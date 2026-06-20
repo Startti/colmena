@@ -594,60 +594,55 @@ impl DagToolExecutor {
                     )
                 });
             }
-            // Catalog present but doc not found → try live registry before giving up.
-            if let (Some(reg), Some(sid)) =
-                (self.attachment_registry.as_ref(), self.agent_session_id.as_ref())
-            {
-                match reg.lookup_by_document_id(sid, document_id).await {
-                    Ok(Some(row)) => {
-                        let key = row.storage_key.clone().ok_or_else(|| {
-                            format!(
-                                "attachment '{document_id}' found in registry but has no storage_key"
-                            )
-                        })?;
-                        let _ = reg.touch_last_used(sid, document_id).await;
-                        return Ok(key);
-                    }
-                    Ok(None) => {}
-                    Err(e) => return Err(format!("attachment registry lookup failed: {e}")),
-                }
-            }
-            // Neither snapshot nor live registry had the document.
-            return Err(format!(
+        }
+        // 2. Live registry fallback — single source for both the snapshot-miss
+        //    and no-snapshot cases. Catches mid-turn outputs (e.g. an image just
+        //    produced by image_generation in the same tool loop).
+        if let Some(key) = self.lookup_storage_key_via_registry(document_id).await? {
+            return Ok(key);
+        }
+        // 3. Not found anywhere. Preserve the two distinct messages the callers'
+        //    tests assert: "not found in catalog" when a snapshot existed,
+        //    "no attachment_catalog wired" when nothing was wired.
+        Err(match self.attachment_catalog.as_ref() {
+            Some(catalog) => format!(
                 "attachment '{document_id}' not found in catalog \
-                 (catalog size: {}). Verify the LLM passed a document_id \
-                 that came from the catalog block.",
+                 (catalog size: {}) nor the live registry. Verify the LLM passed a \
+                 document_id that came from the catalog block.",
                 catalog.len()
-            ));
-        }
-        // 2. No snapshot at all — try live registry (catches mid-turn outputs).
-        if let (Some(reg), Some(sid)) =
+            ),
+            None => format!(
+                "attachment '{document_id}' lookup failed: no attachment_catalog wired \
+                 and no live registry available."
+            ),
+        })
+    }
+
+    /// Live `AttachmentRegistry` lookup for a `document_id`. `Ok(Some(key))` when
+    /// the registry has the row with a `storage_key`; `Ok(None)` when no registry
+    /// is wired or the row is absent; `Err` on a registry error or a row missing
+    /// its `storage_key`. Touches `last_used_at` on a hit (mirrors the resolver
+    /// used by `http_request`).
+    async fn lookup_storage_key_via_registry(
+        &self,
+        document_id: &str,
+    ) -> Result<Option<String>, String> {
+        let (Some(reg), Some(sid)) =
             (self.attachment_registry.as_ref(), self.agent_session_id.as_ref())
-        {
-            match reg.lookup_by_document_id(sid, document_id).await {
-                Ok(Some(row)) => {
-                    let key = row.storage_key.clone().ok_or_else(|| {
-                        format!(
-                            "attachment '{document_id}' found in registry but has no storage_key"
-                        )
-                    })?;
-                    let _ = reg.touch_last_used(sid, document_id).await;
-                    return Ok(key);
-                }
-                Ok(None) => {
-                    return Err(format!(
-                        "attachment '{document_id}' not found in the snapshot catalog \
-                         nor the live registry for session '{sid}'."
-                    ));
-                }
-                Err(e) => return Err(format!("attachment registry lookup failed: {e}")),
+        else {
+            return Ok(None);
+        };
+        match reg.lookup_by_document_id(sid, document_id).await {
+            Ok(Some(row)) => {
+                let key = row.storage_key.clone().ok_or_else(|| {
+                    format!("attachment '{document_id}' found in registry but has no storage_key")
+                })?;
+                let _ = reg.touch_last_used(sid, document_id).await;
+                Ok(Some(key))
             }
+            Ok(None) => Ok(None),
+            Err(e) => Err(format!("attachment registry lookup failed: {e}")),
         }
-        // 3. Nothing wired.
-        Err(format!(
-            "attachment '{document_id}' lookup failed: no attachment_catalog wired \
-             and no live registry available."
-        ))
     }
 
     /// Recursively scan fixed_config for all "$DYNAMIC" placeholders.
