@@ -1331,6 +1331,71 @@ impl DocsClient for GoogleDocsHttpClient {
             .find(|nr| nr.name == name)
             .ok_or_else(|| DocsError::Internal("named_range not found after create".into()))
     }
+
+    async fn upload_image_to_drive(
+        &self,
+        bytes: Vec<u8>,
+        mime: &str,
+        filename: &str,
+    ) -> Result<String, DocsError> {
+        let metadata = serde_json::json!({ "name": filename });
+        let boundary = "colmena_gdocs_img_boundary";
+        let metadata_part = format!(
+            "--{boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n{}\r\n",
+            serde_json::to_string(&metadata).expect("valid metadata json")
+        );
+        let media_part_header = format!("--{boundary}\r\nContent-Type: {mime}\r\n\r\n");
+        let trailer = format!("\r\n--{boundary}--");
+        let mut body = Vec::new();
+        body.extend_from_slice(metadata_part.as_bytes());
+        body.extend_from_slice(media_part_header.as_bytes());
+        body.extend_from_slice(&bytes);
+        body.extend_from_slice(trailer.as_bytes());
+
+        let resp = self
+            .send_with_retry(|c, t| {
+                c.request(
+                    Method::POST,
+                    format!("{}/files?uploadType=multipart&fields=id", self.base_drive_upld),
+                )
+                .bearer_auth(t)
+                .header("Content-Type", format!("multipart/related; boundary={boundary}"))
+                .body(body.clone())
+            })
+            .await?;
+        let resp = self.map_status(resp, "upload_image_to_drive").await?;
+        let j: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| DocsError::Http(format!("upload image json: {e}")))?;
+        j.get("id")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .ok_or_else(|| DocsError::Http("upload image: missing id".into()))
+    }
+
+    async fn set_anyone_reader(&self, file_id: &str) -> Result<(), DocsError> {
+        let url = format!("{}/files/{}/permissions", self.base_drive, file_id);
+        let body = serde_json::json!({ "role": "reader", "type": "anyone" });
+        let resp = self
+            .send_with_retry(|c, t| c.request(Method::POST, &url).bearer_auth(t).json(&body))
+            .await?;
+        self.map_status(resp, "set_anyone_reader").await?;
+        Ok(())
+    }
+
+    async fn delete_drive_file(&self, file_id: &str) -> Result<(), DocsError> {
+        let url = format!("{}/files/{}", self.base_drive, file_id);
+        let resp = self
+            .send_with_retry(|c, t| {
+                c.request(Method::DELETE, &url)
+                    .bearer_auth(t)
+                    .query(&[("supportsAllDrives", "true")])
+            })
+            .await?;
+        self.map_status(resp, "delete_drive_file").await?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -1712,6 +1777,55 @@ mod tests {
             .await
             .unwrap();
         assert!(bytes.starts_with(b"%PDF"));
+    }
+
+    #[tokio::test]
+    async fn upload_image_to_drive_posts_multipart_and_returns_id() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(wiremock::matchers::path_regex(r"/upload/files$"))
+            .and(wiremock::matchers::query_param("uploadType", "multipart"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"id": "drvFID123"})),
+            )
+            .mount(&server)
+            .await;
+        let client = client_for(&server);
+        client.tokens.set_token_for_test("fake".to_string()).await;
+        let id = client
+            .upload_image_to_drive(vec![1, 2, 3], "image/png", "colmena-tmp-img-x.png")
+            .await
+            .unwrap();
+        assert_eq!(id, "drvFID123");
+    }
+
+    #[tokio::test]
+    async fn set_anyone_reader_posts_permission() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(wiremock::matchers::path_regex(r"/drive/files/drvFID/permissions$"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"id": "p1"})),
+            )
+            .mount(&server)
+            .await;
+        let client = client_for(&server);
+        client.tokens.set_token_for_test("fake".to_string()).await;
+        client.set_anyone_reader("drvFID").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn delete_drive_file_sends_delete() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(wiremock::matchers::path_regex(r"/drive/files/drvFID$"))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+        let client = client_for(&server);
+        client.tokens.set_token_for_test("fake".to_string()).await;
+        client.delete_drive_file("drvFID").await.unwrap();
     }
 
     #[tokio::test]

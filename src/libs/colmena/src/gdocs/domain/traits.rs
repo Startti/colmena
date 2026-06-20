@@ -194,4 +194,25 @@ pub trait DocsClient: Send + Sync {
         name: &str,
         scope: Scope,
     ) -> Result<NamedRangeMeta, DocsError>;
+
+    // ── Drive image hosting ──────────────────────────────────────
+
+    /// Upload raw image bytes to Drive as a standalone image file (NO Doc
+    /// conversion). Returns the Drive `file_id`. Used to host an attachment
+    /// publicly so `insertInlineImage` can fetch it. `mime` must be an image
+    /// type (e.g. `image/png`). `filename` is the Drive file name.
+    async fn upload_image_to_drive(
+        &self,
+        bytes: Vec<u8>,
+        mime: &str,
+        filename: &str,
+    ) -> Result<String, DocsError>;
+
+    /// Grant `anyone with the link` reader access to a Drive file (so Google
+    /// can fetch it server-side for `insertInlineImage`).
+    async fn set_anyone_reader(&self, file_id: &str) -> Result<(), DocsError>;
+
+    /// Delete a Drive file by id (`files.delete`). Used to clean up the temp
+    /// image after Docs has copied it into the document.
+    async fn delete_drive_file(&self, file_id: &str) -> Result<(), DocsError>;
 }
