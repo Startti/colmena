@@ -55,6 +55,9 @@ fn merge_same_role(a: LlmMessage, b: LlmMessage) -> LlmMessage {
         files.extend_from_slice(f);
     }
 
+    // assistant carries tool_calls; user carries files. A same-role merge of
+    // mixed assistant(tool_calls)+assistant(files) can't occur in practice
+    // (files are a user concept); recall_history keeps originals regardless.
     let built = if role == MessageRole::Assistant && !tool_calls.is_empty() {
         LlmMessage::assistant_with_tool_calls(content, tool_calls)
     } else if role == MessageRole::User && !files.is_empty() {
@@ -195,7 +198,7 @@ impl LlmRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::llm::domain::tools::{FunctionCall, ToolCall};
+    use crate::llm::domain::tools::FunctionCall;
     use crate::llm::domain::{LlmConfig, LlmProvider, MessageRole, ProviderKind};
 
     // Helper para crear una configuración de prueba
@@ -350,5 +353,21 @@ mod tests {
         assert!(coalesce_consecutive_same_role(vec![]).is_empty());
         let one = vec![LlmMessage::user("hola".into()).unwrap()];
         assert_eq!(coalesce_consecutive_same_role(one).len(), 1);
+    }
+
+    #[test]
+    fn merges_user_files_when_coalescing_users() {
+        // Build two user-with-files messages and confirm files concatenate.
+        let f = |name: &str| {
+            FileData::inline("image/png".to_string(), name.to_string(), b"data".to_vec())
+        };
+        let msgs = vec![
+            LlmMessage::user_with_files("uno".into(), vec![f("a.png")]).unwrap(),
+            LlmMessage::user_with_files("dos".into(), vec![f("b.png")]).unwrap(),
+        ];
+        let out = coalesce_consecutive_same_role(msgs);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].files().map(|f| f.len()), Some(2));
+        assert_eq!(out[0].content(), "uno\n\ndos");
     }
 }
