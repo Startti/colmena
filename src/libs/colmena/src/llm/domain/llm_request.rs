@@ -379,4 +379,17 @@ mod tests {
         assert_eq!(out[0].files().map(|f| f.len()), Some(2));
         assert_eq!(out[0].content(), "uno\n\ndos");
     }
+
+    #[test]
+    fn consecutive_tool_messages_pass_through_new_unmerged() {
+        let config = create_test_config();
+        let messages = vec![
+            LlmMessage::new(MessageRole::User, "do two things".to_string()).unwrap(),
+            LlmMessage::tool("call_a".to_string(), "result a".to_string()).unwrap(),
+            LlmMessage::tool("call_b".to_string(), "result b".to_string()).unwrap(),
+        ];
+        let request = LlmRequest::new(messages, config, false).unwrap();
+        // Parallel tool results stay separate: user + tool + tool = 3.
+        assert_eq!(request.message_count(), 3);
+    }
 }
