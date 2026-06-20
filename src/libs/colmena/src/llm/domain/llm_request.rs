@@ -95,11 +95,18 @@ impl LlmRequest {
         config: LlmConfig,
         stream: bool,
     ) -> Result<Self, LlmError> {
+        // Normalize the wire shape: providers require alternating roles. Merge
+        // any adjacent same-role messages (e.g. a dangling user left by a failed
+        // turn) so a poisoned conversation self-heals instead of erroring here.
+        // Persistence is untouched — recall_history keeps the originals.
+        let messages = coalesce_consecutive_same_role(messages);
+
         if messages.is_empty() {
             return Err(LlmError::EmptyMessages);
         }
 
-        // Validate consecutive roles, ignoring system messages
+        // Defensive: after coalescing only consecutive Tool messages can remain
+        // (allowed for parallel tool calls).
         for i in 1..messages.len() {
             let prev_msg = &messages[i - 1];
             let current_msg = &messages[i];
@@ -255,27 +262,29 @@ mod tests {
     }
 
     #[test]
-    fn test_request_creation_fails_on_consecutive_roles() {
+    fn consecutive_user_messages_are_coalesced_into_one() {
         let config = create_test_config();
         let messages = vec![
             LlmMessage::new(MessageRole::User, "Hello".to_string()).unwrap(),
             LlmMessage::new(MessageRole::User, "How are you?".to_string()).unwrap(),
         ];
-        let result = LlmRequest::new(messages, config, false);
+        let request = LlmRequest::new(messages, config, false).unwrap();
+        assert_eq!(request.message_count(), 1);
+        assert_eq!(request.messages()[0].content(), "Hello\n\nHow are you?");
+    }
 
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            LlmError::ConsecutiveRoles {
-                role,
-                index1,
-                index2,
-            } => {
-                assert_eq!(role, "user");
-                assert_eq!(index1, 0);
-                assert_eq!(index2, 1);
-            }
-            e => panic!("Expected ConsecutiveRoles error, but got {:?}", e),
-        }
+    #[test]
+    fn poisoned_history_with_dangling_user_self_heals() {
+        let config = create_test_config();
+        let messages = vec![
+            LlmMessage::new(MessageRole::User, "q1".to_string()).unwrap(),
+            LlmMessage::new(MessageRole::Assistant, "a1".to_string()).unwrap(),
+            LlmMessage::new(MessageRole::User, "dangling".to_string()).unwrap(),
+            LlmMessage::new(MessageRole::User, "nueva".to_string()).unwrap(),
+        ];
+        let request = LlmRequest::new(messages, config, false).unwrap();
+        assert_eq!(request.message_count(), 3);
+        assert_eq!(request.messages()[2].content(), "dangling\n\nnueva");
     }
 
     #[test]
