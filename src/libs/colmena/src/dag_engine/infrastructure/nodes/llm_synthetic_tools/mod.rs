@@ -369,7 +369,7 @@ pub use gdocs_tools::{
     dispatch_insert_after_text as dispatch_gdocs_insert_after_text,
     dispatch_insert_before_text as dispatch_gdocs_insert_before_text,
     dispatch_insert_between as dispatch_gdocs_insert_between,
-    dispatch_insert_image_after_text as dispatch_gdocs_insert_image_after_text,
+    dispatch_insert_image_after_text_via_executor as dispatch_gdocs_insert_image_after_text,
     dispatch_list_comments as dispatch_gdocs_list_comments,
     dispatch_list_documents as dispatch_gdocs_list_documents,
     dispatch_list_named_ranges as dispatch_gdocs_list_named_ranges,

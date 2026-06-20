@@ -1422,7 +1422,7 @@ impl DagToolExecutor {
                         dispatch_gdocs_insert_between(args, session_id).await
                     }
                     n if n == GDOCS_INSERT_IMAGE_AFTER_TEXT_TOOL => {
-                        dispatch_gdocs_insert_image_after_text(args, session_id).await
+                        dispatch_gdocs_insert_image_after_text(self, args, session_id).await
                     }
                     n if n == GDOCS_DELETE_TEXT_TOOL => {
                         dispatch_gdocs_delete_text(args, session_id).await

@@ -373,15 +373,36 @@ pub struct InsertImageAfterTextArgs {
     pub doc_id: String,
     /// Anchor text to locate; the image is inserted right after the match.
     pub anchor: String,
-    /// Publicly-accessible image URL (PNG/JPEG/GIF). Google fetches it
-    /// server-side, so it must be reachable without auth.
-    pub image_url: String,
+    /// Public http(s) image URL. Mutually exclusive with `attachment_id`.
+    pub image_url: Option<String>,
+    /// Attachment id (generated/edited/uploaded image). The bytes are hosted
+    /// on Drive transiently and inserted. Mutually exclusive with `image_url`.
+    pub attachment_id: Option<String>,
     pub occurrence: Option<u32>,
     /// Optional render width in points (PT).
     pub width_pt: Option<f64>,
     /// Optional render height in points (PT).
     pub height_pt: Option<f64>,
     pub mode: Option<String>,
+}
+
+pub(crate) enum ImageSource {
+    Url(String),
+    Attachment(String),
+}
+
+/// Resolve the XOR of `image_url` / `attachment_id`. Exactly one is required.
+pub(crate) fn insert_image_source(
+    args: &InsertImageAfterTextArgs,
+) -> Result<ImageSource, String> {
+    match (&args.image_url, &args.attachment_id) {
+        (Some(u), None) => Ok(ImageSource::Url(u.clone())),
+        (None, Some(a)) => Ok(ImageSource::Attachment(a.clone())),
+        (Some(_), Some(_)) => Err(
+            "provide exactly one of image_url or attachment_id, not both".into(),
+        ),
+        (None, None) => Err("provide one of image_url or attachment_id".into()),
+    }
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1486,13 +1507,25 @@ pub async fn dispatch_insert_after_text(
     }
 }
 
-pub async fn dispatch_insert_image_after_text(
+/// Production insert-image path. Branches on `image_url` vs `attachment_id`
+/// (XOR — exactly one required). URL path: delegates directly to
+/// `run_insert_image_after_text`. Attachment path: fetches bytes from the
+/// conversation catalog via [`DagToolExecutor::fetch_attachment_bytes`],
+/// then delegates to `run_insert_image_from_bytes` (Drive upload → public →
+/// insert → cleanup). Soft warnings from cleanup failures are forwarded to
+/// the LLM under `soft_warnings`.
+pub async fn dispatch_insert_image_after_text_via_executor(
+    executor: &crate::dag_engine::infrastructure::dag_tool_executor::DagToolExecutor,
     args: serde_json::Value,
     session_id: &str,
 ) -> serde_json::Value {
     let parsed: InsertImageAfterTextArgs = match serde_json::from_value(args) {
         Ok(a) => a,
         Err(e) => return invalid_args(e),
+    };
+    let source = match insert_image_source(&parsed) {
+        Ok(s) => s,
+        Err(e) => return serde_json::json!({"error": "invalid_args", "message": e}),
     };
     let client = match shared_client().await {
         Ok(c) => c,
@@ -1511,17 +1544,58 @@ pub async fn dispatch_insert_image_after_text(
         session_id,
         sa_email: sa.as_deref(),
     };
-    let input = insert::InsertImageAfterTextInput {
-        anchor: parsed.anchor,
-        image_url: parsed.image_url,
-        occurrence: parsed.occurrence,
-        width_pt: parsed.width_pt,
-        height_pt: parsed.height_pt,
-    };
-    let doc_id = DocumentId(parsed.doc_id);
-    match insert::run_insert_image_after_text(&ctx, &doc_id, input).await {
-        Ok(r) => edit_result_to_json(r),
-        Err(e) => error_to_json(e),
+    let doc_id = DocumentId(parsed.doc_id.clone());
+    match source {
+        ImageSource::Url(url) => {
+            let input = insert::InsertImageAfterTextInput {
+                anchor: parsed.anchor,
+                image_url: url,
+                occurrence: parsed.occurrence,
+                width_pt: parsed.width_pt,
+                height_pt: parsed.height_pt,
+            };
+            match insert::run_insert_image_after_text(&ctx, &doc_id, input).await {
+                Ok(r) => edit_result_to_json(r),
+                Err(e) => error_to_json(e),
+            }
+        }
+        ImageSource::Attachment(att) => {
+            let stored = match executor.fetch_attachment_bytes(&att).await {
+                Ok(b) => b,
+                Err(e) => {
+                    return serde_json::json!({
+                        "error": "attachment_fetch_failed",
+                        "message": e,
+                        "attachment_id": att,
+                    });
+                }
+            };
+            let input = insert::InsertImageAfterTextInput {
+                anchor: parsed.anchor,
+                image_url: String::new(),
+                occurrence: parsed.occurrence,
+                width_pt: parsed.width_pt,
+                height_pt: parsed.height_pt,
+            };
+            match insert::run_insert_image_from_bytes(
+                &ctx,
+                &doc_id,
+                input,
+                stored.bytes,
+                &stored.mime_type,
+            )
+            .await
+            {
+                Ok((r, warnings)) => {
+                    let mut v = edit_result_to_json(r);
+                    if !warnings.is_empty() {
+                        v["soft_warnings"] = serde_json::json!(warnings);
+                    }
+                    v
+                }
+                Err(e) => error_to_json(e),
+            }
+        }
     }
 }
 
@@ -2098,6 +2172,39 @@ mod tests {
 
     /// Degraded mode mirror — empty share_email surfaces an actionable
     /// hint pointing to the operator.
+    #[test]
+    fn insert_image_args_require_exactly_one_source() {
+        // both present -> error
+        let both: InsertImageAfterTextArgs = serde_json::from_value(serde_json::json!({
+            "doc_id": "d", "anchor": "a",
+            "image_url": "https://x/y.png", "attachment_id": "att1"
+        }))
+        .unwrap();
+        assert!(insert_image_source(&both).is_err());
+
+        // neither -> error
+        let neither: InsertImageAfterTextArgs =
+            serde_json::from_value(serde_json::json!({"doc_id": "d", "anchor": "a"})).unwrap();
+        assert!(insert_image_source(&neither).is_err());
+
+        // url only -> Ok(Url)
+        let url: InsertImageAfterTextArgs = serde_json::from_value(serde_json::json!({
+            "doc_id": "d", "anchor": "a", "image_url": "https://x/y.png"
+        }))
+        .unwrap();
+        assert!(matches!(insert_image_source(&url), Ok(ImageSource::Url(_))));
+
+        // attachment only -> Ok(Attachment)
+        let att: InsertImageAfterTextArgs = serde_json::from_value(serde_json::json!({
+            "doc_id": "d", "anchor": "a", "attachment_id": "att1"
+        }))
+        .unwrap();
+        assert!(matches!(
+            insert_image_source(&att),
+            Ok(ImageSource::Attachment(_))
+        ));
+    }
+
     #[test]
     fn permission_denied_payload_in_degraded_mode_directs_to_operator() {
         use crate::gdocs::domain::DocsError;
