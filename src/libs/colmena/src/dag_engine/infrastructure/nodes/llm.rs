@@ -2137,6 +2137,16 @@ impl ExecutableNode for LlmNode {
             if let Some(storage) = self.storage.clone() {
                 executor = executor.with_attachment_storage(storage);
             }
+            // Plan A live fallback (2026-06-20): wire the live AttachmentRegistry
+            // into the executor so mid-turn-generated attachments (image_generation,
+            // image_edit, tts) that aren't in the start-of-turn snapshot can still
+            // be resolved by every fetch_attachment_bytes tool (gdocs_insert_image
+            // attachment mode, sql_bulk, attachment_run_python). Mirrors how
+            // http_request's $attachment resolver already queries the registry.
+            // Additive — None default preserves legacy behavior; ADP unaffected.
+            if let Some(reg) = attachment_registry.clone() {
+                executor = executor.with_attachment_registry(reg);
+            }
             if let Some(repo) = skill_repo.clone() {
                 executor = executor.with_skills(repo.clone());
 

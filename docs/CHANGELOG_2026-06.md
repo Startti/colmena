@@ -2803,3 +2803,25 @@ Verificado live: `tests/gdocs_integration_test.rs::image_upload_public_insert_de
 **Estado.** done.
 
 ---
+
+## 45. Attachment live resolution — mid-turn generated/edited/uploaded images usable by all attachment tools — 2026-06-20
+
+**Qué cambió.** `DagToolExecutor::lookup_storage_key` (ya async desde Task 1) ahora tiene un fallback al `AttachmentRegistry` vivo cuando el `document_id` no aparece en el snapshot de inicio de turno. Este registry se cablea en `llm.rs` usando el mismo `Arc<dyn AttachmentRegistry>` que ya está en scope para construir el snapshot del catálogo.
+
+**Problema resuelto.** Cuando el LLM genera una imagen mid-turn (via `image_generation`, `image_edit`, o `tts`) y luego intenta usarla en la misma conversación con `gdocs_insert_image` (modo `attachment_id`), `sql_bulk_insert_from_attachment`, o `attachment_run_python`, el documento no está en el snapshot que se tomó al inicio del turno. Antes del fix, `lookup_storage_key` devolvía "not in catalog" y la herramienta fallaba. Ahora cae al registry vivo (`lookup_by_document_id`) y lo resuelve.
+
+**Flujo post-fix:**
+1. `lookup_storage_key(document_id)` — búsqueda snapshot (path rápido, sin DB).
+2. Si no encontrado y `attachment_registry` está cableado: consulta `registry.lookup_by_document_id(agent_session_id, document_id)`.
+3. Si encontrado vía registry: devuelve el `storage_key`, llama `touch_last_used` en background.
+4. Si no encontrado en ninguno: error descriptivo.
+
+**Unificación.** Esto alinea a `fetch_attachment_bytes` / `fetch_attachment_stream` con cómo el resolvedor de `$attachment` en `http_request` ya funcionaba (consulta directa al registry, nunca depende del snapshot).
+
+**Archivos modificados.** `dag_engine/infrastructure/nodes/llm.rs` — bloque `tool_executor` al final del chain de builders, después de `with_attachment_storage`.
+
+**Additive.** `with_attachment_registry` tiene `None` como default. Ninguna ruta existente cambia; ADP no se ve afectado.
+
+**Estado.** done.
+
+---
