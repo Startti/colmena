@@ -2730,7 +2730,7 @@ exigen roles alternados, así que normalizar a eso es la forma correcta.
 - Plan: [`docs/superpowers/plans/2026-06-20-consecutive-role-coalescing.md`](superpowers/plans/2026-06-20-consecutive-role-coalescing.md)
 - Código: [`src/libs/colmena/src/llm/domain/llm_request.rs`](src/libs/colmena/src/llm/domain/llm_request.rs)
 
-**Tests.** 8 unit en `llm_request` (helper + `new` + caso historia envenenada + Tool-passthrough).
+**Tests.** 9 tests nuevos en `llm_request` (16 en total en el módulo): helper (merge user/assistant/files, Tool no-merge, empty/singleton) + `new` (coalesced-success, historia envenenada self-heal, Tool-passthrough).
 
 **Estado.** done.
 
