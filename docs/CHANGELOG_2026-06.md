@@ -2754,6 +2754,51 @@ recall) estaba bien; faltaba steering. Este cambio cierra ese gap.
 
 - Solo cambia el wire-format del prompt que ve el modelo — sin API/DB/lógica. ADP no afectado.
 - No toca la pista por-línea del digest (`· recall_history(turn=N) para el detalle`).
+## 44. gdocs_insert_image — attachment_id (Approach A)
+
+**Qué cambió.** `gdocs_insert_image_after_text` acepta ahora un parámetro
+`attachment_id` (alternativo a `image_url`, XOR). Permite insertar en Google Docs
+imágenes generadas por `image_generation`/`image_edit`, subidas por el usuario
+inline, o cualquier otro attachment registrado en `OutputStorageRepository`.
+
+**Flujo (Approach A — Drive upload transitorio):**
+
+1. `executor.fetch_attachment_bytes(attachment_id)` — obtiene bytes + mime.
+2. Upload a Drive (`POST /upload/drive/v3/files?uploadType=multipart`) → `file_id`.
+3. `permissions.create {type:"anyone", role:"reader"}` — expone el archivo públicamente.
+4. `insertInlineImage` con `uri = https://lh3.googleusercontent.com/d/<file_id>` — el doc copia la imagen.
+5. `files.delete(file_id)` — borra el archivo temporal de Drive.
+
+**Corroboración empírica (2026-06-12 — ver spec §4).** Los cuatro pasos
+anteriores se validaron contra las APIs de Google reales antes de implementar:
+el `lh3` URL es aceptado por `insertInlineImage` al primer intento; borrar el
+archivo temporal justo después del 200 es seguro porque Google ya copió la imagen
+al doc durante el `batchUpdate` (sincrónicamente).
+
+**Manejo de errores transaccional.** Si `set_anyone_reader` o `run_insert_image_after_text`
+fallan después de subir el archivo, el engine intenta borrar el temporal antes de
+propagar el error. Si la limpieza final falla (post-inserción exitosa), el resultado
+incluye `soft_warnings` con el `file_id` no borrado — la inserción se reporta igualmente
+exitosa.
+
+**Restricción de mime.** Modo `attachment_id` solo acepta `image/png`, `image/jpeg`
+y `image/gif`. Otros mimes devuelven `invalid_args` inmediatamente, antes de tocar Drive.
+
+**Archivos modificados.** `gdocs/domain/traits.rs` (3 métodos nuevos en `DocsClient`:
+`upload_image_to_drive`, `set_anyone_reader`, `delete_drive_file`);
+`gdocs/infrastructure/http_client.rs` (impl + 3 wiremock tests);
+`gdocs/application/insert.rs` (`run_insert_image_from_bytes` helper + `image_ext_for_mime`
++ 4 unit tests con `MockDocsClient`);
+`dag_engine/infrastructure/nodes/llm_synthetic_tools/gdocs_tools.rs` (args XOR +
+`ImageSource` enum + `insert_image_source` helper + dispatcher `via_executor`);
+`dag_tool_executor.rs` (ruta al nuevo dispatcher con `self`);
+`text/tools/gdocs.yaml` + `docs/developer_guide/45_gdocs.md`.
+
+**Tests.** Task 1: 3 wiremock tests para los métodos Drive nuevos. Task 2: 4 unit tests
+en `insert.rs` con `MockDocsClient` (happy path, transactional cleanup ante fallo, soft
+warning cuando cleanup falla, MIME inválido). Task 3: test XOR de args (`insert_image_args_require_exactly_one_source`).
+Verificado live: `tests/gdocs_integration_test.rs::image_upload_public_insert_delete_roundtrip`
+(upload → público → insertInlineImage(lh3) → delete, contra Google real).
 
 **Estado.** done.
 
