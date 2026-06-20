@@ -1,0 +1,48 @@
+{
+  "_comment": "E2E (manual, live): Approach A. Agent generates an image via image_generation (returns document_id) then inserts it into an OPERATOR-PROVIDED Google Doc via gdocs_insert_image_after_text using attachment_id. Replace <YOUR_DOC_ID>. Needs OPENAI_API_KEY + COLMENA_LOCAL storage + OAuth creds in-memory. KNOWN LIMITATION (2026-06-20): the local `dag_engine run` CLI does NOT wire the attachment registry, AND the attachment catalog is a start-of-turn snapshot — so a SAME-TURN generated image is not resolvable by fetch_attachment_bytes (error 'no attachment_catalog wired'). This graph therefore needs the deployed worker (registry wired) or a multi-turn flow (generate turn 1, insert turn 2). The colmena HTTP code path itself is verified live by tests/gdocs_integration_test.rs::image_upload_public_insert_delete_roundtrip. The gdocs path uses the Docs API (read_outline/insert), not Drive export, so a shared doc works.",
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/gdocs-insert-image-attachment",
+        "method": "POST",
+        "test_payload": {
+          "prompt": "Do these steps in order on Google Doc id <YOUR_DOC_ID>:\n1. Call generate_image with prompt 'a simple flat-design red circle on a white background'. Note the document_id in the result.\n2. Call gdocs_read_outline on <YOUR_DOC_ID> and pick a short exact text_preview substring from the first non-empty paragraph as your anchor. Do NOT call gdocs_read_as_markdown.\n3. Call gdocs_insert_image_after_text with doc_id=<YOUR_DOC_ID>, anchor=<that substring>, attachment_id=<the document_id from step 1>. Do NOT pass image_url. Do NOT pass width_pt/height_pt.\n4. Report the EXACT step-3 tool result verbatim: the changes array, revision_id_after, and any soft_warnings."
+        }
+      }
+    },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "api_key": "${GEMINI_API_KEY}",
+        "model": "gemini-2.5-flash",
+        "stream": false,
+        "max_iterations": 10,
+        "connection_url": "${DATABASE_URL}",
+        "system_message": "You are a document editor that can generate images and place them in a Google Doc. Use gdocs_read_outline (Docs API) to find anchors — never gdocs_read_as_markdown. The generate_image result returns a document_id; pass that exact value as the attachment_id argument. Report tool results verbatim.",
+        "enabled_tools": ["generate_image", "gdocs"],
+        "tool_configurations": {
+          "generate_image": {
+            "name": "generate_image",
+            "node_type": "image_generation",
+            "description": "Generate a brand-new image from a text prompt. Returns an object containing a document_id for the generated image. Pass that document_id as attachment_id to gdocs_insert_image_after_text.",
+            "node_schema": {
+              "provider": { "fixed": "openai" },
+              "model": { "fixed": "gpt-image-1" },
+              "api_key": { "fixed": "${OPENAI_API_KEY}" },
+              "size": { "fixed": "1024x1024" },
+              "n": { "fixed": 1 },
+              "prompt": { "type": "string", "required": true, "description": "Detailed text prompt describing the image to generate." }
+            }
+          }
+        }
+      }
+    },
+    "log": { "type": "log" }
+  },
+  "edges": [
+    { "from": "trigger", "to": "agent" },
+    { "from": "agent", "to": "log" }
+  ]
+}

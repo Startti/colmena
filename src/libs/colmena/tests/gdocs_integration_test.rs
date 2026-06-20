@@ -337,3 +337,74 @@ async fn add_tab_collision_returns_tab_exists() {
         "expected TabExists, got {result:?}"
     );
 }
+
+// ── Image insert from bytes (Approach A) — live roundtrip ─────────────
+//
+// Exercises the 3 new DocsClient methods (`upload_image_to_drive`,
+// `set_anyone_reader`, `delete_drive_file`) plus an `insertInlineImage`
+// batchUpdate against REAL Google: upload a tiny PNG to Drive → make it
+// public → insert via the `lh3.googleusercontent.com/d/<id>` content URL →
+// delete the temp Drive file. Proves the colmena HTTP code produces requests
+// Google accepts, and that the temp file can be deleted right after the
+// batchUpdate (Docs hosts its own copy). Gated on `COLMENA_GDOCS_TEST_DOC_ID`
+// (a doc shared Editor with the agent) + OAuth env injected in-memory.
+#[tokio::test]
+#[ignore = "requires OAuth env + COLMENA_GDOCS_TEST_DOC_ID — run with `cargo test --test gdocs_integration_test -- --ignored`"]
+async fn image_upload_public_insert_delete_roundtrip() {
+    let doc_id = match std::env::var("COLMENA_GDOCS_TEST_DOC_ID") {
+        Ok(d) if !d.is_empty() => d,
+        _ => {
+            eprintln!("SKIP: set COLMENA_GDOCS_TEST_DOC_ID to a doc shared (Editor) with the agent");
+            return;
+        }
+    };
+    let client = make_client();
+    let doc = DocumentId(doc_id);
+
+    // A valid 1x1 PNG (base64) — avoids committing a binary fixture.
+    use base64::Engine;
+    let png = base64::engine::general_purpose::STANDARD
+        .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==")
+        .expect("valid base64 png");
+
+    // 1. upload to Drive (image/png, no Doc conversion)
+    let file_id = client
+        .upload_image_to_drive(png, "image/png", "colmena-tmp-img-itest.png")
+        .await
+        .expect("upload_image_to_drive");
+    assert!(!file_id.is_empty());
+
+    // 2. make it publicly readable so Docs can fetch it server-side
+    client
+        .set_anyone_reader(&file_id)
+        .await
+        .expect("set_anyone_reader");
+
+    // 3. insert at the end of the first tab's body via the lh3 content URL
+    let snap = client.get(&doc).await.expect("documents.get");
+    let tab = snap.tabs.first().expect("at least one tab");
+    let last = tab.paragraphs.last().expect("at least one paragraph");
+    let index = last.end_index.saturating_sub(1);
+    let mut location = serde_json::json!({ "index": index });
+    if let Some(t) = &tab.tab_id {
+        location["tabId"] = serde_json::Value::String(t.0.clone());
+    }
+    let uri = format!("https://lh3.googleusercontent.com/d/{file_id}");
+    let req = serde_json::json!({ "insertInlineImage": { "location": location, "uri": uri } });
+    let res = client
+        .batch_update(&doc, vec![req], None)
+        .await
+        .expect("batch_update insertInlineImage");
+    assert!(!res.revision_id_after.0.is_empty());
+
+    // 4. delete the temp Drive file — safe, Docs has copied the image
+    client
+        .delete_drive_file(&file_id)
+        .await
+        .expect("delete_drive_file");
+
+    eprintln!(
+        "OK: uploaded {file_id}, inserted image, deleted temp; revision {}",
+        res.revision_id_after.0
+    );
+}
