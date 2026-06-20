@@ -892,6 +892,14 @@ Failed to parse arguments for tool search_products: trailing characters at line 
 
 ---
 
+### `Consecutive messages with the same role` (resuelto 2026-06-20)
+Antes, un turno que fallaba tras persistir el mensaje del usuario dejaba un
+`user` colgado y trababa la conversación entera. `LlmRequest::new` ahora fusiona
+roles consecutivos (coalescing) y auto-cura. Si lo ves en una versión vieja:
+actualizá colmena o abrí un chat nuevo. Ver CHANGELOG §42.
+
+---
+
 ## 🔒 Problemas con Secure Values en HTTP Tools
 
 ### HTTP tool con `secure: true` devuelve el token real al LLM

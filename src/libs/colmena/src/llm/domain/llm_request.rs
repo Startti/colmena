@@ -1,5 +1,77 @@
-use crate::llm::domain::{LlmConfig, LlmError, LlmMessage, LlmRequestId, ToolDefinition};
+use crate::llm::domain::llm_message::FileData;
+use crate::llm::domain::{
+    LlmConfig, LlmError, LlmMessage, LlmRequestId, MessageRole, ToolCall, ToolDefinition,
+};
 use serde::{Deserialize, Serialize};
+
+/// Merge adjacent messages that share the same role — EXCEPT `Tool`, where
+/// consecutive entries are legitimate (parallel tool results keyed by distinct
+/// `tool_call_id`). Providers require strictly alternating user/assistant
+/// turns; a turn that fails after persisting the user message leaves a dangling
+/// `user` row that would otherwise make every later turn fail at
+/// `LlmRequest::new`. Coalescing normalizes the wire shape and self-heals such
+/// conversations. Pure; never touches persistence (recall_history keeps the
+/// originals verbatim).
+pub fn coalesce_consecutive_same_role(messages: Vec<LlmMessage>) -> Vec<LlmMessage> {
+    let mut out: Vec<LlmMessage> = Vec::with_capacity(messages.len());
+    for msg in messages {
+        let mergeable = matches!(out.last(), Some(last)
+            if last.role() == msg.role() && *msg.role() != MessageRole::Tool);
+        if mergeable {
+            let prev = out.pop().expect("checked non-empty");
+            out.push(merge_same_role(prev, msg));
+        } else {
+            out.push(msg);
+        }
+    }
+    out
+}
+
+/// Merge two same-role messages: join non-empty contents, concat tool_calls and
+/// files. Construction is infallible for valid inputs (the only `new` failure is
+/// empty content for a non-assistant role, and the joined content of two valid
+/// non-assistant messages is non-empty).
+fn merge_same_role(a: LlmMessage, b: LlmMessage) -> LlmMessage {
+    let role = a.role().clone();
+    let content = [a.content(), b.content()]
+        .into_iter()
+        .filter(|s| !s.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+
+    let mut tool_calls: Vec<ToolCall> = Vec::new();
+    if let Some(tc) = a.tool_calls() {
+        tool_calls.extend_from_slice(tc);
+    }
+    if let Some(tc) = b.tool_calls() {
+        tool_calls.extend_from_slice(tc);
+    }
+
+    let mut files: Vec<FileData> = Vec::new();
+    if let Some(f) = a.files() {
+        files.extend_from_slice(f);
+    }
+    if let Some(f) = b.files() {
+        files.extend_from_slice(f);
+    }
+
+    // assistant carries tool_calls; user carries files. A same-role merge of
+    // mixed assistant(tool_calls)+assistant(files) can't occur in practice
+    // (files are a user concept); recall_history keeps originals regardless.
+    let built = if role == MessageRole::Assistant && !tool_calls.is_empty() {
+        LlmMessage::assistant_with_tool_calls(content, tool_calls)
+    } else if role == MessageRole::User && !files.is_empty() {
+        LlmMessage::user_with_files(content, files)
+    } else {
+        LlmMessage::new(role.clone(), content)
+    };
+
+    built.unwrap_or_else(|_| {
+        LlmMessage::new(role, " ".to_string()).unwrap_or_else(|_| {
+            LlmMessage::assistant(String::new()).expect("assistant allows empty")
+        })
+    })
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmRequest {
@@ -23,11 +95,18 @@ impl LlmRequest {
         config: LlmConfig,
         stream: bool,
     ) -> Result<Self, LlmError> {
+        // Normalize the wire shape: providers require alternating roles. Merge
+        // any adjacent same-role messages (e.g. a dangling user left by a failed
+        // turn) so a poisoned conversation self-heals instead of erroring here.
+        // Persistence is untouched — recall_history keeps the originals.
+        let messages = coalesce_consecutive_same_role(messages);
+
         if messages.is_empty() {
             return Err(LlmError::EmptyMessages);
         }
 
-        // Validate consecutive roles, ignoring system messages
+        // Defensive: after coalescing only consecutive Tool messages can remain
+        // (allowed for parallel tool calls).
         for i in 1..messages.len() {
             let prev_msg = &messages[i - 1];
             let current_msg = &messages[i];
@@ -126,6 +205,7 @@ impl LlmRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::llm::domain::tools::FunctionCall;
     use crate::llm::domain::{LlmConfig, LlmProvider, MessageRole, ProviderKind};
 
     // Helper para crear una configuración de prueba
@@ -182,27 +262,29 @@ mod tests {
     }
 
     #[test]
-    fn test_request_creation_fails_on_consecutive_roles() {
+    fn consecutive_user_messages_are_coalesced_into_one() {
         let config = create_test_config();
         let messages = vec![
             LlmMessage::new(MessageRole::User, "Hello".to_string()).unwrap(),
             LlmMessage::new(MessageRole::User, "How are you?".to_string()).unwrap(),
         ];
-        let result = LlmRequest::new(messages, config, false);
+        let request = LlmRequest::new(messages, config, false).unwrap();
+        assert_eq!(request.message_count(), 1);
+        assert_eq!(request.messages()[0].content(), "Hello\n\nHow are you?");
+    }
 
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            LlmError::ConsecutiveRoles {
-                role,
-                index1,
-                index2,
-            } => {
-                assert_eq!(role, "user");
-                assert_eq!(index1, 0);
-                assert_eq!(index2, 1);
-            }
-            e => panic!("Expected ConsecutiveRoles error, but got {:?}", e),
-        }
+    #[test]
+    fn poisoned_history_with_dangling_user_self_heals() {
+        let config = create_test_config();
+        let messages = vec![
+            LlmMessage::new(MessageRole::User, "q1".to_string()).unwrap(),
+            LlmMessage::new(MessageRole::Assistant, "a1".to_string()).unwrap(),
+            LlmMessage::new(MessageRole::User, "dangling".to_string()).unwrap(),
+            LlmMessage::new(MessageRole::User, "nueva".to_string()).unwrap(),
+        ];
+        let request = LlmRequest::new(messages, config, false).unwrap();
+        assert_eq!(request.message_count(), 3);
+        assert_eq!(request.messages()[2].content(), "dangling\n\nnueva");
     }
 
     #[test]
@@ -216,5 +298,98 @@ mod tests {
         // This should not fail because the consecutive check ignores system messages
         let result = LlmRequest::new(messages, config, false);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn coalesces_two_consecutive_user_messages() {
+        let msgs = vec![
+            LlmMessage::user("primera pregunta".into()).unwrap(),
+            LlmMessage::user("segunda pregunta".into()).unwrap(),
+        ];
+        let out = coalesce_consecutive_same_role(msgs);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].role(), &MessageRole::User);
+        assert_eq!(out[0].content(), "primera pregunta\n\nsegunda pregunta");
+    }
+
+    #[test]
+    fn coalesces_three_plus_consecutive_and_leaves_alternating_intact() {
+        let msgs = vec![
+            LlmMessage::user("u1".into()).unwrap(),
+            LlmMessage::assistant("a1".into()).unwrap(),
+            LlmMessage::user("u2".into()).unwrap(),
+            LlmMessage::user("u3".into()).unwrap(),
+            LlmMessage::user("u4".into()).unwrap(),
+        ];
+        let out = coalesce_consecutive_same_role(msgs);
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[2].content(), "u2\n\nu3\n\nu4");
+    }
+
+    #[test]
+    fn does_not_coalesce_consecutive_tool_messages() {
+        let msgs = vec![
+            LlmMessage::tool("call_a".into(), "result a".into()).unwrap(),
+            LlmMessage::tool("call_b".into(), "result b".into()).unwrap(),
+        ];
+        let out = coalesce_consecutive_same_role(msgs);
+        assert_eq!(out.len(), 2, "parallel tool results must stay separate");
+    }
+
+    #[test]
+    fn merges_assistant_tool_calls_when_coalescing_assistants() {
+        let tc = |id: &str| {
+            ToolCall::new(
+                id.to_string(),
+                FunctionCall {
+                    name: "f".into(),
+                    arguments: "{}".into(),
+                },
+            )
+        };
+        let msgs = vec![
+            LlmMessage::assistant_with_tool_calls("".into(), vec![tc("c1")]).unwrap(),
+            LlmMessage::assistant_with_tool_calls("texto".into(), vec![tc("c2")]).unwrap(),
+        ];
+        let out = coalesce_consecutive_same_role(msgs);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].tool_calls().map(|t| t.len()), Some(2));
+        assert_eq!(out[0].content(), "texto");
+    }
+
+    #[test]
+    fn empty_and_singleton_are_passthrough() {
+        assert!(coalesce_consecutive_same_role(vec![]).is_empty());
+        let one = vec![LlmMessage::user("hola".into()).unwrap()];
+        assert_eq!(coalesce_consecutive_same_role(one).len(), 1);
+    }
+
+    #[test]
+    fn merges_user_files_when_coalescing_users() {
+        // Build two user-with-files messages and confirm files concatenate.
+        let f = |name: &str| {
+            FileData::inline("image/png".to_string(), name.to_string(), b"data".to_vec())
+        };
+        let msgs = vec![
+            LlmMessage::user_with_files("uno".into(), vec![f("a.png")]).unwrap(),
+            LlmMessage::user_with_files("dos".into(), vec![f("b.png")]).unwrap(),
+        ];
+        let out = coalesce_consecutive_same_role(msgs);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].files().map(|f| f.len()), Some(2));
+        assert_eq!(out[0].content(), "uno\n\ndos");
+    }
+
+    #[test]
+    fn consecutive_tool_messages_pass_through_new_unmerged() {
+        let config = create_test_config();
+        let messages = vec![
+            LlmMessage::new(MessageRole::User, "do two things".to_string()).unwrap(),
+            LlmMessage::tool("call_a".to_string(), "result a".to_string()).unwrap(),
+            LlmMessage::tool("call_b".to_string(), "result b".to_string()).unwrap(),
+        ];
+        let request = LlmRequest::new(messages, config, false).unwrap();
+        // Parallel tool results stay separate: user + tool + tool = 3.
+        assert_eq!(request.message_count(), 3);
     }
 }
