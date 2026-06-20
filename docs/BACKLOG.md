@@ -1147,9 +1147,9 @@ Conservado para referencia histórica:
 
 ---
 
-## Attachment catalog — snapshot same-turn bloquea "generar y consumir" (2026-06-20)
+## ~~Attachment catalog — snapshot same-turn bloquea "generar y consumir"~~ — SHIPPED 2026-06-20 (Approach A)
 
-**~~SHIPPED (Approach B) 2026-06-20 — ver CHANGELOG §45.~~**
+**SHIPPED (Approach A) 2026-06-20 — ver CHANGELOG §45.**
 
 `lookup_storage_key` ahora tiene un fallback live al `AttachmentRegistry` cuando el `document_id` no está en el snapshot de inicio de turno. Wired en `llm.rs` via `with_attachment_registry(reg)`. Additive; ADP unaffected. El caso "generar imagen y pegarla en el mismo turno" queda resuelto en el ADP worker (donde el registry está cableado).
 
