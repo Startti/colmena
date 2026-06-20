@@ -2705,3 +2705,33 @@ Ejemplo real (resultado de un `load_canvas` del creador-de-agentes):
 **Estado.** done.
 
 ---
+
+## 42. LlmRequest — coalescing de roles consecutivos (auto-cura turnos fallidos) — 2026-06-20
+
+**Qué cambió.** `LlmRequest::new` ahora fusiona mensajes adyacentes del mismo rol
+(excepto `Tool`, que admite consecutivos por tool calls paralelos) en vez de
+fallar con `ConsecutiveRoles`. Nuevo helper puro
+`coalesce_consecutive_same_role` en `llm/domain/llm_request.rs`.
+
+**Por qué.** Un turno que falla *después* de persistir el mensaje del usuario
+(blip de Redis, timeout, tool que crashea, restart) dejaba un `user` colgado en
+`llm_node_history`; el turno siguiente armaba `[…, user, user]` y fallaba en la
+validación **antes de llamar al provider** → la conversación quedaba trabada
+permanentemente (solo se recuperaba abriendo un chat nuevo). Los providers
+exigen roles alternados, así que normalizar a eso es la forma correcta.
+
+- **Auto-cura** conversaciones ya envenenadas (corre en el ensamblado, sin tocar la DB).
+- **Sin pérdida:** la persistencia no cambia; `recall_history` sigue devolviendo los originales verbatim.
+- Merge: `content` unido por `\n\n`; `tool_calls` y `files` concatenados.
+- La validación de roles consecutivos queda como red defensiva (ya no se dispara para user/assistant/system).
+- Pendiente complementario (opcional): rollback del user message ante turno fallido en `agent_service` (ataca la causa). Coalescing solo ya cierra el problema user-facing.
+
+**Documentación de referencia.**
+- Plan: [`docs/superpowers/plans/2026-06-20-consecutive-role-coalescing.md`](superpowers/plans/2026-06-20-consecutive-role-coalescing.md)
+- Código: [`src/libs/colmena/src/llm/domain/llm_request.rs`](src/libs/colmena/src/llm/domain/llm_request.rs)
+
+**Tests.** 8 unit en `llm_request` (helper + `new` + caso historia envenenada + Tool-passthrough).
+
+**Estado.** done.
+
+---
