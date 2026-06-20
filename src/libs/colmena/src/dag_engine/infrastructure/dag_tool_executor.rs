@@ -627,9 +627,10 @@ impl DagToolExecutor {
         &self,
         document_id: &str,
     ) -> Result<Option<String>, String> {
-        let (Some(reg), Some(sid)) =
-            (self.attachment_registry.as_ref(), self.agent_session_id.as_ref())
-        else {
+        let (Some(reg), Some(sid)) = (
+            self.attachment_registry.as_ref(),
+            self.agent_session_id.as_ref(),
+        ) else {
             return Ok(None);
         };
         match reg.lookup_by_document_id(sid, document_id).await {
@@ -3836,26 +3837,25 @@ mod attachment_plumbing_tests {
         use crate::llm::domain::attachments::AttachmentSource;
         // Registry returns a row for a doc id that is NOT in the (empty) snapshot.
         let mut reg = MockAttachmentRegistry::new();
-        reg.expect_lookup_by_document_id()
-            .returning(|_, doc| {
-                Ok(Some(ConversationAttachment {
-                    agent_session_id: "sess-1".to_string(),
-                    document_id: doc.to_string(),
-                    provider: ProviderKind::OpenAi,
-                    provider_file_id: "pf".to_string(),
-                    mime_type: "image/png".to_string(),
-                    filename: "generated.png".to_string(),
-                    size_bytes: Some(512),
-                    label: None,
-                    description: None,
-                    source: AttachmentSource::Inline,
-                    registered_at: chrono::Utc::now(),
-                    refreshed_at: chrono::Utc::now(),
-                    storage_key: Some("sk-live".to_string()),
-                    origin: None,
-                    last_used_at: None,
-                }))
-            });
+        reg.expect_lookup_by_document_id().returning(|_, doc| {
+            Ok(Some(ConversationAttachment {
+                agent_session_id: "sess-1".to_string(),
+                document_id: doc.to_string(),
+                provider: ProviderKind::OpenAi,
+                provider_file_id: "pf".to_string(),
+                mime_type: "image/png".to_string(),
+                filename: "generated.png".to_string(),
+                size_bytes: Some(512),
+                label: None,
+                description: None,
+                source: AttachmentSource::Inline,
+                registered_at: chrono::Utc::now(),
+                refreshed_at: chrono::Utc::now(),
+                storage_key: Some("sk-live".to_string()),
+                origin: None,
+                last_used_at: None,
+            }))
+        });
         reg.expect_touch_last_used().returning(|_, _| Ok(()));
         let mut mock_storage = MockOutputStorageRepository::new();
         mock_storage
