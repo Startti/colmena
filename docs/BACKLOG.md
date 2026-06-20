@@ -1147,6 +1147,52 @@ Conservado para referencia histórica:
 
 ---
 
+## Attachment catalog — snapshot same-turn bloquea "generar y consumir" (2026-06-20)
+
+- **Origen:** hallazgo durante el E2E live de `gdocs_insert_image_after_text`
+  modo `attachment_id` (Approach A). El agente generó una imagen con
+  `image_generation` (devolvió `document_id`) y en el MISMO turno intentó
+  `gdocs_insert_image_after_text(attachment_id=...)` → falló con
+  `attachment_fetch_failed: no attachment_catalog wired / not in catalog`.
+- **Root cause:** `DagToolExecutor::lookup_storage_key` (usado por
+  `fetch_attachment_bytes`) resuelve **solo** contra `attachment_catalog`, que
+  `llm.rs` construye **una vez al inicio del llm_call** desde
+  `attachment_registry.list_for_session(sid)` (un snapshot). No hay re-sync
+  cuando un tool registra un attachment mid-loop. Por lo tanto un attachment
+  **generado en el mismo turno** (image_generation/edit/tts mid-loop) NO está
+  en el snapshot y no es resoluble por NINGÚN tool basado en
+  `fetch_attachment_bytes` (`gdocs_insert_image` modo attachment, `sql_bulk_*`,
+  `attachment_run_python`).
+- **Qué SÍ funciona hoy:** (a) imágenes **subidas por el usuario** antes del
+  turno (están en el snapshot de inicio de turno); (b) imágenes generadas y
+  consumidas en un **turno posterior** (el snapshot del turno N+1 ya las
+  incluye). Lo que NO: generar y pegar en el **mismo** turno.
+- **Afecta prod también** (no es solo el CLI): el snapshot es start-of-turn en
+  ADP worker igual. Es el caso de uso directo que pidió el owner
+  ("generar una imagen y pegarla"); merece fix.
+- **Bonus finding (solo CLI):** el `dag_engine run` local NO cablea el
+  `attachment_registry` en absoluto → ningún tool `fetch_attachment_bytes`
+  resuelve attachments localmente. Por eso el E2E agente-completo de estos
+  tools debe correr contra el worker desplegado (o, para el code-path, el
+  integration test `tests/gdocs_integration_test.rs::image_upload_public_insert_delete_roundtrip`,
+  que verificó el HTTP path live).
+- **Fix propuesto (a discutir):**
+  - (A) **Re-sync del catálogo mid-loop:** después de que un tool registra un
+    attachment (image_generation/edit/tts), refrescar `executor.attachment_catalog`
+    (append la nueva row, o re-`list_for_session`). Localizado, barato.
+  - (B) **Fallback live en `lookup_storage_key`:** si el `document_id` no está
+    en el snapshot, consultar el registry/store en vivo. Más robusto, 1 query
+    extra solo en el miss path.
+  - Recomendado: (A) para el caso común (append la row generada al snapshot en
+    el mismo executor) + (B) como red de seguridad.
+- **Esfuerzo:** ~0.5-1d (A); +0.5d (B). Requiere E2E contra worker o un
+  integration test con registry wired.
+- **Cuándo retomar:** alta prioridad si el flujo "generar imagen → pegarla en
+  el doc en el mismo turno" es un caso de uso real esperado (el owner lo
+  describió así). Hasta entonces, el workaround multi-turno funciona.
+
+---
+
 ## OAuth scope para `last_modified` en sheets compartidos (2026-06-11)
 
 - **Origen:** hallazgo durante E2E live del QW3 `last_modified` (2026-06-11).
