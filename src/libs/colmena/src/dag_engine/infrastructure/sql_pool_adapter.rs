@@ -565,10 +565,9 @@ impl SqlConnectionPort for PgPoolAdapter {
         // transaction — any statement failure rolls the whole block back.
         // Executing on `&*self.pool` (a `&PgPool`) avoids the HRTB error that
         // `&mut *tx` triggers in sqlx 0.8.
-        sqlx::raw_sql(sql)
-            .execute(&*self.pool)
-            .await
-            .map_err(|e| SqlNodeError::ExecutionError(format!("setup_sql execution failed: {}", e)))?;
+        sqlx::raw_sql(sql).execute(&*self.pool).await.map_err(|e| {
+            SqlNodeError::ExecutionError(format!("setup_sql execution failed: {}", e))
+        })?;
         Ok(())
     }
 
@@ -921,15 +920,20 @@ mod tests {
         );
 
         // First run creates schema + table + seed.
-        adapter.execute_setup_sql(&sql).await.expect("first setup_sql run");
+        adapter
+            .execute_setup_sql(&sql)
+            .await
+            .expect("first setup_sql run");
         // Second run is a no-op: no error, no duplicate seed rows.
-        adapter.execute_setup_sql(&sql).await.expect("second setup_sql run (idempotent)");
+        adapter
+            .execute_setup_sql(&sql)
+            .await
+            .expect("second setup_sql run (idempotent)");
 
-        let count: i64 =
-            sqlx::query_scalar(&format!("SELECT count(*) FROM {}.cat", schema))
-                .fetch_one(&*adapter.pool())
-                .await
-                .unwrap();
+        let count: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM {}.cat", schema))
+            .fetch_one(&*adapter.pool())
+            .await
+            .unwrap();
         assert_eq!(count, 2, "seed must not duplicate across runs");
 
         sqlx::query(&format!("DROP SCHEMA {} CASCADE", schema))
@@ -956,8 +960,15 @@ mod tests {
         let res = adapter.execute_setup_sql(&sql).await;
         assert!(res.is_err(), "invalid setup_sql must return an error");
 
-        let missing = adapter.missing_schemas(&[schema.clone()]).await.unwrap();
-        assert_eq!(missing, vec![schema], "failed setup_sql must roll back the CREATE SCHEMA");
+        let missing = adapter
+            .missing_schemas(std::slice::from_ref(&schema))
+            .await
+            .unwrap();
+        assert_eq!(
+            missing,
+            vec![schema],
+            "failed setup_sql must roll back the CREATE SCHEMA"
+        );
     }
 
     #[tokio::test]
@@ -977,14 +988,19 @@ mod tests {
             s = schema
         );
 
-        adapter.execute_setup_sql(&sql).await.expect("setup_sql with semicolon-in-literal");
+        adapter
+            .execute_setup_sql(&sql)
+            .await
+            .expect("setup_sql with semicolon-in-literal");
 
-        let nota: String =
-            sqlx::query_scalar(&format!("SELECT nota FROM {}.notas", schema))
-                .fetch_one(&*adapter.pool())
-                .await
-                .unwrap();
-        assert_eq!(nota, "a; b; c", "semicolons inside string literals must be preserved");
+        let nota: String = sqlx::query_scalar(&format!("SELECT nota FROM {}.notas", schema))
+            .fetch_one(&*adapter.pool())
+            .await
+            .unwrap();
+        assert_eq!(
+            nota, "a; b; c",
+            "semicolons inside string literals must be preserved"
+        );
 
         sqlx::query(&format!("DROP SCHEMA {} CASCADE", schema))
             .execute(&*adapter.pool())

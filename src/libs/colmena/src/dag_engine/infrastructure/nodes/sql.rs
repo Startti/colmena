@@ -613,7 +613,10 @@ mod setup_sql_tests {
         });
 
         // Init runs setup_sql, then introspects — so the table shows in the supplement.
-        let ctx = fresh_node().initialize(&config).await.expect("init with setup_sql");
+        let ctx = fresh_node()
+            .initialize(&config)
+            .await
+            .expect("init with setup_sql");
         let supplement = ctx.description_supplement.unwrap_or_default();
         assert!(
             supplement.contains("gastos"),
@@ -622,17 +625,22 @@ mod setup_sql_tests {
         );
 
         // A second, independent node re-runs setup: seed must stay at 2 rows (idempotent).
-        fresh_node().initialize(&config).await.expect("second init is a no-op");
+        fresh_node()
+            .initialize(&config)
+            .await
+            .expect("second init is a no-op");
 
         let pool = raw_pool().await;
-        let count: i64 =
-            sqlx::query_scalar(&format!("SELECT count(*) FROM {}.gastos", schema))
-                .fetch_one(&pool)
-                .await
-                .unwrap();
+        let count: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM {}.gastos", schema))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
         assert_eq!(count, 2, "seed must be idempotent across inits");
 
-        sqlx::query(&format!("DROP SCHEMA {} CASCADE", schema)).execute(&pool).await.ok();
+        sqlx::query(&format!("DROP SCHEMA {} CASCADE", schema))
+            .execute(&pool)
+            .await
+            .ok();
         pool.close().await;
     }
 
@@ -655,7 +663,11 @@ mod setup_sql_tests {
         let res = fresh_node().initialize(&config).await;
         assert!(res.is_err(), "bad setup_sql must hard-fail init");
         let err = format!("{}", res.err().unwrap());
-        assert!(err.contains("setup_sql"), "error must mention setup_sql, got: {}", err);
+        assert!(
+            err.contains("setup_sql"),
+            "error must mention setup_sql, got: {}",
+            err
+        );
 
         let pool = raw_pool().await;
         let exists: Option<String> = sqlx::query_scalar(
@@ -665,7 +677,10 @@ mod setup_sql_tests {
         .fetch_optional(&pool)
         .await
         .unwrap();
-        assert!(exists.is_none(), "failed setup_sql must roll back the schema");
+        assert!(
+            exists.is_none(),
+            "failed setup_sql must roll back the schema"
+        );
         pool.close().await;
     }
 }
