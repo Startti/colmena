@@ -1,4 +1,4 @@
-# Design — Enriched schema/capability context + `crud` preset for `sql_query`
+# Design — Enriched schema/capability context + `read_write_delete` preset for `sql_query`
 
 - **Fecha:** 2026-06-21
 - **Estado:** Aprobado (brainstorm) — pendiente plan de implementación
@@ -19,20 +19,24 @@ Un agente que usa `sql_query` como tool hoy recibe **contexto pobre** sobre su e
   lo bloquea.
 
 Además, el **modelo de presets tiene un hueco**: no existe un nivel para *"manipular datos
-(incluyendo DELETE) sobre las tablas definidas, sin poder tocar el schema"*.
+(incluyendo DELETE) y extender tablas existentes (agregar columnas), sin poder crear tablas
+nuevas"*.
 
-| Preset | SELECT | INSERT/UPDATE | DELETE | CREATE TABLE/FUNC |
-|---|:--:|:--:|:--:|:--:|
-| `read_only` | ✅ | — | — | — |
-| `read_write` | ✅ | ✅ | — | — |
-| `full` | ✅ | ✅ | ✅ | ✅ |
+| Preset | SELECT | INSERT/UPDATE | DELETE | ADD COLUMN | CREATE TABLE/FUNC |
+|---|:--:|:--:|:--:|:--:|:--:|
+| `read_only` | ✅ | — | — | — | — |
+| `read_write` | ✅ | ✅ | — | — | — |
+| `full` | ✅ | ✅ | ✅ | — | ✅ |
 
-Para "CRUD sin DDL" hoy hay que usar el workaround poco intuitivo
-`{ "preset": "full", "deny": ["create_table", "create_function"] }`.
+Hoy `read_write` no puede borrar; `full` puede borrar y crear tablas, pero **ningún preset
+puede agregar columnas** (`ALTER` está siempre bloqueado). No hay un nivel intermedio para
+"CRUD completo + extender tablas, sin crear tablas nuevas".
 
-**El enforcement de presets ya es correcto** (el validador estático bloquea operaciones
-fuera del preset — `read_write` ya NO puede crear tablas). Este diseño **no relaja
-enforcement**; agrega un preset nombrado y enriquece la *comunicación* hacia el agente.
+**El enforcement de presets existentes ya es correcto** (`read_write` ya NO puede crear
+tablas). Este diseño es **aditivo**: agrega un preset nuevo (`read_write_delete`), habilita
+`ALTER TABLE ADD COLUMN` (solo esa variante) en `read_write_delete` y `full`, y enriquece la
+*comunicación* hacia el agente. No cambia el significado de `read_only`/`read_write`/`full`
+(salvo que `full` gana ADD COLUMN).
 
 ---
 
@@ -40,30 +44,47 @@ enforcement**; agrega un preset nombrado y enriquece la *comunicación* hacia el
 
 Una feature cohesiva con dos componentes ligados por el bloque de capacidades:
 
-1. **Preset `crud`** (enforcement, aditivo) = SELECT/INSERT/UPDATE/DELETE, sin DDL.
-2. **Contexto enriquecido** en `build_description_supplement`:
+1. **Preset `read_write_delete`** (enforcement, aditivo) = SELECT/INSERT/UPDATE/DELETE +
+   `ALTER TABLE ADD COLUMN`. No crea tablas nuevas ni funciones.
+2. **`ADD COLUMN` habilitado** (solo esa variante de `ALTER`) en `read_write_delete` y
+   `full`. Las demás variantes de `ALTER` (DROP COLUMN, ALTER TYPE, RENAME, DROP
+   CONSTRAINT) siguen **siempre bloqueadas**.
+3. **Contexto enriquecido** en `build_description_supplement`:
    - Schema completo por tabla (columnas + tipos + `NOT NULL` + PK/UNIQUE/FK).
    - Bloque de capacidades en lenguaje natural, derivado del **set real de operaciones
      permitidas** (describe correctamente cualquier combo: `read_only`, `read_write`,
-     `crud`, `full`, y variantes con `deny`).
+     `read_write_delete`, `full`, y variantes con `deny`).
    - Cap con degradación elegante para schemas grandes.
 
-Fuera de scope: cambiar enforcement de presets existentes; inyección por SSE; parsear el
-`setup_sql` (usamos introspección del estado real de la DB).
+Fuera de scope: cambiar el significado de `read_only`/`read_write`; permitir variantes
+destructivas de `ALTER`; inyección por SSE; parsear el `setup_sql` (usamos introspección
+del estado real de la DB).
 
 ---
 
 ## 3. Diseño
 
-### 3.A — Preset `crud`
+### 3.A — Preset `read_write_delete` + operación `AddColumn`
 
 En `domain/sql_permissions.rs`:
 
-- `SqlPermissions::from_preset` (o el match equivalente, ~líneas 56-84) acepta `"crud"`:
-  inserta `{ Select, Insert, Update, Delete }`. No incluye `CreateFunction`/`CreateTable`.
-- El parser de preset (default `read_only`) reconoce `"crud"`.
-- `DELETE`/`UPDATE` siguen sujetos al guard "requiere WHERE" del `StaticRuleValidator`
-  (sin cambios).
+- Nueva variante de operación `SqlOperation::AddColumn` (representa `ALTER TABLE … ADD
+  COLUMN`, y **solo** esa variante de ALTER).
+- `SqlPermissions::from_preset` (~líneas 56-84) acepta `"read_write_delete"`:
+  `{ Select, Insert, Update, Delete, AddColumn }`. No incluye `CreateFunction`/`CreateTable`.
+- `full` pasa a incluir `AddColumn` también: `{ Select, Insert, Update, Delete, AddColumn,
+  CreateFunction, CreateTable }`.
+- El parser de preset (default `read_only`) reconoce `"read_write_delete"`.
+- `from_str_loose` mapea `"add_column"` → `AddColumn` (para `deny`).
+- `DELETE`/`UPDATE` siguen sujetos al guard "requiere WHERE" del `StaticRuleValidator`.
+
+**Validador (`StaticRuleValidator` / `sql_ast`):** hoy un `Statement::AlterTable` se
+bloquea siempre. Cambio: detectar `ALTER TABLE` y clasificarlo como operación `AddColumn`
+**solo si TODAS sus operaciones del AST son `AlterTableOperation::AddColumn`**. Si contiene
+cualquier otra variante (`DropColumn`, `AlterColumn`/change type, `RenameColumn`,
+`RenameTable`, `DropConstraint`, etc.) → se bloquea como hasta ahora ("ALTER no permitido").
+Una vez clasificado como `AddColumn`, se aplica el chequeo de preset normal (permitido en
+`read_write_delete`/`full`) + el chequeo de `allowed_schemas` sobre la tabla alterada.
 
 Tabla final de presets:
 
@@ -71,8 +92,11 @@ Tabla final de presets:
 |---|---|
 | `read_only` | SELECT |
 | `read_write` | SELECT, INSERT, UPDATE |
-| `crud` | SELECT, INSERT, UPDATE, DELETE |
-| `full` | SELECT, INSERT, UPDATE, DELETE, CREATE FUNCTION, CREATE TABLE |
+| `read_write_delete` | SELECT, INSERT, UPDATE, DELETE, **ADD COLUMN** |
+| `full` | SELECT, INSERT, UPDATE, DELETE, **ADD COLUMN**, CREATE FUNCTION, CREATE TABLE |
+
+**Siempre bloqueado para el LLM (todos los presets):** `CREATE SCHEMA`, `DROP`, `TRUNCATE`,
+y todo `ALTER` que no sea exclusivamente `ADD COLUMN` (DROP/RENAME/ALTER COLUMN TYPE).
 
 ### 3.B — Introspección de columnas + claves
 
@@ -124,15 +148,15 @@ que produce el bloque a partir del **set de operaciones permitidas** (no del nom
 preset), de modo que `full + deny [...]` también queda correcto. Ejemplos del texto que
 ve el agente:
 
-- **read_only:** "Permisos: solo lectura. Podés ejecutar SELECT sobre las tablas listadas. No podés insertar, actualizar, borrar ni crear nada."
-- **read_write:** "Permisos: lectura y escritura sin borrado. Podés SELECT, INSERT y UPDATE sobre las tablas listadas. NO podés borrar filas (DELETE) ni crear/alterar tablas."
-- **crud:** "Permisos: CRUD sobre tablas existentes. Podés SELECT, INSERT, UPDATE y DELETE sobre las tablas listadas (DELETE/UPDATE requieren WHERE). NO podés crear ni alterar tablas/funciones."
-- **full:** "Permisos: acceso completo a datos + crear tablas/funciones. Podés SELECT/INSERT/UPDATE/DELETE y crear tablas y funciones nuevas en el schema sandbox '<sandbox>'. NO podés crear schemas (los define el operador) ni agregar columnas a tablas existentes. (CREATE SCHEMA / ALTER / TRUNCATE / DROP siempre bloqueados, incluso con full.)"
+- **read_only:** "Permisos: solo lectura. Podés ejecutar SELECT sobre las tablas listadas. No podés insertar, actualizar, borrar ni modificar la estructura."
+- **read_write:** "Permisos: lectura y escritura sin borrado. Podés SELECT, INSERT y UPDATE sobre las tablas listadas. NO podés borrar filas (DELETE) ni modificar la estructura (crear tablas, agregar columnas)."
+- **read_write_delete:** "Permisos: CRUD completo + agregar columnas. Podés SELECT, INSERT, UPDATE y DELETE sobre las tablas listadas (DELETE/UPDATE requieren WHERE), y agregar columnas nuevas a tablas existentes (ALTER TABLE ADD COLUMN). NO podés crear tablas nuevas, borrar/renombrar columnas, cambiar tipos, ni crear schemas."
+- **full:** "Permisos: acceso completo. Podés SELECT/INSERT/UPDATE/DELETE, agregar columnas a tablas existentes, y crear tablas y funciones nuevas en el schema sandbox '<sandbox>'. NO podés crear schemas (los define el operador), ni borrar/renombrar columnas ni cambiar sus tipos. (CREATE SCHEMA / DROP / TRUNCATE / ALTER-no-ADD-COLUMN siempre bloqueados, incluso con full.)"
 
 Reglas de construcción (determinísticas a partir del op-set):
-- Verbos por operación presente: SELECT→"leer", INSERT→"insertar", UPDATE→"actualizar", DELETE→"borrar filas", CreateTable/CreateFunction→"crear tablas/funciones en el sandbox".
-- Una frase negativa explícita listando lo que NO puede (las operaciones ausentes que el agente podría asumir disponibles: DELETE y CREATE TABLE son las más importantes).
-- Nota fija: "DELETE/UPDATE requieren WHERE; TRUNCATE/DROP/ALTER siempre bloqueados."
+- Verbos por operación presente: SELECT→"leer", INSERT→"insertar", UPDATE→"actualizar", DELETE→"borrar filas", AddColumn→"agregar columnas a tablas existentes", CreateTable/CreateFunction→"crear tablas/funciones en el sandbox".
+- Una frase negativa explícita listando lo que NO puede (las ausencias que el agente podría asumir disponibles: DELETE, ADD COLUMN, CREATE TABLE).
+- Nota fija: "DELETE/UPDATE requieren WHERE; CREATE SCHEMA / DROP / TRUNCATE / ALTER destructivo (DROP/RENAME/ALTER COLUMN) siempre bloqueados."
 
 ### 3.D — Render del schema + cap graceful
 
@@ -175,7 +199,10 @@ existente queda en el trait para compatibilidad pero el supplement deja de usarl
 
 Puramente aditivo:
 - Texto enriquecido dentro de la **descripción de la tool** (que ADP ya pasa al LLM tal cual).
-- Un valor de preset nuevo (`crud`) aceptado por el parser; los existentes no cambian.
+- Un valor de preset nuevo (`read_write_delete`) aceptado por el parser; `read_only`/
+  `read_write` no cambian. **Único cambio de comportamiento en un preset existente:** `full`
+  ahora permite `ALTER TABLE ADD COLUMN` (antes lo bloqueaba) — es una ampliación, no rompe
+  grafos (nadie dependía de que `full` fallara al agregar una columna).
 - Sin cambio de API pública, sin evento SSE nuevo, sin migración.
 - Métodos/tipos nuevos en un trait interno con un solo impl in-repo → el worker de ADP
   compila sin cambios.
@@ -185,24 +212,33 @@ Puramente aditivo:
 ## 5. Testing
 
 - **Unit (`sql_permissions.rs`):**
-  - `crud` preset resuelve a {Select, Insert, Update, Delete}; NO permite CreateTable/CreateFunction.
-  - `describe_capabilities_nl` por preset (read_only / read_write / crud / full) + un caso `full + deny [delete]` y `full + deny [create_table, create_function]` (== crud).
+  - `read_write_delete` resuelve a {Select, Insert, Update, Delete, AddColumn}; NO permite CreateTable/CreateFunction.
+  - `full` ahora incluye AddColumn.
+  - `describe_capabilities_nl` por preset (read_only / read_write / read_write_delete / full) + un caso `full + deny [delete]` y `full + deny [create_table, create_function]`.
+- **Unit (validador / `sql_ast`):**
+  - `ALTER TABLE t ADD COLUMN c int` → clasifica como `AddColumn` (permitido en read_write_delete/full, bloqueado en read_only/read_write).
+  - `ALTER TABLE t DROP COLUMN c`, `ALTER TABLE t ALTER COLUMN c TYPE text`, `RENAME` → **bloqueados en todos los presets** (incluido full).
+  - `ALTER TABLE t ADD COLUMN a int, DROP COLUMN b` (mezcla) → bloqueado (no todas las ops son AddColumn).
 - **Unit (render):** `build_description_supplement` con un set de `TableSchema` fixture →
   contiene columnas, PK, FK (`→ ref.tabla.col`), UNIQUE, NOT NULL, y el bloque NL.
   Caso cap: > MAX_SCHEMA_TABLES → degrada a solo-nombres + nota de introspección.
 - **Integración (`#[ignore]`, real Postgres):** crear un schema con PK/FK/UNIQUE →
   `load_table_schemas` los devuelve correctos; el supplement los renderiza.
-- **E2E (grafo real):** agente `crud` sobre finanzas; prompt que borra un gasto ("borrá el
-  gasto de comida de ayer") → DELETE con WHERE permitido; e intento de crear tabla →
-  bloqueado, y el agente ya sabía por el bloque NL que no podía. Guardar SSE en
-  `/tmp/colmena_e2e/` + reporte limpio.
+- **E2E (grafo real):** agente `read_write_delete` sobre finanzas; prompts: (a) borrar un
+  gasto ("borrá el gasto de comida de ayer") → DELETE con WHERE permitido; (b) agregar una
+  columna ("agregá un campo 'metodo_pago' a gastos") → ADD COLUMN permitido; (c) intento de
+  crear tabla nueva → bloqueado, y el agente ya sabía por el bloque NL que no podía. Guardar
+  SSE en `/tmp/colmena_e2e/` + reporte limpio.
 
 ---
 
 ## 6. Documentación a actualizar
 
-- `docs/developer_guide/23_sql_node.md` — preset `crud` en la tabla de presets; nueva
-  sección "Contexto de schema y capacidades que ve el agente" (qué se inyecta, ejemplo,
-  cap).
-- `docs/node_configurations.json` — `crud` como valor válido de `permissions.preset`.
+- `docs/developer_guide/23_sql_node.md` — preset `read_write_delete` en la tabla de
+  presets; documentar que `read_write_delete`/`full` permiten `ALTER TABLE ADD COLUMN`
+  (solo esa variante) y que el resto de `ALTER` sigue bloqueado; actualizar la lista de
+  "siempre bloqueados"; nueva sección "Contexto de schema y capacidades que ve el agente"
+  (qué se inyecta, ejemplo, cap).
+- `docs/node_configurations.json` — `read_write_delete` como valor válido de
+  `permissions.preset`; `add_column` como valor válido de `permissions.deny`.
 - Nota: el bloque de capacidades reemplaza la línea de permisos cruda en el supplement.
