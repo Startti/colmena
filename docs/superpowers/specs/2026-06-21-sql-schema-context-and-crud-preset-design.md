@@ -127,7 +127,7 @@ ve el agente:
 - **read_only:** "Permisos: solo lectura. Podés ejecutar SELECT sobre las tablas listadas. No podés insertar, actualizar, borrar ni crear nada."
 - **read_write:** "Permisos: lectura y escritura sin borrado. Podés SELECT, INSERT y UPDATE sobre las tablas listadas. NO podés borrar filas (DELETE) ni crear/alterar tablas."
 - **crud:** "Permisos: CRUD sobre tablas existentes. Podés SELECT, INSERT, UPDATE y DELETE sobre las tablas listadas (DELETE/UPDATE requieren WHERE). NO podés crear ni alterar tablas/funciones."
-- **full:** "Permisos: acceso completo. Podés SELECT/INSERT/UPDATE/DELETE y crear tablas y funciones en el schema sandbox '<sandbox>'. (TRUNCATE/DROP/ALTER siempre bloqueados.)"
+- **full:** "Permisos: acceso completo a datos + crear tablas/funciones. Podés SELECT/INSERT/UPDATE/DELETE y crear tablas y funciones nuevas en el schema sandbox '<sandbox>'. NO podés crear schemas (los define el operador) ni agregar columnas a tablas existentes. (CREATE SCHEMA / ALTER / TRUNCATE / DROP siempre bloqueados, incluso con full.)"
 
 Reglas de construcción (determinísticas a partir del op-set):
 - Verbos por operación presente: SELECT→"leer", INSERT→"insertar", UPDATE→"actualizar", DELETE→"borrar filas", CreateTable/CreateFunction→"crear tablas/funciones en el sandbox".
