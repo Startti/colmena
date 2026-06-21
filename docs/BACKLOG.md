@@ -1529,3 +1529,17 @@ dispatch de `recall_history`, y que el frontend lo renderice. Aditivo (el
 **Cuándo retomar.** Cuando product/diseño quiera mostrar visualmente al usuario
 que el agente recuperó memoria. Mientras tanto, en el SSE ya es visible como tool
 genérica. Sin trigger urgente.
+
+- **`load_table_schemas` composite (multi-column) FK introspection** — the FK query
+  joins `key_column_usage` × `constraint_column_usage` on constraint name only (no
+  ordinal correlation), so a 2-column FK yields cartesian-product `ForeignKey` rows with
+  wrong pairings. The supplement render masks it (`.find()` per column → one arrow), but
+  the `foreign_keys` list is incorrect for composite FKs. v1 supports single-column FKs
+  only (documented). Fix: emit only single-column FK constraints, or correlate
+  `position_in_unique_constraint`. See review of `feat/sql-schema-context-crud-preset`.
+- **`sql_query` single registry instance shares `OnceCell` across tool configs** —
+  two `tool_configurations` entries with different `connection_url`/`permissions` both
+  resolve to the one registered `sql_query` node `Arc`; `get_or_init` serves the first
+  caller's cached adapter + schema supplement to the second. Pre-existing (not a
+  regression). Only matters if multi-DB SQL tools in one agent become a use case; would
+  need one node instance per distinct config key.
