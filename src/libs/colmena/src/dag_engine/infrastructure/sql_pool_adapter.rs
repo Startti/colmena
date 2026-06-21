@@ -589,7 +589,8 @@ impl SqlConnectionPort for PgPoolAdapter {
             .collect();
 
         let find = |out: &Vec<TableSchema>, s: &str, t: &str| -> Option<usize> {
-            out.iter().position(|x| x.schema_name == s && x.table_name == t)
+            out.iter()
+                .position(|x| x.schema_name == s && x.table_name == t)
         };
 
         for row in &col_rows {
@@ -1029,18 +1030,16 @@ mod tests {
             .any(|c| c.name == "label" && c.data_type.contains("text")));
         let id = item.columns.iter().find(|c| c.name == "id").unwrap();
         assert!(id.is_pk, "id should be PK");
-        let cat = schemas
-            .iter()
-            .find(|t| t.table_name == "cat")
-            .unwrap();
+        let cat = schemas.iter().find(|t| t.table_name == "cat").unwrap();
         let nombre = cat.columns.iter().find(|c| c.name == "nombre").unwrap();
         assert!(
             nombre.not_null && nombre.is_unique,
             "nombre should be NOT NULL + UNIQUE"
         );
-        assert!(item.foreign_keys.iter().any(|fk| fk.column == "cat_id"
-            && fk.ref_table == "cat"
-            && fk.ref_column == "id"));
+        assert!(item
+            .foreign_keys
+            .iter()
+            .any(|fk| fk.column == "cat_id" && fk.ref_table == "cat" && fk.ref_column == "id"));
 
         sqlx::query(&format!("DROP SCHEMA {} CASCADE", schema))
             .execute(&*adapter.pool())

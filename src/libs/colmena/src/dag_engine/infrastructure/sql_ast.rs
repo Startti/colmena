@@ -658,8 +658,7 @@ mod tests {
 
     #[test]
     fn classify_alter_mixed_ops_is_blocked_alter() {
-        let stmts =
-            parse("ALTER TABLE finanzas.gastos ADD COLUMN a INT, DROP COLUMN b").unwrap();
+        let stmts = parse("ALTER TABLE finanzas.gastos ADD COLUMN a INT, DROP COLUMN b").unwrap();
         assert_eq!(classify(&stmts[0]), Some(SqlOperation::Alter));
     }
 

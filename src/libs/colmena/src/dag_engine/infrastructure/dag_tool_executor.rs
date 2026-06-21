@@ -2127,10 +2127,8 @@ impl ToolExecutor for DagToolExecutor {
                         Ok(ctx) => {
                             if let Some(supplement) = ctx.description_supplement {
                                 if !supplement.is_empty() {
-                                    tool_def.description = format!(
-                                        "{}\n\n{}",
-                                        tool_def.description, supplement
-                                    );
+                                    tool_def.description =
+                                        format!("{}\n\n{}", tool_def.description, supplement);
                                 }
                             }
                         }

@@ -447,7 +447,10 @@ mod tests {
             "ALTER TABLE production.users ADD COLUMN nickname TEXT",
             &rwd_perms(),
         );
-        assert!(r.allowed, "ADD COLUMN must be allowed under read_write_delete");
+        assert!(
+            r.allowed,
+            "ADD COLUMN must be allowed under read_write_delete"
+        );
     }
 
     #[test]
@@ -477,7 +480,10 @@ mod tests {
             "ALTER TABLE production.users DROP COLUMN email",
             &full_perms(),
         );
-        assert!(!r.allowed, "destructive ALTER must stay blocked even with full");
+        assert!(
+            !r.allowed,
+            "destructive ALTER must stay blocked even with full"
+        );
         assert!(r.block_reason.unwrap().contains("ALTER"));
     }
 

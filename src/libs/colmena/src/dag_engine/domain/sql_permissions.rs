@@ -269,21 +269,41 @@ impl SqlPermissions {
     pub fn describe_capabilities_nl(&self) -> String {
         let has = |op: SqlOperation| self.allowed_ops.contains(&op);
         let mut can: Vec<&str> = Vec::new();
-        if has(SqlOperation::Select) { can.push("leer (SELECT)"); }
-        if has(SqlOperation::Insert) { can.push("insertar filas (INSERT)"); }
-        if has(SqlOperation::Update) { can.push("modificar filas (UPDATE)"); }
-        if has(SqlOperation::Delete) { can.push("borrar filas (DELETE)"); }
-        if has(SqlOperation::AddColumn) { can.push("agregar columnas a tablas existentes (ALTER TABLE ADD COLUMN)"); }
+        if has(SqlOperation::Select) {
+            can.push("leer (SELECT)");
+        }
+        if has(SqlOperation::Insert) {
+            can.push("insertar filas (INSERT)");
+        }
+        if has(SqlOperation::Update) {
+            can.push("modificar filas (UPDATE)");
+        }
+        if has(SqlOperation::Delete) {
+            can.push("borrar filas (DELETE)");
+        }
+        if has(SqlOperation::AddColumn) {
+            can.push("agregar columnas a tablas existentes (ALTER TABLE ADD COLUMN)");
+        }
         if has(SqlOperation::CreateTable) || has(SqlOperation::CreateFunction) {
             can.push("crear tablas y funciones nuevas en el sandbox");
         }
 
         let mut cannot: Vec<&str> = Vec::new();
-        if !has(SqlOperation::Delete) { cannot.push("borrar filas (DELETE)"); }
-        if !has(SqlOperation::AddColumn) { cannot.push("agregar columnas"); }
-        if !has(SqlOperation::CreateTable) { cannot.push("crear tablas nuevas"); }
+        if !has(SqlOperation::Delete) {
+            cannot.push("borrar filas (DELETE)");
+        }
+        if !has(SqlOperation::AddColumn) {
+            cannot.push("agregar columnas");
+        }
+        if !has(SqlOperation::CreateTable) {
+            cannot.push("crear tablas nuevas");
+        }
 
-        let can_str = if can.is_empty() { "nada".to_string() } else { can.join(", ") };
+        let can_str = if can.is_empty() {
+            "nada".to_string()
+        } else {
+            can.join(", ")
+        };
         let cannot_str = if cannot.is_empty() {
             String::new()
         } else {
@@ -521,7 +541,8 @@ mod tests {
 
     #[test]
     fn test_full_preset_allows_add_column() {
-        let perms = SqlPermissions::from_config(Some(&serde_json::json!({ "preset": "full" }))).unwrap();
+        let perms =
+            SqlPermissions::from_config(Some(&serde_json::json!({ "preset": "full" }))).unwrap();
         assert!(perms.is_allowed(&SqlOperation::AddColumn));
         assert!(perms.is_allowed(&SqlOperation::CreateTable));
     }
@@ -544,14 +565,21 @@ mod tests {
         })))
         .unwrap();
         let nl = perms.describe_capabilities_nl();
-        assert!(nl.contains("SELECT") && nl.contains("INSERT") && nl.contains("UPDATE") && nl.contains("DELETE"));
+        assert!(
+            nl.contains("SELECT")
+                && nl.contains("INSERT")
+                && nl.contains("UPDATE")
+                && nl.contains("DELETE")
+        );
         assert!(nl.to_lowercase().contains("agregar columnas"));
         assert!(nl.to_lowercase().contains("no") && nl.to_lowercase().contains("crear tablas"));
     }
 
     #[test]
     fn test_capabilities_nl_read_only_says_no_writes() {
-        let perms = SqlPermissions::from_config(Some(&serde_json::json!({ "preset": "read_only" }))).unwrap();
+        let perms =
+            SqlPermissions::from_config(Some(&serde_json::json!({ "preset": "read_only" })))
+                .unwrap();
         let nl = perms.describe_capabilities_nl();
         assert!(nl.contains("SELECT"));
         assert!(!nl.contains("INSERT"));

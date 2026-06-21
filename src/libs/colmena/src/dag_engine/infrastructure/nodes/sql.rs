@@ -257,7 +257,10 @@ impl SqlNode {
             lines.push("Available functions (sandbox):".to_string());
             for func in functions {
                 let params = func.parameters.as_deref().unwrap_or("");
-                lines.push(format!("  - {}({}) -- {}", func.function_name, params, func.description));
+                lines.push(format!(
+                    "  - {}({}) -- {}",
+                    func.function_name, params, func.description
+                ));
             }
         }
 
@@ -284,10 +287,10 @@ impl SqlNode {
         );
         // The ALTER anti-pattern is conditional: when the preset allows ADD COLUMN
         // we must NOT list plain ALTER as fully blocked — that confuses the LLM.
-        if permissions.is_allowed(&crate::dag_engine::domain::sql_permissions::SqlOperation::AddColumn) {
-            lines.push(
-                "NO: TRUNCATE, DROP              → siempre bloqueados".to_string(),
-            );
+        if permissions
+            .is_allowed(&crate::dag_engine::domain::sql_permissions::SqlOperation::AddColumn)
+        {
+            lines.push("NO: TRUNCATE, DROP              → siempre bloqueados".to_string());
             lines.push(
                 "SÍ: ALTER TABLE <schema>.<tabla> ADD COLUMN <col> <tipo> \
                  → permitido con este preset (solo ADD COLUMN; nada más de ALTER)"
@@ -322,8 +325,17 @@ impl SqlNode {
                 current = t.schema_name.clone();
                 out.push_str(&format!("\nEsquema disponible (schema: {}):\n", current));
             }
-            let pk: Vec<&str> = t.columns.iter().filter(|c| c.is_pk).map(|c| c.name.as_str()).collect();
-            let pk_str = if pk.is_empty() { String::new() } else { format!("  [PK: {}]", pk.join(", ")) };
+            let pk: Vec<&str> = t
+                .columns
+                .iter()
+                .filter(|c| c.is_pk)
+                .map(|c| c.name.as_str())
+                .collect();
+            let pk_str = if pk.is_empty() {
+                String::new()
+            } else {
+                format!("  [PK: {}]", pk.join(", "))
+            };
             // Show schema-qualified name so LLM knows exactly what to write in SQL.
             let qualified = format!("{}.{}", t.schema_name, t.table_name);
             match &t.description {
@@ -332,12 +344,25 @@ impl SqlNode {
             }
             for c in &t.columns {
                 let mut flags: Vec<&str> = Vec::new();
-                if c.not_null { flags.push("NOT NULL"); }
-                if c.is_unique { flags.push("UNIQUE"); }
+                if c.not_null {
+                    flags.push("NOT NULL");
+                }
+                if c.is_unique {
+                    flags.push("UNIQUE");
+                }
                 let fk = t.foreign_keys.iter().find(|f| f.column == c.name);
-                let fk_str = fk.map(|f| format!("  → {}.{}.{} (FK)", f.ref_schema, f.ref_table, f.ref_column)).unwrap_or_default();
-                let flag_str = if flags.is_empty() { String::new() } else { format!("  {}", flags.join(", ")) };
-                out.push_str(&format!("      - {} {}{}{}\n", c.name, c.data_type, flag_str, fk_str));
+                let fk_str = fk
+                    .map(|f| format!("  → {}.{}.{} (FK)", f.ref_schema, f.ref_table, f.ref_column))
+                    .unwrap_or_default();
+                let flag_str = if flags.is_empty() {
+                    String::new()
+                } else {
+                    format!("  {}", flags.join(", "))
+                };
+                out.push_str(&format!(
+                    "      - {} {}{}{}\n",
+                    c.name, c.data_type, flag_str, fk_str
+                ));
             }
         }
         out
@@ -601,7 +626,9 @@ impl ExecutableNode for SqlNode {
     /// Expose self as [`InitializableNode`] so the tool executor can call
     /// `initialize()` to fetch the DB schema + capability statement and
     /// inject them into the tool description seen by the LLM.
-    fn as_initializable(&self) -> Option<&dyn crate::dag_engine::domain::initializable_node::InitializableNode> {
+    fn as_initializable(
+        &self,
+    ) -> Option<&dyn crate::dag_engine::domain::initializable_node::InitializableNode> {
         Some(self)
     }
 }

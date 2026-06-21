@@ -94,8 +94,10 @@ pub trait SqlConnectionPort: Send + Sync {
 
     /// Load full schema (columns + types + PK/UNIQUE/NOT NULL + FKs) for the
     /// given schemas, for injecting into the LLM tool description.
-    async fn load_table_schemas(&self, schemas: &[String])
-        -> Result<Vec<TableSchema>, SqlNodeError>;
+    async fn load_table_schemas(
+        &self,
+        schemas: &[String],
+    ) -> Result<Vec<TableSchema>, SqlNodeError>;
 
     /// Return the subset of `schemas` that do not yet exist in the database.
     ///
