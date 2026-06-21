@@ -83,6 +83,11 @@ pub trait SqlConnectionPort: Send + Sync {
     /// environment bootstrapping, never for LLM-issued queries. Idempotency is
     /// the author's responsibility (`CREATE ... IF NOT EXISTS`, `INSERT ... ON
     /// CONFLICT`). Any statement failure rolls back the whole block.
+    ///
+    /// Because the block runs inside one implicit transaction, statements that
+    /// cannot run in a transaction (`CREATE INDEX CONCURRENTLY`, `VACUUM`) are
+    /// not supported, and an explicit `BEGIN`/`COMMIT` inside the block breaks
+    /// the all-or-nothing guarantee.
     async fn execute_setup_sql(&self, sql: &str) -> Result<(), SqlNodeError>;
 
     /// Check if the pool is connected and ready.

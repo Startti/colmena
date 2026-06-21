@@ -442,6 +442,7 @@ Un `INSERT` plano sin `ON CONFLICT` **se duplica en cada mensaje** — siempre u
 - **No hay lint de idempotencia.** El motor confía en que el SQL es idempotente.
 - **1 DB = 1 tool con setup** es el patrón esperado. Varios nodos `sql_query` a la misma DB corren cada uno su propio `setup_sql` (seguro por idempotencia, pero redundante).
 - **Aislamiento per-usuario** (otra DB / otro schema por usuario) requiere que el host (ADP) instancie el grafo fresco por run — que es como corre hoy.
+- **Todo el bloque corre en UNA transacción implícita.** Por eso **no** uses statements que no pueden ejecutarse dentro de una transacción (`CREATE INDEX CONCURRENTLY`, `VACUUM`, `REINDEX CONCURRENTLY`) — fallan en runtime y abortan el init. Tampoco pongas `BEGIN`/`COMMIT` explícitos dentro de `setup_sql`: romperían la garantía all-or-nothing (lo posterior a tu `COMMIT` no se revierte). Para índices, usá `CREATE INDEX IF NOT EXISTS` (sin `CONCURRENTLY`).
 
 ---
 
