@@ -264,6 +264,39 @@ impl SqlPermissions {
         self.allowed_schemas.iter().map(String::as_str)
     }
 
+    /// Natural-language statement of what the agent can and cannot do, derived
+    /// from the actual allowed-operation set (so `deny` combos read correctly).
+    pub fn describe_capabilities_nl(&self) -> String {
+        let has = |op: SqlOperation| self.allowed_ops.contains(&op);
+        let mut can: Vec<&str> = Vec::new();
+        if has(SqlOperation::Select) { can.push("leer (SELECT)"); }
+        if has(SqlOperation::Insert) { can.push("insertar filas (INSERT)"); }
+        if has(SqlOperation::Update) { can.push("modificar filas (UPDATE)"); }
+        if has(SqlOperation::Delete) { can.push("borrar filas (DELETE)"); }
+        if has(SqlOperation::AddColumn) { can.push("agregar columnas a tablas existentes (ALTER TABLE ADD COLUMN)"); }
+        if has(SqlOperation::CreateTable) || has(SqlOperation::CreateFunction) {
+            can.push("crear tablas y funciones nuevas en el sandbox");
+        }
+
+        let mut cannot: Vec<&str> = Vec::new();
+        if !has(SqlOperation::Delete) { cannot.push("borrar filas (DELETE)"); }
+        if !has(SqlOperation::AddColumn) { cannot.push("agregar columnas"); }
+        if !has(SqlOperation::CreateTable) { cannot.push("crear tablas nuevas"); }
+
+        let can_str = if can.is_empty() { "nada".to_string() } else { can.join(", ") };
+        let cannot_str = if cannot.is_empty() {
+            String::new()
+        } else {
+            format!(" NO podés: {}.", cannot.join(", "))
+        };
+        format!(
+            "Permisos del agente: podés {}.{} Restricciones permanentes: \
+             DELETE/UPDATE requieren WHERE; CREATE SCHEMA, DROP, TRUNCATE y todo \
+             ALTER que no sea ADD COLUMN están siempre bloqueados.",
+            can_str, cannot_str
+        )
+    }
+
     /// Return a human-readable summary for LLM context injection.
     pub fn describe_for_llm(&self) -> String {
         let ops: Vec<&str> = [
@@ -502,5 +535,25 @@ mod tests {
         .unwrap();
         assert!(perms.is_allowed(&SqlOperation::Delete));
         assert!(!perms.is_allowed(&SqlOperation::AddColumn));
+    }
+
+    #[test]
+    fn test_capabilities_nl_read_write_delete() {
+        let perms = SqlPermissions::from_config(Some(&serde_json::json!({
+            "preset": "read_write_delete"
+        })))
+        .unwrap();
+        let nl = perms.describe_capabilities_nl();
+        assert!(nl.contains("SELECT") && nl.contains("INSERT") && nl.contains("UPDATE") && nl.contains("DELETE"));
+        assert!(nl.to_lowercase().contains("agregar columnas"));
+        assert!(nl.to_lowercase().contains("no") && nl.to_lowercase().contains("crear tablas"));
+    }
+
+    #[test]
+    fn test_capabilities_nl_read_only_says_no_writes() {
+        let perms = SqlPermissions::from_config(Some(&serde_json::json!({ "preset": "read_only" }))).unwrap();
+        let nl = perms.describe_capabilities_nl();
+        assert!(nl.contains("SELECT"));
+        assert!(!nl.contains("INSERT"));
     }
 }

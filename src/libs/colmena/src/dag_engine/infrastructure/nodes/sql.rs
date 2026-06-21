@@ -11,7 +11,7 @@ use crate::dag_engine::domain::observer::ExecutionObserver;
 use crate::dag_engine::domain::sql_errors::SqlNodeError;
 use crate::dag_engine::domain::sql_permissions::SqlPermissions;
 use crate::dag_engine::domain::sql_ports::{
-    FunctionInfo, FunctionRegistryPort, SqlConnectionPort, TableInfo,
+    FunctionInfo, FunctionRegistryPort, SqlConnectionPort, TableSchema,
 };
 use crate::dag_engine::infrastructure::sql_function_registry::PgRegistryAdapter;
 use crate::dag_engine::infrastructure::sql_llm_critic::LlmCriticAdapter;
@@ -38,6 +38,9 @@ pub struct SqlNode {
     /// observe `initialized == false` and both run the expensive setup work.
     init: OnceCell<SqlNodeInit>,
 }
+
+const MAX_SCHEMA_TABLES: usize = 40;
+const MAX_SCHEMA_CHARS: usize = 8000;
 
 impl SqlNode {
     pub fn new(factory: Arc<SqlPortFactory>) -> Self {
@@ -144,9 +147,9 @@ impl SqlNode {
             })
             .unwrap_or_default();
 
-        let tables: Vec<TableInfo> = {
+        let tables: Vec<crate::dag_engine::domain::sql_ports::TableSchema> = {
             let conn: &dyn SqlConnectionPort = adapter.as_ref();
-            conn.load_table_metadata(&allowed_schemas)
+            conn.load_table_schemas(&allowed_schemas)
                 .await
                 .unwrap_or_default()
         };
@@ -208,46 +211,50 @@ impl SqlNode {
 
     /// Build the description supplement from table and function metadata.
     fn build_description_supplement(
-        tables: &[TableInfo],
+        tables: &[TableSchema],
         functions: &[FunctionInfo],
         permissions: &SqlPermissions,
         max_rows: u64,
     ) -> String {
         let mut lines = Vec::new();
 
+        // 1. Capability statement (always included — small).
+        lines.push(permissions.describe_capabilities_nl());
+
+        // 2. Schema render with graceful cap.
         if !tables.is_empty() {
-            let mut current_schema = String::new();
-            for table in tables {
-                if table.schema_name != current_schema {
-                    current_schema = table.schema_name.clone();
-                    lines.push(format!("\nAvailable tables (schema: {}):", current_schema));
+            let rendered = Self::render_schema(tables);
+            if tables.len() > MAX_SCHEMA_TABLES || rendered.len() > MAX_SCHEMA_CHARS {
+                lines.push(String::new());
+                let mut current = String::new();
+                for t in tables {
+                    if t.schema_name != current {
+                        current = t.schema_name.clone();
+                        lines.push(format!("Tablas (schema: {}):", current));
+                    }
+                    lines.push(format!("  - {}", t.table_name));
                 }
-                match &table.description {
-                    Some(desc) => lines.push(format!("  - {} -- {}", table.table_name, desc)),
-                    None => lines.push(format!("  - {}", table.table_name)),
-                }
+                lines.push(
+                    "(Schema grande: usá introspección sobre information_schema \
+                     para ver columnas.)".to_string(),
+                );
+            } else {
+                lines.push(rendered);
             }
         }
 
+        // 3. Functions (unchanged behavior).
         if !functions.is_empty() {
             lines.push(String::new());
             lines.push("Available functions (sandbox):".to_string());
             for func in functions {
                 let params = func.parameters.as_deref().unwrap_or("");
-                lines.push(format!(
-                    "  - {}({}) -- {}",
-                    func.function_name, params, func.description
-                ));
+                lines.push(format!("  - {}({}) -- {}", func.function_name, params, func.description));
             }
         }
 
         lines.push(String::new());
-        lines.push(format!(
-            "{} | Max rows: {}",
-            permissions.describe_for_llm(),
-            max_rows
-        ));
-        lines.push("Use introspection queries to discover column details when needed.".to_string());
+        lines.push(format!("Max rows: {}", max_rows));
 
         // Multi-statement + anti-patterns block (shipped 2026-06-09 with Política C).
         // For deeper guidance load the `sql-query-best-practices` skill if the
@@ -283,6 +290,34 @@ impl SqlNode {
         );
 
         lines.join("\n")
+    }
+
+    /// Render tables with columns + keys for the tool description.
+    fn render_schema(tables: &[crate::dag_engine::domain::sql_ports::TableSchema]) -> String {
+        let mut out = String::new();
+        let mut current = String::new();
+        for t in tables {
+            if t.schema_name != current {
+                current = t.schema_name.clone();
+                out.push_str(&format!("\nEsquema disponible (schema: {}):\n", current));
+            }
+            let pk: Vec<&str> = t.columns.iter().filter(|c| c.is_pk).map(|c| c.name.as_str()).collect();
+            let pk_str = if pk.is_empty() { String::new() } else { format!("  [PK: {}]", pk.join(", ")) };
+            match &t.description {
+                Some(d) => out.push_str(&format!("  • {}{}  -- {}\n", t.table_name, pk_str, d)),
+                None => out.push_str(&format!("  • {}{}\n", t.table_name, pk_str)),
+            }
+            for c in &t.columns {
+                let mut flags: Vec<&str> = Vec::new();
+                if c.not_null { flags.push("NOT NULL"); }
+                if c.is_unique { flags.push("UNIQUE"); }
+                let fk = t.foreign_keys.iter().find(|f| f.column == c.name);
+                let fk_str = fk.map(|f| format!("  → {}.{}.{} (FK)", f.ref_schema, f.ref_table, f.ref_column)).unwrap_or_default();
+                let flag_str = if flags.is_empty() { String::new() } else { format!("  {}", flags.join(", ")) };
+                out.push_str(&format!("      - {} {}{}{}\n", c.name, c.data_type, flag_str, fk_str));
+            }
+        }
+        out
     }
 
     /// Generate a simple session ID using a timestamp.
@@ -538,5 +573,56 @@ impl ExecutableNode for SqlNode {
 
     fn default_output(&self) -> Option<&str> {
         Some("output")
+    }
+}
+
+#[cfg(test)]
+mod supplement_tests {
+    use super::*;
+    use crate::dag_engine::domain::sql_permissions::SqlPermissions;
+    use crate::dag_engine::domain::sql_ports::{ColumnInfo, ForeignKey, TableSchema};
+
+    fn t() -> Vec<TableSchema> {
+        vec![TableSchema {
+            schema_name: "finanzas".into(),
+            table_name: "gastos".into(),
+            description: None,
+            columns: vec![
+                ColumnInfo {
+                    name: "id".into(),
+                    data_type: "integer".into(),
+                    not_null: true,
+                    is_pk: true,
+                    is_unique: false,
+                },
+                ColumnInfo {
+                    name: "categoria_id".into(),
+                    data_type: "integer".into(),
+                    not_null: false,
+                    is_pk: false,
+                    is_unique: false,
+                },
+            ],
+            foreign_keys: vec![ForeignKey {
+                column: "categoria_id".into(),
+                ref_schema: "finanzas".into(),
+                ref_table: "categorias".into(),
+                ref_column: "id".into(),
+            }],
+        }]
+    }
+
+    #[test]
+    fn supplement_includes_columns_pk_and_fk() {
+        let perms = SqlPermissions::from_config(Some(&serde_json::json!({
+            "preset": "read_write_delete",
+            "allowed_schemas": ["finanzas"]
+        })))
+        .unwrap();
+        let s = SqlNode::build_description_supplement(&t(), &[], &perms, 100);
+        assert!(s.contains("PK: id"));
+        assert!(s.contains("categoria_id"));
+        assert!(s.contains("→ finanzas.categorias.id"));
+        assert!(s.to_lowercase().contains("agregar columnas"));
     }
 }
