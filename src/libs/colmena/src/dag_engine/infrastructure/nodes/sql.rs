@@ -232,13 +232,21 @@ impl SqlNode {
                         current = t.schema_name.clone();
                         lines.push(format!("Tablas (schema: {}):", current));
                     }
-                    lines.push(format!("  - {}", t.table_name));
+                    // Always use schema-qualified name so LLM writes correct SQL.
+                    lines.push(format!("  - {}.{}", t.schema_name, t.table_name));
                 }
                 lines.push(
                     "(Schema grande: usá introspección sobre information_schema \
-                     para ver columnas.)".to_string(),
+                     para ver columnas. IMPORTANTE: usá siempre schema.tabla en el SQL.)"
+                        .to_string(),
                 );
             } else {
+                lines.push(String::new());
+                lines.push(
+                    "IMPORTANTE: usá siempre el nombre calificado schema.tabla en el SQL \
+                     (ej: finanzas.gastos, no solo gastos)."
+                        .to_string(),
+                );
                 lines.push(rendered);
             }
         }
@@ -274,9 +282,22 @@ impl SqlNode {
             "NO: $1, ?, :name                  → pegá valores literales, escapá ' con ''"
                 .to_string(),
         );
-        lines.push(
-            "NO: TRUNCATE, DROP, ALTER         → bloqueado; usá DELETE con WHERE".to_string(),
-        );
+        // The ALTER anti-pattern is conditional: when the preset allows ADD COLUMN
+        // we must NOT list plain ALTER as fully blocked — that confuses the LLM.
+        if permissions.is_allowed(&crate::dag_engine::domain::sql_permissions::SqlOperation::AddColumn) {
+            lines.push(
+                "NO: TRUNCATE, DROP              → siempre bloqueados".to_string(),
+            );
+            lines.push(
+                "SÍ: ALTER TABLE <schema>.<tabla> ADD COLUMN <col> <tipo> \
+                 → permitido con este preset (solo ADD COLUMN; nada más de ALTER)"
+                    .to_string(),
+            );
+        } else {
+            lines.push(
+                "NO: TRUNCATE, DROP, ALTER         → bloqueado; usá DELETE con WHERE".to_string(),
+            );
+        }
         lines.push("NO: CREATE INDEX/VIEW/SCHEMA      → bloqueado; pedile al operator".to_string());
         lines.push("NO: GRANT, REVOKE                  → bloqueado".to_string());
         lines.push("NO: DELETE/UPDATE sin WHERE       → bloqueado".to_string());
@@ -303,9 +324,11 @@ impl SqlNode {
             }
             let pk: Vec<&str> = t.columns.iter().filter(|c| c.is_pk).map(|c| c.name.as_str()).collect();
             let pk_str = if pk.is_empty() { String::new() } else { format!("  [PK: {}]", pk.join(", ")) };
+            // Show schema-qualified name so LLM knows exactly what to write in SQL.
+            let qualified = format!("{}.{}", t.schema_name, t.table_name);
             match &t.description {
-                Some(d) => out.push_str(&format!("  • {}{}  -- {}\n", t.table_name, pk_str, d)),
-                None => out.push_str(&format!("  • {}{}\n", t.table_name, pk_str)),
+                Some(d) => out.push_str(&format!("  • {}{}  -- {}\n", qualified, pk_str, d)),
+                None => out.push_str(&format!("  • {}{}\n", qualified, pk_str)),
             }
             for c in &t.columns {
                 let mut flags: Vec<&str> = Vec::new();
@@ -573,6 +596,13 @@ impl ExecutableNode for SqlNode {
 
     fn default_output(&self) -> Option<&str> {
         Some("output")
+    }
+
+    /// Expose self as [`InitializableNode`] so the tool executor can call
+    /// `initialize()` to fetch the DB schema + capability statement and
+    /// inject them into the tool description seen by the LLM.
+    fn as_initializable(&self) -> Option<&dyn crate::dag_engine::domain::initializable_node::InitializableNode> {
+        Some(self)
     }
 }
 

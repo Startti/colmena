@@ -2095,7 +2095,54 @@ impl ToolExecutor for DagToolExecutor {
                     });
                 }
             } else if let Some(node) = self.registry.get_node(&config.node_type) {
-                tools.push(self.generate_tool_definition(name, config, &node));
+                let mut tool_def = self.generate_tool_definition(name, config, &node);
+                // If the node supports pre-flight initialization (e.g. sql_query
+                // connects to the DB, loads the table schema, and builds a
+                // capability statement), append the supplement to the description
+                // so the LLM sees the full schema context from the very first turn.
+                if let Some(initializable) = node.as_initializable() {
+                    use crate::dag_engine::domain::tool_configuration::parse_node_schema;
+                    // Build effective config from node_schema fixed values so that
+                    // initialize() can connect with the correct credentials/permissions.
+                    let effective_config: Value = if let Some(schema) = &config.node_schema {
+                        match parse_node_schema(schema) {
+                            Ok(parsed) => Value::Object(
+                                parsed
+                                    .fixed_values
+                                    .into_iter()
+                                    .collect::<serde_json::Map<_, _>>(),
+                            ),
+                            Err(_) => Value::Object(Default::default()),
+                        }
+                    } else {
+                        Value::Object(
+                            config
+                                .fixed_config
+                                .iter()
+                                .map(|(k, v)| (k.clone(), v.clone()))
+                                .collect(),
+                        )
+                    };
+                    match initializable.initialize(&effective_config).await {
+                        Ok(ctx) => {
+                            if let Some(supplement) = ctx.description_supplement {
+                                if !supplement.is_empty() {
+                                    tool_def.description = format!(
+                                        "{}\n\n{}",
+                                        tool_def.description, supplement
+                                    );
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            colmena_log!(
+                                "WARN: tool '{}' initialize() failed — schema context not injected: {}",
+                                name, e
+                            );
+                        }
+                    }
+                }
+                tools.push(tool_def);
             }
         }
 
