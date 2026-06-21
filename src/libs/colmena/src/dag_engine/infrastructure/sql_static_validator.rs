@@ -431,4 +431,64 @@ mod tests {
         );
         assert!(r.allowed, "COMMENT on allowed schema should pass");
     }
+
+    fn rwd_perms() -> SqlPermissions {
+        SqlPermissions::from_config(Some(&serde_json::json!({
+            "preset": "read_write_delete",
+            "allowed_schemas": ["production"]
+        })))
+        .unwrap()
+    }
+
+    #[test]
+    fn test_add_column_allowed_rwd() {
+        let v = StaticRuleValidator;
+        let r = v.validate(
+            "ALTER TABLE production.users ADD COLUMN nickname TEXT",
+            &rwd_perms(),
+        );
+        assert!(r.allowed, "ADD COLUMN must be allowed under read_write_delete");
+    }
+
+    #[test]
+    fn test_add_column_allowed_full() {
+        let v = StaticRuleValidator;
+        let r = v.validate(
+            "ALTER TABLE production.users ADD COLUMN nickname TEXT",
+            &full_perms(),
+        );
+        assert!(r.allowed);
+    }
+
+    #[test]
+    fn test_add_column_blocked_read_only() {
+        let v = StaticRuleValidator;
+        let r = v.validate(
+            "ALTER TABLE production.users ADD COLUMN nickname TEXT",
+            &read_only_perms(),
+        );
+        assert!(!r.allowed, "ADD COLUMN must be blocked under read_only");
+    }
+
+    #[test]
+    fn test_drop_column_blocked_even_full() {
+        let v = StaticRuleValidator;
+        let r = v.validate(
+            "ALTER TABLE production.users DROP COLUMN email",
+            &full_perms(),
+        );
+        assert!(!r.allowed, "destructive ALTER must stay blocked even with full");
+        assert!(r.block_reason.unwrap().contains("ALTER"));
+    }
+
+    #[test]
+    fn test_add_column_on_disallowed_schema_blocked() {
+        let v = StaticRuleValidator;
+        let r = v.validate(
+            "ALTER TABLE secret.users ADD COLUMN x TEXT",
+            &rwd_perms(), // allowed_schemas = ["production"]
+        );
+        assert!(!r.allowed, "ADD COLUMN must respect the schema allowlist");
+        assert!(r.block_reason.unwrap().to_lowercase().contains("schema"));
+    }
 }
