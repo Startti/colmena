@@ -1,0 +1,47 @@
+{
+  "comment": "E2E: finance agent whose sql_query tool bootstraps its schema via setup_sql",
+  "metadata": {
+    "category": "agents",
+    "requires_env": ["GEMINI_API_KEY", "DATABASE_URL"]
+  },
+  "nodes": {
+    "finanzas_agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "model": "gemini-2.5-flash",
+        "api_key": "${GEMINI_API_KEY}",
+        "stream": false,
+        "system_message": "Eres un asistente de finanzas personales. Usás la tool gastos_db para registrar y consultar gastos. El esquema 'finanzas' ya existe con estas tablas exactas:\n- finanzas.categorias(id SERIAL PK, nombre TEXT UNIQUE) — valores existentes: 'Comida', 'Transporte', 'Hospedaje'\n- finanzas.gastos(id SERIAL PK, categoria_id INT FK->categorias.id, monto NUMERIC(12,2), fecha DATE DEFAULT CURRENT_DATE, descripcion TEXT)\nPara registrar un gasto: primero SELECT id FROM finanzas.categorias WHERE LOWER(nombre)=LOWER('X'), luego INSERT INTO finanzas.gastos(categoria_id, monto, descripcion) VALUES(id_obtenido, monto, 'desc'). Respondé en español.",
+        "tool_configurations": {
+          "gastos_db": {
+            "name": "gastos_db",
+            "node_type": "sql_query",
+            "description": "Registra y consulta gastos del usuario en la base finanzas.",
+            "node_schema": {
+              "connection_url": { "type": "string", "fixed": "${DATABASE_URL}" },
+              "permissions": {
+                "type": "object",
+                "fixed": { "preset": "read_write", "allowed_schemas": ["finanzas"] }
+              },
+              "setup_sql": {
+                "type": "string",
+                "fixed": "CREATE SCHEMA IF NOT EXISTS finanzas;\nCREATE TABLE IF NOT EXISTS finanzas.categorias (id SERIAL PRIMARY KEY, nombre TEXT UNIQUE NOT NULL);\nCREATE TABLE IF NOT EXISTS finanzas.gastos (id SERIAL PRIMARY KEY, categoria_id INT REFERENCES finanzas.categorias(id), monto NUMERIC(12,2), fecha DATE DEFAULT CURRENT_DATE, descripcion TEXT);\nINSERT INTO finanzas.categorias (nombre) VALUES ('Comida'),('Transporte'),('Hospedaje') ON CONFLICT (nombre) DO NOTHING;"
+              },
+              "query": {
+                "type": "string",
+                "required": true,
+                "description": "SQL para registrar o consultar gastos (SELECT/INSERT/UPDATE)."
+              }
+            }
+          }
+        },
+        "prompt": "Registrá un gasto de comida de $20 de hoy con descripción 'almuerzo', y después decime cuánto llevo gastado en total."
+      }
+    },
+    "result": { "type": "output", "config": { "label": "Finanzas Agent Result" } }
+  },
+  "edges": [
+    { "from": "finanzas_agent", "to": "result" }
+  ]
+}
