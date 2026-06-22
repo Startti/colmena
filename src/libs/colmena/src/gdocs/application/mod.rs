@@ -14,4 +14,5 @@ pub mod replace_text;
 pub mod scope_resolver;
 pub mod style;
 pub mod table;
+pub mod table_format;
 pub mod util;
