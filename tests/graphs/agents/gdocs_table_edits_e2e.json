@@ -1,0 +1,33 @@
+{
+  "_comment": "E2E (manual, live): agent reads a table in an operator-provided Google Doc, sets a cell, and inserts a row, IN ONE TURN. Replace <YOUR_DOC_ID>. Needs GEMINI_API_KEY + DATABASE_URL + OAuth creds in-memory + --agent-session-id. Uses Docs API (read_tables/set/insert) so a SHARED doc works.",
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/gdocs-table-edits",
+        "method": "POST",
+        "test_payload": {
+          "prompt": "On Google Doc id <YOUR_DOC_ID>, do in order: 1) call gdocs_read_tables and report the first table's dimensions and cell previews. 2) call gdocs_set_table_cell on table_index 0, row 1, col 0 with text 'EDITED'. 3) call gdocs_insert_table_row on table_index 0, at_row 1, insert_below true. 4) Report the verbatim changes and revision_id_after of each step."
+        }
+      }
+    },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "api_key": "${GEMINI_API_KEY}",
+        "model": "gemini-2.5-flash",
+        "stream": false,
+        "max_iterations": 10,
+        "connection_url": "${DATABASE_URL}",
+        "system_message": "You edit Google Docs tables. Always call gdocs_read_tables first to get table_index and coordinates. Report tool results verbatim.",
+        "enabled_tools": ["gdocs"]
+      }
+    },
+    "log": { "type": "log" }
+  },
+  "edges": [
+    { "from": "trigger", "to": "agent" },
+    { "from": "agent", "to": "log" }
+  ]
+}

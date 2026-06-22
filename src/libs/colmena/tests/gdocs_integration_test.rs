@@ -17,11 +17,16 @@
 //! the configured parent folder. They do NOT delete them automatically —
 //! the parent folder is expected to be a disposable test bucket.
 
+use colmena::gdocs::application::co_edit_guard::GuardContext;
+use colmena::gdocs::application::table;
+use colmena::gdocs::domain::DocumentSnapshot;
 use colmena::gdocs::domain::{
     DocsClient, DocsError, DocumentId, ExportFormat, ParagraphKind, RevisionId, ShareRole,
 };
 use colmena::gdocs::infrastructure::config::GDocsConfig;
 use colmena::gdocs::infrastructure::http_client::GoogleDocsHttpClient;
+use colmena::gdocs::infrastructure::outline_cache::OutlineCache;
+use colmena::gdocs::infrastructure::revision_store::RevisionStore;
 
 /// Returns true iff the required env vars are set. Used to keep the
 /// `#[ignore]`-gated tests from crashing with `panic!("env required")`
@@ -409,4 +414,164 @@ async fn image_upload_public_insert_delete_roundtrip() {
         "OK: uploaded {file_id}, inserted image, deleted temp; revision {}",
         res.revision_id_after.0
     );
+}
+
+/// Minimal in-test `RevisionStore`. The production `InMemoryRevisionStore`
+/// is `#[cfg(test)]`-gated inside the lib, so it isn't visible to this
+/// integration crate (which links the lib compiled without `test` cfg).
+/// This stand-in keeps state in a `Mutex<HashMap>` and is enough for the
+/// table roundtrip: the non-blocking guard treats first-contact (`None`)
+/// as "proceed without diffing", then persists the post-write revision.
+#[derive(Default)]
+struct ItRevisionStore {
+    map: std::sync::Mutex<
+        std::collections::HashMap<(String, String), (RevisionId, Option<DocumentSnapshot>)>,
+    >,
+}
+
+#[async_trait::async_trait]
+impl RevisionStore for ItRevisionStore {
+    async fn get_with_snapshot(
+        &self,
+        sid: &str,
+        doc: &DocumentId,
+    ) -> Result<(Option<RevisionId>, Option<DocumentSnapshot>), DocsError> {
+        let map = self.map.lock().unwrap();
+        match map.get(&(sid.to_string(), doc.0.clone())) {
+            None => Ok((None, None)),
+            Some((rev, snap)) => Ok((Some(rev.clone()), snap.clone())),
+        }
+    }
+
+    async fn put_with_snapshot(
+        &self,
+        sid: &str,
+        doc: &DocumentId,
+        rev: &RevisionId,
+        snapshot: Option<&DocumentSnapshot>,
+    ) -> Result<(), DocsError> {
+        self.map.lock().unwrap().insert(
+            (sid.to_string(), doc.0.clone()),
+            (rev.clone(), snapshot.cloned()),
+        );
+        Ok(())
+    }
+}
+
+// ── Table edits (read → set cell → insert row → delete column) ─────────
+//
+// Live roundtrip over the 6 `gdocs_*_table_*` use cases against REAL Google:
+// create a doc from a markdown table (Drive converts it natively), read the
+// table via `run_read_tables`, then drive the edit use cases through a real
+// `GuardContext` (in-memory revision store + outline cache + fixed session id)
+// and verify the table shrank a column and gained the edited cell text.
+//
+// The edit use cases require a `GuardContext`. No sibling integration test
+// builds one (they only exercise client-level ops), so we assemble a minimal
+// real context here: `OutlineCache::new`, `InMemoryRevisionStore::new`, a fixed
+// `session_id`, `sa_email: None`. This mirrors the application-layer unit-test
+// wiring (`gdocs::application::_test_helpers::TestRig`) but against the live
+// HTTP client instead of `MockDocsClient`.
+//
+// Cleanup deletes the created doc via `delete_drive_file` (a Google Doc is a
+// Drive file), so this test does not leak docs into the parent folder.
+#[tokio::test]
+#[ignore = "requires GOOGLE_APPLICATION_CREDENTIALS + COLMENA_GDOCS_TEST_PARENT_FOLDER_ID — run with `cargo test --test gdocs_integration_test -- --ignored`"]
+async fn table_read_set_insert_delete_roundtrip() {
+    if !env_ready() {
+        eprintln!("{SKIP}");
+        return;
+    }
+    let client = make_client();
+    let folder = parent_folder();
+
+    // 1. Create a doc from markdown containing a table. Drive converts the
+    //    markdown table natively into a Docs table.
+    let md = "# Table test\n\n| A | B |\n|---|---|\n| 1 | 2 |\n";
+    let r = client
+        .create_from_markdown("colmena gdocs IT — tables", md, Some(&folder))
+        .await
+        .expect("create_from_markdown ok");
+    let doc_id = r.meta.doc_id.clone();
+
+    // 2. Read the table and assert dimensions. Header + 1 data row = 2 rows,
+    //    2 columns. Drive sometimes adds/omits rows, so accept >= 2 rows but
+    //    require exactly 2 columns; log the actual dims either way.
+    let listing = table::run_read_tables(&client, &doc_id, None)
+        .await
+        .expect("run_read_tables ok");
+    assert_eq!(
+        listing.tables.len(),
+        1,
+        "expected exactly 1 table, got {}: {:?}",
+        listing.tables.len(),
+        listing.tables
+    );
+    let t0 = &listing.tables[0];
+    eprintln!(
+        "read_tables: rows={}, columns={}, cells={}",
+        t0.rows,
+        t0.columns,
+        t0.cells.len()
+    );
+    assert_eq!(t0.columns, 2, "expected 2 columns, got {}", t0.columns);
+    assert!(
+        t0.rows >= 2,
+        "expected >= 2 rows (header + data), got {}",
+        t0.rows
+    );
+
+    // 3. Build a minimal real GuardContext for the edit use cases.
+    let cache = OutlineCache::new(std::time::Duration::from_secs(5));
+    let revisions = ItRevisionStore::default();
+    let ctx = GuardContext {
+        client: &client,
+        cache: &cache,
+        revisions: &revisions,
+        session_id: "gdocs_it_table_roundtrip",
+        sa_email: None,
+    };
+
+    // 4. set a cell, insert a row below row 1, then delete column 1.
+    table::run_set_table_cell(&ctx, &doc_id, 0, 1, 0, "EDITED", None)
+        .await
+        .expect("run_set_table_cell ok");
+    table::run_insert_table_row(&ctx, &doc_id, 0, 1, true, None)
+        .await
+        .expect("run_insert_table_row ok");
+    table::run_delete_table_column(&ctx, &doc_id, 0, 1, None)
+        .await
+        .expect("run_delete_table_column ok");
+
+    // 5. Re-read and verify the table now has 1 column and contains "EDITED".
+    let after = table::run_read_tables(&client, &doc_id, None)
+        .await
+        .expect("run_read_tables after edits ok");
+    assert_eq!(after.tables.len(), 1, "expected 1 table after edits");
+    let final_table = &after.tables[0];
+    eprintln!(
+        "after edits: rows={}, columns={}",
+        final_table.rows, final_table.columns
+    );
+    assert_eq!(
+        final_table.columns, 1,
+        "expected 1 column after delete, got {}",
+        final_table.columns
+    );
+    assert!(
+        final_table
+            .cells
+            .iter()
+            .any(|c| c.text_preview.contains("EDITED")),
+        "expected a cell containing 'EDITED', got cells: {:?}",
+        final_table.cells
+    );
+
+    // 6. Cleanup — a Google Doc is a Drive file, so delete it by id.
+    client
+        .delete_drive_file(&doc_id.0)
+        .await
+        .expect("delete_drive_file (cleanup) ok");
+
+    eprintln!("OK: table roundtrip on {} cleaned up", doc_id.0);
 }
