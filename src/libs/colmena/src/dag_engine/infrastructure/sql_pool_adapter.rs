@@ -8,7 +8,9 @@
 //! transaction, so multiple adapters can safely share a pool.
 
 use crate::dag_engine::domain::sql_errors::SqlNodeError;
-use crate::dag_engine::domain::sql_ports::{QueryResult, SqlConnectionPort, TableInfo};
+use crate::dag_engine::domain::sql_ports::{
+    ColumnInfo, ForeignKey, QueryResult, SqlConnectionPort, TableInfo, TableSchema,
+};
 use serde_json::{json, Value};
 use sqlx::{Column, PgPool, Row, TypeInfo};
 use std::sync::Arc;
@@ -511,6 +513,114 @@ impl SqlConnectionPort for PgPoolAdapter {
         Ok(tables)
     }
 
+    async fn load_table_schemas(
+        &self,
+        schemas: &[String],
+    ) -> Result<Vec<TableSchema>, SqlNodeError> {
+        let pool = &*self.pool;
+        if schemas.is_empty() {
+            return Ok(vec![]);
+        }
+
+        // 1. Tables + comments (reuse the same shape as load_table_metadata).
+        let base = self.load_table_metadata(schemas).await?;
+
+        // 2. Columns with NOT NULL + PK + UNIQUE flags.
+        let col_rows = sqlx::query(
+            "SELECT c.table_schema, c.table_name, c.column_name, c.data_type, \
+                    (c.is_nullable = 'NO') AS not_null, \
+                    COALESCE(pk.is_pk, false) AS is_pk, \
+                    COALESCE(uq.is_unique, false) AS is_unique \
+             FROM information_schema.columns c \
+             LEFT JOIN ( \
+               SELECT tc.table_schema, tc.table_name, kcu.column_name, true AS is_pk \
+               FROM information_schema.table_constraints tc \
+               JOIN information_schema.key_column_usage kcu \
+                 ON kcu.constraint_name = tc.constraint_name \
+                AND kcu.constraint_schema = tc.constraint_schema \
+               WHERE tc.constraint_type = 'PRIMARY KEY' \
+             ) pk ON pk.table_schema=c.table_schema AND pk.table_name=c.table_name AND pk.column_name=c.column_name \
+             LEFT JOIN ( \
+               SELECT tc.table_schema, tc.table_name, kcu.column_name, true AS is_unique \
+               FROM information_schema.table_constraints tc \
+               JOIN information_schema.key_column_usage kcu \
+                 ON kcu.constraint_name = tc.constraint_name \
+                AND kcu.constraint_schema = tc.constraint_schema \
+               WHERE tc.constraint_type = 'UNIQUE' \
+             ) uq ON uq.table_schema=c.table_schema AND uq.table_name=c.table_name AND uq.column_name=c.column_name \
+             WHERE c.table_schema = ANY($1) \
+             ORDER BY c.table_schema, c.table_name, c.ordinal_position",
+        )
+        .bind(schemas)
+        .fetch_all(pool)
+        .await
+        .map_err(|e| SqlNodeError::ExecutionError(format!("Failed to load columns: {}", e)))?;
+
+        // 3. Single-column foreign keys.
+        let fk_rows = sqlx::query(
+            "SELECT tc.table_schema AS local_schema, tc.table_name AS local_table, \
+                    kcu.column_name AS local_column, \
+                    ccu.table_schema AS ref_schema, ccu.table_name AS ref_table, \
+                    ccu.column_name AS ref_column \
+             FROM information_schema.table_constraints tc \
+             JOIN information_schema.key_column_usage kcu \
+               ON kcu.constraint_name = tc.constraint_name \
+              AND kcu.constraint_schema = tc.constraint_schema \
+             JOIN information_schema.constraint_column_usage ccu \
+               ON ccu.constraint_name = tc.constraint_name \
+              AND ccu.constraint_schema = tc.constraint_schema \
+             WHERE tc.constraint_type = 'FOREIGN KEY' AND tc.table_schema = ANY($1)",
+        )
+        .bind(schemas)
+        .fetch_all(pool)
+        .await
+        .map_err(|e| SqlNodeError::ExecutionError(format!("Failed to load foreign keys: {}", e)))?;
+
+        // Assemble.
+        let mut out: Vec<TableSchema> = base
+            .into_iter()
+            .map(|t| TableSchema {
+                schema_name: t.schema_name,
+                table_name: t.table_name,
+                description: t.description,
+                columns: vec![],
+                foreign_keys: vec![],
+            })
+            .collect();
+
+        let find = |out: &Vec<TableSchema>, s: &str, t: &str| -> Option<usize> {
+            out.iter()
+                .position(|x| x.schema_name == s && x.table_name == t)
+        };
+
+        for row in &col_rows {
+            let s: String = row.try_get("table_schema").unwrap_or_default();
+            let t: String = row.try_get("table_name").unwrap_or_default();
+            if let Some(i) = find(&out, &s, &t) {
+                out[i].columns.push(ColumnInfo {
+                    name: row.try_get("column_name").unwrap_or_default(),
+                    data_type: row.try_get("data_type").unwrap_or_default(),
+                    not_null: row.try_get("not_null").unwrap_or(false),
+                    is_pk: row.try_get("is_pk").unwrap_or(false),
+                    is_unique: row.try_get("is_unique").unwrap_or(false),
+                });
+            }
+        }
+        for row in &fk_rows {
+            let s: String = row.try_get("local_schema").unwrap_or_default();
+            let t: String = row.try_get("local_table").unwrap_or_default();
+            if let Some(i) = find(&out, &s, &t) {
+                out[i].foreign_keys.push(ForeignKey {
+                    column: row.try_get("local_column").unwrap_or_default(),
+                    ref_schema: row.try_get("ref_schema").unwrap_or_default(),
+                    ref_table: row.try_get("ref_table").unwrap_or_default(),
+                    ref_column: row.try_get("ref_column").unwrap_or_default(),
+                });
+            }
+        }
+        Ok(out)
+    }
+
     async fn missing_schemas(&self, schemas: &[String]) -> Result<Vec<String>, SqlNodeError> {
         // Never treat introspection schemas as missing — they always exist and
         // must never be created.
@@ -906,6 +1016,59 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires TEST_DATABASE_URL — run with `cargo test -- --ignored`"]
+    async fn load_table_schemas_returns_columns_pk_unique_fk() {
+        let Some(adapter) = test_adapter().await else {
+            eprintln!("skip: TEST_DATABASE_URL not set");
+            return;
+        };
+        let schema = unique_schema("colmena_sch");
+        for sql in [
+            format!("CREATE SCHEMA IF NOT EXISTS {s}", s = schema),
+            format!(
+                "CREATE TABLE {s}.cat (id SERIAL PRIMARY KEY, nombre TEXT UNIQUE NOT NULL)",
+                s = schema
+            ),
+            format!(
+                "CREATE TABLE {s}.item (id SERIAL PRIMARY KEY, cat_id INT REFERENCES {s}.cat(id), label TEXT)",
+                s = schema
+            ),
+        ] {
+            sqlx::query(&sql).execute(&*adapter.pool()).await.unwrap();
+        }
+
+        let schemas = adapter
+            .load_table_schemas(std::slice::from_ref(&schema))
+            .await
+            .unwrap();
+        let item = schemas
+            .iter()
+            .find(|t| t.table_name == "item")
+            .expect("item table");
+        assert!(item
+            .columns
+            .iter()
+            .any(|c| c.name == "label" && c.data_type.contains("text")));
+        let id = item.columns.iter().find(|c| c.name == "id").unwrap();
+        assert!(id.is_pk, "id should be PK");
+        let cat = schemas.iter().find(|t| t.table_name == "cat").unwrap();
+        let nombre = cat.columns.iter().find(|c| c.name == "nombre").unwrap();
+        assert!(
+            nombre.not_null && nombre.is_unique,
+            "nombre should be NOT NULL + UNIQUE"
+        );
+        assert!(item
+            .foreign_keys
+            .iter()
+            .any(|fk| fk.column == "cat_id" && fk.ref_table == "cat" && fk.ref_column == "id"));
+
+        sqlx::query(&format!("DROP SCHEMA {} CASCADE", schema))
+            .execute(&*adapter.pool())
+            .await
+            .ok();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL — run with `cargo test -- --ignored`"]
     async fn setup_sql_runs_and_is_idempotent() {
         let Some(adapter) = test_adapter().await else {
             eprintln!("skip: TEST_DATABASE_URL not set");
@@ -919,12 +1082,10 @@ mod tests {
             s = schema
         );
 
-        // First run creates schema + table + seed.
         adapter
             .execute_setup_sql(&sql)
             .await
             .expect("first setup_sql run");
-        // Second run is a no-op: no error, no duplicate seed rows.
         adapter
             .execute_setup_sql(&sql)
             .await
@@ -950,8 +1111,6 @@ mod tests {
             return;
         };
         let schema = unique_schema("colmena_setup_fail");
-        // Valid CREATE SCHEMA followed by a garbage statement: the whole tx must roll back,
-        // so the schema must NOT exist afterwards.
         let sql = format!(
             "CREATE SCHEMA IF NOT EXISTS {s};\nTHIS IS NOT VALID SQL;",
             s = schema
@@ -979,8 +1138,6 @@ mod tests {
             return;
         };
         let schema = unique_schema("colmena_setup_semic");
-        // The seed value contains a semicolon inside a string literal. A naive
-        // split on `;` would mangle this; Postgres parses it correctly.
         let sql = format!(
             "CREATE SCHEMA IF NOT EXISTS {s};\n\
              CREATE TABLE IF NOT EXISTS {s}.notas (id SERIAL PRIMARY KEY, nota TEXT UNIQUE NOT NULL);\n\

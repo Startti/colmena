@@ -16,6 +16,10 @@ pub enum SqlOperation {
     Delete,
     CreateFunction,
     CreateTable,
+    /// `ALTER TABLE … ADD COLUMN` — and ONLY that ALTER variant. Allowed in
+    /// `read_write_delete` and `full`. Destructive ALTER (DROP/RENAME/type change)
+    /// is classified as `Alter` and stays blocked.
+    AddColumn,
     /// Always blocked — no preset enables this.
     Truncate,
     /// Always blocked on protected schemas.
@@ -37,6 +41,7 @@ impl SqlOperation {
             "truncate" => Some(Self::Truncate),
             "drop" => Some(Self::Drop),
             "alter" => Some(Self::Alter),
+            "add_column" => Some(Self::AddColumn),
             _ => None,
         }
     }
@@ -47,6 +52,7 @@ impl SqlOperation {
 pub enum PermissionPreset {
     ReadOnly,
     ReadWrite,
+    ReadWriteDelete,
     Full,
 }
 
@@ -55,6 +61,7 @@ impl PermissionPreset {
         match s.to_lowercase().as_str() {
             "read_only" => Ok(Self::ReadOnly),
             "read_write" => Ok(Self::ReadWrite),
+            "read_write_delete" => Ok(Self::ReadWriteDelete),
             "full" => Ok(Self::Full),
             other => Err(format!("Unknown permission preset: '{}'", other)),
         }
@@ -74,6 +81,15 @@ impl PermissionPreset {
                 set.insert(SqlOperation::Update);
                 set
             }
+            Self::ReadWriteDelete => {
+                let mut set = HashSet::new();
+                set.insert(SqlOperation::Select);
+                set.insert(SqlOperation::Insert);
+                set.insert(SqlOperation::Update);
+                set.insert(SqlOperation::Delete);
+                set.insert(SqlOperation::AddColumn);
+                set
+            }
             Self::Full => {
                 let mut set = HashSet::new();
                 set.insert(SqlOperation::Select);
@@ -82,6 +98,7 @@ impl PermissionPreset {
                 set.insert(SqlOperation::Delete);
                 set.insert(SqlOperation::CreateFunction);
                 set.insert(SqlOperation::CreateTable);
+                set.insert(SqlOperation::AddColumn);
                 set
             }
         }
@@ -245,6 +262,59 @@ impl SqlPermissions {
     /// (all schemas allowed) and therefore nothing to provision.
     pub fn allowed_schemas_iter(&self) -> impl Iterator<Item = &str> {
         self.allowed_schemas.iter().map(String::as_str)
+    }
+
+    /// Natural-language statement of what the agent can and cannot do, derived
+    /// from the actual allowed-operation set (so `deny` combos read correctly).
+    pub fn describe_capabilities_nl(&self) -> String {
+        let has = |op: SqlOperation| self.allowed_ops.contains(&op);
+        let mut can: Vec<&str> = Vec::new();
+        if has(SqlOperation::Select) {
+            can.push("leer (SELECT)");
+        }
+        if has(SqlOperation::Insert) {
+            can.push("insertar filas (INSERT)");
+        }
+        if has(SqlOperation::Update) {
+            can.push("modificar filas (UPDATE)");
+        }
+        if has(SqlOperation::Delete) {
+            can.push("borrar filas (DELETE)");
+        }
+        if has(SqlOperation::AddColumn) {
+            can.push("agregar columnas a tablas existentes (ALTER TABLE ADD COLUMN)");
+        }
+        if has(SqlOperation::CreateTable) || has(SqlOperation::CreateFunction) {
+            can.push("crear tablas y funciones nuevas en el sandbox");
+        }
+
+        let mut cannot: Vec<&str> = Vec::new();
+        if !has(SqlOperation::Delete) {
+            cannot.push("borrar filas (DELETE)");
+        }
+        if !has(SqlOperation::AddColumn) {
+            cannot.push("agregar columnas");
+        }
+        if !has(SqlOperation::CreateTable) {
+            cannot.push("crear tablas nuevas");
+        }
+
+        let can_str = if can.is_empty() {
+            "nada".to_string()
+        } else {
+            can.join(", ")
+        };
+        let cannot_str = if cannot.is_empty() {
+            String::new()
+        } else {
+            format!(" NO podés: {}.", cannot.join(", "))
+        };
+        format!(
+            "Permisos del agente: podés {}.{} Restricciones permanentes: \
+             DELETE/UPDATE requieren WHERE; CREATE SCHEMA, DROP, TRUNCATE y todo \
+             ALTER que no sea ADD COLUMN están siempre bloqueados.",
+            can_str, cannot_str
+        )
     }
 
     /// Return a human-readable summary for LLM context injection.
@@ -452,5 +522,66 @@ mod tests {
         let mut schemas: Vec<&str> = perms.allowed_schemas_iter().collect();
         schemas.sort_unstable();
         assert_eq!(schemas, vec!["analytics", "public"]);
+    }
+
+    #[test]
+    fn test_read_write_delete_preset() {
+        let perms = SqlPermissions::from_config(Some(&serde_json::json!({
+            "preset": "read_write_delete"
+        })))
+        .unwrap();
+        assert!(perms.is_allowed(&SqlOperation::Select));
+        assert!(perms.is_allowed(&SqlOperation::Insert));
+        assert!(perms.is_allowed(&SqlOperation::Update));
+        assert!(perms.is_allowed(&SqlOperation::Delete));
+        assert!(perms.is_allowed(&SqlOperation::AddColumn));
+        assert!(!perms.is_allowed(&SqlOperation::CreateTable));
+        assert!(!perms.is_allowed(&SqlOperation::CreateFunction));
+    }
+
+    #[test]
+    fn test_full_preset_allows_add_column() {
+        let perms =
+            SqlPermissions::from_config(Some(&serde_json::json!({ "preset": "full" }))).unwrap();
+        assert!(perms.is_allowed(&SqlOperation::AddColumn));
+        assert!(perms.is_allowed(&SqlOperation::CreateTable));
+    }
+
+    #[test]
+    fn test_deny_add_column() {
+        let perms = SqlPermissions::from_config(Some(&serde_json::json!({
+            "preset": "read_write_delete",
+            "deny": ["add_column"]
+        })))
+        .unwrap();
+        assert!(perms.is_allowed(&SqlOperation::Delete));
+        assert!(!perms.is_allowed(&SqlOperation::AddColumn));
+    }
+
+    #[test]
+    fn test_capabilities_nl_read_write_delete() {
+        let perms = SqlPermissions::from_config(Some(&serde_json::json!({
+            "preset": "read_write_delete"
+        })))
+        .unwrap();
+        let nl = perms.describe_capabilities_nl();
+        assert!(
+            nl.contains("SELECT")
+                && nl.contains("INSERT")
+                && nl.contains("UPDATE")
+                && nl.contains("DELETE")
+        );
+        assert!(nl.to_lowercase().contains("agregar columnas"));
+        assert!(nl.to_lowercase().contains("no") && nl.to_lowercase().contains("crear tablas"));
+    }
+
+    #[test]
+    fn test_capabilities_nl_read_only_says_no_writes() {
+        let perms =
+            SqlPermissions::from_config(Some(&serde_json::json!({ "preset": "read_only" })))
+                .unwrap();
+        let nl = perms.describe_capabilities_nl();
+        assert!(nl.contains("SELECT"));
+        assert!(!nl.contains("INSERT"));
     }
 }

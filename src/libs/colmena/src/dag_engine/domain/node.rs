@@ -1,3 +1,4 @@
+use crate::dag_engine::domain::initializable_node::InitializableNode;
 use crate::dag_engine::domain::observer::ExecutionObserver;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -54,6 +55,16 @@ pub trait ExecutableNode: Send + Sync {
     /// Used by the engine when an outgoing edge specifies no source field.
     /// Return `None` if the node has no single primary output.
     fn default_output(&self) -> Option<&str> {
+        None
+    }
+
+    /// Optional: return a reference to self as [`InitializableNode`] so the
+    /// tool executor can call `initialize()` to enrich the tool description
+    /// with database schema / capability context before the first LLM turn.
+    ///
+    /// Default: `None` (node does not participate in pre-flight initialization).
+    /// Override in nodes that implement [`InitializableNode`] (currently `sql_query`).
+    fn as_initializable(&self) -> Option<&dyn InitializableNode> {
         None
     }
 }

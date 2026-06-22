@@ -8,8 +8,8 @@ The `sql_query` node executes PostgreSQL queries with granular permission contro
 
 | Feature | Description |
 |---|---|
-| Permission presets | `read_only`, `read_write`, `full` with optional `deny` list |
-| Static validator | Blocks dangerous operations (TRUNCATE, DROP, ALTER, DELETE without WHERE) |
+| Permission presets | `read_only`, `read_write`, `read_write_delete`, `full` with optional `deny` list |
+| Static validator | Blocks dangerous operations (TRUNCATE, DROP, destructive ALTER, DELETE without WHERE) |
 | LLM critic (optional) | A second LLM reviews queries for security risks before execution |
 | Schema introspection | Automatically injects table/function metadata into tool descriptions |
 | Sandbox schema | Isolated schema for agent-created functions and tables |
@@ -86,7 +86,7 @@ All string config fields support `${VAR_NAME}` environment variable resolution.
 
 | Field | Type | Required | Default | Description |
 |---|---|---|---|---|
-| `preset` | string | No | `"read_only"` | Permission preset: `read_only`, `read_write`, `full` |
+| `preset` | string | No | `"read_only"` | Permission preset: `read_only`, `read_write`, `read_write_delete`, `full` |
 | `deny` | array | No | `[]` | Operations to deny from the preset (e.g., `["delete"]`) |
 | `allowed_schemas` | array | Recommended | `[]` (all) | PostgreSQL schemas the agent can access |
 | `sandbox_schema` | string | No | `"sandbox"` | Schema for agent-created functions/tables |
@@ -101,15 +101,16 @@ All string config fields support `${VAR_NAME}` environment variable resolution.
 |---|---|
 | `read_only` | SELECT |
 | `read_write` | SELECT, INSERT, UPDATE |
-| `full` | SELECT, INSERT, UPDATE, DELETE, CREATE FUNCTION, CREATE TABLE |
+| `read_write_delete` | SELECT, INSERT, UPDATE, DELETE, ALTER TABLE ADD COLUMN |
+| `full` | SELECT, INSERT, UPDATE, DELETE, ALTER TABLE ADD COLUMN, CREATE FUNCTION, CREATE TABLE |
 
-**Always blocked (no preset enables these):** TRUNCATE, DROP, ALTER
+**Always blocked (no preset enables these):** TRUNCATE, DROP, CREATE SCHEMA, and any `ALTER` that is not exclusively `ADD COLUMN` (DROP COLUMN, ALTER COLUMN TYPE, RENAME).
 
 #### Deny List
 
 The `deny` array removes operations from the preset. Example: `{ "preset": "full", "deny": ["delete"] }` allows everything except DELETE.
 
-Valid deny values: `select`, `insert`, `update`, `delete`, `create_function`, `create_table`
+Valid deny values: `select`, `insert`, `update`, `delete`, `add_column`, `create_function`, `create_table`
 
 ### Runtime Limits Object
 
@@ -296,8 +297,8 @@ The `StaticRuleValidator` enforces these rules synchronously:
 
 | Rule | Behavior |
 |---|---|
-| Unknown operation | **Block** — only SELECT, INSERT, UPDATE, DELETE, CREATE FUNCTION, CREATE TABLE recognized |
-| TRUNCATE, DROP, ALTER | **Block** — always, regardless of preset |
+| Unknown operation | **Block** — only SELECT, INSERT, UPDATE, DELETE, ALTER TABLE ADD COLUMN, CREATE FUNCTION, CREATE TABLE recognized |
+| TRUNCATE, DROP, destructive ALTER | **Block** — always, regardless of preset. `ALTER TABLE … ADD COLUMN` is allowed for `read_write_delete`/`full`; any other ALTER op (DROP COLUMN, ALTER COLUMN TYPE, RENAME) is always blocked |
 | Operation not in preset | **Block** — e.g., INSERT on `read_only` |
 | Schema not in `allowed_schemas` | **Block** — except `information_schema` and `pg_catalog` (always allowed for introspection) |
 | DELETE/UPDATE without WHERE | **Block** — prevents mass data changes |
@@ -378,6 +379,15 @@ Available functions (sandbox):
 Permissions: SELECT, INSERT, UPDATE | Max rows: 50
 Use introspection queries to discover column details when needed.
 ```
+
+### Contexto de schema y capacidades que ve el agente
+
+En el init, el nodo introspecciona `allowed_schemas` (vía `load_table_schemas`) y antepone a la descripción de la tool:
+
+1. Un **bloque de capacidades en lenguaje natural** derivado del preset — qué puede y qué NO (borrar filas, agregar columnas, crear tablas), más las restricciones permanentes (DELETE/UPDATE requieren WHERE; CREATE SCHEMA/DROP/TRUNCATE/ALTER-destructivo siempre bloqueados).
+2. El **schema completo** por tabla: columnas + tipos + `NOT NULL`/`UNIQUE`, marca de PRIMARY KEY, y foreign keys (`→ schema.tabla.columna (FK)`).
+
+Si `allowed_schemas` tiene más de 40 tablas (o el render supera ~8000 caracteres), degrada a solo nombres de tablas + una nota para usar introspección. Así el agente entiende el modelo de datos sin gastar turnos introspeccionando ni intentar operaciones que su preset bloquea.
 
 ---
 

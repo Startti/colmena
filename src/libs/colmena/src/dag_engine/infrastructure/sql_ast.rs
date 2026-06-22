@@ -7,7 +7,8 @@
 
 use crate::dag_engine::domain::sql_permissions::SqlOperation;
 use sqlparser::ast::{
-    visit_relations, ObjectName, ObjectNamePart, Query, Select, SelectItem, SetExpr,
+    visit_relations, AlterTableOperation, ObjectName, ObjectNamePart, Query, Select, SelectItem,
+    SetExpr,
 };
 use sqlparser::dialect::PostgreSqlDialect;
 use sqlparser::parser::{Parser, ParserError};
@@ -270,9 +271,22 @@ pub fn classify(stmt: &Statement) -> Option<SqlOperation> {
         Statement::CreateFunction(_) => Some(SqlOperation::CreateFunction),
         Statement::Truncate { .. } => Some(SqlOperation::Truncate),
         Statement::Drop { .. } => Some(SqlOperation::Drop),
-        Statement::AlterTable { .. }
-        | Statement::AlterIndex { .. }
-        | Statement::AlterView { .. } => Some(SqlOperation::Alter),
+        Statement::AlterTable(alter) => {
+            // Allow ONLY when every operation is ADD COLUMN. Any destructive or
+            // mixed operation (DROP COLUMN, type change, RENAME, …) classifies as
+            // `Alter`, which the validator hard-blocks for all presets.
+            if !alter.operations.is_empty()
+                && alter
+                    .operations
+                    .iter()
+                    .all(|op| matches!(op, AlterTableOperation::AddColumn { .. }))
+            {
+                Some(SqlOperation::AddColumn)
+            } else {
+                Some(SqlOperation::Alter)
+            }
+        }
+        Statement::AlterIndex { .. } | Statement::AlterView { .. } => Some(SqlOperation::Alter),
         _ => None,
     }
 }
@@ -290,6 +304,19 @@ pub fn referenced_schemas(stmt: &Statement) -> Vec<String> {
     if let Statement::Comment { object_name, .. } = stmt {
         if object_name.0.len() >= 2 {
             if let Some(ident) = object_name.0[0].as_ident() {
+                let schema = ident.value.to_lowercase();
+                if !found.contains(&schema) {
+                    found.push(schema);
+                }
+            }
+        }
+    }
+
+    // `ALTER TABLE schema.table …` stores its target in `name`, which
+    // `visit_relations` also does not classify as a FROM/JOIN relation.
+    if let Statement::AlterTable(alter) = stmt {
+        if alter.name.0.len() >= 2 {
+            if let Some(ident) = alter.name.0[0].as_ident() {
                 let schema = ident.value.to_lowercase();
                 if !found.contains(&schema) {
                     found.push(schema);
@@ -466,7 +493,7 @@ mod tests {
         );
         assert_eq!(
             classify(&parse("ALTER TABLE s.t ADD COLUMN x INT").unwrap()[0]),
-            Some(SqlOperation::Alter)
+            Some(SqlOperation::AddColumn)
         );
     }
 
@@ -615,6 +642,30 @@ mod tests {
         // The old substring check matched literals like 'LIMIT' inside WHERE.
         let stmts = parse("SELECT * FROM s.t WHERE name = 'LIMIT'").unwrap();
         assert!(!query_has_limit(&stmts[0]));
+    }
+
+    #[test]
+    fn classify_add_column_only() {
+        let stmts = parse("ALTER TABLE finanzas.gastos ADD COLUMN metodo_pago TEXT").unwrap();
+        assert_eq!(classify(&stmts[0]), Some(SqlOperation::AddColumn));
+    }
+
+    #[test]
+    fn classify_alter_drop_column_is_blocked_alter() {
+        let stmts = parse("ALTER TABLE finanzas.gastos DROP COLUMN monto").unwrap();
+        assert_eq!(classify(&stmts[0]), Some(SqlOperation::Alter));
+    }
+
+    #[test]
+    fn classify_alter_mixed_ops_is_blocked_alter() {
+        let stmts = parse("ALTER TABLE finanzas.gastos ADD COLUMN a INT, DROP COLUMN b").unwrap();
+        assert_eq!(classify(&stmts[0]), Some(SqlOperation::Alter));
+    }
+
+    #[test]
+    fn referenced_schemas_includes_alter_target() {
+        let stmts = parse("ALTER TABLE finanzas.gastos ADD COLUMN x INT").unwrap();
+        assert!(referenced_schemas(&stmts[0]).contains(&"finanzas".to_string()));
     }
 
     #[test]

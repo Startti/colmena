@@ -47,6 +47,35 @@ pub struct TableInfo {
     pub description: Option<String>,
 }
 
+/// A column within a table, for LLM schema context.
+#[derive(Debug, Clone)]
+pub struct ColumnInfo {
+    pub name: String,
+    pub data_type: String,
+    pub not_null: bool,
+    pub is_pk: bool,
+    pub is_unique: bool,
+}
+
+/// A single-column foreign key (the common case for agent context).
+#[derive(Debug, Clone)]
+pub struct ForeignKey {
+    pub column: String,
+    pub ref_schema: String,
+    pub ref_table: String,
+    pub ref_column: String,
+}
+
+/// Full schema of a table: columns + keys, for LLM context injection.
+#[derive(Debug, Clone)]
+pub struct TableSchema {
+    pub schema_name: String,
+    pub table_name: String,
+    pub description: Option<String>,
+    pub columns: Vec<ColumnInfo>,
+    pub foreign_keys: Vec<ForeignKey>,
+}
+
 /// Port for managing the PostgreSQL connection pool and executing queries.
 #[async_trait::async_trait]
 pub trait SqlConnectionPort: Send + Sync {
@@ -62,6 +91,13 @@ pub trait SqlConnectionPort: Send + Sync {
     /// Load table metadata (names + comments) for the given schemas.
     async fn load_table_metadata(&self, schemas: &[String])
         -> Result<Vec<TableInfo>, SqlNodeError>;
+
+    /// Load full schema (columns + types + PK/UNIQUE/NOT NULL + FKs) for the
+    /// given schemas, for injecting into the LLM tool description.
+    async fn load_table_schemas(
+        &self,
+        schemas: &[String],
+    ) -> Result<Vec<TableSchema>, SqlNodeError>;
 
     /// Return the subset of `schemas` that do not yet exist in the database.
     ///

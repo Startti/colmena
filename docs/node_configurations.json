@@ -1149,7 +1149,7 @@
 
     "sql_query": {
       "name": "SQL Query",
-      "description": "Executes PostgreSQL queries with granular permission control and a hybrid validation pipeline (static rules + optional LLM critic). Designed primarily as an LLM tool: configure connection, permissions, and guardrails as fixed values in node_schema, exposing only the 'query' parameter to the LLM. Supports SELECT (incl. WITH/CTE), INSERT (single- and multi-row), UPDATE, DELETE (WHERE required), CREATE TABLE, CREATE FUNCTION (with mandatory COMMENT ON), and COMMENT ON, controlled via permission presets (read_only, read_write, full) with an optional deny list. Always blocked regardless of preset: DROP, ALTER, TRUNCATE, CREATE SCHEMA, CREATE INDEX, CREATE VIEW, GRANT, REVOKE — manage these via migrations. Queries are parsed with sqlparser's PostgreSQL dialect; multi-statement scripts are validated per-statement (so `SELECT 1; DROP TABLE x;` is rejected). Unparseable input returns a `Failed to parse SQL: …` error with no string-matching fallback. Features automatic schema introspection for LLM context injection, a sandbox schema for agent-created functions, runtime limits (statement_timeout, work_mem, max_rows applies to SELECT only), and multi-tenant Row-Level Security (RLS) via tenant_user_id, tenant_column, and auto_rls fields.",
+      "description": "Executes PostgreSQL queries with granular permission control and a hybrid validation pipeline (static rules + optional LLM critic). Designed primarily as an LLM tool: configure connection, permissions, and guardrails as fixed values in node_schema, exposing only the 'query' parameter to the LLM. Supports SELECT (incl. WITH/CTE), INSERT (single- and multi-row), UPDATE, DELETE (WHERE required), ALTER TABLE ADD COLUMN, CREATE TABLE, CREATE FUNCTION (with mandatory COMMENT ON), and COMMENT ON, controlled via permission presets (read_only, read_write, read_write_delete, full) with an optional deny list. Always blocked regardless of preset: DROP, TRUNCATE, CREATE SCHEMA, any ALTER other than ADD COLUMN (DROP COLUMN, ALTER COLUMN TYPE, RENAME), CREATE INDEX, CREATE VIEW, GRANT, REVOKE — manage these via migrations. Queries are parsed with sqlparser's PostgreSQL dialect; multi-statement scripts are validated per-statement (so `SELECT 1; DROP TABLE x;` is rejected). Unparseable input returns a `Failed to parse SQL: …` error with no string-matching fallback. Features automatic schema introspection for LLM context injection, a sandbox schema for agent-created functions, runtime limits (statement_timeout, work_mem, max_rows applies to SELECT only), and multi-tenant Row-Level Security (RLS) via tenant_user_id, tenant_column, and auto_rls fields.",
       "category": "integration",
       "config_fields": {
         "connection_url": {
@@ -1171,13 +1171,13 @@
           "properties": {
             "preset": {
               "type": "string",
-              "description": "Permission preset: 'read_only' (SELECT only), 'read_write' (SELECT/INSERT/UPDATE), 'full' (all including DELETE and CREATE FUNCTION).",
-              "valid_values": ["read_only", "read_write", "full"],
+              "description": "Permission preset: 'read_only' (SELECT only), 'read_write' (SELECT/INSERT/UPDATE), 'read_write_delete' (SELECT/INSERT/UPDATE/DELETE + ALTER TABLE ADD COLUMN), 'full' (all including DELETE, ALTER TABLE ADD COLUMN, CREATE FUNCTION, CREATE TABLE). Always blocked regardless of preset: DROP, TRUNCATE, CREATE SCHEMA, and any ALTER that is not exclusively ADD COLUMN.",
+              "valid_values": ["read_only", "read_write", "read_write_delete", "full"],
               "default": "read_only"
             },
             "deny": {
               "type": "array",
-              "description": "Operations to deny from the preset (e.g., ['delete'] with read_write preset).",
+              "description": "Operations to deny from the preset (e.g., ['delete'] with read_write preset). Valid values: 'select', 'insert', 'update', 'delete', 'add_column', 'create_function', 'create_table'.",
               "example": ["delete"]
             },
             "allowed_schemas": {
