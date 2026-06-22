@@ -8,5 +8,6 @@
 //! `crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::gsheets_tools`
 //! and delegate to the `SheetsClient` trait.
 
+pub mod application;
 pub mod domain;
 pub mod infrastructure;
