@@ -294,6 +294,7 @@ mod tests {
                     start_index: 1,
                     end_index: 6,
                 }],
+                tables: vec![],
             }],
         }
     }

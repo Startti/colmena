@@ -2552,12 +2552,16 @@ impl ExecutableNode for LlmNode {
                 gdocs_tool_create_from_docx,
                 gdocs_tool_create_from_markdown,
                 gdocs_tool_create_named_range,
+                gdocs_tool_delete_table_column,
+                gdocs_tool_delete_table_row,
                 gdocs_tool_delete_text,
                 gdocs_tool_export,
                 gdocs_tool_insert_after_text,
                 gdocs_tool_insert_before_text,
                 gdocs_tool_insert_between,
                 gdocs_tool_insert_image_after_text,
+                gdocs_tool_insert_table_column,
+                gdocs_tool_insert_table_row,
                 gdocs_tool_list_comments,
                 gdocs_tool_list_documents,
                 gdocs_tool_list_named_ranges,
@@ -2565,10 +2569,12 @@ impl ExecutableNode for LlmNode {
                 gdocs_tool_list_tabs,
                 gdocs_tool_read_as_markdown,
                 gdocs_tool_read_outline,
+                gdocs_tool_read_tables,
                 gdocs_tool_replace_named_range,
                 gdocs_tool_replace_section,
                 gdocs_tool_replace_text,
                 gdocs_tool_resolve_comment,
+                gdocs_tool_set_table_cell,
                 gdocs_tool_share,
                 gdocs_tool_style_text,
                 gdocs_tool_unshare,
@@ -2581,12 +2587,16 @@ impl ExecutableNode for LlmNode {
                 GDOCS_CREATE_FROM_MARKDOWN_TOOL,
                 GDOCS_CREATE_NAMED_RANGE_TOOL,
                 GDOCS_CREATE_TOOL,
+                GDOCS_DELETE_TABLE_COLUMN_TOOL,
+                GDOCS_DELETE_TABLE_ROW_TOOL,
                 GDOCS_DELETE_TEXT_TOOL,
                 GDOCS_EXPORT_TOOL,
                 GDOCS_INSERT_AFTER_TEXT_TOOL,
                 GDOCS_INSERT_BEFORE_TEXT_TOOL,
                 GDOCS_INSERT_BETWEEN_TOOL,
                 GDOCS_INSERT_IMAGE_AFTER_TEXT_TOOL,
+                GDOCS_INSERT_TABLE_COLUMN_TOOL,
+                GDOCS_INSERT_TABLE_ROW_TOOL,
                 GDOCS_LIST_COMMENTS_TOOL,
                 GDOCS_LIST_DOCUMENTS_TOOL,
                 GDOCS_LIST_NAMED_RANGES_TOOL,
@@ -2594,10 +2604,12 @@ impl ExecutableNode for LlmNode {
                 GDOCS_LIST_TABS_TOOL,
                 GDOCS_READ_AS_MARKDOWN_TOOL,
                 GDOCS_READ_OUTLINE_TOOL,
+                GDOCS_READ_TABLES_TOOL,
                 GDOCS_REPLACE_NAMED_RANGE_TOOL,
                 GDOCS_REPLACE_SECTION_TOOL,
                 GDOCS_REPLACE_TEXT_TOOL,
                 GDOCS_RESOLVE_COMMENT_TOOL,
+                GDOCS_SET_TABLE_CELL_TOOL,
                 GDOCS_SHARE_TOOL,
                 GDOCS_STYLE_TEXT_TOOL,
                 GDOCS_UNSHARE_TOOL,
@@ -2616,7 +2628,7 @@ impl ExecutableNode for LlmNode {
             // once (Bundle 2A/2B/4A added 6 tools everywhere EXCEPT here).
             // Count must equal build_all_gdocs_tools().len(). Follow-up to make
             // this structural (derive from a shared table): BACKLOG.
-            let all_gdocs: [&str; 29] = [
+            let all_gdocs: [&str; 35] = [
                 GDOCS_CREATE_TOOL,
                 GDOCS_CREATE_FROM_MARKDOWN_TOOL,
                 GDOCS_CREATE_FROM_DOCX_TOOL,
@@ -2647,6 +2659,13 @@ impl ExecutableNode for LlmNode {
                 GDOCS_ADD_COMMENT_TOOL,
                 GDOCS_LIST_COMMENTS_TOOL,
                 GDOCS_RESOLVE_COMMENT_TOOL,
+                // Subsystem G v1.1 (2026-06-21): table edits
+                GDOCS_READ_TABLES_TOOL,
+                GDOCS_SET_TABLE_CELL_TOOL,
+                GDOCS_INSERT_TABLE_ROW_TOOL,
+                GDOCS_DELETE_TABLE_ROW_TOOL,
+                GDOCS_INSERT_TABLE_COLUMN_TOOL,
+                GDOCS_DELETE_TABLE_COLUMN_TOOL,
             ];
 
             // Resolve `enabled_tools` → (wants, excludes). Supports `"*"`,
@@ -2656,7 +2675,7 @@ impl ExecutableNode for LlmNode {
             let (wants, excludes) =
                 resolve_synthetic_enabled_tools(enabled_tools_config, &all_gdocs);
 
-            let gdocs_entries: [(&str, fn() -> crate::llm::domain::ToolDefinition); 29] = [
+            let gdocs_entries: [(&str, fn() -> crate::llm::domain::ToolDefinition); 35] = [
                 (GDOCS_CREATE_TOOL, gdocs_tool_create),
                 (
                     GDOCS_CREATE_FROM_MARKDOWN_TOOL,
@@ -2699,6 +2718,19 @@ impl ExecutableNode for LlmNode {
                 (GDOCS_ADD_COMMENT_TOOL, gdocs_tool_add_comment),
                 (GDOCS_LIST_COMMENTS_TOOL, gdocs_tool_list_comments),
                 (GDOCS_RESOLVE_COMMENT_TOOL, gdocs_tool_resolve_comment),
+                // Subsystem G v1.1 (2026-06-21): table edits
+                (GDOCS_READ_TABLES_TOOL, gdocs_tool_read_tables),
+                (GDOCS_SET_TABLE_CELL_TOOL, gdocs_tool_set_table_cell),
+                (GDOCS_INSERT_TABLE_ROW_TOOL, gdocs_tool_insert_table_row),
+                (GDOCS_DELETE_TABLE_ROW_TOOL, gdocs_tool_delete_table_row),
+                (
+                    GDOCS_INSERT_TABLE_COLUMN_TOOL,
+                    gdocs_tool_insert_table_column,
+                ),
+                (
+                    GDOCS_DELETE_TABLE_COLUMN_TOOL,
+                    gdocs_tool_delete_table_column,
+                ),
             ];
 
             for (name, builder) in gdocs_entries {

@@ -210,6 +210,7 @@ mod tests {
             tabs: vec![TabSnapshot {
                 tab_id: None,
                 paragraphs,
+                tables: vec![],
             }],
         }
     }
@@ -302,10 +303,12 @@ mod tests {
                 TabSnapshot {
                     tab_id: Some(TabId("tab1".into())),
                     paragraphs: vec![p(1, "a")],
+                    tables: vec![],
                 },
                 TabSnapshot {
                     tab_id: Some(TabId("tab2".into())),
                     paragraphs: vec![p(1, "b")],
+                    tables: vec![],
                 },
             ],
         };
@@ -317,10 +320,12 @@ mod tests {
                 TabSnapshot {
                     tab_id: Some(TabId("tab1".into())),
                     paragraphs: vec![p(1, "a")],
+                    tables: vec![],
                 },
                 TabSnapshot {
                     tab_id: Some(TabId("tab2".into())),
                     paragraphs: vec![p(1, "B!")],
+                    tables: vec![],
                 },
             ],
         };

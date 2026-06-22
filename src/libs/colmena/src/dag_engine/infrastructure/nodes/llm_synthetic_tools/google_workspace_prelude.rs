@@ -125,6 +125,27 @@ const SHEET_WORKFLOW_PRELUDE: &str = "### Entender una hoja ANTES de leerla o co
      bindear en `gsheets_run_python` se rellenan automáticamente con el valor del \
      ancla).";
 
+/// Workflow guidance for editing TABLES inside a Google Doc. Appended to
+/// the prelude whenever any gsheets/gdocs tool is active. Scoped to gdocs
+/// table tools (`gdocs_read_tables` + the 5 table-edit tools); harmless
+/// for sheets-only agents.
+const TABLE_WORKFLOW_PRELUDE: &str = "### Editar TABLAS dentro de un Google Doc\n\
+     Antes de editar cualquier tabla de un Doc, leéla PRIMERO con \
+     `gdocs_read_tables`: es la única forma de obtener el `table_index` \
+     (0-based, orden dentro del tab) y las coordenadas `row`/`col` (0-based) \
+     que consumen los tools de edición.\n\
+     Para cambiar texto usá `gdocs_set_table_cell`: UNA celda por llamada, \
+     solo texto plano (sin markdown ni estilo).\n\
+     Celdas fusionadas (merged): solo la celda master (superior-izquierda) \
+     es editable; apuntar a una celda slave devuelve error. `row_span`/\
+     `col_span` > 1 en `gdocs_read_tables` señalan un merge.\n\
+     Insertar o borrar filas/columnas (`gdocs_insert_table_row`, \
+     `gdocs_delete_table_row`, `gdocs_insert_table_column`, \
+     `gdocs_delete_table_column`) también requiere leer `gdocs_read_tables` \
+     primero. La fila/columna nueva queda VACÍA — llenala después con \
+     `gdocs_set_table_cell`. No se puede borrar la última fila ni la última \
+     columna: la tabla debe conservar ≥1 de cada una.";
+
 pub fn build_google_workspace_prelude(sa_email: Option<&str>) -> String {
     let base = match sa_email {
         Some(email) => format!(
@@ -179,7 +200,7 @@ pub fn build_google_workspace_prelude(sa_email: Option<&str>) -> String {
              Editor."
             .to_string(),
     };
-    format!("{base}\n\n{SHEET_WORKFLOW_PRELUDE}")
+    format!("{base}\n\n{SHEET_WORKFLOW_PRELUDE}\n\n{TABLE_WORKFLOW_PRELUDE}")
 }
 
 /// True when the LLM's exposed-tools list contains any `gsheets_*` or
@@ -302,6 +323,39 @@ mod tests {
         assert!(out.contains("operador la dirección"));
         // Email-bearing path should not appear in the degraded version.
         assert!(!out.contains("@"));
+    }
+
+    /// The table-editing workflow block must be present in BOTH prelude
+    /// variants so agents with gdocs table tools always learn the
+    /// read-then-edit flow and merged-cell/last-row constraints.
+    #[test]
+    fn prelude_includes_table_workflow_in_both_variants() {
+        for out in [
+            build_google_workspace_prelude(Some("agents@startti.co")),
+            build_google_workspace_prelude(None),
+        ] {
+            let lower = out.to_lowercase();
+            // Read tables first to get coordinates.
+            assert!(
+                out.contains("gdocs_read_tables"),
+                "prelude must tell the LLM to read tables first"
+            );
+            // One cell per call via set_table_cell.
+            assert!(
+                out.contains("gdocs_set_table_cell"),
+                "prelude must name the cell-edit tool"
+            );
+            // Merged-cell master-only rule.
+            assert!(
+                lower.contains("master") && lower.contains("slave"),
+                "prelude must explain merged-cell master/slave editability"
+            );
+            // Cannot delete the last row/column.
+            assert!(
+                lower.contains("última fila") && lower.contains("última columna"),
+                "prelude must warn the last row/column cannot be deleted"
+            );
+        }
     }
 
     #[test]

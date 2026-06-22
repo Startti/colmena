@@ -411,3 +411,94 @@ gdocs_resolve_comment:
 
     Drive flips `resolved=true` on the parent comment. Re-listing with
     `include_resolved: false` no longer surfaces it.
+
+# ── Subsystem G v1.1 (2026-06-21): surgical table edits ──────────────────
+
+gdocs_read_tables:
+  summary: List every table in a Google Doc with a per-cell text preview
+  description: |
+    Lista todas las tablas de un Google Doc con un preview de texto por
+    celda. Devuelve por tabla: `table_index` (0-based, orden en el tab),
+    `rows`, `columns`, y las celdas con `row`/`col` (0-based),
+    `text_preview`, `row_span` y `col_span`.
+
+    Úsalo SIEMPRE antes de editar una tabla: es la única forma de obtener
+    el `table_index` y las coordenadas `row`/`col` que consumen los 5
+    tools de edición de tablas. `row_span`/`col_span` > 1 indican celdas
+    fusionadas (merged) — útil para no apuntar a una celda slave.
+
+    Funciona sobre docs compartidos (usa la Docs API). Opcional `tab_id`
+    para acotar a un tab. Devuelve error si el doc no existe o el tab no
+    existe.
+
+gdocs_set_table_cell:
+  summary: Replace the plain text of a single table cell
+  description: |
+    Reemplaza el TEXTO PLANO de una sola celda de tabla.
+
+    WORKFLOW: llamá `gdocs_read_tables` PRIMERO para obtener
+    `table_index` (0-based, orden dentro del tab) + `row` + `col` (todos
+    0-based). Luego direccioná esta tool con esos valores.
+
+    CONSTRAINTS:
+    - Una celda por llamada (no batch).
+    - Solo texto plano: no acepta markdown ni estilo (negrita, links,
+      etc.). El texto reemplaza por completo el contenido previo de la
+      celda.
+    - En celdas fusionadas (merged) solo la celda master (superior-
+      izquierda del bloque) es editable; apuntar a una celda slave
+      devuelve un error.
+    - Devuelve un error si la celda está fuera de rango o es una celda
+      slave de un merge.
+
+gdocs_insert_table_row:
+  summary: Insert a blank row into a table, above or below an existing row
+  description: |
+    Inserta una fila VACÍA en una tabla, relativa a una fila existente.
+
+    WORKFLOW: llamá `gdocs_read_tables` PRIMERO para obtener
+    `table_index` y el índice de la fila de referencia (`at_row`, 0-based).
+    `insert_below` (default true) controla el lado: true = la nueva fila
+    queda DEBAJO de `at_row`; false = ARRIBA. La fila nueva queda vacía —
+    llenala después celda por celda con `gdocs_set_table_cell`.
+
+    Devuelve un error si `at_row` está fuera de rango.
+
+gdocs_delete_table_row:
+  summary: Delete a row from a table by 0-based index
+  description: |
+    Borra la fila `row` (0-based) de una tabla.
+
+    WORKFLOW: llamá `gdocs_read_tables` PRIMERO para obtener
+    `table_index` y el índice de la fila a borrar (`row`, 0-based).
+
+    No se puede borrar la última fila restante: la tabla debe conservar
+    ≥1 fila. Devuelve un error si `row` está fuera de rango o si es la
+    única fila.
+
+gdocs_insert_table_column:
+  summary: Insert a column into a table, left or right of an existing column
+  description: |
+    Inserta una columna VACÍA en una tabla, relativa a una columna
+    existente.
+
+    WORKFLOW: llamá `gdocs_read_tables` PRIMERO para obtener
+    `table_index` y el índice de la columna de referencia (`at_col`,
+    0-based). `insert_right` (default true) controla el lado: true = la
+    nueva columna queda a la DERECHA de `at_col`; false = a la IZQUIERDA.
+    La columna nueva queda vacía — llenala después celda por celda con
+    `gdocs_set_table_cell`.
+
+    Devuelve un error si `at_col` está fuera de rango.
+
+gdocs_delete_table_column:
+  summary: Delete a column from a table by 0-based index
+  description: |
+    Borra la columna `col` (0-based) de una tabla.
+
+    WORKFLOW: llamá `gdocs_read_tables` PRIMERO para obtener
+    `table_index` y el índice de la columna a borrar (`col`, 0-based).
+
+    No se puede borrar la última columna restante: la tabla debe
+    conservar ≥1 columna. Devuelve un error si `col` está fuera de rango
+    o si es la única columna.

@@ -452,7 +452,7 @@ fn utf16_len(s: &str) -> u32 {
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn apply_and_finalize(
+pub(crate) async fn apply_and_finalize(
     ctx: &GuardContext<'_>,
     doc_id: &DocumentId,
     snap: &DocumentSnapshot,

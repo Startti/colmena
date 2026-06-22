@@ -452,6 +452,10 @@ pub struct DocumentSnapshot {
 pub struct TabSnapshot {
     pub tab_id: Option<TabId>,
     pub paragraphs: Vec<ParagraphSnapshot>,
+    /// Tables in this tab, in order. Additive (`#[serde(default)]`) so
+    /// every existing consumer ignores it without change.
+    #[serde(default)]
+    pub tables: Vec<TableSnapshot>,
 }
 
 /// One paragraph inside a [`TabSnapshot`], with the character offsets the
@@ -463,6 +467,42 @@ pub struct ParagraphSnapshot {
     pub text: String,
     pub start_index: u32,
     pub end_index: u32,
+}
+
+/// A table parsed from the document body, with its cells and the UTF-16
+/// indices the Docs API uses to address content. Populated by
+/// `parse_tables`; consumed by the `gdocs_*_table_*` use cases.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TableSnapshot {
+    /// 0-based order of appearance of this table within its tab.
+    pub table_index: u32,
+    /// Tab the table lives in. `None` for single-tab legacy docs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab_id: Option<TabId>,
+    /// `startIndex` of the `table` structural element — what the Docs API
+    /// wants as `tableStartLocation.index` for insert/deleteTableRow/Column.
+    pub start_index: u32,
+    pub rows: u32,
+    pub columns: u32,
+    /// Row-major grid of cells. A cell merged "away" by a neighbour's span
+    /// is absent; `row_span`/`col_span` on the master signal the merge.
+    pub cells: Vec<Vec<CellSnapshot>>,
+}
+
+/// A single table cell with its plain text and content range.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CellSnapshot {
+    pub row: u32,
+    pub col: u32,
+    /// Plain text of the cell's paragraphs (trailing `\n` trimmed).
+    pub text: String,
+    /// startIndex of the cell's first paragraph (insertion point).
+    pub content_start_index: u32,
+    /// endIndex of the cell's last paragraph.
+    pub content_end_index: u32,
+    /// >1 when this cell is the master of a merge; 1 otherwise.
+    pub row_span: u32,
+    pub col_span: u32,
 }
 
 /// Raw result of a `documents.batchUpdate` round-trip — kept verbatim so
@@ -571,5 +611,46 @@ mod tests {
         let j = serde_json::to_value(&er).unwrap();
         assert!(j.get("lossy_conversions").is_none());
         assert!(j.get("pending_human_changes_outside_scope").is_none());
+    }
+
+    #[test]
+    fn table_snapshot_round_trips_and_tab_default() {
+        // tables field defaults to empty when absent (backward compat).
+        let legacy = serde_json::json!({
+            "tab_id": null, "paragraphs": []
+        });
+        let tab: TabSnapshot = serde_json::from_value(legacy).unwrap();
+        assert!(tab.tables.is_empty());
+
+        let t = TableSnapshot {
+            table_index: 0,
+            tab_id: None,
+            start_index: 5,
+            rows: 1,
+            columns: 2,
+            cells: vec![vec![
+                CellSnapshot {
+                    row: 0,
+                    col: 0,
+                    text: "a".into(),
+                    content_start_index: 6,
+                    content_end_index: 8,
+                    row_span: 1,
+                    col_span: 1,
+                },
+                CellSnapshot {
+                    row: 0,
+                    col: 1,
+                    text: "b".into(),
+                    content_start_index: 8,
+                    content_end_index: 10,
+                    row_span: 1,
+                    col_span: 1,
+                },
+            ]],
+        };
+        let j = serde_json::to_value(&t).unwrap();
+        let back: TableSnapshot = serde_json::from_value(j).unwrap();
+        assert_eq!(t, back);
     }
 }

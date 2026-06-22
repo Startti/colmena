@@ -2836,3 +2836,58 @@ turno** vía el fallback vivo (snapshot miss → registry hit) → upload a Driv
 **Estado.** done — verificado live local.
 
 ---
+
+## 46. Surgical table-cell edits (Subsystem G v1.1) — 2026-06-21
+
+**Qué cambió.** 6 tools sintéticas nuevas para edición quirúrgica de tablas en
+Google Docs, que antes eran completamente invisibles para el agente:
+
+| Tool | Qué hace |
+|---|---|
+| `gdocs_read_tables` | **Read-only.** Lista las tablas de un tab con `table_index`, `rows`, `columns` y, por celda, `{row, col, text_preview, row_span, col_span}`. |
+| `gdocs_set_table_cell` | Reemplaza el texto plano de **1 celda** (`table_index`, `row`, `col`, `text`). |
+| `gdocs_insert_table_row` | Inserta una fila en `at_row` (`insert_below?`, default `true`). |
+| `gdocs_delete_table_row` | Borra la fila `row`. |
+| `gdocs_insert_table_column` | Inserta una columna en `at_col` (`insert_right?`, default `true`). |
+| `gdocs_delete_table_column` | Borra la columna `col`. |
+
+**El snapshot ahora modela tablas (`parse_tables`).** Previamente las tablas
+existían en el doc (Drive las convierte nativamente desde markdown en
+`create_from_markdown`) pero el parser de outline no las exponía, así que el
+agente no tenía forma de descubrirlas ni direccionarlas. `parse_tables` las
+hidrata en el snapshot con coordenadas 0-based y spans de merge.
+
+**Reglas del modelo.** Texto plano únicamente por celda (sin markdown ni
+estilo); **1 celda por llamada** a `set_table_cell`; snapshot fresco por
+llamada; direccionamiento **0-based** — `table_index` (orden dentro del tab) +
+`row`/`col`. `gdocs_read_tables` es el descubridor: el agente lo llama primero
+para obtener tablas y coordenadas. **Celdas merged:** `read_tables` reporta
+`row_span`/`col_span`; solo la celda master de un merge es editable — un `set`
+sobre una posición slave da error. **No se puede borrar** la última fila ni la
+última columna que queda en una tabla. **Columnas INCLUIDAS** (no diferidas):
+las 6 tools cubren fila y columna por igual.
+
+**Guard de co-edición NO-BLOQUEANTE para celdas.** Las tools de tabla usan
+`run_guard_non_blocking`: los cambios humanos detectados desde el cursor del
+agente afloran como `soft_warnings` y la edición procede igual — nunca
+bloquean (a diferencia del guard bloqueante de las ediciones content-addressed).
+
+**Docs API → docs compartidos.** Las 6 tools pegan a `documents.get` /
+`documents.batchUpdate` (scope `documents`), así que **funcionan sobre docs
+compartidos** (igual que `gdocs_insert_*`/`gdocs_replace_*`), a diferencia de
+las tools Drive-export que fallan con `appNotAuthorizedToFile` bajo `drive.file`.
+
+**Conteos de toolkit.** `gdocs` pasó de 29 → **35** tools; `gdocsread` de 9 →
+**10** (suma `gdocs_read_tables`, read-only).
+
+**Additive — sin impacto ADP.** No toca el API público, `EngineConfig` ni
+firmas de traits exportados. Las 6 tools se activan solo vía `enabled_tools`.
+
+**Referencias.**
+- Spec: [`docs/superpowers/specs/2026-06-21-gdocs-table-cell-edits-design.md`](superpowers/specs/2026-06-21-gdocs-table-cell-edits-design.md)
+- Plan: [`docs/superpowers/plans/2026-06-21-gdocs-table-cell-edits.md`](superpowers/plans/2026-06-21-gdocs-table-cell-edits.md)
+- E2E graph: [`tests/graphs/agents/gdocs_table_edits_e2e.json`](../tests/graphs/agents/gdocs_table_edits_e2e.json)
+
+**Estado.** done.
+
+---

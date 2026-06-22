@@ -52,7 +52,7 @@ CRDT-specific. Ver banner detallado al inicio del bloque CRDT.
 ### 🟡 Medium bets — desbloquean workflows reales
 | Item | Esfuerzo | Impacto | Sección |
 |---|---|---|---|
-| **Surgical table-cell edits** (`gdocs_set_table_cell`, `insert_table_row`) | ~2d | **Alto** — hoy el agente NO puede editar celdas de tabla | [Subsystem G v1.1](#subsystem-g-v11-google-docs) |
+| ✅ ~~**Surgical table-cell edits** (`gdocs_set_table_cell`, `insert_table_row`)~~ — SHIPPED 2026-06-21 (§46; gdocs 29→35; read_tables + set_table_cell + insert/delete row+column; columnas INCLUIDAS; texto plano v1) | ~2d | **Alto** — desbloquea edición de celdas de tabla | [§46](CHANGELOG_2026-06.md) |
 | **Cell formatting** Sheets (colors/borders/widths) | ~2d | Med-Alto — output pulido es pedido frecuente | [Subsystem E v1.1](#subsystem-e-v11-google-sheets) |
 | Markdown tables en insert/replace | ~4-5h | Med — hoy se rechazan duro | [Subsystem G v1.1](#subsystem-g-v11-google-docs) |
 | `append`/`upsert`/`delete_where` sheet modes | ~3-4d | Med — sin trigger concreto aún | [append / upsert / delete_where modes](#sheets-write-safety-v11--append--upsert--delete_where-modes) |
@@ -801,11 +801,11 @@ Items derivados de la implementación de Subsystem D (formulas v1, 2026-06-04 �
   ver §24 de CHANGELOG_2026-06.md.
 - [ ] **`mode: "suggest"`** — `writeControl.suggestionsEnabled` (parámetro
   aceptado pero no-op en v1; el agente recibe un warning si lo pasa).
-- [ ] **Surgical table-cell edits** (`gdocs_set_table_cell`,
+- [x] **Surgical table-cell edits** (`gdocs_set_table_cell`,
   `gdocs_insert_table_row`). Hoy las tablas existen en el doc (Drive
   las convierte nativamente desde markdown en `create_from_markdown`)
   pero el agente no puede editar celdas individuales sin un round-trip
-  manual.
+  manual. — **SHIPPED 2026-06-21** (gdocs 29→35; read_tables + set_table_cell + insert/delete row+column; columnas INCLUIDAS; texto plano v1).
 - [x] **`gdocs_insert_image_after_text`** — **SHIPPED COMPLETO** (paths i + ii/iii).
   - **Path (i) URL-only SHIPPED 2026-06-12** (CHANGELOG §32). El tool inserta
     una imagen inline tras un anchor; `image_url` debe ser una URL http(s) pública.
