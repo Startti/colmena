@@ -105,4 +105,14 @@ pub trait SheetsClient: Send + Sync {
         sheet: &str,
         updates: Vec<(String, CellValue)>,
     ) -> Result<SetRangeResponse, SheetsError>;
+
+    /// Apply N raw `spreadsheets.batchUpdate` requests in one round-trip.
+    /// Used for formatting (`repeatCell` / `updateBorders` /
+    /// `updateDimensionProperties`). Distinct from `batch_update_cells`,
+    /// which is the values-only `values.batchUpdate`.
+    async fn batch_update(
+        &self,
+        id: &SpreadsheetId,
+        requests: Vec<serde_json::Value>,
+    ) -> Result<(), SheetsError>;
 }

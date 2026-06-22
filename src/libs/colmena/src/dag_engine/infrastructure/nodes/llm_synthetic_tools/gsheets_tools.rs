@@ -1001,6 +1001,14 @@ mod tests {
         ) -> Result<SetRangeResponse, SheetsError> {
             Err(SheetsError::Internal("not used".into()))
         }
+
+        async fn batch_update(
+            &self,
+            _id: &SpreadsheetId,
+            _requests: Vec<serde_json::Value>,
+        ) -> Result<(), crate::gsheets::domain::SheetsError> {
+            Ok(())
+        }
     }
 
     #[tokio::test]
@@ -1192,6 +1200,14 @@ mod tests {
             _u: Vec<(String, CellValue)>,
         ) -> Result<SetRangeResponse, SheetsError> {
             Err(SheetsError::Internal("not used".into()))
+        }
+
+        async fn batch_update(
+            &self,
+            _id: &SpreadsheetId,
+            _requests: Vec<serde_json::Value>,
+        ) -> Result<(), crate::gsheets::domain::SheetsError> {
+            Ok(())
         }
     }
 
