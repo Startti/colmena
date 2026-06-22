@@ -826,4 +826,56 @@ mod setup_sql_tests {
         );
         pool.close().await;
     }
+
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL — run with `cargo test -- --ignored`"]
+    async fn empty_or_absent_setup_sql_is_a_noop() {
+        if std::env::var("TEST_DATABASE_URL").is_err() {
+            eprintln!("skip: TEST_DATABASE_URL not set");
+            return;
+        }
+        let schema = unique("colmena_empty_setup");
+
+        // Whitespace-only setup_sql → trimmed empty → must be skipped; init succeeds.
+        let whitespace_cfg = json!({
+            "connection_url": "${TEST_DATABASE_URL}",
+            "permissions": { "preset": "read_only", "allowed_schemas": [schema] },
+            "setup_sql": "   \n  \t "
+        });
+        fresh_node()
+            .initialize(&whitespace_cfg)
+            .await
+            .expect("init with whitespace-only setup_sql must succeed (no-op)");
+
+        // Absent setup_sql → must also be a no-op; init succeeds.
+        let absent_cfg = json!({
+            "connection_url": "${TEST_DATABASE_URL}",
+            "permissions": { "preset": "read_only", "allowed_schemas": [schema] }
+        });
+        fresh_node()
+            .initialize(&absent_cfg)
+            .await
+            .expect("init without setup_sql must succeed (no-op)");
+
+        // Proof of no-op: the schema is auto-created (create_schemas_if_missing) but
+        // contains ZERO tables, because no setup_sql DDL ran.
+        let pool = raw_pool().await;
+        let table_count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM information_schema.tables WHERE table_schema = $1",
+        )
+        .bind(&schema)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            table_count, 0,
+            "empty/absent setup_sql must not create any tables"
+        );
+
+        sqlx::query(&format!("DROP SCHEMA IF EXISTS {} CASCADE", schema))
+            .execute(&pool)
+            .await
+            .ok();
+        pool.close().await;
+    }
 }
