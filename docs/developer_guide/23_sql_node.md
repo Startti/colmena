@@ -8,8 +8,8 @@ The `sql_query` node executes PostgreSQL queries with granular permission contro
 
 | Feature | Description |
 |---|---|
-| Permission presets | `read_only`, `read_write`, `full` with optional `deny` list |
-| Static validator | Blocks dangerous operations (TRUNCATE, DROP, ALTER, DELETE without WHERE) |
+| Permission presets | `read_only`, `read_write`, `read_write_delete`, `full` with optional `deny` list |
+| Static validator | Blocks dangerous operations (TRUNCATE, DROP, destructive ALTER, DELETE without WHERE) |
 | LLM critic (optional) | A second LLM reviews queries for security risks before execution |
 | Schema introspection | Automatically injects table/function metadata into tool descriptions |
 | Sandbox schema | Isolated schema for agent-created functions and tables |
@@ -86,7 +86,7 @@ All string config fields support `${VAR_NAME}` environment variable resolution.
 
 | Field | Type | Required | Default | Description |
 |---|---|---|---|---|
-| `preset` | string | No | `"read_only"` | Permission preset: `read_only`, `read_write`, `full` |
+| `preset` | string | No | `"read_only"` | Permission preset: `read_only`, `read_write`, `read_write_delete`, `full` |
 | `deny` | array | No | `[]` | Operations to deny from the preset (e.g., `["delete"]`) |
 | `allowed_schemas` | array | Recommended | `[]` (all) | PostgreSQL schemas the agent can access |
 | `sandbox_schema` | string | No | `"sandbox"` | Schema for agent-created functions/tables |
@@ -297,8 +297,8 @@ The `StaticRuleValidator` enforces these rules synchronously:
 
 | Rule | Behavior |
 |---|---|
-| Unknown operation | **Block** — only SELECT, INSERT, UPDATE, DELETE, CREATE FUNCTION, CREATE TABLE recognized |
-| TRUNCATE, DROP, ALTER | **Block** — always, regardless of preset |
+| Unknown operation | **Block** — only SELECT, INSERT, UPDATE, DELETE, ALTER TABLE ADD COLUMN, CREATE FUNCTION, CREATE TABLE recognized |
+| TRUNCATE, DROP, destructive ALTER | **Block** — always, regardless of preset. `ALTER TABLE … ADD COLUMN` is allowed for `read_write_delete`/`full`; any other ALTER op (DROP COLUMN, ALTER COLUMN TYPE, RENAME) is always blocked |
 | Operation not in preset | **Block** — e.g., INSERT on `read_only` |
 | Schema not in `allowed_schemas` | **Block** — except `information_schema` and `pg_catalog` (always allowed for introspection) |
 | DELETE/UPDATE without WHERE | **Block** — prevents mass data changes |
