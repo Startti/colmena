@@ -363,6 +363,55 @@ mod tests {
         }
     }
 
+    /// Verifies the `gsheets-presentable-output` skill compiles into the
+    /// binary, parses its frontmatter, and exposes the five expected
+    /// references (recipe, palettes, number_formats, multi_op_template,
+    /// layout). Catches regressions where a filename/frontmatter name
+    /// mismatch or a dropped file would break the skill at runtime.
+    #[tokio::test]
+    async fn gsheets_presentable_output_is_loadable() {
+        let repo =
+            BuiltinSkillRepository::new(&["gsheets-presentable-output".to_string()]).unwrap();
+        let skill = repo.load_skill("gsheets-presentable-output").await.unwrap();
+        assert_eq!(skill.name, "gsheets-presentable-output");
+        assert!(
+            skill.body.contains("Quick rules"),
+            "body should contain the quick-rules section"
+        );
+        assert_eq!(
+            skill.references.len(),
+            5,
+            "expected 5 references, got {}",
+            skill.references.len()
+        );
+        let names: Vec<String> = skill.references.iter().map(|r| r.name.clone()).collect();
+        for expected in &[
+            "recipe",
+            "palettes",
+            "number_formats",
+            "multi_op_template",
+            "layout",
+        ] {
+            assert!(
+                names.iter().any(|n| n == expected),
+                "missing reference '{}', got {:?}",
+                expected,
+                names
+            );
+        }
+        for r in &skill.references {
+            let reference = repo
+                .load_reference("gsheets-presentable-output", &r.name)
+                .await
+                .unwrap();
+            assert!(
+                !reference.body.trim().is_empty(),
+                "reference {} body is empty",
+                r.name
+            );
+        }
+    }
+
     /// Verifies the `gdocs-surgical-edits` skill (shipped 2026-06-10
     /// alongside the apply_edits ConfirmManyMatches guard) compiles
     /// into the binary via `include_dir!`, parses its frontmatter, and

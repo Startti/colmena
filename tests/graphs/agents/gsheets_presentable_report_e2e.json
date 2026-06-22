@@ -1,0 +1,10 @@
+{
+  "_comment": "E2E (manual, live): OPEN prompt — agent builds a sales report and should produce presentable formatting BY DEFAULT (currency, borders, totals row) without being told how, thanks to the always-on nudge + auto-enrolled gsheets-presentable-output skill. Needs GEMINI_API_KEY + DATABASE_URL + OAuth creds in-memory + --agent-session-id.",
+  "nodes": {
+    "trigger": { "type": "trigger_webhook", "config": { "path": "/gsheets-presentable", "method": "POST",
+      "test_payload": { "prompt": "Armá una hoja de cálculo de Google con un reporte de ventas trimestrales por región y pasámela lista para mostrar. Datos (USD): Norte Q1 125000 Q2 138000 Q3 142500 Q4 165000; Sur Q1 98000 Q2 102000 Q3 110000 Q4 121000; Este Q1 156000 Q2 149000 Q3 168000 Q4 180000; Oeste Q1 87000 Q2 95000 Q3 99000 Q4 108000. Incluí total por región y total general." } } },
+    "agent": { "type": "llm_call", "config": { "provider": "google", "api_key": "${GEMINI_API_KEY}", "model": "gemini-2.5-flash", "stream": false, "max_iterations": 18, "connection_url": "${DATABASE_URL}", "system_message": "Sos un analista que arma reportes en Google Sheets. Escribí valores/fórmulas y entregá la hoja lista para mostrar. Reportá la URL.", "enabled_tools": ["gsheets"] } },
+    "log": { "type": "log" }
+  },
+  "edges": [ { "from": "trigger", "to": "agent" }, { "from": "agent", "to": "log" } ]
+}

@@ -491,6 +491,46 @@ impl LlmNode {
         false
     }
 
+    /// True when the agent's resolved tool catalog will contain
+    /// `gsheets_format_range` — used to auto-enroll the
+    /// `gsheets-presentable-output` skill. Honors `!gsheets_format_range`
+    /// exclusions (so an agent that opts the tool out does NOT get the skill).
+    ///
+    /// Note: this is a stronger exclusion semantics than
+    /// `agent_has_gdocs_edit_tools`. An explicit `!gsheets_format_range`
+    /// suppresses enrollment even when the `gsheets` alias is otherwise
+    /// present, because the format tool is precisely what the skill teaches —
+    /// without it in the catalog the skill is noise.
+    pub(super) fn agent_has_gsheets_format_tool(config: &Value, inputs: &NodeInputs) -> bool {
+        const FORMAT_TOOL: &str = "gsheets_format_range";
+        let enabled = inputs
+            .get("enabled_tools")
+            .or_else(|| config.get("enabled_tools"));
+        let raw_names: Vec<&str> = match enabled {
+            Some(Value::String(s)) => vec![s.as_str()],
+            Some(Value::Array(arr)) => arr.iter().filter_map(|v| v.as_str()).collect(),
+            _ => Vec::new(),
+        };
+        // Explicit exclusion wins over any alias/wildcard.
+        if raw_names.contains(&"!gsheets_format_range") {
+            return false;
+        }
+        for n in &raw_names {
+            if n.starts_with('!') {
+                continue;
+            }
+            if *n == "*" || *n == "gsheets" || *n == FORMAT_TOOL {
+                return true;
+            }
+        }
+        if let Some(Value::Object(tc)) = config.get("tool_configurations") {
+            if tc.keys().any(|k| k == FORMAT_TOOL) {
+                return true;
+            }
+        }
+        false
+    }
+
     /// Parse `COLMENA_SKILLS_ALLOWED_DIRS` env var into a list of PathBufs.
     /// Separator: `:` on Unix, `;` on Windows. Missing env var → empty list.
     fn parse_allowed_dirs_env() -> Vec<PathBuf> {
@@ -615,6 +655,21 @@ impl LlmNode {
             skills_config
                 .builtin
                 .push("gdocs-surgical-edits".to_string());
+        }
+
+        // Auto-enroll the `gsheets-presentable-output` builtin skill whenever
+        // the agent can call `gsheets_format_range`. Pairs with the always-on
+        // nudge in the tool description: the nudge shifts the default, the
+        // skill teaches the full presentable-report recipe on demand.
+        if Self::agent_has_gsheets_format_tool(config, inputs)
+            && !skills_config
+                .builtin
+                .iter()
+                .any(|n| n == "gsheets-presentable-output")
+        {
+            skills_config
+                .builtin
+                .push("gsheets-presentable-output".to_string());
         }
 
         // If there's nothing to load (no builtins, no paths), short-circuit.
@@ -5617,6 +5672,75 @@ mod agent_has_gdocs_edit_tools_tests {
         let mut inputs: NodeInputs = HashMap::new();
         inputs.insert("enabled_tools".to_string(), json!(["gdocs_apply_edits"]));
         assert!(LlmNode::agent_has_gdocs_edit_tools(&cfg, &inputs));
+    }
+
+    // ---- gsheets-presentable-output enrollment gate ----
+
+    #[tokio::test]
+    async fn gsheets_alias_triggers_format_skill_enrollment() {
+        let cfg = json!({ "enabled_tools": ["gsheets"] });
+        assert!(LlmNode::agent_has_gsheets_format_tool(
+            &cfg,
+            &empty_inputs()
+        ));
+    }
+
+    #[tokio::test]
+    async fn explicit_format_tool_triggers_enrollment() {
+        let cfg = json!({ "enabled_tools": ["gsheets_format_range"] });
+        assert!(LlmNode::agent_has_gsheets_format_tool(
+            &cfg,
+            &empty_inputs()
+        ));
+    }
+
+    #[tokio::test]
+    async fn wildcard_triggers_format_skill_enrollment() {
+        assert!(LlmNode::agent_has_gsheets_format_tool(
+            &json!({ "enabled_tools": "*" }),
+            &empty_inputs()
+        ));
+    }
+
+    #[tokio::test]
+    async fn gsheets_read_only_does_not_trigger_format_skill() {
+        let cfg = json!({ "enabled_tools": ["gsheets_read", "gsheets_run_python"] });
+        assert!(!LlmNode::agent_has_gsheets_format_tool(
+            &cfg,
+            &empty_inputs()
+        ));
+    }
+
+    #[tokio::test]
+    async fn excluded_format_tool_does_not_trigger() {
+        let cfg = json!({ "enabled_tools": ["gsheets", "!gsheets_format_range"] });
+        assert!(!LlmNode::agent_has_gsheets_format_tool(
+            &cfg,
+            &empty_inputs()
+        ));
+    }
+
+    #[tokio::test]
+    async fn tool_configurations_format_entry_triggers_enrollment() {
+        let cfg = json!({ "tool_configurations": { "gsheets_format_range": {} } });
+        assert!(LlmNode::agent_has_gsheets_format_tool(
+            &cfg,
+            &empty_inputs()
+        ));
+    }
+
+    #[tokio::test]
+    async fn inputs_exclusion_beats_config_for_format_skill() {
+        // `enabled_tools` from inputs takes precedence over config, so an
+        // inputs-level `!gsheets_format_range` suppresses enrollment even when
+        // config would otherwise enable the format tool.
+        let cfg = json!({ "enabled_tools": ["gsheets_format_range"] });
+        let mut inputs: NodeInputs = HashMap::new();
+        inputs.insert(
+            "enabled_tools".to_string(),
+            json!(["!gsheets_format_range"]),
+        );
+        assert!(!LlmNode::agent_has_gsheets_format_tool(&cfg, &inputs));
     }
 
     /// End-to-end of the auto-enrollment path: a config that only opts

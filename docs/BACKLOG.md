@@ -682,7 +682,8 @@ Items derivados de la implementación de Subsystem D (formulas v1, 2026-06-04 �
 - [x] **Cell formatting** — colors, borders, column widths via
   `batchUpdate` + `repeatCell`/`updateBorders`. — **SHIPPED 2026-06-22**
   (§47; `gsheets_format_range`; text/background/borders/alignment/number/wrap/column-width/row-height; gsheets 10→11; non-destructive).
-- [ ] **Formato rico por default + mini-skill de "presentable output".**
+- [x] **Formato rico por default + mini-skill de "presentable output".** — **SHIPPED 2026-06-22**
+  (§48; nudge always-on en `gsheets.yaml` (b) + skill built-in `gsheets-presentable-output` con 5 references auto-enrolada vía gate `agent_has_gsheets_format_tool` cuando `gsheets_format_range` está en el catálogo (a); sin cambios al código del tool; E2E graph `gsheets_presentable_report_e2e.json`).
   **Origen:** observación en el E2E del 2026-06-22 — el tool `gsheets_format_range`
   está completo (verificado live: moneda, bordes, bg, bold, anchos), pero
   `gemini-2.5-flash` lo SUBUTILIZA con prompts abiertos ("hacelo profesional")

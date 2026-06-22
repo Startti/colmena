@@ -2965,3 +2965,48 @@ firmas de traits exportados. El tool se activa vía `enabled_tools`.
 **Estado.** done.
 
 ---
+
+## 48. Formato presentable por default — nudge + skill gsheets-presentable-output (Subsystem E v1.1) — 2026-06-22
+
+**El problema — gap de guía, no del tool.** `gsheets_format_range` (§47) cubre
+todos los atributos de presentación, pero con prompts abiertos gemini-2.5-flash
+**subutiliza** el tool: aplica a lo sumo alineación y deja la hoja sin moneda,
+bordes ni fila de totales destacada. El tool está completo; lo que faltaba era
+empujar el *default* del modelo hacia una salida presentable. Dos prongs, cero
+cambios al código del tool.
+
+**Prong 1 — nudge always-on en la `description`.** La descripción de
+`gsheets_format_range` (en `src/libs/colmena/text/tools/gsheets.yaml`) lleva un
+nudge permanente que instruye al modelo a entregar hojas **listas para mostrar**
+por default (formato de moneda, bordes, header y fila de totales con énfasis),
+acompañado de un ejemplo compacto de `ops`. Como el tool está siempre en el
+catálogo cuando el agente usa `gsheets`, el nudge mueve el default **sin depender
+de la discrecionalidad del modelo** ni de instrucciones por prompt.
+
+**Prong 2 — skill built-in `gsheets-presentable-output`.** Nueva skill compilada
+vía `include_dir` en `src/libs/colmena/skills/gsheets-presentable-output/`
+(SKILL.md + **5 references**: `recipe`, `palettes`, `number_formats`,
+`multi_op_template`, `layout`). Se **auto-enrola** en el catálogo de carga bajo
+demanda del agente cada vez que `gsheets_format_range` está en su catálogo, vía
+el nuevo gate `agent_has_gsheets_format_tool` en `llm.rs` — espeja el patrón de
+`gdocs-surgical-edits` y **honra la exclusión `!gsheets_format_range`**. El
+modelo hace `load_skill("gsheets-presentable-output")` para la receta completa
+(paletas, number formats, un template multi-op completo y reglas de layout).
+
+**Sin cambios al código de `gsheets_format_range`.** El builder
+`format.rs`, el dispatcher y el método de trait `SheetsClient::batch_update`
+(§47) quedan intactos. Este cambio es puramente de **guía al modelo**: YAML,
+markdown de skill, un helper + bloque de enroll + tests en `llm.rs`.
+
+**Additive — sin migración, sin cambio de API pública → ADP no afectado.** No
+toca `EngineConfig`, `ColmenaEngine` ni firmas de traits exportados.
+
+**Referencias.**
+- Spec: [`docs/superpowers/specs/2026-06-22-gsheets-presentable-output-skill-design.md`](superpowers/specs/2026-06-22-gsheets-presentable-output-skill-design.md)
+- Plan: [`docs/superpowers/plans/2026-06-22-gsheets-presentable-output-skill.md`](superpowers/plans/2026-06-22-gsheets-presentable-output-skill.md)
+- E2E graph: [`tests/graphs/agents/gsheets_presentable_report_e2e.json`](../tests/graphs/agents/gsheets_presentable_report_e2e.json)
+- Índice de skills: [`docs/developer_guide/42_builtin_skills_index.md`](42_builtin_skills_index.md)
+
+**Estado.** done.
+
+---
