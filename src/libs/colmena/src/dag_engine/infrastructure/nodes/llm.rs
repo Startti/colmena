@@ -2614,6 +2614,7 @@ impl ExecutableNode for LlmNode {
                 gdocs_tool_delete_table_row,
                 gdocs_tool_delete_text,
                 gdocs_tool_export,
+                gdocs_tool_format_table,
                 gdocs_tool_insert_after_text,
                 gdocs_tool_insert_before_text,
                 gdocs_tool_insert_between,
@@ -2649,6 +2650,7 @@ impl ExecutableNode for LlmNode {
                 GDOCS_DELETE_TABLE_ROW_TOOL,
                 GDOCS_DELETE_TEXT_TOOL,
                 GDOCS_EXPORT_TOOL,
+                GDOCS_FORMAT_TABLE_TOOL,
                 GDOCS_INSERT_AFTER_TEXT_TOOL,
                 GDOCS_INSERT_BEFORE_TEXT_TOOL,
                 GDOCS_INSERT_BETWEEN_TOOL,
@@ -2686,7 +2688,7 @@ impl ExecutableNode for LlmNode {
             // once (Bundle 2A/2B/4A added 6 tools everywhere EXCEPT here).
             // Count must equal build_all_gdocs_tools().len(). Follow-up to make
             // this structural (derive from a shared table): BACKLOG.
-            let all_gdocs: [&str; 35] = [
+            let all_gdocs: [&str; 36] = [
                 GDOCS_CREATE_TOOL,
                 GDOCS_CREATE_FROM_MARKDOWN_TOOL,
                 GDOCS_CREATE_FROM_DOCX_TOOL,
@@ -2724,6 +2726,8 @@ impl ExecutableNode for LlmNode {
                 GDOCS_DELETE_TABLE_ROW_TOOL,
                 GDOCS_INSERT_TABLE_COLUMN_TOOL,
                 GDOCS_DELETE_TABLE_COLUMN_TOOL,
+                // Subsystem G v1.1 (2026-06-22): table-cell formatting
+                GDOCS_FORMAT_TABLE_TOOL,
             ];
 
             // Resolve `enabled_tools` → (wants, excludes). Supports `"*"`,
@@ -2733,7 +2737,7 @@ impl ExecutableNode for LlmNode {
             let (wants, excludes) =
                 resolve_synthetic_enabled_tools(enabled_tools_config, &all_gdocs);
 
-            let gdocs_entries: [(&str, fn() -> crate::llm::domain::ToolDefinition); 35] = [
+            let gdocs_entries: [(&str, fn() -> crate::llm::domain::ToolDefinition); 36] = [
                 (GDOCS_CREATE_TOOL, gdocs_tool_create),
                 (
                     GDOCS_CREATE_FROM_MARKDOWN_TOOL,
@@ -2789,6 +2793,8 @@ impl ExecutableNode for LlmNode {
                     GDOCS_DELETE_TABLE_COLUMN_TOOL,
                     gdocs_tool_delete_table_column,
                 ),
+                // Subsystem G v1.1 (2026-06-22): table-cell formatting
+                (GDOCS_FORMAT_TABLE_TOOL, gdocs_tool_format_table),
             ];
 
             for (name, builder) in gdocs_entries {

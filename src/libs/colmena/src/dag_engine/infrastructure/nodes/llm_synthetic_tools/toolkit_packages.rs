@@ -39,7 +39,7 @@ pub static TOOLKIT_PACKAGES: &[ToolkitPackage] = &[
     },
     ToolkitPackage {
         alias: "gdocs",
-        description: "Read, write, edit, share, discover, and comment on Google Docs (35 tools)",
+        description: "Read, write, edit, share, discover, and comment on Google Docs (36 tools)",
         tools: &[
             "gdocs_create",
             "gdocs_create_from_markdown",
@@ -80,6 +80,8 @@ pub static TOOLKIT_PACKAGES: &[ToolkitPackage] = &[
             "gdocs_delete_table_row",
             "gdocs_insert_table_column",
             "gdocs_delete_table_column",
+            // Subsystem G v1.1 (2026-06-22): table-cell formatting (write).
+            "gdocs_format_table",
         ],
     },
     ToolkitPackage {
@@ -167,7 +169,7 @@ mod tests {
     #[test]
     fn gdocs_package_has_all_tools() {
         let pkg = find_package("gdocs").expect("gdocs package must exist");
-        assert_eq!(pkg.tools.len(), 35, "gdocs package must list 35 tools");
+        assert_eq!(pkg.tools.len(), 36, "gdocs package must list 36 tools");
         for required in &[
             "gdocs_create",
             "gdocs_create_from_markdown",
@@ -204,6 +206,7 @@ mod tests {
             "gdocs_delete_table_row",
             "gdocs_insert_table_column",
             "gdocs_delete_table_column",
+            "gdocs_format_table",
         ] {
             assert!(
                 pkg.tools.contains(required),

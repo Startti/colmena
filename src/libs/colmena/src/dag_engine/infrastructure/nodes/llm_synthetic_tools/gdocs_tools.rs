@@ -2504,7 +2504,7 @@ mod tests {
     }
 
     #[test]
-    fn build_all_returns_35_tools() {
+    fn build_all_returns_36_tools() {
         let tools = build_all_gdocs_tools();
         // 22 v1 + 1 Bundle 2A (list_documents) + 2 Bundle 2B
         // (list_permissions, unshare) + 3 Bundle 4A
@@ -2513,7 +2513,9 @@ mod tests {
         // + 6 Subsystem G v1.1 (2026-06-21) table edits
         // (read_tables, set_table_cell, insert_table_row,
         // delete_table_row, insert_table_column, delete_table_column) = 35.
-        assert_eq!(tools.len(), 35);
+        // + 1 Subsystem G v1.1 (2026-06-22) table-cell formatting
+        // (gdocs_format_table) = 36.
+        assert_eq!(tools.len(), 36);
     }
 
     #[test]
