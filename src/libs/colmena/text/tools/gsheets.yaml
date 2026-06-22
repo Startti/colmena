@@ -258,3 +258,7 @@ gsheets_unshare:
     DO NOT confuse permission_id with email — Drive can have multiple
     grants for the same email (different roles via different grants); each
     has its own permission_id.
+
+gsheets_format_range:
+  summary: Apply cell formatting to one or more ranges
+  description: Apply cell formatting (text, background, borders, alignment, number format, column width) to ranges via a single batchUpdate.

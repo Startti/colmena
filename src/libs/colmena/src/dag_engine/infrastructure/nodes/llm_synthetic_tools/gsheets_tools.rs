@@ -18,6 +18,7 @@
 //! UX aliases (per D-T16 lessons): `address` ↔ `addr`, `start` ↔ `start_addr`,
 //! `values` ↔ `values_2d`, `name` ↔ `sheet`. Single-A1 ranges auto-expanded.
 
+use crate::gsheets::application::format::{a1_to_grid_range, build_format_requests};
 use crate::gsheets::domain::{
     CellValue, ReadOptions, SheetsClient, SheetsError, SpreadsheetId, ValueRenderOption,
 };
@@ -43,6 +44,7 @@ pub const TOOL_DELETE_SHEET: &str = "gsheets_delete_sheet";
 pub const TOOL_READ: &str = "gsheets_read";
 pub const TOOL_SET_CELL: &str = "gsheets_set_cell";
 pub const TOOL_SET_RANGE: &str = "gsheets_set_range";
+pub const TOOL_FORMAT_RANGE: &str = "gsheets_format_range";
 
 // ── Args structs ──────────────────────────────────────────────────────
 
@@ -133,6 +135,21 @@ pub struct SetRangeArgs {
     pub start_addr: String,
     #[serde(alias = "values")]
     pub values_2d: Vec<Vec<serde_json::Value>>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct FormatRangeArgs {
+    pub spreadsheet_id: String,
+    pub ops: Vec<FormatOp>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct FormatOp {
+    /// Sheet/tab name (or numeric sheetId as a string).
+    pub sheet: String,
+    /// A1 range, e.g. "A1:D1" (no sheet prefix).
+    pub range: String,
+    pub format: crate::gsheets::application::format::FormatSpec,
 }
 
 // ── Shared helpers ────────────────────────────────────────────────────
@@ -405,6 +422,14 @@ pub fn tool_set_range() -> ToolDefinition {
         TOOL_SET_RANGE,
         text::tool_description(TOOL_SET_RANGE),
         text::tool_summary(TOOL_SET_RANGE),
+    )
+}
+
+pub fn tool_format_range() -> ToolDefinition {
+    super::build_synthetic_tool_with_summary::<FormatRangeArgs>(
+        TOOL_FORMAT_RANGE,
+        text::tool_description(TOOL_FORMAT_RANGE),
+        text::tool_summary(TOOL_FORMAT_RANGE),
     )
 }
 
@@ -794,6 +819,71 @@ pub async fn dispatch_set_range(args: serde_json::Value) -> serde_json::Value {
         Err(e) => return e,
     };
     dispatch_set_range_with_client(args, &client).await
+}
+
+pub async fn dispatch_format_range_with_client(
+    args: serde_json::Value,
+    client: &dyn SheetsClient,
+) -> serde_json::Value {
+    let parsed: FormatRangeArgs = match serde_json::from_value(args) {
+        Ok(a) => a,
+        Err(e) => return serde_json::json!({"error": "invalid_args", "message": e.to_string()}),
+    };
+    if parsed.ops.is_empty() {
+        return serde_json::json!({"error": "invalid_args", "message": "ops must not be empty"});
+    }
+    let id = SpreadsheetId(parsed.spreadsheet_id);
+    let sheets = match client.list_sheets(&id).await {
+        Ok(s) => s,
+        Err(e) => return error_to_json(e),
+    };
+    let resolve = |name: &str| -> Option<i64> {
+        if let Ok(n) = name.parse::<i64>() {
+            return Some(n);
+        }
+        sheets
+            .iter()
+            .find(|s| s.title == name)
+            .map(|s| s.sheet_id.0)
+    };
+    let mut requests: Vec<serde_json::Value> = Vec::new();
+    for (i, op) in parsed.ops.iter().enumerate() {
+        let sheet_id = match resolve(&op.sheet) {
+            Some(id) => id,
+            None => {
+                return serde_json::json!({"error": "invalid_args",
+                    "message": format!("op {i}: sheet {:?} not found; available: {:?}",
+                        op.sheet, sheets.iter().map(|s| s.title.clone()).collect::<Vec<_>>())})
+            }
+        };
+        let grid = match a1_to_grid_range(sheet_id, &op.range) {
+            Ok(g) => g,
+            Err(e) => {
+                return serde_json::json!({"error": "invalid_args", "message": format!("op {i}: {}", e.0)})
+            }
+        };
+        match build_format_requests(&grid, &op.format) {
+            Ok(mut r) => requests.append(&mut r),
+            Err(e) => {
+                return serde_json::json!({"error": "invalid_args", "message": format!("op {i}: {}", e.0)})
+            }
+        }
+    }
+    let n_requests = requests.len();
+    match client.batch_update(&id, requests).await {
+        Ok(()) => {
+            serde_json::json!({ "ok": true, "ops_applied": parsed.ops.len(), "requests_sent": n_requests })
+        }
+        Err(e) => error_to_json(e),
+    }
+}
+
+pub async fn dispatch_format_range(args: serde_json::Value) -> serde_json::Value {
+    let client = match build_client() {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    dispatch_format_range_with_client(args, &client).await
 }
 
 // Note: create_from_xlsx + export_xlsx need attachment plumbing — wired
@@ -1287,5 +1377,153 @@ mod tests {
             compute_dimensions(&v),
             serde_json::json!({ "rows": 2, "columns": 3 })
         );
+    }
+
+    /// A `SheetsClient` that serves a fixed sheet list from `list_sheets`
+    /// and records the `batch_update` requests it receives. Every other
+    /// method is `unimplemented!()` — only the two used by the format
+    /// dispatcher are wired.
+    struct FormatFake {
+        sheets: Vec<SheetMeta>,
+        captured: std::sync::Mutex<Vec<serde_json::Value>>,
+    }
+
+    #[async_trait]
+    impl SheetsClient for FormatFake {
+        async fn list_sheets(&self, _id: &SpreadsheetId) -> Result<Vec<SheetMeta>, SheetsError> {
+            Ok(self.sheets.clone())
+        }
+        async fn get_modified_time(
+            &self,
+            _id: &SpreadsheetId,
+        ) -> Result<Option<String>, SheetsError> {
+            unimplemented!()
+        }
+        async fn create_spreadsheet(&self, _title: &str) -> Result<SpreadsheetMeta, SheetsError> {
+            unimplemented!()
+        }
+        async fn create_from_xlsx(
+            &self,
+            _t: &str,
+            _b: Vec<u8>,
+        ) -> Result<SpreadsheetMeta, SheetsError> {
+            unimplemented!()
+        }
+        async fn export_xlsx(&self, _id: &SpreadsheetId) -> Result<Vec<u8>, SheetsError> {
+            unimplemented!()
+        }
+        async fn list_spreadsheets<'a>(
+            &self,
+            _filter: &crate::gsheets::domain::types::SpreadsheetListFilter<'a>,
+        ) -> Result<crate::gsheets::domain::types::SpreadsheetListResult, SheetsError> {
+            unimplemented!()
+        }
+        async fn share(
+            &self,
+            _id: &SpreadsheetId,
+            _email: &str,
+            _role: crate::gsheets::domain::types::ShareRole,
+        ) -> Result<(), SheetsError> {
+            unimplemented!()
+        }
+        async fn list_permissions(
+            &self,
+            _id: &SpreadsheetId,
+        ) -> Result<crate::gsheets::domain::types::PermissionList, SheetsError> {
+            unimplemented!()
+        }
+        async fn delete_permission(
+            &self,
+            _id: &SpreadsheetId,
+            _permission_id: &str,
+        ) -> Result<(), SheetsError> {
+            unimplemented!()
+        }
+        async fn add_sheet(&self, _id: &SpreadsheetId, _n: &str) -> Result<SheetMeta, SheetsError> {
+            unimplemented!()
+        }
+        async fn delete_sheet(&self, _id: &SpreadsheetId, _n: &str) -> Result<(), SheetsError> {
+            unimplemented!()
+        }
+        async fn read_range(
+            &self,
+            _id: &SpreadsheetId,
+            _s: &str,
+            _r: Option<&str>,
+            _o: ReadOptions,
+        ) -> Result<ReadResponse, SheetsError> {
+            unimplemented!()
+        }
+        async fn set_cell(
+            &self,
+            _id: &SpreadsheetId,
+            _s: &str,
+            _a: &str,
+            _v: CellValue,
+        ) -> Result<(), SheetsError> {
+            unimplemented!()
+        }
+        async fn set_range(
+            &self,
+            _id: &SpreadsheetId,
+            _s: &str,
+            _a: &str,
+            _v: Vec<Vec<CellValue>>,
+        ) -> Result<SetRangeResponse, SheetsError> {
+            unimplemented!()
+        }
+        async fn batch_update_cells(
+            &self,
+            _id: &SpreadsheetId,
+            _s: &str,
+            _u: Vec<(String, CellValue)>,
+        ) -> Result<SetRangeResponse, SheetsError> {
+            unimplemented!()
+        }
+        async fn batch_update(
+            &self,
+            _id: &SpreadsheetId,
+            requests: Vec<serde_json::Value>,
+        ) -> Result<(), SheetsError> {
+            self.captured.lock().unwrap().extend(requests);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn format_range_resolves_sheet_and_builds_requests() {
+        let fake = FormatFake {
+            sheets: vec![SheetMeta {
+                sheet_id: SheetId(42),
+                title: "Hoja1".into(),
+                index: 0,
+                row_count: 100,
+                col_count: 26,
+            }],
+            captured: std::sync::Mutex::new(vec![]),
+        };
+        let args = serde_json::json!({
+            "spreadsheet_id": "S1",
+            "ops": [{ "sheet": "Hoja1", "range": "A1:D1",
+                      "format": { "text": {"bold": true}, "background_color": "#000000" } }]
+        });
+        let out = dispatch_format_range_with_client(args, &fake).await;
+        assert_eq!(out["ok"], true);
+        assert_eq!(out["requests_sent"], 1);
+        let captured = fake.captured.lock().unwrap();
+        assert_eq!(captured.len(), 1);
+        assert_eq!(captured[0]["repeatCell"]["range"]["sheetId"], 42);
+    }
+
+    #[tokio::test]
+    async fn format_range_unknown_sheet_errors() {
+        let fake = FormatFake {
+            sheets: vec![],
+            captured: std::sync::Mutex::new(vec![]),
+        };
+        let args = serde_json::json!({ "spreadsheet_id": "S1",
+            "ops": [{ "sheet": "Nope", "range": "A1", "format": { "background_color": "#FFFFFF" } }] });
+        let out = dispatch_format_range_with_client(args, &fake).await;
+        assert_eq!(out["error"], "invalid_args");
     }
 }
