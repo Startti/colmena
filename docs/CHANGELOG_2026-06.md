@@ -2891,3 +2891,77 @@ firmas de traits exportados. Las 6 tools se activan solo vía `enabled_tools`.
 **Estado.** done.
 
 ---
+
+## 47. Google Sheets cell formatting (gsheets_format_range) — Subsystem E v1.1 — 2026-06-22
+
+**Qué cambió.** 1 tool sintética genérica nueva, `gsheets_format_range`, que
+aplica **formato de presentación** a celdas de Google Sheets — estilo de texto,
+colores, bordes, alineación, formato numérico, ancho de columna y alto de fila —
+sobre una o más rangos en un único `spreadsheets.batchUpdate` **atómico**.
+
+**Modelo `ops` → batchUpdate atómico.** El tool toma un array `ops`; cada op
+apunta a un rango con un bloque `format`. Todas las ops se hacen fan-out a un
+solo `batchUpdate` (internamente a `repeatCell` / `updateBorders` /
+`updateDimensionProperties`):
+
+```json
+{
+  "spreadsheet_id": "<id>",
+  "ops": [
+    {
+      "sheet": "Ventas",
+      "range": "A1:D1",
+      "format": {
+        "text": { "bold": true, "color": "#FFFFFF" },
+        "background_color": "#1155CC",
+        "horizontal_alignment": "CENTER"
+      }
+    }
+  ]
+}
+```
+
+- `sheet` — nombre del tab o `sheetId` numérico.
+- `range` — notación A1 (`"A1:D1"`, `"B:B"` para columna entera);
+  direccionamiento 0-based internamente.
+
+**Cobertura de atributos (todos opcionales en `format`).**
+`text` (`bold`, `italic`, `underline`, `strikethrough`, `font_size`,
+`font_family`, `color`), `background_color`, `horizontal_alignment`
+(`LEFT`/`CENTER`/`RIGHT`), `vertical_alignment` (`TOP`/`MIDDLE`/`BOTTOM`),
+`number_format` (`{type, pattern?}`), `wrap` (`OVERFLOW`/`CLIP`/`WRAP`),
+`borders` (`top`/`bottom`/`left`/`right`/`inner_horizontal`/`inner_vertical`,
+cada uno `{style, color?}`), `column_width_px`, `row_height_px`. Todos los
+colores son hex `#RRGGBB`.
+
+**Actualizaciones parciales vía `fields` mask.** Cada op se envía con una
+máscara `fields` precisa, así que fijar un atributo (p.ej. solo
+`background_color`) **no borra** los atributos hermanos (bold, alineación, etc.)
+ya presentes en esas celdas. **No-destructivo:** nunca toca valores ni fórmulas.
+**Sin guard de co-edición** — el formato es idempotente y seguro de re-aplicar.
+
+**Separado de las escrituras de valor.** Fórmulas/valores se escriben con
+`gsheets_set_cell` / `gsheets_set_range` (USER_ENTERED); `gsheets_format_range`
+solo *estiliza* lo que ya está ahí.
+
+**Nuevo método de trait `SheetsClient::batch_update`.** Emite un
+`spreadsheets.batchUpdate` con N requests. **Additive** — solo el cliente HTTP y
+el mock lo implementan; ADP no implementa el trait → sin break.
+
+**Nuevo módulo `gsheets/application/format.rs`.** Builder del formato: helpers
+A1→`GridRange` y hex→`RgbColor`, ensamblado de la máscara `fields`, y fan-out a
+`repeatCell` / `updateBorders` / `updateDimensionProperties`.
+
+**Conteo de toolkit.** `gsheets` pasó de 10 → **11** tools.
+
+**Additive — sin impacto ADP.** No toca el API público, `EngineConfig` ni
+firmas de traits exportados. El tool se activa vía `enabled_tools`.
+
+**Referencias.**
+- Spec: [`docs/superpowers/specs/2026-06-22-gsheets-cell-formatting-design.md`](superpowers/specs/2026-06-22-gsheets-cell-formatting-design.md)
+- Plan: [`docs/superpowers/plans/2026-06-22-gsheets-cell-formatting.md`](superpowers/plans/2026-06-22-gsheets-cell-formatting.md)
+- E2E graph: [`tests/graphs/agents/gsheets_format_range_e2e.json`](../tests/graphs/agents/gsheets_format_range_e2e.json)
+
+**Estado.** done.
+
+---

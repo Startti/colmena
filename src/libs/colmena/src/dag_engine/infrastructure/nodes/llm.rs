@@ -2460,15 +2460,16 @@ impl ExecutableNode for LlmNode {
             use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::{
                 gsheets_tool_add_sheet, gsheets_tool_create_from_xlsx,
                 gsheets_tool_create_spreadsheet, gsheets_tool_delete_sheet,
-                gsheets_tool_export_xlsx, gsheets_tool_list_sheets, gsheets_tool_read,
-                gsheets_tool_run_python, gsheets_tool_set_cell, gsheets_tool_set_range,
-                GSHEETS_ADD_SHEET_TOOL, GSHEETS_CREATE_FROM_XLSX_TOOL,
+                gsheets_tool_export_xlsx, gsheets_tool_format_range, gsheets_tool_list_sheets,
+                gsheets_tool_read, gsheets_tool_run_python, gsheets_tool_set_cell,
+                gsheets_tool_set_range, GSHEETS_ADD_SHEET_TOOL, GSHEETS_CREATE_FROM_XLSX_TOOL,
                 GSHEETS_CREATE_SPREADSHEET_TOOL, GSHEETS_DELETE_SHEET_TOOL,
-                GSHEETS_EXPORT_XLSX_TOOL, GSHEETS_LIST_SHEETS_TOOL, GSHEETS_READ_TOOL,
-                GSHEETS_SET_CELL_TOOL, GSHEETS_SET_RANGE_TOOL, TOOL_GSHEETS_RUN_PYTHON,
+                GSHEETS_EXPORT_XLSX_TOOL, GSHEETS_FORMAT_RANGE_TOOL, GSHEETS_LIST_SHEETS_TOOL,
+                GSHEETS_READ_TOOL, GSHEETS_SET_CELL_TOOL, GSHEETS_SET_RANGE_TOOL,
+                TOOL_GSHEETS_RUN_PYTHON,
             };
 
-            let all_gsheets: [&str; 10] = [
+            let all_gsheets: [&str; 11] = [
                 GSHEETS_CREATE_SPREADSHEET_TOOL,
                 GSHEETS_CREATE_FROM_XLSX_TOOL,
                 GSHEETS_EXPORT_XLSX_TOOL,
@@ -2478,6 +2479,7 @@ impl ExecutableNode for LlmNode {
                 GSHEETS_READ_TOOL,
                 GSHEETS_SET_CELL_TOOL,
                 GSHEETS_SET_RANGE_TOOL,
+                GSHEETS_FORMAT_RANGE_TOOL,
                 TOOL_GSHEETS_RUN_PYTHON,
             ];
 
@@ -2489,7 +2491,7 @@ impl ExecutableNode for LlmNode {
             let (wants, excludes) =
                 resolve_synthetic_enabled_tools(enabled_tools_config, &all_gsheets);
 
-            let gsheets_entries: [(&str, fn() -> crate::llm::domain::ToolDefinition); 10] = [
+            let gsheets_entries: [(&str, fn() -> crate::llm::domain::ToolDefinition); 11] = [
                 (
                     GSHEETS_CREATE_SPREADSHEET_TOOL,
                     gsheets_tool_create_spreadsheet,
@@ -2502,6 +2504,7 @@ impl ExecutableNode for LlmNode {
                 (GSHEETS_READ_TOOL, gsheets_tool_read),
                 (GSHEETS_SET_CELL_TOOL, gsheets_tool_set_cell),
                 (GSHEETS_SET_RANGE_TOOL, gsheets_tool_set_range),
+                (GSHEETS_FORMAT_RANGE_TOOL, gsheets_tool_format_range),
                 (TOOL_GSHEETS_RUN_PYTHON, gsheets_tool_run_python),
             ];
 
@@ -5081,13 +5084,14 @@ mod filter_enabled_tools_tests {
             "gsheets_read",
             "gsheets_set_cell",
             "gsheets_set_range",
+            "gsheets_format_range",
             "gsheets_run_python",
             "tavily_web",
         ]);
         let enabled = json!(["gsheets"]);
         let configured = std::collections::HashSet::new();
         let filtered = super::filter_enabled_tools(all_tools, Some(&enabled), &configured);
-        assert_eq!(filtered.len(), 10, "gsheets alias must expand to 10 tools");
+        assert_eq!(filtered.len(), 11, "gsheets alias must expand to 11 tools");
         assert!(filtered.iter().all(|t| t.name.starts_with("gsheets_")));
     }
 

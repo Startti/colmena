@@ -895,6 +895,20 @@ impl SheetsClient for GoogleSheetsHttpClient {
             updated_range: format!("{n_updates} cells in {sheet}"),
         })
     }
+
+    async fn batch_update(
+        &self,
+        id: &SpreadsheetId,
+        requests: Vec<serde_json::Value>,
+    ) -> Result<(), SheetsError> {
+        if requests.is_empty() {
+            return Ok(());
+        }
+        let body = serde_json::json!({ "requests": requests });
+        let url = format!("{}/{}:batchUpdate", self.sheets_base, id.0);
+        self.post_json(&url, body).await?;
+        Ok(())
+    }
 }
 
 /// Wrap a sheet name in single quotes if it contains anything other
@@ -1414,6 +1428,34 @@ mod tests {
             .await
             .expect("batch_update_cells must succeed");
         assert_eq!(resp.updated_cells, 3);
+    }
+
+    #[tokio::test]
+    async fn batch_update_posts_requests_to_spreadsheets_batch_update() {
+        let server = wiremock::MockServer::start().await;
+        let client = GoogleSheetsHttpClient::for_tests(&server.uri(), &server.uri(), &server.uri());
+        client.token_test_seed("fake-token").await;
+
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path_regex(r"/ss_b:batchUpdate"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "spreadsheetId": "ss_b",
+                    "replies": [{}]
+                })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let reqs = vec![serde_json::json!({"repeatCell": {"range": {"sheetId": 0}}})];
+        let r = client
+            .batch_update(
+                &crate::gsheets::domain::SpreadsheetId("ss_b".to_string()),
+                reqs,
+            )
+            .await;
+        assert!(r.is_ok(), "batch_update should succeed: {r:?}");
     }
 
     #[tokio::test]

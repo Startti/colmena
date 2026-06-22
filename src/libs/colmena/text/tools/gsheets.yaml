@@ -258,3 +258,22 @@ gsheets_unshare:
     DO NOT confuse permission_id with email — Drive can have multiple
     grants for the same email (different roles via different grants); each
     has its own permission_id.
+
+gsheets_format_range:
+  summary: Apply cell formatting (style, background, borders, alignment, number format, column width) to one or more ranges
+  description: |
+    Aplica FORMATO (no valores) a una o más zonas de un Google Sheet en un solo
+    batchUpdate atómico. Pasá `ops: [{sheet, range, format}]`. `sheet` = nombre
+    del tab (o sheetId). `range` = A1 sin prefijo de tab (ej "A1:D1", "B:B").
+    `format` (todos los campos opcionales):
+      - text: { bold, italic, underline, strikethrough, font_size, font_family, color }  (color hex "#RRGGBB")
+      - background_color: "#RRGGBB"
+      - horizontal_alignment: LEFT|CENTER|RIGHT ; vertical_alignment: TOP|MIDDLE|BOTTOM
+      - number_format: { type: NUMBER|CURRENCY|PERCENT|DATE|TIME|DATE_TIME|TEXT|SCIENTIFIC, pattern? }
+      - wrap: OVERFLOW|CLIP|WRAP
+      - borders: { top|bottom|left|right|inner_horizontal|inner_vertical: { style: SOLID|SOLID_MEDIUM|SOLID_THICK|DASHED|DOTTED|DOUBLE, color? } }
+      - column_width_px / row_height_px (aplican a las columnas/filas del range)
+    Es NO-DESTRUCTIVO: no toca valores ni fórmulas, y solo cambia los atributos
+    que pasás (setear fondo no borra el bold previo). Para escribir VALORES o
+    FÓRMULAS usá gsheets_set_cell / gsheets_set_range (no este tool).
+    Ejemplo header: { sheet:"Hoja1", range:"A1:D1", format:{ text:{bold:true,color:"#FFFFFF"}, background_color:"#4472C4", horizontal_alignment:"CENTER" } }
