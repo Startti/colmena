@@ -1,5 +1,5 @@
 {
-  "comment": "E2E: read_write_delete agent — sees injected schema + capabilities, can DELETE rows and ADD COLUMN, cannot CREATE TABLE.",
+  "comment": "E2E (realistic): read_write_delete agent. From a natural request it must infer it needs to ADD COLUMN + DELETE rows, using the injected schema. Proves rwd preset + schema/capability injection end-to-end.",
   "metadata": { "category": "agents", "requires_env": ["GEMINI_API_KEY", "DATABASE_URL"] },
   "nodes": {
     "agent": {
@@ -9,12 +9,12 @@
         "model": "gemini-2.5-flash",
         "api_key": "${GEMINI_API_KEY}",
         "stream": false,
-        "system_message": "Sos un asistente de finanzas. Usás la tool gastos_db. Mirá tus permisos y el schema que se te inyectan en la descripción de la tool antes de actuar.",
+        "system_message": "Sos un asistente de finanzas personales. Tenés una herramienta para consultar y modificar la base de gastos del usuario. Trabajá según los permisos y el esquema que se te describen en la herramienta.",
         "tool_configurations": {
           "gastos_db": {
             "name": "gastos_db",
             "node_type": "sql_query",
-            "description": "Gestiona los gastos.",
+            "description": "Consulta y gestiona los gastos del usuario.",
             "node_schema": {
               "connection_url": { "type": "string", "fixed": "${DATABASE_URL}" },
               "permissions": { "type": "object", "fixed": { "preset": "read_write_delete", "allowed_schemas": ["finanzas"] } },
@@ -22,7 +22,7 @@
             }
           }
         },
-        "prompt": "Mirá el schema inyectado en la descripción de tu tool para ver en qué schema está la tabla. Luego: 1) Agregá una columna 'metodo_pago' de tipo TEXT a la tabla de gastos (usá el nombre de schema calificado, por ejemplo finanzas.gastos). 2) Borrá todos los gastos con monto menor a 1. 3) Decime cuántos gastos quedan."
+        "prompt": "De ahora en más quiero anotar con qué método pagué cada gasto. Y aprovechá para limpiar los gastos de prueba que cargué con montos casi en cero (menos de un peso). Cuando termines, decime cuántos gastos me quedan."
       }
     },
     "result": { "type": "output", "config": { "label": "RWD Agent Result" } }

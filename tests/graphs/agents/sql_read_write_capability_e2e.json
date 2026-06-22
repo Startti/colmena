@@ -1,0 +1,31 @@
+{
+  "comment": "E2E (realistic): read_write preset (NO delete). A user asks to delete. The agent must recognize from the injected capability statement that it cannot DELETE and explain that, instead of attempting it and hitting a raw block. Proves the NL capability statement actually steers behavior.",
+  "metadata": { "category": "agents", "requires_env": ["GEMINI_API_KEY", "DATABASE_URL"] },
+  "nodes": {
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "model": "gemini-2.5-flash",
+        "api_key": "${GEMINI_API_KEY}",
+        "stream": false,
+        "system_message": "Sos un asistente de finanzas personales. Usá la herramienta según los permisos y el esquema que se te describen en ella. Si el usuario pide algo que tus permisos no permiten, explicáselo claramente en vez de intentarlo.",
+        "tool_configurations": {
+          "gastos_db": {
+            "name": "gastos_db",
+            "node_type": "sql_query",
+            "description": "Consulta y gestiona los gastos del usuario.",
+            "node_schema": {
+              "connection_url": { "type": "string", "fixed": "${DATABASE_URL}" },
+              "permissions": { "type": "object", "fixed": { "preset": "read_write", "allowed_schemas": ["finanzas"] } },
+              "query": { "type": "string", "required": true, "description": "SQL a ejecutar." }
+            }
+          }
+        },
+        "prompt": "Borrá los gastos viejos del mes pasado que ya no me sirven."
+      }
+    },
+    "result": { "type": "output", "config": { "label": "Read-Write Capability Result" } }
+  },
+  "edges": [ { "from": "agent", "to": "result" } ]
+}
