@@ -6,6 +6,7 @@
 
 use crate::gdocs::application::co_edit_guard::{run_guard_non_blocking, GuardContext};
 use crate::gdocs::application::insert::apply_and_finalize;
+use crate::gdocs::application::util;
 use crate::gdocs::domain::{
     CellSnapshot, ChangeKind, DocsClient, DocsError, DocumentId, EditResult, TabId, TableSnapshot,
 };
@@ -38,15 +39,6 @@ pub struct TableCellInfo {
 
 // ── Helpers ────────────────────────────────────────────────────────
 
-/// Build a `Location` JSON, attaching `tabId` only for multi-tab docs.
-fn location(index: u32, tab_id: Option<&TabId>) -> serde_json::Value {
-    let mut loc = serde_json::json!({ "index": index });
-    if let Some(t) = tab_id {
-        loc["tabId"] = serde_json::json!(t.0);
-    }
-    loc
-}
-
 /// Build a `tableCellLocation` JSON.
 fn cell_location(
     table_start: u32,
@@ -55,7 +47,7 @@ fn cell_location(
     tab_id: Option<&TabId>,
 ) -> serde_json::Value {
     serde_json::json!({
-        "tableStartLocation": location(table_start, tab_id),
+        "tableStartLocation": util::location(table_start, &tab_id.cloned()),
         "rowIndex": row,
         "columnIndex": col,
     })
@@ -158,15 +150,15 @@ fn build_set_cell_requests(
     let mut reqs = Vec::new();
     let del_end = cell.content_end_index.saturating_sub(1);
     if del_end > cell.content_start_index {
-        let mut range = location(cell.content_start_index, tab_id);
-        range["endIndex"] = serde_json::json!(del_end);
-        range["startIndex"] = serde_json::json!(cell.content_start_index);
-        range.as_object_mut().unwrap().remove("index");
-        reqs.push(serde_json::json!({ "deleteContentRange": { "range": range } }));
+        reqs.push(serde_json::json!({
+            "deleteContentRange": {
+                "range": util::range(cell.content_start_index, del_end, &tab_id.cloned())
+            }
+        }));
     }
     reqs.push(serde_json::json!({
         "insertText": {
-            "location": location(cell.content_start_index, tab_id),
+            "location": util::location(cell.content_start_index, &tab_id.cloned()),
             "text": text,
         }
     }));
@@ -367,10 +359,14 @@ pub async fn run_delete_table_column(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gdocs::application::_test_helpers::TestRig;
+    use crate::gdocs::application::co_edit_guard::GuardContext;
     use crate::gdocs::domain::traits::MockDocsClient;
     use crate::gdocs::domain::{
-        DocumentSnapshot, ParagraphKind, ParagraphSnapshot, RevisionId, TabSnapshot,
+        BatchUpdateResult, DocumentSnapshot, ParagraphKind, ParagraphSnapshot, RevisionId,
+        TabSnapshot,
     };
+    use std::sync::{Arc, Mutex};
 
     fn snap_with_one_table() -> DocumentSnapshot {
         DocumentSnapshot {
@@ -500,5 +496,55 @@ mod tests {
             dc["deleteTableColumn"]["tableCellLocation"]["columnIndex"],
             3
         );
+    }
+
+    /// End-to-end orchestration: `run_set_table_cell` should drive the guard,
+    /// emit a `deleteContentRange` + `insertText` for the addressed cell, and
+    /// finalize. Asserts the requests handed to `batch_update` wire the cell's
+    /// content indices correctly.
+    #[tokio::test]
+    async fn run_set_table_cell_wires_delete_and_insert() {
+        let mut rig = TestRig::new();
+        // Pre- and post-write snapshots; apply_and_finalize re-fetches after.
+        let pre = snap_with_one_table();
+        let mut post = snap_with_one_table();
+        post.revision_id = RevisionId("r2".into());
+        let queue = Arc::new(Mutex::new(vec![pre, post]));
+        rig.client.expect_get().returning(move |_| {
+            let mut q = queue.lock().unwrap();
+            let s = if q.len() > 1 {
+                q.remove(0)
+            } else {
+                q[0].clone()
+            };
+            Ok(s)
+        });
+        // Assert the requests contain deleteContentRange + insertText for the
+        // addressed cell (content_start_index 6, content_end_index 8 → del_end 7).
+        rig.client
+            .expect_batch_update()
+            .returning(move |_, requests, _| {
+                assert_eq!(requests.len(), 2);
+                assert_eq!(requests[0]["deleteContentRange"]["range"]["startIndex"], 6);
+                assert_eq!(requests[0]["deleteContentRange"]["range"]["endIndex"], 7);
+                assert_eq!(requests[1]["insertText"]["location"]["index"], 6);
+                assert_eq!(requests[1]["insertText"]["text"], "X");
+                Ok(BatchUpdateResult {
+                    revision_id_after: RevisionId("r2".into()),
+                    replies: vec![],
+                })
+            });
+        let ctx = GuardContext {
+            client: &rig.client,
+            cache: &rig.cache,
+            revisions: &rig.revisions,
+            session_id: "s1",
+            sa_email: None,
+        };
+        let result = run_set_table_cell(&ctx, &DocumentId("d".into()), 0, 0, 0, "X", None)
+            .await
+            .unwrap();
+        assert_eq!(result.changes.len(), 1);
+        assert_eq!(result.changes[0].kind, ChangeKind::Replace);
     }
 }
