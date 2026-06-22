@@ -76,7 +76,7 @@ agente nunca debe llamar `create_*`.
 
 Ver [40_toolkit_packages.md](40_toolkit_packages.md).
 
-## Tool surface (28 tools)
+## Tool surface (34 tools)
 
 ### Creación y administración
 
@@ -112,7 +112,10 @@ Ver [40_toolkit_packages.md](40_toolkit_packages.md).
 > archivos creados/abiertos por la app). En cambio, las tools que usan la
 > **Docs API** — `gdocs_read_outline`, `gdocs_insert_*`, `gdocs_replace_*`,
 > `gdocs_apply_edits`, etc. (`documents.get` / `documents.batchUpdate`, scope
-> `documents`) — **sí funcionan** sobre docs compartidos. **Patrón
+> `documents`) — **sí funcionan** sobre docs compartidos. Las tools de tabla
+> (`gdocs_read_tables`, `gdocs_set_table_cell`, `gdocs_insert_*`/`gdocs_delete_table_*`)
+> también usan la Docs API → **funcionan sobre docs compartidos** (igual que
+> `gdocs_insert_*`/`gdocs_replace_*`). **Patrón
 > recomendado para editar un doc compartido:** usar `gdocs_read_outline` (no
 > `read_as_markdown`) para ubicar anchors, luego las tools de edición. Para
 > habilitar las tools Drive-based en docs compartidos hay que re-consentir con
@@ -130,6 +133,31 @@ Ver [40_toolkit_packages.md](40_toolkit_packages.md).
 | `gdocs_delete_text` | Borra ocurrencias dentro de `scope`. Mismas opciones de scope/case/occurrence que `replace_text`. |
 | `gdocs_replace_section` | Reemplaza todo entre un heading y el próximo mismo-o-mayor nivel (o EOF). |
 | `gdocs_append_markdown` | Agrega markdown al final del doc o del tab. |
+
+### Edición de tablas (Subsystem G v1.1, 2026-06-21)
+
+Las tablas ahora se modelan en el snapshot del doc (`parse_tables`) — antes
+eran invisibles para el agente. Las 6 tools usan la **Docs API**
+(`documents.get`/`documents.batchUpdate`, scope `documents`) → **funcionan
+sobre docs compartidos** (igual que `gdocs_insert_*`/`gdocs_replace_*`),
+a diferencia de las tools Drive-export.
+
+| Tool | Qué hace |
+|---|---|
+| `gdocs_read_tables` | **Read-only.** `doc_id`, `tab_id?` → lista las tablas del tab con `table_index`, `rows`, `columns` y, por celda, `{row, col, text_preview, row_span, col_span}`. Úsalo SIEMPRE primero para descubrir tablas y coordenadas. |
+| `gdocs_set_table_cell` | `doc_id`, `table_index`, `row`, `col`, `text`, `tab_id?` → reemplaza el texto plano de **1 celda**. Snapshot fresco por llamada. |
+| `gdocs_insert_table_row` | `doc_id`, `table_index`, `at_row`, `insert_below?` (default `true`), `tab_id?`. |
+| `gdocs_delete_table_row` | `doc_id`, `table_index`, `row`, `tab_id?`. |
+| `gdocs_insert_table_column` | `doc_id`, `table_index`, `at_col`, `insert_right?` (default `true`), `tab_id?`. |
+| `gdocs_delete_table_column` | `doc_id`, `table_index`, `col`, `tab_id?`. |
+
+**Reglas.** Texto plano únicamente (sin markdown ni estilo por celda); **1
+celda por llamada** a `set_table_cell`; direccionamiento **0-based** —
+`table_index` (orden dentro del tab) + `row`/`col`. Llama `gdocs_read_tables`
+primero para obtener las coordenadas. **Celdas merged:** `read_tables`
+reporta `row_span`/`col_span`; solo la celda master de un merge es editable
+— un `set` sobre una posición slave da error. **No se puede borrar** la
+última fila ni la última columna que queda en una tabla.
 
 ### Composición y estilo
 
@@ -425,8 +453,9 @@ Limitaciones v1 (reportadas en `lossy_conversions`):
   `gdocs_append_markdown`, `gdocs_apply_edits` rechazan markdown que
   contiene tablas con `invalid_args`. Tablas en
   `gdocs_create_from_markdown` sí funcionan (Drive las convierte
-  nativamente), pero ediciones quirúrgicas de celdas (`set_table_cell`,
-  `insert_table_row`) son v1.1.
+  nativamente), y las ediciones quirúrgicas de celdas
+  (`gdocs_read_tables`/`gdocs_set_table_cell`/`gdocs_insert_table_*`/`gdocs_delete_table_*`)
+  shippearon en v1.1 (2026-06-21) — ver §"Edición de tablas".
 - **Math (LaTeX `$…$`)** — pasa como texto literal.
 - **Footnotes** — se omiten.
 - **Imágenes inline** — se omiten (insertion de imágenes via tool
@@ -530,8 +559,9 @@ listadas al final de esa sección.
 Ver "Subsystem G v1.1" en [`BACKLOG.md`](../BACKLOG.md):
 
 - Suggesting mode (`writeControl.suggestionsEnabled`).
-- Edits quirúrgicos a celdas de tabla (`gdocs_set_table_cell`,
-  `gdocs_insert_table_row`).
+- ~~Edits quirúrgicos a celdas de tabla (`gdocs_set_table_cell`,
+  `gdocs_insert_table_row`)~~ — **shipped v1.1 (2026-06-21)**, ver §"Edición
+  de tablas".
 - Tablas markdown en inserts (requiere round-trip snapshot para
   computar índices de celda).
 - Drive Comments API para mensajería humano ↔ agente in-doc.
