@@ -331,6 +331,7 @@ pub use gsheets_tools::{
     dispatch_add_sheet as dispatch_gsheets_add_sheet,
     dispatch_create_spreadsheet as dispatch_gsheets_create_spreadsheet,
     dispatch_delete_sheet as dispatch_gsheets_delete_sheet,
+    dispatch_format_range as dispatch_gsheets_format_range,
     dispatch_list_permissions as dispatch_gsheets_list_permissions,
     dispatch_list_sheets as dispatch_gsheets_list_sheets,
     dispatch_list_spreadsheets as dispatch_gsheets_list_spreadsheets,
@@ -340,6 +341,7 @@ pub use gsheets_tools::{
     tool_create_from_xlsx as gsheets_tool_create_from_xlsx,
     tool_create_spreadsheet as gsheets_tool_create_spreadsheet,
     tool_delete_sheet as gsheets_tool_delete_sheet, tool_export_xlsx as gsheets_tool_export_xlsx,
+    tool_format_range as gsheets_tool_format_range,
     tool_list_permissions as gsheets_tool_list_permissions,
     tool_list_sheets as gsheets_tool_list_sheets,
     tool_list_spreadsheets as gsheets_tool_list_spreadsheets, tool_read as gsheets_tool_read,
@@ -349,6 +351,7 @@ pub use gsheets_tools::{
     TOOL_CREATE_FROM_XLSX as GSHEETS_CREATE_FROM_XLSX_TOOL,
     TOOL_CREATE_SPREADSHEET as GSHEETS_CREATE_SPREADSHEET_TOOL,
     TOOL_DELETE_SHEET as GSHEETS_DELETE_SHEET_TOOL, TOOL_EXPORT_XLSX as GSHEETS_EXPORT_XLSX_TOOL,
+    TOOL_FORMAT_RANGE as GSHEETS_FORMAT_RANGE_TOOL,
     TOOL_LIST_PERMISSIONS as GSHEETS_LIST_PERMISSIONS_TOOL,
     TOOL_LIST_SHEETS as GSHEETS_LIST_SHEETS_TOOL,
     TOOL_LIST_SPREADSHEETS as GSHEETS_LIST_SPREADSHEETS_TOOL, TOOL_READ as GSHEETS_READ_TOOL,
@@ -484,7 +487,7 @@ mod text_coverage_tests {
     /// Returns every synthetic ToolDefinition the colmena library registers,
     /// excluding describe_tool (dynamic per-turn construction).
     fn all_synthetic_tools() -> Vec<ToolDefinition> {
-        // gsheets — 13 tools + gsheets_run_python
+        // gsheets — 14 tools + gsheets_run_python
         let mut tools = vec![
             super::gsheets_tools::tool_create_spreadsheet(),
             super::gsheets_tools::tool_create_from_xlsx(),
@@ -496,6 +499,7 @@ mod text_coverage_tests {
             super::gsheets_tools::tool_read(),
             super::gsheets_tools::tool_set_cell(),
             super::gsheets_tools::tool_set_range(),
+            super::gsheets_tools::tool_format_range(),
             super::gsheets_tools::tool_share(),
             super::gsheets_tools::tool_list_permissions(),
             super::gsheets_tools::tool_unshare(),

@@ -1214,11 +1214,12 @@ impl DagToolExecutor {
         {
             use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::{
                 dispatch_gsheets_add_sheet, dispatch_gsheets_create_spreadsheet,
-                dispatch_gsheets_delete_sheet, dispatch_gsheets_list_sheets, dispatch_gsheets_read,
-                dispatch_gsheets_set_cell, dispatch_gsheets_set_range, GSHEETS_ADD_SHEET_TOOL,
+                dispatch_gsheets_delete_sheet, dispatch_gsheets_format_range,
+                dispatch_gsheets_list_sheets, dispatch_gsheets_read, dispatch_gsheets_set_cell,
+                dispatch_gsheets_set_range, GSHEETS_ADD_SHEET_TOOL,
                 GSHEETS_CREATE_SPREADSHEET_TOOL, GSHEETS_DELETE_SHEET_TOOL,
-                GSHEETS_LIST_SHEETS_TOOL, GSHEETS_READ_TOOL, GSHEETS_SET_CELL_TOOL,
-                GSHEETS_SET_RANGE_TOOL, TOOL_GSHEETS_RUN_PYTHON,
+                GSHEETS_FORMAT_RANGE_TOOL, GSHEETS_LIST_SHEETS_TOOL, GSHEETS_READ_TOOL,
+                GSHEETS_SET_CELL_TOOL, GSHEETS_SET_RANGE_TOOL, TOOL_GSHEETS_RUN_PYTHON,
             };
 
             // E-T7b (Bundle 1, 2026-06-10): xlsx tool constants for the
@@ -1243,6 +1244,7 @@ impl DagToolExecutor {
                     || n == GSHEETS_READ_TOOL
                     || n == GSHEETS_SET_CELL_TOOL
                     || n == GSHEETS_SET_RANGE_TOOL
+                    || n == GSHEETS_FORMAT_RANGE_TOOL
                     || n == TOOL_GSHEETS_RUN_PYTHON
                     || n == TOOL_CREATE_FROM_XLSX
                     || n == TOOL_EXPORT_XLSX
@@ -1290,6 +1292,9 @@ impl DagToolExecutor {
                     }
                     n if n == GSHEETS_SET_CELL_TOOL => dispatch_gsheets_set_cell(args).await,
                     n if n == GSHEETS_SET_RANGE_TOOL => dispatch_gsheets_set_range(args).await,
+                    n if n == GSHEETS_FORMAT_RANGE_TOOL => {
+                        dispatch_gsheets_format_range(args).await
+                    }
                     n if n == TOOL_GSHEETS_RUN_PYTHON => {
                         self.gsheets_run_python_guarded(args).await
                     }

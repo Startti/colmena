@@ -11,7 +11,7 @@ For the YAML registry that backs this index, see
 For toolkit packages (`enabled_tools: ["gsheets"]` shortcut), see
 [40_toolkit_packages.md](40_toolkit_packages.md).
 
-## gsheets (14 tools)
+## gsheets (15 tools)
 
 | Tool | Summary | Detailed docs |
 |---|---|---|
@@ -25,6 +25,7 @@ For toolkit packages (`enabled_tools: ["gsheets"]` shortcut), see
 | `gsheets_read` | Read a cell range from a tab; supports formatted, unformatted, and formula render modes | [§39](39_gsheets.md) |
 | `gsheets_set_cell` | Write one value or formula into a single cell | [§39](39_gsheets.md) |
 | `gsheets_set_range` | Write a 2-D values array starting at a given address | [§39](39_gsheets.md) |
+| `gsheets_format_range` | Apply cell formatting (text style, background, borders, alignment, number format, column/row size) to one or more ranges in one atomic batchUpdate. | [§39](39_gsheets.md) |
 | `gsheets_share` | Grant a Google account access to a spreadsheet (reader / commenter / writer) | [§39](39_gsheets.md) |
 | `gsheets_list_permissions` | Show every Drive permission on a spreadsheet (who has access and at what role) | [§39](39_gsheets.md) |
 | `gsheets_unshare` | Revoke a previously-granted permission on a spreadsheet | [§39](39_gsheets.md) |

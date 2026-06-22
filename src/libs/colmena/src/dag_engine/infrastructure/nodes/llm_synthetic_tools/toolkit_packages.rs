@@ -22,7 +22,7 @@ pub struct ToolkitPackage {
 pub static TOOLKIT_PACKAGES: &[ToolkitPackage] = &[
     ToolkitPackage {
         alias: "gsheets",
-        description: "Read, write, and analyze Google Sheets workbooks (10 tools)",
+        description: "Read, write, and analyze Google Sheets workbooks (11 tools)",
         tools: &[
             "gsheets_create_spreadsheet",
             "gsheets_create_from_xlsx",
@@ -33,6 +33,7 @@ pub static TOOLKIT_PACKAGES: &[ToolkitPackage] = &[
             "gsheets_read",
             "gsheets_set_cell",
             "gsheets_set_range",
+            "gsheets_format_range",
             "gsheets_run_python",
         ],
     },
@@ -127,9 +128,9 @@ mod tests {
     }
 
     #[test]
-    fn gsheets_package_has_all_ten_tools() {
+    fn gsheets_package_has_all_eleven_tools() {
         let pkg = find_package("gsheets").expect("gsheets package must exist");
-        assert_eq!(pkg.tools.len(), 10, "gsheets package must list 10 tools");
+        assert_eq!(pkg.tools.len(), 11, "gsheets package must list 11 tools");
         for required in &[
             "gsheets_create_spreadsheet",
             "gsheets_create_from_xlsx",
@@ -140,6 +141,7 @@ mod tests {
             "gsheets_read",
             "gsheets_set_cell",
             "gsheets_set_range",
+            "gsheets_format_range",
             "gsheets_run_python",
         ] {
             assert!(
