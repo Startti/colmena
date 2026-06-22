@@ -1,6 +1,7 @@
 # 45. Google Docs integration (Subsystem G)
 
-> 35 synthetic LLM tools (v1 core + 6 table-edit tools, v1.1 2026-06-21)
+> 36 synthetic LLM tools (v1 core + 6 table-edit tools, v1.1 2026-06-21
+> + `gdocs_format_table`, v1.1 2026-06-22)
 > que reflejan el modelo de edición
 > quirúrgica direccionada por contenido — el agente describe **qué**
 > cambiar (texto, encabezado, named range), nunca offsets UTF-16. Soporte
@@ -49,7 +50,7 @@ Habilita la superficie completa con un solo alias:
 "enabled_tools": ["gdocs"]
 ```
 
-Esto expande a los 35 tools `gdocs_*` (verificado live 2026-06-21 —
+Esto expande a los 36 tools `gdocs_*` (verificado live 2026-06-21 —
 todos los dispatchers llegan al LLM vía la resolución de `enabled_tools`).
 Para un agente de solo-lectura usa el alias reducido:
 
@@ -78,7 +79,7 @@ agente nunca debe llamar `create_*`.
 
 Ver [40_toolkit_packages.md](40_toolkit_packages.md).
 
-## Tool surface (35 tools)
+## Tool surface (36 tools)
 
 ### Creación y administración
 
@@ -160,6 +161,43 @@ primero para obtener las coordenadas. **Celdas merged:** `read_tables`
 reporta `row_span`/`col_span`; solo la celda master de un merge es editable
 — un `set` sobre una posición slave da error. **No se puede borrar** la
 última fila ni la última columna que queda en una tabla.
+
+### Formato de celdas de tabla (`gdocs_format_table`, Subsystem G v1.1, 2026-06-22)
+
+`gdocs_format_table` aplica **estilo** (no contenido) a rangos rectangulares de
+celdas dentro de una tabla, en un solo `batchUpdate` atómico multi-op. Mirror de
+`gsheets_format_range`: pasás `ops: [{table_index, cell_range, format}]`.
+
+- `table_index` 0-based (de `gdocs_read_tables`).
+- `cell_range` = `{row_start, row_end, col_start, col_end}` 0-based y
+  **END-EXCLUSIVE** (`row_end`/`col_end` NO se incluyen) — igual que los rangos
+  de Sheets.
+- `format` (todos opcionales): `background_color` (`#RRGGBB`),
+  `vertical_alignment` (`TOP|MIDDLE|BOTTOM`),
+  `borders` (`{top|bottom|left|right: {style, color?, width_pt?}}`),
+  `text` (`{bold, italic, underline, strikethrough, font_size, color}`),
+  `horizontal_alignment` (`LEFT|CENTER|RIGHT|JUSTIFIED`).
+
+Emite hasta **3 tipos de request** de la Docs API por op: un
+`updateTableCellStyle` sobre el `tableRange` del rectángulo (fondo / bordes /
+alineación vertical), y por celda del rango un `updateTextStyle` (negrita,
+color, tamaño…) + un `updateParagraphStyle` (alineación horizontal).
+
+**Caveat de bordes.** A diferencia de Sheets, Docs **no** tiene bordes
+internos/externos — cada lado declarado (`top`/`bottom`/`left`/`right`) se
+aplica a **todas** las celdas del rango.
+
+**No destructivo:** solo da estilo, no cambia el texto. Para escribir el
+contenido de una celda usá `gdocs_set_table_cell`. Reutiliza el
+direccionamiento de tablas de #121 (`find_table`/`find_cell`/`cell_location`),
+el co-edit guard no bloqueante y los rangos ya parseados del `CellSnapshot` — sin
+cambio en el trait `DocsClient` ni en el parser.
+
+**Presentable por default.** Su descripción lleva un nudge always-on: cuando
+armás una tabla para que la vea una persona, dejala presentable en UNA llamada
+multi-op (encabezado en negrita con fondo y texto contrastante + centrado,
+bordes en la tabla, fila de totales destacada) sin esperar a que te lo pidan
+(no hay skill dedicado en v1).
 
 ### Composición y estilo
 

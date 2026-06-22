@@ -1,0 +1,33 @@
+{
+  "_comment": "E2E (manual, live): OPEN prompt — el agente crea un Google Doc con una tabla de presupuesto pequeña y debería dejarla presentable POR DEFAULT (header con fondo+negrita+centrado, bordes) vía gdocs_format_table, SIN que el prompt ni el system_message indiquen cómo formatear (el nudge always-on de la description debe manejarlo). Needs GEMINI_API_KEY + DATABASE_URL + OAuth creds in-memory + COLMENA_GDOCS_DEFAULT_PARENT_FOLDER_ID + --agent-session-id.",
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/gdocs-format-table",
+        "method": "POST",
+        "test_payload": {
+          "prompt": "Creá un Google Doc titulado 'Presupuesto Q3' con una tabla de 4 filas x 3 columnas: encabezados Concepto, Estimado, Real; y 3 filas de datos (Marketing 5000 4800; Ventas 8000 8200; Operaciones 3000 2900). Dejala lista para mostrar."
+        }
+      }
+    },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "api_key": "${GEMINI_API_KEY}",
+        "model": "gemini-2.5-flash",
+        "stream": false,
+        "max_iterations": 20,
+        "connection_url": "${DATABASE_URL}",
+        "system_message": "Sos un asistente que arma documentos en Google Docs. Creá el doc, llená la tabla y reportá la URL.",
+        "enabled_tools": ["gdocs"]
+      }
+    },
+    "log": { "type": "log" }
+  },
+  "edges": [
+    { "from": "trigger", "to": "agent" },
+    { "from": "agent", "to": "log" }
+  ]
+}

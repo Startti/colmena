@@ -126,6 +126,7 @@ Detailed docs: [§45 — Google Docs integration](45_gdocs.md). Design spec:
 | `gdocs_delete_table_row` | Delete a row from a table by 0-based index | [§45](45_gdocs.md) |
 | `gdocs_insert_table_column` | Insert a column into a table, left or right of an existing column | [§45](45_gdocs.md) |
 | `gdocs_delete_table_column` | Delete a column from a table by 0-based index | [§45](45_gdocs.md) |
+| `gdocs_format_table` | Apply formatting (background, borders, text style, alignment) to cell ranges in a table | [§45](45_gdocs.md) |
 
 ## Toolkit packages
 
