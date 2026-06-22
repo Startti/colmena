@@ -152,6 +152,23 @@ Source:
 `src/libs/colmena/src/gsheets/application/format.rs` (A1→GridRange +
 hex→RgbColor helpers) and the `gsheets_format_range` dispatcher.
 
+### Formato presentable por default
+
+El formato rico se fomenta **por default**, no como un extra opcional:
+
+- La `description` de `gsheets_format_range` lleva un nudge always-on que
+  empuja al modelo a entregar hojas presentables (moneda, bordes, fila de
+  totales) aun con prompts abiertos — mueve el default sin depender de la
+  discrecionalidad del modelo.
+- La skill built-in **`gsheets-presentable-output`** se auto-enrola en el
+  catálogo de carga bajo demanda del agente cada vez que
+  `gsheets_format_range` está en su catálogo (gate
+  `agent_has_gsheets_format_tool`, espeja el patrón de
+  `gdocs-surgical-edits`; honra la exclusión `!gsheets_format_range`).
+- El modelo puede `load_skill("gsheets-presentable-output")` para la receta
+  completa: paletas, number formats, un template multi-op completo y reglas
+  de layout (5 references).
+
 ## Pandas analysis flow
 
 Same shape as `crdt_doc_*` analysis (subsystem F). Skill
