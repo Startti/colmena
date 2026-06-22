@@ -77,6 +77,8 @@ pub struct BorderSide {
 pub struct FormatError(pub String);
 
 /// Parse `#RRGGBB` (or `RRGGBB`) → Sheets `RgbColor` JSON with 0.0–1.0 floats.
+/// Note: Sheets `RgbColor` is a bare `{red,green,blue}` object, unlike the
+/// Docs API `OptionalColor` wrapper.
 pub fn hex_to_rgb(hex: &str) -> Result<Value, FormatError> {
     let h = hex.strip_prefix('#').unwrap_or(hex);
     if h.len() != 6 || !h.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -137,7 +139,10 @@ fn parse_a1_cell(tok: &str) -> Result<(Option<u32>, Option<u32>), FormatError> {
     } else {
         let mut n: u32 = 0;
         for c in letters.chars() {
-            n = n * 26 + (c.to_ascii_uppercase() as u32 - 'A' as u32 + 1);
+            n = n
+                .checked_mul(26)
+                .and_then(|x| x.checked_add(c.to_ascii_uppercase() as u32 - 'A' as u32 + 1))
+                .ok_or_else(|| FormatError(format!("column reference too large in {tok:?}")))?;
         }
         Some(n - 1)
     };
@@ -342,6 +347,14 @@ mod tests {
         assert!(a1_to_grid_range(7, "").is_err());
     }
 
+    #[test]
+    fn a1_multi_letter_and_garbage() {
+        let aa = a1_to_grid_range(0, "AA1").unwrap();
+        assert_eq!((aa.start_col, aa.end_col), (26, 27));
+        assert!(a1_to_grid_range(0, "AAAAAAAA1").is_err()); // overflow -> error, not panic
+        assert!(a1_to_grid_range(0, "!!").is_err());
+    }
+
     fn gr() -> GridRange {
         GridRange {
             sheet_id: 0,
@@ -404,5 +417,71 @@ mod tests {
     #[test]
     fn empty_spec_is_error() {
         assert!(build_format_requests(&gr(), &FormatSpec::default()).is_err());
+    }
+
+    #[test]
+    fn alignment_number_wrap_and_row_height_fan_out() {
+        let spec = FormatSpec {
+            horizontal_alignment: Some("CENTER".into()),
+            vertical_alignment: Some("MIDDLE".into()),
+            number_format: Some(NumberFormat {
+                r#type: "CURRENCY".into(),
+                pattern: Some("\"$\"#,##0".into()),
+            }),
+            wrap: Some("WRAP".into()),
+            row_height_px: Some(24),
+            ..Default::default()
+        };
+        let reqs = build_format_requests(&gr(), &spec).unwrap();
+        let rc = reqs.iter().find(|r| r.get("repeatCell").is_some()).unwrap();
+        let uef = &rc["repeatCell"]["cell"]["userEnteredFormat"];
+        assert_eq!(uef["horizontalAlignment"], "CENTER");
+        assert_eq!(uef["verticalAlignment"], "MIDDLE");
+        assert_eq!(uef["numberFormat"]["type"], "CURRENCY");
+        assert_eq!(uef["wrapStrategy"], "WRAP");
+        let fields = rc["repeatCell"]["fields"].as_str().unwrap();
+        assert!(
+            fields.contains("horizontalAlignment")
+                && fields.contains("numberFormat")
+                && fields.contains("wrapStrategy")
+        );
+        let dim = reqs
+            .iter()
+            .find(|r| r.get("updateDimensionProperties").is_some())
+            .unwrap();
+        assert_eq!(
+            dim["updateDimensionProperties"]["range"]["dimension"],
+            "ROWS"
+        );
+        assert_eq!(
+            dim["updateDimensionProperties"]["properties"]["pixelSize"],
+            24
+        );
+    }
+
+    #[test]
+    fn borders_with_explicit_color_and_inner() {
+        let spec = FormatSpec {
+            borders: Some(Borders {
+                top: Some(BorderSide {
+                    style: "SOLID".into(),
+                    color: Some("#FF0000".into()),
+                }),
+                inner_horizontal: Some(BorderSide {
+                    style: "DASHED".into(),
+                    color: None,
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let reqs = build_format_requests(&gr(), &spec).unwrap();
+        let ub = &reqs
+            .iter()
+            .find(|r| r.get("updateBorders").is_some())
+            .unwrap()["updateBorders"];
+        assert_eq!(ub["top"]["style"], "SOLID");
+        assert_eq!(ub["top"]["color"]["red"], 1.0);
+        assert_eq!(ub["innerHorizontal"]["style"], "DASHED");
     }
 }
