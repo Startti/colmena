@@ -1,0 +1,33 @@
+{
+  "_comment": "E2E (manual, live): agent creates a spreadsheet, writes a small table, then formats the header (bold + blue background + white centered) in one turn. Needs GEMINI_API_KEY + DATABASE_URL + OAuth creds in-memory (+ a default parent folder for create) + --agent-session-id. gsheets_format_range is non-destructive (formatting only).",
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/gsheets-format",
+        "method": "POST",
+        "test_payload": {
+          "prompt": "Create a spreadsheet titled 'Inventario demo'. On the first sheet write this table starting at A1: header [Producto, Stock], then rows [Lapices, 10] and [Cuadernos, 5] (use gsheets_set_range). Then format the header row A1:B1 in bold with a blue background (#4472C4) and white centered text using gsheets_format_range. Report the spreadsheet URL and the verbatim result of gsheets_format_range."
+        }
+      }
+    },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "api_key": "${GEMINI_API_KEY}",
+        "model": "gemini-2.5-flash",
+        "stream": false,
+        "max_iterations": 12,
+        "connection_url": "${DATABASE_URL}",
+        "system_message": "You manage Google Sheets. Create the spreadsheet, write VALUES with gsheets_set_range, then STYLE with gsheets_format_range (formatting is a separate step from values). Report tool results verbatim including the URL.",
+        "enabled_tools": ["gsheets"]
+      }
+    },
+    "log": { "type": "log" }
+  },
+  "edges": [
+    { "from": "trigger", "to": "agent" },
+    { "from": "agent", "to": "log" }
+  ]
+}

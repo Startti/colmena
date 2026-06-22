@@ -12,6 +12,9 @@
 //!   source .env
 //!   cargo test --test gsheets_integration_test -- --ignored --nocapture
 
+use colmena::gsheets::application::format::{
+    a1_to_grid_range, build_format_requests, BorderSide, Borders, FormatSpec, TextFormat,
+};
 use colmena::gsheets::domain::{
     CellValue, ReadOptions, SheetsClient, SheetsError, SpreadsheetId, ValueRenderOption,
 };
@@ -142,4 +145,117 @@ async fn spreadsheet_not_found_for_bogus_id() {
         result,
         Err(SheetsError::SpreadsheetNotFound(_)) | Err(SheetsError::Http(_))
     ));
+}
+
+#[tokio::test]
+#[ignore = "requires GOOGLE_APPLICATION_CREDENTIALS + COLMENA_GSHEETS_TEST_SPREADSHEET_ID"]
+async fn format_range_live_roundtrip() {
+    if !env_ready() {
+        eprintln!("SKIP: env not configured");
+        return;
+    }
+    let c = client();
+
+    // 1. Create a throwaway spreadsheet. There is no `delete_spreadsheet`
+    //    primitive on the client (sibling live tests reuse a fixed sheet and
+    //    only clean up *tabs* via `delete_sheet`); a created spreadsheet is
+    //    left behind, matching `gsheets_collision_envelope_e2e`'s convention.
+    let meta = c
+        .create_spreadsheet("colmena fmt IT")
+        .await
+        .expect("create ok");
+    let id = meta.spreadsheet_id.clone();
+
+    // 2. Seed a small table on the first sheet at A1.
+    let first = meta
+        .sheets
+        .first()
+        .expect("at least one sheet")
+        .title
+        .clone();
+    c.set_range(
+        &id,
+        &first,
+        "A1",
+        vec![
+            vec![
+                CellValue::String("Producto".to_string()),
+                CellValue::String("Stock".to_string()),
+            ],
+            vec![
+                CellValue::String("Lapices".to_string()),
+                CellValue::String("10".to_string()),
+            ],
+            vec![
+                CellValue::String("Cuadernos".to_string()),
+                CellValue::String("5".to_string()),
+            ],
+        ],
+    )
+    .await
+    .expect("seed ok");
+
+    // 3. Resolve the first sheet's numeric sheet_id.
+    let sheets = c.list_sheets(&id).await.expect("list ok");
+    let sid = sheets.first().expect("at least one sheet").sheet_id.0;
+
+    // 4. Build requests with the pure helpers.
+    let header = build_format_requests(
+        &a1_to_grid_range(sid, "A1:B1").unwrap(),
+        &FormatSpec {
+            text: Some(TextFormat {
+                bold: Some(true),
+                color: Some("#FFFFFF".into()),
+                ..Default::default()
+            }),
+            background_color: Some("#4472C4".into()),
+            horizontal_alignment: Some("CENTER".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let block = build_format_requests(
+        &a1_to_grid_range(sid, "A1:B3").unwrap(),
+        &FormatSpec {
+            borders: Some(Borders {
+                top: Some(BorderSide {
+                    style: "SOLID".into(),
+                    color: None,
+                }),
+                bottom: Some(BorderSide {
+                    style: "SOLID".into(),
+                    color: None,
+                }),
+                left: Some(BorderSide {
+                    style: "SOLID".into(),
+                    color: None,
+                }),
+                right: Some(BorderSide {
+                    style: "SOLID".into(),
+                    color: None,
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let width = build_format_requests(
+        &a1_to_grid_range(sid, "A:A").unwrap(),
+        &FormatSpec {
+            column_width_px: Some(160),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let mut all = header;
+    all.extend(block);
+    all.extend(width);
+
+    // 5. Apply all formatting in one batchUpdate round-trip.
+    let result = c.batch_update(&id, all).await;
+    assert!(result.is_ok(), "batch_update failed: {result:?}");
+
+    // 6. No cleanup: no `delete_spreadsheet` primitive exists; throwaway
+    //    spreadsheet is intentionally left behind (matches file convention).
 }
