@@ -557,6 +557,20 @@ impl SqlConnectionPort for PgPoolAdapter {
         Ok(())
     }
 
+    async fn execute_setup_sql(&self, sql: &str) -> Result<(), SqlNodeError> {
+        // Execute the whole operator block via the simple query protocol
+        // (`raw_sql`). Postgres parses the `;` separators itself (so string
+        // literals and dollar-quoted function bodies are handled correctly),
+        // and a multi-statement simple-protocol batch runs as a SINGLE implicit
+        // transaction — any statement failure rolls the whole block back.
+        // Executing on `&*self.pool` (a `&PgPool`) avoids the HRTB error that
+        // `&mut *tx` triggers in sqlx 0.8.
+        sqlx::raw_sql(sql).execute(&*self.pool).await.map_err(|e| {
+            SqlNodeError::ExecutionError(format!("setup_sql execution failed: {}", e))
+        })?;
+        Ok(())
+    }
+
     fn is_connected(&self) -> bool {
         true
     }
@@ -876,5 +890,121 @@ mod tests {
         let _ = sqlx::query(&format!("DROP TABLE IF EXISTS {}", table))
             .execute(&*adapter.pool())
             .await;
+    }
+
+    /// A unique schema name so parallel test runs never collide.
+    fn unique_schema(prefix: &str) -> String {
+        format!(
+            "{}_{}",
+            prefix,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        )
+    }
+
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL — run with `cargo test -- --ignored`"]
+    async fn setup_sql_runs_and_is_idempotent() {
+        let Some(adapter) = test_adapter().await else {
+            eprintln!("skip: TEST_DATABASE_URL not set");
+            return;
+        };
+        let schema = unique_schema("colmena_setup");
+        let sql = format!(
+            "CREATE SCHEMA IF NOT EXISTS {s};\n\
+             CREATE TABLE IF NOT EXISTS {s}.cat (id SERIAL PRIMARY KEY, nombre TEXT UNIQUE NOT NULL);\n\
+             INSERT INTO {s}.cat (nombre) VALUES ('a'),('b') ON CONFLICT (nombre) DO NOTHING;",
+            s = schema
+        );
+
+        // First run creates schema + table + seed.
+        adapter
+            .execute_setup_sql(&sql)
+            .await
+            .expect("first setup_sql run");
+        // Second run is a no-op: no error, no duplicate seed rows.
+        adapter
+            .execute_setup_sql(&sql)
+            .await
+            .expect("second setup_sql run (idempotent)");
+
+        let count: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM {}.cat", schema))
+            .fetch_one(&*adapter.pool())
+            .await
+            .unwrap();
+        assert_eq!(count, 2, "seed must not duplicate across runs");
+
+        sqlx::query(&format!("DROP SCHEMA {} CASCADE", schema))
+            .execute(&*adapter.pool())
+            .await
+            .ok();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL — run with `cargo test -- --ignored`"]
+    async fn setup_sql_rolls_back_on_failure() {
+        let Some(adapter) = test_adapter().await else {
+            eprintln!("skip: TEST_DATABASE_URL not set");
+            return;
+        };
+        let schema = unique_schema("colmena_setup_fail");
+        // Valid CREATE SCHEMA followed by a garbage statement: the whole tx must roll back,
+        // so the schema must NOT exist afterwards.
+        let sql = format!(
+            "CREATE SCHEMA IF NOT EXISTS {s};\nTHIS IS NOT VALID SQL;",
+            s = schema
+        );
+
+        let res = adapter.execute_setup_sql(&sql).await;
+        assert!(res.is_err(), "invalid setup_sql must return an error");
+
+        let missing = adapter
+            .missing_schemas(std::slice::from_ref(&schema))
+            .await
+            .unwrap();
+        assert_eq!(
+            missing,
+            vec![schema],
+            "failed setup_sql must roll back the CREATE SCHEMA"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL — run with `cargo test -- --ignored`"]
+    async fn setup_sql_handles_semicolons_inside_string_literals() {
+        let Some(adapter) = test_adapter().await else {
+            eprintln!("skip: TEST_DATABASE_URL not set");
+            return;
+        };
+        let schema = unique_schema("colmena_setup_semic");
+        // The seed value contains a semicolon inside a string literal. A naive
+        // split on `;` would mangle this; Postgres parses it correctly.
+        let sql = format!(
+            "CREATE SCHEMA IF NOT EXISTS {s};\n\
+             CREATE TABLE IF NOT EXISTS {s}.notas (id SERIAL PRIMARY KEY, nota TEXT UNIQUE NOT NULL);\n\
+             INSERT INTO {s}.notas (nota) VALUES ('a; b; c') ON CONFLICT (nota) DO NOTHING;",
+            s = schema
+        );
+
+        adapter
+            .execute_setup_sql(&sql)
+            .await
+            .expect("setup_sql with semicolon-in-literal");
+
+        let nota: String = sqlx::query_scalar(&format!("SELECT nota FROM {}.notas", schema))
+            .fetch_one(&*adapter.pool())
+            .await
+            .unwrap();
+        assert_eq!(
+            nota, "a; b; c",
+            "semicolons inside string literals must be preserved"
+        );
+
+        sqlx::query(&format!("DROP SCHEMA {} CASCADE", schema))
+            .execute(&*adapter.pool())
+            .await
+            .ok();
     }
 }

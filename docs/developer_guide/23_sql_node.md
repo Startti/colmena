@@ -381,6 +381,71 @@ Use introspection queries to discover column details when needed.
 
 ---
 
+## Bootstrapping de entorno con `setup_sql`
+
+`setup_sql` permite que el **autor** del grafo adjunte el DDL + datos seed que el
+agente necesita, de modo que un grafo publicado **auto-provisiona su entorno** la
+primera vez que se usa. Es ideal para grafos plantilla (ej. un agente de finanzas
+que crea tickets de gastos): el consumidor lo usa directamente, sin configurar nada.
+
+### Semántica
+
+| Aspecto | Comportamiento |
+|---|---|
+| **Cuándo corre** | En el init del nodo (lazy: el primer uso de la DB en cada run). Después de provisionar `allowed_schemas` y **antes** de la introspección, así la descripción de la tool ya lista las tablas creadas. |
+| **Nivel de confianza** | Operador — **no** pasa por el validador del LLM. Permite DDL (CREATE TABLE/SCHEMA) que el `query` del LLM tiene bloqueado. El LLM nunca ve `setup_sql`. |
+| **Idempotencia** | Corre en cada init. **Debés escribirlo idempotente.** La idempotencia la garantizan tus cláusulas SQL, no un flag de estado. |
+| **Atomicidad** | Una transacción; si cualquier statement falla, rollback completo y el init **hard-failea** con `Failed to run setup_sql: ...`. |
+| **Aislamiento** | Agnóstico. El destino (otra DB, otro schema, multi-tenant RLS, compartido) sale de cómo configures `connection_url`/`allowed_schemas`/`auto_rls`. El mismo `setup_sql` sirve a los 4 modelos. |
+
+### Contrato de idempotencia
+
+| Operación | Forma idempotente |
+|---|---|
+| Schema | `CREATE SCHEMA IF NOT EXISTS finanzas;` |
+| Tabla | `CREATE TABLE IF NOT EXISTS finanzas.gastos (...);` |
+| Columna nueva | `ALTER TABLE ... ADD COLUMN IF NOT EXISTS ...;` |
+| Datos seed | `INSERT INTO ... VALUES (...) ON CONFLICT (col) DO NOTHING;` (requiere un `UNIQUE`) |
+| Índice | `CREATE INDEX IF NOT EXISTS ...;` |
+
+Un `INSERT` plano sin `ON CONFLICT` **se duplica en cada mensaje** — siempre usá `ON CONFLICT`.
+
+### Ejemplo (tool de finanzas)
+
+```json
+"tool_configurations": {
+  "gastos_db": {
+    "name": "gastos_db",
+    "node_type": "sql_query",
+    "description": "Gestiona los gastos del usuario.",
+    "node_schema": {
+      "connection_url": { "type": "string", "fixed": "${DATABASE_URL}" },
+      "permissions": {
+        "type": "object",
+        "fixed": { "preset": "read_write", "allowed_schemas": ["finanzas"] }
+      },
+      "setup_sql": {
+        "type": "string",
+        "fixed": "CREATE SCHEMA IF NOT EXISTS finanzas;\nCREATE TABLE IF NOT EXISTS finanzas.categorias (id SERIAL PRIMARY KEY, nombre TEXT UNIQUE NOT NULL);\nCREATE TABLE IF NOT EXISTS finanzas.gastos (id SERIAL PRIMARY KEY, categoria_id INT REFERENCES finanzas.categorias(id), monto NUMERIC(12,2), fecha DATE DEFAULT CURRENT_DATE, descripcion TEXT);\nINSERT INTO finanzas.categorias (nombre) VALUES ('Comida'),('Transporte'),('Hospedaje') ON CONFLICT (nombre) DO NOTHING;"
+      },
+      "query": { "type": "string", "required": true, "description": "SQL para gestionar gastos." }
+    }
+  }
+}
+```
+
+`setup_sql` va `fixed` → el LLM solo ve `query`.
+
+### Limitaciones (v1)
+
+- **No hay guard "run-once".** Corre idempotente en cada init; no hay tabla de tracking. Para setups pesados con seed no idempotente, ver BACKLOG.
+- **No hay lint de idempotencia.** El motor confía en que el SQL es idempotente.
+- **1 DB = 1 tool con setup** es el patrón esperado. Varios nodos `sql_query` a la misma DB corren cada uno su propio `setup_sql` (seguro por idempotencia, pero redundante).
+- **Aislamiento per-usuario** (otra DB / otro schema por usuario) requiere que el host (ADP) instancie el grafo fresco por run — que es como corre hoy.
+- **Todo el bloque corre en UNA transacción implícita.** Por eso **no** uses statements que no pueden ejecutarse dentro de una transacción (`CREATE INDEX CONCURRENTLY`, `VACUUM`, `REINDEX CONCURRENTLY`) — fallan en runtime y abortan el init. Tampoco pongas `BEGIN`/`COMMIT` explícitos dentro de `setup_sql`: romperían la garantía all-or-nothing (lo posterior a tu `COMMIT` no se revierte). Para índices, usá `CREATE INDEX IF NOT EXISTS` (sin `CONCURRENTLY`).
+
+---
+
 ## Multi-Tenant Row-Level Security (RLS)
 
 The SQL node supports automatic multi-tenant isolation using PostgreSQL Row-Level Security:
