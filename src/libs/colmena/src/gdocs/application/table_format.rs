@@ -271,24 +271,59 @@ fn build_text_style(
 
 /// Apply formatting ops to a doc's tables in one atomic batchUpdate.
 ///
-/// Body wired in Task 2. The `let _ = (...)` fn-pointer references below keep
-/// the Task-1 pure builder/validator + the Task-2 imports alive under the
-/// crate's `deny(warnings)` dead-code lint until the use case is implemented.
+/// Runs the non-blocking co-edit guard once, validates every op's range against
+/// the live snapshot, accumulates all `batchUpdate` requests, and finalizes in a
+/// single atomic call. Non-destructive: it changes only cell/text/paragraph
+/// style, never the cell content.
 pub async fn run_format_table(
-    _ctx: &GuardContext<'_>,
-    _doc_id: &DocumentId,
-    _ops: &[TableFormatOp],
-    _tab_id: Option<TabId>,
+    ctx: &GuardContext<'_>,
+    doc_id: &DocumentId,
+    ops: &[TableFormatOp],
+    tab_id: Option<TabId>,
 ) -> Result<EditResult, DocsError> {
-    let _ = (
-        run_guard_non_blocking,
-        apply_and_finalize,
-        find_table,
-        validate_range,
-        build_format_table_requests,
+    if ops.is_empty() {
+        return Err(DocsError::InvalidArgs(
+            "ops is empty — nothing to format".into(),
+        ));
+    }
+    let guard = run_guard_non_blocking(ctx, doc_id).await?;
+    let snap = &guard.snapshot;
+
+    let mut requests = Vec::new();
+    let mut summary_parts = Vec::new();
+    for op in ops {
+        let table = find_table(snap, op.table_index, tab_id.as_ref())?;
+        validate_range(table, &op.cell_range)?;
+        let mut reqs =
+            build_format_table_requests(table, &op.cell_range, &op.format, tab_id.as_ref())?;
+        requests.append(&mut reqs);
+        summary_parts.push(format!(
+            "table[{}] cells({}..{},{}..{})",
+            op.table_index,
+            op.cell_range.row_start,
+            op.cell_range.row_end,
+            op.cell_range.col_start,
+            op.cell_range.col_end
+        ));
+    }
+    if requests.is_empty() {
+        return Err(DocsError::InvalidArgs(
+            "ops produced no formatting requests — every op's format was empty".into(),
+        ));
+    }
+    apply_and_finalize(
+        ctx,
+        doc_id,
+        snap,
+        requests,
         ChangeKind::Style,
-    );
-    todo!("task 2")
+        0,
+        &format!("format {}", summary_parts.join("; ")),
+        tab_id,
+        vec![],
+        guard.soft_warnings,
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -535,5 +570,136 @@ mod tests {
             "border color must be an OptionalColor with rgbColor; got {}",
             cs["tableCellStyle"]["borderTop"]["color"]
         );
+    }
+
+    // ── use-case integration test (drives run_format_table via MockDocsClient) ──
+
+    /// A 1x2 table at start 5; cells' content ranges 6..8 and 8..10.
+    fn snap_with_one_table() -> crate::gdocs::domain::DocumentSnapshot {
+        use crate::gdocs::domain::{
+            DocumentId, DocumentSnapshot, ParagraphKind, ParagraphSnapshot, RevisionId, TabSnapshot,
+        };
+        DocumentSnapshot {
+            doc_id: DocumentId("d".into()),
+            revision_id: RevisionId("r1".into()),
+            title: "t".into(),
+            tabs: vec![TabSnapshot {
+                tab_id: None,
+                paragraphs: vec![ParagraphSnapshot {
+                    n: 1,
+                    kind: ParagraphKind::Paragraph,
+                    text: "hi".into(),
+                    start_index: 1,
+                    end_index: 3,
+                }],
+                tables: vec![TableSnapshot {
+                    table_index: 0,
+                    tab_id: None,
+                    start_index: 5,
+                    rows: 1,
+                    columns: 2,
+                    cells: vec![vec![cell(0, 0, 6, 8), cell(0, 1, 8, 10)]],
+                }],
+            }],
+        }
+    }
+
+    /// End-to-end: `run_format_table` drives the guard, accumulates the cell-
+    /// style + per-cell text-style requests for a header range, and finalizes in
+    /// ONE `batch_update`. Header range = row 0, cols 0..2 = 2 cells.
+    #[tokio::test]
+    async fn run_format_table_emits_one_batch_update() {
+        use crate::gdocs::application::_test_helpers::TestRig;
+        use crate::gdocs::domain::{BatchUpdateResult, DocumentId, RevisionId};
+        use std::sync::{Arc, Mutex};
+
+        let mut rig = TestRig::new();
+        let pre = snap_with_one_table();
+        let mut post = snap_with_one_table();
+        post.revision_id = RevisionId("r2".into());
+        let queue = Arc::new(Mutex::new(vec![pre, post]));
+        rig.client.expect_get().returning(move |_| {
+            let mut q = queue.lock().unwrap();
+            Ok(if q.len() > 1 {
+                q.remove(0)
+            } else {
+                q[0].clone()
+            })
+        });
+        let calls = Arc::new(Mutex::new(0usize));
+        let calls_c = calls.clone();
+        rig.client
+            .expect_batch_update()
+            .returning(move |_, requests, _| {
+                *calls_c.lock().unwrap() += 1;
+                // one cell-level updateTableCellStyle over the header range...
+                assert_eq!(
+                    requests
+                        .iter()
+                        .filter(|r| r.get("updateTableCellStyle").is_some())
+                        .count(),
+                    1
+                );
+                // ...and one updateTextStyle per cell (2 cells in the header range).
+                assert_eq!(
+                    requests
+                        .iter()
+                        .filter(|r| r.get("updateTextStyle").is_some())
+                        .count(),
+                    2
+                );
+                Ok(BatchUpdateResult {
+                    revision_id_after: RevisionId("r2".into()),
+                    replies: vec![],
+                })
+            });
+        let ctx = GuardContext {
+            client: &rig.client,
+            cache: &rig.cache,
+            revisions: &rig.revisions,
+            session_id: "s1",
+            sa_email: None,
+        };
+        let ops = vec![TableFormatOp {
+            table_index: 0,
+            cell_range: CellRange {
+                row_start: 0,
+                row_end: 1,
+                col_start: 0,
+                col_end: 2,
+            },
+            format: CellFormat {
+                background_color: Some("#1F4E78".into()),
+                text: Some(CellTextFormat {
+                    bold: Some(true),
+                    color: Some("#FFFFFF".into()),
+                    ..Default::default()
+                }),
+                horizontal_alignment: Some("CENTER".into()),
+                ..Default::default()
+            },
+        }];
+        run_format_table(&ctx, &DocumentId("d".into()), &ops, None)
+            .await
+            .unwrap();
+        assert_eq!(*calls.lock().unwrap(), 1, "exactly one batch_update");
+    }
+
+    #[tokio::test]
+    async fn run_format_table_rejects_empty_ops() {
+        use crate::gdocs::application::_test_helpers::TestRig;
+        use crate::gdocs::domain::DocumentId;
+        let rig = TestRig::new();
+        let ctx = GuardContext {
+            client: &rig.client,
+            cache: &rig.cache,
+            revisions: &rig.revisions,
+            session_id: "s1",
+            sa_email: None,
+        };
+        let err = run_format_table(&ctx, &DocumentId("d".into()), &[], None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, DocsError::InvalidArgs(_)));
     }
 }
