@@ -149,6 +149,41 @@ pub async fn run_guard(
     }
 }
 
+/// Like [`run_guard`] but for edits whose scope can't be expressed as a
+/// paragraph range (table cells). Detects human paragraph changes since the
+/// agent's cursor and returns them ALL as `soft_warnings` — it never blocks
+/// with `HumanChangesPending`. The `resolved_scope` is a doc-wide placeholder.
+pub async fn run_guard_non_blocking(
+    ctx: &GuardContext<'_>,
+    doc_id: &DocumentId,
+) -> Result<GuardOk, DocsError> {
+    let snapshot = match ctx.cache.get_fresh(ctx.session_id, doc_id) {
+        Some(s) => s,
+        None => {
+            let s = ctx.client.get(doc_id).await?;
+            ctx.cache.put(ctx.session_id, doc_id, s.clone());
+            s
+        }
+    };
+    let resolved_scope = scope_resolver::resolve(&Scope::All, &snapshot)?;
+    let (known, prior_snap) = ctx
+        .revisions
+        .get_with_snapshot(ctx.session_id, doc_id)
+        .await?;
+    let current_rev = snapshot.revision_id.clone();
+    let soft_warnings = match known {
+        Some(k) if k != current_rev => prior_snap
+            .map(|prior| paragraph_diff(&prior, &snapshot))
+            .unwrap_or_default(),
+        _ => vec![],
+    };
+    Ok(GuardOk {
+        snapshot,
+        resolved_scope,
+        soft_warnings,
+    })
+}
+
 /// Split a list of human changes into `(overlapping_scope, outside_scope)`
 /// using the resolved scope's tab + paragraph range.
 fn partition_by_scope(
@@ -357,6 +392,39 @@ mod guard_tests {
             .unwrap();
         assert_eq!(ok.soft_warnings.len(), 1);
         assert_eq!(ok.soft_warnings[0].paragraph, 2);
+        assert_eq!(ok.soft_warnings[0].kind, HumanChangeKind::Modify);
+    }
+
+    /// Non-blocking guard (table edits): drift + prior snapshot whose
+    /// paragraph text differs → never blocks, surfaces the human change as
+    /// a `soft_warning` instead of erroring with `HumanChangesPending`.
+    #[tokio::test]
+    async fn non_blocking_guard_returns_human_changes_as_soft_warnings() {
+        let mut rig = TestRig::new();
+        let prior = snap("r_old", vec![(1, ParagraphKind::Paragraph, "Hola", 1, 6)]);
+        let current = snap(
+            "r_new",
+            vec![(1, ParagraphKind::Paragraph, "Hola modificado", 1, 16)],
+        );
+        expect_get_snapshot(&mut rig.client, current);
+        rig.revisions
+            .put_with_snapshot("s1", &doc_id(), &RevisionId("r_old".into()), Some(&prior))
+            .await
+            .unwrap();
+        let ctx = GuardContext {
+            client: &rig.client,
+            cache: &rig.cache,
+            revisions: &rig.revisions,
+            session_id: "s1",
+            sa_email: None,
+        };
+        let ok = run_guard_non_blocking(&ctx, &doc_id())
+            .await
+            .expect("non-blocking guard never errors on drift");
+        assert!(
+            !ok.soft_warnings.is_empty(),
+            "human change surfaced as soft-warning"
+        );
         assert_eq!(ok.soft_warnings[0].kind, HumanChangeKind::Modify);
     }
 
