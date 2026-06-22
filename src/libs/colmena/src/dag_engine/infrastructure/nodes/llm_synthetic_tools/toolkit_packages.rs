@@ -38,7 +38,7 @@ pub static TOOLKIT_PACKAGES: &[ToolkitPackage] = &[
     },
     ToolkitPackage {
         alias: "gdocs",
-        description: "Read, write, edit, share, discover, and comment on Google Docs (29 tools)",
+        description: "Read, write, edit, share, discover, and comment on Google Docs (35 tools)",
         tools: &[
             "gdocs_create",
             "gdocs_create_from_markdown",
@@ -72,15 +72,22 @@ pub static TOOLKIT_PACKAGES: &[ToolkitPackage] = &[
             "gdocs_add_comment",
             "gdocs_list_comments",
             "gdocs_resolve_comment",
+            // Subsystem G v1.1 (2026-06-21): table edits
+            "gdocs_read_tables",
+            "gdocs_set_table_cell",
+            "gdocs_insert_table_row",
+            "gdocs_delete_table_row",
+            "gdocs_insert_table_column",
+            "gdocs_delete_table_column",
         ],
     },
     ToolkitPackage {
         // Alias has no `_` per the package-vs-tool naming convention enforced
         // by `package_aliases_have_no_underscore`. `gdocsread` is the
-        // read-only subset (9 tools — no writes; comments/permission/document
+        // read-only subset (10 tools — no writes; comments/permission/document
         // discovery listings are all reads).
         alias: "gdocsread",
-        description: "Read-only Google Docs access (9 tools — no writes)",
+        description: "Read-only Google Docs access (10 tools — no writes)",
         tools: &[
             "gdocs_export",
             "gdocs_list_tabs",
@@ -92,6 +99,8 @@ pub static TOOLKIT_PACKAGES: &[ToolkitPackage] = &[
             "gdocs_list_documents",
             "gdocs_list_permissions",
             "gdocs_list_comments",
+            // Subsystem G v1.1 (2026-06-21): table listing is a read.
+            "gdocs_read_tables",
         ],
     },
 ];
@@ -156,7 +165,7 @@ mod tests {
     #[test]
     fn gdocs_package_has_all_tools() {
         let pkg = find_package("gdocs").expect("gdocs package must exist");
-        assert_eq!(pkg.tools.len(), 29, "gdocs package must list 29 tools");
+        assert_eq!(pkg.tools.len(), 35, "gdocs package must list 35 tools");
         for required in &[
             "gdocs_create",
             "gdocs_create_from_markdown",
@@ -187,6 +196,12 @@ mod tests {
             "gdocs_add_comment",
             "gdocs_list_comments",
             "gdocs_resolve_comment",
+            "gdocs_read_tables",
+            "gdocs_set_table_cell",
+            "gdocs_insert_table_row",
+            "gdocs_delete_table_row",
+            "gdocs_insert_table_column",
+            "gdocs_delete_table_column",
         ] {
             assert!(
                 pkg.tools.contains(required),
@@ -198,7 +213,7 @@ mod tests {
     #[test]
     fn gdocsread_readonly_package_subset() {
         let pkg = find_package("gdocsread").expect("gdocsread package must exist");
-        assert_eq!(pkg.tools.len(), 9);
+        assert_eq!(pkg.tools.len(), 10);
         // Every entry must be a gdocs_* tool.
         for t in pkg.tools {
             assert!(t.starts_with("gdocs_"), "gdocsread non-gdocs tool: {t}");

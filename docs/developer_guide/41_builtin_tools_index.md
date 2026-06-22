@@ -119,6 +119,12 @@ Detailed docs: [§45 — Google Docs integration](45_gdocs.md). Design spec:
 | `gdocs_add_comment` | Post a Drive comment on a document (human ↔ agent messaging) | [§45](45_gdocs.md) |
 | `gdocs_list_comments` | List Drive comments on a document | [§45](45_gdocs.md) |
 | `gdocs_resolve_comment` | Mark a Drive comment resolved (close the thread) | [§45](45_gdocs.md) |
+| `gdocs_read_tables` | List every table in a Google Doc with a per-cell text preview | [§45](45_gdocs.md) |
+| `gdocs_set_table_cell` | Replace the plain text of a single table cell | [§45](45_gdocs.md) |
+| `gdocs_insert_table_row` | Insert a blank row into a table, above or below an existing row | [§45](45_gdocs.md) |
+| `gdocs_delete_table_row` | Delete a row from a table by 0-based index | [§45](45_gdocs.md) |
+| `gdocs_insert_table_column` | Insert a column into a table, left or right of an existing column | [§45](45_gdocs.md) |
+| `gdocs_delete_table_column` | Delete a column from a table by 0-based index | [§45](45_gdocs.md) |
 
 ## Toolkit packages
 

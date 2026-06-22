@@ -1343,25 +1343,30 @@ impl DagToolExecutor {
                 dispatch_gdocs_acknowledge_human_changes, dispatch_gdocs_add_comment,
                 dispatch_gdocs_add_tab, dispatch_gdocs_append_markdown, dispatch_gdocs_apply_edits,
                 dispatch_gdocs_create, dispatch_gdocs_create_from_markdown,
-                dispatch_gdocs_create_named_range, dispatch_gdocs_delete_text,
+                dispatch_gdocs_create_named_range, dispatch_gdocs_delete_table_column,
+                dispatch_gdocs_delete_table_row, dispatch_gdocs_delete_text,
                 dispatch_gdocs_insert_after_text, dispatch_gdocs_insert_before_text,
                 dispatch_gdocs_insert_between, dispatch_gdocs_insert_image_after_text,
+                dispatch_gdocs_insert_table_column, dispatch_gdocs_insert_table_row,
                 dispatch_gdocs_list_comments, dispatch_gdocs_list_named_ranges,
                 dispatch_gdocs_list_permissions, dispatch_gdocs_list_tabs,
                 dispatch_gdocs_read_as_markdown, dispatch_gdocs_read_outline,
-                dispatch_gdocs_replace_named_range, dispatch_gdocs_replace_section,
-                dispatch_gdocs_replace_text, dispatch_gdocs_resolve_comment, dispatch_gdocs_share,
-                dispatch_gdocs_style_text, dispatch_gdocs_unshare,
+                dispatch_gdocs_read_tables, dispatch_gdocs_replace_named_range,
+                dispatch_gdocs_replace_section, dispatch_gdocs_replace_text,
+                dispatch_gdocs_resolve_comment, dispatch_gdocs_set_table_cell,
+                dispatch_gdocs_share, dispatch_gdocs_style_text, dispatch_gdocs_unshare,
                 GDOCS_ACKNOWLEDGE_HUMAN_CHANGES_TOOL, GDOCS_ADD_COMMENT_TOOL, GDOCS_ADD_TAB_TOOL,
                 GDOCS_APPEND_MARKDOWN_TOOL, GDOCS_APPLY_EDITS_TOOL, GDOCS_CREATE_FROM_DOCX_TOOL,
                 GDOCS_CREATE_FROM_MARKDOWN_TOOL, GDOCS_CREATE_NAMED_RANGE_TOOL, GDOCS_CREATE_TOOL,
+                GDOCS_DELETE_TABLE_COLUMN_TOOL, GDOCS_DELETE_TABLE_ROW_TOOL,
                 GDOCS_DELETE_TEXT_TOOL, GDOCS_EXPORT_TOOL, GDOCS_INSERT_AFTER_TEXT_TOOL,
                 GDOCS_INSERT_BEFORE_TEXT_TOOL, GDOCS_INSERT_BETWEEN_TOOL,
-                GDOCS_INSERT_IMAGE_AFTER_TEXT_TOOL, GDOCS_LIST_COMMENTS_TOOL,
-                GDOCS_LIST_DOCUMENTS_TOOL, GDOCS_LIST_NAMED_RANGES_TOOL,
-                GDOCS_LIST_PERMISSIONS_TOOL, GDOCS_LIST_TABS_TOOL, GDOCS_READ_AS_MARKDOWN_TOOL,
-                GDOCS_READ_OUTLINE_TOOL, GDOCS_REPLACE_NAMED_RANGE_TOOL,
-                GDOCS_REPLACE_SECTION_TOOL, GDOCS_REPLACE_TEXT_TOOL, GDOCS_RESOLVE_COMMENT_TOOL,
+                GDOCS_INSERT_IMAGE_AFTER_TEXT_TOOL, GDOCS_INSERT_TABLE_COLUMN_TOOL,
+                GDOCS_INSERT_TABLE_ROW_TOOL, GDOCS_LIST_COMMENTS_TOOL, GDOCS_LIST_DOCUMENTS_TOOL,
+                GDOCS_LIST_NAMED_RANGES_TOOL, GDOCS_LIST_PERMISSIONS_TOOL, GDOCS_LIST_TABS_TOOL,
+                GDOCS_READ_AS_MARKDOWN_TOOL, GDOCS_READ_OUTLINE_TOOL, GDOCS_READ_TABLES_TOOL,
+                GDOCS_REPLACE_NAMED_RANGE_TOOL, GDOCS_REPLACE_SECTION_TOOL,
+                GDOCS_REPLACE_TEXT_TOOL, GDOCS_RESOLVE_COMMENT_TOOL, GDOCS_SET_TABLE_CELL_TOOL,
                 GDOCS_SHARE_TOOL, GDOCS_STYLE_TEXT_TOOL, GDOCS_UNSHARE_TOOL,
             };
 
@@ -1397,6 +1402,12 @@ impl DagToolExecutor {
                     || n == GDOCS_CREATE_NAMED_RANGE_TOOL
                     || n == GDOCS_REPLACE_NAMED_RANGE_TOOL
                     || n == GDOCS_ACKNOWLEDGE_HUMAN_CHANGES_TOOL
+                    || n == GDOCS_READ_TABLES_TOOL
+                    || n == GDOCS_SET_TABLE_CELL_TOOL
+                    || n == GDOCS_INSERT_TABLE_ROW_TOOL
+                    || n == GDOCS_DELETE_TABLE_ROW_TOOL
+                    || n == GDOCS_INSERT_TABLE_COLUMN_TOOL
+                    || n == GDOCS_DELETE_TABLE_COLUMN_TOOL
             );
 
             if is_gdocs_tool {
@@ -1513,6 +1524,25 @@ impl DagToolExecutor {
                     }
                     n if n == GDOCS_ACKNOWLEDGE_HUMAN_CHANGES_TOOL => {
                         dispatch_gdocs_acknowledge_human_changes(args, session_id).await
+                    }
+                    // Subsystem G v1.1 (2026-06-21): surgical table edits.
+                    n if n == GDOCS_READ_TABLES_TOOL => {
+                        dispatch_gdocs_read_tables(args, session_id).await
+                    }
+                    n if n == GDOCS_SET_TABLE_CELL_TOOL => {
+                        dispatch_gdocs_set_table_cell(args, session_id).await
+                    }
+                    n if n == GDOCS_INSERT_TABLE_ROW_TOOL => {
+                        dispatch_gdocs_insert_table_row(args, session_id).await
+                    }
+                    n if n == GDOCS_DELETE_TABLE_ROW_TOOL => {
+                        dispatch_gdocs_delete_table_row(args, session_id).await
+                    }
+                    n if n == GDOCS_INSERT_TABLE_COLUMN_TOOL => {
+                        dispatch_gdocs_insert_table_column(args, session_id).await
+                    }
+                    n if n == GDOCS_DELETE_TABLE_COLUMN_TOOL => {
+                        dispatch_gdocs_delete_table_column(args, session_id).await
                     }
                     other => serde_json::json!({
                         "error": "unknown_gdocs_tool",

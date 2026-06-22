@@ -411,3 +411,48 @@ gdocs_resolve_comment:
 
     Drive flips `resolved=true` on the parent comment. Re-listing with
     `include_resolved: false` no longer surfaces it.
+
+# ── Subsystem G v1.1 (2026-06-21): surgical table edits ──────────────────
+
+gdocs_read_tables:
+  summary: List every table in a Google Doc with a per-cell text preview
+  description: |
+    Lista todas las tablas de un Google Doc con un preview de texto por
+    celda. Devuelve por tabla: table_index (0-based, orden en el tab),
+    rows, columns, y las celdas con row/col (0-based), text_preview,
+    row_span y col_span. Úsalo SIEMPRE antes de editar una tabla para
+    obtener el table_index y las coordenadas. Funciona sobre docs
+    compartidos (usa la Docs API).
+
+gdocs_set_table_cell:
+  summary: Replace the plain text of a single table cell
+  description: |
+    Reemplaza el TEXTO PLANO de una sola celda de tabla. Direcciona con
+    table_index (de gdocs_read_tables) + row + col (todos 0-based). Una
+    celda por llamada. No acepta markdown ni estilo: solo texto. En
+    celdas fusionadas (merged) solo la celda master es editable.
+
+gdocs_insert_table_row:
+  summary: Insert a blank row into a table, above or below an existing row
+  description: |
+    Inserta una fila en una tabla, relativa a una fila existente
+    (at_row), arriba o abajo según insert_below (default true = abajo).
+    La nueva fila queda vacía.
+
+gdocs_delete_table_row:
+  summary: Delete a row from a table by 0-based index
+  description: |
+    Borra la fila row (0-based) de una tabla. No se puede borrar la
+    última fila restante.
+
+gdocs_insert_table_column:
+  summary: Insert a column into a table, left or right of an existing column
+  description: |
+    Inserta una columna en una tabla, relativa a una columna existente
+    (at_col), a la izquierda o derecha según insert_right (default true).
+
+gdocs_delete_table_column:
+  summary: Delete a column from a table by 0-based index
+  description: |
+    Borra la columna col (0-based) de una tabla. No se puede borrar la
+    última columna restante.

@@ -13,7 +13,7 @@
 
 use crate::gdocs::application::{
     apply_edits, co_edit_guard, delete_text, insert, named_range, replace_section, replace_text,
-    style,
+    style, table,
 };
 use crate::gdocs::domain::{
     DocsClient, DocsError, DocumentId, ExportFormat, NamedRangeMeta, Scope, ShareRole, StylePatch,
@@ -65,6 +65,14 @@ pub const TOOL_UNSHARE: &str = "gdocs_unshare";
 pub const TOOL_ADD_COMMENT: &str = "gdocs_add_comment";
 pub const TOOL_LIST_COMMENTS: &str = "gdocs_list_comments";
 pub const TOOL_RESOLVE_COMMENT: &str = "gdocs_resolve_comment";
+
+// Subsystem G v1.1 (2026-06-21): surgical table edits.
+pub const TOOL_READ_TABLES: &str = "gdocs_read_tables";
+pub const TOOL_SET_TABLE_CELL: &str = "gdocs_set_table_cell";
+pub const TOOL_INSERT_TABLE_ROW: &str = "gdocs_insert_table_row";
+pub const TOOL_DELETE_TABLE_ROW: &str = "gdocs_delete_table_row";
+pub const TOOL_INSERT_TABLE_COLUMN: &str = "gdocs_insert_table_column";
+pub const TOOL_DELETE_TABLE_COLUMN: &str = "gdocs_delete_table_column";
 
 // ── Process-wide singletons ───────────────────────────────────────────
 
@@ -488,6 +496,69 @@ pub struct AcknowledgeHumanChangesArgs {
     pub doc_id: String,
 }
 
+// Subsystem G v1.1 (2026-06-21): surgical table edits.
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ReadTablesArgs {
+    pub doc_id: String,
+    pub tab_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SetTableCellArgs {
+    pub doc_id: String,
+    pub table_index: u32,
+    pub row: u32,
+    pub col: u32,
+    pub text: String,
+    pub tab_id: Option<String>,
+    pub mode: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct InsertTableRowArgs {
+    pub doc_id: String,
+    pub table_index: u32,
+    pub at_row: u32,
+    #[serde(default = "default_true")]
+    pub insert_below: bool,
+    pub tab_id: Option<String>,
+    pub mode: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DeleteTableRowArgs {
+    pub doc_id: String,
+    pub table_index: u32,
+    pub row: u32,
+    pub tab_id: Option<String>,
+    pub mode: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct InsertTableColumnArgs {
+    pub doc_id: String,
+    pub table_index: u32,
+    pub at_col: u32,
+    #[serde(default = "default_true")]
+    pub insert_right: bool,
+    pub tab_id: Option<String>,
+    pub mode: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DeleteTableColumnArgs {
+    pub doc_id: String,
+    pub table_index: u32,
+    pub col: u32,
+    pub tab_id: Option<String>,
+    pub mode: Option<String>,
+}
+
 // ── Tool factories (22) ───────────────────────────────────────────────
 
 pub fn tool_create() -> ToolDefinition {
@@ -649,6 +720,56 @@ pub fn tool_resolve_comment() -> ToolDefinition {
         TOOL_RESOLVE_COMMENT,
         text::tool_description(TOOL_RESOLVE_COMMENT),
         text::tool_summary(TOOL_RESOLVE_COMMENT),
+    )
+}
+
+// Subsystem G v1.1 (2026-06-21): surgical table edits.
+
+pub fn tool_read_tables() -> ToolDefinition {
+    super::build_synthetic_tool_with_summary::<ReadTablesArgs>(
+        TOOL_READ_TABLES,
+        text::tool_description(TOOL_READ_TABLES),
+        text::tool_summary(TOOL_READ_TABLES),
+    )
+}
+
+pub fn tool_set_table_cell() -> ToolDefinition {
+    super::build_synthetic_tool_with_summary::<SetTableCellArgs>(
+        TOOL_SET_TABLE_CELL,
+        text::tool_description(TOOL_SET_TABLE_CELL),
+        text::tool_summary(TOOL_SET_TABLE_CELL),
+    )
+}
+
+pub fn tool_insert_table_row() -> ToolDefinition {
+    super::build_synthetic_tool_with_summary::<InsertTableRowArgs>(
+        TOOL_INSERT_TABLE_ROW,
+        text::tool_description(TOOL_INSERT_TABLE_ROW),
+        text::tool_summary(TOOL_INSERT_TABLE_ROW),
+    )
+}
+
+pub fn tool_delete_table_row() -> ToolDefinition {
+    super::build_synthetic_tool_with_summary::<DeleteTableRowArgs>(
+        TOOL_DELETE_TABLE_ROW,
+        text::tool_description(TOOL_DELETE_TABLE_ROW),
+        text::tool_summary(TOOL_DELETE_TABLE_ROW),
+    )
+}
+
+pub fn tool_insert_table_column() -> ToolDefinition {
+    super::build_synthetic_tool_with_summary::<InsertTableColumnArgs>(
+        TOOL_INSERT_TABLE_COLUMN,
+        text::tool_description(TOOL_INSERT_TABLE_COLUMN),
+        text::tool_summary(TOOL_INSERT_TABLE_COLUMN),
+    )
+}
+
+pub fn tool_delete_table_column() -> ToolDefinition {
+    super::build_synthetic_tool_with_summary::<DeleteTableColumnArgs>(
+        TOOL_DELETE_TABLE_COLUMN,
+        text::tool_description(TOOL_DELETE_TABLE_COLUMN),
+        text::tool_summary(TOOL_DELETE_TABLE_COLUMN),
     )
 }
 
@@ -841,6 +962,13 @@ pub fn build_all_gdocs_tools() -> Vec<ToolDefinition> {
         tool_list_comments(),
         tool_resolve_comment(),
         // Bundle 4A (2026-06-11) adds 3 Drive Comments tools.
+        // Subsystem G v1.1 (2026-06-21): surgical table edits.
+        tool_read_tables(),
+        tool_set_table_cell(),
+        tool_insert_table_row(),
+        tool_delete_table_row(),
+        tool_insert_table_column(),
+        tool_delete_table_column(),
     ]
 }
 
@@ -2024,6 +2152,227 @@ pub async fn dispatch_acknowledge_human_changes(
     serde_json::json!({"ok": true, "revision_id_now": snap.revision_id.0})
 }
 
+// Tables (Subsystem G v1.1, 2026-06-21) ─────────────────────────────────
+
+pub async fn dispatch_read_tables(args: serde_json::Value, _session_id: &str) -> serde_json::Value {
+    let parsed: ReadTablesArgs = match serde_json::from_value(args) {
+        Ok(a) => a,
+        Err(e) => return invalid_args(e),
+    };
+    let client = match shared_client().await {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    let tab = parsed.tab_id.map(TabId);
+    match table::run_read_tables(client.as_ref(), &DocumentId(parsed.doc_id), tab.as_ref()).await {
+        Ok(listing) => serde_json::json!({"ok": true, "tables": listing.tables}),
+        Err(e) => error_to_json(e),
+    }
+}
+
+pub async fn dispatch_set_table_cell(
+    args: serde_json::Value,
+    session_id: &str,
+) -> serde_json::Value {
+    let parsed: SetTableCellArgs = match serde_json::from_value(args) {
+        Ok(a) => a,
+        Err(e) => return invalid_args(e),
+    };
+    let client = match shared_client().await {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    let cache = shared_cache().await;
+    let revisions = match shared_revs().await {
+        Ok(r) => r,
+        Err(e) => return e,
+    };
+    let sa = std::env::var("COLMENA_GDOCS_SA_EMAIL").ok();
+    let ctx = co_edit_guard::GuardContext {
+        client: client.as_ref(),
+        cache: cache.as_ref(),
+        revisions: revisions.as_ref(),
+        session_id,
+        sa_email: sa.as_deref(),
+    };
+    match table::run_set_table_cell(
+        &ctx,
+        &DocumentId(parsed.doc_id),
+        parsed.table_index,
+        parsed.row,
+        parsed.col,
+        &parsed.text,
+        parsed.tab_id.map(TabId),
+    )
+    .await
+    {
+        Ok(r) => edit_result_to_json(r),
+        Err(e) => error_to_json(e),
+    }
+}
+
+pub async fn dispatch_insert_table_row(
+    args: serde_json::Value,
+    session_id: &str,
+) -> serde_json::Value {
+    let parsed: InsertTableRowArgs = match serde_json::from_value(args) {
+        Ok(a) => a,
+        Err(e) => return invalid_args(e),
+    };
+    let client = match shared_client().await {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    let cache = shared_cache().await;
+    let revisions = match shared_revs().await {
+        Ok(r) => r,
+        Err(e) => return e,
+    };
+    let sa = std::env::var("COLMENA_GDOCS_SA_EMAIL").ok();
+    let ctx = co_edit_guard::GuardContext {
+        client: client.as_ref(),
+        cache: cache.as_ref(),
+        revisions: revisions.as_ref(),
+        session_id,
+        sa_email: sa.as_deref(),
+    };
+    let doc = DocumentId(parsed.doc_id);
+    match table::run_insert_table_row(
+        &ctx,
+        &doc,
+        parsed.table_index,
+        parsed.at_row,
+        parsed.insert_below,
+        parsed.tab_id.map(TabId),
+    )
+    .await
+    {
+        Ok(r) => edit_result_to_json(r),
+        Err(e) => error_to_json(e),
+    }
+}
+
+pub async fn dispatch_delete_table_row(
+    args: serde_json::Value,
+    session_id: &str,
+) -> serde_json::Value {
+    let parsed: DeleteTableRowArgs = match serde_json::from_value(args) {
+        Ok(a) => a,
+        Err(e) => return invalid_args(e),
+    };
+    let client = match shared_client().await {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    let cache = shared_cache().await;
+    let revisions = match shared_revs().await {
+        Ok(r) => r,
+        Err(e) => return e,
+    };
+    let sa = std::env::var("COLMENA_GDOCS_SA_EMAIL").ok();
+    let ctx = co_edit_guard::GuardContext {
+        client: client.as_ref(),
+        cache: cache.as_ref(),
+        revisions: revisions.as_ref(),
+        session_id,
+        sa_email: sa.as_deref(),
+    };
+    let doc = DocumentId(parsed.doc_id);
+    match table::run_delete_table_row(
+        &ctx,
+        &doc,
+        parsed.table_index,
+        parsed.row,
+        parsed.tab_id.map(TabId),
+    )
+    .await
+    {
+        Ok(r) => edit_result_to_json(r),
+        Err(e) => error_to_json(e),
+    }
+}
+
+pub async fn dispatch_insert_table_column(
+    args: serde_json::Value,
+    session_id: &str,
+) -> serde_json::Value {
+    let parsed: InsertTableColumnArgs = match serde_json::from_value(args) {
+        Ok(a) => a,
+        Err(e) => return invalid_args(e),
+    };
+    let client = match shared_client().await {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    let cache = shared_cache().await;
+    let revisions = match shared_revs().await {
+        Ok(r) => r,
+        Err(e) => return e,
+    };
+    let sa = std::env::var("COLMENA_GDOCS_SA_EMAIL").ok();
+    let ctx = co_edit_guard::GuardContext {
+        client: client.as_ref(),
+        cache: cache.as_ref(),
+        revisions: revisions.as_ref(),
+        session_id,
+        sa_email: sa.as_deref(),
+    };
+    let doc = DocumentId(parsed.doc_id);
+    match table::run_insert_table_column(
+        &ctx,
+        &doc,
+        parsed.table_index,
+        parsed.at_col,
+        parsed.insert_right,
+        parsed.tab_id.map(TabId),
+    )
+    .await
+    {
+        Ok(r) => edit_result_to_json(r),
+        Err(e) => error_to_json(e),
+    }
+}
+
+pub async fn dispatch_delete_table_column(
+    args: serde_json::Value,
+    session_id: &str,
+) -> serde_json::Value {
+    let parsed: DeleteTableColumnArgs = match serde_json::from_value(args) {
+        Ok(a) => a,
+        Err(e) => return invalid_args(e),
+    };
+    let client = match shared_client().await {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    let cache = shared_cache().await;
+    let revisions = match shared_revs().await {
+        Ok(r) => r,
+        Err(e) => return e,
+    };
+    let sa = std::env::var("COLMENA_GDOCS_SA_EMAIL").ok();
+    let ctx = co_edit_guard::GuardContext {
+        client: client.as_ref(),
+        cache: cache.as_ref(),
+        revisions: revisions.as_ref(),
+        session_id,
+        sa_email: sa.as_deref(),
+    };
+    let doc = DocumentId(parsed.doc_id);
+    match table::run_delete_table_column(
+        &ctx,
+        &doc,
+        parsed.table_index,
+        parsed.col,
+        parsed.tab_id.map(TabId),
+    )
+    .await
+    {
+        Ok(r) => edit_result_to_json(r),
+        Err(e) => error_to_json(e),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2059,13 +2408,16 @@ mod tests {
     }
 
     #[test]
-    fn build_all_returns_29_tools() {
+    fn build_all_returns_35_tools() {
         let tools = build_all_gdocs_tools();
         // 22 v1 + 1 Bundle 2A (list_documents) + 2 Bundle 2B
         // (list_permissions, unshare) + 3 Bundle 4A
         // (add_comment, list_comments, resolve_comment)
         // + 1 (gdocs_insert_image_after_text, 2026-06-12) = 29.
-        assert_eq!(tools.len(), 29);
+        // + 6 Subsystem G v1.1 (2026-06-21) table edits
+        // (read_tables, set_table_cell, insert_table_row,
+        // delete_table_row, insert_table_column, delete_table_column) = 35.
+        assert_eq!(tools.len(), 35);
     }
 
     #[test]
