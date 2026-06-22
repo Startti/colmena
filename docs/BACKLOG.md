@@ -70,7 +70,7 @@ CRDT-specific. Ver banner detallado al inicio del bloque CRDT.
 - **Toolkit auto-inject package description** → polish. [Toolkit packages v1.1](#toolkit-packages-v11)
 - **`overwrite` mode E2E coverage** → solo QA, riesgo bajo. [overwrite mode E2E coverage](#sheets-write-safety-v11--overwrite-mode-e2e-coverage)
 
-**Recomendación de secuencia:** batch de 🟢 quick wins (≈medio día) → **surgical table-cell edits** (mejor ratio impacto/esfuerzo concreto) → abrir brainstorm de Item 14 cuando el owner pueda dar el use-case real.
+**Recomendación de secuencia:** ✅ quick wins + ✅ surgical table-cell edits (SHIPPED 2026-06-21, §46) hechos → próximo: **Cell formatting de Sheets** (mejor ratio impacto/esfuerzo restante) → abrir brainstorm de Item 14 cuando el owner pueda dar el use-case real.
 
 ---
 

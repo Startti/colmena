@@ -342,11 +342,12 @@ For overrides (custom alias, `expose_sub_tools` filtering, `cache_ttl_seconds`, 
   [`docs/developer_guide/45_gdocs.md`](docs/developer_guide/45_gdocs.md)
   and the spec at
   [`docs/superpowers/specs/2026-06-08-google-docs-design.md`](docs/superpowers/specs/2026-06-08-google-docs-design.md).
-  v1 limitations: `mode: "suggest"`, surgical table-cell edits,
-  markdown tables in inserts, image insertion, and attachment plumbing
-  for `gdocs_create_from_docx` / `gdocs_export` → all v1.1
-  (see BACKLOG "Subsystem G v1.1"). Purely additive — no breaking
-  changes; ADP unaffected unless it opts in via `enabled_tools`.
+  v1.1 shipped: surgical table-cell edits (§46, 2026-06-21 — 6 table tools,
+  gdocs 22→35), image insertion (§32/§43), and attachment plumbing for
+  `gdocs_create_from_docx` / `gdocs_export` (Bundle 1). Still open in v1.1:
+  `mode: "suggest"` and markdown tables in inserts (see BACKLOG
+  "Subsystem G v1.1"). Purely additive — no breaking changes; ADP
+  unaffected unless it opts in via `enabled_tools`.
 - **SQL node multi-statement shipped 2026-06-09** — `execute_query` refactored
   to Política C: iterate AST statements one-by-one in a single atomic transaction.
   Fixes 'cannot insert multiple commands into a prepared statement' error
