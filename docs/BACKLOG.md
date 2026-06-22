@@ -681,6 +681,18 @@ Items derivados de la implementación de Subsystem D (formulas v1, 2026-06-04 �
   [`docs/developer_guide/47_google_oauth.md`](developer_guide/47_google_oauth.md).
 - [ ] **Cell formatting** — colors, borders, column widths via
   `batchUpdate` + `repeatCell`/`updateBorders`.
+- [ ] **Read formula+value clarity / combined read mode.** Hoy `gsheets_read`
+  expone `value_render` (`UNFORMATTED_VALUE` default → resultado calculado;
+  `FORMULA` → texto de la fórmula; `FORMATTED_VALUE` → display locale). Son
+  **mutuamente excluyentes**: una lectura devuelve UNA cosa, no fórmula+valor
+  juntos. Las fórmulas SÍ se escriben hoy (USER_ENTERED, ya documentado) — el
+  gap es de **lectura**: (a) doc-clarity — la descripción de `gsheets_read` no
+  le explica al LLM cuándo usar `FORMULA` (auditar/preservar fórmulas) ni que
+  por default ve el resultado, no la fórmula (~30min, quick win); (b) opcional
+  — un modo combinado fórmula+valor (dos fetches internos `UNFORMATTED_VALUE` +
+  `FORMULA` fusionados en una respuesta) para que el agente vea ambos sin 2
+  llamadas (~2-3h). Sin trigger concreto aún; (a) es quick-win, (b) requiere
+  use-case.
 - [ ] **Charts** via `batchUpdate.addChart`.
 - [ ] **Conditional formatting** via `batchUpdate.addConditionalFormatRule`.
 - [ ] **Data validation (dropdowns)** via `batchUpdate.setDataValidation`.
