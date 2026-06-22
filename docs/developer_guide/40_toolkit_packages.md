@@ -17,7 +17,7 @@ the engine expands the alias to its 10 tools at runtime.
 "enabled_tools": ["gsheets"]
 ```
 
-Expands to all 10 gsheets tools (`gsheets_create_spreadsheet`, `gsheets_read`, etc.).
+Expands to all 11 gsheets tools (`gsheets_create_spreadsheet`, `gsheets_read`, `gsheets_format_range`, etc.).
 
 ### Package plus individual tools
 

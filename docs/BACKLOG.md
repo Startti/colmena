@@ -682,6 +682,25 @@ Items derivados de la implementación de Subsystem D (formulas v1, 2026-06-04 �
 - [x] **Cell formatting** — colors, borders, column widths via
   `batchUpdate` + `repeatCell`/`updateBorders`. — **SHIPPED 2026-06-22**
   (§47; `gsheets_format_range`; text/background/borders/alignment/number/wrap/column-width/row-height; gsheets 10→11; non-destructive).
+- [ ] **Formato rico por default + mini-skill de "presentable output".**
+  **Origen:** observación en el E2E del 2026-06-22 — el tool `gsheets_format_range`
+  está completo (verificado live: moneda, bordes, bg, bold, anchos), pero
+  `gemini-2.5-flash` lo SUBUTILIZA con prompts abiertos ("hacelo profesional")
+  → solo aplica alineación. Con ops explícitas aplica todo. El gap es de
+  *prompting/guía al modelo*, no del tool. Objetivo: que los agentes formateen
+  rico **por default** sin que el usuario lo pida campo por campo.
+  - (a) **Mini-skill** (built-in, opt-in vía `tool_configurations.<tool>.skills`,
+    reusa la infra de Skills + layered tool context) — `gsheets-presentable-output`:
+    receta de formato profesional (header bold+bg+centrado, moneda/%, bordes de
+    tabla, fila de totales destacada, anchos), patrón "una llamada multi-op",
+    y recordatorio de que formato ≠ valores. Mismo shape que la built-in
+    `sql-query-best-practices`. Aplica también a `gdocs` table formatting cuando
+    exista (ver "Formato de celdas de tabla en gdocs" en Subsystem G v1.1).
+  - (b) **Enriquecer la descripción del tool** (`gsheets.yaml`) con un ejemplo
+    multi-op completo (header+moneda+bordes+totales) para que el modelo vea el
+    patrón rico aunque no cargue el skill.
+  - Esfuerzo ~½d. Sin cambios de código del tool (solo text/skill). Verificar
+    live que un prompt abierto produzca formato rico tras el cambio.
 - [ ] **Read formula+value clarity / combined read mode.** Hoy `gsheets_read`
   expone `value_render` (`UNFORMATTED_VALUE` default → resultado calculado;
   `FORMULA` → texto de la fórmula; `FORMATTED_VALUE` → display locale). Son
