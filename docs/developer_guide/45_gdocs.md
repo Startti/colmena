@@ -1,6 +1,7 @@
 # 45. Google Docs integration (Subsystem G)
 
-> v1 ships 22 synthetic LLM tools que reflejan el modelo de edición
+> 35 synthetic LLM tools (v1 core + 6 table-edit tools, v1.1 2026-06-21)
+> que reflejan el modelo de edición
 > quirúrgica direccionada por contenido — el agente describe **qué**
 > cambiar (texto, encabezado, named range), nunca offsets UTF-16. Soporte
 > multi-tab, conversión markdown ↔ Docs con detección de pérdidas, y
@@ -48,7 +49,7 @@ Habilita la superficie completa con un solo alias:
 "enabled_tools": ["gdocs"]
 ```
 
-Esto expande a los 22 tools `gdocs_*` (verificado live 2026-06-09 —
+Esto expande a los 35 tools `gdocs_*` (verificado live 2026-06-21 —
 todos los dispatchers llegan al LLM vía la resolución de `enabled_tools`).
 Para un agente de solo-lectura usa el alias reducido:
 
@@ -58,9 +59,10 @@ Para un agente de solo-lectura usa el alias reducido:
 
 `gdocsread` excluye todos los tools que mutan el doc (replace_*,
 insert_*, delete_*, append_*, apply_edits, style_*, *_named_range,
-create*, share, add_tab, acknowledge_*). Quedan 6 tools de lectura
-(list_tabs, read_as_markdown, read_outline, list_named_ranges, export
-en modo readonly).
+create*, share, add_tab, acknowledge_*). Quedan 10 tools de lectura
+(list_tabs, read_as_markdown, read_outline, list_named_ranges,
+read_tables, export, acknowledge_human_changes, list_documents,
+list_permissions, list_comments).
 
 **Sintaxis de exclusión `!toolname`.** Igual que en otros toolkits —
 verificada live 2026-06-09 con el patrón típico "todo gdocs excepto
@@ -76,7 +78,7 @@ agente nunca debe llamar `create_*`.
 
 Ver [40_toolkit_packages.md](40_toolkit_packages.md).
 
-## Tool surface (34 tools)
+## Tool surface (35 tools)
 
 ### Creación y administración
 

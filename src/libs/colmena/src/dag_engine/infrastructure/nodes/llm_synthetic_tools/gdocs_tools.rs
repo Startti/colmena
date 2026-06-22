@@ -502,60 +502,97 @@ fn default_true() -> bool {
     true
 }
 
+/// Args for `gdocs_read_tables` — list every table with a per-cell preview.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ReadTablesArgs {
+    /// Drive id of the target document.
     pub doc_id: String,
+    /// Optional tab id to restrict the listing to a single tab.
     pub tab_id: Option<String>,
 }
 
+/// Args for `gdocs_set_table_cell` — replace one cell's plain text.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SetTableCellArgs {
+    /// Drive id of the target document.
     pub doc_id: String,
+    /// 0-based table index, from gdocs_read_tables (order within the tab).
     pub table_index: u32,
+    /// 0-based row index, from gdocs_read_tables.
     pub row: u32,
+    /// 0-based column index, from gdocs_read_tables.
     pub col: u32,
+    /// New cell content. Plain text only, no markdown or styling.
     pub text: String,
+    /// Optional tab id when the table lives in a specific tab.
     pub tab_id: Option<String>,
+    /// Edit mode; v1 only supports the default "direct".
     pub mode: Option<String>,
 }
 
+/// Args for `gdocs_insert_table_row` — insert a blank row.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct InsertTableRowArgs {
+    /// Drive id of the target document.
     pub doc_id: String,
+    /// 0-based table index, from gdocs_read_tables.
     pub table_index: u32,
+    /// 0-based index of the reference row, from gdocs_read_tables.
     pub at_row: u32,
+    /// Default true; true = insert below at_row, false = above.
     #[serde(default = "default_true")]
     pub insert_below: bool,
+    /// Optional tab id when the table lives in a specific tab.
     pub tab_id: Option<String>,
+    /// Edit mode; v1 only supports the default "direct".
     pub mode: Option<String>,
 }
 
+/// Args for `gdocs_delete_table_row` — delete a row by index.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct DeleteTableRowArgs {
+    /// Drive id of the target document.
     pub doc_id: String,
+    /// 0-based table index, from gdocs_read_tables.
     pub table_index: u32,
+    /// 0-based row index to delete, from gdocs_read_tables.
     pub row: u32,
+    /// Optional tab id when the table lives in a specific tab.
     pub tab_id: Option<String>,
+    /// Edit mode; v1 only supports the default "direct".
     pub mode: Option<String>,
 }
 
+/// Args for `gdocs_insert_table_column` — insert a blank column.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct InsertTableColumnArgs {
+    /// Drive id of the target document.
     pub doc_id: String,
+    /// 0-based table index, from gdocs_read_tables.
     pub table_index: u32,
+    /// 0-based index of the reference column, from gdocs_read_tables.
     pub at_col: u32,
+    /// Default true; true = insert right of at_col, false = left.
     #[serde(default = "default_true")]
     pub insert_right: bool,
+    /// Optional tab id when the table lives in a specific tab.
     pub tab_id: Option<String>,
+    /// Edit mode; v1 only supports the default "direct".
     pub mode: Option<String>,
 }
 
+/// Args for `gdocs_delete_table_column` — delete a column by index.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct DeleteTableColumnArgs {
+    /// Drive id of the target document.
     pub doc_id: String,
+    /// 0-based table index, from gdocs_read_tables.
     pub table_index: u32,
+    /// 0-based column index to delete, from gdocs_read_tables.
     pub col: u32,
+    /// Optional tab id when the table lives in a specific tab.
     pub tab_id: Option<String>,
+    /// Edit mode; v1 only supports the default "direct".
     pub mode: Option<String>,
 }
 

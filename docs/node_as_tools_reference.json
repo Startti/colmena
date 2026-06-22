@@ -1621,17 +1621,23 @@
     },
 
     "gdocs": {
-      "summary": "Synthetic LLM tools for Google Docs (subsystem G v1). 22 tools that let the agent create, read, share, export, and surgically edit Google Docs via content-addressed operations — the LLM specifies WHAT to change (text, heading, named range) and never computes UTF-16 indices. Multi-tab supported. Markdown ↔ Docs conversion with structured `lossy_conversions` reporting. Co-edit safety via Drive Revisions + postgres table `gdocs_session_state(agent_session_id, document_id, last_revision_id)`. Auth via Service Account JSON (GOOGLE_APPLICATION_CREDENTIALS) or Application Default Credentials. Requires `COLMENA_GDOCS_DEFAULT_PARENT_FOLDER_ID` (or per-call `parent_folder_id`) for create. Two toolkit aliases: `gdocs` (full 22 tools), `gdocsread` (read-only 6 tools). See docs/developer_guide/45_gdocs.md.",
+      "summary": "Synthetic LLM tools for Google Docs (subsystem G v1). 35 tools that let the agent create, read, share, export, and surgically edit Google Docs via content-addressed operations — the LLM specifies WHAT to change (text, heading, named range) and never computes UTF-16 indices. Multi-tab supported. Markdown ↔ Docs conversion with structured `lossy_conversions` reporting. Co-edit safety via Drive Revisions + postgres table `gdocs_session_state(agent_session_id, document_id, last_revision_id)`. Auth via Service Account JSON (GOOGLE_APPLICATION_CREDENTIALS) or Application Default Credentials. Requires `COLMENA_GDOCS_DEFAULT_PARENT_FOLDER_ID` (or per-call `parent_folder_id`) for create. Two toolkit aliases: `gdocs` (full 35 tools), `gdocsread` (read-only 10 tools). See docs/developer_guide/45_gdocs.md.",
       "synthetic_tools": [
         "gdocs_create", "gdocs_create_from_markdown", "gdocs_create_from_docx",
         "gdocs_share", "gdocs_export",
         "gdocs_list_tabs", "gdocs_add_tab",
         "gdocs_read_as_markdown", "gdocs_read_outline", "gdocs_list_named_ranges",
         "gdocs_replace_text", "gdocs_insert_after_text", "gdocs_insert_before_text",
-        "gdocs_insert_between", "gdocs_delete_text", "gdocs_replace_section",
+        "gdocs_insert_between", "gdocs_insert_image_after_text",
+        "gdocs_delete_text", "gdocs_replace_section",
         "gdocs_append_markdown", "gdocs_apply_edits", "gdocs_style_text",
         "gdocs_create_named_range", "gdocs_replace_named_range",
-        "gdocs_acknowledge_human_changes"
+        "gdocs_acknowledge_human_changes",
+        "gdocs_list_documents", "gdocs_list_permissions", "gdocs_unshare",
+        "gdocs_add_comment", "gdocs_list_comments", "gdocs_resolve_comment",
+        "gdocs_read_tables", "gdocs_set_table_cell",
+        "gdocs_insert_table_row", "gdocs_delete_table_row",
+        "gdocs_insert_table_column", "gdocs_delete_table_column"
       ],
       "how_exposed": "Add `\"gdocs\"` to llm_call.config.enabled_tools (flag-only activation). For read-only agents use `\"gdocsread\"` (excludes all write/share/create/edit tools). No tool_configurations entry required. Auth resolves at first call via GOOGLE_APPLICATION_CREDENTIALS or ADC.",
       "lifecycle": "Each call makes one or more HTTPS requests to docs.googleapis.com / drive.googleapis.com. Tokens cached 50 min. Outline cached per-revision (TTL via COLMENA_GDOCS_REVISION_CACHE_SECS, default 5s). Before every write the co-edit guard checks the current Drive revision against the cursor stored in postgres `gdocs_session_state` keyed on (agent_session_id, document_id); divergence yields a structured `human_changes_pending` error.",
