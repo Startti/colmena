@@ -422,11 +422,12 @@ async fn image_upload_public_insert_delete_roundtrip() {
 /// This stand-in keeps state in a `Mutex<HashMap>` and is enough for the
 /// table roundtrip: the non-blocking guard treats first-contact (`None`)
 /// as "proceed without diffing", then persists the post-write revision.
+/// `(agent_session_id, doc_id) -> (last_revision, post-write snapshot)`.
+type ItRevMap = std::collections::HashMap<(String, String), (RevisionId, Option<DocumentSnapshot>)>;
+
 #[derive(Default)]
 struct ItRevisionStore {
-    map: std::sync::Mutex<
-        std::collections::HashMap<(String, String), (RevisionId, Option<DocumentSnapshot>)>,
-    >,
+    map: std::sync::Mutex<ItRevMap>,
 }
 
 #[async_trait::async_trait]

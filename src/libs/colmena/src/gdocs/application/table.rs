@@ -84,7 +84,7 @@ fn find_table<'a>(
 
 /// Locate a cell in a table, erroring clearly when out of range or covered
 /// by a merge (slave positions are absent from the parsed grid).
-fn find_cell<'a>(t: &'a TableSnapshot, row: u32, col: u32) -> Result<&'a CellSnapshot, DocsError> {
+fn find_cell(t: &TableSnapshot, row: u32, col: u32) -> Result<&CellSnapshot, DocsError> {
     t.cells
         .get(row as usize)
         .and_then(|r| r.iter().find(|c| c.col == col))
