@@ -806,6 +806,18 @@ Items derivados de la implementación de Subsystem D (formulas v1, 2026-06-04 �
   las convierte nativamente desde markdown en `create_from_markdown`)
   pero el agente no puede editar celdas individuales sin un round-trip
   manual. — **SHIPPED 2026-06-21** (gdocs 29→35; read_tables + set_table_cell + insert/delete row+column; columnas INCLUIDAS; texto plano v1).
+- [ ] **Formato de celdas de tabla en gdocs** (`gdocs_format_table_cell` o
+  similar). Complementa a `gdocs_set_table_cell` (que solo escribe texto
+  plano): aplicar estilo a una celda o rango de celdas de una tabla —
+  bold/italic/underline, color de texto, **color de fondo de celda**,
+  bordes, alineación, y posiblemente ancho de columna. Vía Docs API
+  `batchUpdate` con `updateTableCellStyle` (fondo/bordes/padding/alineación
+  vertical) + `updateTextStyle` sobre el rango de la celda (texto). Reusa el
+  modelo de direccionamiento de `gdocs_read_tables` (0-based table_index +
+  row/col) y el co-edit guard no-bloqueante ya existentes. **Distinto del
+  item "Cell formatting" de Subsystem E** (ése es para Google Sheets, no
+  para tablas dentro de un Doc). Esfuerzo estimado ~1.5-2d. Sin trigger de
+  use-case concreto aún — abrir brainstorm cuando se priorice.
 - [x] **`gdocs_insert_image_after_text`** — **SHIPPED COMPLETO** (paths i + ii/iii).
   - **Path (i) URL-only SHIPPED 2026-06-12** (CHANGELOG §32). El tool inserta
     una imagen inline tras un anchor; `image_url` debe ser una URL http(s) pública.
