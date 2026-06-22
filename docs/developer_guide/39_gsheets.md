@@ -1,6 +1,6 @@
 # 39. Google Sheets integration (Subsystem E)
 
-> v1 ships 9 synthetic LLM tools mirroring `crdt_doc_*` shape — agents
+> v1.1 ships 11 synthetic LLM tools mirroring `crdt_doc_*` shape — agents
 > read, write, create, and analyse Google Sheets via the Sheets API v4 +
 > Drive API. Auth via Service Account JSON or Application Default
 > Credentials. No OAuth user-scoped flow in v1.
@@ -13,7 +13,7 @@ Enable the whole gsheets surface with one alias:
 "enabled_tools": ["gsheets"]
 ```
 
-This expands to all 10 gsheets tools via the toolkit-packages registry.
+This expands to all 11 gsheets tools via the toolkit-packages registry.
 For a read-only-style agent, exclude write tools:
 
 ```json
@@ -42,6 +42,7 @@ See [40_toolkit_packages.md](40_toolkit_packages.md) for the full syntax and exc
 | `gsheets_run_python` | **Preferred for analysis.** Run sandboxed pandas/numpy/scipy code against one or more sheet ranges loaded server-side — rows NEVER pass through the LLM context. See section below. |
 | `gsheets_set_cell` | Write one cell. Strings starting with `=` are evaluated by Google server-side. |
 | `gsheets_set_range` | Bulk-write a rectangular block. Same formula semantics. |
+| `gsheets_format_range` | Apply cell formatting (text style, background, borders, alignment, number format, column width, row height) to one or more ranges in a single atomic `batchUpdate`. **Non-destructive** — never touches values/formulas. See "Cell formatting" below. |
 
 UX aliases (per D-T16 lessons): `address` ↔ `addr`, `start` ↔ `start_addr`,
 `values` ↔ `values_2d`, `name` ↔ `sheet`. Single-A1 ranges
@@ -70,6 +71,86 @@ server-side. Write a string starting with `=` to `gsheets_set_cell` /
 `gsheets_set_range` and Google parses, evaluates, and cascades it. Read
 back via `gsheets_read(..., value_render="UNFORMATTED_VALUE")` to get
 the computed number, or `value_render="FORMULA"` to get the text.
+
+## Cell formatting: `gsheets_format_range` (E v1.1)
+
+`gsheets_format_range` applies **presentation** to cells — text style,
+colors, borders, alignment, number format, column width, row height — to
+one or more ranges in a single **atomic** `spreadsheets.batchUpdate`. It
+is **separate from value writes**: it never touches cell values or
+formulas. To write values/formulas use `gsheets_set_cell` /
+`gsheets_set_range` (USER_ENTERED); to *style* what's already there use
+this tool.
+
+### Shape — `ops` list
+
+The tool takes an `ops` array; each op targets one range with one
+`format` block. All ops fan out into a single atomic `batchUpdate`
+(internally to `repeatCell` / `updateBorders` / `updateDimensionProperties`):
+
+```json
+{
+  "spreadsheet_id": "<id>",
+  "ops": [
+    {
+      "sheet": "Ventas",
+      "range": "A1:D1",
+      "format": { ... }
+    }
+  ]
+}
+```
+
+- **`sheet`** — tab name (string) or numeric `sheetId`.
+- **`range`** — A1 notation (e.g. `"A1:D1"`, `"B:B"` for a whole
+  column). Addressing is 0-based internally.
+- **`format`** — all fields optional; only the ones you set are applied.
+
+### `format` fields (all optional)
+
+| Field | Values |
+|---|---|
+| `text` | `{ bold, italic, underline, strikethrough, font_size, font_family, color }` — `color` is hex `#RRGGBB`. |
+| `background_color` | hex `#RRGGBB` |
+| `horizontal_alignment` | `LEFT` \| `CENTER` \| `RIGHT` |
+| `vertical_alignment` | `TOP` \| `MIDDLE` \| `BOTTOM` |
+| `number_format` | `{ type, pattern? }` (e.g. currency / percent / date; optional explicit `pattern`) |
+| `wrap` | `OVERFLOW` \| `CLIP` \| `WRAP` |
+| `borders` | `{ top, bottom, left, right, inner_horizontal, inner_vertical }`, each `{ style, color? }` (`color` hex `#RRGGBB`) |
+| `column_width_px` | integer pixels (applies to the range's columns) |
+| `row_height_px` | integer pixels (applies to the range's rows) |
+
+Colors everywhere are hex `#RRGGBB`.
+
+### Non-destructive: precise `fields` mask
+
+Each op is sent with a tight `fields` mask, so setting one attribute
+(e.g. just `background_color`) does **not** wipe sibling attributes
+(bold, alignment, etc.) already on those cells. There is **no co-edit
+guard** — formatting is idempotent and safe to re-apply.
+
+### Example — bold white header on a blue background, centered
+
+```json
+{
+  "spreadsheet_id": "<id>",
+  "ops": [
+    {
+      "sheet": "Ventas",
+      "range": "A1:D1",
+      "format": {
+        "text": { "bold": true, "color": "#FFFFFF" },
+        "background_color": "#1155CC",
+        "horizontal_alignment": "CENTER"
+      }
+    }
+  ]
+}
+```
+
+Source:
+`src/libs/colmena/src/gsheets/application/format.rs` (A1→GridRange +
+hex→RgbColor helpers) and the `gsheets_format_range` dispatcher.
 
 ## Pandas analysis flow
 
@@ -316,17 +397,24 @@ See [`docs/superpowers/specs/2026-06-06-sheets-write-safety-design.md`](../super
   value types, errors.
 - `src/libs/colmena/src/gsheets/infrastructure/` — REST adapter
   (`http_client.rs`), auth (`auth.rs`), config (`config.rs`).
+- `src/libs/colmena/src/gsheets/application/format.rs` — `gsheets_format_range`
+  format builder: A1→`GridRange` + hex→`RgbColor` helpers, `fields`-mask
+  assembly, fan-out to `repeatCell` / `updateBorders` / `updateDimensionProperties`.
 - `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/gsheets_tools.rs` —
-  9 dispatchers.
+  the gsheets dispatchers.
 
 ## Out of scope for v1 (BACKLOG)
 
-See "Subsystem E v1.1" in `docs/BACKLOG.md`: list_spreadsheets discovery,
-OAuth user-scoped auth, cell formatting, charts, conditional formatting,
-permissions / sharing, revisions, webhooks, plus the E-T7b xlsx
-attachment plumbing.
+See "Subsystem E v1.1" in `docs/BACKLOG.md`: charts, conditional
+formatting, data validation, revisions, webhooks. (list_spreadsheets
+discovery, OAuth user-scoped auth, cell formatting, permissions /
+sharing, and the E-T7b xlsx attachment plumbing have all shipped.)
 
 ## Spec + plan
 
 - Spec: `docs/superpowers/specs/2026-06-05-google-sheets-design.md`
 - Plan: `docs/superpowers/plans/2026-06-05-google-sheets.md`
+- Cell formatting (E v1.1) — spec:
+  `docs/superpowers/specs/2026-06-22-gsheets-cell-formatting-design.md`,
+  plan: `docs/superpowers/plans/2026-06-22-gsheets-cell-formatting.md`,
+  E2E graph: `tests/graphs/agents/gsheets_format_range_e2e.json`.

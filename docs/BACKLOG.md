@@ -53,7 +53,7 @@ CRDT-specific. Ver banner detallado al inicio del bloque CRDT.
 | Item | Esfuerzo | Impacto | Sección |
 |---|---|---|---|
 | ✅ ~~**Surgical table-cell edits** (`gdocs_set_table_cell`, `insert_table_row`)~~ — SHIPPED 2026-06-21 (§46; gdocs 29→35; read_tables + set_table_cell + insert/delete row+column; columnas INCLUIDAS; texto plano v1) | ~2d | **Alto** — desbloquea edición de celdas de tabla | [§46](CHANGELOG_2026-06.md) |
-| **Cell formatting** Sheets (colors/borders/widths) | ~2d | Med-Alto — output pulido es pedido frecuente | [Subsystem E v1.1](#subsystem-e-v11-google-sheets) |
+| ✅ ~~**Cell formatting** Sheets (colors/borders/widths)~~ — SHIPPED 2026-06-22 (§47; `gsheets_format_range`; gsheets 10→11; non-destructive) | ~2d | Med-Alto — output pulido es pedido frecuente | [§47](CHANGELOG_2026-06.md) |
 | Markdown tables en insert/replace | ~4-5h | Med — hoy se rechazan duro | [Subsystem G v1.1](#subsystem-g-v11-google-docs) |
 | `append`/`upsert`/`delete_where` sheet modes | ~3-4d | Med — sin trigger concreto aún | [append / upsert / delete_where modes](#sheets-write-safety-v11--append--upsert--delete_where-modes) |
 
@@ -70,7 +70,7 @@ CRDT-specific. Ver banner detallado al inicio del bloque CRDT.
 - **Toolkit auto-inject package description** → polish. [Toolkit packages v1.1](#toolkit-packages-v11)
 - **`overwrite` mode E2E coverage** → solo QA, riesgo bajo. [overwrite mode E2E coverage](#sheets-write-safety-v11--overwrite-mode-e2e-coverage)
 
-**Recomendación de secuencia:** ✅ quick wins + ✅ surgical table-cell edits (SHIPPED 2026-06-21, §46) hechos → próximo: **Cell formatting de Sheets** (mejor ratio impacto/esfuerzo restante) → abrir brainstorm de Item 14 cuando el owner pueda dar el use-case real.
+**Recomendación de secuencia:** ✅ quick wins + ✅ surgical table-cell edits (SHIPPED 2026-06-21, §46) + ✅ Cell formatting de Sheets (SHIPPED 2026-06-22, §47) hechos → próximo: **markdown tables en insert/replace** (gdocs — hoy se rechazan duro; ~4-5h, siguiente 🟡 medium bet) → abrir brainstorm de Item 14 cuando el owner pueda dar el use-case real.
 
 ---
 
@@ -679,8 +679,9 @@ Items derivados de la implementación de Subsystem D (formulas v1, 2026-06-04 �
   `SheetsAuthProvider` separada porque la auth quedó unificada al
   user `agents@startti.co`. Guía:
   [`docs/developer_guide/47_google_oauth.md`](developer_guide/47_google_oauth.md).
-- [ ] **Cell formatting** — colors, borders, column widths via
-  `batchUpdate` + `repeatCell`/`updateBorders`.
+- [x] **Cell formatting** — colors, borders, column widths via
+  `batchUpdate` + `repeatCell`/`updateBorders`. — **SHIPPED 2026-06-22**
+  (§47; `gsheets_format_range`; text/background/borders/alignment/number/wrap/column-width/row-height; gsheets 10→11; non-destructive).
 - [ ] **Read formula+value clarity / combined read mode.** Hoy `gsheets_read`
   expone `value_render` (`UNFORMATTED_VALUE` default → resultado calculado;
   `FORMULA` → texto de la fórmula; `FORMATTED_VALUE` → display locale). Son
