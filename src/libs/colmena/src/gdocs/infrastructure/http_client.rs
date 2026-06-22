@@ -14,9 +14,10 @@
 //! `todo!("filled by Task N")` stubs that compile until then.
 
 use crate::gdocs::domain::{
-    BatchUpdateResult, CreateFromMarkdownResult, DocsClient, DocsError, DocumentId, DocumentMeta,
-    DocumentSnapshot, ExportFormat, LossyConversion, NamedRangeMeta, OutlineEntry, ParagraphKind,
-    ParagraphSnapshot, RevisionId, RevisionMeta, Scope, ShareRole, TabId, TabMeta, TabSnapshot,
+    BatchUpdateResult, CellSnapshot, CreateFromMarkdownResult, DocsClient, DocsError, DocumentId,
+    DocumentMeta, DocumentSnapshot, ExportFormat, LossyConversion, NamedRangeMeta, OutlineEntry,
+    ParagraphKind, ParagraphSnapshot, RevisionId, RevisionMeta, Scope, ShareRole, TabId, TabMeta,
+    TabSnapshot, TableSnapshot,
 };
 use crate::gdocs::infrastructure::auth::TokenCache;
 use crate::gdocs::infrastructure::config::GDocsConfig;
@@ -234,14 +235,23 @@ pub(crate) fn parse_snapshot(
                 .cloned()
                 .unwrap_or_default();
             let paragraphs = parse_paragraphs(&body_arr, &mut para_counter);
-            tabs.push(TabSnapshot { tab_id, paragraphs });
+            let mut table_counter: u32 = 0;
+            let tables = parse_tables(&body_arr, &tab_id, &mut table_counter);
+            tabs.push(TabSnapshot {
+                tab_id,
+                paragraphs,
+                tables,
+            });
         }
     } else if let Some(body) = j.pointer("/body/content").and_then(|v| v.as_array()) {
         // Legacy single-tab doc.
         let paragraphs = parse_paragraphs(body, &mut para_counter);
+        let mut table_counter: u32 = 0;
+        let tables = parse_tables(body, &None, &mut table_counter);
         tabs.push(TabSnapshot {
             tab_id: None,
             paragraphs,
+            tables,
         });
     }
 
@@ -273,6 +283,99 @@ fn parse_paragraphs(content: &[serde_json::Value], counter: &mut u32) -> Vec<Par
         // to the agent).
     }
     out
+}
+
+/// Parse `table` structural elements out of a body `content[]` array.
+/// `table_counter` yields the 0-based `table_index` (reset per tab by the
+/// caller, mirroring how the agent addresses tables). Indices come straight
+/// from the Docs API (UTF-16) — no manual math.
+fn parse_tables(
+    content: &[serde_json::Value],
+    tab_id: &Option<TabId>,
+    table_counter: &mut u32,
+) -> Vec<TableSnapshot> {
+    let mut out = Vec::new();
+    for elem in content {
+        let Some(table) = elem.get("table") else {
+            continue;
+        };
+        let start_index = elem.get("startIndex").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+        let rows = table.get("rows").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+        let columns = table.get("columns").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+        let mut cells: Vec<Vec<CellSnapshot>> = Vec::new();
+        if let Some(table_rows) = table.get("tableRows").and_then(|v| v.as_array()) {
+            for (r, row) in table_rows.iter().enumerate() {
+                let mut row_cells = Vec::new();
+                if let Some(tcs) = row.get("tableCells").and_then(|v| v.as_array()) {
+                    for (c, cell) in tcs.iter().enumerate() {
+                        row_cells.push(parse_cell(cell, r as u32, c as u32));
+                    }
+                }
+                cells.push(row_cells);
+            }
+        }
+        out.push(TableSnapshot {
+            table_index: *table_counter,
+            tab_id: tab_id.clone(),
+            start_index,
+            rows,
+            columns,
+            cells,
+        });
+        *table_counter += 1;
+    }
+    out
+}
+
+fn parse_cell(cell: &serde_json::Value, row: u32, col: u32) -> CellSnapshot {
+    // Concatenate text across the cell's content paragraphs; capture the
+    // first paragraph's startIndex and the last paragraph's endIndex.
+    let mut text = String::new();
+    let mut content_start_index =
+        cell.get("startIndex").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+    let mut content_end_index = cell.get("endIndex").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+    if let Some(paras) = cell.get("content").and_then(|v| v.as_array()) {
+        if let Some(first) = paras
+            .first()
+            .and_then(|p| p.get("startIndex"))
+            .and_then(|v| v.as_u64())
+        {
+            content_start_index = first as u32;
+        }
+        if let Some(last) = paras
+            .last()
+            .and_then(|p| p.get("endIndex"))
+            .and_then(|v| v.as_u64())
+        {
+            content_end_index = last as u32;
+        }
+        for p in paras {
+            if let Some(elems) = p.pointer("/paragraph/elements").and_then(|v| v.as_array()) {
+                for e in elems {
+                    if let Some(t) = e.pointer("/textRun/content").and_then(|v| v.as_str()) {
+                        text.push_str(t);
+                    }
+                }
+            }
+        }
+    }
+    let row_span = cell
+        .pointer("/tableCellStyle/rowSpan")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(1) as u32;
+    let col_span = cell
+        .pointer("/tableCellStyle/columnSpan")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(1) as u32;
+    CellSnapshot {
+        row,
+        col,
+        text: text.trim_end_matches('\n').to_string(),
+        content_start_index,
+        content_end_index,
+        row_span: row_span.max(1),
+        col_span: col_span.max(1),
+    }
 }
 
 fn paragraph_kind(p: &serde_json::Value) -> ParagraphKind {
@@ -1408,6 +1511,62 @@ impl DocsClient for GoogleDocsHttpClient {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn parse_tables_single_table_two_cells() {
+        let content = serde_json::json!([
+            { "table": {
+                "rows": 1, "columns": 2,
+                "tableRows": [
+                    { "tableCells": [
+                        { "startIndex": 6, "endIndex": 8,
+                          "content": [ { "startIndex": 6, "endIndex": 8,
+                            "paragraph": { "elements": [ { "textRun": { "content": "a\n" } } ] } } ] },
+                        { "startIndex": 8, "endIndex": 10,
+                          "content": [ { "startIndex": 8, "endIndex": 10,
+                            "paragraph": { "elements": [ { "textRun": { "content": "b\n" } } ] } } ] }
+                    ] }
+                ]
+            }, "startIndex": 5 }
+        ]);
+        let arr = content.as_array().unwrap();
+        let mut c = 0u32;
+        let tables = parse_tables(arr, &None, &mut c);
+        assert_eq!(tables.len(), 1);
+        let t = &tables[0];
+        assert_eq!(
+            (t.table_index, t.start_index, t.rows, t.columns),
+            (0, 5, 1, 2)
+        );
+        assert_eq!(t.cells[0][0].text, "a");
+        assert_eq!(t.cells[0][0].content_start_index, 6);
+        assert_eq!(t.cells[0][0].content_end_index, 8);
+        assert_eq!(t.cells[0][1].col, 1);
+        assert_eq!(t.cells[0][1].text, "b");
+    }
+
+    #[test]
+    fn parse_tables_reports_merge_spans_and_empty_cell() {
+        let content = serde_json::json!([
+            { "table": {
+                "rows": 1, "columns": 1,
+                "tableRows": [
+                    { "tableCells": [
+                        { "startIndex": 2, "endIndex": 3,
+                          "tableCellStyle": { "rowSpan": 2, "columnSpan": 3 },
+                          "content": [ { "startIndex": 2, "endIndex": 3,
+                            "paragraph": { "elements": [ { "textRun": { "content": "\n" } } ] } } ] }
+                    ] }
+                ]
+            }, "startIndex": 1 }
+        ]);
+        let arr = content.as_array().unwrap();
+        let mut c = 0u32;
+        let t = &parse_tables(arr, &None, &mut c)[0];
+        assert_eq!(t.cells[0][0].text, "");
+        assert_eq!(t.cells[0][0].row_span, 2);
+        assert_eq!(t.cells[0][0].col_span, 3);
+    }
 
     #[test]
     fn parse_snapshot_single_tab_legacy() {

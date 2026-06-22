@@ -84,6 +84,7 @@ mod tests {
             tabs: vec![TabSnapshot {
                 tab_id: None,
                 paragraphs: vec![],
+                tables: vec![],
             }],
         }
     }

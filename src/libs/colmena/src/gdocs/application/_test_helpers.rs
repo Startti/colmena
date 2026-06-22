@@ -56,6 +56,7 @@ pub fn snap(rev: &str, paras: Vec<(u32, ParagraphKind, &str, u32, u32)>) -> Docu
                     end_index: e,
                 })
                 .collect(),
+            tables: vec![],
         }],
     }
 }
@@ -84,6 +85,7 @@ pub fn snap_multi_tab(
                         end_index: e,
                     })
                     .collect(),
+                tables: vec![],
             })
             .collect(),
     }

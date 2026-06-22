@@ -235,6 +235,7 @@ mod tests {
                         end_index: 0,
                     })
                     .collect(),
+                tables: vec![],
             }],
         }
     }
