@@ -1682,6 +1682,18 @@ impl DagToolExecutor {
                             map.insert(real_key.to_string(), param_value.clone());
                         }
                     }
+                } else if parsed.fixed_values.contains_key(param_name) {
+                    // Defense-in-depth: an LLM-supplied arg must NEVER override an
+                    // operator-declared `fixed` field. Fixed fields are authoritative —
+                    // they carry connection URLs, permissions, setup_sql, etc. that the
+                    // LLM must not control (and `setup_sql` is even exempt from the SQL
+                    // validator). The field isn't advertised to the LLM, so a matching
+                    // key can only come from a confused/adversarial model. Ignore it.
+                    eprintln!(
+                        "⚠️ [DagToolExecutor] Ignoring LLM arg '{}' — it collides with an \
+                         operator-fixed field and cannot override it.",
+                        param_name
+                    );
                 } else {
                     // Top-level placement
                     result.insert(param_name.clone(), param_value.clone());
@@ -3323,6 +3335,124 @@ mod tests {
 
         let exec = exec.with_subgraph_depth(2);
         assert_eq!(exec.subgraph_depth, 2);
+    }
+
+    /// Security: an LLM-supplied tool-call argument must NEVER override an
+    /// operator-declared `fixed` node_schema field. Fixed fields carry
+    /// connection URLs, permissions, setup_sql, etc. that the LLM must not
+    /// control. A model that emits a key matching a fixed field name must be
+    /// ignored, not allowed to overwrite the operator's value.
+    #[tokio::test]
+    async fn node_schema_fixed_field_cannot_be_overridden_by_llm_arg() {
+        let registry = Arc::new(MockRegistry::new());
+        let mut tool_configs = HashMap::new();
+
+        let node_schema: crate::dag_engine::domain::tool_configuration::NodeSchema =
+            serde_json::from_value(serde_json::json!({
+                "secret_field": { "type": "string", "fixed": "OPERATOR_VALUE" },
+                "query": { "type": "string", "required": true, "description": "the query" }
+            }))
+            .unwrap();
+
+        tool_configs.insert(
+            "guarded_tool".to_string(),
+            ToolConfiguration {
+                name: "guarded_tool".to_string(),
+                description: "guarded".to_string(),
+                node_type: "mock_tool".to_string(),
+                fixed_config: HashMap::new(),
+                exposed_inputs: None,
+                parameters: None,
+                mergeable_fields: None,
+                field_mapping: None,
+                node_schema: Some(node_schema),
+                node_config: None,
+                expose_sub_tools: None,
+                summary: None,
+                eager: false,
+            },
+        );
+
+        let executor = DagToolExecutor::new(registry, tool_configs);
+
+        // The LLM tries to override the operator's fixed `secret_field`.
+        let tool_call = ToolCall::new(
+            "call_override".to_string(),
+            FunctionCall::new(
+                "guarded_tool".to_string(),
+                r#"{"query": "SELECT 1", "secret_field": "ATTACKER_VALUE"}"#.to_string(),
+            ),
+        );
+
+        let result = executor.execute(&tool_call).await.unwrap();
+        assert!(result.success);
+        let output: Value = serde_json::from_str(&result.output).unwrap();
+
+        // The fixed field stays authoritative; the LLM override is ignored.
+        assert_eq!(
+            output["secret_field"], "OPERATOR_VALUE",
+            "LLM arg must not override an operator-fixed field"
+        );
+        // A legitimate LLM-visible arg still flows through.
+        assert_eq!(output["query"], "SELECT 1");
+    }
+
+    /// Regression: the fix above only guards the top-level placement branch.
+    /// Container deep-merge (an LLM-visible child merged into a fixed container
+    /// object — an intentional feature) must keep working.
+    #[tokio::test]
+    async fn node_schema_container_deep_merge_still_works() {
+        let registry = Arc::new(MockRegistry::new());
+        let mut tool_configs = HashMap::new();
+
+        let node_schema: crate::dag_engine::domain::tool_configuration::NodeSchema =
+            serde_json::from_value(serde_json::json!({
+                "body": {
+                    "type": "object",
+                    "properties": {
+                        "fixed_key": { "type": "string", "fixed": "FIXED_IN_BODY" },
+                        "user_key": { "type": "string", "required": true, "description": "llm value" }
+                    }
+                }
+            }))
+            .unwrap();
+
+        tool_configs.insert(
+            "merge_tool".to_string(),
+            ToolConfiguration {
+                name: "merge_tool".to_string(),
+                description: "merge".to_string(),
+                node_type: "mock_tool".to_string(),
+                fixed_config: HashMap::new(),
+                exposed_inputs: None,
+                parameters: None,
+                mergeable_fields: None,
+                field_mapping: None,
+                node_schema: Some(node_schema),
+                node_config: None,
+                expose_sub_tools: None,
+                summary: None,
+                eager: false,
+            },
+        );
+
+        let executor = DagToolExecutor::new(registry, tool_configs);
+
+        let tool_call = ToolCall::new(
+            "call_merge".to_string(),
+            FunctionCall::new(
+                "merge_tool".to_string(),
+                r#"{"user_key": "from_llm"}"#.to_string(),
+            ),
+        );
+
+        let result = executor.execute(&tool_call).await.unwrap();
+        assert!(result.success);
+        let output: Value = serde_json::from_str(&result.output).unwrap();
+
+        // Both the fixed sub-field and the LLM-provided child coexist in the container.
+        assert_eq!(output["body"]["fixed_key"], "FIXED_IN_BODY");
+        assert_eq!(output["body"]["user_key"], "from_llm");
     }
 }
 

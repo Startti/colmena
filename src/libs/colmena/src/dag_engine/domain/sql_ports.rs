@@ -111,6 +111,21 @@ pub trait SqlConnectionPort: Send + Sync {
     /// `allowed_schemas`. The identifier is quoted to prevent injection.
     async fn create_schema(&self, schema: &str) -> Result<(), SqlNodeError>;
 
+    /// Execute an operator-authored setup SQL block (DDL + seed) as a single
+    /// atomic transaction. Multi-statement blocks separated by `;` are supported.
+    ///
+    /// This is **operator trust-level** — it bypasses the LLM static validator,
+    /// exactly like schema provisioning. It is intended for author/build-time
+    /// environment bootstrapping, never for LLM-issued queries. Idempotency is
+    /// the author's responsibility (`CREATE ... IF NOT EXISTS`, `INSERT ... ON
+    /// CONFLICT`). Any statement failure rolls back the whole block.
+    ///
+    /// Because the block runs inside one implicit transaction, statements that
+    /// cannot run in a transaction (`CREATE INDEX CONCURRENTLY`, `VACUUM`) are
+    /// not supported, and an explicit `BEGIN`/`COMMIT` inside the block breaks
+    /// the all-or-nothing guarantee.
+    async fn execute_setup_sql(&self, sql: &str) -> Result<(), SqlNodeError>;
+
     /// Check if the pool is connected and ready.
     fn is_connected(&self) -> bool;
 }

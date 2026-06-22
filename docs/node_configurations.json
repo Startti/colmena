@@ -1158,6 +1158,12 @@
           "description": "PostgreSQL connection URL. Supports ${ENV_VAR} syntax for environment variable resolution.",
           "example": "${DATABASE_URL}"
         },
+        "setup_sql": {
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "Operator-authored DDL + seed run once at node init to bootstrap the database environment (schema, tables, seed rows). Operator trust-level: bypasses the LLM validator. Runs idempotently on every init — MUST be written idempotent (CREATE ... IF NOT EXISTS, INSERT ... ON CONFLICT DO NOTHING). Executed as one atomic transaction; any failure rolls back and hard-fails init. The LLM never sees it."
+        },
         "permissions": {
           "type": "object",
           "required": false,

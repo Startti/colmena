@@ -125,6 +125,23 @@ impl SqlNode {
             }
         }
 
+        // Operator-driven environment bootstrapping: run author-defined setup SQL
+        // (DDL + seed). Operator trust-level — bypasses the LLM static validator,
+        // same as schema provisioning above. Idempotency is the author's contract
+        // (`CREATE ... IF NOT EXISTS`, `INSERT ... ON CONFLICT`). Atomic: any failure
+        // rolls the whole block back and hard-fails init. Runs BEFORE metadata
+        // introspection so the tool description reflects freshly-created tables.
+        if let Some(setup_sql) = config.get("setup_sql").and_then(|v| v.as_str()) {
+            let trimmed = setup_sql.trim();
+            if !trimmed.is_empty() {
+                println!("[SqlNode] running setup_sql ({} bytes)", trimmed.len());
+                let conn: &dyn SqlConnectionPort = adapter.as_ref();
+                conn.execute_setup_sql(trimmed)
+                    .await
+                    .map_err(|e| format!("Failed to run setup_sql: {}", e))?;
+            }
+        }
+
         // Create registry adapter sharing the same pool
         let sandbox_schema = permissions.sandbox_schema().to_string();
         let registry = PgRegistryAdapter::new(adapter.pool(), sandbox_schema);
@@ -681,5 +698,132 @@ mod supplement_tests {
         assert!(s.contains("categoria_id"));
         assert!(s.contains("→ finanzas.categorias.id"));
         assert!(s.to_lowercase().contains("agregar columnas"));
+    }
+}
+
+#[cfg(test)]
+mod setup_sql_tests {
+    use super::*;
+    use crate::dag_engine::infrastructure::pool_registry::{PgPoolRegistry, PoolConfig};
+    use crate::dag_engine::infrastructure::sql_port_factory::SqlPortFactory;
+    use serde_json::json;
+
+    fn unique(prefix: &str) -> String {
+        format!(
+            "{}_{}",
+            prefix,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        )
+    }
+
+    fn fresh_node() -> SqlNode {
+        let registry = Arc::new(PgPoolRegistry::new(PoolConfig::defaults()));
+        let factory = Arc::new(SqlPortFactory::new(registry));
+        SqlNode::new(factory)
+    }
+
+    async fn raw_pool() -> sqlx::PgPool {
+        let url = std::env::var("TEST_DATABASE_URL").unwrap();
+        sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL — run with `cargo test -- --ignored`"]
+    async fn setup_sql_runs_at_init_and_table_is_introspected() {
+        if std::env::var("TEST_DATABASE_URL").is_err() {
+            eprintln!("skip: TEST_DATABASE_URL not set");
+            return;
+        }
+        let schema = unique("colmena_node_setup");
+        let setup = format!(
+            "CREATE SCHEMA IF NOT EXISTS {s};\n\
+             CREATE TABLE IF NOT EXISTS {s}.gastos (id SERIAL PRIMARY KEY, nombre TEXT UNIQUE NOT NULL);\n\
+             INSERT INTO {s}.gastos (nombre) VALUES ('a'),('b') ON CONFLICT (nombre) DO NOTHING;",
+            s = schema
+        );
+        // `${TEST_DATABASE_URL}` is resolved by SqlNode::resolve_env_vars.
+        let config = json!({
+            "connection_url": "${TEST_DATABASE_URL}",
+            "permissions": { "preset": "read_write", "allowed_schemas": [schema] },
+            "setup_sql": setup,
+        });
+
+        // Init runs setup_sql, then introspects — so the table shows in the supplement.
+        let ctx = fresh_node()
+            .initialize(&config)
+            .await
+            .expect("init with setup_sql");
+        let supplement = ctx.description_supplement.unwrap_or_default();
+        assert!(
+            supplement.contains("gastos"),
+            "description supplement should list the setup-created table:\n{}",
+            supplement
+        );
+
+        // A second, independent node re-runs setup: seed must stay at 2 rows (idempotent).
+        fresh_node()
+            .initialize(&config)
+            .await
+            .expect("second init is a no-op");
+
+        let pool = raw_pool().await;
+        let count: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM {}.gastos", schema))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 2, "seed must be idempotent across inits");
+
+        sqlx::query(&format!("DROP SCHEMA {} CASCADE", schema))
+            .execute(&pool)
+            .await
+            .ok();
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL — run with `cargo test -- --ignored`"]
+    async fn bad_setup_sql_hard_fails_init_and_rolls_back() {
+        if std::env::var("TEST_DATABASE_URL").is_err() {
+            eprintln!("skip: TEST_DATABASE_URL not set");
+            return;
+        }
+        let schema = unique("colmena_node_setup_fail");
+        // allowed_schemas is empty so schema provisioning does NOT pre-create the schema;
+        // setup_sql creates it and then fails, so rollback must leave it absent.
+        let config = json!({
+            "connection_url": "${TEST_DATABASE_URL}",
+            "permissions": { "preset": "read_only", "allowed_schemas": [] },
+            "setup_sql": format!("CREATE SCHEMA IF NOT EXISTS {s};\nTHIS IS NOT VALID SQL;", s = schema),
+        });
+
+        let res = fresh_node().initialize(&config).await;
+        assert!(res.is_err(), "bad setup_sql must hard-fail init");
+        let err = format!("{}", res.err().unwrap());
+        assert!(
+            err.contains("setup_sql"),
+            "error must mention setup_sql, got: {}",
+            err
+        );
+
+        let pool = raw_pool().await;
+        let exists: Option<String> = sqlx::query_scalar(
+            "SELECT schema_name FROM information_schema.schemata WHERE schema_name = $1",
+        )
+        .bind(&schema)
+        .fetch_optional(&pool)
+        .await
+        .unwrap();
+        assert!(
+            exists.is_none(),
+            "failed setup_sql must roll back the schema"
+        );
+        pool.close().await;
     }
 }

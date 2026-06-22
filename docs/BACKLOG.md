@@ -130,6 +130,17 @@ CRDT-specific. Ver banner detallado al inicio del bloque CRDT.
 
 ---
 
+## `setup_sql` run-once guard (Fase 2)
+
+- **`setup_sql` run-once guard (Fase 2)** — `setup_sql` corre idempotente en cada init.
+  Para setups pesados con seed no idempotente, agregar un opt-in `run_once: true` + tabla
+  de tracking keyed por `hash(connection_url + schema + versión)`. También: lint de
+  idempotencia (warn si `INSERT` sin `ON CONFLICT` / `CREATE` sin `IF NOT EXISTS`) y
+  versionado de schema entre versiones del grafo. Ver
+  `docs/superpowers/specs/2026-06-21-sql-setup-block-design.md` §6.
+
+---
+
 ## Google SA — alias presentable via Workspace Group + revisión del leak del project ID (2026-06-09)
 
 - **Origen:** Brainstorming con owner (2026-06-09) — el SA email actual
