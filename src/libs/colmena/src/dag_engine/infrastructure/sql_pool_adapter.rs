@@ -668,6 +668,13 @@ impl SqlConnectionPort for PgPoolAdapter {
     }
 
     async fn execute_setup_sql(&self, sql: &str) -> Result<(), SqlNodeError> {
+        // Defense-in-depth: tool-generated `setup_sql` sometimes arrives with
+        // `\n`/`\t` emitted as the literal two-character sequences `\`+`n`
+        // (instead of real line breaks). A stray backslash between statements is
+        // invalid SQL and Postgres rejects the whole block with
+        // `syntax error at or near "\"`. Rewrite those escapes to whitespace
+        // (outside string literals only — see `normalize_setup_sql`).
+        let normalized = normalize_setup_sql(sql);
         // Execute the whole operator block via the simple query protocol
         // (`raw_sql`). Postgres parses the `;` separators itself (so string
         // literals and dollar-quoted function bodies are handled correctly),
@@ -675,9 +682,12 @@ impl SqlConnectionPort for PgPoolAdapter {
         // transaction — any statement failure rolls the whole block back.
         // Executing on `&*self.pool` (a `&PgPool`) avoids the HRTB error that
         // `&mut *tx` triggers in sqlx 0.8.
-        sqlx::raw_sql(sql).execute(&*self.pool).await.map_err(|e| {
-            SqlNodeError::ExecutionError(format!("setup_sql execution failed: {}", e))
-        })?;
+        sqlx::raw_sql(&normalized)
+            .execute(&*self.pool)
+            .await
+            .map_err(|e| {
+                SqlNodeError::ExecutionError(format!("setup_sql execution failed: {}", e))
+            })?;
         Ok(())
     }
 
@@ -686,10 +696,182 @@ impl SqlConnectionPort for PgPoolAdapter {
     }
 }
 
+/// Rewrite literal backslash-escape sequences (`\n`, `\t`, `\r`) that appear
+/// **outside** string literals into a single space.
+///
+/// Tool-generated `setup_sql` sometimes serializes intended line breaks as the
+/// two literal characters `\`+`n` rather than a real newline. Between statements
+/// a stray backslash is invalid SQL — Postgres aborts the whole block with
+/// `syntax error at or near "\"`. Because `setup_sql` statements are
+/// `;`-separated, these escapes are only ever cosmetic, so collapsing them to a
+/// space yields valid SQL. Backslashes inside single-quoted strings and
+/// dollar-quoted blocks (`$$ … $$`, `$tag$ … $tag$`) are preserved verbatim so
+/// legitimate seed data and function bodies are never altered. Real newlines,
+/// tabs, and any other backslash sequence are left untouched.
+///
+/// # Examples
+/// ```ignore
+/// // `\n` between statements (the LLM artifact) becomes a space:
+/// assert_eq!(normalize_setup_sql("CREATE SCHEMA s;\\nCREATE TABLE s.t ();"),
+///            "CREATE SCHEMA s; CREATE TABLE s.t ();");
+/// // a `\n` inside a string literal is preserved:
+/// assert_eq!(normalize_setup_sql("INSERT INTO t VALUES ('a\\nb');"),
+///            "INSERT INTO t VALUES ('a\\nb');");
+/// ```
+fn normalize_setup_sql(sql: &str) -> String {
+    let chars: Vec<char> = sql.chars().collect();
+    let mut out = String::with_capacity(sql.len());
+    let mut i = 0;
+
+    // Try to read a dollar-quote opening/closing tag (`$$` or `$tag$`) starting
+    // at `start`. Returns the full tag (e.g. "$$" or "$body$") if one is present.
+    let read_dollar_tag = |start: usize| -> Option<String> {
+        if chars.get(start) != Some(&'$') {
+            return None;
+        }
+        let mut j = start + 1;
+        while let Some(&c) = chars.get(j) {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                j += 1;
+            } else {
+                break;
+            }
+        }
+        if chars.get(j) == Some(&'$') {
+            Some(chars[start..=j].iter().collect())
+        } else {
+            None
+        }
+    };
+
+    while i < chars.len() {
+        let c = chars[i];
+
+        if c == '\'' {
+            // Copy a single-quoted string verbatim, honoring `''` escapes.
+            out.push(c);
+            i += 1;
+            while i < chars.len() {
+                if chars[i] == '\'' {
+                    if chars.get(i + 1) == Some(&'\'') {
+                        out.push('\'');
+                        out.push('\'');
+                        i += 2;
+                    } else {
+                        out.push('\'');
+                        i += 1;
+                        break;
+                    }
+                } else {
+                    out.push(chars[i]);
+                    i += 1;
+                }
+            }
+        } else if let Some(tag) = read_dollar_tag(i) {
+            // Copy a dollar-quoted block verbatim until the matching tag.
+            out.push_str(&tag);
+            i += tag.chars().count();
+            let tag_chars: Vec<char> = tag.chars().collect();
+            while i < chars.len() {
+                if chars[i] == '$' && chars[i..].starts_with(tag_chars.as_slice()) {
+                    out.push_str(&tag);
+                    i += tag_chars.len();
+                    break;
+                }
+                out.push(chars[i]);
+                i += 1;
+            }
+        } else if c == '\\' && matches!(chars.get(i + 1), Some(&('n' | 't' | 'r'))) {
+            // Literal escape sequence outside any string → collapse to a space.
+            out.push(' ');
+            i += 2;
+        } else {
+            out.push(c);
+            i += 1;
+        }
+    }
+
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use sqlx::postgres::PgPoolOptions;
+
+    // ---- normalize_setup_sql (pure, no DB) ----
+
+    #[test]
+    fn normalize_collapses_literal_backslash_n_between_statements() {
+        let input = "CREATE SCHEMA IF NOT EXISTS finanzas;\\nCREATE TABLE IF NOT EXISTS finanzas.gastos (id SERIAL PRIMARY KEY);\\nINSERT INTO finanzas.gastos DEFAULT VALUES;";
+        let out = normalize_setup_sql(input);
+        assert!(
+            !out.contains('\\'),
+            "no stray backslash should remain: {out}"
+        );
+        assert_eq!(
+            out,
+            "CREATE SCHEMA IF NOT EXISTS finanzas; CREATE TABLE IF NOT EXISTS finanzas.gastos (id SERIAL PRIMARY KEY); INSERT INTO finanzas.gastos DEFAULT VALUES;"
+        );
+    }
+
+    #[test]
+    fn normalize_also_handles_backslash_t_and_r() {
+        assert_eq!(normalize_setup_sql("A;\\tB;\\rC;"), "A; B; C;");
+    }
+
+    #[test]
+    fn normalize_preserves_backslash_inside_single_quoted_string() {
+        // A literal backslash-n inside a string is real data — must survive.
+        let input = "INSERT INTO t (note) VALUES ('line\\nbreak');";
+        assert_eq!(normalize_setup_sql(input), input);
+    }
+
+    #[test]
+    fn normalize_preserves_doubled_quote_escapes_inside_string() {
+        let input = "INSERT INTO t (s) VALUES ('it''s a \\n test');";
+        // The `\n` is inside the string (after the `''` escape) → preserved.
+        assert_eq!(normalize_setup_sql(input), input);
+    }
+
+    #[test]
+    fn normalize_preserves_dollar_quoted_function_body() {
+        let input = "CREATE FUNCTION f() RETURNS void AS $$ BEGIN x := 'a\\nb'; END; $$ LANGUAGE plpgsql;\\nSELECT 1;";
+        let out = normalize_setup_sql(input);
+        // Inside `$$ … $$` everything (including the `\n`) is preserved; only the
+        // `\n` AFTER the closing `$$` (between statements) collapses to a space.
+        assert!(
+            out.contains("'a\\nb'"),
+            "dollar-body backslash preserved: {out}"
+        );
+        assert!(
+            out.ends_with("$$ LANGUAGE plpgsql; SELECT 1;"),
+            "trailing \\n collapsed: {out}"
+        );
+    }
+
+    #[test]
+    fn normalize_preserves_tagged_dollar_quote() {
+        let input =
+            "CREATE FUNCTION f() RETURNS text AS $body$ SELECT 'x\\ny' $body$ LANGUAGE sql;";
+        assert_eq!(normalize_setup_sql(input), input);
+    }
+
+    #[test]
+    fn normalize_leaves_clean_sql_untouched() {
+        let input = "CREATE SCHEMA IF NOT EXISTS s; CREATE TABLE s.t (id INT);";
+        assert_eq!(normalize_setup_sql(input), input);
+        // Real newlines/tabs are not escape sequences → untouched.
+        let with_real_newlines = "CREATE SCHEMA s;\nCREATE TABLE s.t (id INT);";
+        assert_eq!(normalize_setup_sql(with_real_newlines), with_real_newlines);
+    }
+
+    #[test]
+    fn normalize_does_not_treat_positional_param_as_dollar_quote() {
+        // `$1` is not a dollar-quote tag; surrounding `\n` should still collapse.
+        let input = "SELECT $1;\\nSELECT 2;";
+        assert_eq!(normalize_setup_sql(input), "SELECT $1; SELECT 2;");
+    }
 
     /// Build an adapter against `TEST_DATABASE_URL`, or return `None` to skip.
     async fn test_adapter() -> Option<PgPoolAdapter> {
