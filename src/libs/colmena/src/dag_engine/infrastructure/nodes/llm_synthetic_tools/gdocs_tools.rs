@@ -74,6 +74,9 @@ pub const TOOL_DELETE_TABLE_ROW: &str = "gdocs_delete_table_row";
 pub const TOOL_INSERT_TABLE_COLUMN: &str = "gdocs_insert_table_column";
 pub const TOOL_DELETE_TABLE_COLUMN: &str = "gdocs_delete_table_column";
 
+// Subsystem G v1.1 (2026-06-22): table-cell formatting.
+pub const TOOL_FORMAT_TABLE: &str = "gdocs_format_table";
+
 // ── Process-wide singletons ───────────────────────────────────────────
 
 static CLIENT: OnceCell<Arc<GoogleDocsHttpClient>> = OnceCell::const_new();
@@ -530,6 +533,17 @@ pub struct SetTableCellArgs {
     pub mode: Option<String>,
 }
 
+/// Args for `gdocs_format_table` — apply formatting to cell ranges in tables.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct FormatTableArgs {
+    /// Drive id of the target document.
+    pub doc_id: String,
+    /// One or more formatting operations, applied in one atomic batchUpdate.
+    pub ops: Vec<crate::gdocs::application::table_format::TableFormatOp>,
+    /// Optional tab id when the tables live in a specific tab.
+    pub tab_id: Option<String>,
+}
+
 /// Args for `gdocs_insert_table_row` — insert a blank row.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct InsertTableRowArgs {
@@ -778,6 +792,14 @@ pub fn tool_set_table_cell() -> ToolDefinition {
     )
 }
 
+pub fn tool_format_table() -> ToolDefinition {
+    super::build_synthetic_tool_with_summary::<FormatTableArgs>(
+        TOOL_FORMAT_TABLE,
+        text::tool_description(TOOL_FORMAT_TABLE),
+        text::tool_summary(TOOL_FORMAT_TABLE),
+    )
+}
+
 pub fn tool_insert_table_row() -> ToolDefinition {
     super::build_synthetic_tool_with_summary::<InsertTableRowArgs>(
         TOOL_INSERT_TABLE_ROW,
@@ -1002,6 +1024,7 @@ pub fn build_all_gdocs_tools() -> Vec<ToolDefinition> {
         // Subsystem G v1.1 (2026-06-21): surgical table edits.
         tool_read_tables(),
         tool_set_table_cell(),
+        tool_format_table(),
         tool_insert_table_row(),
         tool_delete_table_row(),
         tool_insert_table_column(),
@@ -2248,6 +2271,42 @@ pub async fn dispatch_set_table_cell(
     }
 }
 
+pub async fn dispatch_format_table(args: serde_json::Value, session_id: &str) -> serde_json::Value {
+    use crate::gdocs::application::table_format;
+    let parsed: FormatTableArgs = match serde_json::from_value(args) {
+        Ok(a) => a,
+        Err(e) => return invalid_args(e),
+    };
+    let client = match shared_client().await {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    let cache = shared_cache().await;
+    let revisions = match shared_revs().await {
+        Ok(r) => r,
+        Err(e) => return e,
+    };
+    let sa = std::env::var("COLMENA_GDOCS_SA_EMAIL").ok();
+    let ctx = co_edit_guard::GuardContext {
+        client: client.as_ref(),
+        cache: cache.as_ref(),
+        revisions: revisions.as_ref(),
+        session_id,
+        sa_email: sa.as_deref(),
+    };
+    match table_format::run_format_table(
+        &ctx,
+        &DocumentId(parsed.doc_id),
+        &parsed.ops,
+        parsed.tab_id.map(TabId),
+    )
+    .await
+    {
+        Ok(r) => edit_result_to_json(r),
+        Err(e) => error_to_json(e),
+    }
+}
+
 pub async fn dispatch_insert_table_row(
     args: serde_json::Value,
     session_id: &str,
@@ -2445,7 +2504,7 @@ mod tests {
     }
 
     #[test]
-    fn build_all_returns_35_tools() {
+    fn build_all_returns_36_tools() {
         let tools = build_all_gdocs_tools();
         // 22 v1 + 1 Bundle 2A (list_documents) + 2 Bundle 2B
         // (list_permissions, unshare) + 3 Bundle 4A
@@ -2454,7 +2513,9 @@ mod tests {
         // + 6 Subsystem G v1.1 (2026-06-21) table edits
         // (read_tables, set_table_cell, insert_table_row,
         // delete_table_row, insert_table_column, delete_table_column) = 35.
-        assert_eq!(tools.len(), 35);
+        // + 1 Subsystem G v1.1 (2026-06-22) table-cell formatting
+        // (gdocs_format_table) = 36.
+        assert_eq!(tools.len(), 36);
     }
 
     #[test]

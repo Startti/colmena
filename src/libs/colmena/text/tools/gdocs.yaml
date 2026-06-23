@@ -451,6 +451,33 @@ gdocs_set_table_cell:
     - Devuelve un error si la celda está fuera de rango o es una celda
       slave de un merge.
 
+gdocs_format_table:
+  summary: Apply formatting (background, borders, text style, alignment) to cell ranges in a Google Docs table
+  description: |
+    Aplica FORMATO a rangos rectangulares de celdas dentro de una tabla de un
+    Google Doc, en un solo batchUpdate atómico. Pasá `ops: [{table_index,
+    cell_range, format}]`. `table_index` 0-based (de gdocs_read_tables).
+    `cell_range` = { row_start, row_end, col_start, col_end } 0-based y
+    END-EXCLUSIVE (row_end/col_end NO se incluyen). `format` (todos opcionales):
+      - background_color: "#RRGGBB"   (fondo de celda)
+      - vertical_alignment: TOP|MIDDLE|BOTTOM
+      - borders: { top|bottom|left|right: { style: SOLID|DOTTED|DASHED, color?: "#RRGGBB", width_pt?: 1 } }
+      - text: { bold, italic, underline, strikethrough, font_size, color: "#RRGGBB" }
+      - horizontal_alignment: LEFT|CENTER|RIGHT|JUSTIFIED
+    A diferencia de Sheets, Docs NO tiene bordes internos/externos — cada lado
+    se aplica a TODAS las celdas del rango. Para escribir el TEXTO de una celda
+    usá gdocs_set_table_cell (este tool solo da estilo, no cambia el contenido).
+    Por DEFAULT, cuando armes una tabla para que la vea una persona, dejala
+    presentable en UNA llamada multi-op (sin esperar a que te lo pidan):
+    encabezado en negrita con fondo y texto contrastante + centrado, bordes en
+    la tabla, y fila de totales destacada (negrita + fondo). Una tabla sin
+    formato no es una entrega cuidada.
+    Ejemplo (header azul + bordes en toda la tabla 5x3):
+    ops: [
+      { table_index:0, cell_range:{row_start:0,row_end:1,col_start:0,col_end:3}, format:{ text:{bold:true,color:"#FFFFFF"}, background_color:"#1F4E78", horizontal_alignment:"CENTER" } },
+      { table_index:0, cell_range:{row_start:0,row_end:5,col_start:0,col_end:3}, format:{ borders:{ top:{style:"SOLID"}, bottom:{style:"SOLID"}, left:{style:"SOLID"}, right:{style:"SOLID"} } } }
+    ]
+
 gdocs_insert_table_row:
   summary: Insert a blank row into a table, above or below an existing row
   description: |

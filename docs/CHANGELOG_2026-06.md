@@ -3010,3 +3010,77 @@ toca `EngineConfig`, `ColmenaEngine` ni firmas de traits exportados.
 **Estado.** done.
 
 ---
+
+## 49. Formato de celdas de tabla en Google Docs (gdocs_format_table) — Subsystem G v1.1 — 2026-06-22
+
+**Qué cambió.** 1 tool sintética nueva, `gdocs_format_table`, que aplica
+**formato de presentación** a rangos rectangulares de celdas dentro de una tabla
+de un Google Doc — fondo de celda, bordes, alineación vertical, estilo de texto
+(negrita / itálica / subrayado / tachado / tamaño / color) y alineación
+horizontal — sobre una o más ops en un único `documents.batchUpdate` **atómico**.
+Mirror de `gsheets_format_range` (§47) en el lado de Docs.
+
+**Modelo `ops` → batchUpdate atómico.** El tool toma un array `ops`; cada op es
+`{table_index, cell_range, format}`. `table_index` 0-based (de
+`gdocs_read_tables`); `cell_range` = `{row_start, row_end, col_start, col_end}`
+0-based y **END-EXCLUSIVE** (`row_end`/`col_end` NO se incluyen, igual que
+Sheets). Todas las ops se hacen fan-out a un solo `batchUpdate`.
+
+```json
+{
+  "doc_id": "<id>",
+  "ops": [
+    {
+      "table_index": 0,
+      "cell_range": { "row_start": 0, "row_end": 1, "col_start": 0, "col_end": 3 },
+      "format": {
+        "text": { "bold": true, "color": "#FFFFFF" },
+        "background_color": "#1F4E78",
+        "horizontal_alignment": "CENTER"
+      }
+    }
+  ]
+}
+```
+
+**Tres tipos de request de la Docs API por op.** El builder emite (a lo sumo)
+un `updateTableCellStyle` sobre el `tableRange` del rectángulo (fondo / bordes /
+alineación vertical), y por celda del rango un `updateTextStyle` (negrita,
+color, tamaño…) + un `updateParagraphStyle` (alineación horizontal). Cada uno
+con su máscara `fields` precisa → actualizaciones parciales no-destructivas.
+
+**Caveat de bordes vs Sheets.** A diferencia de Sheets, Docs **no** tiene
+bordes internos/externos — cada lado declarado (`top`/`bottom`/`left`/`right`)
+se aplica a **todas** las celdas del rango (cada celda lleva sus 4 bordes).
+
+**Reúso, sin cambio de trait ni de parser.** Reutiliza el direccionamiento de
+tablas de #121 (`find_table`/`find_cell`/`cell_location`, promovidos a
+`pub(crate)`), el **co-edit guard no bloqueante** y los rangos ya parseados del
+`CellSnapshot` (`content_start_index`/`content_end_index`). **No** toca el trait
+`DocsClient` ni el parser de tablas. Nuevo módulo
+`gdocs/application/table_format.rs` (builder puro + use case `run_format_table`).
+
+**No-destructivo.** Solo da estilo, no cambia el contenido. Para escribir el
+texto de una celda se usa `gdocs_set_table_cell`.
+
+**Presentable por default — nudge, sin skill en v1.** La `description` del tool
+(en `src/libs/colmena/text/tools/gdocs.yaml`) lleva un nudge always-on que
+empuja al modelo a dejar las tablas presentables en UNA llamada multi-op
+(encabezado en negrita con fondo + centrado, bordes, fila de totales destacada)
+sin esperar a que se lo pidan. No hay skill dedicado en v1.
+
+**Conteo de toolkit.** `gdocs` pasó de 35 → **36** tools (`gdocsread`
+read-only intacto — el formato es write).
+
+**Additive — sin impacto ADP.** No toca el API público, `EngineConfig`,
+`ColmenaEngine` ni firmas de traits exportados. El tool se activa vía
+`enabled_tools: ["gdocs"]`.
+
+**Referencias.**
+- Spec: [`docs/superpowers/specs/2026-06-22-gdocs-table-cell-formatting-design.md`](superpowers/specs/2026-06-22-gdocs-table-cell-formatting-design.md)
+- Plan: [`docs/superpowers/plans/2026-06-22-gdocs-table-cell-formatting.md`](superpowers/plans/2026-06-22-gdocs-table-cell-formatting.md)
+- E2E graph: [`tests/graphs/agents/gdocs_format_table_e2e.json`](../tests/graphs/agents/gdocs_format_table_e2e.json)
+
+**Estado.** done.
+
+---

@@ -40,7 +40,7 @@ pub struct TableCellInfo {
 // ── Helpers ────────────────────────────────────────────────────────
 
 /// Build a `tableCellLocation` JSON.
-fn cell_location(
+pub(crate) fn cell_location(
     table_start: u32,
     row: u32,
     col: u32,
@@ -54,7 +54,7 @@ fn cell_location(
 }
 
 /// Find a table by index within the requested tab (default: first tab).
-fn find_table<'a>(
+pub(crate) fn find_table<'a>(
     snap: &'a crate::gdocs::domain::DocumentSnapshot,
     table_index: u32,
     tab_id: Option<&TabId>,
@@ -84,7 +84,7 @@ fn find_table<'a>(
 
 /// Locate a cell in a table, erroring clearly when out of range or covered
 /// by a merge (slave positions are absent from the parsed grid).
-fn find_cell(t: &TableSnapshot, row: u32, col: u32) -> Result<&CellSnapshot, DocsError> {
+pub(crate) fn find_cell(t: &TableSnapshot, row: u32, col: u32) -> Result<&CellSnapshot, DocsError> {
     t.cells
         .get(row as usize)
         .and_then(|r| r.iter().find(|c| c.col == col))
