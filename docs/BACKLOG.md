@@ -851,6 +851,29 @@ Items derivados de la implementación de Subsystem D (formulas v1, 2026-06-04 �
   graph `gdocs_format_table_e2e.json`). **Distinto del item "Cell formatting"
   de Subsystem E** (ése es para Google Sheets, no para tablas dentro de un
   Doc). [§49](CHANGELOG_2026-06.md)
+- [ ] **Skill `gdocs-presentable-tables` (presentable-by-default v1.1).**
+  Espeja `gsheets-presentable-output` (#123, §48) para tablas en Docs.
+  **Origen:** el E2E live de §49 mostró que con prompt abierto gemini-2.5-flash
+  subutiliza `gdocs_format_table` (igual gap que medimos en gsheets, donde la
+  skill + nudge sí movió el default — el modelo adoptó hasta la paleta). El spec
+  de #124 dejó explícitamente la skill "para v1.1 si el E2E lo pedía" — y lo
+  pidió. Alcance: skill built-in `gdocs-presentable-tables` (SKILL.md +
+  references: recipe header/totales, paletas, layout de tabla) auto-enrolada por
+  un gate `agent_has_gdocs_format_table_tool` (espeja `agent_has_gsheets_format_tool`,
+  honra `!gdocs_format_table`). Reusa toda la infra de Skills + el patrón de #123.
+  Sin cambios al código del tool (solo skill + gate + nudge). Esfuerzo ~½d.
+  **Nota:** depende en la práctica de destrabar primero "Markdown tables en
+  insert/replace" — hoy el modelo se traba *creando* la tabla, así que la skill
+  de formato no se ejercita end-to-end hasta que la creación funcione.
+- [ ] **`gdocs_read_tables` devuelve el formato actual de cada celda.** Hoy
+  `TableCellInfo` solo expone `text_preview` + `row_span`/`col_span` — NO el
+  estilo. Implicación: el agente formatea a ciegas — no puede decidir incremental
+  ("¿el header ya está en negrita?"), respetar lo que un humano ya estilizó, ni
+  verificar su propio trabajo sin un read-back vía API cruda. **Origen:** trabajo
+  de §49 (`gdocs_format_table`). `CellSnapshot` ya parsea las celdas; faltaría
+  parsear `tableCellStyle`/`textStyle` y exponerlos en el listing (opt-in vía un
+  flag `include_format` para no inflar la respuesta por default). Esfuerzo ~½d.
+  Habilita formateo idempotente/incremental y self-check del agente.
 - [x] **`gdocs_insert_image_after_text`** — **SHIPPED COMPLETO** (paths i + ii/iii).
   - **Path (i) URL-only SHIPPED 2026-06-12** (CHANGELOG §32). El tool inserta
     una imagen inline tras un anchor; `image_url` debe ser una URL http(s) pública.
@@ -889,6 +912,12 @@ Items derivados de la implementación de Subsystem D (formulas v1, 2026-06-04 �
   snapshot read; (2) issue `insertText` cell-by-cell con índices reales
   + ajustar offsets del contenido posterior. Esfuerzo: ~4-5h. No es
   quick win; queda al backlog con scope clarificado.
+  **Mitigación barata mientras tanto (medido en el E2E de §49):** el modelo
+  intenta crear tablas con markdown y choca con el `invalid_args` de
+  `reject_table_markdown`, y a veces ni llega a `gdocs_format_table`. Hacer que
+  ese mensaje de error apunte a `gdocs_create_from_markdown` (que SÍ renderiza
+  una tabla nativa vía Drive) reduciría el atasco sin esperar el fix de fondo
+  (~15min, solo texto del error). No reemplaza este item — lo mitiga.
 - [ ] **Ejecución de Apps Script** desde colmena (`scripts.run`).
   **DEPRIORIZADO 2026-06-11** — ver nota completa en la sección "Subsystem E v1.1"
   (mismo item). Diferido hasta que haya un caso de uso real; requiere
@@ -1599,3 +1628,23 @@ genérica. Sin trigger urgente.
   caller's cached adapter + schema supplement to the second. Pre-existing (not a
   regression). Only matters if multi-DB SQL tools in one agent become a use case; would
   need one node instance per distinct config key.
+
+---
+
+## Proceso / CI / Ops (deuda fuera de features)
+
+Items de proceso, no de producto. Antes solo vivían en notas de sesión; se
+trazan acá para visibilidad en el repo.
+
+- [ ] **CI pytest non-gating.** `ci-develop.yml` corre los tests Python como
+  `pytest ... || echo`, así que un fallo Python NO rompe el build — los errores
+  se tragan. Follow-up: hacer que gatee de verdad. **Ojo antes de activarlo:**
+  revisar primero los `skipif` (tests que dependen de env como `DATABASE_URL`/
+  keys) y el test de runtime CRDT, para no volver el pipeline rojo por entorno
+  faltante en CI. Esfuerzo ~1-2h (auditar qué tests corren sin secrets + marcar
+  el resto `skip`/`ignore`).
+- [ ] **Conversation-memory digest → PROD.** El digest (v1+v1.1+v1.2 +
+  coalescing + recall-nudge) está live y verificado en ADP **dev**; falta el
+  rollout a PROD. Requiere aplicar la columna Prisma `summary` en la DB de prod
+  (`migrate deploy`, NUNCA `migrate dev`/`reset`) y desplegar. Ítem de ops, no
+  de código colmena — depende del owner de ADP.
