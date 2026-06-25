@@ -45,31 +45,47 @@ y adaptarlos.
 
 ## 2. Aristas y puertos
 
-Una arista mueve datos de un nodo a otro. El `from` y el `to` pueden escribirse de
-dos formas:
+> **REGLA DURA v1.1 — las aristas son SIEMPRE peladas.** Toda arista se escribe
+> `{ "from": "A", "to": "B" }`, usando solo ids de nodo. **NUNCA** se escribe la
+> forma punteada `nodo.campo` en `from`/`to` (un punto seguido de un nombre de campo
+> dentro del id está PROHIBIDO). La selección de campos **no** va en la arista: va dentro del `config`
+> del nodo (con `{{templates}}` en `llm_call`) o en un adaptador `python_script`.
 
-- **Id pelado** (`"agent"`) → usa los **puertos por defecto** del nodo. Cada tipo de
-  nodo declara un puerto de entrada y uno de salida por defecto (ej.: `llm_call` recibe
-  por `prompt` y emite por `result`; `output` recibe por `input`).
-- **`nodo.campo`** (`"trigger.message"`) → usa un **puerto explícito**. Lo usás cuando
-  querés tomar/dejar un campo específico, o cuando el nodo no tiene puerto por defecto.
+Una arista pelada mueve datos del **puerto de salida por defecto** de `A` al
+**puerto de entrada por defecto** de `B`. El motor resuelve los puertos solo:
 
-Ejemplo real con las dos formas mezcladas (de `graph_builder.json`):
+- Cada tipo de nodo declara un puerto de salida por defecto (ej.: `llm_call` emite
+  por `result`; `trigger_webhook` emite el payload completo) y uno de entrada por
+  defecto (ej.: `output` recibe por `input`).
+- **Auto-flatten:** si `B` no tiene puerto de entrada por defecto, el motor
+  **desarma el objeto de salida de `A`** y mete cada clave como un input de `B`.
+  Esto es lo que hace funcionar el patrón adaptador (sección 3).
+
+### Cómo seleccionar un campo SIN arista punteada
+
+Conectás el nodo entero con una arista pelada y leés el campo que te interesa
+**dentro del `config`** con un `{{template}}`. Los `{{templates}}` en `llm_call`
+referencian sus inputs inmediatos:
 
 ```json
+"nodes": {
+  "trigger": { "type": "trigger_webhook", "config": { "path": "/chat", "test_payload": { "message": "hola" } } },
+  "agent":   { "type": "llm_call", "config": { "...": "...", "prompt": "{{message}}" } },
+  "out":     { "type": "output", "config": {} }
+},
 "edges": [
-  { "from": "trigger.message", "to": "agent.prompt" },
-  { "from": "agent",           "to": "out" }
+  { "from": "trigger", "to": "agent" },
+  { "from": "agent",   "to": "out" }
 ]
 ```
 
-- La primera arista es **explícita**: toma el campo `message` del webhook y lo entrega
-  al puerto `prompt` del agente.
-- La segunda es **por defecto**: `agent` emite por `result`, `out` recibe por `input`,
-  y el motor los conecta solo.
+- La arista `trigger → agent` es **pelada**. El webhook emite su payload completo;
+  el `llm_call` lee el campo `message` con `"prompt": "{{message}}"` en su `config`.
+- La arista `agent → out` también es pelada: el motor conecta `result` → `input`.
 
-**Regla práctica:** si dudás, escribí la arista explícita (`from: "A.campo"`,
-`to: "B.campo"`) — nunca es ambigua.
+**Regla práctica:** ¿Querés un campo específico? No toques la arista — leelo con
+`{{campo}}` en el `config` del `llm_call`, o usá un adaptador `python_script`
+(sección 3).
 
 ---
 
@@ -116,6 +132,43 @@ El nodo terminal que captura el resultado final del grafo:
 "out": { "type": "output", "config": {} }
 ```
 
+### Adaptador `python_script` → alimentar nodos sin `{{templates}}`
+
+Algunos nodos **no** soportan `{{templates}}` en su `config` — `http_request` solo
+resuelve `${ENV}`, no `{{campo}}`. Para pasarle datos dinámicos con aristas peladas,
+poné un `python_script` adaptador **antes** del nodo: su variable `output` debe ser
+un **objeto**, y el motor lo **auto-flattenea** (sección 2) sobre la arista pelada,
+metiendo cada clave (`base_url`, `endpoint`, `method`, …) como input del nodo destino.
+
+Ejemplo runnable — `trigger → python_script → http_request → output`, todas peladas:
+
+```json
+{
+  "nodes": {
+    "trigger": { "type": "trigger_webhook", "config": { "path": "/run", "test_payload": { "ciudad": "Bogota" } } },
+    "preparar": { "type": "python_script", "config": { "code": "output = { 'base_url': 'https://api.exemplo.com', 'endpoint': '/clima/' + ciudad, 'method': 'GET' }" } },
+    "llamar": { "type": "http_request", "config": {} },
+    "out": { "type": "output", "config": {} }
+  },
+  "edges": [
+    { "from": "trigger", "to": "preparar" },
+    { "from": "preparar", "to": "llamar" },
+    { "from": "llamar", "to": "out" }
+  ]
+}
+```
+
+- El `python_script` lee `ciudad` (del payload, auto-flatteneado del trigger) y arma
+  el objeto `output`. Esas claves caen como inputs de `http_request` por auto-flatten.
+- `http_request` no necesita `{{templates}}`: recibe `base_url`/`endpoint`/`method`
+  ya resueltos por el adaptador.
+
+> **Preferido para agentes:** si lo que querés es que un LLM decida cuándo y con qué
+> datos llamar a `http_request` o `sql_query`, **no uses aristas ni adaptador** —
+> exponé ese nodo como **herramienta** de un `llm_call` en `tool_configurations`
+> (sección 6b). El agente completa los campos y el motor ejecuta la tool sin cablear
+> ninguna arista.
+
 ---
 
 ## 4. Secretos: nunca pongas claves en el JSON
@@ -137,6 +190,19 @@ entorno en tiempo de ejecución:
   "connection_url": "${DATABASE_URL}"
 }
 ```
+
+### Secretos y APIs
+
+Para autenticar contra una API (campo `bearer_token` de `http_request`) hay **dos
+placeholders según el destino del grafo**:
+
+- **Grafo de PRUEBA** (lo corrés vos localmente): usá un *secure handle* `<sv_...>`
+  en `bearer_token` — un identificador que el motor resuelve contra el almacén de
+  secure values.
+- **Grafo ENTREGADO** (el que recibe la persona): usá `${ENV_VAR}` en `bearer_token`
+  — la clave se inyecta desde el entorno en producción.
+
+Detalle completo en [[capability-api-integration]].
 
 ---
 
@@ -252,13 +318,14 @@ se activa con `session_id` + `connection_url` (Postgres).
         "api_key": "${GEMINI_API_KEY}",
         "session_id": "mi_agente_session_001",
         "connection_url": "${DATABASE_URL}",
-        "system_message": "Sos un asistente conversacional. Saludá y ayudá a la persona."
+        "system_message": "Sos un asistente conversacional. Saludá y ayudá a la persona.",
+        "prompt": "{{message}}"
       }
     },
     "out": { "type": "output", "config": {} }
   },
   "edges": [
-    { "from": "trigger.message", "to": "agent.prompt" },
+    { "from": "trigger", "to": "agent" },
     { "from": "agent", "to": "out" }
   ]
 }
@@ -277,11 +344,14 @@ se activa con `session_id` + `connection_url` (Postgres).
 2. **Una arista apunta a un id que no existe.** El `from` y el `to` deben referenciar
    ids de nodos que estén realmente en `nodes`. Un typo (`"agnet"` en vez de `"agent"`)
    hace fallar el grafo.
-3. **El `node_type` de una herramienta debe ser un tipo de nodo real registrado.**
+3. **Arista punteada (`nodo.campo`).** PROHIBIDO. Las aristas son siempre peladas
+   (`{ "from": "A", "to": "B" }`). Para tomar un campo, leelo con `{{campo}}` en el
+   `config` del `llm_call`, o usá un adaptador `python_script` (sección 3).
+4. **El `node_type` de una herramienta debe ser un tipo de nodo real registrado.**
    En `tool_configurations`, `node_type` tiene que ser un nodo que existe de verdad
    (`http_request`, `sql_query`, `subgraph`, `current_time`, etc.), no un placeholder
    como `log`. Si el nodo no existe, la herramienta no se ejecuta.
-4. **Campos ocultos al LLM van en `node_schema` con `"fixed"`.** Todo lo que el modelo
+5. **Campos ocultos al LLM van en `node_schema` con `"fixed"`.** Todo lo que el modelo
    NO debe ver ni elegir (URLs base, métodos HTTP, ids fijos, claves) se declara como
    `"fixed"` dentro de `node_schema`. Solo los campos con `"required": true` o sin
    `fixed` quedan expuestos para que el LLM los complete.
