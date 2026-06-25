@@ -24,7 +24,8 @@
             "tests/graphs/agents/graph_builder/skills/capability-multimedia",
             "tests/graphs/agents/graph_builder/skills/capability-docs-and-sheets",
             "tests/graphs/agents/graph_builder/skills/capability-data-sql",
-            "tests/graphs/agents/graph_builder/skills/capability-code-and-logic"
+            "tests/graphs/agents/graph_builder/skills/capability-code-and-logic",
+            "tests/graphs/agents/graph_builder/skills/capability-api-integration"
           ]
         },
         "secure_suspend_allowed": true,
