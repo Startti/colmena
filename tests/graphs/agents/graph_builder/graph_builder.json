@@ -1,0 +1,41 @@
+{
+  "timezone": "America/Bogota",
+  "locale": "es-CO",
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": { "path": "/chat", "test_payload": { "message": "hola" } }
+    },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "model": "gemini-2.5-flash",
+        "api_key": "${GEMINI_API_KEY}",
+        "session_id": "graph_builder_session_001",
+        "connection_url": "${DATABASE_URL}",
+        "system_message": "PLACEHOLDER — reemplazado en Task 11. Por ahora: sos un asistente que ayuda a crear grafos. Saludá y preguntá qué quiere lograr la persona.",
+        "skills": { "paths": [] },
+        "tool_configurations": {
+          "probar_grafo": {
+            "name": "probar_grafo",
+            "node_type": "subgraph",
+            "description": "Ejecuta un grafo Colmena completo y devuelve su resultado real para que puedas juzgar si funciona. Pasá el grafo entero (objeto con nodes y edges) en child_graph_inline.",
+            "node_schema": {
+              "child_graph_inline": {
+                "type": "object",
+                "required": true,
+                "description": "El grafo Colmena completo a ejecutar: un objeto con las claves nodes y edges."
+              }
+            }
+          }
+        }
+      }
+    },
+    "out": { "type": "output" }
+  },
+  "edges": [
+    { "from": "trigger.message", "to": "agent.prompt" },
+    { "from": "agent", "to": "out" }
+  ]
+}
