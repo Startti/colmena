@@ -164,18 +164,28 @@ Las reglas `when` de cada rama operan sobre esos campos. Formas comunes:
 `{ "field": "intent", "in": ["support", "technical"] }`,
 y combinadores `{ "all": [...] }` (AND) / `{ "any": [...] }` (OR).
 
-### Cómo se conectan las ramas
+### Cómo se conectan las ramas (aristas peladas)
 
-Cada rama es un puerto de salida que se llama **exactamente** igual que su
-`name`. Conectás `router.<nombre_de_rama>` al nodo que maneja ese caso. El router
-además siempre emite un puerto `__decision` con `{ selected_branch, reason, extracted }`
-útil para logging.
+El router decide **una** rama y emite un único objeto de salida con un campo
+`__decision` que trae todo lo que necesitás para ramificar después:
+`__decision.selected_branch` (el `name` de la rama elegida), `__decision.reason`,
+y `__decision.extracted` (los campos que sacó la IA). Conectás el router al nodo
+siguiente con una **arista pelada** `{ "from": "router", "to": "..." }` y ahí leés
+`__decision.selected_branch` para decidir qué hacer.
 
-### Ejemplo runnable (VERBATIM): bifurcar por intención
+> **Por qué pelada y no `router.<rama>`.** El motor no rutea por nombre de puerto:
+> una arista pelada pasa el objeto completo del router (con `__decision`) al nodo
+> siguiente, y desde su `config` (con `{{templates}}` en un `llm_call`, que soportan
+> rutas anidadas como `{{__decision.selected_branch}}`) elegís el campo que te
+> importa. La forma punteada está **prohibida** (regla dura v1.1 — ver
+> [[building-graphs-core]]).
+
+### Ejemplo runnable: bifurcar por intención
 
 Modo `extract_and_route`: la IA extrae `intent` + `urgency`, y las reglas `when`
 mandan cada caso por su rama. `urgent_sales` va primero porque gana la primera
-regla que matchea.
+regla que matchea. El router emite la decisión; un `llm_call` final la lee con
+`{{__decision.selected_branch}}` y redacta la respuesta adecuada.
 
 ```json
 {
@@ -216,31 +226,36 @@ regla que matchea.
         ]
       }
     },
-    "log_urgent":  { "type": "log", "config": { "prefix": "URGENT_SALES:" } },
-    "log_sales":   { "type": "log", "config": { "prefix": "SALES:" } },
-    "log_support": { "type": "log", "config": { "prefix": "SUPPORT:" } },
-    "log_billing": { "type": "log", "config": { "prefix": "BILLING:" } },
+    "responder": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "model": "gemini-2.5-flash",
+        "api_key": "${GEMINI_API_KEY}",
+        "system_message": "Sos el ruteo de un equipo de atención. El router ya clasificó el mensaje en la rama '{{__decision.selected_branch}}' (motivo: {{__decision.reason}}). Redactá en una frase qué área debe atenderlo y con qué prioridad.",
+        "prompt": "Mensaje clasificado en la rama: {{__decision.selected_branch}}"
+      }
+    },
     "out": { "type": "output", "config": {} }
   },
   "edges": [
-    { "from": "trigger.user_message",  "to": "router.input" },
-    { "from": "router.urgent_sales",   "to": "log_urgent" },
-    { "from": "router.sales",          "to": "log_sales" },
-    { "from": "router.support",        "to": "log_support" },
-    { "from": "router.billing",        "to": "log_billing" },
-    { "from": "router.__decision",     "to": "out" }
+    { "from": "trigger",   "to": "router" },
+    { "from": "router",    "to": "responder" },
+    { "from": "responder", "to": "out" }
   ]
 }
 ```
 
 Qué hace cada parte:
 - `trigger`: recibe el mensaje de la persona en `user_message`.
-- El edge `trigger.user_message → router.input`: ese texto entra al router.
+- El edge **pelado** `trigger → router`: el payload del webhook entra al router por
+  su puerto de entrada por defecto (`input`); la IA lo lee para clasificar.
 - `router`: la IA extrae `intent`/`urgency` y la primera regla `when` que matchea
   elige la rama. El mensaje del ejemplo (ventas + urgente) cae en `urgent_sales`.
-- Cada `router.<rama> → log_*`: solo la rama elegida emite payload; el resto va
-  `null` y esos nodos se saltean.
-- `router.__decision → out`: deja registrado qué se decidió y por qué.
+- El edge **pelado** `router → responder`: el objeto del router (con `__decision`)
+  llega al `llm_call`, que lee la rama elegida con `{{__decision.selected_branch}}`
+  en su `system_message`/`prompt` y redacta la respuesta del caso.
+- `responder → out`: devuelve la respuesta final.
 
 > **Variante modo A (`llm_direct`).** Si no necesitás campos estructurados, omití
 > el `schema` y poné `mode: "llm_direct"`; cada rama lleva `name` + `description`

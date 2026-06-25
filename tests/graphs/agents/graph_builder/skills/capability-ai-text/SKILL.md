@@ -115,13 +115,14 @@ Gemini por defecto. Flujo: `trigger` → `llm_call` → `output`.
         "provider": "google",
         "model": "gemini-2.5-flash",
         "api_key": "${GEMINI_API_KEY}",
-        "system_message": "Sos un asistente que responde preguntas de forma clara y breve, siempre en español."
+        "system_message": "Sos un asistente que responde preguntas de forma clara y breve, siempre en español.",
+        "prompt": "{{message}}"
       }
     },
-    "out": { "type": "output" }
+    "out": { "type": "output", "config": {} }
   },
   "edges": [
-    { "from": "trigger.message", "to": "responder.prompt" },
+    { "from": "trigger", "to": "responder" },
     { "from": "responder", "to": "out" }
   ]
 }
@@ -129,7 +130,8 @@ Gemini por defecto. Flujo: `trigger` → `llm_call` → `output`.
 
 Qué hace cada parte:
 - `trigger`: recibe el mensaje de la persona (campo `message` del payload).
-- El edge `trigger.message → responder.prompt`: pasa ese mensaje como prompt.
+- El edge **pelado** `trigger → responder`: pasa el payload completo del webhook;
+  el `llm_call` lee el campo `message` con `"prompt": "{{message}}"` en su `config`.
 - `responder`: el `llm_call` con el stack Gemini por defecto y un `system_message`.
 - `out`: devuelve la respuesta de la IA.
 
