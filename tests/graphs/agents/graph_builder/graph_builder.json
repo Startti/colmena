@@ -27,6 +27,8 @@
             "tests/graphs/agents/graph_builder/skills/capability-code-and-logic"
           ]
         },
+        "secure_suspend_allowed": true,
+        "enabled_tools": ["api_explorer"],
         "tool_configurations": {
           "probar_grafo": {
             "name": "probar_grafo",
@@ -38,6 +40,22 @@
                 "required": true,
                 "description": "El grafo Colmena completo a ejecutar: un objeto con las claves nodes y edges."
               }
+            }
+          },
+          "leer_web": {
+            "name": "leer_web",
+            "node_type": "tavily_client",
+            "description": "Descarga y extrae el contenido de una URL (documentación de una API, una página web). Usalo para leer la doc que te pasa el usuario.",
+            "node_config": { "api_key": "${TAVILY_API_KEY}" }
+          },
+          "http_get": {
+            "name": "http_get",
+            "node_type": "http_request",
+            "description": "Hace un GET a una URL y devuelve el cuerpo. Úsalo para traer specs OpenAPI (.json/.yaml) o endpoints de documentación.",
+            "node_schema": {
+              "method":  { "type": "string", "fixed": "GET" },
+              "base_url": { "type": "string", "required": true, "description": "Origen, ej. https://api.hubapi.com" },
+              "endpoint": { "type": "string", "required": true, "description": "Ruta, ej. /crm/v3/objects/contacts" }
             }
           }
         }
