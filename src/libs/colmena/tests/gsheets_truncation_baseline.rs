@@ -87,10 +87,40 @@ async fn dump_range() {
         .next()
         .and_then(|s| s.trim_matches(|c: char| !c.is_ascii_digit()).parse().ok())
         .unwrap_or(1);
+    // EXP_RENDER=formula → read the formula TEXT (`=A*B`) instead of the
+    // computed value, so a formula cell is distinguishable from a literal.
+    let value_render = match std::env::var("EXP_RENDER").as_deref() {
+        Ok("formula") => colmena::gsheets::domain::ValueRenderOption::Formula,
+        _ => colmena::gsheets::domain::ValueRenderOption::UnformattedValue,
+    };
+    let opts = ReadOptions {
+        value_render,
+        as_records: false,
+    };
     let r = client
-        .read_range(&id, &sheet, Some(&range), ReadOptions::default())
+        .read_range(&id, &sheet, Some(&range), opts)
         .await
         .expect("read ok");
+    // EXP_GENERIC=1 → print the first 5 columns raw (for narrow scratch tabs),
+    // instead of the Clientes-Especiales-specific S/U/V layout.
+    if std::env::var("EXP_GENERIC").is_ok() {
+        println!("\n===== {sheet}!{range} (first 5 columns A..E) =====");
+        for (i, row) in r.values.as_array().into_iter().flatten().enumerate() {
+            let cells = row.as_array().cloned().unwrap_or_default();
+            let get = |idx: usize| cells.get(idx).map(cell_to_string).unwrap_or_default();
+            println!(
+                "row {:>3} | A={:<14} | B={:<14} | C={:<14} | D={:<10} | E={}",
+                first_row + i,
+                get(0),
+                get(1),
+                get(2),
+                get(3),
+                get(4)
+            );
+        }
+        println!("=====================================================================\n");
+        return;
+    }
     println!("\n===== {sheet}!{range} (CLIENT ID | S=Cantidad | U=Tarifa | V=Importe) =====");
     for (i, row) in r.values.as_array().into_iter().flatten().enumerate() {
         let cells = row.as_array().cloned().unwrap_or_default();

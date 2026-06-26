@@ -37,6 +37,53 @@ numbers or column letters, and the matching value does **not** need to be unique
   header name is empty or duplicated can't be addressed and are reported in
   `skipped_columns`.
 
+## Writing a live FORMULA — reference columns by name with `{{Name}}`
+
+To make `Importe` a formula instead of a computed value, put the **column name**
+in double braces; the dispatcher resolves it to the real A1 of the **same row**:
+
+```python
+df = pd.DataFrame(sheet_data)
+mask = df['CLIENT ID'] == 'TCIb1afd2...'
+df.loc[mask, 'Importe'] = '={{Cantidad}}*{{Tarifa}}'   # → e.g. =S5*U5, =S6*U6 ...
+output_sheets = {'Hoja 16': {'mode': 'update_by_position', 'df': df}}
+```
+
+- `{{Cantidad}}` → that column's cell in the row being written (current row only).
+- **Never compute column letters yourself.** Deriving them from `df.columns`
+  order is off-by-one whenever the sheet has an empty or duplicate header column
+  (a very common case), and lands a broken `#VALUE!` formula in the wrong refs.
+  Let the tool do it — it reads the real header positions.
+- An unknown / misspelled column name returns a `FormulaUnknownColumn` error that
+  lists the valid column names, so you can fix it and retry.
+- Single braces (`={1,2;3,4}` array literals) are left untouched — only `{{ }}`
+  is a column reference.
+- Current-row references only. For an aggregate like `=SUM(Importe2:Importe100)`
+  write the literal A1 range yourself.
+
+### Filling a formula down many rows
+
+`{{Name}}` resolves per row, so to fill a formula across a column / range /
+subset, just assign it to those rows — the tool puts the correct row number in
+each cell:
+
+```python
+df['Importe'] = '={{Cantidad}}*{{Tarifa}}'                        # whole column
+df.loc[df['Categoria'] == 'Bebidas', 'Margen'] = '={{Venta}}-{{Costo}}'  # by condition — PREFERRED
+df.loc[df.index[0:30], 'Subtotal'] = '={{Precio}}*{{Unidades}}'   # first 30 data rows
+```
+
+- **Prefer selecting rows by a condition** (`df.loc[df['X']=='Y', …]`) — no row
+  math. If the user names literal sheet rows, map them: `df_index = sheet_row - 2`
+  (row 1 is the header), so sheet rows 2–31 → `df.index[0:30]`.
+- A fill over >50 cells returns `formula_cells_total` + `formula_cells_truncated`
+  in the result. Report the real total ("applied to all 812 rows"), not the
+  50-cell sample.
+- **When you confirm to the user, quote the tool result's `formula_cells`**
+  (real `cell → formula`, e.g. `{"V5": "=S5*U5"}`). Do NOT recompute column
+  letters yourself to build the message — that hand math is off-by-one, so your
+  confirmation would report the wrong cell/refs even though the write was right.
+
 ## Alternative — `update_in_place` (only when a column is truly UNIQUE)
 
 If the tab has a genuine primary key, you can patch by key instead of position:

@@ -149,7 +149,53 @@ gsheets_run_python:
     # Mode 4 — update_by_position (edit existing rows; NO key needed)
     df.loc[df['CLIENT ID'] == 'TCI28fa...', 'Importe'] = df['Cantidad'] * df['Tarifa']
     output_sheets = {'Hoja 16': {'mode': 'update_by_position', 'df': df}}
+
+    # Mode 4 with a FORMULA — reference columns BY NAME with {{Name}}
+    # (resolves to that column in the SAME row; the tool computes the A1).
+    df.loc[mask, 'Importe'] = '={{Cantidad}}*{{Tarifa}}'
+    output_sheets = {'Hoja 16': {'mode': 'update_by_position', 'df': df}}
+
+    # Fill a formula down MANY rows — assign to whichever rows you want; the tool
+    # puts the right row number in each cell. Pick the rows the user described:
+    df['Importe'] = '={{Cantidad}}*{{Tarifa}}'                       # whole column
+    df.loc[df['Categoria'] == 'Bebidas', 'Margen'] = '={{Venta}}-{{Costo}}'  # by condition (preferred)
+    df.loc[df.index[0:30], 'Subtotal'] = '={{Precio}}*{{Unidades}}'  # first 30 data rows
+    output_sheets = {'Hoja 16': {'mode': 'update_by_position', 'df': df}}
     ```
+
+    **Formulas: reference columns by NAME, never by hand-computed letter.**
+    To write a live formula in ANY write mode (`replace`/create, `overwrite`,
+    `update_by_position`, `update_in_place`), put the column NAME in double
+    braces — `'={{Cantidad}}*{{Tarifa}}'`. The dispatcher substitutes the real A1
+    for the SAME row (e.g. `=S5*U5`). Do NOT compute
+    column letters yourself (e.g. from `df.columns` order) — that is off-by-one
+    whenever the sheet has an empty/duplicate header column, and lands a broken
+    `#VALUE!` formula. An unknown column name returns a `FormulaUnknownColumn`
+    error listing the valid names. (Current-row refs only; for an aggregate like
+    `=SUM(...)` write the literal A1 range yourself.)
+
+    **Filling a formula over many rows.** The `{{Name}}` ref resolves PER ROW, so
+    to apply a formula to a column / range / subset, just assign it to those rows
+    and the tool fills the right row number into each (`=S2*U2`, `=S3*U3`, …).
+    Prefer selecting rows by a CONDITION on a column (`df.loc[df['X']=='Y', …]`) —
+    it needs no row arithmetic. If you must target literal SHEET rows, remember
+    `df_index = sheet_row - 2` (row 1 is the header), so sheet rows 2–31 are
+    `df.index[0:30]`. When a fill writes more than 50 cells, the result returns
+    `formula_cells_total` + `formula_cells_truncated` — report that real count
+    (e.g. "applied to all 812 rows"), not just the 50-cell sample.
+
+    **Reporting what you wrote — quote `formula_cells`, never recompute A1.**
+    The tool result echoes the exact cell→formula it wrote (e.g.
+    `"formula_cells": {"V5": "=S5*U5"}`, plus `formula_cells_total` when the write
+    exceeds the 50-cell sample). Relay THOSE in your confirmation.
+
+    ❌ WRONG — building the report by hand. `df.columns` order is off-by-one when
+       the sheet has an empty/duplicate header column, so this reports the WRONG
+       cell even when the write itself was correct:
+         col = chr(ord('A') + df.columns.get_loc('Importe'))   # → 'R', wrong
+         output = {f'{col}{i+2}': f'={col}{i+2}*...'}
+    ✅ RIGHT — relay the tool's `formula_cells` verbatim (and say the real count
+       from `formula_cells_total` when present: "applied to all 812 rows").
 
     **Collision policy.** By default, if a tab named in `output_sheets`
     already exists, the tool fails with a `SheetExists` error returning
