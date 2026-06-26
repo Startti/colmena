@@ -60,6 +60,13 @@ gsheets_set_cell:
   description: |
     Write a single cell. Strings starting with `=` are evaluated by Google as formulas (USER_ENTERED valueInputOption). Cascading recalc happens server-side automatically.
 
+    To edit ROWS matched by a value that may REPEAT (e.g. every row of one
+    client id), first get the target ROW NUMBERS with `gsheets_run_python`
+    (1-based, header = row 1) plus the column letter from the header position,
+    then call this tool once per cell (e.g. `S20`, `S21`, …). Do NOT use
+    `update_in_place` when the identifying column is not unique. For the full
+    write/edit decision table, load the `gsheets-editing` skill.
+
 gsheets_set_range:
   summary: Write a 2-D values array starting at a given address
   description: |
@@ -151,7 +158,24 @@ gsheets_run_python:
     correct choice — it writes only the 47 changed cells via a single
     batchUpdate, instead of replacing 12K cells.
 
-    For more patterns and pitfalls, load the `gsheets-table-exploration` skill (single-table inspection) or `gsheets-cross-sheet-analysis` skill (joins, comparisons).
+    ⚠️ `update_in_place` REQUIRES the `key` column to have UNIQUE values. If the
+    identifying value REPEATS across rows (e.g. several line-items share one
+    client id), update_in_place FAILS with a duplicate-key error. To edit such
+    rows: in code, find their ROW NUMBERS (1-based, header = row 1) and the
+    column letter (from the header position), then write each target cell with
+    `gsheets_set_cell`. NEVER use `overwrite` just to change a few rows — it
+    destroys formatting/formulas in the rest of the tab.
+
+    ## Picking the write mechanism (routing)
+    - A few KNOWN cells → `gsheets_set_cell` / `gsheets_set_range` (no code).
+    - Edit rows by a UNIQUE key column → `update_in_place`.
+    - Edit rows by a NON-UNIQUE value / by position → find the row numbers here,
+      then `gsheets_set_cell` per cell.
+    - Create a NEW tab WITH data → name it in `output_sheets` (creates + fills).
+
+    For more patterns and pitfalls, load the `gsheets-editing` skill (write/edit
+    decision table + examples), `gsheets-table-exploration` (single-table
+    inspection) or `gsheets-cross-sheet-analysis` (joins, comparisons).
 
     MERGED CELLS: sheets are loaded with merged cells already forward-filled, so
     a column that was visually merged (e.g. a category spanning several rows)

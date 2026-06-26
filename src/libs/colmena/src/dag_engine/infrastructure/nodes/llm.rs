@@ -531,6 +531,41 @@ impl LlmNode {
         false
     }
 
+    /// True when the agent can WRITE to a sheet — it has the `gsheets` alias,
+    /// `*`, or any individual write tool (`gsheets_run_python`,
+    /// `gsheets_set_cell`, `gsheets_set_range`). Gates auto-enrollment of the
+    /// `gsheets-editing` skill (the write/edit decision guide). Mirrors
+    /// [`agent_has_gsheets_format_tool`](Self::agent_has_gsheets_format_tool).
+    pub(super) fn agent_has_gsheets_write_tools(config: &Value, inputs: &NodeInputs) -> bool {
+        const WRITE_TOOLS: [&str; 3] = [
+            "gsheets_run_python",
+            "gsheets_set_cell",
+            "gsheets_set_range",
+        ];
+        let enabled = inputs
+            .get("enabled_tools")
+            .or_else(|| config.get("enabled_tools"));
+        let raw_names: Vec<&str> = match enabled {
+            Some(Value::String(s)) => vec![s.as_str()],
+            Some(Value::Array(arr)) => arr.iter().filter_map(|v| v.as_str()).collect(),
+            _ => Vec::new(),
+        };
+        for n in &raw_names {
+            if n.starts_with('!') {
+                continue;
+            }
+            if *n == "*" || *n == "gsheets" || WRITE_TOOLS.contains(n) {
+                return true;
+            }
+        }
+        if let Some(Value::Object(tc)) = config.get("tool_configurations") {
+            if tc.keys().any(|k| WRITE_TOOLS.contains(&k.as_str())) {
+                return true;
+            }
+        }
+        false
+    }
+
     /// Parse `COLMENA_SKILLS_ALLOWED_DIRS` env var into a list of PathBufs.
     /// Separator: `:` on Unix, `;` on Windows. Missing env var → empty list.
     fn parse_allowed_dirs_env() -> Vec<PathBuf> {
@@ -670,6 +705,17 @@ impl LlmNode {
             skills_config
                 .builtin
                 .push("gsheets-presentable-output".to_string());
+        }
+
+        // Auto-enroll the `gsheets-editing` builtin skill whenever the agent can
+        // write to a sheet. Pairs with the always-on routing rules in the
+        // gsheets_run_python / gsheets_set_cell descriptions: the descriptions
+        // give the decision at the point of use, the skill teaches the full
+        // write/edit decision table + per-scenario examples on demand.
+        if Self::agent_has_gsheets_write_tools(config, inputs)
+            && !skills_config.builtin.iter().any(|n| n == "gsheets-editing")
+        {
+            skills_config.builtin.push("gsheets-editing".to_string());
         }
 
         // If there's nothing to load (no builtins, no paths), short-circuit.
@@ -5574,6 +5620,60 @@ mod skills_path_tests {
             "expected empty list, got: {:?}",
             resolved
         );
+    }
+}
+
+#[cfg(test)]
+mod agent_has_gsheets_write_tools_tests {
+    //! Covers the gate that auto-enrolls the `gsheets-editing` builtin skill.
+    use super::*;
+    use serde_json::json;
+    use std::collections::HashMap;
+
+    fn empty_inputs() -> NodeInputs {
+        HashMap::new()
+    }
+
+    #[tokio::test]
+    async fn gsheets_alias_triggers() {
+        let cfg = json!({ "enabled_tools": ["gsheets"] });
+        assert!(LlmNode::agent_has_gsheets_write_tools(&cfg, &empty_inputs()));
+    }
+
+    #[tokio::test]
+    async fn individual_write_tools_trigger() {
+        for t in ["gsheets_run_python", "gsheets_set_cell", "gsheets_set_range"] {
+            let cfg = json!({ "enabled_tools": [t] });
+            assert!(
+                LlmNode::agent_has_gsheets_write_tools(&cfg, &empty_inputs()),
+                "{t} should trigger"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn read_only_tool_alone_does_not_trigger() {
+        let cfg = json!({ "enabled_tools": ["gsheets_read"] });
+        assert!(!LlmNode::agent_has_gsheets_write_tools(&cfg, &empty_inputs()));
+    }
+
+    #[tokio::test]
+    async fn wildcard_triggers() {
+        let cfg = json!({ "enabled_tools": "*" });
+        assert!(LlmNode::agent_has_gsheets_write_tools(&cfg, &empty_inputs()));
+    }
+
+    #[tokio::test]
+    async fn alias_with_one_write_tool_excluded_still_triggers() {
+        // The alias still exposes other write tools (set_cell, set_range).
+        let cfg = json!({ "enabled_tools": ["gsheets", "!gsheets_run_python"] });
+        assert!(LlmNode::agent_has_gsheets_write_tools(&cfg, &empty_inputs()));
+    }
+
+    #[tokio::test]
+    async fn tool_configurations_entry_triggers() {
+        let cfg = json!({ "tool_configurations": { "gsheets_set_cell": {} } });
+        assert!(LlmNode::agent_has_gsheets_write_tools(&cfg, &empty_inputs()));
     }
 }
 
