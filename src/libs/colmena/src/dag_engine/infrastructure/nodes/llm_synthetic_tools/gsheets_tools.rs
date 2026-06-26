@@ -1439,7 +1439,7 @@ mod tests {
             "| A | B |\n| --- | --- |\n| 1 | 11 |\n| 2 | 22 |\n| 3 | 33 |\n| 4 | 44 |\n| 5 | 55 |";
         let (bounded, rows) = bound_markdown_rows(md, 50);
         assert!(bounded.starts_with("| A | B |\n| --- | --- |"));
-        assert!(rows >= 1 && rows < 5, "kept {rows} rows");
+        assert!((1..5).contains(&rows), "kept {rows} rows");
         assert!(bounded.len() <= 50 + 12, "bounded near budget");
         // Only whole rows kept — no dangling partial line.
         assert!(bounded.lines().all(|l| l.starts_with('|')));

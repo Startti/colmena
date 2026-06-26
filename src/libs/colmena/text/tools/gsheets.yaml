@@ -145,6 +145,10 @@ gsheets_run_python:
 
     # Mode 3 — overwrite (replace existing tab; explicit consent)
     output_sheets = {'Sales': {'mode': 'overwrite', 'df': df}}
+
+    # Mode 4 — update_by_position (edit existing rows; NO key needed)
+    df.loc[df['CLIENT ID'] == 'TCI28fa...', 'Importe'] = df['Cantidad'] * df['Tarifa']
+    output_sheets = {'Hoja 16': {'mode': 'update_by_position', 'df': df}}
     ```
 
     **Collision policy.** By default, if a tab named in `output_sheets`
@@ -158,19 +162,20 @@ gsheets_run_python:
     correct choice — it writes only the 47 changed cells via a single
     batchUpdate, instead of replacing 12K cells.
 
-    ⚠️ `update_in_place` REQUIRES the `key` column to have UNIQUE values. If the
-    identifying value REPEATS across rows (e.g. several line-items share one
-    client id), update_in_place FAILS with a duplicate-key error. To edit such
-    rows: in code, find their ROW NUMBERS (1-based, header = row 1) and the
-    column letter (from the header position), then write each target cell with
-    `gsheets_set_cell`. NEVER use `overwrite` just to change a few rows — it
-    destroys formatting/formulas in the rest of the tab.
+    ✅ TO EDIT EXISTING ROWS, PREFER `update_by_position` (Mode 4). Bind the WHOLE
+    sheet (no `range`), modify the bound df IN PLACE (`df.loc[mask,'col']=...`),
+    and return the WHOLE df under `update_by_position`. The dispatcher writes only
+    the changed cells back to the right rows/columns — you NEVER compute an A1
+    address or a row offset, and NO unique key is needed (works even when an id
+    repeats). Do NOT filter the rows you return, and do NOT `reset_index`/`sort`+
+    `reset_index`/`concat` the bound df (it returns a clear error if you do).
+    NEVER use `overwrite` just to change a few rows — it destroys formatting.
 
     ## Picking the write mechanism (routing)
     - A few KNOWN cells → `gsheets_set_cell` / `gsheets_set_range` (no code).
-    - Edit rows by a UNIQUE key column → `update_in_place`.
-    - Edit rows by a NON-UNIQUE value / by position → find the row numbers here,
-      then `gsheets_set_cell` per cell.
+    - **Edit existing rows (any key, unique or not) → `update_by_position`** —
+      modify the bound df in place, return it whole. (Mode 4)
+    - Edit rows by a UNIQUE key column (advanced) → `update_in_place` with `key`.
     - Create a NEW tab WITH data → name it in `output_sheets` (creates + fills).
 
     For more patterns and pitfalls, load the `gsheets-editing` skill (write/edit
