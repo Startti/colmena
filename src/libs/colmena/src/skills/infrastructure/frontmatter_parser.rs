@@ -10,10 +10,41 @@ struct RawFrontmatter {
     references: Vec<RawReference>,
 }
 
-#[derive(Debug, Deserialize)]
+/// A reference declaration in a SKILL.md's `references:` list. Accepts BOTH
+/// the full `{name, description}` map AND the terse bare-string form (just the
+/// reference name) — several built-in skills (e.g. `gsheets-table-exploration`,
+/// `crdt-doc-table-exploration`) use the terse form, where the description is
+/// simply empty. Without this, those skills fail to parse and any agent that
+/// loads them errors at runtime.
+#[derive(Debug)]
 struct RawReference {
     name: String,
     description: String,
+}
+
+impl<'de> Deserialize<'de> for RawReference {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            Bare(String),
+            Full {
+                name: String,
+                #[serde(default)]
+                description: String,
+            },
+        }
+        Ok(match Raw::deserialize(deserializer)? {
+            Raw::Bare(name) => RawReference {
+                name,
+                description: String::new(),
+            },
+            Raw::Full { name, description } => RawReference { name, description },
+        })
+    }
 }
 
 /// Frontmatter that may optionally appear in a `references/<name>.md` file.

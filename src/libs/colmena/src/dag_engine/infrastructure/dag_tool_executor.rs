@@ -276,11 +276,14 @@ impl DagToolExecutor {
             .insert(sheet_key(spreadsheet_id, sheet));
     }
 
-    /// Inspect-before-python guard. If every sheet binding in `args` was already
-    /// read this turn (or there are none), dispatch `gsheets_run_python`
-    /// normally. Otherwise short-circuit: read a bounded markdown preview of each
-    /// unread sheet, mark it seen, and return an `inspect_first` envelope WITHOUT
-    /// running the code, forcing the agent to re-call with informed code.
+    /// Inspect-AND-run guard (Option A). If every sheet binding in `args` was
+    /// already read this turn (or there are none), dispatch `gsheets_run_python`
+    /// normally. Otherwise, for each first-seen sheet: read a bounded markdown
+    /// preview, mark it seen, THEN execute the code and return its result with
+    /// the previews attached under `inspected_sheets` (+ an `inspection_note`).
+    /// The agent sees the real columns AND makes progress in one round-trip — no
+    /// forced re-call. A preview read that errors (missing sheet / permission)
+    /// still short-circuits, since the code would have failed too.
     async fn gsheets_run_python_guarded(&self, args: serde_json::Value) -> serde_json::Value {
         use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::dispatch_gsheets_read;
         use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::dispatch_gsheets_run_python;
@@ -328,12 +331,35 @@ impl DagToolExecutor {
             self.mark_gsheets_sheet_seen(&b.spreadsheet_id, &b.sheet);
         }
 
-        serde_json::json!({
-            "status": "inspect_first",
-            "inspected_sheets": inspected,
-            "advice": "Antes de correr código sobre una hoja hay que conocer sus columnas reales. Acá está el preview (primeras filas) de cada hoja. Volvé a llamar gsheets_run_python con el MISMO código, corregido si hace falta para usar estas columnas/valores reales (p.ej. filtrar por la columna correcta, no adivinar nombres).",
-            "next_action": "re-call gsheets_run_python"
-        })
+        // Option A: do NOT reject the call. Execute the code AND attach the real
+        // columns + row preview to the result, so the agent sees the schema and
+        // makes progress in a SINGLE round-trip. The previous "inspect_first +
+        // re-call" contract relied on the model issuing a second call, which weak
+        // models (e.g. gemini-flash) do unreliably — they narrate intent or go
+        // empty and the write/compute never happens. If a column name was guessed
+        // wrong, the execution error rides alongside the preview so the next call
+        // can fix it (the sheet is now marked seen → it executes directly).
+        let exec = dispatch_gsheets_run_python(args).await;
+        let note = "First run on these sheet(s) this turn: their REAL columns + a \
+                    row preview are in `inspected_sheets`. Your code WAS executed — \
+                    see the result fields. If you used a column name not in the real \
+                    list, fix it and call gsheets_run_python again (it runs directly now).";
+        match exec {
+            serde_json::Value::Object(mut m) => {
+                m.insert(
+                    "inspected_sheets".to_string(),
+                    serde_json::Value::Object(inspected),
+                );
+                m.insert("inspection_note".to_string(), serde_json::json!(note));
+                serde_json::Value::Object(m)
+            }
+            // Non-object result (scalar/array) — wrap so the preview rides along.
+            other => serde_json::json!({
+                "result": other,
+                "inspected_sheets": inspected,
+                "inspection_note": note,
+            }),
+        }
     }
 
     /// Builder: attach a SecureValueService + session_id for secret injection.
@@ -2025,8 +2051,9 @@ impl DagToolExecutor {
     ///   compact marker. Binary base64 in the LLM context is always a footgun
     ///   (megabytes of useless tokens, TPM rate-limit risk), so this is
     ///   always-on regardless of `max_string_bytes`.
-    /// - Strings whose byte length exceeds `max_string_bytes` → replaced with
-    ///   `[truncated: original_size=N bytes]`.
+    /// - Strings whose byte length exceeds `max_string_bytes` → head-preserved
+    ///   via [`head_truncate`](Self::head_truncate) (keep the beginning + a
+    ///   `[truncated: showing first N of M bytes]` marker), NOT discarded.
     ///
     /// Returns the cleaned value. Other types pass through unchanged.
     fn scrub_value_for_llm(value: Value, max_string_bytes: usize) -> Value {
@@ -2044,11 +2071,7 @@ impl DagToolExecutor {
                     }
                 }
                 if s.len() > max_string_bytes {
-                    Value::String(format!(
-                        "[truncated: original_size={} bytes (cap={} bytes); request via load_attachment if needed]",
-                        s.len(),
-                        max_string_bytes
-                    ))
+                    Value::String(Self::head_truncate(&s, max_string_bytes))
                 } else {
                     Value::String(s)
                 }
@@ -2078,16 +2101,41 @@ impl DagToolExecutor {
             }
             Err(_) => {
                 if output.len() > max_string_bytes {
-                    format!(
-                        "[truncated: original_size={} bytes (cap={} bytes)]",
-                        output.len(),
-                        max_string_bytes
-                    )
+                    Self::head_truncate(&output, max_string_bytes)
                 } else {
                     output
                 }
             }
         }
+    }
+
+    /// Reserve, in bytes, for the truncation marker appended by
+    /// [`head_truncate`](Self::head_truncate). The marker is short ASCII text;
+    /// 96 bytes comfortably covers the largest realistic byte counts.
+    const TRUNCATION_MARKER_RESERVE: usize = 96;
+
+    /// Truncate an oversized string by KEEPING ITS HEAD (the first
+    /// `max_string_bytes - marker` bytes, snapped to a UTF-8 char boundary) and
+    /// appending a `[truncated: showing first N of M bytes]` marker — instead of
+    /// discarding the content entirely. For a markdown table or any text whose
+    /// useful part is the beginning (headers, first rows), this preserves a
+    /// usable preview rather than handing the model a content-free placeholder.
+    ///
+    /// The result is always `<= max_string_bytes` (the head budget already
+    /// reserves room for the marker).
+    fn head_truncate(s: &str, max_string_bytes: usize) -> String {
+        let original_len = s.len();
+        let head_budget = max_string_bytes.saturating_sub(Self::TRUNCATION_MARKER_RESERVE);
+        let mut end = head_budget.min(original_len);
+        while end > 0 && !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!(
+            "{}\n[truncated: showing first {} of {} bytes]",
+            &s[..end],
+            end,
+            original_len
+        )
     }
 }
 
@@ -4132,12 +4180,18 @@ mod scrubber_tests {
     }
 
     #[test]
-    fn long_plain_string_above_cap_is_truncated() {
+    fn long_plain_string_above_cap_is_head_preserved() {
         let s = "x".repeat(60_000);
-        let scrubbed = DagToolExecutor::scrub_value_for_llm(json!(s), 50_000);
+        let scrubbed = DagToolExecutor::scrub_value_for_llm(json!(s.clone()), 50_000);
         let out = scrubbed.as_str().unwrap();
-        assert!(out.starts_with("[truncated"));
-        assert!(out.contains("original_size=60000"));
+        // Head preserved (NOT a content-free marker), bounded under the cap,
+        // and annotated with the original size.
+        assert!(out.starts_with("xxxx"), "head should be preserved");
+        assert!(out.len() <= 50_000, "result stays under the cap");
+        assert!(out.contains("[truncated: showing first"));
+        assert!(out.contains("of 60000 bytes"));
+        // The misleading load_attachment hint is gone.
+        assert!(!out.contains("load_attachment"));
     }
 
     #[test]
@@ -4170,8 +4224,31 @@ mod scrubber_tests {
     fn scrub_tool_result_output_handles_non_json() {
         let big = "x".repeat(100_000);
         let out = DagToolExecutor::scrub_tool_result_output(big, 50_000);
-        assert!(out.starts_with("[truncated"));
-        assert!(out.contains("original_size=100000"));
+        // Non-JSON oversized output is head-preserved too (not discarded).
+        assert!(out.starts_with("xxxx"));
+        assert!(out.len() <= 50_000);
+        assert!(out.contains("[truncated: showing first"));
+        assert!(out.contains("of 100000 bytes"));
+    }
+
+    #[test]
+    fn head_truncate_keeps_head_and_stays_under_cap() {
+        let s = "A".repeat(10_000);
+        let out = DagToolExecutor::head_truncate(&s, 1_000);
+        assert!(out.starts_with("AAAA"));
+        assert!(out.len() <= 1_000);
+        assert!(out.contains("of 10000 bytes"));
+    }
+
+    #[test]
+    fn head_truncate_respects_utf8_char_boundary() {
+        // Multi-byte chars (é = 2 bytes) — cutting at a raw byte index could
+        // split one; head_truncate must snap to a char boundary.
+        let s = "é".repeat(5_000); // 10_000 bytes
+        let out = DagToolExecutor::head_truncate(&s, 1_001);
+        // Valid UTF-8 (would have panicked on a bad slice) and under budget.
+        assert!(out.len() <= 1_001);
+        assert!(out.contains("[truncated: showing first"));
     }
 
     #[test]
