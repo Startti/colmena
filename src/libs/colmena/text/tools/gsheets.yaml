@@ -184,12 +184,18 @@ gsheets_run_python:
     `formula_cells_total` + `formula_cells_truncated` — report that real count
     (e.g. "applied to all 812 rows"), not just the 50-cell sample.
 
-    **Reporting what you wrote: use `formula_cells` from the result, never
-    recompute.** The tool result echoes the real cell→formula it wrote (e.g.
-    `"formula_cells": {"V5": "=S5*U5"}`). Quote THAT when you confirm to the user.
-    Do NOT recompute column letters from `df.columns` to build your message —
-    that hand math is off-by-one (it lands `=R5*T5` / wrong cell) and your
-    confirmation would lie even when the write was correct.
+    **Reporting what you wrote — quote `formula_cells`, never recompute A1.**
+    The tool result echoes the exact cell→formula it wrote (e.g.
+    `"formula_cells": {"V5": "=S5*U5"}`, plus `formula_cells_total` when the write
+    exceeds the 50-cell sample). Relay THOSE in your confirmation.
+
+    ❌ WRONG — building the report by hand. `df.columns` order is off-by-one when
+       the sheet has an empty/duplicate header column, so this reports the WRONG
+       cell even when the write itself was correct:
+         col = chr(ord('A') + df.columns.get_loc('Importe'))   # → 'R', wrong
+         output = {f'{col}{i+2}': f'={col}{i+2}*...'}
+    ✅ RIGHT — relay the tool's `formula_cells` verbatim (and say the real count
+       from `formula_cells_total` when present: "applied to all 812 rows").
 
     **Collision policy.** By default, if a tab named in `output_sheets`
     already exists, the tool fails with a `SheetExists` error returning
