@@ -276,11 +276,14 @@ impl DagToolExecutor {
             .insert(sheet_key(spreadsheet_id, sheet));
     }
 
-    /// Inspect-before-python guard. If every sheet binding in `args` was already
-    /// read this turn (or there are none), dispatch `gsheets_run_python`
-    /// normally. Otherwise short-circuit: read a bounded markdown preview of each
-    /// unread sheet, mark it seen, and return an `inspect_first` envelope WITHOUT
-    /// running the code, forcing the agent to re-call with informed code.
+    /// Inspect-AND-run guard (Option A). If every sheet binding in `args` was
+    /// already read this turn (or there are none), dispatch `gsheets_run_python`
+    /// normally. Otherwise, for each first-seen sheet: read a bounded markdown
+    /// preview, mark it seen, THEN execute the code and return its result with
+    /// the previews attached under `inspected_sheets` (+ an `inspection_note`).
+    /// The agent sees the real columns AND makes progress in one round-trip — no
+    /// forced re-call. A preview read that errors (missing sheet / permission)
+    /// still short-circuits, since the code would have failed too.
     async fn gsheets_run_python_guarded(&self, args: serde_json::Value) -> serde_json::Value {
         use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::dispatch_gsheets_read;
         use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::dispatch_gsheets_run_python;
@@ -328,12 +331,35 @@ impl DagToolExecutor {
             self.mark_gsheets_sheet_seen(&b.spreadsheet_id, &b.sheet);
         }
 
-        serde_json::json!({
-            "status": "inspect_first",
-            "inspected_sheets": inspected,
-            "advice": "Antes de correr código sobre una hoja hay que conocer sus columnas reales. Acá está el preview (primeras filas) de cada hoja. Volvé a llamar gsheets_run_python con el MISMO código, corregido si hace falta para usar estas columnas/valores reales (p.ej. filtrar por la columna correcta, no adivinar nombres).",
-            "next_action": "re-call gsheets_run_python"
-        })
+        // Option A: do NOT reject the call. Execute the code AND attach the real
+        // columns + row preview to the result, so the agent sees the schema and
+        // makes progress in a SINGLE round-trip. The previous "inspect_first +
+        // re-call" contract relied on the model issuing a second call, which weak
+        // models (e.g. gemini-flash) do unreliably — they narrate intent or go
+        // empty and the write/compute never happens. If a column name was guessed
+        // wrong, the execution error rides alongside the preview so the next call
+        // can fix it (the sheet is now marked seen → it executes directly).
+        let exec = dispatch_gsheets_run_python(args).await;
+        let note = "First run on these sheet(s) this turn: their REAL columns + a \
+                    row preview are in `inspected_sheets`. Your code WAS executed — \
+                    see the result fields. If you used a column name not in the real \
+                    list, fix it and call gsheets_run_python again (it runs directly now).";
+        match exec {
+            serde_json::Value::Object(mut m) => {
+                m.insert(
+                    "inspected_sheets".to_string(),
+                    serde_json::Value::Object(inspected),
+                );
+                m.insert("inspection_note".to_string(), serde_json::json!(note));
+                serde_json::Value::Object(m)
+            }
+            // Non-object result (scalar/array) — wrap so the preview rides along.
+            other => serde_json::json!({
+                "result": other,
+                "inspected_sheets": inspected,
+                "inspection_note": note,
+            }),
+        }
     }
 
     /// Builder: attach a SecureValueService + session_id for secret injection.
