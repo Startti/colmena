@@ -43,6 +43,13 @@ gsheets_read:
     `gsheets_list_sheets` gives a rough allocated grid size (not the data extent)
     if you want to gauge a sheet before reading something large.
 
+    LARGE SHEETS: a whole-sheet read that would be too big to return is
+    row-bounded automatically — you get the real header + the first rows, plus
+    `truncated: true`, `rows_shown`, and `total_rows`. When you see that, DO NOT
+    assume the unseen rows look like the sample: read the next block with an A1
+    `range`, or (to compute over ALL rows) use `gsheets_run_python`. `dimensions`
+    always reflects the FULL extent, not the truncated sample.
+
     MERGED CELLS: merged cells are auto-expanded on read — every cell of a merge
     returns the merge's value (the top-left anchor), not a blank. Repeated values
     down a column or across a row may therefore reflect a merged region, not

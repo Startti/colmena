@@ -393,7 +393,7 @@ El LLM pasa `body: { image: "$attachment:abc.png" }`. El engine resuelve a `body
 
 Reglas:
 1. Strings con prefijo `data:` que contienen `;base64,` → reemplazo por `[binary elided: mime=<mime>, encoded_size=<N> bytes]`.
-2. Strings cuyo `.len()` excede `max_tool_result_bytes` (default 50 KB, configurable via `llm_call.config.max_tool_result_bytes`) → reemplazo por `[truncated: original_size=N bytes (cap=M bytes); request via load_attachment if needed]`.
+2. Strings cuyo `.len()` excede `max_tool_result_bytes` (default 50 KB, configurable via `llm_call.config.max_tool_result_bytes`) → **head-preserve**: se conserva el inicio (primeros `cap − margen` bytes, recortado en frontera UTF-8) y se anexa `\n[truncated: showing first N of M bytes]`. NO se descarta el contenido (antes se reemplazaba todo por un marcador sin datos). Para una tabla markdown o cualquier texto cuyo valor está al principio (headers, primeras filas), esto deja un preview usable.
 3. Otros tipos (números, bools, nulls, strings cortas) pasan sin tocar.
 
 Esto se aplica **recursivamente** sobre todo JSON Value (objects, arrays nested). El caso que originó esto: `httpbin.org/post` echo-eaba el body con la imagen base64 en su response, y ese response volvía al LLM como tool result — 1.6MB → 1M tokens → TPM rate limit. Con el scrubber, ese mismo echo se colapsa a unos cientos de bytes.
