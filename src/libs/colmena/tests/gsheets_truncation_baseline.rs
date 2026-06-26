@@ -67,6 +67,52 @@ fn env_ready() -> bool {
         && std::env::var("EXP_SHEET").is_ok()
 }
 
+/// Print-only: dump EXP_RANGE of EXP_SHEET showing the business columns
+/// (CLIENT ID / Cantidad=S / Tarifa=U / Importe=V) per sheet row — to verify a
+/// write landed in the right column. Set EXP_RANGE (A1, e.g. "20:27").
+#[tokio::test]
+#[ignore = "requires OAuth creds + EXP_SPREADSHEET_ID + EXP_SHEET + EXP_RANGE"]
+async fn dump_range() {
+    if !env_ready() || std::env::var("EXP_RANGE").is_err() {
+        eprintln!("SKIP: need OAuth + EXP_SPREADSHEET_ID + EXP_SHEET + EXP_RANGE");
+        return;
+    }
+    let client =
+        GoogleSheetsHttpClient::from_config(&GSheetsConfig::from_env()).expect("build client");
+    let id = SpreadsheetId(std::env::var("EXP_SPREADSHEET_ID").unwrap());
+    let sheet = std::env::var("EXP_SHEET").unwrap();
+    let range = std::env::var("EXP_RANGE").unwrap();
+    let first_row: usize = range
+        .split(':')
+        .next()
+        .and_then(|s| s.trim_matches(|c: char| !c.is_ascii_digit()).parse().ok())
+        .unwrap_or(1);
+    let r = client
+        .read_range(&id, &sheet, Some(&range), ReadOptions::default())
+        .await
+        .expect("read ok");
+    println!("\n===== {sheet}!{range} (CLIENT ID | S=Cantidad | U=Tarifa | V=Importe) =====");
+    for (i, row) in r.values.as_array().into_iter().flatten().enumerate() {
+        let cells = row.as_array().cloned().unwrap_or_default();
+        let get = |idx: usize| cells.get(idx).map(cell_to_string).unwrap_or_default();
+        let cid = get(0);
+        let cid = if cid.len() > 20 {
+            format!("{}…", &cid[..20])
+        } else {
+            cid
+        };
+        println!(
+            "row {:>3} | {:<21} | S={:<10} | U={:<12} | V={}",
+            first_row + i,
+            cid,
+            get(18),
+            get(20),
+            get(21)
+        );
+    }
+    println!("=====================================================================\n");
+}
+
 #[tokio::test]
 #[ignore = "requires OAuth creds + EXP_SPREADSHEET_ID + EXP_SHEET"]
 async fn baseline_full_read_vs_cap() {
@@ -345,7 +391,10 @@ async fn locate_client_id() {
                     col_to_a1(qi),
                     row_1based
                 );
-                println!("    CURRENT Cantidad value = {:?}  <-- SAVE THIS to revert", cant);
+                println!(
+                    "    CURRENT Cantidad value = {:?}  <-- SAVE THIS to revert",
+                    cant
+                );
             }
         }
     }

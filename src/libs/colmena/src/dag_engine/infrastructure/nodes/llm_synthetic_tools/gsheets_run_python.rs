@@ -308,11 +308,29 @@ pub async fn dispatch_gsheets_run_python_with_client(
         });
     let results: Vec<(String, Result<ReadResponse, _>)> = join_all(fetches).await;
 
+    // `var` → (sheet name, had_range) for SHEET bindings — used to key the
+    // per-sheet load snapshot retained for `update_by_position`.
+    let var_sheet: std::collections::HashMap<String, (String, bool)> = parsed
+        .bindings
+        .iter()
+        .filter(|b| b.data.is_none())
+        .filter_map(|b| {
+            b.sheet
+                .clone()
+                .map(|s| (b.var.clone(), (s, b.range.is_some())))
+        })
+        .collect();
+
     // 3. Build the sandbox inputs map + a side-table of column names per
     //    binding (used in error responses so the LLM can self-correct
     //    without an extra round-trip).
     let mut inputs = serde_json::Map::new();
     let mut loaded_columns = serde_json::Map::new();
+    // Per-sheet load snapshot (the records the code starts from), keyed by sheet
+    // name. `update_by_position` diffs the returned df against this to write only
+    // the cells the code changed — so it never reverts untouched concurrent edits.
+    let mut loaded_snapshots: std::collections::HashMap<String, LoadedSnapshot> =
+        std::collections::HashMap::new();
     for (var, res) in results {
         let resp = match res {
             Ok(r) => r,
@@ -338,6 +356,23 @@ pub async fn dispatch_gsheets_run_python_with_client(
             serde_json::Value::Null => serde_json::Value::Array(vec![]),
             other => other,
         };
+        // Retain the snapshot for this sheet (clone the records before `records`
+        // is moved into the sandbox inputs). A sheet bound more than once is
+        // flagged ambiguous — positional write-back can't pick a mapping.
+        if let Some((sheet, had_range)) = var_sheet.get(&var) {
+            let recs: Vec<serde_json::Map<String, serde_json::Value>> = records
+                .as_array()
+                .map(|a| a.iter().filter_map(|v| v.as_object().cloned()).collect())
+                .unwrap_or_default();
+            loaded_snapshots
+                .entry(sheet.clone())
+                .and_modify(|s| s.ambiguous = true)
+                .or_insert(LoadedSnapshot {
+                    records: recs,
+                    had_range: *had_range,
+                    ambiguous: false,
+                });
+        }
         inputs.insert(var, records);
     }
 
@@ -435,7 +470,14 @@ pub async fn dispatch_gsheets_run_python_with_client(
                 None
             })
             .unwrap_or_default();
-        let results = write_output_sheets(&client, &spreadsheet_id, sheets_value, policy).await;
+        let results = write_output_sheets(
+            &client,
+            &spreadsheet_id,
+            sheets_value,
+            policy,
+            &loaded_snapshots,
+        )
+        .await;
         wrote_sheets_response = serde_json::Value::Array(results);
     }
 
@@ -491,11 +533,24 @@ pub async fn dispatch_gsheets_run_python_with_client(
 
 /// Dispatch each normalized `output_sheets` entry by mode. Returns one
 /// metadata entry per attempted write.
+/// Snapshot of a sheet binding loaded this run. `update_by_position` diffs the
+/// returned df against `records` (what the code started from) and maps each
+/// changed cell back to the sheet by position, so the agent never computes an
+/// A1 address. `ambiguous` is set when more than one binding loaded the same
+/// sheet (no single position mapping). `had_range` blocks the mode (a range
+/// subset shifts the header/row mapping).
+struct LoadedSnapshot {
+    records: Vec<serde_json::Map<String, serde_json::Value>>,
+    had_range: bool,
+    ambiguous: bool,
+}
+
 async fn write_output_sheets(
     client: &Arc<dyn SheetsClient>,
     spreadsheet_id: &SpreadsheetId,
     output_sheets: &serde_json::Value,
     policy: CollisionPolicy,
+    loaded: &std::collections::HashMap<String, LoadedSnapshot>,
 ) -> Vec<serde_json::Value> {
     let Some(map) = output_sheets.as_object() else {
         return Vec::new();
@@ -515,6 +570,11 @@ async fn write_output_sheets(
             "update_in_place" => {
                 results.push(do_update_in_place(client, spreadsheet_id, raw_name, entry).await);
             }
+            "update_by_position" => {
+                results.push(
+                    do_update_by_position(client, spreadsheet_id, raw_name, entry, loaded).await,
+                );
+            }
             "overwrite" => {
                 results.push(do_overwrite(client, spreadsheet_id, raw_name, entry).await);
             }
@@ -524,7 +584,7 @@ async fn write_output_sheets(
             other => {
                 results.push(serde_json::json!({
                     "name": raw_name,
-                    "error": format!("unknown mode '{other}'; valid: replace, update_in_place, overwrite"),
+                    "error": format!("unknown mode '{other}'; valid: replace, update_in_place, update_by_position, overwrite"),
                 }));
             }
         }
@@ -846,6 +906,245 @@ async fn do_update_in_place(
     }
 }
 
+/// Validate that the returned df index is exactly the set `{0..n-1}` — i.e. the
+/// model returned the WHOLE bound df (modified in place), not a filtered subset.
+/// This is what makes positional write-back safe: a subset / `reset_index` /
+/// `concat` fails here loudly instead of silently writing the wrong rows.
+fn validate_full_index(df_index: &[serde_json::Value], n: usize) -> Result<(), String> {
+    if df_index.len() != n {
+        return Err(format!(
+            "update_by_position needs the FULL df ({n} rows), got {}. Return the WHOLE df \
+             modified in place — do NOT filter/subset the rows you return.",
+            df_index.len()
+        ));
+    }
+    let mut seen = vec![false; n];
+    for v in df_index {
+        let Some(idx) = v.as_i64().filter(|i| *i >= 0).map(|i| i as usize) else {
+            return Err("the df index must be the original 0..N-1 integer row labels. Modify the \
+                 bound df IN PLACE and return it whole — do NOT reset_index / sort+reset_index / concat."
+                .to_string());
+        };
+        if idx >= n {
+            return Err(format!(
+                "row index {idx} is outside the loaded range 0..{n}. Return the whole bound df \
+                 modified in place — do NOT add rows or reset_index."
+            ));
+        }
+        if seen[idx] {
+            return Err(
+                "duplicate row index — the df index must be the original 0..N-1 labels \
+                 (no concat/duplicates). Modify the bound df in place and return it whole."
+                    .to_string(),
+            );
+        }
+        seen[idx] = true;
+    }
+    Ok(())
+}
+
+/// Map each UNIQUELY-named, non-empty header column to its 0-based position.
+/// Empty or duplicate header names are excluded — they can't be addressed by
+/// name; the caller reports them as `skipped_columns`.
+fn addressable_columns(header_cols: &[String]) -> std::collections::HashMap<String, usize> {
+    let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for c in header_cols {
+        *counts.entry(c.as_str()).or_insert(0) += 1;
+    }
+    header_cols
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| !c.is_empty() && counts.get(c.as_str()) == Some(&1))
+        .map(|(i, c)| (c.clone(), i))
+        .collect()
+}
+
+/// Positional / index-based write-back. The model modifies the bound df IN
+/// PLACE and returns the WHOLE df under `mode:'update_by_position'` (no key).
+/// The dispatcher diffs it against the load snapshot by row index and writes
+/// only the changed cells — no agent-computed A1 address, no unique key needed.
+async fn do_update_by_position(
+    client: &Arc<dyn SheetsClient>,
+    spreadsheet_id: &SpreadsheetId,
+    raw_name: &str,
+    entry: &serde_json::Value,
+    loaded: &std::collections::HashMap<String, LoadedSnapshot>,
+) -> serde_json::Value {
+    // 1. The tab must have been BOUND whole-sheet (unambiguously) this run.
+    let snap = match loaded.get(raw_name) {
+        None => {
+            return serde_json::json!({
+                "tab": raw_name,
+                "error": "UpdateByPositionRequiresBinding",
+                "message": format!(
+                    "update_by_position needs the tab '{raw_name}' to be BOUND in this same \
+                     gsheets_run_python call (whole sheet, no `range`)."
+                ),
+            })
+        }
+        Some(s) if s.ambiguous => {
+            return serde_json::json!({
+                "tab": raw_name,
+                "error": format!("the tab '{raw_name}' was bound more than once — can't pick a positional mapping."),
+            })
+        }
+        Some(s) if s.had_range => {
+            return serde_json::json!({
+                "tab": raw_name,
+                "error": format!("update_by_position needs '{raw_name}' bound WITHOUT a `range` (whole sheet)."),
+            })
+        }
+        Some(s) => s,
+    };
+    let n = snap.records.len();
+
+    let new_records: Vec<serde_json::Map<String, serde_json::Value>> = entry
+        .get("df_records")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|r| r.as_object().cloned()).collect())
+        .unwrap_or_default();
+    let df_index: Vec<serde_json::Value> = entry
+        .get("df_index")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    if df_index.len() != new_records.len() {
+        return serde_json::json!({
+            "tab": raw_name,
+            "error": "internal: df_index/df_records length mismatch",
+        });
+    }
+
+    // 2. Require the full {0..N-1} index (catches subset / reset_index / concat).
+    if let Err(msg) = validate_full_index(&df_index, n) {
+        return serde_json::json!({"tab": raw_name, "error": "InvalidIndex", "message": msg});
+    }
+
+    // 3. Positional header → addressable columns (skip empty/duplicate names).
+    let header_read = match client
+        .read_range(
+            spreadsheet_id,
+            raw_name,
+            Some("1:1"),
+            ReadOptions {
+                value_render: crate::gsheets::domain::ValueRenderOption::UnformattedValue,
+                as_records: false,
+            },
+        )
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            return serde_json::json!({"tab": raw_name, "error": format!("header read failed: {e}")})
+        }
+    };
+    let header_cols: Vec<String> = match header_read.values {
+        serde_json::Value::Array(rows) => rows
+            .first()
+            .and_then(|r| r.as_array())
+            .map(|cells| {
+                cells
+                    .iter()
+                    .map(|c| c.as_str().unwrap_or("").to_string())
+                    .collect()
+            })
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    };
+    let col_to_index = addressable_columns(&header_cols);
+
+    // 4. Comparable columns = snapshot columns that are addressable.
+    let snap_cols: Vec<String> = snap
+        .records
+        .first()
+        .map(|r| r.keys().cloned().collect())
+        .unwrap_or_default();
+    let comparable: Vec<String> = snap_cols
+        .iter()
+        .filter(|c| col_to_index.contains_key(*c))
+        .cloned()
+        .collect();
+    let skipped_columns: Vec<String> = snap_cols
+        .iter()
+        .filter(|c| !col_to_index.contains_key(*c))
+        .cloned()
+        .collect();
+
+    // 5. Inject a synthetic `__index__` key into both sides (snapshot = position,
+    //    new = df_index), projecting `new` to the comparable columns so a
+    //    model-added column never trips the diff's column-mismatch check.
+    const IDX: &str = "__index__";
+    let cur: Vec<serde_json::Map<String, serde_json::Value>> = snap
+        .records
+        .iter()
+        .enumerate()
+        .map(|(i, r)| {
+            let mut m = r.clone();
+            m.insert(IDX.to_string(), serde_json::json!(i));
+            m
+        })
+        .collect();
+    let nw: Vec<serde_json::Map<String, serde_json::Value>> = new_records
+        .iter()
+        .zip(df_index.iter())
+        .map(|(r, idx)| {
+            let mut m = serde_json::Map::new();
+            for c in &comparable {
+                if let Some(v) = r.get(c) {
+                    m.insert(c.clone(), v.clone());
+                }
+            }
+            m.insert(IDX.to_string(), idx.clone());
+            m
+        })
+        .collect();
+
+    // 6. Reuse the existing cell-diff, keyed on the synthetic index.
+    let diff = match diff_records(&cur, &nw, IDX, Some(&comparable), false, raw_name) {
+        Ok(d) => d,
+        Err(e) => return e.to_json(),
+    };
+
+    // 7. Map each change → A1 cell. The `__index__` value IS the original row
+    //    position, so `sheet_row = index + 2` (header is row 1); the column
+    //    comes from the positional header. No agent arithmetic anywhere.
+    let mut cell_updates: Vec<(String, crate::gsheets::domain::CellValue)> = Vec::new();
+    for chg in &diff.changes {
+        let (Ok(idx), Some(&col_idx)) = (
+            chg.key_value.parse::<usize>(),
+            col_to_index.get(&chg.column),
+        ) else {
+            continue;
+        };
+        cell_updates.push((
+            a1_addr(col_idx, idx + 2),
+            crate::gsheets::domain::CellValue::from_json(&chg.new_value),
+        ));
+    }
+
+    let cells = cell_updates.len();
+    if cells == 0 {
+        return serde_json::json!({
+            "tab": raw_name, "mode": "update_by_position",
+            "changes": {"rows": 0, "cells": 0},
+            "skipped_columns": skipped_columns,
+        });
+    }
+    match client
+        .batch_update_cells(spreadsheet_id, raw_name, cell_updates)
+        .await
+    {
+        Ok(_) => serde_json::json!({
+            "tab": raw_name, "mode": "update_by_position",
+            "changes": {"rows": diff.rows_changed, "cells": cells, "columns": diff.columns_touched},
+            "skipped_columns": skipped_columns,
+        }),
+        Err(e) => serde_json::json!({
+            "tab": raw_name, "error": format!("batch_update_cells failed: {e}"),
+        }),
+    }
+}
+
 /// Common DataFrame write — used by `replace`, `overwrite`, and the
 /// auto_suffix paths. `name` is what gets written to. `raw_name` is what
 /// the LLM asked for (for response labeling).
@@ -1033,6 +1332,67 @@ fn a1_addr(col_index: usize, row_index: usize) -> String {
         n -= 1;
     }
     format!("{col}{row_index}")
+}
+
+#[cfg(test)]
+mod position_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn idx(v: &[i64]) -> Vec<serde_json::Value> {
+        v.iter().map(|i| json!(i)).collect()
+    }
+
+    #[test]
+    fn full_index_accepts_any_permutation_of_0_to_n() {
+        assert!(validate_full_index(&idx(&[0, 1, 2, 3]), 4).is_ok());
+        // sort() reorders labels but the set is still {0..N-1} → fine.
+        assert!(validate_full_index(&idx(&[3, 0, 2, 1]), 4).is_ok());
+    }
+
+    #[test]
+    fn full_index_rejects_subset() {
+        // df.loc[mask] returning 2 of 4 rows → wrong-row footgun → rejected.
+        let e = validate_full_index(&idx(&[1, 2]), 4).unwrap_err();
+        assert!(e.contains("FULL df"));
+    }
+
+    #[test]
+    fn full_index_rejects_out_of_range_and_duplicates() {
+        assert!(validate_full_index(&idx(&[0, 1, 9]), 3).is_err()); // 9 >= N
+        assert!(validate_full_index(&idx(&[0, 0, 1]), 3).is_err()); // duplicate (concat)
+                                                                    // non-integer label (e.g. a string index)
+        assert!(validate_full_index(&[json!("a"), json!("b")], 2).is_err());
+    }
+
+    #[test]
+    fn addressable_skips_empty_and_duplicate_header_names() {
+        // Mirrors the real "Hoja 16": two empty-named columns + dup.
+        let header = vec![
+            "CLIENT ID".to_string(),
+            "".to_string(),
+            "Cantidad".to_string(),
+            "Tarifa".to_string(),
+            "Importe".to_string(),
+            "".to_string(),
+            "Tarifa".to_string(), // duplicate name
+        ];
+        let map = addressable_columns(&header);
+        assert_eq!(map.get("CLIENT ID"), Some(&0));
+        assert_eq!(map.get("Cantidad"), Some(&2));
+        assert_eq!(map.get("Importe"), Some(&4));
+        // empty + duplicate names are NOT addressable.
+        assert!(!map.contains_key(""));
+        assert!(!map.contains_key("Tarifa"));
+    }
+
+    #[test]
+    fn a1_addr_maps_position_to_letter() {
+        // col 0→A, 18→S, 20→U, 21→V; row passed 1-based.
+        assert_eq!(a1_addr(0, 2), "A2");
+        assert_eq!(a1_addr(21, 20), "V20"); // Importe at sheet row 20
+        assert_eq!(a1_addr(20, 20), "U20"); // Tarifa — the column pro wrongly hit
+    }
 }
 
 #[cfg(test)]

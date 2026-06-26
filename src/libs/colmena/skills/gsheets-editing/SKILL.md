@@ -19,8 +19,8 @@ of the edit:
 | You want to… | Use | Avoid |
 |---|---|---|
 | Set a few KNOWN cells (you know the A1 addresses) | `gsheets_set_cell` (one) / `gsheets_set_range` (contiguous block) | — |
-| Edit rows matched by a **UNIQUE** key column | `gsheets_run_python` + `output_sheets` mode `update_in_place` (`key` = that column) | — |
-| Edit rows matched by a **NON-UNIQUE** value, or by position | `gsheets_run_python` to find the row numbers → `gsheets_set_cell` per cell | **NOT** `update_in_place` (fails on duplicate keys); **NOT** `overwrite` |
+| **Edit existing rows matched by a condition (key unique OR not)** | `gsheets_run_python`: bind the whole sheet, modify the df **in place** (`df.loc[mask,'col']=...`), return the WHOLE df under `output_sheets` mode **`update_by_position`** | filtering the returned df; `reset_index`/`sort`+`reset_index`/`concat`; `overwrite` |
+| Edit rows by a **UNIQUE** key column (advanced/portable) | `gsheets_run_python` + `update_in_place` (`key` = that column) | — |
 | Create a NEW tab **with data** | `gsheets_run_python` with a NEW sheet name in `output_sheets` (creates + fills) | `add_sheet` then `set_range` (two steps) |
 | Create a new **empty** tab | `gsheets_add_sheet` | — |
 | Create a new **spreadsheet file** | `gsheets_create_spreadsheet`, then populate | — |
