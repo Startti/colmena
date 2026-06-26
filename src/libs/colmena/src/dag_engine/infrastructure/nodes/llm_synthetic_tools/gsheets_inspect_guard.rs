@@ -12,8 +12,34 @@ use serde_json::Value;
 use std::collections::HashSet;
 
 /// Key for the per-turn "seen sheets" set: `"<spreadsheet_id>::<sheet>"`.
+///
+/// The sheet name is NORMALIZED (trim → strip one layer of A1 quoting →
+/// case-fold) so the same tab referred to with different casing/quoting across
+/// calls within a turn maps to ONE key. Without this, a model that writes
+/// `hoja 16` on its first `gsheets_run_python` and `Hoja 16` on the next would
+/// re-trigger the inspect guard on the second call even though the sheet was
+/// already inspected — Google resolves tab names case-insensitively, so these
+/// are the same sheet. The spreadsheet_id is trimmed but NOT case-folded (Drive
+/// file IDs are case-sensitive).
 pub fn sheet_key(spreadsheet_id: &str, sheet: &str) -> String {
-    format!("{spreadsheet_id}::{sheet}")
+    format!("{}::{}", spreadsheet_id.trim(), normalize_sheet_name(sheet))
+}
+
+/// Normalize a sheet/tab name for the seen-set key: trim surrounding
+/// whitespace, strip ONE layer of A1-style wrapping quotes (`'My Sheet'` or
+/// `"My Sheet"`), then case-fold. Used only for de-duplication of the seen
+/// set — never for the actual Sheets API call.
+fn normalize_sheet_name(sheet: &str) -> String {
+    let s = sheet.trim();
+    let s = s
+        .strip_prefix('\'')
+        .and_then(|inner| inner.strip_suffix('\''))
+        .or_else(|| {
+            s.strip_prefix('"')
+                .and_then(|inner| inner.strip_suffix('"'))
+        })
+        .unwrap_or(s);
+    s.trim().to_lowercase()
 }
 
 /// A sheet binding that must be read before `gsheets_run_python` can use it.
@@ -101,8 +127,33 @@ mod tests {
     }
 
     #[test]
-    fn sheet_key_joins_id_and_sheet() {
-        assert_eq!(sheet_key("abc", "Ventas"), "abc::Ventas");
+    fn sheet_key_joins_id_and_normalized_sheet() {
+        // Sheet name is case-folded; spreadsheet_id is preserved (case-sensitive).
+        assert_eq!(sheet_key("abc", "Ventas"), "abc::ventas");
+        // All these spellings collapse to the same key.
+        let k = sheet_key("abc", "ventas");
+        assert_eq!(sheet_key("abc", "Ventas"), k);
+        assert_eq!(sheet_key("abc", "'ventas'"), k);
+        assert_eq!(sheet_key("abc", "  VENTAS "), k);
+    }
+
+    #[test]
+    fn unseen_recognizes_case_and_quote_variants_as_seen() {
+        // Marked seen via one spelling; a later call within the same turn refers
+        // to the SAME tab with different case / A1-quoting / surrounding space.
+        // Google resolves tab names case-insensitively, so these are the same
+        // sheet — the guard must NOT re-inspect (the within-turn double-inspect bug).
+        let seen: HashSet<String> = [sheet_key("ssid", "hoja 16")].into_iter().collect();
+        for variant in ["Hoja 16", "HOJA 16", "'hoja 16'", " hoja 16 "] {
+            let args = json!({
+                "code": "x",
+                "bindings": [{"var": "v", "spreadsheet_id": "ssid", "sheet": variant}]
+            });
+            assert!(
+                unseen_sheet_bindings(&args, &seen).is_empty(),
+                "variant {variant:?} should be recognized as already seen"
+            );
+        }
     }
 
     #[test]
@@ -129,7 +180,8 @@ mod tests {
             "code": "x",
             "bindings": [{"var": "v", "spreadsheet_id": "abc", "sheet": "Ventas"}]
         });
-        let got = unseen_sheet_bindings(&args, &seen_with(&["abc::Ventas"]));
+        let seen: HashSet<String> = [sheet_key("abc", "Ventas")].into_iter().collect();
+        let got = unseen_sheet_bindings(&args, &seen);
         assert!(got.is_empty());
     }
 
@@ -153,7 +205,8 @@ mod tests {
                 {"var": "img", "data": [{"k": 1}]}
             ]
         });
-        let got = unseen_sheet_bindings(&args, &seen_with(&["ss::Seen"]));
+        let seen: HashSet<String> = [sheet_key("ss", "Seen")].into_iter().collect();
+        let got = unseen_sheet_bindings(&args, &seen);
         assert_eq!(
             got,
             vec![SheetBindingRef {
