@@ -60,6 +60,25 @@ output_sheets = {'Hoja 16': {'mode': 'update_by_position', 'df': df}}
   is a column reference.
 - Current-row references only. For an aggregate like `=SUM(Importe2:Importe100)`
   write the literal A1 range yourself.
+
+### Filling a formula down many rows
+
+`{{Name}}` resolves per row, so to fill a formula across a column / range /
+subset, just assign it to those rows — the tool puts the correct row number in
+each cell:
+
+```python
+df['Importe'] = '={{Cantidad}}*{{Tarifa}}'                        # whole column
+df.loc[df['Categoria'] == 'Bebidas', 'Margen'] = '={{Venta}}-{{Costo}}'  # by condition — PREFERRED
+df.loc[df.index[0:30], 'Subtotal'] = '={{Precio}}*{{Unidades}}'   # first 30 data rows
+```
+
+- **Prefer selecting rows by a condition** (`df.loc[df['X']=='Y', …]`) — no row
+  math. If the user names literal sheet rows, map them: `df_index = sheet_row - 2`
+  (row 1 is the header), so sheet rows 2–31 → `df.index[0:30]`.
+- A fill over >50 cells returns `formula_cells_total` + `formula_cells_truncated`
+  in the result. Report the real total ("applied to all 812 rows"), not the
+  50-cell sample.
 - **When you confirm to the user, quote the tool result's `formula_cells`**
   (real `cell → formula`, e.g. `{"V5": "=S5*U5"}`). Do NOT recompute column
   letters yourself to build the message — that hand math is off-by-one, so your

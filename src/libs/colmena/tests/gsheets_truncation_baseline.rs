@@ -101,6 +101,26 @@ async fn dump_range() {
         .read_range(&id, &sheet, Some(&range), opts)
         .await
         .expect("read ok");
+    // EXP_GENERIC=1 → print the first 5 columns raw (for narrow scratch tabs),
+    // instead of the Clientes-Especiales-specific S/U/V layout.
+    if std::env::var("EXP_GENERIC").is_ok() {
+        println!("\n===== {sheet}!{range} (first 5 columns A..E) =====");
+        for (i, row) in r.values.as_array().into_iter().flatten().enumerate() {
+            let cells = row.as_array().cloned().unwrap_or_default();
+            let get = |idx: usize| cells.get(idx).map(cell_to_string).unwrap_or_default();
+            println!(
+                "row {:>3} | A={:<14} | B={:<14} | C={:<14} | D={:<10} | E={}",
+                first_row + i,
+                get(0),
+                get(1),
+                get(2),
+                get(3),
+                get(4)
+            );
+        }
+        println!("=====================================================================\n");
+        return;
+    }
     println!("\n===== {sheet}!{range} (CLIENT ID | S=Cantidad | U=Tarifa | V=Importe) =====");
     for (i, row) in r.values.as_array().into_iter().flatten().enumerate() {
         let cells = row.as_array().cloned().unwrap_or_default();

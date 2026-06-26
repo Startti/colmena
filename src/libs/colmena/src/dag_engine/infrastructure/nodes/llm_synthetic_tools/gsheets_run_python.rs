@@ -858,7 +858,7 @@ async fn do_update_in_place(
     let resolvable_cols = addressable_columns(&header_cols);
 
     let mut cell_updates: Vec<(String, crate::gsheets::domain::CellValue)> = Vec::new();
-    let mut formula_cells = serde_json::Map::new();
+    let mut formula_log = FormulaCellLog::default();
     for chg in &diff.changes {
         let (Some(row), Some(col_idx)) = (
             key_to_row.get(&chg.key_value),
@@ -871,7 +871,7 @@ async fn do_update_in_place(
             Ok(v) => v,
             Err(e) => return e.to_json(raw_name),
         };
-        record_formula_cell(&mut formula_cells, &addr, &resolved);
+        formula_log.record(&addr, &resolved);
         cell_updates.push((
             addr,
             crate::gsheets::domain::CellValue::from_json(&resolved),
@@ -911,7 +911,7 @@ async fn do_update_in_place(
                 "rows_null_key": diff.rows_skipped_null_key,
             },
             });
-            attach_formula_cells(&mut resp, formula_cells);
+            formula_log.attach(&mut resp);
             resp
         }
         Err(e) => serde_json::json!({
@@ -1124,7 +1124,7 @@ async fn do_update_by_position(
     //    position, so `sheet_row = index + 2` (header is row 1); the column
     //    comes from the positional header. No agent arithmetic anywhere.
     let mut cell_updates: Vec<(String, crate::gsheets::domain::CellValue)> = Vec::new();
-    let mut formula_cells = serde_json::Map::new();
+    let mut formula_log = FormulaCellLog::default();
     for chg in &diff.changes {
         let (Ok(idx), Some(&col_idx)) = (
             chg.key_value.parse::<usize>(),
@@ -1141,7 +1141,7 @@ async fn do_update_by_position(
             Err(e) => return e.to_json(raw_name),
         };
         let addr = a1_addr(col_idx, target_row);
-        record_formula_cell(&mut formula_cells, &addr, &resolved);
+        formula_log.record(&addr, &resolved);
         cell_updates.push((
             addr,
             crate::gsheets::domain::CellValue::from_json(&resolved),
@@ -1166,7 +1166,7 @@ async fn do_update_by_position(
                 "changes": {"rows": diff.rows_changed, "cells": cells, "columns": diff.columns_touched},
                 "skipped_columns": skipped_columns,
             });
-            attach_formula_cells(&mut resp, formula_cells);
+            formula_log.attach(&mut resp);
             resp
         }
         Err(e) => serde_json::json!({
@@ -1194,31 +1194,46 @@ async fn write_full_df(
             "error": "entry missing df_records or df_cols",
         });
     };
-    let header_row: Vec<CellValue> = cols
+    let col_names: Vec<String> = cols
         .iter()
-        .map(|c| CellValue::String(c.as_str().unwrap_or("").to_string()))
+        .map(|c| c.as_str().unwrap_or("").to_string())
         .collect();
+    // Resolve `{{Column}}` formula placeholders here too, so creating a tab WITH
+    // a formula column (replace/overwrite) works like the diff-write modes.
+    let resolvable = addressable_columns(&col_names);
+    let header_row: Vec<CellValue> = col_names.iter().cloned().map(CellValue::String).collect();
     let mut matrix: Vec<Vec<CellValue>> = vec![header_row];
+    let mut formula_log = FormulaCellLog::default();
     for rec in records {
         let Some(obj) = rec.as_object() else { continue };
-        let row: Vec<CellValue> = cols
-            .iter()
-            .map(|c| {
-                let key = c.as_str().unwrap_or("");
-                CellValue::from_json(obj.get(key).unwrap_or(&serde_json::Value::Null))
-            })
-            .collect();
+        // The row about to be pushed lands at sheet row `matrix.len() + 1`
+        // (matrix[0] is the header → sheet row 1).
+        let target_row = matrix.len() + 1;
+        let mut row: Vec<CellValue> = Vec::with_capacity(col_names.len());
+        for (j, key) in col_names.iter().enumerate() {
+            let raw = obj.get(key).unwrap_or(&serde_json::Value::Null);
+            let resolved = match resolve_formula_placeholders(raw, &resolvable, target_row) {
+                Ok(v) => v,
+                Err(e) => return e.to_json(raw_name),
+            };
+            formula_log.record(&a1_addr(j, target_row), &resolved);
+            row.push(CellValue::from_json(&resolved));
+        }
         matrix.push(row);
     }
     let n_rows = matrix.len();
     let n_cols = cols.len();
     match client.set_range(spreadsheet_id, name, "A1", matrix).await {
-        Ok(_) => serde_json::json!({
-            "name": raw_name,
-            "resolved_name": name,
-            "n_rows": n_rows,
-            "n_cols": n_cols,
-        }),
+        Ok(_) => {
+            let mut resp = serde_json::json!({
+                "name": raw_name,
+                "resolved_name": name,
+                "n_rows": n_rows,
+                "n_cols": n_cols,
+            });
+            formula_log.attach(&mut resp);
+            resp
+        }
         Err(e) => serde_json::json!({
             "name": raw_name,
             "resolved_name": name,
@@ -1458,38 +1473,58 @@ fn resolve_formula_placeholders(
 
 /// Max resolved-formula cells echoed back in a tool result. The model uses these
 /// to report what it wrote truthfully (instead of recomputing A1 by hand, which
-/// it gets wrong); a small sample is enough for a confirmation message.
+/// it gets wrong); a small sample is enough for a confirmation message. When the
+/// write exceeds this (e.g. a whole-column fill), the response also carries
+/// `formula_cells_total` + `formula_cells_truncated` so the model reports the
+/// real count instead of mistaking the 50-cell sample for everything.
 const FORMULA_CELLS_SAMPLE_CAP: usize = 50;
 
-/// If `resolved` is a formula (`=…`), record its real A1 address → formula text
-/// so the tool result can echo exactly what landed. Capped at
-/// [`FORMULA_CELLS_SAMPLE_CAP`] entries.
-fn record_formula_cell(
-    formula_cells: &mut serde_json::Map<String, serde_json::Value>,
-    addr: &str,
-    resolved: &serde_json::Value,
-) {
-    if formula_cells.len() >= FORMULA_CELLS_SAMPLE_CAP {
-        return;
-    }
-    if let Some(s) = resolved.as_str() {
-        if s.starts_with('=') {
-            formula_cells.insert(addr.to_string(), serde_json::Value::String(s.to_string()));
-        }
-    }
+/// Accumulates the formulas a diff-write lands: a bounded `sample` (real A1 →
+/// formula text) the model can quote verbatim, plus the `total` count so it
+/// knows when the sample is partial.
+#[derive(Default)]
+struct FormulaCellLog {
+    sample: serde_json::Map<String, serde_json::Value>,
+    total: usize,
 }
 
-/// Attach the collected `formula_cells` (real A1 → resolved formula) to a success
-/// response so the model reports what it actually wrote, never recomputed A1.
-fn attach_formula_cells(
-    resp: &mut serde_json::Value,
-    formula_cells: serde_json::Map<String, serde_json::Value>,
-) {
-    if !formula_cells.is_empty() {
-        if let Some(obj) = resp.as_object_mut() {
+impl FormulaCellLog {
+    /// Record `resolved` if it is a formula (`=…`). Counts every formula; only
+    /// the first [`FORMULA_CELLS_SAMPLE_CAP`] land in the echoed sample.
+    fn record(&mut self, addr: &str, resolved: &serde_json::Value) {
+        if let Some(s) = resolved.as_str() {
+            if s.starts_with('=') {
+                self.total += 1;
+                if self.sample.len() < FORMULA_CELLS_SAMPLE_CAP {
+                    self.sample
+                        .insert(addr.to_string(), serde_json::Value::String(s.to_string()));
+                }
+            }
+        }
+    }
+
+    /// Attach `formula_cells` (+ `formula_cells_total`/`_truncated` when the
+    /// sample is partial) to a success response. No-op when nothing was a formula.
+    fn attach(self, resp: &mut serde_json::Value) {
+        if self.total == 0 {
+            return;
+        }
+        let Some(obj) = resp.as_object_mut() else {
+            return;
+        };
+        let truncated = self.total > self.sample.len();
+        obj.insert(
+            "formula_cells".to_string(),
+            serde_json::Value::Object(self.sample),
+        );
+        if truncated {
             obj.insert(
-                "formula_cells".to_string(),
-                serde_json::Value::Object(formula_cells),
+                "formula_cells_total".to_string(),
+                serde_json::json!(self.total),
+            );
+            obj.insert(
+                "formula_cells_truncated".to_string(),
+                serde_json::json!(true),
             );
         }
     }
@@ -1628,21 +1663,42 @@ mod position_tests {
 
     #[test]
     fn formula_cells_echo_only_formulas_for_truthful_reporting() {
-        let mut fc = serde_json::Map::new();
-        record_formula_cell(&mut fc, "V5", &json!("=S5*U5")); // formula → recorded
-        record_formula_cell(&mut fc, "B2", &json!(42)); // number → ignored
-        record_formula_cell(&mut fc, "C2", &json!("plain text")); // non-formula → ignored
-        assert_eq!(fc.len(), 1);
-        assert_eq!(fc.get("V5"), Some(&json!("=S5*U5")));
+        let mut log = FormulaCellLog::default();
+        log.record("V5", &json!("=S5*U5")); // formula → recorded
+        log.record("B2", &json!(42)); // number → ignored
+        log.record("C2", &json!("plain text")); // non-formula → ignored
+        assert_eq!(log.total, 1);
+        assert_eq!(log.sample.get("V5"), Some(&json!("=S5*U5")));
 
         let mut resp = json!({"tab": "Hoja 16"});
-        attach_formula_cells(&mut resp, fc);
+        log.attach(&mut resp);
         assert_eq!(resp["formula_cells"]["V5"], json!("=S5*U5"));
+        // small write → no truncation signal
+        assert!(resp.get("formula_cells_total").is_none());
 
         // empty set → field omitted entirely (no noise on pure-value writes)
         let mut resp2 = json!({"tab": "Hoja 16"});
-        attach_formula_cells(&mut resp2, serde_json::Map::new());
+        FormulaCellLog::default().attach(&mut resp2);
         assert!(resp2.get("formula_cells").is_none());
+    }
+
+    #[test]
+    fn formula_cells_signal_truncation_past_cap() {
+        // A whole-column fill (e.g. 130 rows) exceeds the 50-cell sample → the
+        // response must announce the real total so the model reports it honestly.
+        let mut log = FormulaCellLog::default();
+        for r in 2..132 {
+            log.record(&format!("V{r}"), &json!(format!("=S{r}*U{r}")));
+        }
+        assert_eq!(log.total, 130);
+        let mut resp = json!({"tab": "Ventas"});
+        log.attach(&mut resp);
+        assert_eq!(
+            resp["formula_cells"].as_object().unwrap().len(),
+            FORMULA_CELLS_SAMPLE_CAP
+        );
+        assert_eq!(resp["formula_cells_total"], json!(130));
+        assert_eq!(resp["formula_cells_truncated"], json!(true));
     }
 }
 
