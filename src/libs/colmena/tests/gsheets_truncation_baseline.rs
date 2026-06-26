@@ -87,8 +87,18 @@ async fn dump_range() {
         .next()
         .and_then(|s| s.trim_matches(|c: char| !c.is_ascii_digit()).parse().ok())
         .unwrap_or(1);
+    // EXP_RENDER=formula → read the formula TEXT (`=A*B`) instead of the
+    // computed value, so a formula cell is distinguishable from a literal.
+    let value_render = match std::env::var("EXP_RENDER").as_deref() {
+        Ok("formula") => colmena::gsheets::domain::ValueRenderOption::Formula,
+        _ => colmena::gsheets::domain::ValueRenderOption::UnformattedValue,
+    };
+    let opts = ReadOptions {
+        value_render,
+        as_records: false,
+    };
     let r = client
-        .read_range(&id, &sheet, Some(&range), ReadOptions::default())
+        .read_range(&id, &sheet, Some(&range), opts)
         .await
         .expect("read ok");
     println!("\n===== {sheet}!{range} (CLIENT ID | S=Cantidad | U=Tarifa | V=Importe) =====");

@@ -149,7 +149,29 @@ gsheets_run_python:
     # Mode 4 — update_by_position (edit existing rows; NO key needed)
     df.loc[df['CLIENT ID'] == 'TCI28fa...', 'Importe'] = df['Cantidad'] * df['Tarifa']
     output_sheets = {'Hoja 16': {'mode': 'update_by_position', 'df': df}}
+
+    # Mode 4 with a FORMULA — reference columns BY NAME with {{Name}}
+    # (resolves to that column in the SAME row; the tool computes the A1).
+    df.loc[mask, 'Importe'] = '={{Cantidad}}*{{Tarifa}}'
+    output_sheets = {'Hoja 16': {'mode': 'update_by_position', 'df': df}}
     ```
+
+    **Formulas: reference columns by NAME, never by hand-computed letter.**
+    To write a live formula in `update_by_position` / `update_in_place`, put the
+    column NAME in double braces — `'={{Cantidad}}*{{Tarifa}}'`. The dispatcher
+    substitutes the real A1 for the SAME row (e.g. `=S5*U5`). Do NOT compute
+    column letters yourself (e.g. from `df.columns` order) — that is off-by-one
+    whenever the sheet has an empty/duplicate header column, and lands a broken
+    `#VALUE!` formula. An unknown column name returns a `FormulaUnknownColumn`
+    error listing the valid names. (Current-row refs only; for an aggregate like
+    `=SUM(...)` write the literal A1 range yourself.)
+
+    **Reporting what you wrote: use `formula_cells` from the result, never
+    recompute.** The tool result echoes the real cell→formula it wrote (e.g.
+    `"formula_cells": {"V5": "=S5*U5"}`). Quote THAT when you confirm to the user.
+    Do NOT recompute column letters from `df.columns` to build your message —
+    that hand math is off-by-one (it lands `=R5*T5` / wrong cell) and your
+    confirmation would lie even when the write was correct.
 
     **Collision policy.** By default, if a tab named in `output_sheets`
     already exists, the tool fails with a `SheetExists` error returning
