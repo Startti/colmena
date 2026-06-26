@@ -345,7 +345,10 @@ async fn locate_client_id() {
                     col_to_a1(qi),
                     row_1based
                 );
-                println!("    CURRENT Cantidad value = {:?}  <-- SAVE THIS to revert", cant);
+                println!(
+                    "    CURRENT Cantidad value = {:?}  <-- SAVE THIS to revert",
+                    cant
+                );
             }
         }
     }

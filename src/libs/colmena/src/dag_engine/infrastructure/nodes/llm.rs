@@ -5637,12 +5637,19 @@ mod agent_has_gsheets_write_tools_tests {
     #[tokio::test]
     async fn gsheets_alias_triggers() {
         let cfg = json!({ "enabled_tools": ["gsheets"] });
-        assert!(LlmNode::agent_has_gsheets_write_tools(&cfg, &empty_inputs()));
+        assert!(LlmNode::agent_has_gsheets_write_tools(
+            &cfg,
+            &empty_inputs()
+        ));
     }
 
     #[tokio::test]
     async fn individual_write_tools_trigger() {
-        for t in ["gsheets_run_python", "gsheets_set_cell", "gsheets_set_range"] {
+        for t in [
+            "gsheets_run_python",
+            "gsheets_set_cell",
+            "gsheets_set_range",
+        ] {
             let cfg = json!({ "enabled_tools": [t] });
             assert!(
                 LlmNode::agent_has_gsheets_write_tools(&cfg, &empty_inputs()),
@@ -5654,26 +5661,38 @@ mod agent_has_gsheets_write_tools_tests {
     #[tokio::test]
     async fn read_only_tool_alone_does_not_trigger() {
         let cfg = json!({ "enabled_tools": ["gsheets_read"] });
-        assert!(!LlmNode::agent_has_gsheets_write_tools(&cfg, &empty_inputs()));
+        assert!(!LlmNode::agent_has_gsheets_write_tools(
+            &cfg,
+            &empty_inputs()
+        ));
     }
 
     #[tokio::test]
     async fn wildcard_triggers() {
         let cfg = json!({ "enabled_tools": "*" });
-        assert!(LlmNode::agent_has_gsheets_write_tools(&cfg, &empty_inputs()));
+        assert!(LlmNode::agent_has_gsheets_write_tools(
+            &cfg,
+            &empty_inputs()
+        ));
     }
 
     #[tokio::test]
     async fn alias_with_one_write_tool_excluded_still_triggers() {
         // The alias still exposes other write tools (set_cell, set_range).
         let cfg = json!({ "enabled_tools": ["gsheets", "!gsheets_run_python"] });
-        assert!(LlmNode::agent_has_gsheets_write_tools(&cfg, &empty_inputs()));
+        assert!(LlmNode::agent_has_gsheets_write_tools(
+            &cfg,
+            &empty_inputs()
+        ));
     }
 
     #[tokio::test]
     async fn tool_configurations_entry_triggers() {
         let cfg = json!({ "tool_configurations": { "gsheets_set_cell": {} } });
-        assert!(LlmNode::agent_has_gsheets_write_tools(&cfg, &empty_inputs()));
+        assert!(LlmNode::agent_has_gsheets_write_tools(
+            &cfg,
+            &empty_inputs()
+        ));
     }
 }
 

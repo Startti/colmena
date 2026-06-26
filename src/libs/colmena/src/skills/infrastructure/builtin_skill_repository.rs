@@ -467,7 +467,10 @@ mod tests {
             })
             .filter(|n| n != "_placeholder")
             .collect();
-        assert!(!names.is_empty(), "expected built-in skills to be compiled in");
+        assert!(
+            !names.is_empty(),
+            "expected built-in skills to be compiled in"
+        );
         let repo =
             BuiltinSkillRepository::new(&names).expect("every built-in skill must parse cleanly");
         for n in &names {
