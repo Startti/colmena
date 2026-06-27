@@ -161,6 +161,7 @@ async fn load_attachment_injects_synthetic_user_message_and_persists_history() {
         tools_provider: None,
         attachment_resolver: Some(Arc::new(FakeResolver)),
         agent_session_id: Some("agent_1".to_string()),
+        lazy_catalog_names: None,
     };
 
     let resp = svc.run(params).await.unwrap();
