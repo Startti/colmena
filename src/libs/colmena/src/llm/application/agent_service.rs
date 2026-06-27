@@ -75,6 +75,12 @@ pub struct AgentRunParams<'a> {
     /// is `Some`; if missing while a sentinel is detected, the loop returns an
     /// `AttachmentError::SessionMissing` mapped to a tool result string.
     pub agent_session_id: Option<String>,
+    /// Lazy describe-before-use guard (lazy_tool_loading only). When `Some`, it
+    /// holds the set of cataloged tool names. If the model calls a cataloged
+    /// tool that is NOT present in the current iteration's `tools[]` (i.e. not
+    /// discovered THIS turn), the loop returns that tool's schema as a redirect
+    /// instead of executing it blind. `None` (eager mode) → no guard.
+    pub lazy_catalog_names: Option<std::collections::HashSet<String>>,
 }
 
 /// Agent service implementing the ReAct (Reasoning + Acting) pattern
@@ -128,6 +134,7 @@ impl AgentService {
         let tool_executor = params.tool_executor;
         let on_token = params.on_token;
         let tools_provider = params.tools_provider;
+        let lazy_catalog_names = params.lazy_catalog_names;
         let params_resolver = params.attachment_resolver;
         let params_agent_session_id = params.agent_session_id;
 
@@ -419,13 +426,56 @@ impl AgentService {
                         (callback)(LlmStreamPart::LlmToolCallStart(tool_call.clone()));
                     }
 
-                    let result = match tool_executor.execute(tool_call).await {
-                        Ok(res) => res,
-                        Err(e) => ToolResult {
-                            tool_call_id: tool_call.id.clone(),
-                            success: false,
-                            output: format!("Error executing tool: {}", e),
-                            error: Some(e.to_string()),
+                    // Lazy describe-before-use guard (lazy_tool_loading only):
+                    // if the model called a cataloged tool that is NOT loaded
+                    // this turn (absent from `iteration_tools`), do NOT execute
+                    // it blind — return its schema as a redirect so the model
+                    // re-calls it with correct args. The original call stays in
+                    // history, so per-turn discovery marks the tool discovered
+                    // and it becomes callable on the next iteration.
+                    let lazy_redirect: Option<ToolResult> = match &lazy_catalog_names {
+                        Some(catalog) => {
+                            let name = &tool_call.function.name;
+                            let loaded_this_turn = iteration_tools.iter().any(|t| t.name == *name);
+                            if !loaded_this_turn && catalog.contains(name) {
+                                let describe = ToolCall::new(
+                                    format!("guard_{}", tool_call.id),
+                                    crate::llm::domain::FunctionCall::new(
+                                        "describe_tool".to_string(),
+                                        serde_json::json!({ "name": name }).to_string(),
+                                    ),
+                                );
+                                let schema = match tool_executor.execute(&describe).await {
+                                    Ok(r) => r.output,
+                                    Err(_) => format!("(schema unavailable for '{name}')"),
+                                };
+                                Some(ToolResult {
+                                    tool_call_id: tool_call.id.clone(),
+                                    success: true,
+                                    output: format!(
+                                        "⚠️ NOT A RESULT. The tool `{name}` was not loaded this turn, \
+                                         so it was NOT executed. Below is its schema — call `{name}` \
+                                         again now with arguments that match it.\n\n{schema}"
+                                    ),
+                                    error: None,
+                                })
+                            } else {
+                                None
+                            }
+                        }
+                        None => None,
+                    };
+
+                    let result = match lazy_redirect {
+                        Some(redirect) => redirect,
+                        None => match tool_executor.execute(tool_call).await {
+                            Ok(res) => res,
+                            Err(e) => ToolResult {
+                                tool_call_id: tool_call.id.clone(),
+                                success: false,
+                                output: format!("Error executing tool: {}", e),
+                                error: Some(e.to_string()),
+                            },
                         },
                     };
 
@@ -1411,6 +1461,7 @@ mod tests {
                 tools_provider: None,
                 attachment_resolver: None,
                 agent_session_id: None,
+                lazy_catalog_names: None,
             })
             .await;
 
@@ -1509,6 +1560,7 @@ mod tests {
                 tools_provider: None,
                 attachment_resolver: None,
                 agent_session_id: None,
+                lazy_catalog_names: None,
             })
             .await;
 
@@ -1564,6 +1616,7 @@ mod tests {
                 tools_provider: None,
                 attachment_resolver: None,
                 agent_session_id: None,
+                lazy_catalog_names: None,
             })
             .await;
 
@@ -1652,11 +1705,91 @@ mod tests {
                 tools_provider: None,
                 attachment_resolver: None,
                 agent_session_id: None,
+                lazy_catalog_names: None,
             })
             .await;
 
         assert!(result.is_ok(), "rescue must return Ok, not Err");
         assert_eq!(result.unwrap().content(), "Best-effort final answer.");
+    }
+
+    fn named_tool_call(id: &str, name: &str, args: &str) -> ToolCall {
+        ToolCall {
+            id: id.to_string(),
+            call_type: "function".to_string(),
+            function: FunctionCall {
+                name: name.to_string(),
+                arguments: args.to_string(),
+            },
+            response: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn lazy_guard_redirects_undiscovered_call_to_schema() {
+        // A cataloged tool not loaded this turn must be redirected to its schema,
+        // never executed blind. The executor should only ever see `describe_tool`.
+        let mut mock_llm = MockLlmRepo::new();
+        let mut mock_tool_exec = MockToolExec::new();
+        let key = test_key();
+        let (mock_conv, _state) = stateful_conv_mock(vec![]);
+
+        mock_tool_exec.expect_execute().times(1).returning(|call| {
+            assert_eq!(
+                call.function.name, "describe_tool",
+                "guard must redirect via describe_tool, never execute the undiscovered tool"
+            );
+            Ok(ToolResult {
+                tool_call_id: call.id.clone(),
+                success: true,
+                output: "# gsheets_run_python\n<schema>".to_string(),
+                error: None,
+            })
+        });
+
+        // Turn 1: model calls a cataloged tool NOT in iteration_tools.
+        // Turn 2: final answer.
+        let counter = Arc::new(AtomicUsize::new(0));
+        let c = counter.clone();
+        mock_llm.expect_call().returning(move |_req| {
+            let n = c.fetch_add(1, Ordering::SeqCst);
+            if n == 0 {
+                Ok(tool_call_response(named_tool_call(
+                    "c1",
+                    "gsheets_run_python",
+                    r#"{"bad":"args"}"#,
+                )))
+            } else {
+                Ok(text_response("done"))
+            }
+        });
+
+        let catalog: std::collections::HashSet<String> =
+            ["gsheets_run_python".to_string()].into_iter().collect();
+        // Lazy iteration tools never include the cataloged tool (undiscovered this turn).
+        let provider: ToolsProvider = Box::new(|_msgs| vec![]);
+
+        let service = AgentService::new(Arc::new(mock_llm), Arc::new(mock_conv));
+        let result = service
+            .run(AgentRunParams {
+                session_id: &key,
+                prompt: Some("edit the sheet".to_string()),
+                messages: None,
+                config: create_config(),
+                tools: vec![],
+                tool_executor: &mock_tool_exec,
+                max_tool_repeats: None,
+                max_turns: None,
+                on_token: None,
+                tools_provider: Some(provider),
+                attachment_resolver: None,
+                agent_session_id: None,
+                lazy_catalog_names: Some(catalog),
+            })
+            .await;
+
+        assert!(result.is_ok(), "guarded run must succeed");
+        assert_eq!(result.unwrap().content(), "done");
     }
 
     #[tokio::test]
@@ -1706,6 +1839,7 @@ mod tests {
                 tools_provider: None,
                 attachment_resolver: None,
                 agent_session_id: None,
+                lazy_catalog_names: None,
             })
             .await;
 
@@ -1770,6 +1904,7 @@ mod tests {
                 tools_provider: None,
                 attachment_resolver: None,
                 agent_session_id: None,
+                lazy_catalog_names: None,
             })
             .await;
 
@@ -1825,6 +1960,7 @@ mod tests {
                 tools_provider: None,
                 attachment_resolver: None,
                 agent_session_id: None,
+                lazy_catalog_names: None,
             })
             .await;
 
@@ -1864,6 +2000,7 @@ mod tests {
                 tools_provider: None,
                 attachment_resolver: None,
                 agent_session_id: None,
+                lazy_catalog_names: None,
             })
             .await;
 
@@ -1929,6 +2066,7 @@ mod tests {
                 tools_provider: None,
                 attachment_resolver: None,
                 agent_session_id: None,
+                lazy_catalog_names: None,
             })
             .await;
 
@@ -2001,6 +2139,7 @@ mod tests {
                 tools_provider: None,
                 attachment_resolver: None,
                 agent_session_id: None,
+                lazy_catalog_names: None,
             })
             .await;
 
@@ -2084,6 +2223,7 @@ mod tests {
                 tools_provider: None,
                 attachment_resolver: None,
                 agent_session_id: None,
+                lazy_catalog_names: None,
             })
             .await;
 
@@ -2245,6 +2385,7 @@ mod tests {
             tools_provider: None,
             attachment_resolver: Some(Arc::new(FakeResolver)),
             agent_session_id: Some("agent_1".to_string()),
+            lazy_catalog_names: None,
         };
         let resp = svc.run(params).await.unwrap();
         assert_eq!(resp.content(), "Final answer");
@@ -2422,6 +2563,7 @@ mod tests {
             tools_provider: None,
             attachment_resolver: Some(Arc::new(FakeResolver)),
             agent_session_id: Some("agent_1".to_string()),
+            lazy_catalog_names: None,
         };
         svc.run(params).await.unwrap();
 
@@ -2594,6 +2736,7 @@ mod tests {
             tools_provider: None,
             attachment_resolver: Some(Arc::new(FakeResolver)),
             agent_session_id: Some("agent_eph".to_string()),
+            lazy_catalog_names: None,
         };
         let resp = svc.run(params).await.unwrap();
         assert_eq!(resp.content(), "ok");

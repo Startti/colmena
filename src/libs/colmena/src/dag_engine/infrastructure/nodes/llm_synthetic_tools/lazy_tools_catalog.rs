@@ -2,8 +2,24 @@
 //! over conversation messages — no I/O, no provider awareness.
 
 use crate::llm::domain::tools::{ParameterProperty, ToolDefinition, ToolParameters};
-use crate::llm::domain::LlmMessage;
+use crate::llm::domain::{LlmMessage, MessageRole};
 use std::collections::{HashMap, HashSet};
+
+/// Narrow `messages` to the CURRENT user-turn: everything from the last
+/// `MessageRole::User` message onward. Lazy discovery is enforced **per turn**
+/// (mirrors the gsheets inspect-before-code guard, which re-inspects each turn),
+/// so a tool discovered in a previous turn must be re-discovered before reuse —
+/// guaranteeing its schema/guidance is fresh in context even after history
+/// compaction. With no user message (seeded history), the whole slice is kept.
+pub fn current_turn_slice(messages: &[LlmMessage]) -> &[LlmMessage] {
+    match messages
+        .iter()
+        .rposition(|m| *m.role() == MessageRole::User)
+    {
+        Some(idx) => &messages[idx..],
+        None => messages,
+    }
+}
 
 #[derive(Clone)]
 pub struct CatalogEntry {
@@ -105,10 +121,14 @@ pub fn build_describe_tool_definition(pending: &[&CatalogEntry]) -> ToolDefiniti
 
     let description = format!(
         "Reveal the full parameter schema and usage notes for one of the tools below. \
-Call this BEFORE invoking a tool so you know its parameters and return shape. \
-Available tools:\n{}\n\n\
-Only call describe_tool when you've decided you actually need the tool — not preemptively for every tool. \
-After calling describe_tool, the revealed tool will appear in your available tools on your next turn.",
+ALWAYS call describe_tool for a tool BEFORE you invoke it — you need its schema to pass \
+correct arguments and to see its usage notes. Available tools:\n{}\n\n\
+Discovery is PER TURN: the first time you use a tool in a new turn, describe it again. \
+If you skip this and call a tool directly without describing it this turn, you will NOT \
+get its result — you'll receive its schema back as a redirect, and must then call the \
+tool again with arguments that match it. \
+Only describe a tool when you actually need it — not preemptively for every tool. \
+After describe_tool, the revealed tool appears in your available tools and you can call it.",
         catalog_lines.join("\n")
     );
 
@@ -293,5 +313,57 @@ mod tests {
         let td = build_describe_tool_definition(&pending);
         assert_eq!(td.parameters.required, vec!["name".to_string()]);
         assert_eq!(td.name, "describe_tool");
+    }
+
+    // ---- current_turn_slice (per-turn discovery) ----------------------------
+
+    #[test]
+    fn current_turn_slice_no_user_returns_whole() {
+        let msgs = vec![assistant_with_call("a", "{}")];
+        assert_eq!(current_turn_slice(&msgs).len(), 1);
+    }
+
+    #[test]
+    fn current_turn_slice_starts_at_last_user() {
+        let msgs = vec![
+            LlmMessage::user("turn 1".into()).unwrap(),
+            assistant_with_call("a", "{}"),
+            LlmMessage::user("turn 2".into()).unwrap(),
+            assistant_with_call("b", "{}"),
+        ];
+        let slice = current_turn_slice(&msgs);
+        // From the LAST user message onward: ["turn 2", assistant(b)].
+        assert_eq!(slice.len(), 2);
+        assert_eq!(slice[0].content(), "turn 2");
+    }
+
+    #[test]
+    fn per_turn_discovery_ignores_prior_turn_describe() {
+        // Tool `a` was described in turn 1, then a new user turn started with no
+        // re-describe. Scoped to the current turn, `a` is NOT discovered → the
+        // model must describe it again (per-turn enforcement).
+        let msgs = vec![
+            LlmMessage::user("turn 1".into()).unwrap(),
+            assistant_with_call(super::super::DESCRIBE_TOOL_NAME, r#"{"name":"a"}"#),
+            LlmMessage::user("turn 2".into()).unwrap(),
+        ];
+        let cat = [entry("a")];
+        // History-wide would discover `a`; per-turn slice must not.
+        assert!(reconstruct_discovered_set(&msgs, &cat).contains("a"));
+        let set = reconstruct_discovered_set(current_turn_slice(&msgs), &cat);
+        assert!(
+            !set.contains("a"),
+            "per-turn slice must drop prior-turn describe"
+        );
+    }
+
+    #[test]
+    fn per_turn_discovery_keeps_this_turn_describe() {
+        let msgs = vec![
+            LlmMessage::user("turn 2".into()).unwrap(),
+            assistant_with_call(super::super::DESCRIBE_TOOL_NAME, r#"{"name":"a"}"#),
+        ];
+        let set = reconstruct_discovered_set(current_turn_slice(&msgs), &[entry("a")]);
+        assert!(set.contains("a"));
     }
 }
