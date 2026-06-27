@@ -714,6 +714,16 @@ Items derivados de la implementación de Subsystem D (formulas v1, 2026-06-04 �
   `FORMULA` fusionados en una respuesta) para que el agente vea ambos sin 2
   llamadas (~2-3h). Sin trigger concreto aún; (a) es quick-win, (b) requiere
   use-case.
+- [ ] **Formula `{{Column}}` placeholders — follow-ups (shipped 2026-06-26, §52).**
+  El MVP resuelve refs de FILA ACTUAL (`={{Cantidad}}*{{Tarifa}}` → `=S5*U5`,
+  vía `resolve_formula_placeholders` en todos los modos de escritura). Pendiente:
+  - **Aggregates `{{Col:col}}`** — forma columna-sola que emite solo la LETRA
+    (`=SUM({{Importe:col}}2:{{Importe:col}}100)` → `=SUM(V2:V100)`), para que el modelo
+    no calcule letras de columna en agregados. La mitad de fila (límites `2`/`100`) sigue
+    siendo del modelo. ~½d. Sin trigger — esperar un caso real de totales.
+  - **Helper de rango por fila de hoja** — un `sheet_rows(df, start, end)` en el prelude
+    para evitar la fricción `df_index = fila_hoja − 2`. Valor bajo (la doc ya empuja a
+    selección por condición, que no la tiene). Solo si aparece el caso.
 - [ ] **Charts** via `batchUpdate.addChart`.
 - [ ] **Conditional formatting** via `batchUpdate.addConditionalFormatRule`.
 - [ ] **Data validation (dropdowns)** via `batchUpdate.setDataValidation`.
@@ -1631,6 +1641,31 @@ genérica. Sin trigger urgente.
 
 ---
 
+## Lazy tool loading v1.1 (follow-ups)
+
+> Base: per-turn describe-before-use guard shipped 2026-06-27 (§54). El guard hace lazy
+> sólido — imposible usar una tool sin cargar su schema primero; descubrimiento por turno
+> (`current_turn_slice`); redirect schema-only para calls a ciegas. Verificado E2E en lazy
+> con pro y flash. Estos son pulidos opt-in, no bugs.
+
+- [ ] **Eager-selectivo para toolkits sintéticos.** Los nodos del registry via
+  `enabled_tools` son SIEMPRE eager, pero los toolkits sintéticos (gsheets/gdocs/crdt_doc)
+  via `enabled_tools` van LAZY bajo `lazy_tool_loading` **sin escape hatch** — el flag
+  `eager:true` solo existe para entradas de `tool_configurations`, y los tools sintéticos
+  se activan por flag, no son node_types del registry. Falta una perilla para marcar un
+  toolkit/tool sintético como eager (ej. `enabled_tools: ["gsheets!eager"]` o un campo de
+  config). Útil para agentes mono-toolkit que quieran evitar el round-trip de describe.
+  ~½-1d. (Era el "Eje 3" del brainstorm del 2026-06-27.)
+- [ ] **Re-describe redundante.** Observado live: gemini-2.5-flash a veces describe la
+  MISMA tool 2 veces en un turno (un round-trip extra, inofensivo). Se podría no-op-ear un
+  `describe_tool(X)` cuando X ya está descubierta-este-turno. Cosmético. ~1h.
+- [ ] **Narración soft-guarantee.** El nudge "reportá desde `formula_cells`, no recalcules
+  A1" (y, en lazy, "el redirect del guard NO es el resultado") es soft — medido OK en pro y
+  flash, pero un modelo más débil podría ignorarlo. No hay fix duro sin controlar el modelo;
+  monitorear y endurecer el wording si aparece un caso real de narración equivocada.
+
+---
+
 ## Proceso / CI / Ops (deuda fuera de features)
 
 Items de proceso, no de producto. Antes solo vivían en notas de sesión; se
@@ -1648,3 +1683,10 @@ trazan acá para visibilidad en el repo.
   rollout a PROD. Requiere aplicar la columna Prisma `summary` en la DB de prod
   (`migrate deploy`, NUNCA `migrate dev`/`reset`) y desplegar. Ítem de ops, no
   de código colmena — depende del owner de ADP.
+- [ ] **gsheets write-reliability + lazy guard → deploy ADP (2026-06-27).** Todo el
+  bloque está mergeado en colmena `develop` pero **NO deployado**: gsheets read-reliability
+  (#126), `update_by_position` (#127), fórmulas `{{Column}}` (#128), column-append (#130),
+  y el lazy describe-before-use guard (#132). Para hacerlo live: bump del pin de colmena en
+  el worker (`cargo update -p colmena_dag_engine` + commit del `Cargo.lock` — trackea
+  `branch=develop` pero fija un rev) → `deploy_gcp.sh` (dev → prod). **Aditivo:** sin cambios
+  de código ADP, migraciones ni env vars. Ítem de ops — depende del owner de ADP.
