@@ -449,4 +449,34 @@ mod tests {
             );
         }
     }
+
+    /// EVERY built-in skill must parse + load. Enumerates the whole compiled-in
+    /// tree and loads each one — a malformed frontmatter (e.g. an unescaped
+    /// `': '` in a description) or a missing reference file makes this fail at
+    /// CI, instead of only at runtime when an agent auto-enrolls the skill and
+    /// the node errors with `loading builtin skills: invalid frontmatter`.
+    #[tokio::test]
+    async fn all_builtin_skills_parse_and_load() {
+        let names: Vec<String> = BUILTIN_SKILLS_DIR
+            .dirs()
+            .filter_map(|d| {
+                d.path()
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .map(String::from)
+            })
+            .filter(|n| n != "_placeholder")
+            .collect();
+        assert!(
+            !names.is_empty(),
+            "expected built-in skills to be compiled in"
+        );
+        let repo =
+            BuiltinSkillRepository::new(&names).expect("every built-in skill must parse cleanly");
+        for n in &names {
+            repo.load_skill(n)
+                .await
+                .unwrap_or_else(|e| panic!("built-in skill '{n}' failed to load: {e:?}"));
+        }
+    }
 }

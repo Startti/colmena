@@ -61,14 +61,45 @@ Dos campos opcionales nuevos en cada `ToolConfiguration`:
 3. Cuando el LLM llama `describe_tool("X")`, el `DagToolExecutor` intercepta la call (mismo patrón que `load_skill`), genera el markdown curado del schema de `X`, y devuelve el contenido.
 4. En el siguiente request, `X` deja el catálogo (ya descubierta) y aparece tipada en `tools[]` con su schema completo. El LLM la invoca normalmente.
 
-## Persistencia con memoria
+## Persistencia con memoria — descubrimiento POR TURNO (2026-06-27)
 
-`discovered_set` no se guarda en BD. Es una vista derivada del historial: cada vez que el `llm_call` arranca con un `session_id` que tiene memoria, se scan-ean los mensajes pasados y se reconstruye el set:
+`discovered_set` no se guarda en BD. Es una vista derivada del historial, pero
+**acotada al turno de usuario actual** (`current_turn_slice`: los mensajes desde el
+último mensaje `user` en adelante). Se reconstruye en cada iteración del ReAct loop:
 
-- **Regla 1:** una llamada pasada a `describe_tool(name="X")` añade `X` al set.
-- **Regla 2:** una llamada pasada directa a `X` (donde `X` está en el catálogo actual) añade `X` al set.
+- **Regla 1:** una llamada a `describe_tool(name="X")` **en este turno** añade `X` al set.
+- **Regla 2:** una llamada directa a `X` (donde `X` está en el catálogo) **en este turno** añade `X` al set.
 
-La regla 2 maneja tres casos: truncación que dropea el `describe_tool` original, sesiones que cambiaron de `eager` a `lazy` mid-flight, e historiales sembrados manualmente. Si AMBOS rastros caen del historial, la tool sale del set y el LLM la re-descubre la próxima vez que la necesite.
+**Por qué por turno** (mirror del inspect-before-code de gsheets, que re-inspecciona
+cada turno "por si algo cambió"): cross-turn, la compactación puede tirar la guía que
+el modelo vio en el turno 1, pero un set history-wide igual lo marcaría "descubierto" →
+el modelo actuaría en el turno 2 sin la guía en contexto. Acotar al turno garantiza que
+el schema/guía se recargue fresco la primera vez que se usa la tool en cada turno. La
+Regla 2 además cubre sesiones que cambiaron de `eager` a `lazy` mid-flight e historiales
+sembrados manualmente — dentro del turno.
+
+## Guard describe-before-use (2026-06-27)
+
+El catálogo correctamente excluye del `tools[]` las tools no-descubiertas-este-turno,
+pero el provider (p.ej. Gemini) puede **alucinar** un `functionCall` a una tool fuera de
+`tools[]`, y el `DagToolExecutor` la despacharía **a ciegas** (sin que el modelo haya
+cargado su schema → args inventados → falla). El guard cierra ese agujero
+([`agent_service.rs`](../../src/libs/colmena/src/llm/application/agent_service.rs)):
+
+> Si el modelo llama una tool del catálogo que NO está en el `iteration_tools` de este
+> turno, **no se ejecuta** — se devuelve su **schema** (vía `describe_tool`) envuelto en
+> un aviso explícito ("⚠️ NOT A RESULT … call again with matching args"). El modelo lee
+> el schema y re-llama con args correctos. La call original queda en el historial → la
+> Regla 2 la marca descubierta-este-turno → en la iteración siguiente entra a `tools[]` y
+> ejecuta normal.
+
+Es **schema-only** (no auto-retry: los args estaban mal por no tener el schema; re-correrlos
+no sirve). Activo **solo bajo `lazy_tool_loading: true`** (vía `AgentRunParams.lazy_catalog_names`);
+agentes eager no se ven afectados.
+
+Los prompts en lazy son explícitos sobre este flujo (la descripción de `describe_tool`
+y un bloque de sistema "Lazy tools (load before use)") para que el modelo entienda los
+pasos y NO confunda el redirect del guard con el resultado real.
 
 ## Observabilidad
 

@@ -5,7 +5,7 @@ references:
   - name: dataframe-shape
     description: HOW the dispatcher projects sheets into pandas DataFrames. Critical reading — Y.Doc row 1 ALWAYS becomes columns, which means imported xlsx with a title row in A1 need explicit header promotion. Load this before writing any pandas code that references columns by name.
   - name: output-protocol
-    description: How to set `output` and `output_sheets = {name: df}`, collision policy, mode options (replace / update_in_place / overwrite). Load when you need to return data or persist a derived sheet.
+    description: How to set `output` and `output_sheets` (a sheet-name → DataFrame map), collision policy, mode options (replace / update_in_place / overwrite). Load when you need to return data or persist a derived sheet.
   - name: type-quirks
     description: Y.Doc serializes all numbers as f64; NaN handling; mixed-type columns. Load if you hit unexpected dtype issues or your numeric comparisons fail.
   - name: debugging-keyerror

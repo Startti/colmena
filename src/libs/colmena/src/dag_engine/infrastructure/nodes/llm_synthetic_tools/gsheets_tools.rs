@@ -274,6 +274,43 @@ fn values_to_markdown(values: &serde_json::Value) -> String {
     lines.join("\n")
 }
 
+/// Byte budget for a markdown `gsheets_read` result. Kept safely below the
+/// LLM tool-result per-string cap (`DEFAULT_MAX_TOOL_RESULT_STRING_BYTES` =
+/// 50 KiB) so a bounded preview is never re-truncated by the generic scrubber.
+/// A full read above this budget is row-bounded (whole rows, header kept) and
+/// annotated with `truncated`/`rows_shown`/`total_rows` so the agent sees the
+/// real columns + a sample instead of a content-free `[truncated]` marker.
+pub const MARKDOWN_PREVIEW_BUDGET_BYTES: usize = 45_000;
+
+/// Keep the header + separator + as many WHOLE data rows as fit within
+/// `budget` bytes. The first data row is always kept (so the agent gets at
+/// least one sample even if it alone exceeds the budget); subsequent rows are
+/// added only while they fit. Returns `(bounded_markdown, data_rows_kept)`.
+///
+/// Tables with only a header/separator (or less) are returned unchanged with a
+/// row count of 0.
+fn bound_markdown_rows(md: &str, budget: usize) -> (String, usize) {
+    let lines: Vec<&str> = md.lines().collect();
+    if lines.len() <= 2 {
+        return (md.to_string(), 0);
+    }
+    let mut kept = String::with_capacity(budget.min(md.len()));
+    kept.push_str(lines[0]); // header
+    kept.push('\n');
+    kept.push_str(lines[1]); // separator
+    let mut rows_kept = 0usize;
+    for (i, line) in lines[2..].iter().enumerate() {
+        // Always keep the first data row; budget-check the rest (+1 for `\n`).
+        if i > 0 && kept.len() + 1 + line.len() > budget {
+            break;
+        }
+        kept.push('\n');
+        kept.push_str(line);
+        rows_kept += 1;
+    }
+    (kept, rows_kept)
+}
+
 /// Compute the data extent of a read result: rows = number of returned rows
 /// (includes the header row in 2-D mode), columns = max row width. Works for
 /// both 2-D arrays (cells) and record arrays (object keys).
@@ -723,13 +760,38 @@ pub async fn dispatch_read_with_client(
         Ok(r) => {
             let dimensions = compute_dimensions(&r.values);
             if want_markdown {
-                serde_json::json!({
-                    "ok": true,
-                    "sheet": r.sheet,
-                    "range": r.range,
-                    "dimensions": dimensions,
-                    "markdown": values_to_markdown(&r.values),
-                })
+                let md = values_to_markdown(&r.values);
+                if md.len() > MARKDOWN_PREVIEW_BUDGET_BYTES {
+                    // Sheet too large to return whole — row-bound it so the agent
+                    // still sees the real columns + a sample (instead of the
+                    // generic scrubber nuking the entire markdown string).
+                    let (bounded, rows_shown) =
+                        bound_markdown_rows(&md, MARKDOWN_PREVIEW_BUDGET_BYTES);
+                    let total_rows = dimensions
+                        .get("rows")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0)
+                        .saturating_sub(1); // exclude header row
+                    serde_json::json!({
+                        "ok": true,
+                        "sheet": r.sheet,
+                        "range": r.range,
+                        "dimensions": dimensions,
+                        "markdown": bounded,
+                        "truncated": true,
+                        "rows_shown": rows_shown,
+                        "total_rows": total_rows,
+                        "advice": "Sheet too large to return whole — showing the first rows only (the real columns + a sample). Do NOT assume the unseen rows look like these. To get more: read a specific A1 `range` (e.g. the next block of rows), or use gsheets_run_python to process ALL rows programmatically.",
+                    })
+                } else {
+                    serde_json::json!({
+                        "ok": true,
+                        "sheet": r.sheet,
+                        "range": r.range,
+                        "dimensions": dimensions,
+                        "markdown": md,
+                    })
+                }
             } else {
                 serde_json::json!({
                     "ok": true,
@@ -1368,6 +1430,42 @@ mod tests {
     fn values_to_markdown_empty_is_empty_string() {
         let v = serde_json::json!([]);
         assert_eq!(values_to_markdown(&v), "");
+    }
+
+    #[test]
+    fn bound_markdown_rows_keeps_header_and_rows_under_budget() {
+        // header + separator + 5 data rows; budget fits ~3 data rows.
+        let md =
+            "| A | B |\n| --- | --- |\n| 1 | 11 |\n| 2 | 22 |\n| 3 | 33 |\n| 4 | 44 |\n| 5 | 55 |";
+        let (bounded, rows) = bound_markdown_rows(md, 50);
+        assert!(bounded.starts_with("| A | B |\n| --- | --- |"));
+        assert!((1..5).contains(&rows), "kept {rows} rows");
+        assert!(bounded.len() <= 50 + 12, "bounded near budget");
+        // Only whole rows kept — no dangling partial line.
+        assert!(bounded.lines().all(|l| l.starts_with('|')));
+    }
+
+    #[test]
+    fn bound_markdown_rows_always_keeps_at_least_one_data_row() {
+        // A single data row larger than the budget is still kept (the agent
+        // must see at least one sample), even though it exceeds `budget`.
+        let big_cell = "x".repeat(500);
+        let md = format!("| A |\n| --- |\n| {big_cell} |\n| second |");
+        let (bounded, rows) = bound_markdown_rows(&md, 20);
+        assert_eq!(rows, 1, "first data row always kept");
+        assert!(bounded.contains(&big_cell));
+        assert!(
+            !bounded.contains("second"),
+            "second row dropped over budget"
+        );
+    }
+
+    #[test]
+    fn bound_markdown_rows_header_only_table_unchanged() {
+        let md = "| A | B |\n| --- | --- |";
+        let (bounded, rows) = bound_markdown_rows(md, 5);
+        assert_eq!(bounded, md);
+        assert_eq!(rows, 0);
     }
 
     #[test]

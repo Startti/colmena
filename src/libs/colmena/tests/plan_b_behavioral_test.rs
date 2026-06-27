@@ -294,6 +294,7 @@ async fn agent_run_with_in_memory_repo_persists_marker_not_bytes() {
         tools_provider: None,
         attachment_resolver: Some(Arc::new(FakeResolver)),
         agent_session_id: Some("agent_int".to_string()),
+        lazy_catalog_names: None,
     };
 
     let resp = svc.run(params).await.expect("agent run ok");

@@ -17,9 +17,9 @@ use crate::dag_engine::application::ports::NodeRegistryPort;
 use crate::dag_engine::infrastructure::dag_tool_executor::DagToolExecutor;
 use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::{
     build_all_crdt_doc_tools, build_all_document_tools, build_describe_tool_definition,
-    build_load_skill_tool_definition, reconstruct_discovered_set, summary_for_catalog,
-    CatalogEntry, CrdtDocsContext, DescribeToolDispatchResult, DocumentToolsContext,
-    ATTACHMENTS_SYSTEM_PRELUDE, DOCUMENTS_SYSTEM_PRELUDE,
+    build_load_skill_tool_definition, current_turn_slice, reconstruct_discovered_set,
+    summary_for_catalog, CatalogEntry, CrdtDocsContext, DescribeToolDispatchResult,
+    DocumentToolsContext, ATTACHMENTS_SYSTEM_PRELUDE, DOCUMENTS_SYSTEM_PRELUDE,
 };
 use crate::documents::application::DocumentRuntime;
 use crate::documents::domain::ids::SessionId as DocSessionId;
@@ -531,6 +531,41 @@ impl LlmNode {
         false
     }
 
+    /// True when the agent can WRITE to a sheet — it has the `gsheets` alias,
+    /// `*`, or any individual write tool (`gsheets_run_python`,
+    /// `gsheets_set_cell`, `gsheets_set_range`). Gates auto-enrollment of the
+    /// `gsheets-editing` skill (the write/edit decision guide). Mirrors
+    /// [`agent_has_gsheets_format_tool`](Self::agent_has_gsheets_format_tool).
+    pub(super) fn agent_has_gsheets_write_tools(config: &Value, inputs: &NodeInputs) -> bool {
+        const WRITE_TOOLS: [&str; 3] = [
+            "gsheets_run_python",
+            "gsheets_set_cell",
+            "gsheets_set_range",
+        ];
+        let enabled = inputs
+            .get("enabled_tools")
+            .or_else(|| config.get("enabled_tools"));
+        let raw_names: Vec<&str> = match enabled {
+            Some(Value::String(s)) => vec![s.as_str()],
+            Some(Value::Array(arr)) => arr.iter().filter_map(|v| v.as_str()).collect(),
+            _ => Vec::new(),
+        };
+        for n in &raw_names {
+            if n.starts_with('!') {
+                continue;
+            }
+            if *n == "*" || *n == "gsheets" || WRITE_TOOLS.contains(n) {
+                return true;
+            }
+        }
+        if let Some(Value::Object(tc)) = config.get("tool_configurations") {
+            if tc.keys().any(|k| WRITE_TOOLS.contains(&k.as_str())) {
+                return true;
+            }
+        }
+        false
+    }
+
     /// Parse `COLMENA_SKILLS_ALLOWED_DIRS` env var into a list of PathBufs.
     /// Separator: `:` on Unix, `;` on Windows. Missing env var → empty list.
     fn parse_allowed_dirs_env() -> Vec<PathBuf> {
@@ -670,6 +705,17 @@ impl LlmNode {
             skills_config
                 .builtin
                 .push("gsheets-presentable-output".to_string());
+        }
+
+        // Auto-enroll the `gsheets-editing` builtin skill whenever the agent can
+        // write to a sheet. Pairs with the always-on routing rules in the
+        // gsheets_run_python / gsheets_set_cell descriptions: the descriptions
+        // give the decision at the point of use, the skill teaches the full
+        // write/edit decision table + per-scenario examples on demand.
+        if Self::agent_has_gsheets_write_tools(config, inputs)
+            && !skills_config.builtin.iter().any(|n| n == "gsheets-editing")
+        {
+            skills_config.builtin.push("gsheets-editing".to_string());
         }
 
         // If there's nothing to load (no builtins, no paths), short-circuit.
@@ -2934,6 +2980,21 @@ impl ExecutableNode for LlmNode {
                         tool_names.iter().map(|t| t.trim_start_matches("- ")).collect::<Vec<_>>().join(", ")
                     ));
                 }
+                // Lazy workflow note (only when there are cataloged tools): make the
+                // describe-before-use contract explicit so the model doesn't mistake
+                // the guard's schema-redirect for a real result.
+                if lazy_tool_loading && !catalog.is_empty() {
+                    sections.push(
+                        "## Lazy tools (load before use)\n\
+                         Some tools load on demand (see `describe_tool`). Workflow: (1) call \
+                         `describe_tool(name)` to load a tool's schema, then (2) call the tool. \
+                         Discovery is PER TURN — re-describe a tool the first time you use it in a \
+                         new turn. If you call a tool WITHOUT describing it first this turn, you \
+                         will NOT get a result: you'll get its schema back as a redirect — read it \
+                         and call the tool again with arguments that match it."
+                            .to_string(),
+                    );
+                }
             }
             if !sections.is_empty() {
                 messages.push(LlmMessage::system(sections.join("\n\n---\n"))?);
@@ -3037,7 +3098,13 @@ impl ExecutableNode for LlmNode {
                 let static_snapshot = tools.clone();
                 Some(Box::new(
                     move |messages: &[crate::llm::domain::LlmMessage]| {
-                        let discovered = reconstruct_discovered_set(messages, &catalog);
+                        // Per-turn discovery: only count describe_tool / direct
+                        // calls from the CURRENT user-turn, so each new turn
+                        // re-forces describe-before-use (mirrors gsheets inspect
+                        // guard). Guidance is thus always fresh, never stale from
+                        // history compaction.
+                        let discovered =
+                            reconstruct_discovered_set(current_turn_slice(messages), &catalog);
                         let pending: Vec<&CatalogEntry> = catalog
                             .iter()
                             .filter(|e| !discovered.contains(&e.name))
@@ -3073,6 +3140,15 @@ impl ExecutableNode for LlmNode {
                 None
             };
 
+        // Lazy describe-before-use guard: pass the catalog tool-names so the
+        // agent loop can redirect a call to a tool not loaded this turn. Only
+        // when lazy is on (eager agents get `None` → no guard).
+        let lazy_catalog_names: Option<std::collections::HashSet<String>> = if lazy_tool_loading {
+            Some(catalog.iter().map(|e| e.name.clone()).collect())
+        } else {
+            None
+        };
+
         // Create AgentService parameters. On resume, the user prompt is `None`
         // and `messages` is `None`: agent_service will load the just-persisted
         // tool message (added in the resume block above) from history and
@@ -3099,6 +3175,7 @@ impl ExecutableNode for LlmNode {
                         as std::sync::Arc<dyn crate::llm::application::LoadAttachmentResolver>
                 }),
                 agent_session_id: agent_session_id_str.clone(),
+                lazy_catalog_names: lazy_catalog_names.clone(),
             }
         } else {
             crate::llm::application::AgentRunParams {
@@ -3122,6 +3199,7 @@ impl ExecutableNode for LlmNode {
                         as std::sync::Arc<dyn crate::llm::application::LoadAttachmentResolver>
                 }),
                 agent_session_id: agent_session_id_str.clone(),
+                lazy_catalog_names: lazy_catalog_names.clone(),
             }
         };
 
@@ -5574,6 +5652,79 @@ mod skills_path_tests {
             "expected empty list, got: {:?}",
             resolved
         );
+    }
+}
+
+#[cfg(test)]
+mod agent_has_gsheets_write_tools_tests {
+    //! Covers the gate that auto-enrolls the `gsheets-editing` builtin skill.
+    use super::*;
+    use serde_json::json;
+    use std::collections::HashMap;
+
+    fn empty_inputs() -> NodeInputs {
+        HashMap::new()
+    }
+
+    #[tokio::test]
+    async fn gsheets_alias_triggers() {
+        let cfg = json!({ "enabled_tools": ["gsheets"] });
+        assert!(LlmNode::agent_has_gsheets_write_tools(
+            &cfg,
+            &empty_inputs()
+        ));
+    }
+
+    #[tokio::test]
+    async fn individual_write_tools_trigger() {
+        for t in [
+            "gsheets_run_python",
+            "gsheets_set_cell",
+            "gsheets_set_range",
+        ] {
+            let cfg = json!({ "enabled_tools": [t] });
+            assert!(
+                LlmNode::agent_has_gsheets_write_tools(&cfg, &empty_inputs()),
+                "{t} should trigger"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn read_only_tool_alone_does_not_trigger() {
+        let cfg = json!({ "enabled_tools": ["gsheets_read"] });
+        assert!(!LlmNode::agent_has_gsheets_write_tools(
+            &cfg,
+            &empty_inputs()
+        ));
+    }
+
+    #[tokio::test]
+    async fn wildcard_triggers() {
+        let cfg = json!({ "enabled_tools": "*" });
+        assert!(LlmNode::agent_has_gsheets_write_tools(
+            &cfg,
+            &empty_inputs()
+        ));
+    }
+
+    #[tokio::test]
+    async fn alias_with_one_write_tool_excluded_still_triggers() {
+        // The alias still exposes other write tools (set_cell, set_range).
+        let cfg = json!({ "enabled_tools": ["gsheets", "!gsheets_run_python"] });
+        assert!(LlmNode::agent_has_gsheets_write_tools(
+            &cfg,
+            &empty_inputs()
+        ));
+    }
+
+    #[tokio::test]
+    async fn tool_configurations_entry_triggers() {
+        let cfg = json!({ "tool_configurations": { "gsheets_set_cell": {} } });
+        assert!(LlmNode::agent_has_gsheets_write_tools(
+            &cfg,
+            &empty_inputs()
+        ));
     }
 }
 
