@@ -974,6 +974,88 @@ fn addressable_columns(header_cols: &[String]) -> std::collections::HashMap<Stri
         .collect()
 }
 
+/// A single cell a new column needs: a header cell (row 1) or a body value.
+/// `raw` is the value as it came from the df — formula resolution happens in the
+/// caller, where the full column→index map (existing + new) is available.
+#[derive(Debug, PartialEq)]
+struct PlannedCell {
+    col_idx: usize,
+    /// 1-based; row 1 is the header.
+    row: usize,
+    raw: serde_json::Value,
+}
+
+/// What `update_by_position` should write for columns present in the returned df
+/// but absent from the sheet header.
+#[derive(Debug, Default, PartialEq)]
+struct NewColumnPlan {
+    /// (column name, 0-based column index) for each added column, in df order.
+    added: Vec<(String, usize)>,
+    /// Header cells (row 1) + body cells, in write order.
+    cells: Vec<PlannedCell>,
+}
+
+/// For each df column whose name is NOT in `header_cols`, assign the next free
+/// column index (appended after the last header column, in df-column order) and
+/// emit its header cell plus one body cell per record with a non-null value.
+/// A column whose body is entirely null is skipped (no orphan header). The sheet
+/// row for record `i` is `df_index[i] + 2` (header is row 1).
+fn plan_new_columns(
+    header_cols: &[String],
+    new_records: &[serde_json::Map<String, serde_json::Value>],
+    df_index: &[serde_json::Value],
+) -> NewColumnPlan {
+    use std::collections::HashSet;
+    let existing: HashSet<&str> = header_cols.iter().map(String::as_str).collect();
+
+    // Discover new column names in first-seen df order, excluding the synthetic
+    // index and any name already present in the header.
+    let mut new_names: Vec<String> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    for r in new_records {
+        for k in r.keys() {
+            if k == "__index__" || existing.contains(k.as_str()) {
+                continue;
+            }
+            if seen.insert(k.clone()) {
+                new_names.push(k.clone());
+            }
+        }
+    }
+
+    let mut plan = NewColumnPlan::default();
+    let mut next_idx = header_cols.len();
+    for name in new_names {
+        let mut body: Vec<PlannedCell> = Vec::new();
+        for (i, r) in new_records.iter().enumerate() {
+            let Some(v) = r.get(&name) else { continue };
+            if v.is_null() {
+                continue;
+            }
+            let Some(row_idx) = df_index.get(i).and_then(serde_json::Value::as_u64) else {
+                continue;
+            };
+            body.push(PlannedCell {
+                col_idx: next_idx,
+                row: row_idx as usize + 2,
+                raw: v.clone(),
+            });
+        }
+        if body.is_empty() {
+            continue; // entirely-null column → don't create an orphan header.
+        }
+        plan.cells.push(PlannedCell {
+            col_idx: next_idx,
+            row: 1,
+            raw: serde_json::Value::String(name.clone()),
+        });
+        plan.cells.extend(body);
+        plan.added.push((name, next_idx));
+        next_idx += 1;
+    }
+    plan
+}
+
 /// Positional / index-based write-back. The model modifies the bound df IN
 /// PLACE and returns the WHOLE df under `mode:'update_by_position'` (no key).
 /// The dispatcher diffs it against the load snapshot by row index and writes
@@ -1699,6 +1781,80 @@ mod position_tests {
         );
         assert_eq!(resp["formula_cells_total"], json!(130));
         assert_eq!(resp["formula_cells_truncated"], json!(true));
+    }
+
+    fn rec(pairs: &[(&str, serde_json::Value)]) -> serde_json::Map<String, serde_json::Value> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn plan_new_columns_appends_after_last_header() {
+        let header = vec!["a".to_string(), "b".to_string()]; // A, B occupied → new at C (idx 2)
+        let new = vec![
+            rec(&[("a", json!(1)), ("b", json!(2)), ("Margen", json!("=C-D"))]),
+            rec(&[("a", json!(3)), ("b", json!(4)), ("Margen", json!("=C-D"))]),
+        ];
+        let plan = plan_new_columns(&header, &new, &idx(&[0, 1]));
+        assert_eq!(plan.added, vec![("Margen".to_string(), 2)]);
+        assert_eq!(
+            plan.cells,
+            vec![
+                PlannedCell { col_idx: 2, row: 1, raw: json!("Margen") },
+                PlannedCell { col_idx: 2, row: 2, raw: json!("=C-D") },
+                PlannedCell { col_idx: 2, row: 3, raw: json!("=C-D") },
+            ]
+        );
+    }
+
+    #[test]
+    fn plan_new_columns_multiple_get_consecutive_indices() {
+        let header = vec!["a".to_string()]; // A occupied → new at B(1), C(2)
+        let new = vec![rec(&[("a", json!(1)), ("x", json!(10)), ("y", json!(20))])];
+        let plan = plan_new_columns(&header, &new, &idx(&[0]));
+        assert_eq!(plan.added, vec![("x".to_string(), 1), ("y".to_string(), 2)]);
+    }
+
+    #[test]
+    fn plan_new_columns_ignores_existing_header_names() {
+        let header = vec!["a".to_string(), "b".to_string()];
+        let new = vec![rec(&[("a", json!(1)), ("b", json!(9))])]; // both already in header
+        let plan = plan_new_columns(&header, &new, &idx(&[0]));
+        assert!(plan.added.is_empty());
+        assert!(plan.cells.is_empty());
+    }
+
+    #[test]
+    fn plan_new_columns_skips_all_null_column() {
+        let header = vec!["a".to_string()];
+        let new = vec![
+            rec(&[("a", json!(1)), ("Empty", serde_json::Value::Null)]),
+            rec(&[("a", json!(2)), ("Empty", serde_json::Value::Null)]),
+        ];
+        let plan = plan_new_columns(&header, &new, &idx(&[0, 1]));
+        assert!(plan.added.is_empty(), "all-null column must not create an orphan header");
+        assert!(plan.cells.is_empty());
+    }
+
+    #[test]
+    fn plan_new_columns_uses_df_index_for_row_mapping() {
+        let header = vec!["a".to_string()]; // new col at B(1)
+        // df_index out of natural order: record 0 → sheet row 3, record 1 → row 2.
+        let new = vec![
+            rec(&[("a", json!(1)), ("m", json!("r3"))]),
+            rec(&[("a", json!(2)), ("m", json!("r2"))]),
+        ];
+        let plan = plan_new_columns(&header, &new, &idx(&[1, 0]));
+        assert_eq!(
+            plan.cells,
+            vec![
+                PlannedCell { col_idx: 1, row: 1, raw: json!("m") },
+                PlannedCell { col_idx: 1, row: 3, raw: json!("r3") },
+                PlannedCell { col_idx: 1, row: 2, raw: json!("r2") },
+            ]
+        );
     }
 }
 
