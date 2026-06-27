@@ -1,9 +1,9 @@
 ---
 name: gsheets-editing
-description: Use when WRITING or EDITING a Google Sheet with the gsheets tools — pick the right tool/mode for the edit (set_cell vs set_range vs run_python update_in_place/overwrite/new-tab), edit rows by a unique OR a non-unique key, and create + populate sheets. Covers the decision table, the duplicate-key pitfall, and 1-based row / column-letter rules. Load the reference for your scenario.
+description: Use when WRITING or EDITING a Google Sheet with the gsheets tools — pick the right tool/mode for the edit (set_cell vs set_range vs run_python update_by_position/update_in_place/overwrite/new-tab), edit rows with no unique key, write live formulas by column name ({{Column}}), and create + populate sheets. Covers the decision table and the duplicate-key pitfall. Load the reference for your scenario.
 references:
   - name: edit-rows
-    description: Edit existing rows that match a condition. By a UNIQUE key column → run_python + update_in_place. By a value that REPEATS (or by position) → run_python to find the 1-based row numbers, then gsheets_set_cell per cell. Worked pandas code for both, plus the duplicate-key failure and why overwrite is wrong here.
+    description: Edit existing rows that match a condition. Primary way → run_python + update_by_position (bind the WHOLE sheet, modify the df in place, return it whole; no unique key, no A1 math). update_in_place is the alternative when a column is truly UNIQUE. Also covers writing live formulas with {{Column}} placeholders and filling them down a column/condition/range. Worked pandas code, the full-df contract, and why overwrite / whole-column reassignment are wrong here.
   - name: create-and-populate
     description: Create new containers. New tab WITH data → name it in run_python output_sheets (creates + fills in one call). Empty tab → gsheets_add_sheet. Brand-new spreadsheet file → gsheets_create_spreadsheet then populate. Examples of each.
   - name: cell-and-range-writes
@@ -21,6 +21,7 @@ of the edit:
 | Set a few KNOWN cells (you know the A1 addresses) | `gsheets_set_cell` (one) / `gsheets_set_range` (contiguous block) | — |
 | **Edit existing rows matched by a condition (key unique OR not)** | `gsheets_run_python`: bind the whole sheet, modify the df **in place** (`df.loc[mask,'col']=...`), return the WHOLE df under `output_sheets` mode **`update_by_position`** | filtering the returned df; `reset_index`/`sort`+`reset_index`/`concat`; `overwrite` |
 | Edit rows by a **UNIQUE** key column (advanced/portable) | `gsheets_run_python` + `update_in_place` (`key` = that column) | — |
+| Put a **live formula** in cells (recalculates when inputs change) | `gsheets_run_python`: write `'={{ColA}}*{{ColB}}'` (column NAMES in double braces) to the target rows under `update_by_position`/`update_in_place` — the dispatcher fills the real A1 per row | computing column letters by hand inside the formula (off-by-one → `#VALUE!`) |
 | Create a NEW tab **with data** | `gsheets_run_python` with a NEW sheet name in `output_sheets` (creates + fills) | `add_sheet` then `set_range` (two steps) |
 | Create a new **empty** tab | `gsheets_add_sheet` | — |
 | Create a new **spreadsheet file** | `gsheets_create_spreadsheet`, then populate | — |
@@ -33,11 +34,15 @@ of the edit:
 - **`update_in_place` needs a UNIQUE key.** If the identifying value repeats
   across rows (line-items sharing one id), it fails. Fall back to finding row
   numbers in code → `gsheets_set_cell`. See the `edit-rows` reference.
-- **Row numbers are 1-based and the header is row 1.** A pandas row at
-  DataFrame index `i` (header excluded) is sheet row `i + 2`.
-- **Column letter = position in the header.** The Nth data column (0-based N)
-  maps to its A1 letter (col 0 → A, 18 → S, …). Derive it from the header you
-  read; don't guess.
+- **Prefer mechanisms that compute A1 for you.** `update_by_position` and the
+  `{{Column}}` formula placeholders resolve the row/column address in the
+  dispatcher — do NOT compute column letters or row numbers yourself for these.
+  Hand math is off-by-one whenever an empty/duplicate header column shifts the
+  positions (you land in the wrong column → `#VALUE!`).
+- **Only derive A1 for a KNOWN-address `set_cell`/`set_range`.** There, rows are
+  1-based (header is row 1, so DataFrame index `i` → sheet row `i + 2`) and the
+  column letter is the header position (col 0 → A, 18 → S, …) — read it, don't
+  guess.
 - **Writing to an existing tab fails by default** (collision policy) — only
   `update_in_place` patches in place. A bare DataFrame / `overwrite` replaces.
 - **Never `overwrite` to change a few cells** — it wipes everything else in the

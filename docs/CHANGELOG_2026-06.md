@@ -3084,3 +3084,54 @@ read-only intacto — el formato es write).
 **Estado.** done.
 
 ---
+
+## 50. gsheets — lecturas confiables en hojas grandes + escrituras en un turno + skill de edición — 2026-06-26 (PR #126)
+
+**Qué cambió.** Tres arreglos para que los agentes lean y escriban hojas grandes/sucias de forma confiable:
+- **Preview de truncado en `gsheets_read`.** Un read de markdown sobre-dimensionado ahora se acota por filas él mismo (`truncated`/`rows_shown`/`total_rows`) en vez de devolver 0 filas; el scrubber genérico de tool-results (`DagToolExecutor::head_truncate`) preserva el head en lugar de nukear todo el string.
+- **Inspect-and-run (Opción A).** `gsheets_run_python` ya no rechaza la primera llamada cuando no se inspeccionó la tabla: **ejecuta** el código y adjunta el preview de columnas (`inspected_sheets`/`inspection_note`). El contrato viejo de rechazar-y-reintentar fallaba con gemini-flash (narraba la intención y se iba vacío → la escritura no ocurría).
+- **Normalización de la clave del inspect-guard.** `sheet_key` (gsheets_inspect_guard.rs) ahora hace trim + saca comillas A1 + case-fold, así `hoja 16`→`Hoja 16` dentro de un mismo turno de ReAct ya no dispara el preview dos veces. La re-inspección entre turnos se conserva a propósito (por si la tabla cambió).
+
+**Skill `gsheets-editing`.** Tabla de decisión write/edit, auto-enrolada vía el gate `agent_has_gsheets_write_tools`. Bonus: el parser de frontmatter acepta `references:` como bare-string (arregló 2 skills pre-existentes rotas: `gsheets-table-exploration`, `crdt-doc-table-exploration`) + nuevo test `all_builtin_skills_parse_and_load`.
+
+**Hallazgo.** Los arreglos de código **solos** no alcanzaban para que gemini-flash completara una edición de filas sin clave única — necesitaba la estrategia (la skill/descripciones). Con ellas, flash lo completa desde un system message genérico. En prod, los agentes de escritura gsheets necesitan esa skill o un modelo más fuerte.
+
+**Referencias.** Spec [`docs/superpowers/specs/2026-06-15-gsheets-inspect-guard-design.md`](superpowers/specs/2026-06-15-gsheets-inspect-guard-design.md); dev guide [`docs/developer_guide/39_gsheets.md`](developer_guide/39_gsheets.md).
+
+**Estado.** done — mergeado a develop (merge `75f052d0`).
+
+---
+
+## 51. gsheets — modo de escritura `update_by_position` (editar filas sin clave ni A1) — 2026-06-26 (PR #127)
+
+**Qué cambió.** Nuevo modo en `output_sheets` de `gsheets_run_python`: **`update_by_position`**. El modelo bindea la hoja COMPLETA (sin `range`), modifica el df **in place** y devuelve el df ENTERO; el dispatcher (`gsheets_run_python.rs::do_update_by_position`) lo diffea contra el snapshot de carga por **índice de fila** y escribe solo las celdas cambiadas — **sin aritmética A1 del agente y sin clave única** (un id repetido es válido).
+
+**Por qué.** E2E en vivo probó que TANTO flash COMO gemini-2.5-pro cometen errores de off-by-one al calcular direcciones A1 a mano (flash erraba el offset de fila; pro la letra de columna → escribió Importe en Tarifa). El modo posicional saca ese cálculo del modelo.
+
+**Contrato de seguridad.** Exige índice == `{0..N-1}` (rechaza subset / `reset_index` / `concat` con error claro, porque mapearían filas a posiciones equivocadas). Reusa `diff_records` vía una clave sintética `__index__`; `sheet_row = idx + 2`; la columna sale del header posicional crudo (lee `Some("1:1")` — `do_update_in_place` usaba `"A1:Z1"`, capado a 26 columnas). Columnas con header vacío/duplicado no son direccionables → `skipped_columns`.
+
+**Referencias.** Plan [`docs/superpowers/plans/2026-06-26-gsheets-positional-write-back.md`](superpowers/plans/2026-06-26-gsheets-positional-write-back.md); dev guide [`docs/developer_guide/39_gsheets.md`](developer_guide/39_gsheets.md).
+
+**Estado.** done — mergeado a develop (merge `13c0302a`).
+
+---
+
+## 52. gsheets — placeholders de fórmula por nombre de columna `{{Column}}` + fill multi-fila — 2026-06-26 (PR #128)
+
+**Qué cambió.** El modelo escribe fórmulas referenciando columnas por **nombre** en doble llave (`df.loc[mask,'Importe'] = '={{Cantidad}}*{{Tarifa}}'`); el dispatcher sustituye el A1 real de la **misma fila** desde el header posicional (`=S5*U5`). Resuelve **por celda**, así asignar a una columna / condición / rango rellena la fórmula hacia abajo con las refs de cada fila. Funciona en **todos** los modos de escritura (`replace`/crear, `overwrite`, `update_by_position`, `update_in_place`).
+
+**Por qué.** Incluso gemini-2.5-pro erra el A1 DENTRO de una fórmula (deriva la letra de `df.columns`, que descarta columnas de header vacío → `=R5*T5` → `#VALUE!` silencioso). `update_by_position` ubicaba bien la celda pero no podía arreglar las refs adentro del string opaco. Esto mueve esa aritmética del modelo al dispatcher.
+
+**Detalles.**
+- `resolve_formula_placeholders` + `FormulaResolveError`: columna desconocida → error estructurado `FormulaUnknownColumn` (lista columnas válidas), **aborta antes de escribir** (sin escrituras parciales).
+- `formula_cells` en el resultado (+ `formula_cells_total`/`formula_cells_truncated` pasadas las 50 de muestra) para que el modelo reporte lo que realmente escribió en vez de recalcular A1 — el reporte hecho a mano miente aun cuando la escritura fue correcta (medido: con el antipatrón ❌/✅ en la descripción, hasta flash cita `formula_cells`).
+- Fix de review: `do_update_in_place` leía el header como `A1:Z1` (capado en Z) → descartaba en silencio ediciones a columnas más allá de Z; ensanchado a `1:1`.
+- MVP = refs de fila actual; agregados como `=SUM(...)` siguen necesitando rango A1 literal.
+
+**Docs.** `text/tools/gsheets.yaml` + skill `gsheets-editing` (fill por condición como patrón preferido). Harness: `EXP_RENDER=formula`, `EXP_GENERIC`.
+
+**Referencias.** Plan [`docs/superpowers/plans/2026-06-26-gsheets-formula-column-placeholders.md`](superpowers/plans/2026-06-26-gsheets-formula-column-placeholders.md); dev guide [`docs/developer_guide/39_gsheets.md`](developer_guide/39_gsheets.md).
+
+**Estado.** done — mergeado a develop (merge `f8c17d91`).
+
+---

@@ -127,6 +127,10 @@ output_sheets = {
 output_sheets = {'Sales': {'mode': 'overwrite', 'df': df}}
 ```
 
+**Solo en `gsheets` (no en CRDT, 2026-06-26):** dos extensiones viven únicamente en `gsheets_run_python`:
+- **Modo 4 `update_by_position`** — edita filas existentes sin clave única ni A1: bindeás la hoja COMPLETA, modificás el df in place y devolvés el df entero; el dispatcher diffea por **índice de fila**. Ver §39 "Write safety".
+- **Placeholders de fórmula `{{Column}}`** — `df.loc[mask,'Importe'] = '={{Cantidad}}*{{Tarifa}}'` → el dispatcher sustituye el A1 real de la misma fila. Funciona en todos los modos de escritura de gsheets. Ver §39 "Formulas".
+
 La **collision policy** (default `fail` → devuelve `SheetExists` con metadata + advice + valid_next_moves) también es idéntica. Se configura via `fixed_config.on_existing_sheet` (valores: `fail` / `auto_suffix` / `overwrite`). Detalles completos en [`docs/developer_guide/39_gsheets.md`](39_gsheets.md) sección "Write safety".
 
 **¿Por qué shared?** El módulo `diff_writer.rs` calcula el diff (pure JSON records), y cada dispatcher aplica los cell changes via su backend:
