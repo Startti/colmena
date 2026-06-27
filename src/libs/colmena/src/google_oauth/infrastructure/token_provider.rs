@@ -58,6 +58,16 @@ impl OAuthRefreshTokenProvider {
         }
     }
 
+    /// Build a provider whose refresh client targets a custom token endpoint.
+    /// Used by the http_request node's native OAuth (any provider via token_url).
+    pub fn with_endpoint(creds: OAuthCredentials, token_url: &str) -> Self {
+        Self {
+            creds,
+            refresh_client: RefreshClient::with_endpoint(token_url),
+            cache: Arc::new(Mutex::new(None)),
+        }
+    }
+
     /// Test constructor — accepts a custom `RefreshClient` (typically
     /// pointed at wiremock).
     #[cfg(test)]
@@ -145,6 +155,23 @@ mod tests {
 
     fn creds() -> OAuthCredentials {
         OAuthCredentials::for_tests("CID", "CSEC", "RT")
+    }
+
+    #[tokio::test]
+    async fn with_endpoint_mints_against_custom_url() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"{"access_token":"ya29.viaprovider","expires_in":3600,"token_type":"Bearer"}"#,
+            ))
+            .mount(&server)
+            .await;
+        let creds = OAuthCredentials::for_tests("cid", "csec", "rt");
+        let provider = OAuthRefreshTokenProvider::with_endpoint(creds, &server.uri());
+        let token = provider.get_bearer_token().await.expect("token ok");
+        assert_eq!(token.as_str(), "ya29.viaprovider");
     }
 
     /// First call has an empty cache → triggers a refresh and stores
