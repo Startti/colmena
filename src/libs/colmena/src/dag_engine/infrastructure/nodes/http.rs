@@ -573,10 +573,28 @@ impl HttpNode {
                 req = req.header(k, v_resolved);
             }
         }
-        if let Some(token) = inputs.get("bearer_token").and_then(|v| v.as_str()) {
+        // Auth: read from `inputs` first (priority), then `config` fallback;
+        // resolve `${ENV_VAR}` so a fixed `bearer_token` in `config` works.
+        if let Some(token) = inputs
+            .get("bearer_token")
+            .and_then(|v| v.as_str())
+            .or_else(|| config.get("bearer_token").and_then(|v| v.as_str()))
+        {
+            let token = Self::resolve_env_vars(token).map_err(|e| {
+                Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
+                    as Box<dyn StdError + Send + Sync>
+            })?;
             req = req.header("Authorization", format!("Bearer {token}"));
         }
-        if let Some(auth) = inputs.get("authorization").and_then(|v| v.as_str()) {
+        if let Some(auth) = inputs
+            .get("authorization")
+            .and_then(|v| v.as_str())
+            .or_else(|| config.get("authorization").and_then(|v| v.as_str()))
+        {
+            let auth = Self::resolve_env_vars(auth).map_err(|e| {
+                Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
+                    as Box<dyn StdError + Send + Sync>
+            })?;
             req = req.header("Authorization", auth);
         }
 
@@ -803,11 +821,29 @@ impl ExecutableNode for HttpNode {
             }
         }
 
-        // Handle specific auth inputs
-        if let Some(token) = inputs.get("bearer_token").and_then(|v| v.as_str()) {
+        // Handle specific auth inputs. Read from `inputs` first (priority), then
+        // fall back to `config` so delivered graphs can fix the token in `config`.
+        // Values support `${ENV_VAR}` resolution (e.g. `${HUBSPOT_PRIVATE_APP_TOKEN}`).
+        if let Some(token) = inputs
+            .get("bearer_token")
+            .and_then(|v| v.as_str())
+            .or_else(|| config.get("bearer_token").and_then(|v| v.as_str()))
+        {
+            let token = Self::resolve_env_vars(token).map_err(|e| {
+                Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
+                    as Box<dyn StdError + Send + Sync>
+            })?;
             request_builder = request_builder.header("Authorization", format!("Bearer {}", token));
         }
-        if let Some(auth) = inputs.get("authorization").and_then(|v| v.as_str()) {
+        if let Some(auth) = inputs
+            .get("authorization")
+            .and_then(|v| v.as_str())
+            .or_else(|| config.get("authorization").and_then(|v| v.as_str()))
+        {
+            let auth = Self::resolve_env_vars(auth).map_err(|e| {
+                Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
+                    as Box<dyn StdError + Send + Sync>
+            })?;
             request_builder = request_builder.header("Authorization", auth);
         }
 
@@ -1172,6 +1208,45 @@ mod attachment_placeholder_tests {
             .await
             .expect("nested placeholder ok");
         assert_eq!(out["status"], 200);
+    }
+
+    #[tokio::test]
+    async fn bearer_token_from_config_is_env_resolved_into_authorization_header() {
+        use wiremock::matchers::header;
+
+        // Set a unique env var so resolution is observable in the Authorization header.
+        std::env::set_var("HTTP_NODE_TEST_TOKEN", "secret-abc-123");
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/me"))
+            .and(header("authorization", "Bearer secret-abc-123"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": true })),
+            )
+            .mount(&server)
+            .await;
+
+        let node = HttpNode::new();
+        // bearer_token lives in `config` (delivered-graph shape) with a ${ENV} ref.
+        let config = serde_json::json!({
+            "base_url": server.uri(),
+            "endpoint": "/me",
+            "method": "GET",
+            "bearer_token": "${HTTP_NODE_TEST_TOKEN}"
+        });
+        let out = node
+            .execute(
+                &HashMap::<String, Value>::new(),
+                &config,
+                &mut serde_json::json!({}),
+                None,
+            )
+            .await
+            .expect("config bearer_token resolved + auth header sent");
+        assert_eq!(out["status"], 200);
+
+        std::env::remove_var("HTTP_NODE_TEST_TOKEN");
     }
 }
 
