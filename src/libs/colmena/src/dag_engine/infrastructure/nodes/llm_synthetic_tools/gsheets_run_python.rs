@@ -1239,8 +1239,11 @@ async fn do_update_by_position(
         .iter()
         .map(|(name, i)| serde_json::json!({ "name": name, "column": col_letter(*i) }))
         .collect();
-    let new_column_names: Vec<String> =
-        new_plan.added.iter().map(|(name, _)| name.clone()).collect();
+    let new_column_names: Vec<String> = new_plan
+        .added
+        .iter()
+        .map(|(name, _)| name.clone())
+        .collect();
     if !new_plan.cells.is_empty() {
         let mut resolvable = col_to_index.clone();
         for (name, i) in &new_plan.added {
@@ -1253,7 +1256,10 @@ async fn do_update_by_position(
             };
             let addr = a1_addr(pc.col_idx, pc.row);
             formula_log.record(&addr, &resolved);
-            cell_updates.push((addr, crate::gsheets::domain::CellValue::from_json(&resolved)));
+            cell_updates.push((
+                addr,
+                crate::gsheets::domain::CellValue::from_json(&resolved),
+            ));
         }
     }
 
@@ -1834,9 +1840,21 @@ mod position_tests {
         assert_eq!(
             plan.cells,
             vec![
-                PlannedCell { col_idx: 2, row: 1, raw: json!("Margen") },
-                PlannedCell { col_idx: 2, row: 2, raw: json!("=C-D") },
-                PlannedCell { col_idx: 2, row: 3, raw: json!("=C-D") },
+                PlannedCell {
+                    col_idx: 2,
+                    row: 1,
+                    raw: json!("Margen")
+                },
+                PlannedCell {
+                    col_idx: 2,
+                    row: 2,
+                    raw: json!("=C-D")
+                },
+                PlannedCell {
+                    col_idx: 2,
+                    row: 3,
+                    raw: json!("=C-D")
+                },
             ]
         );
     }
@@ -1866,14 +1884,17 @@ mod position_tests {
             rec(&[("a", json!(2)), ("Empty", serde_json::Value::Null)]),
         ];
         let plan = plan_new_columns(&header, &new, &idx(&[0, 1]));
-        assert!(plan.added.is_empty(), "all-null column must not create an orphan header");
+        assert!(
+            plan.added.is_empty(),
+            "all-null column must not create an orphan header"
+        );
         assert!(plan.cells.is_empty());
     }
 
     #[test]
     fn plan_new_columns_uses_df_index_for_row_mapping() {
         let header = vec!["a".to_string()]; // new col at B(1)
-        // df_index out of natural order: record 0 → sheet row 3, record 1 → row 2.
+                                            // df_index out of natural order: record 0 → sheet row 3, record 1 → row 2.
         let new = vec![
             rec(&[("a", json!(1)), ("m", json!("r3"))]),
             rec(&[("a", json!(2)), ("m", json!("r2"))]),
@@ -1882,9 +1903,21 @@ mod position_tests {
         assert_eq!(
             plan.cells,
             vec![
-                PlannedCell { col_idx: 1, row: 1, raw: json!("m") },
-                PlannedCell { col_idx: 1, row: 3, raw: json!("r3") },
-                PlannedCell { col_idx: 1, row: 2, raw: json!("r2") },
+                PlannedCell {
+                    col_idx: 1,
+                    row: 1,
+                    raw: json!("m")
+                },
+                PlannedCell {
+                    col_idx: 1,
+                    row: 3,
+                    raw: json!("r3")
+                },
+                PlannedCell {
+                    col_idx: 1,
+                    row: 2,
+                    raw: json!("r2")
+                },
             ]
         );
     }
