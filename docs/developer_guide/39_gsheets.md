@@ -353,7 +353,7 @@ Source: `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tool
 |---|---|---|
 | `replace` (default) | Create a brand-new tab | Full DataFrame; collision policy applies if tab exists |
 | `update_in_place` | Patch existing rows by a UNIQUE key column | Cell-level diff via single `batchUpdate` — only changed cells |
-| `update_by_position` | Edit existing rows with NO unique key and NO A1 math | Whole-sheet bind, modify df in place, return it whole; cell-level diff by row **index** via single `batchUpdate` |
+| `update_by_position` | Edit existing rows with NO unique key and NO A1 math; also **append new columns** | Whole-sheet bind, modify df in place, return it whole; cell-level diff by row **index** via single `batchUpdate`; df columns absent from the header are appended (header + values) and reported in `added_columns` |
 | `overwrite` | Replace an existing tab entirely | Full DataFrame; schema-change guard rejects unless `allow_schema_change: true` |
 
 ### Example — `update_in_place` (the one that saves cells)
@@ -399,6 +399,25 @@ df, modified in place); a filtered subset / `reset_index` /
 would silently map rows to the wrong sheet positions. Columns whose header
 name is empty or duplicated can't be addressed and are reported in
 `skipped_columns`.
+
+**Adding a new column (shipped 2026-06-26, PR #130).** Assigning a column
+that does NOT exist in the sheet header appends it after the last column —
+the header cell and the values are written in the **same atomic
+`batchUpdate`**, and the result reports `added_columns: [{name, column}]`
+(e.g. `{"name": "Margen", "column": "H"}`). Formulas resolve `{{Name}}`
+against existing **and** newly-added columns, so a new column can reference
+another:
+
+```python
+df = pd.DataFrame(products)                       # whole-sheet binding
+df['Margen'] = '={{price}}-{{cost}}'             # column NOT in the header → appended
+output_sheets = {'products': {'mode': 'update_by_position', 'df': df}}
+# → changes.columns includes "Margen"; added_columns: [{"name":"Margen","column":"H"}]
+```
+
+A new column whose values are entirely null is ignored (no orphan header).
+New **rows** are still not added — this mode edits/extends existing rows
+only. (Previously such a column was silently dropped with `cells: 0`.)
 
 ### Collision policy
 
