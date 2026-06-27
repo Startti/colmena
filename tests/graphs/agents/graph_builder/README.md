@@ -50,6 +50,7 @@ El agente nunca te pide términos técnicos; razona en estas capacidades:
 - Que una IA responda, escriba, resuma o transforme texto.
 - Buscar información en internet.
 - Traer datos de un servicio o API externa.
+- Conectar con una API externa desde su documentación (URL).
 - Pausar para pedirte un dato o una decisión.
 - Crear o editar una imagen.
 - Generar audio o voz a partir de texto.
@@ -71,6 +72,48 @@ El agente nunca te pide términos técnicos; razona en estas capacidades:
 
 Antes de probar grafos con efectos reales (escribir en una API/base de datos, enviar
 mensajes), el agente **avisa y pide confirmación**.
+
+## Conectar con una API (ej. HubSpot)
+
+El builder puede construir un agente que hable con una API externa partiendo de su
+documentación. El flujo es así:
+
+1. **Le pasás la URL de la documentación** de la API en el chat (por ejemplo, la doc
+   pública de HubSpot). El builder la lee para entender la dirección base, cómo se
+   autentica y qué operaciones sirven para lo que querés.
+
+2. **Te pide el token de forma segura.** El builder usa la herramienta `ask_secret`,
+   así que **la corrida se PAUSA** y nunca ve tu clave real (queda guardada de forma
+   segura). Vos respondés el token con un `POST` a
+   **`http://localhost:3000/resume`** — usando el **mismo header `x-agent-session-id`** —
+   y **NUNCA como un mensaje de chat normal**. El `session_id` que va en el body es el
+   que devuelve la pausa (lo trae la respuesta de la pausa, junto con el id del secreto):
+
+   ```bash
+   curl -s -X POST http://localhost:3000/resume \
+     -H "Content-Type: application/json" \
+     -H "x-agent-session-id: mi_charla_001" \
+     -d '{"session_id":"<id-de-la-pausa>","answer":"Q[<secret_id>]: ...\nA[<secret_id>]: <tu-token>"}'
+   ```
+
+   (Reemplazá `<id-de-la-pausa>`, `<secret_id>` y `<tu-token>` por los valores reales;
+   no pongas tu token de verdad en ningún archivo que se vaya a versionar.)
+
+3. **Prueba solo lectura por defecto.** El builder ejerce operaciones de lectura para
+   verificar que funciona. Antes de probar una operación de **escritura** (crear, editar,
+   borrar o enviar — por ejemplo, crear un contacto), **avisa y pide confirmación**, y usa
+   datos de prueba inocuos.
+
+4. **El grafo ENTREGADO autentica con `${HUBSPOT_PRIVATE_APP_TOKEN}`** (una variable de
+   entorno), no con el secreto de la prueba. Tenés que **setear esa variable en el host
+   que vaya a correr el agente** antes de usarlo de verdad.
+
+**Variables de entorno necesarias para este flujo:**
+
+- `OPENAI_API_KEY` — el agente generado para APIs externas usa OpenAI (`gpt-4o`).
+- `SECURE_VALUES_KEY` — para que `ask_secret` pueda guardar el token de forma segura.
+- `DATABASE_URL` — Postgres, para la memoria conversacional y el estado de la pausa.
+- `TAVILY_API_KEY` (opcional) — para que el builder lea la documentación con `leer_web`.
 
 ## Limitaciones conocidas y backlog
 
