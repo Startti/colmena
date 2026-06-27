@@ -1230,6 +1230,33 @@ async fn do_update_by_position(
         ));
     }
 
+    // Append columns present in the returned df but absent from the sheet header.
+    // They get the next free column indices; their formulas may reference other
+    // new columns, so resolve against existing + new positions.
+    let new_plan = plan_new_columns(&header_cols, &new_records, &df_index);
+    let added_columns: Vec<serde_json::Value> = new_plan
+        .added
+        .iter()
+        .map(|(name, i)| serde_json::json!({ "name": name, "column": col_letter(*i) }))
+        .collect();
+    let new_column_names: Vec<String> =
+        new_plan.added.iter().map(|(name, _)| name.clone()).collect();
+    if !new_plan.cells.is_empty() {
+        let mut resolvable = col_to_index.clone();
+        for (name, i) in &new_plan.added {
+            resolvable.insert(name.clone(), *i);
+        }
+        for pc in &new_plan.cells {
+            let resolved = match resolve_formula_placeholders(&pc.raw, &resolvable, pc.row) {
+                Ok(v) => v,
+                Err(e) => return e.to_json(raw_name),
+            };
+            let addr = a1_addr(pc.col_idx, pc.row);
+            formula_log.record(&addr, &resolved);
+            cell_updates.push((addr, crate::gsheets::domain::CellValue::from_json(&resolved)));
+        }
+    }
+
     let cells = cell_updates.len();
     if cells == 0 {
         return serde_json::json!({
@@ -1243,11 +1270,16 @@ async fn do_update_by_position(
         .await
     {
         Ok(_) => {
+            let mut columns_touched = diff.columns_touched.clone();
+            columns_touched.extend(new_column_names.iter().cloned());
             let mut resp = serde_json::json!({
                 "tab": raw_name, "mode": "update_by_position",
-                "changes": {"rows": diff.rows_changed, "cells": cells, "columns": diff.columns_touched},
+                "changes": {"rows": diff.rows_changed, "cells": cells, "columns": columns_touched},
                 "skipped_columns": skipped_columns,
             });
+            if !added_columns.is_empty() {
+                resp["added_columns"] = serde_json::Value::Array(added_columns.clone());
+            }
             formula_log.attach(&mut resp);
             resp
         }
