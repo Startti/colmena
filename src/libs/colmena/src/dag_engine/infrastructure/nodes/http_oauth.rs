@@ -4,7 +4,11 @@
 //! the LLM's `inputs`.
 
 use crate::dag_engine::domain::node::NodeInputs;
+use crate::google_oauth::domain::AuthTokenProvider;
+use crate::google_oauth::infrastructure::OAuthRefreshTokenProvider;
 use serde_json::Value;
+use std::error::Error as StdError;
+use std::sync::Arc;
 
 /// Resolved OAuth2 refresh-token auth, all `${ENV}` still unexpanded
 /// (the caller resolves env vars before use).
@@ -86,6 +90,39 @@ pub fn parse_oauth_auth(
     }))
 }
 
+/// Send `builder` (which must NOT already carry an Authorization header)
+/// with a fresh Bearer from `provider`. On HTTP 401, invalidate the cached
+/// token, mint a new one, and retry exactly once. 403/429/etc. pass through.
+pub async fn send_with_oauth_retry(
+    builder: reqwest::RequestBuilder,
+    provider: Arc<OAuthRefreshTokenProvider>,
+) -> Result<reqwest::Response, Box<dyn StdError + Send + Sync>> {
+    let token = provider.get_bearer_token().await.map_err(|e| {
+        Box::new(std::io::Error::other(format!("OAuth: {e}"))) as Box<dyn StdError + Send + Sync>
+    })?;
+
+    let first = builder
+        .try_clone()
+        .ok_or_else(|| {
+            Box::new(std::io::Error::other(
+                "http_request: OAuth requires a cloneable request (no streaming body)",
+            )) as Box<dyn StdError + Send + Sync>
+        })?
+        .header("Authorization", format!("Bearer {}", token.as_str()));
+    let resp = first.send().await?;
+
+    if resp.status().as_u16() == 401 {
+        provider.invalidate_cache().await;
+        let token2 = provider.get_bearer_token().await.map_err(|e| {
+            Box::new(std::io::Error::other(format!("OAuth (retry): {e}")))
+                as Box<dyn StdError + Send + Sync>
+        })?;
+        let second = builder.header("Authorization", format!("Bearer {}", token2.as_str()));
+        return Ok(second.send().await?);
+    }
+    Ok(resp)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -150,5 +187,50 @@ mod tests {
         let c = json!({ "auth": { "type": "client_credentials" } });
         let err = parse_oauth_auth(&c, &Default::default()).expect_err("unknown type v1");
         assert!(err.contains("oauth2_refresh_token"));
+    }
+
+    #[tokio::test]
+    async fn retries_once_on_401_with_fresh_token() {
+        use crate::google_oauth::infrastructure::OAuthProviderCache;
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let token_srv = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"{"access_token":"TOKEN_A","expires_in":3600,"token_type":"Bearer"}"#,
+            ))
+            .up_to_n_times(1)
+            .with_priority(1)
+            .mount(&token_srv)
+            .await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"{"access_token":"TOKEN_B","expires_in":3600,"token_type":"Bearer"}"#,
+            ))
+            .with_priority(2)
+            .mount(&token_srv)
+            .await;
+
+        let api = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/x"))
+            .and(header("Authorization", "Bearer TOKEN_A"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&api)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/x"))
+            .and(header("Authorization", "Bearer TOKEN_B"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("ok"))
+            .mount(&api)
+            .await;
+
+        let cache = OAuthProviderCache::new();
+        let provider = cache.get_or_create(&token_srv.uri(), "cid", "csec", "rt");
+        let client = reqwest::Client::builder().http1_only().build().unwrap();
+        let builder = client.get(format!("{}/x", api.uri()));
+        let resp = send_with_oauth_retry(builder, provider).await.expect("ok");
+        assert_eq!(resp.status().as_u16(), 200);
     }
 }
