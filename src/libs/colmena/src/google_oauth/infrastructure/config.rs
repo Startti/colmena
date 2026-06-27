@@ -66,15 +66,26 @@ impl OAuthCredentials {
         })
     }
 
+    /// Build credentials directly from config-supplied strings (used by the
+    /// http_request node's native OAuth, where creds come from the graph
+    /// config rather than env vars).
+    pub fn new(
+        client_id: impl Into<String>,
+        client_secret: impl Into<String>,
+        refresh_token: impl Into<String>,
+    ) -> Self {
+        Self {
+            client_id: client_id.into(),
+            client_secret: client_secret.into(),
+            refresh_token: RefreshTokenSecret::new(refresh_token),
+        }
+    }
+
     /// Test-only direct constructor — bypasses env reads so wiremock
     /// suites can preseed deterministic credentials.
     #[cfg(test)]
     pub fn for_tests(client_id: &str, client_secret: &str, refresh_token: &str) -> Self {
-        Self {
-            client_id: client_id.to_string(),
-            client_secret: client_secret.to_string(),
-            refresh_token: RefreshTokenSecret::new(refresh_token),
-        }
+        Self::new(client_id, client_secret, refresh_token)
     }
 }
 
@@ -99,6 +110,14 @@ mod tests {
 
     use super::*;
     use serial_test::serial;
+
+    #[test]
+    fn new_builds_credentials_directly() {
+        let creds = OAuthCredentials::new("cid", "csec", "1//rt");
+        assert_eq!(creds.client_id, "cid");
+        assert_eq!(creds.client_secret, "csec");
+        assert_eq!(creds.refresh_token.expose(), "1//rt");
+    }
 
     const CID: &str = "COLMENA_GOOGLE_OAUTH_CLIENT_ID";
     const CSEC: &str = "COLMENA_GOOGLE_OAUTH_CLIENT_SECRET";
