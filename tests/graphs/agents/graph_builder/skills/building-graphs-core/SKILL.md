@@ -45,11 +45,17 @@ y adaptarlos.
 
 ## 2. Aristas y puertos
 
-> **REGLA DURA v1.1 — las aristas son SIEMPRE peladas.** Toda arista se escribe
-> `{ "from": "A", "to": "B" }`, usando solo ids de nodo. **NUNCA** se escribe la
-> forma punteada `nodo.campo` en `from`/`to` (un punto seguido de un nombre de campo
-> dentro del id está PROHIBIDO). La selección de campos **no** va en la arista: va dentro del `config`
-> del nodo (con `{{templates}}` en `llm_call`) o en un adaptador `python_script`.
+> **REGLA — las aristas son PELADAS por defecto, con UNA excepción: los routers.**
+> Toda arista normal se escribe `{ "from": "A", "to": "B" }`, usando solo ids de
+> nodo. La selección de campos **no** va en la arista: va dentro del `config` del
+> nodo (con `{{templates}}` en `llm_call`) o en un adaptador `python_script`.
+>
+> **La ÚNICA excepción son los puertos de rama de un `router`.** Cuando ramificás el
+> flujo con un router, las aristas de sus ramas DEBEN ir punteadas — `router.<rama>`,
+> `router.input` y opcionalmente `router.__decision` — porque el motor rutea por
+> nombre de puerto: solo la rama elegida emite payload, las demás emiten `null`. Una
+> arista pelada desde un router haría disparar TODAS las ramas a la vez. Fuera de los
+> routers, la forma punteada `nodo.campo` NO se usa.
 
 Una arista pelada mueve datos del **puerto de salida por defecto** de `A` al
 **puerto de entrada por defecto** de `B`. El motor resuelve los puertos solo:
@@ -86,6 +92,16 @@ referencian sus inputs inmediatos:
 **Regla práctica:** ¿Querés un campo específico? No toques la arista — leelo con
 `{{campo}}` en el `config` del `llm_call`, o usá un adaptador `python_script`
 (sección 3).
+
+### Routers (ramificar el flujo) — la excepción punteada
+
+Cuando el flujo tiene que desviarse por caminos distintos según el caso (ventas por
+un lado, soporte por otro), usás un nodo `router`. Es el único nodo cuyas aristas van
+punteadas: alimentás el router con una arista pelada (`{ "from": "trigger", "to":
+"router" }`, que entra por `router.input`) y conectás **cada rama por su nombre**
+(`{ "from": "router.<rama>", "to": "<destino>" }`). Opcionalmente leés la decisión
+con un edge `router.__decision`. El ejemplo completo y los modos del router están en
+[[capability-code-and-logic]].
 
 ---
 
@@ -344,9 +360,12 @@ se activa con `session_id` + `connection_url` (Postgres).
 2. **Una arista apunta a un id que no existe.** El `from` y el `to` deben referenciar
    ids de nodos que estén realmente en `nodes`. Un typo (`"agnet"` en vez de `"agent"`)
    hace fallar el grafo.
-3. **Arista punteada (`nodo.campo`).** PROHIBIDO. Las aristas son siempre peladas
-   (`{ "from": "A", "to": "B" }`). Para tomar un campo, leelo con `{{campo}}` en el
-   `config` del `llm_call`, o usá un adaptador `python_script` (sección 3).
+3. **Arista punteada (`nodo.campo`).** Por defecto las aristas son peladas
+   (`{ "from": "A", "to": "B" }`); para tomar un campo, leelo con `{{campo}}` en el
+   `config` del `llm_call`, o usá un adaptador `python_script` (sección 3). **La
+   única excepción son los puertos de rama de un `router`** (`router.<rama>`,
+   `router.input`, `router.__decision`): ahí el punteado es OBLIGATORIO para que el
+   ruteo funcione (ver sección 2 y [[capability-code-and-logic]]).
 4. **El `node_type` de una herramienta debe ser un tipo de nodo real registrado.**
    En `tool_configurations`, `node_type` tiene que ser un nodo que existe de verdad
    (`http_request`, `sql_query`, `subgraph`, `current_time`, etc.), no un placeholder
