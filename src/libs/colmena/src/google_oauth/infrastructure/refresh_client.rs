@@ -56,6 +56,20 @@ impl RefreshClient {
         }
     }
 
+    /// Production constructor pointing at a custom OAuth2 token endpoint.
+    /// Used by the http_request node's native OAuth to support any provider
+    /// (not just Google). Same timeouts/retries as `new()`.
+    pub fn with_endpoint(endpoint: &str) -> Self {
+        Self {
+            http: reqwest::Client::builder()
+                .timeout(Duration::from_secs(15))
+                .build()
+                .expect("reqwest builder should not fail with default opts"),
+            endpoint: endpoint.to_string(),
+            retry_delays: PRODUCTION_RETRY_DELAYS.to_vec(),
+        }
+    }
+
     /// Test constructor: point at a wiremock URL and use near-zero
     /// retry delays so `retries_exhausted` tests finish in milliseconds.
     #[cfg(test)]
@@ -205,6 +219,23 @@ mod tests {
 
     fn creds() -> OAuthCredentials {
         OAuthCredentials::for_tests("CLIENT_ID_FOO", "CLIENT_SECRET_BAR", "RT_VALUE")
+    }
+
+    #[tokio::test]
+    async fn with_endpoint_targets_custom_url() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"{"access_token":"ya29.custom","expires_in":3600,"token_type":"Bearer"}"#,
+            ))
+            .mount(&server)
+            .await;
+        let client = RefreshClient::with_endpoint(&server.uri());
+        let creds = OAuthCredentials::for_tests("cid", "csec", "rt");
+        let resp = client.refresh(&creds).await.expect("refresh ok");
+        assert_eq!(resp.access_token.as_str(), "ya29.custom");
     }
 
     #[tokio::test]
