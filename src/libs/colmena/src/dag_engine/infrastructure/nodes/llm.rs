@@ -17,9 +17,9 @@ use crate::dag_engine::application::ports::NodeRegistryPort;
 use crate::dag_engine::infrastructure::dag_tool_executor::DagToolExecutor;
 use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::{
     build_all_crdt_doc_tools, build_all_document_tools, build_describe_tool_definition,
-    build_load_skill_tool_definition, reconstruct_discovered_set, summary_for_catalog,
-    CatalogEntry, CrdtDocsContext, DescribeToolDispatchResult, DocumentToolsContext,
-    ATTACHMENTS_SYSTEM_PRELUDE, DOCUMENTS_SYSTEM_PRELUDE,
+    build_load_skill_tool_definition, current_turn_slice, reconstruct_discovered_set,
+    summary_for_catalog, CatalogEntry, CrdtDocsContext, DescribeToolDispatchResult,
+    DocumentToolsContext, ATTACHMENTS_SYSTEM_PRELUDE, DOCUMENTS_SYSTEM_PRELUDE,
 };
 use crate::documents::application::DocumentRuntime;
 use crate::documents::domain::ids::SessionId as DocSessionId;
@@ -2980,6 +2980,21 @@ impl ExecutableNode for LlmNode {
                         tool_names.iter().map(|t| t.trim_start_matches("- ")).collect::<Vec<_>>().join(", ")
                     ));
                 }
+                // Lazy workflow note (only when there are cataloged tools): make the
+                // describe-before-use contract explicit so the model doesn't mistake
+                // the guard's schema-redirect for a real result.
+                if lazy_tool_loading && !catalog.is_empty() {
+                    sections.push(
+                        "## Lazy tools (load before use)\n\
+                         Some tools load on demand (see `describe_tool`). Workflow: (1) call \
+                         `describe_tool(name)` to load a tool's schema, then (2) call the tool. \
+                         Discovery is PER TURN — re-describe a tool the first time you use it in a \
+                         new turn. If you call a tool WITHOUT describing it first this turn, you \
+                         will NOT get a result: you'll get its schema back as a redirect — read it \
+                         and call the tool again with arguments that match it."
+                            .to_string(),
+                    );
+                }
             }
             if !sections.is_empty() {
                 messages.push(LlmMessage::system(sections.join("\n\n---\n"))?);
@@ -3083,7 +3098,13 @@ impl ExecutableNode for LlmNode {
                 let static_snapshot = tools.clone();
                 Some(Box::new(
                     move |messages: &[crate::llm::domain::LlmMessage]| {
-                        let discovered = reconstruct_discovered_set(messages, &catalog);
+                        // Per-turn discovery: only count describe_tool / direct
+                        // calls from the CURRENT user-turn, so each new turn
+                        // re-forces describe-before-use (mirrors gsheets inspect
+                        // guard). Guidance is thus always fresh, never stale from
+                        // history compaction.
+                        let discovered =
+                            reconstruct_discovered_set(current_turn_slice(messages), &catalog);
                         let pending: Vec<&CatalogEntry> = catalog
                             .iter()
                             .filter(|e| !discovered.contains(&e.name))
@@ -3119,6 +3140,15 @@ impl ExecutableNode for LlmNode {
                 None
             };
 
+        // Lazy describe-before-use guard: pass the catalog tool-names so the
+        // agent loop can redirect a call to a tool not loaded this turn. Only
+        // when lazy is on (eager agents get `None` → no guard).
+        let lazy_catalog_names: Option<std::collections::HashSet<String>> = if lazy_tool_loading {
+            Some(catalog.iter().map(|e| e.name.clone()).collect())
+        } else {
+            None
+        };
+
         // Create AgentService parameters. On resume, the user prompt is `None`
         // and `messages` is `None`: agent_service will load the just-persisted
         // tool message (added in the resume block above) from history and
@@ -3145,6 +3175,7 @@ impl ExecutableNode for LlmNode {
                         as std::sync::Arc<dyn crate::llm::application::LoadAttachmentResolver>
                 }),
                 agent_session_id: agent_session_id_str.clone(),
+                lazy_catalog_names: lazy_catalog_names.clone(),
             }
         } else {
             crate::llm::application::AgentRunParams {
@@ -3168,6 +3199,7 @@ impl ExecutableNode for LlmNode {
                         as std::sync::Arc<dyn crate::llm::application::LoadAttachmentResolver>
                 }),
                 agent_session_id: agent_session_id_str.clone(),
+                lazy_catalog_names: lazy_catalog_names.clone(),
             }
         };
 

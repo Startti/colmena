@@ -268,6 +268,7 @@ impl ExecutableNode for CriticNode {
             tools_provider: None,
             attachment_resolver: None,
             agent_session_id: None,
+            lazy_catalog_names: None,
         };
 
         let response = agent_service.run(params).await?;

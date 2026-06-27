@@ -3157,3 +3157,48 @@ read-only intacto — el formato es write).
 **Estado.** done — mergeado a develop (merge `2a9f8275`); tag `colmena_dag_engine-v0.8.1`.
 
 ---
+
+## 54. Lazy tool loading — describe-before-use por turno + guard de dispatch — 2026-06-27
+
+**Qué cambió.** `lazy_tool_loading` se vuelve sólido: ahora es imposible que el modelo
+use una tool sin haber cargado su schema/guía primero, y el descubrimiento se re-fuerza
+**por turno**. Espejo del inspect-before-code de gsheets.
+
+**Pieza 1 — `discovered_set` por turno.** `reconstruct_discovered_set` ahora se acota al
+turno de usuario actual vía el nuevo `current_turn_slice` (mensajes desde el último
+`user`), en vez de escanear todo el historial. Turno 2 resetea → el modelo re-describe.
+Razón: cross-turn la compactación puede tirar la guía que el modelo vio en el turno 1,
+pero un set history-wide igual lo marcaba "descubierto" → actuaba sin la guía en contexto.
+
+**Pieza 2 — guard de dispatch.** Si el modelo llama (alucina) una tool del catálogo que NO
+está en el `iteration_tools` de este turno, el `agent_service` NO la ejecuta a ciegas:
+devuelve su **schema** (vía `describe_tool`) con un aviso explícito "⚠️ NOT A RESULT … call
+again with matching args". La call original queda en historial → Regla 2 la marca
+descubierta-este-turno → entra a `tools[]` y ejecuta en la iteración siguiente. Schema-only
+(no auto-retry — los args estaban mal por no tener el schema). Vía
+`AgentRunParams.lazy_catalog_names` (nuevo campo aditivo).
+
+**Prompts dicientes.** La descripción de `describe_tool` y un nuevo bloque de sistema
+"Lazy tools (load before use)" explican el flujo de 2 pasos y que el redirect del guard
+NO es el resultado real — para que el modelo no lo malinterprete. Bonus: el `summary` lazy
+de `gsheets_run_python` ahora menciona write-back + fórmulas `{{Col}}` (antes solo decía
+"pandas analysis", lo que hacía que el modelo lo llamara a ciegas en lazy).
+
+**Motivación (E2E real).** Con `lazy_tool_loading: true` (el modo de prod en ADP), gemini
+escribía una fórmula llamando `gsheets_run_python` sin describir → calculaba A1 a mano
+(mal) → fallaba → se auto-curaba recién en el 2º intento con narración sucia. Ahora el
+guard fuerza describe→schema→primer intento correcto.
+
+**Scope.** Activo **solo bajo `lazy_tool_loading: true`** (default `false`). Agentes eager
+no se ven afectados — sin flag nuevo, sin breaking change. Aditivo → ADP lo toma en el
+próximo bump de colmena del worker.
+
+**Tests.** `current_turn_slice` (3) + per-turn discovery (2) en `lazy_tools_catalog`;
+`lazy_guard_redirects_undiscovered_call_to_schema` (integración con mock) en
+`agent_service`. 1936 unit tests pasan. Pendiente: E2E real en lazy.
+
+**Referencias.** Plan [`docs/superpowers/plans/2026-06-27-lazy-per-turn-describe-guard.md`](superpowers/plans/2026-06-27-lazy-per-turn-describe-guard.md); dev guide [`docs/developer_guide/29_lazy_tool_loading.md`](developer_guide/29_lazy_tool_loading.md).
+
+**Estado.** code done; E2E lazy pendiente.
+
+---

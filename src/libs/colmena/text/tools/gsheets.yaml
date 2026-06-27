@@ -73,7 +73,7 @@ gsheets_set_range:
     Bulk-write a rectangular block of cells starting at start_addr. values_2d is a row-major 2D array. Strings starting with `=` are evaluated by Google as formulas.
 
 gsheets_run_python:
-  summary: Run sandboxed pandas analysis over sheet ranges loaded directly by the dispatcher (rows never pass through the LLM)
+  summary: "Pandas/numpy over sheet data; also WRITES results back — new tabs, edit rows (no key/A1 math), live formulas by column name {{Col}}. For analysis, bulk edits, compares, formula fills."
   description: |
     Run sandboxed pandas (pd), numpy (np), scipy.stats over one or more tables.
 
