@@ -33,9 +33,11 @@ numbers or column letters, and the matching value does **not** need to be unique
   assign only the masked target column.
 - Do NOT `reset_index()`, `sort()` + `reset_index(drop=True)`, or `concat()` the
   bound df — those break the row mapping.
-- Do NOT add rows with this mode (it edits existing rows only). Columns whose
-  header name is empty or duplicated can't be addressed and are reported in
-  `skipped_columns`.
+- Do NOT add rows with this mode (it edits existing rows only). You CAN add a
+  new COLUMN: assign it on the bound df (`df['Margen'] = '={{Venta}}-{{Costo}}'`)
+  and it is appended after the last column (reported under `added_columns`).
+  Existing columns whose header name is empty or duplicated can't be addressed
+  and are reported in `skipped_columns`.
 
 ## Writing a live FORMULA — reference columns by name with `{{Name}}`
 

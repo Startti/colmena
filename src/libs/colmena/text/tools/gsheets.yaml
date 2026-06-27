@@ -163,6 +163,12 @@ gsheets_run_python:
     output_sheets = {'Hoja 16': {'mode': 'update_by_position', 'df': df}}
     ```
 
+    # Adding a NEW column works the same way: assign it on the bound df
+    # (df['Margen'] = '={{Precio}}-{{Costo}}'). A column NOT already in the sheet
+    # header is APPENDED after the last column (header + values written in the same
+    # atomic batch) and reported under `added_columns` [{name, column}]. New ROWS
+    # are NOT added — this mode edits/extends existing rows only.
+
     **Formulas: reference columns by NAME, never by hand-computed letter.**
     To write a live formula in ANY write mode (`replace`/create, `overwrite`,
     `update_by_position`, `update_in_place`), put the column NAME in double
