@@ -65,6 +65,9 @@ diffs de celdas existentes).
 - **Filas.** Para cada registro `i` del df cuyo valor en esa columna **no es
   `null`**, se escribe en la fila `df_index[i] + 2` (fila 1 = header). Valores
   null/NaN se saltan.
+- **Columna vacía.** Una columna nueva cuyos valores son **todos null** se
+  ignora (no se crea header huérfano): solo se anexa una columna que tenga ≥1
+  valor no-null. Se reporta en `added_columns` únicamente si se creó.
 - **Fórmulas.** Los `{{Nombre}}` se resuelven con el mapa de columnas
   direccionables existentes **+ las columnas nuevas en su índice asignado** (así
   una fórmula puede referenciar otra columna nueva). Un `{{Nombre}}` que no
@@ -125,6 +128,7 @@ La resolución de fórmulas y la conversión a `CellValue` quedan en el caller
   - múltiples columnas nuevas → índices consecutivos en orden de df.
   - nombre ya presente en header → no se trata como nueva (cero celdas).
   - valores `null` en el cuerpo se saltan.
+  - columna nueva todo-null → se ignora (sin header, sin `added_columns`).
   - `df_index` desordenado mapea la fila correcta (`idx + 2`).
 - **Unit existentes** de `update_by_position` siguen verdes (cambio additive).
 - **E2E real** contra hoja `products`: `df['Margen']='={{price}}-{{cost}}'` +
