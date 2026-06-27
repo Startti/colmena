@@ -3135,3 +3135,25 @@ read-only intacto — el formato es write).
 **Estado.** done — mergeado a develop (merge `f8c17d91`).
 
 ---
+
+## 53. gsheets — `update_by_position` agrega columnas nuevas (en vez de descartarlas) — 2026-06-26 (PR #130)
+
+**Qué cambió.** En `update_by_position`, una columna presente en el df devuelto pero **ausente del header** de la hoja ahora se **anexa** tras la última columna (header + valores escritos en el **mismo `batchUpdate` atómico**) en vez de descartarse en silencio. El resultado reporta `added_columns: [{name, column}]` (p.ej. `{"name":"Margen","column":"H"}`), y las celdas nuevas cuentan en `changes.cells`/`changes.columns`.
+
+**Por qué.** El ejemplo CANÓNICO documentado (`df['Margen'] = '={{Venta}}-{{Costo}}'` + `update_by_position`, en la descripción de la tool y en la skill `edit-rows`) estaba roto: el dispatcher proyectaba el df a las columnas existentes (`comparable`) antes del diff, así que la columna nueva volvía con `cells: 0` y `skipped_columns: []` vacío — sin error ni señal. Esto hace real lo que la doc ya prometía.
+
+**Detalles.**
+- Helper puro y unit-testeado `plan_new_columns(header_cols, new_records, df_index)` en `gsheets_run_python.rs`: detecta columnas del df ausentes del header, asigna índices consecutivos tras la última columna (orden del df), emite header + cuerpo, salta columnas **todo-null** (sin header huérfano), mapea filas vía `df_index` (`sheet_row = idx + 2`).
+- `do_update_by_position` mergea esas celdas en el único `batch_update_cells`, resuelve `{{Nombre}}` contra columnas existentes **+ nuevas** (una columna nueva puede referenciar otra). `batch_update_cells` (`spreadsheets.values:batchUpdate`, `USER_ENTERED`) auto-expande la grilla.
+- `update_in_place` NO se tocó (ya devuelve `Column mismatch` explícito ante columnas desconocidas). Filas nuevas siguen sin agregarse (edición de filas existentes).
+- Aditivo: sin cambio de API pública de colmena → ADP no afectado (solo el wire-format del resultado gana `added_columns`).
+
+**Verificado E2E** contra Google real (hoja `products`): `df['Utilidad']='={{price}}-{{cost}}'` + `update_by_position` sin `set_cell` previo → `changes:{cells:1001,columns:["Utilidad"]}`, `added_columns:[{name:Utilidad,column:I}]`, `formula_cells:{I2:=F2-E2}`. 1931 unit tests verdes; CI multi-versión (Python 3.8–3.14) en verde.
+
+**Docs.** `text/tools/gsheets.yaml` + skill `gsheets-editing/references/edit-rows.md` (en el PR #130); dev guide [`docs/developer_guide/39_gsheets.md`](developer_guide/39_gsheets.md) (esta entrada).
+
+**Referencias.** Spec [`docs/superpowers/specs/2026-06-26-gsheets-update-by-position-add-columns-design.md`](superpowers/specs/2026-06-26-gsheets-update-by-position-add-columns-design.md); plan [`docs/superpowers/plans/2026-06-26-gsheets-update-by-position-add-columns.md`](superpowers/plans/2026-06-26-gsheets-update-by-position-add-columns.md).
+
+**Estado.** done — mergeado a develop (merge `2a9f8275`); tag `colmena_dag_engine-v0.8.1`.
+
+---
