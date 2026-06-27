@@ -79,9 +79,15 @@ ejecutarlo en pruebas sin confirmación.
 ### a) Como **nodo** del grafo (llamada fija)
 
 Un nodo `http_request` normal hace una sola petición HTTP. Sus campos clave son
-`base_url` / `endpoint` (o `url`), `method`, `headers` y `body`. También soporta
-subida de archivos por `multipart/form-data` (los archivos se transmiten por
-streaming). Para el cableado de un nodo dentro del grafo, ver
+`base_url` + `endpoint` (la URL se arma como `base_url/endpoint`), `method`,
+`headers` y `body`. **No existe un campo `url` único** — la dirección SIEMPRE se
+parte en `base_url` (ej. `"https://api.hubapi.com"`) y `endpoint` (ej.
+`"/crm/v3/objects/contacts"`); si pones todo en un solo `url` el nodo falla con
+`Invalid URL ''`. Para autenticación tipo Bearer usá el campo dedicado
+`bearer_token` (el nodo le antepone `"Bearer "` automáticamente — pasás solo el
+token, sin el prefijo), **no** armes el header `Authorization` a mano. También
+soporta subida de archivos por `multipart/form-data` (los archivos se transmiten
+por streaming). Para el cableado de un nodo dentro del grafo, ver
 [[building-graphs-core]].
 
 ### b) Como **herramienta** del LLM (el modelo decide cuándo llamarla)
@@ -200,6 +206,14 @@ LLM, con el prefijo fijo `api_explorer__*`:
 3. `api_explorer__search_endpoint` / `list_endpoints` / `get_endpoint_details`
    localizan el endpoint correcto.
 4. `api_explorer__build_http_request` emite la config lista para `http_request`.
+
+> **El placeholder `${SECURE:<ref>}` NO se escribe literal.** `build_http_request`
+> lo emite como marcador de posición para la auth; vos DEBÉS reemplazarlo por el
+> valor real antes de usar la config: en el grafo de PRUEBA, por el handle
+> `<sv_...>` que devuelve `ask_secret` (en el campo `bearer_token`); en el grafo
+> ENTREGADO, por la variable de entorno `${NOMBRE_DEL_TOKEN}`. Dejar
+> `${SECURE:...}` tal cual hace que la llamada se autentique con un valor que no
+> resuelve y la API responde 401.
 
 > **Misma advertencia de efectos secundarios aplica:** si el endpoint que el LLM
 > termina construyendo usa POST/PUT/PATCH/DELETE, el `http_request` resultante
