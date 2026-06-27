@@ -7,6 +7,7 @@ pub mod document_nodes;
 pub mod echo_toolkit;
 pub mod extraction;
 pub mod http;
+pub mod http_oauth;
 pub mod image_edit;
 pub mod image_generation;
 pub mod input;
