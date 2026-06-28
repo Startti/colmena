@@ -314,6 +314,91 @@
       ]
     },
 
+    "imap_read": {
+      "summary": "Read-only email reader over IMAP. As an LLM tool, the connection (host/port/username/password/mailbox) is fixed in node_schema and the LLM supplies only the structured 'search' criteria. Non-destructive (EXAMINE + BODY.PEEK — never marks messages read).",
+      "special_behaviors": [
+        "Put host/port/username/password/mailbox as 'fixed' node_schema fields — the password NEVER reaches the LLM (not in the schema, the args, or the tool result).",
+        "Auth is an app password (LOGIN over TLS); supply it via '${ENV}' or a secure_value, never a plaintext literal.",
+        "'search' is structured (unseen/from/to/subject/body_contains/since/before), compiled to a safe IMAP SEARCH — there is no raw-query field, so no command injection.",
+        "Email body is untrusted input (prompt-injection vector); the node makes no requests to LLM-controlled hosts and there is no token to exfiltrate.",
+        "max_results / download_attachments may optionally be exposed too; 0 results returns { count: 0, messages: [] } (not an error)."
+      ],
+      "examples": {
+        "read_unread_email": {
+          "description": "Assistant that reads the user's mailbox and summarizes messages. Connection is fixed; the LLM chooses only the search criteria (e.g. unread only).",
+          "tool_configurations_entry": {
+            "read_email": {
+              "name": "read_email",
+              "description": "Lee correos del buzón del usuario (read-only, no marca como leído). Devuelve remitente, asunto, fecha, cuerpo en texto y adjuntos. Usa search para filtrar; sin filtros devuelve los más recientes.",
+              "node_type": "imap_read",
+              "node_schema": {
+                "host": {
+                  "type": "string",
+                  "fixed": "imap.gmail.com"
+                },
+                "port": {
+                  "type": "integer",
+                  "fixed": 993
+                },
+                "username": {
+                  "type": "string",
+                  "fixed": "${GMAIL_USER}"
+                },
+                "password": {
+                  "type": "string",
+                  "fixed": "${GMAIL_APP_PASSWORD}",
+                  "comment": "The password is FIXED here — it never appears in the tool schema or args the LLM sees."
+                },
+                "mailbox": {
+                  "type": "string",
+                  "fixed": "INBOX"
+                },
+                "max_results": {
+                  "type": "integer",
+                  "fixed": 5
+                },
+                "search": {
+                  "type": "object",
+                  "required": false,
+                  "description": "Criterios opcionales. unseen (bool): solo no leídos. from/to/subject (string). body_contains (string). since/before (YYYY-MM-DD).",
+                  "properties": {
+                    "unseen": {
+                      "type": "boolean",
+                      "required": false,
+                      "description": "Si true, solo mensajes sin leer."
+                    },
+                    "from": {
+                      "type": "string",
+                      "required": false,
+                      "description": "Filtrar por remitente."
+                    },
+                    "subject": {
+                      "type": "string",
+                      "required": false,
+                      "description": "Filtrar por texto en el asunto."
+                    },
+                    "body_contains": {
+                      "type": "string",
+                      "required": false,
+                      "description": "Filtrar por texto en el cuerpo."
+                    },
+                    "since": {
+                      "type": "string",
+                      "required": false,
+                      "description": "Solo mensajes en o después de esta fecha (YYYY-MM-DD)."
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "reference_graphs": [
+        "tests/graphs/external/imap_read_gmail.json"
+      ]
+    },
+
     "sql_query": {
       "summary": "Execute SQL against a PostgreSQL database. Designed primarily as an LLM tool: the connection, permissions, and guardrails are fixed; the LLM supplies only the 'query' string. Queries are parsed with sqlparser (PostgreSQL dialect) and validated per-statement so multi-statement injections cannot smuggle DDL past a benign first statement. Supports a rich permission model and optional LLM-critic validation.",
       "special_behaviors": [

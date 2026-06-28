@@ -70,6 +70,7 @@ Las secciones están organizadas por **tema**, no por orden numérico. Los prefi
 - [**Nodo Socket.IO**](./developer_guide/21_socketio_node.md) — `socketio_request`: ack, wait-event, autenticación.
 - [**Nodo SQL Query**](./developer_guide/23_sql_node.md) — Permisos granulares, validación AST + critic opcional, sandbox, RLS, auto-creación de schemas.
 - [**Nodos Web**](./developer_guide/25_web_nodes.md) — `http_request` (incluye multipart streaming), `tavily_client`, `api_explorer`, `browser`.
+- [**Nodo IMAP**](./developer_guide/50_imap_node.md) — `imap_read`: lectura read-only de correo por IMAP (app password), búsqueda estructurada, adjuntos descargables.
 - [**Nodo Python Script**](./developer_guide/26_python_node.md) — `python_script`: PyO3, sandbox `restricted`, threading.
 - [**Multimedia Generation**](./developer_guide/32_multimedia_generation.md) — `image_generation`, `image_edit`, `tts`; storage abstracto con 3 adapters.
 - [**Router & Output Parser**](./developer_guide/37_router_and_output_parser.md) — `router` (LLM direct vs extract+rules) y `output_parser` (extracción tipada post-LLM).

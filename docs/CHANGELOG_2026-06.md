@@ -3202,3 +3202,63 @@ próximo bump de colmena del worker.
 **Estado.** code done; E2E lazy pendiente.
 
 ---
+
+## 56. `imap_read` — lectura de correo IMAP (read-only) — 2026-06-27
+
+**Qué cambió.** Nuevo nodo `imap_read` (`ExecutableNode`, registrado en `registry.rs`)
+que lee correo de un buzón IMAP. Conecta por TLS (rustls), autentica con `LOGIN` (app
+password), abre el `mailbox` con `EXAMINE` y hace los fetch con `BODY.PEEK[]`. Búsqueda
+por **criterios estructurados** (`unseen`/`from`/`to`/`subject`/`body_contains`/`since`/
+`before`) que un builder puro (`imap_search.rs`) traduce a un comando `UID SEARCH` seguro.
+Devuelve `{ count, messages: [{ uid, from, to, subject, date, body_text, body_truncated,
+attachments: [{ filename, mime, size, document_id? }] }] }`. Cuerpo prefiere `text/plain`
+(html-only → texto), truncado a `body_max_bytes`. Adjuntos siempre listados; con
+`download_attachments: true` baja los bytes y los registra en `OutputStorageRepository`
+con un `document_id`. Config: `host` (default `imap.gmail.com`), `port` (993), `username`
+(req), `password` (req), `mailbox` (INBOX), `search`, `max_results` (20), `body_max_bytes`
+(5120), `download_attachments` (false).
+
+**Por qué importa.** Conecta un correo personal (Gmail u otro IMAP) a un agente con
+**mínimo setup** — un app password sobre TLS, sin GCP / OAuth / refresh tokens. IMAP no es
+HTTP, así que `http_request` no servía; este es el nodo dedicado. Read-only por diseño
+(`EXAMINE` + `BODY.PEEK` → nunca marca leído).
+
+**Seguridad.** Búsqueda estructurada (no query cruda) → el nodo construye el comando con
+strings citados/escapados y fechas validadas, sin inyección de comandos. Como tool de un
+LLM se usa el patrón `node_schema+fixed`: `host`/`port`/`username`/`password`/`mailbox`
+van `fixed`, de modo que **la contraseña jamás entra al schema, args ni resultado del
+tool**. El contenido de los correos es entrada no confiable (prompt-injection), pero aquí
+no hay token que exfiltrar (no OAuth) y el nodo no hace requests a hosts que el LLM
+controle. El `LOGIN` fallido devuelve un error accionable (verifica app password + 2FA;
+en Workspace el admin puede tenerlo deshabilitado).
+
+**Setup (app password).** Activar 2-Step Verification en la cuenta de Google → generar un
+app password de 16 chars (una sola vez) → usar `username` = dirección completa,
+`password` = el app password vía `secure_value` o `${ENV}`. Gmail personal: IMAP funciona
+con app password; cuentas Workspace (`@startti.co`): el admin puede tener IMAP /
+app-passwords deshabilitado — verificar antes.
+
+**Tests.** Unit puros (sin red): `imap_search` (cada criterio → fragmento SEARCH, ISO →
+`dd-Mon-yyyy`, combinación, vacío → `ALL`, fecha inválida → error, escape de strings),
+`imap_mime` (fixtures RFC822: texto plano, html-only → texto, multipart con adjunto;
+truncado), `imap` (nodo). E2E real contra Gmail (`tests/graphs/external/imap_read_gmail.json`)
+queda `#[ignore]`-gated / manual — no hay servidor IMAP embebido fácil para CI; **pendiente
+de app password**.
+
+**Compat ADP.** Aditivo: nodo nuevo registrado, sin breaking change. **Deps nuevas**
+(`async-imap`, `tokio-rustls`, `mail-parser`) suman tiempo de compilación y superficie de
+supply-chain (consciente). El worker lo toma en el próximo bump de colmena; el canvas de
+ADP eventualmente necesitaría conocer el nodo (downstream, opcional).
+
+**Referencias.** Spec
+[`docs/superpowers/specs/2026-06-27-imap-read-node-design.md`](superpowers/specs/2026-06-27-imap-read-node-design.md);
+plan [`docs/superpowers/plans/2026-06-27-imap-read-node.md`](superpowers/plans/2026-06-27-imap-read-node.md);
+dev guide [`docs/developer_guide/50_imap_node.md`](developer_guide/50_imap_node.md).
+
+**Backlog.** `smtp_send` (enviar correo — nodo aparte, comparte el app password); XOAUTH2
+sobre IMAP (cuentas sin app password); mutaciones (marcar leído / mover / borrar /
+etiquetar — read-only en v1); fetch eficiente vía `BODYSTRUCTURE`.
+
+**Estado.** code done + unit verified; E2E live pendiente de creds.
+
+---

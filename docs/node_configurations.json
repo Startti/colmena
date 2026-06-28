@@ -931,6 +931,109 @@
       "reserved_input_keys": ["base_url", "endpoint", "method", "headers", "body", "query_params", "query_parameters", "bearer_token", "authorization", "secure", "__colmena_session_id", "__node_id", "__colmena_resume_answer"]
     },
 
+    "imap_read": {
+      "name": "IMAP Read",
+      "description": "Reads email from an IMAP mailbox, read-only. Connects over implicit TLS (rustls), authenticates with LOGIN (app password), opens the mailbox with EXAMINE (read-only protocol mode) and fetches with BODY.PEEK so messages are NEVER marked as read. Search is expressed as STRUCTURED criteria (not a raw IMAP query) that the node compiles into a safe UID SEARCH command (strings quoted/escaped, dates validated before connecting — no command injection). Returns message headers (from/to/subject/date/uid) plus body text (prefers text/plain; converts html-only bodies to text; truncated to body_max_bytes). Attachments are ALWAYS listed (filename/mime/size); their bytes are downloaded on demand only when download_attachments=true and registered in OutputStorageRepository, adding a document_id to each attachment. All string values support '${VAR_NAME}' environment variable resolution; the password also accepts secure_values. Auth is app password (LOGIN over TLS) — XOAUTH2 and sending (SMTP) are out of scope (future nodes). When used as an LLM tool, put host/port/username/password/mailbox in node_schema as 'fixed' so the LLM never sees the password; expose only 'search'.",
+      "category": "integration",
+      "config_fields": {
+        "host": {
+          "type": "string",
+          "required": false,
+          "default": "imap.gmail.com",
+          "description": "IMAP server host. Defaults to Gmail. Works with any IMAP provider. Supports '${VAR_NAME}' environment variable syntax.",
+          "supports_env_vars": true,
+          "example": "imap.gmail.com"
+        },
+        "port": {
+          "type": "integer",
+          "required": false,
+          "default": 993,
+          "description": "IMAP server port. Default 993 (implicit TLS).",
+          "example": 993
+        },
+        "username": {
+          "type": "string",
+          "required": true,
+          "default": null,
+          "description": "Full email address used for LOGIN. Required. Supports '${VAR_NAME}' environment variable syntax.",
+          "supports_env_vars": true,
+          "example": "${GMAIL_USER}"
+        },
+        "password": {
+          "type": "string",
+          "required": true,
+          "default": null,
+          "description": "App password (16 chars, requires 2-Step Verification). Required. ALWAYS supply via '${VAR_NAME}' or a secure_value — never a plaintext literal in the graph. When used as an LLM tool it must be a 'fixed' node_schema field so the LLM never sees it.",
+          "supports_env_vars": true,
+          "example": "${GMAIL_APP_PASSWORD}"
+        },
+        "mailbox": {
+          "type": "string",
+          "required": false,
+          "default": "INBOX",
+          "description": "Mailbox/folder to open with EXAMINE (read-only). Default INBOX.",
+          "example": "INBOX"
+        },
+        "search": {
+          "type": "object",
+          "required": false,
+          "default": {},
+          "description": "Structured search criteria, all sub-fields optional; absence means no filter; empty search = all messages (bounded by max_results). Compiled into an IMAP SEARCH command with implicit AND. Sub-fields: unseen (boolean → UNSEEN), from (string → FROM), to (string → TO), subject (string → SUBJECT), body_contains (string → BODY), since (YYYY-MM-DD → SINCE dd-Mon-yyyy), before (YYYY-MM-DD → BEFORE dd-Mon-yyyy). Malformed dates raise a clear config error before connecting.",
+          "example": {
+            "unseen": true,
+            "from": "jefe@x.com",
+            "subject": "factura",
+            "since": "2026-06-01"
+          }
+        },
+        "max_results": {
+          "type": "integer",
+          "required": false,
+          "default": 20,
+          "description": "Maximum number of messages to fetch. Applied AFTER the search — takes the last N UIDs (most recent).",
+          "example": 20
+        },
+        "body_max_bytes": {
+          "type": "integer",
+          "required": false,
+          "default": 5120,
+          "description": "Truncate body_text to this many bytes. When truncated, the message's body_truncated flag is true.",
+          "example": 5120
+        },
+        "download_attachments": {
+          "type": "boolean",
+          "required": false,
+          "default": false,
+          "description": "When true, downloads the bytes of each matching message's attachments (bounded by max_results) and registers them in OutputStorageRepository, adding a document_id to each attachment in the output. When false, attachments are still listed (filename/mime/size) but without document_id. Requires an injected storage repository — fails clearly if absent.",
+          "example": false
+        }
+      },
+      "input_ports": {
+        "search": {
+          "type": "object",
+          "description": "Dynamic structured search criteria. Overrides config search."
+        },
+        "max_results": {
+          "type": "integer",
+          "description": "Dynamic max results. Overrides config."
+        },
+        "download_attachments": {
+          "type": "boolean",
+          "description": "Dynamic flag to download attachment bytes. Overrides config."
+        }
+      },
+      "output_ports": {
+        "output": {
+          "type": "object",
+          "description": "{ count, messages: [{ uid, from, to, subject, date, body_text, body_truncated, attachments: [{ filename, mime, size, document_id? }] }] }. This is the default output port."
+        }
+      },
+      "default_input": null,
+      "default_output": "output",
+      "requires": [],
+      "supports_env_vars": true
+    },
+
     "secure_suspend": {
       "name": "Secure Suspend (Secret Collection)",
       "description": "Pausa el DAG y pide al usuario uno o más secretos en una sola pausa. Persiste cada valor cifrado en la tabla de secure_value_mappings y devuelve solo handles `<sv_<name>>`. El valor real nunca aparece en outputs ni en logs ni en el contexto del LLM. Soporta uso como nodo top-level del DAG o como LLM tool en `tool_configurations`.",
