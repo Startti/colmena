@@ -261,6 +261,49 @@ impl HttpNode {
         self
     }
 
+    /// Resolve the OAuth provider for this request, if an `auth` block is
+    /// configured. Returns Ok(None) when there is no `auth` block.
+    fn resolve_oauth_provider(
+        &self,
+        config: &Value,
+        inputs: &NodeInputs,
+    ) -> Result<
+        Option<Arc<crate::google_oauth::infrastructure::OAuthRefreshTokenProvider>>,
+        Box<dyn StdError + Send + Sync>,
+    > {
+        let spec = match crate::dag_engine::infrastructure::nodes::http_oauth::parse_oauth_auth(
+            config, inputs,
+        )
+        .map_err(|e| {
+            Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
+                as Box<dyn StdError + Send + Sync>
+        })? {
+            Some(s) => s,
+            None => return Ok(None),
+        };
+        let cache = self.oauth_cache.as_ref().ok_or_else(|| {
+            Box::new(std::io::Error::other(
+                "http_request: `auth` block set but no OAuthProviderCache wired",
+            )) as Box<dyn StdError + Send + Sync>
+        })?;
+        let resolve = |s: &str| -> Result<String, Box<dyn StdError + Send + Sync>> {
+            Self::resolve_env_vars(s).map_err(|e| {
+                Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
+                    as Box<dyn StdError + Send + Sync>
+            })
+        };
+        let token_url = resolve(&spec.token_url)?;
+        let client_id = resolve(&spec.client_id)?;
+        let client_secret = resolve(&spec.client_secret)?;
+        let refresh_token = resolve(&spec.refresh_token)?;
+        Ok(Some(cache.get_or_create(
+            &token_url,
+            &client_id,
+            &client_secret,
+            &refresh_token,
+        )))
+    }
+
     /// Recursively walks a JSON value, replacing every string of the form
     /// `$attachment:<storage_key>` with `data:<mime>;base64,<bytes>`. Returns
     /// an error if any placeholder cannot be resolved (no storage adapter,
@@ -836,40 +879,10 @@ impl ExecutableNode for HttpNode {
         }
 
         // --- Native OAuth2 (refresh_token grant) ---
-        // Parse the `auth` block (config-only). Validation includes mutual exclusion
-        // with bearer_token/authorization and the base_url-from-inputs guard.
-        let oauth_spec =
-            crate::dag_engine::infrastructure::nodes::http_oauth::parse_oauth_auth(config, inputs)
-                .map_err(|e| {
-                    Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
-                        as Box<dyn StdError + Send + Sync>
-                })?;
-        let oauth_provider = if let Some(spec) = oauth_spec {
-            let cache = self.oauth_cache.as_ref().ok_or_else(|| {
-                Box::new(std::io::Error::other(
-                    "http_request: `auth` block set but no OAuthProviderCache wired",
-                )) as Box<dyn StdError + Send + Sync>
-            })?;
-            let token_url = Self::resolve_env_vars(&spec.token_url).map_err(|e| {
-                Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
-                    as Box<dyn StdError + Send + Sync>
-            })?;
-            let client_id = Self::resolve_env_vars(&spec.client_id).map_err(|e| {
-                Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
-                    as Box<dyn StdError + Send + Sync>
-            })?;
-            let client_secret = Self::resolve_env_vars(&spec.client_secret).map_err(|e| {
-                Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
-                    as Box<dyn StdError + Send + Sync>
-            })?;
-            let refresh_token = Self::resolve_env_vars(&spec.refresh_token).map_err(|e| {
-                Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
-                    as Box<dyn StdError + Send + Sync>
-            })?;
-            Some(cache.get_or_create(&token_url, &client_id, &client_secret, &refresh_token))
-        } else {
-            None
-        };
+        // Parse the `auth` block (config-only) and mint a provider. Validation
+        // includes mutual exclusion with bearer_token/authorization and the
+        // base_url-from-inputs guard.
+        let oauth_provider = self.resolve_oauth_provider(config, inputs)?;
 
         // Handle specific auth inputs. Read from `inputs` first (priority), then
         // fall back to `config` so delivered graphs can fix the token in `config`.
