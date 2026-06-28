@@ -3202,3 +3202,75 @@ próximo bump de colmena del worker.
 **Estado.** code done; E2E lazy pendiente.
 
 ---
+
+## 55. `http_request` — OAuth2 nativo (grant `refresh_token`) — 2026-06-27 (Fase 1)
+
+**Qué cambió.** El nodo `http_request` gana un bloque de config opcional `auth`
+que autentica nativamente con OAuth2 (grant `refresh_token`) — sin nodo
+`python_script` auxiliar y sin que el LLM vea nunca el token. El nodo mintea y
+cachea el access token internamente, lo inyecta como `Authorization: Bearer`, y
+reintenta **una vez** en `401` (403/429 pasan tal cual). Ejemplo:
+
+```json
+"auth": {
+  "type": "oauth2_refresh_token",
+  "token_url": "https://oauth2.googleapis.com/token",
+  "client_id": "${GMAIL_CLIENT_ID}",
+  "client_secret": "${GMAIL_CLIENT_SECRET}",
+  "refresh_token": "${GMAIL_REFRESH_TOKEN}"
+}
+```
+
+Reusa el `AuthTokenProvider` del módulo `google_oauth` (cache/coalesce/401),
+generalizado con 3 constructores públicos nuevos (`RefreshClient::with_endpoint`,
+`OAuthCredentials::new`, `OAuthRefreshTokenProvider::with_endpoint`) para apuntar
+a cualquier `token_url` (no solo Google). Un `OAuthProviderCache` keyed por
+**fingerprint de credenciales** (SHA-256 de `token_url+client_id+refresh_token`,
+inyectado en `registry.rs` igual que `with_storage`) garantiza **un solo
+provider → un solo mint** compartido entre todos los endpoints de la misma
+identidad (caso de N endpoints).
+
+**Por qué importa.** Permite que un `llm_call` lea APIs OAuth (Gmail, etc.) con
+el nodo http como tool, poniendo el bloque `auth` en `node_schema+fixed` para que
+**nunca** entre al schema/args/resultado que ve el modelo. Es OAuth2 **genérico**,
+útil para cualquier API (Slack, HubSpot, …), no solo Gmail.
+
+**Seguridad.** Guardrail anti-exfiltración: con `auth` presente, `base_url` debe
+ser `fixed` (el LLM no puede suministrar el host vía `inputs`) — cierra el vector
+de prompt-injection desde el contenido de correos. `auth` es mutuamente excluyente
+con `bearer_token`/`authorization` y se lee **solo de config**, nunca de `inputs`.
+Secretos redactados en `Debug` (`OAuthAuthSpec`, `RefreshTokenSecret`), nunca
+logueados, nunca en el resultado. No soportado con multipart en v1 (falla claro).
+
+**Gotcha operativo.** Si el OAuth consent screen está en estado "Testing", Google
+expira el refresh token cada 7 días → publicar la app. El refresh token se obtiene
+**una vez, offline** (OAuth Playground), no por Colmena.
+
+**Compat / ADP.** Puramente aditivo — solo constructores/campos/métodos nuevos;
+ninguna firma pública de `google_oauth` ni de `ExecutableNode` cambió; sin
+migración ni env var nueva. ADP no afectado.
+
+**Tests.** Unit con wiremock (parseo, mutual exclusion, base_url-guard, 401
+invalidate+retry, fingerprint dedup, ruta de error revoked-token a través de
+`execute`); grafo E2E `tests/graphs/external/gmail_oauth_read.json` (run en vivo
+pendiente de creds Gmail). `cargo test --verbose` → 2026 passed / 0 failed; fmt +
+clippy limpios.
+
+**Documentación de referencia.**
+- Spec: [`docs/superpowers/specs/2026-06-27-native-oauth-http-node-design.md`](superpowers/specs/2026-06-27-native-oauth-http-node-design.md)
+- Plan: [`docs/superpowers/plans/2026-06-27-native-oauth-http-node-phase1.md`](superpowers/plans/2026-06-27-native-oauth-http-node-phase1.md)
+- Dev guide: [`docs/developer_guide/25_web_nodes.md`](developer_guide/25_web_nodes.md) (sección "OAuth2 nativo")
+- Schema: `docs/node_configurations.json`, `docs/node_as_tools_reference.json`
+
+**Commits.** `45aaf1ce`, `3dfc25f7`, `a9a59481`, `e45c28af`, `41f532c6`,
+`646432ad`, `b0be9c5d`, `357c346f`, `3ecb4c8c`, `55ccfd72`, `e3195178`,
+`a59cddbd`, `ff51325b`.
+
+**Backlog (Fase 2 / v1.1).** Conexiones nombradas (`oauth_connections` en
+`llm_call`, azúcar de autoría) y persistencia del token en DB (cache cross-run +
+write-back de rotación) — ver [`docs/BACKLOG.md`](BACKLOG.md).
+
+**Estado.** code done + verificado (unit/wiremock); E2E en vivo contra Gmail real
+pendiente de credenciales.
+
+---
