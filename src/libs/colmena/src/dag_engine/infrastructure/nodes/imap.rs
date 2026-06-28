@@ -419,7 +419,7 @@ impl ExecutableNode for ImapNode {
                 "search": "object (optional) — { unseen, from, to, subject, body_contains, since, before }",
                 "max_results": "integer (optional, default 20) — most-recent N messages",
                 "body_max_bytes": "integer (optional, default 5120) — text body truncation cap",
-                "download_attachments": "boolean (optional, default false) — NOT yet implemented"
+                "download_attachments": "boolean (optional, default false) — when true, download attachment bytes and register them as Colmena attachments (returns a document_id per attachment)"
             },
             "required": ["username", "password"]
         })
