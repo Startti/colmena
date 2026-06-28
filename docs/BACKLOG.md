@@ -27,6 +27,37 @@ Si vas a empezar a trabajar en algo de acá, sacalo de esta lista y agregalo al 
 
 ---
 
+## Nodo `imap_read` — PARQUEADO en rama, sin PR (2026-06-28)
+
+- [ ] **Rama `feat/imap-read-node` — completa pero NO se va a mergear.** Existe
+  un nodo `imap_read` totalmente implementado y verificado (lectura read-only de
+  correo por IMAP con app password: EXAMINE + BODY.PEEK no destructivo, búsqueda
+  estructurada → SEARCH, headers + cuerpo en texto, adjuntos listados +
+  descargables como attachments de Colmena; 8 tareas TDD, suite verde, fmt +
+  clippy `--all-targets` limpios). **NO se crea PR.** Spec
+  [`2026-06-27-imap-read-node-design.md`](superpowers/specs/2026-06-27-imap-read-node-design.md)
+  y plan
+  [`2026-06-27-imap-read-node.md`](superpowers/plans/2026-06-27-imap-read-node.md)
+  sí están en `develop`; el **código vive solo en la rama `feat/imap-read-node`**
+  (preservada, no borrar).
+
+  **Por qué no se mergea:** la necesidad de leer correo se resuelve por la vía
+  **OAuth2 + Gmail REST API** — el OAuth2 nativo de `http_request` ya mergeado
+  ([PR #135](https://github.com/Startti/colmena/pull/135), CHANGELOG §55). Un
+  `llm_call` lee Gmail con el nodo `http_request` + el bloque `auth`, sin sumar
+  3 deps nuevas (`async-imap`, `tokio-rustls`, `mail-parser`) ni un segundo
+  camino de correo que mantener. Se prefiere una sola vía (OAuth/REST).
+
+  **Trigger para revivir la rama:** un caso real que OAuth/REST no cubra —
+  p.ej. un proveedor **IMAP-only** (no Gmail/no REST API), o una cuenta donde el
+  **app password** sea sustancialmente más simple que montar OAuth. Si se revive:
+  rebase de la rama sobre `develop` (habrá conflicto trivial en el CHANGELOG —
+  el IMAP usa §56, OAuth usó §55, quedarse con ambos), correr el E2E real contra
+  Gmail con app password, y abrir PR. El nodo `smtp_send` (enviar) y XOAUTH2
+  siguen en backlog dentro del propio spec (§12).
+
+---
+
 ## ⭐ Cola priorizada — daniel@startti.co (2026-06-09)
 
 > Items elevados por el owner el 2026-06-09 tras shippear Subsystem G v1.1.
