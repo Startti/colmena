@@ -157,6 +157,17 @@ pulldown-cmark = { version = "0.10", default-features = false }
 # RFC822/MIME parsing (imap_read node — raw bytes → headers/body/attachments).
 mail-parser = "0.11"
 
+# IMAP client (imap_read node). async-imap is TLS-agnostic: we feed it a
+# tokio-rustls TLS stream (bridged to futures-io via tokio-util's `compat`).
+# `runtime-tokio` drops the default async-std runtime; no TLS feature exists on
+# the crate itself (TLS is the caller's responsibility).
+async-imap = { version = "0.11", default-features = false, features = ["runtime-tokio"] }
+# `ring` crypto provider keeps us on the same TLS backend as reqwest/tungstenite
+# (no aws-lc-rs C toolchain). webpki-roots supplies the trust anchors, mirroring
+# tungstenite's `rustls-tls-webpki-roots`.
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+webpki-roots = "1"
+
 [features]
 default = []
 python = ["pyo3-async-runtimes"]
