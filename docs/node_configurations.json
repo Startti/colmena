@@ -867,6 +867,19 @@
           "description": "A custom Authorization header value. Unlike 'bearer_token' which automatically prepends 'Bearer ', this field sets the Authorization header to exactly the value provided. Use this for non-Bearer auth schemes like Basic auth ('Basic base64encoded'), API keys ('ApiKey xyz'), or custom schemes.",
           "example": "Basic dXNlcjpwYXNz"
         },
+        "auth": {
+          "type": "object",
+          "required": false,
+          "default": null,
+          "description": "Native OAuth2 authentication. The node mints, caches and refreshes the access token in memory and injects 'Authorization: Bearer {token}', retrying once on 401 (403/429 pass through). Config-only: read ONLY from config, NEVER from LLM inputs. Mutually exclusive with bearer_token/authorization. When set, base_url MUST be fixed (anti-exfiltration guard — the LLM cannot control the destination host). As an LLM tool, place the whole block as a 'fixed' field inside node_schema so the model never sees the token. Not supported with multipart bodies in v1.",
+          "properties": {
+            "type": { "type": "string", "required": true, "description": "Grant type. v1: only 'oauth2_refresh_token'.", "example": "oauth2_refresh_token" },
+            "token_url": { "type": "string", "required": true, "description": "Provider token endpoint (any OAuth2 provider).", "example": "https://oauth2.googleapis.com/token" },
+            "client_id": { "type": "string", "required": true, "description": "OAuth client ID. Accepts ${ENV} or secure_values.", "example": "${GMAIL_CLIENT_ID}" },
+            "client_secret": { "type": "string", "required": true, "description": "OAuth client secret. Accepts ${ENV} or secure_values.", "example": "${GMAIL_CLIENT_SECRET}" },
+            "refresh_token": { "type": "string", "required": true, "description": "Long-lived refresh token obtained once offline (e.g. OAuth Playground). Accepts ${ENV} or secure_values.", "example": "${GMAIL_REFRESH_TOKEN}" }
+          }
+        },
         "secure": {
           "type": "boolean",
           "required": false,

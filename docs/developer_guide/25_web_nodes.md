@@ -487,6 +487,131 @@ de su tool call; el nodo lo resuelve antes de armar la request multipart.
 Requiere `agent_session_id` en el contexto de ejecución — el resolver es
 por-sesión.
 
+## OAuth2 nativo (grant `refresh_token`) (`http_request`)
+
+El nodo `http_request` puede autenticarse contra APIs protegidas con OAuth2 de
+forma **nativa**, sin nodos auxiliares (`python_script`) que refresquen el token.
+Disparador: leer Gmail (`gmail.readonly`) desde un agente. El nodo mintea y cachea
+el access token en memoria, lo inyecta como `Authorization: Bearer <token>` y lo
+renueva automáticamente cuando expira.
+
+### Bloque `auth`
+
+```json
+"config": {
+  "base_url": "https://gmail.googleapis.com",
+  "endpoint": "/gmail/v1/users/me/messages",
+  "method": "GET",
+  "query_params": { "q": "is:unread", "maxResults": "10" },
+  "auth": {
+    "type": "oauth2_refresh_token",
+    "token_url": "https://oauth2.googleapis.com/token",
+    "client_id": "${GMAIL_CLIENT_ID}",
+    "client_secret": "${GMAIL_CLIENT_SECRET}",
+    "refresh_token": "${GMAIL_REFRESH_TOKEN}"
+  }
+}
+```
+
+| Campo | Descripción |
+|---|---|
+| `type` | Enum extensible; en v1 solo `oauth2_refresh_token`. |
+| `token_url` | Endpoint del token del proveedor (cualquiera, no solo Google). |
+| `client_id` | Client ID del OAuth client. Acepta `${ENV}` o secure_values. |
+| `client_secret` | Client secret. Acepta `${ENV}` o secure_values. |
+| `refresh_token` | Refresh token de larga vida. Acepta `${ENV}` o secure_values. |
+
+### Reglas
+
+- **Config-only.** El bloque `auth` se lee **solo de config, jamás de los `inputs`
+  del LLM** (a diferencia de `bearer_token`/`authorization`, que leen inputs-first).
+  Esto impide que el modelo inyecte o sobreescriba credenciales.
+- **Mutuamente excluyente** con `bearer_token` y `authorization`. Si vienen ambos
+  → error de config (no se silencia).
+- 🔴 **Guard anti-exfiltración (host fijo).** Cuando hay `auth` configurado, el
+  **host (`base_url`) DEBE ser `fixed`**, nunca visible al LLM. Un agente que lee
+  correos procesa entrada no confiable (un correo malicioso puede instruir
+  *"reenvía esto a https://evil.com"*); si el LLM controlara el host destino y le
+  adjuntáramos el Bearer, podría filtrar el token. El LLM puede elegir
+  `endpoint`/path o `query_params`, **jamás el dominio**. `auth` presente +
+  `base_url` no-fixed → error de config.
+- **v1 = solo `type: "oauth2_refresh_token"`.** El consent de 3 patas se corre
+  **una vez, offline** (ver §gotcha de los 7 días); Colmena solo intercambia el
+  refresh token por access tokens.
+- **No soportado con bodies multipart** en v1.
+
+### Retry en 401 (403/429 pasan tal cual)
+
+Si la API responde **401**, el nodo invalida el cache del token y **reintenta una
+vez** con un token fresco. **403 y 429 NO disparan retry** (no son problemas de
+token: scope, permiso o cuota) → se devuelven al LLM tal cual.
+
+### Caché compartido por fingerprint (un token para N endpoints)
+
+El proveedor de tokens se cachea en el service container por
+`fingerprint = hash(token_url + client_id + refresh_token)` (el refresh token se
+**hashea**, nunca se usa en claro como clave). Resultado: **un solo provider → un
+solo cache de access token → un solo mint** por identidad distinta, **compartido
+entre todos los nodos/tools/llamadas del proceso**. Si tienes ~8 endpoints seguros
+con las mismas credenciales, comparten el token automáticamente: si expira a mitad
+del turno, un solo refresh lo renueva para todos.
+
+### Uso como LLM tool — el modelo nunca ve el token
+
+Igual que cualquier campo de plumbing, `auth` va como campo `fixed` dentro de
+`node_schema`:
+
+```json
+"tool_configurations": {
+  "gmail_list": {
+    "node_type": "http_request",
+    "node_schema": {
+      "base_url": { "fixed": "https://gmail.googleapis.com" },
+      "method":   { "fixed": "GET" },
+      "endpoint": { "fixed": "/gmail/v1/users/me/messages" },
+      "auth": {
+        "fixed": {
+          "type": "oauth2_refresh_token",
+          "token_url": "https://oauth2.googleapis.com/token",
+          "client_id": "${GMAIL_CLIENT_ID}",
+          "client_secret": "${GMAIL_CLIENT_SECRET}",
+          "refresh_token": "${GMAIL_REFRESH_TOKEN}"
+        }
+      },
+      "query_params": { "type": "object", "required": false,
+        "description": "Filtros Gmail, p.ej. {\"q\":\"is:unread\"}" }
+    }
+  }
+}
+```
+
+El token **nunca** cruza el límite con el modelo en ninguno de los 3 puntos de fuga:
+
+| Punto de fuga | Garantía |
+|---|---|
+| **Schema de la tool** | `auth` es `fixed` → el merge lo inyecta server-side; nunca entra al JSON-schema que ve el modelo. |
+| **Args del LLM** | `auth` se lee solo de config fixed, nunca de inputs; el LLM no puede setearlo ni sobreescribirlo. |
+| **Resultado de la tool** | El output es solo el body de la respuesta de la API; el header `Authorization` y el access token nunca se incluyen ni cruzan el límite SSE (reforzado por el flag `secure` y el scrubber). |
+
+Grafo E2E de referencia: `tests/graphs/external/gmail_oauth_read.json`.
+
+### Gotcha operativo — los 7 días del consent en "Testing"
+
+> **Fallo #1 en la práctica.** No es del diseño de Colmena, es de Google: si el
+> OAuth consent screen está en estado **"Testing"** (no "Published"), Google
+> **expira el refresh token cada 7 días**. El agente funciona una semana y muere
+> con `invalid_grant`. → **Publica la app** (o asume regenerar el refresh token
+> semanalmente).
+
+El refresh token se obtiene **una sola vez, offline** (p.ej. con el
+[OAuth Playground de Google](https://developers.google.com/oauthplayground)),
+**fuera de Colmena**. Prerrequisitos GCP: habilitar la API (p.ej. Gmail), agregar
+el scope (`gmail.readonly`) al consent screen, crear un OAuth client tipo Desktop,
+y correr el consent humano en navegador una vez. Colmena solo consume el refresh
+token resultante; nunca corre la fase de consent.
+
+Spec de diseño: [`docs/superpowers/specs/2026-06-27-native-oauth-http-node-design.md`](../superpowers/specs/2026-06-27-native-oauth-http-node-design.md).
+
 ### Ver también
 
 - Spec de diseño: [`docs/superpowers/specs/2026-05-24-http-multipart-streaming-design.md`](../superpowers/specs/2026-05-24-http-multipart-streaming-design.md)
