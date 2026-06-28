@@ -71,12 +71,18 @@ mod tests {
 
     #[test]
     fn empty_criteria_is_all() {
-        assert_eq!(build_search_command(&SearchCriteria::default()).unwrap(), "ALL");
+        assert_eq!(
+            build_search_command(&SearchCriteria::default()).unwrap(),
+            "ALL"
+        );
     }
 
     #[test]
     fn unseen_only() {
-        let c = SearchCriteria { unseen: true, ..Default::default() };
+        let c = SearchCriteria {
+            unseen: true,
+            ..Default::default()
+        };
         assert_eq!(build_search_command(&c).unwrap(), "UNSEEN");
     }
 
@@ -109,22 +115,32 @@ mod tests {
 
     #[test]
     fn invalid_date_errors() {
-        let c = SearchCriteria { since: Some("06/01/2026".into()), ..Default::default() };
+        let c = SearchCriteria {
+            since: Some("06/01/2026".into()),
+            ..Default::default()
+        };
         let err = build_search_command(&c).unwrap_err();
         assert!(err.contains("invalid date"));
     }
 
     #[test]
     fn quotes_are_escaped() {
-        let c = SearchCriteria { subject: Some("he said \"hi\"".into()), ..Default::default() };
-        assert_eq!(build_search_command(&c).unwrap(), "SUBJECT \"he said \\\"hi\\\"\"");
+        let c = SearchCriteria {
+            subject: Some("he said \"hi\"".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            build_search_command(&c).unwrap(),
+            "SUBJECT \"he said \\\"hi\\\"\""
+        );
     }
 
     #[test]
     fn deserializes_from_json() {
         let c: SearchCriteria = serde_json::from_value(serde_json::json!({
             "unseen": true, "from": "a@b.com"
-        })).unwrap();
+        }))
+        .unwrap();
         assert!(c.unseen);
         assert_eq!(c.from.as_deref(), Some("a@b.com"));
     }
