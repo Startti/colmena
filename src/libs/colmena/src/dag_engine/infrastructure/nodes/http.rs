@@ -2083,6 +2083,41 @@ mod oauth_integration_tests {
     }
 
     #[tokio::test]
+    async fn execute_surfaces_revoked_refresh_token_error() {
+        use crate::google_oauth::infrastructure::OAuthProviderCache;
+        use std::collections::HashMap;
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        // Token endpoint returns invalid_grant (revoked/expired refresh token).
+        let token_srv = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(400).set_body_string(
+                r#"{"error":"invalid_grant","error_description":"Token has been expired or revoked."}"#,
+            ))
+            .mount(&token_srv)
+            .await;
+
+        let node = HttpNode::new().with_oauth_cache(std::sync::Arc::new(OAuthProviderCache::new()));
+        let config = serde_json::json!({
+            "base_url": "https://api.example.com", "endpoint": "/data", "method": "GET",
+            "auth": { "type": "oauth2_refresh_token", "token_url": token_srv.uri(),
+                      "client_id": "cid", "client_secret": "csec", "refresh_token": "rt" }
+        });
+        let inputs: HashMap<String, serde_json::Value> = HashMap::new();
+        let mut state = serde_json::Value::Null;
+        let err = node
+            .execute(&inputs, &config, &mut state, None)
+            .await
+            .expect_err("revoked token must error");
+        // The mint fails before any API call; the error must surface (our "OAuth:" prefix).
+        assert!(
+            format!("{err}").contains("OAuth"),
+            "expected OAuth error, got: {err}"
+        );
+    }
+
+    #[tokio::test]
     async fn execute_rejects_auth_plus_bearer_token() {
         use std::collections::HashMap;
         let node = HttpNode::new().with_oauth_cache(std::sync::Arc::new(

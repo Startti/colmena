@@ -593,6 +593,13 @@ El token **nunca** cruza el límite con el modelo en ninguno de los 3 puntos de 
 | **Args del LLM** | `auth` se lee solo de config fixed, nunca de inputs; el LLM no puede setearlo ni sobreescribirlo. |
 | **Resultado de la tool** | El output es solo el body de la respuesta de la API; el header `Authorization` y el access token nunca se incluyen ni cruzan el límite SSE (reforzado por el flag `secure` y el scrubber). |
 
+> 🔴 **Advertencia de seguridad — no expongas `headers` al LLM en tools OAuth.**
+> El guard de exclusión mutua solo verifica las claves `bearer_token`/`authorization`;
+> NO inspecciona un `Authorization` dentro de un objeto `headers`. Si expones
+> `headers` como campo visible al LLM (en `node_schema` sin `fixed`), el modelo
+> podría inyectar un header `Authorization` propio (se enviaría junto al Bearer de
+> OAuth, al host fijo). En tools con `auth`, mantén `headers` fijo o ausente.
+
 Grafo E2E de referencia: `tests/graphs/external/gmail_oauth_read.json`.
 
 ### Gotcha operativo — los 7 días del consent en "Testing"
