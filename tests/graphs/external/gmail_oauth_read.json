@@ -1,0 +1,84 @@
+{
+  "comment": "E2E graph: an assistant that reads the user's Gmail and summarizes unread messages, calling the Gmail API via the http_request node's native OAuth2 (grant refresh_token). The auth block is config-only and fixed inside node_schema, so the LLM never sees the token. base_url/method/endpoint/auth are fixed (anti-exfiltration: the LLM cannot control the destination host); only query_params is LLM-visible. Requires real Gmail OAuth credentials (GMAIL_CLIENT_ID/GMAIL_CLIENT_SECRET/GMAIL_REFRESH_TOKEN) obtained ONCE offline (e.g. Google OAuth Playground) — do NOT run live without them.",
+  "metadata": {
+    "category": "external",
+    "features": ["llm_call", "http_request", "oauth2_refresh_token", "node_schema"],
+    "requires_env": ["GEMINI_API_KEY", "GMAIL_CLIENT_ID", "GMAIL_CLIENT_SECRET", "GMAIL_REFRESH_TOKEN"]
+  },
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/read-gmail",
+        "method": "POST",
+        "test_payload": {
+          "prompt": "Revisa mi correo y resúmeme los mensajes no leídos."
+        }
+      }
+    },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "model": "gemini-2.5-flash",
+        "api_key": "${GEMINI_API_KEY}",
+        "stream": true,
+        "temperature": 0.2,
+        "system_message": "Eres un asistente que lee el correo del usuario y resume sus mensajes no leídos. Usa la tool gmail_list para obtener los mensajes; puedes pasar query_params como {\"q\": \"is:unread\", \"maxResults\": \"10\"}. Resume de forma clara y breve quién escribió y de qué se trata cada mensaje no leído.",
+        "tool_configurations": {
+          "gmail_list": {
+            "name": "gmail_list",
+            "node_type": "http_request",
+            "description": "Lista mensajes de Gmail del usuario autenticado. Pasa query_params para filtrar, p.ej. {\"q\": \"is:unread\", \"maxResults\": \"10\"}.",
+            "node_schema": {
+              "base_url": {
+                "type": "string",
+                "fixed": "https://gmail.googleapis.com"
+              },
+              "method": {
+                "type": "string",
+                "fixed": "GET"
+              },
+              "endpoint": {
+                "type": "string",
+                "fixed": "/gmail/v1/users/me/messages"
+              },
+              "auth": {
+                "fixed": {
+                  "type": "oauth2_refresh_token",
+                  "token_url": "https://oauth2.googleapis.com/token",
+                  "client_id": "${GMAIL_CLIENT_ID}",
+                  "client_secret": "${GMAIL_CLIENT_SECRET}",
+                  "refresh_token": "${GMAIL_REFRESH_TOKEN}"
+                }
+              },
+              "query_params": {
+                "type": "object",
+                "required": false,
+                "description": "Filtros de Gmail, p.ej. {\"q\": \"is:unread\", \"maxResults\": \"10\"}."
+              }
+            }
+          }
+        }
+      }
+    },
+    "log": {
+      "type": "log",
+      "inputs": {
+        "message": "📧 Resumen de correos no leídos:\n\n{{result}}"
+      }
+    }
+  },
+  "edges": [
+    {
+      "from": "trigger",
+      "to": "agent",
+      "comment": "Pasa el prompt al agente"
+    },
+    {
+      "from": "agent.result",
+      "to": "log",
+      "comment": "Loguea el resumen del agente"
+    }
+  ]
+}

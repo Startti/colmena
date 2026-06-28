@@ -6,6 +6,27 @@ Si vas a empezar a trabajar en algo de acá, sacalo de esta lista y agregalo al 
 
 ---
 
+## Persistencia del token OAuth en DB (v1.1 del OAuth nativo de `http_request`)
+
+- [ ] **Persistir tokens OAuth en el store de secure_values.** El OAuth nativo
+  de `http_request` (spec
+  [`2026-06-27-native-oauth-http-node-design.md`](superpowers/specs/2026-06-27-native-oauth-http-node-design.md))
+  ship v1 con provider **en memoria** (sin persistencia). Mejora diferida: un
+  `PersistentTokenProvider` que decore al `AuthTokenProvider` actual, respaldado
+  por la cripto de secure_values (AES-256-GCM, `SECURE_VALUES_KEY`) en una tabla
+  hermana `oauth_token_cache` (NO `secure_value_mappings`). Dos sub-features:
+  (1) **cache cross-run del access token** → evita el mint frío por run
+  (~100-300ms; beneficio latencia/costo); (2) **write-back del refresh token
+  rotado** → cierra el "WARN-pero-no-persiste", **requiere `SELECT FOR UPDATE`**
+  por el race multi-instancia en Cloud Run. **Trigger:** retomar solo ante
+  necesidad medida — un proveedor que fuerce rotación de refresh token (Google
+  por default no rota), o latencia comprobada del mint por run. Costo al
+  retomar: migración Prisma en ADP (`packages/database`, ownership de otro
+  equipo, solo `migrate deploy`) + exposición at-rest nueva del access token.
+  Es 100% aditivo (el trait ya abstrae la fuente del token).
+
+---
+
 ## ⭐ Cola priorizada — daniel@startti.co (2026-06-09)
 
 > Items elevados por el owner el 2026-06-09 tras shippear Subsystem G v1.1.

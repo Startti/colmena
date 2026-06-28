@@ -149,6 +149,7 @@
         "Extra non-reserved input keys with primitive values are automatically added as query params.",
         "bearer_token input maps to the Authorization: Bearer header.",
         "When secure: true in fixed_config, the response is hashed — the LLM never sees real tokens.",
+        "Native OAuth2: an 'auth' block (type oauth2_refresh_token) makes the node mint/cache/refresh the access token in memory and retry once on 401 (403/429 pass through). Always place 'auth' as a fixed field in node_schema — the LLM never sees the token. When auth is set, base_url MUST be fixed (anti-exfiltration). Config-only and mutually exclusive with bearer_token/authorization.",
         "reserved_keys (never sent as query params): body, query_params, headers, base_url, endpoint, method, bearer_token, authorization, secure, __colmena_session_id, __node_id, __colmena_resume_answer"
       ],
       "examples": {
@@ -239,6 +240,36 @@
                     "adults":                  { "type": "string", "required": true,  "description": "Número de pasajeros adultos" },
                     "max":                     { "type": "string", "fixed": "5" }
                   }
+                }
+              }
+            }
+          }
+        },
+        "oauth2_native_refresh_token": {
+          "description": "Protected API via native OAuth2 (grant refresh_token). The whole 'auth' block is a fixed field inside node_schema, so the LLM never sees it — not in the tool schema, not in args, not in the result. The node mints/caches/refreshes the access token in memory and retries once on 401. base_url MUST be fixed when auth is set (anti-exfiltration: the LLM cannot control the destination host); the LLM only sees query_params here.",
+          "requires_env": ["GMAIL_CLIENT_ID", "GMAIL_CLIENT_SECRET", "GMAIL_REFRESH_TOKEN"],
+          "tool_configurations_entry": {
+            "gmail_list": {
+              "name": "gmail_list",
+              "description": "Listar mensajes de Gmail del usuario. Pasa query_params para filtrar, e.g. {\"q\": \"is:unread\"}.",
+              "node_type": "http_request",
+              "node_schema": {
+                "base_url": { "type": "string", "fixed": "https://gmail.googleapis.com" },
+                "method":   { "type": "string", "fixed": "GET" },
+                "endpoint": { "type": "string", "fixed": "/gmail/v1/users/me/messages" },
+                "auth": {
+                  "fixed": {
+                    "type": "oauth2_refresh_token",
+                    "token_url": "https://oauth2.googleapis.com/token",
+                    "client_id": "${GMAIL_CLIENT_ID}",
+                    "client_secret": "${GMAIL_CLIENT_SECRET}",
+                    "refresh_token": "${GMAIL_REFRESH_TOKEN}"
+                  }
+                },
+                "query_params": {
+                  "type": "object",
+                  "required": false,
+                  "description": "Filtros Gmail, e.g. {\"q\": \"is:unread\", \"maxResults\": \"10\"}"
                 }
               }
             }

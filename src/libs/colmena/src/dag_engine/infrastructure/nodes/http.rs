@@ -37,6 +37,9 @@ pub struct HttpNode {
     /// (document_id → storage_key → StoredStream); when `None`, the legacy
     /// direct `storage.read_stream(<storage_key>)` path is used.
     attachment_resolver: Option<Arc<dyn crate::llm::domain::attachments::AttachmentStreamResolver>>,
+    /// Shared OAuth provider cache. When set, a config `auth` block authenticates
+    /// via the refresh_token grant, reusing one token per credential fingerprint.
+    oauth_cache: Option<Arc<crate::google_oauth::infrastructure::OAuthProviderCache>>,
 }
 
 impl Default for HttpNode {
@@ -225,6 +228,7 @@ impl HttpNode {
         Self {
             storage: None,
             attachment_resolver: None,
+            oauth_cache: None,
         }
     }
 
@@ -245,6 +249,59 @@ impl HttpNode {
     ) -> Self {
         self.attachment_resolver = Some(resolver);
         self
+    }
+
+    /// Wire the shared OAuth provider cache so config `auth` blocks
+    /// authenticate via the refresh_token grant.
+    pub fn with_oauth_cache(
+        mut self,
+        cache: Arc<crate::google_oauth::infrastructure::OAuthProviderCache>,
+    ) -> Self {
+        self.oauth_cache = Some(cache);
+        self
+    }
+
+    /// Resolve the OAuth provider for this request, if an `auth` block is
+    /// configured. Returns Ok(None) when there is no `auth` block.
+    fn resolve_oauth_provider(
+        &self,
+        config: &Value,
+        inputs: &NodeInputs,
+    ) -> Result<
+        Option<Arc<crate::google_oauth::infrastructure::OAuthRefreshTokenProvider>>,
+        Box<dyn StdError + Send + Sync>,
+    > {
+        let spec = match crate::dag_engine::infrastructure::nodes::http_oauth::parse_oauth_auth(
+            config, inputs,
+        )
+        .map_err(|e| {
+            Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
+                as Box<dyn StdError + Send + Sync>
+        })? {
+            Some(s) => s,
+            None => return Ok(None),
+        };
+        let cache = self.oauth_cache.as_ref().ok_or_else(|| {
+            Box::new(std::io::Error::other(
+                "http_request: `auth` block set but no OAuthProviderCache wired",
+            )) as Box<dyn StdError + Send + Sync>
+        })?;
+        let resolve = |s: &str| -> Result<String, Box<dyn StdError + Send + Sync>> {
+            Self::resolve_env_vars(s).map_err(|e| {
+                Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
+                    as Box<dyn StdError + Send + Sync>
+            })
+        };
+        let token_url = resolve(&spec.token_url)?;
+        let client_id = resolve(&spec.client_id)?;
+        let client_secret = resolve(&spec.client_secret)?;
+        let refresh_token = resolve(&spec.refresh_token)?;
+        Ok(Some(cache.get_or_create(
+            &token_url,
+            &client_id,
+            &client_secret,
+            &refresh_token,
+        )))
     }
 
     /// Recursively walks a JSON value, replacing every string of the form
@@ -821,30 +878,41 @@ impl ExecutableNode for HttpNode {
             }
         }
 
+        // --- Native OAuth2 (refresh_token grant) ---
+        // Parse the `auth` block (config-only) and mint a provider. Validation
+        // includes mutual exclusion with bearer_token/authorization and the
+        // base_url-from-inputs guard.
+        let oauth_provider = self.resolve_oauth_provider(config, inputs)?;
+
         // Handle specific auth inputs. Read from `inputs` first (priority), then
         // fall back to `config` so delivered graphs can fix the token in `config`.
         // Values support `${ENV_VAR}` resolution (e.g. `${HUBSPOT_PRIVATE_APP_TOKEN}`).
-        if let Some(token) = inputs
-            .get("bearer_token")
-            .and_then(|v| v.as_str())
-            .or_else(|| config.get("bearer_token").and_then(|v| v.as_str()))
-        {
-            let token = Self::resolve_env_vars(token).map_err(|e| {
-                Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
-                    as Box<dyn StdError + Send + Sync>
-            })?;
-            request_builder = request_builder.header("Authorization", format!("Bearer {}", token));
-        }
-        if let Some(auth) = inputs
-            .get("authorization")
-            .and_then(|v| v.as_str())
-            .or_else(|| config.get("authorization").and_then(|v| v.as_str()))
-        {
-            let auth = Self::resolve_env_vars(auth).map_err(|e| {
-                Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
-                    as Box<dyn StdError + Send + Sync>
-            })?;
-            request_builder = request_builder.header("Authorization", auth);
+        // Skipped entirely when native OAuth is active so we never set a second
+        // Authorization header (parse_oauth_auth already rejects the combo).
+        if oauth_provider.is_none() {
+            if let Some(token) = inputs
+                .get("bearer_token")
+                .and_then(|v| v.as_str())
+                .or_else(|| config.get("bearer_token").and_then(|v| v.as_str()))
+            {
+                let token = Self::resolve_env_vars(token).map_err(|e| {
+                    Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
+                        as Box<dyn StdError + Send + Sync>
+                })?;
+                request_builder =
+                    request_builder.header("Authorization", format!("Bearer {}", token));
+            }
+            if let Some(auth) = inputs
+                .get("authorization")
+                .and_then(|v| v.as_str())
+                .or_else(|| config.get("authorization").and_then(|v| v.as_str()))
+            {
+                let auth = Self::resolve_env_vars(auth).map_err(|e| {
+                    Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
+                        as Box<dyn StdError + Send + Sync>
+                })?;
+                request_builder = request_builder.header("Authorization", auth);
+            }
         }
 
         // 5. Query Params (Config + Inputs) — resolve ${ENV_VAR} in values
@@ -938,6 +1006,14 @@ impl ExecutableNode for HttpNode {
         }
 
         if Self::is_multipart_mode(&merged_headers) {
+            // v1: native OAuth is wired only into the main send path below.
+            // `execute_multipart` has its own send, so refuse rather than
+            // silently dropping the `auth` block.
+            if oauth_provider.is_some() {
+                return Err(Box::new(std::io::Error::other(
+                    "http_request: native OAuth (`auth`) is not supported with multipart bodies in v1",
+                )) as Box<dyn StdError + Send + Sync>);
+            }
             let agent_session_id = inputs
                 .get("__colmena_agent_session_id")
                 .and_then(|v| v.as_str());
@@ -980,7 +1056,15 @@ impl ExecutableNode for HttpNode {
         // Note: Headers are not easily printable from request_builder, but we can print what we added
         // println!("DEBUG: Headers: {:?}", request_builder); // RequestBuilder doesn't implement Debug nicely for headers
 
-        let response = request_builder.send().await?;
+        let response = if let Some(provider) = oauth_provider {
+            crate::dag_engine::infrastructure::nodes::http_oauth::send_with_oauth_retry(
+                request_builder,
+                provider,
+            )
+            .await?
+        } else {
+            request_builder.send().await?
+        };
         let status = response.status().as_u16();
         println!("[HttpNode] ← {} ({})", status, full_url_str);
 
@@ -1940,5 +2024,116 @@ mod multipart_execute_tests {
             .await
             .expect("ok");
         assert_eq!(out["status"], 200);
+    }
+}
+
+#[cfg(test)]
+mod oauth_integration_tests {
+    use super::*;
+
+    #[test]
+    fn with_oauth_cache_sets_field() {
+        use crate::google_oauth::infrastructure::OAuthProviderCache;
+        let node = HttpNode::new().with_oauth_cache(std::sync::Arc::new(OAuthProviderCache::new()));
+        assert!(node.oauth_cache.is_some());
+    }
+
+    #[tokio::test]
+    async fn execute_authenticates_with_oauth_block() {
+        use crate::google_oauth::infrastructure::OAuthProviderCache;
+        use std::collections::HashMap;
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let token_srv = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"{"access_token":"ya29.exec","expires_in":3600,"token_type":"Bearer"}"#,
+            ))
+            .mount(&token_srv)
+            .await;
+
+        let api = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/data"))
+            .and(header("Authorization", "Bearer ya29.exec"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true})))
+            .mount(&api)
+            .await;
+
+        let node = HttpNode::new().with_oauth_cache(std::sync::Arc::new(OAuthProviderCache::new()));
+        let config = serde_json::json!({
+            "base_url": api.uri(),
+            "endpoint": "/data",
+            "method": "GET",
+            "auth": {
+                "type": "oauth2_refresh_token",
+                "token_url": token_srv.uri(),
+                "client_id": "cid", "client_secret": "csec", "refresh_token": "rt"
+            }
+        });
+        let inputs: HashMap<String, serde_json::Value> = HashMap::new();
+        let mut state = serde_json::Value::Null;
+        let out = node
+            .execute(&inputs, &config, &mut state, None)
+            .await
+            .expect("ok");
+        assert_eq!(out["status"], 200);
+        assert_eq!(out["body"]["ok"], true);
+    }
+
+    #[tokio::test]
+    async fn execute_surfaces_revoked_refresh_token_error() {
+        use crate::google_oauth::infrastructure::OAuthProviderCache;
+        use std::collections::HashMap;
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        // Token endpoint returns invalid_grant (revoked/expired refresh token).
+        let token_srv = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(400).set_body_string(
+                r#"{"error":"invalid_grant","error_description":"Token has been expired or revoked."}"#,
+            ))
+            .mount(&token_srv)
+            .await;
+
+        let node = HttpNode::new().with_oauth_cache(std::sync::Arc::new(OAuthProviderCache::new()));
+        let config = serde_json::json!({
+            "base_url": "https://api.example.com", "endpoint": "/data", "method": "GET",
+            "auth": { "type": "oauth2_refresh_token", "token_url": token_srv.uri(),
+                      "client_id": "cid", "client_secret": "csec", "refresh_token": "rt" }
+        });
+        let inputs: HashMap<String, serde_json::Value> = HashMap::new();
+        let mut state = serde_json::Value::Null;
+        let err = node
+            .execute(&inputs, &config, &mut state, None)
+            .await
+            .expect_err("revoked token must error");
+        // The mint fails before any API call; the error must surface (our "OAuth:" prefix).
+        assert!(
+            format!("{err}").contains("OAuth"),
+            "expected OAuth error, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_rejects_auth_plus_bearer_token() {
+        use std::collections::HashMap;
+        let node = HttpNode::new().with_oauth_cache(std::sync::Arc::new(
+            crate::google_oauth::infrastructure::OAuthProviderCache::new(),
+        ));
+        let config = serde_json::json!({
+            "base_url": "https://x", "endpoint": "/y", "bearer_token": "static",
+            "auth": { "type": "oauth2_refresh_token", "token_url": "u",
+                      "client_id": "c", "client_secret": "s", "refresh_token": "r" }
+        });
+        let inputs: HashMap<String, serde_json::Value> = HashMap::new();
+        let mut state = serde_json::Value::Null;
+        let err = node
+            .execute(&inputs, &config, &mut state, None)
+            .await
+            .expect_err("mutually exclusive");
+        assert!(format!("{err}").contains("mutually exclusive"));
     }
 }
