@@ -160,6 +160,7 @@ mod tests {
                 arguments: args.to_string(),
             },
             response: None,
+            provider_signature: None,
         }
     }
 

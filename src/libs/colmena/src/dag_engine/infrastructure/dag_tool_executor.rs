@@ -3640,6 +3640,7 @@ mod toolkit_runtime_tests {
                 arguments: r#"{"message":"hola"}"#.to_string(),
             },
             response: None,
+            provider_signature: None,
         };
         let result = exec.execute(&call).await.expect("execute ok");
         assert!(result.success, "got error: {:?}", result.error);
@@ -3662,6 +3663,7 @@ mod toolkit_runtime_tests {
                 arguments: "{}".to_string(),
             },
             response: None,
+            provider_signature: None,
         };
         let result = exec
             .execute(&call)
@@ -3818,6 +3820,7 @@ mod toolkit_runtime_tests {
                 arguments: r#"{"url":"not-a-real-url-xyz"}"#.to_string(),
             },
             response: None,
+            provider_signature: None,
         };
 
         let result = executor
@@ -3886,6 +3889,7 @@ mod toolkit_runtime_tests {
                 r#"{"document_id":"doc-x"}"#.to_string(),
             ),
             response: None,
+            provider_signature: None,
         };
 
         let res = executor.execute(&call).await.unwrap();
@@ -3954,6 +3958,7 @@ mod attachment_plumbing_tests {
             call_type: "function".to_string(),
             function: FunctionCall::new("any".to_string(), r#"{}"#.to_string()),
             response: None,
+            provider_signature: None,
         }
     }
 

@@ -64,6 +64,7 @@ impl GeminiAdapter {
                         inline_data: None,
                         file_data: None,
                         thought: None,
+                        thought_signature: None,
                     });
 
                     if let Some(files) = message.files() {
@@ -80,6 +81,7 @@ impl GeminiAdapter {
                                     }),
                                     file_data: None,
                                     thought: None,
+                                    thought_signature: None,
                                 },
                                 FileSource::Uploaded(r) => GeminiPart {
                                     text: None,
@@ -91,6 +93,7 @@ impl GeminiAdapter {
                                         file_uri: r.provider_file_id.clone(),
                                     }),
                                     thought: None,
+                                    thought_signature: None,
                                 },
                                 FileSource::SignedUrl(_) => {
                                     return Err(LlmError::InternalError {
@@ -123,6 +126,7 @@ impl GeminiAdapter {
                             inline_data: None,
                             file_data: None,
                             thought: None,
+                            thought_signature: None,
                         });
                     }
 
@@ -139,6 +143,9 @@ impl GeminiAdapter {
                                 inline_data: None,
                                 file_data: None,
                                 thought: None,
+                                // Replay the thinking-model signature verbatim, or
+                                // Gemini rejects the request with HTTP 400.
+                                thought_signature: tc.provider_signature.clone(),
                             });
                         }
                     }
@@ -152,6 +159,7 @@ impl GeminiAdapter {
                             inline_data: None,
                             file_data: None,
                             thought: None,
+                            thought_signature: None,
                         });
                     }
 
@@ -203,6 +211,7 @@ impl GeminiAdapter {
                             inline_data: None,
                             file_data: None,
                             thought: None,
+                            thought_signature: None,
                         }]),
                         text: None,
                     });
@@ -378,14 +387,18 @@ impl LlmRepository for GeminiAdapter {
                             part.function_call.as_ref().map(|fc| {
                                 // Generate a unique ID for the tool call
                                 let call_id = format!("call_{}", uuid::Uuid::new_v4());
-                                ToolCall::new(
+                                let mut call = ToolCall::new(
                                     call_id,
                                     FunctionCall::new(
                                         fc.name.clone(),
                                         serde_json::to_string(&fc.args)
                                             .unwrap_or_else(|_| "{}".to_string()),
                                     ),
-                                )
+                                );
+                                // Carry the thinking-model signature so it can be
+                                // replayed when this call is sent back in history.
+                                call.provider_signature = part.thought_signature.clone();
+                                call
                             })
                         })
                         .collect();
@@ -609,6 +622,7 @@ impl LlmRepository for GeminiAdapter {
                                         id: call_id,
                                         name: fc.name.clone(),
                                         args_chunk: args_str,
+                                        provider_signature: part.thought_signature.clone(),
                                     }),
                                     provider.clone(),
                                     is_final,
@@ -745,6 +759,12 @@ struct GeminiPart {
     /// Present and `true` on thought/reasoning parts from Gemini 2.5+ models.
     #[serde(skip_serializing_if = "Option::is_none")]
     thought: Option<bool>,
+    /// Opaque signature attached to function-call (and thought) parts by Gemini
+    /// thinking models. MUST be echoed back verbatim when the part is replayed
+    /// in the conversation, or the API rejects the request with HTTP 400
+    /// ("Function call is missing a thought_signature").
+    #[serde(skip_serializing_if = "Option::is_none", rename = "thoughtSignature")]
+    thought_signature: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1076,6 +1096,82 @@ mod tests {
             "response must be an object, got {fr:?}"
         );
         assert_eq!(fr["response"]["result"], "hello");
+    }
+
+    // ----------------------------------------------------------------------
+    // thoughtSignature round-trip (Gemini thinking models)
+    //
+    // Thinking models (gemini-3.5-flash, 2.5 with thinking budget) attach a
+    // `thoughtSignature` to functionCall parts and REQUIRE it to be replayed
+    // verbatim when the call is sent back in history, else the API rejects the
+    // request with HTTP 400. `ToolCall::provider_signature` carries it through.
+    // ----------------------------------------------------------------------
+
+    fn build_request_replaying_tool_call(
+        signature: Option<&str>,
+    ) -> crate::llm::domain::LlmRequest {
+        use crate::llm::domain::{
+            FunctionCall, LlmConfig, LlmMessage, LlmProvider, LlmRequest, ProviderKind, ToolCall,
+        };
+        let provider =
+            LlmProvider::new(ProviderKind::Google, "test_key".to_string(), None).unwrap();
+        let config = LlmConfig::new(provider);
+        let mut tool_call = ToolCall::new(
+            "call_1".to_string(),
+            FunctionCall::new("load_skill".to_string(), "{}".to_string()),
+        );
+        tool_call.provider_signature = signature.map(|s| s.to_string());
+        let messages = vec![
+            LlmMessage::user("hi".to_string()).unwrap(),
+            LlmMessage::assistant_with_tool_calls("".to_string(), vec![tool_call]).unwrap(),
+        ];
+        LlmRequest::new(messages, config, false).unwrap()
+    }
+
+    fn extract_model_function_call_part(contents: &[GeminiContent]) -> &GeminiPart {
+        let model_msg = contents.iter().find(|c| c.role == "model").unwrap();
+        model_msg
+            .parts
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|p| p.function_call.is_some())
+            .unwrap()
+    }
+
+    #[test]
+    fn assistant_tool_call_replays_thought_signature() {
+        let req = build_request_replaying_tool_call(Some("sig_abc123"));
+        let (_, contents) = GeminiAdapter::new().convert_messages(&req).unwrap();
+        let part = extract_model_function_call_part(&contents);
+        assert_eq!(part.thought_signature.as_deref(), Some("sig_abc123"));
+        // The wire JSON must carry the camelCase key.
+        let wire = serde_json::to_value(part).unwrap();
+        assert_eq!(wire["thoughtSignature"], "sig_abc123");
+    }
+
+    #[test]
+    fn tool_call_without_signature_omits_thought_signature() {
+        let req = build_request_replaying_tool_call(None);
+        let (_, contents) = GeminiAdapter::new().convert_messages(&req).unwrap();
+        let part = extract_model_function_call_part(&contents);
+        assert!(part.thought_signature.is_none());
+        // Absent signature must NOT serialize the key (wire-format unchanged
+        // for non-thinking models — no regression).
+        let wire = serde_json::to_value(part).unwrap();
+        assert!(wire.get("thoughtSignature").is_none());
+    }
+
+    #[test]
+    fn gemini_part_deserializes_thought_signature_from_response() {
+        // A functionCall part as returned by a thinking model.
+        let raw = serde_json::json!({
+            "functionCall": { "name": "load_skill", "args": {} },
+            "thoughtSignature": "sig_from_response"
+        });
+        let part: GeminiPart = serde_json::from_value(raw).unwrap();
+        assert_eq!(part.thought_signature.as_deref(), Some("sig_from_response"));
+        assert!(part.function_call.is_some());
     }
 
     #[test]

@@ -141,6 +141,7 @@ impl LlmRepository for ScriptedAdapter {
                         id,
                         name: tool_name,
                         args_chunk: args_str,
+                        provider_signature: None,
                     }),
                     provider,
                     true,

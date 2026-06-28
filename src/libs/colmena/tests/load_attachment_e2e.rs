@@ -46,6 +46,7 @@ impl LlmRepository for ScriptedLlm {
                     r#"{"document_id":"doc-1"}"#.to_string(),
                 ),
                 response: None,
+                provider_signature: None,
             };
             Ok(
                 LlmResponse::new(LlmRequestId::new(), String::new(), scripted_provider())
