@@ -20,6 +20,7 @@ use std::sync::Arc;
 #[derive(Default)]
 pub struct ImapNode {
     storage: Option<Arc<dyn crate::storage::domain::OutputStorageRepository>>,
+    // reserved for future cross-provider attachment resolution; mirrors http.rs injection
     attachment_resolver: Option<Arc<dyn crate::llm::domain::attachments::AttachmentStreamResolver>>,
     attachment_registry: Option<Arc<dyn AttachmentRegistry>>,
 }
@@ -357,11 +358,23 @@ impl ExecutableNode for ImapNode {
                 let fetch =
                     item.map_err(|e| format!("imap_read: fetch failed for uid {uid}: {e}"))?;
                 if let Some(body) = fetch.body() {
-                    // Skip unparseable messages — don't fail the whole batch.
-                    if let Ok(mut parsed) = parse_email(body, body_max_bytes) {
-                        // The parser cannot know the UID; fill it from the fetch loop.
-                        parsed.uid = *uid;
-                        emails.push(parsed);
+                    // Skip unparseable messages with a warning — don't fail the
+                    // whole batch. Only the uid + parse error are logged; never
+                    // the message body or any credential.
+                    match parse_email(body, body_max_bytes) {
+                        Ok(mut parsed) => {
+                            // The parser cannot know the UID; fill it from the fetch loop.
+                            parsed.uid = *uid;
+                            emails.push(parsed);
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                target: "colmena::imap",
+                                uid = %uid,
+                                error = %e,
+                                "imap_read: skipping unparseable message"
+                            );
+                        }
                     }
                 }
             }
