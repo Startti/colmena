@@ -109,7 +109,12 @@ impl HashMapNodeRegistry {
             // Plan A: also pass the AttachmentStreamResolver when available so
             // multipart parts sourced from `$attachment:<document_id>` look up
             // the document via the registry (with raw-storage_key fallback).
-            let mut http_node = HttpNode::new();
+            // Native OAuth: one shared provider cache for all http_request usages
+            // (and tool-calls) in this engine, keyed by credential fingerprint so the
+            // same identity mints one token.
+            let oauth_cache =
+                Arc::new(crate::google_oauth::infrastructure::OAuthProviderCache::new());
+            let mut http_node = HttpNode::new().with_oauth_cache(oauth_cache);
             if let Some(st) = storage.clone() {
                 http_node = http_node.with_storage(st);
             }

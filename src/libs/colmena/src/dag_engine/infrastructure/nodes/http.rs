@@ -37,6 +37,9 @@ pub struct HttpNode {
     /// (document_id → storage_key → StoredStream); when `None`, the legacy
     /// direct `storage.read_stream(<storage_key>)` path is used.
     attachment_resolver: Option<Arc<dyn crate::llm::domain::attachments::AttachmentStreamResolver>>,
+    /// Shared OAuth provider cache. When set, a config `auth` block authenticates
+    /// via the refresh_token grant, reusing one token per credential fingerprint.
+    oauth_cache: Option<Arc<crate::google_oauth::infrastructure::OAuthProviderCache>>,
 }
 
 impl Default for HttpNode {
@@ -225,6 +228,7 @@ impl HttpNode {
         Self {
             storage: None,
             attachment_resolver: None,
+            oauth_cache: None,
         }
     }
 
@@ -244,6 +248,16 @@ impl HttpNode {
         resolver: Arc<dyn crate::llm::domain::attachments::AttachmentStreamResolver>,
     ) -> Self {
         self.attachment_resolver = Some(resolver);
+        self
+    }
+
+    /// Wire the shared OAuth provider cache so config `auth` blocks
+    /// authenticate via the refresh_token grant.
+    pub fn with_oauth_cache(
+        mut self,
+        cache: Arc<crate::google_oauth::infrastructure::OAuthProviderCache>,
+    ) -> Self {
+        self.oauth_cache = Some(cache);
         self
     }
 
@@ -1940,5 +1954,17 @@ mod multipart_execute_tests {
             .await
             .expect("ok");
         assert_eq!(out["status"], 200);
+    }
+}
+
+#[cfg(test)]
+mod oauth_integration_tests {
+    use super::*;
+
+    #[test]
+    fn with_oauth_cache_sets_field() {
+        use crate::google_oauth::infrastructure::OAuthProviderCache;
+        let node = HttpNode::new().with_oauth_cache(std::sync::Arc::new(OAuthProviderCache::new()));
+        assert!(node.oauth_cache.is_some());
     }
 }
