@@ -118,6 +118,23 @@ impl HashMapNodeRegistry {
             }
             nodes.insert("http_request".to_string(), Arc::new(http_node));
 
+            // --- Registrar Nodo IMAP ---
+            // Mirror the http_request injection (storage + attachment_resolver)
+            // and additionally inject the AttachmentRegistry like the media
+            // nodes, so the attachment-download path (persist fetched email
+            // attachments + register them in the catalog) works end-to-end.
+            let mut imap_node = crate::dag_engine::infrastructure::nodes::imap::ImapNode::new();
+            if let Some(st) = storage.clone() {
+                imap_node = imap_node.with_storage(st);
+            }
+            if let Some(resolver) = attachment_resolver.clone() {
+                imap_node = imap_node.with_attachment_resolver(resolver);
+            }
+            if let Some(reg) = attachment_registry.clone() {
+                imap_node = imap_node.with_attachment_registry(reg);
+            }
+            nodes.insert("imap_read".to_string(), Arc::new(imap_node));
+
             // --- Registrar Nodos Socket.IO ---
             nodes.insert("socketio_request".to_string(), Arc::new(SocketIoNode));
 
@@ -515,6 +532,15 @@ mod registry_tavily_tests {
         assert!(
             reg.get_node("router").is_some(),
             "router must be registered as an ExecutableNode"
+        );
+    }
+
+    #[test]
+    fn imap_read_node_is_registered() {
+        let reg = build_registry();
+        assert!(
+            reg.get_node("imap_read").is_some(),
+            "imap_read must be registered as an ExecutableNode"
         );
     }
 }
