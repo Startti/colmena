@@ -12,12 +12,27 @@ use std::sync::Arc;
 
 /// Resolved OAuth2 refresh-token auth, all `${ENV}` still unexpanded
 /// (the caller resolves env vars before use).
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Debug` is hand-written to redact `client_secret` and `refresh_token`
+/// so a stray `{:?}` / `tracing::debug!` can never leak them (mirrors the
+/// redacted Debug convention on `RefreshTokenSecret`).
+#[derive(Clone, PartialEq, Eq)]
 pub struct OAuthAuthSpec {
     pub token_url: String,
     pub client_id: String,
     pub client_secret: String,
     pub refresh_token: String,
+}
+
+impl std::fmt::Debug for OAuthAuthSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OAuthAuthSpec")
+            .field("token_url", &self.token_url)
+            .field("client_id", &self.client_id)
+            .field("client_secret", &"<redacted>")
+            .field("refresh_token", &"<redacted>")
+            .finish()
+    }
 }
 
 /// Parse and validate the `auth` block from `config`.
@@ -187,6 +202,23 @@ mod tests {
         let c = json!({ "auth": { "type": "client_credentials" } });
         let err = parse_oauth_auth(&c, &Default::default()).expect_err("unknown type v1");
         assert!(err.contains("oauth2_refresh_token"));
+    }
+
+    #[test]
+    fn debug_redacts_secrets() {
+        let spec = OAuthAuthSpec {
+            token_url: "https://oauth2.googleapis.com/token".to_string(),
+            client_id: "cid".to_string(),
+            client_secret: "SUPERSECRET".to_string(),
+            refresh_token: "1//RTSECRET".to_string(),
+        };
+        let dbg = format!("{spec:?}");
+        assert!(!dbg.contains("SUPERSECRET"));
+        assert!(!dbg.contains("1//RTSECRET"));
+        assert!(dbg.contains("<redacted>"));
+        // Non-secret fields stay visible for debuggability.
+        assert!(dbg.contains("cid"));
+        assert!(dbg.contains("oauth2.googleapis.com"));
     }
 
     #[tokio::test]
