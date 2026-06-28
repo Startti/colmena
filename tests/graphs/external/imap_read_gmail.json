@@ -1,0 +1,125 @@
+{
+  "comment": "E2E graph: an LLM agent reads the user's Gmail via the imap_read node and summarizes unread messages. The read_email tool is backed by imap_read with host/port/username/password/mailbox as fixed node_schema fields (the password never reaches the LLM). Requires a real Gmail app password (GMAIL_USER + GMAIL_APP_PASSWORD env vars) — do NOT run live without one.",
+  "metadata": {
+    "category": "external",
+    "features": ["node_schema", "imap_read", "llm_call"],
+    "requires_env": ["GEMINI_API_KEY", "GMAIL_USER", "GMAIL_APP_PASSWORD"]
+  },
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/read_email",
+        "method": "POST",
+        "test_payload": {
+          "prompt": "Revisa mi correo y dame un resumen de los mensajes sin leer."
+        }
+      }
+    },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "api_key": "${GEMINI_API_KEY}",
+        "model": "gemini-2.5-flash",
+        "system_message": "Eres un asistente que lee el correo del usuario y resume sus mensajes. Usa la herramienta read_email para buscar correos en su buzón (por defecto, los mensajes sin leer) y devuelve un resumen claro de cada mensaje: remitente, asunto y una breve síntesis del contenido. Si no hay mensajes que coincidan, dilo explícitamente.",
+        "temperature": 0.3,
+        "stream": false,
+        "enabled_tools": ["read_email"],
+        "tool_configurations": {
+          "read_email": {
+            "name": "read_email",
+            "node_type": "imap_read",
+            "description": "Lee correos del buzón del usuario por IMAP (read-only, no marca como leído). Devuelve remitente, destinatario, asunto, fecha, cuerpo en texto y lista de adjuntos. Usa el campo search para filtrar; sin filtros, devuelve los mensajes más recientes.",
+            "node_schema": {
+              "host": {
+                "type": "string",
+                "fixed": "imap.gmail.com"
+              },
+              "port": {
+                "type": "integer",
+                "fixed": 993
+              },
+              "username": {
+                "type": "string",
+                "fixed": "${GMAIL_USER}"
+              },
+              "password": {
+                "type": "string",
+                "fixed": "${GMAIL_APP_PASSWORD}"
+              },
+              "mailbox": {
+                "type": "string",
+                "fixed": "INBOX"
+              },
+              "max_results": {
+                "type": "integer",
+                "fixed": 5
+              },
+              "search": {
+                "type": "object",
+                "required": false,
+                "description": "Criterios de búsqueda estructurados (todos opcionales). unseen (bool): solo no leídos. from/to/subject (string): coincidencia en esos headers. body_contains (string): texto en el cuerpo. since/before (YYYY-MM-DD): rango de fechas.",
+                "properties": {
+                  "unseen": {
+                    "type": "boolean",
+                    "required": false,
+                    "description": "Si es true, solo devuelve mensajes sin leer."
+                  },
+                  "from": {
+                    "type": "string",
+                    "required": false,
+                    "description": "Filtrar por remitente."
+                  },
+                  "to": {
+                    "type": "string",
+                    "required": false,
+                    "description": "Filtrar por destinatario."
+                  },
+                  "subject": {
+                    "type": "string",
+                    "required": false,
+                    "description": "Filtrar por texto en el asunto."
+                  },
+                  "body_contains": {
+                    "type": "string",
+                    "required": false,
+                    "description": "Filtrar por texto en el cuerpo."
+                  },
+                  "since": {
+                    "type": "string",
+                    "required": false,
+                    "description": "Solo mensajes en o después de esta fecha (YYYY-MM-DD)."
+                  },
+                  "before": {
+                    "type": "string",
+                    "required": false,
+                    "description": "Solo mensajes antes de esta fecha (YYYY-MM-DD)."
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "log": {
+      "type": "log",
+      "inputs": {
+        "message": "📧 Resumen de correo:\n\n{{result}}"
+      }
+    }
+  },
+  "edges": [
+    {
+      "from": "trigger",
+      "to": "agent",
+      "comment": "Pasa el prompt del usuario al agente"
+    },
+    {
+      "from": "agent.result",
+      "to": "log",
+      "comment": "Registra el resumen del agente"
+    }
+  ]
+}
