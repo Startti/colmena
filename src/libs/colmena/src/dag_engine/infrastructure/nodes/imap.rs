@@ -98,6 +98,7 @@ impl ImapNode {
                     })
                     .collect();
                 json!({
+                    "uid": e.uid,
                     "from": e.from, "to": e.to, "subject": e.subject, "date": e.date,
                     "body_text": e.body_text, "body_truncated": e.body_truncated,
                     "attachments": atts
@@ -357,7 +358,9 @@ impl ExecutableNode for ImapNode {
                     item.map_err(|e| format!("imap_read: fetch failed for uid {uid}: {e}"))?;
                 if let Some(body) = fetch.body() {
                     // Skip unparseable messages — don't fail the whole batch.
-                    if let Ok(parsed) = parse_email(body, body_max_bytes) {
+                    if let Ok(mut parsed) = parse_email(body, body_max_bytes) {
+                        // The parser cannot know the UID; fill it from the fetch loop.
+                        parsed.uid = *uid;
                         emails.push(parsed);
                     }
                 }
@@ -456,6 +459,7 @@ mod tests {
 
     fn sample(att: bool) -> ParsedEmail {
         ParsedEmail {
+            uid: 1234,
             from: "a@x.com".into(),
             to: "b@x.com".into(),
             subject: "s".into(),
@@ -479,6 +483,7 @@ mod tests {
     fn build_output_without_attachments() {
         let out = ImapNode::build_output(&[sample(false)], &[vec![]]);
         assert_eq!(out["output"]["count"], 1);
+        assert_eq!(out["output"]["messages"][0]["uid"], 1234);
         assert_eq!(out["output"]["messages"][0]["subject"], "s");
         assert_eq!(
             out["output"]["messages"][0]["attachments"]

@@ -16,6 +16,10 @@ pub struct AttachmentInfo {
 /// Structured result of parsing one email.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParsedEmail {
+    /// IMAP UID of the message. The parser cannot know this (it only sees raw
+    /// RFC822 bytes), so it is left `0` here and filled in by the node from the
+    /// fetch loop.
+    pub uid: u32,
     pub from: String,
     pub to: String,
     pub subject: String,
@@ -78,6 +82,8 @@ pub fn parse_email(raw: &[u8], body_max_bytes: usize) -> Result<ParsedEmail, Str
     }
 
     Ok(ParsedEmail {
+        // The parser only sees raw bytes; the node fills the UID from the fetch loop.
+        uid: 0,
         from,
         to,
         subject,
