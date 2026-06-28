@@ -8,6 +8,10 @@ use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
 use crate::dag_engine::domain::observer::ExecutionObserver;
 use crate::dag_engine::infrastructure::nodes::imap_mime::{parse_email, ParsedEmail};
 use crate::dag_engine::infrastructure::nodes::imap_search::{build_search_command, SearchCriteria};
+use crate::dag_engine::infrastructure::nodes::util::attachment_id::build_document_id;
+use crate::llm::domain::attachments::{origin, AttachmentSource, UpsertAttachmentInput};
+use crate::llm::domain::{AttachmentRegistry, ProviderKind};
+use crate::storage::domain::StoreRequest;
 use futures::StreamExt;
 use serde_json::{json, Value};
 use std::error::Error as StdError;
@@ -17,6 +21,7 @@ use std::sync::Arc;
 pub struct ImapNode {
     storage: Option<Arc<dyn crate::storage::domain::OutputStorageRepository>>,
     attachment_resolver: Option<Arc<dyn crate::llm::domain::attachments::AttachmentStreamResolver>>,
+    attachment_registry: Option<Arc<dyn AttachmentRegistry>>,
 }
 
 impl ImapNode {
@@ -37,6 +42,11 @@ impl ImapNode {
         resolver: Arc<dyn crate::llm::domain::attachments::AttachmentStreamResolver>,
     ) -> Self {
         self.attachment_resolver = Some(resolver);
+        self
+    }
+
+    pub fn with_attachment_registry(mut self, reg: Arc<dyn AttachmentRegistry>) -> Self {
+        self.attachment_registry = Some(reg);
         self
     }
 
@@ -164,23 +174,84 @@ impl ImapNode {
         tokio_rustls::TlsConnector::from(Arc::new(config))
     }
 
-    /// Register downloaded attachment bytes as a Colmena attachment, returning a
-    /// `document_id`.
-    ///
-    /// NOT YET WIRED. Producing a real `document_id` requires the
-    /// `AttachmentRegistry.upsert(...)` path (see `tts.rs` / `image_generation.rs`)
-    /// plus an `agent_session_id` — neither of which is threaded into this node's
-    /// struct (it only carries `storage` + `attachment_resolver`). Wiring that is
-    /// its own follow-up task; until then `download_attachments=true` is rejected
-    /// up front in `execute`, so this helper is unreachable.
-    #[allow(dead_code)]
+    /// Persist downloaded attachment bytes via the storage port and register the
+    /// resulting blob as a Colmena attachment, returning a stable `document_id`.
+    /// Mirrors the registration path in `tts.rs` / `image_generation.rs`: the
+    /// `store(...)` call yields a `storage_key`, `build_document_id` derives the
+    /// LLM-facing handle (prefix `email`), and the `AttachmentRegistry.upsert(...)`
+    /// row is written fail-soft (a registry/session-id gap warns but does not fail
+    /// the batch — the bytes are already persisted and reachable by `document_id`).
     async fn register_attachment(
         &self,
-        _filename: &str,
-        _mime: &str,
-        _bytes: &[u8],
-    ) -> Result<String, String> {
-        Err("imap_read: attachment download not yet implemented".to_string())
+        filename: &str,
+        mime: &str,
+        bytes: &[u8],
+        session_id: &Option<String>,
+        agent_session_id: &Option<String>,
+    ) -> Result<String, Box<dyn StdError + Send + Sync>> {
+        let storage = self
+            .storage
+            .as_ref()
+            .ok_or("imap_read: download_attachments requires storage configured")?;
+
+        let stored = storage
+            .store(StoreRequest {
+                bytes: bytes.to_vec(),
+                mime_type: mime.to_string(),
+                filename: filename.to_string(),
+                session_id: session_id.clone(),
+                agent_session_id: agent_session_id.clone(),
+            })
+            .await
+            .map_err(|e| -> Box<dyn StdError + Send + Sync> { Box::new(e) })?;
+
+        // `email` prefix distinguishes IMAP-sourced attachments from image (`img`)
+        // and TTS (`audio`) producers.
+        let document_id = build_document_id(
+            &stored.filename,
+            &stored.mime_type,
+            &stored.storage_key,
+            "email",
+        );
+
+        // Register the downloaded attachment so `load_attachment(document_id)` and
+        // `$attachment:<id>` resolution work downstream. Fail-soft: the bytes are
+        // already persisted, so a registry hiccup must not lose the email batch.
+        if let (Some(reg), Some(agent_sid)) =
+            (self.attachment_registry.as_ref(), agent_session_id.as_ref())
+        {
+            let upsert = UpsertAttachmentInput {
+                agent_session_id: agent_sid.clone(),
+                document_id: document_id.clone(),
+                provider: ProviderKind::Generated,
+                // For `provider: Generated` rows, provider_file_id holds the
+                // canonical storage_key. Cross-provider upload / resolution reads
+                // bytes back via OutputStorageRepository.read(this).
+                provider_file_id: stored.storage_key.clone(),
+                mime_type: stored.mime_type.clone(),
+                filename: stored.filename.clone(),
+                size_bytes: Some(stored.size_bytes),
+                label: None,
+                description: Some(format!("Email attachment: {}", stored.filename)),
+                // Resolver-friendly source: read bytes back through the storage
+                // port using the storage_key as the path.
+                source: AttachmentSource::Path(stored.storage_key.clone()),
+                storage_key: Some(stored.storage_key.clone()),
+                origin: Some(origin::generated_by("imap_read")),
+            };
+            if let Err(e) = reg.upsert(upsert).await {
+                tracing::warn!(
+                    target: "colmena::imap",
+                    error = %e,
+                    document_id = %document_id,
+                    storage_key = %stored.storage_key,
+                    "failed to register imap attachment in attachment registry — \
+                     load_attachment will not see this attachment"
+                );
+            }
+        }
+
+        Ok(document_id)
     }
 }
 
@@ -211,6 +282,16 @@ impl ExecutableNode for ImapNode {
         let download_attachments =
             Self::resolve_bool(inputs, config, "download_attachments")?.unwrap_or(false);
 
+        // Session scope for attachment registration (injected by the engine).
+        let session_id = inputs
+            .get("__colmena_session_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let agent_session_id = inputs
+            .get("__colmena_agent_session_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
         // Structured search → IMAP SEARCH command.
         let criteria: SearchCriteria = match inputs.get("search").or_else(|| config.get("search")) {
             Some(v) if !v.is_null() => serde_json::from_value(v.clone())
@@ -219,13 +300,10 @@ impl ExecutableNode for ImapNode {
         };
         let search_cmd = build_search_command(&criteria)?;
 
-        // Step 1: attachment download requires a working storage backend AND the
-        // registry/session plumbing (not yet on this node) — reject early.
-        if download_attachments {
-            if self.storage.is_none() {
-                return Err("imap_read: download_attachments requires storage configured".into());
-            }
-            return Err("imap_read: attachment download not yet implemented".into());
+        // Step 1: attachment download requires a working storage backend — reject
+        // early before opening any network connection.
+        if download_attachments && self.storage.is_none() {
+            return Err("imap_read: download_attachments requires storage configured".into());
         }
 
         // Step 2: TCP + rustls TLS, build Client, login.
@@ -292,11 +370,35 @@ impl ExecutableNode for ImapNode {
         // Step 6: logout (best-effort).
         let _ = session.logout().await;
 
-        // Step 7: no attachment download in this path → all doc_ids are None.
-        let doc_ids: Vec<Vec<Option<String>>> = emails
-            .iter()
-            .map(|e| vec![None; e.attachments.len()])
-            .collect();
+        // Step 7: optionally download + register attachments. `doc_ids[i][j]`
+        // aligns with `emails[i].attachments[j]`; `None` when not downloaded.
+        let mut doc_ids: Vec<Vec<Option<String>>> = Vec::with_capacity(emails.len());
+        for email in &emails {
+            let mut row: Vec<Option<String>> = Vec::with_capacity(email.attachments.len());
+            for att in &email.attachments {
+                if download_attachments {
+                    let id = self
+                        .register_attachment(
+                            &att.filename,
+                            &att.mime,
+                            &att.bytes,
+                            &session_id,
+                            &agent_session_id,
+                        )
+                        .await
+                        .map_err(|e| {
+                            format!(
+                                "imap_read: failed to register attachment '{}': {e}",
+                                att.filename
+                            )
+                        })?;
+                    row.push(Some(id));
+                } else {
+                    row.push(None);
+                }
+            }
+            doc_ids.push(row);
+        }
 
         // Step 8: shape output.
         Ok(Self::build_output(&emails, &doc_ids))
