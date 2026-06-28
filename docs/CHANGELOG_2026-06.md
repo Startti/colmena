@@ -3274,3 +3274,35 @@ write-back de rotación) — ver [`docs/BACKLOG.md`](BACKLOG.md).
 pendiente de credenciales.
 
 ---
+
+## 56. Gemini — `thoughtSignature` replay para tool-calling con modelos thinking — 2026-06-28
+
+**Qué cambió.** El `gemini_adapter.rs` ahora **captura y reenvía** el `thoughtSignature`
+que los modelos Gemini **con thinking** (gemini-3.5-flash; 2.5 con thinking budget)
+adjuntan a cada `functionCall`. Estos modelos **exigen** que la firma se reenvíe verbatim
+cuando la tool call se replica en el historial; sin ella la API rechaza el request con
+`HTTP 400 "Function call is missing a thought_signature"`. Antes el adapter la descartaba,
+así que **cualquier loop de tools multi-turno moría tras la primera tool call** (single-shot
+funcionaba). Esto bloqueaba usar gemini-3.5-flash en agentes con herramientas.
+
+- `ToolCall` y `ToolCallChunk` (domain) ganan `provider_signature: Option<String>` (additive,
+  serde `skip_serializing_if=None` → retro-compatible con `llm_node_history`; nombre genérico
+  para no acoplar el domain a Gemini).
+- Captura en el parse no-streaming y streaming; reenvío en la parte `functionCall` del turno
+  `model` al construir el request; acumulación de chunks en `agent_service` lleva la firma.
+- **Sin regresión:** OpenAI/Anthropic dejan `provider_signature: None`; Gemini sin thinking
+  no emite firma → wire-format idéntico. Bindings sin impacto.
+
+**Verificación.** 3 unit tests nuevos (round-trip replay + serde del `thoughtSignature` +
+omisión sin firma); E2E real: el Builder de la cadena de agentes en gemini-3.5-flash, que
+antes moría tras `load_skill`, ahora hace el loop multi-turno completo (0 errores de
+thought_signature). 1958 unit tests pasan.
+
+**Documentación de referencia.** [`implementation_plan.md`](../implementation_plan.md).
+
+**ADP.** No afectado (cambio de wire-format Colmena↔Gemini + campos opcionales additive; no
+cruza SSE ni la API pública).
+
+**Estado.** done + verificado (unit + E2E real).
+
+---

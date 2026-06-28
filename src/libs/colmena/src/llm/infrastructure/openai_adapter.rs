@@ -422,6 +422,7 @@ impl OpenAiAdapter {
                                                     id: final_id,
                                                     name: tc.function.name.clone().unwrap_or_default(),
                                                     args_chunk: tc.function.arguments.clone().unwrap_or_default(),
+                                                    provider_signature: None,
                                                 }),
                                                 provider.clone(),
                                                 is_final,
@@ -1198,6 +1199,7 @@ mod tests {
                 arguments: r#"{"document_id":"att_abc"}"#.into(),
             },
             response: None,
+            provider_signature: None,
         };
         let assistant =
             LlmMessage::assistant_with_tool_calls(String::new(), vec![tool_call]).unwrap();
@@ -1280,6 +1282,7 @@ mod tests {
                     arguments: r#"{"document_id":"att_pdf_1"}"#.into(),
                 },
                 response: None,
+                provider_signature: None,
             }],
         )
         .unwrap();

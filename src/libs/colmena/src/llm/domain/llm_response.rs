@@ -232,6 +232,12 @@ pub struct ToolCallChunk {
     pub id: String,
     pub name: String,
     pub args_chunk: String,
+    /// Opaque provider-specific signature for this tool call (e.g. Gemini
+    /// thinking models' `thoughtSignature`). Carried into the accumulated
+    /// [`ToolCall`] so it can be replayed in subsequent requests. `None` when
+    /// the provider/model doesn't emit one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_signature: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

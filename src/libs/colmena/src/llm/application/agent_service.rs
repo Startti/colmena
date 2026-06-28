@@ -769,6 +769,12 @@ impl AgentService {
                                 if !tc.name.is_empty() && entry.function.name.is_empty() {
                                     entry.function.name = tc.name.clone();
                                 }
+                                // Carry the provider signature (e.g. Gemini
+                                // thinking models' thoughtSignature) so it can be
+                                // replayed when this tool call is sent back.
+                                if tc.provider_signature.is_some() {
+                                    entry.provider_signature = tc.provider_signature.clone();
+                                }
                                 entry.function.arguments.push_str(&tc.args_chunk);
                             }
                             LlmStreamPart::Usage(u) => completion_usage = Some(u.clone()),
@@ -1509,6 +1515,7 @@ mod tests {
                         arguments: "{\"a\": 2, \"b\": 2}".to_string(),
                     },
                     response: None,
+                    provider_signature: None,
                 };
 
                 Ok(LlmResponse::new(
@@ -1637,6 +1644,7 @@ mod tests {
                 arguments: args.to_string(),
             },
             response: None,
+            provider_signature: None,
         }
     }
 
@@ -1722,6 +1730,7 @@ mod tests {
                 arguments: args.to_string(),
             },
             response: None,
+            provider_signature: None,
         }
     }
 
@@ -1884,6 +1893,7 @@ mod tests {
                         arguments: "{}".to_string(),
                     },
                     response: None,
+                    provider_signature: None,
                 })), // B (different signature → resets streak)
                 _ => Ok(text_response("finished")),
             }
@@ -2044,6 +2054,7 @@ mod tests {
                         arguments: "{}".to_string(),
                     },
                     response: None,
+                    provider_signature: None,
                 };
                 Ok(text_response("").with_tool_calls(vec![twin("c1"), twin("c2")]))
             } else {
@@ -2112,6 +2123,7 @@ mod tests {
                         arguments: "{}".to_string(),
                     },
                     response: None,
+                    provider_signature: None,
                 };
                 Ok(text_response("").with_tool_calls(vec![
                     triplet("c1"),
@@ -2181,6 +2193,7 @@ mod tests {
                     arguments: "{}".to_string(),
                 },
                 response: None,
+                provider_signature: None,
             };
             Ok(LlmResponse::new(
                 LlmRequestId::from_string("req-susp".to_string()).unwrap(),
@@ -2269,6 +2282,7 @@ mod tests {
                         r#"{"document_id":"doc-1"}"#.to_string(),
                     ),
                     response: None,
+                    provider_signature: None,
                 };
                 Ok(LlmResponse::new(
                     LlmRequestId::from_string("req-la-1".to_string()).unwrap(),
@@ -2448,6 +2462,7 @@ mod tests {
                         id: llm_call_id.clone(),
                         name: "load_attachment".to_string(),
                         args_chunk: r#"{"document_id":"doc-1"}"#.to_string(),
+                        provider_signature: None,
                     }),
                     provider,
                     true,
@@ -2623,6 +2638,7 @@ mod tests {
                         r#"{"document_id":"doc-eph"}"#.to_string(),
                     ),
                     response: None,
+                    provider_signature: None,
                 };
                 Ok(LlmResponse::new(
                     LlmRequestId::from_string("req-eph-1".to_string()).unwrap(),

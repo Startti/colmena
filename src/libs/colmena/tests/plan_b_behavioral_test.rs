@@ -254,6 +254,7 @@ async fn agent_run_with_in_memory_repo_persists_marker_not_bytes() {
             r#"{"document_id":"doc-int-1"}"#.to_string(),
         ),
         response: None,
+        provider_signature: None,
     };
 
     let turn1 = LlmResponse::new(
