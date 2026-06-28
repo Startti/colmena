@@ -9,6 +9,7 @@ pub mod extraction;
 pub mod http;
 pub mod image_edit;
 pub mod image_generation;
+pub mod imap_mime;
 pub mod imap_search;
 pub mod input;
 pub mod llm;
