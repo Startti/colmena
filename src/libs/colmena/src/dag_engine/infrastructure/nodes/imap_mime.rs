@@ -141,7 +141,7 @@ mod tests {
     #[test]
     fn truncates_long_body() {
         let mut raw = b"Subject: x\r\nContent-Type: text/plain\r\n\r\n".to_vec();
-        raw.extend(std::iter::repeat(b'a').take(10_000));
+        raw.extend(std::iter::repeat_n(b'a', 10_000));
         let p = parse_email(&raw, 100).unwrap();
         assert!(p.body_truncated);
         assert!(p.body_text.len() <= 100);
