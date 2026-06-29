@@ -3306,3 +3306,25 @@ cruza SSE ni la API pública).
 **Estado.** done + verificado (unit + E2E real).
 
 ---
+
+## 57. Tool `node_schema` malformado ya no panica el worker — 2026-06-28
+
+**Qué cambió.** `DagToolExecutor::generate_tool_definition` ya **no hace `panic!`** cuando
+un `node_schema` es inválido (ej. un campo `array` sin `items`). Antes, un grafo malformado
+—que un LLM puede generar (p.ej. el Builder de la cadena de agentes)— **tumbaba el
+proceso/worker** al armar las tools del `llm_call`. Ahora la función devuelve `Result` y el
+caller (`available_tools`) **omite la tool ofensora con un WARN** y sigue, exactamente como
+ya hacía la rama de toolkit con `node_type` desconocido. Las tools válidas se siguen
+exponiendo.
+
+- `generate_tool_definition(...) -> Result<ToolDefinition, String>` (propaga en vez de panicar).
+- `available_tools` saltea la tool malformada (`log WARN + continue`).
+- Sin cambios de firma de trait ni de API pública; bindings y ADP sin impacto.
+
+**Verificación.** Unit test de regresión (`malformed_node_schema_is_skipped_not_panicked`:
+array-sin-items → omitida, la tool válida sobrevive, sin panic); E2E real (un grafo con un
+tool de schema malformado que antes panicaba ahora corre y responde, omitiendo la tool).
+
+**Estado.** done + verificado (unit + E2E).
+
+---
