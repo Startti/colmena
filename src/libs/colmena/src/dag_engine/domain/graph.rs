@@ -74,14 +74,52 @@ impl Graph {
     ///   `node_id`s in subgraph hierarchies (`subgraph_node/inner_node`). Allowing
     ///   `/` in user-defined IDs would make the resulting paths ambiguous.
     pub fn validate(&self) -> Result<(), crate::dag_engine::domain::error::DagError> {
+        use crate::dag_engine::domain::error::DagError;
+        use crate::dag_engine::domain::tool_configuration::{parse_node_schema, NodeSchema};
+
         for node_id in self.nodes.keys() {
             if node_id.contains('/') {
-                return Err(crate::dag_engine::domain::error::DagError::InvalidNodeId {
+                return Err(DagError::InvalidNodeId {
                     node_id: node_id.clone(),
                     reason: "character '/' is reserved for subgraph path qualifiers",
                 });
             }
         }
+
+        // Validate every tool's `node_schema` up front (fail-fast, before
+        // execution / token spend). A malformed schema (e.g. an `array` field
+        // without `items`) is rejected here with a precise, actionable message
+        // instead of degrading silently or — historically — panicking. Since
+        // `validate()` also runs for the child graphs of a `subgraph`, the error
+        // surfaces as a tool result that an agent can read and self-correct on.
+        for (node_id, node) in &self.nodes {
+            let Some(tools) = node
+                .config
+                .get("tool_configurations")
+                .and_then(|v| v.as_object())
+            else {
+                continue;
+            };
+            for (tool_name, tool_cfg) in tools {
+                let Some(schema_value) = tool_cfg.get("node_schema") else {
+                    continue;
+                };
+                let schema: NodeSchema =
+                    serde_json::from_value(schema_value.clone()).map_err(|e| {
+                        DagError::InvalidToolSchema {
+                            node_id: node_id.clone(),
+                            tool_name: tool_name.clone(),
+                            reason: format!("malformed node_schema: {e}"),
+                        }
+                    })?;
+                parse_node_schema(&schema).map_err(|reason| DagError::InvalidToolSchema {
+                    node_id: node_id.clone(),
+                    tool_name: tool_name.clone(),
+                    reason,
+                })?;
+            }
+        }
+
         Ok(())
     }
 }
@@ -120,6 +158,60 @@ mod tests {
     #[test]
     fn validate_accepts_clean_node_id() {
         let g = graph_with_node_id("router_inner");
+        assert!(g.validate().is_ok());
+    }
+
+    /// Build a one-node graph whose `agent` node declares a single tool with the
+    /// given `node_schema` JSON.
+    fn graph_with_tool_schema(schema: serde_json::Value) -> Graph {
+        let json = json!({
+            "nodes": {
+                "agent": {
+                    "type": "llm_call",
+                    "config": {
+                        "tool_configurations": {
+                            "my_tool": { "node_type": "http_request", "node_schema": schema }
+                        }
+                    }
+                }
+            },
+            "edges": []
+        });
+        serde_json::from_value(json).unwrap()
+    }
+
+    #[test]
+    fn validate_rejects_array_tool_field_without_items() {
+        // Regression: an `array` node_schema field without `items` must be caught
+        // at validate() (fail-fast), not panic or degrade silently.
+        let g = graph_with_tool_schema(json!({
+            "rows": { "type": "array", "required": true, "description": "list" }
+        }));
+        let err = g.validate().unwrap_err().to_string();
+        assert!(err.contains("my_tool"), "should name the tool, got: {err}");
+        assert!(err.contains("agent"), "should name the node, got: {err}");
+        assert!(
+            err.contains("items"),
+            "should explain the missing `items`, got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_accepts_array_tool_field_with_items() {
+        let g = graph_with_tool_schema(json!({
+            "rows": {
+                "type": "array",
+                "items": { "type": "object" },
+                "required": true,
+                "description": "list"
+            }
+        }));
+        assert!(g.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_accepts_node_without_tools() {
+        let g = graph_with_node_id("plain_node");
         assert!(g.validate().is_ok());
     }
 }

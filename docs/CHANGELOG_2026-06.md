@@ -3328,3 +3328,30 @@ tool de schema malformado que antes panicaba ahora corre y responde, omitiendo l
 **Estado.** done + verificado (unit + E2E).
 
 ---
+
+## 58. Validación temprana de `node_schema` de tools en `Graph::validate()` — 2026-06-28
+
+**Qué cambió.** `Graph::validate()` ahora valida el `node_schema` de cada tool declarada
+en `tool_configurations`. Un schema malformado (ej. campo `array` sin `items`) **rechaza el
+grafo al cargarlo** —antes de ejecutar y antes de gastar tokens— con un error claro y
+accionable que nombra el nodo, la tool y cómo arreglarlo (`DagError::InvalidToolSchema`).
+Complementa la red de seguridad de §57 (skip+warn): aquella evita el panic si un schema malo
+llega a `available_tools`; ésta lo ataja antes, con fail-fast.
+
+- **Auto-corrección del agente:** como `validate()` también corre para los grafos hijos de un
+  `subgraph`, cuando un agente que genera grafos (ej. el Builder de la cadena) pasa un grafo
+  malformado por una tool `subgraph`, el error vuelve como `ToolResult` (un `Err` de tool se
+  convierte en ToolResult, `agent_service.rs`) → el agente lee el mensaje preciso y se corrige.
+- **Estricto, no lenient:** no se auto-reparan los arrays sin `items` (OpenAI/Gemini los
+  rechazan; adivinar el item-type haría que el LLM llene mal el array).
+- Solo domain (`graph.rs`, `error.rs`); sin cambios de trait ni API pública; bindings/ADP sin
+  impacto. **Cambio de comportamiento:** un grafo con tool malformada ahora falla al cargar
+  (antes, con §57, corría degradado) — fail-fast deliberado.
+
+**Verificación.** Unit tests (array-sin-items → `validate()` Err con tool+nodo+`items`;
+array-con-items → Ok; nodo sin tools → Ok); 1962 unit + integración en verde; E2E real (el
+grafo malformado ahora falla al cargar con el mensaje exacto, 0 panics).
+
+**Estado.** done + verificado (unit + integración + E2E).
+
+---
