@@ -34,4 +34,15 @@ pub enum DagError {
         node_id: String,
         reason: &'static str,
     },
+
+    /// Un nodo declara una tool (`tool_configurations`) cuyo `node_schema` es
+    /// inválido (p.ej. un campo `array` sin `items`). Se detecta al validar el
+    /// grafo —antes de ejecutar y antes de gastar tokens— para que el error sea
+    /// claro y, en grafos hijos de un `subgraph`, accionable por el agente.
+    #[error("Invalid node_schema for tool '{tool_name}' on node '{node_id}': {reason}")]
+    InvalidToolSchema {
+        node_id: String,
+        tool_name: String,
+        reason: String,
+    },
 }

@@ -792,12 +792,18 @@ impl DagToolExecutor {
 
     /// Generate ToolDefinition from node with partial configuration
     #[allow(deprecated)]
+    /// Build the LLM-facing [`ToolDefinition`] for a configured tool.
+    ///
+    /// Returns `Err(message)` when the tool's `node_schema` is malformed (e.g. an
+    /// `array` field without `items`). Callers must skip the offending tool rather
+    /// than crash — a graph (often LLM-generated) with an invalid schema must not
+    /// take down the whole run/worker.
     fn generate_tool_definition(
         &self,
         tool_name: &str,
         tool_config: &ToolConfiguration,
         node: &Arc<dyn ExecutableNode>,
-    ) -> crate::llm::domain::ToolDefinition {
+    ) -> Result<crate::llm::domain::ToolDefinition, String> {
         use crate::dag_engine::domain::tool_configuration::parse_node_schema;
         use crate::llm::domain::{ParameterProperty, ToolDefinition, ToolParameters};
 
@@ -811,13 +817,10 @@ impl DagToolExecutor {
 
         // BRANCH 0 (HIGHEST PRIORITY): node_schema
         if let Some(schema) = &tool_config.node_schema {
-            let parsed = parse_node_schema(schema).unwrap_or_else(|e| {
-                panic!(
-                    "Invalid node_schema for tool '{}': {}\nFix the graph configuration and re-run.",
-                    effective_name, e
-                )
-            });
-            return ToolDefinition {
+            // Propagate (don't panic): a malformed schema must not crash the run.
+            let parsed = parse_node_schema(schema)
+                .map_err(|e| format!("Invalid node_schema for tool '{}': {}", effective_name, e))?;
+            return Ok(ToolDefinition {
                 name: effective_name.to_string(),
                 description: tool_config.description.clone(),
                 summary: None,
@@ -827,19 +830,19 @@ impl DagToolExecutor {
                     required: parsed.required_params,
                 },
                 input_schema_override: None,
-            };
+            });
         }
 
         // If parameters are explicitly defined in config, use them
         if let Some(params_value) = &tool_config.parameters {
             if let Ok(params) = serde_json::from_value::<ToolParameters>(params_value.clone()) {
-                return ToolDefinition {
+                return Ok(ToolDefinition {
                     name: effective_name.to_string(),
                     description: tool_config.description.clone(),
                     summary: None,
                     parameters: params,
                     input_schema_override: None,
-                };
+                });
             } else {
                 colmena_log!(
                     "WARN: Failed to parse custom parameters for tool {}",
@@ -869,7 +872,7 @@ impl DagToolExecutor {
                 required.push(param_name.clone());
             }
 
-            return ToolDefinition {
+            return Ok(ToolDefinition {
                 name: effective_name.to_string(),
                 description: if !tool_config.description.is_empty() {
                     tool_config.description.clone()
@@ -885,7 +888,7 @@ impl DagToolExecutor {
                     required,
                 },
                 input_schema_override: None,
-            };
+            });
         }
 
         let node_schema = node.schema();
@@ -944,7 +947,7 @@ impl DagToolExecutor {
                 .to_string()
         };
 
-        ToolDefinition {
+        Ok(ToolDefinition {
             name: effective_name.to_string(),
             description,
             summary: None,
@@ -954,7 +957,7 @@ impl DagToolExecutor {
                 required,
             },
             input_schema_override: None,
-        }
+        })
     }
 }
 
@@ -2196,7 +2199,20 @@ impl ToolExecutor for DagToolExecutor {
                     });
                 }
             } else if let Some(node) = self.registry.get_node(&config.node_type) {
-                let mut tool_def = self.generate_tool_definition(name, config, &node);
+                // A malformed node_schema (e.g. an `array` field without `items`)
+                // must not crash the run: skip the offending tool with a WARN, same
+                // as the unknown-toolkit branch above.
+                let mut tool_def = match self.generate_tool_definition(name, config, &node) {
+                    Ok(td) => td,
+                    Err(e) => {
+                        colmena_log!(
+                            "WARN: tool '{}' has an invalid node_schema: {} — skipping it",
+                            name,
+                            e
+                        );
+                        continue;
+                    }
+                };
                 // If the node supports pre-flight initialization (e.g. sql_query
                 // connects to the DB, loads the table schema, and builds a
                 // capability statement), append the supplement to the description
@@ -2560,6 +2576,73 @@ mod tests {
 
         // MockNode schema has "a". We fixed it. So properties should be empty.
         assert!(configured_tool.parameters.properties.is_empty());
+    }
+
+    #[tokio::test]
+    async fn malformed_node_schema_is_skipped_not_panicked() {
+        // A node_schema with an `array` field lacking `items` is invalid. It must
+        // NOT crash the run (regression: this used to `panic!`); the offending tool
+        // is skipped while valid tools are still exposed.
+        let registry = Arc::new(MockRegistry::new());
+        let mut tool_configs = HashMap::new();
+
+        // Helper to build a config with a given node_schema.
+        let mk = |name: &str, schema: Option<serde_json::Value>| ToolConfiguration {
+            name: name.to_string(),
+            description: format!("{name} tool"),
+            node_type: "mock_tool".to_string(),
+            fixed_config: HashMap::new(),
+            exposed_inputs: None,
+            parameters: None,
+            mergeable_fields: None,
+            field_mapping: None,
+            node_schema: schema.map(|v| serde_json::from_value(v).unwrap()),
+            node_config: None,
+            expose_sub_tools: None,
+            summary: None,
+            eager: false,
+        };
+
+        // Malformed: array field without `items`.
+        tool_configs.insert(
+            "bad_tool".to_string(),
+            mk(
+                "bad_tool",
+                Some(serde_json::json!({
+                    "repos": { "type": "array", "required": true, "description": "list" }
+                })),
+            ),
+        );
+        // Valid: a well-formed array field (with items) alongside the bad one.
+        tool_configs.insert(
+            "good_tool".to_string(),
+            mk(
+                "good_tool",
+                Some(serde_json::json!({
+                    "repos": {
+                        "type": "array",
+                        "items": { "type": "object" },
+                        "required": true,
+                        "description": "list"
+                    }
+                })),
+            ),
+        );
+
+        let executor = DagToolExecutor::new(registry, tool_configs);
+        // Must not panic.
+        let tools = executor.available_tools().await;
+
+        // The malformed tool is skipped; the valid one survives.
+        assert!(
+            tools.iter().all(|t| t.name != "bad_tool"),
+            "malformed 'bad_tool' must be skipped, got: {:?}",
+            tools.iter().map(|t| &t.name).collect::<Vec<_>>()
+        );
+        assert!(
+            tools.iter().any(|t| t.name == "good_tool"),
+            "valid 'good_tool' must still be exposed"
+        );
     }
 
     #[tokio::test]
