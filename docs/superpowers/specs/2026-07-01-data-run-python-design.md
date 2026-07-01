@@ -54,10 +54,14 @@ LLM.
 4. **Gating por capacidad configurada.** Cada `source`/sink se habilita solo
    si el operador configuró la capacidad correspondiente (ver §5). Attachment
    e inline están siempre disponibles.
-5. **Los tools existentes NO se tocan.** `gsheets_run_python`,
-   `attachment_run_python` y `crdt_doc_run_python` siguen shipeados y sin
-   cambios (ADP los consume). `data_run_python` es **aditivo**. Deprecación
-   eventual es un tema futuro, fuera de este spec.
+5. **Deprecación por redundancia, gated en verificación.** El tool se ship
+   primero de forma **aditiva**; una vez verificado end-to-end (§14), el
+   **mismo PR (o uno inmediato)** borra las dos tools 100 % subsumidas —
+   `gsheets_run_python` y `attachment_run_python` — porque son pura
+   redundancia. `crdt_doc_run_python` y el par `sql_bulk_*` **se mantienen**:
+   no son redundantes, cubren capacidades que `data_run_python` no cubre (ver
+   §15). Es un breaking change para ADP → sweep obligatorio del worker antes
+   del borrado.
 6. **Auto-creación de tabla en `append`/`replace`** cuando la tabla no existe,
    con tipos inferidos del DataFrame, gated por permisos (ver §7.4).
 
@@ -563,23 +567,80 @@ repo).
 
 ---
 
-## 15. Fuera de scope (v1) → BACKLOG
+## 15. Plan de deprecación y migración ADP
+
+### 15.1 Criterio — borrar solo lo 100 % redundante
+
+Redundancia = dos tools que hacen **el mismo** trabajo. Bajo ese filtro:
+
+| Tool | ¿Redundante con `data_run_python`? | Acción |
+|---|---|---|
+| `gsheets_run_python` | Sí — source gsheets + sink `output_sheets`, idéntico | **Borrar** |
+| `attachment_run_python` | Sí — source attachment (CSV/XLSX) | **Borrar** |
+| `crdt_doc_run_python` | **No** — backend CRDT colaborativo (artifact + WS, sin connection_url/attachment_id). Capacidad distinta, no cubierta | **Mantener** (fold-in = v1.1, §15.4) |
+| `sql_bulk_insert_from_attachment` | **No** — COPY streaming de archivo crudo sin el cap de 100k del sandbox; vía de escala | **Mantener** |
+| `sql_inspect_attachment` | **No** — inspect helper del flujo bulk | **Mantener** |
+
+Borrar `crdt`/`bulk` no eliminaría redundancia — eliminaría una capacidad y
+dejaría un agujero funcional. Se mantienen deliberadamente.
+
+### 15.2 Secuencia de rollout (gated)
+
+1. **Ship aditivo:** `data_run_python` entra sin tocar los tools existentes.
+2. **Verificación:** los E2E de §14 pasan contra servicios vivos (Postgres +
+   Google reales), incluyendo los casos A/B/C. Recién con eso verde:
+3. **Sweep ADP:** revisar `apps/service/ia/platform/{worker,api}/src/` por
+   referencias a `gsheets_run_python` / `attachment_run_python` (en
+   `enabled_tools`, `tool_configurations`, o graph JSON de agentes). Migrar
+   cada uso a `data_run_python` con el `fixed_config` equivalente.
+4. **Borrado:** el mismo PR (o uno inmediato encadenado) elimina las dos
+   tools redundantes: dispatchers, builders, textos YAML, entradas en
+   `enabled_tools`/registry, tests, y referencias en docs. Migrar los graph
+   JSON in-repo (`tests/graphs/`) que las usen.
+5. **Docs:** actualizar `41_builtin_tools_index.md`, `43_sheets_local_vs_gsheets.md`,
+   `23_sql_node.md` (matriz de elección) y `39_gsheets.md` para reflejar que
+   el análisis pandas de gsheets/attachment ahora es `data_run_python`.
+
+### 15.3 Tabla de equivalencia de migración
+
+| Antes | Ahora (`data_run_python`) |
+|---|---|
+| `gsheets_run_python` binding `{var, spreadsheet_id, sheet, range}` | Mismo binding, forma GSHEETS |
+| `gsheets_run_python` inline `{var, data}` | Mismo binding, forma INLINE |
+| `gsheets_run_python` `write_to_spreadsheet` + `output_sheets` | Idéntico (mismo arg + sink) |
+| `attachment_run_python` `{attachment_id, code, delimiter, sheet_name, header_row}` | Binding forma ATTACHMENT + `code` |
+| (nuevo) leer/escribir SQL | source `{var, query}` + sink `output_tables` |
+
+El shape de bindings y sinks se preserva 1:1 → la migración ADP es
+mecánica (cambiar el `name`/`node_type` del tool y mover la config gsheets/sql
+a `fixed_config`), sin reescribir el código pandas del agente.
+
+### 15.4 Camino al end-state (v1.1)
+
+Foldear CRDT como source/sink de `data_run_python` (5ª forma de binding:
+artifact CRDT; sink a workbook). Recién ahí `crdt_doc_run_python` se vuelve
+redundante y se borra. `sql_bulk_*` sobrevive como vía de escala. End-state:
+**una super-tool para el 95 % de los casos + bulk para volumen**.
+
+---
+
+## 16. Fuera de scope (v1) → BACKLOG
 
 - `setup_sql` en el bloque `fixed_config.sql` de este tool.
 - Backends no-Postgres (SQLite/MySQL) — mismo backlog que sql_bulk.
 - `delete` como modo de `output_tables` (borrar filas por key) — esperar
   demanda real; hoy `sql_query` con DELETE WHERE cubre.
-- Deprecación/alias de `gsheets_run_python`/`attachment_run_python` hacia el
-  unificado.
 - Formatos extra en `output_attachments` (parquet, json-lines).
 - Caps configurables por operador (`runtime_limits.max_rows_write`).
 - Streaming de bindings SQL gigantes (cursor server-side) — hoy cap 100k.
-- Soporte CRDT como source/sink del unificado (hoy: `crdt_doc_run_python`
-  sigue cubriendo ese mundo).
+- **Fold-in de CRDT como source/sink del unificado (v1.1)** — 5ª forma de
+  binding (artifact CRDT) + sink a workbook. Es el prerequisito para borrar
+  `crdt_doc_run_python` y llegar al end-state de una sola super-tool (§15.4).
+  Hoy `crdt_doc_run_python` se mantiene intacto.
 
 ---
 
-## 16. Riesgos y mitigaciones
+## 17. Riesgos y mitigaciones
 
 | Riesgo | Mitigación |
 |---|---|
@@ -588,10 +649,11 @@ repo).
 | Modelo confunde tool unificado vs específicos | Descripción dinámica + guía de operador + skill de recetas (§11) |
 | Upsert masivo corrompe datos productivos | Caps de filas, key única validada en input, transacción atómica, RLS tenant-scoped, y el techo del preset del operador |
 | Postlude/prelude divergen de los 3 tools hermanos | Los textos nuevos derivan de los existentes; tests de contrato sobre el shape `{user_output, output_*}` |
+| Borrar gsheets/attachment rompe un agente ADP no migrado | Deprecación gated (§15.2): borrado solo tras verificación + sweep del worker; migración 1:1 mecánica (§15.3) |
 
 ---
 
-## 17. Referencias
+## 18. Referencias
 
 - `docs/developer_guide/39_gsheets.md` — write safety, output_sheets, collision policy
 - `docs/developer_guide/43_sheets_local_vs_gsheets.md` — output_sheets compartido CRDT/gsheets
