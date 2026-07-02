@@ -147,7 +147,26 @@ pub fn parse_sql_config(fixed: &HashMap<String, Value>) -> Result<Option<SqlSink
             "tool fixed_config.sql.permissions.allowed_schemas must be non-empty.".to_string(),
         );
     }
-    let permissions = SqlPermissions::from_config(perms_value)?;
+    // Resolve `${ENV}` in `permissions.tenant_user_id` BEFORE building
+    // `SqlPermissions`, so the embedded permissions object and the
+    // top-level `SqlSinkConfig.tenant_user_id` field can never diverge —
+    // see `tenant_user_id_env_is_resolved_in_both_places` regression test.
+    let resolved_perms_value = match perms_value {
+        Some(Value::Object(map))
+            if map.get("tenant_user_id").and_then(|v| v.as_str()).is_some() =>
+        {
+            let raw = map.get("tenant_user_id").and_then(|v| v.as_str()).unwrap();
+            let resolved = resolve_env_vars(raw).map_err(|e| {
+                format!("sql.permissions.tenant_user_id env resolution failed: {e}")
+            })?;
+            let mut patched = map.clone();
+            patched.insert("tenant_user_id".to_string(), Value::String(resolved));
+            Some(Value::Object(patched))
+        }
+        Some(other) => Some(other.clone()),
+        None => None,
+    };
+    let permissions = SqlPermissions::from_config(resolved_perms_value.as_ref())?;
 
     let runtime_limits = sql.get("runtime_limits");
     let statement_timeout_ms = runtime_limits
@@ -170,16 +189,10 @@ pub fn parse_sql_config(fixed: &HashMap<String, Value>) -> Result<Option<SqlSink
         .unwrap_or("fail")
         .to_string();
 
-    let tenant_user_id =
-        match perms_value
-            .and_then(|p| p.get("tenant_user_id"))
-            .and_then(|v| v.as_str())
-        {
-            Some(raw) => Some(resolve_env_vars(raw).map_err(|e| {
-                format!("sql.permissions.tenant_user_id env resolution failed: {e}")
-            })?),
-            None => None,
-        };
+    // Sourced from the already-resolved `permissions` — never re-derived
+    // from raw JSON, so this field and `permissions.tenant_user_id()` can
+    // never disagree.
+    let tenant_user_id = permissions.tenant_user_id().map(|s| s.to_string());
 
     Ok(Some(SqlSinkConfig {
         connection_url,
@@ -355,6 +368,25 @@ mod tests {
         let cfg = parse_sql_config(&f).unwrap().unwrap();
         assert_eq!(cfg.connection_url, "postgres://resolved/db");
         std::env::remove_var("DATA_RUN_PYTHON_TEST_DB_URL");
+    }
+
+    #[test]
+    fn tenant_user_id_env_is_resolved_in_both_places() {
+        std::env::set_var("DRP_TEST_TENANT", "tenant-42");
+        let mut f = std::collections::HashMap::new();
+        f.insert(
+            "sql".into(),
+            serde_json::json!({
+                "connection_url": "postgres://x",
+                "permissions": { "preset": "read_write", "allowed_schemas": ["a"], "tenant_user_id": "${DRP_TEST_TENANT}" }
+            }),
+        );
+        let cfg = parse_sql_config(&f).unwrap().unwrap();
+        // top-level field resolved
+        assert_eq!(cfg.tenant_user_id.as_deref(), Some("tenant-42"));
+        // embedded permissions accessor ALSO resolved (the bug: was "${DRP_TEST_TENANT}")
+        assert_eq!(cfg.permissions.tenant_user_id(), Some("tenant-42"));
+        std::env::remove_var("DRP_TEST_TENANT");
     }
 
     // ── enabled_sources ─────────────────────────────────────────────
