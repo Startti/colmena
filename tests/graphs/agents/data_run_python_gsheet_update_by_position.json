@@ -1,0 +1,35 @@
+{
+  "_comment": "E2E — data_run_python output_sheets update_by_position via a Google Sheets binding (edit rows with NO unique key, no A1 math). Agent binds the WHOLE 'Ventas' tab (no range), modifies the bound df IN PLACE, and returns the whole df with mode update_by_position — the dispatcher diffs by row index against the loaded snapshot. Proves the A2 parity port (data_run_python now threads real per-sheet gsheets snapshots). Needs OAuth creds. Replace <SPREADSHEET_ID>.",
+  "metadata": { "category": "agents", "requires_env": ["GEMINI_API_KEY", "DATABASE_URL", "COLMENA_GOOGLE_OAUTH_CLIENT_ID", "COLMENA_GOOGLE_OAUTH_CLIENT_SECRET", "COLMENA_GOOGLE_OAUTH_REFRESH_TOKEN", "COLMENA_GOOGLE_SHARE_EMAIL"] },
+  "nodes": {
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "model": "gemini-2.5-flash",
+        "api_key": "${GEMINI_API_KEY}",
+        "connection_url": "${DATABASE_URL}",
+        "stream": false,
+        "max_iterations": 8,
+        "temperature": 0.0,
+        "system_message": "Sos un asistente de datos que edita Google Sheets. Usá data_run_python. Para editar filas existentes de una hoja SIN clave única y SIN calcular direcciones A1: (1) hacé un binding de la hoja COMPLETA (spreadsheet_id + sheet, SIN range), (2) modificá el DataFrame in place (no filtres, no reordenés, no reseteés el índice — devolvé el df ENTERO), (3) asigná `output_sheets = {\"<Pestaña>\": {\"mode\": \"update_by_position\", \"df\": <df completo modificado>}}` y pasá el argumento `write_to_spreadsheet` con el id de la planilla. El dispatcher diffea por posición de fila y escribe solo las celdas que cambiaste. No inventes otros nombres de globals/argumentos.",
+        "prompt": "En la pestaña Ventas de esta planilla https://docs.google.com/spreadsheets/d/<SPREADSHEET_ID> aplicá un aumento del 10% a la columna monto de todas las filas.",
+        "tool_configurations": {
+          "data_run_python": {
+            "name": "data_run_python",
+            "node_type": "data_run_python",
+            "description": "Corré código pandas sobre Google Sheets y/o la base de datos, y escribí resultados de vuelta a planillas (output_sheets, con modos replace/update_in_place/update_by_position/overwrite) o tablas SQL.",
+            "fixed_config": {
+              "enable_gsheets": true,
+              "on_existing_sheet": "auto_suffix"
+            }
+          }
+        }
+      }
+    },
+    "log": { "type": "log" }
+  },
+  "edges": [
+    { "from": "agent", "to": "log" }
+  ]
+}

@@ -24,7 +24,7 @@ use serde_json::Value;
 
 use super::attachment_writer::{write_output_attachments, AttachmentRegistrar};
 use super::sheet_collision::{parse_policy, CollisionPolicy};
-use super::sheet_writer::{write_output_sheets, LoadedSnapshot};
+use super::sheet_writer::write_output_sheets;
 use super::sql_bulk_tools::resolve_env_vars;
 use super::table_writer::{parse_output_tables, write_output_tables};
 use super::tabular_bindings::{
@@ -451,17 +451,16 @@ pub async fn dispatch_core(
                     });
                 }
             };
-            // v1: no per-tab load snapshots are threaded here (update_by_position
-            // degrades gracefully — it needs a bound snapshot and errors clearly
-            // when absent). See task-14 report for the limitation.
-            let empty: std::collections::HashMap<String, LoadedSnapshot> =
-                std::collections::HashMap::new();
+            // Per-tab load snapshots from the GSHEETS bindings enable
+            // output_sheets `update_by_position` (diff the returned df against
+            // the loaded rows by position). Empty when no gsheets binding was
+            // loaded → that mode errors clearly (UpdateByPositionRequiresBinding).
             let results = write_output_sheets(
                 client,
                 &SpreadsheetId(target.to_string()),
                 &out_sheets,
                 policy,
-                &empty,
+                &rbindings.gsheets_snapshots,
             )
             .await;
             wrote_sheets = Some(Value::Array(results));

@@ -210,15 +210,26 @@ pub struct ResolvedBindings {
     /// query is (best-effort detected as) a plain `SELECT * FROM <table>`.
     /// Used later for diff-driven UPDATE write-back.
     pub sql_snapshots: HashMap<String, Vec<serde_json::Map<String, Value>>>,
+    /// Sheet name → load snapshot, retained for GSHEETS bindings so
+    /// `output_sheets` `update_by_position` can diff the returned df against the
+    /// loaded rows by position. A sheet bound more than once is flagged
+    /// `ambiguous` (no single positional mapping); a ranged binding sets
+    /// `had_range` (blocks the mode). Mirrors `gsheets_run_python`.
+    pub gsheets_snapshots: HashMap<String, super::sheet_writer::LoadedSnapshot>,
 }
 
-/// One resolved binding: `(var, records, optional_sql_snapshot)`, where the
-/// snapshot is `(qualified_table_name, records)` retained only for a plain
-/// `SELECT * FROM <table>` SQL binding.
+/// One resolved binding: `(var, records, optional_sql_snapshot,
+/// optional_gsheets_snapshot_info)`.
+/// - `sql_snapshot` = `(qualified_table_name, records)`, retained only for a
+///   plain `SELECT * FROM <table>` SQL binding (diff-driven `update_in_place`).
+/// - `gsheets_snapshot_info` = `(sheet_name, had_range)`, retained for a
+///   GSHEETS binding so `output_sheets` `update_by_position` can diff the
+///   returned df against what was loaded, by row position.
 type ResolvedOne = (
     String,
     Value,
     Option<(String, Vec<serde_json::Map<String, Value>>)>,
+    Option<(String, bool)>,
 );
 
 /// Structured error envelope: `{"error": kind, "binding": var, ...extra}`.
@@ -319,9 +330,11 @@ pub async fn resolve_bindings(
     let mut inputs = serde_json::Map::new();
     let mut loaded_columns = serde_json::Map::new();
     let mut sql_snapshots: HashMap<String, Vec<serde_json::Map<String, Value>>> = HashMap::new();
+    let mut gsheets_snapshots: HashMap<String, super::sheet_writer::LoadedSnapshot> =
+        HashMap::new();
 
     for r in results {
-        let (var, records, snapshot) = r?;
+        let (var, records, snapshot, gsheets_info) = r?;
         let columns = extract_columns(&records);
         loaded_columns.insert(
             var.clone(),
@@ -329,6 +342,22 @@ pub async fn resolve_bindings(
         );
         if let Some((table, recs)) = snapshot {
             sql_snapshots.insert(table, recs);
+        }
+        if let Some((sheet, had_range)) = gsheets_info {
+            // Convert the records to Vec<Map> for the snapshot BEFORE `records`
+            // is moved into `inputs`. A sheet bound more than once is ambiguous.
+            let recs: Vec<serde_json::Map<String, Value>> = records
+                .as_array()
+                .map(|a| a.iter().filter_map(|v| v.as_object().cloned()).collect())
+                .unwrap_or_default();
+            gsheets_snapshots
+                .entry(sheet)
+                .and_modify(|s| s.ambiguous = true)
+                .or_insert(super::sheet_writer::LoadedSnapshot {
+                    records: recs,
+                    had_range,
+                    ambiguous: false,
+                });
         }
         inputs.insert(var, records);
     }
@@ -340,6 +369,7 @@ pub async fn resolve_bindings(
         inputs,
         loaded_columns,
         sql_snapshots,
+        gsheets_snapshots,
     })
 }
 
@@ -362,7 +392,7 @@ async fn resolve_one(
         BindingKind::Inline => {
             let raw = b.data.clone().unwrap_or(Value::Array(vec![]));
             let records = normalize_inline_data(&raw);
-            Ok((b.var.clone(), records, None))
+            Ok((b.var.clone(), records, None, None))
         }
 
         BindingKind::Attachment => {
@@ -391,7 +421,7 @@ async fn resolve_one(
                     )
                 })?;
             let records_value = Value::Array(records.into_iter().map(Value::Object).collect());
-            Ok((b.var.clone(), records_value, None))
+            Ok((b.var.clone(), records_value, None, None))
         }
 
         BindingKind::Gsheets => {
@@ -436,7 +466,14 @@ async fn resolve_one(
                 Value::Null => Value::Array(vec![]),
                 other => other,
             };
-            Ok((b.var.clone(), records, None))
+            // Retain sheet + had_range so output_sheets update_by_position can
+            // diff the returned df against this load by row position.
+            Ok((
+                b.var.clone(),
+                records,
+                None,
+                Some((sheet, b.range.is_some())),
+            ))
         }
 
         BindingKind::Sql => {
@@ -529,7 +566,7 @@ async fn resolve_one(
 
             let snapshot = snapshot_table.map(|t| (t, records.clone()));
             let records_value = Value::Array(records.into_iter().map(Value::Object).collect());
-            Ok((b.var.clone(), records_value, snapshot))
+            Ok((b.var.clone(), records_value, snapshot, None))
         }
     }
 }
