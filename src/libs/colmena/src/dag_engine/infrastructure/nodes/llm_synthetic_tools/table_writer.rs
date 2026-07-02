@@ -655,10 +655,28 @@ pub fn build_update_sql_from_changes(
         .collect()
 }
 
-/// Rows are chunked to this size before a single `INSERT`/`UPSERT`
-/// statement is built, keeping the parameter count (`cols * chunk`) well
-/// under Postgres's 65535 bind-parameter limit.
+/// Upper bound on rows chunked into a single `INSERT`/`UPSERT` statement.
+/// The actual chunk size is capped further by [`chunk_rows_for`] so that
+/// `cols * chunk <= PG_MAX_BIND_PARAMS` — a wide table (many columns)
+/// would otherwise blow past Postgres's 65535 bind-parameter limit
+/// within a single `WRITE_CHUNK_SIZE`-row chunk (e.g. 70 cols * 1000
+/// rows = 70,000 params > 65,535).
 const WRITE_CHUNK_SIZE: usize = 1000;
+
+/// Postgres's hard limit on bind parameters in a single prepared
+/// statement.
+const PG_MAX_BIND_PARAMS: usize = 65_535;
+
+/// Compute the row-chunk size for a table with `num_cols` columns,
+/// capping `cols * chunk_rows` under [`PG_MAX_BIND_PARAMS`] while never
+/// exceeding [`WRITE_CHUNK_SIZE`] for normal (narrow) tables. Always
+/// returns at least 1 (so a single row that itself has more columns
+/// than the param budget still gets one — malformed, but not silently
+/// dropped — chunk; such a table is already unrealistic).
+fn chunk_rows_for(num_cols: usize) -> usize {
+    let by_budget = PG_MAX_BIND_PARAMS / num_cols.max(1);
+    WRITE_CHUNK_SIZE.min(by_budget.max(1))
+}
 
 /// Bind a single `serde_json::Value` onto a `sqlx::query::Query` builder,
 /// mapping JSON scalar types to native Postgres types. `Array`/`Object`
@@ -700,19 +718,35 @@ async fn exec_bound(
     query.execute(&mut **tx).await
 }
 
-/// `true` if `err` indicates the `ON CONFLICT (key)` clause has no
-/// matching arbiter on the target table — either a genuine unique-key
-/// collision at write time (SQLSTATE `23505`, `unique_violation`) or the
-/// declared `key` not being backed by any UNIQUE/PRIMARY KEY constraint
-/// at all (SQLSTATE `42P10`, `invalid_column_reference` — Postgres's
-/// code for "there is no unique or exclusion constraint matching the
-/// ON CONFLICT specification"). Both map to the same LLM-facing
-/// `UpsertKeyNotUnique` error: the fix is the same either way — pick a
-/// key backed by a real constraint.
+/// `true` only for SQLSTATE `42P10` (`invalid_column_reference` —
+/// Postgres's code for "there is no unique or exclusion constraint
+/// matching the ON CONFLICT specification"): the declared `key` is not
+/// backed by any UNIQUE/PRIMARY KEY constraint on the target table at
+/// all, so `ON CONFLICT (key)` has no arbiter to match.
+///
+/// Deliberately does **not** include `23505` (`unique_violation`): that
+/// code also fires for a write-time collision on an *unrelated* unique
+/// constraint (e.g. the table has `PRIMARY KEY (id)` and a separate
+/// `UNIQUE (email)`, and an `ON CONFLICT (id)` upsert row collides on
+/// `email`). Labeling that as "the ON CONFLICT key has no matching
+/// UNIQUE constraint" would be misleading — the key IS backed by a
+/// constraint; a different column collided. See
+/// [`is_generic_constraint_violation`] for that case's mapping.
 fn is_unique_violation(err: &sqlx::Error) -> bool {
     matches!(
         err,
-        sqlx::Error::Database(db) if matches!(db.code().as_deref(), Some("23505") | Some("42P10"))
+        sqlx::Error::Database(db) if db.code().as_deref() == Some("42P10")
+    )
+}
+
+/// `true` for SQLSTATE `23505` (`unique_violation`) — a genuine
+/// constraint collision at write time that is unrelated to the
+/// `ON CONFLICT` arbiter itself (see [`is_unique_violation`] doc for why
+/// these two cases must not share an error code).
+fn is_generic_constraint_violation(err: &sqlx::Error) -> bool {
+    matches!(
+        err,
+        sqlx::Error::Database(db) if db.code().as_deref() == Some("23505")
     )
 }
 
@@ -779,6 +813,12 @@ fn scalar_key_to_string(v: &Value) -> Option<String> {
 /// cell-level diff is unavailable (no loaded snapshot) or infeasible
 /// (composite key — [`build_update_sql_from_changes`] only supports a
 /// single-column key).
+///
+/// When `cols` contains only key column(s) — i.e. there are no
+/// non-key columns to `SET` — there is nothing to update for any
+/// record, so no statements are built at all (an empty `SET` clause is
+/// a Postgres syntax error). Callers must treat an empty result as "no
+/// rows changed", not as a failure.
 fn build_full_record_updates(
     schema: &str,
     table: &str,
@@ -787,6 +827,9 @@ fn build_full_record_updates(
     records: &[Map<String, Value>],
 ) -> Vec<(String, Vec<Value>)> {
     let set_cols: Vec<&String> = cols.iter().filter(|c| !key.contains(c)).collect();
+    if set_cols.is_empty() {
+        return Vec::new();
+    }
     records
         .iter()
         .map(|record| {
@@ -1017,9 +1060,10 @@ async fn write_one_table(
     Ok(result)
 }
 
-/// Insert `records` in chunks of [`WRITE_CHUNK_SIZE`], skipping any
-/// empty chunk (defensive — an empty chunk would build a malformed
-/// `VALUES ()` clause).
+/// Insert `records` in chunks of up to [`WRITE_CHUNK_SIZE`] rows (fewer
+/// for wide tables — see [`chunk_rows_for`]), skipping any empty chunk
+/// (defensive — an empty chunk would build a malformed `VALUES ()`
+/// clause).
 async fn insert_chunked(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     schema: &str,
@@ -1028,7 +1072,7 @@ async fn insert_chunked(
     records: &[Map<String, Value>],
 ) -> Result<u64, Value> {
     let mut rows_affected = 0u64;
-    for chunk in records.chunks(WRITE_CHUNK_SIZE) {
+    for chunk in records.chunks(chunk_rows_for(cols.len())) {
         if chunk.is_empty() {
             continue;
         }
@@ -1045,11 +1089,12 @@ async fn insert_chunked(
     Ok(rows_affected)
 }
 
-/// Upsert `records` in chunks of [`WRITE_CHUNK_SIZE`], skipping any
-/// empty chunk. Translates a Postgres unique-violation into a structured
-/// `UpsertKeyNotUnique` error (e.g. the declared `key` is not backed by a
-/// unique/PK constraint on the target table, so `ON CONFLICT` has no
-/// arbiter to match).
+/// Upsert `records` in chunks of up to [`WRITE_CHUNK_SIZE`] rows (fewer
+/// for wide tables — see [`chunk_rows_for`]), skipping any empty chunk.
+/// Translates a Postgres unique-violation on the `ON CONFLICT` arbiter
+/// into a structured `UpsertKeyNotUnique` error (the declared `key` is
+/// not backed by a unique/PK constraint on the target table), and any
+/// other unique-constraint collision into `ConstraintViolation`.
 async fn upsert_chunked(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     schema: &str,
@@ -1060,7 +1105,7 @@ async fn upsert_chunked(
     table_label: &str,
 ) -> Result<u64, Value> {
     let mut rows_affected = 0u64;
-    for chunk in records.chunks(WRITE_CHUNK_SIZE) {
+    for chunk in records.chunks(chunk_rows_for(cols.len())) {
         if chunk.is_empty() {
             continue;
         }
@@ -1075,6 +1120,16 @@ async fn upsert_chunked(
                     "message": format!(
                         "upsert failed: key {key:?} has no matching UNIQUE/PRIMARY KEY \
                          constraint on the target table (ON CONFLICT arbiter not found): {e}"
+                    ),
+                })
+            } else if is_generic_constraint_violation(&e) {
+                json!({
+                    "error": "ConstraintViolation",
+                    "table": table_label,
+                    "detail": e.to_string(),
+                    "message": format!(
+                        "upsert failed: a unique constraint (unrelated to the ON CONFLICT \
+                         key {key:?}) was violated: {e}"
                     ),
                 })
             } else {
@@ -1634,6 +1689,78 @@ mod tests {
         assert!(statements.is_empty());
     }
 
+    // --- Fix 2: build_full_record_updates with key-only columns ---
+
+    #[test]
+    fn full_record_updates_skips_records_when_only_key_columns_present() {
+        // Only the key column ("id") is present in `cols` — there are no
+        // non-key columns to SET, so no UPDATE statements must be built
+        // (an empty SET clause is a Postgres syntax error).
+        let mut r = Map::new();
+        r.insert("id".into(), json!(1));
+        let statements =
+            build_full_record_updates("s", "t", &["id".to_string()], &["id".to_string()], &[r]);
+        assert!(
+            statements.is_empty(),
+            "expected no UPDATE statements when there are no non-key columns to set, got: {statements:?}"
+        );
+    }
+
+    #[test]
+    fn full_record_updates_still_builds_statements_when_non_key_cols_present() {
+        let mut r = Map::new();
+        r.insert("id".into(), json!(1));
+        r.insert("name".into(), json!("Ana"));
+        let statements = build_full_record_updates(
+            "s",
+            "t",
+            &["id".to_string()],
+            &["id".to_string(), "name".to_string()],
+            &[r],
+        );
+        assert_eq!(statements.len(), 1);
+        assert!(
+            statements[0].0.contains("SET \"name\"=$1"),
+            "got: {}",
+            statements[0].0
+        );
+        assert!(
+            !statements[0].0.contains("SET  WHERE"),
+            "malformed empty SET: {}",
+            statements[0].0
+        );
+    }
+
+    // --- Fix 3: chunk_rows_for bind-parameter ceiling ---
+
+    #[test]
+    fn chunk_rows_for_narrow_table_uses_full_write_chunk_size() {
+        assert_eq!(chunk_rows_for(5), WRITE_CHUNK_SIZE);
+    }
+
+    #[test]
+    fn chunk_rows_for_wide_table_caps_under_pg_bind_param_limit() {
+        // 70 columns * 1000 rows = 70,000 > 65,535 — must be capped.
+        let cols = 70;
+        let rows = chunk_rows_for(cols);
+        assert!(
+            rows < WRITE_CHUNK_SIZE,
+            "expected a reduced chunk size, got {rows}"
+        );
+        assert!(
+            cols * rows <= PG_MAX_BIND_PARAMS,
+            "cols*rows={} must stay under the {} bind-parameter limit",
+            cols * rows,
+            PG_MAX_BIND_PARAMS
+        );
+    }
+
+    #[test]
+    fn chunk_rows_for_never_returns_zero() {
+        assert!(chunk_rows_for(0) >= 1);
+        assert!(chunk_rows_for(1_000_000) >= 1);
+    }
+
     // --- write_output_tables (integration, real Postgres) ---
 
     fn full_perms(schemas: &[&str]) -> SqlPermissions {
@@ -1812,6 +1939,73 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires TEST_DATABASE_URL — run with `cargo test -- --ignored`"]
+    async fn upsert_unrelated_unique_collision_is_not_key_not_unique() {
+        // Table has a PK on `id` (a real ON CONFLICT arbiter) AND a
+        // separate UNIQUE column `email`. Upserting ON CONFLICT(id) with
+        // a row whose email collides with an existing row must NOT be
+        // reported as UpsertKeyNotUnique — the `id` key IS backed by a
+        // constraint; a different column collided. Fix 1 regression test.
+        let pool = test_pool().await;
+        sqlx::query("DROP TABLE IF EXISTS drp_test.unrelated_unique")
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("CREATE SCHEMA IF NOT EXISTS drp_test")
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query(
+            "CREATE TABLE drp_test.unrelated_unique (\
+                id BIGINT PRIMARY KEY, email TEXT UNIQUE, name TEXT)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO drp_test.unrelated_unique (id, email, name) \
+             VALUES (1, 'a@x.com', 'Ana')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // ON CONFLICT(id) for id=2 (no PK collision), but email collides
+        // with the existing row's email — a genuine 23505 on the email
+        // constraint, unrelated to the ON CONFLICT(id) arbiter.
+        let specs = parse_output_tables(&json!({
+            "drp_test.unrelated_unique": {
+                "mode":"upsert",
+                "df":[{"id":2,"email":"a@x.com","name":"Bo"}],
+                "key":"id"
+            }
+        }))
+        .unwrap();
+        let perms = full_perms(&["drp_test"]);
+        let out = write_output_tables(
+            &pool,
+            specs,
+            &["drp_test".into()],
+            &perms,
+            None,
+            &Default::default(),
+        )
+        .await;
+        assert_ne!(
+            out["error"], "UpsertKeyNotUnique",
+            "an unrelated unique-constraint collision must not be mislabeled as \
+             UpsertKeyNotUnique: got {out}"
+        );
+        assert_eq!(out["error"], "ConstraintViolation", "got: {out}");
+
+        let n: i64 = sqlx::query_scalar("SELECT count(*) FROM drp_test.unrelated_unique")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(n, 1, "failed upsert must roll back — no partial writes");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL — run with `cargo test -- --ignored`"]
     async fn replace_deletes_then_inserts() {
         let pool = test_pool().await;
         sqlx::query("DROP TABLE IF EXISTS drp_test.replace_t")
@@ -1903,6 +2097,62 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(name, "New");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL — run with `cargo test -- --ignored`"]
+    async fn update_with_only_key_column_is_clean_noop_not_syntax_error() {
+        // Fix 2 regression test (end-to-end): the input records contain
+        // ONLY the key column, so there is nothing to SET. Before the
+        // fix, build_full_record_updates would emit `SET  WHERE ...`
+        // (malformed SQL) on the no-snapshot fallback path, surfacing as
+        // a confusing TransactionError after rollback. After the fix
+        // this must be a clean zero-row result, not a SQL error.
+        let pool = test_pool().await;
+        sqlx::query("DROP TABLE IF EXISTS drp_test.update_key_only")
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("CREATE SCHEMA IF NOT EXISTS drp_test")
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("CREATE TABLE drp_test.update_key_only (id BIGINT PRIMARY KEY, name TEXT)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO drp_test.update_key_only (id, name) VALUES (1, 'Ana')")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let specs = parse_output_tables(&json!({
+            "drp_test.update_key_only": {"mode":"update","df":[{"id":1}],"key":"id"}
+        }))
+        .unwrap();
+        let perms = full_perms(&["drp_test"]);
+        let out = write_output_tables(
+            &pool,
+            specs,
+            &["drp_test".into()],
+            &perms,
+            None,
+            &Default::default(),
+        )
+        .await;
+        assert!(
+            out.get("error").is_none(),
+            "expected a clean result, not an error (malformed SQL): {out}"
+        );
+        assert_eq!(out["wrote_tables"][0]["rows_affected"], 0, "got: {out}");
+
+        // Row must be untouched (no-op, not a corrupted write).
+        let name: String =
+            sqlx::query_scalar("SELECT name FROM drp_test.update_key_only WHERE id = 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(name, "Ana");
     }
 
     #[tokio::test]
