@@ -363,6 +363,45 @@ mod tests {
         }
     }
 
+    /// Verifies the `data-run-python-recipes` skill compiles into the binary,
+    /// parses its frontmatter, and exposes the four expected references
+    /// (spreadsheet_to_db, db_to_file, cross_source_join, sinks_and_modes).
+    #[tokio::test]
+    async fn data_run_python_recipes_is_loadable() {
+        let repo = BuiltinSkillRepository::new(&["data-run-python-recipes".to_string()]).unwrap();
+        let skill = repo.load_skill("data-run-python-recipes").await.unwrap();
+        assert_eq!(skill.name, "data-run-python-recipes");
+        assert!(
+            skill.body.contains("output_tables"),
+            "body should document the output_tables sink"
+        );
+        assert_eq!(
+            skill.references.len(),
+            4,
+            "expected 4 references, got {}",
+            skill.references.len()
+        );
+        let names: Vec<String> = skill.references.iter().map(|r| r.name.clone()).collect();
+        for expected in &[
+            "spreadsheet_to_db",
+            "db_to_file",
+            "cross_source_join",
+            "sinks_and_modes",
+        ] {
+            assert!(
+                names.iter().any(|n| n == expected),
+                "missing reference '{}', got {:?}",
+                expected,
+                names
+            );
+            let reference = repo
+                .load_reference("data-run-python-recipes", expected)
+                .await
+                .unwrap();
+            assert!(!reference.body.is_empty(), "{} body must not be empty", expected);
+        }
+    }
+
     /// Verifies the `gsheets-presentable-output` skill compiles into the
     /// binary, parses its frontmatter, and exposes the five expected
     /// references (recipe, palettes, number_formats, multi_op_template,
