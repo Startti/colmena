@@ -975,7 +975,16 @@ An LLM agent that manages per-user todo lists with automatic Row-Level Security 
 
 ---
 
-## attachment_run_python (shipped 2026-06-10)
+## attachment_run_python (shipped 2026-06-10) — DEPRECATED
+
+> **DEPRECATED (2026-07-02) — usá [`data_run_python`](48_data_run_python.md)
+> en su lugar.** `data_run_python` cubre el mismo cómputo pandas sobre un
+> attachment CSV/XLSX **y además** permite write-back (a SQL vía
+> `output_tables`, a Sheets vía `output_sheets`, o a archivos descargables vía
+> `output_attachments`) y cruce con otras fuentes en una sola call.
+> `attachment_run_python` sigue funcionando por compatibilidad, pero no debe
+> recomendarse. `sql_inspect_attachment` y `sql_bulk_insert_from_attachment`
+> **no** están deprecados. El resto de esta sección documenta el tool legacy.
 
 Tool sintético que **carga un CSV/XLSX adjunto en pandas y ejecuta código del LLM
 server-side**. La data del archivo nunca cruza al contexto del LLM — solo
@@ -1082,7 +1091,7 @@ Después de items 13 + auto-summary + `attachment_run_python` (2026-06-09 / 2026
 
 | Tipo de archivo | "Qué columnas/contenido tiene?" | "Hacé un cálculo sobre la data" | "Cargá esto en mi DB" | "Leé el contenido literal" |
 |---|---|---|---|---|
-| **CSV / XLSX** | Catalog auto-summary (gratis, sin call) | `attachment_run_python` | `sql_inspect_attachment` + `sql_bulk_insert_from_attachment` (volcado crudo) / `data_run_python` (transformación/cruce) | `load_attachment` |
+| **CSV / XLSX** | Catalog auto-summary (gratis, sin call) | `data_run_python` (`attachment_run_python` está deprecado) | `sql_inspect_attachment` + `sql_bulk_insert_from_attachment` (volcado crudo) / `data_run_python` (transformación/cruce) | `load_attachment` |
 | **PDF** | Catalog summary (LLM-generated, gratis después de generación) | N/A | N/A | `load_attachment` |
 | **Imagen** | Catalog metadata (filename, mime, size) | `load_attachment` (multimodal vision) | N/A | `load_attachment` |
 | **Markdown / código / plain text** | Catalog summary (LLM-generated) | N/A | N/A | `load_attachment` |
@@ -1095,7 +1104,7 @@ Después de items 13 + auto-summary + `attachment_run_python` (2026-06-09 / 2026
 | Caso | Por qué la herramienta especializada gana |
 |---|---|
 | CSV/XLSX → ver columnas/sample | El catalog auto-summary ya pone esa info en el system message — no hace falta gastar tokens en `load_attachment` |
-| CSV/XLSX → cálculo | `attachment_run_python` hace la math server-side; el LLM solo ve el resultado |
+| CSV/XLSX → cálculo | `data_run_python` hace la math server-side; el LLM solo ve el resultado (`attachment_run_python` sigue disponible pero está deprecado desde 2026-07-02) |
 | CSV → cargar en Postgres | `sql_bulk_insert_from_attachment` streamea via COPY; el LLM solo ve un stats response |
 
 Para todo lo demás (PDFs, imágenes, código, markdown, texto plain), o cuando el LLM genuinamente necesita ver el contenido literal de un CSV (e.g. "mostrame las filas con error"), [`load_attachment`](31_load_attachment.md) es la herramienta correcta. El catalog auto-summary cubre la mayoría de los casos "qué es esto" sin necesidad de gastar tokens leyendo el archivo entero.
@@ -1105,7 +1114,7 @@ Para todo lo demás (PDFs, imágenes, código, markdown, texto plain), o cuando 
 | Path | Tokens consumidos | Cubre |
 |---|---|---|
 | Catalog auto-summary | 0 calls, ~150 tokens fijos en system message | Schema + 3 sample rows (CSV/XLSX) o summary AI-generated (PDF/text) |
-| `attachment_run_python` | ~80 tokens response | Cálculo analítico (CSV/XLSX) |
+| `data_run_python` (`attachment_run_python` deprecado) | ~80 tokens response | Cálculo analítico (CSV/XLSX) |
 | `sql_inspect_attachment` | ~300 tokens response | Schema + sample + opt. target_table schema (CSV/XLSX) |
 | `sql_bulk_insert_from_attachment` | ~80 tokens response | Stats del insert (CSV → Postgres) |
 | `load_attachment` | proporcional al tamaño del archivo | Contenido literal completo (cualquier mime) |

@@ -46,7 +46,8 @@ See [40_toolkit_packages.md](40_toolkit_packages.md) for the full syntax and exc
 | `gsheets_add_sheet` | Add a new tab. |
 | `gsheets_delete_sheet` | Delete a tab by title or numeric id. |
 | `gsheets_read` | Read cells; `value_render` controls formula vs evaluated; `as_records` controls 2D-array vs records shape. |
-| `gsheets_run_python` | **Preferred for analysis.** Run sandboxed pandas/numpy/scipy code against one or more sheet ranges loaded server-side — rows NEVER pass through the LLM context. See section below. |
+| `gsheets_run_python` | **DEPRECATED (2026-07-02) — use [`data_run_python`](48_data_run_python.md).** Still works for back-compat. Runs sandboxed pandas/numpy/scipy against one or more sheet ranges loaded server-side — rows NEVER pass through the LLM context. See section below. |
+| `data_run_python` | **Preferred for analysis + write-back.** Same server-side pandas sandbox, but binds Sheets, CSV/XLSX attachments, SQL SELECTs, and inline data in one call, and writes back to Sheets, SQL, or downloadable files. Exposed by this alias since 2026-07-02. See [§48](48_data_run_python.md). |
 | `gsheets_set_cell` | Write one cell. Strings starting with `=` are evaluated by Google server-side. |
 | `gsheets_set_range` | Bulk-write a rectangular block. Same formula semantics. |
 | `gsheets_format_range` | Apply cell formatting (text style, background, borders, alignment, number format, column width, row height) to one or more ranges in a single atomic `batchUpdate`. **Non-destructive** — never touches values/formulas. See "Cell formatting" below. |
@@ -250,14 +251,17 @@ el array `values` (respetando `as_records`) en lugar del campo `markdown`:
 ```
 
 > **Regla:** para *comparar* dos tablas no leas markdown y coteja
-> visualmente — usa `gsheets_run_python` (código determinista). La sección
-> siguiente explica cómo.
+> visualmente — usa [`data_run_python`](48_data_run_python.md) (código
+> determinista; `gsheets_run_python` sigue funcionando pero está deprecado).
+> La sección siguiente explica cómo.
 
 ## Comparación de tablas (código, no cotejo visual)
 
 Cuando necesites comparar, cruzar o deduplicar tablas usa
-`gsheets_run_python`. El modelo escribe código pandas que corre en el
-servidor — los datos nunca pasan por el contexto del LLM.
+[`data_run_python`](48_data_run_python.md) (`gsheets_run_python` está
+deprecado desde 2026-07-02, pero el mismo código aplica). El modelo escribe
+código pandas que corre en el servidor — los datos nunca pasan por el
+contexto del LLM.
 
 Un `binding` tiene dos formas posibles:
 
@@ -316,7 +320,17 @@ output_sheets = {"Diferencias": pd.DataFrame(diff)}
 output = {"total_diff": len(diff)}
 ```
 
-## Bulk analysis without LLM cost: `gsheets_run_python` (E-T14)
+## Bulk analysis without LLM cost: `gsheets_run_python` (E-T14) — DEPRECATED
+
+> **DEPRECATED (2026-07-02) — use [`data_run_python`](48_data_run_python.md)
+> instead.** `data_run_python` is the primary tabular tool: same server-side
+> pandas sandbox and identical `bindings` + `output_sheets` +
+> `write_to_spreadsheet` contract, plus SQL/attachment/inline sources and
+> write-back to SQL and downloadable files. `gsheets_run_python` keeps working
+> for back-compat and is still exposed by the `gsheets` alias during the
+> bridge, but should no longer be recommended. The rest of this section
+> documents the legacy tool; the same concepts apply verbatim to
+> `data_run_python`.
 
 `gsheets_read` is fine for inspection (< 50 rows) but burns context
 tokens at scale — 5000 rows ≈ 150k tokens just to feed pandas. The

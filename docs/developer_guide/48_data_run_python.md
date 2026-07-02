@@ -1,12 +1,15 @@
 # 48. `data_run_python` — tool unificado de movimiento de datos tabulares
 
-**Estado:** shipped 2026-07-01/02. Aditivo — no reemplaza (todavía) a
-`gsheets_run_python` ni a `attachment_run_python`; ver §"Convivencia con los
-tools existentes" más abajo.
+**Estado:** shipped 2026-07-01/02. **Es el tool tabular primario.**
+`gsheets_run_python` y `attachment_run_python` quedan **soft-deprecados desde
+2026-07-02** (siguen funcionando por compatibilidad, pero toda la guía, skills
+y aliases apuntan a `data_run_python`); ver §"Convivencia con los tools
+existentes" más abajo.
 
 ## Qué es
 
-`data_run_python` es un único tool sintético LLM que mueve y analiza datos
+`data_run_python` es el **tool tabular primario** — un único tool sintético
+LLM que mueve y analiza datos
 tabulares entre **CSV/XLSX (attachment)**, **Google Sheets**, **SQL** y
 **datos inline**, en una sola tool call. El código pandas corre server-side
 en el sandbox restringido — **las filas nunca pasan por el contexto del
@@ -78,6 +81,26 @@ Reglas (heredadas de `gsheets_run_python`, mismas validaciones):
 Mismas caps que `attachment_run_python`: archivo ≤ 50 MB, ≤ 100 000 filas.
 CSV con auto-delimiter; XLSX con `sheet_name` opcional (default primera
 hoja) y `header_row` 1-indexed.
+
+### Activación
+
+`data_run_python` se activa de dos formas:
+
+1. **`tool_configurations`** — una entrada explícita con
+   `node_type: "data_run_python"` (necesaria para habilitar la capacidad SQL
+   vía `fixed_config.sql`, y para ajustar policies de operador). Ver
+   §"Config del operador" más abajo.
+2. **`enabled_tools`** — desde 2026-07-02 el alias del toolkit **`gsheets`**
+   incluye `data_run_python`, así que `enabled_tools: ["gsheets"]` ya lo
+   expone (junto al resto de la superficie gsheets). También lo activan el
+   wildcard `"*"` y el nombre exacto `"data_run_python"`.
+
+Cuando entra **por alias** (sin `tool_configurations`), la capacidad gsheets
+se auto-detecta (el agente ya tiene el toolkit gsheets habilitado) pero la
+capacidad **SQL requiere sí o sí un `fixed_config.sql`** — que solo se puede
+declarar vía `tool_configurations`. Es decir: `["gsheets"]` te da
+`data_run_python` con lectura/escritura de attachments, inline y Google
+Sheets, pero no SQL.
 
 ### Gating de fuentes
 
@@ -319,14 +342,27 @@ dive de modos/anti-patterns (`sinks_and_modes`). Fuente:
 `src/libs/colmena/skills/data-run-python-recipes/`. Ver también
 [§24 Skills](24_skills.md) para cómo se auto-cargan.
 
-## Convivencia con los tools existentes
+## Convivencia con los tools existentes — `gsheets_run_python` y `attachment_run_python` están deprecados
 
-`data_run_python` es aditivo — no borra `gsheets_run_python` ni
-`attachment_run_python`. Si un operador habilita ambos simultáneamente, las
-descripciones de los tools específicos siguen siendo source-scoped y no
-colisionan gravemente, pero la recomendación es habilitar `data_run_python`
-**en lugar de** los específicos cuando el flujo cruza almacenes (attachment
-↔ SQL, gsheet ↔ SQL). Ver también la matriz de elección en
+Desde **2026-07-02**, `gsheets_run_python` y `attachment_run_python` están
+**soft-deprecados a favor de `data_run_python`**. Siguen **funcionando** y se
+mantienen registrados por compatibilidad con grafos persistidos que los
+nombran (por eso `gsheets_run_python` sigue en el alias `gsheets` durante el
+bridge), pero:
+
+- **No los recomiendes.** `data_run_python` cubre su funcionalidad completa —
+  comparten `sheet_writer.rs`/`table_writer.rs` — y además agrega cruce entre
+  fuentes heterogéneas, write-back a SQL (`output_tables`) y export a archivos
+  descargables (`output_attachments`).
+- Sus descripciones ahora llevan un prefijo `DEPRECATED — usá data_run_python`.
+- Las 11 skills de gsheets instruyen al modelo a llamar `data_run_python`.
+- El borrado real de estos dos tools está **diferido a una Fase 2 gated**
+  (telemetría + verificación de grafos persistidos en ADP). Ver el plan
+  [`docs/superpowers/plans/2026-07-02-data-run-python-soft-deprecation.md`](../superpowers/plans/2026-07-02-data-run-python-soft-deprecation.md).
+
+`sql_inspect_attachment` y `sql_bulk_insert_from_attachment` **no** están
+deprecados (el volcado 1:1 crudo de un CSV entero vía COPY sigue siendo su
+dominio). Ver la matriz de elección en
 [§23 Nodo SQL — "Elegir la herramienta correcta para un attachment"](23_sql_node.md#elegir-la-herramienta-correcta-para-un-attachment).
 
 Fuera de scope de v1 (backlog): `setup_sql` dentro de este tool, backends

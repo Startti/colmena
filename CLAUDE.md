@@ -382,3 +382,17 @@ For overrides (custom alias, `expose_sub_tools` filtering, `cache_ttl_seconds`, 
   resumen semántico v1. Recall sigue lossless. Spec:
   [`docs/superpowers/specs/2026-06-18-conversation-semantic-summary-design.md`](docs/superpowers/specs/2026-06-18-conversation-semantic-summary-design.md);
   plan: [`docs/superpowers/plans/2026-06-19-tool-result-structured-digest-v1-1.md`](docs/superpowers/plans/2026-06-19-tool-result-structured-digest-v1-1.md).
+- **`data_run_python` soft-deprecation shipped 2026-07-02** — `data_run_python`
+  es ahora el tool tabular **primario**; `gsheets_run_python` y
+  `attachment_run_python` quedan **deprecados** (siguen funcionando, se
+  mantienen registrados por compatibilidad con grafos persistidos). Cambio
+  **aditivo y reversible**: sus descripciones llevan prefijo `DEPRECATED`, las
+  11 skills de gsheets ahora instruyen llamar `data_run_python`, y el alias
+  `gsheets` lo incluye (`enabled_tools: ["gsheets"]` lo expone; `gsheets_run_python`
+  sigue en el alias durante el bridge). Vía alias auto-detecta la capacidad
+  gsheets; SQL sigue requiriendo `fixed_config.sql`. El **borrado real** del
+  código de los dos tools viejos queda **diferido a una Fase 2 gated**
+  (telemetría + verificación de grafos persistidos en ADP). ADP no afectado (sin
+  cambio de API pública). Plan:
+  [`docs/superpowers/plans/2026-07-02-data-run-python-soft-deprecation.md`](docs/superpowers/plans/2026-07-02-data-run-python-soft-deprecation.md);
+  guía: [`docs/developer_guide/48_data_run_python.md`](docs/developer_guide/48_data_run_python.md).

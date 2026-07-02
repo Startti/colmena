@@ -1553,6 +1553,9 @@
         },
         "gsheets_run_python": {
           "name": "gsheets_run_python",
+          "deprecated": true,
+          "deprecated_in_favor_of": "data_run_python",
+          "deprecated_note": "DEPRECATED 2026-07-02 — use data_run_python (same pandas sandbox + bindings/output_sheets contract, plus SQL/attachment/inline sources and write-back). Still works for back-compat.",
           "description": "Run sandboxed Python (pandas/numpy/scipy.stats) over data loaded directly from Google Sheets. Each `bindings` entry becomes a Python global (a list of dicts you can pass to pd.DataFrame). Rows NEVER pass through the LLM — only the final `output`. PREFERRED for any analysis over more than ~50 rows. The code can also assign `output_sheets = {name: DataFrame | spec_dict}` to write results back as new tabs or patch existing ones (three modes: replace / update_in_place / overwrite — see write-back section below).",
           "input_schema": {
             "type": "object",
