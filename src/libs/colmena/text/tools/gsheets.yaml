@@ -73,8 +73,14 @@ gsheets_set_range:
     Bulk-write a rectangular block of cells starting at start_addr. values_2d is a row-major 2D array. Strings starting with `=` are evaluated by Google as formulas.
 
 gsheets_run_python:
-  summary: "Pandas/numpy over sheet data; also WRITES results back — new tabs, edit rows (no key/A1 math), live formulas by column name {{Col}}. For analysis, bulk edits, compares, formula fills."
+  summary: "[DEPRECATED - use data_run_python] Pandas/numpy over sheets; WRITES back - new tabs, edit rows (no key/A1 math), live {{Col}} formulas. Kept for back-compat only."
   description: |
+    DEPRECATED — prefer `data_run_python`, which does everything this tool does
+    (same bindings, same `output_sheets` write-back, same modes and `{{Col}}`
+    formulas) plus SQL and downloadable-file sinks in one unified tool. This tool
+    stays only for backward compatibility with existing graphs; do not choose it
+    for new work when `data_run_python` is available.
+
     Run sandboxed pandas (pd), numpy (np), scipy.stats over one or more tables.
 
     ⚠️ KNOW THE COLUMNS FIRST. Binding a sheet loads its ROWS for computation — it

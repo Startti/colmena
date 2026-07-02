@@ -1,0 +1,25 @@
+{
+  "_comment": "E2E — soft-deprecation steering. The agent activates ONLY the `gsheets` toolkit alias (no data_run_python tool_configurations entry). This proves the alias now exposes data_run_python AND that the model prefers it over the deprecated gsheets_run_python for a tabular compute. Uses an inline `data` binding so NO Google creds are needed. Expect the model to call `data_run_python` and return output.",
+  "metadata": { "category": "agents", "requires_env": ["GEMINI_API_KEY", "DATABASE_URL"] },
+  "nodes": {
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "model": "gemini-2.5-flash",
+        "api_key": "${GEMINI_API_KEY}",
+        "connection_url": "${DATABASE_URL}",
+        "stream": false,
+        "max_iterations": 6,
+        "temperature": 0.0,
+        "enabled_tools": ["gsheets"],
+        "system_message": "Sos un asistente de datos. Cuando necesites computar sobre una tabla, usá una tool de pandas en vez de calcular a mano.",
+        "prompt": "Tengo estas ventas: [{\"producto\": \"A\", \"unidades\": 10, \"precio\": 3}, {\"producto\": \"B\", \"unidades\": 5, \"precio\": 7}, {\"producto\": \"C\", \"unidades\": 8, \"precio\": 2}]. Calculá el ingreso total (unidades*precio sumado sobre todas las filas) y decime el número."
+      }
+    },
+    "log": { "type": "log" }
+  },
+  "edges": [
+    { "from": "agent", "to": "log" }
+  ]
+}

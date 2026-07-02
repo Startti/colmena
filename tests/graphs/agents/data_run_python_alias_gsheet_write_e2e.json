@@ -1,0 +1,25 @@
+{
+  "_comment": "E2E — soft-deprecation, real Google write via the `gsheets` alias ONLY (no data_run_python tool_configurations entry). Proves the aliased data_run_python auto-detects the gsheets capability and can create a spreadsheet + write a computed tab end-to-end. Needs OAuth creds (COLMENA_GOOGLE_OAUTH_*). Uses gsheets_create_spreadsheet (from the alias) then data_run_python output_sheets.",
+  "metadata": { "category": "agents", "requires_env": ["GEMINI_API_KEY", "DATABASE_URL", "COLMENA_GOOGLE_OAUTH_CLIENT_ID", "COLMENA_GOOGLE_OAUTH_CLIENT_SECRET", "COLMENA_GOOGLE_OAUTH_REFRESH_TOKEN", "COLMENA_GOOGLE_SHARE_EMAIL"] },
+  "nodes": {
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "model": "gemini-2.5-flash",
+        "api_key": "${GEMINI_API_KEY}",
+        "connection_url": "${DATABASE_URL}",
+        "stream": false,
+        "max_iterations": 10,
+        "temperature": 0.0,
+        "enabled_tools": ["gsheets"],
+        "system_message": "Sos un asistente de datos que trabaja con Google Sheets. Para computar sobre tablas usá una tool de pandas (no calcules a mano). Para escribir resultados a una hoja usá el sink output_sheets de la tool de pandas, pasando write_to_spreadsheet con el id de la planilla.",
+        "prompt": "Creá una planilla nueva llamada 'DRP Alias E2E'. En una pestaña llamada 'Resumen' escribí estas ventas agregando una columna 'ingreso' = unidades*precio por fila, y una última fila con el total de ingreso: [{\"producto\": \"A\", \"unidades\": 10, \"precio\": 3}, {\"producto\": \"B\", \"unidades\": 5, \"precio\": 7}, {\"producto\": \"C\", \"unidades\": 8, \"precio\": 2}]. Al final decime el link de la planilla y el ingreso total."
+      }
+    },
+    "log": { "type": "log" }
+  },
+  "edges": [
+    { "from": "agent", "to": "log" }
+  ]
+}

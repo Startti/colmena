@@ -19,15 +19,15 @@ of the edit:
 | You want to… | Use | Avoid |
 |---|---|---|
 | Set a few KNOWN cells (you know the A1 addresses) | `gsheets_set_cell` (one) / `gsheets_set_range` (contiguous block) | — |
-| **Edit existing rows matched by a condition (key unique OR not)** | `gsheets_run_python`: bind the whole sheet, modify the df **in place** (`df.loc[mask,'col']=...`), return the WHOLE df under `output_sheets` mode **`update_by_position`** | filtering the returned df; `reset_index`/`sort`+`reset_index`/`concat`; `overwrite` |
-| Edit rows by a **UNIQUE** key column (advanced/portable) | `gsheets_run_python` + `update_in_place` (`key` = that column) | — |
-| Put a **live formula** in cells (recalculates when inputs change) | `gsheets_run_python`: write `'={{ColA}}*{{ColB}}'` (column NAMES in double braces) to the target rows under `update_by_position`/`update_in_place` — the dispatcher fills the real A1 per row | computing column letters by hand inside the formula (off-by-one → `#VALUE!`) |
-| Create a NEW tab **with data** | `gsheets_run_python` with a NEW sheet name in `output_sheets` (creates + fills) | `add_sheet` then `set_range` (two steps) |
+| **Edit existing rows matched by a condition (key unique OR not)** | `data_run_python`: bind the whole sheet, modify the df **in place** (`df.loc[mask,'col']=...`), return the WHOLE df under `output_sheets` mode **`update_by_position`** | filtering the returned df; `reset_index`/`sort`+`reset_index`/`concat`; `overwrite` |
+| Edit rows by a **UNIQUE** key column (advanced/portable) | `data_run_python` + `update_in_place` (`key` = that column) | — |
+| Put a **live formula** in cells (recalculates when inputs change) | `data_run_python`: write `'={{ColA}}*{{ColB}}'` (column NAMES in double braces) to the target rows under `update_by_position`/`update_in_place` — the dispatcher fills the real A1 per row | computing column letters by hand inside the formula (off-by-one → `#VALUE!`) |
+| Create a NEW tab **with data** | `data_run_python` with a NEW sheet name in `output_sheets` (creates + fills) | `add_sheet` then `set_range` (two steps) |
 | Create a new **empty** tab | `gsheets_add_sheet` | — |
 | Create a new **spreadsheet file** | `gsheets_create_spreadsheet`, then populate | — |
 | Append rows at the bottom | `gsheets_set_range` from the first free row | — |
-| Rebuild a whole existing tab (intentional) | `gsheets_run_python` + `output_sheets` mode `overwrite` | overwrite by default — it drops formatting/formulas |
-| Compute over ALL rows (filter/aggregate/dedupe) | `gsheets_run_python` (rows never pass through the model) | reading + eyeballing a truncated preview |
+| Rebuild a whole existing tab (intentional) | `data_run_python` + `output_sheets` mode `overwrite` | overwrite by default — it drops formatting/formulas |
+| Compute over ALL rows (filter/aggregate/dedupe) | `data_run_python` (rows never pass through the model) | reading + eyeballing a truncated preview |
 
 ## Rules that bite people
 

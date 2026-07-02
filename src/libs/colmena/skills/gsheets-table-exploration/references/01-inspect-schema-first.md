@@ -7,7 +7,7 @@ Always.
 
 ```python
 import pandas as pd
-df = pd.DataFrame(products)   # binding name from gsheets_run_python args
+df = pd.DataFrame(products)   # binding name from data_run_python args
 print(df.head(3))             # see the first 3 rows
 print(df.dtypes)              # see what pandas inferred per column
 print(f"shape: {df.shape}")   # rows, cols
@@ -19,7 +19,7 @@ output = {
 ```
 
 Run this FIRST, look at the response, THEN write the real analysis in a
-second `gsheets_run_python` call. Two cheap calls beat one expensive
+second `data_run_python` call. Two cheap calls beat one expensive
 guess.
 
 ## Even cheaper: peek without pandas

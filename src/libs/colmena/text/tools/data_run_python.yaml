@@ -1,23 +1,192 @@
 data_run_python:
-  summary: Run pandas code across multiple data sources in one call — bind each source where it lives, get back only the result
+  summary: The pandas workbench for tabular data — read from files, spreadsheets, SQL, or inline JSON, compute, and write results back to any enabled destination. Rows never enter your context.
   description: |
-    Use this tool whenever data must move or be computed between files, spreadsheets, and the SQL database — bind each source where the data lives now; rows never enter your context.
+    Run sandboxed pandas (`pd`) / numpy (`np`) / scipy.stats over one or more tables, then
+    (optionally) write the result BACK to an enabled destination — a table, a spreadsheet, or a
+    downloadable file — all in one call. Row data lives where it is and is streamed to the sandbox;
+    only your `output` (a small summary you choose) crosses the wire.
 
-    Each entry in `bindings` names a Python variable (`var`) and points at exactly one source (see "Available sources" below for what's enabled in this deployment). All bindings are fetched IN PARALLEL and bound as Python globals — each a list of `{col: val}` dicts — before your `code` runs.
+    ## When to use this tool
 
-    When to pick this tool over a source-specific one: pick `data_run_python` when the task CROSSES stores — e.g. "update the database with this spreadsheet", "download this table as a file", "sync a spreadsheet with the DB", "compare this file against the table". Pick a source-specific tool when the whole task stays inside one store.
+    This is the PRIMARY tool for reading, computing over, and writing tabular data — whether the
+    data lives in ONE source or spans several. Reach for it whenever the answer needs a
+    COMPUTATION (max/mean/filter/groupby/join/dedupe/diff/statistical test) or a WRITE-BACK
+    (append rows to a table, fill a formula down a spreadsheet, edit rows, export a file).
+    Cross-store tasks are one prominent case — "update the database from this spreadsheet",
+    "download this table as a CSV", "sync a spreadsheet with the DB", "compare this file against
+    the table" — but a single-source analytical question ("which product has the highest price in
+    this attachment?") is equally in scope. Do NOT read-and-eyeball a table to compare or aggregate
+    it — bind it and compute.
 
-    Required args:
-      - `bindings`: at least one entry, each with a `var` name and exactly one source field (`attachment_id`, `spreadsheet_id`+`sheet`, `query`, or `data` — depending on which sources are enabled)
-      - `code`: Python source. Convenience modules pre-imported: `pd` (pandas), `np` (numpy), `stats` (scipy.stats), and the stdlib (math, datetime, decimal, json, re, statistics, string, collections, functools, itertools)
+    ## Binding sources (`bindings`, required — at least one)
 
-    Optional args:
-      - `write_to_spreadsheet`: target spreadsheet id for an `output_sheets` sink assigned by your code (only meaningful when the spreadsheet source is enabled)
+    Each entry names a Python variable (`var`) and points at EXACTLY ONE source. All bindings are
+    fetched IN PARALLEL and bound as Python globals — each a list of `{col: val}` dicts — BEFORE
+    your `code` runs. Rebuild the DataFrame with `df = pd.DataFrame(var)`.
 
-    How to surface output:
-      - Assign a global `output` (any JSON-serializable value) — that is what you see back. Pandas DataFrames are auto-converted via `to_dict(orient="records")`, Series via `to_list()`, numpy scalars via `item()`.
+    The enabled source fields depend on this deployment (see "Available sources" below):
+      - `attachment_id` — a CSV/XLSX from the conversation catalog. XLSX only: optional
+        `sheet_name` (default first tab) and `header_row` (1-indexed, default 1 — set 2 for a
+        title row above the header).
+      - `data` — an inline array of `{col: val}` objects (or a 2-D array with a header row).
+        Use it to pass a table you produced yourself (e.g. one extracted from an image).
+    <!--SHEETS-->
+      - `spreadsheet_id` + `sheet` — a Google Sheet tab. Optional `range` (A1, no tab prefix);
+        OMIT `range` to bind the WHOLE tab (required for `update_by_position` write-back).
+    <!--/SHEETS-->
+    <!--SQL-->
+      - `query` — a single SQL **SELECT** (read-only; CTE/MERGE that mutate are rejected).
+    <!--/SQL-->
 
-    Sandbox restrictions:
-      - Blocked imports: os, sys, subprocess, socket, urllib, requests, importlib, builtins, ctypes
-      - No filesystem access, no network access beyond the fetched bindings
-      - Code wall-clock capped; response truncated at a fixed byte limit
+    ```python
+    # bindings: [
+    #   {"var": "sales",   "attachment_id": "doc_abc"},
+    #   {"var": "targets", "data": [{"sku": "A", "goal": 100}]}
+    # ]
+    sales   = pd.DataFrame(sales)
+    targets = pd.DataFrame(targets)
+    ```
+
+    ## `code` and surfacing output
+
+    `code` is Python source. Pre-imported: `pd` (pandas), `np` (numpy), `stats` (scipy.stats), and
+    the stdlib (math, datetime, decimal, json, re, statistics, string, collections, functools,
+    itertools). Assign a global `output` (any JSON-serializable value) — THAT is what you see back.
+    DataFrames auto-convert via `to_dict(orient="records")`, Series via `to_list()`, numpy scalars
+    via `.item()`. Keep `output` SMALL — a count, a summary, a handful of rows. Large result sets
+    belong in a write sink (below), not in `output`.
+
+    ## Write sinks — push results back out
+
+    Beyond `output`, assign any of the write-sink global dicts below, keyed by destination name.
+    Each value is EITHER a bare pandas DataFrame (uses that sink's default mode) OR a spec dict. In
+    a spec dict the DataFrame ALWAYS goes in a field literally named `df` — never any other name.
+    <!--SQL-->
+    ### `output_tables` → SQL  (requires SQL configured on this deployment)
+
+    Key = `"schema.table"`. Bare DataFrame ⇒ mode `append`.
+
+    ```python
+    output_tables = {
+        "analytics.daily": enriched_df,                                  # append (default)
+        "inventory.items": {"mode": "upsert", "df": updated, "key": "id"},
+    }
+    ```
+
+    Modes:
+      - `append` — INSERT rows. Auto-creates the table (inferring column types) if missing and
+        permissions allow CREATE TABLE.
+      - `update` — UPDATE existing rows matched by `key`. Requires `key`. Table must exist.
+      - `upsert` — INSERT or UPDATE on conflict. Requires `key`, and the `key` must be backed by a
+        UNIQUE/PRIMARY KEY constraint (else `UpsertKeyNotUnique`).
+      - `replace` — DELETE all rows then INSERT. Destructive; operator policy may reject it.
+
+    `key` is a column name or list of names. `update`/`upsert` need it. The write runs in one
+    atomic transaction — any failure rolls back the whole batch. Structured errors you may see:
+    `SchemaNotAllowed`, `OperationNotPermitted`, `TableNotFound`, `KeyColumnMissing`,
+    `DuplicateKeyInInput`, `ColumnMismatch`, `TooManyRows` (100k cap).
+    <!--/SQL-->
+    <!--SHEETS-->
+    ### `output_sheets` → Google Sheets  (requires `write_to_spreadsheet` arg + gsheets enabled)
+
+    Pass the target spreadsheet id as the `write_to_spreadsheet` TOOL ARG; key = tab name. Bare
+    DataFrame ⇒ mode `replace` (creates the tab). Result metadata (`{name, sheet_id, n_rows,
+    n_cols}`, `formula_cells`, `added_columns`) comes back — never the row contents.
+
+    Four modes:
+      - `replace` (default) — create a new tab and write the whole DataFrame.
+      - `update_in_place` — patch only changed cells of an EXISTING tab, matched by a UNIQUE `key`
+        column. Optional `columns` to restrict which columns are patched. Use for a small number
+        of edits in a large tab (writes only the changed cells, one batchUpdate).
+      - `overwrite` — replace the contents of an existing tab (destroys formatting; explicit
+        consent). Reject a column-set change unless you add `allow_schema_change: true`.
+      - `update_by_position` — edit existing rows in a tab that has NO unique key, WITHOUT
+        computing A1 addresses. See below — this is the default choice for editing rows.
+
+    ```python
+    # replace — new tab
+    output_sheets = {"Resumen": summary_df}
+
+    # update_in_place — patch a few cells by a unique key
+    output_sheets = {"Ventas": {"mode": "update_in_place", "df": mod, "key": "product_id",
+                                "columns": ["price"]}}
+    ```
+
+    **`update_by_position` — the canonical way to EDIT existing rows.** Bind the WHOLE sheet
+    (no `range`), modify the bound DataFrame IN PLACE, and return the WHOLE df. The dispatcher diffs
+    it by ROW POSITION against the loaded snapshot and writes only the changed cells — you never
+    compute an A1 address or a row offset, and no unique key is needed (works even when an id
+    repeats). Do NOT filter, sort, `reset_index`, or `concat` the bound df (returns an error if you
+    do) — return every row.
+
+    ```python
+    df = pd.DataFrame(rows)                      # bound WHOLE sheet, no range
+    df.loc[df["CLIENT ID"] == "TCI28", "Importe"] = df["Cantidad"] * df["Tarifa"]
+    output_sheets = {"Hoja 16": {"mode": "update_by_position", "df": df}}
+    ```
+
+    **Live formulas — reference columns BY NAME with `{{Col}}`, never by hand-computed letter.**
+    In ANY sheet write mode, a cell string like `'={{Cantidad}}*{{Tarifa}}'` is written as a live
+    Google formula; the dispatcher substitutes the real A1 for the SAME row (e.g. `=S5*U5`). The
+    `{{Name}}` ref resolves PER ROW, so to fill a formula down many rows just assign it to those
+    rows and the tool fills the right row number into each. An unknown column name returns a
+    `FormulaUnknownColumn` error listing the valid names. Do NOT compute column letters yourself
+    from `df.columns` order — it is off-by-one whenever the sheet has an empty/duplicate header
+    column and lands a broken `#VALUE!`.
+
+    ```python
+    df["Importe"] = "={{Cantidad}}*{{Tarifa}}"                                # whole column
+    df.loc[df["Categoria"] == "Bebidas", "Margen"] = "={{Venta}}-{{Costo}}"   # by condition (preferred)
+    output_sheets = {"Hoja 16": {"mode": "update_by_position", "df": df}}
+    ```
+
+    A column NOT already in the sheet header is APPENDED after the last column and reported under
+    `added_columns` [{name, column}]. New ROWS are not added by `update_by_position`/`update_in_place`
+    — they edit/extend existing rows only. When a write echoes `formula_cells` (+ `formula_cells_total`
+    when it exceeds the 50-cell sample), RELAY THOSE verbatim in your confirmation — never recompute
+    an A1 yourself. `strict_match: true` (update_in_place) fails loudly if a keyed row is missing
+    instead of skipping it.
+
+    **Collision policy.** By default, if a tab named in `output_sheets` already exists, `replace`
+    fails with a `SheetExists` error carrying the tab's current metadata + suggested next moves
+    (rename / update_in_place / overwrite). Operators may set `fixed_config.on_existing_sheet` to
+    `auto_suffix` (silently append " (2)") or `overwrite`.
+    <!--/SHEETS-->
+    ### `output_attachments` → downloadable file
+
+    Key = a filename ending in `.csv` or `.xlsx` (no other extension). Bare DataFrame, or
+    `{"df": df, "delimiter": ";"}` (CSV delimiter override). Returns `{name, document_id, rows,
+    bytes}` per file. Use it to hand the user a file they can download.
+
+    ```python
+    output_attachments = {"reporte.csv": result_df,
+                          "detalle.xlsx": {"df": detail_df}}
+    ```
+
+    ## Anti-patterns — read this before you compute
+
+    ⚠️ KNOW THE COLUMNS FIRST. Binding a source loads its ROWS, not its schema. The catalog
+    auto-summary already shows each attachment/sheet's inferred columns + sample rows in your
+    system message — USE IT. If you don't already know the real column names and what each holds,
+    inspect first. Never guess a column name or what a term means (e.g. "frutas" is almost
+    certainly a VALUE in a `Categoria` column, not part of a product name). Guessing silently
+    produces wrong results — a filter matching 0 rows, or the wrong rows, with no error.
+
+    ⚠️ SANITY-CHECK THE ROW COUNT. If a filter/groupby/mask matches 0 rows (or far fewer than you
+    expected), do NOT report success — that is a signal you misunderstood the data. Find the right
+    column/value and redo it.
+
+    ⚠️ COERCE TYPES. All CSV and spreadsheet cell values arrive as STRINGS (pandas object dtype).
+    Before numeric ops, coerce: `df["price"] = pd.to_numeric(df["price"], errors="coerce")` or
+    `df = df.astype({"price": float, "stock": int})`. Comparing/sorting/summing string columns
+    silently gives lexical (not numeric) results. SQL-sourced bindings arrive already typed.
+    <!--SHEETS-->
+    ## Optional args
+      - `write_to_spreadsheet` — target spreadsheet id for an `output_sheets` sink (only meaningful
+        when the Google Sheets source is enabled).
+    <!--/SHEETS-->
+
+    ## Sandbox restrictions
+      - Blocked imports: os, sys, subprocess, socket, urllib, requests, importlib, builtins, ctypes.
+      - No filesystem access, no network access beyond the fetched bindings.
+      - Code wall-clock capped; response truncated at a fixed byte limit; writes capped at 100k rows.

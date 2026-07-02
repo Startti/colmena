@@ -1,6 +1,6 @@
 # Pattern E — Join / enrich
 
-> **Use `gsheets_run_python` for any analysis over >50 rows** — pass each sheet as a binding; the rows never load into LLM context. Use `gsheets_read` only for inspection / small reads / `value_render: "FORMULA"`. The code in this reference is the body of `gsheets_run_python`s `code` argument; bind each sheet under the records-list name you pick (e.g. `records_a`, `records_b`).
+> **Use `data_run_python` for any analysis over >50 rows** — pass each sheet as a binding; the rows never load into LLM context. Use `gsheets_read` only for inspection / small reads / `value_render: "FORMULA"`. The code in this reference is the body of `data_run_python`s `code` argument; bind each sheet under the records-list name you pick (e.g. `records_a`, `records_b`).
 
 > Same pattern as the crdt-doc equivalent — see `crdt-doc-cross-sheet-analysis` if you need the local-CRDT variant.
 
@@ -8,11 +8,10 @@
 
 ## Data flow
 
-1. `gsheets_read({spreadsheet_id: <id_primary>, sheet: <tab_primary>, as_records: true})` → `records_primary`
-2. `gsheets_read({spreadsheet_id: <id_lookup>, sheet: <tab_lookup>, as_records: true})` → `records_lookup`
-   - If both live in the same spreadsheet, pass the same `spreadsheet_id` twice and only vary `sheet`.
-3. `run_python({inputs: {records_primary, records_lookup}, script: <below>})`
-4. Write enriched table back with `gsheets_set_range`.
+1. Call `data_run_python` binding each sheet directly (rows never enter context):
+   `data_run_python({ bindings: [ {var: "records_primary", spreadsheet_id: <id_primary>, sheet: <tab_primary>}, {var: "records_lookup", spreadsheet_id: <id_lookup>, sheet: <tab_lookup>} ], code: <below>, write_to_spreadsheet: <id_out> })`
+   - If both live in the same spreadsheet, pass the same `spreadsheet_id` for both bindings and only vary `sheet`.
+2. The `code` joins the lookup onto the primary and assigns the `output_sheets` sink to write the enriched table back; `output` carries the match counts.
 
 ## Script
 
@@ -31,7 +30,9 @@ enriched = primary.merge(
 
 # Report unmatched keys so the user can decide if it matters.
 unmatched = enriched[enriched['Category'].isna()]
-result = enriched
+
+# Write the enriched table back into an "Enriched" tab, in the same call.
+output_sheets = {"Enriched": {"mode": "replace", "df": enriched}}
 output = {
     'rows_enriched':    len(enriched) - len(unmatched),
     'unmatched_count':  len(unmatched),
@@ -41,8 +42,9 @@ output = {
 
 ## Output
 
-- `result` columns: original primary columns + the columns brought from the lookup. Rows with no match in the lookup have NaN in the new columns.
-- Write back via `gsheets_set_range({spreadsheet_id, sheet, start_addr: "A1", values_2d: [headers] + rows})`. If the destination tab does not exist, create it first with `gsheets_add_sheet`.
+- The `output_sheets` write creates an `Enriched` tab whose columns are the original primary columns + the columns brought from the lookup. Rows with no match in the lookup have NaN in the new columns.
+- The write happens INSIDE the `data_run_python` call via the `output_sheets` sink (the DataFrame goes in the `df` field), which CREATES the tab for you — no separate `gsheets_add_sheet` needed. You get back sink metadata, never the row contents.
+- `output` carries only the small match-count summary (enriched / unmatched counts + a sample of unmatched keys).
 
 **Variants:**
 - For "intersect only" semantics (drop unmatched), use `how='inner'`.

@@ -29,7 +29,7 @@ For toolkit packages (`enabled_tools: ["gsheets"]` shortcut), see
 | `gsheets_share` | Grant a Google account access to a spreadsheet (reader / commenter / writer) | [§39](39_gsheets.md) |
 | `gsheets_list_permissions` | Show every Drive permission on a spreadsheet (who has access and at what role) | [§39](39_gsheets.md) |
 | `gsheets_unshare` | Revoke a previously-granted permission on a spreadsheet | [§39](39_gsheets.md) |
-| `gsheets_run_python` | Run sandboxed pandas analysis over sheet ranges loaded directly by the dispatcher (rows never pass through the LLM) | [§39](39_gsheets.md) |
+| `gsheets_run_python` | **DEPRECATED (2026-07-02) → use `data_run_python`.** Still works for back-compat. Run sandboxed pandas analysis over sheet ranges loaded directly by the dispatcher (rows never pass through the LLM) | [§39](39_gsheets.md) |
 
 ## crdt_doc (11 tools)
 
@@ -75,10 +75,10 @@ computation server-side (run_python) instead of dumping every row.
 
 | Tool | Summary | Detailed docs |
 |---|---|---|
-| `attachment_run_python` | Run pandas/numpy code against a registered CSV/XLSX attachment, get back stdout + a structured result — without dumping every row into your context | [§23](23_sql_node.md#attachment_run_python-shipped-2026-06-10) |
+| `attachment_run_python` | **DEPRECATED (2026-07-02) → use `data_run_python`.** Still works for back-compat. Run pandas/numpy code against a registered CSV/XLSX attachment, get back stdout + a structured result — without dumping every row into your context | [§23](23_sql_node.md#attachment_run_python-shipped-2026-06-10) |
 | `sql_inspect_attachment` | Open a registered CSV/XLSX attachment and report its header, sample rows, total row count, and inferred column types — without forcing the LLM to read every row | [§23](23_sql_node.md#bulk-insert-from-attachment-shipped-2026-06-09) |
 | `sql_bulk_insert_from_attachment` | Stream a CSV attachment into a Postgres table via COPY FROM STDIN — bypasses the LLM context for the rows and runs orders of magnitude faster than per-row INSERT | [§23](23_sql_node.md#bulk-insert-from-attachment-shipped-2026-06-09) |
-| `data_run_python` | Run pandas code across multiple data sources (attachments, Google Sheets, SQL) in one call — bind each source where it lives, get back only the result | [§48](48_data_run_python.md) |
+| `data_run_python` | **Primary tabular tool (2026-07-02).** Run pandas code across multiple data sources (attachments, Google Sheets, SQL, inline) in one call — bind each source where it lives, write back to SQL/Sheets/downloadable files, get back only the result. Replaces `gsheets_run_python` + `attachment_run_python`. | [§48](48_data_run_python.md) |
 
 ## gdocs (35 tools)
 

@@ -2551,12 +2551,49 @@ impl ExecutableNode for LlmNode {
             use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::data_run_python::{
                 enabled_sources, tool_data_run_python, TOOL_DATA_RUN_PYTHON,
             };
-            if configured_aliases.contains(TOOL_DATA_RUN_PYTHON) {
+            // `data_run_python` activates via a `tool_configurations` entry
+            // (opt-in by name — the primary path, and the only way to pass a
+            // `sql` block) OR via `enabled_tools`: the `gsheets` toolkit alias,
+            // the `"*"` wildcard, or the exact tool name. Wiring the alias here
+            // is what lets the soft-deprecation of `gsheets_run_python` route
+            // every `["gsheets"]` agent (and the skills that now name
+            // `data_run_python`) to the unified tool. `!data_run_python` opts
+            // back out. `find_package("gsheets")` includes `data_run_python`
+            // (see toolkit_packages.rs), so the alias expands to it here.
+            let (drp_wants, drp_excludes) =
+                resolve_synthetic_enabled_tools(enabled_tools_config, &[TOOL_DATA_RUN_PYTHON]);
+            let drp_enabled = (configured_aliases.contains(TOOL_DATA_RUN_PYTHON)
+                || drp_wants.contains(TOOL_DATA_RUN_PYTHON))
+                && !drp_excludes.contains(TOOL_DATA_RUN_PYTHON);
+            if drp_enabled && !tools.iter().any(|t| t.name == TOOL_DATA_RUN_PYTHON) {
                 let agent_has_gsheets = Self::agent_has_gsheets_write_tools(config, inputs)
                     || Self::agent_has_gsheets_format_tool(config, inputs)
                     || Self::agent_has_gsheets_read_tools(config, inputs);
+                // NOTE: the description gates its Google Sheets guidance on
+                // `agent_has_gsheets` (toolset-derived), whereas dispatch gates
+                // the actual sheets *capability* on the Google client building
+                // (`gsheets_client.is_some()`, a process-credential probe — see
+                // `dispatch_core`). In a healthy deployment these agree (an
+                // agent with the gsheets toolkit runs where creds exist). They
+                // only diverge in a misconfiguration (gsheets tools enabled but
+                // no creds → all gsheets tooling is already broken) or when ADC
+                // creds exist but no gsheets tool is enabled (a latent, unadvertised
+                // capability — benign). Not reconciled here to avoid an
+                // exposure-time client build; revisit if it bites in practice.
                 let enabled = enabled_sources(&data_run_python_fixed_config, agent_has_gsheets);
-                tools.push(tool_data_run_python(&enabled));
+                let td = tool_data_run_python(&enabled);
+                // Honor lazy_tool_loading like the other tools reachable via the
+                // `gsheets` alias (the gsheets/gdocs/crdt blocks below): under
+                // lazy mode register a compact catalog summary and hide the full
+                // (~200-line) schema behind `describe_tool`, instead of shipping
+                // it eagerly every turn to every `["gsheets"]` agent.
+                if lazy_tool_loading {
+                    catalog.push(CatalogEntry {
+                        name: td.name.clone(),
+                        summary: summary_for_catalog(td.summary.as_deref(), &td.description),
+                    });
+                }
+                tools.push(td);
             }
         }
 

@@ -657,12 +657,51 @@ fn mime_from_name(name: &str) -> String {
 
 // ── Tool builder ─────────────────────────────────────────────────────
 
+/// Strip capability-gated blocks from the static base description so the
+/// model only ever reads guidance for sources/sinks the operator actually
+/// enabled. Blocks are delimited by standalone marker lines
+/// `<!--SQL-->`/`<!--/SQL-->` and `<!--SHEETS-->`/`<!--/SHEETS-->` (in the
+/// `data_run_python.yaml` description). A block's content is kept (markers
+/// removed) when its capability is enabled and dropped entirely when not.
+/// SQL and SHEETS blocks are disjoint — no nesting.
+fn render_gated_description(base: &str, enabled: &EnabledSources) -> String {
+    let mut out = String::with_capacity(base.len());
+    let mut skip = false;
+    for line in base.lines() {
+        match line.trim() {
+            "<!--SQL-->" => {
+                skip = !enabled.sql;
+                continue;
+            }
+            "<!--SHEETS-->" => {
+                skip = !enabled.gsheets;
+                continue;
+            }
+            "<!--/SQL-->" | "<!--/SHEETS-->" => {
+                skip = false;
+                continue;
+            }
+            _ => {}
+        }
+        if !skip {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    // Drop the trailing newline introduced by the last push.
+    while out.ends_with('\n') {
+        out.pop();
+    }
+    out
+}
+
 /// Build the [`ToolDefinition`] for `data_run_python`, appending a
 /// dynamically-assembled "Available sources" section to the static base
 /// description so the model only ever sees sources the operator actually
 /// enabled.
 pub fn tool_data_run_python(enabled: &EnabledSources) -> ToolDefinition {
-    let mut description = String::from(text::tool_description(TOOL_DATA_RUN_PYTHON));
+    let mut description =
+        render_gated_description(text::tool_description(TOOL_DATA_RUN_PYTHON), enabled);
 
     description.push_str("\n\nAvailable sources:\n- Attachment (CSV/XLSX from the conversation catalog)\n- Inline JSON data");
     if enabled.gsheets {
@@ -856,6 +895,76 @@ mod tests {
         let desc = def.description.to_lowercase();
         assert!(desc.contains("sql") || desc.contains("database"));
         assert!(!desc.contains("google sheet"));
+    }
+
+    #[test]
+    fn gated_description_keeps_only_enabled_blocks() {
+        let base = "always\n<!--SQL-->\nsql-only\n<!--/SQL-->\nmid\n<!--SHEETS-->\nsheets-only\n<!--/SHEETS-->\ntail";
+
+        let sql_only = render_gated_description(
+            base,
+            &EnabledSources {
+                sql: true,
+                gsheets: false,
+            },
+        );
+        assert!(sql_only.contains("sql-only"));
+        assert!(!sql_only.contains("sheets-only"));
+        assert!(!sql_only.contains("<!--")); // markers stripped
+        assert!(
+            sql_only.contains("always") && sql_only.contains("mid") && sql_only.contains("tail")
+        );
+
+        let sheets_only = render_gated_description(
+            base,
+            &EnabledSources {
+                sql: false,
+                gsheets: true,
+            },
+        );
+        assert!(sheets_only.contains("sheets-only"));
+        assert!(!sheets_only.contains("sql-only"));
+
+        let neither = render_gated_description(
+            base,
+            &EnabledSources {
+                sql: false,
+                gsheets: false,
+            },
+        );
+        assert!(!neither.contains("sql-only"));
+        assert!(!neither.contains("sheets-only"));
+        assert!(neither.contains("always") && neither.contains("tail"));
+    }
+
+    #[test]
+    fn gated_description_real_yaml_hides_sheets_when_disabled() {
+        // Guard the actual shipped YAML: a SQL-only deployment must not
+        // leak any Google Sheets guidance into the tool description.
+        let sql_only = render_gated_description(
+            text::tool_description(TOOL_DATA_RUN_PYTHON),
+            &EnabledSources {
+                sql: true,
+                gsheets: false,
+            },
+        )
+        .to_lowercase();
+        assert!(!sql_only.contains("google sheet"));
+        assert!(!sql_only.contains("update_by_position"));
+        assert!(!sql_only.contains("write_to_spreadsheet"));
+        assert!(sql_only.contains("output_tables"));
+
+        // ...and a gsheets-only deployment must not advertise SQL sinks.
+        let sheets_only = render_gated_description(
+            text::tool_description(TOOL_DATA_RUN_PYTHON),
+            &EnabledSources {
+                sql: false,
+                gsheets: true,
+            },
+        )
+        .to_lowercase();
+        assert!(!sheets_only.contains("output_tables"));
+        assert!(sheets_only.contains("update_by_position"));
     }
 
     #[test]

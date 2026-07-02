@@ -1,0 +1,36 @@
+{
+  "_comment": "E2E — upload a CSV and push it to Google Sheets via data_run_python WITHOUT the LLM reading the rows. Agent activates only the `gsheets` alias (no data_run_python tool_configurations entry — it comes via the alias). It uploads products_100.csv, binds it by attachment_id, creates a spreadsheet, and writes the 100 rows to a tab via the output_sheets sink. The rows never enter the LLM context (only the model's `code` + a summary cross the wire; the catalog shows schema + a few sample rows). Needs OAuth creds (COLMENA_GOOGLE_OAUTH_*). Fixture: tests/fixtures/products_100.csv.",
+  "metadata": { "category": "agents", "requires_env": ["GEMINI_API_KEY", "DATABASE_URL", "COLMENA_GOOGLE_OAUTH_CLIENT_ID", "COLMENA_GOOGLE_OAUTH_CLIENT_SECRET", "COLMENA_GOOGLE_OAUTH_REFRESH_TOKEN", "COLMENA_GOOGLE_SHARE_EMAIL"] },
+  "nodes": {
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "model": "gemini-2.5-flash",
+        "api_key": "${GEMINI_API_KEY}",
+        "connection_url": "${DATABASE_URL}",
+        "attachments_enabled": true,
+        "summary_enabled": true,
+        "stream": false,
+        "max_iterations": 10,
+        "temperature": 0.0,
+        "enabled_tools": ["gsheets"],
+        "system_message": "Sos un asistente de datos. El usuario sube archivos y te pide moverlos a Google Sheets. Usá data_run_python: hacé bind del archivo adjunto por su attachment_id (que ves en el catálogo), resolvé con pandas y para escribir a una planilla asigná el global output_sheets ({\"<Pestaña>\": DataFrame}) y pasá write_to_spreadsheet con el id. Si necesitás crear la planilla primero, usá gsheets_create_spreadsheet. No cargues las filas a mano: bindeá el adjunto.",
+        "prompt": "Te subí un CSV con el catálogo de productos (100 filas). Creá una planilla nueva llamada 'Catálogo CSV E2E' y volcá todo el catálogo en una pestaña 'Catálogo'. Al final decime el link y cuántas filas escribiste.",
+        "files": [
+          {
+            "id": "catalogo_csv",
+            "label": "Catálogo de productos",
+            "path": "tests/fixtures/products_100.csv",
+            "mime_type": "text/csv",
+            "filename": "products_100.csv"
+          }
+        ]
+      }
+    },
+    "log": { "type": "log" }
+  },
+  "edges": [
+    { "from": "agent", "to": "log" }
+  ]
+}
