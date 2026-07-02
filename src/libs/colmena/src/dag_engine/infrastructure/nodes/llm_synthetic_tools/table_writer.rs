@@ -8,9 +8,15 @@
 //!
 //! See `docs/superpowers/specs/2026-07-01-data-run-python-design.md`.
 
+use crate::dag_engine::domain::sql_permissions::{SqlOperation, SqlPermissions};
+use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::sql_bulk_tools::validate_table_against_allowlist;
 use crate::gsheets::infrastructure::http_client::rectangle_to_records;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
+use std::collections::HashSet;
+
+/// Maximum rows accepted in a single `output_tables` write.
+const MAX_ROWS: usize = 100_000;
 
 /// How a table write should be applied. Bare DataFrames (no spec dict)
 /// default to [`WriteMode::Append`] — deliberately conservative, never
@@ -189,6 +195,203 @@ fn normalize_records(value: &Value) -> Vec<Map<String, Value>> {
         .unwrap_or_default()
 }
 
+/// Union of column names across all records, in first-seen order.
+fn input_columns(records: &[Map<String, Value>]) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut cols = Vec::new();
+    for record in records {
+        for key in record.keys() {
+            if seen.insert(key.clone()) {
+                cols.push(key.clone());
+            }
+        }
+    }
+    cols
+}
+
+/// Validate a [`TableWriteSpec`] against permissions, the schema allowlist,
+/// and table shape — before any SQL is executed. Pure function: no I/O, no
+/// async, no DB access. Returns a structured JSON error envelope on the
+/// first failing check (see module doc / spec §10 for error codes).
+pub fn validate_write_spec(
+    spec: &TableWriteSpec,
+    allowed_schemas: &[String],
+    perms: &SqlPermissions,
+    table_exists: bool,
+    table_columns: Option<&[String]>,
+) -> Result<(), Value> {
+    // 1. Schema/identifier allowlist.
+    if let Err(message) = validate_table_against_allowlist(&spec.table, allowed_schemas) {
+        return Err(json!({
+            "error": "SchemaNotAllowed",
+            "table": spec.table,
+            "message": message,
+        }));
+    }
+
+    // 2. Operation permission for the requested mode.
+    let required_ops: &[SqlOperation] = match spec.mode {
+        WriteMode::Append => &[SqlOperation::Insert],
+        WriteMode::Update => &[SqlOperation::Update],
+        WriteMode::Upsert => &[SqlOperation::Insert, SqlOperation::Update],
+        WriteMode::Replace => &[SqlOperation::Insert, SqlOperation::Delete],
+    };
+    if !required_ops.iter().all(|op| perms.is_allowed(op)) {
+        return Err(json!({
+            "error": "OperationNotPermitted",
+            "table": spec.table,
+            "mode": format!("{:?}", spec.mode).to_lowercase(),
+            "message": "the configured SQL permissions do not allow this write mode",
+        }));
+    }
+
+    // 3. Table existence / auto-create gate.
+    if !table_exists {
+        match spec.mode {
+            WriteMode::Update => {
+                return Err(json!({
+                    "error": "TableNotFound",
+                    "table": spec.table,
+                    "message": "cannot UPDATE: table does not exist",
+                }));
+            }
+            WriteMode::Append | WriteMode::Upsert | WriteMode::Replace => {
+                if !perms.is_allowed(&SqlOperation::CreateTable) {
+                    return Err(json!({
+                        "error": "TableNotFound",
+                        "table": spec.table,
+                        "message": "table does not exist and permissions do not allow CREATE TABLE (auto-create)",
+                    }));
+                }
+            }
+        }
+    }
+    let auto_creating = !table_exists;
+
+    let cols = input_columns(&spec.records);
+
+    // 4. Key presence (must be declared, non-empty list) for Update/Upsert.
+    if matches!(spec.mode, WriteMode::Update | WriteMode::Upsert) {
+        match &spec.key {
+            None => {
+                return Err(json!({
+                    "error": "KeyColumnMissing",
+                    "table": spec.table,
+                    "message": "mode requires a 'key' column list",
+                }));
+            }
+            Some(key) if key.is_empty() => {
+                return Err(json!({
+                    "error": "KeyColumnMissing",
+                    "table": spec.table,
+                    "message": "'key' must contain at least one column",
+                }));
+            }
+            Some(_) => {}
+        }
+    }
+
+    // 5. Non-empty records for Update/Upsert.
+    if matches!(spec.mode, WriteMode::Update | WriteMode::Upsert) && spec.records.is_empty() {
+        return Err(json!({
+            "error": "EmptyDataFrame",
+            "table": spec.table,
+            "message": "records must contain at least one row",
+        }));
+    }
+
+    // 4b. Key columns must be present in both input records and table.
+    if matches!(spec.mode, WriteMode::Update | WriteMode::Upsert) {
+        if let Some(key) = &spec.key {
+            for k in key {
+                let in_input = cols.iter().any(|c| c == k);
+                let in_table = table_columns.is_none_or(|tc| tc.iter().any(|c| c == k));
+                if !in_input || !in_table {
+                    return Err(json!({
+                        "error": "KeyColumnMissing",
+                        "table": spec.table,
+                        "key_column": k,
+                        "message": "key column must be present in both the input records and the table",
+                    }));
+                }
+            }
+        }
+    }
+
+    // 6. Duplicate key values within input records (Update/Upsert only).
+    if matches!(spec.mode, WriteMode::Update | WriteMode::Upsert) {
+        if let Some(key) = &spec.key {
+            let mut seen_keys = HashSet::new();
+            for record in &spec.records {
+                let key_values: Vec<Value> = key
+                    .iter()
+                    .map(|k| record.get(k).cloned().unwrap_or(Value::Null))
+                    .collect();
+                let key_repr = serde_json::to_string(&key_values).unwrap_or_default();
+                if !seen_keys.insert(key_repr) {
+                    return Err(json!({
+                        "error": "DuplicateKeyInInput",
+                        "table": spec.table,
+                        "message": "duplicate key value found across input records",
+                    }));
+                }
+            }
+        }
+    }
+
+    // 7. Column names non-empty & unique.
+    {
+        let mut seen_cols = HashSet::new();
+        for c in &cols {
+            if c.is_empty() {
+                return Err(json!({
+                    "error": "InvalidColumnName",
+                    "table": spec.table,
+                    "message": "column name must not be empty",
+                }));
+            }
+            if !seen_cols.insert(c) {
+                return Err(json!({
+                    "error": "InvalidColumnName",
+                    "table": spec.table,
+                    "column": c,
+                    "message": "duplicate column name in input records",
+                }));
+            }
+        }
+    }
+
+    // 8. Column mismatch against existing table (skip when auto-creating).
+    if table_exists && !auto_creating {
+        if let Some(tc) = table_columns {
+            let table_col_set: HashSet<&String> = tc.iter().collect();
+            let df_only: Vec<&String> =
+                cols.iter().filter(|c| !table_col_set.contains(c)).collect();
+            if !df_only.is_empty() {
+                return Err(json!({
+                    "error": "ColumnMismatch",
+                    "table": spec.table,
+                    "df_only": df_only,
+                    "message": "input records contain columns not present in the existing table",
+                }));
+            }
+        }
+    }
+
+    // 9. Row count cap.
+    if spec.records.len() > MAX_ROWS {
+        return Err(json!({
+            "error": "TooManyRows",
+            "table": spec.table,
+            "row_count": spec.records.len(),
+            "max_rows": MAX_ROWS,
+            "message": "too many rows in a single write",
+        }));
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -272,5 +475,200 @@ mod tests {
     fn non_object_top_level_errors() {
         let v = json!([1, 2, 3]);
         assert!(parse_output_tables(&v).is_err());
+    }
+
+    // --- validate_write_spec ---
+
+    use crate::dag_engine::domain::sql_permissions::SqlPermissions;
+
+    fn perms(preset: &str, schemas: &[&str]) -> SqlPermissions {
+        SqlPermissions::from_config(Some(&json!({
+            "preset": preset,
+            "allowed_schemas": schemas,
+        })))
+        .unwrap()
+    }
+
+    #[test]
+    fn update_requires_key() {
+        let spec = TableWriteSpec {
+            table: "a.t".into(),
+            mode: WriteMode::Update,
+            records: vec![],
+            key: None,
+            columns: None,
+        };
+        let p = perms("read_write", &["a"]);
+        let err =
+            validate_write_spec(&spec, &["a".into()], &p, true, Some(&["id".into()])).unwrap_err();
+        assert_eq!(err["error"], "KeyColumnMissing");
+    }
+
+    #[test]
+    fn append_needs_insert_permission() {
+        let mut record = Map::new();
+        record.insert("id".into(), json!(1));
+        let spec = TableWriteSpec {
+            table: "a.t".into(),
+            mode: WriteMode::Append,
+            records: vec![record],
+            key: None,
+            columns: None,
+        };
+        let ro = perms("read_only", &["a"]);
+        let err =
+            validate_write_spec(&spec, &["a".into()], &ro, true, Some(&["id".into()])).unwrap_err();
+        assert_eq!(err["error"], "OperationNotPermitted");
+    }
+
+    #[test]
+    fn schema_outside_allowlist_rejected() {
+        let mut record = Map::new();
+        record.insert("id".into(), json!(1));
+        let spec = TableWriteSpec {
+            table: "secret.t".into(),
+            mode: WriteMode::Append,
+            records: vec![record],
+            key: None,
+            columns: None,
+        };
+        let p = perms("read_write", &["a"]);
+        let err = validate_write_spec(&spec, &["a".into()], &p, true, Some(&[])).unwrap_err();
+        assert_eq!(err["error"], "SchemaNotAllowed");
+    }
+
+    #[test]
+    fn update_on_missing_table_is_table_not_found() {
+        let mut record = Map::new();
+        record.insert("id".into(), json!(1));
+        let spec = TableWriteSpec {
+            table: "a.t".into(),
+            mode: WriteMode::Update,
+            records: vec![record],
+            key: Some(vec!["id".into()]),
+            columns: None,
+        };
+        let p = perms("read_write", &["a"]);
+        let err = validate_write_spec(&spec, &["a".into()], &p, false, None).unwrap_err();
+        assert_eq!(err["error"], "TableNotFound");
+    }
+
+    #[test]
+    fn append_on_missing_table_without_create_table_perm_is_table_not_found() {
+        let mut record = Map::new();
+        record.insert("id".into(), json!(1));
+        let spec = TableWriteSpec {
+            table: "a.t".into(),
+            mode: WriteMode::Append,
+            records: vec![record],
+            key: None,
+            columns: None,
+        };
+        let p = perms("read_write", &["a"]);
+        let err = validate_write_spec(&spec, &["a".into()], &p, false, None).unwrap_err();
+        assert_eq!(err["error"], "TableNotFound");
+    }
+
+    #[test]
+    fn append_on_missing_table_with_create_table_perm_is_ok() {
+        let mut record = Map::new();
+        record.insert("id".into(), json!(1));
+        let spec = TableWriteSpec {
+            table: "a.t".into(),
+            mode: WriteMode::Append,
+            records: vec![record],
+            key: None,
+            columns: None,
+        };
+        let p = perms("full", &["a"]);
+        let ok = validate_write_spec(&spec, &["a".into()], &p, false, None);
+        assert!(ok.is_ok());
+    }
+
+    #[test]
+    fn upsert_requires_non_empty_records() {
+        let spec = TableWriteSpec {
+            table: "a.t".into(),
+            mode: WriteMode::Upsert,
+            records: vec![],
+            key: Some(vec!["id".into()]),
+            columns: None,
+        };
+        let p = perms("read_write", &["a"]);
+        let err =
+            validate_write_spec(&spec, &["a".into()], &p, true, Some(&["id".into()])).unwrap_err();
+        assert_eq!(err["error"], "EmptyDataFrame");
+    }
+
+    #[test]
+    fn duplicate_key_in_input_rejected() {
+        let mut r1 = Map::new();
+        r1.insert("id".into(), json!(1));
+        let mut r2 = Map::new();
+        r2.insert("id".into(), json!(1));
+        let spec = TableWriteSpec {
+            table: "a.t".into(),
+            mode: WriteMode::Upsert,
+            records: vec![r1, r2],
+            key: Some(vec!["id".into()]),
+            columns: None,
+        };
+        let p = perms("read_write", &["a"]);
+        let err =
+            validate_write_spec(&spec, &["a".into()], &p, true, Some(&["id".into()])).unwrap_err();
+        assert_eq!(err["error"], "DuplicateKeyInInput");
+    }
+
+    #[test]
+    fn column_mismatch_reports_df_only() {
+        let mut record = Map::new();
+        record.insert("id".into(), json!(1));
+        record.insert("extra".into(), json!("x"));
+        let spec = TableWriteSpec {
+            table: "a.t".into(),
+            mode: WriteMode::Append,
+            records: vec![record],
+            key: None,
+            columns: None,
+        };
+        let p = perms("read_write", &["a"]);
+        let err =
+            validate_write_spec(&spec, &["a".into()], &p, true, Some(&["id".into()])).unwrap_err();
+        assert_eq!(err["error"], "ColumnMismatch");
+        assert_eq!(err["df_only"], json!(["extra"]));
+    }
+
+    #[test]
+    fn too_many_rows_rejected() {
+        let mut record = Map::new();
+        record.insert("id".into(), json!(1));
+        let records: Vec<Map<String, Value>> = (0..100_001).map(|_| record.clone()).collect();
+        let spec = TableWriteSpec {
+            table: "a.t".into(),
+            mode: WriteMode::Append,
+            records,
+            key: None,
+            columns: None,
+        };
+        let p = perms("read_write", &["a"]);
+        let err =
+            validate_write_spec(&spec, &["a".into()], &p, true, Some(&["id".into()])).unwrap_err();
+        assert_eq!(err["error"], "TooManyRows");
+    }
+
+    #[test]
+    fn valid_append_passes() {
+        let mut record = Map::new();
+        record.insert("id".into(), json!(1));
+        let spec = TableWriteSpec {
+            table: "a.t".into(),
+            mode: WriteMode::Append,
+            records: vec![record],
+            key: None,
+            columns: None,
+        };
+        let p = perms("read_write", &["a"]);
+        let ok = validate_write_spec(&spec, &["a".into()], &p, true, Some(&["id".into()]));
+        assert!(ok.is_ok());
     }
 }
