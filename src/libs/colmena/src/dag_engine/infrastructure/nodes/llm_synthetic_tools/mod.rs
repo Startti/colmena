@@ -21,6 +21,7 @@ pub mod load_skill_tool;
 pub mod markdown_to_docs_ops;
 pub mod recall_history;
 pub mod sheet_collision;
+pub mod sheet_writer;
 pub mod sql_bulk_tools;
 pub mod table_writer;
 pub mod tabular_bindings;
