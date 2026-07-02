@@ -1368,7 +1368,7 @@ use std::collections::HashMap as StdHashMap;
 /// `SqlNode::resolve_env_vars` so the synthetic SQL tools accept the same
 /// `connection_url: "${DATABASE_URL}"` pattern operators already use for
 /// the `sql_query` node.
-fn resolve_env_vars(input: &str) -> Result<String, String> {
+pub(super) fn resolve_env_vars(input: &str) -> Result<String, String> {
     let mut result = String::new();
     let mut last_end = 0;
     while let Some(start) = input[last_end..].find("${") {

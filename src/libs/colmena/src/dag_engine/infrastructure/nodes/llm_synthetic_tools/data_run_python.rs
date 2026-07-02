@@ -10,11 +10,16 @@
 //! dynamic-description tool builder only. Dispatch/execution lives in
 //! later tasks (see `docs/superpowers/specs/2026-07-01-data-run-python-design.md`).
 
+use std::collections::HashMap;
+
+use crate::dag_engine::domain::sql_permissions::SqlPermissions;
 use crate::llm::domain::tools::ToolDefinition;
 use crate::text;
 use schemars::JsonSchema;
 use serde::Deserialize;
+use serde_json::Value;
 
+use super::sql_bulk_tools::resolve_env_vars;
 use super::tabular_bindings::{deserialize_bindings_flexible, DataBinding};
 
 pub const TOOL_DATA_RUN_PYTHON: &str = "data_run_python";
@@ -70,6 +75,122 @@ pub struct DataRunPythonArgs {
 pub struct EnabledSources {
     pub sql: bool,
     pub gsheets: bool,
+}
+
+/// Derive which sources are available for this tool instance from the
+/// operator's `fixed_config` plus whatever the agent already exposes.
+/// `sql` is enabled purely by the presence of a `sql` block in
+/// `fixed_config` (validity is checked separately by
+/// [`parse_sql_config`]); `gsheets` is enabled either because the agent
+/// already has the gsheets toolkit active, or via an explicit
+/// `enable_gsheets: true` flag in `fixed_config`.
+pub fn enabled_sources(fixed: &HashMap<String, Value>, agent_has_gsheets: bool) -> EnabledSources {
+    let sql = fixed.contains_key("sql");
+    let gsheets = agent_has_gsheets || fixed.get("enable_gsheets") == Some(&Value::Bool(true));
+    EnabledSources { sql, gsheets }
+}
+
+// ── SQL sink configuration ──────────────────────────────────────────
+
+/// Parsed & validated `sql` block from a `data_run_python` tool's
+/// `fixed_config`. Governs both the SQL `SELECT` binding source and the
+/// `output_tables` write sink.
+#[derive(Debug, Clone)]
+pub struct SqlSinkConfig {
+    pub connection_url: String,
+    pub permissions: SqlPermissions,
+    pub allowed_schemas: Vec<String>,
+    pub statement_timeout_ms: u64,
+    pub work_mem_mb: u64,
+    pub on_missing_table: String,
+    pub on_existing_table: String,
+    pub tenant_user_id: Option<String>,
+}
+
+/// Parse the optional `sql` block out of a tool's `fixed_config`.
+///
+/// Returns `Ok(None)` when no `sql` block is present (SQL capability is
+/// simply off). Returns `Err` when a `sql` block is present but invalid
+/// (missing `connection_url`, or missing/empty
+/// `permissions.allowed_schemas`) — a misconfigured `sql` block must
+/// never silently degrade to "SQL disabled".
+pub fn parse_sql_config(fixed: &HashMap<String, Value>) -> Result<Option<SqlSinkConfig>, String> {
+    let sql = match fixed.get("sql") {
+        Some(v) => v,
+        None => return Ok(None),
+    };
+
+    let raw_connection_url = sql
+        .get("connection_url")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            "tool fixed_config.sql is missing 'connection_url'. Operator must set \
+         tool_configurations.<tool>.fixed_config.sql.connection_url to a Postgres \
+         connection string."
+                .to_string()
+        })?;
+    let connection_url = resolve_env_vars(raw_connection_url)
+        .map_err(|e| format!("sql.connection_url env resolution failed: {e}"))?;
+
+    let perms_value = sql.get("permissions");
+    let allowed_schemas: Vec<String> = perms_value
+        .and_then(|p| p.get("allowed_schemas"))
+        .and_then(|s| s.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    if allowed_schemas.is_empty() {
+        return Err(
+            "tool fixed_config.sql.permissions.allowed_schemas must be non-empty.".to_string(),
+        );
+    }
+    let permissions = SqlPermissions::from_config(perms_value)?;
+
+    let runtime_limits = sql.get("runtime_limits");
+    let statement_timeout_ms = runtime_limits
+        .and_then(|r| r.get("statement_timeout_ms"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(30_000);
+    let work_mem_mb = runtime_limits
+        .and_then(|r| r.get("work_mem_mb"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(64);
+
+    let on_missing_table = sql
+        .get("on_missing_table")
+        .and_then(|v| v.as_str())
+        .unwrap_or("create")
+        .to_string();
+    let on_existing_table = sql
+        .get("on_existing_table")
+        .and_then(|v| v.as_str())
+        .unwrap_or("fail")
+        .to_string();
+
+    let tenant_user_id =
+        match perms_value
+            .and_then(|p| p.get("tenant_user_id"))
+            .and_then(|v| v.as_str())
+        {
+            Some(raw) => Some(resolve_env_vars(raw).map_err(|e| {
+                format!("sql.permissions.tenant_user_id env resolution failed: {e}")
+            })?),
+            None => None,
+        };
+
+    Ok(Some(SqlSinkConfig {
+        connection_url,
+        permissions,
+        allowed_schemas,
+        statement_timeout_ms,
+        work_mem_mb,
+        on_missing_table,
+        on_existing_table,
+        tenant_user_id,
+    }))
 }
 
 // ── Tool builder ─────────────────────────────────────────────────────
@@ -135,5 +256,138 @@ mod tests {
     fn prelude_imports_pandas() {
         let w = wrap_user_code("output = 1");
         assert!(w.contains("import pandas"));
+    }
+
+    // ── parse_sql_config ────────────────────────────────────────────
+
+    #[test]
+    fn sql_config_absent_is_none() {
+        let f = std::collections::HashMap::new();
+        assert!(parse_sql_config(&f).unwrap().is_none());
+    }
+
+    #[test]
+    fn sql_config_missing_allowed_schemas_errors() {
+        let mut f = std::collections::HashMap::new();
+        f.insert(
+            "sql".into(),
+            serde_json::json!({"connection_url":"postgres://x"}),
+        );
+        assert!(parse_sql_config(&f).is_err());
+    }
+
+    #[test]
+    fn sql_config_missing_connection_url_errors() {
+        let mut f = std::collections::HashMap::new();
+        f.insert(
+            "sql".into(),
+            serde_json::json!({
+                "permissions": { "preset": "read_only", "allowed_schemas": ["public"] }
+            }),
+        );
+        assert!(parse_sql_config(&f).is_err());
+    }
+
+    #[test]
+    fn sql_config_valid_full_block_parses_with_defaults() {
+        let mut f = std::collections::HashMap::new();
+        f.insert(
+            "sql".into(),
+            serde_json::json!({
+                "connection_url": "postgres://localhost/db",
+                "permissions": {
+                    "preset": "read_write_delete",
+                    "allowed_schemas": ["analytics", "public"]
+                }
+            }),
+        );
+        let cfg = parse_sql_config(&f).unwrap().unwrap();
+        assert_eq!(cfg.connection_url, "postgres://localhost/db");
+        let mut schemas = cfg.allowed_schemas.clone();
+        schemas.sort();
+        assert_eq!(schemas, vec!["analytics".to_string(), "public".to_string()]);
+        assert_eq!(cfg.on_missing_table, "create");
+        assert_eq!(cfg.on_existing_table, "fail");
+        assert_eq!(cfg.statement_timeout_ms, 30000);
+        assert_eq!(cfg.work_mem_mb, 64);
+        assert!(cfg.tenant_user_id.is_none());
+    }
+
+    #[test]
+    fn sql_config_respects_runtime_limits_and_table_policies_and_tenant() {
+        let mut f = std::collections::HashMap::new();
+        f.insert(
+            "sql".into(),
+            serde_json::json!({
+                "connection_url": "postgres://localhost/db",
+                "permissions": {
+                    "preset": "read_write_delete",
+                    "allowed_schemas": ["public"],
+                    "tenant_user_id": "user-123"
+                },
+                "runtime_limits": {
+                    "statement_timeout_ms": 5000,
+                    "work_mem_mb": 128
+                },
+                "on_missing_table": "fail",
+                "on_existing_table": "append"
+            }),
+        );
+        let cfg = parse_sql_config(&f).unwrap().unwrap();
+        assert_eq!(cfg.statement_timeout_ms, 5000);
+        assert_eq!(cfg.work_mem_mb, 128);
+        assert_eq!(cfg.on_missing_table, "fail");
+        assert_eq!(cfg.on_existing_table, "append");
+        assert_eq!(cfg.tenant_user_id, Some("user-123".to_string()));
+    }
+
+    #[test]
+    fn sql_config_resolves_env_var_in_connection_url() {
+        std::env::set_var("DATA_RUN_PYTHON_TEST_DB_URL", "postgres://resolved/db");
+        let mut f = std::collections::HashMap::new();
+        f.insert(
+            "sql".into(),
+            serde_json::json!({
+                "connection_url": "${DATA_RUN_PYTHON_TEST_DB_URL}",
+                "permissions": { "preset": "read_only", "allowed_schemas": ["public"] }
+            }),
+        );
+        let cfg = parse_sql_config(&f).unwrap().unwrap();
+        assert_eq!(cfg.connection_url, "postgres://resolved/db");
+        std::env::remove_var("DATA_RUN_PYTHON_TEST_DB_URL");
+    }
+
+    // ── enabled_sources ─────────────────────────────────────────────
+
+    #[test]
+    fn enabled_sources_sql_true_when_sql_block_present() {
+        let mut f = std::collections::HashMap::new();
+        f.insert(
+            "sql".into(),
+            serde_json::json!({
+                "connection_url": "postgres://x",
+                "permissions": { "allowed_schemas": ["public"] }
+            }),
+        );
+        let enabled = enabled_sources(&f, false);
+        assert!(enabled.sql);
+        assert!(!enabled.gsheets);
+    }
+
+    #[test]
+    fn enabled_sources_gsheets_true_when_agent_has_gsheets() {
+        let f = std::collections::HashMap::new();
+        let enabled = enabled_sources(&f, true);
+        assert!(!enabled.sql);
+        assert!(enabled.gsheets);
+    }
+
+    #[test]
+    fn enabled_sources_gsheets_true_when_enable_gsheets_flag_set() {
+        let mut f = std::collections::HashMap::new();
+        f.insert("enable_gsheets".into(), serde_json::json!(true));
+        let enabled = enabled_sources(&f, false);
+        assert!(!enabled.sql);
+        assert!(enabled.gsheets);
     }
 }
