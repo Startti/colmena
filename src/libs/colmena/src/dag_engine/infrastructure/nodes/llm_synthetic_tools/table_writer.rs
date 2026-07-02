@@ -228,6 +228,7 @@ pub fn validate_write_spec(
         return Err(json!({
             "error": "SchemaNotAllowed",
             "table": spec.table,
+            "allowed_schemas": allowed_schemas,
             "message": message,
         }));
     }
