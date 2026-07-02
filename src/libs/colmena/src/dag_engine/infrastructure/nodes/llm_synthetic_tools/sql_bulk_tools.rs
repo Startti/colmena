@@ -1118,7 +1118,7 @@ pub fn validate_table_against_allowlist(
 /// tools. Single connection (no pooling reuse across calls) — these tools
 /// are not on the hot path of the agent loop so the constant ~10ms connect
 /// overhead is acceptable.
-async fn build_short_lived_pool(connection_url: &str) -> Result<sqlx::PgPool, String> {
+pub(super) async fn build_short_lived_pool(connection_url: &str) -> Result<sqlx::PgPool, String> {
     sqlx::postgres::PgPoolOptions::new()
         .max_connections(1)
         .acquire_timeout(std::time::Duration::from_secs(5))

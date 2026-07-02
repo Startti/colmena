@@ -685,22 +685,28 @@ mod tests {
             _query: &str,
             _max_rows: u64,
             _tenant_user_id: Option<&str>,
-        ) -> Result<crate::dag_engine::domain::sql_ports::QueryResult, crate::dag_engine::domain::sql_errors::SqlNodeError>
-        {
+        ) -> Result<
+            crate::dag_engine::domain::sql_ports::QueryResult,
+            crate::dag_engine::domain::sql_errors::SqlNodeError,
+        > {
             panic!("execute_query must not run for a rejected SELECT-only binding");
         }
         async fn load_table_metadata(
             &self,
             _schemas: &[String],
-        ) -> Result<Vec<crate::dag_engine::domain::sql_ports::TableInfo>, crate::dag_engine::domain::sql_errors::SqlNodeError>
-        {
+        ) -> Result<
+            Vec<crate::dag_engine::domain::sql_ports::TableInfo>,
+            crate::dag_engine::domain::sql_errors::SqlNodeError,
+        > {
             unreachable!()
         }
         async fn load_table_schemas(
             &self,
             _schemas: &[String],
-        ) -> Result<Vec<crate::dag_engine::domain::sql_ports::TableSchema>, crate::dag_engine::domain::sql_errors::SqlNodeError>
-        {
+        ) -> Result<
+            Vec<crate::dag_engine::domain::sql_ports::TableSchema>,
+            crate::dag_engine::domain::sql_errors::SqlNodeError,
+        > {
             unreachable!()
         }
         async fn missing_schemas(
@@ -746,7 +752,10 @@ mod tests {
         let err = resolve_bindings(&bindings, Some(&ctx), None, &noop)
             .await
             .expect_err("CTE-wrapped DELETE must be rejected");
-        assert_eq!(err.get("error").and_then(Value::as_str), Some("BindingMustBeSelect"));
+        assert_eq!(
+            err.get("error").and_then(Value::as_str),
+            Some("BindingMustBeSelect")
+        );
     }
 
     #[tokio::test]

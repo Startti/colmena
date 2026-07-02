@@ -11,16 +11,26 @@
 //! later tasks (see `docs/superpowers/specs/2026-07-01-data-run-python-design.md`).
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::dag_engine::domain::sql_permissions::SqlPermissions;
+use crate::dag_engine::domain::sql_ports::SqlConnectionPort;
+use crate::gsheets::domain::{SheetsClient, SpreadsheetId};
 use crate::llm::domain::tools::ToolDefinition;
 use crate::text;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
 
+use super::attachment_writer::{write_output_attachments, AttachmentRegistrar};
+use super::sheet_collision::{parse_policy, CollisionPolicy};
+use super::sheet_writer::{write_output_sheets, LoadedSnapshot};
 use super::sql_bulk_tools::resolve_env_vars;
-use super::tabular_bindings::{deserialize_bindings_flexible, DataBinding};
+use super::table_writer::{parse_output_tables, write_output_tables};
+use super::tabular_bindings::{
+    deserialize_bindings_flexible, resolve_bindings, validate_bindings, AttachmentFetcher,
+    DataBinding, SqlBindingCtx,
+};
 
 pub const TOOL_DATA_RUN_PYTHON: &str = "data_run_python";
 
@@ -33,10 +43,6 @@ const DATA_PY_POSTLUDE: &str =
 /// sandboxed script has `pd`/`np`/`stats` in scope and, on exit, packages
 /// `output`/`output_tables`/`output_sheets`/`output_attachments` into a
 /// single `output` dict the dispatcher parses.
-///
-/// `#[allow(dead_code)]` until Task 14 wires the dispatcher that calls
-/// this from `execute`.
-#[allow(dead_code)]
 fn wrap_user_code(user_code: &str) -> String {
     format!("{DATA_PY_PRELUDE}{user_code}{DATA_PY_POSTLUDE}")
 }
@@ -64,6 +70,14 @@ pub struct DataRunPythonArgs {
     /// capability is enabled.
     #[serde(default)]
     pub write_to_spreadsheet: Option<String>,
+
+    /// Operator-set collision policy for `output_sheets` (`fail` |
+    /// `auto_suffix` | `overwrite`). Sourced from
+    /// `fixed_config.on_existing_sheet` — the executor wrapper injects it
+    /// into the args before [`dispatch_core`] runs. Mirrors
+    /// `gsheets_run_python`'s field of the same name.
+    #[serde(default, alias = "on_existing_sheet")]
+    pub on_existing_sheet: Option<String>,
 }
 
 // ── Capability gating ────────────────────────────────────────────────
@@ -206,6 +220,402 @@ pub fn parse_sql_config(fixed: &HashMap<String, Value>) -> Result<Option<SqlSink
     }))
 }
 
+// ── Dispatch (orchestration) ─────────────────────────────────────────
+
+/// Wall-clock cap for one sandbox execution.
+const CODE_TIMEOUT_SECS: u64 = 30;
+/// Per-string byte cap on the surfaced `output` / `stdout` strings.
+const OUTPUT_BYTE_CAP: usize = 10 * 1024;
+
+/// Fully-resolved SQL runtime for a `data_run_python` call. Built once by
+/// the executor wrapper from the tool's `fixed_config.sql`, then threaded
+/// into [`dispatch_core`]. `adapter` (a trait object) drives the SQL
+/// `SELECT` bindings; `pool` (the concrete `PgPool` behind it) drives the
+/// `output_tables` write sink; both point at the same short-lived pool.
+pub struct SqlRuntime {
+    pub adapter: Arc<dyn SqlConnectionPort>,
+    pub pool: Arc<sqlx::PgPool>,
+    pub permissions: SqlPermissions,
+    pub allowed_schemas: Vec<String>,
+    pub tenant: Option<String>,
+    pub on_missing_table: String,
+    pub on_existing_table: String,
+}
+
+/// Truncate a string to `cap` bytes on a UTF-8 boundary, appending a
+/// `[truncated]` marker when cut. Mirrors `gsheets_run_python`/`attachment_run_python`.
+fn truncate(s: &str, cap: usize) -> String {
+    if s.len() <= cap {
+        return s.to_string();
+    }
+    let mut end = cap;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{} [truncated]", &s[..end])
+}
+
+/// Cap the surfaced `output` value: serialize, and if it exceeds the byte
+/// cap replace it with a truncated string form so a huge `output` never
+/// floods the LLM context. Returns `(value, truncated)`.
+fn cap_output(value: &Value, cap: usize) -> (Value, bool) {
+    let as_text = value.to_string();
+    if as_text.len() <= cap {
+        return (value.clone(), false);
+    }
+    (Value::String(truncate(&as_text, cap)), true)
+}
+
+/// Testable orchestration seam for `data_run_python`. Parses args, resolves
+/// bindings (SQL / gsheets / attachment / inline) into sandbox inputs, runs
+/// the wrapped user code in the restricted Python sandbox, then applies the
+/// three write sinks (`output_tables`, `output_sheets`, `output_attachments`)
+/// gated by which sources the operator enabled. Returns the tool-result
+/// `Value` the LLM sees.
+///
+/// The executor wrapper [`dispatch_data_run_python_via_executor`] builds the
+/// `sql`/`sheets`/`attach`/`registrar` inputs from a live `DagToolExecutor`;
+/// unit tests build them directly (no DB / network needed for the
+/// inline-only and SourceNotEnabled paths).
+pub async fn dispatch_core(
+    args: Value,
+    enabled: &EnabledSources,
+    sql: Option<&SqlRuntime>,
+    sheets: Option<&Arc<dyn SheetsClient>>,
+    attach: &AttachmentFetcher<'_>,
+    registrar: &AttachmentRegistrar<'_>,
+) -> Value {
+    // 1. Parse args.
+    let parsed: DataRunPythonArgs = match serde_json::from_value(args) {
+        Ok(a) => a,
+        Err(e) => {
+            return serde_json::json!({
+                "error": "invalid_args",
+                "message": e.to_string(),
+            });
+        }
+    };
+    if let Err(e) = validate_bindings(&parsed.bindings) {
+        return e;
+    }
+
+    // 2. Build the SQL binding context (for SQL `SELECT` bindings) from the
+    //    runtime, if SQL is configured. When absent, any SQL binding fails
+    //    inside `resolve_bindings` with SourceNotEnabled{source:"sql"}.
+    let sql_ctx = sql.map(|rt| SqlBindingCtx {
+        adapter: rt.adapter.clone(),
+        permissions: rt.permissions.clone(),
+        allowed_schemas: rt.allowed_schemas.clone(),
+        tenant: rt.tenant.clone(),
+    });
+
+    // 3. Resolve every binding into the sandbox inputs map (parallel fetch).
+    let rbindings = match resolve_bindings(&parsed.bindings, sql_ctx.as_ref(), sheets, attach).await
+    {
+        Ok(r) => r,
+        Err(e) => return e,
+    };
+
+    // 4. Wrap + run the user code in the restricted sandbox with a timeout.
+    let wrapped = wrap_user_code(&parsed.code);
+    let inputs = rbindings.inputs.clone();
+    let loaded_columns = rbindings.loaded_columns.clone();
+    let sandbox = tokio::time::timeout(
+        std::time::Duration::from_secs(CODE_TIMEOUT_SECS),
+        tokio::task::spawn_blocking(move || {
+            crate::dag_engine::infrastructure::nodes::python_node::execute_sandboxed_helper(
+                &wrapped,
+                "restricted",
+                CODE_TIMEOUT_SECS,
+                &inputs,
+            )
+        }),
+    )
+    .await;
+
+    let helper = match sandbox {
+        Ok(Ok(Ok(r))) => r,
+        Ok(Ok(Err(e))) => {
+            return serde_json::json!({
+                "output": Value::Null,
+                "stdout": String::new(),
+                "error": truncate(&e, OUTPUT_BYTE_CAP),
+                "loaded_columns": loaded_columns,
+            });
+        }
+        Ok(Err(join_err)) => {
+            return serde_json::json!({
+                "output": Value::Null,
+                "stdout": String::new(),
+                "error": format!("internal join error: {join_err}"),
+                "loaded_columns": loaded_columns,
+            });
+        }
+        Err(_) => {
+            return serde_json::json!({
+                "output": Value::Null,
+                "stdout": String::new(),
+                "error": format!("code execution exceeded {CODE_TIMEOUT_SECS}s timeout"),
+                "loaded_columns": loaded_columns,
+            });
+        }
+    };
+
+    let stdout = truncate(&helper.stdout, OUTPUT_BYTE_CAP);
+    // The postlude wraps everything into
+    // {user_output, output_sheets, output_tables, output_attachments}.
+    let wrapped_output = helper.output.unwrap_or(Value::Null);
+    let user_output = wrapped_output
+        .get("user_output")
+        .cloned()
+        .unwrap_or(Value::Null);
+    let out_tables = wrapped_output
+        .get("output_tables")
+        .cloned()
+        .unwrap_or(Value::Null);
+    let out_sheets = wrapped_output
+        .get("output_sheets")
+        .cloned()
+        .unwrap_or(Value::Null);
+    let out_attachments = wrapped_output
+        .get("output_attachments")
+        .cloned()
+        .unwrap_or(Value::Null);
+
+    let has_tables = out_tables.as_object().is_some_and(|m| !m.is_empty());
+    let has_sheets = out_sheets.as_object().is_some_and(|m| !m.is_empty());
+    let has_attachments = out_attachments.as_object().is_some_and(|m| !m.is_empty());
+
+    // 5. output_tables sink (SQL write-back).
+    let mut wrote_tables: Option<Value> = None;
+    if has_tables {
+        let Some(rt) = sql else {
+            return serde_json::json!({"error": "SourceNotEnabled", "source": "sql"});
+        };
+        let specs = match parse_output_tables(&out_tables) {
+            Ok(s) => s,
+            Err(e) => return e,
+        };
+        let result = write_output_tables(
+            &rt.pool,
+            specs,
+            &rt.allowed_schemas,
+            &rt.permissions,
+            rt.tenant.as_deref(),
+            &rbindings.sql_snapshots,
+            &rt.on_missing_table,
+            &rt.on_existing_table,
+        )
+        .await;
+        wrote_tables = Some(result);
+    }
+
+    // 6. output_sheets sink (Google Sheets write-back).
+    let mut wrote_sheets: Option<Value> = None;
+    let mut sheets_warning: Option<&'static str> = None;
+    let has_target = parsed.write_to_spreadsheet.is_some();
+    if has_sheets {
+        if !has_target {
+            sheets_warning = Some(
+                "Script assigned `output_sheets` but no `write_to_spreadsheet` arg \
+                 was provided; the result was discarded.",
+            );
+        } else if !enabled.gsheets {
+            return serde_json::json!({"error": "SourceNotEnabled", "source": "gsheets"});
+        } else {
+            let Some(client) = sheets else {
+                return serde_json::json!({"error": "SourceNotEnabled", "source": "gsheets"});
+            };
+            let target = parsed.write_to_spreadsheet.as_deref().unwrap();
+            let policy: CollisionPolicy = parsed
+                .on_existing_sheet
+                .as_deref()
+                .map(parse_policy)
+                .transpose()
+                .unwrap_or_else(|e| {
+                    eprintln!(
+                        "[data_run_python] invalid on_existing_sheet, defaulting to fail: {e}"
+                    );
+                    None
+                })
+                .unwrap_or_default();
+            // v1: no per-tab load snapshots are threaded here (update_by_position
+            // degrades gracefully — it needs a bound snapshot and errors clearly
+            // when absent). See task-14 report for the limitation.
+            let empty: std::collections::HashMap<String, LoadedSnapshot> =
+                std::collections::HashMap::new();
+            let results = write_output_sheets(
+                client,
+                &SpreadsheetId(target.to_string()),
+                &out_sheets,
+                policy,
+                &empty,
+            )
+            .await;
+            wrote_sheets = Some(Value::Array(results));
+        }
+    } else if has_target {
+        sheets_warning = Some(
+            "write_to_spreadsheet was set but the script did not assign \
+             `output_sheets = {...}`; nothing was written.",
+        );
+    }
+
+    // 7. output_attachments sink (register CSV/XLSX in the catalog).
+    let mut wrote_attachments: Option<Value> = None;
+    if has_attachments {
+        wrote_attachments = Some(write_output_attachments(&out_attachments, registrar).await);
+    }
+
+    // 8. Assemble the response.
+    let (output_capped, output_truncated) = cap_output(&user_output, OUTPUT_BYTE_CAP);
+    let mut response = serde_json::json!({
+        "output": output_capped,
+        "stdout": stdout,
+        "error": Value::Null,
+    });
+    if output_truncated {
+        response["_output_truncated"] = serde_json::json!(true);
+    }
+    if let Some(v) = wrote_tables {
+        response["wrote_tables"] = v;
+    }
+    if let Some(v) = wrote_sheets {
+        response["wrote_sheets"] = v;
+    }
+    if let Some(v) = wrote_attachments {
+        response["wrote_attachments"] = v;
+    }
+    if let Some(w) = sheets_warning {
+        response["_warning"] = Value::String(w.to_string());
+    }
+    response
+}
+
+/// Executor entry point: build the SQL runtime, gsheets client, attachment
+/// fetcher/registrar closures from a live `DagToolExecutor`, then delegate to
+/// [`dispatch_core`]. Routed from `dag_tool_executor::execute_inner`.
+pub async fn dispatch_data_run_python_via_executor(
+    exec: &crate::dag_engine::infrastructure::dag_tool_executor::DagToolExecutor,
+    tool_call: &crate::llm::domain::tools::ToolCall,
+    fixed: &HashMap<String, Value>,
+) -> Value {
+    // Parse args string → Value.
+    let mut args: Value = match serde_json::from_str(&tool_call.function.arguments) {
+        Ok(v) => v,
+        Err(e) => {
+            return serde_json::json!({
+                "error": "invalid_args",
+                "message": format!("failed to parse tool arguments: {e}"),
+            });
+        }
+    };
+
+    // Inject the operator-set gsheets collision policy from fixed_config so
+    // it reaches `DataRunPythonArgs.on_existing_sheet` (not an LLM field).
+    if let Some(policy) = fixed.get("on_existing_sheet") {
+        if let Value::Object(map) = &mut args {
+            map.insert("on_existing_sheet".to_string(), policy.clone());
+        }
+    }
+
+    // Build the SQL runtime from fixed_config.sql (if present + valid).
+    let sql_cfg = match parse_sql_config(fixed) {
+        Ok(c) => c,
+        Err(e) => {
+            return serde_json::json!({
+                "error": "sql_config_invalid",
+                "message": e,
+            });
+        }
+    };
+
+    let sql_runtime: Option<SqlRuntime> = match &sql_cfg {
+        Some(cfg) => {
+            let pool =
+                match super::sql_bulk_tools::build_short_lived_pool(&cfg.connection_url).await {
+                    Ok(p) => Arc::new(p),
+                    Err(e) => {
+                        return serde_json::json!({
+                            "error": "sql_connect_failed",
+                            "message": e,
+                        });
+                    }
+                };
+            let adapter = Arc::new(
+                crate::dag_engine::infrastructure::sql_pool_adapter::PgPoolAdapter::new(
+                    pool.clone(),
+                    cfg.statement_timeout_ms,
+                    cfg.work_mem_mb,
+                ),
+            );
+            let adapter_dyn: Arc<dyn SqlConnectionPort> = adapter.clone();
+            Some(SqlRuntime {
+                adapter: adapter_dyn,
+                pool: adapter.pool(),
+                permissions: cfg.permissions.clone(),
+                allowed_schemas: cfg.allowed_schemas.clone(),
+                tenant: cfg.tenant_user_id.clone(),
+                on_missing_table: cfg.on_missing_table.clone(),
+                on_existing_table: cfg.on_existing_table.clone(),
+            })
+        }
+        None => None,
+    };
+
+    // Determine which sources are enabled. The gsheets client builds from
+    // process env; treat a build failure as "gsheets not available".
+    let gsheets_client: Option<Arc<dyn SheetsClient>> = {
+        use crate::gsheets::infrastructure::config::GSheetsConfig;
+        use crate::gsheets::infrastructure::http_client::GoogleSheetsHttpClient;
+        match GoogleSheetsHttpClient::from_config(&GSheetsConfig::from_env()) {
+            Ok(c) => Some(Arc::new(c) as Arc<dyn SheetsClient>),
+            Err(_) => None,
+        }
+    };
+    let enabled = enabled_sources(fixed, gsheets_client.is_some());
+
+    // Attachment fetcher: document_id → (bytes, filename).
+    let fetch: AttachmentFetcher = Box::new(move |id: String| {
+        Box::pin(async move {
+            let sb = exec.fetch_attachment_bytes(&id).await?;
+            Ok((sb.bytes, sb.filename))
+        })
+    });
+
+    // Attachment registrar: (name, bytes) → document_id. Derive mime from ext.
+    let register: AttachmentRegistrar = Box::new(move |name: String, bytes: Vec<u8>| {
+        Box::pin(async move {
+            let mime = mime_from_name(&name);
+            exec.register_attachment_bytes(bytes, mime, name).await
+        })
+    });
+
+    dispatch_core(
+        args,
+        &enabled,
+        sql_runtime.as_ref(),
+        gsheets_client.as_ref(),
+        &fetch,
+        &register,
+    )
+    .await
+}
+
+/// Derive an attachment MIME type from a filename extension. Only the two
+/// export formats `write_output_attachments` produces are recognized; any
+/// other extension falls back to a generic binary type.
+fn mime_from_name(name: &str) -> String {
+    let lower = name.to_ascii_lowercase();
+    if lower.ends_with(".csv") {
+        "text/csv".to_string()
+    } else if lower.ends_with(".xlsx") {
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet".to_string()
+    } else {
+        "application/octet-stream".to_string()
+    }
+}
+
 // ── Tool builder ─────────────────────────────────────────────────────
 
 /// Build the [`ToolDefinition`] for `data_run_python`, appending a
@@ -234,7 +644,71 @@ pub fn tool_data_run_python(enabled: &EnabledSources) -> ToolDefinition {
 
 #[cfg(test)]
 mod tests {
+    use super::super::attachment_writer::AttachmentRegistrar;
+    use super::super::tabular_bindings::AttachmentFetcher;
     use super::*;
+
+    fn noop_attach<'a>() -> AttachmentFetcher<'a> {
+        Box::new(|_id| Box::pin(async { Err("no attachment fetcher in this test".to_string()) }))
+    }
+    fn noop_registrar<'a>() -> AttachmentRegistrar<'a> {
+        Box::new(|_n, _b| Box::pin(async { Err("no registrar in this test".to_string()) }))
+    }
+
+    #[tokio::test]
+    async fn dispatch_rejects_unconfigured_sql_source() {
+        let args = serde_json::json!({
+            "bindings": [{"var": "t", "query": "SELECT 1"}],
+            "code": "output=1"
+        });
+        let attach = noop_attach();
+        let reg = noop_registrar();
+        let out = dispatch_core(
+            args,
+            &EnabledSources {
+                sql: false,
+                gsheets: false,
+            },
+            None,
+            None,
+            &attach,
+            &reg,
+        )
+        .await;
+        assert_eq!(out["error"], "SourceNotEnabled");
+        assert_eq!(out["source"], "sql");
+    }
+
+    #[tokio::test]
+    async fn dispatch_inline_binding_happy_path_no_sinks() {
+        // Inline data only, no SQL/gsheets/attachment sources, no output_* sinks.
+        // The sandbox computes `output` and it comes back verbatim with no
+        // wrote_tables / wrote_sheets / wrote_attachments sections.
+        pyo3::Python::initialize();
+        let args = serde_json::json!({
+            "bindings": [{"var": "rows", "data": [{"n": 2}, {"n": 3}]}],
+            "code": "output = int(pd.DataFrame(rows)['n'].sum())"
+        });
+        let attach = noop_attach();
+        let reg = noop_registrar();
+        let out = dispatch_core(
+            args,
+            &EnabledSources {
+                sql: false,
+                gsheets: false,
+            },
+            None,
+            None,
+            &attach,
+            &reg,
+        )
+        .await;
+        assert_eq!(out["error"], Value::Null, "unexpected error: {out}");
+        assert_eq!(out["output"], serde_json::json!(5), "got: {out}");
+        assert!(out.get("wrote_tables").is_none(), "got: {out}");
+        assert!(out.get("wrote_sheets").is_none(), "got: {out}");
+        assert!(out.get("wrote_attachments").is_none(), "got: {out}");
+    }
 
     #[test]
     fn tool_definition_lists_only_enabled_sources() {

@@ -39,7 +39,9 @@ pub fn serialize_records(
     match fmt {
         "csv" => serialize_csv(records, &columns, delimiter),
         "xlsx" => serialize_xlsx(records, &columns),
-        other => Err(format!("unsupported output_attachments format: '{other}' (expected 'csv' or 'xlsx')")),
+        other => Err(format!(
+            "unsupported output_attachments format: '{other}' (expected 'csv' or 'xlsx')"
+        )),
     }
 }
 
@@ -360,9 +362,7 @@ mod tests {
     }
 
     fn mock_registrar<'a>() -> AttachmentRegistrar<'a> {
-        Box::new(|name, bytes| {
-            Box::pin(async move { Ok(format!("doc_{}_{}", name, bytes.len())) })
-        })
+        Box::new(|name, bytes| Box::pin(async move { Ok(format!("doc_{}_{}", name, bytes.len())) }))
     }
 
     #[tokio::test]

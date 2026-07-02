@@ -1042,6 +1042,30 @@ impl DagToolExecutor {
             }
         }
 
+        // --- Synthetic data_run_python (unified cross-store sandbox tool) ---
+        // Binds each tabular source (attachment / Google Sheets / SQL SELECT /
+        // inline JSON) where the data lives NOW, runs sandboxed pandas over all
+        // of them, and applies the output_tables / output_sheets /
+        // output_attachments write sinks. SQL config + gsheets policy come from
+        // the per-tool `fixed_config`; the LLM only supplies bindings + code.
+        {
+            use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::data_run_python::{
+                dispatch_data_run_python_via_executor, TOOL_DATA_RUN_PYTHON,
+            };
+            if tool_call.function.name == TOOL_DATA_RUN_PYTHON {
+                let fixed = self
+                    .tool_configurations
+                    .get(TOOL_DATA_RUN_PYTHON)
+                    .map(|tc| tc.fixed_config.clone())
+                    .unwrap_or_default();
+                let value = dispatch_data_run_python_via_executor(self, tool_call, &fixed).await;
+                return Ok(crate::llm::domain::tools::ToolResult::success(
+                    tool_call.id.clone(),
+                    value.to_string(),
+                ));
+            }
+        }
+
         // --- Synthetic SQL bulk tools (Bulk T4) ---
         // sql_inspect_attachment + sql_bulk_insert_from_attachment use the
         // shared attachment plumbing (Bulk T0) to stream CSV/XLSX bytes from

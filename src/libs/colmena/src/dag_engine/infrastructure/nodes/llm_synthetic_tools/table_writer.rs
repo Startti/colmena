@@ -868,9 +868,18 @@ fn build_full_record_updates(
 /// a given table, `Update` falls back to an unconditional per-row
 /// full-record `UPDATE` keyed by `spec.key`.
 ///
+/// `on_missing_table` (`"create"` | `"fail"`) and `on_existing_table`
+/// (`"fail"` | `"append"` | `"overwrite"`) are operator-set policies from
+/// the tool's `fixed_config.sql`. `on_missing_table == "fail"` blocks the
+/// auto-create path even when permissions allow `CREATE TABLE`; `Replace`
+/// on an existing table with `on_existing_table == "fail"` is rejected
+/// (`TableExists`) BEFORE any `DELETE`. Both strings are validated up
+/// front — an unknown value is rejected loudly (no silent default).
+///
 /// Returns `{"wrote_tables": [...]}` on success, or a structured error
 /// `Value` (as produced by [`validate_write_spec`] / [`diff_writer`]) on
 /// the first failure — the transaction is rolled back before returning.
+#[allow(clippy::too_many_arguments)]
 pub async fn write_output_tables(
     pool: &sqlx::PgPool,
     specs: Vec<TableWriteSpec>,
@@ -878,7 +887,28 @@ pub async fn write_output_tables(
     perms: &SqlPermissions,
     tenant_user_id: Option<&str>,
     loaded_snapshots: &HashMap<String, Vec<Map<String, Value>>>,
+    on_missing_table: &str,
+    on_existing_table: &str,
 ) -> Value {
+    // Validate the operator-set policy strings loudly before touching the
+    // DB — an unknown value must never silently degrade to a default.
+    if !matches!(on_missing_table, "create" | "fail") {
+        return json!({
+            "error": "InvalidPolicy",
+            "field": "on_missing_table",
+            "value": on_missing_table,
+            "message": "on_missing_table must be one of: create, fail",
+        });
+    }
+    if !matches!(on_existing_table, "fail" | "append" | "overwrite") {
+        return json!({
+            "error": "InvalidPolicy",
+            "field": "on_existing_table",
+            "value": on_existing_table,
+            "message": "on_existing_table must be one of: fail, append, overwrite",
+        });
+    }
+
     let mut tx = match pool.begin().await {
         Ok(tx) => tx,
         Err(e) => {
@@ -926,7 +956,17 @@ pub async fn write_output_tables(
     let mut wrote_tables: Vec<Value> = Vec::with_capacity(specs.len());
 
     for spec in &specs {
-        match write_one_table(&mut tx, spec, allowed_schemas, perms, loaded_snapshots).await {
+        match write_one_table(
+            &mut tx,
+            spec,
+            allowed_schemas,
+            perms,
+            loaded_snapshots,
+            on_missing_table,
+            on_existing_table,
+        )
+        .await
+        {
             Ok(result) => wrote_tables.push(result),
             Err(mut err) => {
                 let _ = tx.rollback().await;
@@ -953,12 +993,15 @@ pub async fn write_output_tables(
 /// Apply one [`TableWriteSpec`] within the already-open transaction.
 /// Returns the per-table result object, or a structured error `Value` on
 /// failure (caller rolls back).
+#[allow(clippy::too_many_arguments)]
 async fn write_one_table(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     spec: &TableWriteSpec,
     allowed_schemas: &[String],
     perms: &SqlPermissions,
     loaded_snapshots: &HashMap<String, Vec<Map<String, Value>>>,
+    on_missing_table: &str,
+    on_existing_table: &str,
 ) -> Result<Value, Value> {
     let (schema, table) = split_qualified_table(&spec.table);
 
@@ -983,6 +1026,31 @@ async fn write_one_table(
         table_exists,
         table_columns_opt,
     )?;
+
+    // Operator policy gate (a): `on_missing_table == "fail"` blocks the
+    // auto-create path even when the preset would allow CREATE TABLE.
+    if !table_exists && on_missing_table == "fail" {
+        return Err(json!({
+            "error": "TableNotFound",
+            "table": spec.table,
+            "message": "table does not exist and on_missing_table policy is 'fail' \
+                        (auto-create disabled by operator config)",
+        }));
+    }
+
+    // Operator policy gate (b): a `Replace` (delete-then-insert) against an
+    // EXISTING table with `on_existing_table == "fail"` is rejected BEFORE
+    // any DELETE runs.
+    if table_exists && spec.mode == WriteMode::Replace && on_existing_table == "fail" {
+        return Err(json!({
+            "error": "TableExists",
+            "table": spec.table,
+            "mode": "replace",
+            "message": "table already exists and on_existing_table policy is 'fail'; \
+                        refusing to replace (delete existing rows). Use a different \
+                        table, or set on_existing_table to 'overwrite' to allow replace.",
+        }));
+    }
 
     let mut created = false;
     let mut created_ddl: Option<String> = None;
@@ -1803,6 +1871,8 @@ mod tests {
             &perms,
             None,
             &Default::default(),
+            "create",
+            "overwrite",
         )
         .await;
         assert_eq!(out["wrote_tables"][0]["created"], true, "got: {out}");
@@ -1842,6 +1912,8 @@ mod tests {
             &perms,
             None,
             &Default::default(),
+            "create",
+            "overwrite",
         )
         .await;
         assert_eq!(out["wrote_tables"][0]["created"], false, "got: {out}");
@@ -1881,6 +1953,8 @@ mod tests {
             &perms,
             None,
             &Default::default(),
+            "create",
+            "overwrite",
         )
         .await;
         assert_eq!(out["wrote_tables"][0]["rows_affected"], 2, "got: {out}");
@@ -1926,6 +2000,8 @@ mod tests {
             &perms,
             None,
             &Default::default(),
+            "create",
+            "overwrite",
         )
         .await;
         assert_eq!(out["error"], "UpsertKeyNotUnique", "got: {out}");
@@ -1988,6 +2064,8 @@ mod tests {
             &perms,
             None,
             &Default::default(),
+            "create",
+            "overwrite",
         )
         .await;
         assert_ne!(
@@ -2037,6 +2115,8 @@ mod tests {
             &perms,
             None,
             &Default::default(),
+            "create",
+            "overwrite",
         )
         .await;
         assert_eq!(out["wrote_tables"][0]["rows_affected"], 1, "got: {out}");
@@ -2086,6 +2166,8 @@ mod tests {
             &perms,
             None,
             &Default::default(),
+            "create",
+            "overwrite",
         )
         .await;
         assert_eq!(out["wrote_tables"][0]["rows_affected"], 1, "got: {out}");
@@ -2138,6 +2220,8 @@ mod tests {
             &perms,
             None,
             &Default::default(),
+            "create",
+            "overwrite",
         )
         .await;
         assert!(
@@ -2191,8 +2275,17 @@ mod tests {
         r2.insert("name".into(), json!("Same"));
         snapshots.insert("drp_test.update_diff".to_string(), vec![r1, r2]);
 
-        let out =
-            write_output_tables(&pool, specs, &["drp_test".into()], &perms, None, &snapshots).await;
+        let out = write_output_tables(
+            &pool,
+            specs,
+            &["drp_test".into()],
+            &perms,
+            None,
+            &snapshots,
+            "create",
+            "overwrite",
+        )
+        .await;
         assert_eq!(out["wrote_tables"][0]["rows_affected"], 1, "got: {out}");
         assert_eq!(out["wrote_tables"][0]["changes"]["rows"], 1, "got: {out}");
         assert_eq!(out["wrote_tables"][0]["changes"]["cells"], 1, "got: {out}");
@@ -2237,8 +2330,17 @@ mod tests {
         r1.insert("name".into(), json!("Same"));
         snapshots.insert("drp_test.update_nochange".to_string(), vec![r1]);
 
-        let out =
-            write_output_tables(&pool, specs, &["drp_test".into()], &perms, None, &snapshots).await;
+        let out = write_output_tables(
+            &pool,
+            specs,
+            &["drp_test".into()],
+            &perms,
+            None,
+            &snapshots,
+            "create",
+            "overwrite",
+        )
+        .await;
         assert_eq!(out["wrote_tables"][0]["rows_affected"], 0, "got: {out}");
         assert_eq!(out["wrote_tables"][0]["changes"]["cells"], 0, "got: {out}");
     }
@@ -2285,6 +2387,8 @@ mod tests {
             &perms,
             None,
             &Default::default(),
+            "create",
+            "overwrite",
         )
         .await;
         assert_eq!(out["wrote_tables"][0]["rows_affected"], 1, "got: {out}");
@@ -2333,6 +2437,8 @@ mod tests {
             &perms,
             None,
             &Default::default(),
+            "create",
+            "overwrite",
         )
         .await;
         assert_eq!(out["error"], "TableNotFound", "got: {out}");
@@ -2376,11 +2482,155 @@ mod tests {
             &perms,
             Some("user-123"),
             &Default::default(),
+            "create",
+            "overwrite",
         )
         .await;
         assert_eq!(out["wrote_tables"][0]["rows_affected"], 1, "got: {out}");
         // SET LOCAL config is scoped to the committed transaction and not
         // observable afterward — this test mainly asserts the write
         // still succeeds end-to-end when tenant_user_id is supplied.
+    }
+
+    // --- Task 14: operator table-policy gates (unit, no DB) ---
+
+    #[tokio::test]
+    async fn write_output_tables_rejects_unknown_on_missing_table_policy() {
+        // Reaches the policy validation BEFORE any pool.begin() — a bogus
+        // (never-connected) pool is never touched, so no DB needed. We build
+        // an already-closed lazy pool that would error if used.
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://invalid/db")
+            .unwrap();
+        let specs = parse_output_tables(&json!({"a.t": [{"id": 1}]})).unwrap();
+        let perms = full_perms(&["a"]);
+        let out = write_output_tables(
+            &pool,
+            specs,
+            &["a".into()],
+            &perms,
+            None,
+            &Default::default(),
+            "banana",
+            "fail",
+        )
+        .await;
+        assert_eq!(out["error"], "InvalidPolicy", "got: {out}");
+        assert_eq!(out["field"], "on_missing_table");
+    }
+
+    #[tokio::test]
+    async fn write_output_tables_rejects_unknown_on_existing_table_policy() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://invalid/db")
+            .unwrap();
+        let specs = parse_output_tables(&json!({"a.t": [{"id": 1}]})).unwrap();
+        let perms = full_perms(&["a"]);
+        let out = write_output_tables(
+            &pool,
+            specs,
+            &["a".into()],
+            &perms,
+            None,
+            &Default::default(),
+            "create",
+            "zap",
+        )
+        .await;
+        assert_eq!(out["error"], "InvalidPolicy", "got: {out}");
+        assert_eq!(out["field"], "on_existing_table");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL — run with `cargo test -- --ignored`"]
+    async fn on_missing_table_fail_blocks_autocreate() {
+        // A `full` preset would normally auto-create the table; the operator
+        // policy `on_missing_table = "fail"` must override that and return
+        // TableNotFound WITHOUT creating anything.
+        let pool = test_pool().await;
+        sqlx::query("DROP TABLE IF EXISTS drp_test.no_autocreate")
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("CREATE SCHEMA IF NOT EXISTS drp_test")
+            .execute(&pool)
+            .await
+            .ok();
+        let specs = parse_output_tables(&json!({
+            "drp_test.no_autocreate": [{"id":1,"name":"Ana"}]
+        }))
+        .unwrap();
+        let perms = full_perms(&["drp_test"]);
+        let out = write_output_tables(
+            &pool,
+            specs,
+            &["drp_test".into()],
+            &perms,
+            None,
+            &Default::default(),
+            "fail",
+            "overwrite",
+        )
+        .await;
+        assert_eq!(out["error"], "TableNotFound", "got: {out}");
+
+        let exists: Option<i64> = sqlx::query_scalar(
+            "SELECT count(*) FROM information_schema.tables \
+             WHERE table_schema = 'drp_test' AND table_name = 'no_autocreate'",
+        )
+        .fetch_optional(&pool)
+        .await
+        .unwrap();
+        assert_eq!(exists, Some(0), "table must NOT have been auto-created");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL — run with `cargo test -- --ignored`"]
+    async fn on_existing_table_fail_blocks_replace_before_delete() {
+        // Replace against an existing, non-empty table with the default
+        // `on_existing_table = "fail"` must be rejected as TableExists and
+        // must NOT delete the existing row.
+        let pool = test_pool().await;
+        sqlx::query("DROP TABLE IF EXISTS drp_test.no_replace")
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("CREATE SCHEMA IF NOT EXISTS drp_test")
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("CREATE TABLE drp_test.no_replace (id BIGINT, name TEXT)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO drp_test.no_replace (id, name) VALUES (99, 'Stale')")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let specs = parse_output_tables(&json!({
+            "drp_test.no_replace": {"mode":"replace","df":[{"id":1,"name":"Ana"}]}
+        }))
+        .unwrap();
+        let perms = full_perms(&["drp_test"]);
+        let out = write_output_tables(
+            &pool,
+            specs,
+            &["drp_test".into()],
+            &perms,
+            None,
+            &Default::default(),
+            "create",
+            "fail",
+        )
+        .await;
+        assert_eq!(out["error"], "TableExists", "got: {out}");
+
+        // Existing row must be untouched — the gate runs BEFORE any DELETE.
+        let n: i64 = sqlx::query_scalar("SELECT count(*) FROM drp_test.no_replace")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(n, 1, "replace must have been blocked before deleting");
     }
 }
