@@ -1,0 +1,23 @@
+data_run_python:
+  summary: Run pandas code across multiple data sources in one call — bind each source where it lives, get back only the result
+  description: |
+    Use this tool whenever data must move or be computed between files, spreadsheets, and the SQL database — bind each source where the data lives now; rows never enter your context.
+
+    Each entry in `bindings` names a Python variable (`var`) and points at exactly one source (see "Available sources" below for what's enabled in this deployment). All bindings are fetched IN PARALLEL and bound as Python globals — each a list of `{col: val}` dicts — before your `code` runs.
+
+    When to pick this tool over a source-specific one: pick `data_run_python` when the task CROSSES stores — e.g. "update the database with this spreadsheet", "download this table as a file", "sync a spreadsheet with the DB", "compare this file against the table". Pick a source-specific tool when the whole task stays inside one store.
+
+    Required args:
+      - `bindings`: at least one entry, each with a `var` name and exactly one source field (`attachment_id`, `spreadsheet_id`+`sheet`, `query`, or `data` — depending on which sources are enabled)
+      - `code`: Python source. Convenience modules pre-imported: `pd` (pandas), `np` (numpy), `stats` (scipy.stats), and the stdlib (math, datetime, decimal, json, re, statistics, string, collections, functools, itertools)
+
+    Optional args:
+      - `write_to_spreadsheet`: target spreadsheet id for an `output_sheets` sink assigned by your code (only meaningful when the spreadsheet source is enabled)
+
+    How to surface output:
+      - Assign a global `output` (any JSON-serializable value) — that is what you see back. Pandas DataFrames are auto-converted via `to_dict(orient="records")`, Series via `to_list()`, numpy scalars via `item()`.
+
+    Sandbox restrictions:
+      - Blocked imports: os, sys, subprocess, socket, urllib, requests, importlib, builtins, ctypes
+      - No filesystem access, no network access beyond the fetched bindings
+      - Code wall-clock capped; response truncated at a fixed byte limit

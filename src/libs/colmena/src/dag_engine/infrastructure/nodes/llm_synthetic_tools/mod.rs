@@ -6,6 +6,7 @@ pub mod crdt_doc_import_sheet;
 pub mod crdt_doc_run_python;
 pub mod crdt_doc_tools;
 pub mod crdt_summary;
+pub mod data_run_python;
 pub mod describe_tool;
 pub mod diff_writer;
 pub mod document_tools;
@@ -542,6 +543,14 @@ mod text_coverage_tests {
 
         // attachment_run_python — 1 tool (post item 13, 2026-06-10)
         tools.push(super::attachment_run_python::build_attachment_run_python_tool_definition());
+
+        // data_run_python — 1 tool (both sources enabled for coverage)
+        tools.push(super::data_run_python::tool_data_run_python(
+            &super::data_run_python::EnabledSources {
+                sql: true,
+                gsheets: true,
+            },
+        ));
 
         tools
     }
