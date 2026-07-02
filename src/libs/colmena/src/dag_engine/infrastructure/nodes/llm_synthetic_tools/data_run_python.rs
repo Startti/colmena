@@ -584,11 +584,27 @@ pub async fn dispatch_data_run_python_via_executor(
     };
     let enabled = enabled_sources(fixed, gsheets_client.is_some());
 
-    // Attachment fetcher: document_id → (bytes, filename).
+    // Attachment fetcher: document_id → (bytes, format_hint). `StoredBytes.filename`
+    // is the storage key (`<uuid>.bin`) for path/inline-registered files, which
+    // defeats csv/xlsx format detection — the ORIGINAL mime/filename lives in the
+    // conversation catalog. Prefer the catalog's mime_type (then its original
+    // filename) so `parse_attachment_to_records` can recognize the format.
     let fetch: AttachmentFetcher = Box::new(move |id: String| {
         Box::pin(async move {
             let sb = exec.fetch_attachment_bytes(&id).await?;
-            Ok((sb.bytes, sb.filename))
+            let hint = match exec.lookup_attachment_meta(&id) {
+                Some((mime, filename)) => {
+                    if !mime.is_empty() && mime != "application/octet-stream" {
+                        mime
+                    } else if !filename.is_empty() {
+                        filename
+                    } else {
+                        sb.filename
+                    }
+                }
+                None => sb.filename,
+            };
+            Ok((sb.bytes, hint))
         })
     });
 
