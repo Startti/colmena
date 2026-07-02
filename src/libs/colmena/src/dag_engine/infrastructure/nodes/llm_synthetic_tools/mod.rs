@@ -1,6 +1,7 @@
 //! Synthetic tools for the LLM node — tools that don't map to DAG nodes.
 
 pub mod attachment_run_python;
+pub mod attachment_writer;
 pub mod crdt_doc_context;
 pub mod crdt_doc_import_sheet;
 pub mod crdt_doc_run_python;
