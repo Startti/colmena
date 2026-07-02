@@ -6,6 +6,14 @@ collision policy) pero apuntan a casos de uso distintos. Esta guía te ayuda
 a elegir uno u otro y te da un mapa rápido de los grafos ejemplo que ya
 existen en el repo para que pruebes cada uno.
 
+> **Cruce con SQL:** si el objetivo es analizar/sincronizar un Google Sheet
+> contra una tabla de la base de datos (no solo entre hojas), usá
+> [`data_run_python`](48_data_run_python.md) — bindea el sheet y una query
+> SQL en la misma call y escribe a `output_tables`/`output_sheets` según
+> corresponda. Este documento (y `gsheets_run_python`/`crdt_doc_run_python`)
+> siguen siendo la referencia para flujos que no salen del universo de
+> hojas de cálculo.
+
 ---
 
 ## TL;DR — ¿cuál usar?

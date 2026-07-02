@@ -63,10 +63,17 @@ output = {'filas_upserted': len(changed), 'muestra': changed.head(3).to_dict('re
 
 ## Variant: brand-new table (no existing rows to diff against)
 
-If the target table doesn't exist yet, skip the second binding and use
-`append` (or `upsert` with `on_missing_table: "create"`, which is the
-operator default) — the table gets auto-created with inferred column types
-and, for `upsert`, a `UNIQUE` constraint on `key`.
+If the target table doesn't exist yet, skip the second binding and just
+write with `append` or `upsert` — nothing to set from your code. Whether a
+missing table gets auto-created (vs. failing with `TableNotFound`) is
+governed by `on_missing_table` in the **operator's** `fixed_config.sql`
+block, not by anything you pass. In most deployments the operator default
+is `on_missing_table: "create"`, so the table is auto-created with inferred
+column types and, for `upsert`, a `UNIQUE` constraint on `key` — but you
+can't assume that; if the write comes back `TableNotFound`, that means this
+deployment's operator set `on_missing_table: "fail"`, and the advice in the
+error tells you to ask the operator to create the table or change the
+policy.
 
 ```python
 output_tables = {'staging.import_raw': df_crudo}  # shorthand = mode append

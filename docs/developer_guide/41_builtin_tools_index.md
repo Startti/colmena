@@ -78,7 +78,7 @@ computation server-side (run_python) instead of dumping every row.
 | `attachment_run_python` | Run pandas/numpy code against a registered CSV/XLSX attachment, get back stdout + a structured result — without dumping every row into your context | [§23](23_sql_node.md#attachment_run_python-shipped-2026-06-10) |
 | `sql_inspect_attachment` | Open a registered CSV/XLSX attachment and report its header, sample rows, total row count, and inferred column types — without forcing the LLM to read every row | [§23](23_sql_node.md#bulk-insert-from-attachment-shipped-2026-06-09) |
 | `sql_bulk_insert_from_attachment` | Stream a CSV attachment into a Postgres table via COPY FROM STDIN — bypasses the LLM context for the rows and runs orders of magnitude faster than per-row INSERT | [§23](23_sql_node.md#bulk-insert-from-attachment-shipped-2026-06-09) |
-| `data_run_python` | Run pandas code across multiple data sources (attachments, Google Sheets, SQL) in one call — bind each source where it lives, get back only the result | [design spec](../superpowers/specs/2026-07-01-data-run-python-design.md) |
+| `data_run_python` | Run pandas code across multiple data sources (attachments, Google Sheets, SQL) in one call — bind each source where it lives, get back only the result | [§48](48_data_run_python.md) |
 
 ## gdocs (35 tools)
 

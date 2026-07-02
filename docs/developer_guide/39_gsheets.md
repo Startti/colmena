@@ -5,6 +5,13 @@
 > Drive API. Auth via Service Account JSON or Application Default
 > Credentials. No OAuth user-scoped flow in v1.
 
+> **Cross-store con SQL:** el análisis pandas de un Google Sheet con
+> write-back a una tabla SQL (o viceversa) ahora también es posible en una
+> sola tool call vía [`data_run_python`](48_data_run_python.md) — bindea el
+> sheet y la tabla a la vez, cruza en pandas, y escribe a `output_tables`
+> y/o `output_sheets` en el mismo call. `gsheets_run_python` sigue siendo la
+> opción cuando el flujo es 100% dentro de Sheets.
+
 ## Recommended activation
 
 Enable the whole gsheets surface with one alias:

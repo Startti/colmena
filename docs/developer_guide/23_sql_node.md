@@ -1069,11 +1069,20 @@ como signed URLs. El LLM no necesita saber el source type.
 
 Después de items 13 + auto-summary + `attachment_run_python` (2026-06-09 / 2026-06-10) el LLM tiene **5 caminos** para interactuar con un archivo registrado. La elección depende del tipo de archivo y de la naturaleza de la pregunta.
 
+> **Transformación/cruce de datos tabulares hacia/desde SQL:** desde
+> 2026-07-01/02 este caso lo cubre [`data_run_python`](48_data_run_python.md)
+> — bindea el attachment (y opcionalmente la tabla destino) y escribe el
+> resultado vía `output_tables` con semántica `append`/`update`/`upsert`/
+> `replace`. El **volcado 1:1 crudo** de un CSV entero (sin transformación
+> intermedia) sigue siendo mejor con `sql_bulk_insert_from_attachment` (COPY
+> directo, sin sandbox). Ver la tabla de equivalencia en
+> [§48](48_data_run_python.md#los-grafos-e2e).
+
 ### Matriz por tipo de archivo
 
 | Tipo de archivo | "Qué columnas/contenido tiene?" | "Hacé un cálculo sobre la data" | "Cargá esto en mi DB" | "Leé el contenido literal" |
 |---|---|---|---|---|
-| **CSV / XLSX** | Catalog auto-summary (gratis, sin call) | `attachment_run_python` | `sql_inspect_attachment` + `sql_bulk_insert_from_attachment` | `load_attachment` |
+| **CSV / XLSX** | Catalog auto-summary (gratis, sin call) | `attachment_run_python` | `sql_inspect_attachment` + `sql_bulk_insert_from_attachment` (volcado crudo) / `data_run_python` (transformación/cruce) | `load_attachment` |
 | **PDF** | Catalog summary (LLM-generated, gratis después de generación) | N/A | N/A | `load_attachment` |
 | **Imagen** | Catalog metadata (filename, mime, size) | `load_attachment` (multimodal vision) | N/A | `load_attachment` |
 | **Markdown / código / plain text** | Catalog summary (LLM-generated) | N/A | N/A | `load_attachment` |
