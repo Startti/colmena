@@ -2581,7 +2581,19 @@ impl ExecutableNode for LlmNode {
                 // capability — benign). Not reconciled here to avoid an
                 // exposure-time client build; revisit if it bites in practice.
                 let enabled = enabled_sources(&data_run_python_fixed_config, agent_has_gsheets);
-                tools.push(tool_data_run_python(&enabled));
+                let td = tool_data_run_python(&enabled);
+                // Honor lazy_tool_loading like the other tools reachable via the
+                // `gsheets` alias (the gsheets/gdocs/crdt blocks below): under
+                // lazy mode register a compact catalog summary and hide the full
+                // (~200-line) schema behind `describe_tool`, instead of shipping
+                // it eagerly every turn to every `["gsheets"]` agent.
+                if lazy_tool_loading {
+                    catalog.push(CatalogEntry {
+                        name: td.name.clone(),
+                        summary: summary_for_catalog(td.summary.as_deref(), &td.description),
+                    });
+                }
+                tools.push(td);
             }
         }
 
