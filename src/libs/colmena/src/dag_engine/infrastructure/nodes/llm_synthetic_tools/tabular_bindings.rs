@@ -90,11 +90,10 @@ pub fn classify_binding(b: &DataBinding) -> Result<BindingKind, String> {
     let has_sql = b.query.is_some();
     let has_inline = b.data.is_some();
 
-    let present_count =
-        [has_attachment, has_gsheets, has_sql, has_inline]
-            .iter()
-            .filter(|x| **x)
-            .count();
+    let present_count = [has_attachment, has_gsheets, has_sql, has_inline]
+        .iter()
+        .filter(|x| **x)
+        .count();
 
     match present_count {
         1 => {
