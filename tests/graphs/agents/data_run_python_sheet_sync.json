@@ -1,6 +1,6 @@
 {
   "_comment": "E2E (needs a real Google Sheet + Google creds) — data_run_python canonical case C: gsheets source + SQL source merged in pandas, upserted to SQL via output_tables AND the sheet updated in place via output_sheets. Replace <YOUR_SPREADSHEET_ID> with a real writable spreadsheet id that has a 'Pipeline' tab with columns opp_id,stage,synced. Requires drp_e2e.oportunidades(opp_id,stage) to pre-exist. Per docs/developer_guide/43_sheets_local_vs_gsheets.md: inject Google OAuth/SA creds via Secret Manager (do NOT commit), unset COLMENA_LOCAL. Run: set -a; source .env; set +a; cargo run --release --bin dag_engine -- run tests/graphs/agents/data_run_python_sheet_sync.json --agent-session-id e2e_drp_$(date +%s) --include-extra-info",
-  "metadata": { "category": "agents", "requires_env": ["GEMINI_API_KEY", "DATABASE_URL"] },
+  "metadata": { "category": "agents", "requires_env": ["GEMINI_API_KEY", "DATABASE_URL", "COLMENA_GOOGLE_OAUTH_CLIENT_ID", "COLMENA_GOOGLE_OAUTH_CLIENT_SECRET", "COLMENA_GOOGLE_OAUTH_REFRESH_TOKEN", "COLMENA_GOOGLE_SHARE_EMAIL"] },
   "nodes": {
     "agent": {
       "type": "llm_call",
