@@ -481,9 +481,12 @@ fn infer_column_type<'a>(values: impl Iterator<Item = &'a Value>) -> InferredTyp
     }
 }
 
-/// Quote a single SQL identifier with double quotes.
+/// Quote a single SQL identifier with double quotes, escaping any
+/// embedded `"` by doubling it per the SQL standard (e.g. `a"b` becomes
+/// `"a""b"`). Prevents identifier break-out in generated DDL when a
+/// column/table/schema name (LLM-produced) contains a quote character.
 fn quote_ident(ident: &str) -> String {
-    format!("\"{ident}\"")
+    format!("\"{}\"", ident.replace('"', "\"\""))
 }
 
 /// Build a `CREATE TABLE IF NOT EXISTS` statement for an auto-created
@@ -861,5 +864,12 @@ mod tests {
         ];
         let ddl = infer_create_ddl("s", "t", &recs, None);
         assert!(ddl.contains("\"n\" DOUBLE PRECISION"));
+    }
+
+    #[test]
+    fn ddl_escapes_embedded_quotes_in_identifiers() {
+        let recs = vec![serde_json::from_value(serde_json::json!({"a\"b": 1})).unwrap()];
+        let ddl = infer_create_ddl("s", "t", &recs, None);
+        assert!(ddl.contains("\"a\"\"b\" BIGINT"), "got: {ddl}");
     }
 }
