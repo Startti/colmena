@@ -8,13 +8,15 @@
 //!
 //! See `docs/superpowers/specs/2026-07-01-data-run-python-design.md`.
 
-use super::diff_writer::CellChange;
+use super::diff_writer::{diff_records, CellChange};
 use crate::dag_engine::domain::sql_permissions::{SqlOperation, SqlPermissions};
-use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::sql_bulk_tools::validate_table_against_allowlist;
+use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::sql_bulk_tools::{
+    split_qualified_table, validate_table_against_allowlist,
+};
 use crate::gsheets::infrastructure::http_client::rectangle_to_records;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 /// Maximum rows accepted in a single `output_tables` write.
 const MAX_ROWS: usize = 100_000;
@@ -623,7 +625,10 @@ pub fn build_update_sql_from_changes(
         if !groups.contains_key(&change.key_value) {
             order.push(change.key_value.clone());
         }
-        groups.entry(change.key_value.clone()).or_default().push(change);
+        groups
+            .entry(change.key_value.clone())
+            .or_default()
+            .push(change);
     }
 
     order
@@ -648,6 +653,539 @@ pub fn build_update_sql_from_changes(
             (sql, params)
         })
         .collect()
+}
+
+/// Rows are chunked to this size before a single `INSERT`/`UPSERT`
+/// statement is built, keeping the parameter count (`cols * chunk`) well
+/// under Postgres's 65535 bind-parameter limit.
+const WRITE_CHUNK_SIZE: usize = 1000;
+
+/// Bind a single `serde_json::Value` onto a `sqlx::query::Query` builder,
+/// mapping JSON scalar types to native Postgres types. `Array`/`Object`
+/// values are bound as their JSON text representation (`::text` — callers
+/// needing JSONB columns should cast in SQL, e.g. `$N::jsonb`).
+fn bind_json_value<'q>(
+    query: sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>,
+    value: &'q Value,
+) -> sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments> {
+    match value {
+        Value::Null => query.bind(Option::<String>::None),
+        Value::Bool(b) => query.bind(*b),
+        Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                query.bind(i)
+            } else if let Some(f) = n.as_f64() {
+                query.bind(f)
+            } else {
+                query.bind(n.to_string())
+            }
+        }
+        Value::String(s) => query.bind(s.as_str()),
+        Value::Array(_) | Value::Object(_) => query.bind(value.to_string()),
+    }
+}
+
+/// Execute a parameterized statement built by [`build_insert_sql`] /
+/// [`build_upsert_sql`] / [`build_update_sql_from_changes`] against the
+/// open transaction, binding each `Value` in order.
+async fn exec_bound(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    sql: &str,
+    params: &[Value],
+) -> Result<sqlx::postgres::PgQueryResult, sqlx::Error> {
+    let mut query = sqlx::query(sql);
+    for p in params {
+        query = bind_json_value(query, p);
+    }
+    query.execute(&mut **tx).await
+}
+
+/// `true` if `err` indicates the `ON CONFLICT (key)` clause has no
+/// matching arbiter on the target table — either a genuine unique-key
+/// collision at write time (SQLSTATE `23505`, `unique_violation`) or the
+/// declared `key` not being backed by any UNIQUE/PRIMARY KEY constraint
+/// at all (SQLSTATE `42P10`, `invalid_column_reference` — Postgres's
+/// code for "there is no unique or exclusion constraint matching the
+/// ON CONFLICT specification"). Both map to the same LLM-facing
+/// `UpsertKeyNotUnique` error: the fix is the same either way — pick a
+/// key backed by a real constraint.
+fn is_unique_violation(err: &sqlx::Error) -> bool {
+    matches!(
+        err,
+        sqlx::Error::Database(db) if matches!(db.code().as_deref(), Some("23505") | Some("42P10"))
+    )
+}
+
+/// Introspect a table's columns via `information_schema.columns`. Returns
+/// an empty `Vec` when the table does not exist (or has zero columns,
+/// which is not a real-world case for user tables).
+async fn introspect_columns(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    schema: &str,
+    table: &str,
+) -> Result<Vec<String>, sqlx::Error> {
+    let rows: Vec<(String,)> = sqlx::query_as(
+        "SELECT column_name::text FROM information_schema.columns \
+         WHERE table_schema = $1 AND table_name = $2 ORDER BY ordinal_position",
+    )
+    .bind(schema)
+    .bind(table)
+    .fetch_all(&mut **tx)
+    .await?;
+    Ok(rows.into_iter().map(|(c,)| c).collect())
+}
+
+/// [`build_update_sql_from_changes`] always binds `key_value` as a
+/// `Value::String` (it's a `CellChange::key_value`, opaque and always
+/// textual per `diff_writer::key_to_string`) in the *last* placeholder,
+/// against a `WHERE "key_col"=$N` clause. When the key column's actual
+/// SQL type isn't text (e.g. `BIGINT`), Postgres rejects the comparison
+/// (`operator does not exist: bigint = text`) rather than coercing.
+/// Rather than touching the shared pure builder (whose own unit tests
+/// pin the exact `WHERE "id"=$N` SQL shape), cast the column side to
+/// `text` at the call site — `"id"=$N` → `"id"::text=$N` — which is
+/// type-safe regardless of the column's real type since `key_value`
+/// came from that same column's value stringified.
+fn cast_trailing_where_key_to_text(sql: &str) -> String {
+    let Some(where_pos) = sql.rfind(" WHERE ") else {
+        return sql.to_string();
+    };
+    let clause_start = where_pos + " WHERE ".len();
+    let where_clause = &sql[clause_start..];
+    let Some(eq_offset) = where_clause.find('=') else {
+        return sql.to_string();
+    };
+    let (col, rest) = where_clause.split_at(eq_offset);
+    format!("{}{col}::text{rest}", &sql[..clause_start])
+}
+
+/// Convert a JSON scalar to the same string representation
+/// `diff_writer::key_to_string` uses for `CellChange::key_value`, so
+/// composite-key fallback matching lines up exactly with the diff's
+/// changed-row set. Returns `None` for null/array/object (dropped, same
+/// as the diff).
+fn scalar_key_to_string(v: &Value) -> Option<String> {
+    match v {
+        Value::Null => None,
+        Value::Bool(b) => Some(b.to_string()),
+        Value::Number(n) => Some(n.to_string()),
+        Value::String(s) => Some(s.clone()),
+        Value::Array(_) | Value::Object(_) => None,
+    }
+}
+
+/// Build a per-row full-record `UPDATE` for every record, keyed by
+/// (possibly composite) `key` columns. Used as the fallback path when a
+/// cell-level diff is unavailable (no loaded snapshot) or infeasible
+/// (composite key — [`build_update_sql_from_changes`] only supports a
+/// single-column key).
+fn build_full_record_updates(
+    schema: &str,
+    table: &str,
+    key: &[String],
+    cols: &[String],
+    records: &[Map<String, Value>],
+) -> Vec<(String, Vec<Value>)> {
+    let set_cols: Vec<&String> = cols.iter().filter(|c| !key.contains(c)).collect();
+    records
+        .iter()
+        .map(|record| {
+            let mut params = Vec::with_capacity(set_cols.len() + key.len());
+            let mut set_clauses = Vec::with_capacity(set_cols.len());
+            for col in &set_cols {
+                params.push(record.get(*col).cloned().unwrap_or(Value::Null));
+                set_clauses.push(format!("{}=${}", quote_ident(col), params.len()));
+            }
+            let mut where_clauses = Vec::with_capacity(key.len());
+            for k in key {
+                params.push(record.get(k).cloned().unwrap_or(Value::Null));
+                where_clauses.push(format!("{}=${}", quote_ident(k), params.len()));
+            }
+            let sql = format!(
+                "UPDATE {}.{} SET {} WHERE {}",
+                quote_ident(schema),
+                quote_ident(table),
+                set_clauses.join(","),
+                where_clauses.join(" AND ")
+            );
+            (sql, params)
+        })
+        .collect()
+}
+
+/// Transactional executor for the `output_tables` SQL write-back sink.
+/// Applies every [`TableWriteSpec`] in `specs` sequentially, inside a
+/// single Postgres transaction: any failure rolls the whole batch back
+/// (no partial writes). See module doc / spec §10-12 for the write-mode
+/// semantics.
+///
+/// `loaded_snapshots` — keyed by the spec's qualified table name (e.g.
+/// `"drp_test.people"`, matching `TableWriteSpec::table` verbatim) —
+/// supplies the "before" state for diff-driven `Update`. When absent for
+/// a given table, `Update` falls back to an unconditional per-row
+/// full-record `UPDATE` keyed by `spec.key`.
+///
+/// Returns `{"wrote_tables": [...]}` on success, or a structured error
+/// `Value` (as produced by [`validate_write_spec`] / [`diff_writer`]) on
+/// the first failure — the transaction is rolled back before returning.
+pub async fn write_output_tables(
+    pool: &sqlx::PgPool,
+    specs: Vec<TableWriteSpec>,
+    allowed_schemas: &[String],
+    perms: &SqlPermissions,
+    tenant_user_id: Option<&str>,
+    loaded_snapshots: &HashMap<String, Vec<Map<String, Value>>>,
+) -> Value {
+    let mut tx = match pool.begin().await {
+        Ok(tx) => tx,
+        Err(e) => {
+            return json!({
+                "error": "TransactionError",
+                "message": format!("failed to begin transaction: {e}"),
+            });
+        }
+    };
+
+    if let Err(e) = sqlx::query("SET LOCAL statement_timeout = '30000ms'")
+        .execute(&mut *tx)
+        .await
+    {
+        let _ = tx.rollback().await;
+        return json!({
+            "error": "TransactionError",
+            "message": format!("failed to set statement_timeout: {e}"),
+        });
+    }
+    if let Err(e) = sqlx::query("SET LOCAL work_mem = '64MB'")
+        .execute(&mut *tx)
+        .await
+    {
+        let _ = tx.rollback().await;
+        return json!({
+            "error": "TransactionError",
+            "message": format!("failed to set work_mem: {e}"),
+        });
+    }
+    if let Some(uid) = tenant_user_id {
+        if let Err(e) = sqlx::query("SELECT set_config('app.current_user_id', $1, true)")
+            .bind(uid)
+            .execute(&mut *tx)
+            .await
+        {
+            let _ = tx.rollback().await;
+            return json!({
+                "error": "TransactionError",
+                "message": format!("failed to set tenant context: {e}"),
+            });
+        }
+    }
+
+    let mut wrote_tables: Vec<Value> = Vec::with_capacity(specs.len());
+
+    for spec in &specs {
+        match write_one_table(&mut tx, spec, allowed_schemas, perms, loaded_snapshots).await {
+            Ok(result) => wrote_tables.push(result),
+            Err(mut err) => {
+                let _ = tx.rollback().await;
+                if err.get("table").is_none() {
+                    if let Value::Object(ref mut obj) = err {
+                        obj.insert("table".to_string(), Value::String(spec.table.clone()));
+                    }
+                }
+                return err;
+            }
+        }
+    }
+
+    if let Err(e) = tx.commit().await {
+        return json!({
+            "error": "TransactionError",
+            "message": format!("failed to commit: {e}"),
+        });
+    }
+
+    json!({ "wrote_tables": wrote_tables })
+}
+
+/// Apply one [`TableWriteSpec`] within the already-open transaction.
+/// Returns the per-table result object, or a structured error `Value` on
+/// failure (caller rolls back).
+async fn write_one_table(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    spec: &TableWriteSpec,
+    allowed_schemas: &[String],
+    perms: &SqlPermissions,
+    loaded_snapshots: &HashMap<String, Vec<Map<String, Value>>>,
+) -> Result<Value, Value> {
+    let (schema, table) = split_qualified_table(&spec.table);
+
+    let table_columns = introspect_columns(tx, &schema, &table).await.map_err(|e| {
+        json!({
+            "error": "TransactionError",
+            "table": spec.table,
+            "message": format!("failed to introspect table columns: {e}"),
+        })
+    })?;
+    let table_exists = !table_columns.is_empty();
+    let table_columns_opt = if table_exists {
+        Some(table_columns.as_slice())
+    } else {
+        None
+    };
+
+    validate_write_spec(
+        spec,
+        allowed_schemas,
+        perms,
+        table_exists,
+        table_columns_opt,
+    )?;
+
+    let mut created = false;
+    let mut created_ddl: Option<String> = None;
+    if !table_exists
+        && matches!(
+            spec.mode,
+            WriteMode::Append | WriteMode::Upsert | WriteMode::Replace
+        )
+    {
+        let ddl = infer_create_ddl(&schema, &table, &spec.records, spec.key.as_deref());
+        sqlx::query(&ddl).execute(&mut **tx).await.map_err(|e| {
+            json!({
+                "error": "TransactionError",
+                "table": spec.table,
+                "message": format!("failed to auto-create table: {e}"),
+            })
+        })?;
+        created = true;
+        created_ddl = Some(ddl);
+    }
+
+    let cols = input_columns(&spec.records);
+
+    let mut result = json!({
+        "table": spec.table,
+        "mode": format!("{:?}", spec.mode).to_lowercase(),
+        "created": created,
+    });
+
+    match spec.mode {
+        WriteMode::Append => {
+            let rows_affected = insert_chunked(tx, &schema, &table, &cols, &spec.records).await?;
+            result["rows_affected"] = json!(rows_affected);
+        }
+        WriteMode::Upsert => {
+            let key = spec.key.as_deref().unwrap_or(&[]);
+            let rows_affected =
+                upsert_chunked(tx, &schema, &table, &cols, key, &spec.records, &spec.table).await?;
+            result["rows_affected"] = json!(rows_affected);
+        }
+        WriteMode::Replace => {
+            let delete_sql = format!(
+                "DELETE FROM {}.{}",
+                quote_ident(&schema),
+                quote_ident(&table)
+            );
+            sqlx::query(&delete_sql)
+                .execute(&mut **tx)
+                .await
+                .map_err(|e| {
+                    json!({
+                        "error": "TransactionError",
+                        "table": spec.table,
+                        "message": format!("failed to delete existing rows for replace: {e}"),
+                    })
+                })?;
+            let rows_affected = insert_chunked(tx, &schema, &table, &cols, &spec.records).await?;
+            result["rows_affected"] = json!(rows_affected);
+        }
+        WriteMode::Update => {
+            let key = spec.key.clone().unwrap_or_default();
+            let (rows_affected, changes) =
+                update_records(tx, &schema, &table, &key, &cols, spec, loaded_snapshots).await?;
+            result["rows_affected"] = json!(rows_affected);
+            if let Some(changes) = changes {
+                result["changes"] = changes;
+            }
+        }
+    }
+
+    if let Some(ddl) = created_ddl {
+        result["created_ddl"] = json!(ddl);
+    }
+
+    Ok(result)
+}
+
+/// Insert `records` in chunks of [`WRITE_CHUNK_SIZE`], skipping any
+/// empty chunk (defensive — an empty chunk would build a malformed
+/// `VALUES ()` clause).
+async fn insert_chunked(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    schema: &str,
+    table: &str,
+    cols: &[String],
+    records: &[Map<String, Value>],
+) -> Result<u64, Value> {
+    let mut rows_affected = 0u64;
+    for chunk in records.chunks(WRITE_CHUNK_SIZE) {
+        if chunk.is_empty() {
+            continue;
+        }
+        let row_refs: Vec<&Map<String, Value>> = chunk.iter().collect();
+        let (sql, params) = build_insert_sql(schema, table, cols, &row_refs);
+        let res = exec_bound(tx, &sql, &params).await.map_err(|e| {
+            json!({
+                "error": "TransactionError",
+                "message": format!("insert failed: {e}"),
+            })
+        })?;
+        rows_affected += res.rows_affected();
+    }
+    Ok(rows_affected)
+}
+
+/// Upsert `records` in chunks of [`WRITE_CHUNK_SIZE`], skipping any
+/// empty chunk. Translates a Postgres unique-violation into a structured
+/// `UpsertKeyNotUnique` error (e.g. the declared `key` is not backed by a
+/// unique/PK constraint on the target table, so `ON CONFLICT` has no
+/// arbiter to match).
+async fn upsert_chunked(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    schema: &str,
+    table: &str,
+    cols: &[String],
+    key: &[String],
+    records: &[Map<String, Value>],
+    table_label: &str,
+) -> Result<u64, Value> {
+    let mut rows_affected = 0u64;
+    for chunk in records.chunks(WRITE_CHUNK_SIZE) {
+        if chunk.is_empty() {
+            continue;
+        }
+        let row_refs: Vec<&Map<String, Value>> = chunk.iter().collect();
+        let (sql, params) = build_upsert_sql(schema, table, cols, key, &row_refs);
+        let res = exec_bound(tx, &sql, &params).await.map_err(|e| {
+            if is_unique_violation(&e) {
+                json!({
+                    "error": "UpsertKeyNotUnique",
+                    "table": table_label,
+                    "key": key,
+                    "message": format!(
+                        "upsert failed: key {key:?} has no matching UNIQUE/PRIMARY KEY \
+                         constraint on the target table (ON CONFLICT arbiter not found): {e}"
+                    ),
+                })
+            } else {
+                json!({
+                    "error": "TransactionError",
+                    "message": format!("upsert failed: {e}"),
+                })
+            }
+        })?;
+        rows_affected += res.rows_affected();
+    }
+    Ok(rows_affected)
+}
+
+/// Dispatch `Update`: diff-driven (against `loaded_snapshots`) when a
+/// snapshot is available for this table, else an unconditional per-row
+/// full-record `UPDATE` keyed by `key`. Returns `(rows_affected,
+/// Some(changes_summary))` for the diff-driven path (`changes_summary`
+/// is `{"rows": N, "cells": M}`), or `(rows_affected, None)` for the
+/// full-record fallback.
+async fn update_records(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    schema: &str,
+    table: &str,
+    key: &[String],
+    cols: &[String],
+    spec: &TableWriteSpec,
+    loaded_snapshots: &HashMap<String, Vec<Map<String, Value>>>,
+) -> Result<(u64, Option<Value>), Value> {
+    if let Some(snapshot) = loaded_snapshots.get(&spec.table) {
+        let key0 = key.first().ok_or_else(|| {
+            json!({
+                "error": "KeyColumnMissing",
+                "table": spec.table,
+                "message": "'key' must contain at least one column",
+            })
+        })?;
+        let diff = diff_records(
+            snapshot,
+            &spec.records,
+            key0,
+            spec.columns.as_deref(),
+            false,
+            &spec.table,
+        )
+        .map_err(|e| {
+            let mut v = e.to_json();
+            if let Value::Object(ref mut obj) = v {
+                obj.insert("table".to_string(), Value::String(spec.table.clone()));
+            }
+            v
+        })?;
+
+        if diff.changes.is_empty() {
+            return Ok((0, Some(json!({"rows": 0, "cells": 0}))));
+        }
+
+        let statements = if key.len() == 1 {
+            build_update_sql_from_changes(schema, table, key, &diff.changes)
+                .into_iter()
+                .map(|(sql, params)| (cast_trailing_where_key_to_text(&sql), params))
+                .collect()
+        } else {
+            // Composite key: `CellChange::key_value` is a single opaque
+            // string, so cell-level changes can't be replayed via a
+            // multi-column WHERE clause — fall back to full-record
+            // UPDATE for every row that had at least one change.
+            // diff_records() only reports a change for rows whose key
+            // matched an existing snapshot row, so `key.first()` here
+            // (the diff's own key column) is safe to re-derive from.
+            let changed_key_values: HashSet<&String> =
+                diff.changes.iter().map(|c| &c.key_value).collect();
+            let changed_records: Vec<Map<String, Value>> = spec
+                .records
+                .iter()
+                .filter(|r| {
+                    r.get(key0)
+                        .and_then(scalar_key_to_string)
+                        .is_some_and(|s| changed_key_values.contains(&s))
+                })
+                .cloned()
+                .collect();
+            build_full_record_updates(schema, table, key, cols, &changed_records)
+        };
+
+        let mut rows_touched = 0u64;
+        for (sql, params) in &statements {
+            let res = exec_bound(tx, sql, params).await.map_err(|e| {
+                json!({
+                    "error": "TransactionError",
+                    "message": format!("update failed: {e}"),
+                })
+            })?;
+            rows_touched += res.rows_affected();
+        }
+        let changes = json!({"rows": diff.rows_changed, "cells": diff.changes.len()});
+        Ok((rows_touched, Some(changes)))
+    } else {
+        let statements = build_full_record_updates(schema, table, key, cols, &spec.records);
+        let mut rows_affected = 0u64;
+        for (sql, params) in &statements {
+            let res = exec_bound(tx, sql, params).await.map_err(|e| {
+                json!({
+                    "error": "TransactionError",
+                    "message": format!("update failed: {e}"),
+                })
+            })?;
+            rows_affected += res.rows_affected();
+        }
+        Ok((rows_affected, None))
+    }
 }
 
 #[cfg(test)]
@@ -1014,13 +1552,8 @@ mod tests {
         let mut r = serde_json::Map::new();
         r.insert("id".into(), serde_json::json!(1));
         r.insert("x".into(), serde_json::json!(2));
-        let (sql, _) = build_upsert_sql(
-            "s",
-            "t",
-            &["id".into(), "x".into()],
-            &["id".into()],
-            &[&r],
-        );
+        let (sql, _) =
+            build_upsert_sql("s", "t", &["id".into(), "x".into()], &["id".into()], &[&r]);
         assert!(sql.contains("ON CONFLICT (\"id\") DO UPDATE SET \"x\"=EXCLUDED.\"x\""));
     }
 
@@ -1032,12 +1565,8 @@ mod tests {
         let mut r2 = serde_json::Map::new();
         r2.insert("id".into(), serde_json::json!(2));
         r2.insert("x".into(), serde_json::json!("b"));
-        let (sql, params) =
-            build_insert_sql("s", "t", &["id".into(), "x".into()], &[&r1, &r2]);
-        assert!(
-            sql.contains("VALUES ($1,$2),($3,$4)"),
-            "got: {sql}"
-        );
+        let (sql, params) = build_insert_sql("s", "t", &["id".into(), "x".into()], &[&r1, &r2]);
+        assert!(sql.contains("VALUES ($1,$2),($3,$4)"), "got: {sql}");
         assert_eq!(
             params,
             vec![
@@ -1100,12 +1629,508 @@ mod tests {
             old_value: serde_json::json!("old"),
             new_value: serde_json::json!("new"),
         }];
-        let statements = build_update_sql_from_changes(
-            "s",
-            "t",
-            &["id".into(), "tenant".into()],
-            &changes,
-        );
+        let statements =
+            build_update_sql_from_changes("s", "t", &["id".into(), "tenant".into()], &changes);
         assert!(statements.is_empty());
+    }
+
+    // --- write_output_tables (integration, real Postgres) ---
+
+    fn full_perms(schemas: &[&str]) -> SqlPermissions {
+        SqlPermissions::from_config(Some(&json!({
+            "preset": "full",
+            "allowed_schemas": schemas,
+        })))
+        .unwrap()
+    }
+
+    async fn test_pool() -> sqlx::PgPool {
+        let url = std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set");
+        sqlx::postgres::PgPoolOptions::new()
+            .connect(&url)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL — run with `cargo test -- --ignored`"]
+    async fn append_autocreates_and_inserts() {
+        let pool = test_pool().await;
+        sqlx::query("DROP TABLE IF EXISTS drp_test.people")
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("CREATE SCHEMA IF NOT EXISTS drp_test")
+            .execute(&pool)
+            .await
+            .ok();
+        let specs = parse_output_tables(&json!({
+            "drp_test.people": [{"id":1,"name":"Ana"},{"id":2,"name":"Bo"}]
+        }))
+        .unwrap();
+        let perms = full_perms(&["drp_test"]);
+        let out = write_output_tables(
+            &pool,
+            specs,
+            &["drp_test".into()],
+            &perms,
+            None,
+            &Default::default(),
+        )
+        .await;
+        assert_eq!(out["wrote_tables"][0]["created"], true, "got: {out}");
+        assert_eq!(out["wrote_tables"][0]["rows_affected"], 2, "got: {out}");
+        let n: i64 = sqlx::query_scalar("SELECT count(*) FROM drp_test.people")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(n, 2);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL — run with `cargo test -- --ignored`"]
+    async fn append_into_existing_table_does_not_recreate() {
+        let pool = test_pool().await;
+        sqlx::query("DROP TABLE IF EXISTS drp_test.append2")
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("CREATE SCHEMA IF NOT EXISTS drp_test")
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("CREATE TABLE drp_test.append2 (id BIGINT, name TEXT)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let specs = parse_output_tables(&json!({
+            "drp_test.append2": [{"id":1,"name":"Ana"}]
+        }))
+        .unwrap();
+        let perms = full_perms(&["drp_test"]);
+        let out = write_output_tables(
+            &pool,
+            specs,
+            &["drp_test".into()],
+            &perms,
+            None,
+            &Default::default(),
+        )
+        .await;
+        assert_eq!(out["wrote_tables"][0]["created"], false, "got: {out}");
+        assert_eq!(out["wrote_tables"][0]["rows_affected"], 1, "got: {out}");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL — run with `cargo test -- --ignored`"]
+    async fn upsert_updates_existing_and_inserts_new() {
+        let pool = test_pool().await;
+        sqlx::query("DROP TABLE IF EXISTS drp_test.upsert_t")
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("CREATE SCHEMA IF NOT EXISTS drp_test")
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("CREATE TABLE drp_test.upsert_t (id BIGINT PRIMARY KEY, name TEXT)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO drp_test.upsert_t (id, name) VALUES (1, 'Old')")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let specs = parse_output_tables(&json!({
+            "drp_test.upsert_t": {"mode":"upsert","df":[{"id":1,"name":"New"},{"id":2,"name":"Bo"}],"key":"id"}
+        }))
+        .unwrap();
+        let perms = full_perms(&["drp_test"]);
+        let out = write_output_tables(
+            &pool,
+            specs,
+            &["drp_test".into()],
+            &perms,
+            None,
+            &Default::default(),
+        )
+        .await;
+        assert_eq!(out["wrote_tables"][0]["rows_affected"], 2, "got: {out}");
+
+        let name: String = sqlx::query_scalar("SELECT name FROM drp_test.upsert_t WHERE id = 1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(name, "New");
+        let n: i64 = sqlx::query_scalar("SELECT count(*) FROM drp_test.upsert_t")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(n, 2);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL — run with `cargo test -- --ignored`"]
+    async fn upsert_without_unique_constraint_reports_key_not_unique() {
+        let pool = test_pool().await;
+        sqlx::query("DROP TABLE IF EXISTS drp_test.no_unique")
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("CREATE SCHEMA IF NOT EXISTS drp_test")
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("CREATE TABLE drp_test.no_unique (id BIGINT, name TEXT)")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let specs = parse_output_tables(&json!({
+            "drp_test.no_unique": {"mode":"upsert","df":[{"id":1,"name":"A"}],"key":"id"}
+        }))
+        .unwrap();
+        let perms = full_perms(&["drp_test"]);
+        let out = write_output_tables(
+            &pool,
+            specs,
+            &["drp_test".into()],
+            &perms,
+            None,
+            &Default::default(),
+        )
+        .await;
+        assert_eq!(out["error"], "UpsertKeyNotUnique", "got: {out}");
+
+        let n: i64 = sqlx::query_scalar("SELECT count(*) FROM drp_test.no_unique")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(n, 0, "failed upsert must roll back — no partial writes");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL — run with `cargo test -- --ignored`"]
+    async fn replace_deletes_then_inserts() {
+        let pool = test_pool().await;
+        sqlx::query("DROP TABLE IF EXISTS drp_test.replace_t")
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("CREATE SCHEMA IF NOT EXISTS drp_test")
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("CREATE TABLE drp_test.replace_t (id BIGINT, name TEXT)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO drp_test.replace_t (id, name) VALUES (99, 'Stale')")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let specs = parse_output_tables(&json!({
+            "drp_test.replace_t": {"mode":"replace","df":[{"id":1,"name":"Ana"}]}
+        }))
+        .unwrap();
+        let perms = full_perms(&["drp_test"]);
+        let out = write_output_tables(
+            &pool,
+            specs,
+            &["drp_test".into()],
+            &perms,
+            None,
+            &Default::default(),
+        )
+        .await;
+        assert_eq!(out["wrote_tables"][0]["rows_affected"], 1, "got: {out}");
+
+        let n: i64 = sqlx::query_scalar("SELECT count(*) FROM drp_test.replace_t")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(n, 1);
+        let name: String = sqlx::query_scalar("SELECT name FROM drp_test.replace_t")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(name, "Ana");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL — run with `cargo test -- --ignored`"]
+    async fn update_full_record_fallback_without_snapshot() {
+        let pool = test_pool().await;
+        sqlx::query("DROP TABLE IF EXISTS drp_test.update_fallback")
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("CREATE SCHEMA IF NOT EXISTS drp_test")
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("CREATE TABLE drp_test.update_fallback (id BIGINT PRIMARY KEY, name TEXT)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO drp_test.update_fallback (id, name) VALUES (1, 'Old')")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let specs = parse_output_tables(&json!({
+            "drp_test.update_fallback": {"mode":"update","df":[{"id":1,"name":"New"}],"key":"id"}
+        }))
+        .unwrap();
+        let perms = full_perms(&["drp_test"]);
+        let out = write_output_tables(
+            &pool,
+            specs,
+            &["drp_test".into()],
+            &perms,
+            None,
+            &Default::default(),
+        )
+        .await;
+        assert_eq!(out["wrote_tables"][0]["rows_affected"], 1, "got: {out}");
+        assert!(out["wrote_tables"][0].get("changes").is_none());
+
+        let name: String =
+            sqlx::query_scalar("SELECT name FROM drp_test.update_fallback WHERE id = 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(name, "New");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL — run with `cargo test -- --ignored`"]
+    async fn update_diff_driven_with_snapshot_skips_unchanged() {
+        let pool = test_pool().await;
+        sqlx::query("DROP TABLE IF EXISTS drp_test.update_diff")
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("CREATE SCHEMA IF NOT EXISTS drp_test")
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("CREATE TABLE drp_test.update_diff (id BIGINT PRIMARY KEY, name TEXT)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO drp_test.update_diff (id, name) VALUES (1, 'Old'), (2, 'Same')")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let specs = parse_output_tables(&json!({
+            "drp_test.update_diff": {"mode":"update","df":[{"id":1,"name":"New"},{"id":2,"name":"Same"}],"key":"id"}
+        }))
+        .unwrap();
+        let perms = full_perms(&["drp_test"]);
+
+        let mut snapshots: HashMap<String, Vec<Map<String, Value>>> = HashMap::new();
+        let mut r1 = Map::new();
+        r1.insert("id".into(), json!(1));
+        r1.insert("name".into(), json!("Old"));
+        let mut r2 = Map::new();
+        r2.insert("id".into(), json!(2));
+        r2.insert("name".into(), json!("Same"));
+        snapshots.insert("drp_test.update_diff".to_string(), vec![r1, r2]);
+
+        let out =
+            write_output_tables(&pool, specs, &["drp_test".into()], &perms, None, &snapshots).await;
+        assert_eq!(out["wrote_tables"][0]["rows_affected"], 1, "got: {out}");
+        assert_eq!(out["wrote_tables"][0]["changes"]["rows"], 1, "got: {out}");
+        assert_eq!(out["wrote_tables"][0]["changes"]["cells"], 1, "got: {out}");
+
+        let name: String = sqlx::query_scalar("SELECT name FROM drp_test.update_diff WHERE id = 1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(name, "New");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL — run with `cargo test -- --ignored`"]
+    async fn update_diff_driven_zero_changes_writes_nothing() {
+        let pool = test_pool().await;
+        sqlx::query("DROP TABLE IF EXISTS drp_test.update_nochange")
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("CREATE SCHEMA IF NOT EXISTS drp_test")
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("CREATE TABLE drp_test.update_nochange (id BIGINT PRIMARY KEY, name TEXT)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO drp_test.update_nochange (id, name) VALUES (1, 'Same')")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let specs = parse_output_tables(&json!({
+            "drp_test.update_nochange": {"mode":"update","df":[{"id":1,"name":"Same"}],"key":"id"}
+        }))
+        .unwrap();
+        let perms = full_perms(&["drp_test"]);
+
+        let mut snapshots: HashMap<String, Vec<Map<String, Value>>> = HashMap::new();
+        let mut r1 = Map::new();
+        r1.insert("id".into(), json!(1));
+        r1.insert("name".into(), json!("Same"));
+        snapshots.insert("drp_test.update_nochange".to_string(), vec![r1]);
+
+        let out =
+            write_output_tables(&pool, specs, &["drp_test".into()], &perms, None, &snapshots).await;
+        assert_eq!(out["wrote_tables"][0]["rows_affected"], 0, "got: {out}");
+        assert_eq!(out["wrote_tables"][0]["changes"]["cells"], 0, "got: {out}");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL — run with `cargo test -- --ignored`"]
+    async fn composite_key_update_falls_back_to_full_record() {
+        let pool = test_pool().await;
+        sqlx::query("DROP TABLE IF EXISTS drp_test.composite_update")
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("CREATE SCHEMA IF NOT EXISTS drp_test")
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query(
+            "CREATE TABLE drp_test.composite_update (tenant TEXT, id BIGINT, name TEXT, \
+             PRIMARY KEY (tenant, id))",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO drp_test.composite_update (tenant, id, name) VALUES ('a', 1, 'Old')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let specs = parse_output_tables(&json!({
+            "drp_test.composite_update": {
+                "mode":"update",
+                "df":[{"tenant":"a","id":1,"name":"New"}],
+                "key":["tenant","id"]
+            }
+        }))
+        .unwrap();
+        let perms = full_perms(&["drp_test"]);
+        let out = write_output_tables(
+            &pool,
+            specs,
+            &["drp_test".into()],
+            &perms,
+            None,
+            &Default::default(),
+        )
+        .await;
+        assert_eq!(out["wrote_tables"][0]["rows_affected"], 1, "got: {out}");
+
+        let name: String = sqlx::query_scalar(
+            "SELECT name FROM drp_test.composite_update WHERE tenant = 'a' AND id = 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(name, "New");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL — run with `cargo test -- --ignored`"]
+    async fn validation_failure_rolls_back_whole_batch() {
+        let pool = test_pool().await;
+        sqlx::query("DROP TABLE IF EXISTS drp_test.batch_ok")
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("CREATE SCHEMA IF NOT EXISTS drp_test")
+            .execute(&pool)
+            .await
+            .ok();
+
+        // Two specs: the first would succeed (auto-create + insert), the
+        // second is an Update on a table that doesn't exist — must fail
+        // validation and roll back the whole transaction, including the
+        // first spec's insert.
+        let mut specs = parse_output_tables(&json!({
+            "drp_test.batch_ok": [{"id":1,"name":"Ana"}]
+        }))
+        .unwrap();
+        let mut bad_specs = parse_output_tables(&json!({
+            "drp_test.batch_missing": {"mode":"update","df":[{"id":1,"name":"X"}],"key":"id"}
+        }))
+        .unwrap();
+        specs.append(&mut bad_specs);
+
+        let perms = full_perms(&["drp_test"]);
+        let out = write_output_tables(
+            &pool,
+            specs,
+            &["drp_test".into()],
+            &perms,
+            None,
+            &Default::default(),
+        )
+        .await;
+        assert_eq!(out["error"], "TableNotFound", "got: {out}");
+
+        let exists: Option<i64> = sqlx::query_scalar(
+            "SELECT count(*) FROM information_schema.tables \
+             WHERE table_schema = 'drp_test' AND table_name = 'batch_ok'",
+        )
+        .fetch_optional(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            exists,
+            Some(0),
+            "batch_ok must NOT have been created — whole transaction rolled back"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL — run with `cargo test -- --ignored`"]
+    async fn tenant_user_id_sets_session_config() {
+        let pool = test_pool().await;
+        sqlx::query("DROP TABLE IF EXISTS drp_test.tenant_t")
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("CREATE SCHEMA IF NOT EXISTS drp_test")
+            .execute(&pool)
+            .await
+            .ok();
+
+        let specs = parse_output_tables(&json!({
+            "drp_test.tenant_t": [{"id":1}]
+        }))
+        .unwrap();
+        let perms = full_perms(&["drp_test"]);
+        let out = write_output_tables(
+            &pool,
+            specs,
+            &["drp_test".into()],
+            &perms,
+            Some("user-123"),
+            &Default::default(),
+        )
+        .await;
+        assert_eq!(out["wrote_tables"][0]["rows_affected"], 1, "got: {out}");
+        // SET LOCAL config is scoped to the committed transaction and not
+        // observable afterward — this test mainly asserts the write
+        // still succeeds end-to-end when tenant_user_id is supplied.
     }
 }
