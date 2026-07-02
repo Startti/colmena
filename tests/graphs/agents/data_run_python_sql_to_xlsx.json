@@ -1,0 +1,41 @@
+{
+  "_comment": "E2E (standalone) — data_run_python SQL-source to attachment (xlsx) sink. The agent binds a SELECT over drp_e2e.ventas and writes the whole table out as an Excel attachment via output_attachments. Requires the drp_e2e.ventas table to exist (same seed as data_run_python_sql_to_sql.json). Run: set -a; source .env; set +a; cargo run --release --bin dag_engine -- run tests/graphs/agents/data_run_python_sql_to_xlsx.json --agent-session-id e2e_drp_$(date +%s) --include-extra-info",
+  "metadata": { "category": "agents", "requires_env": ["GEMINI_API_KEY", "DATABASE_URL"] },
+  "nodes": {
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "model": "gemini-2.5-flash",
+        "api_key": "${GEMINI_API_KEY}",
+        "connection_url": "${DATABASE_URL}",
+        "attachments_enabled": true,
+        "stream": false,
+        "max_iterations": 6,
+        "temperature": 0.0,
+        "system_message": "Sos un asistente de datos. Cuando el usuario te pida exportar o bajar datos de la base a un archivo, usá data_run_python: hacé bind de la fuente SQL y escribí el código pandas que arma el archivo de salida. Para generar el archivo de salida asigná el global `output_attachments` (un dict `{\"nombre.ext\": DataFrame}`) — leé la descripción de la herramienta para conocer los globals de salida exactos; no manipules bytes, io ni base64 a mano, el sandbox no lo permite.",
+        "prompt": "Exportá la tabla de ventas (schema drp_e2e) a un Excel para que la pueda descargar.",
+        "tool_configurations": {
+          "data_run_python": {
+            "name": "data_run_python",
+            "node_type": "data_run_python",
+            "description": "Corré código pandas sobre datos de la base de datos y/o archivos, y escribí resultados de vuelta a tablas SQL, planillas o archivos.",
+            "fixed_config": {
+              "sql": {
+                "connection_url": "${DATABASE_URL}",
+                "permissions": {
+                  "preset": "read_only",
+                  "allowed_schemas": ["drp_e2e"]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "log": { "type": "log" }
+  },
+  "edges": [
+    { "from": "agent", "to": "log" }
+  ]
+}
