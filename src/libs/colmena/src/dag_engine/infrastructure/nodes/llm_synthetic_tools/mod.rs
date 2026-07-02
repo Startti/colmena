@@ -21,6 +21,7 @@ pub mod markdown_to_docs_ops;
 pub mod recall_history;
 pub mod sheet_collision;
 pub mod sql_bulk_tools;
+pub mod tabular_bindings;
 pub mod toolkit_packages;
 
 // ── Shared schema helpers ────────────────────────────────────────────────────
