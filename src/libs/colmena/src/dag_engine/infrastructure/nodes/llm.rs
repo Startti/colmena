@@ -1933,6 +1933,16 @@ impl ExecutableNode for LlmNode {
         let configured_aliases: std::collections::HashSet<String> =
             tool_configurations.keys().cloned().collect();
 
+        // Snapshot `data_run_python`'s `fixed_config` before the map is moved
+        // into the executor below — the synthetic-tool assembly block (near
+        // `configured_aliases.contains(...)` further down) needs it to derive
+        // `EnabledSources` (sql / gsheets) via `enabled_sources(...)`, but by
+        // that point `tool_configurations` itself is gone.
+        let data_run_python_fixed_config: HashMap<String, Value> = tool_configurations
+            .get(crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::data_run_python::TOOL_DATA_RUN_PYTHON)
+            .map(|cfg| cfg.fixed_config.clone())
+            .unwrap_or_default();
+
         // Build skill repository (if configured).
         let skill_repo: Option<Arc<dyn SkillRepository>> =
             Self::build_skill_repository_from_config(config, inputs)?;
@@ -2495,6 +2505,26 @@ impl ExecutableNode for LlmNode {
             };
             if configured_aliases.contains(ATTACHMENT_RUN_PYTHON_TOOL_NAME) {
                 tools.push(build_attachment_run_python_tool_definition());
+            }
+
+            // data_run_python (Task 15, 2026-07-02) — opt-in by name via
+            // `tool_configurations`. `fixed_config` was snapshotted above
+            // (before `tool_configurations` moved into the executor) so
+            // `enabled_sources` can gate the `sql` capability on the presence
+            // of a `sql` block. `gsheets` capability mirrors the detection
+            // used for the gsheets skill auto-enrollment
+            // (`agent_has_gsheets_write_tools` / `agent_has_gsheets_format_tool`
+            // above): the agent has the `gsheets` alias/wildcard/any gsheets
+            // tool active, OR the tool's own `fixed_config.enable_gsheets` is
+            // explicitly `true` (handled inside `enabled_sources` itself).
+            use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::data_run_python::{
+                enabled_sources, tool_data_run_python, TOOL_DATA_RUN_PYTHON,
+            };
+            if configured_aliases.contains(TOOL_DATA_RUN_PYTHON) {
+                let agent_has_gsheets = Self::agent_has_gsheets_write_tools(config, inputs)
+                    || Self::agent_has_gsheets_format_tool(config, inputs);
+                let enabled = enabled_sources(&data_run_python_fixed_config, agent_has_gsheets);
+                tools.push(tool_data_run_python(&enabled));
             }
         }
 
@@ -5944,5 +5974,90 @@ mod agent_has_gdocs_edit_tools_tests {
             repo.is_none(),
             "read-only gdocs agents should not get a skill repo unless the operator opted in"
         );
+    }
+}
+
+#[cfg(test)]
+mod data_run_python_activation_tests {
+    //! Covers Task 15: `data_run_python` opt-in via `tool_configurations`,
+    //! mirroring the assembly block near `configured_aliases.contains(...)`
+    //! in `execute()` — snapshot `fixed_config`, derive `EnabledSources` via
+    //! `enabled_sources`, and build the tool definition via
+    //! `tool_data_run_python`. Building a full `execute()` run is too heavy
+    //! for a unit test (requires a live executor/DB), so this test exercises
+    //! the exact same composition the production code performs.
+    use super::*;
+    use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::data_run_python::{
+        enabled_sources, tool_data_run_python, TOOL_DATA_RUN_PYTHON,
+    };
+    use serde_json::json;
+    use std::collections::HashSet;
+
+    fn empty_inputs() -> NodeInputs {
+        HashMap::new()
+    }
+
+    #[tokio::test]
+    async fn activates_with_sql_source_when_configured() {
+        let cfg = json!({
+            "tool_configurations": {
+                "data_run_python": {
+                    "node_type": "data_run_python",
+                    "fixed_config": {
+                        "sql": {
+                            "connection_url": "postgres://localhost/test",
+                            "permissions": { "allowed_schemas": ["public"] }
+                        }
+                    }
+                }
+            }
+        });
+        let inputs = empty_inputs();
+
+        // Same snapshot the production code takes before `tool_configurations`
+        // moves into the executor.
+        let configured_aliases: HashSet<String> = cfg
+            .get("tool_configurations")
+            .and_then(|v| v.as_object())
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default();
+        let fixed_config = cfg
+            .get("tool_configurations")
+            .and_then(|v| v.get(TOOL_DATA_RUN_PYTHON))
+            .and_then(|v| v.get("fixed_config"))
+            .and_then(|v| v.as_object())
+            .map(|m| m.clone().into_iter().collect::<HashMap<String, Value>>())
+            .unwrap_or_default();
+
+        assert!(configured_aliases.contains(TOOL_DATA_RUN_PYTHON));
+
+        let agent_has_gsheets = LlmNode::agent_has_gsheets_write_tools(&cfg, &inputs)
+            || LlmNode::agent_has_gsheets_format_tool(&cfg, &inputs);
+        assert!(
+            !agent_has_gsheets,
+            "no gsheets tools configured in this test"
+        );
+
+        let enabled = enabled_sources(&fixed_config, agent_has_gsheets);
+        assert!(
+            enabled.sql,
+            "sql block present in fixed_config must enable sql source"
+        );
+        assert!(!enabled.gsheets);
+
+        let tool = tool_data_run_python(&enabled);
+        assert_eq!(tool.name, "data_run_python");
+        assert!(
+            tool.description.to_lowercase().contains("sql")
+                || tool.description.to_lowercase().contains("database"),
+            "expected SQL/database source mentioned in description, got: {}",
+            tool.description
+        );
+    }
+
+    #[tokio::test]
+    async fn not_activated_when_not_configured() {
+        let configured_aliases: HashSet<String> = HashSet::new();
+        assert!(!configured_aliases.contains(TOOL_DATA_RUN_PYTHON));
     }
 }

@@ -1,0 +1,43 @@
+{
+  "_comment": "E2E (needs a real Google Sheet + Google creds) — data_run_python canonical case C: gsheets source + SQL source merged in pandas, upserted to SQL via output_tables AND the sheet updated in place via output_sheets. Replace <YOUR_SPREADSHEET_ID> with a real writable spreadsheet id that has a 'Pipeline' tab with columns opp_id,stage,synced. Requires drp_e2e.oportunidades(opp_id,stage) to pre-exist. Per docs/developer_guide/43_sheets_local_vs_gsheets.md: inject Google OAuth/SA creds via Secret Manager (do NOT commit), unset COLMENA_LOCAL. Run: set -a; source .env; set +a; cargo run --release --bin dag_engine -- run tests/graphs/agents/data_run_python_sheet_sync.json --agent-session-id e2e_drp_$(date +%s) --include-extra-info",
+  "metadata": { "category": "agents", "requires_env": ["GEMINI_API_KEY", "DATABASE_URL", "COLMENA_GOOGLE_OAUTH_CLIENT_ID", "COLMENA_GOOGLE_OAUTH_CLIENT_SECRET", "COLMENA_GOOGLE_OAUTH_REFRESH_TOKEN", "COLMENA_GOOGLE_SHARE_EMAIL"] },
+  "nodes": {
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "model": "gemini-2.5-flash",
+        "api_key": "${GEMINI_API_KEY}",
+        "connection_url": "${DATABASE_URL}",
+        "stream": false,
+        "max_iterations": 8,
+        "temperature": 0.0,
+        "system_message": "Sos un asistente de datos. El usuario quiere mantener sincronizado un Google Sheet de su equipo contra una tabla de la base. Usá data_run_python: hacé bind de la hoja (spreadsheet_id + sheet) y de la tabla vía SELECT, cruzalos en pandas, y escribí tanto output_tables (upsert en la base) como output_sheets (marcar sincronizado en la hoja) en la misma llamada.",
+        "prompt": "Sincronizá el Google Sheet 'Pipeline' del equipo (spreadsheet_id: <YOUR_SPREADSHEET_ID>) con la tabla drp_e2e.oportunidades: lo que esté en la hoja y no en la base, cargalo, y marcá en la hoja cuáles quedaron sincronizadas.",
+        "tool_configurations": {
+          "data_run_python": {
+            "name": "data_run_python",
+            "node_type": "data_run_python",
+            "description": "Corré código pandas sobre datos de un Google Sheet y/o la base de datos, y escribí resultados de vuelta a la base y/o al sheet.",
+            "fixed_config": {
+              "enable_gsheets": true,
+              "sql": {
+                "connection_url": "${DATABASE_URL}",
+                "permissions": {
+                  "preset": "full",
+                  "allowed_schemas": ["drp_e2e"]
+                },
+                "on_missing_table": "fail",
+                "on_existing_table": "append"
+              }
+            }
+          }
+        }
+      }
+    },
+    "log": { "type": "log" }
+  },
+  "edges": [
+    { "from": "agent", "to": "log" }
+  ]
+}

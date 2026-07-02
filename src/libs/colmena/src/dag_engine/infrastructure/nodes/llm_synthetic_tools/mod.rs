@@ -1,11 +1,13 @@
 //! Synthetic tools for the LLM node — tools that don't map to DAG nodes.
 
 pub mod attachment_run_python;
+pub mod attachment_writer;
 pub mod crdt_doc_context;
 pub mod crdt_doc_import_sheet;
 pub mod crdt_doc_run_python;
 pub mod crdt_doc_tools;
 pub mod crdt_summary;
+pub mod data_run_python;
 pub mod describe_tool;
 pub mod diff_writer;
 pub mod document_tools;
@@ -20,7 +22,10 @@ pub mod load_skill_tool;
 pub mod markdown_to_docs_ops;
 pub mod recall_history;
 pub mod sheet_collision;
+pub mod sheet_writer;
 pub mod sql_bulk_tools;
+pub mod table_writer;
+pub mod tabular_bindings;
 pub mod toolkit_packages;
 
 // ── Shared schema helpers ────────────────────────────────────────────────────
@@ -541,6 +546,14 @@ mod text_coverage_tests {
 
         // attachment_run_python — 1 tool (post item 13, 2026-06-10)
         tools.push(super::attachment_run_python::build_attachment_run_python_tool_definition());
+
+        // data_run_python — 1 tool (both sources enabled for coverage)
+        tools.push(super::data_run_python::tool_data_run_python(
+            &super::data_run_python::EnabledSources {
+                sql: true,
+                gsheets: true,
+            },
+        ));
 
         tools
     }

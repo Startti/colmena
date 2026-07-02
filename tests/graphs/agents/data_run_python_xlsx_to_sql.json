@@ -1,0 +1,53 @@
+{
+  "_comment": "E2E (needs an uploaded attachment) — data_run_python canonical case A: attachment source (xlsx) + SQL source (current table) merged in pandas, upserted back via output_tables. Requires drp_e2e.productos to pre-exist (id/sku/precio/stock) AND the attachment file at tests/fixtures/precios_actualizados.xlsx to exist locally (create it before running, e.g. with the xlsx skill or a throwaway pandas script) with columns sku,precio,stock. Run: set -a; source .env; set +a; cargo run --release --bin dag_engine -- run tests/graphs/agents/data_run_python_xlsx_to_sql.json --agent-session-id e2e_drp_$(date +%s) --include-extra-info",
+  "metadata": { "category": "agents", "requires_env": ["GEMINI_API_KEY", "DATABASE_URL"] },
+  "nodes": {
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "model": "gemini-2.5-flash",
+        "api_key": "${GEMINI_API_KEY}",
+        "connection_url": "${DATABASE_URL}",
+        "attachments_enabled": true,
+        "summary_enabled": true,
+        "stream": false,
+        "max_iterations": 8,
+        "temperature": 0.0,
+        "system_message": "Sos un asistente de datos. El usuario te va a pedir que impactes en la base un archivo que subió. Usá data_run_python: hacé bind del archivo adjunto (attachment_id, lo ves en el catálogo de adjuntos) y de la tabla actual con una query SELECT, comparalos en pandas y escribí solo lo que cambió con output_tables en modo upsert.",
+        "prompt": "Acá está la lista de precios actualizada (el Excel que subí). Impactala en la base, tabla drp_e2e.productos, actualizando precio y stock por sku.",
+        "files": [
+          {
+            "id": "precios_xlsx",
+            "label": "Precios actualizados",
+            "path": "tests/fixtures/precios_actualizados.xlsx",
+            "mime_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "filename": "precios_actualizados.xlsx"
+          }
+        ],
+        "tool_configurations": {
+          "data_run_python": {
+            "name": "data_run_python",
+            "node_type": "data_run_python",
+            "description": "Corré código pandas sobre datos de un archivo adjunto y/o la base de datos, y escribí resultados de vuelta a tablas SQL.",
+            "fixed_config": {
+              "sql": {
+                "connection_url": "${DATABASE_URL}",
+                "permissions": {
+                  "preset": "full",
+                  "allowed_schemas": ["drp_e2e"]
+                },
+                "on_missing_table": "fail",
+                "on_existing_table": "append"
+              }
+            }
+          }
+        }
+      }
+    },
+    "log": { "type": "log" }
+  },
+  "edges": [
+    { "from": "agent", "to": "log" }
+  ]
+}
