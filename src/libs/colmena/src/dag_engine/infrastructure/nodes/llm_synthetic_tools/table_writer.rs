@@ -375,6 +375,7 @@ pub fn validate_write_spec(
                     "error": "ColumnMismatch",
                     "table": spec.table,
                     "df_only": df_only,
+                    "table_columns": tc,
                     "message": "input records contain columns not present in the existing table",
                 }));
             }
