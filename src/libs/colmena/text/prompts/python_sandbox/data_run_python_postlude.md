@@ -4,6 +4,40 @@
 # === colmena auto-postlude ===
 __col_user_output = output if 'output' in dir() else None
 
+# Coerce a user `output` into a JSON-safe Python value BEFORE the Rust side
+# runs depythonize (which cannot convert pandas/numpy types). Mirrors the
+# auto-conversions promised in the tool description: DataFrame →
+# to_dict('records'), Series → list, numpy scalar → .item(), numpy array →
+# list. Recurses into dicts/lists/tuples so nested numpy values (e.g.
+# `output = {"count": df['n'].sum()}`) are coerced too. Uses explicit
+# isinstance on the real pandas/numpy types (not `hasattr('to_dict')`) so a
+# Series maps to a flat list and unrelated objects with a `to_dict` method
+# are not hijacked. Anything else passes through untouched.
+def __col_json_safe(v):
+    if v is None:
+        return None
+    try:
+        import pandas as _pd
+        if isinstance(v, _pd.DataFrame):
+            return __col_json_safe(v.to_dict('records'))
+        if isinstance(v, _pd.Series):
+            return __col_json_safe(v.tolist())
+    except Exception:
+        pass
+    try:
+        import numpy as _np
+        if isinstance(v, _np.generic):
+            return v.item()
+        if isinstance(v, _np.ndarray):
+            return __col_json_safe(v.tolist())
+    except Exception:
+        pass
+    if isinstance(v, dict):
+        return {k: __col_json_safe(_x) for k, _x in v.items()}
+    if isinstance(v, (list, tuple)):
+        return [__col_json_safe(_x) for _x in v]
+    return v
+
 __col_output_sheets = None
 if 'output_sheets' in dir() and output_sheets is not None:
     import pandas as _pd
@@ -116,7 +150,7 @@ if 'output_attachments' in dir() and output_attachments is not None:
                 __col_output_attachments[str(k)] = entry
 
 output = {
-    'user_output': __col_user_output,
+    'user_output': __col_json_safe(__col_user_output),
     'output_sheets': __col_output_sheets,
     'output_tables': __col_output_tables,
     'output_attachments': __col_output_attachments,
