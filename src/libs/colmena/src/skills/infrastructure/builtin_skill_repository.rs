@@ -398,7 +398,11 @@ mod tests {
                 .load_reference("data-run-python-recipes", expected)
                 .await
                 .unwrap();
-            assert!(!reference.body.is_empty(), "{} body must not be empty", expected);
+            assert!(
+                !reference.body.is_empty(),
+                "{} body must not be empty",
+                expected
+            );
         }
     }
 
