@@ -1,0 +1,53 @@
+{
+  "_comment": "E2E — data_run_python Excel-attachment + SQL cross → upsert (the star case). Agent binds the uploaded xlsx (precios_actualizados.xlsx: sku,precio,stock) AND the current table drp_e2e.productos via SELECT, compares in pandas, and upserts only the changed rows back via output_tables mode upsert (key sku). Fixture: tests/fixtures/precios_actualizados.xlsx. Seed drp_e2e.productos first. Run: set -a; source .env; set +a; cargo run --release --bin dag_engine -- run tests/graphs/agents/data_run_python_excel_to_sql.json --agent-session-id e2e_drp_$(date +%s) --include-extra-info",
+  "metadata": { "category": "agents", "requires_env": ["GEMINI_API_KEY", "DATABASE_URL"] },
+  "nodes": {
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "model": "gemini-2.5-flash",
+        "api_key": "${GEMINI_API_KEY}",
+        "connection_url": "${DATABASE_URL}",
+        "attachments_enabled": true,
+        "summary_enabled": true,
+        "stream": false,
+        "max_iterations": 8,
+        "temperature": 0.0,
+        "system_message": "Sos un asistente de datos. El usuario sube archivos y te pide impactarlos en la base. Usá data_run_python: hacé bind del archivo adjunto (attachment_id, del catálogo de adjuntos) y de la tabla actual con una query SELECT, comparalos en pandas, y escribí de vuelta con el global `output_tables`. Para actualizar filas existentes por una clave única (evitando errores de duplicado), asigná EXACTAMENTE esta forma: `output_tables = {\"schema.tabla\": {\"mode\": \"upsert\", \"df\": <DataFrame que incluye la columna key y las columnas a actualizar>, \"key\": \"<columna_clave>\"}}`. El `df` debe ser un DataFrame de pandas. No uses modo append para filas que ya existen. No inventes otros nombres de globals ni de argumentos.",
+        "prompt": "Acá está la lista de precios actualizada (el Excel que subí). Actualizá precio y stock por sku en la tabla drp_e2e.productos.",
+        "files": [
+          {
+            "id": "precios_xlsx",
+            "label": "Precios actualizados",
+            "path": "tests/fixtures/precios_actualizados.xlsx",
+            "mime_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "filename": "precios_actualizados.xlsx"
+          }
+        ],
+        "tool_configurations": {
+          "data_run_python": {
+            "name": "data_run_python",
+            "node_type": "data_run_python",
+            "description": "Corré código pandas sobre datos de un archivo adjunto y/o la base de datos, y escribí resultados de vuelta a tablas SQL, planillas o archivos.",
+            "fixed_config": {
+              "sql": {
+                "connection_url": "${DATABASE_URL}",
+                "permissions": {
+                  "preset": "full",
+                  "allowed_schemas": ["drp_e2e"]
+                },
+                "on_missing_table": "fail",
+                "on_existing_table": "fail"
+              }
+            }
+          }
+        }
+      }
+    },
+    "log": { "type": "log" }
+  },
+  "edges": [
+    { "from": "agent", "to": "log" }
+  ]
+}
