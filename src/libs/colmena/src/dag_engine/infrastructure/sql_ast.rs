@@ -258,12 +258,39 @@ fn find_matching_paren(input: &str, open: usize) -> Option<usize> {
     None
 }
 
+/// Inspect a `Query`'s body: return the mutation `SqlOperation` when the body is
+/// a data-modifying form (a CTE-wrapped `DELETE`/`UPDATE`/`INSERT`, which
+/// sqlparser 0.62 nests inside `SetExpr`), or `None` for a genuine read query
+/// (`SELECT`, set-operation, `VALUES`, `TABLE t`, or a nested read subquery).
+///
+/// This is what closes the "SELECT-only preset runs a CTE-wrapped mutation" hole.
+fn query_body_operation(q: &Query) -> Option<SqlOperation> {
+    fn walk(body: &SetExpr) -> Option<SqlOperation> {
+        match body {
+            SetExpr::Insert(_) => Some(SqlOperation::Insert),
+            SetExpr::Update(_) => Some(SqlOperation::Update),
+            SetExpr::Delete(_) => Some(SqlOperation::Delete),
+            // A parenthesised subquery body — recurse (defends against
+            // `WITH x AS (...) (DELETE ...)`-style nesting).
+            SetExpr::Query(inner) => walk(&inner.body),
+            // Genuine reads: SELECT, VALUES, TABLE, and set operations.
+            _ => None,
+        }
+    }
+    walk(&q.body)
+}
+
 /// Map a parsed statement to its `SqlOperation`, or `None` for statement kinds
 /// we intentionally do not support (CREATE SCHEMA/INDEX/VIEW, GRANT, REVOKE,
 /// COMMENT-only, etc.). The validator turns `None` into a precise block reason.
 pub fn classify(stmt: &Statement) -> Option<SqlOperation> {
     match stmt {
-        Statement::Query(_) => Some(SqlOperation::Select),
+        // sqlparser 0.62 parses CTE-wrapped mutations
+        // (`WITH x AS (...) DELETE/UPDATE/INSERT ...`) as a single
+        // `Statement::Query` whose *body* is the mutation. Inspect the body so a
+        // SELECT-only preset applies the correct (blocking) permission instead of
+        // waving it through as a read.
+        Statement::Query(q) => Some(query_body_operation(q).unwrap_or(SqlOperation::Select)),
         Statement::Insert(_) => Some(SqlOperation::Insert),
         Statement::Update(_) => Some(SqlOperation::Update),
         Statement::Delete(_) => Some(SqlOperation::Delete),
@@ -402,9 +429,15 @@ pub fn created_function_name(stmt: &Statement) -> Option<String> {
     None
 }
 
-/// True if the statement is a `SELECT` or a `WITH ... SELECT` (CTE).
+/// True only for a *genuine read* query: a `SELECT`, `WITH ... SELECT` (CTE),
+/// set-operation, `VALUES`, or `TABLE t`. A CTE-wrapped mutation
+/// (`WITH x AS (...) DELETE/UPDATE/INSERT ...`) parses as `Statement::Query` in
+/// sqlparser 0.62 but is NOT a read, so this returns `false` for it.
 pub fn is_query(stmt: &Statement) -> bool {
-    matches!(stmt, Statement::Query(_))
+    match stmt {
+        Statement::Query(q) => query_body_operation(q).is_none(),
+        _ => false,
+    }
 }
 
 /// True if the top-level query already has an explicit `LIMIT` clause.
@@ -675,6 +708,66 @@ mod tests {
         let stmts = parse("SELECT 1").unwrap();
         assert!(is_query(&stmts[0]));
         let stmts = parse("INSERT INTO s.t (a) VALUES (1)").unwrap();
+        assert!(!is_query(&stmts[0]));
+    }
+
+    // --- Security regression: CTE-wrapped mutations must NOT classify as reads. ---
+    // sqlparser 0.62 parses `WITH x AS (...) DELETE/UPDATE/INSERT ...` as a single
+    // `Statement::Query` whose body is the mutation. Before the fix, both
+    // `classify` and `is_query` treated any `Statement::Query` as a SELECT, letting
+    // a read-only/SELECT-only caller run a data-modifying CTE.
+
+    #[test]
+    fn classify_cte_wrapped_delete_is_delete_not_select() {
+        let stmts =
+            parse("WITH x AS (SELECT 1) DELETE FROM t WHERE id IN (SELECT id FROM x)").unwrap();
+        assert_eq!(classify(&stmts[0]), Some(SqlOperation::Delete));
+        assert_ne!(classify(&stmts[0]), Some(SqlOperation::Select));
+        assert!(!is_query(&stmts[0]));
+    }
+
+    #[test]
+    fn classify_cte_wrapped_update_is_update_not_select() {
+        let stmts =
+            parse("WITH x AS (SELECT 1) UPDATE t SET a=1 WHERE id IN (SELECT id FROM x)").unwrap();
+        assert_eq!(classify(&stmts[0]), Some(SqlOperation::Update));
+        assert_ne!(classify(&stmts[0]), Some(SqlOperation::Select));
+        assert!(!is_query(&stmts[0]));
+    }
+
+    #[test]
+    fn classify_cte_wrapped_insert_is_insert_not_select() {
+        let stmts = parse("WITH x AS (SELECT 1) INSERT INTO t SELECT * FROM x").unwrap();
+        assert_eq!(classify(&stmts[0]), Some(SqlOperation::Insert));
+        assert_ne!(classify(&stmts[0]), Some(SqlOperation::Select));
+        assert!(!is_query(&stmts[0]));
+    }
+
+    #[test]
+    fn classify_legit_cte_select_stays_select() {
+        // Legitimate CTE read must still classify as Select / be a query.
+        let stmts = parse("WITH x AS (SELECT 1) SELECT * FROM x").unwrap();
+        assert_eq!(classify(&stmts[0]), Some(SqlOperation::Select));
+        assert!(is_query(&stmts[0]));
+    }
+
+    #[test]
+    fn classify_set_operation_and_values_stay_select() {
+        let stmts = parse("SELECT 1 UNION SELECT 2").unwrap();
+        assert_eq!(classify(&stmts[0]), Some(SqlOperation::Select));
+        assert!(is_query(&stmts[0]));
+        let stmts = parse("VALUES (1), (2)").unwrap();
+        assert_eq!(classify(&stmts[0]), Some(SqlOperation::Select));
+        assert!(is_query(&stmts[0]));
+    }
+
+    #[test]
+    fn classify_plain_select_and_delete_unchanged() {
+        let stmts = parse("SELECT * FROM t").unwrap();
+        assert_eq!(classify(&stmts[0]), Some(SqlOperation::Select));
+        assert!(is_query(&stmts[0]));
+        let stmts = parse("DELETE FROM t WHERE id=1").unwrap();
+        assert_eq!(classify(&stmts[0]), Some(SqlOperation::Delete));
         assert!(!is_query(&stmts[0]));
     }
 

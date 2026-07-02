@@ -673,6 +673,82 @@ mod tests {
 
     // ── resolve_bindings ────────────────────────────────────────────
 
+    /// Adapter that panics on every method — proves the SELECT-only gate rejects
+    /// a bad binding BEFORE any DB round-trip (validator + `execute_query` run
+    /// after the `classify == Select` check in `resolve_one`).
+    struct NeverCalledAdapter;
+
+    #[async_trait::async_trait]
+    impl SqlConnectionPort for NeverCalledAdapter {
+        async fn execute_query(
+            &self,
+            _query: &str,
+            _max_rows: u64,
+            _tenant_user_id: Option<&str>,
+        ) -> Result<crate::dag_engine::domain::sql_ports::QueryResult, crate::dag_engine::domain::sql_errors::SqlNodeError>
+        {
+            panic!("execute_query must not run for a rejected SELECT-only binding");
+        }
+        async fn load_table_metadata(
+            &self,
+            _schemas: &[String],
+        ) -> Result<Vec<crate::dag_engine::domain::sql_ports::TableInfo>, crate::dag_engine::domain::sql_errors::SqlNodeError>
+        {
+            unreachable!()
+        }
+        async fn load_table_schemas(
+            &self,
+            _schemas: &[String],
+        ) -> Result<Vec<crate::dag_engine::domain::sql_ports::TableSchema>, crate::dag_engine::domain::sql_errors::SqlNodeError>
+        {
+            unreachable!()
+        }
+        async fn missing_schemas(
+            &self,
+            _schemas: &[String],
+        ) -> Result<Vec<String>, crate::dag_engine::domain::sql_errors::SqlNodeError> {
+            unreachable!()
+        }
+        async fn create_schema(
+            &self,
+            _schema: &str,
+        ) -> Result<(), crate::dag_engine::domain::sql_errors::SqlNodeError> {
+            unreachable!()
+        }
+        async fn execute_setup_sql(
+            &self,
+            _sql: &str,
+        ) -> Result<(), crate::dag_engine::domain::sql_errors::SqlNodeError> {
+            unreachable!()
+        }
+        fn is_connected(&self) -> bool {
+            true
+        }
+    }
+
+    #[tokio::test]
+    async fn sql_binding_rejects_cte_wrapped_delete() {
+        // Security regression: a CTE-wrapped DELETE parses as `Statement::Query`
+        // but must be rejected by the SELECT-only gate with `BindingMustBeSelect`,
+        // never reaching the adapter.
+        let ctx = SqlBindingCtx {
+            adapter: Arc::new(NeverCalledAdapter),
+            permissions: SqlPermissions::from_config(None).unwrap(),
+            allowed_schemas: vec![],
+            tenant: None,
+        };
+        let bindings = vec![b(json!({
+            "var": "rows",
+            "query": "WITH x AS (SELECT 1) DELETE FROM t WHERE id IN (SELECT id FROM x)"
+        }))];
+        let noop: AttachmentFetcher =
+            Box::new(|_id| Box::pin(async { Err("no attach".to_string()) }));
+        let err = resolve_bindings(&bindings, Some(&ctx), None, &noop)
+            .await
+            .expect_err("CTE-wrapped DELETE must be rejected");
+        assert_eq!(err.get("error").and_then(Value::as_str), Some("BindingMustBeSelect"));
+    }
+
     #[tokio::test]
     async fn inline_binding_resolves_to_records() {
         let bindings = vec![b(json!({"var":"t","data":[{"a":1},{"a":2}]}))];
