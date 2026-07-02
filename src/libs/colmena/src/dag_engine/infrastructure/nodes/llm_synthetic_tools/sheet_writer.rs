@@ -22,6 +22,7 @@ use super::sheet_collision::{build_sheet_exists_error, CollisionPolicy, TabMeta}
 /// A1 address. `ambiguous` is set when more than one binding loaded the same
 /// sheet (no single position mapping). `had_range` blocks the mode (a range
 /// subset shifts the header/row mapping).
+#[derive(Debug)]
 pub struct LoadedSnapshot {
     pub records: Vec<serde_json::Map<String, serde_json::Value>>,
     pub had_range: bool,
