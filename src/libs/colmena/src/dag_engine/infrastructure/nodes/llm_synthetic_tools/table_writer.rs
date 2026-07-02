@@ -392,6 +392,137 @@ pub fn validate_write_spec(
     Ok(())
 }
 
+/// Column SQL type inferred from scanning a column's non-null values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InferredType {
+    BigInt,
+    DoublePrecision,
+    Boolean,
+    TimestampTz,
+    Text,
+}
+
+impl InferredType {
+    fn as_sql(self) -> &'static str {
+        match self {
+            InferredType::BigInt => "BIGINT",
+            InferredType::DoublePrecision => "DOUBLE PRECISION",
+            InferredType::Boolean => "BOOLEAN",
+            InferredType::TimestampTz => "TIMESTAMPTZ",
+            InferredType::Text => "TEXT",
+        }
+    }
+}
+
+/// Infer the SQL type for a single column from its non-null values.
+///
+/// All-null (or no values at all) infers `TEXT`. Otherwise the column
+/// must satisfy exactly one of the numeric/bool/timestamp categories
+/// across every non-null value to get anything other than `TEXT`.
+fn infer_column_type<'a>(values: impl Iterator<Item = &'a Value>) -> InferredType {
+    let mut has_value = false;
+    let mut all_int = true;
+    let mut all_numeric = true;
+    let mut has_float = false;
+    let mut all_bool = true;
+    let mut all_timestamp = true;
+
+    for v in values {
+        if v.is_null() {
+            continue;
+        }
+        has_value = true;
+
+        match v {
+            Value::Number(n) => {
+                all_bool = false;
+                all_timestamp = false;
+                if !(n.is_i64() || n.is_u64()) {
+                    all_int = false;
+                    has_float = true;
+                }
+            }
+            Value::Bool(_) => {
+                all_int = false;
+                all_numeric = false;
+                all_timestamp = false;
+            }
+            Value::String(s) => {
+                all_int = false;
+                all_numeric = false;
+                all_bool = false;
+                if chrono::DateTime::parse_from_rfc3339(s).is_err() {
+                    all_timestamp = false;
+                }
+            }
+            Value::Null => unreachable!("null filtered above"),
+            Value::Object(_) | Value::Array(_) => {
+                all_int = false;
+                all_numeric = false;
+                all_bool = false;
+                all_timestamp = false;
+            }
+        }
+    }
+
+    if !has_value {
+        return InferredType::Text;
+    }
+    if all_int && all_numeric {
+        InferredType::BigInt
+    } else if all_numeric && has_float {
+        InferredType::DoublePrecision
+    } else if all_bool {
+        InferredType::Boolean
+    } else if all_timestamp {
+        InferredType::TimestampTz
+    } else {
+        InferredType::Text
+    }
+}
+
+/// Quote a single SQL identifier with double quotes.
+fn quote_ident(ident: &str) -> String {
+    format!("\"{ident}\"")
+}
+
+/// Build a `CREATE TABLE IF NOT EXISTS` statement for an auto-created
+/// `output_tables` sink target, inferring each column's SQL type from the
+/// records' JSON values. Pure function: no I/O, no async, no SQL execution.
+///
+/// Column order follows first-seen order across `records` (see
+/// [`input_columns`]). When `key` is `Some`, a trailing
+/// `UNIQUE ("k1","k2")` clause is appended using those (quoted) columns.
+pub fn infer_create_ddl(
+    schema: &str,
+    table: &str,
+    records: &[Map<String, Value>],
+    key: Option<&[String]>,
+) -> String {
+    let cols = input_columns(records);
+
+    let mut col_defs: Vec<String> = cols
+        .iter()
+        .map(|col| {
+            let values = records.iter().filter_map(|r| r.get(col));
+            let ty = infer_column_type(values);
+            format!("{} {}", quote_ident(col), ty.as_sql())
+        })
+        .collect();
+
+    if let Some(key_cols) = key {
+        let quoted: Vec<String> = key_cols.iter().map(|k| quote_ident(k)).collect();
+        col_defs.push(format!("UNIQUE ({})", quoted.join(",")));
+    }
+
+    format!(
+        "CREATE TABLE IF NOT EXISTS {}.{} ({})",
+        quote_ident(schema),
+        quote_ident(table),
+        col_defs.join(", ")
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -670,5 +801,65 @@ mod tests {
         let p = perms("read_write", &["a"]);
         let ok = validate_write_spec(&spec, &["a".into()], &p, true, Some(&["id".into()]));
         assert!(ok.is_ok());
+    }
+
+    // --- infer_create_ddl ---
+
+    #[test]
+    fn infers_types_and_unique_key() {
+        let recs = vec![serde_json::from_value(
+            serde_json::json!({"id":1,"price":9.5,"active":true,"name":"a"}),
+        )
+        .unwrap()];
+        let ddl = infer_create_ddl("analytics", "t", &recs, Some(&["id".to_string()]));
+        assert!(ddl.contains("\"id\" BIGINT"));
+        assert!(ddl.contains("\"price\" DOUBLE PRECISION"));
+        assert!(ddl.contains("\"active\" BOOLEAN"));
+        assert!(ddl.contains("\"name\" TEXT"));
+        assert!(ddl.contains("UNIQUE (\"id\")"));
+        assert!(ddl.starts_with("CREATE TABLE IF NOT EXISTS \"analytics\".\"t\""));
+    }
+
+    #[test]
+    fn all_null_column_is_text() {
+        let recs = vec![
+            serde_json::from_value(serde_json::json!({"a": null})).unwrap(),
+            serde_json::from_value(serde_json::json!({"a": null})).unwrap(),
+        ];
+        let ddl = infer_create_ddl("s", "t", &recs, None);
+        assert!(ddl.contains("\"a\" TEXT"));
+    }
+
+    #[test]
+    fn iso8601_string_column_is_timestamptz() {
+        let recs = vec![
+            serde_json::from_value(serde_json::json!({"ts": "2026-07-01T12:00:00Z"})).unwrap(),
+        ];
+        let ddl = infer_create_ddl("s", "t", &recs, None);
+        assert!(ddl.contains("\"ts\" TIMESTAMPTZ"));
+    }
+
+    #[test]
+    fn composite_key_produces_multi_column_unique() {
+        let recs = vec![serde_json::from_value(serde_json::json!({"a":1,"b":2})).unwrap()];
+        let ddl = infer_create_ddl("s", "t", &recs, Some(&["a".to_string(), "b".to_string()]));
+        assert!(ddl.contains("UNIQUE (\"a\",\"b\")"));
+    }
+
+    #[test]
+    fn no_key_means_no_unique_clause() {
+        let recs = vec![serde_json::from_value(serde_json::json!({"a":1})).unwrap()];
+        let ddl = infer_create_ddl("s", "t", &recs, None);
+        assert!(!ddl.contains("UNIQUE"));
+    }
+
+    #[test]
+    fn mixed_int_and_float_column_is_double_precision() {
+        let recs = vec![
+            serde_json::from_value(serde_json::json!({"n": 1})).unwrap(),
+            serde_json::from_value(serde_json::json!({"n": 2.5})).unwrap(),
+        ];
+        let ddl = infer_create_ddl("s", "t", &recs, None);
+        assert!(ddl.contains("\"n\" DOUBLE PRECISION"));
     }
 }
