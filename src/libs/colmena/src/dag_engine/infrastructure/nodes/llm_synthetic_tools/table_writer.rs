@@ -890,6 +890,8 @@ pub async fn write_output_tables(
     loaded_snapshots: &HashMap<String, Vec<Map<String, Value>>>,
     on_missing_table: &str,
     on_existing_table: &str,
+    statement_timeout_ms: u64,
+    work_mem_mb: u64,
 ) -> Value {
     // Validate the operator-set policy strings loudly before touching the
     // DB — an unknown value must never silently degrade to a default.
@@ -920,7 +922,7 @@ pub async fn write_output_tables(
         }
     };
 
-    if let Err(e) = sqlx::query("SET LOCAL statement_timeout = '30000ms'")
+    if let Err(e) = sqlx::query(&format!("SET LOCAL statement_timeout = {statement_timeout_ms}"))
         .execute(&mut *tx)
         .await
     {
@@ -930,7 +932,7 @@ pub async fn write_output_tables(
             "message": format!("failed to set statement_timeout: {e}"),
         });
     }
-    if let Err(e) = sqlx::query("SET LOCAL work_mem = '64MB'")
+    if let Err(e) = sqlx::query(&format!("SET LOCAL work_mem = '{work_mem_mb}MB'"))
         .execute(&mut *tx)
         .await
     {
@@ -1874,6 +1876,8 @@ mod tests {
             &Default::default(),
             "create",
             "overwrite",
+            30000,
+            64,
         )
         .await;
         assert_eq!(out["wrote_tables"][0]["created"], true, "got: {out}");
@@ -1883,6 +1887,43 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(n, 2);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL — run with `cargo test -- --ignored`"]
+    async fn custom_runtime_limits_are_applied_to_write() {
+        // Non-default statement_timeout/work_mem must produce valid SQL that
+        // Postgres accepts — proves the operator's runtime_limits are threaded
+        // into the write transaction rather than hardcoded to 30000ms/64MB.
+        let pool = test_pool().await;
+        sqlx::query("DROP TABLE IF EXISTS drp_test.rt_limits")
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("CREATE SCHEMA IF NOT EXISTS drp_test")
+            .execute(&pool)
+            .await
+            .ok();
+        let specs = parse_output_tables(&json!({
+            "drp_test.rt_limits": [{"id":1,"v":"a"}]
+        }))
+        .unwrap();
+        let perms = full_perms(&["drp_test"]);
+        let out = write_output_tables(
+            &pool,
+            specs,
+            &["drp_test".into()],
+            &perms,
+            None,
+            &Default::default(),
+            "create",
+            "overwrite",
+            60000, // non-default statement_timeout_ms
+            128,   // non-default work_mem_mb
+        )
+        .await;
+        assert!(out.get("error").is_none(), "got: {out}");
+        assert_eq!(out["wrote_tables"][0]["rows_affected"], 1, "got: {out}");
     }
 
     #[tokio::test]
@@ -1915,6 +1956,8 @@ mod tests {
             &Default::default(),
             "create",
             "overwrite",
+            30000,
+            64,
         )
         .await;
         assert_eq!(out["wrote_tables"][0]["created"], false, "got: {out}");
@@ -1956,6 +1999,8 @@ mod tests {
             &Default::default(),
             "create",
             "overwrite",
+            30000,
+            64,
         )
         .await;
         assert_eq!(out["wrote_tables"][0]["rows_affected"], 2, "got: {out}");
@@ -2003,6 +2048,8 @@ mod tests {
             &Default::default(),
             "create",
             "overwrite",
+            30000,
+            64,
         )
         .await;
         assert_eq!(out["error"], "UpsertKeyNotUnique", "got: {out}");
@@ -2067,6 +2114,8 @@ mod tests {
             &Default::default(),
             "create",
             "overwrite",
+            30000,
+            64,
         )
         .await;
         assert_ne!(
@@ -2118,6 +2167,8 @@ mod tests {
             &Default::default(),
             "create",
             "overwrite",
+            30000,
+            64,
         )
         .await;
         assert_eq!(out["wrote_tables"][0]["rows_affected"], 1, "got: {out}");
@@ -2169,6 +2220,8 @@ mod tests {
             &Default::default(),
             "create",
             "overwrite",
+            30000,
+            64,
         )
         .await;
         assert_eq!(out["wrote_tables"][0]["rows_affected"], 1, "got: {out}");
@@ -2223,6 +2276,8 @@ mod tests {
             &Default::default(),
             "create",
             "overwrite",
+            30000,
+            64,
         )
         .await;
         assert!(
@@ -2285,6 +2340,8 @@ mod tests {
             &snapshots,
             "create",
             "overwrite",
+            30000,
+            64,
         )
         .await;
         assert_eq!(out["wrote_tables"][0]["rows_affected"], 1, "got: {out}");
@@ -2340,6 +2397,8 @@ mod tests {
             &snapshots,
             "create",
             "overwrite",
+            30000,
+            64,
         )
         .await;
         assert_eq!(out["wrote_tables"][0]["rows_affected"], 0, "got: {out}");
@@ -2390,6 +2449,8 @@ mod tests {
             &Default::default(),
             "create",
             "overwrite",
+            30000,
+            64,
         )
         .await;
         assert_eq!(out["wrote_tables"][0]["rows_affected"], 1, "got: {out}");
@@ -2440,6 +2501,8 @@ mod tests {
             &Default::default(),
             "create",
             "overwrite",
+            30000,
+            64,
         )
         .await;
         assert_eq!(out["error"], "TableNotFound", "got: {out}");
@@ -2485,6 +2548,8 @@ mod tests {
             &Default::default(),
             "create",
             "overwrite",
+            30000,
+            64,
         )
         .await;
         assert_eq!(out["wrote_tables"][0]["rows_affected"], 1, "got: {out}");
@@ -2514,6 +2579,8 @@ mod tests {
             &Default::default(),
             "banana",
             "fail",
+            30000,
+            64,
         )
         .await;
         assert_eq!(out["error"], "InvalidPolicy", "got: {out}");
@@ -2536,6 +2603,8 @@ mod tests {
             &Default::default(),
             "create",
             "zap",
+            30000,
+            64,
         )
         .await;
         assert_eq!(out["error"], "InvalidPolicy", "got: {out}");
@@ -2571,6 +2640,8 @@ mod tests {
             &Default::default(),
             "fail",
             "overwrite",
+            30000,
+            64,
         )
         .await;
         assert_eq!(out["error"], "TableNotFound", "got: {out}");
@@ -2623,6 +2694,8 @@ mod tests {
             &Default::default(),
             "create",
             "fail",
+            30000,
+            64,
         )
         .await;
         assert_eq!(out["error"], "TableExists", "got: {out}");
