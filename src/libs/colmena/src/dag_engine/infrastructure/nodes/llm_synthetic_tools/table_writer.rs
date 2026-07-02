@@ -8,6 +8,7 @@
 //!
 //! See `docs/superpowers/specs/2026-07-01-data-run-python-design.md`.
 
+use super::diff_writer::CellChange;
 use crate::dag_engine::domain::sql_permissions::{SqlOperation, SqlPermissions};
 use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::sql_bulk_tools::validate_table_against_allowlist;
 use crate::gsheets::infrastructure::http_client::rectangle_to_records;
@@ -526,6 +527,129 @@ pub fn infer_create_ddl(
     )
 }
 
+/// Build a parameterized `INSERT` statement for one chunk of rows against
+/// `cols` (column order fixed across all rows). Missing keys in a record
+/// bind SQL `NULL`. Pure function: no I/O, no async, no SQL execution —
+/// values are returned as a flat, placeholder-ordered `Vec<Value>` for a
+/// caller to bind later.
+pub fn build_insert_sql(
+    schema: &str,
+    table: &str,
+    cols: &[String],
+    row_chunk: &[&Map<String, Value>],
+) -> (String, Vec<Value>) {
+    let quoted_cols: Vec<String> = cols.iter().map(|c| quote_ident(c)).collect();
+    let mut params = Vec::with_capacity(cols.len() * row_chunk.len());
+    let mut tuples = Vec::with_capacity(row_chunk.len());
+    let mut n = 0usize;
+    for row in row_chunk {
+        let mut placeholders = Vec::with_capacity(cols.len());
+        for col in cols {
+            n += 1;
+            placeholders.push(format!("${n}"));
+            params.push(row.get(col).cloned().unwrap_or(Value::Null));
+        }
+        tuples.push(format!("({})", placeholders.join(",")));
+    }
+
+    let sql = format!(
+        "INSERT INTO {}.{} ({}) VALUES {}",
+        quote_ident(schema),
+        quote_ident(table),
+        quoted_cols.join(","),
+        tuples.join(",")
+    );
+    (sql, params)
+}
+
+/// Build a parameterized `INSERT ... ON CONFLICT (key) DO UPDATE SET ...`
+/// statement. Every column in `cols` that is not part of `key` gets an
+/// `EXCLUDED`-sourced `DO UPDATE SET` clause. Pure function: no I/O, no
+/// async, no SQL execution.
+pub fn build_upsert_sql(
+    schema: &str,
+    table: &str,
+    cols: &[String],
+    key: &[String],
+    row_chunk: &[&Map<String, Value>],
+) -> (String, Vec<Value>) {
+    let (insert_sql, params) = build_insert_sql(schema, table, cols, row_chunk);
+
+    let quoted_key: Vec<String> = key.iter().map(|k| quote_ident(k)).collect();
+    let set_clauses: Vec<String> = cols
+        .iter()
+        .filter(|c| !key.contains(c))
+        .map(|c| {
+            let q = quote_ident(c);
+            format!("{q}=EXCLUDED.{q}")
+        })
+        .collect();
+
+    let sql = format!(
+        "{} ON CONFLICT ({}) DO UPDATE SET {}",
+        insert_sql,
+        quoted_key.join(","),
+        set_clauses.join(",")
+    );
+    (sql, params)
+}
+
+/// Build parameterized `UPDATE` statements from a flat list of cell-level
+/// [`CellChange`]s, grouped by `key_value`. Each group produces one
+/// `UPDATE "schema"."table" SET "c1"=$1,... WHERE "key0"=$N` statement
+/// (single-key path only — `key_value` binds last).
+///
+/// **Composite-key limitation:** `CellChange` carries a single opaque
+/// `key_value` string, so when `key.len() > 1` there is no way to
+/// reconstruct a correct multi-column `WHERE` clause from the changes
+/// alone. In that case this function returns an empty `Vec` — callers
+/// (the Task 7 executor) must detect this and fall back to a full-record
+/// `UPDATE` built from the original records instead.
+pub fn build_update_sql_from_changes(
+    schema: &str,
+    table: &str,
+    key: &[String],
+    changes: &[CellChange],
+) -> Vec<(String, Vec<Value>)> {
+    if key.len() != 1 {
+        return Vec::new();
+    }
+    let key_col = quote_ident(&key[0]);
+
+    let mut order: Vec<String> = Vec::new();
+    let mut groups: std::collections::HashMap<String, Vec<&CellChange>> =
+        std::collections::HashMap::new();
+    for change in changes {
+        if !groups.contains_key(&change.key_value) {
+            order.push(change.key_value.clone());
+        }
+        groups.entry(change.key_value.clone()).or_default().push(change);
+    }
+
+    order
+        .into_iter()
+        .map(|key_value| {
+            let group = &groups[&key_value];
+            let mut params = Vec::with_capacity(group.len() + 1);
+            let mut set_clauses = Vec::with_capacity(group.len());
+            for change in group.iter() {
+                params.push(change.new_value.clone());
+                set_clauses.push(format!("{}=${}", quote_ident(&change.column), params.len()));
+            }
+            params.push(Value::String(key_value));
+            let sql = format!(
+                "UPDATE {}.{} SET {} WHERE {}=${}",
+                quote_ident(schema),
+                quote_ident(table),
+                set_clauses.join(","),
+                key_col,
+                params.len()
+            );
+            (sql, params)
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -871,5 +995,117 @@ mod tests {
         let recs = vec![serde_json::from_value(serde_json::json!({"a\"b": 1})).unwrap()];
         let ddl = infer_create_ddl("s", "t", &recs, None);
         assert!(ddl.contains("\"a\"\"b\" BIGINT"), "got: {ddl}");
+    }
+
+    // --- SQL statement builders ---
+
+    #[test]
+    fn insert_uses_placeholders() {
+        let mut r = serde_json::Map::new();
+        r.insert("id".into(), serde_json::json!(1));
+        r.insert("x".into(), serde_json::json!("a"));
+        let (sql, params) = build_insert_sql("s", "t", &["id".into(), "x".into()], &[&r]);
+        assert!(sql.starts_with("INSERT INTO \"s\".\"t\" (\"id\",\"x\") VALUES ($1,$2)"));
+        assert_eq!(params.len(), 2);
+    }
+
+    #[test]
+    fn upsert_has_on_conflict() {
+        let mut r = serde_json::Map::new();
+        r.insert("id".into(), serde_json::json!(1));
+        r.insert("x".into(), serde_json::json!(2));
+        let (sql, _) = build_upsert_sql(
+            "s",
+            "t",
+            &["id".into(), "x".into()],
+            &["id".into()],
+            &[&r],
+        );
+        assert!(sql.contains("ON CONFLICT (\"id\") DO UPDATE SET \"x\"=EXCLUDED.\"x\""));
+    }
+
+    #[test]
+    fn insert_multi_row_numbers_placeholders_row_major() {
+        let mut r1 = serde_json::Map::new();
+        r1.insert("id".into(), serde_json::json!(1));
+        r1.insert("x".into(), serde_json::json!("a"));
+        let mut r2 = serde_json::Map::new();
+        r2.insert("id".into(), serde_json::json!(2));
+        r2.insert("x".into(), serde_json::json!("b"));
+        let (sql, params) =
+            build_insert_sql("s", "t", &["id".into(), "x".into()], &[&r1, &r2]);
+        assert!(
+            sql.contains("VALUES ($1,$2),($3,$4)"),
+            "got: {sql}"
+        );
+        assert_eq!(
+            params,
+            vec![
+                serde_json::json!(1),
+                serde_json::json!("a"),
+                serde_json::json!(2),
+                serde_json::json!("b"),
+            ]
+        );
+    }
+
+    #[test]
+    fn insert_binds_null_for_missing_key() {
+        let mut r = serde_json::Map::new();
+        r.insert("id".into(), serde_json::json!(1));
+        let (_, params) = build_insert_sql("s", "t", &["id".into(), "x".into()], &[&r]);
+        assert_eq!(params, vec![serde_json::json!(1), serde_json::Value::Null]);
+    }
+
+    #[test]
+    fn update_from_changes_groups_by_key_value_and_binds_key_last() {
+        let changes = vec![
+            CellChange {
+                key_value: "1".into(),
+                column: "name".into(),
+                old_value: serde_json::json!("old"),
+                new_value: serde_json::json!("new"),
+            },
+            CellChange {
+                key_value: "1".into(),
+                column: "age".into(),
+                old_value: serde_json::json!(20),
+                new_value: serde_json::json!(21),
+            },
+            CellChange {
+                key_value: "2".into(),
+                column: "name".into(),
+                old_value: serde_json::json!("foo"),
+                new_value: serde_json::json!("bar"),
+            },
+        ];
+        let statements = build_update_sql_from_changes("s", "t", &["id".into()], &changes);
+        assert_eq!(statements.len(), 2);
+
+        let (sql1, params1) = &statements[0];
+        assert!(sql1.starts_with("UPDATE \"s\".\"t\" SET"));
+        assert!(sql1.contains("WHERE \"id\"=$"));
+        assert_eq!(params1.last().unwrap(), &serde_json::json!("1"));
+
+        let (sql2, params2) = &statements[1];
+        assert!(sql2.contains("\"name\"=$1"));
+        assert_eq!(params2.last().unwrap(), &serde_json::json!("2"));
+    }
+
+    #[test]
+    fn update_from_changes_composite_key_returns_empty() {
+        let changes = vec![CellChange {
+            key_value: "1".into(),
+            column: "name".into(),
+            old_value: serde_json::json!("old"),
+            new_value: serde_json::json!("new"),
+        }];
+        let statements = build_update_sql_from_changes(
+            "s",
+            "t",
+            &["id".into(), "tenant".into()],
+            &changes,
+        );
+        assert!(statements.is_empty());
     }
 }
