@@ -2,7 +2,7 @@
 
 Three different "new" — pick by what you're creating.
 
-## New TAB with data → `gsheets_run_python` (one call creates AND fills)
+## New TAB with data → `data_run_python` (one call creates AND fills)
 
 Name a sheet that does NOT exist yet in `output_sheets`. The dispatcher creates
 the tab and writes the rows in one shot — no separate `add_sheet` + `set_range`.

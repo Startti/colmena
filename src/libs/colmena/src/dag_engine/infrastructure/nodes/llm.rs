@@ -2551,7 +2551,21 @@ impl ExecutableNode for LlmNode {
             use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::data_run_python::{
                 enabled_sources, tool_data_run_python, TOOL_DATA_RUN_PYTHON,
             };
-            if configured_aliases.contains(TOOL_DATA_RUN_PYTHON) {
+            // `data_run_python` activates via a `tool_configurations` entry
+            // (opt-in by name — the primary path, and the only way to pass a
+            // `sql` block) OR via `enabled_tools`: the `gsheets` toolkit alias,
+            // the `"*"` wildcard, or the exact tool name. Wiring the alias here
+            // is what lets the soft-deprecation of `gsheets_run_python` route
+            // every `["gsheets"]` agent (and the skills that now name
+            // `data_run_python`) to the unified tool. `!data_run_python` opts
+            // back out. `find_package("gsheets")` includes `data_run_python`
+            // (see toolkit_packages.rs), so the alias expands to it here.
+            let (drp_wants, drp_excludes) =
+                resolve_synthetic_enabled_tools(enabled_tools_config, &[TOOL_DATA_RUN_PYTHON]);
+            let drp_enabled = (configured_aliases.contains(TOOL_DATA_RUN_PYTHON)
+                || drp_wants.contains(TOOL_DATA_RUN_PYTHON))
+                && !drp_excludes.contains(TOOL_DATA_RUN_PYTHON);
+            if drp_enabled && !tools.iter().any(|t| t.name == TOOL_DATA_RUN_PYTHON) {
                 let agent_has_gsheets = Self::agent_has_gsheets_write_tools(config, inputs)
                     || Self::agent_has_gsheets_format_tool(config, inputs)
                     || Self::agent_has_gsheets_read_tools(config, inputs);

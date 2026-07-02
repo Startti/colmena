@@ -22,7 +22,7 @@ pub struct ToolkitPackage {
 pub static TOOLKIT_PACKAGES: &[ToolkitPackage] = &[
     ToolkitPackage {
         alias: "gsheets",
-        description: "Read, write, and analyze Google Sheets workbooks (11 tools)",
+        description: "Read, write, and analyze Google Sheets workbooks (12 tools)",
         tools: &[
             "gsheets_create_spreadsheet",
             "gsheets_create_from_xlsx",
@@ -34,7 +34,12 @@ pub static TOOLKIT_PACKAGES: &[ToolkitPackage] = &[
             "gsheets_set_cell",
             "gsheets_set_range",
             "gsheets_format_range",
+            // `gsheets_run_python` is DEPRECATED in favor of the unified
+            // `data_run_python` (added below). It stays in the package during
+            // the soft-deprecation bridge so persisted graphs / prompts that
+            // still name it keep working. Remove in the Phase 2 hard-delete.
             "gsheets_run_python",
+            "data_run_python",
         ],
     },
     ToolkitPackage {
@@ -130,9 +135,9 @@ mod tests {
     }
 
     #[test]
-    fn gsheets_package_has_all_eleven_tools() {
+    fn gsheets_package_has_all_twelve_tools() {
         let pkg = find_package("gsheets").expect("gsheets package must exist");
-        assert_eq!(pkg.tools.len(), 11, "gsheets package must list 11 tools");
+        assert_eq!(pkg.tools.len(), 12, "gsheets package must list 12 tools");
         for required in &[
             "gsheets_create_spreadsheet",
             "gsheets_create_from_xlsx",
@@ -145,6 +150,7 @@ mod tests {
             "gsheets_set_range",
             "gsheets_format_range",
             "gsheets_run_python",
+            "data_run_python",
         ] {
             assert!(
                 pkg.tools.contains(required),

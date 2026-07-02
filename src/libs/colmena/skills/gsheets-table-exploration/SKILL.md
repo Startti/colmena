@@ -16,7 +16,7 @@ references:
 Use this skill when you need to answer a question about ONE tab of a
 Google Sheets spreadsheet — top-N, filters, groupings, simple stats.
 The only tools you need are `gsheets_read` (peek + tiny reads) and
-`gsheets_run_python` (real analysis).
+`data_run_python` (real analysis).
 
 ## The cardinal rule
 

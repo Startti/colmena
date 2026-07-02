@@ -27,7 +27,7 @@ results are written back via `gsheets_set_range`.
 1. `gsheets_list_sheets({spreadsheet_id})` — discover tabs in the
    spreadsheet you have an id for.
 2. **For any analysis over more than ~50 rows, prefer
-   `gsheets_run_python`** — see the next section. It loads rows server-
+   `data_run_python`** — see the next section. It loads rows server-
    side, so they never burn LLM context tokens.
 3. For inspection / small reads / when you need formula text:
    `gsheets_read({spreadsheet_id, sheet, range?, as_records: true})` —
@@ -36,13 +36,13 @@ results are written back via `gsheets_set_range`.
    `gsheets_set_range({spreadsheet_id, sheet, start_addr, values_2d})`
    with `[headers, ...rows]` as the 2D array.
 
-## Loading rows without burning tokens — `gsheets_run_python`
+## Loading rows without burning tokens — `data_run_python`
 
 `gsheets_read` dumps every row into the LLM context. For 5000 sales
 rows that's ~150k tokens you pay for even though pandas could do the
 analysis in 30 lines of Python.
 
-`gsheets_run_python` solves this: you describe the analysis as Python
+`data_run_python` solves this: you describe the analysis as Python
 code; the dispatcher fetches every binding **in parallel** directly
 from Google, runs the code in a sandbox, and the LLM only sees the
 final `output`. Rows never round-trip.
@@ -66,7 +66,7 @@ final `output`. Rows never round-trip.
 
 Anti-pattern: do NOT `gsheets_read` then send rows to a separate
 `run_python` for analysis — that pays the token cost twice (read into
-context, then back to sandbox). Use `gsheets_run_python` instead.
+context, then back to sandbox). Use `data_run_python` instead.
 
 ## When to load which reference
 
