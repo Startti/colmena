@@ -173,6 +173,7 @@ fn format_from_name(name: &str) -> Option<&'static str> {
 
 /// Extract the records array and optional delimiter from a spec entry,
 /// which is either a bare array of records or `{df: [...], delimiter?}`.
+#[allow(clippy::type_complexity)]
 fn extract_spec(spec: &Value) -> Result<(Vec<Map<String, Value>>, Option<String>), Value> {
     let (records_value, delimiter) = match spec {
         Value::Array(_) => (spec, None),
