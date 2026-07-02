@@ -73,3 +73,4 @@ node_modules/
 
 # Compiled napi binaries (built by CD per-platform; never commit)
 *.node
+.superpowers/
