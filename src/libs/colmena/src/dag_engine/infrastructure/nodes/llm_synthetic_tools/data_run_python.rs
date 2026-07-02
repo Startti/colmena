@@ -700,7 +700,8 @@ fn render_gated_description(base: &str, enabled: &EnabledSources) -> String {
 /// description so the model only ever sees sources the operator actually
 /// enabled.
 pub fn tool_data_run_python(enabled: &EnabledSources) -> ToolDefinition {
-    let mut description = render_gated_description(text::tool_description(TOOL_DATA_RUN_PYTHON), enabled);
+    let mut description =
+        render_gated_description(text::tool_description(TOOL_DATA_RUN_PYTHON), enabled);
 
     description.push_str("\n\nAvailable sources:\n- Attachment (CSV/XLSX from the conversation catalog)\n- Inline JSON data");
     if enabled.gsheets {
@@ -817,7 +818,9 @@ mod tests {
         assert!(sql_only.contains("sql-only"));
         assert!(!sql_only.contains("sheets-only"));
         assert!(!sql_only.contains("<!--")); // markers stripped
-        assert!(sql_only.contains("always") && sql_only.contains("mid") && sql_only.contains("tail"));
+        assert!(
+            sql_only.contains("always") && sql_only.contains("mid") && sql_only.contains("tail")
+        );
 
         let sheets_only = render_gated_description(
             base,
