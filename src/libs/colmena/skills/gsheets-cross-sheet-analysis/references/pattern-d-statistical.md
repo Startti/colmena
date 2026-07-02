@@ -8,9 +8,10 @@
 
 ## Data flow
 
-1. `gsheets_read({spreadsheet_id: <id_a>, sheet: <tab_a>, as_records: true})` → `records_a`
-2. `gsheets_read({spreadsheet_id: <id_b>, sheet: <tab_b>, as_records: true})` → `records_b`
-3. `run_python({inputs: {records_a, records_b}, script: <below>})`
+1. Call `data_run_python` binding each sheet directly (rows never enter context):
+   `data_run_python({ bindings: [ {var: "records_a", spreadsheet_id: <id_a>, sheet: <tab_a>}, {var: "records_b", spreadsheet_id: <id_b>, sheet: <tab_b>} ], code: <below> })`
+   - The stats table is small (one row per numeric column), so the default flow surfaces it via `output`. If the user wants a persistent report, add `write_to_spreadsheet: <id_out>` and assign the `output_sheets` sink (commented below).
+2. The `code` runs a Welch t-test per numeric column; `output` carries the table plus a short significance count.
 
 ## Script
 
@@ -38,14 +39,22 @@ for c in numeric_cols:
         't_stat':   t,           'p_value':  p,
         'sig':      bool(p < 0.05),
     })
-result = pd.DataFrame(rows)
-output = f"{sum(r['sig'] for r in rows)} columns with p<0.05 (significant drift)"
+stats_df = pd.DataFrame(rows)
+
+# One row per numeric column — small enough to return inline.
+output = {
+    'summary': f"{sum(r['sig'] for r in rows)} columns with p<0.05 (significant drift)",
+    'per_column': rows,
+}
+
+# Optional persistent report: only when the tool was called with write_to_spreadsheet.
+# output_sheets = {"Drift": {"mode": "replace", "df": stats_df}}
 ```
 
 ## Output
 
-- `result` columns: `column, mean_A, mean_B, std_A, std_B, median_A, median_B, t_stat, p_value, sig`.
-- Write back via `gsheets_set_range` if the user wants a persistent report.
+- `output.per_column` holds one record per numeric column: `column, mean_A, mean_B, std_A, std_B, median_A, median_B, t_stat, p_value, sig`. `output.summary` is the one-line significance count.
+- To persist a report, call `data_run_python` with `write_to_spreadsheet: <id_out>` and uncomment the `output_sheets` sink assignment — the write then happens INSIDE the same call (the DataFrame goes in the `df` field), returning sink metadata, not rows.
 
 **Gotchas:**
 - Columns with `<2` non-null values per side are silently skipped (t-test undefined).

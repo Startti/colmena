@@ -8,10 +8,9 @@
 
 ## Data flow
 
-1. `gsheets_read({spreadsheet_id: <id_ventas>, sheet: <tab_ventas>, as_records: true})` → `records_ventas`
-2. `gsheets_read({spreadsheet_id: <id_reglas>, sheet: <tab_reglas>, as_records: true})` → `records_reglas`
-3. `run_python({inputs: {records_ventas, records_reglas}, script: <below>})`
-4. Write result back with `gsheets_set_range`.
+1. Call `data_run_python` binding each sheet directly (rows never enter context):
+   `data_run_python({ bindings: [ {var: "records_ventas", spreadsheet_id: <id_ventas>, sheet: <tab_ventas>}, {var: "records_reglas", spreadsheet_id: <id_reglas>, sheet: <tab_reglas>} ], code: <below>, write_to_spreadsheet: <id_out> })`
+2. The `code` applies the rules row-by-row and assigns the `output_sheets` sink to write the transformed table back; `output` carries how many rows were affected.
 
 ## Script
 
@@ -33,14 +32,18 @@ ventas.loc[mask, 'Descuento'] = (
 ventas['PrecioFinal'] = ventas['Precio'] - ventas['Descuento']
 
 # Drop the rule columns from the final output (they were a means to an end)
-result = ventas.drop(columns=['MinQty', 'DiscountPct'])
+transformed = ventas.drop(columns=['MinQty', 'DiscountPct'])
+
+# Write the transformed table back into a "Descuentos" tab, in the same call.
+output_sheets = {"Descuentos": {"mode": "replace", "df": transformed}}
 output = f"Applied discounts to {int(mask.sum())}/{len(ventas)} rows"
 ```
 
 ## Output
 
-- `result` columns: primary columns + the new derived columns (e.g. `Descuento`, `PrecioFinal`). Rule columns dropped to keep the result clean.
-- Write back via `gsheets_set_range({spreadsheet_id, sheet, start_addr: "A1", values_2d: [headers] + rows})`.
+- The `output_sheets` write creates a `Descuentos` tab whose columns are the primary columns + the new derived columns (e.g. `Descuento`, `PrecioFinal`). Rule columns are dropped to keep the result clean.
+- The write happens INSIDE the `data_run_python` call via the `output_sheets` sink (the DataFrame goes in the `df` field). You get back sink metadata, never the row contents.
+- `output` carries only the short summary string (rows affected / total).
 
 **Pattern:**
 1. Merge the rules in via the matching join key.

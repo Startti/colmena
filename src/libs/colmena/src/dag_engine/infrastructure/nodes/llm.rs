@@ -2569,6 +2569,17 @@ impl ExecutableNode for LlmNode {
                 let agent_has_gsheets = Self::agent_has_gsheets_write_tools(config, inputs)
                     || Self::agent_has_gsheets_format_tool(config, inputs)
                     || Self::agent_has_gsheets_read_tools(config, inputs);
+                // NOTE: the description gates its Google Sheets guidance on
+                // `agent_has_gsheets` (toolset-derived), whereas dispatch gates
+                // the actual sheets *capability* on the Google client building
+                // (`gsheets_client.is_some()`, a process-credential probe — see
+                // `dispatch_core`). In a healthy deployment these agree (an
+                // agent with the gsheets toolkit runs where creds exist). They
+                // only diverge in a misconfiguration (gsheets tools enabled but
+                // no creds → all gsheets tooling is already broken) or when ADC
+                // creds exist but no gsheets tool is enabled (a latent, unadvertised
+                // capability — benign). Not reconciled here to avoid an
+                // exposure-time client build; revisit if it bites in practice.
                 let enabled = enabled_sources(&data_run_python_fixed_config, agent_has_gsheets);
                 tools.push(tool_data_run_python(&enabled));
             }

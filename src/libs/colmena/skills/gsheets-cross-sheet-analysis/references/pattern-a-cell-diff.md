@@ -8,10 +8,9 @@
 
 ## Data flow
 
-1. `gsheets_read({spreadsheet_id: <id_a>, sheet: <tab_a>, as_records: true})` → `records_a`
-2. `gsheets_read({spreadsheet_id: <id_b>, sheet: <tab_b>, as_records: true})` → `records_b`
-3. `run_python({inputs: {records_a, records_b}, script: <below>})`
-4. Write result back with `gsheets_set_range`.
+1. Call `data_run_python` binding each sheet directly (rows never enter context):
+   `data_run_python({ bindings: [ {var: "records_a", spreadsheet_id: <id_a>, sheet: <tab_a>}, {var: "records_b", spreadsheet_id: <id_b>, sheet: <tab_b>} ], code: <below>, write_to_spreadsheet: <id_out> })`
+2. The `code` computes the cell-level diff and assigns the `output_sheets` sink to write the diff table back; `output` carries a short text summary.
 
 ## Script
 
@@ -27,13 +26,17 @@ diff = a[common_cols].compare(
 )
 # DataFrame.compare returns a MultiIndex on columns — flatten for sheet storage
 diff.columns = [f"{c}_{side}" for c, side in diff.columns]
-result = diff.reset_index(names='row_index')
-output = f"{len(diff)} cells changed across {len(common_cols)} columns"
+diff_df = diff.reset_index(names='row_index')
+
+# Write the diff table back into a "Diff" tab of the target spreadsheet, in the same call.
+output_sheets = {"Diff": {"mode": "replace", "df": diff_df}}
+output = f"{len(diff_df)} cells changed across {len(common_cols)} columns"
 ```
 
 ## Output
 
-- `result` columns: `row_index, <colname>_self, <colname>_other, ...` for each column with at least one differing value.
-- Write back as 2D array: `[result.columns.tolist()] + result.values.tolist()` via `gsheets_set_range({spreadsheet_id, sheet, start_addr: "A1", values_2d: <2d>})`.
+- The `output_sheets` write creates a `Diff` tab whose columns are `row_index, <colname>_self, <colname>_other, ...` for each column with at least one differing value.
+- The write happens INSIDE the `data_run_python` call via the `output_sheets` sink (the DataFrame goes in the `df` field). You get back sink metadata (`{name, sheet_id, n_rows, n_cols}`) — never the row contents.
+- `output` carries only the short summary string (e.g. `"12 cells changed across 5 columns"`).
 
 **Anti-tip:** if shapes differ (one has extra rows), `DataFrame.compare` raises. In that case use Pattern B (row-diff by key) instead.
