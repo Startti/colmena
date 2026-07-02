@@ -7,26 +7,35 @@ __col_user_output = output if 'output' in dir() else None
 # Coerce a user `output` into a JSON-safe Python value BEFORE the Rust side
 # runs depythonize (which cannot convert pandas/numpy types). Mirrors the
 # auto-conversions promised in the tool description: DataFrame →
-# to_dict('records'), Series → to_list(), numpy scalar → .item(), numpy
-# array → tolist(). Anything else passes through untouched.
+# to_dict('records'), Series → list, numpy scalar → .item(), numpy array →
+# list. Recurses into dicts/lists/tuples so nested numpy values (e.g.
+# `output = {"count": df['n'].sum()}`) are coerced too. Uses explicit
+# isinstance on the real pandas/numpy types (not `hasattr('to_dict')`) so a
+# Series maps to a flat list and unrelated objects with a `to_dict` method
+# are not hijacked. Anything else passes through untouched.
 def __col_json_safe(v):
     if v is None:
         return None
-    if hasattr(v, 'to_dict') and callable(v.to_dict):
-        try:
-            return v.to_dict(orient='records')
-        except TypeError:
-            return v.to_dict()
-    if hasattr(v, 'to_list') and callable(v.to_list):
-        return v.to_list()
+    try:
+        import pandas as _pd
+        if isinstance(v, _pd.DataFrame):
+            return __col_json_safe(v.to_dict('records'))
+        if isinstance(v, _pd.Series):
+            return __col_json_safe(v.tolist())
+    except Exception:
+        pass
     try:
         import numpy as _np
         if isinstance(v, _np.generic):
             return v.item()
         if isinstance(v, _np.ndarray):
-            return v.tolist()
+            return __col_json_safe(v.tolist())
     except Exception:
         pass
+    if isinstance(v, dict):
+        return {k: __col_json_safe(_x) for k, _x in v.items()}
+    if isinstance(v, (list, tuple)):
+        return [__col_json_safe(_x) for _x in v]
     return v
 
 __col_output_sheets = None
