@@ -1,0 +1,53 @@
+{
+  "_comment": "E2E — data_run_python CSV-attachment-source to SQL-sink. Agent binds the uploaded CSV (products_100.csv, 100 rows) and loads it into a new table drp_e2e.catalogo_csv via output_tables (append/replace). Fixture: tests/fixtures/products_100.csv (product_id,sku,name,price,stock). Run: set -a; source .env; set +a; cargo run --release --bin dag_engine -- run tests/graphs/agents/data_run_python_csv_to_sql.json --agent-session-id e2e_drp_$(date +%s) --include-extra-info",
+  "metadata": { "category": "agents", "requires_env": ["GEMINI_API_KEY", "DATABASE_URL"] },
+  "nodes": {
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "model": "gemini-2.5-flash",
+        "api_key": "${GEMINI_API_KEY}",
+        "connection_url": "${DATABASE_URL}",
+        "attachments_enabled": true,
+        "summary_enabled": true,
+        "stream": false,
+        "max_iterations": 8,
+        "temperature": 0.0,
+        "system_message": "Sos un asistente de datos. El usuario sube archivos y te pide moverlos o cruzarlos con la base. Usá data_run_python: hacé bind del archivo adjunto (usás su attachment_id, que ves en el catálogo de adjuntos) y/o de tablas SQL con queries SELECT, resolvé con pandas, y para escribir a una tabla asigná el global `output_tables` (dict `{\"schema.tabla\": DataFrame}`). Leé la descripción de la tool para los nombres exactos de los globals de salida; no inventes nombres de variables ni de argumentos.",
+        "prompt": "Te subí un CSV con el catálogo de productos. Cargalo en la base en una tabla nueva drp_e2e.catalogo_csv.",
+        "files": [
+          {
+            "id": "catalogo_csv",
+            "label": "Catálogo de productos",
+            "path": "tests/fixtures/products_100.csv",
+            "mime_type": "text/csv",
+            "filename": "products_100.csv"
+          }
+        ],
+        "tool_configurations": {
+          "data_run_python": {
+            "name": "data_run_python",
+            "node_type": "data_run_python",
+            "description": "Corré código pandas sobre datos de un archivo adjunto y/o la base de datos, y escribí resultados de vuelta a tablas SQL, planillas o archivos.",
+            "fixed_config": {
+              "sql": {
+                "connection_url": "${DATABASE_URL}",
+                "permissions": {
+                  "preset": "full",
+                  "allowed_schemas": ["drp_e2e"]
+                },
+                "on_missing_table": "create",
+                "on_existing_table": "overwrite"
+              }
+            }
+          }
+        }
+      }
+    },
+    "log": { "type": "log" }
+  },
+  "edges": [
+    { "from": "agent", "to": "log" }
+  ]
+}

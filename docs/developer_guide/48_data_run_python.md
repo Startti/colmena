@@ -276,12 +276,26 @@ Notas:
 
 En `tests/graphs/agents/`:
 
-| Grafo | Caso | Requiere |
-|---|---|---|
-| `data_run_python_sql_to_sql.json` | SQL fuente → agregación pandas → SQL sink (sin attachment/gsheets) | Tabla `drp_e2e.ventas` seed |
-| `data_run_python_xlsx_to_sql.json` | Caso canónico A: attachment (xlsx) + tabla actual como bindings, diff en pandas, upsert vía `output_tables` | `drp_e2e.productos` + archivo `tests/fixtures/precios_actualizados.xlsx` |
-| `data_run_python_sql_to_xlsx.json` | Caso canónico B: SQL fuente → export a Excel vía `output_attachments` | `drp_e2e.ventas` seed |
-| `data_run_python_sheet_sync.json` | Caso canónico C: gsheet + tabla SQL en una call, upsert a SQL Y `output_sheets` en el mismo call | Google Sheet real con creds OAuth + `drp_e2e.oportunidades` |
+La matriz cubre CSV, Excel, Google Sheets y SQL como **fuente** y como
+**sink**. Los 7 marcados ✅ están verificados en vivo (Postgres real / Sheets
+API real):
+
+| Grafo | Caso | Requiere | Live |
+|---|---|---|---|
+| `data_run_python_csv_to_sql.json` | CSV adjunto → tabla SQL nueva (`output_tables` append + auto-create) | `tests/fixtures/products_100.csv` | ✅ |
+| `data_run_python_excel_to_sql.json` | Excel adjunto + tabla SQL → cruce en pandas → **upsert** por key | `drp_e2e.productos` + `tests/fixtures/precios_actualizados.xlsx` | ✅ |
+| `data_run_python_sql_to_csv.json` | SQL fuente → CSV descargable (`output_attachments`) | `drp_e2e.productos` seed | ✅ |
+| `data_run_python_sql_to_sql.json` | SQL fuente → agregación pandas → SQL sink | `drp_e2e.ventas` seed | ✅ |
+| `data_run_python_sql_to_xlsx.json` | SQL fuente → export a Excel (`output_attachments`) | `drp_e2e.ventas` seed | ✅ |
+| `data_run_python_gsheet_to_sql.json` | Google Sheet real → agregación → tabla SQL | Google Sheet (`<SPREADSHEET_ID>`, tab `Ventas`) + creds OAuth | ✅ |
+| `data_run_python_sql_to_gsheet.json` | SQL fuente → pestaña nueva en Google Sheet (`output_sheets` + `write_to_spreadsheet`) | Google Sheet escribible + creds OAuth | ✅ |
+| `data_run_python_xlsx_to_sql.json` | Variante del caso A con fixture propio | `drp_e2e.productos` + fixture xlsx | autorado |
+| `data_run_python_sheet_sync.json` | gsheet + tabla SQL en una call: upsert a SQL Y `output_sheets` | Google Sheet + `drp_e2e.oportunidades` | autorado |
+
+Seed mínimo (`drp_e2e`): `CREATE SCHEMA IF NOT EXISTS drp_e2e;` + las tablas
+que cada grafo usa (ver el `_comment` de cada JSON). Los grafos con
+`<SPREADSHEET_ID>` usan un placeholder — sustituilo por un id real al correr
+(el repo no guarda ids reales de planillas).
 
 Comando de corrida (patrón común, agent-session-id estable por regla del
 repo):

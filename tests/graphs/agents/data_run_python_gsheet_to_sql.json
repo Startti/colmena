@@ -1,0 +1,43 @@
+{
+  "_comment": "E2E — data_run_python Google-Sheets-source to SQL-sink. Agent binds a tab of a shared Google Sheet, aggregates in pandas, and writes to drp_e2e.resumen_gsheet via output_tables. Needs OAuth creds (COLMENA_GOOGLE_OAUTH_* from Secret Manager, see docs/developer_guide/47_google_oauth.md) + the operator/agent having access to the sheet. Replace <SPREADSHEET_ID> with a real spreadsheet whose 'Ventas' tab has columns region,monto. gsheets source is enabled via fixed_config.enable_gsheets. Run: set the OAuth env + PYTHONPATH per the runbook, then cargo run --release --bin dag_engine -- run <this> --agent-session-id e2e_$(date +%s) --include-extra-info",
+  "metadata": { "category": "agents", "requires_env": ["GEMINI_API_KEY", "DATABASE_URL", "COLMENA_GOOGLE_OAUTH_CLIENT_ID", "COLMENA_GOOGLE_OAUTH_CLIENT_SECRET", "COLMENA_GOOGLE_OAUTH_REFRESH_TOKEN", "COLMENA_GOOGLE_SHARE_EMAIL"] },
+  "nodes": {
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "model": "gemini-2.5-flash",
+        "api_key": "${GEMINI_API_KEY}",
+        "connection_url": "${DATABASE_URL}",
+        "stream": false,
+        "max_iterations": 8,
+        "temperature": 0.0,
+        "system_message": "Sos un asistente de datos. El usuario comparte planillas de Google Sheets y te pide cruzarlas o resumirlas contra la base. Usá data_run_python: para leer una hoja hacé un binding con `spreadsheet_id` + `sheet` (el nombre de la pestaña); resolvé con pandas; y para escribir el resultado a una tabla SQL asigná el global `output_tables` (dict `{\"schema.tabla\": DataFrame}`). Leé la descripción de la tool para los nombres exactos de los globals; no inventes nombres de variables ni de argumentos.",
+        "prompt": "Acá está la planilla del equipo: https://docs.google.com/spreadsheets/d/<SPREADSHEET_ID> — en la pestaña Ventas están las columnas region y monto. Sumá el monto por región y guardá el resumen en la base, tabla drp_e2e.resumen_gsheet.",
+        "tool_configurations": {
+          "data_run_python": {
+            "name": "data_run_python",
+            "node_type": "data_run_python",
+            "description": "Corré código pandas sobre datos de Google Sheets y/o la base de datos, y escribí resultados de vuelta a tablas SQL o planillas.",
+            "fixed_config": {
+              "enable_gsheets": true,
+              "sql": {
+                "connection_url": "${DATABASE_URL}",
+                "permissions": {
+                  "preset": "full",
+                  "allowed_schemas": ["drp_e2e"]
+                },
+                "on_missing_table": "create",
+                "on_existing_table": "overwrite"
+              }
+            }
+          }
+        }
+      }
+    },
+    "log": { "type": "log" }
+  },
+  "edges": [
+    { "from": "agent", "to": "log" }
+  ]
+}

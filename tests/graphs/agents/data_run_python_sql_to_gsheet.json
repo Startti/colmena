@@ -1,0 +1,42 @@
+{
+  "_comment": "E2E — data_run_python SQL-source to Google-Sheets-sink. Agent binds a SELECT over drp_e2e.productos and writes it to a new tab of a Google Sheet via the output_sheets global + the write_to_spreadsheet tool arg. Needs OAuth creds (COLMENA_GOOGLE_OAUTH_*). Replace <SPREADSHEET_ID> with a real writable spreadsheet. gsheets sink enabled via fixed_config.enable_gsheets. Run per the OAuth runbook (docs/developer_guide/47_google_oauth.md).",
+  "metadata": { "category": "agents", "requires_env": ["GEMINI_API_KEY", "DATABASE_URL", "COLMENA_GOOGLE_OAUTH_CLIENT_ID", "COLMENA_GOOGLE_OAUTH_CLIENT_SECRET", "COLMENA_GOOGLE_OAUTH_REFRESH_TOKEN", "COLMENA_GOOGLE_SHARE_EMAIL"] },
+  "nodes": {
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "model": "gemini-2.5-flash",
+        "api_key": "${GEMINI_API_KEY}",
+        "connection_url": "${DATABASE_URL}",
+        "stream": false,
+        "max_iterations": 8,
+        "temperature": 0.0,
+        "system_message": "Sos un asistente de datos. El usuario te pide volcar datos de la base a una planilla de Google Sheets. Usá data_run_python: hacé bind de la tabla con un SELECT, resolvé con pandas, y para escribir a una planilla asigná el global `output_sheets` (dict `{\"NombrePestaña\": DataFrame}`) Y pasá el argumento del tool `write_to_spreadsheet` con el id de la planilla destino (lo sacás del link que te comparten). Leé la descripción de la tool para los nombres exactos de los globals/argumentos; no inventes otros nombres ni construyas los datos a mano.",
+        "prompt": "Tomá la tabla drp_e2e.productos de la base y volcala en una pestaña nueva llamada Productos_DB en esta planilla: https://docs.google.com/spreadsheets/d/<SPREADSHEET_ID>",
+        "tool_configurations": {
+          "data_run_python": {
+            "name": "data_run_python",
+            "node_type": "data_run_python",
+            "description": "Corré código pandas sobre datos de la base de datos y/o Google Sheets, y escribí resultados de vuelta a tablas SQL o planillas (output_sheets + write_to_spreadsheet).",
+            "fixed_config": {
+              "enable_gsheets": true,
+              "on_existing_sheet": "auto_suffix",
+              "sql": {
+                "connection_url": "${DATABASE_URL}",
+                "permissions": {
+                  "preset": "read_write",
+                  "allowed_schemas": ["drp_e2e"]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "log": { "type": "log" }
+  },
+  "edges": [
+    { "from": "agent", "to": "log" }
+  ]
+}

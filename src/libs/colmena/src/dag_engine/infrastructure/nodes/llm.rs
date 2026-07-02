@@ -566,6 +566,37 @@ impl LlmNode {
         false
     }
 
+    /// True if the agent has any READ-ONLY gsheets tool enabled (by exact name
+    /// or the `gsheets`/`*` alias). Used to let `data_run_python` use Google
+    /// Sheets as a read binding source even for a read-only-provisioned agent
+    /// (which has no write/format tool and so is missed by
+    /// [`agent_has_gsheets_write_tools`]/[`agent_has_gsheets_format_tool`]).
+    pub(super) fn agent_has_gsheets_read_tools(config: &Value, inputs: &NodeInputs) -> bool {
+        const READ_TOOLS: [&str; 2] = ["gsheets_read", "gsheets_list_sheets"];
+        let enabled = inputs
+            .get("enabled_tools")
+            .or_else(|| config.get("enabled_tools"));
+        let raw_names: Vec<&str> = match enabled {
+            Some(Value::String(s)) => vec![s.as_str()],
+            Some(Value::Array(arr)) => arr.iter().filter_map(|v| v.as_str()).collect(),
+            _ => Vec::new(),
+        };
+        for n in &raw_names {
+            if n.starts_with('!') {
+                continue;
+            }
+            if *n == "*" || *n == "gsheets" || READ_TOOLS.contains(n) {
+                return true;
+            }
+        }
+        if let Some(Value::Object(tc)) = config.get("tool_configurations") {
+            if tc.keys().any(|k| READ_TOOLS.contains(&k.as_str())) {
+                return true;
+            }
+        }
+        false
+    }
+
     /// Parse `COLMENA_SKILLS_ALLOWED_DIRS` env var into a list of PathBufs.
     /// Separator: `:` on Unix, `;` on Windows. Missing env var → empty list.
     fn parse_allowed_dirs_env() -> Vec<PathBuf> {
@@ -2522,7 +2553,8 @@ impl ExecutableNode for LlmNode {
             };
             if configured_aliases.contains(TOOL_DATA_RUN_PYTHON) {
                 let agent_has_gsheets = Self::agent_has_gsheets_write_tools(config, inputs)
-                    || Self::agent_has_gsheets_format_tool(config, inputs);
+                    || Self::agent_has_gsheets_format_tool(config, inputs)
+                    || Self::agent_has_gsheets_read_tools(config, inputs);
                 let enabled = enabled_sources(&data_run_python_fixed_config, agent_has_gsheets);
                 tools.push(tool_data_run_python(&enabled));
             }
@@ -5724,6 +5756,25 @@ mod agent_has_gsheets_write_tools_tests {
     async fn read_only_tool_alone_does_not_trigger() {
         let cfg = json!({ "enabled_tools": ["gsheets_read"] });
         assert!(!LlmNode::agent_has_gsheets_write_tools(
+            &cfg,
+            &empty_inputs()
+        ));
+    }
+
+    #[tokio::test]
+    async fn read_detector_triggers_on_read_tools() {
+        // The read-only detector (used to enable data_run_python's gsheets
+        // binding source) DOES fire for read tools that the write detector
+        // above intentionally ignores.
+        for t in ["gsheets_read", "gsheets_list_sheets", "gsheets", "*"] {
+            let cfg = json!({ "enabled_tools": [t] });
+            assert!(
+                LlmNode::agent_has_gsheets_read_tools(&cfg, &empty_inputs()),
+                "{t} should trigger the read detector"
+            );
+        }
+        let cfg = json!({ "enabled_tools": ["current_time"] });
+        assert!(!LlmNode::agent_has_gsheets_read_tools(
             &cfg,
             &empty_inputs()
         ));

@@ -240,6 +240,11 @@ pub struct SqlRuntime {
     pub tenant: Option<String>,
     pub on_missing_table: String,
     pub on_existing_table: String,
+    /// Operator-configured write limits (from `fixed_config.sql.runtime_limits`),
+    /// threaded into the `output_tables` write transaction so writes honor the
+    /// same `statement_timeout`/`work_mem` the read side already applies.
+    pub statement_timeout_ms: u64,
+    pub work_mem_mb: u64,
 }
 
 /// Truncate a string to `cap` bytes on a UTF-8 boundary, appending a
@@ -405,6 +410,8 @@ pub async fn dispatch_core(
             &rbindings.sql_snapshots,
             &rt.on_missing_table,
             &rt.on_existing_table,
+            rt.statement_timeout_ms,
+            rt.work_mem_mb,
         )
         .await;
         wrote_tables = Some(result);
@@ -558,6 +565,8 @@ pub async fn dispatch_data_run_python_via_executor(
                 tenant: cfg.tenant_user_id.clone(),
                 on_missing_table: cfg.on_missing_table.clone(),
                 on_existing_table: cfg.on_existing_table.clone(),
+                statement_timeout_ms: cfg.statement_timeout_ms,
+                work_mem_mb: cfg.work_mem_mb,
             })
         }
         None => None,
@@ -575,11 +584,27 @@ pub async fn dispatch_data_run_python_via_executor(
     };
     let enabled = enabled_sources(fixed, gsheets_client.is_some());
 
-    // Attachment fetcher: document_id → (bytes, filename).
+    // Attachment fetcher: document_id → (bytes, format_hint). `StoredBytes.filename`
+    // is the storage key (`<uuid>.bin`) for path/inline-registered files, which
+    // defeats csv/xlsx format detection — the ORIGINAL mime/filename lives in the
+    // conversation catalog. Prefer the catalog's mime_type (then its original
+    // filename) so `parse_attachment_to_records` can recognize the format.
     let fetch: AttachmentFetcher = Box::new(move |id: String| {
         Box::pin(async move {
             let sb = exec.fetch_attachment_bytes(&id).await?;
-            Ok((sb.bytes, sb.filename))
+            let hint = match exec.lookup_attachment_meta(&id) {
+                Some((mime, filename)) => {
+                    if !mime.is_empty() && mime != "application/octet-stream" {
+                        mime
+                    } else if !filename.is_empty() {
+                        filename
+                    } else {
+                        sb.filename
+                    }
+                }
+                None => sb.filename,
+            };
+            Ok((sb.bytes, hint))
         })
     });
 
