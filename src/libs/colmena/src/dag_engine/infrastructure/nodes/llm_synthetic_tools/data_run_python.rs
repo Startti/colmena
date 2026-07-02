@@ -754,6 +754,38 @@ mod tests {
         assert!(out.get("wrote_attachments").is_none(), "got: {out}");
     }
 
+    #[tokio::test]
+    #[ignore = "executes the PyO3 pandas sandbox; the shared per-process interpreter \
+                flakes with `No module named pandas` when another sandbox test inits it \
+                first under parallel `cargo test` aggregation. Passes in isolation. Run \
+                with `cargo test -- --ignored`."]
+    async fn dispatch_coerces_raw_numpy_scalar_output() {
+        // Regression: assigning a bare numpy scalar (np.int64) to `output` —
+        // without wrapping in int() — must serialize cleanly via the postlude
+        // coercion helper, not fail with "unsupported type int64".
+        pyo3::Python::initialize();
+        let args = serde_json::json!({
+            "bindings": [{"var": "rows", "data": [{"n": 2}, {"n": 3}]}],
+            "code": "output = pd.DataFrame(rows)['n'].sum()"  // raw numpy int64
+        });
+        let attach = noop_attach();
+        let reg = noop_registrar();
+        let out = dispatch_core(
+            args,
+            &EnabledSources {
+                sql: false,
+                gsheets: false,
+            },
+            None,
+            None,
+            &attach,
+            &reg,
+        )
+        .await;
+        assert_eq!(out["error"], Value::Null, "unexpected error: {out}");
+        assert_eq!(out["output"], serde_json::json!(5), "got: {out}");
+    }
+
     #[test]
     fn tool_definition_lists_only_enabled_sources() {
         let def = tool_data_run_python(&EnabledSources {

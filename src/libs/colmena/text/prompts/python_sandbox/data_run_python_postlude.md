@@ -4,6 +4,31 @@
 # === colmena auto-postlude ===
 __col_user_output = output if 'output' in dir() else None
 
+# Coerce a user `output` into a JSON-safe Python value BEFORE the Rust side
+# runs depythonize (which cannot convert pandas/numpy types). Mirrors the
+# auto-conversions promised in the tool description: DataFrame →
+# to_dict('records'), Series → to_list(), numpy scalar → .item(), numpy
+# array → tolist(). Anything else passes through untouched.
+def __col_json_safe(v):
+    if v is None:
+        return None
+    if hasattr(v, 'to_dict') and callable(v.to_dict):
+        try:
+            return v.to_dict(orient='records')
+        except TypeError:
+            return v.to_dict()
+    if hasattr(v, 'to_list') and callable(v.to_list):
+        return v.to_list()
+    try:
+        import numpy as _np
+        if isinstance(v, _np.generic):
+            return v.item()
+        if isinstance(v, _np.ndarray):
+            return v.tolist()
+    except Exception:
+        pass
+    return v
+
 __col_output_sheets = None
 if 'output_sheets' in dir() and output_sheets is not None:
     import pandas as _pd
@@ -116,7 +141,7 @@ if 'output_attachments' in dir() and output_attachments is not None:
                 __col_output_attachments[str(k)] = entry
 
 output = {
-    'user_output': __col_user_output,
+    'user_output': __col_json_safe(__col_user_output),
     'output_sheets': __col_output_sheets,
     'output_tables': __col_output_tables,
     'output_attachments': __col_output_attachments,
