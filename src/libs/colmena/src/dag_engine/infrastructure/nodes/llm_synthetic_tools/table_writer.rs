@@ -228,6 +228,7 @@ pub fn validate_write_spec(
         return Err(json!({
             "error": "SchemaNotAllowed",
             "table": spec.table,
+            "allowed_schemas": allowed_schemas,
             "message": message,
         }));
     }
@@ -432,7 +433,15 @@ fn infer_column_type<'a>(values: impl Iterator<Item = &'a Value>) -> InferredTyp
             Value::Number(n) => {
                 all_bool = false;
                 all_timestamp = false;
-                if !(n.is_i64() || n.is_u64()) {
+                if n.is_i64() {
+                    // fits a signed BIGINT
+                } else if n.is_u64() {
+                    // u64 > i64::MAX does NOT fit a signed BIGINT — classify the
+                    // column as TEXT so the value binds losslessly instead of
+                    // overflowing / coercing to float at INSERT time.
+                    all_int = false;
+                    all_numeric = false;
+                } else {
                     all_int = false;
                     has_float = true;
                 }
@@ -1602,6 +1611,20 @@ mod tests {
         assert!(ddl.contains("\"name\" TEXT"));
         assert!(ddl.contains("UNIQUE (\"id\")"));
         assert!(ddl.starts_with("CREATE TABLE IF NOT EXISTS \"analytics\".\"t\""));
+    }
+
+    #[test]
+    fn u64_over_i64_max_is_text_not_bigint() {
+        // A u64 value larger than i64::MAX does not fit a signed BIGINT; the
+        // column must infer as TEXT to bind losslessly (no overflow/float coercion).
+        let big: u64 = (i64::MAX as u64) + 1;
+        let recs = vec![
+            serde_json::from_value(serde_json::json!({"n": 1})).unwrap(),
+            serde_json::from_value(serde_json::json!({"n": big})).unwrap(),
+        ];
+        let ddl = infer_create_ddl("s", "t", &recs, None);
+        assert!(ddl.contains("\"n\" TEXT"), "got: {ddl}");
+        assert!(!ddl.contains("\"n\" BIGINT"), "got: {ddl}");
     }
 
     #[test]

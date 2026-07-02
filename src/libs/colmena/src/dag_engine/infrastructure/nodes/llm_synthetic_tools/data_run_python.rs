@@ -434,18 +434,23 @@ pub async fn dispatch_core(
                 return serde_json::json!({"error": "SourceNotEnabled", "source": "gsheets"});
             };
             let target = parsed.write_to_spreadsheet.as_deref().unwrap();
-            let policy: CollisionPolicy = parsed
+            // Operator-set policy: reject an invalid value loudly (consistent with
+            // the SQL sink's InvalidPolicy) instead of silently defaulting.
+            let policy: CollisionPolicy = match parsed
                 .on_existing_sheet
                 .as_deref()
                 .map(parse_policy)
                 .transpose()
-                .unwrap_or_else(|e| {
-                    eprintln!(
-                        "[data_run_python] invalid on_existing_sheet, defaulting to fail: {e}"
-                    );
-                    None
-                })
-                .unwrap_or_default();
+            {
+                Ok(p) => p.unwrap_or_default(),
+                Err(e) => {
+                    return serde_json::json!({
+                        "error": "InvalidPolicy",
+                        "field": "on_existing_sheet",
+                        "message": format!("invalid on_existing_sheet: {e}"),
+                    });
+                }
+            };
             // v1: no per-tab load snapshots are threaded here (update_by_position
             // degrades gracefully — it needs a bound snapshot and errors clearly
             // when absent). See task-14 report for the limitation.
@@ -579,7 +584,17 @@ pub async fn dispatch_data_run_python_via_executor(
         use crate::gsheets::infrastructure::http_client::GoogleSheetsHttpClient;
         match GoogleSheetsHttpClient::from_config(&GSheetsConfig::from_env()) {
             Ok(c) => Some(Arc::new(c) as Arc<dyn SheetsClient>),
-            Err(_) => None,
+            Err(e) => {
+                // Degrade to "gsheets not available" (a graph may legitimately not
+                // use gsheets), but log the reason so a genuine credential/config
+                // misconfiguration is diagnosable instead of silently disabling
+                // the source.
+                crate::colmena_log!(
+                    "WARN: [data_run_python] gsheets client unavailable ({e}); \
+                     Google Sheets source/sink disabled for this call"
+                );
+                None
+            }
         }
     };
     let enabled = enabled_sources(fixed, gsheets_client.is_some());
