@@ -147,8 +147,11 @@ operador que suba el preset o cree la tabla. La respuesta incluye
 las ve ni las puede pasar desde el código):
 
 - `on_missing_table`: `"create"` (default) | `"fail"`.
-- `on_existing_table`: `"fail"` (default) | `"append"` — solo aplica a
-  `mode: "replace"` cuando la tabla ya existe. `replace` con `DELETE` sin
+- `on_existing_table`: `"fail"` (default) | `"append"` | `"overwrite"` —
+  aplica cuando `mode: "replace"` apunta a una tabla que ya existe. `"fail"`
+  aborta con `TableExists` antes de tocar nada; `"append"` deja pasar la
+  operación sin bloquear; `"overwrite"` asume que el operador acepta el
+  reemplazo destructivo. `replace` con `DELETE` sin
   `WHERE` está permitido SOLO en este canal operador-gobernado (el
   validador estático de `sql_query` lo sigue bloqueando para queries que el
   LLM escribe a mano).
@@ -221,7 +224,7 @@ Siempre disponible (no requiere capacidad extra).
         },
         "runtime_limits": { "statement_timeout_ms": 30000, "work_mem_mb": 64 },
         "on_missing_table": "create",                 // create (default) | fail
-        "on_existing_table": "fail"                   // fail (default) | append — solo aplica a mode replace
+        "on_existing_table": "fail"                   // fail (default) | append | overwrite — solo aplica a mode replace
       },
       // ── Capacidad gsheets (opcional; auto-on si el toolkit gsheets está habilitado) ──
       "enable_gsheets": true,
