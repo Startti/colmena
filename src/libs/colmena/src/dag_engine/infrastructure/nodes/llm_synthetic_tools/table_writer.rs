@@ -342,25 +342,16 @@ pub fn validate_write_spec(
         }
     }
 
-    // 7. Column names non-empty & unique.
-    {
-        let mut seen_cols = HashSet::new();
-        for c in &cols {
-            if c.is_empty() {
-                return Err(json!({
-                    "error": "InvalidColumnName",
-                    "table": spec.table,
-                    "message": "column name must not be empty",
-                }));
-            }
-            if !seen_cols.insert(c) {
-                return Err(json!({
-                    "error": "InvalidColumnName",
-                    "table": spec.table,
-                    "column": c,
-                    "message": "duplicate column name in input records",
-                }));
-            }
+    // 7. Column names non-empty. (Uniqueness needs no check here: `cols` comes
+    // from `input_columns`, which dedupes, and per-record JSON object keys are
+    // inherently unique — a duplicate branch would be unreachable dead code.)
+    for c in &cols {
+        if c.is_empty() {
+            return Err(json!({
+                "error": "InvalidColumnName",
+                "table": spec.table,
+                "message": "column name must not be empty",
+            }));
         }
     }
 
@@ -922,9 +913,11 @@ pub async fn write_output_tables(
         }
     };
 
-    if let Err(e) = sqlx::query(&format!("SET LOCAL statement_timeout = {statement_timeout_ms}"))
-        .execute(&mut *tx)
-        .await
+    if let Err(e) = sqlx::query(&format!(
+        "SET LOCAL statement_timeout = {statement_timeout_ms}"
+    ))
+    .execute(&mut *tx)
+    .await
     {
         let _ = tx.rollback().await;
         return json!({
