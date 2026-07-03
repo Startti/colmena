@@ -6,6 +6,33 @@ Si vas a empezar a trabajar en algo de acá, sacalo de esta lista y agregalo al 
 
 ---
 
+## `data_run_python` Fase 2 — borrado duro de las 2 tools viejas (2026-07-03)
+
+- [ ] **Borrar `gsheets_run_python.rs` + `attachment_run_python.rs`** (subsumidas
+  por `data_run_python`). La **soft-deprecación ya shipeó** (PR #142: siguen vivas
+  con nota `DEPRECATED`, guía/skills/alias apuntan a `data_run_python`). El borrado
+  real está **gated** en: (1) telemetría con ~0 llamadas a los nombres viejos, **y**
+  (2) auditoría de **grafos persistidos en la DB de ADP** (`node_type`/`enabled_tools`
+  que los nombren — fuera del alcance de grep, tarea del back de ADP), **y**
+  (3) un **adaptador de compatibilidad** en `data_run_python` para la forma de args
+  vieja de attachment (`attachment_id` plano + globals `df`/`result` vs
+  `bindings`/`output`). Mantener `crdt_doc_run_python` y `sql_bulk_*`.
+  **Trigger:** telemetría de ~0 uso + confirmación de ADP de grafos persistidos.
+  Plan: [`superpowers/plans/2026-07-02-data-run-python-soft-deprecation.md`](superpowers/plans/2026-07-02-data-run-python-soft-deprecation.md) §Fase 2.
+
+## `data_run_python.yaml` — validación de marcadores balanceados (2026-07-03)
+
+- [ ] **Hazard latente en `render_gated_description`** (`data_run_python.rs`): la
+  descripción se gatea por capacidad con marcadores `<!--SQL-->`/`<!--SHEETS-->`.
+  Un marcador de cierre mal tipeado o faltante deja `skip=true` para siempre →
+  **dropea silenciosamente el resto de la descripción**, sin error ni warning. No
+  se dispara con el YAML actual (marcadores balanceados), pero es un riesgo de
+  edición futura. Fix: validar en un test (o al cargar) que los marcadores estén
+  balanceados y no anidados. **Trigger:** al próximo edit del bloque de descripción,
+  o si alguien reporta guía faltante.
+
+---
+
 ## Persistencia del token OAuth en DB (v1.1 del OAuth nativo de `http_request`)
 
 - [ ] **Persistir tokens OAuth en el store de secure_values.** El OAuth nativo
