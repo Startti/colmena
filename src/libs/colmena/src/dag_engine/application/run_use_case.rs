@@ -1,4 +1,5 @@
 use crate::colmena_log;
+use crate::dag_engine::application::liveness::LivenessSettings;
 use crate::dag_engine::application::ports::{NodeRegistryPort, SubGraphExecutorPort};
 use crate::dag_engine::application::secure_value_service::SecureValueService;
 use crate::dag_engine::domain::error::DagError;
@@ -17,6 +18,7 @@ pub struct DagRunUseCase {
     registry: Arc<dyn NodeRegistryPort>,
     state_repository: Option<Arc<dyn DagStateRepository>>,
     secure_value_service: Option<Arc<SecureValueService>>,
+    liveness: LivenessSettings,
 }
 
 impl DagRunUseCase {
@@ -28,6 +30,7 @@ impl DagRunUseCase {
             registry,
             state_repository,
             secure_value_service: None,
+            liveness: LivenessSettings::default(),
         }
     }
 
@@ -45,7 +48,15 @@ impl DagRunUseCase {
             registry,
             state_repository,
             secure_value_service: Some(secure_value_service),
+            liveness: LivenessSettings::default(),
         }
+    }
+
+    /// Overrides the liveness knobs (heartbeat / idle watchdog). Callers that
+    /// build the use case directly get `LivenessSettings::default()`.
+    pub fn with_liveness(mut self, liveness: LivenessSettings) -> Self {
+        self.liveness = liveness;
+        self
     }
 
     /// Evaluates if a node has exceeded its call limits

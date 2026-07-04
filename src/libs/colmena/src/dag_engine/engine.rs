@@ -55,6 +55,9 @@ pub struct EngineConfig {
     /// (capability 1 — agent opens its own generation). Always present when
     /// built via `from_env` because the engine requires `DATABASE_URL`.
     pub attachment_registry: Option<Arc<dyn AttachmentRegistry>>,
+    /// Liveness knobs for the execution loop (heartbeat + idle watchdog).
+    /// `from_env` reads COLMENA_HEARTBEAT_INTERVAL_SECS / COLMENA_IDLE_TIMEOUT_SECS.
+    pub liveness: crate::dag_engine::application::liveness::LivenessSettings,
 }
 
 /// Parse a string env value as a boolean. Returns `Some(true)` for
@@ -208,6 +211,7 @@ impl EngineConfig {
             // attachment_registry is built lazily inside ColmenaEngine::new
             // (after the pool is pinned), so leave it None here.
             attachment_registry: None,
+            liveness: crate::dag_engine::application::liveness::LivenessSettings::from_env(),
         })
     }
 }
@@ -222,6 +226,7 @@ impl ColmenaEngine {
     /// Build the engine: pin the internal pool, migrate state + secure-values
     /// schemas on it, build the node registry, and wire the `DagRunUseCase`.
     pub async fn new(config: EngineConfig) -> Result<Self, EngineError> {
+        let liveness = config.liveness;
         let registry = Arc::new(PgPoolRegistry::new(config.pool_config));
 
         // Pin the internal DB. The returned Arc<PgPool> is the sole Postgres
@@ -283,11 +288,14 @@ impl ColmenaEngine {
             Some(attachment_registry.clone()),
         );
 
-        let use_case = Arc::new(DagRunUseCase::with_secure_values_and_service(
-            node_registry.clone(),
-            Some(state_repo.clone()),
-            secure_value_service,
-        ));
+        let use_case = Arc::new(
+            DagRunUseCase::with_secure_values_and_service(
+                node_registry.clone(),
+                Some(state_repo.clone()),
+                secure_value_service,
+            )
+            .with_liveness(liveness),
+        );
         node_registry.set_subgraph_executor(use_case.clone());
 
         tracing::info!(
