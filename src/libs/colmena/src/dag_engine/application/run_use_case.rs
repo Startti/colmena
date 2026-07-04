@@ -549,6 +549,7 @@ impl DagRunUseCase {
                     let mut last_activity = tokio::time::Instant::now();
                     let mut last_beat = last_activity;
                     let mut last_tool: Option<String> = None;
+                    let mut idle_abort_msg: Option<String> = None;
 
                     let mut output_opt = None;
                     loop {
@@ -658,15 +659,17 @@ impl DagRunUseCase {
                                     }
                                     let _ = repo.cancel_running_descendants(&session_id).await;
                                 }
-                                // NOTE: `Err(...)?` cannot be used here — this arm's body
-                                // runs inside the `select!`'s per-arm async block, whose
-                                // return type is `()`, not the `try_stream!` macro's
+                                // `Err(...)?` cannot be used here — this arm's body runs
+                                // inside the `select!`'s per-arm async block, whose return
+                                // type is `()`, not the `try_stream!` macro's
                                 // `Result`-returning outer async block (unlike the
                                 // `output_result...?` usage after the loop, which sits
-                                // directly in the outer body). Fail the stream explicitly
-                                // instead: yield a terminal Error event and return.
-                                yield DagExecutionEvent::Error { message: msg };
-                                return;
+                                // directly in the outer body). Stash the message and break
+                                // out of the loop so it can be raised as a stream-level
+                                // `Err` there, matching every other abort path (hard-stop,
+                                // node error) that drain consumers already handle.
+                                idle_abort_msg = Some(msg);
+                                break;
                             }
                             event_opt = rx.recv() => {
                                 match event_opt {
@@ -739,6 +742,10 @@ impl DagRunUseCase {
                                 }
                             }
                         }
+                    }
+
+                    if let Some(msg) = idle_abort_msg {
+                        Err(DagError::NodeExecution(msg))?;
                     }
 
                     let output_result = output_opt.unwrap_or_else(|| {

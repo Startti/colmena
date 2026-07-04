@@ -5,15 +5,17 @@ use async_trait::async_trait;
 use colmena::dag_engine::application::liveness::LivenessSettings;
 use colmena::dag_engine::application::ports::NodeRegistryPort;
 use colmena::dag_engine::application::run_use_case::DagRunUseCase;
+use colmena::dag_engine::domain::error::DagError;
 use colmena::dag_engine::domain::events::DagExecutionEvent;
 use colmena::dag_engine::domain::graph::Graph;
 use colmena::dag_engine::domain::node::{ExecutableNode, NodeInputs};
 use colmena::dag_engine::domain::observer::{ExecutionObserver, NodeEvent};
+use colmena::dag_engine::domain::state::{DagRunState, DagRunStatus, DagStateRepository};
 use futures::StreamExt;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::error::Error as StdError;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// Sleeps silently for `millis`, then returns. The "hung / slow tool" stand-in.
@@ -219,21 +221,14 @@ async fn hung_node_is_aborted_after_idle_timeout() {
     let started = std::time::Instant::now();
     let (events, err) = drain(uc, single_node_graph("sleepy"), None).await;
 
-    // The idle watchdog fails the stream via a terminal `Error` event (not a
-    // stream-level `Err`) — see run_use_case.rs's idle-abort arm for why
-    // `Err(...)?` can't be used inside this `select!` arm.
-    assert!(
-        err.is_none(),
-        "idle-abort must not surface as a stream Err: {:?}",
-        err
-    );
-    let msg = events
-        .iter()
-        .find_map(|e| match e {
-            DagExecutionEvent::Error { message } => Some(message.clone()),
-            _ => None,
-        })
-        .expect("stream must end with a terminal Error event");
+    // The idle watchdog fails the stream via a stream-level `Err` (not an
+    // `Ok(DagExecutionEvent::Error { .. })` item) — this is what every drain-
+    // style consumer (`ColmenaEngine::run_dag`, `run_subgraph`/
+    // `resume_subgraph`) is written to handle. The `select!` arm itself can't
+    // use `Err(...)?` directly (its per-arm async block returns `()`), so it
+    // stashes the message and breaks out of the loop, where it's raised with
+    // `?` — see run_use_case.rs's idle-abort arm.
+    let msg = err.expect("idle-abort must surface as a stream-level Err");
     assert!(msg.contains("n1"), "error must name the node: {}", msg);
     assert!(
         msg.contains("no events"),
@@ -302,5 +297,101 @@ async fn user_cancel_wins_over_idle_watchdog() {
             .iter()
             .any(|e| matches!(e, DagExecutionEvent::Cancelled { .. })),
         "terminal event must be Cancelled"
+    );
+}
+
+/// Emits `LlmToolCallStart` for a "stuck_tool" call, then hangs forever
+/// (well past any test timeout) without ever finishing the call or emitting
+/// another event. Stand-in for a hung tool call so the idle-abort message's
+/// tool-suffix and the FAILED-state persistence can be pinned down together.
+struct StuckToolNode;
+
+#[async_trait]
+impl ExecutableNode for StuckToolNode {
+    async fn execute(
+        &self,
+        _inputs: &NodeInputs,
+        _config: &Value,
+        _state: &mut Value,
+        observer: Option<Arc<dyn ExecutionObserver>>,
+    ) -> Result<Value, Box<dyn StdError + Send + Sync>> {
+        if let Some(obs) = &observer {
+            obs.on_event(NodeEvent::LlmToolCallStart {
+                tool_id: "call_1".to_string(),
+                tool_name: "stuck_tool".to_string(),
+                tool_args: "{}".to_string(),
+            });
+        }
+        tokio::time::sleep(Duration::from_secs(30)).await;
+        Ok(json!({"ok": true}))
+    }
+    fn schema(&self) -> Value {
+        json!({})
+    }
+}
+
+/// Minimal in-memory `DagStateRepository` stub. Only `save` is exercised by
+/// the idle-abort path; the other required methods are unreachable in these
+/// tests and return the emptiest value the trait allows.
+#[derive(Default)]
+struct StubStateRepository {
+    saved: Mutex<Vec<DagRunState>>,
+}
+
+#[async_trait]
+impl DagStateRepository for StubStateRepository {
+    async fn get_by_id(&self, _session_id: &str) -> Result<Option<DagRunState>, DagError> {
+        Ok(None)
+    }
+
+    async fn save(&self, state: &DagRunState) -> Result<(), DagError> {
+        self.saved.lock().unwrap().push(state.clone());
+        Ok(())
+    }
+
+    async fn find_resume_entry(&self, _agent_session_id: &str) -> Result<Option<String>, DagError> {
+        Ok(None)
+    }
+
+    async fn find_suspended_child(
+        &self,
+        _parent_session_id: &str,
+    ) -> Result<Option<String>, DagError> {
+        Ok(None)
+    }
+}
+
+#[tokio::test]
+async fn idle_abort_persists_failed_state_and_names_the_stuck_tool() {
+    let liveness = LivenessSettings {
+        heartbeat_interval: None,
+        idle_timeout: Some(Duration::from_millis(400)),
+    };
+    let mut nodes: HashMap<String, Arc<dyn ExecutableNode>> = HashMap::new();
+    nodes.insert("stuck".to_string(), Arc::new(StuckToolNode));
+    let registry = Arc::new(TestRegistry { nodes });
+    let repo = Arc::new(StubStateRepository::default());
+    let uc = DagRunUseCase::new(registry, Some(repo.clone() as Arc<dyn DagStateRepository>))
+        .with_liveness(liveness);
+
+    let (_events, err) = drain(uc, single_node_graph("stuck"), None).await;
+
+    let msg = err.expect("idle-abort of a hung tool call must surface as a stream-level Err");
+    assert!(
+        msg.contains("stuck_tool"),
+        "error must name the in-flight tool: {}",
+        msg
+    );
+    assert!(
+        msg.contains("in flight"),
+        "error must mark the tool as in flight: {}",
+        msg
+    );
+
+    let saved = repo.saved.lock().unwrap();
+    assert!(
+        saved.iter().any(|s| s.status == DagRunStatus::Failed),
+        "idle abort must persist a FAILED state, got statuses: {:?}",
+        saved.iter().map(|s| s.status.clone()).collect::<Vec<_>>()
     );
 }
