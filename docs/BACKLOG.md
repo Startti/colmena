@@ -6,6 +6,41 @@ Si vas a empezar a trabajar en algo de acá, sacalo de esta lista y agregalo al 
 
 ---
 
+## Liveness mid-run (PR #144) — follow-ups (2026-07-04)
+
+Contexto: PR #144 agregó heartbeat `Progress` + idle watchdog al loop por-nodo de
+`run_use_case.rs` (spec en el repo ADP: `apps/service/ia/platform/SPEC_STREAM_MIDRUN_LIVENESS.md`).
+Verificado e2e en dev del platform. Estos son los Minors diferidos por los reviews, ninguno bloqueante:
+
+- [ ] **Fase 2 — timeout suave por tool-call devuelto al LLM.** Al vencer un idle
+  propio del tool, devolver `ToolResult` de error ("tool 'X' excedió Ns sin
+  actividad") para que el agente reaccione (reintentar, otro camino) en vez de
+  fallar el run entero. Requiere threading de una señal de actividad hasta
+  `agent_service.rs` (~línea 471, donde `on_token` solo ve start/finish del tool)
+  — por eso quedó fuera del PR #144 (spec §9). **Trigger:** primer caso real de
+  tool colgado del que el agente podría haberse recuperado.
+- [ ] **`SseMapper`: el arm de `Error` no cierra text blocks abiertos** (el de
+  `Cancelled` sí, `sse_mapper.rs:294-300`). Pre-existente, pero el idle-abort es
+  el error más propenso a disparar mid-text-stream (LLM colgado a mitad de un
+  bloque). Fix: espejar las ~3 líneas de cierre del arm `Cancelled`. **Trigger:**
+  primer reporte de UI con bloque de texto colgado tras un error, o próximo touch
+  del mapper.
+- [ ] **Dedupe de la persistencia terminal en `run_use_case.rs`:** los bloques
+  `DagRunState` de `Cancelled` (arm de cancel) y `Failed` (arm de idle) son ~13
+  líneas idénticas salvo el `status`. Extraer helper `persist_terminal_state(status)`.
+  De paso: comentario en el arm `rx.recv()` documentando que los `Progress` de
+  subgrafos internos resetean el reloj del padre **por delegación** (el watchdog
+  del hijo es quien caza el cuelgue interno). **Trigger:** próximo touch del loop.
+- [ ] **Test e2e de subgraph-as-tool colgado** (harness con DB, `#[ignore]` como
+  `cancellation_integration.rs`): pin de que un child colgado → idle-abort del
+  hijo → `Err` propaga → el run padre **falla** (no `Ok(null)` como tool result).
+  Hoy la lógica está cubierta por propagación `?` verificada en review + tests
+  unitarios sin DB. **Trigger:** próxima sesión de tests de integración con DB.
+- [ ] **`http_request` sin timeout default propio** (`timeout_secs` es opcional
+  por nodo): el idle-abort ahora lo acota indirectamente a 300s, pero un default
+  explícito (p.ej. 120s) daría errores más tempranos y específicos. **Trigger:**
+  próximo touch de `nodes/http.rs`.
+
 ## `data_run_python` Fase 2 — borrado duro de las 2 tools viejas (2026-07-03)
 
 - [ ] **Borrar `gsheets_run_python.rs` + `attachment_run_python.rs`** (subsumidas
