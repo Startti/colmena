@@ -24,7 +24,10 @@ impl Default for LivenessSettings {
 
 impl LivenessSettings {
     pub fn disabled() -> Self {
-        Self { heartbeat_interval: None, idle_timeout: None }
+        Self {
+            heartbeat_interval: None,
+            idle_timeout: None,
+        }
     }
 
     /// Reads `COLMENA_HEARTBEAT_INTERVAL_SECS` / `COLMENA_IDLE_TIMEOUT_SECS`.
@@ -52,7 +55,10 @@ impl LivenessSettings {
                 heartbeat_interval = Some(Duration::from_secs(clamped));
             }
         }
-        Self { heartbeat_interval, idle_timeout }
+        Self {
+            heartbeat_interval,
+            idle_timeout,
+        }
     }
 }
 
@@ -61,7 +67,9 @@ fn parse_secs(name: &str, default: u64) -> u64 {
         Ok(v) => match v.trim().parse::<u64>() {
             Ok(n) => n,
             Err(_) => {
-                eprintln!("⚠️ {name}='{v}' is not a valid number of seconds; using default {default}");
+                eprintln!(
+                    "⚠️ {name}='{v}' is not a valid number of seconds; using default {default}"
+                );
                 default
             }
         },
@@ -90,7 +98,10 @@ mod tests {
         assert_eq!(s.heartbeat_interval, Some(Duration::from_secs(20)));
         assert_eq!(s.idle_timeout, None);
 
-        assert_eq!(LivenessSettings::normalized(0, 0), LivenessSettings::disabled());
+        assert_eq!(
+            LivenessSettings::normalized(0, 0),
+            LivenessSettings::disabled()
+        );
     }
 
     #[test]

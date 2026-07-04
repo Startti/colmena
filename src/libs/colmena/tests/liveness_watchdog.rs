@@ -57,7 +57,9 @@ impl ExecutableNode for ChattyNode {
         for _ in 0..self.ticks {
             tokio::time::sleep(Duration::from_millis(self.tick_millis)).await;
             if let Some(obs) = &observer {
-                obs.on_event(NodeEvent::LlmToken { token: "tick".to_string() });
+                obs.on_event(NodeEvent::LlmToken {
+                    token: "tick".to_string(),
+                });
             }
         }
         Ok(json!({"ok": true}))
@@ -88,7 +90,11 @@ fn single_node_graph(node_type: &str) -> Graph {
     .expect("valid graph JSON")
 }
 
-fn use_case(node_type: &str, node: Arc<dyn ExecutableNode>, liveness: LivenessSettings) -> DagRunUseCase {
+fn use_case(
+    node_type: &str,
+    node: Arc<dyn ExecutableNode>,
+    liveness: LivenessSettings,
+) -> DagRunUseCase {
     let mut nodes: HashMap<String, Arc<dyn ExecutableNode>> = HashMap::new();
     nodes.insert(node_type.to_string(), node);
     DagRunUseCase::new(Arc::new(TestRegistry { nodes }), None).with_liveness(liveness)
@@ -134,18 +140,26 @@ async fn silent_node_emits_heartbeats_and_completes() {
 
     assert!(err.is_none(), "no error expected, got {:?}", err);
     let beats = count_progress(&events);
-    assert!(beats >= 2, "expected >= 2 heartbeats during 350ms silence, got {}", beats);
+    assert!(
+        beats >= 2,
+        "expected >= 2 heartbeats during 350ms silence, got {}",
+        beats
+    );
     for e in &events {
         if let DagExecutionEvent::Progress { node_id, .. } = e {
             assert_eq!(node_id, "n1");
         }
     }
     assert!(
-        events.iter().any(|e| matches!(e, DagExecutionEvent::NodeFinish { .. })),
+        events
+            .iter()
+            .any(|e| matches!(e, DagExecutionEvent::NodeFinish { .. })),
         "node must still finish normally"
     );
     assert!(
-        events.iter().any(|e| matches!(e, DagExecutionEvent::GraphFinish { .. })),
+        events
+            .iter()
+            .any(|e| matches!(e, DagExecutionEvent::GraphFinish { .. })),
         "graph must finish normally"
     );
 }
@@ -157,12 +171,25 @@ async fn real_activity_resets_the_heartbeat_clock() {
         heartbeat_interval: Some(Duration::from_millis(200)),
         idle_timeout: None,
     };
-    let uc = use_case("chatty", Arc::new(ChattyNode { tick_millis: 80, ticks: 6 }), liveness);
+    let uc = use_case(
+        "chatty",
+        Arc::new(ChattyNode {
+            tick_millis: 80,
+            ticks: 6,
+        }),
+        liveness,
+    );
     let (events, err) = drain(uc, single_node_graph("chatty"), None).await;
 
     assert!(err.is_none());
-    assert_eq!(count_progress(&events), 0, "chatty node must not trigger heartbeats");
-    assert!(events.iter().any(|e| matches!(e, DagExecutionEvent::GraphFinish { .. })));
+    assert_eq!(
+        count_progress(&events),
+        0,
+        "chatty node must not trigger heartbeats"
+    );
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, DagExecutionEvent::GraphFinish { .. })));
 }
 
 #[tokio::test]
@@ -176,7 +203,9 @@ async fn disabled_liveness_changes_nothing() {
 
     assert!(err.is_none());
     assert_eq!(count_progress(&events), 0);
-    assert!(events.iter().any(|e| matches!(e, DagExecutionEvent::GraphFinish { .. })));
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, DagExecutionEvent::GraphFinish { .. })));
 }
 
 #[tokio::test]
@@ -193,7 +222,11 @@ async fn hung_node_is_aborted_after_idle_timeout() {
     // The idle watchdog fails the stream via a terminal `Error` event (not a
     // stream-level `Err`) — see run_use_case.rs's idle-abort arm for why
     // `Err(...)?` can't be used inside this `select!` arm.
-    assert!(err.is_none(), "idle-abort must not surface as a stream Err: {:?}", err);
+    assert!(
+        err.is_none(),
+        "idle-abort must not surface as a stream Err: {:?}",
+        err
+    );
     let msg = events
         .iter()
         .find_map(|e| match e {
@@ -202,12 +235,19 @@ async fn hung_node_is_aborted_after_idle_timeout() {
         })
         .expect("stream must end with a terminal Error event");
     assert!(msg.contains("n1"), "error must name the node: {}", msg);
-    assert!(msg.contains("no events"), "error must describe the silence: {}", msg);
+    assert!(
+        msg.contains("no events"),
+        "error must describe the silence: {}",
+        msg
+    );
     assert!(
         started.elapsed() < Duration::from_secs(5),
         "abort must happen at the idle deadline, not at node completion"
     );
-    assert!(count_progress(&events) >= 1, "heartbeats must precede the abort");
+    assert!(
+        count_progress(&events) >= 1,
+        "heartbeats must precede the abort"
+    );
 }
 
 #[tokio::test]
@@ -217,11 +257,24 @@ async fn activity_prevents_idle_abort() {
         heartbeat_interval: None,
         idle_timeout: Some(Duration::from_millis(300)),
     };
-    let uc = use_case("chatty", Arc::new(ChattyNode { tick_millis: 80, ticks: 8 }), liveness);
+    let uc = use_case(
+        "chatty",
+        Arc::new(ChattyNode {
+            tick_millis: 80,
+            ticks: 8,
+        }),
+        liveness,
+    );
     let (events, err) = drain(uc, single_node_graph("chatty"), None).await;
 
-    assert!(err.is_none(), "chatty node must never be idle-aborted: {:?}", err);
-    assert!(events.iter().any(|e| matches!(e, DagExecutionEvent::GraphFinish { .. })));
+    assert!(
+        err.is_none(),
+        "chatty node must never be idle-aborted: {:?}",
+        err
+    );
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, DagExecutionEvent::GraphFinish { .. })));
 }
 
 #[tokio::test]
@@ -239,9 +292,15 @@ async fn user_cancel_wins_over_idle_watchdog() {
     });
     let (events, err) = drain(uc, single_node_graph("sleepy"), Some(token)).await;
 
-    assert!(err.is_none(), "cancel must yield Cancelled, not an error: {:?}", err);
     assert!(
-        events.iter().any(|e| matches!(e, DagExecutionEvent::Cancelled { .. })),
+        err.is_none(),
+        "cancel must yield Cancelled, not an error: {:?}",
+        err
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, DagExecutionEvent::Cancelled { .. })),
         "terminal event must be Cancelled"
     );
 }

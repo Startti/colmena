@@ -190,8 +190,7 @@ mod tests {
         assert_eq!(json["data"]["node_id"], "n1");
         assert_eq!(json["data"]["idle_secs"], 42);
 
-        let back: DagExecutionEvent =
-            serde_json::from_value(json).unwrap();
+        let back: DagExecutionEvent = serde_json::from_value(json).unwrap();
         match back {
             DagExecutionEvent::Progress { node_id, idle_secs } => {
                 assert_eq!(node_id, "n1");
