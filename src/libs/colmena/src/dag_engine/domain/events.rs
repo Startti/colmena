@@ -118,6 +118,13 @@ pub enum DagExecutionEvent {
         tool_id: String,
         tool_name: String,
     },
+    /// Liveness heartbeat emitted by the execution loop when the in-flight
+    /// node has produced no real events for the configured heartbeat
+    /// interval. `idle_secs` is the silence elapsed so far. Emitted directly
+    /// by the loop (never via the observer channel), so it can never reset
+    /// the idle watchdog that guards against hung nodes.
+    #[serde(rename = "progress")]
+    Progress { node_id: String, idle_secs: u64 },
     /// Wraps a DagExecutionEvent emitted from inside a subgraph execution.
     /// The frontend receives these with a "subgraph-" prefix on the event type.
     #[serde(rename = "subgraph_wrapped")]
@@ -169,6 +176,28 @@ mod tests {
                 assert!(partial_output.is_null());
             }
             other => panic!("expected Cancelled, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn progress_serializes_and_roundtrips() {
+        let ev = DagExecutionEvent::Progress {
+            node_id: "n1".to_string(),
+            idle_secs: 42,
+        };
+        let json = serde_json::to_value(&ev).unwrap();
+        assert_eq!(json["event"], "progress");
+        assert_eq!(json["data"]["node_id"], "n1");
+        assert_eq!(json["data"]["idle_secs"], 42);
+
+        let back: DagExecutionEvent =
+            serde_json::from_value(json).unwrap();
+        match back {
+            DagExecutionEvent::Progress { node_id, idle_secs } => {
+                assert_eq!(node_id, "n1");
+                assert_eq!(idle_secs, 42);
+            }
+            other => panic!("expected Progress, got {:?}", other),
         }
     }
 }

@@ -347,6 +347,7 @@ impl SseMapper {
                 "toolCallId": tool_id,
                 "toolName": tool_name,
             })),
+            DagExecutionEvent::Progress { .. } => None,
             DagExecutionEvent::SubgraphWrapped { inner } => match inner.as_ref() {
                 DagExecutionEvent::NodeStart {
                     node_id,
