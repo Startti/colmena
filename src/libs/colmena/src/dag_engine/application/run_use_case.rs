@@ -540,6 +540,17 @@ impl DagRunUseCase {
                     let execution_future = node_impl.execute(&inputs, &node_config_value, &mut global_shared_state, Some(observer));
                     tokio::pin!(execution_future);
 
+                    // ── Liveness clocks (spec: SPEC_STREAM_MIDRUN_LIVENESS) ─────
+                    // `last_activity` advances on every REAL event received via
+                    // `rx`. Heartbeats are yielded directly (never through `rx`),
+                    // so they cannot feed the clock they are driven by.
+                    let hb_interval = self.liveness.heartbeat_interval;
+                    // Unused in this task — Task 5 wires the idle-abort arm that reads it.
+                    let _idle_timeout = self.liveness.idle_timeout;
+                    let mut last_activity = tokio::time::Instant::now();
+                    let mut last_beat = last_activity;
+                    let mut last_tool: Option<String> = None;
+
                     let mut output_opt = None;
                     loop {
                         tokio::select! {
@@ -588,9 +599,29 @@ impl DagRunUseCase {
                                 };
                                 return;
                             }
+                            // ── Liveness heartbeat (mid-node) ──────────────────
+                            // Nothing real for `hb_interval`: emit Progress so
+                            // downstream no-event watchdogs (platform API, 60s)
+                            // see the run is alive.
+                            _ = async {
+                                match hb_interval {
+                                    Some(iv) => tokio::time::sleep_until(
+                                        std::cmp::max(last_activity, last_beat) + iv
+                                    ).await,
+                                    None => std::future::pending::<()>().await,
+                                }
+                            }, if output_opt.is_none() => {
+                                let _ = &last_tool;
+                                last_beat = tokio::time::Instant::now();
+                                yield DagExecutionEvent::Progress {
+                                    node_id: node_id.clone(),
+                                    idle_secs: last_activity.elapsed().as_secs(),
+                                };
+                            }
                             event_opt = rx.recv() => {
                                 match event_opt {
                                     Some(event) => {
+                                        last_activity = tokio::time::Instant::now();
                                         match event {
                                             NodeEvent::LlmToken { token } => yield DagExecutionEvent::LlmToken { node_id: node_id.clone(), token },
                                             NodeEvent::ThinkingToken { node_id: thinking_node_id, node_type: thinking_node_type, token } => yield DagExecutionEvent::ThinkingToken { node_id: thinking_node_id, node_type: thinking_node_type, token },
@@ -604,8 +635,14 @@ impl DagRunUseCase {
                                                 entry.4 += cache_write_tokens.unwrap_or(0);
                                                 yield DagExecutionEvent::LlmUsage { node_id: node_id.clone(), prompt_tokens, completion_tokens, thinking_tokens, cache_read_tokens, cache_write_tokens };
                                             }
-                                            NodeEvent::LlmToolCallStart { tool_id, tool_name, tool_args } => yield DagExecutionEvent::LlmToolCallStart { node_id: node_id.clone(), tool_id, tool_name, tool_args },
-                                            NodeEvent::LlmToolCallFinish { tool_id, success, output } => yield DagExecutionEvent::LlmToolCallFinish { node_id: node_id.clone(), tool_id, success, output },
+                                            NodeEvent::LlmToolCallStart { tool_id, tool_name, tool_args } => {
+                                                last_tool = Some(tool_name.clone());
+                                                yield DagExecutionEvent::LlmToolCallStart { node_id: node_id.clone(), tool_id, tool_name, tool_args }
+                                            }
+                                            NodeEvent::LlmToolCallFinish { tool_id, success, output } => {
+                                                last_tool = None;
+                                                yield DagExecutionEvent::LlmToolCallFinish { node_id: node_id.clone(), tool_id, success, output }
+                                            }
                                             NodeEvent::SkillLoaded { tool_id, skill_name, reference, source, size_bytes } => yield DagExecutionEvent::SkillLoaded { node_id: node_id.clone(), tool_id, skill_name, reference, source, size_bytes },
                                             NodeEvent::ToolDescribed { tool_id, tool_name } => yield DagExecutionEvent::ToolDescribed { node_id: node_id.clone(), tool_id, tool_name },
                                             NodeEvent::LlmMessageStart => yield DagExecutionEvent::LlmMessageStart { node_id: node_id.clone() },
