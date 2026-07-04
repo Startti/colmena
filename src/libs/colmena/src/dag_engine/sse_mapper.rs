@@ -347,6 +347,12 @@ impl SseMapper {
                 "toolCallId": tool_id,
                 "toolName": tool_name,
             })),
+            DagExecutionEvent::Progress { node_id, idle_secs } => Some(json!({
+                "type": "status",
+                "stage": "running",
+                "node_id": node_id,
+                "idleSecs": idle_secs
+            })),
             DagExecutionEvent::SubgraphWrapped { inner } => match inner.as_ref() {
                 DagExecutionEvent::NodeStart {
                     node_id,
@@ -471,6 +477,12 @@ impl SseMapper {
                 DagExecutionEvent::Error { message } => Some(json!({
                     "type": "subgraph-error",
                     "errorText": message
+                })),
+                DagExecutionEvent::Progress { node_id, idle_secs } => Some(json!({
+                    "type": "status",
+                    "stage": "running",
+                    "node_id": node_id,
+                    "idleSecs": idle_secs
                 })),
                 _ => None,
             },
@@ -657,5 +669,35 @@ mod tests {
             .find(|p| p["type"] == "finish")
             .expect("must emit a finish terminator");
         assert_eq!(finish["finishReason"], "cancelled");
+    }
+
+    #[test]
+    fn progress_maps_to_status_running_part() {
+        let mut mapper = SseMapper::new();
+        let parts = mapper.map(&DagExecutionEvent::Progress {
+            node_id: "n1".to_string(),
+            idle_secs: 25,
+        });
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0]["type"], "status");
+        assert_eq!(parts[0]["stage"], "running");
+        assert_eq!(parts[0]["node_id"], "n1");
+        assert_eq!(parts[0]["idleSecs"], 25);
+    }
+
+    #[test]
+    fn wrapped_progress_maps_to_status_running_part() {
+        let mut mapper = SseMapper::new();
+        let parts = mapper.map(&DagExecutionEvent::SubgraphWrapped {
+            inner: Box::new(DagExecutionEvent::Progress {
+                node_id: "inner_node".to_string(),
+                idle_secs: 40,
+            }),
+        });
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0]["type"], "status");
+        assert_eq!(parts[0]["stage"], "running");
+        assert_eq!(parts[0]["node_id"], "inner_node");
+        assert_eq!(parts[0]["idleSecs"], 40);
     }
 }

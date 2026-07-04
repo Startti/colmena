@@ -24,6 +24,7 @@ async fn engine_boots_with_pinned_pool_and_migrates() {
         pool_config: PoolConfig::defaults(),
         storage: Arc::new(LocalCacheStorageAdapter::new()),
         attachment_registry: None,
+        liveness: Default::default(),
     })
     .await
     .expect("engine boots");
@@ -50,6 +51,7 @@ async fn shutdown_is_idempotent() {
         pool_config: PoolConfig::defaults(),
         storage: Arc::new(LocalCacheStorageAdapter::new()),
         attachment_registry: None,
+        liveness: Default::default(),
     })
     .await
     .unwrap();

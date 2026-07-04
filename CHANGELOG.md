@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- feat(dag_engine): mid-run liveness — `Progress` heartbeat event while an in-flight
+  node is silent (default 20s, `COLMENA_HEARTBEAT_INTERVAL_SECS`, 0=off) and idle
+  watchdog that aborts a node after silence (default 300s, `COLMENA_IDLE_TIMEOUT_SECS`,
+  0=off) with a descriptive `node '<id>' produced no events for Ns` failure. SseMapper
+  emits `{"type":"status","stage":"running","node_id",...}` for heartbeats. Real events
+  (including subgraph-as-tool inner events) reset both clocks; heartbeats never do.
+
 ## [0.3.0] - 2026-03-18
 
 ### Added

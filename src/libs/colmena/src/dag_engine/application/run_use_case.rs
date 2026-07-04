@@ -1,4 +1,5 @@
 use crate::colmena_log;
+use crate::dag_engine::application::liveness::LivenessSettings;
 use crate::dag_engine::application::ports::{NodeRegistryPort, SubGraphExecutorPort};
 use crate::dag_engine::application::secure_value_service::SecureValueService;
 use crate::dag_engine::domain::error::DagError;
@@ -17,6 +18,7 @@ pub struct DagRunUseCase {
     registry: Arc<dyn NodeRegistryPort>,
     state_repository: Option<Arc<dyn DagStateRepository>>,
     secure_value_service: Option<Arc<SecureValueService>>,
+    liveness: LivenessSettings,
 }
 
 impl DagRunUseCase {
@@ -28,6 +30,7 @@ impl DagRunUseCase {
             registry,
             state_repository,
             secure_value_service: None,
+            liveness: LivenessSettings::default(),
         }
     }
 
@@ -45,7 +48,15 @@ impl DagRunUseCase {
             registry,
             state_repository,
             secure_value_service: Some(secure_value_service),
+            liveness: LivenessSettings::default(),
         }
+    }
+
+    /// Overrides the liveness knobs (heartbeat / idle watchdog). Callers that
+    /// build the use case directly get `LivenessSettings::default()`.
+    pub fn with_liveness(mut self, liveness: LivenessSettings) -> Self {
+        self.liveness = liveness;
+        self
     }
 
     /// Evaluates if a node has exceeded its call limits
@@ -519,7 +530,7 @@ impl DagRunUseCase {
                 // Snapshot the shared state before the node mutably borrows it, so the
                 // mid-node cancellation arm can persist a coherent (pre-node) state.
                 // Only taken when a cancel token is wired, to avoid the clone otherwise.
-                let global_state_snapshot = if cancel_token.is_some() {
+                let global_state_snapshot = if cancel_token.is_some() || self.liveness.idle_timeout.is_some() {
                     global_shared_state.clone()
                 } else {
                     Value::Null
@@ -528,6 +539,17 @@ impl DagRunUseCase {
                 let output = {
                     let execution_future = node_impl.execute(&inputs, &node_config_value, &mut global_shared_state, Some(observer));
                     tokio::pin!(execution_future);
+
+                    // ── Liveness clocks (spec: SPEC_STREAM_MIDRUN_LIVENESS) ─────
+                    // `last_activity` advances on every REAL event received via
+                    // `rx`. Heartbeats are yielded directly (never through `rx`),
+                    // so they cannot feed the clock they are driven by.
+                    let hb_interval = self.liveness.heartbeat_interval;
+                    let idle_timeout = self.liveness.idle_timeout;
+                    let mut last_activity = tokio::time::Instant::now();
+                    let mut last_beat = last_activity;
+                    let mut last_tool: Option<String> = None;
+                    let mut idle_abort_msg: Option<String> = None;
 
                     let mut output_opt = None;
                     loop {
@@ -577,9 +599,82 @@ impl DagRunUseCase {
                                 };
                                 return;
                             }
+                            // ── Liveness heartbeat (mid-node) ──────────────────
+                            // Nothing real for `hb_interval`: emit Progress so
+                            // downstream no-event watchdogs (platform API, 60s)
+                            // see the run is alive.
+                            _ = async {
+                                match hb_interval {
+                                    Some(iv) => tokio::time::sleep_until(
+                                        std::cmp::max(last_activity, last_beat) + iv
+                                    ).await,
+                                    None => std::future::pending::<()>().await,
+                                }
+                            }, if output_opt.is_none() => {
+                                last_beat = tokio::time::Instant::now();
+                                yield DagExecutionEvent::Progress {
+                                    node_id: node_id.clone(),
+                                    idle_secs: last_activity.elapsed().as_secs(),
+                                };
+                            }
+                            // ── Idle watchdog (mid-node) ───────────────────────
+                            // No real event for `idle_timeout`: treat the node as
+                            // hung. Drop the future (same interruption semantics
+                            // as hard-stop), persist FAILED, fail the stream with
+                            // a descriptive error. Heartbeats never feed
+                            // `last_activity`, so they cannot mask a hang.
+                            _ = async {
+                                match idle_timeout {
+                                    Some(to) => tokio::time::sleep_until(last_activity + to).await,
+                                    None => std::future::pending::<()>().await,
+                                }
+                            }, if output_opt.is_none() => {
+                                let idle_secs = idle_timeout.map(|t| t.as_secs()).unwrap_or(0);
+                                let tool_suffix = last_tool
+                                    .as_ref()
+                                    .map(|t| format!(" (tool '{}' in flight)", t))
+                                    .unwrap_or_default();
+                                let msg = format!(
+                                    "node '{}' produced no events for {}s{} — aborted by liveness watchdog (COLMENA_IDLE_TIMEOUT_SECS)",
+                                    node_id, idle_secs, tool_suffix
+                                );
+                                if let Some(repo) = &self.state_repository {
+                                    let mut remaining = active_queue.clone();
+                                    remaining.push_front(node_id.clone());
+                                    let state = DagRunState {
+                                        session_id: session_id.clone(),
+                                        agent_session_id: active_agent_session_id.clone(),
+                                        parent_session_id: parent_session_id_for_save.clone(),
+                                        graph_json: serde_json::to_value(&graph).unwrap_or(Value::Null),
+                                        all_outputs: all_outputs.clone(),
+                                        global_shared_state: global_state_snapshot.clone(),
+                                        execution_history: execution_history.clone(),
+                                        global_calls: global_calls.clone(),
+                                        caller_specific_calls: caller_specific_calls.clone(),
+                                        active_queue: remaining,
+                                        status: DagRunStatus::Failed,
+                                    };
+                                    if let Err(e) = repo.save(&state).await {
+                                        eprintln!("⚠️ Failed to persist FAILED state after idle abort: {}", e);
+                                    }
+                                    let _ = repo.cancel_running_descendants(&session_id).await;
+                                }
+                                // `Err(...)?` cannot be used here — this arm's body runs
+                                // inside the `select!`'s per-arm async block, whose return
+                                // type is `()`, not the `try_stream!` macro's
+                                // `Result`-returning outer async block (unlike the
+                                // `output_result...?` usage after the loop, which sits
+                                // directly in the outer body). Stash the message and break
+                                // out of the loop so it can be raised as a stream-level
+                                // `Err` there, matching every other abort path (hard-stop,
+                                // node error) that drain consumers already handle.
+                                idle_abort_msg = Some(msg);
+                                break;
+                            }
                             event_opt = rx.recv() => {
                                 match event_opt {
                                     Some(event) => {
+                                        last_activity = tokio::time::Instant::now();
                                         match event {
                                             NodeEvent::LlmToken { token } => yield DagExecutionEvent::LlmToken { node_id: node_id.clone(), token },
                                             NodeEvent::ThinkingToken { node_id: thinking_node_id, node_type: thinking_node_type, token } => yield DagExecutionEvent::ThinkingToken { node_id: thinking_node_id, node_type: thinking_node_type, token },
@@ -593,8 +688,14 @@ impl DagRunUseCase {
                                                 entry.4 += cache_write_tokens.unwrap_or(0);
                                                 yield DagExecutionEvent::LlmUsage { node_id: node_id.clone(), prompt_tokens, completion_tokens, thinking_tokens, cache_read_tokens, cache_write_tokens };
                                             }
-                                            NodeEvent::LlmToolCallStart { tool_id, tool_name, tool_args } => yield DagExecutionEvent::LlmToolCallStart { node_id: node_id.clone(), tool_id, tool_name, tool_args },
-                                            NodeEvent::LlmToolCallFinish { tool_id, success, output } => yield DagExecutionEvent::LlmToolCallFinish { node_id: node_id.clone(), tool_id, success, output },
+                                            NodeEvent::LlmToolCallStart { tool_id, tool_name, tool_args } => {
+                                                last_tool = Some(tool_name.clone());
+                                                yield DagExecutionEvent::LlmToolCallStart { node_id: node_id.clone(), tool_id, tool_name, tool_args }
+                                            }
+                                            NodeEvent::LlmToolCallFinish { tool_id, success, output } => {
+                                                last_tool = None;
+                                                yield DagExecutionEvent::LlmToolCallFinish { node_id: node_id.clone(), tool_id, success, output }
+                                            }
                                             NodeEvent::SkillLoaded { tool_id, skill_name, reference, source, size_bytes } => yield DagExecutionEvent::SkillLoaded { node_id: node_id.clone(), tool_id, skill_name, reference, source, size_bytes },
                                             NodeEvent::ToolDescribed { tool_id, tool_name } => yield DagExecutionEvent::ToolDescribed { node_id: node_id.clone(), tool_id, tool_name },
                                             NodeEvent::LlmMessageStart => yield DagExecutionEvent::LlmMessageStart { node_id: node_id.clone() },
@@ -641,6 +742,10 @@ impl DagRunUseCase {
                                 }
                             }
                         }
+                    }
+
+                    if let Some(msg) = idle_abort_msg {
+                        Err(DagError::NodeExecution(msg))?;
                     }
 
                     let output_result = output_opt.unwrap_or_else(|| {
