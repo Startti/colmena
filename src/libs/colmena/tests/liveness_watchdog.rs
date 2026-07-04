@@ -178,3 +178,70 @@ async fn disabled_liveness_changes_nothing() {
     assert_eq!(count_progress(&events), 0);
     assert!(events.iter().any(|e| matches!(e, DagExecutionEvent::GraphFinish { .. })));
 }
+
+#[tokio::test]
+async fn hung_node_is_aborted_after_idle_timeout() {
+    let liveness = LivenessSettings {
+        heartbeat_interval: Some(Duration::from_millis(100)),
+        idle_timeout: Some(Duration::from_millis(400)),
+    };
+    // Node "hangs" for 30s; the watchdog must kill the run at ~400ms.
+    let uc = use_case("sleepy", Arc::new(SleepyNode { millis: 30_000 }), liveness);
+    let started = std::time::Instant::now();
+    let (events, err) = drain(uc, single_node_graph("sleepy"), None).await;
+
+    // The idle watchdog fails the stream via a terminal `Error` event (not a
+    // stream-level `Err`) — see run_use_case.rs's idle-abort arm for why
+    // `Err(...)?` can't be used inside this `select!` arm.
+    assert!(err.is_none(), "idle-abort must not surface as a stream Err: {:?}", err);
+    let msg = events
+        .iter()
+        .find_map(|e| match e {
+            DagExecutionEvent::Error { message } => Some(message.clone()),
+            _ => None,
+        })
+        .expect("stream must end with a terminal Error event");
+    assert!(msg.contains("n1"), "error must name the node: {}", msg);
+    assert!(msg.contains("no events"), "error must describe the silence: {}", msg);
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "abort must happen at the idle deadline, not at node completion"
+    );
+    assert!(count_progress(&events) >= 1, "heartbeats must precede the abort");
+}
+
+#[tokio::test]
+async fn activity_prevents_idle_abort() {
+    // Events every 80ms, idle deadline 300ms → node survives well past 300ms total.
+    let liveness = LivenessSettings {
+        heartbeat_interval: None,
+        idle_timeout: Some(Duration::from_millis(300)),
+    };
+    let uc = use_case("chatty", Arc::new(ChattyNode { tick_millis: 80, ticks: 8 }), liveness);
+    let (events, err) = drain(uc, single_node_graph("chatty"), None).await;
+
+    assert!(err.is_none(), "chatty node must never be idle-aborted: {:?}", err);
+    assert!(events.iter().any(|e| matches!(e, DagExecutionEvent::GraphFinish { .. })));
+}
+
+#[tokio::test]
+async fn user_cancel_wins_over_idle_watchdog() {
+    let liveness = LivenessSettings {
+        heartbeat_interval: None,
+        idle_timeout: Some(Duration::from_millis(800)),
+    };
+    let uc = use_case("sleepy", Arc::new(SleepyNode { millis: 30_000 }), liveness);
+    let token = tokio_util::sync::CancellationToken::new();
+    let t = token.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        t.cancel();
+    });
+    let (events, err) = drain(uc, single_node_graph("sleepy"), Some(token)).await;
+
+    assert!(err.is_none(), "cancel must yield Cancelled, not an error: {:?}", err);
+    assert!(
+        events.iter().any(|e| matches!(e, DagExecutionEvent::Cancelled { .. })),
+        "terminal event must be Cancelled"
+    );
+}
