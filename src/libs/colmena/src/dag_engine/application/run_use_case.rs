@@ -732,7 +732,36 @@ impl DagRunUseCase {
                                                     }
                                                     match child_event {
                                                         DagExecutionEvent::GraphFinish { .. } => {}
-                                                        other => yield DagExecutionEvent::SubgraphWrapped { inner: Box::new(other) },
+                                                        // Grandchild+ event that already crossed one subgraph
+                                                        // boundary: FLATTEN instead of re-nesting. Bump `depth`
+                                                        // and prefix this node onto the lineage `path`. The old
+                                                        // code produced `SubgraphWrapped { SubgraphWrapped { .. } }`,
+                                                        // which the mapper could not unwrap (dropped as `_ => None`).
+                                                        DagExecutionEvent::SubgraphWrapped { inner, depth, path } => {
+                                                            let new_path = if path.is_empty() {
+                                                                node_id.clone()
+                                                            } else {
+                                                                format!("{}>{}", node_id, path)
+                                                            };
+                                                            yield DagExecutionEvent::SubgraphWrapped {
+                                                                inner,
+                                                                depth: depth + 1,
+                                                                path: new_path,
+                                                            };
+                                                        }
+                                                        // Base child event from a direct child subgraph: wrap at
+                                                        // depth 1 with path `<this node>>​<child node>`.
+                                                        other => {
+                                                            let new_path = match other.node_id() {
+                                                                Some(cid) => format!("{}>{}", node_id, cid),
+                                                                None => node_id.clone(),
+                                                            };
+                                                            yield DagExecutionEvent::SubgraphWrapped {
+                                                                inner: Box::new(other),
+                                                                depth: 1,
+                                                                path: new_path,
+                                                            };
+                                                        }
                                                     }
                                                 }
                                             }

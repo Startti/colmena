@@ -127,8 +127,59 @@ pub enum DagExecutionEvent {
     Progress { node_id: String, idle_secs: u64 },
     /// Wraps a DagExecutionEvent emitted from inside a subgraph execution.
     /// The frontend receives these with a "subgraph-" prefix on the event type.
+    ///
+    /// `depth` is the nesting level of the wrapped event (1 = direct child
+    /// subgraph, 2 = grandchild, …). The wrapper is kept **flat**: `inner` is
+    /// always a base event, never another `SubgraphWrapped`; deeper levels are
+    /// represented by incrementing `depth` instead of re-nesting (see
+    /// `run_use_case.rs`). The SSE mapper still tolerates legacy nested wrappers
+    /// by accumulating `depth` across layers. `path` is the human-readable
+    /// lineage (`parent>…>node`) used to render the nested tree.
     #[serde(rename = "subgraph_wrapped")]
-    SubgraphWrapped { inner: Box<DagExecutionEvent> },
+    SubgraphWrapped {
+        inner: Box<DagExecutionEvent>,
+        #[serde(default = "default_subgraph_depth")]
+        depth: u32,
+        #[serde(default)]
+        path: String,
+    },
+}
+
+/// Default nesting depth for a `SubgraphWrapped` event whose `depth` field is
+/// absent (legacy serialized events). A wrapped event is at least one level
+/// deep, so the default is `1` rather than `0`.
+fn default_subgraph_depth() -> u32 {
+    1
+}
+
+impl DagExecutionEvent {
+    /// The `node_id` this event is scoped to, when it has one. Events that are
+    /// not tied to a single node (`TurnStart`, `GraphFinish`, `GraphUsageSummary`,
+    /// `Error`, `Cancelled`, `SubgraphWrapped`) return `None`. Used to build the
+    /// `path` lineage when wrapping child events and to identify the active node
+    /// for the liveness heartbeat.
+    pub fn node_id(&self) -> Option<&str> {
+        match self {
+            DagExecutionEvent::NodeStart { node_id, .. }
+            | DagExecutionEvent::NodeFinish { node_id, .. }
+            | DagExecutionEvent::LlmToken { node_id, .. }
+            | DagExecutionEvent::LlmToolCall { node_id, .. }
+            | DagExecutionEvent::LlmUsage { node_id, .. }
+            | DagExecutionEvent::LlmToolCallStart { node_id, .. }
+            | DagExecutionEvent::LlmToolCallFinish { node_id, .. }
+            | DagExecutionEvent::LlmMessageStart { node_id }
+            | DagExecutionEvent::LlmMessageFinish { node_id, .. }
+            | DagExecutionEvent::ThinkingToken { node_id, .. }
+            | DagExecutionEvent::ReasoningStart { node_id, .. }
+            | DagExecutionEvent::ReasoningDelta { node_id, .. }
+            | DagExecutionEvent::ReasoningEnd { node_id, .. }
+            | DagExecutionEvent::SubgraphNodeFinish { node_id, .. }
+            | DagExecutionEvent::SkillLoaded { node_id, .. }
+            | DagExecutionEvent::ToolDescribed { node_id, .. }
+            | DagExecutionEvent::Progress { node_id, .. } => Some(node_id),
+            _ => None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -176,6 +227,50 @@ mod tests {
                 assert!(partial_output.is_null());
             }
             other => panic!("expected Cancelled, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn subgraph_wrapped_carries_depth_and_path() {
+        let ev = DagExecutionEvent::SubgraphWrapped {
+            inner: Box::new(DagExecutionEvent::LlmToken {
+                node_id: "calc_a".to_string(),
+                token: "96".to_string(),
+            }),
+            depth: 3,
+            path: "top>Builder>orch>calc_a".to_string(),
+        };
+        let json = serde_json::to_value(&ev).unwrap();
+        assert_eq!(json["event"], "subgraph_wrapped");
+        assert_eq!(json["data"]["depth"], 3);
+        assert_eq!(json["data"]["path"], "top>Builder>orch>calc_a");
+
+        let back: DagExecutionEvent = serde_json::from_value(json).unwrap();
+        match back {
+            DagExecutionEvent::SubgraphWrapped { inner, depth, path } => {
+                assert_eq!(depth, 3);
+                assert_eq!(path, "top>Builder>orch>calc_a");
+                assert!(matches!(*inner, DagExecutionEvent::LlmToken { .. }));
+            }
+            other => panic!("expected SubgraphWrapped, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn subgraph_wrapped_defaults_depth_to_one_when_absent() {
+        // Legacy serialized form without depth/path must deserialize with
+        // depth = 1 and an empty path (backward-compat).
+        let json = serde_json::json!({
+            "event": "subgraph_wrapped",
+            "data": { "inner": { "event": "llm_token", "data": { "node_id": "n", "token": "x" } } }
+        });
+        let back: DagExecutionEvent = serde_json::from_value(json).unwrap();
+        match back {
+            DagExecutionEvent::SubgraphWrapped { depth, path, .. } => {
+                assert_eq!(depth, 1, "absent depth must default to 1");
+                assert_eq!(path, "", "absent path must default to empty");
+            }
+            other => panic!("expected SubgraphWrapped, got {:?}", other),
         }
     }
 
