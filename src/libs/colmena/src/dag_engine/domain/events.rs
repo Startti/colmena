@@ -180,6 +180,27 @@ impl DagExecutionEvent {
             _ => None,
         }
     }
+
+    /// Whether this event should advance the liveness **heartbeat** clock
+    /// (`last_forwarded`). Content and progress events (tokens, tool calls,
+    /// reasoning, node boundaries) do; pure turn-boundary / accounting markers
+    /// (`LlmUsage`, `LlmMessageStart`, `LlmMessageFinish`, `TurnStart`) and the
+    /// heartbeat `Progress` itself do NOT — a stream emitting only those is
+    /// effectively silent to the user and must still heartbeat. The idle-abort
+    /// clock (`last_any`) is separate and advances on *every* event. For wrapped
+    /// child events the decision follows the base event.
+    pub fn advances_heartbeat_clock(&self) -> bool {
+        match self {
+            DagExecutionEvent::LlmUsage { .. }
+            | DagExecutionEvent::LlmMessageStart { .. }
+            | DagExecutionEvent::LlmMessageFinish { .. }
+            | DagExecutionEvent::TurnStart { .. }
+            | DagExecutionEvent::Progress { .. }
+            | DagExecutionEvent::GraphFinish { .. } => false,
+            DagExecutionEvent::SubgraphWrapped { inner, .. } => inner.advances_heartbeat_clock(),
+            _ => true,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -228,6 +249,63 @@ mod tests {
             }
             other => panic!("expected Cancelled, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn heartbeat_clock_classification() {
+        // Content / progress → advances the heartbeat clock.
+        assert!(DagExecutionEvent::LlmToken {
+            node_id: "n".into(),
+            token: "x".into()
+        }
+        .advances_heartbeat_clock());
+        assert!(DagExecutionEvent::NodeStart {
+            node_id: "n".into(),
+            node_type: "llm_call".into(),
+            inputs: Value::Null,
+            config: Value::Null
+        }
+        .advances_heartbeat_clock());
+
+        // Turn boundaries / accounting → do NOT advance (heartbeat must still fire).
+        assert!(!DagExecutionEvent::LlmMessageStart {
+            node_id: "n".into()
+        }
+        .advances_heartbeat_clock());
+        assert!(!DagExecutionEvent::LlmMessageFinish {
+            node_id: "n".into(),
+            usage: None
+        }
+        .advances_heartbeat_clock());
+        assert!(!DagExecutionEvent::LlmUsage {
+            node_id: "n".into(),
+            prompt_tokens: 1,
+            completion_tokens: 1,
+            thinking_tokens: None,
+            cache_read_tokens: None,
+            cache_write_tokens: None
+        }
+        .advances_heartbeat_clock());
+        assert!(!DagExecutionEvent::TurnStart { turn: 1 }.advances_heartbeat_clock());
+
+        // Wrapped events follow their base event.
+        let wrapped_boundary = DagExecutionEvent::SubgraphWrapped {
+            inner: Box::new(DagExecutionEvent::LlmMessageStart {
+                node_id: "sub".into(),
+            }),
+            depth: 2,
+            path: "a>b>sub".into(),
+        };
+        assert!(!wrapped_boundary.advances_heartbeat_clock());
+        let wrapped_token = DagExecutionEvent::SubgraphWrapped {
+            inner: Box::new(DagExecutionEvent::LlmToken {
+                node_id: "sub".into(),
+                token: "x".into(),
+            }),
+            depth: 2,
+            path: "a>b>sub".into(),
+        };
+        assert!(wrapped_token.advances_heartbeat_clock());
     }
 
     #[test]
