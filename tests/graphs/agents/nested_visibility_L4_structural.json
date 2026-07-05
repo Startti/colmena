@@ -1,0 +1,151 @@
+{
+  "comment": "E2E 4 niveles ESTRUCTURALES (nodos subgraph por edge). Garantiza wrapping L1..L4 sin depender de decisiones del LLM. Hoja: llm_call que streamea.",
+  "metadata": {
+    "category": "agents",
+    "features": [
+      "nested_visibility_L4_structural"
+    ],
+    "requires_env": [
+      "GEMINI_API_KEY"
+    ]
+  },
+  "nodes": {
+    "trigger": {
+      "type": "input",
+      "config": {
+        "prompt": "En una frase, ¿cuánto es 6 por 7 y por qué?"
+      }
+    },
+    "sg1": {
+      "type": "subgraph",
+      "config": {
+        "child_graph_inline": {
+          "nodes": {
+            "sg2_in": {
+              "type": "input",
+              "config": {}
+            },
+            "sg2": {
+              "type": "subgraph",
+              "config": {
+                "child_graph_inline": {
+                  "nodes": {
+                    "sg3_in": {
+                      "type": "input",
+                      "config": {}
+                    },
+                    "sg3": {
+                      "type": "subgraph",
+                      "config": {
+                        "child_graph_inline": {
+                          "nodes": {
+                            "sg4_in": {
+                              "type": "input",
+                              "config": {}
+                            },
+                            "sg4": {
+                              "type": "subgraph",
+                              "config": {
+                                "child_graph_inline": {
+                                  "nodes": {
+                                    "leaf_in": {
+                                      "type": "input",
+                                      "config": {}
+                                    },
+                                    "leaf_llm": {
+                                      "type": "llm_call",
+                                      "config": {
+                                        "provider": "google",
+                                        "model": "gemini-2.5-flash",
+                                        "api_key": "${GEMINI_API_KEY}",
+                                        "stream": true,
+                                        "system_message": "Responde en UNA frase corta y clara. Estás en el nivel 4 de anidamiento."
+                                      }
+                                    },
+                                    "leaf_out": {
+                                      "type": "output",
+                                      "config": {}
+                                    }
+                                  },
+                                  "edges": [
+                                    {
+                                      "from": "leaf_in",
+                                      "to": "leaf_llm"
+                                    },
+                                    {
+                                      "from": "leaf_llm",
+                                      "to": "leaf_out"
+                                    }
+                                  ]
+                                }
+                              }
+                            },
+                            "sg4_out": {
+                              "type": "output",
+                              "config": {}
+                            }
+                          },
+                          "edges": [
+                            {
+                              "from": "sg4_in",
+                              "to": "sg4"
+                            },
+                            {
+                              "from": "sg4",
+                              "to": "sg4_out"
+                            }
+                          ]
+                        }
+                      }
+                    },
+                    "sg3_out": {
+                      "type": "output",
+                      "config": {}
+                    }
+                  },
+                  "edges": [
+                    {
+                      "from": "sg3_in",
+                      "to": "sg3"
+                    },
+                    {
+                      "from": "sg3",
+                      "to": "sg3_out"
+                    }
+                  ]
+                }
+              }
+            },
+            "sg2_out": {
+              "type": "output",
+              "config": {}
+            }
+          },
+          "edges": [
+            {
+              "from": "sg2_in",
+              "to": "sg2"
+            },
+            {
+              "from": "sg2",
+              "to": "sg2_out"
+            }
+          ]
+        }
+      }
+    },
+    "out": {
+      "type": "output"
+    }
+  },
+  "edges": [
+    {
+      "from": "trigger",
+      "to": "sg1"
+    },
+    {
+      "from": "sg1",
+      "to": "out"
+    }
+  ]
+}

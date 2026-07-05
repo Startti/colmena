@@ -1,0 +1,61 @@
+{
+  "comment": "E2E de visibilidad anidada — agents-as-tools. Un llm_call coordinador expone un sub-agente (child_graph_inline) como la tool `calcular_con_especialista`. El hijo es un llm_call que usa la tool real `multiply`. Debe verse: subgraph-node-start/end (frontera Fase F, sin __agent_name), y frames subgraph-* con level:1 / path para el texto y el tool-call del hijo.",
+  "metadata": {
+    "category": "agents",
+    "features": ["subgraph_as_tool", "nested_visibility", "level_path"],
+    "requires_env": ["GEMINI_API_KEY"]
+  },
+  "nodes": {
+    "trigger": {
+      "type": "input",
+      "config": {
+        "prompt": "Necesito el costo total de 4 noches de hotel a 150 dólares por noche. Pídeselo al especialista y repórtame el total."
+      }
+    },
+    "coordinador": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "model": "gemini-2.5-flash",
+        "api_key": "${GEMINI_API_KEY}",
+        "system_message": "Eres un coordinador. Para cualquier cálculo, delega la tarea al sub-agente usando la tool `calcular_con_especialista` y luego repórtame su resultado en una frase.",
+        "stream": true,
+        "tool_configurations": {
+          "calcular_con_especialista": {
+            "name": "calcular_con_especialista",
+            "node_type": "subgraph",
+            "description": "Delega un cálculo a un sub-agente especialista que usa herramientas de aritmética y devuelve el total.",
+            "fixed_config": {
+              "child_graph_inline": {
+                "nodes": {
+                  "esp_in": { "type": "input", "config": {} },
+                  "esp_llm": {
+                    "type": "llm_call",
+                    "config": {
+                      "provider": "google",
+                      "model": "gemini-2.5-flash",
+                      "api_key": "${GEMINI_API_KEY}",
+                      "system_message": "Eres un especialista en aritmética. SIEMPRE usa la tool `multiply` para multiplicar. Muestra el cálculo y termina con el total en dólares.",
+                      "stream": true,
+                      "enabled_tools": ["multiply"]
+                    }
+                  },
+                  "esp_out": { "type": "output", "config": {} }
+                },
+                "edges": [
+                  { "from": "esp_in", "to": "esp_llm" },
+                  { "from": "esp_llm", "to": "esp_out" }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "out": { "type": "output" }
+  },
+  "edges": [
+    { "from": "trigger", "to": "coordinador" },
+    { "from": "coordinador.result", "to": "out" }
+  ]
+}

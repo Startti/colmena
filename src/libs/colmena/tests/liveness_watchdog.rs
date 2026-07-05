@@ -71,6 +71,59 @@ impl ExecutableNode for ChattyNode {
     }
 }
 
+/// Emits only *turn-boundary* events (wrapped as `SubgraphChildEvent`, exactly
+/// like a nested sub-agent's LlmMessageStart/Finish/LlmUsage bubbling up) every
+/// `tick_millis`, `ticks` times. These advance the idle-abort clock (`last_any`)
+/// but must NOT reset the heartbeat clock (`last_forwarded`) — so the run keeps
+/// heart-beating while never being idle-aborted. Regression for Fase E.
+struct BorderChatterNode {
+    tick_millis: u64,
+    ticks: u32,
+}
+
+#[async_trait]
+impl ExecutableNode for BorderChatterNode {
+    async fn execute(
+        &self,
+        _inputs: &NodeInputs,
+        _config: &Value,
+        _state: &mut Value,
+        observer: Option<Arc<dyn ExecutionObserver>>,
+    ) -> Result<Value, Box<dyn StdError + Send + Sync>> {
+        // Rotate through the three boundary/accounting events, each wrapped in a
+        // SubgraphChildEvent (as a nested sub-agent would deliver them).
+        let boundary_events = [
+            DagExecutionEvent::LlmMessageStart {
+                node_id: "sub".to_string(),
+            },
+            DagExecutionEvent::LlmUsage {
+                node_id: "sub".to_string(),
+                prompt_tokens: 1,
+                completion_tokens: 1,
+                thinking_tokens: None,
+                cache_read_tokens: None,
+                cache_write_tokens: None,
+            },
+            DagExecutionEvent::LlmMessageFinish {
+                node_id: "sub".to_string(),
+                usage: None,
+            },
+        ];
+        for i in 0..self.ticks {
+            tokio::time::sleep(Duration::from_millis(self.tick_millis)).await;
+            if let Some(obs) = &observer {
+                let ev = &boundary_events[(i as usize) % boundary_events.len()];
+                let raw = serde_json::to_value(ev).unwrap();
+                obs.on_event(NodeEvent::SubgraphChildEvent(raw));
+            }
+        }
+        Ok(json!({"ok": true}))
+    }
+    fn schema(&self) -> Value {
+        json!({})
+    }
+}
+
 struct TestRegistry {
     nodes: HashMap<String, Arc<dyn ExecutableNode>>,
 }
@@ -192,6 +245,47 @@ async fn real_activity_resets_the_heartbeat_clock() {
     assert!(events
         .iter()
         .any(|e| matches!(e, DagExecutionEvent::GraphFinish { .. })));
+}
+
+/// Fase E regression: a node whose only activity is nested turn-boundary events
+/// (LlmMessageStart/Finish/LlmUsage wrapped as SubgraphChildEvent) must STILL
+/// emit heartbeats (because `last_forwarded` is not reset by boundaries) AND must
+/// NOT be idle-aborted (because `last_any` IS reset by them). Before the two-clock
+/// split, the single `last_activity` was reset by these events, suppressing the
+/// heartbeat while they never XADDed downstream → false "Stream timeout".
+#[tokio::test]
+async fn border_only_activity_still_heartbeats_and_never_idle_aborts() {
+    // heartbeat 200ms < idle 800ms; boundary events every 100ms for ~1.2s.
+    let liveness = LivenessSettings {
+        heartbeat_interval: Some(Duration::from_millis(200)),
+        idle_timeout: Some(Duration::from_millis(800)),
+    };
+    let uc = use_case(
+        "border",
+        Arc::new(BorderChatterNode {
+            tick_millis: 100,
+            ticks: 12,
+        }),
+        liveness,
+    );
+    let (events, err) = drain(uc, single_node_graph("border"), None).await;
+
+    assert!(
+        err.is_none(),
+        "boundary-only activity must never be idle-aborted (last_any advances): {:?}",
+        err
+    );
+    assert!(
+        count_progress(&events) >= 2,
+        "heartbeat must still fire during boundary-only activity (last_forwarded is not reset), got {} beats",
+        count_progress(&events)
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, DagExecutionEvent::GraphFinish { .. })),
+        "graph must finish normally"
+    );
 }
 
 #[tokio::test]

@@ -43,8 +43,52 @@ impl SseMapper {
         }
     }
 
+    /// Follow a chain of `SubgraphWrapped` events down to the base (non-wrapped)
+    /// event. Tolerates both the flat representation (`inner` is already a base
+    /// event) and legacy nested wrappers (`SubgraphWrapped { SubgraphWrapped {…} }`).
+    fn deep_base(event: &DagExecutionEvent) -> &DagExecutionEvent {
+        let mut cur = event;
+        while let DagExecutionEvent::SubgraphWrapped { inner, .. } = cur {
+            cur = inner.as_ref();
+        }
+        cur
+    }
+
+    /// Compute the nesting `level` and lineage `path` for an event. Level-0
+    /// (non-wrapped) events return `(0, node_id)`. Wrapped events accumulate the
+    /// `depth` of every layer (so a legacy double-nested wrapper yields the same
+    /// level as a flat wrapper of the same depth) and take the outermost
+    /// non-empty `path`, falling back to the base event's `node_id`.
+    fn level_and_path(event: &DagExecutionEvent) -> (u32, String) {
+        let mut level = 0u32;
+        let mut path = String::new();
+        let mut cur = event;
+        while let DagExecutionEvent::SubgraphWrapped {
+            inner,
+            depth,
+            path: p,
+        } = cur
+        {
+            level += (*depth).max(1);
+            if path.is_empty() && !p.is_empty() {
+                path = p.clone();
+            }
+            cur = inner.as_ref();
+        }
+        if path.is_empty() {
+            if let Some(nid) = cur.node_id() {
+                path = nid.to_string();
+            }
+        }
+        (level, path)
+    }
+
     /// Convert one `DagExecutionEvent` into the ordered list of JSON protocol parts
     /// that should be emitted for that event. Returns 0..N values.
+    ///
+    /// Every emitted frame carries two additive fields: `level` (nesting depth,
+    /// `0` = top agent) and `path` (lineage `parent>…>node`). See
+    /// `SPEC_NESTED_VISIBILITY_SSE_FIELDS.md`.
     pub fn map(&mut self, event: &DagExecutionEvent) -> Vec<Value> {
         let mut parts: Vec<Value> = Vec::new();
 
@@ -86,7 +130,7 @@ impl SseMapper {
                     "toolName": tool_name
                 }));
             }
-            DagExecutionEvent::SubgraphWrapped { inner } => match inner.as_ref() {
+            DagExecutionEvent::SubgraphWrapped { inner, .. } => match Self::deep_base(inner) {
                 DagExecutionEvent::LlmToken { node_id, .. }
                 | DagExecutionEvent::ThinkingToken { node_id, .. }
                     if !self.text_block_ids.contains_key(node_id) =>
@@ -283,8 +327,20 @@ impl SseMapper {
                     "output": output
                 }))
             }
-            DagExecutionEvent::LlmMessageStart { .. } => None,
-            DagExecutionEvent::LlmMessageFinish { .. } => None,
+            // Turn boundaries are forwarded as a lightweight `agent-turn` frame
+            // (never `finish`/`error`, which terminate the stream). This keeps the
+            // downstream no-event watchdog fed across quiet turn transitions and
+            // gives the client a turn signal. `level`/`path` are injected below.
+            DagExecutionEvent::LlmMessageStart { node_id } => Some(json!({
+                "type": "agent-turn",
+                "phase": "start",
+                "node_id": node_id
+            })),
+            DagExecutionEvent::LlmMessageFinish { node_id, .. } => Some(json!({
+                "type": "agent-turn",
+                "phase": "finish",
+                "node_id": node_id
+            })),
             DagExecutionEvent::Error { message } => Some(json!({
                 "type": "error",
                 "errorText": message
@@ -353,7 +409,7 @@ impl SseMapper {
                 "node_id": node_id,
                 "idleSecs": idle_secs
             })),
-            DagExecutionEvent::SubgraphWrapped { inner } => match inner.as_ref() {
+            DagExecutionEvent::SubgraphWrapped { inner, .. } => match Self::deep_base(inner) {
                 DagExecutionEvent::NodeStart {
                     node_id,
                     node_type,
@@ -484,6 +540,28 @@ impl SseMapper {
                     "node_id": node_id,
                     "idleSecs": idle_secs
                 })),
+                DagExecutionEvent::ToolDescribed {
+                    node_id,
+                    tool_id,
+                    tool_name,
+                } => Some(json!({
+                    "type": "subgraph-tool-described",
+                    "nodeId": node_id,
+                    "toolCallId": tool_id,
+                    "toolName": tool_name,
+                })),
+                // Turn boundaries from a sub-agent — forwarded for visibility and
+                // to keep the no-event watchdog fed. `level`/`path` injected below.
+                DagExecutionEvent::LlmMessageStart { node_id } => Some(json!({
+                    "type": "agent-turn",
+                    "phase": "start",
+                    "node_id": node_id
+                })),
+                DagExecutionEvent::LlmMessageFinish { node_id, .. } => Some(json!({
+                    "type": "agent-turn",
+                    "phase": "finish",
+                    "node_id": node_id
+                })),
                 _ => None,
             },
         };
@@ -491,6 +569,19 @@ impl SseMapper {
         if let Some(v) = protocol {
             parts.push(v);
         }
+
+        // Tag every frame for this event with its nesting `level` and lineage
+        // `path` (additive; existing consumers ignore unknown fields). All parts
+        // produced in this call pertain to the same source event, hence share the
+        // same (level, path). `or_insert` never clobbers a frame that set them.
+        let (level, path) = Self::level_and_path(event);
+        for part in parts.iter_mut() {
+            if let Some(obj) = part.as_object_mut() {
+                obj.entry("level").or_insert_with(|| json!(level));
+                obj.entry("path").or_insert_with(|| json!(path.clone()));
+            }
+        }
+
         parts
     }
 
@@ -590,6 +681,8 @@ mod tests {
                 tool_name: "search".into(),
                 args_chunk: "{\"q\"".into(),
             }),
+            depth: 1,
+            path: "top>inner_llm".into(),
         };
         let event2 = DagExecutionEvent::SubgraphWrapped {
             inner: Box::new(DagExecutionEvent::LlmToolCall {
@@ -598,6 +691,8 @@ mod tests {
                 tool_name: "search".into(),
                 args_chunk: ":\"rust\"}".into(),
             }),
+            depth: 1,
+            path: "top>inner_llm".into(),
         };
 
         // First chunk → subgraph-tool-input-start + subgraph-tool-input-delta
@@ -637,6 +732,8 @@ mod tests {
                 tool_name: "search".into(),
                 args_chunk: "{\"q\":\"y\"}".into(),
             }),
+            depth: 1,
+            path: "top>inner_llm".into(),
         };
         let sub_parts = mapper.map(&sub_event);
         assert_eq!(
@@ -685,6 +782,94 @@ mod tests {
         assert_eq!(parts[0]["idleSecs"], 25);
     }
 
+    /// Regression (Fase A): a *doubly*-nested `SubgraphWrapped` (a grandchild
+    /// event, level 2) must still produce a `subgraph-text-delta` frame with
+    /// `level: 2`. Before the fix the mapper only unwrapped one level and the
+    /// nested wrapper fell into `_ => None`, dropping the event entirely.
+    #[test]
+    fn double_nested_wrapped_llm_token_maps_to_subgraph_text_delta_level_2() {
+        let mut mapper = SseMapper::new();
+        let ev = DagExecutionEvent::SubgraphWrapped {
+            inner: Box::new(DagExecutionEvent::SubgraphWrapped {
+                inner: Box::new(DagExecutionEvent::LlmToken {
+                    node_id: "calc_a".into(),
+                    token: "96".into(),
+                }),
+                depth: 1,
+                path: "orch>calc_a".into(),
+            }),
+            depth: 1,
+            path: "Builder>orch>calc_a".into(),
+        };
+        let parts = mapper.map(&ev);
+
+        // [subgraph-text-start, subgraph-text-delta] — both at level 2.
+        let delta = parts
+            .iter()
+            .find(|p| p["type"] == "subgraph-text-delta")
+            .expect("double-nested LlmToken must produce a subgraph-text-delta (was dropped)");
+        assert_eq!(delta["delta"], "96");
+        assert_eq!(delta["level"], 2, "accumulated depth across two layers");
+        assert_eq!(delta["path"], "Builder>orch>calc_a");
+        for p in &parts {
+            assert_eq!(p["level"], 2, "every frame for this event is level 2");
+            assert_eq!(p["path"], "Builder>orch>calc_a");
+        }
+    }
+
+    /// Fase B: level-0 (non-wrapped) frames carry `level: 0` and `path` = node id.
+    #[test]
+    fn level_zero_frames_carry_level_and_path() {
+        let mut mapper = SseMapper::new();
+        let parts = mapper.map(&DagExecutionEvent::LlmToken {
+            node_id: "top_llm".into(),
+            token: "hi".into(),
+        });
+        let delta = parts
+            .iter()
+            .find(|p| p["type"] == "text-delta")
+            .expect("must emit text-delta");
+        assert_eq!(delta["level"], 0);
+        assert_eq!(delta["path"], "top_llm");
+    }
+
+    /// Fase C5: turn-boundary events forward as a lightweight `agent-turn` frame
+    /// (Some), never `finish`/`error`. Both the top-level and wrapped variants.
+    #[test]
+    fn message_boundaries_forward_as_agent_turn() {
+        let mut mapper = SseMapper::new();
+        let start = mapper.map(&DagExecutionEvent::LlmMessageStart {
+            node_id: "n1".into(),
+        });
+        assert_eq!(start.len(), 1, "boundary must forward (was dropped)");
+        assert_eq!(start[0]["type"], "agent-turn");
+        assert_eq!(start[0]["phase"], "start");
+        assert_eq!(start[0]["level"], 0);
+
+        let finish = mapper.map(&DagExecutionEvent::LlmMessageFinish {
+            node_id: "n1".into(),
+            usage: None,
+        });
+        assert_eq!(finish[0]["type"], "agent-turn");
+        assert_eq!(finish[0]["phase"], "finish");
+
+        // Wrapped boundary → still agent-turn, carries the sub-agent level.
+        let wrapped = mapper.map(&DagExecutionEvent::SubgraphWrapped {
+            inner: Box::new(DagExecutionEvent::LlmMessageStart {
+                node_id: "sub".into(),
+            }),
+            depth: 2,
+            path: "Builder>orch>sub".into(),
+        });
+        assert_eq!(wrapped[0]["type"], "agent-turn");
+        assert_eq!(wrapped[0]["level"], 2);
+        assert_eq!(wrapped[0]["path"], "Builder>orch>sub");
+
+        // Never a stream terminator.
+        assert_ne!(start[0]["type"], "finish");
+        assert_ne!(start[0]["type"], "error");
+    }
+
     #[test]
     fn wrapped_progress_maps_to_status_running_part() {
         let mut mapper = SseMapper::new();
@@ -693,6 +878,8 @@ mod tests {
                 node_id: "inner_node".to_string(),
                 idle_secs: 40,
             }),
+            depth: 1,
+            path: "top>inner_node".into(),
         });
         assert_eq!(parts.len(), 1);
         assert_eq!(parts[0]["type"], "status");

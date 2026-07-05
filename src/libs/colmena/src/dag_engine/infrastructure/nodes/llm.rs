@@ -395,6 +395,18 @@ impl LlmNode {
             .or_else(|| config.get("task"))
     }
 
+    /// Resolves whether user-facing token streaming is enabled for this
+    /// `llm_call`. Precedence: `inputs.stream` > `config.stream` > default
+    /// `true`. Only an explicit `false` disables streaming — visibility is
+    /// on by default (Fase D, nested-visibility-liveness).
+    fn resolve_stream_enabled(inputs: &NodeInputs, config: &Value) -> bool {
+        inputs
+            .get("stream")
+            .and_then(|v| v.as_bool())
+            .or_else(|| config.get("stream").and_then(|v| v.as_bool()))
+            .unwrap_or(true)
+    }
+
     pub fn new(
         repository_factory: Arc<ConversationRepositoryFactory>,
         registry: Weak<dyn NodeRegistryPort>,
@@ -3124,12 +3136,8 @@ impl ExecutableNode for LlmNode {
             }
         }
 
-        // Check if streaming is enabled
-        let stream_enabled = inputs
-            .get("stream")
-            .and_then(|v| v.as_bool())
-            .or_else(|| config.get("stream").and_then(|v| v.as_bool()))
-            .unwrap_or(true);
+        // Check if streaming is enabled (default true — see resolve_stream_enabled).
+        let stream_enabled = Self::resolve_stream_enabled(inputs, config);
 
         // Shared state for reasoning block ID across the on_token Fn closure.
         let current_reasoning_id: Arc<std::sync::Mutex<Option<String>>> =
@@ -4214,6 +4222,43 @@ mod prompt_or_task_fallback_tests {
         let empty = json!({});
         let got = LlmNode::resolve_prompt_or_task(&inputs, &empty);
         assert_eq!(got, None);
+    }
+}
+
+#[cfg(test)]
+mod stream_default_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn stream_defaults_to_true_when_absent() {
+        // No `stream` anywhere → streaming ON by default (Fase D).
+        assert!(LlmNode::resolve_stream_enabled(
+            &NodeInputs::new(),
+            &json!({})
+        ));
+    }
+
+    #[test]
+    fn explicit_false_disables_from_inputs_or_config() {
+        let mut inputs = NodeInputs::new();
+        inputs.insert("stream".to_string(), json!(false));
+        assert!(!LlmNode::resolve_stream_enabled(&inputs, &json!({})));
+        assert!(!LlmNode::resolve_stream_enabled(
+            &NodeInputs::new(),
+            &json!({ "stream": false })
+        ));
+    }
+
+    #[test]
+    fn inputs_take_precedence_over_config() {
+        let mut inputs = NodeInputs::new();
+        inputs.insert("stream".to_string(), json!(true));
+        // inputs=true wins over config=false
+        assert!(LlmNode::resolve_stream_enabled(
+            &inputs,
+            &json!({ "stream": false })
+        ));
     }
 }
 

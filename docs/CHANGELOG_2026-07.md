@@ -52,3 +52,28 @@ Una sección por feature. Cada sección contiene:
 - Tools reference: [`docs/node_as_tools_reference.json`](node_as_tools_reference.json) (`socketio_request.special_behaviors` + `transport` fijado en los ejemplos de node_schema)
 
 **Estado.** done.
+
+---
+
+## 3. Visibilidad total anidada + campos `level`/`path` + red de seguridad de liveness (dos relojes)
+
+**Qué cambió.** El stream SSE ahora forwardea la actividad de sub-agentes anidados a **cualquier profundidad** (subgraph-as-tool → orchestrator → sub-agentes hijos → sus tools), y cada frame lleva dos campos nuevos **aditivos**: `level` (profundidad de anidamiento; `0` = agente principal) y `path` (linaje `padre>…>nodo`).
+
+- **Drop de niveles profundos (Fase A/B).** `run_use_case.rs` **aplana** el anidamiento: en vez de crear `SubgraphWrapped { SubgraphWrapped { … } }` (que el mapper solo desenvolvía un nivel → `_ => None` → **descartado**), propaga un único `SubgraphWrapped` incrementando `depth` y prefijando el `node_id` al `path`. `SubgraphWrapped` ahora lleva `depth: u32` + `path: String` (serde defaults 1/""). El `sse_mapper` desenvuelve a cualquier profundidad (`deep_base`), acumula `depth` → `level` (`level_and_path`) e inyecta `level`/`path` en **todo** frame (nivel 0 → `level:0`, `path = node_id`).
+- **Fronteras subgraph-as-tool (Fase F).** `subgraph.rs` emite `subgraph-node-start`/`-end` también cuando el subgrafo se invoca como tool (sin `__agent_name`), usando el `__node_id` como nombre — antes solo los agentes de orchestrator delimitaban.
+- **Bordes de turno (Fase C).** `LlmMessageStart`/`Finish` (antes `None`) → frame ligero `agent-turn` (Some, **nunca** `finish`/`error`). `ToolDescribed` anidado ahora visible.
+- **Liveness dos relojes (Fase E).** Se separa el `last_activity` único en `last_forwarded` (avanza solo con eventos de contenido/progreso → gobierna el heartbeat) y `last_any` (avanza con cualquier evento → gobierna el idle-abort). Cierra el **falso `Stream timeout`**: un sub-agente que solo emitía bordes cada pocos segundos mantenía vivo el idle-abort pero seguía suprimiendo el heartbeat sin XADDear → el watchdog de 60 s del API mataba el stream. Clasificador `DagExecutionEvent::advances_heartbeat_clock()`.
+- **Stream default (Fase D).** Auditoría: los tres paths (directo, agente, orchestrator) ya streamean por defecto; solo `stream:false` explícito desactiva. Extraído `LlmNode::resolve_stream_enabled` para dejarlo testeable.
+
+**Por qué importa.** Reproducido empíricamente contra `colmena-api` dev: 22 s de stream mudo con un orchestrator embebido (en el creador real >60 s → falso `Stream timeout`), y niveles ≥2 completamente invisibles. Ahora ADP puede renderizar el árbol anidado (indentación/breadcrumbs por `level`/`path`).
+
+**Contrato / ADP.** 100% **aditivo**: los `type` existentes NO cambian; `level`/`path` son campos nuevos opcionales. ADP viejo los ignora (`default: return state`); ADP nuevo los aprovecha. Sin cambio de API pública Rust → worker ADP no afectado. Bindings Python/TS no tocados (cambio interno del JSON del stream).
+
+**Regresión.** mapper: `SubgraphWrapped` doblemente anidado → `subgraph-text-delta` con `level:2` (antes `[]`). liveness: node que solo emite bordes envueltos → **sí** heartbeats y **no** idle-abort.
+
+**Documentación de referencia.**
+- Plan: [`docs/superpowers/plans/2026-07-05-nested-visibility-liveness.md`](superpowers/plans/2026-07-05-nested-visibility-liveness.md)
+- Contrato de campos: [`docs/SPEC_NESTED_VISIBILITY_SSE_FIELDS.md`](SPEC_NESTED_VISIBILITY_SSE_FIELDS.md)
+- Liveness previo (#144): `SPEC_STREAM_MIDRUN_LIVENESS.md` (ADP)
+
+**Estado.** done (Fases A/B/C/D/E/F). Pendiente: E2E manual contra el creador real desde el frontend ADP.

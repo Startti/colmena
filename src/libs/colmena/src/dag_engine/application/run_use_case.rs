@@ -541,13 +541,23 @@ impl DagRunUseCase {
                     tokio::pin!(execution_future);
 
                     // ── Liveness clocks (spec: SPEC_STREAM_MIDRUN_LIVENESS) ─────
-                    // `last_activity` advances on every REAL event received via
-                    // `rx`. Heartbeats are yielded directly (never through `rx`),
-                    // so they cannot feed the clock they are driven by.
+                    // TWO clocks, deliberately separate:
+                    //   • `last_forwarded` advances only on events that produce a
+                    //     forwarded/XADDed part (content, tool calls, reasoning,
+                    //     node boundaries). Governs the heartbeat. Turn-boundary /
+                    //     accounting markers (LlmUsage, LlmMessageStart/Finish,
+                    //     TurnStart) do NOT advance it — a stream emitting only
+                    //     those is silent to the user and must keep heart-beating.
+                    //   • `last_any` advances on EVERY event received via `rx`.
+                    //     Governs the idle-abort watchdog, so a node that is
+                    //     genuinely producing *some* signal is never killed as hung.
+                    // Heartbeats are yielded directly (never through `rx`), so they
+                    // cannot feed the clocks they are driven by.
                     let hb_interval = self.liveness.heartbeat_interval;
                     let idle_timeout = self.liveness.idle_timeout;
-                    let mut last_activity = tokio::time::Instant::now();
-                    let mut last_beat = last_activity;
+                    let mut last_forwarded = tokio::time::Instant::now();
+                    let mut last_any = last_forwarded;
+                    let mut last_beat = last_forwarded;
                     let mut last_tool: Option<String> = None;
                     let mut idle_abort_msg: Option<String> = None;
 
@@ -606,7 +616,7 @@ impl DagRunUseCase {
                             _ = async {
                                 match hb_interval {
                                     Some(iv) => tokio::time::sleep_until(
-                                        std::cmp::max(last_activity, last_beat) + iv
+                                        std::cmp::max(last_forwarded, last_beat) + iv
                                     ).await,
                                     None => std::future::pending::<()>().await,
                                 }
@@ -614,7 +624,7 @@ impl DagRunUseCase {
                                 last_beat = tokio::time::Instant::now();
                                 yield DagExecutionEvent::Progress {
                                     node_id: node_id.clone(),
-                                    idle_secs: last_activity.elapsed().as_secs(),
+                                    idle_secs: last_forwarded.elapsed().as_secs(),
                                 };
                             }
                             // ── Idle watchdog (mid-node) ───────────────────────
@@ -625,7 +635,7 @@ impl DagRunUseCase {
                             // `last_activity`, so they cannot mask a hang.
                             _ = async {
                                 match idle_timeout {
-                                    Some(to) => tokio::time::sleep_until(last_activity + to).await,
+                                    Some(to) => tokio::time::sleep_until(last_any + to).await,
                                     None => std::future::pending::<()>().await,
                                 }
                             }, if output_opt.is_none() => {
@@ -674,7 +684,14 @@ impl DagRunUseCase {
                             event_opt = rx.recv() => {
                                 match event_opt {
                                     Some(event) => {
-                                        last_activity = tokio::time::Instant::now();
+                                        // Every event keeps the idle watchdog at bay…
+                                        let now = tokio::time::Instant::now();
+                                        last_any = now;
+                                        // …but only content/progress events reset the
+                                        // heartbeat clock (turn boundaries / usage do not).
+                                        if node_event_advances_heartbeat(&event) {
+                                            last_forwarded = now;
+                                        }
                                         match event {
                                             NodeEvent::LlmToken { token } => yield DagExecutionEvent::LlmToken { node_id: node_id.clone(), token },
                                             NodeEvent::ThinkingToken { node_id: thinking_node_id, node_type: thinking_node_type, token } => yield DagExecutionEvent::ThinkingToken { node_id: thinking_node_id, node_type: thinking_node_type, token },
@@ -732,7 +749,36 @@ impl DagRunUseCase {
                                                     }
                                                     match child_event {
                                                         DagExecutionEvent::GraphFinish { .. } => {}
-                                                        other => yield DagExecutionEvent::SubgraphWrapped { inner: Box::new(other) },
+                                                        // Grandchild+ event that already crossed one subgraph
+                                                        // boundary: FLATTEN instead of re-nesting. Bump `depth`
+                                                        // and prefix this node onto the lineage `path`. The old
+                                                        // code produced `SubgraphWrapped { SubgraphWrapped { .. } }`,
+                                                        // which the mapper could not unwrap (dropped as `_ => None`).
+                                                        DagExecutionEvent::SubgraphWrapped { inner, depth, path } => {
+                                                            let new_path = if path.is_empty() {
+                                                                node_id.clone()
+                                                            } else {
+                                                                format!("{}>{}", node_id, path)
+                                                            };
+                                                            yield DagExecutionEvent::SubgraphWrapped {
+                                                                inner,
+                                                                depth: depth + 1,
+                                                                path: new_path,
+                                                            };
+                                                        }
+                                                        // Base child event from a direct child subgraph: wrap at
+                                                        // depth 1 with path `<this node>>​<child node>`.
+                                                        other => {
+                                                            let new_path = match other.node_id() {
+                                                                Some(cid) => format!("{}>{}", node_id, cid),
+                                                                None => node_id.clone(),
+                                                            };
+                                                            yield DagExecutionEvent::SubgraphWrapped {
+                                                                inner: Box::new(other),
+                                                                depth: 1,
+                                                                path: new_path,
+                                                            };
+                                                        }
                                                     }
                                                 }
                                             }
@@ -1120,6 +1166,30 @@ struct ChannelObserver {
 impl crate::dag_engine::domain::observer::ExecutionObserver for ChannelObserver {
     fn on_event(&self, event: crate::dag_engine::domain::observer::NodeEvent) {
         let _ = self.tx.send(event);
+    }
+}
+
+/// Whether a `NodeEvent` received via the observer channel should advance the
+/// liveness **heartbeat** clock (`last_forwarded`). Mirrors
+/// [`DagExecutionEvent::advances_heartbeat_clock`]: content and progress events
+/// do; pure turn-boundary / accounting markers (`LlmUsage`, `LlmMessageStart`,
+/// `LlmMessageFinish`) do not. For a `SubgraphChildEvent` the decision follows
+/// the wrapped base event; an undeserializable payload conservatively does not
+/// advance the clock. The idle-abort clock (`last_any`) is separate and always
+/// advances.
+fn node_event_advances_heartbeat(event: &crate::dag_engine::domain::observer::NodeEvent) -> bool {
+    use crate::dag_engine::domain::events::DagExecutionEvent;
+    use crate::dag_engine::domain::observer::NodeEvent;
+    match event {
+        NodeEvent::LlmUsage { .. }
+        | NodeEvent::LlmMessageStart
+        | NodeEvent::LlmMessageFinish(_) => false,
+        NodeEvent::SubgraphChildEvent(raw) => {
+            serde_json::from_value::<DagExecutionEvent>(raw.clone())
+                .map(|e| e.advances_heartbeat_clock())
+                .unwrap_or(false)
+        }
+        _ => true,
     }
 }
 
