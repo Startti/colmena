@@ -195,6 +195,20 @@ impl ExecutableNode for SubGraphNode {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
 
+        // Name used for the subgraph boundary frames (subgraph-node-start/end).
+        // OrchestratorNode injects `__agent_name` when a subgraph runs as a named
+        // agent. When the subgraph is invoked as a plain tool (no agent name),
+        // fall back to this node's own id so the parent stream can still delimit
+        // the sub-tree — otherwise the whole subgraph-as-tool branch has no
+        // visible boundary and the nested UI tree can't be built (Fase F).
+        let boundary_name = agent_name.clone().or_else(|| {
+            inputs
+                .get("__node_id")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+        });
+
         // --- 3. STATE MAPPING (IN) ---
         // We pass the resolved `inputs` to the child graph as its initial global_state
         let mut child_state_obj = serde_json::Map::new();
@@ -214,8 +228,9 @@ impl ExecutableNode for SubGraphNode {
         );
         let child_state = Value::Object(child_state_obj);
 
-        // Emit subgraph node-start boundary event (only when called by orchestrator)
-        if let (Some(ref name), Some(ref obs)) = (&agent_name, &_observer) {
+        // Emit subgraph node-start boundary event (orchestrator agent OR
+        // subgraph-as-tool — see `boundary_name`).
+        if let (Some(ref name), Some(ref obs)) = (&boundary_name, &_observer) {
             let start_event = DagExecutionEvent::NodeStart {
                 node_id: name.clone(),
                 node_type: "subgraph".to_string(),
@@ -274,7 +289,7 @@ impl ExecutableNode for SubGraphNode {
         };
 
         // Emit subgraph node-end boundary event with final output
-        if let (Some(ref name), Some(ref obs)) = (&agent_name, &_observer) {
+        if let (Some(ref name), Some(ref obs)) = (&boundary_name, &_observer) {
             let finish_event = DagExecutionEvent::SubgraphNodeFinish {
                 node_id: name.clone(),
                 output: final_output.clone(),
@@ -457,6 +472,120 @@ mod subgraph_depth_guard_tests {
             );
         }
         // Ok is also acceptable (won't happen without an executor, but we don't assert it).
+    }
+}
+
+#[cfg(test)]
+mod subgraph_as_tool_boundary_tests {
+    //! Fase F: a subgraph invoked as a plain tool (no `__agent_name`) must still
+    //! emit node-start / node-end boundary frames so the parent stream can
+    //! delimit the sub-tree. Boundary name falls back to the node's `__node_id`.
+    use super::*;
+    use crate::dag_engine::application::ports::SubGraphExecutorPort;
+    use crate::dag_engine::domain::error::DagError;
+    use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
+    use crate::dag_engine::domain::observer::{ExecutionObserver, NodeEvent};
+    use serde_json::json;
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct CapturingObserver {
+        events: Mutex<Vec<NodeEvent>>,
+    }
+    impl ExecutionObserver for CapturingObserver {
+        fn on_event(&self, event: NodeEvent) {
+            self.events.lock().unwrap().push(event);
+        }
+    }
+
+    struct StubExecutor;
+    #[async_trait::async_trait]
+    impl SubGraphExecutorPort for StubExecutor {
+        async fn run_subgraph(
+            &self,
+            _session_id: &str,
+            _graph_json: Value,
+            _global_state: Value,
+            _observer: Option<Arc<dyn ExecutionObserver>>,
+            _parent_session_id: Option<String>,
+            _agent_session_id: Option<String>,
+            _path_prefix: Option<String>,
+        ) -> Result<Value, DagError> {
+            Ok(json!({ "out": { "output": 42 } }))
+        }
+        async fn resume_subgraph(
+            &self,
+            _session_id: &str,
+            _answer: String,
+            _observer: Option<Arc<dyn ExecutionObserver>>,
+            _agent_session_id: Option<String>,
+            _path_prefix: Option<String>,
+        ) -> Result<Value, DagError> {
+            Ok(Value::Null)
+        }
+        async fn find_child_session_id_for_resume(
+            &self,
+            _parent_session_id: &str,
+            _parent_node_path: &str,
+        ) -> Result<Option<String>, DagError> {
+            Ok(None)
+        }
+    }
+
+    /// Deserialize a captured `SubgraphChildEvent` into its inner DagExecutionEvent.
+    fn inner_of(ev: &NodeEvent) -> Option<DagExecutionEvent> {
+        match ev {
+            NodeEvent::SubgraphChildEvent(raw) => serde_json::from_value(raw.clone()).ok(),
+            _ => None,
+        }
+    }
+
+    #[tokio::test]
+    async fn subgraph_as_tool_emits_boundaries_without_agent_name() {
+        let node = SubGraphNode::new();
+        node.executor
+            .set(Arc::new(StubExecutor) as Arc<dyn SubGraphExecutorPort>)
+            .ok()
+            .expect("executor set once");
+
+        let obs = Arc::new(CapturingObserver::default());
+
+        let mut inputs: NodeInputs = NodeInputs::new();
+        inputs.insert("__node_id".to_string(), json!("my_tool"));
+        inputs.insert(
+            "child_graph_inline".to_string(),
+            json!({ "nodes": {}, "edges": [] }),
+        );
+        // NOTE: config has NO __agent_name — this is the subgraph-as-tool path.
+        let cfg = json!({});
+        let mut gs = json!({});
+
+        node.execute(&inputs, &cfg, &mut gs, Some(obs.clone()))
+            .await
+            .expect("stub execute succeeds");
+
+        let events = obs.events.lock().unwrap();
+        let start = events.iter().find_map(|e| match inner_of(e) {
+            Some(DagExecutionEvent::NodeStart {
+                node_id, node_type, ..
+            }) if node_type == "subgraph" => Some(node_id),
+            _ => None,
+        });
+        assert_eq!(
+            start.as_deref(),
+            Some("my_tool"),
+            "subgraph-as-tool must emit a node-start boundary named after __node_id"
+        );
+
+        let finish = events.iter().find_map(|e| match inner_of(e) {
+            Some(DagExecutionEvent::SubgraphNodeFinish { node_id, .. }) => Some(node_id),
+            _ => None,
+        });
+        assert_eq!(
+            finish.as_deref(),
+            Some("my_tool"),
+            "subgraph-as-tool must emit a node-end boundary"
+        );
     }
 }
 
