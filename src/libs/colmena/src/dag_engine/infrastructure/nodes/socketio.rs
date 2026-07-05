@@ -4,7 +4,9 @@
 //! Configure via `config`: `url`, `namespace`, `event`, `payload`, `headers`, `cookies`,
 //! `wait_event`, `timeout_ms`, `transport`, `pre_events`. All string values support
 //! `${ENV_VAR}` resolution. Input edges override config values (inputs take priority
-//! over config).
+//! over config). `transport` defaults to `websocket` (single persistent connection —
+//! safe behind multi-instance load balancers without session affinity); set it to
+//! `"any"` for polling-first + upgrade or `"polling"` for long-polling only.
 //!
 //! ## Pre-events (multi-event sequence on the same connection)
 //! Use `pre_events: [{event, payload?, wait_event?, timeout_ms?}, ...]` to emit a
@@ -331,7 +333,11 @@ impl ExecutableNode for SocketIoNode {
             .filter(|s| !s.is_empty())
             .map(|s| s.to_string());
         let timeout_ms = Self::get_u64(inputs, config, "timeout_ms").unwrap_or(10000);
-        let transport = Self::get_str(inputs, config, "transport").unwrap_or("any");
+        // Default is websocket-only: a single persistent connection avoids the
+        // polling-handshake stickiness problem behind multi-instance load
+        // balancers (e.g. Cloud Run without session affinity). Set
+        // `transport: "any"` explicitly to restore polling-first + upgrade.
+        let transport = Self::get_str(inputs, config, "transport").unwrap_or("websocket");
 
         // Main payload (inputs > config). Env vars resolved later in emit_step.
         let main_payload = inputs
@@ -511,7 +517,9 @@ impl ExecutableNode for SocketIoNode {
                 }
                 Err(msg) => {
                     println!("[SocketIoNode] ✗ pre_event '{}' failed: {}", pe.event, msg);
-                    let _ = client.disconnect().await;
+                    if let Err(e) = client.disconnect().await {
+                        println!("[SocketIoNode] ⚠ disconnect failed: {}", e);
+                    }
                     return Ok(json!({
                         "success": false,
                         "event": event_name,
@@ -537,7 +545,12 @@ impl ExecutableNode for SocketIoNode {
         .await;
 
         // ---- 11. Disconnect (always) ----
-        let _ = client.disconnect().await;
+        // A failed disconnect leaves the underlying engine.io task half-open
+        // (it keeps polling/pinging and surfaces recurring "EngineIO Error"
+        // events) — log it so the leak is visible in worker logs.
+        if let Err(e) = client.disconnect().await {
+            println!("[SocketIoNode] ⚠ disconnect failed: {}", e);
+        }
 
         // ---- 12. Build output envelope ----
         let pre_responses_val = if pre_responses.is_empty() {
@@ -599,7 +612,7 @@ impl ExecutableNode for SocketIoNode {
                 "cookies": "string (optional, shorthand for Cookie header, supports ${ENV_VAR})",
                 "wait_event": "string (optional, listen for this server event instead of using ack)",
                 "timeout_ms": "integer (default: 10000)",
-                "transport": "string (any|websocket|polling, default: any)",
+                "transport": "string (websocket|polling|any, default: websocket)",
                 "pre_events": "array<{event, payload?, wait_event?, timeout_ms?}> (optional, sequence emitted on the same connection BEFORE the main event)"
             },
             "inputs": {

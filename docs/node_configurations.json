@@ -1091,9 +1091,9 @@
         "transport": {
           "type": "string",
           "required": false,
-          "default": "any",
-          "description": "The transport type for the Socket.IO connection. 'any' (default) lets the client choose automatically (usually starts with polling, upgrades to WebSocket). 'websocket' forces WebSocket-only. 'polling' forces HTTP long-polling only.",
-          "valid_values": ["any", "websocket", "polling"],
+          "default": "websocket",
+          "description": "The transport type for the Socket.IO connection. 'websocket' (default) connects with a single persistent WebSocket — no polling handshake, safe behind multi-instance load balancers without session affinity (e.g. Cloud Run). 'any' lets the client choose automatically (starts with HTTP long-polling, upgrades to WebSocket) — only use it against servers that require the polling handshake. 'polling' forces HTTP long-polling only.",
+          "valid_values": ["websocket", "any", "polling"],
           "example": "websocket"
         },
         "pre_events": {

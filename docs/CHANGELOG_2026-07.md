@@ -35,3 +35,20 @@ Una sección por feature. Cada sección contiene:
 - Schema: [`docs/node_as_tools_reference.json`](node_as_tools_reference.json) (`gsheets_run_python` marcado `deprecated`)
 
 **Estado.** done (Fase 1 — soft-deprecation). Fase 2 (borrado) pendiente y gated.
+
+---
+
+## 2. `socketio_request` — transporte default `websocket` + log de disconnect fallido
+
+**Qué cambió.** El nodo `socketio_request` ahora conecta por **WebSocket por default** (`transport: "websocket"`); antes el default era `"any"` (HTTP long-polling primero + upgrade). Además, un `disconnect()` fallido ya no se descarta en silencio — se loggea `[SocketIoNode] ⚠ disconnect failed: …` (2 call sites: cierre normal y aborto por pre-event fallido).
+
+**Por qué importa.** Origen: handoff de ADP 2026-07-04. El gateway `canvas` de ADP corre en Cloud Run con hasta 10 instancias **sin session affinity**; con polling-first, cada request HTTP de una misma sesión Engine.IO puede aterrizar en otra instancia que no la conoce → `⚠ server error event: EngineIO Error` recurrente (~cada 4-5 s) en los logs del worker. Con websocket-only hay una sola conexión persistente y el problema desaparece. Bonus: este cambio es prerequisito para que ADP pueda activar `CANVAS_TRANSPORT_WS_ONLY=true` (con polling-first activo, ese flag rechazaría el handshake). El log del disconnect da visibilidad a la conexión zombi que quedaba latiendo errores cuando el paquete DISCONNECT de polling aterrizaba en la instancia equivocada.
+
+**Semántica sin cambio.** Emit + ack / wait_event / pre_events / timeouts / envelope de salida — idénticos en ambos transportes. Los operadores que necesiten polling-first pueden fijar `transport: "any"` explícitamente (opt-out de 1 línea). Ningún grafo del repo dependía del default `"any"`.
+
+**Documentación de referencia.**
+- Dev guide: [`docs/developer_guide/21_socketio_node.md`](developer_guide/21_socketio_node.md) (tabla de config + nueva sección de troubleshooting "Recurring EngineIO Error")
+- Schema: [`docs/node_configurations.json`](node_configurations.json) (`transport.default: "websocket"`)
+- Tools reference: [`docs/node_as_tools_reference.json`](node_as_tools_reference.json) (`socketio_request.special_behaviors` + `transport` fijado en los ejemplos de node_schema)
+
+**Estado.** done.

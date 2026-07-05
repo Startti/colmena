@@ -32,7 +32,7 @@ All config fields support `${VAR_NAME}` environment variable resolution in strin
 | `cookies` | string | No | `null` | Cookie string sent as `Cookie` header (shorthand for auth) |
 | `wait_event` | string | No | `null` | If set, listen for this server event instead of using ack callback |
 | `timeout_ms` | integer | No | `10000` | Timeout in ms for the response |
-| `transport` | string | No | `"any"` | Transport type: `"any"`, `"websocket"`, or `"polling"` |
+| `transport` | string | No | `"websocket"` | Transport type: `"websocket"` (default — single persistent connection), `"any"` (polling-first + upgrade), or `"polling"` |
 | `pre_events` | array | No | `[]` | Sequence of events emitted on the SAME connection BEFORE the main event. See [Pre-events](#pre-events-multi-event-sequence-on-the-same-connection) |
 
 ---
@@ -476,6 +476,21 @@ A graph where an LLM agent uses `socketio_request` as a tool via `tool_configura
 **Cause:** The Socket.IO handshake failed (wrong URL, CORS, or transport mismatch).
 
 **Solutions:**
-- Try `"transport": "polling"` — some servers don't support WebSocket upgrades
+- Try `"transport": "any"` or `"transport": "polling"` — some servers don't accept direct WebSocket connections (the default is `"websocket"`)
 - Check if the URL includes the correct path (some servers use `/socket.io/` as the default path)
 - Verify network connectivity and firewall rules
+
+### Recurring `EngineIO Error` events with `transport: "any"` or `"polling"`
+
+**Cause:** HTTP long-polling requires every request of a session to reach the SAME
+server instance. Behind a multi-instance load balancer WITHOUT session affinity
+(e.g. Cloud Run with multiple instances), successive polling requests can land on
+different instances that don't know the Engine.IO session → the client surfaces
+recurring `⚠ server error event: Text([String("EngineIO Error")])` lines (these
+are client-side transport errors, not events emitted by your server). A failed
+polling disconnect can also leave the engine.io task half-open — the node now
+logs `⚠ disconnect failed: …` when that happens.
+
+**Solution:** use the default `"transport": "websocket"` — a single persistent
+connection has no per-request stickiness requirement. If you must keep polling,
+enable session affinity on the load balancer.
