@@ -421,6 +421,7 @@
       "see_also": "docs/developer_guide/21_socketio_node.md — full guide with config reference, response patterns, pre_events, and troubleshooting.",
       "special_behaviors": [
         "Stateless per execution: each tool call opens a fresh Socket.IO connection, emits, collects the response, and disconnects.",
+        "Transport defaults to 'websocket' (single persistent connection). This is the safe choice behind multi-instance load balancers WITHOUT session affinity (e.g. Cloud Run): the polling-first handshake of transport 'any' can land successive HTTP requests on different instances and fail with 'EngineIO Error'. Only set transport: 'any' for servers that require the polling handshake.",
         "Two response patterns: ack mode (default — server replies via the Socket.IO acknowledgment callback) or wait-event mode (set 'wait_event' to listen for a separate named server event).",
         "All string values support '${ENV_VAR}' resolution, including strings nested inside the payload (resolved recursively).",
         "Errors are returned as an envelope, not exceptions: { success: false, event, error, exception? }. This lets downstream nodes branch on success.",
@@ -438,6 +439,7 @@
               "node_schema": {
                 "url":        { "type": "string",  "fixed": "${ADP_API_URL}" },
                 "namespace":  { "type": "string",  "fixed": "/canvas" },
+                "transport":  { "type": "string",  "fixed": "websocket" },
                 "event":      { "type": "string",  "fixed": "load_canvas_state" },
                 "wait_event": { "type": "string",  "fixed": "canvas_state_loaded" },
                 "cookies":    { "type": "string",  "fixed": "__Secure-better-auth.session_token=${ADP_SESSION_TOKEN}" },
@@ -463,6 +465,7 @@
               "node_schema": {
                 "url":        { "type": "string",  "fixed": "${ADP_API_URL}" },
                 "namespace":  { "type": "string",  "fixed": "/canvas" },
+                "transport":  { "type": "string",  "fixed": "websocket" },
                 "event":      { "type": "string",  "fixed": "create_node" },
                 "cookies":    { "type": "string",  "fixed": "__Secure-better-auth.session_token=${ADP_SESSION_TOKEN}" },
                 "timeout_ms": { "type": "integer", "fixed": 15000 },

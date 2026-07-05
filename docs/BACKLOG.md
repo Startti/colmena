@@ -6,6 +6,16 @@ Si vas a empezar a trabajar en algo de acá, sacalo de esta lista y agregalo al 
 
 ---
 
+## `socketio_request` — reuso de conexión por run (2026-07-04)
+
+**Origen:** handoff de ADP 2026-07-04 (mismo incidente que PR #145 — `EngineIO Error` en el gateway canvas). El nodo es stateless por diseño: cada tool call abre una conexión Socket.IO fresca, emite, y desconecta. Con agentes que hacen N ops (`artifact_read`/`write`, `document_read`/`write`) eso significa N handshakes por run — churn + latencia por op.
+
+**Qué haría falta:** pool/caché de conexiones keyed por `(url, namespace, headers/cookies)` con scope de run (service container o `DagToolExecutor`), cierre limpio al terminar el run, y rework del registro de handlers de `wait_event` (hoy se registran en tiempo de builder, por conexión — un cliente reusado entre ops con distintos `wait_event` necesita enrutamiento dinámico; el mapa `WaitSlots` ya enruta por nombre, el registro es lo estático).
+
+**Trigger:** si tras PR #145 (websocket default) + session affinity en ADP la latencia por op del agente-creador sigue siendo un problema medible, o si ADP lo vuelve a pedir. No urgente: PR #145 elimina el ruido de `EngineIO Error`; esto es solo optimización de latencia.
+
+---
+
 ## Liveness mid-run (PR #144) — follow-ups (2026-07-04)
 
 Contexto: PR #144 agregó heartbeat `Progress` + idle watchdog al loop por-nodo de
