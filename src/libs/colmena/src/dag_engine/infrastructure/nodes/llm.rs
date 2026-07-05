@@ -370,6 +370,31 @@ pub struct LlmNode {
 }
 
 impl LlmNode {
+    /// Select the source value for the prompt: explicit `prompt` (inputs → config),
+    /// falling back to `task` (inputs → config) when `prompt` is absent **or blank**.
+    ///
+    /// The subgraph-as-tool convention passes the instruction as `task`; when the
+    /// child graph fronts the `llm_call` with an `input` node, the incoming edge
+    /// injects `prompt: null` into the child. A plain
+    /// `inputs.get("prompt").or_else(|| inputs.get("task"))` chain does NOT fall
+    /// through in that case, because `Option::or_else` only fires on `None`, never
+    /// on `Some(Value::Null)` — so the node saw a null prompt, was skipped, and
+    /// returned `null` without ever delegating. Treating a blank prompt (null or
+    /// empty object) as "no prompt" realizes the documented intent of the `task`
+    /// fallback. A non-empty object prompt is preserved (the synthesizer pattern
+    /// intentionally passes a JSON object/array as the prompt).
+    fn resolve_prompt_or_task<'a>(inputs: &'a NodeInputs, config: &'a Value) -> Option<&'a Value> {
+        fn is_present(v: &Value) -> bool {
+            !(v.is_null() || matches!(v, Value::Object(o) if o.is_empty()))
+        }
+        inputs
+            .get("prompt")
+            .filter(|v| is_present(v))
+            .or_else(|| config.get("prompt").filter(|v| is_present(v)))
+            .or_else(|| inputs.get("task"))
+            .or_else(|| config.get("task"))
+    }
+
     /// Resolves whether user-facing token streaming is enabled for this
     /// `llm_call`. Precedence: `inputs.stream` > `config.stream` > default
     /// `true`. Only an explicit `false` disables streaming — visibility is
@@ -1229,11 +1254,10 @@ impl ExecutableNode for LlmNode {
         // On resume, the prompt may be missing/empty — that is allowed.
         let prompt_raw_str: String;
         let prompt: &str = {
-            let val = inputs
-                .get("prompt")
-                .or_else(|| config.get("prompt"))
-                .or_else(|| inputs.get("task")) // Added fallback to "task"
-                .or_else(|| config.get("task")); // Added fallback to "task"
+            // Prompt precedence with a blank-aware fallback to `task` (see
+            // `resolve_prompt_or_task`): a `prompt: null` injected by a child
+            // graph's input edge must not defeat the subgraph-as-tool `task`.
+            let val = Self::resolve_prompt_or_task(inputs, config);
             match val {
                 Some(Value::String(s)) => {
                     prompt_raw_str = Self::resolve_template_vars(s, inputs);
@@ -4129,6 +4153,76 @@ fn build_initial_user_message(
     _resolved_files: &[crate::llm::domain::FileData],
 ) -> Result<LlmMessage, crate::llm::domain::LlmError> {
     LlmMessage::user(prompt.to_string())
+}
+
+#[cfg(test)]
+mod prompt_or_task_fallback_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// Regression: a child `llm_call` fronted by an `input` node inside a
+    /// subgraph-as-tool receives `prompt: null` from the incoming edge. The
+    /// `task` fallback MUST still fire (it did not before, because
+    /// `Option::or_else` ignores `Some(Value::Null)`), otherwise the node is
+    /// skipped and returns null without delegating.
+    #[test]
+    fn null_prompt_falls_through_to_task() {
+        let mut inputs = NodeInputs::new();
+        inputs.insert("prompt".to_string(), Value::Null);
+        inputs.insert("task".to_string(), json!("multiplicar 6 por 7"));
+        let empty = json!({});
+        let got = LlmNode::resolve_prompt_or_task(&inputs, &empty);
+        assert_eq!(got, Some(&json!("multiplicar 6 por 7")));
+    }
+
+    #[test]
+    fn empty_object_prompt_falls_through_to_task() {
+        let mut inputs = NodeInputs::new();
+        inputs.insert("prompt".to_string(), json!({}));
+        inputs.insert("task".to_string(), json!("do the thing"));
+        let empty = json!({});
+        let got = LlmNode::resolve_prompt_or_task(&inputs, &empty);
+        assert_eq!(got, Some(&json!("do the thing")));
+    }
+
+    #[test]
+    fn explicit_string_prompt_wins_over_task() {
+        let mut inputs = NodeInputs::new();
+        inputs.insert("prompt".to_string(), json!("real prompt"));
+        inputs.insert("task".to_string(), json!("ignored task"));
+        let empty = json!({});
+        let got = LlmNode::resolve_prompt_or_task(&inputs, &empty);
+        assert_eq!(got, Some(&json!("real prompt")));
+    }
+
+    #[test]
+    fn non_empty_object_prompt_is_preserved() {
+        // Synthesizer pattern: a JSON object prompt is intentional and must not
+        // be treated as blank.
+        let mut inputs = NodeInputs::new();
+        let obj = json!({ "results": [1, 2, 3] });
+        inputs.insert("prompt".to_string(), obj.clone());
+        inputs.insert("task".to_string(), json!("ignored"));
+        let empty = json!({});
+        let got = LlmNode::resolve_prompt_or_task(&inputs, &empty);
+        assert_eq!(got, Some(&obj));
+    }
+
+    #[test]
+    fn task_from_config_when_inputs_empty() {
+        let inputs = NodeInputs::new();
+        let config = json!({ "task": "config task" });
+        let got = LlmNode::resolve_prompt_or_task(&inputs, &config);
+        assert_eq!(got, Some(&json!("config task")));
+    }
+
+    #[test]
+    fn none_when_no_prompt_and_no_task() {
+        let inputs = NodeInputs::new();
+        let empty = json!({});
+        let got = LlmNode::resolve_prompt_or_task(&inputs, &empty);
+        assert_eq!(got, None);
+    }
 }
 
 #[cfg(test)]
