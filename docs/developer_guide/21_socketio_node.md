@@ -65,6 +65,8 @@ All input ports mirror the config fields. **Inputs take priority over config** �
 | `response` | any | The server response data (**default output port**) |
 | `pre_responses` | array | Only present when `pre_events` were configured and at least one completed. Items: `{ event, response }` in execution order |
 | `failed_pre_event` | string | Only present when a pre-event failed. The main event was NOT emitted in this case |
+| `transport_errors` | array | Only on failure — aggregated transport-level errors captured during the operation (e.g. `"EngineIO Error (x4)"`) |
+| `advice` | string | Only alongside `transport_errors` — actionable guidance for the caller/LLM |
 
 **Default output:** `response` — downstream nodes connected with implicit edges receive this value.
 
@@ -494,3 +496,9 @@ logs `⚠ disconnect failed: …` when that happens.
 **Solution:** use the default `"transport": "websocket"` — a single persistent
 connection has no per-request stickiness requirement. If you must keep polling,
 enable session affinity on the load balancer.
+
+Since 2026-07-05 the node also: (1) attaches `transport_errors` + `advice` to the
+failure envelope when transport errors occur DURING an operation, so the LLM can
+distinguish "server slow" from "connection broken" and inform the user; and
+(2) silences all handler logging for a connection once its execution finishes —
+zombie connections leaked by an incomplete disconnect no longer spam the logs.

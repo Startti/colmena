@@ -1151,7 +1151,9 @@
           "error": "string (human-readable error message)",
           "exception": "any (optional, present only for server-side exceptions caught via the 'exception' event)",
           "failed_pre_event": "string (optional, present when a pre_event failed — the main event was NOT emitted)",
-          "pre_responses": "array (optional, present when at least one pre_event completed)"
+          "pre_responses": "array (optional, present when at least one pre_event completed)",
+          "transport_errors": "array<string> (optional, present only when transport-level errors occurred during the operation — aggregated, e.g. \"EngineIO Error (x4)\")",
+          "advice": "string (optional, present alongside transport_errors — actionable guidance for the caller/LLM)"
         }
       },
       "default_input": null,

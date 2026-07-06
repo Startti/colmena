@@ -55,7 +55,22 @@ Una sección por feature. Cada sección contiene:
 
 ---
 
-## 3. Visibilidad total anidada + campos `level`/`path` + red de seguridad de liveness (dos relojes)
+## 3. `socketio_request` — visibilidad de errores de transporte para el LLM + mute de conexiones zombi
+
+**Qué cambió.** (1) Cuando una operación falla, el envelope de error ahora incluye `transport_errors` (errores de transporte capturados durante ESA operación, agregados — p.ej. `"EngineIO Error (x4)"`) y `advice` (guía accionable para el LLM: la conexión está inestable, reintentar no ayuda, informar al usuario). El envelope ya viajaba al LLM (tool message) y por SSE (`tool-output-available`), así que el modelo ahora puede distinguir "server lento" de "conexión rota" sin ningún cambio en el executor ni en ADP. (2) Todos los handlers de la conexión se gatean con un flag `active` que se apaga al desconectar: las conexiones zombi que `rust_socketio 0.6` filtra tras un disconnect incompleto (su task de fondo sigue vivo consumiendo el stream) ya no pueden imprimir `EngineIO Error` infinitos en los logs del worker.
+
+**Por qué importa.** Follow-up del incidente ADP 2026-07-04 (PR #145): websocket-only eliminó la causa polling/stickiness, pero los logs del worker (revision 00083) mostraron que el ruido residual viene del task de fondo del crate que no muere tras `disconnect()`. En éxito el buffer se descarta (no se alarma al modelo por ruido irrelevante).
+
+**Documentación de referencia.**
+- Plan: [`docs/superpowers/plans/2026-07-05-socketio-transport-error-visibility.md`](superpowers/plans/2026-07-05-socketio-transport-error-visibility.md)
+- Dev guide: [`docs/developer_guide/21_socketio_node.md`](developer_guide/21_socketio_node.md)
+- Tools reference: [`docs/node_as_tools_reference.json`](node_as_tools_reference.json)
+
+**Estado.** done.
+
+---
+
+## 4. Visibilidad total anidada + campos `level`/`path` + red de seguridad de liveness (dos relojes)
 
 **Qué cambió.** El stream SSE ahora forwardea la actividad de sub-agentes anidados a **cualquier profundidad** (subgraph-as-tool → orchestrator → sub-agentes hijos → sus tools), y cada frame lleva dos campos nuevos **aditivos**: `level` (profundidad de anidamiento; `0` = agente principal) y `path` (linaje `padre>…>nodo`).
 

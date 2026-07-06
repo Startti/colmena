@@ -27,6 +27,8 @@
 //! Returns `{ "success": bool, "event": string, "response": Value }`.
 //! With `pre_events`, also includes `pre_responses: [{event, response}, ...]`.
 //! On pre-event failure: `{ "success": false, "event", "failed_pre_event", "error", "pre_responses" }`.
+//! On failure the envelope may also include `transport_errors` (aggregated
+//! transport-level errors captured during the operation) and `advice`.
 //! The default output port is `response`.
 
 use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
@@ -36,6 +38,7 @@ use rust_socketio::{Payload, TransportType};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::error::Error as StdError;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, Mutex};
@@ -44,6 +47,15 @@ use tokio::sync::{mpsc, oneshot, Mutex};
 /// One entry exists only while a step is awaiting that event; the handler removes it
 /// on fire and the step removes it on timeout/exception cleanup.
 type WaitSlots = Arc<Mutex<HashMap<String, oneshot::Sender<Value>>>>;
+
+/// Max raw transport-error messages captured per execution (drop beyond).
+const MAX_TRANSPORT_ERRORS: usize = 10;
+
+/// LLM-facing advice attached to failure envelopes that carry transport errors.
+const TRANSPORT_ERROR_ADVICE: &str = "Transport-level errors occurred during this operation: \
+    the connection to the server is unstable or the server dropped the session. Retrying the \
+    same call is unlikely to help while these errors persist — if the problem continues, \
+    inform the user that the realtime backend appears to be unreachable.";
 
 /// One entry of the `pre_events` array.
 #[derive(Debug)]
@@ -121,6 +133,48 @@ impl SocketIoNode {
             #[allow(deprecated)]
             Payload::String(s) => serde_json::from_str(&s).unwrap_or(Value::String(s)),
         }
+    }
+
+    /// Render a payload as a compact single-line string for logs/envelopes.
+    fn payload_to_compact_string(payload: Payload) -> String {
+        match Self::payload_to_value(payload) {
+            Value::String(s) => s,
+            other => other.to_string(),
+        }
+    }
+
+    /// Collapse duplicate transport-error messages preserving first-seen
+    /// order: `["E", "E", "F", "E"]` → `["E (x3)", "F"]`.
+    fn summarize_transport_errors(raw: &[String]) -> Vec<String> {
+        let mut order: Vec<&String> = Vec::new();
+        let mut counts: HashMap<&String, usize> = HashMap::new();
+        for msg in raw {
+            if !counts.contains_key(msg) {
+                order.push(msg);
+            }
+            *counts.entry(msg).or_insert(0) += 1;
+        }
+        order
+            .into_iter()
+            .map(|msg| {
+                let n = counts[msg];
+                if n > 1 {
+                    format!("{} (x{})", msg, n)
+                } else {
+                    msg.clone()
+                }
+            })
+            .collect()
+    }
+
+    /// Attach `transport_errors` + `advice` to a failure envelope. No-op when
+    /// no transport errors were captured — success envelopes never call this.
+    fn attach_transport_context(envelope: &mut Value, raw_errors: &[String]) {
+        if raw_errors.is_empty() {
+            return;
+        }
+        envelope["transport_errors"] = json!(Self::summarize_transport_errors(raw_errors));
+        envelope["advice"] = json!(TRANSPORT_ERROR_ADVICE);
     }
 
     /// Helper to read a string field from inputs (priority) or config.
@@ -403,40 +457,71 @@ impl ExecutableNode for SocketIoNode {
             }
         }
 
-        // Lifecycle/debug handlers
-        builder = builder.on("error", |payload, _client| {
-            async move {
-                println!("[SocketIoNode] ⚠ server error event: {:?}", payload);
-            }
-            .boxed()
-        });
-        builder = builder.on("connect_error", |payload, _client| {
-            async move {
-                println!("[SocketIoNode] ⚠ connect_error event: {:?}", payload);
-            }
-            .boxed()
-        });
-        builder = builder.on("disconnect", |payload, _client| {
-            async move {
-                println!("[SocketIoNode] ⚠ disconnect event: {:?}", payload);
-            }
-            .boxed()
-        });
+        // ---- 4b. Execution-window gate + transport-error capture ----
+        // `active` is true only while this execution owns the connection.
+        // rust_socketio's background task can outlive disconnect() (it keeps
+        // polling and surfacing "EngineIO Error" events); gating every handler
+        // on `active` makes those zombie connections silent. `transport_errors`
+        // collects error events fired DURING the window so op failures can
+        // tell the LLM WHY (unstable connection vs. slow server).
+        let active = Arc::new(AtomicBool::new(true));
+        let transport_errors: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+
+        // Lifecycle/debug handlers — all gated on `active` (see 4b).
+        for evt in ["error", "connect_error"] {
+            let active = active.clone();
+            let errors = transport_errors.clone();
+            builder = builder.on(evt, move |payload, _client| {
+                let active = active.clone();
+                let errors = errors.clone();
+                async move {
+                    if !active.load(Ordering::Relaxed) {
+                        return; // stale connection from a finished execution
+                    }
+                    let msg = Self::payload_to_compact_string(payload);
+                    println!("[SocketIoNode] ⚠ transport error event: {}", msg);
+                    let mut buf = errors.lock().await;
+                    if buf.len() < MAX_TRANSPORT_ERRORS {
+                        buf.push(msg);
+                    }
+                }
+                .boxed()
+            });
+        }
+        {
+            let active = active.clone();
+            builder = builder.on("disconnect", move |payload, _client| {
+                let active = active.clone();
+                async move {
+                    if active.load(Ordering::Relaxed) {
+                        println!("[SocketIoNode] ⚠ disconnect event: {:?}", payload);
+                    }
+                }
+                .boxed()
+            });
+        }
 
         // ---- 5. Exception channel (mpsc, drained per step) ----
         let (exc_tx, mut exc_rx) = mpsc::unbounded_channel::<Value>();
-        builder = builder.on("exception", move |payload, _client| {
-            let exc_tx = exc_tx.clone();
-            async move {
-                let val = Self::payload_to_value(payload);
-                println!(
-                    "[SocketIoNode] ⚠ exception: {}",
-                    serde_json::to_string(&val).unwrap_or_else(|_| format!("{:?}", val))
-                );
-                let _ = exc_tx.send(val);
-            }
-            .boxed()
-        });
+        {
+            let active = active.clone();
+            builder = builder.on("exception", move |payload, _client| {
+                let exc_tx = exc_tx.clone();
+                let active = active.clone();
+                async move {
+                    if !active.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    let val = Self::payload_to_value(payload);
+                    println!(
+                        "[SocketIoNode] ⚠ exception: {}",
+                        serde_json::to_string(&val).unwrap_or_else(|_| format!("{:?}", val))
+                    );
+                    let _ = exc_tx.send(val);
+                }
+                .boxed()
+            });
+        }
 
         // ---- 6. Wait-event routing: register one handler per unique name ----
         let wait_slots: WaitSlots = Arc::new(Mutex::new(HashMap::new()));
@@ -459,35 +544,56 @@ impl ExecutableNode for SocketIoNode {
         }
 
         // ---- 7. Catch-all debug handler ----
-        builder = builder.on_any(move |event, payload, _client| {
-            async move {
-                let preview = match &payload {
-                    Payload::Text(vals) => {
-                        let s = format!("{:?}", vals);
-                        if s.len() > 500 {
-                            format!("{}…", &s[..500])
-                        } else {
-                            s
-                        }
+        {
+            let active = active.clone();
+            builder = builder.on_any(move |event, payload, _client| {
+                let active = active.clone();
+                async move {
+                    if !active.load(Ordering::Relaxed) {
+                        return;
                     }
-                    _ => format!("{:?}", payload),
-                };
-                println!("[SocketIoNode] 📡 event '{}': {}", event, preview);
-            }
-            .boxed()
-        });
+                    let preview = match &payload {
+                        Payload::Text(vals) => {
+                            let s = format!("{:?}", vals);
+                            if s.len() > 500 {
+                                format!("{}…", &s[..500])
+                            } else {
+                                s
+                            }
+                        }
+                        _ => format!("{:?}", payload),
+                    };
+                    println!("[SocketIoNode] 📡 event '{}': {}", event, preview);
+                }
+                .boxed()
+            });
+        }
 
         // ---- 8. Connect ----
         println!(
             "[SocketIoNode] connecting to {} (namespace: {}, transport: {})",
             url, namespace, transport
         );
-        let client = builder.connect().await.map_err(|e| {
-            format!(
-                "socketio_request: failed to connect to {} (namespace {}): {}",
-                url, namespace, e
-            )
-        })?;
+        let client = match builder.connect().await {
+            Ok(c) => c,
+            Err(e) => {
+                active.store(false, Ordering::Relaxed);
+                let captured = transport_errors.lock().await;
+                let extra = if captured.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        " (transport errors during connect: {})",
+                        Self::summarize_transport_errors(&captured).join("; ")
+                    )
+                };
+                return Err(format!(
+                    "socketio_request: failed to connect to {} (namespace {}): {}{}",
+                    url, namespace, e, extra
+                )
+                .into());
+            }
+        };
 
         // Small delay to let the connection fully establish.
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -517,16 +623,19 @@ impl ExecutableNode for SocketIoNode {
                 }
                 Err(msg) => {
                     println!("[SocketIoNode] ✗ pre_event '{}' failed: {}", pe.event, msg);
+                    active.store(false, Ordering::Relaxed);
                     if let Err(e) = client.disconnect().await {
                         println!("[SocketIoNode] ⚠ disconnect failed: {}", e);
                     }
-                    return Ok(json!({
+                    let mut out = json!({
                         "success": false,
                         "event": event_name,
                         "failed_pre_event": pe.event,
                         "error": msg,
                         "pre_responses": pre_responses,
-                    }));
+                    });
+                    Self::attach_transport_context(&mut out, &transport_errors.lock().await);
+                    return Ok(out);
                 }
             }
         }
@@ -545,9 +654,10 @@ impl ExecutableNode for SocketIoNode {
         .await;
 
         // ---- 11. Disconnect (always) ----
-        // A failed disconnect leaves the underlying engine.io task half-open
-        // (it keeps polling/pinging and surfaces recurring "EngineIO Error"
-        // events) — log it so the leak is visible in worker logs.
+        // Flip `active` first so a leaked background task (rust_socketio can
+        // keep polling after an incomplete disconnect) goes silent instead of
+        // spamming logs. The disconnect result itself is still logged.
+        active.store(false, Ordering::Relaxed);
         if let Err(e) = client.disconnect().await {
             println!("[SocketIoNode] ⚠ disconnect failed: {}", e);
         }
@@ -582,6 +692,7 @@ impl ExecutableNode for SocketIoNode {
                 if let Some(pre) = pre_responses_val {
                     out["pre_responses"] = pre;
                 }
+                Self::attach_transport_context(&mut out, &transport_errors.lock().await);
                 Ok(out)
             }
         }
@@ -632,7 +743,9 @@ impl ExecutableNode for SocketIoNode {
                 "response": "any",
                 "pre_responses": "array<{event, response}> (only present when pre_events were used)",
                 "failed_pre_event": "string (only present when a pre_event failed)",
-                "error": "string (only present on failure)"
+                "error": "string (only present on failure)",
+                "transport_errors": "array<string> (only on failure, when transport-level errors occurred during the operation — aggregated, e.g. \"EngineIO Error (x4)\")",
+                "advice": "string (only present alongside transport_errors — actionable guidance for the caller/LLM)"
             }
         })
     }
@@ -742,5 +855,67 @@ mod tests {
         assert_eq!(resolved["list"][0], "my-room");
         assert_eq!(resolved["list"][1], 42);
         std::env::remove_var("TEST_PRE_EVENT_VAR");
+    }
+
+    #[test]
+    fn summarize_transport_errors_empty() {
+        let out = SocketIoNode::summarize_transport_errors(&[]);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn summarize_transport_errors_single() {
+        let raw = vec!["EngineIO Error".to_string()];
+        let out = SocketIoNode::summarize_transport_errors(&raw);
+        assert_eq!(out, vec!["EngineIO Error".to_string()]);
+    }
+
+    #[test]
+    fn summarize_transport_errors_aggregates_preserving_order() {
+        let raw = vec![
+            "EngineIO Error".to_string(),
+            "EngineIO Error".to_string(),
+            "Connection reset".to_string(),
+            "EngineIO Error".to_string(),
+        ];
+        let out = SocketIoNode::summarize_transport_errors(&raw);
+        assert_eq!(
+            out,
+            vec![
+                "EngineIO Error (x3)".to_string(),
+                "Connection reset".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn attach_transport_context_noop_when_empty() {
+        let mut env = json!({ "success": false, "event": "ping", "error": "Timeout" });
+        SocketIoNode::attach_transport_context(&mut env, &[]);
+        assert!(env.get("transport_errors").is_none());
+        assert!(env.get("advice").is_none());
+    }
+
+    #[test]
+    fn attach_transport_context_adds_fields() {
+        let mut env = json!({ "success": false, "event": "ping", "error": "Timeout" });
+        let raw = vec!["EngineIO Error".to_string(), "EngineIO Error".to_string()];
+        SocketIoNode::attach_transport_context(&mut env, &raw);
+        assert_eq!(env["transport_errors"], json!(["EngineIO Error (x2)"]));
+        assert_eq!(env["advice"], json!(TRANSPORT_ERROR_ADVICE));
+        // Pre-existing fields untouched
+        assert_eq!(env["error"], json!("Timeout"));
+    }
+
+    #[test]
+    fn payload_to_compact_string_unwraps_single_text() {
+        let p = Payload::Text(vec![Value::String("EngineIO Error".to_string())]);
+        assert_eq!(SocketIoNode::payload_to_compact_string(p), "EngineIO Error");
+    }
+
+    #[test]
+    fn payload_to_compact_string_serializes_object() {
+        let p = Payload::Text(vec![json!({ "code": 1 })]);
+        assert_eq!(SocketIoNode::payload_to_compact_string(p), "{\"code\":1}");
     }
 }
