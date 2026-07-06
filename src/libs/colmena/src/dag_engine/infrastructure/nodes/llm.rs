@@ -148,6 +148,32 @@ pub(crate) fn filter_enabled_tools(
         .collect()
 }
 
+/// De-duplicate tool definitions by `name`, keeping the **first** occurrence and
+/// preserving order.
+///
+/// The executor lists folded `tool_configurations` **before** registry
+/// built-ins (see `DagToolExecutor::available_tools` — "Add configured tools
+/// first"), and [`filter_enabled_tools`] preserves that order, so first-wins is
+/// exactly config-wins.
+///
+/// Without this, a folded tool whose `name` shadows a built-in leaves BOTH in
+/// the list: e.g. a `python_script` named `"add"` declared under a map key like
+/// `"k"` (key ≠ name, which the frontend produces with cuid keys) is included by
+/// its `name`, and the built-in `add` (registered in `registry.rs`) is included
+/// too — two `ToolDefinition`s with `name == "add"`. Gemini then rejects the
+/// request with `Duplicate function declaration found: add`. Deduping the final
+/// list makes the collision impossible regardless of key/builtin, and keeps the
+/// user's configured tool.
+pub(crate) fn dedup_tools_by_name(
+    tools: Vec<crate::llm::domain::ToolDefinition>,
+) -> Vec<crate::llm::domain::ToolDefinition> {
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    tools
+        .into_iter()
+        .filter(|t| seen.insert(t.name.clone()))
+        .collect()
+}
+
 /// Resolve an `enabled_tools` config into `(includes, excludes)` for a
 /// closed bundle of synthetic tools (gsheets / gdocs).
 ///
@@ -3218,6 +3244,13 @@ impl ExecutableNode for LlmNode {
                 None
             };
 
+        // Collapse any duplicate tool names before the list reaches the provider.
+        // A folded `tool_configurations` entry whose `name` shadows a built-in
+        // (key ≠ name, eager) would otherwise leave two declarations with the same
+        // name → Gemini `Duplicate function declaration`. Config-wins: the folded
+        // tool is listed first by the executor, so first-occurrence dedup keeps it.
+        tools = dedup_tools_by_name(tools);
+
         // Build a dynamic tools_provider closure when lazy mode is on. The closure
         // is called fresh at each ReAct iteration: it derives `discovered_set` from
         // the current message history (rule 1: prior describe_tool calls; rule 2:
@@ -5303,15 +5336,21 @@ mod filter_enabled_tools_tests {
     //!     parity with `tool_configurations`).
     //!   - `configured_aliases` are auto-enabled (no need to also list them
     //!     under `enabled_tools`).
-    use super::filter_enabled_tools;
+    use super::{dedup_tools_by_name, filter_enabled_tools};
     use crate::llm::domain::{ToolDefinition, ToolParameters};
     use serde_json::json;
     use std::collections::{HashMap, HashSet};
 
     fn td(name: &str) -> ToolDefinition {
+        td_desc(name, &format!("desc for {}", name))
+    }
+
+    /// Like `td` but with an explicit description, so two same-named tools (a
+    /// folded config vs a built-in) can be told apart in assertions.
+    fn td_desc(name: &str, desc: &str) -> ToolDefinition {
         ToolDefinition::new(
             name.to_string(),
-            format!("desc for {}", name),
+            desc.to_string(),
             ToolParameters {
                 schema_type: "object".to_string(),
                 properties: HashMap::new(),
@@ -5329,6 +5368,84 @@ mod filter_enabled_tools_tests {
             td("api_explorer__list_endpoints"),
             td("current_time"),
         ]
+    }
+
+    // ---- Regression: folded tool shadowing a built-in must not duplicate ----
+    // See docs/BUG_folded_tool_shadows_builtin_duplicate_declaration.md.
+
+    #[test]
+    fn folded_tool_shadowing_builtin_dedups_to_single_config_wins() {
+        // `available_tools()` lists folded tool_configurations FIRST, then
+        // registry built-ins. Here a folded `add` (map key "k" ≠ name) and the
+        // built-in `add` both survive the filter (name "add" ∈ enabled_tools).
+        // The final dedup must collapse them to ONE, keeping the folded (config).
+        let all_tools = vec![
+            td_desc("add", "folded"),  // from tool_configurations (name="add", key="k")
+            td_desc("add", "builtin"), // from registry.rs
+            td("multiply"),            // unrelated built-in, not enabled
+        ];
+        let enabled = json!(["add"]);
+        let configured: HashSet<String> = ["k".to_string()].into_iter().collect();
+
+        let filtered = filter_enabled_tools(all_tools, Some(&enabled), &configured);
+        // Both "add" survive the filter (this is the bug source).
+        assert_eq!(
+            filtered.iter().filter(|t| t.name == "add").count(),
+            2,
+            "pre-dedup both add definitions are present"
+        );
+
+        let deduped = dedup_tools_by_name(filtered);
+        let adds: Vec<&ToolDefinition> = deduped.iter().filter(|t| t.name == "add").collect();
+        assert_eq!(adds.len(), 1, "exactly one `add` after dedup");
+        assert_eq!(
+            adds[0].description, "folded",
+            "config-wins: the folded tool is kept, not the built-in"
+        );
+    }
+
+    #[test]
+    fn key_equals_name_stays_single() {
+        // When key == name, `available_tools()` already yields a single `add`
+        // (the built-in is skipped by its existing key guard). Dedup is a no-op.
+        let all_tools = vec![td_desc("add", "folded")];
+        let enabled = json!(["add"]);
+        let configured: HashSet<String> = ["add".to_string()].into_iter().collect();
+
+        let deduped =
+            dedup_tools_by_name(filter_enabled_tools(all_tools, Some(&enabled), &configured));
+        assert_eq!(deduped.iter().filter(|t| t.name == "add").count(), 1);
+    }
+
+    #[test]
+    fn non_builtin_name_unaffected() {
+        // A folded tool whose name is NOT a built-in never collides → one entry.
+        let all_tools = vec![td_desc("xyzzy", "folded")];
+        let enabled = json!(["xyzzy"]);
+        let configured: HashSet<String> = ["k".to_string()].into_iter().collect();
+
+        let deduped =
+            dedup_tools_by_name(filter_enabled_tools(all_tools, Some(&enabled), &configured));
+        assert_eq!(deduped.len(), 1);
+        assert_eq!(deduped[0].name, "xyzzy");
+    }
+
+    #[test]
+    fn dedup_keeps_first_and_preserves_order() {
+        let out = dedup_tools_by_name(vec![
+            td_desc("a", "first"),
+            td("b"),
+            td_desc("a", "second"),
+            td("c"),
+        ]);
+        let names: Vec<&str> = out.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, vec!["a", "b", "c"], "order preserved, dupes dropped");
+        assert_eq!(out[0].description, "first", "first occurrence kept");
+    }
+
+    #[test]
+    fn dedup_empty_is_empty() {
+        assert!(dedup_tools_by_name(Vec::new()).is_empty());
     }
 
     #[test]
