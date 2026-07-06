@@ -1,0 +1,24 @@
+{
+  "comment": "Repro del bug: folded tool name='add' (builtin) con key 'k' != name + enabled_tools=['add'] eager. Antes del fix: Gemini 'Duplicate function declaration found: add'. Con el fix: corre OK.",
+  "nodes": {
+    "trigger": { "type": "input", "config": { "prompt": "go" } },
+    "top": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google", "model": "gemini-2.5-flash", "api_key": "${GEMINI_API_KEY}",
+        "system_message": "Call the tool 'add' exactly once (its code just sets output=1), then reply DONE.",
+        "enabled_tools": ["add"],
+        "tool_configurations": {
+          "k": {
+            "name": "add", "node_type": "python_script", "description": "adds",
+            "node_schema": {
+              "sandbox_mode": { "fixed": "none" },
+              "code": { "type": "string", "required": true, "description": "python that sets output" }
+            }
+          }
+        }
+      }
+    }
+  },
+  "edges": [{ "from": "trigger", "to": "top" }]
+}
