@@ -17,6 +17,14 @@ _ALLOWED_IMPORTS = {
     'itertools', 'functools', 'string', 'decimal', 'statistics',
     # crdt_doc_run_python additions (subsistema C, 2026-06):
     'pandas', 'numpy', 'scipy',
+    # Request-signing primitives. APIs such as NetSuite TBA, AWS SigV4 or
+    # Shopify webhooks require an HMAC signature computed per request, which is
+    # impossible from a static header. These modules are pure computation plus,
+    # for `secrets`, an OS entropy read — none of them opens a socket or a file.
+    # Sandboxed code still cannot perform the call itself: network modules
+    # (`urllib`, `socket`, `requests`, ...) stay banned, so the signed request
+    # must go out through the `http_request` node, where it remains auditable.
+    'hmac', 'hashlib', 'base64', 'secrets',
 }
 _BANNED_BUILTINS = {'open', 'exec', 'eval', 'compile', '__import__'}
 
@@ -536,5 +544,60 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result, 14);
+    }
+
+    /// Signing primitives must be importable in `restricted` mode: APIs like
+    /// NetSuite TBA or AWS SigV4 require an HMAC signature per request, which
+    /// cannot be expressed as a static header.
+    #[test]
+    fn restricted_allows_signing_primitives() {
+        pyo3::Python::initialize();
+        let code = "import hmac, hashlib, base64, secrets\n\
+                    sig = base64.b64encode(hmac.new(b'k', b'msg', hashlib.sha256).digest()).decode()\n\
+                    output = {'sig': sig, 'nonce_len': len(secrets.token_hex(16))}";
+        let res = execute_sandboxed_helper(code, "restricted", 30, &serde_json::Map::new())
+            .expect("signing primitives must be allowed in restricted mode");
+        let out = res.output.expect("output");
+        assert_eq!(out["nonce_len"], 32);
+        assert!(out["sig"].as_str().unwrap().len() > 20);
+    }
+
+    /// The sandbox must keep granting signing but never network egress: the
+    /// signed request has to leave through `http_request`, not from Python.
+    #[test]
+    fn restricted_still_blocks_network_and_process_modules() {
+        pyo3::Python::initialize();
+        for module in [
+            "urllib",
+            "socket",
+            "requests",
+            "os",
+            "subprocess",
+            "sys",
+            "shutil",
+        ] {
+            let code = format!("import {module}\noutput = 1");
+            let err = execute_sandboxed_helper(&code, "restricted", 30, &serde_json::Map::new())
+                .expect_err(&format!("'{module}' must stay banned in restricted mode"));
+            assert!(
+                err.contains("SandboxViolation"),
+                "expected a sandbox violation for '{module}', got: {err}"
+            );
+        }
+    }
+
+    /// `urllib.parse` must not slip through: the validator matches on the root
+    /// module, so allowing it would also unlock `urllib.request` (network).
+    #[test]
+    fn restricted_blocks_urllib_submodules() {
+        pyo3::Python::initialize();
+        let err = execute_sandboxed_helper(
+            "from urllib.parse import quote\noutput = quote('a b')",
+            "restricted",
+            30,
+            &serde_json::Map::new(),
+        )
+        .expect_err("urllib.parse must stay banned (root module match)");
+        assert!(err.contains("SandboxViolation"), "got: {err}");
     }
 }
