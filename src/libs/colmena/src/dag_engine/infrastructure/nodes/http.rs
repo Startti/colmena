@@ -10,6 +10,8 @@
 //! (string, number, boolean) are automatically appended as URL query parameters.
 //! This is the mechanism that allows `node_schema` container children and `$DYNAMIC`
 //! top-level fields to reach the node as flat inputs.
+//! Engine-internal inputs (`__colmena_*`, `__node*`) are excluded by prefix — they are
+//! bookkeeping for the engine and must never reach an external API.
 //!
 //! ## Outputs
 //! Always returns `{ "status": u16, "body": Value }`.
@@ -224,6 +226,59 @@ fn filename_from_url_path(url: &Url) -> String {
 }
 
 impl HttpNode {
+    /// Keys this node consumes itself; they must never travel as query params.
+    const RESERVED_KEYS: [&'static str; 10] = [
+        "base_url",
+        "endpoint",
+        "method",
+        "headers",
+        "body",
+        "query_params",     // correct key used throughout the codebase
+        "query_parameters", // kept for backward compat
+        "bearer_token",
+        "authorization",
+        "secure", // internal Colmena flag — NEVER send to external APIs
+    ];
+
+    /// True for engine-injected bookkeeping inputs (`__colmena_*`, `__node*`).
+    ///
+    /// Matched by PREFIX rather than listed in [`Self::RESERVED_KEYS`]: that list has to be
+    /// extended by hand every time the engine adds an internal input, and the one that gets
+    /// forgotten leaks silently into the outbound query string. `__colmena_subgraph_depth`
+    /// did exactly that — `DagToolExecutor` injects it into every tool call assuming it is
+    /// "harmless for nodes that ignore this key", but this node forwards unknown primitives
+    /// as query params. APIs that ignore unknown params hid the leak; one that validates
+    /// them rejected the request outright (HTTP 400, the param echoed back as an unexpected
+    /// filter), breaking every tool call of an agent built against it.
+    fn is_engine_internal(key: &str) -> bool {
+        key.starts_with("__colmena") || key.starts_with("__node")
+    }
+
+    /// Collects the leftover inputs that should travel as query params.
+    ///
+    /// Only primitives (string, number, bool) qualify — objects/arrays/nulls are ignored.
+    fn collect_extra_query_params(inputs: &NodeInputs) -> std::collections::HashMap<&str, Value> {
+        let mut extra_params = std::collections::HashMap::new();
+        for (k, v) in inputs {
+            if Self::RESERVED_KEYS.contains(&k.as_str()) || Self::is_engine_internal(k.as_str()) {
+                continue;
+            }
+            match v {
+                Value::String(s) => {
+                    let s_resolved = Self::resolve_env_vars(s).unwrap_or(s.to_string());
+                    extra_params.insert(k.as_str(), Value::String(s_resolved));
+                }
+                Value::Number(_) | Value::Bool(_) => {
+                    extra_params.insert(k.as_str(), v.clone());
+                }
+                _ => {
+                    // Ignore Objects, Arrays, Nulls
+                }
+            }
+        }
+        extra_params
+    }
+
     pub fn new() -> Self {
         Self {
             storage: None,
@@ -952,41 +1007,7 @@ impl ExecutableNode for HttpNode {
         }
 
         // Collect extra inputs as query params (for tools that flatten params)
-        let reserved_keys = [
-            "base_url",
-            "endpoint",
-            "method",
-            "headers",
-            "body",
-            "query_params",     // correct key used throughout the codebase
-            "query_parameters", // kept for backward compat
-            "bearer_token",
-            "authorization",
-            "secure", // internal Colmena flag — NEVER send to external APIs
-            "__colmena_session_id",
-            "__colmena_agent_session_id",
-            "__node_id",
-            "__colmena_node_id_path",
-            "__colmena_resume_answer",
-        ];
-        let mut extra_params = std::collections::HashMap::new();
-        for (k, v) in inputs {
-            if !reserved_keys.contains(&k.as_str()) {
-                // Only include primitives (String, Number, Boolean)
-                match v {
-                    serde_json::Value::String(s) => {
-                        let s_resolved = Self::resolve_env_vars(s).unwrap_or(s.to_string());
-                        extra_params.insert(k, serde_json::Value::String(s_resolved));
-                    }
-                    serde_json::Value::Number(_) | serde_json::Value::Bool(_) => {
-                        extra_params.insert(k, v.clone());
-                    }
-                    _ => {
-                        // Ignore Objects, Arrays, Nulls
-                    }
-                }
-            }
-        }
+        let extra_params = Self::collect_extra_query_params(inputs);
         if !extra_params.is_empty() {
             request_builder = request_builder.query(&extra_params);
         }
@@ -2135,5 +2156,81 @@ mod oauth_integration_tests {
             .await
             .expect_err("mutually exclusive");
         assert!(format!("{err}").contains("mutually exclusive"));
+    }
+}
+
+#[cfg(test)]
+mod extra_query_params_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn inputs(pairs: &[(&str, Value)]) -> NodeInputs {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect::<HashMap<_, _>>()
+    }
+
+    #[test]
+    fn engine_internal_inputs_never_become_query_params() {
+        // Exactly what DagToolExecutor injects into every tool call. `__colmena_subgraph_depth`
+        // was the one missing from the allowlist and leaked to the wire.
+        let given = inputs(&[
+            ("__colmena_subgraph_depth", json!(0)),
+            ("__colmena_session_id", json!("sess-1")),
+            ("__colmena_agent_session_id", json!("agent-1")),
+            ("__colmena_node_id_path", json!("a/b")),
+            ("__colmena_resume_answer", json!("yes")),
+            ("__node_id", json!("n1")),
+        ]);
+        let got = HttpNode::collect_extra_query_params(&given);
+
+        assert!(got.is_empty(), "engine-internal inputs leaked: {got:?}");
+    }
+
+    #[test]
+    fn reserved_keys_never_become_query_params() {
+        let given = inputs(&[
+            ("base_url", json!("https://api.example.com")),
+            ("endpoint", json!("/v1/items")),
+            ("method", json!("GET")),
+            ("bearer_token", json!("t")),
+            ("authorization", json!("Bearer t")),
+            ("secure", json!(true)),
+        ]);
+        let got = HttpNode::collect_extra_query_params(&given);
+
+        assert!(got.is_empty(), "reserved keys leaked: {got:?}");
+    }
+
+    #[test]
+    fn caller_supplied_primitives_still_become_query_params() {
+        // The filter must not be over-broad: genuine LLM-supplied params still travel.
+        let given = inputs(&[
+            ("page", json!("1")),
+            ("limit", json!(5)),
+            ("active", json!(true)),
+            ("__colmena_subgraph_depth", json!(0)),
+        ]);
+        let got = HttpNode::collect_extra_query_params(&given);
+
+        assert_eq!(got.len(), 3);
+        assert_eq!(got.get("page"), Some(&json!("1")));
+        assert_eq!(got.get("limit"), Some(&json!(5)));
+        assert_eq!(got.get("active"), Some(&json!(true)));
+    }
+
+    #[test]
+    fn non_primitive_inputs_are_ignored() {
+        let given = inputs(&[
+            ("obj", json!({"a": 1})),
+            ("arr", json!([1, 2])),
+            ("nil", Value::Null),
+            ("keep", json!("yes")),
+        ]);
+        let got = HttpNode::collect_extra_query_params(&given);
+
+        assert_eq!(got.len(), 1);
+        assert_eq!(got.get("keep"), Some(&json!("yes")));
     }
 }
