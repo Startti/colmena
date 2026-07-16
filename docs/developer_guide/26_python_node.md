@@ -62,9 +62,31 @@ When the `code` input port is present (e.g. an LLM emits the code into the edge)
 | `"none"` | Full Python access. No AST check, no timeout. Use for code authored by you. |
 | `"restricted"` | AST validation runs before execution. Only whitelisted imports are allowed; banned builtins are blocked. Execution is wrapped in `tokio::time::timeout`. |
 
-**Allowed imports (restricted mode):** `math`, `json`, `re`, `datetime`, `collections`, `itertools`, `functools`, `string`, `decimal`, `statistics`.
+**Allowed imports (restricted mode):** `math`, `json`, `re`, `datetime`, `collections`, `itertools`, `functools`, `string`, `decimal`, `statistics`, `pandas`, `numpy`, `scipy`, `hmac`, `hashlib`, `base64`, `secrets`.
 
 **Banned builtins (restricted mode):** `open`, `exec`, `eval`, `compile`, `__import__`.
+
+#### Firma de peticiones (`hmac`, `hashlib`, `base64`, `secrets`)
+
+Estos cuatro módulos están permitidos para poder integrar APIs que exigen **firmar cada
+petición** (NetSuite TBA / OAuth 1.0a, AWS SigV4, webhooks de Shopify…). En esas APIs la firma
+depende del método, la URL y un nonce/timestamp, así que **no puede expresarse como una cabecera
+estática** en `http_request`.
+
+Son cómputo puro (`secrets` además lee entropía del SO): ninguno abre un socket ni un fichero.
+La red **sigue cerrada** en modo `restricted` — `urllib`, `socket`, `requests`, `os` y
+`subprocess` continúan bloqueados. El patrón previsto es de dos pasos:
+
+1. Un nodo/tool `python_script` (`restricted`) recibe `method` + `endpoint`, tiene las
+   credenciales en campos `fixed` del `node_schema` y devuelve **solo la cabecera firmada**.
+2. Un nodo/tool `http_request` ejecuta la llamada con esa cabecera.
+
+Así el tráfico saliente sigue pasando por `http_request` (auditable), el LLM nunca ve las
+credenciales (solo una firma efímera de un solo uso) y el sandbox se mantiene intacto.
+
+> ⚠️ El validador compara **el módulo raíz** (`nombre.split('.')[0]`). Por eso `urllib` no se
+> puede permitir "solo para `urllib.parse`": abriría también `urllib.request` y con ello la red.
+> El percent-encoding hay que implementarlo a mano (RFC 3986).
 
 On a sandbox violation the node returns a `SandboxViolation: ...` error string the LLM can read and retry from. Syntax errors are returned as `SyntaxError: ...`.
 
