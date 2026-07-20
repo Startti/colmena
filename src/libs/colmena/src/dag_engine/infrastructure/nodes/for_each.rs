@@ -44,14 +44,23 @@ pub(crate) fn apply_column_selection(rows: Vec<Value>, column: Option<&str>, as_
         .collect()
 }
 
-/// Read the list of rows from inputs: `items` (inline array) → `items_from`
-/// (data-source handle) → default input edge.
-async fn resolve_rows_async(inputs: &NodeInputs) -> Result<Vec<Value>, String> {
-    if let Some(Value::Array(arr)) = inputs.get("items") {
+/// Read a config field, falling back to the inputs map. Mirrors the
+/// `suspend` node's `cfg_or_input` — config-first so graph-node static
+/// config is honored, inputs-fallback so the tool path (where the
+/// executor folds everything into `inputs` and passes `config = {}`)
+/// keeps working unchanged.
+fn cfg_or_input<'a>(config: &'a Value, inputs: &'a NodeInputs, key: &str) -> Option<&'a Value> {
+    config.get(key).or_else(|| inputs.get(key))
+}
+
+/// Read the list of rows from config or inputs: `items` (inline array) →
+/// `items_from` (data-source handle) → default input edge.
+async fn resolve_rows_async(config: &Value, inputs: &NodeInputs) -> Result<Vec<Value>, String> {
+    if let Some(Value::Array(arr)) = cfg_or_input(config, inputs, "items") {
         return Ok(arr.clone());
     }
 
-    if let Some(handle) = inputs.get("items_from") {
+    if let Some(handle) = cfg_or_input(config, inputs, "items_from") {
         let source = handle.get("source").and_then(|v| v.as_str()).unwrap_or("");
         let column = handle.get("column").and_then(|v| v.as_str());
         let as_name = handle.get("as").and_then(|v| v.as_str());
@@ -101,13 +110,14 @@ fn row_key(row: &Value, index: usize) -> String {
     format!("index={index}")
 }
 
-fn parse_policy(inputs: &NodeInputs) -> ExecPolicy {
-    let on_error = match inputs.get("on_error").and_then(|v| v.as_str()) {
+fn parse_policy(config: &Value, inputs: &NodeInputs) -> ExecPolicy {
+    let on_error = match cfg_or_input(config, inputs, "on_error").and_then(|v| v.as_str()) {
         Some("abort") => OnError::Abort,
         _ => OnError::Continue,
     };
-    let concurrency = inputs.get("concurrency").and_then(|v| v.as_u64()).unwrap_or(1).max(1) as usize;
-    let max_items = inputs.get("max_items").and_then(|v| v.as_u64()).unwrap_or(DEFAULT_MAX_ITEMS as u64) as usize;
+    let concurrency = cfg_or_input(config, inputs, "concurrency").and_then(|v| v.as_u64()).unwrap_or(1).max(1) as usize;
+    let max_items =
+        cfg_or_input(config, inputs, "max_items").and_then(|v| v.as_u64()).unwrap_or(DEFAULT_MAX_ITEMS as u64) as usize;
     ExecPolicy { on_error, concurrency, max_items }
 }
 
@@ -116,13 +126,13 @@ impl ExecutableNode for ForEachNode {
     async fn execute(
         &self,
         inputs: &NodeInputs,
-        _config: &Value,
+        config: &Value,
         _state: &mut Value,
         observer: Option<Arc<dyn ExecutionObserver>>,
     ) -> Result<Value, Box<dyn StdError + Send + Sync>> {
         let node_id = inputs.get("__node_id").and_then(|v| v.as_str()).unwrap_or("for_each").to_string();
 
-        let target = inputs.get("target").cloned().ok_or("for_each: missing `target` (embedded tool config)")?;
+        let target = cfg_or_input(config, inputs, "target").cloned().ok_or("for_each: missing `target` (embedded tool config)")?;
         let target_type = target
             .get("node_type")
             .and_then(|v| v.as_str())
@@ -133,8 +143,9 @@ impl ExecutableNode for ForEachNode {
         }
         let target_schema = target.get("node_schema").cloned().unwrap_or_else(|| json!({}));
 
-        let policy = parse_policy(inputs);
-        let mut rows = resolve_rows_async(inputs).await.map_err(|e| -> Box<dyn StdError + Send + Sync> { e.into() })?;
+        let policy = parse_policy(config, inputs);
+        let mut rows =
+            resolve_rows_async(config, inputs).await.map_err(|e| -> Box<dyn StdError + Send + Sync> { e.into() })?;
         if rows.len() > policy.max_items {
             colmena_log!("⚠️ [for_each] {} rows exceeds max_items={}, truncating.", rows.len(), policy.max_items);
             rows.truncate(policy.max_items);
@@ -317,6 +328,33 @@ mod tests {
 
         let mut state = json!({});
         let out = node.execute(&inputs, &json!({}), &mut state, None).await.unwrap();
+        let results = out["output"]["results"].as_array().unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(out["output"]["ok"], 2);
+        assert_eq!(results[0]["status"], "ok");
+        assert_eq!(results[0]["output"], json!({"output": 3.0}));
+        assert_eq!(results[1]["output"], json!({"output": 30.0}));
+    }
+
+    #[tokio::test]
+    async fn runs_as_graph_node_reading_config() {
+        let node = ForEachNode::new();
+        node.registry.set(Arc::new(StubRegistry { add: Arc::new(AddNode) }) as Arc<dyn NodeRegistryPort>).ok();
+
+        let config = json!({
+            "target": {
+                "node_type": "add",
+                "node_schema": {
+                    "a": { "type": "number", "required": true },
+                    "b": { "type": "number", "required": true }
+                }
+            },
+            "items": [{"a":1,"b":2},{"a":10,"b":20}]
+        });
+        let inputs: NodeInputs = HashMap::new();
+
+        let mut state = json!({});
+        let out = node.execute(&inputs, &config, &mut state, None).await.unwrap();
         let results = out["output"]["results"].as_array().unwrap();
         assert_eq!(results.len(), 2);
         assert_eq!(out["output"]["ok"], 2);
