@@ -418,7 +418,7 @@ impl SseMapper {
                 in_flight,
             } => Some(json!({
                 "type": "batch-progress",
-                "node_id": node_id,
+                "nodeId": node_id,
                 "total": total,
                 "completed": completed,
                 "ok": ok,
@@ -432,7 +432,7 @@ impl SseMapper {
                 status,
             } => Some(json!({
                 "type": "batch-item-finished",
-                "node_id": node_id,
+                "nodeId": node_id,
                 "index": index,
                 "key": key,
                 "status": status,
@@ -577,6 +577,34 @@ impl SseMapper {
                     "nodeId": node_id,
                     "toolCallId": tool_id,
                     "toolName": tool_name,
+                })),
+                DagExecutionEvent::BatchProgress {
+                    node_id,
+                    total,
+                    completed,
+                    ok,
+                    err,
+                    in_flight,
+                } => Some(json!({
+                    "type": "subgraph-batch-progress",
+                    "nodeId": node_id,
+                    "total": total,
+                    "completed": completed,
+                    "ok": ok,
+                    "err": err,
+                    "inFlight": in_flight,
+                })),
+                DagExecutionEvent::BatchItemFinished {
+                    node_id,
+                    index,
+                    key,
+                    status,
+                } => Some(json!({
+                    "type": "subgraph-batch-item-finished",
+                    "nodeId": node_id,
+                    "index": index,
+                    "key": key,
+                    "status": status,
                 })),
                 // Turn boundaries from a sub-agent — forwarded for visibility and
                 // to keep the no-event watchdog fed. `level`/`path` injected below.
