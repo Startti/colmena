@@ -2200,6 +2200,114 @@
           }
         }
       }
+    },
+
+    "for_each": {
+      "summary": "Ejecuta un tool embebido (`target`) una vez por cada fila de una lista, de forma determinista (la iteración ocurre en Rust, no por el LLM re-llamando el tool en un loop). El LLM entrega una única lista de filas (`items`, o `items_from` para leer un Google Sheet) y el resultado es una tabla { total, ok, err, results[] } con una fila por item, en el orden original, sin importar la concurrencia.",
+      "see_also": "docs/developer_guide/49_for_each.md — guía completa; docs/superpowers/specs/2026-07-20-deterministic-list-tool-execution-design.md — spec de diseño.",
+      "special_behaviors": [
+        "`target` (contrato del tool embebido: { node_type, node_schema? }) y las políticas (`on_error`, `concurrency`, `max_items`) deben declararse `fixed` dentro de `node_schema` — el LLM nunca elige el target ni la política de reintentos, solo aporta `items`.",
+        "`items` (array LLM-visible) es el campo típico que el LLM completa; alternativamente `items_from: { source: \"sheet\", ref: \"<spreadsheet_id>|<sheet>|<range?>\", column?, as? }` lee filas de un Google Sheet sin que el modelo las re-escriba (v1 solo soporta `sheet`; `source: \"attachment\"` queda diferido a v1.1).",
+        "Cada fila se fusiona dentro del `node_schema` del target con el mismo merge que usa un tool normal (`merge_args_into_schema`), y los campos `required` del target se validan antes de despachar esa fila — una fila incompleta se reporta como `status: \"err\"` para esa fila, sin abortar las demás (salvo `on_error: \"abort\"`).",
+        "`target.node_type` puede ser cualquier ExecutableNode registrado, incluyendo `http_request`, `subgraph` (agents-as-tools por fila, aislamiento total entre filas) o cualquier nodo de cómputo. `for_each` no puede targetear a sí mismo (guard anti-recursión).",
+        "HITL fail-closed: si el target se suspende dentro de una fila (p.ej. un `suspend` o un subgraph que pide input humano), esa fila se reporta como error — for_each no soporta pausar el fan-out a mitad de camino.",
+        "Emite dos eventos SSE de progreso: `batch-progress` (snapshot total/completed/ok/err/in_flight, al inicio y al final) y `batch-item-finished` (uno por fila, con `index`/`key`/`status`) — útiles para UIs que muestran progreso incremental de un lote."
+      ],
+      "examples": {
+        "forma_a_target_http_request": {
+          "description": "target = http_request. El LLM entrega `items` (un objeto por usuario); for_each hace una llamada HTTP por fila, deterministicamente.",
+          "tool_configurations_entry": {
+            "batch_update_users": {
+              "name": "batch_update_users",
+              "node_type": "for_each",
+              "description": "Aplica una actualización de plan a un lote de usuarios, una llamada HTTP por usuario, deterministicamente.",
+              "node_schema": {
+                "on_error": { "fixed": "continue" },
+                "concurrency": { "fixed": 2 },
+                "items": {
+                  "type": "array",
+                  "required": true,
+                  "description": "Una fila por usuario a actualizar.",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "user_id": { "type": "number", "required": true },
+                      "plan": { "type": "string", "required": true }
+                    }
+                  }
+                },
+                "target": {
+                  "fixed": {
+                    "node_type": "http_request",
+                    "node_schema": {
+                      "base_url": { "type": "string", "fixed": "https://api.example.com" },
+                      "endpoint": { "type": "string", "fixed": "/users/update" },
+                      "method": { "type": "string", "fixed": "POST" },
+                      "body": {
+                        "type": "object",
+                        "properties": {
+                          "user_id": { "type": "number", "required": true },
+                          "plan": { "type": "string", "required": true }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "forma_b_target_subgraph": {
+          "description": "target = subgraph (agents-as-tools por fila). Cada fila corre un sub-agente aislado (Mode B) — útil para drafting/generación por item sin compartir memoria entre filas.",
+          "tool_configurations_entry": {
+            "batch_draft_messages": {
+              "name": "batch_draft_messages",
+              "node_type": "for_each",
+              "description": "Corre un sub-agente una vez por fila para redactar un mensaje, deterministicamente. Cada fila es aislada.",
+              "node_schema": {
+                "on_error": { "fixed": "continue" },
+                "concurrency": { "fixed": 2 },
+                "items": {
+                  "type": "array",
+                  "required": true,
+                  "description": "Una fila por persona, cada una con un `task`.",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "task": { "type": "string", "required": true }
+                    }
+                  }
+                },
+                "target": {
+                  "fixed": {
+                    "node_type": "subgraph",
+                    "node_schema": {
+                      "child_graph_inline": {
+                        "fixed": {
+                          "nodes": {
+                            "sub_agent": {
+                              "type": "llm_call",
+                              "config": {
+                                "provider": "google",
+                                "model": "gemini-2.5-flash",
+                                "api_key": "${GEMINI_API_KEY}",
+                                "system_message": "Resuelve esta tarea en una sola frase: {{task}}"
+                              }
+                            },
+                            "out": { "type": "output" }
+                          },
+                          "edges": [{ "from": "sub_agent", "to": "out" }]
+                        }
+                      },
+                      "task": { "type": "string", "required": true }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
 

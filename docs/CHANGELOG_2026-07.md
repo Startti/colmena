@@ -92,3 +92,31 @@ Una sección por feature. Cada sección contiene:
 - Liveness previo (#144): `SPEC_STREAM_MIDRUN_LIVENESS.md` (ADP)
 
 **Estado.** done (Fases A/B/C/D/E/F). Pendiente: E2E manual contra el creador real desde el frontend ADP.
+
+---
+
+## 5. `for_each` — ejecución determinista de tools sobre una lista
+
+**Qué cambió.** Nuevo nodo `for_each`: ejecuta un tool embebido (`target: { node_type, node_schema? }`) una vez por cada fila de una lista, de forma **determinista** (la iteración ocurre en Rust vía `ListToolExecutor`/`run_list`, no por el LLM re-llamando el mismo tool N veces dentro de su loop). Es **un solo nodo, dos formas de uso**: como nodo de grafo (`config` estático) o como tool de un `llm_call` (`tool_configurations` + `node_schema`, con `target`/políticas `fixed` y `items` LLM-visible).
+
+- Lista de filas: `items` (array inline) → `items_from` (`source: "sheet"` en v1, con selección/renombre de columna vía `column`/`as`) → edge de entrada por defecto (solo nodo de grafo). `items_from: { source: "attachment" }` queda **diferido a v1.1** — un `ExecutableNode` no puede resolver `document_id → bytes` hoy sin inyección adicional.
+- Políticas: `on_error` (`continue`/`abort`, default `continue`), `concurrency` (default 1), `max_items` (default 1000, trunca con warning).
+- Cada fila se fusiona en el `node_schema` del target con el mismo `merge_args_into_schema` que usa un tool LLM normal; campos `required` del target se validan por fila antes de despachar (falla por fila, no aborta el batch salvo `on_error: "abort"`).
+- Resultado: `{ output: { total, ok, err, results: [{ index, input, status, output|error }] } }`, un entry por fila en orden original.
+- Eventos SSE: `batch-progress` (snapshot agregado, al inicio y al final) y `batch-item-finished` (uno por fila). Cuando `target: subgraph`, los eventos internos del sub-agente se propagan con `level`/`path` incrementados (reusa la visibilidad anidada del §4).
+- HITL fail-closed: una suspensión dentro de una fila se reporta como error de esa fila — `for_each` no soporta pausar el fan-out a mitad de camino. Guard anti-recursión: `target.node_type == "for_each"` se rechaza.
+- Config-first/inputs-fallback (`cfg_or_input`, mismo patrón que `suspend`) — el mismo código sirve sin cambios tanto al path de nodo-de-grafo (`config` estático) como al path de tool LLM (`DagToolExecutor` pliega todo en `inputs`, `config = {}`).
+
+**Por qué importa.** Elimina el patrón "el LLM re-llama el mismo tool 20 veces en su loop" para operaciones tipo batch (actualizar N usuarios, procesar N filas de un sheet) — más rápido, más barato en tokens, y determinista (no depende de que el modelo no se salte/repita filas).
+
+**Verificado en vivo (Gemini 2.5 Flash).** Grafo de nodo (`tests/graphs/basic/for_each_node.json`, target `add`, sin LLM): 2/2 filas ok. Tool con `target: http_request` (`tests/graphs/agents/for_each_http_tool.json`, echo endpoint): 3/3 filas ok, frames `batch-progress`/`batch-item-finished` presentes. Tool con `target: subgraph` (`tests/graphs/agents/for_each_subgraph_tool.json`, sub-agente inline): 3/3 filas ok, cada fila corrió un sub-agente aislado (Mode B) con `level`/`path` anidados correctos.
+
+**Documentación de referencia.**
+- Dev guide: [`docs/developer_guide/49_for_each.md`](developer_guide/49_for_each.md) — guía completa.
+- Schema: [`docs/node_configurations.json`](node_configurations.json) (`node_configurations.for_each`).
+- Tools reference: [`docs/node_as_tools_reference.json`](node_as_tools_reference.json) (`node_types_as_tools.for_each`, ambos ejemplos).
+- Ports: [`docs/agent_context/node_ports_reference.md`](agent_context/node_ports_reference.md).
+- Índice de tools: [`docs/developer_guide/41_builtin_tools_index.md`](developer_guide/41_builtin_tools_index.md) → sección "Registered nodes usable as tools".
+- Spec: [`docs/superpowers/specs/2026-07-20-deterministic-list-tool-execution-design.md`](superpowers/specs/2026-07-20-deterministic-list-tool-execution-design.md).
+
+**Estado.** done (v1 — `items`/`items_from: sheet`/`target: any registered node incl. subgraph`). Diferido a v1.1: `items_from: attachment`, `items_from: tool_result`, checkpoint store durable, `results_to` sink de escritura.

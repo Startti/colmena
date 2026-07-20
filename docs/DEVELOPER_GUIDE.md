@@ -80,6 +80,7 @@ Las secciones están organizadas por **tema**, no por orden numérico. Los prefi
 - [**Google OAuth (auth para gsheets + gdocs)**](./developer_guide/47_google_oauth.md) — Auth user-scoped vía refresh_token desde `agents@startti.co`. Setup one-time con `colmena_oauth_setup`, env vars, runbook de revocación.
 - [**data_run_python**](./developer_guide/48_data_run_python.md) — Tool unificado de movimiento de datos tabulares (CSV/XLSX ↔ Google Sheets ↔ SQL) con sinks output_tables/output_sheets/output_attachments; filas nunca pasan por el LLM.
 - [**Nodo Suspend (HITL)**](./developer_guide/44_suspend_node.md) — `suspend` / `secure_suspend`, formato Q/A, resume, patrones canónicos.
+- [**for_each — ejecución determinista de tools sobre una lista**](./developer_guide/49_for_each.md) — un nodo, dos formas (grafo/tool), `target` embebido, `items`/`items_from: sheet`, políticas `on_error`/`concurrency`/`max_items`, HITL fail-closed.
 
 ## 9. Tools y skills (catálogos y referencias)
 
