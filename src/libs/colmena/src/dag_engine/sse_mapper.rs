@@ -409,6 +409,34 @@ impl SseMapper {
                 "node_id": node_id,
                 "idleSecs": idle_secs
             })),
+            DagExecutionEvent::BatchProgress {
+                node_id,
+                total,
+                completed,
+                ok,
+                err,
+                in_flight,
+            } => Some(json!({
+                "type": "batch-progress",
+                "node_id": node_id,
+                "total": total,
+                "completed": completed,
+                "ok": ok,
+                "err": err,
+                "inFlight": in_flight,
+            })),
+            DagExecutionEvent::BatchItemFinished {
+                node_id,
+                index,
+                key,
+                status,
+            } => Some(json!({
+                "type": "batch-item-finished",
+                "node_id": node_id,
+                "index": index,
+                "key": key,
+                "status": status,
+            })),
             DagExecutionEvent::SubgraphWrapped { inner, .. } => match Self::deep_base(inner) {
                 DagExecutionEvent::NodeStart {
                     node_id,

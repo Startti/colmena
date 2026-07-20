@@ -118,6 +118,24 @@ pub enum DagExecutionEvent {
         tool_id: String,
         tool_name: String,
     },
+    /// Coarse batch progress emitted by `for_each` at start, per item, and end.
+    #[serde(rename = "batch_progress")]
+    BatchProgress {
+        node_id: String,
+        total: usize,
+        completed: usize,
+        ok: usize,
+        err: usize,
+        in_flight: usize,
+    },
+    /// Emitted by `for_each` the moment a single item finishes.
+    #[serde(rename = "batch_item_finished")]
+    BatchItemFinished {
+        node_id: String,
+        index: usize,
+        key: String,
+        status: String,
+    },
     /// Liveness heartbeat emitted by the execution loop when the in-flight
     /// node has produced no real events for the configured heartbeat
     /// interval. `idle_secs` is the silence elapsed so far. Emitted directly
@@ -176,6 +194,8 @@ impl DagExecutionEvent {
             | DagExecutionEvent::SubgraphNodeFinish { node_id, .. }
             | DagExecutionEvent::SkillLoaded { node_id, .. }
             | DagExecutionEvent::ToolDescribed { node_id, .. }
+            | DagExecutionEvent::BatchProgress { node_id, .. }
+            | DagExecutionEvent::BatchItemFinished { node_id, .. }
             | DagExecutionEvent::Progress { node_id, .. } => Some(node_id),
             _ => None,
         }
@@ -217,6 +237,21 @@ mod tests {
         let json = serde_json::to_value(&ev).unwrap();
         assert_eq!(json["event"], "tool_described");
         assert_eq!(json["data"]["tool_name"], "search_orders");
+    }
+
+    #[test]
+    fn batch_progress_serializes_with_event_tag() {
+        let ev = DagExecutionEvent::BatchProgress {
+            node_id: "fe1".into(),
+            total: 10,
+            completed: 3,
+            ok: 2,
+            err: 1,
+            in_flight: 2,
+        };
+        let v = serde_json::to_value(&ev).unwrap();
+        assert_eq!(v["event"], "batch_progress");
+        assert_eq!(v["data"]["completed"], 3);
     }
 
     #[test]
