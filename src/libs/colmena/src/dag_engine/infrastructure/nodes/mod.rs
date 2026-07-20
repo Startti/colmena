@@ -6,6 +6,7 @@ pub mod debug;
 pub mod document_nodes;
 pub mod echo_toolkit;
 pub mod extraction;
+pub mod for_each;
 pub mod http;
 pub mod http_oauth;
 pub mod image_edit;
