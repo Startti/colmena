@@ -2,10 +2,12 @@
 //! deterministically (iteration in Rust, not the LLM loop). Usable as a graph
 //! node and as an LLM tool. See spec 2026-07-20-deterministic-list-tool-execution.
 
+use crate::colmena_log;
 use crate::dag_engine::application::list_tool_executor::{run_list, ExecPolicy, ItemStatus, OnError, DEFAULT_MAX_ITEMS};
 use crate::dag_engine::application::ports::NodeRegistryPort;
 use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
 use crate::dag_engine::domain::observer::{ExecutionObserver, NodeEvent};
+use crate::dag_engine::domain::tool_configuration::parse_node_schema;
 use crate::dag_engine::infrastructure::node_schema_merge::merge_args_into_schema;
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
@@ -134,7 +136,7 @@ impl ExecutableNode for ForEachNode {
         let policy = parse_policy(inputs);
         let mut rows = resolve_rows_async(inputs).await.map_err(|e| -> Box<dyn StdError + Send + Sync> { e.into() })?;
         if rows.len() > policy.max_items {
-            eprintln!("⚠️ [for_each] {} rows exceeds max_items={}, truncating.", rows.len(), policy.max_items);
+            colmena_log!("⚠️ [for_each] {} rows exceeds max_items={}, truncating.", rows.len(), policy.max_items);
             rows.truncate(policy.max_items);
         }
         let total = rows.len();
@@ -161,6 +163,15 @@ impl ExecutableNode for ForEachNode {
                     }
                 };
                 let merged = merge_args_into_schema(&target_schema, row_map).map_err(|e| format!("row {index}: {e}"))?;
+                if let Ok(node_schema) = serde_json::from_value::<crate::dag_engine::domain::tool_configuration::NodeSchema>(target_schema.clone()) {
+                    if let Ok(parsed) = parse_node_schema(&node_schema) {
+                        for req in &parsed.required_params {
+                            if !merged.contains_key(req) {
+                                return Err(format!("row {index}: missing required param '{req}'"));
+                            }
+                        }
+                    }
+                }
                 let node = registry
                     .get_node(&target_type)
                     .ok_or_else(|| format!("row {index}: unknown target node_type '{target_type}'"))?;
@@ -170,9 +181,7 @@ impl ExecutableNode for ForEachNode {
                     .await
                     .map_err(|e| format!("row {index}: {e}"))?;
                 // HITL fail-closed: a SUSPENDED result inside a fan-out is an error.
-                if result.get("__colmena_status").and_then(|v| v.as_str()) == Some("SUSPENDED")
-                    || result.get("status").and_then(|v| v.as_str()) == Some("SUSPENDED")
-                {
+                if result.get("__colmena_status").and_then(|v| v.as_str()) == Some("SUSPENDED") {
                     return Err(format!("row {index}: target suspended (HITL not supported inside for_each)"));
                 }
                 Ok(result)
@@ -314,5 +323,45 @@ mod tests {
         assert_eq!(results[0]["status"], "ok");
         assert_eq!(results[0]["output"], json!({"output": 3.0}));
         assert_eq!(results[1]["output"], json!({"output": 30.0}));
+    }
+
+    #[tokio::test]
+    async fn missing_required_param_becomes_err_row() {
+        let node = ForEachNode::new();
+        node.registry.set(Arc::new(StubRegistry { add: Arc::new(AddNode) }) as Arc<dyn NodeRegistryPort>).ok();
+
+        let mut inputs: NodeInputs = HashMap::new();
+        inputs.insert(
+            "target".to_string(),
+            json!({
+                "node_type": "add",
+                "node_schema": {
+                    "a": { "type": "number", "required": true },
+                    "b": { "type": "number", "required": true }
+                }
+            }),
+        );
+        inputs.insert("items".to_string(), json!([{"a":1}])); // missing b
+        inputs.insert("on_error".to_string(), json!("continue"));
+
+        let mut state = json!({});
+        let out = node.execute(&inputs, &json!({}), &mut state, None).await.unwrap();
+        assert_eq!(out["output"]["err"], 1);
+        assert_eq!(out["output"]["results"][0]["status"], "err");
+    }
+
+    #[tokio::test]
+    async fn empty_list_is_not_an_error() {
+        let node = ForEachNode::new();
+        node.registry.set(Arc::new(StubRegistry { add: Arc::new(AddNode) }) as Arc<dyn NodeRegistryPort>).ok();
+
+        let mut inputs: NodeInputs = HashMap::new();
+        inputs.insert("target".to_string(), json!({ "node_type": "add", "node_schema": {} }));
+        inputs.insert("items".to_string(), json!([]));
+
+        let mut state = json!({});
+        let out = node.execute(&inputs, &json!({}), &mut state, None).await.unwrap();
+        assert_eq!(out["output"]["total"], 0);
+        assert!(out["output"]["results"].as_array().unwrap().is_empty());
     }
 }
