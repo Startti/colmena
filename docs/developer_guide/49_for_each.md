@@ -88,6 +88,12 @@ ver "Config vs tool" más abajo):
      leer un CSV/XLSX adjunto, usa un nodo upstream
      (`data_run_python`/lectura) que alimente el edge de entrada de
      `for_each` (ver punto 3).
+   > **Cuidado de seguridad**: si dejas `items_from` (o solo su campo
+   > `ref`) visible al LLM en vez de `fixed`, el modelo controla qué
+   > `ref = "<spreadsheet_id>|<sheet>|<range?>"` se lee — y por tanto puede
+   > leer cualquier sheet al que la identidad de Google del agente tenga
+   > acceso, no solo el sheet que el operador tenía en mente. Si no quieres
+   > eso, deja `ref` (o todo `items_from`) `fixed` en `node_schema`.
 3. **Edge de entrada** (`input` o `default`) — si ni `items` ni
    `items_from` están configurados, `for_each` lee un array desde su
    input port por defecto. Solo aplica al uso como **nodo de grafo**
@@ -101,7 +107,7 @@ advertencia) antes de despachar.
 | Campo | Default | Descripción |
 |---|---|---|
 | `on_error` | `"continue"` | `"continue"` corre todas las filas pese a fallos anteriores, reportando ok/err por fila. `"abort"` deja de despachar filas nuevas apenas una falla (best-effort bajo concurrencia — las filas ya en vuelo terminan). |
-| `concurrency` | `1` | Filas despachadas al target simultáneamente. `1` = secuencial. Valores `< 1` se ajustan a `1`. |
+| `concurrency` | `1` | Filas despachadas al target simultáneamente. `1` = secuencial. Valores `< 1` se ajustan a `1`; valores `> 64` se recortan a `64` (ceiling defensivo, evita que un `concurrency` mal configurado o sugerido por el LLM dispare concurrencia sin límite). |
 | `max_items` | `1000` | Tope duro de filas procesadas; protege contra un `items_from` desbocado o un array gigante enviado por el LLM. |
 
 Cuando `for_each` se expone como **tool**, `on_error`/`concurrency`/

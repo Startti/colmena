@@ -16,6 +16,23 @@ use std::collections::HashMap;
 use std::error::Error as StdError;
 use std::sync::{Arc, OnceLock};
 
+/// Upper clamp on `concurrency` — a defensive ceiling so a misconfigured or
+/// LLM-supplied huge value can't spawn unbounded concurrent dispatches.
+const MAX_CONCURRENCY: usize = 64;
+
+/// Ambient context keys forwarded from `for_each`'s own `inputs` into every
+/// per-row target dispatch (when present, and only if the target's merged
+/// args don't already set them). This keeps recursion/session context alive
+/// across a `for_each` boundary — e.g. `__colmena_subgraph_depth` so a
+/// `subgraph` target reached via `for_each` doesn't reset `MAX_SUBGRAPH_TOOL_DEPTH`
+/// to 0. Deliberately excludes `__node_id` / `__colmena_node_id_path`, which
+/// are for_each-specific and could collide with the target's own path logic.
+const FORWARDED_CONTEXT_KEYS: [&str; 3] = [
+    "__colmena_subgraph_depth",
+    "__colmena_session_id",
+    "__colmena_agent_session_id",
+];
+
 pub struct ForEachNode {
     pub registry: Arc<OnceLock<Arc<dyn NodeRegistryPort>>>,
 }
@@ -61,11 +78,29 @@ fn cfg_or_input<'a>(config: &'a Value, inputs: &'a NodeInputs, key: &str) -> Opt
     config.get(key).or_else(|| inputs.get(key))
 }
 
+/// A short JSON type name for error messages (`items` type-mismatch).
+fn value_type_name(v: &Value) -> &'static str {
+    match v {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
 /// Read the list of rows from config or inputs: `items` (inline array) →
 /// `items_from` (data-source handle) → default input edge.
 async fn resolve_rows_async(config: &Value, inputs: &NodeInputs) -> Result<Vec<Value>, String> {
-    if let Some(Value::Array(arr)) = cfg_or_input(config, inputs, "items") {
-        return Ok(arr.clone());
+    if let Some(v) = cfg_or_input(config, inputs, "items") {
+        return match v {
+            Value::Array(arr) => Ok(arr.clone()),
+            other => Err(format!(
+                "for_each: `items` must be an array of row objects, got {}",
+                value_type_name(other)
+            )),
+        };
     }
 
     if let Some(handle) = cfg_or_input(config, inputs, "items_from") {
@@ -127,10 +162,11 @@ fn parse_policy(config: &Value, inputs: &NodeInputs) -> ExecPolicy {
         Some("abort") => OnError::Abort,
         _ => OnError::Continue,
     };
-    let concurrency = cfg_or_input(config, inputs, "concurrency")
+    let concurrency = (cfg_or_input(config, inputs, "concurrency")
         .and_then(|v| v.as_u64())
         .unwrap_or(1)
-        .max(1) as usize;
+        .max(1) as usize)
+        .min(MAX_CONCURRENCY);
     let max_items = cfg_or_input(config, inputs, "max_items")
         .and_then(|v| v.as_u64())
         .unwrap_or(DEFAULT_MAX_ITEMS as u64) as usize;
@@ -203,12 +239,22 @@ impl ExecutableNode for ForEachNode {
             });
         }
 
+        // Ambient recursion/session context from for_each's own inputs, forwarded
+        // into every per-row target dispatch (see FORWARDED_CONTEXT_KEYS doc).
+        // Cloned into an owned map upfront so the dispatch closure below doesn't
+        // need to borrow `inputs` across the `.await` points inside `run_list`.
+        let forwarded_context: HashMap<String, Value> = FORWARDED_CONTEXT_KEYS
+            .iter()
+            .filter_map(|&key| inputs.get(key).map(|v| (key.to_string(), v.clone())))
+            .collect();
+
         // Per-row dispatch: merge the row into the target schema, run the target node.
         let dispatch = |index: usize, row: Value| {
             let registry = registry.clone();
             let target_type = target_type.clone();
             let target_schema = target_schema.clone();
             let observer = observer.clone();
+            let forwarded_context = forwarded_context.clone();
             async move {
                 let row_map: HashMap<String, Value> = match &row {
                     Value::Object(m) => m.clone().into_iter().collect(),
@@ -218,8 +264,11 @@ impl ExecutableNode for ForEachNode {
                         h
                     }
                 };
-                let merged = merge_args_into_schema(&target_schema, row_map)
+                let mut merged = merge_args_into_schema(&target_schema, row_map)
                     .map_err(|e| format!("row {index}: {e}"))?;
+                for (key, value) in forwarded_context {
+                    merged.entry(key).or_insert(value);
+                }
                 if let Ok(node_schema) = serde_json::from_value::<
                     crate::dag_engine::domain::tool_configuration::NodeSchema,
                 >(target_schema.clone())
@@ -357,17 +406,40 @@ mod tests {
 
     struct StubRegistry {
         add: Arc<dyn ExecutableNode>,
+        echo: Option<Arc<dyn ExecutableNode>>,
     }
     impl NodeRegistryPort for StubRegistry {
         fn get_node(&self, node_type: &str) -> Option<Arc<dyn ExecutableNode>> {
-            if node_type == "add" {
-                Some(self.add.clone())
-            } else {
-                None
+            match node_type {
+                "add" => Some(self.add.clone()),
+                "echo" => self.echo.clone(),
+                _ => None,
             }
         }
         fn get_all_nodes(&self) -> HashMap<String, Arc<dyn ExecutableNode>> {
             HashMap::new()
+        }
+    }
+
+    /// A tiny stub node that echoes back exactly the inputs it received (as
+    /// its `output`). Used to observe what a target dispatch actually gets,
+    /// e.g. whether ambient context keys were forwarded.
+    struct EchoNode;
+    #[async_trait::async_trait]
+    impl ExecutableNode for EchoNode {
+        async fn execute(
+            &self,
+            inputs: &NodeInputs,
+            _config: &Value,
+            _state: &mut Value,
+            _observer: Option<Arc<dyn ExecutionObserver>>,
+        ) -> Result<Value, Box<dyn StdError + Send + Sync>> {
+            let map: Map<String, Value> = inputs.clone().into_iter().collect();
+            Ok(json!({ "output": Value::Object(map) }))
+        }
+
+        fn schema(&self) -> Value {
+            json!({})
         }
     }
 
@@ -402,6 +474,7 @@ mod tests {
         node.registry
             .set(Arc::new(StubRegistry {
                 add: Arc::new(AddNode),
+                echo: None,
             }) as Arc<dyn NodeRegistryPort>)
             .ok();
 
@@ -437,6 +510,7 @@ mod tests {
         node.registry
             .set(Arc::new(StubRegistry {
                 add: Arc::new(AddNode),
+                echo: None,
             }) as Arc<dyn NodeRegistryPort>)
             .ok();
 
@@ -471,6 +545,7 @@ mod tests {
         node.registry
             .set(Arc::new(StubRegistry {
                 add: Arc::new(AddNode),
+                echo: None,
             }) as Arc<dyn NodeRegistryPort>)
             .ok();
 
@@ -510,6 +585,7 @@ mod tests {
         node.registry
             .set(Arc::new(StubRegistry {
                 add: Arc::new(AddNode),
+                echo: None,
             }) as Arc<dyn NodeRegistryPort>)
             .ok();
 
@@ -552,6 +628,7 @@ mod tests {
         node.registry
             .set(Arc::new(StubRegistry {
                 add: Arc::new(AddNode),
+                echo: None,
             }) as Arc<dyn NodeRegistryPort>)
             .ok();
 
@@ -569,5 +646,86 @@ mod tests {
             .unwrap();
         assert_eq!(out["output"]["total"], 0);
         assert!(out["output"]["results"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn concurrency_is_clamped_to_max_concurrency() {
+        let config = json!({ "concurrency": 1000 });
+        let inputs: NodeInputs = HashMap::new();
+        let policy = super::parse_policy(&config, &inputs);
+        assert_eq!(policy.concurrency, MAX_CONCURRENCY);
+    }
+
+    #[test]
+    fn concurrency_below_one_is_raised_to_one() {
+        let config = json!({ "concurrency": 0 });
+        let inputs: NodeInputs = HashMap::new();
+        let policy = super::parse_policy(&config, &inputs);
+        assert_eq!(policy.concurrency, 1);
+    }
+
+    #[tokio::test]
+    async fn forwards_subgraph_depth_into_target_dispatch() {
+        // A for_each whose target is reached via a subgraph-like tool must not
+        // silently reset the ambient recursion depth — otherwise a
+        // self-referencing `child_graph_path` routed through for_each could
+        // bypass MAX_SUBGRAPH_TOOL_DEPTH. Use an echo target to observe exactly
+        // what context the per-row dispatch receives.
+        let node = ForEachNode::new();
+        node.registry
+            .set(Arc::new(StubRegistry {
+                add: Arc::new(AddNode),
+                echo: Some(Arc::new(EchoNode)),
+            }) as Arc<dyn NodeRegistryPort>)
+            .ok();
+
+        let mut inputs: NodeInputs = HashMap::new();
+        inputs.insert(
+            "target".to_string(),
+            json!({ "node_type": "echo", "node_schema": {} }),
+        );
+        inputs.insert("items".to_string(), json!([{"a": 1}]));
+        inputs.insert("__colmena_subgraph_depth".to_string(), json!(3));
+        // Not forwarded — for_each-specific, must not leak into the target.
+        inputs.insert("__node_id".to_string(), json!("for_each_1"));
+
+        let mut state = json!({});
+        let out = node
+            .execute(&inputs, &json!({}), &mut state, None)
+            .await
+            .unwrap();
+        let result_output = &out["output"]["results"][0]["output"]["output"];
+        assert_eq!(result_output["__colmena_subgraph_depth"], json!(3));
+        assert!(result_output.get("__node_id").is_none());
+    }
+
+    #[tokio::test]
+    async fn non_array_items_yields_targeted_error() {
+        let node = ForEachNode::new();
+        node.registry
+            .set(Arc::new(StubRegistry {
+                add: Arc::new(AddNode),
+                echo: None,
+            }) as Arc<dyn NodeRegistryPort>)
+            .ok();
+
+        let mut inputs: NodeInputs = HashMap::new();
+        inputs.insert(
+            "target".to_string(),
+            json!({ "node_type": "add", "node_schema": {} }),
+        );
+        inputs.insert("items".to_string(), json!("not-an-array"));
+
+        let mut state = json!({});
+        let err = node
+            .execute(&inputs, &json!({}), &mut state, None)
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("`items` must be an array of row objects"),
+            "unexpected error message: {msg}"
+        );
+        assert!(msg.contains("string"), "expected type name in error: {msg}");
     }
 }
