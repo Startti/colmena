@@ -228,11 +228,18 @@ the user's source. Durable server-side checkpointing and a `results_to` write-si
   already-owned tools by name (instead of an embedded target), resolved via a sibling-tool
   dispatch handle the `DagToolExecutor` injects only in the tool context. Restores "batch a
   tool you already have" + lets the LLM pick the target. Needs the injection plumbing.
-- **Deferred (v1.1) — `results_to` sink**: opt-in dump of the results table to a **new**
-  Sheet (never mutate the source → safe). Thin sink **on top of** the node (reuses gsheets
-  `SheetsClient` create+write / the `data_run_python` path), NOT in the core. Modes `final`
-  (one `batchUpdate` at end, default) + `incremental` (append per row — "watch the sheet
-  fill"; append + per-row `index` → no races under concurrency). Generalizable to `sql`.
+- **SHIPPED in v1 (2026-07-20) — `results_to` sink**: opt-in dump of the results table to a
+  **new** Sheet (never mutates the source → safe by construction). Thin sink **on top of**
+  the node (reuses the gsheets free dispatch fns `dispatch_gsheets_create_spreadsheet` +
+  `dispatch_gsheets_set_range`), NOT in the core `ListToolExecutor`. Config
+  `{ sink:"sheet", title?, mode:"final"|"incremental" }`. Header
+  `[index, <sorted input cols>, status, result]`; `result` = compact JSON of the row output
+  (ok) or the error string (err). `final` (default) writes all rows in one `set_range` at
+  end; `incremental` writes each row at `A{index+2}` as it finishes (distinct ranges → no
+  races under concurrency; "watch the sheet fill"). Returns `results_sheet:{spreadsheet_id,url}`
+  in the node output. Create-failure → hard Err; per-row incremental write failure → log +
+  continue; final write failure → `results_sheet_error` in output. Verified live (both modes
+  create correct sheets). Future: generalizable to `sql`; `items_from: sql` sink.
 - **Deferred (v1.1) — `items_from: attachment` (CSV/XLSX)**: a plain `ExecutableNode`
   cannot resolve a `document_id → bytes` — `fetch_attachment_bytes`/`lookup_attachment_meta`
   are `DagToolExecutor` methods, and the executor injects no attachment fetcher into a
