@@ -3,7 +3,7 @@
 [![Rust](https://img.shields.io/badge/rust-1.70+-orange.svg)](https://www.rust-lang.org)
 [![Python](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Status](https://img.shields.io/badge/status-alpha-red.svg)](https://github.com/your-org/colmena)
+[![Status](https://img.shields.io/badge/status-alpha-red.svg)](https://github.com/Startti/colmena)
 
 Una librería **nativa** de Rust para la orquestación de agentes de IA, diseñada siguiendo principios de **Arquitectura Hexagonal** y expuesta a Python mediante PyO3. Proporciona una interfaz unificada para múltiples proveedores de LLM con llamadas síncronas y streaming.
 
@@ -661,7 +661,7 @@ Colmena sigue los principios de **Arquitectura Hexagonal** (Ports and Adapters):
 
 ## 📜 Licencia
 
-[Definir licencia]
+Este proyecto está licenciado bajo la [Licencia MIT](LICENSE).
 
 ## 🙏 Agradecimientos
 
