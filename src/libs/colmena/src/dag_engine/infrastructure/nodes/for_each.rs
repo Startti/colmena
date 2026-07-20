@@ -3,7 +3,9 @@
 //! node and as an LLM tool. See spec 2026-07-20-deterministic-list-tool-execution.
 
 use crate::colmena_log;
-use crate::dag_engine::application::list_tool_executor::{run_list, ExecPolicy, ItemStatus, OnError, DEFAULT_MAX_ITEMS};
+use crate::dag_engine::application::list_tool_executor::{
+    run_list, ExecPolicy, ItemStatus, OnError, DEFAULT_MAX_ITEMS,
+};
 use crate::dag_engine::application::ports::NodeRegistryPort;
 use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
 use crate::dag_engine::domain::observer::{ExecutionObserver, NodeEvent};
@@ -26,14 +28,20 @@ impl Default for ForEachNode {
 
 impl ForEachNode {
     pub fn new() -> Self {
-        Self { registry: Arc::new(OnceLock::new()) }
+        Self {
+            registry: Arc::new(OnceLock::new()),
+        }
     }
 }
 
 /// Select a single column from each row, renaming it to `as_name` (or the
 /// column name itself if `as_name` is absent). With no `column`, rows pass
 /// through unchanged.
-pub(crate) fn apply_column_selection(rows: Vec<Value>, column: Option<&str>, as_name: Option<&str>) -> Vec<Value> {
+pub(crate) fn apply_column_selection(
+    rows: Vec<Value>,
+    column: Option<&str>,
+    as_name: Option<&str>,
+) -> Vec<Value> {
     let Some(col) = column else { return rows };
     let key = as_name.unwrap_or(col);
     rows.into_iter()
@@ -86,7 +94,11 @@ async fn resolve_rows_async(config: &Value, inputs: &NodeInputs) -> Result<Vec<V
                     .cloned()
                     .ok_or("for_each items_from sheet: no `values` in response")?
             }
-            other => return Err(format!("for_each items_from: unknown source '{other}' (v1: sheet)")),
+            other => {
+                return Err(format!(
+                    "for_each items_from: unknown source '{other}' (v1: sheet)"
+                ))
+            }
         };
         return Ok(apply_column_selection(rows, column, as_name));
     }
@@ -115,10 +127,18 @@ fn parse_policy(config: &Value, inputs: &NodeInputs) -> ExecPolicy {
         Some("abort") => OnError::Abort,
         _ => OnError::Continue,
     };
-    let concurrency = cfg_or_input(config, inputs, "concurrency").and_then(|v| v.as_u64()).unwrap_or(1).max(1) as usize;
-    let max_items =
-        cfg_or_input(config, inputs, "max_items").and_then(|v| v.as_u64()).unwrap_or(DEFAULT_MAX_ITEMS as u64) as usize;
-    ExecPolicy { on_error, concurrency, max_items }
+    let concurrency = cfg_or_input(config, inputs, "concurrency")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(1)
+        .max(1) as usize;
+    let max_items = cfg_or_input(config, inputs, "max_items")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(DEFAULT_MAX_ITEMS as u64) as usize;
+    ExecPolicy {
+        on_error,
+        concurrency,
+        max_items,
+    }
 }
 
 #[async_trait::async_trait]
@@ -130,9 +150,15 @@ impl ExecutableNode for ForEachNode {
         _state: &mut Value,
         observer: Option<Arc<dyn ExecutionObserver>>,
     ) -> Result<Value, Box<dyn StdError + Send + Sync>> {
-        let node_id = inputs.get("__node_id").and_then(|v| v.as_str()).unwrap_or("for_each").to_string();
+        let node_id = inputs
+            .get("__node_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("for_each")
+            .to_string();
 
-        let target = cfg_or_input(config, inputs, "target").cloned().ok_or("for_each: missing `target` (embedded tool config)")?;
+        let target = cfg_or_input(config, inputs, "target")
+            .cloned()
+            .ok_or("for_each: missing `target` (embedded tool config)")?;
         let target_type = target
             .get("node_type")
             .and_then(|v| v.as_str())
@@ -141,21 +167,40 @@ impl ExecutableNode for ForEachNode {
         if target_type == "for_each" {
             return Err("for_each: a for_each cannot target itself".into());
         }
-        let target_schema = target.get("node_schema").cloned().unwrap_or_else(|| json!({}));
+        let target_schema = target
+            .get("node_schema")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
 
         let policy = parse_policy(config, inputs);
-        let mut rows =
-            resolve_rows_async(config, inputs).await.map_err(|e| -> Box<dyn StdError + Send + Sync> { e.into() })?;
+        let mut rows = resolve_rows_async(config, inputs)
+            .await
+            .map_err(|e| -> Box<dyn StdError + Send + Sync> { e.into() })?;
         if rows.len() > policy.max_items {
-            colmena_log!("⚠️ [for_each] {} rows exceeds max_items={}, truncating.", rows.len(), policy.max_items);
+            colmena_log!(
+                "⚠️ [for_each] {} rows exceeds max_items={}, truncating.",
+                rows.len(),
+                policy.max_items
+            );
             rows.truncate(policy.max_items);
         }
         let total = rows.len();
 
-        let registry = self.registry.get().ok_or("for_each: NodeRegistryPort not initialized")?.clone();
+        let registry = self
+            .registry
+            .get()
+            .ok_or("for_each: NodeRegistryPort not initialized")?
+            .clone();
 
         if let Some(obs) = &observer {
-            obs.on_event(NodeEvent::BatchProgress { node_id: node_id.clone(), total, completed: 0, ok: 0, err: 0, in_flight: 0 });
+            obs.on_event(NodeEvent::BatchProgress {
+                node_id: node_id.clone(),
+                total,
+                completed: 0,
+                ok: 0,
+                err: 0,
+                in_flight: 0,
+            });
         }
 
         // Per-row dispatch: merge the row into the target schema, run the target node.
@@ -173,19 +218,39 @@ impl ExecutableNode for ForEachNode {
                         h
                     }
                 };
-                let merged = merge_args_into_schema(&target_schema, row_map).map_err(|e| format!("row {index}: {e}"))?;
-                if let Ok(node_schema) = serde_json::from_value::<crate::dag_engine::domain::tool_configuration::NodeSchema>(target_schema.clone()) {
+                let merged = merge_args_into_schema(&target_schema, row_map)
+                    .map_err(|e| format!("row {index}: {e}"))?;
+                if let Ok(node_schema) = serde_json::from_value::<
+                    crate::dag_engine::domain::tool_configuration::NodeSchema,
+                >(target_schema.clone())
+                {
                     if let Ok(parsed) = parse_node_schema(&node_schema) {
                         for req in &parsed.required_params {
-                            if !merged.contains_key(req) {
+                            // A required param may live at the top level of `merged`, or
+                            // (when it's a container child, e.g. an http_request's
+                            // `body.user_id`) nested inside its container object. Mirrors
+                            // the `real_key` logic in `merge_args_into_schema`.
+                            let present = if let Some(container) =
+                                parsed.param_to_container.get(req)
+                            {
+                                let real_key =
+                                    req.find('.').map(|p| &req[p + 1..]).unwrap_or(req.as_str());
+                                merged
+                                    .get(container)
+                                    .and_then(|v| v.as_object())
+                                    .is_some_and(|m| m.contains_key(real_key))
+                            } else {
+                                merged.contains_key(req)
+                            };
+                            if !present {
                                 return Err(format!("row {index}: missing required param '{req}'"));
                             }
                         }
                     }
                 }
-                let node = registry
-                    .get_node(&target_type)
-                    .ok_or_else(|| format!("row {index}: unknown target node_type '{target_type}'"))?;
+                let node = registry.get_node(&target_type).ok_or_else(|| {
+                    format!("row {index}: unknown target node_type '{target_type}'")
+                })?;
                 let mut item_state = json!({});
                 let result = node
                     .execute(&merged, &json!({}), &mut item_state, observer.clone())
@@ -193,7 +258,9 @@ impl ExecutableNode for ForEachNode {
                     .map_err(|e| format!("row {index}: {e}"))?;
                 // HITL fail-closed: a SUSPENDED result inside a fan-out is an error.
                 if result.get("__colmena_status").and_then(|v| v.as_str()) == Some("SUSPENDED") {
-                    return Err(format!("row {index}: target suspended (HITL not supported inside for_each)"));
+                    return Err(format!(
+                        "row {index}: target suspended (HITL not supported inside for_each)"
+                    ));
                 }
                 Ok(result)
             }
@@ -215,13 +282,24 @@ impl ExecutableNode for ForEachNode {
                     node_id: node_id.clone(),
                     index: r.index,
                     key: row_key(&r.input, r.index),
-                    status: if r.status == ItemStatus::Ok { "ok".into() } else { "err".into() },
+                    status: if r.status == ItemStatus::Ok {
+                        "ok".into()
+                    } else {
+                        "err".into()
+                    },
                 });
             }
             let mut m = Map::new();
             m.insert("index".into(), json!(r.index));
             m.insert("input".into(), r.input.clone());
-            m.insert("status".into(), json!(if r.status == ItemStatus::Ok { "ok" } else { "err" }));
+            m.insert(
+                "status".into(),
+                json!(if r.status == ItemStatus::Ok {
+                    "ok"
+                } else {
+                    "err"
+                }),
+            );
             if let Some(o) = &r.output {
                 m.insert("output".into(), o.clone());
             }
@@ -231,7 +309,14 @@ impl ExecutableNode for ForEachNode {
             out_rows.push(Value::Object(m));
         }
         if let Some(obs) = &observer {
-            obs.on_event(NodeEvent::BatchProgress { node_id: node_id.clone(), total, completed: results.len(), ok, err, in_flight: 0 });
+            obs.on_event(NodeEvent::BatchProgress {
+                node_id: node_id.clone(),
+                total,
+                completed: results.len(),
+                ok,
+                err,
+                in_flight: 0,
+            });
         }
 
         Ok(json!({ "output": { "total": total, "ok": ok, "err": err, "results": out_rows } }))
@@ -288,7 +373,10 @@ mod tests {
 
     #[test]
     fn column_selection_maps_scalar_rows() {
-        let rows = vec![json!({"user_id": 1, "name": "a"}), json!({"user_id": 2, "name": "b"})];
+        let rows = vec![
+            json!({"user_id": 1, "name": "a"}),
+            json!({"user_id": 2, "name": "b"}),
+        ];
         let picked = super::apply_column_selection(rows, Some("user_id"), Some("uid"));
         assert_eq!(picked[0], json!({"uid": 1}));
         assert_eq!(picked[1], json!({"uid": 2}));
@@ -311,7 +399,11 @@ mod tests {
     #[tokio::test]
     async fn runs_add_target_over_inline_items() {
         let node = ForEachNode::new();
-        node.registry.set(Arc::new(StubRegistry { add: Arc::new(AddNode) }) as Arc<dyn NodeRegistryPort>).ok();
+        node.registry
+            .set(Arc::new(StubRegistry {
+                add: Arc::new(AddNode),
+            }) as Arc<dyn NodeRegistryPort>)
+            .ok();
 
         let mut inputs: NodeInputs = HashMap::new();
         inputs.insert(
@@ -327,7 +419,10 @@ mod tests {
         inputs.insert("items".to_string(), json!([{"a":1,"b":2},{"a":10,"b":20}]));
 
         let mut state = json!({});
-        let out = node.execute(&inputs, &json!({}), &mut state, None).await.unwrap();
+        let out = node
+            .execute(&inputs, &json!({}), &mut state, None)
+            .await
+            .unwrap();
         let results = out["output"]["results"].as_array().unwrap();
         assert_eq!(results.len(), 2);
         assert_eq!(out["output"]["ok"], 2);
@@ -339,7 +434,11 @@ mod tests {
     #[tokio::test]
     async fn runs_as_graph_node_reading_config() {
         let node = ForEachNode::new();
-        node.registry.set(Arc::new(StubRegistry { add: Arc::new(AddNode) }) as Arc<dyn NodeRegistryPort>).ok();
+        node.registry
+            .set(Arc::new(StubRegistry {
+                add: Arc::new(AddNode),
+            }) as Arc<dyn NodeRegistryPort>)
+            .ok();
 
         let config = json!({
             "target": {
@@ -354,7 +453,10 @@ mod tests {
         let inputs: NodeInputs = HashMap::new();
 
         let mut state = json!({});
-        let out = node.execute(&inputs, &config, &mut state, None).await.unwrap();
+        let out = node
+            .execute(&inputs, &config, &mut state, None)
+            .await
+            .unwrap();
         let results = out["output"]["results"].as_array().unwrap();
         assert_eq!(results.len(), 2);
         assert_eq!(out["output"]["ok"], 2);
@@ -366,7 +468,11 @@ mod tests {
     #[tokio::test]
     async fn missing_required_param_becomes_err_row() {
         let node = ForEachNode::new();
-        node.registry.set(Arc::new(StubRegistry { add: Arc::new(AddNode) }) as Arc<dyn NodeRegistryPort>).ok();
+        node.registry
+            .set(Arc::new(StubRegistry {
+                add: Arc::new(AddNode),
+            }) as Arc<dyn NodeRegistryPort>)
+            .ok();
 
         let mut inputs: NodeInputs = HashMap::new();
         inputs.insert(
@@ -383,22 +489,84 @@ mod tests {
         inputs.insert("on_error".to_string(), json!("continue"));
 
         let mut state = json!({});
-        let out = node.execute(&inputs, &json!({}), &mut state, None).await.unwrap();
+        let out = node
+            .execute(&inputs, &json!({}), &mut state, None)
+            .await
+            .unwrap();
         assert_eq!(out["output"]["err"], 1);
         assert_eq!(out["output"]["results"][0]["status"], "err");
     }
 
     #[tokio::test]
-    async fn empty_list_is_not_an_error() {
+    async fn required_param_nested_in_container_is_not_falsely_missing() {
+        // Regression: a target `node_schema` with a container field (e.g. an
+        // http_request's `body.user_id`) folds LLM-visible children into the
+        // container object at merge time (`merged["body"]["user_id"]`), not at
+        // the top level (`merged["user_id"]`). The required-param check must
+        // look inside the container, not `merged.contains_key(<child name>)`
+        // directly — otherwise every row with a present-but-nested required
+        // field is wrongly flagged as missing it.
         let node = ForEachNode::new();
-        node.registry.set(Arc::new(StubRegistry { add: Arc::new(AddNode) }) as Arc<dyn NodeRegistryPort>).ok();
+        node.registry
+            .set(Arc::new(StubRegistry {
+                add: Arc::new(AddNode),
+            }) as Arc<dyn NodeRegistryPort>)
+            .ok();
 
         let mut inputs: NodeInputs = HashMap::new();
-        inputs.insert("target".to_string(), json!({ "node_type": "add", "node_schema": {} }));
+        inputs.insert(
+            "target".to_string(),
+            json!({
+                "node_type": "add",
+                "node_schema": {
+                    "payload": {
+                        "properties": {
+                            "a": { "type": "number", "required": true },
+                            "b": { "type": "number", "required": true }
+                        }
+                    }
+                }
+            }),
+        );
+        inputs.insert("items".to_string(), json!([{"a": 1, "b": 2}]));
+        inputs.insert("on_error".to_string(), json!("continue"));
+
+        let mut state = json!({});
+        let out = node
+            .execute(&inputs, &json!({}), &mut state, None)
+            .await
+            .unwrap();
+        // AddNode still fails (it reads top-level `a`/`b`, not `payload.a`/`payload.b`),
+        // but the failure must NOT be the required-param guard — proving the guard
+        // correctly saw `a`/`b` nested inside `payload`.
+        let error = out["output"]["results"][0]["error"].as_str().unwrap();
+        assert!(
+            !error.contains("missing required param"),
+            "required-param guard falsely rejected a container-nested field: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_list_is_not_an_error() {
+        let node = ForEachNode::new();
+        node.registry
+            .set(Arc::new(StubRegistry {
+                add: Arc::new(AddNode),
+            }) as Arc<dyn NodeRegistryPort>)
+            .ok();
+
+        let mut inputs: NodeInputs = HashMap::new();
+        inputs.insert(
+            "target".to_string(),
+            json!({ "node_type": "add", "node_schema": {} }),
+        );
         inputs.insert("items".to_string(), json!([]));
 
         let mut state = json!({});
-        let out = node.execute(&inputs, &json!({}), &mut state, None).await.unwrap();
+        let out = node
+            .execute(&inputs, &json!({}), &mut state, None)
+            .await
+            .unwrap();
         assert_eq!(out["output"]["total"], 0);
         assert!(out["output"]["results"].as_array().unwrap().is_empty());
     }

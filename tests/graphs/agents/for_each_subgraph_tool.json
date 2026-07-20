@@ -1,0 +1,87 @@
+{
+  "comment": "for_each as an LLM tool, subgraph target. The agent exposes `batch_draft_messages` (node_type: for_each) whose embedded target is an inline sub-agent (single llm_call resolving {{task}}). Each row runs the sub-agent in its own isolated child session (Mode B, per-row isolation) — proving for_each composes with subgraph-as-tool, not just plain nodes.",
+  "metadata": {
+    "category": "agents",
+    "features": ["for_each", "subgraph", "child_graph_inline", "llm_call", "batch_progress"],
+    "requires_env": ["GEMINI_API_KEY"]
+  },
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/for_each_subgraph_tool",
+        "method": "POST",
+        "test_payload": {
+          "prompt": "Draft a one-sentence welcome message for each of these new users: Ana, Bruno, Carla."
+        }
+      }
+    },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "api_key": "${GEMINI_API_KEY}",
+        "model": "gemini-2.5-flash",
+        "temperature": 0.0,
+        "system_message": "You draft messages via the `batch_draft_messages` tool. Always use the tool (never answer from memory). Build the `items` array from the user's request — one row per person, each with a `task` string describing what to draft for them. After the tool returns, present the drafted message for each person.",
+        "enabled_tools": ["batch_draft_messages"],
+        "tool_configurations": {
+          "batch_draft_messages": {
+            "name": "batch_draft_messages",
+            "node_type": "for_each",
+            "description": "Run a sub-agent once per row to draft a message, deterministically. Each row's sub-agent call is fully isolated from the others. Provide `items` as an array of rows, each with a `task` string.",
+            "node_schema": {
+              "on_error": { "fixed": "continue" },
+              "concurrency": { "fixed": 2 },
+              "items": {
+                "type": "array",
+                "required": true,
+                "description": "One row per person, each with a `task` describing what to draft.",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "task": { "type": "string", "required": true, "description": "The drafting instruction for this row, e.g. 'Write a one-sentence welcome message for Ana.'" }
+                  }
+                }
+              },
+              "target": {
+                "fixed": {
+                  "node_type": "subgraph",
+                  "node_schema": {
+                    "child_graph_inline": {
+                      "fixed": {
+                        "nodes": {
+                          "sub_agent": {
+                            "type": "llm_call",
+                            "config": {
+                              "provider": "google",
+                              "model": "gemini-2.5-flash",
+                              "api_key": "${GEMINI_API_KEY}",
+                              "temperature": 0.2,
+                              "system_message": "Eres un asistente conciso. Resuelve esta tarea y responde en una sola frase: {{task}}",
+                              "stream": false
+                            }
+                          },
+                          "out": { "type": "output" }
+                        },
+                        "edges": [
+                          { "from": "sub_agent", "to": "out" }
+                        ]
+                      }
+                    },
+                    "task": { "type": "string", "required": true }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "log": { "type": "log" }
+  },
+  "edges": [
+    { "from": "trigger", "to": "agent" },
+    { "from": "agent", "to": "log" }
+  ]
+}

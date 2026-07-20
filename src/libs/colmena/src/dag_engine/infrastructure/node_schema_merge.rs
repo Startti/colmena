@@ -16,8 +16,8 @@ pub(crate) fn merge_args_into_schema(
 ) -> Result<HashMap<String, Value>, String> {
     let node_schema: NodeSchema = serde_json::from_value(node_schema.clone())
         .map_err(|e| format!("Invalid node_schema: {e}"))?;
-    let parsed = parse_node_schema(&node_schema)
-        .map_err(|e| format!("Invalid node_schema: {e}"))?;
+    let parsed =
+        parse_node_schema(&node_schema).map_err(|e| format!("Invalid node_schema: {e}"))?;
     let mut result: HashMap<String, Value> = HashMap::new();
 
     for (k, v) in &parsed.fixed_values {
@@ -59,7 +59,12 @@ pub(crate) fn merge_args_into_schema(
 
     let resolved = result
         .iter()
-        .map(|(k, v)| (k.clone(), DagToolExecutor::resolve_value_templates(v, &result)))
+        .map(|(k, v)| {
+            (
+                k.clone(),
+                DagToolExecutor::resolve_value_templates(v, &result),
+            )
+        })
         .collect::<HashMap<String, Value>>();
     Ok(resolved)
 }
@@ -78,13 +83,17 @@ mod tests {
         let mut row = HashMap::new();
         row.insert("user_id".to_string(), json!(42));
         let out = merge_args_into_schema(&schema, row).unwrap();
-        assert_eq!(out.get("base_url").unwrap(), &json!("https://api.example.com"));
+        assert_eq!(
+            out.get("base_url").unwrap(),
+            &json!("https://api.example.com")
+        );
         assert_eq!(out.get("user_id").unwrap(), &json!(42));
     }
 
     #[test]
     fn row_arg_cannot_override_fixed() {
-        let schema = json!({ "secret": { "fixed": "keep" }, "x": { "type": "number", "required": true } });
+        let schema =
+            json!({ "secret": { "fixed": "keep" }, "x": { "type": "number", "required": true } });
         let mut row = HashMap::new();
         row.insert("secret".to_string(), json!("evil"));
         row.insert("x".to_string(), json!(1));

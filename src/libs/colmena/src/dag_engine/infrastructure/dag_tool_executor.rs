@@ -173,7 +173,10 @@ impl DagToolExecutor {
     /// Note: this is a shallow template resolution for `fixed_config` string fields.
     /// Full node-output path resolution (e.g. `${node_name.field.path}`) happens
     /// upstream in the DAG engine before the tool executor is called.
-    pub(crate) fn resolve_template_string(template: &str, inputs: &HashMap<String, Value>) -> String {
+    pub(crate) fn resolve_template_string(
+        template: &str,
+        inputs: &HashMap<String, Value>,
+    ) -> String {
         use regex::Regex;
 
         // Pattern: ${context.key} or ${key}
