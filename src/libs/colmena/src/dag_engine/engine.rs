@@ -297,6 +297,7 @@ impl ColmenaEngine {
             .with_liveness(liveness),
         );
         node_registry.set_subgraph_executor(use_case.clone());
+        node_registry.set_foreach_registry(node_registry.clone());
 
         tracing::info!(
             target = "colmena::engine",
