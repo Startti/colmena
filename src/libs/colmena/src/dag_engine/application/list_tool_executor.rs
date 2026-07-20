@@ -45,13 +45,29 @@ where
         return run_sequential(rows, policy, dispatch).await;
     }
     use futures::stream::{self, StreamExt};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    // Best-effort Abort under concurrency: a shared flag is set when a row
+    // errors under `OnError::Abort`. Items already pulled into the
+    // `buffer_unordered` window still complete (no strict cancellation), but
+    // any item not yet started is short-circuited — no NEW dispatch runs after
+    // an error is observed.
+    let aborted = Arc::new(AtomicBool::new(false));
+    let abort_on_err = policy.on_error == OnError::Abort;
+    let dispatch = &dispatch;
     let mut results: Vec<ItemResult> = stream::iter(rows.into_iter().enumerate())
         .map(|(index, row)| {
-            let fut = dispatch(index, row.clone());
+            let aborted = Arc::clone(&aborted);
             async move {
-                match fut.await {
+                if abort_on_err && aborted.load(Ordering::SeqCst) {
+                    return ItemResult { index, input: row, status: ItemStatus::Err, output: None, error: Some("skipped: batch aborted".to_string()) };
+                }
+                match dispatch(index, row.clone()).await {
                     Ok(output) => ItemResult { index, input: row, status: ItemStatus::Ok, output: Some(output), error: None },
-                    Err(error) => ItemResult { index, input: row, status: ItemStatus::Err, output: None, error: Some(error) },
+                    Err(error) => {
+                        if abort_on_err { aborted.store(true, Ordering::SeqCst); }
+                        ItemResult { index, input: row, status: ItemStatus::Err, output: None, error: Some(error) }
+                    }
                 }
             }
         })
@@ -115,17 +131,63 @@ mod tests {
 
     #[tokio::test]
     async fn parallel_preserves_index_order() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
         let rows: Vec<Value> = (0..10).map(|i| json!({"n": i})).collect();
         let policy = ExecPolicy { on_error: OnError::Continue, concurrency: 4, max_items: DEFAULT_MAX_ITEMS };
-        let out = run_list(rows, &policy, |_i, row| async move {
-            let n = row["n"].as_i64().unwrap();
-            // Later items sleep longer; without re-sort they'd finish out of order.
-            tokio::time::sleep(std::time::Duration::from_millis((10 - n) as u64)).await;
-            Ok(json!(n))
+        // Track peak in-flight to prove real concurrency (a sequential loop
+        // would keep peak == 1, so this fails if buffer_unordered regresses).
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let out = run_list(rows, &policy, |_i, row| {
+            let in_flight = Arc::clone(&in_flight);
+            let peak = Arc::clone(&peak);
+            async move {
+                let cur = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                peak.fetch_max(cur, Ordering::SeqCst);
+                let n = row["n"].as_i64().unwrap();
+                // Later items sleep less; without re-sort they'd finish out of order.
+                tokio::time::sleep(std::time::Duration::from_millis((10 - n) as u64)).await;
+                in_flight.fetch_sub(1, Ordering::SeqCst);
+                Ok(json!(n))
+            }
         }).await;
         for (i, item) in out.iter().enumerate() {
             assert_eq!(item.index, i);
             assert_eq!(item.output.as_ref().unwrap(), &json!(i as i64));
         }
+        assert!(peak.load(Ordering::SeqCst) > 1, "expected concurrent execution, peak in-flight was {}", peak.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn abort_best_effort_under_concurrency() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        // 20 rows; item 0 fails immediately. Under Abort + concurrency, in-flight
+        // items may finish but no NEW items should start after the error is seen.
+        let rows: Vec<Value> = (0..20).map(|i| json!({"n": i})).collect();
+        let policy = ExecPolicy { on_error: OnError::Abort, concurrency: 2, max_items: DEFAULT_MAX_ITEMS };
+        let executed = Arc::new(AtomicUsize::new(0));
+        let out = run_list(rows, &policy, |_i, row| {
+            let executed = Arc::clone(&executed);
+            async move {
+                executed.fetch_add(1, Ordering::SeqCst);
+                let n = row["n"].as_i64().unwrap();
+                if n == 0 {
+                    Err("early failure".into())
+                } else {
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                    Ok(json!(n))
+                }
+            }
+        }).await;
+        let ran = executed.load(Ordering::SeqCst);
+        assert!(ran < 20, "Abort should skip items; all {ran} ran (no-op abort)");
+        assert_eq!(out.len(), 20, "one result entry per row expected");
+        assert_eq!(out[0].status, ItemStatus::Err);
+        assert!(
+            out.iter().any(|r| r.error.as_deref() == Some("skipped: batch aborted")),
+            "expected at least one short-circuited item"
+        );
     }
 }
