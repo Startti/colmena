@@ -139,6 +139,86 @@ diseño del operador del grafo, no algo que el LLM deba elegir por llamada.
   (p.ej. `{ status, body }` para `http_request`, `{ result, extra_info }`
   para un `subgraph`/`llm_call`).
 
+## Escribir resultados a una hoja (`results_to`)
+
+`for_each` puede escribir su tabla de resultados a una hoja de Google
+**nueva** (nunca toca la hoja de entrada/fuente):
+
+```json
+"results_to": { "sink": "sheet", "title": "batch_results", "mode": "final" }
+```
+
+- `sink` — único valor soportado: `"sheet"`. Cualquier otro valor produce
+  error.
+- `title` — opcional, título de la spreadsheet **nueva** que se crea.
+  Default: `"for_each results"`.
+- `mode` — opcional:
+  - `"final"` (default) — escribe todas las filas en una sola llamada, al
+    terminar el fan-out completo.
+  - `"incremental"` — escribe cada fila en `A{index+2}` en el momento en
+    que esa fila termina (ves la hoja llenarse en vivo). Es
+    concurrency-safe porque cada fila escribe en una dirección de celda
+    distinta — no hay carrera entre filas concurrentes.
+  - Cualquier otro valor falla con: `for_each results_to: unknown mode
+    '<x>' (expected 'final' or 'incremental')`.
+
+La hoja creada tiene encabezado `[index, <columnas del input, orden
+alfabético>, status, result]`, donde `result` es el JSON compacto del
+`output` de esa fila si `status == "ok"`, o el string de error si
+`status == "err"`.
+
+El output del nodo gana un campo `results_sheet: { spreadsheet_id, url }`
+apuntando a la hoja creada.
+
+Errores:
+
+- Fallo al **crear** la hoja → el nodo entero falla (`Err`).
+- Fallo de escritura **por fila** en modo `incremental` → warning en log,
+  el fan-out continúa (no aborta las demás filas).
+- Fallo de escritura **final** (modo `final`) → no aborta el nodo; el
+  output incluye `results_sheet_error` con el detalle.
+
+Requiere las mismas credenciales OAuth de gsheets que `items_from: sheet`
+(`COLMENA_GOOGLE_OAUTH_*` en el entorno — ver
+[`docs/developer_guide/47_google_oauth.md`](47_google_oauth.md)).
+
+### Ejemplo — leer de una hoja y escribir resultados en otra
+
+```json
+{
+  "target": {
+    "node_type": "http_request",
+    "node_schema": {
+      "base_url": { "fixed": "https://api.example.com" },
+      "endpoint": { "fixed": "/users/update" },
+      "method": { "fixed": "POST" },
+      "body": {
+        "properties": {
+          "user_id": { "type": "number", "required": true },
+          "plan": { "type": "string", "required": true }
+        }
+      }
+    }
+  },
+  "items_from": {
+    "source": "sheet",
+    "ref": "1AbC...xyz|Users|A2:C200"
+  },
+  "results_to": {
+    "sink": "sheet",
+    "title": "batch_update_users results",
+    "mode": "incremental"
+  },
+  "concurrency": 4,
+  "on_error": "continue"
+}
+```
+
+`for_each` lee las filas de la hoja `Users` (input), corre las 200 filas
+contra `http_request` con concurrencia 4, y a medida que cada fila termina
+la va escribiendo en la nueva hoja `batch_update_users results` — la hoja
+fuente `Users` nunca se modifica.
+
 ## Eventos de progreso (SSE)
 
 `for_each` emite dos tipos de evento sobre el `ExecutionObserver`:
@@ -262,4 +342,4 @@ presentes en el SSE.
 - [`docs/superpowers/specs/2026-07-20-deterministic-list-tool-execution-design.md`](../superpowers/specs/2026-07-20-deterministic-list-tool-execution-design.md)
   — spec de diseño completo, incluyendo deferrals de v1.1
   (`items_from: attachment`, `items_from: tool_result`, checkpoint store
-  durable, `results_to` sink).
+  durable, `target_tool` por nombre).

@@ -2211,7 +2211,8 @@
         "Cada fila se fusiona dentro del `node_schema` del target con el mismo merge que usa un tool normal (`merge_args_into_schema`), y los campos `required` del target se validan antes de despachar esa fila — una fila incompleta se reporta como `status: \"err\"` para esa fila, sin abortar las demás (salvo `on_error: \"abort\"`).",
         "`target.node_type` puede ser cualquier ExecutableNode registrado, incluyendo `http_request`, `subgraph` (agents-as-tools por fila, aislamiento total entre filas) o cualquier nodo de cómputo. `for_each` no puede targetear a sí mismo (guard anti-recursión).",
         "HITL fail-closed: si el target se suspende dentro de una fila (p.ej. un `suspend` o un subgraph que pide input humano), esa fila se reporta como error — for_each no soporta pausar el fan-out a mitad de camino.",
-        "Emite dos eventos SSE de progreso: `batch-progress` (snapshot total/completed/ok/err/in_flight, al inicio y al final) y `batch-item-finished` (uno por fila, con `index`/`key`/`status`) — útiles para UIs que muestran progreso incremental de un lote."
+        "Emite dos eventos SSE de progreso: `batch-progress` (snapshot total/completed/ok/err/in_flight, al inicio y al final) y `batch-item-finished` (uno por fila, con `index`/`key`/`status`) — útiles para UIs que muestran progreso incremental de un lote.",
+        "`results_to` (opcional: { sink: \"sheet\", title?, mode?: \"final\"|\"incremental\" }) escribe la tabla de resultados a una hoja de Google NUEVA (nunca toca la hoja fuente) — es una decisión de configuración del operador, no algo que el LLM deba elegir por llamada, así que declárala `fixed` dentro de `node_schema` igual que `target`/`on_error`/`concurrency`/`max_items`. El output del nodo gana `results_sheet: { spreadsheet_id, url }` cuando se usa."
       ],
       "examples": {
         "forma_a_target_http_request": {

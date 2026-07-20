@@ -549,6 +549,17 @@
           "required": false,
           "default": 1000,
           "description": "Hard cap on the number of rows processed. If the resolved list exceeds this, it is truncated (with a warning log) before dispatch — protects against a runaway `items_from` source or an oversized LLM-supplied array."
+        },
+        "results_to": {
+          "type": "object",
+          "required": false,
+          "default": null,
+          "description": "Optional sink that writes the results table to a NEW Google Sheet (never mutates the input/source sheet). { sink: \"sheet\" (only supported value, any other errors), title?: string (default \"for_each results\"), mode?: \"final\" | \"incremental\" (default \"final\") }. `mode: \"final\"` writes all rows in one call at the end; `mode: \"incremental\"` writes each row at A{index+2} as soon as it finishes (concurrency-safe — distinct cell address per row) so the sheet fills in live. Any other `mode` value errors: \"for_each results_to: unknown mode '<x>' (expected 'final' or 'incremental')\". The created sheet's header is [index, <input columns, alphabetical>, status, result], where `result` is the compact JSON of the row's output (ok) or the error string (err). On success the node output gains `results_sheet: { spreadsheet_id, url }`. Sheet-creation failure fails the whole node; a per-row write failure in incremental mode logs a warning and continues; a final-mode write failure surfaces as `results_sheet_error` in the output instead of failing the node. Requires the same gsheets OAuth credentials as `items_from: { source: \"sheet\" }` (COLMENA_GOOGLE_OAUTH_*).",
+          "example": {
+            "sink": "sheet",
+            "title": "batch_results",
+            "mode": "incremental"
+          }
         }
       },
       "input_ports": {
