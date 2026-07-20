@@ -1,0 +1,85 @@
+//! Deterministic iteration engine for `for_each`: runs a dispatch closure over
+//! N rows with a policy (error handling + concurrency) and stable ordering.
+
+use serde_json::Value;
+use std::future::Future;
+
+pub const DEFAULT_MAX_ITEMS: usize = 1000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OnError { Continue, Abort }
+
+#[derive(Debug, Clone, Copy)]
+pub struct ExecPolicy { pub on_error: OnError, pub concurrency: usize, pub max_items: usize }
+
+impl Default for ExecPolicy {
+    fn default() -> Self { Self { on_error: OnError::Continue, concurrency: 1, max_items: DEFAULT_MAX_ITEMS } }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ItemStatus { Ok, Err }
+
+#[derive(Debug, Clone)]
+pub struct ItemResult {
+    pub index: usize,
+    pub input: Value,
+    pub status: ItemStatus,
+    pub output: Option<Value>,
+    pub error: Option<String>,
+}
+
+/// Run `dispatch` over each row sequentially (concurrency handled in a later
+/// task). `Continue` collects every row's result; `Abort` stops after the
+/// first error. Results are index-ordered.
+pub async fn run_list<F, Fut>(rows: Vec<Value>, policy: &ExecPolicy, dispatch: F) -> Vec<ItemResult>
+where
+    F: Fn(usize, Value) -> Fut,
+    Fut: Future<Output = Result<Value, String>>,
+{
+    let mut results = Vec::with_capacity(rows.len());
+    for (index, row) in rows.into_iter().enumerate() {
+        let res = dispatch(index, row.clone()).await;
+        let item = match res {
+            Ok(output) => ItemResult { index, input: row, status: ItemStatus::Ok, output: Some(output), error: None },
+            Err(error) => ItemResult { index, input: row, status: ItemStatus::Err, output: None, error: Some(error) },
+        };
+        let is_err = item.status == ItemStatus::Err;
+        results.push(item);
+        if is_err && policy.on_error == OnError::Abort { break; }
+    }
+    results
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn continue_collects_ok_and_err_in_order() {
+        let rows = vec![json!({"n":1}), json!({"n":2}), json!({"n":3})];
+        let policy = ExecPolicy { on_error: OnError::Continue, concurrency: 1, max_items: DEFAULT_MAX_ITEMS };
+        let out = run_list(rows, &policy, |_i, row| async move {
+            let n = row["n"].as_i64().unwrap();
+            if n == 2 { Err("boom".into()) } else { Ok(json!({"double": n * 2})) }
+        }).await;
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[0].index, 0);
+        assert_eq!(out[0].status, ItemStatus::Ok);
+        assert_eq!(out[1].status, ItemStatus::Err);
+        assert_eq!(out[1].error.as_deref(), Some("boom"));
+        assert_eq!(out[2].output.as_ref().unwrap(), &json!({"double": 6}));
+    }
+
+    #[tokio::test]
+    async fn abort_stops_after_first_error() {
+        let rows = vec![json!({"n":1}), json!({"n":2}), json!({"n":3})];
+        let policy = ExecPolicy { on_error: OnError::Abort, concurrency: 1, max_items: DEFAULT_MAX_ITEMS };
+        let out = run_list(rows, &policy, |_i, row| async move {
+            let n = row["n"].as_i64().unwrap();
+            if n == 2 { Err("stop".into()) } else { Ok(json!(n)) }
+        }).await;
+        assert_eq!(out.len(), 2); // item 3 never ran
+        assert_eq!(out[1].status, ItemStatus::Err);
+    }
+}
