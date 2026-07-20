@@ -28,19 +28,65 @@ impl ForEachNode {
     }
 }
 
-/// Read the list of rows from inputs: `items` (inline array) → default input edge.
-/// (`items_from` handles are added in a later task.)
-fn resolve_rows(inputs: &NodeInputs) -> Result<Vec<Value>, String> {
+/// Select a single column from each row, renaming it to `as_name` (or the
+/// column name itself if `as_name` is absent). With no `column`, rows pass
+/// through unchanged.
+pub(crate) fn apply_column_selection(rows: Vec<Value>, column: Option<&str>, as_name: Option<&str>) -> Vec<Value> {
+    let Some(col) = column else { return rows };
+    let key = as_name.unwrap_or(col);
+    rows.into_iter()
+        .map(|row| {
+            let val = row.get(col).cloned().unwrap_or(Value::Null);
+            json!({ key: val })
+        })
+        .collect()
+}
+
+/// Read the list of rows from inputs: `items` (inline array) → `items_from`
+/// (data-source handle) → default input edge.
+async fn resolve_rows_async(inputs: &NodeInputs) -> Result<Vec<Value>, String> {
     if let Some(Value::Array(arr)) = inputs.get("items") {
         return Ok(arr.clone());
     }
+
+    if let Some(handle) = inputs.get("items_from") {
+        let source = handle.get("source").and_then(|v| v.as_str()).unwrap_or("");
+        let column = handle.get("column").and_then(|v| v.as_str());
+        let as_name = handle.get("as").and_then(|v| v.as_str());
+        let rows = match source {
+            "sheet" => {
+                use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::dispatch_gsheets_read;
+                let reference = handle.get("ref").and_then(|v| v.as_str()).unwrap_or("");
+                // `ref` = "<spreadsheet_id>|<sheet>|<range?>"
+                let mut parts = reference.split('|');
+                let spreadsheet_id = parts.next().unwrap_or("").to_string();
+                let sheet = parts.next().unwrap_or("").to_string();
+                let range = parts.next().map(|s| s.to_string());
+                let mut args = json!({ "spreadsheet_id": spreadsheet_id, "sheet": sheet, "format": "json", "as_records": true });
+                if let Some(r) = range {
+                    args["range"] = json!(r);
+                }
+                let res = dispatch_gsheets_read(args).await;
+                if res.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+                    return Err(format!("for_each items_from sheet failed: {res}"));
+                }
+                res.get("values")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .ok_or("for_each items_from sheet: no `values` in response")?
+            }
+            other => return Err(format!("for_each items_from: unknown source '{other}' (v1: sheet)")),
+        };
+        return Ok(apply_column_selection(rows, column, as_name));
+    }
+
     if let Some(Value::Array(arr)) = inputs.get("input") {
         return Ok(arr.clone());
     }
     if let Some(Value::Array(arr)) = inputs.get("default") {
         return Ok(arr.clone());
     }
-    Err("for_each: no list found — provide `items` (array) or an input edge carrying an array".into())
+    Err("for_each: no list found — provide `items`, `items_from`, or an input edge carrying an array".into())
 }
 
 /// A stable per-row key for progress/checklist events: first scalar field, else index.
@@ -86,7 +132,7 @@ impl ExecutableNode for ForEachNode {
         let target_schema = target.get("node_schema").cloned().unwrap_or_else(|| json!({}));
 
         let policy = parse_policy(inputs);
-        let mut rows = resolve_rows(inputs).map_err(|e| -> Box<dyn StdError + Send + Sync> { e.into() })?;
+        let mut rows = resolve_rows_async(inputs).await.map_err(|e| -> Box<dyn StdError + Send + Sync> { e.into() })?;
         if rows.len() > policy.max_items {
             eprintln!("⚠️ [for_each] {} rows exceeds max_items={}, truncating.", rows.len(), policy.max_items);
             rows.truncate(policy.max_items);
@@ -192,8 +238,9 @@ impl ExecutableNode for ForEachNode {
     fn description(&self) -> Option<&str> {
         Some(
             "Run an embedded target tool once per row of a list, deterministically. \
-              Provide the list via `items` (array) or `items_from` (a data-source handle). \
-              Prefer `items_from` for lists that come from data — the model never re-types them.",
+              Provide the list via `items` (inline array) or `items_from` \
+              ({ source: \"sheet\", ref: \"<spreadsheet_id>|<sheet>|<range?>\", column?, as? }) \
+              to read rows from a Google Sheet without the model re-typing them.",
         )
     }
 }
@@ -217,6 +264,28 @@ mod tests {
         fn get_all_nodes(&self) -> HashMap<String, Arc<dyn ExecutableNode>> {
             HashMap::new()
         }
+    }
+
+    #[test]
+    fn column_selection_maps_scalar_rows() {
+        let rows = vec![json!({"user_id": 1, "name": "a"}), json!({"user_id": 2, "name": "b"})];
+        let picked = super::apply_column_selection(rows, Some("user_id"), Some("uid"));
+        assert_eq!(picked[0], json!({"uid": 1}));
+        assert_eq!(picked[1], json!({"uid": 2}));
+    }
+
+    #[test]
+    fn column_selection_no_column_returns_rows_unchanged() {
+        let rows = vec![json!({"a": 1}), json!({"a": 2})];
+        let picked = super::apply_column_selection(rows.clone(), None, None);
+        assert_eq!(picked, rows);
+    }
+
+    #[test]
+    fn column_selection_defaults_key_to_column_name() {
+        let rows = vec![json!({"user_id": 1, "name": "a"})];
+        let picked = super::apply_column_selection(rows, Some("user_id"), None);
+        assert_eq!(picked[0], json!({"user_id": 1}));
     }
 
     #[tokio::test]
