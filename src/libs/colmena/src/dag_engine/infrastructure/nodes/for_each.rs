@@ -202,12 +202,16 @@ fn parse_results_to(v: &Value) -> Result<ResultsSink, String> {
         .and_then(|s| s.as_str())
         .unwrap_or("for_each results")
         .to_string();
-    let mode = v
-        .get("mode")
-        .and_then(|s| s.as_str())
-        .unwrap_or("final")
-        .to_string();
-    Ok(ResultsSink { title, mode })
+    let mode = v.get("mode").and_then(|s| s.as_str()).unwrap_or("final");
+    if mode != "final" && mode != "incremental" {
+        return Err(format!(
+            "for_each results_to: unknown mode '{mode}' (expected 'final' or 'incremental')"
+        ));
+    }
+    Ok(ResultsSink {
+        title,
+        mode: mode.to_string(),
+    })
 }
 
 /// Header row for the results sheet: `["index"] + <input columns> + ["status", "result"]`.
@@ -997,6 +1001,66 @@ mod tests {
         let cols = vec!["input".to_string()];
         let row = super::results_sheet_row(0, &input, "ok", json!("42"), &cols);
         assert_eq!(row, vec![json!(0), json!(42), json!("ok"), json!("42")]);
+    }
+
+    #[test]
+    fn parse_results_to_accepts_valid_modes_and_rejects_unknown() {
+        // Absent mode defaults to "final".
+        let sink = super::parse_results_to(&json!({ "sink": "sheet" })).unwrap();
+        assert_eq!(sink.mode, "final");
+        // Explicit valid modes are accepted.
+        assert_eq!(
+            super::parse_results_to(&json!({ "sink": "sheet", "mode": "final" }))
+                .unwrap()
+                .mode,
+            "final"
+        );
+        assert_eq!(
+            super::parse_results_to(&json!({ "sink": "sheet", "mode": "incremental" }))
+                .unwrap()
+                .mode,
+            "incremental"
+        );
+        // An unrecognized mode fails loudly rather than silently writing nothing.
+        let err = super::parse_results_to(&json!({ "sink": "sheet", "mode": "Final" }))
+            .unwrap_err();
+        assert!(
+            err.contains("unknown mode 'Final'")
+                && err.contains("expected 'final' or 'incremental'"),
+            "unexpected error message: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn results_to_unknown_mode_returns_targeted_error() {
+        let node = ForEachNode::new();
+        node.registry
+            .set(Arc::new(StubRegistry {
+                add: Arc::new(AddNode),
+                echo: None,
+            }) as Arc<dyn NodeRegistryPort>)
+            .ok();
+
+        let mut inputs: NodeInputs = HashMap::new();
+        inputs.insert(
+            "target".to_string(),
+            json!({ "node_type": "add", "node_schema": {} }),
+        );
+        inputs.insert("items".to_string(), json!([{"a":1,"b":2}]));
+        inputs.insert(
+            "results_to".to_string(),
+            json!({"sink": "sheet", "mode": "increment"}),
+        );
+
+        let mut state = json!({});
+        let err = node
+            .execute(&inputs, &json!({}), &mut state, None)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("unknown mode 'increment'"),
+            "unexpected error message: {err}"
+        );
     }
 
     #[tokio::test]
