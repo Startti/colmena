@@ -11,6 +11,9 @@ use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
 use crate::dag_engine::domain::observer::{ExecutionObserver, NodeEvent};
 use crate::dag_engine::domain::tool_configuration::parse_node_schema;
 use crate::dag_engine::infrastructure::node_schema_merge::merge_args_into_schema;
+use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::{
+    dispatch_gsheets_create_spreadsheet, dispatch_gsheets_set_range,
+};
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 use std::error::Error as StdError;
@@ -177,6 +180,81 @@ fn parse_policy(config: &Value, inputs: &NodeInputs) -> ExecPolicy {
     }
 }
 
+/// Parsed `results_to` sink config. v1 supports only `sink: "sheet"` — a NEW
+/// spreadsheet created once before iteration, never the input sheet.
+#[derive(Debug, Clone)]
+struct ResultsSink {
+    title: String,
+    mode: String,
+}
+
+/// Parse a `results_to` value into a `ResultsSink`, or an error message if
+/// the sink is unsupported. Pure — no I/O.
+fn parse_results_to(v: &Value) -> Result<ResultsSink, String> {
+    let sink = v.get("sink").and_then(|s| s.as_str()).unwrap_or("");
+    if sink != "sheet" {
+        return Err(format!(
+            "for_each results_to: unknown sink '{sink}' (v1: sheet)"
+        ));
+    }
+    let title = v
+        .get("title")
+        .and_then(|s| s.as_str())
+        .unwrap_or("for_each results")
+        .to_string();
+    let mode = v
+        .get("mode")
+        .and_then(|s| s.as_str())
+        .unwrap_or("final")
+        .to_string();
+    Ok(ResultsSink { title, mode })
+}
+
+/// Header row for the results sheet: `["index"] + <input columns> + ["status", "result"]`.
+/// Input columns are the sorted keys of the first row's input object (rows are
+/// homogeneous); if the first row is a scalar (or the list is empty), a
+/// single `"input"` column is used instead. Pure — no I/O.
+fn results_sheet_header(rows: &[Value]) -> (Vec<String>, Vec<Value>) {
+    let input_cols: Vec<String> = match rows.first() {
+        Some(Value::Object(map)) => {
+            let mut cols: Vec<String> = map.keys().cloned().collect();
+            cols.sort();
+            cols
+        }
+        _ => vec!["input".to_string()],
+    };
+    let mut header: Vec<Value> = vec![json!("index")];
+    header.extend(input_cols.iter().map(|c| json!(c)));
+    header.push(json!("status"));
+    header.push(json!("result"));
+    (input_cols, header)
+}
+
+/// A single data row for the results sheet, matching `results_sheet_header`'s
+/// column order: `[index, <input[col] for each input col>, status, result]`.
+/// When `input_cols == ["input"]` and `input` is not an object, the scalar
+/// value itself fills that column. Pure — no I/O.
+fn results_sheet_row(
+    index: usize,
+    input: &Value,
+    status: &str,
+    result_cell: Value,
+    input_cols: &[String],
+) -> Vec<Value> {
+    let mut row: Vec<Value> = vec![json!(index)];
+    for col in input_cols {
+        let cell = match input {
+            Value::Object(map) => map.get(col).cloned().unwrap_or(Value::Null),
+            other if col == "input" => other.clone(),
+            _ => Value::Null,
+        };
+        row.push(cell);
+    }
+    row.push(json!(status));
+    row.push(result_cell);
+    row
+}
+
 #[async_trait::async_trait]
 impl ExecutableNode for ForEachNode {
     async fn execute(
@@ -222,6 +300,72 @@ impl ExecutableNode for ForEachNode {
         }
         let total = rows.len();
 
+        let results_to = match cfg_or_input(config, inputs, "results_to") {
+            Some(v) => Some(
+                parse_results_to(v).map_err(|e| -> Box<dyn StdError + Send + Sync> { e.into() })?,
+            ),
+            None => None,
+        };
+
+        // `results_to` sheet sink: create the destination spreadsheet ONCE,
+        // before iterating, and write the header row upfront. Never touches
+        // the input sheet — always a brand-new spreadsheet.
+        let mut results_sheet_info: Option<Value> = None;
+        // (spreadsheet_id, sheet_name, mode, input_cols) — captured for the
+        // per-row `incremental` write and the post-loop `final` write.
+        let mut sink_ctx: Option<(String, String, String, Vec<String>)> = None;
+        if let Some(sink) = &results_to {
+            let create_res =
+                dispatch_gsheets_create_spreadsheet(json!({ "title": sink.title })).await;
+            if create_res.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+                return Err(format!(
+                    "for_each results_to: failed to create results spreadsheet: {create_res}"
+                )
+                .into());
+            }
+            let spreadsheet_id = create_res
+                .get("spreadsheet_id")
+                .and_then(|v| v.as_str())
+                .ok_or("for_each results_to: create_spreadsheet response missing spreadsheet_id")?
+                .to_string();
+            let url = create_res
+                .get("url")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let sheet_name = create_res
+                .get("sheets")
+                .and_then(|s| s.as_array())
+                .and_then(|a| a.first())
+                .and_then(|s| s.get("title"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("Sheet1")
+                .to_string();
+
+            let (input_cols, header) = results_sheet_header(&rows);
+            let header_res = dispatch_gsheets_set_range(json!({
+                "spreadsheet_id": spreadsheet_id,
+                "sheet": sheet_name,
+                "start": "A1",
+                "values": [header],
+            }))
+            .await;
+            if header_res.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+                colmena_log!(
+                    "⚠️ [for_each] results_to: failed to write header row: {}",
+                    header_res
+                );
+            }
+
+            results_sheet_info = Some(json!({ "spreadsheet_id": spreadsheet_id, "url": url }));
+            sink_ctx = Some((spreadsheet_id, sheet_name, sink.mode.clone(), input_cols));
+        }
+        // Only the `incremental` mode writes inside the per-row dispatch closure.
+        let incremental_sink: Option<(String, String, Vec<String>)> =
+            sink_ctx.as_ref().and_then(|(id, sheet, mode, cols)| {
+                (mode == "incremental").then(|| (id.clone(), sheet.clone(), cols.clone()))
+            });
+
         let registry = self
             .registry
             .get()
@@ -255,63 +399,103 @@ impl ExecutableNode for ForEachNode {
             let target_schema = target_schema.clone();
             let observer = observer.clone();
             let forwarded_context = forwarded_context.clone();
+            let incremental_sink = incremental_sink.clone();
             async move {
-                let row_map: HashMap<String, Value> = match &row {
-                    Value::Object(m) => m.clone().into_iter().collect(),
-                    other => {
-                        let mut h = HashMap::new();
-                        h.insert("value".to_string(), other.clone());
-                        h
+                let dispatch_result: Result<Value, String> = async {
+                    let row_map: HashMap<String, Value> = match &row {
+                        Value::Object(m) => m.clone().into_iter().collect(),
+                        other => {
+                            let mut h = HashMap::new();
+                            h.insert("value".to_string(), other.clone());
+                            h
+                        }
+                    };
+                    let mut merged = merge_args_into_schema(&target_schema, row_map)
+                        .map_err(|e| format!("row {index}: {e}"))?;
+                    for (key, value) in forwarded_context {
+                        merged.entry(key).or_insert(value);
                     }
-                };
-                let mut merged = merge_args_into_schema(&target_schema, row_map)
-                    .map_err(|e| format!("row {index}: {e}"))?;
-                for (key, value) in forwarded_context {
-                    merged.entry(key).or_insert(value);
-                }
-                if let Ok(node_schema) = serde_json::from_value::<
-                    crate::dag_engine::domain::tool_configuration::NodeSchema,
-                >(target_schema.clone())
-                {
-                    if let Ok(parsed) = parse_node_schema(&node_schema) {
-                        for req in &parsed.required_params {
-                            // A required param may live at the top level of `merged`, or
-                            // (when it's a container child, e.g. an http_request's
-                            // `body.user_id`) nested inside its container object. Mirrors
-                            // the `real_key` logic in `merge_args_into_schema`.
-                            let present = if let Some(container) =
-                                parsed.param_to_container.get(req)
-                            {
-                                let real_key =
-                                    req.find('.').map(|p| &req[p + 1..]).unwrap_or(req.as_str());
-                                merged
-                                    .get(container)
-                                    .and_then(|v| v.as_object())
-                                    .is_some_and(|m| m.contains_key(real_key))
-                            } else {
-                                merged.contains_key(req)
-                            };
-                            if !present {
-                                return Err(format!("row {index}: missing required param '{req}'"));
+                    if let Ok(node_schema) = serde_json::from_value::<
+                        crate::dag_engine::domain::tool_configuration::NodeSchema,
+                    >(target_schema.clone())
+                    {
+                        if let Ok(parsed) = parse_node_schema(&node_schema) {
+                            for req in &parsed.required_params {
+                                // A required param may live at the top level of `merged`, or
+                                // (when it's a container child, e.g. an http_request's
+                                // `body.user_id`) nested inside its container object. Mirrors
+                                // the `real_key` logic in `merge_args_into_schema`.
+                                let present = if let Some(container) =
+                                    parsed.param_to_container.get(req)
+                                {
+                                    let real_key = req
+                                        .find('.')
+                                        .map(|p| &req[p + 1..])
+                                        .unwrap_or(req.as_str());
+                                    merged
+                                        .get(container)
+                                        .and_then(|v| v.as_object())
+                                        .is_some_and(|m| m.contains_key(real_key))
+                                } else {
+                                    merged.contains_key(req)
+                                };
+                                if !present {
+                                    return Err(format!(
+                                        "row {index}: missing required param '{req}'"
+                                    ));
+                                }
                             }
                         }
                     }
+                    let node = registry.get_node(&target_type).ok_or_else(|| {
+                        format!("row {index}: unknown target node_type '{target_type}'")
+                    })?;
+                    let mut item_state = json!({});
+                    let result = node
+                        .execute(&merged, &json!({}), &mut item_state, observer.clone())
+                        .await
+                        .map_err(|e| format!("row {index}: {e}"))?;
+                    // HITL fail-closed: a SUSPENDED result inside a fan-out is an error.
+                    if result.get("__colmena_status").and_then(|v| v.as_str())
+                        == Some("SUSPENDED")
+                    {
+                        return Err(format!(
+                            "row {index}: target suspended (HITL not supported inside for_each)"
+                        ));
+                    }
+                    Ok(result)
                 }
-                let node = registry.get_node(&target_type).ok_or_else(|| {
-                    format!("row {index}: unknown target node_type '{target_type}'")
-                })?;
-                let mut item_state = json!({});
-                let result = node
-                    .execute(&merged, &json!({}), &mut item_state, observer.clone())
-                    .await
-                    .map_err(|e| format!("row {index}: {e}"))?;
-                // HITL fail-closed: a SUSPENDED result inside a fan-out is an error.
-                if result.get("__colmena_status").and_then(|v| v.as_str()) == Some("SUSPENDED") {
-                    return Err(format!(
-                        "row {index}: target suspended (HITL not supported inside for_each)"
-                    ));
+                .await;
+
+                // `results_to` incremental sink: write this row's own address the
+                // moment it finishes, both ok and err, so the sheet reflects
+                // failures too. Distinct per-row ranges avoid concurrent-write races.
+                if let Some((spreadsheet_id, sheet_name, input_cols)) = &incremental_sink {
+                    let (status, cell) = match &dispatch_result {
+                        Ok(output) => (
+                            "ok",
+                            json!(serde_json::to_string(output).unwrap_or_default()),
+                        ),
+                        Err(e) => ("err", json!(e.clone())),
+                    };
+                    let row_values = results_sheet_row(index, &row, status, cell, input_cols);
+                    let write_res = dispatch_gsheets_set_range(json!({
+                        "spreadsheet_id": spreadsheet_id,
+                        "sheet": sheet_name,
+                        "start": format!("A{}", index + 2),
+                        "values": [row_values],
+                    }))
+                    .await;
+                    if write_res.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+                        colmena_log!(
+                            "⚠️ [for_each] results_to incremental write failed for row {}: {}",
+                            index,
+                            write_res
+                        );
+                    }
                 }
-                Ok(result)
+
+                dispatch_result
             }
         };
 
@@ -368,7 +552,48 @@ impl ExecutableNode for ForEachNode {
             });
         }
 
-        Ok(json!({ "output": { "total": total, "ok": ok, "err": err, "results": out_rows } }))
+        // `results_to` final-mode sink: one bulk write of every data row after
+        // all rows finish (as opposed to `incremental`, which already wrote
+        // per-row inside the dispatch closure above).
+        let mut results_sheet_error: Option<String> = None;
+        if let Some((spreadsheet_id, sheet_name, mode, input_cols)) = &sink_ctx {
+            if mode == "final" && !results.is_empty() {
+                let data_rows: Vec<Vec<Value>> = results
+                    .iter()
+                    .map(|r| {
+                        let (status, cell) = match r.status {
+                            ItemStatus::Ok => (
+                                "ok",
+                                json!(serde_json::to_string(&r.output).unwrap_or_default()),
+                            ),
+                            ItemStatus::Err => {
+                                ("err", json!(r.error.clone().unwrap_or_default()))
+                            }
+                        };
+                        results_sheet_row(r.index, &r.input, status, cell, input_cols)
+                    })
+                    .collect();
+                let write_res = dispatch_gsheets_set_range(json!({
+                    "spreadsheet_id": spreadsheet_id,
+                    "sheet": sheet_name,
+                    "start": "A2",
+                    "values": data_rows,
+                }))
+                .await;
+                if write_res.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+                    results_sheet_error = Some(format!("{write_res}"));
+                }
+            }
+        }
+
+        let mut output = json!({ "total": total, "ok": ok, "err": err, "results": out_rows });
+        if let Some(info) = results_sheet_info {
+            output["results_sheet"] = info;
+        }
+        if let Some(e) = results_sheet_error {
+            output["results_sheet_error"] = json!(e);
+        }
+        Ok(json!({ "output": output }))
     }
 
     fn default_output(&self) -> Option<&str> {
@@ -697,6 +922,142 @@ mod tests {
         let result_output = &out["output"]["results"][0]["output"]["output"];
         assert_eq!(result_output["__colmena_subgraph_depth"], json!(3));
         assert!(result_output.get("__node_id").is_none());
+    }
+
+    #[test]
+    fn results_sheet_header_derives_sorted_input_columns() {
+        let rows = vec![json!({"b": 1, "a": 2})];
+        let (cols, header) = super::results_sheet_header(&rows);
+        assert_eq!(cols, vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(
+            header,
+            vec![
+                json!("index"),
+                json!("a"),
+                json!("b"),
+                json!("status"),
+                json!("result")
+            ]
+        );
+    }
+
+    #[test]
+    fn results_sheet_header_scalar_input_uses_single_column() {
+        let rows = vec![json!(42)];
+        let (cols, header) = super::results_sheet_header(&rows);
+        assert_eq!(cols, vec!["input".to_string()]);
+        assert_eq!(
+            header,
+            vec![json!("index"), json!("input"), json!("status"), json!("result")]
+        );
+    }
+
+    #[test]
+    fn results_sheet_header_empty_rows_falls_back_to_input_column() {
+        let rows: Vec<Value> = vec![];
+        let (cols, header) = super::results_sheet_header(&rows);
+        assert_eq!(cols, vec!["input".to_string()]);
+        assert_eq!(
+            header,
+            vec![json!("index"), json!("input"), json!("status"), json!("result")]
+        );
+    }
+
+    #[test]
+    fn results_sheet_row_builds_ok_row_from_object_input() {
+        let input = json!({"a": 2, "b": 1});
+        let cols = vec!["a".to_string(), "b".to_string()];
+        let row = super::results_sheet_row(0, &input, "ok", json!("{\"output\":3.0}"), &cols);
+        assert_eq!(
+            row,
+            vec![
+                json!(0),
+                json!(2),
+                json!(1),
+                json!("ok"),
+                json!("{\"output\":3.0}")
+            ]
+        );
+    }
+
+    #[test]
+    fn results_sheet_row_builds_err_row_with_error_string() {
+        let input = json!({"a": 1});
+        let cols = vec!["a".to_string()];
+        let row = super::results_sheet_row(2, &input, "err", json!("row 2: boom"), &cols);
+        assert_eq!(
+            row,
+            vec![json!(2), json!(1), json!("err"), json!("row 2: boom")]
+        );
+    }
+
+    #[test]
+    fn results_sheet_row_scalar_input_uses_input_value() {
+        let input = json!(42);
+        let cols = vec!["input".to_string()];
+        let row = super::results_sheet_row(0, &input, "ok", json!("42"), &cols);
+        assert_eq!(row, vec![json!(0), json!(42), json!("ok"), json!("42")]);
+    }
+
+    #[tokio::test]
+    async fn results_to_absent_leaves_output_unchanged() {
+        let node = ForEachNode::new();
+        node.registry
+            .set(Arc::new(StubRegistry {
+                add: Arc::new(AddNode),
+                echo: None,
+            }) as Arc<dyn NodeRegistryPort>)
+            .ok();
+
+        let mut inputs: NodeInputs = HashMap::new();
+        inputs.insert(
+            "target".to_string(),
+            json!({
+                "node_type": "add",
+                "node_schema": {
+                    "a": { "type": "number", "required": true },
+                    "b": { "type": "number", "required": true }
+                }
+            }),
+        );
+        inputs.insert("items".to_string(), json!([{"a":1,"b":2}]));
+
+        let mut state = json!({});
+        let out = node
+            .execute(&inputs, &json!({}), &mut state, None)
+            .await
+            .unwrap();
+        assert!(out["output"].get("results_sheet").is_none());
+        assert!(out["output"].get("results_sheet_error").is_none());
+    }
+
+    #[tokio::test]
+    async fn results_to_unknown_sink_returns_targeted_error() {
+        let node = ForEachNode::new();
+        node.registry
+            .set(Arc::new(StubRegistry {
+                add: Arc::new(AddNode),
+                echo: None,
+            }) as Arc<dyn NodeRegistryPort>)
+            .ok();
+
+        let mut inputs: NodeInputs = HashMap::new();
+        inputs.insert(
+            "target".to_string(),
+            json!({ "node_type": "add", "node_schema": {} }),
+        );
+        inputs.insert("items".to_string(), json!([{"a":1,"b":2}]));
+        inputs.insert("results_to".to_string(), json!({"sink": "database"}));
+
+        let mut state = json!({});
+        let err = node
+            .execute(&inputs, &json!({}), &mut state, None)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("unknown sink 'database'"),
+            "unexpected error message: {err}"
+        );
     }
 
     #[tokio::test]
