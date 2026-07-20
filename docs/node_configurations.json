@@ -9,7 +9,7 @@
       "default": null,
       "description": "The node type identifier that determines which execution logic is used. Must match one of the registered node types in the engine (e.g., 'llm_call', 'http_request', 'input'). This field is required for every node and is used by the DAG engine to look up the correct ExecutableNode implementation at runtime.",
       "valid_values": [
-        "input", "output", "trigger_webhook", "suspend", "loop_controller", "subgraph", "router",
+        "input", "output", "trigger_webhook", "suspend", "loop_controller", "subgraph", "for_each", "router",
         "log", "mock_input",
         "add", "subtract", "multiply", "divide", "exponential",
         "http_request", "socketio_request", "sql_query", "python_script",
@@ -501,6 +501,70 @@
       },
       "default_input": null,
       "default_output": "result",
+      "requires": [],
+      "supports_env_vars": false
+    },
+
+    "for_each": {
+      "name": "ForEach",
+      "description": "Runs an embedded target tool once per row of a list, deterministically (iteration happens in Rust, not by the LLM re-calling a tool in a loop). Usable as a graph node (config-driven) AND as an LLM tool exposed via tool_configurations (node_schema-driven, target/policy fields declared as `fixed`, `items`/`items_from` left LLM-visible). The list source is either an inline `items` array, `items_from` (currently only `source: \"sheet\"`, reading a Google Sheet without the model re-typing rows), or a default input edge carrying an array. Each row is merged into the target's `node_schema` (same merge semantics as a normal LLM tool call) and dispatched to the target node_type via the shared NodeRegistryPort. Rows run with bounded concurrency; a suspend (HITL) inside a row is treated as an error for that row (fail-closed — for_each does not support pausing mid-fan-out). See docs/developer_guide/49_for_each.md.",
+      "category": "control_flow",
+      "config_fields": {
+        "target": {
+          "type": "object",
+          "required": true,
+          "default": null,
+          "description": "Embedded tool config for the row-level target: { node_type: string, node_schema?: object }. `node_type` must be a registered node type (not `for_each` itself — self-targeting is rejected). `node_schema` follows the same `fixed`/LLM-visible/`properties` container conventions as a normal tool_configurations entry; each row's fields are merged into it via the same merge_args_into_schema used by the LLM tool executor, then required fields are validated before dispatch.",
+          "example": { "node_type": "http_request", "node_schema": { "base_url": { "fixed": "https://api.example.com" }, "endpoint": { "fixed": "/users" }, "method": { "fixed": "POST" }, "body": { "properties": { "user_id": { "type": "number", "required": true }, "plan": { "type": "string", "required": true } } } } }
+        },
+        "items": {
+          "type": "array",
+          "required": false,
+          "default": null,
+          "description": "Inline array of row objects, one row per target invocation. Mutually exclusive in practice with `items_from` (items wins if both are present). When exposed as an LLM tool, this is typically the one LLM-visible field alongside the `fixed` target/policy fields.",
+          "example": [{ "user_id": 101, "plan": "pro" }, { "user_id": 102, "plan": "pro" }]
+        },
+        "items_from": {
+          "type": "object",
+          "required": false,
+          "default": null,
+          "description": "Data-source handle to read rows from instead of an inline `items` array. v1 only supports { source: \"sheet\", ref: \"<spreadsheet_id>|<sheet>|<range?>\", column?: string, as?: string }. `column`/`as` select and rename a single column from each row (e.g. pull just `user_id` and rename it to `uid`). `items_from: { source: \"attachment\" }` is deferred to v1.1 — do not configure it, it will fail with 'unknown source'.",
+          "example": { "source": "sheet", "ref": "1AbC...xyz|Users|A2:B50", "column": "user_id", "as": "uid" }
+        },
+        "on_error": {
+          "type": "string",
+          "required": false,
+          "default": "continue",
+          "valid_values": ["continue", "abort"],
+          "description": "Row-failure policy. 'continue' (default) runs every row regardless of earlier failures and reports per-row ok/err in the result table. 'abort' stops dispatching new rows as soon as one fails (best-effort under concurrency — in-flight rows still complete)."
+        },
+        "concurrency": {
+          "type": "integer",
+          "required": false,
+          "default": 1,
+          "description": "Maximum number of rows dispatched to the target concurrently. 1 = fully sequential. Values below 1 are clamped up to 1."
+        },
+        "max_items": {
+          "type": "integer",
+          "required": false,
+          "default": 1000,
+          "description": "Hard cap on the number of rows processed. If the resolved list exceeds this, it is truncated (with a warning log) before dispatch — protects against a runaway `items_from` source or an oversized LLM-supplied array."
+        }
+      },
+      "input_ports": {
+        "input": {
+          "type": "array",
+          "description": "Fallback list source (also checked as 'default') when neither `items` nor `items_from` is configured — lets a for_each graph node read its list from an upstream edge instead of static config."
+        }
+      },
+      "output_ports": {
+        "output": {
+          "type": "object",
+          "description": "{ total: number, ok: number, err: number, results: [{ index, input, status: \"ok\"|\"err\", output?, error? }] } — one entry per row, in original order, regardless of concurrency."
+        }
+      },
+      "default_input": null,
+      "default_output": "output",
       "requires": [],
       "supports_env_vars": false
     },
@@ -2996,7 +3060,7 @@
     "control_flow": {
       "name": "Control Flow",
       "description": "Nodes that manage data flow, graph lifecycle, looping, suspension, and subgraph execution.",
-      "node_types": ["input", "output", "trigger_webhook", "suspend", "loop_controller", "subgraph"]
+      "node_types": ["input", "output", "trigger_webhook", "suspend", "loop_controller", "subgraph", "for_each"]
     },
     "debug": {
       "name": "Debug",

@@ -233,6 +233,13 @@ the user's source. Durable server-side checkpointing and a `results_to` write-si
   `SheetsClient` create+write / the `data_run_python` path), NOT in the core. Modes `final`
   (one `batchUpdate` at end, default) + `incremental` (append per row — "watch the sheet
   fill"; append + per-row `index` → no races under concurrency). Generalizable to `sql`.
+- **Deferred (v1.1) — `items_from: attachment` (CSV/XLSX)**: a plain `ExecutableNode`
+  cannot resolve a `document_id → bytes` — `fetch_attachment_bytes`/`lookup_attachment_meta`
+  are `DagToolExecutor` methods, and the executor injects no attachment fetcher into a
+  node's `inputs`. Supporting it needs injecting `AttachmentRegistry` + storage into
+  `for_each` and replicating the fetch path. v1 ships `items_from: sheet` only; CSV/XLSX is
+  still reachable via an upstream node (`data_run_python`/read) feeding `for_each`'s input
+  edge. (Discovered during implementation 2026-07-20.)
 - **Deferred (v1.1) — `items_from: tool_result`**: needs a per-turn `tool_call_id -> output`
   cache in `DagToolExecutor`.
 - **Deferred (v1.1) — durable checkpoint store** keyed by `(batch_id + item_key)` for crash
