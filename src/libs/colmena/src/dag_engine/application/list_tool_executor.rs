@@ -28,18 +28,48 @@ pub struct ItemResult {
     pub error: Option<String>,
 }
 
-/// Run `dispatch` over each row sequentially (concurrency handled in a later
-/// task). `Continue` collects every row's result; `Abort` stops after the
-/// first error. Results are index-ordered.
+/// Run `dispatch` over each row, sequentially when `policy.concurrency <= 1`
+/// or bounded-concurrently otherwise. `Continue` collects every row's
+/// result; `Abort` stops after the first error. Results are always
+/// index-ordered regardless of completion order.
+///
+/// Note: `Abort` under concurrency is best-effort — in-flight items complete;
+/// no NEW items start after an error is observed. Strict cancellation is
+/// deferred to the backlog.
 pub async fn run_list<F, Fut>(rows: Vec<Value>, policy: &ExecPolicy, dispatch: F) -> Vec<ItemResult>
+where
+    F: Fn(usize, Value) -> Fut,
+    Fut: Future<Output = Result<Value, String>>,
+{
+    if policy.concurrency <= 1 {
+        return run_sequential(rows, policy, dispatch).await;
+    }
+    use futures::stream::{self, StreamExt};
+    let mut results: Vec<ItemResult> = stream::iter(rows.into_iter().enumerate())
+        .map(|(index, row)| {
+            let fut = dispatch(index, row.clone());
+            async move {
+                match fut.await {
+                    Ok(output) => ItemResult { index, input: row, status: ItemStatus::Ok, output: Some(output), error: None },
+                    Err(error) => ItemResult { index, input: row, status: ItemStatus::Err, output: None, error: Some(error) },
+                }
+            }
+        })
+        .buffer_unordered(policy.concurrency)
+        .collect()
+        .await;
+    results.sort_by_key(|r| r.index);
+    results
+}
+
+async fn run_sequential<F, Fut>(rows: Vec<Value>, policy: &ExecPolicy, dispatch: F) -> Vec<ItemResult>
 where
     F: Fn(usize, Value) -> Fut,
     Fut: Future<Output = Result<Value, String>>,
 {
     let mut results = Vec::with_capacity(rows.len());
     for (index, row) in rows.into_iter().enumerate() {
-        let res = dispatch(index, row.clone()).await;
-        let item = match res {
+        let item = match dispatch(index, row.clone()).await {
             Ok(output) => ItemResult { index, input: row, status: ItemStatus::Ok, output: Some(output), error: None },
             Err(error) => ItemResult { index, input: row, status: ItemStatus::Err, output: None, error: Some(error) },
         };
@@ -81,5 +111,21 @@ mod tests {
         }).await;
         assert_eq!(out.len(), 2); // item 3 never ran
         assert_eq!(out[1].status, ItemStatus::Err);
+    }
+
+    #[tokio::test]
+    async fn parallel_preserves_index_order() {
+        let rows: Vec<Value> = (0..10).map(|i| json!({"n": i})).collect();
+        let policy = ExecPolicy { on_error: OnError::Continue, concurrency: 4, max_items: DEFAULT_MAX_ITEMS };
+        let out = run_list(rows, &policy, |_i, row| async move {
+            let n = row["n"].as_i64().unwrap();
+            // Later items sleep longer; without re-sort they'd finish out of order.
+            tokio::time::sleep(std::time::Duration::from_millis((10 - n) as u64)).await;
+            Ok(json!(n))
+        }).await;
+        for (i, item) in out.iter().enumerate() {
+            assert_eq!(item.index, i);
+            assert_eq!(item.output.as_ref().unwrap(), &json!(i as i64));
+        }
     }
 }
