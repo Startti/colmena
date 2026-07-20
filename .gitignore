@@ -74,3 +74,6 @@ node_modules/
 # Compiled napi binaries (built by CD per-platform; never commit)
 *.node
 .superpowers/
+
+# Agente-creador test graphs (local experimentation, not for commit yet)
+tests/agente-creador/
