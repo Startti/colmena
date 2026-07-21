@@ -715,6 +715,12 @@ impl DagRunUseCase {
                                             }
                                             NodeEvent::SkillLoaded { tool_id, skill_name, reference, source, size_bytes } => yield DagExecutionEvent::SkillLoaded { node_id: node_id.clone(), tool_id, skill_name, reference, source, size_bytes },
                                             NodeEvent::ToolDescribed { tool_id, tool_name } => yield DagExecutionEvent::ToolDescribed { node_id: node_id.clone(), tool_id, tool_name },
+                                            NodeEvent::BatchProgress { node_id, total, completed, ok, err, in_flight } => {
+                                                yield DagExecutionEvent::BatchProgress { node_id, total, completed, ok, err, in_flight }
+                                            }
+                                            NodeEvent::BatchItemFinished { node_id, index, key, status } => {
+                                                yield DagExecutionEvent::BatchItemFinished { node_id, index, key, status }
+                                            }
                                             NodeEvent::LlmMessageStart => yield DagExecutionEvent::LlmMessageStart { node_id: node_id.clone() },
                                             NodeEvent::LlmMessageFinish(usage) => yield DagExecutionEvent::LlmMessageFinish { node_id: node_id.clone(), usage: usage.map(|u| serde_json::json!(u)) },
                                             NodeEvent::ReasoningStart { id } => yield DagExecutionEvent::ReasoningStart { node_id: node_id.clone(), id },

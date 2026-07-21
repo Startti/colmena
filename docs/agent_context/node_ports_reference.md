@@ -18,6 +18,7 @@ In Colmena's DAG engine, each node has optional **default ports** for input and 
 | **loop_controller** | Manages loop state | Controls loop continuation based on `loop_status` input |
 | **router** | Declarative branching | Routes input to one of N named output ports. Mode `llm_direct` lets the LLM pick a branch by name; mode `extract_and_route` extracts JSON then matches `when` rules. Each branch may optionally run a subgraph. Always emits `__decision`. Fails fast on no-match (no default branch). |
 | **input** | Static configuration | Emits `config` as output; useful for providing constants or test data |
+| **for_each** | Deterministic list fan-out | Runs an embedded `target` node once per row of a list (Rust-side iteration, not the LLM re-calling a tool in a loop). Usable as a graph node (config-driven) and as an LLM tool (`node_schema`-driven, `target`/policy fields `fixed`). List source: `items` (inline array), `items_from` (`source: "sheet"` in v1), or an input edge carrying an array. Emits `batch-progress` and `batch-item-finished` SSE events. HITL fail-closed: a suspend inside a row becomes that row's error. See [§49](../developer_guide/49_for_each.md). |
 
 ### **I/O & Logging Nodes**
 
@@ -104,6 +105,7 @@ In Colmena's DAG engine, each node has optional **default ports** for input and 
 | `reactor` | — | `result` | **Dynamic inputs** — `texts.*` summarized and reviewed |
 | `orchestrator` | — | `final_response` | **Dynamic inputs** — full multi-agent lifecycle; suspends at `planner`, `phase_reactor`, `critic`, `critic_max_retries`, `final_reactor`; supports bridge tasks; `allow_suspend` per-component |
 | `subgraph` | — | `result` | **Dynamic inputs** — Executes a child execution with isolated session_id. Inputs are injected into child globals. |
+| `for_each` | `input` (fallback array) | `output` | **Config/inputs dual-path** (`target`/`items`/`items_from`/`on_error`/`concurrency`/`max_items` read config-first, inputs-fallback). Output: `{ total, ok, err, results: [{index, input, status, output|error}] }`. |
 | `task_memory_writer` | — | `result` | **Requires explicit fields** for task management |
 | `trigger_webhook` | — | `output` | Webhook trigger — emits payload |
 | `mock_input` | — | — | **Raw output** — emits config as-is, no specific field |

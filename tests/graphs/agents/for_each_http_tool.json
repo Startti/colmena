@@ -1,0 +1,76 @@
+{
+  "comment": "for_each as an LLM tool, http_request target. The agent exposes `batch_update_users` (node_type: for_each) whose embedded target is an http_request POST to a real echo endpoint (postman-echo.com/post). The LLM supplies the `items` array (one row per user) from a realistic prompt; for_each fans the request out deterministically, one HTTP call per row, and returns a result table (not the LLM re-looping per user).",
+  "metadata": {
+    "category": "agents",
+    "features": ["for_each", "http_request", "llm_call", "batch_progress"],
+    "requires_env": ["GEMINI_API_KEY"]
+  },
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/for_each_http_tool",
+        "method": "POST",
+        "test_payload": {
+          "prompt": "Update the plan to pro for users 101, 102, 103."
+        }
+      }
+    },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "api_key": "${GEMINI_API_KEY}",
+        "model": "gemini-2.5-flash",
+        "temperature": 0.0,
+        "system_message": "You update user accounts via the `batch_update_users` tool. Always use the tool (never answer from memory). Build the `items` array from the user's request — one row per user id, each with the target plan. After the tool returns, summarize how many updates succeeded and how many failed.",
+        "enabled_tools": ["batch_update_users"],
+        "tool_configurations": {
+          "batch_update_users": {
+            "name": "batch_update_users",
+            "node_type": "for_each",
+            "description": "Apply a plan update to a batch of users, one HTTP call per user, deterministically. Provide `items` as an array of rows, each with `user_id` (number) and `plan` (string).",
+            "node_schema": {
+              "on_error": { "fixed": "continue" },
+              "concurrency": { "fixed": 2 },
+              "items": {
+                "type": "array",
+                "required": true,
+                "description": "One row per user to update.",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "user_id": { "type": "number", "required": true, "description": "The user id to update." },
+                    "plan": { "type": "string", "required": true, "description": "The plan to set for the user, e.g. 'pro'." }
+                  }
+                }
+              },
+              "target": {
+                "fixed": {
+                  "node_type": "http_request",
+                  "node_schema": {
+                    "base_url": { "type": "string", "fixed": "https://postman-echo.com" },
+                    "endpoint": { "type": "string", "fixed": "/post" },
+                    "method": { "type": "string", "fixed": "POST" },
+                    "body": {
+                      "type": "object",
+                      "properties": {
+                        "user_id": { "type": "number", "required": true },
+                        "plan": { "type": "string", "required": true }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "log": { "type": "log" }
+  },
+  "edges": [
+    { "from": "trigger", "to": "agent" },
+    { "from": "agent", "to": "log" }
+  ]
+}

@@ -173,7 +173,10 @@ impl DagToolExecutor {
     /// Note: this is a shallow template resolution for `fixed_config` string fields.
     /// Full node-output path resolution (e.g. `${node_name.field.path}`) happens
     /// upstream in the DAG engine before the tool executor is called.
-    fn resolve_template_string(template: &str, inputs: &HashMap<String, Value>) -> String {
+    pub(crate) fn resolve_template_string(
+        template: &str,
+        inputs: &HashMap<String, Value>,
+    ) -> String {
         use regex::Regex;
 
         // Pattern: ${context.key} or ${key}
@@ -190,7 +193,7 @@ impl DagToolExecutor {
     }
 
     /// Recursively resolve template strings in a Value
-    fn resolve_value_templates(value: &Value, inputs: &HashMap<String, Value>) -> Value {
+    pub(crate) fn resolve_value_templates(value: &Value, inputs: &HashMap<String, Value>) -> Value {
         match value {
             Value::String(s) => Value::String(Self::resolve_template_string(s, inputs)),
             Value::Object(obj) => {
@@ -1730,78 +1733,19 @@ impl DagToolExecutor {
             })?;
 
         // 3. Build final_args with node_schema, $DYNAMIC substitution, or legacy field_mapping
-        use crate::dag_engine::domain::tool_configuration::parse_node_schema;
-
         let inputs = if let Some(schema) = tool_cfg.and_then(|c| c.node_schema.as_ref()) {
             // PATH 0 (HIGHEST PRIORITY): node_schema
-            let parsed = parse_node_schema(schema).map_err(|e| LlmError::InvalidToolCall {
+            let schema_value =
+                serde_json::to_value(schema).map_err(|e| LlmError::InvalidToolCall {
+                    reason: format!("Invalid node_schema for tool {}: {}", node_type, e),
+                })?;
+            crate::dag_engine::infrastructure::node_schema_merge::merge_args_into_schema(
+                &schema_value,
+                args.clone(),
+            )
+            .map_err(|e| LlmError::InvalidToolCall {
                 reason: format!("Invalid node_schema for tool {}: {}", node_type, e),
-            })?;
-            let mut result: HashMap<String, Value> = HashMap::new();
-
-            // Seed with all fixed values (will be resolved later)
-            for (k, v) in &parsed.fixed_values {
-                result.insert(k.clone(), v.clone());
-            }
-
-            // Place each LLM arg in the correct location
-            for (param_name, param_value) in &args {
-                if let Some(container) = parsed.param_to_container.get(param_name) {
-                    // Merge into container
-                    let entry = result
-                        .entry(container.clone())
-                        .or_insert_with(|| Value::Object(serde_json::Map::new()));
-                    if let Value::Object(map) = entry {
-                        // Strip dot-prefix if present (collision-prefixed keys use
-                        // "container.child" format, but the real key inside the container
-                        // is just "child").
-                        let real_key = if let Some(dot_pos) = param_name.find('.') {
-                            &param_name[dot_pos + 1..]
-                        } else {
-                            param_name.as_str()
-                        };
-
-                        // Deep-merge: if the container already has a fixed object for this key
-                        // (e.g., edge with {type, animated, environmentId}), merge the LLM-provided
-                        // object into it rather than overwriting.
-                        if let (Some(Value::Object(existing)), Value::Object(incoming)) =
-                            (map.get(real_key), param_value)
-                        {
-                            let mut merged = existing.clone();
-                            for (k, v) in incoming {
-                                merged.insert(k.clone(), v.clone());
-                            }
-                            map.insert(real_key.to_string(), Value::Object(merged));
-                        } else {
-                            map.insert(real_key.to_string(), param_value.clone());
-                        }
-                    }
-                } else if parsed.fixed_values.contains_key(param_name) {
-                    // Defense-in-depth: an LLM-supplied arg must NEVER override an
-                    // operator-declared `fixed` field. Fixed fields are authoritative —
-                    // they carry connection URLs, permissions, setup_sql, etc. that the
-                    // LLM must not control (and `setup_sql` is even exempt from the SQL
-                    // validator). The field isn't advertised to the LLM, so a matching
-                    // key can only come from a confused/adversarial model. Ignore it.
-                    eprintln!(
-                        "⚠️ [DagToolExecutor] Ignoring LLM arg '{}' — it collides with an \
-                         operator-fixed field and cannot override it.",
-                        param_name
-                    );
-                } else {
-                    // Top-level placement
-                    result.insert(param_name.clone(), param_value.clone());
-                }
-            }
-
-            // Resolve template variables in fixed values using the final inputs
-            // We need to clone to avoid borrow checker issues
-            let resolved_result = result
-                .iter()
-                .map(|(k, v)| (k.clone(), Self::resolve_value_templates(v, &result)))
-                .collect::<HashMap<String, Value>>();
-
-            resolved_result
+            })?
         } else if let Some(fixed) = fixed_config.as_ref() {
             // Check if using new $DYNAMIC system
             let dynamic_fields = Self::collect_dynamic_fields(fixed);

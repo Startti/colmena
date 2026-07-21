@@ -1,0 +1,40 @@
+{
+  "comment": "for_each as a graph node: fans out the embedded target `add` over two inline rows, deterministically (no LLM in the loop). Acceptance gate for Task 9 P0 — expects results.length == 2, both ok, sums 3 and 30.",
+  "metadata": {
+    "category": "basic",
+    "features": ["for_each", "add", "batch_progress"]
+  },
+  "nodes": {
+    "start": {
+      "type": "input",
+      "config": {
+        "prompt": "run the batch"
+      }
+    },
+    "fe1": {
+      "type": "for_each",
+      "config": {
+        "target": {
+          "node_type": "add",
+          "node_schema": {
+            "a": { "type": "number", "required": true },
+            "b": { "type": "number", "required": true }
+          }
+        },
+        "items": [
+          { "a": 1, "b": 2 },
+          { "a": 10, "b": 20 }
+        ],
+        "concurrency": 2,
+        "on_error": "continue"
+      }
+    },
+    "log_result": {
+      "type": "log"
+    }
+  },
+  "edges": [
+    { "from": "start", "to": "fe1" },
+    { "from": "fe1", "to": "log_result" }
+  ]
+}

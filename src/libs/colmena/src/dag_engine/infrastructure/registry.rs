@@ -19,6 +19,7 @@ pub struct HashMapNodeRegistry {
     nodes: HashMap<String, Arc<dyn ExecutableNode>>,
     toolkit_nodes: HashMap<String, Arc<dyn ToolkitNode>>,
     subgraph_node: Option<Arc<SubGraphNode>>,
+    foreach_node: Option<Arc<crate::dag_engine::infrastructure::nodes::for_each::ForEachNode>>,
 }
 
 use crate::llm::infrastructure::ConversationRepositoryFactory;
@@ -338,6 +339,14 @@ impl HashMapNodeRegistry {
                 router_node.clone() as Arc<dyn ExecutableNode>,
             );
 
+            // --- Registrar ForEach ---
+            let fe_node =
+                Arc::new(crate::dag_engine::infrastructure::nodes::for_each::ForEachNode::new());
+            nodes.insert(
+                "for_each".to_string(),
+                fe_node.clone() as Arc<dyn ExecutableNode>,
+            );
+
             let mut toolkit_nodes: HashMap<String, Arc<dyn ToolkitNode>> = HashMap::new();
             toolkit_nodes.insert(
                 "tavily_client".to_string(),
@@ -352,6 +361,7 @@ impl HashMapNodeRegistry {
                 nodes,
                 toolkit_nodes,
                 subgraph_node: Some(sub_node),
+                foreach_node: Some(fe_node),
             }
         })
     }
@@ -361,6 +371,18 @@ impl HashMapNodeRegistry {
     pub fn set_subgraph_executor(&self, executor: Arc<dyn SubGraphExecutorPort>) {
         if let Some(sub) = &self.subgraph_node {
             let _ = sub.executor.set(executor);
+        }
+    }
+
+    /// Injects the shared node registry handle into the `for_each` node so it
+    /// can dispatch to target nodes at execution time. Mirrors
+    /// `set_subgraph_executor` above: creates an intentional self-referential
+    /// `Arc` (registry -> node -> registry) that is acceptable because the
+    /// registry, use case, and nodes form an engine-lifetime singleton
+    /// dropped together.
+    pub fn set_foreach_registry(&self, registry: Arc<dyn NodeRegistryPort>) {
+        if let Some(fe) = &self.foreach_node {
+            let _ = fe.registry.set(registry);
         }
     }
 
@@ -520,6 +542,40 @@ mod registry_tavily_tests {
         assert!(
             reg.get_node("router").is_some(),
             "router must be registered as an ExecutableNode"
+        );
+    }
+}
+
+#[cfg(test)]
+mod for_each_registration_tests {
+    use super::*;
+
+    #[test]
+    fn for_each_registered_as_executable_node() {
+        let reg = super::registry_tavily_tests::build_registry();
+        assert!(
+            reg.get_node("for_each").is_some(),
+            "for_each must be registered as an ExecutableNode"
+        );
+    }
+
+    #[test]
+    fn for_each_registry_handle_gets_wired_by_setter() {
+        let reg = super::registry_tavily_tests::build_registry();
+        assert!(
+            reg.foreach_node.is_some(),
+            "for_each node handle must be kept by the registry"
+        );
+        assert!(
+            reg.foreach_node.as_ref().unwrap().registry.get().is_none(),
+            "registry OnceLock must be empty before set_foreach_registry is called"
+        );
+
+        reg.set_foreach_registry(reg.clone() as Arc<dyn NodeRegistryPort>);
+
+        assert!(
+            reg.foreach_node.as_ref().unwrap().registry.get().is_some(),
+            "set_foreach_registry must populate the for_each node's registry OnceLock"
         );
     }
 }

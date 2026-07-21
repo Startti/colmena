@@ -129,6 +129,19 @@ Detailed docs: [§45 — Google Docs integration](45_gdocs.md). Design spec:
 | `gdocs_delete_table_column` | Delete a column from a table by 0-based index | [§45](45_gdocs.md) |
 | `gdocs_format_table` | Apply formatting (background, borders, text style, alignment) to cell ranges in a table | [§45](45_gdocs.md) |
 
+## Registered nodes usable as tools (not synthetic — not covered by the CI index test above)
+
+Some registered `ExecutableNode`s (not the synthetic YAML-backed tools above)
+are commonly exposed as LLM tools via `tool_configurations` + `node_schema`:
+`http_request`, math nodes (`add`/`subtract`/...), `subgraph`
+(agents-as-tools), and `for_each` — runs an embedded `target` tool once per
+row of a list, deterministically (iteration happens in Rust, not the LLM
+re-calling a tool in a loop). See
+[§49 for_each](49_for_each.md) and
+[`docs/node_as_tools_reference.json`](../node_as_tools_reference.json) →
+`node_types_as_tools.for_each` for the full contract and both usage examples
+(`target: http_request`, `target: subgraph`).
+
 ## Toolkit packages
 
 See [40_toolkit_packages.md](40_toolkit_packages.md). Registered packages:

@@ -45,6 +45,22 @@ pub enum NodeEvent {
         tool_id: String,
         tool_name: String,
     },
+    /// Coarse batch progress emitted by `for_each` at start, per item, and end.
+    BatchProgress {
+        node_id: String,
+        total: usize,
+        completed: usize,
+        ok: usize,
+        err: usize,
+        in_flight: usize,
+    },
+    /// Emitted by `for_each` the moment a single item finishes.
+    BatchItemFinished {
+        node_id: String,
+        index: usize,
+        key: String,
+        status: String, // "ok" | "err"
+    },
     LlmMessageStart,
     LlmMessageFinish(Option<crate::llm::domain::LlmUsage>),
     /// Streaming token from an internal "thinking" LLM call (planner, critic, reactor, agent subgraphs).

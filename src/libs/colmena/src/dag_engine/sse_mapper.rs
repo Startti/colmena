@@ -409,6 +409,34 @@ impl SseMapper {
                 "node_id": node_id,
                 "idleSecs": idle_secs
             })),
+            DagExecutionEvent::BatchProgress {
+                node_id,
+                total,
+                completed,
+                ok,
+                err,
+                in_flight,
+            } => Some(json!({
+                "type": "batch-progress",
+                "nodeId": node_id,
+                "total": total,
+                "completed": completed,
+                "ok": ok,
+                "err": err,
+                "inFlight": in_flight,
+            })),
+            DagExecutionEvent::BatchItemFinished {
+                node_id,
+                index,
+                key,
+                status,
+            } => Some(json!({
+                "type": "batch-item-finished",
+                "nodeId": node_id,
+                "index": index,
+                "key": key,
+                "status": status,
+            })),
             DagExecutionEvent::SubgraphWrapped { inner, .. } => match Self::deep_base(inner) {
                 DagExecutionEvent::NodeStart {
                     node_id,
@@ -549,6 +577,34 @@ impl SseMapper {
                     "nodeId": node_id,
                     "toolCallId": tool_id,
                     "toolName": tool_name,
+                })),
+                DagExecutionEvent::BatchProgress {
+                    node_id,
+                    total,
+                    completed,
+                    ok,
+                    err,
+                    in_flight,
+                } => Some(json!({
+                    "type": "subgraph-batch-progress",
+                    "nodeId": node_id,
+                    "total": total,
+                    "completed": completed,
+                    "ok": ok,
+                    "err": err,
+                    "inFlight": in_flight,
+                })),
+                DagExecutionEvent::BatchItemFinished {
+                    node_id,
+                    index,
+                    key,
+                    status,
+                } => Some(json!({
+                    "type": "subgraph-batch-item-finished",
+                    "nodeId": node_id,
+                    "index": index,
+                    "key": key,
+                    "status": status,
                 })),
                 // Turn boundaries from a sub-agent — forwarded for visibility and
                 // to keep the no-event watchdog fed. `level`/`path` injected below.

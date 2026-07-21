@@ -1,4 +1,5 @@
 pub mod dag_tool_executor;
+pub mod node_schema_merge;
 pub mod nodes;
 pub mod persistence;
 pub mod pool_registry;
