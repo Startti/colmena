@@ -429,20 +429,19 @@ impl ExecutableNode for ForEachNode {
                                 // (when it's a container child, e.g. an http_request's
                                 // `body.user_id`) nested inside its container object. Mirrors
                                 // the `real_key` logic in `merge_args_into_schema`.
-                                let present = if let Some(container) =
-                                    parsed.param_to_container.get(req)
-                                {
-                                    let real_key = req
-                                        .find('.')
-                                        .map(|p| &req[p + 1..])
-                                        .unwrap_or(req.as_str());
-                                    merged
-                                        .get(container)
-                                        .and_then(|v| v.as_object())
-                                        .is_some_and(|m| m.contains_key(real_key))
-                                } else {
-                                    merged.contains_key(req)
-                                };
+                                let present =
+                                    if let Some(container) = parsed.param_to_container.get(req) {
+                                        let real_key = req
+                                            .find('.')
+                                            .map(|p| &req[p + 1..])
+                                            .unwrap_or(req.as_str());
+                                        merged
+                                            .get(container)
+                                            .and_then(|v| v.as_object())
+                                            .is_some_and(|m| m.contains_key(real_key))
+                                    } else {
+                                        merged.contains_key(req)
+                                    };
                                 if !present {
                                     return Err(format!(
                                         "row {index}: missing required param '{req}'"
@@ -460,8 +459,7 @@ impl ExecutableNode for ForEachNode {
                         .await
                         .map_err(|e| format!("row {index}: {e}"))?;
                     // HITL fail-closed: a SUSPENDED result inside a fan-out is an error.
-                    if result.get("__colmena_status").and_then(|v| v.as_str())
-                        == Some("SUSPENDED")
+                    if result.get("__colmena_status").and_then(|v| v.as_str()) == Some("SUSPENDED")
                     {
                         return Err(format!(
                             "row {index}: target suspended (HITL not supported inside for_each)"
@@ -570,9 +568,7 @@ impl ExecutableNode for ForEachNode {
                                 "ok",
                                 json!(serde_json::to_string(&r.output).unwrap_or_default()),
                             ),
-                            ItemStatus::Err => {
-                                ("err", json!(r.error.clone().unwrap_or_default()))
-                            }
+                            ItemStatus::Err => ("err", json!(r.error.clone().unwrap_or_default())),
                         };
                         results_sheet_row(r.index, &r.input, status, cell, input_cols)
                     })
@@ -952,7 +948,12 @@ mod tests {
         assert_eq!(cols, vec!["input".to_string()]);
         assert_eq!(
             header,
-            vec![json!("index"), json!("input"), json!("status"), json!("result")]
+            vec![
+                json!("index"),
+                json!("input"),
+                json!("status"),
+                json!("result")
+            ]
         );
     }
 
@@ -963,7 +964,12 @@ mod tests {
         assert_eq!(cols, vec!["input".to_string()]);
         assert_eq!(
             header,
-            vec![json!("index"), json!("input"), json!("status"), json!("result")]
+            vec![
+                json!("index"),
+                json!("input"),
+                json!("status"),
+                json!("result")
+            ]
         );
     }
 
@@ -1022,8 +1028,8 @@ mod tests {
             "incremental"
         );
         // An unrecognized mode fails loudly rather than silently writing nothing.
-        let err = super::parse_results_to(&json!({ "sink": "sheet", "mode": "Final" }))
-            .unwrap_err();
+        let err =
+            super::parse_results_to(&json!({ "sink": "sheet", "mode": "Final" })).unwrap_err();
         assert!(
             err.contains("unknown mode 'Final'")
                 && err.contains("expected 'final' or 'incremental'"),
