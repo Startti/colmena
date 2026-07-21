@@ -162,6 +162,17 @@ diseño del operador del grafo, no algo que el LLM deba elegir por llamada.
   - Cualquier otro valor falla con: `for_each results_to: unknown mode
     '<x>' (expected 'final' or 'incremental')`.
 
+> **Dónde se ve el progreso (importante).** `final` e `incremental` emiten
+> **exactamente el mismo stream SSE** (los mismos `batch-progress` /
+> `batch-item-finished`) — la diferencia entre ambos **no es observable en
+> el SSE**. La escritura fila-por-fila ocurre *dentro* del nodo contra la
+> Sheets API, no como evento SSE. El "ver la hoja llenarse" solo se observa
+> **abriendo la hoja de Google durante la corrida**:
+> - `final` → la hoja queda vacía (solo encabezado) hasta el final, y ahí
+>   aparecen todas las filas de golpe.
+> - `incremental` → cada fila aparece apenas termina su item (útil con
+>   targets lentos o listas largas, para dar señal de avance en la hoja).
+
 La hoja creada tiene encabezado `[index, <columnas del input, orden
 alfabético>, status, result]`, donde `result` es el JSON compacto del
 `output` de esa fila si `status == "ok"`, o el string de error si
@@ -253,7 +264,29 @@ intervención humana por fila.
 - Cuando `target.node_type == "subgraph"`, cada fila corre un
   sub-agente aislado (Mode B — sin memoria compartida entre filas) y
   hereda el guard de profundidad normal de subgraph-as-tool
-  (`MAX_SUBGRAPH_TOOL_DEPTH = 5`).
+  (`MAX_SUBGRAPH_TOOL_DEPTH = 5`). `for_each` **propaga**
+  `__colmena_subgraph_depth` (y `__colmena_session_id`/
+  `__colmena_agent_session_id`) al target en cada fila, de modo que el
+  guard de profundidad sigue siendo efectivo a través del borde
+  `for_each → subgraph` (no se resetea a 0 en cada `for_each`).
+
+## Casos borde y validaciones
+
+Todos verificados en vivo (ver el spec de diseño y los grafos de prueba):
+
+| Situación | Comportamiento |
+|---|---|
+| **Lista vacía** (`items: []`) | No es error: `{ total: 0, ok: 0, err: 0, results: [] }`, el nodo devuelve `Ok`. |
+| **`items` no es un array** (p.ej. un objeto o string) | Error tipado inmediato: `for_each: `items` must be an array of row objects, got <tipo>` — el nodo falla (no cae silenciosamente a otra fuente). |
+| **Fila sin campo `required`** del target | Esa fila → `status: "err"`, `error: "row N: missing required param '<campo>'"`; las demás filas siguen (salvo `on_error: "abort"`). La validación ocurre **antes** de despachar el target. |
+| **Campos anidados en contenedores** (p.ej. `body.user_id`) | La validación de requeridos mira dentro de los `properties` del contenedor, no solo el nivel superior. |
+| **`target.node_type == "for_each"`** | Rechazo inmediato: `for_each: a for_each cannot target itself`. |
+| **`items` excede `max_items`** | Se trunca a `max_items` con un warning en log (no falla). |
+| **`concurrency` fuera de rango** | Se ajusta a `[1, 64]` (ver Políticas). |
+| **Target se suspende (HITL) en una fila** | Fila → `err` (`"row N: target suspended…"`); el fan-out **no** se pausa (ver HITL fail-closed). |
+| **`items_from.source` desconocido** | Error: `for_each items_from: unknown source '<x>' (v1: sheet)`. |
+| **`results_to.mode` desconocido** | Error antes de tocar gsheets: `for_each results_to: unknown mode '<x>' (expected 'final' or 'incremental')`. |
+| **Fallo al leer el sheet** (`items_from: sheet`) | El nodo falla con el detalle de la respuesta de gsheets. |
 
 ## Config vs tool — cómo `for_each` lee sus propios campos
 
@@ -330,6 +363,18 @@ cargo run --bin dag_engine -- run tests/graphs/agents/for_each_http_tool.json \
 Ambos grafos fueron verificados en vivo (Gemini 2.5 Flash) — 3/3 filas
 `ok` en cada uno, con frames `batch-progress`/`batch-item-finished`
 presentes en el SSE.
+
+## Lo que NO soporta v1 (diferido a v1.1)
+
+No configures esto todavía — no está implementado:
+
+| Feature | Estado | Alternativa hoy |
+|---|---|---|
+| **`target_tool` por nombre** — referenciar un tool que el agente ya tiene, en vez de un `target` embebido, dejando que el LLM elija cuál batchear | Diferido: un `ExecutableNode` no ve los tools hermanos del agente; requiere que `DagToolExecutor` inyecte un handle de despacho solo en el contexto de tool | Usa `target` embebido (el operador fija qué tool se batchea). |
+| **`items_from: { source: "attachment" }`** — leer filas de un CSV/XLSX adjunto | Diferido: un nodo plano no resuelve `document_id → bytes` | Nodo upstream (`data_run_python`/lectura) → edge de entrada de `for_each`. |
+| **`items_from: { source: "tool_result" }`** — tomar la lista del resultado de un tool previo | Diferido: necesita un cache por-turno `tool_call_id → output` en `DagToolExecutor` | `items` inline, o materializar en un sheet. |
+| **Modo A (memoria compartida entre filas)** — un solo agente que procesa las N filas acumulando conversación | Diferido: solo tiene sentido con targets agente, es secuencial-obligado | Solo Modo B (aislado) hoy. |
+| **Checkpoint durable** — reanudar un batch saltando filas ya exitosas tras un crash | Diferido: requiere un store keyed por `(batch_id + item_key)` | `on_error: "continue"` + re-alimentar solo las filas `err`. |
 
 ## Ver también
 
