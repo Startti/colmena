@@ -517,4 +517,4 @@ Guide: [`36_attachment_gc.md`](./developer_guide/36_attachment_gc.md).
 - [`developer_guide/14_llm_deep_dive.md`](./developer_guide/14_llm_deep_dive.md) — LLM node parameters, streaming, memory
 - [`developer_guide/22_tool_execution_flow.md`](./developer_guide/22_tool_execution_flow.md) — tool call lifecycle end-to-end
 - [`ONBOARDING.md`](./ONBOARDING.md) — reading paths by contributor role
-- [`DEVELOPER_GUIDE.md`](./DEVELOPER_GUIDE.md) — index of all 37 developer guides
+- [`DEVELOPER_GUIDE.md`](./DEVELOPER_GUIDE.md) — index of all 51 developer guides

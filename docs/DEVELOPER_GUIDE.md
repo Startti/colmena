@@ -76,7 +76,7 @@ Las secciones están organizadas por **tema**, no por orden numérico. Los prefi
 - [**CRDT Documents**](./developer_guide/38_crdt_documents.md) — Workbooks colaborativos en tiempo real sobre `yrs::Doc`.
 - [**Google Sheets**](./developer_guide/39_gsheets.md) — Integración con la Sheets API; lectura/escritura desde grafos.
 - [**Sheets local (CRDT) vs Google Sheets**](./developer_guide/43_sheets_local_vs_gsheets.md) — Comparativa, cuándo elegir cada uno, API write-back unificada.
-- [**Google Docs**](./developer_guide/45_gdocs.md) — 35 tools sintéticos para crear, leer, exportar y editar quirúrgicamente Google Docs (content-addressed, multi-tab, co-edit guard, table-cell edits).
+- [**Google Docs**](./developer_guide/45_gdocs.md) — 36 tools sintéticos para crear, leer, exportar y editar quirúrgicamente Google Docs (content-addressed, multi-tab, co-edit guard, table-cell edits).
 - [**Google OAuth (auth para gsheets + gdocs)**](./developer_guide/47_google_oauth.md) — Auth user-scoped vía refresh_token desde `agents@startti.co`. Setup one-time con `colmena_oauth_setup`, env vars, runbook de revocación.
 - [**data_run_python**](./developer_guide/48_data_run_python.md) — Tool unificado de movimiento de datos tabulares (CSV/XLSX ↔ Google Sheets ↔ SQL) con sinks output_tables/output_sheets/output_attachments; filas nunca pasan por el LLM.
 - [**Nodo Suspend (HITL)**](./developer_guide/44_suspend_node.md) — `suspend` / `secure_suspend`, formato Q/A, resume, patrones canónicos.

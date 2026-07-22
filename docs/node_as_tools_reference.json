@@ -1084,12 +1084,12 @@
 
     "crdt_documents": {
       "summary": "Synthetic LLM tools for real-time collaborative xlsx workbooks (v1 CRDT documents feature). Exposed when an llm_call's config includes the crdt_documents block with an artifact_id. All mutations are in-process against a Yrs-backed document; persisted snapshots are stored locally or in GCS. No tool_configurations needed — the engine auto-creates them when crdt_documents is present. Subsystem F (cross-sheet) adds crdt_doc_list_sheets_of + crdt_doc_import_sheet and extends crdt_doc_get_recent_changes with an optional artifact_id filter. Subsystem D (formulas v1) adds server-side formula evaluation: any cell value starting with '=' is parsed and evaluated by formualizer before persistence, with intra-sheet eager recalc of dependents; set_cell/set_range return cells_recalculated + structured warnings; read accepts include_formulas to expose the {v, f, fs} shape; list_sheets returns formula_count per sheet. See docs/developer_guide/38_crdt_documents.md §5.8.",
-      "synthetic_tools": ["crdt_doc_list_sheets", "crdt_doc_read", "crdt_doc_set_cell", "crdt_doc_set_range", "crdt_doc_add_sheet", "crdt_doc_get_recent_changes", "crdt_doc_list_sheets_of", "crdt_doc_import_sheet"],
+      "synthetic_tools": ["crdt_doc_list_sheets", "crdt_doc_list_sheets_of", "crdt_doc_read", "crdt_doc_set_cell", "crdt_doc_set_range", "crdt_doc_add_sheet", "crdt_doc_get_recent_changes", "crdt_doc_list_my_artifacts", "crdt_doc_create_artifact", "crdt_doc_run_python", "crdt_doc_import_sheet"],
       "how_exposed": "Automatically registered when llm_call.config.crdt_documents is present (with artifact_id, storage_backend, etc.). The LLM never sees the artifact_id or storage config — those are internal routing parameters managed by the engine.",
       "lifecycle": "All mutations modify the in-process Yrs document. The ChangeTracker records operations for narration (get_recent_changes). Snapshots are persisted after each DAG run via ArtifactStorage (localfs or gcs).",
       "examples": {
         "llm_call_with_crdt_documents": {
-          "description": "llm_call node configured to expose the 6 CRDT tools. No tool_configurations entries are needed — the engine auto-creates them.",
+          "description": "llm_call node configured to expose the 11 CRDT tools. No tool_configurations entries are needed — the engine auto-creates them.",
           "config_block": {
             "type": "llm_call",
             "config": {
@@ -1385,17 +1385,18 @@
     },
 
     "gsheets": {
-      "summary": "Synthetic LLM tools for Google Sheets (subsystem E). The `gsheets` alias expands to 12 tools (10 native gsheets_* + the deprecated gsheets_run_python + the unified data_run_python) that mirror the crdt_doc_* shape so the same skills/agent prompts work against native Google Spreadsheets. Auto-registered when an llm_call's `enabled_tools` includes `gsheets`. Auth via the shared OAuth user-scoped subsystem (COLMENA_GOOGLE_OAUTH_CLIENT_ID/_CLIENT_SECRET/_REFRESH_TOKEN + COLMENA_GOOGLE_SHARE_EMAIL) since the 2026-06-10 migration — no per-graph config needed. There is no Service-Account/ADC auth path (missing OAuth vars → NotConfigured); GOOGLE_APPLICATION_CREDENTIALS is only read as a legacy fallback to derive the share_email, never for auth. Formulas are evaluated server-side by Google (USER_ENTERED valueInputOption). UX aliases carried forward from D-T16: `address`↔`addr`, `start`↔`start_addr`, `values`↔`values_2d`, `name`↔`sheet`. Single-A1 ranges auto-expanded (`\"C1\"` → `\"C1:C1\"`). 7 of 9 tools fully wired in v1; the xlsx pair (`gsheets_create_from_xlsx`, `gsheets_export_xlsx`) is published but errors at runtime — see BACKLOG E-T7b. See docs/developer_guide/39_gsheets.md.",
+      "summary": "Synthetic LLM tools for Google Sheets (subsystem E). The `gsheets` alias expands to 12 tools (10 native gsheets_* + the deprecated gsheets_run_python + the unified data_run_python) that mirror the crdt_doc_* shape so the same skills/agent prompts work against native Google Spreadsheets. Auto-registered when an llm_call's `enabled_tools` includes `gsheets`. Auth via the shared OAuth user-scoped subsystem (COLMENA_GOOGLE_OAUTH_CLIENT_ID/_CLIENT_SECRET/_REFRESH_TOKEN + COLMENA_GOOGLE_SHARE_EMAIL) since the 2026-06-10 migration — no per-graph config needed. There is no Service-Account/ADC auth path (missing OAuth vars → NotConfigured); GOOGLE_APPLICATION_CREDENTIALS is only read as a legacy fallback to derive the share_email, never for auth. Formulas are evaluated server-side by Google (USER_ENTERED valueInputOption). UX aliases carried forward from D-T16: `address`↔`addr`, `start`↔`start_addr`, `values`↔`values_2d`, `name`↔`sheet`. Single-A1 ranges auto-expanded (`\"C1\"` → `\"C1:C1\"`). The xlsx pair (`gsheets_create_from_xlsx`, `gsheets_export_xlsx`) is fully wired via attachment plumbing since Bundle 1 (2026-06-10). See docs/developer_guide/39_gsheets.md.",
       "synthetic_tools": [
         "gsheets_create_spreadsheet", "gsheets_create_from_xlsx", "gsheets_export_xlsx",
         "gsheets_list_sheets", "gsheets_add_sheet", "gsheets_delete_sheet",
-        "gsheets_read", "gsheets_run_python", "gsheets_set_cell", "gsheets_set_range"
+        "gsheets_read", "gsheets_set_cell", "gsheets_set_range",
+        "gsheets_format_range", "gsheets_run_python", "data_run_python"
       ],
       "how_exposed": "Add `\"gsheets\"` to llm_call.config.enabled_tools (flag-only activation, like api_explorer). No tool_configurations entry required. Auth resolves at first call via the shared OAuth user-scoped subsystem (COLMENA_GOOGLE_OAUTH_* + COLMENA_GOOGLE_SHARE_EMAIL).",
       "lifecycle": "Each call makes one or more HTTPS requests to sheets.googleapis.com / drive.googleapis.com. Tokens cached 50 min. Auto-retry on 429 / 5xx with exponential backoff.",
       "examples": {
         "llm_call_with_gsheets": {
-          "description": "llm_call node configured to expose all 9 gsheets tools.",
+          "description": "llm_call node configured to expose all 12 gsheets tools.",
           "config_block": {
             "type": "llm_call",
             "config": {
@@ -1429,7 +1430,7 @@
         },
         "gsheets_create_from_xlsx": {
           "name": "gsheets_create_from_xlsx",
-          "description": "Upload an .xlsx attachment as a NATIVE Google Spreadsheet (auto-conversion via Drive API). attachment_id refers to a file already present in the run's attachment store. Returns {spreadsheet_id, url, sheets[]} with the converted tabs. DEFERRED — calls error at runtime in v1; see BACKLOG E-T7b.",
+          "description": "Upload an .xlsx attachment as a NATIVE Google Spreadsheet (auto-conversion via Drive API). attachment_id refers to a file already present in the run's attachment store. Returns {spreadsheet_id, url, sheets[]} with the converted tabs. Fully wired via attachment plumbing since Bundle 1 (2026-06-10).",
           "input_schema": {
             "type": "object",
             "properties": {
@@ -1449,7 +1450,7 @@
         },
         "gsheets_export_xlsx": {
           "name": "gsheets_export_xlsx",
-          "description": "Download a Google Spreadsheet as .xlsx and register it as an attachment. Returns {attachment_id}. DEFERRED — calls error at runtime in v1; see BACKLOG E-T7b.",
+          "description": "Download a Google Spreadsheet as .xlsx and register it as an attachment. Returns {attachment_id}. Fully wired via attachment plumbing since Bundle 1 (2026-06-10).",
           "input_schema": {
             "type": "object",
             "properties": {
@@ -1643,14 +1644,14 @@
         }
       },
       "special_behaviors": [
-        "Flag-only activation: `enabled_tools: [\"gsheets\"]` exposes all 9 tools. No tool_configurations entry needed.",
+        "Flag-only activation: `enabled_tools: [\"gsheets\"]` exposes all 12 tools. No tool_configurations entry needed.",
         "Auth resolves via the shared OAuth user-scoped subsystem (COLMENA_GOOGLE_OAUTH_CLIENT_ID/_CLIENT_SECRET/_REFRESH_TOKEN) since 2026-06-10. No Service-Account/ADC auth path exists; GOOGLE_APPLICATION_CREDENTIALS is only read as a legacy fallback to derive the share_email, never for auth.",
         "The COLMENA_GOOGLE_SHARE_EMAIL Workspace user (prod: agents@startti.co) must be shared (Edit access) on each spreadsheet the agent touches.",
         "Formulas are evaluated SERVER-SIDE by Google. Write `\"=SUM(A1:A10)\"` and read back with value_render='UNFORMATTED_VALUE' to get the computed number, or value_render='FORMULA' to get the text.",
         "UX aliases carried forward from D-T16: `address`↔`addr`, `start`↔`start_addr`, `values`↔`values_2d`, `name`↔`sheet`. Single-A1 ranges auto-expanded (`\"C1\"` → `\"C1:C1\"`).",
         "Scopes default to spreadsheets + drive.file; override via COLMENA_GSHEETS_SCOPES (comma-separated short names or full URLs).",
         "Auto-retry on 429 / 5xx with exponential backoff (1s/2s/4s by default; configurable via retry_base_delay in tests).",
-        "gsheets_create_from_xlsx and gsheets_export_xlsx are DEFERRED in v1 — tool defs are published but calls error at runtime. See BACKLOG E-T7b."
+        "gsheets_create_from_xlsx and gsheets_export_xlsx are fully wired via attachment plumbing since Bundle 1 (2026-06-10)."
       ],
       "reference_graphs": [
         "tests/graphs/agents/gsheets_smoke.json"
@@ -1674,13 +1675,14 @@
         "gdocs_add_comment", "gdocs_list_comments", "gdocs_resolve_comment",
         "gdocs_read_tables", "gdocs_set_table_cell",
         "gdocs_insert_table_row", "gdocs_delete_table_row",
-        "gdocs_insert_table_column", "gdocs_delete_table_column"
+        "gdocs_insert_table_column", "gdocs_delete_table_column",
+        "gdocs_format_table"
       ],
       "how_exposed": "Add `\"gdocs\"` to llm_call.config.enabled_tools (flag-only activation). For read-only agents use `\"gdocsread\"` (excludes all write/share/create/edit tools). No tool_configurations entry required. Auth resolves at first call via the shared OAuth user-scoped subsystem (COLMENA_GOOGLE_OAUTH_* + COLMENA_GOOGLE_SHARE_EMAIL).",
       "lifecycle": "Each call makes one or more HTTPS requests to docs.googleapis.com / drive.googleapis.com. Tokens cached 50 min. Outline cached per-revision (TTL via COLMENA_GDOCS_REVISION_CACHE_SECS, default 5s). Before every write the co-edit guard checks the current Drive revision against the cursor stored in postgres `gdocs_session_state` keyed on (agent_session_id, document_id); divergence yields a structured `human_changes_pending` error.",
       "examples": {
         "llm_call_with_gdocs_full": {
-          "description": "llm_call exposing all 22 gdocs tools.",
+          "description": "llm_call exposing all 36 gdocs tools.",
           "config_block": {
             "type": "llm_call",
             "config": {
@@ -1693,7 +1695,7 @@
           }
         },
         "llm_call_with_gdocsread_only": {
-          "description": "Read-only agent (6 tools).",
+          "description": "Read-only agent (10 tools).",
           "config_block": {
             "type": "llm_call",
             "config": {
@@ -1758,7 +1760,7 @@
         },
         "gdocs_create_from_docx": {
           "name": "gdocs_create_from_docx",
-          "description": "Upload a .docx attachment and convert it to a Google Doc. DEFERRED in v1 — attachment-fetcher plumbing is not yet wired; dispatcher returns a typed `not_yet_wired` envelope.",
+          "description": "Upload a .docx attachment and convert it to a Google Doc. Wired since Bundle 1 (2026-06-10) — the attachment bytes are fetched and converted via the Drive API. Returns {document_id, url}.",
           "input_schema": {
             "type": "object",
             "properties": {
@@ -1771,10 +1773,11 @@
           "output_schema": {
             "type": "object",
             "properties": {
-              "error": { "type": "string", "description": "`not_yet_wired` in v1." }
+              "document_id": { "type": "string", "description": "Google-assigned document ID." },
+              "url":         { "type": "string", "description": "Human-friendly URL (https://docs.google.com/document/d/<id>/edit)." }
             }
           },
-          "errors": ["not_yet_wired"]
+          "errors": ["no_parent_folder_configured", "auth_failed", "permission_denied"]
         },
         "gdocs_share": {
           "name": "gdocs_share",
@@ -1796,7 +1799,7 @@
         },
         "gdocs_export": {
           "name": "gdocs_export",
-          "description": "Export a doc to docx / pdf / markdown / txt / rtf / epub / odt / html. v1 returns `{format, byte_len}`; attachment-id wrapper deferred to v1.1.",
+          "description": "Export a doc to docx / pdf / markdown / txt / rtf / epub / odt / html. Wired since Bundle 1 (2026-06-10): the exported bytes are registered via OutputStorageRepository and the tool returns `{format, byte_len, attachment_id}`.",
           "input_schema": {
             "type": "object",
             "properties": {
@@ -1808,8 +1811,9 @@
           "output_schema": {
             "type": "object",
             "properties": {
-              "format":   { "type": "string" },
-              "byte_len": { "type": "integer" }
+              "format":        { "type": "string" },
+              "byte_len":      { "type": "integer" },
+              "attachment_id": { "type": "string", "description": "ID of the exported bytes registered in the run's attachment store." }
             }
           },
           "errors": ["invalid_args", "document_not_found", "auth_failed"]
@@ -1845,7 +1849,7 @@
         },
         "gdocs_add_tab": {
           "name": "gdocs_add_tab",
-          "description": "Create a new tab. Optional `after_tab_id` positions it; `markdown` seeding is acknowledged but DEFERRED in v1 (response includes `pending_markdown_seed: true`).",
+          "description": "Create a new tab. Optional `after_tab_id` positions it; optional `markdown` seeds the new tab's content in the same call (wired via append_markdown since Bundle 3, 2026-06-11).",
           "input_schema": {
             "type": "object",
             "properties": {
@@ -1860,7 +1864,7 @@
             "type": "object",
             "properties": {
               "tab_id":                  { "type": "string" },
-              "pending_markdown_seed":   { "type": "boolean", "description": "true when `markdown` was provided — v1 does not auto-seed; use append_markdown after." }
+              "markdown_seeded":         { "type": "boolean", "description": "true when `markdown` was provided and seeded into the new tab via append_markdown (Bundle 3, 2026-06-11)." }
             }
           },
           "errors": ["tab_exists", "document_not_found"]
@@ -2166,7 +2170,7 @@
         }
       },
       "special_behaviors": [
-        "Flag-only activation: `enabled_tools: [\"gdocs\"]` exposes all 22 tools; `enabled_tools: [\"gdocsread\"]` exposes the 6 read-only tools. No tool_configurations entry needed.",
+        "Flag-only activation: `enabled_tools: [\"gdocs\"]` exposes all 36 tools; `enabled_tools: [\"gdocsread\"]` exposes the 10 read-only tools. No tool_configurations entry needed.",
         "Auth resolves via the shared OAuth user-scoped subsystem (COLMENA_GOOGLE_OAUTH_CLIENT_ID/_CLIENT_SECRET/_REFRESH_TOKEN) since 2026-06-10. No Service-Account/ADC auth path exists; GOOGLE_APPLICATION_CREDENTIALS is only read as a legacy fallback to derive the share_email, never for auth.",
         "The COLMENA_GOOGLE_SHARE_EMAIL Workspace user (prod: agents@startti.co) must be shared (writer/editor) on each doc the agent touches.",
         "Parent folder requirement: gdocs_create* fail with `no_parent_folder_configured` unless `parent_folder_id` arg is set OR COLMENA_GDOCS_DEFAULT_PARENT_FOLDER_ID env var is configured.",
@@ -2175,7 +2179,7 @@
         "Markdown converter: tables in insert/append/replace_section/apply_edits are rejected with `invalid_args` in v1; tables in gdocs_create_from_markdown work via Drive's native conversion. Math/footnotes/images are reported under `lossy_conversions` rather than failing silently.",
         "Outline cache: per-revision outline cached for COLMENA_GDOCS_REVISION_CACHE_SECS seconds (default 5).",
         "Scopes default to documents + drive.file; override via COLMENA_GDOCS_SCOPES.",
-        "gdocs_create_from_docx and gdocs_export attachment_id wrapper are DEFERRED — tool defs are published; create_from_docx returns `not_yet_wired`; export returns the raw byte length without registering an attachment."
+        "gdocs_create_from_docx and gdocs_export are wired since Bundle 1 (2026-06-10): create_from_docx fetches the .docx attachment bytes and converts via the Drive API; export registers the exported bytes via OutputStorageRepository and returns an attachment_id."
       ],
       "reference_graphs": [
         "tests/graphs/agents/gdocs_smoke.json"
@@ -2348,7 +2352,7 @@
   "toolkit_packages": {
     "description": "Curated bundles of synthetic tools exposed under a single alias. Use enabled_tools: [\"gsheets\"] to expand to all gsheets_* tools at once. Exclusion via !toolname is supported.",
     "gsheets": {
-      "description": "Read, write, and analyze Google Sheets workbooks (10 tools)",
+      "description": "Read, write, and analyze Google Sheets workbooks (12 tools)",
       "tools": [
         "gsheets_create_spreadsheet",
         "gsheets_create_from_xlsx",
@@ -2359,12 +2363,14 @@
         "gsheets_read",
         "gsheets_set_cell",
         "gsheets_set_range",
-        "gsheets_run_python"
+        "gsheets_format_range",
+        "gsheets_run_python",
+        "data_run_python"
       ],
       "exclusion_example": "[\"gsheets\", \"!gsheets_delete_sheet\"]"
     },
     "gdocs": {
-      "description": "Create, read, share, export, and surgically edit Google Docs (22 tools, content-addressed)",
+      "description": "Create, read, share, export, and surgically edit Google Docs (36 tools, content-addressed)",
       "tools": [
         "gdocs_create",
         "gdocs_create_from_markdown",
@@ -2380,6 +2386,7 @@
         "gdocs_insert_after_text",
         "gdocs_insert_before_text",
         "gdocs_insert_between",
+        "gdocs_insert_image_after_text",
         "gdocs_delete_text",
         "gdocs_replace_section",
         "gdocs_append_markdown",
@@ -2387,19 +2394,36 @@
         "gdocs_style_text",
         "gdocs_create_named_range",
         "gdocs_replace_named_range",
-        "gdocs_acknowledge_human_changes"
+        "gdocs_acknowledge_human_changes",
+        "gdocs_list_documents",
+        "gdocs_list_permissions",
+        "gdocs_unshare",
+        "gdocs_add_comment",
+        "gdocs_list_comments",
+        "gdocs_resolve_comment",
+        "gdocs_read_tables",
+        "gdocs_set_table_cell",
+        "gdocs_insert_table_row",
+        "gdocs_delete_table_row",
+        "gdocs_insert_table_column",
+        "gdocs_delete_table_column",
+        "gdocs_format_table"
       ],
       "exclusion_example": "[\"gdocs\", \"!gdocs_share\", \"!gdocs_export\"]"
     },
     "gdocsread": {
-      "description": "Read-only subset of gdocs (6 tools): list/read tabs, read as markdown, outline, named ranges. Use for inspector agents that should never mutate or share docs.",
+      "description": "Read-only subset of gdocs (10 tools): list/read tabs, read as markdown, outline, named ranges, tables, comments, permissions. Use for inspector agents that should never mutate or share docs.",
       "tools": [
+        "gdocs_export",
         "gdocs_list_tabs",
         "gdocs_read_as_markdown",
         "gdocs_read_outline",
         "gdocs_list_named_ranges",
-        "gdocs_export",
-        "gdocs_acknowledge_human_changes"
+        "gdocs_acknowledge_human_changes",
+        "gdocs_list_documents",
+        "gdocs_list_permissions",
+        "gdocs_list_comments",
+        "gdocs_read_tables"
       ],
       "exclusion_example": "[\"gdocsread\", \"!gdocs_export\"]"
     }

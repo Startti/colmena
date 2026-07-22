@@ -42,8 +42,8 @@ See [40_toolkit_packages.md](40_toolkit_packages.md) for the full syntax and exc
 | Tool | What it does |
 |---|---|
 | `gsheets_create_spreadsheet` | Create a new empty spreadsheet. Returns `{spreadsheet_id, url}`. |
-| `gsheets_create_from_xlsx` | Upload an `.xlsx` attachment as a native Google Sheet (auto-conversion). **Deferred to E-T7b** (attachment plumbing pending); tool definition is published but calls error at runtime. |
-| `gsheets_export_xlsx` | Download a Google Sheet as `.xlsx`, register as attachment. **Deferred to E-T7b** for the same reason. |
+| `gsheets_create_from_xlsx` | Upload an `.xlsx` attachment as a native Google Sheet (auto-conversion). Fully wired via attachment plumbing since Bundle 1 (2026-06-10). |
+| `gsheets_export_xlsx` | Download a Google Sheet as `.xlsx`, register as attachment. Fully wired via attachment plumbing since Bundle 1 (2026-06-10). |
 | `gsheets_list_sheets` | List tabs in a spreadsheet. |
 | `gsheets_add_sheet` | Add a new tab. |
 | `gsheets_delete_sheet` | Delete a tab by title or numeric id. |
@@ -57,6 +57,11 @@ See [40_toolkit_packages.md](40_toolkit_packages.md) for the full syntax and exc
 UX aliases (per D-T16 lessons): `address` ↔ `addr`, `start` ↔ `start_addr`,
 `values` ↔ `values_2d`, `name` ↔ `sheet`. Single-A1 ranges
 auto-expanded (`"C1"` → `"C1:C1"`).
+
+**Fuera del alias `gsheets`** (existen y están registrados, pero NO se activan con
+`enabled_tools: ["gsheets"]` — hay que listarlos explícitamente): `gsheets_list_spreadsheets`
+(discovery), `gsheets_share`, `gsheets_list_permissions`, `gsheets_unshare`. Aparecen en el
+[índice de tools built-in §41](41_builtin_tools_index.md) (sección gsheets, 15 tools en total).
 
 ## Auth
 

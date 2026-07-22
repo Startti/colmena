@@ -7,7 +7,7 @@
 A toolkit package is a curated bundle of synthetic tools exposed under a single
 alias. Instead of writing `enabled_tools: ["gsheets_list_sheets", "gsheets_read",
 ...]` for every Google Sheets tool, you write `enabled_tools: ["gsheets"]` and
-the engine expands the alias to its 10 tools at runtime.
+the engine expands the alias to its 12 tools at runtime.
 
 ## Syntax
 
@@ -17,7 +17,7 @@ the engine expands the alias to its 10 tools at runtime.
 "enabled_tools": ["gsheets"]
 ```
 
-Expands to all 11 gsheets tools (`gsheets_create_spreadsheet`, `gsheets_read`, `gsheets_format_range`, etc.).
+Expands to all 12 tools in the `gsheets` package (`gsheets_create_spreadsheet`, `gsheets_read`, `gsheets_format_range`, `data_run_python`, etc.).
 
 ### Package plus individual tools
 
@@ -84,12 +84,12 @@ single tool name removes only that tool.
 **Example:**
 
 ```json
-"enabled_tools": ["gsheets", "crdt_doc", "!gsheets_delete_sheet", "!crdt_doc_add_sheet"]
+"enabled_tools": ["gsheets", "gdocsread", "!gsheets_delete_sheet", "!gdocs_list_permissions"]
 ```
 
-1. Inclusions: `gsheets` (10 tools) + `crdt_doc` (6 tools) = 16 tools.
-2. Exclusions: remove `gsheets_delete_sheet` and `crdt_doc_add_sheet`.
-3. Result: 14 tools.
+1. Inclusions: `gsheets` (12 tools) + `gdocsread` (10 tools) = 22 tools.
+2. Exclusions: remove `gsheets_delete_sheet` and `gdocs_list_permissions`.
+3. Result: 20 tools.
 
 ## Edge cases
 
@@ -100,6 +100,17 @@ single tool name removes only that tool.
 | Exclude alone (no inclusions) | Empty result, no panic |
 | `!` alone (empty exclusion) | Logged warning, ignored |
 | Tool name collides with package alias | Exact tool match wins |
+
+## Registered packages
+
+The `TOOLKIT_PACKAGES` registry currently ships three aliases (source of truth:
+`toolkit_packages.rs`; counts derivable via `scripts/derive_tool_counts.sh`):
+
+| Alias | Tools | Qué expone |
+|---|---|---|
+| `gsheets` | 12 | 10 native `gsheets_*` (CRUD + `gsheets_format_range`) + the deprecated `gsheets_run_python` + `data_run_python` |
+| `gdocs` | 36 | Full Google Docs surface (create/read/edit/share/comment/tables) |
+| `gdocsread` | 10 | Read-only subset of `gdocs` (no writes) |
 
 ## Registering a new package
 
