@@ -7,8 +7,9 @@
 > cambiar (texto, encabezado, named range), nunca offsets UTF-16. Soporte
 > multi-tab, conversión markdown ↔ Docs con detección de pérdidas, y
 > seguridad ante co-edición concurrente vía revisionId equality check +
-> tabla postgres `gdocs_session_state`. Auth vía Service Account JSON o
-> Application Default Credentials (sin OAuth user-scoped en v1).
+> tabla postgres `gdocs_session_state`. Auth vía el subsistema compartido
+> **OAuth user-scoped** (`COLMENA_GOOGLE_OAUTH_*` + `COLMENA_GOOGLE_SHARE_EMAIL`)
+> desde la migración del 2026-06-10 — ver [47_google_oauth.md](47_google_oauth.md).
 >
 > **Live-verified 2026-06-09** contra un Google Doc real compartido por
 > el usuario (`1QkeEG4PU0PFBwDs8dP6WaYUIEafVwjL3D27eA1w8f0k`, SA
@@ -268,17 +269,28 @@ calcular UTF-16 offsets — fuera del scope de v1.
 
 ## Auth
 
-Dos caminos, sin configuración por-grafo:
+Desde la **migración OAuth del 2026-06-10**, gdocs autentica exclusivamente vía
+el subsistema compartido `google_oauth` — ya no queda camino Service-Account-JSON
+ni ADC en `gdocs/infrastructure/auth.rs` (`TokenCache::from_oauth_credentials`
+envuelve `OAuthRefreshTokenProvider`). Sin configuración por-grafo.
 
-1. **Service Account JSON** — `GOOGLE_APPLICATION_CREDENTIALS=/path/to/sa.json`.
-   El email del SA debe tener acceso `writer` (o `editor`) sobre cada
-   doc. Best para automatizaciones desatendidas.
-2. **Application Default Credentials** — sin la env var, `yup-oauth2`
-   cae a ADC: metadata server en GCP, o `gcloud auth
-   application-default login` para dev local.
+Env vars requeridas (montadas desde Secret Manager en producción):
 
-Scopes por defecto: `documents` + `drive`. Override vía
-`COLMENA_GDOCS_SCOPES=<comma-sep>` (short names o full URLs).
+- `COLMENA_GOOGLE_OAUTH_CLIENT_ID`
+- `COLMENA_GOOGLE_OAUTH_CLIENT_SECRET`
+- `COLMENA_GOOGLE_OAUTH_REFRESH_TOKEN`
+- `COLMENA_GOOGLE_SHARE_EMAIL` — el usuario Workspace que el agente actúa-como
+  (prod: `agents@startti.co`); el parent folder y los docs deben compartirse
+  como Editor con esta dirección.
+
+**No hay camino de auth Service-Account/ADC**: si faltan las env vars OAuth, la
+auth falla con `NotConfigured` (sin fallback). `GOOGLE_APPLICATION_CREDENTIALS` se
+consulta solo como fallback legacy para *derivar el `share_email`* (su campo
+`client_email`), nunca para autenticar. Ver [47_google_oauth.md](47_google_oauth.md)
+para la cadena de resolución de credenciales y el flujo `colmena_oauth_setup`.
+
+Scopes por defecto: `documents` + `drive` (consentidos en setup time). Override
+vía `COLMENA_GDOCS_SCOPES=<comma-sep>` (short names o full URLs).
 
 > **Pivot 2026-06-09 (fix `79eae72`).** El default original era
 > `documents` + `drive.file`. `drive.file` solo da acceso a archivos
@@ -552,7 +564,7 @@ colmena — es restricción de Google Drive.
 |---|---|
 | **Shared Drive de Google Workspace** | Crear un Shared Drive en tu dominio Workspace, agregar la SA como Content Manager o Editor, usar el folder_id del Shared Drive como `parent_folder_id`. Los archivos los ownea el Shared Drive (el dominio), no la SA. |
 | **Domain-wide delegation** | Configurar DWD en el admin console + grantear los scopes a la SA. La SA impersona a un usuario real; los archivos los crea "como ese usuario". |
-| **OAuth user-scoped flow (v1.1)** | Pendiente. Hará que `create_*` funcione contra cualquier Gmail user con su propio refresh_token. |
+| **OAuth user-scoped flow (producción, desde 2026-06-10)** | Ya es el camino por defecto. El agente actúa como un usuario Workspace real (`COLMENA_GOOGLE_SHARE_EMAIL`, prod `agents@startti.co`) con su propio refresh_token, así que `create_*` ownea archivos como ese usuario y no sufre el `storageQuotaExceeded` de un SA. El resto de esta sección aplica solo al camino legacy SA + ADC. |
 
 **Patrón realista v1 — "user-creates-first".** Para el caso de uso
 "cualquier usuario comparte un folder y el agente trabaja ahí":
@@ -611,7 +623,6 @@ Ver "Subsystem G v1.1" en [`BACKLOG.md`](../BACKLOG.md):
 - Plumbing de attachments para `gdocs_create_from_docx` (load bytes) y
   `gdocs_export` (register attachment).
 - `gdocs_list_documents` (descubrimiento scoped a folder via Drive).
-- OAuth user-scoped (hoy solo SA + ADC).
 - Ejecución de Apps Script.
 - Restore desde Drive Revisions (rollback).
 - Math expressions en markdown (hoy pasan como `$…$` literal).

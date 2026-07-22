@@ -271,7 +271,14 @@ Los tool dispatchers no saben qué modo está activo — solo llaman `ctx.backen
 
 ### 5.6 Python/pandas analysis (subsistema C)
 
-Tool: `crdt_doc_run_python(sheet_ids, code, write_to_sheet?)`.
+Tool: `crdt_doc_run_python(sheet_ids, code, on_existing_sheet?)`.
+
+> **Nota de API (write-safety, 2026-06-07).** El write-back ya **no** usa la
+> variable `output_sheet` (singular) ni el arg `write_to_sheet` — ambos fueron
+> removidos (breaking). El código escribe vía un dict Python `output_sheets`
+> (plural) de `nombre → DataFrame | spec-dict`, y la política de colisión se
+> controla con el arg `on_existing_sheet` (`fail` por defecto, `auto_suffix`,
+> `overwrite`), típicamente vía `fixed_config`.
 
 #### Por qué existe
 
@@ -301,12 +308,19 @@ Turn 3 — persistir resultado en una nueva hoja:
        sheet_ids=["sh_inventory"],
        code="
            df = dfs['sh_inventory']
-           output_sheet = df.groupby('Region').agg({'Sales': 'sum', 'Qty': 'mean'}).reset_index()
-       ",
-       write_to_sheet="Summary by Region"
+           summary = df.groupby('Region').agg({'Sales': 'sum', 'Qty': 'mean'}).reset_index()
+           # dict nombre → DataFrame; bare DataFrame ⇒ mode='replace' (crea la tab)
+           output_sheets = {'Summary by Region': summary}
+       "
    )
-   → wrote_sheet = {sheet_id: "sh_summary", name: "Summary by Region", n_rows: 4, preview: [...]}
+   → wrote_sheets = [{name: "Summary by Region", sheet_id: "sh_summary", n_rows: 4, ...}]
 ```
+
+**Modos de write-back** (por entrada del dict `output_sheets`):
+
+- **`replace`** (default) — DataFrame pelado o `{'mode':'replace','df':...}`. Crea/reescribe la tab entera. Colisiones según `on_existing_sheet`.
+- **`overwrite`** — `{'mode':'overwrite','df':...}`. Sobrescribe la tab existente.
+- **`update_in_place`** — `{'mode':'update_in_place','df':..., 'key':'<col>'}`. Diff-write: solo parchea las celdas cambiadas (matchea filas por `key`). Requiere que la tab ya exista.
 
 #### Sandbox + librerías
 
@@ -316,7 +330,7 @@ Reusa la infra `restricted` de `python_script` (AST validation + import whitelis
 
 - **Input**: `dfs: dict[sheet_id, pd.DataFrame]` — una DataFrame por sheet pedido. Row 1 del workbook = column names. Headers ausentes/no-string → fallback `col_A`, `col_B`.
 - **Output al LLM**: variable `output` (cualquier JSON-serializable). Cap 10KB; trunca con `_output_truncated: true`.
-- **Write-back**: variable `output_sheet` (pd.DataFrame). Solo se escribe si `write_to_sheet` está en args. Headers as row 1, sin index. Name collisions → auto-suffix `" (2)"`, `" (3)"`. Cap 100k rows; trunca con `truncated_at` en response.
+- **Write-back**: dict `output_sheets` (nombre → DataFrame o spec-dict `{mode, df, ...}`). Headers as row 1, sin index. La política de colisión la fija `on_existing_sheet` (`fail` default / `auto_suffix` / `overwrite`). Cap 100k rows; trunca con `truncated_at` en response.
 
 #### Límites v1 (hardcoded, deuda técnica)
 
@@ -326,14 +340,14 @@ Reusa la infra `restricted` de `python_script` (AST validation + import whitelis
 | Code execution timeout | 30s | Idem (`timeout_secs`) |
 | `output` to LLM | 10 KB | Idem |
 | `stdout` / `error` | 10 KB cada uno | Idem |
-| `output_sheet` rows | 100K | Idem + chunked writes para evitar transact_mut gigante |
+| `output_sheets` rows | 100K | Idem + chunked writes para evitar transact_mut gigante |
 | Sheet name | 31 chars (Excel xlsx limit) | Stays — hard limit |
 
 Ver `docs/BACKLOG.md` → "Configurable limits para `crdt_doc_run_python`".
 
 #### Modo Local vs WsPeer
 
-Mismo comportamiento. En WsPeer mode el worker tiene la réplica Y.Doc local via WS, entonces la construcción del DataFrame es local, sin roundtrip. Las escrituras de `output_sheet` van como mutaciones Y.Doc → propagan al server via WS → fan-out a browsers.
+Mismo comportamiento. En WsPeer mode el worker tiene la réplica Y.Doc local via WS, entonces la construcción del DataFrame es local, sin roundtrip. Las escrituras de `output_sheets` van como mutaciones Y.Doc → propagan al server via WS → fan-out a browsers.
 
 #### Requisito de runtime
 

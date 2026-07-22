@@ -1385,13 +1385,13 @@
     },
 
     "gsheets": {
-      "summary": "Synthetic LLM tools for Google Sheets (subsystem E v1). 10 tools that mirror the crdt_doc_* shape so the same skills/agent prompts work against native Google Spreadsheets. Auto-registered when an llm_call's `enabled_tools` includes `gsheets`. Auth via Service Account JSON (GOOGLE_APPLICATION_CREDENTIALS) or Application Default Credentials — no per-graph config needed. Formulas are evaluated server-side by Google (USER_ENTERED valueInputOption). UX aliases carried forward from D-T16: `address`↔`addr`, `start`↔`start_addr`, `values`↔`values_2d`, `name`↔`sheet`. Single-A1 ranges auto-expanded (`\"C1\"` → `\"C1:C1\"`). 7 of 9 tools fully wired in v1; the xlsx pair (`gsheets_create_from_xlsx`, `gsheets_export_xlsx`) is published but errors at runtime — see BACKLOG E-T7b. See docs/developer_guide/39_gsheets.md.",
+      "summary": "Synthetic LLM tools for Google Sheets (subsystem E). The `gsheets` alias expands to 12 tools (10 native gsheets_* + the deprecated gsheets_run_python + the unified data_run_python) that mirror the crdt_doc_* shape so the same skills/agent prompts work against native Google Spreadsheets. Auto-registered when an llm_call's `enabled_tools` includes `gsheets`. Auth via the shared OAuth user-scoped subsystem (COLMENA_GOOGLE_OAUTH_CLIENT_ID/_CLIENT_SECRET/_REFRESH_TOKEN + COLMENA_GOOGLE_SHARE_EMAIL) since the 2026-06-10 migration — no per-graph config needed. There is no Service-Account/ADC auth path (missing OAuth vars → NotConfigured); GOOGLE_APPLICATION_CREDENTIALS is only read as a legacy fallback to derive the share_email, never for auth. Formulas are evaluated server-side by Google (USER_ENTERED valueInputOption). UX aliases carried forward from D-T16: `address`↔`addr`, `start`↔`start_addr`, `values`↔`values_2d`, `name`↔`sheet`. Single-A1 ranges auto-expanded (`\"C1\"` → `\"C1:C1\"`). 7 of 9 tools fully wired in v1; the xlsx pair (`gsheets_create_from_xlsx`, `gsheets_export_xlsx`) is published but errors at runtime — see BACKLOG E-T7b. See docs/developer_guide/39_gsheets.md.",
       "synthetic_tools": [
         "gsheets_create_spreadsheet", "gsheets_create_from_xlsx", "gsheets_export_xlsx",
         "gsheets_list_sheets", "gsheets_add_sheet", "gsheets_delete_sheet",
         "gsheets_read", "gsheets_run_python", "gsheets_set_cell", "gsheets_set_range"
       ],
-      "how_exposed": "Add `\"gsheets\"` to llm_call.config.enabled_tools (flag-only activation, like api_explorer). No tool_configurations entry required. Auth resolves at first call via GOOGLE_APPLICATION_CREDENTIALS env var or ADC.",
+      "how_exposed": "Add `\"gsheets\"` to llm_call.config.enabled_tools (flag-only activation, like api_explorer). No tool_configurations entry required. Auth resolves at first call via the shared OAuth user-scoped subsystem (COLMENA_GOOGLE_OAUTH_* + COLMENA_GOOGLE_SHARE_EMAIL).",
       "lifecycle": "Each call makes one or more HTTPS requests to sheets.googleapis.com / drive.googleapis.com. Tokens cached 50 min. Auto-retry on 429 / 5xx with exponential backoff.",
       "examples": {
         "llm_call_with_gsheets": {
@@ -1644,8 +1644,8 @@
       },
       "special_behaviors": [
         "Flag-only activation: `enabled_tools: [\"gsheets\"]` exposes all 9 tools. No tool_configurations entry needed.",
-        "Auth resolves automatically: GOOGLE_APPLICATION_CREDENTIALS (Service Account JSON path) takes precedence; otherwise ADC via gcloud auth application-default login or GCP metadata server.",
-        "Service Account email must be shared (Edit access) on each spreadsheet the agent touches.",
+        "Auth resolves via the shared OAuth user-scoped subsystem (COLMENA_GOOGLE_OAUTH_CLIENT_ID/_CLIENT_SECRET/_REFRESH_TOKEN) since 2026-06-10. No Service-Account/ADC auth path exists; GOOGLE_APPLICATION_CREDENTIALS is only read as a legacy fallback to derive the share_email, never for auth.",
+        "The COLMENA_GOOGLE_SHARE_EMAIL Workspace user (prod: agents@startti.co) must be shared (Edit access) on each spreadsheet the agent touches.",
         "Formulas are evaluated SERVER-SIDE by Google. Write `\"=SUM(A1:A10)\"` and read back with value_render='UNFORMATTED_VALUE' to get the computed number, or value_render='FORMULA' to get the text.",
         "UX aliases carried forward from D-T16: `address`↔`addr`, `start`↔`start_addr`, `values`↔`values_2d`, `name`↔`sheet`. Single-A1 ranges auto-expanded (`\"C1\"` → `\"C1:C1\"`).",
         "Scopes default to spreadsheets + drive.file; override via COLMENA_GSHEETS_SCOPES (comma-separated short names or full URLs).",
@@ -1658,7 +1658,7 @@
     },
 
     "gdocs": {
-      "summary": "Synthetic LLM tools for Google Docs (subsystem G v1). 35 tools that let the agent create, read, share, export, and surgically edit Google Docs via content-addressed operations — the LLM specifies WHAT to change (text, heading, named range) and never computes UTF-16 indices. Multi-tab supported. Markdown ↔ Docs conversion with structured `lossy_conversions` reporting. Co-edit safety via Drive Revisions + postgres table `gdocs_session_state(agent_session_id, document_id, last_revision_id)`. Auth via Service Account JSON (GOOGLE_APPLICATION_CREDENTIALS) or Application Default Credentials. Requires `COLMENA_GDOCS_DEFAULT_PARENT_FOLDER_ID` (or per-call `parent_folder_id`) for create. Two toolkit aliases: `gdocs` (full 35 tools), `gdocsread` (read-only 10 tools). See docs/developer_guide/45_gdocs.md.",
+      "summary": "Synthetic LLM tools for Google Docs (subsystem G). 36 tools that let the agent create, read, share, export, and surgically edit Google Docs via content-addressed operations — the LLM specifies WHAT to change (text, heading, named range) and never computes UTF-16 indices. Multi-tab supported. Markdown ↔ Docs conversion with structured `lossy_conversions` reporting. Co-edit safety via Drive Revisions + postgres table `gdocs_session_state(agent_session_id, document_id, last_revision_id)`. Auth via the shared OAuth user-scoped subsystem (COLMENA_GOOGLE_OAUTH_* + COLMENA_GOOGLE_SHARE_EMAIL) since the 2026-06-10 migration. There is no Service-Account/ADC auth path (missing OAuth vars → NotConfigured); GOOGLE_APPLICATION_CREDENTIALS is only read as a legacy fallback to derive the share_email, never for auth. Requires `COLMENA_GDOCS_DEFAULT_PARENT_FOLDER_ID` (or per-call `parent_folder_id`) for create. Two toolkit aliases: `gdocs` (full 36 tools), `gdocsread` (read-only 10 tools). See docs/developer_guide/45_gdocs.md.",
       "synthetic_tools": [
         "gdocs_create", "gdocs_create_from_markdown", "gdocs_create_from_docx",
         "gdocs_share", "gdocs_export",
@@ -1676,7 +1676,7 @@
         "gdocs_insert_table_row", "gdocs_delete_table_row",
         "gdocs_insert_table_column", "gdocs_delete_table_column"
       ],
-      "how_exposed": "Add `\"gdocs\"` to llm_call.config.enabled_tools (flag-only activation). For read-only agents use `\"gdocsread\"` (excludes all write/share/create/edit tools). No tool_configurations entry required. Auth resolves at first call via GOOGLE_APPLICATION_CREDENTIALS or ADC.",
+      "how_exposed": "Add `\"gdocs\"` to llm_call.config.enabled_tools (flag-only activation). For read-only agents use `\"gdocsread\"` (excludes all write/share/create/edit tools). No tool_configurations entry required. Auth resolves at first call via the shared OAuth user-scoped subsystem (COLMENA_GOOGLE_OAUTH_* + COLMENA_GOOGLE_SHARE_EMAIL).",
       "lifecycle": "Each call makes one or more HTTPS requests to docs.googleapis.com / drive.googleapis.com. Tokens cached 50 min. Outline cached per-revision (TTL via COLMENA_GDOCS_REVISION_CACHE_SECS, default 5s). Before every write the co-edit guard checks the current Drive revision against the cursor stored in postgres `gdocs_session_state` keyed on (agent_session_id, document_id); divergence yields a structured `human_changes_pending` error.",
       "examples": {
         "llm_call_with_gdocs_full": {
@@ -2167,8 +2167,8 @@
       },
       "special_behaviors": [
         "Flag-only activation: `enabled_tools: [\"gdocs\"]` exposes all 22 tools; `enabled_tools: [\"gdocsread\"]` exposes the 6 read-only tools. No tool_configurations entry needed.",
-        "Auth resolves automatically: GOOGLE_APPLICATION_CREDENTIALS (Service Account JSON path) takes precedence; otherwise ADC.",
-        "Service Account email must be shared (writer/editor) on each doc the agent touches.",
+        "Auth resolves via the shared OAuth user-scoped subsystem (COLMENA_GOOGLE_OAUTH_CLIENT_ID/_CLIENT_SECRET/_REFRESH_TOKEN) since 2026-06-10. No Service-Account/ADC auth path exists; GOOGLE_APPLICATION_CREDENTIALS is only read as a legacy fallback to derive the share_email, never for auth.",
+        "The COLMENA_GOOGLE_SHARE_EMAIL Workspace user (prod: agents@startti.co) must be shared (writer/editor) on each doc the agent touches.",
         "Parent folder requirement: gdocs_create* fail with `no_parent_folder_configured` unless `parent_folder_id` arg is set OR COLMENA_GDOCS_DEFAULT_PARENT_FOLDER_ID env var is configured.",
         "Content-addressed editing: every edit tool resolves its target via text search; the LLM never computes UTF-16 indices. 0 matches → text_not_found. 2 matches with identical neighbours → ambiguous_match. ≥5 matches without confirm_many → confirm_many_matches.",
         "Co-edit guard: before every write, the dispatcher compares the Drive revision to the cursor stored in postgres `gdocs_session_state` (keyed on agent_session_id + document_id). Divergence → `human_changes_pending` with delta summary. Acknowledge via gdocs_acknowledge_human_changes.",
