@@ -7,7 +7,7 @@ Carga progresiva del schema de tools para nodos LLM. Cuando un `llm_call` tiene 
 Every Rust-side synthetic tool MUST declare a `summary` between 10 and 200
 characters via `build_synthetic_tool_with_summary` (or by setting the
 `summary` field on `ToolDefinition` directly). This is enforced in CI by
-the `every_synthetic_tool_has_summary` test in
+the `every_registered_tool_has_text_entry` test in
 `llm_synthetic_tools/mod.rs`. Builds refuse to ship if any synthetic tool
 is missing a summary.
 

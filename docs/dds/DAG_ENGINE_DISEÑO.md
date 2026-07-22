@@ -158,15 +158,17 @@ pub trait ExecutableNode: Send + Sync {
     /// Descripción legible para humanos y LLMs (usada cuando el nodo actúa como tool).
     fn description(&self) -> Option<&str> { None }
 
-    /// Texto adicional derivado de `fixed_config`, anexado al bloque de contexto
-    /// cuando el nodo se usa como tool. Debe ser una función pura (sin I/O).
-    fn tool_description_supplement(&self, _fixed_config: &Value) -> Option<String> { None }
-
     /// Nombre del puerto de input por defecto cuando un edge entrante no especifica campo.
     fn default_input(&self) -> Option<&str> { None }
 
     /// Nombre del puerto de output por defecto cuando un edge saliente no especifica campo.
     fn default_output(&self) -> Option<&str> { None }
+
+    /// Referencia opcional a sí mismo como `InitializableNode`, para que el
+    /// tool executor pueda llamar `initialize()` y enriquecer la descripción
+    /// del tool con contexto de schema/capacidades antes del primer turno LLM.
+    /// `None` por defecto; hoy solo lo sobreescribe `sql_query`.
+    fn as_initializable(&self) -> Option<&dyn crate::dag_engine::domain::initializable_node::InitializableNode> { None }
 }
 ```
 Definido en `src/libs/colmena/src/dag_engine/domain/node.rs`. Notas relevantes:
@@ -288,7 +290,9 @@ impl ExecutableNode for TriggerWebhookNode {
             .or(config.get("test_payload"))
             .or(serde_json::to_value(inputs)?);
         
-        Ok(json!({ "output": payload }))
+        // Retorna el payload sin envolver: default_output() = Some("output")
+        // permite que el auto-flattening del engine lo exponga como "output".
+        Ok(payload)
     }
 }
 ```
@@ -308,6 +312,8 @@ Los tres ejemplos anteriores (`HttpNode`, `LlmNode`, `TriggerWebhookNode`) ilust
 | `log` | `debug.rs::LogNode` | Imprime su input. |
 | `output` | `output.rs::OutputNode` | Marca el output final del DAG. |
 | `add`, `subtract`, `multiply`, `divide`, `exponential` | `math.rs` | Aritmética básica. |
+| `output_parser` | `output_parser.rs::OutputParserNode` | Parseo estructurado de outputs. |
+| `router` | `router/` module | Enrutamiento condicional entre ramas del DAG. |
 | `current_time` | `current_time.rs` | Devuelve la hora actual (timezone-aware vía `Graph.timezone`). |
 | `trigger_webhook` | `trigger.rs::TriggerWebhookNode` | Entry point en modo `serve`. |
 | `input` | `input.rs::InputNode` | Entrada parametrizada para CLI / API. |
@@ -323,22 +329,26 @@ Los tres ejemplos anteriores (`HttpNode`, `LlmNode`, `TriggerWebhookNode`) ilust
 | `orchestrator` | `orchestrator.rs::OrchestratorNode` | Config anidada `{ planner, critic, phase_reactor, final_reactor }`. Ver `tests/graphs/advanced/trip_planner_v2.json`. |
 | `task_memory_writer` | `task_memory_writer.rs` | Persiste memoria de tareas. |
 | `planner` | `planner.rs::PlannerNode` | Planificación de tareas. |
-| `critic` | `critic.rs::CriticNode` | Crítica de outputs; prompts en inglés (`=== PREVIOUS ATTEMPT — WHY IT FAILED ===`). |
+| `critic` | `critic.rs::CriticNode` | Crítica de outputs. Su feedback es consumido por `orchestrator.rs`, cuyo phase-reactor prompt builder lo inserta bajo el header en inglés `=== PREVIOUS ATTEMPT — WHY IT FAILED ===` (`orchestrator.rs:1962`). |
 | `reactor` | `reactor.rs::ReactorNode` | Reactor de fase / final. Requiere `task_memory_repo`. |
 | `tavily_client` | `tavily_client.rs::TavilyClientNode` | Búsqueda web; también `ToolkitNode`. Secure-values opcional. |
 | `document_create`, `document_edit`, `document_read` | `document_nodes.rs` | Documentos (incluye `ArtifactKind::Html` desde PR #79). |
 | `api_explorer` | `api_explorer.rs::ApiExplorerNode` | Exploración dinámica de APIs; también `ToolkitNode`. |
-| `image_generation` | `image_generation.rs::ImageGenerationNode` | Solo si hay `AssetStore`. |
-| `image_edit` | `image_edit.rs::ImageEditNode` | Solo si hay `AssetStore`. |
-| `tts` | `tts.rs::TtsNode` | Solo si hay `AssetStore`. |
+| `image_generation` | `image_generation.rs::ImageGenerationNode` | Solo si hay `storage` (`Arc<dyn OutputStorageRepository>`). |
+| `image_edit` | `image_edit.rs::ImageEditNode` | Solo si hay `storage` (`Arc<dyn OutputStorageRepository>`). |
+| `tts` | `tts.rs::TtsNode` | Solo si hay `storage` (`Arc<dyn OutputStorageRepository>`). |
 | `subgraph` | `subgraph.rs::SubGraphNode` | Composición de DAGs; los node IDs hijos se cualifican como `outer/inner`. |
+| `for_each` | `for_each.rs::ForEachNode` | Ejecuta un tool embebido una vez por fila de una lista, de forma determinista (Rust, no re-llamadas del LLM). |
 
-Existen además helpers en `infrastructure/nodes/`: `qa_response_parser.rs`, `echo_toolkit.rs`, `llm_synthetic_tools/`, `prompts/`, `util/`. La lista canónica vive en `HashMapNodeRegistry::new_with_secure_values`.
+Existen además helpers en `infrastructure/nodes/`: `qa_response_parser.rs`, `echo_toolkit.rs`, `llm_synthetic_tools/`, `util/`. La lista canónica vive en `HashMapNodeRegistry::new_with_secure_values`.
 
 #### HashMapNodeRegistry
 ```rust
 pub struct HashMapNodeRegistry {
     nodes: HashMap<String, Arc<dyn ExecutableNode>>,
+    toolkit_nodes: HashMap<String, Arc<dyn ToolkitNode>>,
+    subgraph_node: Option<Arc<SubGraphNode>>,
+    foreach_node: Option<Arc<ForEachNode>>,
 }
 
 impl NodeRegistryPort for HashMapNodeRegistry {
@@ -348,7 +358,7 @@ impl NodeRegistryPort for HashMapNodeRegistry {
 }
 ```
 
-Registry simple que mapea strings a implementaciones de nodos.
+Registry que mapea strings a implementaciones de nodos (`nodes`), más registros dedicados para toolkits (`toolkit_nodes`), el nodo `subgraph` y el nodo `for_each`, usados para wiring adicional (p.ej. inyectar el registry en `for_each`).
 
 ## Configuración Dinámica
 

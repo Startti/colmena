@@ -11,7 +11,7 @@ It serves two main use cases:
 
 **Source:** `src/libs/colmena/src/dag_engine/infrastructure/nodes/python_node.rs`
 **Registered as:** `"python_script"` in the node registry
-**Feature flag:** requires the `python` cargo feature (PyO3 bindings)
+**Feature flag:** none — `pyo3` and `pythonize` are unconditional dependencies in `src/libs/colmena/Cargo.toml`, and `main.rs` calls `pyo3::Python::initialize()` unconditionally, so `python_script` works without `--features python`. The `python` cargo feature only gates `pyo3-async-runtimes` (used for PyO3 async bindings, not this node).
 
 ---
 
@@ -28,10 +28,10 @@ The node is intentionally small: there is no separate use case or domain port. E
 │   2. Strip ```python ... ``` markdown wrappers              │
 │   3. Resolve `sandbox_mode` and `sandbox_timeout_secs`      │
 │   4. Filter reserved keys from the input map                │
-│   5. spawn_blocking → Python::with_gil:                     │
+│   5. spawn_blocking → Python::attach:                        │
 │        • If restricted: AST validation                      │
 │        • Inject inputs as global Python variables           │
-│        • py.run_bound(code)                                 │
+│        • py.run(code)                                       │
 │        • Extract `output` variable → JSON                   │
 │   6. If restricted: wrap in tokio::time::timeout            │
 └────────────────────────────────────────────────────────────┘
@@ -162,9 +162,9 @@ The stripping is conservative: only leading/trailing triple-backtick fences are 
 
 ## Threading & GIL Safety
 
-- The Python interpreter is initialized once via `pyo3::prepare_freethreaded_python()` (called eagerly from the engine boot path).
+- The Python interpreter is initialized once via `pyo3::Python::initialize()` (pyo3 0.29; was `prepare_freethreaded_python()`), called eagerly from the engine boot path (`src/libs/colmena/src/dag_engine/main.rs:123`).
 - Every execution runs inside `tokio::task::spawn_blocking` so it cannot block the async runtime.
-- Inside the blocking task, `Python::with_gil` acquires the GIL, runs the validator (if restricted), executes the user code, and releases the GIL on return.
+- Inside the blocking task, `Python::attach` (pyo3 0.29's replacement for `Python::with_gil`) acquires the GIL, runs the validator (if restricted), executes the user code, and releases the GIL on return (`src/libs/colmena/src/dag_engine/infrastructure/nodes/python_node.rs:113`).
 - `tokio::time::timeout` only wraps the `JoinHandle` — it cannot interrupt a Python frame already holding the GIL. See the limitation note above.
 
 ---
@@ -275,18 +275,20 @@ The system message of the agent should instruct it to always call the tool for a
 
 ### Pattern C — `attachment_run_python` (pandas DataFrame from attachment)
 
+> **DEPRECATED** — `attachment_run_python` is soft-deprecated as of 2026-07-02 in favor of `data_run_python` (see `docs/developer_guide/48_data_run_python.md`). It remains registered for backward compatibility with existing graphs; do not choose it for new work.
+
 For CSV / XLSX attachments the LLM never has to re-emit the rows. The synthetic tool **`attachment_run_python`** parses the attachment server-side into a pandas `DataFrame` called `df` and runs the LLM-authored snippet against it inside the same restricted sandbox as Pattern B.
 
 ```
-LLM call:  attachment_run_python({ document_id: "att_abc", code: "output = df.groupby('country')['amount'].sum().to_dict()" })
+LLM call:  attachment_run_python({ attachment_id: "att_abc", code: "result = df.groupby('country')['amount'].sum().to_dict()" })
 
 Server:    bytes ← OutputStorageRepository.read(document_id)
            df ← pandas.read_csv(bytes)        (or read_excel for .xlsx)
-           sandboxed exec → reads `output`
+           sandboxed exec → reads `result`
            → tool result
 ```
 
-- Activation: **`enabled_tools: ["attachment_run_python"]`** (zero config needed; the only state it needs is the `document_id`).
+- Activation: **`enabled_tools: ["attachment_run_python"]`** (zero config needed; the only state it needs is the `attachment_id`).
 - Sandbox: `restricted` always — same allow-list as Pattern B plus `pandas` (which itself is whitelisted; `numpy` is reachable as `pd.np` and as a direct import).
 - Wall-clock cap: 30 s; output JSON cap: 50 KB.
 - The `df` global is pre-loaded; the LLM only writes the analysis. No need to `import pandas` (it is already in scope as `pd`).

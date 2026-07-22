@@ -69,22 +69,26 @@ src/libs/colmena/src/
 │       ├── registry.rs             # Mapping de tipos de nodo a implementaciones
 │       ├── dag_tool_executor.rs    # Ejecutor de herramientas dentro del grafo
 │       └── nodes/                  # Implementaciones de nodos específicas (ver tabla abajo)
-├── skills/                         # 🛠️ SKILLS (capacidades cargables on-demand)
-│   ├── domain/                     # SkillConfig { builtin: [..], paths: [..] }, recursive references (depth 5)
-│   ├── application/                # load_skill use case, recursive reference resolver
+├── skills/                         # 🛠️ SKILLS (capacidades cargables on-demand) — solo domain/ + infrastructure/ (sin application/)
+│   ├── domain/                     # SkillsConfig { builtin: [..], paths: [..] }, recursive references (depth 5)
 │   └── infrastructure/             # Loader de SKILL.md + frontmatter (YAML)
+│                                    # (el use case load_skill vive en dag_engine/infrastructure/nodes/llm_synthetic_tools/load_skill_tool.rs)
 ├── documents/                      # 📄 ARTIFACTS / DOCUMENTOS (Markdown, HTML, etc.)
-│   ├── domain/                     # ArtifactKind { Markdown, Html, ... }, HtmlIR, PatchOp
-│   ├── application/                # upload_asset, list_assets, delete_asset, render, validate
-│   └── infrastructure/             # HtmlRenderer, HtmlValidator, HtmlOpApplier
+│   ├── domain/                     # ArtifactKind { Excel, Word, Html }, HtmlIR, PatchOp
+│   ├── application/                # upload_asset, list_assets, delete_asset, render, validate, apply_html_ops.rs (HtmlOpApplier)
+│   └── infrastructure/             # HtmlRenderer, HtmlValidator; storage/: LocalFsAssetStore, GcsAssetStore (AssetStore port defined in domain/ports.rs)
 ├── storage/                        # 💾 ALMACENAMIENTO DE BLOBS
-│   ├── domain/                     # Port: AssetStore, OutputStorageRepository
-│   └── infrastructure/             # LocalFsAssetStore, GcsAssetStore (feature `gcs`)
-├── web/                            # 🌐 CLIENTES WEB (search / scraping)
-│   └── infrastructure/             # Tavily, fetchers HTTP
-├── attachment_gc/                  # 🧹 GARBAGE COLLECTOR de adjuntos huérfanos
-│   ├── application/                # Use case de barrido programado
-│   └── infrastructure/             # Scheduler + adapters de proveedores
+│   ├── domain/                     # OutputStorageRepository (output_storage_repository.rs, storage_error.rs)
+│   └── infrastructure/             # local_cache_adapter, local_http_adapter, http_callback_adapter
+├── web/                            # 🌐 CLIENTES WEB (search / scraping / OpenAPI)
+│   ├── domain/                     # api_spec_port.rs, search_port.rs, session.rs, errors.rs
+│   ├── application/                # api_spec_use_case.rs, search_use_case.rs, swagger2_to_oas3.rs, url_normalizer.rs
+│   └── infrastructure/             # openapi_adapter.rs, tavily_adapter.rs
+├── attachment_gc/                  # 🧹 GARBAGE COLLECTOR de adjuntos huérfanos (main.rs, sin capas)
+├── crdt_documents/                 # 📝 Documentos colaborativos CRDT (spreadsheets)
+├── gdocs/                          # 📄 Integración Google Docs (tools sintéticas gdocs_*)
+├── gsheets/                        # 📊 Integración Google Sheets (tools sintéticas gsheets_*)
+├── google_oauth/                   # 🔐 Flujo OAuth de usuario para Google (Docs/Sheets)
 ├── shared/                         # 🤝 FUNCIONALIDADES COMPARTIDAS
 │   └── infrastructure/
 │       ├── config_resolver.rs      # Resolución de variables ${ENV}
@@ -105,7 +109,7 @@ src/libs/colmena/src/
 | `input.rs` / `output.rs` | Entrada/salida del grafo |
 | `orchestrator.rs` | Orquestador anidado (planner + critic + phase_reactor + final_reactor) |
 | `planner.rs` | Generación de plan multi-paso |
-| `critic.rs` | Crítica adversarial (prompts en inglés: `=== PREVIOUS ATTEMPT — WHY IT FAILED ===`) |
+| `critic.rs` | Crítica adversarial (system prompt default en `text/prompts/critic_system.md`) |
 | `reactor.rs` | Ejecutor reactivo de pasos |
 | `extraction.rs` | Extracción estructurada (JSON / schema) |
 | `qa_response_parser.rs` | Parseo de respuestas Q&A |
@@ -125,7 +129,7 @@ src/libs/colmena/src/
 | `image_generation.rs` | Generación de imágenes |
 | `image_edit.rs` | Edición de imágenes |
 | `tts.rs` | Text-to-speech |
-| `util/`, `prompts/` | Helpers internos y plantillas de system prompts |
+| `util/` | Helpers internos (los prompts de sistema viven en el registro `src/libs/colmena/text/prompts/`, no en `nodes/`) |
 
 ### Flujo de Datos
 

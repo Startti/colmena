@@ -28,7 +28,7 @@ src/libs/colmena/src/
 │   └── infrastructure/     — OpenAI/Anthropic/Gemini/Mock adapters, persistence, files
 │
 ├── skills/                 — markdown skill packages loaded on-demand
-│   ├── domain/             — Skill, SkillRepository trait, SkillConfig
+│   ├── domain/             — Skill, SkillRepository trait, SkillsConfig
 │   └── infrastructure/     — BuiltinSkillRepository, FilesystemSkillRepository, composite
 │
 ├── storage/                — artifact storage abstraction (images, audio)
@@ -48,17 +48,25 @@ src/libs/colmena/src/
 │   ├── xlsx_import.rs / xlsx_export.rs — calamine in, rust_xlsxwriter out
 │   ├── snapshot_writer.rs  — persistence tick (5s + on shutdown)
 │   ├── change_tracker.rs   — ring buffer of per-artifact change events for narration
-│   ├── tool_executor.rs    — backing for the 6 `crdt_doc_*` LLM synthetic tools
+│   ├── tool_executor.rs    — backing for the 11 `crdt_doc_*` LLM synthetic tools
 │   └── ...                 — formula_engine, projection, df_writer, narration, etc.
 │
 ├── gsheets/                — Google Sheets API integration (read + diff-write)
 │   ├── domain/             — sheet handle, spec, errors, ports
-│   └── infrastructure/     — http_client (Sheets v4), batchUpdate, OAuth via yup_oauth2
+│   └── infrastructure/     — http_client (Sheets v4), batchUpdate, OAuth via `google_oauth::infrastructure::OAuthRefreshTokenProvider`
+│
+├── gdocs/                  — Google Docs integration (35+ `gdocs_*` synthetic tools)
+│   ├── domain/             — document handle, patch/edit types, ports
+│   └── infrastructure/     — Docs API client, markdown import/export, revision tracking
+│
+├── google_oauth/           — OAuth user-scoped Google auth flow (COLMENA_GOOGLE_OAUTH_*)
+│   ├── domain/             — token/credential types, ports
+│   └── infrastructure/     — OAuth client, refresh-token flow
 │
 ├── web/                    — web/HTTP toolkit nodes (api_explorer, tavily_client)
 │   ├── domain/             — ApiSpecPort, SearchPort, SessionRegistry, errors
 │   ├── application/        — ApiSpecUseCase, SearchUseCase, Swagger2→OAS3 converter
-│   └── infrastructure/     — OpenAPIAdapter, TavilyAdapter
+│   └── infrastructure/     — OpenApiAdapter, TavilyAdapter
 │
 ├── shared/                 — cross-cutting helpers (no domain/application layers)
 │   └── infrastructure/     — ConfigResolver (API keys), ServiceContainer (DI)
@@ -106,7 +114,7 @@ The core of the system. Everything that takes a `graph.json`, resolves its topol
   - `state.rs` — `DagRunStatus`, `DagStateRepository` port (suspend/resume state), `DagTaskMemoryRepository`.
   - `observer.rs` — `ExecutionObserver` trait. Nodes call `observer.on_event(NodeEvent)` for SSE.
   - `events.rs` — `DagExecutionEvent` enum: `NodeStart`, `NodeFinish`, `LlmToken`, `LlmToolCall`, `LlmUsage`, etc. The wire format for SSE.
-  - `sql_ports.rs` — port traits for the SQL node (`SqlConnectionPort`, `StaticValidatorPort`, `LlmCriticPort`).
+  - `sql_ports.rs` — port traits for the SQL node (`SqlConnectionPort`, `SqlValidatorPort`, `SqlCriticPort`, `FunctionRegistryPort`).
   - `sql_permissions.rs` — `SqlPermissions` value object (presets + deny-lists + allowed schemas).
   - `secure_value_repository.rs` — port for encrypting/looking up secure values.
   - `error.rs` — `DagError` enum (thiserror).
@@ -131,19 +139,21 @@ The core of the system. Everything that takes a `graph.json`, resolves its topol
   - `sql_pool_adapter.rs` — concrete `SqlConnectionPort`: executes queries against a `PgPool`.
   - `sql_port_factory.rs` — builds the full SQL port stack (static validator + optional LLM critic + pool) from graph config.
   - `sql_function_registry.rs` — tracks registered SQL functions for the sandbox schema.
-  - `sse_mapper.rs` — stateful `DagExecutionEvent → SSE JSON` mapper. Used by CLI, HTTP handler, and tests.
-  - `verbose.rs` — `colmena_log!` macro gated by `COLMENA_VERBOSE=1`.
 
 - `dag_engine/engine.rs` — **`ColmenaEngine`**: process-wide singleton. Owns the `PgPoolRegistry`, state repo, secure value repo, skill repository, node registry, and `DagRunUseCase`. Every consumer (CLI, HTTP, Python bindings, Node bindings) builds one.
 
 - `dag_engine/api.rs` — `run_dag()` / `serve_dag()` free functions. `run_dag` builds an engine, parses the JSON, and runs to completion. `serve_dag` starts an Axum HTTP server.
+
+- `dag_engine/sse_mapper.rs` — stateful `DagExecutionEvent → SSE JSON` mapper. Used by CLI, HTTP handler, and tests. Top-level file, not under `infrastructure/`.
+
+- `dag_engine/verbose.rs` — `colmena_log!` macro gated by `COLMENA_VERBOSE=1`. Top-level file, not under `infrastructure/`.
 
 **Node implementations in `infrastructure/nodes/`:**
 
 | File | Node type(s) | Notes |
 |------|-------------|-------|
 | `math.rs` | `add`, `subtract`, `multiply`, `divide`, `exponential` | Simplest nodes — good copy template |
-| `trigger.rs` | `trigger`, `trigger_webhook` | Entry points for graph execution |
+| `trigger.rs` | `trigger_webhook` | Entry point (webhook) for graph execution |
 | `input.rs` | `input` | Injects the `inject_payload` value |
 | `output.rs` | `output` | Marks the terminal node of a graph/subgraph |
 | `debug.rs` | `log`, `mock_input` | `log`: logs inputs and passes through; `mock_input`: emits its raw config as the root data object (test fixture) |
@@ -160,7 +170,7 @@ The core of the system. Everything that takes a `graph.json`, resolves its topol
 | `suspend.rs` | `suspend` | Human-in-the-loop pause with Q/A resume |
 | `secure_suspend.rs` | `secure_suspend` | Like suspend but collects secrets (never logs them) |
 | `subgraph.rs` | `subgraph` | Recursively runs a nested graph |
-| `extraction.rs` | `extraction` | Structured data extraction via LLM |
+| `extraction.rs` | `information_extraction` | Structured data extraction via LLM |
 | `output_parser.rs` | `output_parser` | Lightweight wrapper around `extraction` for the common "parse last LLM message into typed JSON" pattern |
 | `router/` | `router` | Declarative branching: `llm_direct` (LLM picks branch by name) or `extract_and_route` (LLM extracts JSON + `when` DSL rules); always-on `__decision` audit port |
 | `loop_controller.rs` | `loop_controller` | DAG looping primitive |
@@ -171,6 +181,7 @@ The core of the system. Everything that takes a `graph.json`, resolves its topol
 | `api_explorer.rs` | `api_explorer` | OpenAPI toolkit (5 sub-tools); registered as toolkit |
 | `tavily_client.rs` | `tavily_client` | Web search toolkit; registered as toolkit |
 | `document_nodes.rs` | `document_create`, `document_edit`, `document_read` | Office document nodes |
+| `for_each.rs` | `for_each` | Deterministic list execution: runs an embedded `target` tool once per row, iterating in Rust (`ListToolExecutor`) rather than via repeated LLM tool calls |
 | `qa_response_parser.rs` | (shared) | Parses the ID-keyed `Q[id]: A[id]:` resume format |
 
 **Test-only fixtures** (intentionally **not** registered in `HashMapNodeRegistry`; used only by unit tests that construct them directly or via `register_toolkit_node`):
@@ -215,11 +226,11 @@ All LLM communication — synchronous calls, streaming, conversation history, at
   - `tools.rs` — `ToolDefinition`, `ToolParameters`, `ParameterProperty`, `ToolCall`, `ToolResult`. The provider-neutral tool schema types that go into `LlmRequest`.
   - `tool_executor.rs` — `ToolExecutor` trait: `execute_tool(name, args) → ToolResult`. `DagToolExecutor` implements this and is injected into `AgentService`.
   - `llm_request.rs` — `LlmRequest` struct: model, messages, tools, config options.
-  - `llm_response.rs` — `LlmResponse` struct: text content, `tool_calls`, `usage`.
-  - `llm_message.rs` — `LlmMessage`, `MessageRole`, `LlmStreamPart`, `LlmStreamChunk`.
+  - `llm_response.rs` — `LlmResponse` struct: text content, `tool_calls`, `usage`. Also defines `LlmStreamPart` and `LlmStreamChunk`.
+  - `llm_message.rs` — `LlmMessage`, `MessageRole`.
   - `memory.rs` — `ConversationKey` (session_id + agent_session_id + node_id), `ConversationRepository` trait, `Conversation` struct. The three-part key is what enables multi-turn memory across agent sessions.
   - `llm_config.rs` — `LlmConfig` (model, temperature, max_tokens, etc.), `LlmProvider`.
-  - `llm_provider.rs` — `ProviderKind` enum (OpenAi, Google, Anthropic, Mock, Scripted).
+  - `llm_provider.rs` — `ProviderKind` enum (OpenAi, Google, Anthropic, Mock, Generated).
   - `llm_error.rs` — `LlmError` enum (thiserror).
   - `tts.rs` / `tts_repository.rs` — TTS request/response types and port.
   - `attachments/` — attachment domain types:
@@ -281,16 +292,16 @@ Markdown knowledge packages compiled into the binary or loaded from the filesyst
 **Layer breakdown:**
 
 - `skills/domain/`
-  - `skill.rs` — `Skill` struct: `name`, `description`, `body` (markdown without frontmatter), `references`, `source`, optional `node_type` (marks it as a layer-1 node-type guide).
-  - `skill_repository.rs` — **`SkillRepository` trait**: `list_available()`, `find_by_node_type()`, `load_by_name()`, `load_reference()`. The composite wraps two implementations of this.
-  - `skill_config.rs` — `SkillsConfig`: the graph-level skills config (paths, allowed dirs, eager list, etc.).
+  - `skill.rs` — `Skill` struct: `name`, `description`, `body` (markdown without frontmatter), `references`, `source`. No `node_type` field — that field was removed when the layered-tool-context feature was reverted.
+  - `skill_repository.rs` — **`SkillRepository` trait**: `list_available()`, `load_skill()`, `load_reference()`. The composite wraps two implementations of this.
+  - `skill_config.rs` — `SkillsConfig`: the graph-level skills config, just `builtin: Vec<String>` and `paths: Vec<String>`.
   - `skill_error.rs` — `SkillError` enum.
 
 - `skills/infrastructure/`
   - `builtin_skill_repository.rs` — `BuiltinSkillRepository`: uses `include_dir!("$CARGO_MANIFEST_DIR/skills")` to compile all `SKILL.md` files into the binary. Scans for single-file and folder-of-skills layouts.
   - `filesystem_skill_repository.rs` — `FilesystemSkillRepository`: loads skills from operator-declared paths at runtime. Applies allowed-dirs whitelist for security.
   - `composite_skill_repository.rs` — `CompositeSkillRepository`: merges builtin + filesystem sources. Deduplicates by name (builtin wins).
-  - `frontmatter_parser.rs` — parses the YAML frontmatter block (`---`) from a `SKILL.md` to extract `name`, `description`, `node_type`, etc.
+  - `frontmatter_parser.rs` — parses the YAML frontmatter block (`---`) from a `SKILL.md` to extract `name`, `description`, etc. Explicitly rejects a top-level `node_type:` key as deprecated (the layered-tool-context feature was reverted) and errors out.
 
 **Key files to know:**
 
@@ -301,7 +312,7 @@ Markdown knowledge packages compiled into the binary or loaded from the filesyst
 **Common contribution patterns:**
 
 - **Add a built-in skill** → create `src/libs/colmena/skills/<name>/SKILL.md` with valid frontmatter → no code change needed (picked up at compile time). Full guide: [`24_skills.md`](./developer_guide/24_skills.md).
-- **Add a node-type guide** → set `node_type: <your_node_type>` in the skill frontmatter → the engine auto-folds it into the tool description for that node type.
+- **Add a node-type guide** → not supported. The layered-tool-context feature (auto-folding a skill into a node's tool description via `node_type:` frontmatter) was reverted; `frontmatter_parser.rs` now rejects that key with a parse error. Reference skills explicitly from `llm_call.skills` instead (see [`24_skills.md`](./developer_guide/24_skills.md)).
 
 ---
 
@@ -340,10 +351,10 @@ Word/Excel document generation and versioned editing. The LLM interacts with doc
 
 - `documents/domain/`
   - `ir/` — **Intermediate Representation**: `word.rs` (`WordIR`, `Block`, `Run`, `TableRow`...) and `excel.rs` (`ExcelIR`, `Workbook`, `Sheet`, `Cell`, `NamedTable`...). JSON-serializable IR is the source of truth — not the rendered file.
-  - `patch.rs` — `Patch` enum: the atomic operations the LLM applies to the IR (`InsertRow`, `SetCell`, `AppendBlock`, etc.).
+  - `patch.rs` — `PatchOp` enum: the atomic operations the LLM applies to the IR (`InsertRow`, `SetCell`, `InsertBlock`, etc.).
   - `ports.rs` — `ArtifactStore` trait (CRUD for versioned artifacts), `IRRenderer` trait (IR → binary), `IRValidator` trait, `IdGenerator` trait.
   - `artifact.rs` — `ArtifactMeta`, `VersionData`, `ArtifactSummary`, `PatchApplied`.
-  - `ids.rs` — `ArtifactId`, `VersionId`, `SessionId`, `ArtifactKind` (Word/Excel).
+  - `ids.rs` — `ArtifactId`, `VersionId`, `SessionId`, `ArtifactKind` (Excel/Word/Html).
   - `error.rs` — `DocumentError`, `IndexError`, `RenderError`, `StorageError`.
 
 - `documents/application/`
@@ -383,7 +394,7 @@ The domain and application logic behind the `api_explorer` and `tavily_client` t
 - `web/domain/`
   - `api_spec_port.rs` — **`ApiSpecPort` trait**: `fetch_and_parse(url, etag, last_modified)`. Returns `SpecFetchResult` (modified spec or `NotModified`). Hides `oas3`/`serde_yaml` from domain.
   - `search_port.rs` — **`SearchPort` trait**: `search(SearchRequest) → Vec<SearchResult>`. Provider-neutral interface used by `tavily_client`.
-  - `session.rs` — `SessionKey`, `SessionRegistry` trait (per-conversation spec cache).
+  - `session.rs` — `SessionKey`, `SessionRegistry<T>` generic struct (per-conversation spec cache).
   - `errors.rs` — `WebDomainError` enum.
 
 - `web/application/`
@@ -393,7 +404,7 @@ The domain and application logic behind the `api_explorer` and `tavily_client` t
   - `url_normalizer.rs` — normalizes spec URLs for cache keying.
 
 - `web/infrastructure/`
-  - `openapi_adapter.rs` — `OpenAPIAdapter`: implements `ApiSpecPort`. Fetches and parses YAML/JSON specs, does conditional GET.
+  - `openapi_adapter.rs` — `OpenApiAdapter`: implements `ApiSpecPort`. Fetches and parses YAML/JSON specs, does conditional GET.
   - `tavily_adapter.rs` — `TavilyAdapter`: implements `SearchPort` by calling the Tavily API.
 
 **Key files to know:**
@@ -425,6 +436,7 @@ Feature-gated (`#[cfg(feature = "python")]`). Exposes Colmena to Python as the `
   - `ColmenaLlm` (`#[pyclass]`) — `call()`, `stream()`, `health_check()`.
   - `run_dag()`, `serve_dag()`, `validate_graph()` — free functions.
   - `LlmException` — custom Python exception bridging `LlmError`.
+  - `mod crdt_documents;` (`python_bindings/crdt_documents.rs`) — declared from `mod.rs` and registers 4 more pyfunctions: `list_sheets`, `read_sheet`, `add_sheet`, `write_sheet`.
 
 The binding uses `pyo3_asyncio_0_21::tokio::future_into_py` to bridge Rust futures → Python `asyncio`.
 
@@ -436,13 +448,15 @@ Guide: [`docs/examples/python_usage.md`](./examples/python_usage.md).
 
 Feature-gated (`#[cfg(feature = "node")]`). Exposes Colmena to Node.js via `napi-rs` (compiled with `npm run build --features node`).
 
-- `node_bindings/mod.rs` — the entire Node.js surface:
-  - `NodeLlmConfigOptions` (`#[napi(object)]`) — config struct.
-  - `NodeLlmMessage` (`#[napi(object)]`) — message type.
-  - `ColmenaLlm` (`#[napi]`) — `call()`, `healthCheck()`.
-  - `runDag()`, `serveDag()` — async graph runners.
+`node_bindings/mod.rs` itself only declares submodules and re-exports (`pub use dag::*; pub use documents::*; pub use llm::*; pub use registry::*; pub use stream::*;`); the actual Node.js surface lives in the sibling files:
 
-Fewer features are exposed than through the Python bindings (no streaming iterator, no `validate_graph`).
+  - `node_bindings/llm.rs` — `NodeLlmConfigOptions` (`#[napi(object)]`) config struct, `NodeLlmMessage` (`#[napi(object)]`) message type, `ColmenaLlm` (`#[napi]`) with `call()`, `healthCheck()`.
+  - `node_bindings/dag.rs` — `run_dag()`, `serve_dag()`, and `validate_graph()` (`dag.rs:68`) async/sync graph functions.
+  - `node_bindings/stream.rs` — `LlmStreamHandle` (`#[napi]`), an async-iterator handle over an LLM stream with a `pull()` method; the TS facade attaches `[Symbol.asyncIterator]` so callers use `for await (const chunk of stream)`.
+  - `node_bindings/documents.rs` — document/version napi bindings.
+  - `node_bindings/registry.rs` — node type listing bindings.
+
+The Node.js bindings have parity with the Python bindings: both expose a streaming iterator (`LlmStreamHandle`/`PyLlmStream`) and a `validate_graph()` function.
 
 ---
 
@@ -517,4 +531,4 @@ Guide: [`36_attachment_gc.md`](./developer_guide/36_attachment_gc.md).
 - [`developer_guide/14_llm_deep_dive.md`](./developer_guide/14_llm_deep_dive.md) — LLM node parameters, streaming, memory
 - [`developer_guide/22_tool_execution_flow.md`](./developer_guide/22_tool_execution_flow.md) — tool call lifecycle end-to-end
 - [`ONBOARDING.md`](./ONBOARDING.md) — reading paths by contributor role
-- [`DEVELOPER_GUIDE.md`](./DEVELOPER_GUIDE.md) — index of all 51 developer guides
+- [`DEVELOPER_GUIDE.md`](./DEVELOPER_GUIDE.md) — index of all 52 developer guides

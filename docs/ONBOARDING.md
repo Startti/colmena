@@ -140,9 +140,9 @@ Complete Paths 1–3 first — otherwise the architecture references below will 
 
    | Area | Design doc |
    |---|---|
-   | LLM module | [`docs/dds/MODULO_LLM_DISEÑO.md`](./dds/MODULO_LLM_DISEÑO.md) |
+   | LLM module | [`docs/developer_guide/14_llm_deep_dive.md`](./developer_guide/14_llm_deep_dive.md) |
    | DAG engine | [`docs/dds/DAG_ENGINE_DISEÑO.md`](./dds/DAG_ENGINE_DISEÑO.md) |
-   | Agents and tools | [`docs/dds/DISEÑO_AGENTES_Y_TOOLS.md`](./dds/DISEÑO_AGENTES_Y_TOOLS.md) |
+   | Agents and tools | [`docs/developer_guide/09_tool_calling.md`](./developer_guide/09_tool_calling.md) |
    | Security / secrets | [`docs/dds/SECURE_VALUES_DISEÑO.md`](./dds/SECURE_VALUES_DISEÑO.md) |
 
 7. **[`docs/CHANGELOG_2026-05.md`](./CHANGELOG_2026-05.md)** — scan recent entries

@@ -16,8 +16,8 @@ Para compilar las bindings desde el repo (desarrollo):
 
 ```bash
 # Requiere Node.js 18+ y la toolchain Rust pinned en rust-toolchain.toml
-npm run build                   # compila el crate con feature `node` via napi-rs
-node --test ts/test/            # corre la suite de bindings
+npm run build                   # compila el crate con feature `node` via napi-rs + tsc (ts/ -> lib/)
+npm test                        # node --test lib/test/*.js (requiere `npm run build` antes)
 ```
 
 ## `runDag` — ejecutar un grafo a término

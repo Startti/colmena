@@ -458,7 +458,7 @@ El nodo `secure_suspend` pausa el DAG para recolectar uno o más secretos del us
 
 | Campo | Tipo | Requerido | Descripción |
 |---|---|---|---|
-| `secrets` | array | **sí** | Lista de `{ question, name }`. Mínimo 1, máximo 8. `name` debe ser único y matchear `^[a-z][a-z0-9_]{2,63}$`. El `name` cumple doble rol: identifica el handle (`<sv_<name>>`) y es el id usado en la respuesta de resume. |
+| `secrets` | array | **sí** | Lista de `{ question, name }`. Mínimo 1 (no hay máximo). `name` debe ser único y matchear `^[a-z][a-z0-9_]{2,63}$`. El `name` cumple doble rol: identifica el handle (`<sv_<name>>`) y es el id usado en la respuesta de resume. |
 | `id` | string | no | Base ID del bloque. Default: `__node_id`. |
 
 ### Reanudación

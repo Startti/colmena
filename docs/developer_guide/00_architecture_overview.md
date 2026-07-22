@@ -116,7 +116,7 @@ cargo run --bin dag_engine -- run graph.json --agent-session-id demo_001
 cargo run --bin dag_engine -- serve tests/graphs/agents/llm_call.json
 ```
 
-Los binarios están declarados en `src/libs/colmena/Cargo.toml` líneas 10-21: `colmena` (main.rs), `dag_engine` (dag_engine/main.rs), `attachment_gc` (attachment_gc/main.rs).
+Los binarios están declarados en `src/libs/colmena/Cargo.toml` líneas 12-26: `colmena` (main.rs), `dag_engine` (dag_engine/main.rs), `attachment_gc` (attachment_gc/main.rs), `colmena_oauth_setup` (src/bin/colmena_oauth_setup.rs).
 
 ### Python
 
@@ -175,8 +175,8 @@ DagRunUseCase::execute_stream(graph, resume_id, answer, ...)
     ├─ node.execute(&inputs, &config, &mut state, observer)
     │     │
     │     │ Para nodos llm:
-    │     │   AgentService::run_turn()  →  loop ReAct
-    │     │     LLM call → tool_calls? → DagToolExecutor::execute_tool()
+    │     │   AgentService::run()  →  loop ReAct
+    │     │     LLM call → tool_calls? → DagToolExecutor (impl ToolExecutor::execute())
     │     │                              → next LLM call with tool result
     │     │                              → repeat until no tool calls
     │     │

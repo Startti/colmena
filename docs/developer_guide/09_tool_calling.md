@@ -6,20 +6,12 @@ Los nodos `http_request` se pueden exponer como herramientas llamables por un ag
 
 Cuando se definen `enabled_tools` en un nodo `llm_call`, el engine inyecta automáticamente un bloque de instrucciones al final del `system_message` del usuario. Esto asegura que el LLM use las herramientas correctamente **sin que el usuario tenga que incluir estas instrucciones manualmente**.
 
-El bloque inyectado tiene esta forma:
+El bloque inyectado tiene esta forma (trimmed a una sola línea desde 2026-06 por optimización de tamaño de prompt — ver `docs/CHANGELOG_2026-06.md` commit `e293001`):
 
 ```
----
-## Tool Use Instructions
-You have access to the following tools:
-- list_products
-- search_products
-
-Rules:
-- ALWAYS use the available tools to answer questions that require real or live data. Never answer from your own knowledge when a tool can provide the data.
-- Call the most relevant tool before responding. Do not skip tool calls.
-- If a tool call fails, report the error clearly instead of guessing an answer.
-- Only respond without a tool call when the user's request is purely conversational and no tool is needed.
+## Tools
+Available: list_products, search_products.
+Prefer tools over guessing. Report errors clearly.
 ```
 
 **Implicaciones para el diseño de grafos:**
@@ -309,12 +301,20 @@ El `HttpNode` distingue body de query params **por la clave del campo**, no por 
 
 ### Campos internos que NUNCA se envían como query params
 
-La lista `reserved_keys` en `HttpNode` filtra estos campos del mecanismo de `extra_params`:
+El filtrado ocurre en dos capas dentro de `HttpNode` (`src/libs/colmena/src/dag_engine/infrastructure/nodes/http.rs`):
 
-```
-body, query_params, query_parameters, headers, base_url, endpoint, method,
-bearer_token, authorization, secure, __colmena_session_id, __node_id, __colmena_resume_answer
-```
+1. **`RESERVED_KEYS`** — const array de 10 claves propias del nodo:
+
+   ```
+   base_url, endpoint, method, headers, body, query_params, query_parameters,
+   bearer_token, authorization, secure
+   ```
+
+2. **`is_engine_internal()`** — filtro por *prefijo* (no lista fija) que excluye cualquier clave inyectada por el engine, como `__colmena_session_id`, `__node_id`, `__colmena_resume_answer`, `__colmena_subgraph_depth`, etc.:
+
+   ```rust
+   key.starts_with("__colmena") || key.starts_with("__node")
+   ```
 
 > **Bug corregido (2026-04-05):** `"secure": true` fue añadido a `reserved_keys`. Antes se filtraba como `?secure=true` a APIs externas causando errores 400.
 

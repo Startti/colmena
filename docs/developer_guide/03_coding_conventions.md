@@ -8,13 +8,15 @@
 pub struct LlmRequest { }
 
 // Enums: PascalCase
-pub enum ProviderKind { OpenAi, Gemini }
+pub enum ProviderKind { OpenAi, Google, Anthropic, Mock, Generated }
 
 // Functions: snake_case
-pub fn create_request() -> LlmRequest { }
+pub fn create_request() -> LlmRequest { } // ejemplo ilustrativo, no una API real
 
 // Constants: SCREAMING_SNAKE_CASE
-pub const INVALID_TEMPERATURE: &str = "Temperature must be between 0.0 and 2.0";
+// (los mensajes de error usan #[error("...")] de thiserror, p.ej.
+// LlmError::InvalidTemperature en llm/domain/llm_error.rs, no una constante &str)
+pub const MAX_RETRIES: u32 = 3;
 
 // Traits: PascalCase con sufijo descriptivo
 pub trait LlmRepository { }
@@ -156,20 +158,18 @@ impl ColmenaLlm {
     ///
     /// Raises:
     ///     LlmException: Si hay un error en la llamada.
+    #[pyo3(signature = (messages, provider, options=None))]
     pub fn call(
         &self,
         py: Python,
-        messages: Vec<&PyDict>,
+        messages: Vec<Bound<'_, PyDict>>,
         provider: &str,
-        api_key: Option<String>,
-        model: Option<String>,
-        temperature: Option<f32>,
-        max_tokens: Option<u32>,
-        top_p: Option<f32>,
-        frequency_penalty: Option<f32>,
-        presence_penalty: Option<f32>,
+        options: Option<LlmConfigOptions>,
     ) -> PyResult<String> {
         // Implementación...
     }
 }
 ```
+`LlmConfigOptions` es un `#[pyclass]` que agrupa los parámetros opcionales
+(`api_key`, `model`, `temperature`, `max_tokens`, `top_p`, `frequency_penalty`,
+`presence_penalty`) — ver `src/libs/colmena/src/python_bindings/mod.rs:55-72, 100-105`.

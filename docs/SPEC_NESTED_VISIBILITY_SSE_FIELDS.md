@@ -2,14 +2,14 @@
 
 **Fecha:** 2026-07-05
 **Autor:** investigación cruzada ADP ↔ colmena `dag_engine`
-**Estado:** propuesta de contrato (para que ADP integre los campos nuevos)
+**Estado:** implementado en colmena (PR #146, `sse_mapper.rs` / `run_use_case.rs`) — contrato disponible para que ADP integre los campos nuevos
 **Repos:** productor = `Startti/colmena` (`dag_engine`); consumidor = ADP (`apps/api` relay + `packages/shared` reducer/UI)
 
 ---
 
 ## 0. TL;DR para ADP
 
-Colmena va a emitir **más eventos** (los niveles anidados 2, 3, 4… del árbol de sub-agentes que hoy son invisibles) y a **agregar dos campos nuevos a TODOS los frames de subgraph y al heartbeat**:
+Colmena emite **más eventos** (los niveles anidados 2, 3, 4… del árbol de sub-agentes que hoy son invisibles) y a **agregar dos campos nuevos a TODOS los frames de subgraph y al heartbeat**:
 
 - `level: number` — profundidad de anidamiento del nodo que emitió el evento. `0` = agente principal, `1` = primer subgrafo/rol embebido, `2` = orchestrator dentro del rol, `3` = sub-agente hijo, etc.
 - `path: string` — linaje legible del nodo, p.ej. `"top>Builder>orch>calc_a"`.
@@ -105,4 +105,3 @@ data: {"type":"status","stage":"running","node_id":"critic","idleSecs":20,"level
 - Drop de niveles profundos: `sse_mapper.rs` (bloque `SubgraphWrapped`, catch-all `_ => None`)
 - Re-wrap por nivel: `run_use_case.rs` (`yield SubgraphWrapped { inner }`)
 - `path_prefix` (fuente del `path`): `run_use_case.rs`
-- Liveness / heartbeat previo (#144): `SPEC_STREAM_MIDRUN_LIVENESS.md`
