@@ -1,9 +1,11 @@
 # 39. Google Sheets integration (Subsystem E)
 
-> v1.1 ships 11 synthetic LLM tools mirroring `crdt_doc_*` shape — agents
-> read, write, create, and analyse Google Sheets via the Sheets API v4 +
-> Drive API. Auth via Service Account JSON or Application Default
-> Credentials. No OAuth user-scoped flow in v1.
+> The `gsheets` toolkit alias ships 12 synthetic LLM tools (the 11 native
+> `gsheets_*` tools plus the unified `data_run_python`) — agents read,
+> write, create, and analyse Google Sheets via the Sheets API v4 + Drive
+> API. Auth via the shared **OAuth user-scoped** subsystem
+> (`COLMENA_GOOGLE_OAUTH_*` + `COLMENA_GOOGLE_SHARE_EMAIL`) since the
+> 2026-06-10 migration — see [47_google_oauth.md](47_google_oauth.md).
 
 > **Cross-store con SQL:** el análisis pandas de un Google Sheet con
 > write-back a una tabla SQL (o viceversa) ahora también es posible en una
@@ -20,7 +22,7 @@ Enable the whole gsheets surface with one alias:
 "enabled_tools": ["gsheets"]
 ```
 
-This expands to all 11 gsheets tools via the toolkit-packages registry.
+This expands to all 12 tools in the `gsheets` package via the toolkit-packages registry.
 For a read-only-style agent, exclude write tools:
 
 ```json
@@ -58,18 +60,30 @@ auto-expanded (`"C1"` → `"C1:C1"`).
 
 ## Auth
 
-Two paths, no app config required in colmena itself:
+Since the **2026-06-10 OAuth migration**, gsheets authenticates exclusively
+through the shared `google_oauth` subsystem — there is no Service-Account-JSON
+or ADC code path left in `gsheets/infrastructure/auth.rs` (the production
+`TokenProvider` is `Inner::OAuth(OAuthRefreshTokenProvider)`, built via
+`OAuthCredentials::from_env()`). No per-graph config is required.
 
-1. **Service Account JSON** — set `GOOGLE_APPLICATION_CREDENTIALS=/path/to/sa.json`.
-   The SA email must be shared (Edit access) on each spreadsheet the
-   agent touches. Best for unattended/automation use.
-2. **Application Default Credentials** — when the env var is unset,
-   `yup-oauth2` falls back to ADC: GCP metadata server in cloud
-   environments, or `gcloud auth application-default login` for local
-   dev.
+Required env vars (mounted from Secret Manager in production):
 
-Scopes: defaults to `spreadsheets` + `drive.file`. Override via
-`COLMENA_GSHEETS_SCOPES=<comma-sep>` (short names or full URLs).
+- `COLMENA_GOOGLE_OAUTH_CLIENT_ID`
+- `COLMENA_GOOGLE_OAUTH_CLIENT_SECRET`
+- `COLMENA_GOOGLE_OAUTH_REFRESH_TOKEN`
+- `COLMENA_GOOGLE_SHARE_EMAIL` — the Workspace user the agent acts as (prod:
+  `agents@startti.co`); users share their spreadsheets as Editor with this
+  address. Surfaces in `SheetsError::PermissionDenied` and the LLM prelude.
+
+There is **no Service-Account/ADC auth path**: if the OAuth env vars are missing,
+auth fails with `NotConfigured` (no fallback). `GOOGLE_APPLICATION_CREDENTIALS` is
+consulted only as a legacy fallback to *derive the `share_email`* display value
+(its `client_email` field), never for authentication. See
+[47_google_oauth.md](47_google_oauth.md) for the full credential-resolution chain
+and the `colmena_oauth_setup` consent flow.
+
+Scopes: defaults to `spreadsheets` + `drive.file` (consented at setup time).
+Override via `COLMENA_GSHEETS_SCOPES=<comma-sep>` (short names or full URLs).
 
 ## Formulas — Google evaluates them
 

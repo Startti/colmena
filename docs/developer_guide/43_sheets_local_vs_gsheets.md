@@ -38,7 +38,7 @@ existen en el repo para que pruebes cada uno.
 | **Sync** | Yjs v1 protocol sobre WebSocket → Univer en browser | Server-side via batchUpdate calls |
 | **Colaboración** | Multi-peer real-time (humano + LLM + Python script editando juntos) | Una operación a la vez; concurrencia = last-writer-wins |
 | **Persistencia** | Snapshot `.bin` en disco; opcional Postgres event log | Google Drive |
-| **Auth** | Ninguna (proceso local) o sesión Yjs WS | Service Account JSON o ADC |
+| **Auth** | Ninguna (proceso local) o sesión Yjs WS | OAuth user-scoped (`COLMENA_GOOGLE_OAUTH_*`) |
 | **Import xlsx** | ✅ `calamine` + import endpoint | ⚠️ Solo via `gsheets_create_from_xlsx` (Drive auto-conversion) |
 | **Export xlsx** | ✅ `rust_xlsxwriter` | ✅ `gsheets_export_xlsx` |
 | **Fórmulas server-side** | ✅ subsistema D (`formualizer` recalc cascade) | ✅ Google evalúa (USER_ENTERED) |
@@ -50,7 +50,7 @@ existen en el repo para que pruebes cada uno.
 
 ## Tool surface por subsistema
 
-### CRDT (10 tools sintéticos)
+### CRDT (11 tools sintéticos)
 
 Definidos en `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/crdt_doc_*.rs`. Activados via bloque `crdt_documents` en el `llm_call` (necesita `artifact_id`).
 
@@ -65,7 +65,7 @@ Definidos en `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic
 | `crdt_doc_run_python` | Sandbox pandas/numpy/scipy sobre `dfs[sheet_id]`; soporta `output_sheets` write-back |
 | `crdt_doc_list_sheets_of` | (Subsistema F) Peek a las sheets de OTRO artifact sin importarlo |
 | `crdt_doc_import_sheet` | (Subsistema F) Clona una sheet de otro artifact (snapshot) al actual |
-| `list_my_artifacts` / `create_artifact` | Workspace-level: el agente descubre qué workbooks ya existen y crea nuevos |
+| `crdt_doc_list_my_artifacts` / `crdt_doc_create_artifact` | Workspace-level: el agente descubre qué workbooks ya existen y crea nuevos |
 
 Activación en `llm_call`:
 ```json
@@ -82,9 +82,9 @@ Activación en `llm_call`:
 }
 ```
 
-### gsheets (10 tools sintéticos)
+### gsheets (12 tools sintéticos vía el alias)
 
-Definidos en `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/gsheets_*.rs`. Activados via toolkit package `["gsheets"]` o entries individuales en `tool_configurations`.
+Definidos en `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/gsheets_*.rs`. Activados via toolkit package `["gsheets"]` o entries individuales en `tool_configurations`. El alias expande a 12 tools: los 10 `gsheets_*` de abajo + `gsheets_format_range` (formato de celdas) + `data_run_python`. `gsheets_run_python` sigue en el bundle pero está **deprecado (2026-07-02)** en favor de `data_run_python`.
 
 | Tool | Hace |
 |---|---|
@@ -97,7 +97,9 @@ Definidos en `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic
 | `gsheets_read` | Lee un rango; modos `FORMATTED_VALUE` / `UNFORMATTED_VALUE` / `FORMULA` |
 | `gsheets_set_cell` | Escribe una celda; `=` se evalúa por Google (USER_ENTERED) |
 | `gsheets_set_range` | Bulk write 2D array |
-| `gsheets_run_python` | Sandbox pandas/numpy/scipy sobre bindings paralelos; soporta `output_sheets` write-back |
+| `gsheets_format_range` | Formato de celdas (estilo de texto, fondo, bordes, alineación, número, ancho/alto) en un `batchUpdate` atómico; no toca valores |
+| `gsheets_run_python` | **DEPRECADO (2026-07-02) — usar `data_run_python`.** Sandbox pandas/numpy/scipy sobre bindings paralelos; soporta `output_sheets` write-back |
+| `data_run_python` | Sandbox unificado cross-store: bindea Sheets + attachments CSV/XLSX + SELECTs SQL en un call y escribe a `output_sheets`/`output_tables`. Ver [§48](48_data_run_python.md) |
 
 Activación en `llm_call`:
 ```json
@@ -109,7 +111,11 @@ Activación en `llm_call`:
 }
 ```
 
-Auth se resuelve via env var `GOOGLE_APPLICATION_CREDENTIALS` (SA JSON) o ADC.
+Auth se resuelve vía el subsistema OAuth user-scoped (`COLMENA_GOOGLE_OAUTH_CLIENT_ID`/
+`_CLIENT_SECRET`/`_REFRESH_TOKEN` + `COLMENA_GOOGLE_SHARE_EMAIL`) desde la migración
+del 2026-06-10. No hay camino de auth SA/ADC (falta de OAuth → `NotConfigured`);
+`GOOGLE_APPLICATION_CREDENTIALS` solo se consulta como fallback legacy para derivar
+el `share_email`, nunca para autenticar. Ver [47_google_oauth.md](47_google_oauth.md).
 
 ---
 
@@ -183,18 +189,22 @@ Alternativa: pasá `--seed-artifact-id art_<26-char-ULID>` para reusar un artifa
 
 ### gsheets — `tests/graphs/agents/`
 
-Estos grafos son standalone CLI siempre que tengas la SA + permiso al spreadsheet target.
+Estos grafos son standalone CLI siempre que tengas las credenciales OAuth
+(`COLMENA_GOOGLE_OAUTH_*`) + permiso de Editor al spreadsheet target para el
+`COLMENA_GOOGLE_SHARE_EMAIL`.
 
 | Grafo | Demuestra |
 |---|---|
 | [`gsheets_smoke.json`](../../tests/graphs/agents/gsheets_smoke.json) | Smoke base — agente crea planilla, agrega tab, escribe SUM, lee back valor + fórmula |
-| [`gsheets_package_smoke.json`](../../tests/graphs/agents/gsheets_package_smoke.json) | Toolkit package — `enabled_tools: ["gsheets"]` expande a los 10 tools sin listarlos |
+| [`gsheets_package_smoke.json`](../../tests/graphs/agents/gsheets_package_smoke.json) | Toolkit package — `enabled_tools: ["gsheets"]` expande a los 12 tools sin listarlos |
 | [`gsheets_update_in_place.json`](../../tests/graphs/agents/gsheets_update_in_place.json) | E2E manual — `update_in_place` aplica 10% discount a Electronics; solo las celdas cambiadas se escriben (no las 1000 filas) |
 
 **Cómo ejecutar:**
 ```bash
 set -a; source .env; set +a
-export GOOGLE_APPLICATION_CREDENTIALS=/path/to/sa.json
+# Credenciales OAuth: en local se inyectan desde Secret Manager (startti-dev):
+#   COLMENA_GOOGLE_OAUTH_CLIENT_ID / _CLIENT_SECRET / _REFRESH_TOKEN
+#   COLMENA_GOOGLE_SHARE_EMAIL
 cargo run --release --bin dag_engine -- run tests/graphs/agents/gsheets_smoke.json \
   --agent-session-id e2e_$(date +%s) > /tmp/colmena_e2e/gsheets_smoke.sse 2>&1
 ```
