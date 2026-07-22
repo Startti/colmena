@@ -85,7 +85,7 @@ Verificado e2e en dev del platform. Estos son los Minors diferidos por los revie
   [`2026-06-27-native-oauth-http-node-design.md`](superpowers/specs/2026-06-27-native-oauth-http-node-design.md))
   ship v1 con provider **en memoria** (sin persistencia). Mejora diferida: un
   `PersistentTokenProvider` que decore al `AuthTokenProvider` actual, respaldado
-  por la cripto de secure_values (AES-256-GCM, `SECURE_VALUES_KEY`) en una tabla
+  por la cripto de secure_values (pgcrypto `pgp_sym_encrypt`, `SECURE_VALUES_KEY`) en una tabla
   hermana `oauth_token_cache` (NO `secure_value_mappings`). Dos sub-features:
   (1) **cache cross-run del access token** → evita el mint frío por run
   (~100-300ms; beneficio latencia/costo); (2) **write-back del refresh token

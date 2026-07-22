@@ -436,8 +436,8 @@ API Key: <value_2>"
 
 5. Database almacena:
 ```
-<value_1> → AES-256(prod_secret)
-<value_2> → AES-256(sk_live_abc)
+<value_1> → pgp_sym_encrypt(prod_secret)
+<value_2> → pgp_sym_encrypt(sk_live_abc)
 ```
 
 ---

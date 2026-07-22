@@ -871,7 +871,7 @@ El nodo `information_extraction` permite tomar texto no estructurado y usar un L
 Colmena v0.3.0 introduce **Secure Values**, un sistema para manejar secretos (API Keys, Tokens, Credenciales) de forma cifrada en la base de datos y memoria, evitando que se filtren en logs o interfaces.
 
 ### Conceptos Clave
-- **Cifrado AES-256-GCM**: Todos los valores marcados como sensibles se cifran usando una clave maestra (`SECURE_VALUES_KEY`).
+- **Cifrado pgcrypto (`pgp_sym_encrypt`)**: Todos los valores marcados como sensibles se cifran con pgcrypto symmetric encryption (OpenPGP CFB — cipher por defecto de pgcrypto, **no** AES-256-GCM) usando una clave maestra (`SECURE_VALUES_KEY`).
 - **Inyección Automática**: El motor detecta valores cifrados (ej. `<secure_value_8>`) y los descifra justo antes de ejecutar un nodo.
 - **Precedencia de Configuración**: Los valores en `inputs` (provenientes de edges) siempre tienen prioridad sobre los de `config`.
 

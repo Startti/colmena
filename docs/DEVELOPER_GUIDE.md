@@ -55,7 +55,7 @@ Las secciones están organizadas por **tema**, no por orden numérico. Los prefi
 
 ## 6. Seguridad
 
-- [**Estrategia de Seguridad / Secure Values**](./developer_guide/13_security_strategy.md) — AES-256-GCM, `secure_suspend`, masking outbound, sliding TTL, `SECURE_VALUES_KEY` (fail-fast).
+- [**Estrategia de Seguridad / Secure Values**](./developer_guide/13_security_strategy.md) — pgcrypto (`pgp_sym_encrypt`), `secure_suspend`, masking outbound, sliding TTL, `SECURE_VALUES_KEY` (fail-fast).
 
 ## 7. Persistencia y datos
 

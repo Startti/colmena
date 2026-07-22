@@ -125,7 +125,7 @@ curl -X POST http://localhost:3000/webhook \
 4. **Secure Value Service:**
    - Response from API: `{access_token: "real_token_xyz"}`
    - After hashing: `{access_token: "<value_1>"}`
-   - Stored in DB: `<value_1> → AES-256(real_token_xyz)`
+   - Stored in DB: `<value_1> → pgp_sym_encrypt(real_token_xyz)`
 
 5. **LLM node SKIP injection (sees hashes only):**
 ```json
@@ -172,7 +172,7 @@ DAG ends: DELETE FROM secure_value_mappings (cleanup)
 - ✅ Credentials NEVER hardcoded in graph
 - ✅ LLM nodes completely isolated from real credentials
 - ✅ Non-LLM HTTP nodes work transparently with real values
-- ✅ Values encrypted at rest (AES-256 in PostgreSQL)
+- ✅ Values encrypted at rest (pgcrypto `pgp_sym_encrypt`, OpenPGP CFB — not AES-256-GCM, in PostgreSQL)
 - ✅ Auto-cleanup on DAG completion
 - ✅ Works with real APIs (Amadeus, OpenAI, etc.)
 
@@ -373,7 +373,7 @@ When the user is in the loop and must provide credentials interactively — e.g.
 
 **How it works:**
 
-The `secure_suspend` node pauses the DAG and presents the user with one or more questions (e.g., "Enter your API key"). Answers are encrypted with AES-256-GCM and stored in `secure_value_mappings`. The node returns only opaque handles (`<sv_name>`) — the LLM and all other nodes **never see the real value**. On DAG resume the handles flow through the graph and are auto-injected by `inject_secrets` at execution time.
+The `secure_suspend` node pauses the DAG and presents the user with one or more questions (e.g., "Enter your API key"). Answers are encrypted with Postgres pgcrypto symmetric encryption (`pgp_sym_encrypt`/`pgp_sym_decrypt`, OpenPGP CFB — pgcrypto default cipher, **not** AES-256-GCM), keyed by `SECURE_VALUES_KEY`, and stored in `secure_value_mappings`. The node returns only opaque handles (`<sv_name>`) — the LLM and all other nodes **never see the real value**. On DAG resume the handles flow through the graph and are auto-injected by `inject_secrets` at execution time.
 
 The node can be used in three ways:
 
@@ -450,7 +450,7 @@ User provides answers (ID-keyed Q/A — keyed by each secret's `name`):
             Q[api_secret]: Please enter your API secret
             A[api_secret]: VALUE2"
   ↓
-Values encrypted with AES-256 → secure_value_mappings
+Values encrypted with pgp_sym_encrypt → secure_value_mappings
   ↓
 Node outputs: { api_key: "<sv_api_key>", api_secret: "<sv_api_secret>" }
   ↓
@@ -539,11 +539,11 @@ The `secure_value_mappings` table has an `agent_session_id TEXT` column. When an
 | Strategy | Setup | Credentials in Code? | LLM Sees Real Values? | DB Required? | Encryption? | Audit Trail? | Production Ready? |
 |----------|-------|----------------------|----------------------|--------------|-------------|--------------|-------------------|
 | Env Vars | `export VAR=...` | No | **YES** ⚠️ | No | No | No | Limited |
-| Webhook + Secure | HTTP POST + DB | No | **NO** ✓ | **Yes** | AES-256 | Basic | **Yes** ✓ |
+| Webhook + Secure | HTTP POST + DB | No | **NO** ✓ | **Yes** | pgcrypto | Basic | **Yes** ✓ |
 | Test Payload | Hardcode in JSON | **YES** ⚠️ | **YES** ⚠️ | No | No | No | **No** |
-| DB Query (Future) | `store-secret` CLI | No | No | **Yes** | AES-256 | **Yes** ✓ | Future |
-| LLM-Driven Auth | tool + secure:true | No | **NO** ✓ | **Yes** | AES-256 | Basic | **Yes** ✓ |
-| `secure_suspend` | Human in loop | No | **NO** ✓ | **Yes** | AES-256 | Basic | **Yes** ✓ |
+| DB Query (Future) | `store-secret` CLI | No | No | **Yes** | pgcrypto | **Yes** ✓ | Future |
+| LLM-Driven Auth | tool + secure:true | No | **NO** ✓ | **Yes** | pgcrypto | Basic | **Yes** ✓ |
+| `secure_suspend` | Human in loop | No | **NO** ✓ | **Yes** | pgcrypto | Basic | **Yes** ✓ |
 
 ---
 
@@ -882,7 +882,7 @@ A: **Webhook + Secure (Strategy 2)** today, plan for **DB Query (Strategy 4)** w
 A: Yes. E.g., use env vars for LLM API keys, use webhook payload for third-party API credentials, secure-flag the third-party response.
 
 **Q: What if webhook is compromised?**  
-A: TLS encryption protects in-transit. HTTPS + authentication protects the endpoint. Database encryption (AES-256) protects at-rest.
+A: TLS encryption protects in-transit. HTTPS + authentication protects the endpoint. Database encryption (pgcrypto `pgp_sym_encrypt`) protects at-rest.
 
 **Q: How long are credentials stored in DB?**  
 A: Sliding TTL of 24h, extended on each successful `decrypt` (see "Sliding TTL y outbound masking" below). Each run also triggers a bounded sweep — `cleanup_expired_for_run(session_id, agent_session_id)` in `secure_value_service.rs`, called from `run_use_case.rs` — that deletes only rows where `expires_at < NOW()` scoped to that session/agent_session; live (unexpired) rows survive across runs for multi-turn use.
@@ -894,7 +894,7 @@ A: Currently no. Planned for Phase 2 (audit logging table).
 A: Outside Colmena's scope. Manage via upstream service (Amadeus, OpenAI, etc.). Use webhook strategy so creds can be updated per-request.
 
 **Q: Is `SECURE_VALUES_KEY` enough to encrypt credentials?**  
-A: For MVP yes (AES-256 via PostgreSQL pgcrypto). For high-security scenarios, integrate with Vault or AWS Secrets Manager (Phase 3).
+A: For MVP yes (pgcrypto `pgp_sym_encrypt`, OpenPGP CFB — not AES-256-GCM — via PostgreSQL). For high-security scenarios, integrate with Vault or AWS Secrets Manager (Phase 3).
 
 > ⚠️ **CRITICAL — `SECURE_VALUES_KEY` is mandatory.** Since 2026-06-07 the
 > Postgres secure-value backend **fails fast at startup** if the env var is

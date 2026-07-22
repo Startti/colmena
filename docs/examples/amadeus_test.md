@@ -241,7 +241,7 @@ Based on the flight data provided, I recommend Flight #1 for the following reaso
 === SECURITY VERIFICATION ===
 ✓ HTTP node (search_flights) used real token via auto-injection
 ✓ LLM node (analyze_with_gemini) sees only secure hash
-✓ Database stores encrypted mapping: <value_1> → AES-256(real_token)
+✓ Database stores encrypted mapping: <value_1> → pgp_sym_encrypt(real_token)
 ```
 
 ---

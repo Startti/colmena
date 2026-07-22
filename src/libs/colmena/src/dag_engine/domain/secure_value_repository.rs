@@ -2,7 +2,9 @@ use crate::dag_engine::domain::error::DagError;
 use async_trait::async_trait;
 
 /// Repository trait for managing secure values (encrypted storage)
-/// Implementations handle AES-256 encryption/decryption
+/// Implementations handle Postgres pgcrypto symmetric encryption/decryption
+/// (`pgp_sym_encrypt`/`pgp_sym_decrypt`, OpenPGP CFB — pgcrypto default cipher,
+/// not AES-256-GCM), keyed by `SECURE_VALUES_KEY`
 #[async_trait]
 pub trait SecureValueRepository: Send + Sync {
     /// Store a sensitive value with encryption

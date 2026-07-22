@@ -38,7 +38,7 @@
     - `05_testing.md` — Test strategy, mocking, commands
     - `09_tool_calling.md` — Tool calling setup and usage in DAG
     - `12_dag_engine_guide.md` — DAG engine technical details
-    - `13_security_strategy.md` — Secure Values, AES-256-GCM secrets
+    - `13_security_strategy.md` — Secure Values, pgcrypto pgp_sym_encrypt secrets
     - `14_llm_deep_dive.md` — LLM node advanced parameters
     - `15_memory_guide.md` — SQLite/PostgreSQL persistence
     - `16_data_flow_guide.md` — Data passing and transforms between nodes

@@ -433,7 +433,7 @@ El nodo `secure_suspend` pausa el DAG para recolectar uno o más secretos del us
 
 - **Type**: `"secure_suspend"`
 - **Location**: `src/libs/colmena/src/dag_engine/infrastructure/nodes/secure_suspend.rs`
-- **Requires**: `DATABASE_URL` — los secretos se persisten cifrados (AES-256-GCM) en PostgreSQL vía `SecureValueService`.
+- **Requires**: `DATABASE_URL` — los secretos se persisten cifrados con pgcrypto (`pgp_sym_encrypt`) en PostgreSQL vía `SecureValueService`.
 - **Spec completa**: `docs/superpowers/specs/2026-05-07-secure-suspend-node-design.md`
 
 ### Inputs (engine-injected)

@@ -122,7 +122,7 @@ The core of the system. Everything that takes a `graph.json`, resolves its topol
 - `dag_engine/application/`
   - `run_use_case.rs` — **`DagRunUseCase`**: the topological execution loop. Uses a `VecDeque` to dequeue nodes when all their upstream inputs are resolved. Handles suspend/resume. Emits `DagExecutionEvent`s.
   - `ports.rs` — `NodeRegistryPort` (look up a node by type) and `SubGraphExecutorPort` (recursive DAG execution for the `subgraph` node).
-  - `secure_value_service.rs` — AES-256-GCM encryption/decryption wrapper for secure values.
+  - `secure_value_service.rs` — pgcrypto symmetric encryption (`pgp_sym_encrypt`) wrapper for secure values.
   - `sql_execution_service.rs` — orchestrates the SQL validation pipeline (static AST → optional LLM critic → execute).
 
 - `dag_engine/infrastructure/`

@@ -104,7 +104,7 @@ You write JSON graphs that orchestrate LLMs, tools, SQL, HTTP, etc. You do not m
 
 9. **If you need agent-session continuity (memory, HITL, secrets):**
    - [`docs/developer_guide/15_memory_guide.md`](./developer_guide/15_memory_guide.md) — conversational memory across sessions
-   - [`docs/developer_guide/13_security_strategy.md`](./developer_guide/13_security_strategy.md) — `secure_suspend` for collecting secrets; AES-256-GCM at rest
+   - [`docs/developer_guide/13_security_strategy.md`](./developer_guide/13_security_strategy.md) — `secure_suspend` for collecting secrets; pgcrypto (`pgp_sym_encrypt`) at rest
 
 10. **Read 3–4 test graphs** that match your use case from [`tests/graphs/`](../tests/graphs/):
     - `tests/graphs/basic/` — simple nodes (trigger, math, log, suspend)

@@ -2,7 +2,7 @@
 
 El nodo `suspend` **pausa la ejecución de un DAG** y espera a que un humano (o un sistema externo) proporcione una respuesta. Es el mecanismo canónico de Colmena para construir flujos *Human-in-the-Loop* (HITL): aprobaciones, confirmaciones, recolección de inputs libres, reviews intermedios, etc.
 
-> **No confundir con `secure_suspend`** — ese nodo se usa para recolectar **secretos** (API keys, passwords) cifrados con AES-256-GCM. Si lo que necesitás es pedir un secreto, ver [13_security_strategy.md](13_security_strategy.md) y la sección "The `secure_suspend` Node" en [agent_context/node_ports_reference.md](../agent_context/node_ports_reference.md).
+> **No confundir con `secure_suspend`** — ese nodo se usa para recolectar **secretos** (API keys, passwords) cifrados con pgcrypto (`pgp_sym_encrypt`). Si lo que necesitás es pedir un secreto, ver [13_security_strategy.md](13_security_strategy.md) y la sección "The `secure_suspend` Node" en [agent_context/node_ports_reference.md](../agent_context/node_ports_reference.md).
 
 - **Tipo**: `"suspend"`
 - **Categoría**: `control_flow`

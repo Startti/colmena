@@ -241,7 +241,7 @@ Los eventos que el observer puede recibir están enumerados en `dag_engine/domai
 | Principios hexagonales, flujo de datos, estructura de directorios | [01_architecture.md](./01_architecture.md) |
 | Persistencia de memoria (SQLite/Postgres, historial de conversaciones) | [15_memory_guide.md](./15_memory_guide.md) |
 | Schema de tablas Postgres (`llm_node_history`, `dag_runs`, `secure_value_mappings`) | [30_database_schema.md](./30_database_schema.md) |
-| Seguridad: Secure Values, AES-256-GCM, `secure_suspend` | [13_security_strategy.md](./13_security_strategy.md) |
+| Seguridad: Secure Values, pgcrypto (`pgp_sym_encrypt`), `secure_suspend` | [13_security_strategy.md](./13_security_strategy.md) |
 | Estrategia de testing, mocking, `#[ignore]`, deny-warnings | [05_testing.md](./05_testing.md) |
 | Flujo completo de tool calls (node_schema → merge → ejecución) | [22_tool_execution_flow.md](./22_tool_execution_flow.md) |
 | Referencia de todos los eventos SSE emitidos por el motor | [../sse_events_reference.md](../sse_events_reference.md) |

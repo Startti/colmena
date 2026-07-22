@@ -2,7 +2,9 @@ use crate::dag_engine::domain::{error::DagError, secure_value_repository::Secure
 use async_trait::async_trait;
 use sqlx::{PgPool, Row};
 
-/// PostgreSQL implementation using pgcrypto for AES-256 encryption.
+/// PostgreSQL implementation using pgcrypto symmetric encryption
+/// (`pgp_sym_encrypt`/`pgp_sym_decrypt`, OpenPGP CFB — pgcrypto default cipher,
+/// not AES-256-GCM), keyed by `SECURE_VALUES_KEY`.
 ///
 /// The pgcrypto symmetric encryption key is loaded from the `SECURE_VALUES_KEY`
 /// environment variable at construction time and stored in the struct. If the

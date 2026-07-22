@@ -991,4 +991,4 @@ tool-output → {"body": {"access_token": "<value_1>", ...}}   ← ✅ placehold
 | `AMADEUS_CLIENT_SECRET` | Secret de credencial Amadeus |
 | `OPENAI_API_KEY` | API key del LLM |
 | `DATABASE_URL` | PostgreSQL para almacenar `<value_N>` → token encriptado |
-| `SECURE_VALUES_KEY` | Clave AES-256 para encriptar en DB (mínimo 32 chars) |
+| `SECURE_VALUES_KEY` | Clave de pgcrypto (`pgp_sym_encrypt`) para encriptar en DB (mínimo 32 chars) |
