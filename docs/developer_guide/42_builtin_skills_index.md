@@ -22,7 +22,7 @@ For context on skills design and authoring, see
 | `gsheets-cross-sheet-analysis` | Same cross-sheet patterns as `crdt-doc-cross-sheet-analysis`, but via Google Sheets `gsheets_*` tools. | [SKILL.md](../../src/libs/colmena/skills/gsheets-cross-sheet-analysis/SKILL.md) |
 | `gsheets-presentable-output` | Turning a written Google Sheet into a presentable report via `gsheets_format_range` — header bands, number/currency formats, palettes, multi-op composition. 5 references on-demand (recipe, layout, palettes, number_formats, multi_op_template). Auto-enrolled when `gsheets_format_range` is in the catalog. | [SKILL.md](../../src/libs/colmena/skills/gsheets-presentable-output/SKILL.md) |
 | `gsheets-table-exploration` | Single-table patterns for Google Sheets — inspect schema first, top-N via nlargest, filters via query, type coercion, multi-tab output. | [link](../../src/libs/colmena/skills/gsheets-table-exploration/SKILL.md) |
-| `gsheets-editing` | Write/edit decision guide — pick the right mechanism (`gsheets_set_cell`/`gsheets_set_range` vs `data_run_python` `update_by_position`/`update_in_place`/`overwrite`/new-tab), edit rows with no unique key via `update_by_position`, write live formulas by column name (`{{Column}}`), create + populate sheets. 3 references (edit-rows, create-and-populate, cell-and-range-writes). Auto-enrolled when the agent has gsheets write tools. (All 11 gsheets skills target `data_run_python` as of 2026-07-02; `gsheets_run_python` is deprecated.) | [SKILL.md](../../src/libs/colmena/skills/gsheets-editing/SKILL.md) |
+| `gsheets-editing` | Write/edit decision guide — pick the right mechanism (`gsheets_set_cell`/`gsheets_set_range` vs `data_run_python` `update_by_position`/`update_in_place`/`overwrite`/new-tab), edit rows with no unique key via `update_by_position`, write live formulas by column name (`{{Column}}`), create + populate sheets. 3 references (edit-rows, create-and-populate, cell-and-range-writes). Auto-enrolled when the agent has gsheets write tools. (All gsheets skills — 4 packages: `gsheets-editing`, `gsheets-cross-sheet-analysis`, `gsheets-table-exploration`, `gsheets-presentable-output` — target `data_run_python` as of 2026-07-02; `gsheets_run_python` is deprecated.) | [SKILL.md](../../src/libs/colmena/skills/gsheets-editing/SKILL.md) |
 | `python-expert` | Modern Python (3.11+) — typing, async, dataclasses, stdlib internals. Not for general programming questions. | [SKILL.md](../../src/libs/colmena/skills/python-expert/SKILL.md) |
 | `sales-analysis` | Analyzing sales data — common tables, KPIs, pitfalls. | [SKILL.md](../../src/libs/colmena/skills/sales-analysis/SKILL.md) |
 | `sql-optimizer` | Writing, reviewing, or optimizing SQL — performance, indexes, joins, query plans. Not for ORM-specific questions. | [SKILL.md](../../src/libs/colmena/skills/sql-optimizer/SKILL.md) |
@@ -37,7 +37,7 @@ reaches a topic covered by a built-in skill, it can pull in the guidance:
 {
   "tool_name": "load_skill",
   "parameters": {
-    "skill_name": "sql-optimizer"
+    "name": "sql-optimizer"
   }
 }
 ```
@@ -56,17 +56,19 @@ for the full loading protocol and layered-context semantics.
    markdown format. Include a frontmatter block at the top:
    ```yaml
    ---
-   skill_name: my-optimization-tips
+   name: my-optimization-tips
    description: Tips for optimizing X
    ---
    ```
    Then write the body as markdown — code examples, patterns, common pitfalls, etc.
 
-3. **Register in the runtime:** Add the skill name to the built-in skills list in
-   `src/libs/colmena/src/llm/application/skill_loader.rs` (or wherever the runtime
-   loads skills). Ensure the skill is discoverable by the `load_skill` tool.
+3. **No hay registro manual:** los built-in skills se auto-descubren en tiempo de
+   compilación vía `include_dir!("$CARGO_MANIFEST_DIR/skills")` en
+   `src/libs/colmena/src/skills/infrastructure/builtin_skill_repository.rs`. Con
+   crear la carpeta con su `SKILL.md` basta — no hay lista que editar. El nombre
+   del frontmatter (`name:`) es el id que usa `load_skill`.
 
-4. **Document coverage:** Once registered, the skill appears in this index and is
+4. **Document coverage:** Once discovered, the skill appears in this index and is
    available to all LLMs. Update this file if adding a new built-in skill.
 
 5. **Test the load:** Verify the LLM can call `load_skill` with your skill name and

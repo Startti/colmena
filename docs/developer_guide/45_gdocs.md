@@ -88,16 +88,16 @@ Ver [40_toolkit_packages.md](40_toolkit_packages.md).
 |---|---|
 | `gdocs_create` | Crea un Google Doc vacío con `title` en `parent_folder_id` (o el folder operator-default). Devuelve `{doc_id, url, revision_id, tabs}`. |
 | `gdocs_create_from_markdown` | Crea un doc partiendo de un string markdown. Drive convierte nativamente; re-exportamos para detectar `lossy_conversions`. |
-| `gdocs_create_from_docx` | Sube un `.docx` adjunto y lo convierte a Google Doc. **Deferido a v1.1** — el plumbing de attachment-fetcher aún no está cableado; el dispatcher devuelve `not_yet_wired` con metadata estructurada. |
+| `gdocs_create_from_docx` | Sube un `.docx` adjunto y lo convierte a Google Doc. **Cableado desde Bundle 1 (2026-06-10)** vía attachment plumbing; el dispatcher `_via_executor` carga los bytes y devuelve `{document_id, url}`. |
 | `gdocs_share` | Otorga `reader` / `commenter` / `writer` a un email. Wrapper de `drive.permissions.create`. |
-| `gdocs_export` | Exporta un doc en `docx` / `pdf` / `markdown` / `txt` / `rtf` / `epub` / `odt` / `html`. v1 devuelve `{format, byte_len}`; el wrapper attachment-id queda para v1.1. |
+| `gdocs_export` | Exporta un doc en `docx` / `pdf` / `markdown` / `txt` / `rtf` / `epub` / `odt` / `html`. **Cableado desde Bundle 1 (2026-06-10)** — el `_via_executor` registra los bytes vía `OutputStorageRepository` y devuelve `{format, byte_len, attachment_id}`. |
 
 ### Multi-tab
 
 | Tool | Qué hace |
 |---|---|
 | `gdocs_list_tabs` | Lista todos los tabs (incluyendo `childTabs` anidados). |
-| `gdocs_add_tab` | Agrega un tab. `after_tab_id` opcional define posición. `markdown` opcional se acepta pero **el seeding queda para v1.1** (la respuesta incluye `pending_markdown_seed: true`). |
+| `gdocs_add_tab` | Agrega un tab. `after_tab_id` opcional define posición. `markdown` opcional **siembra el contenido en el mismo call** (vía `append_markdown` desde Bundle 3, 2026-06-11); la respuesta incluye `markdown_seeded: true`. |
 
 ### Lectura
 
@@ -540,7 +540,7 @@ El `tab_id` es jerárquico: tabs anidados usan dot notation (`parent.child`).
   (REST adapter), `auth.rs`, `config.rs`, `outline_cache.rs`,
   `revision_store.rs` (postgres).
 - `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/gdocs_tools.rs` —
-  los 22 dispatchers.
+  los 36 dispatchers.
 - `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/markdown_to_docs_ops.rs` —
   converter markdown → API requests + golden fixtures.
 
@@ -576,27 +576,24 @@ colmena — es restricción de Google Drive.
    sobre el doc preexistente. Useful exclusion:
    `enabled_tools: ["gdocs", "!gdocs_create", "!gdocs_create_from_markdown"]`.
 
-### 2. `gdocs_create_from_docx` devuelve `not_yet_wired`
+### 2. ~~`gdocs_create_from_docx` devuelve `not_yet_wired`~~ — shipped Bundle 1 (2026-06-10)
 
-El dispatcher acepta el call pero responde con metadata estructurada
-`{ok: false, error: "not_yet_wired", hint: "..."}`. Falta el plumbing
-de attachment-fetcher (cargar bytes desde el registry). Mismo plumbing
-que requiere E-T7b (gsheets xlsx). v1.1.
+El attachment plumbing se cableó en Bundle 1: el dispatcher
+`_via_executor` carga los bytes desde el registry y crea el doc,
+devolviendo `{document_id, url}`. (El stub `not_yet_wired` legacy sigue
+en el árbol pero el router ya no lo invoca.)
 
-### 3. `gdocs_export` devuelve `byte_len`, no `attachment_id`
+### 3. ~~`gdocs_export` devuelve `byte_len`, no `attachment_id`~~ — shipped Bundle 1 (2026-06-10)
 
-El export funciona contra la Drive API y devuelve el formato pedido,
-pero solo reporta `{format, byte_len}` — no envuelve los bytes en un
-attachment registrado. El agente puede ver el tamaño pero no compartir
-el archivo downstream. Wrapping de attachment es v1.1.
+El export ahora registra los bytes vía `OutputStorageRepository` y
+devuelve `{format, byte_len, attachment_id}`, así que el archivo se puede
+compartir downstream.
 
-### 4. `gdocs_add_tab` con `markdown` no siembra contenido
+### 4. ~~`gdocs_add_tab` con `markdown` no siembra contenido~~ — shipped Bundle 3 (2026-06-11)
 
-El argumento `markdown` se acepta pero NO se aplica al tab recién
-creado. La response incluye `pending_markdown_seed: true` como señal
-explícita. Workaround v1: crear el tab vacío y luego llamar
-`gdocs_append_markdown` con el `tab_id` devuelto. v1.1 lo hará en un
-paso.
+El argumento `markdown` ahora siembra el contenido en el tab recién
+creado (vía `append_markdown`) en el mismo call. La response incluye
+`markdown_seeded: true`.
 
 ### 5. ~~Co-edit guard sin diff per-paragraph~~ — shipped en v1.1 (2026-06-09)
 
@@ -616,13 +613,8 @@ Ver "Subsystem G v1.1" en [`BACKLOG.md`](../BACKLOG.md):
   de tablas".
 - Tablas markdown en inserts (requiere round-trip snapshot para
   computar índices de celda).
-- Drive Comments API para mensajería humano ↔ agente in-doc.
 - `gdocs_acknowledge_human_changes` enriquecido (resumen via cheap-tier
   LLM + warnings de conflictos).
-- `gdocs_insert_image_after_text` (sabores attachment_id + URL).
-- Plumbing de attachments para `gdocs_create_from_docx` (load bytes) y
-  `gdocs_export` (register attachment).
-- `gdocs_list_documents` (descubrimiento scoped a folder via Drive).
 - Ejecución de Apps Script.
 - Restore desde Drive Revisions (rollback).
 - Math expressions en markdown (hoy pasan como `$…$` literal).

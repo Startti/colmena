@@ -67,7 +67,7 @@ For toolkit packages (`enabled_tools: ["gsheets"]` shortcut), see
 | `load_attachment` | Materialize a registered attachment's content (with auto-summary for large files) into the conversation | [§31](31_load_attachment.md) |
 | `recall_history` | Re-read the FULL original content of one past message by its turn index (the `[Tn]` shown in the conversation summary); paginated (`offset`/`next_offset`) for large artifacts | [§15](15_memory_guide.md) |
 
-## sql (3 tools — synthetic SQL/pandas tools for tabular attachments)
+## sql (4 tools — synthetic SQL/pandas tools for tabular attachments)
 
 Opt-in via `tool_configurations`. Bypass the LLM context for large CSV/XLSX
 attachments — the LLM sees only a sample (catalog auto-summary) or runs
@@ -80,7 +80,7 @@ computation server-side (run_python) instead of dumping every row.
 | `sql_bulk_insert_from_attachment` | Stream a CSV attachment into a Postgres table via COPY FROM STDIN — bypasses the LLM context for the rows and runs orders of magnitude faster than per-row INSERT | [§23](23_sql_node.md#bulk-insert-from-attachment-shipped-2026-06-09) |
 | `data_run_python` | **Primary tabular tool (2026-07-02).** Run pandas code across multiple data sources (attachments, Google Sheets, SQL, inline) in one call — bind each source where it lives, write back to SQL/Sheets/downloadable files, get back only the result. Replaces `gsheets_run_python` + `attachment_run_python`. | [§48](48_data_run_python.md) |
 
-## gdocs (35 tools)
+## gdocs (36 tools)
 
 Content-addressed surgical editing — the LLM specifies WHAT to change
 (text, heading, named range) and never computes UTF-16 indices.
@@ -94,7 +94,7 @@ Detailed docs: [§45 — Google Docs integration](45_gdocs.md). Design spec:
 |---|---|---|
 | `gdocs_create` | Create an empty Google Doc and place it in a shared folder | [§45](45_gdocs.md) |
 | `gdocs_create_from_markdown` | Create a new Google Doc from a markdown string (Drive does the conversion) | [§45](45_gdocs.md) |
-| `gdocs_create_from_docx` | Upload a .docx attachment and convert it into a new Google Doc (DEFERRED in v1) | [§45](45_gdocs.md) |
+| `gdocs_create_from_docx` | Upload a .docx attachment and convert it into a new Google Doc. Wired via attachment plumbing since Bundle 1 (2026-06-10). | [§45](45_gdocs.md) |
 | `gdocs_share` | Grant a user reader / commenter / writer access to a Google Doc | [§45](45_gdocs.md) |
 | `gdocs_export` | Export a Google Doc as docx / pdf / markdown / txt / rtf / epub / odt / html | [§45](45_gdocs.md) |
 | `gdocs_list_tabs` | List every tab inside a multi-tab Google Doc | [§45](45_gdocs.md) |
@@ -146,8 +146,8 @@ re-calling a tool in a loop). See
 
 See [40_toolkit_packages.md](40_toolkit_packages.md). Registered packages:
 
-- `gsheets` — expands to all 10 `gsheets_*` tools.
-- `gdocs` — expands to all 35 `gdocs_*` tools.
+- `gsheets` — expands to 12 tools (10 native `gsheets_*` + the deprecated `gsheets_run_python` + `data_run_python`).
+- `gdocs` — expands to all 36 `gdocs_*` tools.
 - `gdocsread` — read-only subset of gdocs (10 tools: `list_tabs`,
   `read_as_markdown`, `read_outline`, `list_named_ranges`, `read_tables`,
   `export`, `acknowledge_human_changes`, `list_documents`,

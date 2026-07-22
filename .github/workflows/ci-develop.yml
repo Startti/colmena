@@ -46,6 +46,9 @@ jobs:
       - name: Hexagonal compliance — documents module
         run: ./scripts/check_hexagonal_documents.sh
 
+      - name: Docs count drift guard
+        run: ./scripts/check_doc_counts.sh
+
       - name: Clean target/wheels
         run: rm -rf target/wheels
 
