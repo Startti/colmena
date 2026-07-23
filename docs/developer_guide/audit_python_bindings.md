@@ -74,6 +74,7 @@ El motor DAG en Python **existe y funciona**, pero no está en la guía de usuar
 | `Registry.node_types() -> list[str]` | sin doc | lista node types registrados |
 | `Registry.toolkit_catalog(node_type, config) -> list[dict]` | sin doc | sub-tools de un toolkit |
 | submódulo `colmena.documents` (`list_sheets`/`read_sheet`/`add_sheet`/`write_sheet`) + wrapper pandas [`colmena_documents`](../../python/colmena_documents/__init__.py) | sin doc | feature completa invisible |
+| `stream_dag(graph, resume_id=None, resume_answer=None, inject_payload=None, include_extra_info=False, agent_session_id=None) -> AsyncIterator[dict]` | sin doc de usuario | añadido 2026-06-16 (posterior a esta auditoría, `python_bindings/mod.rs:407`); async iterator de eventos SSE-mapeados equivalentes a lo que `serve_dag` transmite por HTTP; tiene stub en `stubs/colmena/__init__.pyi` y tests en `python/tests/test_stream_dag.py`, pero no está cubierto por el inventario ni por el plan de esta auditoría |
 
 ### Ejemplos rotos
 
@@ -193,6 +194,10 @@ podría cambiar al terminarlo, así que arreglarlo ahora sería prematuro). Por 
 **Deferido (decisión del usuario):** unificar el modelo de runtime tokio (incluye habilitar
 `colmena.documents` desde Python plano, atado al cierre de CRDT). Resta también (opcional):
 `run_dag`/return dict en vez de JSON string, tool-calling programático.
+
+**Pendiente de incorporar al plan:** `stream_dag` (añadido 2026-06-16, un día después del último
+cierre de P2 registrado aquí) — falta documentarlo en `48_python_dag.md` y sumarlo explícitamente
+al inventario de la sección 2 como completado, no solo pendiente.
 
 (plan original abajo)
 

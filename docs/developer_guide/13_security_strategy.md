@@ -48,7 +48,7 @@ export GEMINI_API_KEY="sk-..."
 
 **Node Types that Support This:**
 - `http_request` — resolves `${VAR}` in: base_url, endpoint, headers, body
-- `llm_call` — resolves `${VAR}` for api_key field only
+- `llm_call` — resolves `${VAR}` for `api_key` and `connection_url` (memory/history DB connection string)
 
 **Flow:**
 ```
@@ -125,7 +125,7 @@ curl -X POST http://localhost:3000/webhook \
 4. **Secure Value Service:**
    - Response from API: `{access_token: "real_token_xyz"}`
    - After hashing: `{access_token: "<value_1>"}`
-   - Stored in DB: `<value_1> → AES-256(real_token_xyz)`
+   - Stored in DB: `<value_1> → pgp_sym_encrypt(real_token_xyz)`
 
 5. **LLM node SKIP injection (sees hashes only):**
 ```json
@@ -172,7 +172,7 @@ DAG ends: DELETE FROM secure_value_mappings (cleanup)
 - ✅ Credentials NEVER hardcoded in graph
 - ✅ LLM nodes completely isolated from real credentials
 - ✅ Non-LLM HTTP nodes work transparently with real values
-- ✅ Values encrypted at rest (AES-256 in PostgreSQL)
+- ✅ Values encrypted at rest (pgcrypto `pgp_sym_encrypt`, OpenPGP CFB — not AES-256-GCM, in PostgreSQL)
 - ✅ Auto-cleanup on DAG completion
 - ✅ Works with real APIs (Amadeus, OpenAI, etc.)
 
@@ -373,7 +373,7 @@ When the user is in the loop and must provide credentials interactively — e.g.
 
 **How it works:**
 
-The `secure_suspend` node pauses the DAG and presents the user with one or more questions (e.g., "Enter your API key"). Answers are encrypted with AES-256-GCM and stored in `secure_value_mappings`. The node returns only opaque handles (`<sv_name>`) — the LLM and all other nodes **never see the real value**. On DAG resume the handles flow through the graph and are auto-injected by `inject_secrets` at execution time.
+The `secure_suspend` node pauses the DAG and presents the user with one or more questions (e.g., "Enter your API key"). Answers are encrypted with Postgres pgcrypto symmetric encryption (`pgp_sym_encrypt`/`pgp_sym_decrypt`, OpenPGP CFB — pgcrypto default cipher, **not** AES-256-GCM), keyed by `SECURE_VALUES_KEY`, and stored in `secure_value_mappings`. The node returns only opaque handles (`<sv_name>`) — the LLM and all other nodes **never see the real value**. On DAG resume the handles flow through the graph and are auto-injected by `inject_secrets` at execution time.
 
 The node can be used in three ways:
 
@@ -450,7 +450,7 @@ User provides answers (ID-keyed Q/A — keyed by each secret's `name`):
             Q[api_secret]: Please enter your API secret
             A[api_secret]: VALUE2"
   ↓
-Values encrypted with AES-256 → secure_value_mappings
+Values encrypted with pgp_sym_encrypt → secure_value_mappings
   ↓
 Node outputs: { api_key: "<sv_api_key>", api_secret: "<sv_api_secret>" }
   ↓
@@ -539,11 +539,11 @@ The `secure_value_mappings` table has an `agent_session_id TEXT` column. When an
 | Strategy | Setup | Credentials in Code? | LLM Sees Real Values? | DB Required? | Encryption? | Audit Trail? | Production Ready? |
 |----------|-------|----------------------|----------------------|--------------|-------------|--------------|-------------------|
 | Env Vars | `export VAR=...` | No | **YES** ⚠️ | No | No | No | Limited |
-| Webhook + Secure | HTTP POST + DB | No | **NO** ✓ | **Yes** | AES-256 | Basic | **Yes** ✓ |
+| Webhook + Secure | HTTP POST + DB | No | **NO** ✓ | **Yes** | pgcrypto | Basic | **Yes** ✓ |
 | Test Payload | Hardcode in JSON | **YES** ⚠️ | **YES** ⚠️ | No | No | No | **No** |
-| DB Query (Future) | `store-secret` CLI | No | No | **Yes** | AES-256 | **Yes** ✓ | Future |
-| LLM-Driven Auth | tool + secure:true | No | **NO** ✓ | **Yes** | AES-256 | Basic | **Yes** ✓ |
-| `secure_suspend` | Human in loop | No | **NO** ✓ | **Yes** | AES-256 | Basic | **Yes** ✓ |
+| DB Query (Future) | `store-secret` CLI | No | No | **Yes** | pgcrypto | **Yes** ✓ | Future |
+| LLM-Driven Auth | tool + secure:true | No | **NO** ✓ | **Yes** | pgcrypto | Basic | **Yes** ✓ |
+| `secure_suspend` | Human in loop | No | **NO** ✓ | **Yes** | pgcrypto | Basic | **Yes** ✓ |
 
 ---
 
@@ -882,10 +882,10 @@ A: **Webhook + Secure (Strategy 2)** today, plan for **DB Query (Strategy 4)** w
 A: Yes. E.g., use env vars for LLM API keys, use webhook payload for third-party API credentials, secure-flag the third-party response.
 
 **Q: What if webhook is compromised?**  
-A: TLS encryption protects in-transit. HTTPS + authentication protects the endpoint. Database encryption (AES-256) protects at-rest.
+A: TLS encryption protects in-transit. HTTPS + authentication protects the endpoint. Database encryption (pgcrypto `pgp_sym_encrypt`) protects at-rest.
 
 **Q: How long are credentials stored in DB?**  
-A: Automatically deleted when DAG completes (on `dag_end` trigger in `run_use_case.rs`). Fallback timeout: 1 hour.
+A: Sliding TTL of 24h, extended on each successful `decrypt` (see "Sliding TTL y outbound masking" below). Each run also triggers a bounded sweep — `cleanup_expired_for_run(session_id, agent_session_id)` in `secure_value_service.rs`, called from `run_use_case.rs` — that deletes only rows where `expires_at < NOW()` scoped to that session/agent_session; live (unexpired) rows survive across runs for multi-turn use.
 
 **Q: Can I audit who accessed which credentials?**  
 A: Currently no. Planned for Phase 2 (audit logging table).
@@ -894,7 +894,7 @@ A: Currently no. Planned for Phase 2 (audit logging table).
 A: Outside Colmena's scope. Manage via upstream service (Amadeus, OpenAI, etc.). Use webhook strategy so creds can be updated per-request.
 
 **Q: Is `SECURE_VALUES_KEY` enough to encrypt credentials?**  
-A: For MVP yes (AES-256 via PostgreSQL pgcrypto). For high-security scenarios, integrate with Vault or AWS Secrets Manager (Phase 3).
+A: For MVP yes (pgcrypto `pgp_sym_encrypt`, OpenPGP CFB — not AES-256-GCM — via PostgreSQL). For high-security scenarios, integrate with Vault or AWS Secrets Manager (Phase 3).
 
 > ⚠️ **CRITICAL — `SECURE_VALUES_KEY` is mandatory.** Since 2026-06-07 the
 > Postgres secure-value backend **fails fast at startup** if the env var is
@@ -932,7 +932,7 @@ Este bloque resume el estado real del cifrado en tránsito para cada componente 
 
 ### Nodo HTTP (`reqwest`)
 
-- `reqwest 0.11` con features `["json", "stream", "rustls-tls"]` y `default-features = false` — usa **rustls + webpki-roots** (bundle de CAs públicas embebido).
+- `reqwest 0.11` con features `["json", "stream", "multipart", "rustls-tls"]` y `default-features = false` — usa **rustls + webpki-roots** (bundle de CAs públicas embebido).
 - El cliente se construye con `Client::builder().http1_only().build()` — sin flags de TLS personalizadas.
 - En la práctica:
   - HTTPS contra APIs con CA pública: ✅ funciona.
@@ -984,7 +984,7 @@ RETURNING decrypted_value;
 
 `exists()` también filtra `expires_at > NOW()` pero **NO** extiende la ventana — es una precondición de chequeo, no un uso. Resultado: una conversación activa que se prolonga más de 24h no se queda sin credenciales abruptamente; el cap efectivo pasa de "24h desde el persist" a "24h desde el último uso".
 
-Implementación: `src/libs/colmena/src/secure_values/infrastructure/postgres_secure_value_repository.rs`. La constante de TTL (`SECURE_VALUE_TTL_HOURS = 24`) está hardcodeada por ahora — configurabilidad vía env var queda explícitamente fuera de scope.
+Implementación: `src/libs/colmena/src/dag_engine/infrastructure/persistence/postgres_secure_value_repository.rs`. El TTL está hardcodeado como literal SQL `INTERVAL '24 hours'` repetido en las tres queries (persist, decrypt-with-agent, decrypt-with-session; líneas 91, 136, 152) — no hay una constante nombrada; configurabilidad vía env var queda explícitamente fuera de scope.
 
 ### 2. Cleanup periódico por expiración (no más barrido total)
 
@@ -992,7 +992,7 @@ Antes: al final de cada run, `run_use_case.rs` llamaba `cleanup(session_id)` que
 
 Ahora: `cleanup_expired_for_run(session_id, agent_session_id)` borra **solo filas expiradas** (`expires_at < NOW()`) scoped a `session_id` OR `agent_session_id` del run. Filas vivas sobreviven. Cada turno limpia su propio scope — patrón B3 (bounded per-run sweep) descripto en la sección "Decision" del spec.
 
-Implementación: `src/libs/colmena/src/secure_values/application/secure_value_service.rs` (método `cleanup_expired_for_run`) + el repo Postgres correspondiente. Engine call site: `src/libs/colmena/src/dag_engine/application/run_use_case.rs` (línea ~687 del antes; ahora invoca la versión bounded).
+Implementación: `src/libs/colmena/src/dag_engine/application/secure_value_service.rs` (método `cleanup_expired_for_run`) + el repo Postgres correspondiente. Engine call site: `src/libs/colmena/src/dag_engine/application/run_use_case.rs` (línea ~687 del antes; ahora invoca la versión bounded).
 
 ### 3. Handle hardening — sufijo random + min-length
 
@@ -1028,7 +1028,7 @@ if value.chars().count() < MIN_SECRET_VALUE_LEN {
 
 El mínimo de 4 chars permite PINs estándar pero rechaza strings de alta colisión (`"on"`, `"ok"`, `"42"`). Es un prerequisito de la garantía #4 — substring matching sobre valores muy cortos causaría sobre-enmascarado patológico en response bodies.
 
-Implementación: `src/libs/colmena/src/secure_values/application/secure_value_service.rs::persist_secret` (handle generation), `src/libs/colmena/src/dag_engine/infrastructure/nodes/secure_suspend.rs` (min-length check).
+Implementación: `src/libs/colmena/src/dag_engine/application/secure_value_service.rs::persist_secret` (handle generation), `src/libs/colmena/src/dag_engine/infrastructure/nodes/secure_suspend.rs` (min-length check).
 
 **Compatibilidad backward.** Los handles viejos (`<sv_user>` sin sufijo) **siguen resolviendo** porque el lookup es match exacto sobre `hash_key` — no hay parsing del formato. No hay backfill ni flag de versión. Conversaciones en curso siguen funcionando sin tocar nada.
 
@@ -1044,13 +1044,17 @@ let applied = self.secure_value_service
     .inject_secrets(&mut node_inputs, session_id, agent_session_id)
     .await?;  // applied: HashMap<decrypted_value, handle>
 
-let mut result = node.execute(...).await;
-// MASK every tool response — Ok and Err paths
-match &mut result {
-    Ok(v)  => self.secure_value_service.mask_outbound(v, &applied),
-    Err(e) => self.secure_value_service.mask_outbound_string(e, &applied),
+let result = node.execute(...).await;
+// MASK every tool response — Ok and Err paths, same mask_outbound() for both.
+// Err is wrapped into a Value::String, masked, then unwrapped back into an error.
+match result {
+    Ok(mut v) => { self.secure_value_service.mask_outbound(&mut v, &applied); Ok(v) }
+    Err(e) => {
+        let mut err_value = Value::String(e.to_string());
+        self.secure_value_service.mask_outbound(&mut err_value, &applied);
+        Err(err_value.as_str().unwrap_or("").to_string().into())
+    }
 }
-result
 ```
 
 **Cómo funciona el masking.** Walk recursivo de la `serde_json::Value`. Para cada JSON string, reemplazar cada substring que coincida con un valor decrypted por su handle. Reemplazos aplicados **longest-key-first** para evitar leaks parciales cuando dos secretos comparten prefix.
@@ -1066,7 +1070,7 @@ pub fn mask_outbound(&self, value: &mut serde_json::Value, mapping: &HashMap<Str
 **Diff en la API de `inject_secrets`.** Cambió de retornar `Result<()>` a `Result<HashMap<String, String>>` (mapeo de `decrypted_value → handle`). Callers que no necesitan el mapeo (ej. `run_use_case` para nodos non-LLM) simplemente ignoran el return.
 
 Implementación:
-- `src/libs/colmena/src/secure_values/application/secure_value_service.rs` — nueva firma de `inject_secrets` + `mask_outbound`.
+- `src/libs/colmena/src/dag_engine/application/secure_value_service.rs` — nueva firma de `inject_secrets` + `mask_outbound`.
 - `src/libs/colmena/src/dag_engine/infrastructure/dag_tool_executor.rs::execute_inner` — call site del masking.
 
 ### Consecuencia para graph authors

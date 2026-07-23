@@ -1,10 +1,11 @@
-# Nodos Web (tavily_client, api_explorer, browser)
+# Nodos Web (tavily_client, api_explorer)
 
-Tres nodos toolkit que otorgan capacidades de internet a los agentes LLM:
+Dos nodos toolkit que otorgan capacidades de internet a los agentes LLM:
 
 - **tavily_client** — búsqueda y lectura web vía Tavily. Nodo toolkit expuesto como sub-herramientas `web__search` y `web__fetch`. Ver [Spec A](../superpowers/specs/2026-04-23-web-nodes-a-tavily-client-design.md) y §2 más abajo.
 - **api_explorer** — descubrimiento de OpenAPI/Swagger y constructor de `http_request`. Ver [Spec C](../superpowers/specs/2026-04-23-web-nodes-c-api-explorer-design.md).
-- **browser** — navegador headless auto-hospedado (Browserless + chromiumoxide). Ver [Spec B](../superpowers/specs/2026-04-23-web-nodes-b-browser-design.md).
+
+> El nodo `browser` (Spec B, navegador headless auto-hospedado con Browserless + chromiumoxide) nunca fue implementado — no existe en `registry.rs` ni en `dag_engine/infrastructure/nodes/` ni en `src/libs/colmena/src/web/`.
 
 ## Runtime compartido: nodos toolkit
 
@@ -37,7 +38,6 @@ Flujo en runtime:
 
 - [tavily_client](#2-tavily_client) — poblado por Spec A.
 - [api_explorer](#3-api_explorer) — poblado por Spec C.
-- [browser](#browser) — poblado por Spec B.
 
 ## 2. `tavily_client`
 
@@ -206,7 +206,7 @@ Devuelve: `{ spec_url_input, resolved_url, original_format, internal_format, tit
 | `limit` | int | no | 1-200, default 50. |
 | `offset` | int | no | default 0. |
 
-Devuelve: `{ endpoints: [{ operation_id, method, path, summary, tags }, ...], total }`.
+Devuelve: `{ endpoints: [{ operation_id, method, path, summary, tags }, ...], total, returned, offset }`.
 
 **`api_explorer__search_endpoint`** — búsqueda fuzzy.
 
@@ -378,7 +378,7 @@ Por qué importa: (1) Gemini rechaza con 400 cualquier `function_response` que c
 
 ### Manejo de errores
 
-Recuperables (devueltos al LLM como JSON estructurado): `rate_limit`, `timeout`, `upstream`, `spec_parse_failed`, `unsupported_spec_format`, `endpoint_not_found` (con `did_you_mean`), `missing_required_params`, `invalid_param_type`, `missing_auth`, `spec_not_loaded`, `unexpected_html_response`, `swagger2_conversion_failed`.
+Recuperables (devueltos al LLM como JSON estructurado): `rate_limit`, `fetch_failed` (timeout y upstream 5xx comparten este `error`, distinguidos por `reason: "timeout"` o por `status`/`retryable`), `spec_parse_failed`, `unsupported_spec_format`, `endpoint_not_found` (con `did_you_mean`), `missing_required_params`, `invalid_param_type`, `missing_auth`, `spec_not_loaded`, `unexpected_html_response`, `swagger2_conversion_failed`.
 
 Crashean el DAG: `InvalidConfig`, `AdapterInit`, `SpecTooLarge`.
 
@@ -549,8 +549,8 @@ token: scope, permiso o cuota) → se devuelven al LLM tal cual.
 ### Caché compartido por fingerprint (un token para N endpoints)
 
 El proveedor de tokens se cachea en el service container por
-`fingerprint = hash(token_url + client_id + refresh_token)` (el refresh token se
-**hashea**, nunca se usa en claro como clave). Resultado: **un solo provider → un
+`fingerprint = hash(token_url + client_id + client_secret + refresh_token)` (el
+refresh token se **hashea**, nunca se usa en claro como clave). Resultado: **un solo provider → un
 solo cache de access token → un solo mint** por identidad distinta, **compartido
 entre todos los nodos/tools/llamadas del proceso**. Si tienes ~8 endpoints seguros
 con las mismas credenciales, comparten el token automáticamente: si expira a mitad

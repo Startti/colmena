@@ -312,7 +312,7 @@ Ambos pueden estar en `config` (estático) o en `inputs` (dinámico).
 
 Este ejemplo demuestra cómo usar SQLite para persistencia local.
 
-**Archivo:** `tests/memory_sqlite_example.json`
+**Archivo:** `tests/graphs/memory/memory_sqlite_example.json`
 
 ```json
 {
@@ -359,7 +359,7 @@ Este ejemplo demuestra cómo usar SQLite para persistencia local.
 
 **Ejecutar:**
 ```bash
-cargo run --bin dag_engine -- run tests/memory_sqlite_example.json
+cargo run --bin dag_engine -- run tests/graphs/memory/memory_sqlite_example.json
 ```
 
 **Resultado esperado:**
@@ -376,7 +376,7 @@ DATABASE_URL="postgresql://postgres:password@localhost:5432/colmena_memory"
 OPENAI_API_KEY="sk-..."
 ```
 
-**Archivo:** `tests/memory_postgres_example.json`
+**Archivo:** `tests/graphs/memory/memory_postgres_example.json`
 
 ```json
 {
@@ -423,7 +423,7 @@ OPENAI_API_KEY="sk-..."
 
 **Ejecutar:**
 ```bash
-cargo run --bin dag_engine -- run tests/memory_postgres_example.json
+cargo run --bin dag_engine -- run tests/graphs/memory/memory_postgres_example.json
 ```
 
 #### Ejemplo 3: Memoria Dinámica (Thread ID desde Webhook)
@@ -575,8 +575,10 @@ Primero, crea la estructura de tu nodo e implementa el trait `ExecutableNode`.
 ```rust
 // Ejemplo: HttpNode con configuración dinámica
 use crate::domain::node::{ExecutableNode, NodeInputs};
+use crate::dag_engine::domain::observer::ExecutionObserver;
 use serde_json::{json, Value};
 use std::error::Error as StdError;
+use std::sync::Arc;
 
 pub struct HttpNode;
 
@@ -587,7 +589,8 @@ impl ExecutableNode for HttpNode {
         inputs: &NodeInputs,
         config: &Value,
         _state: &mut Value,
-    ) -> Result<Value, Box<dyn StdError>> {
+        _observer: Option<Arc<dyn ExecutionObserver>>,
+    ) -> Result<Value, Box<dyn StdError + Send + Sync>> {
         // Configuración dinámica: inputs > config
         let base_url = inputs.get("base_url").and_then(|v| v.as_str())
             .or_else(|| config.get("base_url").and_then(|v| v.as_str()))
@@ -634,16 +637,14 @@ impl ExecutableNode for HttpNode {
 
 Segundo, "inyecta" tu nuevo nodo en la aplicación añadiéndolo al registro.
 
-Abre `src/libs/colmena/src/dag_engine/infrastructure/registry.rs` y añade tu nodo en la función `HashMapNodeRegistry::new()`.
+Abre `src/libs/colmena/src/dag_engine/infrastructure/registry.rs` y añade tu nodo en `HashMapNodeRegistry::new_with_secure_values()` (la función que `new()` delega). Nota que `HashMapNodeRegistry::new()` no es sin argumentos: recibe `repository_factory: Arc<ConversationRepositoryFactory>`, `sql_port_factory: Arc<SqlPortFactory>` y `task_memory_repo: Option<...>`; y el struct tiene cuatro campos (`nodes`, `toolkit_nodes`, `subgraph_node`, `foreach_node`), no solo `nodes`.
 
 ```rust
-// en: src/libs/colmena/src/dag_engine/infrastructure/registry.rs
+// en: src/libs/colmena/src/dag_engine/infrastructure/registry.rs (registry.rs:125, 153)
 
 // ... (otros registros de nodos) ...
 nodes.insert("http_request".to_string(), Arc::new(HttpNode));
 nodes.insert("llm_call".to_string(), Arc::new(LlmNode));
-        
-Self { nodes }
 ```
 
 ## 🧪 Testing Local con `test_payload`
@@ -870,7 +871,7 @@ El nodo `information_extraction` permite tomar texto no estructurado y usar un L
 Colmena v0.3.0 introduce **Secure Values**, un sistema para manejar secretos (API Keys, Tokens, Credenciales) de forma cifrada en la base de datos y memoria, evitando que se filtren en logs o interfaces.
 
 ### Conceptos Clave
-- **Cifrado AES-256-GCM**: Todos los valores marcados como sensibles se cifran usando una clave maestra (`SECURE_VALUES_KEY`).
+- **Cifrado pgcrypto (`pgp_sym_encrypt`)**: Todos los valores marcados como sensibles se cifran con pgcrypto symmetric encryption (OpenPGP CFB — cipher por defecto de pgcrypto, **no** AES-256-GCM) usando una clave maestra (`SECURE_VALUES_KEY`).
 - **Inyección Automática**: El motor detecta valores cifrados (ej. `<secure_value_8>`) y los descifra justo antes de ejecutar un nodo.
 - **Precedencia de Configuración**: Los valores en `inputs` (provenientes de edges) siempre tienen prioridad sobre los de `config`.
 
@@ -920,7 +921,7 @@ PROMPT DEL USUARIO
        │          ├─ se ejecutan en la MISMA fase actual (no en la siguiente)
        │          └─ sus resultados → bridge summary antes de que empiece fase N+1
        ▼  (repetir para todas las fases)
-  5. FINAL REACTOR ──► sintetiza todos los resúmenes ──► puede SUSPENDER ⏸ (allow_suspend)
+  5. FINAL REACTOR ──► sintetiza todos los resúmenes en una respuesta de texto plano (no puede suspender)
        │
        ▼
   OUTPUT: final_response
@@ -980,8 +981,8 @@ PROMPT DEL USUARIO
 | `critic` | object | opcional | Si presente, cada resultado de agente pasa por el critic antes de marcarse completo. |
 | `critic.max_retries` | int | `3` | Nº máximo de fallos consecutivos del critic antes de suspender para que el usuario decida. |
 | `phase_reactor` | object | opcional | Si presente, se ejecuta al finalizar cada fase. Puede añadir tareas de recovery o suspender. |
-| `final_reactor` | object | opcional | Si presente, se ejecuta cuando todas las fases terminan. Sintetiza la respuesta final. |
-| `allow_suspend` | bool | `true` | **Por componente** (se pone dentro de `planner`, `critic`, `phase_reactor` o `final_reactor`). Si `false`, ese componente no suspende aunque el LLM lo solicite — imprime las preguntas en logs y continúa. |
+| `final_reactor` | object | opcional | Si presente, se ejecuta cuando todas las fases terminan. Sintetiza la respuesta final mediante una llamada LLM directa de texto plano; nunca suspende (`allow_suspend` dentro de `final_reactor` no tiene efecto). |
+| `allow_suspend` | bool | `true` | **Por componente** (se pone dentro de `planner`, `critic` o `phase_reactor`). Si `false`, ese componente no suspende aunque el LLM lo solicite — imprime las preguntas en logs y continúa. No aplica a `final_reactor`, que no puede suspender. |
 
 ### Human-in-the-Loop (HITL) con `allow_suspend`
 
@@ -1015,7 +1016,7 @@ Para `critic_max_retries`, las preguntas incluyen tipo `choice`:
 
 ### Suspend/Resume en el Orchestrator
 
-El orchestrator puede suspender en **cinco puntos internos**, cada uno con su `suspended_at` y preguntas estructuradas:
+El orchestrator puede suspender en **cuatro puntos internos**, cada uno con su `suspended_at` y preguntas estructuradas. El `final_reactor` (paso 5 del ciclo de vida) hace una llamada LLM de texto plano sin lógica de suspensión — no es un punto de suspensión posible.
 
 #### Punto 0: `planner` — Antes de generar el plan
 
@@ -1058,11 +1059,7 @@ Se activa cuando una tarea falla la crítica `max_retries` veces seguidas. El us
 - **`retry`**: Reintentar con instrucciones adicionales (se escriben en el campo `instructions`)
 - **`cancel`**: Cancelar definitivamente (`[CANCELLED by user]`)
 
-#### Punto 4: `final_reactor` — Antes de la síntesis final
-
-Se activa cuando el reactor final necesita aclaración antes de escribir la respuesta al usuario.
-
-Al reanudar: el Q&A se inyecta como contexto en el reactor final, que vuelve a ejecutarse con la aclaración incluida.
+> **Nota:** el `final_reactor` (paso 5 del ciclo de vida, síntesis de la respuesta final) **no es un punto de suspensión**. `finalize_execution` (en `orchestrator.rs`) hace una llamada LLM directa de texto plano y siempre retorna `OrchestratorSuspend::Done(...)` — no invoca `allow_suspend_for` ni puede construir `OrchestratorSuspend::Suspended`.
 
 ### Bridge Tasks
 
@@ -1249,7 +1246,7 @@ cargo run --bin dag_engine -- serve tests/my_graph.json
 ```rust
 use colmena::dag_engine::engine::{ColmenaEngine, EngineConfig};
 
-let config = EngineConfig::from_env()?;      // lee DATABASE_URL + COLMENA_POOL_*
+let config = EngineConfig::from_env().await?;      // lee DATABASE_URL + COLMENA_POOL_*
 let engine = ColmenaEngine::new(config).await?;
 ```
 
@@ -1261,7 +1258,7 @@ let engine = ColmenaEngine::new(config).await?;
 use futures::StreamExt;
 
 let graph: Graph = serde_json::from_str(&json)?;
-let mut stream = Box::pin(engine.execute_stream(graph, None, None, true));
+let mut stream = Box::pin(engine.execute_stream(graph, None, None, true, None, None));
 while let Some(event) = stream.next().await {
     // manejar DagExecutionEvent
 }

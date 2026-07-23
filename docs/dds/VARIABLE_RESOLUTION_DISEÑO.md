@@ -462,10 +462,11 @@ no existe esa función. En su lugar **cada nodo trae su propio scanner**:
 
 | Nodo | Función | Archivo |
 |------|---------|---------|
-| http | `resolve_env_vars` / `resolve_env_vars_in_value` | `dag_engine/infrastructure/nodes/http.rs` (≈L296) |
-| llm  | `resolve_env_var`, `resolve_context_vars`, `resolve_context_in_node_schema`, `resolve_template_vars` | `dag_engine/infrastructure/nodes/llm.rs` (≈L285, L368, L406, L427) |
-| sql, socketio, tts, image_generation, image_edit, reactor, critic, planner, orchestrator, tavily_client, extraction, input | `resolve_env_var` / `resolve_env_vars` (variantes copy-paste) | `dag_engine/infrastructure/nodes/*.rs` |
-| dag_tool_executor (fixed_config en tools) | `resolve_template_string` con regex `\$\{(?:context\.)?(\w+)\}` | `dag_engine/infrastructure/dag_tool_executor.rs` (≈L118) |
+| http | `resolve_env_vars` / `resolve_env_vars_in_value` | `dag_engine/infrastructure/nodes/http.rs` (L408) |
+| llm  | `resolve_env_var`, `resolve_context_vars`, `resolve_context_in_node_schema`, `resolve_template_vars` | `dag_engine/infrastructure/nodes/llm.rs` (L474, L847, L885, L906) |
+| sql, socketio, tts, image_generation, image_edit, reactor, critic, planner, orchestrator, tavily_client, extraction | `resolve_env_var` / `resolve_env_vars` (variantes copy-paste) | `dag_engine/infrastructure/nodes/*.rs` |
+| input | `resolve_templates` — **no resuelve env vars**; solo templates `{{key}}` / `{{key.nested}}` contra un `state` JSON, con fallback silencioso a string vacío si la clave no existe (no fail-fast como los demás nodos) | `dag_engine/infrastructure/nodes/input.rs` (L10) |
+| dag_tool_executor (fixed_config en tools) | `resolve_template_string` con regex `\$\{(?:context\.)?(\w+)\}` | `dag_engine/infrastructure/dag_tool_executor.rs` (L176) |
 
 La mayoría son scanners manuales por byte (`find("${")` + `find('}')`), no regex.
 La única regex real está en `dag_tool_executor.rs` y usa `\w+` —
@@ -500,7 +501,7 @@ template, no en el case.
 
 #### 3. Sintaxis adicional no documentada en el diseño
 
-`llm.rs::resolve_template_vars` (L427) también acepta `{{var.path}}`
+`llm.rs::resolve_template_vars` (L906) también acepta `{{var.path}}`
 (doble llave, estilo Mustache/Handlebars) para algunos campos. Esto no
 aparece en la especificación original.
 

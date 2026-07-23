@@ -180,7 +180,7 @@ Si seteás `COLMENA_LOCAL=false` y olvidás el callback URL o secret, el engine 
 
 ## Storage adapter selection
 
-`EngineConfig::from_env` (`src/libs/colmena/src/dag_engine/engine.rs:73`) elige uno de tres adapters según env vars:
+`EngineConfig::from_env` (`src/libs/colmena/src/dag_engine/engine.rs:95`) elige uno de tres adapters según env vars:
 
 | `COLMENA_LOCAL` | Adapter | URL shape | Bytes location |
 |---|---|---|---|
@@ -389,7 +389,7 @@ El LLM pasa `body: { image: "$attachment:abc.png" }`. El engine resuelve a `body
 
 ## Universal binary scrubber
 
-`DagToolExecutor.execute()` aplica un scrubber a todo tool result antes de devolverlo al agent loop. Ver `src/libs/colmena/src/dag_engine/infrastructure/dag_tool_executor.rs:1048+`.
+`DagToolExecutor.execute()` aplica un scrubber a todo tool result antes de devolverlo al agent loop. Ver `scrub_value_for_llm`/`scrub_tool_result_output` en `src/libs/colmena/src/dag_engine/infrastructure/dag_tool_executor.rs:2030+`.
 
 Reglas:
 1. Strings con prefijo `data:` que contienen `;base64,` → reemplazo por `[binary elided: mime=<mime>, encoded_size=<N> bytes]`.
@@ -418,9 +418,9 @@ cargo run --bin dag_engine -- run tests/graphs/media/image_generation_basic.json
 
 Verás:
 - Log al startup: `storage_mode_selected mode=local adapter=LocalHttpStorageAdapter dir=/tmp/colmena-out port=8765`
-- En el output JSON: `"url": "http://127.0.0.1:8765/files/<uuid>.png"`
+- En el output JSON: `"document_id": "img_<...>"` (Plan B eliminó el campo `url` — ver `image_generation.rs:698`, `assert!(images[0].get("url").is_none())`)
 - En disco: `ls /tmp/colmena-out/` muestra el archivo (1-3MB típico para 1024x1024 PNG)
-- Podés `open /tmp/colmena-out/<uuid>.png` para inspeccionarlo, o pegar la URL en el navegador DURANTE el run
+- Podés `open /tmp/colmena-out/<uuid>.png` para inspeccionarlo DURANTE el run
 
 **Lifecycle**: el server HTTP local muere cuando termina el proceso. Los archivos en disco persisten. La URL deja de responder pero el archivo sigue siendo `open`-eable.
 
@@ -446,8 +446,8 @@ Verás:
   - `src/libs/colmena/src/storage/` — port + 3 adapters.
   - `src/libs/colmena/src/dag_engine/infrastructure/nodes/{image_generation,image_edit,tts}.rs` — nodos.
   - `src/libs/colmena/src/llm/infrastructure/{openai_tts_adapter,elevenlabs_tts_adapter,google_tts_adapter}.rs` — TTS adapters.
-  - `src/libs/colmena/src/dag_engine/infrastructure/dag_tool_executor.rs:1048+` — scrubber.
-  - `src/libs/colmena/src/dag_engine/engine.rs:73+` — `COLMENA_LOCAL` selection logic.
+  - `src/libs/colmena/src/dag_engine/infrastructure/dag_tool_executor.rs:2030+` — scrubber (`scrub_value_for_llm`/`scrub_tool_result_output`).
+  - `src/libs/colmena/src/dag_engine/engine.rs:95+` — `COLMENA_LOCAL` selection logic (`from_env`).
 
 ## Host-side integration (out of scope for this repository)
 

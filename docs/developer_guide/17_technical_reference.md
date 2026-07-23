@@ -147,7 +147,7 @@ El motor de Colmena rastrea el uso de recursos a lo largo de toda la vida del gr
 ### Rastreo de Tokens (LLM Usage)
 Una de las métricas más importantes es el uso de tokens. El sistema funciona de forma acumulativa:
 1.  **Emisión**: Cada nodo que interactúa con un LLM emite eventos `LlmUsage` con los tokens de su llamada específica.
-2.  **Agregación**: El orquestador de la CLI (`main.rs`) captura estos eventos y los suma en acumuladores globales.
+2.  **Agregación**: `SseMapper` (`dag_engine/sse_mapper.rs`) captura estos eventos y los suma en acumuladores globales (`total_prompt_tokens`, `total_completion_tokens`, etc.); `main.rs` solo instancia el mapper y reenvía sus resultados.
 3.  **Reporte Final**: Al emitir el evento `finish`, el motor incluye el objeto `usage` con la suma total de `promptTokens` y `completionTokens` de todos los nodos que participaron.
 
 ---

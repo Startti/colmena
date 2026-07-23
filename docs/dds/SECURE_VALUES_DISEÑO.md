@@ -56,7 +56,7 @@ Implement a **Secure Values** system where HTTP nodes can mark their outputs as 
 │  ┌──────────────────────────────────────────────────┐   │
 │  │  PostgresSecureValueRepository (impl)           │   │
 │  │  • Manages secure_value_mappings table          │   │
-│  │  • AES-256 encryption/decryption                │   │
+│  │  • pgcrypto pgp_sym_encrypt/decrypt (not GCM)   │   │
 │  │  • Index on (session_id, hash_key)              │   │
 │  └──────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────┘
@@ -78,7 +78,7 @@ CREATE TABLE secure_value_mappings (
     
     -- Mapping
     hash_key VARCHAR(255) NOT NULL,          -- e.g., "<token_1>", "<api_key_2>"
-    encrypted_value BYTEA NOT NULL,          -- AES-256(real_value)
+    encrypted_value BYTEA NOT NULL,          -- pgp_sym_encrypt(real_value)
     
     -- Metadata
     field_name VARCHAR(255),                 -- e.g., "token", "authorization"
@@ -122,7 +122,7 @@ HTTP Node Execution
 │ SecureValueService::hash_output()               │
 │ • Recursively traverse body                     │
 │ • Generate hash_key: <token_1>, <user_id_1>   │
-│ • Encrypt real value: AES-256(value)            │
+│ • Encrypt real value: pgp_sym_encrypt(value)    │
 │ • Store in DB with session_id                   │
 └─────────────────────────────────────────────────┘
         │
@@ -233,7 +233,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 /// Manages encryption, storage, and decryption of sensitive values
-/// Implementation uses AES-256 encryption in the database
+/// Implementation uses pgcrypto pgp_sym_encrypt (OpenPGP CFB, not AES-256-GCM) in the database
 #[async_trait]
 pub trait SecureValueRepository: Send + Sync {
     /// Store encrypted value mapping
@@ -467,7 +467,7 @@ impl PostgresSecureValueRepository {
         Ok(())
     }
 
-    /// Encrypt using AES-256 (requires pgcrypto extension)
+    /// Encrypt using pgcrypto pgp_sym_encrypt (OpenPGP CFB, not AES-256-GCM; requires pgcrypto extension)
     fn encrypt(&self, value: &str) -> Result<Vec<u8>, DagError> {
         // Use pgcrypto: encrypt(value::bytea, key::bytea, 'aes')
         // Key is derived from environment: SECURE_VALUES_KEY
@@ -480,7 +480,7 @@ impl PostgresSecureValueRepository {
         Ok(value.as_bytes().to_vec())
     }
 
-    /// Decrypt using AES-256
+    /// Decrypt using pgcrypto pgp_sym_decrypt
     fn decrypt(&self, encrypted: &[u8]) -> Result<String, DagError> {
         // Placeholder: actual decryption happens in SQL
         String::from_utf8(encrypted.to_vec())
@@ -703,7 +703,7 @@ async fn finalize_dag(&self, status: DagRunStatus) -> Result<(), DagError> {
 
 | Aspect | Measure |
 |--------|---------|
-| **Encryption at Rest** | pgcrypto (AES-256) in PostgreSQL |
+| **Encryption at Rest** | pgcrypto `pgp_sym_encrypt` (OpenPGP CFB, not AES-256-GCM) in PostgreSQL |
 | **Encryption in Transit** | TLS/HTTPS for DB connections |
 | **Key Management** | `SECURE_VALUES_KEY` env var (must be 32+ chars) |
 | **LLM Isolation** | LLM nodes never see real values, only hashes |

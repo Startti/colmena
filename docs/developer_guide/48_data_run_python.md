@@ -71,8 +71,10 @@ Reglas (heredadas de `gsheets_run_python`, mismas validaciones):
 - Pasa por el mismo `StaticRuleValidator`/`SqlPermissions` que el nodo
   `sql_query`, respetando `allowed_schemas` (`information_schema`/
   `pg_catalog` permitidos para introspección).
-- Cap de 100 000 filas por binding (constante compartida con
-  `MAX_BULK_INSERT_ROWS`) → `BindingTooLarge` si se desborda.
+- Cap de 100 000 filas por binding (`SQL_BINDING_ROW_LIMIT` en
+  `tabular_bindings.rs`, distinta de la constante `MAX_BULK_INSERT_ROWS`
+  usada por `sql_bulk_tools.rs` — mismo valor, consts separadas) →
+  `BindingTooLarge` si se desborda.
 - `statement_timeout_ms`/`work_mem_mb` de `runtime_limits` aplican vía `SET
   LOCAL`, igual que `sql_query`.
 

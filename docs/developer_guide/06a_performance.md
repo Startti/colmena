@@ -38,6 +38,8 @@ impl OpenAiAdapter {
 
 ### Benchmark Tests
 
+> **Nota**: este ejemplo es ilustrativo, no ejecutable tal cual. El repo no tiene un directorio `benches/` ni `criterion` como dependencia/target `[[bench]]` en `Cargo.toml` — habría que añadirlos primero. `LlmConfig::new` tampoco toma builders `with_model`/`with_api_key`; su firma real es `LlmConfig::new(provider: LlmProvider)` (`src/libs/colmena/src/llm/domain/llm_config.rs:72`).
+
 ```rust
 // benches/llm_benchmarks.rs
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
@@ -46,9 +48,7 @@ use colmena::llm::domain::*;
 fn benchmark_request_creation(c: &mut Criterion) {
     c.bench_function("create_llm_request", |b| {
         b.iter(|| {
-            let config = LlmConfig::new()
-                .with_model(black_box("gpt-4"))
-                .with_api_key(black_box("test-key"));
+            let config = LlmConfig::new(black_box(LlmProvider::OpenAi));
 
             let messages = vec![
                 LlmMessage::user(black_box("Test message")),
@@ -83,6 +83,9 @@ criterion_main!(benches);
 ### Optimizaciones Comunes
 
 **1. Connection Pooling:**
+
+> **Nota**: patrón de optimización *propuesto*, no el estado actual del código. Hoy `OpenAiAdapter::new()` crea un `Client::new()` nuevo por instancia, sin cliente estático compartido ni tuning de pool (`src/libs/colmena/src/llm/infrastructure/openai_adapter.rs:24-29`), y `lazy_static` no es una dependencia del crate.
+
 ```rust
 // Reutilizar cliente HTTP
 lazy_static! {
@@ -151,8 +154,8 @@ Actualmente, el `DagRunUseCase` ejecuta los nodos de forma **secuencial** siguie
 
 **2. Impacto de Secure Values:**
 El uso de `secure: true` en la configuración de un nodo añade dos pasos adicionales:
-- **Pre-ejecución**: Inyección de secretos desde PostgreSQL/Vault (latencia de DB).
-- **Post-ejecución**: Cifrado (AES-256-GCM) y hashing del resultado antes de guardarlo en memoria o enviarlo al stream.
+- **Pre-ejecución**: Inyección de secretos desde PostgreSQL (latencia de DB) — único backend implementado hoy (`PostgresSecureValueRepository`); "Vault" solo aparece en un comentario como caso de uso futuro hipotético (`postgres_secure_value_repository.rs:49`).
+- **Post-ejecución**: Cifrado vía `pgp_sym_encrypt` de pgcrypto (cifrado simétrico PGP, sin override de cipher-algo → modo por defecto de pgcrypto, no AES-256-GCM) y hashing del resultado antes de guardarlo en memoria o enviarlo al stream (`postgres_secure_value_repository.rs:87`).
 - **Recomendación**: Usa `secure: true` solo en campos estrictamente sensibles para evitar el coste de cifrado en datos públicos.
 
 **3. Persistencia de Estado:**

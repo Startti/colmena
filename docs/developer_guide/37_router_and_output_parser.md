@@ -230,7 +230,7 @@ El router emite **múltiples puertos**, uno por rama declarada + `__decision`. S
 
 ### Qué recibe exactamente el nodo downstream — auto-unwrap del payload
 
-El payload de cada rama es un objeto envuelto (`{ input }` en Mode A, `{ input, extracted }` en Mode B), **no** el valor crudo. Cuando conectás `from: "router.<rama>"` a `to: "<nodo>"` **sin** especificar el puerto destino, el engine intenta desempacarlo automáticamente (*smart extraction*, `run_use_case.rs:974-982`):
+El payload de cada rama es un objeto envuelto (`{ input }` en Mode A, `{ input, extracted }` en Mode B), **no** el valor crudo. Cuando conectás `from: "router.<rama>"` a `to: "<nodo>"` **sin** especificar el puerto destino, el engine intenta desempacarlo automáticamente (*smart extraction*, `run_use_case.rs:1115-1131` dentro de `build_inputs_for`):
 
 1. Mira el `default_input()` del nodo destino (ej. `"input"` para `log`, `llm_call`, etc.).
 2. Si el payload es un objeto **y tiene una clave con ese mismo nombre**, le pasa solo el valor interno.
@@ -242,7 +242,7 @@ Como la clave del payload del router es `input`, esto define una regla simple:
 |---|---|
 | Su puerto por defecto se llama **`input`** (la mayoría: `log`, `llm_call`, `output_parser`, …) | ✅ El engine desempaca `input` solo |
 | Su puerto por defecto **NO** es `input` (ej. `add` espera `a`/`b`) | ⚠️ Recibe el objeto `{ input, extracted }` completo bajo su puerto → casi nunca es lo que querés |
-| El nodo **no declara** `default_input()` | ❌ No le entra nada |
+| El nodo **no declara** `default_input()` | ⚠️ Auto-flatten como último recurso: se mergean todas las claves del objeto (`input`, `extracted`) directo en los inputs del nodo — no es "nada", pero tampoco suele ser lo que querés |
 
 **Patrón seguro (recomendado): sé explícito en ambos lados.** Desempacá con dotted path en `from` y nombrá el puerto en `to`:
 

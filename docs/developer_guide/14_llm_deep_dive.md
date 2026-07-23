@@ -565,7 +565,7 @@ Focus on: 1) Auth flaws, 2) Input validation, 3) Output encoding. Rate severity.
 
 > **Aplica solo a nodos `llm_call`** con tool calling habilitado. Los nodos
 > de un solo turno (`planner`, `reactor`, `critic`, `orchestrator`,
-> `extract_with_schema`) no son afectados — siempre ejecutan exactamente un turno.
+> `information_extraction`) no son afectados — siempre ejecutan exactamente un turno.
 
 ### Motivación
 
@@ -646,9 +646,13 @@ El techo evita que un agente que llama tools distintas (sin activar la guarda de
 bucle) consuma recursos ilimitados. Cuando lo alcanza, también dispara la síntesis
 forzada.
 
-Los nodos de un solo turno (`planner`, `reactor`, `critic`, `orchestrator`,
-`extract_with_schema`) setean internamente `max_turns = 1`, preservando su
-comportamiento anterior sin cambios.
+Los nodos de un solo turno `planner`, `reactor`, `critic` y `orchestrator`
+setean internamente `max_turns = 1` (ver `nodes/planner.rs:385`,
+`nodes/reactor.rs:302`, `nodes/critic.rs:265`, `nodes/orchestrator.rs:731`),
+preservando su comportamiento anterior sin cambios. `information_extraction`
+(`nodes/extraction.rs`) ni siquiera pasa por el loop de tool-calling — hace
+una única llamada directa al LLM — por lo que el concepto de `max_turns` no
+le aplica.
 
 ---
 

@@ -211,8 +211,9 @@ produce a consolidated outcome across all phases.
 ### `secure_value_mappings`  *(PostgreSQL only)*
 
 Stores encrypted secrets (API keys, tokens, passwords) produced by
-`secure_value` nodes. Each secret is encrypted with `pgp_sym_encrypt` (AES-256
-via `pgcrypto`) using the key from the `SECURE_VALUES_KEY` environment
+`secure_value` nodes. Each secret is encrypted with pgcrypto symmetric encryption
+(`pgp_sym_encrypt`/`pgp_sym_decrypt`, OpenPGP CFB — pgcrypto default cipher,
+**not** AES-256-GCM) using the key from the `SECURE_VALUES_KEY` environment
 variable. Rows expire after **24 hours** by default (bumped from the original
 1h on 2026-05-11 via `20260511000001_secure_values_24h_ttl.sql` to support
 sliding-window reuse across consecutive runs of the same agent) and are
@@ -225,7 +226,7 @@ deleted at session cleanup or by the background expiry sweeper.
 | `agent_session_id` | `TEXT` | YES | — | Chat-scoped handle. When set, the agent-first lookup path resolves secrets across multiple runs of the same agent (added by `20260508000001_secure_values_agent_session_id.sql`) |
 | `source_node_id` | `VARCHAR(255)` | NO | — | ID of the `secure_value` node that produced this secret |
 | `hash_key` | `VARCHAR(255)` | NO | — | Deterministic hash of the secret (used as a lookup key without exposing the plaintext) |
-| `encrypted_value` | `BYTEA` | NO | — | AES-256 ciphertext produced by `pgp_sym_encrypt` |
+| `encrypted_value` | `BYTEA` | NO | — | pgcrypto ciphertext produced by `pgp_sym_encrypt` (OpenPGP CFB, not AES-256-GCM) |
 | `field_name` | `VARCHAR(255)` | YES | — | Name of the field this secret corresponds to (e.g., `api_key`, `Authorization`) |
 | `created_at` | `TIMESTAMPTZ` | YES | `NOW()` | When the secret was stored |
 | `expires_at` | `TIMESTAMPTZ` | YES | `NOW() + INTERVAL '24 hours'` | Absolute expiry time; rows past this timestamp are eligible for deletion. Pre-existing rows keep whatever TTL they were written with — they are swept naturally by `cleanup_expired_for_run` as their owning runs complete |

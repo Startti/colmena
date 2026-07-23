@@ -120,9 +120,11 @@ El diagrama de abajo muestra exactamente cómo los tres fields del JSON terminan
                                      ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │ ④ Lectura en LlmNode::execute                                               │
-│   src/libs/colmena/src/dag_engine/infrastructure/nodes/llm.rs               │
+│   src/libs/colmena/src/dag_engine/infrastructure/nodes/llm.rs:3041-3056     │
 │                                                                             │
-│   Dentro del bloque `if !history_exists` (= primer turno de la sesión):     │
+│   Corre INCONDICIONALMENTE en cada ejecución del nodo — ANTES y AFUERA     │
+│   del bloque `if !history_exists`, o sea en TODOS los turnos, no solo el   │
+│   primero:                                                                  │
 │                                                                             │
 │     let tz_str = inputs.get("__colmena_timezone")                           │
 │         .and_then(|v| v.as_str())                                           │
@@ -196,19 +198,19 @@ El diagrama de abajo muestra exactamente cómo los tres fields del JSON terminan
 │   Locale: es-CO                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
                                      │
-                                     │ sections.push(context_block)
+                                     │ llm_config.with_volatile_system_suffix(context_block)
                                      ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │ ⑦ Ensamble del system message                                               │
-│   (sections: Vec<String> en LlmNode::execute, dentro del !history_exists)   │
+│   llm.rs:3055 (afuera de sections) + llm_config.rs:133 + adapters           │
 │                                                                             │
-│   sections[0] = context_block                  ← lo nuestro va PRIMERO      │
-│   sections[1] = graph_author_system_message    ← lo que escribió el autor   │
-│   sections[2] = ATTACHMENTS_SYSTEM_PRELUDE     ← si hay attachments         │
-│   sections[3] = tool_use_instructions          ← si hay tools               │
-│   sections[…] = …                                                           │
-│                                                                             │
-│   Se joinea con "\n\n---\n" entre secciones.                                │
+│   El context_block NO entra al Vec<String> `sections` (ese vec solo tiene   │
+│   graph_author_system_message / ATTACHMENTS_SYSTEM_PRELUDE /               │
+│   tool_use_instructions / etc., construido dentro de !history_exists y     │
+│   joineado con "\n\n---\n"). En cambio se guarda aparte como                │
+│   `LlmConfig::volatile_system_suffix` y cada adapter de provider lo agrega  │
+│   DESPUÉS del contenido system estable, fuera del prefijo cacheado (ver     │
+│   src/libs/colmena/src/llm/infrastructure/anthropic_adapter.rs:207-213).    │
 └─────────────────────────────────────────────────────────────────────────────┘
                                      │
                                      │ LlmRequest construction
@@ -243,10 +245,10 @@ El diagrama de abajo muestra exactamente cómo los tres fields del JSON terminan
 
 | Turno | Bloque temporal | Por qué |
 |---|---|---|
-| **1** (sin history persistido) | Se computa y prepende a `sections[0]` | `if !history_exists` se cumple, todos los `sections.push` corren. |
-| **2+** (con history persistido) | NO se re-computa | Se entra al else-branch de `if !history_exists`. El system message de turno 1 ya está en `llm_node_history` y se replay-ea. Esto significa que **el datetime se congela al primer turno** — para conversaciones cortas (típicas) está bien; para sesiones de muchas horas, conviene re-arquitectar. |
+| **1** (sin history persistido) | Se computa y se carga como `volatile_system_suffix` | El bloque de cómputo (`llm.rs:3041-3056`) corre siempre, independientemente de `history_exists`. |
+| **2+** (con history persistido) | SE RE-COMPUTA igual | Mismo bloque incondicional corre en cada ejecución del nodo; el timestamp se refresca cada turno vía `volatile_system_suffix`, que cada adapter agrega fuera del prefijo cacheado. |
 
-> **v1 limitation.** El timestamp NO se actualiza turno-a-turno. Es aceptable para sesiones < 24h y se documenta en el spec. Si en el futuro se necesita, conviene mover la inyección al call assembly afuera del `!history_exists` guard.
+> **Cache-safe desde 2026-06-11.** El timestamp SÍ se actualiza turno-a-turno. Ver el comentario en `llm.rs:3032-3040` y [§14 — Bloque temporal cache-safe](14_llm_deep_dive.md).
 
 ## Cómo se computa la hora
 
@@ -344,7 +346,7 @@ Una futura iteración podría exponer `[temporal_context_defaults]` en un config
 
 ## Limitaciones conocidas (v1)
 
-1. **Bloque no se refresca turno-a-turno.** Solo el primer turno computa el datetime; turnos siguientes lo reciben del history persistido. Para sesiones de > algunas horas, el modelo verá un timestamp viejo. Ver "Qué pasa en cada turno" arriba.
+1. ~~Bloque no se refresca turno-a-turno~~ — **resuelto 2026-06-11.** El datetime se recomputa en cada turno vía `LlmConfig::volatile_system_suffix` (llm.rs:3041-3056), fuera del prefijo cacheado. Ver "Qué pasa en cada turno" arriba y [§14 — Bloque temporal cache-safe](14_llm_deep_dive.md).
 2. **No hay locale-aware formatting del `human` echo.** `chrono` default es inglés (`Sunday, May 18, 2026`). Si querés `Domingo, 18 de mayo de 2026`, requiere `chrono`'s `unstable-locales` feature + lookup de locale → chrono `Locale` enum. Fuera de scope v1.
 3. **No hay override per-nodo.** Si querés que un `llm_call` específico mienta sobre la timezone (ej. simular respuestas como si fuera de otra zona), no podés vía config — sería una feature explícita "per-node temporal context override".
 4. **No hay locale-aware validation.** Cualquier string en `locale` pasa al modelo. Si pasás `"klingon"`, el LLM hace lo que pueda.

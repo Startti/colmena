@@ -76,7 +76,7 @@ JSON estructurado almacenado por versión. Ejemplo mínimo de un Excel vacío:
 }
 ```
 
-Esquema detallado en [domain/ir/excel.rs](../../src/libs/colmena/src/documents/domain/ir/excel.rs), [domain/ir/word.rs](../../src/libs/colmena/src/documents/domain/ir/word.rs) y [domain/ir/html.rs](../../src/libs/colmena/src/documents/domain/ir/html.rs). El IR HTML modela `slides` (con `layout`, `title`, `subtitle`, `notes`) que contienen `blocks` tipados (paragraph, heading, list, table, image, chart, callout, columns, page_break, etc.), más propiedades de documento (`theme`, `layout_mode`, `doc_props`).
+Esquema detallado en [domain/ir/excel.rs](../../src/libs/colmena/src/documents/domain/ir/excel.rs), [domain/ir/word.rs](../../src/libs/colmena/src/documents/domain/ir/word.rs) y [domain/ir/html.rs](../../src/libs/colmena/src/documents/domain/ir/html.rs). El IR HTML modela `slides` (con `layout`, `title`, `subtitle`, `notes`) que contienen `blocks` tipados (heading, paragraph, list, blockquote, code, table, chart, kpi_card, kpi_grid, image, two_columns, three_columns, comparison, callout, divider, video, auto_toc), más propiedades de documento (`theme`, `layout_mode`, `doc_props`).
 
 ### Patch y `PatchSource`
 Un `Patch` agrupa una lista ordenada de `PatchOp` que se aplican **atómicamente** sobre `base_version`. Si una falla, ninguna se aplica.
@@ -96,7 +96,7 @@ Un `Patch` agrupa una lista ordenada de `PatchOp` que se aplican **atómicamente
 
 ### Versionado inmutable
 - Cada patch produce una nueva versión: `v1`, `v2`, `v3`, …
-- Retención por defecto: **20 versiones** (constante `DEFAULT_RETENTION` en [runtime.rs:32](../../src/libs/colmena/src/documents/application/runtime.rs#L32)). `v1` siempre se conserva aunque caiga fuera de la ventana.
+- Retención por defecto: **20 versiones** (constante `DEFAULT_RETENTION` en [runtime.rs:37](../../src/libs/colmena/src/documents/application/runtime.rs#L37)). `v1` siempre se conserva aunque caiga fuera de la ventana.
 - Por versión se persiste: IR JSON, render binario y metadatos del patch aplicado.
 - `document_rollback` es **no destructivo**: copia la IR de la versión objetivo a un nuevo HEAD; el historial completo se mantiene.
 
@@ -133,11 +133,11 @@ Cuando el HEAD del servidor es más reciente que `base_version`:
 
 > Convención clave: las ops referencian la hoja por su **`sheet_id` estable** (ej. `"s1"`), nunca por el nombre visible. Para una hoja recién creada con `add_sheet`, **aplica un patch separado**: lee el ID generado en `diff_summary` y úsalo en el patch siguiente.
 
-### Word (14 ops)
+### Word (15 ops)
 
 | Op | Propósito |
 |----|-----------|
-| `insert_block` | Insertar párrafo, heading, lista, tabla, imagen o page-break. Posicionar con `before` / `after`; sin ambos → append. |
+| `insert_block` | Insertar párrafo, heading, lista o tabla. Posicionar con `before` / `after`; sin ambos → append. |
 | `replace_block` / `delete_block` / `move_block` | Manipular bloques completos por `block_id`. |
 | `set_heading_level` | Cambiar el nivel de un heading (1-6). |
 | `replace_run_text` | Reemplazar el texto de un *run* dentro de un párrafo/heading. |
@@ -158,12 +158,13 @@ Las ops HTML se agrupan por nivel: slide / block / table / list / documento.
 | `set_slide_layout` | Cambiar el layout (`SectionDivider`/`Title` requieren `title` no vacío). |
 | `set_slide_title` | Set/clear título y subtítulo del slide (independiente de blocks). |
 | `set_slide_notes` | Set/clear las speaker notes. |
-| `insert_html_block` | Insertar block en un slide (paragraph/heading/list/table/image/chart/callout/columns/page_break…). Posicionar con `before` / `after`; sin ambos → append. Devuelve `block_id`. |
+| `insert_html_block` | Insertar block en un slide (heading/paragraph/list/blockquote/code/table/chart/kpi_card/kpi_grid/image/two_columns/three_columns/comparison/callout/divider/video/auto_toc). Posicionar con `before` / `after`; sin ambos → append. Devuelve `block_id`. |
 | `delete_html_block` / `replace_html_block` / `move_html_block` | Manipular blocks completos por `block_id`. |
 | `insert_html_table_row` / `delete_html_table_row` / `update_html_table_cell` | Filas y celdas de tablas. |
 | `insert_html_list_item` / `delete_html_list_item` / `update_html_list_item` | Ítems de listas. |
 | `set_theme` | Cambiar tema visual (`executive` \| `minimal` \| `vibrant` \| `dark`). |
 | `set_doc_props` | Set parcial de `title` / `author` / `date` / `locale` (`en` \| `es`). |
+| `set_footer` | Set del `FooterConfig` del documento (`enabled`, `page_numbers`, `custom_text?`). |
 
 Bloques `image` referencian assets via `AssetId` (ver §5). El render embebe Chart.js y `slides_runtime.js` (carpeta [`infrastructure/render/html_assets/`](../../src/libs/colmena/src/documents/infrastructure/render/html_assets/)) para tablas/listas/charts/navegación en el `.html` final.
 
@@ -187,7 +188,7 @@ Configurables vía el campo `storage_backend` (en config de nodo o de `llm_call.
 ```
 
 - `storage_root` por defecto: `./.colmena/documents` (constante `DEFAULT_STORAGE_ROOT` en [runtime.rs](../../src/libs/colmena/src/documents/application/runtime.rs)).
-- `asset_storage_root` por defecto: directorio hermano `<storage_root>_assets` (o `.colmena/documents/assets` si tampoco se setea `storage_root`).
+- `asset_storage_root` por defecto: directorio hermano `<storage_root>_assets` (o `.colmena/documents_assets` si tampoco se setea `storage_root`).
 - Layout en disco (artifacts):
   ```
   {storage_root}/artifacts/{artifact_id}/
@@ -448,7 +449,7 @@ El agente —siguiendo el system prelude— hará: `document_create({kind:"excel
 
 ## 8. Workflow estándar recomendado
 
-El `DOCUMENTS_SYSTEM_PRELUDE` enseña al modelo este patrón ([document_tools.rs:284-378](../../src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/document_tools.rs#L284-L378)):
+El `DOCUMENTS_SYSTEM_PRELUDE` enseña al modelo este patrón (definido en [document_tools.rs:214-215](../../src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/document_tools.rs#L214-L215) vía `include_str!`; texto real en [text/prompts/documents_system_prelude.md](../../src/libs/colmena/text/prompts/documents_system_prelude.md)):
 
 1. **Crear** con `document_create` (omite `initial_ir` salvo que necesites algo muy específico — es más simple shapearlo con patches).
 2. **Patchar** con `document_apply_patch`. Pasa el `version_id` más reciente como `base_version`.
@@ -494,7 +495,7 @@ cargo test --lib document_tools
 
 ## 11. Referencias rápidas
 
-- Bundler runtime: [`DocumentRuntime::from_config`](../../src/libs/colmena/src/documents/application/runtime.rs#L58)
+- Bundler runtime: [`DocumentRuntime::from_config`](../../src/libs/colmena/src/documents/application/runtime.rs#L87)
 - Catálogo de ops: [`PatchOp`](../../src/libs/colmena/src/documents/domain/patch.rs#L34)
-- Manual del LLM: [`DOCUMENTS_SYSTEM_PRELUDE`](../../src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/document_tools.rs#L284)
+- Manual del LLM: [`DOCUMENTS_SYSTEM_PRELUDE`](../../src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/document_tools.rs#L214) (texto en [text/prompts/documents_system_prelude.md](../../src/libs/colmena/text/prompts/documents_system_prelude.md))
 - Diseño completo (interno): [docs/superpowers/specs/2026-04-21-documents-feature-design.md](../superpowers/specs/2026-04-21-documents-feature-design.md)

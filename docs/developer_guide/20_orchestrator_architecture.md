@@ -575,7 +575,7 @@ Los archivos Rust relevantes para el orchestrator:
 
 | Archivo | Responsabilidad |
 |---|---|
-| [`infrastructure/nodes/orchestrator.rs`](../../src/libs/colmena/src/dag_engine/infrastructure/nodes/orchestrator.rs) | Implementación principal del orchestrator (1864 líneas) |
+| [`infrastructure/nodes/orchestrator.rs`](../../src/libs/colmena/src/dag_engine/infrastructure/nodes/orchestrator.rs) | Implementación principal del orchestrator (2244 líneas) |
 | [`infrastructure/nodes/planner.rs`](../../src/libs/colmena/src/dag_engine/infrastructure/nodes/planner.rs) | Nodo Planner con schema forzado |
 | [`infrastructure/nodes/critic.rs`](../../src/libs/colmena/src/dag_engine/infrastructure/nodes/critic.rs) | Nodo Critic con retry logic |
 | [`infrastructure/nodes/reactor.rs`](../../src/libs/colmena/src/dag_engine/infrastructure/nodes/reactor.rs) | Nodos Phase Reactor y Final Reactor |

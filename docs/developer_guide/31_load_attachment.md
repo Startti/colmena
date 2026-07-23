@@ -12,7 +12,7 @@ Items 13 + auto-summary + `attachment_run_python` (2026-06-09 / 2026-06-10) **ag
 | Pregunta del usuario | Tool primario |
 |---|---|
 | "Qué columnas tiene este CSV?" | Catalog auto-summary (gratis, ya en system message) |
-| "Cuál producto tiene precio más alto?" | `attachment_run_python` (math server-side) |
+| "Cuál producto tiene precio más alto?" | `data_run_python` (math server-side; `attachment_run_python` está DEPRECATED desde 2026-07-02, ver `text/tools/sql.yaml`) |
 | "Cargá este CSV en mi DB" | `sql_bulk_insert_from_attachment` (COPY) |
 | **"Leéme el PDF" / "Describime la imagen" / "Resumime este markdown"** | **`load_attachment`** |
 | "Mostrame la fila 23 del CSV verbatim" | `load_attachment` |
@@ -234,17 +234,25 @@ Cuando hay al menos un attachment en el catálogo de la sesión Y `attachments_e
 
 ### Orden de ensamblado del system message
 
-El motor arma el system message en este orden (`llm.rs::execute`):
+Desde el cambio "cache-safe temporal context" (commit `e8191dd1`), el bloque de
+contexto temporal/geográfico **ya no va primero**: se construye con
+`format_temporal_context_block` y se adjunta vía
+`llm_config.with_volatile_system_suffix(context_block)`
+(`llm.rs` ~línea 3054), que cada adapter de provider agrega al **final** del
+system message (`openai_adapter.rs:44-58`, `gemini_adapter.rs:276`/`1305`,
+`anthropic_adapter.rs:207-213`). El motor arma el resto en este orden
+(`llm.rs::execute`, comentario en línea 3059: *"First stable section now that
+the temporal block moved to the volatile suffix"*):
 
 ```
-[bloque de contexto temporal/geográfico]   ← siempre primero
 [TU system_message]                          ← el rol/persona/política del agente
 [ATTACHMENTS_SYSTEM_PRELUDE]                 ← auto, solo si hay adjuntos
 [catálogo de documentos]                     ← auto, una línea por doc
 [lista de tools disponibles]                 ← auto, si hay tools
+[bloque de contexto temporal/geográfico]     ← siempre último (volatile suffix, no afecta el prompt cache)
 ```
 
-El prelude se inyecta **después** de tu `system_message`. El modelo lee primero tu persona/política, luego la mecánica de attachments.
+El prelude se inyecta **después** de tu `system_message`. El modelo lee primero su persona/política, luego la mecánica de attachments, y el timestamp fresco llega al final para no invalidar el prompt cache.
 
 ### Texto exacto del prelude
 

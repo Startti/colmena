@@ -21,6 +21,10 @@ El stream tiene **dos niveles de eventos**:
 
 Los eventos de subgrafo nunca se mezclan con los de top-level: si estás dentro de un agente del orchestrator verás `subgraph-text-delta`, nunca `text-delta`.
 
+### Campos `level` / `path` en todos los eventos
+
+`SseMapper::map()` etiqueta **todas** las líneas emitidas (top-level y de subgrafo) con dos campos adicionales antes de devolverlas: `level` (profundidad de anidamiento, `u32`) y `path` (linaje como string, p.ej. `"parent>child"`). Son aditivos — no aparecen en las tablas de campos de este documento por brevedad, pero están presentes en absolutamente todos los frames. Ver `src/libs/colmena/src/dag_engine/sse_mapper.rs:629-639`.
+
 ---
 
 ## Eventos top-level
@@ -126,6 +130,35 @@ Emitido cuando el LLM invoca la herramienta sintética `load_skill`.
 
 ---
 
+### Status — heartbeat de progreso
+
+| Evento | Campos | Cuándo |
+|--------|--------|--------|
+| `status` | `stage` (siempre `"running"`), `node_id`, `idleSecs` | Emitido periódicamente mientras un nodo lleva tiempo sin producir otros eventos (evento `Progress` interno) |
+
+```json
+{ "type": "status", "stage": "running", "node_id": "llm_1", "idleSecs": 12 }
+```
+
+> Se emite tanto a nivel top como dentro de subgrafos (en ese caso también lleva `"type": "status"`, sin prefijo `subgraph-`; se distingue por `level`/`path`). Ver `sse_mapper.rs:406-411` y `sse_mapper.rs:565-570`.
+
+---
+
+### Agent-turn — límites de turno del LLM
+
+| Evento | Campos | Cuándo |
+|--------|--------|--------|
+| `agent-turn` | `phase` (`"start"` o `"finish"`), `node_id` | Emitido al iniciar/terminar un turno de mensaje del LLM (`LlmMessageStart`/`LlmMessageFinish`), tanto top-level como dentro de subgrafos |
+
+```json
+{ "type": "agent-turn", "phase": "start",  "node_id": "llm_1" }
+{ "type": "agent-turn", "phase": "finish", "node_id": "llm_1" }
+```
+
+> A diferencia de `finish`/`error`, `agent-turn` **no termina el stream** — solo marca límites de turno para mantener vivo el watchdog de "sin eventos" del cliente. Ver `sse_mapper.rs:334-343` (top-level) y `sse_mapper.rs:611-620` (subgrafo).
+
+---
+
 ### Thinking — LLMs internos del nodo `orchestrator`
 
 Los sub-componentes internos del `orchestrator` (`planner`, `phase_reactor`, `critic`) emiten sus tokens como `thinking-delta`. **No** son eventos de subgrafo.
@@ -200,6 +233,7 @@ El texto completo también queda disponible en `output.final_response` del `node
 | `usage-summary` | `nodes` (array) | Justo antes de `finish` |
 | `finish` | `finishReason`, `usage`, `output` | Fin de la ejecución |
 | `error` | `errorText` | Error irrecuperable |
+| `cancelled` | `reason`, `output` | Emitido justo antes del `finish` con `finishReason: "cancelled"`, cuando la ejecución se cancela (p.ej. el usuario detiene el run). Cierra cualquier bloque de texto abierto antes de emitirse. |
 
 #### `usage-summary.nodes`
 
@@ -244,6 +278,7 @@ El texto completo también queda disponible en `output.final_response` del `node
 |-------|--------|
 | `"stop"` | Ejecución completada normalmente |
 | `"suspended"` | El grafo se pausó esperando respuesta del usuario |
+| `"cancelled"` | La ejecución fue cancelada (ver evento `cancelled` arriba); precedido por un frame `cancelled` con `reason`/`output` |
 
 En caso de `suspended`, `output` contiene:
 
@@ -295,6 +330,7 @@ Todos los eventos dentro de un nodo `subgraph` o de un agente-tarea del `orchest
 | `subgraph-tool-input-delta` | `toolCallId`, `inputTextDelta` | Chunk de args en streaming |
 | `subgraph-tool-input-available` | `toolCallId`, `toolName`, `input` | Args completos del tool |
 | `subgraph-tool-output-available` | `toolCallId`, `output` | Resultado del tool |
+| `subgraph-tool-described` | `nodeId`, `toolCallId`, `toolName` | Contraparte de subgrafo de `tool-described` — emitido cuando `describe_tool` resuelve dentro de un `subgraph` o agente-tarea del orchestrator. |
 
 ### Skill
 
@@ -533,9 +569,13 @@ Para reanudar, el cliente envía las respuestas con el mismo `session_id`. El pl
 | `tool-input-available` | top | `toolCallId`, `toolName`, `input` | — |
 | `tool-output-available` | top | `toolCallId`, `output` | — |
 | `skill-loaded` | top | `nodeId`, `toolCallId`, `skillName`, `source`, `sizeBytes` | `reference` |
+| `tool-described` | top | `nodeId`, `toolCallId`, `toolName` | — |
+| `status` | top/sub | `stage`, `node_id`, `idleSecs` | — |
+| `agent-turn` | top/sub | `phase`, `node_id` | — |
 | `thinking-delta` | top | `node_id`, `node_type`, `delta` | — |
 | `usage-summary` | top | `nodes` | — |
 | `finish` | top | `finishReason`, `usage`, `output` | — |
+| `cancelled` | top | `reason`, `output` | — |
 | `error` | top | `errorText` | — |
 | `subgraph-node-start` | sub | `node_id`, `node_type`, `config`, `inputs` | — |
 | `subgraph-node-end` | sub | `node_id`, `node_type`, `output` | — |
@@ -549,6 +589,7 @@ Para reanudar, el cliente envía las respuestas con el mismo `session_id`. El pl
 | `subgraph-tool-input-delta` | sub | `toolCallId`, `inputTextDelta` | — |
 | `subgraph-tool-input-available` | sub | `toolCallId`, `toolName`, `input` | — |
 | `subgraph-tool-output-available` | sub | `toolCallId`, `output` | — |
+| `subgraph-tool-described` | sub | `nodeId`, `toolCallId`, `toolName` | — |
 | `subgraph-skill-loaded` | sub | `nodeId`, `toolCallId`, `skillName`, `source`, `sizeBytes` | `reference` |
 | `subgraph-usage-summary` | sub | `nodes` | — |
 | `subgraph-error` | sub | `errorText` | — |

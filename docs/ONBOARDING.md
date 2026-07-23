@@ -104,7 +104,7 @@ You write JSON graphs that orchestrate LLMs, tools, SQL, HTTP, etc. You do not m
 
 9. **If you need agent-session continuity (memory, HITL, secrets):**
    - [`docs/developer_guide/15_memory_guide.md`](./developer_guide/15_memory_guide.md) — conversational memory across sessions
-   - [`docs/developer_guide/13_security_strategy.md`](./developer_guide/13_security_strategy.md) — `secure_suspend` for collecting secrets; AES-256-GCM at rest
+   - [`docs/developer_guide/13_security_strategy.md`](./developer_guide/13_security_strategy.md) — `secure_suspend` for collecting secrets; pgcrypto (`pgp_sym_encrypt`) at rest
 
 10. **Read 3–4 test graphs** that match your use case from [`tests/graphs/`](../tests/graphs/):
     - `tests/graphs/basic/` — simple nodes (trigger, math, log, suspend)
@@ -140,9 +140,9 @@ Complete Paths 1–3 first — otherwise the architecture references below will 
 
    | Area | Design doc |
    |---|---|
-   | LLM module | [`docs/dds/MODULO_LLM_DISEÑO.md`](./dds/MODULO_LLM_DISEÑO.md) |
+   | LLM module | [`docs/developer_guide/14_llm_deep_dive.md`](./developer_guide/14_llm_deep_dive.md) |
    | DAG engine | [`docs/dds/DAG_ENGINE_DISEÑO.md`](./dds/DAG_ENGINE_DISEÑO.md) |
-   | Agents and tools | [`docs/dds/DISEÑO_AGENTES_Y_TOOLS.md`](./dds/DISEÑO_AGENTES_Y_TOOLS.md) |
+   | Agents and tools | [`docs/developer_guide/09_tool_calling.md`](./developer_guide/09_tool_calling.md) |
    | Security / secrets | [`docs/dds/SECURE_VALUES_DISEÑO.md`](./dds/SECURE_VALUES_DISEÑO.md) |
 
 7. **[`docs/CHANGELOG_2026-05.md`](./CHANGELOG_2026-05.md)** — scan recent entries

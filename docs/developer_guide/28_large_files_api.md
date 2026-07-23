@@ -140,7 +140,7 @@ RAM en vuelo ~1 MB (chunk + sockets) independiente del tamaño del archivo, **ex
 `tests/graphs/media/`:
 
 - `image_url_anthropic.json` / `image_url_openai.json` / `image_url_gemini.json` — imágenes JPEG vía signed URL (path URL passthrough en Anthropic+OpenAI, Files API en Gemini).
-- `pdf_url_anthropic.json` / `pdf_url_openai.json` / `pdf_url_gemini.json` — PDFs ≥ 30 MB vía signed URL (path Files API en los 3).
+- `pdf_url_anthropic.json` / `pdf_url_openai.json` / `pdf_url_gemini.json` — PDFs de ~12 MB (`size_bytes: 12582912`) vía signed URL (path Files API en los 3; el `url` se usa por elección del test, no porque el archivo supere el threshold de 30 MB).
 
 Las URLs firmadas en los JSONs expiran a las 6 h. Para regenerarlas ver `tests/graphs/media/README.md`.
 

@@ -26,7 +26,18 @@ La **Arquitectura Hexagonal** (también conocida como **Ports and Adapters**) es
 
 ## Estructura del Proyecto
 
-Basándome en el repositorio analizado, la estructura sigue este patrón:
+> **Nota**: Este documento es un tutorial genérico de Arquitectura Hexagonal que usa un
+> dominio ficticio `User` (TypeScript primero, luego Rust) como ejemplo pedagógico — no
+> describe la estructura real de Colmena. La estructura real de Colmena vive en
+> `src/libs/colmena/src/` con módulos `dag_engine/`, `llm/`, `gdocs/`, `gsheets/`,
+> `google_oauth/`, `crdt_documents/`, `documents/`, `skills/`, `storage/`, `web/`,
+> `shared/`, `python_bindings/`, `node_bindings/`, `attachment_gc/`, `bin/`, `text/`
+> (no existe un módulo `user/` ni tipos `User`/`UserId`/`UserRepository`). Ver
+> `docs/dds/ARQUITECTURA_HEXAGONAL_GUIA.md` §"Introducción" y
+> [`docs/developer_guide/01_architecture.md`](../developer_guide/01_architecture.md)
+> para la arquitectura real de Colmena.
+
+El siguiente ejemplo ilustra el patrón con un dominio ficticio `User`:
 
 ```
 src/
@@ -390,6 +401,10 @@ export const ServiceContainer = {
 
 ### Estructura de Proyecto Rust
 
+> **Nota**: Este árbol `src/user/...` sigue siendo el ejemplo ficticio con fines
+> didácticos, no la estructura real de Colmena (que no tiene módulo `user/`; ver la
+> nota al inicio de la sección "Estructura del Proyecto").
+
 ```
 src/
 ├── lib.rs
@@ -424,6 +439,17 @@ src/
 ### Implementación en Rust
 
 #### 1. Cargo.toml
+
+> **Nota**: El `Cargo.toml` de ejemplo a continuación es genérico, para ilustrar el
+> patrón de dependencias de una app hexagonal con Axum + SQLx — no es el `Cargo.toml`
+> real de Colmena. El crate real se llama `colmena_dag_engine` (ver
+> `src/libs/colmena/Cargo.toml`), y no existe un módulo `user/`. A diferencia del
+> ejemplo genérico, Colmena sí usa `axum` (servidor REST/WebSocket del modo `serve`)
+> y `sqlx` como su capa de persistencia real (Postgres/SQLite) para DAG state,
+> memoria conversacional, secure values y el registro de attachments — ver
+> `postgres_dag_state_repository.rs`, `postgres_conversation_repository.rs`,
+> `postgres_secure_value_repository.rs`, `postgres_attachment_registry.rs`, entre
+> otros.
 
 ```toml
 [package]
