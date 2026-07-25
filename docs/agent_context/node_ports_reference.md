@@ -66,6 +66,7 @@ In Colmena's DAG engine, each node has optional **default ports** for input and 
 | Node | Purpose | Key Behavior |
 |---|---|---|
 | **mock_input** | Test data | Emits config as-is without transformation |
+| **current_time** | Current timestamp | Takes no config and no inputs; emits the current UTC time as an RFC3339 string, generated fresh each run |
 
 ### **Media Generation Nodes**
 
@@ -74,6 +75,16 @@ In Colmena's DAG engine, each node has optional **default ports** for input and 
 | **image_generation** | Generate images | Calls OpenAI (gpt-image-1, dall-e-3) or Google Vertex Imagen 4; persists output via `OutputStorageRepository`; returns `{ images: [{ document_id, mime_type, size_bytes, description }], provider, model }`. Plan B (2026-05-25) removed the legacy `attachment_id`/`url` fields. Only registered when an engine storage adapter is present (default for `EngineConfig::from_env`). |
 | **tts** | Synthesize speech | OpenAI (tts-1, gpt-4o-mini-tts), ElevenLabs (eleven_multilingual_v2, etc.), or Google Gemini TTS. Persists audio bytes via `OutputStorageRepository`; returns `{ audio: { document_id, mime_type, size_bytes, duration_ms, description }, provider, model }`. Plan B (2026-05-25) removed the legacy `attachment_id`/`url` fields. |
 | **image_edit** | Edit an existing image | OpenAI gpt-image-1 (only provider today) via `/v1/images/edits`. Fetches `source_url` (data:, http(s), or `$attachment:<document_id>`) + optional `mask_url`, posts multipart, persists output via `OutputStorageRepository`. Returns same shape as `image_generation`. |
+
+### **Documents Nodes**
+
+Versioned document artifacts (Excel/Word) with an optimistic-concurrency edit model, backed by a pluggable storage backend (`localfs` default; `gcs` behind a feature flag). All three read every field input-first with a config fallback. See [§27](../developer_guide/27_documents_library.md).
+
+| Node | Purpose | Key Behavior |
+|---|---|---|
+| **document_create** | Create a versioned document | Creates an Excel/Word artifact from an optional `initial_ir`. Requires `kind` (`excel`\|`word`). Returns `{ artifact_id, version_id, label }`, or an error object on failure. |
+| **document_edit** | Patch a document → new version | Applies an ordered `ops` array against a `base_version`. Optimistic concurrency: returns a structured `VersionConflict` (as output, not a thrown error) if the artifact advanced past `base_version`. Returns `{ version_id, diff_summary }`. |
+| **document_read** | Read a document's IR | Returns `{ ir, version_id }` for `artifact_id`; reads current HEAD unless a specific `version` is given. |
 
 ---
 
@@ -87,7 +98,7 @@ In Colmena's DAG engine, each node has optional **default ports** for input and 
 | `input` | — | `output` | Static input — reads from config |
 | `suspend` | `question` | `answer_received` | Suspend/resume — question→answer flow |
 | `secure_suspend` | `secrets` | `handles` | Secret collection — pauses, persists encrypted, returns handles only |
-| `loop_controller` | `loop_status` | `output` | Loop control — manages loop state |
+| `loop_controller` | `loop_status` | `output` | Loop control. Payload: `output` is an object that always carries `__colmena_loop_status` (one of `NEXT_TURN` / `FINISHED` / `SUSPENDED`; default `FINISHED`, forced to `SUSPENDED` when `suspend_flag` is set). Conditionally adds `question` (when `SUSPENDED` and a `question` is present) or `final_result` (when `FINISHED` and `all_tasks` is present). Note the emitted key is `__colmena_loop_status`, distinct from the `loop_status` input. |
 | `router` | `input` | — | **Multi-port output** — one port per branch (`<branch_name>`, non-null only on selected) + `__decision`. No default output port; downstream nodes read specific branch ports via `from: "router.<branch_name>"`. |
 | `output_parser` | `input` | — | **Raw extracted JSON** — emits the parsed object directly (not wrapped in `{ output: ... }`). Downstream reads schema fields via dotted paths (e.g., `parser.intent`). Hard-errors on empty input. |
 | **add** | — | `output` | **Requires explicit `a`, `b` fields** |
@@ -96,22 +107,26 @@ In Colmena's DAG engine, each node has optional **default ports** for input and 
 | **divide** | — | `output` | **Requires explicit `a`, `b` fields** |
 | `exponential` | `input` | `output` | Power function — single numeric input |
 | **http_request** | — | `body` | **Requires explicit `url`, `method`, etc.** See multipart mode note below. |
-| **socketio_request** | — | `response` | **Requires explicit `url`, `event`, etc.** |
-| `sql_query` | `query` | `output` | SQL query execution — permission control, validation, RLS |
+| **socketio_request** | — | `response` | **Requires explicit `url`, `event`, etc.** Emits a flat envelope (not wrapped in `{ output: ... }`). Success: `{ success: true, event, response, pre_responses?: [{event, response}] }` — `response` is the opaque ack/emit payload. Failure (returned as `Ok`, not `Err`): `{ success: false, event, error, failed_pre_event?, pre_responses? }` + injected transport-context fields. `success` is the discriminator. |
+| `sql_query` | `query` | `output` | SQL execution — permission control, validation, RLS. Success payload: top-level `{ output, row_count, truncated }` (+ optional `warnings[]`, `optimization_hints[]` when non-empty). `output` **shape varies by last statement**: SELECT → array of row objects keyed by column name; INSERT/UPDATE/DELETE → `{ rows_affected: <sum> }`; CREATE TABLE → `{ created: true, type: "table" }`; CREATE FUNCTION → `{ created: true }`. On failure the whole payload is replaced by `{ error, source: "static_validator"\|"llm_critic"\|"execution" }`. |
 | `python_script` | — | — | **Dynamic inputs & outputs** — all inputs flattened as Python variables; output is the raw value of the `output` variable (not wrapped in `{ output: ... }`), so edges pass it through unchanged |
-| `planner` | — | `result` | **Dynamic inputs** — any input is treated as text for planning |
-| `critic` | — | `result` | **Dynamic inputs** — `texts.*` inputs reviewed by LLM |
-| `information_extraction` | — | `result` | **Dynamic inputs** — `texts.*` inputs extracted per schema |
-| `reactor` | — | `result` | **Dynamic inputs** — `texts.*` summarized and reviewed |
+| `planner` | — | `result` | **Dynamic inputs**. Payload: `result` = `{ items: [{task, assigned_to, completed, phase, parallel}] }`; sibling top-level `extra_info.raw_response` (raw LLM text). Suspend branch instead emits top-level `__colmena_status: "SUSPENDED"` + `result: { questions: [...] }`. Not wrapped in `{ output: ... }`. |
+| `critic` | — | `result` | **Dynamic inputs** (`texts.*`). Payload: `result` = a **boolean** (the `task_ok` verdict); sibling `extra_info` = `{ task_ok, feedback, suspend, question, __colmena_status }`. |
+| `information_extraction` | — | `result` | **Dynamic inputs** (`texts.*`). Payload: `result` = an **object whose fields follow the config `schema`** (dynamic). `extra_info` is `{}` normally; on schema-driven suspend it carries `{ __colmena_status: "SUSPENDED", all_tasks: [...] }`. |
+| `reactor` | — | `result` | **Dynamic inputs** (`texts.*`). Payload: `result` = a **string** (final synthesized answer); sibling `extra_info` = `{ task_ok, add_tasks:[{task,assigned_to}], suspend, question, __colmena_status }`. |
 | `orchestrator` | — | `final_response` | **Dynamic inputs** — full multi-agent lifecycle; suspends at `planner`, `phase_reactor`, `critic`, `critic_max_retries`, `final_reactor`; supports bridge tasks; `allow_suspend` per-component |
-| `subgraph` | — | `result` | **Dynamic inputs** — Executes a child execution with isolated session_id. Inputs are injected into child globals. |
+| `subgraph` | — | — (none) | **Dynamic inputs**; no `default_output` declared. **Pass-through**: returns the child graph's output tree verbatim — specifically the value of the child node flagged as output node (commonly `{ result, extra_info }`), else the full child result map. Suspend bubbles up the child's top-level `__colmena_status: "SUSPENDED"` + `questions` unchanged. |
 | `for_each` | `input` (fallback array) | `output` | **Config/inputs dual-path** (`target`/`items`/`items_from`/`on_error`/`concurrency`/`max_items` read config-first, inputs-fallback). Output: `{ total, ok, err, results: [{index, input, status, output|error}] }`. |
-| `task_memory_writer` | — | `result` | **Requires explicit fields** for task management |
-| `trigger_webhook` | — | `output` | Webhook trigger — emits payload |
+| `task_memory_writer` | — | `result` | **Requires explicit fields**. Payload (normal): `result` = array of task objects `[{id, task_name, assigned_to, completed, result}]` (the full task list after the mutation); `extra_info` = `{}`. On suspend: `result` = the string `"Suspended by Critic Node"` and `extra_info` = `{ __colmena_status: "SUSPENDED", all_tasks: [...] }`. Not wrapped in `{ output: ... }`. |
+| `trigger_webhook` | — | `output` | Webhook trigger. Emits the payload **raw / unwrapped** (not inside `{ output: ... }`; relies on downstream auto-flatten, like `input`). Payload shape is arbitrary — resolved by priority: `config.__payload__` (injected in serve mode) → `config.test_payload` (local run) → the node's `inputs` map. |
 | `mock_input` | — | — | **Raw output** — emits config as-is, no specific field |
 | `image_generation` | — | `images` | **Requires `provider`, `model`, `prompt` in config**. Output (Plan B, 2026-05-25): `{ images: [{document_id, mime_type, size_bytes, description}], provider, model }`. Legacy `attachment_id`/`url` removed; consumers needing a renderable URL must resolve by `document_id` via a backend endpoint. |
 | `tts` | — | `audio` | **Requires `provider`, `model`, `api_key`, `text`, `voice` in config**. Output (Plan B): `{ audio: {document_id, mime_type, size_bytes, duration_ms, description}, provider, model }` — same storage semantics as image_generation. |
 | `image_edit` | — | `images` | **Requires `provider`, `api_key`, `source_url`, `prompt` in config**. Output: same shape as `image_generation` (Plan B `document_id`-only). `source_url` accepts `data:` URIs, http(s), or `$attachment:<document_id>`. |
+| `current_time` | — | `output` | No config, no inputs — emits current UTC time as an RFC3339 string |
+| `document_create` | — | `output` | **Requires `kind` (`excel`\|`word`)**. Input-first/config-fallback. Output: `{ artifact_id, version_id, label }` or `{ error, ... }` |
+| `document_edit` | — | `output` | **Requires `artifact_id`, `base_version`, `ops`**. Output: `{ version_id, diff_summary }`, or a `VersionConflict` object on stale `base_version` |
+| `document_read` | — | `output` | **Requires `artifact_id`** (optional `version`, default HEAD). Output: `{ ir, version_id }` |
 
 **Multipart mode** (activado por header `Content-Type: multipart/*`):
 - El campo `body` se interpreta como un map de parts (string URL/`$attachment:`/texto, array, o objeto explícito con `url`/`attachment`/`value` + overrides opcionales `filename`/`content_type`).

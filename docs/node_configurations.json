@@ -15,7 +15,10 @@
         "http_request", "socketio_request", "sql_query", "python_script",
         "llm_call", "information_extraction", "output_parser", "planner", "critic", "reactor",
         "orchestrator", "task_memory_writer",
-        "tavily_client", "api_explorer"
+        "tavily_client", "api_explorer",
+        "current_time", "secure_suspend",
+        "image_generation", "image_edit", "tts",
+        "document_create", "document_edit", "document_read"
       ],
       "example": "llm_call"
     },
@@ -494,13 +497,13 @@
         }
       },
       "output_ports": {
-        "result": {
+        "<child_output>": {
           "type": "any",
-          "description": "The child graph's output, extracted from the node flagged with '__colmena_is_output_node: true'. If the child graph suspends, this contains the SUSPENDED status object which bubbles up to the parent."
+          "description": "Pass-through: SubGraphNode declares NO default_output and adds no wrapper key. It returns the child graph's output tree verbatim — specifically the value of the child node flagged with '__colmena_is_output_node: true' (commonly itself an object like { result, extra_info }), or the full child result map if no node is flagged. If the child suspends, the child's top-level SUSPENDED status object (with 'questions') bubbles up unchanged."
         }
       },
       "default_input": null,
-      "default_output": "result",
+      "default_output": null,
       "requires": [],
       "supports_env_vars": false
     },
@@ -1375,10 +1378,12 @@
       "output_ports": {
         "output": {
           "type": "any",
-          "description": "For SELECT: array of row objects. For mutations: { rows_affected: N }. For CREATE FUNCTION: { created: true, name, schema }."
+          "description": "Shape depends on the LAST statement executed. SELECT: array of row objects keyed by column name. INSERT/UPDATE/DELETE: { rows_affected: N } (summed across statements). CREATE TABLE: { created: true, type: \"table\" }. CREATE FUNCTION: { created: true }. On failure the whole payload is replaced by { error: string, source: \"static_validator\"|\"llm_critic\"|\"execution\" } — with no row_count/truncated keys."
         },
         "row_count": { "type": "integer", "description": "Number of rows returned or affected." },
-        "truncated": { "type": "boolean", "description": "Whether results were truncated due to max_rows limit." }
+        "truncated": { "type": "boolean", "description": "Whether results were truncated due to max_rows limit." },
+        "warnings": { "type": "array", "description": "Optional — present only when non-empty. Array of string warnings surfaced by the execution service." },
+        "optimization_hints": { "type": "array", "description": "Optional — present only when non-empty. Array of string hints suggesting query optimizations." }
       },
       "default_input": "query",
       "default_output": "output",
@@ -1881,6 +1886,10 @@
         "result": {
           "type": "object",
           "description": "The extracted data as a JSON object matching the provided schema. If the LLM's response contains markdown code blocks, they are automatically stripped before parsing. Returns null if no texts were provided."
+        },
+        "extra_info": {
+          "type": "object",
+          "description": "Sibling top-level key. Empty object {} on the normal path. On a schema-driven suspend (schema/LLM sets suspend=true and a task memory repo is present) it carries { __colmena_status: 'SUSPENDED', all_tasks: [...] }."
         }
       },
       "default_input": null,
@@ -2040,7 +2049,11 @@
       "output_ports": {
         "result": {
           "type": "object",
-          "description": "Contains either: (1) { \"items\": [...tasks] } — an array of task objects, each with: 'task' (description string), 'assigned_to' (agent name string), 'completed' (always false), 'phase' (integer >= 1), 'parallel' (boolean). Or: (2) { \"questions\": [...] } — when the planner needs clarification, an array of question objects with 'id', 'question', 'type' ('open'|'choice'), and optional 'options'."
+          "description": "Contains either: (1) { \"items\": [...tasks] } — an array of task objects, each with: 'task' (description string), 'assigned_to' (agent name string), 'completed' (always false), 'phase' (integer >= 1), 'parallel' (boolean). Or: (2) { \"questions\": [...] } — when the planner needs clarification, an array of question objects with 'id', 'question', 'type' ('open'|'choice'), and optional 'options'. On the suspend branch the top-level output also carries '__colmena_status': 'SUSPENDED'."
+        },
+        "extra_info": {
+          "type": "object",
+          "description": "Sibling top-level key: { \"raw_response\": string } — the raw LLM text the plan/questions were parsed from."
         }
       },
       "default_input": null,
@@ -2408,13 +2421,205 @@
       },
       "output_ports": {
         "result": {
-          "type": "array",
-          "description": "The complete list of all current tasks in the database for this session, including any newly added tasks and reflecting any deletions. Each task object includes: id, task_name, assigned_to, completed, result."
+          "type": "any",
+          "description": "Normal path: an array — the complete list of all current tasks in the database for this session, including newly added tasks and reflecting deletions. Each task object includes: id, task_name, assigned_to, completed, result. On the suspend path (input suspend=true) 'result' is instead the string 'Suspended by Critic Node'."
+        },
+        "extra_info": {
+          "type": "object",
+          "description": "Sibling top-level key. Empty object {} on the normal path. On suspend it carries { __colmena_status: 'SUSPENDED', all_tasks: [...] }."
         }
       },
       "default_input": null,
       "default_output": "result",
       "requires": ["postgres"],
+      "supports_env_vars": false
+    },
+
+    "current_time": {
+      "name": "Current Time",
+      "description": "Returns the current UTC timestamp as an RFC3339 / ISO-8601 string (e.g. '2026-07-24T15:30:00+00:00'). Takes no config and reads no inputs — it is a pure value-source node that generates the timestamp fresh on every execution via Utc::now(). Commonly used to feed a wall-clock value into LLM/agent nodes, or exposed as the built-in 'current_time' LLM tool. Emits the timestamp in the standard { \"output\": ... } structure.",
+      "category": "utility",
+      "config_fields": {},
+      "input_ports": {},
+      "output_ports": {
+        "output": {
+          "type": "string",
+          "description": "The current UTC time formatted as an RFC3339 / ISO-8601 string. Generated fresh on every execution."
+        }
+      },
+      "default_input": null,
+      "default_output": "output",
+      "requires": [],
+      "supports_env_vars": false
+    },
+
+    "document_create": {
+      "name": "Document Create",
+      "description": "Creates a new versioned document artifact (Excel or Word) in the documents store and returns its identifiers. The document is built from an optional initial intermediate-representation (IR) object and receives a fresh artifact_id plus a first version_id. Part of the Documents Library (see developer_guide/27_documents_library.md). Every field can be supplied via an input edge (checked first) or via config (fallback).",
+      "category": "documents",
+      "config_fields": {
+        "kind": {
+          "type": "string",
+          "required": true,
+          "default": null,
+          "description": "Document type to create. Must be 'excel' or 'word'; any other value errors. Required — omitting it raises MissingField(\"kind\").",
+          "example": "excel"
+        },
+        "initial_ir": {
+          "type": "object",
+          "required": false,
+          "default": null,
+          "description": "Optional initial document contents as an IR object. $DYNAMIC / $ref compatible. If omitted, an empty document of the given kind is created."
+        },
+        "label": {
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "Optional human-readable label stored with the first version."
+        },
+        "retention_limit": {
+          "type": "integer",
+          "required": false,
+          "default": null,
+          "description": "Optional cap on how many historical versions are retained for this artifact. Unbounded if omitted."
+        },
+        "session_id": {
+          "type": "string",
+          "required": false,
+          "default": "default",
+          "description": "Session scope for the artifact. Resolved from input '__colmena_session_id', then input/config 'session_id', defaulting to 'default'."
+        },
+        "storage_backend": {
+          "type": "string",
+          "required": false,
+          "default": "localfs",
+          "valid_values": ["localfs", "gcs"],
+          "description": "Storage backend for the documents store. 'localfs' (default) or 'gcs' (requires the 'gcs' feature flag and a 'gcs_bucket'). Consumed by DocumentRuntime::from_config."
+        },
+        "storage_root": {
+          "type": "string",
+          "required": false,
+          "default": ".colmena/documents",
+          "description": "Filesystem root for the 'localfs' backend. Assets default to '.colmena/documents/assets' unless 'asset_storage_root' is set."
+        }
+      },
+      "input_ports": {
+        "kind": { "type": "string", "description": "Same as config.kind; input takes priority over config." },
+        "initial_ir": { "type": "object", "description": "Same as config.initial_ir; input takes priority over config." },
+        "label": { "type": "string", "description": "Same as config.label; input takes priority over config." },
+        "retention_limit": { "type": "integer", "description": "Same as config.retention_limit; input takes priority over config." },
+        "session_id": { "type": "string", "description": "Session id; the '__colmena_session_id' input is checked first." }
+      },
+      "output_ports": {
+        "output": {
+          "type": "object",
+          "description": "On success: { \"artifact_id\": string, \"version_id\": string, \"label\": string|null }. On failure the same 'output' key carries an error object, e.g. { \"error\": \"VersionConflict\", \"current_version\": n, \"conflicts\": [...] } or { \"error\": \"<message>\" }."
+        }
+      },
+      "default_input": null,
+      "default_output": "output",
+      "requires": [],
+      "supports_env_vars": false
+    },
+
+    "document_edit": {
+      "name": "Document Edit",
+      "description": "Applies an ordered list of patch operations to an existing document artifact, producing a new version. Uses optimistic concurrency: the edit targets a specific base_version and returns a structured VersionConflict (as output, not a thrown error) if the artifact has advanced past it. Part of the Documents Library (see developer_guide/27_documents_library.md). Fields are input-first, config-fallback.",
+      "category": "documents",
+      "config_fields": {
+        "artifact_id": {
+          "type": "string",
+          "required": true,
+          "default": null,
+          "description": "Identifier of the document to edit. Required — MissingField(\"artifact_id\") if absent."
+        },
+        "base_version": {
+          "type": "string",
+          "required": true,
+          "default": null,
+          "description": "The version_id this patch is based on. Required. If the artifact's current version differs, a VersionConflict is returned instead of applying the patch."
+        },
+        "ops": {
+          "type": "array",
+          "required": true,
+          "default": null,
+          "description": "Ordered array of PatchOp objects to apply. Required; $DYNAMIC compatible. An array that fails to deserialize into patch operations errors with 'invalid ops array'."
+        },
+        "storage_backend": {
+          "type": "string",
+          "required": false,
+          "default": "localfs",
+          "valid_values": ["localfs", "gcs"],
+          "description": "Storage backend for the documents store ('localfs' default, or 'gcs'). Consumed by DocumentRuntime::from_config."
+        },
+        "storage_root": {
+          "type": "string",
+          "required": false,
+          "default": ".colmena/documents",
+          "description": "Filesystem root for the 'localfs' backend."
+        }
+      },
+      "input_ports": {
+        "artifact_id": { "type": "string", "description": "Same as config.artifact_id; input takes priority over config." },
+        "base_version": { "type": "string", "description": "Same as config.base_version; input takes priority over config." },
+        "ops": { "type": "array", "description": "Same as config.ops; input takes priority over config." }
+      },
+      "output_ports": {
+        "output": {
+          "type": "object",
+          "description": "On success: { \"version_id\": string, \"diff_summary\": string } — diff_summary is a natural-language description of the change. On version mismatch: { \"error\": \"VersionConflict\", \"current_version\": n, \"conflicts\": [...] }; other failures: { \"error\": \"<message>\" }."
+        }
+      },
+      "default_input": null,
+      "default_output": "output",
+      "requires": [],
+      "supports_env_vars": false
+    },
+
+    "document_read": {
+      "name": "Document Read",
+      "description": "Reads a document artifact and returns its intermediate-representation (IR) plus the version that was read. Reads the current HEAD (latest) version unless a specific 'version' is given. Part of the Documents Library (see developer_guide/27_documents_library.md). Fields are input-first, config-fallback.",
+      "category": "documents",
+      "config_fields": {
+        "artifact_id": {
+          "type": "string",
+          "required": true,
+          "default": null,
+          "description": "Identifier of the document to read. Required — MissingField(\"artifact_id\") if absent."
+        },
+        "version": {
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "Specific version_id to read. If omitted, the current HEAD (latest) version is returned."
+        },
+        "storage_backend": {
+          "type": "string",
+          "required": false,
+          "default": "localfs",
+          "valid_values": ["localfs", "gcs"],
+          "description": "Storage backend for the documents store ('localfs' default, or 'gcs'). Consumed by DocumentRuntime::from_config."
+        },
+        "storage_root": {
+          "type": "string",
+          "required": false,
+          "default": ".colmena/documents",
+          "description": "Filesystem root for the 'localfs' backend."
+        }
+      },
+      "input_ports": {
+        "artifact_id": { "type": "string", "description": "Same as config.artifact_id; input takes priority over config." },
+        "version": { "type": "string", "description": "Same as config.version; input takes priority over config. Omit for HEAD." }
+      },
+      "output_ports": {
+        "output": {
+          "type": "object",
+          "description": "On success: { \"ir\": object, \"version_id\": string } — 'ir' is the full document intermediate representation. On failure: { \"error\": \"<message>\" } (or a VersionConflict shape)."
+        }
+      },
+      "default_input": null,
+      "default_output": "output",
+      "requires": [],
       "supports_env_vars": false
     }
   },
@@ -3070,8 +3275,8 @@
   "categories": {
     "control_flow": {
       "name": "Control Flow",
-      "description": "Nodes that manage data flow, graph lifecycle, looping, suspension, and subgraph execution.",
-      "node_types": ["input", "output", "trigger_webhook", "suspend", "loop_controller", "subgraph", "for_each"]
+      "description": "Nodes that manage data flow, graph lifecycle, looping, human-in-the-loop suspension, declarative branching, and subgraph execution.",
+      "node_types": ["input", "output", "trigger_webhook", "suspend", "secure_suspend", "loop_controller", "router", "subgraph", "for_each"]
     },
     "debug": {
       "name": "Debug",
@@ -3085,13 +3290,13 @@
     },
     "integration": {
       "name": "Integration",
-      "description": "Nodes for external system integration: HTTP APIs and Python scripting.",
-      "node_types": ["http_request", "python_script"]
+      "description": "Nodes for external system integration: HTTP APIs, Socket.IO realtime events, PostgreSQL queries, and Python scripting.",
+      "node_types": ["http_request", "socketio_request", "sql_query", "python_script"]
     },
     "llm": {
       "name": "LLM & AI",
-      "description": "Language model nodes: direct inference, structured extraction, planning, quality review, and synthesis.",
-      "node_types": ["llm_call", "information_extraction", "planner", "critic", "reactor"]
+      "description": "Language model nodes: direct inference, structured extraction, output parsing, planning, quality review, and synthesis.",
+      "node_types": ["llm_call", "information_extraction", "output_parser", "planner", "critic", "reactor"]
     },
     "orchestration": {
       "name": "Orchestration",
@@ -3107,6 +3312,16 @@
       "name": "Media Generation",
       "description": "Nodes that produce media artifacts (images, audio) from a prompt and persist them via the OutputStorageRepository port. Returned as attachment handles suitable for agent tool outputs.",
       "node_types": ["image_generation", "tts", "image_edit"]
+    },
+    "utility": {
+      "name": "Utility",
+      "description": "Stateless value-source helpers with no external dependencies.",
+      "node_types": ["current_time"]
+    },
+    "documents": {
+      "name": "Documents Library",
+      "description": "Versioned document artifacts (Excel/Word) with an optimistic-concurrency edit model. Backed by a pluggable storage backend (localfs default, gcs behind a feature flag). See developer_guide/27_documents_library.md.",
+      "node_types": ["document_create", "document_edit", "document_read"]
     }
   }
 }

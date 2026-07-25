@@ -1,0 +1,30 @@
+#!/bin/sh
+. "$(dirname "$0")/_/husky.sh"
+
+# Auto-regenerate the module dependency map when Rust files or the generator change.
+# Keeps docs/agent_context/module_dependency_map.md in sync with the import graph so
+# the exploration/spec phase never reads a stale blast-radius index.
+
+MAP="docs/agent_context/module_dependency_map.md"
+GEN="scripts/gen_module_map.py"
+
+# Only run when staged changes touch .rs files or the generator itself.
+staged=$(git diff --cached --name-only --diff-filter=ACMR)
+if ! echo "$staged" | grep -qE '\.rs$|^scripts/gen_module_map\.py$'; then
+    exit 0
+fi
+
+if ! command -v python3 >/dev/null 2>&1; then
+    echo "⚠️  pre-commit: python3 not found — cannot regenerate $MAP."
+    echo "   Install python3 or regenerate manually before pushing: python3 $GEN"
+    exit 1
+fi
+
+if ! python3 "$GEN"; then
+    echo "❌ pre-commit: failed to regenerate $MAP. Fix $GEN and retry."
+    exit 1
+fi
+
+# Stage the refreshed map so it lands in this commit alongside the code that changed it.
+git add "$MAP"
+exit 0

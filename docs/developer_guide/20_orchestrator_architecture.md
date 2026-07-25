@@ -569,6 +569,80 @@ finish { finishReason: "stop", ... }
 
 ---
 
+## Orquestación manual: `loop_controller` y `task_memory_writer`
+
+El nodo `orchestrator` encapsula todo el ciclo plan→ejecuta→revisa. Cuando en cambio armás el bucle **a mano** (sin el nodo orchestrator) — por ejemplo un agente conversacional multi-turno o una pipeline iterativa — estos dos nodos utilitarios son las piezas que mueven el estado del loop y persisten las tareas.
+
+### `loop_controller`
+
+Punto de decisión de un DAG cíclico: lee el estado actual del loop y le dice al engine si volver a ejecutar el grafo desde el inicio (`NEXT_TURN`), terminar (`FINISHED`) o pausar para pedir input al usuario (`SUSPENDED`).
+
+**Campos de config** (todos con contraparte dinámica en el port de entrada del mismo nombre):
+
+| Campo | Tipo | Default | Significado |
+|---|---|---|---|
+| `loop_status` | string | `"FINISHED"` | Estado de continuación. `NEXT_TURN` re-ejecuta el grafo con el estado actualizado; `FINISHED` detiene; `SUSPENDED` pausa esperando input. El port de entrada `loop_status` lo sobrescribe. |
+| `suspend_flag` | boolean | `false` | Atajo que fuerza `SUSPENDED` sin tocar `loop_status`. Útil cuando un critic/reviewer downstream decide que hace falta input humano. |
+| `question` | string | `null` | Pregunta a mostrar al usuario. Solo se incluye en el output cuando el estado efectivo es `SUSPENDED`. |
+| `all_tasks` | any | `null` | Payload final (típicamente resultados acumulados de todas las iteraciones). Se emite como `final_result` cuando el estado es `FINISHED`. |
+
+**Ports** — entrada default `loop_status` (más los dinámicos `suspend_flag` / `question` / `all_tasks`); salida default `output` (objeto JSON).
+
+**Payload de salida** — el objeto `output` **siempre** lleva `__colmena_loop_status` (uno de `NEXT_TURN` / `FINISHED` / `SUSPENDED`), y condicionalmente:
+
+```jsonc
+// NEXT_TURN — el engine re-ejecuta el grafo
+{ "__colmena_loop_status": "NEXT_TURN" }
+
+// SUSPENDED — se adjunta 'question' si hay una
+{ "__colmena_loop_status": "SUSPENDED", "question": "¿Refinamos la búsqueda o cerramos?" }
+
+// FINISHED — se adjunta 'final_result' si 'all_tasks' está presente
+{ "__colmena_loop_status": "FINISHED", "final_result": [ { "task": "Book flight", "completed": true } ] }
+```
+
+> Ojo con la asimetría de nombres: el port de **entrada** se llama `loop_status`, pero la clave **emitida** es `__colmena_loop_status` — es esa clave prefijada la que el DAG engine lee para decidir loop/stop/suspend.
+
+**Rol en el loop manual:** un `python_script` upstream evalúa la condición de corte y setea `loop_status`; el `loop_controller` traduce esa decisión al contrato que el engine entiende. Es el equivalente manual a las Protecciones Anti-Loop y al HITL que el orchestrator maneja internamente.
+
+### `task_memory_writer`
+
+Persiste resultados de tareas y mutaciones del critic (agregar/borrar tareas, suspender) en la base de memoria de tareas PostgreSQL. Es el nodo utilitario para gestionar el estado de tareas en patrones de orquestación manual. Requiere `DATABASE_URL` (`requires: ["postgres"]`).
+
+**Campos de config** (todos con contraparte dinámica en el port de entrada):
+
+| Campo | Tipo | Default | Significado |
+|---|---|---|---|
+| `task_id` | string | `null` | UUID de la tarea cuyo `result` se actualiza. Junto con `result`, escribe el resultado y marca la tarea como completada. |
+| `result` | any | `null` | Valor a escribir en la tarea `task_id` (típicamente el output del agente que la ejecutó). |
+| `add_tasks` | array | `null` | Tareas nuevas a insertar. Cada objeto lleva `task` (descripción) y `assigned_to` (nombre de agente); se crean con `completed=false, phase=1, parallel=false`. |
+| `delete_tasks` | array | `null` | Array de IDs (UUID string) de tareas a borrar. |
+| `suspend` | boolean | `false` | Si es `true`, el nodo devuelve estado `SUSPENDED` tras aplicar las operaciones, disparando la persistencia de estado y la espera de input. |
+
+**Ports** — sin entrada default (los campos deben venir explícitos por config o edges); salida default `result`.
+
+**Payload de salida** — no va wrappeado en `{ output: ... }`:
+
+```jsonc
+// Normal — la lista completa de tareas tras la mutación
+{
+  "result": [
+    { "id": "550e...", "task_name": "Search flights", "assigned_to": "flights_agent", "completed": true, "result": "..." }
+  ],
+  "extra_info": {}
+}
+
+// suspend=true — el critic pidió aclaración
+{
+  "result": "Suspended by Critic Node",
+  "extra_info": { "__colmena_status": "SUSPENDED", "all_tasks": [ /* ... */ ] }
+}
+```
+
+**Rol en el loop manual:** hace de puente entre el output de un agente y la tabla `DAG_TASK` (ver *Gestión de Fases y Memoria*), replicando a mano lo que el orchestrator hace vía Critic + Phase Reactor. Un `router` o un `python_script` upstream puede alimentar `add_tasks`/`delete_tasks`; el flag `suspend` conecta con el mismo mecanismo HITL descrito arriba.
+
+---
+
 ## Referencia de Implementación
 
 Los archivos Rust relevantes para el orchestrator:
