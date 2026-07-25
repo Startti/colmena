@@ -35,6 +35,9 @@ All files live under `src/libs/colmena/migrations/`.
 | `20260513000001_conversation_attachments.sql` | Creates `conversation_attachments` (per-`agent_session_id` registry of files attached to a conversation; survives across runs) |
 | `20260525000001_attachment_uniform_resolution.sql` | Adds `storage_key`, `origin`, `last_used_at` to `conversation_attachments` + `idx_conv_attachments_session_used` |
 | `20260603000000_crdt_doc_changes.sql` | Creates the CRDT-documents change log: `crdt_doc_events`, `crdt_doc_session_cursors`, `crdt_doc_session_artifacts`, plus 3 indices. Backs the `crdt_doc_get_recent_changes` LLM tool and per-agent attachment list |
+| `20260608000000_gdocs_session_state.sql` | Creates `gdocs_session_state` (last-known revision per `(agent_session_id, document_id)`) + `gdocs_session_state_last_edit_at_idx`. Backs the Google Docs co-edit guard that detects human edits between agent writes |
+| `20260609000000_gdocs_session_state_snapshot.sql` | Adds `last_snapshot_json` (JSONB) and `last_snapshot_size_bytes` (INTEGER) to `gdocs_session_state` so the co-edit guard can show paragraph-level diffs of human changes |
+| `20260618000000_llm_history_summary.sql` | Adds the `summary` TEXT column to `llm_node_history` (per-message semantic summary cache; NULL = not yet summarized or below the verbatim threshold) |
 
 ### SQLite (`migrations/sqlite/`)
 
@@ -47,12 +50,14 @@ All files live under `src/libs/colmena/migrations/`.
 | `20260513000001_conversation_attachments.sql` | SQLite mirror of the Postgres `conversation_attachments` table (TEXT/INTEGER-typed) |
 | `20260525000001_attachment_uniform_resolution.sql` | Mirrors the Postgres `storage_key`/`origin`/`last_used_at` extension on `conversation_attachments` |
 | `20260603000000_crdt_doc_changes.sql` | SQLite mirror of the CRDT change-log tables (TEXT/INTEGER-typed). Used when the CRDT runtime points at a SQLite backend in tests / local dev |
+| `20260618000000_llm_history_summary.sql` | SQLite mirror: adds the `summary` TEXT column to `llm_node_history`. SQLite does not support `ADD COLUMN IF NOT EXISTS`, so it runs exactly once |
 
 > **SQLite scope**: SQLite is supported for `llm_node_history`,
 > `dag_task_memory`, `conversation_attachments` and the CRDT change-log
 > tables (`crdt_doc_events`, `crdt_doc_session_cursors`,
 > `crdt_doc_session_artifacts`). The DAG state machine (`dag_runs`,
-> `dag_phase_summaries`, `secure_value_mappings`, `provider_file_cache`)
+> `dag_phase_summaries`, `secure_value_mappings`, `provider_file_cache`,
+> `gdocs_session_state`)
 > and the SQL sandbox tables are PostgreSQL-only — features that depend
 > on them (resume after suspend, secure values, the Files API cache,
 > the SQL node's function registry) require a Postgres internal database.
@@ -96,6 +101,7 @@ fallback). See **Read semantics** below.
 | `tool_call_id` | `TEXT` | `TEXT` | YES | — | Provider-assigned ID linking a `tool` message back to the `assistant` tool call that requested it |
 | `tool_calls` | `JSONB` | `TEXT` | YES | — | Array of `ToolCall` objects serialized from an assistant response (present when `role = assistant` and the model requested tool execution). On SQLite the JSON is stored as a text blob |
 | `created_at` | `TIMESTAMPTZ` | `TEXT` | NO | `NOW()` (PG) / app-set ISO-8601 (SQLite) | Wall-clock time when the message was appended |
+| `summary` | `TEXT` | `TEXT` | YES | — | Cached per-message semantic summary (conversation-summary feature, added by `20260618000000_llm_history_summary.sql`). NULL when the message has not yet been summarized or is below the verbatim threshold |
 
 **Indexes**
 
@@ -279,6 +285,10 @@ full flow.
 - `PRIMARY KEY (document_id, provider)` — same document can live in multiple
   providers' caches simultaneously.
 
+**Indexes**
+
+- `idx_provider_file_cache_expires` on `(expires_at) WHERE expires_at IS NOT NULL` — partial index for expiry sweeps of provider-side files (only Gemini rows have a non-NULL `expires_at`)
+
 **Read semantics**
 
 `lookup(document_id, provider)` runs:
@@ -461,6 +471,37 @@ Migration: `20260603000000_crdt_doc_changes.sql`. Same shape on both backends
 
 ---
 
+### `gdocs_session_state`  *(PostgreSQL only)*
+
+Tracks the last-known Google Docs revision per `(agent_session_id, document_id)`
+so the Google Docs co-edit guard can detect human edits made between two agent
+writes. Read and written by
+[`revision_store.rs`](../../src/libs/colmena/src/gdocs/infrastructure/revision_store.rs).
+
+Migrations: `20260608000000_gdocs_session_state.sql` creates the table;
+`20260609000000_gdocs_session_state_snapshot.sql` adds the two snapshot columns
+that let the guard render paragraph-level diffs of human changes.
+
+| Column | Type | Nullable | Default | Description |
+|--------|------|----------|---------|-------------|
+| `agent_session_id` | `TEXT` | NO | — | Stable agent handle. Part of the composite PK |
+| `document_id` | `TEXT` | NO | — | Google Docs document id. Part of the PK |
+| `last_revision_id` | `TEXT` | NO | — | Drive revision id of the last state the agent observed/wrote |
+| `last_edit_at` | `TIMESTAMPTZ` | NO | `now()` | When the agent last touched this document |
+| `last_snapshot_json` | `JSONB` | YES | — | Serialized snapshot of the document body used to compute paragraph-level diffs of human changes (added by `20260609000000_gdocs_session_state_snapshot.sql`) |
+| `last_snapshot_size_bytes` | `INTEGER` | YES | — | Size of `last_snapshot_json` in bytes; capped via `COLMENA_GDOCS_MAX_SNAPSHOT_BYTES` (added 2026-06-09) |
+
+**Constraints**
+
+- `PRIMARY KEY (agent_session_id, document_id)` — exactly one state row per
+  agent-document pair. `INSERT … ON CONFLICT DO UPDATE` on write.
+
+**Indexes**
+
+- `gdocs_session_state_last_edit_at_idx` on `(last_edit_at)` — recency sweeps
+
+---
+
 ## SQL sandbox tables  *(PostgreSQL only, runtime-created)*
 
 These tables are **not** managed by `sqlx::migrate!()` — they are created
@@ -534,7 +575,7 @@ No indexes are declared — the table is small and accessed by
 When a graph executes `CREATE TABLE` against a database where the SQL node has
 `auto_rls = true` (default for the `restricted` permission profile),
 `PgPoolAdapter::setup_rls_for_new_table` is invoked immediately after the DDL
-([`nodes/sql.rs:391`](../../src/libs/colmena/src/dag_engine/infrastructure/nodes/sql.rs)).
+([`nodes/sql.rs:563`](../../src/libs/colmena/src/dag_engine/infrastructure/nodes/sql.rs)).
 This is *not* a schema migration but a runtime side-effect — included here
 for completeness because it changes the shape of every user table.
 

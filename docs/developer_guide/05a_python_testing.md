@@ -24,6 +24,12 @@ Este directorio contiene los tests automatizados para los bindings de Python.
 -   `test_streaming_scenarios.py`: Verifica la integridad de chunks en flujos de streaming asíncrono (`await llm.stream(...)` + `async for`).
 -   `test_async_mock_streaming.py`: **(Nuevo v0.3.0)** Valida el comportamiento asíncrono (`async for`) de los bindings utilizando proveedores mockeados.
 -   `test_mock_streaming.py`: Versión síncrona de tests con mocks para mayor velocidad en CI.
+-   `test_run_dag.py`: Cobertura de regresión para los bindings `run_dag` y `validate_graph` con grafos pure-math (sin API keys ni red).
+-   `test_stream_dag.py`: Prueba `colmena.stream_dag`, el iterador asíncrono sobre los eventos SSE de un DAG.
+-   `test_serve_dag.py`: Smoke test del binding bloqueante `serve_dag` (levanta un servidor HTTP fuera de proceso).
+-   `test_crdt_documents_roundtrip.py`: Round-trip del helper Python contra un runtime colmena en proceso (requiere tokio runtime activo).
+-   `test_api_explorer_smoke.py`: Smoke test del nodo `api_explorer` (registro bajo `node_type="api_explorer"` y catálogo de sub-tools).
+-   `test_web_nodes.py`: Smoke tests que verifican que el nodo `tavily_client` es accesible desde Python (sin llamar a la API real).
 
 ## Ejecutar Tests
 

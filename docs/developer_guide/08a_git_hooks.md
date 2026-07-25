@@ -4,7 +4,7 @@ Esta guía explica cómo configurar y usar los git hooks para validar commits se
 
 ## ¿Qué son los Git Hooks?
 
-Los git hooks son scripts que se ejecutan automáticamente en ciertos eventos de git (como `commit`, `push`, etc.). En este proyecto usamos un hook `commit-msg` para validar que todos los commits sigan el formato de [Conventional Commits](https://www.conventionalcommits.org/).
+Los git hooks son scripts que se ejecutan automáticamente en ciertos eventos de git (como `commit`, `push`, etc.). En este proyecto usamos hooks de husky: un hook `commit-msg` para validar que todos los commits sigan el formato de [Conventional Commits](https://www.conventionalcommits.org/), y un hook `pre-commit` que regenera automáticamente `docs/agent_context/module_dependency_map.md` (vía `scripts/gen_module_map.py`) cuando los cambios en stage tocan archivos `.rs` o el generador.
 
 ## ¿Por qué Conventional Commits?
 
@@ -17,13 +17,9 @@ Los git hooks son scripts que se ejecutan automáticamente en ciertos eventos de
 
 ### Primera vez (obligatorio)
 
-Cuando clones el repositorio o actualices, ejecuta:
+Los hooks se ejecutan mediante husky con `core.hooksPath=.husky`. Verifica que esté configurado con `git config core.hooksPath` (debe devolver `.husky`); si no, actívalo con `git config core.hooksPath .husky` (este comando no imprime salida). Los hooks activos son `.husky/commit-msg` y `.husky/pre-commit`.
 
-```bash
-./scripts/install-hooks.sh
-```
-
-Verás:
+El script fallback legacy `./scripts/install-hooks.sh` (copia solo `commit-msg` a `.git/hooks/`, ignorado cuando `core.hooksPath=.husky`) imprime:
 
 ```
 Installing git hooks...
@@ -56,15 +52,17 @@ Examples:
 |------|-------------|---------|
 | `feat` | Nueva funcionalidad | MINOR (1.0.0 → 1.1.0) |
 | `fix` | Corrección de bug | PATCH (1.0.0 → 1.0.1) |
-| `docs` | Cambios en documentación | - |
-| `style` | Formato, linting (sin cambio de código) | - |
+| `docs` | Cambios en documentación | PATCH |
+| `style` | Formato, linting (sin cambio de código) | PATCH |
 | `refactor` | Refactorización sin cambio funcional | PATCH |
 | `perf` | Mejora de rendimiento | PATCH |
-| `test` | Agregar o modificar tests | - |
-| `build` | Cambios en sistema de build o dependencias | - |
-| `ci` | Cambios en CI/CD | - |
-| `chore` | Tareas de mantenimiento | - |
-| `revert` | Revertir un commit anterior | - |
+| `test` | Agregar o modificar tests | PATCH |
+| `build` | Cambios en sistema de build o dependencias | PATCH |
+| `ci` | Cambios en CI/CD | PATCH |
+| `chore` | Tareas de mantenimiento | PATCH |
+| `revert` | Revertir un commit anterior | PATCH |
+
+> **Nota:** En este repo el workflow `cd-main.yml` sube **MAJOR** ante `feat!`/`BREAKING CHANGE`, **MINOR** ante `feat`, y **PATCH** para cualquier otro commit (incluye `fix`, `perf`, `refactor` y — por el `else` por defecto — `docs`, `style`, `test`, `build`, `ci`, `chore`, `revert`). Es decir, todo commit fusionado a `main` produce al menos un bump PATCH.
 
 ### Breaking Changes
 
@@ -175,7 +173,7 @@ El CI/CD lee el **último commit** del merge a `main` para determinar el bump:
 | `feat!: breaking change` | 1.0.0 → **2.0.0** (MAJOR) |
 | `feat: new feature` | 1.0.0 → **1.1.0** (MINOR) |
 | `fix: bug fix` | 1.0.0 → **1.0.1** (PATCH) |
-| `docs: update` | Sin bump |
+| `docs: update` (y cualquier otro tipo) | 1.0.0 → **1.0.1** (PATCH por defecto) |
 
 Ver [10_cicd_guide.md](./10_cicd_guide.md) para más detalles.
 
@@ -184,16 +182,22 @@ Ver [10_cicd_guide.md](./10_cicd_guide.md) para más detalles.
 ### El hook no se ejecuta
 
 ```bash
-# Reinstalar hooks
-./scripts/install-hooks.sh
+# Verificar que git apunte a los hooks de husky
+git config core.hooksPath
+# Debe devolver: .husky
+
+# Si no, activarlo
+git config core.hooksPath .husky
 
 # Verificar permisos
-ls -la .git/hooks/commit-msg
-# Debe mostrar: -rwxr-xr-x
+ls -la .husky/commit-msg .husky/pre-commit
+# Deben mostrar: -rwxr-xr-x
 
 # Dar permisos manualmente
-chmod +x .git/hooks/commit-msg
+chmod +x .husky/commit-msg .husky/pre-commit
 ```
+
+> Nota: `./scripts/install-hooks.sh` es un fallback legacy que copia solo `commit-msg` a `.git/hooks/`; con `core.hooksPath=.husky` esa ruta se ignora, así que prefiere el mecanismo de husky de arriba.
 
 ### El hook rechaza commits válidos
 
@@ -247,7 +251,7 @@ Instala la extensión [Conventional Commits](https://marketplace.visualstudio.co
 - [Conventional Commits Specification](https://www.conventionalcommits.org/)
 - [Semantic Versioning](https://semver.org/)
 - [Angular Commit Guidelines](https://github.com/angular/angular/blob/main/CONTRIBUTING.md#commit)
-- [Guía de CI/CD del proyecto](../CICD_GUIDE.md)
+- [Guía de CI/CD del proyecto](./10_cicd_guide.md)
 
 ---
 

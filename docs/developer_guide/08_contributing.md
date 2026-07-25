@@ -5,10 +5,10 @@
 ## 🛠️ Entorno de Desarrollo
 
 Antes de empezar, asegúrate de tener instalado:
-- **Rust** 1.75+ (y `cargo-fmt`, `clippy`)
+- **Rust** 1.95.0 (fijado en `rust-toolchain.toml`; incluye `rustfmt`, `clippy`)
 - **Python** 3.8+
 - **Maturin** para los bindings.
-- **Node.js** 20+ (si trabajas en los bindings de Node).
+- **Node.js** 18+ (si trabajas en los bindings de Node).
 
 Ejecuta el setup inicial:
 ```bash
@@ -24,10 +24,10 @@ pip install -e ".[dev]"     # Instala dependencias de desarrollo
 2.  **Conventional Commits**: Es obligatorio seguir el estándar de [Git Hooks y Commits](./08a_git_hooks.md). El CI/CD depende de esto para el versionado.
 3.  **Calidad de Código**:
     *   **Rust**: Ejecuta `cargo fmt --all` y `cargo clippy -- -D warnings`.
-    *   **Python**: Usamos `black` para formato y `ruff` para linting.
+    *   **Python**: Usamos `black` para formato, `isort` para imports y `mypy` para type-checking.
 4.  **Tests**: Ningún PR es aceptado sin tests que validen la nueva lógica.
     *   `cargo test` (Core)
-    *   `pytest tests/` (Integración Python)
+    *   `pytest python/` (Integración Python)
 5.  **Documentación**: Si cambias interfaces, actualiza la Guía del Desarrollador.
 
 ## 🔍 Checklist de Review

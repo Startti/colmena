@@ -39,8 +39,8 @@ choco install python rust-msvc git -y
 ### 1. Entorno Python
 
 ```bash
-python3 -m venv venv
-source venv/bin/activate  # Linux/macOS
+python3 -m venv .venv
+source .venv/bin/activate  # Linux/macOS
 # venv\Scripts\activate     # Windows
 pip install --upgrade pip maturin
 ```
@@ -63,7 +63,7 @@ El motor requiere configurar las siguientes variables de entorno (puedes usar un
 
 | Variable | Requerida | Propósito |
 | :--- | :--- | :--- |
-| `SECURE_VALUES_KEY` | **SÍ** | Clave de 32 bytes en Base64 para cifrado AES-GCM. |
+| `SECURE_VALUES_KEY` | **SÍ** | Passphrase para el cifrado simétrico pgcrypto (`pgp_sym_encrypt`, OpenPGP CFB); usa una cadena aleatoria de al menos 32 caracteres. |
 | `DATABASE_URL` | Opcional | Conexión a PostgreSQL para persistencia de memoria. |
 | `OPENAI_API_KEY` | Opcional | Requerida si usas el proveedor OpenAI. |
 | `GEMINI_API_KEY` | Opcional | Requerida si usas el proveedor Google Gemini. |
@@ -94,7 +94,7 @@ El framework utiliza PostgreSQL (o SQLite localmente) para persistir la memoria 
    sqlx migrate run --source src/libs/colmena/migrations/postgres
    ```
 
-> **Nota:** Todos los esquemas necesarios (`llm_node_history`, `dag_task_memory`, etc.) se encuentran agrupados en un único archivo inicial, por lo que este comando dejará la base de datos completamente configurada para el motor.
+> **Nota:** Los esquemas del motor están repartidos en varios archivos de migración dentro de `migrations/postgres` (por ejemplo, `llm_node_history` y `dag_task_memory` se crean en `20240101000000_initial_schema.sql`, y migraciones posteriores añaden tablas como `secure_value_mappings`, `provider_file_cache` y `crdt_doc_changes`). `sqlx migrate run` aplica todas en orden, dejando la base de datos completamente configurada para el motor.
 
 ### Scripts de Desarrollo
 
