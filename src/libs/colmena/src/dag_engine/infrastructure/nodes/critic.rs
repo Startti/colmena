@@ -358,11 +358,12 @@ impl ExecutableNode for CriticNode {
                 "texts.*": "Named text inputs for the Critic to review (e.g. texts.agent_result, texts.current_task)"
             },
             "outputs": {
-                "task_ok":  "bool — true if the result is satisfactory",
-                "feedback": "string — when task_ok=false, explains what was wrong and what to do differently",
-                "suspend":  "bool — true if user input is needed",
-                "question": "string — the question to ask the user when suspend=true",
-                "__colmena_status": "SUSPENDED | OK"
+                "result": "bool — task_ok: true if the result is satisfactory (also the default_output)",
+                "extra_info.task_ok":  "bool — true if the result is satisfactory",
+                "extra_info.feedback": "string — when task_ok=false, explains what was wrong and what to do differently",
+                "extra_info.suspend":  "bool — true if user input is needed",
+                "extra_info.question": "string — the question to ask the user when suspend=true",
+                "extra_info.__colmena_status": "SUSPENDED | OK"
             }
         })
     }
