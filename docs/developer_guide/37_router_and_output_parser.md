@@ -59,6 +59,62 @@ Ambos comparten internamente el motor de extracción (`util/extract_with_schema`
 
 ---
 
+## `information_extraction`
+
+El motor de extracción que `output_parser` envuelve. Extrae datos estructurados de texto no estructurado usando un LLM y un JSON Schema definido por vos. La `temperature` se fuerza a `0.1` para máxima consistencia. Su UX está pensada para escenarios multi-fuente (varios `texts.{name}` concatenados) e integración con flujos del orchestrator, mientras que `output_parser` es el atajo de un solo `input` para encadenar justo después de un `llm_call`.
+
+```json
+{
+  "type": "information_extraction",
+  "config": {
+    "provider": "openai",
+    "model": "gpt-4o",
+    "api_key": "${OPENAI_API_KEY}",
+    "schema": {
+      "people_assigned": { "type": "array", "items": { "type": "string" }, "description": "Names assigned to the project" },
+      "deadline":        { "type": "string", "description": "Deadline in YYYY-MM-DD format" }
+    },
+    "system_message": "If a field is not found, use null instead of guessing."
+  }
+}
+```
+
+**Campos de config:**
+
+| Campo | Tipo | Default | Significado |
+|---|---|---|---|
+| `provider` | string | — (requerido) | Proveedor LLM (`openai` / `google` / `anthropic`). |
+| `api_key` | string | — (requerido) | API key del proveedor. Soporta `${VAR_NAME}`. |
+| `model` | string | dependiente del proveedor | Identificador del modelo. |
+| `schema` | object | — (requerido) | JSON Schema que define qué extraer. Se incluye en el system prompt, así que descripciones claras por campo mejoran mucho la precisión. Es el campo más importante. |
+| `system_message` | string | `null` | Instrucciones extra anexadas al prompt de extracción built-in (guía de dominio, formatos de fecha, política de nulos). |
+| `texts` | object | `null` | Fuentes de texto estáticas en config (`{ nombre: contenido }`). En la práctica casi siempre se pasan por edges. |
+| `verbose` | boolean | `false` | Imprime el prompt, los textos y el output parseado para debug. |
+
+**Ports:**
+- **Entrada** — sin port default. Fuentes dinámicas vía el patrón `texts.{name}` (ej. edge `{ "from": "source.result", "to": "extractor.texts.email_body" }`); cada fuente recibe un header `# {name}` y se concatenan. Los valores no-string se serializan a JSON. `system_message` también es sobrescribible por edge. **Si no llega ningún `texts`, el nodo se skipea silenciosamente** (a diferencia de `output_parser`, que falla duro).
+- **Salida** (default `result`) — objeto JSON cuyos campos **siguen el `schema` de config** (dinámico). Los code blocks markdown se strippean antes de parsear.
+
+**Payload de salida** — no wrappeado en `{ output: ... }`:
+
+```jsonc
+// Normal — 'result' matchea el schema; extra_info vacío
+{
+  "result": { "people_assigned": ["Alice", "Bob"], "deadline": "2026-08-01" },
+  "extra_info": {}
+}
+
+// Suspend impulsado por el schema (integración con orchestrator)
+{
+  "result": { /* campos del schema */ },
+  "extra_info": { "__colmena_status": "SUSPENDED", "all_tasks": [ /* ... */ ] }
+}
+```
+
+**Relación con `output_parser`:** los dos delegan al mismo helper `util/extract_with_schema`, así que comparten latencia, costo y semántica de parseo. Elegí `information_extraction` cuando necesitás **múltiples fuentes de texto** o cuando el nodo participa en un flujo de orchestrator (procesa mutaciones `add_tasks`/`delete_tasks`); elegí `output_parser` para el caso simple de un único input crudo saliendo de un agente. La tabla de diferencias en la sección `output_parser` de arriba resume el resto.
+
+---
+
 ## `router` — modo A: `llm_direct`
 
 El LLM lee la lista de ramas (nombre + descripción) y elige una.
