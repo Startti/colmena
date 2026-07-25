@@ -74,6 +74,15 @@ When you need to understand or modify any node (HTTP, LLM, orchestrator, etc.):
 
 **Do NOT search the whole repo** — the answer is almost always in `docs/`.
 
+## Impact / Blast-Radius — Before Changing Any Rust File
+Before assessing which files a change touches (exploration, spec, or design phase), consult the **auto-generated module dependency map** FIRST, then open only the files it points to — do not scan the whole repo:
+
+- **`docs/agent_context/module_dependency_map.md`** — for every `.rs` module: **Used by** (the files that break if you change its public surface = its blast radius) and **Depends on** (what it needs). Opens with a blast-radius ranking of the riskiest modules to touch (e.g. `llm::domain` has 76 importers).
+- It is **derived from `use crate::...` imports — never hand-edit it.** Regenerate after adding/removing files or imports: `python3 scripts/gen_module_map.py`.
+- Workflow: look up the target file → read its **Used by** list → open only those callers + the target to judge impact. This replaces reading 4+ files to guess coupling.
+
+When delegating exploration (e.g. `sdd-explore`), forward this map as the starting point for identifying affected areas and coupling.
+
 ## Build Commands
 - **Rust**: `cargo check`, `cargo build`, `cargo test`, `cargo clippy`, `cargo fmt`
 - **Python**: `maturin develop` (builds PyO3 bindings into `.venv`)
