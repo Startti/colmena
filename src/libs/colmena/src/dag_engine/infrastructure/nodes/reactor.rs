@@ -383,6 +383,32 @@ impl ExecutableNode for ReactorNode {
     }
 
     fn schema(&self) -> Value {
-        reactor_schema()
+        // Node-metadata schema (type/config/inputs/outputs), matching the
+        // convention used by planner/critic. NOTE: this is distinct from
+        // `reactor_schema()`, which is the JSON Schema the LLM must satisfy in
+        // its structured response (see the `execute` body).
+        json!({
+            "type": "reactor",
+            "config": {
+                "provider": "openai | google | anthropic (required)",
+                "api_key": "string or ${ENV_VAR} (required)",
+                "model": "string (optional) - defaults to provider default",
+                "verbose": "bool (default false)",
+                "system_message": "string (optional) - extra instructions appended to the default reactor prompt",
+                "texts": "object (optional) - static named texts to review, merged with the `texts.*` inputs"
+            },
+            "inputs": {
+                "texts.*": "named text inputs to review (e.g. texts.synthesis_result); a synthesis-like input is required or the node skips",
+                "system_message": "string (optional) - extra instructions"
+            },
+            "outputs": {
+                "result": "string — the final user-facing response text (also the default_output)",
+                "extra_info.task_ok": "bool — true if the synthesis is complete and satisfactory",
+                "extra_info.add_tasks": "array — follow-up tasks { task, assigned_to } when more work is needed",
+                "extra_info.suspend": "bool — true if user input is needed",
+                "extra_info.question": "string — the question to ask the user when suspend=true",
+                "extra_info.__colmena_status": "SUSPENDED | OK"
+            }
+        })
     }
 }

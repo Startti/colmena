@@ -284,7 +284,8 @@ impl ExecutableNode for ExtractionNode {
                 "system_message": "string (optional)"
             },
             "outputs": {
-                "extracted field": "varies according to schema"
+                "result": "object — the extracted fields, shaped by the configured `schema` (also the default_output)",
+                "extra_info": "object — empty on the normal path; when the extraction requests suspension it carries `__colmena_status: \"SUSPENDED\"` and `all_tasks` (the updated task list)"
             }
         })
     }
