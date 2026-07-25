@@ -499,7 +499,8 @@ impl ExecutableNode for PlannerNode {
                 "system_message": "string (optional) - extra instructions"
             },
             "outputs": {
-                "output.items": "array of task objects { task, assigned_to, completed }"
+                "result.items": "array of task objects { task, assigned_to, completed, phase, parallel }",
+                "extra_info.raw_response": "the raw LLM text the plan/questions were parsed from"
             }
         })
     }
