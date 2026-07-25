@@ -621,11 +621,11 @@ cargo run --bin dag_engine -- crdt-agent inproc \
 
 | Categoría | Comando | Notas |
 |---|---|---|
-| Unit tests del módulo | `cargo test -p colmena_dag_engine --lib crdt_documents` | ~40 tests + 1 ignored (R2.1 benchmark) |
-| Tools synthetic | `cargo test -p colmena_dag_engine --lib crdt_doc_tools` | 8 tests |
+| Unit tests del módulo | `cargo test -p colmena_dag_engine --lib crdt_documents` | 111 tests (incluye 1 ignored, R2.1 benchmark) |
+| Tools synthetic | `cargo test -p colmena_dag_engine --lib crdt_doc_tools` | 18 tests |
 | R2.1 benchmark | `cargo test --lib crdt_documents::projection::tests::r2_1 -- --ignored --nocapture` | Mide p50 — debería ser <50ms |
 | Convergencia multi-agente (WS + in-proc) | `cargo test --test crdt_documents_convergence_test` | 1 PASS |
-| REST CRUD | `cargo test --test crdt_documents_rest_test` | 2 PASS |
+| REST CRUD | `cargo test --test crdt_documents_rest_test` | 12 PASS |
 | xlsx round-trip | `cargo test --test crdt_documents_xlsx_roundtrip_test` | 1 PASS |
 | LLM tools E2E | `cargo test --test crdt_documents_llm_tools_test` | 1 PASS |
 | Persistencia | `cargo test --test crdt_documents_persistence_test` | 1 PASS (toma ~7s, snapshot tick) |

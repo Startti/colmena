@@ -61,7 +61,7 @@ async fn test_llm_call_use_case_success() {
 Para los tests de los adaptadores de infraestructura, usamos `wiremock` para simular las APIs externas.
 
 ```rust
-// tests/gemini_adapter_test.rs
+// src/libs/colmena/src/llm/infrastructure/gemini_adapter.rs (tests inline)
 use wiremock::{MockServer, Mock, ResponseTemplate};
 use wiremock::matchers::{method, path};
 
@@ -96,7 +96,7 @@ cargo test
 cargo test llm::domain::llm_config
 
 # Ejecutar un test de integración específico
-cargo test --test cohere_adapter_test
+cargo test --test graph_validation
 
 # Tests con output detallado
 cargo test -- --nocapture
@@ -237,7 +237,7 @@ Los tests que requieren conectividad real (Postgres, APIs externas) están marca
 | `postgres_file_cache` (lib) | 5 | `TEST_DATABASE_URL` | Cache persistido de archivos del LLM |
 | `tavily_live` | 4 | `TAVILY_API_KEY` | Llamadas reales al search API |
 
-**Total: 19 tests `#[ignore]`.**
+**Total: 136 tests `#[ignore]`** (la tabla anterior lista solo un subconjunto; conteo autoritativo vía `cargo test -p colmena_dag_engine -- --list --ignored`).
 
 ### Cómo correrlos en local
 
@@ -282,8 +282,8 @@ Estas variables están en el `.env` del repo (gitignoreado, no llega al runner) 
 
 | Variable | Usada por | Tests afectados |
 |----------|-----------|-----------------|
-| `DATABASE_URL` | Engine + tests de persistencia | 8 tests `#[ignore]` |
-| `TEST_DATABASE_URL` | Tests de `PgPoolRegistry` y `postgres_file_cache` | 7 tests `#[ignore]` |
+| `DATABASE_URL` | Engine + tests de persistencia | 45 tests `#[ignore]` |
+| `TEST_DATABASE_URL` | Tests de `PgPoolRegistry` y `postgres_file_cache` | 44 tests `#[ignore]` |
 | `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY` | `ConfigResolver::resolve_api_key` (devuelve `Err` si falta, no panica) | Solo grafos JSON manuales |
 | `TAVILY_API_KEY` | `tavily_client` node + tests live | 4 tests `#[ignore]` |
 | `AMADEUS_CLIENT_ID`, `AMADEUS_CLIENT_SECRET` | Solo grafos JSON en `tests/graphs/external/` | Ninguno (manual) |
@@ -311,4 +311,4 @@ Los tests de Python están en `python/tests/` y se ejecutan con:
 .venv/bin/pytest python/ -v
 ```
 
-CI los corre en el matrix de versiones Python 3.8 → 3.12 después de los tests de Rust. Ver [`05a_python_testing.md`](./05a_python_testing.md) para más detalle.
+CI los corre en el matrix de versiones Python 3.8 → 3.14 después de los tests de Rust. Ver [`05a_python_testing.md`](./05a_python_testing.md) para más detalle.

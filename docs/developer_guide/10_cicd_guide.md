@@ -62,15 +62,15 @@ develop (desarrollo) ──────► staging (pre-producción) ───�
 
 **Pasos**:
 1. **Checkout del código**
-2. **Setup de Rust y Python** (matriz con Python 3.8-3.12)
-3. **Cache de dependencias de Rust**
-4. **Instalación de maturin**
-5. **Verificación de formato**: `cargo fmt --check`
-6. **Análisis de código**: `cargo clippy`
-7. **Tests de Rust**: `cargo test`
-8. **Build del paquete Python**: `maturin build`
-9. **Instalación del paquete**
-10. **Tests de Python**: `pytest` (si existen)
+2. **Setup de Rust y Python** (matriz con Python 3.8-3.14)
+3. **Instalación de maturin**
+4. **Verificación de formato**: `cargo fmt -- --check`
+5. **Análisis de código**: `cargo clippy -- -D warnings`
+6. **Tests de Rust**: `cargo test --verbose`
+7. **Compliance hexagonal** (módulo documents) y **guard de conteo de docs** (`scripts/check_hexagonal_documents.sh`, `scripts/check_doc_counts.sh`)
+8. **Build e instalación del paquete Python**: `maturin build --release`
+9. **Tests de Python**: `pytest python/ -v` (no bloqueante si no hay tests)
+10. **Build de bindings Node + fachada TS** y **tests de Node**: `npm test`
 
 **Resultado**: ✅ o ❌ que indica si el código está listo para merge
 
@@ -78,7 +78,7 @@ develop (desarrollo) ──────► staging (pre-producción) ───�
 
 ### 2. CI/CD para Staging (`.github/workflows/ci-staging.yml`)
 
-**Trigger**: Push o Pull Request a `staging`
+**Trigger**: Push a `staging`
 
 **Propósito**: Validar y publicar pre-releases para testing
 
@@ -109,21 +109,34 @@ develop (desarrollo) ──────► staging (pre-producción) ───�
 **Pasos**:
 1. **Checkout completo** (con historial completo para versionado)
 2. **Setup de Rust y Python**
-3. **Cache de dependencias**
-4. **Instalación de maturin**
-5. **Verificación de formato y calidad**
-6. **Tests de Rust**
-7. **🔢 Versionado Semántico Automático**:
+3. **Verificación de formato y calidad**: `cargo fmt -- --check` + `cargo clippy -- -D warnings`
+4. **Tests de Rust**: `cargo test --verbose`
+5. **🔢 Versionado Semántico Automático**:
    - Lee el último commit message
    - Determina tipo de bump (MAJOR/MINOR/PATCH)
-   - Actualiza `pyproject.toml` y `Cargo.toml`
+   - Actualiza `pyproject.toml`, `Cargo.toml` y `package.json`
    - Crea commit de versión
    - Crea tag Git
-8. **Build de wheels de Python**
-9. **📦 Publicación a PyPI** (producción)
-10. **🎉 Creación de GitHub Release**
+6. **Build de wheels de Python** (Linux/macOS/Windows) + sdist
+7. **📦 Publicación a PyPI** (producción)
+8. **Build de bindings Node + 📦 Publicación a NPM**
+9. **🎉 Creación de GitHub Release**
 
-**Resultado**: Nueva versión publicada en PyPI y GitHub Releases
+**Resultado**: Nueva versión publicada en PyPI, NPM y GitHub Releases
+
+---
+
+### 4. Validación de Commits (`.github/workflows/validate-commits.yml`)
+
+**Trigger**: Pull Request a `develop`, `staging` o `main`
+
+**Propósito**: Rechazar PRs cuyos commits no sigan Conventional Commits
+
+**Pasos**:
+1. **Checkout completo**
+2. **Validación de mensajes de commit**: cada commit del PR debe empezar con uno de los tipos permitidos — `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `build`, `ci`, `chore`, `revert` (con scope y/o `!` opcionales). Los merge commits y los commits `chore: bump version to ...` se omiten.
+
+**Resultado**: ❌ si algún commit del PR no cumple el formato
 
 ---
 
@@ -230,7 +243,7 @@ Para mantener la calidad del código y evitar merges accidentales, debes configu
   - ✅ **Require branches to be up to date before merging**
   - **Status checks que deben pasar**:
     - `Test` (del workflow ci-develop.yml)
-    - Todos los jobs de la matriz de Python (3.8, 3.9, 3.10, 3.11, 3.12)
+    - Todos los jobs de la matriz de Python (3.8, 3.9, 3.10, 3.11, 3.12, 3.13, 3.14)
 
 - ✅ **Require conversation resolution before merging**
 
@@ -313,7 +326,7 @@ Para mantener la calidad del código y evitar merges accidentales, debes configu
    - Ve a [https://pypi.org/manage/account/token/](https://pypi.org/manage/account/token/)
    - Click en **Add API token**
    - **Token name**: `GitHub Actions - Colmena Production`
-   - **Scope**: `Project: colmena`
+   - **Scope**: `Project: colmena-ai`
    - Copia el token (empieza con `pypi-...`)
 
 2. **Agregar a GitHub**:
@@ -334,7 +347,7 @@ Para mantener la calidad del código y evitar merges accidentales, debes configu
    - Ve a [https://test.pypi.org/manage/account/token/](https://test.pypi.org/manage/account/token/)
    - Click en **Add API token**
    - **Token name**: `GitHub Actions - Colmena Staging`
-   - **Scope**: `Entire account` (primera vez) o `Project: colmena`
+   - **Scope**: `Entire account` (primera vez) o `Project: colmena-ai`
    - Copia el token (empieza con `pypi-...`)
 
 3. **Agregar a GitHub**:
@@ -351,6 +364,7 @@ El secret `GITHUB_TOKEN` se proporciona automáticamente por GitHub Actions y no
 **Secretos configurados correctamente**:
 - ✅ `PYPI_API_TOKEN` - Para publicación a PyPI (main)
 - ✅ `TEST_PYPI_API_TOKEN` - Para publicación a TestPyPI (staging)
+- ✅ `NPM_TOKEN` - Para publicación a NPM (main)
 - ✅ `GITHUB_TOKEN` - Automático (para tags y releases)
 
 ---
@@ -447,7 +461,7 @@ Cuando se hace merge a `main`:
 
 1. ✅ GitHub Actions ejecuta CI completo
 2. 📊 Calcula nueva versión según Conventional Commit
-3. 📝 Actualiza `pyproject.toml` y `Cargo.toml`
+3. 📝 Actualiza `pyproject.toml`, `Cargo.toml` y `package.json`
 4. 💾 Crea commit: `chore: bump version to X.Y.Z`
 5. 🏷️ Crea tag: `vX.Y.Z`
 6. 📦 Construye wheels de Python
@@ -458,7 +472,7 @@ Cuando se hace merge a `main`:
 
 ```bash
 # Verificar en PyPI
-pip install colmena --upgrade
+pip install colmena-ai --upgrade
 python -c "import colmena; print(colmena.__version__)"
 
 # Verificar en GitHub

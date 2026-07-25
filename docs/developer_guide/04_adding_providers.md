@@ -4,21 +4,27 @@
 
 ```rust
 // src/libs/colmena/src/llm/domain/llm_provider.rs
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProviderKind {
     OpenAi,
-    Gemini,
+    Google,
     Anthropic,
+    Mock,
+    Generated,
     Mistral,        // ← Nuevo proveedor
 }
 
-impl ProviderKind {
-    pub fn from_str(s: &str) -> Result<Self, LlmError> {
+impl FromStr for ProviderKind {
+    type Err = LlmError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
-            "openai" => Ok(Self::OpenAi),
-            "google" => Ok(Self::Gemini),
-            "anthropic" => Ok(Self::Anthropic),
-            "mistral" => Ok(Self::Mistral),        // ← Añadir aquí
+            "openai" => Ok(ProviderKind::OpenAi),
+            "google" => Ok(ProviderKind::Google),
+            "anthropic" => Ok(ProviderKind::Anthropic),
+            "mock" => Ok(ProviderKind::Mock),
+            "generated" => Ok(ProviderKind::Generated),
+            "mistral" => Ok(ProviderKind::Mistral),        // ← Añadir aquí
             _ => Err(LlmError::UnsupportedProvider { provider: s.to_string() }),
         }
     }

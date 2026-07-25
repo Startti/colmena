@@ -68,7 +68,7 @@ En producción, es obligatorio configurar las siguientes variables de entorno:
 | Variable | Descripción | Requerido |
 | :--- | :--- | :--- |
 | **`DATABASE_URL`** | URL de conexión a PostgreSQL (`postgres://user:pass@host:5432/db`) | Sí (Engine) |
-| **`SECURE_VALUES_KEY`** | Clave de 32 bytes (base64) para cifrar/descifrar secretos (AES-GCM) | Sí |
+| **`SECURE_VALUES_KEY`** | Passphrase (cadena aleatoria de ≥32 caracteres) para cifrar/descifrar secretos con pgcrypto `pgp_sym_encrypt` (OpenPGP CFB, no AES-GCM) | Sí |
 | **`OPENAI_API_KEY`** | API Key del proveedor OpenAI | Opcional |
 | **`GEMINI_API_KEY`** | API Key de Google Gemini | Opcional |
 | **`ANTHROPIC_API_KEY`** | API Key de Anthropic Claude | Opcional |
