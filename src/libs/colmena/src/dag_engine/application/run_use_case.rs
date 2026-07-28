@@ -1,6 +1,7 @@
 use crate::colmena_log;
 use crate::dag_engine::application::liveness::LivenessSettings;
 use crate::dag_engine::application::ports::{NodeRegistryPort, SubGraphExecutorPort};
+use crate::dag_engine::application::preflight;
 use crate::dag_engine::application::secure_value_service::SecureValueService;
 use crate::dag_engine::domain::error::DagError;
 use crate::dag_engine::domain::graph::{Edge, Graph};
@@ -182,6 +183,12 @@ impl DagRunUseCase {
             let mut global_calls: HashMap<String, u32> = HashMap::new();
             let mut caller_specific_calls: HashMap<String, HashMap<String, u32>> = HashMap::new();
             let mut global_shared_state = serde_json::json!({});
+
+            // Pre-flight: validate keys of the providers this graph will use (cached,
+            // blocking). Runs on every entry (fresh/resume/subgraph re-enter here) —
+            // the TTL cache is what makes per-turn ADP runs cheap (first turn checks,
+            // rest hit cache). Disable via COLMENA_PREFLIGHT_HEALTH=off.
+            preflight::validate_graph_providers(&graph).await?;
 
             // ── Lifecycle decision (spec §4.1) ─────────────────────────────────────
             //
