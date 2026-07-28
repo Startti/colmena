@@ -3,6 +3,14 @@ name: test_graph
 description: Protocol for running and testing Colmena DAG graph JSON files. Use when the user wants to test, run, validate, or debug a JSON graph file in tests/graphs/ or any .json DAG definition. Triggers on phrases like "test this graph", "run this json", "check this graph", "does this graph work", "execute this dag".
 ---
 
+> **MANDATORY — Colmena work uses Colmena nodes.** Any task in/for Colmena MUST be
+> built and verified as a real Colmena graph of registered nodes (`python_script`,
+> `sql_query`, `llm_call`, `http_request`, `for_each`, `subgraph`, …) run through the
+> DAG engine (`cargo run --bin dag_engine -- run <graph.json>`) — never as a
+> standalone script tested in isolation. Plain code is only the body of a
+> `python_script` node, and must be embedded in a graph and exercised E2E before the
+> task counts as done.
+
 # Test Graph Skill
 
 ## When to Use

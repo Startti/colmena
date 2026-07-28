@@ -3,6 +3,10 @@ name: typescript_dev
 description: Protocol for TypeScript/Node.js development in Colmena. Use when modifying napi-rs bindings, Node.js integration, or TypeScript types. Includes build context, testing, and documentation integration.
 ---
 
+> **MANDATORY — Colmena work uses Colmena nodes.** Any task in/for Colmena MUST be
+> built and verified as a real Colmena graph of registered nodes run through the DAG
+> engine — never as a standalone script tested in isolation.
+
 # TypeScript Development Skill
 
 ## When to Use

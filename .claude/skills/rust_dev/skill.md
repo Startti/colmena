@@ -3,6 +3,13 @@ name: rust_dev
 description: Protocol for Rust development in Colmena. Use when modifying or creating Rust code (.rs files or Cargo.toml) in src/libs/colmena. Includes architecture context, development protocols, testing, and documentation integration.
 ---
 
+> **MANDATORY — Colmena work uses Colmena nodes.** Any task in/for Colmena MUST be
+> built and verified as a real Colmena graph of registered nodes run through the DAG
+> engine — never as a standalone script tested in isolation. If a task needs new
+> behavior as a tool/step, implement it as a real `ExecutableNode`, register it in
+> `registry.rs`, and exercise it inside a graph E2E — do not deliver a standalone
+> library.
+
 # Rust Development Skill
 
 ## When to Use

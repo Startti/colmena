@@ -6,6 +6,22 @@
 - Version: 0.4.0 (alpha) — Phases 1-6 and 9 complete, Phase 7 (testing) and 8 (docs) pending
 - Repository: https://github.com/Startti/colmena
 
+## MANDATORY — Colmena work is done with Colmena nodes
+When ANYTHING is requested in or for Colmena (a feature, an agent, a solution, a
+test), it MUST be built and verified **exclusively as a real Colmena graph made of
+registered nodes** (`python_script`, `sql_query`, `llm_call`, `http_request`,
+`for_each`, `subgraph`, etc.) and run through the DAG engine
+(`cargo run --bin dag_engine -- run <graph.json>`). It is NOT done as a standalone
+Python/Rust script tested in isolation.
+
+- Plain code is acceptable ONLY as the **body destined for a `python_script` node**,
+  and it must then be **embedded in a real graph and exercised E2E through the DAG
+  engine** before the task counts as done.
+- Never back a tool/step with a placeholder/mock instead of a real registered node
+  (see also the "Grafos JSON con tools reales" rule below).
+- Verifying a standalone library with unit tests is NOT the same as delivering a
+  Colmena solution. The deliverable is a working graph exercised by the engine.
+
 ## Key Directories
 - `src/libs/colmena/src/` — All Rust source code
   - `llm/` — LLM module: multi-provider abstraction (OpenAI, Anthropic, Gemini)

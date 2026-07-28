@@ -3,6 +3,14 @@ name: python_dev
 description: Protocol for Python development in Colmena. Use when modifying Python files, PyO3 bindings, or Python tests. Includes maturin build context, testing, and documentation integration.
 ---
 
+> **MANDATORY — Colmena work uses Colmena nodes.** Any task in/for Colmena MUST be
+> built and verified as a real Colmena graph of registered nodes (`python_script`,
+> `sql_query`, `llm_call`, `http_request`, `for_each`, `subgraph`, …) run through the
+> DAG engine (`cargo run --bin dag_engine -- run <graph.json>`) — never as a
+> standalone Python script tested in isolation. Plain Python is only the body of a
+> `python_script` node, and must be embedded in a graph and exercised E2E before the
+> task counts as done.
+
 # Python Development Skill
 
 ## When to Use
