@@ -77,3 +77,6 @@ node_modules/
 
 # Agente-creador test graphs (local experimentation, not for commit yet)
 tests/agente-creador/
+# Local Pi runtime state
+.atl/
+.pi/
