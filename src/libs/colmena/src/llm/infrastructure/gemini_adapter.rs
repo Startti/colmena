@@ -698,34 +698,41 @@ impl LlmRepository for GeminiAdapter {
     }
 
     async fn health_check(&self) -> Result<(), LlmError> {
-        // For Gemini, we'll make a simple test request to check if the API key works
-        let url = format!("{}/models/gemini-1.5-flash:generateContent", self.base_url);
-
-        let test_body = json!({
-            "contents": [
-                {
-                    "role": "user",
-                    "parts": [{"text": "Hi"}]
-                }
-            ]
-        });
-
+        // Reachability-only diagnostic — model-free, no request body, no pinned
+        // model string. Mirrors the OpenAI adapter's `GET /models` shape.
         let response = self
             .client
-            .post(&url)
-            .header("Content-Type", "application/json")
-            .query(&[("key", "dummy")]) // This will fail, but we can check if endpoint exists
-            .json(&test_body)
+            .get(format!("{}/models", self.base_url))
             .send()
             .await
             .map_err(|e| LlmError::network_error(e.to_string()))?;
 
-        // If we get a 4xx status, the endpoint exists (just API key is wrong)
-        // If we get a 2xx status, everything is working
-        if response.status().is_success() || response.status().is_client_error() {
+        if response.status().is_success() {
             Ok(())
         } else {
-            Err(LlmError::request_failed("Gemini endpoint not available"))
+            Err(LlmError::request_failed("Gemini health check failed"))
+        }
+    }
+
+    async fn validate_credentials(&self, api_key: &str) -> Result<(), LlmError> {
+        let response = self
+            .client
+            .get(format!("{}/models", self.base_url))
+            .query(&[("key", api_key)])
+            .send()
+            .await
+            .map_err(|e| LlmError::network_error(e.to_string()))?;
+
+        let status = response.status();
+        if status.is_success() {
+            Ok(())
+        } else if status.as_u16() == 401 || status.as_u16() == 403 {
+            Err(LlmError::InvalidApiKey)
+        } else {
+            Err(LlmError::request_failed(format!(
+                "Gemini credential validation failed with status {}",
+                status
+            )))
         }
     }
 
@@ -935,7 +942,7 @@ mod tests {
         let provider = LlmProvider::new(
             ProviderKind::Google,
             "k".into(),
-            Some("gemini-1.5-pro".into()),
+            Some("gemini-2.5-pro".into()),
         )
         .unwrap();
         let config = LlmConfig::new(provider);
@@ -969,7 +976,7 @@ mod tests {
         let provider = LlmProvider::new(
             ProviderKind::Google,
             "k".into(),
-            Some("gemini-1.5-pro".into()),
+            Some("gemini-2.5-pro".into()),
         )
         .unwrap();
         let config = LlmConfig::new(provider);
@@ -993,7 +1000,7 @@ mod tests {
         let provider = LlmProvider::new(
             ProviderKind::Google,
             "k".into(),
-            Some("gemini-1.5-pro".into()),
+            Some("gemini-2.5-pro".into()),
         )
         .unwrap();
         let config = LlmConfig::new(provider);
@@ -1293,6 +1300,80 @@ mod tests {
     fn with_base_url_overrides() {
         let a = GeminiAdapter::with_base_url("http://127.0.0.1:4000/gemini/v1beta".to_string());
         assert_eq!(a.base_url(), "http://127.0.0.1:4000/gemini/v1beta");
+    }
+
+    #[tokio::test]
+    async fn health_check_hits_models_endpoint_with_no_pinned_model() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/models"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "models": [] })))
+            .mount(&server)
+            .await;
+
+        let adapter = GeminiAdapter::with_base_url(server.uri());
+        let result = adapter.health_check().await;
+        assert!(result.is_ok(), "expected Ok, got {:?}", result);
+
+        let received = server.received_requests().await.unwrap();
+        assert_eq!(received.len(), 1);
+        assert_eq!(received[0].method.as_str(), "GET");
+        assert_eq!(received[0].url.path(), "/models");
+        assert!(received[0].body.is_empty(), "GET /models must send no body");
+        let full_url = received[0].url.to_string();
+        assert!(
+            !full_url.contains("1.5"),
+            "no deprecated pinned model in the request, got: {}",
+            full_url
+        );
+        assert!(
+            !full_url.contains("generateContent"),
+            "must not call generateContent, got: {}",
+            full_url
+        );
+    }
+
+    #[tokio::test]
+    async fn validate_credentials_ok_on_200() {
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/models"))
+            .and(query_param("key", "real-gemini-key"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "models": [] })))
+            .mount(&server)
+            .await;
+
+        let adapter = GeminiAdapter::with_base_url(server.uri());
+        let result = adapter.validate_credentials("real-gemini-key").await;
+        assert!(result.is_ok(), "expected Ok, got {:?}", result);
+    }
+
+    #[tokio::test]
+    async fn validate_credentials_err_on_401() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/models"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(json!({
+                "error": { "message": "API key not valid" }
+            })))
+            .mount(&server)
+            .await;
+
+        let adapter = GeminiAdapter::with_base_url(server.uri());
+        let err = adapter
+            .validate_credentials("revoked-gemini-key")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, LlmError::InvalidApiKey), "got {:?}", err);
     }
 
     // ── Cache-safe temporal suffix (2026-06-11) ──────────────────────────

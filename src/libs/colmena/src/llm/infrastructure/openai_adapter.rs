@@ -497,6 +497,28 @@ impl LlmRepository for OpenAiAdapter {
         }
     }
 
+    async fn validate_credentials(&self, api_key: &str) -> Result<(), LlmError> {
+        let response = self
+            .client
+            .get(format!("{}/models", self.base_url))
+            .header("Authorization", format!("Bearer {}", api_key))
+            .send()
+            .await
+            .map_err(|e| LlmError::network_error(e.to_string()))?;
+
+        let status = response.status();
+        if status.is_success() {
+            Ok(())
+        } else if status.as_u16() == 401 || status.as_u16() == 403 {
+            Err(LlmError::InvalidApiKey)
+        } else {
+            Err(LlmError::request_failed(format!(
+                "OpenAI credential validation failed with status {}",
+                status
+            )))
+        }
+    }
+
     fn provider_name(&self) -> &'static str {
         "openai"
     }
@@ -1007,6 +1029,68 @@ mod tests {
     fn with_base_url_overrides() {
         let a = OpenAiAdapter::with_base_url("http://127.0.0.1:4000/v1".to_string());
         assert_eq!(a.base_url(), "http://127.0.0.1:4000/v1");
+    }
+
+    #[tokio::test]
+    async fn health_check_hits_models_endpoint_with_no_pinned_model() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/models"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "data": [] })))
+            .mount(&server)
+            .await;
+
+        let adapter = OpenAiAdapter::with_base_url(server.uri());
+        let result = adapter.health_check().await;
+        assert!(result.is_ok(), "expected Ok, got {:?}", result);
+
+        let received = server.received_requests().await.unwrap();
+        assert_eq!(received.len(), 1);
+        assert_eq!(received[0].url.path(), "/models");
+        assert!(received[0].body.is_empty(), "GET /models must send no body");
+    }
+
+    #[tokio::test]
+    async fn validate_credentials_ok_on_200() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/models"))
+            .and(header("authorization", "Bearer sk-real-key"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "data": [] })))
+            .mount(&server)
+            .await;
+
+        let adapter = OpenAiAdapter::with_base_url(server.uri());
+        let result = adapter.validate_credentials("sk-real-key").await;
+        assert!(result.is_ok(), "expected Ok, got {:?}", result);
+    }
+
+    #[tokio::test]
+    async fn validate_credentials_err_on_401() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/models"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(json!({
+                "error": { "message": "Invalid API key" }
+            })))
+            .mount(&server)
+            .await;
+
+        let adapter = OpenAiAdapter::with_base_url(server.uri());
+        let err = adapter
+            .validate_credentials("sk-revoked-key")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, LlmError::InvalidApiKey), "got {:?}", err);
     }
 
     #[test]

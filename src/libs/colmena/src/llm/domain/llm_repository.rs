@@ -17,6 +17,13 @@ pub trait LlmRepository: Send + Sync {
     /// Test connection with the provider
     async fn health_check(&self) -> Result<(), LlmError>;
 
+    /// Validate that `api_key` is accepted by the provider (authenticated ListModels).
+    /// Default impl = reachability-only fallback (health_check), so external/mock impls
+    /// are unaffected. Real adapters override it. ADDITIVE + defaulted => no ADP break.
+    async fn validate_credentials(&self, _api_key: &str) -> Result<(), LlmError> {
+        self.health_check().await
+    }
+
     /// Get the provider name this repository implements
     fn provider_name(&self) -> &'static str;
 }
