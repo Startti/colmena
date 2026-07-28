@@ -6,6 +6,78 @@ Si vas a empezar a trabajar en algo de acá, sacalo de esta lista y agregalo al 
 
 ---
 
+## 🔍 Code audit exhaustivo — 60 hallazgos (2026-07-27)
+
+**Origen:** auditoría por-símbolo de los 353 archivos fuente del crate (`src/libs/colmena/src/`), 12 lotes vía Workflow multi-agente (Haiku describe → Sonnet sintetiza → Opus juzga dead-code). Catálogo por-archivo en `docs/agent_context/audit/*.md`; **detalle completo de cada hallazgo (con nota TDD del test-rojo primero) en [`docs/agent_context/audit/FINDINGS_LEDGER.md`](agent_context/audit/FINDINGS_LEDGER.md)**. Esta entrada es el índice histórico; el ledger es la fuente de verdad.
+
+**Cómo retomar:** cada hallazgo tiene un slug de SDD change propuesto. Al trabajar uno, sácalo de acá → SDD change (spec/design/tasks) → implementar con TDD (test que falla primero) → changelog del mes.
+
+**Meta-hallazgo:** en 353 archivos, **0 resultaron muertos de verdad** entre decenas de `Used-by=0` — todos falsos positivos del dependency map (4 patrones ciegos: facades re-export, factories runtime, `use super::`/DI trait-object, imports agrupados `use x::{a,b,c}`). El valor está en correctness/seguridad/sin-terminar, no en borrar. Único código muerto real = variables locales / helpers de test / campos privados (triviales, edits acoplados).
+
+### 🔴 HIGH — correctness / seguridad (arrancar por acá)
+
+| # | Hallazgo | Módulo | SDD change slug |
+|---|----------|--------|-----------------|
+| 5 | Panic en hidratación de filas — conv repos `.unwrap()` al construir `LlmMessage` desde DB; fila malformada panica el proceso | llm/persistence | `llm-persistence-row-hydration-safety` |
+| 6 | `gemini-1.5-flash` deprecado hardcodeado en health-check (`gemini_adapter:702`) | llm/infra | `gemini-health-check-model-update` |
+| 18 | Errores tragados mientras se reporta éxito (`extraction`, `crdt_doc_run_python`, `crdt_doc_tools`) | dag_engine/nodes | `synthetic-tools-partial-failure-reporting` |
+| 25 | Fail-open: status no-parseable → `DagRunStatus::Failed` silencioso | dag_engine/infra | `dag-persistence-fail-open-observability` |
+| 30 | `python_node:211` imprime el código del usuario a stdout (fuga de secretos/PII) | dag_engine/nodes | `dag-nodes-structured-logging-b05` |
+| 36 | Blobs de versión escritos pero `read_version` devuelve `Vec::new()` (gcs+localfs) — pérdida de datos | documents/storage | `documents-read-version-blobs-bug` |
+| 45 | Backend GCS de CRDT: `new`→`NotImplemented`, 6 métodos `unreachable!()` (panic si se selecciona) — **DECISIÓN** | crdt_documents | `crdt-gcs-storage-decision` |
+| 46 | Reorder de hojas corrompe metadata (tags string `'s'/'n'/'b'` vs numéricos `1-4`) | crdt_documents | `crdt-reorder-typetag-fix` |
+| 13 | `DagRunUseCase::execute()` público con cuerpo `unimplemented!()` (panica) + muerto — **DECISIÓN** (deprecate vs remove, barrer ADP) | dag_engine/app | `dag-run-usecase-execute-deprecation` |
+
+### 🟡 MED
+
+| # | Hallazgo | Módulo | SDD change slug |
+|---|----------|--------|-----------------|
+| 7 | Serde de tool-call args con `unwrap_or_default()` → `{}`/`''` silencioso | llm/infra | `llm-adapter-tool-arg-serde-observability` |
+| 8 | OpenAI stream lee solo `tool_calls.first()` (dropea calls paralelos) | llm/infra | `openai-adapter-parallel-tool-calls` |
+| 9 | Hidratación row→message duplicada entre repos | llm/persistence | `llm-persistence-dedup-hydration` |
+| 14 | Violación hexagonal: `sql_execution_service` (app) importa `infrastructure::sql_ast` | dag_engine/app | `dag-sql-exec-layering-fix` |
+| 15 | `api.rs` — 4 bloques copy-paste entre handlers | dag_engine | `dag-api-handler-dedup` |
+| 16 | `sse_mapper` mapea cada evento 2× (top-level + SubgraphWrapped) | dag_engine | `dag-sse-mapper-dedup` |
+| 19 | Tests vacíos (assert sobre campo nunca seteado; `tool_constants` parcial) | dag_engine/nodes | `dag-test-quality-b04` |
+| 20 | `parse_a1` aritmética sin `checked_*` (overflow) | crdt_doc_tools | `crdt-a1-parser-safety` |
+| 22 | `http.rs` usa `println!` en vez de `tracing` | dag_engine/nodes | `http-node-structured-logging` |
+| 23 | Funciones enormes (`llm.rs` 2500 líneas, `image_edit`, `gdocs` 26 dispatchers) | dag_engine/nodes | `dag-nodes-fn-extraction` |
+| 26 | SQL: nombres de schema por `format!()` en 8 sitios (defensa) | dag_engine/infra | `sql-function-registry-ident-escaping` |
+| 27 | SELECT diagnóstico en cada `persist` de secure value (duplica queries) | dag_engine/infra | `secure-value-persist-diagnostic-gate` |
+| 28 | `query_feedback` sin constraint único ni índice `session_id` | dag_engine/infra | `query-feedback-constraints-migration` |
+| 31 | `subgraph:162-166` ramas SUSPENDED/no-SUSPENDED idénticas (¿bug o dead?) | dag_engine/nodes | `subgraph-suspend-branch-review` |
+| 32 | `schema()` incompleto (planner 4/9 campos; trigger tipos bare-string) | dag_engine/nodes | `dag-nodes-schema-parity-b05` |
+| 33 | Router usa errores string en vez de `thiserror` enum | dag_engine/nodes | `router-typed-errors` |
+| 34 | `orchestrator::execute()` ~1000 líneas, 3 niveles de anidación | dag_engine/nodes | `orchestrator-fn-extraction` |
+| 37 | `ListAssetsUseCase` muerto en prod pero campo público de `DocumentRuntime` — **DECISIÓN** | documents | `documents-list-assets-usecase-decision` |
+| 38 | Masking de errores en fronteras JSON/IO (VersionId vacío, `<img src="">`) | documents | `documents-io-boundary-error-handling` |
+| 39 | Dispatch por tipo de artefacto triplicado (Excel/Word/HTML) | documents | `documents-artifact-dispatch-dedup` |
+| 41 | Co-edit guard: `sa_email` (filtro self-author) nunca se aplica | gdocs | `gdocs-coedit-self-author-filter` |
+| 42 | Violación de capas + `RevisionStore` trait mal ubicado en infra | gdocs | `gdocs-port-relocation` |
+| 43 | `style::lookup_para` usa `.expect()` (panica); hex inconsistente | gdocs | `gdocs-error-handling-consistency` |
+| 47 | Race multi-peer al reordenar (snapshot→restore pierde updates) | crdt_documents | `crdt-reorder-concurrency-guard` |
+| 48 | `RestBackend`/`xlsx_import` tragan errores HTTP/carga | crdt_documents | `crdt-error-surfacing` |
+| 49 | Violaciones de capa (`tool_executor`/`xlsx_import` → infra directo) | crdt_documents | `crdt-layering-ports` |
+| 52 | `fail_on_limit` definido pero nunca leído (fallback nunca implementado) | web | `web-search-fail-on-limit` |
+| 54 | Colisión silenciosa por leaf-name en lookup de skill references | skills | `skills-reference-leafname-collision` |
+| 56 | MIME validado con `.trim()` pero usado sin trim → `.bin` | storage | `storage-local-http-mime-trim` |
+| 57 | Path de descarga mapea GET fallido a `UploadFailed` (variante errónea) | storage | `storage-download-error-variant` |
+| 58 | Guard de path-traversal duplicado 4× (drift en chequeo de seguridad) | storage | `storage-path-guard-dedup` |
+| 59 | Bindings tragan errores de escritura si el runtime tokio no está | python_bindings | `pybindings-crdt-sheet-error-surfacing` |
+
+### ⚪ LOW / cleanup (agrupados por lote — detalle + dead-code trivial en el ledger)
+
+`llm-domain-builder-consistency` (#1) · `llm-domain-id-error-type` (#2) · `llm-error-hygiene` (#3) · `available_tools` dead-candidate sin verificar (#4) · `llm-quality-cleanup-b02` (#10, incl. `_created_at_str` #11 muerto) · `llm-test-mock-hygiene` (#12) · `dag-engine-cleanup-b03` (#17) · `gdocs-legacy-stub-cleanup` (#21 — 2 safe_to_remove + 1 needs_human) · `dag-nodes-cleanup-b04` (#24) · `dag-infra-cleanup-b06` (#29) · `dag-nodes-cleanup-b05` (#35, incl. `reactor::task_memory_repo` muerto) · `documents-cleanup-b07` (#40, incl. `DEFAULT_ASSET_STORAGE_ROOT` muerto) · `gdocs-cleanup-b08` (#44, incl. `snap_multi_tab` muerto) · `crdt-cleanup-b09` (#50) · `web-gsheets-cleanup-b10` (#53) · `skills-infra-dedup-b11` (#55, `available_builtin_names` needs_human) · `bindings-shared-cleanup-b12` (#60)
+
+### Decisiones pendientes (disciplina breaking-change — barrer ADP antes)
+- **#13** `execute()` público que panica: `#[deprecated]` + fallback vs remover
+- **#37** `ListAssetsUseCase` muerto-pero-público: cablear el nodo o remover
+- **#45** stub GCS de CRDT: implementar o fallar-cerrado con error claro
+
+**Trigger:** retomar por la tabla HIGH (empezar por #46/#36/#5 — bugs de datos reales). Los tests de integración (`tests/*.rs`, 44 archivos) y `examples/` quedaron fuera del audit — pase opcional futuro (B04 ya encontró un test que siempre pasa, así que vale la pena).
+
+---
+
 ## `socketio_request` — reuso de conexión por run (2026-07-04)
 
 **Origen:** handoff de ADP 2026-07-04 (mismo incidente que PR #145 — `EngineIO Error` en el gateway canvas). El nodo es stateless por diseño: cada tool call abre una conexión Socket.IO fresca, emite, y desconecta. Con agentes que hacen N ops (`artifact_read`/`write`, `document_read`/`write`) eso significa N handshakes por run — churn + latencia por op.

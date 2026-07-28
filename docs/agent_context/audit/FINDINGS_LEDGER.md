@@ -1,0 +1,205 @@
+# Colmena Code-Audit — Findings Ledger
+
+Cumulative findings from the per-module code audit (Workflow `colmena-code-audit`).
+This ledger is the **EXPLORE output of SDD**: each finding cluster becomes a candidate
+SDD change, remediated via TDD (test-first). Discovery (audit) is read-only and does
+**not** carry TDD; TDD begins at the `apply` phase of each remediation change.
+
+Per-symbol catalog cards live alongside this file in `docs/agent_context/audit/*.md`.
+
+## Legend
+- **Status**: `open` (found, not triaged) · `spec'd` (SDD change created) · `in-progress` · `done` · `wontfix`
+- **SDD change**: the proposed change id under `openspec/` (or engram topic) once triaged
+- **TDD note**: the failing test that must be written first before any fix
+
+---
+
+## Batch 01 — `llm/domain` (28 files) — audited 2026-07-25
+
+| # | Finding | Files | Type | Status | Proposed SDD change | TDD note (failing test first) |
+|---|---------|-------|------|--------|---------------------|-------------------------------|
+| 1 | Builder API inconsistency + silent error-swallowing: `with_thinking_budget` returns `Self` (no validation) while siblings return `Result<Self, LlmError>`; `with_tool_calls`/`with_content` use `unwrap_or(self.message)` hiding construction errors; `is_streaming()` duplicates `stream()` | `llm_config.rs`, `llm_request.rs`, `llm_response.rs` | improvement | open | `llm-domain-builder-consistency` | Test that `with_thinking_budget` rejects out-of-bounds and returns `Err(LlmError)`; test that `with_tool_calls` on an invalid message returns `Err`, not a silently-fallback `Self` |
+| 2 | Duplicated ID value objects using `Result<Self, String>` instead of domain `LlmError` (violates thiserror convention); near-identical 40-line structs | `value_objects/llm_request_id.rs`, `value_objects/llm_response_id.rs`, `value_objects/mod.rs` | improvement | open | `llm-domain-id-error-type` | Test `LlmRequestId::from_string("")` returns `Err(LlmError::InvalidId(..))` (new variant); Display round-trip test |
+| 3 | `LlmError` hygiene: 30+ variants, only 11 have constructors, ~3 unit-tested, zero doc comments; 5 variants share identical `{ message: String }` shape | `llm_error.rs` | improvement | open | `llm-error-hygiene` | Add failing tests for the uncovered error families (config / message-validation / tool) before adding constructors + docs |
+| 4 | `available_tools()` trait method documented "typically not used directly" — dead-candidate | `tool_executor.rs` | dead_candidate | open (needs Judge) | — (blocked on Opus blast-radius verdict) | n/a until verdict is `safe_to_remove` |
+
+**Structural:** 0 orphans, 0 layering violations (domain layer is clean). **Unfinished:** none.
+
+---
+
+## Batch 02 — `llm/application` + `llm/infrastructure` (44 files) — audited 2026-07-25
+
+| # | Finding | Files | Type | Sev | Status | Proposed SDD change | TDD note (failing test first) |
+|---|---------|-------|------|-----|--------|---------------------|-------------------------------|
+| 5 | **Panics on fallible constructors at persistence boundaries** — both conversation repos `.unwrap()` on `LlmMessage` constructors while hydrating DB rows (postgres 68-83,203-217; sqlite 68-82,206-221). A single malformed/legacy row panics the process instead of a domain error. | `persistence/postgres_conversation_repository.rs`, `persistence/sqlite_conversation_repository.rs` | improvement (reliability) | **HIGH** | open | `llm-persistence-row-hydration-safety` | Insert a malformed row → assert `get_by_id` returns `Err(LlmError)`, NOT a panic. Then convert `.unwrap()` → `?`. |
+| 6 | **Deprecated `gemini-1.5-flash` hardcoded** in production health-check path (`gemini_adapter.rs:702`). Violates project convention (always `gemini-2.5-flash`). | `infrastructure/gemini_adapter.rs` | improvement | **HIGH** | open | `gemini-health-check-model-update` | Assert `health_check` uses a non-deprecated model string (no `1.5`); source from shared const. |
+| 7 | Silent serialization-failure swallowing on tool-call args: `to_string(...).unwrap_or_default()` sends `{}`/`''` downstream, masking serde bugs | `infrastructure/gemini_adapter.rs`, `infrastructure/scripted_adapter.rs` | improvement | MED | open | `llm-adapter-tool-arg-serde-observability` | Test that a non-serializable tool arg surfaces `Err`/`warn!`, not a silent `{}`. |
+| 8 | OpenAI stream reads only `tool_calls.first()` (`openai_adapter.rs:407`) — drops additional concurrent tool calls in one delta chunk; also stale `#[allow(dead_code)]` on a live `index` field | `infrastructure/openai_adapter.rs` | improvement (correctness) | MED | open | `openai-adapter-parallel-tool-calls` | Feed a delta chunk with 2 tool_calls → assert both are emitted. |
+| 9 | Duplicated row→message hydration + session-key branching across both conversation repos (2-3x each, mirrored) | `persistence/postgres_conversation_repository.rs`, `persistence/sqlite_conversation_repository.rs` | improvement (DRY) | MED | open | `llm-persistence-dedup-hydration` | (refactor — covered by #5's tests; assert behavior parity after extract) |
+| 10 | Misc quality: health-check `Result` that never fails; unconditional double-clone of attachment bytes (`llm_call_use_case.rs:300-301`); mutex-poison boilerplate ×3; per-field row-extract boilerplate; `llm::application` re-export inconsistency; misleading test name `agent_keying_isolates_two_runs...` (actually verifies sharing) | multiple | improvement | LOW | open | `llm-quality-cleanup-b02` | per-item micro-tests where behavior changes; rename is test-only |
+| 11 | `_created_at_str` unused local (sqlite conv repo:57) — **Judge verdict: safe_to_remove (0.95)** | `persistence/sqlite_conversation_repository.rs` | dead_confirmed | trivial | ready | fold into `llm-quality-cleanup-b02` | none (pure no-op removal, already `_`-prefixed) |
+| 12 | Test-only adapter stubs: `SlowLlmRepository::stream` `unimplemented!()`; `mock_adapter` hardcodes `is_final=false`; `scripted_adapter` docstring contradicts impl | test mocks | unfinished | LOW | open | `llm-test-mock-hygiene` | fix stubs / correct docstring; low risk (test-only) |
+
+**⚠️ META-FINDING (tooling) — dependency-map factory blind spot:** 12 modules reported Used-by=0 but the synth+judge correctly identified them as **false positives**: the `module_dependency_map.md` is import-graph-only, so provider adapters (gemini/openai/mock/scripted), repositories (postgres/sqlite conv), and factory-constructed types show 0 importers because they're wired through **mod-level re-exports and runtime factories** (`llm_provider_factory`, `repository_factory`, `file_provider_factory`), not direct file edges. **Rule for all future batches: never treat a factory/registry-constructed adapter as dead on Used-by=0 alone.** The audit already applies this caution (0 confirmed dead among the 12).
+
+---
+
+## Batch 03 — `dag_engine` core: domain + application + engine/api/sse (27 files) — audited 2026-07-25
+
+| # | Finding | Files | Type | Sev | Status | Proposed SDD change | TDD note (failing test first) |
+|---|---------|-------|------|-----|--------|---------------------|-------------------------------|
+| 13 | **Public API method that panics + is dead** — `DagRunUseCase::execute()` has an `unimplemented!()` body (deprecation note → `execute_stream`), but is fully `pub` API. Zero callers in-repo AND in ADP sweep, yet removing it is **semver-breaking**. Judge verdict: `needs_human`. | `application/run_use_case.rs` | unfinished + dead (public) | **HIGH** | open (**human decision**) | `dag-run-usecase-execute-deprecation` | Decide: `#[deprecated]` + real fallback to `execute_stream`, OR remove (breaking, sweep ADP first). TDD: test the chosen behavior (no runtime panic on public API). |
+| 14 | **Hexagonal layering violation** — `sql_execution_service.rs` (application) imports `dag_engine::infrastructure::sql_ast` directly; application should depend only on domain ports (`sql_ports.rs`). Couples use-case to a concrete parser. | `application/sql_execution_service.rs` | layering violation | MED | open | `dag-sql-exec-layering-fix` | Introduce a domain port for AST analysis; assert application no longer imports `infrastructure::*`; behavior parity test. |
+| 15 | `api.rs` handler duplication — 4 blocks copy-pasted across `handler_webhook`/`handler_resume`/`run_dag_from_str`/`stream_dag_from_str` (payload injection, loop-control exit detection SSE vs JSON, agent_session_id resolution, 6-fallback `find_field`) | `api.rs` | improvement (DRY) | MED | open | `dag-api-handler-dedup` | behavior parity tests per handler before extract |
+| 16 | `sse_mapper.rs` maps every SSE event type twice (top-level 178-439 + SubgraphWrapped 440-622, identical minus `subgraph-` prefix) | `sse_mapper.rs` | improvement (DRY) | MED | open | `dag-sse-mapper-dedup` | golden test on emitted SSE JSON before/after extract |
+| 17 | LOW cluster: webhook multi-trigger fan-out semantics unqualified (broadcasts to all trigger nodes — document or route); `COLMENA_VERBOSE` doc drift in `verbose.rs` (comment implies env-read but `set_verbose()` must be called); `ExecPolicy.max_items` enforced in caller `for_each.rs` not `run_list` (design-location clarification, NOT dead — see below) | `api.rs`, `verbose.rs`, `application/list_tool_executor.rs` | improvement | LOW | open | `dag-engine-cleanup-b03` | per-item micro-tests / doc fixes |
+
+**Judge value confirmed again:** synth proposed `ExecPolicy.max_items` as dead — **judge REJECTED it (0.98)**: `max_items` IS enforced, in the caller `for_each.rs:297-303` (`rows.truncate`) + exposed in the for_each LLM tool schema (persisted ADP graphs may set it). A blind deletion would have broken the build + dropped a shipped feature. **Structural:** 0 orphans. **Unfinished HIGH:** the `execute()` panic (row 13).
+
+---
+
+## Batch 04 — `dag_engine/infrastructure/nodes` part 1 (36 files: node impls + synthetic tools) — audited 2026-07-25
+
+| # | Finding | Files | Type | Sev | Status | Proposed SDD change | TDD note (failing test first) |
+|---|---------|-------|------|-----|--------|---------------------|-------------------------------|
+| 18 | **Silently discarded errors while reporting success counters** — `let _`/`continue`/`unwrap_or(0)` swallow failures but the user-facing count still says success (`extraction.rs:223` delete error ignored; `crdt_doc_run_python.rs:408-410,424` cell writes skipped/miscounted; `crdt_doc_tools.rs` event-record `.unwrap_or(0)` masks DB failures) | `extraction.rs`, `crdt_doc_run_python.rs`, `crdt_doc_tools.rs` | improvement (data integrity) | **MED-HIGH** | open | `synthetic-tools-partial-failure-reporting` | Force a cell-write failure → assert the count reflects it / a `skipped[]` warning is emitted, not a silent success |
+| 19 | **Vacuous / false-confidence tests** — `recall_history` asserts `_truncated` field that `dispatch_recall_history` never sets (assertion always passes); `gdocs_tools tool_constants_unique` only checks 22 of 36 tools (14 newer silently untested) | `recall_history.rs`, `gdocs_tools.rs` | test quality | MED | open | `dag-test-quality-b04` | Make the assertions meaningful (implement `_truncated` or drop; widen tool-constant coverage to all 36) — **directly a TDD-hygiene fix** |
+| 20 | Unchecked A1-notation arithmetic — `crdt_doc_tools.rs parse_a1` uses raw `col*26+..` (overflow risk) while sibling `parse_a1_to_rc` uses `checked_mul/add`; also `extraction.rs` strips quotes by slicing serde output | `crdt_doc_tools.rs`, `extraction.rs` | improvement (correctness) | MED | open | `crdt-a1-parser-safety` | Feed a large column ref → assert no overflow/panic; consolidate on the checked parser |
+| 21 | gdocs legacy stub dispatchers + dead marker — `dispatch_export` (**Judge: safe_to_remove 0.9**, superseded by `_via_executor`); `_hashmap_keep_alive` (**safe_to_remove 0.95**); `dispatch_create_from_docx` (**needs_human 0.72** — public re-export, sweep ADP first) | `gdocs_tools.rs`, `attachment_run_python.rs` | dead | LOW/trivial + 1 human | ready (2) / **human** (1) | `gdocs-legacy-stub-cleanup` | coupled deletions (drop unused `use HashMap`, `mod.rs` re-export lines) or build breaks; ADP sweep for the public one |
+| 22 | `http.rs` uses `println!` (execute 903,1090,1099; multipart 713,717) instead of `tracing` — not log-level aware in prod | `http.rs` | improvement | MED | open | `http-node-structured-logging` | assert no `println!` in the node; behavior parity |
+| 23 | Oversized functions / boilerplate — `llm.rs execute` ~2500 lines (multiple concerns); `image_edit.rs` repeats `inputs.get()→as_type()→or_else(config)` ×8; `gdocs_tools.rs` has 26 near-identical text-edit dispatchers | `llm.rs`, `image_edit.rs`, `gdocs_tools.rs` | improvement (DRY) | MED | open | `dag-nodes-fn-extraction` | golden/behavior tests before extract; `ExecutableNode` contract unchanged |
+| 24 | LOW cluster: stale doc refs (debug.rs `DO NOT CHANGE` no rationale; `mod.rs` docstring cites nonexistent test; gdocs undocumented singletons CLIENT/CACHE/REVS + `_session_id`-ignored convention); magic `json!({})` no-schema sentinel; redundant `ParameterProperty` construction; `api_explorer` `secure_values` prepared-but-unimplemented (Tasks 14-15) | multiple | improvement | LOW | open | `dag-nodes-cleanup-b04` | per-item micro-tests / doc fixes |
+
+**Structural:** 0 orphans, 0 layering violations. **Judge:** 2 safe_to_remove, 1 needs_human, 0 rejected.
+
+---
+
+## Batch 06 — `dag_engine/infrastructure` non-nodes: SQL / pool_registry / persistence (19 files) — audited 2026-07-25
+
+| # | Finding | Files | Type | Sev | Status | Proposed SDD change | TDD note (failing test first) |
+|---|---------|-------|------|-----|--------|---------------------|-------------------------------|
+| 25 | **Fail-open error handling masks corruption** — `DagStateRepository::get_by_id` coerces any **unparseable status → `DagRunStatus::Failed`** via `unwrap_or_default()` (silently marks runs Failed!); `sql_function_registry::list_functions` coerces NULL/malformed cols → empty strings; `sql_llm_critic::analyze` returns safe default on JSON parse failure with no log | `persistence/postgres_dag_state_repository.rs`, `sql_function_registry.rs`, `sql_llm_critic.rs` | improvement (correctness/obs) | **MED-HIGH** | open | `dag-persistence-fail-open-observability` | Feed an unparseable status row → assert it errors/logs, NOT silently `Failed`; add `warn!` on the critic's fail-open path |
+| 26 | **SQL injection surface** — `sql_function_registry` interpolates schema names via `format!()` at 8 sites (34,39,62,72,90,112,140,173) instead of parameterized/quoted idents. Low risk today (schema = config-time) but fragile if that ever changes | `sql_function_registry.rs` | risk (defense-in-depth) | MED | open | `sql-function-registry-ident-escaping` | Adversarial schema-name test (`"; DROP …`) → assert quoted/rejected |
+| 27 | Diagnostic-only post-insert `SELECT` on **every** `SecureValueRepository::persist` (107-123) — doubles query count on secure-value writes for no runtime benefit | `persistence/postgres_secure_value_repository.rs` | improvement (perf) | MED | open | `secure-value-persist-diagnostic-gate` | Gate behind `cfg(debug_assertions)`/verbose flag or remove; assert single write query in prod path |
+| 28 | `query_feedback` table has no uniqueness constraint on `(session_id, query_text, feedback_type)` (unbounded dup inserts) and no `session_id` index (full-scan lookups) | `sql_function_registry.rs` | improvement (data integrity/perf) | MED | open | `query-feedback-constraints-migration` | migration + test dedup-on-write / index presence |
+| 29 | LOW/MED cluster: `println!`/`eprintln!` in RLS setup + `merge_args_into_schema` collision warnings (untestable side-effect); duplicated logic (`find_resume_entry` nested subquery, `registry.rs` 3-step registration ×3 → helper, `pool_registry` `allow(unused_imports)`); stale `dag_tool_executor.rs:1397-1401` comment says gdocs "stubbed"/"not_yet_wired" but shipped Bundle 1 (2026-06-10) | multiple | improvement | LOW-MED | open | `dag-infra-cleanup-b06` | per-item micro-tests / doc fixes; make collision-report a returned value not a print |
+
+**Judge value (again):** synth proposed 2 dead — **judge REJECTED both (0.98/0.99)**: `UrlKey` (consumed via `use super::url_key` — the map misses **sibling `use super::` imports**) and `PostgresSecureValueRepository` (constructed via `Arc::new(...)` **trait-object DI in `engine.rs:254`** — the map misses dynamic construction). **Structural:** 7 "orphans" all confirmed facade/scanner false positives. **Unfinished:** none.
+
+**⚠️ META-FINDING extended:** the dependency map's blind spots now cover THREE construction patterns → never trust `Used-by=0` alone: (1) mod-level re-export facades, (2) runtime factories, (3) `use super::` sibling imports + trait-object DI wiring. The audit has confirmed **0 truly-dead files** across all Used-by=0 reports — every one was a scanner limitation the Judge caught.
+
+---
+
+## Batch 05 — `dag_engine/infrastructure/nodes` part 2 (35 files: orchestrator/planner/reactor/router/sql/subgraph/suspend) — audited 2026-07-27
+
+| # | Finding | Files | Type | Sev | Status | Proposed SDD change | TDD note (failing test first) |
+|---|---------|-------|------|-----|--------|---------------------|-------------------------------|
+| 30 | **Raw user code printed to stdout** — `python_node.rs:211` prints user code via `println!` (secrets/PII leak outside structured logging); plus `println!` across `orchestrator.rs`, `sql.rs` (13 sites) | `python_node.rs`, `orchestrator.rs`, `sql.rs` | risk (data exposure) | **MED-HIGH** | open | `dag-nodes-structured-logging-b05` | Assert no `println!` of user code; route through `colmena_log!` |
+| 31 | **Dead/no-op branch that may be a suspend bug** — `subgraph.rs:162-166` SUSPENDED and non-SUSPENDED branches return **identical `Ok(result)`**; either dead `if/else` OR a real correctness gap in child-suspend handling | `subgraph.rs` | correctness (needs review) | MED | open | `subgraph-suspend-branch-review` | Test a child `SUSPENDED` propagates distinctly; if truly identical, collapse |
+| 32 | Incomplete `schema()` introspection — `planner.rs` documents 4 of 9 config fields (missing agents/texts/verbose/thinking_budget/streaming); `trigger.rs` uses bare string type literals instead of structured JSON Schema | `planner.rs`, `trigger.rs` | improvement | MED | open | `dag-nodes-schema-parity-b05` | assert `schema()` covers all config fields (same pattern as prior critic/planner/extraction/reactor fixes) |
+| 33 | Router uses ad-hoc `format!`/boxed-string errors instead of a `thiserror` enum; `llm_direct::pick_branch` fails late on empty `cfg.branches` with opaque message | `router/extract_and_route.rs`, `router/llm_direct.rs` | improvement | MED | open | `router-typed-errors` | test empty-branches config → typed `RouterError`, upfront guard |
+| 34 | Oversized `orchestrator.rs::execute()` ~1000 lines, 3-level nesting (resume detection + planning + phase loop + bridge + dispatch + critic + retries) in a 2244-line file | `orchestrator.rs` | improvement (readability) | MED | open | `orchestrator-fn-extraction` | golden/behavior tests before extracting `detect_resume_scenario`/`run_phase_loop`/`dispatch_task`/`apply_critic_retry` |
+| 35 | Cluster (dead + perf + nits): `reactor.rs::task_memory_repo` field **dead (Judge safe_to_remove 0.8**, coupled edit); `router/config.rs:47` recompiles regex every call → `OnceLock`; `sheet_writer` header-read dup + `tab`/`name` field inconsistency; `math.rs` 4-op boilerplate; `task_memory_writer:91` swallows delete error; `subgraph` `_observer` misnamed (used 6×); stale comments (`orchestrator` seed_db, `trigger` StdError) | multiple | dead + improvement | LOW-MED | open | `dag-nodes-cleanup-b05` | per-item micro-tests; regex-hoist perf test |
+
+**Structural:** 0 orphans, 0 layering violations. **Judge:** 1 safe_to_remove, 0 needs_human, 0 rejected. `dag_engine` module now **fully audited**.
+
+---
+
+## Batch 07 — `documents` (41 files: IR Excel/Word/HTML, renderers, GCS/local storage, validators) — audited 2026-07-27
+
+| # | Finding | Files | Type | Sev | Status | Proposed SDD change | TDD note (failing test first) |
+|---|---------|-------|------|-----|--------|---------------------|-------------------------------|
+| 36 | **Version blobs written but never read back** — `read_version` returns hard-coded `blobs: Vec::new()` in BOTH storage adapters (`gcs_store.rs:345`, `local_fs_store.rs:130`) even though `write_version` persists them (GCS + disk lines 82-90). Reading any version loses its blob content — data-integrity bug. | `infrastructure/storage/gcs_store.rs`, `infrastructure/storage/local_fs_store.rs` | correctness (data loss) | **HIGH** | open | `documents-read-version-blobs-bug` | Write a version with non-empty blobs → `read_version` → assert blobs round-trip (currently empty) |
+| 37 | `ListAssetsUseCase` is **dead in production but public** — `execute()` never called (the DAG node `document_tools.rs:421` bypasses it, calling `AssetStore::list_by_session` directly); only a `#[cfg(test)]` test invokes it. Yet it's a `pub` field of `pub struct DocumentRuntime`. Judge: `needs_human`. | `application/list_assets.rs`, `application/runtime.rs` | dead (public) | MED | open (**human decision**) | `documents-list-assets-usecase-decision` | decide: route the node through the use case (restore intended arch), OR remove (breaking — sweep ADP) |
+| 38 | Silent failure masking at JSON/IO boundaries — `read_document` builds `VersionId` from empty string when field absent; `html_renderer` emits `<img src="">`/`<iframe src="">` when asset URL unresolved; `gcs_store` HEAD parse `unwrap_or("")` masks UTF-8 failures; `local_fs_store::set_head` conflates read-failure with missing-file via `unwrap_or_default()` | `read_document.rs`, `apply_patch.rs`, `html_renderer.rs`, `gcs_store.rs`, `local_fs_store.rs` | improvement (correctness/obs) | MED | open | `documents-io-boundary-error-handling` | force each malformed-input path → assert typed error/placeholder, not silent default |
+| 39 | Per-artifact-type dispatch duplication — `apply_patch`/`create_document` triple-match on `ArtifactKind` (parse→apply→validate→render); `apply_word_ops` has 3 internal dup patterns; `html_renderer` duplicates recursive tree-traversal | `apply_patch.rs`, `create_document.rs`, `apply_word_ops.rs`, `html_renderer.rs` | improvement (DRY) | MED | open | `documents-artifact-dispatch-dedup` | introduce `ArtifactOps` trait/factory; behavior parity tests before extract |
+| 40 | Cluster (dead + nits): `DEFAULT_ASSET_STORAGE_ROOT` const **dead (Judge safe_to_remove 0.8)**; `gcs read_version` `_id`/`_version` underscored but used; `word_renderer` redundant `is_some()` + unvalidated hex trim; `local_fs_asset_store::head` parses dir path instead of `meta.session_id`; `get_head`/`list_versions` magic `"agent"`/`"user"` literals → consts; `delete_asset` test-stub `unimplemented!()` (test-only, fine) | multiple | dead + improvement | LOW | open | `documents-cleanup-b07` | per-item micro-tests / const extraction |
+
+**Structural:** 0 orphans, 0 layering violations. **Judge:** 1 safe_to_remove, 1 needs_human, 1 rejected (`VersionData` — kept, it's a core port type; describe flag only checked in-file usage).
+
+---
+
+## Batch 08 — `gdocs` (26 files: co-edit guard, diff, apply_edits, tables, auth, revision store) — audited 2026-07-27
+
+| # | Finding | Files | Type | Sev | Status | Proposed SDD change | TDD note (failing test first) |
+|---|---------|-------|------|-----|--------|---------------------|-------------------------------|
+| 41 | **Co-edit guard self-author filter never applied** — `GuardContext.sa_email` is declared to exclude the service account's OWN revisions from human-change detection, but neither `run_guard` nor `run_guard_non_blocking` uses it. The agent's own edits get flagged as "human changes" — the intended co-edit safety behavior does not happen. | `application/co_edit_guard.rs` | correctness (functional gap) | MED | open | `gdocs-coedit-self-author-filter` | Simulate a revision authored by `sa_email` → assert it is NOT reported as a human change (currently is) |
+| 42 | **Hexagonal layering violation w/ misplaced port** — `co_edit_guard.rs` (application) imports concrete `infrastructure::outline_cache::OutlineCache` + `infrastructure::revision_store::RevisionStore`. Root cause: the `RevisionStore` **trait is defined in infrastructure**, not `domain/traits.rs`; `OutlineCache` has no trait at all → no seam for testing/substitution. | `application/co_edit_guard.rs`, `application/_test_helpers.rs` | layering violation | MED | open | `gdocs-port-relocation` | move `RevisionStore` trait to domain + introduce an `OutlineCache` port; assert application no longer imports `infrastructure::*` |
+| 43 | Panic-prone / inconsistent error handling — `style.rs::lookup_para` uses `.expect()` (panics on missing paragraph, should return `DocsError`); `table_format::build_text_style` swallows invalid hex via `if let Ok` while the cell path fails hard via `?` | `application/style.rs`, `application/table_format.rs` | improvement (correctness) | MED | open | `gdocs-error-handling-consistency` | missing-paragraph input → assert `Err(DocsError)`, not panic; pick one hex-color policy |
+| 44 | Cluster (dead + perf + doc): `_test_helpers::snap_multi_tab` **dead (Judge safe_to_remove 0.9)**; `replace_section` cache-invalidate→fetch→store dup (88-93/159-164); `scope_resolver::resolve` multi-pass min/max → single fold; `config.rs` test hardcodes scopes `["documents","drive.file"]` but `from_env` defaults `["documents","drive"]` (test documents wrong default); `http_client.rs:12-14` header still says Task 10/11/12 `todo!()` stubs though fully implemented | multiple | dead + improvement | LOW | open | `gdocs-cleanup-b08` | per-item micro-tests / doc + test-fixture corrections |
+
+**Structural:** 7 "orphans" all confirmed **false positives** (grouped-`use` map artifact — see meta below; + `DocsError` re-export chain). **Judge:** 1 safe_to_remove, 0 needs_human, 0 rejected.
+
+**⚠️ META-FINDING extended (blind spot #4):** the dependency map also **undercounts grouped imports** — `use crate::gdocs::application::{apply_edits, co_edit_guard, delete_text, ...}` is attributed to the parent `gdocs::application` mod, not to each submodule, so 6 gdocs submodules showed false `Used-by=0`. Blind-spot list is now: (1) mod-level re-export facades, (2) runtime factories, (3) `use super::` siblings + trait-object DI, (4) grouped `use x::{a,b,c}` imports.
+
+---
+
+## Batch 09 — `crdt_documents` (25 files: CRDT backend, formula engine, yjs protocol, ws peer, xlsx import/export, storage) — audited 2026-07-27
+
+| # | Finding | Files | Type | Sev | Status | Proposed SDD change | TDD note (failing test first) |
+|---|---------|-------|------|-----|--------|---------------------|-------------------------------|
+| 45 | **GCS storage backend fully stubbed** — `GcsStorage::new` always returns `NotImplemented`; all 6 `ArtifactStorage` methods use `unreachable!()`. Feature-gated (`gcs`) so build-safe, but selecting `storage_backend:"gcs"` for CRDT docs panics at runtime. Judge kept the file (feature-gated, real compile consumers) → this is a **completeness/decision** item, not dead code. | `storage/gcs.rs` | unfinished (latent panic) | **HIGH** | open (**decision**) | `crdt-gcs-storage-decision` | Implement + round-trip test, OR fail-closed with a clear error (not `unreachable!()`) when config selects gcs |
+| 46 | **Type-tag encoding mismatch → sheet corruption on reorder** — `apply_reorder_sheets:915` writes string tags (`'s'`,`'n'`,`'b'`) via `json_to_any` while `write_cell_raw` uses numeric tags (`1,2,3,4`); reordering can corrupt cell metadata | `tool_executor.rs` | correctness (data corruption) | **MED-HIGH** | open | `crdt-reorder-typetag-fix` | Reorder a sheet with number/bool/string cells → assert type+value preserved (currently corrupts) |
+| 47 | Multi-peer concurrency race — `apply_reorder_sheets` snapshot(843)→restore(887) window silently drops concurrent peer WS updates. Documented v1 single-agent limitation, but real before multi-peer. | `tool_executor.rs` | reliability | MED | open | `crdt-reorder-concurrency-guard` | concurrent-update-during-reorder test → assert no lost update (per-doc mutex) |
+| 48 | Error-swallowing in ingestion/remote paths — `RestBackend` (record_event/events_since/artifacts_for_session) skips HTTP status check, uses `unwrap_or(0)`/`("")` masking remote failures as valid zero/empty; `xlsx_import::worksheet_range` silently skips worksheets that fail to load | `crdt_backend.rs`, `xlsx_import.rs` | improvement (obs/correctness) | MED | open | `crdt-error-surfacing` | HTTP error → assert propagated `Err`, not zero/empty; failed worksheet → logged/surfaced |
+| 49 | Layering violations — `tool_executor.rs` + `xlsx_import.rs` tagged `application` but depend directly on `formula_engine`/`projection`/`recalc_observer`/`yjs_protocol` (infra) with no domain port | `tool_executor.rs`, `xlsx_import.rs` | layering violation | MED | open | `crdt-layering-ports` | introduce domain ports; assert application no longer imports infra modules |
+| 50 | Cluster (dead + validation + nits): `ws_peer::_server_sv_for_task` **dead-but-coupled (Judge needs_human** — the binding has a required WS-handshake side effect); `ArtifactId::from_str` under-validates ULID (accepts invalid Crockford chars); missing `///` docs (`change_tracker_store`, `xlsx_import`); dup traversal (formula_engine_yrs_resolver/projection); O(n²) `col_letter`; brittle `read_fixture` (use `CARGO_MANIFEST_DIR`); stale "spike, removable in one commit" comment (module graduated to prod, ADP-deployed); v1.1 per-cell-diff TODO; `snapshot_sheet_inline` TODO(Task4) dup of `projection::project_sheet` | multiple | dead + improvement | LOW-MED | open | `crdt-cleanup-b09` | per-item micro-tests / doc + validation fixes |
+
+**Structural:** 17 "orphans" — nearly all facade re-export **false positives**; **Judge kept all 3 it evaluated** (`gcs` feature-gated, `mod.rs` 17 importers, `RestBackend` re-export) → **0 confirmed dead**, 1 needs_human. **Judge:** 0 safe_to_remove, 1 needs_human, 3 rejected.
+
+---
+
+## Batch 10 — `web` + `gsheets` (26 files: Tavily/OpenAPI adapters, gsheets format/auth/http/merge_fill) — audited 2026-07-27
+
+| # | Finding | Files | Type | Sev | Status | Proposed SDD change | TDD note (failing test first) |
+|---|---------|-------|------|-----|--------|---------------------|-------------------------------|
+| 52 | **`fail_on_limit` config never read** — `SearchUseCaseConfig.fail_on_limit` is defined + defaulted `false` but never consulted in `SearchUseCase`; rate-limit always returns `RateLimit` error immediately regardless. The intended conditional-fallback logic was never implemented (same shape as #41 `sa_email`). | `web/application/search_use_case.rs` | correctness (functional gap) | MED | open | `web-search-fail-on-limit` | `fail_on_limit=false` + rate-limit hit → assert graceful fallback (not immediate `RateLimit` error) |
+| 53 | Cluster (LOW): duplicated retry/backoff formula `retry_base_delay * (1 << attempt)` repeated 8× (`gsheets/http_client` get/put/post/delete + `web/search_use_case` search/fetch) → extract `with_retry` helper; `api_spec_use_case` clarity (`("form", false)`/`("form", true)` → `("form", _)`; magic `16.0` → named const); dead match-guard `s if (500..600)` in `tavily_adapter::map_error` (identical to fallback arm) | `gsheets/http_client.rs`, `web/search_use_case.rs`, `web/api_spec_use_case.rs`, `web/tavily_adapter.rs` | improvement (DRY/clarity) | LOW | open | `web-gsheets-cleanup-b10` | retry-helper parity tests; remove redundant arm |
+
+**Structural:** 0 orphans, 0 layering violations, 0 dead. **Clean module** — well-built (retry logic, typed errors, hexagonal boundaries intact).
+
+---
+
+## Batch 11 — `skills` + `google_oauth` (21 files) — audited 2026-07-27 (⚠️ Judge phase incomplete — monthly spend limit hit)
+
+| # | Finding | Files | Type | Sev | Status | Proposed SDD change | TDD note (failing test first) |
+|---|---------|-------|------|-----|--------|---------------------|-------------------------------|
+| 54 | **Silent leaf-name collision in skill reference lookup** — `builtin_skill_repository::load_reference` keys a flat HashMap by final path segment only, so two references with the same leaf name but different parents (`database/config` vs `api/config`) silently collide and one shadows the other with no error | `skills/infrastructure/builtin_skill_repository.rs` | correctness | MED | open | `skills-reference-leafname-collision` | two refs same leaf name → assert both resolvable (or fail-fast with conflicting full paths); currently one silently shadows |
+| 55 | Cluster (LOW): `available_builtin_names` is a pure passthrough wrapper (inline/remove); `frontmatter_parser` duplicates ~10-line delimiter scan in `parse_reference_file_refs` vs `parse_skill_md` → extract `find_delimiters` | `skills/infrastructure/builtin_skill_repository.rs`, `skills/infrastructure/frontmatter_parser.rs` | improvement (DRY) | LOW | open | `skills-infra-dedup-b11` | parity tests before extract |
+
+**Structural:** 11 "orphans" — all facade re-export **false positives** (skills/domain has 9 users, google_oauth/domain 7, infra aggregate 5 — consumers import via aggregate path). `google_oauth` otherwise clean. **Judge (resolved 2026-07-27 after budget restored):** the 6 previously-budget-truncated verdicts re-ran → **0 confirmed dead**; 1 `needs_human` (`available_builtin_names` public passthrough, ADP sweep clean — see #55); the other 5 (`AccessToken::as_str`, `AuthTokenProvider` trait, `OAuthProviderCache`, `OAuthRefreshTokenProvider`, `SkillRepository` trait) all **kept** as live re-exported symbols. `available_builtin_names` #55 status updated: LOW → verified `needs_human` (public API; remove only after confirming, currently a no-op passthrough).
+
+---
+
+## Batch 12 — `storage` + bindings + `shared` + entrypoints (25 files) — audited 2026-07-27
+
+| # | Finding | Files | Type | Sev | Status | Proposed SDD change | TDD note (failing test first) |
+|---|---------|-------|------|-----|--------|---------------------|-------------------------------|
+| 56 | **MIME validated trimmed but used untrimmed** — `local_http_adapter::store` checks `mime_type.trim().is_empty()` but passes the untrimmed string to `ext_from_mime()` (line 207), so `" image/png "` passes validation yet resolves to `.bin` | `storage/infrastructure/local_http_adapter.rs` | correctness | MED | open | `storage-local-http-mime-trim` | store with `" image/png "` → assert `.png` extension (currently `.bin`) |
+| 57 | **Wrong error variant on download path** — `http_callback_adapter::read`/`read_stream` map GET failures to `StorageError::UploadFailed` (semantically wrong for a download); also duplicated meta-cache lookup | `storage/infrastructure/http_callback_adapter.rs` | correctness (obs) | MED | open | `storage-download-error-variant` | assert a failed GET surfaces `DownloadFailed`/`ReadFailed`, not `UploadFailed`; add the variant |
+| 58 | Path-traversal guard `key.contains('/') \|\| contains("..") \|\| is_empty()` duplicated 4× (`serve_file`/`read`/`read_stream`/`delete`) — security-adjacent DRY (drift risk on a security check) | `storage/infrastructure/local_http_adapter.rs` | risk (DRY) | MED | open | `storage-path-guard-dedup` | one canonical guard helper; traversal-rejection test |
+| 59 | **Bindings swallow write errors** — `python_bindings/crdt_documents` deprecated sheet pyfns (`add_sheet`/`write_sheet`) silently swallow `ChangeTracker.record` errors when the tokio runtime is unavailable → could mask real write failures in prod; plus undocumented `#[allow(deprecated)]` (no removal roadmap) here and in `node_bindings/documents.rs` | `python_bindings/crdt_documents.rs`, `node_bindings/documents.rs` | correctness + doc | MED | open | `pybindings-crdt-sheet-error-surfacing` | force runtime-unavailable → assert the write error is surfaced, not swallowed; document the deprecation scope |
+| 60 | Cluster (LOW): binding boilerplate dup (`node_bindings/llm` call/stream, `python_bindings` dict→LlmMessage, `GraphSource` parse run_dag/stream_dag, `documents.rs` registry-lookup msg ×3); `create_config` 8 params w/ `clippy::too_many_arguments` suppressed → builder; `create_for_provider` pass-through (**Judge needs_human** — public re-export, ADP sweep); missing `///` docs in `python_bindings/mod.rs`; `dir()` returns `&PathBuf` → `&Path`. NOTE: `main.rs::main` flagged needs_human is a **false positive** (required bin entrypoint — not dead) | multiple | dead(false-pos) + improvement | LOW | open | `bindings-shared-cleanup-b12` | per-item micro-tests / builder + docs |
+
+**Structural:** 6 "orphans" all **false positives** (storage adapters LocalCache/LocalHttp/HttpCallback are runtime-selected via factory + `COLMENA_LOCAL` guard; config_resolver/service_container reached via feature-gated bindings). **Judge:** 0 safe_to_remove, 2 needs_human (`main` = false positive; `create_for_provider` = public passthrough), 1 rejected (`load_env` — used by both bindings under `node`/`python` features).
+
+---
+
+# ✅ AUDIT COMPLETE — 353 / 353 crate-source files (100%)
+
+- **Scope:** every `.rs` under `src/libs/colmena/src/` (the crate library source). The earlier "400" figure counted 44 integration tests + 2 examples + `build.rs` — **out of scope** (test/example code, optional future pass).
+- **Coverage:** 353 per-symbol catalog cards on disk in `docs/agent_context/audit/` (git-tracked, regenerable). 60 findings triaged into candidate SDD changes with TDD notes.
+- **Token spend (audit total):** ~18.5M across 12 batches.
+- **Modules (all full):** `llm`, `dag_engine`, `documents`, `gdocs`, `crdt_documents`, `web`, `gsheets`, `skills`, `google_oauth`, `storage`, `node_bindings`, `python_bindings`, `shared`.
+
+## Meta-finding (final): dependency-map dead-code signal is unreliable alone
+Across all 12 batches, **0 files were confirmed truly dead** among **dozens of `Used-by=0` reports** — every one was a scanner blind spot the Opus judge caught. The `module_dependency_map.md` under-counts FOUR construction patterns: (1) mod-level re-export facades, (2) runtime factories/registries, (3) `use super::` siblings + trait-object DI, (4) grouped `use x::{a,b,c}` imports. **Only genuinely-dead items found:** function-local vars / test helpers / private unused fields (`_created_at_str`, `_hashmap_keep_alive`, `snap_multi_tab`, `reactor::task_memory_repo`, `DEFAULT_ASSET_STORAGE_ROOT`, `dispatch_export`) — all trivial, all coupled edits. Real removal value is near-zero; the audit's value is in the **correctness/security/unfinished findings**, not dead-code deletion.
+
+## Top remediation queue (correctness/security HIGH-MED first)
+1. **#46** CRDT sheet-reorder type-tag corruption · **#36** version blobs never read back · **#45** GCS stub `unreachable!()` panic
+2. **#5** conversation-repo row-hydration `.unwrap()` panic · **#25** fail-open status→`Failed` coercion
+3. **#30** user code → stdout (secret leak) · **#26** SQL ident `format!()` interpolation · **#58** path-guard drift
+4. **#13** public `execute()` panic · **#37** dead-but-public `ListAssetsUseCase` (decisions) · **#41/#52** never-applied config fields · **#18/#48/#59** error-swallowing · **#6** deprecated gemini-1.5-flash
+- **Decisions needed (breaking-change discipline):** #13, #37, #45.
+- **Next step:** triage this queue → each cluster becomes an SDD change → implement via TDD (failing test first). Start with the HIGH correctness bugs (#46, #36, #5).
+- **Highest-value open (correctness/security):** #46 (crdt sheet-reorder corruption), #45 (gcs stub panic), #36 (version blobs never read back), #5 (row-hydration panic), #13 (public `execute()` panic), #25 (fail-open status→Failed), #30 (user code to stdout), #31 (subgraph suspend branch), #41 (co-edit self-author filter), #52 (fail_on_limit gap), #18 (lying counters), #6 (gemini-1.5-flash), #26 (SQL ident interpolation). **Decisions needed:** #13, #37, #45.
