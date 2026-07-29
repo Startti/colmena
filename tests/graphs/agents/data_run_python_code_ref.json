@@ -1,0 +1,42 @@
+{
+  "_comment": "E2E — data_run_python code_ref (stored/named code resolved server-side via fixed_config.code_source_query, never seen by the LLM). Seed first: CREATE SCHEMA IF NOT EXISTS drp_e2e; CREATE TABLE IF NOT EXISTS drp_e2e.recipes (name TEXT PRIMARY KEY, code TEXT NOT NULL); INSERT INTO drp_e2e.recipes (name, code) VALUES ('sum_recipe', 'output = int(pd.DataFrame(rows)[\"n\"].sum())') ON CONFLICT (name) DO UPDATE SET code = EXCLUDED.code; Run: set -a; source .env; set +a; unset COLMENA_LOCAL; cargo run --bin dag_engine -- run tests/graphs/agents/data_run_python_code_ref.json --agent-session-id data_run_python_code_ref_e2e --include-extra-info",
+  "metadata": { "category": "agents", "requires_env": ["GEMINI_API_KEY", "DATABASE_URL"] },
+  "nodes": {
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "model": "gemini-2.5-flash",
+        "api_key": "${GEMINI_API_KEY}",
+        "connection_url": "${DATABASE_URL}",
+        "attachments_enabled": true,
+        "stream": false,
+        "max_iterations": 8,
+        "temperature": 0.0,
+        "system_message": "Sos un asistente de datos que ejecuta recetas de cálculo guardadas por nombre. Cuando el usuario pida correr una receta guardada, usá data_run_python con `code_ref` (NUNCA `code`) puesto en el nombre exacto de la receta que te dieron — el código en sí vive del lado del servidor, vos no lo ves ni lo escribís. Armá el binding de datos con `var` = \"rows\" y `data` = la lista de objetos {\"n\": <numero>} que te pase el usuario. Cuando el resultado incluya `code_ref`, confirmá al usuario qué receta corriste.",
+        "prompt": "Corré la receta guardada 'sum_recipe' sobre estos números: 4, 6 y 10.",
+        "tool_configurations": {
+          "data_run_python": {
+            "name": "data_run_python",
+            "node_type": "data_run_python",
+            "description": "Corré una receta pandas guardada (por nombre) o código pandas inline sobre datos, y devolvé un resultado resumido.",
+            "fixed_config": {
+              "sql": {
+                "connection_url": "${DATABASE_URL}",
+                "permissions": {
+                  "preset": "read_only",
+                  "allowed_schemas": ["drp_e2e"]
+                }
+              },
+              "code_source_query": "SELECT code FROM drp_e2e.recipes WHERE name='{{code_ref}}'"
+            }
+          }
+        }
+      }
+    },
+    "log": { "type": "log" }
+  },
+  "edges": [
+    { "from": "agent", "to": "log" }
+  ]
+}
