@@ -1,10 +1,11 @@
+use super::hydration::hydrate_message;
 use crate::llm::domain::{
     Conversation, ConversationKey, ConversationRepository, LlmError, LlmMessage, MessageRole,
     StoredMessage,
 };
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use sqlx::{PgPool, Row};
 
 pub struct PostgresConversationRepository {
@@ -49,39 +50,16 @@ impl ConversationRepository for PostgresConversationRepository {
 
         let messages = rows
             .into_iter()
-            .map(|row| {
+            .filter_map(|row| {
                 let role_str: String = row.get("role");
                 let content: String = row.get("content");
                 let tool_call_id: Option<String> = row.get("tool_call_id");
                 let tool_calls_json: Option<serde_json::Value> = row.get("tool_calls");
-                let _created_at: DateTime<Utc> = row.get("created_at");
 
-                let role = match role_str.as_str() {
-                    "system" => MessageRole::System,
-                    "user" => MessageRole::User,
-                    "assistant" => MessageRole::Assistant,
-                    "tool" => MessageRole::Tool,
-                    _ => MessageRole::User,
-                };
+                let tool_calls = tool_calls_json
+                    .map(|tc_json| serde_json::from_value(tc_json).unwrap_or_default());
 
-                match role {
-                    MessageRole::System => LlmMessage::system(content).unwrap(),
-                    MessageRole::User => LlmMessage::user(content).unwrap(),
-                    MessageRole::Assistant => {
-                        if let Some(tc_json) = tool_calls_json {
-                            let tool_calls: Vec<crate::llm::domain::ToolCall> =
-                                serde_json::from_value(tc_json).unwrap_or_default();
-                            LlmMessage::assistant_with_tool_calls(content, tool_calls).unwrap()
-                        } else {
-                            LlmMessage::assistant(content).unwrap()
-                        }
-                    }
-                    MessageRole::Tool => LlmMessage::tool(
-                        tool_call_id.unwrap_or_else(|| "unknown".to_string()),
-                        content,
-                    )
-                    .unwrap(),
-                }
+                hydrate_message(&role_str, content, tool_call_id, tool_calls)
             })
             .collect();
 
@@ -184,41 +162,18 @@ impl ConversationRepository for PostgresConversationRepository {
 
         let stored = rows
             .into_iter()
-            .map(|row| {
+            .filter_map(|row| {
                 let role_str: String = row.get("role");
                 let content: String = row.get("content");
                 let tool_call_id: Option<String> = row.get("tool_call_id");
                 let tool_calls_json: Option<serde_json::Value> = row.get("tool_calls");
                 let summary: Option<String> = row.get("summary");
 
-                let role = match role_str.as_str() {
-                    "system" => MessageRole::System,
-                    "user" => MessageRole::User,
-                    "assistant" => MessageRole::Assistant,
-                    "tool" => MessageRole::Tool,
-                    _ => MessageRole::User,
-                };
+                let tool_calls = tool_calls_json
+                    .map(|tc_json| serde_json::from_value(tc_json).unwrap_or_default());
 
-                let message = match role {
-                    MessageRole::System => LlmMessage::system(content).unwrap(),
-                    MessageRole::User => LlmMessage::user(content).unwrap(),
-                    MessageRole::Assistant => {
-                        if let Some(tc_json) = tool_calls_json {
-                            let tool_calls: Vec<crate::llm::domain::ToolCall> =
-                                serde_json::from_value(tc_json).unwrap_or_default();
-                            LlmMessage::assistant_with_tool_calls(content, tool_calls).unwrap()
-                        } else {
-                            LlmMessage::assistant(content).unwrap()
-                        }
-                    }
-                    MessageRole::Tool => LlmMessage::tool(
-                        tool_call_id.unwrap_or_else(|| "unknown".to_string()),
-                        content,
-                    )
-                    .unwrap(),
-                };
-
-                StoredMessage { message, summary }
+                let message = hydrate_message(&role_str, content, tool_call_id, tool_calls)?;
+                Some(StoredMessage { message, summary })
             })
             .collect();
 

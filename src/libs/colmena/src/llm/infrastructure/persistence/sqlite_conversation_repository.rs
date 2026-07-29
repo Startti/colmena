@@ -1,3 +1,4 @@
+use super::hydration::hydrate_message;
 use crate::llm::domain::{
     Conversation, ConversationKey, ConversationRepository, LlmError, LlmMessage, MessageRole,
     StoredMessage,
@@ -49,39 +50,16 @@ impl ConversationRepository for SqliteConversationRepository {
 
         let messages = rows
             .into_iter()
-            .map(|row| {
+            .filter_map(|row| {
                 let role_str: String = row.get("role");
                 let content: String = row.get("content");
                 let tool_call_id: Option<String> = row.get("tool_call_id");
                 let tool_calls_str: Option<String> = row.get("tool_calls");
-                let _created_at_str: String = row.get("created_at");
 
-                let role = match role_str.as_str() {
-                    "system" => MessageRole::System,
-                    "user" => MessageRole::User,
-                    "assistant" => MessageRole::Assistant,
-                    "tool" => MessageRole::Tool,
-                    _ => MessageRole::User,
-                };
+                let tool_calls =
+                    tool_calls_str.map(|tc_str| serde_json::from_str(&tc_str).unwrap_or_default());
 
-                match role {
-                    MessageRole::System => LlmMessage::system(content).unwrap(),
-                    MessageRole::User => LlmMessage::user(content).unwrap(),
-                    MessageRole::Assistant => {
-                        if let Some(tc_str) = tool_calls_str {
-                            let tool_calls: Vec<crate::llm::domain::ToolCall> =
-                                serde_json::from_str(&tc_str).unwrap_or_default();
-                            LlmMessage::assistant_with_tool_calls(content, tool_calls).unwrap()
-                        } else {
-                            LlmMessage::assistant(content).unwrap()
-                        }
-                    }
-                    MessageRole::Tool => LlmMessage::tool(
-                        tool_call_id.unwrap_or_else(|| "unknown".to_string()),
-                        content,
-                    )
-                    .unwrap(),
-                }
+                hydrate_message(&role_str, content, tool_call_id, tool_calls)
             })
             .collect();
 
@@ -187,41 +165,18 @@ impl ConversationRepository for SqliteConversationRepository {
 
         let stored = rows
             .into_iter()
-            .map(|row| {
+            .filter_map(|row| {
                 let role_str: String = row.get("role");
                 let content: String = row.get("content");
                 let tool_call_id: Option<String> = row.get("tool_call_id");
                 let tool_calls_str: Option<String> = row.get("tool_calls");
                 let summary: Option<String> = row.get("summary");
 
-                let role = match role_str.as_str() {
-                    "system" => MessageRole::System,
-                    "user" => MessageRole::User,
-                    "assistant" => MessageRole::Assistant,
-                    "tool" => MessageRole::Tool,
-                    _ => MessageRole::User,
-                };
+                let tool_calls =
+                    tool_calls_str.map(|tc_str| serde_json::from_str(&tc_str).unwrap_or_default());
 
-                let message = match role {
-                    MessageRole::System => LlmMessage::system(content).unwrap(),
-                    MessageRole::User => LlmMessage::user(content).unwrap(),
-                    MessageRole::Assistant => {
-                        if let Some(tc_str) = tool_calls_str {
-                            let tool_calls: Vec<crate::llm::domain::ToolCall> =
-                                serde_json::from_str(&tc_str).unwrap_or_default();
-                            LlmMessage::assistant_with_tool_calls(content, tool_calls).unwrap()
-                        } else {
-                            LlmMessage::assistant(content).unwrap()
-                        }
-                    }
-                    MessageRole::Tool => LlmMessage::tool(
-                        tool_call_id.unwrap_or_else(|| "unknown".to_string()),
-                        content,
-                    )
-                    .unwrap(),
-                };
-
-                StoredMessage { message, summary }
+                let message = hydrate_message(&role_str, content, tool_call_id, tool_calls)?;
+                Some(StoredMessage { message, summary })
             })
             .collect();
 
@@ -315,5 +270,62 @@ mod summary_tests {
         assert_eq!(after.len(), 2);
         assert!(after[0].summary.is_none());
         assert_eq!(after[1].summary.as_deref(), Some("summary of second"));
+    }
+
+    /// Inserts a raw row bypassing `add_message` so we can persist a shape the
+    /// domain constructors reject (e.g. a non-assistant row with empty content),
+    /// simulating a legacy/corrupt DB row.
+    async fn insert_raw(pool: &SqlitePool, role: &str, content: &str, tool_call_id: Option<&str>) {
+        sqlx::query(
+            "INSERT INTO llm_node_history \
+                (id, session_id, agent_session_id, node_id, role, content, \
+                 tool_call_id, tool_calls, summary, created_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind("s")
+        .bind("a")
+        .bind("n")
+        .bind(role)
+        .bind(content)
+        .bind(tool_call_id)
+        .bind(Option::<String>::None)
+        .bind(Option::<String>::None)
+        .bind(Utc::now().to_rfc3339())
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn get_by_id_skips_malformed_row_instead_of_panicking() {
+        let pool = pool().await;
+        let repo = SqliteConversationRepository::new(pool.clone());
+        let k = key();
+        // One valid row, then a corrupt `tool` row with empty content that the
+        // `LlmMessage::tool` constructor rejects.
+        repo.add_message(&k, LlmMessage::user("hello".into()).unwrap())
+            .await
+            .unwrap();
+        insert_raw(&pool, "tool", "", Some("call_x")).await;
+
+        let conv = repo.get_by_id(&k).await.unwrap();
+        assert_eq!(conv.messages.len(), 1, "malformed row must be skipped");
+        assert_eq!(conv.messages[0].content(), "hello");
+    }
+
+    #[tokio::test]
+    async fn get_with_summaries_skips_malformed_row() {
+        let pool = pool().await;
+        let repo = SqliteConversationRepository::new(pool.clone());
+        let k = key();
+        repo.add_message(&k, LlmMessage::user("hi".into()).unwrap())
+            .await
+            .unwrap();
+        insert_raw(&pool, "system", "   ", None).await; // whitespace-only → rejected
+
+        let stored = repo.get_with_summaries(&k).await.unwrap();
+        assert_eq!(stored.len(), 1, "malformed row must be skipped");
+        assert_eq!(stored[0].message.content(), "hi");
     }
 }

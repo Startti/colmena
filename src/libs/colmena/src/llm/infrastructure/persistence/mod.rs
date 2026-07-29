@@ -1,3 +1,4 @@
+pub mod hydration;
 pub mod in_memory_conversation_repository;
 pub mod postgres_attachment_registry;
 pub mod postgres_conversation_repository;
