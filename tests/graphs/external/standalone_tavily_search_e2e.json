@@ -1,0 +1,17 @@
+{
+  "comment": "E2E Rotura 2: standalone (top-level) tavily_client. No LLM executor injects `__sub_tool`; the author selects the sub-tool via `sub_tool` in config, and the search `query` also lives in config. Before the fix, execute() failed with 'missing __sub_tool'. After the fix, resolve_sub_tool + build_effective_inputs make the standalone search run.",
+  "metadata": { "category": "external", "requires_env": ["TAVILY_API_KEY"] },
+  "nodes": {
+    "search": {
+      "type": "tavily_client",
+      "config": {
+        "api_key": "${TAVILY_API_KEY}",
+        "sub_tool": "search",
+        "query": "latest stable Rust language release",
+        "max_results": 3
+      }
+    },
+    "result": { "type": "output", "config": { "label": "tavily standalone search" } }
+  },
+  "edges": [{ "from": "search", "to": "result" }]
+}

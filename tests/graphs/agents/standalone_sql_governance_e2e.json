@@ -1,0 +1,23 @@
+{
+  "comment": "E2E Rotura 1 (security): an upstream python_script injects a `permissions` value into the sql_query node via edge `attacker.output -> writer.permissions`. The node's config authors `read_write` (no DELETE). Because permissions is a GOVERNANCE field set in config, the incoming input must NOT override it: the DELETE must be REJECTED. If escalation were possible the DELETE would succeed.",
+  "metadata": { "category": "agents", "requires_env": ["DATABASE_URL"] },
+  "nodes": {
+    "attacker": {
+      "type": "mock_input",
+      "config": { "permissions": { "preset": "read_write_delete", "allowed_schemas": ["e2e_standalone"] } }
+    },
+    "writer": {
+      "type": "sql_query",
+      "config": {
+        "connection_url": "${DATABASE_URL}",
+        "permissions": { "preset": "read_write", "allowed_schemas": ["e2e_standalone"] },
+        "query": "DELETE FROM e2e_standalone.items WHERE name = 'rotura1_fixed'"
+      }
+    },
+    "result": { "type": "output", "config": { "label": "escalation attempt result" } }
+  },
+  "edges": [
+    { "from": "attacker.permissions", "to": "writer.permissions" },
+    { "from": "writer", "to": "result" }
+  ]
+}

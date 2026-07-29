@@ -148,6 +148,40 @@ impl Default for TavilyClientNode {
 }
 
 impl TavilyClientNode {
+    /// Resolve which sub-tool (`search` / `fetch`) to run.
+    ///
+    /// In the tool path the executor injects [`SUB_TOOL_INPUT_KEY`] into `inputs`.
+    /// A top-level (standalone) node has no executor, so the author sets the
+    /// sub-tool in `config` (as `sub_tool`) or via an edge input `sub_tool`.
+    /// Precedence: `inputs[__sub_tool]` → `inputs[sub_tool]` → `config[sub_tool]`.
+    fn resolve_sub_tool(config: &Value, inputs: &NodeInputs) -> Option<String> {
+        inputs
+            .get(SUB_TOOL_INPUT_KEY)
+            .and_then(|v| v.as_str())
+            .or_else(|| inputs.get("sub_tool").and_then(|v| v.as_str()))
+            .or_else(|| config.get("sub_tool").and_then(|v| v.as_str()))
+            .map(str::to_string)
+    }
+
+    /// Merge the node's static `config` (base) with edge `inputs`; inputs win.
+    ///
+    /// The sub-tool handlers read their arguments (`query`, `url`, …) from the
+    /// inputs map. In the tool path they arrive as inputs; for a standalone node
+    /// the author writes them in `config`, so we backfill from there. In the tool
+    /// path `config` is `{}`, so the result equals `inputs` (behavior unchanged).
+    fn build_effective_inputs(config: &Value, inputs: &NodeInputs) -> NodeInputs {
+        let mut effective: NodeInputs = HashMap::new();
+        if let Some(obj) = config.as_object() {
+            for (k, v) in obj {
+                effective.insert(k.clone(), v.clone());
+            }
+        }
+        for (k, v) in inputs {
+            effective.insert(k.clone(), v.clone());
+        }
+        effective
+    }
+
     async fn handle_search(
         &self,
         inputs: &NodeInputs,
@@ -275,16 +309,22 @@ impl ExecutableNode for TavilyClientNode {
         _state: &mut Value,
         _observer: Option<Arc<dyn ExecutionObserver>>,
     ) -> Result<Value, Box<dyn StdError + Send + Sync>> {
-        let sub = inputs
-            .get(SUB_TOOL_INPUT_KEY)
-            .and_then(|v| v.as_str())
-            .ok_or("tavily_client: missing __sub_tool")?;
+        // Resolve the sub-tool from the executor-injected `__sub_tool` (tool path)
+        // or from `sub_tool` in config/inputs (standalone top-level node).
+        let sub = Self::resolve_sub_tool(config, inputs).ok_or(
+            "tavily_client: missing sub-tool — provide `__sub_tool` (tool path) or \
+             `sub_tool` in config/inputs (standalone: \"search\" or \"fetch\")",
+        )?;
+        // Merge config into the handler inputs so a standalone node's `query`/`url`
+        // (authored in config) reach the handlers, which read from the inputs map.
+        // In the tool path config is `{}`, so `effective == inputs` (unchanged).
+        let effective = Self::build_effective_inputs(config, inputs);
         // `dag_run_id` not yet threaded through ExecutableNode — we reuse a
         // stable default session id for rate-limiting.
         let session_id = "default";
-        match sub {
-            "search" => self.handle_search(inputs, config, session_id).await,
-            "fetch" => self.handle_fetch(inputs, config, session_id).await,
+        match sub.as_str() {
+            "search" => self.handle_search(&effective, config, session_id).await,
+            "fetch" => self.handle_fetch(&effective, config, session_id).await,
             other => Err(format!("tavily_client: unknown sub_tool '{other}'").into()),
         }
     }
@@ -469,6 +509,61 @@ fn fetch_sub_tool() -> SubToolDefinition {
             .into(),
         properties: props,
         required: vec!["url".into()],
+    }
+}
+
+#[cfg(test)]
+mod standalone_tests {
+    use super::*;
+
+    fn inputs(pairs: &[(&str, Value)]) -> NodeInputs {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn resolves_sub_tool_from_dunder_input() {
+        let ins = inputs(&[(SUB_TOOL_INPUT_KEY, json!("search"))]);
+        assert_eq!(
+            TavilyClientNode::resolve_sub_tool(&json!({}), &ins),
+            Some("search".to_string())
+        );
+    }
+
+    #[test]
+    fn resolves_sub_tool_from_plain_config_key() {
+        // Top-level author sets `sub_tool` in config; no executor to inject the dunder.
+        let config = json!({ "sub_tool": "fetch" });
+        assert_eq!(
+            TavilyClientNode::resolve_sub_tool(&config, &HashMap::new()),
+            Some("fetch".to_string())
+        );
+    }
+
+    #[test]
+    fn missing_sub_tool_returns_none() {
+        assert_eq!(
+            TavilyClientNode::resolve_sub_tool(&json!({}), &HashMap::new()),
+            None
+        );
+    }
+
+    #[test]
+    fn effective_inputs_backfill_query_from_config() {
+        // Standalone: handlers read `query` from inputs; author wrote it in config.
+        let config = json!({ "sub_tool": "search", "query": "rust news", "api_key": "k" });
+        let eff = TavilyClientNode::build_effective_inputs(&config, &HashMap::new());
+        assert_eq!(eff.get("query").and_then(|v| v.as_str()), Some("rust news"));
+    }
+
+    #[test]
+    fn effective_inputs_edge_overrides_config() {
+        let config = json!({ "query": "old" });
+        let ins = inputs(&[("query", json!("new"))]);
+        let eff = TavilyClientNode::build_effective_inputs(&config, &ins);
+        assert_eq!(eff.get("query").and_then(|v| v.as_str()), Some("new"));
     }
 }
 

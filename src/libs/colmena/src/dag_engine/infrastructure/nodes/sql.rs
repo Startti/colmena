@@ -50,6 +50,43 @@ impl SqlNode {
         }
     }
 
+    /// Governance fields that carry authority (credentials, permissions, sandbox
+    /// limits). When present in the node's static `config`, they MUST NOT be
+    /// overridable by an incoming edge input — otherwise an upstream node (e.g. an
+    /// `llm_call`) whose output happens to contain a `permissions` key could
+    /// escalate the SQL node's privileges. Everything else is *data* and lets an
+    /// input override config (edge-driven data flow).
+    const GOVERNANCE_KEYS: &'static [&'static str] = &[
+        "connection_url",
+        "permissions",
+        "runtime_limits",
+        "guardrail_llm",
+        "setup_sql",
+    ];
+
+    /// Build the effective config for `execute`, merging the node's static
+    /// `config` (base) with edge `inputs`.
+    ///
+    /// - **Data fields** (`query`, …): the value from `inputs` overrides `config`.
+    /// - **Governance fields** ([`GOVERNANCE_KEYS`]): if `config` sets them, they
+    ///   are authoritative and an input cannot override them.
+    ///
+    /// In the tool path `config` is always `{}`, so every value comes from
+    /// `inputs` and behavior is byte-identical to the pre-merge implementation.
+    fn build_effective_config(config: &Value, inputs: &NodeInputs) -> Value {
+        let mut merged = config.as_object().cloned().unwrap_or_default();
+        for (k, v) in inputs {
+            let governance_locked =
+                Self::GOVERNANCE_KEYS.contains(&k.as_str()) && merged.contains_key(k);
+            if governance_locked {
+                // config authored this governance field — an input cannot override it.
+                continue;
+            }
+            merged.insert(k.clone(), v.clone());
+        }
+        Value::Object(merged)
+    }
+
     /// Perform the full initialization and return the result.
     /// Called at most once — subsequent calls return the cached `SqlNodeInit`.
     async fn get_or_init(
@@ -413,16 +450,18 @@ impl ExecutableNode for SqlNode {
     async fn execute(
         &self,
         inputs: &NodeInputs,
-        _config: &Value,
+        config: &Value,
         _state: &mut Value,
         observer: Option<Arc<dyn ExecutionObserver>>,
     ) -> Result<Value, Box<dyn StdError + Send + Sync>> {
-        // NOTE: When used as a tool via DagToolExecutor, all node_schema fixed values
-        // arrive in `inputs` (not `config`, which is always `{}`). We read everything
-        // from `inputs` to be compatible with both tool-call and direct-execution modes.
-        let effective_config = serde_json::to_value(inputs).unwrap_or_else(|_| json!({}));
+        // Merge the node's static `config` with edge `inputs`. Data fields let an
+        // input override config; governance fields (permissions, connection_url,
+        // …) authored in `config` are authoritative and cannot be overridden by an
+        // input. In the tool path `config` is `{}`, so every value comes from
+        // `inputs` (tool-call behavior is unchanged). See `build_effective_config`.
+        let effective_config = Self::build_effective_config(config, inputs);
 
-        let query = inputs
+        let query = effective_config
             .get("query")
             .and_then(|v| v.as_str())
             .ok_or("sql_query node requires 'query' input")?;
@@ -647,6 +686,78 @@ impl ExecutableNode for SqlNode {
         &self,
     ) -> Option<&dyn crate::dag_engine::domain::initializable_node::InitializableNode> {
         Some(self)
+    }
+}
+
+#[cfg(test)]
+mod effective_config_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn inputs(pairs: &[(&str, Value)]) -> NodeInputs {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn top_level_reads_query_and_governance_from_config() {
+        // Top-level node: everything authored in `config`, no incoming edges.
+        let config = json!({
+            "connection_url": "postgres://x",
+            "query": "INSERT INTO t VALUES (1)",
+            "permissions": { "preset": "read_write" }
+        });
+        let eff = SqlNode::build_effective_config(&config, &HashMap::new());
+        assert_eq!(
+            eff.get("query").and_then(|v| v.as_str()),
+            Some("INSERT INTO t VALUES (1)")
+        );
+        assert_eq!(
+            eff.get("connection_url").and_then(|v| v.as_str()),
+            Some("postgres://x")
+        );
+        assert_eq!(
+            eff.pointer("/permissions/preset").and_then(|v| v.as_str()),
+            Some("read_write")
+        );
+    }
+
+    #[test]
+    fn tool_path_empty_config_takes_all_from_inputs() {
+        // Tool path: `config` is `{}`; fixed node_schema values arrive via inputs.
+        let ins = inputs(&[
+            ("query", json!("SELECT 1")),
+            ("permissions", json!({ "preset": "read_only" })),
+        ]);
+        let eff = SqlNode::build_effective_config(&json!({}), &ins);
+        assert_eq!(eff.get("query").and_then(|v| v.as_str()), Some("SELECT 1"));
+        assert_eq!(
+            eff.pointer("/permissions/preset").and_then(|v| v.as_str()),
+            Some("read_only")
+        );
+    }
+
+    #[test]
+    fn data_field_query_is_overridable_by_input() {
+        let config = json!({ "query": "SELECT 1", "permissions": { "preset": "read_write" } });
+        let ins = inputs(&[("query", json!("SELECT 2"))]);
+        let eff = SqlNode::build_effective_config(&config, &ins);
+        assert_eq!(eff.get("query").and_then(|v| v.as_str()), Some("SELECT 2"));
+    }
+
+    #[test]
+    fn governance_permissions_from_config_not_overridable_by_input() {
+        // Security: an upstream node emitting `permissions` must NOT escalate.
+        let config = json!({ "permissions": { "preset": "read_write" } });
+        let ins = inputs(&[("permissions", json!({ "preset": "read_write_delete" }))]);
+        let eff = SqlNode::build_effective_config(&config, &ins);
+        assert_eq!(
+            eff.pointer("/permissions/preset").and_then(|v| v.as_str()),
+            Some("read_write"),
+            "config governance must win over an incoming input"
+        );
     }
 }
 

@@ -1,0 +1,21 @@
+{
+  "comment": "E2E Rotura 1: standalone (top-level) sql_query. All config lives in `config` (connection_url, read_write permissions, setup_sql, INSERT query) with NO incoming edges. Before the fix, execute() read everything from `inputs` (empty for a root node) and failed at the 'query' check / defaulted to read_only. After the fix, execute() merges config so the INSERT runs under read_write.",
+  "metadata": { "category": "agents", "requires_env": ["DATABASE_URL"] },
+  "nodes": {
+    "writer": {
+      "type": "sql_query",
+      "config": {
+        "connection_url": "${DATABASE_URL}",
+        "permissions": {
+          "preset": "read_write",
+          "allowed_schemas": ["e2e_standalone"],
+          "create_schemas_if_missing": true
+        },
+        "setup_sql": "CREATE TABLE IF NOT EXISTS e2e_standalone.items (id serial primary key, name text)",
+        "query": "INSERT INTO e2e_standalone.items (name) VALUES ('rotura1_fixed') RETURNING id, name"
+      }
+    },
+    "result": { "type": "output", "config": { "label": "standalone insert result" } }
+  },
+  "edges": [{ "from": "writer", "to": "result" }]
+}
