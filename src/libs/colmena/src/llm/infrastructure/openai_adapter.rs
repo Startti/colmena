@@ -404,7 +404,14 @@ impl OpenAiAdapter {
                                         }
                                         yield chunk;
                                     } else if let Some(tool_calls) = &choice.delta.tool_calls {
-                                        if let Some(tc) = tool_calls.first() {
+                                        // OpenAI can pack multiple tool calls into a
+                                        // single delta (parallel tool calling). Emit one
+                                        // chunk per entry — keyed by `index` so downstream
+                                        // accumulation reconstructs each call independently.
+                                        // Only the last chunk carries finish_reason/is_final
+                                        // so the terminal signal is not duplicated.
+                                        let last_idx = tool_calls.len().saturating_sub(1);
+                                        for (i, tc) in tool_calls.iter().enumerate() {
                                             // Register ID if provided
                                             if let Some(id) = &tc.id {
                                                 tool_ids_by_index.insert(tc.index, id.clone());
@@ -415,6 +422,7 @@ impl OpenAiAdapter {
                                                 .or_else(|| tool_ids_by_index.get(&tc.index).cloned())
                                                 .unwrap_or_default();
 
+                                            let is_last = i == last_idx;
                                             let mut chunk = LlmStreamChunk::new(
                                                 request_id.clone(),
                                                 LlmStreamPart::ToolCallChunk(ToolCallChunk {
@@ -425,10 +433,12 @@ impl OpenAiAdapter {
                                                     provider_signature: None,
                                                 }),
                                                 provider.clone(),
-                                                is_final,
+                                                is_final && is_last,
                                             );
-                                            if let Some(reason) = finish_reason {
-                                                chunk = chunk.with_finish_reason(reason);
+                                            if is_last {
+                                                if let Some(reason) = finish_reason.clone() {
+                                                    chunk = chunk.with_finish_reason(reason);
+                                                }
                                             }
                                             yield chunk;
                                         }
@@ -599,7 +609,6 @@ struct OpenAiDelta {
 
 #[derive(Debug, Deserialize)]
 struct OpenAiStreamToolCall {
-    #[allow(dead_code)]
     index: usize,
     id: Option<String>,
     #[allow(dead_code)]
@@ -1091,6 +1100,76 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, LlmError::InvalidApiKey), "got {:?}", err);
+    }
+
+    #[tokio::test]
+    async fn stream_emits_all_parallel_tool_calls_in_one_delta() {
+        use crate::llm::domain::{LlmConfig, LlmMessage, LlmProvider, LlmRequest, ProviderKind};
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+
+        // A single streaming delta that carries TWO tool calls at once
+        // (OpenAI parallel tool calling). The buggy adapter took only
+        // `tool_calls.first()` and silently dropped the second one.
+        let sse_body = concat!(
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[",
+            "{\"index\":0,\"id\":\"call_a\",\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"arguments\":\"{}\"}},",
+            "{\"index\":1,\"id\":\"call_b\",\"type\":\"function\",\"function\":{\"name\":\"get_time\",\"arguments\":\"{}\"}}",
+            "]},\"finish_reason\":null}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(sse_body),
+            )
+            .mount(&server)
+            .await;
+
+        let provider = LlmProvider::new(
+            ProviderKind::OpenAi,
+            "sk-test".into(),
+            Some("gpt-4o".into()),
+        )
+        .unwrap();
+        let config = LlmConfig::new(provider);
+        let msg = LlmMessage::user("hi".into()).unwrap();
+        let request = LlmRequest::new(vec![msg], config, true).unwrap();
+
+        let adapter = OpenAiAdapter::with_base_url(server.uri());
+        let mut stream = adapter.stream(request).await.unwrap();
+
+        let mut tool_calls = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.unwrap();
+            if let LlmStreamPart::ToolCallChunk(tc) = chunk.part() {
+                tool_calls.push((tc.index, tc.name.clone(), tc.id.clone()));
+            }
+        }
+
+        assert!(
+            tool_calls.iter().any(|(_, name, _)| name == "get_weather"),
+            "first tool call missing: {:?}",
+            tool_calls
+        );
+        assert!(
+            tool_calls.iter().any(|(_, name, _)| name == "get_time"),
+            "second parallel tool call was dropped: {:?}",
+            tool_calls
+        );
+        // Distinct indices must be preserved so downstream accumulation keys
+        // each tool call separately.
+        assert!(
+            tool_calls.iter().any(|(i, _, _)| *i == 0)
+                && tool_calls.iter().any(|(i, _, _)| *i == 1),
+            "expected tool calls at index 0 and 1: {:?}",
+            tool_calls
+        );
     }
 
     #[test]
