@@ -47,14 +47,25 @@ data_run_python:
     targets = pd.DataFrame(targets)
     ```
 
-    ## `code` and surfacing output
+    ## `code` / `code_ref` and surfacing output
 
-    `code` is Python source. Pre-imported: `pd` (pandas), `np` (numpy), `stats` (scipy.stats), and
-    the stdlib (math, datetime, decimal, json, re, statistics, string, collections, functools,
-    itertools). Assign a global `output` (any JSON-serializable value) — THAT is what you see back.
-    DataFrames auto-convert via `to_dict(orient="records")`, Series via `to_list()`, numpy scalars
-    via `.item()`. Keep `output` SMALL — a count, a summary, a handful of rows. Large result sets
-    belong in a write sink (below), not in `output`.
+    Supply the Python source ONE of two ways — exactly one is required:
+      - `code` — Python source inline.
+    <!--SQL-->
+      - `code_ref` — a reference key for code already stored server-side (e.g. a saved
+        recipe/report script). The operator maps `code_ref` to stored code via a SQL lookup
+        configured on this deployment; you never see the underlying query. Use `code_ref` instead
+        of `code` when the user asks to run a NAMED/SAVED script rather than pasting one. On
+        success the result also carries `code_ref` and `code_hash` (an audit fingerprint) — relay
+        `code_ref` back to the user, ignore `code_hash`.
+    <!--/SQL-->
+
+    Either way, the code that runs is Python source. Pre-imported: `pd` (pandas), `np` (numpy),
+    `stats` (scipy.stats), and the stdlib (math, datetime, decimal, json, re, statistics, string,
+    collections, functools, itertools). Assign a global `output` (any JSON-serializable value) —
+    THAT is what you see back. DataFrames auto-convert via `to_dict(orient="records")`, Series via
+    `to_list()`, numpy scalars via `.item()`. Keep `output` SMALL — a count, a summary, a handful
+    of rows. Large result sets belong in a write sink (below), not in `output`.
 
     ## Write sinks — push results back out
 

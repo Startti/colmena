@@ -3,6 +3,11 @@ import pandas as pd
 import numpy as np
 from scipy import stats
 
+# Code sourced via `code_ref` (a stored/named script resolved server-side
+# through fixed_config.code_source_query) runs through this EXACT same
+# prelude/postlude wrap and the same restricted-mode sandbox validation as
+# inline `code` — no relaxed rules, no different globals.
+#
 # Each binding is already bound as `<var>` (a list of {col: val} dicts).
 # `_loaded_columns` is a dict of {var: [col, ...]} for reference.
 # A binding may come from an attachment, Google Sheets, a SQL SELECT, or

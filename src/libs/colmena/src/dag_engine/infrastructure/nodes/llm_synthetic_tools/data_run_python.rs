@@ -59,11 +59,21 @@ pub struct DataRunPythonArgs {
     #[serde(deserialize_with = "deserialize_bindings_flexible")]
     pub bindings: Vec<DataBinding>,
 
-    /// Python code. Has access to `pandas as pd`, `numpy as np`,
+    /// Python code, inline. Has access to `pandas as pd`, `numpy as np`,
     /// `scipy.stats as stats`, plus each binding's records list bound
     /// under its `var` name. Define `output` (any JSON-serializable
-    /// value) — that is what the LLM sees.
-    pub code: String,
+    /// value) — that is what the LLM sees. Exactly one of `code` or
+    /// `code_ref` must be set.
+    #[serde(default)]
+    pub code: Option<String>,
+
+    /// Reference key for stored code, resolved server-side via the
+    /// operator-only `fixed_config.code_source_query` SQL binding instead
+    /// of pasting code inline. Exactly one of `code` or `code_ref` must be
+    /// set. Requires the operator to have configured `code_source_query`
+    /// (and a `sql` capability) on this tool instance.
+    #[serde(default)]
+    pub code_ref: Option<String>,
 
     /// Optional target spreadsheet for `output_sheets` returned by the
     /// script (Google Sheets sink). Only meaningful when the `gsheets`
@@ -220,6 +230,166 @@ pub fn parse_sql_config(fixed: &HashMap<String, Value>) -> Result<Option<SqlSink
     }))
 }
 
+// ── code_ref resolution ──────────────────────────────────────────────
+
+/// Placeholder token substituted with the LLM-supplied `code_ref` key
+/// before running `fixed_config.code_source_query`. Distinct from the
+/// `${ENV}` / `$DYNAMIC` placeholder syntax used elsewhere so the two
+/// substitution passes can never collide.
+const CODE_REF_PLACEHOLDER: &str = "{{code_ref}}";
+
+/// The synthetic binding var used to resolve `code_ref` through the
+/// existing single-SELECT-binding path (`resolve_bindings`).
+const CODE_REF_BINDING_VAR: &str = "__code_source";
+
+/// Allowlist gate for the LLM-supplied `code_ref` key, applied BEFORE it is
+/// substituted into `fixed_config.code_source_query`. This neutralizes SQL
+/// injection through the substituted key; the resulting query still passes
+/// through the existing SELECT-only gate + static validator in
+/// `resolve_bindings`.
+fn is_valid_code_ref_key(key: &str) -> bool {
+    !key.is_empty()
+        && key
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | ':' | '/' | '-'))
+}
+
+/// Resolve a `code_ref` key to its stored code string via
+/// `fixed_config.code_source_query`, reusing the single-SELECT-binding
+/// fetch path (`resolve_bindings`) for the SELECT-only gate, static
+/// validator, and adapter round-trip. Requires the result to be exactly
+/// one row, one column, non-empty/non-whitespace text.
+///
+/// Returns `(resolved_code, sha256_hex)` on success.
+async fn resolve_code_ref(
+    code_ref: &str,
+    code_source_query: Option<&str>,
+    sql: Option<&SqlRuntime>,
+    attach: &AttachmentFetcher<'_>,
+) -> Result<(String, String), Value> {
+    let (rt, query_template) = match (sql, code_source_query) {
+        (Some(rt), Some(q)) if !q.trim().is_empty() => (rt, q),
+        _ => {
+            return Err(serde_json::json!({
+                "error": "CodeRefNotEnabled",
+                "message": "`code_ref` was supplied but this tool instance has no \
+                             fixed_config.sql / fixed_config.code_source_query configured",
+            }));
+        }
+    };
+
+    if !is_valid_code_ref_key(code_ref) {
+        return Err(serde_json::json!({
+            "error": "invalid_args",
+            "message": format!(
+                "code_ref '{code_ref}' contains disallowed characters; only letters, \
+                 digits, and '_.:/-' are permitted"
+            ),
+        }));
+    }
+
+    let resolved_query = query_template.replace(CODE_REF_PLACEHOLDER, code_ref);
+    let sql_ctx = SqlBindingCtx {
+        adapter: rt.adapter.clone(),
+        permissions: rt.permissions.clone(),
+        allowed_schemas: rt.allowed_schemas.clone(),
+        tenant: rt.tenant.clone(),
+    };
+    let binding = DataBinding {
+        var: CODE_REF_BINDING_VAR.to_string(),
+        attachment_id: None,
+        spreadsheet_id: None,
+        sheet: None,
+        range: None,
+        query: Some(resolved_query),
+        data: None,
+        delimiter: None,
+        sheet_name: None,
+        header_row: None,
+    };
+
+    let resolved =
+        resolve_bindings(std::slice::from_ref(&binding), Some(&sql_ctx), None, attach).await?;
+
+    let records = resolved
+        .inputs
+        .get(CODE_REF_BINDING_VAR)
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+
+    if records.is_empty() {
+        return Err(serde_json::json!({
+            "error": "CodeRefNotFound",
+            "message": format!("code_ref '{code_ref}' matched zero rows"),
+        }));
+    }
+    if records.len() > 1 {
+        return Err(serde_json::json!({
+            "error": "CodeRefAmbiguous",
+            "message": format!(
+                "code_ref '{code_ref}' matched {} rows; expected exactly one",
+                records.len()
+            ),
+        }));
+    }
+    let row = match records[0].as_object() {
+        Some(o) => o,
+        None => {
+            return Err(serde_json::json!({
+                "error": "CodeRefShapeInvalid",
+                "message": "code_source_query result row is not an object",
+            }));
+        }
+    };
+    if row.len() != 1 {
+        return Err(serde_json::json!({
+            "error": "CodeRefShapeInvalid",
+            "message": format!(
+                "code_source_query must return exactly one column; got {}",
+                row.len()
+            ),
+        }));
+    }
+    let cell = row.values().next().unwrap();
+    let code_str = match cell {
+        Value::String(s) => s.clone(),
+        _ => {
+            return Err(serde_json::json!({
+                "error": "CodeRefShapeInvalid",
+                "message": "code_source_query cell is not a text value",
+            }));
+        }
+    };
+    if code_str.trim().is_empty() {
+        return Err(serde_json::json!({
+            "error": "CodeRefEmpty",
+            "message": format!("code_ref '{code_ref}' resolved to empty/whitespace-only code"),
+        }));
+    }
+
+    let hash = {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(code_str.as_bytes());
+        format!("{:x}", hasher.finalize())
+    };
+
+    Ok((code_str, hash))
+}
+
+/// Attach `code_ref` + `code_hash` audit fields to a successful response
+/// when the code was sourced via `code_ref` (no-op — fields stay
+/// absent — for inline `code`). Extracted as a pure function so the
+/// audit-field contract is unit-testable without executing the sandbox.
+fn with_code_ref_audit(mut response: Value, audit: Option<&(String, String)>) -> Value {
+    if let Some((code_ref, code_hash)) = audit {
+        response["code_ref"] = Value::String(code_ref.clone());
+        response["code_hash"] = Value::String(code_hash.clone());
+    }
+    response
+}
+
 // ── Dispatch (orchestration) ─────────────────────────────────────────
 
 /// Wall-clock cap for one sandbox execution.
@@ -289,6 +459,7 @@ pub async fn dispatch_core(
     sheets: Option<&Arc<dyn SheetsClient>>,
     attach: &AttachmentFetcher<'_>,
     registrar: &AttachmentRegistrar<'_>,
+    code_source_query: Option<&str>,
 ) -> Value {
     // 1. Parse args.
     let parsed: DataRunPythonArgs = match serde_json::from_value(args) {
@@ -300,6 +471,25 @@ pub async fn dispatch_core(
             });
         }
     };
+
+    // 1.5. Enforce exactly one of `code` / `code_ref` BEFORE any sandbox or
+    //      SQL execution runs — see spec "Exactly-One-Of Code Source".
+    match (&parsed.code, &parsed.code_ref) {
+        (Some(_), Some(_)) => {
+            return serde_json::json!({
+                "error": "invalid_args",
+                "message": "provide exactly one of `code` or `code_ref`, not both",
+            });
+        }
+        (None, None) => {
+            return serde_json::json!({
+                "error": "invalid_args",
+                "message": "provide exactly one of `code` or `code_ref`",
+            });
+        }
+        _ => {}
+    }
+
     if let Err(e) = validate_bindings(&parsed.bindings) {
         return e;
     }
@@ -321,8 +511,23 @@ pub async fn dispatch_core(
         Err(e) => return e,
     };
 
+    // 3.5. Resolve the code to run: inline `code` used verbatim, or
+    //      `code_ref` resolved via `code_source_query` (step 1.5 guarantees
+    //      exactly one of the two is set).
+    let (user_code, code_ref_audit): (String, Option<(String, String)>) =
+        match (&parsed.code, &parsed.code_ref) {
+            (Some(c), None) => (c.clone(), None),
+            (None, Some(code_ref)) => {
+                match resolve_code_ref(code_ref, code_source_query, sql, attach).await {
+                    Ok((code, hash)) => (code, Some((code_ref.clone(), hash))),
+                    Err(e) => return e,
+                }
+            }
+            _ => unreachable!("step 1.5 guarantees exactly one of code/code_ref is set"),
+        };
+
     // 4. Wrap + run the user code in the restricted sandbox with a timeout.
-    let wrapped = wrap_user_code(&parsed.code);
+    let wrapped = wrap_user_code(&user_code);
     let inputs = rbindings.inputs.clone();
     let loaded_columns = rbindings.loaded_columns.clone();
     let sandbox = tokio::time::timeout(
@@ -500,7 +705,7 @@ pub async fn dispatch_core(
     if let Some(w) = sheets_warning {
         response["_warning"] = Value::String(w.to_string());
     }
-    response
+    with_code_ref_audit(response, code_ref_audit.as_ref())
 }
 
 /// Executor entry point: build the SQL runtime, gsheets client, attachment
@@ -630,6 +835,10 @@ pub async fn dispatch_data_run_python_via_executor(
         })
     });
 
+    // Operator-only: WHERE stored code lives for `code_ref` resolution. Read
+    // straight from `fixed` (never LLM-visible), mirroring `fixed_config.sql`.
+    let code_source_query = fixed.get("code_source_query").and_then(|v| v.as_str());
+
     dispatch_core(
         args,
         &enabled,
@@ -637,6 +846,7 @@ pub async fn dispatch_data_run_python_via_executor(
         gsheets_client.as_ref(),
         &fetch,
         &register,
+        code_source_query,
     )
     .await
 }
@@ -751,10 +961,13 @@ mod tests {
             None,
             &attach,
             &reg,
+            None,
         )
         .await;
         assert_eq!(out["error"], "SourceNotEnabled");
         assert_eq!(out["source"], "sql");
+        assert!(out.get("code_ref").is_none(), "got: {out}");
+        assert!(out.get("code_hash").is_none(), "got: {out}");
     }
 
     #[tokio::test]
@@ -784,6 +997,7 @@ mod tests {
             None,
             &attach,
             &reg,
+            None,
         )
         .await;
         assert_eq!(out["error"], Value::Null, "unexpected error: {out}");
@@ -819,6 +1033,7 @@ mod tests {
             None,
             &attach,
             &reg,
+            None,
         )
         .await;
         assert_eq!(out["error"], Value::Null, "unexpected error: {out}");
@@ -851,6 +1066,7 @@ mod tests {
             None,
             &noop_attach(),
             &noop_registrar(),
+            None,
         )
         .await;
         assert_eq!(series["error"], Value::Null, "unexpected error: {series}");
@@ -871,6 +1087,7 @@ mod tests {
             None,
             &noop_attach(),
             &noop_registrar(),
+            None,
         )
         .await;
         assert_eq!(nested["error"], Value::Null, "unexpected error: {nested}");
@@ -1141,5 +1358,403 @@ mod tests {
         let enabled = enabled_sources(&f, false);
         assert!(!enabled.sql);
         assert!(enabled.gsheets);
+    }
+
+    // ── code_ref: precedence (exactly-one-of) ────────────────────────
+
+    #[tokio::test]
+    async fn code_ref_and_code_both_set_errors() {
+        let args = serde_json::json!({
+            "bindings": [{"var": "t", "data": [{"a": 1}]}],
+            "code": "output=1",
+            "code_ref": "some_key"
+        });
+        let attach = noop_attach();
+        let reg = noop_registrar();
+        let out = dispatch_core(
+            args,
+            &EnabledSources {
+                sql: false,
+                gsheets: false,
+            },
+            None,
+            None,
+            &attach,
+            &reg,
+            None,
+        )
+        .await;
+        assert_eq!(out["error"], "invalid_args", "got: {out}");
+        let msg = out["message"].as_str().unwrap_or_default();
+        assert!(
+            msg.contains("code") && msg.contains("code_ref"),
+            "got: {out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn code_ref_and_code_neither_set_errors() {
+        let args = serde_json::json!({
+            "bindings": [{"var": "t", "data": [{"a": 1}]}],
+        });
+        let attach = noop_attach();
+        let reg = noop_registrar();
+        let out = dispatch_core(
+            args,
+            &EnabledSources {
+                sql: false,
+                gsheets: false,
+            },
+            None,
+            None,
+            &attach,
+            &reg,
+            None,
+        )
+        .await;
+        assert_eq!(out["error"], "invalid_args", "got: {out}");
+        let msg = out["message"].as_str().unwrap_or_default();
+        assert!(
+            msg.contains("code") && msg.contains("code_ref"),
+            "got: {out}"
+        );
+    }
+
+    // ── code_ref: SQL resolution (resolve_code_ref) ──────────────────
+
+    /// A [`SqlConnectionPort`] mock that returns a canned row set (or a
+    /// canned execution error) for `execute_query`, and panics if any other
+    /// method is called — `resolve_code_ref` only ever needs `execute_query`.
+    struct CannedAdapter {
+        rows: Vec<Value>,
+        fail: Option<String>,
+    }
+
+    #[async_trait::async_trait]
+    impl SqlConnectionPort for CannedAdapter {
+        async fn execute_query(
+            &self,
+            _query: &str,
+            _max_rows: u64,
+            _tenant_user_id: Option<&str>,
+        ) -> Result<
+            crate::dag_engine::domain::sql_ports::QueryResult,
+            crate::dag_engine::domain::sql_errors::SqlNodeError,
+        > {
+            if let Some(msg) = &self.fail {
+                return Err(
+                    crate::dag_engine::domain::sql_errors::SqlNodeError::ExecutionError(
+                        msg.clone(),
+                    ),
+                );
+            }
+            Ok(crate::dag_engine::domain::sql_ports::QueryResult {
+                output: Value::Array(self.rows.clone()),
+                row_count: self.rows.len() as u64,
+                truncated: false,
+            })
+        }
+        async fn load_table_metadata(
+            &self,
+            _schemas: &[String],
+        ) -> Result<
+            Vec<crate::dag_engine::domain::sql_ports::TableInfo>,
+            crate::dag_engine::domain::sql_errors::SqlNodeError,
+        > {
+            unreachable!()
+        }
+        async fn load_table_schemas(
+            &self,
+            _schemas: &[String],
+        ) -> Result<
+            Vec<crate::dag_engine::domain::sql_ports::TableSchema>,
+            crate::dag_engine::domain::sql_errors::SqlNodeError,
+        > {
+            unreachable!()
+        }
+        async fn missing_schemas(
+            &self,
+            _schemas: &[String],
+        ) -> Result<Vec<String>, crate::dag_engine::domain::sql_errors::SqlNodeError> {
+            unreachable!()
+        }
+        async fn create_schema(
+            &self,
+            _schema: &str,
+        ) -> Result<(), crate::dag_engine::domain::sql_errors::SqlNodeError> {
+            unreachable!()
+        }
+        async fn execute_setup_sql(
+            &self,
+            _sql: &str,
+        ) -> Result<(), crate::dag_engine::domain::sql_errors::SqlNodeError> {
+            unreachable!()
+        }
+        fn is_connected(&self) -> bool {
+            true
+        }
+    }
+
+    /// Build a [`SqlRuntime`] wrapping `adapter`. The `pool` field uses a
+    /// lazily-connected (never-touched) pool — `resolve_code_ref` and the
+    /// SELECT-only binding path never read `SqlRuntime::pool` (only the
+    /// `output_tables` write sink does), so no real DB is needed.
+    fn sql_runtime_with(adapter: CannedAdapter) -> SqlRuntime {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://invalid/db")
+            .unwrap();
+        SqlRuntime {
+            adapter: Arc::new(adapter),
+            pool: Arc::new(pool),
+            permissions: SqlPermissions::from_config(None).unwrap(),
+            allowed_schemas: vec![],
+            tenant: None,
+            on_missing_table: "create".to_string(),
+            on_existing_table: "fail".to_string(),
+            statement_timeout_ms: 30_000,
+            work_mem_mb: 64,
+        }
+    }
+
+    const CODE_REF_QUERY: &str = "SELECT code FROM recipes WHERE name='{{code_ref}}'";
+
+    #[tokio::test]
+    async fn code_ref_not_enabled_fails_closed_no_sql_runtime() {
+        let out = resolve_code_ref("recipe_a", Some(CODE_REF_QUERY), None, &noop_attach())
+            .await
+            .unwrap_err();
+        assert_eq!(out["error"], "CodeRefNotEnabled", "got: {out}");
+    }
+
+    #[tokio::test]
+    async fn code_ref_not_enabled_fails_closed_no_query() {
+        let rt = sql_runtime_with(CannedAdapter {
+            rows: vec![],
+            fail: None,
+        });
+        let out = resolve_code_ref("recipe_a", None, Some(&rt), &noop_attach())
+            .await
+            .unwrap_err();
+        assert_eq!(out["error"], "CodeRefNotEnabled", "got: {out}");
+    }
+
+    #[tokio::test]
+    async fn code_ref_zero_rows_fails_closed() {
+        let rt = sql_runtime_with(CannedAdapter {
+            rows: vec![],
+            fail: None,
+        });
+        let out = resolve_code_ref("recipe_a", Some(CODE_REF_QUERY), Some(&rt), &noop_attach())
+            .await
+            .unwrap_err();
+        assert_eq!(out["error"], "CodeRefNotFound", "got: {out}");
+    }
+
+    #[tokio::test]
+    async fn code_ref_ambiguous_fails_closed_multi_row() {
+        let rt = sql_runtime_with(CannedAdapter {
+            rows: vec![
+                serde_json::json!({"code": "a"}),
+                serde_json::json!({"code": "b"}),
+            ],
+            fail: None,
+        });
+        let out = resolve_code_ref("recipe_a", Some(CODE_REF_QUERY), Some(&rt), &noop_attach())
+            .await
+            .unwrap_err();
+        assert_eq!(out["error"], "CodeRefAmbiguous", "got: {out}");
+    }
+
+    #[tokio::test]
+    async fn code_ref_ambiguous_fails_closed_multi_col() {
+        let rt = sql_runtime_with(CannedAdapter {
+            rows: vec![serde_json::json!({"code": "a", "other": "x"})],
+            fail: None,
+        });
+        let out = resolve_code_ref("recipe_a", Some(CODE_REF_QUERY), Some(&rt), &noop_attach())
+            .await
+            .unwrap_err();
+        assert_eq!(out["error"], "CodeRefShapeInvalid", "got: {out}");
+    }
+
+    #[tokio::test]
+    async fn code_ref_empty_fails_closed() {
+        let rt = sql_runtime_with(CannedAdapter {
+            rows: vec![serde_json::json!({"code": "   "})],
+            fail: None,
+        });
+        let out = resolve_code_ref("recipe_a", Some(CODE_REF_QUERY), Some(&rt), &noop_attach())
+            .await
+            .unwrap_err();
+        assert_eq!(out["error"], "CodeRefEmpty", "got: {out}");
+    }
+
+    #[tokio::test]
+    async fn code_ref_fetch_error_fails_closed() {
+        let rt = sql_runtime_with(CannedAdapter {
+            rows: vec![],
+            fail: Some("connection reset".to_string()),
+        });
+        let out = resolve_code_ref("recipe_a", Some(CODE_REF_QUERY), Some(&rt), &noop_attach())
+            .await
+            .unwrap_err();
+        assert_eq!(out["error"], "SqlExecutionFailed", "got: {out}");
+    }
+
+    #[tokio::test]
+    async fn code_ref_invalid_key_rejected() {
+        let rt = sql_runtime_with(CannedAdapter {
+            rows: vec![],
+            fail: None,
+        });
+        let out = resolve_code_ref(
+            "recipe'; DROP TABLE recipes;--",
+            Some(CODE_REF_QUERY),
+            Some(&rt),
+            &noop_attach(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(out["error"], "invalid_args", "got: {out}");
+    }
+
+    #[tokio::test]
+    async fn code_ref_resolves_single_cell_and_hashes() {
+        let rt = sql_runtime_with(CannedAdapter {
+            rows: vec![serde_json::json!({"code": "output = 1"})],
+            fail: None,
+        });
+        let (code, hash) =
+            resolve_code_ref("recipe_a", Some(CODE_REF_QUERY), Some(&rt), &noop_attach())
+                .await
+                .unwrap();
+        assert_eq!(code, "output = 1");
+        assert_eq!(hash.len(), 64, "expected a sha256 hex digest, got: {hash}");
+    }
+
+    // ── code_ref: sandbox passthrough + audit fields ─────────────────
+
+    #[tokio::test]
+    #[ignore = "executes the PyO3 pandas sandbox; the shared per-process interpreter \
+                flakes with `No module named pandas` when another sandbox test inits it \
+                first under parallel `cargo test` aggregation. Passes in isolation. Run \
+                with `cargo test -- --ignored`."]
+    async fn code_ref_banned_construct_passthrough() {
+        // Resolved code with a banned construct must surface the SAME
+        // SandboxViolation shape as equivalent inline code — no relaxation
+        // of restricted-mode rules on the code_ref path.
+        pyo3::Python::initialize();
+        let rt = sql_runtime_with(CannedAdapter {
+            rows: vec![serde_json::json!({"code": "output = exec('1')"})],
+            fail: None,
+        });
+        let args = serde_json::json!({
+            "bindings": [{"var": "rows", "data": [{"n": 1}]}],
+            "code_ref": "danger"
+        });
+        let attach = noop_attach();
+        let reg = noop_registrar();
+        let out = dispatch_core(
+            args,
+            &EnabledSources {
+                sql: true,
+                gsheets: false,
+            },
+            Some(&rt),
+            None,
+            &attach,
+            &reg,
+            Some(CODE_REF_QUERY),
+        )
+        .await;
+        assert!(
+            out["error"].as_str().is_some(),
+            "expected a sandbox violation error, got: {out}"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "executes the PyO3 pandas sandbox; the shared per-process interpreter \
+                flakes with `No module named pandas` when another sandbox test inits it \
+                first under parallel `cargo test` aggregation. Passes in isolation. Run \
+                with `cargo test -- --ignored`."]
+    async fn code_ref_happy_path_execution() {
+        // Resolved valid code runs with the same semantics/output shape as
+        // inline code, plus the `code_ref`/`code_hash` audit fields.
+        pyo3::Python::initialize();
+        let rt = sql_runtime_with(CannedAdapter {
+            rows: vec![serde_json::json!({"code": "output = int(pd.DataFrame(rows)['n'].sum())"})],
+            fail: None,
+        });
+        let args = serde_json::json!({
+            "bindings": [{"var": "rows", "data": [{"n": 2}, {"n": 3}]}],
+            "code_ref": "sum_recipe"
+        });
+        let attach = noop_attach();
+        let reg = noop_registrar();
+        let out = dispatch_core(
+            args,
+            &EnabledSources {
+                sql: true,
+                gsheets: false,
+            },
+            Some(&rt),
+            None,
+            &attach,
+            &reg,
+            Some(CODE_REF_QUERY),
+        )
+        .await;
+        assert_eq!(out["error"], Value::Null, "unexpected error: {out}");
+        assert_eq!(out["output"], serde_json::json!(5), "got: {out}");
+        assert_eq!(out["code_ref"], "sum_recipe", "got: {out}");
+        assert_eq!(out["code_hash"].as_str().unwrap().len(), 64, "got: {out}");
+    }
+
+    #[test]
+    fn code_ref_result_includes_audit_fields() {
+        let base = serde_json::json!({"output": 1, "stdout": "", "error": Value::Null});
+        let out = with_code_ref_audit(base, Some(&("recipe_a".to_string(), "abc123".to_string())));
+        assert_eq!(out["code_ref"], "recipe_a");
+        assert_eq!(out["code_hash"], "abc123");
+    }
+
+    #[test]
+    fn inline_code_result_omits_code_ref_fields() {
+        let base = serde_json::json!({"output": 1, "stdout": "", "error": Value::Null});
+        let out = with_code_ref_audit(base, None);
+        assert!(out.get("code_ref").is_none(), "got: {out}");
+        assert!(out.get("code_hash").is_none(), "got: {out}");
+    }
+
+    // ── code_ref: backward compatibility ──────────────────────────────
+
+    #[tokio::test]
+    async fn existing_inline_code_only_graph_unaffected() {
+        // No `code_ref`, no `code_source_query` — output/error shape must be
+        // byte-for-byte identical to pre-code_ref behavior.
+        let args = serde_json::json!({
+            "bindings": [{"var": "t", "query": "SELECT 1"}],
+            "code": "output=1"
+        });
+        let attach = noop_attach();
+        let reg = noop_registrar();
+        let out = dispatch_core(
+            args,
+            &EnabledSources {
+                sql: false,
+                gsheets: false,
+            },
+            None,
+            None,
+            &attach,
+            &reg,
+            None,
+        )
+        .await;
+        assert_eq!(out["error"], "SourceNotEnabled");
+        assert_eq!(out["source"], "sql");
+        assert!(out.get("code_ref").is_none(), "got: {out}");
+        assert!(out.get("code_hash").is_none(), "got: {out}");
     }
 }
