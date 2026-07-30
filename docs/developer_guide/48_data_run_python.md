@@ -253,7 +253,10 @@ Siempre disponible (no requiere capacidad extra).
       },
       // ── Capacidad gsheets (opcional; auto-on si el toolkit gsheets está habilitado) ──
       "enable_gsheets": true,
-      "on_existing_sheet": "fail"                     // policy existente de sheets
+      "on_existing_sheet": "fail",                    // policy existente de sheets
+
+      // ── Código guardado (opcional; correr una receta por nombre — ver §"Código guardado — code_ref") ──
+      "code_source_query": "SELECT code FROM recetas WHERE name='{{code_ref}}'"
     }
   }
 }
@@ -273,6 +276,116 @@ Notas:
   destino es responsabilidad del nodo `sql_query` del grafo o de
   migraciones; la auto-creación de `output_tables` cubre solo el caso
   "tabla de resultados nueva".
+
+## Código guardado — `code_ref` (correr una receta por nombre desde SQL)
+
+**Estado:** shipped 2026-07-29.
+
+Por defecto el modelo pasa el código pandas **inline** en el campo `code` de la
+tool call. Con **`code_ref`** el modelo en cambio **referencia por nombre** una
+receta ya guardada, y el motor la **trae de la base de datos** con un `SELECT`
+que fija el operador — el código **nunca lo escribe ni lo copia el LLM**.
+
+Sirve para código estable/versionado que no querés que el modelo teclee cada
+vez: pegar código inline es frágil (copy-fidelity) y está limitado por el
+tamaño del `tool_code` que algunos proveedores filtran. Con `code_ref` el
+modelo solo manda una **llave corta**.
+
+### Cómo funciona
+
+```
+1) OPERADOR — fijo en fixed_config, NUNCA visible al LLM:
+   code_source_query = "SELECT code FROM recetas WHERE name='{{code_ref}}'"
+
+2) MODELO — manda solo la llave (ni SQL, ni código):
+   { "code_ref": "sum_recipe", "bindings": [ ...los datos... ] }
+
+3) MOTOR (Rust):
+   a. valida code_ref contra el allowlist  ^[A-Za-z0-9_.:/-]+$   (anti-inyección)
+   b. sustituye {{code_ref}} en el query del operador
+   c. corre ese SELECT (SELECT-only, mismo gate que un binding SQL) → obtiene el código
+   d. valida y ejecuta el código en el MISMO sandbox restringido que el código inline
+```
+
+El `code_source_query` se declara en `fixed_config` (ver §"Config del
+operador"), junto a `sql`. **El modelo solo ve el parámetro `code_ref`** (un
+string); nunca ve `code_source_query` ni sabe de qué tabla sale el código.
+
+### Precedencia — exactamente uno de `code` / `code_ref`
+
+- `code` inline **y** `code_ref` a la vez → error `invalid_args`.
+- Ninguno de los dos → error `invalid_args`.
+- Exactamente uno → procede.
+
+### Resolución — fail-closed
+
+El `code_source_query` debe devolver **una sola celda** (una fila, una columna)
+con el código. Cualquier otra forma corta la corrida con error estructurado,
+nunca una ejecución vacía silenciosa:
+
+| Situación | Error |
+|---|---|
+| 0 filas | `CodeRefNotFound` |
+| > 1 fila / > 1 columna | `CodeRefAmbiguous` |
+| celda vacía / solo whitespace | `CodeRefEmpty` |
+| sin `code_source_query` o sin runtime SQL | `CodeRefNotEnabled` |
+| error de conexión / SQL | `SqlExecutionFailed` |
+
+### Seguridad
+
+- El **`code_source_query` lo fija el operador**, no el modelo → el modelo no
+  puede apuntar a código arbitrario ni a otra tabla; solo elige la llave.
+- El valor `code_ref` pasa por el **allowlist `^[A-Za-z0-9_.:/-]+$`** antes de
+  sustituirse → no puede inyectar SQL en el template del operador.
+- El código traído se valida en el **mismo sandbox restringido** que el código
+  inline (whitelist de imports; `exec`/`eval`/`compile`/`open`/`__import__`
+  baneados). Traerlo desde SQL **no relaja nada**: una receta con un constructo
+  prohibido corta con `SandboxViolation` igual que si fuera inline.
+
+### Auditoría
+
+Cuando la corrida usa `code_ref`, el resultado agrega dos campos (ausentes en
+el camino inline):
+
+- `code_ref` — la llave que se corrió.
+- `code_hash` — sha256 hex del código resuelto.
+
+Sirven para trazar "qué receta y qué versión exacta produjo este resultado".
+
+### Los DATOS siguen siendo del modelo
+
+`code_ref` cambia de dónde sale el **código**, no de dónde salen los **datos**:
+los `bindings` los sigue proveyendo el modelo (no se pueden fijar por
+`fixed_config` ni por `node_schema`). Mantené los datos **simples** (idealmente
+`inline`, o un binding SQL chico) — así el modelo no tiene nada grande que
+copiar, y evitás abrir muchas conexiones en paralelo.
+
+### Ejemplo verificado
+
+Grafo `tests/graphs/agents/data_run_python_code_ref.json` (live: Postgres real
++ Gemini 2.5 Flash). El operador guarda la receta y fija el query; el modelo la
+corre por nombre sobre datos inline:
+
+```jsonc
+"tool_configurations": {
+  "data_run_python": {
+    "node_type": "data_run_python",
+    "fixed_config": {
+      "sql": { "connection_url": "${DATABASE_URL}",
+               "permissions": { "preset": "read_only", "allowed_schemas": ["drp_e2e"] } },
+      "code_source_query": "SELECT code FROM drp_e2e.recipes WHERE name='{{code_ref}}'"
+    }
+  }
+}
+```
+
+Seed:
+`INSERT INTO drp_e2e.recipes (name, code) VALUES ('sum_recipe', 'output = int(pd.DataFrame(rows)["n"].sum())');`
+
+El modelo manda
+`{ "code_ref": "sum_recipe", "bindings": [{"var":"rows","data":[{"n":4},{"n":6},{"n":10}]}] }`
+→ resultado `{ "output": 20, "code_ref": "sum_recipe", "code_hash": "b21a2214…" }`.
+El código vino de la BD; el modelo solo mandó la llave y los datos.
 
 ## Seguridad
 
@@ -314,6 +427,7 @@ API real):
 | `data_run_python_sql_to_xlsx.json` | SQL fuente → export a Excel (`output_attachments`) | `drp_e2e.ventas` seed | ✅ |
 | `data_run_python_gsheet_to_sql.json` | Google Sheet real → agregación → tabla SQL | Google Sheet (`<SPREADSHEET_ID>`, tab `Ventas`) + creds OAuth | ✅ |
 | `data_run_python_sql_to_gsheet.json` | SQL fuente → pestaña nueva en Google Sheet (`output_sheets` + `write_to_spreadsheet`) | Google Sheet escribible + creds OAuth | ✅ |
+| `data_run_python_code_ref.json` | **Código guardado en SQL corrido por nombre** (`code_ref` + `code_source_query`) sobre datos inline | `drp_e2e.recipes` seed (ver §"Código guardado — code_ref") | ✅ |
 | `data_run_python_xlsx_to_sql.json` | Variante del caso A con fixture propio | `drp_e2e.productos` + fixture xlsx | autorado |
 | `data_run_python_sheet_sync.json` | gsheet + tabla SQL en una call: upsert a SQL Y `output_sheets` | Google Sheet + `drp_e2e.oportunidades` | autorado |
 
