@@ -21,29 +21,17 @@ impl SqliteConversationRepository {
 #[async_trait]
 impl ConversationRepository for SqliteConversationRepository {
     async fn get_by_id(&self, key: &ConversationKey) -> Result<Conversation, LlmError> {
-        let rows = if let Some(agent) = &key.agent_session_id {
-            sqlx::query(
-                "SELECT role, content, tool_call_id, tool_calls, created_at \
-                 FROM llm_node_history \
-                 WHERE agent_session_id = ? AND node_id = ? \
-                 ORDER BY created_at ASC, id ASC",
-            )
-            .bind(&agent.0)
-            .bind(&key.node_id.0)
-            .fetch_all(&self.pool)
-            .await
-        } else {
-            sqlx::query(
-                "SELECT role, content, tool_call_id, tool_calls, created_at \
-                 FROM llm_node_history \
-                 WHERE session_id = ? AND node_id = ? \
-                 ORDER BY created_at ASC, id ASC",
-            )
-            .bind(&key.session_id.0)
-            .bind(&key.node_id.0)
-            .fetch_all(&self.pool)
-            .await
-        }
+        let (col, val) = key.keying();
+        let rows = sqlx::query(&format!(
+            "SELECT role, content, tool_call_id, tool_calls, created_at \
+             FROM llm_node_history \
+             WHERE {col} = ? AND node_id = ? \
+             ORDER BY created_at ASC, id ASC"
+        ))
+        .bind(val)
+        .bind(&key.node_id.0)
+        .fetch_all(&self.pool)
+        .await
         .map_err(|e| LlmError::RequestFailed {
             message: format!("Database error: {}", e),
         })?;
@@ -112,21 +100,15 @@ impl ConversationRepository for SqliteConversationRepository {
     }
 
     async fn delete(&self, key: &ConversationKey) -> Result<(), LlmError> {
-        let res = if let Some(agent) = &key.agent_session_id {
-            sqlx::query("DELETE FROM llm_node_history WHERE agent_session_id = ? AND node_id = ?")
-                .bind(&agent.0)
-                .bind(&key.node_id.0)
-                .execute(&self.pool)
-                .await
-        } else {
-            sqlx::query("DELETE FROM llm_node_history WHERE session_id = ? AND node_id = ?")
-                .bind(&key.session_id.0)
-                .bind(&key.node_id.0)
-                .execute(&self.pool)
-                .await
-        };
-
-        res.map_err(|e| LlmError::RequestFailed {
+        let (col, val) = key.keying();
+        sqlx::query(&format!(
+            "DELETE FROM llm_node_history WHERE {col} = ? AND node_id = ?"
+        ))
+        .bind(val)
+        .bind(&key.node_id.0)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| LlmError::RequestFailed {
             message: format!("Database error: {}", e),
         })?;
         Ok(())
@@ -136,29 +118,17 @@ impl ConversationRepository for SqliteConversationRepository {
         &self,
         key: &ConversationKey,
     ) -> Result<Vec<StoredMessage>, LlmError> {
-        let rows = if let Some(agent) = &key.agent_session_id {
-            sqlx::query(
-                "SELECT role, content, tool_call_id, tool_calls, summary \
-                 FROM llm_node_history \
-                 WHERE agent_session_id = ? AND node_id = ? \
-                 ORDER BY created_at ASC, id ASC",
-            )
-            .bind(&agent.0)
-            .bind(&key.node_id.0)
-            .fetch_all(&self.pool)
-            .await
-        } else {
-            sqlx::query(
-                "SELECT role, content, tool_call_id, tool_calls, summary \
-                 FROM llm_node_history \
-                 WHERE session_id = ? AND node_id = ? \
-                 ORDER BY created_at ASC, id ASC",
-            )
-            .bind(&key.session_id.0)
-            .bind(&key.node_id.0)
-            .fetch_all(&self.pool)
-            .await
-        }
+        let (col, val) = key.keying();
+        let rows = sqlx::query(&format!(
+            "SELECT role, content, tool_call_id, tool_calls, summary \
+             FROM llm_node_history \
+             WHERE {col} = ? AND node_id = ? \
+             ORDER BY created_at ASC, id ASC"
+        ))
+        .bind(val)
+        .bind(&key.node_id.0)
+        .fetch_all(&self.pool)
+        .await
         .map_err(|e| LlmError::RequestFailed {
             message: format!("Database error: {}", e),
         })?;
@@ -189,37 +159,21 @@ impl ConversationRepository for SqliteConversationRepository {
         ordinal: usize,
         summary: &str,
     ) -> Result<(), LlmError> {
-        if let Some(agent) = &key.agent_session_id {
-            sqlx::query(
-                "UPDATE llm_node_history SET summary = ? \
-                 WHERE id = (\
-                     SELECT id FROM llm_node_history \
-                     WHERE agent_session_id = ? AND node_id = ? \
-                     ORDER BY created_at ASC, id ASC LIMIT 1 OFFSET ?\
-                 )",
-            )
-            .bind(summary)
-            .bind(&agent.0)
-            .bind(&key.node_id.0)
-            .bind(ordinal as i64)
-            .execute(&self.pool)
-            .await
-        } else {
-            sqlx::query(
-                "UPDATE llm_node_history SET summary = ? \
-                 WHERE id = (\
-                     SELECT id FROM llm_node_history \
-                     WHERE session_id = ? AND node_id = ? \
-                     ORDER BY created_at ASC, id ASC LIMIT 1 OFFSET ?\
-                 )",
-            )
-            .bind(summary)
-            .bind(&key.session_id.0)
-            .bind(&key.node_id.0)
-            .bind(ordinal as i64)
-            .execute(&self.pool)
-            .await
-        }
+        let (col, val) = key.keying();
+        sqlx::query(&format!(
+            "UPDATE llm_node_history SET summary = ? \
+             WHERE id = (\
+                 SELECT id FROM llm_node_history \
+                 WHERE {col} = ? AND node_id = ? \
+                 ORDER BY created_at ASC, id ASC LIMIT 1 OFFSET ?\
+             )"
+        ))
+        .bind(summary)
+        .bind(val)
+        .bind(&key.node_id.0)
+        .bind(ordinal as i64)
+        .execute(&self.pool)
+        .await
         .map_err(|e| LlmError::RequestFailed {
             message: format!("Database error: {}", e),
         })?;
@@ -327,5 +281,56 @@ mod summary_tests {
         let stored = repo.get_with_summaries(&k).await.unwrap();
         assert_eq!(stored.len(), 1, "malformed row must be skipped");
         assert_eq!(stored[0].message.content(), "hi");
+    }
+
+    /// Session-keyed variant of `key()` — `agent_session_id: None`, so
+    /// `get_by_id`/`delete`/`get_with_summaries`/`set_summary` must resolve
+    /// via the `session_id` fallback branch of `ConversationKey::keying()`.
+    fn session_key(session_id: &str) -> ConversationKey {
+        ConversationKey {
+            session_id: SessionId(session_id.into()),
+            agent_session_id: None,
+            node_id: NodeIdPath("n".into()),
+        }
+    }
+
+    #[tokio::test]
+    async fn session_keyed_write_then_read_round_trips() {
+        let repo = SqliteConversationRepository::new(pool().await);
+        let k = session_key("sess_roundtrip");
+        repo.add_message(&k, LlmMessage::user("first".into()).unwrap())
+            .await
+            .unwrap();
+        repo.add_message(&k, LlmMessage::assistant("second".into()).unwrap())
+            .await
+            .unwrap();
+
+        let conv = repo.get_by_id(&k).await.unwrap();
+        assert_eq!(conv.messages.len(), 2);
+        assert_eq!(conv.messages[0].content(), "first");
+        assert_eq!(conv.messages[1].content(), "second");
+    }
+
+    #[tokio::test]
+    async fn session_keyed_history_is_isolated_from_a_differently_keyed_session() {
+        let pool = pool().await;
+        let repo = SqliteConversationRepository::new(pool);
+        let key_a = session_key("sess_a");
+        let key_b = session_key("sess_b");
+
+        repo.add_message(&key_a, LlmMessage::user("only in a".into()).unwrap())
+            .await
+            .unwrap();
+        repo.add_message(&key_b, LlmMessage::user("only in b".into()).unwrap())
+            .await
+            .unwrap();
+
+        let conv_a = repo.get_by_id(&key_a).await.unwrap();
+        assert_eq!(conv_a.messages.len(), 1, "sess_a must not see sess_b rows");
+        assert_eq!(conv_a.messages[0].content(), "only in a");
+
+        let conv_b = repo.get_by_id(&key_b).await.unwrap();
+        assert_eq!(conv_b.messages.len(), 1, "sess_b must not see sess_a rows");
+        assert_eq!(conv_b.messages[0].content(), "only in b");
     }
 }
