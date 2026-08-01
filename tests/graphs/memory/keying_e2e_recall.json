@@ -1,0 +1,16 @@
+{
+  "nodes": {
+    "chat": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "api_key": "${GEMINI_API_KEY}",
+        "model": "gemini-2.5-flash",
+        "connection_url": "${DATABASE_URL}",
+        "system_message": "Sos un asistente con memoria perfecta. Respondé breve.",
+        "prompt": "¿Cuál es mi color favorito y en qué trabajo? Respondé en una sola frase."
+      }
+    }
+  },
+  "edges": []
+}

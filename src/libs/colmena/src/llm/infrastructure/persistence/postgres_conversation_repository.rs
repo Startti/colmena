@@ -21,29 +21,17 @@ impl PostgresConversationRepository {
 #[async_trait]
 impl ConversationRepository for PostgresConversationRepository {
     async fn get_by_id(&self, key: &ConversationKey) -> Result<Conversation, LlmError> {
-        let rows = if let Some(agent) = &key.agent_session_id {
-            sqlx::query(
-                "SELECT role, content, tool_call_id, tool_calls, created_at \
-                 FROM llm_node_history \
-                 WHERE agent_session_id = $1 AND node_id = $2 \
-                 ORDER BY created_at ASC, id ASC",
-            )
-            .bind(&agent.0)
-            .bind(&key.node_id.0)
-            .fetch_all(&self.pool)
-            .await
-        } else {
-            sqlx::query(
-                "SELECT role, content, tool_call_id, tool_calls, created_at \
-                 FROM llm_node_history \
-                 WHERE session_id = $1 AND node_id = $2 \
-                 ORDER BY created_at ASC, id ASC",
-            )
-            .bind(&key.session_id.0)
-            .bind(&key.node_id.0)
-            .fetch_all(&self.pool)
-            .await
-        }
+        let (col, val) = key.keying();
+        let rows = sqlx::query(&format!(
+            "SELECT role, content, tool_call_id, tool_calls, created_at \
+             FROM llm_node_history \
+             WHERE {col} = $1 AND node_id = $2 \
+             ORDER BY created_at ASC, id ASC"
+        ))
+        .bind(val)
+        .bind(&key.node_id.0)
+        .fetch_all(&self.pool)
+        .await
         .map_err(|e| LlmError::RequestFailed {
             message: format!("Database error: {}", e),
         })?;
@@ -109,21 +97,15 @@ impl ConversationRepository for PostgresConversationRepository {
     }
 
     async fn delete(&self, key: &ConversationKey) -> Result<(), LlmError> {
-        let res = if let Some(agent) = &key.agent_session_id {
-            sqlx::query("DELETE FROM llm_node_history WHERE agent_session_id = $1 AND node_id = $2")
-                .bind(&agent.0)
-                .bind(&key.node_id.0)
-                .execute(&self.pool)
-                .await
-        } else {
-            sqlx::query("DELETE FROM llm_node_history WHERE session_id = $1 AND node_id = $2")
-                .bind(&key.session_id.0)
-                .bind(&key.node_id.0)
-                .execute(&self.pool)
-                .await
-        };
-
-        res.map_err(|e| LlmError::RequestFailed {
+        let (col, val) = key.keying();
+        sqlx::query(&format!(
+            "DELETE FROM llm_node_history WHERE {col} = $1 AND node_id = $2"
+        ))
+        .bind(val)
+        .bind(&key.node_id.0)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| LlmError::RequestFailed {
             message: format!("Database error: {}", e),
         })?;
         Ok(())
@@ -133,29 +115,17 @@ impl ConversationRepository for PostgresConversationRepository {
         &self,
         key: &ConversationKey,
     ) -> Result<Vec<StoredMessage>, LlmError> {
-        let rows = if let Some(agent) = &key.agent_session_id {
-            sqlx::query(
-                "SELECT role, content, tool_call_id, tool_calls, summary \
-                 FROM llm_node_history \
-                 WHERE agent_session_id = $1 AND node_id = $2 \
-                 ORDER BY created_at ASC, id ASC",
-            )
-            .bind(&agent.0)
-            .bind(&key.node_id.0)
-            .fetch_all(&self.pool)
-            .await
-        } else {
-            sqlx::query(
-                "SELECT role, content, tool_call_id, tool_calls, summary \
-                 FROM llm_node_history \
-                 WHERE session_id = $1 AND node_id = $2 \
-                 ORDER BY created_at ASC, id ASC",
-            )
-            .bind(&key.session_id.0)
-            .bind(&key.node_id.0)
-            .fetch_all(&self.pool)
-            .await
-        }
+        let (col, val) = key.keying();
+        let rows = sqlx::query(&format!(
+            "SELECT role, content, tool_call_id, tool_calls, summary \
+             FROM llm_node_history \
+             WHERE {col} = $1 AND node_id = $2 \
+             ORDER BY created_at ASC, id ASC"
+        ))
+        .bind(val)
+        .bind(&key.node_id.0)
+        .fetch_all(&self.pool)
+        .await
         .map_err(|e| LlmError::RequestFailed {
             message: format!("Database error: {}", e),
         })?;
@@ -186,37 +156,21 @@ impl ConversationRepository for PostgresConversationRepository {
         ordinal: usize,
         summary: &str,
     ) -> Result<(), LlmError> {
-        if let Some(agent) = &key.agent_session_id {
-            sqlx::query(
-                "UPDATE llm_node_history SET summary = $1 \
-                 WHERE id = (\
-                     SELECT id FROM llm_node_history \
-                     WHERE agent_session_id = $2 AND node_id = $3 \
-                     ORDER BY created_at ASC, id ASC OFFSET $4 LIMIT 1\
-                 )",
-            )
-            .bind(summary)
-            .bind(&agent.0)
-            .bind(&key.node_id.0)
-            .bind(ordinal as i64)
-            .execute(&self.pool)
-            .await
-        } else {
-            sqlx::query(
-                "UPDATE llm_node_history SET summary = $1 \
-                 WHERE id = (\
-                     SELECT id FROM llm_node_history \
-                     WHERE session_id = $2 AND node_id = $3 \
-                     ORDER BY created_at ASC, id ASC OFFSET $4 LIMIT 1\
-                 )",
-            )
-            .bind(summary)
-            .bind(&key.session_id.0)
-            .bind(&key.node_id.0)
-            .bind(ordinal as i64)
-            .execute(&self.pool)
-            .await
-        }
+        let (col, val) = key.keying();
+        sqlx::query(&format!(
+            "UPDATE llm_node_history SET summary = $1 \
+             WHERE id = (\
+                 SELECT id FROM llm_node_history \
+                 WHERE {col} = $2 AND node_id = $3 \
+                 ORDER BY created_at ASC, id ASC OFFSET $4 LIMIT 1\
+             )"
+        ))
+        .bind(summary)
+        .bind(val)
+        .bind(&key.node_id.0)
+        .bind(ordinal as i64)
+        .execute(&self.pool)
+        .await
         .map_err(|e| LlmError::RequestFailed {
             message: format!("Database error: {}", e),
         })?;

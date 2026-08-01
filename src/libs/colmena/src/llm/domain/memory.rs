@@ -22,6 +22,24 @@ pub struct ConversationKey {
     pub node_id: NodeIdPath,
 }
 
+impl ConversationKey {
+    /// Resolves this key's precedence into `(column, value)` for history
+    /// queries: `agent_session_id` when present, else `session_id`.
+    ///
+    /// The returned column is a FIXED identifier drawn from a closed
+    /// 2-element set (`"agent_session_id"` | `"session_id"`) — it is never
+    /// user- or LLM-supplied, so interpolating it into SQL via `format!` is
+    /// safe and is NOT an audit-#26 (dynamic SQL identifier injection)
+    /// violation. The returned value is always passed to the query as a
+    /// bound parameter, never interpolated.
+    pub fn keying(&self) -> (&'static str, &str) {
+        match &self.agent_session_id {
+            Some(agent) => ("agent_session_id", agent.0.as_str()),
+            None => ("session_id", self.session_id.0.as_str()),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Conversation {
     pub key: ConversationKey,
@@ -78,5 +96,30 @@ pub trait ConversationRepository: Send + Sync {
         _summary: &str,
     ) -> Result<(), LlmError> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn keying_prefers_agent_session_id_when_present() {
+        let key = ConversationKey {
+            session_id: SessionId("sess_y".into()),
+            agent_session_id: Some(AgentSessionId("agent_x".into())),
+            node_id: NodeIdPath("n".into()),
+        };
+        assert_eq!(key.keying(), ("agent_session_id", "agent_x"));
+    }
+
+    #[test]
+    fn keying_falls_back_to_session_id_when_agent_session_id_absent() {
+        let key = ConversationKey {
+            session_id: SessionId("sess_y".into()),
+            agent_session_id: None,
+            node_id: NodeIdPath("n".into()),
+        };
+        assert_eq!(key.keying(), ("session_id", "sess_y"));
     }
 }
