@@ -19,17 +19,15 @@ impl<'a> WordOpApplier<'a> {
                 let mut new_block: Block = serde_json::from_value(block.clone())
                     .map_err(|e| invalid(op, &format!("bad block: {e}")))?;
                 assign_block_ids(&mut new_block, self.ids, &mut assigned);
-                let pos = if let Some(b) = before {
-                    ir.block_index(b)
-                        .ok_or_else(|| invalid(op, "before block not found"))?
-                } else if let Some(a) = after {
-                    let i = ir
-                        .block_index(a)
-                        .ok_or_else(|| invalid(op, "after block not found"))?;
-                    i + 1
-                } else {
-                    ir.document.blocks.len()
-                };
+                let pos = resolve_insert_pos(
+                    before.as_deref(),
+                    after.as_deref(),
+                    |b| ir.block_index(b),
+                    ir.document.blocks.len(),
+                    op,
+                    "before block not found",
+                    "after block not found",
+                )?;
                 ir.document.blocks.insert(pos, new_block);
             }
             PatchOp::DeleteBlock { block_id } => {
@@ -118,8 +116,7 @@ impl<'a> WordOpApplier<'a> {
                     .ok_or_else(|| invalid(op, "block not found"))?;
                 let mut new_run: Run = serde_json::from_value(run.clone())
                     .map_err(|e| invalid(op, &format!("bad run: {e}")))?;
-                new_run.id = self.ids.new_run_id();
-                assigned.runs.push(new_run.id.clone());
+                assign_fresh_run_id(&mut new_run, self.ids, &mut assigned);
                 match b {
                     Block::Paragraph { runs, .. } | Block::Heading { runs, .. } => {
                         let pos = (*at_index as usize).min(runs.len());
@@ -148,20 +145,8 @@ impl<'a> WordOpApplier<'a> {
                 at_index,
                 runs,
             } => {
-                let b = ir
-                    .block_mut(list_block_id)
-                    .ok_or_else(|| invalid(op, "list not found"))?;
-                let Block::List { items, .. } = b else {
-                    return Err(invalid(op, "not a list"));
-                };
-                let mut new_runs: Vec<Run> = Vec::new();
-                for r in runs {
-                    let mut run: Run = serde_json::from_value(r.clone())
-                        .map_err(|e| invalid(op, &format!("bad run: {e}")))?;
-                    run.id = self.ids.new_run_id();
-                    assigned.runs.push(run.id.clone());
-                    new_runs.push(run);
-                }
+                let items = list_items_mut(ir, list_block_id, op)?;
+                let new_runs = build_runs_from_json(runs, self.ids, &mut assigned, op)?;
                 let pos = (*at_index as usize).min(items.len());
                 let item_id = self.ids.new_list_item_id();
                 assigned.list_items.push(item_id.clone());
@@ -178,36 +163,18 @@ impl<'a> WordOpApplier<'a> {
                 item_id,
                 runs,
             } => {
-                let b = ir
-                    .block_mut(list_block_id)
-                    .ok_or_else(|| invalid(op, "list not found"))?;
-                let Block::List { items, .. } = b else {
-                    return Err(invalid(op, "not a list"));
-                };
+                let items = list_items_mut(ir, list_block_id, op)?;
                 let it = items
                     .iter_mut()
                     .find(|i| &i.id == item_id)
                     .ok_or_else(|| invalid(op, "item not found"))?;
-                let mut new_runs: Vec<Run> = Vec::new();
-                for r in runs {
-                    let mut run: Run = serde_json::from_value(r.clone())
-                        .map_err(|e| invalid(op, &format!("bad run: {e}")))?;
-                    run.id = self.ids.new_run_id();
-                    assigned.runs.push(run.id.clone());
-                    new_runs.push(run);
-                }
-                it.runs = new_runs;
+                it.runs = build_runs_from_json(runs, self.ids, &mut assigned, op)?;
             }
             PatchOp::DeleteListItem {
                 list_block_id,
                 item_id,
             } => {
-                let b = ir
-                    .block_mut(list_block_id)
-                    .ok_or_else(|| invalid(op, "list not found"))?;
-                let Block::List { items, .. } = b else {
-                    return Err(invalid(op, "not a list"));
-                };
+                let items = list_items_mut(ir, list_block_id, op)?;
                 items.retain(|i| &i.id != item_id);
             }
             PatchOp::InsertTableRow {
@@ -216,19 +183,13 @@ impl<'a> WordOpApplier<'a> {
                 after,
                 cells,
             } => {
-                let b = ir
-                    .block_mut(table_block_id)
-                    .ok_or_else(|| invalid(op, "table not found"))?;
-                let Block::Table { rows, .. } = b else {
-                    return Err(invalid(op, "not a table"));
-                };
+                let rows = table_rows_mut(ir, table_block_id, op)?;
                 let mut new_cells: Vec<TableCell> = Vec::new();
                 for c in cells {
                     let mut cell: TableCell = serde_json::from_value(c.clone())
                         .map_err(|e| invalid(op, &format!("bad cell: {e}")))?;
                     for run in cell.runs.iter_mut() {
-                        run.id = self.ids.new_run_id();
-                        assigned.runs.push(run.id.clone());
+                        assign_fresh_run_id(run, self.ids, &mut assigned);
                     }
                     new_cells.push(cell);
                 }
@@ -238,31 +199,22 @@ impl<'a> WordOpApplier<'a> {
                     id: row_id,
                     cells: new_cells,
                 };
-                let pos = if let Some(b) = before {
-                    rows.iter()
-                        .position(|r| &r.id == b)
-                        .ok_or_else(|| invalid(op, "before row not found"))?
-                } else if let Some(a) = after {
-                    let i = rows
-                        .iter()
-                        .position(|r| &r.id == a)
-                        .ok_or_else(|| invalid(op, "after row not found"))?;
-                    i + 1
-                } else {
-                    rows.len()
-                };
+                let pos = resolve_insert_pos(
+                    before.as_deref(),
+                    after.as_deref(),
+                    |b| rows.iter().position(|r| r.id == b),
+                    rows.len(),
+                    op,
+                    "before row not found",
+                    "after row not found",
+                )?;
                 rows.insert(pos, row);
             }
             PatchOp::DeleteTableRow {
                 table_block_id,
                 row_id,
             } => {
-                let b = ir
-                    .block_mut(table_block_id)
-                    .ok_or_else(|| invalid(op, "table not found"))?;
-                let Block::Table { rows, .. } = b else {
-                    return Err(invalid(op, "not a table"));
-                };
+                let rows = table_rows_mut(ir, table_block_id, op)?;
                 rows.retain(|r| &r.id != row_id);
             }
             PatchOp::UpdateTableCell {
@@ -271,12 +223,7 @@ impl<'a> WordOpApplier<'a> {
                 col_index,
                 runs,
             } => {
-                let b = ir
-                    .block_mut(table_block_id)
-                    .ok_or_else(|| invalid(op, "table not found"))?;
-                let Block::Table { rows, .. } = b else {
-                    return Err(invalid(op, "not a table"));
-                };
+                let rows = table_rows_mut(ir, table_block_id, op)?;
                 let row = rows
                     .iter_mut()
                     .find(|r| &r.id == row_id)
@@ -285,15 +232,7 @@ impl<'a> WordOpApplier<'a> {
                     .cells
                     .get_mut(*col_index as usize)
                     .ok_or_else(|| invalid(op, "column out of range"))?;
-                let mut new_runs: Vec<Run> = Vec::new();
-                for r in runs {
-                    let mut run: Run = serde_json::from_value(r.clone())
-                        .map_err(|e| invalid(op, &format!("bad run: {e}")))?;
-                    run.id = self.ids.new_run_id();
-                    assigned.runs.push(run.id.clone());
-                    new_runs.push(run);
-                }
-                cell.runs = new_runs;
+                cell.runs = build_runs_from_json(runs, self.ids, &mut assigned, op)?;
             }
 
             // Excel-only and HTML-only ops are not valid for Word artifacts.
@@ -345,6 +284,99 @@ fn invalid(op: &PatchOp, reason: &str) -> DocumentError {
     DocumentError::InvalidPatchOp {
         reason: reason.to_string(),
         op: serde_json::to_value(op).unwrap_or(serde_json::Value::Null),
+    }
+}
+
+// ---- Intra-kind helpers (Stage 2, finding #39 follow-up slice) ----
+// These extract 3 patterns repeated across the op arms above: run
+// deserialize-assign-push, the List/Table block type-guard, and the
+// before/after -> positional-index resolution. Semantics and error text
+// are byte-identical to the pre-extraction inline arms — see the parity
+// net tests in this module's `tests` block.
+
+/// Assign a fresh server-side run id to `run` and record it in `assigned`.
+fn assign_fresh_run_id(run: &mut Run, ids: &dyn IdGenerator, assigned: &mut AssignedIds) {
+    run.id = ids.new_run_id();
+    assigned.runs.push(run.id.clone());
+}
+
+/// Deserialize each raw JSON value in `raw` into a [`Run`], assign it a
+/// fresh server-side id, and collect the results in order. Preserves the
+/// exact "bad run: {e}" error wording of the original inline arms.
+fn build_runs_from_json(
+    raw: &[serde_json::Value],
+    ids: &dyn IdGenerator,
+    assigned: &mut AssignedIds,
+    op: &PatchOp,
+) -> Result<Vec<Run>, DocumentError> {
+    raw.iter()
+        .map(|r| {
+            let mut run: Run = serde_json::from_value(r.clone())
+                .map_err(|e| invalid(op, &format!("bad run: {e}")))?;
+            assign_fresh_run_id(&mut run, ids, assigned);
+            Ok(run)
+        })
+        .collect()
+}
+
+/// Look up `list_block_id` and assert it is a [`Block::List`], returning a
+/// mutable reference to its items. Preserves the exact "list not found" /
+/// "not a list" error text of the original inline `let Block::List { .. }
+/// = b else { ... }` guards.
+fn list_items_mut<'a>(
+    ir: &'a mut WordIR,
+    list_block_id: &str,
+    op: &PatchOp,
+) -> Result<&'a mut Vec<ListItem>, DocumentError> {
+    let b = ir
+        .block_mut(list_block_id)
+        .ok_or_else(|| invalid(op, "list not found"))?;
+    let Block::List { items, .. } = b else {
+        return Err(invalid(op, "not a list"));
+    };
+    Ok(items)
+}
+
+/// Look up `table_block_id` and assert it is a [`Block::Table`], returning
+/// a mutable reference to its rows. Preserves the exact "table not found" /
+/// "not a table" error text of the original inline `let Block::Table { .. }
+/// = b else { ... }` guards.
+fn table_rows_mut<'a>(
+    ir: &'a mut WordIR,
+    table_block_id: &str,
+    op: &PatchOp,
+) -> Result<&'a mut Vec<TableRow>, DocumentError> {
+    let b = ir
+        .block_mut(table_block_id)
+        .ok_or_else(|| invalid(op, "table not found"))?;
+    let Block::Table { rows, .. } = b else {
+        return Err(invalid(op, "not a table"));
+    };
+    Ok(rows)
+}
+
+/// Resolve a `before`/`after` anchor pair to a positional index: `before`
+/// resolves to the target's own index, `after` resolves to the index right
+/// after the target, and the default (neither provided) appends at `len`.
+/// Preserves the exact not-found error text of the original inline
+/// if/else-if arms — callers supply their own wording (e.g. "before block
+/// not found" vs. "before row not found") since it differs per call site.
+fn resolve_insert_pos(
+    before: Option<&str>,
+    after: Option<&str>,
+    find: impl Fn(&str) -> Option<usize>,
+    len: usize,
+    op: &PatchOp,
+    before_not_found: &str,
+    after_not_found: &str,
+) -> Result<usize, DocumentError> {
+    if let Some(b) = before {
+        find(b).ok_or_else(|| invalid(op, before_not_found))
+    } else if let Some(a) = after {
+        let i = find(a).ok_or_else(|| invalid(op, after_not_found))?;
+        Ok(i + 1)
+    } else {
+        Ok(len)
     }
 }
 
