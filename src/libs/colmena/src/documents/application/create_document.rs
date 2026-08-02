@@ -259,4 +259,44 @@ mod tests {
         let stored = store.read_current(&out.artifact_id).await.unwrap();
         assert_eq!(stored.rendered_extension, "html");
     }
+
+    // ---- Phase 0 parity net (finding #39) ----
+    // Word coverage was missing before this refactor; add it as a
+    // characterization test pinned against unchanged production code.
+    #[tokio::test]
+    async fn creates_empty_word_artifact() {
+        use crate::documents::infrastructure::render::WordRenderer;
+        use crate::documents::infrastructure::validation::WordValidator;
+
+        let tmp = tempdir().unwrap();
+        let store: Arc<dyn ArtifactStore> = Arc::new(LocalFsStore::new(tmp.path()));
+        let uc = CreateDocumentUseCase {
+            store: store.clone(),
+            excel_renderer: Arc::new(ExcelRenderer),
+            excel_validator: Arc::new(ExcelValidator),
+            word_renderer: Arc::new(WordRenderer),
+            word_validator: Arc::new(WordValidator),
+            html_renderer: Arc::new(NoopRenderer),
+            html_validator: Arc::new(NoopValidator),
+            ids: Arc::new(CountingIdGenerator::default()),
+            default_retention: 10,
+        };
+        let out = uc
+            .execute(CreateDocumentInput {
+                kind: ArtifactKind::Word,
+                session_id: SessionId::new("s"),
+                label: None,
+                retention_limit: None,
+                initial_ir: None,
+                source: PatchSource::Agent,
+            })
+            .await
+            .unwrap();
+        assert_eq!(out.version_id.0, "v1");
+        assert!(out.label.starts_with("Untitled Word"));
+        let stored = store.read_current(&out.artifact_id).await.unwrap();
+        assert_eq!(stored.rendered_extension, "docx");
+        assert!(stored.rendered_binary.len() > 4);
+        assert_eq!(&stored.rendered_binary[0..4], &[0x50, 0x4B, 0x03, 0x04]);
+    }
 }

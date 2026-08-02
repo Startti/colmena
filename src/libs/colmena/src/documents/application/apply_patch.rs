@@ -817,4 +817,489 @@ mod tests {
         assert!(s.to_lowercase().contains("theme"));
         assert!(s.to_lowercase().contains("dark"));
     }
+
+    // ---- Phase 0 parity net (finding #39) ----
+    // Characterization tests pinning current behavior BEFORE the artifact_ops
+    // dispatch refactor. These must pass unmodified against both pre- and
+    // post-refactor code.
+
+    #[tokio::test]
+    async fn apply_insert_block_on_word_advances_version() {
+        use crate::documents::infrastructure::render::WordRenderer;
+        use crate::documents::infrastructure::validation::WordValidator;
+
+        let tmp = tempdir().unwrap();
+        let store: Arc<dyn ArtifactStore> = Arc::new(LocalFsStore::new(tmp.path()));
+        let ids = Arc::new(CountingIdGenerator::default());
+        let create = CreateDocumentUseCase {
+            store: store.clone(),
+            excel_renderer: Arc::new(ExcelRenderer),
+            excel_validator: Arc::new(ExcelValidator),
+            word_renderer: Arc::new(WordRenderer),
+            word_validator: Arc::new(WordValidator),
+            html_renderer: Arc::new(NoopR),
+            html_validator: Arc::new(NoopV),
+            ids: ids.clone(),
+            default_retention: 10,
+        };
+        let out = create
+            .execute(CreateDocumentInput {
+                kind: ArtifactKind::Word,
+                session_id: SessionId::new("s"),
+                label: None,
+                retention_limit: None,
+                initial_ir: None,
+                source: PatchSource::Agent,
+            })
+            .await
+            .unwrap();
+
+        let apply = ApplyPatchUseCase {
+            store: store.clone(),
+            excel_renderer: Arc::new(ExcelRenderer),
+            excel_validator: Arc::new(ExcelValidator),
+            word_renderer: Arc::new(WordRenderer),
+            word_validator: Arc::new(WordValidator),
+            html_renderer: Arc::new(NoopR),
+            html_validator: Arc::new(NoopV),
+            ids: ids.clone(),
+        };
+        let res = apply
+            .execute(ApplyPatchInput {
+                patch: Patch {
+                    artifact_id: out.artifact_id.0.clone(),
+                    base_version: "v1".into(),
+                    source: PatchSource::Agent,
+                    ops: vec![PatchOp::InsertBlock {
+                        before: None,
+                        after: None,
+                        block: serde_json::json!({
+                            "type": "paragraph",
+                            "runs": [{"text": "hello world"}]
+                        }),
+                    }],
+                },
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(res.version_id.0, "v2");
+        assert_eq!(res.summary.natural_language.len(), 1);
+        assert!(res.summary.natural_language[0].starts_with("Inserted paragraph"));
+
+        let stored = store.read_current(&out.artifact_id).await.unwrap();
+        assert_eq!(stored.rendered_extension, "docx");
+        assert!(stored.rendered_binary.len() > 4);
+        assert_eq!(&stored.rendered_binary[0..4], &[0x50, 0x4B, 0x03, 0x04]);
+    }
+
+    #[tokio::test]
+    async fn apply_invalid_op_on_excel_returns_exact_reason() {
+        use crate::documents::domain::ir::html::SlideLayout;
+
+        let tmp = tempdir().unwrap();
+        let store: Arc<dyn ArtifactStore> = Arc::new(LocalFsStore::new(tmp.path()));
+        let ids = Arc::new(CountingIdGenerator::default());
+        let create = CreateDocumentUseCase {
+            store: store.clone(),
+            excel_renderer: Arc::new(ExcelRenderer),
+            excel_validator: Arc::new(ExcelValidator),
+            word_renderer: Arc::new(NoopR),
+            word_validator: Arc::new(NoopV),
+            html_renderer: Arc::new(NoopR),
+            html_validator: Arc::new(NoopV),
+            ids: ids.clone(),
+            default_retention: 10,
+        };
+        let out = create
+            .execute(CreateDocumentInput {
+                kind: ArtifactKind::Excel,
+                session_id: SessionId::new("s"),
+                label: None,
+                retention_limit: None,
+                initial_ir: None,
+                source: PatchSource::Agent,
+            })
+            .await
+            .unwrap();
+
+        let apply = ApplyPatchUseCase {
+            store: store.clone(),
+            excel_renderer: Arc::new(ExcelRenderer),
+            excel_validator: Arc::new(ExcelValidator),
+            word_renderer: Arc::new(NoopR),
+            word_validator: Arc::new(NoopV),
+            html_renderer: Arc::new(NoopR),
+            html_validator: Arc::new(NoopV),
+            ids: ids.clone(),
+        };
+        let err = apply
+            .execute(ApplyPatchInput {
+                patch: Patch {
+                    artifact_id: out.artifact_id.0.clone(),
+                    base_version: "v1".into(),
+                    source: PatchSource::Agent,
+                    ops: vec![PatchOp::AddSlide {
+                        layout: SlideLayout::Blank,
+                        at_index: None,
+                        title: None,
+                        subtitle: None,
+                    }],
+                },
+            })
+            .await
+            .unwrap_err();
+
+        match err {
+            DocumentError::InvalidPatchOp { reason, .. } => {
+                assert_eq!(reason, "Word/HTML op not applicable to Excel artifact");
+            }
+            other => panic!("expected InvalidPatchOp, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn apply_invalid_op_on_word_returns_exact_reason() {
+        let tmp = tempdir().unwrap();
+        let store: Arc<dyn ArtifactStore> = Arc::new(LocalFsStore::new(tmp.path()));
+        let ids = Arc::new(CountingIdGenerator::default());
+        let create = CreateDocumentUseCase {
+            store: store.clone(),
+            excel_renderer: Arc::new(ExcelRenderer),
+            excel_validator: Arc::new(ExcelValidator),
+            word_renderer: Arc::new(NoopR),
+            word_validator: Arc::new(NoopV),
+            html_renderer: Arc::new(NoopR),
+            html_validator: Arc::new(NoopV),
+            ids: ids.clone(),
+            default_retention: 10,
+        };
+        let out = create
+            .execute(CreateDocumentInput {
+                kind: ArtifactKind::Word,
+                session_id: SessionId::new("s"),
+                label: None,
+                retention_limit: None,
+                initial_ir: None,
+                source: PatchSource::Agent,
+            })
+            .await
+            .unwrap();
+
+        let apply = ApplyPatchUseCase {
+            store: store.clone(),
+            excel_renderer: Arc::new(ExcelRenderer),
+            excel_validator: Arc::new(ExcelValidator),
+            word_renderer: Arc::new(NoopR),
+            word_validator: Arc::new(NoopV),
+            html_renderer: Arc::new(NoopR),
+            html_validator: Arc::new(NoopV),
+            ids: ids.clone(),
+        };
+        let err = apply
+            .execute(ApplyPatchInput {
+                patch: Patch {
+                    artifact_id: out.artifact_id.0.clone(),
+                    base_version: "v1".into(),
+                    source: PatchSource::Agent,
+                    ops: vec![PatchOp::SetCell {
+                        sheet_id: "s1".into(),
+                        address: "A1".into(),
+                        value: serde_json::json!(1),
+                        value_type: None,
+                        format: None,
+                        style_ref: None,
+                    }],
+                },
+            })
+            .await
+            .unwrap_err();
+
+        match err {
+            DocumentError::InvalidPatchOp { reason, .. } => {
+                assert_eq!(reason, "not a Word op");
+            }
+            other => panic!("expected InvalidPatchOp, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn apply_invalid_op_on_html_returns_exact_reason() {
+        let tmp = tempdir().unwrap();
+        let store: Arc<dyn ArtifactStore> = Arc::new(LocalFsStore::new(tmp.path()));
+        let ids = Arc::new(CountingIdGenerator::default());
+        let create = CreateDocumentUseCase {
+            store: store.clone(),
+            excel_renderer: Arc::new(ExcelRenderer),
+            excel_validator: Arc::new(ExcelValidator),
+            word_renderer: Arc::new(NoopR),
+            word_validator: Arc::new(NoopV),
+            html_renderer: Arc::new(NoopR),
+            html_validator: Arc::new(NoopV),
+            ids: ids.clone(),
+            default_retention: 10,
+        };
+        let out = create
+            .execute(CreateDocumentInput {
+                kind: ArtifactKind::Html,
+                session_id: SessionId::new("s"),
+                label: None,
+                retention_limit: None,
+                initial_ir: None,
+                source: PatchSource::Agent,
+            })
+            .await
+            .unwrap();
+
+        let apply = ApplyPatchUseCase {
+            store: store.clone(),
+            excel_renderer: Arc::new(ExcelRenderer),
+            excel_validator: Arc::new(ExcelValidator),
+            word_renderer: Arc::new(NoopR),
+            word_validator: Arc::new(NoopV),
+            html_renderer: Arc::new(NoopR),
+            html_validator: Arc::new(NoopV),
+            ids: ids.clone(),
+        };
+        let err = apply
+            .execute(ApplyPatchInput {
+                patch: Patch {
+                    artifact_id: out.artifact_id.0.clone(),
+                    base_version: "v1".into(),
+                    source: PatchSource::Agent,
+                    ops: vec![PatchOp::SetCell {
+                        sheet_id: "s1".into(),
+                        address: "A1".into(),
+                        value: serde_json::json!(1),
+                        value_type: None,
+                        format: None,
+                        style_ref: None,
+                    }],
+                },
+            })
+            .await
+            .unwrap_err();
+
+        match err {
+            DocumentError::InvalidPatchOp { reason, .. } => {
+                assert_eq!(reason, "op not applicable to HTML kind");
+            }
+            other => panic!("expected InvalidPatchOp, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn apply_parse_error_reason_excel_is_exact() {
+        let tmp = tempdir().unwrap();
+        let store: Arc<dyn ArtifactStore> = Arc::new(LocalFsStore::new(tmp.path()));
+        let ids = Arc::new(CountingIdGenerator::default());
+        let create = CreateDocumentUseCase {
+            store: store.clone(),
+            excel_renderer: Arc::new(ExcelRenderer),
+            excel_validator: Arc::new(ExcelValidator),
+            word_renderer: Arc::new(NoopR),
+            word_validator: Arc::new(NoopV),
+            html_renderer: Arc::new(NoopR),
+            html_validator: Arc::new(NoopV),
+            ids: ids.clone(),
+            default_retention: 10,
+        };
+        let out = create
+            .execute(CreateDocumentInput {
+                kind: ArtifactKind::Excel,
+                session_id: SessionId::new("s"),
+                label: None,
+                retention_limit: None,
+                initial_ir: None,
+                source: PatchSource::Agent,
+            })
+            .await
+            .unwrap();
+
+        let mut corrupted = store.read_current(&out.artifact_id).await.unwrap();
+        corrupted.ir = serde_json::json!({"totally": "wrong"});
+        store
+            .write_version(&out.artifact_id, &VersionId::initial(), &corrupted)
+            .await
+            .unwrap();
+
+        let apply = ApplyPatchUseCase {
+            store: store.clone(),
+            excel_renderer: Arc::new(ExcelRenderer),
+            excel_validator: Arc::new(ExcelValidator),
+            word_renderer: Arc::new(NoopR),
+            word_validator: Arc::new(NoopV),
+            html_renderer: Arc::new(NoopR),
+            html_validator: Arc::new(NoopV),
+            ids: ids.clone(),
+        };
+        let err = apply
+            .execute(ApplyPatchInput {
+                patch: Patch {
+                    artifact_id: out.artifact_id.0.clone(),
+                    base_version: "v1".into(),
+                    source: PatchSource::Agent,
+                    ops: vec![],
+                },
+            })
+            .await
+            .unwrap_err();
+
+        match err {
+            DocumentError::IRValidationFailed { path, reason } => {
+                assert_eq!(path, "/");
+                assert!(reason.starts_with("parse current IR: "));
+            }
+            other => panic!("expected IRValidationFailed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn apply_parse_error_reason_word_is_exact() {
+        let tmp = tempdir().unwrap();
+        let store: Arc<dyn ArtifactStore> = Arc::new(LocalFsStore::new(tmp.path()));
+        let ids = Arc::new(CountingIdGenerator::default());
+        let create = CreateDocumentUseCase {
+            store: store.clone(),
+            excel_renderer: Arc::new(ExcelRenderer),
+            excel_validator: Arc::new(ExcelValidator),
+            word_renderer: Arc::new(NoopR),
+            word_validator: Arc::new(NoopV),
+            html_renderer: Arc::new(NoopR),
+            html_validator: Arc::new(NoopV),
+            ids: ids.clone(),
+            default_retention: 10,
+        };
+        let out = create
+            .execute(CreateDocumentInput {
+                kind: ArtifactKind::Word,
+                session_id: SessionId::new("s"),
+                label: None,
+                retention_limit: None,
+                initial_ir: None,
+                source: PatchSource::Agent,
+            })
+            .await
+            .unwrap();
+
+        let mut corrupted = store.read_current(&out.artifact_id).await.unwrap();
+        corrupted.ir = serde_json::json!({"totally": "wrong"});
+        store
+            .write_version(&out.artifact_id, &VersionId::initial(), &corrupted)
+            .await
+            .unwrap();
+
+        let apply = ApplyPatchUseCase {
+            store: store.clone(),
+            excel_renderer: Arc::new(ExcelRenderer),
+            excel_validator: Arc::new(ExcelValidator),
+            word_renderer: Arc::new(NoopR),
+            word_validator: Arc::new(NoopV),
+            html_renderer: Arc::new(NoopR),
+            html_validator: Arc::new(NoopV),
+            ids: ids.clone(),
+        };
+        let err = apply
+            .execute(ApplyPatchInput {
+                patch: Patch {
+                    artifact_id: out.artifact_id.0.clone(),
+                    base_version: "v1".into(),
+                    source: PatchSource::Agent,
+                    ops: vec![],
+                },
+            })
+            .await
+            .unwrap_err();
+
+        match err {
+            DocumentError::IRValidationFailed { path, reason } => {
+                assert_eq!(path, "/");
+                assert!(reason.starts_with("parse current Word IR: "));
+            }
+            other => panic!("expected IRValidationFailed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn apply_parse_error_reason_html_is_exact() {
+        let tmp = tempdir().unwrap();
+        let store: Arc<dyn ArtifactStore> = Arc::new(LocalFsStore::new(tmp.path()));
+        let ids = Arc::new(CountingIdGenerator::default());
+        let create = CreateDocumentUseCase {
+            store: store.clone(),
+            excel_renderer: Arc::new(ExcelRenderer),
+            excel_validator: Arc::new(ExcelValidator),
+            word_renderer: Arc::new(NoopR),
+            word_validator: Arc::new(NoopV),
+            html_renderer: Arc::new(NoopR),
+            html_validator: Arc::new(NoopV),
+            ids: ids.clone(),
+            default_retention: 10,
+        };
+        let out = create
+            .execute(CreateDocumentInput {
+                kind: ArtifactKind::Html,
+                session_id: SessionId::new("s"),
+                label: None,
+                retention_limit: None,
+                initial_ir: None,
+                source: PatchSource::Agent,
+            })
+            .await
+            .unwrap();
+
+        let mut corrupted = store.read_current(&out.artifact_id).await.unwrap();
+        corrupted.ir = serde_json::json!({"totally": "wrong"});
+        store
+            .write_version(&out.artifact_id, &VersionId::initial(), &corrupted)
+            .await
+            .unwrap();
+
+        let apply = ApplyPatchUseCase {
+            store: store.clone(),
+            excel_renderer: Arc::new(ExcelRenderer),
+            excel_validator: Arc::new(ExcelValidator),
+            word_renderer: Arc::new(NoopR),
+            word_validator: Arc::new(NoopV),
+            html_renderer: Arc::new(NoopR),
+            html_validator: Arc::new(NoopV),
+            ids: ids.clone(),
+        };
+        let err = apply
+            .execute(ApplyPatchInput {
+                patch: Patch {
+                    artifact_id: out.artifact_id.0.clone(),
+                    base_version: "v1".into(),
+                    source: PatchSource::Agent,
+                    ops: vec![],
+                },
+            })
+            .await
+            .unwrap_err();
+
+        match err {
+            DocumentError::IRValidationFailed { path, reason } => {
+                assert_eq!(path, "/");
+                assert!(reason.starts_with("parse current HTML IR: "));
+            }
+            other => panic!("expected IRValidationFailed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn excel_renderer_output_is_deterministic_for_same_ir() {
+        let ir_value = serde_json::json!({
+            "kind": "excel",
+            "artifact_id": "x", "version_id": "v1",
+            "schema_version": "1.0.0",
+            "workbook": { "sheets": [
+                {"id": "s1", "name": "Hoja1", "order": 0, "columns": [], "cells": {}, "tables": []}
+            ], "named_styles": {} }
+        });
+        let renderer = ExcelRenderer;
+        let a = renderer.render(&ir_value).await.unwrap();
+        let b = renderer.render(&ir_value).await.unwrap();
+        assert!(!a.is_empty());
+        assert_eq!(a, b);
+    }
 }
