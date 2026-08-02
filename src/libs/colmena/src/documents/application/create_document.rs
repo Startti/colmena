@@ -61,12 +61,7 @@ impl CreateDocumentUseCase {
             obj.insert("version_id".into(), serde_json::json!("v1"));
         }
 
-        let (validator, renderer): (&Arc<dyn IRValidator>, &Arc<dyn IRRenderer>) = match input.kind
-        {
-            ArtifactKind::Excel => (&self.excel_validator, &self.excel_renderer),
-            ArtifactKind::Word => (&self.word_validator, &self.word_renderer),
-            ArtifactKind::Html => (&self.html_validator, &self.html_renderer),
-        };
+        let (validator, renderer) = self.render_pair(input.kind);
         validator.validate(&ir)?;
         let bytes = renderer.render(&ir).await?;
 
@@ -85,11 +80,7 @@ impl CreateDocumentUseCase {
         let version_data = VersionData {
             ir,
             rendered_binary: bytes,
-            rendered_extension: match input.kind {
-                ArtifactKind::Excel => "xlsx",
-                ArtifactKind::Word => "docx",
-                ArtifactKind::Html => "html",
-            },
+            rendered_extension: input.kind.extension(),
             patch_applied,
             blobs: vec![],
         };
@@ -109,16 +100,22 @@ impl CreateDocumentUseCase {
             meta,
         })
     }
+
+    /// Returns the `(validator, renderer)` pair for `kind`, reading the same
+    /// named fields the pre-refactor per-kind match arm read directly. Same
+    /// shape as `ApplyPatchUseCase::render_pair`.
+    fn render_pair(&self, kind: ArtifactKind) -> (&Arc<dyn IRValidator>, &Arc<dyn IRRenderer>) {
+        match kind {
+            ArtifactKind::Excel => (&self.excel_validator, &self.excel_renderer),
+            ArtifactKind::Word => (&self.word_validator, &self.word_renderer),
+            ArtifactKind::Html => (&self.html_validator, &self.html_renderer),
+        }
+    }
 }
 
 fn default_label(kind: ArtifactKind) -> String {
     let now = Utc::now().format("%Y-%m-%d %H:%M");
-    let k = match kind {
-        ArtifactKind::Excel => "Excel",
-        ArtifactKind::Word => "Word",
-        ArtifactKind::Html => "Html",
-    };
-    format!("Untitled {k} {now}")
+    format!("Untitled {kind:?} {now}")
 }
 
 fn empty_ir(id: &ArtifactId, kind: ArtifactKind) -> serde_json::Value {
