@@ -12,14 +12,16 @@ Si vas a empezar a trabajar en algo de acá, sacalo de esta lista y agregalo al 
 
 **Cómo retomar:** cada hallazgo tiene un slug de SDD change propuesto. Al trabajar uno, sácalo de acá → SDD change (spec/design/tasks) → implementar con TDD (test que falla primero) → changelog del mes.
 
+**Progreso (5/60 resueltos):** ✅ #5 (`llm-persistence-row-hydration-safety`), ✅ #6 (`gemini-health-check-model-update`), ✅ #8 (`openai-adapter-parallel-tool-calls`), ✅ #9 (`llm-persistence-dedup-hydration`, PR #159 `12d19d9d`), ✅ #11 (var muerta, folded en b02). Los ✅ en las tablas de abajo marcan lo cerrado. Fuente de verdad del estado: el ledger.
+
 **Meta-hallazgo:** en 353 archivos, **0 resultaron muertos de verdad** entre decenas de `Used-by=0` — todos falsos positivos del dependency map (4 patrones ciegos: facades re-export, factories runtime, `use super::`/DI trait-object, imports agrupados `use x::{a,b,c}`). El valor está en correctness/seguridad/sin-terminar, no en borrar. Único código muerto real = variables locales / helpers de test / campos privados (triviales, edits acoplados).
 
 ### 🔴 HIGH — correctness / seguridad (arrancar por acá)
 
 | # | Hallazgo | Módulo | SDD change slug |
 |---|----------|--------|-----------------|
-| 5 | Panic en hidratación de filas — conv repos `.unwrap()` al construir `LlmMessage` desde DB; fila malformada panica el proceso | llm/persistence | `llm-persistence-row-hydration-safety` |
-| 6 | `gemini-1.5-flash` deprecado hardcodeado en health-check (`gemini_adapter:702`) | llm/infra | `gemini-health-check-model-update` |
+| ✅ 5 | ~~Panic en hidratación de filas — conv repos `.unwrap()` al construir `LlmMessage` desde DB; fila malformada panica el proceso~~ | llm/persistence | `llm-persistence-row-hydration-safety` — **DONE** 2026-07-28 |
+| ✅ 6 | ~~`gemini-1.5-flash` deprecado hardcodeado en health-check (`gemini_adapter:702`)~~ | llm/infra | `gemini-health-check-model-update` — **DONE** 2026-07-28 (`fd225bf2`) |
 | 18 | Errores tragados mientras se reporta éxito (`extraction`, `crdt_doc_run_python`, `crdt_doc_tools`) | dag_engine/nodes | `synthetic-tools-partial-failure-reporting` |
 | 25 | Fail-open: status no-parseable → `DagRunStatus::Failed` silencioso | dag_engine/infra | `dag-persistence-fail-open-observability` |
 | 30 | `python_node:211` imprime el código del usuario a stdout (fuga de secretos/PII) | dag_engine/nodes | `dag-nodes-structured-logging-b05` |
@@ -33,8 +35,8 @@ Si vas a empezar a trabajar en algo de acá, sacalo de esta lista y agregalo al 
 | # | Hallazgo | Módulo | SDD change slug |
 |---|----------|--------|-----------------|
 | 7 | Serde de tool-call args con `unwrap_or_default()` → `{}`/`''` silencioso | llm/infra | `llm-adapter-tool-arg-serde-observability` |
-| 8 | OpenAI stream lee solo `tool_calls.first()` (dropea calls paralelos) | llm/infra | `openai-adapter-parallel-tool-calls` |
-| 9 | Hidratación row→message duplicada entre repos | llm/persistence | `llm-persistence-dedup-hydration` |
+| ✅ 8 | ~~OpenAI stream lee solo `tool_calls.first()` (dropea calls paralelos)~~ | llm/infra | `openai-adapter-parallel-tool-calls` — **DONE** 2026-07-28 |
+| ✅ 9 | ~~Hidratación row→message duplicada + branching de keying entre repos~~ | llm/persistence | `llm-persistence-dedup-hydration` — **DONE** 2026-08-01 (PR #159 `12d19d9d`) |
 | 14 | Violación hexagonal: `sql_execution_service` (app) importa `infrastructure::sql_ast` | dag_engine/app | `dag-sql-exec-layering-fix` |
 | 15 | `api.rs` — 4 bloques copy-paste entre handlers | dag_engine | `dag-api-handler-dedup` |
 | 16 | `sse_mapper` mapea cada evento 2× (top-level + SubgraphWrapped) | dag_engine | `dag-sse-mapper-dedup` |
