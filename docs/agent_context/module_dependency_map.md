@@ -5,8 +5,8 @@
 
 **How to use (for the exploration/spec phase):** before opening files to assess a change, look up the target file below. **Used by** is its blast radius — the files that break if you change its public surface. **Depends on** is what it needs. Start by reading only those, not the whole repo.
 
-- Files indexed: **356**
-- Modules with at least one importer: **160**
+- Files indexed: **357**
+- Modules with at least one importer: **161**
 
 ## Blast-radius ranking (change these with the most care)
 
@@ -15,10 +15,10 @@
 | 79 | `llm::domain` | `src/libs/colmena/src/llm/domain/mod.rs` |
 | 37 | `dag_engine::domain::node` | `src/libs/colmena/src/dag_engine/domain/node.rs` |
 | 26 | `dag_engine::domain::observer` | `src/libs/colmena/src/dag_engine/domain/observer.rs` |
-| 22 | `documents::domain` | `src/libs/colmena/src/documents/domain/mod.rs` |
+| 23 | `documents::domain` | `src/libs/colmena/src/documents/domain/mod.rs` |
 | 22 | `llm::domain::tools` | `src/libs/colmena/src/llm/domain/tools.rs` |
 | 21 | `gdocs::domain` | `src/libs/colmena/src/gdocs/domain/mod.rs` |
-| 19 | `documents::domain::ids` | `src/libs/colmena/src/documents/domain/ids.rs` |
+| 20 | `documents::domain::ids` | `src/libs/colmena/src/documents/domain/ids.rs` |
 | 17 | `crdt_documents` | `src/libs/colmena/src/crdt_documents/mod.rs` |
 | 13 | `llm::domain::attachments` | `src/libs/colmena/src/llm/domain/attachments/mod.rs` |
 | 13 | `llm::infrastructure` | `src/libs/colmena/src/llm/infrastructure/mod.rs` |
@@ -28,12 +28,12 @@
 | 10 | `dag_engine::application::ports` | `src/libs/colmena/src/dag_engine/application/ports.rs` |
 | 10 | `dag_engine::application::secure_value_service` | `src/libs/colmena/src/dag_engine/application/secure_value_service.rs` |
 | 10 | `dag_engine::infrastructure::pool_registry` | `src/libs/colmena/src/dag_engine/infrastructure/pool_registry/mod.rs` |
+| 10 | `documents::domain::artifact` | `src/libs/colmena/src/documents/domain/artifact.rs` |
+| 10 | `documents::domain::patch` | `src/libs/colmena/src/documents/domain/patch.rs` |
 | 10 | `gdocs::application::_test_helpers` | `src/libs/colmena/src/gdocs/application/_test_helpers.rs` |
 | 10 | `text` | `src/libs/colmena/src/text/mod.rs` |
 | 9 | `crdt_documents::tool_executor` | `src/libs/colmena/src/crdt_documents/tool_executor.rs` |
-| 9 | `documents::domain::artifact` | `src/libs/colmena/src/documents/domain/artifact.rs` |
 | 9 | `documents::domain::ir` | `src/libs/colmena/src/documents/domain/ir/mod.rs` |
-| 9 | `documents::domain::patch` | `src/libs/colmena/src/documents/domain/patch.rs` |
 | 9 | `gdocs::application::co_edit_guard` | `src/libs/colmena/src/gdocs/application/co_edit_guard.rs` |
 | 9 | `skills::domain` | `src/libs/colmena/src/skills/domain/mod.rs` |
 | 8 | `dag_engine::domain::sql_permissions` | `src/libs/colmena/src/dag_engine/domain/sql_permissions.rs` |
@@ -787,23 +787,28 @@
 
 #### `src/libs/colmena/src/documents/application/apply_excel_ops.rs`
 - Module: `documents::application::apply_excel_ops`
-- **Used by (1)**: `src/libs/colmena/src/documents/application/apply_patch.rs`
+- **Used by (1)**: `src/libs/colmena/src/documents/application/artifact_ops.rs`
 - Depends on (5): `documents::domain`, `documents::domain::artifact`, `documents::domain::ir`, `documents::domain::patch`, `documents::infrastructure::ids`
 
 #### `src/libs/colmena/src/documents/application/apply_html_ops.rs`
 - Module: `documents::application::apply_html_ops`
-- **Used by (1)**: `src/libs/colmena/src/documents/application/apply_patch.rs`
+- **Used by (1)**: `src/libs/colmena/src/documents/application/artifact_ops.rs`
 - Depends on (5): `documents::domain`, `documents::domain::artifact`, `documents::domain::ir::html`, `documents::domain::patch`, `documents::infrastructure::ids`
 
 #### `src/libs/colmena/src/documents/application/apply_patch.rs`
 - Module: `documents::application::apply_patch`
 - **Used by (3)**: `src/libs/colmena/src/dag_engine/infrastructure/nodes/document_nodes.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/document_tools.rs`, `src/libs/colmena/src/documents/application/runtime.rs`
-- Depends on (15): `documents::application::apply_excel_ops`, `documents::application::apply_html_ops`, `documents::application::apply_word_ops`, `documents::application::create_document`, `documents::domain`, `documents::domain::artifact`, `documents::domain::ids`, `documents::domain::ir`, `documents::domain::ir::html`, `documents::domain::patch`, `documents::domain::ports`, `documents::infrastructure::ids`, `documents::infrastructure::render`, `documents::infrastructure::storage`, `documents::infrastructure::validation`
+- Depends on (12): `documents::application::artifact_ops`, `documents::application::create_document`, `documents::domain`, `documents::domain::artifact`, `documents::domain::ids`, `documents::domain::ir::html`, `documents::domain::patch`, `documents::domain::ports`, `documents::infrastructure::ids`, `documents::infrastructure::render`, `documents::infrastructure::storage`, `documents::infrastructure::validation`
 
 #### `src/libs/colmena/src/documents/application/apply_word_ops.rs`
 - Module: `documents::application::apply_word_ops`
-- **Used by (1)**: `src/libs/colmena/src/documents/application/apply_patch.rs`
+- **Used by (1)**: `src/libs/colmena/src/documents/application/artifact_ops.rs`
 - Depends on (5): `documents::domain`, `documents::domain::artifact`, `documents::domain::ir`, `documents::domain::patch`, `documents::infrastructure::ids`
+
+#### `src/libs/colmena/src/documents/application/artifact_ops.rs`
+- Module: `documents::application::artifact_ops`
+- **Used by (1)**: `src/libs/colmena/src/documents/application/apply_patch.rs`
+- Depends on (9): `documents::application::apply_excel_ops`, `documents::application::apply_html_ops`, `documents::application::apply_word_ops`, `documents::domain`, `documents::domain::artifact`, `documents::domain::ids`, `documents::domain::ir`, `documents::domain::ir::html`, `documents::domain::patch`
 
 #### `src/libs/colmena/src/documents/application/create_document.rs`
 - Module: `documents::application::create_document`
@@ -857,7 +862,7 @@
 
 #### `src/libs/colmena/src/documents/domain/artifact.rs`
 - Module: `documents::domain::artifact`
-- **Used by (9)**: `src/libs/colmena/src/documents/application/apply_excel_ops.rs`, `src/libs/colmena/src/documents/application/apply_html_ops.rs`, `src/libs/colmena/src/documents/application/apply_patch.rs`, `src/libs/colmena/src/documents/application/apply_word_ops.rs`, `src/libs/colmena/src/documents/application/create_document.rs`, `src/libs/colmena/src/documents/application/delete_asset.rs`, `src/libs/colmena/src/documents/application/rollback.rs`, `src/libs/colmena/src/documents/infrastructure/storage/gcs_store.rs`, `src/libs/colmena/src/documents/infrastructure/storage/local_fs_store.rs`
+- **Used by (10)**: `src/libs/colmena/src/documents/application/apply_excel_ops.rs`, `src/libs/colmena/src/documents/application/apply_html_ops.rs`, `src/libs/colmena/src/documents/application/apply_patch.rs`, `src/libs/colmena/src/documents/application/apply_word_ops.rs`, `src/libs/colmena/src/documents/application/artifact_ops.rs`, `src/libs/colmena/src/documents/application/create_document.rs`, `src/libs/colmena/src/documents/application/delete_asset.rs`, `src/libs/colmena/src/documents/application/rollback.rs`, `src/libs/colmena/src/documents/infrastructure/storage/gcs_store.rs`, `src/libs/colmena/src/documents/infrastructure/storage/local_fs_store.rs`
 - Depends on (0): — (no intra-crate imports)
 
 #### `src/libs/colmena/src/documents/domain/error.rs`
@@ -867,7 +872,7 @@
 
 #### `src/libs/colmena/src/documents/domain/ids.rs`
 - Module: `documents::domain::ids`
-- **Used by (19)**: `src/libs/colmena/src/dag_engine/infrastructure/nodes/document_nodes.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/document_tools.rs`, `src/libs/colmena/src/documents/application/apply_patch.rs`, `src/libs/colmena/src/documents/application/create_document.rs`, `src/libs/colmena/src/documents/application/delete_asset.rs`, `src/libs/colmena/src/documents/application/get_head.rs`, `src/libs/colmena/src/documents/application/list_assets.rs`, `src/libs/colmena/src/documents/application/list_versions.rs`, `src/libs/colmena/src/documents/application/read_document.rs`, `src/libs/colmena/src/documents/application/rollback.rs`, `src/libs/colmena/src/documents/application/runtime.rs`, `src/libs/colmena/src/documents/application/upload_asset.rs`, `src/libs/colmena/src/documents/domain/ports.rs`, `src/libs/colmena/src/documents/infrastructure/render/html_renderer.rs`, `src/libs/colmena/src/documents/infrastructure/storage/gcs_asset_store.rs`, `src/libs/colmena/src/documents/infrastructure/storage/gcs_store.rs`, `src/libs/colmena/src/documents/infrastructure/storage/local_fs_asset_store.rs`, `src/libs/colmena/src/documents/infrastructure/storage/local_fs_store.rs`
+- **Used by (20)**: `src/libs/colmena/src/dag_engine/infrastructure/nodes/document_nodes.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/document_tools.rs`, `src/libs/colmena/src/documents/application/apply_patch.rs`, `src/libs/colmena/src/documents/application/artifact_ops.rs`, `src/libs/colmena/src/documents/application/create_document.rs`, `src/libs/colmena/src/documents/application/delete_asset.rs`, `src/libs/colmena/src/documents/application/get_head.rs`, `src/libs/colmena/src/documents/application/list_assets.rs`, `src/libs/colmena/src/documents/application/list_versions.rs`, `src/libs/colmena/src/documents/application/read_document.rs`, `src/libs/colmena/src/documents/application/rollback.rs`, `src/libs/colmena/src/documents/application/runtime.rs`, `src/libs/colmena/src/documents/application/upload_asset.rs`, `src/libs/colmena/src/documents/domain/ports.rs`, `src/libs/colmena/src/documents/infrastructure/render/html_renderer.rs`, `src/libs/colmena/src/documents/infrastructure/storage/gcs_asset_store.rs`, `src/libs/colmena/src/documents/infrastructure/storage/gcs_store.rs`, `src/libs/colmena/src/documents/infrastructure/storage/local_fs_asset_store.rs`, `src/libs/colmena/src/documents/infrastructure/storage/local_fs_store.rs`
 - Depends on (0): — (no intra-crate imports)
 
 #### `src/libs/colmena/src/documents/domain/ir/common.rs`
@@ -882,12 +887,12 @@
 
 #### `src/libs/colmena/src/documents/domain/ir/html.rs`
 - Module: `documents::domain::ir::html`
-- **Used by (4)**: `src/libs/colmena/src/documents/application/apply_html_ops.rs`, `src/libs/colmena/src/documents/application/apply_patch.rs`, `src/libs/colmena/src/documents/infrastructure/render/html_renderer.rs`, `src/libs/colmena/src/documents/infrastructure/validation/html_validator.rs`
+- **Used by (5)**: `src/libs/colmena/src/documents/application/apply_html_ops.rs`, `src/libs/colmena/src/documents/application/apply_patch.rs`, `src/libs/colmena/src/documents/application/artifact_ops.rs`, `src/libs/colmena/src/documents/infrastructure/render/html_renderer.rs`, `src/libs/colmena/src/documents/infrastructure/validation/html_validator.rs`
 - Depends on (0): — (no intra-crate imports)
 
 #### `src/libs/colmena/src/documents/domain/ir/mod.rs`
 - Module: `documents::domain::ir`
-- **Used by (9)**: `src/libs/colmena/src/documents/application/apply_excel_ops.rs`, `src/libs/colmena/src/documents/application/apply_patch.rs`, `src/libs/colmena/src/documents/application/apply_word_ops.rs`, `src/libs/colmena/src/documents/domain/patch.rs`, `src/libs/colmena/src/documents/infrastructure/render/excel_renderer.rs`, `src/libs/colmena/src/documents/infrastructure/render/word_renderer.rs`, `src/libs/colmena/src/documents/infrastructure/validation/excel_validator.rs`, `src/libs/colmena/src/documents/infrastructure/validation/html_validator.rs`, `src/libs/colmena/src/documents/infrastructure/validation/word_validator.rs`
+- **Used by (9)**: `src/libs/colmena/src/documents/application/apply_excel_ops.rs`, `src/libs/colmena/src/documents/application/apply_word_ops.rs`, `src/libs/colmena/src/documents/application/artifact_ops.rs`, `src/libs/colmena/src/documents/domain/patch.rs`, `src/libs/colmena/src/documents/infrastructure/render/excel_renderer.rs`, `src/libs/colmena/src/documents/infrastructure/render/word_renderer.rs`, `src/libs/colmena/src/documents/infrastructure/validation/excel_validator.rs`, `src/libs/colmena/src/documents/infrastructure/validation/html_validator.rs`, `src/libs/colmena/src/documents/infrastructure/validation/word_validator.rs`
 - Depends on (0): — (no intra-crate imports)
 
 #### `src/libs/colmena/src/documents/domain/ir/word.rs`
@@ -897,12 +902,12 @@
 
 #### `src/libs/colmena/src/documents/domain/mod.rs`
 - Module: `documents::domain`
-- **Used by (22)**: `src/libs/colmena/src/dag_engine/infrastructure/nodes/document_nodes.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/document_tools.rs`, `src/libs/colmena/src/documents/application/apply_excel_ops.rs`, `src/libs/colmena/src/documents/application/apply_html_ops.rs`, `src/libs/colmena/src/documents/application/apply_patch.rs`, `src/libs/colmena/src/documents/application/apply_word_ops.rs`, `src/libs/colmena/src/documents/application/create_document.rs`, `src/libs/colmena/src/documents/application/get_head.rs`, `src/libs/colmena/src/documents/application/list_versions.rs`, `src/libs/colmena/src/documents/application/read_document.rs`, `src/libs/colmena/src/documents/application/rollback.rs`, `src/libs/colmena/src/documents/application/runtime.rs`, `src/libs/colmena/src/documents/application/upload_asset.rs`, `src/libs/colmena/src/documents/infrastructure/ids.rs`, `src/libs/colmena/src/documents/infrastructure/render/excel_renderer.rs`, `src/libs/colmena/src/documents/infrastructure/render/html_renderer.rs`, `src/libs/colmena/src/documents/infrastructure/render/word_renderer.rs`, `src/libs/colmena/src/documents/infrastructure/storage/gcs_store.rs`, `src/libs/colmena/src/documents/infrastructure/storage/local_fs_store.rs`, `src/libs/colmena/src/documents/infrastructure/validation/excel_validator.rs`, `src/libs/colmena/src/documents/infrastructure/validation/html_validator.rs`, `src/libs/colmena/src/documents/infrastructure/validation/word_validator.rs`
+- **Used by (23)**: `src/libs/colmena/src/dag_engine/infrastructure/nodes/document_nodes.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/document_tools.rs`, `src/libs/colmena/src/documents/application/apply_excel_ops.rs`, `src/libs/colmena/src/documents/application/apply_html_ops.rs`, `src/libs/colmena/src/documents/application/apply_patch.rs`, `src/libs/colmena/src/documents/application/apply_word_ops.rs`, `src/libs/colmena/src/documents/application/artifact_ops.rs`, `src/libs/colmena/src/documents/application/create_document.rs`, `src/libs/colmena/src/documents/application/get_head.rs`, `src/libs/colmena/src/documents/application/list_versions.rs`, `src/libs/colmena/src/documents/application/read_document.rs`, `src/libs/colmena/src/documents/application/rollback.rs`, `src/libs/colmena/src/documents/application/runtime.rs`, `src/libs/colmena/src/documents/application/upload_asset.rs`, `src/libs/colmena/src/documents/infrastructure/ids.rs`, `src/libs/colmena/src/documents/infrastructure/render/excel_renderer.rs`, `src/libs/colmena/src/documents/infrastructure/render/html_renderer.rs`, `src/libs/colmena/src/documents/infrastructure/render/word_renderer.rs`, `src/libs/colmena/src/documents/infrastructure/storage/gcs_store.rs`, `src/libs/colmena/src/documents/infrastructure/storage/local_fs_store.rs`, `src/libs/colmena/src/documents/infrastructure/validation/excel_validator.rs`, `src/libs/colmena/src/documents/infrastructure/validation/html_validator.rs`, `src/libs/colmena/src/documents/infrastructure/validation/word_validator.rs`
 - Depends on (0): — (no intra-crate imports)
 
 #### `src/libs/colmena/src/documents/domain/patch.rs`
 - Module: `documents::domain::patch`
-- **Used by (9)**: `src/libs/colmena/src/dag_engine/infrastructure/nodes/document_nodes.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/document_tools.rs`, `src/libs/colmena/src/documents/application/apply_excel_ops.rs`, `src/libs/colmena/src/documents/application/apply_html_ops.rs`, `src/libs/colmena/src/documents/application/apply_patch.rs`, `src/libs/colmena/src/documents/application/apply_word_ops.rs`, `src/libs/colmena/src/documents/application/create_document.rs`, `src/libs/colmena/src/documents/application/rollback.rs`, `src/libs/colmena/src/documents/application/runtime.rs`
+- **Used by (10)**: `src/libs/colmena/src/dag_engine/infrastructure/nodes/document_nodes.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/document_tools.rs`, `src/libs/colmena/src/documents/application/apply_excel_ops.rs`, `src/libs/colmena/src/documents/application/apply_html_ops.rs`, `src/libs/colmena/src/documents/application/apply_patch.rs`, `src/libs/colmena/src/documents/application/apply_word_ops.rs`, `src/libs/colmena/src/documents/application/artifact_ops.rs`, `src/libs/colmena/src/documents/application/create_document.rs`, `src/libs/colmena/src/documents/application/rollback.rs`, `src/libs/colmena/src/documents/application/runtime.rs`
 - Depends on (1): `documents::domain::ir`
 
 #### `src/libs/colmena/src/documents/domain/ports.rs`

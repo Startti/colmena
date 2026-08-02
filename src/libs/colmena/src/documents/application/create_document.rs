@@ -61,12 +61,7 @@ impl CreateDocumentUseCase {
             obj.insert("version_id".into(), serde_json::json!("v1"));
         }
 
-        let (validator, renderer): (&Arc<dyn IRValidator>, &Arc<dyn IRRenderer>) = match input.kind
-        {
-            ArtifactKind::Excel => (&self.excel_validator, &self.excel_renderer),
-            ArtifactKind::Word => (&self.word_validator, &self.word_renderer),
-            ArtifactKind::Html => (&self.html_validator, &self.html_renderer),
-        };
+        let (validator, renderer) = self.render_pair(input.kind);
         validator.validate(&ir)?;
         let bytes = renderer.render(&ir).await?;
 
@@ -85,11 +80,7 @@ impl CreateDocumentUseCase {
         let version_data = VersionData {
             ir,
             rendered_binary: bytes,
-            rendered_extension: match input.kind {
-                ArtifactKind::Excel => "xlsx",
-                ArtifactKind::Word => "docx",
-                ArtifactKind::Html => "html",
-            },
+            rendered_extension: input.kind.extension(),
             patch_applied,
             blobs: vec![],
         };
@@ -109,16 +100,22 @@ impl CreateDocumentUseCase {
             meta,
         })
     }
+
+    /// Returns the `(validator, renderer)` pair for `kind`, reading the same
+    /// named fields the pre-refactor per-kind match arm read directly. Same
+    /// shape as `ApplyPatchUseCase::render_pair`.
+    fn render_pair(&self, kind: ArtifactKind) -> (&Arc<dyn IRValidator>, &Arc<dyn IRRenderer>) {
+        match kind {
+            ArtifactKind::Excel => (&self.excel_validator, &self.excel_renderer),
+            ArtifactKind::Word => (&self.word_validator, &self.word_renderer),
+            ArtifactKind::Html => (&self.html_validator, &self.html_renderer),
+        }
+    }
 }
 
 fn default_label(kind: ArtifactKind) -> String {
     let now = Utc::now().format("%Y-%m-%d %H:%M");
-    let k = match kind {
-        ArtifactKind::Excel => "Excel",
-        ArtifactKind::Word => "Word",
-        ArtifactKind::Html => "Html",
-    };
-    format!("Untitled {k} {now}")
+    format!("Untitled {kind:?} {now}")
 }
 
 fn empty_ir(id: &ArtifactId, kind: ArtifactKind) -> serde_json::Value {
@@ -258,5 +255,45 @@ mod tests {
         assert_eq!(out.version_id.0, "v1");
         let stored = store.read_current(&out.artifact_id).await.unwrap();
         assert_eq!(stored.rendered_extension, "html");
+    }
+
+    // ---- Phase 0 parity net (finding #39) ----
+    // Word coverage was missing before this refactor; add it as a
+    // characterization test pinned against unchanged production code.
+    #[tokio::test]
+    async fn creates_empty_word_artifact() {
+        use crate::documents::infrastructure::render::WordRenderer;
+        use crate::documents::infrastructure::validation::WordValidator;
+
+        let tmp = tempdir().unwrap();
+        let store: Arc<dyn ArtifactStore> = Arc::new(LocalFsStore::new(tmp.path()));
+        let uc = CreateDocumentUseCase {
+            store: store.clone(),
+            excel_renderer: Arc::new(ExcelRenderer),
+            excel_validator: Arc::new(ExcelValidator),
+            word_renderer: Arc::new(WordRenderer),
+            word_validator: Arc::new(WordValidator),
+            html_renderer: Arc::new(NoopRenderer),
+            html_validator: Arc::new(NoopValidator),
+            ids: Arc::new(CountingIdGenerator::default()),
+            default_retention: 10,
+        };
+        let out = uc
+            .execute(CreateDocumentInput {
+                kind: ArtifactKind::Word,
+                session_id: SessionId::new("s"),
+                label: None,
+                retention_limit: None,
+                initial_ir: None,
+                source: PatchSource::Agent,
+            })
+            .await
+            .unwrap();
+        assert_eq!(out.version_id.0, "v1");
+        assert!(out.label.starts_with("Untitled Word"));
+        let stored = store.read_current(&out.artifact_id).await.unwrap();
+        assert_eq!(stored.rendered_extension, "docx");
+        assert!(stored.rendered_binary.len() > 4);
+        assert_eq!(&stored.rendered_binary[0..4], &[0x50, 0x4B, 0x03, 0x04]);
     }
 }
