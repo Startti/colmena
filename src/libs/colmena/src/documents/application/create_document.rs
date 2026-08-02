@@ -1,3 +1,4 @@
+use crate::documents::application::artifact_ops;
 use crate::documents::domain::artifact::{ArtifactMeta, PatchApplied, PatchSummary, VersionData};
 use crate::documents::domain::ids::{ArtifactId, ArtifactKind, SessionId, VersionId};
 use crate::documents::domain::patch::PatchSource;
@@ -61,7 +62,7 @@ impl CreateDocumentUseCase {
             obj.insert("version_id".into(), serde_json::json!("v1"));
         }
 
-        let (validator, renderer) = self.render_pair(input.kind);
+        let (validator, renderer) = artifact_ops::render_pair(input.kind, self);
         validator.validate(&ir)?;
         let bytes = renderer.render(&ir).await?;
 
@@ -100,16 +101,17 @@ impl CreateDocumentUseCase {
             meta,
         })
     }
+}
 
-    /// Returns the `(validator, renderer)` pair for `kind`, reading the same
-    /// named fields the pre-refactor per-kind match arm read directly. Same
-    /// shape as `ApplyPatchUseCase::render_pair`.
-    fn render_pair(&self, kind: ArtifactKind) -> (&Arc<dyn IRValidator>, &Arc<dyn IRRenderer>) {
-        match kind {
-            ArtifactKind::Excel => (&self.excel_validator, &self.excel_renderer),
-            ArtifactKind::Word => (&self.word_validator, &self.word_renderer),
-            ArtifactKind::Html => (&self.html_validator, &self.html_renderer),
-        }
+impl artifact_ops::ArtifactRenderers for CreateDocumentUseCase {
+    fn excel_pair(&self) -> (&Arc<dyn IRValidator>, &Arc<dyn IRRenderer>) {
+        (&self.excel_validator, &self.excel_renderer)
+    }
+    fn word_pair(&self) -> (&Arc<dyn IRValidator>, &Arc<dyn IRRenderer>) {
+        (&self.word_validator, &self.word_renderer)
+    }
+    fn html_pair(&self) -> (&Arc<dyn IRValidator>, &Arc<dyn IRRenderer>) {
+        (&self.html_validator, &self.html_renderer)
     }
 }
 

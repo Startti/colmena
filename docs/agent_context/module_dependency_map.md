@@ -807,13 +807,13 @@
 
 #### `src/libs/colmena/src/documents/application/artifact_ops.rs`
 - Module: `documents::application::artifact_ops`
-- **Used by (1)**: `src/libs/colmena/src/documents/application/apply_patch.rs`
+- **Used by (2)**: `src/libs/colmena/src/documents/application/apply_patch.rs`, `src/libs/colmena/src/documents/application/create_document.rs`
 - Depends on (9): `documents::application::apply_excel_ops`, `documents::application::apply_html_ops`, `documents::application::apply_word_ops`, `documents::domain`, `documents::domain::artifact`, `documents::domain::ids`, `documents::domain::ir`, `documents::domain::ir::html`, `documents::domain::patch`
 
 #### `src/libs/colmena/src/documents/application/create_document.rs`
 - Module: `documents::application::create_document`
 - **Used by (4)**: `src/libs/colmena/src/dag_engine/infrastructure/nodes/document_nodes.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/document_tools.rs`, `src/libs/colmena/src/documents/application/apply_patch.rs`, `src/libs/colmena/src/documents/application/runtime.rs`
-- Depends on (9): `documents::domain`, `documents::domain::artifact`, `documents::domain::ids`, `documents::domain::patch`, `documents::domain::ports`, `documents::infrastructure::ids`, `documents::infrastructure::render`, `documents::infrastructure::storage`, `documents::infrastructure::validation`
+- Depends on (10): `documents::application::artifact_ops`, `documents::domain`, `documents::domain::artifact`, `documents::domain::ids`, `documents::domain::patch`, `documents::domain::ports`, `documents::infrastructure::ids`, `documents::infrastructure::render`, `documents::infrastructure::storage`, `documents::infrastructure::validation`
 
 #### `src/libs/colmena/src/documents/application/delete_asset.rs`
 - Module: `documents::application::delete_asset`
