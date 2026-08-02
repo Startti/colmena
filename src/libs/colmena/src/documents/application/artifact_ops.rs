@@ -4,8 +4,9 @@
 //! Behavior-preserving refactor (code-audit finding #39): the op-application
 //! loop, version-bump, and per-kind IR-parse error wording are byte-identical
 //! to the pre-refactor inline per-kind match arms — only the duplication of
-//! that loop across the three `ArtifactKind` variants is removed. See
-//! `ArtifactOps` design (finding #39) for the full rationale.
+//! that loop across the three `ArtifactKind` variants is removed. See the
+//! `documents-artifact-dispatch-dedup` design (finding #39) for the full
+//! rationale.
 
 use crate::documents::application::apply_excel_ops::ExcelOpApplier;
 use crate::documents::application::apply_html_ops::HtmlOpApplier;
