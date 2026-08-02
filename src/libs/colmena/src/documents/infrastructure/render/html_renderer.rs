@@ -58,60 +58,63 @@ fn slide_has_chart(s: &Slide) -> bool {
     s.blocks.iter().any(block_is_or_contains_chart)
 }
 
-fn block_is_or_contains_chart(b: &Block) -> bool {
-    match b {
-        Block::Chart { .. } => true,
-        Block::TwoColumns { left, right, .. } => {
-            left.iter().any(block_is_or_contains_chart)
-                || right.iter().any(block_is_or_contains_chart)
+/// Generic pre-order visitor over a `Block` tree: calls `f` on every block,
+/// then recurses into `TwoColumns`/`ThreeColumns` children in
+/// left -> middle -> right order. All 3 recursive walkers below (chart
+/// detection, asset-id collection, chart-init collection) are built on top
+/// of this single traversal (finding #39, Stage 3) instead of each
+/// reimplementing the same `TwoColumns`/`ThreeColumns` descent.
+///
+/// The chart-detection walker loses its early-exit (it used to short-circuit
+/// via `.any()`); the leaf-level result is unchanged, only traversal cost
+/// for large trees with an early chart differs.
+fn walk_blocks<'b>(blocks: &'b [Block], f: &mut impl FnMut(&'b Block)) {
+    for b in blocks {
+        f(b);
+        match b {
+            Block::TwoColumns { left, right, .. } => {
+                walk_blocks(left, f);
+                walk_blocks(right, f);
+            }
+            Block::ThreeColumns {
+                left,
+                middle,
+                right,
+                ..
+            } => {
+                walk_blocks(left, f);
+                walk_blocks(middle, f);
+                walk_blocks(right, f);
+            }
+            _ => {}
         }
-        Block::ThreeColumns {
-            left,
-            middle,
-            right,
-            ..
-        } => {
-            left.iter().any(block_is_or_contains_chart)
-                || middle.iter().any(block_is_or_contains_chart)
-                || right.iter().any(block_is_or_contains_chart)
-        }
-        _ => false,
     }
 }
 
-fn collect_asset_ids(ir: &HtmlIR) -> Vec<AssetId> {
-    fn walk(blocks: &[Block], out: &mut Vec<AssetId>) {
-        for b in blocks {
-            match b {
-                Block::Image {
-                    src: ImageSrc::Asset { asset_id },
-                    ..
-                }
-                | Block::Video {
-                    src: VideoSrc::Asset { asset_id },
-                    ..
-                } => out.push(AssetId::new(asset_id.clone())),
-                Block::TwoColumns { left, right, .. } => {
-                    walk(left, out);
-                    walk(right, out);
-                }
-                Block::ThreeColumns {
-                    left,
-                    middle,
-                    right,
-                    ..
-                } => {
-                    walk(left, out);
-                    walk(middle, out);
-                    walk(right, out);
-                }
-                _ => {}
-            }
+fn block_is_or_contains_chart(b: &Block) -> bool {
+    let mut found = false;
+    walk_blocks(std::slice::from_ref(b), &mut |blk| {
+        if matches!(blk, Block::Chart { .. }) {
+            found = true;
         }
-    }
+    });
+    found
+}
+
+fn collect_asset_ids(ir: &HtmlIR) -> Vec<AssetId> {
     let mut out = vec![];
     for s in &ir.slides {
-        walk(&s.blocks, &mut out);
+        walk_blocks(&s.blocks, &mut |b| match b {
+            Block::Image {
+                src: ImageSrc::Asset { asset_id },
+                ..
+            }
+            | Block::Video {
+                src: VideoSrc::Asset { asset_id },
+                ..
+            } => out.push(AssetId::new(asset_id.clone())),
+            _ => {}
+        });
     }
     out
 }
@@ -528,28 +531,11 @@ fn render_chart_init_scripts(ir: &HtmlIR) -> String {
 }
 
 fn collect_chart_inits(blocks: &[Block], out: &mut Vec<String>) {
-    for b in blocks {
-        match b {
-            Block::Chart { id, chart, .. } => {
-                out.push(chart_init_for(id, chart));
-            }
-            Block::TwoColumns { left, right, .. } => {
-                collect_chart_inits(left, out);
-                collect_chart_inits(right, out);
-            }
-            Block::ThreeColumns {
-                left,
-                middle,
-                right,
-                ..
-            } => {
-                collect_chart_inits(left, out);
-                collect_chart_inits(middle, out);
-                collect_chart_inits(right, out);
-            }
-            _ => {}
+    walk_blocks(blocks, &mut |b| {
+        if let Block::Chart { id, chart, .. } = b {
+            out.push(chart_init_for(id, chart));
         }
-    }
+    });
 }
 
 fn chart_init_for(block_id: &str, c: &crate::documents::domain::ir::html::ChartSpec) -> String {
