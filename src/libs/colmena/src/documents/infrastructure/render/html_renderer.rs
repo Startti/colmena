@@ -795,6 +795,189 @@ mod tests {
         assert!(html.contains("chart_blk_c"), "wrong canvas id reference");
     }
 
+    // ---- Phase 0 parity net (finding #39, follow-up slice) ----
+    // Characterization tests pinning the exact leaf results (and descent
+    // ORDER) of the 3 recursive walkers across nested TwoColumns/
+    // ThreeColumns layouts, BEFORE the Stage 3 generic-walker extraction.
+    // Must pass unmodified against both pre- and post-extraction code.
+
+    use crate::documents::domain::ir::html::{
+        ChartSeries, ChartSize, ChartSpec, ChartType, ColumnRatio, DocProps, FooterConfig, Gap,
+        ImagePosition, SlideLayout,
+    };
+
+    fn divider(id: &str) -> Block {
+        Block::Divider { id: id.to_string() }
+    }
+
+    fn chart_block(id: &str) -> Block {
+        Block::Chart {
+            id: id.to_string(),
+            chart: ChartSpec {
+                chart_type: ChartType::Bar,
+                series: vec![ChartSeries {
+                    name: "S".into(),
+                    data: vec![1.0],
+                }],
+                x_axis: None,
+                y_axis: None,
+                legend: true,
+                palette: None,
+            },
+            title: None,
+            size: ChartSize::Medium,
+        }
+    }
+
+    fn image_asset(id: &str, asset_id: &str) -> Block {
+        Block::Image {
+            id: id.to_string(),
+            src: ImageSrc::Asset {
+                asset_id: asset_id.to_string(),
+            },
+            alt: "alt".to_string(),
+            caption: None,
+            position: ImagePosition::Inline,
+        }
+    }
+
+    fn video_asset(id: &str, asset_id: &str) -> Block {
+        Block::Video {
+            id: id.to_string(),
+            src: VideoSrc::Asset {
+                asset_id: asset_id.to_string(),
+            },
+            caption: None,
+        }
+    }
+
+    fn two_columns(id: &str, left: Vec<Block>, right: Vec<Block>) -> Block {
+        Block::TwoColumns {
+            id: id.to_string(),
+            left,
+            right,
+            ratio: ColumnRatio::FiftyFifty,
+            gap: Gap::Medium,
+        }
+    }
+
+    fn three_columns(id: &str, left: Vec<Block>, middle: Vec<Block>, right: Vec<Block>) -> Block {
+        Block::ThreeColumns {
+            id: id.to_string(),
+            left,
+            middle,
+            right,
+            gap: Gap::Medium,
+        }
+    }
+
+    fn ir_with_blocks(blocks: Vec<Block>) -> HtmlIR {
+        HtmlIR {
+            kind: "html".to_string(),
+            artifact_id: "art_x".to_string(),
+            version_id: "v1".to_string(),
+            schema_version: "1.0.0".to_string(),
+            doc_props: DocProps {
+                title: None,
+                author: None,
+                date: None,
+                locale: Locale::En,
+            },
+            theme: Theme::Executive,
+            layout_mode: LayoutMode::Report,
+            footer: FooterConfig {
+                enabled: false,
+                page_numbers: false,
+                custom_text: None,
+            },
+            slides: vec![Slide {
+                id: "sl_1".to_string(),
+                layout: SlideLayout::Blank,
+                title: None,
+                subtitle: None,
+                notes: None,
+                blocks,
+            }],
+            assets_referenced: vec![],
+        }
+    }
+
+    #[test]
+    fn chart_nested_in_two_columns_right_is_detected() {
+        let block = two_columns("tc", vec![divider("d1")], vec![chart_block("c1")]);
+        assert!(block_is_or_contains_chart(&block));
+    }
+
+    #[test]
+    fn chart_nested_in_three_columns_middle_is_detected() {
+        let block = three_columns(
+            "thc",
+            vec![divider("d1")],
+            vec![chart_block("c1")],
+            vec![divider("d2")],
+        );
+        assert!(block_is_or_contains_chart(&block));
+    }
+
+    #[test]
+    fn no_chart_anywhere_is_not_detected() {
+        let block = two_columns("tc", vec![divider("d1")], vec![divider("d2")]);
+        assert!(!block_is_or_contains_chart(&block));
+    }
+
+    #[test]
+    fn asset_ids_collected_in_descent_order_across_nested_columns() {
+        // sl_1.blocks = [top1, TwoColumns{left:[l1], right:[ThreeColumns{left:[rl1],
+        // middle:[rm1], right:[rr1]}]}, top2]
+        let nested_three = three_columns(
+            "thc",
+            vec![image_asset("il1", "a_rl1")],
+            vec![video_asset("im1", "a_rm1")],
+            vec![image_asset("ir1", "a_rr1")],
+        );
+        let ir = ir_with_blocks(vec![
+            image_asset("top1", "a_top1"),
+            two_columns("tc", vec![image_asset("l1", "a_l1")], vec![nested_three]),
+            image_asset("top2", "a_top2"),
+        ]);
+        let ids: Vec<String> = collect_asset_ids(&ir)
+            .into_iter()
+            .map(|a| a.as_str().to_string())
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["a_top1", "a_l1", "a_rl1", "a_rm1", "a_rr1", "a_top2"],
+            "expected pre-order left-then-middle-then-right descent"
+        );
+    }
+
+    #[test]
+    fn chart_inits_collected_in_descent_order_across_nested_columns() {
+        let nested_three = three_columns(
+            "thc",
+            vec![chart_block("c_l")],
+            vec![chart_block("c_m")],
+            vec![chart_block("c_r")],
+        );
+        let blocks = vec![
+            chart_block("c_top"),
+            two_columns("tc", vec![], vec![nested_three]),
+        ];
+        let mut out = vec![];
+        collect_chart_inits(&blocks, &mut out);
+        assert_eq!(out.len(), 4);
+        for (expected_pos, id) in ["c_top", "c_l", "c_m", "c_r"].iter().enumerate() {
+            let actual_pos = out
+                .iter()
+                .position(|s| s.contains(&format!("chart_{id}")))
+                .unwrap_or_else(|| panic!("missing init script for {id}"));
+            assert_eq!(
+                actual_pos, expected_pos,
+                "chart {id} not at expected descent position"
+            );
+        }
+    }
+
     #[test]
     fn auto_toc_depth_1_lists_section_dividers_only() {
         let mut ir = minimal_ir();

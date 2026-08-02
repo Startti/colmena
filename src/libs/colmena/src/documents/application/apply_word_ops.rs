@@ -498,4 +498,303 @@ mod tests {
         assert_eq!(out.assigned_ids.list_items, vec!["li_01"]);
         assert_eq!(out.assigned_ids.runs, vec!["run_01"]);
     }
+
+    // ---- Phase 0 parity net (finding #39, follow-up slice) ----
+    // Characterization tests pinning the exact `invalid(op, ...)` error text
+    // and the before/after -> positional-index resolution BEFORE the
+    // intra-kind helper extraction (Stage 2). Must pass unmodified against
+    // both pre- and post-extraction code.
+
+    fn table_ir_with_rows(row_ids: &[&str]) -> WordIR {
+        let mut ir = base_ir();
+        ir.document.blocks.push(Block::Table {
+            id: "tbl".into(),
+            rows: row_ids
+                .iter()
+                .map(|id| TableRow {
+                    id: (*id).to_string(),
+                    cells: vec![],
+                })
+                .collect(),
+        });
+        ir
+    }
+
+    // -- List/Table block type-guard rejections --
+
+    #[test]
+    fn insert_list_item_on_non_list_block_returns_not_a_list() {
+        let ids = CountingIdGenerator::default();
+        let applier = WordOpApplier { ids: &ids };
+        let mut ir = base_ir(); // "b1" is a Paragraph, not a List
+        let err = applier
+            .apply(
+                &mut ir,
+                &PatchOp::InsertListItem {
+                    list_block_id: "b1".into(),
+                    at_index: 0,
+                    runs: vec![serde_json::json!({"text": "item"})],
+                },
+            )
+            .unwrap_err();
+        match err {
+            DocumentError::InvalidPatchOp { reason, .. } => assert_eq!(reason, "not a list"),
+            other => panic!("expected InvalidPatchOp, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn delete_list_item_on_non_list_block_returns_not_a_list() {
+        let ids = CountingIdGenerator::default();
+        let applier = WordOpApplier { ids: &ids };
+        let mut ir = base_ir();
+        let err = applier
+            .apply(
+                &mut ir,
+                &PatchOp::DeleteListItem {
+                    list_block_id: "b1".into(),
+                    item_id: "li_1".into(),
+                },
+            )
+            .unwrap_err();
+        match err {
+            DocumentError::InvalidPatchOp { reason, .. } => assert_eq!(reason, "not a list"),
+            other => panic!("expected InvalidPatchOp, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn insert_table_row_on_non_table_block_returns_not_a_table() {
+        let ids = CountingIdGenerator::default();
+        let applier = WordOpApplier { ids: &ids };
+        let mut ir = base_ir(); // "b1" is a Paragraph, not a Table
+        let err = applier
+            .apply(
+                &mut ir,
+                &PatchOp::InsertTableRow {
+                    table_block_id: "b1".into(),
+                    before: None,
+                    after: None,
+                    cells: vec![],
+                },
+            )
+            .unwrap_err();
+        match err {
+            DocumentError::InvalidPatchOp { reason, .. } => assert_eq!(reason, "not a table"),
+            other => panic!("expected InvalidPatchOp, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn update_table_cell_on_non_table_block_returns_not_a_table() {
+        let ids = CountingIdGenerator::default();
+        let applier = WordOpApplier { ids: &ids };
+        let mut ir = base_ir();
+        let err = applier
+            .apply(
+                &mut ir,
+                &PatchOp::UpdateTableCell {
+                    table_block_id: "b1".into(),
+                    row_id: "r1".into(),
+                    col_index: 0,
+                    runs: vec![],
+                },
+            )
+            .unwrap_err();
+        match err {
+            DocumentError::InvalidPatchOp { reason, .. } => assert_eq!(reason, "not a table"),
+            other => panic!("expected InvalidPatchOp, got {other:?}"),
+        }
+    }
+
+    // -- before/after -> positional-index resolution: InsertBlock --
+
+    #[test]
+    fn insert_block_before_target_positions_new_block_at_target_index() {
+        let ids = CountingIdGenerator::default();
+        let applier = WordOpApplier { ids: &ids };
+        let mut ir = base_ir(); // single block "b1"
+        applier
+            .apply(
+                &mut ir,
+                &PatchOp::InsertBlock {
+                    before: Some("b1".into()),
+                    after: None,
+                    block: serde_json::json!({"type": "paragraph", "runs": [{"text": "new"}]}),
+                },
+            )
+            .unwrap();
+        assert_eq!(ir.document.blocks.len(), 2);
+        assert!(ir.document.blocks[0].id().starts_with("blk_"));
+        assert_eq!(ir.document.blocks[1].id(), "b1");
+    }
+
+    #[test]
+    fn insert_block_after_target_positions_new_block_right_after() {
+        let ids = CountingIdGenerator::default();
+        let applier = WordOpApplier { ids: &ids };
+        let mut ir = base_ir();
+        applier
+            .apply(
+                &mut ir,
+                &PatchOp::InsertBlock {
+                    before: None,
+                    after: Some("b1".into()),
+                    block: serde_json::json!({"type": "paragraph", "runs": [{"text": "new"}]}),
+                },
+            )
+            .unwrap();
+        assert_eq!(ir.document.blocks.len(), 2);
+        assert_eq!(ir.document.blocks[0].id(), "b1");
+        assert!(ir.document.blocks[1].id().starts_with("blk_"));
+    }
+
+    #[test]
+    fn insert_block_default_appends_at_document_end() {
+        let ids = CountingIdGenerator::default();
+        let applier = WordOpApplier { ids: &ids };
+        let mut ir = base_ir();
+        ir.document.blocks.push(Block::Paragraph {
+            id: "b2".into(),
+            runs: vec![],
+        });
+        applier
+            .apply(
+                &mut ir,
+                &PatchOp::InsertBlock {
+                    before: None,
+                    after: None,
+                    block: serde_json::json!({"type": "paragraph", "runs": [{"text": "new"}]}),
+                },
+            )
+            .unwrap();
+        assert_eq!(ir.document.blocks.len(), 3);
+        assert_eq!(ir.document.blocks[0].id(), "b1");
+        assert_eq!(ir.document.blocks[1].id(), "b2");
+        assert!(ir.document.blocks[2].id().starts_with("blk_"));
+    }
+
+    #[test]
+    fn insert_block_before_missing_target_returns_exact_reason() {
+        let ids = CountingIdGenerator::default();
+        let applier = WordOpApplier { ids: &ids };
+        let mut ir = base_ir();
+        let err = applier
+            .apply(
+                &mut ir,
+                &PatchOp::InsertBlock {
+                    before: Some("missing".into()),
+                    after: None,
+                    block: serde_json::json!({"type": "paragraph", "runs": []}),
+                },
+            )
+            .unwrap_err();
+        match err {
+            DocumentError::InvalidPatchOp { reason, .. } => {
+                assert_eq!(reason, "before block not found")
+            }
+            other => panic!("expected InvalidPatchOp, got {other:?}"),
+        }
+    }
+
+    // -- before/after -> positional-index resolution: InsertTableRow --
+
+    #[test]
+    fn insert_table_row_before_target_positions_row_at_target_index() {
+        let ids = CountingIdGenerator::default();
+        let applier = WordOpApplier { ids: &ids };
+        let mut ir = table_ir_with_rows(&["r1", "r2"]);
+        applier
+            .apply(
+                &mut ir,
+                &PatchOp::InsertTableRow {
+                    table_block_id: "tbl".into(),
+                    before: Some("r2".into()),
+                    after: None,
+                    cells: vec![],
+                },
+            )
+            .unwrap();
+        let Block::Table { rows, .. } = &ir.document.blocks[1] else {
+            panic!("expected table block");
+        };
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].id, "r1");
+        assert!(rows[1].id.starts_with("row_"));
+        assert_eq!(rows[2].id, "r2");
+    }
+
+    #[test]
+    fn insert_table_row_after_target_positions_row_right_after() {
+        let ids = CountingIdGenerator::default();
+        let applier = WordOpApplier { ids: &ids };
+        let mut ir = table_ir_with_rows(&["r1", "r2"]);
+        applier
+            .apply(
+                &mut ir,
+                &PatchOp::InsertTableRow {
+                    table_block_id: "tbl".into(),
+                    before: None,
+                    after: Some("r1".into()),
+                    cells: vec![],
+                },
+            )
+            .unwrap();
+        let Block::Table { rows, .. } = &ir.document.blocks[1] else {
+            panic!("expected table block");
+        };
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].id, "r1");
+        assert!(rows[1].id.starts_with("row_"));
+        assert_eq!(rows[2].id, "r2");
+    }
+
+    #[test]
+    fn insert_table_row_default_appends_at_table_end() {
+        let ids = CountingIdGenerator::default();
+        let applier = WordOpApplier { ids: &ids };
+        let mut ir = table_ir_with_rows(&["r1", "r2"]);
+        applier
+            .apply(
+                &mut ir,
+                &PatchOp::InsertTableRow {
+                    table_block_id: "tbl".into(),
+                    before: None,
+                    after: None,
+                    cells: vec![],
+                },
+            )
+            .unwrap();
+        let Block::Table { rows, .. } = &ir.document.blocks[1] else {
+            panic!("expected table block");
+        };
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].id, "r1");
+        assert_eq!(rows[1].id, "r2");
+        assert!(rows[2].id.starts_with("row_"));
+    }
+
+    #[test]
+    fn insert_table_row_after_missing_target_returns_exact_reason() {
+        let ids = CountingIdGenerator::default();
+        let applier = WordOpApplier { ids: &ids };
+        let mut ir = table_ir_with_rows(&["r1"]);
+        let err = applier
+            .apply(
+                &mut ir,
+                &PatchOp::InsertTableRow {
+                    table_block_id: "tbl".into(),
+                    before: None,
+                    after: Some("missing".into()),
+                    cells: vec![],
+                },
+            )
+            .unwrap_err();
+        match err {
+            DocumentError::InvalidPatchOp { reason, .. } => {
+                assert_eq!(reason, "after row not found")
+            }
+            other => panic!("expected InvalidPatchOp, got {other:?}"),
+        }
+    }
 }
