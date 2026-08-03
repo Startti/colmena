@@ -372,6 +372,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn read_current_returns_written_blobs() {
+        let tmp = tempdir().unwrap();
+        let s = LocalFsStore::new(tmp.path());
+        let id = ArtifactId::new("art_01");
+        let meta = ArtifactMeta::initial(
+            id.clone(),
+            ArtifactKind::Excel,
+            SessionId::new("s"),
+            "t".into(),
+            5,
+        );
+        s.create_artifact(&meta).await.unwrap();
+        let bytes_a = vec![10u8, 20, 30];
+        let bytes_b = vec![0u8, 255, 128, 64];
+        let mut data = sample_version_data();
+        data.blobs = vec![
+            ("a.bin".to_string(), bytes_a.clone()),
+            ("b.png".to_string(), bytes_b.clone()),
+        ];
+        s.write_version(&id, &VersionId::initial(), &data)
+            .await
+            .unwrap();
+        s.set_head(&id, None, &VersionId::initial()).await.unwrap();
+
+        let current = s.read_current(&id).await.unwrap();
+
+        let mut expected: Vec<(String, Vec<u8>)> = vec![
+            ("a.bin".to_string(), bytes_a),
+            ("b.png".to_string(), bytes_b),
+        ];
+        expected.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut actual = current.blobs.clone();
+        actual.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(actual, expected);
+    }
+
+    #[tokio::test]
     async fn read_version_empty_blobs_stays_empty() {
         let tmp = tempdir().unwrap();
         let s = LocalFsStore::new(tmp.path());
