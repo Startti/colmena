@@ -1,6 +1,6 @@
-use crate::documents::application::artifact_ops::apply_ops_for_kind;
+use crate::documents::application::artifact_ops::{self, apply_ops_for_kind};
 use crate::documents::domain::artifact::{PatchApplied, PatchSummary, VersionData};
-use crate::documents::domain::ids::{ArtifactId, ArtifactKind, VersionId};
+use crate::documents::domain::ids::{ArtifactId, VersionId};
 use crate::documents::domain::patch::Patch;
 use crate::documents::domain::{
     ArtifactStore, DocumentError, IRRenderer, IRValidator, IdGenerator,
@@ -55,7 +55,7 @@ impl ApplyPatchUseCase {
             self.ids.as_ref(),
         )?;
 
-        let (validator, renderer) = self.render_pair(meta.kind);
+        let (validator, renderer) = artifact_ops::render_pair(meta.kind, self);
         validator.validate(&ir_value)?;
         let rendered = renderer.render(&ir_value).await?;
 
@@ -90,15 +90,17 @@ impl ApplyPatchUseCase {
             summary,
         })
     }
+}
 
-    /// Returns the `(validator, renderer)` pair for `kind`, reading the same
-    /// named fields the pre-refactor per-kind match arms read directly.
-    fn render_pair(&self, kind: ArtifactKind) -> (&Arc<dyn IRValidator>, &Arc<dyn IRRenderer>) {
-        match kind {
-            ArtifactKind::Excel => (&self.excel_validator, &self.excel_renderer),
-            ArtifactKind::Word => (&self.word_validator, &self.word_renderer),
-            ArtifactKind::Html => (&self.html_validator, &self.html_renderer),
-        }
+impl artifact_ops::ArtifactRenderers for ApplyPatchUseCase {
+    fn excel_pair(&self) -> (&Arc<dyn IRValidator>, &Arc<dyn IRRenderer>) {
+        (&self.excel_validator, &self.excel_renderer)
+    }
+    fn word_pair(&self) -> (&Arc<dyn IRValidator>, &Arc<dyn IRRenderer>) {
+        (&self.word_validator, &self.word_renderer)
+    }
+    fn html_pair(&self) -> (&Arc<dyn IRValidator>, &Arc<dyn IRRenderer>) {
+        (&self.html_validator, &self.html_renderer)
     }
 }
 
@@ -109,7 +111,7 @@ mod tests {
     use crate::documents::application::create_document::{
         CreateDocumentInput, CreateDocumentUseCase,
     };
-    use crate::documents::domain::ids::SessionId;
+    use crate::documents::domain::ids::{ArtifactKind, SessionId};
     use crate::documents::domain::patch::{PatchOp, PatchSource};
     use crate::documents::infrastructure::ids::CountingIdGenerator;
     use crate::documents::infrastructure::render::ExcelRenderer;

@@ -58,60 +58,63 @@ fn slide_has_chart(s: &Slide) -> bool {
     s.blocks.iter().any(block_is_or_contains_chart)
 }
 
-fn block_is_or_contains_chart(b: &Block) -> bool {
-    match b {
-        Block::Chart { .. } => true,
-        Block::TwoColumns { left, right, .. } => {
-            left.iter().any(block_is_or_contains_chart)
-                || right.iter().any(block_is_or_contains_chart)
+/// Generic pre-order visitor over a `Block` tree: calls `f` on every block,
+/// then recurses into `TwoColumns`/`ThreeColumns` children in
+/// left -> middle -> right order. All 3 recursive walkers below (chart
+/// detection, asset-id collection, chart-init collection) are built on top
+/// of this single traversal (finding #39, Stage 3) instead of each
+/// reimplementing the same `TwoColumns`/`ThreeColumns` descent.
+///
+/// The chart-detection walker loses its early-exit (it used to short-circuit
+/// via `.any()`); the leaf-level result is unchanged, only traversal cost
+/// for large trees with an early chart differs.
+fn walk_blocks<'b>(blocks: &'b [Block], f: &mut impl FnMut(&'b Block)) {
+    for b in blocks {
+        f(b);
+        match b {
+            Block::TwoColumns { left, right, .. } => {
+                walk_blocks(left, f);
+                walk_blocks(right, f);
+            }
+            Block::ThreeColumns {
+                left,
+                middle,
+                right,
+                ..
+            } => {
+                walk_blocks(left, f);
+                walk_blocks(middle, f);
+                walk_blocks(right, f);
+            }
+            _ => {}
         }
-        Block::ThreeColumns {
-            left,
-            middle,
-            right,
-            ..
-        } => {
-            left.iter().any(block_is_or_contains_chart)
-                || middle.iter().any(block_is_or_contains_chart)
-                || right.iter().any(block_is_or_contains_chart)
-        }
-        _ => false,
     }
 }
 
-fn collect_asset_ids(ir: &HtmlIR) -> Vec<AssetId> {
-    fn walk(blocks: &[Block], out: &mut Vec<AssetId>) {
-        for b in blocks {
-            match b {
-                Block::Image {
-                    src: ImageSrc::Asset { asset_id },
-                    ..
-                }
-                | Block::Video {
-                    src: VideoSrc::Asset { asset_id },
-                    ..
-                } => out.push(AssetId::new(asset_id.clone())),
-                Block::TwoColumns { left, right, .. } => {
-                    walk(left, out);
-                    walk(right, out);
-                }
-                Block::ThreeColumns {
-                    left,
-                    middle,
-                    right,
-                    ..
-                } => {
-                    walk(left, out);
-                    walk(middle, out);
-                    walk(right, out);
-                }
-                _ => {}
-            }
+fn block_is_or_contains_chart(b: &Block) -> bool {
+    let mut found = false;
+    walk_blocks(std::slice::from_ref(b), &mut |blk| {
+        if matches!(blk, Block::Chart { .. }) {
+            found = true;
         }
-    }
+    });
+    found
+}
+
+fn collect_asset_ids(ir: &HtmlIR) -> Vec<AssetId> {
     let mut out = vec![];
     for s in &ir.slides {
-        walk(&s.blocks, &mut out);
+        walk_blocks(&s.blocks, &mut |b| match b {
+            Block::Image {
+                src: ImageSrc::Asset { asset_id },
+                ..
+            }
+            | Block::Video {
+                src: VideoSrc::Asset { asset_id },
+                ..
+            } => out.push(AssetId::new(asset_id.clone())),
+            _ => {}
+        });
     }
     out
 }
@@ -528,28 +531,11 @@ fn render_chart_init_scripts(ir: &HtmlIR) -> String {
 }
 
 fn collect_chart_inits(blocks: &[Block], out: &mut Vec<String>) {
-    for b in blocks {
-        match b {
-            Block::Chart { id, chart, .. } => {
-                out.push(chart_init_for(id, chart));
-            }
-            Block::TwoColumns { left, right, .. } => {
-                collect_chart_inits(left, out);
-                collect_chart_inits(right, out);
-            }
-            Block::ThreeColumns {
-                left,
-                middle,
-                right,
-                ..
-            } => {
-                collect_chart_inits(left, out);
-                collect_chart_inits(middle, out);
-                collect_chart_inits(right, out);
-            }
-            _ => {}
+    walk_blocks(blocks, &mut |b| {
+        if let Block::Chart { id, chart, .. } = b {
+            out.push(chart_init_for(id, chart));
         }
-    }
+    });
 }
 
 fn chart_init_for(block_id: &str, c: &crate::documents::domain::ir::html::ChartSpec) -> String {
@@ -793,6 +779,189 @@ mod tests {
         assert!(html.contains("new Chart"), "no Chart init: {html}");
         assert!(html.contains(r#"type: "bar""#), "wrong chart type");
         assert!(html.contains("chart_blk_c"), "wrong canvas id reference");
+    }
+
+    // ---- Phase 0 parity net (finding #39, follow-up slice) ----
+    // Characterization tests pinning the exact leaf results (and descent
+    // ORDER) of the 3 recursive walkers across nested TwoColumns/
+    // ThreeColumns layouts, BEFORE the Stage 3 generic-walker extraction.
+    // Must pass unmodified against both pre- and post-extraction code.
+
+    use crate::documents::domain::ir::html::{
+        ChartSeries, ChartSize, ChartSpec, ChartType, ColumnRatio, DocProps, FooterConfig, Gap,
+        ImagePosition, SlideLayout,
+    };
+
+    fn divider(id: &str) -> Block {
+        Block::Divider { id: id.to_string() }
+    }
+
+    fn chart_block(id: &str) -> Block {
+        Block::Chart {
+            id: id.to_string(),
+            chart: ChartSpec {
+                chart_type: ChartType::Bar,
+                series: vec![ChartSeries {
+                    name: "S".into(),
+                    data: vec![1.0],
+                }],
+                x_axis: None,
+                y_axis: None,
+                legend: true,
+                palette: None,
+            },
+            title: None,
+            size: ChartSize::Medium,
+        }
+    }
+
+    fn image_asset(id: &str, asset_id: &str) -> Block {
+        Block::Image {
+            id: id.to_string(),
+            src: ImageSrc::Asset {
+                asset_id: asset_id.to_string(),
+            },
+            alt: "alt".to_string(),
+            caption: None,
+            position: ImagePosition::Inline,
+        }
+    }
+
+    fn video_asset(id: &str, asset_id: &str) -> Block {
+        Block::Video {
+            id: id.to_string(),
+            src: VideoSrc::Asset {
+                asset_id: asset_id.to_string(),
+            },
+            caption: None,
+        }
+    }
+
+    fn two_columns(id: &str, left: Vec<Block>, right: Vec<Block>) -> Block {
+        Block::TwoColumns {
+            id: id.to_string(),
+            left,
+            right,
+            ratio: ColumnRatio::FiftyFifty,
+            gap: Gap::Medium,
+        }
+    }
+
+    fn three_columns(id: &str, left: Vec<Block>, middle: Vec<Block>, right: Vec<Block>) -> Block {
+        Block::ThreeColumns {
+            id: id.to_string(),
+            left,
+            middle,
+            right,
+            gap: Gap::Medium,
+        }
+    }
+
+    fn ir_with_blocks(blocks: Vec<Block>) -> HtmlIR {
+        HtmlIR {
+            kind: "html".to_string(),
+            artifact_id: "art_x".to_string(),
+            version_id: "v1".to_string(),
+            schema_version: "1.0.0".to_string(),
+            doc_props: DocProps {
+                title: None,
+                author: None,
+                date: None,
+                locale: Locale::En,
+            },
+            theme: Theme::Executive,
+            layout_mode: LayoutMode::Report,
+            footer: FooterConfig {
+                enabled: false,
+                page_numbers: false,
+                custom_text: None,
+            },
+            slides: vec![Slide {
+                id: "sl_1".to_string(),
+                layout: SlideLayout::Blank,
+                title: None,
+                subtitle: None,
+                notes: None,
+                blocks,
+            }],
+            assets_referenced: vec![],
+        }
+    }
+
+    #[test]
+    fn chart_nested_in_two_columns_right_is_detected() {
+        let block = two_columns("tc", vec![divider("d1")], vec![chart_block("c1")]);
+        assert!(block_is_or_contains_chart(&block));
+    }
+
+    #[test]
+    fn chart_nested_in_three_columns_middle_is_detected() {
+        let block = three_columns(
+            "thc",
+            vec![divider("d1")],
+            vec![chart_block("c1")],
+            vec![divider("d2")],
+        );
+        assert!(block_is_or_contains_chart(&block));
+    }
+
+    #[test]
+    fn no_chart_anywhere_is_not_detected() {
+        let block = two_columns("tc", vec![divider("d1")], vec![divider("d2")]);
+        assert!(!block_is_or_contains_chart(&block));
+    }
+
+    #[test]
+    fn asset_ids_collected_in_descent_order_across_nested_columns() {
+        // sl_1.blocks = [top1, TwoColumns{left:[l1], right:[ThreeColumns{left:[rl1],
+        // middle:[rm1], right:[rr1]}]}, top2]
+        let nested_three = three_columns(
+            "thc",
+            vec![image_asset("il1", "a_rl1")],
+            vec![video_asset("im1", "a_rm1")],
+            vec![image_asset("ir1", "a_rr1")],
+        );
+        let ir = ir_with_blocks(vec![
+            image_asset("top1", "a_top1"),
+            two_columns("tc", vec![image_asset("l1", "a_l1")], vec![nested_three]),
+            image_asset("top2", "a_top2"),
+        ]);
+        let ids: Vec<String> = collect_asset_ids(&ir)
+            .into_iter()
+            .map(|a| a.as_str().to_string())
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["a_top1", "a_l1", "a_rl1", "a_rm1", "a_rr1", "a_top2"],
+            "expected pre-order left-then-middle-then-right descent"
+        );
+    }
+
+    #[test]
+    fn chart_inits_collected_in_descent_order_across_nested_columns() {
+        let nested_three = three_columns(
+            "thc",
+            vec![chart_block("c_l")],
+            vec![chart_block("c_m")],
+            vec![chart_block("c_r")],
+        );
+        let blocks = vec![
+            chart_block("c_top"),
+            two_columns("tc", vec![], vec![nested_three]),
+        ];
+        let mut out = vec![];
+        collect_chart_inits(&blocks, &mut out);
+        assert_eq!(out.len(), 4);
+        for (expected_pos, id) in ["c_top", "c_l", "c_m", "c_r"].iter().enumerate() {
+            let actual_pos = out
+                .iter()
+                .position(|s| s.contains(&format!("chart_{id}")))
+                .unwrap_or_else(|| panic!("missing init script for {id}"));
+            assert_eq!(
+                actual_pos, expected_pos,
+                "chart {id} not at expected descent position"
+            );
+        }
     }
 
     #[test]

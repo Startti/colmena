@@ -16,9 +16,10 @@ use crate::documents::domain::ids::ArtifactKind;
 use crate::documents::domain::ir::html::HtmlIR;
 use crate::documents::domain::ir::{ExcelIR, WordIR};
 use crate::documents::domain::patch::PatchOp;
-use crate::documents::domain::{DocumentError, IdGenerator};
+use crate::documents::domain::{DocumentError, IRRenderer, IRValidator, IdGenerator};
 use serde::Serialize;
 use serde_json::Value;
+use std::sync::Arc;
 
 /// Per-`ArtifactKind` behavior needed by the generic op-application loop in
 /// [`run_ops`]. Each impl wraps one of the existing `*OpApplier` structs
@@ -141,6 +142,36 @@ pub(crate) fn apply_ops_for_kind(
         ArtifactKind::Excel => run_ops(&ExcelOpApplier { ids }, current_ir, ops, new_version),
         ArtifactKind::Word => run_ops(&WordOpApplier { ids }, current_ir, ops, new_version),
         ArtifactKind::Html => run_ops(&HtmlOpApplier { ids }, current_ir, ops, new_version),
+    }
+}
+
+/// Implemented by any use case that owns the 6 named `Arc<dyn ...>`
+/// validator/renderer fields for Excel/Word/Html (`ApplyPatchUseCase`,
+/// `CreateDocumentUseCase`), letting [`render_pair`] dispatch on
+/// `ArtifactKind` from a single shared match instead of each use case
+/// duplicating that match as a private method (finding #39, Part D — hoist
+/// of the design's intended shared `render_pair` helper). Implementers
+/// only provide trivial field accessors; the field names themselves stay
+/// unchanged on each struct (invariant: no public API change).
+pub(crate) trait ArtifactRenderers {
+    fn excel_pair(&self) -> (&Arc<dyn IRValidator>, &Arc<dyn IRRenderer>);
+    fn word_pair(&self) -> (&Arc<dyn IRValidator>, &Arc<dyn IRRenderer>);
+    fn html_pair(&self) -> (&Arc<dyn IRValidator>, &Arc<dyn IRRenderer>);
+}
+
+/// Returns the `(validator, renderer)` pair for `kind`, reading whichever
+/// concrete fields `renderers` maps to Excel/Word/Html. This is the single
+/// per-`ArtifactKind` render-pair match in the whole module — both
+/// `ApplyPatchUseCase` and `CreateDocumentUseCase` call this instead of
+/// each holding a byte-identical private `render_pair` method.
+pub(crate) fn render_pair<T: ArtifactRenderers>(
+    kind: ArtifactKind,
+    renderers: &T,
+) -> (&Arc<dyn IRValidator>, &Arc<dyn IRRenderer>) {
+    match kind {
+        ArtifactKind::Excel => renderers.excel_pair(),
+        ArtifactKind::Word => renderers.word_pair(),
+        ArtifactKind::Html => renderers.html_pair(),
     }
 }
 
