@@ -47,6 +47,43 @@ impl LocalFsStore {
             .map_err(|e| StorageError::Backend(format!("rename: {e}")))?;
         Ok(())
     }
+
+    /// Reads all blob files under `vdir/blobs/`. A missing `blobs/` directory
+    /// is not an error — it means the version was written with no blobs.
+    /// Non-file entries are skipped. Bytes are read binary-safe (no UTF-8
+    /// coercion). Results are sorted by name for deterministic read order.
+    async fn read_blobs(vdir: &Path) -> Result<Vec<(String, Vec<u8>)>, StorageError> {
+        let blobs_dir = vdir.join("blobs");
+        if !blobs_dir.exists() {
+            return Ok(Vec::new());
+        }
+        let mut rd = fs::read_dir(&blobs_dir)
+            .await
+            .map_err(|e| StorageError::Backend(format!("readdir blobs: {e}")))?;
+        let mut out = Vec::new();
+        while let Some(entry) = rd
+            .next_entry()
+            .await
+            .map_err(|e| StorageError::Backend(format!("readdir blobs entry: {e}")))?
+        {
+            let file_type = entry
+                .file_type()
+                .await
+                .map_err(|e| StorageError::Backend(format!("blob file_type: {e}")))?;
+            if !file_type.is_file() {
+                continue;
+            }
+            let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+                continue;
+            };
+            let bytes = fs::read(entry.path())
+                .await
+                .map_err(|e| StorageError::Backend(format!("read blob {name}: {e}")))?;
+            out.push((name, bytes));
+        }
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(out)
+    }
 }
 
 #[async_trait]
@@ -118,6 +155,8 @@ impl ArtifactStore for LocalFsStore {
         let patch_applied: PatchApplied = serde_json::from_slice(&pa_bytes)
             .map_err(|e| StorageError::Backend(format!("parse patch: {e}")))?;
 
+        let blobs = Self::read_blobs(&vdir).await?;
+
         Ok(VersionData {
             ir,
             rendered_binary: render,
@@ -127,7 +166,7 @@ impl ArtifactStore for LocalFsStore {
                 crate::documents::domain::ArtifactKind::Html => "html",
             },
             patch_applied,
-            blobs: Vec::new(),
+            blobs,
         })
     }
 
