@@ -361,8 +361,10 @@ mod tests {
 
         let read = s.read_version(&id, &VersionId::initial()).await.unwrap();
 
-        let mut expected: Vec<(String, Vec<u8>)> =
-            vec![("a.bin".to_string(), bytes_a), ("b.png".to_string(), bytes_b)];
+        let mut expected: Vec<(String, Vec<u8>)> = vec![
+            ("a.bin".to_string(), bytes_a),
+            ("b.png".to_string(), bytes_b),
+        ];
         expected.sort_by(|a, b| a.0.cmp(&b.0));
         let mut actual = read.blobs.clone();
         actual.sort_by(|a, b| a.0.cmp(&b.0));
