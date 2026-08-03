@@ -297,6 +297,104 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn read_version_returns_written_blobs() {
+        let tmp = tempdir().unwrap();
+        let s = LocalFsStore::new(tmp.path());
+        let id = ArtifactId::new("art_01");
+        let meta = ArtifactMeta::initial(
+            id.clone(),
+            ArtifactKind::Excel,
+            SessionId::new("s"),
+            "t".into(),
+            5,
+        );
+        s.create_artifact(&meta).await.unwrap();
+        let bytes_a = vec![10u8, 20, 30];
+        let bytes_b = vec![0u8, 255, 128, 64];
+        let mut data = sample_version_data();
+        data.blobs = vec![
+            ("a.bin".to_string(), bytes_a.clone()),
+            ("b.png".to_string(), bytes_b.clone()),
+        ];
+        s.write_version(&id, &VersionId::initial(), &data)
+            .await
+            .unwrap();
+
+        let read = s.read_version(&id, &VersionId::initial()).await.unwrap();
+
+        let mut expected: Vec<(String, Vec<u8>)> =
+            vec![("a.bin".to_string(), bytes_a), ("b.png".to_string(), bytes_b)];
+        expected.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut actual = read.blobs.clone();
+        actual.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(actual, expected);
+    }
+
+    #[tokio::test]
+    async fn read_version_empty_blobs_stays_empty() {
+        let tmp = tempdir().unwrap();
+        let s = LocalFsStore::new(tmp.path());
+        let id = ArtifactId::new("art_01");
+        let meta = ArtifactMeta::initial(
+            id.clone(),
+            ArtifactKind::Excel,
+            SessionId::new("s"),
+            "t".into(),
+            5,
+        );
+        s.create_artifact(&meta).await.unwrap();
+        let data = sample_version_data();
+        assert!(data.blobs.is_empty());
+        s.write_version(&id, &VersionId::initial(), &data)
+            .await
+            .unwrap();
+
+        let read = s.read_version(&id, &VersionId::initial()).await.unwrap();
+        assert_eq!(read.blobs, Vec::<(String, Vec<u8>)>::new());
+    }
+
+    #[tokio::test]
+    async fn read_version_non_blob_fields_unchanged() {
+        let tmp = tempdir().unwrap();
+        let s = LocalFsStore::new(tmp.path());
+        let id = ArtifactId::new("art_01");
+        let meta = ArtifactMeta::initial(
+            id.clone(),
+            ArtifactKind::Excel,
+            SessionId::new("s"),
+            "t".into(),
+            5,
+        );
+        s.create_artifact(&meta).await.unwrap();
+        let mut data = sample_version_data();
+        data.ir = serde_json::json!({"kind": "excel", "sheets": ["Sheet1"]});
+        data.rendered_binary = vec![9, 8, 7, 6];
+        data.patch_applied.summary = PatchSummary {
+            natural_language: vec!["Updated 3 cells".to_string()],
+            structured: vec![serde_json::json!({"op": "set_cell"})],
+        };
+        data.blobs = vec![("a.bin".to_string(), vec![1, 2, 3])];
+
+        s.write_version(&id, &VersionId::initial(), &data)
+            .await
+            .unwrap();
+        let read = s.read_version(&id, &VersionId::initial()).await.unwrap();
+
+        assert_eq!(read.ir, data.ir);
+        assert_eq!(read.rendered_binary, data.rendered_binary);
+        assert_eq!(read.rendered_extension, data.rendered_extension);
+        assert_eq!(
+            read.patch_applied.summary.natural_language,
+            data.patch_applied.summary.natural_language
+        );
+        assert_eq!(
+            read.patch_applied.summary.structured,
+            data.patch_applied.summary.structured
+        );
+        assert_eq!(read.patch_applied.patch, data.patch_applied.patch);
+    }
+
+    #[tokio::test]
     async fn list_versions_sorted() {
         let tmp = tempdir().unwrap();
         let s = LocalFsStore::new(tmp.path());
