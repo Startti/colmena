@@ -18,8 +18,11 @@
 //!
 //! `blobs.json` lists the blob names persisted for a version so
 //! `read_version` can reconstruct them without a list-objects HTTP call
-//! (not exposed by this adapter — see module doc above). Only written when
-//! a version has at least one blob.
+//! (not exposed by this adapter — see module doc above). Always written by
+//! `write_version` (including `{ "names": [] }` for a version with no
+//! blobs), so the index is authoritative for the latest write and
+//! `read_version` never returns stale blobs left over from a prior write to
+//! the same version.
 //!
 //! ## CAS for `set_head`
 //! HEAD is written with `set_if_generation_match`. First-time write uses
@@ -262,11 +265,14 @@ impl GcsArtifactStore {
     // ── blob index helpers ─────────────────────────────────────────────────────
 
     /// Reads all blobs for a version via the persisted blob-index manifest.
-    /// A missing index (NotFound) means the version was written with no
-    /// blobs and returns an empty vec, not an error. A blob named in the
-    /// index but missing on read is an integrity error and propagates.
-    /// Results are sorted by name for deterministic order (mirrors
-    /// local_fs_store).
+    /// `write_version` always writes the index (including the empty case),
+    /// so a present index is authoritative for the latest write: an empty
+    /// `names` list means no blobs, a populated one means exactly those
+    /// names. A missing index (NotFound) is tolerated for versions written
+    /// before this index existed and also returns an empty vec, not an
+    /// error. A blob named in the index but missing on read is an integrity
+    /// error and propagates. Results are sorted by name for deterministic
+    /// order (mirrors local_fs_store).
     async fn read_blobs(
         &self,
         id: &ArtifactId,
@@ -349,19 +355,22 @@ impl ArtifactStore for GcsArtifactStore {
             .await?;
         }
 
-        if !data.blobs.is_empty() {
-            let index = BlobIndex {
-                names: data.blobs.iter().map(|(name, _)| name.clone()).collect(),
-            };
-            let index_bytes = serde_json::to_vec(&index)
-                .map_err(|e| StorageError::Backend(format!("ser blob index: {e}")))?;
-            self.write(
-                &self.blobs_index_key(id, version),
-                &index_bytes,
-                "application/json",
-            )
-            .await?;
-        }
+        // Always persist the index — including the empty case — so it is
+        // authoritative for the latest write and read_version never returns
+        // stale blobs left over from a prior write to this (id, version).
+        // Stale blob OBJECTS from a prior write become unreferenced by the
+        // index and are reclaimed by GCS lifecycle rules (see module doc).
+        let index = BlobIndex {
+            names: data.blobs.iter().map(|(name, _)| name.clone()).collect(),
+        };
+        let index_bytes = serde_json::to_vec(&index)
+            .map_err(|e| StorageError::Backend(format!("ser blob index: {e}")))?;
+        self.write(
+            &self.blobs_index_key(id, version),
+            &index_bytes,
+            "application/json",
+        )
+        .await?;
 
         // Register version in manifest (best-effort; overwrite is last-writer-wins).
         let mut manifest = self.read_manifest(id).await?;
@@ -591,6 +600,46 @@ mod tests {
         assert!(data.blobs.is_empty());
         store
             .write_version(&id, &VersionId::initial(), &data)
+            .await
+            .unwrap();
+
+        let read = store
+            .read_version(&id, &VersionId::initial())
+            .await
+            .unwrap();
+        assert_eq!(read.blobs, Vec::<(String, Vec<u8>)>::new());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires GCS bucket — run with `cargo test -- --ignored`"]
+    async fn gcs_read_version_after_rewrite_with_empty_blobs_is_empty() {
+        let Some((store, _prefix)) = test_store().await else {
+            eprintln!("skip: COLMENA_TEST_GCS_BUCKET not set");
+            return;
+        };
+        let id = ArtifactId::new("art_01");
+        let meta = ArtifactMeta::initial(
+            id.clone(),
+            ArtifactKind::Excel,
+            SessionId::new("s"),
+            "t".into(),
+            5,
+        );
+        store.create_artifact(&meta).await.unwrap();
+        let mut data = sample_version_data();
+        data.blobs = vec![
+            ("a.bin".to_string(), vec![10u8, 20, 30]),
+            ("b.png".to_string(), vec![0u8, 255, 128, 64]),
+        ];
+        store
+            .write_version(&id, &VersionId::initial(), &data)
+            .await
+            .unwrap();
+
+        let mut rewrite = sample_version_data();
+        rewrite.blobs = vec![];
+        store
+            .write_version(&id, &VersionId::initial(), &rewrite)
             .await
             .unwrap();
 
