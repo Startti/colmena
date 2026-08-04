@@ -13,7 +13,16 @@
 //! {prefix}/artifacts/{id}/versions/{vid}/render.{ext}
 //! {prefix}/artifacts/{id}/versions/{vid}/patch_applied.json
 //! {prefix}/artifacts/{id}/versions/{vid}/blobs/{name}
+//! {prefix}/artifacts/{id}/versions/{vid}/blobs.json  ← blob name index
 //! ```
+//!
+//! `blobs.json` lists the blob names persisted for a version so
+//! `read_version` can reconstruct them without a list-objects HTTP call
+//! (not exposed by this adapter — see module doc above). Always written by
+//! `write_version` (including `{ "names": [] }` for a version with no
+//! blobs), so the index is authoritative for the latest write and
+//! `read_version` never returns stale blobs left over from a prior write to
+//! the same version.
 //!
 //! ## CAS for `set_head`
 //! HEAD is written with `set_if_generation_match`. First-time write uses
@@ -35,6 +44,12 @@ use serde::{Deserialize, Serialize};
 struct VersionManifest {
     #[serde(default)]
     versions: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Default)]
+struct BlobIndex {
+    #[serde(default)]
+    names: Vec<String>,
 }
 
 // ── store ─────────────────────────────────────────────────────────────────────
@@ -104,6 +119,10 @@ impl GcsArtifactStore {
 
     fn blob_key(&self, id: &ArtifactId, v: &VersionId, name: &str) -> String {
         format!("{}/versions/{}/blobs/{name}", self.art_prefix(id), v.0)
+    }
+
+    fn blobs_index_key(&self, id: &ArtifactId, v: &VersionId) -> String {
+        format!("{}/versions/{}/blobs.json", self.art_prefix(id), v.0)
     }
 
     // ── low-level helpers ──────────────────────────────────────────────────────
@@ -242,6 +261,37 @@ impl GcsArtifactStore {
             .await?;
         Ok(())
     }
+
+    // ── blob index helpers ─────────────────────────────────────────────────────
+
+    /// Reads all blobs for a version via the persisted blob-index manifest.
+    /// `write_version` always writes the index (including the empty case),
+    /// so a present index is authoritative for the latest write: an empty
+    /// `names` list means no blobs, a populated one means exactly those
+    /// names. A missing index (NotFound) is tolerated for versions written
+    /// before this index existed and also returns an empty vec, not an
+    /// error. A blob named in the index but missing on read is an integrity
+    /// error and propagates. Results are sorted by name for deterministic
+    /// order (mirrors local_fs_store).
+    async fn read_blobs(
+        &self,
+        id: &ArtifactId,
+        version: &VersionId,
+    ) -> Result<Vec<(String, Vec<u8>)>, StorageError> {
+        let index: BlobIndex = match self.read_bytes(&self.blobs_index_key(id, version)).await {
+            Ok(bytes) => serde_json::from_slice(&bytes)
+                .map_err(|e| StorageError::Backend(format!("parse blob index: {e}")))?,
+            Err(StorageError::NotFound(_)) => return Ok(Vec::new()),
+            Err(e) => return Err(e),
+        };
+        let mut out = Vec::with_capacity(index.names.len());
+        for name in index.names {
+            let bytes = self.read_bytes(&self.blob_key(id, version, &name)).await?;
+            out.push((name, bytes));
+        }
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(out)
+    }
 }
 
 // ── ArtifactStore implementation ───────────────────────────────────────────────
@@ -305,6 +355,23 @@ impl ArtifactStore for GcsArtifactStore {
             .await?;
         }
 
+        // Always persist the index — including the empty case — so it is
+        // authoritative for the latest write and read_version never returns
+        // stale blobs left over from a prior write to this (id, version).
+        // Stale blob OBJECTS from a prior write become unreferenced by the
+        // index and are reclaimed by GCS lifecycle rules (see module doc).
+        let index = BlobIndex {
+            names: data.blobs.iter().map(|(name, _)| name.clone()).collect(),
+        };
+        let index_bytes = serde_json::to_vec(&index)
+            .map_err(|e| StorageError::Backend(format!("ser blob index: {e}")))?;
+        self.write(
+            &self.blobs_index_key(id, version),
+            &index_bytes,
+            "application/json",
+        )
+        .await?;
+
         // Register version in manifest (best-effort; overwrite is last-writer-wins).
         let mut manifest = self.read_manifest(id).await?;
         if !manifest.versions.contains(&version.0) {
@@ -316,22 +383,22 @@ impl ArtifactStore for GcsArtifactStore {
 
     async fn read_version(
         &self,
-        _id: &ArtifactId,
-        _version: &VersionId,
+        id: &ArtifactId,
+        version: &VersionId,
     ) -> Result<VersionData, StorageError> {
-        let ir_bytes = self.read_bytes(&self.ir_key(_id, _version)).await?;
+        let ir_bytes = self.read_bytes(&self.ir_key(id, version)).await?;
         let ir: serde_json::Value = serde_json::from_slice(&ir_bytes)
             .map_err(|e| StorageError::Backend(format!("parse ir: {e}")))?;
 
-        let meta = self.read_meta(_id).await?;
+        let meta = self.read_meta(id).await?;
         let ext = meta.kind.extension();
-        let render = self
-            .read_bytes(&self.render_key(_id, _version, ext))
-            .await?;
+        let render = self.read_bytes(&self.render_key(id, version, ext)).await?;
 
-        let pa_bytes = self.read_bytes(&self.patch_key(_id, _version)).await?;
+        let pa_bytes = self.read_bytes(&self.patch_key(id, version)).await?;
         let patch_applied: PatchApplied = serde_json::from_slice(&pa_bytes)
             .map_err(|e| StorageError::Backend(format!("parse patch: {e}")))?;
+
+        let blobs = self.read_blobs(id, version).await?;
 
         Ok(VersionData {
             ir,
@@ -342,7 +409,7 @@ impl ArtifactStore for GcsArtifactStore {
                 crate::documents::domain::ArtifactKind::Html => "html",
             },
             patch_applied,
-            blobs: Vec::new(),
+            blobs,
         })
     }
 
@@ -428,5 +495,158 @@ impl ArtifactStore for GcsArtifactStore {
             .await;
         let _ = self.write_manifest(id, &VersionManifest::default()).await;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::documents::domain::artifact::PatchSummary;
+    use crate::documents::domain::ids::SessionId;
+    use crate::documents::domain::ArtifactKind;
+
+    /// Builds a store against `COLMENA_TEST_GCS_BUCKET` (optionally scoped by
+    /// `COLMENA_TEST_GCS_PREFIX`, defaulting to a nonce path so repeated runs
+    /// don't collide). Returns `None` when the env var is unset so the test
+    /// can skip cleanly if run without `--ignored` gating removed by mistake.
+    async fn test_store() -> Option<(GcsArtifactStore, String)> {
+        let bucket = std::env::var("COLMENA_TEST_GCS_BUCKET").ok()?;
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let prefix = format!("colmena-test/blob-roundtrip-{nonce}");
+        let store = GcsArtifactStore::new(bucket, prefix.clone())
+            .await
+            .expect("build GcsArtifactStore");
+        Some((store, prefix))
+    }
+
+    fn sample_version_data() -> VersionData {
+        VersionData {
+            ir: serde_json::json!({"kind": "excel"}),
+            rendered_binary: vec![1, 2, 3],
+            rendered_extension: "xlsx",
+            patch_applied: PatchApplied {
+                patch: serde_json::json!({}),
+                applied_at: chrono::Utc::now(),
+                resulted_in: VersionId::initial(),
+                summary: PatchSummary::default(),
+            },
+            blobs: vec![],
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires GCS bucket — run with `cargo test -- --ignored`"]
+    async fn gcs_read_version_returns_written_blobs() {
+        let Some((store, _prefix)) = test_store().await else {
+            eprintln!("skip: COLMENA_TEST_GCS_BUCKET not set");
+            return;
+        };
+        let id = ArtifactId::new("art_01");
+        let meta = ArtifactMeta::initial(
+            id.clone(),
+            ArtifactKind::Excel,
+            SessionId::new("s"),
+            "t".into(),
+            5,
+        );
+        store.create_artifact(&meta).await.unwrap();
+        let bytes_a = vec![10u8, 20, 30];
+        let bytes_b = vec![0u8, 255, 128, 64];
+        let mut data = sample_version_data();
+        data.blobs = vec![
+            ("a.bin".to_string(), bytes_a.clone()),
+            ("b.png".to_string(), bytes_b.clone()),
+        ];
+        store
+            .write_version(&id, &VersionId::initial(), &data)
+            .await
+            .unwrap();
+
+        let read = store
+            .read_version(&id, &VersionId::initial())
+            .await
+            .unwrap();
+
+        let mut expected: Vec<(String, Vec<u8>)> = vec![
+            ("a.bin".to_string(), bytes_a),
+            ("b.png".to_string(), bytes_b),
+        ];
+        expected.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut actual = read.blobs.clone();
+        actual.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(actual, expected);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires GCS bucket — run with `cargo test -- --ignored`"]
+    async fn gcs_read_version_empty_blobs_stays_empty() {
+        let Some((store, _prefix)) = test_store().await else {
+            eprintln!("skip: COLMENA_TEST_GCS_BUCKET not set");
+            return;
+        };
+        let id = ArtifactId::new("art_01");
+        let meta = ArtifactMeta::initial(
+            id.clone(),
+            ArtifactKind::Excel,
+            SessionId::new("s"),
+            "t".into(),
+            5,
+        );
+        store.create_artifact(&meta).await.unwrap();
+        let data = sample_version_data();
+        assert!(data.blobs.is_empty());
+        store
+            .write_version(&id, &VersionId::initial(), &data)
+            .await
+            .unwrap();
+
+        let read = store
+            .read_version(&id, &VersionId::initial())
+            .await
+            .unwrap();
+        assert_eq!(read.blobs, Vec::<(String, Vec<u8>)>::new());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires GCS bucket — run with `cargo test -- --ignored`"]
+    async fn gcs_read_version_after_rewrite_with_empty_blobs_is_empty() {
+        let Some((store, _prefix)) = test_store().await else {
+            eprintln!("skip: COLMENA_TEST_GCS_BUCKET not set");
+            return;
+        };
+        let id = ArtifactId::new("art_01");
+        let meta = ArtifactMeta::initial(
+            id.clone(),
+            ArtifactKind::Excel,
+            SessionId::new("s"),
+            "t".into(),
+            5,
+        );
+        store.create_artifact(&meta).await.unwrap();
+        let mut data = sample_version_data();
+        data.blobs = vec![
+            ("a.bin".to_string(), vec![10u8, 20, 30]),
+            ("b.png".to_string(), vec![0u8, 255, 128, 64]),
+        ];
+        store
+            .write_version(&id, &VersionId::initial(), &data)
+            .await
+            .unwrap();
+
+        let mut rewrite = sample_version_data();
+        rewrite.blobs = vec![];
+        store
+            .write_version(&id, &VersionId::initial(), &rewrite)
+            .await
+            .unwrap();
+
+        let read = store
+            .read_version(&id, &VersionId::initial())
+            .await
+            .unwrap();
+        assert_eq!(read.blobs, Vec::<(String, Vec<u8>)>::new());
     }
 }

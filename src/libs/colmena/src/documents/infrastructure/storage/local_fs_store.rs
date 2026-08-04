@@ -47,6 +47,43 @@ impl LocalFsStore {
             .map_err(|e| StorageError::Backend(format!("rename: {e}")))?;
         Ok(())
     }
+
+    /// Reads all blob files under `vdir/blobs/`. A missing `blobs/` directory
+    /// is not an error — it means the version was written with no blobs.
+    /// Non-file entries are skipped. Bytes are read binary-safe (no UTF-8
+    /// coercion). Results are sorted by name for deterministic read order.
+    async fn read_blobs(vdir: &Path) -> Result<Vec<(String, Vec<u8>)>, StorageError> {
+        let blobs_dir = vdir.join("blobs");
+        if !blobs_dir.exists() {
+            return Ok(Vec::new());
+        }
+        let mut rd = fs::read_dir(&blobs_dir)
+            .await
+            .map_err(|e| StorageError::Backend(format!("readdir blobs: {e}")))?;
+        let mut out = Vec::new();
+        while let Some(entry) = rd
+            .next_entry()
+            .await
+            .map_err(|e| StorageError::Backend(format!("readdir blobs entry: {e}")))?
+        {
+            let file_type = entry
+                .file_type()
+                .await
+                .map_err(|e| StorageError::Backend(format!("blob file_type: {e}")))?;
+            if !file_type.is_file() {
+                continue;
+            }
+            let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+                continue;
+            };
+            let bytes = fs::read(entry.path())
+                .await
+                .map_err(|e| StorageError::Backend(format!("read blob {name}: {e}")))?;
+            out.push((name, bytes));
+        }
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(out)
+    }
 }
 
 #[async_trait]
@@ -79,8 +116,18 @@ impl ArtifactStore for LocalFsStore {
         let patch_bytes = serde_json::to_vec_pretty(&data.patch_applied)
             .map_err(|e| StorageError::Backend(format!("ser patch: {e}")))?;
         Self::atomic_write(&vdir.join("patch_applied.json"), &patch_bytes).await?;
+        // Make the on-disk blobs/ dir authoritative for this write: drop any
+        // blobs left over from a prior write to this same (id, version)
+        // before writing the new set. This must run even when data.blobs is
+        // empty (full→empty case), otherwise read_version would keep
+        // returning stale blobs from the previous write.
+        let blobs_dir = vdir.join("blobs");
+        match fs::remove_dir_all(&blobs_dir).await {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(StorageError::Backend(format!("rmdir blobs: {e}"))),
+        }
         if !data.blobs.is_empty() {
-            let blobs_dir = vdir.join("blobs");
             fs::create_dir_all(&blobs_dir)
                 .await
                 .map_err(|e| StorageError::Backend(format!("mkdir blobs: {e}")))?;
@@ -118,6 +165,8 @@ impl ArtifactStore for LocalFsStore {
         let patch_applied: PatchApplied = serde_json::from_slice(&pa_bytes)
             .map_err(|e| StorageError::Backend(format!("parse patch: {e}")))?;
 
+        let blobs = Self::read_blobs(&vdir).await?;
+
         Ok(VersionData {
             ir,
             rendered_binary: render,
@@ -127,7 +176,7 @@ impl ArtifactStore for LocalFsStore {
                 crate::documents::domain::ArtifactKind::Html => "html",
             },
             patch_applied,
-            blobs: Vec::new(),
+            blobs,
         })
     }
 
@@ -294,6 +343,208 @@ mod tests {
             .set_head(&id, Some(&VersionId::new("v999")), &VersionId::new("v2"))
             .await;
         assert!(matches!(err, Err(StorageError::PreconditionFailed(_))));
+    }
+
+    #[tokio::test]
+    async fn read_version_returns_written_blobs() {
+        let tmp = tempdir().unwrap();
+        let s = LocalFsStore::new(tmp.path());
+        let id = ArtifactId::new("art_01");
+        let meta = ArtifactMeta::initial(
+            id.clone(),
+            ArtifactKind::Excel,
+            SessionId::new("s"),
+            "t".into(),
+            5,
+        );
+        s.create_artifact(&meta).await.unwrap();
+        let bytes_a = vec![10u8, 20, 30];
+        let bytes_b = vec![0u8, 255, 128, 64];
+        let mut data = sample_version_data();
+        data.blobs = vec![
+            ("a.bin".to_string(), bytes_a.clone()),
+            ("b.png".to_string(), bytes_b.clone()),
+        ];
+        s.write_version(&id, &VersionId::initial(), &data)
+            .await
+            .unwrap();
+
+        let read = s.read_version(&id, &VersionId::initial()).await.unwrap();
+
+        let mut expected: Vec<(String, Vec<u8>)> = vec![
+            ("a.bin".to_string(), bytes_a),
+            ("b.png".to_string(), bytes_b),
+        ];
+        expected.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut actual = read.blobs.clone();
+        actual.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(actual, expected);
+    }
+
+    #[tokio::test]
+    async fn read_current_returns_written_blobs() {
+        let tmp = tempdir().unwrap();
+        let s = LocalFsStore::new(tmp.path());
+        let id = ArtifactId::new("art_01");
+        let meta = ArtifactMeta::initial(
+            id.clone(),
+            ArtifactKind::Excel,
+            SessionId::new("s"),
+            "t".into(),
+            5,
+        );
+        s.create_artifact(&meta).await.unwrap();
+        let bytes_a = vec![10u8, 20, 30];
+        let bytes_b = vec![0u8, 255, 128, 64];
+        let mut data = sample_version_data();
+        data.blobs = vec![
+            ("a.bin".to_string(), bytes_a.clone()),
+            ("b.png".to_string(), bytes_b.clone()),
+        ];
+        s.write_version(&id, &VersionId::initial(), &data)
+            .await
+            .unwrap();
+        s.set_head(&id, None, &VersionId::initial()).await.unwrap();
+
+        let current = s.read_current(&id).await.unwrap();
+
+        let mut expected: Vec<(String, Vec<u8>)> = vec![
+            ("a.bin".to_string(), bytes_a),
+            ("b.png".to_string(), bytes_b),
+        ];
+        expected.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut actual = current.blobs.clone();
+        actual.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(actual, expected);
+    }
+
+    #[tokio::test]
+    async fn read_version_empty_blobs_stays_empty() {
+        let tmp = tempdir().unwrap();
+        let s = LocalFsStore::new(tmp.path());
+        let id = ArtifactId::new("art_01");
+        let meta = ArtifactMeta::initial(
+            id.clone(),
+            ArtifactKind::Excel,
+            SessionId::new("s"),
+            "t".into(),
+            5,
+        );
+        s.create_artifact(&meta).await.unwrap();
+        let data = sample_version_data();
+        assert!(data.blobs.is_empty());
+        s.write_version(&id, &VersionId::initial(), &data)
+            .await
+            .unwrap();
+
+        let read = s.read_version(&id, &VersionId::initial()).await.unwrap();
+        assert_eq!(read.blobs, Vec::<(String, Vec<u8>)>::new());
+    }
+
+    #[tokio::test]
+    async fn read_version_non_blob_fields_unchanged() {
+        let tmp = tempdir().unwrap();
+        let s = LocalFsStore::new(tmp.path());
+        let id = ArtifactId::new("art_01");
+        let meta = ArtifactMeta::initial(
+            id.clone(),
+            ArtifactKind::Excel,
+            SessionId::new("s"),
+            "t".into(),
+            5,
+        );
+        s.create_artifact(&meta).await.unwrap();
+        let mut data = sample_version_data();
+        data.ir = serde_json::json!({"kind": "excel", "sheets": ["Sheet1"]});
+        data.rendered_binary = vec![9, 8, 7, 6];
+        data.patch_applied.summary = PatchSummary {
+            natural_language: vec!["Updated 3 cells".to_string()],
+            structured: vec![serde_json::json!({"op": "set_cell"})],
+        };
+        data.blobs = vec![("a.bin".to_string(), vec![1, 2, 3])];
+
+        s.write_version(&id, &VersionId::initial(), &data)
+            .await
+            .unwrap();
+        let read = s.read_version(&id, &VersionId::initial()).await.unwrap();
+
+        assert_eq!(read.ir, data.ir);
+        assert_eq!(read.rendered_binary, data.rendered_binary);
+        assert_eq!(read.rendered_extension, data.rendered_extension);
+        assert_eq!(
+            read.patch_applied.summary.natural_language,
+            data.patch_applied.summary.natural_language
+        );
+        assert_eq!(
+            read.patch_applied.summary.structured,
+            data.patch_applied.summary.structured
+        );
+        assert_eq!(read.patch_applied.patch, data.patch_applied.patch);
+    }
+
+    #[tokio::test]
+    async fn read_version_after_rewrite_with_empty_blobs_is_empty() {
+        let tmp = tempdir().unwrap();
+        let s = LocalFsStore::new(tmp.path());
+        let id = ArtifactId::new("art_01");
+        let meta = ArtifactMeta::initial(
+            id.clone(),
+            ArtifactKind::Excel,
+            SessionId::new("s"),
+            "t".into(),
+            5,
+        );
+        s.create_artifact(&meta).await.unwrap();
+        let mut data = sample_version_data();
+        data.blobs = vec![
+            ("a.bin".to_string(), vec![10u8, 20, 30]),
+            ("b.png".to_string(), vec![0u8, 255, 128, 64]),
+        ];
+        s.write_version(&id, &VersionId::initial(), &data)
+            .await
+            .unwrap();
+
+        let mut rewrite = sample_version_data();
+        rewrite.blobs = vec![];
+        s.write_version(&id, &VersionId::initial(), &rewrite)
+            .await
+            .unwrap();
+
+        let read = s.read_version(&id, &VersionId::initial()).await.unwrap();
+        assert_eq!(read.blobs, Vec::<(String, Vec<u8>)>::new());
+    }
+
+    #[tokio::test]
+    async fn read_version_after_rewrite_with_fewer_blobs_prunes_stale() {
+        let tmp = tempdir().unwrap();
+        let s = LocalFsStore::new(tmp.path());
+        let id = ArtifactId::new("art_01");
+        let meta = ArtifactMeta::initial(
+            id.clone(),
+            ArtifactKind::Excel,
+            SessionId::new("s"),
+            "t".into(),
+            5,
+        );
+        s.create_artifact(&meta).await.unwrap();
+        let bytes_a = vec![10u8, 20, 30];
+        let mut data = sample_version_data();
+        data.blobs = vec![
+            ("a.bin".to_string(), bytes_a.clone()),
+            ("b.png".to_string(), vec![0u8, 255, 128, 64]),
+        ];
+        s.write_version(&id, &VersionId::initial(), &data)
+            .await
+            .unwrap();
+
+        let mut rewrite = sample_version_data();
+        rewrite.blobs = vec![("a.bin".to_string(), bytes_a.clone())];
+        s.write_version(&id, &VersionId::initial(), &rewrite)
+            .await
+            .unwrap();
+
+        let read = s.read_version(&id, &VersionId::initial()).await.unwrap();
+        assert_eq!(read.blobs, vec![("a.bin".to_string(), bytes_a)]);
     }
 
     #[tokio::test]
