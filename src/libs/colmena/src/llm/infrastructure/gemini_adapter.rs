@@ -391,8 +391,7 @@ impl LlmRepository for GeminiAdapter {
                                     call_id,
                                     FunctionCall::new(
                                         fc.name.clone(),
-                                        serde_json::to_string(&fc.args)
-                                            .unwrap_or_else(|_| "{}".to_string()),
+                                        super::tool_args::serialize_tool_args(&fc.args, &fc.name),
                                     ),
                                 );
                                 // Carry the thinking-model signature so it can be
@@ -613,7 +612,8 @@ impl LlmRepository for GeminiAdapter {
 
                             if let Some(fc) = &part.function_call {
                                 let call_id = format!("call_{}", uuid::Uuid::new_v4());
-                                let args_str = serde_json::to_string(&fc.args).unwrap_or_default();
+                                let args_str =
+                                    super::tool_args::serialize_tool_args(&fc.args, &fc.name);
 
                                 let mut chunk = LlmStreamChunk::new(
                                     request_id.clone(),

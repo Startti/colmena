@@ -13,6 +13,7 @@ pub mod openai_adapter;
 pub mod openai_tts_adapter;
 pub mod persistence;
 pub mod scripted_adapter;
+mod tool_args;
 pub mod tts_provider_factory;
 
 pub use anthropic_adapter::AnthropicAdapter;
