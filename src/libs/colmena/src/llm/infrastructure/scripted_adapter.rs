@@ -92,7 +92,7 @@ impl LlmRepository for ScriptedAdapter {
                 tool_name,
                 arguments,
             } => {
-                let args_str = serde_json::to_string(&arguments).unwrap_or_default();
+                let args_str = super::tool_args::serialize_tool_args(&arguments, &tool_name);
                 let function = FunctionCall::new(tool_name, args_str);
                 let tool_call = ToolCall::new(id, function);
                 let resp = LlmResponse::new(
@@ -133,7 +133,7 @@ impl LlmRepository for ScriptedAdapter {
                 tool_name,
                 arguments,
             } => {
-                let args_str = serde_json::to_string(&arguments).unwrap_or_default();
+                let args_str = super::tool_args::serialize_tool_args(&arguments, &tool_name);
                 vec![Ok(LlmStreamChunk::new(
                     req_id,
                     LlmStreamPart::ToolCallChunk(ToolCallChunk {

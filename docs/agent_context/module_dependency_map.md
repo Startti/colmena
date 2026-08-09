@@ -5,7 +5,7 @@
 
 **How to use (for the exploration/spec phase):** before opening files to assess a change, look up the target file below. **Used by** is its blast radius — the files that break if you change its public surface. **Depends on** is what it needs. Start by reading only those, not the whole repo.
 
-- Files indexed: **357**
+- Files indexed: **358**
 - Modules with at least one importer: **161**
 
 ## Blast-radius ranking (change these with the most care)
@@ -1604,6 +1604,11 @@
 - Module: `llm::infrastructure::scripted_adapter`
 - **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
 - Depends on (2): `llm::domain`, `llm::domain::tools`
+
+#### `src/libs/colmena/src/llm/infrastructure/tool_args.rs`
+- Module: `llm::infrastructure::tool_args`
+- **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
+- Depends on (0): — (no intra-crate imports)
 
 #### `src/libs/colmena/src/llm/infrastructure/tts_provider_factory.rs`
 - Module: `llm::infrastructure::tts_provider_factory`
