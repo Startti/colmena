@@ -126,7 +126,7 @@ contra dos errores operativos distintos —
 
 | Entorno | `RUST_LOG` | `COLMENA_LOG_PAYLOADS` | Resultado |
 |---|---|---|---|
-| Producción | `info` (sin cambios) | unset | Solo eventos operativos, cero contenido de usuario |
+| Producción | `info` (sin cambios) | unset | Solo eventos operativos; cero contenido de usuario **en el stream de logs** (ver "Qué NO documenta este contrato") |
 | Develop | `colmena=trace` | `1` | Trazabilidad completa, incluyendo código literal y SQL |
 | Develop, sesión sensible | `colmena=trace,colmena::payload=off` | cualquiera | Trazado completo del flujo, payload suprimido |
 | CLI local | default `info`; `--verbose` → `colmena=debug` | opt-in | Igual que producción, reproducible localmente |
@@ -175,6 +175,19 @@ registrada como un ítem abierto en el ledger de auditoría (ver
 `docs/agent_context/audit/FINDINGS_LEDGER.md`).
 
 ## Qué NO documenta este contrato
+
+- **No cubre el stream de eventos SSE.** Los frames `node-start` incluyen
+  `config` e `inputs` verbatim, de modo que el cuerpo de código de un nodo
+  `python_script` viaja dentro del evento aunque este contrato lo suprima del
+  stream de logs. Verificado E2E: con la postura default (`RUST_LOG` e
+  `COLMENA_LOG_PAYLOADS` sin fijar) el `println!` desaparece pero el código
+  sigue apareciendo en el frame `node-start`. Ese stream viaja por HTTP/Redis
+  hacia el cliente que ejecuta el grafo — el worker de ADP no imprime eventos
+  a stdout (verificado: cero `println!`/`eprintln!` en su árbol de fuentes),
+  así que **no alcanza Cloud Logging**; en el CLI se imprime en la terminal
+  del operador, que está mirando su propia corrida. Es un canal distinto, con
+  semántica y audiencia distintas: su filtrado se registra como ítem aparte
+  en el ledger de auditoría y no forma parte de esta garantía.
 
 - No cubre los ~31 archivos que ya usaban `tracing` antes de este cambio
   (findings #22, #29 quedan fuera de alcance).
