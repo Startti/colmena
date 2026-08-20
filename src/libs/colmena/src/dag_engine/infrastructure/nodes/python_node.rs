@@ -208,8 +208,6 @@ impl ExecutableNode for PythonNode {
             code
         };
 
-        println!("[PythonNode] Executing code:\n{}", code);
-
         // 2. Extract sandbox config
         let sandbox_mode = inputs
             .get("sandbox_mode")
@@ -223,6 +221,21 @@ impl ExecutableNode for PythonNode {
             .or_else(|| config.get("sandbox_timeout_secs"))
             .and_then(|v| v.as_u64())
             .unwrap_or(10);
+
+        // Structured event: safe metadata only — never the raw code. See
+        // docs/developer_guide/50_logging_and_observability.md for the
+        // target namespace contract. The raw body itself goes through
+        // `payload_trace!`, which is double-gated (EnvFilter directive AND
+        // `COLMENA_LOG_PAYLOADS`) — neither this event nor a bare `debug!`
+        // ever carries `code`.
+        tracing::debug!(
+            target: crate::dag_engine::log_policy::T_PYTHON_NODE,
+            code_len = code.len(),
+            sandbox_mode = %sandbox_mode,
+            timeout_secs = timeout_secs,
+            "executing python code"
+        );
+        crate::dag_engine::log_policy::payload_trace!(python_code, code = %code);
 
         // 3. Prepare inputs for the helper — skip sandbox config keys.
         // Intrinsic Python ↔ JSON limitation for the `output` value: see
@@ -599,5 +612,126 @@ mod tests {
         )
         .expect_err("urllib.parse must stay banned (root module match)");
         assert!(err.contains("SandboxViolation"), "got: {err}");
+    }
+}
+
+/// Four-axis behavioral proof of the double-gate payload contract (finding
+/// #30 — see docs/developer_guide/50_logging_and_observability.md). Reuses
+/// the buffering-`MakeWriter` + `set_default` + canary-marker harness from
+/// `secure_suspend.rs::resume_does_not_log_real_values` verbatim, swapping
+/// the plain `with_max_level` for a real `EnvFilter` so each axis exercises
+/// a distinct filter directive against the double-gated `payload_trace!`.
+#[cfg(test)]
+mod payload_logging_tests {
+    use super::*;
+    use crate::dag_engine::log_policy::{test_override, P_PYTHON_CODE};
+    use std::collections::HashMap;
+    use std::io::Write;
+    use std::sync::Mutex as StdMutex;
+    use tracing_subscriber::{fmt, EnvFilter};
+
+    /// Writer that buffers everything emitted by tracing.
+    #[derive(Clone, Default)]
+    struct BufWriter(std::sync::Arc<StdMutex<Vec<u8>>>);
+    impl<'a> fmt::MakeWriter<'a> for BufWriter {
+        type Writer = BufWriterHandle;
+        fn make_writer(&'a self) -> Self::Writer {
+            BufWriterHandle(self.0.clone())
+        }
+    }
+    struct BufWriterHandle(std::sync::Arc<StdMutex<Vec<u8>>>);
+    impl Write for BufWriterHandle {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    const CANARY: &str = "CANARY_9f3a1c2e_payload_marker";
+
+    /// Runs a `python_script` node whose code body embeds [`CANARY`] under
+    /// the given `EnvFilter` directive and payload-guard override, and
+    /// returns everything the subscriber captured.
+    ///
+    /// `#[tokio::test(flavor = "multi_thread", worker_threads = 1)]` keeps
+    /// the entire async body — including the synchronous `debug!` /
+    /// `payload_trace!` calls in `PythonNode::execute`, which run BEFORE
+    /// the `spawn_blocking` hop — on the single OS thread that owns both
+    /// the `test_override` thread-local and the `set_default` subscriber.
+    async fn run_under(filter: &str, guard: bool) -> String {
+        pyo3::Python::initialize();
+        let buf = BufWriter::default();
+        let subscriber = fmt::Subscriber::builder()
+            .with_writer(buf.clone())
+            .with_env_filter(EnvFilter::new(filter))
+            .finish();
+
+        let _override_guard = test_override::set(guard);
+
+        let node = PythonNode;
+        let inputs = HashMap::new();
+        let config = json!({ "code": format!("output = 1  # {CANARY}") });
+        let mut state = json!({});
+
+        let _tracing_guard = tracing::subscriber::set_default(subscriber);
+        node.execute(&inputs, &config, &mut state, None)
+            .await
+            .unwrap();
+        drop(_tracing_guard);
+
+        let captured = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        captured
+    }
+
+    // (a) default production posture: no trace filter, guard unset.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn axis_a_info_guard_unset_payload_absent() {
+        let captured = run_under("info", false).await;
+        assert!(
+            !captured.contains(CANARY),
+            "axis a: payload leaked at default posture: {captured}"
+        );
+    }
+
+    // (b) LOAD-BEARING: a reflexive `RUST_LOG=trace` must not expose the
+    // payload on its own — the guard is independent of the filter.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn axis_b_trace_filter_alone_guard_unset_payload_absent() {
+        let captured = run_under("colmena=trace", false).await;
+        assert!(
+            !captured.contains(CANARY),
+            "axis b: trace filter alone must not expose payload (guard must be independent of the filter): {captured}"
+        );
+    }
+
+    // (c) LOAD-BEARING: the guard alone must not expose the payload when
+    // the filter explicitly blocks the payload target — the filter
+    // directive is independent of the guard.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn axis_c_guard_set_payload_target_off_absent() {
+        let captured = run_under("colmena=trace,colmena::payload=off", true).await;
+        assert!(
+            !captured.contains(CANARY),
+            "axis c: guard alone must not expose payload when the filter blocks the target (the directive must be independent of the guard): {captured}"
+        );
+    }
+
+    // (d) both gates open: still debuggable, and the captured record must
+    // carry the documented payload target — welding the macro's literal to
+    // the `P_PYTHON_CODE` const so a silent rename breaks this test.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn axis_d_both_gates_open_payload_present() {
+        let captured = run_under("colmena::payload::python_code=trace", true).await;
+        assert!(
+            captured.contains(CANARY),
+            "axis d: both gates open, payload should be visible: {captured}"
+        );
+        assert!(
+            captured.contains(P_PYTHON_CODE),
+            "axis d: captured record must carry the payload target metadata '{P_PYTHON_CODE}': {captured}"
+        );
     }
 }
