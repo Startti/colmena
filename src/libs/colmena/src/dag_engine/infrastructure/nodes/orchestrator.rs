@@ -1040,13 +1040,12 @@ impl ExecutableNode for OrchestratorNode {
                                 repo.add_task(&new_task).await?;
                             }
                         }
-                        // Print plan in human-readable format for debugging
-                        colmena_log!(
-                            "💾 [OrchestratorNode] DB seeded with {} tasks from internal planner.",
-                            items.len()
-                        );
-                        colmena_log!("📋 [OrchestratorNode] PLAN:");
-                        colmena_log!("{}", "─".repeat(60));
+                        // Structured event: safe metadata only — never the
+                        // rendered plan text (task/context are LLM-authored).
+                        // See docs/developer_guide/50_logging_and_observability.md
+                        // for the target namespace contract. The human-readable
+                        // plan goes through `payload_trace!`, double-gated
+                        // (EnvFilter directive AND `COLMENA_LOG_PAYLOADS`).
                         let mut phase_map: std::collections::BTreeMap<i64, Vec<String>> =
                             std::collections::BTreeMap::new();
                         for task_val in items {
@@ -1071,13 +1070,18 @@ impl ExecutableNode for OrchestratorNode {
                                 format!("  [{agent}]{parallel_tag}: {task_name}\n    → {ctx}");
                             phase_map.entry(phase_num).or_default().push(entry);
                         }
-                        for (ph, tasks) in &phase_map {
-                            colmena_log!("Phase {}:", ph);
-                            for t in tasks {
-                                println!("{}", t);
-                            }
-                        }
-                        colmena_log!("{}", "─".repeat(60));
+                        tracing::debug!(
+                            target: crate::dag_engine::log_policy::T_ORCHESTRATOR,
+                            task_count = items.len(),
+                            phase_count = phase_map.len(),
+                            "internal planner produced a phase plan"
+                        );
+                        let rendered = phase_map
+                            .iter()
+                            .map(|(ph, tasks)| format!("Phase {ph}:\n{}", tasks.join("\n")))
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        crate::dag_engine::log_policy::payload_trace!(planner_plan, plan = %rendered);
                     }
                 }
             } else {

@@ -154,7 +154,11 @@ impl SqlNode {
                     .await
                     .map_err(|e| format!("Failed to check existing schemas: {}", e))?;
                 for schema in &missing {
-                    println!("[SqlNode] allowed_schema '{}' missing — creating", schema);
+                    tracing::debug!(
+                        target: crate::dag_engine::log_policy::T_SQL,
+                        schema = %schema,
+                        "allowed_schema missing — creating"
+                    );
                     conn.create_schema(schema)
                         .await
                         .map_err(|e| format!("Failed to create schema '{}': {}", schema, e))?;
@@ -171,7 +175,11 @@ impl SqlNode {
         if let Some(setup_sql) = config.get("setup_sql").and_then(|v| v.as_str()) {
             let trimmed = setup_sql.trim();
             if !trimmed.is_empty() {
-                println!("[SqlNode] running setup_sql ({} bytes)", trimmed.len());
+                tracing::debug!(
+                    target: crate::dag_engine::log_policy::T_SQL,
+                    bytes = trimmed.len(),
+                    "running setup_sql"
+                );
                 let conn: &dyn SqlConnectionPort = adapter.as_ref();
                 conn.execute_setup_sql(trimmed)
                     .await
@@ -218,16 +226,22 @@ impl SqlNode {
 
         // Auto-RLS setup if enabled
         if permissions.auto_rls() {
-            println!("[SqlNode] auto_rls enabled — setting up RLS policies...");
+            tracing::debug!(
+                target: crate::dag_engine::log_policy::T_SQL,
+                "auto_rls enabled — setting up RLS policies"
+            );
             let tenant_col = permissions.tenant_column();
             for table in &tables {
                 if let Err(e) = adapter
                     .setup_rls_for_table(&table.schema_name, &table.table_name, tenant_col)
                     .await
                 {
-                    println!(
-                        "[SqlNode] RLS setup warning for {}.{}: {}",
-                        table.schema_name, table.table_name, e
+                    tracing::warn!(
+                        target: crate::dag_engine::log_policy::T_SQL,
+                        schema = %table.schema_name,
+                        table = %table.table_name,
+                        error = %e,
+                        "RLS setup warning"
                     );
                 }
             }
@@ -469,7 +483,10 @@ impl ExecutableNode for SqlNode {
         // Lazy initialization: connect on first call if not already initialized.
         // OnceCell ensures concurrent callers wait on the same future — no TOCTOU race.
         if self.init.get().is_none() {
-            println!("[SqlNode] First call — initializing connection pool...");
+            tracing::debug!(
+                target: crate::dag_engine::log_policy::T_SQL,
+                "first call — initializing connection pool"
+            );
         }
         let init = self
             .get_or_init(&effective_config)
@@ -482,7 +499,11 @@ impl ExecutableNode for SqlNode {
         // Resolve tenant_user_id (may contain ${ENV_VAR})
         let tenant_user_id: Option<String> = permissions.tenant_user_id().map(|raw| {
             Self::resolve_env_vars(raw).unwrap_or_else(|e| {
-                println!("[SqlNode] Warning: failed to resolve tenant_user_id: {}", e);
+                tracing::warn!(
+                    target: crate::dag_engine::log_policy::T_SQL,
+                    error = %e,
+                    "failed to resolve tenant_user_id"
+                );
                 raw.to_string()
             })
         });
@@ -565,10 +586,20 @@ impl ExecutableNode for SqlNode {
         let session_id = Self::new_session_id();
         let schema_context = init.description_supplement.clone();
 
-        // Use char-based truncation to avoid panicking on multi-byte UTF-8
-        // characters that straddle byte index 100.
-        let preview: String = query.chars().take(100).collect();
-        println!("[SqlNode] Executing: {}", preview);
+        // Structured event: safe metadata only — never the raw query. See
+        // docs/developer_guide/50_logging_and_observability.md for the
+        // target namespace contract. The raw query goes through
+        // `payload_trace!`, double-gated (EnvFilter directive AND
+        // `COLMENA_LOG_PAYLOADS`) — full text, not truncated, since a
+        // truncated payload only defeats debugging behind two gates.
+        tracing::debug!(
+            target: crate::dag_engine::log_policy::T_SQL,
+            query_len = query.len(),
+            session_id = %session_id,
+            max_rows,
+            "executing sql query"
+        );
+        crate::dag_engine::log_policy::payload_trace!(sql_query, query = %query);
 
         match service
             .execute(
@@ -582,9 +613,11 @@ impl ExecutableNode for SqlNode {
             .await
         {
             Ok(result) => {
-                println!(
-                    "[SqlNode] {} rows, truncated: {}",
-                    result.row_count, result.truncated
+                tracing::debug!(
+                    target: crate::dag_engine::log_policy::T_SQL,
+                    row_count = result.row_count,
+                    truncated = result.truncated,
+                    "sql query executed"
                 );
 
                 // Post-CREATE TABLE: apply RLS to any new tables in the query
@@ -594,9 +627,11 @@ impl ExecutableNode for SqlNode {
                             if let Some((schema, table)) =
                                 crate::dag_engine::infrastructure::sql_ast::created_table_name(stmt)
                             {
-                                println!(
-                                    "[SqlNode] CREATE TABLE detected — applying RLS to {}.{}",
-                                    schema, table
+                                tracing::debug!(
+                                    target: crate::dag_engine::log_policy::T_SQL,
+                                    schema = %schema,
+                                    table = %table,
+                                    "CREATE TABLE detected — applying RLS"
                                 );
                                 if let Err(e) = adapter
                                     .setup_rls_for_new_table(
@@ -606,9 +641,12 @@ impl ExecutableNode for SqlNode {
                                     )
                                     .await
                                 {
-                                    println!(
-                                        "[SqlNode] RLS setup warning for new table {}.{}: {}",
-                                        schema, table, e
+                                    tracing::warn!(
+                                        target: crate::dag_engine::log_policy::T_SQL,
+                                        schema = %schema,
+                                        table = %table,
+                                        error = %e,
+                                        "RLS setup warning for new table"
                                     );
                                 }
                             }
@@ -632,14 +670,26 @@ impl ExecutableNode for SqlNode {
                 Ok(result.to_json())
             }
             Err(e) => {
-                println!("[SqlNode] Error: {}", e);
+                // Stays visible at the default production posture (`warn!`
+                // on `colmena::sql`, not gated behind `payload_trace!`) —
+                // a genuine error condition, not payload. The error string
+                // can still echo fragments of the failed query if the
+                // driver includes them; redacting that is a separate,
+                // filed follow-up (see docs/developer_guide/50_logging_and_observability.md).
+                let source = match &e {
+                    SqlNodeError::Blocked { .. } => "static_validator",
+                    SqlNodeError::CriticRejected { .. } => "llm_critic",
+                    _ => "execution",
+                };
+                tracing::warn!(
+                    target: crate::dag_engine::log_policy::T_SQL,
+                    error = %e,
+                    source,
+                    "sql execution failed"
+                );
                 Ok(json!({
                     "error": e.to_string(),
-                    "source": match &e {
-                        SqlNodeError::Blocked { .. } => "static_validator",
-                        SqlNodeError::CriticRejected { .. } => "llm_critic",
-                        _ => "execution",
-                    }
+                    "source": source
                 }))
             }
         }

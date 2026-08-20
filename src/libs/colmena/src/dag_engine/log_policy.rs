@@ -25,10 +25,30 @@ use std::sync::OnceLock;
 /// crate's `#![deny(warnings)]` lint policy.
 pub(crate) const T_PYTHON_NODE: &str = "colmena::python_node";
 
+/// Event target for `sql_query` node metadata (safe fields only — no raw
+/// SQL text).
+pub(crate) const T_SQL: &str = "colmena::sql";
+
+/// Event target for orchestrator metadata (planner/critic cycle — safe
+/// fields only, never the rendered plan text).
+pub(crate) const T_ORCHESTRATOR: &str = "colmena::orchestrator";
+
 /// Payload target carrying the raw Python source body of a `python_script`
 /// node execution. Gated by both an `EnvFilter` directive AND
 /// `COLMENA_LOG_PAYLOADS` — see [`payload_trace`] and the module doc above.
 pub(crate) const P_PYTHON_CODE: &str = "colmena::payload::python_code";
+
+/// Payload target carrying the raw SQL text of a `sql_query` node
+/// execution. Same double-gate as [`P_PYTHON_CODE`].
+pub(crate) const P_SQL_QUERY: &str = "colmena::payload::sql_query";
+
+/// Payload target carrying the orchestrator's rendered phase plan (the
+/// `[agent]: task → ctx` lines) — LLM-authored `task`/`context` text. Same
+/// double-gate as [`P_PYTHON_CODE`]/[`P_SQL_QUERY`]. A third payload target
+/// beyond the original two-target proposal: without it, a plain `debug!`
+/// on the orchestrator event target would still leak this text under
+/// `colmena::payload=off`, making that filter directive's promise false.
+pub(crate) const P_PLANNER_PLAN: &str = "colmena::payload::planner_plan";
 
 /// Name of the environment variable that opens gate #2. Hoisted to a const so
 /// the docs-sync test can bind it to the operator-facing guide: a typo here
@@ -80,6 +100,16 @@ macro_rules! payload_trace {
     (python_code, $($t:tt)*) => {
         if $crate::dag_engine::log_policy::payload_logging_enabled() {
             tracing::trace!(target: $crate::dag_engine::log_policy::P_PYTHON_CODE, $($t)*);
+        }
+    };
+    (sql_query, $($t:tt)*) => {
+        if $crate::dag_engine::log_policy::payload_logging_enabled() {
+            tracing::trace!(target: $crate::dag_engine::log_policy::P_SQL_QUERY, $($t)*);
+        }
+    };
+    (planner_plan, $($t:tt)*) => {
+        if $crate::dag_engine::log_policy::payload_logging_enabled() {
+            tracing::trace!(target: $crate::dag_engine::log_policy::P_PLANNER_PLAN, $($t)*);
         }
     };
 }
@@ -227,13 +257,57 @@ mod tests {
             include_str!("../../../../../docs/developer_guide/50_logging_and_observability.md");
         for target in [
             super::T_PYTHON_NODE,
+            super::T_SQL,
+            super::T_ORCHESTRATOR,
             super::P_PYTHON_CODE,
+            super::P_SQL_QUERY,
+            super::P_PLANNER_PLAN,
             super::ENV_PAYLOAD_FLAG,
         ] {
             assert!(
                 guide.contains(target),
                 "target '{target}' must appear verbatim in the guide doc"
             );
+        }
+    }
+
+    // ── Regression fence (finding #30) ──────────────────────────────────
+    // Honest framing: this proves regression-resistance — a future edit
+    // can't silently reintroduce a raw print of user/LLM content — NOT
+    // security. It is a source-text scan, not a runtime guarantee; see the
+    // four-axis behavioral test in `python_node.rs` for the property that
+    // actually matters.
+
+    #[test]
+    fn no_raw_print_macros_outside_cfg_test_in_migrated_node_files() {
+        let files: &[(&str, &str)] = &[
+            (
+                "python_node.rs",
+                include_str!("infrastructure/nodes/python_node.rs"),
+            ),
+            ("sql.rs", include_str!("infrastructure/nodes/sql.rs")),
+            (
+                "orchestrator.rs",
+                include_str!("infrastructure/nodes/orchestrator.rs"),
+            ),
+        ];
+        for (name, content) in files {
+            // Truncate at the first `#[cfg(test)]` marker — everything from
+            // there on is test code, out of scope for this fence. Files
+            // with no test module (e.g. `orchestrator.rs`) scan in full.
+            let production_code = match content.find("#[cfg(test)]") {
+                Some(idx) => &content[..idx],
+                None => content,
+            };
+            for macro_name in ["println!", "eprintln!", "print!"] {
+                assert!(
+                    !production_code.contains(macro_name),
+                    "{name} contains a raw `{macro_name}` outside #[cfg(test)] — \
+                     route it through `tracing::debug!`/`warn!` (event) or \
+                     `payload_trace!` (payload) instead. See \
+                     docs/developer_guide/50_logging_and_observability.md"
+                );
+            }
         }
     }
 }
