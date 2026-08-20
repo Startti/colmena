@@ -63,8 +63,7 @@ pub(crate) fn payload_logging_enabled() -> bool {
     if let Some(v) = test_override::get() {
         return v;
     }
-    *PAYLOAD
-        .get_or_init(|| resolve_payload_flag(std::env::var(ENV_PAYLOAD_FLAG).ok().as_deref()))
+    *PAYLOAD.get_or_init(|| resolve_payload_flag(std::env::var(ENV_PAYLOAD_FLAG).ok().as_deref()))
 }
 
 /// Emit a raw payload record on `tracing::trace!`, but only when
@@ -224,9 +223,8 @@ mod tests {
 
     #[test]
     fn target_consts_appear_verbatim_in_the_guide() {
-        let guide = include_str!(
-            "../../../../../docs/developer_guide/50_logging_and_observability.md"
-        );
+        let guide =
+            include_str!("../../../../../docs/developer_guide/50_logging_and_observability.md");
         for target in [
             super::T_PYTHON_NODE,
             super::P_PYTHON_CODE,
