@@ -1,6 +1,7 @@
 // src/dag_engine/main.rs
 use clap::{Parser, Subcommand};
 use colmena::dag_engine::api;
+use tracing_subscriber::EnvFilter;
 
 #[derive(Parser, Debug)]
 #[command(version, about = "Motor de ejecución de grafos DAG en Rust")]
@@ -113,6 +114,27 @@ enum Commands {
     },
 }
 
+/// Install the process-wide `tracing` subscriber. `RUST_LOG` wins whenever
+/// it is set to a non-empty value; otherwise the default is `info`, or
+/// `colmena=debug` when `--verbose` was passed — never a payload target
+/// (see `dag_engine::log_policy`). `try_init` is non-panicking so a double
+/// call (e.g. from a future test harness) is a no-op rather than a crash.
+fn init_tracing(verbose: bool) {
+    let filter = std::env::var("RUST_LOG")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| {
+            if verbose {
+                "colmena=debug".to_string()
+            } else {
+                "info".to_string()
+            }
+        });
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::new(filter))
+        .try_init();
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     dotenvy::dotenv().ok();
@@ -125,6 +147,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     pyo3::Python::initialize();
 
     let cli = Cli::parse();
+
+    // Install the process-wide subscriber once, before dispatching to any
+    // subcommand (Run and Serve both go through it). The library itself
+    // never installs a subscriber or reads RUST_LOG — see
+    // docs/developer_guide/50_logging_and_observability.md ("la librería
+    // emite, la aplicación decide"). `dotenvy::dotenv()` already ran above
+    // (before `Cli::parse()`), so any RUST_LOG supplied via `.env` is
+    // already visible to `std::env::var` here.
+    let verbose = matches!(
+        &cli.command,
+        Commands::Run { verbose: true, .. } | Commands::Serve { verbose: true, .. }
+    );
+    init_tracing(verbose);
 
     match cli.command {
         Commands::Run {
@@ -146,7 +181,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
             println!("🚀 Ejecutando grafo: {}", file_path);
 
-            dotenvy::dotenv().ok();
+            // dotenvy::dotenv() already ran once at the top of `main`,
+            // before `init_tracing` resolved RUST_LOG — this second call
+            // was a harmless but redundant no-op (dotenv does not
+            // override already-set vars) and has been removed.
             let engine_config = colmena::dag_engine::engine::EngineConfig::from_env()
                 .await
                 .map_err(|e| anyhow::anyhow!("{}", e))?;

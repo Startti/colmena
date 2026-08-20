@@ -60,17 +60,25 @@ pub struct EngineConfig {
     pub liveness: crate::dag_engine::application::liveness::LivenessSettings,
 }
 
-/// Parse a string env value as a boolean. Returns `Some(true)` for
-/// "true"/"1"/"yes" (case-insensitive), `Some(false)` for "false"/"0"/"no",
-/// and `None` for anything else (including unset).
-fn parse_bool_env(name: &str) -> Option<bool> {
-    std::env::var(name)
-        .ok()
-        .and_then(|v| match v.trim().to_lowercase().as_str() {
-            "true" | "1" | "yes" | "on" => Some(true),
-            "false" | "0" | "no" | "off" => Some(false),
-            _ => None,
-        })
+/// Parse a raw string value as a boolean, independent of any environment
+/// read. Returns `Some(true)` for "true"/"1"/"yes"/"on" (case-insensitive),
+/// `Some(false)` for "false"/"0"/"no"/"off", and `None` for anything else.
+///
+/// This is the pure core shared by [`parse_bool_env`] and
+/// `dag_engine::log_policy` — it takes no process-global state so it can be
+/// unit-tested in parallel without `#[serial]`.
+pub(crate) fn parse_bool_str(v: &str) -> Option<bool> {
+    match v.trim().to_lowercase().as_str() {
+        "true" | "1" | "yes" | "on" => Some(true),
+        "false" | "0" | "no" | "off" => Some(false),
+        _ => None,
+    }
+}
+
+/// Parse an env var as a boolean via [`parse_bool_str`]. Returns `None` when
+/// the var is unset or does not parse.
+pub(crate) fn parse_bool_env(name: &str) -> Option<bool> {
+    std::env::var(name).ok().and_then(|v| parse_bool_str(&v))
 }
 
 impl EngineConfig {

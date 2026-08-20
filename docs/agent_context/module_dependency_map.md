@@ -5,8 +5,8 @@
 
 **How to use (for the exploration/spec phase):** before opening files to assess a change, look up the target file below. **Used by** is its blast radius — the files that break if you change its public surface. **Depends on** is what it needs. Start by reading only those, not the whole repo.
 
-- Files indexed: **358**
-- Modules with at least one importer: **161**
+- Files indexed: **359**
+- Modules with at least one importer: **163**
 
 ## Blast-radius ranking (change these with the most care)
 
@@ -310,7 +310,7 @@
 
 #### `src/libs/colmena/src/dag_engine/engine.rs`
 - Module: `dag_engine::engine`
-- **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
+- **Used by (1)**: `src/libs/colmena/src/dag_engine/log_policy.rs`
 - Depends on (17): `dag_engine::application::run_use_case`, `dag_engine::application::secure_value_service`, `dag_engine::domain::error`, `dag_engine::domain::events`, `dag_engine::domain::graph`, `dag_engine::domain::state`, `dag_engine::infrastructure::persistence`, `dag_engine::infrastructure::persistence::postgres_dag_state_repository`, `dag_engine::infrastructure::pool_registry`, `dag_engine::infrastructure::registry`, `dag_engine::infrastructure::sql_port_factory`, `dag_engine::sse_mapper`, `llm::domain`, `llm::infrastructure::persistence`, `llm::infrastructure::persistence::repository_factory`, `storage::domain`, `storage::infrastructure`
 
 #### `src/libs/colmena/src/dag_engine/infrastructure/dag_tool_executor.rs`
@@ -576,7 +576,7 @@
 #### `src/libs/colmena/src/dag_engine/infrastructure/nodes/python_node.rs`
 - Module: `dag_engine::infrastructure::nodes::python_node`
 - **Used by (2)**: `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/crdt_doc_run_python.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/gsheets_run_python.rs`
-- Depends on (1): `dag_engine::domain::node`
+- Depends on (2): `dag_engine::domain::node`, `dag_engine::log_policy`
 
 #### `src/libs/colmena/src/dag_engine/infrastructure/nodes/qa_response_parser.rs`
 - Module: `dag_engine::infrastructure::nodes::qa_response_parser`
@@ -762,6 +762,11 @@
 - Module: `dag_engine::infrastructure::sql_static_validator`
 - **Used by (1)**: `src/libs/colmena/src/dag_engine/infrastructure/nodes/sql.rs`
 - Depends on (3): `dag_engine::domain::sql_permissions`, `dag_engine::domain::sql_ports`, `dag_engine::infrastructure::sql_ast`
+
+#### `src/libs/colmena/src/dag_engine/log_policy.rs`
+- Module: `dag_engine::log_policy`
+- **Used by (1)**: `src/libs/colmena/src/dag_engine/infrastructure/nodes/python_node.rs`
+- Depends on (1): `dag_engine::engine`
 
 #### `src/libs/colmena/src/dag_engine/main.rs`
 - Module: `(crate root)`
