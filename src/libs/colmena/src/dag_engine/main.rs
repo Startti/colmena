@@ -114,6 +114,15 @@ enum Commands {
     },
 }
 
+/// `COLMENA_VERBOSE=1` is documented in the `--verbose` help text as
+/// equivalent to the flag, so the tracing filter must honor it too — not only
+/// the legacy `colmena_log!` gate in `dag_engine::verbose`.
+fn verbose_env() -> bool {
+    std::env::var("COLMENA_VERBOSE")
+        .map(|v| v == "1" || v == "true")
+        .unwrap_or(false)
+}
+
 /// Install the process-wide `tracing` subscriber. `RUST_LOG` wins whenever
 /// it is set to a non-empty value; otherwise the default is `info`, or
 /// `colmena=debug` when `--verbose` was passed — never a payload target
@@ -158,7 +167,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let verbose = matches!(
         &cli.command,
         Commands::Run { verbose: true, .. } | Commands::Serve { verbose: true, .. }
-    );
+    ) || verbose_env();
     init_tracing(verbose);
 
     match cli.command {
@@ -174,10 +183,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             use futures::StreamExt;
 
             // Enable verbose mode via flag or env var
-            let verbose_env = std::env::var("COLMENA_VERBOSE")
-                .map(|v| v == "1" || v == "true")
-                .unwrap_or(false);
-            colmena::dag_engine::verbose::set_verbose(verbose || verbose_env);
+            colmena::dag_engine::verbose::set_verbose(verbose || verbose_env());
 
             println!("🚀 Ejecutando grafo: {}", file_path);
 
@@ -250,10 +256,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             port,
             verbose,
         } => {
-            let verbose_env = std::env::var("COLMENA_VERBOSE")
-                .map(|v| v == "1" || v == "true")
-                .unwrap_or(false);
-            colmena::dag_engine::verbose::set_verbose(verbose || verbose_env);
+            colmena::dag_engine::verbose::set_verbose(verbose || verbose_env());
             println!("🌐 Modo Serve: Iniciando...");
             api::serve_dag(file_path, host, port).await?;
         }

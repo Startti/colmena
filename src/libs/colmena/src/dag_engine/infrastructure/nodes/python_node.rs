@@ -707,9 +707,14 @@ mod payload_logging_tests {
         );
     }
 
-    // (c) LOAD-BEARING: the guard alone must not expose the payload when
-    // the filter explicitly blocks the payload target — the filter
-    // directive is independent of the guard.
+    // (c) The filter directive alone closes the gate: with
+    // `colmena::payload=off`, EnvFilter's target-prefix matching blocks the
+    // record even though the guard is open. Note this axis would still pass
+    // if the guard check were deleted from `payload_trace!` — EnvFilter
+    // suppresses it either way — so it proves the directive carries its own
+    // weight, NOT that the guard does. Axis (b) is the one that proves the
+    // guard is load-bearing (verified by mutation: deleting the guard check
+    // fails (b) and only (b)).
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     async fn axis_c_guard_set_payload_target_off_absent() {
         let captured = run_under("colmena=trace,colmena::payload=off", true).await;

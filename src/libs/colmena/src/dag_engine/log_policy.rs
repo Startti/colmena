@@ -30,7 +30,22 @@ pub(crate) const T_PYTHON_NODE: &str = "colmena::python_node";
 /// `COLMENA_LOG_PAYLOADS` — see [`payload_trace`] and the module doc above.
 pub(crate) const P_PYTHON_CODE: &str = "colmena::payload::python_code";
 
+/// Name of the environment variable that opens gate #2. Hoisted to a const so
+/// the docs-sync test can bind it to the operator-facing guide: a typo here
+/// would silently disable the only mechanism operators are told to use, and
+/// no behavioral test can catch it (the `OnceLock` below is a process global
+/// that tests cannot re-resolve).
+pub(crate) const ENV_PAYLOAD_FLAG: &str = "COLMENA_LOG_PAYLOADS";
+
 static PAYLOAD: OnceLock<bool> = OnceLock::new();
+
+/// Pure resolution of gate #2 from a raw environment value: absent, empty or
+/// unparseable all mean closed. Split out of [`payload_logging_enabled`] so
+/// the production composition is unit-testable without touching process state.
+pub(crate) fn resolve_payload_flag(raw: Option<&str>) -> bool {
+    raw.and_then(crate::dag_engine::engine::parse_bool_str)
+        .unwrap_or(false)
+}
 
 /// Gate #2 of the double-gate payload contract: returns `true` only when
 /// `COLMENA_LOG_PAYLOADS` resolves to a truthy value, read lazily and
@@ -48,9 +63,8 @@ pub(crate) fn payload_logging_enabled() -> bool {
     if let Some(v) = test_override::get() {
         return v;
     }
-    *PAYLOAD.get_or_init(|| {
-        crate::dag_engine::engine::parse_bool_env("COLMENA_LOG_PAYLOADS").unwrap_or(false)
-    })
+    *PAYLOAD
+        .get_or_init(|| resolve_payload_flag(std::env::var(ENV_PAYLOAD_FLAG).ok().as_deref()))
 }
 
 /// Emit a raw payload record on `tracing::trace!`, but only when
@@ -175,6 +189,34 @@ mod tests {
         assert!(super::test_override::get().is_none());
     }
 
+    // ── Production resolution path ──────────────────────────────────────
+    // `payload_logging_enabled` short-circuits on the test override, so the
+    // real env-driven composition is never reached by a behavioral test.
+    // These cover it directly.
+
+    #[test]
+    fn payload_flag_closed_when_env_absent_or_unparseable() {
+        assert!(!super::resolve_payload_flag(None));
+        assert!(!super::resolve_payload_flag(Some("")));
+        assert!(!super::resolve_payload_flag(Some("maybe")));
+    }
+
+    #[test]
+    fn payload_flag_opens_only_on_truthy_values() {
+        for v in ["1", "true", "TRUE", "yes", "on"] {
+            assert!(
+                super::resolve_payload_flag(Some(v)),
+                "'{v}' should open the payload gate"
+            );
+        }
+        for v in ["0", "false", "no", "off"] {
+            assert!(
+                !super::resolve_payload_flag(Some(v)),
+                "'{v}' should keep the payload gate closed"
+            );
+        }
+    }
+
     // ── Docs-sync ────────────────────────────────────────────────────────
     // Guards against a silent rename: if a target literal changes here
     // without updating the guide, this test fails instead of the ADP
@@ -185,7 +227,11 @@ mod tests {
         let guide = include_str!(
             "../../../../../docs/developer_guide/50_logging_and_observability.md"
         );
-        for target in [super::T_PYTHON_NODE, super::P_PYTHON_CODE] {
+        for target in [
+            super::T_PYTHON_NODE,
+            super::P_PYTHON_CODE,
+            super::ENV_PAYLOAD_FLAG,
+        ] {
             assert!(
                 guide.contains(target),
                 "target '{target}' must appear verbatim in the guide doc"
