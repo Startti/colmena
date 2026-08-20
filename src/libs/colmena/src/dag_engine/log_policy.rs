@@ -271,6 +271,108 @@ mod tests {
         }
     }
 
+    // ── Double-gate coverage for the payload kinds added after PR 1 ─────
+    // `python_code` has the four-axis behavioral proof in `python_node.rs`,
+    // which drives a real node. The other two kinds cannot be proved that
+    // way in CI — `sql_query` would need a live database and `planner_plan`
+    // a full orchestrator run — so they are proved here at the macro level:
+    // same four axes, same double gate, exercised through `payload_trace!`.
+    //
+    // Honest limit: this proves the MACHINERY for these kinds, not that
+    // their call sites route raw content through it. The regression fence
+    // catches a reintroduced `println!`; nothing automatically catches raw
+    // content added as a field on a safe `debug!` event.
+
+    use std::io::Write;
+    use std::sync::{Arc, Mutex as StdMutex};
+    use tracing_subscriber::{fmt, EnvFilter};
+
+    #[derive(Clone, Default)]
+    struct BufWriter(Arc<StdMutex<Vec<u8>>>);
+    impl<'a> fmt::MakeWriter<'a> for BufWriter {
+        type Writer = BufHandle;
+        fn make_writer(&'a self) -> Self::Writer {
+            BufHandle(self.0.clone())
+        }
+    }
+    struct BufHandle(Arc<StdMutex<Vec<u8>>>);
+    impl Write for BufHandle {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    const CANARY: &str = "CANARY_4b7d21e0_payload_marker";
+
+    /// Emit both post-PR-1 payload kinds under `filter`, with the guard
+    /// forced to `guard`, and return everything the subscriber captured.
+    /// Both gates are thread-local here (`set_default` and `test_override`),
+    /// so the axes run in parallel with no `#[serial]`.
+    fn capture(filter: &str, guard: bool) -> String {
+        let buf = BufWriter::default();
+        let subscriber = fmt::Subscriber::builder()
+            .with_writer(buf.clone())
+            .with_env_filter(EnvFilter::new(filter))
+            .finish();
+        let _override = super::test_override::set(guard);
+        let _tracing = tracing::subscriber::set_default(subscriber);
+        super::payload_trace!(sql_query, query = %CANARY);
+        super::payload_trace!(planner_plan, plan = %CANARY);
+        drop(_tracing);
+        let captured = buf.0.lock().unwrap().clone();
+        String::from_utf8(captured).unwrap()
+    }
+
+    #[test]
+    fn new_kinds_absent_at_default_posture() {
+        let out = capture("info", false);
+        assert!(
+            !out.contains(CANARY),
+            "payload leaked at default posture: {out}"
+        );
+    }
+
+    // Load-bearing: a reflexive `RUST_LOG=trace` must not open the gate on
+    // its own. This is the axis that fails if the guard check is deleted.
+    #[test]
+    fn new_kinds_absent_under_bare_trace_without_guard() {
+        let out = capture("colmena=trace", false);
+        assert!(
+            !out.contains(CANARY),
+            "trace filter alone must not expose payload: {out}"
+        );
+    }
+
+    #[test]
+    fn new_kinds_absent_when_directive_blocks_the_target() {
+        let out = capture("colmena=trace,colmena::payload=off", true);
+        assert!(
+            !out.contains(CANARY),
+            "guard alone must not expose payload when the directive blocks the target: {out}"
+        );
+    }
+
+    #[test]
+    fn new_kinds_present_when_both_gates_open() {
+        let out = capture("colmena::payload=trace", true);
+        assert!(
+            out.contains(CANARY),
+            "both gates open, payload should be visible: {out}"
+        );
+        assert!(
+            out.contains(super::P_SQL_QUERY),
+            "captured record must carry the sql_query target: {out}"
+        );
+        assert!(
+            out.contains(super::P_PLANNER_PLAN),
+            "captured record must carry the planner_plan target: {out}"
+        );
+    }
+
     // ── Regression fence (finding #30) ──────────────────────────────────
     // Honest framing: this proves regression-resistance — a future edit
     // can't silently reintroduce a raw print of user/LLM content — NOT
