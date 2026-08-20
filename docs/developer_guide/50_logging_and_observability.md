@@ -126,10 +126,10 @@ contra dos errores operativos distintos —
 
 | Entorno | `RUST_LOG` | `COLMENA_LOG_PAYLOADS` | Resultado |
 |---|---|---|---|
-| Producción | `info` (sin cambios) | unset | Solo eventos operativos, cero contenido de usuario |
+| Producción | `info` (sin cambios) | unset | Solo eventos operativos; cero contenido de usuario **en el stream de logs** (ver "Qué NO documenta este contrato") |
 | Develop | `colmena=trace` | `1` | Trazabilidad completa, incluyendo código literal y SQL |
 | Develop, sesión sensible | `colmena=trace,colmena::payload=off` | cualquiera | Trazado completo del flujo, payload suprimido |
-| CLI local | default `info`; `--verbose` → `colmena=debug` | opt-in | Igual que producción, reproducible localmente |
+| CLI local | default `info`; `--verbose` (o `COLMENA_VERBOSE=1`) → `colmena=debug` | opt-in | Igual que producción, reproducible localmente |
 
 Notas sobre la fila de CLI local: `--verbose` sube el nivel del filtro a
 `colmena=debug` (paridad con la vista de plan del orchestrator que ya existía
@@ -140,7 +140,8 @@ contenido crudo, incluso en modo verbose.
 ## Resolución del filtro en el binario `dag_engine`
 
 `RUST_LOG`, cuando está definido y no vacío, siempre gana. Si no está
-definido, el default es `info`; `--verbose` lo sube a `colmena=debug`. La
+definido, el default es `info`; `--verbose` — o `COLMENA_VERBOSE=1`, que el
+help del flag documenta como equivalente — lo sube a `colmena=debug`. La
 inicialización usa `try_init()` (no entra en pánico si ya hay un subscriber
 instalado), y ocurre una sola vez antes de despachar cualquier subcomando —
 tanto `run` como `serve` comparten la misma resolución.
@@ -176,6 +177,19 @@ registrada como un ítem abierto en el ledger de auditoría (ver
 
 ## Qué NO documenta este contrato
 
+- **No cubre el stream de eventos SSE.** Los frames `node-start` incluyen
+  `config` e `inputs` verbatim, de modo que el cuerpo de código de un nodo
+  `python_script` viaja dentro del evento aunque este contrato lo suprima del
+  stream de logs. Verificado E2E: con la postura default (`RUST_LOG` e
+  `COLMENA_LOG_PAYLOADS` sin fijar) el `println!` desaparece pero el código
+  sigue apareciendo en el frame `node-start`. Ese stream viaja por HTTP/Redis
+  hacia el cliente que ejecuta el grafo — el worker de ADP no imprime eventos
+  a stdout (verificado: cero `println!`/`eprintln!` en su árbol de fuentes),
+  así que **no alcanza Cloud Logging**; en el CLI se imprime en la terminal
+  del operador, que está mirando su propia corrida. Es un canal distinto, con
+  semántica y audiencia distintas: su filtrado se registra como ítem aparte
+  en el ledger de auditoría y no forma parte de esta garantía.
+
 - No cubre los ~31 archivos que ya usaban `tracing` antes de este cambio
   (findings #22, #29 quedan fuera de alcance).
 - No introduce ningún nuevo mecanismo de enmascarado tipo `colmena_log!`
@@ -183,11 +197,12 @@ registrada como un ítem abierto en el ledger de auditoría (ver
   de diseño porque sigue dependiendo de que el desarrollador recuerde usarla
   en cada sitio, mientras que el macro `payload_trace!` hace que el guard sea
   estructuralmente imposible de omitir en el call site.
-- No cubre `attachment_gc` más allá de una nota de compatibilidad: al unificar
-  la feature `env-filter` en la dependencia principal de `tracing-subscriber`,
-  ese binario (que ya llama a `tracing_subscriber::fmt::init()`) empieza a
-  honrar `RUST_LOG` como efecto colateral — se verifica y documenta en el
-  slice de código de este cambio, no aquí.
+- No cambia si `attachment_gc` honra `RUST_LOG`: ya lo hacía. Verificado
+  contra el fuente de `tracing-subscriber 0.3.20` (`fmt/mod.rs`): sin la
+  feature `env-filter`, `try_init()` construye igualmente un filtro `Targets`
+  a partir de `RUST_LOG`. Promover la feature a la dependencia principal
+  cambia ese binario de `Targets` a `EnvFilter` — sintaxis de directivas más
+  rica, mismo respeto por la variable — no lo hace pasar de sordo a oyente.
 
 ## Ver también
 
