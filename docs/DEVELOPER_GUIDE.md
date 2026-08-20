@@ -32,6 +32,7 @@ Las secciones están organizadas por **tema**, no por orden numérico. Los prefi
 - [**Ejemplos de uso en TypeScript**](./examples/typescript_usage.md) — Guía práctica con fragmentos listos para usar: LLM, streaming, DAG, documents, errores y diferencias clave respecto a Python.
 - [**Performance**](./developer_guide/06a_performance.md) — Cómo medir y optimizar.
 - [**Troubleshooting**](./developer_guide/18_troubleshooting.md) — Errores frecuentes del engine y bindings, con causas y fixes.
+- [**Logging y Observabilidad**](./developer_guide/50_logging_and_observability.md) — Contrato de targets `tracing` (`colmena::<nodo>` vs `colmena::payload::<tipo>`), gate doble sobre payloads (`RUST_LOG` + `COLMENA_LOG_PAYLOADS`), matriz de configuración por entorno.
 
 ## 4. Contribuir, CI/CD, deploy
 
