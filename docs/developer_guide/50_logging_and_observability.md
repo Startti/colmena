@@ -272,15 +272,22 @@ registrada como un ítem abierto en el ledger de auditoría (ver
   `colmena_log!` en 15 archivos encontró **~23 sitios que siguen sin gate**:
   `planner.rs` (3: system message, textos de contexto, respuesta cruda),
   `critic.rs` (3: el mismo patrón), `extraction.rs` (1: el system message de
-  entrada, distinto de la salida ya migrada) y ~16 mensajes cortos en
-  `orchestrator.rs` que interpolan `task.task_name`, que escribe el LLM.
+  entrada, distinto de la salida ya migrada) y ~16 sitios en
+  `orchestrator.rs`. **Ojo con estos últimos: no son todos triviales.** La
+  mayoría interpola `task.task_name` (autoría del LLM), pero al menos dos son
+  volcados de contenido completo de la misma severidad que los ya migrados:
+  el prompt enriquecido entero que se le manda a un agente (armado con
+  `task.context`, respuestas de HITL y feedback del critic), y el texto de las
+  preguntas en `debug_print_questions`.
   En todos ellos `--verbose` (más `verbose: true` en el nodo, donde aplica)
   expone contenido crudo **sin que `COLMENA_LOG_PAYLOADS` importe**.
   Registrados en `docs/agent_context/audit/FINDINGS_LEDGER.md` como follow-up
-  de finding #30, con la lista exacta, para una PR dedicada: son tres bloques
-  idénticos al ya migrado en `reactor.rs` más una tanda de interpolaciones,
-  mecánicos y repetitivos, y estirar esta PR para incluirlos la llevaría muy
-  lejos del presupuesto de revisión.
+  de finding #30, con la lista exacta, para una PR dedicada: `planner.rs`, `critic.rs` y el bloque de
+  `extraction.rs` son idénticos en forma al ya migrado en `reactor.rs` y sí
+  son mecánicos; los de `orchestrator.rs` no, y el prompt hacia el agente
+  merece el mismo tratamiento de payload que recibió el resultado del agente
+  en esta PR. Estirar esta PR para incluirlos la llevaría muy lejos del
+  presupuesto de revisión.
 - No cubre los ~31 archivos que ya usaban `tracing` antes de este cambio
   (findings #22, #29 quedan fuera de alcance).
 - No introduce ningún nuevo mecanismo de enmascarado tipo `colmena_log!`
