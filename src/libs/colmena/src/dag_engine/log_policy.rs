@@ -513,7 +513,7 @@ mod tests {
     // safe values (session ids, enums, `Option`s) in `colmena_log!` calls,
     // so that check would be too noisy to act on.
     #[test]
-    fn no_pretty_json_dump_inside_colmena_log_in_orchestrator_and_extraction() {
+    fn no_pretty_json_dump_inside_colmena_log_in_migrated_node_files() {
         let files: &[(&str, &str)] = &[
             (
                 "orchestrator.rs",

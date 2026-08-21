@@ -1,22 +1,23 @@
 # 50. Logging y observabilidad — contrato de namespaces y payloads
 
 > Documenta el contrato de tracing que reemplaza los `println!`/`eprintln!`
-> directos a stdout en `python_node.rs`, `sql.rs`, `orchestrator.rs` y
-> `extraction.rs`
+> directos a stdout en `python_node.rs`, `sql.rs`, `orchestrator.rs`,
+> `extraction.rs`, `reactor.rs` y `llm.rs`, y que saca de `colmena_log!` los
+> volcados de contenido crudo de esos mismos archivos
 > (finding #30 del [ledger de auditoría](../agent_context/audit/FINDINGS_LEDGER.md)).
 > Este contrato es la referencia que consume el worker de ADP para filtrar
 > logs por `RUST_LOG` en Cloud Logging.
 >
 > **Alcance de la garantía**: este documento describe el comportamiento de
-> los **cuatro archivos migrados** listados arriba. NO es una afirmación
+> los **seis archivos migrados** listados arriba. NO es una afirmación
 > sobre el resto del crate — ver "Qué NO documenta este contrato" para la
 > lista de sitios conocidos que todavía imprimen contenido crudo bajo
 > `--verbose`/`colmena_log!` sin el gate doble.
 
 ## TL;DR
 
-- En `python_node.rs`, `sql.rs`, `orchestrator.rs` y `extraction.rs`, todo
-  el logging usa [`tracing`](https://docs.rs/tracing), nunca
+- En `python_node.rs`, `sql.rs`, `orchestrator.rs`, `extraction.rs`,
+  `reactor.rs` y `llm.rs`, todo el logging usa [`tracing`](https://docs.rs/tracing), nunca
   `println!`/`eprintln!` fuera de tests — verificado por una regla de
   regresión (ver "Límite honesto de esta garantía").
 - Los eventos operativos (metadata segura: tamaños, ids, flags) viven bajo
@@ -237,8 +238,8 @@ registrada como un ítem abierto en el ledger de auditoría (ver
   mayor severidad: `python_node.rs`, `sql.rs`, `llm.rs` (prompt y respuesta
   completos del nodo más usado del crate), `reactor.rs`, el I/O con el reactor
   y con los subgrafos-agente en `orchestrator.rs`, y la salida parseada de
-  `extraction.rs`. Una auditoría del resto de las ~177 llamadas a
-  `colmena_log!` en 12 archivos encontró **~23 sitios que siguen sin gate**:
+  `extraction.rs`. Una auditoría del resto de las 161 llamadas a
+  `colmena_log!` en 15 archivos encontró **~23 sitios que siguen sin gate**:
   `planner.rs` (3: system message, textos de contexto, respuesta cruda),
   `critic.rs` (3: el mismo patrón), `extraction.rs` (1: el system message de
   entrada, distinto de la salida ya migrada) y ~16 mensajes cortos en

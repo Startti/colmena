@@ -166,11 +166,6 @@ impl ExecutableNode for ExtractionNode {
         })
         .await?;
 
-        if verbose {
-            colmena_log!("\n═══════════════════════════════════════");
-            colmena_log!("🔍 [ExtractionNode] VERBOSE — Parsed Output:");
-            colmena_log!("═══════════════════════════════════════\n");
-        }
         // Structured event: safe metadata only — never the raw parsed
         // output (LLM-generated structured data). See
         // docs/developer_guide/50_logging_and_observability.md. The raw
@@ -187,6 +182,12 @@ impl ExecutableNode for ExtractionNode {
             extraction_result,
             parsed = %serde_json::to_string_pretty(&parsed_json).unwrap_or_default()
         );
+        if verbose {
+            colmena_log!(
+                "🔍 [ExtractionNode] VERBOSE — parsed output ({} fields)",
+                parsed_json.as_object().map(|o| o.len()).unwrap_or(0)
+            );
+        }
 
         let session_id = _state
             .get("session_id")
