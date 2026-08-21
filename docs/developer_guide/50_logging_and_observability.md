@@ -146,19 +146,28 @@ contra dos errores operativos distintos —
 
 ### El flag `verbose` de un nodo ya no expone contenido
 
-Los nodos `llm_call`, `reactor`, `orchestrator` y `extraction` aceptan
-`verbose: true` en su configuración del grafo. Hasta este cambio, ese flag
-combinado con `--verbose` (o `COLMENA_VERBOSE=1`) volcaba a stdout el prompt
-completo, la respuesta completa del modelo, los inputs y resultados crudos del
-reactor y el JSON parseado de `extraction`, vía `colmena_log!` — que es un
-`println!` con una compuerta, no logging estructurado.
+Hasta este cambio había **dos compuertas distintas**, y conviene no
+confundirlas:
+
+- El flag `verbose: true` en la config del nodo, que aceptan `llm_call`,
+  `reactor`, `orchestrator` y `extraction`. Combinado con `--verbose`
+  (o `COLMENA_VERBOSE=1`) volcaba a stdout el prompt completo, la respuesta
+  completa del modelo y el JSON parseado de `extraction`.
+- **Solo `--verbose`**, sin ningún opt-in por nodo. Los inputs y el resultado
+  crudo del reactor y el resultado crudo de cada agente en `orchestrator`
+  salían así: viven en `handle_phase_completion`, que corre en cada cierre de
+  fase sin condición alguna, gateados únicamente por `colmena_log!` — que es
+  un `println!` con una compuerta global, no logging estructurado.
+
+Esa segunda categoría era la más expuesta: alcanzaba con levantar el proceso
+en modo verbose, sin tocar ningún grafo.
 
 Ese contenido ahora sale exclusivamente por `colmena::payload::*`, con el doble
 gate. `verbose` sigue existiendo y sigue haciendo la salida del operador más
 locuaz, pero lo que emite son **tamaños, no cuerpos**.
 
-Consecuencia práctica para quien depura: `verbose: true` ya no alcanza para ver
-un prompt. Hace falta `RUST_LOG=...colmena::payload::llm_io=trace` más
+Consecuencia práctica para quien depura: ni `verbose: true` ni `--verbose`
+alcanzan ya para ver un prompt o el I/O del reactor. Hace falta `RUST_LOG=...colmena::payload::llm_io=trace` más
 `COLMENA_LOG_PAYLOADS=1`, igual que para cualquier otro payload.
 
 ## Matriz de configuración por entorno
