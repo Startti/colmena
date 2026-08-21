@@ -190,6 +190,27 @@ inicialización usa `try_init()` (no entra en pánico si ya hay un subscriber
 instalado), y ocurre una sola vez antes de despachar cualquier subcomando —
 tanto `run` como `serve` comparten la misma resolución.
 
+### Lo que se pierde en la postura default
+
+Varios de los `println!` migrados eran **incondicionales**: se veían siempre,
+sin importar la configuración. Al pasar a `debug!` quedan filtrados con
+`RUST_LOG=info`, que es la postura de producción. En concreto, en producción
+ya no se ve por default la traza de ejecución de `sql_query` — largo de la
+consulta, filas devueltas, creación de schemas de `allowed_schemas`,
+activación de RLS, ejecución de `setup_sql`, inicialización del pool — ni el
+evento de ejecución de `python_script`.
+
+Es una consecuencia deliberada de gatear por nivel, no un descuido, y hay dos
+razones por las que se aceptó: el stream SSE sigue emitiendo `node-start` y
+`node-finish` por cada nodo, así que la evidencia de *que* un nodo corrió no
+se pierde; y subir estos eventos a `info` implicaba evaluar el volumen de
+salida de los 31 archivos que ya usaban `tracing`, que es una decisión
+separada.
+
+Para recuperar la traza: `RUST_LOG=colmena::sql=debug` (o `--verbose`, que
+sube todo `colmena` a `debug`). Los errores de SQL siguen visibles por default
+como `warn!`.
+
 ## Límite honesto de esta garantía
 
 Esta es una garantía **de configuración, con dos gates deliberados e
