@@ -1,18 +1,29 @@
 # 50. Logging y observabilidad — contrato de namespaces y payloads
 
 > Documenta el contrato de tracing que reemplaza los `println!`/`eprintln!`
-> directos a stdout en `python_node.rs`, `sql.rs` y `orchestrator.rs`
+> directos a stdout en `python_node.rs`, `sql.rs`, `orchestrator.rs`,
+> `extraction.rs`, `reactor.rs` y `llm.rs`, y que saca de `colmena_log!` los
+> volcados de contenido crudo de esos mismos archivos
 > (finding #30 del [ledger de auditoría](../agent_context/audit/FINDINGS_LEDGER.md)).
 > Este contrato es la referencia que consume el worker de ADP para filtrar
 > logs por `RUST_LOG` en Cloud Logging.
+>
+> **Alcance de la garantía**: este documento describe el comportamiento de
+> los **seis archivos migrados** listados arriba. NO es una afirmación
+> sobre el resto del crate — ver "Qué NO documenta este contrato" para la
+> lista de sitios conocidos que todavía imprimen contenido crudo bajo
+> `--verbose`/`colmena_log!` sin el gate doble.
 
 ## TL;DR
 
-- Todo el logging de colmena usa [`tracing`](https://docs.rs/tracing), nunca
-  `println!`/`eprintln!` fuera de tests.
+- En `python_node.rs`, `sql.rs`, `orchestrator.rs`, `extraction.rs`,
+  `reactor.rs` y `llm.rs`, todo el logging usa [`tracing`](https://docs.rs/tracing), nunca
+  `println!`/`eprintln!` fuera de tests — verificado por una regla de
+  regresión (ver "Límite honesto de esta garantía").
 - Los eventos operativos (metadata segura: tamaños, ids, flags) viven bajo
   `colmena::<nodo>`. El contenido crudo controlado por el usuario o el LLM
-  (código Python, SQL, planes del orchestrator) vive bajo un target separado
+  (código Python, SQL, planes y resultados del orchestrator, salida
+  parseada de extracción) vive bajo un target separado
   `colmena::payload::<tipo>`.
 - Emitir un payload requiere **dos condiciones independientes** a la vez: el
   `EnvFilter` debe habilitar el target `colmena::payload::*`, Y la variable
@@ -60,18 +71,29 @@ familias, con semántica distinta:
 |---|---|---|
 | `colmena::python_node` | Metadata del evento de ejecución del nodo `python_script` | `code_len`, `sandbox_mode`, `timeout_secs` — nunca el código en sí |
 | `colmena::sql` | Metadata del evento de ejecución del nodo `sql_query` | `query_len`, `session_id`, `max_rows`, errores de ejecución — nunca la consulta en sí |
-| `colmena::orchestrator` | Metadata del ciclo del orchestrator (planner/critic) | `task_count`, `phase_count`, `phase` — nunca el plan renderizado |
+| `colmena::orchestrator` | Metadata del ciclo del orchestrator (planner/critic/reactor/agentes) | `task_count`, `phase_count`, `phase`, `input_count`, `agent` (identificador del agente, no contenido) — nunca el plan, los inputs/resultados del reactor, ni el resultado de un agente |
+| `colmena::extraction` | Metadata de la salida parseada del nodo `extraction` | `field_count` — nunca el JSON parseado en sí |
+| `colmena::reactor` | Metadata del nodo `reactor` | `system_message_len`, `context_texts_len`, `response_len` — nunca el prompt, el contexto ni la respuesta |
+| `colmena::llm` | Metadata del nodo `llm_call` | `prompt_len`, `has_system_message`, `response_len` — nunca el prompt ni la respuesta |
 | `colmena::payload::python_code` | Código Python crudo del nodo `python_script` | El body completo del script, sin truncar |
 | `colmena::payload::sql_query` | SQL crudo del nodo `sql_query` | La consulta completa, sin truncar |
 | `colmena::payload::planner_plan` | Plan renderizado del orchestrator (líneas `[agent]: task → ctx`) | Texto generado por el LLM, sin truncar |
+| `colmena::payload::agent_io` | I/O del orchestrator con el reactor interno y con los subgrafos-agente | Inputs/resultado crudo del phase reactor, inputs crudos del propio nodo orchestrator (`--verbose`), y el resultado crudo de un agente junto con `task.task_name` (autoría del LLM) |
+| `colmena::payload::extraction_result` | Salida parseada cruda del nodo `extraction` | El JSON parseado completo, generado por el LLM |
+| `colmena::payload::llm_io` | Request y respuesta crudas de `llm_call` y `reactor` | System message, prompt y completion completos. **El contenido más sensible del sistema**: es lo que el usuario escribió y lo que el modelo respondió, sin truncar |
 
-`colmena::payload::planner_plan` es el tercer target de payload, además de
+`colmena::payload::planner_plan` fue el tercer target de payload, además de
 los dos que documentaba la propuesta original (`python_code`, `sql_query`).
 Se añadió porque el bloque de log del orchestrator también interpola texto
 autoría del LLM (`task`/`context` renderizados) — sin este target dedicado,
 un operador que apagara `colmena::payload=off` seguiría viendo ese contenido
 a través de un `debug!` genérico, lo cual rompería la garantía central de
-este contrato.
+este contrato. `agent_io` y `extraction_result` se añadieron en una
+extensión posterior de la misma PR, después de que el lens `review-risk`
+encontrara que el `orchestrator` y el `extraction` node todavía volcaban
+I/O crudo de agentes/reactor y la salida parseada del LLM a través de
+`colmena_log!`, sin el gate doble — exactamente la clase de bug que este
+contrato existe para cerrar.
 
 ### Por qué los payloads comparten el prefijo `colmena::payload::*`
 
@@ -122,6 +144,32 @@ contra dos errores operativos distintos —
 | c | `colmena=trace,colmena::payload=off` | `1` | **No** — la directiva del filtro es independiente del guard |
 | d | `colmena::payload::python_code=trace` (o `colmena=trace`) | `1` | Sí |
 
+### El flag `verbose` de un nodo ya no expone contenido
+
+Hasta este cambio había **dos compuertas distintas**, y conviene no
+confundirlas:
+
+- El flag `verbose: true` en la config del nodo, que aceptan `llm_call`,
+  `reactor`, `orchestrator` y `extraction`. Combinado con `--verbose`
+  (o `COLMENA_VERBOSE=1`) volcaba a stdout el prompt completo, la respuesta
+  completa del modelo y el JSON parseado de `extraction`.
+- **Solo `--verbose`**, sin ningún opt-in por nodo. Los inputs y el resultado
+  crudo del reactor y el resultado crudo de cada agente en `orchestrator`
+  salían así: viven en `handle_phase_completion`, que corre en cada cierre de
+  fase sin condición alguna, gateados únicamente por `colmena_log!` — que es
+  un `println!` con una compuerta global, no logging estructurado.
+
+Esa segunda categoría era la más expuesta: alcanzaba con levantar el proceso
+en modo verbose, sin tocar ningún grafo.
+
+Ese contenido ahora sale exclusivamente por `colmena::payload::*`, con el doble
+gate. `verbose` sigue existiendo y sigue haciendo la salida del operador más
+locuaz, pero lo que emite son **tamaños, no cuerpos**.
+
+Consecuencia práctica para quien depura: ni `verbose: true` ni `--verbose`
+alcanzan ya para ver un prompt o el I/O del reactor. Hace falta `RUST_LOG=...colmena::payload::llm_io=trace` más
+`COLMENA_LOG_PAYLOADS=1`, igual que para cualquier otro payload.
+
 ## Matriz de configuración por entorno
 
 | Entorno | `RUST_LOG` | `COLMENA_LOG_PAYLOADS` | Resultado |
@@ -132,10 +180,15 @@ contra dos errores operativos distintos —
 | CLI local | default `info`; `--verbose` (o `COLMENA_VERBOSE=1`) → `colmena=debug` | opt-in | Igual que producción, reproducible localmente |
 
 Notas sobre la fila de CLI local: `--verbose` sube el nivel del filtro a
-`colmena=debug` (paridad con la vista de plan del orchestrator que ya existía
-antes de este cambio), pero **no** habilita ningún target de payload por sí
-mismo — sigue haciendo falta `COLMENA_LOG_PAYLOADS=1` explícito para ver
-contenido crudo, incluso en modo verbose.
+`colmena=debug`, pero **no** habilita ningún target de payload por sí mismo —
+sigue haciendo falta `COLMENA_LOG_PAYLOADS=1` explícito para ver contenido
+crudo, incluso en modo verbose, **en los sitios migrados por este contrato**:
+`python_script`, `sql_query`, `llm_call`, `reactor`, el I/O con el reactor y
+los agentes en `orchestrator`, y la salida parseada de `extraction`.
+
+Fuera de esa lista `--verbose` **sí sigue exponiendo contenido crudo sin
+gate**, y esa es hoy la frontera real de la garantía — ver "Qué NO documenta
+este contrato" para el inventario exacto.
 
 ## Resolución del filtro en el binario `dag_engine`
 
@@ -145,6 +198,27 @@ help del flag documenta como equivalente — lo sube a `colmena=debug`. La
 inicialización usa `try_init()` (no entra en pánico si ya hay un subscriber
 instalado), y ocurre una sola vez antes de despachar cualquier subcomando —
 tanto `run` como `serve` comparten la misma resolución.
+
+### Lo que se pierde en la postura default
+
+Varios de los `println!` migrados eran **incondicionales**: se veían siempre,
+sin importar la configuración. Al pasar a `debug!` quedan filtrados con
+`RUST_LOG=info`, que es la postura de producción. En concreto, en producción
+ya no se ve por default la traza de ejecución de `sql_query` — largo de la
+consulta, filas devueltas, creación de schemas de `allowed_schemas`,
+activación de RLS, ejecución de `setup_sql`, inicialización del pool — ni el
+evento de ejecución de `python_script`.
+
+Es una consecuencia deliberada de gatear por nivel, no un descuido, y hay dos
+razones por las que se aceptó: el stream SSE sigue emitiendo `node-start` y
+`node-finish` por cada nodo, así que la evidencia de *que* un nodo corrió no
+se pierde; y subir estos eventos a `info` implicaba evaluar el volumen de
+salida de los 31 archivos que ya usaban `tracing`, que es una decisión
+separada.
+
+Para recuperar la traza: `RUST_LOG=colmena::sql=debug` (o `--verbose`, que
+sube todo `colmena` a `debug`). Los errores de SQL siguen visibles por default
+como `warn!`.
 
 ## Límite honesto de esta garantía
 
@@ -190,6 +264,30 @@ registrada como un ítem abierto en el ledger de auditoría (ver
   semántica y audiencia distintas: su filtrado se registra como ítem aparte
   en el ledger de auditoría y no forma parte de esta garantía.
 
+- **No cubre todo `colmena_log!` todavía.** Este contrato migró los sitios de
+  mayor severidad: `python_node.rs`, `sql.rs`, `llm.rs` (prompt y respuesta
+  completos del nodo más usado del crate), `reactor.rs`, el I/O con el reactor
+  y con los subgrafos-agente en `orchestrator.rs`, y la salida parseada de
+  `extraction.rs`. Una auditoría del resto de las ~149 invocaciones de
+  `colmena_log!` en 13 archivos encontró **~23 sitios que siguen sin gate**:
+  `planner.rs` (3: system message, textos de contexto, respuesta cruda),
+  `critic.rs` (3: el mismo patrón), `extraction.rs` (1: el system message de
+  entrada, distinto de la salida ya migrada) y ~16 sitios en
+  `orchestrator.rs`. **Ojo con estos últimos: no son todos triviales.** La
+  mayoría interpola `task.task_name` (autoría del LLM), pero al menos dos son
+  volcados de contenido completo de la misma severidad que los ya migrados:
+  el prompt enriquecido entero que se le manda a un agente (armado con
+  `task.context`, respuestas de HITL y feedback del critic), y el texto de las
+  preguntas en `debug_print_questions`.
+  En todos ellos `--verbose` (más `verbose: true` en el nodo, donde aplica)
+  expone contenido crudo **sin que `COLMENA_LOG_PAYLOADS` importe**.
+  Registrados en `docs/agent_context/audit/FINDINGS_LEDGER.md` como follow-up
+  de finding #30, con la lista exacta, para una PR dedicada: `planner.rs`, `critic.rs` y el bloque de
+  `extraction.rs` son idénticos en forma al ya migrado en `reactor.rs` y sí
+  son mecánicos; los de `orchestrator.rs` no, y el prompt hacia el agente
+  merece el mismo tratamiento de payload que recibió el resultado del agente
+  en esta PR. Estirar esta PR para incluirlos la llevaría muy lejos del
+  presupuesto de revisión.
 - No cubre los ~31 archivos que ya usaban `tracing` antes de este cambio
   (findings #22, #29 quedan fuera de alcance).
 - No introduce ningún nuevo mecanismo de enmascarado tipo `colmena_log!`

@@ -1,0 +1,28 @@
+{
+  "comment": "E2E fixture for finding #30 (dag-nodes-structured-logging-b05, PR 2/3): a python_script node with a canary literal in its body feeds a sql_query node whose query embeds a second, independent canary literal. Used to verify the payload double-gate end-to-end through the real DAG engine CLI at four RUST_LOG/COLMENA_LOG_PAYLOADS combinations — see docs/developer_guide/50_logging_and_observability.md.",
+  "metadata": {
+    "category": "basic",
+    "requires_env": ["DATABASE_URL"]
+  },
+  "nodes": {
+    "start": {
+      "type": "python_script",
+      "config": {
+        "code": "output = 'PYTHON_CANARY_7f3e1a9b_e2e_marker'"
+      }
+    },
+    "sql_probe": {
+      "type": "sql_query",
+      "config": {
+        "connection_url": "${DATABASE_URL}",
+        "permissions": { "preset": "read_only", "allowed_schemas": ["public"] },
+        "query": "SELECT 'SQL_CANARY_2c8d4f61_e2e_marker' AS canary"
+      }
+    },
+    "result": { "type": "output", "config": { "label": "Logging Payload E2E Result" } }
+  },
+  "edges": [
+    { "from": "start", "to": "sql_probe.upstream_marker" },
+    { "from": "sql_probe", "to": "result" }
+  ]
+}

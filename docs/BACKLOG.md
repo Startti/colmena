@@ -12,7 +12,7 @@ Si vas a empezar a trabajar en algo de acá, sacalo de esta lista y agregalo al 
 
 **Cómo retomar:** cada hallazgo tiene un slug de SDD change propuesto. Al trabajar uno, sácalo de acá → SDD change (spec/design/tasks) → implementar con TDD (test que falla primero) → changelog del mes.
 
-**Progreso (7/60 resueltos):** ✅ #5 (`llm-persistence-row-hydration-safety`), ✅ #6 (`gemini-health-check-model-update`), ✅ #8 (`openai-adapter-parallel-tool-calls`), ✅ #9 (`llm-persistence-dedup-hydration`, PR #159 `12d19d9d`), ✅ #11 (var muerta, folded en b02), ✅ #36 (`documents-read-version-blobs-bug`, PR #164 `ab8ebd27`), ✅ #39 (`documents-artifact-dispatch-dedup`, PRs #161/#162). Los ✅ en las tablas de abajo marcan lo cerrado. Fuente de verdad del estado: el ledger.
+**Progreso (9/60 resueltos):** ✅ #5 (`llm-persistence-row-hydration-safety`), ✅ #6 (`gemini-health-check-model-update`), ✅ #7 (`llm-adapter-tool-arg-serde-observability`, 2026-08-08), ✅ #8 (`openai-adapter-parallel-tool-calls`), ✅ #9 (`llm-persistence-dedup-hydration`, PR #159 `12d19d9d`), ✅ #11 (var muerta, folded en b02), ✅ #30 (`dag-nodes-structured-logging-b05`, PRs #167/#168/PR3, 2026-08-20), ✅ #36 (`documents-read-version-blobs-bug`, PR #164 `ab8ebd27`), ✅ #39 (`documents-artifact-dispatch-dedup`, PRs #161/#162). Los ✅ en las tablas de abajo marcan lo cerrado. Fuente de verdad del estado: el ledger.
 
 **🎯 Prioridad de módulos (2026-08-04, daniel@startti.co):** los 3 módulos MÁS CRÍTICOS son **`llm`**, **`dag_engine`** y **`gdocs`** — atacar sus findings PRIMERO. El resto queda en 2º orden. Las tablas de abajo están **agrupadas por módulo** en dos tiers de prioridad; dentro de cada módulo, orden por severidad (HIGH → MED → LOW).
 
@@ -28,7 +28,7 @@ Si vas a empezar a trabajar en algo de acá, sacalo de esta lista y agregalo al 
 | ✅ 6 | HIGH | ~~`gemini-1.5-flash` deprecado en health-check (`gemini_adapter:702`)~~ | `gemini-health-check-model-update` — **DONE** 2026-07-28 (`fd225bf2`) |
 | ✅ 8 | MED | ~~OpenAI stream lee solo `tool_calls.first()` (dropea calls paralelos)~~ | `openai-adapter-parallel-tool-calls` — **DONE** 2026-07-28 |
 | ✅ 9 | MED | ~~Hidratación row→message + branching de keying duplicados~~ | `llm-persistence-dedup-hydration` — **DONE** 2026-08-01 (PR #159 `12d19d9d`) |
-| 7 | MED | Serde de tool-call args con `unwrap_or_default()` → `{}`/`''` silencioso | `llm-adapter-tool-arg-serde-observability` |
+| ✅ 7 | MED | ~~Serde de tool-call args con `unwrap_or_default()` → `{}`/`''` silencioso~~ | `llm-adapter-tool-arg-serde-observability` — **DONE** 2026-08-08 |
 | 1 | LOW | Builder API inconsistente + error-swallowing | `llm-domain-builder-consistency` |
 | 2 | LOW | ID value objects usan `Result<Self,String>` en vez de `LlmError` | `llm-domain-id-error-type` |
 | 3 | LOW | `LlmError` hygiene (30+ variants, pocos constructores/docs) | `llm-error-hygiene` |
@@ -44,7 +44,7 @@ Si vas a empezar a trabajar en algo de acá, sacalo de esta lista y agregalo al 
 | 13 | HIGH ⚖️ | `DagRunUseCase::execute()` público `unimplemented!()` + muerto — DECISIÓN | `dag-run-usecase-execute-deprecation` |
 | 18 | HIGH | Errores tragados mientras se reporta éxito (`extraction`, `crdt_doc_*`) | `synthetic-tools-partial-failure-reporting` |
 | 25 | HIGH | Fail-open: status no-parseable → `DagRunStatus::Failed` silencioso | `dag-persistence-fail-open-observability` |
-| 30 | HIGH | `python_node:211` imprime código de usuario a stdout (fuga secretos/PII) | `dag-nodes-structured-logging-b05` |
+| ✅ 30 | HIGH | ~~`python_node:211` imprime código de usuario a stdout (fuga secretos/PII)~~ | `dag-nodes-structured-logging-b05` — **DONE** 2026-08-20 (PRs #167/#168/PR3) |
 | 14 | MED | Violación hexagonal: `sql_execution_service` (app) → `infra::sql_ast` | `dag-sql-exec-layering-fix` |
 | 15 | MED | `api.rs` — 4 bloques copy-paste entre handlers | `dag-api-handler-dedup` |
 | 16 | MED | `sse_mapper` mapea cada evento 2× (top-level + SubgraphWrapped) | `dag-sse-mapper-dedup` |
@@ -132,7 +132,7 @@ Si vas a empezar a trabajar en algo de acá, sacalo de esta lista y agregalo al 
 - **#37** (`documents`) `ListAssetsUseCase` muerto-pero-público: cablear el nodo o remover
 - **#45** (`crdt_documents`) stub GCS de CRDT: implementar o fallar-cerrado con error claro
 
-**Trigger:** retomar por PRIORIDAD 1 en orden de severidad — arrancar por los HIGH de `dag_engine` (#18, #25, #30) y el MED de `llm` (#7), luego los MED de `gdocs` (#41-43). Los ⚖️ (#13/#37/#45) agruparlos en una ronda de decisiones aparte. Los tests de integración (`tests/*.rs`, 44 archivos) y `examples/` quedaron fuera del audit — pase opcional futuro (B04 ya encontró un test que siempre pasa, así que vale la pena).
+**Trigger:** retomar por PRIORIDAD 1 en orden de severidad — arrancar por los HIGH de `dag_engine` restantes (#18, #25; #30 ya cerrado), luego los MED de `gdocs` (#41-43). Los ⚖️ (#13/#37/#45) agruparlos en una ronda de decisiones aparte. Los tests de integración (`tests/*.rs`, 44 archivos) y `examples/` quedaron fuera del audit — pase opcional futuro (B04 ya encontró un test que siempre pasa, así que vale la pena).
 
 ---
 
