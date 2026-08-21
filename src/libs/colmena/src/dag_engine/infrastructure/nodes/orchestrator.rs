@@ -1103,12 +1103,18 @@ impl ExecutableNode for OrchestratorNode {
                             phase_count = phase_map.len(),
                             "internal planner produced a phase plan"
                         );
-                        let rendered = phase_map
-                            .iter()
-                            .map(|(ph, tasks)| format!("Phase {ph}:\n{}", tasks.join("\n")))
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        crate::dag_engine::log_policy::payload_trace!(planner_plan, plan = %rendered);
+                        // Rendered inline as a macro argument so the join only
+                        // runs inside `payload_trace!`'s guard — with the gates
+                        // closed this costs nothing, matching every other
+                        // payload call site.
+                        crate::dag_engine::log_policy::payload_trace!(
+                            planner_plan,
+                            plan = %phase_map
+                                .iter()
+                                .map(|(ph, tasks)| format!("Phase {ph}:\n{}", tasks.join("\n")))
+                                .collect::<Vec<_>>()
+                                .join("\n")
+                        );
                     }
                 }
             } else {
