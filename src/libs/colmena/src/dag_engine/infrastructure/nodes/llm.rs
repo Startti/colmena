@@ -71,7 +71,10 @@ pub(crate) fn filter_enabled_tools(
             *wildcard_all = true;
         } else if let Some(stripped) = s.strip_prefix('!') {
             if stripped.is_empty() {
-                eprintln!("filter_enabled_tools: empty exclusion entry '!' ignored");
+                tracing::warn!(
+                    target: crate::dag_engine::log_policy::T_LLM,
+                    "filter_enabled_tools: empty exclusion entry '!' ignored"
+                );
             } else {
                 raw_excludes.push(stripped.to_string());
             }
@@ -3367,16 +3370,25 @@ impl ExecutableNode for LlmNode {
             }
         };
 
+        // The system message and the prompt are user/LLM-controlled and no
+        // longer ride on the node's `verbose` config — they go through the
+        // double-gated `payload_trace!`. See
+        // docs/developer_guide/50_logging_and_observability.md.
+        tracing::debug!(
+            target: crate::dag_engine::log_policy::T_LLM,
+            prompt_len = prompt.len(),
+            has_system_message = system_message.is_some(),
+            "llm request built"
+        );
+        if let Some(sys) = system_message {
+            crate::dag_engine::log_policy::payload_trace!(llm_io, system_message = %sys);
+        }
+        crate::dag_engine::log_policy::payload_trace!(llm_io, prompt = %prompt);
         if verbose {
-            colmena_log!("\n═══════════════════════════════════════");
-            colmena_log!("🤖 [LlmNode] VERBOSE — Request:");
-            colmena_log!("───────────────────────────────────────");
-            if let Some(sys) = system_message {
-                colmena_log!("System: {}", sys);
-                colmena_log!("───────────────────────────────────────");
-            }
-            colmena_log!("Prompt: {}", prompt);
-            colmena_log!("═══════════════════════════════════════\n");
+            colmena_log!(
+                "🤖 [LlmNode] VERBOSE — request built ({} prompt chars)",
+                prompt.len()
+            );
         }
 
         // ---- Step 4: Build summary tasks (run in parallel with answer call below) -----
@@ -3530,12 +3542,18 @@ impl ExecutableNode for LlmNode {
             }
         }
 
+        let response_content = response.content();
+        tracing::debug!(
+            target: crate::dag_engine::log_policy::T_LLM,
+            response_len = response_content.len(),
+            "llm response received"
+        );
+        crate::dag_engine::log_policy::payload_trace!(llm_io, response = %response_content);
         if verbose {
-            colmena_log!("\n═══════════════════════════════════════");
-            colmena_log!("🤖 [LlmNode] VERBOSE — Response:");
-            colmena_log!("───────────────────────────────────────");
-            colmena_log!("{}", response.content());
-            colmena_log!("═══════════════════════════════════════\n");
+            colmena_log!(
+                "🤖 [LlmNode] VERBOSE — response received ({} chars)",
+                response_content.len()
+            );
         }
 
         // Format result json in standardized structure

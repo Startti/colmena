@@ -169,13 +169,24 @@ impl ExecutableNode for ExtractionNode {
         if verbose {
             colmena_log!("\n═══════════════════════════════════════");
             colmena_log!("🔍 [ExtractionNode] VERBOSE — Parsed Output:");
-            colmena_log!("───────────────────────────────────────");
-            colmena_log!(
-                "{}",
-                serde_json::to_string_pretty(&parsed_json).unwrap_or_default()
-            );
             colmena_log!("═══════════════════════════════════════\n");
         }
+        // Structured event: safe metadata only — never the raw parsed
+        // output (LLM-generated structured data). See
+        // docs/developer_guide/50_logging_and_observability.md. The raw
+        // parsed JSON goes through `payload_trace!`, double-gated
+        // (EnvFilter directive AND `COLMENA_LOG_PAYLOADS`) — unconditional
+        // on `verbose` now that `tracing`'s own `EnvFilter` governs
+        // visibility.
+        tracing::debug!(
+            target: crate::dag_engine::log_policy::T_EXTRACTION,
+            field_count = parsed_json.as_object().map(|o| o.len()).unwrap_or(0),
+            "extraction node parsed the llm output"
+        );
+        crate::dag_engine::log_policy::payload_trace!(
+            extraction_result,
+            parsed = %serde_json::to_string_pretty(&parsed_json).unwrap_or_default()
+        );
 
         let session_id = _state
             .get("session_id")

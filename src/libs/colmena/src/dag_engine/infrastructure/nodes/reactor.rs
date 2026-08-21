@@ -206,14 +206,28 @@ impl ExecutableNode for ReactorNode {
             serde_json::to_string_pretty(&schema)?
         );
 
+        // The system prompt and the context texts are user/LLM-controlled, so
+        // they no longer ride on the node's `verbose` config — they go through
+        // the double-gated `payload_trace!`. `verbose` still controls how
+        // chatty the operator-facing line is, but it now carries sizes, not
+        // content. See docs/developer_guide/50_logging_and_observability.md.
+        tracing::debug!(
+            target: crate::dag_engine::log_policy::T_REACTOR,
+            system_message_len = system_message.len(),
+            context_texts_len = formatted_texts.len(),
+            "reactor synthesizing"
+        );
+        crate::dag_engine::log_policy::payload_trace!(
+            llm_io,
+            system_message = %system_message,
+            context_texts = %formatted_texts
+        );
         if verbose {
-            colmena_log!("\n═══════════════════════════════════════");
-            colmena_log!("⚡ [ReactorNode] VERBOSE — System Prompt:");
-            colmena_log!("───────────────────────────────────────");
-            colmena_log!("{}", system_message);
-            colmena_log!("───────────────────────────────────────");
-            colmena_log!("Context Texts:\n{}", formatted_texts);
-            colmena_log!("═══════════════════════════════════════\n");
+            colmena_log!(
+                "⚡ [ReactorNode] VERBOSE — synthesizing ({} prompt chars, {} context chars)",
+                system_message.len(),
+                formatted_texts.len()
+            );
         } else {
             colmena_log!("⚡ [ReactorNode] Reviewing synthesis and producing final response...");
         }
@@ -312,12 +326,17 @@ impl ExecutableNode for ReactorNode {
 
         let raw = response.content();
 
+        tracing::debug!(
+            target: crate::dag_engine::log_policy::T_REACTOR,
+            response_len = raw.len(),
+            "reactor received llm response"
+        );
+        crate::dag_engine::log_policy::payload_trace!(llm_io, response = %raw);
         if verbose {
-            colmena_log!("\n═══════════════════════════════════════");
-            colmena_log!("⚡ [ReactorNode] VERBOSE — Raw LLM Response:");
-            colmena_log!("───────────────────────────────────────");
-            colmena_log!("{}", raw);
-            colmena_log!("═══════════════════════════════════════\n");
+            colmena_log!(
+                "⚡ [ReactorNode] VERBOSE — response received ({} chars)",
+                raw.len()
+            );
         }
 
         // --- 5. Parse and return ---

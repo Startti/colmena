@@ -279,11 +279,21 @@ impl OrchestratorNode {
                 obj.remove("__orchestrator_phase_reactor_qa");
             }
 
-            colmena_log!(
-                "📨 [OrchestratorNode] REACTOR INPUTS (phase {}):\n{}\n{}",
+            // Structured event: safe metadata only — never the raw reactor
+            // inputs (task result text folded in is LLM-authored). See
+            // docs/developer_guide/50_logging_and_observability.md. The raw
+            // inputs go through `payload_trace!`, double-gated (EnvFilter
+            // directive AND `COLMENA_LOG_PAYLOADS`).
+            tracing::debug!(
+                target: crate::dag_engine::log_policy::T_ORCHESTRATOR,
                 phase,
-                "─".repeat(60),
-                serde_json::to_string_pretty(&reactor_inputs)
+                input_count = reactor_inputs.len(),
+                "dispatching phase reactor inputs"
+            );
+            crate::dag_engine::log_policy::payload_trace!(
+                agent_io,
+                phase,
+                reactor_inputs = %serde_json::to_string_pretty(&reactor_inputs)
                     .unwrap_or_else(|_| format!("{:?}", reactor_inputs))
             );
 
@@ -309,13 +319,19 @@ impl OrchestratorNode {
                 .await?;
             emit_internal_node_finish(&observer, KEY_PHASE_REACTOR, reactor_res.clone());
 
-            colmena_log!(
-                "📬 [OrchestratorNode] REACTOR RAW RESULT (phase {}):\n{}\n{}\n{}",
+            // Structured event: safe metadata only — never the raw reactor
+            // result (see comment above). The raw result goes through
+            // `payload_trace!`, double-gated.
+            tracing::debug!(
+                target: crate::dag_engine::log_policy::T_ORCHESTRATOR,
                 phase,
-                "─".repeat(60),
-                serde_json::to_string_pretty(&reactor_res)
-                    .unwrap_or_else(|_| format!("{:?}", reactor_res)),
-                "─".repeat(60)
+                "phase reactor returned a result"
+            );
+            crate::dag_engine::log_policy::payload_trace!(
+                agent_io,
+                phase,
+                reactor_result = %serde_json::to_string_pretty(&reactor_res)
+                    .unwrap_or_else(|_| format!("{:?}", reactor_res))
             );
 
             // ── Suspend check ─────────────────────────────────────────────────
@@ -788,10 +804,21 @@ impl ExecutableNode for OrchestratorNode {
         if verbose {
             colmena_log!("\n═══════════════════════════════════════");
             colmena_log!("🚦 [OrchestratorNode] VERBOSE — session_id: {}", session_id);
-            colmena_log!("───────────────────────────────────────");
-            colmena_log!("Inputs: {:?}", inputs);
             colmena_log!("═══════════════════════════════════════\n");
         }
+        // Structured event: safe metadata only — never the raw node inputs
+        // (may carry LLM-authored text, e.g. a resumed suspend answer). See
+        // docs/developer_guide/50_logging_and_observability.md. The raw
+        // inputs go through `payload_trace!`, double-gated (EnvFilter
+        // directive AND `COLMENA_LOG_PAYLOADS`) — unconditional on `verbose`
+        // now that `tracing`'s own `EnvFilter` governs visibility.
+        tracing::debug!(
+            target: crate::dag_engine::log_policy::T_ORCHESTRATOR,
+            session_id = %session_id,
+            input_count = inputs.len(),
+            "orchestrator node inputs received"
+        );
+        crate::dag_engine::log_policy::payload_trace!(agent_io, session_id = %session_id, inputs = ?inputs);
 
         // ── Detect resume context ─────────────────────────────────────────────
         // When run_use_case resumes from a suspend, it injects __colmena_resume_answer
@@ -1526,13 +1553,25 @@ impl ExecutableNode for OrchestratorNode {
                                 .execute(&task_inputs, &subgraph_cfg, _state, _observer.clone())
                                 .await?;
 
-                            colmena_log!(
-                                "📬 [OrchestratorNode] RAW RESULT ← agent '{}' | task '{}'\n{}\n{}\n{}",
-                                task.assigned_to,
-                                task.task_name,
-                                "─".repeat(60),
-                                serde_json::to_string_pretty(&agent_result).unwrap_or_else(|_| format!("{:?}", agent_result)),
-                                "─".repeat(60)
+                            // Structured event: safe metadata only —
+                            // `assigned_to` is an agent identifier from the
+                            // graph config, safe to log. Never the raw
+                            // agent result JSON, and never `task.task_name`
+                            // alongside it (both LLM-authored). See
+                            // docs/developer_guide/50_logging_and_observability.md.
+                            // The raw result + task name go through
+                            // `payload_trace!`, double-gated.
+                            tracing::debug!(
+                                target: crate::dag_engine::log_policy::T_ORCHESTRATOR,
+                                agent = %task.assigned_to,
+                                "agent subgraph returned a result"
+                            );
+                            crate::dag_engine::log_policy::payload_trace!(
+                                agent_io,
+                                agent = %task.assigned_to,
+                                task_name = %task.task_name,
+                                agent_result = %serde_json::to_string_pretty(&agent_result)
+                                    .unwrap_or_else(|_| format!("{:?}", agent_result))
                             );
 
                             // ── Agent suspend propagation (spec §5) ──
