@@ -268,8 +268,8 @@ registrada como un ítem abierto en el ledger de auditoría (ver
   mayor severidad: `python_node.rs`, `sql.rs`, `llm.rs` (prompt y respuesta
   completos del nodo más usado del crate), `reactor.rs`, el I/O con el reactor
   y con los subgrafos-agente en `orchestrator.rs`, y la salida parseada de
-  `extraction.rs`. Una auditoría del resto de las 161 llamadas a
-  `colmena_log!` en 15 archivos encontró **~23 sitios que siguen sin gate**:
+  `extraction.rs`. Una auditoría del resto de las ~149 invocaciones de
+  `colmena_log!` en 13 archivos encontró **~23 sitios que siguen sin gate**:
   `planner.rs` (3: system message, textos de contexto, respuesta cruda),
   `critic.rs` (3: el mismo patrón), `extraction.rs` (1: el system message de
   entrada, distinto de la salida ya migrada) y ~16 sitios en
