@@ -327,7 +327,7 @@ Una corrida suspendida devuelve `output.suspended: true` + `output.suspendQuesti
 
 **`planner`** — bloque `config.planner` dentro de `orchestrator` (no nodo). `model`, `provider_key_id` (preferir PREMIUM/reasoning), `system_message`, `allow_suspend`, `thinking_budget`. Sin memoria/skills/lazy/secure.
 
-**`subgraph` (Reusable)** — embebe un grafo hijo. **Por `/v1` SOLO funciona `child_graph_inline`** (grafo `{nodes, edges}` verbatim), tanto en modo nodo (`config.child_graph_inline`) como en modo tool (entry en `tool_configurations` con `child_graph_inline` dentro de su config). ⚠️ **`assetVersionId` NO sirve por `/v1`**: es un artificio del canvas que `compileGraph` resuelve/baja a inline; el import de `/v1` no lo resuelve y el `subgraph` falla al correr (ver §9 corrección #7 y §16). Anidamiento ≤5 (`MAX_SUBGRAPH_TOOL_DEPTH`).
+**`subgraph` (Reusable)** — embebe un grafo hijo. **Por `/v1` SOLO funciona `child_graph_inline`** (grafo `{nodes, edges}` verbatim), tanto en modo nodo (`config.child_graph_inline`) como en modo tool (entry en `tool_configurations` con `child_graph_inline` dentro de su config). ⚠️ **`assetVersionId` NO sirve por `/v1`**: es un artificio del canvas que `compileGraph` resuelve/baja a inline; el import de `/v1` no lo resuelve y el `subgraph` falla al correr (ver §9 corrección #7 y §16). Anidamiento sin límite desde 2026-08-21 (el guard fijo de 5 fue eliminado; techo opcional en `COLMENA_MAX_SUBGRAPH_DEPTH`, apagado por defecto).
 
 ### 7.3 Tools plegadas (dentro de `llm_call.tool_configurations` + `enabled_tools`)
 

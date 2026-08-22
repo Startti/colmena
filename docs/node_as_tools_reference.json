@@ -892,7 +892,7 @@
         "Stateless por llamada: cada invocación arranca con memoria vacía (aislada por un path qualifier efímero derivado del tool_call_id). Dos llamadas a la misma tool no comparten memoria.",
         "HITL soportado: si el sub-agente se suspende (pregunta al usuario), el SUSPENDED hace bubble-up por el loop de tools del padre y el resume reanuda al hijo en esa misma tool call.",
         "Streaming transparente: los pasos internos del hijo se emiten al stream del padre con prefijo `subgraph-*`.",
-        "Guard de profundidad: máximo 5 niveles de subgraph-as-tool anidados (MAX_SUBGRAPH_TOOL_DEPTH); más allá retorna error claro para evitar recursión infinita."
+        "Profundidad de anidación: sin límite desde 2026-08-21 (el guard fijo de 5 fue eliminado). Un techo opcional por deployment vive en COLMENA_MAX_SUBGRAPH_DEPTH, apagado por defecto; al superarlo el error arranca con el código estable SUBGRAPH_DEPTH_EXCEEDED:. Ojo con child_graph_inline: anida el hijo dentro del documento del padre y el parser se rinde alrededor de 30 niveles inline, un límite del documento y no de la ejecución."
       ],
       "examples": {
         "forma_a_reusar_grafo_existente": {
