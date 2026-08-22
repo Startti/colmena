@@ -6,6 +6,42 @@
 - Version: 0.4.0 (alpha) — Phases 1-6 and 9 complete, Phase 7 (testing) and 8 (docs) pending
 - Repository: https://github.com/Startti/colmena
 
+## MANDATORY — Documentation ships WITH the code
+Every push and every PR carries its documentation update **in the same change**.
+Never a follow-up, never "lo actualizo después", never a separate ticket. A change
+that ships without its docs is not done.
+
+Documentation that lags the code is worse than none — people trust it and act on
+stale rules. This is enforced, not suggested: a `PreToolUse` hook
+([`.claude/hooks/require-docs-with-code.sh`](.claude/hooks/require-docs-with-code.sh))
+blocks `git push` and `gh pr create` when the outgoing diff touches repo files and
+no documentation.
+
+Before pushing, run this audit:
+
+1. **Update docs in the same commit range as the code.**
+2. **Grep for stale references OUTSIDE the area you touched.** This is the step
+   that gets skipped. When removing or renaming anything public — a constant, an
+   env var, an event type, a config field, a limit — grep the whole `docs/` tree
+   for the old name AND for prose describing the old behavior (e.g. "máximo 5
+   niveles"), not just the files already open. The canonical references
+   (`docs/node_as_tools_reference.json`, `docs/node_configurations.json`,
+   `docs/agent_context/`, the developer guides) are read as ground truth by both
+   agents and humans, and must never lag.
+3. **Audit against the code on disk, never against memory of what you wrote.**
+   `git log -S "<string>"` is the cheap check for "did this actually ship?".
+4. **Cross-verify claims against real behavior.** For anything observable (SSE
+   frames, CLI output, API responses), run it and check the doc's claims against
+   the captured output. A doc that reads well can still be false.
+5. **The PR body and commit message are documentation too.** They land in
+   permanent history and are read more than the docs. `develop` is shared, so a
+   wrong claim there cannot be rewritten — only corrected by a PR comment.
+6. **Check links, anchors, and JSON validity.**
+
+If a change legitimately needs no docs (a revert, a CI-only fix, a security
+patch), retry the push with the `DOCS_EXEMPT=1` prefix. Deliberate and visible,
+rather than silently working around the gate.
+
 ## MANDATORY — Colmena work is done with Colmena nodes
 When ANYTHING is requested in or for Colmena (a feature, an agent, a solution, a
 test), it MUST be built and verified **exclusively as a real Colmena graph made of
