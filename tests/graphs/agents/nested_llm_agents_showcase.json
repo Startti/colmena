@@ -1,0 +1,151 @@
+{
+  "comment": "Vitrina del wrap SSE con agentes anidados que usan tools. Tres niveles de llm_call encadenados: el analista delega en un experto (llm_call COMO TOOL) y en un equipo de cálculo (subgraph como tool); dentro, el calculista usa `multiply` y delega otra vez en un revisor que usa `add`. Cada nivel emite sus propios frames con su `level` y su `path`.",
+  "metadata": {
+    "category": "agents",
+    "features": [
+      "nested_visibility",
+      "level_path",
+      "subgraph_as_tool",
+      "llm_call_as_tool"
+    ],
+    "requires_env": [
+      "GEMINI_API_KEY",
+      "DATABASE_URL"
+    ]
+  },
+  "nodes": {
+    "trigger": {
+      "type": "input",
+      "config": {
+        "prompt": "Necesito dos cosas: que un experto me diga en una frase qué es el interés compuesto, y que el equipo de cálculo me dé 12 por 8 verificado."
+      }
+    },
+    "analista": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "model": "gemini-2.5-flash",
+        "api_key": "${GEMINI_API_KEY}",
+        "temperature": 0,
+        "stream": true,
+        "system_message": "Eres el analista principal. Para preguntas conceptuales usa la tool `consultar_experto`. Para cualquier cálculo usa la tool `equipo_calculo`. Cuando tengas ambas respuestas, resúmelas en dos frases.",
+        "tool_configurations": {
+          "consultar_experto": {
+            "name": "consultar_experto",
+            "node_type": "llm_call",
+            "description": "Consulta a un experto que responde conceptos en una frase.",
+            "fixed_config": {
+              "provider": "google",
+              "model": "gemini-2.5-flash",
+              "api_key": "${GEMINI_API_KEY}",
+              "temperature": 0,
+              "stream": true,
+              "system_message": "Eres un experto. Responde el concepto en UNA sola frase clara."
+            }
+          },
+          "equipo_calculo": {
+            "name": "equipo_calculo",
+            "node_type": "subgraph",
+            "description": "Delega un cálculo a un equipo que lo resuelve y lo hace verificar.",
+            "fixed_config": {
+              "child_graph_inline": {
+                "nodes": {
+                  "calc_in": {
+                    "type": "input",
+                    "config": {}
+                  },
+                  "calculista": {
+                    "type": "llm_call",
+                    "config": {
+                      "provider": "google",
+                      "model": "gemini-2.5-flash",
+                      "api_key": "${GEMINI_API_KEY}",
+                      "temperature": 0,
+                      "stream": true,
+                      "system_message": "Eres un calculista. Multiplica SIEMPRE con la tool `multiply`. Cuando tengas el producto, pídele al revisor que lo verifique sumándolo consigo mismo, usando la tool `pedir_revision`. Reporta ambos resultados en una frase.",
+                      "enabled_tools": [
+                        "multiply"
+                      ],
+                      "tool_configurations": {
+                        "pedir_revision": {
+                          "name": "pedir_revision",
+                          "node_type": "subgraph",
+                          "description": "Delega una verificación aritmética al revisor final.",
+                          "fixed_config": {
+                            "child_graph_inline": {
+                              "nodes": {
+                                "rev_in": {
+                                  "type": "input",
+                                  "config": {}
+                                },
+                                "revisor": {
+                                  "type": "llm_call",
+                                  "config": {
+                                    "provider": "google",
+                                    "model": "gemini-2.5-flash",
+                                    "api_key": "${GEMINI_API_KEY}",
+                                    "temperature": 0,
+                                    "stream": true,
+                                    "system_message": "Eres el revisor final. Verifica la suma que te pidan usando SIEMPRE la tool `add`. Responde en una frase: qué verificaste y el resultado.",
+                                    "enabled_tools": [
+                                      "add"
+                                    ]
+                                  }
+                                },
+                                "rev_out": {
+                                  "type": "output",
+                                  "config": {}
+                                }
+                              },
+                              "edges": [
+                                {
+                                  "from": "rev_in",
+                                  "to": "revisor"
+                                },
+                                {
+                                  "from": "revisor",
+                                  "to": "rev_out"
+                                }
+                              ]
+                            }
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "calc_out": {
+                    "type": "output",
+                    "config": {}
+                  }
+                },
+                "edges": [
+                  {
+                    "from": "calc_in",
+                    "to": "calculista"
+                  },
+                  {
+                    "from": "calculista",
+                    "to": "calc_out"
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "out": {
+      "type": "output"
+    }
+  },
+  "edges": [
+    {
+      "from": "trigger",
+      "to": "analista"
+    },
+    {
+      "from": "analista.result",
+      "to": "out"
+    }
+  ]
+}
