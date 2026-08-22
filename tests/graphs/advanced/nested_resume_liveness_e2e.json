@@ -1,0 +1,187 @@
+{
+  "comment": "E2E de liveness en el RESUME de un run anidado a tres niveles (handoff ADP 2026-08-22, 'Stream timeout: no events received in 60s'). Reproduce la forma reportada: creator -> ADP Resources -> DB Connection Specialist, cada nivel un llm_call con connection_url, y el especialista con la confirmacion humana PLEGADA como tool (node_type suspend) mas una tool de borrado real (python_script). El objetivo NO es la autonomia del agente sino medir el hueco maximo entre frames SSE durante el resume: si supera 60s, el watchdog de ADP dispara con razon.",
+  "metadata": {
+    "category": "advanced",
+    "features": [
+      "subgraph_as_tool",
+      "suspend_as_tool",
+      "nested_resume",
+      "liveness"
+    ],
+    "requires_env": [
+      "GEMINI_API_KEY",
+      "DATABASE_URL"
+    ]
+  },
+  "nodes": {
+    "root_input": {
+      "type": "input",
+      "config": {
+        "prompt": "Necesito eliminar la conexion de base de datos 'ventas-prod'. Encargate."
+      }
+    },
+    "creator": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "model": "gemini-2.5-flash",
+        "api_key": "${GEMINI_API_KEY}",
+        "connection_url": "${DATABASE_URL}",
+        "stream": true,
+        "temperature": 0,
+        "system_message": "Eres el creador de agentes. Para CUALQUIER pedido sobre recursos (crear, listar, borrar conexiones) debes SIEMPRE delegar llamando a la tool `adp_resources` y pasarle el pedido completo del usuario en `task`. Nunca resuelvas vos el pedido. Cuando la tool responda, resume su resultado en una frase.",
+        "prompt": "{{prompt}}",
+        "tool_configurations": {
+          "adp_resources": {
+            "name": "adp_resources",
+            "node_type": "subgraph",
+            "description": "Agente de recursos del ADP. Recibe el pedido del usuario en `task` y lo resuelve delegando en sus especialistas.",
+            "fixed_config": {
+              "child_graph_inline": {
+                "nodes": {
+                  "__asset_input__": {
+                    "type": "input",
+                    "config": {}
+                  },
+                  "adp_resources_agent": {
+                    "type": "llm_call",
+                    "config": {
+                      "provider": "google",
+                      "model": "gemini-2.5-flash",
+                      "api_key": "${GEMINI_API_KEY}",
+                      "connection_url": "${DATABASE_URL}",
+                      "stream": true,
+                      "temperature": 0,
+                      "system_message": "Eres el agente de recursos del ADP. Para CUALQUIER pedido sobre conexiones de base de datos debes SIEMPRE delegar llamando a la tool `db_connection_specialist` y pasarle el pedido completo en `task`. Nunca resuelvas vos el pedido. Cuando la tool responda, reporta su resultado en una frase.",
+                      "prompt": "{{task}}",
+                      "tool_configurations": {
+                        "db_connection_specialist": {
+                          "name": "db_connection_specialist",
+                          "node_type": "subgraph",
+                          "description": "Especialista en conexiones de base de datos. Recibe el pedido en `task` y lo ejecuta, pidiendo confirmacion humana antes de cualquier borrado.",
+                          "fixed_config": {
+                            "child_graph_inline": {
+                              "nodes": {
+                                "__asset_input__": {
+                                  "type": "input",
+                                  "config": {}
+                                },
+                                "db_specialist_agent": {
+                                  "type": "llm_call",
+                                  "config": {
+                                    "provider": "google",
+                                    "model": "gemini-2.5-flash",
+                                    "api_key": "${GEMINI_API_KEY}",
+                                    "connection_url": "${DATABASE_URL}",
+                                    "stream": true,
+                                    "temperature": 0,
+                                    "system_message": "Eres el especialista en conexiones de base de datos. Antes de borrar CUALQUIER conexion debes llamar SIEMPRE a la tool `confirmar_borrado` con id 'confirm_delete' para pedirle confirmacion al humano. Cuando recibas la respuesta: si el humano confirmo (si/yes/dale), llama a `borrar_conexion` con el nombre de la conexion y luego reporta el resultado; si el humano dijo que no, NO llames a `borrar_conexion` y responde explicando que no se borro nada.",
+                                    "prompt": "{{task}}",
+                                    "tool_configurations": {
+                                      "confirmar_borrado": {
+                                        "name": "confirmar_borrado",
+                                        "node_type": "suspend",
+                                        "description": "Pide confirmacion humana antes de una accion destructiva. Suspende el run hasta que el humano responda.",
+                                        "node_schema": {
+                                          "id": {
+                                            "type": "string",
+                                            "fixed": "confirm_delete"
+                                          },
+                                          "question_type": {
+                                            "type": "string",
+                                            "fixed": "choice"
+                                          },
+                                          "question": {
+                                            "type": "string",
+                                            "required": true,
+                                            "description": "Pregunta de confirmacion que se le muestra al humano, mencionando explicitamente el recurso a borrar."
+                                          },
+                                          "options": {
+                                            "type": "array",
+                                            "items": {
+                                              "type": "string"
+                                            },
+                                            "required": false,
+                                            "description": "Respuestas sugeridas, p.ej. [\"si\", \"no\"]. Es solo una sugerencia de UX: cualquier texto es valido."
+                                          }
+                                        }
+                                      },
+                                      "borrar_conexion": {
+                                        "name": "borrar_conexion",
+                                        "node_type": "python_script",
+                                        "description": "Borra definitivamente una conexion de base de datos por nombre. Solo se llama tras confirmacion humana explicita.",
+                                        "node_schema": {
+                                          "code": {
+                                            "fixed": "output = {\"deleted\": True, \"connection\": globals().get(\"connection_name\", \"desconocida\")}"
+                                          },
+                                          "sandbox_mode": {
+                                            "fixed": "restricted"
+                                          },
+                                          "connection_name": {
+                                            "type": "string",
+                                            "required": true,
+                                            "description": "Nombre exacto de la conexion a borrar."
+                                          }
+                                        }
+                                      }
+                                    }
+                                  }
+                                },
+                                "__asset_output__": {
+                                  "type": "output",
+                                  "config": {}
+                                }
+                              },
+                              "edges": [
+                                {
+                                  "from": "__asset_input__",
+                                  "to": "db_specialist_agent"
+                                },
+                                {
+                                  "from": "db_specialist_agent",
+                                  "to": "__asset_output__"
+                                }
+                              ]
+                            }
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "__asset_output__": {
+                    "type": "output",
+                    "config": {}
+                  }
+                },
+                "edges": [
+                  {
+                    "from": "__asset_input__",
+                    "to": "adp_resources_agent"
+                  },
+                  {
+                    "from": "adp_resources_agent",
+                    "to": "__asset_output__"
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "root_output": {
+      "type": "output",
+      "config": {}
+    }
+  },
+  "edges": [
+    {
+      "from": "root_input",
+      "to": "creator"
+    },
+    {
+      "from": "creator.result",
+      "to": "root_output"
+    }
+  ]
+}

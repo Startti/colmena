@@ -63,3 +63,54 @@ Una sección por feature. Cada sección contiene:
 **Estado.** done (código). Handoff a ADP (#63) pendiente en el repo de ADP.
 
 ---
+
+## 2. Verificación de liveness en el resume de un run anidado — respuesta al handoff de ADP
+
+**Qué cambió.** Nada del motor. Es una verificación E2E que cierra un reporte de ADP («`Stream
+timeout: no events received in 60s` al reanudar un run suspendido de tres niveles») y deja los
+grafos que la reproducen dentro del repo, para que la próxima vez que aparezca el síntoma la
+medición sea un comando y no una investigación.
+
+**Qué se midió.** Dos grafos nuevos reproducen la forma reportada — `creator` → `adp_resources` →
+`db_connection_specialist`, tres `llm_call` con `connection_url`, el especialista con la
+confirmación humana plegada como tool (`node_type: "suspend"`) más una tool de borrado real
+(`python_script`):
+
+- [`tests/graphs/advanced/nested_resume_liveness_e2e.json`](../tests/graphs/advanced/nested_resume_liveness_e2e.json)
+- [`tests/graphs/advanced/nested_resume_liveness_slow_e2e.json`](../tests/graphs/advanced/nested_resume_liveness_slow_e2e.json)
+  — misma forma, con dos diferencias deliberadas: la tool de borrado duerme 70 s (para forzar un
+  silencio profundo por encima del umbral de 60 s) y **no** fija `sandbox_mode: restricted`, porque el
+  modo restringido no permite importar `time` y además impone un `sandbox_timeout_secs` de 10 s que
+  cortaría el sleep antes de tiempo
+
+Corridos con `dag_engine run`, que emite por el mismo `SseMapper` que usa el worker de ADP, y
+midiendo el silencio entre frames consecutivos (que es exactamente lo que cuenta el watchdog de
+ADP):
+
+| Escenario | Frames | Duración | Máx. silencio |
+|---|---|---|---|
+| Run inicial, 3 niveles | 30 | 31.8 s | 5.4 s |
+| Resume | 40 | 32.0 s | 5.1 s |
+| Resume con 70 s de silencio forzado en el agente más profundo (`level=4` en el SSE) | 49 | 103.5 s | **20.0 s** |
+| Resume con `COLMENA_HEARTBEAT_INTERVAL_SECS=1` | 80 | 34.9 s | 1.0 s |
+
+Los conteos de frames y las duraciones son de una corrida concreta y no son bit-reproducibles (dependen
+de cuántos tokens emita el modelo); la columna estructural es la del silencio máximo.
+
+**Resultado.** El heartbeat sostiene el resume anidado: un silencio de 70 s en el agente más profundo (`level=4` en el SSE) se
+convierte en tres huecos de 20 s cerrados por frames `status` emitidos desde el nodo raíz. Se
+confirmó, eso sí, que los tres relojes de liveness se inicializan dentro del bloque que envuelve
+`node_impl.execute(...)`, de modo que el arranque de un run no está cubierto — medido con el
+heartbeat en 1 s, son **1.1 s** (1.1–2.4 s entre corridas) sin un solo frame en un resume de tres niveles. Esa ventana no
+escala con el anidamiento (la re-entrada a los subgrafos ocurre dentro del nodo, con el reloj ya
+corriendo) y el worker de ADP ya la cubre con su propio keepalive de 20 s, así que no se cambió el
+motor.
+
+**Documentación de referencia.**
+- Respuesta al handoff: [`docs/superpowers/handoff/2026-08-22-respuesta-stream-timeout-resume-anidado.md`](superpowers/handoff/2026-08-22-respuesta-stream-timeout-resume-anidado.md)
+- Liveness de dos relojes: `CHANGELOG_2026-07.md` §Fase E (PR #146)
+
+**Estado.** done (verificación). Sin cambios de código; el endurecimiento «arrancar el reloj al
+aceptar el job» queda anotado y no implementado, porque no explica el síntoma reportado.
+
+---
