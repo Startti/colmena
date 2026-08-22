@@ -73,6 +73,7 @@ impl Graph {
     /// - Node IDs containing `/` — the engine uses `/` to separate path-qualified
     ///   `node_id`s in subgraph hierarchies (`subgraph_node/inner_node`). Allowing
     ///   `/` in user-defined IDs would make the resulting paths ambiguous.
+    /// - Malformed `node_schema` on any tool in `tool_configurations`.
     pub fn validate(&self) -> Result<(), crate::dag_engine::domain::error::DagError> {
         use crate::dag_engine::domain::error::DagError;
         use crate::dag_engine::domain::tool_configuration::{parse_node_schema, NodeSchema};

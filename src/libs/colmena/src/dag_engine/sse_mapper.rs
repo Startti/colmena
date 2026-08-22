@@ -203,6 +203,11 @@ impl SseMapper {
                     "inputs": Self::clean_inputs(inputs)
                 }))
             }
+            DagExecutionEvent::NodeSkipped { node_id, reason } => Some(json!({
+                "type": "node-skipped",
+                "node_id": node_id,
+                "reason": reason
+            })),
             DagExecutionEvent::TurnStart { .. } => None,
             DagExecutionEvent::NodeFinish { node_id, output } => {
                 let ntype = self.node_types.get(node_id).cloned().unwrap_or_default();
@@ -1105,5 +1110,36 @@ mod tests {
         let close = mapper.map(&node_finish("top_llm"));
         assert_eq!(close[0]["type"], "text-end");
         assert_eq!(close[0]["id"], open[0]["id"]);
+    }
+    /// A node dropped by the engine must reach the wire. Three engine paths
+    /// discard a node without executing it (unsatisfiable dependency, `null`
+    /// output, unresolved edge pointer); two of them are intentional control
+    /// flow, so the frame is informational — but it must exist, otherwise a
+    /// mis-wired checkpoint looks identical to a graph that ran clean.
+    #[test]
+    fn node_skipped_maps_to_a_wire_frame_with_its_reason() {
+        let mut m = SseMapper::new();
+        let parts = m.map(&DagExecutionEvent::NodeSkipped {
+            node_id: "ask_user".into(),
+            reason: "pointer_unresolved".into(),
+        });
+        assert_eq!(parts.len(), 1, "expected exactly one frame, got: {parts:?}");
+        assert_eq!(parts[0]["type"], "node-skipped");
+        assert_eq!(parts[0]["node_id"], "ask_user");
+        assert_eq!(parts[0]["reason"], "pointer_unresolved");
+    }
+
+    #[test]
+    fn node_skipped_carries_level_and_path_like_every_other_node_frame() {
+        let mut m = SseMapper::new();
+        let parts = m.map(&DagExecutionEvent::NodeSkipped {
+            node_id: "ask_user".into(),
+            reason: "upstream_never_fired".into(),
+        });
+        assert_eq!(parts[0]["level"], 0);
+        assert_eq!(
+            parts[0]["path"], "ask_user",
+            "path falls back to the node id, so the frame is placeable in the nested tree"
+        );
     }
 }

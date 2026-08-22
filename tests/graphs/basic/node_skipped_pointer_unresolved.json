@@ -1,0 +1,20 @@
+{
+  "comment": "Regresión — un nodo cuya arista entrante usa un puntero que no resuelve NO se ejecuta, y el motor lo reporta con `node-skipped` / reason `pointer_unresolved` en vez de callarlo. Determinista, sin LLM. Esperado: node-start start, node-skipped ask, node-start tail, finish stop.",
+  "metadata": {
+    "category": "basic",
+    "features": ["node_skipped", "observability", "suspend"],
+    "requires_env": []
+  },
+  "nodes": {
+    "start": { "type": "input", "config": { "msg": "hola" } },
+    "ask": {
+      "type": "suspend",
+      "config": { "id": "confirm_delete", "question": "¿Confirmás el borrado?" }
+    },
+    "tail": { "type": "log" }
+  },
+  "edges": [
+    { "from": "start.campo_inexistente", "to": "ask" },
+    { "from": "start", "to": "tail" }
+  ]
+}

@@ -351,6 +351,17 @@ impl DagRunUseCase {
 
             let mut current_caller: Option<String> = None;
 
+            // Nodes the engine declined to enqueue, with the first reason seen.
+            // Collected rather than reported on sight: a node with several
+            // incoming branches can be passed over by one of them and still run
+            // via another, and a cyclic graph re-walks the same untaken branch
+            // every turn. The run decides at the end who actually never ran.
+            let mut potential_skips: HashMap<String, &'static str> = HashMap::new();
+
+            // Set when the run abandons its queue on an execution limit rather
+            // than draining it.
+            let mut stopped_early = false;
+
             // Usage tracking: accumulate token counts and model/provider per node_id.
             // node_meta: node_id → (model, provider, node_type)
             // usage_accumulator: node_id → (prompt, completion, thinking, cache_read, cache_write)
@@ -431,6 +442,9 @@ impl DagRunUseCase {
                         active_queue.push_back(node_id.clone());
                     } else {
                         colmena_log!("⚠️ [RunUseCase] Dropping node '{}' from queue because its upstream dependencies never fired.", node_id);
+                        potential_skips
+                            .entry(node_id.clone())
+                            .or_insert("upstream_never_fired");
                     }
                     continue;
                 }
@@ -444,6 +458,10 @@ impl DagRunUseCase {
                 // Check Call Limits
                 if let Err(e) = Self::check_limits(&node_id, current_caller.as_deref(), &graph, &mut global_calls, &mut caller_specific_calls) {
                     colmena_log!("🚨 [RunUseCase] Execution limit reached: {}", e);
+                    // The queue is abandoned here, so whatever is still in it did
+                    // not go unvisited for a routing reason. Remember that, or the
+                    // report below would blame ordinary routing for a truncation.
+                    stopped_early = true;
                     break;
                 }
 
@@ -932,8 +950,22 @@ impl DagRunUseCase {
 
                 // --- DYNAMICALLY PUSH TO QUEUE BASED ON EDGES ---
                 // If a node emitted Value::Null intentionally (skip stub), do not traverse its descendants
+                if processed_output.is_null() {
+                    // Deliberate "skip stub": a node emitting `null` stops the
+                    // branch. Legitimate control flow, but the downstream nodes
+                    // never run, so say so instead of leaving a hole.
+                    for edge in graph.edges.iter().filter(|e| e.from == node_id || e.from.starts_with(&format!("{}.", node_id))) {
+                        let target_node_id = edge.to.split('.').next().unwrap_or("").to_string();
+                        if !target_node_id.is_empty() {
+                            potential_skips
+                                .entry(target_node_id)
+                                .or_insert("upstream_null_output");
+                        }
+                    }
+                }
+
                 if !processed_output.is_null() {
-                    let outgoing_edges = graph.edges.iter().filter(|e| e.from == node_id || e.from.starts_with(&format!("{}.", node_id)));
+                    let outgoing_edges: Vec<_> = graph.edges.iter().filter(|e| e.from == node_id || e.from.starts_with(&format!("{}.", node_id))).collect();
                     for edge in outgoing_edges {
 
                         // Check if the specific JSON path exists in the emitted output
@@ -947,18 +979,79 @@ impl DagRunUseCase {
                             ptr_exists
                         };
 
-                        if has_data {
-                            let target_node_id = edge.to.split('.').next().unwrap_or("");
-                            if graph.nodes.contains_key(target_node_id)
-                                && !active_queue.contains(&target_node_id.to_string()) {
+                        let target_node_id = edge.to.split('.').next().unwrap_or("");
+                        // A target that is never enqueued simply does not run.
+                        // Both causes below are silent by design (conditional
+                        // routing, and a stale `to`), so report instead of failing.
+                        let skip_reason = if !has_data {
+                            Some("pointer_unresolved")
+                        } else if !graph.nodes.contains_key(target_node_id) {
+                            Some("unknown_target")
+                        } else {
+                            None
+                        };
+                        match skip_reason {
+                            Some(reason) => {
+                                if !target_node_id.is_empty() {
+                                    potential_skips
+                                        .entry(target_node_id.to_string())
+                                        .or_insert(reason);
+                                }
+                            }
+                            None => {
+                                if !active_queue.contains(&target_node_id.to_string()) {
                                     colmena_log!("DEBUG [Queue Push]: Enqueuing {} -> {}", node_id, target_node_id);
                                     active_queue.push_back(target_node_id.to_string());
                                 }
+                            }
                         }
                     }
                 }
 
                 current_caller = Some(node_id.clone());
+            }
+
+            // A node is skipped iff the whole run went by without it producing
+            // an output. The source of truth is the graph itself, not what an
+            // edge happened to mark: a node can be passed over by one branch and
+            // still run via another (so marking is not enough to report), and a
+            // node behind an already-skipped one is never marked at all (so
+            // marking is not enough to *find* it). `potential_skips` only
+            // supplies the precise cause when one was observed — on a run that
+            // resumes from a suspend, the marks were made in an earlier run and
+            // are gone, but the node is still correctly reported.
+            // Sorted so the tail of the stream is stable.
+            let no_cause_reason = if stopped_early {
+                "run_stopped_early"
+            } else {
+                "never_reached"
+            };
+            let mut confirmed_skips: Vec<(String, &'static str)> = graph
+                .nodes
+                .keys()
+                .map(|node_id| {
+                    let reason = potential_skips
+                        .get(node_id)
+                        .copied()
+                        .unwrap_or(no_cause_reason);
+                    (node_id.clone(), reason)
+                })
+                // …plus anything an edge pointed at that is not a node at all,
+                // which `graph.nodes` by definition cannot surface.
+                .chain(
+                    potential_skips
+                        .iter()
+                        .filter(|(node_id, _)| !graph.nodes.contains_key(*node_id))
+                        .map(|(node_id, reason)| (node_id.clone(), *reason)),
+                )
+                .filter(|(node_id, _)| !all_outputs.contains_key(node_id))
+                .collect();
+            confirmed_skips.sort();
+            for (node_id, reason) in confirmed_skips {
+                yield DagExecutionEvent::NodeSkipped {
+                    node_id,
+                    reason: reason.to_string(),
+                };
             }
 
             // Completed

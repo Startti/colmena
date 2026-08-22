@@ -15,6 +15,29 @@ Esta guía te ayudará a resolver los problemas más comunes al compilar, instal
 - [Diagnóstico Avanzado](#diagnóstico-avanzado)
 - [Obtener Ayuda](#obtener-ayuda)
 
+## 🧭 Un nodo del grafo no se ejecutó
+
+Si un nodo declarado en `nodes` no aparece en la traza de ejecución, el motor lo
+dice en vez de callarlo: al terminar la corrida emite un evento `node-skipped`
+por cada nodo que no produjo output, con la causa. Ver
+[sse_events_reference.md](../sse_events_reference.md#nodo-no-ejecutado) para la
+tabla completa de `reason`. Los más frecuentes:
+
+| Síntoma | Causa |
+|---------|-------|
+| `reason: "pointer_unresolved"` | La arista entrante usa `from: "nodo.campo"` y ese campo no está en el output del upstream. Revisá el nombre exacto del campo. |
+| `reason: "upstream_never_fired"` | El nodo esperaba dependencias que nunca se resolvieron. Suele indicar una rama muerta. |
+| `reason: "upstream_null_output"` | El upstream emitió `null` a propósito y cortó la rama. |
+| `reason: "unknown_target"` | Una arista apunta a un `node_id` que no existe en `nodes`. Casi siempre un error de cableado. |
+| `reason: "never_reached"` | No se observó ninguna causa concreta; típico en nodos detrás de otro ya salteado. |
+| `reason: "run_stopped_early"` | La corrida se cortó por un límite de ejecución (`max_total_calls` / `max_calls_from`), así que la cola quedó abandonada. |
+
+Un checkpoint `suspend` que no corre casi siempre cae en el primer caso: está en
+`nodes`, pero su arista entrante no resuelve, así que nunca se encola. Si la
+causa es `unknown_target`, el `to` de la arista tiene un id mal escrito.
+
+---
+
 ## 🚨 Diagnóstico Rápido
 
 Antes de buscar soluciones específicas, ejecuta este script de diagnóstico:

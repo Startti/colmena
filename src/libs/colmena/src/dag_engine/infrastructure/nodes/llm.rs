@@ -2284,6 +2284,10 @@ impl ExecutableNode for LlmNode {
         // AgentService for its history operations). Falls back to an in-memory
         // repo when the operator hasn't configured persistent memory; either
         // way recall_history works for the duration of the run.
+        // Whether the operator configured persistent conversation memory. The
+        // fallback below keeps the run working without it, but a *resume* cannot
+        // be honoured from an in-process history — see `classify_resume`.
+        let has_persistent_memory = repo_instance.is_some();
         let conversation_repo: Arc<dyn crate::llm::domain::ConversationRepository> =
             match repo_instance.clone() {
                 Some(repo) => repo,
@@ -2469,7 +2473,27 @@ impl ExecutableNode for LlmNode {
         if let Some(answer) = resume_answer.as_deref() {
             let conversation = conversation_repo.get_by_id(&conversation_key).await?;
             let maybe_pending = find_pending_tool_call(&conversation.messages);
-            if let Some(pending) = maybe_pending {
+            // Single dispatch point for the resume decision; the `if let` below
+            // only unwraps what this match already resolved.
+            let pending_to_replay =
+                match classify_resume(maybe_pending.is_some(), has_persistent_memory) {
+                    ResumeRouting::ReplayPending => maybe_pending,
+                    ResumeRouting::DegradeToFreshRun => None,
+                    ResumeRouting::FailNoPersistence => {
+                        let node_name = inputs
+                            .get("__node_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("(unknown)");
+                        return Err(format!(
+                        "llm_call '{node_name}': received a resume answer but this node has no \
+                         persistent conversation memory, so the suspended tool call cannot be \
+                         recovered. Set `connection_url` on this llm_call (it is required for \
+                         human-in-the-loop resume, including on llm_call nodes inside a subgraph)."
+                    )
+                        .into());
+                    }
+                };
+            if let Some(pending) = pending_to_replay {
                 tracing::info!(
                     target: "colmena::llm_node",
                     "llm_call: resume — replaying pending tool with user answer"
@@ -4197,6 +4221,74 @@ fn build_initial_user_message(
     _resolved_files: &[crate::llm::domain::FileData],
 ) -> Result<LlmMessage, crate::llm::domain::LlmError> {
     LlmMessage::user(prompt.to_string())
+}
+
+/// What to do with a `__colmena_resume_answer` that reached an `llm_call`.
+///
+/// The HITL contract is that a suspended tool call is replayed with the user's
+/// answer. Two things can go wrong, and they are not the same failure:
+///
+/// * The node has persistent conversation memory but no pending tool call —
+///   unexpected engine routing. Degrading to a fresh run is deliberate
+///   (`docs/superpowers/specs/2026-06-05-suspend-resume-answer-routing-fix-design.md`
+///   §4.2.1): one mis-routed answer must not abort the whole DAG.
+/// * The node has no persistent memory at all — the history is in-process and
+///   therefore always empty on a later run, so the resume is not merely
+///   unexpected, it is impossible. Continuing would let the agent answer a
+///   human checkpoint from an empty context.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ResumeRouting {
+    /// Replay the suspended tool call with the user's answer.
+    ReplayPending,
+    /// No pending call and no persistence — the resume can never succeed.
+    FailNoPersistence,
+    /// No pending call but memory is configured — fall through to a fresh run.
+    DegradeToFreshRun,
+}
+
+/// Decide how to handle a resume answer. See [`ResumeRouting`].
+pub(crate) fn classify_resume(has_pending: bool, has_persistent_memory: bool) -> ResumeRouting {
+    match (has_pending, has_persistent_memory) {
+        (true, _) => ResumeRouting::ReplayPending,
+        (false, true) => ResumeRouting::DegradeToFreshRun,
+        (false, false) => ResumeRouting::FailNoPersistence,
+    }
+}
+
+#[cfg(test)]
+mod classify_resume_tests {
+    use super::{classify_resume, ResumeRouting};
+
+    #[test]
+    fn replays_the_pending_tool_when_one_exists() {
+        assert_eq!(
+            classify_resume(true, true),
+            ResumeRouting::ReplayPending,
+            "the normal HITL resume must replay the suspended tool call"
+        );
+    }
+
+    #[test]
+    fn degrades_to_a_fresh_run_when_memory_exists_but_the_tool_call_is_gone() {
+        // Defense in depth from the resume-routing spec: the engine's per-node
+        // gating may have handed us an answer we cannot place. Do not abort the
+        // whole DAG for it.
+        assert_eq!(
+            classify_resume(false, true),
+            ResumeRouting::DegradeToFreshRun
+        );
+    }
+
+    #[test]
+    fn fails_when_the_node_has_no_persistent_memory_to_resume_from() {
+        // Without `connection_url` the node falls back to an in-process history
+        // that is always empty on a later run, so the resume can never succeed.
+        // Continuing means answering the user from nothing — fail instead.
+        assert_eq!(
+            classify_resume(false, false),
+            ResumeRouting::FailNoPersistence
+        );
+    }
 }
 
 #[cfg(test)]
