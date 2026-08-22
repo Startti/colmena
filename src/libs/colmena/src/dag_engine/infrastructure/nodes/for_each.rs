@@ -8,7 +8,7 @@ use crate::dag_engine::application::list_tool_executor::{
 };
 use crate::dag_engine::application::ports::NodeRegistryPort;
 use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
-use crate::dag_engine::domain::observer::{ExecutionObserver, NodeEvent};
+use crate::dag_engine::domain::observer::{ChildScopeObserver, ExecutionObserver, NodeEvent};
 use crate::dag_engine::domain::tool_configuration::parse_node_schema;
 use crate::dag_engine::infrastructure::node_schema_merge::merge_args_into_schema;
 use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::{
@@ -398,6 +398,7 @@ impl ExecutableNode for ForEachNode {
 
         // Per-row dispatch: merge the row into the target schema, run the target node.
         let dispatch = |index: usize, row: Value| {
+            let node_id = node_id.clone();
             let registry = registry.clone();
             let target_type = target_type.clone();
             let target_schema = target_schema.clone();
@@ -454,8 +455,22 @@ impl ExecutableNode for ForEachNode {
                         format!("row {index}: unknown target node_type '{target_type}'")
                     })?;
                     let mut item_state = json!({});
+
+                    // Every row runs the SAME target graph, so every row emits the
+                    // same node ids. Handed the raw observer they are indistinguishable
+                    // in the stream: identical `path`, so a consumer cannot tell row 0's
+                    // output from row 1's, and anything the SSE mapper keys on `path`
+                    // (open text blocks) collides between concurrent rows.
+                    //
+                    // Scoping each row under its own identity gives it a distinct
+                    // lineage. The suffix is the row index, which lines up with the
+                    // `index` field of the `batch-item-finished` event for that row.
+                    let row_observer = observer
+                        .clone()
+                        .map(|obs| ChildScopeObserver::wrap(obs, format!("{node_id}#{index}")));
+
                     let result = node
-                        .execute(&merged, &json!({}), &mut item_state, observer.clone())
+                        .execute(&merged, &json!({}), &mut item_state, row_observer)
                         .await
                         .map_err(|e| format!("row {index}: {e}"))?;
                     // HITL fail-closed: a SUSPENDED result inside a fan-out is an error.
@@ -659,6 +674,13 @@ mod tests {
             _state: &mut Value,
             _observer: Option<Arc<dyn ExecutionObserver>>,
         ) -> Result<Value, Box<dyn StdError + Send + Sync>> {
+            // Emit one event so a test can observe how this dispatch's observer
+            // was scoped. No-op when the caller passes `None`.
+            if let Some(obs) = &_observer {
+                obs.on_event(NodeEvent::LlmToken {
+                    token: "tick".to_string(),
+                });
+            }
             let map: Map<String, Value> = inputs.clone().into_iter().collect();
             Ok(json!({ "output": Value::Object(map) }))
         }
@@ -922,6 +944,74 @@ mod tests {
         let result_output = &out["output"]["results"][0]["output"]["output"];
         assert_eq!(result_output["__colmena_subgraph_depth"], json!(3));
         assert!(result_output.get("__node_id").is_none());
+    }
+
+    /// Every row runs the same target graph and so emits the same node ids.
+    /// Handed the raw observer they are indistinguishable in the stream — same
+    /// `path` for every row — which collides anything the SSE mapper keys on
+    /// `path`, notably open text blocks between concurrent rows.
+    #[tokio::test]
+    async fn each_row_emits_under_its_own_lineage() {
+        use crate::dag_engine::domain::events::DagExecutionEvent;
+        use std::sync::Mutex;
+
+        #[derive(Default)]
+        struct Capturing {
+            events: Mutex<Vec<NodeEvent>>,
+        }
+        impl ExecutionObserver for Capturing {
+            fn on_event(&self, event: NodeEvent) {
+                self.events.lock().unwrap().push(event);
+            }
+        }
+
+        let node = ForEachNode::new();
+        node.registry
+            .set(Arc::new(StubRegistry {
+                add: Arc::new(AddNode),
+                echo: Some(Arc::new(EchoNode)),
+            }) as Arc<dyn NodeRegistryPort>)
+            .ok();
+
+        let mut inputs: NodeInputs = HashMap::new();
+        inputs.insert(
+            "target".to_string(),
+            json!({ "node_type": "echo", "node_schema": {} }),
+        );
+        inputs.insert("items".to_string(), json!([{"a": 1}, {"a": 2}]));
+        inputs.insert("concurrency".to_string(), json!(2));
+        inputs.insert("__node_id".to_string(), json!("fan"));
+
+        let obs = Arc::new(Capturing::default());
+        node.execute(&inputs, &json!({}), &mut json!({}), Some(obs.clone()))
+            .await
+            .expect("fan-out succeeds");
+
+        // Collect the lineage of every token the rows emitted.
+        let events = obs.events.lock().unwrap();
+        let mut lineages: Vec<String> = events
+            .iter()
+            .filter_map(|e| match e {
+                NodeEvent::SubgraphChildEvent(raw) => {
+                    serde_json::from_value::<DagExecutionEvent>(raw.clone()).ok()
+                }
+                _ => None,
+            })
+            // The scoped observer stamps the row identity as the event's
+            // `node_id`; the enclosing run loop is what turns that into a
+            // `path` segment later.
+            .filter_map(|ev| match ev {
+                DagExecutionEvent::LlmToken { node_id, .. } => Some(node_id),
+                _ => None,
+            })
+            .collect();
+        lineages.sort();
+
+        assert_eq!(
+            lineages,
+            vec!["fan#0".to_string(), "fan#1".to_string()],
+            "each row must emit under its own `<node_id>#<index>` lineage"
+        );
     }
 
     #[test]

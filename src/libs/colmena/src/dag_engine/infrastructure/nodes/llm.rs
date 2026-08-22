@@ -2318,14 +2318,7 @@ impl ExecutableNode for LlmNode {
             executor = executor.with_agent_session_id(agent_session_id_str.clone());
             // Thread the parent observer so tool-invoked subgraphs emit subgraph-* events.
             executor = executor.with_observer(_observer.clone());
-            // Read the inbound subgraph-tool nesting depth (0 at the top level) and
-            // thread it into the executor so tool-invoked subgraphs receive it and
-            // can enforce MAX_SUBGRAPH_TOOL_DEPTH.
-            let inbound_depth = inputs
-                .get("__colmena_subgraph_depth")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            executor = executor.with_subgraph_depth(inbound_depth);
+            executor = executor.with_subgraph_depth(effective_subgraph_depth(inputs));
             if let Some(ctx) = documents_context.clone() {
                 executor = executor.with_documents(ctx);
             }
@@ -6421,5 +6414,67 @@ mod data_run_python_activation_tests {
     async fn not_activated_when_not_configured() {
         let configured_aliases: HashSet<String> = HashSet::new();
         assert!(!configured_aliases.contains(TOOL_DATA_RUN_PYTHON));
+    }
+}
+
+/// Nesting depth this `llm_call` should hand to the tools it dispatches.
+///
+/// An `llm_call` dispatched AS A TOOL is itself a nesting level: it runs its own
+/// agent loop below its caller. It used to pass the inbound depth through
+/// unchanged, so a chain of llm-as-tool agents all reported the same level and an
+/// optional recursion ceiling never counted them.
+///
+/// `DagToolExecutor` marks the tool path with `__colmena_tool_name`; an
+/// `llm_call` running as a graph node never carries that key.
+fn effective_subgraph_depth(inputs: &NodeInputs) -> u64 {
+    let inbound = inputs
+        .get("__colmena_subgraph_depth")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    inbound + u64::from(inputs.contains_key("__colmena_tool_name"))
+}
+
+#[cfg(test)]
+mod effective_subgraph_depth_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn inputs(pairs: &[(&str, Value)]) -> NodeInputs {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn graph_node_passes_the_inbound_depth_through() {
+        assert_eq!(effective_subgraph_depth(&inputs(&[])), 0);
+        assert_eq!(
+            effective_subgraph_depth(&inputs(&[("__colmena_subgraph_depth", json!(3))])),
+            3
+        );
+    }
+
+    #[test]
+    fn tool_invoked_counts_as_one_more_level() {
+        assert_eq!(
+            effective_subgraph_depth(&inputs(&[("__colmena_tool_name", json!("Experto"))])),
+            1
+        );
+        assert_eq!(
+            effective_subgraph_depth(&inputs(&[
+                ("__colmena_subgraph_depth", json!(4)),
+                ("__colmena_tool_name", json!("Experto")),
+            ])),
+            5
+        );
+    }
+
+    #[test]
+    fn a_non_numeric_inbound_depth_falls_back_to_zero() {
+        assert_eq!(
+            effective_subgraph_depth(&inputs(&[("__colmena_subgraph_depth", json!("nope"))])),
+            0
+        );
     }
 }
