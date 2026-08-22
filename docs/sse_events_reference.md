@@ -21,6 +21,8 @@ El stream tiene **dos niveles de eventos**:
 
 Los eventos de subgrafo nunca se mezclan con los de top-level: si estás dentro de un agente del orchestrator verás `subgraph-text-delta`, nunca `text-delta`.
 
+> El prefijo distingue **anidado vs. top-level**, no la profundidad. Un evento de nivel 1 y uno de nivel 4 son ambos `subgraph-*`; lo único que los separa es el campo `level`. Y la anidación **no tiene tope** desde 2026-08-21 (ver [nota de migración](adp_migration/2026-08-21-unbounded-subgraph-nesting.md)), así que `level` puede crecer sin cota: un consumidor que indente por nivel necesita un tope visual propio.
+
 ### Campos `level` / `path` en todos los eventos
 
 `SseMapper::map()` etiqueta **todas** las líneas emitidas (top-level y de subgrafo) con dos campos adicionales antes de devolverlas: `level` (profundidad de anidamiento, `u32`) y `path` (linaje como string, p.ej. `"parent>child"`). Son aditivos — no aparecen en las tablas de campos de este documento por brevedad, pero están presentes en absolutamente todos los frames. Ver `src/libs/colmena/src/dag_engine/sse_mapper.rs:629-639`.
@@ -169,7 +171,10 @@ Los sub-componentes internos del `orchestrator` (`planner`, `phase_reactor`, `cr
 |--------|--------|--------|
 | `thinking-delta` | `node_id`, `node_type`, `delta` | Token de un LLM interno del orchestrator |
 
-El `node_id` identifica cuál sub-componente está pensando y **coincide exactamente** con el `node_id` del `subgraph-node-start`/`subgraph-node-end` que lo enmarca:
+El `node_id` identifica cuál sub-componente está pensando y **coincide exactamente** con el `node_id` del `subgraph-node-start`/`subgraph-node-end` que lo enmarca. Desde 2026-08-21 también coinciden `level` y `path`: antes el `thinking-delta` salía un nivel más arriba y bajo otro linaje que su propio `node-start`, así que un árbol armado agrupando por `path` no podía colgarlo bajo su nodo. Ver [nota de migración](adp_migration/2026-08-21-thinking-delta-level-fix.md).
+
+> Con el `orchestrator` **anidado dentro de un `subgraph`** el thinking sigue siendo `thinking-delta`. Hasta 2026-08-21 en ese caso se emitía como `subgraph-text-delta`, o sea que el razonamiento interno del planner se renderizaba como la respuesta del agente. No existe un tipo `subgraph-thinking-delta`: los frames de thinking no son eventos de subgrafo en ningún nivel, y `level`/`path` bastan para ubicarlos.
+
 
 ```json
 { "type": "subgraph-node-start", "node_id": "planner",       "node_type": "planner"  }
@@ -306,6 +311,12 @@ Todos los eventos dentro de un nodo `subgraph` o de un agente-tarea del `orchest
 | `subgraph-node-start` | `node_id`, `node_type`, `config`, `inputs` | Antes de ejecutar un nodo interno |
 | `subgraph-node-end` | `node_id`, `node_type`, `output` | Después de ejecutar un nodo interno |
 
+Además de los nodos internos, el propio `subgraph` emite un **par de frontera** con `node_type: "subgraph"` que delimita todo su sub-árbol. El `node_id` de esa frontera sale de, en orden: el nombre del agente (`orchestrator`), el id del nodo del grafo (ruta por aristas), o el nombre del tool que el modelo llamó (ruta tool).
+
+> Desde 2026-08-21 la ruta tool **también** emite frontera. Antes no emitía ninguna: el fallback estaba escrito pero nada poblaba la clave de la que dependía, así que un `subgraph` usado como tool streameaba sin delimitador. Ver [nota de migración](adp_migration/2026-08-21-subgraph-tool-boundary-frames.md).
+>
+> Y en las dos rutas de frontera sintética (agente de orchestrator, o tool) el contenido del hijo ahora **anida bajo** el nombre de la frontera en `path`, en vez de salir como su hermano. Eso sube un nivel el `level` de ese contenido. La ruta por aristas queda igual. Ver [nota de migración](adp_migration/2026-08-21-nested-level-and-path-changes.md).
+
 ### Texto
 
 | Evento | Campos | Cuándo |
@@ -348,6 +359,32 @@ Todos los eventos dentro de un nodo `subgraph` o de un agente-tarea del `orchest
 ---
 
 ## Eventos por tipo de nodo
+
+### `for_each` — progreso de fan-out
+
+Un `for_each` emite dos eventos propios además de los de sus filas. Con el
+prefijo `subgraph-` cuando el `for_each` está anidado.
+
+| Evento | Campos | Cuándo |
+|--------|--------|--------|
+| `batch-progress` | `nodeId`, `total`, `completed`, `ok`, `err`, `inFlight` | Al empezar, por cada fila terminada, y al final |
+| `batch-item-finished` | `nodeId`, `index`, `key`, `status` | En cuanto una fila termina (`status`: `"ok"` \| `"err"`) |
+
+Las filas corren el mismo grafo target, así que emiten los mismos `node_id`.
+Desde 2026-08-21 cada fila corre bajo `<nodeId>#<índice>` en el `path`, y ese
+índice **coincide con el campo `index`** de su `batch-item-finished`:
+
+```
+{ "type": "batch-item-finished", "nodeId": "for_each", "index": 0, "status": "ok" }
+{ "type": "subgraph-text-delta",  "path": "coordinador>abanico>for_each#0>eco", ... }
+{ "type": "subgraph-text-delta",  "path": "coordinador>abanico>for_each#1>eco", ... }
+```
+
+Antes las filas compartían un `path` idéntico: no se podían atribuir, y sus
+bloques de texto colisionaban con `concurrency > 1`. Ver la
+[nota de migración](adp_migration/2026-08-21-for-each-row-lineage.md).
+
+---
 
 ### `trigger_webhook` / `input`
 
@@ -567,6 +604,8 @@ Para reanudar, el cliente envía las respuestas con el mismo `session_id`. El pl
 | `tool-input-start` | top | `toolCallId`, `toolName` | — |
 | `tool-input-delta` | top | `toolCallId`, `inputTextDelta` | — |
 | `tool-input-available` | top | `toolCallId`, `toolName`, `input` | — |
+| `batch-progress` | top | `nodeId`, `total`, `completed`, `ok`, `err`, `inFlight` | — |
+| `batch-item-finished` | top | `nodeId`, `index`, `key`, `status` | — |
 | `tool-output-available` | top | `toolCallId`, `output` | — |
 | `skill-loaded` | top | `nodeId`, `toolCallId`, `skillName`, `source`, `sizeBytes` | `reference` |
 | `tool-described` | top | `nodeId`, `toolCallId`, `toolName` | — |

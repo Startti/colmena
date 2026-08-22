@@ -95,6 +95,7 @@ Las secciones están organizadas por **tema**, no por orden numérico. Los prefi
 - [**Node Configurations (JSON canon)**](./node_configurations.json) — Schema canónico de cada nodo (campos, tipos, defaults).
 - [**Node as Tools Reference (JSON)**](./node_as_tools_reference.json) — Cómo configurar nodos como tools LLM (`tool_configurations`, `node_schema`, `expose_sub_tools`, ejemplos por tipo).
 - [**Node Ports Reference**](./agent_context/node_ports_reference.md) — Puertos default (`default_input`/`default_output`) y outputs por tipo de nodo.
+- [**Notas de migración para ADP**](./adp_migration/README.md) — Un documento por cada cambio de colmena visible cruzando la frontera SSE o que rompa la API pública de Rust: qué cambió, qué tiene que hacer ADP, y qué se rompe si no hace nada.
 
 ## 11. Diseño (DDS) y backlog
 

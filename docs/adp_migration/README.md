@@ -1,0 +1,36 @@
+# Notas de migración para ADP
+
+Un documento por cada cambio de colmena que sea **visible cruzando la frontera
+SSE** o que altere la superficie pública de Rust. Cada nota dice qué cambió, qué
+ve ADP antes y después, qué tiene que hacer ADP, y qué se rompe si no hace nada.
+
+Los cambios que quedan dentro del motor no llevan nota aquí.
+
+## 2026-08-21 — remediación de ejecución anidada y SSE
+
+Salen juntos en una sola rama. Léanse en este orden. El único que exige trabajo
+de frontend es el segundo.
+
+| # | Nota | Acción de ADP | Qué se rompe si se ignora |
+|---|------|---------------|---------------------------|
+| 1 | [`thinking-delta` con nivel correcto](2026-08-21-thinking-delta-level-fix.md) | Ninguna — solo cambian `level` y `path` | Nada; el thinking del planner se indenta un nivel más adentro |
+| 2 | [Cambios de `level` y `path`](2026-08-21-nested-level-and-path-changes.md) | **Obligatoria** — revisar el agrupamiento del árbol | El trabajo de un sub-agente se dibuja a la profundidad equivocada o al lado de su etiqueta |
+| 3 | [La anidación de subgrafos ya no tiene tope](2026-08-21-unbounded-subgraph-nesting.md) | Revisión — decidir si se pone un techo | Un ciclo de agentes recursa hasta agotar el worker |
+| 4 | [Frames de frontera para subgrafos como tool](2026-08-21-subgraph-tool-boundary-frames.md) | Opcional — dibujar los delimitadores nuevos | Nada; es puramente aditivo |
+| 4b | [Frontera también para `llm_call` / `for_each` como tool](2026-08-21-inner-work-tool-boundaries.md) | Recomendada — permite un solo camino de código | Aditivo; revisar si algo cuenta nodos |
+| 5 | [`llm_call` como tool ahora es un nivel real](2026-08-21-llm-call-as-tool-nesting.md) | Condicional — solo si algún agente lo usa | Esos eventos se mueven de nivel 0 a nivel 1 |
+| 6 | [Código de error del techo de profundidad](2026-08-21-subgraph-depth-error-code.md) | Opcional | Nada, salvo que se configure un techo |
+| 7 | [Linaje por fila en `for_each`](2026-08-21-for-each-row-lineage.md) | Opcional — habilita progreso por fila | Nada; las filas pasan de indistinguibles a identificables |
+
+## Cómo verificar todo esto de una sola pasada
+
+Un grafo cubre los siete cambios en un solo run:
+
+```bash
+cargo run --bin dag_engine -- run tests/graphs/advanced/nested_sse_remediation_e2e.json \
+  --agent-session-id verificacion_001 > /tmp/salida.sse
+python3 scripts/verify_nested_sse_e2e.py /tmp/salida.sse
+```
+
+Para el techo opcional de profundidad, el mismo grafo con
+`COLMENA_MAX_SUBGRAPH_DEPTH=3` y el verificador en modo `--ceiling`.
