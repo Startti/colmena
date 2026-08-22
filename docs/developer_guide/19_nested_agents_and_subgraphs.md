@@ -269,6 +269,32 @@ sequenceDiagram
 
 La clave `__colmena_resume_answer` es detectada por el `SubGraphNode` en la próxima llamada y enrutada directamente al `resume_subgraph` del hijo, sin re-ejecutar el grafo desde el principio.
 
+### Requisito: `connection_url` en cada `llm_call` que participe del HITL
+
+Un `llm_call` que suspende —sea el raíz o uno anidado dentro de un
+`child_graph_inline`— **necesita `connection_url`**. El resume se apoya en el
+historial de conversación persistido para encontrar la tool call suspendida y
+reproducirla con la respuesta del usuario. Sin `connection_url` el nodo cae a un
+historial en memoria del proceso, que en la corrida siguiente está siempre vacío.
+
+Desde 2026-08-21 ese caso **falla explícitamente** en vez de continuar:
+
+```
+llm_call 'especialista': received a resume answer but this node has no persistent
+conversation memory, so the suspended tool call cannot be recovered.
+Set `connection_url` on this llm_call (it is required for human-in-the-loop
+resume, including on llm_call nodes inside a subgraph).
+```
+
+Antes, esa combinación degradaba a una corrida fresca y el agente respondía sin
+contexto —típicamente inventando un error interno—, lo que hacía ver un problema
+de configuración como un fallo del motor. El caso distinto (hay memoria
+persistida pero no aparece la tool call pendiente) sigue degradando a corrida
+fresca a propósito, como defensa en profundidad.
+
+> Al generar grafos por código (compiladores de assets, canvas, etc.),
+> propagá `connection_url` a **todos** los `llm_call` inlineados, no solo al raíz.
+
 ---
 
 ## Eventos de Streaming

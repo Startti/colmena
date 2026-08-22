@@ -1,0 +1,152 @@
+{
+  "comment": "Regresión HITL a dos niveles de anidamiento — el raíz llama a un agente intermedio (subgraph as tool, child_graph_inline), que a su vez llama a un especialista cuyo grafo hijo contiene un nodo `suspend` cableado entre el input y el llm_call. Reproduce la forma que compila ADP para sus assets (__asset_input__ / __asset_output__). Esperado run 1: subgraph-node-start del suspend en level=2 y finishReason=suspended. Esperado run 2 (--answer): re-entra al suspend, sigue al llm_call hijo y desanida hasta el raíz con finishReason=stop. Los tres llm_call llevan connection_url: el resume lo requiere en cada nivel.",
+  "nodes": {
+    "root_input": {
+      "type": "input",
+      "config": {
+        "prompt": "Borra el recurso llamado 'facturas-2024'."
+      }
+    },
+    "root_agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "model": "gemini-2.5-flash",
+        "api_key": "${GEMINI_API_KEY}",
+        "connection_url": "${DATABASE_URL}",
+        "stream": false,
+        "system_message": "Eres un coordinador. Para CUALQUIER solicitud de borrado debes SIEMPRE llamar a la tool `agente_intermedio` pasando la petición del usuario en `task`. NUNCA respondas en texto plano sin llamarla.",
+        "prompt": "{{prompt}}",
+        "tool_configurations": {
+          "agente_intermedio": {
+            "name": "agente_intermedio",
+            "node_type": "subgraph",
+            "description": "Delega a un agente intermedio que a su vez tiene un especialista de borrado.",
+            "fixed_config": {
+              "child_graph_inline": {
+                "nodes": {
+                  "__asset_input__": {
+                    "type": "input",
+                    "config": {}
+                  },
+                  "ccf65c59": {
+                    "type": "llm_call",
+                    "config": {
+                      "provider": "google",
+                      "model": "gemini-2.5-flash",
+                      "api_key": "${GEMINI_API_KEY}",
+                      "stream": false,
+                      "system_message": "Eres un agente intermedio. Para CUALQUIER solicitud de borrado debes SIEMPRE llamar a la tool `especialista_borrado` pasando la petición en `task`. NUNCA respondas en texto plano sin llamarla.",
+                      "prompt": "{{task}}",
+                      "tool_configurations": {
+                        "especialista_borrado": {
+                          "name": "especialista_borrado",
+                          "node_type": "subgraph",
+                          "description": "Especialista que confirma con el humano antes de borrar.",
+                          "fixed_config": {
+                            "child_graph_inline": {
+                              "nodes": {
+                                "__asset_input__": {
+                                  "type": "input",
+                                  "config": {}
+                                },
+                                "f2565540": {
+                                  "type": "suspend",
+                                  "config": {
+                                    "id": "confirm_delete",
+                                    "question": "¿Confirmás el borrado del recurso? (sí/no)",
+                                    "question_type": "choice",
+                                    "options": [
+                                      "sí",
+                                      "no"
+                                    ]
+                                  }
+                                },
+                                "11bd61dd": {
+                                  "type": "llm_call",
+                                  "config": {
+                                    "provider": "google",
+                                    "model": "gemini-2.5-flash",
+                                    "api_key": "${GEMINI_API_KEY}",
+                                    "stream": false,
+                                    "system_message": "Eres el especialista de borrado. Ya se obtuvo confirmación humana. Responde confirmando el borrado en una frase.",
+                                    "prompt": "Confirmación recibida: {{answer_received}}. Reporta el resultado del borrado.",
+                                    "connection_url": "${DATABASE_URL}"
+                                  }
+                                },
+                                "__asset_output__": {
+                                  "type": "output",
+                                  "config": {}
+                                }
+                              },
+                              "edges": [
+                                {
+                                  "from": "__asset_input__",
+                                  "to": "f2565540"
+                                },
+                                {
+                                  "from": "f2565540",
+                                  "to": "11bd61dd"
+                                },
+                                {
+                                  "from": "11bd61dd",
+                                  "to": "__asset_output__"
+                                }
+                              ]
+                            }
+                          }
+                        }
+                      },
+                      "connection_url": "${DATABASE_URL}"
+                    }
+                  },
+                  "__asset_output__": {
+                    "type": "output",
+                    "config": {}
+                  }
+                },
+                "edges": [
+                  {
+                    "from": "__asset_input__",
+                    "to": "ccf65c59"
+                  },
+                  {
+                    "from": "ccf65c59",
+                    "to": "__asset_output__"
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "root_out": {
+      "type": "output"
+    }
+  },
+  "edges": [
+    {
+      "from": "root_input",
+      "to": "root_agent"
+    },
+    {
+      "from": "root_agent.result",
+      "to": "root_out"
+    }
+  ],
+  "metadata": {
+    "category": "agents",
+    "features": [
+      "subgraph_as_tool",
+      "child_graph_inline",
+      "hitl",
+      "suspend",
+      "nested_depth_2"
+    ],
+    "requires_env": [
+      "GEMINI_API_KEY",
+      "DATABASE_URL"
+    ]
+  }
+}
