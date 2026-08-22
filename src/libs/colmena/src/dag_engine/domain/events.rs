@@ -76,6 +76,34 @@ pub enum DagExecutionEvent {
     /// The reasoning block for `node_id` has closed.
     #[serde(rename = "reasoning_end")]
     ReasoningEnd { node_id: String, id: String },
+    /// A node that produced no output for the whole run. Decided at the end of
+    /// the run against the graph itself, not against what an edge marked: a node
+    /// with converging branches can be passed over by one and still run via
+    /// another, and a node behind an already-skipped one is never marked at all.
+    /// Emitted once per node. `reason` is a stable code carrying the first cause
+    /// observed, or `never_reached` when none was:
+    ///
+    /// * `upstream_never_fired` — its dependencies were never satisfied and no
+    ///   upstream was left in the queue. Almost always a mis-wired graph.
+    /// * `upstream_null_output` — an upstream emitted `null`, the deliberate
+    ///   "skip stub" that stops a branch. Legitimate control flow.
+    /// * `pointer_unresolved` — an incoming edge reads `from: "node.field"` and
+    ///   that field is absent from the upstream output. This is how conditional
+    ///   routing works (`router`, `loop_controller`), so also legitimate.
+    /// * `unknown_target` — an edge names a node absent from `nodes`. A real
+    ///   wiring defect: nothing can ever run at the other end of that edge.
+    /// * `never_reached` — the node produced no output and no edge ever passed
+    ///   over it, so no more precise cause was observed. Typically a node behind
+    ///   an already-skipped one, or one whose cause was recorded in an earlier
+    ///   run of a suspend/resume chain.
+    /// * `run_stopped_early` — the run abandoned its queue on an execution limit
+    ///   (`max_total_calls` / `max_calls_from`), so the remaining nodes were not
+    ///   passed over for any routing reason.
+    ///
+    /// The event never aborts a run: it exists so a node that never ran is
+    /// never invisible.
+    #[serde(rename = "node_skipped")]
+    NodeSkipped { node_id: String, reason: String },
     #[serde(rename = "graph_finish")]
     GraphFinish { output: Value },
     #[serde(rename = "error")]
@@ -364,7 +392,8 @@ impl DagExecutionEvent {
             | DagExecutionEvent::ToolDescribed { node_id, .. }
             | DagExecutionEvent::BatchProgress { node_id, .. }
             | DagExecutionEvent::BatchItemFinished { node_id, .. }
-            | DagExecutionEvent::Progress { node_id, .. } => Some(node_id),
+            | DagExecutionEvent::Progress { node_id, .. }
+            | DagExecutionEvent::NodeSkipped { node_id, .. } => Some(node_id),
             _ => None,
         }
     }

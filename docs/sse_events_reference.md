@@ -47,6 +47,50 @@ Los eventos de subgrafo nunca se mezclan con los de top-level: si estás dentro 
 
 ---
 
+### Nodo no ejecutado
+
+| Evento | Campos | Cuándo |
+|--------|--------|--------|
+| `node-skipped` | `node_id`, `reason` | El motor decidió no ejecutar el nodo |
+
+Un nodo que no corre ya no es invisible. Antes, las tres rutas que descartan un
+nodo lo hacían sin emitir nada: un checkpoint `suspend` mal cableado se veía
+exactamente igual que un grafo que corrió limpio.
+
+| `reason` | Significado | ¿Es un problema? |
+|----------|-------------|------------------|
+| `upstream_never_fired` | El nodo nunca tuvo sus dependencias resueltas y ningún upstream quedaba en cola | Casi siempre sí — grafo mal cableado |
+| `upstream_null_output` | El nodo upstream emitió `null` (*skip stub*), por lo que la rama se detiene | No — control de flujo deliberado |
+| `pointer_unresolved` | La arista entrante usa `from: "nodo.campo"` y ese campo no existe en el output | No — así funciona el ruteo condicional |
+| `unknown_target` | La arista apunta a un `node_id` ausente de `nodes` | Sí — error de cableado |
+| `never_reached` | El nodo no produjo output y ninguna arista pasó por él, así que no se observó una causa más precisa | Depende — típico en nodos detrás de otro ya salteado |
+| `run_stopped_early` | La corrida abandonó su cola al alcanzar un límite de ejecución (`max_total_calls` / `max_calls_from`) | Sí — la corrida quedó truncada |
+
+Es un evento **informativo**: no aborta la corrida.
+
+**Cuándo se emite.** Al **final** de la corrida, comparando el grafo completo
+contra los nodos que produjeron output. Sale **un evento por nodo**, nunca uno
+por arista.
+
+Se decide así, y no en el momento en que una arista pasa de largo, por dos
+motivos: un nodo con varias aristas entrantes puede ser salteado por una y
+ejecutarse igual por otra (reportarlo ahí sería mentira), y un nodo que está
+detrás de otro ya salteado nunca llega a ser marcado por ninguna arista
+(reportarlo solo desde las marcas lo dejaría invisible). El `reason` que queda es
+la **primera** causa observada, o `never_reached` si no se observó ninguna.
+
+En una corrida que termina suspendida (`finishReason: "suspended"`) o cancelada
+no se emite ninguno: esos nodos están pendientes, no salteados.
+
+```json
+{ "type": "node-skipped", "node_id": "ask_user", "reason": "pointer_unresolved" }
+```
+
+Dentro de un subgrafo llega igual que los demás eventos de nodo, con sus campos
+`level` y `path`.
+
+---
+
 ### Texto LLM — nodo `llm_call` con streaming
 
 Emitido cuando un nodo LLM genera texto en streaming.
