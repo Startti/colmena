@@ -173,9 +173,67 @@ se filtran del mapeo IN.
   en esa misma tool call (incluido multi-suspend anidado).
 - **Streaming transparente** — los pasos internos del hijo se emiten al stream
   del padre con prefijo `subgraph-*`.
-- **Guard de profundidad** — máximo 5 niveles de subgraph-as-tool anidados
-  (`MAX_SUBGRAPH_TOOL_DEPTH`); más allá retorna un error claro para evitar
-  recursión infinita.
+- **Profundidad sin tope** — no hay límite de anidación; ver
+  [Profundidad de anidación](#profundidad-de-anidación) más abajo.
+
+### Profundidad de anidación
+
+Desde 2026-08-21 **no hay límite**. El guard fijo de 5 niveles fue eliminado:
+rechazaba composiciones legítimas y no había forma de optar por salir. Se
+verificaron **50 niveles** de anidación en ejecución, sin degradación.
+
+#### Techo opcional (apagado por defecto)
+
+```
+COLMENA_MAX_SUBGRAPH_DEPTH=<n>
+```
+
+| Valor | Efecto |
+|-------|--------|
+| Sin definir (**default**) | Sin límite |
+| Vacío, no parseable, o `0` | Sin límite |
+| `n > 0` | Un `subgraph` a profundidad `n` o mayor falla |
+
+El `0` se trata como "sin límite" a propósito, no como "rechazar todo": así un
+`=0` accidental en un script de deploy no deja fuera de servicio a todos los
+subgrafos del ambiente. La variable se lee una vez por proceso y se cachea, así
+que cambiarla exige reiniciar el servicio.
+
+Existe como válvula de operaciones contra recursión desbocada (un subgrafo que
+se referencia a sí mismo, o un ciclo A→B→A), que sin tope factura llamadas LLM
+hasta agotar el worker. Al superarlo, el error arranca con el código estable
+`SUBGRAPH_DEPTH_EXCEEDED:`, para poder detectarlo sin parsear prosa.
+
+#### Un límite que SÍ existe: el JSON inline
+
+Anidar con `child_graph_inline` mete el grafo hijo **dentro del documento del
+padre**. Cada nivel agrega varias capas de anidación JSON, y el deserializador
+tiene un tope de recursión propio: alrededor de **30 niveles inline** el parseo
+falla con `recursion limit exceeded` antes de que el grafo llegue a ejecutarse.
+
+Es un límite del **documento**, no de la ejecución, y es anterior a este cambio.
+No aplica a las otras formas de anidar:
+
+- `child_graph_path` — cada grafo es un archivo aparte, todos poco profundos.
+- Assets publicados / subgrafo-como-tool — igual, cada documento es plano.
+
+Verificado: 50 niveles vía `child_graph_path` corren sin problema; 50 niveles
+inline ni siquiera parsean. Si una composición realmente necesita más de ~30
+niveles en un solo documento, la salida es partirla en archivos.
+
+#### Cómo verificarlo
+
+```bash
+cargo run --bin dag_engine -- run tests/graphs/advanced/nested_sse_remediation_e2e.json \
+  --agent-session-id verificacion_001 > /tmp/salida.sse
+python3 scripts/verify_nested_sse_e2e.py /tmp/salida.sse
+```
+
+El grafo incluye una cadena de 6 subgrafos anidados (la profundidad que el guard
+viejo rechazaba) y el verificador afirma que se alcanza. Con
+`COLMENA_MAX_SUBGRAPH_DEPTH=3` y el verificador en modo `--ceiling`, se
+comprueba el camino contrario. Ver también las
+[notas de migración para ADP](../adp_migration/README.md).
 
 Spec de diseño completa (decisiones, arquitectura del flujo con/sin HITL,
 ejemplos de las dos formas de declaración):

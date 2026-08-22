@@ -1,3 +1,4 @@
+use crate::dag_engine::domain::observer::NodeEvent;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -171,6 +172,173 @@ fn default_subgraph_depth() -> u32 {
 }
 
 impl DagExecutionEvent {
+    /// Lift a node-emitted [`NodeEvent`] into the stream event it corresponds to,
+    /// stamping it with `node_id`.
+    ///
+    /// Nodes emit `NodeEvent`s that carry no node identity of their own; whoever
+    /// is running the node supplies it. The graph execution loop does this
+    /// inline (it also keeps per-node bookkeeping while matching, so it cannot
+    /// simply call this). `DagToolExecutor` needs the same mapping for a node it
+    /// dispatches as a tool, and hand-rolling a second copy there would let the
+    /// two drift apart variant by variant.
+    ///
+    /// Returns `None` for [`NodeEvent::SubgraphChildEvent`], which is not a
+    /// node's own event but an already-formed stream event from one level below.
+    /// Callers decide how to re-parent it.
+    pub fn from_node_event(event: NodeEvent, node_id: &str) -> Option<Self> {
+        let nid = || node_id.to_string();
+        Some(match event {
+            NodeEvent::LlmToken { token } => Self::LlmToken {
+                node_id: nid(),
+                token,
+            },
+            NodeEvent::LlmToolCall {
+                tool_id,
+                tool_name,
+                args_chunk,
+            } => Self::LlmToolCall {
+                node_id: nid(),
+                tool_id,
+                tool_name,
+                args_chunk,
+            },
+            NodeEvent::LlmUsage {
+                prompt_tokens,
+                completion_tokens,
+                thinking_tokens,
+                cache_read_tokens,
+                cache_write_tokens,
+            } => Self::LlmUsage {
+                node_id: nid(),
+                prompt_tokens,
+                completion_tokens,
+                thinking_tokens,
+                cache_read_tokens,
+                cache_write_tokens,
+            },
+            NodeEvent::LlmToolCallStart {
+                tool_id,
+                tool_name,
+                tool_args,
+            } => Self::LlmToolCallStart {
+                node_id: nid(),
+                tool_id,
+                tool_name,
+                tool_args,
+            },
+            NodeEvent::LlmToolCallFinish {
+                tool_id,
+                success,
+                output,
+            } => Self::LlmToolCallFinish {
+                node_id: nid(),
+                tool_id,
+                success,
+                output,
+            },
+            NodeEvent::SkillLoaded {
+                tool_id,
+                skill_name,
+                reference,
+                source,
+                size_bytes,
+            } => Self::SkillLoaded {
+                node_id: nid(),
+                tool_id,
+                skill_name,
+                reference,
+                source,
+                size_bytes,
+            },
+            NodeEvent::ToolDescribed { tool_id, tool_name } => Self::ToolDescribed {
+                node_id: nid(),
+                tool_id,
+                tool_name,
+            },
+            // `for_each` stamps its own node_id on these two.
+            NodeEvent::BatchProgress {
+                node_id,
+                total,
+                completed,
+                ok,
+                err,
+                in_flight,
+            } => Self::BatchProgress {
+                node_id,
+                total,
+                completed,
+                ok,
+                err,
+                in_flight,
+            },
+            NodeEvent::BatchItemFinished {
+                node_id,
+                index,
+                key,
+                status,
+            } => Self::BatchItemFinished {
+                node_id,
+                index,
+                key,
+                status,
+            },
+            NodeEvent::LlmMessageStart => Self::LlmMessageStart { node_id: nid() },
+            NodeEvent::LlmMessageFinish(usage) => Self::LlmMessageFinish {
+                node_id: nid(),
+                usage: usage.map(|u| serde_json::json!(u)),
+            },
+            // Carries the internal sub-node's own identity (planner, critic, …).
+            NodeEvent::ThinkingToken {
+                node_id,
+                node_type,
+                token,
+            } => Self::ThinkingToken {
+                node_id,
+                node_type,
+                token,
+            },
+            NodeEvent::ReasoningStart { id } => Self::ReasoningStart { node_id: nid(), id },
+            NodeEvent::ReasoningDelta { id, token } => Self::ReasoningDelta {
+                node_id: nid(),
+                id,
+                token,
+            },
+            NodeEvent::ReasoningEnd { id } => Self::ReasoningEnd { node_id: nid(), id },
+            NodeEvent::SubgraphChildEvent(_) => return None,
+        })
+    }
+
+    /// Re-parent an event coming from one level below under `node_id`.
+    ///
+    /// Keeps the wrapper **flat**: an already-wrapped event gets its `depth`
+    /// bumped and `node_id` prepended to its lineage, rather than nesting a
+    /// second `SubgraphWrapped` around it. Deeply nested wrappers used to be
+    /// dropped outright by the SSE mapper.
+    pub fn wrap_as_child_of(self, node_id: &str) -> Self {
+        match self {
+            Self::SubgraphWrapped { inner, depth, path } => Self::SubgraphWrapped {
+                inner,
+                depth: depth + 1,
+                path: if path.is_empty() {
+                    node_id.to_string()
+                } else {
+                    format!("{node_id}>{path}")
+                },
+            },
+            base => {
+                let path = match base.node_id() {
+                    Some(child) => format!("{node_id}>{child}"),
+                    None => node_id.to_string(),
+                };
+                Self::SubgraphWrapped {
+                    inner: Box::new(base),
+                    depth: 1,
+                    path,
+                }
+            }
+        }
+    }
+
     /// The `node_id` this event is scoped to, when it has one. Events that are
     /// not tied to a single node (`TurnStart`, `GraphFinish`, `GraphUsageSummary`,
     /// `Error`, `Cancelled`, `SubgraphWrapped`) return `None`. Used to build the
@@ -405,6 +573,92 @@ mod tests {
                 assert_eq!(idle_secs, 42);
             }
             other => panic!("expected Progress, got {:?}", other),
+        }
+    }
+
+    // ── from_node_event / wrap_as_child_of ──────────────────────────────────
+
+    #[test]
+    fn from_node_event_stamps_the_supplied_node_id() {
+        let ev = DagExecutionEvent::from_node_event(
+            NodeEvent::LlmToken { token: "hi".into() },
+            "agent_a",
+        )
+        .expect("LlmToken lifts");
+        match ev {
+            DagExecutionEvent::LlmToken { node_id, token } => {
+                assert_eq!(node_id, "agent_a");
+                assert_eq!(token, "hi");
+            }
+            other => panic!("expected LlmToken, got {other:?}"),
+        }
+    }
+
+    /// ThinkingToken already knows which internal sub-node produced it; the
+    /// caller's node id must not overwrite that.
+    #[test]
+    fn from_node_event_preserves_thinking_token_identity() {
+        let ev = DagExecutionEvent::from_node_event(
+            NodeEvent::ThinkingToken {
+                node_id: "planner".into(),
+                node_type: "planner".into(),
+                token: "t".into(),
+            },
+            "orchestrator",
+        )
+        .expect("ThinkingToken lifts");
+        match ev {
+            DagExecutionEvent::ThinkingToken { node_id, .. } => assert_eq!(node_id, "planner"),
+            other => panic!("expected ThinkingToken, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn from_node_event_returns_none_for_child_events() {
+        assert!(DagExecutionEvent::from_node_event(
+            NodeEvent::SubgraphChildEvent(serde_json::json!({})),
+            "x"
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn wrap_as_child_of_wraps_a_base_event_at_depth_one() {
+        let base = DagExecutionEvent::LlmToken {
+            node_id: "child".into(),
+            token: "t".into(),
+        };
+        match base.wrap_as_child_of("parent") {
+            DagExecutionEvent::SubgraphWrapped { depth, path, .. } => {
+                assert_eq!(depth, 1);
+                assert_eq!(path, "parent>child");
+            }
+            other => panic!("expected SubgraphWrapped, got {other:?}"),
+        }
+    }
+
+    /// Stays flat: an already-wrapped event bumps depth and extends the lineage
+    /// instead of nesting a second wrapper, which the SSE mapper used to drop.
+    #[test]
+    fn wrap_as_child_of_flattens_an_already_wrapped_event() {
+        let wrapped = DagExecutionEvent::SubgraphWrapped {
+            inner: Box::new(DagExecutionEvent::LlmToken {
+                node_id: "leaf".into(),
+                token: "t".into(),
+            }),
+            depth: 2,
+            path: "mid>leaf".into(),
+        };
+        match wrapped.wrap_as_child_of("top") {
+            DagExecutionEvent::SubgraphWrapped { inner, depth, path } => {
+                assert_eq!(depth, 3);
+                assert_eq!(path, "top>mid>leaf");
+                assert!(
+                    !matches!(*inner, DagExecutionEvent::SubgraphWrapped { .. }),
+                    "wrapper must stay flat"
+                );
+            }
+            other => panic!("expected SubgraphWrapped, got {other:?}"),
         }
     }
 }

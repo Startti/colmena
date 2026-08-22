@@ -20,6 +20,19 @@ pub struct DagRunUseCase {
     state_repository: Option<Arc<dyn DagStateRepository>>,
     secure_value_service: Option<Arc<SecureValueService>>,
     liveness: LivenessSettings,
+    /// Starting `global_shared_state` handed to a child run in memory.
+    ///
+    /// `run_subgraph` persists the child's starting state and `execute_stream`
+    /// reads it back through the state repository. That round-trip is also the
+    /// only thing carrying `__colmena_subgraph_depth` into the child, because
+    /// the child-state builder in `SubGraphNode` strips every `__colmena_*` key
+    /// before handing the map over.
+    ///
+    /// With no state repository configured nothing is persisted and nothing is
+    /// read back, so the depth silently reset to 0 at each subgraph boundary and
+    /// the recursion ceiling stopped applying — no warning, no error. Seeding in
+    /// memory makes the handover independent of persistence.
+    seed_state: Option<Value>,
 }
 
 impl DagRunUseCase {
@@ -32,6 +45,7 @@ impl DagRunUseCase {
             state_repository,
             secure_value_service: None,
             liveness: LivenessSettings::default(),
+            seed_state: None,
         }
     }
 
@@ -50,7 +64,33 @@ impl DagRunUseCase {
             state_repository,
             secure_value_service: Some(secure_value_service),
             liveness: LivenessSettings::default(),
+            seed_state: None,
         }
+    }
+
+    /// Folds an in-memory seed into a run's starting `global_shared_state`.
+    ///
+    /// Keys already present win: a resumed run's persisted state is newer than
+    /// whatever seed its parent handed over. When a state repository IS
+    /// configured this is a no-op, because the persisted state that was just
+    /// read back already contains the same entries.
+    fn fold_seed_state(state: &mut Value, seed: Option<Value>) {
+        let (Some(Value::Object(seed)), Some(obj)) = (seed, state.as_object_mut()) else {
+            return;
+        };
+        for (k, v) in seed {
+            obj.entry(k).or_insert(v);
+        }
+    }
+
+    /// Seeds the starting `global_shared_state` for the next run, in memory.
+    ///
+    /// Used by `run_subgraph` so a child inherits its parent's ambient state
+    /// (notably `__colmena_subgraph_depth`) without depending on a database
+    /// round-trip. See [`Self::seed_state`].
+    pub fn with_seed_state(mut self, state: Value) -> Self {
+        self.seed_state = Some(state);
+        self
     }
 
     /// Overrides the liveness knobs (heartbeat / idle watchdog). Callers that
@@ -296,6 +336,9 @@ impl DagRunUseCase {
             if !global_shared_state.is_object() {
                 global_shared_state = serde_json::json!({});
             }
+
+            Self::fold_seed_state(&mut global_shared_state, self.seed_state.clone());
+
             if let Some(obj) = global_shared_state.as_object_mut() {
                 obj.insert("session_id".to_string(), Value::String(session_id.clone()));
 
@@ -1224,6 +1267,11 @@ impl SubGraphExecutorPort for DagRunUseCase {
             .validate()
             .map_err(|e| DagError::NodeExecution(format!("Invalid sub-graph: {}", e)))?;
 
+        // Handed to the child both ways: persisted below (so a resume can find
+        // it) AND seeded in memory on the cloned use case (so the handover works
+        // even with no state repository configured).
+        let seed = global_state.clone();
+
         // Mapear globales del hijo a la tabla para el inicio
         if let Some(repo) = &self.state_repository {
             let initial_state = DagRunState {
@@ -1243,7 +1291,7 @@ impl SubGraphExecutorPort for DagRunUseCase {
         }
 
         use futures::StreamExt;
-        let mut stream = Box::pin(self.clone().execute_stream(
+        let mut stream = Box::pin(self.clone().with_seed_state(seed).execute_stream(
             graph,
             Some(session_id.to_string()),
             None,
@@ -1343,6 +1391,50 @@ impl SubGraphExecutorPort for DagRunUseCase {
         } else {
             Ok(None)
         }
+    }
+}
+
+#[cfg(test)]
+mod seed_state_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn seeds_missing_keys() {
+        let mut state = json!({ "kept": 1 });
+        DagRunUseCase::fold_seed_state(
+            &mut state,
+            Some(json!({ "__colmena_subgraph_depth": 3, "other": "x" })),
+        );
+        assert_eq!(state["kept"], 1);
+        assert_eq!(state["__colmena_subgraph_depth"], 3);
+        assert_eq!(state["other"], "x");
+    }
+
+    /// A resumed run's persisted state is newer than the parent's seed.
+    #[test]
+    fn existing_keys_are_not_overwritten() {
+        let mut state = json!({ "__colmena_subgraph_depth": 9 });
+        DagRunUseCase::fold_seed_state(&mut state, Some(json!({ "__colmena_subgraph_depth": 1 })));
+        assert_eq!(state["__colmena_subgraph_depth"], 9);
+    }
+
+    #[test]
+    fn no_seed_is_a_noop() {
+        let mut state = json!({ "a": 1 });
+        DagRunUseCase::fold_seed_state(&mut state, None);
+        assert_eq!(state, json!({ "a": 1 }));
+    }
+
+    #[test]
+    fn non_object_seed_and_non_object_state_are_ignored() {
+        let mut state = json!({ "a": 1 });
+        DagRunUseCase::fold_seed_state(&mut state, Some(json!("not an object")));
+        assert_eq!(state, json!({ "a": 1 }));
+
+        let mut scalar = json!(5);
+        DagRunUseCase::fold_seed_state(&mut scalar, Some(json!({ "a": 1 })));
+        assert_eq!(scalar, json!(5));
     }
 }
 

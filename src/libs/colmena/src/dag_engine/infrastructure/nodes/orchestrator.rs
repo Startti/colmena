@@ -72,12 +72,23 @@ fn emit_internal_node_finish(
 }
 
 // ── DirectThinkingObserver ───────────────────────────────────────────────────
-// Fires LlmToken as ThinkingToken DIRECTLY to the parent (no SubgraphChildEvent
-// wrapping). Used for the orchestrator's internal LLMs (planner, critic,
-// phase_reactor, final_reactor) so their tokens reach run_use_case as plain
-// NodeEvent::ThinkingToken → DagExecutionEvent::ThinkingToken → "thinking-delta".
-// The node_id identifies the internal sub-node (e.g. "planner", "critic") so the
-// frontend can match thinking-delta events to the corresponding subgraph-node-start.
+// Re-labels an internal LLM's LlmToken stream as ThinkingToken. Used for the
+// orchestrator's internal LLMs (planner, critic, phase_reactor) so their tokens
+// are rendered as reasoning rather than as the agent's user-facing answer. The
+// node_id identifies the internal sub-node (e.g. "planner", "critic") so the
+// frontend can match the thinking frames to the corresponding node-start.
+//
+// The token is emitted WRAPPED (`SubgraphChildEvent`), matching how
+// `emit_internal_node_start`/`emit_internal_node_finish` emit this same node's
+// structural frames. That agreement is the whole point: emitted plain, the
+// tokens surfaced one nesting level ABOVE their own node-start and under a
+// different lineage path, so a tree built by grouping on `path` could not attach
+// a planner's reasoning to the planner.
+//
+// NOTE: LlmUsage and the Reasoning* events stay UNWRAPPED on purpose. They carry
+// no node identity of their own — `run_use_case` stamps them with the enclosing
+// loop's node_id — so they belong to the orchestrator node, not to the internal
+// sub-node, and wrapping them would move token accounting off the orchestrator.
 struct DirectThinkingObserver {
     inner: Arc<dyn ExecutionObserver>,
     node_id: String,
@@ -88,11 +99,14 @@ impl ExecutionObserver for DirectThinkingObserver {
     fn on_event(&self, event: NodeEvent) {
         match event {
             NodeEvent::LlmToken { token } => {
-                self.inner.on_event(NodeEvent::ThinkingToken {
+                let thinking = DagExecutionEvent::ThinkingToken {
                     node_id: self.node_id.clone(),
                     node_type: self.node_type.clone(),
                     token,
-                });
+                };
+                if let Ok(raw) = serde_json::to_value(&thinking) {
+                    self.inner.on_event(NodeEvent::SubgraphChildEvent(raw));
+                }
             }
             NodeEvent::LlmUsage { .. }
             | NodeEvent::ReasoningStart { .. }
@@ -2290,4 +2304,120 @@ fn build_tasks_json(tasks: Vec<crate::dag_engine::domain::state::DagTask>) -> Va
         .collect();
 
     Value::Array(arr)
+}
+
+#[cfg(test)]
+mod direct_thinking_observer_tests {
+    //! The orchestrator's internal LLMs (planner, critic, phase_reactor) must
+    //! emit their thinking at the SAME nesting level and lineage as their own
+    //! node-start/node-end frames. Those structural frames are wrapped
+    //! (`emit_internal_node_start`/`_finish`); the tokens used to be emitted
+    //! plain, which surfaced them one level ABOVE their own node-start under a
+    //! different path, orphaning a planner's reasoning in the tree.
+    use super::*;
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct Capturing {
+        events: Mutex<Vec<NodeEvent>>,
+    }
+    impl ExecutionObserver for Capturing {
+        fn on_event(&self, event: NodeEvent) {
+            self.events.lock().unwrap().push(event);
+        }
+    }
+
+    fn observed(sink: &Arc<Capturing>) -> Vec<NodeEvent> {
+        sink.events.lock().unwrap().clone()
+    }
+
+    #[test]
+    fn thinking_tokens_are_emitted_as_wrapped_child_events() {
+        let sink = Arc::new(Capturing::default());
+        let obs = direct_thinking_observer(KEY_PLANNER, NODE_TYPE_PLANNER, &Some(sink.clone()))
+            .expect("observer built");
+
+        obs.on_event(NodeEvent::LlmToken {
+            token: "pensando".into(),
+        });
+
+        let events = observed(&sink);
+        assert_eq!(events.len(), 1);
+        let raw = match &events[0] {
+            NodeEvent::SubgraphChildEvent(raw) => raw.clone(),
+            other => panic!(
+                "thinking must travel wrapped so it lands at its node-start's level; got {other:?}"
+            ),
+        };
+        match serde_json::from_value::<DagExecutionEvent>(raw).expect("valid event") {
+            DagExecutionEvent::ThinkingToken {
+                node_id,
+                node_type,
+                token,
+            } => {
+                assert_eq!(node_id, KEY_PLANNER);
+                assert_eq!(node_type, NODE_TYPE_PLANNER);
+                assert_eq!(token, "pensando");
+            }
+            other => panic!("expected ThinkingToken, got {other:?}"),
+        }
+    }
+
+    /// The structural frames this same node emits must use the SAME transport,
+    /// otherwise the two halves land at different levels again.
+    #[test]
+    fn node_start_uses_the_same_wrapped_transport_as_the_tokens() {
+        let sink = Arc::new(Capturing::default());
+        emit_internal_node_start(
+            &Some(sink.clone()),
+            KEY_PLANNER,
+            NODE_TYPE_PLANNER,
+            json!({}),
+        );
+        assert!(
+            matches!(
+                observed(&sink).first(),
+                Some(NodeEvent::SubgraphChildEvent(_))
+            ),
+            "node-start and thinking must share a transport or they split levels"
+        );
+    }
+
+    /// Usage and reasoning frames stay UNWRAPPED on purpose: they carry no node
+    /// identity of their own, so they belong to the orchestrator node. Wrapping
+    /// them would move token accounting off the orchestrator.
+    #[test]
+    fn usage_and_reasoning_stay_unwrapped() {
+        let sink = Arc::new(Capturing::default());
+        let obs = direct_thinking_observer(KEY_PLANNER, NODE_TYPE_PLANNER, &Some(sink.clone()))
+            .expect("observer built");
+
+        obs.on_event(NodeEvent::LlmUsage {
+            prompt_tokens: 10,
+            completion_tokens: 5,
+            thinking_tokens: None,
+            cache_read_tokens: None,
+            cache_write_tokens: None,
+        });
+        obs.on_event(NodeEvent::ReasoningStart { id: "r1".into() });
+
+        let events = observed(&sink);
+        assert_eq!(events.len(), 2);
+        assert!(
+            events
+                .iter()
+                .all(|e| !matches!(e, NodeEvent::SubgraphChildEvent(_))),
+            "these belong to the orchestrator node, not to the internal sub-node"
+        );
+    }
+
+    /// Anything else an internal LLM emits is deliberately dropped.
+    #[test]
+    fn unrelated_events_are_dropped() {
+        let sink = Arc::new(Capturing::default());
+        let obs = direct_thinking_observer(KEY_CRITIC, NODE_TYPE_CRITIC, &Some(sink.clone()))
+            .expect("observer built");
+        obs.on_event(NodeEvent::LlmMessageStart);
+        assert!(observed(&sink).is_empty());
+    }
 }

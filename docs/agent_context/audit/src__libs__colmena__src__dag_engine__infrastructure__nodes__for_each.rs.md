@@ -37,7 +37,7 @@
 
 - **Results sheet dual-mode**: Incremental mode writes per-row ranges inside the dispatch closure (race-safe via distinct row addresses); final mode bulk-writes all rows after iteration completes. Both modes create a destination sheet exactly once before iteration (never touches input sheet). Failures are logged as warnings; write errors captured in output.
 
-- **Ambient context forwarding**: `FORWARDED_CONTEXT_KEYS` preserves recursion depth and session context across the for_each boundary so subgraph targets don't reset `MAX_SUBGRAPH_TOOL_DEPTH` and conversational memory survives fan-out. `__node_id` is deliberately excluded to prevent collision with target's own path logic.
+- **Ambient context forwarding**: `FORWARDED_CONTEXT_KEYS` preserves nesting depth and session context across the for_each boundary so subgraph targets don't reset the depth counter (which feeds the optional `COLMENA_MAX_SUBGRAPH_DEPTH` ceiling) and conversational memory survives fan-out. `__node_id` is deliberately excluded to prevent collision with target's own path logic.
 
 - **Config-first with inputs fallback**: The `cfg_or_input` pattern (mirroring suspend node) allows the same dispatch code to serve both graph-node execution (config static, inputs empty) and LLM-tool execution (config `{}`, all args in inputs).
 

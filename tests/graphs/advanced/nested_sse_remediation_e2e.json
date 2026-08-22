@@ -1,0 +1,392 @@
+{
+  "comment": "E2E de la remediación de anidación/SSE (2026-08-21). Un solo run ejercita: profundidad sin tope (cadena de 6 subgrafos anidados, antes rechazada en 5), frontera de subgraph-as-tool, anidación del contenido bajo su frontera, llm_call-as-tool como nivel propio, bloques de texto por rama concurrente, y thinking del planner al nivel de su node-start. El system_message pide las tres tools explícitamente A PROPÓSITO: esto verifica el cableado del stream, no la autonomía del agente.",
+  "metadata": {
+    "category": "advanced",
+    "features": [
+      "nested_visibility",
+      "level_path",
+      "subgraph_as_tool",
+      "llm_call_as_tool",
+      "for_each",
+      "orchestrator",
+      "unbounded_depth"
+    ],
+    "requires_env": [
+      "GEMINI_API_KEY",
+      "DATABASE_URL"
+    ]
+  },
+  "nodes": {
+    "trigger": {
+      "type": "input",
+      "config": {
+        "prompt": "Ejecuta la verificación completa: llama a `cadena_profunda`, a `experto_directo` y a `abanico`, y resume en dos frases lo que devolvió cada una."
+      }
+    },
+    "coordinador": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "model": "gemini-2.5-flash",
+        "api_key": "${GEMINI_API_KEY}",
+        "temperature": 0,
+        "system_message": "Eres un coordinador de verificación. Llama EXACTAMENTE UNA VEZ a cada una de tus tres tools: `cadena_profunda`, `experto_directo` y `abanico`. Para `abanico` usa dos filas. Cuando tengas las tres respuestas, resume brevemente lo que devolvió cada una.",
+        "stream": true,
+        "tool_configurations": {
+          "cadena_profunda": {
+            "name": "cadena_profunda",
+            "node_type": "subgraph",
+            "description": "Recorre una cadena de sub-grafos anidados y devuelve la profundidad alcanzada.",
+            "fixed_config": {
+              "child_graph_inline": {
+                "nodes": {
+                  "in": {
+                    "type": "input",
+                    "config": {}
+                  },
+                  "deeper": {
+                    "type": "subgraph",
+                    "config": {
+                      "child_graph_inline": {
+                        "nodes": {
+                          "in": {
+                            "type": "input",
+                            "config": {}
+                          },
+                          "deeper": {
+                            "type": "subgraph",
+                            "config": {
+                              "child_graph_inline": {
+                                "nodes": {
+                                  "in": {
+                                    "type": "input",
+                                    "config": {}
+                                  },
+                                  "deeper": {
+                                    "type": "subgraph",
+                                    "config": {
+                                      "child_graph_inline": {
+                                        "nodes": {
+                                          "in": {
+                                            "type": "input",
+                                            "config": {}
+                                          },
+                                          "deeper": {
+                                            "type": "subgraph",
+                                            "config": {
+                                              "child_graph_inline": {
+                                                "nodes": {
+                                                  "in": {
+                                                    "type": "input",
+                                                    "config": {}
+                                                  },
+                                                  "deeper": {
+                                                    "type": "subgraph",
+                                                    "config": {
+                                                      "child_graph_inline": {
+                                                        "nodes": {
+                                                          "in": {
+                                                            "type": "input",
+                                                            "config": {}
+                                                          },
+                                                          "deeper": {
+                                                            "type": "subgraph",
+                                                            "config": {
+                                                              "child_graph_inline": {
+                                                                "nodes": {
+                                                                  "in": {
+                                                                    "type": "input",
+                                                                    "config": {}
+                                                                  },
+                                                                  "probe": {
+                                                                    "type": "python_script",
+                                                                    "config": {
+                                                                      "code": "output = {\"depth_reached\": globals().get(\"__colmena_subgraph_depth\", -1)}"
+                                                                    }
+                                                                  },
+                                                                  "out": {
+                                                                    "type": "output",
+                                                                    "config": {}
+                                                                  }
+                                                                },
+                                                                "edges": [
+                                                                  {
+                                                                    "from": "in",
+                                                                    "to": "probe"
+                                                                  },
+                                                                  {
+                                                                    "from": "probe",
+                                                                    "to": "out"
+                                                                  }
+                                                                ]
+                                                              }
+                                                            }
+                                                          },
+                                                          "out": {
+                                                            "type": "output",
+                                                            "config": {}
+                                                          }
+                                                        },
+                                                        "edges": [
+                                                          {
+                                                            "from": "in",
+                                                            "to": "deeper"
+                                                          },
+                                                          {
+                                                            "from": "deeper",
+                                                            "to": "out"
+                                                          }
+                                                        ]
+                                                      }
+                                                    }
+                                                  },
+                                                  "out": {
+                                                    "type": "output",
+                                                    "config": {}
+                                                  }
+                                                },
+                                                "edges": [
+                                                  {
+                                                    "from": "in",
+                                                    "to": "deeper"
+                                                  },
+                                                  {
+                                                    "from": "deeper",
+                                                    "to": "out"
+                                                  }
+                                                ]
+                                              }
+                                            }
+                                          },
+                                          "out": {
+                                            "type": "output",
+                                            "config": {}
+                                          }
+                                        },
+                                        "edges": [
+                                          {
+                                            "from": "in",
+                                            "to": "deeper"
+                                          },
+                                          {
+                                            "from": "deeper",
+                                            "to": "out"
+                                          }
+                                        ]
+                                      }
+                                    }
+                                  },
+                                  "out": {
+                                    "type": "output",
+                                    "config": {}
+                                  }
+                                },
+                                "edges": [
+                                  {
+                                    "from": "in",
+                                    "to": "deeper"
+                                  },
+                                  {
+                                    "from": "deeper",
+                                    "to": "out"
+                                  }
+                                ]
+                              }
+                            }
+                          },
+                          "out": {
+                            "type": "output",
+                            "config": {}
+                          }
+                        },
+                        "edges": [
+                          {
+                            "from": "in",
+                            "to": "deeper"
+                          },
+                          {
+                            "from": "deeper",
+                            "to": "out"
+                          }
+                        ]
+                      }
+                    }
+                  },
+                  "out": {
+                    "type": "output",
+                    "config": {}
+                  }
+                },
+                "edges": [
+                  {
+                    "from": "in",
+                    "to": "deeper"
+                  },
+                  {
+                    "from": "deeper",
+                    "to": "out"
+                  }
+                ]
+              }
+            }
+          },
+          "experto_directo": {
+            "name": "experto_directo",
+            "node_type": "llm_call",
+            "description": "Consulta a un experto directo (no es un subgrafo) y devuelve su respuesta.",
+            "fixed_config": {
+              "provider": "google",
+              "model": "gemini-2.5-flash",
+              "api_key": "${GEMINI_API_KEY}",
+              "stream": true,
+              "temperature": 0,
+              "system_message": "Eres un experto. Responde en UNA sola frase."
+            }
+          },
+          "abanico": {
+            "name": "abanico",
+            "node_type": "for_each",
+            "description": "Ejecuta un sub-agente por cada fila de la lista, en paralelo.",
+            "node_schema": {
+              "on_error": {
+                "fixed": "continue"
+              },
+              "concurrency": {
+                "fixed": 2
+              },
+              "items": {
+                "type": "array",
+                "required": true,
+                "description": "Dos filas, cada una con una `task` de una frase.",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "task": {
+                      "type": "string",
+                      "required": true,
+                      "description": "La instrucción para esta fila."
+                    }
+                  }
+                }
+              },
+              "target": {
+                "fixed": {
+                  "node_type": "subgraph",
+                  "node_schema": {
+                    "child_graph_inline": {
+                      "fixed": {
+                        "nodes": {
+                          "eco": {
+                            "type": "llm_call",
+                            "config": {
+                              "provider": "google",
+                              "model": "gemini-2.5-flash",
+                              "api_key": "${GEMINI_API_KEY}",
+                              "temperature": 0,
+                              "system_message": "Responde en UNA sola frase corta: {{task}}",
+                              "stream": true
+                            }
+                          },
+                          "out": {
+                            "type": "output"
+                          }
+                        },
+                        "edges": [
+                          {
+                            "from": "eco",
+                            "to": "out"
+                          }
+                        ]
+                      }
+                    },
+                    "task": {
+                      "type": "string",
+                      "required": true
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "orquestador": {
+      "type": "orchestrator",
+      "config": {
+        "max_phases": 2,
+        "verbose": false,
+        "planner": {
+          "provider": "google",
+          "model": "gemini-2.5-flash",
+          "api_key": "${GEMINI_API_KEY}",
+          "temperature": 0,
+          "system_message": "Planifica en UNA sola fase. Asigna esa fase al agente `Ejecutor`.",
+          "streaming": true
+        },
+        "final_reactor": {
+          "provider": "google",
+          "model": "gemini-2.5-flash",
+          "api_key": "${GEMINI_API_KEY}",
+          "temperature": 0,
+          "system_message": "Resume en dos frases lo que hizo el Ejecutor."
+        },
+        "agents": {
+          "Ejecutor": {
+            "description": "Redacta un cierre breve del informe de verificación.",
+            "child_graph_inline": {
+              "nodes": {
+                "ej_in": {
+                  "type": "input",
+                  "config": {}
+                },
+                "ej_llm": {
+                  "type": "llm_call",
+                  "config": {
+                    "provider": "google",
+                    "model": "gemini-2.5-flash",
+                    "api_key": "${GEMINI_API_KEY}",
+                    "temperature": 0,
+                    "system_message": "Redacta un cierre de dos frases para un informe de verificación técnica.",
+                    "stream": true
+                  }
+                },
+                "ej_out": {
+                  "type": "output",
+                  "config": {}
+                }
+              },
+              "edges": [
+                {
+                  "from": "ej_in",
+                  "to": "ej_llm"
+                },
+                {
+                  "from": "ej_llm",
+                  "to": "ej_out"
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    "out": {
+      "type": "output"
+    }
+  },
+  "edges": [
+    {
+      "from": "trigger",
+      "to": "coordinador"
+    },
+    {
+      "from": "coordinador.result",
+      "to": "orquestador"
+    },
+    {
+      "from": "orquestador",
+      "to": "out"
+    }
+  ]
+}

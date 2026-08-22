@@ -25,7 +25,9 @@
 use crate::colmena_log;
 use crate::dag_engine::application::ports::NodeRegistryPort;
 use crate::dag_engine::application::secure_value_service::SecureValueService;
+use crate::dag_engine::domain::events::DagExecutionEvent;
 use crate::dag_engine::domain::node::ExecutableNode;
+use crate::dag_engine::domain::observer::{ChildScopeObserver, ExecutionObserver, NodeEvent};
 use crate::dag_engine::domain::tool_configuration::{ToolConfiguration, DYNAMIC_PLACEHOLDER};
 use crate::llm::domain::{LlmError, ToolCall, ToolExecutor, ToolResult};
 use async_trait::async_trait;
@@ -1885,12 +1887,31 @@ impl DagToolExecutor {
             Value::String(Self::ephemeral_subgraph_path(&tool_call.id)),
         );
 
-        // Inject the current subgraph-tool nesting depth so a `subgraph` node
-        // invoked as a tool can enforce MAX_SUBGRAPH_TOOL_DEPTH. Harmless for
-        // nodes that ignore this key.
+        // Inject the current subgraph-tool nesting depth. Nesting is unbounded by
+        // default; the counter feeds the optional COLMENA_MAX_SUBGRAPH_DEPTH
+        // ceiling and reports the run's nesting level. Harmless for nodes that
+        // ignore this key.
         inputs.insert(
             "__colmena_subgraph_depth".to_string(),
             Value::Number(self.subgraph_depth.into()),
+        );
+
+        // Inject the LLM-visible tool name so a `subgraph` dispatched as a tool
+        // can name its stream boundary after the tool the model actually called
+        // (e.g. "Specs_Writer") instead of emitting no boundary at all.
+        //
+        // `SubGraphNode` used to fall back to `__node_id` for this, but that key
+        // is only ever set by the graph execution loop and a tool dispatch never
+        // goes through it — so the fallback was dead code and every
+        // subgraph-as-tool branch streamed with no delimiter.
+        //
+        // The `__colmena_` prefix is load-bearing: nodes that forward unknown
+        // inputs outward (notably `http_request`) scrub engine-internal keys by
+        // that prefix, so this cannot leak into an outbound query string the way
+        // `__colmena_subgraph_depth` once did.
+        inputs.insert(
+            "__colmena_tool_name".to_string(),
+            Value::String(tool_call.function.name.clone()),
         );
 
         // Convert HashMap to NodeInputs (which is just HashMap<String, Value>)
@@ -1930,14 +1951,62 @@ impl DagToolExecutor {
 
         let mut state = serde_json::json!({});
 
+        // The node type actually being dispatched. NOT `node_type` above — that
+        // variable holds the LLM-visible tool name.
+        let dispatched_node_type = tool_cfg
+            .map(|c| c.node_type.as_str())
+            .unwrap_or(node_type.as_str());
+
+        // A node that runs its own inner execution — `llm_call` (an agent loop)
+        // or `for_each` (one target run per row) — shares this agent's observer,
+        // so the graph loop stamps THIS agent's node id on everything it emits
+        // and it all surfaces at this agent's own level, as if the parent had
+        // produced it. Re-parent under the tool's name so it gets its own node.
+        //
+        // Every other node type keeps the raw observer. `subgraph` in particular
+        // re-parents its own child events and would come out double-wrapped.
+        let node_observer: Option<Arc<dyn ExecutionObserver>> =
+            if scopes_child_events(dispatched_node_type) {
+                self.observer
+                    .clone()
+                    .map(|inner| ChildScopeObserver::wrap(inner, tool_call.function.name.clone()))
+            } else {
+                self.observer.clone()
+            };
+
+        // Stream boundary. `subgraph` emits its own pair from inside the node,
+        // but `llm_call` and `for_each` had none, so a consumer got their nested
+        // frames with no marker saying where that sub-tree opened or closed —
+        // two code paths in the frontend for what is the same idea. Emitted on
+        // the RAW observer so the boundary sits one level ABOVE the content it
+        // delimits, matching how a subgraph-as-tool already reads.
+        let boundary =
+            scopes_child_events(dispatched_node_type).then(|| tool_call.function.name.clone());
+        if let (Some(name), Some(obs)) = (&boundary, &self.observer) {
+            let start = DagExecutionEvent::NodeStart {
+                node_id: name.clone(),
+                node_type: dispatched_node_type.to_string(),
+                inputs: Value::Object(Default::default()),
+                config: Value::Object(Default::default()),
+            };
+            if let Ok(raw) = serde_json::to_value(&start) {
+                obs.on_event(NodeEvent::SubgraphChildEvent(raw));
+            }
+        }
+
         let result = node
-            .execute(
-                &inputs,
-                &node_exec_config,
-                &mut state,
-                self.observer.clone(),
-            )
+            .execute(&inputs, &node_exec_config, &mut state, node_observer)
             .await;
+
+        if let (Some(name), Some(obs)) = (&boundary, &self.observer) {
+            let finish = DagExecutionEvent::SubgraphNodeFinish {
+                node_id: name.clone(),
+                output: result.as_ref().cloned().unwrap_or(Value::Null),
+            };
+            if let Ok(raw) = serde_json::to_value(&finish) {
+                obs.on_event(NodeEvent::SubgraphChildEvent(raw));
+            }
+        }
 
         // SECURE VALUES (Task 11): mask decrypted secrets back to their handles
         // before any downstream handling. This runs unconditionally (independent of
@@ -2107,6 +2176,52 @@ impl DagToolExecutor {
             end,
             original_len
         )
+    }
+}
+
+/// Whether a node dispatched as a tool needs its events re-parented under the
+/// tool's name.
+///
+/// True for node types that run their own inner execution — `llm_call` (an agent
+/// loop) and `for_each` (one target run per row). They share the calling agent's
+/// observer, so without re-parenting the graph loop stamps the CALLER's node id
+/// on everything they emit and it all surfaces at the caller's own level.
+///
+/// `subgraph` is deliberately absent: it re-parents its own child events and
+/// would come out double-wrapped.
+fn scopes_child_events(node_type: &str) -> bool {
+    matches!(node_type, "llm_call" | "for_each")
+}
+
+#[cfg(test)]
+mod scopes_child_events_tests {
+    use super::scopes_child_events;
+
+    #[test]
+    fn nodes_that_run_inner_executions_are_scoped() {
+        assert!(scopes_child_events("llm_call"));
+        assert!(scopes_child_events("for_each"));
+    }
+
+    #[test]
+    fn subgraph_is_not_scoped_here_it_reparents_itself() {
+        assert!(
+            !scopes_child_events("subgraph"),
+            "subgraph already re-parents its own child events; scoping it here double-wraps"
+        );
+    }
+
+    #[test]
+    fn leaf_node_types_keep_the_raw_observer() {
+        for t in [
+            "http_request",
+            "sql_query",
+            "python_script",
+            "tts",
+            "suspend",
+        ] {
+            assert!(!scopes_child_events(t), "{t} must not be scoped");
+        }
     }
 }
 

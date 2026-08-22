@@ -39,10 +39,18 @@ const TOP_LEVEL_PROVIDER_NODE_TYPES: &[&str] = &[
 /// `provider` / `api_key` pair.
 const ORCHESTRATOR_ROLE_KEYS: &[&str] = &["planner", "critic", "phase_reactor", "final_reactor"];
 
-/// Maximum `subgraph` → `child_graph_inline` recursion depth. Matches the
-/// `MAX_SUBGRAPH_TOOL_DEPTH` guard used elsewhere in the engine for the same
-/// structural reason (bound worst-case recursion on adversarial/buggy graphs).
-const MAX_SUBGRAPH_DEPTH: usize = 5;
+/// How deep this pre-flight walk descends into nested `child_graph_inline`
+/// definitions while enumerating provider keys.
+///
+/// NOT an execution limit — runtime subgraph nesting is unbounded (see
+/// `SubGraphNode::depth_ceiling`). This is a stack guard for a pure JSON walk,
+/// so it is set far above any plausible authored nesting: stopping early only
+/// costs pre-flight coverage (the skipped branch is reported in `skipped` and
+/// its provider keys go unvalidated until the run actually reaches them), and
+/// with the old value of 5 an eight-deep composition silently lost that
+/// validation. An inline child graph is literal JSON and therefore acyclic, so
+/// the only thing this really guards against is pathologically deep input.
+const MAX_SUBGRAPH_DEPTH: usize = 64;
 
 /// One statically-enumerated `(provider, resolved api key)` pair a graph will
 /// need at run time.

@@ -11,6 +11,16 @@ use crate::dag_engine::domain::events::DagExecutionEvent;
 /// (HTTP SSE handler, Redis worker, tests) can use this instead of hand-rolling
 /// the same match block and diverging over time.
 pub struct SseMapper {
+    /// Open text blocks, keyed by the event's **lineage `path`** — never by
+    /// `node_id` alone.
+    ///
+    /// One mapper serves every nesting level of a run, so `node_id` is not
+    /// unique across it: two sub-agents in different branches can carry the same
+    /// node id (the same `child_graph_inline` instantiated twice, a `for_each`
+    /// fanning out over `subgraph`). Keyed by node id, the second open
+    /// overwrites the first's uuid, the first `NodeFinish` closes the second's
+    /// block, and the second's block never closes at all. `path` is unique per
+    /// branch, so the pairing holds.
     text_block_ids: HashMap<String, String>,
     node_types: HashMap<String, String>,
     seen_top_tool_ids: HashSet<String>,
@@ -92,18 +102,19 @@ impl SseMapper {
     pub fn map(&mut self, event: &DagExecutionEvent) -> Vec<Value> {
         let mut parts: Vec<Value> = Vec::new();
 
+        // Computed up front rather than at the tagging step below: `path` is the
+        // key for `text_block_ids`, and both phases need it.
+        let (level, path) = Self::level_and_path(event);
+
         // Phase 1: state management — open/close text blocks, accumulate tokens
         match event {
-            DagExecutionEvent::LlmToken { node_id, .. }
-                if !self.text_block_ids.contains_key(node_id) =>
-            {
+            DagExecutionEvent::LlmToken { .. } if !self.text_block_ids.contains_key(&path) => {
                 let part_id = format!("txt_{}", Uuid::new_v4());
                 parts.push(json!({ "type": "text-start", "id": part_id }));
-                self.text_block_ids.insert(node_id.clone(), part_id);
+                self.text_block_ids.insert(path.clone(), part_id);
             }
-            DagExecutionEvent::NodeFinish { node_id, .. }
-            | DagExecutionEvent::SubgraphNodeFinish { node_id, .. } => {
-                if let Some(part_id) = self.text_block_ids.remove(node_id) {
+            DagExecutionEvent::NodeFinish { .. } | DagExecutionEvent::SubgraphNodeFinish { .. } => {
+                if let Some(part_id) = self.text_block_ids.remove(&path) {
                     parts.push(json!({ "type": "text-end", "id": part_id }));
                 }
             }
@@ -131,17 +142,19 @@ impl SseMapper {
                 }));
             }
             DagExecutionEvent::SubgraphWrapped { inner, .. } => match Self::deep_base(inner) {
-                DagExecutionEvent::LlmToken { node_id, .. }
-                | DagExecutionEvent::ThinkingToken { node_id, .. }
-                    if !self.text_block_ids.contains_key(node_id) =>
-                {
+                // ThinkingToken deliberately does NOT open a text block: it maps
+                // to `thinking-delta`, which carries no block id — the
+                // same shape as top-level `thinking-delta`. It used to be folded
+                // in here, which opened a `subgraph-text-start` whose deltas then
+                // rendered an agent's internal reasoning as its answer.
+                DagExecutionEvent::LlmToken { .. } if !self.text_block_ids.contains_key(&path) => {
                     let part_id = format!("txt_{}", Uuid::new_v4());
                     parts.push(json!({ "type": "subgraph-text-start", "id": part_id }));
-                    self.text_block_ids.insert(node_id.clone(), part_id);
+                    self.text_block_ids.insert(path.clone(), part_id);
                 }
-                DagExecutionEvent::NodeFinish { node_id, .. }
-                | DagExecutionEvent::SubgraphNodeFinish { node_id, .. } => {
-                    if let Some(part_id) = self.text_block_ids.remove(node_id) {
+                DagExecutionEvent::NodeFinish { .. }
+                | DagExecutionEvent::SubgraphNodeFinish { .. } => {
+                    if let Some(part_id) = self.text_block_ids.remove(&path) {
                         parts.push(json!({ "type": "subgraph-text-end", "id": part_id }));
                     }
                 }
@@ -206,12 +219,12 @@ impl SseMapper {
                 "node_type": "subgraph",
                 "output": output
             })),
-            DagExecutionEvent::LlmToken { node_id, token } => {
+            DagExecutionEvent::LlmToken { token, .. } => {
                 let part_id = self
                     .text_block_ids
-                    .get(node_id)
+                    .get(&path)
                     .cloned()
-                    .unwrap_or_else(|| node_id.clone());
+                    .unwrap_or_else(|| path.clone());
                 Some(json!({ "type": "text-delta", "id": part_id, "delta": token }))
             }
             // ThinkingToken is emitted by the orchestrator node when internal planner/critic/reactor
@@ -468,28 +481,32 @@ impl SseMapper {
                     "node_type": "subgraph",
                     "output": output
                 })),
-                DagExecutionEvent::LlmToken { node_id, token } => {
+                DagExecutionEvent::LlmToken { token, .. } => {
                     let part_id = self
                         .text_block_ids
-                        .get(node_id)
+                        .get(&path)
                         .cloned()
-                        .unwrap_or_else(|| node_id.clone());
+                        .unwrap_or_else(|| path.clone());
                     Some(json!({ "type": "subgraph-text-delta", "id": part_id, "delta": token }))
                 }
+                // Same `thinking-delta` type as the unwrapped case, on purpose.
+                // An orchestrator's internal planner/critic reasoning is thinking
+                // at every nesting level; `level` and `path` place it in the tree,
+                // so it needs no `subgraph-` variant — and the events reference
+                // states outright that thinking frames are not subgraph events.
+                //
+                // It used to map to `subgraph-text-delta`, which silently
+                // reclassified that reasoning as the agent's user-facing answer.
                 DagExecutionEvent::ThinkingToken {
                     node_id,
                     node_type,
                     token,
-                } => {
-                    let part_id = self
-                        .text_block_ids
-                        .get(node_id)
-                        .cloned()
-                        .unwrap_or_else(|| node_id.clone());
-                    Some(
-                        json!({ "type": "subgraph-text-delta", "id": part_id, "node_id": node_id, "node_type": node_type, "delta": token }),
-                    )
-                }
+                } => Some(json!({
+                    "type": "thinking-delta",
+                    "node_id": node_id,
+                    "node_type": node_type,
+                    "delta": token
+                })),
                 DagExecutionEvent::LlmToolCall {
                     tool_id,
                     args_chunk,
@@ -630,7 +647,6 @@ impl SseMapper {
         // `path` (additive; existing consumers ignore unknown fields). All parts
         // produced in this call pertain to the same source event, hence share the
         // same (level, path). `or_insert` never clobbers a frame that set them.
-        let (level, path) = Self::level_and_path(event);
         for part in parts.iter_mut() {
             if let Some(obj) = part.as_object_mut() {
                 obj.entry("level").or_insert_with(|| json!(level));
@@ -942,5 +958,152 @@ mod tests {
         assert_eq!(parts[0]["stage"], "running");
         assert_eq!(parts[0]["node_id"], "inner_node");
         assert_eq!(parts[0]["idleSecs"], 40);
+    }
+
+    // ── Nested thinking frames (defect: planner split across two levels) ─────
+
+    fn wrap(inner: DagExecutionEvent, depth: u32, path: &str) -> DagExecutionEvent {
+        DagExecutionEvent::SubgraphWrapped {
+            inner: Box::new(inner),
+            depth,
+            path: path.into(),
+        }
+    }
+
+    fn thinking(node_id: &str, token: &str) -> DagExecutionEvent {
+        DagExecutionEvent::ThinkingToken {
+            node_id: node_id.into(),
+            node_type: "planner".into(),
+            token: token.into(),
+        }
+    }
+
+    /// A wrapped ThinkingToken is internal LLM reasoning, not the agent's
+    /// answer. It must NOT map to `subgraph-text-delta` and must NOT open a text
+    /// block; it keeps the same `thinking-delta` type as the unwrapped case, so
+    /// no consumer has to learn a new one.
+    #[test]
+    fn wrapped_thinking_token_stays_a_thinking_delta() {
+        let mut mapper = SseMapper::new();
+        let parts = mapper.map(&wrap(thinking("planner", "hmm"), 1, "orch>planner"));
+
+        assert_eq!(
+            parts.len(),
+            1,
+            "must not also emit a text-start; got {parts:?}"
+        );
+        assert_eq!(parts[0]["type"], "thinking-delta");
+        assert_eq!(parts[0]["node_id"], "planner");
+        assert_eq!(parts[0]["node_type"], "planner");
+        assert_eq!(parts[0]["delta"], "hmm");
+        assert!(
+            parts[0].get("id").is_none(),
+            "thinking frames carry no text-block id"
+        );
+    }
+
+    /// The orchestrator-inside-a-subgraph shape: the planner's node-start is
+    /// wrapped twice (level 2), so its thinking must arrive at level 2 under the
+    /// same path. Before the fix the token arrived at level 1 under `top>planner`
+    /// while its node-start sat at level 2 under `top>orch>planner`.
+    #[test]
+    fn nested_planner_thinking_shares_level_and_path_with_its_node_start() {
+        let mut mapper = SseMapper::new();
+
+        let start = wrap(
+            wrap(
+                DagExecutionEvent::NodeStart {
+                    node_id: "planner".into(),
+                    node_type: "planner".into(),
+                    inputs: json!({}),
+                    config: json!({}),
+                },
+                1,
+                "orch>planner",
+            ),
+            1,
+            "top>orch>planner",
+        );
+        let token = wrap(
+            wrap(thinking("planner", "step 1"), 1, "orch>planner"),
+            1,
+            "top>orch>planner",
+        );
+
+        let start_parts = mapper.map(&start);
+        let token_parts = mapper.map(&token);
+
+        assert_eq!(start_parts[0]["type"], "subgraph-node-start");
+        assert_eq!(token_parts[0]["type"], "thinking-delta");
+        assert_eq!(
+            start_parts[0]["level"], token_parts[0]["level"],
+            "a node's thinking must sit at the same nesting level as its node-start"
+        );
+        assert_eq!(
+            start_parts[0]["path"], token_parts[0]["path"],
+            "a node's thinking must share its node-start's lineage path"
+        );
+        assert_eq!(token_parts[0]["level"], 2);
+        assert_eq!(token_parts[0]["path"], "top>orch>planner");
+    }
+
+    // ── Text blocks keyed by path, not node_id ──────────────────────────────
+
+    fn llm_token(node_id: &str, token: &str) -> DagExecutionEvent {
+        DagExecutionEvent::LlmToken {
+            node_id: node_id.into(),
+            token: token.into(),
+        }
+    }
+
+    fn node_finish(node_id: &str) -> DagExecutionEvent {
+        DagExecutionEvent::NodeFinish {
+            node_id: node_id.into(),
+            output: json!({}),
+        }
+    }
+
+    /// Two sub-agents in different branches sharing a node id (the same
+    /// `child_graph_inline` instantiated twice) must get independent text
+    /// blocks. Keyed by node id, agent B's open clobbered agent A's uuid, A's
+    /// finish closed B's block, and B's block leaked forever.
+    #[test]
+    fn same_node_id_in_different_branches_gets_independent_text_blocks() {
+        let mut mapper = SseMapper::new();
+
+        let a_open = mapper.map(&wrap(llm_token("llm_1", "a"), 1, "top>agent_a>llm_1"));
+        let b_open = mapper.map(&wrap(llm_token("llm_1", "b"), 1, "top>agent_b>llm_1"));
+
+        assert_eq!(a_open[0]["type"], "subgraph-text-start");
+        assert_eq!(b_open[0]["type"], "subgraph-text-start");
+        let a_id = a_open[0]["id"].clone();
+        let b_id = b_open[0]["id"].clone();
+        assert_ne!(a_id, b_id, "each branch owns a distinct text block");
+
+        // Closing A must close A's block, leaving B's open.
+        let a_close = mapper.map(&wrap(node_finish("llm_1"), 1, "top>agent_a>llm_1"));
+        assert_eq!(a_close[0]["type"], "subgraph-text-end");
+        assert_eq!(
+            a_close[0]["id"], a_id,
+            "A's finish must close A's own block"
+        );
+
+        let b_close = mapper.map(&wrap(node_finish("llm_1"), 1, "top>agent_b>llm_1"));
+        assert_eq!(
+            b_close[0]["id"], b_id,
+            "B's block must still be open and close with its own id"
+        );
+    }
+
+    /// Level-0 behavior is unchanged: with no wrapper the path falls back to the
+    /// node id, so open/close pair exactly as before.
+    #[test]
+    fn top_level_text_block_still_opens_and_closes_by_node() {
+        let mut mapper = SseMapper::new();
+        let open = mapper.map(&llm_token("top_llm", "hi"));
+        assert_eq!(open[0]["type"], "text-start");
+        let close = mapper.map(&node_finish("top_llm"));
+        assert_eq!(close[0]["type"], "text-end");
+        assert_eq!(close[0]["id"], open[0]["id"]);
     }
 }

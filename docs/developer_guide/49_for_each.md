@@ -256,19 +256,50 @@ for_each)"`) — `for_each` **no soporta pausar el fan-out a mitad de
 camino**. Diseña los targets de `for_each` para que no requieran
 intervención humana por fila.
 
-## Guard anti-recursión y `MAX_SUBGRAPH_TOOL_DEPTH`
+## Guard anti-recursión y profundidad de anidación
 
 - `target.node_type == "for_each"` se rechaza inmediatamente
   (`for_each: a for_each cannot target itself`) — no hay fan-out anidado
   de `for_each`.
 - Cuando `target.node_type == "subgraph"`, cada fila corre un
   sub-agente aislado (Mode B — sin memoria compartida entre filas) y
-  hereda el guard de profundidad normal de subgraph-as-tool
-  (`MAX_SUBGRAPH_TOOL_DEPTH = 5`). `for_each` **propaga**
-  `__colmena_subgraph_depth` (y `__colmena_session_id`/
-  `__colmena_agent_session_id`) al target en cada fila, de modo que el
-  guard de profundidad sigue siendo efectivo a través del borde
-  `for_each → subgraph` (no se resetea a 0 en cada `for_each`).
+  hereda la contabilidad de profundidad normal de subgraph-as-tool.
+  `for_each` **propaga** `__colmena_subgraph_depth` (y
+  `__colmena_session_id`/`__colmena_agent_session_id`) al target en cada
+  fila, de modo que el contador no se resetea a 0 en cada `for_each`.
+  Desde 2026-08-21 la anidación **no tiene tope por defecto**: ese
+  contador alimenta el techo opcional `COLMENA_MAX_SUBGRAPH_DEPTH` y
+  reporta el nivel de anidación. Ver
+  [nota de migración](../adp_migration/2026-08-21-unbounded-subgraph-nesting.md).
+
+## Linaje por fila en el stream
+
+Todas las filas corren el **mismo** grafo target, así que todas emiten los
+**mismos** `node_id`. Desde 2026-08-21 cada fila corre bajo su propia identidad
+en el stream, `<node_id_del_for_each>#<índice>`, donde el índice **coincide con
+el campo `index`** del `batch-item-finished` de esa fila:
+
+```
+path: "coordinador>abanico>for_each#0>eco"
+path: "coordinador>abanico>for_each#1>eco"
+```
+
+Antes las filas eran indistinguibles — `path` idéntico para todas — así que con
+`concurrency > 1` los tokens llegaban entremezclados sin forma de atribuirlos, y
+los bloques de texto abiertos (que el `SseMapper` keyea por `path`) colisionaban
+entre filas concurrentes: el `text-end` de una cerraba el bloque de la otra.
+
+Un `for_each` despachado **como tool** se anida bajo el nombre del tool, y sus
+propios `batch-progress` / `batch-item-finished` quedan **dentro** de ese nodo —
+un nivel por encima de las filas, no sueltos en nivel 0:
+
+```
+L2  subgraph-batch-progress       coordinador>abanico>for_each
+L3  subgraph-text-delta           coordinador>abanico>for_each#0>eco
+L3  subgraph-text-delta           coordinador>abanico>for_each#1>eco
+```
+
+Ver la [nota de migración](../adp_migration/2026-08-21-for-each-row-lineage.md).
 
 ## Casos borde y validaciones
 

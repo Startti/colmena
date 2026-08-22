@@ -7,10 +7,12 @@
 - `SubGraphNode` (struct, pub) — Container for a SubGraphExecutorPort dependency injected via OnceLock
 - `impl Default for SubGraphNode` — Delegating default implementation
 - `SubGraphNode::new()` (fn, pub) — Creates a new SubGraphNode with uninitialized executor
-- `SubGraphNode::MAX_SUBGRAPH_TOOL_DEPTH` (const, pub) — Recursion guard limit set to 5 for subgraph-as-tool nesting
+- `SubGraphNode::depth_ceiling()` (fn, private) — Optional nesting ceiling from `COLMENA_MAX_SUBGRAPH_DEPTH`; `None` (unbounded) by default, cached in a `OnceLock`. Replaced the removed `MAX_SUBGRAPH_TOOL_DEPTH` const on 2026-08-21
+- `SubGraphNode::non_empty_str()` (fn, private) — Reads an input key as a non-empty string; backs the boundary-name fallback chain
 - `SubGraphNode::resolve_child_graph_source()` (fn, private) — Resolves child graph from config (edge-based) or inputs (tool-based) with config precedence; returns inline object or path string
 - `SubGraphNode::current_depth()` (fn, private) — Reads `__colmena_subgraph_depth` from inputs; defaults to 0 if absent
-- `SubGraphNode::depth_exceeded()` (fn, private) — Returns true if current depth >= MAX_SUBGRAPH_TOOL_DEPTH
+- `SubGraphNode::exceeds_ceiling()` (fn, private) — Pure ceiling comparison, testable without touching the process environment
+- `SubGraphNode::depth_exceeded()` (fn, private) — True only when a ceiling is configured AND this depth reaches it; always false in the default unbounded configuration
 - `impl ExecutableNode for SubGraphNode` — Trait implementation for DAG execution engine
 - `ExecutableNode::schema()` (fn) — Returns default schema exposing "task" string input for LLM tool exposure
 - `ExecutableNode::execute()` (fn, async) — Main execution logic: handles resume answer propagation, graph loading (inline or file), HITL suspend bubble-up, child state mapping (in/out), and boundary event emission for Fase F
