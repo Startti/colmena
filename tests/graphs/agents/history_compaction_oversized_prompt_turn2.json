@@ -1,0 +1,73 @@
+{
+  "comment": "Turno 2 de 2. Un turno ORDINARIO cuya unica particularidad es un prompt pegado de ~11.000 caracteres (>2.500 tokens estimados, el presupuesto de la ventana de recientes). Sin resume, sin suspend, sin sembrar filas en la DB y sin matar ningun proceso: el prompt se persiste y recien despues corre la compactacion, asi que el mensaje mas nuevo almacenado es el prompt gigante. Antes del fix esto abortaba con 'index out of bounds' en history_compaction.rs:143 y exit code 101. Despues del fix el run completa con finishReason 'stop' y el prompt viaja VERBATIM (todo mensaje mas nuevo que agota el presupuesto por si solo viaja verbatim, sin importar el rol). Es la prueba de que el panic NO es especifico de resume.",
+  "metadata": {
+    "category": "agents",
+    "features": [
+      "history_compaction",
+      "conversation_memory",
+      "python_script"
+    ],
+    "requires_env": [
+      "GEMINI_API_KEY",
+      "DATABASE_URL"
+    ]
+  },
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/hc-oversized-prompt-2",
+        "method": "POST",
+        "test_payload": {
+          "prompt": "Te pego el contrato completo y abajo va mi pregunta.\n\nCLAUSULA 1. Las partes acuerdan que la prestacion descrita en el anexo tecnico sera ejecutada conforme a los plazos alli establecidos, y que cualquier demora imputable al proveedor generara los efectos previstos en el regimen de penalidades. CLAUSULA 2. Las partes acuerdan que la prestacion descrita en el anexo tecnico sera ejecutada conforme a los plazos alli establecidos, y que cualquier demora imputable al proveedor generara los efectos previstos en el regimen de penalidades. CLAUSULA 3. Las partes acuerdan que la prestacion descrita en el anexo tecnico sera ejecutada conforme a los plazos alli establecidos, y que cualquier demora imputable al proveedor generara los efectos previstos en el regimen de penalidades. CLAUSULA 4. Las partes acuerdan que la prestacion descrita en el anexo tecnico sera ejecutada conforme a los plazos alli establecidos, y que cualquier demora imputable al proveedor generara los efectos previstos en el regimen de penalidades. CLAUSULA 5. Las partes acuerdan que la prestacion descrita en el anexo tecnico sera ejecutada conforme a los plazos alli establecidos, y que cualquier demora imputable al proveedor generara los efectos previstos en el regimen de penalidades. CLAUSULA 6. Las partes acuerdan que la prestacion descrita en el anexo tecnico sera ejecutada conforme a los plazos alli establecidos, y que cualquier demora imputable al proveedor generara los efectos previstos en el regimen de penalidades. CLAUSULA 7. Las partes acuerdan que la prestacion descrita en el anexo tecnico sera ejecutada conforme a los plazos alli establecidos, y que cualquier demora imputable al proveedor generara los efectos previstos en el regimen de penalidades. CLAUSULA 8. Las partes acuerdan que la prestacion descrita en el anexo tecnico sera ejecutada conforme a los plazos alli establecidos, y que cualquier demora imputable al proveedor generara los efectos previstos en el regimen de penalidades. CLAUSULA 9. Las partes acuerdan que la prestacion descrita en el anexo tecnico sera ejecutada conforme a los plazos alli establecidos, y que cualquier demora imputable al proveedor generara los efectos previstos en el regimen de penalidades. CLAUSULA 10. Las partes acuerdan que la prestacion descrita en el anexo tecnico sera ejecutada conforme a los plazos alli establecidos, y que cualquier demora imputable al proveedor generara los efectos previstos en el regimen de penalidades. CLAUSULA 11. Las partes acuerdan que la prestacion descrita en el anexo tecnico sera ejecutada conforme a los plazos alli establecidos, y que cualquier demora imputable al proveedor generara los efectos previstos en el regimen de penalidades. CLAUSULA 12. Las partes acuerdan que la prestacion descrita en el anexo tecnico sera ejecutada conforme a los plazos alli establecidos, y que cualquier demora imputable al proveedor generara los efectos previstos en el regimen de penalidades. CLAUSULA 13. Las partes acuerdan que la prestacion descrita en el anexo tecnico sera ejecutada conforme a los plazos alli establecidos, y que cualquier demora imputable al proveedor generara los efectos previstos en el regimen de penalidades. CLAUSULA 14. Las partes acuerdan que la prestacion descrita en el anexo tecnico sera ejecutada conforme a los plazos alli establecidos, y que cualquier demora imputable al proveedor generara los efectos previstos en el regimen de penalidades. CLAUSULA 15. Las partes acuerdan que la prestacion descrita en el anexo tecnico sera ejecutada conforme a los plazos alli establecidos, y que cualquier demora imputable al proveedor generara los efectos previstos en el regimen de penalidades. CLAUSULA 16. Las partes acuerdan que la prestacion descrita en el anexo tecnico sera ejecutada conforme a los plazos alli establecidos, y que cualquier demora imputable al proveedor generara los efectos previstos en el regimen de penalidades. CLAUSULA 17. Las partes acuerdan que la prestacion descrita en el anexo tecnico sera ejecutada conforme a los plazos alli establecidos, y que cualquier demora imputable al proveedor generara los efectos previstos en el regimen de penalidades. CLAUSULA 18. Las partes acuerdan que la prestacion descrita en el anexo tecnico sera ejecutada conforme a los plazos alli establecidos, y que cualquier demora imputable al proveedor generara los efectos previstos en el regimen de penalidades. CLAUSULA 19. Las partes acuerdan que la prestacion descrita en el anexo tecnico sera ejecutada conforme a los plazos alli establecidos, y que cualquier demora imputable al proveedor generara los efectos previstos en el regimen de penalidades. CLAUSULA 20. Las partes acuerdan que la prestacion descrita en el anexo tecnico sera ejecutada conforme a los plazos alli establecidos, y que cualquier demora imputable al proveedor generara los efectos previstos en el regimen de penalidades. CLAUSULA 21. Las partes acuerdan que la prestacion descrita en el anexo tecnico sera ejecutada conforme a los plazos alli establecidos, y que cualquier demora imputable al proveedor generara los efectos previstos en el regimen de penalidades. CLAUSULA 22. Las partes acuerdan que la prestacion descrita en el anexo tecnico sera ejecutada conforme a los plazos alli establecidos, y que cualquier demora imputable al proveedor generara los efectos previstos en el regimen de penalidades. CLAUSULA 23. Las partes acuerdan que la prestacion descrita en el anexo tecnico sera ejecutada conforme a los plazos alli establecidos, y que cualquier demora imputable al proveedor generara los efectos previstos en el regimen de penalidades. CLAUSULA 24. Las partes acuerdan que la prestacion descrita en el anexo tecnico sera ejecutada conforme a los plazos alli establecidos, y que cualquier demora imputable al proveedor generara los efectos previstos en el regimen de penalidades. CLAUSULA 25. Las partes acuerdan que la prestacion descrita en el anexo tecnico sera ejecutada conforme a los plazos alli establecidos, y que cualquier demora imputable al proveedor generara los efectos previstos en el regimen de penalidades. CLAUSULA 26. Las partes acuerdan que la prestacion descrita en el anexo tecnico sera ejecutada conforme a los plazos alli establecidos, y que cualquier demora imputable al proveedor generara los efectos previstos en el regimen de penalidades. CLAUSULA 27. Las partes acuerdan que la prestacion descrita en el anexo tecnico sera ejecutada conforme a los plazos alli establecidos, y que cualquier demora imputable al proveedor generara los efectos previstos en el regimen de penalidades. CLAUSULA 28. Las partes acuerdan que la prestacion descrita en el anexo tecnico sera ejecutada conforme a los plazos alli establecidos, y que cualquier demora imputable al proveedor generara los efectos previstos en el regimen de penalidades. CLAUSULA 29. Las partes acuerdan que la prestacion descrita en el anexo tecnico sera ejecutada conforme a los plazos alli establecidos, y que cualquier demora imputable al proveedor generara los efectos previstos en el regimen de penalidades. CLAUSULA 30. Las partes acuerdan que la prestacion descrita en el anexo tecnico sera ejecutada conforme a los plazos alli establecidos, y que cualquier demora imputable al proveedor generara los efectos previstos en el regimen de penalidades. CLAUSULA 31. Las partes acuerdan que la prestacion descrita en el anexo tecnico sera ejecutada conforme a los plazos alli establecidos, y que cualquier demora imputable al proveedor generara los efectos previstos en el regimen de penalidades. CLAUSULA 32. Las partes acuerdan que la prestacion descrita en el anexo tecnico sera ejecutada conforme a los plazos alli establecidos, y que cualquier demora imputable al proveedor generara los efectos previstos en el regimen de penalidades. CLAUSULA 33. Las partes acuerdan que la prestacion descrita en el anexo tecnico sera ejecutada conforme a los plazos alli establecidos, y que cualquier demora imputable al proveedor generara los efectos previstos en el regimen de penalidades. CLAUSULA 34. Las partes acuerdan que la prestacion descrita en el anexo tecnico sera ejecutada conforme a los plazos alli establecidos, y que cualquier demora imputable al proveedor generara los efectos previstos en el regimen de penalidades. CLAUSULA 35. Las partes acuerdan que la prestacion descrita en el anexo tecnico sera ejecutada conforme a los plazos alli establecidos, y que cualquier demora imputable al proveedor generara los efectos previstos en el regimen de penalidades. CLAUSULA 36. Las partes acuerdan que la prestacion descrita en el anexo tecnico sera ejecutada conforme a los plazos alli establecidos, y que cualquier demora imputable al proveedor generara los efectos previstos en el regimen de penalidades. CLAUSULA 37. Las partes acuerdan que la prestacion descrita en el anexo tecnico sera ejecutada conforme a los plazos alli establecidos, y que cualquier demora imputable al proveedor generara los efectos previstos en el regimen de penalidades. CLAUSULA 38. Las partes acuerdan que la prestacion descrita en el anexo tecnico sera ejecutada conforme a los plazos alli establecidos, y que cualquier demora imputable al proveedor generara los efectos previstos en el regimen de penalidades. CLAUSULA 39. Las partes acuerdan que la prestacion descrita en el anexo tecnico sera ejecutada conforme a los plazos alli establecidos, y que cualquier demora imputable al proveedor generara los efectos previstos en el regimen de penalidades. CLAUSULA 40. Las partes acuerdan que la prestacion descrita en el anexo tecnico sera ejecutada conforme a los plazos alli establecidos, y que cualquier demora imputable al proveedor generara los efectos previstos en el regimen de penalidades. CLAUSULA 41. Las partes acuerdan que la prestacion descrita en el anexo tecnico sera ejecutada conforme a los plazos alli establecidos, y que cualquier demora imputable al proveedor generara los efectos previstos en el regimen de penalidades. CLAUSULA 42. Las partes acuerdan que la prestacion descrita en el anexo tecnico sera ejecutada conforme a los plazos alli establecidos, y que cualquier demora imputable al proveedor generara los efectos previstos en el regimen de penalidades. CLAUSULA 43. Las partes acuerdan que la prestacion descrita en el anexo tecnico sera ejecutada conforme a los plazos alli establecidos, y que cualquier demora imputable al proveedor generara los efectos previstos en el regimen de penalidades. CLAUSULA 44. Las partes acuerdan que la prestacion descrita en el anexo tecnico sera ejecutada conforme a los plazos alli establecidos, y que cualquier demora imputable al proveedor generara los efectos previstos en el regimen de penalidades. CLAUSULA 45. Las partes acuerdan que la prestacion descrita en el anexo tecnico sera ejecutada conforme a los plazos alli establecidos, y que cualquier demora imputable al proveedor generara los efectos previstos en el regimen de penalidades. \n\nPREGUNTA: segun el texto de arriba, que pasa si el proveedor se demora?"
+        }
+      }
+    },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "api_key": "${GEMINI_API_KEY}",
+        "model": "gemini-2.5-flash",
+        "system_message": "Sos un asistente conciso. Si el usuario pide contar transacciones, llama a la tool `contar_registros` y responde con el numero. En cualquier otro caso responde en 2 oraciones como maximo.",
+        "temperature": 0.0,
+        "stream": false,
+        "connection_url": "${DATABASE_URL}",
+        "tool_configurations": {
+          "contar_registros": {
+            "name": "contar_registros",
+            "node_type": "python_script",
+            "description": "Devuelve un listado corto de transacciones para contar.",
+            "node_schema": {
+              "sandbox_mode": {
+                "type": "string",
+                "fixed": "restricted"
+              },
+              "sandbox_timeout_secs": {
+                "type": "number",
+                "fixed": 15
+              },
+              "code": {
+                "type": "string",
+                "fixed": "output = [{'id': i, 'monto': i * 11} for i in range(5)]"
+              }
+            }
+          }
+        }
+      }
+    },
+    "out": {
+      "type": "output"
+    }
+  },
+  "edges": [
+    {
+      "from": "trigger",
+      "to": "agent"
+    },
+    {
+      "from": "agent.result",
+      "to": "out"
+    }
+  ]
+}

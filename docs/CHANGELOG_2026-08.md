@@ -114,3 +114,87 @@ motor.
 aceptar el job» queda anotado y no implementado, porque no explica el síntoma reportado.
 
 ---
+
+## 3. Panic al compactar el historial cuando el mensaje más nuevo excede el presupuesto — fix + respuesta a ADP
+
+**Qué cambió.** `recent_boundary_by_tokens` (`history_compaction.rs`) devolvía `messages.len()` — un
+índice fuera de rango — cuando el mensaje más nuevo por sí solo ya excedía el presupuesto de
+~2.500 tokens de la ventana de recientes: el acumulador inicial (`b = messages.len()`) nunca se
+reasignaba porque el loop cortaba en la primera iteración, antes de llegar a `b = i`.
+`build_compacted_messages` indexaba ese resultado sin chequear el límite y el proceso panicaba con
+`index out of bounds`. **Fix:** la función ahora clampa su resultado
+(`b.min(messages.len().saturating_sub(1))`): nunca vuelve a devolver un índice fuera de rango, ni
+siquiera con historial vacío, garantizado por una nueva sweep combinatoria
+(`recent_boundary_is_always_a_valid_index`, n×size×budget×shape) que cubre casos que los dos tests
+de reproducción originales no alcanzaban (p.ej. `n=1, budget=0`). El clamp bounda el **índice** de
+la ventana, no el contenido: cuando el mensaje más nuevo por sí solo agota el presupuesto, la
+ventana de recientes degenera a exactamente ese mensaje y viaja **verbatim, sin importar el rol**
+(`user`, `assistant` o `tool`) — ver la limitación conocida en
+[`15_memory_guide.md`](developer_guide/15_memory_guide.md).
+
+**No es específico de "resume".** El reporte de ADP asumía que el disparador era "reanudar un run
+suspendido". Es el disparador más frecuente en producción, pero no el único: un prompt de usuario
+pegado de más de ~10.000 caracteres dispara el mismo panic en un turno normal, sin ningún resume de
+por medio. Dos tests de regresión cubren ambos casos
+(`repro_adp_panic_last_content_message_alone_exceeds_budget`,
+`repro_panic_also_fires_on_a_large_user_prompt`), y el E2E de ruta limpia descrito más abajo lo
+demuestra en vivo: el mismo turno ordinario aborta contra el binario pre-fix y completa contra el
+binario con el fix.
+
+**Qué se midió.**
+- **14 tests unitarios** en `history_compaction.rs`: la sweep de contrato
+  `recent_boundary_is_always_a_valid_index`; los dos tests de reproducción del panic
+  (`repro_adp_panic_last_content_message_alone_exceeds_budget`,
+  `repro_panic_also_fires_on_a_large_user_prompt`); la propiedad de costo acotado a un solo turno
+  (`oversized_message_leaves_the_recent_window_on_the_next_turn`); los tests de verbatim por rol
+  (`oversized_newest_user_prompt_stays_verbatim`, `oversized_newest_assistant_stays_verbatim`);
+  `recent_window_is_never_empty`; el pin de la salida cruda con tool calls en paralelo
+  (`parallel_tool_calls_with_oversized_last_result_ship_the_history_raw`); y los tests
+  preexistentes de clasificación/digest/summarización — todos pasan.
+- **E2E en vivo** contra Gemini 2.5 Flash + Postgres real — y es también la prueba directa de que el
+  panic **no** es específico de "resume":
+  [`history_compaction_oversized_prompt_turn1.json`](../tests/graphs/agents/history_compaction_oversized_prompt_turn1.json)
+  + [`history_compaction_oversized_prompt_turn2.json`](../tests/graphs/agents/history_compaction_oversized_prompt_turn2.json).
+  Dos corridas ordinarias del CLI con el mismo `--agent-session-id`, **sin sembrar filas en la DB,
+  sin `suspend` y sin matar ningún proceso**; el turno 2 es sólo un prompt pegado de 11.053
+  caracteres. Contra el binario **pre-fix** el turno 2 aborta con
+  `index out of bounds: the len is 6 but the index is 6` en `history_compaction.rs:143:46` y
+  `exit code 101`. Contra el binario **con el fix** el mismo turno termina con
+  `finishReason: "stop"`. Con `COLMENA_DUMP_PROMPT_FULL=1` sobre la corrida arreglada, el wire
+  queda `[user viejo, system+resumen, prompt de 11.124 chars VERBATIM]`: el `user` más nuevo sale
+  completo, sin truncar.
+
+**Documentación de referencia.**
+- Guía: [`docs/developer_guide/15_memory_guide.md`](developer_guide/15_memory_guide.md) §Compactación
+  → "Ventana de recientes cuando el mensaje más nuevo excede el presupuesto".
+- Código: `src/libs/colmena/src/llm/application/history_compaction.rs` — `recent_boundary_by_tokens`.
+- Grafos E2E: [`history_compaction_oversized_prompt_turn1.json`](../tests/graphs/agents/history_compaction_oversized_prompt_turn1.json)
+  + [`history_compaction_oversized_prompt_turn2.json`](../tests/graphs/agents/history_compaction_oversized_prompt_turn2.json)
+  — se corren en ese orden con el mismo `--agent-session-id`, sin sembrar nada en la base.
+
+**Respuesta al handoff de ADP.**
+
+1. **Confirmado, con reproducción.** El panic existe y es real: `recent_boundary_by_tokens` devolvía
+   un índice igual a `messages.len()` (fuera de rango) cuando el mensaje más nuevo por sí solo
+   excedía el presupuesto de recientes, y `build_compacted_messages` lo indexaba sin chequear el
+   límite. Reproducido con dos tests deterministas y con un run en vivo contra Postgres real (ver
+   arriba).
+2. **No es específico de "resume".** Corrige la lectura del reporte: reanudar un run suspendido es
+   el camino más frecuente para llegar a este estado (el mensaje más nuevo persistido queda siendo
+   el resultado de una tool grande, sin respuesta de seguimiento todavía), pero no es el único. Un
+   usuario pegando un prompt de más de ~10.000 caracteres en un turno normal, sin ningún suspend de
+   por medio, dispara el mismo panic — el mecanismo depende únicamente del tamaño del mensaje más
+   nuevo, no de si el turno viene de un resume.
+3. **Sobre "un panic tumba el worker entero".** Colmena no define `panic = "abort"` en ningún
+   perfil de `Cargo.toml`, y no instala ningún `catch_unwind` alrededor de la ejecución de nodos.
+   Con el perfil `unwind` de Rust (el default, que Colmena no sobrescribe), un panic dentro de una
+   tarea de Tokio se propaga como un `JoinError` de esa tarea — no mata el proceso por sí solo. Si
+   el binario de ADP sí termina el proceso entero ante ese panic, eso depende de decisiones propias
+   de su binario (perfil de compilación, un panic hook que llame `abort()`, cómo se manejan los
+   `JoinError`, etc.) que no podemos verificar leyendo el repo de Colmena. No hacemos ninguna
+   afirmación sobre eso, ni ninguna recomendación operativa sobre su perfil de panics o su política
+   de reinicio.
+
+**Estado.** done. Fix + tests + E2E en vivo + documentación en el mismo cambio.
+
+---

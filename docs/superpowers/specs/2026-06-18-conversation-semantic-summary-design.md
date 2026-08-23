@@ -227,6 +227,15 @@ get_by_id (orden crudo DB: mensajes + columna summary)
                  + sufijo temporal volátil (sin cambios)
 ```
 
+> **Amendment (2026-08-22):** cuando el mensaje más nuevo (`N-1`) por sí solo excede el
+> presupuesto de recientes, "recientes[B..N](full)" degenera a exactamente ese único mensaje y
+> viaja **verbatim**, sin importar el rol — no hay truncamiento ni transformación de contenido, lo
+> que se acota es el índice `B` del borde (`recent_boundary_by_tokens`), nunca el tamaño del
+> mensaje. Detalle en
+> [`docs/developer_guide/15_memory_guide.md`](../../developer_guide/15_memory_guide.md)
+> §Compactación → "Ventana de recientes cuando el mensaje más nuevo excede el presupuesto" y
+> [`docs/CHANGELOG_2026-08.md`](../../CHANGELOG_2026-08.md) §3.
+
 Durante el loop: nada (recientes crecen full; el bloque de resumen no cambia →
 cache-friendly). Los mensajes nuevos se guardan full; se resumen en un load futuro.
 
