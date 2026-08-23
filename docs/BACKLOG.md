@@ -271,7 +271,7 @@ Verificado e2e en dev del platform. Estos son los Minors diferidos por los revie
 | **11** | ✅ Cache nativo de provider habilitado por default en Anthropic + Gemini (shipped 2026-06-09) | [Provider-level prompt caching](#crdt-documents-v11--provider-level-prompt-caching-anthropic--gemini) | done |
 | **12** | ✅ SQL node — `INSERT` multi-statement (shipped 2026-06-09) | [SQL node — INSERT multi-line bug](#sql-node--insert-multi-line-bug-2026-06-09--shipped-2026-06-09) | done |
 | **13** | ✅ SQL node — bulk insert desde CSV adjunto (shipped 2026-06-09, Postgres + CSV only) | [SQL node — bulk insert desde attachment](#sql-node--bulk-insert-desde-attachment-2026-06-09) | done |
-| **14** | 🧠 Filtrar fields que el LLM ve de outputs de nodos upstream | [Output filtering para LLM](#output-filtering-para-llm--qué-campos-ve-el-modelo-2026-06-09) | requiere brainstorming dedicado |
+| **14** | 🧠 Filtrar fields que el LLM ve de outputs de nodos upstream | [Output filtering para LLM](#output-filtering-para-llm--qué-campos-ve-el-modelo-2026-06-09) | brainstorm ✅ hecho (2026-08-22); Plan 1 mergeado, Plan 2 en backlog |
 
 **Estado:** items 11-14 fueron agregados al backlog el 2026-06-09. Item 11
 ya existía bajo la sección "CRDT Documents v1.1 — Provider-level prompt
@@ -314,7 +314,7 @@ CRDT-specific. Ver banner detallado al inicio del bloque CRDT.
 ### 🔴 Alto impacto, requiere diseño primero
 | Item | Esfuerzo | Impacto | Sección |
 |---|---|---|---|
-| **Item 14 — Output filtering (qué fields ve el LLM)** | brainstorm → 3-8d | **Alto** — token waste en todo DAG; flagged por el owner | [Output filtering para LLM](#output-filtering-para-llm--qué-campos-ve-el-modelo-2026-06-09) |
+| **Item 14 — Output filtering (qué fields ve el LLM)** | brainstorm ✅; Plan 2 pendiente | **Alto** — token waste en todo DAG; flagged por el owner | [Output filtering para LLM](#output-filtering-para-llm--qué-campos-ve-el-modelo-2026-06-09) |
 
 ### ⚪ Parked / niche / bloqueado (no tirar todavía)
 - **Sheets batchUpdate-shaped**: charts, conditional formatting, data validation, revisions/undo, webhooks → esfuerzo medio, demanda niche. [Subsystem E v1.1](#subsystem-e-v11-google-sheets)
@@ -324,7 +324,7 @@ CRDT-specific. Ver banner detallado al inicio del bloque CRDT.
 - **Toolkit auto-inject package description** → polish. [Toolkit packages v1.1](#toolkit-packages-v11)
 - **`overwrite` mode E2E coverage** → solo QA, riesgo bajo. [overwrite mode E2E coverage](#sheets-write-safety-v11--overwrite-mode-e2e-coverage)
 
-**Recomendación de secuencia:** ✅ quick wins + ✅ surgical table-cell edits (SHIPPED 2026-06-21, §46) + ✅ Cell formatting de Sheets (SHIPPED 2026-06-22, §47) hechos → próximo: **markdown tables en insert/replace** (gdocs — hoy se rechazan duro; ~4-5h, siguiente 🟡 medium bet) → abrir brainstorm de Item 14 cuando el owner pueda dar el use-case real.
+**Recomendación de secuencia:** ✅ quick wins + ✅ surgical table-cell edits (SHIPPED 2026-06-21, §46) + ✅ Cell formatting de Sheets (SHIPPED 2026-06-22, §47) hechos → próximo: **markdown tables en insert/replace** (gdocs — hoy se rechazan duro; ~4-5h, siguiente 🟡 medium bet) → el brainstorm de Item 14 se hizo el 2026-08-22 y su Plan 1 ya está en `develop`; lo que queda es el **Plan 2** (mapa determinista + binding `from_tool_call`), en backlog por decisión del owner.
 
 ---
 
@@ -451,12 +451,36 @@ CRDT-specific. Ver banner detallado al inicio del bloque CRDT.
   - **Debuggability:** ¿el `extra_info` sigue mostrando el output completo aunque el LLM no lo vea? (sí — para que el operador pueda debuggear sin perder data).
   - **Observabilidad:** SSE debe loguear qué se filtró.
   - **Performance:** la transformación debe ser barata (filter inline, no nueva pasada).
-- **Próximo paso:** sesión de brainstorming con `superpowers:brainstorming` skill.
-  - **Input requerido del owner:** pintar el use case real (qué nodo, qué fields, qué pasó). Después se discuten las opciones A-E con escenarios concretos.
-  - **Output esperado:** propuesta formal en `docs/proposals/2026-06-XX-output-filtering-for-llm.md` con la opción ganadora + spec + plan.
-- **Estimación post-brainstorming:** indeterminada (depende de la opción ganadora). Sospecha: opción (A) o (C) ~3-5 días. Opción (B) o (E) ~5-8 días.
-- **Cuándo retomar:** después de items 11-13. Brainstorming primero,
-  implementación después.
+- **✅ El brainstorming SE HIZO (2026-08-22).** El owner dio el use-case real: costo de tokens
+  **y** calidad de respuesta, con el exceso pesando por igual en su forma estructural (un
+  `SELECT *` que trae 20 columnas cuando importan 3) y en su forma semántica (texto largo donde
+  lo relevante está enterrado). Resultado en
+  [`docs/superpowers/specs/2026-08-22-interaction-scoped-memory-and-result-maps-design.md`](superpowers/specs/2026-08-22-interaction-scoped-memory-and-result-maps-design.md),
+  con once decisiones cerradas y su alternativa descartada.
+- **Lo que el diseño cubre de este item — la mitad reactiva** (qué hacer con lo que ya llegó):
+  un **mapa determinista** para resultados estructurados grandes (esquema, cardinalidad, rangos,
+  filas de muestra crudas, aviso explícito de lo omitido) y un binding nuevo `from_tool_call` en
+  `data_run_python`, para que el modelo **calcule sobre el dato original** en vez de leer filas
+  hacia el prompt. El mapa nunca juzga qué es relevante: solo describe. Por eso es determinista y
+  no puede equivocarse.
+- **Lo que sigue siendo este item — la mitad proactiva:** las opciones (A)/(B)/(C) de arriba,
+  proyección declarada por el operador o pedida por el modelo al llamar la tool. **Es la capa de
+  mayor ahorro y menor riesgo**, porque el dato nunca entra a ningún prompt. Conviene atacarla
+  primero o en paralelo con el Plan 2.
+- **Estado de implementación:**
+  - ✅ **Plan 1 — borde de interacción** (PR #176, `0038765f`): el borde entre memoria y lo
+    verbatim dejó de decidirlo un presupuesto de tokens.
+  - ⏸️ **Plan 2 — mapa + binding `from_tool_call`: EN BACKLOG** por decisión del owner
+    (2026-08-23). Es el que trae el ahorro de tokens. Depende del Plan 1, ya mergeado, así que
+    arranca cuando se quiera.
+  - 🚧 **Plan 3 — zona 0, pinneo del `system` por rol: BLOQUEADO.** Depende de arreglar el
+    adaptador de Anthropic, que colapsa múltiples mensajes `system` por sobrescritura (gana el
+    último), así que hoy una conversación lo bastante larga como para compactarse pierde el system
+    prompt real del agente en ese proveedor.
+- **Diferido con su diseño ya escrito** (para no volver a discutirlo): extracción de prosa con
+  modelo barato para bloques opacos de texto. Se difirió con motivo medido, no asumido — la
+  ventana de ahorro dura solo lo que le queda a la interacción abierta, y el modelo barato lee el
+  documento entero igual. Se decide con números vía `COLMENA_DUMP_PROMPT_SIZES`.
 
 ---
 
