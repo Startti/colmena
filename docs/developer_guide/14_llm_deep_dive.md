@@ -777,9 +777,22 @@ request:
 
 Anthropic interpreta cada marker como "todo el contenido hasta este punto
 es cacheable". El system message marker cachea ese block; el last-tool
-marker cachea todo el array `tools[]`. Cualquier llamada siguiente del
-**mismo agente** dentro de los 5 minutos siguientes paga ~10% del precio
-normal sobre la porción cacheada.
+marker cachea todo el array `tools[]`.
+
+> **Más de un mensaje `system` en el request.** La Messages API de Anthropic
+> tiene UN campo `system` top-level, pero un `LlmRequest` puede traer varios
+> mensajes de rol `system` (están explícitamente permitidos, incluso
+> intercalados). El adapter los emite **todos, en orden, como bloques
+> separados** y pone el marker `cache_control` **solo en el primero**, de modo
+> que lo estable se cachea y lo volátil queda fuera del prefijo cacheado.
+> Antes del fix del 2026-08-22 **sobrescribía**: solo sobrevivía el último
+> `system` y los anteriores se perdían sin error ni log. Era un defecto
+> latente — ninguna ruta viva manda hoy dos `system` (ver
+> [§15](15_memory_guide.md) para por qué) — pero el modo de fallo es
+> silencioso, así que el adapter no puede depender de eso.
+
+Cualquier llamada siguiente del **mismo agente** dentro de los 5 minutos
+siguientes paga ~10% del precio normal sobre la porción cacheada.
 
 **Importante**: el conversational tail (user/assistant messages) NO se
 cachea — cambia cada turn y cachearlo causaría cache-write churn sin read
@@ -827,11 +840,13 @@ inyecta como **suffix volátil al FINAL del system message**, fuera del prefijo
 cacheado. Esto permite que el timestamp se refresque **cada turno** (hora
 correcta en conversaciones largas) **sin romper el cache** del prefijo estable.
 
-- **Anthropic**: el adapter emite el system como 2 bloques —
-  `[estable (cache_control: ephemeral), temporal (sin marker)]`. El marker
-  cubre solo el bloque estable.
-- **OpenAI / Gemini**: el temporal se concatena al final del system /
-  `systemInstruction`; su prefix-cache automático cachea el prefijo estable.
+- **Anthropic**: el adapter emite el system como un array de bloques —
+  `[primero (cache_control: ephemeral), ...siguientes (sin marker)]`. El marker
+  cubre solo el **primer** bloque; todo lo que llegue después (más mensajes
+  `system`, el bloque temporal) queda fuera del prefijo cacheado.
+- **OpenAI / Gemini**: el temporal se concatena al final del **último** mensaje
+  `system` / del `systemInstruction`; su prefix-cache automático cachea el
+  prefijo estable.
 
 Antes del fix el timestamp iba al FRENTE del system y quedaba **congelado** en
 turn 1 (gate `if !history_exists`) para no romper el cache — al costo de mostrar

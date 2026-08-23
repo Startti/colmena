@@ -372,6 +372,76 @@ Dos hallazgos empíricos que conviene no re-descubrir:
 - Anthropic **no exige que el orden de los `tool_result` coincida** con el de los
   `tool_use` declarados; solo exige que estén todos. Verificado en vivo: declarado
   `[ask_email, ask_city]`, enviado `[ask_city, ask_email]` → 200.
+## 6. El adapter de Anthropic descartaba mensajes `system` de más
+
+**Qué cambió.** `anthropic_adapter.rs::convert_messages` colapsaba todos los mensajes de rol
+`system` **sobrescribiendo** (`system_message = Some(...)` dentro del loop), así que de varios
+sobrevivía solo el último. Ahora los acumula en orden y `build_request_body` los emite como bloques
+separados del campo `system`, con el marker `cache_control: ephemeral` **solo en el primero** — lo
+estable queda cacheado y lo volátil fuera del prefijo.
+
+**Latente, no un fallo vivo.** El reporte que originó el cambio afirmaba que toda conversación
+compactada perdía el system prompt del agente, vía el segundo `system` que agrega
+`history_compaction`. No se reproduce, y la razón está en el orden real del historial:
+
+- El nodo `llm_call` persiste el turno 1 como `[User(prompt), System(secciones)]` — el
+  `build_initial_user_message` va primero y el `messages.push(LlmMessage::system(...))` después,
+  y solo cuando `!history_exists`. Por eso `messages[keep_first - 1]` **es** un `system`, la rama
+  de merge de `build_compacted_messages` corre siempre, y la compactación produce **uno**.
+- Los otros cinco llamadores de `AgentService` (`reactor`, `planner`, `critic`, `orchestrator` y
+  `util/extract_with_schema`) **sí** arman `[System, User]`, el orden que el reporte asumía — pero
+  cada uno usa un `InMemoryConversationRepository` nuevo por invocación con exactamente 2 mensajes,
+  así que `build_compacted_messages` sale por su guarda temprana (`total <= keep_first + 1`) y
+  nunca compacta. Los salva el historial efímero, no el orden: si alguno pasara a historial
+  persistente, la rama del segundo `system` se activaría.
+
+**Por qué se arregla igual.** Varios `system` son legales —`LlmRequest` los admite intercalados— y
+los otros dos adapters ya los manejan. La rama que emite un `system` nuevo no se alcanza hoy por
+cómo cada llamador arma el historial; cualquier cambio ahí la activa, y el modo de fallo es
+silencioso — sin error ni log, el agente deja de seguir sus instrucciones.
+
+**Defecto secundario, misma raíz.** `openai_adapter.rs` inyectaba `volatile_system_suffix` en
+**cada** mensaje `system`, duplicando el bloque temporal. Ahora va solo en el **último**, lo que
+además alinea el orden con Anthropic y Gemini. Aplica a Chat Completions y Responses API.
+
+**Fuera de alcance.** Como la compactación mergea el resumen DENTRO del `system` estable y ese
+resumen se recomputa en cada run, el prefijo cacheado cambia turno a turno: una vez que una
+conversación compacta, el prompt caching deja de acertar. Es un cambio de comportamiento en
+`history_compaction`, no en el adapter — va en su propio ticket.
+
+**Tests.** TDD, RED reproducido (`left: 1, right: 2` en el conteo de bloques `system`) antes del
+GREEN: 3 tests en `anthropic_adapter.rs`, 2 en `openai_adapter.rs`, 1 candado de regresión en
+`gemini_adapter.rs`.
+
+**Verificación E2E** (Anthropic real, `claude-opus-5`, con un `--agent-session-id` estable):
+[`..._fill.json`](../tests/graphs/agents/anthropic_compaction_system_prompt_fill.json) acumula
+historial hasta disparar la compactación y
+[`..._probe.json`](../tests/graphs/agents/anthropic_compaction_system_prompt_probe.json) pide un
+código que vive **solo** en el system prompt y nunca aparece en un turno visible. Resultado: el
+request compactado queda en **3 mensajes con un único bloque `system`**, y el agente devuelve el
+código exacto — o sea, el system prompt sigue gobernando después de compactar. Ese run es también
+la evidencia de que la ruta de dos `system` no se alcanza hoy.
+
+Para reproducirlo (requiere API real de Anthropic; `unset ANTHROPIC_BASE_URL` si el `.env` local lo
+define sin `/v1`, y `unset COLMENA_LOCAL` después de cargarlo):
+
+```bash
+for i in $(seq 1 3); do
+  cargo run --bin dag_engine -- run \
+    tests/graphs/agents/anthropic_compaction_system_prompt_fill.json \
+    --agent-session-id orion_compaction_001
+done
+COLMENA_DUMP_PROMPT_SIZES=1 COLMENA_DUMP_PROMPT_FULL=1 \
+  cargo run --bin dag_engine -- run \
+    tests/graphs/agents/anthropic_compaction_system_prompt_probe.json \
+    --agent-session-id orion_compaction_001
+```
+
+Con la frontera estructural de §4 alcanzan tres corridas de `fill`: cada una cierra su interacción
+con un `assistant` sin `tool_calls`, así que `current_interaction_start` deja la ventana verbatim en
+un solo mensaje y todo lo anterior se resume apenas el borde supera `SUMMARY_KEEP_FIRST_MSGS`. El
+dump de la sonda muestra los mensajes exactos del request. La verificación es manual a propósito:
+pega contra una API paga y no puede correr en CI.
 
 **Estado.** done.
 

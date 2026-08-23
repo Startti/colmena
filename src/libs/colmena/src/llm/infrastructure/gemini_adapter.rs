@@ -1416,4 +1416,35 @@ mod tests {
             "stable system"
         );
     }
+
+    // ── Multiple System messages (compaction summary) ────────────────────
+    //
+    // Regression lock, not a new behavior: this adapter already joins every
+    // System instruction with a blank line. The invariant is cross-provider —
+    // `history_compaction` appends the conversation summary as a SECOND System
+    // message, and no adapter may drop one (the Anthropic adapter used to).
+
+    #[test]
+    fn two_system_messages_are_joined_into_one_instruction() {
+        use crate::llm::domain::{LlmConfig, LlmMessage, LlmProvider, LlmRequest, ProviderKind};
+        let adapter = GeminiAdapter::new();
+        let provider = LlmProvider::new(ProviderKind::Google, "k".to_string(), None).unwrap();
+        let config = LlmConfig::new(provider);
+        let messages = vec![
+            LlmMessage::system("stable system".into()).unwrap(),
+            LlmMessage::user("hi".into()).unwrap(),
+            LlmMessage::system("## Conversation summary (older turns)".into()).unwrap(),
+        ];
+        let req = LlmRequest::new(messages, config, false).unwrap();
+        let body = adapter.build_request_body(&req).unwrap();
+
+        let text = body["systemInstruction"]["parts"][0]["text"]
+            .as_str()
+            .unwrap();
+        assert!(text.contains("stable system"), "agent prompt survives");
+        assert!(
+            text.contains("## Conversation summary (older turns)"),
+            "compaction summary survives"
+        );
+    }
 }
