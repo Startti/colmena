@@ -108,6 +108,28 @@ pub fn recent_boundary_by_tokens(
     b.min(messages.len().saturating_sub(1))
 }
 
+/// Index where the open interaction starts: right after the last `assistant`
+/// message that carried no tool calls.
+///
+/// The ReAct loop in `agent_service` terminates **if and only if** the assistant
+/// returned no tool calls — condition at `agent_service.rs:354`, `return` at
+/// `:360` for `Some(empty)`, `return` at `:677` for `None`. A persisted
+/// `assistant` with no tool calls is therefore, by construction, the close of an
+/// interaction, and everything after it is still in flight.
+///
+/// Returns `0` when no interaction has closed yet: the whole history belongs to
+/// the current one.
+pub fn current_interaction_start(messages: &[LlmMessage]) -> usize {
+    for i in (0..messages.len()).rev() {
+        let closes = matches!(messages[i].role(), MessageRole::Assistant)
+            && messages[i].tool_calls().is_none_or(|tcs| tcs.is_empty());
+        if closes {
+            return i + 1;
+        }
+    }
+    0
+}
+
 use crate::llm::application::tool_digest::digest_tool_result;
 use crate::llm::domain::{
     ConversationKey, ConversationRepository, MessageSummarizer, StoredMessage,
@@ -866,5 +888,66 @@ mod tests {
             big,
             "the oversized tool result stays verbatim"
         );
+    }
+
+    #[test]
+    fn interaction_start_is_after_the_last_assistant_without_tool_calls() {
+        let closing = LlmMessage::assistant("listo".to_string()).unwrap();
+        let msgs = vec![
+            LlmMessage::user("vieja".into()).unwrap(),
+            closing.clone(),
+            LlmMessage::user("actual".into()).unwrap(),
+            LlmMessage::assistant_with_tool_calls(String::new(), vec![tc("c1", "sql_query")])
+                .unwrap(),
+            LlmMessage::tool("c1".into(), "filas".into()).unwrap(),
+        ];
+        assert_eq!(current_interaction_start(&msgs), 2);
+    }
+
+    #[test]
+    fn an_assistant_with_an_empty_tool_call_vec_also_closes() {
+        // The ReAct loop returns on BOTH `Some(vec![])` and `None`. Detecting
+        // the close with `is_none()` alone would miss the non-streaming path.
+        let msgs = vec![
+            LlmMessage::user("x".into()).unwrap(),
+            LlmMessage::assistant_with_tool_calls("listo".to_string(), vec![]).unwrap(),
+            LlmMessage::user("actual".into()).unwrap(),
+        ];
+        assert_eq!(current_interaction_start(&msgs), 2);
+    }
+
+    #[test]
+    fn several_unanswered_user_messages_all_belong_to_the_open_interaction() {
+        let msgs = vec![
+            LlmMessage::assistant("listo".to_string()).unwrap(),
+            LlmMessage::user("uno".into()).unwrap(),
+            LlmMessage::user("dos".into()).unwrap(),
+            LlmMessage::user("tres".into()).unwrap(),
+        ];
+        assert_eq!(current_interaction_start(&msgs), 1);
+    }
+
+    #[test]
+    fn a_closing_assistant_as_the_newest_message_leaves_nothing_open() {
+        // Reachable on a resume with no new prompt: the newest stored message is
+        // the previous turn's final answer. Task 2 must not let this empty the
+        // recent window.
+        let msgs = vec![
+            LlmMessage::user("x".into()).unwrap(),
+            LlmMessage::assistant("listo".to_string()).unwrap(),
+        ];
+        assert_eq!(current_interaction_start(&msgs), msgs.len());
+    }
+
+    #[test]
+    fn without_a_closed_interaction_everything_is_current() {
+        let msgs = vec![
+            LlmMessage::user("x".into()).unwrap(),
+            LlmMessage::assistant_with_tool_calls(String::new(), vec![tc("c1", "sql_query")])
+                .unwrap(),
+            LlmMessage::tool("c1".into(), "filas".into()).unwrap(),
+        ];
+        assert_eq!(current_interaction_start(&msgs), 0);
+        assert_eq!(current_interaction_start(&[]), 0);
     }
 }
