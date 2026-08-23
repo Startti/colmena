@@ -207,7 +207,6 @@ impl AgentService {
             session_id,
             self.conversation_repository.as_ref(),
             self.message_summarizer.as_ref(),
-            crate::llm::application::history_compaction::RECENT_TOKEN_BUDGET,
         )
         .await;
 
