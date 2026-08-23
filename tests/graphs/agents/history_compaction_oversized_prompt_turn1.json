@@ -1,0 +1,73 @@
+{
+  "comment": "Turno 1 de 2 del E2E de ruta limpia para el panic de compactacion. Corre este grafo PRIMERO con un --agent-session-id estable: el agente llama una tool real y responde, dejando 4 mensajes persistidos (user, assistant+tool_calls, tool, assistant) — suficientes para superar el early-return de build_compacted_messages. Despues corre history_compaction_oversized_prompt_turn2.json con el MISMO --agent-session-id.",
+  "metadata": {
+    "category": "agents",
+    "features": [
+      "history_compaction",
+      "conversation_memory",
+      "python_script"
+    ],
+    "requires_env": [
+      "GEMINI_API_KEY",
+      "DATABASE_URL"
+    ]
+  },
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/hc-oversized-prompt-1",
+        "method": "POST",
+        "test_payload": {
+          "prompt": "Conta cuantas transacciones hay, por favor."
+        }
+      }
+    },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "api_key": "${GEMINI_API_KEY}",
+        "model": "gemini-2.5-flash",
+        "system_message": "Sos un asistente conciso. Si el usuario pide contar transacciones, llama a la tool `contar_registros` y responde con el numero. En cualquier otro caso responde en 2 oraciones como maximo.",
+        "temperature": 0.0,
+        "stream": false,
+        "connection_url": "${DATABASE_URL}",
+        "tool_configurations": {
+          "contar_registros": {
+            "name": "contar_registros",
+            "node_type": "python_script",
+            "description": "Devuelve un listado corto de transacciones para contar.",
+            "node_schema": {
+              "sandbox_mode": {
+                "type": "string",
+                "fixed": "restricted"
+              },
+              "sandbox_timeout_secs": {
+                "type": "number",
+                "fixed": 15
+              },
+              "code": {
+                "type": "string",
+                "fixed": "output = [{'id': i, 'monto': i * 11} for i in range(5)]"
+              }
+            }
+          }
+        }
+      }
+    },
+    "out": {
+      "type": "output"
+    }
+  },
+  "edges": [
+    {
+      "from": "trigger",
+      "to": "agent"
+    },
+    {
+      "from": "agent.result",
+      "to": "out"
+    }
+  ]
+}
