@@ -114,3 +114,185 @@ motor.
 aceptar el job» queda anotado y no implementado, porque no explica el síntoma reportado.
 
 ---
+
+## 3. Panic al compactar el historial cuando el mensaje más nuevo excede el presupuesto — fix + respuesta a ADP
+
+**Qué cambió.** `recent_boundary_by_tokens` (`history_compaction.rs`) devolvía `messages.len()` — un
+índice fuera de rango — cuando el mensaje más nuevo por sí solo ya excedía el presupuesto de
+~2.500 tokens de la ventana de recientes: el acumulador inicial (`b = messages.len()`) nunca se
+reasignaba porque el loop cortaba en la primera iteración, antes de llegar a `b = i`.
+`build_compacted_messages` indexaba ese resultado sin chequear el límite y el proceso panicaba con
+`index out of bounds`. **Fix:** la función ahora clampa su resultado
+(`b.min(messages.len().saturating_sub(1))`): nunca vuelve a devolver un índice fuera de rango, ni
+siquiera con historial vacío, garantizado por una nueva sweep combinatoria
+(`recent_boundary_is_always_a_valid_index`, n×size×budget×shape) que cubre casos que los dos tests
+de reproducción originales no alcanzaban (p.ej. `n=1, budget=0`). El clamp bounda el **índice** de
+la ventana, no el contenido: cuando el mensaje más nuevo por sí solo agota el presupuesto, la
+ventana de recientes degenera a exactamente ese mensaje y viaja **verbatim, sin importar el rol**
+(`user`, `assistant` o `tool`) — ver "Dónde se corta el historial: la interacción abierta" en
+[`15_memory_guide.md`](developer_guide/15_memory_guide.md) (sección reemplazada en §4 de este mismo
+changelog: el borde pasó de presupuesto de tokens a estructural).
+
+**No es específico de "resume".** El reporte de ADP asumía que el disparador era "reanudar un run
+suspendido". Es el disparador más frecuente en producción, pero no el único: un prompt de usuario
+pegado de más de ~10.000 caracteres dispara el mismo panic en un turno normal, sin ningún resume de
+por medio. Dos tests de regresión cubren ambos casos
+(`repro_adp_panic_last_content_message_alone_exceeds_budget`,
+`repro_panic_also_fires_on_a_large_user_prompt`), y el E2E de ruta limpia descrito más abajo lo
+demuestra en vivo: el mismo turno ordinario aborta contra el binario pre-fix y completa contra el
+binario con el fix.
+
+**Qué se midió.**
+- **14 tests unitarios** en `history_compaction.rs`: la sweep de contrato
+  `recent_boundary_is_always_a_valid_index`; los dos tests de reproducción del panic
+  (`repro_adp_panic_last_content_message_alone_exceeds_budget`,
+  `repro_panic_also_fires_on_a_large_user_prompt`); la propiedad de costo acotado a un solo turno
+  (`oversized_message_leaves_the_recent_window_on_the_next_turn`); los tests de verbatim por rol
+  (`oversized_newest_user_prompt_stays_verbatim`, `oversized_newest_assistant_stays_verbatim`);
+  `recent_window_is_never_empty`; el pin de la salida cruda con tool calls en paralelo
+  (`parallel_tool_calls_with_oversized_last_result_ship_the_history_raw`); y los tests
+  preexistentes de clasificación/digest/summarización — todos pasan.
+- **E2E en vivo** contra Gemini 2.5 Flash + Postgres real — y es también la prueba directa de que el
+  panic **no** es específico de "resume":
+  [`history_compaction_oversized_prompt_turn1.json`](../tests/graphs/agents/history_compaction_oversized_prompt_turn1.json)
+  + [`history_compaction_oversized_prompt_turn2.json`](../tests/graphs/agents/history_compaction_oversized_prompt_turn2.json).
+  Dos corridas ordinarias del CLI con el mismo `--agent-session-id`, **sin sembrar filas en la DB,
+  sin `suspend` y sin matar ningún proceso**; el turno 2 es sólo un prompt pegado de 11.053
+  caracteres. Contra el binario **pre-fix** el turno 2 aborta con
+  `index out of bounds: the len is 6 but the index is 6` en `history_compaction.rs:143:46` y
+  `exit code 101`. Contra el binario **con el fix** el mismo turno termina con
+  `finishReason: "stop"`. Con `COLMENA_DUMP_PROMPT_FULL=1` sobre la corrida arreglada, el wire
+  queda `[user viejo, system+resumen, prompt de 11.124 chars VERBATIM]`: el `user` más nuevo sale
+  completo, sin truncar.
+
+**Documentación de referencia.**
+- Guía: [`docs/developer_guide/15_memory_guide.md`](developer_guide/15_memory_guide.md) §Compactación
+  → "Dónde se corta el historial: la interacción abierta" (sección renombrada en §4 de este mismo
+  changelog: el borde pasó de presupuesto de tokens a estructural — el mecanismo descrito aquí abajo
+  ya no existe en el código).
+- Código (histórico — reemplazado en §4): `recent_boundary_by_tokens` ya no existe;
+  `src/libs/colmena/src/llm/application/history_compaction.rs` usa `current_interaction_start`.
+- Grafos E2E: [`history_compaction_oversized_prompt_turn1.json`](../tests/graphs/agents/history_compaction_oversized_prompt_turn1.json)
+  + [`history_compaction_oversized_prompt_turn2.json`](../tests/graphs/agents/history_compaction_oversized_prompt_turn2.json)
+  — se corren en ese orden con el mismo `--agent-session-id`, sin sembrar nada en la base.
+
+**Respuesta al handoff de ADP.**
+
+1. **Confirmado, con reproducción.** El panic existe y es real: `recent_boundary_by_tokens` devolvía
+   un índice igual a `messages.len()` (fuera de rango) cuando el mensaje más nuevo por sí solo
+   excedía el presupuesto de recientes, y `build_compacted_messages` lo indexaba sin chequear el
+   límite. Reproducido con dos tests deterministas y con un run en vivo contra Postgres real (ver
+   arriba).
+2. **No es específico de "resume".** Corrige la lectura del reporte: reanudar un run suspendido es
+   el camino más frecuente para llegar a este estado (el mensaje más nuevo persistido queda siendo
+   el resultado de una tool grande, sin respuesta de seguimiento todavía), pero no es el único. Un
+   usuario pegando un prompt de más de ~10.000 caracteres en un turno normal, sin ningún suspend de
+   por medio, dispara el mismo panic — el mecanismo depende únicamente del tamaño del mensaje más
+   nuevo, no de si el turno viene de un resume.
+3. **Sobre "un panic tumba el worker entero".** Colmena no define `panic = "abort"` en ningún
+   perfil de `Cargo.toml`, y no instala ningún `catch_unwind` alrededor de la ejecución de nodos.
+   Con el perfil `unwind` de Rust (el default, que Colmena no sobrescribe), un panic dentro de una
+   tarea de Tokio se propaga como un `JoinError` de esa tarea — no mata el proceso por sí solo. Si
+   el binario de ADP sí termina el proceso entero ante ese panic, eso depende de decisiones propias
+   de su binario (perfil de compilación, un panic hook que llame `abort()`, cómo se manejan los
+   `JoinError`, etc.) que no podemos verificar leyendo el repo de Colmena. No hacemos ninguna
+   afirmación sobre eso, ni ninguna recomendación operativa sobre su perfil de panics o su política
+   de reinicio.
+
+**Estado.** done. Fix + tests + E2E en vivo + documentación en el mismo cambio.
+
+---
+
+## 4. La frontera de compactación pasa de presupuesto de tokens a estructural — `current_interaction_start`
+
+**Qué cambió.** El fix de §3 clampaba el índice para que `recent_boundary_by_tokens` nunca panicara,
+pero dejaba en pie el defecto de fondo que ese mismo mecanismo tenía: decidir el borde por
+presupuesto acumulado (`RECENT_TOKEN_BUDGET` = ~2.500 tokens) no sabe qué mensajes pertenecen a la
+MISMA interacción que el más nuevo. Cuando esa interacción incluía un resultado de `tool`
+sobredimensionado, el borde podía aterrizar **entre** la pregunta que disparó la tool call y su
+resultado, resumiendo la pregunta mientras el resultado viajaba verbatim al lado — el propio modelo
+se quedaba sin ver qué había preguntado.
+
+Este cambio reemplaza el mecanismo entero por uno estructural: `current_interaction_start`
+(`history_compaction.rs`) escanea el historial hacia atrás y devuelve la posición justo después del
+**último `assistant` que respondió sin `tool_calls`** — la propia condición de salida del loop ReAct
+de `agent_service` (`agent_service.rs:353` `if tool_calls.is_empty()`, `return` en `:359` para
+`Some(vec![])`, `return` en `:676` para `None`). Un `assistant` persistido sin `tool_calls` es, por
+construcción, el cierre de una interacción; todo lo que viene después sigue en curso y viaja
+**verbatim, sin importar tamaño ni rol**. `RECENT_TOKEN_BUDGET`, `recent_boundary_by_tokens`,
+`est_tokens` y el guard de pares que compensaba su punto ciego (retroceder el borde sobre cada
+`tool` consecutivo) quedan eliminados — ya no hacen falta: el borde nuevo aterriza siempre en el
+primer mensaje de una interacción, que nunca puede ser un `Tool` huérfano de su `Assistant`.
+
+**El costo, dicho con honestidad — en las dos direcciones.** No hay tope de tamaño en la interacción
+abierta, y esa interacción **no está acotada a un turno**: un `suspend` no la cierra (la ruta de
+suspensión retorna en `agent_service.rs:500` sin persistir ningún `assistant` sin `tool_calls`), así
+que sigue abierta a través de todos los runs de resume que hagan falta. Mientras siga abierta, cada
+resultado de `tool` grande que contenga viaja completo en cada resume, y en el caso límite —nada
+cerró todavía, `b = 0`— la historia entera viaja cruda, sin compactar, en cada run: el shape que
+Colmena documenta para un agente HITL de varios pasos dirigido enteramente vía `suspend`. Un agente
+así con un par de resultados grandes puede alcanzar el techo de contexto del proveedor con un error
+duro, donde el presupuesto viejo degradaba en su lugar.
+
+El otro lado, menos obvio: al arrancar un turno nuevo ordinario, la ventana verbatim es de
+exactamente un mensaje (el prompt recién persistido, en `len-1`, justo después del cierre anterior
+en `len-2`). Una respuesta previa del agente de más de `SUMMARY_SKIP_THRESHOLD_CHARS` (250 chars) ya
+no tiene el margen que daba el viejo presupuesto de ~2.500 tokens y pasa a resumen semántico de
+~250 chars un turno antes de lo que pasaba con el mecanismo eliminado.
+
+Detalle completo, costos y casos borde: [`15_memory_guide.md`](developer_guide/15_memory_guide.md)
+§Compactación → "Dónde se corta el historial: la interacción abierta". Es una decisión de diseño
+deliberada, no un descuido: resumir por presupuesto es exactamente el mecanismo que causaba el
+defecto de fondo. El mapa para acotar el peso de un resultado estructurado sobredimensionado sin
+resumir la pregunta que lo disparó queda para un cambio aparte (ver "What this plan does NOT do" en
+el plan de referencia, abajo).
+
+**Qué se midió.**
+- **`cargo test --verbose`**: 2.365 tests de la lib (2.294 passed, 71 ignored — requieren
+  `DATABASE_URL`/API keys, se corren aparte con `--ignored`, 0 failed), incluyendo **16 tests** en
+  `llm::application::history_compaction::tests` (todos pasan): la detección del borde
+  (`interaction_start_is_after_the_last_assistant_without_tool_calls`,
+  `interaction_start_uses_the_last_close_not_the_first`,
+  `an_assistant_with_an_empty_tool_call_vec_also_closes`,
+  `several_unanswered_user_messages_all_belong_to_the_open_interaction`,
+  `without_a_closed_interaction_everything_is_current`,
+  `a_closing_assistant_as_the_newest_message_leaves_nothing_open`), el caso que motivó este cambio
+  (`the_current_question_survives_next_to_an_oversized_tool_result`) y la ventana nunca vacía
+  (`recent_window_is_never_empty`, `a_closed_newest_interaction_still_leaves_a_recent_message`).
+  `cargo fmt --check` y `cargo clippy --all-targets` limpios (el crate corre con
+  `warnings = "deny"`).
+- **E2E en vivo** contra Gemini 2.5 Flash + Postgres real, dos corridas del CLI con el mismo
+  `--agent-session-id` y `COLMENA_DUMP_PROMPT_SIZES=1 COLMENA_DUMP_PROMPT_FULL=1` (el segundo env var
+  por sí solo no imprime nada — el dump completo está anidado dentro del chequeo del primero, un
+  detalle que no estaba documentado):
+  [`interaction_boundary_e2e_turn1.json`](../tests/graphs/agents/interaction_boundary_e2e_turn1.json)
+  + [`interaction_boundary_e2e_turn2.json`](../tests/graphs/agents/interaction_boundary_e2e_turn2.json).
+  El turno 1 pide un conteo (una tool call + respuesta final que **cierra** la interacción,
+  `finishReason: "stop"`, `"Hay 5 transacciones en total."`). El turno 2 pide el listado completo:
+  la tool `listar_transacciones` devuelve 300 filas (15.363 chars de JSON crudo). En el dump del
+  último iter del turno 2 (`n_msgs=5`), el wire queda `[user T1 (155ch, kept_first), System
+  fusionado con el resumen de T1 (996ch), user T2 (234ch, VERBATIM — la pregunta completa "Ahora
+  necesito el detalle completo de todas las transacciones…"), assistant+tool_calls T2 (309ch),
+  Tool T2 (17.892ch, VERBATIM — las 300 filas completas, sin digest ni truncar)]`. Ni la pregunta
+  del turno 2 ni el resultado de la tool aparecen como línea `[Tn]` dentro del bloque `## Conversation
+  summary`: ese bloque solo cubre los índices `keep_first..b` (el `tool` y el `assistant` de cierre
+  del turno 1), nunca los de la interacción abierta — la propia longitud del mensaje `System`
+  (996ch) es demasiado chica para contener los 17.892ch del resultado. `finishReason: "stop"` en
+  ambos turnos.
+
+**Documentación de referencia.**
+- Guía: [`docs/developer_guide/15_memory_guide.md`](developer_guide/15_memory_guide.md) §Compactación
+  → "Dónde se corta el historial: la interacción abierta".
+- Código: `src/libs/colmena/src/llm/application/history_compaction.rs` —
+  `current_interaction_start`, `build_compacted_messages`.
+- Plan de referencia:
+  [`docs/superpowers/plans/2026-08-22-interaction-boundary.md`](superpowers/plans/2026-08-22-interaction-boundary.md).
+- Grafos E2E:
+  [`interaction_boundary_e2e_turn1.json`](../tests/graphs/agents/interaction_boundary_e2e_turn1.json)
+  + [`interaction_boundary_e2e_turn2.json`](../tests/graphs/agents/interaction_boundary_e2e_turn2.json)
+  — se corren en ese orden con el mismo `--agent-session-id`, sin sembrar nada en la base.
+
+**Estado.** done. Cambio estructural + 16 tests unitarios + E2E en vivo + documentación en el mismo
+cambio.
+
+---

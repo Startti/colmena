@@ -327,9 +327,10 @@ sin perder nada (el original siempre vive en la DB).
 
 - **Cuándo:** una sola vez, **al cargar el run** (lazy). Nunca por iteración del
   loop ReAct, y el bloque compactado queda fijo durante el run (cache-friendly).
-- **Recientes (full):** los últimos mensajes que entran en un presupuesto de
-  ~2.500 tokens van **completos**, alineados a límites de turno (no se parte un
-  par `assistant(tool_calls)+tool`).
+- **Recientes (full):** todo lo que pertenece a la **interacción abierta** va
+  **completo**, sin importar cuánto pese. El borde es estructural, no de
+  presupuesto: arranca justo después del último `assistant` que respondió sin
+  `tool_calls` (ver "Dónde se corta el historial" más abajo).
 - **Primeros 2 (full):** el mensaje inicial del usuario (el objetivo) y el
   `system_message` se preservan completos.
 - **Medio (resumido):** todo lo que queda entre medio se colapsa en **un** mensaje
@@ -337,8 +338,19 @@ sin perder nada (el original siempre vive en la DB).
 
 ### Política por rol / tipo de mensaje
 
-Cada línea del resumen se construye según el rol — **nunca se trunca por
-caracteres ni se persiste nada truncado**:
+Cada línea del resumen se construye según el rol. La DB **nunca guarda nada
+truncado** (ver la garantía de persistencia más abajo), pero el texto que se
+**envía al modelo** sí puede truncarse por caracteres — como puente de runtime,
+nunca como límite persistido — cuando un mensaje de la zona de memoria se queda
+sin resumen semántico. Eso pasa en **tres** situaciones: el summarizer devuelve
+error, no hay summarizer configurado, o ya se agotó el cupo de
+`SUMMARIZE_PER_LOAD_CAP` (30) resúmenes para esa carga. En cualquiera de las
+tres la línea cae a los primeros `SUMMARY_TARGET_CHARS` (250) caracteres del
+original, más el puntero a `recall_history`.
+
+Ese truncado vive **solo en la zona de memoria**. Nada dentro de la interacción
+abierta se trunca, sin importar su rol — ver la sección "Dónde se corta el
+historial: la interacción abierta" más abajo. Fuera de ese caso:
 
 | Tipo de mensaje | Cómo aparece en el resumen |
 |---|---|
@@ -382,6 +394,76 @@ columna: lista la *identidad* de cada fila (`<type> "<name>"`), sacando campos
 sabe qué nodo es cuál sin recuperar. Identificadores más profundos que un hop → marcador +
 `recall_history` (degradación elegante).
 
+### Dónde se corta el historial: la interacción abierta
+
+El borde entre "recientes" (verbatim) y "viejo" (resumido) es **estructural**,
+no de presupuesto de tokens. Lo calcula `current_interaction_start`
+(`history_compaction.rs`): escanea el historial hacia atrás y devuelve la
+posición justo después del **último `assistant` que respondió sin
+`tool_calls`**. Ese es, por construcción, el cierre de la última interacción
+que terminó — el loop ReAct de `agent_service` solo retorna al llamador
+cuando el `assistant` no pide ninguna tool más — así que todo lo que viene
+después sigue en curso.
+
+Una interacción abierta **no está acotada a un turno.** Un `suspend` no la
+cierra: la ruta de suspensión retorna en `agent_service.rs:500` con
+`LlmResponse::suspended(...)` sin persistir ningún `assistant` sin
+`tool_calls`, así que la interacción sigue abierta a través de todos los runs
+de resume que hagan falta, hasta que el agente por fin responda sin pedir otra
+tool.
+
+Todo lo que cae en la interacción abierta —la pregunta que la disparó, cada
+`assistant` con `tool_calls`, cada resultado de `tool`, sin importar tamaño ni
+rol— viaja **verbatim** al proveedor. No hay tope de tokens que decida dónde
+se corta: el corte lo decide la estructura de la conversación (dónde terminó
+la última interacción cerrada), no cuánto pesa el contenido ni cuántos runs
+lleva abierta.
+
+Casos borde:
+
+- **Nada cerró todavía** (`current_interaction_start` devuelve `0`) → todo el
+  historial es la interacción actual; no hay zona vieja que resumir.
+- **`suspend` mantiene la interacción abierta entre resumes** (ver arriba) —
+  un agente HITL de varios pasos, el shape que Colmena documenta para dirigir
+  la interacción con el usuario, puede acumular todos sus resumes dentro de
+  una sola interacción abierta sin que ninguno la cierre.
+- **El mensaje más nuevo es, él mismo, el cierre** de una interacción
+  (alcanzable en un resume sin prompt nuevo: lo último persistido es la
+  respuesta final del turno anterior) → la ventana de recientes retrocede un
+  mensaje para no vaciarse del todo. Vaciarla dejaría el wire terminando en un
+  turno viejo — en Anthropic y Gemini, que sacan el `system`/resumen del
+  arreglo de mensajes, el modelo vería como último mensaje real el primer
+  prompt de la sesión, no el actual.
+
+**El costo, dicho con honestidad — en las dos direcciones.** No hay tope de
+tamaño en la interacción abierta, y no está acotada a un turno (ver arriba):
+mientras siga abierta, cada resultado de `tool` grande que contenga viaja
+completo en cada resume, y en el caso límite —nada cerró todavía, `b = 0`—
+`build_compacted_messages` retorna temprano por `b <= keep_first`: la historia
+entera viaja cruda, sin compactar. Un agente HITL de varios pasos con un par
+de resultados grandes puede así alcanzar el techo de contexto del proveedor
+con un error duro, donde el presupuesto viejo degradaba en su lugar.
+
+El otro lado, menos obvio: al arrancar un turno nuevo ordinario, el cierre
+anterior queda en el índice `len-2` y el prompt recién persistido en `len-1`,
+así que la ventana verbatim es de exactamente **un** mensaje. Una respuesta
+previa del agente de más de `SUMMARY_SKIP_THRESHOLD_CHARS` (250 chars) ya no
+tiene el margen que daba el viejo presupuesto de ~2.500 tokens y pasa a
+resumen semántico de ~250 chars un turno antes de lo que pasaba con el
+mecanismo eliminado: un "reescribí más corto lo que me acabás de decir"
+después de una respuesta de 3.000 caracteres ahora ve solo esa línea
+resumida, y necesita un `recall_history` o una paráfrasis con pérdida.
+
+Es una **decisión de diseño deliberada**, no un descuido: la alternativa
+(recortar por presupuesto) es justo el mecanismo que este cambio reemplazó,
+porque podía resumir la propia pregunta que disparó una tool call
+sobredimensionada — ver [`docs/CHANGELOG_2026-08.md`](../CHANGELOG_2026-08.md)
+§4 para el detalle y las cifras del E2E que lo verifica. El mapa para
+resultados estructurados sobredimensionados dentro de la interacción abierta
+(acotar su peso sin resumir la pregunta) queda para un cambio aparte — ver
+"What this plan does NOT do" en
+[`docs/superpowers/plans/2026-08-22-interaction-boundary.md`](../superpowers/plans/2026-08-22-interaction-boundary.md).
+
 ### Ejemplo del bloque que recibe el modelo
 
 ```text
@@ -408,8 +490,8 @@ viene **paginado**: cada llamada devuelve `content` + `offset` + `returned_chars
 con ese `offset` hasta reconstruir todo el mensaje verbatim.
 
 > **Garantía:** la compactación solo afecta lo que se le **envía** al modelo. La
-> tabla `llm_node_history` siempre guarda el `content` **completo**; nada truncado
-> se persiste, y todo es recuperable por turno.
+> tabla `llm_node_history` siempre guarda el `content` **completo**; nada
+> truncado se persiste, y todo es recuperable por turno.
 
 ### Modelo del summarizer (cadena de resolución)
 
@@ -431,12 +513,15 @@ La llamada de resumen es one-shot y **no** entra a `llm_node_history`.
 |---|---|---|
 | Umbral verbatim | `250` chars | Por debajo → se manda tal cual, sin resumir |
 | Target del resumen | `~250` chars | Pedido por prompt (no hard-cut) |
-| Ventana de recientes | `~2.500` tokens | Cuánto historial reciente va completo |
+| Frontera de recientes | estructural (sin presupuesto) | Arranca justo después del último `assistant` sin `tool_calls`; todo desde ahí va completo, sin importar tamaño |
 | Primeros completos | `2` | Objetivo original + system |
 | Máx. líneas del resumen | `100` | Tope del bloque (las más viejas se omiten, recuperables) |
 
 Diseño completo:
-[`docs/superpowers/specs/2026-06-18-conversation-semantic-summary-design.md`](../superpowers/specs/2026-06-18-conversation-semantic-summary-design.md).
+[`docs/superpowers/specs/2026-06-18-conversation-semantic-summary-design.md`](../superpowers/specs/2026-06-18-conversation-semantic-summary-design.md)
+(resumen semántico, digest, `keep_first`). El borde estructural que reemplazó
+la ventana por presupuesto se diseñó por separado:
+[`docs/superpowers/plans/2026-08-22-interaction-boundary.md`](../superpowers/plans/2026-08-22-interaction-boundary.md).
 
 ## 📚 Más Información
 
