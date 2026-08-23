@@ -698,5 +698,5 @@ async fn test_http_to_llm_pipeline() {
 
 - [Developer Guide](../developer_guide/12_dag_engine_guide.md)
 - [Usage Examples](../examples/USAGE_EXAMPLES.md)
-- [LLM Module Design](MODULO_LLM_DISEÑO.md)
+- [LLM Module Design](../archive/proposals/MODULO_LLM_DISEÑO.md) (archivado — superado por [LLM Deep Dive](../developer_guide/14_llm_deep_dive.md))
 - [Hexagonal Architecture Guide](ARQUITECTURA_HEXAGONAL_GUIA.md)

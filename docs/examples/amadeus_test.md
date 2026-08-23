@@ -296,8 +296,8 @@ SELECT hash_key, encrypted_value FROM secure_value_mappings;
 After this test passes:
 
 1. **Explore more patterns:**
-   - [CREDENTIALS_AND_SECRETS_STRATEGY.md](CREDENTIALS_AND_SECRETS_STRATEGY.md) — All 4 strategies explained
-   - [NODE_CONNECTION_AND_DATA_FLOW.md](NODE_CONNECTION_AND_DATA_FLOW.md) — How data flows between nodes
+   - [Security Strategy](../developer_guide/13_security_strategy.md) — All 4 strategies explained
+   - [Data Flow Guide](../developer_guide/16_data_flow_guide.md) — How data flows between nodes
 
 2. **Plan for production:**
    - Implement Strategy 4: DB Query node for credential management
@@ -343,8 +343,8 @@ docker stop colmena-test-db
 
 - **"Is my setup correct?"** → Check all env vars are set: `echo $AMADEUS_CLIENT_ID $GEMINI_API_KEY $DATABASE_URL`
 - **"What went wrong?"** → Run with `RUST_LOG=debug` for verbose output
-- **"How does secure hashing work?"** → Read [SECURE_VALUES_DESIGN.md](SECURE_VALUES_DESIGN.md)
-- **"Can I use this in production?"** → Yes, but read [CREDENTIALS_AND_SECRETS_STRATEGY.md](CREDENTIALS_AND_SECRETS_STRATEGY.md) first
+- **"How does secure hashing work?"** → Read [Secure Values — diseño](../dds/SECURE_VALUES_DISEÑO.md)
+- **"Can I use this in production?"** → Yes, but read [Security Strategy](../developer_guide/13_security_strategy.md) first
 
 ---
 

@@ -1379,8 +1379,8 @@
         "If artifact_id points to a previously-saved document, the snapshot is loaded at initialization; edits then accumulate on top."
       ],
       "reference_graphs": [
-        "tests/graphs/agents/crdt_documents_basic.json",
-        "tests/graphs/agents/crdt_documents_multiagent.json"
+        "tests/graphs/crdt_documents/llm_agent_smoke.json",
+        "tests/graphs/crdt_documents/llm_agent_smoke_ws_peer.json"
       ]
     },
 

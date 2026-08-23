@@ -748,7 +748,7 @@ incluido `before_text` y `after_text` por párrafo.
 **Documentación de referencia.**
 - Spec: [`docs/superpowers/specs/2026-06-09-gdocs-paragraph-diff-design.md`](superpowers/specs/2026-06-09-gdocs-paragraph-diff-design.md)
 - Plan: [`docs/superpowers/plans/2026-06-09-gdocs-paragraph-diff.md`](superpowers/plans/2026-06-09-gdocs-paragraph-diff.md)
-- Propuesta original (parking lot): [`docs/proposals/2026-06-09-gdocs-oauth-user-flow.md`](proposals/2026-06-09-gdocs-oauth-user-flow.md)
+- Propuesta original (parking lot): `docs/proposals/2026-06-09-gdocs-oauth-user-flow.md` — borrada como superada al shippear OAuth user-scoped; ver [`docs/developer_guide/47_google_oauth.md`](developer_guide/47_google_oauth.md)
 - Dev guide §"Co-edit safety pipeline" reescrito:
   [`docs/developer_guide/45_gdocs.md`](developer_guide/45_gdocs.md)
 
@@ -1580,7 +1580,7 @@ refresh contra `oauth2.googleapis.com` con cache de 1h.
 - **ADP deploy_gcp.sh debe actualizarse** antes del próximo deploy
   contra colmena develop o el worker boot-paniquea con `ConfigMissing`
   listando exactamente qué env vars faltan. Ver
-  [`docs/developer_guide/47_google_oauth.md`](../developer_guide/47_google_oauth.md)
+  [`docs/developer_guide/47_google_oauth.md`](developer_guide/47_google_oauth.md)
   paso F.
 
 **BREAKING para usuarios de docs ya compartidos.** Como discutimos con
@@ -1602,9 +1602,9 @@ naturalmente.
 **Estado.** done en colmena develop. ADP pending (T47-T50 del plan).
 
 **Spec + plan.**
-- Design: [`docs/superpowers/specs/2026-06-10-oauth-user-scoped-design.md`](../superpowers/specs/2026-06-10-oauth-user-scoped-design.md)
-- Plan: [`docs/superpowers/plans/2026-06-10-oauth-user-scoped.md`](../superpowers/plans/2026-06-10-oauth-user-scoped.md)
-- Guía operacional: [`docs/developer_guide/47_google_oauth.md`](../developer_guide/47_google_oauth.md)
+- Design: [`docs/superpowers/specs/2026-06-10-oauth-user-scoped-design.md`](superpowers/specs/2026-06-10-oauth-user-scoped-design.md)
+- Plan: [`docs/superpowers/plans/2026-06-10-oauth-user-scoped.md`](superpowers/plans/2026-06-10-oauth-user-scoped.md)
+- Guía operacional: [`docs/developer_guide/47_google_oauth.md`](developer_guide/47_google_oauth.md)
 
 ---
 
@@ -2698,7 +2698,7 @@ Ejemplo real (resultado de un `load_canvas` del creador-de-agentes):
 
 **Documentación de referencia.**
 - Plan: [`docs/superpowers/plans/2026-06-19-tool-digest-v1-2-identifier-drill.md`](superpowers/plans/2026-06-19-tool-digest-v1-2-identifier-drill.md)
-- Módulo: [`src/libs/colmena/src/llm/application/tool_digest.rs`](src/libs/colmena/src/llm/application/tool_digest.rs)
+- Módulo: [`src/libs/colmena/src/llm/application/tool_digest.rs`](../src/libs/colmena/src/llm/application/tool_digest.rs)
 
 **Tests.** 15 unit en `tool_digest` (incl. drill nominal, identificador de columna-objeto, presupuesto de profundidad, cap de nombre largo).
 
@@ -2728,7 +2728,7 @@ exigen roles alternados, así que normalizar a eso es la forma correcta.
 
 **Documentación de referencia.**
 - Plan: [`docs/superpowers/plans/2026-06-20-consecutive-role-coalescing.md`](superpowers/plans/2026-06-20-consecutive-role-coalescing.md)
-- Código: [`src/libs/colmena/src/llm/domain/llm_request.rs`](src/libs/colmena/src/llm/domain/llm_request.rs)
+- Código: [`src/libs/colmena/src/llm/domain/llm_request.rs`](../src/libs/colmena/src/llm/domain/llm_request.rs)
 
 **Tests.** 9 tests nuevos en `llm_request` (16 en total en el módulo): helper (merge user/assistant/files, Tool no-merge, empty/singleton) + `new` (coalesced-success, historia envenenada self-heal, Tool-passthrough).
 
@@ -3005,7 +3005,7 @@ toca `EngineConfig`, `ColmenaEngine` ni firmas de traits exportados.
 - Spec: [`docs/superpowers/specs/2026-06-22-gsheets-presentable-output-skill-design.md`](superpowers/specs/2026-06-22-gsheets-presentable-output-skill-design.md)
 - Plan: [`docs/superpowers/plans/2026-06-22-gsheets-presentable-output-skill.md`](superpowers/plans/2026-06-22-gsheets-presentable-output-skill.md)
 - E2E graph: [`tests/graphs/agents/gsheets_presentable_report_e2e.json`](../tests/graphs/agents/gsheets_presentable_report_e2e.json)
-- Índice de skills: [`docs/developer_guide/42_builtin_skills_index.md`](42_builtin_skills_index.md)
+- Índice de skills: [`docs/developer_guide/42_builtin_skills_index.md`](developer_guide/42_builtin_skills_index.md)
 
 **Estado.** done.
 
@@ -3298,7 +3298,7 @@ omisión sin firma); E2E real: el Builder de la cadena de agentes en gemini-3.5-
 antes moría tras `load_skill`, ahora hace el loop multi-turno completo (0 errores de
 thought_signature). 1958 unit tests pasan.
 
-**Documentación de referencia.** [`implementation_plan.md`](../implementation_plan.md).
+**Documentación de referencia.** `implementation_plan.md` (archivo de trabajo local, nunca versionado — destrackeado en `7eaaec46`).
 
 **ADP.** No afectado (cambio de wire-format Colmena↔Gemini + campos opcionales additive; no
 cruza SSE ni la API pública).

@@ -280,10 +280,10 @@ With this fix, you can now:
 
 ## Files to Reference
 
-- [SECURE_VALUES_DESIGN.md](docs/SECURE_VALUES_DESIGN.md) - Architecture overview
-- [CREDENTIALS_AND_SECRETS_STRATEGY.md](docs/CREDENTIALS_AND_SECRETS_STRATEGY.md) - All credential approaches
-- [SECURE_VALUES_QUICK_REFERENCE.md](docs/SECURE_VALUES_QUICK_REFERENCE.md) - Usage examples
-- [node_schema documentation](docs/LLM_NODE_COMPLETE_GUIDE.md) - Tool config reference
+- `SECURE_VALUES_DESIGN.md` - Architecture overview (documento borrado en `9dea7419`; vigente: [Secure Values — diseño](../dds/SECURE_VALUES_DISEÑO.md))
+- `CREDENTIALS_AND_SECRETS_STRATEGY.md` - All credential approaches (documento borrado en `9dea7419`; vigente: [Security Strategy](../developer_guide/13_security_strategy.md))
+- [SECURE_VALUES_QUICK_REFERENCE.md](SECURE_VALUES_QUICK_REFERENCE.md) - Usage examples
+- `LLM_NODE_COMPLETE_GUIDE.md` - Tool config reference (documento borrado en `9dea7419`; vigente: [LLM Deep Dive](../developer_guide/14_llm_deep_dive.md))
 
 ---
 

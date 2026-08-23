@@ -3769,7 +3769,7 @@ will run faster once flush() is added in v1.1."
 
 - [ ] **Step 1: Write the guide**
 
-Mirror the structure of the existing [`27_documents_library.md`](../../docs/developer_guide/27_documents_library.md). Sections to include:
+Mirror the structure of the existing [`27_documents_library.md`](../../developer_guide/27_documents_library.md). Sections to include:
 
 1. Overview (1 paragraph: CRDT vs patches, why both exist).
 2. Architecture (the diagram from spec §4).

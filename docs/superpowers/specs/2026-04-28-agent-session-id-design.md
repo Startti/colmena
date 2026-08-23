@@ -208,7 +208,7 @@ Nodes that need either value (today only `llm_call`, `subgraph`, and the secure-
 
 ### 6.1 Read priority for the history key
 
-In [llm.rs](src/libs/colmena/src/dag_engine/infrastructure/nodes/llm.rs), the resolution becomes:
+In [llm.rs](../../../src/libs/colmena/src/dag_engine/infrastructure/nodes/llm.rs), the resolution becomes:
 
 ```rust
 // agent_session_id presence — the key is always injected by the engine,

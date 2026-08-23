@@ -650,8 +650,8 @@ impl ExecutableNode for LlmNode {
 
 ### 11.5 Referencias
 
-- [DAG Engine Developer Guide](../developer_guide/12_dag_engine_guide.md)
-- [DAG Engine Design](DAG_ENGINE_DISEÑO.md)
-- [Usage Examples](../examples/USAGE_EXAMPLES.md)
+- [DAG Engine Developer Guide](../../developer_guide/12_dag_engine_guide.md)
+- [DAG Engine Design](../../dds/DAG_ENGINE_DISEÑO.md)
+- [Usage Examples](../../examples/USAGE_EXAMPLES.md)
 
 Este diseño proporciona una base sólida para el módulo LLM de Colmena, siguiendo principios de arquitectura hexagonal y permitiendo fácil extensión para futuros proveedores y funcionalidades.

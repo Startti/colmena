@@ -22,7 +22,7 @@ El nodo `llm_call` de Colmena resuelve `skills.paths` así (ver [llm.rs:89-138](
 2. Cada path en `skills.paths` se resuelve relativo a `graph_dir` (si es relativo) o se usa tal cual (si es absoluto), luego se `canonicalize()`.
 3. El path canonicalizado debe estar dentro de `graph_dir` o de algún directorio listado en `COLMENA_SKILLS_ALLOWED_DIRS` (separador `:` en Unix).
 
-En el worker, los grafos llegan como JSON en mensajes de Redis (ver [worker/src/main.rs:170](../../../../adp/apps/service/ia/platform/worker/src/main.rs)), nunca como archivo en disco — por lo tanto `__colmena_graph_path` no se inyecta y `graph_dir` cae al CWD del contenedor (`/app`, definido por `WORKDIR /app` en el Dockerfile).
+En el worker, los grafos llegan como JSON en mensajes de Redis (ver `worker/src/main.rs:170` (repo ADP)), nunca como archivo en disco — por lo tanto `__colmena_graph_path` no se inyecta y `graph_dir` cae al CWD del contenedor (`/app`, definido por `WORKDIR /app` en el Dockerfile).
 
 ## Decisiones
 

@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust 1.x, sqlx (Postgres), tokio, async-trait, serde_json. Tests use `cargo test`. Integration tests connect to Postgres via `DATABASE_URL`.
 
-**Spec:** [docs/superpowers/specs/2026-04-29-orchestrator-agent-suspend-design.md](docs/superpowers/specs/2026-04-29-orchestrator-agent-suspend-design.md)
+**Spec:** [docs/superpowers/specs/2026-04-29-orchestrator-agent-suspend-design.md](../specs/2026-04-29-orchestrator-agent-suspend-design.md)
 
 ---
 

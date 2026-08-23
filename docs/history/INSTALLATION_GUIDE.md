@@ -470,7 +470,7 @@ maturin publish
 
 Una vez que tengas Colmena instalado exitosamente:
 
-1. **Leer la documentación de uso**: [🐍 Ejemplos de Uso en Python](PYTHON_USAGE_EXAMPLES.md) o [📖 Ejemplos Generales](examples/USAGE_EXAMPLES.md)
+1. **Leer la documentación de uso**: [🐍 Ejemplos de Uso en Python](../examples/python_usage.md) o [📖 Ejemplos Generales](../examples/USAGE_EXAMPLES.md)
 2. **Configurar API keys**: Variables de entorno o configuración directa
 3. **Ejecutar tests**: `python python/tests/test_streaming_scenarios.py`
 4. **Explorar ejemplos**: Revisar los scripts de ejemplo incluidos

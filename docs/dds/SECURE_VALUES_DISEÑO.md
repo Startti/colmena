@@ -760,9 +760,9 @@ async fn test_cleanup_on_dag_end() {
 
 ### Test Graphs
 - `tests/graphs/security/http_secure_basic.json` — Simple secure HTTP → output
-- `tests/graphs/security/http_secure_to_llm.json` — Secure HTTP → LLM (should see hashes)
-- `tests/graphs/security/http_secure_to_http.json` — Secure HTTP → HTTP (should inject)
-- `tests/graphs/security/amadeus_secure.json` — Real-world example
+- `tests/graphs/security/http_secure_to_llm_test.json` — Secure HTTP → LLM (should see hashes)
+- `tests/graphs/security/http_secure_to_http_inject.json` — Secure HTTP → HTTP (should inject)
+- `tests/graphs/security/amadeus_secure_simple_test.json` — Real-world example
 
 ---
 

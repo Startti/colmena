@@ -278,7 +278,6 @@ Tool de SQL con permisos finos sobre Postgres.
 |-------|-------------|
 | `tests/graphs/agents/sql_provision_schema_tool.json` | Provisión de schema. |
 | `tests/graphs/agents/sql_create_schema_blocked.json` | Bloqueo de operaciones DDL no permitidas. |
-| `tests/graphs/agents/sql_layered_tool_context.json` | Contexto SQL en capas. |
 | `tests/graphs/agents/sql_query_readonly_test.json` | Query read-only. |
 | `tests/graphs/agents/sql_insert_decimal_regression.json` | Regression test (insert decimal). |
 | `tests/graphs/agents/sql_rls_todo_test.json` | RLS / row-level security. |

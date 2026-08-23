@@ -166,7 +166,7 @@ This document traces the **complete lifecycle** of an LLM tool call — from the
 
 ### Step 1: Parse the `node_schema`
 
-**File:** [tool_configuration.rs:320](src/libs/colmena/src/dag_engine/domain/tool_configuration.rs#L320)
+**File:** [tool_configuration.rs:320](../../src/libs/colmena/src/dag_engine/domain/tool_configuration.rs#L320)
 **Function:** `parse_node_schema(schema: &NodeSchema) -> Result<ParsedNodeSchema, String>`
 
 The `node_schema` is a HashMap where each key is a node input field (e.g., `base_url`, `query_params`, `payload`). Each field is a `NodeSchemaField` with:
@@ -207,7 +207,7 @@ ParsedNodeSchema {
 
 ### Step 2: Generate the Tool Definition
 
-**File:** [dag_tool_executor.rs:804](src/libs/colmena/src/dag_engine/infrastructure/dag_tool_executor.rs#L804)
+**File:** [dag_tool_executor.rs:804](../../src/libs/colmena/src/dag_engine/infrastructure/dag_tool_executor.rs#L804)
 **Function:** `generate_tool_definition()`
 
 Takes the `ParsedNodeSchema` output and builds a `ToolDefinition` that follows the OpenAI function-calling schema:
@@ -253,7 +253,7 @@ The LLM only provides values for the parameters it can see — it has no knowled
 
 ### Step 4: Parse LLM Arguments
 
-**File:** [dag_tool_executor.rs:1730](src/libs/colmena/src/dag_engine/infrastructure/dag_tool_executor.rs#L1730) (inside `execute_inner()`)
+**File:** [dag_tool_executor.rs:1730](../../src/libs/colmena/src/dag_engine/infrastructure/dag_tool_executor.rs#L1730) (inside `execute_inner()`)
 
 The `arguments` JSON string is deserialized into a `HashMap<String, Value>`:
 
@@ -266,7 +266,7 @@ let args: HashMap<String, Value> = serde_json::from_str(&tool_call.function.argu
 
 ### Step 5: Merge Fixed Values + LLM Arguments
 
-**File:** [node_schema_merge.rs:13-70](src/libs/colmena/src/dag_engine/infrastructure/node_schema_merge.rs#L13-L70)
+**File:** [node_schema_merge.rs:13-70](../../src/libs/colmena/src/dag_engine/infrastructure/node_schema_merge.rs#L13-L70)
 **Function:** `merge_args_into_schema()` — called from `execute_inner()` (`dag_tool_executor.rs:986`) when the tool config has a `node_schema` (PATH 0, highest priority). Extracted into its own module so `for_each` can reuse identical merge semantics for row-driven (non-LLM) calls.
 
 This is the core merge algorithm. It runs in three sub-steps:
@@ -376,7 +376,7 @@ let resolved_result = result.iter()
 
 The merged `inputs` HashMap is passed to the target node's `execute()` method.
 
-#### For `http_request` — [http.rs:850](src/libs/colmena/src/dag_engine/infrastructure/nodes/http.rs#L850)
+#### For `http_request` — [http.rs:850](../../src/libs/colmena/src/dag_engine/infrastructure/nodes/http.rs#L850)
 
 ```
 1. Extract fields from inputs (priority) or config (fallback):
@@ -399,7 +399,7 @@ The merged `inputs` HashMap is passed to the target node's `execute()` method.
 8. Return { "status": 200, "body": { ... } }
 ```
 
-#### For `socketio_request` — [socketio.rs:361](src/libs/colmena/src/dag_engine/infrastructure/nodes/socketio.rs#L361)
+#### For `socketio_request` — [socketio.rs:361](../../src/libs/colmena/src/dag_engine/infrastructure/nodes/socketio.rs#L361)
 
 ```
 1. Extract fields from inputs (priority) or config (fallback):

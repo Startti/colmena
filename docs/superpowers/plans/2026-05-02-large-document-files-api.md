@@ -43,7 +43,7 @@
 
 Lista completa con severidad, soluciones y estimaciones en:
 
-📋 **[Deuda técnica](./2026-05-02-large-document-files-api-tech-debt.md)** (sibling del spec).
+📋 **[Deuda técnica](../specs/2026-05-02-large-document-files-api-tech-debt.md)** (sibling del spec).
 
 **Sesión 2026-05-03**: 5 items resueltos en 6 commits sobre `develop`:
 

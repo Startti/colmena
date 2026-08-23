@@ -101,7 +101,7 @@ done
 Esto **ya está hecho** en ADP develop a partir del commit `09e90674` (2026-06-10).
 Si vas a hacer un setup desde cero en otro project / dominio, mirá la documentación
 operacional del script en
-[`apps/service/ia/platform/CICD.md`](../../../adp/apps/service/ia/platform/CICD.md)
+`apps/service/ia/platform/CICD.md`
 (en el repo ADP, no en colmena).
 
 Los cambios clave en el script son:
