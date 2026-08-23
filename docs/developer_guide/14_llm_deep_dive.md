@@ -895,18 +895,14 @@ distintos para distintos consumidores:
   "usage": {
     "promptTokens": 4193,            // siempre presente — input FRESCO, sin cache
     "completionTokens": 52,          // siempre presente
-    "totalTokens": 4321,             // siempre presente (incluye thinking)
-    "thinkingTokens": 76,            // solo si > 0
-    "cacheReadTokens": 725,          // solo si > 0
-    "cacheWriteTokens": 24882        // solo si > 0
+    "cacheReadTokens": 725,          // siempre presente (0 si no hubo hit)
+    "cacheWriteTokens": 24882,       // siempre presente (0 si no hubo write)
+    "totalTokens": 29876,            // siempre presente — incluye thinking Y cache
+    "thinkingTokens": 76             // solo si > 0
   },
   "output": { ... }
 }
 ```
-
-> El agregado run-level todavía aplica el gate `> 0` a las columnas de cache y
-> deja el cache fuera de `totalTokens`. Eso se corrige en el slice siguiente de
-> esta cadena; el agregado por nodo de arriba ya está normalizado.
 
 **Esquema del `node-end.output.extra_info.usage` por nodo:**
 
@@ -930,11 +926,10 @@ distintos para distintos consumidores:
 }
 ```
 
-**En el `usage` por nodo, los campos de cache están SIEMPRE presentes** (desde
-2026-08-23), incluso en `0`. Antes tenían gate `> 0`, lo que hacía imposible
-distinguir "no hubo cache hit" de "este provider no reporta el dato" — dos
-situaciones con implicaciones de costo opuestas. `thinkingTokens` conserva su
-gate `> 0`.
+**Los campos de cache están SIEMPRE presentes** (desde 2026-08-23), incluso en
+`0`. Antes tenían gate `> 0`, lo que hacía imposible distinguir "no hubo cache
+hit" de "este provider no reporta el dato" — dos situaciones con implicaciones
+de costo opuestas. `thinkingTokens` conserva su gate `> 0`.
 
 **Read y write NO se colapsan en un solo número.** Anthropic cobra ~10% del
 input rate por un cache read y ~125% por un cache write: un factor de más de

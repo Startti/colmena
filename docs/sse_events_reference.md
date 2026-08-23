@@ -297,11 +297,19 @@ El texto completo también queda disponible en `output.final_response` del `node
   "thinking_tokens": 150,
   "cache_read_tokens": 800,
   "cache_write_tokens": 400,
-  "total_tokens": 1690
+  "total_tokens": 2890
 }
 ```
 
-> `thinking_tokens`, `cache_read_tokens` y `cache_write_tokens` solo aparecen si su valor es > 0.
+> `prompt_tokens` es el input **fresco** — los tokens servidos desde cache nunca
+> están adentro, en ningún provider (los adapters normalizan la discrepancia
+> entre las tres APIs). `total_tokens` suma las cinco columnas, cache incluido.
+>
+> `cache_read_tokens` y `cache_write_tokens` están **siempre presentes**, incluso
+> en `0`. `thinking_tokens` solo aparece si es > 0.
+>
+> Ver [§14 — Provider prompt caching](developer_guide/14_llm_deep_dive.md) para
+> la fórmula de costo y la tabla de semántica por provider.
 
 #### `finish`
 
@@ -312,10 +320,10 @@ El texto completo también queda disponible en `output.final_response` del `node
   "usage": {
     "promptTokens": 2400,
     "completionTokens": 680,
-    "totalTokens": 3330,
-    "thinkingTokens": 250,
     "cacheReadTokens": 1600,
-    "cacheWriteTokens": 800
+    "cacheWriteTokens": 800,
+    "totalTokens": 5730,
+    "thinkingTokens": 250
   },
   "output": { ... }
 }

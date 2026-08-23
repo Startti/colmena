@@ -6,6 +6,16 @@ ve ADP antes y después, qué tiene que hacer ADP, y qué se rompe si no hace na
 
 Los cambios que quedan dentro del motor no llevan nota aquí.
 
+## 2026-08-23 — `usage` separa input fresco de tokens de cache
+
+| # | Nota | Acción de ADP | Qué se rompe si se ignora |
+|---|------|---------------|---------------------------|
+| 1 | [Split de tokens de cache en `usage`](2026-08-23-usage-cache-token-split.md) | **Obligatoria si se factura sobre `usage`** — sacar la resta `promptTokens − cacheReadTokens` | Costos de input negativos en Anthropic; `totalTokens` cambia de magnitud |
+
+Ningún campo cambió de nombre. `promptTokens` pasa a ser input **fresco** en los
+tres providers, `totalTokens` incluye el cache, y las dos columnas de cache están
+siempre presentes.
+
 ## 2026-08-21 — remediación de ejecución anidada y SSE
 
 Salen juntos en una sola rama. Léanse en este orden. El único que exige trabajo
