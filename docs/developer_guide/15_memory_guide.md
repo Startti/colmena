@@ -405,16 +405,28 @@ que terminó — el loop ReAct de `agent_service` solo retorna al llamador
 cuando el `assistant` no pide ninguna tool más — así que todo lo que viene
 después sigue en curso.
 
+Una interacción abierta **no está acotada a un turno.** Un `suspend` no la
+cierra: la ruta de suspensión retorna en `agent_service.rs:500` con
+`LlmResponse::suspended(...)` sin persistir ningún `assistant` sin
+`tool_calls`, así que la interacción sigue abierta a través de todos los runs
+de resume que hagan falta, hasta que el agente por fin responda sin pedir otra
+tool.
+
 Todo lo que cae en la interacción abierta —la pregunta que la disparó, cada
 `assistant` con `tool_calls`, cada resultado de `tool`, sin importar tamaño ni
 rol— viaja **verbatim** al proveedor. No hay tope de tokens que decida dónde
 se corta: el corte lo decide la estructura de la conversación (dónde terminó
-la última interacción cerrada), no cuánto pesa el contenido.
+la última interacción cerrada), no cuánto pesa el contenido ni cuántos runs
+lleva abierta.
 
 Casos borde:
 
 - **Nada cerró todavía** (`current_interaction_start` devuelve `0`) → todo el
   historial es la interacción actual; no hay zona vieja que resumir.
+- **`suspend` mantiene la interacción abierta entre resumes** (ver arriba) —
+  un agente HITL de varios pasos, el shape que Colmena documenta para dirigir
+  la interacción con el usuario, puede acumular todos sus resumes dentro de
+  una sola interacción abierta sin que ninguno la cierre.
 - **El mensaje más nuevo es, él mismo, el cierre** de una interacción
   (alcanzable en un resume sin prompt nuevo: lo último persistido es la
   respuesta final del turno anterior) → la ventana de recientes retrocede un
@@ -423,18 +435,33 @@ Casos borde:
   arreglo de mensajes, el modelo vería como último mensaje real el primer
   prompt de la sesión, no el actual.
 
-**El costo, dicho con honestidad:** no hay tope de tamaño en la interacción
-abierta. Una interacción larga con varios resultados de `tool` grandes viaja
-entera, verbatim, en cada llamada mientras siga abierta — eso puede empujar la
-request hacia el techo de contexto del proveedor. Es una **decisión de diseño
-deliberada**, no un descuido: la alternativa (recortar por presupuesto) es
-justo el mecanismo que este cambio reemplazó, porque podía resumir la propia
-pregunta que disparó una tool call sobredimensionada — ver
-[`docs/CHANGELOG_2026-08.md`](../CHANGELOG_2026-08.md) §4 para el detalle y
-las cifras del E2E que lo verifica. El mapa para resultados estructurados
-sobredimensionados dentro de la interacción abierta (acotar su peso sin
-resumir la pregunta) queda para un cambio aparte — ver "What this plan does
-NOT do" en
+**El costo, dicho con honestidad — en las dos direcciones.** No hay tope de
+tamaño en la interacción abierta, y no está acotada a un turno (ver arriba):
+mientras siga abierta, cada resultado de `tool` grande que contenga viaja
+completo en cada resume, y en el caso límite —nada cerró todavía, `b = 0`—
+`build_compacted_messages` retorna temprano por `b <= keep_first`: la historia
+entera viaja cruda, sin compactar. Un agente HITL de varios pasos con un par
+de resultados grandes puede así alcanzar el techo de contexto del proveedor
+con un error duro, donde el presupuesto viejo degradaba en su lugar.
+
+El otro lado, menos obvio: al arrancar un turno nuevo ordinario, el cierre
+anterior queda en el índice `len-2` y el prompt recién persistido en `len-1`,
+así que la ventana verbatim es de exactamente **un** mensaje. Una respuesta
+previa del agente de más de `SUMMARY_SKIP_THRESHOLD_CHARS` (250 chars) ya no
+tiene el margen que daba el viejo presupuesto de ~2.500 tokens y pasa a
+resumen semántico de ~250 chars un turno antes de lo que pasaba con el
+mecanismo eliminado: un "reescribí más corto lo que me acabás de decir"
+después de una respuesta de 3.000 caracteres ahora ve solo esa línea
+resumida, y necesita un `recall_history` o una paráfrasis con pérdida.
+
+Es una **decisión de diseño deliberada**, no un descuido: la alternativa
+(recortar por presupuesto) es justo el mecanismo que este cambio reemplazó,
+porque podía resumir la propia pregunta que disparó una tool call
+sobredimensionada — ver [`docs/CHANGELOG_2026-08.md`](../CHANGELOG_2026-08.md)
+§4 para el detalle y las cifras del E2E que lo verifica. El mapa para
+resultados estructurados sobredimensionados dentro de la interacción abierta
+(acotar su peso sin resumir la pregunta) queda para un cambio aparte — ver
+"What this plan does NOT do" en
 [`docs/superpowers/plans/2026-08-22-interaction-boundary.md`](../superpowers/plans/2026-08-22-interaction-boundary.md).
 
 ### Ejemplo del bloque que recibe el modelo

@@ -129,8 +129,9 @@ siquiera con historial vacío, garantizado por una nueva sweep combinatoria
 de reproducción originales no alcanzaban (p.ej. `n=1, budget=0`). El clamp bounda el **índice** de
 la ventana, no el contenido: cuando el mensaje más nuevo por sí solo agota el presupuesto, la
 ventana de recientes degenera a exactamente ese mensaje y viaja **verbatim, sin importar el rol**
-(`user`, `assistant` o `tool`) — ver la limitación conocida en
-[`15_memory_guide.md`](developer_guide/15_memory_guide.md).
+(`user`, `assistant` o `tool`) — ver "Dónde se corta el historial: la interacción abierta" en
+[`15_memory_guide.md`](developer_guide/15_memory_guide.md) (sección reemplazada en §4 de este mismo
+changelog: el borde pasó de presupuesto de tokens a estructural).
 
 **No es específico de "resume".** El reporte de ADP asumía que el disparador era "reanudar un run
 suspendido". Es el disparador más frecuente en producción, pero no el único: un prompt de usuario
@@ -223,15 +224,28 @@ construcción, el cierre de una interacción; todo lo que viene después sigue e
 `tool` consecutivo) quedan eliminados — ya no hacen falta: el borde nuevo aterriza siempre en el
 primer mensaje de una interacción, que nunca puede ser un `Tool` huérfano de su `Assistant`.
 
-**El costo, dicho con honestidad (no es gratis).** No hay tope de tamaño en la interacción abierta.
-Antes, un mensaje sobredimensionado se acotaba a un solo turno de sobrecosto porque el borde por
-presupuesto lo empujaba a la zona resumida en el turno siguiente. Ahora, mientras la interacción
-siga abierta, **cada** resultado de `tool` grande que contenga viaja completo en **cada** llamada de
-ese turno — una interacción larga con varios resultados grandes puede empujar el request hacia el
-techo de contexto del proveedor. Es una decisión de diseño deliberada, no un descuido: resumir por
-presupuesto es exactamente el mecanismo que causaba el defecto de fondo. El mapa para acotar el peso
-de un resultado estructurado sobredimensionado sin resumir la pregunta que lo disparó queda para un
-cambio aparte (ver "What this plan does NOT do" en el plan de referencia, abajo).
+**El costo, dicho con honestidad — en las dos direcciones.** No hay tope de tamaño en la interacción
+abierta, y esa interacción **no está acotada a un turno**: un `suspend` no la cierra (la ruta de
+suspensión retorna en `agent_service.rs:500` sin persistir ningún `assistant` sin `tool_calls`), así
+que sigue abierta a través de todos los runs de resume que hagan falta. Mientras siga abierta, cada
+resultado de `tool` grande que contenga viaja completo en cada resume, y en el caso límite —nada
+cerró todavía, `b = 0`— la historia entera viaja cruda, sin compactar, en cada run: el shape que
+Colmena documenta para un agente HITL de varios pasos dirigido enteramente vía `suspend`. Un agente
+así con un par de resultados grandes puede alcanzar el techo de contexto del proveedor con un error
+duro, donde el presupuesto viejo degradaba en su lugar.
+
+El otro lado, menos obvio: al arrancar un turno nuevo ordinario, la ventana verbatim es de
+exactamente un mensaje (el prompt recién persistido, en `len-1`, justo después del cierre anterior
+en `len-2`). Una respuesta previa del agente de más de `SUMMARY_SKIP_THRESHOLD_CHARS` (250 chars) ya
+no tiene el margen que daba el viejo presupuesto de ~2.500 tokens y pasa a resumen semántico de
+~250 chars un turno antes de lo que pasaba con el mecanismo eliminado.
+
+Detalle completo, costos y casos borde: [`15_memory_guide.md`](developer_guide/15_memory_guide.md)
+§Compactación → "Dónde se corta el historial: la interacción abierta". Es una decisión de diseño
+deliberada, no un descuido: resumir por presupuesto es exactamente el mecanismo que causaba el
+defecto de fondo. El mapa para acotar el peso de un resultado estructurado sobredimensionado sin
+resumir la pregunta que lo disparó queda para un cambio aparte (ver "What this plan does NOT do" en
+el plan de referencia, abajo).
 
 **Qué se midió.**
 - **`cargo test --verbose`**: 2.365 tests de la lib (2.294 passed, 71 ignored — requieren
