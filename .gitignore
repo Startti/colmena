@@ -40,6 +40,8 @@ dist/
 colmena_memory.db
 colmena_compaction_e2e.db
 colmena_prompt_cache_e2e.db
+colmena_prompt_cache_e2e_openai.db
+colmena_prompt_cache_e2e_gemini.db
 
 # Runtime data created by the engine at graph-execution time
 # (CRDT document snapshots, document library storage root, etc.)

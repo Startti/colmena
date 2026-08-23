@@ -274,10 +274,22 @@ pub async fn build_compacted_messages(
     //
     // Kept separate, `system_blocks[0]` stays byte-identical across turns and
     // the volatile summary lands in `system_blocks[1]`, outside the cached
-    // prefix — the shape the adapter was already written for. OpenAI's
-    // automatic prefix cache gains the same way (the stable prefix stops
-    // moving); Gemini joins every System into one `system_instruction`, so its
-    // wire format is unchanged.
+    // prefix — the shape the adapter was already written for.
+    //
+    // This matters for Anthropic ONLY, and the reason is the granularity of the
+    // match. Anthropic's breakpoint is block-scoped: `cache_control` on
+    // `system_blocks[0]` caches up to that block boundary and the block's bytes
+    // must match exactly, so appending a growing summary to it destroys the hit.
+    // OpenAI and Gemini both match a prefix INSIDE a longer string, so the
+    // stable head kept hitting even while the summary was glued behind it —
+    // measured, not inferred:
+    //
+    //   OpenAI (gpt-4o-mini, direct probe, merged vs split system, summary
+    //   grown between calls): cached_tokens 1280 in BOTH shapes.
+    //   Gemini (2.5-flash, 5 turns): cache reads 857/1728 before, 858/1730
+    //   after; turn 1 prompt_tokens identical at 1714.
+    //
+    // Neither provider was broken and neither gains from this change.
     if let Ok(s) = LlmMessage::system(summary) {
         out.push(s);
     }
