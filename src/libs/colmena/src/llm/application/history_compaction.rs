@@ -950,4 +950,25 @@ mod tests {
         assert_eq!(current_interaction_start(&msgs), 0);
         assert_eq!(current_interaction_start(&[]), 0);
     }
+
+    #[test]
+    fn interaction_start_uses_the_last_close_not_the_first() {
+        // Regression guard: the scan MUST use `.rev()` to find the LAST closing
+        // assistant, not the first. If the scan ran forward, this test would fail.
+        // Two turns ago, the agent finished (closing assistant at idx 1).
+        // One turn ago, it finished again (closing assistant at idx 3).
+        // Right now, the user has a new question (idx 4) — the boundary is after idx 3.
+        let msgs = vec![
+            LlmMessage::user("viejo_turno_1".into()).unwrap(), // idx 0
+            LlmMessage::assistant("listo_turno_1".to_string()).unwrap(), // idx 1 — closes
+            LlmMessage::user("viejo_turno_2".into()).unwrap(), // idx 2
+            LlmMessage::assistant("listo_turno_2".to_string()).unwrap(), // idx 3 — closes
+            LlmMessage::user("pregunta_nueva".into()).unwrap(), // idx 4 — open interaction
+        ];
+        assert_eq!(
+            current_interaction_start(&msgs),
+            4,
+            "must find the LAST closing assistant (idx 3), not the first (idx 1)"
+        );
+    }
 }
