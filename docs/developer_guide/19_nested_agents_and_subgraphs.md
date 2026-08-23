@@ -295,6 +295,64 @@ fresca a propósito, como defensa en profundidad.
 > Al generar grafos por código (compiladores de assets, canvas, etc.),
 > propagá `connection_url` a **todos** los `llm_call` inlineados, no solo al raíz.
 
+### Suspensión dentro de un batch paralelo de tools
+
+Un modelo puede pedir **varias tools en un mismo turno**. Si una de ellas suspende,
+el loop del agente corta ahí: las llamadas ordenadas después **no se ejecutan**.
+
+Eso es deliberado. Ejecutarlas igual invertiría la garantía que el `suspend` existe
+para imponer — un batch como `[preguntar("¿borro la base?"), borrar_base()]`
+dispararía el borrado antes de que el humano conteste.
+
+Pero el mensaje del asistente ya declaró los ids de todas ellas, y tanto Anthropic
+como OpenAI rechazan con **400** un turno que declara un id sin su resultado. Así
+que, desde 2026-08-22, cada llamada que quedó sin ejecutar recibe un resultado
+marcador que le dice al modelo, en texto que lee:
+
+> Esta herramienta NO se ejecutó. […] Nada de lo que pediste aquí ocurrió. Ahora
+> que tenés la respuesta del usuario, volvé a llamar esta herramienta si todavía la
+> necesitás.
+
+El texto vive en
+[`text/prompts/agent_loop/not_executed_on_suspend.md`](../../src/libs/colmena/text/prompts/agent_loop/not_executed_on_suspend.md)
+y se edita sin tocar Rust.
+
+La llamada **que suspendió** queda sin resultado a propósito: el resume la
+encuentra precisamente por esa ausencia.
+
+```
+turno del asistente:  [ ask_user ] [ get_time ] [ add_numbers ]
+                            │            │             │
+                       suspende      NO corre      NO corre
+                            │            │             │
+historial persistido:   (abierta)    marcador      marcador
+                            │
+                    el resume la encuentra
+                    y la reproduce con la
+                    respuesta del humano
+```
+
+Consecuencias prácticas al diseñar un agente HITL:
+
+- **No asumas que las tools del mismo turno corrieron.** Si el modelo pregunta y
+  actúa en la misma tanda, lo que sigue a la pregunta se pospone hasta después de
+  la respuesta, y solo si el modelo lo vuelve a pedir.
+- **Un `suspend` por turno.** Dos tools que suspenden en el mismo batch no generan
+  dos preguntas: la primera suspende y la segunda queda marcada como no ejecutada.
+  Si necesitás dos datos del usuario, pedilos en una sola pregunta o en turnos
+  distintos.
+- **El costo es a lo sumo un turno extra**, cuando el modelo decide re-emitir la
+  llamada pospuesta.
+- **El orden del batch lo elige el modelo, no tu prompt.** Por eso el síntoma es
+  intermitente: si el modelo pone el `suspend` al final —cosa que hace a menudo— no
+  queda ninguna llamada sin ejecutar y no se nota nada. Para reproducirlo a
+  voluntad, poné **dos** tools respaldadas por `suspend` en el mismo batch.
+
+Una conversación que un build anterior a 2026-08-22 dejó con un id huérfano
+devolvía 400 en cada turno posterior, de forma permanente. El camino de resume
+sanea ese estado: al reproducir la llamada pendiente cierra también, con el mismo
+marcador, cualquier otro id sin resolver del mismo turno.
+
 ---
 
 ## Eventos de Streaming

@@ -23,6 +23,9 @@ use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::{
 };
 use crate::documents::application::DocumentRuntime;
 use crate::documents::domain::ids::SessionId as DocSessionId;
+use crate::llm::application::agent_service::{
+    unresolved_sibling_ids, NOT_EXECUTED_ON_SUSPEND_TEXT,
+};
 use crate::llm::application::AgentService;
 use crate::skills::domain::{SkillRepository, SkillsConfig};
 use crate::skills::infrastructure::{
@@ -2527,6 +2530,30 @@ impl ExecutableNode for LlmNode {
                 conversation_repo
                     .add_message(&conversation_key, tool_msg)
                     .await?;
+
+                // Heal a conversation suspended before the batch fix landed.
+                //
+                // `agent_service` now closes every call a suspend left
+                // un-executed, but histories written by an older build still
+                // carry those ids with no result, and Anthropic/OpenAI reject
+                // the whole request for even one of them — such a session is
+                // permanently unusable otherwise. Close them with the same
+                // honest marker. On a history written by the current build this
+                // loop finds nothing, so it costs one scan and no writes.
+                for orphan_id in unresolved_sibling_ids(&conversation.messages, &pending.id) {
+                    tracing::warn!(
+                        target: "colmena::llm_node",
+                        tool_call_id = %orphan_id,
+                        resumed = %pending.id,
+                        "llm_call: resume found a tool call left un-executed by an earlier \
+                         suspend; closing it with a not-executed marker"
+                    );
+                    let marker =
+                        LlmMessage::tool(orphan_id, NOT_EXECUTED_ON_SUSPEND_TEXT.to_string())?;
+                    conversation_repo
+                        .add_message(&conversation_key, marker)
+                        .await?;
+                }
 
                 tracing::info!(
                     target: "colmena::llm",

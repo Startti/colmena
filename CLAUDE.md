@@ -393,6 +393,29 @@ For overrides (custom alias, `expose_sub_tools` filtering, `cache_ttl_seconds`, 
 ## Current Status
 - **Active development on `develop`**. See `docs/CHANGELOG_*.md` for the rolling change log; `docs/BACKLOG.md` for parked items.
 - **`for_each` deterministic list execution shipped 2026-07-20** — new node `node_type: "for_each"` runs an embedded `target` tool ({ node_type, node_schema? }) once per row of a list, deterministically (iteration happens in Rust via `ListToolExecutor`/`run_list`, not by the LLM re-calling the same tool N times in its own loop). One node, two usage forms: graph node (static `config`) or LLM tool (`tool_configurations` + `node_schema`, `target`/policy fields `fixed`, `items` LLM-visible). List source: `items` (inline array) → `items_from` (`source: "sheet"` in v1, with `column`/`as` selection — `source: "attachment"` deferred to v1.1, a plain `ExecutableNode` can't resolve `document_id → bytes` yet) → default input edge (graph-node path only). Policies `on_error` (continue/abort), `concurrency`, `max_items`. Per-row required-field validation before dispatch (row-level failure, not batch-abort, unless `on_error: "abort"`). Result: `{ output: { total, ok, err, results: [{index, input, status, output|error}] } }`. Two SSE events: `batch-progress` (aggregate snapshot) and `batch-item-finished` (per row) — when `target: subgraph`, child sub-agent events propagate with nested `level`/`path` (reuses the nested-visibility infra). HITL fail-closed (a suspend inside a row becomes that row's error) + self-target guard (`for_each` can't target itself). Config-first/inputs-fallback via `cfg_or_input` (same pattern as `suspend`) lets the same node code serve both usage paths unchanged. E2E-verified live (Gemini 2.5 Flash): graph-node `target: add` (2/2 ok, no LLM), tool `target: http_request` (3/3 ok), tool `target: subgraph` (3/3 ok, per-row sub-agent isolation confirmed). Purely additive — new node, no changes to existing node signatures or public API → ADP unaffected. See [`docs/developer_guide/49_for_each.md`](docs/developer_guide/49_for_each.md), [`docs/superpowers/specs/2026-07-20-deterministic-list-tool-execution-design.md`](docs/superpowers/specs/2026-07-20-deterministic-list-tool-execution-design.md), and CHANGELOG §5.
+- **Parallel tool batch + suspend orphan fix — 2026-08-22** — when an `llm_call`
+  emitted several tool calls in ONE assistant turn and one suspended for human
+  input, every call ordered after it was never executed and never got a `Tool`
+  result, while its id stayed declared in the persisted assistant message.
+  Anthropic and OpenAI reject that with a hard **400** (`tool_use ids were found
+  without tool_result blocks`), so the conversation became permanently unusable;
+  Gemini is permissive and masked it. Pre-existing, unrelated to the compaction
+  boundary work. Fix: each stranded call now gets an honest "no se ejecutó"
+  marker (text registry:
+  [`text/prompts/agent_loop/not_executed_on_suspend.md`](src/libs/colmena/text/prompts/agent_loop/not_executed_on_suspend.md)),
+  the **suspending** id is deliberately left open (the resume path finds it by
+  that absence), and the resume path additionally heals histories written by
+  older builds. Rejected alternative: executing the remaining calls before
+  suspending — that fires side effects before the human answers, inverting the
+  gate the `suspend` exists to impose. Zero SSE/wire change → ADP unaffected.
+  Two empirical facts worth not re-discovering: batch **order is model-chosen**
+  (Claude put the suspend last even when told to put it first — the benign
+  case; the deterministic repro is TWO suspend-backed tools in one batch), and
+  Anthropic does **not** require `tool_result` order to match `tool_use` order,
+  only completeness. Repro graph:
+  [`tests/graphs/agents/parallel_tool_suspend_orphan.json`](tests/graphs/agents/parallel_tool_suspend_orphan.json);
+  see [`docs/developer_guide/19_nested_agents_and_subgraphs.md`](docs/developer_guide/19_nested_agents_and_subgraphs.md)
+  ("Suspensión dentro de un batch paralelo de tools") and CHANGELOG §5.
 - **Nested-execution + SSE remediation, unbounded nesting — 2026-08-21** —
   Seven defects in how nested runs report themselves, plus the removal of the
   subgraph nesting limit. **Nesting is now unbounded by default**

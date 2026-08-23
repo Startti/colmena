@@ -1,0 +1,85 @@
+{
+  "comment": "REPRO — parallel tool batch + suspend orphan. The agent is told to ask BOTH questions in ONE assistant turn. Two suspend-backed tools in the same batch make the defect deterministic regardless of the order the model emits them in: the first one to execute short-circuits agent_service, so the second tool_call id is declared on the wire with no matching tool_result. Anthropic rejects that with a 400 on the request that follows the resume. Run 1: suspend. Run 2: resume with --answer.",
+  "metadata": {
+    "category": "agents",
+    "features": [
+      "parallel_tool_calls",
+      "hitl",
+      "suspend",
+      "llm_call",
+      "anthropic"
+    ],
+    "requires_env": [
+      "ANTHROPIC_API_KEY",
+      "DATABASE_URL"
+    ]
+  },
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/parallel_tool_suspend_orphan",
+        "method": "POST",
+        "test_payload": {
+          "prompt": "Quiero darme de alta. Pregúntame de una sola vez mi ciudad y mi correo electrónico."
+        }
+      }
+    },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "anthropic",
+        "model": "claude-sonnet-4-6",
+        "api_key": "${ANTHROPIC_API_KEY}",
+        "connection_url": "${DATABASE_URL}",
+        "stream": false,
+        "system_message": "Eres un asistente de alta conversacional. En tu PRIMER turno debes emitir las DOS tool calls en un ÚNICO mensaje, en paralelo: `ask_city` y `ask_email`. NO las emitas en turnos separados, NO esperes la respuesta de una para llamar la otra: las dos deben ir juntas en la misma respuesta. No respondas en texto plano antes de llamarlas.",
+        "tool_configurations": {
+          "ask_city": {
+            "name": "ask_city",
+            "node_type": "suspend",
+            "description": "Pregunta al usuario en qué ciudad vive y espera su respuesta.",
+            "node_schema": {
+              "id": {
+                "fixed": "ask_city"
+              },
+              "question": {
+                "type": "string",
+                "required": true,
+                "description": "La pregunta sobre la ciudad."
+              }
+            }
+          },
+          "ask_email": {
+            "name": "ask_email",
+            "node_type": "suspend",
+            "description": "Pregunta al usuario su correo electrónico y espera su respuesta.",
+            "node_schema": {
+              "id": {
+                "fixed": "ask_email"
+              },
+              "question": {
+                "type": "string",
+                "required": true,
+                "description": "La pregunta sobre el correo."
+              }
+            }
+          }
+        }
+      }
+    },
+    "out": {
+      "type": "output"
+    }
+  },
+  "edges": [
+    {
+      "from": "trigger",
+      "to": "agent"
+    },
+    {
+      "from": "agent.result",
+      "to": "out"
+    }
+  ]
+}
