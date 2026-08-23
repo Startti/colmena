@@ -9,8 +9,10 @@ Two checks run:
    them, yet a doc naming a graph nobody can run is just as broken.
 
 Check 1 skips fenced code blocks and inline code spans, so a `[link](url)` shown as
-an example of markdown syntax is not reported as a real link. External links
-(http/https/mailto) and pure anchors (#foo) are out of scope.
+an example of markdown syntax is not reported as a real link. It also skips targets
+that do not look like a path (no directory separator and no file extension), which
+is what an indexing expression in prose such as "recientes[B..N](full)" looks like.
+External links (http/https/mailto) and pure anchors (#foo) are out of scope.
 
 A `path#anchor` link is resolved by its path part; a `path:LINE` suffix is
 tolerated because docs use it as a clickable line reference.
@@ -30,6 +32,11 @@ FENCE = re.compile(r'^\s*(```|~~~)')
 INLINE_CODE = re.compile(r'`[^`]*`')
 LINE_SUFFIX = re.compile(r':L?\d+(?:-L?\d+)?$')
 GRAPH_REF = re.compile(r'tests/graphs/[A-Za-z0-9_/]*\.json')
+# A real relative link carries a directory separator or a file extension. Prose
+# sometimes contains bracket-paren pairs that are not links at all -- an indexing
+# expression, or a diagram quoted with "" instead of backticks -- and those never
+# look like a path. Requiring path shape drops exactly that noise.
+PATH_SHAPE = re.compile(r'\.[A-Za-z0-9]{1,8}$')
 
 # Docs that record what was planned or shipped in the past, not what exists today.
 HISTORICAL = ("docs/superpowers", "docs/history", "docs/archive")
@@ -63,6 +70,8 @@ def resolve(doc_dir, target):
     path = target.split("#", 1)[0]
     path = LINE_SUFFIX.sub("", path)
     if not path:
+        return None
+    if "/" not in path and not PATH_SHAPE.search(path):
         return None
     return os.path.normpath(os.path.join(doc_dir, path))
 
