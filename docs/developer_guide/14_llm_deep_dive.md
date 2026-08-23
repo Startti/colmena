@@ -786,10 +786,20 @@ marker cachea todo el array `tools[]`.
 > separados** y pone el marker `cache_control` **solo en el primero**, de modo
 > que lo estable se cachea y lo volátil queda fuera del prefijo cacheado.
 > Antes del fix del 2026-08-22 **sobrescribía**: solo sobrevivía el último
-> `system` y los anteriores se perdían sin error ni log. Era un defecto
-> latente — ninguna ruta viva manda hoy dos `system` (ver
-> [§15](15_memory_guide.md) para por qué) — pero el modo de fallo es
-> silencioso, así que el adapter no puede depender de eso.
+> `system` y los anteriores se perdían sin error ni log.
+>
+> Esa ruta ya **no** es latente: desde el 2026-08-23 toda conversación
+> compactada manda dos `system` — el prompt estable del agente y, aparte, el
+> `## Conversation summary`. La separación es deliberada y existe justamente
+> para este marker: el resumen se recomputa en cada carga, así que fusionarlo
+> dentro del bloque 0 movía el prefijo cacheado en cada turno y el caching
+> nunca acertaba. Medición antes/después en
+> [§15 — Dónde termina el resumen](15_memory_guide.md).
+>
+> Sostener eso requiere además que `LlmRequest::new` **no** vuelva a fusionar
+> los dos `system`: `coalesce_consecutive_same_role` exime a `System` igual que
+> a `Tool`. Sin esa exención el dominio deshace la separación antes de que el
+> adapter vea nada.
 
 Cualquier llamada siguiente del **mismo agente** dentro de los 5 minutos
 siguientes paga ~10% del precio normal sobre la porción cacheada.

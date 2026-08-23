@@ -336,23 +336,45 @@ sin perder nada (el original siempre vive en la DB).
 - **Medio (resumido):** todo lo que queda entre medio se colapsa en **un** mensaje
   `system` titulado `## Conversation summary`, con **una línea `[Tn]` por mensaje**.
 
-> **Dónde termina el resumen.** `build_compacted_messages` mergea el resumen **dentro** del
-> `system` previo cuando `messages[keep_first - 1]` ya es `system`, y si no lo empuja como un
-> mensaje `system` aparte. Con `keep_first = 2` eso depende del orden real del historial, y el que
-> arma `llm_call` es `[User(prompt), System(secciones)]` — el prompt del usuario primero, el
-> `system` ensamblado después, y solo en el turno 1 (`!history_exists`). O sea: el índice 1 **es**
-> el `system`, la rama de merge corre siempre, y **la ruta viva produce un solo `system`**.
-> Verificado E2E contra Anthropic real (ver CHANGELOG 2026-08 §6).
+> **Dónde termina el resumen.** `build_compacted_messages` lo emite **siempre como un mensaje
+> `system` propio**, nunca fusionado dentro del `system_message` del agente — aunque eso deje dos
+> `system` consecutivos. El request compactado queda así:
 >
-> Los otros cinco llamadores de `AgentService` —`reactor`, `planner`, `critic`, `orchestrator` y
-> `util/extract_with_schema`— **sí** arman `[System, User]`, o sea el orden que activaría la otra
-> rama. No llegan a activarla por otro motivo: cada uno usa un `InMemoryConversationRepository`
-> nuevo por invocación con exactamente 2 mensajes, así que `build_compacted_messages` sale temprano
-> (`total <= keep_first + 1`) y nunca compacta. Los salva el historial efímero, no el orden — si
-> alguno pasara a historial persistente, el request llevaría dos `system`.
+> ```
+> [ User(prompt inicial), System(prompt estable), System(## Conversation summary), ...recientes ]
+> ```
 >
-> Esa otra rama —un `system` nuevo, con lo que el request llevaría **dos**— hoy no se alcanza,
-> pero es legal: `LlmRequest` admite mensajes `system` intercalados. Cada adapter los maneja así:
+> **Por qué separados: prompt caching.** El adapter de Anthropic pone el marker `cache_control`
+> en el **primer** bloque `system` (ver [§14 — Prompt caching](14_llm_deep_dive.md)), así que el
+> prefijo cacheado es `tools[] + system_blocks[0]`. El resumen se **recomputa en cada carga** y
+> crece con la conversación: fusionarlo dentro de ese bloque reescribía el prefijo cacheado turno
+> a turno. Separado, el bloque 0 queda byte-idéntico y el resumen cae en `system_blocks[1]`, fuera
+> del prefijo.
+>
+> Dos piezas del código sostienen esa separación, y **hacen falta las dos**:
+>
+> 1. `history_compaction::build_compacted_messages` emite el resumen aparte.
+> 2. `LlmRequest::new` exime a `System` de `coalesce_consecutive_same_role`, igual que ya eximía a
+>    `Tool`. El coalescer normaliza la alternancia user/assistant que exigen los providers; los
+>    `system` nunca participan de esa alternancia, y volver a fusionarlos deshacía (1) por completo.
+>
+> **Medido E2E contra Anthropic real** (`tests/graphs/agents/prompt_cache_compaction_measure.json`,
+> Sonnet 5, 5 turnos, prefijo estable de 3029 tokens):
+>
+> | Turno | Antes — write / read | Después — write / read |
+> |---|---|---|
+> | 1 | 3029 / 3029 | 3029 / 3029 |
+> | 2 | 3457 / 3457 | **0** / 6058 |
+> | 3 | 3829 / 3829 | **0** / 3029 |
+> | 4 | 4260 / 4260 | **0** / 3029 |
+> | 5 | 4684 / **0** | **0** / 3029 |
+>
+> Antes, el `cache_creation_input_tokens` **crecía exactamente al ritmo del resumen** y se pagaba
+> completo (a 1.25×) en cada turno: el prefijo se reescribía siempre y nunca se reusaba entre runs.
+> Después, la escritura desaparece a partir del turno 1 y la lectura se estabiliza en el tamaño del
+> prefijo estable; el resumen viaja como input normal (visible en el `promptTokens` creciente).
+>
+> **Varios `system` en un request son legales** y cada adapter los maneja así:
 >
 > | Provider | Qué hace con varios `system` |
 > |---|---|
@@ -361,12 +383,12 @@ sin perder nada (el original siempre vive en la DB).
 > | **Gemini** | Los une con `\n\n` en un único `systemInstruction` |
 >
 > Ningún adapter puede descartar uno. El de Anthropic lo hacía hasta el 2026-08-22 (sobrescribía en
-> vez de combinar) — defecto latente, no un fallo en producción. Ver
-> [§14 — Prompt caching](14_llm_deep_dive.md).
+> vez de combinar) — era un defecto latente entonces; desde este cambio esa ruta **sí** está viva.
 >
-> **Costo del merge.** Como el resumen queda dentro del `system` estable y se recomputa en cada
-> run, el prefijo cacheado cambia turno a turno: una vez que una conversación compacta, el prompt
-> caching deja de acertar. Anotado como ítem aparte.
+> Los otros cinco llamadores de `AgentService` —`reactor`, `planner`, `critic`, `orchestrator` y
+> `util/extract_with_schema`— usan un `InMemoryConversationRepository` nuevo por invocación con
+> exactamente 2 mensajes, así que `build_compacted_messages` sale temprano
+> (`total <= keep_first + 1`) y nunca compacta.
 
 ### Política por rol / tipo de mensaje
 
