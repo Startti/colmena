@@ -1083,11 +1083,9 @@ Si pasaste handles viejos (`<sv_*>` sin sufijo) en conversation history persisti
 
 ## References
 
-- [Secure Values Design](SECURE_VALUES_DESIGN.md)
-- [Secure Values Implementation](SECURE_VALUES_IMPLEMENTATION.md)
-- [Secure Values Quick Reference](SECURE_VALUES_QUICK_REFERENCE.md)
-- [NODE_CONNECTION_AND_DATA_FLOW.md](NODE_CONNECTION_AND_DATA_FLOW.md)
-- [LLM Node Complete Guide](LLM_NODE_COMPLETE_GUIDE.md)
+- [Secure Values — diseño](../dds/SECURE_VALUES_DISEÑO.md)
+- [Data Flow Guide](16_data_flow_guide.md)
+- [LLM Deep Dive](14_llm_deep_dive.md)
 - [Connection Pool Management spec](../superpowers/specs/2026-04-20-connection-pool-management-design.md)
 
 ---

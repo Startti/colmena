@@ -341,7 +341,7 @@ A: Yes, they're in tests/graphs/ ready to run (pending Phase 2 validation).
 
 ## 🔗 Related Documentation
 
-- [CLAUDE.md](CLAUDE.md) — Project instructions and build commands
+- [CLAUDE.md](../../CLAUDE.md) — Project instructions and build commands
 - `docs/developer_guide/` — Architecture and implementation guides
 - `docs/dds/` — Design documents
 

@@ -26,7 +26,11 @@ Cuando una propuesta avanza a spec, dejar un puntero en este README
 
 ## Índice actual
 
-- [`2026-06-09-gdocs-oauth-user-flow.md`](2026-06-09-gdocs-oauth-user-flow.md) —
-  OAuth user-scoped para Google Docs (v1.1 item 1). Permite al agente actuar
-  AS el usuario en vez de como Service Account: docs creados quedan con
-  owner=usuario, acceso natural a su Drive, soporta Gmail personal.
+Sin propuestas abiertas.
+
+- `2026-06-09-gdocs-oauth-user-flow.md` — OAuth user-scoped para Google Docs
+  (v1.1 item 1): que el agente actúe AS el usuario en vez de como Service
+  Account. → promovido a spec
+  [`2026-06-10-oauth-user-scoped-design.md`](../superpowers/specs/2026-06-10-oauth-user-scoped-design.md)
+  y shipped; la propuesta se borró como superada. Guía vigente:
+  [`47_google_oauth.md`](../developer_guide/47_google_oauth.md).

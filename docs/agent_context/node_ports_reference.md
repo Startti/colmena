@@ -689,7 +689,7 @@ Flag cleared → Phase N closes → Phase N+1 starts with complete context
 
 **Step 1 — Run the orchestrator (may suspend):**
 ```bash
-cargo run --bin dag_engine -- run tests/graphs/advanced/my_plan.json
+cargo run --bin dag_engine -- run <tu_grafo_orquestador>.json
 ```
 
 Output when suspended:
@@ -706,7 +706,7 @@ Output when suspended:
 
 **Step 2 — Resume with the answer:**
 ```bash
-cargo run --bin dag_engine -- run tests/graphs/advanced/my_plan.json \
+cargo run --bin dag_engine -- run <tu_grafo_orquestador>.json \
   --session-id abc-123 \
   --answer "Use the clothing expert estimates"
 ```

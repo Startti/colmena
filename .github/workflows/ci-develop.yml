@@ -49,6 +49,9 @@ jobs:
       - name: Docs count drift guard
         run: ./scripts/check_doc_counts.sh
 
+      - name: Docs link and graph-reference guard
+        run: python3 scripts/check_doc_links.py docs
+
       - name: Clean target/wheels
         run: rm -rf target/wheels
 

@@ -9,7 +9,7 @@
 ## 1. Problema
 
 El bloque **Temporal & Geographic Context** (`format_temporal_context_block`,
-[`llm.rs:3287`](../../src/libs/colmena/src/dag_engine/infrastructure/nodes/llm.rs))
+[`llm.rs:3287`](../../../src/libs/colmena/src/dag_engine/infrastructure/nodes/llm.rs))
 se inyecta como **primera sección** del system message y lleva un timestamp
 con **granularidad de segundos** (`%Y-%m-%dT%H:%M:%S`). El marker
 `cache_control: ephemeral` de Anthropic cubre **todo** el system block, y los
@@ -34,7 +34,7 @@ Tests live con `ANTHROPIC_API_KEY` real (SSE en `/tmp/colmena_e2e/`):
    cachea ni a ~2900) — la cifra documentada de Anthropic está desactualizada
    para esta generación.
 3. **El timestamp NO rompe el cache cross-turn** gracias al gate
-   `if !history_exists` ([`llm.rs:2521`](../../src/libs/colmena/src/dag_engine/infrastructure/nodes/llm.rs)):
+   `if !history_exists` ([`llm.rs:2521`](../../../src/libs/colmena/src/dag_engine/infrastructure/nodes/llm.rs)):
    el system se construye una sola vez en turn 1 y se reusa **congelado** desde
    la memoria en turns siguientes. El prefijo se preserva → cache hit.
 

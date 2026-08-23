@@ -1153,7 +1153,7 @@ Items derivados de la implementación de Subsystem D (formulas v1, 2026-06-04 �
     editadas, subidas inline, o vía signed URL) — la distinción ii/iii queda
     superada: `executor.fetch_attachment_bytes` ya normaliza cualquier fuente a
     bytes. Sin cambio cross-repo (ADP no afectado). Ver spec
-    [`2026-06-12-gdocs-insert-image-from-attachment-design.md`](../superpowers/specs/2026-06-12-gdocs-insert-image-from-attachment-design.md).
+    [`2026-06-12-gdocs-insert-image-from-attachment-design.md`](superpowers/specs/2026-06-12-gdocs-insert-image-from-attachment-design.md).
 - [x] **Drive Comments API** — SHIPPED 2026-06-11 (Bundle 4A, commit
   `92b89c5`): `gdocs_add_comment` + `gdocs_list_comments` +
   `gdocs_resolve_comment`. Mensajería humano ↔ agente in-doc para el
@@ -1762,7 +1762,7 @@ los tests deberían pasar verde.
     ```
     Nota: `loaded_columns` confirma que bindings + permisos del SA funcionan. La falla es 100% del runtime Python.
   - Spec del feature: [`docs/superpowers/specs/2026-06-06-sheets-write-safety-design.md`](superpowers/specs/2026-06-06-sheets-write-safety-design.md).
-  - Documentación del dispatcher: [`src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/gsheets_run_python.rs`](src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/gsheets_run_python.rs) — el doc comment al inicio del struct `GsheetsRunPythonArgs.code` dice "Has access to `pandas as pd`, `numpy as np`, `scipy.stats as stats`".
+  - Documentación del dispatcher: [`src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/gsheets_run_python.rs`](../src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/gsheets_run_python.rs) — el doc comment al inicio del struct `GsheetsRunPythonArgs.code` dice "Has access to `pandas as pd`, `numpy as np`, `scipy.stats as stats`".
   - Worker Dockerfile en ADP: `/Users/danielgarcia/startti/adp/apps/service/ia/platform/Dockerfile.deps` (a verificar).
   - Cloud Run service: `colmena-worker` en `us-central1`, SA `adp-backend-sa-develop@startti-dev.iam.gserviceaccount.com`.
   - Runbook E2E: Phase 6 en [`verifying_deployed_worker.md`](#phase-6).
@@ -1853,7 +1853,7 @@ turno corre 20+ queries grandes). Hasta entonces v1 alcanza para el caso común
 **Referencias (ambos).**
 - Spec v1: [`docs/superpowers/specs/2026-06-18-conversation-semantic-summary-design.md`](superpowers/specs/2026-06-18-conversation-semantic-summary-design.md) (§No-objetivos lista v1.1/v2; §Enhancements futuros).
 - Plan v1.1: [`docs/superpowers/plans/2026-06-19-tool-result-structured-digest-v1-1.md`](superpowers/plans/2026-06-19-tool-result-structured-digest-v1-1.md).
-- Módulo: [`src/libs/colmena/src/llm/application/tool_digest.rs`](src/libs/colmena/src/llm/application/tool_digest.rs) (v1.2) y [`history_compaction.rs`](src/libs/colmena/src/llm/application/history_compaction.rs) (v2).
+- Módulo: [`src/libs/colmena/src/llm/application/tool_digest.rs`](../src/libs/colmena/src/llm/application/tool_digest.rs) (v1.2) y [`history_compaction.rs`](../src/libs/colmena/src/llm/application/history_compaction.rs) (v2).
 - CHANGELOG §40 (v1.1 shipped).
 
 ### `recall_history` — evento SSE dedicado para UI — *prioridad baja*

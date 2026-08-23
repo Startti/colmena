@@ -328,7 +328,7 @@ Pero esto era violación de precondición del caller (mime mal formado), no erro
 ### Solución implementada
 
 1. **Nueva variante** `LlmError::InvalidMimeType { mime: String, message: String }`.
-2. **Anthropic adapter** ([anthropic_files_api.rs](src/libs/colmena/src/llm/infrastructure/files/anthropic_files_api.rs)) y **OpenAI adapter** ([openai_files_api.rs](src/libs/colmena/src/llm/infrastructure/files/openai_files_api.rs)) ahora mapean el error de `mime_str` a `InvalidMimeType` con el mime original y el mensaje detallado del parser.
+2. **Anthropic adapter** ([anthropic_files_api.rs](../../../src/libs/colmena/src/llm/infrastructure/files/anthropic_files_api.rs)) y **OpenAI adapter** ([openai_files_api.rs](../../../src/libs/colmena/src/llm/infrastructure/files/openai_files_api.rs)) ahora mapean el error de `mime_str` a `InvalidMimeType` con el mime original y el mensaje detallado del parser.
 3. **Gemini** no requiere cambio: pasa el mime como header `X-Goog-Upload-Header-Content-Type` directamente sin validación local — si es inválido, el server lo rechaza con 400 (que ya es `FileApiUploadFailed`, correcto en ese caso porque sí fue HTTP failure).
 
 ### Tests

@@ -168,7 +168,7 @@ let context_block = format!(
 
 ### 5. System Message Assembly
 
-The `context_block` is prepended as the **first section** in the system message assembly block (currently at [llm.rs:1108-1151](../../src/libs/colmena/src/dag_engine/infrastructure/nodes/llm.rs#L1108)):
+The `context_block` is prepended as the **first section** in the system message assembly block (currently at [llm.rs:1108-1151](../../../src/libs/colmena/src/dag_engine/infrastructure/nodes/llm.rs#L1108)):
 
 ```rust
 // In the sections Vec<String> assembly:

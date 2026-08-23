@@ -363,7 +363,7 @@ A[ask_name]: Julian"
 
 ### 7.4 Test de no-regresión: LLM-as-parent-with-suspend-tool
 
-Reutilizar `tests/graphs/agents/llm_tool_suspend_smoke.json` (ya existe). Validar que el flujo completo:
+Reutilizar `tests/graphs/advanced/llm_tool_suspend_smoke.json` (ya existe). Validar que el flujo completo:
 - LLM llama un tool que suspende.
 - Run pausa.
 - Resume con el answer del tool.

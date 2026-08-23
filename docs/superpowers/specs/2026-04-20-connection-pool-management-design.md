@@ -11,7 +11,7 @@ Eliminate per-request Postgres pool creation in the Colmena DAG engine by introd
 
 ## Motivation
 
-The production worker at [`adp/apps/service/ia/platform/worker/src/main.rs`](../../../../adp/apps/service/ia/platform/worker/src/main.rs) currently creates a fresh `sqlx::PgPool::connect(&db_url)` inside `process_job` (line 166) for every Redis job it processes, plus a new `ConversationRepositoryFactory::new()` (line 167) whose internal cache starts empty on every call. The `colmena_dag_engine` library itself replicates the pattern in [`api.rs`](../../../src/libs/colmena/src/dag_engine/api.rs) (lines 29 and 320) and [`main.rs`](../../../src/libs/colmena/src/dag_engine/main.rs) (line 73). The SQL node's [`PgPoolAdapter`](../../../src/libs/colmena/src/dag_engine/infrastructure/sql_pool_adapter.rs) owns its own `max_connections=5` pool per instance.
+The production worker at ``adp/apps/service/ia/platform/worker/src/main.rs`` (repo ADP) currently creates a fresh `sqlx::PgPool::connect(&db_url)` inside `process_job` (line 166) for every Redis job it processes, plus a new `ConversationRepositoryFactory::new()` (line 167) whose internal cache starts empty on every call. The `colmena_dag_engine` library itself replicates the pattern in [`api.rs`](../../../src/libs/colmena/src/dag_engine/api.rs) (lines 29 and 320) and [`main.rs`](../../../src/libs/colmena/src/dag_engine/main.rs) (line 73). The SQL node's [`PgPoolAdapter`](../../../src/libs/colmena/src/dag_engine/infrastructure/sql_pool_adapter.rs) owns its own `max_connections=5` pool per instance.
 
 The observed effect in Cloud Run is Postgres connection-pool saturation: with sqlx's default `max_connections=10` and multiple concurrent jobs per instance across N Cloud Run replicas, the internal Cloud SQL instance sees hundreds of short-lived connections. The problem is worst when a single graph has both an LLM memory node and a SQL node, each opening independent pools against the same database.
 
@@ -263,7 +263,7 @@ Internally, `get_port` calls `registry.get_or_create(url)` and wraps the `Arc<Pg
 - [`nodes/sql.rs`](../../../src/libs/colmena/src/dag_engine/infrastructure/nodes/sql.rs) — the `HashMapNodeRegistry` (already passed to every `ExecutableNode::execute` via the existing execution context) gains a `sql_port_factory: Arc<SqlPortFactory>` field alongside the existing `conversation_factory`. The node reads this factory from the context and calls `get_port(url, timeout_ms, work_mem_mb)`. The node never constructs a `PgPoolAdapter` directly.
 - [`api.rs`](../../../src/libs/colmena/src/dag_engine/api.rs) (`run_dag`, `serve_dag`) — refactored to instantiate `ColmenaEngine::new()` once and reuse it. For `run_dag` (used by CLI single-shot), the engine is created, used once, then `shutdown().await` is called before return.
 - [`main.rs`](../../../src/libs/colmena/src/dag_engine/main.rs) (CLI) — same pattern as `api.rs`.
-- [`platform/worker/src/main.rs`](../../../../adp/apps/service/ia/platform/worker/src/main.rs) — `main()` builds the engine, passes it in `AppState`; `process_job` receives `&Engine` and calls `engine.execute_stream(...)`. Lines 164-189 (pool + repos + registry + use_case construction) are deleted from `process_job`.
+- ``platform/worker/src/main.rs`` (repo ADP) — `main()` builds the engine, passes it in `AppState`; `process_job` receives `&Engine` and calls `engine.execute_stream(...)`. Lines 164-189 (pool + repos + registry + use_case construction) are deleted from `process_job`.
 
 ## Shutdown semantics
 

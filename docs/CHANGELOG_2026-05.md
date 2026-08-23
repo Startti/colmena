@@ -278,7 +278,7 @@ Para dev/prod symmetry agregamos `COLMENA_LOCAL=true|false` como guard rail expl
 - Dev guide: [docs/developer_guide/23_sql_node.md](developer_guide/23_sql_node.md) → tabla "Permissions Object" + subsección "Operator-Driven Schema Provisioning".
 - Schema: [docs/node_configurations.json](node_configurations.json) → `sql_query.permissions.create_schemas_if_missing` (default `true`).
 - Tool reference: [docs/node_as_tools_reference.json](node_as_tools_reference.json) → nota de provisioning en `sql_query`.
-- Test graph: `tests/graphs/agents/sql_provision_schema_tool.json` (LLM tool, schema fresco) + `tests/graphs/external/sql_create_allowed_schema.json` (standalone).
+- Test graph: `tests/graphs/agents/sql_provision_schema_tool.json` (LLM tool, schema fresco).
 
 **Archivos tocados:** `domain/sql_permissions.rs` (field + accesores `create_schemas_if_missing()` / `allowed_schemas_iter()`), `domain/sql_ports.rs` (`missing_schemas` + `create_schema` en `SqlConnectionPort`), `infrastructure/sql_pool_adapter.rs` (impl + tests `#[ignore]` con `TEST_DATABASE_URL`), `infrastructure/nodes/sql.rs` (paso de provisioning en `do_initialize_inner`).
 

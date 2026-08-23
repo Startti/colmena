@@ -16,19 +16,19 @@
 
 | File | Lines | Heuristic | Replace with |
 |------|-------|-----------|--------------|
-| [sql_static_validator.rs:14-41](../../src/libs/colmena/src/dag_engine/infrastructure/sql_static_validator.rs:14) | `detect_operation` startswith chain | AST `match Statement::*` |
-| [sql_static_validator.rs:44-54](../../src/libs/colmena/src/dag_engine/infrastructure/sql_static_validator.rs:44) | `extract_schemas` regex `\b(\w+)\.(\w+)` (**the bug**) | Walk `ObjectName` nodes in AST |
-| [sql_static_validator.rs:57-60](../../src/libs/colmena/src/dag_engine/infrastructure/sql_static_validator.rs:57) | `has_where_clause` substring | `Statement::{Update,Delete}.selection.is_some()` |
-| [sql_static_validator.rs:63-66](../../src/libs/colmena/src/dag_engine/infrastructure/sql_static_validator.rs:63) | `has_comment` substring | `Statement::Comment { .. }` in statement list |
-| [sql_static_validator.rs:170-176](../../src/libs/colmena/src/dag_engine/infrastructure/sql_static_validator.rs:170) | `SELECT *` warning substring | `Select.projection contains SelectItem::Wildcard` |
-| [sql_execution_service.rs:140-156](../../src/libs/colmena/src/dag_engine/application/sql_execution_service.rs:140) | CREATE FUNCTION startswith → register | AST `Statement::CreateFunction` detection |
-| [sql_execution_service.rs:168-174](../../src/libs/colmena/src/dag_engine/application/sql_execution_service.rs:168) | `extract_function_name` regex | `Statement::CreateFunction.name` |
-| [sql_execution_service.rs:177-182](../../src/libs/colmena/src/dag_engine/application/sql_execution_service.rs:177) | `extract_comment` regex (quote-based, breaks on escaped quotes) | `Statement::Comment.comment` value |
-| [sql_pool_adapter.rs:275-276](../../src/libs/colmena/src/dag_engine/infrastructure/sql_pool_adapter.rs:275) | startswith SELECT/WITH → is_select | `Statement::{Query}` match (covers CTE) |
-| [sql_pool_adapter.rs:306](../../src/libs/colmena/src/dag_engine/infrastructure/sql_pool_adapter.rs:306) | substring "LIMIT" (false positive on `WHERE x='LIMIT'`) | `Query.limit.is_some()` |
-| [sql_pool_adapter.rs:381-394](../../src/libs/colmena/src/dag_engine/infrastructure/sql_pool_adapter.rs:381) | startswith CREATE FUNCTION/TABLE for output shape | AST statement-type dispatch |
-| [nodes/sql.rs:232-248](../../src/libs/colmena/src/dag_engine/infrastructure/nodes/sql.rs:232) | `extract_create_table_name` regex | `Statement::CreateTable.name` |
-| [nodes/sql.rs:390-391](../../src/libs/colmena/src/dag_engine/infrastructure/nodes/sql.rs:390) | startswith CREATE TABLE → apply RLS | AST `Statement::CreateTable` detection |
+| [sql_static_validator.rs:14-41](../../../src/libs/colmena/src/dag_engine/infrastructure/sql_static_validator.rs:14) | `detect_operation` startswith chain | AST `match Statement::*` |
+| [sql_static_validator.rs:44-54](../../../src/libs/colmena/src/dag_engine/infrastructure/sql_static_validator.rs:44) | `extract_schemas` regex `\b(\w+)\.(\w+)` (**the bug**) | Walk `ObjectName` nodes in AST |
+| [sql_static_validator.rs:57-60](../../../src/libs/colmena/src/dag_engine/infrastructure/sql_static_validator.rs:57) | `has_where_clause` substring | `Statement::{Update,Delete}.selection.is_some()` |
+| [sql_static_validator.rs:63-66](../../../src/libs/colmena/src/dag_engine/infrastructure/sql_static_validator.rs:63) | `has_comment` substring | `Statement::Comment { .. }` in statement list |
+| [sql_static_validator.rs:170-176](../../../src/libs/colmena/src/dag_engine/infrastructure/sql_static_validator.rs:170) | `SELECT *` warning substring | `Select.projection contains SelectItem::Wildcard` |
+| [sql_execution_service.rs:140-156](../../../src/libs/colmena/src/dag_engine/application/sql_execution_service.rs:140) | CREATE FUNCTION startswith → register | AST `Statement::CreateFunction` detection |
+| [sql_execution_service.rs:168-174](../../../src/libs/colmena/src/dag_engine/application/sql_execution_service.rs:168) | `extract_function_name` regex | `Statement::CreateFunction.name` |
+| [sql_execution_service.rs:177-182](../../../src/libs/colmena/src/dag_engine/application/sql_execution_service.rs:177) | `extract_comment` regex (quote-based, breaks on escaped quotes) | `Statement::Comment.comment` value |
+| [sql_pool_adapter.rs:275-276](../../../src/libs/colmena/src/dag_engine/infrastructure/sql_pool_adapter.rs:275) | startswith SELECT/WITH → is_select | `Statement::{Query}` match (covers CTE) |
+| [sql_pool_adapter.rs:306](../../../src/libs/colmena/src/dag_engine/infrastructure/sql_pool_adapter.rs:306) | substring "LIMIT" (false positive on `WHERE x='LIMIT'`) | `Query.limit.is_some()` |
+| [sql_pool_adapter.rs:381-394](../../../src/libs/colmena/src/dag_engine/infrastructure/sql_pool_adapter.rs:381) | startswith CREATE FUNCTION/TABLE for output shape | AST statement-type dispatch |
+| [nodes/sql.rs:232-248](../../../src/libs/colmena/src/dag_engine/infrastructure/nodes/sql.rs:232) | `extract_create_table_name` regex | `Statement::CreateTable.name` |
+| [nodes/sql.rs:390-391](../../../src/libs/colmena/src/dag_engine/infrastructure/nodes/sql.rs:390) | startswith CREATE TABLE → apply RLS | AST `Statement::CreateTable` detection |
 
 ### Multi-row INSERT support (user question)
 
@@ -41,8 +41,8 @@ INSERT INTO seb_data.productos (sku, name) VALUES
 
 Tracing the path:
 1. **Validator**: `detect_operation` matches `INSERT` → `SqlOperation::Insert` → permission check → schema check. Number of VALUES rows is irrelevant. ✅
-2. **Executor** ([sql_pool_adapter.rs:369](../../src/libs/colmena/src/dag_engine/infrastructure/sql_pool_adapter.rs:369)): Non-SELECT → `execute()` → returns `rows_affected`. ✅
-3. `max_rows` only caps SELECT result sets ([sql_pool_adapter.rs:358](../../src/libs/colmena/src/dag_engine/infrastructure/sql_pool_adapter.rs:358)), not INSERT row counts.
+2. **Executor** ([sql_pool_adapter.rs:369](../../../src/libs/colmena/src/dag_engine/infrastructure/sql_pool_adapter.rs:369)): Non-SELECT → `execute()` → returns `rows_affected`. ✅
+3. `max_rows` only caps SELECT result sets ([sql_pool_adapter.rs:358](../../../src/libs/colmena/src/dag_engine/infrastructure/sql_pool_adapter.rs:358)), not INSERT row counts.
 
 **Effective limits:**
 - `statement_timeout_ms` (default 30s) — could trip on very large inserts; bump in `runtime_limits` if needed.

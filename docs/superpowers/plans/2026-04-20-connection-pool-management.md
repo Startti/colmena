@@ -1841,7 +1841,7 @@ impl Drop for ColmenaEngine {
 }
 ```
 
-> **DagRunUseCase::execute_stream:** this method currently takes `self` by value (the use_case is `Clone`). We call `self.use_case.clone().execute_stream(...)` to avoid lifetime problems with `Arc<DagRunUseCase>`. Verify by checking the signature at [run_use_case.rs](../../src/libs/colmena/src/dag_engine/application/run_use_case.rs) and adjust the call if the trait is different.
+> **DagRunUseCase::execute_stream:** this method currently takes `self` by value (the use_case is `Clone`). We call `self.use_case.clone().execute_stream(...)` to avoid lifetime problems with `Arc<DagRunUseCase>`. Verify by checking the signature at [run_use_case.rs](../../../src/libs/colmena/src/dag_engine/application/run_use_case.rs) and adjust the call if the trait is different.
 
 - [ ] **Step 2: Fix the `api.rs`, `main.rs`, registry.rs call-sites so the lib compiles**
 
