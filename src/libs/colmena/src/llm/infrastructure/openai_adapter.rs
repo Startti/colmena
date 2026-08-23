@@ -45,16 +45,26 @@ impl OpenAiAdapter {
         // Cache-safe temporal suffix (2026-06-11). Appended to the END of the
         // system message content so OpenAI's automatic prefix cache still
         // matches the stable prefix while the timestamp changes per turn.
+        // A request can carry MORE THAN ONE System message — `history_compaction`
+        // appends the conversation summary as a second one — so the suffix is
+        // attached to the LAST of them only. Attaching it to every System
+        // message would repeat the temporal block once per system in the
+        // prompt; attaching it to the last keeps it at the end of the system
+        // context, matching the Anthropic and Gemini adapters.
         let volatile_suffix = request.config().volatile_system_suffix();
+        let last_system_idx = request
+            .messages()
+            .iter()
+            .rposition(|m| m.role() == &MessageRole::System);
         let mut suffix_applied = false;
         let mut out = Vec::with_capacity(request.messages().len());
-        for msg in request.messages() {
+        for (idx, msg) in request.messages().iter().enumerate() {
             let mut message_json = json!({
                 "role": msg.role().as_str(),
             });
 
             // Effective content: append the volatile suffix to the system text.
-            let content_text: String = if msg.role() == &MessageRole::System {
+            let content_text: String = if Some(idx) == last_system_idx {
                 if let Some(suffix) = volatile_suffix {
                     suffix_applied = true;
                     format!("{}\n\n{}", msg.content(), suffix)
@@ -733,10 +743,15 @@ impl OpenAiAdapter {
         // the stable system prefix while the timestamp changes per turn. If no
         // system message exists, a standalone system item is pushed at the
         // front carrying just the suffix (nothing stable to cache anyway).
+        // Only the LAST System message carries the suffix — see `build_messages`.
         let volatile_suffix = request.config().volatile_system_suffix();
+        let last_system_idx = request
+            .messages()
+            .iter()
+            .rposition(|m| m.role() == &MessageRole::System);
         let mut suffix_applied = false;
         let mut input_items: Vec<serde_json::Value> = Vec::new();
-        for msg in request.messages() {
+        for (idx, msg) in request.messages().iter().enumerate() {
             match msg.role() {
                 MessageRole::Tool => {
                     let call_id = msg.tool_call_id().unwrap_or_default();
@@ -770,7 +785,7 @@ impl OpenAiAdapter {
                 }
                 MessageRole::System | MessageRole::User => {
                     // Append the volatile suffix to the system message text.
-                    let text: String = if msg.role() == &MessageRole::System {
+                    let text: String = if Some(idx) == last_system_idx {
                         if let Some(suffix) = volatile_suffix {
                             suffix_applied = true;
                             format!("{}\n\n{}", msg.content(), suffix)
@@ -1587,5 +1602,67 @@ mod tests {
         let messages = body["messages"].as_array().unwrap();
         let system = messages.iter().find(|m| m["role"] == "system").unwrap();
         assert_eq!(system["content"].as_str().unwrap(), "stable system");
+    }
+
+    // ── Multiple System messages (compaction summary) ────────────────────
+    //
+    // `history_compaction` appends the conversation summary as a SECOND
+    // System message. OpenAI keeps both in the array (nothing is lost), but
+    // the per-turn temporal block must still be injected exactly ONCE — and
+    // at the END of the system context, matching Anthropic and Gemini.
+
+    fn openai_req_two_systems(suffix: Option<&str>) -> LlmRequest {
+        use crate::llm::domain::{LlmConfig, LlmMessage, LlmProvider, ProviderKind};
+        let messages = vec![
+            LlmMessage::system("stable system".into()).unwrap(),
+            LlmMessage::user("hi".into()).unwrap(),
+            LlmMessage::system("## Conversation summary (older turns)".into()).unwrap(),
+            LlmMessage::user("and now?".into()).unwrap(),
+        ];
+        let provider =
+            LlmProvider::new(ProviderKind::OpenAi, "k".into(), Some("gpt-4o".into())).unwrap();
+        let mut config = LlmConfig::new(provider);
+        if let Some(s) = suffix {
+            config = config.with_volatile_system_suffix(s);
+        }
+        LlmRequest::new(messages, config, false).unwrap()
+    }
+
+    #[test]
+    fn chat_completions_injects_volatile_suffix_once_on_the_last_system() {
+        let adapter = OpenAiAdapter::new();
+        let req = openai_req_two_systems(Some("## Temporal\n2026-08-22T10:00:00"));
+        let body = adapter.build_request_body(&req).unwrap();
+        let messages = body["messages"].as_array().unwrap();
+
+        let systems: Vec<&str> = messages
+            .iter()
+            .filter(|m| m["role"] == "system")
+            .map(|m| m["content"].as_str().unwrap())
+            .collect();
+        assert_eq!(systems.len(), 2, "both System messages survive");
+        assert_eq!(
+            systems[0], "stable system",
+            "the stable prompt must NOT carry a duplicate temporal block"
+        );
+        assert!(systems[1].starts_with("## Conversation summary (older turns)"));
+        assert!(systems[1].ends_with("## Temporal\n2026-08-22T10:00:00"));
+    }
+
+    #[test]
+    fn responses_injects_volatile_suffix_once_on_the_last_system() {
+        let adapter = OpenAiAdapter::new();
+        let req = openai_req_two_systems(Some("## Temporal\n2026-08-22T10:00:00"));
+        let body = adapter.build_responses_request_body(&req).unwrap();
+        let input = body["input"].as_array().unwrap();
+
+        let systems: Vec<&str> = input
+            .iter()
+            .filter(|m| m["role"] == "system")
+            .map(|m| m["content"][0]["text"].as_str().unwrap())
+            .collect();
+        assert_eq!(systems.len(), 2, "both System messages survive");
+        assert_eq!(systems[0], "stable system");
+        assert!(systems[1].ends_with("## Temporal\n2026-08-22T10:00:00"));
     }
 }

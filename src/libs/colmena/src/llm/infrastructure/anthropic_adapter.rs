@@ -43,17 +43,26 @@ impl AnthropicAdapter {
         &self.base_url
     }
 
+    /// Split a request into (system texts, conversation messages).
+    ///
+    /// Anthropic's Messages API has no `system` role inside `messages`; the
+    /// system prompt travels in a separate top-level field. A request can
+    /// legitimately carry MORE THAN ONE `System` message — `history_compaction`
+    /// appends the conversation summary as a second one — so every System
+    /// message is collected in order. Collapsing them by overwriting would
+    /// silently drop the agent's real system prompt the moment a conversation
+    /// grows long enough to be compacted.
     fn convert_messages(
         &self,
         request: &LlmRequest,
-    ) -> Result<(Option<String>, Vec<AnthropicMessage>), LlmError> {
-        let mut system_message = None;
+    ) -> Result<(Vec<String>, Vec<AnthropicMessage>), LlmError> {
+        let mut system_messages: Vec<String> = Vec::new();
         let mut messages = Vec::new();
 
         for message in request.messages() {
             match message.role() {
                 MessageRole::System => {
-                    system_message = Some(message.content().to_string());
+                    system_messages.push(message.content().to_string());
                 }
                 MessageRole::User => {
                     if let Some(files) = message.files() {
@@ -172,11 +181,11 @@ impl AnthropicAdapter {
             }
         }
 
-        Ok((system_message, messages))
+        Ok((system_messages, messages))
     }
 
     fn build_request_body(&self, request: &LlmRequest) -> Result<serde_json::Value, LlmError> {
-        let (system_message, messages) = self.convert_messages(request)?;
+        let (system_messages, messages) = self.convert_messages(request)?;
 
         let mut body = json!({
             "model": request.config().model(),
@@ -203,43 +212,35 @@ impl AnthropicAdapter {
         // We do NOT add a marker on user/assistant messages because the
         // conversation tail changes every turn — caching it would cause
         // constant cache-write churn with no read benefit.
-        // Cache-safe temporal suffix (2026-06-11). When the config carries a
-        // `volatile_system_suffix` (the per-turn temporal block), it is emitted
-        // as a SECOND system block WITHOUT a cache_control marker. The cache
-        // breakpoint stays on the first (stable) block, so the changing
-        // timestamp lives outside the cached prefix and never busts it. When
-        // there is no stable system but there IS a suffix, the suffix becomes
-        // the (uncached) system on its own.
+        // Cache-safe volatile blocks. Everything after the FIRST system block
+        // is emitted WITHOUT a cache_control marker, so the cache breakpoint
+        // stays on the stable agent prompt and per-turn content lives outside
+        // the cached prefix instead of busting it every request. Two kinds of
+        // volatile block land here:
+        //
+        //   1. Extra `System` messages from the request — today that is the
+        //      conversation summary appended by `history_compaction`, which
+        //      changes as the conversation grows.
+        //   2. The config's `volatile_system_suffix` (the per-turn temporal
+        //      block), always emitted last.
+        //
+        // When there is no stable system but there IS a suffix, the suffix
+        // becomes the (uncached) system on its own.
         let volatile_suffix = request.config().volatile_system_suffix();
-        match (system_message, volatile_suffix) {
-            (Some(system), Some(suffix)) => {
-                body["system"] = json!([
-                    {
-                        "type": "text",
-                        "text": system,
-                        "cache_control": {"type": "ephemeral"}
-                    },
-                    {
-                        "type": "text",
-                        "text": suffix
-                    }
-                ]);
+        let mut system_blocks: Vec<serde_json::Value> = Vec::new();
+        for text in &system_messages {
+            system_blocks.push(json!({ "type": "text", "text": text }));
+        }
+        if let Some(suffix) = volatile_suffix {
+            system_blocks.push(json!({ "type": "text", "text": suffix }));
+        }
+        if !system_blocks.is_empty() {
+            if !system_messages.is_empty() {
+                // Only a real system message anchors the cache breakpoint; a
+                // lone temporal suffix is volatile by definition.
+                system_blocks[0]["cache_control"] = json!({ "type": "ephemeral" });
             }
-            (Some(system), None) => {
-                body["system"] = json!([{
-                    "type": "text",
-                    "text": system,
-                    "cache_control": {"type": "ephemeral"}
-                }]);
-            }
-            (None, Some(suffix)) => {
-                // No stable system to cache; the suffix is the whole system.
-                body["system"] = json!([{
-                    "type": "text",
-                    "text": suffix
-                }]);
-            }
-            (None, None) => {}
+            body["system"] = json!(system_blocks);
         }
 
         if let Some(temp) = request.config().temperature() {
@@ -1255,5 +1256,106 @@ mod tests {
         let arr = body["system"].as_array().unwrap();
         assert_eq!(arr.len(), 1, "single block when no suffix");
         assert_eq!(arr[0]["cache_control"]["type"], "ephemeral");
+    }
+
+    // ── Multiple System messages (compaction summary) ────────────────────
+    //
+    // `history_compaction::build_compacted_messages` appends the conversation
+    // summary as a SECOND System message whenever a conversation is long
+    // enough to be compacted. Anthropic's Messages API takes a single
+    // top-level `system` field, so the adapter must COMBINE every System
+    // message it sees — dropping one silently discards the agent's real
+    // system prompt mid-conversation.
+
+    fn anth_request_from_messages(
+        msgs: Vec<crate::llm::domain::LlmMessage>,
+        suffix: Option<&str>,
+    ) -> LlmRequest {
+        use crate::llm::domain::{LlmConfig, LlmProvider, ProviderKind};
+        let provider = LlmProvider::new(
+            ProviderKind::Anthropic,
+            "k".into(),
+            Some("claude-3-5-sonnet".into()),
+        )
+        .unwrap();
+        let mut config = LlmConfig::new(provider);
+        if let Some(s) = suffix {
+            config = config.with_volatile_system_suffix(s);
+        }
+        LlmRequest::new(msgs, config, false).unwrap()
+    }
+
+    #[test]
+    fn two_system_messages_both_survive_in_system_field() {
+        use crate::llm::domain::LlmMessage;
+        let adapter = AnthropicAdapter::new();
+        let req = anth_request_from_messages(
+            vec![
+                LlmMessage::system("AGENT PROMPT: you only answer in Spanish.".into()).unwrap(),
+                LlmMessage::user("hola".into()).unwrap(),
+                LlmMessage::system("## Conversation summary (older turns)".into()).unwrap(),
+                LlmMessage::user("y ahora?".into()).unwrap(),
+            ],
+            None,
+        );
+        let body = adapter.build_request_body(&req).unwrap();
+
+        let arr = body["system"].as_array().expect("system block array");
+        assert_eq!(arr.len(), 2, "both System messages must reach the request");
+        assert_eq!(arr[0]["text"], "AGENT PROMPT: you only answer in Spanish.");
+        assert_eq!(arr[1]["text"], "## Conversation summary (older turns)");
+
+        // Only System messages are hoisted — the User turns stay in `messages`.
+        let msgs = body["messages"].as_array().expect("messages array");
+        assert_eq!(msgs.len(), 2, "the two user turns remain in messages");
+    }
+
+    #[test]
+    fn extra_system_blocks_are_uncached_marker_stays_on_the_first() {
+        use crate::llm::domain::LlmMessage;
+        let adapter = AnthropicAdapter::new();
+        let req = anth_request_from_messages(
+            vec![
+                LlmMessage::system("stable agent prompt".into()).unwrap(),
+                LlmMessage::user("hola".into()).unwrap(),
+                LlmMessage::system("volatile summary".into()).unwrap(),
+            ],
+            None,
+        );
+        let body = adapter.build_request_body(&req).unwrap();
+
+        let arr = body["system"].as_array().unwrap();
+        assert_eq!(
+            arr[0]["cache_control"]["type"], "ephemeral",
+            "the stable prompt anchors the cache breakpoint"
+        );
+        assert!(
+            arr[1].get("cache_control").is_none(),
+            "the per-turn summary must sit OUTSIDE the cached prefix"
+        );
+    }
+
+    #[test]
+    fn two_system_messages_plus_volatile_suffix_emit_three_ordered_blocks() {
+        use crate::llm::domain::LlmMessage;
+        let adapter = AnthropicAdapter::new();
+        let req = anth_request_from_messages(
+            vec![
+                LlmMessage::system("stable agent prompt".into()).unwrap(),
+                LlmMessage::user("hola".into()).unwrap(),
+                LlmMessage::system("volatile summary".into()).unwrap(),
+            ],
+            Some("## Temporal\n2026-08-22T10:00:00"),
+        );
+        let body = adapter.build_request_body(&req).unwrap();
+
+        let arr = body["system"].as_array().unwrap();
+        assert_eq!(arr.len(), 3, "stable + summary + temporal suffix");
+        assert_eq!(arr[0]["text"], "stable agent prompt");
+        assert_eq!(arr[1]["text"], "volatile summary");
+        assert_eq!(arr[2]["text"], "## Temporal\n2026-08-22T10:00:00");
+        assert_eq!(arr[0]["cache_control"]["type"], "ephemeral");
+        assert!(arr[1].get("cache_control").is_none());
+        assert!(arr[2].get("cache_control").is_none());
     }
 }

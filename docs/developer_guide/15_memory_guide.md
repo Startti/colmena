@@ -336,6 +336,38 @@ sin perder nada (el original siempre vive en la DB).
 - **Medio (resumido):** todo lo que queda entre medio se colapsa en **un** mensaje
   `system` titulado `## Conversation summary`, con **una línea `[Tn]` por mensaje**.
 
+> **Dónde termina el resumen.** `build_compacted_messages` mergea el resumen **dentro** del
+> `system` previo cuando `messages[keep_first - 1]` ya es `system`, y si no lo empuja como un
+> mensaje `system` aparte. Con `keep_first = 2` eso depende del orden real del historial, y el que
+> arma `llm_call` es `[User(prompt), System(secciones)]` — el prompt del usuario primero, el
+> `system` ensamblado después, y solo en el turno 1 (`!history_exists`). O sea: el índice 1 **es**
+> el `system`, la rama de merge corre siempre, y **la ruta viva produce un solo `system`**.
+> Verificado E2E contra Anthropic real (ver CHANGELOG 2026-08 §6).
+>
+> Los otros cinco llamadores de `AgentService` —`reactor`, `planner`, `critic`, `orchestrator` y
+> `util/extract_with_schema`— **sí** arman `[System, User]`, o sea el orden que activaría la otra
+> rama. No llegan a activarla por otro motivo: cada uno usa un `InMemoryConversationRepository`
+> nuevo por invocación con exactamente 2 mensajes, así que `build_compacted_messages` sale temprano
+> (`total <= keep_first + 1`) y nunca compacta. Los salva el historial efímero, no el orden — si
+> alguno pasara a historial persistente, el request llevaría dos `system`.
+>
+> Esa otra rama —un `system` nuevo, con lo que el request llevaría **dos**— hoy no se alcanza,
+> pero es legal: `LlmRequest` admite mensajes `system` intercalados. Cada adapter los maneja así:
+>
+> | Provider | Qué hace con varios `system` |
+> |---|---|
+> | **Anthropic** | Un bloque por `system`, en orden; `cache_control` solo en el primero |
+> | **OpenAI** | Los deja en el array `messages` tal cual, en su posición |
+> | **Gemini** | Los une con `\n\n` en un único `systemInstruction` |
+>
+> Ningún adapter puede descartar uno. El de Anthropic lo hacía hasta el 2026-08-22 (sobrescribía en
+> vez de combinar) — defecto latente, no un fallo en producción. Ver
+> [§14 — Prompt caching](14_llm_deep_dive.md).
+>
+> **Costo del merge.** Como el resumen queda dentro del `system` estable y se recomputa en cada
+> run, el prefijo cacheado cambia turno a turno: una vez que una conversación compacta, el prompt
+> caching deja de acertar. Anotado como ítem aparte.
+
 ### Política por rol / tipo de mensaje
 
 Cada línea del resumen se construye según el rol. La DB **nunca guarda nada

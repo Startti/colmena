@@ -38,6 +38,7 @@ dist/
 # Git worktrees (local dev)
 .worktrees/
 colmena_memory.db
+colmena_compaction_e2e.db
 
 # Runtime data created by the engine at graph-execution time
 # (CRDT document snapshots, document library storage root, etc.)
