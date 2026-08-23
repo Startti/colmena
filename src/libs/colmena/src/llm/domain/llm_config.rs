@@ -1,22 +1,56 @@
 use crate::llm::domain::{LlmError, LlmProvider};
 use serde::{Deserialize, Serialize};
 
+/// Emits `Some(n)` as `n` and `None` as `0`, so a field is never simply missing.
+/// Deserialization is unaffected — `Option` still accepts an absent field, which
+/// keeps histories written by older builds readable.
+fn serialize_opt_u32_as_zero<S>(value: &Option<u32>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serializer.serialize_u32(value.unwrap_or(0))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct LlmUsage {
-    /// Tokens in the input prompt (excluding cache hits).
+    /// Fresh input tokens — the portion of the prompt billed at the full input
+    /// rate, with any cache-served tokens excluded.
+    ///
+    /// **Normalized across providers.** The three provider APIs disagree on
+    /// whether cached tokens are part of the input count: Anthropic reports
+    /// `input_tokens` already net of cache (disjoint), while OpenAI and Gemini
+    /// report cached tokens as a *subset* of `prompt_tokens` /
+    /// `promptTokenCount`. Each adapter converts to the disjoint form via
+    /// [`LlmUsage::with_cached_input_tokens_included`], so this field means the
+    /// same thing everywhere and `prompt + cache_read + cache_write` is always
+    /// the true input size. Verified live 2026-08-23 against all three APIs.
     pub prompt_tokens: u32,
     /// Tokens in the text output (Gemini: text only; Anthropic/OpenAI: includes thinking).
     pub completion_tokens: u32,
     /// Thinking / reasoning tokens (Gemini `thoughtsTokenCount`, OpenAI `reasoning_tokens`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thinking_tokens: Option<u32>,
-    /// Tokens read from the prompt cache (Anthropic `cache_read_input_tokens`, OpenAI `cached_tokens`).
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Tokens read from the prompt cache (Anthropic `cache_read_input_tokens`,
+    /// OpenAI `cached_tokens`, Gemini `cachedContentTokenCount`). Billed at a
+    /// steep discount — never fold this into [`Self::prompt_tokens`].
+    ///
+    /// Always serialized, as `0` when absent: an omitted field could not be told
+    /// apart from a provider that never reports one, and those two cases have
+    /// opposite cost implications.
+    #[serde(serialize_with = "serialize_opt_u32_as_zero")]
     pub cache_read_tokens: Option<u32>,
     /// Tokens written to the prompt cache (Anthropic `cache_creation_input_tokens`).
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Billed at a *premium* over fresh input, so it is kept separate from
+    /// [`Self::cache_read_tokens`] — the two rates differ by more than 10x, which
+    /// is why the two are never collapsed into one "cache" figure.
+    ///
+    /// Always serialized, as `0` when absent.
+    #[serde(serialize_with = "serialize_opt_u32_as_zero")]
     pub cache_write_tokens: Option<u32>,
-    /// prompt + completion + thinking (for models that report thinking separately).
+    /// Every token the turn touched: prompt + completion + thinking +
+    /// cache_read + cache_write. Cache tokens are counted here because they are
+    /// real tokens the provider processed and billed; omitting them understated
+    /// a cached Anthropic turn by ~80%.
     pub total_tokens: u32,
 }
 
@@ -32,18 +66,47 @@ impl LlmUsage {
 
     pub fn with_thinking_tokens(mut self, tokens: u32) -> Self {
         self.thinking_tokens = Some(tokens);
-        self.total_tokens = self.prompt_tokens + self.completion_tokens + tokens;
+        self.recompute_total();
         self
     }
 
     pub fn with_cache_read_tokens(mut self, tokens: u32) -> Self {
         self.cache_read_tokens = Some(tokens);
+        self.recompute_total();
         self
     }
 
     pub fn with_cache_write_tokens(mut self, tokens: u32) -> Self {
         self.cache_write_tokens = Some(tokens);
+        self.recompute_total();
         self
+    }
+
+    /// Record cache-read tokens that the provider counted *inside* its prompt
+    /// total, subtracting them so [`Self::prompt_tokens`] is left holding only
+    /// fresh input.
+    ///
+    /// Use this for OpenAI and Gemini. Anthropic already reports the two counts
+    /// disjointly and must use [`Self::with_cache_read_tokens`] instead —
+    /// calling this for Anthropic would subtract the cache twice.
+    ///
+    /// Saturating: a provider that ever reported more cached tokens than prompt
+    /// tokens would floor `prompt_tokens` at 0 rather than wrap.
+    pub fn with_cached_input_tokens_included(mut self, cached: u32) -> Self {
+        self.prompt_tokens = self.prompt_tokens.saturating_sub(cached);
+        self.cache_read_tokens = Some(cached);
+        self.recompute_total();
+        self
+    }
+
+    /// Recomputed from scratch on every mutation so builder call order cannot
+    /// change the result.
+    fn recompute_total(&mut self) {
+        self.total_tokens = self.prompt_tokens
+            + self.completion_tokens
+            + self.thinking_tokens.unwrap_or(0)
+            + self.cache_read_tokens.unwrap_or(0)
+            + self.cache_write_tokens.unwrap_or(0);
     }
 }
 
@@ -182,6 +245,48 @@ impl LlmConfig {
 mod tests {
     use super::*;
     use crate::llm::domain::ProviderKind;
+
+    #[test]
+    fn usage_always_serializes_both_cache_fields() {
+        // The wire contract ADP binds to: the cache line is always there, even
+        // when the turn had no cache activity at all.
+        let json = serde_json::to_value(LlmUsage::new(100, 10)).unwrap();
+        assert_eq!(json["cache_read_tokens"], 0);
+        assert_eq!(json["cache_write_tokens"], 0);
+        // thinking_tokens keeps its `> 0` gate and stays absent.
+        assert!(json.get("thinking_tokens").is_none());
+        // No field was renamed.
+        for key in ["prompt_tokens", "completion_tokens", "total_tokens"] {
+            assert!(json.get(key).is_some(), "missing expected key `{key}`");
+        }
+    }
+
+    #[test]
+    fn usage_deserializes_when_cache_fields_are_absent() {
+        // Histories written by older builds omit the cache fields entirely.
+        // `Option` must still accept that rather than fail the whole record.
+        let usage: LlmUsage = serde_json::from_value(serde_json::json!({
+            "prompt_tokens": 100,
+            "completion_tokens": 10,
+            "total_tokens": 110
+        }))
+        .expect("absent cache fields must deserialize");
+        assert_eq!(usage.cache_read_tokens, None);
+        assert_eq!(usage.cache_write_tokens, None);
+    }
+
+    #[test]
+    fn usage_roundtrips_through_json() {
+        // LlmUsage crosses the subgraph boundary as JSON, so serialize ->
+        // deserialize must not lose or alter a value.
+        let original = LlmUsage::new(404, 8).with_cache_read_tokens(1809);
+        let back: LlmUsage =
+            serde_json::from_value(serde_json::to_value(&original).unwrap()).unwrap();
+        assert_eq!(back.prompt_tokens, 404);
+        assert_eq!(back.cache_read_tokens, Some(1809));
+        assert_eq!(back.cache_write_tokens, Some(0), "0 round-trips as Some(0)");
+        assert_eq!(back.total_tokens, original.total_tokens);
+    }
 
     // Helper para crear un LlmProvider de prueba.
     fn create_test_provider() -> LlmProvider {

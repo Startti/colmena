@@ -893,7 +893,7 @@ distintos para distintos consumidores:
   "type": "finish",
   "finishReason": "stop",
   "usage": {
-    "promptTokens": 4193,            // siempre presente
+    "promptTokens": 4193,            // siempre presente — input FRESCO, sin cache
     "completionTokens": 52,          // siempre presente
     "totalTokens": 4321,             // siempre presente (incluye thinking)
     "thinkingTokens": 76,            // solo si > 0
@@ -904,6 +904,10 @@ distintos para distintos consumidores:
 }
 ```
 
+> El agregado run-level todavía aplica el gate `> 0` a las columnas de cache y
+> deja el cache fuera de `totalTokens`. Eso se corrige en el slice siguiente de
+> esta cadena; el agregado por nodo de arriba ya está normalizado.
+
 **Esquema del `node-end.output.extra_info.usage` por nodo:**
 
 ```jsonc
@@ -913,12 +917,12 @@ distintos para distintos consumidores:
   "output": {
     "extra_info": {
       "usage": {
-        "prompt_tokens": 4193,
+        "prompt_tokens": 4193,        // input FRESCO, sin cache
         "completion_tokens": 52,
-        "total_tokens": 4321,
-        "thinking_tokens": 76,        // solo si > 0
-        "cache_read_tokens": 725,     // solo si > 0
-        "cache_write_tokens": 24882   // solo si > 0
+        "cache_read_tokens": 725,     // siempre presente (0 si no hubo hit)
+        "cache_write_tokens": 24882,  // siempre presente (0 si no hubo write)
+        "total_tokens": 29876,        // incluye thinking Y cache
+        "thinking_tokens": 76         // solo si > 0
       },
       "tool_calls": [ ... ]
     }
@@ -926,20 +930,72 @@ distintos para distintos consumidores:
 }
 ```
 
-**Gate `> 0`:** los campos opcionales (`thinking`, `cacheRead`, `cacheWrite`)
-solo aparecen cuando son > 0. Esto evita ruido en runs sin cache hits. El
-consumidor debe defenderse con `??`/`?.` (e.g. `usage.cacheReadTokens ?? 0`).
-Si tu UI asume siempre presente, romperá en runs sin caching.
+**En el `usage` por nodo, los campos de cache están SIEMPRE presentes** (desde
+2026-08-23), incluso en `0`. Antes tenían gate `> 0`, lo que hacía imposible
+distinguir "no hubo cache hit" de "este provider no reporta el dato" — dos
+situaciones con implicaciones de costo opuestas. `thinkingTokens` conserva su
+gate `> 0`.
+
+**Read y write NO se colapsan en un solo número.** Anthropic cobra ~10% del
+input rate por un cache read y ~125% por un cache write: un factor de más de
+10x entre ambos. Un campo único de "cache" no sería facturable.
+
+### Semántica de `promptTokens`: normalizada, sin restas del consumidor
+
+Las tres APIs discrepan en si los tokens cacheados cuentan dentro del input:
+
+| Provider | Campo crudo de la API | ¿El cache está dentro del input? |
+|---|---|---|
+| **Anthropic** | `input_tokens` | **No** — disjunto de `cache_read_input_tokens` y `cache_creation_input_tokens` |
+| **OpenAI** | `prompt_tokens` | **Sí** — `prompt_tokens_details.cached_tokens` es un subconjunto |
+| **Gemini** | `promptTokenCount` | **Sí** — `cachedContentTokenCount` es un subconjunto |
+
+**Colmena normaliza esto en el adapter**, que es el único lugar donde se conoce
+la semántica del provider. Los adapters de OpenAI y Gemini restan el cache del
+prompt; el de Anthropic lo deja intacto porque ya viene neto. El resultado es
+que `promptTokens` significa **siempre lo mismo — input fresco** — y por lo tanto:
+
+```
+promptTokens + cacheReadTokens + cacheWriteTokens  =  input real del turno
+```
+
+Esa identidad se sostiene en los tres providers, así que el agregado run-level
+sigue siendo sumable incluso cuando un grafo mezcla providers.
+
+> **Verificado en vivo contra las tres APIs reales el 2026-08-23**, no inferido
+> de su documentación.
+>
+> **OpenAI** (`gpt-4o`) — la evidencia más limpia, dos corridas del mismo grafo:
+>
+> | | `prompt_tokens` | `cache_read_tokens` | `total_tokens` |
+> |---|---|---|---|
+> | run 1 (sin cache) | 2550 | 0 | 2554 |
+> | run 2 (cache hit) | **118** | **2432** | 2554 |
+>
+> `118 + 2432 = 2550`, exactamente el prompt de run 1, y el total no se mueve: el
+> mismo trabajo, redistribuido entre la columna cara y la barata.
+>
+> **Gemini** — en un cache hit (`cache_read_tokens: 8820`) el `promptTokenCount`
+> **no cayó** respecto al turno anterior sin hit (9235 → 9259), lo que prueba que
+> el cache va adentro.
+>
+> **Anthropic** — `prompt_tokens: 404` con `cache_read_tokens: 1809`: imposible
+> si estuviera adentro.
 
 **Cómo calcular costo real (ejemplo Anthropic):**
 
 ```
-costo_input  = (promptTokens − cacheReadTokens) × rate_full_input
-             + cacheReadTokens × rate_full_input × 0.10
-             + cacheWriteTokens × rate_full_input × 1.25      (una vez)
-costo_output = completionTokens × rate_output
+costo_input  = promptTokens      × rate_full_input           ← YA es input fresco
+             + cacheReadTokens   × rate_full_input × 0.10
+             + cacheWriteTokens  × rate_full_input × 1.25    (una vez)
+costo_output = completionTokens  × rate_output
 costo_total  = costo_input + costo_output
 ```
+
+> ⚠️ **No restes `cacheReadTokens` de `promptTokens`.** Esta guía documentó
+> `(promptTokens − cacheReadTokens)` hasta el 2026-08-23; con la normalización
+> vigente eso resta el cache dos veces. Con los números reales medidos arriba
+> daba `404 − 1809 = −1405`, es decir un costo de input **negativo**.
 
 (Rates exactos: ver pricing del provider; Anthropic cobra ~10% para cache
 reads y ~125% para cache writes, balance neto positivo si hay ≥2 hits.)
@@ -960,6 +1016,6 @@ y el SSE lo está propagando correctamente.
 
 ---
 
-**Versión:** 1.2  
-**Fecha:** 2026-06-09  
+**Versión:** 1.3  
+**Fecha:** 2026-08-23  
 **Status:** ✅ Completo

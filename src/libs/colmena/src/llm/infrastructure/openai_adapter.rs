@@ -643,7 +643,7 @@ fn openai_usage_to_llm_usage(u: OpenAiUsage) -> LlmUsage {
         usage = usage.with_thinking_tokens(r.reasoning_tokens);
     }
     if let Some(p) = u.prompt_tokens_details.filter(|d| d.cached_tokens > 0) {
-        usage = usage.with_cache_read_tokens(p.cached_tokens);
+        usage = usage.with_cached_input_tokens_included(p.cached_tokens);
     }
     usage
 }
@@ -927,7 +927,20 @@ impl OpenAiAdapter {
                 usage.get("input_tokens").and_then(|v| v.as_u64()),
                 usage.get("output_tokens").and_then(|v| v.as_u64()),
             ) {
-                usage_obj = Some(LlmUsage::new(input as u32, output as u32));
+                let mut u = LlmUsage::new(input as u32, output as u32);
+                // Responses API reports cache hits under `input_tokens_details`
+                // (the Chat Completions equivalent is `prompt_tokens_details`).
+                // Like Chat Completions, the cached count is a SUBSET of
+                // `input_tokens`, so normalize rather than add.
+                if let Some(c) = usage
+                    .get("input_tokens_details")
+                    .and_then(|d| d.get("cached_tokens"))
+                    .and_then(|v| v.as_u64())
+                    .filter(|&n| n > 0)
+                {
+                    u = u.with_cached_input_tokens_included(c as u32);
+                }
+                usage_obj = Some(u);
             }
         }
 
@@ -1011,12 +1024,21 @@ impl OpenAiAdapter {
                                     usage.get("input_tokens").and_then(|v| v.as_u64()),
                                     usage.get("output_tokens").and_then(|v| v.as_u64()),
                                 ) {
+                                    let mut u = LlmUsage::new(
+                                        input_tokens as u32,
+                                        output_tokens as u32,
+                                    );
+                                    if let Some(c) = usage
+                                        .get("input_tokens_details")
+                                        .and_then(|d| d.get("cached_tokens"))
+                                        .and_then(|v| v.as_u64())
+                                        .filter(|&n| n > 0)
+                                    {
+                                        u = u.with_cached_input_tokens_included(c as u32);
+                                    }
                                     yield Ok(LlmStreamChunk::new(
                                         request_id.clone(),
-                                        LlmStreamPart::Usage(LlmUsage::new(
-                                            input_tokens as u32,
-                                            output_tokens as u32,
-                                        )),
+                                        LlmStreamPart::Usage(u),
                                         provider.clone(),
                                         false,
                                     ));

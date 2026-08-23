@@ -478,7 +478,7 @@ impl LlmRepository for GeminiAdapter {
                 usage = usage.with_thinking_tokens(t);
             }
             if let Some(c) = u.cached_content_token_count.filter(|&n| n > 0) {
-                usage = usage.with_cache_read_tokens(c);
+                usage = usage.with_cached_input_tokens_included(c);
             }
             usage
         });
@@ -678,7 +678,7 @@ impl LlmRepository for GeminiAdapter {
                         usage = usage.with_thinking_tokens(t);
                     }
                     if let Some(c) = u.cached_content_token_count.filter(|&n| n > 0) {
-                        usage = usage.with_cache_read_tokens(c);
+                        usage = usage.with_cached_input_tokens_included(c);
                     }
                     latest_usage = Some(usage);
                 }
@@ -1237,11 +1237,59 @@ mod tests {
             usage = usage.with_thinking_tokens(t);
         }
         if let Some(c) = parsed.cached_content_token_count.filter(|&n| n > 0) {
-            usage = usage.with_cache_read_tokens(c);
+            usage = usage.with_cached_input_tokens_included(c);
         }
         assert_eq!(usage.cache_read_tokens, Some(1200));
         assert_eq!(usage.thinking_tokens, Some(50));
-        assert_eq!(usage.prompt_tokens, 1500);
+        // Gemini folds the cached count INTO `promptTokenCount`, so the adapter
+        // subtracts it: 1500 reported - 1200 cached = 300 billed as fresh input.
+        // Verified live 2026-08-23 — on a cache hit `promptTokenCount` did not
+        // drop, proving the cached tokens are counted inside it.
+        assert_eq!(
+            usage.prompt_tokens, 300,
+            "prompt_tokens must hold only fresh input, net of the cache hit"
+        );
+        // No token is lost or double-counted by the normalization.
+        assert_eq!(usage.prompt_tokens + usage.cache_read_tokens.unwrap(), 1500);
+        // The total covers every token the turn touched, cache included.
+        assert_eq!(usage.total_tokens, 300 + 200 + 50 + 1200);
+    }
+
+    #[test]
+    fn cached_input_normalization_is_independent_of_builder_order() {
+        // `recompute_total` sums from scratch, so applying the cache before or
+        // after thinking must land on the same numbers. Guards against a future
+        // builder that recomputes from a partial subtotal.
+        let a = LlmUsage::new(1500, 200)
+            .with_thinking_tokens(50)
+            .with_cached_input_tokens_included(1200);
+        let b = LlmUsage::new(1500, 200)
+            .with_cached_input_tokens_included(1200)
+            .with_thinking_tokens(50);
+        assert_eq!(a, b);
+        assert_eq!(a.total_tokens, 1750);
+    }
+
+    #[test]
+    fn anthropic_style_disjoint_cache_is_added_not_subtracted() {
+        // The other half of the contract: Anthropic already reports input net of
+        // cache, so `with_cache_read_tokens` must leave `prompt_tokens` alone and
+        // only widen the total. Measured live: 404 fresh + 1809 cached = 2213.
+        let usage = LlmUsage::new(404, 8).with_cache_read_tokens(1809);
+        assert_eq!(
+            usage.prompt_tokens, 404,
+            "disjoint input must not be reduced"
+        );
+        assert_eq!(usage.total_tokens, 404 + 8 + 1809);
+    }
+
+    #[test]
+    fn cached_input_exceeding_prompt_saturates_at_zero() {
+        // Defensive: a provider reporting more cached than prompt tokens would
+        // wrap a u32 subtraction and bill an astronomical number.
+        let usage = LlmUsage::new(100, 10).with_cached_input_tokens_included(500);
+        assert_eq!(usage.prompt_tokens, 0);
+        assert_eq!(usage.cache_read_tokens, Some(500));
     }
 
     #[test]
@@ -1259,7 +1307,7 @@ mod tests {
             parsed.candidates_token_count.unwrap_or(0),
         );
         if let Some(c) = parsed.cached_content_token_count.filter(|&n| n > 0) {
-            usage = usage.with_cache_read_tokens(c);
+            usage = usage.with_cached_input_tokens_included(c);
         }
         assert_eq!(
             usage.cache_read_tokens, None,
@@ -1282,7 +1330,7 @@ mod tests {
             parsed.candidates_token_count.unwrap_or(0),
         );
         if let Some(c) = parsed.cached_content_token_count.filter(|&n| n > 0) {
-            usage = usage.with_cache_read_tokens(c);
+            usage = usage.with_cached_input_tokens_included(c);
         }
         assert_eq!(usage.cache_read_tokens, None);
     }
