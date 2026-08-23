@@ -17,7 +17,7 @@ stale rules. This is enforced, not suggested: a `PreToolUse` hook
 blocks `git push` and `gh pr create` when the outgoing diff touches repo files and
 no documentation.
 
-Before pushing, run this audit:
+Run this audit **before `review start`**, not merely before pushing:
 
 1. **Update docs in the same commit range as the code.**
 2. **Grep for stale references OUTSIDE the area you touched.** This is the step
@@ -49,6 +49,46 @@ Before pushing, run this audit:
    `docs/archive/` are exempt from the graph check — a plan there may name a
    graph that was proposed and never built. CI runs this on every PR to
    `develop`.
+
+**Ordering matters as much as content.** A review receipt is bound to the exact
+bytes of the candidate tree, and the review contract exposes no transition that
+refreshes that snapshot (`immutable_snapshot` is a mandatory feature, not a
+toggle). Documentation authored AFTER `review start` invalidates the receipt just
+as surely as a `cargo fmt` would, and the only legal recovery is a brand-new
+review: new lineage, new lens fan-out, new correction budget. In August 2026 that
+pattern burned 53 review lenses on roughly six changes, with four base commits
+each carrying three separate review starts. Follow this order:
+
+```
+implement → fix → docs → tests → cargo fmt → tests green → review start → finalize → commit
+```
+
+Never run `review start` mid-flight, with docs still pending.
+
+**Size the candidate before you freeze it.** Documentation counts toward the
+review tier exactly like code does, and docs run roughly 25-30% of a change in
+this repo — so a 300-line code change routinely lands at 450+ total and silently
+buys the 4-lens tier. Check the number first:
+
+```bash
+python3 scripts/review_size.py
+```
+
+It prints code/docs/total, the tier and lens count you will get, and the
+correction budget with its margin. Above 400 total lines a change that touches
+code jumps to 4 lenses (a pure-documentation change stays at one), and the
+correction budget saturates at 200 — so the larger the candidate,
+the *smaller* its proportional room to absorb findings before it escalates, and
+escalation has no reentry.
+
+**The reported tier is a floor, not a ceiling.** Size is only one input: gentle-ai
+also forces `high` on non-size signals such as a file gaining mode `100755`
+(`executable_mode`) or a file that spawns processes (`process_boundary`) — this
+very script trips both, and is `high` at 283 lines. The tool reports the signals
+it can detect and labels them, but it cannot see every rule the binary applies.
+Slicing does not lower a signal-forced tier. Use `--base-ref origin/develop` (after a `git fetch`) to size a whole branch — a stale local `develop` silently measures merged PRs too. When
+it reports `high`, slice the change with the `chained-pr` skill instead of paying
+for four lenses.
 
 If a change legitimately needs no docs (a revert, a CI-only fix, a security
 patch), retry the push with the `DOCS_EXEMPT=1` prefix. Deliberate and visible,
