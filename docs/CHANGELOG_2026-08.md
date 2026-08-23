@@ -446,3 +446,84 @@ pega contra una API paga y no puede correr en CI.
 **Estado.** done.
 
 ---
+
+## 7. Prompt caching roto al compactar — el resumen sale del prefijo cacheado
+
+**Qué cambió.** El `## Conversation summary` que produce `history_compaction` ya **no** se fusiona
+dentro del `system_message` del agente. Viaja como un mensaje `system` propio, detrás del estable:
+
+```
+[ User(prompt inicial), System(prompt estable), System(## Conversation summary), ...recientes ]
+```
+
+**El defecto.** El adapter de Anthropic pone el marker `cache_control` en el **primer** bloque
+`system`, así que el prefijo cacheado es `tools[] + system_blocks[0]`. El resumen se recomputa en
+cada carga del run y crece con la conversación; fusionado dentro de ese bloque, reescribía los bytes
+del breakpoint **en cada turno**. Efecto: apenas una conversación compactaba, el prompt entero del
+agente se re-escribía a la tarifa de cache-write (1.25×) turno tras turno y no se leía nunca de
+vuelta. No era degradación silenciosa de un ahorro: era gasto extra sobre el precio completo.
+
+**Dos cambios, ambos necesarios.**
+
+1. `history_compaction::build_compacted_messages` deja de mergear el resumen en el `system` previo.
+2. `LlmRequest::new` exime a `System` de `coalesce_consecutive_same_role`, igual que ya eximía a
+   `Tool`. **Sin esto el fix (1) es invisible**: el coalescer del dominio volvía a fusionar los dos
+   `system` antes de que el adapter viera nada, y la medición E2E no se movía ni un token. El
+   coalescer existe para normalizar la alternancia user/assistant que exigen los providers; los
+   `system` nunca participan de esa alternancia (Anthropic los iza a `system[]`, Gemini a
+   `systemInstruction`, OpenAI acepta consecutivos).
+
+**Medición E2E contra Anthropic real** — `tests/graphs/agents/prompt_cache_compaction_measure.json`,
+Sonnet 5, 5 turnos sobre el mismo `--agent-session-id`, prefijo estable de 3029 tokens:
+
+| Turno | Antes — write / read | Después — write / read |
+|---|---|---|
+| 1 | 3029 / 3029 | 3029 / 3029 |
+| 2 | 3457 / 3457 | **0** / 6058 |
+| 3 | 3829 / 3829 | **0** / 3029 |
+| 4 | 4260 / 4260 | **0** / 3029 |
+| 5 | 4684 / **0** | **0** / 3029 |
+
+Antes, `cache_creation_input_tokens` crecía exactamente al ritmo del resumen (3029 → 4684) y se
+pagaba entero en cada turno. Después, la escritura desaparece a partir del turno 1, la lectura se
+estabiliza en el tamaño del prefijo estable, y el resumen viaja como input normal (visible en el
+`promptTokens` creciente). Los turnos con lectura duplicada (6058) son runs de dos iteraciones del
+loop ReAct: las dos aciertan.
+
+**Cómo se aisló.** La medición sola no bastaba: tras el fix (1) la escritura seguía creciendo. Una
+sonda directa contra la Messages API — mismo shape que el request real, con `tools[]` marcado y tres
+bloques `system` — confirmó que el marker en el bloque 0 **sí** aísla el prefijo (el bloque 1 podía
+cambiar y crecer sin perder el `cache_read`). Eso descartó al adapter y a la API, y dejó al
+coalescer del dominio como único candidato: el dump de `COLMENA_DUMP_PROMPT_SIZES` mostraba dos
+`system`, pero `LlmRequest::new` los fusionaba después del dump.
+
+**Alcance.** OpenAI gana por el mismo motivo (su prefix-cache automático deja de moverse). Gemini no
+cambia: une todos los `system` en un `systemInstruction`, así que su wire format es idéntico.
+Ninguna API pública cambia → ADP no se ve afectado.
+
+**Documentación de referencia.**
+- [§15 — Memory guide, "Dónde termina el resumen"](developer_guide/15_memory_guide.md)
+- [§14 — LLM deep dive, "Más de un mensaje `system` en el request"](developer_guide/14_llm_deep_dive.md)
+
+**Verificación.**
+
+```bash
+set -a; source .env; set +a
+export ANTHROPIC_BASE_URL="https://api.anthropic.com/v1"
+for t in 1 2 3 4 5; do
+  cargo run --bin dag_engine -- run \
+    tests/graphs/agents/prompt_cache_compaction_measure.json \
+    --agent-session-id pc_measure_001
+done
+```
+
+Leer `cacheWriteTokens` / `cacheReadTokens` del frame `finish` de cada corrida. Manual a propósito:
+pega contra una API paga y no puede correr en CI. Los guards que **sí** corren en CI son
+`summary_never_merges_into_the_agent_system_prompt`,
+`the_cached_system_prefix_does_not_move_as_the_conversation_grows` (history_compaction) y
+`consecutive_system_messages_are_not_coalesced` / `a_request_with_two_system_messages_is_valid`
+(llm_request).
+
+**Estado.** done.
+
+---
