@@ -4,19 +4,36 @@ use crate::llm::domain::{
 };
 use serde::{Deserialize, Serialize};
 
-/// Merge adjacent messages that share the same role — EXCEPT `Tool`, where
-/// consecutive entries are legitimate (parallel tool results keyed by distinct
-/// `tool_call_id`). Providers require strictly alternating user/assistant
-/// turns; a turn that fails after persisting the user message leaves a dangling
-/// `user` row that would otherwise make every later turn fail at
-/// `LlmRequest::new`. Coalescing normalizes the wire shape and self-heals such
-/// conversations. Pure; never touches persistence (recall_history keeps the
-/// originals verbatim).
+/// Merge adjacent messages that share the same role — EXCEPT `Tool` and
+/// `System`, where consecutive entries are legitimate.
+///
+/// Providers require strictly alternating user/assistant turns; a turn that
+/// fails after persisting the user message leaves a dangling `user` row that
+/// would otherwise make every later turn fail at `LlmRequest::new`. Coalescing
+/// normalizes the wire shape and self-heals such conversations. Pure; never
+/// touches persistence (recall_history keeps the originals verbatim).
+///
+/// The two exemptions:
+///
+/// * `Tool` — parallel tool results are keyed by distinct `tool_call_id`, so
+///   merging them would destroy the pairing with their `tool_use` blocks.
+/// * `System` — System messages are never part of the user/assistant
+///   alternation any provider enforces: Anthropic hoists them into `system[]`
+///   content blocks, Gemini joins them into `system_instruction`, and OpenAI
+///   accepts consecutive `system` entries as-is. Merging them WAS actively
+///   harmful: `history_compaction` emits the volatile conversation summary as
+///   its own System message precisely so it stays out of the Anthropic
+///   prompt-cache breakpoint, which sits on the FIRST system block. Coalescing
+///   folded that summary back into the agent's stable prompt and moved the
+///   cached prefix on every turn — measured as a full cache re-write per turn
+///   (3029 → 4684 tokens over five turns) with zero cache reads.
 pub fn coalesce_consecutive_same_role(messages: Vec<LlmMessage>) -> Vec<LlmMessage> {
     let mut out: Vec<LlmMessage> = Vec::with_capacity(messages.len());
     for msg in messages {
         let mergeable = matches!(out.last(), Some(last)
-            if last.role() == msg.role() && *msg.role() != MessageRole::Tool);
+            if last.role() == msg.role()
+                && *msg.role() != MessageRole::Tool
+                && *msg.role() != MessageRole::System);
         if mergeable {
             let prev = out.pop().expect("checked non-empty");
             out.push(merge_same_role(prev, msg));
@@ -105,15 +122,20 @@ impl LlmRequest {
             return Err(LlmError::EmptyMessages);
         }
 
-        // Defensive: after coalescing only consecutive Tool messages can remain
-        // (allowed for parallel tool calls).
+        // Defensive: after coalescing only consecutive Tool and System messages
+        // can remain — both are deliberate exemptions above.
         for i in 1..messages.len() {
             let prev_msg = &messages[i - 1];
             let current_msg = &messages[i];
 
             if prev_msg.role() == current_msg.role() {
-                // Allow consecutive Tool messages (for parallel tool calls)
-                if *current_msg.role() == crate::llm::domain::MessageRole::Tool {
+                // Allow consecutive Tool messages (parallel tool calls) and
+                // consecutive System messages (stable prompt + volatile
+                // compaction summary, kept apart for prompt caching).
+                if matches!(
+                    current_msg.role(),
+                    crate::llm::domain::MessageRole::Tool | crate::llm::domain::MessageRole::System
+                ) {
                     continue;
                 }
 
@@ -391,5 +413,61 @@ mod tests {
         let request = LlmRequest::new(messages, config, false).unwrap();
         // Parallel tool results stay separate: user + tool + tool = 3.
         assert_eq!(request.message_count(), 3);
+    }
+
+    // ── System messages survive coalescing (prompt caching) ──────────────
+    //
+    // `history_compaction` deliberately emits the volatile conversation summary
+    // as a System message of its own so it lands OUTSIDE the Anthropic cache
+    // breakpoint, which sits on the first system block. Coalescing the two back
+    // together moved the cached prefix on every turn.
+
+    #[test]
+    fn consecutive_system_messages_are_not_coalesced() {
+        let msgs = vec![
+            LlmMessage::user("hola".to_string()).unwrap(),
+            LlmMessage::system("STABLE AGENT PROMPT".to_string()).unwrap(),
+            LlmMessage::system("## Conversation summary (older turns)".to_string()).unwrap(),
+            LlmMessage::user("y ahora?".to_string()).unwrap(),
+        ];
+        let out = coalesce_consecutive_same_role(msgs);
+
+        assert_eq!(out.len(), 4, "no message may be merged away");
+        assert_eq!(out[1].content(), "STABLE AGENT PROMPT");
+        assert_eq!(out[2].content(), "## Conversation summary (older turns)");
+    }
+
+    #[test]
+    fn a_request_with_two_system_messages_is_valid() {
+        let request = LlmRequest::new(
+            vec![
+                LlmMessage::user("hola".to_string()).unwrap(),
+                LlmMessage::system("STABLE AGENT PROMPT".to_string()).unwrap(),
+                LlmMessage::system("## Conversation summary (older turns)".to_string()).unwrap(),
+                LlmMessage::user("y ahora?".to_string()).unwrap(),
+            ],
+            create_test_config(),
+            false,
+        )
+        .expect("consecutive System messages must not be rejected");
+
+        let systems = request
+            .messages()
+            .iter()
+            .filter(|m| m.role() == &MessageRole::System)
+            .count();
+        assert_eq!(systems, 2, "both System messages must reach the adapter");
+    }
+
+    #[test]
+    fn consecutive_user_messages_still_coalesce() {
+        // Regression guard: the System exemption must not weaken the
+        // self-healing merge that alternating-role providers depend on.
+        let out = coalesce_consecutive_same_role(vec![
+            LlmMessage::user("dangling".to_string()).unwrap(),
+            LlmMessage::user("nueva pregunta".to_string()).unwrap(),
+        ]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].content(), "dangling\n\nnueva pregunta");
     }
 }
