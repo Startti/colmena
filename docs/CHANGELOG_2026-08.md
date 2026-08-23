@@ -296,3 +296,83 @@ el plan de referencia, abajo).
 cambio.
 
 ---
+
+## 5. Tool calls huérfanas cuando un `suspend` corta un batch paralelo
+
+**Qué cambió.** Cuando un `llm_call` emite **varias tool calls en un mismo turno**
+(batch paralelo) y una de ellas se suspende para preguntarle al humano, las
+llamadas ordenadas *después* de la que suspendió ya no quedan sin resultado: cada
+una recibe un marcador honesto que dice, en texto que lee el modelo, que **no se
+ejecutó**.
+
+**El defecto.** El branch `SUSPENDED` de `agent_service.rs` hace `return` desde el
+medio del `for tool_call in tool_calls`, así que las llamadas restantes nunca se
+ejecutan. Pero el mensaje del asistente —persistido *antes* del loop— ya declaró
+los N ids. En el resume, `find_pending_tool_call` reproduce **solo el primer** id
+sin resolver, y el resto queda huérfano para siempre.
+
+Anthropic y OpenAI validan el emparejamiento: un turno de asistente que declara un
+id sin su resultado es un **400 duro**, no una respuesta degradada. La
+conversación queda inutilizable de forma permanente:
+
+```
+messages.2: `tool_use` ids were found without `tool_result` blocks immediately
+after: toolu_01A7MjfvpYUMQdtCzZGq7GJZ. Each `tool_use` block must have a
+corresponding `tool_result` block in the next message.
+```
+
+El 400 de Anthropic está **verificado en vivo** contra la API real. OpenAI impone la
+misma regla de emparejamiento por contrato de API, pero eso **no se re-verificó
+empíricamente aquí** (la key de prueba no tenía crédito). Gemini es permisivo y
+enmascara el fallo, por eso no se veía en los grafos que usan el stack por defecto. La población expuesta son los agentes HITL sobre Anthropic u
+OpenAI — y como la forma de agente documentada en Colmena canaliza *toda* la
+interacción con el usuario por nodos `suspend`, no es un caso de borde exótico.
+
+Es un defecto **preexistente**. No lo introdujo ni lo agravó el cambio de borde de
+compactación (PR #174 / `claude/interaction-boundary`): bajo el pair-guard anterior
+la llamada huérfana viajaba por el cable exactamente igual.
+
+**Por qué se eligió el marcador y no ejecutar las llamadas restantes.** Ejecutar
+las que faltan antes de devolver `SUSPENDED` invierte la garantía que el `suspend`
+existe para imponer. Un batch como `[preguntar("¿borro la base de producción?"),
+borrar_base()]` ejecutaría el borrado **antes** de que el humano conteste. La otra
+alternativa —resolver todas las pendientes en el resume— tiene el mismo problema
+corrido en el tiempo: los efectos secundarios se disparan igual, ahora en diferido,
+y el modelo nunca tiene ocasión de reconsiderar a la luz de la respuesta.
+
+El marcador no ejecuta nada. Le dice la verdad al modelo y le devuelve la decisión:
+si después de leer la respuesta del humano todavía quiere esa llamada, la vuelve a
+emitir. El costo es, como mucho, un turno extra.
+
+El id **que suspendió** se deja deliberadamente abierto: el resume lo localiza
+precisamente por esa ausencia de resultado.
+
+**Sesiones ya rotas.** El arreglo principal no puede rescatar una conversación que
+un build anterior ya dejó con un id huérfano —el historial está escrito—, y esa
+conversación devuelve 400 en cada turno siguiente para siempre. Por eso el camino
+de resume en `llm.rs` cierra también, con el mismo marcador, cualquier id que
+encuentre sin resolver junto al que acaba de reproducir. Sobre un historial escrito
+por el build actual ese barrido no encuentra nada: cuesta un escaneo y cero
+escrituras.
+
+**Sin cambios de formato de wire.** No se agregan eventos SSE: la llamada que nunca
+se ejecutó tampoco había emitido `tool-input-available`, así que ningún frontend
+tenía un spinner colgado esperándola. El cambio vive enteramente en el historial de
+conversación → **ADP no se ve afectado**.
+
+**Verificación.** Reproducido en vivo contra Anthropic real antes de tocar nada, con
+[`tests/graphs/agents/parallel_tool_suspend_orphan.json`](../tests/graphs/agents/parallel_tool_suspend_orphan.json).
+Dos hallazgos empíricos que conviene no re-descubrir:
+
+- El **orden** del batch lo elige el modelo, no el prompt. Pidiéndole explícitamente
+  que pusiera el `suspend` primero, Claude lo puso último — que es justo el caso
+  benigno. El repro determinista son **dos tools respaldadas por `suspend`** en el
+  mismo batch: la que se ejecute primero deja huérfana a la otra, salga en el orden
+  que salga.
+- Anthropic **no exige que el orden de los `tool_result` coincida** con el de los
+  `tool_use` declarados; solo exige que estén todos. Verificado en vivo: declarado
+  `[ask_email, ask_city]`, enviado `[ask_city, ask_email]` → 200.
+
+**Estado.** done.
+
+---

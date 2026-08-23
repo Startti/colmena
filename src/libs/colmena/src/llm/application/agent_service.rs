@@ -21,6 +21,18 @@ const DISCOVERY_TOOL_NAMES: &[&str] = &["load_skill", "describe_tool"];
 /// signature is repeated (loop guard). The prior result is prepended to this.
 const REPEAT_NUDGE_TEXT: &str = include_str!("../../../text/prompts/agent_loop/repeat_nudge.md");
 
+/// LLM-facing text persisted as the tool result of every call in a parallel
+/// batch that was left un-executed because an earlier call in the same batch
+/// suspended for human input.
+///
+/// Both Anthropic and OpenAI reject an assistant turn that declares a
+/// `tool_use` / `tool_calls` id without a matching result, so these ids cannot
+/// simply be left open. The text is deliberately honest: it tells the model the
+/// call did NOT run and no side effect happened, so it can re-issue it if it
+/// still wants it.
+pub(crate) const NOT_EXECUTED_ON_SUSPEND_TEXT: &str =
+    include_str!("../../../text/prompts/agent_loop/not_executed_on_suspend.md");
+
 /// LLM-facing instruction for the forced final synthesis ("rescue"). Appended
 /// as a user message before the terminal, tool-less LLM call.
 const RESCUE_SYNTHESIS_TEXT: &str =
@@ -46,6 +58,43 @@ pub trait LoadAttachmentResolver: Send + Sync {
         agent_session_id: &str,
         document_id: &str,
     ) -> Result<Option<FileData>, String>;
+}
+
+/// Ids declared by the most recent assistant `tool_calls` message that still
+/// have no `Tool` result in `messages`, excluding `skip_id`.
+///
+/// Used to close out a parallel tool batch that a suspend cut short. Both
+/// providers that validate tool pairing (Anthropic, OpenAI) reject an assistant
+/// turn whose declared ids are not all answered, so any id left open here would
+/// make every subsequent request in that conversation fail with a 400.
+///
+/// `skip_id` is the suspending call itself: it must stay unresolved, because the
+/// resume path (`find_pending_tool_call`) locates it precisely by its missing
+/// result.
+///
+/// Order is preserved and ids are de-duplicated.
+pub fn unresolved_sibling_ids(messages: &[LlmMessage], skip_id: &str) -> Vec<String> {
+    let resolved: std::collections::HashSet<&str> = messages
+        .iter()
+        .filter(|m| m.role() == &MessageRole::Tool)
+        .filter_map(|m| m.tool_call_id())
+        .collect();
+
+    let latest_batch = messages
+        .iter()
+        .rev()
+        .filter(|m| m.role() == &MessageRole::Assistant)
+        .find_map(|m| m.tool_calls());
+
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    latest_batch
+        .into_iter()
+        .flatten()
+        .filter(|c| c.id != skip_id)
+        .filter(|c| !resolved.contains(c.id.as_str()))
+        .filter(|c| seen.insert(c.id.as_str()))
+        .map(|c| c.id.clone())
+        .collect()
 }
 
 /// Parameters for running the agent
@@ -493,6 +542,39 @@ impl AgentService {
                                 tool_call_id = %result.tool_call_id,
                                 "agent_service: SUSPENDED detected in tool result, short-circuiting agent loop"
                             );
+
+                            // The model may have asked for several tools in this
+                            // one turn. The suspend returns from the middle of
+                            // that batch, so every call ordered after it never
+                            // runs — deliberately: executing a side-effecting
+                            // call before the human answers would defeat the
+                            // gate the suspend exists to impose.
+                            //
+                            // Those ids are already persisted inside the
+                            // assistant message (step B), and an id without a
+                            // result is a hard 400 on Anthropic and OpenAI. So
+                            // close each one with an honest marker saying it did
+                            // not run. The suspending id is deliberately left
+                            // open — the resume path finds it by that absence.
+                            for orphan_id in unresolved_sibling_ids(&messages, &result.tool_call_id)
+                            {
+                                tracing::warn!(
+                                    target: "colmena::agent",
+                                    tool_call_id = %orphan_id,
+                                    suspended_by = %result.tool_call_id,
+                                    "agent_service: tool call left un-executed by a suspend in the \
+                                     same batch; closing it with a not-executed marker"
+                                );
+                                let marker = LlmMessage::tool(
+                                    orphan_id,
+                                    NOT_EXECUTED_ON_SUSPEND_TEXT.to_string(),
+                                )?;
+                                messages.push(marker.clone());
+                                self.conversation_repository
+                                    .add_message(session_id, marker)
+                                    .await?;
+                            }
+
                             let questions = parsed
                                 .get("questions")
                                 .cloned()
@@ -1073,6 +1155,68 @@ mod tests {
         });
 
         (mock, state)
+    }
+
+    // ── unresolved_sibling_ids (parallel-batch suspend orphan fix) ───────────
+
+    fn asst_with_calls(ids: &[&str]) -> LlmMessage {
+        let calls = ids
+            .iter()
+            .map(|id| ToolCall {
+                id: (*id).to_string(),
+                call_type: "function".to_string(),
+                function: FunctionCall {
+                    name: "t".to_string(),
+                    arguments: "{}".to_string(),
+                },
+                response: None,
+                provider_signature: None,
+            })
+            .collect();
+        LlmMessage::assistant_with_tool_calls(String::new(), calls).unwrap()
+    }
+
+    #[test]
+    fn unresolved_siblings_excludes_the_suspending_call_and_resolved_ones() {
+        let messages = vec![
+            asst_with_calls(&["a", "b", "c"]),
+            LlmMessage::tool("a".to_string(), "done".to_string()).unwrap(),
+        ];
+        // `b` suspended; `a` already has a result; only `c` never ran.
+        assert_eq!(
+            unresolved_sibling_ids(&messages, "b"),
+            vec!["c".to_string()]
+        );
+    }
+
+    #[test]
+    fn unresolved_siblings_is_empty_when_the_batch_is_fully_answered() {
+        let messages = vec![
+            asst_with_calls(&["a", "b"]),
+            LlmMessage::tool("a".to_string(), "done".to_string()).unwrap(),
+        ];
+        assert!(unresolved_sibling_ids(&messages, "b").is_empty());
+    }
+
+    #[test]
+    fn unresolved_siblings_only_looks_at_the_latest_batch() {
+        // An older turn is fully resolved; the newest turn is the one that matters.
+        let messages = vec![
+            asst_with_calls(&["old1", "old2"]),
+            LlmMessage::tool("old1".to_string(), "x".to_string()).unwrap(),
+            LlmMessage::tool("old2".to_string(), "x".to_string()).unwrap(),
+            asst_with_calls(&["new1", "new2"]),
+        ];
+        assert_eq!(
+            unresolved_sibling_ids(&messages, "new1"),
+            vec!["new2".to_string()]
+        );
+    }
+
+    #[test]
+    fn unresolved_siblings_handles_a_history_with_no_tool_calls() {
+        let messages = vec![LlmMessage::user("hi".to_string()).unwrap()];
+        assert!(unresolved_sibling_ids(&messages, "whatever").is_empty());
     }
 
     // ── Cache-safe temporal strip-on-load (2026-06-11) ──────────────────────
@@ -2255,6 +2399,235 @@ mod tests {
 
         // Only user + assistant(tool_calls) persisted — tool result NOT saved.
         assert_eq!(conv_state.lock().unwrap().len(), 2);
+    }
+
+    /// REGRESSION — parallel tool batch + suspend.
+    ///
+    /// When the model emits several tool calls in ONE assistant turn and one of
+    /// them suspends, every call *after* the suspending one is never executed.
+    /// Its id is still declared in the persisted assistant message, so Anthropic
+    /// and OpenAI reject the next request ("`tool_use` ids were found without
+    /// `tool_result` blocks"). The agent service must close those ids with an
+    /// honest "not executed" marker before short-circuiting.
+    #[tokio::test]
+    async fn suspend_closes_tool_calls_left_unexecuted_in_the_same_batch() {
+        let mut mock_llm = MockLlmRepo::new();
+        let mut mock_tool_exec = MockToolExec::new();
+
+        let key = test_key();
+        let (mock_conv, conv_state) = stateful_conv_mock(vec![]);
+
+        // One assistant turn carrying THREE tool calls; the FIRST suspends.
+        mock_llm.expect_call().times(1).returning(|_| {
+            let mk = |id: &str, name: &str| ToolCall {
+                id: id.to_string(),
+                call_type: "function".to_string(),
+                function: FunctionCall {
+                    name: name.to_string(),
+                    arguments: "{}".to_string(),
+                },
+                response: None,
+                provider_signature: None,
+            };
+            Ok(LlmResponse::new(
+                LlmRequestId::from_string("req-batch".to_string()).unwrap(),
+                "".to_string(),
+                LlmProvider::new(
+                    ProviderKind::Anthropic,
+                    "key".to_string(),
+                    Some("claude-sonnet-4-6".to_string()),
+                )
+                .unwrap(),
+            )
+            .unwrap()
+            .with_tool_calls(vec![
+                mk("call_suspend", "ask_user"),
+                mk("call_b", "get_time"),
+                mk("call_c", "add_numbers"),
+            ]))
+        });
+
+        // Only the first call ever reaches the executor.
+        mock_tool_exec.expect_execute().times(1).returning(|call| {
+            assert_eq!(call.id, "call_suspend", "only the first call may execute");
+            Ok(ToolResult {
+                tool_call_id: call.id.clone(),
+                success: true,
+                output:
+                    r#"{"__colmena_status":"SUSPENDED","questions":[{"id":"q1","question":"x?","type":"open"}]}"#
+                        .to_string(),
+                error: None,
+            })
+        });
+
+        let service = AgentService::new(Arc::new(mock_llm), Arc::new(mock_conv));
+
+        let response = service
+            .run(AgentRunParams {
+                session_id: &key,
+                prompt: Some("hello".to_string()),
+                messages: None,
+                config: create_config(),
+                tools: vec![],
+                tool_executor: &mock_tool_exec,
+                max_tool_repeats: None,
+                max_turns: None,
+                on_token: None,
+                tools_provider: None,
+                attachment_resolver: None,
+                agent_session_id: None,
+                lazy_catalog_names: None,
+            })
+            .await
+            .expect("run must succeed");
+
+        // The suspend itself is unchanged.
+        let suspend = response.suspend().expect("must carry suspend info");
+        assert_eq!(suspend.tool_call_id, "call_suspend");
+
+        let persisted = conv_state.lock().unwrap().clone();
+
+        // The SUSPENDING id must stay unresolved — the resume path finds it by
+        // walking for the first tool_call with no Tool message.
+        let resolved: Vec<&str> = persisted
+            .iter()
+            .filter(|m| m.role() == &MessageRole::Tool)
+            .filter_map(|m| m.tool_call_id())
+            .collect();
+        assert!(
+            !resolved.contains(&"call_suspend"),
+            "the suspending call must remain pending, got {resolved:?}"
+        );
+
+        // Every OTHER id in the batch must now have a Tool message.
+        assert!(
+            resolved.contains(&"call_b") && resolved.contains(&"call_c"),
+            "un-executed sibling calls must be closed, got {resolved:?}"
+        );
+
+        // ...and the marker must say, honestly, that they did not run.
+        for m in persisted.iter().filter(|m| m.role() == &MessageRole::Tool) {
+            assert_eq!(
+                m.content(),
+                // `LlmMessage::new` trims, so compare against the trimmed source.
+                NOT_EXECUTED_ON_SUSPEND_TEXT.trim(),
+                "marker text must come from the text registry"
+            );
+        }
+    }
+
+    /// REGRESSION — a call that ran BEFORE the suspend keeps its real result.
+    ///
+    /// Writing a marker over an already-answered id would put two `Tool`
+    /// messages on one `tool_call_id`, which is its own wire-level defect. Only
+    /// the calls that never ran may be closed.
+    #[tokio::test]
+    async fn suspend_preserves_results_of_calls_that_ran_before_it() {
+        let mut mock_llm = MockLlmRepo::new();
+        let mut mock_tool_exec = MockToolExec::new();
+
+        let key = test_key();
+        let (mock_conv, conv_state) = stateful_conv_mock(vec![]);
+
+        // Batch order: a real call, then the suspend, then a stranded call.
+        mock_llm.expect_call().times(1).returning(|_| {
+            let mk = |id: &str, name: &str| ToolCall {
+                id: id.to_string(),
+                call_type: "function".to_string(),
+                function: FunctionCall {
+                    name: name.to_string(),
+                    arguments: "{}".to_string(),
+                },
+                response: None,
+                provider_signature: None,
+            };
+            Ok(LlmResponse::new(
+                LlmRequestId::from_string("req-mixed".to_string()).unwrap(),
+                "".to_string(),
+                LlmProvider::new(
+                    ProviderKind::Anthropic,
+                    "key".to_string(),
+                    Some("claude-sonnet-4-6".to_string()),
+                )
+                .unwrap(),
+            )
+            .unwrap()
+            .with_tool_calls(vec![
+                mk("call_ran", "get_time"),
+                mk("call_suspend", "ask_user"),
+                mk("call_stranded", "add_numbers"),
+            ]))
+        });
+
+        // `call_ran` returns normally; `call_suspend` suspends; `call_stranded`
+        // must never reach the executor.
+        mock_tool_exec.expect_execute().times(2).returning(|call| {
+            let output = match call.id.as_str() {
+                "call_ran" => "2026-08-22T00:00:00Z".to_string(),
+                "call_suspend" => {
+                    r#"{"__colmena_status":"SUSPENDED","questions":[{"id":"q1","question":"x?","type":"open"}]}"#
+                        .to_string()
+                }
+                other => panic!("tool {other} must not execute after a suspend"),
+            };
+            Ok(ToolResult {
+                tool_call_id: call.id.clone(),
+                success: true,
+                output,
+                error: None,
+            })
+        });
+
+        let service = AgentService::new(Arc::new(mock_llm), Arc::new(mock_conv));
+
+        let response = service
+            .run(AgentRunParams {
+                session_id: &key,
+                prompt: Some("hello".to_string()),
+                messages: None,
+                config: create_config(),
+                tools: vec![],
+                tool_executor: &mock_tool_exec,
+                max_tool_repeats: None,
+                max_turns: None,
+                on_token: None,
+                tools_provider: None,
+                attachment_resolver: None,
+                agent_session_id: None,
+                lazy_catalog_names: None,
+            })
+            .await
+            .expect("run must succeed");
+
+        assert_eq!(
+            response.suspend().expect("must suspend").tool_call_id,
+            "call_suspend"
+        );
+
+        let persisted = conv_state.lock().unwrap().clone();
+        let tool_msgs: Vec<(&str, &str)> = persisted
+            .iter()
+            .filter(|m| m.role() == &MessageRole::Tool)
+            .map(|m| (m.tool_call_id().unwrap_or(""), m.content()))
+            .collect();
+
+        // Exactly one Tool message per id — no duplicate for `call_ran`.
+        assert_eq!(tool_msgs.len(), 2, "got {tool_msgs:?}");
+
+        let ran = tool_msgs
+            .iter()
+            .find(|(id, _)| *id == "call_ran")
+            .expect("the call that ran must keep a result");
+        assert_eq!(
+            ran.1, "2026-08-22T00:00:00Z",
+            "its real result must survive, not be overwritten by the marker"
+        );
+
+        let stranded = tool_msgs
+            .iter()
+            .find(|(id, _)| *id == "call_stranded")
+            .expect("the stranded call must be closed");
+        assert_eq!(stranded.1, NOT_EXECUTED_ON_SUSPEND_TEXT.trim());
     }
 
     #[tokio::test]

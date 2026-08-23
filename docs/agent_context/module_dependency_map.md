@@ -6,7 +6,7 @@
 **How to use (for the exploration/spec phase):** before opening files to assess a change, look up the target file below. **Used by** is its blast radius — the files that break if you change its public surface. **Depends on** is what it needs. Start by reading only those, not the whole repo.
 
 - Files indexed: **359**
-- Modules with at least one importer: **163**
+- Modules with at least one importer: **164**
 
 ## Blast-radius ranking (change these with the most care)
 
@@ -396,7 +396,7 @@
 #### `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm.rs`
 - Module: `dag_engine::infrastructure::nodes::llm`
 - **Used by (1)**: `src/libs/colmena/src/dag_engine/infrastructure/registry.rs`
-- Depends on (28): `crdt_documents`, `dag_engine::application::ports`, `dag_engine::domain::node`, `dag_engine::domain::observer`, `dag_engine::domain::tool_configuration`, `dag_engine::infrastructure::dag_tool_executor`, `dag_engine::infrastructure::nodes::llm_synthetic_tools`, `dag_engine::infrastructure::nodes::llm_synthetic_tools::attachment_run_python`, `dag_engine::infrastructure::nodes::llm_synthetic_tools::data_run_python`, `dag_engine::infrastructure::nodes::llm_synthetic_tools::sql_bulk_tools`, `dag_engine::infrastructure::pool_registry`, `documents::application`, `documents::domain::ids`, `llm::application`, `llm::application::attachment_catalog`, `llm::domain`, `llm::domain::attachments`, `llm::domain::tools`, `llm::infrastructure`, `llm::infrastructure::attachment_summary`, `llm::infrastructure::files`, `llm::infrastructure::files::signed_url_downloader`, `llm::infrastructure::persistence`, `llm::infrastructure::persistence::in_memory_conversation_repository`, `skills::domain`, `skills::infrastructure`, `storage::domain`, `storage::infrastructure`
+- Depends on (29): `crdt_documents`, `dag_engine::application::ports`, `dag_engine::domain::node`, `dag_engine::domain::observer`, `dag_engine::domain::tool_configuration`, `dag_engine::infrastructure::dag_tool_executor`, `dag_engine::infrastructure::nodes::llm_synthetic_tools`, `dag_engine::infrastructure::nodes::llm_synthetic_tools::attachment_run_python`, `dag_engine::infrastructure::nodes::llm_synthetic_tools::data_run_python`, `dag_engine::infrastructure::nodes::llm_synthetic_tools::sql_bulk_tools`, `dag_engine::infrastructure::pool_registry`, `documents::application`, `documents::domain::ids`, `llm::application`, `llm::application::agent_service`, `llm::application::attachment_catalog`, `llm::domain`, `llm::domain::attachments`, `llm::domain::tools`, `llm::infrastructure`, `llm::infrastructure::attachment_summary`, `llm::infrastructure::files`, `llm::infrastructure::files::signed_url_downloader`, `llm::infrastructure::persistence`, `llm::infrastructure::persistence::in_memory_conversation_repository`, `skills::domain`, `skills::infrastructure`, `storage::domain`, `storage::infrastructure`
 
 #### `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/attachment_run_python.rs`
 - Module: `dag_engine::infrastructure::nodes::llm_synthetic_tools::attachment_run_python`
@@ -1257,7 +1257,7 @@
 
 #### `src/libs/colmena/src/llm/application/agent_service.rs`
 - Module: `llm::application::agent_service`
-- **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
+- **Used by (1)**: `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm.rs`
 - Depends on (1): `llm::domain`
 
 #### `src/libs/colmena/src/llm/application/attachment_catalog.rs`

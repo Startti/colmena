@@ -12,6 +12,7 @@ Esta guía te ayudará a resolver los problemas más comunes al compilar, instal
 - [Problemas con Migraciones de Base de Datos](#-problemas-con-migraciones-de-base-de-datos)
 - [Problemas con Gemini Streaming y Tool Calling](#-problemas-con-gemini-streaming-y-tool-calling)
 - [Problemas con Secure Values en HTTP Tools](#-problemas-con-secure-values-en-http-tools)
+- [`tool_use` ids sin `tool_result` (agente HITL)](#-tool_use-ids-sin-tool_result-tras-reanudar-un-agente-hitl)
 - [Diagnóstico Avanzado](#diagnóstico-avanzado)
 - [Obtener Ayuda](#obtener-ayuda)
 
@@ -496,6 +497,34 @@ def call_with_retry(llm, messages, provider, api_key, max_retries=5):
 llm = colmena.ColmenaLlm()
 response = call_with_retry(llm, ["Test"], "openai", "tu-api-key")
 ```
+
+## 🔗 `tool_use` ids sin `tool_result` tras reanudar un agente HITL
+
+**Síntomas.** Un agente que se suspendió para preguntarle algo al usuario falla al
+reanudar, y **sigue fallando en cada turno posterior**: la conversación queda
+inutilizable.
+
+```
+Anthropic API error: messages.2: `tool_use` ids were found without `tool_result`
+blocks immediately after: toolu_01A7MjfvpYUMQdtCzZGq7GJZ. Each `tool_use` block
+must have a corresponding `tool_result` block in the next message.
+```
+
+OpenAI impone la misma regla de emparejamiento (el mensaje difiere). En **Gemini no
+aparece**: es permisivo y enmascara el problema, así que un agente que funciona sobre
+Gemini puede romperse al cambiar de proveedor sin tocar el grafo.
+
+**Causa.** El modelo pidió varias tools en un mismo turno y una de ellas suspendió.
+Las llamadas ordenadas después no se ejecutaron, pero sus ids ya estaban declarados
+en el mensaje del asistente. Un id declarado sin resultado es un 400 duro.
+
+**Solución.** Corregido el 2026-08-22: cada llamada que un `suspend` deja sin
+ejecutar recibe un marcador "no se ejecutó", y el camino de resume sanea además los
+historiales escritos por builds anteriores —basta con reanudar la conversación una
+vez más—. Si seguís viendo el error, estás corriendo un build previo a esa fecha.
+
+**Detalle completo y consecuencias de diseño:**
+[19_nested_agents_and_subgraphs.md → Suspensión dentro de un batch paralelo de tools](19_nested_agents_and_subgraphs.md#suspensión-dentro-de-un-batch-paralelo-de-tools).
 
 ## 🐌 Problemas de Performance
 
