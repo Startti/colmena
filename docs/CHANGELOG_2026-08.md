@@ -166,8 +166,11 @@ binario con el fix.
 
 **Documentación de referencia.**
 - Guía: [`docs/developer_guide/15_memory_guide.md`](developer_guide/15_memory_guide.md) §Compactación
-  → "Ventana de recientes cuando el mensaje más nuevo excede el presupuesto".
-- Código: `src/libs/colmena/src/llm/application/history_compaction.rs` — `recent_boundary_by_tokens`.
+  → "Dónde se corta el historial: la interacción abierta" (sección renombrada en §4 de este mismo
+  changelog: el borde pasó de presupuesto de tokens a estructural — el mecanismo descrito aquí abajo
+  ya no existe en el código).
+- Código (histórico — reemplazado en §4): `recent_boundary_by_tokens` ya no existe;
+  `src/libs/colmena/src/llm/application/history_compaction.rs` usa `current_interaction_start`.
 - Grafos E2E: [`history_compaction_oversized_prompt_turn1.json`](../tests/graphs/agents/history_compaction_oversized_prompt_turn1.json)
   + [`history_compaction_oversized_prompt_turn2.json`](../tests/graphs/agents/history_compaction_oversized_prompt_turn2.json)
   — se corren en ese orden con el mismo `--agent-session-id`, sin sembrar nada en la base.
@@ -196,5 +199,86 @@ binario con el fix.
    de reinicio.
 
 **Estado.** done. Fix + tests + E2E en vivo + documentación en el mismo cambio.
+
+---
+
+## 4. La frontera de compactación pasa de presupuesto de tokens a estructural — `current_interaction_start`
+
+**Qué cambió.** El fix de §3 clampaba el índice para que `recent_boundary_by_tokens` nunca panicara,
+pero dejaba en pie el defecto de fondo que ese mismo mecanismo tenía: decidir el borde por
+presupuesto acumulado (`RECENT_TOKEN_BUDGET` = ~2.500 tokens) no sabe qué mensajes pertenecen a la
+MISMA interacción que el más nuevo. Cuando esa interacción incluía un resultado de `tool`
+sobredimensionado, el borde podía aterrizar **entre** la pregunta que disparó la tool call y su
+resultado, resumiendo la pregunta mientras el resultado viajaba verbatim al lado — el propio modelo
+se quedaba sin ver qué había preguntado.
+
+Este cambio reemplaza el mecanismo entero por uno estructural: `current_interaction_start`
+(`history_compaction.rs`) escanea el historial hacia atrás y devuelve la posición justo después del
+**último `assistant` que respondió sin `tool_calls`** — la propia condición de salida del loop ReAct
+de `agent_service` (`agent_service.rs:353` `if tool_calls.is_empty()`, `return` en `:359` para
+`Some(vec![])`, `return` en `:676` para `None`). Un `assistant` persistido sin `tool_calls` es, por
+construcción, el cierre de una interacción; todo lo que viene después sigue en curso y viaja
+**verbatim, sin importar tamaño ni rol**. `RECENT_TOKEN_BUDGET`, `recent_boundary_by_tokens`,
+`est_tokens` y el guard de pares que compensaba su punto ciego (retroceder el borde sobre cada
+`tool` consecutivo) quedan eliminados — ya no hacen falta: el borde nuevo aterriza siempre en el
+primer mensaje de una interacción, que nunca puede ser un `Tool` huérfano de su `Assistant`.
+
+**El costo, dicho con honestidad (no es gratis).** No hay tope de tamaño en la interacción abierta.
+Antes, un mensaje sobredimensionado se acotaba a un solo turno de sobrecosto porque el borde por
+presupuesto lo empujaba a la zona resumida en el turno siguiente. Ahora, mientras la interacción
+siga abierta, **cada** resultado de `tool` grande que contenga viaja completo en **cada** llamada de
+ese turno — una interacción larga con varios resultados grandes puede empujar el request hacia el
+techo de contexto del proveedor. Es una decisión de diseño deliberada, no un descuido: resumir por
+presupuesto es exactamente el mecanismo que causaba el defecto de fondo. El mapa para acotar el peso
+de un resultado estructurado sobredimensionado sin resumir la pregunta que lo disparó queda para un
+cambio aparte (ver "What this plan does NOT do" en el plan de referencia, abajo).
+
+**Qué se midió.**
+- **`cargo test --verbose`**: 2.365 tests de la lib (2.294 passed, 71 ignored — requieren
+  `DATABASE_URL`/API keys, se corren aparte con `--ignored`, 0 failed), incluyendo **16 tests** en
+  `llm::application::history_compaction::tests` (todos pasan): la detección del borde
+  (`interaction_start_is_after_the_last_assistant_without_tool_calls`,
+  `interaction_start_uses_the_last_close_not_the_first`,
+  `an_assistant_with_an_empty_tool_call_vec_also_closes`,
+  `several_unanswered_user_messages_all_belong_to_the_open_interaction`,
+  `without_a_closed_interaction_everything_is_current`,
+  `a_closing_assistant_as_the_newest_message_leaves_nothing_open`), el caso que motivó este cambio
+  (`the_current_question_survives_next_to_an_oversized_tool_result`) y la ventana nunca vacía
+  (`recent_window_is_never_empty`, `a_closed_newest_interaction_still_leaves_a_recent_message`).
+  `cargo fmt --check` y `cargo clippy --all-targets` limpios (el crate corre con
+  `warnings = "deny"`).
+- **E2E en vivo** contra Gemini 2.5 Flash + Postgres real, dos corridas del CLI con el mismo
+  `--agent-session-id` y `COLMENA_DUMP_PROMPT_SIZES=1 COLMENA_DUMP_PROMPT_FULL=1` (el segundo env var
+  por sí solo no imprime nada — el dump completo está anidado dentro del chequeo del primero, un
+  detalle que no estaba documentado):
+  [`interaction_boundary_e2e_turn1.json`](../tests/graphs/agents/interaction_boundary_e2e_turn1.json)
+  + [`interaction_boundary_e2e_turn2.json`](../tests/graphs/agents/interaction_boundary_e2e_turn2.json).
+  El turno 1 pide un conteo (una tool call + respuesta final que **cierra** la interacción,
+  `finishReason: "stop"`, `"Hay 5 transacciones en total."`). El turno 2 pide el listado completo:
+  la tool `listar_transacciones` devuelve 300 filas (15.363 chars de JSON crudo). En el dump del
+  último iter del turno 2 (`n_msgs=5`), el wire queda `[user T1 (155ch, kept_first), System
+  fusionado con el resumen de T1 (996ch), user T2 (234ch, VERBATIM — la pregunta completa "Ahora
+  necesito el detalle completo de todas las transacciones…"), assistant+tool_calls T2 (309ch),
+  Tool T2 (17.892ch, VERBATIM — las 300 filas completas, sin digest ni truncar)]`. Ni la pregunta
+  del turno 2 ni el resultado de la tool aparecen como línea `[Tn]` dentro del bloque `## Conversation
+  summary`: ese bloque solo cubre los índices `keep_first..b` (el `tool` y el `assistant` de cierre
+  del turno 1), nunca los de la interacción abierta — la propia longitud del mensaje `System`
+  (996ch) es demasiado chica para contener los 17.892ch del resultado. `finishReason: "stop"` en
+  ambos turnos.
+
+**Documentación de referencia.**
+- Guía: [`docs/developer_guide/15_memory_guide.md`](developer_guide/15_memory_guide.md) §Compactación
+  → "Dónde se corta el historial: la interacción abierta".
+- Código: `src/libs/colmena/src/llm/application/history_compaction.rs` —
+  `current_interaction_start`, `build_compacted_messages`.
+- Plan de referencia:
+  [`docs/superpowers/plans/2026-08-22-interaction-boundary.md`](superpowers/plans/2026-08-22-interaction-boundary.md).
+- Grafos E2E:
+  [`interaction_boundary_e2e_turn1.json`](../tests/graphs/agents/interaction_boundary_e2e_turn1.json)
+  + [`interaction_boundary_e2e_turn2.json`](../tests/graphs/agents/interaction_boundary_e2e_turn2.json)
+  — se corren en ese orden con el mismo `--agent-session-id`, sin sembrar nada en la base.
+
+**Estado.** done. Cambio estructural + 16 tests unitarios + E2E en vivo + documentación en el mismo
+cambio.
 
 ---

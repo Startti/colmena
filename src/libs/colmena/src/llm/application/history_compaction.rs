@@ -75,8 +75,8 @@ pub fn classify_value_class(messages: &[LlmMessage]) -> Vec<ValueClass> {
 /// message that carried no tool calls.
 ///
 /// The ReAct loop in `agent_service` terminates **if and only if** the assistant
-/// returned no tool calls — condition at `agent_service.rs:354`, `return` at
-/// `:360` for `Some(empty)`, `return` at `:677` for `None`. A persisted
+/// returned no tool calls — condition at `agent_service.rs:353`, `return` at
+/// `:359` for `Some(empty)`, `return` at `:676` for `None`. A persisted
 /// `assistant` with no tool calls is therefore, by construction, the close of an
 /// interaction, and everything after it is still in flight.
 ///
