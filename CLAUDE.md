@@ -36,7 +36,19 @@ Before pushing, run this audit:
 5. **The PR body and commit message are documentation too.** They land in
    permanent history and are read more than the docs. `develop` is shared, so a
    wrong claim there cannot be rewritten — only corrected by a PR comment.
-6. **Check links, anchors, and JSON validity.**
+6. **Check links, anchors, and JSON validity.** Run the guard:
+
+   ```bash
+   python3 scripts/check_doc_links.py docs
+   ```
+
+   It fails on two things: a relative markdown link under `docs/` whose target
+   does not exist, and a living doc naming a `tests/graphs/**.json` graph that
+   was never committed (graph paths are usually inline code spans, so a plain
+   link check misses them). `docs/superpowers/`, `docs/history/` and
+   `docs/archive/` are exempt from the graph check — a plan there may name a
+   graph that was proposed and never built. CI runs this on every PR to
+   `develop`.
 
 If a change legitimately needs no docs (a revert, a CI-only fix, a security
 patch), retry the push with the `DOCS_EXEMPT=1` prefix. Deliberate and visible,
@@ -107,10 +119,11 @@ Python/Rust script tested in isolation.
     - `32_multimedia_generation.md` — `image_generation` / `image_edit` / `tts` nodes; artifact storage with 3 adapters (LocalCache/LocalHttp/HttpCallback); `COLMENA_LOCAL` env guard; `$attachment:<key>` placeholder; binary scrubber. **Live in dev as of 2026-05-22** — Vertex uses ADC (no key file needed on Cloud Run); Gemini TTS auto-wraps L16 PCM to playable WAV; Vertex `google_project_id`/`google_location` fall back to `GOOGLE_CLOUD_PROJECT`/`GOOGLE_CLOUD_LOCATION` env vars (best practice: omit from graph JSON). Canvas-side configuration reference (per-tool fields, accepted values per model, env-var resolution chain) lives in the ADP repo at `docs/MULTIMEDIA_TOOLS_CANVAS_CONFIG.md`.
     - `35_temporal_geographic_context.md` — Auto-injected date/time/location/locale block in every llm_call system message
   - `dds/` — Design documents:
-    - `ARQUITECTURA_HEXAGONAL_GUIA.md`, `DAG_ENGINE_DISEÑO.md`, `DISEÑO_AGENTES_Y_TOOLS.md`
-    - `MODULO_LLM_DISEÑO.md`, `RAG_DISEÑO.md`
+    - `ARQUITECTURA_HEXAGONAL_GUIA.md`, `DAG_ENGINE_DISEÑO.md`
     - `SECURE_VALUES_DISEÑO.md` — Security design
     - `VARIABLE_RESOLUTION_DISEÑO.md` — Variable resolution ($ref, $DYNAMIC, secure_values)
+    - `DISEÑO_AGENTES_Y_TOOLS.md`, `MODULO_LLM_DISEÑO.md` and `RAG_DISEÑO.md` were
+      archived as superseded (PR #83) — they now live in `docs/archive/proposals/`
   - `examples/` — `USAGE_EXAMPLES.md`, `amadeus_test.md`, `python_usage.md`
   - `testing/` — `critic_feedback_test_plan.md`
   - `history/` — Past implementation notes (superseded, for historical context only)
