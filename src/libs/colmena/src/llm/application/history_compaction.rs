@@ -258,16 +258,27 @@ pub async fn build_compacted_messages(
 
     let mut out: Vec<LlmMessage> = Vec::new();
     out.extend(messages[..keep_first].iter().cloned());
-    // Merge en el system previo si el último keep_first es System (evita systems consecutivos).
-    if keep_first > 0 && matches!(messages[keep_first - 1].role(), MessageRole::System) {
-        let combined = format!(
-            "{}\n\n---\n\n{}",
-            messages[keep_first - 1].content(),
-            summary
-        );
-        out.pop();
-        out.push(LlmMessage::system(combined).unwrap_or_else(|_| messages[keep_first - 1].clone()));
-    } else if let Ok(s) = LlmMessage::system(summary) {
+    // The summary travels as its OWN System message and is NEVER merged into
+    // the agent's system prompt, even though that leaves two consecutive
+    // System messages.
+    //
+    // Prompt caching is why. Anthropic marks the FIRST system block as the
+    // cache breakpoint (`anthropic_adapter::build_request_body`), so the
+    // cached prefix is `tools[] + system_blocks[0]`. Merging a summary that is
+    // recomputed on every load into that block rewrote the breakpoint's bytes
+    // every turn: the whole agent prompt was re-written at the 1.25x cache-write
+    // rate on each request and never read back once. Measured on a 5-turn
+    // Anthropic conversation before this change: cache writes of 3029, 3457,
+    // 3829, 4260 and 4684 tokens — growing exactly as the summary grew — with
+    // zero cross-turn cache reads.
+    //
+    // Kept separate, `system_blocks[0]` stays byte-identical across turns and
+    // the volatile summary lands in `system_blocks[1]`, outside the cached
+    // prefix — the shape the adapter was already written for. OpenAI's
+    // automatic prefix cache gains the same way (the stable prefix stops
+    // moving); Gemini joins every System into one `system_instruction`, so its
+    // wire format is unchanged.
+    if let Ok(s) = LlmMessage::system(summary) {
         out.push(s);
     }
     out.extend(messages[b..].iter().cloned());
@@ -780,6 +791,115 @@ mod tests {
             current_interaction_start(&msgs),
             4,
             "must find the LAST closing assistant (idx 3), not the first (idx 1)"
+        );
+    }
+
+    // ── Prompt-cache stability of the system prefix ──────────────────────
+    //
+    // `llm_call` persists turn 1 as `[User(prompt), System(sections)]` — user
+    // first, system second (`llm.rs`) — so `messages[SUMMARY_KEEP_FIRST_MSGS - 1]`
+    // is the agent's real system prompt. That block is the one Anthropic marks
+    // as the prompt-cache breakpoint, so it must stay byte-identical while the
+    // conversation grows.
+
+    const STABLE_SYSTEM: &str = "AGENT PROMPT: sos ATLAS, respondés en español.";
+
+    /// `[User, System, ...]` history long enough to compact, at `turns` closed
+    /// exchanges after the first one.
+    async fn seed_user_first_history(
+        repo: &Arc<InMemoryConversationRepository>,
+        k: &ConversationKey,
+        turns: usize,
+    ) {
+        repo.add_message(k, LlmMessage::user("primera pregunta".into()).unwrap())
+            .await
+            .unwrap();
+        repo.add_message(k, LlmMessage::system(STABLE_SYSTEM.into()).unwrap())
+            .await
+            .unwrap();
+        repo.add_message(
+            k,
+            LlmMessage::assistant("primera respuesta".into()).unwrap(),
+        )
+        .await
+        .unwrap();
+        for i in 0..turns {
+            repo.add_message(k, LlmMessage::user(format!("pregunta {i}")).unwrap())
+                .await
+                .unwrap();
+            repo.add_message(k, LlmMessage::assistant(format!("respuesta {i}")).unwrap())
+                .await
+                .unwrap();
+        }
+        repo.add_message(k, LlmMessage::user("pregunta abierta".into()).unwrap())
+            .await
+            .unwrap();
+    }
+
+    async fn compact_at(turns: usize) -> Vec<LlmMessage> {
+        let repo = Arc::new(InMemoryConversationRepository::new());
+        let k = ckey();
+        seed_user_first_history(&repo, &k, turns).await;
+        let stored = repo.get_with_summaries(&k).await.unwrap();
+        build_compacted_messages(&stored, &k, repo.as_ref(), None).await
+    }
+
+    #[tokio::test]
+    async fn summary_never_merges_into_the_agent_system_prompt() {
+        let out = compact_at(2).await;
+
+        let systems: Vec<&LlmMessage> = out
+            .iter()
+            .filter(|m| matches!(m.role(), MessageRole::System))
+            .collect();
+        assert_eq!(
+            systems.len(),
+            2,
+            "the summary must be its own System message, not merged into the prompt"
+        );
+        assert_eq!(
+            systems[0].content(),
+            STABLE_SYSTEM,
+            "the agent's system prompt must reach the wire byte-identical — merging \
+             the summary into it moves the Anthropic cache breakpoint every turn"
+        );
+        assert!(
+            systems[1].content().starts_with("## Conversation summary"),
+            "the second System message carries the summary, got: {}",
+            systems[1].content()
+        );
+    }
+
+    #[tokio::test]
+    async fn the_cached_system_prefix_does_not_move_as_the_conversation_grows() {
+        let short = compact_at(2).await;
+        let long = compact_at(5).await;
+
+        let first_system = |msgs: &[LlmMessage]| {
+            msgs.iter()
+                .find(|m| matches!(m.role(), MessageRole::System))
+                .expect("a system message survives compaction")
+                .content()
+                .to_string()
+        };
+        let summary_of = |msgs: &[LlmMessage]| {
+            msgs.iter()
+                .filter(|m| matches!(m.role(), MessageRole::System))
+                .nth(1)
+                .expect("a summary block is emitted")
+                .content()
+                .to_string()
+        };
+
+        assert_eq!(
+            first_system(&short),
+            first_system(&long),
+            "the cache breakpoint block must be identical at both conversation lengths"
+        );
+        assert_ne!(
+            summary_of(&short),
+            summary_of(&long),
+            "guard is only meaningful while the summary itself does change"
         );
     }
 }
