@@ -1,0 +1,73 @@
+{
+  "comment": "Turno 1 de 2 del E2E de la frontera estructural de interacción (Task 3, 2026-08-22). Corre este grafo PRIMERO con un --agent-session-id estable: el agente llama una tool real y responde con una frase final SIN tool_calls — ese assistant final CIERRA la interacción, el ancla que current_interaction_start() usa para ubicar la frontera de compactación en Tasks 1-2. Después corre interaction_boundary_e2e_turn2.json con el MISMO --agent-session-id: su pregunta y el resultado grande de su tool deben caer en la interacción abierta (después de este cierre) y viajar verbatim.",
+  "metadata": {
+    "category": "agents",
+    "features": [
+      "history_compaction",
+      "conversation_memory",
+      "python_script"
+    ],
+    "requires_env": [
+      "GEMINI_API_KEY",
+      "DATABASE_URL"
+    ]
+  },
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/ib-e2e-1",
+        "method": "POST",
+        "test_payload": {
+          "prompt": "¿Cuántas transacciones hay en total? Contalas con la tool y decime solo el número."
+        }
+      }
+    },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "api_key": "${GEMINI_API_KEY}",
+        "model": "gemini-2.5-flash",
+        "system_message": "Sos un asistente conciso. Si te piden contar transacciones, llamá a la tool `contar_registros`. Si te piden el listado completo de transacciones, llamá a la tool `listar_transacciones`. Respondé siempre en 2 oraciones como máximo.",
+        "temperature": 0.0,
+        "stream": false,
+        "connection_url": "${DATABASE_URL}",
+        "tool_configurations": {
+          "contar_registros": {
+            "name": "contar_registros",
+            "node_type": "python_script",
+            "description": "Devuelve un listado corto de transacciones para contar.",
+            "node_schema": {
+              "sandbox_mode": {
+                "type": "string",
+                "fixed": "restricted"
+              },
+              "sandbox_timeout_secs": {
+                "type": "number",
+                "fixed": 15
+              },
+              "code": {
+                "type": "string",
+                "fixed": "output = [{'id': i, 'monto': i * 11} for i in range(5)]"
+              }
+            }
+          }
+        }
+      }
+    },
+    "out": {
+      "type": "output"
+    }
+  },
+  "edges": [
+    {
+      "from": "trigger",
+      "to": "agent"
+    },
+    {
+      "from": "agent.result",
+      "to": "out"
+    }
+  ]
+}

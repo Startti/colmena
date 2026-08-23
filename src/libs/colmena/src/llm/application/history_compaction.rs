@@ -6,7 +6,6 @@ use std::collections::HashMap;
 
 pub const SUMMARY_SKIP_THRESHOLD_CHARS: usize = 250;
 pub const SUMMARY_TARGET_CHARS: usize = 250;
-pub const RECENT_TOKEN_BUDGET: usize = 2_500;
 pub const DISCOVERY_KEEP_RECENT_MSGS: usize = 8;
 pub const SUMMARY_KEEP_FIRST_MSGS: usize = 2;
 pub const SUMMARY_MAX_LINES: usize = 100;
@@ -30,11 +29,6 @@ pub fn rendered_size(msg: &LlmMessage) -> usize {
         }
     }
     n
-}
-
-/// Estimación de tokens (chars/4), consistente con los dumps del repo.
-fn est_tokens(msg: &LlmMessage) -> usize {
-    rendered_size(msg) / 4 + 1
 }
 
 /// Clasifica cada mensaje como Scaffolding (round-trip de discovery tools) o Content.
@@ -77,35 +71,26 @@ pub fn classify_value_class(messages: &[LlmMessage]) -> Vec<ValueClass> {
         .collect()
 }
 
-/// Borde `B` de la ventana reciente: camina desde el final acumulando tokens SOLO de
-/// mensajes `Content` hasta `token_budget`. Devuelve el índice del primer mensaje reciente.
+/// Index where the open interaction starts: right after the last `assistant`
+/// message that carried no tool calls.
 ///
-/// **Guarantees:** the result is always a valid slice start — `&messages[b..]` never
-/// panics, including for an empty input. When `messages` is non-empty the result is
-/// additionally a valid element index — `&messages[b]` never panics. When even the
-/// newest message alone exceeds `token_budget`, the recent window degenerates to
-/// exactly that one message (`b == len - 1`).
-pub fn recent_boundary_by_tokens(
-    messages: &[LlmMessage],
-    classes: &[ValueClass],
-    token_budget: usize,
-) -> usize {
-    let mut budget = token_budget as i64;
-    let mut b = messages.len();
+/// The ReAct loop in `agent_service` terminates **if and only if** the assistant
+/// returned no tool calls — condition at `agent_service.rs:353`, `return` at
+/// `:359` for `Some(empty)`, `return` at `:676` for `None`. A persisted
+/// `assistant` with no tool calls is therefore, by construction, the close of an
+/// interaction, and everything after it is still in flight.
+///
+/// Returns `0` when no interaction has closed yet: the whole history belongs to
+/// the current one.
+pub fn current_interaction_start(messages: &[LlmMessage]) -> usize {
     for i in (0..messages.len()).rev() {
-        if classes[i] == ValueClass::Content {
-            budget -= est_tokens(&messages[i]) as i64;
-            if budget < 0 {
-                break;
-            }
+        let closes = matches!(messages[i].role(), MessageRole::Assistant)
+            && messages[i].tool_calls().is_none_or(|tcs| tcs.is_empty());
+        if closes {
+            return i + 1;
         }
-        b = i;
     }
-    // `messages.len()` was never a legal answer: it is the initial accumulator
-    // leaking when the walk breaks on the FIRST iteration (the newest message
-    // alone exceeds the budget). In that case the newest message IS the recent
-    // window — it is the message the model most needs verbatim.
-    b.min(messages.len().saturating_sub(1))
+    0
 }
 
 use crate::llm::application::tool_digest::digest_tool_result;
@@ -137,7 +122,6 @@ pub async fn build_compacted_messages(
     key: &ConversationKey,
     repo: &dyn ConversationRepository,
     summarizer: Option<&std::sync::Arc<dyn MessageSummarizer>>,
-    recent_token_budget: usize,
 ) -> Vec<LlmMessage> {
     let messages: Vec<LlmMessage> = stored.iter().map(|s| s.message.clone()).collect();
     let total = messages.len();
@@ -148,10 +132,18 @@ pub async fn build_compacted_messages(
     }
 
     let classes = classify_value_class(&messages);
-    let mut b = recent_boundary_by_tokens(&messages, &classes, recent_token_budget);
-
-    // Guard de pares: no cortar dejando un Tool sin su Assistant.
-    while b > keep_first && matches!(messages[b].role(), MessageRole::Tool) {
+    // Structural boundary: everything from the open interaction's first message
+    // onward travels verbatim, whatever it weighs. The pair guard that used to
+    // live here is unnecessary now — the boundary lands on an interaction's
+    // first message, which can never be a `Tool` orphaned from its `Assistant`.
+    let mut b = current_interaction_start(&messages);
+    // Nothing is open: the newest message closed its own interaction, which a
+    // resume with no new prompt reaches. Keep that closing message in the recent
+    // window instead of shipping a prompt whose only non-summary content is the
+    // system block — Anthropic and Gemini hoist the summary out of the message
+    // array, so an empty recent window leaves the model reading an old turn as
+    // the newest thing anyone said.
+    if b == messages.len() {
         b -= 1;
     }
     if b <= keep_first {
@@ -317,139 +309,6 @@ mod tests {
         assert_eq!(classes[4], ValueClass::Content);
     }
 
-    /// Message-count/shape/size/budget space covered by
-    /// `recent_boundary_is_always_a_valid_index` below.
-    #[derive(Debug, Clone, Copy)]
-    enum Shape {
-        AllContent,
-        AllScaffolding,
-        Alternating,
-        OnlyLastOversized,
-        OnlyFirstOversized,
-    }
-
-    impl Shape {
-        const ALL: [Shape; 5] = [
-            Shape::AllContent,
-            Shape::AllScaffolding,
-            Shape::Alternating,
-            Shape::OnlyLastOversized,
-            Shape::OnlyFirstOversized,
-        ];
-    }
-
-    /// Builds `n` user messages of `size` chars each, plus a `ValueClass` vector
-    /// per `shape`. Message content itself is uniform; only the CLASS vector
-    /// varies, which is exactly what `recent_boundary_by_tokens` reads.
-    fn build(n: usize, size: usize, shape: Shape) -> (Vec<LlmMessage>, Vec<ValueClass>) {
-        // `LlmMessage::new` rejects empty content, so even the "size=0" case needs
-        // at least one char — that still exercises the near-zero boundary case.
-        let small = "x".to_string();
-        let big = "x".repeat(size.max(1));
-        let msgs: Vec<LlmMessage> = (0..n)
-            .map(|i| {
-                let content = match shape {
-                    Shape::OnlyLastOversized if i + 1 == n => big.clone(),
-                    Shape::OnlyFirstOversized if i == 0 => big.clone(),
-                    Shape::OnlyLastOversized | Shape::OnlyFirstOversized => small.clone(),
-                    _ => big.clone(),
-                };
-                LlmMessage::user(content).unwrap()
-            })
-            .collect();
-        let classes: Vec<ValueClass> = (0..n)
-            .map(|i| match shape {
-                Shape::AllContent => ValueClass::Content,
-                Shape::AllScaffolding => ValueClass::Scaffolding,
-                Shape::Alternating => {
-                    if i % 2 == 0 {
-                        ValueClass::Content
-                    } else {
-                        ValueClass::Scaffolding
-                    }
-                }
-                Shape::OnlyLastOversized | Shape::OnlyFirstOversized => ValueClass::Content,
-            })
-            .collect();
-        (msgs, classes)
-    }
-
-    #[test]
-    fn recent_boundary_is_always_a_valid_index() {
-        for n in [0, 1, 2, 3, 4, 8] {
-            for size in [0, 1, 240, 1_000, 12_000, 40_000] {
-                for budget in [0, 1, 250, RECENT_TOKEN_BUDGET] {
-                    for shape in Shape::ALL {
-                        let (msgs, classes) = build(n, size, shape);
-                        let b = recent_boundary_by_tokens(&msgs, &classes, budget);
-                        // Slice-safe. The slicing IS the assertion: pre-fix this panicked
-                        // whenever the walk broke on its first iteration and `b` leaked
-                        // `messages.len()`.
-                        let _ = &msgs[b..];
-                        assert!(
-                            b <= msgs.len(),
-                            "boundary {b} > len {} (n={n}/size={size}/budget={budget}/shape={shape:?})",
-                            msgs.len()
-                        );
-                        if !msgs.is_empty() {
-                            // Index-safe: `&msgs[b]` must never panic on a non-empty slice.
-                            // Same story — the indexing itself is what would blow up.
-                            let _ = &msgs[b];
-                            assert!(
-                                b < msgs.len(),
-                                "boundary {b} not < len {} (n={n}/size={size}/budget={budget}/shape={shape:?})",
-                                msgs.len()
-                            );
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn recent_boundary_counts_only_content_tokens() {
-        let big = "x".repeat(400);
-        let msgs: Vec<LlmMessage> = (0..6)
-            .map(|_| LlmMessage::user(big.clone()).unwrap())
-            .collect();
-        let classes = vec![ValueClass::Content; 6];
-        let b = recent_boundary_by_tokens(&msgs, &classes, 250);
-        assert!((3..=4).contains(&b), "boundary fue {b}");
-    }
-
-    /// The cost of keeping an oversized newest message verbatim is bounded to a
-    /// SINGLE turn. As soon as any message is appended after it, the backward walk
-    /// breaks on the oversized message instead of on the newest one, so the
-    /// boundary lands past it and it leaves the recent window on its own — no
-    /// special-casing required. This is the property the role rule is priced on.
-    #[test]
-    fn oversized_message_leaves_the_recent_window_on_the_next_turn() {
-        let budget = 250;
-        let oversized = LlmMessage::user("x".repeat(budget * 4 * 2)).unwrap();
-        let small = || LlmMessage::user("ok".to_string()).unwrap();
-
-        // Turn N: the oversized message IS the newest — it is the recent window.
-        let msgs = vec![small(), small(), small(), oversized.clone()];
-        let classes = vec![ValueClass::Content; msgs.len()];
-        let b_now = recent_boundary_by_tokens(&msgs, &classes, budget);
-        assert_eq!(
-            b_now,
-            msgs.len() - 1,
-            "the oversized newest message must be the whole recent window"
-        );
-
-        // Turn N+1: one more message arrives. The oversized message is no longer
-        // newest, so it falls out of the recent window without any extra rule.
-        let msgs_next = vec![small(), small(), small(), oversized, small()];
-        let classes_next = vec![ValueClass::Content; msgs_next.len()];
-        let b_next = recent_boundary_by_tokens(&msgs_next, &classes_next, budget);
-        assert_eq!(
-            b_next, 4,
-            "the oversized message must be excluded from the recent window on the next turn"
-        );
-    }
-
     #[test]
     fn rendered_size_includes_tool_call_args() {
         let m = LlmMessage::assistant_with_tool_calls(
@@ -515,15 +374,18 @@ mod tests {
             repo.add_message(&k, LlmMessage::user(format!("{long} msg{i}")).unwrap())
                 .await
                 .unwrap();
+            if i == 2 {
+                // Closes the previous interaction so msg0..msg2 fall in the old
+                // zone and get summarized, while msg3..msg9 stay recent and raw.
+                repo.add_message(&k, LlmMessage::assistant("cierre".to_string()).unwrap())
+                    .await
+                    .unwrap();
+            }
         }
         let stored: Vec<StoredMessage> = repo.get_with_summaries(&k).await.unwrap();
         let summarizer: Arc<dyn MessageSummarizer> = Arc::new(StubSummarizer);
 
-        // Budget of 300 tokens (~1200 chars) forces older messages into the summary zone.
-        // Each message is ~600 chars ≈ 151 tokens, so only the last 1-2 messages fit in
-        // the recent window, leaving idx 2 (and others) in the old zone to be summarized.
-        let out =
-            build_compacted_messages(&stored, &k, repo.as_ref(), Some(&summarizer), 300).await;
+        let out = build_compacted_messages(&stored, &k, repo.as_ref(), Some(&summarizer)).await;
 
         assert!(out
             .iter()
@@ -542,78 +404,8 @@ mod tests {
                 .unwrap();
         }
         let stored = repo.get_with_summaries(&k).await.unwrap();
-        let out =
-            build_compacted_messages(&stored, &k, repo.as_ref(), None, RECENT_TOKEN_BUDGET).await;
+        let out = build_compacted_messages(&stored, &k, repo.as_ref(), None).await;
         assert_eq!(out.len(), 3);
-    }
-
-    #[tokio::test]
-    async fn repro_adp_panic_last_content_message_alone_exceeds_budget() {
-        // idx 0,1 = keep_first; idx 2 = short; idx 3 = a single content message that
-        // alone blows the whole recent budget (a large tool output on resume). This
-        // is the EXACT shape ADP reported ("the len is 4 but the index is 4"): total=4,
-        // keep_first=2, newest message alone exceeds the budget. Before the clamp in
-        // `recent_boundary_by_tokens`, this shape panicked with an index-out-of-bounds
-        // slice access. This is a PANIC regression test: it must not merely avoid
-        // crashing — the newest Tool message must survive intact and verbatim, since
-        // this shape lands on the pair-guard early return
-        // (`if b <= keep_first { return messages; }`), which returns the raw vector
-        // unmodified.
-        let repo = Arc::new(InMemoryConversationRepository::new());
-        let k = ckey();
-        for _ in 0..3 {
-            repo.add_message(&k, LlmMessage::user("x".into()).unwrap())
-                .await
-                .unwrap();
-        }
-        let big = "z".repeat(40_000);
-        repo.add_message(&k, LlmMessage::tool("call_1".into(), big.clone()).unwrap())
-            .await
-            .unwrap();
-
-        let stored = repo.get_with_summaries(&k).await.unwrap();
-        assert_eq!(stored.len(), 4);
-
-        let out =
-            build_compacted_messages(&stored, &k, repo.as_ref(), None, RECENT_TOKEN_BUDGET).await;
-        assert!(!out.is_empty());
-
-        let last = out.last().expect("non-empty output");
-        assert_eq!(
-            last.role(),
-            &MessageRole::Tool,
-            "newest Tool message must stay last: {last:?}"
-        );
-        assert_eq!(
-            last.tool_call_id(),
-            Some("call_1"),
-            "tool_call_id must be preserved verbatim"
-        );
-        assert_eq!(
-            last.content(),
-            big,
-            "newest tool result must survive intact and verbatim — this is the exact ADP panic shape"
-        );
-    }
-
-    #[tokio::test]
-    async fn repro_panic_also_fires_on_a_large_user_prompt() {
-        let repo = Arc::new(InMemoryConversationRepository::new());
-        let k = ckey();
-        for _ in 0..3 {
-            repo.add_message(&k, LlmMessage::user("x".into()).unwrap())
-                .await
-                .unwrap();
-        }
-        // Not resume-specific: a single pasted user message over the budget does it too.
-        repo.add_message(&k, LlmMessage::user("z".repeat(40_000)).unwrap())
-            .await
-            .unwrap();
-
-        let stored = repo.get_with_summaries(&k).await.unwrap();
-        let out =
-            build_compacted_messages(&stored, &k, repo.as_ref(), None, RECENT_TOKEN_BUDGET).await;
-        assert!(!out.is_empty());
     }
 
     #[tokio::test]
@@ -643,7 +435,12 @@ mod tests {
         repo.add_message(&k, LlmMessage::tool("call_1".into(), tool_content).unwrap())
             .await
             .unwrap();
-        // idx 3,4,5 = short recents.
+        // idx 3 = closes the interaction, so the tool result above lands in the
+        // old zone and gets digested instead of shipping raw in the recent window.
+        repo.add_message(&k, LlmMessage::assistant("cierre".to_string()).unwrap())
+            .await
+            .unwrap();
+        // idx 4,5,6 = short recents.
         for _ in 0..3 {
             repo.add_message(&k, LlmMessage::user("x".into()).unwrap())
                 .await
@@ -653,8 +450,7 @@ mod tests {
         let stored = repo.get_with_summaries(&k).await.unwrap();
         let fail: Arc<dyn MessageSummarizer> = Arc::new(FailSummarizer);
 
-        // Tiny budget pushes the tool result (idx 2) into the old zone.
-        let out = build_compacted_messages(&stored, &k, repo.as_ref(), Some(&fail), 5).await;
+        let out = build_compacted_messages(&stored, &k, repo.as_ref(), Some(&fail)).await;
 
         let summary = out
             .iter()
@@ -681,9 +477,9 @@ mod tests {
     }
 
     /// Fixture for `recent_window_is_never_empty`: idx0,1 = keep_first; idx2 =
-    /// old-zone filler; idx3 = Assistant issuing a tool call; idx4 = the Tool
-    /// result under test (the oversized newest message). Returns the index of
-    /// that Tool result.
+    /// old-zone filler; idx3 = a closing Assistant, so a summary zone exists;
+    /// idx4 = Assistant issuing a tool call; idx5 = the Tool result under test
+    /// (the oversized newest message). Returns the index of that Tool result.
     async fn build_oversized_newest_tool_fixture(
         repo: &InMemoryConversationRepository,
         k: &ConversationKey,
@@ -698,6 +494,10 @@ mod tests {
         repo.add_message(k, LlmMessage::user("filler".into()).unwrap())
             .await
             .unwrap();
+        // Closes the previous interaction so the tool call below opens a new one.
+        repo.add_message(k, LlmMessage::assistant("cierre".to_string()).unwrap())
+            .await
+            .unwrap();
         repo.add_message(
             k,
             LlmMessage::assistant_with_tool_calls(String::new(), vec![tc("call_1", "sql_query")])
@@ -708,7 +508,7 @@ mod tests {
         repo.add_message(k, LlmMessage::tool("call_1".into(), tool_content).unwrap())
             .await
             .unwrap();
-        4
+        5
     }
 
     #[tokio::test]
@@ -723,14 +523,17 @@ mod tests {
         repo.add_message(&k, LlmMessage::user("filler".into()).unwrap())
             .await
             .unwrap();
+        // Closes the previous interaction so a summary zone exists ahead of it.
+        repo.add_message(&k, LlmMessage::assistant("cierre".to_string()).unwrap())
+            .await
+            .unwrap();
         let big = "z".repeat(40_000);
         repo.add_message(&k, LlmMessage::user(big.clone()).unwrap())
             .await
             .unwrap();
 
         let stored = repo.get_with_summaries(&k).await.unwrap();
-        let out =
-            build_compacted_messages(&stored, &k, repo.as_ref(), None, RECENT_TOKEN_BUDGET).await;
+        let out = build_compacted_messages(&stored, &k, repo.as_ref(), None).await;
 
         let last = out.last().expect("non-empty output");
         assert_eq!(last.role(), &MessageRole::User);
@@ -749,14 +552,17 @@ mod tests {
         repo.add_message(&k, LlmMessage::user("filler".into()).unwrap())
             .await
             .unwrap();
+        // Closes the previous interaction so a summary zone exists ahead of it.
+        repo.add_message(&k, LlmMessage::assistant("cierre".to_string()).unwrap())
+            .await
+            .unwrap();
         let big = "z".repeat(40_000);
         repo.add_message(&k, LlmMessage::assistant(big.clone()).unwrap())
             .await
             .unwrap();
 
         let stored = repo.get_with_summaries(&k).await.unwrap();
-        let out =
-            build_compacted_messages(&stored, &k, repo.as_ref(), None, RECENT_TOKEN_BUDGET).await;
+        let out = build_compacted_messages(&stored, &k, repo.as_ref(), None).await;
 
         let last = out.last().expect("non-empty output");
         assert_eq!(last.role(), &MessageRole::Assistant);
@@ -784,6 +590,14 @@ mod tests {
             .add_message(&k_user, LlmMessage::user("filler".into()).unwrap())
             .await
             .unwrap();
+        // Closes the previous interaction so a summary zone exists ahead of it.
+        repo_user
+            .add_message(
+                &k_user,
+                LlmMessage::assistant("cierre".to_string()).unwrap(),
+            )
+            .await
+            .unwrap();
         repo_user
             .add_message(&k_user, LlmMessage::user("z".repeat(40_000)).unwrap())
             .await
@@ -795,14 +609,7 @@ mod tests {
         ] {
             let stored = repo.get_with_summaries(k).await.unwrap();
             let fail: Arc<dyn MessageSummarizer> = Arc::new(FailSummarizer);
-            let out = build_compacted_messages(
-                &stored,
-                k,
-                repo.as_ref(),
-                Some(&fail),
-                RECENT_TOKEN_BUDGET,
-            )
-            .await;
+            let out = build_compacted_messages(&stored, k, repo.as_ref(), Some(&fail)).await;
             let last = out.last().expect("non-empty output");
             assert_ne!(
                 last.role(),
@@ -812,59 +619,167 @@ mod tests {
         }
     }
 
-    /// The pair guard walks the boundary back over EVERY trailing `Tool` message,
-    /// not just the newest one, so a `Tool` never ships without its `Assistant`.
-    /// When that walk reaches `keep_first`, the early return hands back the whole
-    /// history raw — no summary block at all. Pins the shape the memory guide
-    /// documents: parallel tool calls whose last result is oversized.
+    #[test]
+    fn interaction_start_is_after_the_last_assistant_without_tool_calls() {
+        let closing = LlmMessage::assistant("listo".to_string()).unwrap();
+        let msgs = vec![
+            LlmMessage::user("vieja".into()).unwrap(),
+            closing.clone(),
+            LlmMessage::user("actual".into()).unwrap(),
+            LlmMessage::assistant_with_tool_calls(String::new(), vec![tc("c1", "sql_query")])
+                .unwrap(),
+            LlmMessage::tool("c1".into(), "filas".into()).unwrap(),
+        ];
+        assert_eq!(current_interaction_start(&msgs), 2);
+    }
+
+    #[test]
+    fn an_assistant_with_an_empty_tool_call_vec_also_closes() {
+        // The ReAct loop returns on BOTH `Some(vec![])` and `None`. Detecting
+        // the close with `is_none()` alone would miss the non-streaming path.
+        let msgs = vec![
+            LlmMessage::user("x".into()).unwrap(),
+            LlmMessage::assistant_with_tool_calls("listo".to_string(), vec![]).unwrap(),
+            LlmMessage::user("actual".into()).unwrap(),
+        ];
+        assert_eq!(current_interaction_start(&msgs), 2);
+    }
+
+    #[test]
+    fn several_unanswered_user_messages_all_belong_to_the_open_interaction() {
+        let msgs = vec![
+            LlmMessage::assistant("listo".to_string()).unwrap(),
+            LlmMessage::user("uno".into()).unwrap(),
+            LlmMessage::user("dos".into()).unwrap(),
+            LlmMessage::user("tres".into()).unwrap(),
+        ];
+        assert_eq!(current_interaction_start(&msgs), 1);
+    }
+
+    #[test]
+    fn a_closing_assistant_as_the_newest_message_leaves_nothing_open() {
+        // Reachable on a resume with no new prompt: the newest stored message is
+        // the previous turn's final answer. Task 2 must not let this empty the
+        // recent window.
+        let msgs = vec![
+            LlmMessage::user("x".into()).unwrap(),
+            LlmMessage::assistant("listo".to_string()).unwrap(),
+        ];
+        assert_eq!(current_interaction_start(&msgs), msgs.len());
+    }
+
+    #[test]
+    fn without_a_closed_interaction_everything_is_current() {
+        let msgs = vec![
+            LlmMessage::user("x".into()).unwrap(),
+            LlmMessage::assistant_with_tool_calls(String::new(), vec![tc("c1", "sql_query")])
+                .unwrap(),
+            LlmMessage::tool("c1".into(), "filas".into()).unwrap(),
+        ];
+        assert_eq!(current_interaction_start(&msgs), 0);
+        assert_eq!(current_interaction_start(&[]), 0);
+    }
+
+    /// The defect this plan closes: with a budget-driven boundary, an oversized
+    /// tool result pushed the cut back far enough to swallow the question that
+    /// triggered it. The user's own message must stay verbatim.
     #[tokio::test]
-    async fn parallel_tool_calls_with_oversized_last_result_ship_the_history_raw() {
+    async fn the_current_question_survives_next_to_an_oversized_tool_result() {
         let repo = Arc::new(InMemoryConversationRepository::new());
         let k = ckey();
-        let big = "z".repeat(40_000);
+        let question = "según el contrato de arriba, qué pasa si el proveedor se demora";
 
-        for _ in 0..2 {
-            repo.add_message(&k, LlmMessage::user("x".into()).unwrap())
+        repo.add_message(&k, LlmMessage::user("hola".into()).unwrap())
+            .await
+            .unwrap();
+        repo.add_message(&k, LlmMessage::user("otra vieja".into()).unwrap())
+            .await
+            .unwrap();
+        repo.add_message(&k, LlmMessage::user("vieja".into()).unwrap())
+            .await
+            .unwrap();
+        // Closes the previous interaction.
+        repo.add_message(&k, LlmMessage::assistant("listo".to_string()).unwrap())
+            .await
+            .unwrap();
+        // The open interaction starts here.
+        repo.add_message(&k, LlmMessage::user(question.into()).unwrap())
+            .await
+            .unwrap();
+        repo.add_message(
+            &k,
+            LlmMessage::assistant_with_tool_calls(String::new(), vec![tc("c1", "sql_query")])
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        repo.add_message(
+            &k,
+            LlmMessage::tool("c1".into(), "z".repeat(40_000)).unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let stored = repo.get_with_summaries(&k).await.unwrap();
+        let out = build_compacted_messages(&stored, &k, repo.as_ref(), None).await;
+
+        assert!(
+            out.iter().any(|m| m.content() == question),
+            "the open interaction's question must travel verbatim, not summarised"
+        );
+        assert!(
+            out.iter().any(|m| m.content().chars().count() == 40_000),
+            "the tool result of the open interaction must travel verbatim too"
+        );
+    }
+
+    /// The recent window must never be empty, even when nothing is open.
+    #[tokio::test]
+    async fn a_closed_newest_interaction_still_leaves_a_recent_message() {
+        let repo = Arc::new(InMemoryConversationRepository::new());
+        let k = ckey();
+        for i in 0..4 {
+            repo.add_message(&k, LlmMessage::user(format!("vieja {i}")).unwrap())
                 .await
                 .unwrap();
         }
         repo.add_message(
             &k,
-            LlmMessage::assistant_with_tool_calls(
-                String::new(),
-                vec![tc("call_a", "sql_query"), tc("call_b", "sql_query")],
-            )
-            .unwrap(),
+            LlmMessage::assistant("la respuesta final".to_string()).unwrap(),
         )
         .await
         .unwrap();
-        repo.add_message(
-            &k,
-            LlmMessage::tool("call_a".into(), "small".into()).unwrap(),
-        )
-        .await
-        .unwrap();
-        repo.add_message(&k, LlmMessage::tool("call_b".into(), big.clone()).unwrap())
-            .await
-            .unwrap();
 
         let stored = repo.get_with_summaries(&k).await.unwrap();
-        let out =
-            build_compacted_messages(&stored, &k, repo.as_ref(), None, RECENT_TOKEN_BUDGET).await;
+        let out = build_compacted_messages(&stored, &k, repo.as_ref(), None).await;
 
-        assert_eq!(
-            out.len(),
-            stored.len(),
-            "the whole history must ship raw when the pair guard reaches keep_first"
+        let last = out.last().expect("output is never empty");
+        assert_ne!(
+            last.role(),
+            &MessageRole::System,
+            "the summary block must not be the last message on the wire"
         );
-        assert!(
-            !out.iter().any(|m| m.role() == &MessageRole::System),
-            "no summary block is synthesized on the raw-return path"
-        );
+        assert_eq!(last.content(), "la respuesta final");
+    }
+
+    #[test]
+    fn interaction_start_uses_the_last_close_not_the_first() {
+        // Regression guard: the scan MUST use `.rev()` to find the LAST closing
+        // assistant, not the first. If the scan ran forward, this test would fail.
+        // Two turns ago, the agent finished (closing assistant at idx 1).
+        // One turn ago, it finished again (closing assistant at idx 3).
+        // Right now, the user has a new question (idx 4) — the boundary is after idx 3.
+        let msgs = vec![
+            LlmMessage::user("viejo_turno_1".into()).unwrap(), // idx 0
+            LlmMessage::assistant("listo_turno_1".to_string()).unwrap(), // idx 1 — closes
+            LlmMessage::user("viejo_turno_2".into()).unwrap(), // idx 2
+            LlmMessage::assistant("listo_turno_2".to_string()).unwrap(), // idx 3 — closes
+            LlmMessage::user("pregunta_nueva".into()).unwrap(), // idx 4 — open interaction
+        ];
         assert_eq!(
-            out.last().unwrap().content(),
-            big,
-            "the oversized tool result stays verbatim"
+            current_interaction_start(&msgs),
+            4,
+            "must find the LAST closing assistant (idx 3), not the first (idx 1)"
         );
     }
 }

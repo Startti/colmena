@@ -1,0 +1,73 @@
+{
+  "comment": "Turno 2 de 2. Corre DESPUÉS de interaction_boundary_e2e_turn1.json con el MISMO --agent-session-id. Este turno pide el listado COMPLETO de transacciones: la tool `listar_transacciones` devuelve ~300 filas (varios miles de caracteres, muy por encima del umbral de resumen de 250 chars). La pregunta de este turno y ese resultado grande caen en la interacción que sigue abierta (el turno 1 ya cerró la suya con su respuesta final), así que current_interaction_start() los deja del lado verbatim: ninguno de los dos debe aparecer resumido como línea '[Tn]' dentro del bloque '## Conversation summary'. Verificar contra el dump con COLMENA_DUMP_PROMPT_SIZES=1 COLMENA_DUMP_PROMPT_FULL=1 (el segundo env var por sí solo no imprime nada: el dump completo está anidado dentro del chequeo de COLMENA_DUMP_PROMPT_SIZES en agent_service.rs).",
+  "metadata": {
+    "category": "agents",
+    "features": [
+      "history_compaction",
+      "conversation_memory",
+      "python_script"
+    ],
+    "requires_env": [
+      "GEMINI_API_KEY",
+      "DATABASE_URL"
+    ]
+  },
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/ib-e2e-2",
+        "method": "POST",
+        "test_payload": {
+          "prompt": "Ahora necesito el detalle completo de todas las transacciones (id, monto y cliente) para armar un reporte. Llamá a la tool y pegame la lista entera, no un resumen."
+        }
+      }
+    },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "api_key": "${GEMINI_API_KEY}",
+        "model": "gemini-2.5-flash",
+        "system_message": "Sos un asistente conciso. Si te piden contar transacciones, llamá a la tool `contar_registros`. Si te piden el listado completo de transacciones, llamá a la tool `listar_transacciones`. Respondé siempre en 2 oraciones como máximo.",
+        "temperature": 0.0,
+        "stream": false,
+        "connection_url": "${DATABASE_URL}",
+        "tool_configurations": {
+          "listar_transacciones": {
+            "name": "listar_transacciones",
+            "node_type": "python_script",
+            "description": "Devuelve el listado completo de transacciones (id, monto, cliente).",
+            "node_schema": {
+              "sandbox_mode": {
+                "type": "string",
+                "fixed": "restricted"
+              },
+              "sandbox_timeout_secs": {
+                "type": "number",
+                "fixed": 15
+              },
+              "code": {
+                "type": "string",
+                "fixed": "output = [{'id': i, 'monto': round(i * 11.37, 2), 'cliente': f'cliente_{i:04d}'} for i in range(300)]"
+              }
+            }
+          }
+        }
+      }
+    },
+    "out": {
+      "type": "output"
+    }
+  },
+  "edges": [
+    {
+      "from": "trigger",
+      "to": "agent"
+    },
+    {
+      "from": "agent.result",
+      "to": "out"
+    }
+  ]
+}
