@@ -6,6 +6,78 @@ Si vas a empezar a trabajar en algo de acá, sacalo de esta lista y agregalo al 
 
 ---
 
+## 🚨 MÁXIMA PRIORIDAD — Colmena no puede ejecutar los modelos GPT-5.6 (2026-08-24)
+
+**Síntoma.** Cualquier `llm_call` contra `gpt-5.6-sol`, `gpt-5.6-terra` o
+`gpt-5.6-luna` falla antes de generar un solo token:
+
+```
+Function tools with reasoning_effort are not supported for gpt-5.6-*
+in /v1/chat/completions. To use function tools, use /v1/responses
+or set reasoning_effort to 'none'.
+```
+
+**Los tres modelos fallan idéntico** — no es un caso borde de uno. Medido en vivo
+el 2026-08-24 sobre una matriz de 41 modelos: 38 respondieron, los 3 que fallaron
+son exactamente los GPT-5.6.
+
+**Lo que lo hace desconcertante:** el grafo de prueba **no declara ninguna tool**
+(sin `tool_configurations`, sin `enabled_tools`). Colmena manda un array `tools`
+de todos modos, y GPT-5.6 rechaza esa combinación en Chat Completions. El primer
+paso de la investigación es entender **por qué se envía `tools` cuando el grafo no
+pide ninguna** — eso puede ser un defecto en sí mismo, independiente de 5.6.
+
+**Por qué es máxima prioridad:**
+
+1. Es la familia de modelos **más nueva** de OpenAI. Cualquier agente que la
+   configure hoy en ADP muere en el primer turno.
+2. Es la **única** familia de OpenAI que cobra por escribir cache (1.25x, campo
+   `cache_write_tokens`). Colmena ya lee ese campo desde el 2026-08-24, pero ese
+   soporte **no se pudo verificar en vivo** porque los modelos son inalcanzables.
+   Estamos facturando contra un contrato documentado que no pudimos ejercitar.
+
+**Arreglo probable:** rutear estos modelos a `/v1/responses`. El adapter ya tiene
+`is_responses_api_required`, que hoy solo conmuta cuando hay archivos no-imagen en
+el request; habría que extender esa condición. La alternativa que sugiere el
+propio error (`reasoning_effort: 'none'`) desactiva el razonamiento, así que no
+sirve como default.
+
+**Cómo reproducirlo:**
+
+```bash
+/tmp/cachematrix/probe.sh openai OPENAI_API_KEY 2 gpt-5.6-luna
+```
+
+O cualquier grafo `llm_call` con `"model": "gpt-5.6-luna"`.
+
+**Trigger:** antes de que cualquier agente productivo se configure con un modelo
+5.6, y antes de confiar en las cifras de cache write de OpenAI para facturar.
+
+---
+
+## Cache tokens en `usage` — pendientes tras la cadena de 4 slices (2026-08-24)
+
+Contexto: la cadena `usage-cache-01..04` normalizó la semántica de
+`prompt_tokens` (input fresco en los 3 providers), sumó el cache a
+`total_tokens`, hizo siempre presentes las columnas de cache, pobló
+`provider`/`model` en la fila del nodo anidado y cableó el `cache_write_tokens`
+de OpenAI. Ver CHANGELOG §8, §9 y §10. Lo que quedó afuera:
+
+| Pendiente | Detalle | Trigger |
+|---|---|---|
+| **Doc: `gemini-2.5-pro` sí cachea** | La guía §14 y la página de precios de Google lo listan **sin** context caching. Medido en vivo: `cache_read_tokens: 3984` con 734 frescos — cachea igual de bien que `2.5-flash`. Hay que corregir §14. | Junto con la próxima corrección de §14 |
+| **Cálculo de costo dentro de Colmena** | Decisión abierta. El bloqueante técnico ya cayó (el `model` del nodo anidado viaja desde el slice 3). Falta decidir de dónde sale la tabla de precios y cómo se evita que envejezca: un precio hardcodeado que quedó viejo factura mal **en silencio**, que es peor que no dar número. Hoy el pricing vive en ADP (los ST y sus márgenes). | Cuando se decida si el costo lo calcula Colmena o sigue en ADP |
+| **Grafos de la matriz de 41 modelos** | El harness (`gen.py`, `run_matrix.sh`, `probe.sh`) y los grafos generados viven en `/tmp/cachematrix`, fuera del repo. La matriz no es reproducible desde una checkout limpia. | Si se quiere re-correr la matriz tras cambiar de modelos o de providers |
+| **Mínimos reales de prefijo en Gemini 3.x** | Siete modelos no cachearon con un prefijo de ~4.5k tokens: `gpt-5`, `gemini-2.5-flash-lite`, `gemini-3.1-flash-lite`, `gemini-3.1-pro-preview`, `gemini-3.5-flash-lite`, `gemini-3.6-flash`, `gemini-3.7-flash`. **No está probado que no soporten cache** — está probado que no cachearon en esas condiciones. Falta barrer con prefijos mayores. | Antes de recomendar un modelo Gemini 3.x para workloads con prefijo repetido |
+
+**Dependencia cruzada con ADP (no es trabajo de este repo):** ADP debe sacar la
+resta `promptTokens − cacheReadTokens` de su cálculo de costo. Con la
+normalización mergeada eso resta el cache dos veces en Anthropic y produce costos
+de input **negativos**. Detalle y acción concreta en
+[`docs/adp_migration/2026-08-23-usage-cache-token-split.md`](adp_migration/2026-08-23-usage-cache-token-split.md).
+
+---
+
 ## 🔍 Code audit exhaustivo — 60 hallazgos (2026-07-27)
 
 **Origen:** auditoría por-símbolo de los 353 archivos fuente del crate (`src/libs/colmena/src/`), 12 lotes vía Workflow multi-agente (Haiku describe → Sonnet sintetiza → Opus juzga dead-code). Catálogo por-archivo en `docs/agent_context/audit/*.md`; **detalle completo de cada hallazgo (con nota TDD del test-rojo primero) en [`docs/agent_context/audit/FINDINGS_LEDGER.md`](agent_context/audit/FINDINGS_LEDGER.md)**. Esta entrada es el índice histórico; el ledger es la fuente de verdad.

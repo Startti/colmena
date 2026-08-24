@@ -39,10 +39,17 @@ pub struct LlmUsage {
     /// opposite cost implications.
     #[serde(serialize_with = "serialize_opt_u32_as_zero")]
     pub cache_read_tokens: Option<u32>,
-    /// Tokens written to the prompt cache (Anthropic `cache_creation_input_tokens`).
-    /// Billed at a *premium* over fresh input, so it is kept separate from
-    /// [`Self::cache_read_tokens`] — the two rates differ by more than 10x, which
-    /// is why the two are never collapsed into one "cache" figure.
+    /// Tokens written to the prompt cache (Anthropic `cache_creation_input_tokens`,
+    /// OpenAI `cache_write_tokens` on GPT-5.6 and later).
+    ///
+    /// Billed at a *premium* over fresh input — 1.25x on both providers — so it
+    /// is kept separate from [`Self::cache_read_tokens`], which bills at 0.1x.
+    /// The two rates differ by more than 12x, which is why they are never
+    /// collapsed into one "cache" figure.
+    ///
+    /// Providers that cache automatically and charge nothing to create the entry
+    /// (Gemini implicit caching, OpenAI before GPT-5.6) report no write at all,
+    /// and this stays `0` for them. That is correct, not a missing datum.
     ///
     /// Always serialized, as `0` when absent.
     #[serde(serialize_with = "serialize_opt_u32_as_zero")]
@@ -95,6 +102,23 @@ impl LlmUsage {
     pub fn with_cached_input_tokens_included(mut self, cached: u32) -> Self {
         self.prompt_tokens = self.prompt_tokens.saturating_sub(cached);
         self.cache_read_tokens = Some(cached);
+        self.recompute_total();
+        self
+    }
+
+    /// Record cache-write tokens that the provider counted *inside* its prompt
+    /// total, subtracting them so [`Self::prompt_tokens`] is left holding only
+    /// fresh input.
+    ///
+    /// The write-side twin of [`Self::with_cached_input_tokens_included`], for
+    /// OpenAI GPT-5.6 and later: there the three categories *partition* the
+    /// input, so `cached + written + uncached == prompt_tokens`. Anthropic
+    /// reports its write disjointly and must use
+    /// [`Self::with_cache_write_tokens`] instead — calling this for Anthropic
+    /// would subtract tokens that were never in the prompt count.
+    pub fn with_cache_write_tokens_included(mut self, written: u32) -> Self {
+        self.prompt_tokens = self.prompt_tokens.saturating_sub(written);
+        self.cache_write_tokens = Some(written);
         self.recompute_total();
         self
     }
