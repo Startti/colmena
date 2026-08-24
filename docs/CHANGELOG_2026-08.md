@@ -548,3 +548,67 @@ pega contra una API paga y no puede correr en CI. Los guards que **sí** corren 
 **Estado.** done.
 
 ---
+---
+
+## 8. `usage` separa el input fresco de los tokens de cache
+
+**Qué cambió.** El dato de cache ya viajaba end-to-end desde 2026-06-09
+(`cache_read_tokens` / `cache_write_tokens` en los tres adapters, propagados al
+SSE en tres lugares). Lo que faltaba no era plomería sino **semántica**:
+`prompt_tokens` significaba tres cosas distintas según el provider — Anthropic
+lo reportaba neto de cache, OpenAI y Gemini con el cache adentro — y el motor las
+sumaba en el mismo acumulador. Tabla completa por provider en
+[§14](developer_guide/14_llm_deep_dive.md).
+
+**Verificado en vivo contra las tres APIs reales el 2026-08-23**, no inferido de
+su documentación. OpenAI (`gpt-4o`) dio la evidencia más limpia: run 1 sin cache
+`prompt 2550 / cache_read 0`, run 2 con hit `prompt 118 / cache_read 2432`, y
+`total_tokens: 2554` **idéntico en ambas** — `118 + 2432 = 2550`, el prompt de
+run 1 exacto. Gemini: en un cache hit (8820 cacheados) el `promptTokenCount`
+**no cayó** respecto al turno anterior sin hit (9235 → 9259) — prueba de que el
+cache va adentro. Anthropic: `prompt_tokens: 404` con `cache_read_tokens: 1809`,
+imposible si estuviera adentro.
+
+**Dos consecuencias con plata de por medio, ambas cerradas.**
+
+1. **`total_tokens` subcontaba los turnos cacheados de Anthropic un 81%.** Se
+   calculaba como `prompt + completion + thinking`, sin el cache. Medición real:
+   `prompt_tokens: 404`, `cache_read_tokens: 1809`, `total_tokens: 412` — el
+   turno procesó 2213 tokens de entrada.
+2. **La fórmula de costo que documentaba §14 daba negativo en Anthropic.** Decía
+   `costo_input = (promptTokens − cacheReadTokens) × rate`; con esos números,
+   `404 − 1809 = −1405`. Era correcta para OpenAI/Gemini y catastrófica para
+   Anthropic, exactamente por la asimetría de arriba.
+
+**Qué se hizo. Ningún campo cambió de nombre** — la restricción era explícita,
+porque ADP factura sobre estos nombres.
+
+- **Normalización en el adapter**, que es el único lugar donde se conoce la
+  semántica del provider. Nuevo builder `LlmUsage::with_cached_input_tokens_included`
+  para los providers que meten el cache adentro (resta y registra); Anthropic
+  sigue usando `with_cache_read_tokens` (suma sin restar). `prompt_tokens` pasa a
+  significar **input fresco** en los tres, y se sostiene la identidad
+  `prompt + cache_read + cache_write = input real del turno`.
+- **`total_tokens` incluye el cache.** `recompute_total` suma las cinco columnas
+  desde cero en cada mutación, así que el orden de los builders ya no puede
+  alterar el resultado (hay un test que lo fija).
+- **Las dos columnas de cache están siempre presentes**, `0` incluido. El gate
+  `> 0` hacía indistinguible "no hubo cache hit" de "este provider no reporta el
+  dato". `thinking_tokens` conserva su gate.
+- **El `finish` de un run cancelado emite el mismo objeto que uno terminado.**
+  Antes perdía las columnas de cache y thinking por completo
+  (`sse_mapper.rs:386`). Ahora ambos caminos comparten `usage_snapshot()`.
+- **Se cableó el cache en el path Responses API de OpenAI** (streaming y no
+  streaming), que lo descartaba entero.
+
+**Read y write no se colapsan en un solo campo.** Un cache read cuesta ~10% del
+input rate y un cache write ~125%: más de 10x de diferencia. Un número único de
+"cache" no sería facturable.
+
+**Documentación de referencia.**
+- [`docs/adp_migration/2026-08-23-usage-cache-token-split.md`](adp_migration/2026-08-23-usage-cache-token-split.md) — nota de migración; **acción requerida**: los tokens de cache dejaron de facturarse en Gemini/OpenAI, porque salieron de `promptTokens` y el cálculo de ADP no mira las columnas de cache
+- [`docs/developer_guide/14_llm_deep_dive.md`](developer_guide/14_llm_deep_dive.md) — semántica por provider y fórmula de costo corregida
+- [`docs/sse_events_reference.md`](sse_events_reference.md) — esquemas de `usage-summary.nodes` y `finish`
+
+**Estado.** Done. 2313 tests unitarios en verde; semántica de Anthropic y Gemini
+verificada contra las APIs reales.

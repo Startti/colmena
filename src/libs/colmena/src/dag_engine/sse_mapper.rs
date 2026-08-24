@@ -93,6 +93,41 @@ impl SseMapper {
         (level, path)
     }
 
+    /// Run-level token totals, in the shape every stream terminator emits.
+    ///
+    /// Field names are the ones consumers already bind to — none were renamed.
+    /// Two things changed in their meaning:
+    ///
+    /// * `promptTokens` is now *fresh* input on every provider. The adapters
+    ///   normalize away the API-level disagreement (Anthropic reports input net
+    ///   of cache; OpenAI and Gemini fold cache into it), so this number is
+    ///   comparable and summable even when one graph mixes providers.
+    /// * `totalTokens` includes the cache columns. It previously omitted them,
+    ///   which understated a cached Anthropic turn by roughly 80%.
+    ///
+    /// `cacheReadTokens` and `cacheWriteTokens` are always present, including as
+    /// `0` — an absent field used to be ambiguous between "no cache hit" and
+    /// "this provider does not report it". They stay two separate fields because
+    /// their rates differ by more than 10x, so a combined figure could not be
+    /// billed. `thinkingTokens` keeps its existing `> 0` gate.
+    fn usage_snapshot(&self) -> Value {
+        let mut usage_obj = json!({
+            "promptTokens": self.total_prompt_tokens,
+            "completionTokens": self.total_completion_tokens,
+            "cacheReadTokens": self.total_cache_read_tokens,
+            "cacheWriteTokens": self.total_cache_write_tokens,
+            "totalTokens": self.total_prompt_tokens
+                + self.total_completion_tokens
+                + self.total_thinking_tokens
+                + self.total_cache_read_tokens
+                + self.total_cache_write_tokens
+        });
+        if self.total_thinking_tokens > 0 {
+            usage_obj["thinkingTokens"] = json!(self.total_thinking_tokens);
+        }
+        usage_obj
+    }
+
     /// Convert one `DagExecutionEvent` into the ordered list of JSON protocol parts
     /// that should be emitted for that event. Returns 0..N values.
     ///
@@ -323,20 +358,7 @@ impl SseMapper {
                     })
                     .unwrap_or("stop");
 
-                let mut usage_obj = json!({
-                    "promptTokens": self.total_prompt_tokens,
-                    "completionTokens": self.total_completion_tokens,
-                    "totalTokens": self.total_prompt_tokens + self.total_completion_tokens + self.total_thinking_tokens
-                });
-                if self.total_thinking_tokens > 0 {
-                    usage_obj["thinkingTokens"] = json!(self.total_thinking_tokens);
-                }
-                if self.total_cache_read_tokens > 0 {
-                    usage_obj["cacheReadTokens"] = json!(self.total_cache_read_tokens);
-                }
-                if self.total_cache_write_tokens > 0 {
-                    usage_obj["cacheWriteTokens"] = json!(self.total_cache_write_tokens);
-                }
+                let usage_obj = self.usage_snapshot();
 
                 Some(json!({
                     "type": "finish",
@@ -383,11 +405,9 @@ impl SseMapper {
                 }));
 
                 // Terminator the frontend already respects (closes the stream).
-                let usage_obj = json!({
-                    "promptTokens": self.total_prompt_tokens,
-                    "completionTokens": self.total_completion_tokens,
-                    "totalTokens": self.total_prompt_tokens + self.total_completion_tokens + self.total_thinking_tokens
-                });
+                // Uses the same snapshot as `GraphFinish`: a cancelled run used
+                // real tokens and must report its cache split too.
+                let usage_obj = self.usage_snapshot();
                 Some(json!({
                     "type": "finish",
                     "finishReason": "cancelled",
@@ -819,6 +839,98 @@ mod tests {
             "subgraph tool-input-start must not be suppressed by top-level seen_tool_ids"
         );
         assert_eq!(sub_parts[0]["type"], "subgraph-tool-input-start");
+    }
+
+    /// Feeds one usage event and returns the `finish` frame's `usage` object.
+    fn usage_after(ev: DagExecutionEvent, terminator: DagExecutionEvent) -> Value {
+        let mut mapper = SseMapper::new();
+        mapper.map(&ev);
+        mapper
+            .map(&terminator)
+            .into_iter()
+            .find(|p| p["type"] == "finish")
+            .expect("must emit a finish terminator")["usage"]
+            .clone()
+    }
+
+    fn usage_event(
+        prompt: u32,
+        completion: u32,
+        read: Option<u32>,
+        write: Option<u32>,
+    ) -> DagExecutionEvent {
+        DagExecutionEvent::LlmUsage {
+            node_id: "llm_1".into(),
+            prompt_tokens: prompt,
+            completion_tokens: completion,
+            thinking_tokens: None,
+            cache_read_tokens: read,
+            cache_write_tokens: write,
+        }
+    }
+
+    #[test]
+    fn finish_usage_keeps_existing_field_names() {
+        // The wire contract: these four keys must never be renamed, because
+        // downstream billing binds to them.
+        let usage = usage_after(
+            usage_event(404, 8, Some(1809), None),
+            DagExecutionEvent::GraphFinish { output: json!({}) },
+        );
+        for key in [
+            "promptTokens",
+            "completionTokens",
+            "totalTokens",
+            "cacheReadTokens",
+        ] {
+            assert!(usage.get(key).is_some(), "missing expected key `{key}`");
+        }
+    }
+
+    #[test]
+    fn finish_usage_counts_cache_in_the_total() {
+        // Real Anthropic numbers, measured live 2026-08-23. The old total was
+        // 412 and hid 1809 billed cache-read tokens.
+        let usage = usage_after(
+            usage_event(404, 8, Some(1809), None),
+            DagExecutionEvent::GraphFinish { output: json!({}) },
+        );
+        assert_eq!(usage["promptTokens"], 404, "prompt stays fresh-only");
+        assert_eq!(usage["cacheReadTokens"], 1809);
+        assert_eq!(usage["totalTokens"], 404 + 8 + 1809);
+    }
+
+    #[test]
+    fn finish_usage_always_carries_both_cache_fields_even_at_zero() {
+        // An absent field could not be distinguished from a provider that never
+        // reports one, so both are emitted unconditionally.
+        let usage = usage_after(
+            usage_event(100, 10, None, None),
+            DagExecutionEvent::GraphFinish { output: json!({}) },
+        );
+        assert_eq!(usage["cacheReadTokens"], 0);
+        assert_eq!(usage["cacheWriteTokens"], 0);
+        assert_eq!(usage["totalTokens"], 110);
+    }
+
+    #[test]
+    fn cancelled_finish_reports_the_same_usage_shape_as_graph_finish() {
+        // A cancelled run burned real tokens; its terminator used to drop the
+        // cache and thinking columns entirely.
+        let ev = usage_event(404, 8, Some(1809), Some(200));
+        let finished = usage_after(
+            ev.clone(),
+            DagExecutionEvent::GraphFinish { output: json!({}) },
+        );
+        let cancelled = usage_after(
+            ev,
+            DagExecutionEvent::Cancelled {
+                reason: Some("stopped".into()),
+                partial_output: json!({}),
+            },
+        );
+        assert_eq!(finished, cancelled);
+        assert_eq!(cancelled["cacheWriteTokens"], 200);
     }
 
     #[test]

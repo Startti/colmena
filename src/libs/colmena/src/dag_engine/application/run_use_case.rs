@@ -1129,9 +1129,13 @@ impl DagRunUseCase {
                     obj.insert("prompt_tokens".into(), json!(pt));
                     obj.insert("completion_tokens".into(), json!(ct));
                     if *tt > 0 { obj.insert("thinking_tokens".into(), json!(tt)); }
-                    if *cr > 0 { obj.insert("cache_read_tokens".into(), json!(cr)); }
-                    if *cw > 0 { obj.insert("cache_write_tokens".into(), json!(cw)); }
-                    obj.insert("total_tokens".into(), json!(pt + ct + tt));
+                    // Always emitted, `0` included: an absent cache field could not be
+                    // told apart from a provider that never reports one. Kept as two
+                    // fields because read and write bill at rates >10x apart.
+                    obj.insert("cache_read_tokens".into(), json!(cr));
+                    obj.insert("cache_write_tokens".into(), json!(cw));
+                    // Cache tokens count toward the total — they were processed and billed.
+                    obj.insert("total_tokens".into(), json!(pt + ct + tt + cr + cw));
                     Value::Object(obj)
                 }).collect();
                 yield DagExecutionEvent::GraphUsageSummary { entries };
