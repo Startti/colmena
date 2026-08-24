@@ -697,3 +697,30 @@ correcto, no un dato faltante.
 **Estado.** Done. Cuatro tests nuevos sobre la forma de usage de GPT-5.6, incluido
 uno que fija la identidad `prompt + read + write == input reportado`. No se pudo
 verificar en vivo: no hay acceso a un modelo GPT-5.6 en esta cuenta.
+
+## 11. La Responses API de OpenAI aprende a leer tool calls (groundwork)
+
+**Qué cambió.** El adapter de OpenAI ya sabía **hablar** la Responses API para
+adjuntos, pero solo leía el `output_text` del **primer** item de la respuesta.
+Ahora el parseo entiende toda la forma de la respuesta:
+
+- Nuevo `parse_responses_output` recorre **todos** los items del array `output`:
+  los `message` aportan el texto (aunque haya un item `reasoning` delante, que
+  antes tapaba el texto), y los `function_call` se convierten en `ToolCall`
+  (id = `call_id`, el que se devuelve luego en `function_call_output`).
+- `call_responses` adjunta esos tool calls al `LlmResponse`.
+- `stream_responses` maneja los eventos `response.output_item.added`
+  (function_call) y `response.function_call_arguments.delta`, emitiendo
+  `ToolCallChunk` igual que el path de chat completions.
+
+**Por qué solo groundwork.** Este slice **no cambia el ruteo**: hoy nada dirige
+tools a la Responses API, así que el tráfico existente (adjuntos, sin tool calls)
+se comporta idéntico — el escaneo de todos los items es una mejora estricta
+incluso ahí. Habilitar el ruteo `gpt-5*` + tools es el slice siguiente
+(§12), que se apoya en este parser.
+
+**ADP no afectado.** Cambio interno del wire OpenAI↔Colmena; SSE y `usage`
+idénticos.
+
+**Estado.** Done. Un test nuevo sobre la forma de respuesta gpt-5 (texto + tool
+call tras un item de reasoning).

@@ -722,6 +722,60 @@ mod openai_cache_usage_tests {
     }
 }
 
+/// Parse a non-streaming Responses API body into `(text, tool_calls)`.
+///
+/// The `output` array interleaves item kinds: `reasoning` items (ignored),
+/// `message` items (their `output_text` blocks are the assistant text) and
+/// `function_call` items (each becomes a [`ToolCall`]). A tool call's id is the
+/// `call_id` echoed back in a later `function_call_output`; it falls back to the
+/// item `id` only if `call_id` is absent. Scanning ALL items — not just the
+/// first — is what lets a gpt-5 response whose first item is `reasoning` still
+/// surface its text and tool calls.
+fn parse_responses_output(json_val: &serde_json::Value) -> (String, Vec<ToolCall>) {
+    let mut content = String::new();
+    let mut tool_calls: Vec<ToolCall> = Vec::new();
+
+    if let Some(outputs) = json_val.get("output").and_then(|o| o.as_array()) {
+        for item in outputs {
+            match item.get("type").and_then(|t| t.as_str()) {
+                Some("message") => {
+                    if let Some(contents) = item.get("content").and_then(|c| c.as_array()) {
+                        for block in contents {
+                            if block.get("type").and_then(|t| t.as_str()) == Some("output_text") {
+                                if let Some(t) = block.get("text").and_then(|t| t.as_str()) {
+                                    content.push_str(t);
+                                }
+                            }
+                        }
+                    }
+                }
+                Some("function_call") => {
+                    let call_id = item
+                        .get("call_id")
+                        .and_then(|v| v.as_str())
+                        .or_else(|| item.get("id").and_then(|v| v.as_str()))
+                        .unwrap_or_default()
+                        .to_string();
+                    let name = item
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    let arguments = item
+                        .get("arguments")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    tool_calls.push(ToolCall::new(call_id, FunctionCall::new(name, arguments)));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    (content, tool_calls)
+}
+
 // SSE Parser implementation
 fn openai_usage_to_llm_usage(u: OpenAiUsage) -> LlmUsage {
     let mut usage = LlmUsage::new(u.prompt_tokens, u.completion_tokens);
@@ -1000,20 +1054,7 @@ impl OpenAiAdapter {
         let json_val: serde_json::Value = serde_json::from_str(&response_text)
             .map_err(|e| LlmError::parsing_error(e.to_string()))?;
 
-        let mut content = String::new();
-        if let Some(outputs) = json_val.get("output").and_then(|o| o.as_array()) {
-            if let Some(first) = outputs.first() {
-                if let Some(contents) = first.get("content").and_then(|c| c.as_array()) {
-                    for block in contents {
-                        if block.get("type").and_then(|t| t.as_str()) == Some("output_text") {
-                            if let Some(t) = block.get("text").and_then(|t| t.as_str()) {
-                                content.push_str(t);
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        let (content, tool_calls) = parse_responses_output(&json_val);
 
         let mut usage_obj = None;
         if let Some(usage) = json_val.get("usage") {
@@ -1053,6 +1094,9 @@ impl OpenAiAdapter {
         )?;
         if let Some(u) = usage_obj {
             llm_response = llm_response.with_usage(u);
+        }
+        if !tool_calls.is_empty() {
+            llm_response = llm_response.with_tool_calls(tool_calls);
         }
 
         Ok(llm_response)
@@ -1097,6 +1141,11 @@ impl OpenAiAdapter {
 
         let sse_stream = async_stream::stream! {
             let mut parser = sse_parser;
+            // output_index → (call_id, name) for streamed function_call items, so
+            // the argument-delta events (which carry only the index) can be
+            // attributed back to their call.
+            let mut fc_meta: std::collections::HashMap<u64, (String, String)> =
+                std::collections::HashMap::new();
             while let Some(event_res) = parser.next().await {
                 match event_res {
                     Ok(SseEvent::Message(data)) => {
@@ -1116,6 +1165,66 @@ impl OpenAiAdapter {
                                 yield Ok(LlmStreamChunk::new(
                                     request_id.clone(),
                                     LlmStreamPart::Content(delta.to_string()),
+                                    provider.clone(),
+                                    false,
+                                ));
+                            }
+                        } else if event_type == "response.output_item.added" {
+                            // A new output item begins. For function_call items this
+                            // carries the call_id + name; register them and emit an
+                            // opening ToolCallChunk (empty args) so downstream keys
+                            // the call by its index before the argument deltas arrive.
+                            let item = event_json.get("item");
+                            if item.and_then(|i| i.get("type")).and_then(|t| t.as_str())
+                                == Some("function_call")
+                            {
+                                let idx = event_json
+                                    .get("output_index")
+                                    .and_then(|v| v.as_u64())
+                                    .unwrap_or(0);
+                                let call_id = item
+                                    .and_then(|i| i.get("call_id"))
+                                    .and_then(|v| v.as_str())
+                                    .or_else(|| {
+                                        item.and_then(|i| i.get("id")).and_then(|v| v.as_str())
+                                    })
+                                    .unwrap_or_default()
+                                    .to_string();
+                                let name = item
+                                    .and_then(|i| i.get("name"))
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or_default()
+                                    .to_string();
+                                fc_meta.insert(idx, (call_id.clone(), name.clone()));
+                                yield Ok(LlmStreamChunk::new(
+                                    request_id.clone(),
+                                    LlmStreamPart::ToolCallChunk(ToolCallChunk {
+                                        index: idx as usize,
+                                        id: call_id,
+                                        name,
+                                        args_chunk: String::new(),
+                                        provider_signature: None,
+                                    }),
+                                    provider.clone(),
+                                    false,
+                                ));
+                            }
+                        } else if event_type == "response.function_call_arguments.delta" {
+                            if let Some(delta) = event_json.get("delta").and_then(|d| d.as_str()) {
+                                let idx = event_json
+                                    .get("output_index")
+                                    .and_then(|v| v.as_u64())
+                                    .unwrap_or(0);
+                                let (call_id, name) = fc_meta.get(&idx).cloned().unwrap_or_default();
+                                yield Ok(LlmStreamChunk::new(
+                                    request_id.clone(),
+                                    LlmStreamPart::ToolCallChunk(ToolCallChunk {
+                                        index: idx as usize,
+                                        id: call_id,
+                                        name,
+                                        args_chunk: delta.to_string(),
+                                        provider_signature: None,
+                                    }),
                                     provider.clone(),
                                     false,
                                 ));
@@ -1796,5 +1905,26 @@ mod tests {
         assert_eq!(systems.len(), 2, "both System messages survive");
         assert_eq!(systems[0], "stable system");
         assert!(systems[1].ends_with("## Temporal\n2026-08-22T10:00:00"));
+    }
+
+    #[test]
+    fn parse_responses_output_reads_text_and_function_calls_past_reasoning() {
+        // Real gpt-5 shape: a reasoning item precedes the message, and a
+        // function_call item carries call_id (echoed back) + id.
+        let json_val = serde_json::json!({
+            "output": [
+                { "type": "reasoning", "id": "rs_1", "summary": [] },
+                { "type": "message", "role": "assistant",
+                  "content": [{ "type": "output_text", "text": "Hola" }] },
+                { "type": "function_call", "id": "fc_1", "call_id": "call_abc",
+                  "name": "recall_history", "arguments": "{\"turn\":1}" }
+            ]
+        });
+        let (content, calls) = parse_responses_output(&json_val);
+        assert_eq!(content, "Hola", "text is found even after a reasoning item");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, "call_abc", "call_id is the id echoed back");
+        assert_eq!(calls[0].function.name, "recall_history");
+        assert_eq!(calls[0].function.arguments, "{\"turn\":1}");
     }
 }
