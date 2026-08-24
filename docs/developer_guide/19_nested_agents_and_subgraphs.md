@@ -163,10 +163,12 @@ se filtran del mapeo IN.
 
 ### Comportamiento
 
-- **Stateless por llamada** — cada invocación arranca con memoria vacía. El
-  aislamiento se logra con un *path qualifier* efímero derivado del
-  `tool_call_id`; dos llamadas a la misma tool no comparten memoria. Por ser
-  determinista del `tool_call_id`, el resume HITL reconstruye el mismo scope.
+- **Stateless por llamada (default)** — por defecto cada invocación arranca con
+  memoria vacía. El aislamiento se logra con un *path qualifier* efímero derivado
+  del `tool_call_id`; dos llamadas a la misma tool no comparten memoria. Por ser
+  determinista del `tool_call_id`, el resume HITL reconstruye el mismo scope. Este
+  comportamiento es configurable con `memory_mode` (ver
+  [Memoria del sub-agente](#memoria-del-sub-agente-memory_mode)).
 - **HITL (suspend/resume)** — si el sub-agente se suspende para preguntar al
   usuario, el `SUSPENDED` hace *bubble-up* por el loop de tools del padre
   reusando los mismos rieles que cualquier otra tool. El resume reanuda al hijo
@@ -175,6 +177,50 @@ se filtran del mapeo IN.
   del padre con prefijo `subgraph-*`.
 - **Profundidad sin tope** — no hay límite de anidación; ver
   [Profundidad de anidación](#profundidad-de-anidación) más abajo.
+
+### Memoria del sub-agente (`memory_mode`)
+
+Un sub-agente usado como tool no recuerda nada entre turnos **por diseño**: la
+memoria conversacional se keya por `(agent_session_id | session_id, node_id)`, y el
+`node_id` de una tool es `tool/<tool_call_id>` — efímero, único por llamada. Eso da
+aislamiento perfecto, pero impide construir un sub-agente conversacional (que
+pregunte, reciba respuesta y siga en una llamada posterior).
+
+`memory_mode` es un campo **del operador** (nunca visible al LLM) en la entrada de
+`tool_configurations` que elige cómo se keya esa memoria. Solo aplica a tools cuyo
+`node_type` lleva memoria (`llm_call`, `subgraph`); ponerlo en cualquier otro
+(`http_request`, etc.) **falla la validación del grafo al cargar**. Requiere que el
+`llm_call` que recuerda tenga `connection_url` (sin él la memoria es en-proceso y no
+sobrevive entre runs).
+
+| `memory_mode` | `node_id` | Comportamiento |
+|---|---|---|
+| `stateless` (**default**) | `tool/<tool_call_id>` | Cada llamada aislada. Es lo de hoy; omitir el campo equivale a esto. |
+| `persistent` | `tool/<tool_name>` | Una sola conversación compartida por todas las llamadas al tool. **Aún no activo** — llega en un incremento siguiente. |
+| `dynamic` | `tool/<tool_name>/<thread_id>` | El modelo nombra el hilo por llamada vía un parámetro `thread_id` **requerido** que el motor auto-expone; un id nuevo abre un hilo, un id previo lo continúa. **Aún no activo** — llega en un incremento siguiente. |
+
+En el build actual solo `stateless` está activo; declarar `persistent` o `dynamic`
+falla al cargar con un mensaje claro (no queda como no-op silencioso).
+
+```json
+"tool_configurations": {
+  "archivador": {
+    "name": "archivador",
+    "node_type": "subgraph",
+    "memory_mode": "stateless",
+    "description": "Sub-agente que guarda y consulta datos.",
+    "node_schema": {
+      "child_graph_inline": { "fixed": { "nodes": { "keeper": { "type": "llm_call", "config": { "connection_url": "${DATABASE_URL}", "prompt": "{{task}}" } } }, "edges": [] } },
+      "task": { "type": "string", "required": true, "description": "Instrucción para el sub-agente." }
+    }
+  }
+}
+```
+
+`orchestrator` **no** está en el allowlist todavía: no propaga `__colmena_node_id_path`
+como sí lo hace `subgraph`, así que su memoria como tool está sin verificar. Los nodos
+internos del orchestrator (`planner`/`critic`/`reactor`) nunca son entradas de
+`tool_configurations` — heredan el path de su padre y por eso no se listan.
 
 ### Profundidad de anidación
 

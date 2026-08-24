@@ -122,7 +122,7 @@ pub fn into_tool_result(call_id: &str, r: &DescribeToolDispatchResult) -> ToolRe
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dag_engine::domain::tool_configuration::{NodeSchema, NodeSchemaField};
+    use crate::dag_engine::domain::tool_configuration::{MemoryMode, NodeSchema, NodeSchemaField};
     use serde_json::json;
     use std::collections::HashMap;
 
@@ -169,6 +169,7 @@ mod tests {
             expose_sub_tools: None,
             summary: None,
             eager: false,
+            memory_mode: MemoryMode::Stateless,
         }
     }
 

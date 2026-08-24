@@ -7,7 +7,7 @@ use crate::dag_engine::application::secure_value_service::SecureValueService;
 use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
 use crate::dag_engine::domain::observer::ExecutionObserver;
 use crate::dag_engine::domain::tool_configuration::{
-    NodeSchema, NodeSchemaField, ToolConfiguration,
+    MemoryMode, NodeSchema, NodeSchemaField, ToolConfiguration,
 };
 use crate::dag_engine::infrastructure::nodes::qa_response_parser::parse_qa_response;
 use async_trait::async_trait;
@@ -92,6 +92,7 @@ pub fn synthetic_secure_suspend_tool(name: &str) -> ToolConfiguration {
         expose_sub_tools: None,
         summary: None,
         eager: false,
+        memory_mode: MemoryMode::Stateless,
     }
 }
 

@@ -28,7 +28,9 @@ use crate::dag_engine::application::secure_value_service::SecureValueService;
 use crate::dag_engine::domain::events::DagExecutionEvent;
 use crate::dag_engine::domain::node::ExecutableNode;
 use crate::dag_engine::domain::observer::{ChildScopeObserver, ExecutionObserver, NodeEvent};
-use crate::dag_engine::domain::tool_configuration::{ToolConfiguration, DYNAMIC_PLACEHOLDER};
+use crate::dag_engine::domain::tool_configuration::{
+    MemoryMode, ToolConfiguration, DYNAMIC_PLACEHOLDER,
+};
 use crate::llm::domain::{LlmError, ToolCall, ToolExecutor, ToolResult};
 use async_trait::async_trait;
 use serde_json::Value;
@@ -819,6 +821,13 @@ impl DagToolExecutor {
         } else {
             tool_name
         };
+
+        // Fail-closed on a misconfigured memory_mode (wrong node type, or a mode not yet
+        // active) before building the definition, so a bad graph errors at tool-build
+        // time instead of silently behaving as stateless.
+        tool_config
+            .validate_memory_config()
+            .map_err(|e| format!("tool '{}': {}", effective_name, e))?;
 
         // BRANCH 0 (HIGHEST PRIORITY): node_schema
         if let Some(schema) = &tool_config.node_schema {
@@ -2639,6 +2648,7 @@ fn synthesise_default_toolkit_config(alias: &str) -> ToolConfiguration {
         expose_sub_tools: Some(SubToolFilter::all()),
         summary: None,
         eager: false,
+        memory_mode: MemoryMode::Stateless,
     }
 }
 
@@ -2790,6 +2800,7 @@ mod tests {
                 expose_sub_tools: None,
                 summary: None,
                 eager: false,
+                memory_mode: MemoryMode::Stateless,
             },
         );
 
@@ -2834,6 +2845,7 @@ mod tests {
             expose_sub_tools: None,
             summary: None,
             eager: false,
+            memory_mode: MemoryMode::Stateless,
         };
 
         // Malformed: array field without `items`.
@@ -2901,6 +2913,7 @@ mod tests {
                 expose_sub_tools: None,
                 summary: None,
                 eager: false,
+                memory_mode: MemoryMode::Stateless,
             },
         );
 
@@ -2946,6 +2959,7 @@ mod tests {
                 expose_sub_tools: None,
                 summary: None,
                 eager: false,
+                memory_mode: MemoryMode::Stateless,
             },
         );
 
@@ -2995,6 +3009,7 @@ mod tests {
                 expose_sub_tools: None,
                 summary: None,
                 eager: false,
+                memory_mode: MemoryMode::Stateless,
             },
         );
 
@@ -3050,6 +3065,7 @@ mod tests {
                 expose_sub_tools: None,
                 summary: None,
                 eager: false,
+                memory_mode: MemoryMode::Stateless,
             },
         );
 
@@ -3102,6 +3118,7 @@ mod tests {
                 expose_sub_tools: None,
                 summary: None,
                 eager: false,
+                memory_mode: MemoryMode::Stateless,
             },
         );
 
@@ -3151,6 +3168,7 @@ mod tests {
                 expose_sub_tools: None,
                 summary: None,
                 eager: false,
+                memory_mode: MemoryMode::Stateless,
             },
         );
 
@@ -3209,6 +3227,7 @@ mod tests {
                 expose_sub_tools: None,
                 summary: None,
                 eager: false,
+                memory_mode: MemoryMode::Stateless,
             },
         );
 
@@ -3279,6 +3298,7 @@ mod tests {
                 expose_sub_tools: None,
                 summary: None,
                 eager: false,
+                memory_mode: MemoryMode::Stateless,
             },
         );
 
@@ -3337,6 +3357,7 @@ mod tests {
                 expose_sub_tools: None,
                 summary: None,
                 eager: false,
+                memory_mode: MemoryMode::Stateless,
             },
         );
 
@@ -3403,6 +3424,7 @@ mod tests {
                 expose_sub_tools: None,
                 summary: None,
                 eager: false,
+                memory_mode: MemoryMode::Stateless,
             },
         );
 
@@ -3495,6 +3517,7 @@ mod tests {
             expose_sub_tools: None,
             summary: None,
             eager: false,
+            memory_mode: MemoryMode::Stateless,
         };
         let executor =
             DagToolExecutor::new(registry, HashMap::new()).with_describe_tool_lookup(vec![cfg]);
@@ -3534,6 +3557,7 @@ mod tests {
             expose_sub_tools: None,
             summary: None,
             eager: false,
+            memory_mode: MemoryMode::Stateless,
         };
 
         let observed: Arc<std::sync::Mutex<Vec<String>>> =
@@ -3591,6 +3615,7 @@ mod tests {
                 expose_sub_tools: None,
                 summary: None,
                 eager: false,
+                memory_mode: MemoryMode::Stateless,
             },
         );
 
@@ -3775,6 +3800,7 @@ mod tests {
                 expose_sub_tools: None,
                 summary: None,
                 eager: false,
+                memory_mode: MemoryMode::Stateless,
             },
         );
 
@@ -3838,6 +3864,7 @@ mod tests {
                 expose_sub_tools: None,
                 summary: None,
                 eager: false,
+                memory_mode: MemoryMode::Stateless,
             },
         );
 
@@ -3927,6 +3954,7 @@ mod toolkit_runtime_tests {
                 expose_sub_tools: Some(SubToolFilter::all()),
                 summary: None,
                 eager: false,
+                memory_mode: MemoryMode::Stateless,
             },
         );
         DagToolExecutor::new(registry, configs)
@@ -4012,6 +4040,7 @@ mod toolkit_runtime_tests {
                 expose_sub_tools: Some(SubToolFilter::List(vec!["echo".to_string()])),
                 summary: None,
                 eager: false,
+                memory_mode: MemoryMode::Stateless,
             },
         );
         let exec = DagToolExecutor::new(registry, configs);

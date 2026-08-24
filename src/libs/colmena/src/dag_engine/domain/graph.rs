@@ -76,7 +76,9 @@ impl Graph {
     /// - Malformed `node_schema` on any tool in `tool_configurations`.
     pub fn validate(&self) -> Result<(), crate::dag_engine::domain::error::DagError> {
         use crate::dag_engine::domain::error::DagError;
-        use crate::dag_engine::domain::tool_configuration::{parse_node_schema, NodeSchema};
+        use crate::dag_engine::domain::tool_configuration::{
+            parse_node_schema, validate_memory_mode, MemoryMode, NodeSchema,
+        };
 
         for node_id in self.nodes.keys() {
             if node_id.contains('/') {
@@ -102,6 +104,32 @@ impl Graph {
                 continue;
             };
             for (tool_name, tool_cfg) in tools {
+                // Reject a misconfigured `memory_mode` up front (wrong node type, or a
+                // mode not yet active) so a bad graph fails at load instead of silently
+                // dropping the tool at build time. Only touches configs that set the
+                // field — absent → stateless → skipped.
+                if let Some(mm_value) = tool_cfg.get("memory_mode") {
+                    let mode: MemoryMode =
+                        serde_json::from_value(mm_value.clone()).map_err(|e| {
+                            DagError::InvalidToolSchema {
+                                node_id: node_id.clone(),
+                                tool_name: tool_name.clone(),
+                                reason: format!("invalid memory_mode value: {e}"),
+                            }
+                        })?;
+                    let cfg_node_type = tool_cfg
+                        .get("node_type")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    validate_memory_mode(cfg_node_type, mode).map_err(|reason| {
+                        DagError::InvalidToolSchema {
+                            node_id: node_id.clone(),
+                            tool_name: tool_name.clone(),
+                            reason,
+                        }
+                    })?;
+                }
+
                 let Some(schema_value) = tool_cfg.get("node_schema") else {
                     continue;
                 };
@@ -213,6 +241,72 @@ mod tests {
     #[test]
     fn validate_accepts_node_without_tools() {
         let g = graph_with_node_id("plain_node");
+        assert!(g.validate().is_ok());
+    }
+
+    /// One-node graph whose `agent` declares a single tool `my_tool` with the given
+    /// node_type and memory_mode.
+    fn graph_with_tool_memory(node_type: &str, memory_mode: serde_json::Value) -> Graph {
+        let json = json!({
+            "nodes": {
+                "agent": {
+                    "type": "llm_call",
+                    "config": {
+                        "tool_configurations": {
+                            "my_tool": { "node_type": node_type, "memory_mode": memory_mode }
+                        }
+                    }
+                }
+            },
+            "edges": []
+        });
+        serde_json::from_value(json).unwrap()
+    }
+
+    #[test]
+    fn validate_rejects_memory_mode_on_non_capable_tool() {
+        let g = graph_with_tool_memory("http_request", json!("dynamic"));
+        let err = g.validate().unwrap_err().to_string();
+        assert!(err.contains("my_tool"), "should name the tool, got: {err}");
+        assert!(
+            err.contains("only valid on memory-bearing"),
+            "should explain the allowlist, got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_not_yet_active_mode() {
+        let g = graph_with_tool_memory("llm_call", json!("persistent"));
+        let err = g.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("not active in this build"),
+            "should explain the mode is not active yet, got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_unknown_memory_mode_value() {
+        let g = graph_with_tool_memory("llm_call", json!("sometimes"));
+        let err = g.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("invalid memory_mode value"),
+            "should flag the bad enum value, got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_accepts_stateless_and_absent_memory_mode() {
+        assert!(graph_with_tool_memory("http_request", json!("stateless"))
+            .validate()
+            .is_ok());
+        // absent memory_mode → default stateless → accepted
+        let g: Graph = serde_json::from_value(json!({
+            "nodes": { "agent": { "type": "llm_call", "config": {
+                "tool_configurations": { "my_tool": { "node_type": "subgraph" } }
+            }}},
+            "edges": []
+        }))
+        .unwrap();
         assert!(g.validate().is_ok());
     }
 }

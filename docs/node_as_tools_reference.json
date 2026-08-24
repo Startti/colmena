@@ -67,6 +67,19 @@
           "required": false,
           "default": false,
           "description": "When true, the tool output is hashed before being returned to the LLM — real values (e.g. access tokens) are replaced with safe placeholders like '<value_1>'. The engine resolves placeholders back to real values when used in subsequent tool calls via inject_secrets(). Requires DATABASE_URL and SECURE_VALUES_KEY env vars."
+        },
+        "memory_mode": {
+          "type": "string",
+          "required": false,
+          "default": "stateless",
+          "valid_values": ["stateless", "persistent", "dynamic"],
+          "allowed_node_types": ["llm_call", "subgraph"],
+          "description": "How a memory-bearing sub-agent tool keys its conversational memory ACROSS calls. Only valid on tools whose node_type carries memory ('llm_call', 'subgraph'); setting it on any other node type (e.g. 'http_request') fails graph validation at load. Conversational memory is keyed on (agent_session_id | session_id, node_id); memory_mode chooses that node_id. Requires the memory-bearing llm_call to have a 'connection_url' so history persists across runs (without one memory is in-process only and does not survive). 'orchestrator' is not accepted yet (its path propagation as a tool is unverified).",
+          "modes": {
+            "stateless": "DEFAULT. Every call is an isolated conversation (node_id = tool/<tool_call_id>). Same as omitting the field — today's behavior.",
+            "persistent": "One shared conversation for every call to this tool (node_id = tool/<tool_name>). NOT ACTIVE YET — ships in a follow-up increment.",
+            "dynamic": "The model names the thread per call via a REQUIRED 'thread_id' parameter the engine auto-exposes (node_id = tool/<tool_name>/<thread_id>). A new id starts a thread; a prior id continues it. NOT ACTIVE YET — ships in a follow-up increment."
+          }
         }
       }
     },
