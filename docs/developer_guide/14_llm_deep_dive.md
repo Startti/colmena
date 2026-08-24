@@ -738,12 +738,31 @@ Anthropic).
 
 ### Tabla resumen
 
-| Provider | Mecanismo | Qué se cachea | TTL | Mínimo prefix | Descuento |
-|---|---|---|---|---|---|
-| **OpenAI** | Automatic server-side | Prefix completo del request | ~5-10 min | 1024 tokens | 50% sobre cached |
-| **Anthropic** | `cache_control: ephemeral` markers | System message + tools[] | 5 min | ninguno explícito | ~90% sobre cached |
-| **Gemini 2.5+** | Implicit caching (automatic) | Prefix del request | ~3-5 min | 1024 (flash) / 2048 (pro) | 25-75% sobre cached |
+| Provider | Mecanismo | Qué se cachea | TTL | Mínimo prefix | Cache read | Cache write |
+|---|---|---|---|---|---|---|
+| **OpenAI** | Automatic server-side | Prefix completo del request | ~5-10 min | 1024 tokens | 0.10× (0.50× en gpt-4o y anteriores) | **1.25× desde GPT-5.6**; gratis antes |
+| **Anthropic** | `cache_control: ephemeral` markers | System message + tools[] | 5 min / 1 h | ninguno explícito | 0.10× | 1.25× (5 min) · 2× (1 h) |
+| **Gemini 2.5+** | Implicit caching (automatic) | Prefix del request | ~3-5 min | 1024 (flash) / 2048 (pro) | 0.10× | gratis (implicit) |
 
+> **Multiplicadores relativos al precio de input base.** Verificado contra la
+> documentación de cada provider el 2026-08-23.
+>
+> Dos correcciones respecto de lo que decía esta guía antes: el descuento de
+> lectura de OpenAI pasó de 50% a **90%** a partir de la serie gpt-5.x, y el de
+> Gemini no es "25-75%" sino **90%** en los modelos 2.5 y posteriores (era 75%
+> en los 2.0).
+>
+> **OpenAI ahora sí cobra por escribir.** Desde GPT-5.6 la creación de cache
+> cuesta 1.25× y se reporta en `prompt_tokens_details.cache_write_tokens`. En
+> modelos anteriores la creación es gratuita y el campo no existe. Igual que
+> `cached_tokens`, es un **subconjunto** de `prompt_tokens`: las tres categorías
+> particionan el input (`cached + written + uncached = prompt_tokens`), así que
+> el adapter resta ambas.
+>
+> **Gemini tiene un segundo modo con costo de escritura** que Colmena no usa: el
+> *explicit caching* vía la API `CachedContent`, que cobra almacenamiento por
+> hora ($1.00 por 1M tokens/hora en 2.5 Flash, $4.50 en 2.5 Pro). El *implicit
+> caching* que usamos no cobra creación ni almacenamiento.
 ### Cómo funciona internamente
 
 **OpenAI** — el adapter no hace nada en el request body. La API server-side
@@ -813,6 +832,46 @@ tienen **implicit caching** automático server-side (lanzado mayo 2025) que
 cachea cualquier prefix repetido ≥1024 tokens (flash) o ≥2048 tokens (pro).
 El adapter solo lee `usageMetadata.cachedContentTokenCount` y lo mapea a
 `LlmUsage::cache_read_tokens`.
+
+### Precios por modelo (USD por millón de tokens, 2026-08-23)
+
+**Anthropic** — los únicos con dos duraciones de cache:
+
+| Modelo | Input | Write 5 min | Write 1 h | Read | Output |
+|---|---|---|---|---|---|
+| Claude Fable 5 | $10 | $12.50 | $20 | $1 | $50 |
+| Claude Opus 5 | $5 | $6.25 | $10 | $0.50 | $25 |
+| Claude Sonnet 5 | $2 | $2.50 | $4 | $0.20 | $10 |
+| Claude Sonnet 4.6 | $3 | $3.75 | $6 | $0.30 | $15 |
+| Claude Haiku 4.5 | $1 | $1.25 | $2 | $0.10 | $5 |
+
+**OpenAI** — `—` significa que ese modelo no cobra por escribir:
+
+| Modelo | Input | Cached (read) | Write | Output |
+|---|---|---|---|---|
+| gpt-5.6-sol | $4.00 | $0.40 | $5.00 | $20.00 |
+| gpt-5.6-terra | $2.00 | $0.20 | $2.50 | $12.00 |
+| gpt-5.6-luna | $0.20 | $0.02 | $0.25 | $1.20 |
+| gpt-5.5 | $5.00 | $0.50 | — | $30.00 |
+| gpt-5.4 | $2.50 | $0.25 | — | $15.00 |
+| gpt-4o | $2.50 | $1.25 | — | $10.00 |
+| gpt-4o-mini | $0.15 | $0.075 | — | $0.60 |
+
+**Gemini** — la columna de almacenamiento aplica **solo al explicit caching**:
+
+| Modelo | Input | Cache hit | Output | Storage (explicit) |
+|---|---|---|---|---|
+| 2.5 Flash | $0.30 | $0.03 | $2.50 | $1.00 /1M/hora |
+| 2.5 Pro (≤200k) | $1.25 | $0.125 | $10.00 | $4.50 /1M/hora |
+| 2.5 Flash-Lite | $0.10 | $0.01 | $0.40 | $1.00 /1M/hora |
+| 3.7 / 3.6 Flash | $0.75 | $0.075 | $3.75 | $0.50 /1M/hora |
+| 3.5 Flash | $1.50 | $0.15 | $9.00 | $1.00 /1M/hora |
+
+> Los precios cambian. Verificar contra
+> [Anthropic](https://platform.claude.com/docs/en/about-claude/pricing),
+> [OpenAI](https://developers.openai.com/api/docs/pricing) y
+> [Gemini](https://ai.google.dev/gemini-api/docs/pricing) antes de usarlos para
+> facturar.
 
 ### Cómo verificar que el caching está activo
 

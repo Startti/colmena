@@ -582,6 +582,15 @@ struct OpenAiFunctionCall {
 struct OpenAiPromptDetails {
     #[serde(default)]
     cached_tokens: u32,
+    /// Tokens newly written to the cache. Present from GPT-5.6 on, where OpenAI
+    /// started charging 1.25x to create an entry; earlier models create theirs
+    /// for free and omit the field, which `serde(default)` reads as 0.
+    ///
+    /// Like `cached_tokens`, this is a SUBSET of `prompt_tokens`: the three
+    /// categories partition the input, so cached + written + uncached equals the
+    /// prompt total.
+    #[serde(default)]
+    cache_write_tokens: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -633,6 +642,86 @@ struct OpenAiStreamFunctionCall {
     arguments: Option<String>,
 }
 
+#[cfg(test)]
+mod openai_cache_usage_tests {
+    use super::*;
+
+    /// GPT-5.6 shape: the three categories partition the input.
+    /// Documented example: 2000 read + 400 written + 200 neither = 2600.
+    fn gpt56_usage() -> OpenAiUsage {
+        serde_json::from_value(serde_json::json!({
+            "prompt_tokens": 2600,
+            "completion_tokens": 50,
+            "total_tokens": 2650,
+            "prompt_tokens_details": { "cached_tokens": 2000, "cache_write_tokens": 400 }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn cache_write_is_subtracted_out_of_the_prompt() {
+        // OpenAI counts BOTH cache columns inside prompt_tokens, so both come
+        // out. Leaving the write in would bill 400 tokens at the full input rate
+        // on top of the 1.25x already charged for writing them.
+        let u = openai_usage_to_llm_usage(gpt56_usage());
+        assert_eq!(
+            u.prompt_tokens, 200,
+            "only the never-cached tokens stay fresh"
+        );
+        assert_eq!(u.cache_read_tokens, Some(2000));
+        assert_eq!(u.cache_write_tokens, Some(400));
+    }
+
+    #[test]
+    fn the_three_columns_still_add_up_to_the_reported_input() {
+        let u = openai_usage_to_llm_usage(gpt56_usage());
+        assert_eq!(
+            u.prompt_tokens + u.cache_read_tokens.unwrap() + u.cache_write_tokens.unwrap(),
+            2600,
+            "no input token may be lost or double-counted by the normalization"
+        );
+        assert_eq!(u.total_tokens, 2600 + 50);
+    }
+
+    #[test]
+    fn a_write_with_no_read_is_still_recorded() {
+        // First call against a fresh prefix: everything is written, nothing read.
+        // The old code read `prompt_tokens_details` only when `cached_tokens > 0`,
+        // so this whole case was dropped.
+        let raw: OpenAiUsage = serde_json::from_value(serde_json::json!({
+            "prompt_tokens": 1000,
+            "completion_tokens": 10,
+            "total_tokens": 1010,
+            "prompt_tokens_details": { "cached_tokens": 0, "cache_write_tokens": 900 }
+        }))
+        .unwrap();
+        let u = openai_usage_to_llm_usage(raw);
+        assert_eq!(u.cache_write_tokens, Some(900));
+        assert_eq!(u.prompt_tokens, 100);
+    }
+
+    #[test]
+    fn pre_gpt56_models_omit_the_field_and_report_no_write() {
+        // Older models create their cache entry for free and send no such field.
+        // `serde(default)` reads it as 0, and a 0 write must not be recorded as
+        // if the model had reported one.
+        let raw: OpenAiUsage = serde_json::from_value(serde_json::json!({
+            "prompt_tokens": 1200,
+            "completion_tokens": 20,
+            "total_tokens": 1220,
+            "prompt_tokens_details": { "cached_tokens": 1024 }
+        }))
+        .unwrap();
+        let u = openai_usage_to_llm_usage(raw);
+        assert_eq!(u.cache_read_tokens, Some(1024));
+        assert_eq!(
+            u.cache_write_tokens, None,
+            "absent field must not become a write"
+        );
+        assert_eq!(u.prompt_tokens, 176);
+    }
+}
+
 // SSE Parser implementation
 fn openai_usage_to_llm_usage(u: OpenAiUsage) -> LlmUsage {
     let mut usage = LlmUsage::new(u.prompt_tokens, u.completion_tokens);
@@ -642,8 +731,13 @@ fn openai_usage_to_llm_usage(u: OpenAiUsage) -> LlmUsage {
     {
         usage = usage.with_thinking_tokens(r.reasoning_tokens);
     }
-    if let Some(p) = u.prompt_tokens_details.filter(|d| d.cached_tokens > 0) {
-        usage = usage.with_cached_input_tokens_included(p.cached_tokens);
+    if let Some(p) = u.prompt_tokens_details {
+        if p.cached_tokens > 0 {
+            usage = usage.with_cached_input_tokens_included(p.cached_tokens);
+        }
+        if p.cache_write_tokens > 0 {
+            usage = usage.with_cache_write_tokens_included(p.cache_write_tokens);
+        }
     }
     usage
 }
@@ -940,6 +1034,14 @@ impl OpenAiAdapter {
                 {
                     u = u.with_cached_input_tokens_included(c as u32);
                 }
+                if let Some(w) = usage
+                    .get("input_tokens_details")
+                    .and_then(|d| d.get("cache_write_tokens"))
+                    .and_then(|v| v.as_u64())
+                    .filter(|&n| n > 0)
+                {
+                    u = u.with_cache_write_tokens_included(w as u32);
+                }
                 usage_obj = Some(u);
             }
         }
@@ -1035,6 +1137,14 @@ impl OpenAiAdapter {
                                         .filter(|&n| n > 0)
                                     {
                                         u = u.with_cached_input_tokens_included(c as u32);
+                                    }
+                                    if let Some(w) = usage
+                                        .get("input_tokens_details")
+                                        .and_then(|d| d.get("cache_write_tokens"))
+                                        .and_then(|v| v.as_u64())
+                                        .filter(|&n| n > 0)
+                                    {
+                                        u = u.with_cache_write_tokens_included(w as u32);
                                     }
                                     yield Ok(LlmStreamChunk::new(
                                         request_id.clone(),

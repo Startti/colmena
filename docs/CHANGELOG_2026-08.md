@@ -656,3 +656,44 @@ cache por nivel de anidamiento:
 - [`docs/sse_events_reference.md`](sse_events_reference.md) — `usage-summary.nodes`
 
 **Estado.** Done. Verificado en vivo contra los tres providers.
+
+---
+
+## 10. OpenAI cobra por escribir cache desde GPT-5.6 — el adapter no lo leía
+
+**Qué cambió.** Hasta GPT-5.5, OpenAI creaba sus entradas de cache **gratis**: no
+había nada que cobrar ni que reportar, y por eso su adapter solo leía
+`cached_tokens`. Desde **GPT-5.6** cobra la creación a **1.25×** y la reporta en
+`prompt_tokens_details.cache_write_tokens` (Chat Completions) y
+`input_tokens_details.cache_write_tokens` (Responses API). El adapter no leía
+ese campo, así que en esos modelos Colmena reportaba `cache_write_tokens: 0`
+sobre tokens que OpenAI **sí estaba facturando** — un subconteo silencioso.
+
+**La semántica no es la de Anthropic.** El write de OpenAI es un **subconjunto**
+de `prompt_tokens`, igual que su `cached_tokens`: las tres categorías
+*particionan* el input, `cached + written + uncached = prompt_tokens` (ejemplo de
+su propia doc: 2000 leídos + 400 escritos + 200 sin cachear = 2600). En Anthropic
+las tres son disjuntas. Por eso el nuevo builder
+`LlmUsage::with_cache_write_tokens_included` **resta**, mientras que
+`with_cache_write_tokens` (Anthropic) solo registra.
+
+**Un caso que se perdía entero.** El código leía `prompt_tokens_details` solo
+cuando `cached_tokens > 0`, así que la primera llamada contra un prefijo nuevo
+—todo escritura, cero lectura— se descartaba completa. Ahora las dos columnas se
+leen por separado.
+
+**Precios corregidos en la guía.** La tabla de §14 estaba desactualizada en sus
+**tres** renglones: el descuento de lectura de OpenAI pasó de 50% a **90%** con
+la serie gpt-5.x, el de Gemini no es "25-75%" sino **90%** en 2.5+, y faltaba la
+columna de write. Se agregaron además tablas de precio por modelo para los tres
+providers, con fecha y enlace a la fuente.
+
+**Gemini explicit caching.** Documentado como el segundo modo con costo de
+escritura que Colmena **no** usa: cobra almacenamiento por hora ($1.00 por 1M
+tokens/hora en 2.5 Flash). El implicit que sí usamos no cobra creación ni
+almacenamiento, así que su `cache_write_tokens` seguirá siendo `0` — y eso es
+correcto, no un dato faltante.
+
+**Estado.** Done. Cuatro tests nuevos sobre la forma de usage de GPT-5.6, incluido
+uno que fija la identidad `prompt + read + write == input reportado`. No se pudo
+verificar en vivo: no hay acceso a un modelo GPT-5.6 en esta cuenta.
