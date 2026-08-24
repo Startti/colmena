@@ -59,7 +59,7 @@ pub struct StoredMessage {
 pub struct NodeActivity {
     pub node_id: String,
     pub message_count: i64,
-    pub last_activity: String, // ISO-8601 UTC
+    pub last_activity: String,   // ISO-8601 UTC
     pub opening: Option<String>, // earliest `user` message content
 }
 

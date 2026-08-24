@@ -127,8 +127,15 @@ impl std::fmt::Display for MemoryMode {
 /// Node types for which [`ToolConfiguration::memory_mode`] is meaningful — the tool
 /// carries or propagates conversational memory.
 ///
-/// `orchestrator` is intentionally NOT here yet: it does not currently propagate
-/// `__colmena_node_id_path`, so its memory scoping as a tool is unverified.
+/// `orchestrator` is intentionally NOT here. Its memory propagation would actually work
+/// (it dispatches sub-agents through `SubGraphNode` with a clone of its inputs, so
+/// `__colmena_node_id_path` flows through), but the orchestrator node reads its entire
+/// configuration (`agents`, `planner`, …) from the `config` argument via
+/// `config.get("agents")` with no `inputs` fallback — and a tool dispatch passes
+/// `config = {}` (everything arrives in `inputs`). So an orchestrator-as-tool runs with
+/// zero agents today; it is not tool-ready at all, independent of memory. Making it
+/// tool-ready first (an `inputs`-fallback like `subgraph`'s `resolve_child_graph_source`)
+/// is a prerequisite before `memory_mode` on it is meaningful.
 /// `planner`/`critic`/`reactor` are internal orchestrator sub-nodes, never
 /// `tool_configurations` entries, so they inherit the path from their parent and are
 /// not listed. The allowlist gates only the top-level tool node type.
@@ -697,9 +704,9 @@ mod tests {
     fn is_memory_capable_allowlist() {
         assert!(is_memory_capable("llm_call"));
         assert!(is_memory_capable("subgraph"));
-        assert!(!is_memory_capable("orchestrator")); // deferred until path propagation is verified
+        assert!(!is_memory_capable("orchestrator")); // not tool-ready (reads config, not inputs)
         assert!(!is_memory_capable("http_request"));
-        assert!(!is_memory_capable("critic"));
+        assert!(!is_memory_capable("critic")); // internal-only, never a tool entry
     }
 
     #[test]

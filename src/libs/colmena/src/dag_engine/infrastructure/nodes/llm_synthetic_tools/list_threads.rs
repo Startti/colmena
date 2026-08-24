@@ -172,7 +172,7 @@ mod tests {
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].thread_id, "alfa");
         assert_eq!(out[0].messages, 6); // merged 4 + 2
-        // "alfa/keeper" < "alfa/notes" lexicographically, so keeper's opening wins
+                                        // "alfa/keeper" < "alfa/notes" lexicographically, so keeper's opening wins
         assert_eq!(out[0].opening.as_deref(), Some("abrir alfa"));
         assert_eq!(out[1].thread_id, "beta");
     }

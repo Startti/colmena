@@ -213,6 +213,11 @@ un aislamiento silencioso. El resultado del tool **eco-devuelve** el id como pre
 el id exacto para continuar). El `thread_id` se sanitiza (`[A-Za-z0-9._-]`, resto → `-`,
 máx. 128) antes de formar la clave.
 
+En `dynamic`, el motor auto-expone además una tool `list_threads` cuando hay al menos un
+tool dynamic: el modelo la llama para enumerar los hilos existentes (`thread_id`,
+`messages`, `last_activity`, `opening`) y así retomar el correcto. Opcional `tool` para
+enfocar uno; sin argumento lista todos agrupados.
+
 ```json
 "tool_configurations": {
   "archivador": {
@@ -228,10 +233,15 @@ máx. 128) antes de formar la clave.
 }
 ```
 
-`orchestrator` **no** está en el allowlist todavía: no propaga `__colmena_node_id_path`
-como sí lo hace `subgraph`, así que su memoria como tool está sin verificar. Los nodos
-internos del orchestrator (`planner`/`critic`/`reactor`) nunca son entradas de
-`tool_configurations` — heredan el path de su padre y por eso no se listan.
+`orchestrator` **no** está en el allowlist. Su propagación de `__colmena_node_id_path` sí
+funcionaría (despacha sub-agentes vía `SubGraphNode` con un clon de sus `inputs`), pero el
+nodo lee toda su configuración (`agents`, `planner`, …) desde `config` sin fallback a
+`inputs` — y una tool dispatch pasa `config = {}` (todo llega por `inputs`). Un
+`orchestrator`-como-tool corre hoy con cero agentes, independientemente de la memoria; hacerlo
+apto para tool (un fallback a `inputs` como el `resolve_child_graph_source` de `subgraph`) es
+prerrequisito antes de que `memory_mode` tenga sentido ahí. Los nodos internos del
+orchestrator (`planner`/`critic`/`reactor`) nunca son entradas de `tool_configurations` —
+heredan el path de su padre y por eso no se listan.
 
 ### Profundidad de anidación
 
