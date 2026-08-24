@@ -497,8 +497,29 @@ cambiar y crecer sin perder el `cache_read`). Eso descartó al adapter y a la AP
 coalescer del dominio como único candidato: el dump de `COLMENA_DUMP_PROMPT_SIZES` mostraba dos
 `system`, pero `LlmRequest::new` los fusionaba después del dump.
 
-**Alcance.** OpenAI gana por el mismo motivo (su prefix-cache automático deja de moverse). Gemini no
-cambia: une todos los `system` en un `systemInstruction`, así que su wire format es idéntico.
+**Alcance: solo Anthropic.** Medido en los tres providers (2026-08-23) — **OpenAI y Gemini nunca
+estuvieron afectados y no ganan nada con este cambio.** La redacción original de esta sección decía
+lo contrario sobre OpenAI; era una inferencia de lectura de código, no una medición, y resultó falsa.
+
+La diferencia es la **granularidad del match**. El breakpoint de Anthropic es *por bloque*:
+`cache_control` sobre `system_blocks[0]` cachea hasta ese límite y exige que los bytes del bloque
+matcheen **exacto**, así que pegarle un resumen creciente destruye el acierto. OpenAI y Gemini
+matchean un prefijo **dentro** de un string más largo, de modo que la cabecera estable seguía
+acertando aunque el resumen viajara pegado detrás.
+
+| Provider | Granularidad | Antes | Después | Veredicto |
+|---|---|---|---|---|
+| **Anthropic** | breakpoint por bloque | write 3029/3457/3829/4260/4684, cero reads cross-turn | 0 writes desde el turno 2, reads fijas en 3029 | **arreglado** |
+| **OpenAI** | prefijo de tokens sobre el prompt serializado | `cached_tokens` 1280 con el resumen ya crecido | 1280 | **sin cambio** |
+| **Gemini** | prefijo de bytes sobre el request serializado | reads 857 / 1728 | 858 / 1730 | **sin cambio** |
+
+Evidencia de OpenAI: sonda directa a `chat/completions` con las dos formas del mensaje (`system`
+fusionado vs `system` separados), creciendo el resumen entre llamadas — `cached_tokens` idéntico en
+ambas. Evidencia de Gemini: 5 turnos por arm; el turno 1 (sin compactación todavía) da
+`promptTokens` **1714 exacto en los dos arms**, y la divergencia posterior es de ~5 tokens, que es
+el separador `---` que dejó de emitirse. Grafos:
+`tests/graphs/agents/prompt_cache_compaction_measure_{openai,gemini}.json`.
+
 Ninguna API pública cambia → ADP no se ve afectado.
 
 **Documentación de referencia.**

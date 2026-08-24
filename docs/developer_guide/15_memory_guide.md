@@ -374,6 +374,23 @@ sin perder nada (el original siempre vive en la DB).
 > Después, la escritura desaparece a partir del turno 1 y la lectura se estabiliza en el tamaño del
 > prefijo estable; el resumen viaja como input normal (visible en el `promptTokens` creciente).
 >
+> **Solo Anthropic se beneficia.** Medido en los tres providers: OpenAI y Gemini **nunca estuvieron
+> afectados**. La diferencia es la granularidad del match — el breakpoint de Anthropic es *por
+> bloque* y exige igualdad exacta de los bytes de `system_blocks[0]`, mientras que OpenAI y Gemini
+> matchean un prefijo **dentro** de un string más largo, así que su cabecera estable seguía
+> acertando aunque el resumen viajara pegado detrás.
+>
+> | Provider | Antes | Después |
+> |---|---|---|
+> | **Anthropic** | write 3029→4684 por turno, cero reads cross-turn | 0 writes desde el turno 2, reads fijas en 3029 |
+> | **OpenAI** (`gpt-4o-mini`) | `cached_tokens` 1280 con el resumen crecido | 1280 |
+> | **Gemini** (`2.5-flash`) | reads 857 / 1728 | 858 / 1730 |
+>
+> En Gemini el `systemInstruction` sí cambia de texto — pasa de `estable\n\n---\n\nresumen` a
+> `estable\n\nresumen`, porque el adapter une los `system` con `\n\n` y el separador `---`
+> desaparece. Es una diferencia de ~5 tokens que no mueve el caching: el turno 1, todavía sin
+> compactar, da `promptTokens` idéntico (1714) en ambos arms.
+>
 > **Varios `system` en un request son legales** y cada adapter los maneja así:
 >
 > | Provider | Qué hace con varios `system` |
