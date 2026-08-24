@@ -1,0 +1,89 @@
+{
+  "nodes": {
+    "trigger": {
+      "type": "input",
+      "config": {
+        "prompt": "Necesito el costo total de 4 noches de hotel a 150 dólares por noche. Pídeselo al especialista y repórtame el total."
+      }
+    },
+    "coordinador": {
+      "type": "llm_call",
+      "config": {
+        "provider": "openai",
+        "model": "gpt-5.6",
+        "api_key": "${OPENAI_API_KEY}",
+        "system_message": "Eres un coordinador. Para cualquier cálculo, delega al sub-agente usando la tool `calcular_con_especialista` y luego repórtame su resultado en una frase.",
+        "stream": true,
+        "tool_configurations": {
+          "calcular_con_especialista": {
+            "name": "calcular_con_especialista",
+            "node_type": "subgraph",
+            "description": "Delega un cálculo a un sub-agente especialista que usa aritmética y devuelve el total.",
+            "fixed_config": {
+              "child_graph_inline": {
+                "nodes": {
+                  "esp_in": {
+                    "type": "input",
+                    "config": {}
+                  },
+                  "esp_llm": {
+                    "type": "llm_call",
+                    "config": {
+                      "provider": "openai",
+                      "model": "gpt-5.6",
+                      "api_key": "${OPENAI_API_KEY}",
+                      "system_message": "Eres un especialista en aritmética. SIEMPRE usa la tool `multiply` para multiplicar. Muestra el cálculo y termina con el total en dólares.",
+                      "stream": true,
+                      "enabled_tools": [
+                        "multiply"
+                      ]
+                    }
+                  },
+                  "esp_out": {
+                    "type": "output",
+                    "config": {}
+                  }
+                },
+                "edges": [
+                  {
+                    "from": "esp_in",
+                    "to": "esp_llm"
+                  },
+                  {
+                    "from": "esp_llm",
+                    "to": "esp_out"
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "out": {
+      "type": "output"
+    }
+  },
+  "edges": [
+    {
+      "from": "trigger",
+      "to": "coordinador"
+    },
+    {
+      "from": "coordinador.result",
+      "to": "out"
+    }
+  ],
+  "comment": "E2E: gpt-5.6 anidado (subgraph-as-tool). Coordinador gpt-5.6 delega a un sub-agente gpt-5.6 (child_graph_inline) que usa la tool multiply. Prueba que el ruteo a /v1/responses funciona a traves del loop anidado, con streaming de eventos subgraph-* del hijo. Resultado esperado: 4*150=600.",
+  "metadata": {
+    "category": "agents",
+    "features": [
+      "subgraph_as_tool",
+      "responses_api",
+      "gpt5"
+    ],
+    "requires_env": [
+      "OPENAI_API_KEY"
+    ]
+  }
+}

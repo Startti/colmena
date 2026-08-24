@@ -242,13 +242,26 @@ impl OpenAiAdapter {
     }
 
     fn is_responses_api_required(&self, request: &LlmRequest) -> bool {
-        request.messages().iter().any(|msg| {
+        // Non-image file attachments carry a `file_id`/`input_file` shape that
+        // only the Responses API accepts.
+        let has_non_image_file = request.messages().iter().any(|msg| {
             if let Some(files) = msg.files() {
                 files.iter().any(|f| !f.mime_type.starts_with("image/"))
             } else {
                 false
             }
-        })
+        });
+
+        // gpt-5 reasoning models reject function tools on /v1/chat/completions
+        // unless `reasoning_effort` is 'none' — OpenAI returns a hard 400
+        // ("Function tools with reasoning_effort are not supported ... use
+        // /v1/responses"). The Responses API is the only endpoint that serves
+        // reasoning + tools together, so route there whenever this family is
+        // paired with tools. (Colmena injects `recall_history` on every agent
+        // turn, so a gpt-5 agent almost always has at least one tool.)
+        let gpt5_with_tools = is_gpt5_family(request.config().model()) && request.has_tools();
+
+        has_non_image_file || gpt5_with_tools
     }
 
     async fn call_chat_completions(&self, request: LlmRequest) -> Result<LlmResponse, LlmError> {
@@ -776,6 +789,15 @@ fn parse_responses_output(json_val: &serde_json::Value) -> (String, Vec<ToolCall
     (content, tool_calls)
 }
 
+/// OpenAI's gpt-5 family (`gpt-5`, `gpt-5-mini`, `gpt-5.6`, `gpt-5.6-nano`, …)
+/// are reasoning models. On `/v1/chat/completions` they reject function tools
+/// unless `reasoning_effort` is `'none'`; the Responses API serves reasoning
+/// and tools together. They also reject `temperature`/`top_p` other than the
+/// default, so those params are omitted for this family.
+fn is_gpt5_family(model: &str) -> bool {
+    model.starts_with("gpt-5")
+}
+
 // SSE Parser implementation
 fn openai_usage_to_llm_usage(u: OpenAiUsage) -> LlmUsage {
     let mut usage = LlmUsage::new(u.prompt_tokens, u.completion_tokens);
@@ -1002,19 +1024,69 @@ impl OpenAiAdapter {
             }
         }
 
+        let model = request.config().model();
         let mut body = json!({
-            "model": request.config().model(),
+            "model": model,
             "input": input_items,
         });
 
-        if let Some(temp) = request.config().temperature() {
-            body["temperature"] = json!(temp);
+        // gpt-5 reasoning models reject `temperature`/`top_p` other than the
+        // default value; forwarding them yields a 400. Omit them for that family
+        // (the model reasons at its default sampling regardless).
+        if !is_gpt5_family(model) {
+            if let Some(temp) = request.config().temperature() {
+                body["temperature"] = json!(temp);
+            }
+            if let Some(top_p) = request.config().top_p() {
+                body["top_p"] = json!(top_p);
+            }
         }
+        // The Responses API caps output with `max_output_tokens` — `max_tokens`
+        // is a Chat Completions field and is rejected here.
         if let Some(max_tokens) = request.config().max_tokens() {
-            body["max_tokens"] = json!(max_tokens);
+            body["max_output_tokens"] = json!(max_tokens);
         }
-        if let Some(top_p) = request.config().top_p() {
-            body["top_p"] = json!(top_p);
+
+        // Tools — the Responses API uses a FLAT function shape (name /
+        // description / parameters at the top level), unlike Chat Completions
+        // which nests them under a `"function"` object.
+        if let Some(tools) = request.tools() {
+            let responses_tools: Vec<serde_json::Value> = tools
+                .iter()
+                .map(|tool| {
+                    let parameters = tool.input_schema_override.clone().unwrap_or_else(|| {
+                        json!({
+                            "type": tool.parameters.schema_type,
+                            "properties": tool.parameters.properties,
+                            "required": tool.parameters.required
+                        })
+                    });
+                    json!({
+                        "type": "function",
+                        "name": tool.name,
+                        "description": tool.description,
+                        "parameters": parameters,
+                    })
+                })
+                .collect();
+            body["tools"] = json!(responses_tools);
+
+            if let Some(choice) = request.tool_choice() {
+                body["tool_choice"] = json!(choice);
+            }
+        }
+
+        // Reasoning effort maps to `reasoning.effort` on the Responses API
+        // (Chat Completions uses a flat `reasoning_effort`).
+        if let Some(budget) = request.config().thinking_budget() {
+            let effort = if budget <= 1000 {
+                "low"
+            } else if budget <= 5000 {
+                "medium"
+            } else {
+                "high"
+            };
+            body["reasoning"] = json!({ "effort": effort });
         }
 
         Ok(body)
@@ -1905,6 +1977,107 @@ mod tests {
         assert_eq!(systems.len(), 2, "both System messages survive");
         assert_eq!(systems[0], "stable system");
         assert!(systems[1].ends_with("## Temporal\n2026-08-22T10:00:00"));
+    }
+
+    // ── gpt-5 family: Responses API routing + tool serialization ──────────
+
+    use crate::llm::domain::{
+        LlmConfig as Cfg, LlmMessage as Msg, LlmProvider as Prov, LlmRequest as Req,
+        ProviderKind as Kind, ToolDefinition, ToolParameters,
+    };
+
+    fn gpt5_req_with_tool(model: &str) -> Req {
+        let user = Msg::user("Hi".into()).unwrap();
+        let provider = Prov::new(Kind::OpenAi, "k".into(), Some(model.into())).unwrap();
+        let config = Cfg::new(provider);
+        let tool = ToolDefinition::new(
+            "recall_history".into(),
+            "Recall prior turns".into(),
+            ToolParameters::new(),
+        );
+        Req::new(vec![user], config, false)
+            .unwrap()
+            .with_tools(vec![tool])
+    }
+
+    #[test]
+    fn gpt5_with_tools_routes_to_responses_api() {
+        let adapter = OpenAiAdapter::new();
+        assert!(
+            adapter.is_responses_api_required(&gpt5_req_with_tool("gpt-5.6")),
+            "gpt-5.6 + tools must use the Responses API"
+        );
+    }
+
+    #[test]
+    fn gpt4o_with_tools_stays_on_chat_completions() {
+        let adapter = OpenAiAdapter::new();
+        assert!(
+            !adapter.is_responses_api_required(&gpt5_req_with_tool("gpt-4o")),
+            "gpt-4o keeps using the proven Chat Completions tool path"
+        );
+    }
+
+    #[test]
+    fn gpt5_without_tools_stays_on_chat_completions() {
+        // A toolless gpt-5 call (e.g. single-shot extraction) works on Chat
+        // Completions — only the tools+reasoning combination is rejected there.
+        let user = Msg::user("Hi".into()).unwrap();
+        let provider = Prov::new(Kind::OpenAi, "k".into(), Some("gpt-5.6".into())).unwrap();
+        let req = Req::new(vec![user], Cfg::new(provider), false).unwrap();
+        let adapter = OpenAiAdapter::new();
+        assert!(!adapter.is_responses_api_required(&req));
+    }
+
+    #[test]
+    fn responses_serializes_tools_in_flat_function_shape() {
+        let adapter = OpenAiAdapter::new();
+        let body = adapter
+            .build_responses_request_body(&gpt5_req_with_tool("gpt-5.6"))
+            .unwrap();
+        let tools = body["tools"].as_array().expect("tools array present");
+        assert_eq!(tools.len(), 1);
+        // FLAT shape: name/description/parameters at the top level, NOT nested
+        // under a "function" object (that's the Chat Completions shape).
+        assert_eq!(tools[0]["type"], "function");
+        assert_eq!(tools[0]["name"], "recall_history");
+        assert!(tools[0].get("function").is_none());
+        assert_eq!(tools[0]["parameters"]["type"], "object");
+    }
+
+    #[test]
+    fn responses_omits_temperature_and_top_p_for_gpt5() {
+        let user = Msg::user("Hi".into()).unwrap();
+        let provider = Prov::new(Kind::OpenAi, "k".into(), Some("gpt-5.6".into())).unwrap();
+        let config = Cfg::new(provider)
+            .with_temperature(0.7)
+            .unwrap()
+            .with_top_p(0.9)
+            .unwrap()
+            .with_max_tokens(256)
+            .unwrap();
+        let req = Req::new(vec![user], config, false).unwrap();
+        let adapter = OpenAiAdapter::new();
+        let body = adapter.build_responses_request_body(&req).unwrap();
+        assert!(
+            body.get("temperature").is_none(),
+            "gpt-5 rejects temperature"
+        );
+        assert!(body.get("top_p").is_none(), "gpt-5 rejects top_p");
+        // max_tokens must be sent under the Responses-API field name.
+        assert_eq!(body["max_output_tokens"], 256);
+        assert!(body.get("max_tokens").is_none());
+    }
+
+    #[test]
+    fn responses_maps_thinking_budget_to_reasoning_effort() {
+        let user = Msg::user("Hi".into()).unwrap();
+        let provider = Prov::new(Kind::OpenAi, "k".into(), Some("gpt-5.6".into())).unwrap();
+        let config = Cfg::new(provider).with_thinking_budget(3000);
+        let req = Req::new(vec![user], config, false).unwrap();
+        let adapter = OpenAiAdapter::new();
+        let body = adapter.build_responses_request_body(&req).unwrap();
+        assert_eq!(body["reasoning"]["effort"], "medium");
     }
 
     #[test]

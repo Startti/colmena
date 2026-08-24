@@ -72,7 +72,7 @@ Level 3 (Default): Environment variables o valores por defecto
 - **Fuente:** `inputs.model` → `config.model`
 - **Descripción:** Nombre específico del modelo a usar
 - **Valores típicos:**
-  - OpenAI: `"gpt-4"`, `"gpt-4o"`, `"gpt-4o-mini"`, `"gpt-3.5-turbo"`
+  - OpenAI: `"gpt-4o"`, `"gpt-4o-mini"`, `"gpt-5"`, `"gpt-5-mini"`, `"gpt-5.6"`
   - Gemini: `"gemini-2.5-flash"` (recomendado), `"gemini-pro"`
   - Anthropic: `"claude-3-5-sonnet"`, `"claude-3-haiku"`, `"claude-opus"`
 - **Ejemplos:**
@@ -84,6 +84,33 @@ Level 3 (Default): Environment variables o valores por defecto
     }
   }
   ```
+
+#### OpenAI — ruteo automático a la Responses API (familia `gpt-5`)
+
+Los modelos de razonamiento `gpt-5*` (`gpt-5`, `gpt-5-mini`, `gpt-5.6`, …)
+**rechazan las function tools en `/v1/chat/completions`** salvo que
+`reasoning_effort` sea `'none'`. OpenAI devuelve un `400`:
+
+```
+Function tools with reasoning_effort are not supported for gpt-5.6 in
+/v1/chat/completions. To use function tools, use /v1/responses or set
+reasoning_effort to 'none'.
+```
+
+Como Colmena inyecta la tool `recall_history` en **cada** turno de agente, un
+grafo `gpt-5*` casi siempre lleva al menos una tool. Por eso el adapter OpenAI
+**enruta automáticamente a `/v1/responses`** cuando el modelo es `gpt-5*` **y**
+la request lleva tools — preservando razonamiento **y** tool calling juntos. No
+hay que configurar nada; es transparente. El resto de modelos (`gpt-4o`,
+`gpt-4.1`, …) siguen usando `/v1/chat/completions`.
+
+Ajustes automáticos del ruteo `gpt-5*`: `temperature`/`top_p` se **omiten** (esa
+familia solo acepta el default; dejarlos en el grafo es inofensivo),
+`max_tokens` viaja como `max_output_tokens`, y `thinking_budget` se mapea a
+`reasoning.effort` (`low` ≤1000 < `medium` ≤5000 < `high`). Streaming, tool
+calling (incluye batches paralelos), memoria y subgraphs funcionan igual que en
+chat completions. Verificado E2E:
+[`tests/graphs/agents/gpt5_responses_tools_e2e.json`](../../tests/graphs/agents/gpt5_responses_tools_e2e.json).
 
 #### `system_message`
 - **Tipo:** `string` (opcional)
@@ -133,6 +160,10 @@ Boolean optional flag (`true | false`, default `false`). When enabled, tools in 
 - **Tipo:** `number` (0.0 a 2.0)
 - **Fuente:** `inputs.temperature` → `config.temperature`
 - **Descripción:** Creatividad de la respuesta (0 = determinista, 2 = muy creativo)
+- **Nota `gpt-5*`:** la familia de razonamiento OpenAI solo acepta el valor por
+  defecto; Colmena **omite** `temperature`/`top_p` para esos modelos (ver
+  "OpenAI — ruteo automático a la Responses API"). Dejarlos en el grafo es
+  inofensivo: se ignoran.
 
 #### `max_tokens`
 - **Tipo:** `integer` (> 0)
