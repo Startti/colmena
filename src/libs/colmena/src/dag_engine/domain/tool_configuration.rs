@@ -91,6 +91,83 @@ impl SubToolFilter {
     }
 }
 
+/// How a memory-bearing tool (a sub-agent) keys its conversational memory across calls.
+///
+/// Conversation memory is keyed on `(agent_session_id | session_id, node_id)`, where
+/// `node_id` is the tool's path qualifier. Changing that qualifier is the single lever
+/// that decides whether a sub-agent invoked as a tool remembers previous calls.
+///
+/// Only meaningful for memory-bearing node types (see [`MEMORY_CAPABLE_NODE_TYPES`]).
+/// Absent in JSON → [`MemoryMode::Stateless`], preserving today's behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryMode {
+    /// Every call is an isolated conversation. `node_id = tool/<tool_call_id>`.
+    /// The default, and the only mode active in the current build.
+    #[default]
+    Stateless,
+    /// One persistent conversation shared by every call to this tool.
+    /// `node_id = tool/<tool_name>`.
+    Persistent,
+    /// The model names the thread per call via a required `thread_id` parameter.
+    /// `node_id = tool/<tool_name>/<thread_id>`.
+    Dynamic,
+}
+
+impl std::fmt::Display for MemoryMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            MemoryMode::Stateless => "stateless",
+            MemoryMode::Persistent => "persistent",
+            MemoryMode::Dynamic => "dynamic",
+        })
+    }
+}
+
+/// Node types for which [`ToolConfiguration::memory_mode`] is meaningful — the tool
+/// carries or propagates conversational memory.
+///
+/// `orchestrator` is intentionally NOT here yet: it does not currently propagate
+/// `__colmena_node_id_path`, so its memory scoping as a tool is unverified.
+/// `planner`/`critic`/`reactor` are internal orchestrator sub-nodes, never
+/// `tool_configurations` entries, so they inherit the path from their parent and are
+/// not listed. The allowlist gates only the top-level tool node type.
+pub const MEMORY_CAPABLE_NODE_TYPES: &[&str] = &["llm_call", "subgraph"];
+
+/// Whether [`ToolConfiguration::memory_mode`] is meaningful for the given node type.
+pub fn is_memory_capable(node_type: &str) -> bool {
+    MEMORY_CAPABLE_NODE_TYPES.contains(&node_type)
+}
+
+/// Fail-closed validation of a `(node_type, memory_mode)` pair. Shared by
+/// [`ToolConfiguration::validate_memory_config`] (struct path) and `Graph::validate`
+/// (raw-JSON path, so a bad graph is rejected at load without a full struct decode).
+///
+/// Returns `Err` with an actionable message when the mode cannot be honored:
+/// 1. `stateless` — always valid (nothing to persist; today's behavior).
+/// 2. A non-stateless mode is only valid on [`MEMORY_CAPABLE_NODE_TYPES`].
+/// 3. `persistent` and `dynamic` are not active in the current build; they are rejected
+///    loudly instead of silently behaving as `stateless`. Their backend (`connection_url`)
+///    checks land alongside their activation.
+pub fn validate_memory_mode(node_type: &str, mode: MemoryMode) -> Result<(), String> {
+    if mode == MemoryMode::Stateless {
+        return Ok(());
+    }
+    if !is_memory_capable(node_type) {
+        return Err(format!(
+            "memory_mode is only valid on memory-bearing tools ({}); \
+             this tool is node_type '{}'",
+            MEMORY_CAPABLE_NODE_TYPES.join(" | "),
+            node_type
+        ));
+    }
+    Err(format!(
+        "memory_mode '{}' is not active in this build (only 'stateless' is supported); \
+         it ships in a follow-up increment",
+        mode
+    ))
+}
+
 /// Configuration for exposing a DAG node as an LLM-callable tool.
 ///
 /// Defined inside `tool_configurations` of an `llm_call` node. The executor uses this
@@ -186,6 +263,12 @@ pub struct ToolConfiguration {
     /// in the `describe_tool` catalog. No effect when lazy_tool_loading is disabled.
     #[serde(default)]
     pub eager: bool,
+
+    /// How this tool's conversational memory is keyed across calls. Only meaningful
+    /// for memory-bearing node types ([`MEMORY_CAPABLE_NODE_TYPES`]). Absent → `stateless`
+    /// (current behavior). Validated by [`ToolConfiguration::validate_memory_config`].
+    #[serde(default)]
+    pub memory_mode: MemoryMode,
 }
 
 impl ToolConfiguration {
@@ -194,6 +277,15 @@ impl ToolConfiguration {
     /// configuration.
     pub fn is_toolkit(&self) -> bool {
         self.expose_sub_tools.is_some()
+    }
+
+    /// Fail-closed guard for [`ToolConfiguration::memory_mode`]. Returns `Err`
+    /// describing the misconfiguration so a bad graph fails at tool-build time rather
+    /// than silently doing nothing.
+    ///
+    /// Delegates to [`validate_memory_mode`] with this config's node type and mode.
+    pub fn validate_memory_config(&self) -> Result<(), String> {
+        validate_memory_mode(&self.node_type, self.memory_mode)
     }
 }
 
@@ -487,6 +579,78 @@ pub fn parse_node_schema(schema: &NodeSchema) -> Result<ParsedNodeSchema, String
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn cfg(node_type: &str, mode: Value) -> ToolConfiguration {
+        serde_json::from_value(json!({
+            "name": "t",
+            "node_type": node_type,
+            "memory_mode": mode,
+        }))
+        .expect("valid ToolConfiguration")
+    }
+
+    #[test]
+    fn memory_mode_defaults_to_stateless_when_absent() {
+        let c: ToolConfiguration =
+            serde_json::from_value(json!({ "name": "t", "node_type": "llm_call" })).unwrap();
+        assert_eq!(c.memory_mode, MemoryMode::Stateless);
+    }
+
+    #[test]
+    fn memory_mode_parses_snake_case() {
+        assert_eq!(
+            cfg("llm_call", json!("persistent")).memory_mode,
+            MemoryMode::Persistent
+        );
+        assert_eq!(
+            cfg("subgraph", json!("dynamic")).memory_mode,
+            MemoryMode::Dynamic
+        );
+    }
+
+    #[test]
+    fn is_memory_capable_allowlist() {
+        assert!(is_memory_capable("llm_call"));
+        assert!(is_memory_capable("subgraph"));
+        assert!(!is_memory_capable("orchestrator")); // deferred until path propagation is verified
+        assert!(!is_memory_capable("http_request"));
+        assert!(!is_memory_capable("critic"));
+    }
+
+    #[test]
+    fn validate_stateless_is_always_ok_even_on_non_capable_type() {
+        assert!(cfg("http_request", json!("stateless"))
+            .validate_memory_config()
+            .is_ok());
+        assert!(cfg("llm_call", json!("stateless"))
+            .validate_memory_config()
+            .is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_memory_mode_on_non_capable_node_type() {
+        let err = cfg("http_request", json!("persistent"))
+            .validate_memory_config()
+            .unwrap_err();
+        assert!(
+            err.contains("only valid on memory-bearing tools"),
+            "got: {err}"
+        );
+        assert!(err.contains("http_request"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_rejects_not_yet_active_modes_on_capable_type() {
+        for mode in ["persistent", "dynamic"] {
+            let err = cfg("llm_call", json!(mode))
+                .validate_memory_config()
+                .unwrap_err();
+            assert!(
+                err.contains("not active in this build"),
+                "mode {mode}: {err}"
+            );
+        }
+    }
 
     #[test]
     fn test_parse_node_schema_fixed_only() {
