@@ -19,3 +19,13 @@ recall_history:
     null, call again with `offset` set to that value to read the next page, until
     `next_offset` is null. Use this to reconstruct large artifacts (e.g. a graph
     JSON) verbatim. Call sparingly — each page re-loads content into your context.
+
+list_threads:
+  summary: List the existing conversation threads of a memory-bearing sub-agent tool
+  description: |
+    List the conversation threads that already exist for a "dynamic"-memory
+    sub-agent tool, so you can continue the right one. Optionally pass `tool` to
+    focus a single tool; omit it to list every dynamic tool grouped. Each thread
+    returns its `thread_id` (the id you pass to that tool to continue it), the
+    message count, the last activity time, and `opening` (how the thread began).
+    Use this when you need to reuse a prior `thread_id` and don't remember it.

@@ -17,6 +17,7 @@ pub mod gsheets_inspect_guard;
 pub mod gsheets_run_python;
 pub mod gsheets_tools;
 pub mod lazy_tools_catalog;
+pub mod list_threads;
 pub mod load_attachment_tool;
 pub mod load_skill_tool;
 pub mod markdown_to_docs_ops;
@@ -325,6 +326,10 @@ pub use crdt_doc_import_sheet::{
 pub use recall_history::{
     dispatch_recall_history, tool_recall_history, RecallHistoryArgs,
     TOOL_RECALL_HISTORY as RECALL_HISTORY_TOOL,
+};
+
+pub use list_threads::{
+    dispatch_list_threads, tool_list_threads, ListThreadsArgs, TOOL_LIST_THREADS,
 };
 
 pub use gsheets_run_python::{
