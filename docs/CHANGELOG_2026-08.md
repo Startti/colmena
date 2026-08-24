@@ -724,3 +724,58 @@ idénticos.
 
 **Estado.** Done. Un test nuevo sobre la forma de respuesta gpt-5 (texto + tool
 call tras un item de reasoning).
+
+## 12. GPT-5.6 fallaba en el primer turno — ruteo automático a la Responses API
+
+**El síntoma.** Cualquier grafo con un modelo `gpt-5*` moría en el turno 0 con un
+`400` de OpenAI:
+
+```
+Function tools with reasoning_effort are not supported for gpt-5.6 in
+/v1/chat/completions. To use function tools, use /v1/responses or set
+reasoning_effort to 'none'.
+```
+
+Lo desconcertante: el grafo **no declaraba ninguna tool**. Colmena inyecta la tool `recall_history` en
+**cada** turno de agente (`llm.rs`, "Always eager"). Así que aunque el grafo no
+declare tools, la request siempre lleva al menos una → `build_request_body`
+escribe `body["tools"]`. La familia de razonamiento `gpt-5` rechaza *function
+tools + `reasoning_effort` ≠ `'none'`* en Chat Completions, y su
+`reasoning_effort` por defecto (del server) no es `'none'` → choca solo por la
+presencia del array.
+
+**El fix.** El adapter OpenAI ahora **rutea a `/v1/responses`** cuando el modelo
+es `gpt-5*` **y** la request lleva tools (`is_gpt5_family` + `is_responses_api_required`).
+La Responses API es el único endpoint que sirve *reasoning + tools* juntos.
+Apoyándose en el parser del §11, se completó el lado del **request**:
+
+- `build_responses_request_body` serializa `tools` (forma *plana*:
+  `name`/`description`/`parameters` al nivel superior, **no** anidado bajo
+  `"function"` como en Chat Completions), `tool_choice`, y `reasoning.effort`
+  desde `thinking_budget`. `temperature`/`top_p` se **omiten** para `gpt-5*`
+  (esa familia solo acepta el default; da `400` — confirmado por curl a
+  `/v1/responses`), y `max_tokens` se manda como `max_output_tokens`.
+
+El resto de modelos (`gpt-4o`, `gpt-4.1`, …) siguen en `/v1/chat/completions`
+sin cambios — cero regresión en el path maduro.
+
+**Verificado en vivo con gpt-5.6** (a diferencia de §10, esta cuenta sí tiene
+acceso). Todo verde: grafo sin tools; tools no-stream + stream
+([`gpt5_responses_tools_e2e.json`](../tests/graphs/agents/gpt5_responses_tools_e2e.json),
+`add`→`multiply`); cache en el path Responses (`cache_read 1654` / `cache_write
+1714`); anidado subgraph-as-tool
+([`gpt5_responses_nested_subgraph_e2e.json`](../tests/graphs/agents/gpt5_responses_nested_subgraph_e2e.json),
+gpt-5.6→gpt-5.6, total 600); HITL (`suspend` simple + batch paralelo con
+suspend, sin el 400 de ids huérfanos del §5); skills (`load_skill`), lazy
+(`describe_tool`) y memoria multi-turno (`recall_history`); y sin regresión en
+`gpt-4o`. 30/30 tests del adapter, 506/506 del módulo `llm`.
+
+Límite conocido, ajeno a este cambio: un adjunto no-imagen inline base64 + tools
+no entrega el PDF al modelo — pre-existente (el grafo original
+`tests/graphs/media/pdf_base64.json` en gpt-4o-mini falla idéntico), fileado
+como issue separado.
+
+**ADP no afectado.** El cambio vive en el wire OpenAI↔Colmena; la frontera SSE y
+el `usage` que consume ADP son idénticos.
+
+**Estado.** Done.

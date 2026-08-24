@@ -1,0 +1,33 @@
+{
+  "comment": "E2E: gpt-5.6 tool calling. The gpt-5 reasoning family rejects function tools on /v1/chat/completions, so Colmena auto-routes gpt-5* + tools to /v1/responses. This graph chains add -> multiply through the agent loop, proving tools serialization, function_call parsing, and multi-turn dispatch on the Responses API. `temperature` is left set on purpose to prove it is tolerated (omitted for gpt-5). Flip `stream` to true to exercise the streaming function_call path.",
+  "metadata": { "category": "agents", "requires_env": ["OPENAI_API_KEY"] },
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/gpt5-tools",
+        "method": "POST",
+        "test_payload": {
+          "prompt": "Calculate 25 + 17, then multiply the result by 2. Use the tools for every step."
+        }
+      }
+    },
+    "agent_llm": {
+      "type": "llm_call",
+      "config": {
+        "provider": "openai",
+        "api_key": "${OPENAI_API_KEY}",
+        "model": "gpt-5.6",
+        "system_message": "You are a math assistant. You MUST use the tools (add, multiply) for every calculation. Do not compute mentally.",
+        "temperature": 0.0,
+        "stream": false,
+        "enabled_tools": ["add", "multiply", "subtract", "divide"]
+      }
+    },
+    "log_result": { "type": "log" }
+  },
+  "edges": [
+    { "from": "trigger", "to": "agent_llm" },
+    { "from": "agent_llm", "to": "log_result" }
+  ]
+}
