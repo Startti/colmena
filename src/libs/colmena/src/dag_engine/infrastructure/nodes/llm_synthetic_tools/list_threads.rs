@@ -40,9 +40,18 @@ pub fn tool_list_threads() -> ToolDefinition {
 /// Group per-node_id rows into per-thread entries. `node_id` is
 /// `tool/<tool_name>/<thread_id>[/<child...>]`; the thread id is the first
 /// segment after the `tool/<tool_name>/` prefix. Rows sharing a thread id merge
-/// (sum messages, max last_activity, opening from the earliest source row).
-fn aggregate_threads(tool_name: &str, rows: Vec<NodeActivity>) -> Vec<ThreadInfo> {
+/// (sum messages, max last_activity, opening from the row with the
+/// lexicographically-smallest `node_id`).
+///
+/// Neither the Postgres/SQLite backends (`GROUP BY node_id` with no outer
+/// `ORDER BY`) nor the in-memory backend (`HashMap` iteration) guarantee an
+/// input order, so `rows` is sorted by `node_id` up front — this is NOT "the
+/// earliest by time" (`NodeActivity` carries no first-activity timestamp to
+/// order by), only a stable, deterministic tie-break so repeated calls return
+/// the same `opening` for a given thread.
+fn aggregate_threads(tool_name: &str, mut rows: Vec<NodeActivity>) -> Vec<ThreadInfo> {
     use std::collections::HashMap;
+    rows.sort_by(|a, b| a.node_id.cmp(&b.node_id));
     let prefix = format!("tool/{tool_name}/");
     // thread_id -> (messages, max_last, best_opening, best_opening_key)
     let mut acc: HashMap<String, ThreadInfo> = HashMap::new();
@@ -65,8 +74,9 @@ fn aggregate_threads(tool_name: &str, rows: Vec<NodeActivity>) -> Vec<ThreadInfo
         if r.last_activity > e.last_activity {
             e.last_activity = r.last_activity.clone();
         }
-        // keep the opening from the lexicographically-earliest node_id as a stable
-        // "first source" proxy; fill if still empty
+        // `rows` is sorted by node_id above, so the first row we see for a
+        // given thread_id is the one with the smallest node_id; keep its
+        // opening (fill-if-still-empty makes this a first-write-wins).
         if e.opening.is_none() {
             e.opening = opening;
         }
@@ -162,7 +172,8 @@ mod tests {
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].thread_id, "alfa");
         assert_eq!(out[0].messages, 6); // merged 4 + 2
-        assert_eq!(out[0].opening.as_deref(), Some("abrir alfa")); // earliest source
+        // "alfa/keeper" < "alfa/notes" lexicographically, so keeper's opening wins
+        assert_eq!(out[0].opening.as_deref(), Some("abrir alfa"));
         assert_eq!(out[1].thread_id, "beta");
     }
 
@@ -171,5 +182,52 @@ mod tests {
         let rows = vec![na("tool/asesor/caso-12", 5, "2026-08-24T12:00:00Z", "hola")];
         let out = aggregate_threads("asesor", rows);
         assert_eq!(out[0].thread_id, "caso-12");
+    }
+
+    #[test]
+    fn aggregate_opening_is_deterministic_regardless_of_input_order() {
+        // Same rows as `aggregate_extracts_thread_id_and_merges_children` but
+        // fed in reverse order — backends (Postgres/SQLite GROUP BY with no
+        // ORDER BY, in-memory HashMap iteration) make no input-order promise,
+        // so the merged `opening` must not depend on it.
+        let rows = vec![
+            na(
+                "tool/archivador/alfa/notes",
+                2,
+                "2026-08-24T11:00:00Z",
+                "z-later",
+            ),
+            na(
+                "tool/archivador/alfa/keeper",
+                4,
+                "2026-08-24T10:00:00Z",
+                "abrir alfa",
+            ),
+        ];
+        let out = aggregate_threads("archivador", rows);
+        assert_eq!(out[0].thread_id, "alfa");
+        assert_eq!(out[0].opening.as_deref(), Some("abrir alfa"));
+    }
+
+    #[test]
+    fn truncate_long_opening_gets_ellipsis_without_panicking_on_char_boundary() {
+        // 130 accented/multi-byte chars — a byte-index truncation (e.g.
+        // `s[..max]`) would panic here on a non-boundary; `truncate` walks
+        // `chars()` so it must not.
+        let long = "café ".repeat(26); // 5 chars * 26 = 130 chars, all multi-byte-safe via chars()
+        assert_eq!(long.chars().count(), 130);
+        let t = truncate(&long, OPENING_MAX_CHARS);
+        assert_eq!(t.chars().count(), OPENING_MAX_CHARS + 1); // + ellipsis char
+        assert!(t.ends_with('…'));
+        assert_eq!(
+            t.chars().take(OPENING_MAX_CHARS).collect::<String>(),
+            long.chars().take(OPENING_MAX_CHARS).collect::<String>()
+        );
+    }
+
+    #[test]
+    fn truncate_short_opening_is_unchanged() {
+        let s = "hola";
+        assert_eq!(truncate(s, OPENING_MAX_CHARS), s);
     }
 }
