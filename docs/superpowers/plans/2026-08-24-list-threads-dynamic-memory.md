@@ -455,35 +455,41 @@ git commit -m "feat(dag): add list_threads synthetic tool (definition + dispatch
 **Interfaces:**
 - Consumes: `dispatch_list_threads`, `TOOL_LIST_THREADS`, `tool_list_threads`, `MemoryMode::Dynamic`, `self.conversation_repository`, `self.conversation_key`, `self.tool_configurations`.
 
-- [ ] **Step 1: Write the failing exposure test** (in `dag_tool_executor.rs` test module; reuse the `registry_with_subgraph()` + `dynamic_tool_configs()` helpers added for Part 3)
+- [ ] **Step 1: Write the failing dispatch test** (in `dag_tool_executor.rs` test module; reuse the `registry_with_subgraph()` + `dynamic_tool_configs()` helpers added for Part 3). This exercises the real Task-4 deliverable — the `execute_inner` dispatch arm — against an in-memory repo seeded with one thread. (Exposure/gating lives in `llm.rs` and is covered end-to-end by the E2E in Task 5.)
 
 ```rust
 #[tokio::test]
-async fn list_threads_exposed_only_when_a_dynamic_tool_exists() {
-    // dynamic tool present → list_threads exposed
+async fn list_threads_dispatch_lists_dynamic_tool_threads() {
+    use crate::llm::domain::{ConversationKey, ConversationRepository, SessionId, AgentSessionId, NodeIdPath, LlmMessage, MessageRole};
+    use crate::llm::infrastructure::persistence::in_memory_conversation_repository::InMemoryConversationRepository;
+    let repo = std::sync::Arc::new(InMemoryConversationRepository::new());
+    // seed one thread for the dynamic tool "archivador"
+    let thread_key = ConversationKey {
+        session_id: SessionId("s".into()),
+        agent_session_id: Some(AgentSessionId("a".into())),
+        node_id: NodeIdPath("tool/archivador/proyecto-alfa/keeper".into()),
+    };
+    repo.add_message(&thread_key, LlmMessage::new(MessageRole::User, "abrir alfa")).await.unwrap();
+    // the parent llm_call's key supplies the keying (agent_session_id "a")
+    let parent_key = ConversationKey {
+        session_id: SessionId("s".into()),
+        agent_session_id: Some(AgentSessionId("a".into())),
+        node_id: NodeIdPath("chat".into()),
+    };
     let exec = DagToolExecutor::new(registry_with_subgraph(), dynamic_tool_configs())
-        .with_conversation_history(
-            std::sync::Arc::new(crate::llm::infrastructure::persistence::in_memory_conversation_repository::InMemoryConversationRepository::new()),
-            crate::llm::domain::ConversationKey {
-                session_id: crate::llm::domain::SessionId("s".into()),
-                agent_session_id: Some(crate::llm::domain::AgentSessionId("a".into())),
-                node_id: crate::llm::domain::NodeIdPath("chat".into()),
-            },
-        );
-    // NOTE: exposure lives in llm.rs, not the executor. This test asserts the
-    // gating PREDICATE instead: at least one config is Dynamic.
-    let has_dynamic = dynamic_tool_configs().values().any(|c| c.memory_mode == crate::dag_engine::domain::tool_configuration::MemoryMode::Dynamic);
-    assert!(has_dynamic);
-    let _ = exec;
+        .with_conversation_history(repo, parent_key);
+    let call = ToolCall::new("call_1".into(), FunctionCall::new("list_threads".into(), "{}".into()));
+    let res = exec.execute(&call).await.unwrap();
+    assert!(res.success, "list_threads should succeed: {}", res.output);
+    assert!(res.output.contains("proyecto-alfa"), "should list the thread: {}", res.output);
+    assert!(res.output.contains("archivador"), "grouped under the tool name: {}", res.output);
 }
 ```
 
-(Exposure itself is wired in `llm.rs`; the unit here pins the predicate. The end-to-end exposure is covered by the E2E in Task 5.)
+- [ ] **Step 2: Run to verify it fails**
 
-- [ ] **Step 2: Run to verify it fails/compiles**
-
-Run: `cargo test --lib list_threads_exposed_only_when_a_dynamic_tool_exists`
-Expected: initially FAIL to compile if `with_conversation_history` import path differs — fix imports until it compiles and passes.
+Run: `cargo test --lib list_threads_dispatch_lists_dynamic_tool_threads`
+Expected: FAIL — the `list_threads` name is not yet matched in `execute_inner`, so it falls through to the "tool not found" / node-resolution path (no `proyecto-alfa` in the output). Fix imports (the `with_conversation_history` builder path) until it compiles and then fails on the assertion.
 
 - [ ] **Step 3: Add the dispatch arm** in `execute_inner`, immediately after the `RECALL_HISTORY_TOOL` block (~line 1740)
 
