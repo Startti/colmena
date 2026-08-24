@@ -1630,18 +1630,29 @@ impl ExecutableNode for LlmNode {
                                         });
                                     }
                                     Err(e) => {
-                                        crate::colmena_log!(
-                                            "[file-resolve-no-cache] WARN upload failed for '{}': {}",
-                                            filename, e
-                                        );
+                                        // Fail closed: silently dropping the file
+                                        // here let the model answer as if the
+                                        // attachment never existed (see #200). The
+                                        // canonical resolve_files path aborts on
+                                        // this error; match it so behavior is the
+                                        // same with and without DATABASE_URL.
+                                        return Err(format!(
+                                            "attachment '{}' could not be uploaded to the {} Files API: {}. \
+                                             The file cannot be delivered to the model; aborting rather than \
+                                             dropping it silently.",
+                                            filename, provider_kind, e
+                                        )
+                                        .into());
                                     }
                                 },
                                 Err(e) => {
-                                    crate::colmena_log!(
-                                        "[file-resolve-no-cache] WARN download failed for '{}': {}",
-                                        filename,
-                                        e
-                                    );
+                                    return Err(format!(
+                                        "attachment '{}' could not be downloaded from its signed URL: {}. \
+                                         The file cannot be delivered to the model; aborting rather than \
+                                         dropping it silently.",
+                                        filename, e
+                                    )
+                                    .into());
                                 }
                             }
                         }
@@ -1716,11 +1727,18 @@ impl ExecutableNode for LlmNode {
                                     });
                                 }
                                 Err(e) => {
-                                    crate::colmena_log!(
-                                        "[file-resolve-no-cache] WARN inline upload failed for '{}': {}",
-                                        filename,
-                                        e
-                                    );
+                                    // Fail closed — see #200 and the SignedUrl arm
+                                    // above. A non-text inline file MUST reach the
+                                    // provider Files API to be delivered; dropping
+                                    // it silently makes the model hallucinate a
+                                    // missing document.
+                                    return Err(format!(
+                                        "inline attachment '{}' could not be uploaded to the {} Files API: {}. \
+                                         The file cannot be delivered to the model; aborting rather than \
+                                         dropping it silently.",
+                                        filename, provider_kind, e
+                                    )
+                                    .into());
                                 }
                             }
                         }
@@ -1837,7 +1855,23 @@ impl ExecutableNode for LlmNode {
                     FileSource::InlineBytes { .. } if is_text_like(&file.mime_type) => {
                         String::new()
                     }
-                    _ => continue, // Not uploaded yet — skip registration this pass.
+                    // A non-text file that is still not Uploaded here means
+                    // resolution neither uploaded it nor aborted — with #200 the
+                    // no-cache path now fails closed, so this should be
+                    // unreachable. Keep the skip as a backstop but make the drop
+                    // auditable instead of silent.
+                    _ => {
+                        tracing::warn!(
+                            target: "colmena::attachment",
+                            event = "attachment.registration_skipped_unuploaded",
+                            agent_session_id = %sid,
+                            mime = %file.mime_type,
+                            filename = %file.filename,
+                            "skipping catalog registration for '{}': the file was never uploaded to the provider Files API; the model will not see it this turn",
+                            file.filename
+                        );
+                        continue;
+                    }
                 };
 
                 // Plan A — Foundation: persist bytes uniformly to
