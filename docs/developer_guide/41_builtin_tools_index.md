@@ -59,13 +59,14 @@ For toolkit packages (`enabled_tools: ["gsheets"]` shortcut), see
 | `document_rollback` | Roll back an artifact to a previous version; full history is preserved | [§38](38_crdt_documents.md) |
 | `document_list_my_artifacts` | List every document artifact that belongs to the current session with metadata | [§38](38_crdt_documents.md) |
 
-## helpers (3 tools)
+## helpers (4 tools)
 
 | Tool | Summary | Detailed docs |
 |---|---|---|
 | `load_skill` | Load a markdown skill bundle into the conversation; reveals built-in or user-provided guidance on demand | [§24](24_skills.md) |
 | `load_attachment` | Materialize a registered attachment's content (with auto-summary for large files) into the conversation | [§31](31_load_attachment.md) |
 | `recall_history` | Re-read the FULL original content of one past message by its turn index (the `[Tn]` shown in the conversation summary); paginated (`offset`/`next_offset`) for large artifacts | [§15](15_memory_guide.md) |
+| `list_threads` | List the existing conversation threads of a `memory_mode: "dynamic"` sub-agent tool, grouped by tool, so the model can continue the right `thread_id` | [§19](19_nested_agents_and_subgraphs.md) |
 
 ## sql (4 tools — synthetic SQL/pandas tools for tabular attachments)
 

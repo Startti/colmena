@@ -536,6 +536,9 @@ mod text_coverage_tests {
         // recall_history — 1 tool
         tools.push(super::recall_history::tool_recall_history());
 
+        // list_threads — 1 tool
+        tools.push(super::list_threads::tool_list_threads());
+
         // load_attachment — 1 tool; pass empty catalog (valid defensive path per docs)
         tools.push(super::load_attachment_tool::build_load_attachment_tool_definition(&[]));
 
