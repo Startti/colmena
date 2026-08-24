@@ -1983,11 +1983,26 @@ impl DagToolExecutor {
         let boundary =
             scopes_child_events(dispatched_node_type).then(|| tool_call.function.name.clone());
         if let (Some(name), Some(obs)) = (&boundary, &self.observer) {
+            // Identity of the node that is about to run. The run loop reads
+            // `provider`/`model` off this frame to label the node's row in
+            // `usage-summary`; without them the row reported `model: null,
+            // provider: null` and its tokens could be attributed but not priced
+            // — and a tool's `fixed_config` is free to name a different provider
+            // and model than the agent dispatching it, so the parent's values
+            // are not a safe substitute.
+            //
+            // A strict allowlist, deliberately. By this point `inputs` holds the
+            // merged `fixed_config` with secure values ALREADY DECRYPTED (the
+            // resolved `api_key` among them), and the SSE mapper only scrubs
+            // `__`-prefixed keys and `session_id` — echoing `inputs` wholesale
+            // here would put a live credential on the wire. That is why this
+            // frame shipped empty in the first place.
+            let identity = boundary_identity(&inputs, tool_cfg.map(|c| &c.fixed_config));
             let start = DagExecutionEvent::NodeStart {
                 node_id: name.clone(),
                 node_type: dispatched_node_type.to_string(),
                 inputs: Value::Object(Default::default()),
-                config: Value::Object(Default::default()),
+                config: Value::Object(identity),
             };
             if let Ok(raw) = serde_json::to_value(&start) {
                 obs.on_event(NodeEvent::SubgraphChildEvent(raw));
@@ -2191,6 +2206,141 @@ impl DagToolExecutor {
 /// would come out double-wrapped.
 fn scopes_child_events(node_type: &str) -> bool {
     matches!(node_type, "llm_call" | "for_each")
+}
+
+/// The fields a stream-boundary frame may carry to identify the node about to run.
+///
+/// A strict allowlist, and it must stay one. `inputs` reaches the boundary with
+/// the tool's merged `fixed_config` and its secure values ALREADY DECRYPTED —
+/// the resolved `api_key` included — and the SSE mapper scrubs only
+/// `__`-prefixed keys and `session_id`. Echoing `inputs` wholesale onto this
+/// frame would put a live credential on the wire, which is why the frame
+/// shipped empty before this existed. Widen this list only for fields that can
+/// never hold a secret.
+const BOUNDARY_IDENTITY_FIELDS: [&str; 2] = ["provider", "model"];
+
+/// Build the identity payload for a boundary frame: the allowlisted fields,
+/// read from the merged inputs and falling back to the tool's `fixed_config`.
+///
+/// Absent and explicitly-null fields are omitted rather than emitted as null,
+/// so a consumer can tell "this node type has no model" from "the model was
+/// lost on the way here". Node types with no such fields (`for_each`) yield an
+/// empty map, exactly as before.
+fn boundary_identity(
+    inputs: &HashMap<String, Value>,
+    fixed_config: Option<&HashMap<String, Value>>,
+) -> serde_json::Map<String, Value> {
+    let mut identity = serde_json::Map::new();
+    for key in BOUNDARY_IDENTITY_FIELDS {
+        let value = inputs
+            .get(key)
+            .or_else(|| fixed_config.and_then(|c| c.get(key)))
+            .filter(|v| !v.is_null());
+        if let Some(v) = value {
+            identity.insert(key.to_string(), v.clone());
+        }
+    }
+    identity
+}
+
+#[cfg(test)]
+mod boundary_identity_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn map(pairs: &[(&str, Value)]) -> HashMap<String, Value> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn carries_provider_and_model_from_inputs() {
+        // The whole point: the usage row for a nested node has to say which
+        // model burned the tokens, or they can be attributed but not priced.
+        let inputs = map(&[
+            ("provider", json!("anthropic")),
+            ("model", json!("claude-sonnet-4-6")),
+        ]);
+        let id = boundary_identity(&inputs, None);
+        assert_eq!(id["provider"], "anthropic");
+        assert_eq!(id["model"], "claude-sonnet-4-6");
+    }
+
+    #[test]
+    fn never_carries_anything_outside_the_allowlist() {
+        // The regression that matters. `inputs` holds the merged fixed_config
+        // with secure values already decrypted, and the SSE mapper does not
+        // scrub `api_key`. If someone widens this to `inputs.clone()`, a live
+        // credential goes on the wire.
+        let inputs = map(&[
+            ("provider", json!("openai")),
+            ("model", json!("gpt-4o")),
+            ("api_key", json!("sk-live-must-never-appear")),
+            ("system_message", json!("private prompt")),
+            ("connection_url", json!("postgres://user:pw@host/db")),
+        ]);
+        let id = boundary_identity(&inputs, None);
+        assert_eq!(
+            id.keys().collect::<Vec<_>>(),
+            vec!["provider", "model"],
+            "boundary frame must carry the allowlist and nothing else"
+        );
+        let serialized = serde_json::to_string(&id).unwrap();
+        for secret in ["sk-live-must-never-appear", "private prompt", "postgres://"] {
+            assert!(
+                !serialized.contains(secret),
+                "leaked `{secret}` onto the boundary frame"
+            );
+        }
+    }
+
+    #[test]
+    fn falls_back_to_fixed_config_when_inputs_lack_the_field() {
+        // Not every dispatch path merges fixed_config into inputs, so the
+        // tool's own declaration is the second source.
+        let fixed = map(&[
+            ("provider", json!("google")),
+            ("model", json!("gemini-2.5-flash")),
+        ]);
+        let id = boundary_identity(&HashMap::new(), Some(&fixed));
+        assert_eq!(id["provider"], "google");
+        assert_eq!(id["model"], "gemini-2.5-flash");
+    }
+
+    #[test]
+    fn inputs_win_over_fixed_config() {
+        let inputs = map(&[("model", json!("resolved-at-runtime"))]);
+        let fixed = map(&[("model", json!("declared-in-config"))]);
+        let id = boundary_identity(&inputs, Some(&fixed));
+        assert_eq!(id["model"], "resolved-at-runtime");
+    }
+
+    #[test]
+    fn omits_absent_and_null_fields_rather_than_emitting_null() {
+        // A `for_each` tool has neither field. An empty map is honest; a map of
+        // nulls would look like the identity was lost in transit.
+        let id = boundary_identity(&map(&[("model", Value::Null)]), None);
+        assert!(
+            id.is_empty(),
+            "null and absent must both be omitted, got {id:?}"
+        );
+    }
+
+    #[test]
+    fn a_child_does_not_inherit_the_parent_identity() {
+        // A tool's fixed_config is free to name a different provider than the
+        // agent dispatching it — the cheap-child pattern. Verified live with an
+        // Anthropic parent and a Gemini child.
+        let child = map(&[
+            ("provider", json!("google")),
+            ("model", json!("gemini-2.5-flash")),
+        ]);
+        let id = boundary_identity(&child, None);
+        assert_eq!(id["provider"], "google");
+        assert_ne!(id["provider"], "anthropic");
+    }
 }
 
 #[cfg(test)]

@@ -301,6 +301,12 @@ El texto completo también queda disponible en `output.final_response` del `node
 }
 ```
 
+> `model` y `provider` identifican **el nodo de esa fila**, no el agente que lo
+> despachó. Un `llm_call` anidado como tool puede declarar en su `fixed_config`
+> un provider y un modelo distintos a los del padre, y esta fila reporta los
+> suyos. Hasta el 2026-08-23 llegaban en `null` para todo nodo anidado, lo que
+> permitía atribuir sus tokens pero no tarifarlos.
+>
 > `prompt_tokens` es el input **fresco** — los tokens servidos desde cache nunca
 > están adentro, en ningún provider (los adapters normalizan la discrepancia
 > entre las tres APIs). `total_tokens` suma las cinco columnas, cache incluido.
