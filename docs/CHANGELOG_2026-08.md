@@ -779,3 +779,34 @@ como issue separado.
 el `usage` que consume ADP son idénticos.
 
 **Estado.** Done.
+
+## 13. Un adjunto que falla al subir ya no se descarta en silencio (#200)
+
+**Qué cambió.** En la resolución de archivos del `llm_call` **sin caché** (la rama
+que corre cuando no hay `DATABASE_URL`), un fallo al subir el adjunto a la Files
+API del provider solo emitía un `WARN` y **seguía sin el archivo** — el modelo
+respondía como si el documento nunca hubiera existido, sin ningún error que lo
+explicara. Ahora esa rama **falla cerrado** (propaga el error y aborta el run),
+igual que la rama canónica (`LlmCallUseCase::resolve_files`, que ya usaba
+`.await?`). Aplica a los tres puntos: descarga de signed URL, subida de signed
+URL y subida de inline no-text.
+
+Además, el backstop `_ => continue` del registro de catálogo (un archivo no-text
+que llegó sin subir) pasa de salto silencioso a un `tracing::warn!` estructurado
+(`event = "attachment.registration_skipped_unuploaded"`), para que cualquier drop
+futuro quede auditable.
+
+**Por qué.** Descubierto investigando el issue #197 (que resultó no ser un bug: la
+entrega de adjuntos funciona; el síntoma original era un proxy TLS bloqueando la
+Files API). El silent-drop es un problema de robustez independiente: perder un
+archivo del usuario sin señal es peor que fallar.
+
+**Alcance.** Solo afecta el path sin `DATABASE_URL` (dev/local); producción/ADP
+siempre setea `DATABASE_URL` → rama canónica, ya fail-closed. El path de éxito no
+cambia — verificado E2E (inline PDF sin `DATABASE_URL` → subida → registro →
+`load_attachment` → respuesta correcta). Un test de inyección de fallo determinista
+requiere un provider mockeable y queda como follow-up.
+
+**ADP no afectado.**
+
+**Estado.** Done.
