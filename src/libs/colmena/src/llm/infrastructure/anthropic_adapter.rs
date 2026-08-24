@@ -26,14 +26,14 @@ impl Default for AnthropicAdapter {
 impl AnthropicAdapter {
     pub fn new() -> Self {
         Self {
-            client: Client::new(),
+            client: crate::shared::http_client::client(),
             base_url: "https://api.anthropic.com/v1".to_string(),
         }
     }
 
     pub fn with_base_url(base_url: String) -> Self {
         Self {
-            client: Client::new(),
+            client: crate::shared::http_client::client(),
             base_url,
         }
     }

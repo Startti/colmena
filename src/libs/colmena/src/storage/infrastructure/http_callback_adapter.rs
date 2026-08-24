@@ -51,7 +51,7 @@ pub struct HttpCallbackStorageAdapter {
 impl HttpCallbackStorageAdapter {
     pub fn new(callback_url: String, shared_secret: String) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: crate::shared::http_client::client(),
             callback_url,
             shared_secret,
             meta_cache: Arc::new(DashMap::new()),

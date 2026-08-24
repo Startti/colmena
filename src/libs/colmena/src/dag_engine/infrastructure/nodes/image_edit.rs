@@ -34,7 +34,7 @@ impl ImageEditNode {
     pub fn new(storage: Arc<dyn OutputStorageRepository>) -> Self {
         Self {
             storage,
-            http: reqwest::Client::new(),
+            http: crate::shared::http_client::client(),
             secure_values: None,
             attachment_registry: None,
             #[cfg(test)]

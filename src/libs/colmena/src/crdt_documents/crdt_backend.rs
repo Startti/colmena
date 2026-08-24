@@ -139,7 +139,7 @@ pub struct RestBackend {
 impl RestBackend {
     pub fn new(base_url: impl Into<String>) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: crate::shared::http_client::client(),
             base_url: base_url.into().trim_end_matches('/').to_string(),
         }
     }

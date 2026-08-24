@@ -47,7 +47,7 @@ pub struct RefreshClient {
 impl RefreshClient {
     pub fn new() -> Self {
         Self {
-            http: reqwest::Client::builder()
+            http: crate::shared::http_client::builder()
                 .timeout(Duration::from_secs(15))
                 .build()
                 .expect("reqwest builder should not fail with default opts"),
@@ -61,7 +61,7 @@ impl RefreshClient {
     /// (not just Google). Same timeouts/retries as `new()`.
     pub fn with_endpoint(endpoint: &str) -> Self {
         Self {
-            http: reqwest::Client::builder()
+            http: crate::shared::http_client::builder()
                 .timeout(Duration::from_secs(15))
                 .build()
                 .expect("reqwest builder should not fail with default opts"),
@@ -75,7 +75,7 @@ impl RefreshClient {
     #[cfg(test)]
     pub fn for_tests(endpoint: &str) -> Self {
         Self {
-            http: reqwest::Client::builder()
+            http: crate::shared::http_client::builder()
                 .timeout(Duration::from_secs(5))
                 .build()
                 .expect("reqwest builder"),

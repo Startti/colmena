@@ -48,7 +48,7 @@ impl AnthropicFilesApiAdapter {
     }
 
     fn default_client() -> Client {
-        Client::builder()
+        crate::shared::http_client::builder()
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(600))
             .user_agent(concat!("colmena/", env!("CARGO_PKG_VERSION")))

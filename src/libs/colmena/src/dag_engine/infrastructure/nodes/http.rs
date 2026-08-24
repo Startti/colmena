@@ -21,7 +21,7 @@
 use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
 use bytes::Bytes;
 use futures::Stream;
-use reqwest::{Client, Method, Url};
+use reqwest::{Method, Url};
 use serde_json::{json, Value};
 use std::error::Error as StdError;
 use std::pin::Pin;
@@ -127,7 +127,7 @@ impl MultipartUrlResolver {
             }
         }
 
-        let client = reqwest::Client::builder()
+        let client = crate::shared::http_client::builder()
             .timeout(std::time::Duration::from_secs(self.timeout_secs))
             .http1_only()
             .build()?;
@@ -664,7 +664,7 @@ impl HttpNode {
         }
 
         // Build the outbound request — same client tuning as JSON path
-        let client = reqwest::Client::builder().http1_only().build()?;
+        let client = crate::shared::http_client::builder().http1_only().build()?;
         let url = Url::parse(full_url).map_err(|e| format!("Invalid URL '{full_url}': {e}"))?;
         let method = reqwest::Method::from_str(method_str)
             .map_err(|e| format!("Invalid HTTP method '{method_str}': {e}"))?;
@@ -898,7 +898,7 @@ impl ExecutableNode for HttpNode {
 
         // 3. Prepare Client and Request
         // Build client forcing HTTP/1.1 to avoid HTTP/2 issues with some APIs
-        let client = Client::builder().http1_only().build()?;
+        let client = crate::shared::http_client::builder().http1_only().build()?;
 
         println!("[HttpNode] → {} {}", method, url);
 
