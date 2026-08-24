@@ -1,7 +1,7 @@
 use super::hydration::hydrate_message;
 use crate::llm::domain::{
     Conversation, ConversationKey, ConversationRepository, LlmError, LlmMessage, MessageRole,
-    StoredMessage,
+    NodeActivity, StoredMessage,
 };
 
 use async_trait::async_trait;
@@ -180,6 +180,45 @@ impl ConversationRepository for SqliteConversationRepository {
 
         Ok(())
     }
+
+    async fn list_node_activity(
+        &self,
+        keying: (&str, &str),
+        node_id_prefix: &str,
+    ) -> Result<Vec<NodeActivity>, LlmError> {
+        let (col, val) = keying;
+        let sql = format!(
+            "SELECT h1.node_id AS node_id, \
+                    count(*) AS message_count, \
+                    max(h1.created_at) AS last_activity, \
+                    (SELECT h2.content FROM llm_node_history h2 \
+                       WHERE h2.{col} = ?1 AND h2.node_id = h1.node_id AND h2.role = 'user' \
+                       ORDER BY h2.created_at ASC LIMIT 1) AS opening \
+             FROM llm_node_history h1 \
+             WHERE h1.{col} = ?1 AND h1.node_id LIKE ?2 \
+             GROUP BY h1.node_id"
+        );
+        let like = format!("{}%", node_id_prefix);
+        let rows = sqlx::query(&sql)
+            .bind(val)
+            .bind(&like)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| LlmError::RequestFailed {
+                message: format!("Database error: {}", e),
+            })?;
+        Ok(rows
+            .iter()
+            .map(|r| NodeActivity {
+                node_id: r.get::<String, _>("node_id"),
+                message_count: r.get::<i64, _>("message_count"),
+                last_activity: r
+                    .get::<Option<String>, _>("last_activity")
+                    .unwrap_or_default(),
+                opening: r.get::<Option<String>, _>("opening"),
+            })
+            .collect())
+    }
 }
 
 #[cfg(test)]
@@ -332,5 +371,53 @@ mod summary_tests {
         let conv_b = repo.get_by_id(&key_b).await.unwrap();
         assert_eq!(conv_b.messages.len(), 1, "sess_b must not see sess_a rows");
         assert_eq!(conv_b.messages[0].content(), "only in b");
+    }
+
+    fn node_key(agent: &str, node_id: &str) -> ConversationKey {
+        ConversationKey {
+            session_id: SessionId(format!("sess_{agent}")),
+            agent_session_id: Some(AgentSessionId(agent.to_string())),
+            node_id: NodeIdPath(node_id.to_string()),
+        }
+    }
+
+    #[tokio::test]
+    async fn sqlite_list_node_activity_returns_counts_and_opening() {
+        let repo = SqliteConversationRepository::new(pool().await);
+        let agent = "sqlite_list_node_activity_test";
+        let alfa = node_key(agent, "tool/t/alfa/keeper");
+        let beta = node_key(agent, "tool/t/beta/keeper");
+
+        repo.add_message(&alfa, LlmMessage::user("hello alfa".into()).unwrap())
+            .await
+            .unwrap();
+        repo.add_message(&alfa, LlmMessage::assistant("hi back".into()).unwrap())
+            .await
+            .unwrap();
+        repo.add_message(&beta, LlmMessage::user("hello beta".into()).unwrap())
+            .await
+            .unwrap();
+
+        let rows = repo
+            .list_node_activity(("agent_session_id", agent), "tool/t/")
+            .await
+            .unwrap();
+
+        assert_eq!(rows.len(), 2);
+        let alfa_row = rows
+            .iter()
+            .find(|r| r.node_id == "tool/t/alfa/keeper")
+            .expect("alfa row present");
+        assert_eq!(alfa_row.message_count, 2);
+        assert_eq!(alfa_row.opening.as_deref(), Some("hello alfa"));
+        let beta_row = rows
+            .iter()
+            .find(|r| r.node_id == "tool/t/beta/keeper")
+            .expect("beta row present");
+        assert_eq!(beta_row.message_count, 1);
+        assert_eq!(beta_row.opening.as_deref(), Some("hello beta"));
+        assert!(rows
+            .iter()
+            .all(|r| r.message_count > 0 && r.opening.is_some()));
     }
 }
