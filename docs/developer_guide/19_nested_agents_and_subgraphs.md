@@ -197,13 +197,21 @@ sobrevive entre runs).
 |---|---|---|
 | `stateless` (**default**) | `tool/<tool_call_id>` | Cada llamada aislada. Es lo de hoy; omitir el campo equivale a esto. |
 | `persistent` | `tool/<tool_name>` | Una sola conversación compartida por todas las llamadas al tool; todas acumulan en el mismo hilo y el modelo no maneja ningún identificador. **Activo.** |
-| `dynamic` | `tool/<tool_name>/<thread_id>` | El modelo nombra el hilo por llamada vía un parámetro `thread_id` **requerido** que el motor auto-expone; un id nuevo abre un hilo, un id previo lo continúa. **Aún no activo** — llega en un incremento siguiente. |
+| `dynamic` | `tool/<tool_name>/<thread_id>` | El modelo nombra el hilo por llamada vía un parámetro `thread_id` **requerido** que el motor auto-expone; un id nuevo abre un hilo, un id previo lo continúa. **Activo.** |
 
-`stateless` y `persistent` están activos; declarar `dynamic` falla al cargar con un
-mensaje claro (no queda como no-op silencioso). Un modo con memoria
-(`persistent`/`dynamic`) **requiere `connection_url`** en el `llm_call` que recuerda —
-para un `subgraph`, en un `llm_call` dentro de su `child_graph_inline` — o el grafo
-falla al cargar. Un `child_graph_path` externo no es inspeccionable y no se bloquea.
+Los tres modos están activos. Un modo con memoria (`persistent`/`dynamic`) **requiere
+`connection_url`** en el `llm_call` que recuerda — para un `subgraph`, en un `llm_call`
+dentro de su `child_graph_inline` — o el grafo falla al cargar. Un `child_graph_path`
+externo no es inspeccionable y no se bloquea.
+
+**`dynamic` en detalle.** El motor auto-expone `thread_id` como parámetro **requerido**
+(no lo declares en `node_schema`; el motor lo agrega). El modelo decide en cada llamada:
+un id nuevo abre un hilo, un id previo lo retoma. Si el modelo **omite** el `thread_id`,
+la llamada devuelve un **error corregible** que el modelo puede leer y reintentar — nunca
+un aislamiento silencioso. El resultado del tool **eco-devuelve** el id como prefijo
+`[hilo: <id>]` para que sobreviva a la compactación de contexto (el modelo debe reusar
+el id exacto para continuar). El `thread_id` se sanitiza (`[A-Za-z0-9._-]`, resto → `-`,
+máx. 128) antes de formar la clave.
 
 ```json
 "tool_configurations": {

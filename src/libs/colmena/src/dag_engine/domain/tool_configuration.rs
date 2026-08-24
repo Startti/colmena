@@ -146,8 +146,6 @@ pub fn is_memory_capable(node_type: &str) -> bool {
 /// Returns `Err` with an actionable message when the mode cannot be honored:
 /// 1. `stateless` — always valid (nothing to persist; today's behavior).
 /// 2. A non-stateless mode is only valid on [`MEMORY_CAPABLE_NODE_TYPES`].
-/// 3. `dynamic` is not active in the current build; it is rejected loudly instead of
-///    silently behaving as `stateless`.
 ///
 /// This checks the `(node_type, mode)` pair only. The `connection_url` backend
 /// requirement for a memory-bearing mode is checked separately by
@@ -162,13 +160,6 @@ pub fn validate_memory_mode(node_type: &str, mode: MemoryMode) -> Result<(), Str
              this tool is node_type '{}'",
             MEMORY_CAPABLE_NODE_TYPES.join(" | "),
             node_type
-        ));
-    }
-    if mode == MemoryMode::Dynamic {
-        return Err(format!(
-            "memory_mode '{}' is not active in this build (only 'stateless' and 'persistent' \
-             are supported); it ships in a follow-up increment",
-            mode
         ));
     }
     Ok(())
@@ -734,23 +725,34 @@ mod tests {
     }
 
     #[test]
-    fn validate_accepts_persistent_on_capable_type() {
-        // persistent is active; the (node_type, mode) gate passes. The connection_url
-        // backend requirement is checked separately by memory_backend_missing_reason.
-        assert!(cfg("llm_call", json!("persistent"))
-            .validate_memory_config()
-            .is_ok());
-        assert!(cfg("subgraph", json!("persistent"))
-            .validate_memory_config()
-            .is_ok());
+    fn validate_accepts_persistent_and_dynamic_on_capable_type() {
+        // The (node_type, mode) gate passes for both active memory modes. The
+        // connection_url backend requirement is checked separately by
+        // memory_backend_missing_reason.
+        for mode in ["persistent", "dynamic"] {
+            assert!(
+                cfg("llm_call", json!(mode))
+                    .validate_memory_config()
+                    .is_ok(),
+                "llm_call + {mode} should pass the mode gate"
+            );
+            assert!(
+                cfg("subgraph", json!(mode))
+                    .validate_memory_config()
+                    .is_ok(),
+                "subgraph + {mode} should pass the mode gate"
+            );
+        }
     }
 
     #[test]
-    fn validate_rejects_dynamic_as_not_yet_active() {
-        let err = cfg("llm_call", json!("dynamic"))
-            .validate_memory_config()
-            .unwrap_err();
-        assert!(err.contains("not active in this build"), "got: {err}");
+    fn backend_check_applies_to_dynamic_too() {
+        let without =
+            json!({ "node_type": "llm_call", "node_schema": { "prompt": { "type": "string" } } });
+        assert!(
+            memory_backend_missing_reason("llm_call", MemoryMode::Dynamic, &without).is_some(),
+            "dynamic without connection_url must be flagged"
+        );
     }
 
     #[test]

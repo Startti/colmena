@@ -158,6 +158,9 @@ pub struct DagToolExecutor {
 /// `max_tool_result_bytes` config field).
 pub const DEFAULT_MAX_TOOL_RESULT_STRING_BYTES: usize = 50 * 1024;
 
+/// LLM-visible name of the thread selector auto-exposed for `dynamic` memory_mode.
+const THREAD_ID_PARAM: &str = "thread_id";
+
 impl DagToolExecutor {
     /// Deterministic ephemeral path qualifier for a node invoked as a tool.
     ///
@@ -169,6 +172,28 @@ impl DagToolExecutor {
     /// memory (stateless isolation).
     fn ephemeral_subgraph_path(tool_call_id: &str) -> String {
         format!("tool/{tool_call_id}")
+    }
+
+    /// Normalize an LLM-supplied `thread_id` into a safe path/DB-key fragment:
+    /// keep `[A-Za-z0-9._-]`, replace every other run with a single `-`, trim
+    /// leading/trailing `-`, and cap at 128 chars. Returns `""` when nothing
+    /// usable remains, which the caller treats as "absent".
+    fn sanitize_thread_id(raw: &str) -> String {
+        let mut out = String::with_capacity(raw.len().min(128));
+        let mut last_dash = false;
+        for ch in raw.chars() {
+            if ch.is_ascii_alphanumeric() || ch == '.' || ch == '_' || ch == '-' {
+                out.push(ch);
+                last_dash = false;
+            } else if !last_dash {
+                out.push('-');
+                last_dash = true;
+            }
+            if out.len() >= 128 {
+                break;
+            }
+        }
+        out.trim_matches('-').to_string()
     }
 
     /// Resolve `${var}` and `${context.var}` placeholders in a string value
@@ -797,15 +822,53 @@ impl DagToolExecutor {
         }
     }
 
-    /// Generate ToolDefinition from node with partial configuration
-    #[allow(deprecated)]
-    /// Build the LLM-facing [`ToolDefinition`] for a configured tool.
+    /// Build the tool definition sent to the LLM, then auto-expose the `thread_id`
+    /// selector when `memory_mode` is `dynamic`. Delegates the base shape to
+    /// [`Self::generate_base_tool_definition`] so the injection applies uniformly
+    /// across every parameter-generation branch.
+    fn generate_tool_definition(
+        &self,
+        tool_name: &str,
+        tool_config: &ToolConfiguration,
+        node: &Arc<dyn ExecutableNode>,
+    ) -> Result<crate::llm::domain::ToolDefinition, String> {
+        use crate::llm::domain::ParameterProperty;
+
+        let mut def = self.generate_base_tool_definition(tool_name, tool_config, node)?;
+
+        // `dynamic` memory_mode: the model names the conversation thread per call.
+        // Auto-expose a REQUIRED `thread_id` so the choice is explicit — a new id
+        // starts a thread, a prior id continues it. Making it required turns a
+        // missing id into a correctable tool error (see `execute_inner`) instead
+        // of silent isolation.
+        if tool_config.memory_mode == MemoryMode::Dynamic {
+            def.parameters.properties.insert(
+                THREAD_ID_PARAM.to_string(),
+                ParameterProperty::new(
+                    "string".to_string(),
+                    "REQUIRED. Names the conversation thread with this sub-agent. For a NEW \
+                     topic, invent a short descriptive id you have NOT used before (e.g. \
+                     'proyecto-alfa'). To CONTINUE a prior thread, reuse its EXACT id."
+                        .to_string(),
+                ),
+            );
+            if !def.parameters.required.iter().any(|r| r == THREAD_ID_PARAM) {
+                def.parameters.required.push(THREAD_ID_PARAM.to_string());
+            }
+        }
+
+        Ok(def)
+    }
+
+    /// Build the LLM-facing [`ToolDefinition`] for a configured tool (base shape,
+    /// before any `memory_mode` parameter injection).
     ///
     /// Returns `Err(message)` when the tool's `node_schema` is malformed (e.g. an
     /// `array` field without `items`). Callers must skip the offending tool rather
     /// than crash — a graph (often LLM-generated) with an invalid schema must not
     /// take down the whole run/worker.
-    fn generate_tool_definition(
+    #[allow(deprecated)]
+    fn generate_base_tool_definition(
         &self,
         tool_name: &str,
         tool_config: &ToolConfiguration,
@@ -1891,14 +1954,35 @@ impl DagToolExecutor {
         // value. Harmless for nodes that ignore this key.
         //   - persistent → `tool/<tool_name>`: one shared conversation for the tool,
         //     keyed by its stable name, so every call accumulates.
+        //   - dynamic → `tool/<tool_name>/<thread_id>`: the model names the thread
+        //     per call. A missing/empty id is a correctable tool error, never silent
+        //     isolation, so the model can retry with an id.
         //   - stateless (default) → `tool/<tool_call_id>`: an ephemeral per-call
         //     qualifier — stable across suspend/resume, unique across calls.
-        // `dynamic` is rejected at graph load in this build; it falls to the
-        // ephemeral branch defensively until it ships.
+        //
+        // Always strip any caller-supplied `thread_id` first: it is a meta-parameter
+        // consumed here and must never reach the child as a task input.
         let memory_mode = tool_cfg.map(|c| c.memory_mode).unwrap_or_default();
+        let thread_id: Option<String> = inputs
+            .remove(THREAD_ID_PARAM)
+            .and_then(|v| v.as_str().map(Self::sanitize_thread_id))
+            .filter(|s| !s.is_empty());
         let node_id_path = match memory_mode {
             MemoryMode::Persistent => format!("tool/{}", tool_call.function.name),
-            _ => Self::ephemeral_subgraph_path(&tool_call.id),
+            MemoryMode::Dynamic => match &thread_id {
+                Some(t) => format!("tool/{}/{}", tool_call.function.name, t),
+                None => {
+                    return Ok(ToolResult {
+                        tool_call_id: tool_call.id.clone(),
+                        success: false,
+                        output: "thread_id is required for this tool: pass a NEW id to start \
+                                 a conversation thread, or a PRIOR id to continue one."
+                            .to_string(),
+                        error: Some("missing_thread_id".to_string()),
+                    });
+                }
+            },
+            MemoryMode::Stateless => Self::ephemeral_subgraph_path(&tool_call.id),
         };
         inputs.insert(
             "__colmena_node_id_path".to_string(),
@@ -2101,10 +2185,17 @@ impl DagToolExecutor {
                     value
                 };
 
+                // In `dynamic` mode, echo the thread id back so the model can reuse it
+                // to continue this exact thread later — the id must survive context
+                // compaction, and the model's own history is where it does.
+                let output = match (memory_mode, &thread_id) {
+                    (MemoryMode::Dynamic, Some(t)) => format!("[hilo: {t}]\n{}", safe_output),
+                    _ => safe_output.to_string(),
+                };
                 Ok(ToolResult {
                     tool_call_id: tool_call.id.clone(),
                     success: true,
-                    output: safe_output.to_string(),
+                    output,
                     error: None,
                 })
             }
@@ -2731,6 +2822,82 @@ mod tests {
         fn get_all_nodes(&self) -> HashMap<String, Arc<dyn ExecutableNode>> {
             self.nodes.clone()
         }
+    }
+
+    fn registry_with_subgraph() -> Arc<MockRegistry> {
+        let mut nodes: HashMap<String, Arc<dyn ExecutableNode>> = HashMap::new();
+        nodes.insert(
+            "subgraph".to_string(),
+            Arc::new(MockNode {
+                name: "subgraph".to_string(),
+            }),
+        );
+        Arc::new(MockRegistry { nodes })
+    }
+
+    fn dynamic_tool_configs() -> HashMap<String, ToolConfiguration> {
+        let cfg: ToolConfiguration = serde_json::from_value(serde_json::json!({
+            "name": "archivador",
+            "node_type": "subgraph",
+            "memory_mode": "dynamic",
+            "node_schema": {
+                "task": { "type": "string", "required": true, "description": "task" }
+            }
+        }))
+        .unwrap();
+        let mut m = HashMap::new();
+        m.insert("archivador".to_string(), cfg);
+        m
+    }
+
+    #[test]
+    fn sanitize_thread_id_normalizes_and_caps() {
+        assert_eq!(
+            DagToolExecutor::sanitize_thread_id("proyecto-alfa"),
+            "proyecto-alfa"
+        );
+        assert_eq!(
+            DagToolExecutor::sanitize_thread_id("Proyecto Alfa!!"),
+            "Proyecto-Alfa"
+        );
+        assert_eq!(DagToolExecutor::sanitize_thread_id("  --  "), "");
+        assert_eq!(DagToolExecutor::sanitize_thread_id("a/b\\c:d"), "a-b-c-d");
+        assert!(DagToolExecutor::sanitize_thread_id(&"x".repeat(500)).len() <= 128);
+    }
+
+    #[tokio::test]
+    async fn dynamic_memory_mode_exposes_required_thread_id() {
+        let executor = DagToolExecutor::new(registry_with_subgraph(), dynamic_tool_configs());
+        let tools = executor.available_tools().await;
+        let t = tools
+            .iter()
+            .find(|t| t.name == "archivador")
+            .expect("archivador tool should be exposed");
+        assert!(
+            t.parameters.properties.contains_key("thread_id"),
+            "dynamic mode must expose thread_id"
+        );
+        assert!(
+            t.parameters.required.iter().any(|r| r == "thread_id"),
+            "thread_id must be required"
+        );
+    }
+
+    #[tokio::test]
+    async fn dynamic_missing_thread_id_returns_correctable_error() {
+        let executor = DagToolExecutor::new(registry_with_subgraph(), dynamic_tool_configs());
+        // No thread_id in the args → correctable tool error, not a crash.
+        let tool_call = ToolCall::new(
+            "call_1".to_string(),
+            FunctionCall::new("archivador".to_string(), r#"{"task": "hola"}"#.to_string()),
+        );
+        let result = executor.execute(&tool_call).await.unwrap();
+        assert!(!result.success, "missing thread_id must fail the call");
+        assert!(
+            result.output.contains("thread_id is required"),
+            "error must guide the model, got: {}",
+            result.output
+        );
     }
 
     #[tokio::test]

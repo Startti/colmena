@@ -73,6 +73,8 @@ impl Graph {
     /// - Node IDs containing `/` — the engine uses `/` to separate path-qualified
     ///   `node_id`s in subgraph hierarchies (`subgraph_node/inner_node`). Allowing
     ///   `/` in user-defined IDs would make the resulting paths ambiguous.
+    /// - A misconfigured `memory_mode` on any tool (wrong node type, unknown value, or
+    ///   a memory-bearing mode without a `connection_url` backend).
     /// - Malformed `node_schema` on any tool in `tool_configurations`.
     pub fn validate(&self) -> Result<(), crate::dag_engine::domain::error::DagError> {
         use crate::dag_engine::domain::error::DagError;
@@ -289,41 +291,38 @@ mod tests {
     }
 
     #[test]
-    fn validate_rejects_dynamic_as_not_yet_active() {
-        let g = graph_with_tool_memory("llm_call", json!("dynamic"));
-        let err = g.validate().unwrap_err().to_string();
-        assert!(
-            err.contains("not active in this build"),
-            "should explain the mode is not active yet, got: {err}"
-        );
+    fn validate_rejects_memory_mode_without_connection_url() {
+        // persistent and dynamic are active but need a persistence backend; a tool
+        // with no connection_url must be rejected at load.
+        for mode in ["persistent", "dynamic"] {
+            let g = graph_with_tool_memory("llm_call", json!(mode));
+            let err = g.validate().unwrap_err().to_string();
+            assert!(
+                err.contains("needs a connection_url"),
+                "{mode} should require a connection_url, got: {err}"
+            );
+        }
     }
 
     #[test]
-    fn validate_rejects_persistent_without_connection_url() {
-        // persistent is active but needs a persistence backend; a tool with no
-        // connection_url must be rejected at load.
-        let g = graph_with_tool_memory("llm_call", json!("persistent"));
-        let err = g.validate().unwrap_err().to_string();
-        assert!(
-            err.contains("needs a connection_url"),
-            "should require a connection_url, got: {err}"
-        );
-    }
-
-    #[test]
-    fn validate_accepts_persistent_with_connection_url() {
-        let g: Graph = serde_json::from_value(json!({
-            "nodes": { "agent": { "type": "llm_call", "config": {
-                "tool_configurations": { "asesor": {
-                    "node_type": "llm_call",
-                    "memory_mode": "persistent",
-                    "fixed_config": { "connection_url": "${DATABASE_URL}" }
-                }}
-            }}},
-            "edges": []
-        }))
-        .unwrap();
-        assert!(g.validate().is_ok());
+    fn validate_accepts_memory_mode_with_connection_url() {
+        for mode in ["persistent", "dynamic"] {
+            let g: Graph = serde_json::from_value(json!({
+                "nodes": { "agent": { "type": "llm_call", "config": {
+                    "tool_configurations": { "asesor": {
+                        "node_type": "llm_call",
+                        "memory_mode": mode,
+                        "fixed_config": { "connection_url": "${DATABASE_URL}" }
+                    }}
+                }}},
+                "edges": []
+            }))
+            .unwrap();
+            assert!(
+                g.validate().is_ok(),
+                "{mode} with connection_url should pass"
+            );
+        }
     }
 
     #[test]

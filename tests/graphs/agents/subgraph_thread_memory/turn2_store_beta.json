@@ -1,0 +1,49 @@
+{
+  "nodes": {
+    "chat": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "api_key": "${GEMINI_API_KEY}",
+        "model": "gemini-2.5-flash",
+        "connection_url": "${DATABASE_URL}",
+        "system_message": "Delegas a un sub-agente 'archivador' que recuerda por HILO. SIEMPRE que el usuario mencione un proyecto, llama a 'archivador' con 'thread_id' = el nombre del proyecto en minusculas con guiones (ej. proyecto Alfa -> 'proyecto-alfa') y 'task' = si el usuario DA un dato, pasalo como AFIRMACION (ej. 'El presupuesto de Alfa es 5000 dolares.'); si PREGUNTA, pasa la pregunta tal cual. Nunca digas 'guardar'; el archivador recuerda solo dentro de su hilo.",
+        "prompt": "Ahora anota para el proyecto Beta: su presupuesto es 8000 dolares.",
+        "tool_configurations": {
+          "archivador": {
+            "name": "archivador",
+            "node_type": "subgraph",
+            "description": "Sub-agente archivador con memoria por hilo. Guarda datos que le pasas y los recuerda. Usa 'thread_id' para separar conversaciones por proyecto y 'task' para el mensaje.",
+            "node_schema": {
+              "child_graph_inline": {
+                "fixed": {
+                  "nodes": {
+                    "keeper": {
+                      "type": "llm_call",
+                      "config": {
+                        "provider": "google",
+                        "api_key": "${GEMINI_API_KEY}",
+                        "model": "gemini-2.5-flash",
+                        "connection_url": "${DATABASE_URL}",
+                        "system_message": "Sos un asistente con memoria perfecta de ESTA conversacion (identificada por su hilo). Recorda con exactitud todo lo que te digan y respondelo cuando te pregunten. Si te preguntan algo que no se menciono antes en este hilo, decilo claramente. No inventes. Responde en una sola frase.",
+                        "prompt": "{{task}}"
+                      }
+                    }
+                  },
+                  "edges": []
+                }
+              },
+              "task": {
+                "type": "string",
+                "required": true,
+                "description": "El mensaje literal para el archivador: que guarde un dato o que recupere uno."
+              }
+            },
+            "memory_mode": "dynamic"
+          }
+        }
+      }
+    }
+  },
+  "edges": []
+}
