@@ -1886,14 +1886,23 @@ impl DagToolExecutor {
             );
         }
 
-        // Inject a deterministic ephemeral path qualifier so any memory-bearing
-        // node invoked as a tool (subgraph, or a bare llm_call) scopes its
-        // conversational memory per-call (stateless) while remaining stable
-        // across suspend/resume. Engine-authoritative: overwrites any
-        // caller-supplied value. Harmless for nodes that ignore this key.
+        // Scope this tool's conversational memory according to its `memory_mode`
+        // (see `MemoryMode`). Engine-authoritative: overwrites any caller-supplied
+        // value. Harmless for nodes that ignore this key.
+        //   - persistent → `tool/<tool_name>`: one shared conversation for the tool,
+        //     keyed by its stable name, so every call accumulates.
+        //   - stateless (default) → `tool/<tool_call_id>`: an ephemeral per-call
+        //     qualifier — stable across suspend/resume, unique across calls.
+        // `dynamic` is rejected at graph load in this build; it falls to the
+        // ephemeral branch defensively until it ships.
+        let memory_mode = tool_cfg.map(|c| c.memory_mode).unwrap_or_default();
+        let node_id_path = match memory_mode {
+            MemoryMode::Persistent => format!("tool/{}", tool_call.function.name),
+            _ => Self::ephemeral_subgraph_path(&tool_call.id),
+        };
         inputs.insert(
             "__colmena_node_id_path".to_string(),
-            Value::String(Self::ephemeral_subgraph_path(&tool_call.id)),
+            Value::String(node_id_path),
         );
 
         // Inject the current subgraph-tool nesting depth. Nesting is unbounded by

@@ -77,7 +77,8 @@ impl Graph {
     pub fn validate(&self) -> Result<(), crate::dag_engine::domain::error::DagError> {
         use crate::dag_engine::domain::error::DagError;
         use crate::dag_engine::domain::tool_configuration::{
-            parse_node_schema, validate_memory_mode, MemoryMode, NodeSchema,
+            memory_backend_missing_reason, parse_node_schema, validate_memory_mode, MemoryMode,
+            NodeSchema,
         };
 
         for node_id in self.nodes.keys() {
@@ -128,6 +129,19 @@ impl Graph {
                             reason,
                         }
                     })?;
+                    // A memory-bearing mode also needs a persistence backend
+                    // (connection_url); without one, memory would not survive across
+                    // runs. Provable-absent → reject; unknowable (external child
+                    // graph) → allowed.
+                    if let Some(reason) =
+                        memory_backend_missing_reason(cfg_node_type, mode, tool_cfg)
+                    {
+                        return Err(DagError::InvalidToolSchema {
+                            node_id: node_id.clone(),
+                            tool_name: tool_name.clone(),
+                            reason,
+                        });
+                    }
                 }
 
                 let Some(schema_value) = tool_cfg.get("node_schema") else {
@@ -275,13 +289,41 @@ mod tests {
     }
 
     #[test]
-    fn validate_rejects_not_yet_active_mode() {
-        let g = graph_with_tool_memory("llm_call", json!("persistent"));
+    fn validate_rejects_dynamic_as_not_yet_active() {
+        let g = graph_with_tool_memory("llm_call", json!("dynamic"));
         let err = g.validate().unwrap_err().to_string();
         assert!(
             err.contains("not active in this build"),
             "should explain the mode is not active yet, got: {err}"
         );
+    }
+
+    #[test]
+    fn validate_rejects_persistent_without_connection_url() {
+        // persistent is active but needs a persistence backend; a tool with no
+        // connection_url must be rejected at load.
+        let g = graph_with_tool_memory("llm_call", json!("persistent"));
+        let err = g.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("needs a connection_url"),
+            "should require a connection_url, got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_accepts_persistent_with_connection_url() {
+        let g: Graph = serde_json::from_value(json!({
+            "nodes": { "agent": { "type": "llm_call", "config": {
+                "tool_configurations": { "asesor": {
+                    "node_type": "llm_call",
+                    "memory_mode": "persistent",
+                    "fixed_config": { "connection_url": "${DATABASE_URL}" }
+                }}
+            }}},
+            "edges": []
+        }))
+        .unwrap();
+        assert!(g.validate().is_ok());
     }
 
     #[test]

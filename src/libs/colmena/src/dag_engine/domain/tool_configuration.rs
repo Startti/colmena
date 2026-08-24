@@ -146,9 +146,12 @@ pub fn is_memory_capable(node_type: &str) -> bool {
 /// Returns `Err` with an actionable message when the mode cannot be honored:
 /// 1. `stateless` — always valid (nothing to persist; today's behavior).
 /// 2. A non-stateless mode is only valid on [`MEMORY_CAPABLE_NODE_TYPES`].
-/// 3. `persistent` and `dynamic` are not active in the current build; they are rejected
-///    loudly instead of silently behaving as `stateless`. Their backend (`connection_url`)
-///    checks land alongside their activation.
+/// 3. `dynamic` is not active in the current build; it is rejected loudly instead of
+///    silently behaving as `stateless`.
+///
+/// This checks the `(node_type, mode)` pair only. The `connection_url` backend
+/// requirement for a memory-bearing mode is checked separately by
+/// [`memory_backend_missing_reason`], which needs the raw tool config.
 pub fn validate_memory_mode(node_type: &str, mode: MemoryMode) -> Result<(), String> {
     if mode == MemoryMode::Stateless {
         return Ok(());
@@ -161,11 +164,102 @@ pub fn validate_memory_mode(node_type: &str, mode: MemoryMode) -> Result<(), Str
             node_type
         ));
     }
-    Err(format!(
-        "memory_mode '{}' is not active in this build (only 'stateless' is supported); \
-         it ships in a follow-up increment",
-        mode
-    ))
+    if mode == MemoryMode::Dynamic {
+        return Err(format!(
+            "memory_mode '{}' is not active in this build (only 'stateless' and 'persistent' \
+             are supported); it ships in a follow-up increment",
+            mode
+        ));
+    }
+    Ok(())
+}
+
+/// Whether a memory-bearing `llm_call` tool config carries a `connection_url`
+/// (in `node_schema.<field>.fixed` or in `fixed_config`). Without one, conversation
+/// memory falls back to an in-process store and does NOT survive across runs.
+fn llm_call_has_connection_url(tool_cfg: &Value) -> bool {
+    let in_fixed_config = tool_cfg
+        .get("fixed_config")
+        .and_then(|c| c.get("connection_url"))
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| !s.is_empty());
+    let in_node_schema = tool_cfg
+        .get("node_schema")
+        .and_then(|s| s.get("connection_url"))
+        .and_then(|f| f.get("fixed"))
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| !s.is_empty());
+    in_fixed_config || in_node_schema
+}
+
+/// Resolve a `subgraph` tool's inline child graph from either `node_schema`
+/// (`child_graph_inline.fixed`) or `fixed_config.child_graph_inline`. `None` when the
+/// child is external (`child_graph_path`) or absent — those cannot be inspected here.
+fn subgraph_inline_child(tool_cfg: &Value) -> Option<&Value> {
+    tool_cfg
+        .get("node_schema")
+        .and_then(|s| s.get("child_graph_inline"))
+        .and_then(|f| f.get("fixed"))
+        .or_else(|| {
+            tool_cfg
+                .get("fixed_config")
+                .and_then(|c| c.get("child_graph_inline"))
+        })
+}
+
+/// Whether an inline child graph contains at least one `llm_call` node with a
+/// non-empty `connection_url` — i.e. a node that can actually persist memory.
+fn inline_child_has_memory_llm(inline: &Value) -> bool {
+    let Some(nodes) = inline.get("nodes").and_then(|n| n.as_object()) else {
+        return false;
+    };
+    nodes.values().any(|node| {
+        let is_llm = node.get("type").and_then(|v| v.as_str()) == Some("llm_call");
+        let has_url = node
+            .get("config")
+            .and_then(|c| c.get("connection_url"))
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| !s.is_empty());
+        is_llm && has_url
+    })
+}
+
+/// Reason a memory-bearing `memory_mode` cannot persist, or `None` when the backend
+/// is present (or cannot be proven absent). Complements [`validate_memory_mode`]: this
+/// one needs the raw tool config to look for a `connection_url`.
+///
+/// - `stateless` → always `None` (nothing to persist).
+/// - `llm_call` → requires a `connection_url` in `node_schema`/`fixed_config`.
+/// - `subgraph` with an inline child → requires an `llm_call` in it carrying a
+///   `connection_url`; with an external `child_graph_path` the child cannot be
+///   inspected here, so this does not block (documented caveat).
+pub fn memory_backend_missing_reason(
+    node_type: &str,
+    mode: MemoryMode,
+    tool_cfg: &Value,
+) -> Option<String> {
+    if mode == MemoryMode::Stateless {
+        return None;
+    }
+    let present = match node_type {
+        "llm_call" => llm_call_has_connection_url(tool_cfg),
+        "subgraph" => match subgraph_inline_child(tool_cfg) {
+            Some(inline) => inline_child_has_memory_llm(inline),
+            // External child_graph_path — not inspectable here; don't block.
+            None => true,
+        },
+        // Non-capable node types are rejected by validate_memory_mode already.
+        _ => true,
+    };
+    if present {
+        None
+    } else {
+        Some(format!(
+            "memory_mode '{mode}' needs a connection_url so conversational memory persists \
+             across runs; this tool has none (without it memory is in-process only and is \
+             lost between runs)"
+        ))
+    }
 }
 
 /// Configuration for exposing a DAG node as an LLM-callable tool.
@@ -640,16 +734,98 @@ mod tests {
     }
 
     #[test]
-    fn validate_rejects_not_yet_active_modes_on_capable_type() {
-        for mode in ["persistent", "dynamic"] {
-            let err = cfg("llm_call", json!(mode))
-                .validate_memory_config()
-                .unwrap_err();
-            assert!(
-                err.contains("not active in this build"),
-                "mode {mode}: {err}"
-            );
-        }
+    fn validate_accepts_persistent_on_capable_type() {
+        // persistent is active; the (node_type, mode) gate passes. The connection_url
+        // backend requirement is checked separately by memory_backend_missing_reason.
+        assert!(cfg("llm_call", json!("persistent"))
+            .validate_memory_config()
+            .is_ok());
+        assert!(cfg("subgraph", json!("persistent"))
+            .validate_memory_config()
+            .is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_dynamic_as_not_yet_active() {
+        let err = cfg("llm_call", json!("dynamic"))
+            .validate_memory_config()
+            .unwrap_err();
+        assert!(err.contains("not active in this build"), "got: {err}");
+    }
+
+    #[test]
+    fn backend_ok_for_stateless_regardless_of_url() {
+        let c = json!({ "node_type": "llm_call" });
+        assert!(memory_backend_missing_reason("llm_call", MemoryMode::Stateless, &c).is_none());
+    }
+
+    #[test]
+    fn backend_llm_call_requires_connection_url() {
+        let without =
+            json!({ "node_type": "llm_call", "node_schema": { "prompt": { "type": "string" } } });
+        assert!(
+            memory_backend_missing_reason("llm_call", MemoryMode::Persistent, &without).is_some(),
+            "missing connection_url must be flagged"
+        );
+
+        let via_schema = json!({
+            "node_type": "llm_call",
+            "node_schema": { "connection_url": { "fixed": "${DATABASE_URL}" } }
+        });
+        assert!(
+            memory_backend_missing_reason("llm_call", MemoryMode::Persistent, &via_schema)
+                .is_none()
+        );
+
+        let via_fixed = json!({
+            "node_type": "llm_call",
+            "fixed_config": { "connection_url": "${DATABASE_URL}" }
+        });
+        assert!(
+            memory_backend_missing_reason("llm_call", MemoryMode::Persistent, &via_fixed).is_none()
+        );
+    }
+
+    #[test]
+    fn backend_subgraph_inline_requires_llm_with_url() {
+        let inline_no_url = json!({
+            "node_type": "subgraph",
+            "node_schema": { "child_graph_inline": { "fixed": {
+                "nodes": { "keeper": { "type": "llm_call", "config": { "prompt": "{{task}}" } } },
+                "edges": []
+            } } }
+        });
+        assert!(
+            memory_backend_missing_reason("subgraph", MemoryMode::Persistent, &inline_no_url)
+                .is_some(),
+            "inline child without connection_url must be flagged"
+        );
+
+        let inline_with_url = json!({
+            "node_type": "subgraph",
+            "fixed_config": { "child_graph_inline": {
+                "nodes": { "keeper": { "type": "llm_call", "config": { "connection_url": "${DATABASE_URL}", "prompt": "{{task}}" } } },
+                "edges": []
+            } }
+        });
+        assert!(memory_backend_missing_reason(
+            "subgraph",
+            MemoryMode::Persistent,
+            &inline_with_url
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn backend_subgraph_external_path_is_not_blocked() {
+        // Cannot inspect an external child_graph_path here — do not block.
+        let external = json!({
+            "node_type": "subgraph",
+            "fixed_config": { "child_graph_path": "./agents/keeper.json" }
+        });
+        assert!(
+            memory_backend_missing_reason("subgraph", MemoryMode::Persistent, &external).is_none()
+        );
     }
 
     #[test]

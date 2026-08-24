@@ -196,18 +196,21 @@ sobrevive entre runs).
 | `memory_mode` | `node_id` | Comportamiento |
 |---|---|---|
 | `stateless` (**default**) | `tool/<tool_call_id>` | Cada llamada aislada. Es lo de hoy; omitir el campo equivale a esto. |
-| `persistent` | `tool/<tool_name>` | Una sola conversación compartida por todas las llamadas al tool. **Aún no activo** — llega en un incremento siguiente. |
+| `persistent` | `tool/<tool_name>` | Una sola conversación compartida por todas las llamadas al tool; todas acumulan en el mismo hilo y el modelo no maneja ningún identificador. **Activo.** |
 | `dynamic` | `tool/<tool_name>/<thread_id>` | El modelo nombra el hilo por llamada vía un parámetro `thread_id` **requerido** que el motor auto-expone; un id nuevo abre un hilo, un id previo lo continúa. **Aún no activo** — llega en un incremento siguiente. |
 
-En el build actual solo `stateless` está activo; declarar `persistent` o `dynamic`
-falla al cargar con un mensaje claro (no queda como no-op silencioso).
+`stateless` y `persistent` están activos; declarar `dynamic` falla al cargar con un
+mensaje claro (no queda como no-op silencioso). Un modo con memoria
+(`persistent`/`dynamic`) **requiere `connection_url`** en el `llm_call` que recuerda —
+para un `subgraph`, en un `llm_call` dentro de su `child_graph_inline` — o el grafo
+falla al cargar. Un `child_graph_path` externo no es inspeccionable y no se bloquea.
 
 ```json
 "tool_configurations": {
   "archivador": {
     "name": "archivador",
     "node_type": "subgraph",
-    "memory_mode": "stateless",
+    "memory_mode": "persistent",
     "description": "Sub-agente que guarda y consulta datos.",
     "node_schema": {
       "child_graph_inline": { "fixed": { "nodes": { "keeper": { "type": "llm_call", "config": { "connection_url": "${DATABASE_URL}", "prompt": "{{task}}" } } }, "edges": [] } },
