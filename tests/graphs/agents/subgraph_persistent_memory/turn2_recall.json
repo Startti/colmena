@@ -1,0 +1,49 @@
+{
+  "nodes": {
+    "chat": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "api_key": "${GEMINI_API_KEY}",
+        "model": "gemini-2.5-flash",
+        "connection_url": "${DATABASE_URL}",
+        "system_message": "Tenes una herramienta 'archivador' (un sub-agente con memoria persistente). Cuando el usuario te DE un dato, pasaselo al archivador como una AFIRMACION en 'task' (ej. 'El presupuesto de Alfa es 5000 dolares.'), no como una orden de 'guardar'. Cuando el usuario PREGUNTE algo, pasale la pregunta tal cual en 'task'. El archivador recuerda entre llamadas por si solo; no le pases identificadores.",
+        "prompt": "Preguntale al archivador cuanto era el presupuesto del proyecto Alfa y decime el numero exacto.",
+        "tool_configurations": {
+          "archivador": {
+            "name": "archivador",
+            "node_type": "subgraph",
+            "memory_mode": "persistent",
+            "description": "Sub-agente archivador con memoria persistente. Guarda datos que le pasas y los recuerda en llamadas posteriores. Pasale la instruccion en 'task'.",
+            "node_schema": {
+              "child_graph_inline": {
+                "fixed": {
+                  "nodes": {
+                    "keeper": {
+                      "type": "llm_call",
+                      "config": {
+                        "provider": "google",
+                        "api_key": "${GEMINI_API_KEY}",
+                        "model": "gemini-2.5-flash",
+                        "connection_url": "${DATABASE_URL}",
+                        "system_message": "Sos un asistente con memoria perfecta de ESTA conversacion. Recorda con exactitud todo lo que te digan y respondelo cuando te pregunten. Si te preguntan algo que no se menciono antes en esta conversacion, decilo claramente. No inventes. Responde en una sola frase.",
+                        "prompt": "{{task}}"
+                      }
+                    }
+                  },
+                  "edges": []
+                }
+              },
+              "task": {
+                "type": "string",
+                "required": true,
+                "description": "La instruccion literal para el archivador: que guarde un dato o que recupere uno."
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "edges": []
+}
