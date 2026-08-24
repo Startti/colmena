@@ -11,6 +11,7 @@ Los cambios que quedan dentro del motor no llevan nota aquí.
 | # | Nota | Acción de ADP | Qué se rompe si se ignora |
 |---|------|---------------|---------------------------|
 | 1 | [Split de tokens de cache en `usage`](2026-08-23-usage-cache-token-split.md) | **Obligatoria si se factura sobre `usage`** — sacar la resta `promptTokens − cacheReadTokens` | Costos de input negativos en Anthropic; `totalTokens` cambia de magnitud |
+| 2 | [Identidad del nodo anidado en su frame de frontera](2026-08-23-nested-node-identity.md) | Ninguna — aditivo | Nada; el costo por nodo anidado sigue sin poder calcularse |
 
 Ningún campo cambió de nombre. `promptTokens` pasa a ser input **fresco** en los
 tres providers, `totalTokens` incluye el cache, y las dos columnas de cache están

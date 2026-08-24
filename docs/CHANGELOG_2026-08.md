@@ -612,3 +612,47 @@ input rate y un cache write ~125%: más de 10x de diferencia. Un número único 
 
 **Estado.** Done. 2313 tests unitarios en verde; semántica de Anthropic y Gemini
 verificada contra las APIs reales.
+
+---
+
+## 9. La identidad del nodo anidado viaja en su frame de frontera
+
+**Qué cambió.** Un `llm_call` (o `for_each`) despachado como tool emitía su
+`subgraph-node-start` con `config: {}` e `inputs: {}`. Como el motor puebla su
+tabla de metadatos leyendo `provider`/`model` de ese frame, la fila de ese nodo
+en `usage-summary` salía con `model: null, provider: null`. Sus tokens se
+**atribuían** bien pero **no se podían tarifar** — las tarifas son por modelo, y
+el modelo no viajaba. Y el `fixed_config` de un tool es libre de nombrar otro
+provider que el del agente que lo despacha (el patrón del hijo en tier barato),
+así que heredar los valores del padre no era un sustituto válido.
+
+Ahora el frame lleva la identidad del nodo que va a correr, y la fila queda
+tarifable. Verificado en vivo con un padre `claude-sonnet-4-6` y un hijo
+`gemini-2.5-flash` en el mismo run: cada fila reporta lo suyo.
+
+**Es una allowlist deliberada** — `config` lleva **solo** `provider` y `model`,
+porque en ese punto los inputs ya tienen los secure values descifrados y volcar
+todo pondría el `api_key` en el stream. Ese es el motivo por el que el frame
+salía vacío. Detalle completo en la nota de migración; la lógica vive en
+`boundary_identity`, con seis tests.
+
+**Grafos de evidencia.** Tres nuevos, uno por provider:
+[`nested_cache_usage_anthropic_e2e.json`](../tests/graphs/agents/nested_cache_usage_anthropic_e2e.json),
+[`nested_cache_usage_openai_e2e.json`](../tests/graphs/agents/nested_cache_usage_openai_e2e.json),
+[`nested_cache_usage_gemini_e2e.json`](../tests/graphs/agents/nested_cache_usage_gemini_e2e.json).
+Un `llm_call` padre expone un `llm_call` hijo como tool; ambos llevan ~2.6k
+tokens de prefijo estable **distinto**, para que cacheen por separado. Corriendo
+el mismo `--agent-session-id` varias veces se ve la inversión y el retorno del
+cache por nivel de anidamiento:
+
+| Provider | Turno 1 | Turno 2+ | Nota |
+|---|---|---|---|
+| Anthropic | padre write 3803, hijo write 3546 | padre read 7606, hijo read 3546, write 0 | El único que reporta `cache_write` |
+| OpenAI | padre read 2816, hijo 0 | turno 3: hijo `prompt 97 / read 2688` | Nunca reporta write |
+| Gemini | hijo read 0 | el hijo **recién cachea en el turno 4** | Warmup real; único con `thinkingTokens` |
+
+**Documentación de referencia.**
+- [`docs/adp_migration/2026-08-23-nested-node-identity.md`](adp_migration/2026-08-23-nested-node-identity.md) — nota de migración (aditiva, sin acción obligatoria)
+- [`docs/sse_events_reference.md`](sse_events_reference.md) — `usage-summary.nodes`
+
+**Estado.** Done. Verificado en vivo contra los tres providers.
