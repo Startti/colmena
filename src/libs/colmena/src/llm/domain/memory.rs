@@ -54,6 +54,15 @@ pub struct StoredMessage {
     pub summary: Option<String>,
 }
 
+/// Per-`node_id` activity summary for thread enumeration (`list_threads`).
+#[derive(Debug, Clone)]
+pub struct NodeActivity {
+    pub node_id: String,
+    pub message_count: i64,
+    pub last_activity: String, // ISO-8601 UTC
+    pub opening: Option<String>, // earliest `user` message content
+}
+
 #[async_trait]
 pub trait ConversationRepository: Send + Sync {
     /// Loads all messages for the given thread.
@@ -96,6 +105,18 @@ pub trait ConversationRepository: Send + Sync {
         _summary: &str,
     ) -> Result<(), LlmError> {
         Ok(())
+    }
+
+    /// List per-`node_id` activity for every `node_id` starting with `node_id_prefix`,
+    /// keyed by `keying` (("agent_session_id"|"session_id", value)). Backends override;
+    /// the default returns empty so non-DB stubs stay valid.
+    async fn list_node_activity(
+        &self,
+        keying: (&str, &str),
+        node_id_prefix: &str,
+    ) -> Result<Vec<NodeActivity>, LlmError> {
+        let _ = (keying, node_id_prefix);
+        Ok(Vec::new())
     }
 }
 

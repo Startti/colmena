@@ -1,5 +1,6 @@
 use crate::llm::domain::{
-    Conversation, ConversationKey, ConversationRepository, LlmError, LlmMessage, StoredMessage,
+    Conversation, ConversationKey, ConversationRepository, LlmError, LlmMessage, MessageRole,
+    NodeActivity, StoredMessage,
 };
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -83,6 +84,42 @@ impl ConversationRepository for InMemoryConversationRepository {
         }
         Ok(())
     }
+
+    async fn list_node_activity(
+        &self,
+        keying: (&str, &str),
+        node_id_prefix: &str,
+    ) -> Result<Vec<NodeActivity>, LlmError> {
+        // `inner` is already keyed by the effective id (agent_session_id when
+        // present, else session_id — see `lookup_key`), not by the full
+        // `ConversationKey`. The store therefore can't distinguish which
+        // column produced that id; matching on the value alone mirrors the
+        // same collapsing precedence `ConversationKey::keying` already
+        // applies, so `col` is accepted for interface parity but unused here.
+        let (_col, val) = keying;
+        let map = self.inner.lock().unwrap();
+        let mut out = Vec::new();
+        for ((id, node_id), msgs) in map.iter() {
+            if id != val || !node_id.starts_with(node_id_prefix) {
+                continue;
+            }
+            let opening = msgs
+                .iter()
+                .find(|sm| matches!(sm.message.role(), MessageRole::User))
+                .map(|sm| sm.message.content().to_string());
+            let last_activity = msgs
+                .last()
+                .map(|sm| sm.message.timestamp().to_rfc3339())
+                .unwrap_or_default();
+            out.push(NodeActivity {
+                node_id: node_id.clone(),
+                message_count: msgs.len() as i64,
+                last_activity,
+                opening,
+            });
+        }
+        Ok(out)
+    }
 }
 
 #[cfg(test)]
@@ -163,5 +200,48 @@ mod tests {
         assert!(out[0].summary.is_none());
         assert_eq!(out[1].summary.as_deref(), Some("sum2"));
         assert_eq!(repo.get_by_id(&key).await.unwrap().messages.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn list_node_activity_groups_by_node_id_under_prefix() {
+        let repo = InMemoryConversationRepository::new();
+        let key = |node: &str| k(Some("agent-1"), "s", node);
+
+        repo.add_message(
+            &key("tool/archivador/alfa/keeper"),
+            LlmMessage::user("abrir alfa".into()).unwrap(),
+        )
+        .await
+        .unwrap();
+        repo.add_message(
+            &key("tool/archivador/alfa/keeper"),
+            LlmMessage::assistant("ok".into()).unwrap(),
+        )
+        .await
+        .unwrap();
+        repo.add_message(
+            &key("tool/archivador/beta/keeper"),
+            LlmMessage::user("abrir beta".into()).unwrap(),
+        )
+        .await
+        .unwrap();
+        repo.add_message(
+            &key("tool/otro/x/keeper"),
+            LlmMessage::user("no incluir".into()).unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let rows = repo
+            .list_node_activity(("agent_session_id", "agent-1"), "tool/archivador/")
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 2, "only archivador node_ids");
+        let alfa = rows
+            .iter()
+            .find(|r| r.node_id == "tool/archivador/alfa/keeper")
+            .unwrap();
+        assert_eq!(alfa.message_count, 2);
+        assert_eq!(alfa.opening.as_deref(), Some("abrir alfa"));
     }
 }

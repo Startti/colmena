@@ -38,8 +38,8 @@ pub use llm_repository::{LlmRepository, LlmStream};
 pub use llm_request::LlmRequest;
 pub use llm_response::{LlmResponse, LlmStreamChunk, LlmStreamPart, SuspendInfo, ToolCallChunk};
 pub use memory::{
-    AgentSessionId, Conversation, ConversationKey, ConversationRepository, NodeIdPath, SessionId,
-    StoredMessage,
+    AgentSessionId, Conversation, ConversationKey, ConversationRepository, NodeActivity,
+    NodeIdPath, SessionId, StoredMessage,
 };
 pub use message_summarizer::MessageSummarizer;
 pub use signed_url_fetcher::SignedUrlFetcher;
