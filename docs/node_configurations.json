@@ -1796,7 +1796,7 @@
         },
         "extra_info": {
           "type": "object",
-          "description": "Metadata about the LLM call including: 'usage' (token counts: prompt_tokens, completion_tokens, total_tokens), 'tool_calls' (array of tool calls made during execution, if any), and optionally 'all_tasks' (when write_to_memory is true)."
+          "description": "Metadata about the LLM call including: 'usage' (token counts: prompt_tokens = fresh input excluding cache, completion_tokens, cache_read_tokens, cache_write_tokens, total_tokens = all five summed), 'tool_calls' (array of tool calls made during execution, if any), and optionally 'all_tasks' (when write_to_memory is true)."
         }
       },
       "default_input": "prompt",
