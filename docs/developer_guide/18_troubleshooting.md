@@ -387,6 +387,46 @@ maturin develop --release
 
 ## 🔑 Problemas con API Keys
 
+### Error: "invalid peer certificate: UnknownIssuer" (proxy TLS local, p. ej. Proxon)
+
+**Síntomas:**
+```
+Pre-flight: provider openai rejected the API key: Network error:
+error sending request for url (https://api.openai.com/v1/models):
+... invalid peer certificate: UnknownIssuer
+```
+
+Se disfraza de "API key rechazada", pero la key está bien: es un problema de
+**confianza TLS**. Pista clave: `curl https://api.openai.com/v1/models` funciona
+desde la misma máquina, pero el binario de Colmena no.
+
+**Causa.** Un proxy que **intercepta TLS** en tu red local (herramientas de
+seguridad/medición de consumo como *Proxon*, o un MITM corporativo) descifra el
+tráfico y **re-firma** el certificado de OpenAI/Anthropic/Google con su propia CA
+raíz. Esa CA está en el keychain del sistema (por eso `curl` la acepta), pero el
+binario de Colmena usa `rustls` con la lista de raíces **embebida**
+(`webpki-roots`), que no la conoce → `UnknownIssuer`. Es la elección de diseño
+que hace a Colmena portable en Cloud Run (no depende del trust store del host) —
+producción no ve ningún proxy, así que el worker de ADP no sufre esto.
+
+**Solución.** Hacer que Colmena confíe en la CA del proxy **además** de las
+embebidas, vía la variable de entorno `COLMENA_EXTRA_CA_CERT` apuntando al PEM de
+esa CA:
+
+```bash
+# Ejemplo con Proxon en macOS
+export COLMENA_EXTRA_CA_CERT="$HOME/Library/Group Containers/group.com.proxon.observer/proxon-ca.cert.pem"
+cargo run --bin dag_engine -- run tests/graphs/agents/llm_call.json
+```
+
+- Es **aditivo y seguro**: suma esa CA a las raíces de confianza; NO desactiva la
+  verificación (no es `danger_accept_invalid_certs`) y las raíces públicas siguen
+  válidas. Acepta un bundle (varios certificados en el mismo PEM).
+- **Sin setear** (default en prod, CI y máquinas sin proxy) no cambia nada.
+- Alternativa si preferís no tocar Colmena: **excluir** los dominios de los
+  proveedores de la interceptación del proxy — pero eso puede anular su función si
+  el proxy está justo para medir ese tráfico.
+
 ### Error: "Invalid API key"
 
 **Síntomas:**

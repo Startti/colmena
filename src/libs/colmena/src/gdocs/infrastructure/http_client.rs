@@ -52,7 +52,7 @@ impl GoogleDocsHttpClient {
     /// vars — so deploys see one clear error per boot rather than
     /// playing whack-a-mole through them.
     pub fn from_config(cfg: &GDocsConfig) -> Result<Self, DocsError> {
-        let http = Client::builder()
+        let http = crate::shared::http_client::builder()
             .timeout(cfg.request_timeout)
             .build()
             .map_err(|e| DocsError::Http(e.to_string()))?;
@@ -80,7 +80,7 @@ impl GoogleDocsHttpClient {
         base_drive: impl Into<String>,
         base_drive_upld: impl Into<String>,
     ) -> Result<Self, DocsError> {
-        let http = Client::builder()
+        let http = crate::shared::http_client::builder()
             .timeout(cfg.request_timeout)
             .build()
             .map_err(|e| DocsError::Http(e.to_string()))?;

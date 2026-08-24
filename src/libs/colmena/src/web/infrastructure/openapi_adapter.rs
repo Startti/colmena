@@ -47,7 +47,7 @@ pub struct OpenApiAdapter {
 
 impl OpenApiAdapter {
     pub fn new(config: OpenApiAdapterConfig) -> Result<Self, WebDomainError> {
-        let client = reqwest::Client::builder()
+        let client = crate::shared::http_client::builder()
             .timeout(config.timeout)
             .user_agent("colmena-api-explorer/0.1")
             .build()

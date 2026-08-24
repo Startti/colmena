@@ -44,7 +44,7 @@ impl TavilyAdapter {
                 "Tavily api_key is empty".to_string(),
             ));
         }
-        let client = Client::builder()
+        let client = crate::shared::http_client::builder()
             .timeout(timeout)
             .build()
             .map_err(|e| WebDomainError::AdapterInit(format!("reqwest build: {e}")))?;

@@ -24,14 +24,14 @@ impl Default for OpenAiAdapter {
 impl OpenAiAdapter {
     pub fn new() -> Self {
         Self {
-            client: Client::new(),
+            client: crate::shared::http_client::client(),
             base_url: "https://api.openai.com/v1".to_string(),
         }
     }
 
     pub fn with_base_url(base_url: String) -> Self {
         Self {
-            client: Client::new(),
+            client: crate::shared::http_client::client(),
             base_url,
         }
     }

@@ -275,7 +275,7 @@ async fn exchange_code_for_refresh_token(
     redirect_uri: &str,
     code: &str,
 ) -> Result<String, String> {
-    let http = reqwest::Client::new();
+    let http = colmena::shared::http_client::client();
     let resp = http
         .post(OAUTH_TOKEN_URL)
         .form(&[

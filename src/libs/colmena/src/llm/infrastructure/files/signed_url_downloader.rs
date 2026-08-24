@@ -25,7 +25,7 @@ impl SignedUrlDownloader {
     }
 
     fn default_client() -> reqwest::Client {
-        reqwest::Client::builder()
+        crate::shared::http_client::builder()
             .connect_timeout(std::time::Duration::from_secs(10))
             // 600s = 10 min. Generous for files up to ~500 MB on slow connections.
             .timeout(std::time::Duration::from_secs(600))

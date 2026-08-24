@@ -810,3 +810,47 @@ requiere un provider mockeable y queda como follow-up.
 **ADP no afectado.**
 
 **Estado.** Done.
+
+## 14. `COLMENA_EXTRA_CA_CERT` — convivir con un proxy TLS interceptor local
+
+**Qué cambió.** Todos los `reqwest::Client` del crate ahora se construyen a
+través de un factory único: `shared::http_client::{builder, client}`. El factory
+lee la nueva variable de entorno **`COLMENA_EXTRA_CA_CERT`** (path a un PEM) y
+**agrega** esa(s) CA(s) a las raíces de confianza embebidas (`webpki-roots`).
+
+**Por qué.** El crate fija `rustls` con raíces embebidas (portable, reproducible
+en Cloud Run, sin depender del trust store del host). El costo: rechaza un proxy
+que **intercepta TLS** en la máquina del dev (p. ej. *Proxon*, que mide consumo
+de IA re-firmando los certificados de los proveedores con su propia CA) →
+`invalid peer certificate: UnknownIssuer`, disfrazado de "API key rechazada". El
+factory cierra esa brecha sin bajar la seguridad.
+
+**Garantías.**
+- **Opt-in y aditivo.** Con la env **sin setear** (default en prod, CI y máquinas
+  sin proxy), el factory es byte-por-byte un `reqwest::Client::builder()` normal —
+  cero cambio de comportamiento. `webpki-roots` sigue siendo el único trust store.
+- **No desactiva verificación.** Suma una CA conocida; **no** es
+  `danger_accept_invalid_certs`. Los certificados públicos siguen validando igual.
+- **Degrada seguro.** Si la env apunta a un archivo inexistente/ilegible o sin PEM
+  válido, se sigue con las raíces embebidas y un `warn` estructurado
+  (`target: colmena::http`), en vez de romper todas las requests.
+
+**Uso (dev detrás de Proxon):**
+```bash
+export COLMENA_EXTRA_CA_CERT="$HOME/Library/Group Containers/group.com.proxon.observer/proxon-ca.cert.pem"
+```
+
+**Verificado.** gpt-5.6 contra OpenAI real detrás de Proxon: sin la env →
+`UnknownIssuer` (como antes); con la env → responde OK. 48 tests del factory
+(split de PEM, gating de env, degradación). Guía:
+[`docs/developer_guide/18_troubleshooting.md`](developer_guide/18_troubleshooting.md)
+("invalid peer certificate: UnknownIssuer").
+
+**ADP no afectado.** Cambio interno; la env va sin setear en la nube y no hay
+proxy interceptor en la ruta de Cloud Run. `Cargo.toml` (features de `reqwest`,
+`rustls-tls` + `webpki-roots`) **no cambia**.
+
+**Estado.** Done. Migrados los clientes de proveedores externos (adapters LLM,
+Files APIs, TTS, image, signed-URL, web, gsheets/gdocs, google_oauth, http node,
+crdt, storage callback). Único `Client::builder()` restante: uno en un `mod
+tests`.

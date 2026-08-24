@@ -467,7 +467,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 addr,
                 value,
             } => {
-                let resp = reqwest::Client::new()
+                let resp = colmena::shared::http_client::client()
                     .post(format!("{base_url}/crdt/agent-op"))
                     .json(&serde_json::json!({
                         "artifact": artifact,

@@ -18,7 +18,7 @@ pub struct OpenAiTtsAdapter {
 impl OpenAiTtsAdapter {
     pub fn new(api_key: String) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: crate::shared::http_client::client(),
             api_key,
             base_url: DEFAULT_BASE_URL.to_string(),
         }

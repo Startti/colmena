@@ -44,7 +44,7 @@ impl GoogleSheetsHttpClient {
     /// vars in the message — so deploys see one clear error per boot
     /// rather than playing whack-a-mole.
     pub fn from_config(cfg: &GSheetsConfig) -> Result<Self, SheetsError> {
-        let http = Client::builder()
+        let http = crate::shared::http_client::builder()
             .timeout(cfg.request_timeout)
             .build()
             .map_err(|e| SheetsError::Internal(format!("reqwest builder: {e}")))?;
@@ -68,7 +68,7 @@ impl GoogleSheetsHttpClient {
     #[cfg(test)]
     pub fn for_tests(sheets_base: &str, drive_base: &str, drive_upload_base: &str) -> Self {
         Self {
-            http: Client::builder()
+            http: crate::shared::http_client::builder()
                 .timeout(Duration::from_secs(5))
                 .build()
                 .unwrap(),

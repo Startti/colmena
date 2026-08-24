@@ -24,14 +24,14 @@ impl Default for GeminiAdapter {
 impl GeminiAdapter {
     pub fn new() -> Self {
         Self {
-            client: Client::new(),
+            client: crate::shared::http_client::client(),
             base_url: "https://generativelanguage.googleapis.com/v1beta".to_string(),
         }
     }
 
     pub fn with_base_url(base_url: String) -> Self {
         Self {
-            client: Client::new(),
+            client: crate::shared::http_client::client(),
             base_url,
         }
     }
