@@ -854,3 +854,67 @@ proxy interceptor en la ruta de Cloud Run. `Cargo.toml` (features de `reqwest`,
 Files APIs, TTS, image, signed-URL, web, gsheets/gdocs, google_oauth, http node,
 crdt, storage callback). Único `Client::builder()` restante: uno en un `mod
 tests`.
+
+---
+
+## 15. El `fixed_config` de un subgraph ya no cruza al prompt del hijo
+
+**Qué cambió.** `SubGraphNode` excluye `child_graph_inline` y `child_graph_path` del
+estado global que arma para el grafo hijo. El nodo sigue resolviendo su grafo desde
+esas claves —la lectura ocurre antes del mapeo IN— pero ya no se las pasa al hijo.
+
+**El bug.** Reportado y medido por ADP el 2026-08-25 en dev, con credenciales
+reales. Todo sub-agente ejecutado como `subgraph` recibía el `child_graph_inline`
+completo de su propio nodo **dentro de su mensaje de usuario**, con los secretos ya
+resueltos: `api_key` del proveedor LLM, `api_key` de Tavily y un `connection_url` de
+Postgres, los tres en claro. Un sub-agente además copió la cadena de conexión textual
+dentro de un documento que redactó para el usuario final, sin que nadie se lo pidiera.
+
+La cadena:
+
+1. `dag_tool_executor.rs` mezcla el `fixed_config` del tool en los `inputs` del nodo y
+   le pasa `config = {}`. Correcto: el nodo necesita su `child_graph_inline`.
+2. `subgraph.rs` copiaba al estado del hijo **todos** los inputs salvo `__colmena_*` y
+   `__node_id`. El filtro excluía lo interno del motor, no la config del operador.
+3. El nodo `input` del hijo con `data: {}` toma la rama passthrough y devuelve todo lo
+   que no empiece con `__`.
+4. `resolve_prompt_or_task` ve un objeto no vacío y lo preserva como `prompt`.
+5. `agent_service.rs` lo manda al modelo y persiste el mismo objeto — por eso lo que se
+   lee en `llm_node_history` **es** lo que recibió el modelo.
+
+`memory_mode` no introdujo la fuga (el mapeo IN es de abril), pero la agrava: los modos
+con memoria **exigen** un `connection_url` dentro del `child_graph_inline`, y con
+`persistent` el `node_id` es estable, así que el mensaje envenenado queda en un hilo
+compartido y se reenvía en cada llamada posterior.
+
+**Segundo bug que cierra el mismo cambio.** Con el plumbing en el estado, un `subgraph`
+anidado sin `config` propia caía al fallback `inputs.get("child_graph_inline")` y
+resolvía **el grafo del padre** — recursión silenciosa. ADP confirmó anidamiento a
+profundidad 2 en 7 rutas de su grafo.
+
+**Por qué exclusión por nombre.** Las dos alternativas quedaron descartadas por
+medición, no por preferencia. Una *allowlist* de claves es imposible: ADP midió sobre
+215 filas que el conjunto lo decide el modelo por llamada (apareció `confirmation`, que
+nadie declara). Un filtro *por procedencia* tampoco: los tres caminos de merge del
+executor (`node_schema`, `$DYNAMIC`, legacy `field_mapping`) producen un mapa plano donde
+el valor del operador y el argumento del modelo son indistinguibles.
+
+**Forma del fix.** Una constante única, `CHILD_GRAPH_SOURCE_KEYS`, de la que derivan
+tanto `resolve_child_graph_source` como el predicado nuevo
+`is_excluded_from_child_state`. Una fuente nueva del grafo hijo queda invisible para el
+hijo por construcción, sin una segunda lista que recordar. El mapeo IN se extrajo a
+`build_child_state`, una función pura, para que los tests ejerciten el mapeo real.
+
+**Límite conocido.** La exclusión no cubre un secreto puesto directamente en el
+`fixed_config` del tool `subgraph` (p. ej. un `api_key` al nivel del tool). Hoy nadie lo
+hace, y cerrarlo exige conservar la procedencia en el executor — cambio aparte.
+
+**Documentación de referencia.** `docs/developer_guide/19_nested_agents_and_subgraphs.md`
+(secciones "Entrada" y el bloque de plumbing), grafo de repro en
+`tests/graphs/advanced/subgraph_plumbing_isolation.json`.
+
+**Tests.** 8 unitarios nuevos en `subgraph_child_state_isolation_tests`. Verificado que
+4 de ellos fallan contra el predicado pre-fix (el resto fija lo que **no** debe cambiar:
+`files`, las claves internas del motor y la propagación de profundidad).
+
+**Estado.** done.
