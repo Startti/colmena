@@ -2334,6 +2334,14 @@ impl ExecutableNode for LlmNode {
                 }
             };
 
+        // F-T4 (list_threads) — capture before `tool_configurations` moves
+        // into the executor below: whether any configured tool opted into
+        // `memory_mode: "dynamic"`. Gates exposure of the `list_threads`
+        // synthetic tool near the `tool_recall_history()` push further down.
+        let exposes_dynamic_memory = tool_configurations.values().any(|c| {
+            c.memory_mode == crate::dag_engine::domain::tool_configuration::MemoryMode::Dynamic
+        });
+
         let tool_executor = {
             let mut executor = DagToolExecutor::new(registry, tool_configurations);
             executor = executor
@@ -2780,6 +2788,17 @@ impl ExecutableNode for LlmNode {
         {
             use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::tool_recall_history;
             tools.push(tool_recall_history());
+        }
+
+        // F-T4 — expose the list_threads synthetic tool only when at least
+        // one configured tool opted into `memory_mode: "dynamic"`. Unlike
+        // recall_history above (always eager), this is intentionally
+        // conditional: there is nothing to navigate without a dynamic-memory
+        // tool, and an always-eager tool would just be dead weight in the
+        // catalog for every non-dynamic LLM node.
+        if exposes_dynamic_memory {
+            use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::tool_list_threads;
+            tools.push(tool_list_threads());
         }
 
         // E-T8 — expose the 9 synthetic Google Sheets tools (gsheets_*) when

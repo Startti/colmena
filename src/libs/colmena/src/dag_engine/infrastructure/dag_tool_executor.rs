@@ -1744,6 +1744,70 @@ impl DagToolExecutor {
             });
         }
 
+        // --- list_threads synthetic tool ---
+        // Enumerate the conversation threads of any `memory_mode: "dynamic"`
+        // tool. Mirrors the recall_history wiring immediately above: same
+        // conversation_repository/conversation_key deps, same "not wired"
+        // failure shape, same argument parsing.
+        if tool_call.function.name
+            == crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::TOOL_LIST_THREADS
+        {
+            use crate::dag_engine::domain::tool_configuration::MemoryMode;
+            use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::dispatch_list_threads;
+            let (Some(repo), Some(key)) = (
+                self.conversation_repository.as_ref(),
+                self.conversation_key.as_ref(),
+            ) else {
+                return Ok(crate::llm::domain::ToolResult {
+                    tool_call_id: tool_call.id.clone(),
+                    output: serde_json::json!({
+                        "error": "list_threads_not_wired",
+                        "hint": "This LLM node was constructed without conversation history access."
+                    })
+                    .to_string(),
+                    success: false,
+                    error: None,
+                });
+            };
+            // Use the LLM-visible name (mirrors `generate_base_tool_definition`'s
+            // `effective_name`: the configured `name`, falling back to the
+            // `tool_configurations` map key when `name` is empty). `node_id` is
+            // built from this same name (`tool/<name>/<thread>`), so using the raw
+            // config `name` here would return an empty/mismatched list and reject
+            // the tool's real name as `unknown_or_non_dynamic_tool`.
+            let mut dynamic_tool_names: Vec<String> = self
+                .tool_configurations
+                .iter()
+                .filter(|(_, c)| c.memory_mode == MemoryMode::Dynamic)
+                .map(|(k, c)| {
+                    if c.name.is_empty() {
+                        k.clone()
+                    } else {
+                        c.name.clone()
+                    }
+                })
+                .collect();
+            dynamic_tool_names.sort();
+            let args: serde_json::Value = if tool_call.function.arguments.trim().is_empty() {
+                serde_json::json!({})
+            } else {
+                serde_json::from_str(&tool_call.function.arguments).map_err(|e| {
+                    LlmError::InvalidToolCall {
+                        reason: format!("Failed to parse list_threads arguments: {e}"),
+                    }
+                })?
+            };
+            let result = dispatch_list_threads(repo, key, &dynamic_tool_names, args).await;
+            let success =
+                !matches!(&result, serde_json::Value::Object(m) if m.contains_key("error"));
+            return Ok(crate::llm::domain::ToolResult {
+                tool_call_id: tool_call.id.clone(),
+                output: result.to_string(),
+                success,
+                error: None,
+            });
+        }
+
         // --- Toolkit dispatch: names of the form "<alias>__<sub_tool>" ---
         if let Some((alias, sub_tool)) = tool_call.function.name.split_once("__") {
             if let Some(cfg) = self.tool_configurations.get(alias) {
@@ -2897,6 +2961,116 @@ mod tests {
             result.output.contains("thread_id is required"),
             "error must guide the model, got: {}",
             result.output
+        );
+    }
+
+    #[tokio::test]
+    async fn list_threads_dispatch_lists_dynamic_tool_threads() {
+        use crate::llm::domain::{
+            AgentSessionId, ConversationKey, ConversationRepository, LlmMessage, MessageRole,
+            NodeIdPath, SessionId,
+        };
+        use crate::llm::infrastructure::persistence::in_memory_conversation_repository::InMemoryConversationRepository;
+        let repo = std::sync::Arc::new(InMemoryConversationRepository::new());
+        // seed one thread for the dynamic tool "archivador"
+        let thread_key = ConversationKey {
+            session_id: SessionId("s".into()),
+            agent_session_id: Some(AgentSessionId("a".into())),
+            node_id: NodeIdPath("tool/archivador/proyecto-alfa/keeper".into()),
+        };
+        repo.add_message(
+            &thread_key,
+            LlmMessage::new(MessageRole::User, "abrir alfa".to_string()).unwrap(),
+        )
+        .await
+        .unwrap();
+        // the parent llm_call's key supplies the keying (agent_session_id "a")
+        let parent_key = ConversationKey {
+            session_id: SessionId("s".into()),
+            agent_session_id: Some(AgentSessionId("a".into())),
+            node_id: NodeIdPath("chat".into()),
+        };
+        let exec = DagToolExecutor::new(registry_with_subgraph(), dynamic_tool_configs())
+            .with_conversation_history(repo, parent_key);
+        let call = ToolCall::new(
+            "call_1".into(),
+            FunctionCall::new("list_threads".into(), "{}".into()),
+        );
+        let res = exec.execute(&call).await.unwrap();
+        assert!(res.success, "list_threads should succeed: {}", res.output);
+        assert!(
+            res.output.contains("proyecto-alfa"),
+            "should list the thread: {}",
+            res.output
+        );
+        assert!(
+            res.output.contains("archivador"),
+            "grouped under the tool name: {}",
+            res.output
+        );
+    }
+
+    /// Regression test for the "empty `name` falls back to the map key" bug:
+    /// `generate_base_tool_definition`'s `effective_name` (what the LLM sees,
+    /// and what `node_id = tool/<name>/<thread>` is built from) falls back to
+    /// the `tool_configurations` map key when `tool_config.name` is empty
+    /// (frontend-style config, e.g. a UUID map key). `dynamic_tool_names` must
+    /// mirror that fallback, or `list_threads` reports the tool under a name
+    /// the model never sees and can never pass back in `{"tool": ...}`.
+    #[tokio::test]
+    async fn list_threads_uses_map_key_when_configured_name_is_empty() {
+        use crate::llm::domain::{
+            AgentSessionId, ConversationKey, ConversationRepository, LlmMessage, MessageRole,
+            NodeIdPath, SessionId,
+        };
+        use crate::llm::infrastructure::persistence::in_memory_conversation_repository::InMemoryConversationRepository;
+
+        let cfg: ToolConfiguration = serde_json::from_value(serde_json::json!({
+            "name": "",
+            "node_type": "subgraph",
+            "memory_mode": "dynamic",
+            "node_schema": {
+                "task": { "type": "string", "required": true, "description": "task" }
+            }
+        }))
+        .unwrap();
+        let mut tool_configs = HashMap::new();
+        tool_configs.insert("archivador".to_string(), cfg);
+
+        let repo = std::sync::Arc::new(InMemoryConversationRepository::new());
+        let thread_key = ConversationKey {
+            session_id: SessionId("s".into()),
+            agent_session_id: Some(AgentSessionId("a".into())),
+            node_id: NodeIdPath("tool/archivador/proyecto-alfa/keeper".into()),
+        };
+        repo.add_message(
+            &thread_key,
+            LlmMessage::new(MessageRole::User, "abrir alfa".to_string()).unwrap(),
+        )
+        .await
+        .unwrap();
+        let parent_key = ConversationKey {
+            session_id: SessionId("s".into()),
+            agent_session_id: Some(AgentSessionId("a".into())),
+            node_id: NodeIdPath("chat".into()),
+        };
+        let exec = DagToolExecutor::new(registry_with_subgraph(), tool_configs)
+            .with_conversation_history(repo, parent_key);
+        let call = ToolCall::new(
+            "call_1".into(),
+            FunctionCall::new("list_threads".into(), "{}".into()),
+        );
+        let res = exec.execute(&call).await.unwrap();
+        assert!(res.success, "list_threads should succeed: {}", res.output);
+        assert!(
+            res.output.contains("proyecto-alfa"),
+            "should list the thread under the map-key-derived name: {}",
+            res.output
+        );
+        assert!(
+            res.output.contains("archivador"),
+            "should be grouped under the map key 'archivador' (empty configured name falls back to it): {}",
+            res.output
         );
     }
 

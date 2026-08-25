@@ -17,6 +17,7 @@ pub mod gsheets_inspect_guard;
 pub mod gsheets_run_python;
 pub mod gsheets_tools;
 pub mod lazy_tools_catalog;
+pub mod list_threads;
 pub mod load_attachment_tool;
 pub mod load_skill_tool;
 pub mod markdown_to_docs_ops;
@@ -327,6 +328,10 @@ pub use recall_history::{
     TOOL_RECALL_HISTORY as RECALL_HISTORY_TOOL,
 };
 
+pub use list_threads::{
+    dispatch_list_threads, tool_list_threads, ListThreadsArgs, TOOL_LIST_THREADS,
+};
+
 pub use gsheets_run_python::{
     dispatch_gsheets_run_python, dispatch_gsheets_run_python_with_client,
     tool_gsheets_run_python as gsheets_tool_run_python, GsheetsBinding, GsheetsRunPythonArgs,
@@ -530,6 +535,9 @@ mod text_coverage_tests {
 
         // recall_history — 1 tool
         tools.push(super::recall_history::tool_recall_history());
+
+        // list_threads — 1 tool
+        tools.push(super::list_threads::tool_list_threads());
 
         // load_attachment — 1 tool; pass empty catalog (valid defensive path per docs)
         tools.push(super::load_attachment_tool::build_load_attachment_tool_definition(&[]));

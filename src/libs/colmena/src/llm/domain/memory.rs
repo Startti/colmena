@@ -54,6 +54,26 @@ pub struct StoredMessage {
     pub summary: Option<String>,
 }
 
+/// Max rows a single `list_node_activity` call returns for one `node_id_prefix`.
+/// Enumeration is model-driven (one row per invented thread id) and each row
+/// carries an `opening` snippet, so an unbounded result can inject tens of KB
+/// into a single tool result. Mirrors the pagination discipline of the sibling
+/// `recall_history` tool. Shared by every `ConversationRepository` backend.
+pub const MAX_LISTED_NODE_ACTIVITY: i64 = 100;
+
+/// Per-`node_id` activity summary for thread enumeration (`list_threads`).
+#[derive(Debug, Clone)]
+pub struct NodeActivity {
+    pub node_id: String,
+    pub message_count: i64,
+    // Backend-formatted timestamp string (not a guaranteed ISO-8601 UTC format):
+    // Postgres renders `max(created_at)::text` per the session TimeZone with a
+    // space separator (e.g. "2026-08-24 10:00:00+00"), while SQLite/in-memory
+    // produce RFC 3339. Comparable/sortable within a single backend only.
+    pub last_activity: String,
+    pub opening: Option<String>, // earliest `user` message content
+}
+
 #[async_trait]
 pub trait ConversationRepository: Send + Sync {
     /// Loads all messages for the given thread.
@@ -96,6 +116,18 @@ pub trait ConversationRepository: Send + Sync {
         _summary: &str,
     ) -> Result<(), LlmError> {
         Ok(())
+    }
+
+    /// List per-`node_id` activity for every `node_id` starting with `node_id_prefix`,
+    /// keyed by `keying` (("agent_session_id"|"session_id", value)). Backends override;
+    /// the default returns empty so non-DB stubs stay valid.
+    async fn list_node_activity(
+        &self,
+        keying: (&str, &str),
+        node_id_prefix: &str,
+    ) -> Result<Vec<NodeActivity>, LlmError> {
+        let _ = (keying, node_id_prefix);
+        Ok(Vec::new())
     }
 }
 
