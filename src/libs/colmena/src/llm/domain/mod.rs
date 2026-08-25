@@ -39,7 +39,7 @@ pub use llm_request::LlmRequest;
 pub use llm_response::{LlmResponse, LlmStreamChunk, LlmStreamPart, SuspendInfo, ToolCallChunk};
 pub use memory::{
     AgentSessionId, Conversation, ConversationKey, ConversationRepository, NodeActivity,
-    NodeIdPath, SessionId, StoredMessage,
+    NodeIdPath, SessionId, StoredMessage, MAX_LISTED_NODE_ACTIVITY,
 };
 pub use message_summarizer::MessageSummarizer;
 pub use signed_url_fetcher::SignedUrlFetcher;

@@ -1,7 +1,7 @@
 use super::hydration::hydrate_message;
 use crate::llm::domain::{
     Conversation, ConversationKey, ConversationRepository, LlmError, LlmMessage, MessageRole,
-    NodeActivity, StoredMessage,
+    NodeActivity, StoredMessage, MAX_LISTED_NODE_ACTIVITY,
 };
 
 use async_trait::async_trait;
@@ -193,15 +193,25 @@ impl ConversationRepository for SqliteConversationRepository {
                     max(h1.created_at) AS last_activity, \
                     (SELECT h2.content FROM llm_node_history h2 \
                        WHERE h2.{col} = ?1 AND h2.node_id = h1.node_id AND h2.role = 'user' \
-                       ORDER BY h2.created_at ASC LIMIT 1) AS opening \
+                       ORDER BY h2.created_at ASC, h2.id ASC LIMIT 1) AS opening \
              FROM llm_node_history h1 \
-             WHERE h1.{col} = ?1 AND h1.node_id LIKE ?2 \
-             GROUP BY h1.node_id"
+             WHERE h1.{col} = ?1 AND h1.node_id LIKE ?2 ESCAPE '\\' \
+             GROUP BY h1.node_id \
+             ORDER BY max(h1.created_at) DESC \
+             LIMIT ?3"
         );
-        let like = format!("{}%", node_id_prefix);
+        // Escape LIKE metacharacters (`\`, `%`, `_`) in the prefix before
+        // appending the wildcard `%`, so a literal `_` in a tool name (common)
+        // doesn't act as a single-char wildcard. `\` must be escaped first.
+        let escaped_prefix = node_id_prefix
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
+        let like = format!("{}%", escaped_prefix);
         let rows = sqlx::query(&sql)
             .bind(val)
             .bind(&like)
+            .bind(MAX_LISTED_NODE_ACTIVITY)
             .fetch_all(&self.pool)
             .await
             .map_err(|e| LlmError::RequestFailed {

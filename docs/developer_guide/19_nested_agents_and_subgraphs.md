@@ -216,7 +216,11 @@ máx. 128) antes de formar la clave.
 En `dynamic`, el motor auto-expone además una tool `list_threads` cuando hay al menos un
 tool dynamic: el modelo la llama para enumerar los hilos existentes (`thread_id`,
 `messages`, `last_activity`, `opening`) y así retomar el correcto. Opcional `tool` para
-enfocar uno; sin argumento lista todos agrupados.
+enfocar uno; sin argumento lista todos agrupados. La consulta por tool está acotada a
+100 filas (`MAX_LISTED_NODE_ACTIVITY`, compartida por los backends Postgres/SQLite); si
+la enumeración toca ese tope, la entrada de ese tool en la respuesta agrega
+`"truncated": true` para que el modelo sepa que la lista es parcial (la clave se omite
+cuando no aplica).
 
 ```json
 "tool_configurations": {
