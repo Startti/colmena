@@ -8,6 +8,21 @@ use std::error::Error;
 use std::sync::{Arc, OnceLock};
 use tokio::fs;
 
+/// Operator-supplied keys that name the child graph itself.
+///
+/// They arrive either in the node's `config` (edge path) or in its `inputs` (tool
+/// path, where `DagToolExecutor` merges the tool's `fixed_config` into inputs and
+/// passes `config = {}`). Either way they are plumbing, never data for the child.
+///
+/// [`SubGraphNode::resolve_child_graph_source`] reads them, and
+/// [`SubGraphNode::is_excluded_from_child_state`] keeps them out of the child's
+/// global state — otherwise the child's own `input` node passes them through and
+/// they end up inside an LLM prompt, secrets already resolved.
+///
+/// Both uses derive from this constant on purpose: a new source key has to become
+/// invisible to the child by construction, not by remembering a second list.
+const CHILD_GRAPH_SOURCE_KEYS: [&str; 2] = ["child_graph_inline", "child_graph_path"];
+
 pub struct SubGraphNode {
     pub executor: Arc<OnceLock<Arc<dyn SubGraphExecutorPort>>>,
 }
@@ -32,19 +47,58 @@ impl SubGraphNode {
     /// is unchanged; the tool path supplies the value via `inputs` (because the
     /// executor merges `fixed_config` into inputs and passes `config = {}`).
     fn resolve_child_graph_source(inputs: &NodeInputs, config: &Value) -> Option<Value> {
-        if let Some(inline) = config.get("child_graph_inline") {
-            return Some(inline.clone());
+        for key in CHILD_GRAPH_SOURCE_KEYS {
+            if let Some(source) = config.get(key) {
+                return Some(source.clone());
+            }
         }
-        if let Some(path) = config.get("child_graph_path") {
-            return Some(path.clone());
-        }
-        if let Some(inline) = inputs.get("child_graph_inline") {
-            return Some(inline.clone());
-        }
-        if let Some(path) = inputs.get("child_graph_path") {
-            return Some(path.clone());
+        for key in CHILD_GRAPH_SOURCE_KEYS {
+            if let Some(source) = inputs.get(key) {
+                return Some(source.clone());
+            }
         }
         None
+    }
+
+    /// True for keys that must never cross into the child graph's global state.
+    ///
+    /// Two families: the engine's own bookkeeping (`__colmena_*`, `__node_id`),
+    /// and the operator's child-graph plumbing ([`CHILD_GRAPH_SOURCE_KEYS`]).
+    /// Everything else — the model's tool arguments, `files`, whatever the parent
+    /// put on the wire — is data the child is meant to see.
+    ///
+    /// Kept as a pure function so the rule is unit-testable without standing up a
+    /// graph run.
+    fn is_excluded_from_child_state(key: &str) -> bool {
+        key.starts_with("__colmena_")
+            || key == "__node_id"
+            || CHILD_GRAPH_SOURCE_KEYS.contains(&key)
+    }
+
+    /// Build the child graph's initial global state from this node's inputs.
+    ///
+    /// Everything the child is meant to see is copied verbatim; the engine's
+    /// bookkeeping and the operator's plumbing are dropped (see
+    /// [`Self::is_excluded_from_child_state`]).
+    ///
+    /// The nesting depth is re-inserted afterwards on purpose. The counter is
+    /// kept even though nesting is unbounded by default: it feeds the optional
+    /// `COLMENA_MAX_SUBGRAPH_DEPTH` ceiling and is the value observability
+    /// reports as the run's nesting level. Because the filter drops every
+    /// `__colmena_*` key, re-inserting it is the only way it survives into the
+    /// child's global state.
+    fn build_child_state(inputs: &NodeInputs) -> Value {
+        let mut child_state_obj = serde_json::Map::new();
+        for (k, v) in inputs {
+            if !Self::is_excluded_from_child_state(k) {
+                child_state_obj.insert(k.clone(), v.clone());
+            }
+        }
+        child_state_obj.insert(
+            "__colmena_subgraph_depth".to_string(),
+            json!(Self::current_depth(inputs) + 1),
+        );
+        Value::Object(child_state_obj)
     }
 
     /// Optional ceiling for subgraph nesting depth.
@@ -283,25 +337,7 @@ impl ExecutableNode for SubGraphNode {
         };
 
         // --- 3. STATE MAPPING (IN) ---
-        // We pass the resolved `inputs` to the child graph as its initial global_state
-        let mut child_state_obj = serde_json::Map::new();
-        for (k, v) in inputs {
-            if !k.starts_with("__colmena_") && k != "__node_id" {
-                child_state_obj.insert(k.clone(), v.clone());
-            }
-        }
-        // Propagate (depth+1) into the child. The counter is kept even though
-        // nesting is unbounded by default: it feeds the optional
-        // COLMENA_MAX_SUBGRAPH_DEPTH ceiling and is the value observability
-        // reports as the run's nesting level. Inserted AFTER the loop on
-        // purpose: the loop filters out every __colmena_* key, so this is the
-        // only way the depth survives into the child's global state.
-        let next_depth = Self::current_depth(inputs) + 1;
-        child_state_obj.insert(
-            "__colmena_subgraph_depth".to_string(),
-            serde_json::json!(next_depth),
-        );
-        let child_state = Value::Object(child_state_obj);
+        let child_state = Self::build_child_state(inputs);
 
         // Emit subgraph node-start boundary event (orchestrator agent OR
         // subgraph-as-tool — see `boundary_name`).
@@ -443,6 +479,188 @@ mod subgraph_tool_input_config_tests {
         assert_eq!(
             SubGraphNode::resolve_child_graph_source(&inputs, &config),
             None
+        );
+    }
+}
+
+#[cfg(test)]
+mod subgraph_child_state_isolation_tests {
+    //! The child graph's initial global state must carry the parent's data and
+    //! nothing else. Two families are dropped: the engine's own bookkeeping, and
+    //! the operator's child-graph plumbing.
+    //!
+    //! The plumbing half is a security boundary, not tidiness. `child_graph_inline`
+    //! holds the child's `llm_call` config with secrets already resolved. Left in
+    //! the state, the child's own `input` node (`data: {}` → passthrough) hands it
+    //! to an `llm_call` as a non-empty object `prompt`, which `resolve_prompt_or_task`
+    //! preserves verbatim — so provider keys and a Postgres `connection_url` reach
+    //! the model and get persisted in `llm_node_history`. Measured in the field by
+    //! ADP on 2026-08-25; a sub-agent then copied the connection string into a
+    //! document it wrote for the end user.
+    //!
+    //! Leaving it in also lets a nested `subgraph` with no `config` of its own fall
+    //! back to `inputs.get("child_graph_inline")` and re-resolve the *parent's*
+    //! graph — silent recursion.
+
+    use super::*;
+    use crate::dag_engine::domain::node::NodeInputs;
+    use serde_json::json;
+
+    /// A `child_graph_inline` shaped like the real thing: the secrets live inside
+    /// the child's `llm_call` config, which is exactly where `memory_mode`
+    /// requires a `connection_url` to go.
+    fn inline_with_secrets() -> Value {
+        json!({
+            "nodes": {
+                "keeper": { "type": "llm_call", "config": {
+                    "api_key": "AIzaFAKE_child_key_do_not_use_11111111",
+                    "connection_url": "postgresql://fakeuser:fakepass@127.0.0.1:5432/fakedb"
+                }}
+            },
+            "edges": []
+        })
+    }
+
+    fn state_keys(state: &Value) -> Vec<String> {
+        let mut keys: Vec<String> = state
+            .as_object()
+            .expect("child state is an object")
+            .keys()
+            .cloned()
+            .collect();
+        keys.sort();
+        keys
+    }
+
+    #[test]
+    fn child_graph_inline_never_reaches_child_state() {
+        let mut inputs: NodeInputs = NodeInputs::new();
+        inputs.insert("child_graph_inline".to_string(), inline_with_secrets());
+        inputs.insert("task".to_string(), json!("redactá el spec"));
+
+        let state = SubGraphNode::build_child_state(&inputs);
+
+        assert!(
+            state.get("child_graph_inline").is_none(),
+            "the operator's plumbing must not become child state: {state}"
+        );
+        // Belt and braces: the secrets must not survive under any other key.
+        let serialized = serde_json::to_string(&state).unwrap();
+        assert!(!serialized.contains("fakepass"), "leaked: {serialized}");
+        assert!(!serialized.contains("AIzaFAKE"), "leaked: {serialized}");
+    }
+
+    #[test]
+    fn child_graph_path_never_reaches_child_state() {
+        let mut inputs: NodeInputs = NodeInputs::new();
+        inputs.insert(
+            "child_graph_path".to_string(),
+            json!("./agents/weather_agent.json"),
+        );
+        inputs.insert("task".to_string(), json!("clima en Bogotá"));
+
+        let state = SubGraphNode::build_child_state(&inputs);
+
+        assert!(state.get("child_graph_path").is_none());
+        assert_eq!(state.get("task"), Some(&json!("clima en Bogotá")));
+    }
+
+    #[test]
+    fn model_supplied_args_reach_child_state() {
+        // The exact key sets ADP measured across 215 rows. `confirmation` is the
+        // reminder that this set is chosen by the model per call, not declared in
+        // a schema — which is why the filter can only be a blocklist of plumbing,
+        // never an allowlist of data.
+        let mut inputs: NodeInputs = NodeInputs::new();
+        inputs.insert("child_graph_inline".to_string(), inline_with_secrets());
+        inputs.insert("task".to_string(), json!("redactá el spec"));
+        inputs.insert("docKind".to_string(), json!("spec"));
+        inputs.insert("name".to_string(), json!("colmena-leak"));
+        inputs.insert("scope".to_string(), json!("platform"));
+        inputs.insert("confirmation".to_string(), json!(true));
+
+        let state = SubGraphNode::build_child_state(&inputs);
+
+        assert_eq!(
+            state_keys(&state),
+            vec![
+                "__colmena_subgraph_depth",
+                "confirmation",
+                "docKind",
+                "name",
+                "scope",
+                "task",
+            ]
+        );
+    }
+
+    #[test]
+    fn files_reaches_child_state() {
+        // `llm.rs` resolves attachments from `inputs.get("files")`. This is the
+        // key that must survive, and the reason the fix lives here rather than in
+        // `input.rs`: at this seam the exclusion is a known list, over there it
+        // would mean reasoning about every key.
+        let mut inputs: NodeInputs = NodeInputs::new();
+        inputs.insert("child_graph_inline".to_string(), inline_with_secrets());
+        inputs.insert("files".to_string(), json!([{ "id": "file_123" }]));
+
+        let state = SubGraphNode::build_child_state(&inputs);
+
+        assert_eq!(state.get("files"), Some(&json!([{ "id": "file_123" }])));
+    }
+
+    #[test]
+    fn engine_internal_keys_stay_excluded() {
+        let mut inputs: NodeInputs = NodeInputs::new();
+        inputs.insert("__node_id".to_string(), json!("my_tool"));
+        inputs.insert("__colmena_tool_name".to_string(), json!("Document_agent"));
+        inputs.insert("__colmena_session_id".to_string(), json!("sess_1"));
+        inputs.insert("task".to_string(), json!("algo"));
+
+        let state = SubGraphNode::build_child_state(&inputs);
+
+        assert!(state.get("__node_id").is_none());
+        assert!(state.get("__colmena_tool_name").is_none());
+        assert!(state.get("__colmena_session_id").is_none());
+        assert_eq!(state.get("task"), Some(&json!("algo")));
+    }
+
+    #[test]
+    fn depth_still_propagates_into_the_child() {
+        // The one `__colmena_*` key that is re-inserted after the filter.
+        let mut inputs: NodeInputs = NodeInputs::new();
+        inputs.insert("__colmena_subgraph_depth".to_string(), json!(2));
+
+        let state = SubGraphNode::build_child_state(&inputs);
+
+        assert_eq!(state.get("__colmena_subgraph_depth"), Some(&json!(3)));
+    }
+
+    #[test]
+    fn depth_starts_at_one_when_absent() {
+        let inputs: NodeInputs = NodeInputs::new();
+        let state = SubGraphNode::build_child_state(&inputs);
+        assert_eq!(state.get("__colmena_subgraph_depth"), Some(&json!(1)));
+    }
+
+    #[test]
+    fn the_node_still_resolves_the_graph_it_no_longer_passes_down() {
+        // The exclusion is safe precisely because resolution happens first:
+        // `resolve_child_graph_source` reads the key, then `build_child_state`
+        // drops it. Both halves asserted together so neither can drift.
+        let mut inputs: NodeInputs = NodeInputs::new();
+        inputs.insert("child_graph_inline".to_string(), inline_with_secrets());
+
+        assert_eq!(
+            SubGraphNode::resolve_child_graph_source(&inputs, &json!({})),
+            Some(inline_with_secrets()),
+            "the node must still find its own graph"
+        );
+        assert!(
+            SubGraphNode::build_child_state(&inputs)
+                .get("child_graph_inline")
+                .is_none(),
+            "but must not hand it to the child"
         );
     }
 }

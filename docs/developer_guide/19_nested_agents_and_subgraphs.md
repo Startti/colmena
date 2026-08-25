@@ -153,13 +153,29 @@ existente) o `child_graph_inline` (un `llm_call` declarado en línea):
 > `child_graph_path` / `child_graph_inline` son plumbing estático del subgraph,
 > por eso van en `fixed_config` y nunca en `node_schema`.
 
+Y por eso el motor **los excluye del estado global del hijo**. El nodo resuelve su
+grafo desde esas claves y después las descarta: nunca aparecen en el
+`global_shared_state` del hijo, no las ve su nodo de entrada, y no pueden terminar
+dentro de un prompt. Es una frontera de seguridad, no prolijidad — el
+`child_graph_inline` contiene la config del `llm_call` del hijo con los secretos ya
+resueltos (`api_key`, y el `connection_url` que [`memory_mode`](#memoria-del-sub-agente-memory_mode)
+exige para los modos con memoria).
+
+La exclusión sale de una constante única en `subgraph.rs`
+(`CHILD_GRAPH_SOURCE_KEYS`), compartida por el resolver y por el mapeo IN: una
+fuente nueva del grafo hijo queda invisible para el hijo por construcción, sin
+mantener una segunda lista.
+
 ### Entrada
 
 Por defecto el LLM ve un único parámetro `task` (string), que se inyecta como
 `{{task}}` en el `global_shared_state` del hijo. Para entrada estructurada,
 declara un `node_schema` y cada campo se inyecta como variable del hijo
-(`{{ciudad}}`, `{{fecha}}`, etc.). Las claves internas (`__colmena_*`, `__node_id`)
-se filtran del mapeo IN.
+(`{{ciudad}}`, `{{fecha}}`, etc.). Del mapeo IN se filtran las claves internas del
+motor (`__colmena_*`, `__node_id`) y el plumbing del operador
+(`child_graph_inline`, `child_graph_path`). Todo lo demás pasa: los argumentos que
+el modelo elige mandar en cada llamada —que no son enumerables por adelantado— y
+`files`, del que `llm.rs` resuelve los adjuntos.
 
 ### Comportamiento
 

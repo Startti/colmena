@@ -1,0 +1,39 @@
+{
+  "comment": "Regresion: el plumbing del subgraph (child_graph_inline / child_graph_path) NUNCA debe cruzar al estado global del grafo hijo. Reproduce la forma reportada por ADP (2026-08-25) sin llamar a ningun proveedor: el eslabon que hace visible la fuga es el nodo input del hijo con data:{} (rama passthrough), no el llm_call. 'seed' entrega child_graph_inline por ARISTA, asi el nodo subgraph lo recibe en sus inputs con config vacia — el mismo camino que usa DagToolExecutor al mezclar fixed_config en inputs. La salida del hijo ES lo que el hijo recibio. ESPERADO: la salida NO contiene child_graph_inline, ni AIzaFAKE_child_key_do_not_use_11111111, ni fakepass. Solo task.",
+  "nodes": {
+    "seed": {
+      "type": "input",
+      "config": {
+        "data": {
+          "task": "repetime lo que recibiste",
+          "child_graph_inline": {
+            "nodes": {
+              "entrada": {
+                "type": "input",
+                "config": { "inputType": "Text", "data": {} }
+              },
+              "salida": {
+                "type": "output",
+                "config": {}
+              }
+            },
+            "edges": [{ "from": "entrada", "to": "salida" }],
+            "__secreto_falso_api_key": "AIzaFAKE_child_key_do_not_use_11111111",
+            "__secreto_falso_conn": "postgresql://fakeuser:fakepass@127.0.0.1:5432/fakedb"
+          }
+        }
+      }
+    },
+    "hija": {
+      "type": "subgraph",
+      "config": {}
+    },
+    "final_log": {
+      "type": "log"
+    }
+  },
+  "edges": [
+    { "from": "seed", "to": "hija" },
+    { "from": "hija", "to": "final_log" }
+  ]
+}
