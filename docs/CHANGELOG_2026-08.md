@@ -918,3 +918,34 @@ hace, y cerrarlo exige conservar la procedencia en el executor — cambio aparte
 `files`, las claves internas del motor y la propagación de profundidad).
 
 **Estado.** done.
+
+---
+
+## 16. `head_truncate` sube a dominio como primitiva compartida
+
+**Qué cambió.** Nada observable: es un refactor puro, sin cambio de comportamiento.
+
+`head_truncate` y su constante `TRUNCATION_MARKER_RESERVE` vivían como funciones asociadas
+privadas de `DagToolExecutor`. Ahora viven en un módulo nuevo,
+`llm/domain/text_bounds.rs`, puro y sin dependencias, y
+`DagToolExecutor::head_truncate` quedó como una delegación de una línea.
+
+**Por qué.** La primitiva no tiene nada de específico del executor: recorta una cadena
+conservando su cabeza y le anexa el marcador `[truncated: showing first N of M bytes]`,
+respetando límites de carácter UTF-8. Estaba encerrada donde el resto del módulo LLM no
+podía alcanzarla, y ese es justamente el escenario en que cada nuevo consumidor se escribe
+su propia variante y los marcadores empiezan a divergir. Moverla la deja disponible como
+única fuente de verdad antes de que aparezca el segundo consumidor, no después.
+
+**Compatibilidad.** `scrub_tool_result_output` sigue llamando a `Self::head_truncate` y por
+lo tanto no cambia en absoluto. La visibilidad es `pub(crate)`, así que no se agrega
+superficie pública: ninguna firma exportada cambia y los bindings de Python y TypeScript no
+se tocan. ADP no se ve afectado.
+
+**Tests.** Los 2 tests preexistentes en `dag_tool_executor::scrubber_tests` siguen verdes
+**sin modificarse** — son la prueba de que la delegación preserva el comportamiento. Se
+suman 3 unitarios en `text_bounds`, entre ellos uno de aprobación que fija el formato exacto
+del marcador y otro que ejercita entrada multibyte (`é` repetida), donde cortar por índice
+de byte crudo habría paniqueado.
+
+**Estado.** done.

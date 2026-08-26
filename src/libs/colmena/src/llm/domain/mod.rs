@@ -12,6 +12,7 @@ pub mod llm_response;
 pub mod memory;
 pub mod message_summarizer;
 pub mod signed_url_fetcher;
+pub(crate) mod text_bounds;
 pub mod tool_executor;
 pub mod tools;
 pub mod tts;
