@@ -263,6 +263,40 @@ prerrequisito antes de que `memory_mode` tenga sentido ahí. Los nodos internos 
 orchestrator (`planner`/`critic`/`reactor`) nunca son entradas de `tool_configurations` —
 heredan el path de su padre y por eso no se listan.
 
+### ¿Y si quiero un orchestrator dentro del loop de tools?
+
+No hace falta esperar a que `orchestrator` sea apto para tool: **envolvelo en un
+`subgraph`**. El patrón funciona hoy y da exactamente la capability que se busca —
+un agente conversacional que, ante un pedido complejo, delega a un equipo que
+**planifica por adelantado** y ejecuta con sus agentes especializados.
+
+```
+llm_call (padre)
+└── tool: subgraph                 ← soportado hoy
+    └── child_graph_inline
+        └── nodo orchestrator      ← acá SÍ recibe su config
+            ├── planner
+            ├── agents
+            └── final_reactor
+```
+
+Por qué funciona: el grafo hijo de un `subgraph` se ejecuta por el **loop normal del
+DAG**, donde la configuración de cada nodo sale de su campo `config`. Ahí el
+orchestrator es un nodo del grafo, no una tool, así que recibe `agents`, `planner` y
+`final_reactor` intactos. La limitación descrita arriba aplica únicamente a poner el
+orchestrator **directamente** en `tool_configurations`.
+
+Ejemplo mínimo verificado end-to-end (Gemini 2.5 Flash):
+[`tests/graphs/advanced/orchestrator_inside_subgraph_tool.json`](../../tests/graphs/advanced/orchestrator_inside_subgraph_tool.json).
+En el run, el pipeline completo del orchestrator (`planner` → agente `redactor` →
+`final_reactor`) corre dentro del loop de tools del padre y devuelve una sola
+respuesta consolidada.
+
+> **Sobre `memory_mode` en este patrón:** el campo va en la entrada del `subgraph`
+> (que sí lo acepta) y scopea la memoria de los `llm_call` hoja del orchestrator. El
+> estado de orquestación en sí —plan y crítica— no persiste: `planner`, `critic` y
+> `reactor` usan memoria efímera en proceso por diseño.
+
 ### Profundidad de anidación
 
 Desde 2026-08-21 **no hay límite**. El guard fijo de 5 niveles fue eliminado:
