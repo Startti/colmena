@@ -1,0 +1,70 @@
+{
+  "nodes": {
+    "chat": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "api_key": "${GEMINI_API_KEY}",
+        "model": "gemini-2.5-flash",
+        "system_message": "Tenes una herramienta 'equipo' que es un EQUIPO que planifica y ejecuta trabajo complejo. Para pedidos complejos, llamala con 'task'.",
+        "prompt": "Pedile al equipo un saludo corto para el cliente Acme. Pasa task='Escribi un saludo corto para el cliente Acme'.",
+        "tool_configurations": {
+          "equipo": {
+            "name": "equipo",
+            "node_type": "subgraph",
+            "description": "Equipo que PLANIFICA por adelantado y ejecuta con agentes especializados. Usalo para pedidos complejos.",
+            "node_schema": {
+              "task": { "type": "string", "required": true, "description": "El pedido para el equipo." },
+              "child_graph_inline": {
+                "fixed": {
+                  "nodes": {
+                    "team": {
+                      "type": "orchestrator",
+                      "config": {
+                        "planner": {
+                          "provider": "google",
+                          "model": "gemini-2.5-flash",
+                          "api_key": "${GEMINI_API_KEY}",
+                          "system_message": "Planifica UNA sola tarea para el agente 'redactor'."
+                        },
+                        "final_reactor": {
+                          "provider": "google",
+                          "model": "gemini-2.5-flash",
+                          "api_key": "${GEMINI_API_KEY}",
+                          "system_message": "Entrega la respuesta final al usuario en una sola frase."
+                        },
+                        "agents": {
+                          "redactor": {
+                            "description": "Redacta textos breves.",
+                            "child_graph_inline": {
+                              "nodes": {
+                                "w": {
+                                  "type": "llm_call",
+                                  "config": {
+                                    "provider": "google",
+                                    "api_key": "${GEMINI_API_KEY}",
+                                    "model": "gemini-2.5-flash",
+                                    "system_message": "Redacta en una frase.",
+                                    "prompt": "{{task}}"
+                                  }
+                                }
+                              },
+                              "edges": []
+                            }
+                          }
+                        },
+                        "max_phases": 2
+                      }
+                    }
+                  },
+                  "edges": []
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "edges": []
+}
