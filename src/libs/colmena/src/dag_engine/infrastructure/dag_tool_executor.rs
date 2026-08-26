@@ -2337,33 +2337,18 @@ impl DagToolExecutor {
         }
     }
 
-    /// Reserve, in bytes, for the truncation marker appended by
-    /// [`head_truncate`](Self::head_truncate). The marker is short ASCII text;
-    /// 96 bytes comfortably covers the largest realistic byte counts.
-    const TRUNCATION_MARKER_RESERVE: usize = 96;
-
-    /// Truncate an oversized string by KEEPING ITS HEAD (the first
-    /// `max_string_bytes - marker` bytes, snapped to a UTF-8 char boundary) and
-    /// appending a `[truncated: showing first N of M bytes]` marker — instead of
-    /// discarding the content entirely. For a markdown table or any text whose
-    /// useful part is the beginning (headers, first rows), this preserves a
-    /// usable preview rather than handing the model a content-free placeholder.
+    /// Truncate an oversized string by KEEPING ITS HEAD and appending a
+    /// `[truncated: showing first N of M bytes]` marker — instead of
+    /// discarding the content entirely. For a markdown table or any text
+    /// whose useful part is the beginning (headers, first rows), this
+    /// preserves a usable preview rather than handing the model a
+    /// content-free placeholder.
     ///
-    /// The result is always `<= max_string_bytes` (the head budget already
-    /// reserves room for the marker).
+    /// Delegates to [`crate::llm::domain::text_bounds::head_truncate`], the
+    /// single source of truth for this truncation primitive, so that no
+    /// parallel truncation mechanism can drift from it.
     fn head_truncate(s: &str, max_string_bytes: usize) -> String {
-        let original_len = s.len();
-        let head_budget = max_string_bytes.saturating_sub(Self::TRUNCATION_MARKER_RESERVE);
-        let mut end = head_budget.min(original_len);
-        while end > 0 && !s.is_char_boundary(end) {
-            end -= 1;
-        }
-        format!(
-            "{}\n[truncated: showing first {} of {} bytes]",
-            &s[..end],
-            end,
-            original_len
-        )
+        crate::llm::domain::text_bounds::head_truncate(s, max_string_bytes)
     }
 }
 
