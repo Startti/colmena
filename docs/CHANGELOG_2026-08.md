@@ -988,3 +988,47 @@ afirmando que se distingue por patrón y que arrastra el contexto necesario para
 aguas abajo o bien un aviso al operador o bien un error de tool corregible por el modelo).
 
 **Estado.** done (slice 1a de 9).
+
+---
+
+## 18. Nombres y delimitador de contenido no confiable para MCP (2/9)
+
+**Qué cambió.** Nada observable todavía: son las dos funciones puras que las slices de
+exposición y despacho usarán para contener contenido de terceros. Se suman a
+`llm/domain/mcp.rs`, que estrenó el puerto en §17.
+
+**`normalize(alias, tool)`** deriva el nombre expuesto `<alias>__<tool>`: normaliza a
+`[A-Za-z0-9_-]` (la clase que aceptan los tres proveedores) y, si supera 64 caracteres,
+conserva los primeros 55 más `_` y 8 hex de `sha256` del nombre ya normalizado. Siempre ≤ 64,
+determinista, con el prefijo del alias al frente para que un operador lo rastree, y dos
+nombres largos con los mismos primeros 55 caracteres siguen siendo distintos. Los guiones se
+preservan: `resolve-library-id` de Context7 queda `context7__resolve-library-id`.
+
+**`wrap_untrusted_content(alias, tool, nonce, content)`** envuelve el texto que escribe un
+servidor de terceros en un delimitador que lo declara dato, no instrucción. El `nonce` **lo
+recibe por parámetro**: esta capa nunca lo genera, lo que la deja determinista y permite que
+quien llama derive uno que el servidor no pueda falsificar. Un marcador de cierre falsificado
+dentro del contenido no termina el bloque, porque no lleva el nonce correcto.
+
+Ambas son puras y sin estado. El único import nuevo es `sha2`, hashing sin I/O, así que la
+regla de cero dependencias de infraestructura sigue en pie.
+
+**Corrección de la revisión de §17.** Los siete tests de variantes de `McpError` eran
+tautológicos: construían la variante, la desestructuraban con el mismo patrón y afirmaban
+sobre los valores que ellos mismos habían puesto — una garantía del sistema de tipos, no de
+nuestro código — sin tocar nunca `Display`, que es el mensaje que ve un operador o el modelo.
+Se reemplazan por dos:
+
+- `every_variant_renders_its_context` fija el **texto exacto** de las 8 variantes. Verificado
+  empíricamente: falla al quitar un campo de un `#[error(...)]` y ante una errata de una
+  letra; los tests viejos pasaban en verde en ambos casos.
+- `every_variant_is_classifiable_without_a_catch_all` clasifica cada variante en aviso al
+  operador o error corregible por el modelo, con un `match` **sin brazo `_`**. Agregar un
+  catch-all, o una variante sin clasificar, deja de compilar.
+
+**Compatibilidad.** Puramente aditivo: ninguna firma pública cambia, ningún binding se toca,
+ADP no se ve afectado.
+
+**Tests.** 10 en `llm::domain::mcp`: 5 de `normalize`, 3 del delimitador, 2 de errores.
+
+**Estado.** done (slice 1b de 9).
