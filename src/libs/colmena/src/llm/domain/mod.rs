@@ -9,6 +9,7 @@ pub mod llm_provider;
 pub mod llm_repository;
 pub mod llm_request;
 pub mod llm_response;
+pub mod mcp;
 pub mod memory;
 pub mod message_summarizer;
 pub mod signed_url_fetcher;

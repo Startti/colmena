@@ -949,3 +949,42 @@ del marcador y otro que ejercita entrada multibyte (`é` repetida), donde cortar
 de byte crudo habría paniqueado.
 
 **Estado.** done.
+
+---
+
+## 17. Puerto de dominio para servidores MCP remotos (1/9)
+
+**Qué cambió.** Nada observable todavía: es la capa de dominio de la feature que permitirá
+conectar un servidor MCP (Model Context Protocol) remoto a un `llm_call` y exponer sus tools
+al modelo. Este slice solo introduce contratos, sin adapter, sin registry y sin despacho.
+
+Nuevo módulo `llm/domain/mcp.rs` con:
+
+| Item | Rol |
+|---|---|
+| `McpClientPort` | Puerto async (`Send + Sync`) con `list_tools`, `call_tool`, `server_label` |
+| `McpToolDescriptor` | Tool tal como la declara el servidor — `input_schema` **verbatim** |
+| `McpToolResult` | Contenido ya colapsado a `String` más el flag `is_error` |
+| `McpServerConfig` | URL, transporte, refs de headers **sin resolver**, timeouts |
+| `McpError` | 8 variantes `thiserror`, sin catch-all: cada una debe poder distinguirse |
+| `MCP_MAX_*` | Los 7 límites del diseño, en un solo lugar para que los tests afirmen sobre el mismo símbolo |
+
+El módulo respeta la regla dura de `CLAUDE.md`: **cero dependencias de infraestructura**. Sus
+imports se limitan a `std`, `serde_json`, `thiserror` y `async_trait` — nada de `reqwest` ni
+`rmcp`. Un test de compilación (`send_sync_tests`) fija que todo implementador del puerto sea
+`Send + Sync`, porque `ToolExecutor` y el resto de los puertos ya lo exigen.
+
+**Relación con §16.** El truncado por bytes que la contención de contenido MCP necesitará
+vive ya en `llm/domain/text_bounds.rs`, entregado por separado en §16. Este slice no lo toca:
+lo consumirán las slices posteriores, que son las que capan descripciones y resultados de
+terceros.
+
+**Compatibilidad.** Puramente aditivo. Ninguna firma pública cambia, ningún binding se toca,
+y un grafo sin entradas MCP se comporta byte a byte igual. ADP no se ve afectado.
+
+**Tests.** 8 unitarios: `send_sync_tests` (prueba de compilación de que todo implementador
+del puerto es `Send + Sync`) y `error_variant_tests` (una por variante de `McpError`,
+afirmando que se distingue por patrón y que arrastra el contexto necesario para construir
+aguas abajo o bien un aviso al operador o bien un error de tool corregible por el modelo).
+
+**Estado.** done (slice 1a de 9).
