@@ -1111,3 +1111,76 @@ que quien lea el manifiesto las vea sin depender de un test.
 código que la consuma el comportamiento en runtime es idéntico. ADP no se ve afectado.
 
 **Estado.** done.
+
+---
+
+## 20. Adapter `rmcp` para servidores MCP remotos (4/9)
+
+**Qué cambió.** Nada observable todavía: nadie construye este cliente aún. Es la
+implementación de `McpClientPort` sobre el transporte streamable-HTTP de `rmcp`, en
+`llm/infrastructure/mcp_client/`. **Es el único archivo del crate autorizado a nombrar un
+tipo de `rmcp`**; el dominio sigue sin saber que existe.
+
+`RmcpHttpClient::connect` valida **HTTPS antes de tocar el socket** y luego deja que
+`ServiceExt::serve` maneje el handshake (`initialize` → `notifications/initialized`).
+
+**Las tres operaciones están acotadas por el `timeout` de la configuración**, el handshake
+incluido. Eso último salió de la revisión: `ServiceExt::serve` no impone deadline propio y
+`rmcp` no configura timeout en su cliente HTTP, así que un servidor que acepta la conexión
+TCP y después se queda mudo habría colgado a quien llame a `connect`, sin techo — y
+`timeout_seconds` no habría significado lo que dice. Verificado quitando el wrapper: el test
+pasa de ~1s a **10,23s**, el retardo completo del mock.
+
+**No hay `session.rs`, a propósito.** El worker de `rmcp` ya guarda el `mcp-session-id` que
+devuelva un servidor y lo reenvía en cada request posterior, y no manda ninguno cuando el
+servidor nunca emite uno. Escribir eso de nuevo sería el mecanismo paralelo que el diseño
+prohíbe. Lo que sí hacemos es **probar ambas formas de servidor** con `wiremock`, que es lo
+que da confianza de que funciona — no la existencia de código propio.
+
+**`sampling` nunca se negocia.** `ClientCapabilities::default()` deja el campo en `None`, así
+que los params serializados de `initialize` no llevan esa clave sin importar qué anuncie el
+servidor. Un test lo afirma sobre el JSON real del request.
+
+**`input_schema` viaja verbatim**, sin aplanarse. Es la razón por la que el tipo del dominio
+lo guarda como `serde_json::Value`: los schemas reales usan `minItems`, `minimum` y
+`$schema`, que el modelo plano de `ParameterProperty` no puede representar.
+
+**Costura de test declarada.** `wiremock` solo sirve HTTP plano, así que los tests entran por
+`connect_for_test`, que salta el guard de HTTPS. Está bajo `#[cfg(test)]` —no existe en
+builds de producción— y el guard se afirma por separado en
+`rmcp_connect_rejects_non_https_url`. Vale saberlo al leer los tests: no ejercitan el camino
+guardado, lo ejercitan alrededor.
+
+**Compatibilidad.** Aditivo. Ninguna firma pública cambia, ningún binding se toca. ADP no se
+ve afectado.
+
+**Tests.** 8 con `wiremock`, sin red: guard de HTTPS, handshake completo, `tools/list` contra
+un servidor sin sesión, eco de `mcp-session-id` contra uno con sesión, timeout de `call_tool`
+y de `connect` al valor configurado, ausencia de `sampling` en el handshake, y fidelidad
+byte a byte del `input_schema`.
+
+Dos de ellos salieron de la revisión, y valen por lo que cubren:
+
+- **`rmcp_list_tools_forwards_input_schema_verbatim`** usa un schema con `minItems`,
+  `minimum`, array-of-enum y `$schema` —la forma real que expone el servidor MCP de
+  HuggingFace— y afirma igualdad byte a byte tras el viaje de ida y vuelta. Es la propiedad
+  que sostiene toda la feature: una slice posterior reenvía ese schema tal cual a
+  `ToolDefinition::input_schema_override`, y el modelo plano de `ParameterProperty` no puede
+  representar esas restricciones, así que aplanar acá sería pérdida silenciosa de datos.
+  Antes no lo cubría ningún test: el que había afirmaba solo `len()` y `name`.
+- **`rmcp_handshake_initialize_then_notified`** ahora afirma sobre los cuerpos reales de los
+  requests que se enviaron `initialize` y `notifications/initialized`, **en ese orden**.
+  Antes afirmaba solo `is_ok()`, que habría pasado en verde aunque se mandara únicamente el
+  primero.
+
+Ambos verificados rompiendo el código a propósito. Los de red en vivo y la matriz completa
+de protocolo quedan para la slice siguiente.
+
+**Limitación conocida, para la slice de reintentos.** Cuando un `timeout` dispara, soltar el
+future **no cancela** el request en `rmcp`: su pool interno de responders conserva la entrada
+hasta que llegue una respuesta que quizá nunca llegue. Como el cliente se va a cachear y
+reusar, timeouts repetidos contra un servidor colgado hacen crecer ese pool. `rmcp` expone
+`send_cancellable_request` para eso; se aborda junto con el reintento acotado, que toca este
+mismo código.
+
+**Estado.** done (slice 4 de 9).
