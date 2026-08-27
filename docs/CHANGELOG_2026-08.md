@@ -1032,3 +1032,82 @@ ADP no se ve afectado.
 **Tests.** 10 en `llm::domain::mcp`: 5 de `normalize`, 3 del delimitador, 2 de errores.
 
 **Estado.** done (slice 1b de 9).
+
+---
+
+## 19. Dependencia `rmcp` para clientes MCP remotos (3/N)
+
+**Qué cambió.** Se agrega la crate `rmcp` (el SDK oficial de Rust para Model Context
+Protocol) como dependencia. Todavía no la usa nadie: este cambio aísla la decisión de
+dependencia para que se revise sola, separada del adapter que la consumirá.
+
+```toml
+rmcp = { version = "3.1.4", default-features = false, features = [
+  "client", "transport-streamable-http-client-reqwest", "reqwest" ] }
+```
+
+**Por qué `default-features = false`.** Los defaults de `rmcp` incluyen `server`, que
+arrastra todo el stack de servidor (`schemars`, `uuid`, `tower`). Colmena es cliente MCP
+puro, así que serían dependencias compiladas a cambio de nada.
+
+**Por qué NO `transport-child-process`.** Ese es el transporte stdio: lanza un binario
+local y le habla por pipes. La decisión de producto es **solo remoto**: un worker capaz de
+ejecutar procesos nombrados desde la configuración de un grafo es una postura de seguridad
+distinta a uno que no puede. Verificado: `process-wrap` no aparece en `Cargo.lock`.
+
+**El costo aceptado: una tercera versión de `reqwest`.** `rmcp 3.1.4` exige
+`reqwest ^0.13.2` y el crate usa `reqwest 0.11`. El árbol queda con tres — la nuestra
+`0.11.27`, la `0.12.28` que ya arrastraba `rust_socketio`, y la `0.13.4` de `rmcp`.
+
+Se midió la alternativa antes de aceptarlo. Subir el crate a `reqwest 0.13` resultó ser
+**una línea más dos features** (`.query()` y `.form()` pasaron a ser features en 0.13), con
+los 2.397 tests en verde y cero cambios en los 26 archivos que usan `reqwest::`. Se
+descartó igual: en 0.13 el feature `rustls` arrastra `rustls-platform-verifier`, que en
+Linux lee el almacén de certificados **del sistema** en vez de los `webpki-roots`
+embebidos que [`shared/infrastructure/http_client.rs`](../src/libs/colmena/src/shared/infrastructure/http_client.rs)
+fija a propósito para que la confianza TLS sea idéntica en cualquier imagen. Y no se puede
+conservar: `reqwest` eliminó el feature `webpki-roots` después de 0.13.1, y `rmcp` exige
+≥0.13.2.
+
+Mover la confianza TLS del binario a la imagen habría afectado **todas** las llamadas
+salientes de Colmena. Con la duplicación de stack el efecto queda acotado a MCP — pero
+**queda**, y conviene decirlo explícitamente: `reqwest 0.13.4` entra al árbol con
+`rustls-platform-verifier`, así que **las llamadas MCP van a validar contra el almacén de
+certificados del sistema, no contra los `webpki-roots` embebidos que usa el resto de
+Colmena**, y además quedan fuera del alcance de `COLMENA_EXTRA_CA_CERT`. Son dos anclas de
+confianza distintas conviviendo en el mismo binario.
+
+Se eligió esa asimetría, no se la evitó: el radio de impacto de un cambio acotado a MCP es
+menor que el de uno que alcanza a los proveedores de LLM, Google, Amadeus y los adjuntos.
+Las imágenes de runtime —la de Colmena y las dos de ADP— instalan `ca-certificates` sobre
+`debian:bookworm-slim`, así que el almacén del sistema existe. Una base futura sin él
+rompería MCP en silencio; ese es el precio y queda anotado acá.
+
+**Tests.** 2 de integración en `tests/rmcp_dependency_invariants.rs`. Ambos leen
+`Cargo.lock`, nunca `Cargo.toml`: lo que importa no es cómo se *escribe* la dependencia
+sino qué termina *compilado*, y difieren — un feature puede llegar por unificación de
+features con otro miembro del workspace, un override, un bloque `[target.'cfg(…)']` o una
+dependencia transitiva. Se afirma sobre la lista de dependencias **propias de rmcp**, no
+sobre el árbol entero, porque `schemars`, `uuid` y `tower` aparecen legítimamente por otras
+vías.
+
+Una primera versión de estos guards hacía string-matching sobre `Cargo.toml`, y se
+**reprodujo dando falso verde**: envolver el array de `features` en varias líneas —un
+reformateo rutinario— dejaba el feature agregado fuera de lo que el check miraba, así que
+los tests pasaban mientras `process-wrap` entraba de verdad al lockfile y el transporte
+stdio quedaba compilado. Un guard que reporta éxito con la invariante rota es peor que no
+tenerlo, porque se le va a creer. La segunda versión parseaba la tabla inline completa y
+seguía siendo frágil ante llaves dentro de strings o comentarios; la revisión lo marcó y se
+eliminó el parseo de manifiesto por completo.
+
+Ambos ataques quedaron verificados rompiendo el manifiesto a propósito: reactivar
+`transport-child-process` (con el reformateo multilínea incluido) y restaurar
+`default-features` hacen fallar a un guard cada uno, nombrando qué crate se coló.
+
+El `Cargo.toml` enuncia las dos restricciones en un comentario junto a la dependencia, para
+que quien lea el manifiesto las vea sin depender de un test.
+
+**Compatibilidad.** Aditivo. Ninguna firma pública cambia, ningún binding se toca, y sin
+código que la consuma el comportamiento en runtime es idéntico. ADP no se ve afectado.
+
+**Estado.** done.
