@@ -7,15 +7,45 @@
 //! (R2.3). Reimplementing that would be the "parallel mechanism" this
 //! design forbids for containment (§6); the tests below prove both server
 //! shapes work end-to-end instead.
+//!
+//! ## Timeout ownership — explicit cancel notification, not a dropped future (2b)
+//!
+//! Full empirical writeup: `docs/CHANGELOG_2026-08.md` §21. Short version:
+//! slice 2a's outer `tokio::time::timeout` around `list_all_tools`/`call_tool`
+//! enforced the deadline but leaked one `local_responder_pool` entry per
+//! timeout (dropping the future never cancels the in-flight rmcp request).
+//! The design's fix — `send_cancellable_request` +
+//! `PeerRequestOptions::timeout`, letting `RequestHandle::await_response`'s
+//! own internal race own the cleanup — does NOT hold empirically against
+//! rmcp 3.1.4 + `transport-streamable-http-client-reqwest`: its internal
+//! timer does fire on schedule, but it then `.await`s a cancel notification
+//! that is serialized behind the still-in-flight original request, so the
+//! caller does not regain control until that request finishes anyway.
+//!
+//! `send_request` still uses `send_cancellable_request` (the only path that
+//! returns a `Peer`/`RequestId` we can clone before consuming the handle),
+//! but wraps `await_response()` in our own `tokio::time::timeout`, and on
+//! expiry fires the cancel notification as a DETACHED `tokio::spawn`ed task
+//! ([`RmcpHttpClient::spawn_cancel_notification`]) instead of awaiting it —
+//! that detachment is what actually returns control to the caller at the
+//! promised deadline. `list_tools` pages `tools/list` itself (no longer
+//! calls `Peer::list_all_tools`) so each page is bounded and cancelled
+//! independently, and the page count itself is capped (a server controls
+//! `next_cursor`, so without a ceiling the loop would spin forever with every
+//! individual page dutifully bounded). Worst case is therefore
+//! `max_pages * timeout_seconds`, and every page is cancelled on its own
+//! timeout so the pool never grows unbounded. `connect`'s handshake keeps
+//! its own outer timeout around `ServiceExt::serve`, unrelated to this.
 
 use std::time::Duration;
 
 use async_trait::async_trait;
 use rmcp::model::{
-    CallToolRequestParams, CallToolResult, ClientCapabilities, ClientInfo, ContentBlock,
-    Implementation, Tool,
+    CallToolRequest, CallToolRequestParams, CallToolResult, CancelledNotificationParam,
+    ClientCapabilities, ClientInfo, ClientRequest, ContentBlock, Implementation, ListToolsRequest,
+    ListToolsResult, Notification, PaginatedRequestParams, RequestId, ServerResult, Tool,
 };
-use rmcp::service::{RoleClient, RunningService};
+use rmcp::service::{Peer, PeerRequestOptions, RoleClient, RunningService};
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 use rmcp::transport::StreamableHttpClientTransport;
 use rmcp::{ServiceError, ServiceExt};
@@ -23,7 +53,14 @@ use serde_json::Value;
 
 use crate::llm::domain::mcp::{
     McpClientPort, McpError, McpServerConfig, McpToolDescriptor, McpToolResult,
+    MCP_MAX_TOOLS_PER_SERVER,
 };
+
+/// Backoff between the single retry attempt and the original one (R2.5).
+/// Small and fixed — this is not exponential backoff for a retry budget of
+/// one, just a brief pause so a genuinely transient failure (a mid-flight
+/// connection reset) has a moment to clear before the retry.
+const MCP_RETRY_BACKOFF: Duration = Duration::from_millis(75);
 
 /// A live connection to one remote MCP server over `rmcp`'s streamable-HTTP
 /// client transport.
@@ -110,20 +147,74 @@ impl RmcpHttpClient {
 #[async_trait]
 impl McpClientPort for RmcpHttpClient {
     async fn list_tools(&self) -> Result<Vec<McpToolDescriptor>, McpError> {
-        let tools = tokio::time::timeout(self.timeout, self.running.list_all_tools())
-            .await
-            .map_err(|_| self.timeout_error())?
-            .map_err(|e| self.service_error(e))?;
-        Ok(tools.iter().map(descriptor_from_tool).collect())
+        let mut tools = Vec::new();
+        let mut cursor: Option<String> = None;
+        // A server controls `next_cursor`, so the loop needs its own ceiling:
+        // one that keeps handing back a cursor would otherwise spin forever,
+        // each page dutifully bounded and the whole call unbounded.
+        //
+        // The number is borrowed from the tool ceiling for want of a better
+        // one; it bounds PAGES, not tools or bytes. A single page carrying an
+        // enormous `tools` array still passes. Capping that belongs to the
+        // exposure slice, which is where `MCP_MAX_TOOLS_PER_SERVER` acquires
+        // its real meaning — today nothing else reads it.
+        let max_pages = MCP_MAX_TOOLS_PER_SERVER.max(1);
+        let mut pages = 0usize;
+        loop {
+            pages += 1;
+            if pages > max_pages {
+                return Err(McpError::Protocol {
+                    server: self.server_label.clone(),
+                    detail: format!(
+                        "tools/list kept returning a cursor after {max_pages} pages; refusing to \
+                         page further"
+                    ),
+                });
+            }
+            let page_cursor = cursor.clone();
+            let result = self
+                .retry_transient(|| async {
+                    let mut params = PaginatedRequestParams::default();
+                    params.cursor = page_cursor.clone();
+                    let request =
+                        ClientRequest::ListToolsRequest(ListToolsRequest::with_param(params));
+                    self.send_request(request).await
+                })
+                .await?;
+            let ListToolsResult {
+                tools: page,
+                next_cursor,
+                ..
+            } = match result {
+                ServerResult::ListToolsResult(r) => r,
+                other => return Err(self.unexpected_response("tools/list", &other)),
+            };
+            tools.extend(page.iter().map(descriptor_from_tool));
+            cursor = next_cursor;
+            if cursor.is_none() {
+                break;
+            }
+        }
+        Ok(tools)
     }
 
     async fn call_tool(&self, name: &str, arguments: Value) -> Result<McpToolResult, McpError> {
         let params = self.build_call_params(name, arguments)?;
-        let result = tokio::time::timeout(self.timeout, self.running.call_tool(params))
-            .await
-            .map_err(|_| self.timeout_error())?
-            .map_err(|e| self.service_error(e))?;
-        Ok(mcp_result_from(result))
+        // NOT retried, deliberately. A transport error can arrive AFTER the
+        // server already ran the tool — a connection reset while reading the
+        // response is indistinguishable, at this layer, from one before the
+        // request was sent. MCP gives no way to declare a tool idempotent, and
+        // the tools worth exposing are exactly the ones with side effects, so a
+        // blind retry can bill a card or send a message twice for one call the
+        // model made once. `list_tools` is retried because it only reads.
+        let result = {
+            let request = ClientRequest::CallToolRequest(CallToolRequest::new(params.clone()));
+            self.send_request(request).await?
+        };
+        match result {
+            ServerResult::CallToolResult(r) => Ok(mcp_result_from(r)),
+            other => Err(self.unexpected_response("tools/call", &other)),
+        }
     }
 
     fn server_label(&self) -> &str {
@@ -148,10 +239,84 @@ impl RmcpHttpClient {
         }
     }
 
+    /// Sends one JSON-RPC request through `rmcp`'s cancellable-request path
+    /// and enforces `self.timeout` with an explicit cancel notification on
+    /// expiry — see the module doc ("Timeout ownership") for why this is an
+    /// outer `tokio::time::timeout` plus an explicit notification, rather
+    /// than the `PeerRequestOptions.timeout` field alone.
+    async fn send_request(&self, request: ClientRequest) -> Result<ServerResult, McpError> {
+        let handle = self
+            .running
+            .send_cancellable_request(request, PeerRequestOptions::no_options())
+            .await
+            .map_err(|e| self.service_error(e))?;
+        let peer = handle.peer.clone();
+        let request_id = handle.id.clone();
+        match tokio::time::timeout(self.timeout, handle.await_response()).await {
+            Ok(inner) => inner.map_err(|e| self.service_error(e)),
+            Err(_) => {
+                Self::spawn_cancel_notification(peer, request_id);
+                Err(self.timeout_error())
+            }
+        }
+    }
+
+    /// Fires the `notifications/cancelled` message rmcp's own (private)
+    /// `RequestHandle::send_timeout_cancel_notification` would send on an
+    /// internal timeout — as a DETACHED background task, not awaited. See
+    /// the module doc ("Timeout ownership") and `docs/CHANGELOG_2026-08.md`
+    /// §21 for why: awaiting it inline serializes behind the still-hung
+    /// request we are trying to walk away from, which is the same problem
+    /// rmcp's own internal cancel path has. Detaching is what actually
+    /// returns control to the caller at `self.timeout`; the responder-pool
+    /// entry is still cleaned up, just on this task's own time.
+    fn spawn_cancel_notification(peer: Peer<RoleClient>, request_id: RequestId) {
+        tokio::spawn(async move {
+            let notification: rmcp::model::CancelledNotification =
+                Notification::new(CancelledNotificationParam::new(
+                    Some(request_id),
+                    Some("client timeout".to_string()),
+                ));
+            let _ = peer.send_notification(notification.into()).await;
+        });
+    }
+
+    /// One bounded retry with a fixed backoff (R2.5), scoped ONLY to
+    /// `McpError::Transport` — a transient connection-level failure
+    /// (reset/DNS/TLS). Everything else is left alone on purpose:
+    /// - `Timeout` is not proven transient the way a connection reset is —
+    ///   retrying it would double the wait on a server that is simply slow.
+    /// - `Protocol`/`Handshake` indicate a malformed exchange, not a blip;
+    ///   retrying would resend the same malformed request.
+    /// - A `tools/call` that completes with `isError: true` is `Ok(..)`
+    ///   from `call_tool`'s perspective (design §2a: it is a legitimate
+    ///   model-correctable failure, R4.5) — it never reaches this helper's
+    ///   `Err` arm at all, so it is structurally impossible to retry here.
+    async fn retry_transient<T, F, Fut>(&self, mut op: F) -> Result<T, McpError>
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = Result<T, McpError>>,
+    {
+        match op().await {
+            Err(McpError::Transport { .. }) => {
+                tokio::time::sleep(MCP_RETRY_BACKOFF).await;
+                op().await
+            }
+            other => other,
+        }
+    }
+
     fn timeout_error(&self) -> McpError {
         McpError::Timeout {
             server: self.server_label.clone(),
             seconds: self.timeout.as_secs(),
+        }
+    }
+
+    fn unexpected_response(&self, method: &str, result: &ServerResult) -> McpError {
+        McpError::Protocol {
+            server: self.server_label.clone(),
+            detail: format!("unexpected response shape for '{method}': {result:?}"),
         }
     }
 
@@ -187,7 +352,13 @@ fn descriptor_from_tool(tool: &Tool) -> McpToolDescriptor {
     }
 }
 
-/// Text blocks folded losslessly; non-text blocks are slice 2b's scope (R2.6).
+/// Folds a tool result's content blocks into the single `String` a tool-result
+/// message carries.
+///
+/// Text blocks are preserved losslessly; **every other block type is silently
+/// discarded** — develop's behavior, kept here because handling them is the
+/// next slice's job (R2.6). Until then an MCP tool that answers with an image
+/// or an embedded resource loses that content with no trace.
 fn mcp_result_from(result: CallToolResult) -> McpToolResult {
     let content = result
         .content
@@ -284,7 +455,64 @@ mod tests {
         tools: Vec<Tool>,
         session_id: Option<&'static str>,
         call_delay: Option<Duration>,
+        /// R2.5 — the first N `tools/call` attempts get a synthetic
+        /// transport-level failure (non-JSON 500) before the mock starts
+        /// answering normally; used to prove the bounded retry.
+        fail_transport_first_n_calls: usize,
+        /// R2.5/R4.5 — when true, `tools/call` answers with a well-formed
+        /// `isError: true` result instead of success, to prove that path is
+        /// never retried.
+        call_is_error: bool,
+        /// How many `tools/list` pages to hand out before stopping. `None`
+        /// means the single-page shape most tests want; `Some(n)` returns a
+        /// `next_cursor` on the first `n` pages; `Some(usize::MAX)` never
+        /// stops, to exercise the loop's own ceiling.
+        list_pages: Option<usize>,
+        /// Every request body this mock received, in order, so tests can
+        /// assert on the wire rather than on a return value.
         seen: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl McpMock {
+        /// A non-JSON, non-success body for the first N attempts at `method`.
+        /// rmcp's transport cannot parse it as JSON-RPC and surfaces a
+        /// transport-level failure, which our adapter maps to
+        /// `McpError::Transport` — a stand-in for a connection reset.
+        ///
+        /// Keyed by method so both the retried operation (`tools/list`) and the
+        /// deliberately un-retried one (`tools/call`) can be exercised.
+        fn synthetic_transient_failure(&self, method: &str) -> Option<ResponseTemplate> {
+            let needle = format!("\"method\":\"{method}\"");
+            let prior_attempts = self
+                .seen
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|b| b.contains(&needle))
+                .count()
+                - 1; // exclude the request just pushed above
+            (prior_attempts < self.fail_transport_first_n_calls).then(|| {
+                ResponseTemplate::new(500)
+                    .set_body_raw(b"synthetic transient failure".to_vec(), "text/plain")
+            })
+        }
+
+        fn with_fail_transport_first_n_calls(mut self, n: usize) -> Self {
+            self.fail_transport_first_n_calls = n;
+            self
+        }
+
+        /// Hand out `next_cursor` on the first `n` `tools/list` pages.
+        /// `usize::MAX` never stops — for the ceiling test.
+        fn with_list_pages(mut self, n: usize) -> Self {
+            self.list_pages = Some(n);
+            self
+        }
+
+        fn with_call_is_error(mut self, is_error: bool) -> Self {
+            self.call_is_error = is_error;
+            self
+        }
     }
 
     impl Respond for McpMock {
@@ -321,16 +549,52 @@ mod tests {
                     tmpl
                 }
                 "tools/list" => {
-                    let body = ServerJsonRpcMessage::response(
-                        ServerResult::ListToolsResult(ListToolsResult::with_all_items(
-                            self.tools.clone(),
-                        )),
-                        id,
-                    );
+                    if let Some(failure) = self.synthetic_transient_failure("tools/list") {
+                        return failure;
+                    }
+                    // Drive pagination from the cursor the CLIENT sent, read
+                    // off the raw request body, not from a request counter.
+                    // Counting requests would hand out page 2 even to a client
+                    // that dropped the cursor, so the test would pass while the
+                    // very thing it names was broken.
+                    let sent_cursor: Option<String> =
+                        serde_json::from_slice::<serde_json::Value>(&request.body)
+                            .ok()
+                            .and_then(|v| {
+                                v.get("params")?.get("cursor")?.as_str().map(str::to_string)
+                            });
+                    let page_index = match sent_cursor.as_deref() {
+                        None => 0,
+                        Some(c) => c
+                            .strip_prefix("page-")
+                            .and_then(|n| n.parse::<usize>().ok())
+                            .unwrap_or(0),
+                    };
+                    let next_cursor = match self.list_pages {
+                        Some(n) if n == usize::MAX => Some(format!("page-{}", page_index + 1)),
+                        Some(n) if page_index < n => Some(format!("page-{}", page_index + 1)),
+                        _ => None,
+                    };
+                    let mut page = ListToolsResult::with_all_items(self.tools.clone());
+                    page.next_cursor = next_cursor;
+                    let body =
+                        ServerJsonRpcMessage::response(ServerResult::ListToolsResult(page), id);
                     ResponseTemplate::new(200).set_body_json(&body)
                 }
                 "tools/call" => {
-                    let result = CallToolResult::success(vec![ContentBlock::text("ok")]);
+                    if let Some(failure) = self.synthetic_transient_failure("tools/call") {
+                        return failure;
+                    }
+                    let content = vec![ContentBlock::text(if self.call_is_error {
+                        "boom: invalid arguments"
+                    } else {
+                        "ok"
+                    })];
+                    let result = if self.call_is_error {
+                        CallToolResult::error(content)
+                    } else {
+                        CallToolResult::success(content)
+                    };
                     let body =
                         ServerJsonRpcMessage::response(ServerResult::CallToolResult(result), id);
                     let mut tmpl = ResponseTemplate::new(200).set_body_json(&body);
@@ -353,6 +617,9 @@ mod tests {
             tools,
             session_id,
             call_delay,
+            fail_transport_first_n_calls: 0,
+            call_is_error: false,
+            list_pages: None,
             seen: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -570,4 +837,203 @@ mod tests {
             "initialize params must never mention sampling: {init_body}"
         );
     }
+
+    // -----------------------------------------------------------------
+    /// `list_tools` threads the cursor across pages and accumulates all of
+    /// them. The single-page shape every other test uses would never exercise
+    /// this, so the loop's cursor handling had no coverage at all.
+    #[tokio::test]
+    async fn rmcp_list_tools_accumulates_across_pages() {
+        let server = MockServer::start().await;
+        // Two pages: the first answers with a cursor, the second without.
+        Mock::given(wiremock::matchers::any())
+            .respond_with(mock(vec![tool("read_wiki_structure")], None, None).with_list_pages(1))
+            .mount(&server)
+            .await;
+
+        let cfg = config(server.uri(), 5);
+        let client = RmcpHttpClient::connect_for_test("paged", &cfg)
+            .await
+            .expect("connect must succeed");
+        let tools = client.list_tools().await.expect("list_tools must succeed");
+
+        assert_eq!(
+            tools.len(),
+            2,
+            "both pages must be accumulated, got: {tools:?}"
+        );
+
+        let list_requests = server
+            .received_requests()
+            .await
+            .expect("logging enabled")
+            .iter()
+            .filter(|r| String::from_utf8_lossy(&r.body).contains("\"method\":\"tools/list\""))
+            .count();
+        assert_eq!(list_requests, 2, "one request per page");
+    }
+
+    /// A server controls `next_cursor`, so the pagination loop needs its own
+    /// ceiling: without one, a server that keeps handing back a cursor spins
+    /// forever with every individual page dutifully bounded — unbounded total
+    /// work driven entirely by the remote side.
+    #[tokio::test]
+    async fn rmcp_list_tools_refuses_to_page_forever() {
+        let server = MockServer::start().await;
+        Mock::given(wiremock::matchers::any())
+            .respond_with(
+                mock(vec![tool("t")], None, None).with_list_pages(usize::MAX), // never stops
+            )
+            .mount(&server)
+            .await;
+
+        let cfg = config(server.uri(), 5);
+        let client = RmcpHttpClient::connect_for_test("endless", &cfg)
+            .await
+            .expect("connect must succeed");
+
+        let err = client
+            .list_tools()
+            .await
+            .expect_err("an endless cursor must be refused, not followed forever");
+        assert!(
+            matches!(err, McpError::Protocol { .. }),
+            "expected Protocol, got: {err:?}"
+        );
+        assert!(
+            err.to_string().contains("refusing to page further"),
+            "the error must say why it stopped: {err}"
+        );
+    }
+
+    // Retry / no-retry split (R2.5)
+    // -----------------------------------------------------------------
+
+    /// R2.5 — `tools/list` IS retried once on a transient transport failure:
+    /// it only reads, so running it twice costs a round trip and nothing else.
+    #[tokio::test]
+    async fn rmcp_transient_transport_error_retries_list_tools_once_then_succeeds() {
+        let server = MockServer::start().await;
+        let responder = mock(vec![tool("read_wiki_structure")], None, None)
+            .with_fail_transport_first_n_calls(1);
+        let seen = responder.seen.clone();
+        Mock::given(wiremock::matchers::any())
+            .respond_with(responder)
+            .mount(&server)
+            .await;
+
+        let cfg = config(server.uri(), 5);
+        let client = RmcpHttpClient::connect_for_test("flaky", &cfg)
+            .await
+            .expect("connect must succeed");
+
+        let tools = client
+            .list_tools()
+            .await
+            .expect("the retry must transparently succeed");
+        assert_eq!(tools.len(), 1);
+
+        let list_attempts = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|b| b.contains("\"method\":\"tools/list\""))
+            .count();
+        assert_eq!(
+            list_attempts, 2,
+            "exactly one retry: the first attempt failed transport-level, the second succeeded"
+        );
+    }
+
+    /// R2.5 — `tools/call` is NEVER retried, even on a transport error.
+    ///
+    /// A reset can arrive AFTER the server already ran the tool; at this layer
+    /// that is indistinguishable from one before the request was sent. MCP has
+    /// no way to declare a tool idempotent, and the tools worth exposing are
+    /// exactly the ones with side effects — so a blind retry could bill a card
+    /// or send a message twice for one call the model made once. The failure is
+    /// surfaced to the model, which can decide to try again knowing the risk.
+    #[tokio::test]
+    async fn rmcp_call_tool_is_never_retried_on_transport_error() {
+        let server = MockServer::start().await;
+        let responder = mock(Vec::new(), None, None).with_fail_transport_first_n_calls(1);
+        let seen = responder.seen.clone();
+        Mock::given(wiremock::matchers::any())
+            .respond_with(responder)
+            .mount(&server)
+            .await;
+
+        let cfg = config(server.uri(), 5);
+        let client = RmcpHttpClient::connect_for_test("flaky", &cfg)
+            .await
+            .expect("connect must succeed");
+
+        let err = client
+            .call_tool("charge_card", json!({}))
+            .await
+            .expect_err("a transport failure on tools/call must surface, not retry");
+        assert!(
+            matches!(err, McpError::Transport { .. }),
+            "expected Transport, got: {err:?}"
+        );
+
+        let call_attempts = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|b| b.contains("\"method\":\"tools/call\""))
+            .count();
+        assert_eq!(
+            call_attempts, 1,
+            "tools/call must reach the server exactly once — a second attempt could \
+             re-run a side effect the first one already performed"
+        );
+    }
+
+    /// R2.5 — a `tools/call` that completes with `isError: true` is a
+    /// legitimate, model-correctable failure and reaches the caller as a
+    /// successful result carrying the flag, never as a retry.
+    ///
+    /// Note this holds *structurally*: `call_tool` does not go through
+    /// `retry_transient` at all, so there is no retry path to skip. The test
+    /// pins the observable behavior — the server sees exactly one `tools/call`.
+    #[tokio::test]
+    async fn rmcp_is_error_true_response_is_not_retried() {
+        let server = MockServer::start().await;
+        let responder = mock(Vec::new(), None, None).with_call_is_error(true);
+        let seen = responder.seen.clone();
+        Mock::given(wiremock::matchers::any())
+            .respond_with(responder)
+            .mount(&server)
+            .await;
+
+        let cfg = config(server.uri(), 5);
+        let client = RmcpHttpClient::connect_for_test("erroring", &cfg)
+            .await
+            .expect("connect must succeed");
+
+        let result = client
+            .call_tool("anything", json!({}))
+            .await
+            .expect("an isError:true tools/call response is Ok, not Err (R4.5)");
+        assert!(result.is_error);
+        assert_eq!(result.content, "boom: invalid arguments");
+
+        let call_attempts = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|b| b.contains("\"method\":\"tools/call\""))
+            .count();
+        assert_eq!(
+            call_attempts, 1,
+            "isError:true must never trigger a retry — it is not a transport failure"
+        );
+    }
+
+    // Not covered here, by design: content-block conversion beyond text
+    // (R2.6), the malformed-initialize and 0/1/N-tools protocol cases
+    // (R2.7), and the live network tests against real MCP servers. Those
+    // ship in the next slice, which is where `mcp_result_from` stops
+    // discarding non-text blocks.
 }
