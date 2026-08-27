@@ -1184,3 +1184,99 @@ reusar, timeouts repetidos contra un servidor colgado hacen crecer ese pool. `rm
 mismo código.
 
 **Estado.** done (slice 4 de 9).
+
+---
+
+## 21. Propiedad del timeout y regla de idempotencia en el cliente MCP (5/9)
+
+**Qué cambió.** Nada observable todavía: nadie construye este cliente aún. Son dos
+correcciones al adapter de la §20, ambas salidas de la revisión.
+
+### El timeout ahora cancela de verdad
+
+La §20 imponía el plazo con un `tokio::time::timeout` externo alrededor de
+`list_all_tools`/`call_tool`. Eso acotaba al caller, pero **soltar el future no cancela el
+request en rmcp**: su `local_responder_pool` conservaba la entrada hasta una respuesta que
+podía no llegar nunca. Como el cliente se va a cachear y reusar, timeouts repetidos contra un
+servidor colgado lo hacían crecer.
+
+El arreglo que el diseño proponía —`send_cancellable_request` con `PeerRequestOptions::timeout`,
+dejando que rmcp fuera dueño del plazo y de la limpieza— **no se sostiene empíricamente** con
+rmcp 3.1.4 sobre `transport-streamable-http-client-reqwest`: su timer interno dispara a
+horario, pero después **espera** una notificación de cancelación que queda serializada detrás
+del request todavía en vuelo, así que el caller no recupera control hasta que ese request
+termine igual.
+
+Lo que sí funciona: usar `send_cancellable_request` solo para obtener un `Peer` y un
+`RequestId` clonables antes de consumir el handle, envolver `await_response()` en nuestro
+propio `tokio::time::timeout`, y al expirar disparar la cancelación como **tarea desprendida**
+(`tokio::spawn`) en vez de esperarla. Esa detención es lo que devuelve control en el plazo
+prometido sin dejar la entrada colgada.
+
+`list_tools` ya no llama a `Peer::list_all_tools`: pagina `tools/list` por su cuenta, de modo
+que cada página se acota y se cancela por separado.
+
+Y el bucle lleva **su propio techo de páginas**, derivado de `MCP_MAX_TOOLS_PER_SERVER`. Eso
+salió de la revisión: el `next_cursor` lo controla el servidor, así que sin ceiling un
+servidor que siga devolviendo cursor hace girar el bucle para siempre, con cada página
+diligentemente acotada y el total sin acotar — trabajo ilimitado manejado enteramente por el
+otro lado. Peor caso real: `max_pages * timeout_seconds`.
+
+### `tools/call` no se reintenta nunca
+
+`tools/list` se reintenta una vez ante un fallo transitorio de transporte: solo lee, así que
+correrlo dos veces cuesta un round trip y nada más.
+
+**`tools/call` no se reintenta, ni siquiera ante un error de transporte.** Un reset de
+conexión puede llegar **después** de que el servidor ya ejecutó la tool —un corte mientras se
+lee la respuesta es indistinguible, en esta capa, de uno previo al envío— y `service_error`
+mapea ambos a `Transport`. MCP no ofrece forma de declarar una tool idempotente, y las tools
+que vale la pena exponer son justamente las que tienen efectos: una escritura, un envío, un
+cobro. Un reintento ciego podía cobrar una tarjeta dos veces por una sola llamada del modelo.
+
+Ahora el fallo se le devuelve al modelo, que puede reintentar sabiendo lo que arriesga.
+
+**Compatibilidad.** Aditivo. Ninguna firma pública cambia, ningún binding se toca.
+
+**Tests.** 13 en total; 5 nuevos y todos verificados rompiendo el código:
+
+- `rmcp_call_tool_is_never_retried_on_transport_error` afirma que el servidor ve
+  `tools/call` **exactamente una vez**. Volver a poner el reintento lo hace fallar.
+- `rmcp_transient_transport_error_retries_list_tools_once_then_succeeds` cubre el caso que sí
+  se reintenta. La inyección de fallo transitorio del mock se generalizó de un arm cableado a
+  `tools/call` a un helper por método, para poder ejercitar ambos caminos.
+- `rmcp_is_error_true_response_is_not_retried` fija que un `isError: true` llega como
+  resultado con la bandera, no como reintento. Vale aclarar que eso se cumple
+  **estructuralmente**: `call_tool` no pasa por `retry_transient`, así que no hay camino de
+  reintento que saltear.
+- `rmcp_list_tools_accumulates_across_pages` cubre el hilado del cursor y la acumulación
+  entre páginas. La revisión notó que ningún test ejercitaba más de una página —todos los
+  mocks devolvían la lista completa de una— así que el bucle nuevo no tenía cobertura
+  alguna. El mock avanza de página **leyendo el cursor que mandó el cliente**, no contando
+  requests: contar habría entregado la página 2 incluso a un cliente que dejara de enviarlo,
+  y el test habría pasado mientras lo que nombra estaba roto. Verificado dejando de enviar el
+  cursor — el cliente entonces pide la misma página hasta chocar contra el techo.
+- `rmcp_list_tools_refuses_to_page_forever` fija el techo: un servidor que nunca deja de
+  devolver cursor recibe un `Protocol` que dice por qué se paró, en vez de un bucle infinito.
+
+**Tres limitaciones conocidas.**
+
+El techo de páginas acota **páginas, no tools ni bytes**: un servidor que devuelva una sola
+página con un array enorme de tools pasa igual. Acotar eso corresponde a la slice de
+exposición, que es donde `MCP_MAX_TOOLS_PER_SERVER` cobra su sentido real — hoy no lo lee
+nadie más, y el número se toma prestado a falta de uno mejor.
+
+Los bloques de contenido que no son texto —imágenes, recursos embebidos— **se siguen
+descartando en silencio** al plegar el resultado de un `tools/call`. Es el comportamiento que
+ya tenía develop, y se conserva acá porque manejarlos es trabajo de la slice siguiente: una
+tool MCP que responda con una imagen pierde ese contenido sin dejar rastro. Está dicho también
+en el doc comment de `mcp_result_from`, para que no dependa de leer el CHANGELOG.
+
+Y un servidor genuinamente mudo —que acepta la conexión, nunca responde
+y nunca resetea— traba de forma permanente el único worker compartido de rmcp. Cada llamada
+sigue acotada por nuestro timeout, así que nadie se cuelga, pero el cliente cacheado para ese
+servidor no se recupera en toda la vida del proceso.
+
+Ninguna de las tres está activa: nada construye este cliente todavía.
+
+**Estado.** done (slice 5 de 9).
