@@ -538,6 +538,12 @@ mod tests {
         /// `isError: true` result instead of success, to prove that path is
         /// never retried.
         call_is_error: bool,
+        /// R2.7 — when true, `initialize` answers with a well-formed JSON-RPC
+        /// envelope whose result is NOT an `InitializeResult`. Proves the
+        /// handshake refuses a syntactically valid but semantically wrong
+        /// response instead of proceeding on a connection it never
+        /// negotiated.
+        malformed_initialize: bool,
         /// How many `tools/list` pages to hand out before stopping. `None`
         /// means the single-page shape most tests want; `Some(n)` returns a
         /// `next_cursor` on the first `n` pages; `Some(usize::MAX)` never
@@ -588,6 +594,11 @@ mod tests {
             self.call_is_error = is_error;
             self
         }
+
+        fn with_malformed_initialize(mut self, malformed: bool) -> Self {
+            self.malformed_initialize = malformed;
+            self
+        }
     }
 
     impl Respond for McpMock {
@@ -611,6 +622,17 @@ mod tests {
             let id = req.id.clone();
             match req.request.method() {
                 "initialize" => {
+                    if self.malformed_initialize {
+                        // A well-formed JSON-RPC envelope carrying the WRONG
+                        // result type. The failure this guards against is a
+                        // client that shrugs and continues on a session it
+                        // never actually negotiated.
+                        let body = ServerJsonRpcMessage::response(
+                            ServerResult::EmptyResult(rmcp::model::EmptyResult {}),
+                            id,
+                        );
+                        return ResponseTemplate::new(200).set_body_json(&body);
+                    }
                     let mut capabilities = ServerCapabilities::default();
                     capabilities.tools = Some(ToolsCapability::default());
                     let body = ServerJsonRpcMessage::response(
@@ -694,6 +716,7 @@ mod tests {
             call_delay,
             fail_transport_first_n_calls: 0,
             call_is_error: false,
+            malformed_initialize: false,
             list_pages: None,
             seen: Arc::new(Mutex::new(Vec::new())),
         }
@@ -1280,7 +1303,127 @@ mod tests {
         }
     }
 
-    // Not covered here, by design: the malformed-initialize and 0/1/N-tools
-    // protocol cases (R2.7), and the live network tests against real MCP
-    // servers. Those ship in the next slice.
+    /// R2.7 — the empty catalog. A server with nothing to offer is a normal
+    /// answer, not an error: exposure must see an empty list rather than a
+    /// failure it would report as a broken server.
+    #[tokio::test]
+    async fn rmcp_tools_list_zero_tools() {
+        let server = MockServer::start().await;
+        Mock::given(wiremock::matchers::any())
+            .respond_with(mock(Vec::new(), None, None))
+            .mount(&server)
+            .await;
+
+        let cfg = config(server.uri(), 5);
+        let client = RmcpHttpClient::connect_for_test("empty", &cfg)
+            .await
+            .expect("connect must succeed");
+        let tools = client.list_tools().await.expect("list_tools must succeed");
+        assert!(tools.is_empty(), "expected an empty catalog, got {tools:?}");
+    }
+
+    /// R2.7 — the single-tool catalog. Pins the boundary between "empty" and
+    /// "paginated": one tool must arrive whole, with its name intact, and
+    /// must not trip the pagination loop.
+    #[tokio::test]
+    async fn rmcp_tools_list_one_tool() {
+        let server = MockServer::start().await;
+        Mock::given(wiremock::matchers::any())
+            .respond_with(mock(vec![tool("solo_tool")], None, None))
+            .mount(&server)
+            .await;
+
+        let cfg = config(server.uri(), 5);
+        let client = RmcpHttpClient::connect_for_test("one-tool", &cfg)
+            .await
+            .expect("connect must succeed");
+        let tools = client.list_tools().await.expect("list_tools must succeed");
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].name, "solo_tool");
+    }
+
+    /// R2.7 — a handshake that is syntactically valid and semantically wrong.
+    /// The envelope parses; the result simply is not an `InitializeResult`.
+    /// Accepting it would leave the client talking on a session it never
+    /// negotiated, so this must fail at connect rather than surface later as
+    /// a confusing tools/list error.
+    #[tokio::test]
+    async fn rmcp_malformed_initialize_response_errors() {
+        let server = MockServer::start().await;
+        Mock::given(wiremock::matchers::any())
+            .respond_with(mock(Vec::new(), None, None).with_malformed_initialize(true))
+            .mount(&server)
+            .await;
+
+        let cfg = config(server.uri(), 5);
+        let err = RmcpHttpClient::connect_for_test("malformed", &cfg)
+            .await
+            .expect_err("a non-InitializeResult response must not be accepted as a handshake");
+        // Handshake SPECIFICALLY, not `Handshake | Protocol`: `connect` maps
+        // every `serve` failure to `Handshake` and can only otherwise yield
+        // `Timeout`. Every `Protocol` constructor lives past the handshake,
+        // so accepting it here would be an alternation the code cannot take —
+        // an assertion looser than the thing it guards.
+        assert!(
+            matches!(err, McpError::Handshake { .. }),
+            "expected a Handshake error, got: {err:?}"
+        );
+    }
+
+    /// R2.8 — live, against a REAL MCP server. Every other test here mocks
+    /// the protocol, which proves we speak it the way we believe it works;
+    /// only this proves we speak it the way a real server does. DeepWiki is
+    /// stateless (issues no `mcp-session-id`), so it exercises that half of
+    /// the transport.
+    #[tokio::test]
+    #[ignore = "requires network — run with `cargo test -- --ignored`"]
+    async fn deepwiki_read_wiki_structure_returns_real_outline_text() {
+        let cfg = config("https://mcp.deepwiki.com/mcp".to_string(), 30);
+        let client = RmcpHttpClient::connect("deepwiki", &cfg)
+            .await
+            .expect("DeepWiki connect must succeed");
+
+        let tools = client
+            .list_tools()
+            .await
+            .expect("DeepWiki list_tools must succeed");
+        assert!(
+            tools.iter().any(|t| t.name == "read_wiki_structure"),
+            "expected a read_wiki_structure tool, got: {:?}",
+            tools.iter().map(|t| &t.name).collect::<Vec<_>>()
+        );
+
+        let result = client
+            .call_tool(
+                "read_wiki_structure",
+                json!({ "repoName": "modelcontextprotocol/rust-sdk" }),
+            )
+            .await
+            .expect("read_wiki_structure must succeed");
+        assert!(!result.is_error);
+        assert!(
+            !result.content.trim().is_empty(),
+            "expected a non-empty real wiki outline"
+        );
+    }
+
+    /// R2.8 — live, against a REAL STATEFUL server. HuggingFace issues an
+    /// `mcp-session-id` on `initialize`; if the transport did not echo it
+    /// back, this second round-trip would be rejected. The mocked
+    /// session-echo test asserts our belief about that rule — this one
+    /// asserts the rule itself.
+    #[tokio::test]
+    #[ignore = "requires network — run with `cargo test -- --ignored`"]
+    async fn huggingface_session_id_echoed_live() {
+        let cfg = config("https://huggingface.co/mcp".to_string(), 30);
+        let client = RmcpHttpClient::connect("huggingface", &cfg)
+            .await
+            .expect("HuggingFace connect must succeed");
+
+        let tools = client
+            .list_tools()
+            .await
+            .expect("HuggingFace list_tools must succeed on the same session");
+        assert!(!tools.is_empty(), "expected at least one HuggingFace tool");
+    }
 }
