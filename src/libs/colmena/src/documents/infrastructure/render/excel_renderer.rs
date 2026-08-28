@@ -1,13 +1,32 @@
 use crate::documents::domain::ir::{CellType, ExcelIR};
 use crate::documents::domain::{IRRenderer, RenderError};
 use async_trait::async_trait;
-use rust_xlsxwriter::{Format, Workbook};
+use rust_xlsxwriter::{DocProperties, ExcelDateTime, Format, Workbook};
 
 pub struct ExcelRenderer;
+
+/// Fixed creation/modification date stamped into every rendered workbook's
+/// `docProps/core.xml`.
+///
+/// `rust_xlsxwriter` defaults `dcterms:created`/`dcterms:modified` to
+/// `ExcelDateTime::utc_now()` when no `DocProperties` are set, and that
+/// timestamp has one-SECOND resolution. Rendering the same `ExcelIR` twice
+/// therefore produces different bytes whenever a second boundary falls
+/// between the two renders — breaking this system's content-addressability
+/// guarantee (same IR ⇒ same bytes). A generated artifact's wall-clock
+/// creation time carries no useful information for anyone consuming it, so
+/// we pin it to a fixed, arbitrary date instead of the current time. The
+/// value itself is not meaningful — do not "helpfully" restore
+/// `utc_now()`.
+const FIXED_CREATION_DATE: (u16, u8, u8) = (2026, 1, 1);
 
 impl ExcelRenderer {
     fn render_sync(ir: &ExcelIR) -> Result<Vec<u8>, RenderError> {
         let mut wb = Workbook::new();
+        let (year, month, day) = FIXED_CREATION_DATE;
+        let created = ExcelDateTime::from_ymd(year, month, day)
+            .map_err(|e| RenderError::Failed(format!("fixed creation date: {e}")))?;
+        wb.set_properties(&DocProperties::new().set_creation_datetime(&created));
         let mut sorted = ir.workbook.sheets.clone();
         sorted.sort_by_key(|s| s.order);
 

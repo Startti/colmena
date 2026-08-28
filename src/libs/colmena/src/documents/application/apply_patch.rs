@@ -839,4 +839,37 @@ mod tests {
         assert!(!a.is_empty());
         assert_eq!(a, b);
     }
+
+    /// Regression test for the one-second-resolution `creation_time` bug in
+    /// `rust_xlsxwriter`: `Workbook::new()` without `set_properties` defaults
+    /// `docProps/core.xml`'s `dcterms:created`/`dcterms:modified` to
+    /// `ExcelDateTime::utc_now()`, which truncates to whole seconds. Two
+    /// renders of the SAME IR that straddle a second boundary therefore
+    /// produce DIFFERENT bytes, even though nothing about the content
+    /// changed. This is why `excel_renderer_output_is_deterministic_for_same_ir`
+    /// above is flaky (~1/many runs, but reliably reproducible with a
+    /// deliberate delay) rather than reliably green.
+    #[tokio::test]
+    async fn excel_renderer_output_is_deterministic_across_a_second_boundary() {
+        let ir_value = serde_json::json!({
+            "kind": "excel",
+            "artifact_id": "x", "version_id": "v1",
+            "schema_version": "1.0.0",
+            "workbook": { "sheets": [
+                {"id": "s1", "name": "Hoja1", "order": 0, "columns": [], "cells": {}, "tables": []}
+            ], "named_styles": {} }
+        });
+        let renderer = ExcelRenderer;
+        let a = renderer.render(&ir_value).await.unwrap();
+        // Force the two renders to straddle a wall-clock second boundary so
+        // an `utc_now()`-derived timestamp is guaranteed to differ.
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+        let b = renderer.render(&ir_value).await.unwrap();
+        assert_eq!(
+            a, b,
+            "same IR must render to identical bytes regardless of wall-clock \
+             time — content-addressability requires no wall-clock timestamp \
+             to leak into the output"
+        );
+    }
 }
