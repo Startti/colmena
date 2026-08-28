@@ -1382,3 +1382,38 @@ Fuera de alcance, para la slice siguiente: la matriz de casos de protocolo
 (`initialize` malformado, 0/1/N tools) y los dos tests de red contra servidores MCP reales.
 
 **Estado.** done (slice 6 de 9).
+
+## 24. Matriz de protocolo y pruebas contra servidores MCP reales (7/9)
+
+Slice de **cobertura**, no de comportamiento: no cambia una línea de producción. Cierra los
+huecos de prueba que las slices 4-6 habían ido dejando anotados como "para la siguiente".
+
+**Matriz de protocolo** (wiremock, tres casos que antes no tenían ninguna prueba):
+
+- **Catálogo vacío.** Un servidor sin tools que ofrecer es una respuesta normal, no un error.
+  Sin esta prueba, nada impedía que exposición terminara reportando un servidor sano como roto.
+- **Catálogo de un tool.** Fija el borde entre "vacío" y "paginado": un solo tool tiene que
+  llegar entero y no disparar el loop de paginación.
+- **`initialize` malformado.** Un envelope JSON-RPC bien formado cuyo resultado **no** es un
+  `InitializeResult`. Es el caso incómodo: parsea, así que un cliente descuidado sigue adelante
+  sobre una sesión que nunca negoció, y el problema reaparece después como un error confuso en
+  `tools/list`. Ahora falla en el connect, que es donde se entiende. Requirió extender el mock
+  con `with_malformed_initialize`.
+
+**Dos pruebas en vivo** (`#[ignore]`, se corren con `cargo test -- --ignored` según la
+convención del repo para tests que necesitan red):
+
+- **DeepWiki** (`https://mcp.deepwiki.com/mcp`) — servidor **stateless**, no emite
+  `mcp-session-id`. Lista tools, encuentra `read_wiki_structure` y lo llama de verdad,
+  exigiendo texto real de vuelta.
+- **HuggingFace** (`https://huggingface.co/mcp`) — servidor **stateful**. Si el transporte no
+  devolviera el `mcp-session-id` que el servidor emite en el `initialize`, el segundo
+  round-trip sería rechazado.
+
+La distinción importa y es la razón de ser de esta slice: **todo el resto de los tests son
+mocks, y un mock prueba que hablamos el protocolo como nosotros creemos que funciona.** Solo
+estos dos prueban que lo hablamos como lo habla un servidor real. Ambos verificados corriendo
+en vivo, no solo escritos.
+
+**Estado.** done (slice 7 de 9).
+
