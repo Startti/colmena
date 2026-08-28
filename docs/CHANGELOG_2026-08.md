@@ -1280,3 +1280,46 @@ servidor no se recupera en toda la vida del proceso.
 Ninguna de las tres está activa: nada construye este cliente todavía.
 
 **Estado.** done (slice 5 de 9).
+
+## 22. `ExcelRenderer` producía bytes distintos para el mismo IR — fecha de creación fija
+
+`ExcelRenderer::render_sync` (en
+`src/libs/colmena/src/documents/infrastructure/render/excel_renderer.rs`) construía el
+`Workbook` sin llamar nunca a `set_properties`. `rust_xlsxwriter` 0.77, ante la ausencia de
+`DocProperties`, rellena `creation_time` con `ExcelDateTime::utc_now()` — que tiene resolución
+de **un segundo** (trunca a `timestamp.as_secs()`). Ese valor se escribe en
+`docProps/core.xml` como `dcterms:created` **y** `dcterms:modified` a la vez.
+
+Consecuencia: renderizar el mismo IR dos veces producía bytes distintos cada vez que el
+segundo boundary caía entre ambos renders. El test
+`excel_renderer_output_is_deterministic_for_same_ir` (en
+`src/libs/colmena/src/documents/application/apply_patch.rs`) pasaba casi siempre por pura
+suerte de timing, y ya había cancelado el matrix de CI completo (7 jobs de Python, 3.8-3.14,
+con `fail-fast` por defecto) en dos PRs distintas
+(#209, #211) al caer justo sobre ese borde. El problema no era solo el flake: content
+addressability es una promesa del sistema (mismo IR ⇒ mismos bytes), y la fecha de creación
+de un artefacto generado por código no le sirve a nadie que lo consuma — no hay wall-clock
+"real" que reportar honestamente.
+
+**Fix.** Se fija la fecha de creación/modificación a una constante arbitraria
+(`FIXED_CREATION_DATE`, 2026-01-01) vía `wb.set_properties(&DocProperties::new()
+.set_creation_datetime(&created))`, con `ExcelDateTime::from_ymd` (no se habilitó el feature
+`chrono` del crate — no era necesario y el proyecto lo excluye por defecto). Un solo
+`set_creation_datetime` alimenta ambos campos de `core.xml`. Los timestamps de las entradas
+del ZIP interno ya estaban fijados por la librería (`DateTime::default()` en
+`packager.rs`), así que `core.xml` era la única fuente de no-determinismo.
+
+**Test.** Nuevo `excel_renderer_output_is_deterministic_across_a_second_boundary` (mismo
+archivo que el test preexistente) renderiza el mismo IR dos veces con un
+`tokio::time::sleep(1100ms)` entre medio, forzando deliberadamente el cruce de un segundo —
+falla de forma determinista contra el código anterior (no depende de la suerte de timing) y
+pasa con el fix. Se verificó revirtiendo el fix localmente para confirmar que el test vuelve a
+fallar, y reaplicándolo. No se agregó ninguna dependencia nueva (no hay crate de lectura de
+ZIP entre las dev-dependencies del crate `colmena_dag_engine`, así que no se pudo hacer una
+aserción directa sobre `docProps/core.xml`).
+
+**Compatibilidad.** Aditivo, sin cambios de API pública ni de firma de `ExecutableNode` — solo
+cambia el contenido de `docProps/core.xml` dentro de los archivos `.xlsx` generados. ADP no
+afectado.
+
+**Estado.** done.
