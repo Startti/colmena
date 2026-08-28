@@ -1417,3 +1417,48 @@ en vivo, no solo escritos.
 
 **Estado.** done (slice 7 de 9).
 
+## 25. Superficie de configuración MCP y validación fail-closed (8/9)
+
+Primera pieza del lado `dag_engine`: hasta ahora todo el código MCP vivía en `llm/` y el motor no
+sabía que existía. Esta slice declara **qué es un config MCP válido** y lo rechaza al cargar el
+grafo. No abre conexiones — eso es la slice siguiente.
+
+**Superficie** (`McpServerSpec`, presente solo cuando `node_type: "mcp"`):
+
+| Campo | Default | Nota |
+|---|---|---|
+| `url` | — (obligatorio) | debe ser HTTPS |
+| `transport` | `streamable_http` | o `sse` |
+| `headers` | `{}` | valores tal como están en el grafo: normalmente referencias sin resolver |
+| `timeout_seconds` | 30 | deadline por llamada |
+| `cache_ttl_seconds` | 300 | sigue la convención por-node-config existente (`tavily_client`) |
+
+El tipo se define acá pero **todavía no se monta como campo de `ToolConfiguration`**: la validación
+trabaja sobre JSON crudo por diseño, y el único consumidor del campo tipado es el constructor de
+bindings de la slice siguiente. Llega junto con quien lo lee.
+
+**Validación fail-closed** en `Graph::validate`, sobre JSON crudo, espejando `validate_memory_mode`
+en vez de inventar un mecanismo paralelo. Tres rechazos, cada uno porque el fallo alternativo es
+**silencioso**:
+
+1. `node_type: "mcp"` sin `mcp.url` — un tool MCP sin dirección no expone nada, y el operador lo lee
+   como "el modelo ignoró mi servidor", no como un config roto.
+2. URL no-HTTPS — estas conexiones llevan headers con credenciales. Se rechaza al cargar, no al
+   conectar; `RmcpHttpClient::connect` lo revalida antes de tocar un socket (R2.1).
+3. Un bloque `mcp` sobre un tool que **no** es MCP — config muerto que el operador cree activo. Esto
+   **no** estaba en el diseño: se agrega porque es la misma clase de fallo que un `memory_mode` mal
+   ubicado.
+
+El chequeo de scheme es case-insensitive (RFC 3986): rechazar `HTTPS://` sería un falso rechazo.
+
+**`Debug` redactado en `McpServerConfig` (G3).** `header_refs` está pensado para referencias sin
+resolver, pero nada impide que un operador pegue un token literal en el grafo, y un `Debug` derivado
+lo imprimiría en cualquier log. Verificado en rojo: el test mostraba `Bearer sk-live-SECRET`. Ahora
+**todos** los valores pasan a `***` sin intentar adivinar cuáles son secretos — una redacción que
+depende de reconocer el secreto falla justo con el que no reconoce. Los **nombres** de header
+sobreviven: quien depura autenticación necesita verlos, y un nombre no es una credencial.
+
+**Alcance.** Aditivo, sin API pública nueva, sin dependencias, sin conexiones. Un grafo sin entradas
+MCP no ve diferencia (G2).
+
+**Estado.** done (slice 8 de 9).

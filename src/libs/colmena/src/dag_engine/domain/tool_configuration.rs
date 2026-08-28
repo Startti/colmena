@@ -22,10 +22,11 @@
 //!
 //! The execution priority in `DagToolExecutor` is: `node_schema` → `$DYNAMIC` → deprecated.
 
+use crate::llm::domain::mcp::McpTransport;
 use crate::llm::domain::ParameterProperty;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 /// Marker string used as a placeholder value in `fixed_config` to indicate that a field
 /// should be provided by the LLM at call time.
@@ -258,6 +259,110 @@ pub fn memory_backend_missing_reason(
              lost between runs)"
         ))
     }
+}
+
+// ---------------------------------------------------------------------------
+// MCP remote servers (R3.1/R3.2)
+// ---------------------------------------------------------------------------
+
+/// `node_type` marking a `tool_configurations` entry as backed by a remote MCP
+/// server rather than by a registered `ExecutableNode`.
+pub const MCP_NODE_TYPE: &str = "mcp";
+
+/// Per-call deadline when the operator does not set one.
+pub const DEFAULT_MCP_TIMEOUT_SECONDS: u64 = 30;
+
+/// How long a server's `tools/list` result stays reusable when the operator
+/// does not set one. Follows the existing per-node-config `cache_ttl_seconds`
+/// convention rather than being promoted onto [`ToolConfiguration`].
+pub const DEFAULT_MCP_CACHE_TTL_SECONDS: u64 = 300;
+
+/// Operator-declared connection to one remote MCP server.
+///
+/// `headers` holds values exactly as written in the graph JSON — normally
+/// unresolved secure-value / `$DYNAMIC` references, resolved only at connect
+/// time and never stored on the connection's cache key (design §7).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct McpServerSpec {
+    pub url: String,
+    #[serde(default)]
+    pub transport: McpTransport,
+    #[serde(default)]
+    pub headers: BTreeMap<String, String>,
+    #[serde(default = "default_mcp_timeout_seconds")]
+    pub timeout_seconds: u64,
+    #[serde(default = "default_mcp_cache_ttl_seconds")]
+    pub cache_ttl_seconds: u64,
+}
+
+fn default_mcp_timeout_seconds() -> u64 {
+    DEFAULT_MCP_TIMEOUT_SECONDS
+}
+
+fn default_mcp_cache_ttl_seconds() -> u64 {
+    DEFAULT_MCP_CACHE_TTL_SECONDS
+}
+
+/// Whether a URL's scheme is `https`, compared case-insensitively because URL
+/// schemes are case-insensitive per RFC 3986 — refusing `HTTPS://` would be a
+/// false rejection of a valid config.
+fn is_https_url(url: &str) -> bool {
+    url.split_once("://")
+        .is_some_and(|(scheme, rest)| scheme.eq_ignore_ascii_case("https") && !rest.is_empty())
+}
+
+/// Fail-closed validation of a tool configuration's MCP block, on the raw-JSON
+/// path so a bad graph is rejected at load without a full struct decode —
+/// mirroring [`validate_memory_mode`].
+///
+/// Three rejections, each for a config that would otherwise fail silently:
+/// 1. `node_type: "mcp"` with no reachable address. An MCP tool with no `url`
+///    exposes nothing, which reads to the operator as "the model ignored my
+///    server" rather than as a broken config.
+/// 2. A non-HTTPS URL (R3.2). These connections carry credential headers;
+///    plaintext is refused at load rather than at connect.
+/// 3. An `mcp` block on a tool that is not an MCP tool — dead config the
+///    operator believes is live. Not named in the design, but it is the same
+///    failure class as a misplaced `memory_mode` and gets the same treatment.
+///
+/// The returned message does not repeat the tool alias: the caller wraps it in
+/// [`DagError::InvalidToolSchema`], whose `Display` already names both the tool
+/// and the node.
+///
+/// [`DagError::InvalidToolSchema`]: crate::dag_engine::domain::DagError
+pub fn validate_mcp_config(node_type: &str, tool_cfg: &Value) -> Result<(), String> {
+    let block = tool_cfg.get("mcp");
+
+    if node_type != MCP_NODE_TYPE {
+        return match block {
+            Some(_) => Err(format!(
+                "an 'mcp' block is only valid on a tool with node_type '{MCP_NODE_TYPE}'; \
+                 this tool is node_type '{node_type}' and the block would be ignored"
+            )),
+            None => Ok(()),
+        };
+    }
+
+    let url = block
+        .and_then(|b| b.get("url"))
+        .and_then(|u| u.as_str())
+        .unwrap_or("");
+
+    if url.is_empty() {
+        return Err(format!(
+            "a tool with node_type '{MCP_NODE_TYPE}' needs 'mcp.url' pointing at the \
+             remote MCP server; this tool has none"
+        ));
+    }
+
+    if !is_https_url(url) {
+        return Err(format!(
+            "MCP server URL must be HTTPS, got '{url}' (these connections carry \
+             credential headers, so plaintext transport is refused)"
+        ));
+    }
+
+    Ok(())
 }
 
 /// Configuration for exposing a DAG node as an LLM-callable tool.
@@ -671,6 +776,99 @@ pub fn parse_node_schema(schema: &NodeSchema) -> Result<ParsedNodeSchema, String
 mod tests {
     use super::*;
     use serde_json::json;
+
+    // --- MCP config surface (R3.1/R3.2) ---
+
+    fn mcp_cfg(node_type: &str, mcp: Value) -> Value {
+        json!({ "name": "t", "node_type": node_type, "mcp": mcp })
+    }
+
+    /// The defaults are a documented part of the config surface: an operator
+    /// who writes only `url` must get a working, bounded connection.
+    #[test]
+    fn mcp_spec_defaults_match_the_documented_values() {
+        let spec: McpServerSpec =
+            serde_json::from_value(json!({ "url": "https://mcp.example.com/mcp" })).unwrap();
+        assert_eq!(spec.transport, McpTransport::StreamableHttp);
+        assert!(spec.headers.is_empty());
+        assert_eq!(spec.timeout_seconds, DEFAULT_MCP_TIMEOUT_SECONDS);
+        assert_eq!(spec.cache_ttl_seconds, DEFAULT_MCP_CACHE_TTL_SECONDS);
+    }
+
+    /// Fail-closed: an `mcp` tool with no reachable address is not a tool.
+    /// Silently exposing nothing would read to the operator as "the model
+    /// ignored my server".
+    #[test]
+    fn mcp_node_type_without_a_url_is_rejected() {
+        let missing_block = json!({ "name": "t", "node_type": MCP_NODE_TYPE });
+        let err = validate_mcp_config(MCP_NODE_TYPE, &missing_block).unwrap_err();
+        assert!(
+            err.contains("url"),
+            "the message must name the missing field: {err}"
+        );
+
+        let empty_url = mcp_cfg(MCP_NODE_TYPE, json!({ "url": "" }));
+        assert!(validate_mcp_config(MCP_NODE_TYPE, &empty_url).is_err());
+    }
+
+    /// R3.2 — plaintext transport is refused at load, not at connect. Headers
+    /// on these connections carry credentials.
+    #[test]
+    fn mcp_url_must_be_https() {
+        let http = mcp_cfg(
+            MCP_NODE_TYPE,
+            json!({ "url": "http://mcp.example.com/mcp" }),
+        );
+        let err = validate_mcp_config(MCP_NODE_TYPE, &http).unwrap_err();
+        assert!(err.contains("HTTPS"), "got: {err}");
+        assert!(
+            err.contains("http://mcp.example.com/mcp"),
+            "the message must quote the offending URL so it is fixable: {err}"
+        );
+
+        for scheme in ["ws://", "file://", "ftp://"] {
+            let cfg = mcp_cfg(MCP_NODE_TYPE, json!({ "url": format!("{scheme}host/mcp") }));
+            assert!(
+                validate_mcp_config(MCP_NODE_TYPE, &cfg).is_err(),
+                "{scheme} must be refused"
+            );
+        }
+    }
+
+    /// URL schemes are case-insensitive per RFC 3986. Refusing `HTTPS://`
+    /// would be a false rejection of a perfectly valid config.
+    #[test]
+    fn mcp_url_scheme_check_is_case_insensitive() {
+        let upper = mcp_cfg(
+            MCP_NODE_TYPE,
+            json!({ "url": "HTTPS://mcp.example.com/mcp" }),
+        );
+        assert!(validate_mcp_config(MCP_NODE_TYPE, &upper).is_ok());
+    }
+
+    /// An `mcp` block on a tool that is not an MCP tool is dead config the
+    /// operator believes is live. Same failure class as a misplaced
+    /// `memory_mode`, so it gets the same fail-closed treatment.
+    #[test]
+    fn mcp_block_on_a_non_mcp_node_type_is_rejected() {
+        let cfg = mcp_cfg(
+            "http_request",
+            json!({ "url": "https://mcp.example.com/mcp" }),
+        );
+        let err = validate_mcp_config("http_request", &cfg).unwrap_err();
+        assert!(
+            err.contains("http_request"),
+            "the message must name the node type: {err}"
+        );
+    }
+
+    /// The overwhelmingly common case must stay untouched: no `mcp` key, no
+    /// opinion.
+    #[test]
+    fn a_tool_without_an_mcp_block_is_unaffected() {
+        let cfg = json!({ "name": "t", "node_type": "http_request" });
+        assert!(validate_mcp_config("http_request", &cfg).is_ok());
+    }
 
     fn cfg(node_type: &str, mode: Value) -> ToolConfiguration {
         serde_json::from_value(json!({

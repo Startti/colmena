@@ -79,8 +79,8 @@ impl Graph {
     pub fn validate(&self) -> Result<(), crate::dag_engine::domain::error::DagError> {
         use crate::dag_engine::domain::error::DagError;
         use crate::dag_engine::domain::tool_configuration::{
-            memory_backend_missing_reason, parse_node_schema, validate_memory_mode, MemoryMode,
-            NodeSchema,
+            memory_backend_missing_reason, parse_node_schema, validate_mcp_config,
+            validate_memory_mode, MemoryMode, NodeSchema,
         };
 
         for node_id in self.nodes.keys() {
@@ -146,6 +146,25 @@ impl Graph {
                     }
                 }
 
+                // Reject a misconfigured MCP block at load (R3.1/R3.2): no url,
+                // a non-HTTPS url, or an `mcp` block on a tool that is not an
+                // MCP tool. Each of these otherwise fails silently — the
+                // operator sees "the model ignored my server", not a config
+                // error. Reads raw JSON, like the memory_mode checks above.
+                {
+                    let cfg_node_type = tool_cfg
+                        .get("node_type")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    validate_mcp_config(cfg_node_type, tool_cfg).map_err(|reason| {
+                        DagError::InvalidToolSchema {
+                            node_id: node_id.clone(),
+                            tool_name: tool_name.clone(),
+                            reason,
+                        }
+                    })?;
+                }
+
                 let Some(schema_value) = tool_cfg.get("node_schema") else {
                     continue;
                 };
@@ -173,6 +192,53 @@ impl Graph {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn graph_with_tool(tool: Value) -> Graph {
+        serde_json::from_value(json!({
+            "nodes": { "agent": { "type": "llm_call", "config": {
+                "tool_configurations": { "docs": tool }
+            }}},
+            "edges": []
+        }))
+        .unwrap()
+    }
+
+    /// R3.1 — a bad MCP config must fail at LOAD. Deferring it to connect time
+    /// turns a typo into a runtime mystery.
+    #[test]
+    fn graph_validate_fails_missing_mcp_url() {
+        let g = graph_with_tool(json!({ "name": "docs", "node_type": "mcp" }));
+        let err = g.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("mcp.url"),
+            "must name the missing field: {err}"
+        );
+        assert!(err.contains("docs"), "must name the tool alias: {err}");
+        assert!(err.contains("agent"), "must name the node: {err}");
+    }
+
+    /// R3.2 — plaintext is refused at load, and the message quotes the URL so
+    /// the operator can see exactly what to change.
+    #[test]
+    fn graph_validate_rejects_http_scheme() {
+        let g = graph_with_tool(json!({
+            "name": "docs", "node_type": "mcp",
+            "mcp": { "url": "http://mcp.example.com/mcp" }
+        }));
+        let err = g.validate().unwrap_err().to_string();
+        assert!(err.contains("HTTPS"), "{err}");
+        assert!(err.contains("http://mcp.example.com/mcp"), "{err}");
+    }
+
+    /// The happy path must still load, defaults and all.
+    #[test]
+    fn graph_validate_accepts_a_well_formed_mcp_tool() {
+        let g = graph_with_tool(json!({
+            "name": "docs", "node_type": "mcp",
+            "mcp": { "url": "https://mcp.deepwiki.com/mcp" }
+        }));
+        assert!(g.validate().is_ok());
+    }
 
     fn graph_with_node_id(id: &str) -> Graph {
         let json = json!({
