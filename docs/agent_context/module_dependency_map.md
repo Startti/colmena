@@ -301,7 +301,7 @@
 #### `src/libs/colmena/src/dag_engine/domain/tool_configuration.rs`
 - Module: `dag_engine::domain::tool_configuration`
 - **Used by (8)**: `src/libs/colmena/src/dag_engine/domain/graph.rs`, `src/libs/colmena/src/dag_engine/infrastructure/dag_tool_executor.rs`, `src/libs/colmena/src/dag_engine/infrastructure/node_schema_merge.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/for_each.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/describe_tool.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/secure_suspend.rs`, `src/libs/colmena/src/dag_engine/infrastructure/registry.rs`
-- Depends on (1): `llm::domain`
+- Depends on (2): `llm::domain`, `llm::domain::mcp`
 
 #### `src/libs/colmena/src/dag_engine/domain/toolkit_node.rs`
 - Module: `dag_engine::domain::toolkit_node`
@@ -1387,7 +1387,7 @@
 
 #### `src/libs/colmena/src/llm/domain/mcp.rs`
 - Module: `llm::domain::mcp`
-- **Used by (1)**: `src/libs/colmena/src/llm/infrastructure/mcp_client/rmcp_http_client.rs`
+- **Used by (2)**: `src/libs/colmena/src/dag_engine/domain/tool_configuration.rs`, `src/libs/colmena/src/llm/infrastructure/mcp_client/rmcp_http_client.rs`
 - Depends on (0): — (no intra-crate imports)
 
 #### `src/libs/colmena/src/llm/domain/memory.rs`

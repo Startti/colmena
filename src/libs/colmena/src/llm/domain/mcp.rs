@@ -15,9 +15,11 @@
 //! they stay deterministic and unit-testable without any ambient state.
 
 use std::collections::BTreeMap;
+use std::fmt;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -116,7 +118,8 @@ pub struct McpToolResult {
 /// Transport used to reach an MCP server. Only remote transports are
 /// supported — no stdio/process-spawn code path exists anywhere in this
 /// crate (spec R2.1).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum McpTransport {
     #[default]
     StreamableHttp,
@@ -129,13 +132,40 @@ pub enum McpTransport {
 /// resolved secret values (design §7, spec R3.6/G3) — the resolved values
 /// are read at connect time and never stored on this struct's cache-key
 /// representation.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct McpServerConfig {
     pub url: String,
     pub transport: McpTransport,
     pub header_refs: BTreeMap<String, String>,
     pub timeout: Duration,
     pub cache_ttl: Duration,
+}
+
+/// Manual `Debug` so header values never reach a log line (G3).
+///
+/// `header_refs` is meant to hold unresolved references, but nothing stops an
+/// operator from pasting a literal token into the graph JSON — so redaction
+/// must not depend on recognising which values are secret. Every value is
+/// replaced unconditionally. Header NAMES survive, because an operator
+/// debugging authentication needs to know which headers were sent, and a name
+/// is not a credential.
+impl fmt::Debug for McpServerConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("McpServerConfig")
+            .field("url", &self.url)
+            .field("transport", &self.transport)
+            .field(
+                "header_refs",
+                &self
+                    .header_refs
+                    .keys()
+                    .map(|name| (name.as_str(), "***"))
+                    .collect::<BTreeMap<_, _>>(),
+            )
+            .field("timeout", &self.timeout)
+            .field("cache_ttl", &self.cache_ttl)
+            .finish()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -387,6 +417,52 @@ mod error_variant_tests {
         assert!(!is_model_correctable(&McpError::InvalidConfig {
             detail: "url must be https".into(),
         }));
+    }
+}
+
+#[cfg(test)]
+mod config_tests {
+    use super::*;
+
+    /// G3 — `header_refs` normally holds unresolved references, but nothing
+    /// stops an operator from pasting a literal token into the graph JSON.
+    /// A derived `Debug` would then print it into any log line that formats
+    /// the config. Values are redacted; NAMES are kept, because an operator
+    /// debugging auth needs to see which header was sent.
+    #[test]
+    fn mcp_server_config_debug_redacts_header_values() {
+        let mut header_refs = BTreeMap::new();
+        header_refs.insert(
+            "Authorization".to_string(),
+            "Bearer sk-live-SECRET".to_string(),
+        );
+        header_refs.insert("X-Api-Key".to_string(), "$DYNAMIC".to_string());
+        let cfg = McpServerConfig {
+            url: "https://mcp.example.com/mcp".to_string(),
+            transport: McpTransport::StreamableHttp,
+            header_refs,
+            timeout: Duration::from_secs(30),
+            cache_ttl: Duration::from_secs(300),
+        };
+
+        let rendered = format!("{cfg:?}");
+        assert!(
+            !rendered.contains("sk-live-SECRET"),
+            "a literal credential must never reach a log line: {rendered}"
+        );
+        assert!(
+            !rendered.contains("$DYNAMIC"),
+            "even a reference is redacted - the redaction must not depend on \
+             recognising which values are secret: {rendered}"
+        );
+        assert!(
+            rendered.contains("Authorization") && rendered.contains("X-Api-Key"),
+            "header NAMES stay visible so auth is debuggable: {rendered}"
+        );
+        assert!(
+            rendered.contains("mcp.example.com"),
+            "the url stays visible - it is not the secret: {rendered}"
+        );
     }
 }
 
