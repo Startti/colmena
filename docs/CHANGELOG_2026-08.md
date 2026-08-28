@@ -1266,11 +1266,11 @@ página con un array enorme de tools pasa igual. Acotar eso corresponde a la sli
 exposición, que es donde `MCP_MAX_TOOLS_PER_SERVER` cobra su sentido real — hoy no lo lee
 nadie más, y el número se toma prestado a falta de uno mejor.
 
-Los bloques de contenido que no son texto —imágenes, recursos embebidos— **se siguen
-descartando en silencio** al plegar el resultado de un `tools/call`. Es el comportamiento que
-ya tenía develop, y se conserva acá porque manejarlos es trabajo de la slice siguiente: una
-tool MCP que responda con una imagen pierde ese contenido sin dejar rastro. Está dicho también
-en el doc comment de `mcp_result_from`, para que no dependa de leer el CHANGELOG.
+Los bloques de contenido que no son texto —imágenes, recursos embebidos— **se seguían
+descartando en silencio** al plegar el resultado de un `tools/call`. Era el comportamiento que
+ya tenía develop, y se conservó en esta slice porque manejarlos era trabajo de la siguiente.
+**Corregido en §23** — ya no aplica: hoy cada bloque se convierte en un placeholder con
+nombre.
 
 Y un servidor genuinamente mudo —que acepta la conexión, nunca responde
 y nunca resetea— traba de forma permanente el único worker compartido de rmcp. Cada llamada
@@ -1323,3 +1323,62 @@ cambia el contenido de `docProps/core.xml` dentro de los archivos `.xlsx` genera
 afectado.
 
 **Estado.** done.
+
+## 23. Los bloques no-texto de un `tools/call` ya no se pierden en silencio (6/9)
+
+Al plegar el resultado de un `tools/call` a la única `String` que puede llevar un mensaje de
+tool-result, el cliente MCP se quedaba solo con los bloques `Text` y **descartaba el resto sin
+dejar rastro** (`.filter_map` sobre `ContentBlock::Text`). Una tool MCP que respondiera con una
+imagen, audio o un recurso binario entregaba una respuesta truncada que el modelo leía como
+completa — que es peor que perder el contenido: lo perdía sin que nadie pudiera notarlo.
+
+**Cambio.** Nueva función `content_block_to_text` que cubre las cinco variantes de
+`ContentBlock` y convierte cada una en un placeholder **con nombre y acotado**:
+
+| Variante | Resultado |
+|---|---|
+| `Text` | verbatim, sin pérdida |
+| `Image` / `Audio` | `[image content omitted: image/png (N base64 bytes)]` |
+| `Resource` + `TextResourceContents` | verbatim, sin pérdida (es contenido real, solo entregado bajo una uri) |
+| `Resource` + `BlobResourceContents` | `[resource content omitted: <uri>, <mime>, N base64 bytes]` |
+| `ResourceLink` | `[resource link omitted: <uri> (<name>)]` |
+
+El placeholder nombra **qué** se omitió, no solo que algo se omitió: quien lee el resultado
+puede decidir si le importa. Y **nunca** incluye el payload codificado — un blob base64
+inyectado en el contexto del modelo cuesta una fortuna en tokens y no dice nada; el mime type y
+el tamaño dicen todo lo útil.
+
+**El techo.** Cada campo que el placeholder interpola —mime type, uri, nombre del recurso— lo
+controla el **servidor**. Sin un tope, "te digo qué se omitió" se convierte en el mismo flood
+de contexto que la omisión venía a evitar: un `uri` de un megabyte entra entero. Por eso todo
+bloque renderizado —incluido un bloque de texto, que es igual de controlado por el servidor—
+pasa por un techo de `MCP_MAX_CONTENT_BLOCK_BYTES` (4 KB) aplicado con `head_truncate`, el
+mismo primitivo compartido que ya usa el resto del módulo, en vez de una variante nueva. Un
+bloque recortado lo dice: conserva el marcador `[truncated: showing first N of M bytes]`, así
+que nunca encoge en silencio.
+
+La constante vive por ahora en `rmcp_http_client.rs`; su lugar natural es junto al resto de los
+`MCP_MAX_*` en `llm::domain::mcp`, y se mueve allá cuando la slice de exposición toque ese
+archivo.
+
+`ContentBlock` y `ResourceContents` son `#[non_exhaustive]` en `rmcp`, así que ambos matches
+llevan un brazo catch-all. Hoy está muerto —las cinco variantes actuales están cubiertas— pero
+evita que el crate deje de compilar el día que `rmcp` agregue una sexta, con la misma política
+de placeholder honesto.
+
+**Tests.** Tres unitarios puros sobre `content_block_to_text` (cada placeholder nombra lo
+elidido, empieza con `[`, se mantiene acotado y jamás reenvía el base64; el recurso de texto
+embebido se preserva sin pérdida; y un servidor hostil que devuelve campos de 64 KB no logra
+pasar el techo — verificado neutralizando el cap, que deja escapar 131 KB) y uno de protocolo
+con wiremock: un `tools/call` que
+mezcla un bloque de texto y uno de imagen debe surfacear los dos —el texto sin pérdida, la
+imagen como placeholder— y no filtrar el base64. Verificados en rojo antes de implementar.
+
+**Alcance.** Contenido enteramente dentro de `rmcp_http_client.rs`, el único archivo que puede
+nombrar tipos de `rmcp`. Sin cambios en `llm/domain/mcp.rs` ni en la capa de aplicación, sin
+dependencias nuevas, sin cambios de API pública → ADP no afectado.
+
+Fuera de alcance, para la slice siguiente: la matriz de casos de protocolo
+(`initialize` malformado, 0/1/N tools) y los dos tests de red contra servidores MCP reales.
+
+**Estado.** done (slice 6 de 9).

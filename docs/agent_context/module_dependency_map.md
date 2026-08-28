@@ -6,7 +6,7 @@
 **How to use (for the exploration/spec phase):** before opening files to assess a change, look up the target file below. **Used by** is its blast radius — the files that break if you change its public surface. **Depends on** is what it needs. Start by reading only those, not the whole repo.
 
 - Files indexed: **365**
-- Modules with at least one importer: **165**
+- Modules with at least one importer: **166**
 
 ## Blast-radius ranking (change these with the most care)
 
@@ -1412,7 +1412,7 @@
 
 #### `src/libs/colmena/src/llm/domain/text_bounds.rs`
 - Module: `llm::domain::text_bounds`
-- **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
+- **Used by (1)**: `src/libs/colmena/src/llm/infrastructure/mcp_client/rmcp_http_client.rs`
 - Depends on (0): — (no intra-crate imports)
 
 #### `src/libs/colmena/src/llm/domain/tool_executor.rs`
@@ -1558,7 +1558,7 @@
 #### `src/libs/colmena/src/llm/infrastructure/mcp_client/rmcp_http_client.rs`
 - Module: `llm::infrastructure::mcp_client::rmcp_http_client`
 - **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
-- Depends on (1): `llm::domain::mcp`
+- Depends on (2): `llm::domain::mcp`, `llm::domain::text_bounds`
 
 #### `src/libs/colmena/src/llm/infrastructure/message_summarizer/llm_message_summarizer.rs`
 - Module: `llm::infrastructure::message_summarizer::llm_message_summarizer`

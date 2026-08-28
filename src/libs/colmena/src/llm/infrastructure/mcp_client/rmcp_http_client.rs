@@ -43,7 +43,8 @@ use async_trait::async_trait;
 use rmcp::model::{
     CallToolRequest, CallToolRequestParams, CallToolResult, CancelledNotificationParam,
     ClientCapabilities, ClientInfo, ClientRequest, ContentBlock, Implementation, ListToolsRequest,
-    ListToolsResult, Notification, PaginatedRequestParams, RequestId, ServerResult, Tool,
+    ListToolsResult, Notification, PaginatedRequestParams, RequestId, ResourceContents,
+    ServerResult, Tool,
 };
 use rmcp::service::{Peer, PeerRequestOptions, RoleClient, RunningService};
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
@@ -55,6 +56,7 @@ use crate::llm::domain::mcp::{
     McpClientPort, McpError, McpServerConfig, McpToolDescriptor, McpToolResult,
     MCP_MAX_TOOLS_PER_SERVER,
 };
+use crate::llm::domain::text_bounds::head_truncate;
 
 /// Backoff between the single retry attempt and the original one (R2.5).
 /// Small and fixed — this is not exponential backoff for a retry budget of
@@ -352,21 +354,94 @@ fn descriptor_from_tool(tool: &Tool) -> McpToolDescriptor {
     }
 }
 
+/// Renders one content block as the text a tool-result message can carry.
+///
+/// Text is preserved verbatim. Everything else becomes a named placeholder
+/// rather than being dropped: the model must be able to tell that an image,
+/// an audio clip or a binary resource was part of the answer, and what it
+/// was, even though this transport can only carry text. Silently discarding
+/// them produces a truncated answer that reads as complete — the failure mode
+/// this function exists to prevent.
+///
+/// Placeholders deliberately never embed the encoded payload. A base64 blob
+/// forwarded into the model's context would cost a fortune in tokens and say
+/// nothing; the mime type and byte count say everything useful about it.
+/// Ceiling, in bytes, for a single rendered content block.
+///
+/// A placeholder interpolates strings the SERVER controls — mime type, uri,
+/// resource name. Without a ceiling a hostile or merely sloppy server turns
+/// "omitted, here is what it was" into an arbitrarily large context flood,
+/// which is exactly the failure the placeholder was meant to avoid. Text
+/// blocks are bounded by the same ceiling for the same reason.
+///
+/// This belongs alongside the other `MCP_MAX_*` caps in
+/// `llm::domain::mcp`; it lives here until the exposure slice next touches
+/// that file.
+const MCP_MAX_CONTENT_BLOCK_BYTES: usize = 4 * 1024;
+
+fn content_block_to_text(block: ContentBlock) -> String {
+    let rendered = render_content_block(block);
+    if rendered.len() > MCP_MAX_CONTENT_BLOCK_BYTES {
+        head_truncate(&rendered, MCP_MAX_CONTENT_BLOCK_BYTES)
+    } else {
+        rendered
+    }
+}
+
+/// The unbounded rendering. Every caller must go through
+/// [`content_block_to_text`], which applies the ceiling.
+fn render_content_block(block: ContentBlock) -> String {
+    match block {
+        ContentBlock::Text(text) => text.text,
+        ContentBlock::Image(img) => format!(
+            "[image content omitted: {} ({} base64 bytes)]",
+            img.mime_type,
+            img.data.len()
+        ),
+        ContentBlock::Audio(audio) => format!(
+            "[audio content omitted: {} ({} base64 bytes)]",
+            audio.mime_type,
+            audio.data.len()
+        ),
+        ContentBlock::Resource(embedded) => match &embedded.resource {
+            // An embedded TEXT resource is real content, not something to
+            // elide — it is exactly what the caller asked for, delivered
+            // under a uri instead of inline.
+            ResourceContents::TextResourceContents { .. } => embedded.get_text(),
+            ResourceContents::BlobResourceContents {
+                uri,
+                mime_type,
+                blob,
+                ..
+            } => format!(
+                "[resource content omitted: {uri}, {}, {} base64 bytes]",
+                mime_type.as_deref().unwrap_or("unknown mime type"),
+                blob.len()
+            ),
+            // `ResourceContents` is `#[non_exhaustive]` too.
+            _ => "[resource content omitted: unrecognized resource shape]".to_string(),
+        },
+        ContentBlock::ResourceLink(link) => {
+            format!("[resource link omitted: {} ({})]", link.uri, link.name)
+        }
+        // `ContentBlock` is `#[non_exhaustive]` in `rmcp` — this arm is dead
+        // today, since all five current variants are matched above, but it
+        // keeps the crate compiling rather than failing to build the day
+        // `rmcp` adds a sixth. Same honest-placeholder policy as the rest.
+        _ => "[content block omitted: unrecognized block type]".to_string(),
+    }
+}
+
 /// Folds a tool result's content blocks into the single `String` a tool-result
 /// message carries.
 ///
-/// Text blocks are preserved losslessly; **every other block type is silently
-/// discarded** — develop's behavior, kept here because handling them is the
-/// next slice's job (R2.6). Until then an MCP tool that answers with an image
-/// or an embedded resource loses that content with no trace.
+/// Every block contributes exactly one line via [`content_block_to_text`], so
+/// no part of a tool's answer is lost without a trace.
 fn mcp_result_from(result: CallToolResult) -> McpToolResult {
     let content = result
         .content
         .into_iter()
-        .filter_map(|block| match block {
-            ContentBlock::Text(text) => Some(text.text),
-            _ => None,
-        })
+        .map(content_block_to_text)
         .collect::<Vec<_>>()
         .join("\n");
     McpToolResult {
@@ -1031,9 +1106,181 @@ mod tests {
         );
     }
 
-    // Not covered here, by design: content-block conversion beyond text
-    // (R2.6), the malformed-initialize and 0/1/N-tools protocol cases
-    // (R2.7), and the live network tests against real MCP servers. Those
-    // ship in the next slice, which is where `mcp_result_from` stops
-    // discarding non-text blocks.
+    /// R2.6 — every non-text content block becomes a named, bounded
+    /// placeholder instead of being silently dropped. Pure unit test against
+    /// `content_block_to_text`, no network involved.
+    #[test]
+    fn every_non_text_content_block_becomes_a_named_placeholder() {
+        use rmcp::model::ResourceContents;
+
+        let cases: Vec<(ContentBlock, &str)> = vec![
+            (ContentBlock::audio("QUJD", "audio/wav"), "audio/wav"),
+            (
+                ContentBlock::resource(ResourceContents::BlobResourceContents {
+                    uri: "file:///report.pdf".to_string(),
+                    mime_type: Some("application/pdf".to_string()),
+                    blob: "QUJD".to_string(),
+                    meta: None,
+                }),
+                "application/pdf",
+            ),
+            (
+                ContentBlock::resource_link(rmcp::model::Resource::new(
+                    "https://example.com/doc",
+                    "doc",
+                )),
+                "https://example.com/doc",
+            ),
+        ];
+
+        for (block, must_name) in cases {
+            let text = super::content_block_to_text(block);
+            assert!(
+                text.contains(must_name),
+                "the placeholder must name what was elided; got: {text}"
+            );
+            assert!(
+                text.starts_with('['),
+                "a placeholder must be visibly a placeholder, not passable as content: {text}"
+            );
+            assert!(
+                text.len() < 200,
+                "a placeholder must stay bounded, got {} bytes",
+                text.len()
+            );
+            assert!(
+                !text.contains("QUJD"),
+                "the encoded payload must never be forwarded: {text}"
+            );
+        }
+    }
+
+    /// R2.6 — an embedded TEXT resource is real content, not something to
+    /// elide: it must be preserved losslessly, unlike its blob sibling.
+    #[test]
+    fn embedded_text_resource_is_preserved_not_placeholdered() {
+        let text = super::content_block_to_text(ContentBlock::embedded_text(
+            "file:///notes.md",
+            "the actual note body",
+        ));
+        assert_eq!(text, "the actual note body");
+    }
+
+    /// R2.6 — protocol-level proof: a `tools/call` response mixing a text
+    /// block and an image block must surface both in `call_tool`'s output —
+    /// the text losslessly, the image as a named placeholder — never drop
+    /// the image or forward its raw base64 payload.
+    #[tokio::test]
+    async fn rmcp_call_tool_non_text_block_becomes_placeholder_not_silently_dropped() {
+        let server = MockServer::start().await;
+        struct ImageMock {
+            seen: Arc<Mutex<Vec<String>>>,
+        }
+        impl Respond for ImageMock {
+            fn respond(&self, request: &Request) -> ResponseTemplate {
+                if request.method.as_str() == "GET" {
+                    return ResponseTemplate::new(405);
+                }
+                self.seen
+                    .lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&request.body).to_string());
+                let msg: ClientJsonRpcMessage = request.body_json().unwrap();
+                let ClientJsonRpcMessage::Request(req) = msg else {
+                    return ResponseTemplate::new(202);
+                };
+                let id = req.id.clone();
+                match req.request.method() {
+                    "initialize" => {
+                        let mut capabilities = ServerCapabilities::default();
+                        capabilities.tools = Some(ToolsCapability::default());
+                        let body = ServerJsonRpcMessage::response(
+                            ServerResult::InitializeResult(InitializeResult::new(capabilities)),
+                            id,
+                        );
+                        ResponseTemplate::new(200).set_body_json(&body)
+                    }
+                    "tools/call" => {
+                        let result = CallToolResult::success(vec![
+                            ContentBlock::text("here is the chart:"),
+                            ContentBlock::image("base64data==", "image/png"),
+                        ]);
+                        let body = ServerJsonRpcMessage::response(
+                            ServerResult::CallToolResult(result),
+                            id,
+                        );
+                        ResponseTemplate::new(200).set_body_json(&body)
+                    }
+                    other => panic!("unexpected method: {other}"),
+                }
+            }
+        }
+        Mock::given(wiremock::matchers::any())
+            .respond_with(ImageMock {
+                seen: Arc::new(Mutex::new(Vec::new())),
+            })
+            .mount(&server)
+            .await;
+
+        let cfg = config(server.uri(), 5);
+        let client = RmcpHttpClient::connect_for_test("image-server", &cfg)
+            .await
+            .expect("connect must succeed");
+        let result = client
+            .call_tool("render", json!({}))
+            .await
+            .expect("call_tool must succeed");
+
+        assert!(
+            result.content.contains("here is the chart:"),
+            "the text block must survive losslessly: {}",
+            result.content
+        );
+        assert!(
+            result.content.contains("image/png") && result.content.contains("omitted"),
+            "the image block must become a named, bounded placeholder, not vanish: {}",
+            result.content
+        );
+        assert!(
+            !result.content.contains("base64data=="),
+            "the raw base64 payload must never be forwarded verbatim into the model's context"
+        );
+    }
+
+    /// R2.6 — the placeholder's own bound. Every field it interpolates is
+    /// SERVER-controlled, so "named" must not become "unbounded": a server
+    /// handing back a megabyte-long uri or resource name would otherwise turn
+    /// an elision into the very context flood the elision exists to prevent.
+    #[test]
+    fn a_hostile_server_cannot_make_a_placeholder_unbounded() {
+        let flood = "A".repeat(64 * 1024);
+
+        let cases = vec![
+            ContentBlock::resource_link(rmcp::model::Resource::new(
+                format!("https://example.com/{flood}"),
+                flood.clone(),
+            )),
+            ContentBlock::image("QUJD", flood.clone()),
+            // A text block is server-controlled too, and bounded the same way.
+            ContentBlock::text(flood.clone()),
+        ];
+
+        for block in cases {
+            let text = super::content_block_to_text(block);
+            assert!(
+                text.len() <= super::MCP_MAX_CONTENT_BLOCK_BYTES,
+                "a server-controlled field escaped the ceiling: {} bytes",
+                text.len()
+            );
+            assert!(
+                text.contains("[truncated: showing first"),
+                "an elided block must say it was elided, not silently shrink: {}",
+                &text[..text.len().min(120)]
+            );
+        }
+    }
+
+    // Not covered here, by design: the malformed-initialize and 0/1/N-tools
+    // protocol cases (R2.7), and the live network tests against real MCP
+    // servers. Those ship in the next slice.
 }
