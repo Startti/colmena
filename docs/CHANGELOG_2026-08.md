@@ -1536,3 +1536,36 @@ siguientes.
 
 **Estado.** done.
 
+## 28. Cache TTL del catálogo de tools MCP
+
+Bajo lazy loading la etapa de exposición corre **en cada iteración del loop del agente**. Sin cache,
+cada turno paga un round-trip `tools/list` por un catálogo que casi nunca cambia.
+`McpConnectionRegistry::tools` lo sirve desde cache mientras esté dentro de `cache_ttl`.
+
+**Single-flight, no solo cache.** Sobre una entrada fría o recién vencida, los turnos concurrentes
+dispararían cada uno su propio `tools/list` — una estampida contra el servidor justo en el momento
+en que el cache rota. Verificado neutralizando el lock: 16 lectores concurrentes producen **16**
+`tools/list`; con él, **uno**. El re-chequeo dentro del lock es igual de necesario: sin él el lock
+serializaría los fetches y los haría todos igual.
+
+El lock de fetch es **separado** del de creación de conexión, para que refrescar un catálogo nunca
+quede serializado detrás de un handshake ajeno.
+
+**Un `tools/list` fallido no se cachea**, por la misma razón que un connect fallido: un mal momento
+dejaría el catálogo del servidor en blanco hasta que venciera el TTL.
+
+**`tokio::time::Instant`, no `SystemTime`.** Es monótono, así que un salto de reloj de pared
+—corrección NTP, un contenedor suspendido que despierta— no puede hacer que una entrada parezca más
+vieja o más nueva de lo que es. Y es virtualizable: la expiración se prueba **adelantando un reloj
+pausado**, no durmiendo. Difiere del precedente de `search_use_case`, que usa `Utc::now()` y por eso
+no puede testear expiración sin esperar de verdad. (`test-util` se agregó a las dev-dependencies de
+`tokio`; el `Cargo.lock` no cambió — es solo un flag de feature.)
+
+La comparación es `elapsed() >= ttl`, así que **`cache_ttl: 0` significa "nunca cachear"**, no
+"cachear para siempre". Un TTL cero es una elección legítima del operador y no debe leerse como un
+acierto permanente accidental.
+
+**Alcance.** Aditivo sobre el registry, sin red, sin API pública cambiada.
+
+**Estado.** done.
+
