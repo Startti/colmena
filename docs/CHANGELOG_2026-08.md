@@ -1497,3 +1497,42 @@ determinista — estaría afirmando una propiedad de `BTreeMap`, no de este mód
 comentario en vez de simulado con un test vacío.
 
 **Alcance.** Módulo nuevo, aditivo, puro — sin red, sin estado, sin API pública cambiada.
+
+## 27. Pool de conexiones MCP: una conexión por identidad de servidor
+
+Una conexión MCP es cara: handshake TCP+TLS más un round-trip JSON-RPC `initialize` antes de poder
+listar un solo tool. El `DagToolExecutor` se construye **de nuevo en cada ejecución de `llm_call`**,
+así que la conexión no puede vivir ahí — cada turno de cada agente pagaría el handshake completo.
+`McpConnectionRegistry` sobrevive a las ejecuciones y devuelve el mismo cliente para la misma
+`McpServerKey`.
+
+**El lock por clave no es defensivo, es la razón de ser del módulo.** Sin él, N llamadores que
+llegan a la vez sobre una clave fría fallan todos el fast path y cada uno abre su propia conexión:
+N handshakes y N-1 conexiones huérfanas. Verificado quitándolo: 16 tareas concurrentes producen 16
+handshakes; con el lock, **uno**. El re-chequeo dentro del lock es igual de necesario — sin él el
+lock serializaría los handshakes pero los haría todos igual.
+
+**Un connect fallido no se cachea.** Un servidor caído en el primer intento tiene que estar
+disponible en el turno siguiente; cachear el fallo convertiría una caída transitoria en permanente
+para toda la vida del proceso.
+
+**`McpConnector` es un puerto, no una llamada directa a `RmcpHttpClient::connect`.** Eso permite
+probar el pooling por lo que realmente es —un problema de concurrencia y cacheo— sin abrir un
+socket. Wiremock prueba que hablamos el protocolo; no puede probar que dos llamadores compitiendo
+por una clave fría produzcan un solo handshake.
+
+**Desviación deliberada de `pool_registry`:** ahí las entradas de `creation_locks` se borran tras
+crear, porque esa registry keyea sobre URLs arbitrarias de base de datos y debe acotar el
+crecimiento. Acá las claves son servidores MCP declarados por el operador —un puñado, por toda la
+vida del proceso— y borrar abriría una ventana donde un waiter tardío y un llamador nuevo sostienen
+dos mutexes distintos para la misma clave. Es inofensivo (el re-chequeo lo atrapa), pero vuelve más
+difícil razonar sobre la garantía del lock a cambio de nada a esta cardinalidad.
+
+Todavía **no hay singleton de proceso**: nada lo dereferencia aún, así que el `Lazy` llega con su
+cableado. El cache TTL de `tools/list` y la resolución de headers vía secure values son las piezas
+siguientes.
+
+**Alcance.** Módulo nuevo, aditivo, sin red y sin API pública cambiada.
+
+**Estado.** done.
+
