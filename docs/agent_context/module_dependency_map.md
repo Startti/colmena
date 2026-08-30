@@ -5,7 +5,7 @@
 
 **How to use (for the exploration/spec phase):** before opening files to assess a change, look up the target file below. **Used by** is its blast radius — the files that break if you change its public surface. **Depends on** is what it needs. Start by reading only those, not the whole repo.
 
-- Files indexed: **365**
+- Files indexed: **367**
 - Modules with at least one importer: **166**
 
 ## Blast-radius ranking (change these with the most care)
@@ -317,6 +317,16 @@
 - Module: `dag_engine::infrastructure::dag_tool_executor`
 - **Used by (3)**: `src/libs/colmena/src/dag_engine/infrastructure/node_schema_merge.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm.rs`, `src/libs/colmena/src/dag_engine/infrastructure/registry.rs`
 - Depends on (23): `dag_engine::application::ports`, `dag_engine::application::secure_value_service`, `dag_engine::domain::events`, `dag_engine::domain::node`, `dag_engine::domain::observer`, `dag_engine::domain::tool_configuration`, `dag_engine::domain::toolkit_node`, `dag_engine::infrastructure::nodes::api_explorer`, `dag_engine::infrastructure::nodes::echo_toolkit`, `dag_engine::infrastructure::nodes::llm_synthetic_tools`, `dag_engine::infrastructure::nodes::llm_synthetic_tools::attachment_run_python`, `dag_engine::infrastructure::nodes::llm_synthetic_tools::data_run_python`, `dag_engine::infrastructure::nodes::llm_synthetic_tools::gdocs_tools`, `dag_engine::infrastructure::nodes::llm_synthetic_tools::gsheets_inspect_guard`, `dag_engine::infrastructure::nodes::llm_synthetic_tools::gsheets_tools`, `dag_engine::infrastructure::nodes::llm_synthetic_tools::sql_bulk_tools`, `llm::domain`, `llm::domain::attachments`, `llm::domain::attachments::attachment_registry`, `llm::domain::tools`, `llm::infrastructure::persistence::in_memory_conversation_repository`, `skills::domain`, `storage::domain`
+
+#### `src/libs/colmena/src/dag_engine/infrastructure/mcp_registry/key.rs`
+- Module: `dag_engine::infrastructure::mcp_registry::key`
+- **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
+- Depends on (1): `llm::domain::mcp`
+
+#### `src/libs/colmena/src/dag_engine/infrastructure/mcp_registry/mod.rs`
+- Module: `dag_engine::infrastructure::mcp_registry`
+- **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
+- Depends on (0): — (no intra-crate imports)
 
 #### `src/libs/colmena/src/dag_engine/infrastructure/mod.rs`
 - Module: `dag_engine::infrastructure`
@@ -1387,7 +1397,7 @@
 
 #### `src/libs/colmena/src/llm/domain/mcp.rs`
 - Module: `llm::domain::mcp`
-- **Used by (2)**: `src/libs/colmena/src/dag_engine/domain/tool_configuration.rs`, `src/libs/colmena/src/llm/infrastructure/mcp_client/rmcp_http_client.rs`
+- **Used by (3)**: `src/libs/colmena/src/dag_engine/domain/tool_configuration.rs`, `src/libs/colmena/src/dag_engine/infrastructure/mcp_registry/key.rs`, `src/libs/colmena/src/llm/infrastructure/mcp_client/rmcp_http_client.rs`
 - Depends on (0): — (no intra-crate imports)
 
 #### `src/libs/colmena/src/llm/domain/memory.rs`

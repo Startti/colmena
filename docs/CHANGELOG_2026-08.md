@@ -1462,3 +1462,38 @@ sobreviven: quien depura autenticación necesita verlos, y un nombre no es una c
 MCP no ve diferencia (G2).
 
 **Estado.** done (slice 8 de 9).
+
+## 26. Identidad de conexión MCP (`McpServerKey`)
+
+Segunda pieza del lado `dag_engine`. La anterior declaraba qué config es válido; esta define
+**quién es un servidor y cuándo dos configuraciones son el mismo servidor**. El registry que la
+consume para reusar conexiones llega en la slice siguiente.
+
+**`McpServerKey` = sha256(url ‖ transport ‖ fingerprint de las REFERENCIAS de header).** Nunca de
+los valores resueltos (R3.6). La distinción es el punto entero: dos grafos que apuntan la misma
+referencia al mismo secreto comparten conexión, y **rotar el secreto no fragmenta el pool**. Una
+clave construida sobre valores resueltos además significaría que la credencial en texto plano
+decide la ubicación en el cache — a un accidente de quedar logueada como cache key.
+
+**Cada campo se absorbe con un prefijo de longitud (`u64`), no separado por un byte.** La primera
+versión usaba `0x1F` como separador, asumiendo que no podía aparecer dentro de una URL, un nombre de
+header ni una referencia. Esa premisa es falsa: son strings escritos por el operador que salen del
+JSON del grafo, y JSON codifica cualquier byte, `\u001F` incluido. Con separadores planos, los dos
+headers `{"A":"1","B":"2"}` y el header unico `{"A":"1\u001FB\u001F2"}` producen **la misma
+preimagen** — dos conjuntos de credenciales distintos, una sola conexion del pool, y el segundo
+llamador mandando los headers del primero.
+
+El framing por longitud elimina la ambiguedad **por construccion**, en vez de asumir algo sobre los
+datos. Encontrado por el test `a_separator_byte_inside_a_header_cannot_forge_another_configs_identity`,
+que fallo contra la implementacion con separadores y pasa con el framing.
+
+La URL y el transporte también participan: cambiar cualquiera de los dos es otro servidor. Agregar
+un header, o intercambiar cuál string es el nombre y cuál la referencia, también cambia la identidad.
+
+El orden de los headers no cambia la clave, pero eso es **estructural, no verificado por un test**:
+`header_refs` es un `BTreeMap`, así que dos configs escritos en distinto orden ya son el mismo mapa
+antes de llegar al hash. Un test que los comparara no podría fallar con ninguna implementación
+determinista — estaría afirmando una propiedad de `BTreeMap`, no de este módulo. Se deja dicho en un
+comentario en vez de simulado con un test vacío.
+
+**Alcance.** Módulo nuevo, aditivo, puro — sin red, sin estado, sin API pública cambiada.
