@@ -114,7 +114,7 @@ de input **negativos**. Detalle y acción concreta en
 | # | Sev | Hallazgo | SDD change slug |
 |---|-----|----------|-----------------|
 | 13 | HIGH ⚖️ | `DagRunUseCase::execute()` público `unimplemented!()` + muerto — DECISIÓN | `dag-run-usecase-execute-deprecation` |
-| 18 | HIGH | Errores tragados mientras se reporta éxito (`extraction`, `crdt_doc_*`) | `synthetic-tools-partial-failure-reporting` |
+| 🟡 18 | HIGH | Errores tragados mientras se reporta éxito — **mitad A DONE** 2026-08-23 (`extraction` + `task_memory_writer`, que el audit no había registrado); mitades B/C (`crdt_doc_*`) → issues [#181](https://github.com/Startti/colmena/issues/181) / [#182](https://github.com/Startti/colmena/issues/182), congeladas con CRDT | `synthetic-tools-partial-failure-reporting` |
 | 25 | HIGH | Fail-open: status no-parseable → `DagRunStatus::Failed` silencioso | `dag-persistence-fail-open-observability` |
 | ✅ 30 | HIGH | ~~`python_node:211` imprime código de usuario a stdout (fuga secretos/PII)~~ | `dag-nodes-structured-logging-b05` — **DONE** 2026-08-20 (PRs #167/#168/PR3) |
 | 14 | MED | Violación hexagonal: `sql_execution_service` (app) → `infra::sql_ast` | `dag-sql-exec-layering-fix` |
@@ -204,7 +204,7 @@ de input **negativos**. Detalle y acción concreta en
 - **#37** (`documents`) `ListAssetsUseCase` muerto-pero-público: cablear el nodo o remover
 - **#45** (`crdt_documents`) stub GCS de CRDT: implementar o fallar-cerrado con error claro
 
-**Trigger:** retomar por PRIORIDAD 1 en orden de severidad — arrancar por los HIGH de `dag_engine` restantes (#18, #25; #30 ya cerrado), luego los MED de `gdocs` (#41-43). Los ⚖️ (#13/#37/#45) agruparlos en una ronda de decisiones aparte. Los tests de integración (`tests/*.rs`, 44 archivos) y `examples/` quedaron fuera del audit — pase opcional futuro (B04 ya encontró un test que siempre pasa, así que vale la pena).
+**Trigger:** retomar por PRIORIDAD 1 en orden de severidad — arrancar por los HIGH de `dag_engine` restantes (#25; #30 cerrado, #18 con su mitad A cerrada y B/C diferidas al descongelamiento de CRDT), luego los MED de `gdocs` (#41-43). Los ⚖️ (#13/#37/#45) agruparlos en una ronda de decisiones aparte. Los tests de integración (`tests/*.rs`, 44 archivos) y `examples/` quedaron fuera del audit — pase opcional futuro (B04 ya encontró un test que siempre pasa, así que vale la pena).
 
 ---
 

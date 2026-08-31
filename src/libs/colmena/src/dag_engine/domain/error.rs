@@ -27,6 +27,15 @@ pub enum DagError {
     #[error("Error de estado: {0}")]
     StateError(String),
 
+    /// El identificador de tarea recibido no tiene una forma válida.
+    ///
+    /// Se distingue de [`DagError::StateError`] a propósito: esto NO es un fallo
+    /// de infraestructura sino una entrada inválida, casi siempre un id que el
+    /// modelo inventó en el bucle del crítico. El llamador puede reportarlo como
+    /// una operación omitida en vez de abortar el run.
+    #[error("Identificador de tarea inválido: '{0}'")]
+    InvalidTaskId(String),
+
     /// El graph contiene un node ID que viola una invariante estructural
     /// (por ejemplo, contiene `/` reservado para path qualifiers).
     #[error("Invalid node id '{node_id}': {reason}")]

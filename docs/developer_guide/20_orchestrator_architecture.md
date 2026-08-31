@@ -643,6 +643,42 @@ Persiste resultados de tareas y mutaciones del critic (agregar/borrar tareas, su
 
 ---
 
+### Fallos al escribir memoria de tareas
+
+`task_memory_writer` e `information_extraction` comparten el mismo bloque de
+mutaciones (`nodes/task_mutations.rs`). Su política de errores distingue **dos
+clases que antes se confundían**:
+
+| Situación | Comportamiento |
+|---|---|
+| La base no responde (insert, delete o lectura) | El error **propaga** y el run falla |
+| No se puede leer la lista de tareas | El error **propaga** — una lista vacía es una afirmación sobre la sesión, y el orquestador rutea sobre ella |
+| Un id de `delete_tasks` no es un identificador válido | La operación se **omite y se reporta** en `extra_info.skipped_deletes`, más un `warn` estructurado; el run continúa |
+
+La distinción importa porque las dos cosas tienen causas distintas. Una base
+caída es un fallo de infraestructura y no hay nada sensato que hacer con una
+respuesta a medias. Un id mal formado, en cambio, es casi siempre un id que el
+modelo inventó en el bucle del crítico — algo rutinario — y matar el run entero
+por eso convierte una alucinación en una caída.
+
+Lo que **no** es aceptable en ninguno de los dos casos es el silencio. Hasta
+2026-08 el borrado usaba `let _ = repo.delete_task(...)` y la lectura de tareas
+usaba `if let Ok(tasks) = ...`, así que un borrado que nunca ocurrió se
+reportaba como aplicado y una base inalcanzable se reportaba como *"esta sesión
+no tiene tareas"* — la lista vacía que el orquestador luego usaba para decidir
+que no quedaba trabajo. Ver el hallazgo #18 del audit.
+
+El puerto lo hace explícito con `DagError::InvalidTaskId`, distinto de
+`DagError::StateError`; el adaptador Postgres mapea el fallo de parseo de UUID a
+esa variante.
+
+**Grafo de verificación:**
+[`tests/graphs/advanced/task_memory_error_propagation.json`](../../tests/graphs/advanced/task_memory_error_propagation.json)
+ejercita los dos nodos contra Postgres real, incluyendo un `delete_tasks` con un
+id inválido que debe aparecer en `skipped_deletes` sin matar el run.
+
+---
+
 ## Referencia de Implementación
 
 Los archivos Rust relevantes para el orchestrator:
