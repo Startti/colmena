@@ -5,6 +5,7 @@ use serde_json::{json, Value};
 use std::error::Error;
 use std::sync::Arc;
 
+use super::task_mutations;
 use crate::llm::domain::ProviderKind;
 
 /// Default system prompt template for ExtractionNode.
@@ -196,60 +197,26 @@ impl ExecutableNode for ExtractionNode {
             .to_string();
 
         if let Some(repo) = &self.task_memory_repo {
-            // Process Critic modifications (Add tasks)
-            if let Some(add_array) = parsed_json.get("add_tasks").and_then(|v| v.as_array()) {
-                for task_val in add_array {
-                    if let Some(task_obj) = task_val.as_object() {
-                        let task_name = task_obj
-                            .get("task")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("Unknown")
-                            .to_string();
-                        let assigned_to = task_obj
-                            .get("assigned_to")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("Unknown")
-                            .to_string();
-
-                        let new_task = crate::dag_engine::domain::state::DagTask {
-                            id: uuid::Uuid::new_v4().to_string(),
-                            session_id: session_id.clone(),
-                            task_name,
-                            assigned_to,
-                            completed: false,
-                            result: None,
-                            phase: 1,
-                            parallel: false,
-                            context: None,
-                            is_bridge: false,
-                        };
-                        repo.add_task(&new_task).await?;
-                    }
-                }
+            // Apply the critic's modifications, then read the updated list back
+            // for the next nodes. Both steps propagate their failures: a task
+            // that was not written, or a list that could not be read, must never
+            // reach the orchestrator dressed up as a successful empty result.
+            let skipped_deletes = task_mutations::apply_critic_mutations(
+                repo,
+                &session_id,
+                parsed_json.get("add_tasks"),
+                parsed_json.get("delete_tasks"),
+            )
+            .await?;
+            if !skipped_deletes.is_empty() {
+                tracing::warn!(
+                    target: "colmena::extraction",
+                    skipped_deletes = ?skipped_deletes,
+                    "critic asked to delete task ids that are not valid identifiers"
+                );
             }
 
-            // Process Critic modifications (Delete tasks)
-            if let Some(delete_array) = parsed_json.get("delete_tasks").and_then(|v| v.as_array()) {
-                for id_val in delete_array {
-                    if let Some(id_str) = id_val.as_str() {
-                        let _ = repo.delete_task(id_str).await;
-                    }
-                }
-            }
-
-            // Generate updated tasks list for next nodes
-            let mut all_tasks_json = Vec::new();
-            if let Ok(tasks) = repo.get_tasks_for_run(&session_id).await {
-                for t in tasks {
-                    all_tasks_json.push(json!({
-                        "id": t.id,
-                        "task_name": t.task_name,
-                        "assigned_to": t.assigned_to,
-                        "completed": t.completed,
-                        "result": t.result
-                    }));
-                }
-            }
+            let all_tasks_json = task_mutations::fetch_session_tasks(repo, &session_id).await?;
 
             // Check if we need to suspend
             let suspend = parsed_json
@@ -257,12 +224,23 @@ impl ExecutableNode for ExtractionNode {
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
             if suspend {
+                let mut extra_info = json!({
+                    "__colmena_status": "SUSPENDED",
+                    "all_tasks": all_tasks_json
+                });
+                if !skipped_deletes.is_empty() {
+                    extra_info["skipped_deletes"] = json!(skipped_deletes);
+                }
                 return Ok(json!({
                     "result": parsed_json.clone(),
-                    "extra_info": {
-                        "__colmena_status": "SUSPENDED",
-                        "all_tasks": all_tasks_json
-                    }
+                    "extra_info": extra_info
+                }));
+            }
+
+            if !skipped_deletes.is_empty() {
+                return Ok(json!({
+                    "result": parsed_json,
+                    "extra_info": { "skipped_deletes": skipped_deletes }
                 }));
             }
         }
@@ -297,7 +275,7 @@ impl ExecutableNode for ExtractionNode {
             },
             "outputs": {
                 "result": "object — the extracted fields, shaped by the configured `schema` (also the default_output)",
-                "extra_info": "object — empty on the normal path; when the extraction requests suspension it carries `__colmena_status: \"SUSPENDED\"` and `all_tasks` (the updated task list)"
+                "extra_info": "object — empty on the normal path; when the extraction requests suspension it carries `__colmena_status: \"SUSPENDED\"` and `all_tasks` (the updated task list); carries `skipped_deletes` (array of ids) when the critic named a `delete_tasks` id that is not a valid identifier"
             }
         })
     }

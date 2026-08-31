@@ -1685,3 +1685,71 @@ que cerrar antes de cablear** la registry a un executor. Queda anotado en el có
 
 **Estado.** done.
 
+## 31. Errores tragados en memoria de tareas — cierre parcial del finding #18 (mitad A)
+
+**Qué cambió.** `information_extraction` y `task_memory_writer` dejan de reportar
+como exitosas operaciones de memoria de tareas que nunca ocurrieron.
+
+Los dos nodos tenían el **mismo bloque duplicado** —el audit solo había registrado
+el de `extraction.rs`— con dos silencios:
+
+```rust
+repo.add_task(&new_task).await?;          // propagaba
+let _ = repo.delete_task(id_str).await;   // tragaba
+
+if let Ok(tasks) = repo.get_tasks_for_run(&session_id).await { ... }  // tragaba
+```
+
+La asimetría del primer par estaba dentro del mismo `if let Some(repo)`: `add`
+propagaba, `delete` no. El segundo era peor: un fallo de lectura producía
+`all_tasks = []`, y en `task_memory_writer` esa lista **es el `default_output` del
+nodo**. Un hipo transitorio de Postgres se leía río abajo como *"esta sesión no
+tiene tareas pendientes"*, y el orquestador ruteaba sobre eso.
+
+**El bloque ahora vive una sola vez** en
+[`nodes/task_mutations.rs`](../src/libs/colmena/src/dag_engine/infrastructure/nodes/task_mutations.rs)
+(`apply_critic_mutations` + `fetch_session_tasks`), que es lo que impide que un
+fix vuelva a aterrizar en una sola de las dos copias.
+
+**Dos clases de fallo, no una.** El E2E encontró que propagar todo por igual
+rompía un caso legítimo: `delete_task` valida que el id sea un UUID
+([`postgres_dag_state_repository.rs:385`](../src/libs/colmena/src/dag_engine/infrastructure/persistence/postgres_dag_state_repository.rs)),
+y colapsaba esa validación de input con los errores de base en el mismo
+`StateError`. Como `add_task` **genera** su UUID y `delete_task` lo **recibe** del
+modelo, solo el borrado puede fallar por input — y un crítico que alucina un id es
+rutinario. La política quedó así:
+
+| Situación | Comportamiento |
+|---|---|
+| Base caída (insert, delete o lectura) | propaga, el run falla |
+| Lista de tareas ilegible | propaga — una lista vacía es una afirmación sobre la sesión |
+| Id de `delete_tasks` inválido | se omite y se **reporta** en `extra_info.skipped_deletes` + `warn` estructurado |
+
+Para que el puerto pueda expresar la diferencia se agregó
+`DagError::InvalidTaskId`, distinta de `DagError::StateError`. El defecto que
+cierra este cambio era el **silencio**, no la supervivencia.
+
+**Documentación de referencia.**
+[§20 Orchestrator](developer_guide/20_orchestrator_architecture.md) ("Fallos al
+escribir memoria de tareas"),
+[node_ports_reference](agent_context/node_ports_reference.md),
+[FINDINGS_LEDGER](agent_context/audit/FINDINGS_LEDGER.md) #18.
+
+**Verificación.** 2303 tests unitarios (3 nuevos en `task_mutations`), clippy
+limpio, y E2E contra Postgres real con
+[`tests/graphs/advanced/task_memory_error_propagation.json`](../tests/graphs/advanced/task_memory_error_propagation.json):
+`information_extraction` inserta las tareas que pidió el crítico,
+`task_memory_writer` las lee de vuelta, y un `delete_tasks` con id inválido
+aparece en `skipped_deletes` sin matar el run.
+
+**Alcance.** Solo la mitad **A** del finding. Las mitades **B**
+(`crdt_doc_run_python`: `cells_written` cuenta escrituras fallidas) y **C**
+(`crdt_doc_tools`: `record_event` fallido → id `0`, y cursor reseteado a `0` por
+un error de DB) quedan como issues
+[#181](https://github.com/Startti/colmena/issues/181) y
+[#182](https://github.com/Startti/colmena/issues/182), congeladas bajo el freeze
+de CRDT Documents.
+
+**Estado.** partial — mitad A cerrada; B y C diferidas al descongelamiento de CRDT.
+
+---

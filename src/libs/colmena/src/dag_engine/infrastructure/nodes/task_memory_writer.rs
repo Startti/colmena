@@ -1,8 +1,8 @@
+use super::task_mutations;
 use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
 use serde_json::{json, Value};
 use std::error::Error as StdError;
 use std::sync::Arc;
-use uuid::Uuid;
 
 pub struct TaskMemoryWriterNode {
     task_memory_repo: Option<Arc<dyn crate::dag_engine::domain::state::DagTaskMemoryRepository>>,
@@ -46,85 +46,52 @@ impl ExecutableNode for TaskMemoryWriterNode {
                 }
             }
 
-            // 2. Process Critic modifications (Add tasks)
-            if let Some(add_val) = inputs.get("add_tasks").or_else(|| config.get("add_tasks")) {
-                if let Some(add_array) = add_val.as_array() {
-                    for task_val in add_array {
-                        if let Some(task_obj) = task_val.as_object() {
-                            let task_name = task_obj
-                                .get("task")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("Unknown")
-                                .to_string();
-                            let assigned_to = task_obj
-                                .get("assigned_to")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("Unknown")
-                                .to_string();
-
-                            let new_task = crate::dag_engine::domain::state::DagTask {
-                                id: Uuid::new_v4().to_string(),
-                                session_id: session_id.clone(),
-                                task_name,
-                                assigned_to,
-                                completed: false,
-                                result: None,
-                                phase: 1,
-                                parallel: false,
-                                context: None,
-                                is_bridge: false,
-                            };
-                            repo.add_task(&new_task).await?;
-                        }
-                    }
-                }
+            // 2-3. Apply the critic's modifications (add + delete). A failure
+            // propagates: a task that was not written must never be reported as
+            // applied.
+            let skipped_deletes = task_mutations::apply_critic_mutations(
+                repo,
+                &session_id,
+                inputs.get("add_tasks").or_else(|| config.get("add_tasks")),
+                inputs
+                    .get("delete_tasks")
+                    .or_else(|| config.get("delete_tasks")),
+            )
+            .await?;
+            if !skipped_deletes.is_empty() {
+                tracing::warn!(
+                    target: "colmena::task_memory_writer",
+                    skipped_deletes = ?skipped_deletes,
+                    "critic asked to delete task ids that are not valid identifiers"
+                );
             }
 
-            // 3. Process Critic modifications (Delete tasks)
-            if let Some(delete_val) = inputs
-                .get("delete_tasks")
-                .or_else(|| config.get("delete_tasks"))
-            {
-                if let Some(delete_array) = delete_val.as_array() {
-                    for id_val in delete_array {
-                        if let Some(id_str) = id_val.as_str() {
-                            let _ = repo.delete_task(id_str).await;
-                        }
-                    }
-                }
-            }
-
-            // 4. Return all current tasks and final loop status
-            let mut all_tasks_json = Vec::new();
-            if let Ok(tasks) = repo.get_tasks_for_run(&session_id).await {
-                for t in tasks {
-                    all_tasks_json.push(json!({
-                        "id": t.id,
-                        "task_name": t.task_name,
-                        "assigned_to": t.assigned_to,
-                        "completed": t.completed,
-                        "result": t.result
-                    }));
-                }
-            }
+            // 4. Return all current tasks and final loop status. This list is the
+            // node's `default_output`, so a read failure propagates rather than
+            // shipping an empty list the orchestrator would route on.
+            let all_tasks_json = task_mutations::fetch_session_tasks(repo, &session_id).await?;
 
             let suspend = inputs
                 .get("suspend")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
+            let mut extra_info = json!({});
+            if !skipped_deletes.is_empty() {
+                extra_info["skipped_deletes"] = json!(skipped_deletes);
+            }
+
             if suspend {
+                extra_info["__colmena_status"] = json!("SUSPENDED");
+                extra_info["all_tasks"] = json!(all_tasks_json);
                 return Ok(json!({
                     "result": "Suspended by Critic Node",
-                    "extra_info": {
-                        "__colmena_status": "SUSPENDED",
-                        "all_tasks": all_tasks_json
-                    }
+                    "extra_info": extra_info
                 }));
             }
 
             Ok(json!({
                 "result": all_tasks_json,
-                "extra_info": {}
+                "extra_info": extra_info
             }))
         } else {
             Err("TaskMemoryWriterNode requires a Task Memory Repository".into())
@@ -148,6 +115,10 @@ impl ExecutableNode for TaskMemoryWriterNode {
                 "add_tasks": "Array of new task objects to append.",
                 "delete_tasks": "Array of task IDs to delete.",
                 "suspend": "Boolean to suspend the DAG loop."
+            },
+            "outputs": {
+                "result": "array — every task of the session after the mutation (also the default_output); the string \"Suspended by Critic Node\" when `suspend` is true",
+                "extra_info": "object — empty on the normal path; carries `__colmena_status: \"SUSPENDED\"` and `all_tasks` on suspend, and `skipped_deletes` (array of ids) when a `delete_tasks` id was not a valid identifier"
             }
         })
     }

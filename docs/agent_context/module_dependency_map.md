@@ -5,7 +5,7 @@
 
 **How to use (for the exploration/spec phase):** before opening files to assess a change, look up the target file below. **Used by** is its blast radius — the files that break if you change its public surface. **Depends on** is what it needs. Start by reading only those, not the whole repo.
 
-- Files indexed: **368**
+- Files indexed: **369**
 - Modules with at least one importer: **168**
 
 ## Blast-radius ranking (change these with the most care)
@@ -23,8 +23,8 @@
 | 13 | `llm::domain::attachments` | `src/libs/colmena/src/llm/domain/attachments/mod.rs` |
 | 13 | `llm::infrastructure` | `src/libs/colmena/src/llm/infrastructure/mod.rs` |
 | 13 | `storage::domain` | `src/libs/colmena/src/storage/domain/mod.rs` |
+| 12 | `dag_engine::domain::error` | `src/libs/colmena/src/dag_engine/domain/error.rs` |
 | 11 | `dag_engine::application::secure_value_service` | `src/libs/colmena/src/dag_engine/application/secure_value_service.rs` |
-| 11 | `dag_engine::domain::error` | `src/libs/colmena/src/dag_engine/domain/error.rs` |
 | 11 | `documents::domain::ports` | `src/libs/colmena/src/documents/domain/ports.rs` |
 | 11 | `text` | `src/libs/colmena/src/text/mod.rs` |
 | 10 | `dag_engine::application::ports` | `src/libs/colmena/src/dag_engine/application/ports.rs` |
@@ -240,7 +240,7 @@
 
 #### `src/libs/colmena/src/dag_engine/domain/error.rs`
 - Module: `dag_engine::domain::error`
-- **Used by (11)**: `src/libs/colmena/src/dag_engine/application/ports.rs`, `src/libs/colmena/src/dag_engine/application/preflight.rs`, `src/libs/colmena/src/dag_engine/application/run_use_case.rs`, `src/libs/colmena/src/dag_engine/domain/graph.rs`, `src/libs/colmena/src/dag_engine/domain/secure_value_repository.rs`, `src/libs/colmena/src/dag_engine/domain/state.rs`, `src/libs/colmena/src/dag_engine/engine.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/secure_suspend.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/subgraph.rs`, `src/libs/colmena/src/dag_engine/infrastructure/persistence/postgres_dag_state_repository.rs`, `src/libs/colmena/src/dag_engine/infrastructure/registry.rs`
+- **Used by (12)**: `src/libs/colmena/src/dag_engine/application/ports.rs`, `src/libs/colmena/src/dag_engine/application/preflight.rs`, `src/libs/colmena/src/dag_engine/application/run_use_case.rs`, `src/libs/colmena/src/dag_engine/domain/graph.rs`, `src/libs/colmena/src/dag_engine/domain/secure_value_repository.rs`, `src/libs/colmena/src/dag_engine/domain/state.rs`, `src/libs/colmena/src/dag_engine/engine.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/secure_suspend.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/subgraph.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/task_mutations.rs`, `src/libs/colmena/src/dag_engine/infrastructure/persistence/postgres_dag_state_repository.rs`, `src/libs/colmena/src/dag_engine/infrastructure/registry.rs`
 - Depends on (0): — (no intra-crate imports)
 
 #### `src/libs/colmena/src/dag_engine/domain/events.rs`
@@ -295,7 +295,7 @@
 
 #### `src/libs/colmena/src/dag_engine/domain/state.rs`
 - Module: `dag_engine::domain::state`
-- **Used by (5)**: `src/libs/colmena/src/dag_engine/application/run_use_case.rs`, `src/libs/colmena/src/dag_engine/engine.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/orchestrator.rs`, `src/libs/colmena/src/dag_engine/infrastructure/persistence/postgres_dag_state_repository.rs`, `src/libs/colmena/src/dag_engine/infrastructure/registry.rs`
+- **Used by (6)**: `src/libs/colmena/src/dag_engine/application/run_use_case.rs`, `src/libs/colmena/src/dag_engine/engine.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/orchestrator.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/task_mutations.rs`, `src/libs/colmena/src/dag_engine/infrastructure/persistence/postgres_dag_state_repository.rs`, `src/libs/colmena/src/dag_engine/infrastructure/registry.rs`
 - Depends on (1): `dag_engine::domain::error`
 
 #### `src/libs/colmena/src/dag_engine/domain/tool_configuration.rs`
@@ -667,6 +667,11 @@
 - Module: `dag_engine::infrastructure::nodes::task_memory_writer`
 - **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
 - Depends on (1): `dag_engine::domain::node`
+
+#### `src/libs/colmena/src/dag_engine/infrastructure/nodes/task_mutations.rs`
+- Module: `dag_engine::infrastructure::nodes::task_mutations`
+- **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
+- Depends on (2): `dag_engine::domain::error`, `dag_engine::domain::state`
 
 #### `src/libs/colmena/src/dag_engine/infrastructure/nodes/tavily_client.rs`
 - Module: `dag_engine::infrastructure::nodes::tavily_client`

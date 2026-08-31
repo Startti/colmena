@@ -1,0 +1,71 @@
+{
+  "nodes": {
+    "critic_report": {
+      "type": "input",
+      "config": {
+        "critic_report": "Review of the deployment plan: the backend migration is missing, so add a task for Juan to write the migration script, and add a task for Maria to review it. The old task about updating the changelog is no longer needed."
+      }
+    },
+    "extract_plan_changes": {
+      "type": "information_extraction",
+      "config": {
+        "provider": "google",
+        "api_key": "${GEMINI_API_KEY}",
+        "model": "gemini-2.5-flash",
+        "system_message": "Extract the plan modifications requested by the critic. Every new task must go in add_tasks with its assignee.",
+        "schema": {
+          "add_tasks": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "task": {
+                  "type": "string"
+                },
+                "assigned_to": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "New tasks the critic asked to create"
+          },
+          "summary": {
+            "type": "string",
+            "description": "One-line summary of the requested changes"
+          }
+        }
+      }
+    },
+    "write_task_memory": {
+      "type": "task_memory_writer",
+      "config": {
+        "add_tasks": [
+          {
+            "task": "Deploy the migration to staging",
+            "assigned_to": "Daniel"
+          }
+        ],
+        "delete_tasks": [
+          "task-that-does-not-exist"
+        ]
+      }
+    },
+    "log_result": {
+      "type": "log"
+    }
+  },
+  "edges": [
+    {
+      "from": "critic_report",
+      "to": "extract_plan_changes.texts.critic_report"
+    },
+    {
+      "from": "extract_plan_changes",
+      "to": "write_task_memory"
+    },
+    {
+      "from": "write_task_memory",
+      "to": "log_result"
+    }
+  ]
+}

@@ -332,7 +332,7 @@ impl crate::dag_engine::domain::state::DagTaskMemoryRepository for PostgresDagSt
         result: serde_json::Value,
     ) -> Result<(), DagError> {
         let id_uuid = uuid::Uuid::parse_str(task_id)
-            .map_err(|_| DagError::StateError("Invalid UUID for task_id".to_string()))?;
+            .map_err(|_| DagError::InvalidTaskId(task_id.to_string()))?;
 
         sqlx::query(
             "UPDATE dag_task_memory SET completed = TRUE, result = $1, updated_at = NOW() WHERE id = $2"
@@ -383,7 +383,7 @@ impl crate::dag_engine::domain::state::DagTaskMemoryRepository for PostgresDagSt
 
     async fn delete_task(&self, task_id: &str) -> Result<(), DagError> {
         let id_uuid = uuid::Uuid::parse_str(task_id)
-            .map_err(|_| DagError::StateError("Invalid UUID for task_id".to_string()))?;
+            .map_err(|_| DagError::InvalidTaskId(task_id.to_string()))?;
 
         sqlx::query("DELETE FROM dag_task_memory WHERE id = $1")
             .bind(id_uuid)

@@ -30,6 +30,7 @@ pub mod sql;
 pub mod subgraph;
 pub mod suspend;
 pub mod task_memory_writer;
+pub mod task_mutations;
 pub mod tavily_client;
 pub mod trigger;
 pub mod tts;
