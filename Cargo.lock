@@ -794,6 +794,7 @@ dependencies = [
  "formualizer",
  "futures",
  "google-cloud-storage",
+ "http 1.4.0",
  "include_dir",
  "lru",
  "maud",

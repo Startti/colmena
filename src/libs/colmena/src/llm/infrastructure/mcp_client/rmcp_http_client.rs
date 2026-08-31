@@ -37,9 +37,11 @@
 //! timeout so the pool never grows unbounded. `connect`'s handshake keeps
 //! its own outer timeout around `ServiceExt::serve`, unrelated to this.
 
+use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use http::{HeaderName, HeaderValue};
 use rmcp::model::{
     CallToolRequest, CallToolRequestParams, CallToolResult, CancelledNotificationParam,
     ClientCapabilities, ClientInfo, ClientRequest, ContentBlock, Implementation, ListToolsRequest,
@@ -78,7 +80,19 @@ impl RmcpHttpClient {
     /// `notifications/initialized`, driven by `rmcp`'s `ServiceExt::serve`).
     /// HTTPS is enforced HERE, before any socket work (R2.1) — the
     /// defensive re-check; `Graph::validate` (later slice) is primary.
-    pub async fn connect(server_label: &str, config: &McpServerConfig) -> Result<Self, McpError> {
+    /// Connect and complete the MCP handshake.
+    ///
+    /// `resolved_headers` carries the ACTUAL header values — the secure-value
+    /// references on `config.header_refs` already resolved. They are passed
+    /// separately, and deliberately not stored on [`McpServerConfig`], so the
+    /// "a resolved credential never reaches the cache key, the `Debug` output
+    /// or a log line" property is structural rather than a discipline someone
+    /// has to remember.
+    pub async fn connect(
+        server_label: &str,
+        config: &McpServerConfig,
+        resolved_headers: &BTreeMap<String, String>,
+    ) -> Result<Self, McpError> {
         if !config.url.starts_with("https://") {
             return Err(McpError::InvalidConfig {
                 detail: format!(
@@ -87,7 +101,7 @@ impl RmcpHttpClient {
                 ),
             });
         }
-        Self::connect_transport(server_label, config).await
+        Self::connect_transport(server_label, config, resolved_headers).await
     }
 
     /// Everything `connect` does after the HTTPS guard — split out so tests
@@ -95,11 +109,17 @@ impl RmcpHttpClient {
     async fn connect_transport(
         server_label: &str,
         config: &McpServerConfig,
+        resolved_headers: &BTreeMap<String, String>,
     ) -> Result<Self, McpError> {
         // `StreamableHttpClientTransportConfig::default()` sets
         // `allow_stateless: true`: both stateless and session-issuing
         // servers work without a config flag (R2.3).
-        let transport_config = StreamableHttpClientTransportConfig::with_uri(config.url.clone());
+        // `StreamableHttpClientTransportConfig` is `#[non_exhaustive]`, so it
+        // is built through `with_uri` and then adjusted, rather than by a
+        // struct expression.
+        let mut transport_config =
+            StreamableHttpClientTransportConfig::with_uri(config.url.clone());
+        transport_config.custom_headers = build_custom_headers(server_label, resolved_headers)?;
         let transport = StreamableHttpClientTransport::from_config(transport_config);
 
         // `ClientCapabilities::default()` leaves `sampling: None`, so the
@@ -142,7 +162,16 @@ impl RmcpHttpClient {
         server_label: &str,
         config: &McpServerConfig,
     ) -> Result<Self, McpError> {
-        Self::connect_transport(server_label, config).await
+        Self::connect_transport(server_label, config, &BTreeMap::new()).await
+    }
+
+    #[cfg(test)]
+    async fn connect_for_test_with_headers(
+        server_label: &str,
+        config: &McpServerConfig,
+        resolved_headers: &BTreeMap<String, String>,
+    ) -> Result<Self, McpError> {
+        Self::connect_transport(server_label, config, resolved_headers).await
     }
 }
 
@@ -354,6 +383,58 @@ fn descriptor_from_tool(tool: &Tool) -> McpToolDescriptor {
     }
 }
 
+/// Header names `rmcp` owns and refuses to let a caller override.
+///
+/// Enforced here, at connect, rather than left to `rmcp` — it validates per
+/// REQUEST, so an operator who set `Mcp-Session-Id` would not learn about it
+/// at load or at connect but as an obscure transport failure on the first
+/// tool call. `MCP-Protocol-Version` is reserved upstream but explicitly
+/// allowed through (the worker injects it after initialization), so it is not
+/// listed.
+const RESERVED_HEADER_NAMES: &[&str] = &["accept", "mcp-session-id", "last-event-id"];
+
+/// Turn resolved header values into the transport's header map, refusing
+/// anything that would break the session or is not a valid HTTP header.
+///
+/// Fail-closed: an operator who cannot see WHY their header was dropped will
+/// debug the server instead of their config. Every rejection names the header.
+fn build_custom_headers(
+    server_label: &str,
+    resolved: &BTreeMap<String, String>,
+) -> Result<HashMap<HeaderName, HeaderValue>, McpError> {
+    let mut out = HashMap::with_capacity(resolved.len());
+    for (name, value) in resolved {
+        if RESERVED_HEADER_NAMES
+            .iter()
+            .any(|r| name.eq_ignore_ascii_case(r))
+        {
+            return Err(McpError::InvalidConfig {
+                detail: format!(
+                    "MCP server '{server_label}' sets the reserved header '{name}'; \
+                     the transport owns it and overriding it would break the session"
+                ),
+            });
+        }
+
+        let header_name =
+            HeaderName::try_from(name.as_str()).map_err(|_| McpError::InvalidConfig {
+                detail: format!("MCP server '{server_label}' has an invalid header name '{name}'"),
+            })?;
+
+        // The VALUE is never quoted back: it is the resolved secret.
+        let header_value =
+            HeaderValue::try_from(value.as_str()).map_err(|_| McpError::InvalidConfig {
+                detail: format!(
+                    "MCP server '{server_label}' has a header '{name}' whose resolved value is \
+                     not a valid HTTP header value (control characters or non-ASCII)"
+                ),
+            })?;
+
+        out.insert(header_name, header_value);
+    }
+    Ok(out)
+}
+
 /// Renders one content block as the text a tool-result message can carry.
 ///
 /// Text is preserved verbatim. Everything else becomes a named placeholder
@@ -515,7 +596,7 @@ mod tests {
     #[tokio::test]
     async fn rmcp_connect_rejects_non_https_url() {
         let cfg = config("http://insecure.example.com/mcp".to_string(), 5);
-        let err = RmcpHttpClient::connect("insecure", &cfg)
+        let err = RmcpHttpClient::connect("insecure", &cfg, &BTreeMap::new())
             .await
             .expect_err("http:// must be rejected before any network call");
         assert!(matches!(err, McpError::InvalidConfig { .. }));
@@ -1370,6 +1451,113 @@ mod tests {
         );
     }
 
+    // --- Auth headers (R3.3) ---
+
+    fn headers(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    /// The property that matters: the header reaches the SERVER. Asserting
+    /// that `build_custom_headers` accepted it would prove only that we built
+    /// a map — a config whose header never leaves the process looks identical
+    /// to a working one until the server answers 401.
+    #[tokio::test]
+    async fn a_resolved_auth_header_reaches_the_server_on_every_request() {
+        let server = MockServer::start().await;
+        let responder = mock(vec![tool("t")], None, None);
+        let seen = responder.seen.clone();
+        Mock::given(wiremock::matchers::any())
+            .respond_with(responder)
+            .mount(&server)
+            .await;
+
+        let cfg = config(server.uri(), 5);
+        let client = RmcpHttpClient::connect_for_test_with_headers(
+            "secured",
+            &cfg,
+            &headers(&[("authorization", "Bearer resolved-token")]),
+        )
+        .await
+        .expect("connect must succeed");
+        client.list_tools().await.expect("list_tools must succeed");
+
+        // `seen` records bodies; the header check needs the request itself.
+        assert!(
+            !seen.lock().unwrap().is_empty(),
+            "the mock must have been called"
+        );
+        let requests = server.received_requests().await.unwrap();
+        assert!(
+            requests.len() >= 2,
+            "expected at least initialize + tools/list, got {}",
+            requests.len()
+        );
+        for (i, req) in requests.iter().enumerate() {
+            assert_eq!(
+                req.headers
+                    .get("authorization")
+                    .map(|v| v.to_str().unwrap_or_default()),
+                Some("Bearer resolved-token"),
+                "request {i} ({}) carried no authorization header — a header sent only on \
+                 the handshake would leave every later call unauthenticated",
+                req.url.path()
+            );
+        }
+    }
+
+    /// Fail-closed at connect, not at the first tool call. `rmcp` validates
+    /// reserved headers per REQUEST, so without this the operator meets an
+    /// obscure transport error long after the config that caused it.
+    #[tokio::test]
+    async fn a_reserved_header_is_refused_at_connect_and_named() {
+        for reserved in [
+            "Mcp-Session-Id",
+            "mcp-session-id",
+            "Accept",
+            "Last-Event-Id",
+        ] {
+            let cfg = config("https://mcp.example.com/mcp".to_string(), 5);
+            let err = RmcpHttpClient::connect("secured", &cfg, &headers(&[(reserved, "anything")]))
+                .await
+                .expect_err("a reserved header must be refused");
+            let msg = err.to_string();
+            assert!(
+                msg.contains(reserved),
+                "the message must name the offending header: {msg}"
+            );
+            assert!(matches!(err, McpError::InvalidConfig { .. }), "got {err:?}");
+        }
+    }
+
+    /// A malformed header must fail loudly with the name, never panic and
+    /// never silently vanish.
+    #[tokio::test]
+    async fn a_malformed_header_is_refused_and_never_leaks_its_value() {
+        let cfg = config("https://mcp.example.com/mcp".to_string(), 5);
+
+        let bad_name = RmcpHttpClient::connect("secured", &cfg, &headers(&[("bad header", "v")]))
+            .await
+            .expect_err("a space is not valid in a header name");
+        assert!(bad_name.to_string().contains("bad header"));
+
+        let bad_value = RmcpHttpClient::connect(
+            "secured",
+            &cfg,
+            &headers(&[("x-token", "line\nbreak-SECRET")]),
+        )
+        .await
+        .expect_err("a newline is not valid in a header value");
+        let msg = bad_value.to_string();
+        assert!(msg.contains("x-token"), "must name the header: {msg}");
+        assert!(
+            !msg.contains("SECRET"),
+            "the rejection must not quote the resolved value back into a log: {msg}"
+        );
+    }
+
     /// R2.8 — live, against a REAL MCP server. Every other test here mocks
     /// the protocol, which proves we speak it the way we believe it works;
     /// only this proves we speak it the way a real server does. DeepWiki is
@@ -1379,7 +1567,7 @@ mod tests {
     #[ignore = "requires network — run with `cargo test -- --ignored`"]
     async fn deepwiki_read_wiki_structure_returns_real_outline_text() {
         let cfg = config("https://mcp.deepwiki.com/mcp".to_string(), 30);
-        let client = RmcpHttpClient::connect("deepwiki", &cfg)
+        let client = RmcpHttpClient::connect("deepwiki", &cfg, &BTreeMap::new())
             .await
             .expect("DeepWiki connect must succeed");
 
@@ -1416,7 +1604,7 @@ mod tests {
     #[ignore = "requires network — run with `cargo test -- --ignored`"]
     async fn huggingface_session_id_echoed_live() {
         let cfg = config("https://huggingface.co/mcp".to_string(), 30);
-        let client = RmcpHttpClient::connect("huggingface", &cfg)
+        let client = RmcpHttpClient::connect("huggingface", &cfg, &BTreeMap::new())
             .await
             .expect("HuggingFace connect must succeed");
 

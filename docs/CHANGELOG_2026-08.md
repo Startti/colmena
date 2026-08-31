@@ -1569,3 +1569,43 @@ acierto permanente accidental.
 
 **Estado.** done.
 
+## 29. Los headers de autenticación MCP llegan al servidor
+
+**Bug real, no una mejora.** `RmcpHttpClient::connect` construía el transporte con
+`with_uri(url)` y nada más: `config.header_refs` **se ignoraba por completo**. Un servidor MCP con
+`Authorization` conectaba sin el header y devolvía 401, sin ninguna pista de que el header
+configurado nunca había salido del proceso. La superficie de config existía desde §25; el cable no.
+
+**Los valores resueltos viajan aparte del config.** `connect` toma ahora un tercer argumento,
+`resolved_headers`, en vez de leerlos de `McpServerConfig`. Así la propiedad "una credencial
+resuelta nunca toca la cache key, el `Debug` ni un log" es **estructural** y no una disciplina que
+alguien tenga que recordar: el tipo que se hashea y se imprime simplemente no puede contenerla.
+
+Es un cambio de firma sobre `pub fn connect`. Se hace igual y se dice: la API se introdujo en esta
+misma cadena, no tiene consumidores y no está cableada. Dejar una firma que descarta los headers de
+auth en silencio es peor que cambiarla ahora.
+
+**Rechazo fail-closed al conectar, no en la primera tool call.** `rmcp` valida los headers
+reservados **por request**, así que un operador que setee `Mcp-Session-Id` no se enteraría al cargar
+ni al conectar, sino como un fallo de transporte oscuro más tarde. Se rechazan acá —`accept`,
+`mcp-session-id`, `last-event-id`— nombrando el header. `MCP-Protocol-Version` está reservado
+upstream pero permitido a propósito (el worker lo inyecta post-init), así que no se lista.
+
+Un nombre o valor de header inválido también se rechaza nombrando el header, **sin citar el valor**:
+el valor es el secreto resuelto, y un mensaje de error es exactamente el lugar por donde se filtra.
+
+**Verificado contra el servidor, no contra la función.** El test asserta que el header llega en
+**todas** las requests capturadas por wiremock, no solo en el handshake — un header que se mandara
+únicamente en el `initialize` dejaría toda llamada posterior sin autenticar. Probado quitando la
+entrega y dejando la validación: el test falla.
+
+`http = "1"` pasa a dependencia directa: `HeaderName`/`HeaderValue` de rmcp son de **http 1.x**, no
+del **http 0.2** que arrastra nuestro reqwest 0.11 — usar el tipo equivocado ni siquiera compila. No
+entra ningún crate nuevo al `Cargo.lock`: `http 1.4.0` ya estaba ahí vía rmcp, y el diff es **una
+línea**, la arista directa de `colmena_dag_engine` hacia él.
+
+**Alcance.** Sin conexiones nuevas; todavía sin caller. La resolución de las referencias vía secure
+values es la pieza siguiente — hoy el llamador debe pasar valores ya resueltos.
+
+**Estado.** done.
+
