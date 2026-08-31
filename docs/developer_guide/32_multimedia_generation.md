@@ -238,6 +238,44 @@ El agente (LLM) ve el tool output con la siguiente forma (Plan B, 2026-05-25):
 
 **El LLM nunca recibe los bytes** — solo el handle estable (`document_id`) + metadata. Para renderizar al usuario o abrir en una nueva pestaña, el frontend resuelve `document_id` → signed URL vía un endpoint del backend.
 
+### Inputs engine-injected: `__colmena_session_id` / `__colmena_agent_session_id`
+
+Los tres nodos (`image_generation`, `image_edit`, `tts`) leen dos claves internas
+de `inputs` — nunca de `config` — que el motor inyecta automáticamente en cada
+ejecución: `__colmena_session_id` y `__colmena_agent_session_id`. Se usan para:
+
+- derivar el path scoped de storage (`chat-attachments/<userId>/<agentSessionDbId>/generated/...`);
+- resolver secure-values con el `session_id`/`agent_session_id` correcto (con
+  fallback a `"default"` cuando `__colmena_session_id` está ausente, p. ej. en
+  runs CLI ad-hoc).
+
+No son campos de `node_schema` ni aparecen en `tool_configurations` — no hace
+falta declararlos, el motor los provee siempre. Confirmado en
+`image_generation.rs:176-181`, `image_edit.rs:164-168`, `tts.rs:122-126`.
+
+### Auto-registro en `AttachmentRegistry` es fail-soft
+
+El `upsert` que registra el output generado en `AttachmentRegistry` (ver más
+abajo) **no aborta el nodo si falla** — solo emite un `tracing::warn!` y el
+nodo igual retorna éxito con su `document_id`. Si el `upsert` falla, ese
+`document_id` queda "huérfano": el tool result lo referencia pero
+`load_attachment` no lo va a encontrar (no hay row en
+`conversation_attachments`). Confirmado en
+`image_generation.rs:372-380` (mismo patrón en `image_edit.rs` y `tts.rs`):
+
+```rust
+if let Err(e) = reg.upsert(upsert).await {
+    tracing::warn!(
+        target: "colmena::image_generation",
+        error = %e,
+        document_id = %document_id,
+        storage_key = %stored.storage_key,
+        "failed to register generated image in attachment registry — \
+         load_attachment will not see this output"
+    );
+}
+```
+
 ## Nodos disponibles
 
 ### `image_generation`

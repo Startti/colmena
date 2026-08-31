@@ -194,6 +194,32 @@ el modelo elige mandar en cada llamada —que no son enumerables por adelantado�
 - **Profundidad sin tope** — no hay límite de anidación; ver
   [Profundidad de anidación](#profundidad-de-anidación) más abajo.
 
+### `suspend` y `secure_suspend` como Tool (patrón `cfg_or_input`)
+
+Al igual que `subgraph`, los nodos `suspend` y `secure_suspend` pueden usarse
+como tool de un `llm_call` (declarándolos en `tool_configurations`). Cuando el
+executor los dispara como tool pasa los argumentos elegidos por el modelo en
+`inputs` y `config = {}`; cuando corren como nodo del grafo (edge), los campos
+llegan por `config`. Ambos nodos resuelven esa ambigüedad, pero con
+implementaciones distintas:
+
+- **`suspend`** usa un helper explícito `cfg_or_input(config, inputs, key)`
+  (`suspend.rs:27`) que hace `config.get(key).or_else(|| inputs.get(key))` —
+  **`config` gana** si el campo está en ambos, así el uso tradicional como nodo
+  no cambia de comportamiento. Se aplica a `id`, `question`, `question_type` y
+  `options` (`suspend.rs:47,66,71,82,87`).
+- **`secure_suspend`** no usa ese helper — resuelve el mismo problema inline en
+  `execute()` (`secure_suspend.rs:212-229`): si `inputs` trae `secrets` o `id`,
+  arma un `effective_config` tomando esos dos campos **de `inputs`** (inputs
+  gana) y completa el resto desde `config` para cualquier clave ausente en
+  `inputs`. Si ni `secrets` ni `id` están en `inputs`, usa `config` tal cual
+  (comportamiento de nodo sin cambios).
+
+En ambos casos el resultado es el mismo objetivo — el nodo funciona igual
+declarado como edge del grafo o como tool del LLM — pero la precedencia
+config-vs-inputs y el mecanismo difieren entre los dos nodos; no asumas que
+`secure_suspend` respeta la misma prioridad `config` > `inputs` que `suspend`.
+
 ### Memoria del sub-agente (`memory_mode`)
 
 Un sub-agente usado como tool no recuerda nada entre turnos **por diseño**: la
