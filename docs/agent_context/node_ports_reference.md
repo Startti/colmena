@@ -35,7 +35,7 @@ In Colmena's DAG engine, each node has optional **default ports** for input and 
 | **add** | Addition | `output = a + b` (requires explicit `.a`, `.b` fields) |
 | **subtract** | Subtraction | `output = a - b` (requires explicit `.a`, `.b` fields) |
 | **multiply** | Multiplication | `output = a * b` (requires explicit `.a`, `.b` fields) |
-| **divide** | Division | `output = a / b` (requires explicit `.a`, `.b` fields) |
+| **divide** | Division | `output = a / b` (requires explicit `.a`, `.b` fields). Fail-closed: `b == 0.0` returns a `DivisionByZero` error (`math.rs:109-111`) instead of `output` — no silent `inf`/`NaN`. |
 | **exponential** | Power function | `output = base ^ exponent` (single numeric input) |
 
 ### **LLM & AI Nodes**
@@ -104,10 +104,10 @@ Versioned document artifacts (Excel/Word) with an optimistic-concurrency edit mo
 | **add** | — | `output` | **Requires explicit `a`, `b` fields** |
 | **subtract** | — | `output` | **Requires explicit `a`, `b` fields** |
 | **multiply** | — | `output` | **Requires explicit `a`, `b` fields** |
-| **divide** | — | `output` | **Requires explicit `a`, `b` fields** |
+| **divide** | — | `output` | **Requires explicit `a`, `b` fields.** Errors (not a payload field, a hard `Err`) on `b == 0.0` — `DivisionByZero` (`math.rs:109-111`). |
 | `exponential` | `input` | `output` | Power function — single numeric input |
 | **http_request** | — | `body` | **Requires explicit `url`, `method`, etc.** See multipart mode note below. |
-| **socketio_request** | — | `response` | **Requires explicit `url`, `event`, etc.** Emits a flat envelope (not wrapped in `{ output: ... }`). Success: `{ success: true, event, response, pre_responses?: [{event, response}] }` — `response` is the opaque ack/emit payload. Failure (returned as `Ok`, not `Err`): `{ success: false, event, error, failed_pre_event?, pre_responses? }` + injected transport-context fields. `success` is the discriminator. |
+| **socketio_request** | — | `response` | **Requires explicit `url`, `event`, etc.** Emits a flat envelope (not wrapped in `{ output: ... }`). Success: `{ success: true, event, response, pre_responses?: [{event, response}] }` — `response` is the opaque ack/emit payload. Failure (returned as `Ok`, not `Err`): `{ success: false, event, error, failed_pre_event?, pre_responses? }`. `error` is always a plain string (server exceptions caught via the `exception` event are folded into this string — there is no separate `exception` field, `socketio.rs:690`). On failure, when transport-level errors occurred during the operation, two extra fields are injected: `transport_errors` (`array<string>`, aggregated, e.g. `"EngineIO Error (x4)"`) and `advice` (actionable guidance string) — both declared in `schema()` (`socketio.rs:747-748`). `success` is the discriminator. |
 | `sql_query` | `query` | `output` | SQL execution — permission control, validation, RLS. Success payload: top-level `{ output, row_count, truncated }` (+ optional `warnings[]`, `optimization_hints[]` when non-empty). `output` **shape varies by last statement**: SELECT → array of row objects keyed by column name; INSERT/UPDATE/DELETE → `{ rows_affected: <sum> }`; CREATE TABLE → `{ created: true, type: "table" }`; CREATE FUNCTION → `{ created: true }`. On failure the whole payload is replaced by `{ error, source: "static_validator"\|"llm_critic"\|"execution" }`. |
 | `python_script` | — | — | **Dynamic inputs & outputs** — all inputs flattened as Python variables; output is the raw value of the `output` variable (not wrapped in `{ output: ... }`), so edges pass it through unchanged |
 | `planner` | — | `result` | **Dynamic inputs**. Payload: `result` = `{ items: [{task, assigned_to, completed, phase, parallel}] }`; sibling top-level `extra_info.raw_response` (raw LLM text). Suspend branch instead emits top-level `__colmena_status: "SUSPENDED"` + `result: { questions: [...] }`. Not wrapped in `{ output: ... }`. |

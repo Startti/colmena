@@ -213,7 +213,8 @@
       "default_input": "input",
       "default_output": "result",
       "requires": [],
-      "supports_env_vars": false
+      "supports_env_vars": false,
+      "supports_templates": false
     },
 
     "trigger_webhook": {
@@ -634,6 +635,14 @@
           "default": null,
           "description": "Optional extra rules appended to the system message (mode A: routing rules; mode B: extraction rules).",
           "example": "Be conservative; if unsure, prefer 'support'."
+        },
+        "temperature": {
+          "type": "number",
+          "required": false,
+          "default": 0.1,
+          "description": "NOT configurable — both modes ('llm_direct' and 'extract_and_route') always call the LLM with temperature fixed at 0.1 for deterministic branch selection. There is no config or input override, and the router does not support 'thinking_budget' or streaming at all.",
+          "read_only": true,
+          "example": 0.1
         },
         "branches": {
           "type": "array",
@@ -1226,8 +1235,7 @@
         "schema": {
           "success": false,
           "event": "string (the main event name)",
-          "error": "string (human-readable error message)",
-          "exception": "any (optional, present only for server-side exceptions caught via the 'exception' event)",
+          "error": "string (human-readable error message; server-side exceptions caught via the 'exception' event are folded into this string as \"server exception: <msg>\" — there is no separate 'exception' output field)",
           "failed_pre_event": "string (optional, present when a pre_event failed — the main event was NOT emitted)",
           "pre_responses": "array (optional, present when at least one pre_event completed)",
           "transport_errors": "array<string> (optional, present only when transport-level errors occurred during the operation — aggregated, e.g. \"EngineIO Error (x4)\")",
@@ -1715,6 +1723,27 @@
           "description": "The UUID of the task to update in the task memory database. Required when 'write_to_memory' is true. Supports '{{variable}}' template syntax to resolve the task ID dynamically from inputs (e.g., '{{task_id}}'). The node writes its LLM response as the task's result in the database.",
           "example": "{{task_id}}"
         },
+        "thinking_budget": {
+          "type": "integer",
+          "required": false,
+          "default": null,
+          "description": "Token budget for extended/thinking reasoning on providers that support it (e.g. Anthropic's extended thinking, Gemini's thinking mode). Read from inputs first, then config. Omitted or unset means the provider's default (usually no extended thinking).",
+          "example": 4096
+        },
+        "documents": {
+          "type": "object",
+          "required": false,
+          "default": null,
+          "description": "Configures the seven `document_*` synthetic tools (create/apply/read/get_head/list_versions/rollback plus the auto-exposed catalog) backed by the plain (non-CRDT) document runtime. Read from inputs first, then config; presence of this block is what triggers the tools — omit it entirely to leave `llm_call` without document tools. Fields: 'storage_backend' ('localfs' default, or 'gcs'), 'storage_root' (default '.colmena/documents' for localfs), 'asset_storage_root' (defaults to a sibling '<root>_assets' dir), 'gcs_bucket'/'gcs_prefix' (when storage_backend='gcs'). An invalid block (e.g. 'gcs' without the gcs feature/bucket) fails the node with an explicit error.",
+          "example": { "storage_backend": "localfs", "storage_root": ".colmena/documents" }
+        },
+        "skills_path": {
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "Shorthand for a single on-demand skills directory, equivalent to a one-entry 'skills.paths' array. Read from config only (not inputs). Same auto-detection and COLMENA_SKILLS_ALLOWED_DIRS whitelist rules apply. A sibling array form 'skills_paths' (list of strings) is also read for multiple directories. Both are merged with 'skills.paths' and deduped by skill name. A missing directory is a hard error. See developer_guide/24_skills.md.",
+          "example": "./my_skills"
+        },
         "crdt_documents": {
           "type": "object",
           "required": false,
@@ -2021,6 +2050,28 @@
           "description": "When true, prints the full system prompt, input texts, and raw LLM response. See 'llm_shared_fields.verbose'.",
           "example": true
         },
+        "temperature": {
+          "type": "number",
+          "required": false,
+          "default": 0.1,
+          "description": "NOT configurable — the planner always calls the LLM with temperature fixed at 0.1 for deterministic task breakdown. Any 'temperature' value in config or inputs is ignored.",
+          "read_only": true,
+          "example": 0.1
+        },
+        "thinking_budget": {
+          "type": "integer",
+          "required": false,
+          "default": null,
+          "description": "Token budget for extended/thinking reasoning on providers that support it. Read from config only (not inputs). Omitted or unset means the provider's default (usually no extended thinking).",
+          "example": 4096
+        },
+        "streaming": {
+          "type": "boolean",
+          "required": false,
+          "default": false,
+          "description": "Enables token-by-token streaming of the planner's LLM call via the DAG execution observer. Read from config only (not inputs). Distinct from the 'stream' field used by 'llm_call'.",
+          "example": true
+        },
         "agents": {
           "type": "array",
           "required": false,
@@ -2104,6 +2155,28 @@
           "description": "When true, prints system prompt, context texts, and raw LLM response. See 'llm_shared_fields.verbose'.",
           "example": true
         },
+        "temperature": {
+          "type": "number",
+          "required": false,
+          "default": 0.1,
+          "description": "NOT configurable — the critic always calls the LLM with temperature fixed at 0.1 for consistent evaluations. Any 'temperature' value in config or inputs is ignored.",
+          "read_only": true,
+          "example": 0.1
+        },
+        "thinking_budget": {
+          "type": "integer",
+          "required": false,
+          "default": null,
+          "description": "Token budget for extended/thinking reasoning on providers that support it. Read from config only (not inputs). Omitted or unset means the provider's default (usually no extended thinking).",
+          "example": 4096
+        },
+        "streaming": {
+          "type": "boolean",
+          "required": false,
+          "default": false,
+          "description": "Enables token-by-token streaming of the critic's LLM call via the DAG execution observer. Read from config only (not inputs). Distinct from the 'stream' field used by 'llm_call'.",
+          "example": true
+        },
         "texts": {
           "type": "object",
           "required": false,
@@ -2180,6 +2253,28 @@
           "description": "When true, prints system prompt, context texts, and raw LLM response. See 'llm_shared_fields.verbose'.",
           "example": true
         },
+        "temperature": {
+          "type": "number",
+          "required": false,
+          "default": 0.2,
+          "description": "NOT configurable — the reactor always calls the LLM with temperature fixed at 0.2 for balanced quality. Any 'temperature' value in config or inputs is ignored.",
+          "read_only": true,
+          "example": 0.2
+        },
+        "thinking_budget": {
+          "type": "integer",
+          "required": false,
+          "default": null,
+          "description": "Token budget for extended/thinking reasoning on providers that support it. Read from config only (not inputs). Omitted or unset means the provider's default (usually no extended thinking).",
+          "example": 4096
+        },
+        "streaming": {
+          "type": "boolean",
+          "required": false,
+          "default": false,
+          "description": "Enables token-by-token streaming of the reactor's LLM call via the DAG execution observer. Read from config only (not inputs). Distinct from the 'stream' field used by 'llm_call'.",
+          "example": true
+        },
         "texts": {
           "type": "object",
           "required": false,
@@ -2244,6 +2339,9 @@
             "api_key": { "type": "string", "required": true, "description": "API key. Supports '${VAR}'.", "supports_env_vars": true },
             "model": { "type": "string", "required": false, "description": "Model identifier." },
             "system_message": { "type": "string", "required": false, "description": "Extra planning instructions appended to the built-in planner prompt." },
+            "temperature": { "type": "number", "required": false, "default": 0.1, "read_only": true, "description": "NOT configurable — dispatched to the same PlannerNode as the standalone 'planner' node type, which fixes temperature at 0.1. Any value here is ignored." },
+            "thinking_budget": { "type": "integer", "required": false, "default": null, "description": "Token budget for extended/thinking reasoning, forwarded to the internal PlannerNode. Same semantics as 'planner.config_fields.thinking_budget'." },
+            "streaming": { "type": "boolean", "required": false, "default": false, "description": "Enables token-by-token streaming of the internal planner's LLM call, forwarded to the internal PlannerNode. Same semantics as 'planner.config_fields.streaming'." },
             "allow_suspend": { "type": "boolean", "required": false, "default": true, "description": "When true, allows the planner to suspend execution and ask the user clarification questions before generating the task plan. When false, any clarification questions from the planner are logged but execution continues with the LLM's best guess." }
           },
           "example": {
@@ -2291,6 +2389,9 @@
             "api_key": { "type": "string", "required": true, "description": "API key. Supports '${VAR}'.", "supports_env_vars": true },
             "model": { "type": "string", "required": false, "description": "Model identifier." },
             "system_message": { "type": "string", "required": false, "description": "Extra review guidelines." },
+            "temperature": { "type": "number", "required": false, "default": 0.1, "read_only": true, "description": "NOT configurable — dispatched to the same CriticNode as the standalone 'critic' node type, which fixes temperature at 0.1. Any value here is ignored." },
+            "thinking_budget": { "type": "integer", "required": false, "default": null, "description": "Token budget for extended/thinking reasoning, forwarded to the internal CriticNode. Same semantics as 'critic.config_fields.thinking_budget'." },
+            "streaming": { "type": "boolean", "required": false, "default": false, "description": "Enables token-by-token streaming of the internal critic's LLM call, forwarded to the internal CriticNode. Same semantics as 'critic.config_fields.streaming'." },
             "max_retries": { "type": "integer", "required": false, "default": 3, "description": "Maximum number of times a task can be retried after critic rejection before the orchestrator either suspends (if allow_suspend=true) or gives up and marks the task as done with the last result." },
             "allow_suspend": { "type": "boolean", "required": false, "default": true, "description": "When true, if max_retries is exceeded, the orchestrator suspends and asks the user for help. When false, exceeded retries are logged but execution continues." }
           },
@@ -2312,6 +2413,9 @@
             "api_key": { "type": "string", "required": true, "description": "API key. Supports '${VAR}'.", "supports_env_vars": true },
             "model": { "type": "string", "required": false, "description": "Model identifier." },
             "system_message": { "type": "string", "required": false, "description": "Phase review instructions." },
+            "temperature": { "type": "number", "required": false, "default": 0.2, "read_only": true, "description": "NOT configurable — dispatched to the same ReactorNode as the standalone 'reactor' node type, which fixes temperature at 0.2. Any value here is ignored." },
+            "thinking_budget": { "type": "integer", "required": false, "default": null, "description": "Token budget for extended/thinking reasoning, forwarded to the internal ReactorNode. Same semantics as 'reactor.config_fields.thinking_budget'." },
+            "streaming": { "type": "boolean", "required": false, "default": false, "description": "Enables token-by-token streaming of the phase reactor's LLM call, forwarded to the internal ReactorNode. Same semantics as 'reactor.config_fields.streaming'." },
             "allow_suspend": { "type": "boolean", "required": false, "default": true, "description": "When true, allows the phase reactor to suspend for user clarification after a phase completes." }
           },
           "example": {
@@ -2331,6 +2435,8 @@
             "api_key": { "type": "string", "required": true, "description": "API key. Supports '${VAR}'.", "supports_env_vars": true },
             "model": { "type": "string", "required": false, "description": "Model identifier." },
             "system_message": { "type": "string", "required": false, "description": "Final synthesis instructions." },
+            "temperature": { "type": "number", "required": false, "default": null, "description": "LLM temperature for the final synthesis call. Unlike planner/critic/phase_reactor (which delegate to the standalone node types with a fixed temperature), final_reactor is implemented inline in the orchestrator and honors this value when set." },
+            "thinking_budget": { "type": "integer", "required": false, "default": null, "description": "Token budget for extended/thinking reasoning on providers that support it, read from this config block directly (final_reactor is implemented inline, not delegated to ReactorNode)." },
             "allow_suspend": { "type": "boolean", "required": false, "default": true, "description": "When true, allows the final reactor to suspend and ask the user a question before producing the final response." }
           },
           "example": {
@@ -2794,6 +2900,14 @@
         "required": false,
         "default": [],
         "description": "Layer-2 skill names scoped to this tool. The engine auto-loads them from the builtin pool or from any path declared in llm_call.skills.paths — no need to repeat them in llm_call.skills.builtin. Resolved at graph load (unknown names → error). Appear in the load_skill catalog only after this tool is discovered (lazy describe_tool). In non-lazy mode, visible from turn 1. Skills with node_type frontmatter cannot be referenced here (use the node_type mechanism for layer-1 guides)."
+      },
+      "memory_mode": {
+        "type": "string",
+        "required": false,
+        "default": "stateless",
+        "valid_values": ["stateless", "persistent", "dynamic"],
+        "description": "Only valid when node_type is 'llm_call' or 'subgraph' (the enclosing 'llm_call'/'subgraph' config must also carry a memory backend — 'session_id'/'agent_session_id' + 'connection_url' for llm_call, or the equivalent on the subgraph's inline/child llm_call — otherwise Graph::validate fails closed at load with an explicit error). Controls whether repeated calls to this tool share conversational memory: 'stateless' (default) — every call is an isolated conversation, node_id = tool/<tool_call_id>. 'persistent' — one shared conversation across every call to this tool, node_id = tool/<tool_name>; the model manages nothing extra. 'dynamic' — the engine auto-exposes a REQUIRED 'thread_id' parameter the model names per call (a new id starts a new thread, a prior id continues it; omitting it returns a correctable tool error rather than silently isolating); node_id = tool/<tool_name>/<thread_id>, and the tool result echoes '[hilo: <id>]' so the id survives conversation compaction. thread_id is sanitized to [A-Za-z0-9._-], max 128 chars. Not valid on other node_types (e.g. 'orchestrator', 'planner', 'critic', 'reactor' as tools) — Graph::validate rejects a non-stateless value there. See developer_guide/19_nested_agents_and_subgraphs.md ('Memoria del sub-agente').",
+        "example": "dynamic"
       }
     },
 

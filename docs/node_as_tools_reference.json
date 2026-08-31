@@ -2326,6 +2326,285 @@
           }
         }
       }
+    },
+    "current_time": {
+      "summary": "Devuelve el timestamp UTC actual (RFC3339/ISO-8601) como tool. No toma config ni inputs — el LLM lo llama sin argumentos cuando necesita anclar una fecha/hora real (p.ej. calcular 'en 3 días' o poner una fecha en un documento).",
+      "see_also": "docs/node_configurations.json → node_types.current_time — config_fields vacío, output_ports.output.",
+      "special_behaviors": [
+        "El node_schema puede omitirse por completo (o dejarse como objeto vacío `{}`) — el nodo no lee ningún input y no acepta parámetros LLM-visibles.",
+        "El timestamp se genera fresco en cada llamada (Utc::now().to_rfc3339()); no hay caché ni parámetro de timezone — siempre es UTC.",
+        "Ya se auto-inyecta como bloque de contexto temporal en el system message de todo llm_call (ver developer_guide/35_temporal_geographic_context.md); exponerlo también como tool le da al LLM una forma explícita de re-consultar la hora en medio de un loop de tool calls largo."
+      ],
+      "examples": {
+        "no_args_tool": {
+          "description": "Exponer current_time como tool sin ningún parámetro — el LLM solo lo invoca cuando necesita la hora actual.",
+          "tool_configurations_entry": {
+            "get_current_time": {
+              "name": "get_current_time",
+              "description": "Obtener la fecha y hora UTC actual en formato RFC3339.",
+              "node_type": "current_time"
+            }
+          }
+        }
+      }
+    },
+    "log": {
+      "summary": "Nodo de debug: imprime su input a stdout y lo retorna sin cambios (pass-through exacto). No está pensado para ser expuesto como tool LLM — es una herramienta de desarrollo de grafos, no una capability del agente.",
+      "see_also": "docs/node_configurations.json → node_types.log.",
+      "special_behaviors": [
+        "Busca las claves 'input' > 'result' > 'output' en ese orden de precedencia y usa el primer valor presente; si ninguna existe pero hay otros inputs, los agrupa todos en un único objeto para loguearlos juntos.",
+        "No tiene config_fields — cualquier config pasada se ignora.",
+        "Si se necesita que el LLM inspeccione un valor intermedio como parte de su propio razonamiento, preferir devolver ese valor como parte del resultado de otro tool en vez de encadenar `log` como tool — `log` solo imprime a la consola del proceso del servidor, el LLM nunca ve stdout."
+      ]
+    },
+    "document_create": {
+      "summary": "Crea un nuevo artifact de documento versionado (Excel o Word) y retorna sus identificadores. Expone `kind` (y opcionalmente `initial_ir`/`label`) como parámetros LLM-visibles; el storage backend se fija por operador.",
+      "see_also": "docs/node_configurations.json → node_types.document_create; docs/developer_guide/27_documents_library.md — guía completa de la Documents Library.",
+      "special_behaviors": [
+        "`kind` es requerido y debe ser 'excel' o 'word' — cualquier otro valor falla con un error de config (MissingField/Config error), no con un panic.",
+        "`session_id` se resuelve automáticamente con prioridad input '__colmena_session_id' > input/config 'session_id' > default 'default' — normalmente NO hace falta exponerlo al LLM ni fijarlo en fixed_config; el executor ya inyecta '__colmena_session_id' en el contexto de la sesión del agente.",
+        "`storage_backend`/`storage_root` son plumbing de infraestructura (dónde persiste el documento) — declarar como `fixed` dentro de node_schema o en fixed_config, nunca LLM-visibles.",
+        "Output de éxito: { artifact_id, version_id, label }. version_id del primer documento es 'v1'."
+      ],
+      "examples": {
+        "llm_visible_kind_only": {
+          "description": "El LLM solo decide el tipo de documento; el resto queda fijo por operador.",
+          "tool_configurations_entry": {
+            "create_document": {
+              "name": "create_document",
+              "description": "Crear un nuevo documento (Excel o Word) vacío y devolver su artifact_id para editarlo después.",
+              "node_type": "document_create",
+              "node_schema": {
+                "kind": {
+                  "type": "string",
+                  "required": true,
+                  "valid_values": [
+                    "excel",
+                    "word"
+                  ],
+                  "description": "Tipo de documento a crear."
+                },
+                "label": {
+                  "type": "string",
+                  "required": false,
+                  "description": "Etiqueta legible para identificar el documento (opcional)."
+                },
+                "storage_backend": {
+                  "fixed": "localfs"
+                },
+                "storage_root": {
+                  "fixed": ".colmena/documents"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "document_edit": {
+      "summary": "Aplica una lista ordenada de patch ops a un documento existente, produciendo una nueva versión con optimistic concurrency (VersionConflict como output estructurado, no como excepción). Expone `artifact_id`, `base_version` y `ops` como parámetros LLM-visibles.",
+      "see_also": "docs/node_configurations.json → node_types.document_edit; docs/developer_guide/27_documents_library.md §6.",
+      "special_behaviors": [
+        "Todos los campos son input-first, config-fallback: si el LLM los pasa como argumentos del tool call, ganan sobre cualquier valor fijo en config.",
+        "`base_version` debe coincidir con la versión actual del artifact — si el documento avanzó mientras tanto, el nodo retorna `{ error: \"VersionConflict\", current_version, conflicts }` en vez de aplicar el patch; el LLM debe releer (document_read) y reintentar con la nueva base_version.",
+        "`ops` que no deserializa a la lista de PatchOp esperada retorna un error de config ('invalid ops array') — el LLM puede leer el mensaje y corregir la estructura.",
+        "`session_id` se resuelve igual que en document_create (input '__colmena_session_id' > input/config 'session_id' > 'default') — no requiere exposición explícita al LLM.",
+        "Los patches aplicados por este nodo siempre se etiquetan internamente como origen 'agent' (PatchSource::Agent), no configurable — refleja que este nodo DAG es el frente del LLM, no de edición humana directa."
+      ],
+      "examples": {
+        "llm_provides_patch": {
+          "description": "El LLM decide qué artifact editar, sobre qué versión, y qué ops aplicar; storage queda fijo.",
+          "tool_configurations_entry": {
+            "edit_document": {
+              "name": "edit_document",
+              "description": "Aplicar una lista de operaciones de edición a un documento existente. Retorna la nueva versión o un VersionConflict si el documento cambió mientras tanto.",
+              "node_type": "document_edit",
+              "node_schema": {
+                "artifact_id": {
+                  "type": "string",
+                  "required": true,
+                  "description": "Identificador del documento a editar."
+                },
+                "base_version": {
+                  "type": "string",
+                  "required": true,
+                  "description": "Versión sobre la que se basa este patch (usualmente la última leída con document_read)."
+                },
+                "ops": {
+                  "type": "array",
+                  "required": true,
+                  "description": "Lista ordenada de operaciones de patch a aplicar."
+                },
+                "storage_backend": {
+                  "fixed": "localfs"
+                },
+                "storage_root": {
+                  "fixed": ".colmena/documents"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "document_read": {
+      "summary": "Lee un artifact de documento y retorna su IR (intermediate representation) más la versión leída. Lee HEAD (última versión) salvo que se especifique `version`. Expone `artifact_id` (y opcionalmente `version`) como parámetros LLM-visibles.",
+      "see_also": "docs/node_configurations.json → node_types.document_read; docs/developer_guide/27_documents_library.md.",
+      "special_behaviors": [
+        "Campos input-first, config-fallback: si el LLM pasa `artifact_id`/`version` como argumentos, ganan sobre cualquier valor fijo en config.",
+        "Sin `version`, siempre lee la última versión (HEAD) — útil como paso previo a document_edit para obtener la base_version vigente.",
+        "`storage_backend`/`storage_root` son plumbing de infraestructura (default 'localfs' / '.colmena/documents') — fijar en node_schema, nunca LLM-visibles.",
+        "artifact_id inexistente retorna un objeto de error estructurado en el output, no una excepción del grafo."
+      ],
+      "examples": {
+        "llm_reads_artifact": {
+          "description": "El LLM decide qué artifact (y opcionalmente qué versión) leer antes de editarlo o resumirlo.",
+          "tool_configurations_entry": {
+            "read_document": {
+              "name": "read_document",
+              "description": "Leer el contenido (IR) de un documento existente en una versión dada, o la última versión si no se especifica.",
+              "node_type": "document_read",
+              "node_schema": {
+                "artifact_id": {
+                  "type": "string",
+                  "required": true,
+                  "description": "Identificador del documento a leer."
+                },
+                "version": {
+                  "type": "string",
+                  "required": false,
+                  "description": "Versión específica a leer. Si se omite, se lee la última versión (HEAD)."
+                },
+                "storage_backend": {
+                  "fixed": "localfs"
+                },
+                "storage_root": {
+                  "fixed": ".colmena/documents"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "suspend": {
+      "summary": "Pausa el DAG y espera respuesta humana antes de continuar; el LLM lo usa como tool cuando necesita aprobación o un dato que solo el usuario puede dar (p.ej. dentro de un subgraph expuesto como tool a un llm_call padre).",
+      "see_also": "docs/developer_guide/44_suspend_node.md — guía completa (incluye 'Suspensión dentro de un subgraph'); docs/node_configurations.json → node_types.suspend.",
+      "special_behaviors": [
+        "Cuando se usa como tool, el executor pasa `config = {}` vacío y mergea `fixed_config` + `node_schema` dentro de `inputs` — el nodo resuelve cada campo con el patrón config-first/inputs-fallback (`cfg_or_input`), así que en el tool path los valores llegan por inputs y funcionan igual.",
+        "`id` es requerido y estable (charset [A-Za-z0-9_-]{1,64}) — no cae al __node_id. El operador responde con `Q[<id>]: <echo>\\nA[<id>]: <respuesta>` en `--answer`; declararlo `fixed` en node_schema si el id debe ser constante entre llamadas, o LLM-visible si el propio LLM debe elegirlo dinámicamente (poco común).",
+        "`question_type: \"choice\"` + `options` es solo un hint de UX — el parser NO valida contra la lista, cualquier texto libre es una respuesta válida.",
+        "No confundir con `secure_suspend`: `suspend` es para preguntas abiertas/elección, no para recolectar secretos (esos nunca deben pasar por aquí en texto plano)."
+      ],
+      "examples": {
+        "approval_gate_as_tool": {
+          "description": "suspend expuesto directamente como tool de un llm_call — el LLM pide aprobación humana antes de continuar una acción sensible.",
+          "tool_configurations_entry": {
+            "ask_human_approval": {
+              "name": "ask_human_approval",
+              "description": "Pausar y pedir aprobación humana explícita antes de continuar con una acción irreversible o sensible.",
+              "node_type": "suspend",
+              "node_schema": {
+                "id": {
+                  "fixed": "human_approval"
+                },
+                "question": {
+                  "type": "string",
+                  "required": true,
+                  "description": "Pregunta clara y específica de lo que se necesita aprobar."
+                },
+                "question_type": {
+                  "fixed": "choice"
+                },
+                "options": {
+                  "type": "array",
+                  "required": false,
+                  "description": "Opciones sugeridas para la UX (no es una whitelist, cualquier texto libre es válido)."
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "secure_suspend": {
+      "summary": "Pausa el DAG y pide al usuario uno o más secretos en una sola pausa; cada valor se cifra y persiste en secure_value_mappings, devolviendo solo handles `<sv_<name>>` — el valor real nunca llega al LLM ni a los outputs/logs. Soporta uso como nodo top-level o como LLM tool en tool_configurations.",
+      "see_also": "docs/developer_guide/13_security_strategy.md — Strategy 6 (Secure Values); docs/node_configurations.json → node_types.secure_suspend; docs/agent_context/node_ports_reference.md → secure_suspend.",
+      "special_behaviors": [
+        "El id de cada pregunta emitida ES el `name` de cada objeto en `secrets` (no `<id>__1`/`<id>__2` pese a lo que sugiere la descripción legacy del campo `id` en node_configurations.json — ese campo `id` de nivel bloque NO se usa para generar los ids de las questions, está reservado sin efecto actual). El operador/LLM responde con `Q[<name>]: <echo>\\nA[<name>]: <secreto>`.",
+        "`secrets` es un array de { question, name }: mínimo 1, máximo 8; cada `name` debe matchear `^[a-z][a-z0-9_]{2,63}$` y ser único en la lista; las preguntas también deben ser únicas.",
+        "Igual que `suspend`, en el tool path el executor pasa `config = {}` y mergea fixed_config/node_schema en inputs — el nodo resuelve con el mismo patrón config-first/inputs-fallback.",
+        "El `question` de cada secreto es solo human-readable — el parser de resume no lo valida contra el echo, solo bindea por `name`.",
+        "Nunca declarar `secrets` como fixed si el propósito es que el LLM decida en runtime qué credenciales pedir; si el set de credenciales es siempre el mismo, sí conviene fijarlo para evitar que el LLM invente nombres de secretos."
+      ],
+      "examples": {
+        "llm_requests_known_credentials": {
+          "description": "El LLM necesita credenciales de una API externa que el usuario aún no proveyó; el set de secretos es fijo (siempre los mismos dos campos).",
+          "tool_configurations_entry": {
+            "request_api_credentials": {
+              "name": "request_api_credentials",
+              "description": "Pedir al usuario sus credenciales de Amadeus (client_id y client_secret) cuando no se hayan provisto todavía. El valor real nunca se expone al modelo.",
+              "node_type": "secure_suspend",
+              "node_schema": {
+                "secrets": {
+                  "fixed": [
+                    {
+                      "question": "¿Cuál es tu Amadeus client_id?",
+                      "name": "amadeus_client_id"
+                    },
+                    {
+                      "question": "¿Cuál es tu Amadeus client_secret?",
+                      "name": "amadeus_client_secret"
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "critic": {
+      "summary": "Revisor de calidad potenciado por LLM: evalúa el resultado de una tarea y decide task_ok (pass/fail), con feedback accionable si falla y una posible pregunta de suspensión al usuario. Temperatura fija en 0.1. Se usa como tool cuando un agente quiere autoevaluar su propio resultado antes de responder, o como paso embebido de un orchestrator.",
+      "see_also": "docs/developer_guide/20_orchestrator_architecture.md — Critic Feedback Loop; docs/node_configurations.json → node_types.critic.",
+      "special_behaviors": [
+        "`provider`/`api_key` son requeridos (sin fallback automático a env vars aparte de la sintaxis `${VAR_NAME}` en `api_key`) — casi siempre `fixed` en node_schema/fixed_config, nunca LLM-visibles.",
+        "Temperatura forzada a 0.1 — no expone un campo `temperature` configurable; cualquier valor pasado se ignora silenciosamente.",
+        "Además de los campos documentados en node_configurations.json (provider, api_key, model, system_message, verbose, texts) el código también soporta `thinking_budget` (extended thinking) y `streaming` (boolean, default false) — no listados aún en node_configurations.json.",
+        "Los textos a evaluar siguen el patrón `texts.{name}` como inputs. Si no se provee ningún texto, el nodo retorna `null` directamente (no `{ result: null, ... }`) — un downstream que espere un booleano en `result` debe tolerar ese caso.",
+        "El LLM subyacente debe responder JSON con { task_ok, feedback, suspend, question } — el nodo limpia automáticamente fences markdown (```json ... ```) de la respuesta antes de parsear."
+      ],
+      "examples": {
+        "self_review_tool": {
+          "description": "El agente principal se autoevalúa antes de responder al usuario; provider/api_key/system_message quedan fijos, el texto a revisar es LLM-visible.",
+          "tool_configurations_entry": {
+            "review_my_answer": {
+              "name": "review_my_answer",
+              "description": "Revisar la calidad del borrador de respuesta antes de enviarlo al usuario. Devuelve task_ok, feedback y opcionalmente una pregunta de aclaración.",
+              "node_type": "critic",
+              "node_schema": {
+                "provider": {
+                  "fixed": "google"
+                },
+                "api_key": {
+                  "fixed": "${GEMINI_API_KEY}"
+                },
+                "model": {
+                  "fixed": "gemini-2.5-flash"
+                },
+                "system_message": {
+                  "fixed": "Los resultados deben incluir precios en USD y al menos 2 opciones concretas."
+                },
+                "texts": {
+                  "type": "object",
+                  "required": true,
+                  "description": "Textos a revisar, como un objeto { nombre: contenido }."
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
 

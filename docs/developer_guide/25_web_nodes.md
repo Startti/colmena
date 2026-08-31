@@ -109,6 +109,17 @@ El nodo también es ejecutable como cualquier otro `ExecutableNode`. Para invoca
 
 Ver `tests/graphs/web/tavily_direct_search.json`. El output del nodo es el mismo JSON que recibiría el LLM como tool result (`{ query, results, answer, credits_used }` para search; `{ url, content, ... }` para fetch).
 
+### Parámetros de `search` no documentados en el schema
+
+- **`max_results` se clampea en silencio a `[1, 10]`** (`tavily_client.rs:207`).
+  Un valor fuera de rango (ej. `50`, `0`) no produce error ni warning — se
+  ajusta al límite más cercano y el LLM/operador no se entera. Default `5`
+  cuando no se pasa ni en `inputs` ni en `search_defaults`.
+- **`time_range`** (string: `"day"`, `"week"`, `"month"`, `"year"`) filtra
+  resultados por antigüedad, pero no aparece en la tabla de configuración
+  arriba. Un valor no reconocido cae a `None` (sin filtro) en silencio —no
+  hay error de validación (`tavily_client.rs:233-247`).
+
 ### Manejo de errores
 
 | Upstream | Para el LLM (recuperable) | Crash de DAG |
@@ -486,6 +497,32 @@ de su tool call; el nodo lo resuelve antes de armar la request multipart.
 
 Requiere `agent_session_id` en el contexto de ejecución — el resolver es
 por-sesión.
+
+### Logging a stdout en modo multipart
+
+El path multipart de `http_request` loguea cada request/response vía
+`println!` directo a stdout (no `tracing`), con el método, la URL y la
+cantidad de parts: `[HttpNode] → {method} {url} (multipart, {n} parts)` /
+`[HttpNode] ← {status} ({url})` (`http.rs:713,717`). El path no-multipart
+tiene el mismo patrón (`http.rs:903,1090,1099`). No hay forma de silenciarlo
+por config — si el operador necesita logging estructurado o quiere apagarlo,
+hoy solo puede filtrar stdout en el nivel de proceso.
+
+### OAuth nativo no soportado con multipart
+
+El bloque `auth` (OAuth2 nativo, ver más abajo) **no funciona junto con un
+body multipart** en la v1 actual. Si `oauth_provider` está resuelto (bloque
+`auth` presente) y el nodo entra al path multipart, falla en runtime con:
+
+```
+http_request: native OAuth (`auth`) is not supported with multipart bodies in v1
+```
+
+Confirmado en `http.rs:1030-1037`. No es un error de validación temprana en
+`schema()` — el nodo arma todo lo demás (parsea el body, valida los parts) y
+recién ahí revienta al llegar al send. Para subir archivos a un endpoint que
+requiere OAuth nativo, hoy la única salida es un `Authorization` header
+manual (`Bearer ${TOKEN}`) en vez del bloque `auth`.
 
 ## OAuth2 nativo (grant `refresh_token`) (`http_request`)
 
