@@ -1753,3 +1753,166 @@ de CRDT Documents.
 **Estado.** partial — mitad A cerrada; B y C diferidas al descongelamiento de CRDT.
 
 ---
+---
+
+## 32. `information_extraction` reportaba éxito sin extraer nada — y rompía dos grafos del propio repo
+
+**Qué cambió.** El nodo `information_extraction` junta sus documentos **solo** de inputs cuya key
+empieza con `texts.` (lo que produce un edge `{"from": "src", "to": "<nodo>.texts.<nombre>"}`) o del
+objeto estático `config.texts`. Cuando ninguno de los dos aportaba nada, hacía:
+
+```rust
+colmena_log!("⚠️ [ExtractionNode] Skipped execution because 'texts' input was missing or empty.");
+return Ok(Value::Null);
+```
+
+Ahora distingue **dos casos que antes se veían iguales desde adentro del nodo**:
+
+| Caso | Comportamiento |
+|---|---|
+| No hay ninguna fuente declarada (ni un input `texts.*`, ni `config.texts`) | `Err` que nombra el cableado esperado, lista las keys que sí llegaron y dice si había `config.texts` |
+| Hay fuente declarada pero toda resolvió a null o vacío | `Ok(null)` — el comportamiento previo, sin cambios |
+
+La discriminación es por **declaración**, no por contenido. Esa distinción no estaba en la primera
+versión de este fix y la encontró la lente de review — ver "Lo que corrigió el review" más abajo.
+
+**Por qué importaba.** `Ok(Value::Null)` es "corrí bien y mi salida es null", no "no corrí". El motor
+lee ese null y emite `node-skipped` con `reason: upstream_null_output` para **toda** la rama
+downstream. El run terminaba con exit 0, `finishReason: "stop"` y 0 tokens. La única señal era un
+`colmena_log!` invisible sin logging verbose — al stream SSE no llegaba **nada**. Es la misma clase
+de defecto que el finding #18 (reportar éxito por trabajo que no ocurrió), en otra instancia del
+mismo archivo.
+
+El efecto práctico: un edge mal escrito era **indistinguible** de un run correcto.
+
+**Dos grafos del repo estaban mal cableados por esto**, y no se había notado nunca:
+
+| Grafo | Edge que tenía | Edge correcto | En esta PR |
+|---|---|---|---|
+| [`tests/graphs/agents/extraction_example.json`](../tests/graphs/agents/extraction_example.json) | `{"from": "slack_message", "to": "extract_info"}` | `{"to": "extract_info.texts.slack_message"}` | **arreglado y verificado E2E** |
+| [`tests/graphs/advanced/trip_planner.json`](../tests/graphs/advanced/trip_planner.json) | `{"from": "trigger", "to": "planner"}` | `{"to": "planner.texts.request"}` | **NO tocado** — ver abajo |
+
+Ambos son pre-existentes (verificado contra un checkout limpio), no los causó trabajo reciente. Las
+copias viejas en `src/libs/colmena/tests/` **tampoco funcionan**, aunque fallan distinto: usan
+`config.data` con `from: "<nodo>.output"`, y como un `input` con `data` string devuelve el string
+crudo, el pointer `/output` no resuelve y el motor skipea el nodo con `reason: pointer_unresolved`
+(comprobado corriéndolo). O sea que no hay ninguna copia sana de la que copiar el cableado — el
+ejemplo de este repo nunca anduvo en ninguna de sus formas.
+
+**`trip_planner.json` queda sin tocar a propósito.** Se intentó arreglarlo y se encontró que el
+cableado `texts.` es apenas el primero de **cuatro** defectos independientes, cada uno destapado al
+arreglar el anterior — se recorrieron los cuatro con el motor real antes de revertir:
+
+1. `{"from": "trigger", "to": "planner"}` sin prefijo `texts.` → el planner no recibía nada.
+2. El edge `{"from": "trigger.plan", "to": "state_merger.injected_plan"}` es **irresoluble por
+   construcción**: un nodo `input` con config no vacía emite exactamente las keys que declara, y
+   `plan` no es una de ellas (`input.rs`, rama "config has declared keys"). El motor skipeaba
+   `state_merger` con `reason: pointer_unresolved`.
+3. El script de `state_merger` lee `llm_plan['output']`, pero el payload de un
+   `information_extraction` es el JSON parseado según su `schema` — acá `{"type": "array", "items": [...]}`,
+   sin key `output`. Devolvía `None` y el plan quedaba vacío.
+4. El nodo `orchestrator` tiene `config: {}`, sin bloque `agents`, así que aun con un plan válido
+   corta con `Configuration for agent 'clothing_expert' not found in orchestrator config`.
+
+Los defectos 2-4 no son de cableado sino de diseño del grafo, y arreglarlos exige decidir la config
+de agentes del orchestrator. Queda como trabajo aparte (ledger, finding #66): con este cambio ese
+grafo pasa de terminar en silencio con exit 0 a fallar con un mensaje accionable en el planner, que
+es exactamente la mejora buscada.
+
+**No hay grafo que dependa del retorno null.** Se revisaron las tres definiciones del repo que usan
+`information_extraction`: `product_sales_assistant_cards.json` ya cableaba `parse_cards.texts.sales_response`
+correctamente, y los otros dos estaban rotos, no apoyados en el null. En `trip_planner.json` el
+`state_merger` tolera un `llm_plan` nulo por su `try/except`, pero eso nunca se ejercitaba: el motor
+skipeaba el propio `state_merger` antes de llegar ahí.
+
+**Lo que corrigió el review.** La primera versión disparaba el error cuando el **texto formateado**
+quedaba vacío, no cuando faltaba la **declaración**. La lente `review-reliability` mostró que eso
+rompía grafos correctamente cableados: `extraction.rs:109` ya descartaba los valores null bajo
+`texts.` (`Value::Null => continue`, código pre-existente — nadie escribe esa rama para un caso
+imposible), y el motor **sí** puede entregar un null ahí. Con un edge sin punto `{"from": "http_node",
+"to": "extract.texts.api_response"}` y un `http_request` que contesta 204:
+
+- `run_use_case.rs:967` skipea la rama solo si el output upstream es null **entero**, y
+  `{"status": 204, "body": null}` no lo es;
+- `run_use_case.rs:973-975` pone `has_data = true` incondicionalmente para un `from` sin punto;
+- `run_use_case.rs:1237-1251` inserta `Value::Null` cuando el `default_output` resuelto es null.
+
+O sea: el nodo se ejecutaba con `texts.api_response = null`, el texto quedaba vacío, y la primera
+versión mataba el run entero con un mensaje que mandaba al operador a arreglar un cableado correcto.
+Era una regresión introducida por el propio fix. Peor: uno de los unit tests **fijaba** ese
+comportamiento, o sea le daba apariencia de decisión deliberada.
+
+**Segundo hallazgo del review: el `to` correcto no alcanza.** La lente encontró que el grafo ya
+recableado seguía entregando basura al LLM. Un nodo `input` con claves declaradas emite el **objeto
+completo** (`input.rs`, rama "config has declared keys"), no el string; con un `from` sin path el
+resolver cae al fallback `is_object()` de `run_use_case.rs:1237-1251` y pasa ese objeto entero, y
+`extraction.rs` lo serializa por la rama `_ => val.to_string()`. Resultado: el modelo recibía
+`{"slack_message":"Hi team..."}` bajo el header `# slack_message` en vez del texto.
+
+Se veía bien porque **funcionaba**: el LLM parsea JSON sin quejarse y la extracción salía correcta.
+Ese es exactamente el motivo por el que pasó desapercibido — el resultado no delata el defecto. El
+cableado final apunta al campo, no al nodo:
+
+```json
+{ "from": "slack_message.slack_message", "to": "extract_info.texts.slack_message" }
+```
+
+Comprobado con el motor, no deducido: con el path el frame `node-start` muestra
+`"texts.slack_message":"Hi team..."` (string); sin él, `"texts.email_body":{"email_body":"..."}`
+(objeto).
+
+**Tests.** Tres unit tests en `extraction.rs`, todos offline y deterministas (el guard corre antes de
+cualquier llamada de red): sin fuente declarada → `Err` nombrando el cableado y listando las keys
+recibidas, con el plumbing interno `__colmena_*` / `session_id` filtrado; `texts.<name> = null` bien
+cableado → `Ok(null)`, no error; `config.texts` declarado pero vacío → `Ok(null)`.
+
+**Verificado con el motor real**, no solo con unit tests — los cuatro estados, vía
+`cargo run --bin dag_engine -- run`:
+
+1. **Antes del fix**, `extraction_example.json` con su cableado original → `"extract_info": null`,
+   `node-skipped` con `reason: upstream_null_output` en `log_result`, `finishReason: "stop"`,
+   `totalTokens: 0`. Éxito silencioso.
+2. **Después del fix**, mismo grafo ya recableado → el frame `node-start` muestra
+   `"texts.slack_message":"Hi team..."` (string limpio, no un objeto serializado), `result` poblado
+   (`{main_objective, dead_line, people_assigned}`), `log_result` corre, cero frames `node-skipped`.
+3. **Sin fuente declarada**, con una copia del grafo re-rota a propósito → frame SSE
+   `{"type":"error","errorText":"... [information_extraction] no text sources to extract from ..."}`
+   con `Input keys received: [email_body, slack_message]`. El error llega al stream, que era
+   exactamente lo que faltaba.
+4. **Fuente declarada que resolvió vacía** — el escenario que encontró el review, reproducido con un
+   `http_request` real contra `https://httpbin.org/status/204` y el edge sin punto
+   `{"from": "empty_source", "to": "extract_info.texts.api_response"}` → `"output": null`,
+   `node-skipped` con `reason: upstream_null_output` en `log_result`, y **ningún frame de error**.
+   O sea: la regresión no está, comprobado contra el motor y no solo con un unit test.
+
+```bash
+cargo run --bin dag_engine -- run tests/graphs/agents/extraction_example.json \
+  --agent-session-id agent_extraction_fix_001
+```
+
+**Alcance y lo que queda afuera.** Cambio de comportamiento acotado a `information_extraction` y a un
+solo caso: un grafo **sin fuente declarada** que antes "pasaba" ahora falla — que es el punto. Un
+grafo correctamente cableado se comporta exactamente igual que antes, incluso cuando su upstream no
+produce nada. Sin cambio de API pública ni de
+formato de wire → **ADP no afectado** salvo que tenga un grafo persistido con este mismo error de
+cableado, en cuyo caso pasa de romperse en silencio a romperse con un mensaje accionable.
+
+- `critic` y `reactor` comparten el patrón `texts.*` con la misma forma de skip. **No** se tocaron —
+  cada uno merece su propia verificación E2E.
+- `tests/graphs/advanced/trip_planner.json` sigue roto por los defectos 2-4 de arriba (finding #66).
+- El finding #18 (mitad A) **ya no está abierto en este archivo**: lo cerró la §31, que extrajo el bloque de
+  mutaciones a `task_mutations.rs` y reemplazó el `let _ = repo.delete_task(...)` por un `match` real. Esta
+  sección se escribió cuando esa PR todavía no estaba en `develop`; se corrigió al rebasar. Lo que sí sigue
+  abierto en la misma función es el finding #20 (strip de comillas por slicing del output de serde).
+
+**Documentación de referencia.**
+- Schema canónico: [`docs/node_configurations.json`](node_configurations.json) — `information_extraction`
+  (descripción, `texts.<name>`, `result`).
+- Guía: [`docs/developer_guide/12_dag_engine_guide.md`](developer_guide/12_dag_engine_guide.md) — Ejemplo 4,
+  con el aviso sobre el prefijo y el ejemplo alineado al grafo verificado.
+- Comparativa: [`docs/developer_guide/37_router_and_output_parser.md`](developer_guide/37_router_and_output_parser.md)
+  — `information_extraction` ya no "skipea en silencio".
+- Puertos: [`docs/agent_context/node_ports_reference.md`](agent_context/node_ports_reference.md).
+- Ledger: [`docs/agent_context/audit/FINDINGS_LEDGER.md`](agent_context/audit/FINDINGS_LEDGER.md) — Batch 14, findings #65 (este fix) y #66 (`trip_planner.json`, abierto).
+
+**Estado.** done.

@@ -101,10 +101,17 @@ impl ExecutableNode for ExtractionNode {
         // --- 3. Gather and Format Texts ---
         let mut formatted_texts = String::new();
 
+        // Whether the graph author DECLARED a text source at all, independently of
+        // what that source resolved to. The two are not the same thing: a correctly
+        // wired `texts.` edge can legitimately carry a null (an `http_request` that
+        // answers 204, say), and that is a data condition, not a misconfiguration.
+        let mut source_declared = config.get("texts").is_some();
+
         // The DAG engine flattens input paths (e.g. from edge.to = "extract_info.texts.slack_message")
         // So we look for any input key that starts with "texts."
         for (key, val) in inputs {
             if let Some(text_name) = key.strip_prefix("texts.") {
+                source_declared = true;
                 let text_str = match val {
                     Value::String(s) => s.clone(),
                     Value::Null => continue, // Ignore explicitly null values
@@ -132,10 +139,50 @@ impl ExecutableNode for ExtractionNode {
         }
 
         if formatted_texts.is_empty() {
-            colmena_log!(
-                "⚠️ [ExtractionNode] Skipped execution because 'texts' input was missing or empty."
-            );
-            return Ok(Value::Null);
+            if source_declared {
+                // A text source WAS wired, it just resolved to nothing. Keep the
+                // pre-existing behaviour: report null and let the engine skip the
+                // downstream branch. Failing here would break correctly-wired
+                // graphs whose upstream legitimately produced no content, and the
+                // wiring advice below would be actively wrong for them.
+                colmena_log!(
+                    "⚠️ [ExtractionNode] Skipped execution: every declared text source resolved to null or empty."
+                );
+                return Ok(Value::Null);
+            }
+
+            // No source declared at all — a misconfiguration. Fail loudly instead
+            // of returning `Ok(Value::Null)`. A null return reported SUCCESS for
+            // work that never happened: the engine then emitted `node-skipped`
+            // with `reason: upstream_null_output` for the whole downstream branch,
+            // and the only trace was a `colmena_log!` invisible without verbose
+            // logging. Nothing reached the SSE stream.
+            //
+            // The list below carries only the keys a graph author actually wrote. The engine also injects
+            // `__colmena_*` / `__node_id` / `__graph_nodes` / `session_id` plumbing,
+            // and listing those buries the one line the operator needs to act on.
+            let mut received: Vec<&str> = inputs
+                .keys()
+                .filter(|k| !k.starts_with("__") && k.as_str() != "session_id")
+                .map(|k| k.as_str())
+                .collect();
+            received.sort_unstable();
+            let received_list = if received.is_empty() {
+                "<none>".to_string()
+            } else {
+                received.join(", ")
+            };
+
+            return Err(format!(
+                "[information_extraction] no text sources to extract from. This node reads its \
+                 documents ONLY from inputs whose key starts with `texts.` (wire the edge as \
+                 {{\"from\": \"<source_node>\", \"to\": \"<this_node>.texts.<name>\"}} — a plain \
+                 {{\"to\": \"<this_node>\"}} does NOT work) or from a static `config.texts` object. \
+                 Input keys received: [{received_list}]. Config `texts` present: {has_config_texts}.",
+                received_list = received_list,
+                has_config_texts = config.get("texts").is_some(),
+            )
+            .into());
         }
 
         if verbose {
@@ -278,5 +325,96 @@ impl ExecutableNode for ExtractionNode {
                 "extra_info": "object — empty on the normal path; when the extraction requests suspension it carries `__colmena_status: \"SUSPENDED\"` and `all_tasks` (the updated task list); carries `skipped_deletes` (array of ids) when the critic named a `delete_tasks` id that is not a valid identifier"
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Builds a config that is valid in every respect EXCEPT the text sources,
+    /// so `execute` reaches the `formatted_texts.is_empty()` guard without ever
+    /// touching the network.
+    fn config_without_texts() -> Value {
+        json!({
+            "provider": "openai",
+            "api_key": "sk-not-used-the-guard-fires-first",
+            "schema": { "field": { "type": "string" } }
+        })
+    }
+
+    #[tokio::test]
+    async fn errors_instead_of_returning_null_when_no_texts_are_wired() {
+        let node = ExtractionNode::new(None);
+        let mut inputs = NodeInputs::new();
+        // The exact mis-wiring this guards: an edge written as
+        // `{"from": "slack_message", "to": "extract_info"}` lands the payload
+        // under the bare source name, never under `texts.`.
+        inputs.insert("slack_message".to_string(), json!("hello"));
+        inputs.insert("email_body".to_string(), json!("world"));
+        // Engine-injected plumbing that must not leak into the message.
+        inputs.insert("__node_id".to_string(), json!("extract_info"));
+        inputs.insert("session_id".to_string(), json!("run-1"));
+        let mut state = json!({});
+
+        let err = node
+            .execute(&inputs, &config_without_texts(), &mut state, None)
+            .await
+            .expect_err("a node with no text sources must fail, not report success");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("texts."),
+            "the error must name the expected wiring, got: {msg}"
+        );
+        assert!(
+            msg.contains("slack_message") && msg.contains("email_body"),
+            "the error must list the input keys actually received, got: {msg}"
+        );
+        assert!(
+            !msg.contains("__node_id") && !msg.contains("session_id"),
+            "engine-injected plumbing must not bury the actionable keys, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_correctly_wired_but_null_text_source_returns_null_instead_of_failing() {
+        let node = ExtractionNode::new(None);
+        let mut inputs = NodeInputs::new();
+        // The edge IS wired correctly. The upstream just produced nothing — an
+        // `http_request` answering 204, for instance, resolves its `body` to null
+        // and the engine hands it over as `texts.<name> = null`. That is a data
+        // condition, not a misconfiguration, and it must not fail the whole run:
+        // before the guard existed this path returned null and the engine skipped
+        // only the downstream branch.
+        inputs.insert("texts.api_response".to_string(), Value::Null);
+        let mut state = json!({});
+
+        let out = node
+            .execute(&inputs, &config_without_texts(), &mut state, None)
+            .await
+            .expect("a declared-but-empty source must not fail the run");
+
+        assert_eq!(
+            out,
+            Value::Null,
+            "the pre-existing null return is the contract for a declared-but-empty source"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_declared_but_empty_config_texts_also_returns_null() {
+        let node = ExtractionNode::new(None);
+        let inputs = NodeInputs::new();
+        let mut config = config_without_texts();
+        config["texts"] = json!({});
+        let mut state = json!({});
+
+        let out = node
+            .execute(&inputs, &config, &mut state, None)
+            .await
+            .expect("declaring `config.texts` is declaring a source, even when empty");
+
+        assert_eq!(out, Value::Null);
     }
 }

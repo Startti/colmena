@@ -44,12 +44,12 @@
   },
   "edges": [
     {
-      "from": "slack_message",
-      "to": "extract_info"
+      "from": "slack_message.slack_message",
+      "to": "extract_info.texts.slack_message"
     },
     {
-      "from": "email_body",
-      "to": "extract_info"
+      "from": "email_body.email_body",
+      "to": "extract_info.texts.email_body"
     },
     {
       "from": "extract_info",

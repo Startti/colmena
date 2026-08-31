@@ -1836,7 +1836,7 @@
 
     "information_extraction": {
       "name": "Information Extraction",
-      "description": "Extracts structured data from unstructured text using an LLM and a user-defined JSON schema. You provide the schema defining what to extract (field names, types, descriptions), and the node instructs the LLM to output valid JSON matching that schema. The temperature is forced to 0.1 for maximum consistency. Text sources are gathered from: (1) input edges using the 'texts.{name}' pattern (e.g., an edge to 'extractor.texts.email_body'), and (2) static texts defined in config. Multiple text sources are concatenated with headers. If no texts are provided, the node is silently skipped. Can also process critic mutations (add_tasks, delete_tasks) for integration with orchestrator flows.",
+      "description": "Extracts structured data from unstructured text using an LLM and a user-defined JSON schema. You provide the schema defining what to extract (field names, types, descriptions), and the node instructs the LLM to output valid JSON matching that schema. The temperature is forced to 0.1 for maximum consistency. Text sources are gathered from: (1) input edges using the 'texts.{name}' pattern (e.g., an edge to 'extractor.texts.email_body'), and (2) static texts defined in config. Multiple text sources are concatenated with headers. Two distinct empty cases: if NO source is declared at all (no 'texts.'-prefixed input and no config 'texts') the node FAILS with an error naming the expected wiring \u2014 that is a misconfiguration. If a source IS declared but every one resolved to null or empty (an upstream that legitimately produced nothing), the node returns null and the engine skips the downstream branch, which is the long-standing behavior. Note the edge form: {\"from\": \"source\", \"to\": \"extractor\"} does NOT work, because the payload lands under the bare source name instead of under 'texts.'. Can also process critic mutations (add_tasks, delete_tasks) for integration with orchestrator flows.",
       "category": "llm",
       "config_fields": {
         "provider": {
@@ -1904,7 +1904,7 @@
       "input_ports": {
         "texts.<name>": {
           "type": "string|any",
-          "description": "Dynamic text sources for extraction. Use edge paths like { \"from\": \"source.result\", \"to\": \"extractor.texts.email_body\" }. The node collects all inputs with keys starting with 'texts.' and formats them as labeled text sections. Each text source gets a header '# {name}' for the LLM to reference. Non-string values are serialized to JSON strings."
+          "description": "Dynamic text sources for extraction. REQUIRED unless config 'texts' is set \u2014 the node reads documents ONLY from input keys starting with 'texts.', so an edge written as { \"from\": \"source\", \"to\": \"extractor\" } declares no source at all and the run fails with a wiring error. Declaring the key is what counts: a correctly wired 'texts.<name>' whose value resolves to null returns null instead of failing. Use edge paths like { \"from\": \"source.result\", \"to\": \"extractor.texts.email_body\" }. The node collects all inputs with keys starting with 'texts.' and formats them as labeled text sections. Each text source gets a header '# {name}' for the LLM to reference. Non-string values are serialized to JSON strings."
         },
         "system_message": {
           "type": "string",
@@ -1914,7 +1914,7 @@
       "output_ports": {
         "result": {
           "type": "object",
-          "description": "The extracted data as a JSON object matching the provided schema. If the LLM's response contains markdown code blocks, they are automatically stripped before parsing. Returns null if no texts were provided."
+          "description": "The extracted data as a JSON object matching the provided schema. If the LLM's response contains markdown code blocks, they are automatically stripped before parsing. Null when every declared text source resolved to null or empty; an error (not null) when no source was declared at all."
         },
         "extra_info": {
           "type": "object",
