@@ -6,7 +6,7 @@
 **How to use (for the exploration/spec phase):** before opening files to assess a change, look up the target file below. **Used by** is its blast radius — the files that break if you change its public surface. **Depends on** is what it needs. Start by reading only those, not the whole repo.
 
 - Files indexed: **368**
-- Modules with at least one importer: **167**
+- Modules with at least one importer: **168**
 
 ## Blast-radius ranking (change these with the most care)
 
@@ -23,11 +23,11 @@
 | 13 | `llm::domain::attachments` | `src/libs/colmena/src/llm/domain/attachments/mod.rs` |
 | 13 | `llm::infrastructure` | `src/libs/colmena/src/llm/infrastructure/mod.rs` |
 | 13 | `storage::domain` | `src/libs/colmena/src/storage/domain/mod.rs` |
+| 11 | `dag_engine::application::secure_value_service` | `src/libs/colmena/src/dag_engine/application/secure_value_service.rs` |
 | 11 | `dag_engine::domain::error` | `src/libs/colmena/src/dag_engine/domain/error.rs` |
 | 11 | `documents::domain::ports` | `src/libs/colmena/src/documents/domain/ports.rs` |
 | 11 | `text` | `src/libs/colmena/src/text/mod.rs` |
 | 10 | `dag_engine::application::ports` | `src/libs/colmena/src/dag_engine/application/ports.rs` |
-| 10 | `dag_engine::application::secure_value_service` | `src/libs/colmena/src/dag_engine/application/secure_value_service.rs` |
 | 10 | `dag_engine::infrastructure::pool_registry` | `src/libs/colmena/src/dag_engine/infrastructure/pool_registry/mod.rs` |
 | 10 | `documents::domain::artifact` | `src/libs/colmena/src/documents/domain/artifact.rs` |
 | 10 | `documents::domain::patch` | `src/libs/colmena/src/documents/domain/patch.rs` |
@@ -230,7 +230,7 @@
 
 #### `src/libs/colmena/src/dag_engine/application/secure_value_service.rs`
 - Module: `dag_engine::application::secure_value_service`
-- **Used by (10)**: `src/libs/colmena/src/dag_engine/application/run_use_case.rs`, `src/libs/colmena/src/dag_engine/engine.rs`, `src/libs/colmena/src/dag_engine/infrastructure/dag_tool_executor.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/api_explorer.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/image_edit.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/image_generation.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/secure_suspend.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/tavily_client.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/tts.rs`, `src/libs/colmena/src/dag_engine/infrastructure/registry.rs`
+- **Used by (11)**: `src/libs/colmena/src/dag_engine/application/run_use_case.rs`, `src/libs/colmena/src/dag_engine/engine.rs`, `src/libs/colmena/src/dag_engine/infrastructure/dag_tool_executor.rs`, `src/libs/colmena/src/dag_engine/infrastructure/mcp_registry/key.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/api_explorer.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/image_edit.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/image_generation.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/secure_suspend.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/tavily_client.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/tts.rs`, `src/libs/colmena/src/dag_engine/infrastructure/registry.rs`
 - Depends on (1): `dag_engine::domain`
 
 #### `src/libs/colmena/src/dag_engine/application/sql_execution_service.rs`
@@ -320,8 +320,8 @@
 
 #### `src/libs/colmena/src/dag_engine/infrastructure/mcp_registry/key.rs`
 - Module: `dag_engine::infrastructure::mcp_registry::key`
-- **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
-- Depends on (1): `llm::domain::mcp`
+- **Used by (1)**: `src/libs/colmena/src/dag_engine/infrastructure/mcp_registry/registry.rs`
+- Depends on (2): `dag_engine::application::secure_value_service`, `llm::domain::mcp`
 
 #### `src/libs/colmena/src/dag_engine/infrastructure/mcp_registry/mod.rs`
 - Module: `dag_engine::infrastructure::mcp_registry`
@@ -331,7 +331,7 @@
 #### `src/libs/colmena/src/dag_engine/infrastructure/mcp_registry/registry.rs`
 - Module: `dag_engine::infrastructure::mcp_registry::registry`
 - **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
-- Depends on (2): `dag_engine::infrastructure::mcp_registry`, `llm::domain::mcp`
+- Depends on (3): `dag_engine::infrastructure::mcp_registry`, `dag_engine::infrastructure::mcp_registry::key`, `llm::domain::mcp`
 
 #### `src/libs/colmena/src/dag_engine/infrastructure/mod.rs`
 - Module: `dag_engine::infrastructure`

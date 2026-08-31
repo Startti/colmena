@@ -9,6 +9,17 @@ pub struct SecureValueService {
     repo: Arc<dyn SecureValueRepository>,
 }
 
+/// Whether a string is a secure-value placeholder rather than a literal.
+///
+/// THE definition, extracted so every caller shares it. `collect_placeholders`
+/// delegates here, and so does MCP connection keying, which must know whether
+/// a header value is a session-scoped reference (its resolved secret differs
+/// per session) or a literal (the same everywhere). A second, drifting copy of
+/// this rule would eventually let one session reuse another's credential.
+pub(crate) fn is_secure_value_placeholder(s: &str) -> bool {
+    s.starts_with('<') && s.ends_with('>') && s.len() > 2
+}
+
 impl SecureValueService {
     pub fn new(repo: Arc<dyn SecureValueRepository>) -> Self {
         Self { repo }
@@ -113,9 +124,18 @@ impl SecureValueService {
     /// Inject real values back into inputs before non-LLM node execution.
     /// Automatically detects placeholders (`<value_N>`, `<sv_*>`) and replaces them.
     ///
-    /// `agent_session_id` is forwarded to the repository: when present, lookup is
-    /// agent-first with session fallback (so resume under a fresh ephemeral
-    /// session_id can still find secrets persisted under the same agent).
+    /// `agent_session_id` is forwarded to the repository, and it takes
+    /// PRECEDENCE: when present the lookup is agent-only, and when absent it is
+    /// session-only. The two branches are mutually exclusive — there is no
+    /// fallback from one to the other (`PostgresSecureValueRepository::decrypt`
+    /// is a plain if/else over two `WHERE` clauses).
+    ///
+    /// The effect an earlier version of this comment called a "fallback" is
+    /// real but arrives differently: because the agent branch ignores
+    /// `session_id` entirely, a resume under a fresh ephemeral session still
+    /// finds secrets persisted under the same agent. Purpose achieved,
+    /// mechanism different — and the difference matters to anything that
+    /// partitions on these ids, such as MCP connection keying.
     ///
     /// Returns the map of `(decrypted_value → handle)` for every placeholder that
     /// was successfully resolved and substituted. Outbound-masking callers (e.g.
@@ -162,7 +182,7 @@ impl SecureValueService {
                     self.collect_placeholders(v, placeholders);
                 }
             }
-            Value::String(s) if s.starts_with('<') && s.ends_with('>') && s.len() > 2 => {
+            Value::String(s) if is_secure_value_placeholder(s) => {
                 placeholders.push(s.clone());
             }
             _ => {}
@@ -317,7 +337,14 @@ mod tests {
     }
 
     /// Mock repository for testing. Stores every persist as a row.
-    /// `decrypt`/`exists` mirror the production agent-first / session-fallback rule.
+    ///
+    /// CAVEAT: `decrypt`/`exists` here look up agent-first and then FALL BACK
+    /// to session, which production does NOT do — the real repository takes
+    /// exactly one of two mutually exclusive branches. The mock is therefore
+    /// more permissive than production and must not be used to reason about
+    /// how secrets partition. Anything that keys on that partition (MCP
+    /// connection identity, for one) has to read
+    /// `PostgresSecureValueRepository::decrypt` instead.
     struct MockSecureValueRepository {
         rows: Mutex<Vec<MockEntry>>,
     }

@@ -40,13 +40,23 @@ pub struct McpConnectionRegistry {
     /// handshake instead of two.
     ///
     /// Deliberate deviation from `pool_registry`, which removes the entry
-    /// after creating: entries are kept here. That registry keys on arbitrary
-    /// database URLs and must bound growth; these keys are operator-declared
-    /// MCP servers, so the map holds a handful of entries for the process
-    /// lifetime. Removing would open a window where a late waiter and a fresh
-    /// caller hold two different mutexes for one key — harmless, because the
-    /// re-check below catches it, but it makes the lock's guarantee harder to
-    /// reason about for no benefit at this cardinality.
+    /// after creating: entries are kept here. Removing would open a window
+    /// where a late waiter and a fresh caller hold two different mutexes for
+    /// one key — harmless, because the re-check below catches it, but it makes
+    /// the lock's guarantee harder to reason about.
+    ///
+    /// CARDINALITY, honestly: this was first justified on "a handful of
+    /// operator-declared MCP servers". That premise no longer holds. Since
+    /// `McpServerKey` gained a credential scope, a credential-bearing server
+    /// keys per agent session, so this map — and `clients`, `tool_cache` and
+    /// `fetch_locks` — grow with CONCURRENT SESSIONS, not with declared
+    /// servers. None of them has eviction, a max-entries cap or an idle
+    /// timeout, while the sibling `pool_registry` has all three
+    /// (`LruCache`, `max_entries`, `idle_timeout`).
+    ///
+    /// That is a gap, not a decision, and it MUST be closed before this
+    /// registry is wired to an executor. It is not a live defect today only
+    /// because nothing constructs this type outside tests.
     creation_locks: DashMap<McpServerKey, Arc<Mutex<()>>>,
     /// Last `tools/list` result per server, with the moment it was fetched.
     tool_cache: DashMap<McpServerKey, CachedTools>,
@@ -194,6 +204,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
+    use crate::dag_engine::infrastructure::mcp_registry::key::CredentialScope;
     use crate::llm::domain::mcp::{McpToolDescriptor, McpToolResult, McpTransport};
 
     /// Counts `tools/list` round-trips, so cache hits are observable, and can
@@ -341,7 +352,7 @@ mod tests {
         let connector = Arc::new(CountingConnector::new());
         let registry = McpConnectionRegistry::new(connector.clone());
         let cfg = config("https://mcp.example.com/mcp");
-        let key = McpServerKey::from_config(&cfg);
+        let key = McpServerKey::from_config(&cfg, CredentialScope::unscoped());
 
         let a = registry.client(&key, "docs", &cfg).await.unwrap();
         let b = registry.client(&key, "docs", &cfg).await.unwrap();
@@ -365,11 +376,19 @@ mod tests {
         let b_cfg = config("https://b.example.com/mcp");
 
         registry
-            .client(&McpServerKey::from_config(&a_cfg), "a", &a_cfg)
+            .client(
+                &McpServerKey::from_config(&a_cfg, CredentialScope::unscoped()),
+                "a",
+                &a_cfg,
+            )
             .await
             .unwrap();
         registry
-            .client(&McpServerKey::from_config(&b_cfg), "b", &b_cfg)
+            .client(
+                &McpServerKey::from_config(&b_cfg, CredentialScope::unscoped()),
+                "b",
+                &b_cfg,
+            )
             .await
             .unwrap();
 
@@ -386,7 +405,7 @@ mod tests {
         let connector = Arc::new(CountingConnector::slow());
         let registry = Arc::new(McpConnectionRegistry::new(connector.clone()));
         let cfg = config("https://mcp.example.com/mcp");
-        let key = McpServerKey::from_config(&cfg);
+        let key = McpServerKey::from_config(&cfg, CredentialScope::unscoped());
 
         let mut tasks = Vec::new();
         for _ in 0..16 {
@@ -415,7 +434,7 @@ mod tests {
         let connector = Arc::new(CountingConnector::failing_first(1));
         let registry = McpConnectionRegistry::new(connector.clone());
         let cfg = config("https://mcp.example.com/mcp");
-        let key = McpServerKey::from_config(&cfg);
+        let key = McpServerKey::from_config(&cfg, CredentialScope::unscoped());
 
         assert!(registry.client(&key, "docs", &cfg).await.is_err());
         assert!(registry.is_empty(), "a failure must not occupy the pool");
@@ -437,7 +456,7 @@ mod tests {
         let connector = Arc::new(CountingConnector::new());
         let registry = McpConnectionRegistry::new(connector.clone());
         let cfg = config("https://mcp.example.com/mcp");
-        let key = McpServerKey::from_config(&cfg);
+        let key = McpServerKey::from_config(&cfg, CredentialScope::unscoped());
 
         let first = registry.tools(&key, "docs", &cfg).await.unwrap();
         let second = registry.tools(&key, "docs", &cfg).await.unwrap();
@@ -461,7 +480,7 @@ mod tests {
         let connector = Arc::new(CountingConnector::new());
         let registry = McpConnectionRegistry::new(connector.clone());
         let cfg = config("https://mcp.example.com/mcp"); // cache_ttl = 300s
-        let key = McpServerKey::from_config(&cfg);
+        let key = McpServerKey::from_config(&cfg, CredentialScope::unscoped());
 
         registry.tools(&key, "docs", &cfg).await.unwrap();
         tokio::time::advance(Duration::from_secs(299)).await;
@@ -483,11 +502,19 @@ mod tests {
         let b = config("https://b.example.com/mcp");
 
         let a_tools = registry
-            .tools(&McpServerKey::from_config(&a), "a", &a)
+            .tools(
+                &McpServerKey::from_config(&a, CredentialScope::unscoped()),
+                "a",
+                &a,
+            )
             .await
             .unwrap();
         let b_tools = registry
-            .tools(&McpServerKey::from_config(&b), "b", &b)
+            .tools(
+                &McpServerKey::from_config(&b, CredentialScope::unscoped()),
+                "b",
+                &b,
+            )
             .await
             .unwrap();
 
@@ -503,7 +530,7 @@ mod tests {
         let connector = Arc::new(CountingConnector::listing_fails_first(1));
         let registry = McpConnectionRegistry::new(connector.clone());
         let cfg = config("https://mcp.example.com/mcp");
-        let key = McpServerKey::from_config(&cfg);
+        let key = McpServerKey::from_config(&cfg, CredentialScope::unscoped());
 
         assert!(registry.tools(&key, "docs", &cfg).await.is_err());
         assert!(
@@ -521,7 +548,7 @@ mod tests {
         let connector = Arc::new(CountingConnector::slow_listing());
         let registry = Arc::new(McpConnectionRegistry::new(connector.clone()));
         let cfg = config("https://mcp.example.com/mcp");
-        let key = McpServerKey::from_config(&cfg);
+        let key = McpServerKey::from_config(&cfg, CredentialScope::unscoped());
 
         let mut tasks = Vec::new();
         for _ in 0..16 {
@@ -549,7 +576,7 @@ mod tests {
         let registry = McpConnectionRegistry::new(connector.clone());
         let mut cfg = config("https://mcp.example.com/mcp");
         cfg.cache_ttl = Duration::ZERO;
-        let key = McpServerKey::from_config(&cfg);
+        let key = McpServerKey::from_config(&cfg, CredentialScope::unscoped());
 
         registry.tools(&key, "docs", &cfg).await.unwrap();
         registry.tools(&key, "docs", &cfg).await.unwrap();
@@ -567,7 +594,7 @@ mod tests {
             McpConnectionRegistry::new(c2.clone()),
         );
         let cfg = config("https://mcp.example.com/mcp");
-        let key = McpServerKey::from_config(&cfg);
+        let key = McpServerKey::from_config(&cfg, CredentialScope::unscoped());
 
         r1.client(&key, "docs", &cfg).await.unwrap();
         r2.client(&key, "docs", &cfg).await.unwrap();

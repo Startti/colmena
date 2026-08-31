@@ -1609,3 +1609,79 @@ values es la pieza siguiente — hoy el llamador debe pasar valores ya resueltos
 
 **Estado.** done.
 
+## 30. Dos sesiones no comparten conexión MCP cuando los headers llevan credenciales
+
+**Corrección a §26.** La `McpServerKey` hasheaba url + transporte + las **referencias** de header, a
+propósito: así rotar un secreto no fragmenta el pool. Ese razonamiento asumía que una referencia
+significa lo mismo en todas partes. **No es así.**
+
+Los handles de secure values son `<value_1>`, `<sv_admin_token>` — contadores y nombres, sin nada
+único por sesión — y `decrypt(session_id, agent_session_id, handle)` resuelve **el mismo handle a
+secretos distintos según la sesión**. Dos sesiones de agente corriendo el mismo grafo producen
+`header_refs` idénticos, por lo tanto la misma clave, por lo tanto **comparten una conexión del
+pool**: la segunda sesión manda la credencial de la primera.
+
+Es la misma clase de bug que el framing por longitud arregló en §26 —dos credenciales, una
+conexión— reapareciendo una capa más arriba.
+
+**Arreglo.** `from_config` toma ahora un `CredentialScope { session_id, agent_session_id }`, que
+participa en la clave **solo cuando algún valor de header es una referencia**.
+
+El principio, que la primera versión de este arreglo no tenía: **la clave debe particionar el pool
+exactamente como el descifrado particiona los secretos.** `decrypt` resuelve por agente cuando hay
+`agent_session_id` y **estrictamente por `session_id`** cuando no —el modo *session-only* legítimo y
+documentado— así que la clave hace lo mismo. Un scope que solo llevara el id de agente colapsaría
+todos los runs session-only a una clave y volvería a compartir credenciales; el review lo marcó como
+CRITICAL antes de mergear, y ahora hay un test por cada mitad.
+
+Se absorben **dos** campos, un discriminante y un id, así `("agent","")` y `("none","")` siguen
+siendo preimágenes distintas y un id vacío no puede colisionar con el caso sin scope. Consecuencias, elegidas a
+conciencia:
+
+| Config | Comportamiento |
+|---|---|
+| Sin headers (servidor público) | pool **global**, sin fragmentar |
+| Headers literales | pool **global** — es el mismo secreto en todas partes, compartir es correcto |
+| Headers con referencia | aislado **por agent session** |
+
+Por `agent_session_id` y no por `session_id`: una conversación reusa su conexión entre turnos —igual
+que keyea la memoria conversacional— mientras que dos agentes distintos nunca comparten credencial.
+Aislar por run habría cambiado una fuga de credenciales por un handshake en cada turno.
+
+El scope se absorbe **length-framed** como cualquier otro campo, antes de los headers, así que no
+puede confundirse con contenido de header.
+
+**El predicado de placeholder se extrajo, no se duplicó.** `is_secure_value_placeholder` es ahora la
+definición única; `collect_placeholders` delega ahí. Una segunda copia de esa regla terminaría
+desincronizándose, y el modo de fallo de esa desincronización es exactamente que una sesión reuse la
+credencial de otra.
+
+`from_config` cambia de firma en vez de ganar una variante segura al lado: un llamador no debe poder
+obtener la clave insegura por descuido. No hay consumidores en producción todavía.
+
+**Verificado.** Neutralizando el scope, el test entre sesiones falla — el bug reproducido, no
+argumentado. Y colapsando **solo el discriminante**, dejando los ids intactos, falla el test del id
+vacío: aísla exactamente el campo que dice aislar.
+
+Cuatro tests de este archivo fueron reescritos durante el review por el mismo defecto: comparaban
+dos valores que diferían en **más de una cosa**, dejando que una diferencia ajena cargara la
+aserción. Las versiones finales mantienen todo constante y varían un solo campo, y cada una se
+verificó mutando exactamente ese campo. El detalle por test está en sus doc comments.
+
+**Dos comentarios pre-existentes corregidos.** El doc de `inject_secrets` y el del mock de tests
+decían que la resolución es "agent-first con fallback a sesión". No lo es:
+`PostgresSecureValueRepository::decrypt` es un if/else sobre dos `WHERE` mutuamente excluyentes, sin
+fallback. El efecto que describían —que un resume con un `session_id` nuevo encuentre secretos del
+mismo agente— sí ocurre, pero por **precedencia** del agente, no por fallback. La diferencia importa
+para cualquier cosa que particione sobre esos ids, que es exactamente lo que hace esta clave. El
+mock, además, **sí** implementa el fallback que producción no tiene, así que ahora lleva una
+advertencia de no razonar sobre particionamiento leyéndolo.
+
+**Cardinalidad, dicho de frente.** El scope cambia el orden de magnitud del pool: antes era una
+conexión por servidor en todo el proceso, ahora es una por sesión de agente para los servidores con
+credencial. `McpConnectionRegistry` no tiene evicción, ni tope de entradas, ni timeout de
+inactividad —`pool_registry` tiene los tres— y eso pasa de ser defendible a ser un hueco que **hay
+que cerrar antes de cablear** la registry a un executor. Queda anotado en el código, no solo acá.
+
+**Estado.** done.
+
