@@ -8,5 +8,5 @@
 pub mod key;
 pub mod registry;
 
-pub use key::McpServerKey;
+pub use key::{CredentialScope, McpServerKey};
 pub use registry::{McpConnectionRegistry, McpConnector};
