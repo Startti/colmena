@@ -52,7 +52,7 @@ Recibe texto crudo en `input`, lo manda al LLM con un schema inline y devuelve e
 |---|---|---|
 | Inputs | Un único port `input` | Múltiples `texts.{name}` |
 | Schema | Inline-required (`{ type, required, description }`) | JSON Schema estándar |
-| Input vacío | Hard error (`missing input`) | Silently skip |
+| Input vacío | Hard error (`missing input`) | Sin fuente declarada → hard error; fuente declarada que resolvió vacía → `null` |
 | Mutaciones del orchestrator (`add_tasks`/`delete_tasks`) | No las soporta | Sí |
 
 Ambos comparten internamente el motor de extracción (`util/extract_with_schema`), así que la latencia y los costos son idénticos.
@@ -92,7 +92,9 @@ El motor de extracción que `output_parser` envuelve. Extrae datos estructurados
 | `verbose` | boolean | `false` | Imprime el prompt, los textos y el output parseado para debug. |
 
 **Ports:**
-- **Entrada** — sin port default. Fuentes dinámicas vía el patrón `texts.{name}` (ej. edge `{ "from": "source.result", "to": "extractor.texts.email_body" }`); cada fuente recibe un header `# {name}` y se concatenan. Los valores no-string se serializan a JSON. `system_message` también es sobrescribible por edge. **Si no llega ningún `texts`, el nodo se skipea silenciosamente** (a diferencia de `output_parser`, que falla duro).
+- **Entrada** — sin port default. Fuentes dinámicas vía el patrón `texts.{name}` (ej. edge `{ "from": "source.result", "to": "extractor.texts.email_body" }`); cada fuente recibe un header `# {name}` y se concatenan. Los valores no-string se serializan a JSON. `system_message` también es sobrescribible por edge. **Si no se declara ninguna fuente, el nodo falla duro** con un error que nombra el cableado esperado. Ojo con la forma del edge: `{ "from": "source", "to": "extractor" }` **no** declara fuente, porque el payload aterriza bajo el nombre del nodo origen y nunca bajo `texts.`. Hasta 2026-08-30 ese caso retornaba `Ok(null)`, o sea reportaba éxito sin hacer nada, y el motor skipeaba toda la rama downstream con `reason: upstream_null_output`.
+
+  Lo que **sí** sigue devolviendo `null` es el caso distinto de una fuente **bien cableada que resolvió vacía** (un `http_request` que contesta 204 deja `texts.<name> = null`). Eso es una condición de datos, no de configuración: el motor skipea solo esa rama, como siempre. La distinción es por **declaración**, no por contenido.
 - **Salida** (default `result`) — objeto JSON cuyos campos **siguen el `schema` de config** (dinámico). Los code blocks markdown se strippean antes de parsear.
 
 **Payload de salida** — no wrappeado en `{ output: ... }`:

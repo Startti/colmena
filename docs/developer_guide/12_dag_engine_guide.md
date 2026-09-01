@@ -834,13 +834,25 @@ curl -X POST http://localhost:3000/test \
 
 El nodo `information_extraction` permite tomar texto no estructurado y usar un LLM para extraer un JSON estrictamente apegado a un `schema`. Soporta múltiples entradas inyectadas dinámicamente en el objeto `texts`.
 
+> ⚠️ **El prefijo `texts.` en el `to` del edge es obligatorio.** El nodo junta sus documentos SOLO de inputs cuya key empieza con `texts.` (o del `config.texts` estático). Un edge escrito como `{"from": "slack_message", "to": "extract_info"}` deja el payload bajo la key `slack_message`: el nodo no ve ninguna fuente declarada y **falla** con un error que nombra el cableado esperado. Hasta 2026-08-30 ese caso retornaba `null` reportando éxito, y el motor skipeaba toda la rama downstream con `reason: upstream_null_output` sin que nada llegara al stream SSE.
+>
+> Distinto es una fuente **bien cableada que resolvió vacía** (`texts.<name> = null` porque el upstream no produjo nada): eso sigue devolviendo `null` y skipeando solo esa rama. El nodo distingue por **declaración**, no por contenido.
+>
+> ⚠️ **El `from` también necesita su path.** Un nodo `input` con claves declaradas emite el objeto
+> completo (`{"slack_message": "Hi team..."}`), no el string. Si el `from` es solo `slack_message`,
+> lo que llega a `texts.slack_message` es ese **objeto**, y el nodo lo serializa a JSON literal antes
+> de mandárselo al LLM: el modelo lee `{"slack_message":"Hi team..."}` en vez del texto limpio.
+> Funciona —el LLM parsea JSON— pero no es lo que querés. Por eso el `from` es
+> `slack_message.slack_message`: apunta al campo, no al nodo. Verificado con el motor: con el path
+> llega el string; sin él llega el objeto.
+
 ```json
 {
   "nodes": {
     "slack_message": {
       "type": "input",
       "config": {
-        "data": "Hi team, let's ship the new deployment feature. The deadline for this is 15-11-2026. Juan and Maria are assigned to the backend."
+        "slack_message": "Hi team, let's ship the new deployment feature. The deadline for this is 15-11-2026. Juan and Maria are assigned to the backend."
       }
     },
     "extract_info": {
@@ -859,7 +871,7 @@ El nodo `information_extraction` permite tomar texto no estructurado y usar un L
   },
   "edges": [
     {
-      "from": "slack_message.output",
+      "from": "slack_message.slack_message",
       "to": "extract_info.texts.slack_message"
     }
   ]
