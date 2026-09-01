@@ -1621,6 +1621,12 @@ values es la pieza siguiente — hoy el llamador debe pasar valores ya resueltos
 
 ## 30. Dos sesiones no comparten conexión MCP cuando los headers llevan credenciales
 
+> **[SUPERADA POR §34.]** El problema que esta entrada identifica es real y sigue vigente: el pool
+> no puede mezclar credenciales. El MECANISMO que describe abajo —`from_config` con un
+> `CredentialScope { session_id, agent_session_id }`— fue reemplazado por un fingerprint de los
+> valores resueltos. Ni `from_config` ni `CredentialScope` existen ya. La tabla de comportamiento de
+> esta entrada («aislado por agent session») describe el diseño viejo, no el actual.
+
 **Corrección a §26.** La `McpServerKey` hasheaba url + transporte + las **referencias** de header, a
 propósito: así rotar un secreto no fragmenta el pool. Ese razonamiento asumía que una referencia
 significa lo mismo en todas partes. **No es así.**
@@ -1934,6 +1940,12 @@ la clave era una por servidor declarado eso era defendible; desde que incorpora 
 credencial, la cardinalidad escala con **sesiones concurrentes**, y dejarlo así habría sido cablear
 la registry sobre un mapa que crece sin límite.
 
+> **[§34 corrigió la premisa, no la conclusión.]** La cardinalidad ya no escala con sesiones
+> concurrentes sino con **credenciales resueltas distintas**: dos sesiones que comparten un secreto
+> ahora colapsan a una sola clave. La evicción sigue siendo necesaria — de hecho más, porque cada
+> rotación de secreto agrega una entrada.
+
+
 **Se evicta la huella completa de la clave** —cliente, catálogo cacheado y los dos mapas de locks—,
 no solo el cliente. Borrar únicamente el cliente dejaría los otros tres creciendo igual, que es
 exactamente el problema.
@@ -1979,10 +1991,11 @@ llamador de producción y un operador no podría ver que el tope se está tocand
 El tope de 128 además es heurístico, sin datos de carga detrás.
 
 Y una propiedad inherente a cualquier cache con tope LRU, dicha para que quien cablee la conozca:
-alguien que pueda acuñar muchos `agent_session_id` contra un servidor con credencial puede empujar
-la cardinalidad hasta el tope y forzar la evicción de la conexión caliente de otra sesión. **No
-rompe el aislamiento de credenciales** —solo obliga a re-handshakear— pero es un costo real entre
-tenants.
+alguien que pueda acuñar muchas **credenciales distintas** contra un servidor puede empujar la
+cardinalidad hasta el tope y forzar la evicción de la conexión caliente de otro tenant. **No rompe
+el aislamiento de credenciales** —solo obliga a re-handshakear— pero es un costo real entre
+tenants. (Redactado originalmente sobre `agent_session_id`; §34 cambió el discriminante a la
+credencial resuelta, no la propiedad.)
 
 **`touch` usa `push`, no `put` — y eso es lo que hace que el tope sea un invariante.**
 `LruCache::put` devuelve `Option<V>`: descarta la mitad de la clave, así que **no puede** informar
@@ -2064,3 +2077,90 @@ alcance explícitamente.
 **Estado.** done (evicción y tope; pendientes `idle_timeout`, `close_all`, observabilidad, el
 `tool_cache` huérfano de la ventana estrecha, y medir el costo de `touch` en el fast-path).
 
+## 34. La identidad de conexión MCP pasa a ser la credencial, no la sesión
+
+**Qué cambió.** `McpServerKey` deja de scopear por `session_id`/`agent_session_id`
+y pasa a incluir un **fingerprint salado de los valores de header ya resueltos**.
+`McpConnectionRegistry` deja de saber conectar: recibe una factory y queda como pool puro.
+El trait `McpConnector` se borra.
+
+**Por qué el scope por sesión estaba mal.** §30 (PR #222) lo introdujo por una razón
+correcta —el pool no puede mezclar credenciales— pero con la única herramienta que había:
+la clave se calculaba **antes** de resolver los secretos, así que el id de sesión era el
+único discriminante disponible. Era un proxy, y fallaba en las dos direcciones:
+
+- **Separaba de más.** Dos sesiones que sostienen la MISMA credencial recibían conexiones
+  distintas. El servidor no puede distinguirlas; el pool tampoco debería. Una conexión por
+  sesión, para nada.
+- **Separaba de menos, que es lo grave.** Una **rotación de secreto** deja el config y la
+  sesión intactos, así que la clave no cambiaba. El pool seguía devolviendo la conexión
+  construida con el valor retirado hasta que algo más la eviccionara. Nadie lo nota hasta
+  que el servidor empieza a rechazar.
+
+**Por qué el fingerprint lo cierra por construcción.** Si el llamador resuelve los headers
+primero —y puede: tiene el servicio de secure values y los ids— la clave puede incluir un
+digest de los valores. Rotación → fingerprint nuevo → clave nueva → conexión nueva, y la
+vieja se va por el LRU de §33. Sin lógica de invalidación que equivocar. El caso sin
+credenciales queda igual que antes: fingerprint constante, pooling global, que es lo que
+hace barato hablar con un servidor público como DeepWiki.
+
+**El digest va salado, y no es cosmético.** La clave se imprime en el `tracing::debug` de
+evicción. Un `sha256` sin sal de un secreto no es reversible pero **sí es un oráculo
+estable**: cualquiera que lea un log y adivine un valor puede confirmar la conjetura. La
+sal es un uuid por proceso — estable exactamente mientras el pooling la necesita, la vida
+del proceso, e inútil fuera de ahí. `the_fingerprint_is_salted_not_a_bare_digest_of_the_secret`
+lo fija comparando contra el digest sin sal que un atacante calcularía.
+
+**El registry como pool puro.** `client(key, factory)` en vez de
+`client(key, label, config)` + un trait. La razón es de honestidad de API: una conexión se
+crea una sola vez por clave, así que los headers resueltos son entrada de **creación**, no
+de llamada. Una firma que los recibiera en cada `client()` los ignoraría en cada cache hit
+y le mentiría al lector. La factory dice la verdad: solo se invoca en miss.
+
+`McpConnector` se borra en el mismo movimiento. Tenía cero implementaciones de producción
+y una de test — un trait que existía solo para poder mockearse. Los tests ahora pasan un
+closure, que es menos código y la misma cobertura: `concurrent_first_use_produces_exactly_one_handshake`
+sigue fijando el single-flight, verificado quitando el re-chequeo bajo el lock y viendo
+fallar el test.
+
+**Momento.** Se hace ahora porque el registry **todavía no tiene ningún llamador de
+producción** — `McpServerKey::from_config` y `CredentialScope` solo se usaban en sus propios
+tests. Cambiar esta API hoy no rompe nada; dentro de una slice, sí.
+
+**Qué queda para quien cablee esto.** El llamador debe resolver los headers vía secure
+values ANTES de construir la clave, y pasar la misma factory que usará esos valores. Si
+resuelve unos valores y conecta con otros, el pool queda mintiendo — el fingerprint dice
+una credencial y la conexión lleva otra. No hay forma de detectarlo desde acá.
+
+**El precio.** Arreglar la corrección
+convierte el problema en uno de recursos. Antes, una rotación dejaba **una** entrada rancia
+sirviendo el valor retirado. Ahora cada rotación acuña una clave nueva, y la conexión vieja queda
+**viva** —socket TLS abierto y sesión del lado del servidor— hasta que la presión del LRU la
+eviccione. Nada la cierra de forma proactiva: el registry no sabe que una clave nueva "reemplaza" a
+otra, son claves independientes.
+
+El tope de §33 acota `clients` en 128, pero **no degrada de forma gradual**. El LRU desaloja por
+**recencia, no por obsolescencia**, y `register_and_pool` rankea cada clave nueva como la más
+reciente. O sea: las entradas muertas de una rotación son las **últimas** en caer, y las primeras
+son las conexiones vivas de otros tenants. Una ráfaga de más de 128 credenciales rotadas vacía el
+pool entero de una pasada y fuerza un re-handshake simultáneo contra todos los servidores que
+tenía. No es un goteo, es un flush.
+
+**Y el tope no cubría todo.** `tool_cache` no está acotado por él: en el fill frío de `tools()`,
+entre que `client()` retorna y el `insert`, corre el `list_tools()`. Si otra task eviccionaba esa
+clave en esa ventana, el insert aterrizaba sobre una clave que el LRU ya no nombra, y como la
+evicción solo elige claves que nombra, ese catálogo quedaba huérfano para siempre. Antes se
+auto-sanaba en el siguiente acceso; con rotación **no hay siguiente acceso**, porque la credencial
+ya no existe. Los mapas de locks sobreviven esa carrera por su guard de `strong_count`;
+`tool_cache` no tenía equivalente. `tools()` ahora vuelve a registrar la clave tras el insert.
+
+Eso **asciende `idle_timeout` y `close_all` de deuda declarada a bloqueante**. Venían diferidos
+desde §33 como "conviene tenerlos"; con esta entrada son la única forma de cerrar una conexión
+cuya credencial ya no existe. No se implementan acá para no seguir creciendo un candidato que ya
+está en tier alto, pero dejan de ser opcionales antes de cablear un llamador.
+
+**Alcance.** Sin llamadores de producción, sin cambio de API pública del crate → ADP no
+afectado.
+
+**Estado.** done (y `idle_timeout` + `close_all` pasan a ser prerequisito del cableado, no deuda
+suelta).

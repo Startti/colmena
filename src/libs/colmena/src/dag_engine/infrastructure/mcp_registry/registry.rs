@@ -10,30 +10,15 @@
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use dashmap::DashMap;
 use lru::LruCache;
 use tokio::sync::Mutex;
 use tokio::time::Instant;
 
 use crate::dag_engine::infrastructure::mcp_registry::McpServerKey;
-use crate::llm::domain::mcp::{McpClientPort, McpError, McpServerConfig, McpToolDescriptor};
+use std::future::Future;
 
-/// How a registry obtains a client for a configuration.
-///
-/// A port rather than a direct call to `RmcpHttpClient::connect`, so the
-/// pooling logic can be tested for what it actually is — a concurrency and
-/// caching problem — without a socket. Wiremock proves we speak the protocol;
-/// it cannot prove that two callers racing on a cold key produce one
-/// handshake.
-#[async_trait]
-pub trait McpConnector: Send + Sync {
-    async fn connect(
-        &self,
-        server_label: &str,
-        config: &McpServerConfig,
-    ) -> Result<Arc<dyn McpClientPort>, McpError>;
-}
+use crate::llm::domain::mcp::{McpClientPort, McpError, McpServerConfig, McpToolDescriptor};
 
 /// Pool of connections keyed by [`McpServerKey`].
 pub struct McpConnectionRegistry {
@@ -66,7 +51,6 @@ pub struct McpConnectionRegistry {
     /// rather than being allowed to drop entries behind our back.
     lru: Mutex<LruCache<McpServerKey, ()>>,
     max_entries: usize,
-    connector: Arc<dyn McpConnector>,
 }
 
 /// A cached catalog and the instant it was fetched.
@@ -83,32 +67,36 @@ struct CachedTools {
 
 /// How many servers stay pooled before the least recently used is dropped.
 ///
-/// Sized for the credential-scoped key space: one entry per (server, agent
-/// session) actually in flight, not per declared server. Generous enough that
-/// a normal deployment never evicts, small enough to bound a pathological one.
+/// Sized for the credential-scoped key space: one entry per (server, distinct
+/// resolved credential) actually in flight, not per declared server. Two
+/// callers holding the same secret share one entry; a rotation mints another.
+/// Generous enough that a normal deployment never evicts, small enough to
+/// bound a pathological one.
 pub const DEFAULT_MAX_POOLED_SERVERS: usize = 128;
 
+impl Default for McpConnectionRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl McpConnectionRegistry {
-    pub fn new(connector: Arc<dyn McpConnector>) -> Self {
-        Self::with_max_entries(connector, DEFAULT_MAX_POOLED_SERVERS)
+    pub fn new() -> Self {
+        Self::with_max_entries(DEFAULT_MAX_POOLED_SERVERS)
     }
 
-    pub fn with_max_entries(connector: Arc<dyn McpConnector>, max_entries: usize) -> Self {
+    pub fn with_max_entries(max_entries: usize) -> Self {
         // Headroom, as in `pool_registry`: eviction is meant to be driven by
         // `evict_if_needed`, not by the cache dropping a record on its own.
         // Headroom makes that rare — it does NOT make it impossible, which is
         // why `touch` handles the displacement instead of assuming it away.
         let lru_cap = max_entries.max(1).saturating_mul(10).max(1024);
-        Self::with_capacities(connector, max_entries, lru_cap)
+        Self::with_capacities(max_entries, lru_cap)
     }
 
     /// `max_entries` with an explicit LRU capacity, so the displacement path
     /// in `touch` can be exercised without minting 1024 keys.
-    fn with_capacities(
-        connector: Arc<dyn McpConnector>,
-        max_entries: usize,
-        lru_cap: usize,
-    ) -> Self {
+    fn with_capacities(max_entries: usize, lru_cap: usize) -> Self {
         let max_entries = max_entries.max(1);
         let lru_cap = NonZeroUsize::new(lru_cap.max(1)).expect("clamped to at least 1");
         Self {
@@ -118,7 +106,6 @@ impl McpConnectionRegistry {
             fetch_locks: DashMap::new(),
             lru: Mutex::new(LruCache::new(lru_cap)),
             max_entries,
-            connector,
         }
     }
 
@@ -277,12 +264,15 @@ impl McpConnectionRegistry {
     /// A failed connect is NOT cached: a server that was down when the agent
     /// first reached for it must be reachable on the next turn, not poisoned
     /// for the life of the process.
-    pub async fn client(
+    pub async fn client<F, Fut>(
         &self,
         key: &McpServerKey,
-        server_label: &str,
-        config: &McpServerConfig,
-    ) -> Result<Arc<dyn McpClientPort>, McpError> {
+        connect: F,
+    ) -> Result<Arc<dyn McpClientPort>, McpError>
+    where
+        F: FnOnce() -> Fut + Send,
+        Fut: Future<Output = Result<Arc<dyn McpClientPort>, McpError>> + Send,
+    {
         if let Some(existing) = self.clients.get(key) {
             let client = existing.clone();
             drop(existing);
@@ -307,7 +297,7 @@ impl McpConnectionRegistry {
             return Ok(client);
         }
 
-        let connected = self.connector.connect(server_label, config).await;
+        let connected = connect().await;
         let client = match connected {
             Ok(client) => client,
             Err(e) => {
@@ -344,12 +334,16 @@ impl McpConnectionRegistry {
     /// turns over. A failed fetch is never cached, for the same reason a
     /// failed connect is not: one bad moment would blank the catalog until
     /// the TTL elapsed.
-    pub async fn tools(
+    pub async fn tools<F, Fut>(
         &self,
         key: &McpServerKey,
-        server_label: &str,
         config: &McpServerConfig,
-    ) -> Result<Arc<Vec<McpToolDescriptor>>, McpError> {
+        connect: F,
+    ) -> Result<Arc<Vec<McpToolDescriptor>>, McpError>
+    where
+        F: FnOnce() -> Fut + Send,
+        Fut: Future<Output = Result<Arc<dyn McpClientPort>, McpError>> + Send,
+    {
         if let Some(fresh) = self.cached_if_fresh(key, config) {
             // A catalog hit is a USE. Under lazy loading the exposure stage
             // calls `tools` on every agent-loop iteration and may never call
@@ -389,7 +383,7 @@ impl McpConnectionRegistry {
         // a server reached only through `tools` that is permanently
         // unreachable would strand one `fetch_locks` entry for good.
         let filled = async {
-            let client = self.client(key, server_label, config).await?;
+            let client = self.client(key, connect).await?;
             Ok::<_, McpError>(Arc::new(client.list_tools().await?))
         }
         .await;
@@ -409,6 +403,21 @@ impl McpConnectionRegistry {
                 fetched_at: Instant::now(),
             },
         );
+        // Re-register in the LRU, because between `client` returning and this
+        // insert there is a real await — the `list_tools` round-trip — and a
+        // racing task's `evict_if_needed` may have popped this key in it. The
+        // insert would then land on a key the LRU no longer names, and since
+        // eviction can only choose keys it still names, nothing would ever
+        // collect this catalog entry. The lock maps survive that race through
+        // their `strong_count` guard; `tool_cache` has no equivalent, so it
+        // needs the key put back.
+        //
+        // Cheap on the ordinary path: the key is normally still present, and
+        // `push` on a present key is a re-rank that displaces nothing.
+        //
+        // Pinned by `a_catalog_cached_for_a_key_evicted_mid_fill_stays_collectable`,
+        // which stages the racing eviction from inside `list_tools`.
+        self.touch(key).await;
         Ok(tools)
     }
 
@@ -439,27 +448,36 @@ impl McpConnectionRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
     use serde_json::Value;
     use std::collections::BTreeMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
-    use crate::dag_engine::infrastructure::mcp_registry::key::CredentialScope;
+    use crate::dag_engine::infrastructure::mcp_registry::key::CredentialFingerprint;
     use crate::llm::domain::mcp::{McpToolDescriptor, McpToolResult, McpTransport};
 
     /// Counts `tools/list` round-trips, so cache hits are observable, and can
     /// be told to fail so the not-cached-on-failure path is testable.
+    /// Runs inside `list_tools`, i.e. exactly in the window `tools()` leaves
+    /// open between pooling the client and caching the catalog.
+    type DuringList = Arc<dyn Fn() + Send + Sync>;
+
     struct StubClient {
         label: String,
         list_calls: Arc<AtomicUsize>,
         fail_first_n_lists: usize,
         list_delay: Option<Duration>,
+        during_list: Option<DuringList>,
     }
 
     #[async_trait]
     impl McpClientPort for StubClient {
         async fn list_tools(&self) -> Result<Vec<McpToolDescriptor>, McpError> {
             let n = self.list_calls.fetch_add(1, Ordering::SeqCst);
+            if let Some(hook) = &self.during_list {
+                hook();
+            }
             if let Some(d) = self.list_delay {
                 tokio::time::sleep(d).await;
             }
@@ -499,6 +517,7 @@ mod tests {
         list_calls: Arc<AtomicUsize>,
         fail_first_n_lists: usize,
         list_delay: Option<Duration>,
+        during_list: Option<DuringList>,
     }
 
     impl CountingConnector {
@@ -510,6 +529,7 @@ mod tests {
                 list_calls: Arc::new(AtomicUsize::new(0)),
                 fail_first_n_lists: 0,
                 list_delay: None,
+                during_list: None,
             }
         }
         fn failing_first(n: usize) -> Self {
@@ -548,8 +568,7 @@ mod tests {
         }
     }
 
-    #[async_trait]
-    impl McpConnector for CountingConnector {
+    impl CountingConnector {
         async fn connect(
             &self,
             server_label: &str,
@@ -570,6 +589,7 @@ mod tests {
                 list_calls: self.list_calls.clone(),
                 fail_first_n_lists: self.fail_first_n_lists,
                 list_delay: self.list_delay,
+                during_list: self.during_list.clone(),
             }))
         }
     }
@@ -591,12 +611,15 @@ mod tests {
     #[tokio::test]
     async fn the_pool_stays_within_its_cap() {
         let connector = Arc::new(CountingConnector::new());
-        let registry = McpConnectionRegistry::with_max_entries(connector.clone(), 2);
+        let registry = McpConnectionRegistry::with_max_entries(2);
 
         for host in ["a", "b", "c"] {
             let cfg = config(&format!("https://{host}.example.com/mcp"));
-            let key = McpServerKey::from_config(&cfg, CredentialScope::unscoped());
-            registry.client(&key, host, &cfg).await.unwrap();
+            let key = McpServerKey::from_resolved(&cfg, &CredentialFingerprint::none());
+            registry
+                .client(&key, || connector.connect(host, &cfg))
+                .await
+                .unwrap();
         }
 
         assert_eq!(registry.len(), 2, "three servers, a cap of two");
@@ -608,34 +631,52 @@ mod tests {
     #[tokio::test]
     async fn the_least_recently_used_server_is_the_one_evicted() {
         let connector = Arc::new(CountingConnector::new());
-        let registry = McpConnectionRegistry::with_max_entries(connector.clone(), 2);
+        let registry = McpConnectionRegistry::with_max_entries(2);
 
         let mk = |h: &str| {
             let cfg = config(&format!("https://{h}.example.com/mcp"));
-            let key = McpServerKey::from_config(&cfg, CredentialScope::unscoped());
+            let key = McpServerKey::from_resolved(&cfg, &CredentialFingerprint::none());
             (key, cfg)
         };
         let (a_key, a_cfg) = mk("a");
         let (b_key, b_cfg) = mk("b");
         let (c_key, c_cfg) = mk("c");
 
-        registry.client(&a_key, "a", &a_cfg).await.unwrap();
-        registry.client(&b_key, "b", &b_cfg).await.unwrap();
+        registry
+            .client(&a_key, || connector.connect("a", &a_cfg))
+            .await
+            .unwrap();
+        registry
+            .client(&b_key, || connector.connect("b", &b_cfg))
+            .await
+            .unwrap();
         // Re-touch A so B becomes the oldest.
-        registry.client(&a_key, "a", &a_cfg).await.unwrap();
-        registry.client(&c_key, "c", &c_cfg).await.unwrap();
+        registry
+            .client(&a_key, || connector.connect("a", &a_cfg))
+            .await
+            .unwrap();
+        registry
+            .client(&c_key, || connector.connect("c", &c_cfg))
+            .await
+            .unwrap();
 
         assert_eq!(registry.len(), 2);
         // A must still be pooled: reusing it performs NO new handshake.
         let before = connector.count();
-        registry.client(&a_key, "a", &a_cfg).await.unwrap();
+        registry
+            .client(&a_key, || connector.connect("a", &a_cfg))
+            .await
+            .unwrap();
         assert_eq!(
             connector.count(),
             before,
             "A was used most recently and must have survived"
         );
         // B must be gone: reusing it DOES handshake again.
-        registry.client(&b_key, "b", &b_cfg).await.unwrap();
+        registry
+            .client(&b_key, || connector.connect("b", &b_cfg))
+            .await
+            .unwrap();
         assert_eq!(
             connector.count(),
             before + 1,
@@ -650,22 +691,31 @@ mod tests {
     #[tokio::test]
     async fn eviction_drops_the_cached_catalog_with_the_client() {
         let connector = Arc::new(CountingConnector::new());
-        let registry = McpConnectionRegistry::with_max_entries(connector.clone(), 1);
+        let registry = McpConnectionRegistry::with_max_entries(1);
 
         let a_cfg = config("https://a.example.com/mcp");
-        let a_key = McpServerKey::from_config(&a_cfg, CredentialScope::unscoped());
+        let a_key = McpServerKey::from_resolved(&a_cfg, &CredentialFingerprint::none());
         let b_cfg = config("https://b.example.com/mcp");
-        let b_key = McpServerKey::from_config(&b_cfg, CredentialScope::unscoped());
+        let b_key = McpServerKey::from_resolved(&b_cfg, &CredentialFingerprint::none());
 
-        registry.tools(&a_key, "a", &a_cfg).await.unwrap();
+        registry
+            .tools(&a_key, &a_cfg, || connector.connect("a", &a_cfg))
+            .await
+            .unwrap();
         assert_eq!(connector.list_count(), 1);
 
         // Admitting B evicts A.
-        registry.tools(&b_key, "b", &b_cfg).await.unwrap();
+        registry
+            .tools(&b_key, &b_cfg, || connector.connect("b", &b_cfg))
+            .await
+            .unwrap();
 
         // A comes back: its catalog must be gone, not served stale from a map
         // the eviction forgot to clear.
-        registry.tools(&a_key, "a", &a_cfg).await.unwrap();
+        registry
+            .tools(&a_key, &a_cfg, || connector.connect("a", &a_cfg))
+            .await
+            .unwrap();
         assert_eq!(
             connector.list_count(),
             3,
@@ -679,12 +729,18 @@ mod tests {
     #[tokio::test]
     async fn a_cap_below_one_is_clamped_rather_than_disabling_the_pool() {
         let connector = Arc::new(CountingConnector::new());
-        let registry = McpConnectionRegistry::with_max_entries(connector.clone(), 0);
+        let registry = McpConnectionRegistry::with_max_entries(0);
 
         let cfg = config("https://a.example.com/mcp");
-        let key = McpServerKey::from_config(&cfg, CredentialScope::unscoped());
-        registry.client(&key, "a", &cfg).await.unwrap();
-        registry.client(&key, "a", &cfg).await.unwrap();
+        let key = McpServerKey::from_resolved(&cfg, &CredentialFingerprint::none());
+        registry
+            .client(&key, || connector.connect("a", &cfg))
+            .await
+            .unwrap();
+        registry
+            .client(&key, || connector.connect("a", &cfg))
+            .await
+            .unwrap();
 
         assert_eq!(registry.len(), 1, "the pool must still hold one entry");
         assert_eq!(
@@ -705,17 +761,75 @@ mod tests {
     #[tokio::test]
     async fn a_failed_connect_leaves_no_lock_behind() {
         let connector = Arc::new(CountingConnector::failing_first(1));
-        let registry = McpConnectionRegistry::with_max_entries(connector.clone(), 128);
+        let registry = McpConnectionRegistry::with_max_entries(128);
 
         let cfg = config("https://down.example.com/mcp");
-        let key = McpServerKey::from_config(&cfg, CredentialScope::unscoped());
+        let key = McpServerKey::from_resolved(&cfg, &CredentialFingerprint::none());
 
-        assert!(registry.client(&key, "down", &cfg).await.is_err());
+        assert!(registry
+            .client(&key, || connector.connect("down", &cfg))
+            .await
+            .is_err());
 
         assert!(registry.is_empty(), "a failure must not occupy the pool");
         assert!(
             !registry.creation_locks.contains_key(&key),
             "nor leave its creation lock behind, with no eviction ever coming to collect it"
+        );
+    }
+
+    /// A catalog cached for a key evicted mid-fill must stay collectable.
+    ///
+    /// `tools()` pools the client, then awaits `list_tools`, then caches the
+    /// catalog. A racing eviction inside that await pops the key, so the cache
+    /// write lands on a key the LRU no longer names — and eviction can only
+    /// choose keys it names, so nothing would ever collect that entry. Before
+    /// rotation existed this self-healed on the next access; a rotated-away
+    /// credential has no next access.
+    ///
+    /// The race is staged synchronously: the stub's `list_tools` runs a hook in
+    /// exactly that window and evicts the key itself. No sleeps, no threads.
+    /// Drop the `touch` after the insert and this fails.
+    #[tokio::test]
+    async fn a_catalog_cached_for_a_key_evicted_mid_fill_stays_collectable() {
+        let registry = Arc::new(McpConnectionRegistry::new());
+        let cfg = config("https://midfill.example.com/mcp");
+        let key = McpServerKey::from_resolved(&cfg, &CredentialFingerprint::none());
+
+        // The eviction that races the fill, run from inside `list_tools`.
+        let evictor = {
+            let registry = registry.clone();
+            let key = key.clone();
+            Arc::new(move || {
+                let popped = registry
+                    .lru
+                    .try_lock()
+                    .expect("uncontended in test")
+                    .pop_lru();
+                assert_eq!(
+                    popped.map(|(k, _)| k),
+                    Some(key.clone()),
+                    "the hook must evict the key being filled"
+                );
+                registry.drop_footprint(&key, "test_race");
+            }) as DuringList
+        };
+
+        let connector = CountingConnector {
+            during_list: Some(evictor),
+            ..CountingConnector::new()
+        };
+        registry
+            .tools(&key, &cfg, || connector.connect("midfill", &cfg))
+            .await
+            .unwrap();
+
+        // The catalog is cached, so eviction MUST be able to name the key again.
+        let named = registry.lru.lock().await.peek(&key).is_some();
+        assert!(
+            named,
+            "the key is back out of the LRU while its catalog is cached: nothing \
+             would ever collect that entry"
         );
     }
 
@@ -733,15 +847,16 @@ mod tests {
         use std::task::{Context, Poll};
 
         let connector = Arc::new(CountingConnector::new());
-        let registry = McpConnectionRegistry::with_max_entries(connector.clone(), 128);
+        let registry = McpConnectionRegistry::with_max_entries(128);
 
         let cfg = config("https://cancelled.example.com/mcp");
-        let key = McpServerKey::from_config(&cfg, CredentialScope::unscoped());
+        let key = McpServerKey::from_resolved(&cfg, &CredentialFingerprint::none());
 
         // Park the connect path on the LRU lock.
         let held = registry.lru.lock().await;
 
-        let mut connecting = Box::pin(registry.client(&key, "cancelled", &cfg));
+        let mut connecting =
+            Box::pin(registry.client(&key, || connector.connect("cancelled", &cfg)));
         let mut cx = Context::from_waker(std::task::Waker::noop());
         for _ in 0..8 {
             assert!(
@@ -780,12 +895,12 @@ mod tests {
     async fn a_key_the_lru_displaces_on_its_own_is_not_left_stranded() {
         let connector = Arc::new(CountingConnector::new());
         // Room for three clients, but an LRU that only remembers two.
-        let registry = McpConnectionRegistry::with_capacities(connector.clone(), 3, 2);
+        let registry = McpConnectionRegistry::with_capacities(3, 2);
 
         let mk = |h: &str| {
             let cfg = config(&format!("https://{h}.example.com/mcp"));
             (
-                McpServerKey::from_config(&cfg, CredentialScope::unscoped()),
+                McpServerKey::from_resolved(&cfg, &CredentialFingerprint::none()),
                 cfg,
             )
         };
@@ -793,7 +908,10 @@ mod tests {
 
         for host in ["a", "b", "c"] {
             let (key, cfg) = mk(host);
-            registry.client(&key, host, &cfg).await.unwrap();
+            registry
+                .client(&key, || connector.connect(host, &cfg))
+                .await
+                .unwrap();
         }
 
         assert!(
@@ -810,7 +928,10 @@ mod tests {
         // And it is genuinely gone, not merely unreachable: asking again is a
         // fresh handshake.
         let before = connector.calls.load(Ordering::SeqCst);
-        registry.client(&a, "a", &a_cfg).await.unwrap();
+        registry
+            .client(&a, || connector.connect("a", &a_cfg))
+            .await
+            .unwrap();
         assert_eq!(
             connector.calls.load(Ordering::SeqCst),
             before + 1,
@@ -831,12 +952,15 @@ mod tests {
     #[tokio::test]
     async fn a_failed_catalog_fetch_leaves_no_lock_behind() {
         let connector = Arc::new(CountingConnector::failing_first(1));
-        let registry = McpConnectionRegistry::with_max_entries(connector.clone(), 128);
+        let registry = McpConnectionRegistry::with_max_entries(128);
 
         let cfg = config("https://down.example.com/mcp");
-        let key = McpServerKey::from_config(&cfg, CredentialScope::unscoped());
+        let key = McpServerKey::from_resolved(&cfg, &CredentialFingerprint::none());
 
-        assert!(registry.tools(&key, "down", &cfg).await.is_err());
+        assert!(registry
+            .tools(&key, &cfg, || connector.connect("down", &cfg))
+            .await
+            .is_err());
 
         assert!(
             !registry.fetch_locks.contains_key(&key),
@@ -865,18 +989,21 @@ mod tests {
     #[tokio::test]
     async fn a_lock_someone_still_holds_is_not_evicted() {
         let connector = Arc::new(CountingConnector::new());
-        let registry = McpConnectionRegistry::with_max_entries(connector.clone(), 2);
+        let registry = McpConnectionRegistry::with_max_entries(2);
 
         let victim_cfg = config("https://victim.example.com/mcp");
-        let victim = McpServerKey::from_config(&victim_cfg, CredentialScope::unscoped());
+        let victim = McpServerKey::from_resolved(&victim_cfg, &CredentialFingerprint::none());
         let other_cfg = config("https://other.example.com/mcp");
-        let other = McpServerKey::from_config(&other_cfg, CredentialScope::unscoped());
+        let other = McpServerKey::from_resolved(&other_cfg, &CredentialFingerprint::none());
 
         registry
-            .client(&victim, "victim", &victim_cfg)
+            .client(&victim, || connector.connect("victim", &victim_cfg))
             .await
             .unwrap();
-        registry.client(&other, "other", &other_cfg).await.unwrap();
+        registry
+            .client(&other, || connector.connect("other", &other_cfg))
+            .await
+            .unwrap();
 
         // Stand in for a waiter that grabbed the mutex before eviction ran.
         let waiter = registry
@@ -887,8 +1014,11 @@ mod tests {
 
         // `victim` is now least-recently-used, so admitting a third evicts it.
         let third_cfg = config("https://third.example.com/mcp");
-        let third = McpServerKey::from_config(&third_cfg, CredentialScope::unscoped());
-        registry.client(&third, "third", &third_cfg).await.unwrap();
+        let third = McpServerKey::from_resolved(&third_cfg, &CredentialFingerprint::none());
+        registry
+            .client(&third, || connector.connect("third", &third_cfg))
+            .await
+            .unwrap();
 
         assert!(
             !registry.clients.contains_key(&victim),
@@ -908,11 +1038,14 @@ mod tests {
     #[tokio::test]
     async fn an_orphan_lock_is_swept_once_its_holder_releases() {
         let connector = Arc::new(CountingConnector::new());
-        let registry = McpConnectionRegistry::with_max_entries(connector.clone(), 1);
+        let registry = McpConnectionRegistry::with_max_entries(1);
 
         let a_cfg = config("https://a.example.com/mcp");
-        let a = McpServerKey::from_config(&a_cfg, CredentialScope::unscoped());
-        registry.client(&a, "a", &a_cfg).await.unwrap();
+        let a = McpServerKey::from_resolved(&a_cfg, &CredentialFingerprint::none());
+        registry
+            .client(&a, || connector.connect("a", &a_cfg))
+            .await
+            .unwrap();
         let waiter = registry
             .creation_locks
             .get(&a)
@@ -920,16 +1053,22 @@ mod tests {
             .expect("lock exists");
 
         let b_cfg = config("https://b.example.com/mcp");
-        let b = McpServerKey::from_config(&b_cfg, CredentialScope::unscoped());
-        registry.client(&b, "b", &b_cfg).await.unwrap();
+        let b = McpServerKey::from_resolved(&b_cfg, &CredentialFingerprint::none());
+        registry
+            .client(&b, || connector.connect("b", &b_cfg))
+            .await
+            .unwrap();
         assert!(registry.creation_locks.contains_key(&a), "still held");
 
         drop(waiter);
 
         // Any later eviction sweeps it.
         let c_cfg = config("https://c.example.com/mcp");
-        let c = McpServerKey::from_config(&c_cfg, CredentialScope::unscoped());
-        registry.client(&c, "c", &c_cfg).await.unwrap();
+        let c = McpServerKey::from_resolved(&c_cfg, &CredentialFingerprint::none());
+        registry
+            .client(&c, || connector.connect("c", &c_cfg))
+            .await
+            .unwrap();
 
         assert!(
             !registry.creation_locks.contains_key(&a),
@@ -944,21 +1083,33 @@ mod tests {
     #[tokio::test]
     async fn a_catalog_hit_refreshes_lru_rank() {
         let connector = Arc::new(CountingConnector::new());
-        let registry = McpConnectionRegistry::with_max_entries(connector.clone(), 2);
+        let registry = McpConnectionRegistry::with_max_entries(2);
 
         let busy_cfg = config("https://busy.example.com/mcp");
-        let busy = McpServerKey::from_config(&busy_cfg, CredentialScope::unscoped());
+        let busy = McpServerKey::from_resolved(&busy_cfg, &CredentialFingerprint::none());
         let idle_cfg = config("https://idle.example.com/mcp");
-        let idle = McpServerKey::from_config(&idle_cfg, CredentialScope::unscoped());
+        let idle = McpServerKey::from_resolved(&idle_cfg, &CredentialFingerprint::none());
 
-        registry.tools(&busy, "busy", &busy_cfg).await.unwrap();
-        registry.tools(&idle, "idle", &idle_cfg).await.unwrap();
+        registry
+            .tools(&busy, &busy_cfg, || connector.connect("busy", &busy_cfg))
+            .await
+            .unwrap();
+        registry
+            .tools(&idle, &idle_cfg, || connector.connect("idle", &idle_cfg))
+            .await
+            .unwrap();
         // Busy keeps working, served purely from its cached catalog.
-        registry.tools(&busy, "busy", &busy_cfg).await.unwrap();
+        registry
+            .tools(&busy, &busy_cfg, || connector.connect("busy", &busy_cfg))
+            .await
+            .unwrap();
 
         let third_cfg = config("https://third.example.com/mcp");
-        let third = McpServerKey::from_config(&third_cfg, CredentialScope::unscoped());
-        registry.client(&third, "third", &third_cfg).await.unwrap();
+        let third = McpServerKey::from_resolved(&third_cfg, &CredentialFingerprint::none());
+        registry
+            .client(&third, || connector.connect("third", &third_cfg))
+            .await
+            .unwrap();
 
         assert!(
             registry.clients.contains_key(&busy),
@@ -976,12 +1127,18 @@ mod tests {
     #[tokio::test]
     async fn two_executions_with_the_same_config_share_one_connection() {
         let connector = Arc::new(CountingConnector::new());
-        let registry = McpConnectionRegistry::new(connector.clone());
+        let registry = McpConnectionRegistry::new();
         let cfg = config("https://mcp.example.com/mcp");
-        let key = McpServerKey::from_config(&cfg, CredentialScope::unscoped());
+        let key = McpServerKey::from_resolved(&cfg, &CredentialFingerprint::none());
 
-        let a = registry.client(&key, "docs", &cfg).await.unwrap();
-        let b = registry.client(&key, "docs", &cfg).await.unwrap();
+        let a = registry
+            .client(&key, || connector.connect("docs", &cfg))
+            .await
+            .unwrap();
+        let b = registry
+            .client(&key, || connector.connect("docs", &cfg))
+            .await
+            .unwrap();
 
         assert_eq!(
             connector.count(),
@@ -997,23 +1154,21 @@ mod tests {
     #[tokio::test]
     async fn different_keys_get_different_connections() {
         let connector = Arc::new(CountingConnector::new());
-        let registry = McpConnectionRegistry::new(connector.clone());
+        let registry = McpConnectionRegistry::new();
         let a_cfg = config("https://a.example.com/mcp");
         let b_cfg = config("https://b.example.com/mcp");
 
         registry
             .client(
-                &McpServerKey::from_config(&a_cfg, CredentialScope::unscoped()),
-                "a",
-                &a_cfg,
+                &McpServerKey::from_resolved(&a_cfg, &CredentialFingerprint::none()),
+                || connector.connect("a", &a_cfg),
             )
             .await
             .unwrap();
         registry
             .client(
-                &McpServerKey::from_config(&b_cfg, CredentialScope::unscoped()),
-                "b",
-                &b_cfg,
+                &McpServerKey::from_resolved(&b_cfg, &CredentialFingerprint::none()),
+                || connector.connect("b", &b_cfg),
             )
             .await
             .unwrap();
@@ -1029,15 +1184,20 @@ mod tests {
     #[tokio::test]
     async fn concurrent_first_use_produces_exactly_one_handshake() {
         let connector = Arc::new(CountingConnector::slow());
-        let registry = Arc::new(McpConnectionRegistry::new(connector.clone()));
+        let registry = Arc::new(McpConnectionRegistry::new());
         let cfg = config("https://mcp.example.com/mcp");
-        let key = McpServerKey::from_config(&cfg, CredentialScope::unscoped());
+        let key = McpServerKey::from_resolved(&cfg, &CredentialFingerprint::none());
 
         let mut tasks = Vec::new();
         for _ in 0..16 {
-            let (r, k, c) = (registry.clone(), key.clone(), cfg.clone());
+            let (r, k, c, conn) = (
+                registry.clone(),
+                key.clone(),
+                cfg.clone(),
+                connector.clone(),
+            );
             tasks.push(tokio::spawn(async move {
-                r.client(&k, "docs", &c).await.map(|_| ())
+                r.client(&k, || conn.connect("docs", &c)).await.map(|_| ())
             }));
         }
         for t in tasks {
@@ -1058,15 +1218,21 @@ mod tests {
     #[tokio::test]
     async fn a_failed_connect_is_not_cached() {
         let connector = Arc::new(CountingConnector::failing_first(1));
-        let registry = McpConnectionRegistry::new(connector.clone());
+        let registry = McpConnectionRegistry::new();
         let cfg = config("https://mcp.example.com/mcp");
-        let key = McpServerKey::from_config(&cfg, CredentialScope::unscoped());
+        let key = McpServerKey::from_resolved(&cfg, &CredentialFingerprint::none());
 
-        assert!(registry.client(&key, "docs", &cfg).await.is_err());
+        assert!(registry
+            .client(&key, || connector.connect("docs", &cfg))
+            .await
+            .is_err());
         assert!(registry.is_empty(), "a failure must not occupy the pool");
 
         assert!(
-            registry.client(&key, "docs", &cfg).await.is_ok(),
+            registry
+                .client(&key, || connector.connect("docs", &cfg))
+                .await
+                .is_ok(),
             "the next attempt must retry, not replay the cached failure"
         );
         assert_eq!(connector.count(), 2);
@@ -1080,12 +1246,18 @@ mod tests {
     #[tokio::test]
     async fn a_cache_hit_skips_the_tools_list_roundtrip() {
         let connector = Arc::new(CountingConnector::new());
-        let registry = McpConnectionRegistry::new(connector.clone());
+        let registry = McpConnectionRegistry::new();
         let cfg = config("https://mcp.example.com/mcp");
-        let key = McpServerKey::from_config(&cfg, CredentialScope::unscoped());
+        let key = McpServerKey::from_resolved(&cfg, &CredentialFingerprint::none());
 
-        let first = registry.tools(&key, "docs", &cfg).await.unwrap();
-        let second = registry.tools(&key, "docs", &cfg).await.unwrap();
+        let first = registry
+            .tools(&key, &cfg, || connector.connect("docs", &cfg))
+            .await
+            .unwrap();
+        let second = registry
+            .tools(&key, &cfg, || connector.connect("docs", &cfg))
+            .await
+            .unwrap();
 
         assert_eq!(
             connector.list_count(),
@@ -1104,17 +1276,26 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn an_expired_entry_is_refetched() {
         let connector = Arc::new(CountingConnector::new());
-        let registry = McpConnectionRegistry::new(connector.clone());
+        let registry = McpConnectionRegistry::new();
         let cfg = config("https://mcp.example.com/mcp"); // cache_ttl = 300s
-        let key = McpServerKey::from_config(&cfg, CredentialScope::unscoped());
+        let key = McpServerKey::from_resolved(&cfg, &CredentialFingerprint::none());
 
-        registry.tools(&key, "docs", &cfg).await.unwrap();
+        registry
+            .tools(&key, &cfg, || connector.connect("docs", &cfg))
+            .await
+            .unwrap();
         tokio::time::advance(Duration::from_secs(299)).await;
-        registry.tools(&key, "docs", &cfg).await.unwrap();
+        registry
+            .tools(&key, &cfg, || connector.connect("docs", &cfg))
+            .await
+            .unwrap();
         assert_eq!(connector.list_count(), 1, "still inside the TTL");
 
         tokio::time::advance(Duration::from_secs(2)).await;
-        registry.tools(&key, "docs", &cfg).await.unwrap();
+        registry
+            .tools(&key, &cfg, || connector.connect("docs", &cfg))
+            .await
+            .unwrap();
         assert_eq!(connector.list_count(), 2, "past the TTL, it must refetch");
     }
 
@@ -1123,23 +1304,23 @@ mod tests {
     #[tokio::test]
     async fn the_cache_is_keyed_per_server() {
         let connector = Arc::new(CountingConnector::new());
-        let registry = McpConnectionRegistry::new(connector.clone());
+        let registry = McpConnectionRegistry::new();
         let a = config("https://a.example.com/mcp");
         let b = config("https://b.example.com/mcp");
 
         let a_tools = registry
             .tools(
-                &McpServerKey::from_config(&a, CredentialScope::unscoped()),
-                "a",
+                &McpServerKey::from_resolved(&a, &CredentialFingerprint::none()),
                 &a,
+                || connector.connect("a", &a),
             )
             .await
             .unwrap();
         let b_tools = registry
             .tools(
-                &McpServerKey::from_config(&b, CredentialScope::unscoped()),
-                "b",
+                &McpServerKey::from_resolved(&b, &CredentialFingerprint::none()),
                 &b,
+                || connector.connect("b", &b),
             )
             .await
             .unwrap();
@@ -1154,13 +1335,19 @@ mod tests {
     #[tokio::test]
     async fn a_failed_tools_list_is_not_cached() {
         let connector = Arc::new(CountingConnector::listing_fails_first(1));
-        let registry = McpConnectionRegistry::new(connector.clone());
+        let registry = McpConnectionRegistry::new();
         let cfg = config("https://mcp.example.com/mcp");
-        let key = McpServerKey::from_config(&cfg, CredentialScope::unscoped());
+        let key = McpServerKey::from_resolved(&cfg, &CredentialFingerprint::none());
 
-        assert!(registry.tools(&key, "docs", &cfg).await.is_err());
+        assert!(registry
+            .tools(&key, &cfg, || connector.connect("docs", &cfg))
+            .await
+            .is_err());
         assert!(
-            registry.tools(&key, "docs", &cfg).await.is_ok(),
+            registry
+                .tools(&key, &cfg, || connector.connect("docs", &cfg))
+                .await
+                .is_ok(),
             "the next turn must retry, not serve a cached failure"
         );
         assert_eq!(connector.list_count(), 2);
@@ -1172,15 +1359,22 @@ mod tests {
     #[tokio::test]
     async fn concurrent_cold_reads_produce_exactly_one_tools_list() {
         let connector = Arc::new(CountingConnector::slow_listing());
-        let registry = Arc::new(McpConnectionRegistry::new(connector.clone()));
+        let registry = Arc::new(McpConnectionRegistry::new());
         let cfg = config("https://mcp.example.com/mcp");
-        let key = McpServerKey::from_config(&cfg, CredentialScope::unscoped());
+        let key = McpServerKey::from_resolved(&cfg, &CredentialFingerprint::none());
 
         let mut tasks = Vec::new();
         for _ in 0..16 {
-            let (r, k, c) = (registry.clone(), key.clone(), cfg.clone());
+            let (r, k, c, conn) = (
+                registry.clone(),
+                key.clone(),
+                cfg.clone(),
+                connector.clone(),
+            );
             tasks.push(tokio::spawn(async move {
-                r.tools(&k, "docs", &c).await.map(|_| ())
+                r.tools(&k, &c, || conn.connect("docs", &c))
+                    .await
+                    .map(|_| ())
             }));
         }
         for t in tasks {
@@ -1199,13 +1393,19 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_zero_ttl_refetches_every_time() {
         let connector = Arc::new(CountingConnector::new());
-        let registry = McpConnectionRegistry::new(connector.clone());
+        let registry = McpConnectionRegistry::new();
         let mut cfg = config("https://mcp.example.com/mcp");
         cfg.cache_ttl = Duration::ZERO;
-        let key = McpServerKey::from_config(&cfg, CredentialScope::unscoped());
+        let key = McpServerKey::from_resolved(&cfg, &CredentialFingerprint::none());
 
-        registry.tools(&key, "docs", &cfg).await.unwrap();
-        registry.tools(&key, "docs", &cfg).await.unwrap();
+        registry
+            .tools(&key, &cfg, || connector.connect("docs", &cfg))
+            .await
+            .unwrap();
+        registry
+            .tools(&key, &cfg, || connector.connect("docs", &cfg))
+            .await
+            .unwrap();
         assert_eq!(connector.list_count(), 2, "ttl 0 must disable the cache");
     }
 
@@ -1215,15 +1415,12 @@ mod tests {
     async fn registries_are_independent() {
         let c1 = Arc::new(CountingConnector::new());
         let c2 = Arc::new(CountingConnector::new());
-        let (r1, r2) = (
-            McpConnectionRegistry::new(c1.clone()),
-            McpConnectionRegistry::new(c2.clone()),
-        );
+        let (r1, r2) = (McpConnectionRegistry::new(), McpConnectionRegistry::new());
         let cfg = config("https://mcp.example.com/mcp");
-        let key = McpServerKey::from_config(&cfg, CredentialScope::unscoped());
+        let key = McpServerKey::from_resolved(&cfg, &CredentialFingerprint::none());
 
-        r1.client(&key, "docs", &cfg).await.unwrap();
-        r2.client(&key, "docs", &cfg).await.unwrap();
+        r1.client(&key, || c1.connect("docs", &cfg)).await.unwrap();
+        r2.client(&key, || c2.connect("docs", &cfg)).await.unwrap();
 
         assert_eq!(c1.count(), 1);
         assert_eq!(

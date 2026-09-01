@@ -4,9 +4,12 @@
 //! same credentials must share one connection; two that do not must never
 //! share one. [`McpServerKey`] is that identity.
 
-use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 
-use crate::dag_engine::application::secure_value_service::is_secure_value_placeholder;
+use once_cell::sync::Lazy;
+use sha2::{Digest, Sha256};
+use uuid::Uuid;
+
 use crate::llm::domain::mcp::{McpServerConfig, McpTransport};
 
 /// Absorb one field into the digest, framed by its own length.
@@ -26,125 +29,88 @@ fn absorb(hasher: &mut Sha256, field: &[u8]) {
     hasher.update(field);
 }
 
-/// The identity under which a config's credential references resolve.
+/// A fingerprint of the credential VALUES a connection will carry.
 ///
-/// Carries BOTH ids because [`SecureValueRepository::decrypt`] uses both: with
-/// an agent id it resolves by agent, without one strictly by session. A scope
-/// that tracked only the agent id would collapse every session-only run to one
-/// key and let them share a credential — the exact bug this type exists to
-/// prevent.
+/// The pool must split exactly where the credential splits. This used to be
+/// approximated by the session or agent id, because the key was computed
+/// before the secrets were resolved and the id was all that existed. That
+/// proxy was wrong in both directions: it separated two sessions holding the
+/// SAME credential, which the server cannot tell apart, and it kept ONE key
+/// across a secret rotation, so the pool went on handing back a connection
+/// carrying the retired value until something else happened to evict it.
 ///
-/// [`SecureValueRepository::decrypt`]: crate::dag_engine::domain::SecureValueRepository::decrypt
-#[derive(Debug, Clone, Copy)]
-pub struct CredentialScope<'a> {
-    pub session_id: &'a str,
-    pub agent_session_id: Option<&'a str>,
-}
+/// Fingerprinting the resolved values removes the proxy. A rotation changes
+/// the fingerprint, which changes the key, which yields a new connection; the
+/// stale one ages out through the LRU. Correct by construction, with no
+/// invalidation path to get wrong.
+///
+/// SALTED, per process. This digest lands in the pool key, and that key is
+/// printed by the eviction `tracing::debug`. An unsalted `sha256` of a secret
+/// is not reversible, but it is a stable oracle: anyone who can read a log and
+/// guess a value can confirm the guess. A random per-process salt keeps the
+/// digest stable for exactly as long as pooling needs it — the life of the
+/// process — and meaningless outside it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CredentialFingerprint(String);
 
-impl<'a> CredentialScope<'a> {
-    pub fn new(session_id: &'a str, agent_session_id: Option<&'a str>) -> Self {
-        Self {
-            session_id,
-            agent_session_id,
+/// Random per process. Never persisted, never logged.
+static CREDENTIAL_SALT: Lazy<String> = Lazy::new(|| Uuid::new_v4().to_string());
+
+impl CredentialFingerprint {
+    /// Fingerprint the RESOLVED header values.
+    ///
+    /// Names are absorbed alongside values, so the same bytes sent as
+    /// `Authorization` and as `X-Api-Key` are not the same credential.
+    pub fn of(resolved_headers: &BTreeMap<String, String>) -> Self {
+        let mut hasher = Sha256::new();
+        absorb(&mut hasher, CREDENTIAL_SALT.as_bytes());
+        for (name, value) in resolved_headers {
+            absorb(&mut hasher, name.as_bytes());
+            absorb(&mut hasher, value.as_bytes());
         }
+        Self(hex_digest(hasher))
     }
 
-    /// For configs with no credential-bearing header, where the scope is
-    /// ignored. Named so a caller cannot reach for it by accident.
-    pub fn unscoped() -> Self {
-        Self {
-            session_id: "",
-            agent_session_id: None,
-        }
+    /// A server reached with no headers at all.
+    pub fn none() -> Self {
+        Self::of(&BTreeMap::new())
     }
 }
 
 /// Opaque, collision-resistant identity of one MCP server connection.
 ///
-/// Derived from the URL, the transport, and a fingerprint of the header
-/// **references** — never of their resolved values (design §7, spec R3.6).
-/// That distinction is the whole point: two graphs referencing the same secret
-/// under the same reference share a connection, and rotating the underlying
-/// secret does not fragment the pool. A key built from resolved values would
-/// also mean the plaintext credential decides cache placement, which is one
-/// accident away from it being logged as a cache key.
+/// Derived from the URL, the transport, the header NAMES, and a
+/// [`CredentialFingerprint`] of the RESOLVED header values.
+///
+/// Keying on the references instead would leave the key unchanged across a
+/// rotation, and an unchanged key means the pool keeps handing back the
+/// connection built with the retired value. The fingerprint is what makes a
+/// rotation produce a new connection.
+///
+/// Resolved values do carry a risk the references did not: the credential
+/// would decide cache placement and could reach a log. That is why the
+/// fingerprint is SALTED — see its docs.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct McpServerKey(String);
 
 impl McpServerKey {
-    /// Derive the key for a server configuration under a credential scope.
+    /// The pool identity of a server reached with these resolved credentials.
     ///
-    /// `credential_scope` is the `agent_session_id`. It participates in the
-    /// key ONLY when a header value is a secure-value reference, and here is
-    /// why that is not optional:
-    ///
-    /// Secure-value handles are `<value_1>`, `<sv_admin_token>` — counters and
-    /// names, carrying nothing unique per session. `decrypt` resolves the SAME
-    /// handle to DIFFERENT secrets depending on the session. So two agent
-    /// sessions running the same graph produce identical `header_refs`, and
-    /// without the scope they would produce an identical key, share one pooled
-    /// connection, and the second session would send the first session's
-    /// credential.
-    ///
-    /// A config whose headers are all literals is genuinely the same server
-    /// everywhere, so it stays globally pooled; so does one with no headers at
-    /// all. Only credential-bearing configs fragment, and they fragment per
-    /// agent session rather than per run, so a conversation still reuses its
-    /// connection across turns.
-    pub fn from_config(config: &McpServerConfig, scope: CredentialScope<'_>) -> Self {
+    /// Takes the fingerprint, not the raw values, so this function never holds
+    /// a secret and the salting decision lives in exactly one place.
+    pub fn from_resolved(config: &McpServerConfig, credential: &CredentialFingerprint) -> Self {
         let mut hasher = Sha256::new();
         absorb(&mut hasher, config.url.as_bytes());
         absorb(&mut hasher, transport_tag(config.transport).as_bytes());
-
-        // Absorbed before the headers so a scope can never be confused with
-        // header content. Always two fields — a discriminant and an id — so
-        // ("agent", "") and ("none", "") stay distinct pre-images and an empty
-        // id cannot collide with the unscoped case.
-        let (tag, id) = if config
-            .header_refs
-            .values()
-            .any(|v| is_secure_value_placeholder(v))
-        {
-            // Mirror `decrypt`'s OWN partitioning exactly. The key must split
-            // the pool the same way decryption splits secrets, or the pool
-            // hands one caller another's credential.
-            //
-            // The authority is the PRODUCTION impl,
-            // `PostgresSecureValueRepository::decrypt`: two pure branches, an
-            // agent-only `WHERE` when an agent id is present and a
-            // session-only `WHERE` otherwise, with NO fallback between them.
-            // Do not reason from `MockSecureValueRepository` in
-            // `secure_value_service`'s tests — it implements agent-first WITH
-            // a session fallback, which production does not, and copying that
-            // shape here would silently merge two identities into one key.
-            match scope.agent_session_id {
-                Some(agent) => ("agent", agent),
-                None => ("session", scope.session_id),
-            }
-        } else {
-            // No credential-bearing header: the config is the same server for
-            // everyone, so it stays globally pooled.
-            ("none", "")
-        };
-        absorb(&mut hasher, tag.as_bytes());
-        absorb(&mut hasher, id.as_bytes());
-        // `header_refs` is a BTreeMap, so iteration order is already
-        // deterministic. Each name and reference is absorbed under its own
-        // length, so ("ab", "c") cannot collide with ("a", "bc") and no byte
-        // inside a value can shift a field boundary.
-        for (name, reference) in &config.header_refs {
+        absorb(&mut hasher, credential.0.as_bytes());
+        // Header NAMES still count: two configs sending the same value under
+        // different names are different requests. The VALUES are already
+        // inside the fingerprint and must not be absorbed again here, where
+        // they would be unsalted.
+        for name in config.header_refs.keys() {
             absorb(&mut hasher, name.as_bytes());
-            absorb(&mut hasher, reference.as_bytes());
         }
-        // Same hex idiom as `llm::domain::mcp::hex_sha256_prefix`; no new
-        // dependency for eight lines of formatting.
-        Self(
-            hasher
-                .finalize()
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect(),
-        )
+        Self(hex_digest(hasher))
     }
 
     /// The hex digest, for log lines and metrics. Safe to print: it is derived
@@ -161,355 +127,324 @@ fn transport_tag(transport: McpTransport) -> &'static str {
     }
 }
 
+/// The hex form both digests use. Same idiom as
+/// `llm::domain::mcp::hex_sha256_prefix`; no new dependency for eight lines.
+fn hex_digest(hasher: Sha256) -> String {
+    hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeMap;
     use std::time::Duration;
 
-    fn config(url: &str, transport: McpTransport, headers: &[(&str, &str)]) -> McpServerConfig {
+    fn cfg_with(headers: &[(&str, &str)]) -> McpServerConfig {
         McpServerConfig {
-            url: url.to_string(),
-            transport,
+            url: "https://mcp.example.com/mcp".to_string(),
+            transport: McpTransport::StreamableHttp,
             header_refs: headers
                 .iter()
                 .map(|(k, v)| (k.to_string(), v.to_string()))
-                .collect::<BTreeMap<_, _>>(),
+                .collect(),
             timeout: Duration::from_secs(30),
             cache_ttl: Duration::from_secs(300),
         }
     }
 
-    /// THE bug this scope exists for. Secure-value handles are counters and
-    /// names (`<value_1>`, `<sv_admin_token>`) with nothing unique per
-    /// session, and `decrypt` resolves the same handle to a different secret
-    /// per session. Two agent sessions running the SAME graph therefore build
-    /// identical `header_refs`. Without the scope they would key identically,
-    /// share one pooled connection, and the second session would send the
-    /// first session's credential.
+    fn resolved(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    fn key_for(headers: &[(&str, &str)], values: &[(&str, &str)]) -> McpServerKey {
+        McpServerKey::from_resolved(
+            &cfg_with(headers),
+            &CredentialFingerprint::of(&resolved(values)),
+        )
+    }
+
+    // --- What the pool must never merge ---
+
+    /// The property the credential scope was introduced to protect, now stated
+    /// directly instead of through a session-id proxy: two principals whose
+    /// secret resolves to different bytes must never share a connection.
     #[test]
-    fn two_agent_sessions_sharing_a_reference_do_not_share_a_connection() {
-        let cfg = config(
-            "https://mcp.example.com/mcp",
-            McpTransport::StreamableHttp,
-            &[("Authorization", "<value_1>")],
+    fn two_principals_with_different_secrets_do_not_share_a_connection() {
+        assert_ne!(
+            key_for(
+                &[("Authorization", "<sv_token>")],
+                &[("Authorization", "Bearer alice")]
+            ),
+            key_for(
+                &[("Authorization", "<sv_token>")],
+                &[("Authorization", "Bearer bob")]
+            ),
+            "same reference, different resolved secret: different connections"
+        );
+    }
+
+    /// The bug the session-id proxy could not see. A rotation leaves the
+    /// config and the session untouched, so the OLD key was unchanged and the
+    /// pool kept serving a connection holding the retired credential.
+    #[test]
+    fn rotating_a_secret_yields_a_new_connection() {
+        let before = key_for(
+            &[("Authorization", "<sv_token>")],
+            &[("Authorization", "Bearer old")],
+        );
+        let after = key_for(
+            &[("Authorization", "<sv_token>")],
+            &[("Authorization", "Bearer new")],
         );
         assert_ne!(
-            McpServerKey::from_config(&cfg, CredentialScope::new("s", Some("agent-a"))),
-            McpServerKey::from_config(&cfg, CredentialScope::new("s", Some("agent-b"))),
-            "identical refs under different agent sessions resolve to DIFFERENT \
-             secrets, so they must not share a pooled connection"
+            before, after,
+            "a rotated secret must not keep serving the connection built with the old one"
         );
     }
 
-    /// The other half: one conversation must still reuse its connection across
-    /// turns, or the scope would have traded a credential leak for a handshake
-    /// on every turn.
+    /// Moving the same bytes to a different header is a different request, so
+    /// it must be a different identity.
     #[test]
-    fn the_same_agent_session_keeps_one_connection_across_turns() {
-        let cfg = config(
-            "https://mcp.example.com/mcp",
-            McpTransport::StreamableHttp,
-            &[("Authorization", "<sv_admin_token>")],
-        );
-        // DIFFERENT session ids, same agent. That is what "across turns"
-        // actually means: each run of a conversation gets a fresh session id
-        // while the agent id persists. Comparing two identical scopes would
-        // only have re-proved determinism, which
-        // `the_same_reference_always_yields_the_same_identity` already covers.
-        // This mirrors `decrypt`'s agent branch, which filters on the agent id
-        // alone and never reads session_id.
-        assert_eq!(
-            McpServerKey::from_config(&cfg, CredentialScope::new("run-1", Some("agent-a"))),
-            McpServerKey::from_config(&cfg, CredentialScope::new("run-2", Some("agent-a")))
-        );
-    }
-
-    /// A server with no headers is genuinely the same server for everyone, so
-    /// it must stay globally pooled — otherwise every agent session would
-    /// re-handshake against a public server for no reason.
-    #[test]
-    fn a_server_without_headers_pools_globally_across_sessions() {
-        let cfg = config(
-            "https://mcp.deepwiki.com/mcp",
-            McpTransport::StreamableHttp,
-            &[],
-        );
-        assert_eq!(
-            McpServerKey::from_config(&cfg, CredentialScope::new("s", Some("agent-a"))),
-            McpServerKey::from_config(&cfg, CredentialScope::new("s", Some("agent-b"))),
-            "an unauthenticated server must not fragment per session"
-        );
-    }
-
-    /// A LITERAL header is the same secret in every session, so sharing is
-    /// correct. Only references — whose resolved value is session-dependent —
-    /// force isolation.
-    #[test]
-    fn a_literal_header_is_the_same_secret_everywhere_and_still_pools() {
-        let cfg = config(
-            "https://mcp.example.com/mcp",
-            McpTransport::StreamableHttp,
-            &[("X-Api-Key", "literal-key-not-a-placeholder")],
-        );
-        assert_eq!(
-            McpServerKey::from_config(&cfg, CredentialScope::new("s", Some("agent-a"))),
-            McpServerKey::from_config(&cfg, CredentialScope::new("s", Some("agent-b")))
-        );
-    }
-
-    /// The half the first version of this fix left open, and the reason the
-    /// scope carries BOTH ids. With no agent id, `decrypt` resolves strictly
-    /// by `session_id`, so two session-only runs of the same graph resolve the
-    /// same handle to different secrets and must not share a connection.
-    #[test]
-    fn two_session_only_runs_sharing_a_reference_do_not_share_a_connection() {
-        let cfg = config(
-            "https://mcp.example.com/mcp",
-            McpTransport::StreamableHttp,
-            &[("Authorization", "<value_1>")],
-        );
+    fn the_same_secret_under_a_different_header_name_is_a_different_key() {
         assert_ne!(
-            McpServerKey::from_config(&cfg, CredentialScope::new("run-1", None)),
-            McpServerKey::from_config(&cfg, CredentialScope::new("run-2", None)),
-            "without an agent id, decrypt partitions by session_id, so the key must too"
+            key_for(&[("Authorization", "<sv_t>")], &[("Authorization", "tok")]),
+            key_for(&[("X-Api-Key", "<sv_t>")], &[("X-Api-Key", "tok")]),
         );
     }
 
-    /// The discriminant must participate: an agent named `x` and a session
-    /// named `x` are different identities, and `decrypt` looks them up in
-    /// different columns. BOTH ids are `"x"` here on purpose — if the two
-    /// scopes differed in any second field, that difference could carry the
-    /// assertion and an implementation that ignored the discriminant entirely
-    /// would still pass.
+    /// Field framing, at the fingerprint layer: ("ab","c") and ("a","bc")
+    /// concatenate identically, so only length framing keeps them apart.
     #[test]
-    fn an_agent_id_and_a_session_id_with_the_same_text_are_different_scopes() {
-        let cfg = config(
-            "https://mcp.example.com/mcp",
-            McpTransport::StreamableHttp,
-            &[("Authorization", "<value_1>")],
-        );
+    fn credential_field_boundaries_cannot_be_shifted_into_a_collision() {
         assert_ne!(
-            McpServerKey::from_config(&cfg, CredentialScope::new("x", Some("x"))),
-            McpServerKey::from_config(&cfg, CredentialScope::new("x", None))
+            CredentialFingerprint::of(&resolved(&[("ab", "c")])),
+            CredentialFingerprint::of(&resolved(&[("a", "bc")])),
         );
     }
 
-    /// An empty agent id must not collapse into the session case. ONE config,
-    /// only the scope varies — comparing two different configs would let the
-    /// differing headers carry the assertion and prove nothing about the
-    /// discriminant.
+    /// Role order, not just field length. The surviving boundary tests compare
+    /// two DIFFERENT string pairs, so a digest that combined name and value
+    /// commutatively would pass every one of them. This is the successor to
+    /// the old `a_header_name_and_its_reference_are_not_interchangeable`,
+    /// re-expressed at the fingerprint layer where the values now live.
     #[test]
-    fn an_empty_agent_id_is_a_different_scope_from_an_empty_session_id() {
-        let cfg = config(
-            "https://mcp.example.com/mcp",
-            McpTransport::StreamableHttp,
-            &[("Authorization", "<value_1>")],
-        );
+    fn a_header_name_and_its_value_are_not_interchangeable() {
         assert_ne!(
-            McpServerKey::from_config(&cfg, CredentialScope::new("", Some(""))),
-            McpServerKey::from_config(&cfg, CredentialScope::new("", None)),
-            "both ids are empty, so only the discriminant can tell an agent-scoped \
-             secret from a session-scoped one"
+            CredentialFingerprint::of(&resolved(&[("A", "B")])),
+            CredentialFingerprint::of(&resolved(&[("B", "A")])),
+            "the same two strings in swapped roles are a different credential"
         );
     }
 
-    /// R3.6 — the key is a function of the REFERENCE, not of the resolved
-    /// value. Two deployments pointing the same reference at different secrets
-    /// still share one connection, and rotating a secret does not fragment the
-    /// pool. It also keeps the plaintext credential out of anything that gets
-    /// logged as a cache key.
-    #[test]
-    fn the_key_is_a_digest_and_never_carries_its_inputs_verbatim() {
-        let a = config(
-            "https://mcp.example.com/mcp",
-            McpTransport::StreamableHttp,
-            &[("Authorization", "$DYNAMIC")],
-        );
-        let key = McpServerKey::from_config(&a, CredentialScope::unscoped());
-
-        // 64 lowercase hex characters and nothing else. This is the assertion
-        // that can actually fail: a key built by concatenating its inputs —
-        // `format!("{url}|{refs}")`, the obvious shortcut — would carry the
-        // URL and the header reference verbatim into every log line and metric
-        // label that prints it. Asserting "the rendered key does not contain
-        // '$DYNAMIC'" would NOT catch that, because it holds vacuously for any
-        // hex digest whatever the implementation hashed.
-        assert_eq!(key.as_str().len(), 64, "sha256 hex is 64 chars: {key:?}");
-        assert!(
-            key.as_str()
-                .bytes()
-                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
-            "the key must be pure lowercase hex, carrying no input material: {key:?}"
-        );
-    }
-
-    /// R3.6 is enforced by the TYPE, not by the hash: `McpServerConfig` holds
-    /// `header_refs`, and a resolved secret value never enters that struct at
-    /// all (it is read at connect time and moved straight into the transport's
-    /// header map). What IS testable here is the consequence operators depend
-    /// on — the same reference always yields the same identity, so rotating
-    /// the secret behind it does not fragment the connection pool.
-    #[test]
-    fn the_same_reference_always_yields_the_same_identity() {
-        let mk = || {
-            config(
-                "https://mcp.example.com/mcp",
-                McpTransport::StreamableHttp,
-                &[("Authorization", "$DYNAMIC")],
-            )
-        };
-        assert_eq!(
-            McpServerKey::from_config(&mk(), CredentialScope::unscoped()),
-            McpServerKey::from_config(&mk(), CredentialScope::unscoped())
-        );
-    }
-
-    /// A different reference is a different credential, so it must be a
-    /// different connection — otherwise one tool would silently ride another
-    /// tool's authorization.
-    #[test]
-    fn a_different_header_reference_is_a_different_key() {
-        let a = config(
-            "https://mcp.example.com/mcp",
-            McpTransport::StreamableHttp,
-            &[("Authorization", "$DYNAMIC")],
-        );
-        let b = config(
-            "https://mcp.example.com/mcp",
-            McpTransport::StreamableHttp,
-            &[("Authorization", "<sv_other>")],
-        );
-        assert_ne!(
-            McpServerKey::from_config(&a, CredentialScope::unscoped()),
-            McpServerKey::from_config(&b, CredentialScope::unscoped())
-        );
-    }
-
-    /// URL and transport are part of the identity too.
-    #[test]
-    fn url_and_transport_both_participate_in_the_key() {
-        let base = config(
-            "https://a.example.com/mcp",
-            McpTransport::StreamableHttp,
-            &[],
-        );
-        let other_url = config(
-            "https://b.example.com/mcp",
-            McpTransport::StreamableHttp,
-            &[],
-        );
-        let other_transport = config("https://a.example.com/mcp", McpTransport::Sse, &[]);
-        assert_ne!(
-            McpServerKey::from_config(&base, CredentialScope::unscoped()),
-            McpServerKey::from_config(&other_url, CredentialScope::unscoped())
-        );
-        assert_ne!(
-            McpServerKey::from_config(&base, CredentialScope::unscoped()),
-            McpServerKey::from_config(&other_transport, CredentialScope::unscoped())
-        );
-    }
-
-    /// The separator earns its place here: without it, ("ab","c") and
-    /// ("a","bc") would hash the same pre-image and two DIFFERENT credentials
-    /// would share one connection.
-    #[test]
-    fn header_field_boundaries_cannot_be_shifted_into_a_collision() {
-        let a = config(
-            "https://x/mcp",
-            McpTransport::StreamableHttp,
-            &[("ab", "c")],
-        );
-        let b = config(
-            "https://x/mcp",
-            McpTransport::StreamableHttp,
-            &[("a", "bc")],
-        );
-        assert_ne!(
-            McpServerKey::from_config(&a, CredentialScope::unscoped()),
-            McpServerKey::from_config(&b, CredentialScope::unscoped())
-        );
-    }
-
-    /// The separator alone is NOT enough, and this is the test that proves it.
+    /// Per-ENTRY pairing, which the single-header tests cannot show.
     ///
-    /// Nothing validates header names or references — they are operator-authored
-    /// strings from the graph JSON, and JSON can encode any byte, `\u001F`
-    /// included. With plain separators, `{"A":"1","B":"2"}` and the single
-    /// header `{"A":"1\u001FB\u001F2"}` produce the SAME pre-image: two
-    /// different header sets, therefore two different credentials, sharing one
-    /// pooled connection — the second caller would send the first caller's
-    /// headers. Length-prefixed framing is what actually makes the pre-image
-    /// unambiguous.
+    /// A digest that hashed the sorted names and the sorted values as two
+    /// independent sets would pass every other test in this module — the name
+    /// set and the value set are each unchanged here — and yet would equate
+    /// two genuinely different credential sets, letting the pool hand one
+    /// principal's connection to the other. Only a fixture with TWO headers
+    /// whose values are swapped between them can catch that.
     #[test]
-    fn a_separator_byte_inside_a_header_cannot_forge_another_configs_identity() {
-        let two_headers = config(
-            "https://x/mcp",
-            McpTransport::StreamableHttp,
-            &[("A", "1"), ("B", "2")],
-        );
-        let smuggled = config(
-            "https://x/mcp",
-            McpTransport::StreamableHttp,
-            &[("A", "1\u{1F}B\u{1F}2")],
-        );
+    fn swapping_values_between_two_headers_is_a_different_credential() {
         assert_ne!(
-            McpServerKey::from_config(&two_headers, CredentialScope::unscoped()),
-            McpServerKey::from_config(&smuggled, CredentialScope::unscoped()),
-            "a header value carrying the separator must not be able to impersonate \
-             a different header set"
+            CredentialFingerprint::of(&resolved(&[("Authorization", "X"), ("X-Api-Key", "Y")])),
+            CredentialFingerprint::of(&resolved(&[("Authorization", "Y"), ("X-Api-Key", "X")])),
+            "same names, same values, different pairing: a different credential"
         );
     }
 
-    /// The same smuggling attempt through the URL field.
+    /// Every entry counts, not just the first.
+    ///
+    /// The swap test above shares its name set and value set between the two
+    /// fixtures, but its two sides also differ in the FIRST sorted key, so a
+    /// digest that hashed only the first pair would still tell them apart —
+    /// passing for the wrong reason. These two fixtures agree on the first
+    /// entry and differ only in the second, which is the shape that catches
+    /// it. Cardinality counts too: one header is not the same credential as
+    /// that header plus another.
     #[test]
-    fn a_separator_byte_inside_the_url_cannot_shift_field_boundaries() {
-        let plain = config("https://x/mcp", McpTransport::StreamableHttp, &[("A", "1")]);
-        let smuggled = config(
-            "https://x/mcp\u{1F}streamable_http\u{1F}A\u{1F}1",
-            McpTransport::StreamableHttp,
-            &[],
-        );
+    fn entries_past_the_first_participate_in_the_fingerprint() {
+        let alice = CredentialFingerprint::of(&resolved(&[
+            ("Authorization", "tok"),
+            ("X-Api-Key", "alice"),
+        ]));
+        let bob =
+            CredentialFingerprint::of(&resolved(&[("Authorization", "tok"), ("X-Api-Key", "bob")]));
         assert_ne!(
-            McpServerKey::from_config(&plain, CredentialScope::unscoped()),
-            McpServerKey::from_config(&smuggled, CredentialScope::unscoped())
+            alice, bob,
+            "same first entry, different second: two different principals"
+        );
+
+        let one = CredentialFingerprint::of(&resolved(&[("Authorization", "tok")]));
+        assert_ne!(
+            one, alice,
+            "adding a second header is a different credential, not the same one"
         );
     }
 
-    // Header ORDER is deliberately NOT tested: `header_refs` is a `BTreeMap`,
-    // so two configs written in different orders are already the same map
-    // before `from_config` is ever called. A test comparing them could not
-    // fail for any deterministic implementation — it would assert a property
-    // of `BTreeMap`, not of this module. Order-independence here is
-    // structural, guaranteed by the type.
+    /// EVERY entry, at EVERY position.
+    ///
+    /// Three ad-hoc fixtures in a row were defeated by a different
+    /// position-blind implementation each time: hash only the first pair, then
+    /// hash only the last. Each new fixture happened to vary the position the
+    /// next mutant ignored, so it passed for the wrong reason. Naming positions
+    /// one at a time is a losing game — this pins the property instead: change
+    /// any single entry's value, at any position, and the fingerprint changes.
+    /// A digest that consults only some positions fails here whichever ones it
+    /// picks.
+    #[test]
+    fn every_entry_participates_regardless_of_position() {
+        // Names chosen so BTreeMap order is first < middle < last.
+        let base = [("a-first", "1"), ("m-middle", "2"), ("z-last", "3")];
+        let baseline = CredentialFingerprint::of(&resolved(&base));
 
-    /// Adding a header is a different credential set, so it must be a
-    /// different connection. Covers the empty-to-non-empty boundary that the
-    /// pair-swap cases do not reach.
+        for position in 0..base.len() {
+            let mut varied = base;
+            varied[position].1 = "changed";
+            assert_ne!(
+                baseline,
+                CredentialFingerprint::of(&resolved(&varied)),
+                "changing '{}' (position {position}) left the fingerprint unchanged, so \
+                 that entry does not participate",
+                base[position].0
+            );
+        }
+    }
+
+    /// And at the key layer, over header names.
+    #[test]
+    fn header_name_boundaries_cannot_be_shifted_into_a_collision() {
+        let none = CredentialFingerprint::none();
+        assert_ne!(
+            McpServerKey::from_resolved(&cfg_with(&[("ab", ""), ("c", "")]), &none),
+            McpServerKey::from_resolved(&cfg_with(&[("a", ""), ("bc", "")]), &none),
+        );
+    }
+
     #[test]
     fn adding_a_header_changes_the_key() {
-        let bare = config("https://x/mcp", McpTransport::StreamableHttp, &[]);
-        let with_header = config(
-            "https://x/mcp",
-            McpTransport::StreamableHttp,
-            &[("Authorization", "$DYNAMIC")],
-        );
+        let none = CredentialFingerprint::none();
         assert_ne!(
-            McpServerKey::from_config(&bare, CredentialScope::unscoped()),
-            McpServerKey::from_config(&with_header, CredentialScope::unscoped())
+            McpServerKey::from_resolved(&cfg_with(&[("A", "1")]), &none),
+            McpServerKey::from_resolved(&cfg_with(&[("A", "1"), ("B", "2")]), &none),
         );
     }
 
-    /// The name and the reference are distinct inputs: swapping which is which
-    /// must change the identity, or a header named after a value would collide
-    /// with a value named after a header.
     #[test]
-    fn a_header_name_and_its_reference_are_not_interchangeable() {
-        let a = config("https://x/mcp", McpTransport::StreamableHttp, &[("A", "B")]);
-        let b = config("https://x/mcp", McpTransport::StreamableHttp, &[("B", "A")]);
+    fn url_and_transport_both_participate_in_the_key() {
+        let none = CredentialFingerprint::none();
+        let base = cfg_with(&[]);
+        let mut other_url = base.clone();
+        other_url.url = "https://other.example.com/mcp".to_string();
+        let mut other_transport = base.clone();
+        other_transport.transport = McpTransport::Sse;
+
         assert_ne!(
-            McpServerKey::from_config(&a, CredentialScope::unscoped()),
-            McpServerKey::from_config(&b, CredentialScope::unscoped())
+            McpServerKey::from_resolved(&base, &none),
+            McpServerKey::from_resolved(&other_url, &none),
+            "a different endpoint is a different server"
+        );
+        assert_ne!(
+            McpServerKey::from_resolved(&base, &none),
+            McpServerKey::from_resolved(&other_transport, &none),
+            "the same endpoint over a different transport is a different connection"
+        );
+    }
+
+    /// A separator-looking byte inside a URL must not be able to forge the
+    /// pre-image of another config.
+    #[test]
+    fn a_separator_byte_inside_the_url_cannot_shift_field_boundaries() {
+        let none = CredentialFingerprint::none();
+        let mut sneaky = cfg_with(&[]);
+        sneaky.url = "https://mcp.example.com/mcp\u{1f}streamable_http".to_string();
+        assert_ne!(
+            McpServerKey::from_resolved(&sneaky, &none),
+            McpServerKey::from_resolved(&cfg_with(&[]), &none),
+        );
+    }
+
+    // --- What the pool must merge ---
+
+    /// The improvement the proxy could not express. Two sessions holding the
+    /// SAME credential are indistinguishable to the server, so separating them
+    /// bought nothing and cost a connection each.
+    #[test]
+    fn two_sessions_with_the_same_secret_share_one_connection() {
+        assert_eq!(
+            key_for(
+                &[("Authorization", "<sv_token>")],
+                &[("Authorization", "Bearer shared")]
+            ),
+            key_for(
+                &[("Authorization", "<sv_token>")],
+                &[("Authorization", "Bearer shared")]
+            ),
+            "the server cannot tell these apart; the pool should not either"
+        );
+    }
+
+    /// No headers at all: one connection for everyone, which is what makes a
+    /// public server like DeepWiki cheap to talk to.
+    #[test]
+    fn a_server_without_headers_pools_globally() {
+        assert_eq!(
+            McpServerKey::from_resolved(&cfg_with(&[]), &CredentialFingerprint::none()),
+            McpServerKey::from_resolved(&cfg_with(&[]), &CredentialFingerprint::none()),
+        );
+    }
+
+    #[test]
+    fn the_same_inputs_always_yield_the_same_identity() {
+        assert_eq!(
+            key_for(&[("Authorization", "<sv_t>")], &[("Authorization", "tok")]),
+            key_for(&[("Authorization", "<sv_t>")], &[("Authorization", "tok")]),
+        );
+    }
+
+    // --- What the key must not leak ---
+
+    /// The key is printed by the eviction log. It must be a digest, and in
+    /// particular must not carry the RESOLVED secret.
+    #[test]
+    fn the_key_never_carries_its_inputs_verbatim() {
+        let k = key_for(
+            &[("Authorization", "<sv_token>")],
+            &[("Authorization", "Bearer super-secret-value")],
+        );
+        let s = k.as_str();
+        assert!(
+            !s.contains("super-secret-value"),
+            "the resolved secret leaked into the key"
+        );
+        assert!(!s.contains("sv_token"), "the reference leaked into the key");
+        assert!(
+            !s.contains("mcp.example.com"),
+            "the url leaked into the key"
+        );
+        assert_eq!(s.len(), 64, "a sha256 hex digest");
+        assert!(s.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    /// The fingerprint is salted, so it is not the bare digest of the secret
+    /// an attacker would compute to confirm a guess from a log line.
+    #[test]
+    fn the_fingerprint_is_salted_not_a_bare_digest_of_the_secret() {
+        let fp = CredentialFingerprint::of(&resolved(&[("Authorization", "tok")]));
+
+        let mut unsalted = Sha256::new();
+        absorb(&mut unsalted, b"Authorization");
+        absorb(&mut unsalted, b"tok");
+        assert_ne!(
+            fp.0,
+            hex_digest(unsalted),
+            "an unsalted digest lets anyone with the log confirm a guessed secret"
         );
     }
 }
