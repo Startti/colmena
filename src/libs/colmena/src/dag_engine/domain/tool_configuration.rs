@@ -315,7 +315,7 @@ fn is_https_url(url: &str) -> bool {
 /// path so a bad graph is rejected at load without a full struct decode —
 /// mirroring [`validate_memory_mode`].
 ///
-/// Three rejections, each for a config that would otherwise fail silently:
+/// Four rejections, each for a config that would otherwise fail silently:
 /// 1. `node_type: "mcp"` with no reachable address. An MCP tool with no `url`
 ///    exposes nothing, which reads to the operator as "the model ignored my
 ///    server" rather than as a broken config.
@@ -324,6 +324,10 @@ fn is_https_url(url: &str) -> bool {
 /// 3. An `mcp` block on a tool that is not an MCP tool — dead config the
 ///    operator believes is live. Not named in the design, but it is the same
 ///    failure class as a misplaced `memory_mode` and gets the same treatment.
+/// 4. A block that parses as JSON but not as an [`McpServerSpec`] — a typo'd
+///    `transport`, a `headers` that is not a string map. Checking only the url
+///    let these load cleanly and then contribute nothing, which is the same
+///    silent failure the other three exist to prevent.
 ///
 /// The returned message does not repeat the tool alias: the caller wraps it in
 /// [`DagError::InvalidToolSchema`], whose `Display` already names both the tool
@@ -360,6 +364,22 @@ pub fn validate_mcp_config(node_type: &str, tool_cfg: &Value) -> Result<(), Stri
             "MCP server URL must be HTTPS, got '{url}' (these connections carry \
              credential headers, so plaintext transport is refused)"
         ));
+    }
+
+    // Parse the WHOLE block, not just the url. Checking only the url leaves a
+    // graph with a typo'd `transport` or a non-object `headers` loading
+    // cleanly, and then the server contributes nothing — which reads to the
+    // operator as "the model ignored my server", not as "my config is
+    // malformed". Failing closed here is the only place that distinction can
+    // still be made.
+    if let Some(block) = block {
+        if let Err(e) = serde_json::from_value::<McpServerSpec>(block.clone()) {
+            return Err(format!(
+                "the 'mcp' block on this tool is malformed: {e}. Valid fields are \
+                 url, transport (streamable_http | sse), headers (string map), \
+                 timeout_seconds and cache_ttl_seconds"
+            ));
+        }
     }
 
     Ok(())
@@ -844,6 +864,45 @@ mod tests {
             json!({ "url": "HTTPS://mcp.example.com/mcp" }),
         );
         assert!(validate_mcp_config(MCP_NODE_TYPE, &upper).is_ok());
+    }
+
+    /// A field the url check never looks at must still fail the load.
+    ///
+    /// Checking only `mcp.url` let a graph with a typo'd `transport` load
+    /// cleanly and then contribute zero tools, which reads to the operator as
+    /// "the model ignored my server" rather than "my config is malformed".
+    /// This is the only place that distinction can still be drawn.
+    #[test]
+    fn a_malformed_mcp_field_beyond_the_url_fails_the_load() {
+        let bad_transport = json!({
+            "node_type": MCP_NODE_TYPE,
+            "mcp": { "url": "https://mcp.example.com/mcp", "transport": "streamablehttp" }
+        });
+        let err = validate_mcp_config(MCP_NODE_TYPE, &bad_transport).unwrap_err();
+        assert!(
+            err.contains("malformed"),
+            "the error must say the block is malformed, got: {err}"
+        );
+        assert!(
+            err.contains("streamable_http"),
+            "and name the valid values, got: {err}"
+        );
+
+        let bad_headers = json!({
+            "node_type": MCP_NODE_TYPE,
+            "mcp": { "url": "https://mcp.example.com/mcp", "headers": ["not", "a", "map"] }
+        });
+        assert!(
+            validate_mcp_config(MCP_NODE_TYPE, &bad_headers).is_err(),
+            "headers must be a string map"
+        );
+
+        // The well-formed case still passes, so the gate did not become a wall.
+        let good = json!({
+            "node_type": MCP_NODE_TYPE,
+            "mcp": { "url": "https://mcp.example.com/mcp", "transport": "sse" }
+        });
+        assert!(validate_mcp_config(MCP_NODE_TYPE, &good).is_ok());
     }
 
     /// An `mcp` block on a tool that is not an MCP tool is dead config the
