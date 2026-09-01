@@ -2297,3 +2297,41 @@ producción recorre), y `DagToolExecutor::available_tools`
 **Alcance.** Módulo nuevo, aditivo, sin cambio de API pública → ADP no afectado.
 
 **Estado.** done (la mitad pura; conector y cableado en la slice siguiente).
+
+## 36. El puente entre una config MCP y una conexión viva
+
+**Qué cambió.** Nuevo `mcp/bind.rs`: dado un `McpServerSpec` y los ids de sesión, resuelve las
+referencias de credencial, deriva la identidad de pool que implican, y produce la factory que
+`McpConnectionRegistry` espera. Es la pieza que faltaba entre la config y el cliente `rmcp` — hasta
+ahora el registry no tenía con qué conectar y la resolución de headers no tenía llamador.
+
+**Resolver primero, keyear después.** Ese orden es todo el punto. Keyear sobre las *referencias*
+dejaría la identidad intacta a través de una rotación, y el pool seguiría devolviendo la conexión
+construida con el secreto retirado — el bug que §34 cerró en la clave y que ahora se ejercita desde
+la config real, no solo desde un test unitario.
+
+**El `Debug` se escribe a mano y muestra solo NOMBRES de header.** Este tipo existe para sostener
+secretos resueltos; un `Debug` derivado los pondría en la primera línea de log que alguien agregue
+depurando una conexión. Un test lo fija y la mutación a `#[derive(Debug)]` lo tumba.
+
+**Sin servicio de secure values, una referencia falla ruidoso.** La alternativa —dejar pasar el
+placeholder— lo mandaría al servidor **como texto**, que el operador lee como credencial equivocada
+en vez de servicio faltante. Los literales sí pasan: un literal significa lo mismo para todos, y es
+lo que mantiene globalmente pooleado a un servidor público.
+
+**Los errores nombran el header, nunca el valor.** Un fallo de resolución se le reporta a un
+operador, y lo que no resolvió es precisamente lo que no hay que imprimir.
+
+**Nota sobre el mock de los tests.** Espeja el `decrypt` de PRODUCCIÓN: dos ramas mutuamente
+excluyentes, sin fallback. El mock que vive en los tests de `secure_value_service` **sí** hace
+fallback de agente a sesión, y reusarlo habría dejado pasar un binding que producción rechaza. Es la
+misma trampa que `key.rs` documenta desde §30.
+
+**Sigue sin llamador.** El cableado `with_mcp` va en la slice siguiente, **junto con la contención**
+y no antes: exponer es el momento en que las descripciones de terceros entran al contexto del
+modelo, así que cablear sin los delimitadores con nonce pagaría ese riesgo sin obtener el dispatch.
+Las cuatro decisiones diferidas de §35 se vuelven alcanzables todas juntas en ese momento.
+
+**Alcance.** Módulo nuevo, aditivo, sin cambio de API pública → ADP no afectado.
+
+**Estado.** done (conector y binding; cableado y contención en la slice siguiente).

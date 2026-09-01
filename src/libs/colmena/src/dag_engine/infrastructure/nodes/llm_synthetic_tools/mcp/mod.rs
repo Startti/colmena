@@ -4,6 +4,8 @@
 //! server's catalog into `ToolDefinition`s the provider can see, and dispatch
 //! (a later slice) routes a call back to the server.
 
+pub mod bind;
 pub mod expose;
 
+pub use bind::{bind, McpBinding};
 pub use expose::{collect_mcp_tool_configs, drop_colliding, exposed_definitions};
