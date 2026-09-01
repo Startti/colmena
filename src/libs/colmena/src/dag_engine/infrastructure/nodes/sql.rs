@@ -514,6 +514,13 @@ impl ExecutableNode for SqlNode {
             .and_then(|v| v.as_u64())
             .unwrap_or(100);
 
+        // Static validation is unconditional by design: it is what blocks DROP,
+        // TRUNCATE and unqualified DELETE/UPDATE, so there is deliberately no
+        // switch to turn it off. The node's schema used to advertise a
+        // `guardrail_enabled` flag that nothing ever read — operators set it
+        // believing it controlled this, and it silently did nothing. The flag is
+        // gone; do not reintroduce one. `guardrail_llm` below is the only
+        // guardrail that is actually optional.
         let validator = Arc::new(StaticRuleValidator)
             as Arc<dyn crate::dag_engine::domain::sql_ports::SqlValidatorPort>;
 
@@ -703,7 +710,6 @@ impl ExecutableNode for SqlNode {
                 "connection_url": "string (required, supports ${ENV_VAR})",
                 "permissions": "object (optional, default: read_only preset)",
                 "runtime_limits": "object (optional, max_rows, statement_timeout_ms, work_mem_mb)",
-                "guardrail_enabled": "boolean (optional, enables static validation rules)",
                 "guardrail_llm": "object (optional, LLM critic config: enabled, provider, model, api_key)"
             },
             "inputs": {

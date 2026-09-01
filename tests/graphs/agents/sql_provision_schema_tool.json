@@ -29,7 +29,6 @@
                   "create_schemas_if_missing": true
                 }
               },
-              "guardrail_enabled": { "type": "boolean", "fixed": true },
               "guardrail_llm": { "type": "object", "fixed": { "enabled": false } },
               "query": {
                 "type": "string",

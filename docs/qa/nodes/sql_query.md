@@ -9,20 +9,37 @@ Fuentes de doc revisadas:
 
 ## 1) Config documentada NO soportada por el código
 
-### Hallazgo 1: Campo `guardrail_enabled` ignorado por el código
+### Hallazgo 1: Campo `guardrail_enabled` ignorado por el código — ✅ RESUELTO
 
-**Qué dice la doc:**
-- `docs/developer_guide/23_sql_node.md` línea 81 lista `guardrail_enabled | boolean | No | true | Enable static validation rules`
-- El mismo campo aparece en ejemplos de `node_as_tools_reference.json` como `"guardrail_enabled": { "type": "boolean", "fixed": true }`
+> **Estado: cerrado.** El campo fantasma fue eliminado del `schema()` del nodo y de
+> toda la documentación canónica. La validación estática es incondicional por
+> diseño y ya no se anuncia ningún interruptor para apagarla. Este hallazgo se
+> conserva como registro de la auditoría; **ya no es reproducible**.
 
-**Qué hace el código:**
-- `src/libs/colmena/src/dag_engine/infrastructure/nodes/sql.rs` línea 520-524: el código NUNCA lee `config.guardrail_enabled`. Lee únicamente `guardrail_llm.enabled` para decidir si activar el LLM critic.
-- La validación estática SIEMPRE está activada (no hay forma de deshabilitarla en el código).
-- El campo `guardrail_enabled` en la config es silenciosamente ignorado.
+**Qué decía la doc (antes del fix):**
+- `docs/developer_guide/23_sql_node.md` listaba `guardrail_enabled | boolean | No | true | Enable static validation rules`.
+- El `schema()` del nodo lo anunciaba en su bloque `config` (`sql.rs`).
+- *Corrección a la ficha original:* también se afirmaba que aparecía en
+  `docs/node_as_tools_reference.json`. **Eso era falso** — ese archivo nunca lo
+  contuvo. Verificado al aplicar el fix.
 
-**Impacto para QA:**
-- Pruebas que intenten pasar `guardrail_enabled: false` esperando deshabilitar validación estática no verán efecto — la validación seguirá funcionando.
-- El campo es **documentado pero no funcional** — la doc debería aclarar que la validación estática es siempre obligatoria, o el código debería implementar el campo.
+**Qué hacía el código:**
+- Ningún `.get("guardrail_enabled")` existía en `sql.rs`. Solo se leía
+  `guardrail_llm.enabled`, que activa el crítico LLM (ese sí es opcional y real).
+- La validación estática siempre estuvo activa: es lo que bloquea `DROP`,
+  `TRUNCATE` y `DELETE`/`UPDATE` sin `WHERE`.
+
+**Por qué se eliminó en vez de implementarse:**
+Cablear el flag habría permitido apagar la validación que impide operaciones
+destructivas — un downgrade de seguridad. Se quitó el flag y se dejó una nota en
+`sql.rs` para que no se reintroduzca.
+
+**Qué verificar en QA:**
+- Pasar `guardrail_enabled` (en config o como campo `fixed`) es inofensivo: la
+  clave sobrante se ignora, igual que antes. Los grafos persistidos que aún lo
+  llevan siguen funcionando sin cambios.
+- La validación estática debe seguir bloqueando `DROP`/`TRUNCATE`/`DELETE` sin
+  `WHERE` en todos los casos (ver pruebas 4-6 de la sección 3).
 
 ---
 
