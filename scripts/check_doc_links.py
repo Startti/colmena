@@ -19,7 +19,9 @@ tolerated because docs use it as a clickable line reference.
 
 `docs/superpowers/`, `docs/history/` and `docs/archive/` are historical records:
 plans there legitimately name graphs that were proposed and never created, so
-check 2 skips them. Their markdown links are still checked.
+check 2 skips them. `docs/qa/` is skipped for the mirror-image reason: the
+per-node QA plans name the graph each test case still has to be built from.
+Their markdown links are still checked.
 
 Exit code 1 if anything is broken, so this can gate CI.
 """
@@ -40,6 +42,13 @@ PATH_SHAPE = re.compile(r'\.[A-Za-z0-9]{1,8}$')
 
 # Docs that record what was planned or shipped in the past, not what exists today.
 HISTORICAL = ("docs/superpowers", "docs/history", "docs/archive")
+
+# Docs that describe work still to be done. The per-node QA plans under docs/qa/
+# name the graph each test case needs so QA can build it; naming a graph there is
+# the assignment, not a claim that it already exists. Check 2 skips them for the
+# same reason it skips HISTORICAL -- the graph path is prospective, not a promise.
+# Their markdown links are still checked.
+PROSPECTIVE = ("docs/qa",)
 
 # A doc may deliberately name a graph that does not exist yet. Each entry must say
 # why, so the exception stays reviewable instead of silently absorbing regressions.
@@ -101,7 +110,7 @@ def main(roots):
     missing_graphs, graphs_checked = [], 0
     for root in roots:
         for dirpath, _dirnames, filenames in os.walk(root):
-            if dirpath.startswith(HISTORICAL):
+            if dirpath.startswith(HISTORICAL) or dirpath.startswith(PROSPECTIVE):
                 continue
             for name in sorted(filenames):
                 if not name.endswith((".md", ".json")):

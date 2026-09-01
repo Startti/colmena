@@ -47,8 +47,9 @@ Run this audit **before `review start`**, not merely before pushing:
    was never committed (graph paths are usually inline code spans, so a plain
    link check misses them). `docs/superpowers/`, `docs/history/` and
    `docs/archive/` are exempt from the graph check — a plan there may name a
-   graph that was proposed and never built. CI runs this on every PR to
-   `develop`.
+   graph that was proposed and never built. `docs/qa/` is exempt for the
+   mirror-image reason — a per-node QA plan names the graph each test case
+   still has to be built from. CI runs this on every PR to `develop`.
 
 **Ordering matters as much as content.** A review receipt is bound to the exact
 bytes of the candidate tree, and the review contract exposes no transition that
