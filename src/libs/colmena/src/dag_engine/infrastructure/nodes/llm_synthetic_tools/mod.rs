@@ -21,6 +21,7 @@ pub mod list_threads;
 pub mod load_attachment_tool;
 pub mod load_skill_tool;
 pub mod markdown_to_docs_ops;
+pub mod mcp;
 pub mod recall_history;
 pub mod sheet_collision;
 pub mod sheet_writer;

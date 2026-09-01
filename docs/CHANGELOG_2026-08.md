@@ -1264,7 +1264,8 @@ Ahora el fallo se le devuelve al modelo, que puede reintentar sabiendo lo que ar
 El techo de páginas acota **páginas, no tools ni bytes**: un servidor que devuelva una sola
 página con un array enorme de tools pasa igual. Acotar eso corresponde a la slice de
 exposición, que es donde `MCP_MAX_TOOLS_PER_SERVER` cobra su sentido real — hoy no lo lee
-nadie más, y el número se toma prestado a falta de uno mejor.
+nadie más, y el número se toma prestado a falta de uno mejor. **[Resuelto en §35: la slice de
+exposición ahora sí lo lee, y acota el catálogo con él.]**
 
 Los bloques de contenido que no son texto —imágenes, recursos embebidos— **se seguían
 descartando en silencio** al plegar el resultado de un `tools/call`. Era el comportamiento que
@@ -2164,3 +2165,135 @@ afectado.
 
 **Estado.** done (y `idle_timeout` + `close_all` pasan a ser prerequisito del cableado, no deuda
 suelta).
+
+## 35. Exposición de tools MCP: el schema del servidor se reenvía tal cual
+
+**Qué cambió.** Nuevo módulo `nodes/llm_synthetic_tools/mcp/` que convierte el catálogo de un
+servidor MCP en `ToolDefinition`s: naming, techo de schema, política de colisión y lectura de la
+config `mcp` desde el JSON crudo. **Sin llamador todavía** — el conector de producción y el
+cableado en `nodes/llm.rs` son la slice siguiente.
+
+**El schema se reenvía VERBATIM.** El `input_schema` del servidor va a `input_schema_override` sin
+tocarse. Re-derivarlo a los `ToolParameters` planos de Colmena cambiaría en silencio lo que el
+modelo lee — un `required` perdido, un `enum` caído— y esos schemas los escribió un tercero. Solo
+se acota el summary de primer nivel.
+
+**Un schema sobre el techo EXCLUYE su tool, no lo trunca.** Un JSON Schema truncado es inválido, y
+el proveedor rechazaría la request entera: un tool gigante se llevaría puestos a los sanos del
+mismo servidor. La exclusión se reporta con el nombre y el tamaño, no ocurre en silencio.
+
+**Las descripciones anidadas DENTRO del schema no se tocan.** Son parte del contrato que el modelo
+razona. Context7 manda una de 2006 bytes en `resolve-library-id`; recortarla cambiaría el
+significado del parámetro.
+
+**MCP siempre pierde una colisión de nombre.** Un servidor remoto es entrada de terceros; dejarlo
+sombrear `describe_tool` o `load_skill` permitiría a quien controle ese servidor redefinir qué hace
+un built-in de Colmena a mitad de conversación. Perder no es un desempate, es la frontera de
+contención.
+
+Se podría haber logrado lo mismo empujando MCP al final y dejando que `dedup_tools_by_name`
+(primero-gana) lo descartara — mismo resultado, cero código. No se hizo porque ese camino es
+**silencioso**: un operador cuyo tool desaparece no tendría cómo saber qué nombre se lo llevó.
+`drop_colliding` emite un warning nombrando el tool que **perdió**, para que el operador sepa cuál
+de los suyos desapareció. Deliberadamente NO nombra al que reclama: el llamador decide qué va en
+`claimed`, y la slice siguiente pondrá ahí los nombres de otros servidores MCP.
+
+**Los fixtures son sondeos reales, no inventados.** `tests/fixtures/mcp/` trae los catálogos que
+DeepWiki y Context7 devolvieron el 2026-09-01. Context7 aportó los dos casos difíciles sin que
+hubiera que fabricarlos: `resolve-library-id` con guiones (28 chars, que `normalize` debe dejar
+intacto) y esa descripción de 2006 bytes. Un fixture escrito a mano habría tenido la forma que uno
+espera, que es justo el sesgo que estos tests existen para atrapar.
+
+**La config `mcp` se lee del JSON crudo**, no de `ToolConfiguration`, que no tiene campo tipado.
+Agregarlo obligaba a poner `mcp: None` en 29 literales de cuatro archivos y arrastraba el tier por
+una línea mecánica. `validate_mcp_config` ya funciona así, y ambos sitios deserializan a
+`McpServerSpec`, de modo que el conjunto de campos vive en un solo lugar.
+
+**`validate_mcp_config` parsea el bloque entero, no solo la url.** Mirando únicamente `mcp.url`, un
+`transport` mal tipeado cargaba sin error y después el servidor aportaba cero tools — que el
+operador lee como *"el modelo ignoró mi servidor"*, no como *"mi config está rota"*. Fallar cerrado
+en el load es el único lugar donde esa distinción todavía se puede hacer.
+
+**La descripción de primer nivel también se acota**, con `MCP_MAX_DESCRIPTION_BYTES`. Es el campo
+que cada adapter manda al proveedor en **cada** request, así que sin tope un servidor de terceros
+infla toda la conversación. La constante existía desde la slice 1, con ese nombre y ese propósito, y
+no tenía un solo uso.
+
+**Y una truncación solo se anuncia si de verdad ocurrió.** `head_truncate` agrega su marcador
+`[truncated: ...]` incondicionalmente; los otros dos call sites del crate se protegen con un chequeo
+de longitud antes de llamarlo, y este no. Las tres descripciones de DeepWiki miden entre 45 y 92
+bytes, muy por debajo del presupuesto, así que **todas** habrían llegado al modelo diciendo que
+fueron recortadas. El helper `cap` es ese chequeo, con nombre, para que el próximo llamador de este
+módulo no tenga que acordarse.
+
+**Dónde falla cada cosa.** Un bloque `mcp` mal escrito **tumba el load del grafo**; un servidor que
+devuelve un schema gigante o un nombre que colisiona solo pierde **ese tool**, con warning. La línea
+es la procedencia del error:
+
+- **Config del operador** — la escribió una persona, es estática, y está mal. Falla cerrada en el
+  load, ruidosa, igual que `validate_memory_mode` cuando alguien declara `memory_mode` en un node
+  type que no lo soporta. El operador puede arreglarla; que el grafo cargue a medias le esconde el
+  error.
+- **Comportamiento de un servidor de terceros en runtime** — no lo controla nadie del lado de acá,
+  cambia sin aviso, y tumbar el grafo por él le daría a un servidor remoto la capacidad de negar el
+  servicio entero. Degrada por tool y se reporta.
+
+**Un servidor tampoco puede exponer dos tools bajo un mismo nombre.** `normalize` colapsa los
+caracteres fuera de `[A-Za-z0-9_-]`, así que `foo.bar` y `foo/bar` aterrizan ambos en
+`alias__foo_bar`. `drop_colliding` no lo ve —compara contra lo que Colmena ya reclamó, no contra
+hermanos del mismo catálogo— y dos definiciones con el mismo nombre llegan al proveedor como
+declaración duplicada, que Gemini rechaza de plano. Ahora el segundo se excluye y se reporta.
+
+**El nombre crudo del servidor se acota Y se limpia antes de llegar a un reporte.** El nombre expuesto pasa por
+`normalize`, así que todo lo construido desde él ya viene con charset restringido y corto. Pero el
+reporte de exclusiones nombra al tool **como lo escribió el servidor**, que es texto de terceros sin
+límite: sin cota, un catálogo hostil puede empujar megabytes, caracteres de control o instrucciones
+inyectadas al canal donde ese reporte termine — la misma clase de vector que los caps de descripción
+y summary existen para cerrar, entrando por un campo que los esquivaba.
+
+Acotar el largo cierra **la mitad**. Un nombre corto, muy por debajo de cualquier techo, todavía
+puede llevar `\x1b[2J` o un `\r` y aterrizar byte por byte en un log o en la terminal de un
+operador. `for_report` hace las dos cosas: reemplaza cada carácter de control y después acota. El
+nombre expuesto nunca lo necesita, porque `normalize` ya lo restringió a `[A-Za-z0-9_-]`; al crudo no
+se le había hecho nada.
+
+**La descripción se limpia distinto que el nombre, y la diferencia es deliberada.** En un nombre
+ningún carácter de control es legítimo, así que `for_report` los reemplaza todos. Una descripción es
+prosa: `\n` y `\t` son formato real, y filtrarlos mangleaba contenido — el catálogo vivo de Context7
+en `tests/fixtures/mcp/` trae una descripción de 2 KB cuyo único carácter de control es un salto de
+línea. `ESC` y el resto de los C0 no tienen ese reclamo, y esta cadena llega al proveedor en **cada**
+request, así que `for_model` los reemplaza antes de acotar.
+
+**El techo de tools por servidor aterriza acá, y solo acá.** El bucle de paginación del cliente toma
+prestada la misma constante pero **acota páginas, no tools** — su propio comentario lo dice, y dice
+que acotar tools *"belongs to the exposure slice"*. Esta es esa slice, y hasta ahora nadie leía la
+constante para lo que fue escrita. Una sola página con diez mil tools atraviesa el cliente intacta,
+así que sin esto un servidor podía ocupar la lista de tools entera del modelo. Se consideran los
+primeros `MCP_MAX_TOOLS_PER_SERVER` y se reporta cuántos se ofrecieron y cuántos no se miraron.
+
+Eso además vuelve innecesaria cualquier cota separada sobre el reporte: hay como mucho una nota por
+tool considerado, y los tools considerados ya están acotados.
+
+**Dos decisiones que la contención (4b) tiene que revisar, no heredar.** El `input_schema` va
+verbatim y **no** se sanea: es deliberado —la identidad byte a byte es la propiedad de este módulo y
+está testeada— pero significa que un `description` anidado dentro del schema puede llevar escapes que
+sus hermanos de primer nivel ya no llevan. Y `for_model` preserva `\n` a propósito; hoy es
+defendible porque la descripción viaja como campo JSON estructurado y no concatenada en texto de
+conversación, y deja de serlo si algún adapter aplana la metadata de tools a texto plano. Las dos se
+cierran con `wrap_untrusted_content`, que ya existe en el dominio sin llamador.
+
+**Una cosa que este módulo deja a medias a propósito, para que la slice siguiente no la herede sin
+verla.** Los reportes de tool excluido y de colisión son `Vec<String>` en prosa, sin atribución de
+servidor ni tipo de error — el evento `McpServerDegraded` va a necesitar ambos, y diseñar ese payload
+antes de que el evento exista sería adivinar.
+
+**Qué falta para que esto sirva**, dicho para que no se lea como una feature completa: no existe un
+`McpConnector` de producción, la resolución de headers vía secure values no está cableada
+(`build_custom_headers` solo se llama desde su propio archivo, por un camino que ningún test de
+producción recorre), y `DagToolExecutor::available_tools`
+(`dag_tool_executor.rs`) descarta hoy en silencio cualquier entrada `node_type: "mcp"` —
+`registry.get_node("mcp")` devuelve `None` y esa rama no tiene `else`.
+
+**Alcance.** Módulo nuevo, aditivo, sin cambio de API pública → ADP no afectado.
+
+**Estado.** done (la mitad pura; conector y cableado en la slice siguiente).

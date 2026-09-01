@@ -188,7 +188,8 @@ impl McpClientPort for RmcpHttpClient {
         // one; it bounds PAGES, not tools or bytes. A single page carrying an
         // enormous `tools` array still passes. Capping that belongs to the
         // exposure slice, which is where `MCP_MAX_TOOLS_PER_SERVER` acquires
-        // its real meaning — today nothing else reads it.
+        // its real meaning: `llm_synthetic_tools::mcp::expose` caps the catalog
+        // with it.
         let max_pages = MCP_MAX_TOOLS_PER_SERVER.max(1);
         let mut pages = 0usize;
         loop {
