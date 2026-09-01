@@ -1521,12 +1521,22 @@ probar el pooling por lo que realmente es —un problema de concurrencia y cache
 socket. Wiremock prueba que hablamos el protocolo; no puede probar que dos llamadores compitiendo
 por una clave fría produzcan un solo handshake.
 
-**Desviación deliberada de `pool_registry`:** ahí las entradas de `creation_locks` se borran tras
-crear, porque esa registry keyea sobre URLs arbitrarias de base de datos y debe acotar el
-crecimiento. Acá las claves son servidores MCP declarados por el operador —un puñado, por toda la
-vida del proceso— y borrar abriría una ventana donde un waiter tardío y un llamador nuevo sostienen
-dos mutexes distintos para la misma clave. Es inofensivo (el re-chequeo lo atrapa), pero vuelve más
-difícil razonar sobre la garantía del lock a cambio de nada a esta cardinalidad.
+**Desviación deliberada de `pool_registry`** — **[CORREGIDO en §33: TODO este párrafo, premisa
+incluida, quedó obsoleto. No es un matiz sobre una sola frase.]** El texto original decía: ahí las
+entradas de `creation_locks` se borran tras crear, porque esa registry keyea sobre URLs arbitrarias
+de base de datos y debe acotar el crecimiento; acá las claves son servidores MCP declarados por el
+operador —un puñado, por toda la vida del proceso— y borrar abriría una ventana donde un waiter
+tardío y un llamador nuevo sostienen dos mutexes distintos para la misma clave, lo cual sería
+inofensivo porque el re-chequeo lo atrapa.
+
+Las **dos** afirmaciones eran falsas:
+
+1. **«Un puñado, por toda la vida del proceso» ya no vale.** El scope por credencial (§30, PR #222)
+   hizo que la cardinalidad de claves escale con las sesiones concurrentes, no con la cantidad de
+   servidores que el operador declaró. Esa es la premisa que justificaba no acotar el crecimiento, y
+   es la que motiva la evicción de §33.
+2. **El re-chequeo NO atrapa la ventana.** Los dos llamadores sostienen mutexes independientes,
+   ninguno ve el insert del otro, y ambos conectan. El review lo marcó CRITICAL.
 
 Todavía **no hay singleton de proceso**: nada lo dereferencia aún, así que el `Lazy` llega con su
 cableado. El cache TTL de `tools/list` y la resolución de headers vía secure values son las piezas
@@ -1916,3 +1926,141 @@ cableado, en cuyo caso pasa de romperse en silencio a romperse con un mensaje ac
 - Ledger: [`docs/agent_context/audit/FINDINGS_LEDGER.md`](agent_context/audit/FINDINGS_LEDGER.md) — Batch 14, findings #65 (este fix) y #66 (`trip_planner.json`, abierto).
 
 **Estado.** done.
+## 33. Evicción LRU en el pool de conexiones MCP
+
+Cierra el hueco que el §30 dejó declarado en el código: `McpConnectionRegistry` no tenía evicción,
+ni tope de entradas, ni timeout de inactividad, mientras que `pool_registry` tiene los tres. Mientras
+la clave era una por servidor declarado eso era defendible; desde que incorpora el scope por
+credencial, la cardinalidad escala con **sesiones concurrentes**, y dejarlo así habría sido cablear
+la registry sobre un mapa que crece sin límite.
+
+**Se evicta la huella completa de la clave** —cliente, catálogo cacheado y los dos mapas de locks—,
+no solo el cliente. Borrar únicamente el cliente dejaría los otros tres creciendo igual, que es
+exactamente el problema.
+
+**Se revierte una decisión anterior, y el primer intento de revertirla tenía un bug.** Las entradas
+de `creation_locks` antes no se borraban nunca, justificado en que la cardinalidad era "un puñado de
+servidores declarados". Esa premisa cayó con el scope por credencial.
+
+La primera versión las borraba incondicionalmente, con un comentario que afirmaba que la ventana
+resultante era inofensiva porque "el re-chequeo la atrapa". **Era falso, y el review lo marcó como
+CRITICAL.** Si un waiter ya tiene un clon del `Arc` viejo y la entrada se borra, un llamador nuevo
+crea un mutex **independiente** para la misma clave: los dos mutexes no se serializan entre sí, los
+dos pasan el re-chequeo mientras `clients` está vacío, y los dos conectan. Dos conexiones vivas para
+una clave — justo el invariante que la registry existe para sostener.
+
+El arreglo: una entrada de lock se borra **solo cuando la registry es su única referencia**, vía
+`remove_if`, cuyo predicado se evalúa bajo el lock del shard, así que nadie puede clonar el `Arc`
+entre el chequeo y el borrado. Un lock contendido sobrevive esa pasada y lo recoge después
+`sweep_orphan_locks` — sin ese barrido quedaría para siempre, porque la evicción nunca vuelve sobre
+una clave que ya sacó del LRU.
+
+`DEFAULT_MAX_POOLED_SERVERS = 128`, configurable con `with_max_entries`. Un tope de 0 se clampea a 1:
+sin eso el pool evictaría cada conexión al instante de crearla, convirtiéndose en un no-op que
+re-handshakea en cada llamada.
+
+**Un hit de catálogo cuenta como uso.** El review también marcó que los aciertos de cache en
+`tools()` no refrescaban el rango LRU. Bajo lazy loading la etapa de exposición llama a `tools` en
+cada iteración del loop del agente y puede no volver a llamar a `client` nunca, así que un servidor
+en uso constante se hundía hasta el fondo del LRU y podía ser evictado **antes** que uno realmente
+ocioso — el orden exactamente al revés para el patrón de acceso que el cache existe para servir.
+
+**Verificación.** Cada test se probó mutando **exactamente** el mecanismo que dice aislar, no
+borrando la funcionalidad entera — el detalle por test vive en su propio doc comment. Vale registrar
+una vuelta de más: para hacer verdadero un comentario que decía que el barrido "corre solo en la
+evicción", lo gateé detrás de un flag. Eso **introdujo una fuga**: un connect fallido crea la entrada
+de lock y retorna antes de llegar a la evicción, así que en un deployment que nunca toca el tope
+nadie la recogía. El comentario era lo equivocado, no la cadencia. Revertido, con el comentario
+diciendo la verdad y la ruta de fallo limpiando lo suyo.
+
+**Lo que todavía falta antes de cablear**, nombrado para que no se pierda: un `idle_timeout` y un
+`close_all` —`pool_registry` tiene ambos— y alguna observabilidad, porque hoy `len()` no tiene
+llamador de producción y un operador no podría ver que el tope se está tocando ni que hay thrashing.
+El tope de 128 además es heurístico, sin datos de carga detrás.
+
+Y una propiedad inherente a cualquier cache con tope LRU, dicha para que quien cablee la conozca:
+alguien que pueda acuñar muchos `agent_session_id` contra un servidor con credencial puede empujar
+la cardinalidad hasta el tope y forzar la evicción de la conexión caliente de otra sesión. **No
+rompe el aislamiento de credenciales** —solo obliga a re-handshakear— pero es un costo real entre
+tenants.
+
+**`touch` usa `push`, no `put` — y eso es lo que hace que el tope sea un invariante.**
+`LruCache::put` devuelve `Option<V>`: descarta la mitad de la clave, así que **no puede** informar
+que el cache soltó un registro propio para mantenerse en capacidad. `push` devuelve el `(clave,
+valor)` desplazado. La distinción carga peso: `evict_if_needed` solo puede elegir víctimas que el
+LRU todavía conoce, de modo que una clave cuyo registro desapareciera en silencio quedaría en
+`clients` para siempre, ineviccionable, y el tope dejaría de sostenerse sin ruido alguno.
+
+La holgura del LRU (`max_entries * 10`, mínimo 1024) hace ese desplazamiento raro — **no imposible**.
+La primera versión de este código lo daba por descartado en un comentario que nombraba el modo de
+fallo y acto seguido lo afirmaba cerrado por probabilidad. El review lo marcó, y con razón: una
+holgura no es un invariante. El desplazamiento ahora se atiende borrando el footprint
+completo de la clave desplazada, igual que una evicción normal. Lo prueba
+`a_key_the_lru_displaces_on_its_own_is_not_left_stranded`, con `max_entries` deliberadamente
+generoso para que `evict_if_needed` no dispare nunca: lo único que puede sacar la clave es el manejo
+del desplazamiento. Revertir `push` a `put` lo tumba.
+
+El test ejercita `register_and_pool`, **no** `touch` — sus tres claves son nuevas, así que todas van
+por la ruta fría. Ambos comparten `collect_displaced`, de modo que la lógica común queda cubierta;
+la rama de desplazamiento de `touch` en particular **no está fijada por ningún test**, y es
+casi inalcanzable: `touch` solo corre en un hit, y una clave que está en `clients` está en el LRU,
+así que su `push` es un re-rank. Solo dispara vía una ventana estrecha.
+
+**El LRU se registra ANTES que `clients`, y ese orden es la otra mitad del invariante.** El fix de
+`push` cierra el desplazamiento por capacidad del LRU, y **solo eso**. La ronda siguiente del review
+encontró la misma falla por otra ruta: `touch` se suspende en el mutex del LRU, así que un llamador
+cancelado en ese await — un timeout, un `select!`, una task abortada — dejaba, con `clients.insert`
+primero, la clave en `clients` sin registro en el LRU. `evict_if_needed` solo puede elegir víctimas
+que el LRU nombra, de modo que esa clave quedaba ineviccionable para toda la vida del proceso.
+
+Invertir el orden no alcanzaba. Al enumerar las rutas restantes apareció una tercera, que el review
+no había levantado: entre `touch()` retornando y el `insert` no hay await, pero el runtime es
+multi-thread, así que otro hilo puede desplazar esa misma clave del LRU en ese instante y correr
+`drop_footprint` sobre ella ANTES de que esté en `clients`. La eliminación no encuentra nada,
+nuestro insert aterriza después, y la clave queda otra vez ineviccionable. Es la misma falla por una
+tercera ruta.
+
+La solución no es ordenar sino hacerlo atómico: el método `register_and_pool` toma el mutex del LRU
+**una vez** y
+hace el `push` y el `clients.insert` dentro de la misma sección crítica. Todos los demás escritores
+del LRU pasan por ese mutex, así que no queda ventana. `drop_footprint` nunca toma el mutex del LRU,
+de modo que recolectar la clave desplazada después no puede trabarse contra él.
+
+Qué está fijado por test y qué no, dicho para no venderlo de más:
+
+- La **cancelación** sí: `a_cancelled_connect_does_not_strand_an_unevictable_key` sostiene el mutex
+  del LRU para parquear el connect exactamente en ese await y suelta el future ahí — determinista,
+  sin sleeps ni timings. Mover el `insert` fuera de la sección crítica lo tumba.
+- El **desplazamiento concurrente** no. Queda cerrado por construcción —una sola sección crítica— y
+  eso es un argumento, no una aserción ejecutable. Un test que lo demostrara tendría que probar que
+  no existe un entrelazado, que es justo lo que un test no hace.
+
+Y el comentario que escribí para documentar el fix de `push` decía «invariante en lugar de
+probabilidad» — de más otra vez, porque solo valía contra el desplazamiento interno. Ahora declara su
+alcance explícitamente.
+
+**Dos hallazgos del review que quedan abiertos a propósito**, con el motivo:
+
+- **`touch()` serializa el fast-path.** Se llama en cada `client()`/`tools()`, incluidos los hits de
+  cache que antes solo hacían un `DashMap::get` sin lock, y toma un `tokio::sync::Mutex` de proceso.
+  Es inherente a un LRU con recencia exacta: quitarlo es un LRU sharded o un CLOCK aproximado, o sea
+  un rediseño, no una corrección. La sección crítica es CPU pura, sin I/O. Se mide cuando haya un
+  llamador de producción; hoy no lo hay.
+- **Un `tool_cache` puede quedar huérfano en una ventana estrecha.** En el fill frío de `tools()`,
+  entre que `client()` retorna (ya habiendo hecho `touch`) y el `tool_cache.insert`, corre el
+  `list_tools()` — un await real. Si en esa ventana la evicción de otra clave saca ESTA del LRU, el
+  insert deja una entrada de catálogo que la evicción ya no alcanza, porque solo borra `tool_cache`
+  de las claves que saca del LRU. Se recupera sola en el próximo acceso a esa clave (el hit hace
+  `touch` y la reinserta); solo persiste si la clave no se vuelve a tocar nunca. Esa recuperación
+  descansa en que el LRU no suelte registros por su cuenta — cierto ahora que `touch` maneja el
+  desplazamiento, y NO cierto en la versión que el review examinó.
+
+  El review lo clasificó `introduced` y **no lo comparto**: sobre el árbol base no había evicción
+  alguna, así que `tool_cache` crecía sin tope de forma incondicional. Este cambio **reduce** la
+  fuga, no la abre. Es un residuo, no una regresión — y por eso va como follow-up y no como
+  corrección de este candidato. Cerrarlo bien pide un test de concurrencia con el fill retenido, que
+  es trabajo propio, no una línea.
+
+**Estado.** done (evicción y tope; pendientes `idle_timeout`, `close_all`, observabilidad, el
+`tool_cache` huérfano de la ventana estrecha, y medir el costo de `touch` en el fast-path).
+

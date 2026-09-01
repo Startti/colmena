@@ -7,10 +7,12 @@
 //! re-handshake. This registry outlives executions and hands the same client
 //! back for the same [`McpServerKey`].
 
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use dashmap::DashMap;
+use lru::LruCache;
 use tokio::sync::Mutex;
 use tokio::time::Instant;
 
@@ -39,30 +41,31 @@ pub struct McpConnectionRegistry {
     /// One lock per key, so two callers racing on a cold key produce one
     /// handshake instead of two.
     ///
-    /// Deliberate deviation from `pool_registry`, which removes the entry
-    /// after creating: entries are kept here. Removing would open a window
-    /// where a late waiter and a fresh caller hold two different mutexes for
-    /// one key — harmless, because the re-check below catches it, but it makes
-    /// the lock's guarantee harder to reason about.
+    /// Entries are dropped by eviction, but ONLY while the registry holds the
+    /// sole reference. Removing a lock a waiter still holds would let a fresh
+    /// caller mint a second, independent mutex for the same key: neither sees
+    /// the other's insert, both pass the `clients` re-check while it is empty,
+    /// and both connect — two live connections for one key.
     ///
-    /// CARDINALITY, honestly: this was first justified on "a handful of
-    /// operator-declared MCP servers". That premise no longer holds. Since
-    /// `McpServerKey` gained a credential scope, a credential-bearing server
-    /// keys per agent session, so this map — and `clients`, `tool_cache` and
-    /// `fetch_locks` — grow with CONCURRENT SESSIONS, not with declared
-    /// servers. None of them has eviction, a max-entries cap or an idle
-    /// timeout, while the sibling `pool_registry` has all three
-    /// (`LruCache`, `max_entries`, `idle_timeout`).
-    ///
-    /// That is a gap, not a decision, and it MUST be closed before this
-    /// registry is wired to an executor. It is not a live defect today only
-    /// because nothing constructs this type outside tests.
+    /// Two removal MECHANISMS, reached from three call sites. The targeted
+    /// one is `evict_if_needed`'s `remove_if`, which drops only the key it
+    /// just evicted. The other is `sweep_orphan_locks`, a `retain` over the
+    /// whole map that keeps any entry still pooled or still held; it runs
+    /// both at the tail of `evict_if_needed` and from the failure paths of
+    /// `client` and `tools`. Those failure paths do NOT remove their own
+    /// entry directly — they trigger the whole-map sweep and let it decide.
+    /// A lock can therefore be collected without any eviction happening.
     creation_locks: DashMap<McpServerKey, Arc<Mutex<()>>>,
     /// Last `tools/list` result per server, with the moment it was fetched.
     tool_cache: DashMap<McpServerKey, CachedTools>,
     /// Single-flight for cache fills, separate from `creation_locks` so a
     /// catalog refresh never serialises behind an unrelated handshake.
     fetch_locks: DashMap<McpServerKey, Arc<Mutex<()>>>,
+    /// Eviction order. Used only to pick a victim; the cap is enforced by
+    /// `evict_if_needed`, so the cache itself is given generous headroom
+    /// rather than being allowed to drop entries behind our back.
+    lru: Mutex<LruCache<McpServerKey, ()>>,
+    max_entries: usize,
     connector: Arc<dyn McpConnector>,
 }
 
@@ -78,15 +81,195 @@ struct CachedTools {
     fetched_at: Instant,
 }
 
+/// How many servers stay pooled before the least recently used is dropped.
+///
+/// Sized for the credential-scoped key space: one entry per (server, agent
+/// session) actually in flight, not per declared server. Generous enough that
+/// a normal deployment never evicts, small enough to bound a pathological one.
+pub const DEFAULT_MAX_POOLED_SERVERS: usize = 128;
+
 impl McpConnectionRegistry {
     pub fn new(connector: Arc<dyn McpConnector>) -> Self {
+        Self::with_max_entries(connector, DEFAULT_MAX_POOLED_SERVERS)
+    }
+
+    pub fn with_max_entries(connector: Arc<dyn McpConnector>, max_entries: usize) -> Self {
+        // Headroom, as in `pool_registry`: eviction is meant to be driven by
+        // `evict_if_needed`, not by the cache dropping a record on its own.
+        // Headroom makes that rare — it does NOT make it impossible, which is
+        // why `touch` handles the displacement instead of assuming it away.
+        let lru_cap = max_entries.max(1).saturating_mul(10).max(1024);
+        Self::with_capacities(connector, max_entries, lru_cap)
+    }
+
+    /// `max_entries` with an explicit LRU capacity, so the displacement path
+    /// in `touch` can be exercised without minting 1024 keys.
+    fn with_capacities(
+        connector: Arc<dyn McpConnector>,
+        max_entries: usize,
+        lru_cap: usize,
+    ) -> Self {
+        let max_entries = max_entries.max(1);
+        let lru_cap = NonZeroUsize::new(lru_cap.max(1)).expect("clamped to at least 1");
         Self {
             clients: DashMap::new(),
             creation_locks: DashMap::new(),
             tool_cache: DashMap::new(),
             fetch_locks: DashMap::new(),
+            lru: Mutex::new(LruCache::new(lru_cap)),
+            max_entries,
             connector,
         }
+    }
+
+    /// Mark a key as most recently used.
+    ///
+    /// `push`, deliberately, NOT `put`. `put` returns `Option<V>` — it throws
+    /// away the key half and so cannot report that the cache dropped a record
+    /// of its own to stay within capacity. `push` returns the displaced
+    /// `(key, value)`.
+    ///
+    /// That distinction is load-bearing. `evict_if_needed` can only choose a
+    /// victim the LRU still knows, so a key whose record the cache dropped
+    /// silently would stay in `clients` forever, unevictable, and the cap
+    /// would quietly stop holding. Headroom makes the displacement rare;
+    /// handling it here is what closes it.
+    ///
+    /// SCOPE, since an earlier version of this comment overstated it: this
+    /// closes displacement by the LRU's own capacity, and nothing else. This
+    /// method never ADDS to `clients` — it can remove from it, via
+    /// `collect_displaced` — so it cannot close the other route, a key
+    /// reaching `clients` with no LRU record. That one is closed in
+    /// `register_and_pool`, which does the LRU record and the pool insert
+    /// under a single lock; see its comment.
+    ///
+    /// REACHABILITY, so nobody reads the displacement branch here as a normal
+    /// path. `touch` runs only on a hit, and a key in `clients` is in the LRU,
+    /// so its `push` is a re-rank and displaces nothing. The branch fires only
+    /// through a narrow window — the disclosed `tools` cold-fill orphan, or
+    /// the gap inside `evict_if_needed` between popping a victim and removing
+    /// it. It is defensive, and NO test pins it: driving it deterministically
+    /// means staging one of those races.
+    async fn touch(&self, key: &McpServerKey) {
+        let displaced = { self.lru.lock().await.push(key.clone(), ()) };
+        self.collect_displaced(key, displaced);
+    }
+
+    /// Register `key` in the LRU and pool `client` under the SAME LRU lock.
+    ///
+    /// Ordering the two is not enough. Every other writer of the LRU takes
+    /// this mutex, so releasing it between the `push` and the `insert` leaves
+    /// a window — on a multi-threaded runtime a genuinely concurrent one, not
+    /// merely an await point — in which another task can displace this very
+    /// key and run `drop_footprint` on it BEFORE it is in `clients`. The
+    /// removal would find nothing, our insert would land afterwards, and the
+    /// key would sit in `clients` with no LRU record: unevictable, exactly
+    /// the failure the `push` handling exists to prevent.
+    ///
+    /// Holding the lock across both closes it. `drop_footprint` never takes
+    /// the LRU mutex, so collecting the displaced key afterwards cannot
+    /// deadlock against it.
+    async fn register_and_pool(&self, key: &McpServerKey, client: Arc<dyn McpClientPort>) {
+        let displaced = {
+            let mut lru = self.lru.lock().await;
+            let displaced = lru.push(key.clone(), ());
+            self.clients.insert(key.clone(), client);
+            displaced
+        };
+        self.collect_displaced(key, displaced);
+    }
+
+    /// Drop the footprint of a key the LRU displaced to stay within capacity.
+    ///
+    /// `push` also returns the old entry when the key was already present.
+    /// That is a re-rank, not a displacement, and must not drop anything.
+    fn collect_displaced(&self, key: &McpServerKey, displaced: Option<(McpServerKey, ())>) {
+        if let Some((displaced, _)) = displaced {
+            if displaced != *key {
+                self.drop_footprint(&displaced, "lru_capacity_displaced");
+            }
+        }
+    }
+
+    /// Remove every trace of `key`: client, cached catalog and both locks.
+    ///
+    /// Dropping only the client would leave the other three growing without
+    /// bound, which is the problem this exists to solve.
+    ///
+    /// A lock is removed ONLY when the registry holds its sole reference.
+    /// Removing one a waiter still holds would leave that waiter serialised
+    /// against a mutex nobody else can reach: a fresh caller would mint a
+    /// second, independent mutex for the same key, both would pass the
+    /// `clients` re-check while it is empty, and BOTH would connect — two
+    /// live connections for one key, the invariant this registry exists to
+    /// hold. `remove_if` evaluates the predicate under the shard lock, so no
+    /// one can clone the `Arc` between the check and the removal. A contended
+    /// entry survives this pass and is collected by `sweep_orphan_locks` once
+    /// its waiter is done.
+    fn drop_footprint(&self, key: &McpServerKey, reason: &'static str) {
+        self.clients.remove(key);
+        self.tool_cache.remove(key);
+        self.creation_locks
+            .remove_if(key, |_, lock| Arc::strong_count(lock) == 1);
+        self.fetch_locks
+            .remove_if(key, |_, lock| Arc::strong_count(lock) == 1);
+        tracing::debug!(
+            target = "colmena::mcp_registry",
+            key = %key.as_str(),
+            reason,
+            "mcp_connection_evicted"
+        );
+    }
+
+    /// Drop least-recently-used keys until the pool is within its cap.
+    ///
+    /// Each victim's whole footprint goes via `drop_footprint`; see there for
+    /// why a held lock survives the pass.
+    ///
+    /// LIMIT, stated rather than implied: this bounds the MAP, not live
+    /// sockets. Evicting drops the registry's `Arc`, so the connection closes
+    /// only once every other holder drops theirs. A caller mid-request keeps
+    /// its connection alive until it is done, by design — eviction means "no
+    /// longer handed out", never "torn out from under a caller".
+    async fn evict_if_needed(&self) {
+        while self.clients.len() > self.max_entries {
+            let victim = { self.lru.lock().await.pop_lru() };
+            let Some((victim, _)) = victim else {
+                // The LRU is empty while the map is over cap: nothing left to
+                // choose, so stop rather than spin.
+                break;
+            };
+            self.drop_footprint(&victim, "lru_capacity");
+        }
+        self.sweep_orphan_locks();
+    }
+
+    /// Drop lock entries whose key is no longer pooled and whose mutex nobody
+    /// holds.
+    ///
+    /// Without this, a lock that was contended at the moment its key was
+    /// evicted would linger forever: eviction never revisits a key it already
+    /// popped from the LRU.
+    ///
+    /// Runs on every `evict_if_needed` call, NOT only when something was
+    /// actually evicted. An earlier version gated it on a real eviction so
+    /// that a comment claiming "only on eviction" would be true — which
+    /// introduced a leak, because a FAILED connect creates a lock entry and
+    /// returns before `evict_if_needed` is ever reached, and in a deployment
+    /// that never hits the cap no eviction would ever come to collect it. The
+    /// cadence was load-bearing; the comment was the thing that was wrong.
+    /// Cost is a walk of two maps. The POOLED population is capped by
+    /// `max_entries`, but entries for connects that are in flight or have
+    /// failed are not in `clients` and so are bounded by concurrency instead —
+    /// a burst of simultaneous failures against distinct servers makes each
+    /// failure walk a transiently larger map. Bounded and self-draining, not
+    /// capped.
+    fn sweep_orphan_locks(&self) {
+        let pooled = |k: &McpServerKey| self.clients.contains_key(k);
+        self.creation_locks
+            .retain(|k, lock| pooled(k) || Arc::strong_count(lock) > 1);
+        self.fetch_locks
+            .retain(|k, lock| pooled(k) || Arc::strong_count(lock) > 1);
     }
 
     /// The pooled client for `key`, connecting once if this is its first use.
@@ -101,7 +284,10 @@ impl McpConnectionRegistry {
         config: &McpServerConfig,
     ) -> Result<Arc<dyn McpClientPort>, McpError> {
         if let Some(existing) = self.clients.get(key) {
-            return Ok(existing.clone());
+            let client = existing.clone();
+            drop(existing);
+            self.touch(key).await;
+            return Ok(client);
         }
 
         let lock = self
@@ -115,11 +301,33 @@ impl McpConnectionRegistry {
         // waited. Without this the lock would serialise the handshakes but
         // still perform every one of them.
         if let Some(existing) = self.clients.get(key) {
-            return Ok(existing.clone());
+            let client = existing.clone();
+            drop(existing);
+            self.touch(key).await;
+            return Ok(client);
         }
 
-        let client = self.connector.connect(server_label, config).await?;
-        self.clients.insert(key.clone(), client.clone());
+        let connected = self.connector.connect(server_label, config).await;
+        let client = match connected {
+            Ok(client) => client,
+            Err(e) => {
+                // This key never made it into `clients`, so nothing will ever
+                // evict it and nothing will sweep on its behalf. Release our
+                // hold and collect it here, or a server that fails once for a
+                // session that never retries leaves its lock behind for the
+                // life of the process.
+                drop(_guard);
+                drop(lock);
+                self.sweep_orphan_locks();
+                return Err(e);
+            }
+        };
+        // One lock covers both the LRU record and the pool entry; see
+        // `register_and_pool`.
+        // A caller cancelled on that lock leaves neither, and no concurrent
+        // displacement can slip between them.
+        self.register_and_pool(key, client.clone()).await;
+        self.evict_if_needed().await;
         Ok(client)
     }
 
@@ -143,6 +351,13 @@ impl McpConnectionRegistry {
         config: &McpServerConfig,
     ) -> Result<Arc<Vec<McpToolDescriptor>>, McpError> {
         if let Some(fresh) = self.cached_if_fresh(key, config) {
+            // A catalog hit is a USE. Under lazy loading the exposure stage
+            // calls `tools` on every agent-loop iteration and may never call
+            // `client` again, so without this a server in constant use would
+            // sink to the bottom of the LRU and be evicted ahead of an idle
+            // one — the eviction order would be exactly backwards for the
+            // access pattern the cache exists to serve.
+            self.touch(key).await;
             return Ok(fresh);
         }
 
@@ -157,11 +372,36 @@ impl McpConnectionRegistry {
         // while we waited. Without this the lock would serialise the fetches
         // and still perform every one of them.
         if let Some(fresh) = self.cached_if_fresh(key, config) {
+            // A catalog hit is a USE. Under lazy loading the exposure stage
+            // calls `tools` on every agent-loop iteration and may never call
+            // `client` again, so without this a server in constant use would
+            // sink to the bottom of the LRU and be evicted ahead of an idle
+            // one — the eviction order would be exactly backwards for the
+            // access pattern the cache exists to serve.
+            self.touch(key).await;
             return Ok(fresh);
         }
 
-        let client = self.client(key, server_label, config).await?;
-        let tools = Arc::new(client.list_tools().await?);
+        // Same cleanup obligation as `client`'s failure path, for the OTHER
+        // lock map. `client` cannot collect this entry on our behalf: we still
+        // hold a clone of it while it runs, so its sweep sees `strong_count >
+        // 1` and correctly leaves it alone. If we returned without sweeping,
+        // a server reached only through `tools` that is permanently
+        // unreachable would strand one `fetch_locks` entry for good.
+        let filled = async {
+            let client = self.client(key, server_label, config).await?;
+            Ok::<_, McpError>(Arc::new(client.list_tools().await?))
+        }
+        .await;
+        let tools = match filled {
+            Ok(tools) => tools,
+            Err(e) => {
+                drop(_guard);
+                drop(lock);
+                self.sweep_orphan_locks();
+                return Err(e);
+            }
+        };
         self.tool_cache.insert(
             key.clone(),
             CachedTools {
@@ -342,6 +582,392 @@ mod tests {
             timeout: Duration::from_secs(30),
             cache_ttl: Duration::from_secs(300),
         }
+    }
+
+    // --- Eviction ---
+
+    /// The cap must actually hold. Without it the pool grows one entry per
+    /// (server, agent session) for the life of the process.
+    #[tokio::test]
+    async fn the_pool_stays_within_its_cap() {
+        let connector = Arc::new(CountingConnector::new());
+        let registry = McpConnectionRegistry::with_max_entries(connector.clone(), 2);
+
+        for host in ["a", "b", "c"] {
+            let cfg = config(&format!("https://{host}.example.com/mcp"));
+            let key = McpServerKey::from_config(&cfg, CredentialScope::unscoped());
+            registry.client(&key, host, &cfg).await.unwrap();
+        }
+
+        assert_eq!(registry.len(), 2, "three servers, a cap of two");
+    }
+
+    /// LRU, not arbitrary. A and B are identical in every way except WHEN they
+    /// were last used, so only the eviction ORDER can decide which survives —
+    /// picking a victim any other way flips this.
+    #[tokio::test]
+    async fn the_least_recently_used_server_is_the_one_evicted() {
+        let connector = Arc::new(CountingConnector::new());
+        let registry = McpConnectionRegistry::with_max_entries(connector.clone(), 2);
+
+        let mk = |h: &str| {
+            let cfg = config(&format!("https://{h}.example.com/mcp"));
+            let key = McpServerKey::from_config(&cfg, CredentialScope::unscoped());
+            (key, cfg)
+        };
+        let (a_key, a_cfg) = mk("a");
+        let (b_key, b_cfg) = mk("b");
+        let (c_key, c_cfg) = mk("c");
+
+        registry.client(&a_key, "a", &a_cfg).await.unwrap();
+        registry.client(&b_key, "b", &b_cfg).await.unwrap();
+        // Re-touch A so B becomes the oldest.
+        registry.client(&a_key, "a", &a_cfg).await.unwrap();
+        registry.client(&c_key, "c", &c_cfg).await.unwrap();
+
+        assert_eq!(registry.len(), 2);
+        // A must still be pooled: reusing it performs NO new handshake.
+        let before = connector.count();
+        registry.client(&a_key, "a", &a_cfg).await.unwrap();
+        assert_eq!(
+            connector.count(),
+            before,
+            "A was used most recently and must have survived"
+        );
+        // B must be gone: reusing it DOES handshake again.
+        registry.client(&b_key, "b", &b_cfg).await.unwrap();
+        assert_eq!(
+            connector.count(),
+            before + 1,
+            "B was the least recently used and must have been evicted"
+        );
+    }
+
+    /// Eviction must drop a key's WHOLE footprint. Dropping only the client
+    /// would leave the cached catalog and both lock maps growing without
+    /// bound — the very thing the cap exists to stop. Observable through the
+    /// catalog: a re-admitted server must re-fetch `tools/list`.
+    #[tokio::test]
+    async fn eviction_drops_the_cached_catalog_with_the_client() {
+        let connector = Arc::new(CountingConnector::new());
+        let registry = McpConnectionRegistry::with_max_entries(connector.clone(), 1);
+
+        let a_cfg = config("https://a.example.com/mcp");
+        let a_key = McpServerKey::from_config(&a_cfg, CredentialScope::unscoped());
+        let b_cfg = config("https://b.example.com/mcp");
+        let b_key = McpServerKey::from_config(&b_cfg, CredentialScope::unscoped());
+
+        registry.tools(&a_key, "a", &a_cfg).await.unwrap();
+        assert_eq!(connector.list_count(), 1);
+
+        // Admitting B evicts A.
+        registry.tools(&b_key, "b", &b_cfg).await.unwrap();
+
+        // A comes back: its catalog must be gone, not served stale from a map
+        // the eviction forgot to clear.
+        registry.tools(&a_key, "a", &a_cfg).await.unwrap();
+        assert_eq!(
+            connector.list_count(),
+            3,
+            "an evicted server must re-fetch its catalog, not hit a surviving cache entry"
+        );
+    }
+
+    /// A cap of zero would evict every connection the instant it was created,
+    /// turning the pool into a no-op that re-handshakes every call. Clamped to
+    /// one instead.
+    #[tokio::test]
+    async fn a_cap_below_one_is_clamped_rather_than_disabling_the_pool() {
+        let connector = Arc::new(CountingConnector::new());
+        let registry = McpConnectionRegistry::with_max_entries(connector.clone(), 0);
+
+        let cfg = config("https://a.example.com/mcp");
+        let key = McpServerKey::from_config(&cfg, CredentialScope::unscoped());
+        registry.client(&key, "a", &cfg).await.unwrap();
+        registry.client(&key, "a", &cfg).await.unwrap();
+
+        assert_eq!(registry.len(), 1, "the pool must still hold one entry");
+        assert_eq!(
+            connector.count(),
+            1,
+            "the second call must still be served from the pool"
+        );
+    }
+
+    /// A connect that FAILS must not strand its lock entry.
+    ///
+    /// The entry is created before the handshake is attempted, and the failure
+    /// path returns before `evict_if_needed` is ever reached — so nothing
+    /// would ever evict this key and nothing would sweep on its behalf. In a
+    /// deployment that never reaches the cap, that entry would live as long as
+    /// the process. Only whether the failure path cleans up can decide this:
+    /// the cap is never approached here.
+    #[tokio::test]
+    async fn a_failed_connect_leaves_no_lock_behind() {
+        let connector = Arc::new(CountingConnector::failing_first(1));
+        let registry = McpConnectionRegistry::with_max_entries(connector.clone(), 128);
+
+        let cfg = config("https://down.example.com/mcp");
+        let key = McpServerKey::from_config(&cfg, CredentialScope::unscoped());
+
+        assert!(registry.client(&key, "down", &cfg).await.is_err());
+
+        assert!(registry.is_empty(), "a failure must not occupy the pool");
+        assert!(
+            !registry.creation_locks.contains_key(&key),
+            "nor leave its creation lock behind, with no eviction ever coming to collect it"
+        );
+    }
+
+    /// A caller cancelled mid-connect must not strand an unevictable key.
+    ///
+    /// `touch` suspends on the `lru` mutex. Holding that mutex parks the
+    /// connect path at exactly that await, and dropping the future there IS
+    /// the cancellation — no timing, no sleeps. With `clients.insert` ordered
+    /// before `touch`, the key would survive in `clients` with no LRU record
+    /// and `pop_lru` could never name it again. Swap the two lines back and
+    /// this fails.
+    #[tokio::test]
+    async fn a_cancelled_connect_does_not_strand_an_unevictable_key() {
+        use std::future::Future;
+        use std::task::{Context, Poll};
+
+        let connector = Arc::new(CountingConnector::new());
+        let registry = McpConnectionRegistry::with_max_entries(connector.clone(), 128);
+
+        let cfg = config("https://cancelled.example.com/mcp");
+        let key = McpServerKey::from_config(&cfg, CredentialScope::unscoped());
+
+        // Park the connect path on the LRU lock.
+        let held = registry.lru.lock().await;
+
+        let mut connecting = Box::pin(registry.client(&key, "cancelled", &cfg));
+        let mut cx = Context::from_waker(std::task::Waker::noop());
+        for _ in 0..8 {
+            assert!(
+                matches!(connecting.as_mut().poll(&mut cx), Poll::Pending),
+                "the connect path must park on the held LRU lock, not complete"
+            );
+        }
+
+        drop(connecting); // the cancellation
+        drop(held);
+
+        assert!(
+            registry.is_empty(),
+            "a cancelled connect must leave nothing in `clients`: a key there \
+             with no LRU record is unevictable, since eviction can only choose \
+             keys the LRU still names"
+        );
+    }
+
+    /// A record the LRU drops on its OWN capacity must not leave the key
+    /// stranded in `clients`.
+    ///
+    /// `evict_if_needed` can only pick a victim the LRU still knows, so a key
+    /// whose record vanished silently would never be evictable again and the
+    /// cap would stop holding. `max_entries` is deliberately generous here so
+    /// that `evict_if_needed` NEVER fires: the only thing that can remove `a`
+    /// is the displacement handling itself. Revert `push` to `put` and this
+    /// fails, because `put` cannot report which key it dropped.
+    ///
+    /// The method under test is `register_and_pool`, NOT `touch`. All three
+    /// keys are first-time keys, so every call takes the cold-connect path;
+    /// `touch` is never reached. The two share `collect_displaced`, so the
+    /// shared logic is covered — but `touch`'s own displacement branch is
+    /// not; see its doc for why that branch is nearly unreachable.
+    #[tokio::test]
+    async fn a_key_the_lru_displaces_on_its_own_is_not_left_stranded() {
+        let connector = Arc::new(CountingConnector::new());
+        // Room for three clients, but an LRU that only remembers two.
+        let registry = McpConnectionRegistry::with_capacities(connector.clone(), 3, 2);
+
+        let mk = |h: &str| {
+            let cfg = config(&format!("https://{h}.example.com/mcp"));
+            (
+                McpServerKey::from_config(&cfg, CredentialScope::unscoped()),
+                cfg,
+            )
+        };
+        let (a, a_cfg) = mk("a");
+
+        for host in ["a", "b", "c"] {
+            let (key, cfg) = mk(host);
+            registry.client(&key, host, &cfg).await.unwrap();
+        }
+
+        assert!(
+            !registry.clients.contains_key(&a),
+            "`a` was displaced from the LRU by `c`; leaving it pooled makes it \
+             unevictable, since eviction can only choose keys the LRU knows"
+        );
+        assert_eq!(
+            registry.len(),
+            2,
+            "the pool tracks only what the LRU can still name"
+        );
+
+        // And it is genuinely gone, not merely unreachable: asking again is a
+        // fresh handshake.
+        let before = connector.calls.load(Ordering::SeqCst);
+        registry.client(&a, "a", &a_cfg).await.unwrap();
+        assert_eq!(
+            connector.calls.load(Ordering::SeqCst),
+            before + 1,
+            "a displaced key reconnects rather than serving a stale entry"
+        );
+    }
+
+    /// The `tools` twin of `a_failed_connect_leaves_no_lock_behind`.
+    ///
+    /// The exclusivity claim applies to the FETCH lock only: `client` cannot
+    /// collect that entry for us, because we hold a clone of it while `client`
+    /// runs, so its sweep correctly leaves it alone. Only `tools` cleaning up
+    /// after itself can satisfy that assertion — the cap is never approached
+    /// here, so no eviction will ever come.
+    ///
+    /// The second assertion, on the creation lock, is NOT exclusive; see the
+    /// comment on it.
+    #[tokio::test]
+    async fn a_failed_catalog_fetch_leaves_no_lock_behind() {
+        let connector = Arc::new(CountingConnector::failing_first(1));
+        let registry = McpConnectionRegistry::with_max_entries(connector.clone(), 128);
+
+        let cfg = config("https://down.example.com/mcp");
+        let key = McpServerKey::from_config(&cfg, CredentialScope::unscoped());
+
+        assert!(registry.tools(&key, "down", &cfg).await.is_err());
+
+        assert!(
+            !registry.fetch_locks.contains_key(&key),
+            "tools must sweep its own fetch lock; client cannot, because we still hold it"
+        );
+        // NOT a proof that `client`'s own failure path ran: `tools`' sweep
+        // walks BOTH lock maps, so this would still pass with `client`'s
+        // cleanup deleted. `a_failed_connect_leaves_no_lock_behind` is the
+        // test that isolates that path; this is only a check that the fetch
+        // failure leaves neither map dirty.
+        assert!(
+            !registry.creation_locks.contains_key(&key),
+            "no creation lock survives either, whichever sweep collected it"
+        );
+    }
+
+    /// The race that removing lock entries reopened. A waiter holding a clone
+    /// of a key's mutex must NOT have that mutex dropped from the map: a fresh
+    /// caller would then mint a second, independent mutex for the same key,
+    /// both would pass the `clients` re-check while it is empty, and both
+    /// would connect — two live connections for one key.
+    ///
+    /// The victim is evicted either way; the ONLY thing that differs is
+    /// whether someone still holds its lock, so nothing but the held-clone
+    /// check can decide whether that lock survives.
+    #[tokio::test]
+    async fn a_lock_someone_still_holds_is_not_evicted() {
+        let connector = Arc::new(CountingConnector::new());
+        let registry = McpConnectionRegistry::with_max_entries(connector.clone(), 2);
+
+        let victim_cfg = config("https://victim.example.com/mcp");
+        let victim = McpServerKey::from_config(&victim_cfg, CredentialScope::unscoped());
+        let other_cfg = config("https://other.example.com/mcp");
+        let other = McpServerKey::from_config(&other_cfg, CredentialScope::unscoped());
+
+        registry
+            .client(&victim, "victim", &victim_cfg)
+            .await
+            .unwrap();
+        registry.client(&other, "other", &other_cfg).await.unwrap();
+
+        // Stand in for a waiter that grabbed the mutex before eviction ran.
+        let waiter = registry
+            .creation_locks
+            .get(&victim)
+            .map(|e| e.value().clone())
+            .expect("the lock exists while the key is pooled");
+
+        // `victim` is now least-recently-used, so admitting a third evicts it.
+        let third_cfg = config("https://third.example.com/mcp");
+        let third = McpServerKey::from_config(&third_cfg, CredentialScope::unscoped());
+        registry.client(&third, "third", &third_cfg).await.unwrap();
+
+        assert!(
+            !registry.clients.contains_key(&victim),
+            "the victim's CLIENT is evicted as usual"
+        );
+        assert!(
+            registry.creation_locks.contains_key(&victim),
+            "but its lock must survive while a waiter still holds it, or a fresh \
+             caller would mint a second mutex and both would connect"
+        );
+        drop(waiter);
+    }
+
+    /// Once the waiter is gone the orphan must be collected, or a lock that
+    /// happened to be contended at eviction time would linger for the life of
+    /// the process — eviction never revisits a key it already popped.
+    #[tokio::test]
+    async fn an_orphan_lock_is_swept_once_its_holder_releases() {
+        let connector = Arc::new(CountingConnector::new());
+        let registry = McpConnectionRegistry::with_max_entries(connector.clone(), 1);
+
+        let a_cfg = config("https://a.example.com/mcp");
+        let a = McpServerKey::from_config(&a_cfg, CredentialScope::unscoped());
+        registry.client(&a, "a", &a_cfg).await.unwrap();
+        let waiter = registry
+            .creation_locks
+            .get(&a)
+            .map(|e| e.value().clone())
+            .expect("lock exists");
+
+        let b_cfg = config("https://b.example.com/mcp");
+        let b = McpServerKey::from_config(&b_cfg, CredentialScope::unscoped());
+        registry.client(&b, "b", &b_cfg).await.unwrap();
+        assert!(registry.creation_locks.contains_key(&a), "still held");
+
+        drop(waiter);
+
+        // Any later eviction sweeps it.
+        let c_cfg = config("https://c.example.com/mcp");
+        let c = McpServerKey::from_config(&c_cfg, CredentialScope::unscoped());
+        registry.client(&c, "c", &c_cfg).await.unwrap();
+
+        assert!(
+            !registry.creation_locks.contains_key(&a),
+            "an orphan must be collected once nobody holds it"
+        );
+    }
+
+    /// A server kept warm entirely through `tools` — the lazy-loading access
+    /// pattern — must keep its LRU rank. Both keys are connected once and
+    /// never touched through `client` again, so only whether a CATALOG hit
+    /// counts as a use can decide which one survives.
+    #[tokio::test]
+    async fn a_catalog_hit_refreshes_lru_rank() {
+        let connector = Arc::new(CountingConnector::new());
+        let registry = McpConnectionRegistry::with_max_entries(connector.clone(), 2);
+
+        let busy_cfg = config("https://busy.example.com/mcp");
+        let busy = McpServerKey::from_config(&busy_cfg, CredentialScope::unscoped());
+        let idle_cfg = config("https://idle.example.com/mcp");
+        let idle = McpServerKey::from_config(&idle_cfg, CredentialScope::unscoped());
+
+        registry.tools(&busy, "busy", &busy_cfg).await.unwrap();
+        registry.tools(&idle, "idle", &idle_cfg).await.unwrap();
+        // Busy keeps working, served purely from its cached catalog.
+        registry.tools(&busy, "busy", &busy_cfg).await.unwrap();
+
+        let third_cfg = config("https://third.example.com/mcp");
+        let third = McpServerKey::from_config(&third_cfg, CredentialScope::unscoped());
+        registry.client(&third, "third", &third_cfg).await.unwrap();
+
+        assert!(
+            registry.clients.contains_key(&busy),
+            "a server in constant use through tools() must not be evicted first"
+        );
+        assert!(
+            !registry.clients.contains_key(&idle),
+            "the genuinely idle server is the one that should go"
+        );
     }
 
     /// R3.4 — the reason the registry exists. Two executions of the same agent
