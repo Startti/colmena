@@ -38,10 +38,6 @@
                   "work_mem_mb": 32
                 }
               },
-              "guardrail_enabled": {
-                "type": "boolean",
-                "fixed": true
-              },
               "guardrail_llm": {
                 "type": "object",
                 "fixed": {

@@ -22,7 +22,7 @@ para `archivo:línea`).
 
 | # | Nodo | Gap | Evidencia |
 |---|------|-----|-----------|
-| A1 | `sql_query` | Campo `guardrail_enabled` se anuncia en el schema del nodo pero **ningún código lo consume** — solo se usa `guardrail_llm.enabled`. Un operador cree que activa la validación estática y no hace nada. | **[✓código]** `sql.rs:706` lo declara; no existe `.get("guardrail_enabled")`. Ver [sql_query.md](sql_query.md) |
+| ~~A1~~ | `sql_query` | ✅ **RESUELTO.** El campo fantasma `guardrail_enabled` se eliminó del `schema()` del nodo y de toda la doc canónica. La validación estática es incondicional por diseño (es lo que bloquea `DROP`/`TRUNCATE`/`DELETE` sin `WHERE`), así que se quitó el flag en vez de cablearlo. Los grafos que aún lo pasan siguen funcionando: la clave sobrante se ignora. | Ver [sql_query.md](sql_query.md) |
 | A2 | `loop_controller` | `loop_status` **no tiene fail-closed**: solo se compara con `"SUSPENDED"`/`"FINISHED"`. Un valor inválido (typo) se emite tal cual sin error → riesgo de loop mal terminado. Además el schema del código omite `SUSPENDED` de su lista. | **[✓código]** `loop_controller.rs:45-60`, schema en `:91`. Ver [loop_controller.md](loop_controller.md) |
 | A3 | familia LLM | Campos de config reales **invisibles en `node_configurations.json`**: `thinking_budget`, `streaming`, `temperature` (fija/oculta). No se pueden descubrir sin leer el código. | Afecta `llm_call`, `planner`, `critic`, `reactor`, `orchestrator`, `router`. Ver cada `.md` |
 | A4 | `input` | El doc-comment afirma resolver `{{key.nested}}` pero la implementación hace **lookup plano** (`state.get("key.nested")` literal, sin traversal). Un template anidado se reemplaza por vacío en silencio. | **[✓código]** `input.rs:8` (comentario) vs `input.rs:22-23` (lookup plano). Ver [input.md](input.md) |
@@ -67,7 +67,7 @@ Para planear el trabajo de doc-fixes, agrupado por el archivo canónico que hay 
 
 | Archivo de doc | Acción principal |
 |----------------|------------------|
-| `docs/node_configurations.json` | Añadir campos ocultos: `thinking_budget`, `streaming`, `temperature` (LLM-family); `supports_templates` (output); documentar `guardrail_enabled` real de `sql_query`; corregir lista de `loop_status`; `memory_mode` en `subgraph`. |
+| `docs/node_configurations.json` | Añadir campos ocultos: `thinking_budget`, `streaming`, `temperature` (LLM-family); `supports_templates` (output); `memory_mode` en `subgraph`. (El `guardrail_enabled` de `sql_query` se eliminó en vez de documentarse — ver A1.) |
 | `docs/node_as_tools_reference.json` | Crear las entradas faltantes (ver tabla BAJA — es el gap más numeroso). |
 | `docs/agent_context/node_ports_reference.md` | Añadir `python_script`; corregir div/0 en `divide`; outputs de `socketio_request` (`exception`, transport-errors). |
 | Guías `docs/developer_guide/` | Documentar `cfg_or_input` (suspend/secure_suspend), inputs `__colmena_*` (multimedia), fail-soft de auto-registro, side-effect auto-RLS (sql). |

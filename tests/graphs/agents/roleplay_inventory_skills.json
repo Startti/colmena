@@ -81,7 +81,6 @@
                 "type": "object",
                 "fixed": { "max_rows": 50, "statement_timeout_ms": 15000 }
               },
-              "guardrail_enabled": { "type": "boolean", "fixed": true },
               "guardrail_llm": { "type": "object", "fixed": { "enabled": false } },
               "query": { "type": "string", "required": true, "description": "SQL DML statement(s) that record the movement." }
             }
@@ -102,7 +101,6 @@
                 "type": "object",
                 "fixed": { "max_rows": 50, "statement_timeout_ms": 15000 }
               },
-              "guardrail_enabled": { "type": "boolean", "fixed": true },
               "guardrail_llm": { "type": "object", "fixed": { "enabled": false } },
               "query": { "type": "string", "required": true, "description": "SQL SELECT query." }
             }
@@ -123,7 +121,6 @@
                 "type": "object",
                 "fixed": { "max_rows": 50, "statement_timeout_ms": 15000 }
               },
-              "guardrail_enabled": { "type": "boolean", "fixed": true },
               "guardrail_llm": { "type": "object", "fixed": { "enabled": false } },
               "query": { "type": "string", "required": true, "description": "SQL SELECT query." }
             }

@@ -37,7 +37,6 @@ Estos son los nombres **exactos** de los campos (no inventar otros):
 | `permissions`      | No        | Objeto que controla **qué operaciones** se permiten. Si se omite, queda en `read_only`. |
 | `setup_sql`        | No        | DDL + datos semilla que vos escribís para que el grafo cree sus tablas la primera vez. La IA nunca lo ve. |
 | `runtime_limits`   | No        | Límites por consulta: `max_rows` (default 100), `statement_timeout_ms` (default 30000), `work_mem_mb` (default 64). |
-| `guardrail_enabled`| No        | Valida reglas estáticas de seguridad. Default `true`. Dejalo en `true`. |
 | `guardrail_llm`    | No        | El **crítico** opcional: una segunda IA revisa cada consulta antes de ejecutarla (ver abajo). Default desactivado. |
 
 ### El objeto `permissions`
@@ -118,7 +117,6 @@ cambiar); lo único que la IA escribe es `query`.
           "work_mem_mb": 32
         }
       },
-      "guardrail_enabled": { "type": "boolean", "fixed": true },
       "guardrail_llm": { "type": "object", "fixed": { "enabled": false } },
       "query": {
         "type": "string",
@@ -130,7 +128,7 @@ cambiar); lo único que la IA escribe es `query`.
 }
 ```
 
-Notá que `connection_url`, `permissions`, `runtime_limits`, `guardrail_enabled` y
+Notá que `connection_url`, `permissions`, `runtime_limits` y
 `guardrail_llm` van **`fixed`** (ocultos a la IA), y solo `query` queda visible y
 editable por el modelo. El nodo además introspecciona la base y le agrega
 automáticamente a la descripción de la herramienta la lista de tablas
@@ -181,8 +179,7 @@ que modifique nada. Flujo: `sql_agent` → `result`.
                   "work_mem_mb": 32
                 }
               },
-              "guardrail_enabled": { "type": "boolean", "fixed": true },
-              "guardrail_llm": { "type": "object", "fixed": { "enabled": false } },
+                      "guardrail_llm": { "type": "object", "fixed": { "enabled": false } },
               "query": {
                 "type": "string",
                 "required": true,

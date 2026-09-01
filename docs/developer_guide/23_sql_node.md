@@ -78,7 +78,6 @@ All string config fields support `${VAR_NAME}` environment variable resolution.
 | `connection_url` | string | **Yes** | — | PostgreSQL connection URL (e.g., `${DATABASE_URL}`) |
 | `permissions` | object | No | `read_only` preset | Permission configuration (see Permissions section) |
 | `runtime_limits` | object | No | see below | Runtime limits per query (see Runtime Limits section) |
-| `guardrail_enabled` | boolean | No | `true` | Enable static validation rules |
 | `guardrail_llm` | object | No | `{ enabled: false }` | LLM critic configuration (see Guardrail LLM section) |
 | `query` | string | **Yes** | — | The SQL query to execute |
 
@@ -779,10 +778,6 @@ An LLM agent that uses `sql_query` as a tool via `tool_configurations`. The LLM 
                   "work_mem_mb": 32
                 }
               },
-              "guardrail_enabled": {
-                "type": "boolean",
-                "fixed": true
-              },
               "guardrail_llm": {
                 "type": "object",
                 "fixed": { "enabled": false }
@@ -811,7 +806,7 @@ An LLM agent that uses `sql_query` as a tool via `tool_configurations`. The LLM 
 
 **Key patterns in this example:**
 
-- **`node_schema` with `fixed` fields:** `connection_url`, `permissions`, `runtime_limits`, `guardrail_enabled`, and `guardrail_llm` are all `fixed` — hidden from the LLM and auto-filled at execution time
+- **`node_schema` with `fixed` fields:** `connection_url`, `permissions`, `runtime_limits`, and `guardrail_llm` are all `fixed` — hidden from the LLM and auto-filled at execution time
 - **Only `query` is dynamic:** The LLM sees and provides only the SQL query
 - **Schema introspection:** The node automatically appends available table names to the tool description, so the LLM knows what tables exist
 - **Static validation:** Even though the preset is `read_only`, the static validator provides defense-in-depth against accidental mutations
@@ -867,7 +862,6 @@ An LLM agent that manages per-user todo lists with automatic Row-Level Security 
                   "work_mem_mb": 32
                 }
               },
-              "guardrail_enabled": { "type": "boolean", "fixed": true },
               "guardrail_llm": { "type": "object", "fixed": { "enabled": false } },
               "query": {
                 "type": "string",

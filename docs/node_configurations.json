@@ -1340,12 +1340,6 @@
             }
           }
         },
-        "guardrail_enabled": {
-          "type": "boolean",
-          "required": false,
-          "description": "Enable static validation rules (always recommended). Checks for dangerous patterns like DELETE without WHERE, unauthorized operations, etc.",
-          "default": true
-        },
         "guardrail_llm": {
           "type": "object",
           "required": false,
