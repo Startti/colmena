@@ -151,6 +151,24 @@ async fn resolve_headers(
 }
 
 impl McpBinding {
+    /// The server's connection settings, for the pool's freshness check.
+    ///
+    /// **Not a secret-free view, and must not be treated as one.** The returned
+    /// config carries `header_refs`, which is `spec.headers` verbatim. A header
+    /// value is normally a secure-value reference, but `resolve_headers`
+    /// deliberately lets a LITERAL through — that is what keeps a public server
+    /// globally pooled — and for a literal the value in `header_refs` IS the
+    /// credential. Nothing in the type separates the two cases.
+    ///
+    /// `pub(crate)` for that reason. The pool needs the timeout and the cache
+    /// TTL to judge freshness, and that need does not justify putting header
+    /// values on the crate's public API: `McpBinding`'s hand-written `Debug` and
+    /// `McpServerKey` both go out of their way to expose header NAMES only, so
+    /// the one path that can see values stays inside.
+    pub(crate) fn config(&self) -> &McpServerConfig {
+        &self.config
+    }
+
     /// Open a live connection using the resolved credentials.
     pub async fn connect(&self) -> Result<Arc<dyn McpClientPort>, McpError> {
         let client =

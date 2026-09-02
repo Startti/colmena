@@ -24,11 +24,11 @@
 | 13 | `llm::domain::attachments` | `src/libs/colmena/src/llm/domain/attachments/mod.rs` |
 | 13 | `llm::infrastructure` | `src/libs/colmena/src/llm/infrastructure/mod.rs` |
 | 13 | `storage::domain` | `src/libs/colmena/src/storage/domain/mod.rs` |
-| 11 | `dag_engine::application::secure_value_service` | `src/libs/colmena/src/dag_engine/application/secure_value_service.rs` |
+| 12 | `dag_engine::application::secure_value_service` | `src/libs/colmena/src/dag_engine/application/secure_value_service.rs` |
+| 11 | `dag_engine::domain::tool_configuration` | `src/libs/colmena/src/dag_engine/domain/tool_configuration.rs` |
 | 11 | `documents::domain::ports` | `src/libs/colmena/src/documents/domain/ports.rs` |
 | 11 | `text` | `src/libs/colmena/src/text/mod.rs` |
 | 10 | `dag_engine::application::ports` | `src/libs/colmena/src/dag_engine/application/ports.rs` |
-| 10 | `dag_engine::domain::tool_configuration` | `src/libs/colmena/src/dag_engine/domain/tool_configuration.rs` |
 | 10 | `dag_engine::infrastructure::pool_registry` | `src/libs/colmena/src/dag_engine/infrastructure/pool_registry/mod.rs` |
 | 10 | `documents::domain::artifact` | `src/libs/colmena/src/documents/domain/artifact.rs` |
 | 10 | `documents::domain::patch` | `src/libs/colmena/src/documents/domain/patch.rs` |
@@ -230,7 +230,7 @@
 
 #### `src/libs/colmena/src/dag_engine/application/secure_value_service.rs`
 - Module: `dag_engine::application::secure_value_service`
-- **Used by (11)**: `src/libs/colmena/src/dag_engine/application/run_use_case.rs`, `src/libs/colmena/src/dag_engine/engine.rs`, `src/libs/colmena/src/dag_engine/infrastructure/dag_tool_executor.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/api_explorer.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/image_edit.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/image_generation.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/mcp/bind.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/secure_suspend.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/tavily_client.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/tts.rs`, `src/libs/colmena/src/dag_engine/infrastructure/registry.rs`
+- **Used by (12)**: `src/libs/colmena/src/dag_engine/application/run_use_case.rs`, `src/libs/colmena/src/dag_engine/engine.rs`, `src/libs/colmena/src/dag_engine/infrastructure/dag_tool_executor.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/api_explorer.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/image_edit.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/image_generation.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/mcp/bind.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/mcp/wire.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/secure_suspend.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/tavily_client.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/tts.rs`, `src/libs/colmena/src/dag_engine/infrastructure/registry.rs`
 - Depends on (1): `dag_engine::domain`
 
 #### `src/libs/colmena/src/dag_engine/application/sql_execution_service.rs`
@@ -300,7 +300,7 @@
 
 #### `src/libs/colmena/src/dag_engine/domain/tool_configuration.rs`
 - Module: `dag_engine::domain::tool_configuration`
-- **Used by (10)**: `src/libs/colmena/src/dag_engine/domain/graph.rs`, `src/libs/colmena/src/dag_engine/infrastructure/dag_tool_executor.rs`, `src/libs/colmena/src/dag_engine/infrastructure/node_schema_merge.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/for_each.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/describe_tool.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/mcp/bind.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/mcp/expose.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/secure_suspend.rs`, `src/libs/colmena/src/dag_engine/infrastructure/registry.rs`
+- **Used by (11)**: `src/libs/colmena/src/dag_engine/domain/graph.rs`, `src/libs/colmena/src/dag_engine/infrastructure/dag_tool_executor.rs`, `src/libs/colmena/src/dag_engine/infrastructure/node_schema_merge.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/for_each.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/describe_tool.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/mcp/bind.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/mcp/expose.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/mcp/wire.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/secure_suspend.rs`, `src/libs/colmena/src/dag_engine/infrastructure/registry.rs`
 - Depends on (2): `llm::domain`, `llm::domain::mcp`
 
 #### `src/libs/colmena/src/dag_engine/domain/toolkit_node.rs`
@@ -325,7 +325,7 @@
 
 #### `src/libs/colmena/src/dag_engine/infrastructure/mcp_registry/mod.rs`
 - Module: `dag_engine::infrastructure::mcp_registry`
-- **Used by (2)**: `src/libs/colmena/src/dag_engine/infrastructure/mcp_registry/registry.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/mcp/bind.rs`
+- **Used by (3)**: `src/libs/colmena/src/dag_engine/infrastructure/mcp_registry/registry.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/mcp/bind.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/mcp/wire.rs`
 - Depends on (0): — (no intra-crate imports)
 
 #### `src/libs/colmena/src/dag_engine/infrastructure/mcp_registry/registry.rs`
@@ -536,7 +536,7 @@
 #### `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/mcp/wire.rs`
 - Module: `dag_engine::infrastructure::nodes::llm_synthetic_tools::mcp::wire`
 - **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
-- Depends on (2): `llm::domain::mcp`, `llm::domain::tools`
+- Depends on (5): `dag_engine::application::secure_value_service`, `dag_engine::domain::tool_configuration`, `dag_engine::infrastructure::mcp_registry`, `llm::domain::mcp`, `llm::domain::tools`
 
 #### `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/mod.rs`
 - Module: `dag_engine::infrastructure::nodes::llm_synthetic_tools`

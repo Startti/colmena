@@ -2434,3 +2434,43 @@ test dentro del mismo módulo; la función no tiene consumidores fuera del crate
 **Alcance.** Módulo nuevo, aditivo, sin llamadores todavía.
 
 **Estado.** done.
+
+## 40. Alcanzar todos los servidores MCP de un turno, en paralelo y degradando
+
+**Qué cambió.** La mitad de E/S de `wire.rs`: `wire` resuelve credenciales, alcanza cada servidor
+declarado, y pliega lo que vuelve con el `fold_catalog` de §39. Más `unavailable_notice` y el accesor
+`McpBinding::config()`.
+
+**Degradar es el tipo, no una rama.** `wire` no devuelve `Result` en absoluto. Hacer imposible el
+camino de error es lo que garantiza que un servidor de terceros caído nunca se lleve puesto al agente:
+el alias queda en `unavailable`, las demás tools siguen, y el `llm_call` no falla. Un fallo de `bind`
+—incluido el rechazo de una credencial que no resolvió— degrada igual que uno de red: un secreto
+vencido no puede tumbar un agente cuyas otras tools están sanas.
+
+**Concurrente, y por una razón medida.** Secuencialmente, N servidores lentos-pero-vivos se suman:
+cada uno está acotado solo por su propio `timeout_seconds` (default 30) y nada acota la suma, así que
+cinco podrían agregar más de dos minutos **a cada turno** — y esto corre antes de que el modelo se
+invoque siquiera. En fan-out el costo pasa de la suma al máximo. Es la forma exacta del incidente que
+el repo ya registró: trabajo síncrono por turno acotado solo por timeout individual, sin techo
+agregado.
+
+**Solo la E/S es concurrente.** El plegado sigue secuencial y en orden de `BTreeMap`, porque `claimed`
+depende del orden: quién gana un nombre disputado no puede depender de quién contestó primero.
+
+**El aviso al modelo.** Un modelo que conserva su creencia previa promete trabajo que ya no puede
+hacer, así que el system message declara la pérdida. Nombra el servidor y **no** las tools que faltan:
+el catálogo es justamente lo que no se pudo traer, y cualquier lista sería inventada. En un turno sano
+devuelve `None`, no un string vacío — un vacío igual cambiaría el prefijo cacheable y costaría una
+escritura de caché por turno (§30).
+
+**El accesor y su advertencia.** `McpBinding::config()` es `pub(crate)`, no `pub`. El config que
+devuelve carga `header_refs`, que es `spec.headers` verbatim, y `resolve_headers` deja pasar
+deliberadamente un valor **literal** — para un literal, ese valor **es** la credencial. El `Debug` a
+mano de `McpBinding` y `McpServerKey` se toman el trabajo de exponer solo NOMBRES de header; la única
+ruta que ve valores se queda adentro del crate. Su doc lo dice así en vez de prometer una vista libre
+de secretos, que es lo que decía una versión anterior y le costó un linaje escalado.
+
+**Alcance.** Aditivo, sin llamadores todavía — el cableado va en la slice siguiente. ADP no afectado.
+
+**Estado.** done.
+
