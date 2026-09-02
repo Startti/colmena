@@ -123,3 +123,43 @@ estaban colgadas. Sin cambio de API pública → **ADP no afectado**.
 **Origen.** Hallazgo de severidad Alta A2 del audit doc-vs-código por nodo (PR #226).
 
 **Estado.** done.
+
+---
+
+## 3. Catálogo de nodos: cerrados los huecos y la contradicción interna
+
+**Qué cambió.** `docs/node_configurations.json` describía **32** tipos de nodo
+mientras declaraba **37** como válidos en `common_node_properties.type.valid_values`
+y los referenciaba en `categories`. Faltaban las entradas de `tavily_client`,
+`api_explorer`, `image_generation`, `image_edit` y `tts`. Nada detectaba esa
+contradicción: el archivo se mantenía a mano, sin generador ni check en CI.
+
+Las cinco entradas ahora existen, auditadas campo por campo contra la
+implementación de cada nodo. Además:
+
+- **Clave `required` duplicada** en `llm_call.crdt_documents`: el objeto tenía dos
+  (`false` del campo, y una lista `["artifact_id"]` estilo JSON-Schema mal
+  ubicada). `jq` la absorbía en silencio con last-wins; un parser tipado la
+  rechaza. Se eliminó la segunda, redundante con `properties.artifact_id.required`.
+- **Campos que el código lee y el catálogo no documentaba**:
+  `llm_call.max_tool_result_bytes`, `orchestrator.api_key` y `orchestrator.plan`.
+- **Nueva sección `common_config_fields`** para las claves que lee el *motor* del
+  `config` de cualquier nodo, sin pertenecer a ningún tipo. Hoy contiene
+  `include_extra_info`, que `DagRunUseCase` consulta al armar la salida final.
+- **`api_explorer` documentado con `config_fields` vacío** y una nota: se
+  construye una sola vez con valores por defecto y su `execute()` recibe
+  `_config` sin usar, así que cualquier clave puesta ahí es inerte. Su `schema()`
+  anuncia diez campos que el nodo nunca lee — drift del `.rs`, no del catálogo.
+- **Correcciones de datos**: `tts.format` acepta también `mpeg` y `ogg` y es
+  case-insensitive; `quality` de los nodos de imagen dejó de declarar
+  `valid_values` porque el nodo no valida nada y reenvía el string al proveedor
+  (con `dall-e-3` el vocabulario es `standard`/`hd`, no `low`/`medium`/`high`);
+  y `provider` de `image_generation`/`tts` NO es case-insensitive — el match es
+  exacto y `"OpenAI"` falla en runtime.
+
+**Solo documentación.** No cambia ningún comportamiento del motor.
+
+**Documentación de referencia.** [`docs/node_configurations.json`](../docs/node_configurations.json).
+
+**Estado.** done.
+
