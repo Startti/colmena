@@ -159,6 +159,7 @@ Python/Rust script tested in isolation.
     - `31_load_attachment.md` — On-demand attachment loading inside the LLM loop; auto-summary via cheap-tier provider
     - `32_multimedia_generation.md` — `image_generation` / `image_edit` / `tts` nodes; artifact storage with 3 adapters (LocalCache/LocalHttp/HttpCallback); `COLMENA_LOCAL` env guard; `$attachment:<key>` placeholder; binary scrubber. **Live in dev as of 2026-05-22** — Vertex uses ADC (no key file needed on Cloud Run); Gemini TTS auto-wraps L16 PCM to playable WAV; Vertex `google_project_id`/`google_location` fall back to `GOOGLE_CLOUD_PROJECT`/`GOOGLE_CLOUD_LOCATION` env vars (best practice: omit from graph JSON). Canvas-side configuration reference (per-tool fields, accepted values per model, env-var resolution chain) lives in the ADP repo at `docs/MULTIMEDIA_TOOLS_CANVAS_CONFIG.md`.
     - `35_temporal_geographic_context.md` — Auto-injected date/time/location/locale block in every llm_call system message
+    - `51_graph_linter.md` — `dag_engine lint`: static check of a graph's node configuration against the embedded catalog; the anti-noise rules; `lint_graph_json` vs `lint_graph`
   - `dds/` — Design documents:
     - `ARQUITECTURA_HEXAGONAL_GUIA.md`, `DAG_ENGINE_DISEÑO.md`
     - `SECURE_VALUES_DISEÑO.md` — Security design
@@ -171,7 +172,7 @@ Python/Rust script tested in isolation.
 
 ## Node Documentation — Where to Look
 When you need to understand or modify any node (HTTP, LLM, orchestrator, etc.):
-1. **Config fields**: `docs/node_configurations.json` — start here, canonical schema for all nodes
+1. **Config fields**: `docs/node_configurations.json` — start here, canonical schema for all nodes. **It is no longer documentation-only**: it is embedded in the binary and drives `dag_engine lint`, and three tests keep its node-type list in sync with the registry in both directions. Adding a node type without an entry now fails the test suite (a corrupt catalog still compiles; `NodeCatalog::embedded()` panics at run time, and only the `lint` subcommand reaches it).
 2. **Ports & outputs**: `docs/agent_context/node_ports_reference.md`
 3. **Developer guide**: `docs/DEVELOPER_GUIDE.md` → pick the relevant section
 4. **Design intent**: `docs/dds/` for architecture decisions
@@ -194,6 +195,7 @@ When delegating exploration (e.g. `sdd-explore`), forward this map as the starti
 - **Python**: `maturin develop` (builds PyO3 bindings into `.venv`)
 - **TypeScript**: `npm run build` (napi build with `--features node`)
 - **DAG Engine CLI (run)**: `cargo run --bin dag_engine -- run <path/to/graph.json>`
+- **DAG Engine CLI (lint)**: `cargo run --bin dag_engine -- lint <path/to/graph.json>` — checks a graph's configuration without running it (invented config fields, missing required fields, unknown node types, dangling edges). Advisory; `--strict` exits non-zero. See [docs/developer_guide/51_graph_linter.md](docs/developer_guide/51_graph_linter.md).
 - **DAG Engine CLI (serve)**: `cargo run --bin dag_engine -- serve <path/to/graph.json>`
 - **Attachment GC (cleanup)**: `cargo run --bin attachment_gc -- --dry-run` (or without --dry-run to actually delete)
 - **Docs**: `cargo doc --no-deps --open`

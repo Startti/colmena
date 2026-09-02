@@ -279,3 +279,39 @@ todavía a estas funciones: la superficie de usuario llega en el cambio siguient
 
 **Estado.** done.
 
+---
+
+## 7. `dag_engine lint`: revisar un grafo sin ejecutarlo
+
+**Qué cambió.** Nuevo subcomando:
+
+```bash
+cargo run --bin dag_engine -- lint <graph.json> [--format text|json] [--strict]
+```
+
+Contesta la pregunta que realmente tiene quien escribe el JSON: cuáles de estos
+campos existen y cuáles me los inventé. Hasta ahora un `"modle"` en vez de
+`"model"` cargaba bien, pasaba `Graph::validate()` y corría con el modelo por
+defecto — el motor deserializa `config` a un `Value` sin tipar y ninguna struct
+del grafo usa `deny_unknown_fields`.
+
+**No bloquea nada.** `Graph::validate()` quedó igual y `run` se comporta
+exactamente como antes. Los grafos que hoy corren en producción casi con
+seguridad contienen campos desconocidos, y volverlos fail-closed rompería agentes
+en marcha sin aviso. `--strict` sale con código ≠ 0 para quien lo quiera en CI;
+ese es el camino de adopción, no un cambio de default.
+
+**No construye un engine.** Lintear es estático, y exigir conexión a base de
+datos para revisar un archivo JSON dejaría la herramienta fuera del alcance de
+las personas para las que existe. Los tipos de nodo se toman del catálogo, cuya
+correspondencia con el registry está fijada por tests.
+
+**Encontró defectos reales en este repo**, sin ejecutar nada:
+`tests/graphs/edge_resolution/default_ports_chain.json` usa `default_input_port`
+(que el motor descarta al cargar) y pone `config.left` en nodos `add`/`multiply`
+que reciben `_config` sin usar — al correrlo muere con `Entrada no es un número: a`.
+
+**Documentación de referencia.** [`docs/developer_guide/51_graph_linter.md`](developer_guide/51_graph_linter.md).
+
+**Estado.** done.
+
