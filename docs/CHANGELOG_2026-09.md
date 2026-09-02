@@ -237,3 +237,45 @@ corridas sobre el mismo grafo se lean igual.
 
 **Estado.** done.
 
+---
+
+## 6. El análisis del linter de grafos
+
+**Qué cambió.** `dag_engine::domain::lint::linter` — una función pura de grafo a
+lista de hallazgos, sin I/O ni acceso al registry: todo lo que necesita llega en
+`LintContext`. Detecta campos de config inventados (con sugerencia *did you
+mean*), campos obligatorios ausentes, tipos de nodo inexistentes, edges que
+apuntan a nodos que no existen, valores fuera del conjunto documentado y tipos
+JSON incorrectos.
+
+**Dos puntos de entrada, y la diferencia importa.** `lint_graph_json` recibe el
+documento crudo; `lint_graph` recibe un `Graph` ya deserializado. Preferí el
+primero siempre que tengas el JSON original: deserializar a `Graph` **descarta en
+silencio** toda clave no declarada, así que un nodo con `"default_input_port"`
+—una invención real presente en los grafos de ejemplo de este repo— ya no existe
+cuando hay un `Graph`. `lint_graph` queda para quien ya tiene uno en la mano.
+
+**Las reglas que evitan el ruido.** Un linter con falsos positivos se ignora, así
+que cada una se midió contra los 301 grafos de ejemplo del repo. Sin ellas la
+primera versión producía 178 hallazgos de los que 132 eran ruido; con ellas
+quedan 252 grafos limpios y 80 hallazgos, todos auditados contra el código.
+
+- **Sin cobertura no se opina.** Un tipo sin entrada en el catálogo produce un
+  `NO_CATALOG_COVERAGE` (info) y ni un solo `UNKNOWN_FIELD`.
+- **`required` no significa "tiene que estar en `config`".** El edge nombra el
+  puerto al que escribe (`"to": "run_sql.query"`); si nombra el campo, no falta.
+  Mirar solo "¿tiene algún edge entrante?" producía 35 de 41 avisos falsos. Una
+  obligatoriedad condicional nunca se reporta.
+- **Nodos de config abierta.** `input` y `mock_input` emiten su config como
+  datos: ninguna clave puede ser inventada en ellos.
+- **Un comentario no es un ajuste.** Las claves de anotación se ignoran, salvo que
+  el tipo de nodo documente un campo con ese nombre.
+- **Claves que lee el motor, no el nodo.** `include_extra_info` la lee
+  `DagRunUseCase` de cualquier nodo; sin tratarla aparte, el linter la marcaba
+  como inventada y afirmaba —falsamente— que el motor la ignora.
+
+**Sin cambio de comportamiento.** `Graph::validate()` no se tocó y nada llama
+todavía a estas funciones: la superficie de usuario llega en el cambio siguiente.
+
+**Estado.** done.
+

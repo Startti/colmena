@@ -5,7 +5,7 @@
 
 **How to use (for the exploration/spec phase):** before opening files to assess a change, look up the target file below. **Used by** is its blast radius — the files that break if you change its public surface. **Depends on** is what it needs. Start by reading only those, not the whole repo.
 
-- Files indexed: **377**
+- Files indexed: **378**
 - Modules with at least one importer: **170**
 
 ## Blast-radius ranking (change these with the most care)
@@ -250,7 +250,7 @@
 
 #### `src/libs/colmena/src/dag_engine/domain/graph.rs`
 - Module: `dag_engine::domain::graph`
-- **Used by (4)**: `src/libs/colmena/src/dag_engine/api.rs`, `src/libs/colmena/src/dag_engine/application/preflight.rs`, `src/libs/colmena/src/dag_engine/application/run_use_case.rs`, `src/libs/colmena/src/dag_engine/engine.rs`
+- **Used by (5)**: `src/libs/colmena/src/dag_engine/api.rs`, `src/libs/colmena/src/dag_engine/application/preflight.rs`, `src/libs/colmena/src/dag_engine/application/run_use_case.rs`, `src/libs/colmena/src/dag_engine/domain/lint/linter.rs`, `src/libs/colmena/src/dag_engine/engine.rs`
 - Depends on (2): `dag_engine::domain::error`, `dag_engine::domain::tool_configuration`
 
 #### `src/libs/colmena/src/dag_engine/domain/initializable_node.rs`
@@ -267,6 +267,11 @@
 - Module: `dag_engine::domain::lint::diagnostic`
 - **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
 - Depends on (0): — (no intra-crate imports)
+
+#### `src/libs/colmena/src/dag_engine/domain/lint/linter.rs`
+- Module: `dag_engine::domain::lint::linter`
+- **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
+- Depends on (1): `dag_engine::domain::graph`
 
 #### `src/libs/colmena/src/dag_engine/domain/lint/mod.rs`
 - Module: `dag_engine::domain::lint`
