@@ -11,6 +11,21 @@ use std::sync::Arc;
 // Import from crate since this is part of the colmena library
 use crate::dag_engine::domain::graph::Graph;
 
+/// Hard ceiling on how many turns a serve-mode loop (`?loop=true`) may take.
+///
+/// Each turn is a fresh `run_dag`, so the per-node `max_total_calls` counters in
+/// `RunUseCase` are rebuilt every turn and cannot bound this outer loop. Without
+/// a ceiling, a graph that never emits a stopping status runs forever.
+///
+/// `COLMENA_MAX_GRAPH_TURNS=0` removes the ceiling for the rare graph that
+/// legitimately needs to run unbounded.
+fn max_graph_turns() -> u32 {
+    std::env::var("COLMENA_MAX_GRAPH_TURNS")
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok())
+        .unwrap_or(50)
+}
+
 pub async fn run_dag(
     file_path: String,
     resume_id: Option<String>,
@@ -499,6 +514,28 @@ async fn handler_webhook(
                             }
                         }
                         turn_count += 1;
+
+                        // Runaway guard. Report it on the wire: a silent stop
+                        // here is indistinguishable from a graph that finished.
+                        let cap = max_graph_turns();
+                        if cap > 0 && turn_count > cap {
+                            yield Ok::<Event, std::io::Error>(
+                                Event::default().data(
+                                    serde_json::json!({
+                                        "type": "error",
+                                        "error": format!(
+                                            "Loop stopped after {} turns (COLMENA_MAX_GRAPH_TURNS). \
+                                             The graph never emitted a stopping status; check that \
+                                             it reaches an output node or sets __colmena_loop_status \
+                                             to FINISHED.",
+                                            cap
+                                        )
+                                    })
+                                    .to_string(),
+                                ),
+                            );
+                            should_stop_loop = true;
+                        }
                     }
                 } else {
                     should_stop_loop = true;
@@ -671,6 +708,33 @@ async fn handler_webhook(
                         }
 
                         turn_count += 1;
+
+                        // Runaway guard -- see `max_graph_turns`. Answer with an
+                        // explicit error rather than the last partial output, so
+                        // a caller cannot mistake a truncated run for a finished
+                        // one.
+                        let cap = max_graph_turns();
+                        if cap > 0 && turn_count > cap {
+                            eprintln!(
+                                "\u{26a0}\u{fe0f}  Loop stopped after {} turns (COLMENA_MAX_GRAPH_TURNS).",
+                                cap
+                            );
+                            return (
+                                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                                Json(serde_json::json!({
+                                    "error": format!(
+                                        "Loop stopped after {} turns (COLMENA_MAX_GRAPH_TURNS). \
+                                         The graph never emitted a stopping status; check that it \
+                                         reaches an output node or sets __colmena_loop_status to \
+                                         FINISHED.",
+                                        cap
+                                    ),
+                                    "turns": turn_count - 1,
+                                    "last_output": out
+                                })),
+                            )
+                                .into_response();
+                        }
                     }
                 }
                 Err(e) => {

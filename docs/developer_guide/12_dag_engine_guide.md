@@ -1243,6 +1243,38 @@ Levanta un servidor HTTP (Axum) que expone los endpoints definidos en los nodos 
 cargo run --bin dag_engine -- serve tests/my_graph.json
 ```
 
+#### Techo de turnos del loop (`COLMENA_MAX_GRAPH_TURNS`)
+
+Una petición con `?loop=true` re-ejecuta el grafo completo turno tras turno hasta
+que algo lo detiene: `__colmena_loop_status: "FINISHED"`, una suspensión, o un
+nodo de output. Si el grafo nunca emite ninguna de esas señales, el loop no
+termina solo.
+
+**Los límites por nodo no cubren este caso.** `max_total_calls` y
+`max_calls_from` viven dentro de `RunUseCase`, y cada turno es un `run_dag`
+nuevo: sus contadores se reconstruyen desde cero en cada iteración, así que no
+pueden acotar el bucle exterior.
+
+Por eso existe un techo propio:
+
+| Variable | Default | Efecto |
+|---|---|---|
+| `COLMENA_MAX_GRAPH_TURNS` | `50` | Turnos máximos por petición en modo loop. `0` desactiva el techo. |
+
+Al alcanzarlo la ejecución **para y lo informa explícitamente** — nunca devuelve
+la última salida parcial como si el grafo hubiera terminado bien:
+
+- **JSON**: HTTP 500 con `{ error, turns, last_output }`.
+- **SSE**: un frame `{"type":"error","error":"Loop stopped after N turns..."}`
+  antes de cerrar el stream.
+
+Si ves ese error, el grafo no está alcanzando su condición de corte. Revisa que
+llegue a un nodo de output o que su `loop_controller` emita `FINISHED`.
+
+> Un `loop_status` mal escrito ya no puede causar esto: el `loop_controller`
+> coacciona cualquier valor no reconocido a `FINISHED` con un `warn`. Ver
+> [`node_configurations.json`](../node_configurations.json) → `loop_controller`.
+
 ## 🏗️ Ciclo de vida de `ColmenaEngine`
 
 `ColmenaEngine` es el punto de entrada **process-wide** para toda ejecución de DAG. Fue introducido para eliminar la creación de pools por job que saturaba Postgres. Un único `ColmenaEngine` por proceso posee:

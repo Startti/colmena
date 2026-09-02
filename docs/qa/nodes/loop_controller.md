@@ -10,10 +10,13 @@ Fuentes de doc revisadas:
 
 ## 1) Config documentada NO soportada por el código
 
-**Hallazgo 1:** Validación de `loop_status` ausente — valores inválidos se aceptan sin rechazo.
-- **Qué dice la doc:** `docs/node_configurations.json` declara `"valid_values": ["NEXT_TURN", "FINISHED", "SUSPENDED"]` para el campo `loop_status`.
-- **Qué hace el código:** `loop_controller.rs:30-35` resuelve el valor de `loop_status` (de inputs, luego config, luego default "FINISHED") como una cadena plana sin validación. Cualquier valor string es aceptado y propagado en la salida `__colmena_loop_status`.
-- **Impacto QA:** El nodo no rechaza un `loop_status: "TYPO"` con un error fail-closed. El usuario verá un status desconocido en el output sin indicación de que es inválido. QA debe probar que valores fuera del enum son aceptados silenciosamente.
+**Hallazgo 1:** Validación de `loop_status` ausente — valores inválidos se aceptan sin rechazo. — ✅ **RESUELTO**
+- **Qué decía la doc:** `docs/node_configurations.json` declaraba `"valid_values": ["NEXT_TURN", "FINISHED", "SUSPENDED"]` para el campo `loop_status`.
+- **Qué hacía el código:** resolvía `loop_status` como cadena plana sin validación y lo propagaba tal cual en `__colmena_loop_status`. El consumidor real (`api.rs`) solo detiene el loop en `FINISHED`, así que un typo dejaba el loop de serve-mode girando; el loop de grafo tampoco tenía tope de iteraciones.
+- **Resolución:** se descartó el fail-closed estricto porque el enum era incompleto — `orchestrator.rs` emite además `FINISHED_PHASE`, y rechazarlo habría roto el orquestador. En su lugar:
+  1. `loop_controller` valida contra `KNOWN_LOOP_STATUSES` (`NEXT_TURN`, `FINISHED`, `SUSPENDED`, `FINISHED_PHASE`) y **coacciona** cualquier valor no reconocido a `FINISHED` con un `warn`. Parar temprano es un fallo visible y depurable; un loop sin fin no lo es.
+  2. Se añadió el techo `COLMENA_MAX_GRAPH_TURNS` (default 50, `0` = sin techo) al loop de `api.rs`, que ataca la causa raíz: protege también cuando el runaway no viene de un typo. Al alcanzarlo, responde con un error explícito, nunca con la salida parcial.
+- **Qué probar ahora:** que los 4 valores válidos pasan intactos (en especial que `FINISHED_PHASE` **no** se colapsa a `FINISHED`), que un typo produce `FINISHED` + warning, y que `suspend_flag: true` sigue ganando sobre cualquier valor. Cubierto por 6 tests unitarios en `loop_controller.rs`.
 
 **Hallazgo 2:** Tipo de `all_tasks` nunca validado — documentado como "any".
 - **Qué dice la doc:** `docs/node_configurations.json` especifica `"type": "any"` y describe `all_tasks` como "El payload final a emitir si FINISHED".

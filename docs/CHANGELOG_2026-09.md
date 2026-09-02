@@ -58,3 +58,68 @@ skill `capability-data-sql`, que le enseñaba a los operadores a declararlo.
 **Origen.** Hallazgo de severidad Alta A1 del audit doc-vs-código por nodo (PR #226).
 
 **Estado.** done.
+
+---
+
+## 2. Loop de grafo: guardia contra ejecución sin fin
+
+**Qué cambió.** Un `loop_status` mal escrito podía dejar un loop de serve-mode
+girando indefinidamente. `loop_controller` propagaba el valor tal cual, y el único
+consumidor real (`api.rs`) solo detiene el loop cuando lee exactamente
+`"FINISHED"` (o una suspensión, o un nodo de output). Un `"FINISHEDD"` no coincide
+con nada, así que el motor tomaba otro turno. Para siempre.
+
+**Los límites por nodo no cubrían este caso.** `max_total_calls` y
+`max_calls_from` viven dentro de `RunUseCase`, y cada turno del loop es un
+`run_dag` nuevo: sus contadores se reconstruyen desde cero en cada iteración. El
+`turn_count` de `api.rs` existía, pero solo se imprimía — nunca se comparaba
+contra nada. (`COLMENA_HARD_TURN_CAP` es de otra capa: acota los turnos del
+agente LLM dentro de `AgentService`, no las iteraciones del grafo.)
+
+Dos cambios, en dos capas distintas:
+
+1. **`loop_controller` coacciona los valores desconocidos.** Valida contra
+   `KNOWN_LOOP_STATUSES` = `NEXT_TURN`, `FINISHED`, `SUSPENDED`, `FINISHED_PHASE`,
+   y convierte cualquier otro valor a `FINISHED` emitiendo un `warn`. Parar
+   temprano es un fallo visible y depurable; un loop sin fin no lo es.
+
+2. **Techo de turnos en `api.rs`** (`COLMENA_MAX_GRAPH_TURNS`, default `50`,
+   `0` = sin techo), aplicado a los **dos** loops — el de JSON y el de streaming.
+   Ataca la causa raíz: protege también cuando el runaway no viene de un typo
+   (un orquestador que nunca emite `FINISHED`, un grafo sin nodo de output).
+
+**Por qué NO se hizo fail-closed estricto.** Era la opción obvia y es la
+equivocada: el enum documentado estaba **incompleto**. `orchestrator.rs:585` emite
+`FINISHED_PHASE`, que no aparecía en `valid_values`. Rechazar los valores fuera de
+la lista habría roto el orquestador en producción. Por eso `FINISHED_PHASE` es
+ahora un valor válido de primera clase, con un test que verifica explícitamente
+que **no** se colapsa a `FINISHED` (colapsarlo cortaría el loop una fase antes).
+
+**Al alcanzar el techo la ejecución falla de forma ruidosa,** nunca devuelve la
+última salida parcial como si el grafo hubiera terminado bien:
+
+- **JSON**: HTTP 500 con `{ error, turns, last_output }`.
+- **SSE**: un frame `{"type":"error","error":"Loop stopped after N turns..."}`.
+
+**Compatibilidad.** Aditivo. Los cuatro estados válidos se comportan igual que
+antes; solo cambian los valores que ya estaban rotos. El techo por defecto (50)
+solo afecta a peticiones `?loop=true` que hoy no terminan — es decir, a las que ya
+estaban colgadas. Sin cambio de API pública → **ADP no afectado**.
+
+**Verificación.**
+
+| Chequeo | Resultado |
+|---|---|
+| `cargo test --lib loop_controller` | 6 passed, 0 failed |
+| Prueba de mutación (corrección desactivada a propósito) | `unrecognized_status_is_coerced_to_finished` **falla** — el test detecta el defecto real, no pasa por construcción |
+| `cargo test --verbose` | ver PR |
+
+**Documentación de referencia.**
+- [`docs/developer_guide/12_dag_engine_guide.md`](developer_guide/12_dag_engine_guide.md) — "Techo de turnos del loop".
+- [`docs/node_configurations.json`](node_configurations.json) — `loop_controller.loop_status`, con `FINISHED_PHASE` y la coerción.
+- [`docs/agent_context/node_ports_reference.md`](agent_context/node_ports_reference.md) — puertos y salida del nodo.
+- [`docs/qa/nodes/loop_controller.md`](qa/nodes/loop_controller.md) — hallazgo A2, marcado como resuelto.
+
+**Origen.** Hallazgo de severidad Alta A2 del audit doc-vs-código por nodo (PR #226).
+
+**Estado.** done.

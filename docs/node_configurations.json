@@ -398,8 +398,8 @@
           "type": "string",
           "required": false,
           "default": "FINISHED",
-          "description": "The loop continuation status. Determines what the DAG engine does after this node executes. 'NEXT_TURN' tells the engine to re-execute the entire graph from the start with updated state (the output of this iteration becomes the input of the next). 'FINISHED' tells the engine the loop is complete and execution should stop. 'SUSPENDED' pauses execution and waits for user input. Can be overridden by the 'loop_status' input port or forced to SUSPENDED by the 'suspend_flag'.",
-          "valid_values": ["NEXT_TURN", "FINISHED", "SUSPENDED"],
+          "description": "The loop continuation status. Determines what the DAG engine does after this node executes. 'NEXT_TURN' tells the engine to re-execute the entire graph from the start with updated state (the output of this iteration becomes the input of the next). 'FINISHED' tells the engine the loop is complete and execution should stop. 'SUSPENDED' pauses execution and waits for user input. 'FINISHED_PHASE' is emitted by the orchestrator to mean a phase completed while the loop continues. Can be overridden by the 'loop_status' input port or forced to SUSPENDED by the 'suspend_flag'. An unrecognized value (a typo such as 'FINISHEDD', or a custom label) is NOT passed through: nothing downstream matches it, so the node coerces it to 'FINISHED' and logs a warning. Stopping early is a visible, debuggable failure; before this guard a typo left a serve-mode loop taking turns until the turn ceiling stopped it.",
+          "valid_values": ["NEXT_TURN", "FINISHED", "SUSPENDED", "FINISHED_PHASE"],
           "example": "NEXT_TURN"
         },
         "suspend_flag": {
@@ -427,7 +427,7 @@
       "input_ports": {
         "loop_status": {
           "type": "string",
-          "description": "Dynamic loop status provided by an upstream node. Overrides the config value. Typically set by a Python script or logic node that evaluates whether the loop should continue."
+          "description": "Dynamic loop status provided by an upstream node. Overrides the config value. Typically set by a Python script or logic node that evaluates whether the loop should continue. Subject to the same validation as the config field: an unrecognized value is coerced to 'FINISHED' with a warning."
         },
         "suspend_flag": {
           "type": "boolean",
