@@ -476,9 +476,19 @@ fn stream_dag<'py>(
     })
 }
 
-/// Validates that a graph dict deserialises into the engine's `Graph`. Used
-/// by smoke tests; mirrors the strictness of `cargo run -- run <file>` graph
-/// loading without requiring network or a live LLM.
+/// Checks that a graph dict deserialises into the engine's `Graph`.
+///
+/// This is a *shape* check only. It catches a missing `nodes`/`edges`, a field
+/// of the wrong JSON type, or a malformed edge — nothing more.
+///
+/// It is **weaker than loading the graph with `dag_engine run`**, which also
+/// calls [`Graph::validate`] and so rejects a node id containing `/`, a
+/// malformed `node_schema`, an invalid `memory_mode` and a misconfigured `mcp`
+/// block. None of those are caught here.
+///
+/// It says nothing at all about the contents of a node's `config`: that is an
+/// untyped `Value`, so an invented field passes silently. Use
+/// `dag_engine lint` for that.
 #[pyfunction]
 fn validate_graph(graph: pyo3::Bound<'_, pyo3::PyAny>) -> PyResult<()> {
     let v: serde_json::Value =
