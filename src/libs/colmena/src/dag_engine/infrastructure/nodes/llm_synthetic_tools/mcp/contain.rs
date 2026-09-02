@@ -30,7 +30,7 @@ pub fn nonce_for(tool_call_id: &str) -> String {
 
 /// Everything third-party, contained, in one place.
 ///
-/// The three wrap sites in [`McpDispatcher::call`] all go through here so that
+/// Every wrap site in [`super::dispatch::McpDispatcher::call`] goes through here so that
 /// removing a guard cannot silently leave one of them unprotected. Testing
 /// `for_display` and `cap_result` on their own does NOT prove `call` uses them —
 /// a mutation dropping either from the call path survived a suite that tested

@@ -6,10 +6,12 @@
 
 pub mod bind;
 pub mod contain;
+pub mod dispatch;
 pub mod expose;
 pub mod wire;
 
 pub use bind::{bind, McpBinding};
 pub use contain::{contain, nonce_for};
+pub use dispatch::McpDispatcher;
 pub use expose::{collect_mcp_tool_configs, drop_colliding, exposed_definitions};
 pub use wire::{fold_catalog, unavailable_notice, wire, Folded, McpRoute, McpWiring};
