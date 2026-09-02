@@ -2370,3 +2370,31 @@ ninguno de los dos campos alimenta la clave del pool. Cada mutación mata exacta
 **Alcance.** Aditivo sobre un módulo que todavía no tiene llamador → ADP no afectado.
 
 **Estado.** done.
+
+## 38. Un pool de MCP por proceso
+
+**Qué cambió.** `global_mcp_registry()` — el pool que las slices §33-§34 construyeron pero que nadie
+instanciaba.
+
+**Por qué del proceso y no del nodo.** Colmena se embebe como librería en el worker de ADP y nunca
+llama a `main()`, así que no hay hook de arranque donde construirlo; un `OnceLock` deja que el primer
+`llm_call` que necesite MCP lo cree y que el resto de los turnos lo reuse. Un pool por nodo habría
+anulado el diseño entero: el techo LRU (§33) y el TTL del catálogo (§34) existen para que un agente
+deje de re-handshakear en cada turno, y uno que muere con el nodo re-handshakea en todos. Un test fija
+la identidad — dos llamadas devuelven el mismo `Arc` — porque si eso se rompe el pool sigue
+compilando y deja de servir en silencio.
+
+**Tamaño por entorno, con fallback.** `COLMENA_MAX_POOLED_MCP_SERVERS` cuando parsea como entero
+positivo. Ausente, vacío, cero, negativo, no numérico o demasiado grande para `usize` caen todos a
+`DEFAULT_MAX_POOLED_SERVERS` (128) en vez de fallar: un pool dimensionado por una variable mal tipeada
+es peor resultado que uno dimensionado por el default, y una variable mal puesta no puede ser lo que
+tumbe MCP. El cero cae también a propósito — un pool que no puede sostener nada no es un pool más
+chico, es uno roto.
+
+**El parseo vive fuera del closure.** `pool_size_from` es una función pura precisamente para poder
+testearla: el closure del `OnceLock` corre una sola vez por proceso y el binario de tests comparte ese
+proceso, así que dentro de él cada rama del fallback sería inalcanzable desde un test.
+
+**Alcance.** Aditivo, sin llamadores todavía. ADP no afectado.
+
+**Estado.** done.
