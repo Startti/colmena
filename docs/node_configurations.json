@@ -54,6 +54,18 @@
     }
   },
 
+  "common_config_fields": {
+    "description": "Configuration keys the ENGINE reads from any node's `config`, whatever its type. They are not owned by a node implementation and therefore do not appear in any `node_types.<type>.config_fields`, but they are valid on every node.",
+    "fields": {
+      "include_extra_info": {
+        "type": "boolean",
+        "required": false,
+        "default": false,
+        "description": "Keeps this node's `extra_info` block in the final aggregated graph output. Without it the engine strips `extra_info` from every node unless the whole run was started with the global include-extra-info flag. Read by DagRunUseCase when assembling the final output, not by the node itself — so it works on any node type.",
+        "example": true
+      }
+    }
+  },
   "edge_schema": {
     "from": {
       "type": "string",
@@ -159,6 +171,12 @@
       "description": "Provides static configuration data as output to downstream nodes. Acts as a data source that emits hardcoded values defined in its config. Supports '{{key}}' template syntax to resolve values from the DAG's global state, and allows upstream edge inputs to override individual fields. When config is empty, it acts as a pure passthrough — forwarding all injected inputs directly to its output. This is the primary way to inject initial data, configuration constants, or user parameters into a DAG flow.",
       "category": "control_flow",
       "config_fields": {
+        "<any_key>": {
+          "type": "any",
+          "required": false,
+          "default": null,
+          "description": "Placeholder, not a literal field name. This node emits its configuration as the payload for downstream nodes, so any key the author chooses is valid data — there is no closed set of settings to check against. Values support '{{key}}' template resolution against graph state."
+        },
         "data": {
           "type": "any",
           "required": false,
@@ -1474,6 +1492,13 @@
           "supports_env_vars": true,
           "example": "${OPENAI_API_KEY}"
         },
+        "max_tool_result_bytes": {
+          "type": "integer",
+          "required": false,
+          "default": null,
+          "description": "Per-node override of the cap applied to a tool result before it enters the conversation. Raise it when a tool legitimately returns a large payload. An incoming 'max_tool_result_bytes' input takes precedence over this value.",
+          "example": 200000
+        },
         "model": {
           "type": "string",
           "required": false,
@@ -1777,7 +1802,6 @@
               "description": "Object key prefix in GCS. Ignored when storage_backend='localfs' or when ws_url is set."
             }
           },
-          "required": ["artifact_id"],
           "examples": {
             "ws_peer_production": {
               "artifact_id": "art_abc123def456ghi789jkl012mn",
@@ -2323,6 +2347,13 @@
           "validation": { "min": 1 },
           "example": 5
         },
+        "plan": {
+          "type": "array",
+          "required": false,
+          "default": null,
+          "description": "Backward-compatibility escape hatch: a pre-built task list used to seed the run when there is no internal planner and no tasks exist yet for the session. Consulted after state and inputs, in that order. Prefer configuring a planner.",
+          "read_only": false
+        },
         "planner": {
           "type": "object",
           "required": true,
@@ -2372,6 +2403,14 @@
               }
             }
           }
+        },
+        "api_key": {
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "API key handed down to the internal planner when that planner does not carry its own. Not used by the orchestrator itself. Supports '${ENV_VAR}' and secure-value placeholders.",
+          "supports_env_vars": true,
+          "example": "${OPENAI_API_KEY}"
         },
         "critic": {
           "type": "object",
@@ -2721,6 +2760,466 @@
       "default_output": "output",
       "requires": [],
       "supports_env_vars": false
+    },
+    "tavily_client": {
+      "name": "Tavily Client",
+      "description": "Toolkit node wrapping the Tavily web API. Exposes two sub-tools to an llm_call — tavily_web_search and tavily_extract — selected by the reserved '__sub_tool' input. Requires an entry in tool_configurations to supply api_key; unlike api_explorer it cannot be activated by flag alone.",
+      "category": "web",
+      "config_fields": {
+        "api_key": {
+          "type": "string",
+          "required": true,
+          "default": null,
+          "description": "Tavily API key. Prefer the '${TAVILY_API_KEY}' env-var form or a secure value; passing a literal 'tvly-...' string logs a warning. Read at node init and resolved before the first call.",
+          "supports_env_vars": true,
+          "example": "${TAVILY_API_KEY}"
+        },
+        "search_defaults": {
+          "type": "object",
+          "required": false,
+          "default": {},
+          "description": "Defaults merged into every search call. Recognised keys: max_results, search_depth, time_range, include_content, include_domains, exclude_domains. Per-call inputs override these.",
+          "example": {
+            "max_results": 5,
+            "search_depth": "advanced"
+          }
+        },
+        "sub_tool": {
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "Pins the sub-tool when the node runs as a plain graph node rather than through the toolkit dispatcher. As an LLM tool the reserved '__sub_tool' input takes precedence.",
+          "valid_values": [
+            "search",
+            "fetch"
+          ]
+        },
+        "timeout_seconds": {
+          "type": "integer",
+          "required": false,
+          "default": 30,
+          "description": "Per-request HTTP timeout, in seconds."
+        },
+        "enable_cache": {
+          "type": "boolean",
+          "required": false,
+          "default": true,
+          "description": "Whether identical queries are served from the in-process response cache."
+        },
+        "cache_ttl_seconds": {
+          "type": "integer",
+          "required": false,
+          "default": 3600,
+          "description": "How long a cached response stays valid. Ignored when enable_cache is false."
+        },
+        "max_calls_per_run": {
+          "type": "integer",
+          "required": false,
+          "default": 50,
+          "description": "Ceiling on Tavily calls within a single DAG run, to bound cost on a looping agent."
+        },
+        "fail_on_limit": {
+          "type": "boolean",
+          "required": false,
+          "default": false,
+          "description": "What happens when max_calls_per_run is reached: false returns an error payload the agent can read and recover from, true aborts the node."
+        },
+        "query": {
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "Search terms, for sub_tool 'search'. Backfilled from config when this node runs standalone; supplied as an input when it runs as an LLM tool.",
+          "example": "rust async runtimes"
+        },
+        "url": {
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "Page to extract, for sub_tool 'fetch'. Backfilled from config when this node runs standalone."
+        },
+        "extract_format": {
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "Output format for sub_tool 'fetch'."
+        },
+        "max_results": {
+          "type": "integer",
+          "required": false,
+          "default": null,
+          "description": "Per-call override of the same key in search_defaults."
+        },
+        "search_depth": {
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "Per-call override of the same key in search_defaults."
+        },
+        "time_range": {
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "Per-call override of the same key in search_defaults."
+        },
+        "include_content": {
+          "type": "boolean",
+          "required": false,
+          "default": null,
+          "description": "Per-call override of the same key in search_defaults."
+        },
+        "include_domains": {
+          "type": "array",
+          "required": false,
+          "default": null,
+          "description": "Per-call override of the same key in search_defaults."
+        },
+        "exclude_domains": {
+          "type": "array",
+          "required": false,
+          "default": null,
+          "description": "Per-call override of the same key in search_defaults."
+        },
+        "retry_policy": {
+          "type": "object",
+          "required": false,
+          "default": null,
+          "description": "Retry behaviour for transient failures.",
+          "properties": {
+            "max_attempts": {
+              "type": "integer",
+              "required": false,
+              "description": "Total attempts, including the first."
+            },
+            "initial_backoff_ms": {
+              "type": "integer",
+              "required": false,
+              "description": "Delay before the first retry; grows on subsequent attempts."
+            }
+          }
+        }
+      },
+      "input_ports": {
+        "__sub_tool": {
+          "type": "string",
+          "description": "Reserved. Names the sub-tool to dispatch. Injected by the toolkit dispatcher, not authored by hand."
+        }
+      },
+      "output_ports": {
+        "output": {
+          "type": "any",
+          "description": "The sub-tool's result. Shape depends on the sub-tool: search returns { query, results[] }, extract returns { url, content }. An error is returned as { error: string } rather than aborting, unless fail_on_limit applies."
+        }
+      },
+      "default_input": null,
+      "default_output": null,
+      "requires": [
+        "api_key"
+      ],
+      "supports_env_vars": true
+    },
+    "api_explorer": {
+      "name": "API Explorer",
+      "description": "Toolkit node that lets an agent load an OpenAPI spec and explore it, exposing five sub-tools: load_spec, list_endpoints, search_endpoint, get_endpoint_details and build_http_request. Activated by flag alone — 'enabled_tools': ['api_explorer'] is sufficient, no tool_configurations entry is needed.",
+      "category": "web",
+      "config_fields": {},
+      "input_ports": {
+        "__sub_tool": {
+          "type": "string",
+          "description": "Reserved. Names the sub-tool to dispatch. Injected by the toolkit dispatcher, not authored by hand."
+        }
+      },
+      "output_ports": {
+        "output": {
+          "type": "any",
+          "description": "The sub-tool's result. Shape depends on the sub-tool. An error is returned as { error: string }."
+        }
+      },
+      "default_input": null,
+      "default_output": null,
+      "requires": [],
+      "supports_env_vars": false,
+      "config_note": "This node takes no graph-level configuration: it is built once at registry time from process-level defaults, and its execute() ignores the node's config object entirely. Cache, session-TTL and retry behaviour are internal defaults, not author-settable fields. Any key placed in this node's config is inert."
+    },
+    "image_generation": {
+      "name": "Image Generation",
+      "description": "Generates images from a text prompt via OpenAI or Google (Vertex AI). Output images are persisted through the configured artifact storage adapter and referenced downstream by document_id. Registered only when the engine has a storage adapter.",
+      "category": "media",
+      "config_fields": {
+        "provider": {
+          "type": "string",
+          "required": true,
+          "default": null,
+          "description": "Which image provider to call. Matched exactly — 'OpenAI' fails at run time with 'unknown provider'.",
+          "valid_values": [
+            "openai",
+            "google"
+          ],
+          "example": "openai"
+        },
+        "model": {
+          "type": "string",
+          "required": true,
+          "default": null,
+          "description": "Provider-specific model id, e.g. 'gpt-image-1' or 'dall-e-3' for openai, 'imagen-4.0-generate-001' for google.",
+          "example": "gpt-image-1"
+        },
+        "api_key": {
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "OpenAI API key. Not used by the google provider, which authenticates through Application Default Credentials. Supports '${ENV_VAR}' and secure-value placeholders.",
+          "supports_env_vars": true,
+          "example": "${OPENAI_API_KEY}"
+        },
+        "prompt": {
+          "type": "string",
+          "required": true,
+          "default": null,
+          "description": "What to generate. May arrive from an incoming edge instead of config — 'prompt' is this node's default input port."
+        },
+        "size": {
+          "type": "string",
+          "required": false,
+          "default": "1024x1024",
+          "description": "Requested image dimensions, as 'WIDTHxHEIGHT'. Accepted values depend on the model."
+        },
+        "quality": {
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "Render quality, forwarded verbatim to the provider — the node does not validate it, so the accepted vocabulary is the model's. 'gpt-image-1' takes low/medium/high/auto, while 'dall-e-3' takes standard/hd. OpenAI only; ignored by the google provider."
+        },
+        "n": {
+          "type": "integer",
+          "required": false,
+          "default": 1,
+          "description": "How many images to generate.",
+          "validation": {
+            "min": 1,
+            "max": 10
+          }
+        },
+        "google_project_id": {
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "GCP project for Vertex AI. Required when provider is 'google', but best omitted from graph JSON: it falls back to the GOOGLE_CLOUD_PROJECT env var.",
+          "supports_env_vars": true
+        },
+        "google_location": {
+          "type": "string",
+          "required": false,
+          "default": "us-central1",
+          "description": "Vertex AI region. Falls back to the GOOGLE_CLOUD_LOCATION env var; best omitted from graph JSON.",
+          "supports_env_vars": true
+        }
+      },
+      "input_ports": {
+        "prompt": {
+          "type": "string",
+          "description": "The generation prompt. Takes precedence over config.prompt."
+        }
+      },
+      "output_ports": {
+        "output": {
+          "type": "object",
+          "description": "{ images: [{ document_id, ... }], provider, model }. Images are referenced by document_id; there is no url or attachment_id field."
+        }
+      },
+      "default_input": "prompt",
+      "default_output": "output",
+      "requires": [
+        "provider",
+        "model",
+        "prompt"
+      ],
+      "supports_env_vars": true
+    },
+    "image_edit": {
+      "name": "Image Edit",
+      "description": "Edits an existing image from a text instruction, optionally restricted to a masked region. OpenAI only today. Registered only when the engine has a storage adapter.",
+      "category": "media",
+      "config_fields": {
+        "provider": {
+          "type": "string",
+          "required": true,
+          "default": null,
+          "description": "Which provider to call. Only 'openai' is supported today.",
+          "valid_values": [
+            "openai"
+          ],
+          "example": "openai"
+        },
+        "model": {
+          "type": "string",
+          "required": false,
+          "default": "gpt-image-1",
+          "description": "Provider-specific model id."
+        },
+        "api_key": {
+          "type": "string",
+          "required": true,
+          "default": null,
+          "description": "OpenAI API key. Supports '${ENV_VAR}' and secure-value placeholders.",
+          "supports_env_vars": true,
+          "example": "${OPENAI_API_KEY}"
+        },
+        "source_url": {
+          "type": "string",
+          "required": true,
+          "default": null,
+          "description": "The image to edit, as a data: URI or an http(s) URL. May arrive from an incoming edge instead of config — 'source_url' is this node's default input port.",
+          "example": "https://example.com/photo.png"
+        },
+        "mask_url": {
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "PNG whose transparent pixels mark the region to edit. Omit to let the model edit the whole image."
+        },
+        "prompt": {
+          "type": "string",
+          "required": true,
+          "default": null,
+          "description": "Describes the desired edit."
+        },
+        "size": {
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "Requested output dimensions, as 'WIDTHxHEIGHT'."
+        },
+        "quality": {
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "Render quality, forwarded verbatim to the provider — the node does not validate it, so the accepted vocabulary is the model's ('gpt-image-1': low/medium/high/auto; 'dall-e-3': standard/hd)."
+        },
+        "n": {
+          "type": "integer",
+          "required": false,
+          "default": 1,
+          "description": "How many variants to produce.",
+          "validation": {
+            "min": 1,
+            "max": 10
+          }
+        }
+      },
+      "input_ports": {
+        "source_url": {
+          "type": "string",
+          "description": "The image to edit. Takes precedence over config.source_url."
+        }
+      },
+      "output_ports": {
+        "output": {
+          "type": "object",
+          "description": "{ images: [{ document_id, ... }], provider, model }. Images are referenced by document_id."
+        }
+      },
+      "default_input": "source_url",
+      "default_output": "output",
+      "requires": [
+        "provider",
+        "api_key",
+        "source_url",
+        "prompt"
+      ],
+      "supports_env_vars": true
+    },
+    "tts": {
+      "name": "Text to Speech",
+      "description": "Synthesises speech from text via OpenAI, ElevenLabs or Google. Audio is persisted through the configured artifact storage adapter and referenced downstream by document_id. Gemini returns L16 PCM, which the node wraps into a playable WAV. Registered only when the engine has a storage adapter.",
+      "category": "media",
+      "config_fields": {
+        "provider": {
+          "type": "string",
+          "required": true,
+          "default": null,
+          "description": "Which speech provider to call. Matched exactly — 'OpenAI' fails at run time with 'unknown tts provider'. Note the asymmetry with 'format' on this same node, which IS case-insensitive.",
+          "valid_values": [
+            "openai",
+            "elevenlabs",
+            "google"
+          ],
+          "example": "openai"
+        },
+        "model": {
+          "type": "string",
+          "required": true,
+          "default": null,
+          "description": "Provider-specific model id.",
+          "example": "gpt-4o-mini-tts"
+        },
+        "api_key": {
+          "type": "string",
+          "required": true,
+          "default": null,
+          "description": "Provider API key. Supports '${ENV_VAR}' and secure-value placeholders.",
+          "supports_env_vars": true,
+          "example": "${OPENAI_API_KEY}"
+        },
+        "text": {
+          "type": "string",
+          "required": true,
+          "default": null,
+          "description": "What to say. May arrive from an incoming edge instead of config — 'text' is this node's default input port."
+        },
+        "voice": {
+          "type": "string",
+          "required": true,
+          "default": null,
+          "description": "Voice id. Provider-specific; there is no shared vocabulary across providers.",
+          "example": "alloy"
+        },
+        "format": {
+          "type": "string",
+          "required": false,
+          "default": "mp3",
+          "description": "Audio container/encoding to request. Matched case-insensitively, and 'mpeg' and 'ogg' are accepted as aliases of 'mp3' and 'opus' (AudioFormat::from_str).",
+          "valid_values": [
+            "mp3",
+            "mpeg",
+            "wav",
+            "opus",
+            "ogg",
+            "pcm"
+          ]
+        },
+        "speed": {
+          "type": "number",
+          "required": false,
+          "default": null,
+          "description": "Playback rate. OpenAI accepts 0.25-4.0; ignored by elevenlabs.",
+          "validation": {
+            "min": 0.25,
+            "max": 4.0
+          }
+        }
+      },
+      "input_ports": {
+        "text": {
+          "type": "string",
+          "description": "The text to synthesise. Takes precedence over config.text."
+        }
+      },
+      "output_ports": {
+        "output": {
+          "type": "object",
+          "description": "{ audio: { document_id, ... }, provider, model }. Audio is referenced by document_id."
+        }
+      },
+      "default_input": "text",
+      "default_output": "output",
+      "requires": [
+        "provider",
+        "model",
+        "api_key",
+        "text",
+        "voice"
+      ],
+      "supports_env_vars": true
     }
   },
 
