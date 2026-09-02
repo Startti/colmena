@@ -41,6 +41,14 @@ pub struct McpConnectionRegistry {
     /// entry directly — they trigger the whole-map sweep and let it decide.
     /// A lock can therefore be collected without any eviction happening.
     creation_locks: DashMap<McpServerKey, Arc<Mutex<()>>>,
+    /// When each key's connect last failed.
+    ///
+    /// NOT a cached failure — the value is a timestamp, never an error, and it is
+    /// cleared as soon as one attempt succeeds. It exists because a connect costs
+    /// up to the server's full `timeout` and runs BEFORE the model is invoked, so
+    /// a server that is simply down would otherwise add that to every turn of a
+    /// conversation for the life of the process.
+    recent_failures: DashMap<McpServerKey, std::time::Instant>,
     /// Last `tools/list` result per server, with the moment it was fetched.
     tool_cache: DashMap<McpServerKey, CachedTools>,
     /// Single-flight for cache fills, separate from `creation_locks` so a
@@ -102,6 +110,7 @@ impl McpConnectionRegistry {
         Self {
             clients: DashMap::new(),
             creation_locks: DashMap::new(),
+            recent_failures: DashMap::new(),
             tool_cache: DashMap::new(),
             fetch_locks: DashMap::new(),
             lru: Mutex::new(LruCache::new(lru_cap)),
@@ -264,9 +273,22 @@ impl McpConnectionRegistry {
     /// A failed connect is NOT cached: a server that was down when the agent
     /// first reached for it must be reachable on the next turn, not poisoned
     /// for the life of the process.
+    ///
+    /// Re-ATTEMPTS are spaced all the same, because not caching a failure is not
+    /// the same as retrying it without limit. An attempt costs up to `timeout`
+    /// and happens before the model is invoked, so a dead server would otherwise
+    /// tax every turn by that much, forever. Within one `timeout` of a failure
+    /// the attempt is skipped and the caller degrades immediately.
+    ///
+    /// The spacing is the server's OWN `timeout` rather than a constant, because
+    /// that value already says what an attempt costs: waiting it out caps the
+    /// time spent re-dialling a dead server at roughly half, whether its timeout
+    /// is one second or thirty. A server that recovers is picked up on the first
+    /// attempt after that window.
     pub async fn client<F, Fut>(
         &self,
         key: &McpServerKey,
+        config: &McpServerConfig,
         connect: F,
     ) -> Result<Arc<dyn McpClientPort>, McpError>
     where
@@ -297,10 +319,33 @@ impl McpConnectionRegistry {
             return Ok(client);
         }
 
+        if let Some(failed_at) = self.recent_failures.get(key) {
+            let since = failed_at.elapsed();
+            drop(failed_at);
+            if since < config.timeout {
+                return Err(McpError::Transport {
+                    // The key is a salted hash carrying no alias and no URL, so
+                    // it would tell an operator nothing. The caller adds the
+                    // alias it already knows.
+                    server: "(recently failed)".to_string(),
+                    reason: format!(
+                        "not retried: the last attempt failed {}s ago and another \
+                         would cost up to {}s before the model runs. It will be \
+                         dialled again once that window passes.",
+                        since.as_secs(),
+                        config.timeout.as_secs()
+                    ),
+                });
+            }
+            self.recent_failures.remove(key);
+        }
+
         let connected = connect().await;
         let client = match connected {
             Ok(client) => client,
             Err(e) => {
+                self.recent_failures
+                    .insert(key.clone(), std::time::Instant::now());
                 // This key never made it into `clients`, so nothing will ever
                 // evict it and nothing will sweep on its behalf. Release our
                 // hold and collect it here, or a server that fails once for a
@@ -383,7 +428,7 @@ impl McpConnectionRegistry {
         // a server reached only through `tools` that is permanently
         // unreachable would strand one `fetch_locks` entry for good.
         let filled = async {
-            let client = self.client(key, connect).await?;
+            let client = self.client(key, config, connect).await?;
             Ok::<_, McpError>(Arc::new(client.list_tools().await?))
         }
         .await;
@@ -617,7 +662,7 @@ mod tests {
             let cfg = config(&format!("https://{host}.example.com/mcp"));
             let key = McpServerKey::from_resolved(&cfg, &CredentialFingerprint::none());
             registry
-                .client(&key, || connector.connect(host, &cfg))
+                .client(&key, &cfg, || connector.connect(host, &cfg))
                 .await
                 .unwrap();
         }
@@ -643,20 +688,20 @@ mod tests {
         let (c_key, c_cfg) = mk("c");
 
         registry
-            .client(&a_key, || connector.connect("a", &a_cfg))
+            .client(&a_key, &a_cfg, || connector.connect("a", &a_cfg))
             .await
             .unwrap();
         registry
-            .client(&b_key, || connector.connect("b", &b_cfg))
+            .client(&b_key, &b_cfg, || connector.connect("b", &b_cfg))
             .await
             .unwrap();
         // Re-touch A so B becomes the oldest.
         registry
-            .client(&a_key, || connector.connect("a", &a_cfg))
+            .client(&a_key, &a_cfg, || connector.connect("a", &a_cfg))
             .await
             .unwrap();
         registry
-            .client(&c_key, || connector.connect("c", &c_cfg))
+            .client(&c_key, &c_cfg, || connector.connect("c", &c_cfg))
             .await
             .unwrap();
 
@@ -664,7 +709,7 @@ mod tests {
         // A must still be pooled: reusing it performs NO new handshake.
         let before = connector.count();
         registry
-            .client(&a_key, || connector.connect("a", &a_cfg))
+            .client(&a_key, &a_cfg, || connector.connect("a", &a_cfg))
             .await
             .unwrap();
         assert_eq!(
@@ -674,7 +719,7 @@ mod tests {
         );
         // B must be gone: reusing it DOES handshake again.
         registry
-            .client(&b_key, || connector.connect("b", &b_cfg))
+            .client(&b_key, &b_cfg, || connector.connect("b", &b_cfg))
             .await
             .unwrap();
         assert_eq!(
@@ -734,11 +779,11 @@ mod tests {
         let cfg = config("https://a.example.com/mcp");
         let key = McpServerKey::from_resolved(&cfg, &CredentialFingerprint::none());
         registry
-            .client(&key, || connector.connect("a", &cfg))
+            .client(&key, &cfg, || connector.connect("a", &cfg))
             .await
             .unwrap();
         registry
-            .client(&key, || connector.connect("a", &cfg))
+            .client(&key, &cfg, || connector.connect("a", &cfg))
             .await
             .unwrap();
 
@@ -767,7 +812,7 @@ mod tests {
         let key = McpServerKey::from_resolved(&cfg, &CredentialFingerprint::none());
 
         assert!(registry
-            .client(&key, || connector.connect("down", &cfg))
+            .client(&key, &cfg, || connector.connect("down", &cfg))
             .await
             .is_err());
 
@@ -856,7 +901,7 @@ mod tests {
         let held = registry.lru.lock().await;
 
         let mut connecting =
-            Box::pin(registry.client(&key, || connector.connect("cancelled", &cfg)));
+            Box::pin(registry.client(&key, &cfg, || connector.connect("cancelled", &cfg)));
         let mut cx = Context::from_waker(std::task::Waker::noop());
         for _ in 0..8 {
             assert!(
@@ -909,7 +954,7 @@ mod tests {
         for host in ["a", "b", "c"] {
             let (key, cfg) = mk(host);
             registry
-                .client(&key, || connector.connect(host, &cfg))
+                .client(&key, &cfg, || connector.connect(host, &cfg))
                 .await
                 .unwrap();
         }
@@ -929,7 +974,7 @@ mod tests {
         // fresh handshake.
         let before = connector.calls.load(Ordering::SeqCst);
         registry
-            .client(&a, || connector.connect("a", &a_cfg))
+            .client(&a, &a_cfg, || connector.connect("a", &a_cfg))
             .await
             .unwrap();
         assert_eq!(
@@ -997,11 +1042,15 @@ mod tests {
         let other = McpServerKey::from_resolved(&other_cfg, &CredentialFingerprint::none());
 
         registry
-            .client(&victim, || connector.connect("victim", &victim_cfg))
+            .client(&victim, &victim_cfg, || {
+                connector.connect("victim", &victim_cfg)
+            })
             .await
             .unwrap();
         registry
-            .client(&other, || connector.connect("other", &other_cfg))
+            .client(&other, &other_cfg, || {
+                connector.connect("other", &other_cfg)
+            })
             .await
             .unwrap();
 
@@ -1016,7 +1065,9 @@ mod tests {
         let third_cfg = config("https://third.example.com/mcp");
         let third = McpServerKey::from_resolved(&third_cfg, &CredentialFingerprint::none());
         registry
-            .client(&third, || connector.connect("third", &third_cfg))
+            .client(&third, &third_cfg, || {
+                connector.connect("third", &third_cfg)
+            })
             .await
             .unwrap();
 
@@ -1043,7 +1094,7 @@ mod tests {
         let a_cfg = config("https://a.example.com/mcp");
         let a = McpServerKey::from_resolved(&a_cfg, &CredentialFingerprint::none());
         registry
-            .client(&a, || connector.connect("a", &a_cfg))
+            .client(&a, &a_cfg, || connector.connect("a", &a_cfg))
             .await
             .unwrap();
         let waiter = registry
@@ -1055,7 +1106,7 @@ mod tests {
         let b_cfg = config("https://b.example.com/mcp");
         let b = McpServerKey::from_resolved(&b_cfg, &CredentialFingerprint::none());
         registry
-            .client(&b, || connector.connect("b", &b_cfg))
+            .client(&b, &b_cfg, || connector.connect("b", &b_cfg))
             .await
             .unwrap();
         assert!(registry.creation_locks.contains_key(&a), "still held");
@@ -1066,7 +1117,7 @@ mod tests {
         let c_cfg = config("https://c.example.com/mcp");
         let c = McpServerKey::from_resolved(&c_cfg, &CredentialFingerprint::none());
         registry
-            .client(&c, || connector.connect("c", &c_cfg))
+            .client(&c, &c_cfg, || connector.connect("c", &c_cfg))
             .await
             .unwrap();
 
@@ -1107,7 +1158,9 @@ mod tests {
         let third_cfg = config("https://third.example.com/mcp");
         let third = McpServerKey::from_resolved(&third_cfg, &CredentialFingerprint::none());
         registry
-            .client(&third, || connector.connect("third", &third_cfg))
+            .client(&third, &third_cfg, || {
+                connector.connect("third", &third_cfg)
+            })
             .await
             .unwrap();
 
@@ -1132,11 +1185,11 @@ mod tests {
         let key = McpServerKey::from_resolved(&cfg, &CredentialFingerprint::none());
 
         let a = registry
-            .client(&key, || connector.connect("docs", &cfg))
+            .client(&key, &cfg, || connector.connect("docs", &cfg))
             .await
             .unwrap();
         let b = registry
-            .client(&key, || connector.connect("docs", &cfg))
+            .client(&key, &cfg, || connector.connect("docs", &cfg))
             .await
             .unwrap();
 
@@ -1161,6 +1214,7 @@ mod tests {
         registry
             .client(
                 &McpServerKey::from_resolved(&a_cfg, &CredentialFingerprint::none()),
+                &a_cfg,
                 || connector.connect("a", &a_cfg),
             )
             .await
@@ -1168,6 +1222,7 @@ mod tests {
         registry
             .client(
                 &McpServerKey::from_resolved(&b_cfg, &CredentialFingerprint::none()),
+                &b_cfg,
                 || connector.connect("b", &b_cfg),
             )
             .await
@@ -1197,7 +1252,9 @@ mod tests {
                 connector.clone(),
             );
             tasks.push(tokio::spawn(async move {
-                r.client(&k, || conn.connect("docs", &c)).await.map(|_| ())
+                r.client(&k, &c, || conn.connect("docs", &c))
+                    .await
+                    .map(|_| ())
             }));
         }
         for t in tasks {
@@ -1212,31 +1269,82 @@ mod tests {
         assert_eq!(registry.len(), 1);
     }
 
-    /// A server that was down on the first reach must be reachable on the
-    /// next turn. Caching the failure would poison the key for the life of
-    /// the process, turning a transient outage into a permanent one.
+    /// A server that was down must be reachable again, not poisoned for the life
+    /// of the process. The window is what changed: the retry is SPACED by the
+    /// server's own `timeout`, so a dead server cannot charge that much to every
+    /// turn. A near-zero timeout here keeps the test fast while exercising the
+    /// real boundary.
     #[tokio::test]
-    async fn a_failed_connect_is_not_cached() {
+    async fn a_failed_connect_is_retried_once_its_window_passes() {
+        let connector = Arc::new(CountingConnector::failing_first(1));
+        let registry = McpConnectionRegistry::new();
+        let mut cfg = config("https://mcp.example.com/mcp");
+        cfg.timeout = Duration::from_millis(20);
+        let key = McpServerKey::from_resolved(&cfg, &CredentialFingerprint::none());
+
+        assert!(registry
+            .client(&key, &cfg, || connector.connect("docs", &cfg))
+            .await
+            .is_err());
+        assert!(registry.is_empty(), "a failure must not occupy the pool");
+
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        assert!(
+            registry
+                .client(&key, &cfg, || connector.connect("docs", &cfg))
+                .await
+                .is_ok(),
+            "past its window the server must be dialled again"
+        );
+        assert_eq!(connector.count(), 2, "the second attempt really happened");
+        // The mark must be GONE, not merely ignored. Behaviour is identical
+        // either way — the window is recomputed on the next call — so nothing
+        // else notices, and a mutation dropping the removal passed until this
+        // assertion existed. What it costs is memory: `recent_failures` is
+        // process-global, so every server that ever failed and recovered would
+        // leave an entry behind for the life of the process.
+        assert!(
+            registry.recent_failures.is_empty(),
+            "a recovered server left its failure mark behind"
+        );
+    }
+
+    /// The point of the window. An attempt costs up to `timeout` and runs before
+    /// the model is invoked, so re-dialling a dead server on every turn would tax
+    /// the whole conversation. Inside the window the caller is refused without
+    /// the connector ever being touched.
+    #[tokio::test]
+    async fn a_failed_connect_is_not_retried_inside_its_window() {
         let connector = Arc::new(CountingConnector::failing_first(1));
         let registry = McpConnectionRegistry::new();
         let cfg = config("https://mcp.example.com/mcp");
         let key = McpServerKey::from_resolved(&cfg, &CredentialFingerprint::none());
 
         assert!(registry
-            .client(&key, || connector.connect("docs", &cfg))
+            .client(&key, &cfg, || connector.connect("docs", &cfg))
             .await
             .is_err());
-        assert!(registry.is_empty(), "a failure must not occupy the pool");
 
-        assert!(
-            registry
-                .client(&key, || connector.connect("docs", &cfg))
-                .await
-                .is_ok(),
-            "the next attempt must retry, not replay the cached failure"
+        let second = registry
+            .client(&key, &cfg, || connector.connect("docs", &cfg))
+            .await;
+
+        assert!(second.is_err(), "the second attempt must still fail");
+        assert_eq!(
+            connector.count(),
+            1,
+            "the connector was dialled again inside the window, so a dead server \
+             would cost its full timeout on every turn"
         );
-        assert_eq!(connector.count(), 2);
     }
+
+    // There is deliberately no "a success clears the mark" test, and no such
+    // line in `client`: the window check above removes the mark before any
+    // connect is attempted, so by the time one succeeds there is nothing left to
+    // clear. A first draft had both, and the mutation that deleted the clearing
+    // line passed the suite — not because a test was missing but because the line
+    // was unreachable. The test that "covered" it was passing on the expiry
+    // removal instead.
 
     // --- tools/list TTL cache (R3.5) ---
 
@@ -1419,8 +1527,12 @@ mod tests {
         let cfg = config("https://mcp.example.com/mcp");
         let key = McpServerKey::from_resolved(&cfg, &CredentialFingerprint::none());
 
-        r1.client(&key, || c1.connect("docs", &cfg)).await.unwrap();
-        r2.client(&key, || c2.connect("docs", &cfg)).await.unwrap();
+        r1.client(&key, &cfg, || c1.connect("docs", &cfg))
+            .await
+            .unwrap();
+        r2.client(&key, &cfg, || c2.connect("docs", &cfg))
+            .await
+            .unwrap();
 
         assert_eq!(c1.count(), 1);
         assert_eq!(

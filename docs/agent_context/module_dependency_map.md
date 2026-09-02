@@ -5,7 +5,7 @@
 
 **How to use (for the exploration/spec phase):** before opening files to assess a change, look up the target file below. **Used by** is its blast radius — the files that break if you change its public surface. **Depends on** is what it needs. Start by reading only those, not the whole repo.
 
-- Files indexed: **378**
+- Files indexed: **379**
 - Modules with at least one importer: **170**
 
 ## Blast-radius ranking (change these with the most care)
