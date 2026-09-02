@@ -91,7 +91,7 @@ impl McpDispatcher {
 
         let client = match self
             .registry
-            .client(&binding.key, || binding.connect())
+            .client(&binding.key, binding.config(), || binding.connect())
             .await
         {
             Ok(c) => c,

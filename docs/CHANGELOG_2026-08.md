@@ -2624,3 +2624,39 @@ los falsos positivos que no queremos, porque en un guard que corta, el falso pos
 
 **Estado.** done.
 
+## 44. Un servidor MCP caído deja de cobrarle a cada turno
+
+**Qué cambió.** El pool espacia los reintentos de conexión: dentro de una ventana igual al `timeout`
+del propio servidor, un `client()` que ya falló se rechaza sin volver a marcar.
+
+**El problema, que aparece recién al cablear.** Un connect cuesta hasta `timeout_seconds` (default 30)
+y ocurre **antes** de que el modelo se invoque. El pool deliberadamente **no cachea** un fallo —para
+que un servidor caído hoy funcione mañana, decisión correcta y con su test— pero no cachear no es lo
+mismo que reintentar sin límite: un servidor simplemente muerto le agregaba esos 30 segundos a **cada
+turno de la conversación, para siempre**. Este repo ya tiene registrado un incidente de timeout de
+stream a los 60s en esta misma ruta.
+
+**Por qué la ventana es el `timeout` y no una constante.** Ese valor ya dice cuánto cuesta el intento.
+Esperarlo acota en la mitad el tiempo gastado re-marcando un servidor muerto, sea su timeout de un
+segundo o de treinta, y no agrega ninguna perilla nueva. Un servidor que se recupera se toma en el
+primer intento pasada la ventana.
+
+**Lo que NO cambia.** La marca es un `Instant`, nunca un error: no se replica un fallo viejo, solo se
+espacia el próximo intento. El test que fijaba "no queda envenenado de por vida" sigue existiendo, con
+la ventana explícita en vez de implícita.
+
+**Dos cosas que encontró la verificación por mutación y conviene distinguir**, porque son opuestas.
+Borrar "el éxito limpia la marca" **pasaba la suite** — y al razonarlo resultó que esa línea era
+**inalcanzable**: el chequeo de ventana ya borra la marca antes de cualquier `connect()`, así que
+cuando uno tiene éxito no queda nada que limpiar. No faltaba un test, sobraba código; ambos se
+eliminaron, y el comentario que quedó explica por qué no existe ese test. Borrar la limpieza **al
+expirar la ventana**, en cambio, también pasaba — pero ahí sí faltaba una aserción: el comportamiento
+es idéntico porque la ventana se recalcula, pero `recent_failures` es global del proceso y cada
+servidor que alguna vez falló y se recuperó dejaría su entrada para siempre. Es una fuga, y ahora hay
+un test que la fija.
+
+**Alcance.** `client()` recibe el `config` que `tools()` ya tenía; el único llamador externo es el
+dispatcher. Sin cambio de API pública. ADP no afectado.
+
+**Estado.** done.
+
