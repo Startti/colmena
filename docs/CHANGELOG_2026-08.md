@@ -2327,11 +2327,46 @@ excluyentes, sin fallback. El mock que vive en los tests de `secure_value_servic
 fallback de agente a sesión, y reusarlo habría dejado pasar un binding que producción rechaza. Es la
 misma trampa que `key.rs` documenta desde §30.
 
-**Sigue sin llamador.** El cableado `with_mcp` va en la slice siguiente, **junto con la contención**
-y no antes: exponer es el momento en que las descripciones de terceros entran al contexto del
-modelo, así que cablear sin los delimitadores con nonce pagaría ese riesgo sin obtener el dispatch.
-Las cuatro decisiones diferidas de §35 se vuelven alcanzables todas juntas en ese momento.
+**Sigue sin llamador.** El cableado `with_mcp` va en la slice siguiente, junto con el dispatch.
+La razón NO es que exponer descripciones quede sin contener: §35 ya las sanea con `for_model`
+(caracteres de control reemplazados, tope de bytes aplicado) antes de que el proveedor las vea, y
+`wrap_untrusted_content` con nonce protege los **resultados** de tools, que no existen hasta que hay
+dispatch. La razón es más simple: exponer una tool que el motor no sabe rutear deja un estado roto —
+el modelo la ve, la llama, y no hay a dónde ir. Las cuatro decisiones diferidas de §35 se vuelven
+alcanzables todas juntas en ese momento.
 
 **Alcance.** Módulo nuevo, aditivo, sin cambio de API pública → ADP no afectado.
 
 **Estado.** done (conector y binding; cableado y contención en la slice siguiente).
+
+## 37. Una referencia de credencial que no resuelve ya no viaja al servidor
+
+**Qué cambió.** `bind` ahora rechaza un header cuya referencia de secure value **no se resolvió**,
+en las dos ramas y no solo en una.
+
+**El agujero.** `SecureValueService::inject_secrets` deja el placeholder intacto y devuelve `Ok`
+cuando el vault no tiene fila para él. O sea: un `Ok` **no es prueba de resolución**. La rama sin
+servicio ya rechazaba; la rama con servicio presente confiaba en ese `Ok`, así que el texto literal
+`<sv_token>` habría viajado a un servidor de terceros como header de autorización — no el secreto,
+pero sí una credencial silenciosamente equivocada, pooleada bajo el fingerprint del propio
+placeholder. El encabezado del módulo afirmaba que un `McpBinding` "ha resuelto esas referencias";
+ahora eso es cierto en todos los caminos de éxito, que antes no lo era.
+
+**Por qué acá y no en los otros siete call sites.** El passthrough de `inject_secrets` es compartido
+y preexistente (tts, image_generation, image_edit, tavily, executor, run_use_case). En esos casos el
+placeholder cae en un payload; acá se convierte en un header de autenticación hacia afuera. El
+chequeo es local a `bind` a propósito: no cambia el contrato compartido.
+
+**Tres tests que faltaban, los tres verificados por mutación.** Borrar el chequeo nuevo tumba
+`a_reference_the_vault_cannot_resolve_fails_instead_of_being_sent`; borrar el rechazo sin-servicio
+tumba `a_reference_without_a_secure_value_service_fails_loudly` (comportamiento documentado en §36
+que hasta ahora nada sostenía); e intercambiar `timeout` con `cache_ttl` tumba
+`the_timeout_and_the_cache_ttl_are_not_swapped` — el swap era invisible para toda la suite porque
+ninguno de los dos campos alimenta la clave del pool. Cada mutación mata exactamente un test.
+
+**Los errores siguen nombrando el header, nunca el valor**, y un test lo fija: el mensaje contiene
+`Authorization` y no contiene la referencia.
+
+**Alcance.** Aditivo sobre un módulo que todavía no tiene llamador → ADP no afectado.
+
+**Estado.** done.

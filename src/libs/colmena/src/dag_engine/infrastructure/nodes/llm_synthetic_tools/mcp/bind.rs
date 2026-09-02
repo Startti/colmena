@@ -124,9 +124,30 @@ async fn resolve_headers(
             detail: format!("MCP server '{alias}' could not resolve its headers: {e}"),
         })?;
 
-    serde_json::from_value(carrier).map_err(|e| McpError::InvalidConfig {
-        detail: format!("MCP server '{alias}' resolved to headers that are not strings: {e}"),
-    })
+    let resolved: BTreeMap<String, String> =
+        serde_json::from_value(carrier).map_err(|e| McpError::InvalidConfig {
+            detail: format!("MCP server '{alias}' resolved to headers that are not strings: {e}"),
+        })?;
+
+    // `inject_secrets` leaves a placeholder untouched and returns `Ok` when the
+    // vault has no row for it, so a successful call is NOT proof of resolution.
+    // Unchecked, the literal `<sv_...>` text would travel to a third-party
+    // server as an authorization header: not the secret, but a credential that
+    // is silently wrong, pooled under a fingerprint of the placeholder itself.
+    // The sibling no-service branch above refuses for the same reason.
+    if let Some(name) = resolved
+        .iter()
+        .find_map(|(name, value)| is_secure_value_placeholder(value).then_some(name))
+    {
+        return Err(McpError::InvalidConfig {
+            detail: format!(
+                "MCP server '{alias}' header '{name}' references a secure value that \
+                 did not resolve for this session"
+            ),
+        });
+    }
+
+    Ok(resolved)
 }
 
 impl McpBinding {
@@ -324,5 +345,75 @@ mod tests {
             !printed.contains("super-secret-value"),
             "the resolved secret reached Debug output: {printed}"
         );
+    }
+
+    /// A vault that holds no row for the reference is the dangerous case:
+    /// `inject_secrets` returns `Ok` and leaves the placeholder text in place,
+    /// so a bind that trusted that `Ok` would send `<sv_token>` itself to a
+    /// third-party server as an authorization header.
+    #[tokio::test]
+    async fn a_reference_the_vault_cannot_resolve_fails_instead_of_being_sent() {
+        let svc = SecureValueService::new(Arc::new(Vault { rows: vec![] }));
+
+        let err = bind(
+            "srv",
+            &spec(json!({ "Authorization": "<sv_token>" })),
+            Some(&svc),
+            "session-1",
+            Some("agent-a"),
+        )
+        .await
+        .expect_err("an unresolved reference must not produce a binding");
+
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("Authorization"),
+            "the error must name the header so an operator can act: {msg}"
+        );
+        assert!(
+            !msg.contains("<sv_token>"),
+            "the error must not echo the reference value: {msg}"
+        );
+    }
+
+    /// The same refusal, one branch earlier: no service wired at all. Documented
+    /// behaviour that previously had no test, so nothing stopped the branch from
+    /// being deleted.
+    #[tokio::test]
+    async fn a_reference_without_a_secure_value_service_fails_loudly() {
+        let err = bind(
+            "srv",
+            &spec(json!({ "Authorization": "<sv_token>" })),
+            None,
+            "session-1",
+            Some("agent-a"),
+        )
+        .await
+        .expect_err("a reference with no service must not produce a binding");
+
+        assert!(
+            format!("{err:?}").contains("Authorization"),
+            "the error must name the header"
+        );
+    }
+
+    /// `timeout` and `cache_ttl` feed neither the key nor any other assertion,
+    /// so a swap between them was invisible to the whole suite. Their defaults
+    /// differ (30s vs 300s), which is exactly what makes the swap detectable.
+    #[tokio::test]
+    async fn the_timeout_and_the_cache_ttl_are_not_swapped() {
+        let s: McpServerSpec = serde_json::from_value(json!({
+            "url": "https://mcp.example.com/mcp",
+            "timeout_seconds": 7,
+            "cache_ttl_seconds": 900
+        }))
+        .expect("spec parses");
+
+        let b = bind("srv", &s, None, "session-1", None)
+            .await
+            .expect("binds");
+
+        assert_eq!(b.config.timeout, Duration::from_secs(7), "timeout");
+        assert_eq!(b.config.cache_ttl, Duration::from_secs(900), "cache_ttl");
     }
 }
