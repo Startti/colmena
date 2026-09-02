@@ -5,7 +5,7 @@
 
 **How to use (for the exploration/spec phase):** before opening files to assess a change, look up the target file below. **Used by** is its blast radius — the files that break if you change its public surface. **Depends on** is what it needs. Start by reading only those, not the whole repo.
 
-- Files indexed: **373**
+- Files indexed: **374**
 - Modules with at least one importer: **169**
 
 ## Blast-radius ranking (change these with the most care)
@@ -41,7 +41,7 @@
 | 8 | `dag_engine::domain::sql_permissions` | `src/libs/colmena/src/dag_engine/domain/sql_permissions.rs` |
 | 8 | `dag_engine::domain::sql_ports` | `src/libs/colmena/src/dag_engine/domain/sql_ports.rs` |
 | 8 | `gsheets::domain` | `src/libs/colmena/src/gsheets/domain/mod.rs` |
-| 7 | `dag_engine::domain::sql_errors` | `src/libs/colmena/src/dag_engine/domain/sql_errors.rs` |
+| 8 | `llm::domain::mcp` | `src/libs/colmena/src/llm/domain/mcp.rs` |
 
 ## Per-file dependencies
 
@@ -522,6 +522,11 @@
 - Module: `dag_engine::infrastructure::nodes::llm_synthetic_tools::mcp::bind`
 - **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
 - Depends on (7): `dag_engine::application::secure_value_service`, `dag_engine::domain::error`, `dag_engine::domain::secure_value_repository`, `dag_engine::domain::tool_configuration`, `dag_engine::infrastructure::mcp_registry`, `llm::domain::mcp`, `llm::infrastructure::mcp_client`
+
+#### `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/mcp/contain.rs`
+- Module: `dag_engine::infrastructure::nodes::llm_synthetic_tools::mcp::contain`
+- **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
+- Depends on (2): `llm::domain::mcp`, `llm::domain::text_bounds`
 
 #### `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/mcp/expose.rs`
 - Module: `dag_engine::infrastructure::nodes::llm_synthetic_tools::mcp::expose`
@@ -1427,7 +1432,7 @@
 
 #### `src/libs/colmena/src/llm/domain/mcp.rs`
 - Module: `llm::domain::mcp`
-- **Used by (7)**: `src/libs/colmena/src/dag_engine/domain/tool_configuration.rs`, `src/libs/colmena/src/dag_engine/infrastructure/mcp_registry/key.rs`, `src/libs/colmena/src/dag_engine/infrastructure/mcp_registry/registry.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/mcp/bind.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/mcp/expose.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/mcp/wire.rs`, `src/libs/colmena/src/llm/infrastructure/mcp_client/rmcp_http_client.rs`
+- **Used by (8)**: `src/libs/colmena/src/dag_engine/domain/tool_configuration.rs`, `src/libs/colmena/src/dag_engine/infrastructure/mcp_registry/key.rs`, `src/libs/colmena/src/dag_engine/infrastructure/mcp_registry/registry.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/mcp/bind.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/mcp/contain.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/mcp/expose.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/mcp/wire.rs`, `src/libs/colmena/src/llm/infrastructure/mcp_client/rmcp_http_client.rs`
 - Depends on (0): — (no intra-crate imports)
 
 #### `src/libs/colmena/src/llm/domain/memory.rs`
@@ -1452,7 +1457,7 @@
 
 #### `src/libs/colmena/src/llm/domain/text_bounds.rs`
 - Module: `llm::domain::text_bounds`
-- **Used by (2)**: `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/mcp/expose.rs`, `src/libs/colmena/src/llm/infrastructure/mcp_client/rmcp_http_client.rs`
+- **Used by (3)**: `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/mcp/contain.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/mcp/expose.rs`, `src/libs/colmena/src/llm/infrastructure/mcp_client/rmcp_http_client.rs`
 - Depends on (0): — (no intra-crate imports)
 
 #### `src/libs/colmena/src/llm/domain/tool_executor.rs`
