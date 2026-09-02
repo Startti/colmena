@@ -263,6 +263,11 @@
 - **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
 - Depends on (0): — (no intra-crate imports)
 
+#### `src/libs/colmena/src/dag_engine/domain/lint/diagnostic.rs`
+- Module: `dag_engine::domain::lint::diagnostic`
+- **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
+- Depends on (0): — (no intra-crate imports)
+
 #### `src/libs/colmena/src/dag_engine/domain/lint/mod.rs`
 - Module: `dag_engine::domain::lint`
 - **Used by (1)**: `src/libs/colmena/src/dag_engine/infrastructure/registry.rs`
