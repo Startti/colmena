@@ -5,7 +5,7 @@
 
 **How to use (for the exploration/spec phase):** before opening files to assess a change, look up the target file below. **Used by** is its blast radius — the files that break if you change its public surface. **Depends on** is what it needs. Start by reading only those, not the whole repo.
 
-- Files indexed: **372**
+- Files indexed: **373**
 - Modules with at least one importer: **169**
 
 ## Blast-radius ranking (change these with the most care)
@@ -15,7 +15,7 @@
 | 80 | `llm::domain` | `src/libs/colmena/src/llm/domain/mod.rs` |
 | 37 | `dag_engine::domain::node` | `src/libs/colmena/src/dag_engine/domain/node.rs` |
 | 29 | `dag_engine::domain::observer` | `src/libs/colmena/src/dag_engine/domain/observer.rs` |
-| 24 | `llm::domain::tools` | `src/libs/colmena/src/llm/domain/tools.rs` |
+| 25 | `llm::domain::tools` | `src/libs/colmena/src/llm/domain/tools.rs` |
 | 23 | `documents::domain` | `src/libs/colmena/src/documents/domain/mod.rs` |
 | 21 | `gdocs::domain` | `src/libs/colmena/src/gdocs/domain/mod.rs` |
 | 20 | `documents::domain::ids` | `src/libs/colmena/src/documents/domain/ids.rs` |
@@ -532,6 +532,11 @@
 - Module: `dag_engine::infrastructure::nodes::llm_synthetic_tools::mcp`
 - **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
 - Depends on (0): — (no intra-crate imports)
+
+#### `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/mcp/wire.rs`
+- Module: `dag_engine::infrastructure::nodes::llm_synthetic_tools::mcp::wire`
+- **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
+- Depends on (2): `llm::domain::mcp`, `llm::domain::tools`
 
 #### `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/mod.rs`
 - Module: `dag_engine::infrastructure::nodes::llm_synthetic_tools`
@@ -1422,7 +1427,7 @@
 
 #### `src/libs/colmena/src/llm/domain/mcp.rs`
 - Module: `llm::domain::mcp`
-- **Used by (6)**: `src/libs/colmena/src/dag_engine/domain/tool_configuration.rs`, `src/libs/colmena/src/dag_engine/infrastructure/mcp_registry/key.rs`, `src/libs/colmena/src/dag_engine/infrastructure/mcp_registry/registry.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/mcp/bind.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/mcp/expose.rs`, `src/libs/colmena/src/llm/infrastructure/mcp_client/rmcp_http_client.rs`
+- **Used by (7)**: `src/libs/colmena/src/dag_engine/domain/tool_configuration.rs`, `src/libs/colmena/src/dag_engine/infrastructure/mcp_registry/key.rs`, `src/libs/colmena/src/dag_engine/infrastructure/mcp_registry/registry.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/mcp/bind.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/mcp/expose.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/mcp/wire.rs`, `src/libs/colmena/src/llm/infrastructure/mcp_client/rmcp_http_client.rs`
 - Depends on (0): — (no intra-crate imports)
 
 #### `src/libs/colmena/src/llm/domain/memory.rs`
@@ -1457,7 +1462,7 @@
 
 #### `src/libs/colmena/src/llm/domain/tools.rs`
 - Module: `llm::domain::tools`
-- **Used by (24)**: `src/libs/colmena/src/dag_engine/domain/toolkit_node.rs`, `src/libs/colmena/src/dag_engine/infrastructure/dag_tool_executor.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/echo_toolkit.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/crdt_doc_import_sheet.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/crdt_doc_run_python.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/crdt_doc_tools.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/data_run_python.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/describe_tool.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/document_tools.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/gdocs_tools.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/gsheets_run_python.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/gsheets_tools.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/lazy_tools_catalog.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/list_threads.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/load_attachment_tool.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/load_skill_tool.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/mcp/expose.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/mod.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/recall_history.rs`, `src/libs/colmena/src/llm/application/history_compaction.rs`, `src/libs/colmena/src/llm/domain/llm_request.rs`, `src/libs/colmena/src/llm/infrastructure/anthropic_adapter.rs`, `src/libs/colmena/src/llm/infrastructure/scripted_adapter.rs`
+- **Used by (25)**: `src/libs/colmena/src/dag_engine/domain/toolkit_node.rs`, `src/libs/colmena/src/dag_engine/infrastructure/dag_tool_executor.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/echo_toolkit.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/crdt_doc_import_sheet.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/crdt_doc_run_python.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/crdt_doc_tools.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/data_run_python.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/describe_tool.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/document_tools.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/gdocs_tools.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/gsheets_run_python.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/gsheets_tools.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/lazy_tools_catalog.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/list_threads.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/load_attachment_tool.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/load_skill_tool.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/mcp/expose.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/mcp/wire.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/mod.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/recall_history.rs`, `src/libs/colmena/src/llm/application/history_compaction.rs`, `src/libs/colmena/src/llm/domain/llm_request.rs`, `src/libs/colmena/src/llm/infrastructure/anthropic_adapter.rs`, `src/libs/colmena/src/llm/infrastructure/scripted_adapter.rs`
 - Depends on (0): — (no intra-crate imports)
 
 #### `src/libs/colmena/src/llm/domain/tts.rs`
