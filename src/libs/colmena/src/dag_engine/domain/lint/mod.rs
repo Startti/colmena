@@ -6,10 +6,15 @@
 //! question the author actually has: which of these fields are real, and which
 //! did I make up?
 //!
-//! This slice contributes the catalog: the typed view of
-//! `docs/node_configurations.json` that says which fields each node type
-//! accepts. The analysis built on top of it lands separately.
+//! Analysis is advisory. It never gates execution.
+//!
+//! So far this module contributes the catalog — the typed view of
+//! `docs/node_configurations.json` saying which fields each node type accepts —
+//! and the vocabulary a finding is reported in. The analysis itself lands
+//! separately.
 
 pub mod catalog;
+pub mod diagnostic;
 
 pub use catalog::{FieldSpec, NodeCatalog, NodeCatalogEntry, Requiredness};
+pub use diagnostic::{Diagnostic, DiagnosticCode, LintReport, Severity};

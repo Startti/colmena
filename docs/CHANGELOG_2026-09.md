@@ -210,3 +210,30 @@ generar un artefacto dentro del crate.
 
 **Estado.** done.
 
+---
+
+## 5. Vocabulario de diagnósticos para el linter de grafos
+
+**Qué cambió.** Nuevo módulo `dag_engine::domain::lint::diagnostic` con los tipos
+en los que se reporta un hallazgo: `Severity`, `DiagnosticCode`, `Diagnostic` y
+`LintReport`.
+
+Dos decisiones que quedan fijadas acá, antes de que exista el análisis que las
+usa:
+
+- **Los códigos son estables** (`UNKNOWN_FIELD`, `MISSING_REQUIRED_FIELD`, …) y
+  se exponen como `&'static str`. Quien consuma los hallazgos —la salida JSON de
+  la CLI, o una UI sobre los bindings— debe ramificar sobre el código, nunca
+  sobre el texto del mensaje, que es libre de cambiar.
+- **`Info` no bloquea.** `has_blocking_findings()` cuenta errores y warnings pero
+  ignora `Info`, porque la única severidad `Info` prevista dice "no pude revisar
+  este nodo": es una afirmación sobre la cobertura de la herramienta, no sobre el
+  grafo. Fallar por eso castigaría al autor por un hueco nuestro.
+
+`LintReport::sort()` ordena por severidad, nodo, campo y código, para que dos
+corridas sobre el mismo grafo se lean igual.
+
+**Sin cambio de comportamiento.** Tipos nuevos, sin consumidores todavía.
+
+**Estado.** done.
+
