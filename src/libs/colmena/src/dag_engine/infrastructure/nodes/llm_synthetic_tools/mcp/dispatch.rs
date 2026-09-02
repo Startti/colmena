@@ -132,6 +132,21 @@ async fn call_and_contain(
     nonce: &str,
     arguments: Value,
 ) -> String {
+    if let Some(path) = resolved_secret_in(&arguments) {
+        // Refused before the network, so the value never leaves the process.
+        return contain(
+            alias,
+            tool,
+            nonce,
+            &format!(
+                "refused: the argument at {path} carries a secure-value handle. \
+                 Secrets resolved by the engine are never forwarded to an MCP \
+                 server. Send the value the tool actually needs, or drop the field."
+            ),
+            true,
+        );
+    }
+
     match client.call_tool(tool, arguments).await {
         // `is_error` is the server saying the CALL failed, not the transport. It
         // is still server-authored text, so it is contained exactly like a
@@ -140,6 +155,56 @@ async fn call_and_contain(
         Ok(result) => contain(alias, tool, nonce, &result.content, result.is_error),
         Err(e) => contain(alias, tool, nonce, &format!("the call failed: {e}"), true),
     }
+}
+
+/// The path of the first argument carrying a secure-value handle, if any.
+///
+/// The one outbound control there is. A hostile tool DESCRIPTION — third-party
+/// text the model reads and Colmena never reviews — can ask the model to include
+/// things in its arguments, and nothing else here inspects them. This does not
+/// solve that in general: if the model copies conversation text, no pattern
+/// distinguishes it from a legitimate argument. It closes the case that DOES
+/// have an unambiguous signature — a secret the engine itself resolved leaving
+/// for a third party.
+///
+/// Deliberately NOT `is_secure_value_placeholder`, which matches ANY `<...>`.
+/// That looseness is right for LOOKUP, where a miss simply finds nothing, and
+/// wrong for a guard that REFUSES: it would reject `<b>bold</b>` and every other
+/// argument that happens to be markup. Matched here are only the two shapes the
+/// service actually mints — `<value_N>` and `<sv_...>`.
+fn resolved_secret_in(arguments: &Value) -> Option<String> {
+    fn looks_minted(s: &str) -> bool {
+        let Some(inner) = s.strip_prefix('<').and_then(|s| s.strip_suffix('>')) else {
+            return false;
+        };
+        inner.starts_with("sv_")
+            || inner
+                .strip_prefix("value_")
+                .is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+    }
+
+    fn walk(v: &Value, path: &str) -> Option<String> {
+        match v {
+            Value::String(s) if looks_minted(s) => Some(path.to_string()),
+            Value::Object(map) => map.iter().find_map(|(k, v)| {
+                walk(
+                    v,
+                    &if path.is_empty() {
+                        k.clone()
+                    } else {
+                        format!("{path}.{k}")
+                    },
+                )
+            }),
+            Value::Array(items) => items
+                .iter()
+                .enumerate()
+                .find_map(|(i, v)| walk(v, &format!("{path}[{i}]"))),
+            _ => None,
+        }
+    }
+
+    walk(arguments, "")
 }
 
 #[cfg(test)]
@@ -381,6 +446,67 @@ mod tests {
             )),
             "the connect-failure path returned an unfenced string: {out}"
         );
+    }
+
+    /// A secret the engine resolved must not leave for a third party, and the
+    /// refusal must happen BEFORE the network — the server must never see it.
+    #[tokio::test]
+    async fn a_resolved_secret_never_reaches_the_server() {
+        let server = answering("ok", false);
+
+        let out = call_and_contain(
+            &server,
+            "srv",
+            "thing",
+            "abcd1234",
+            serde_json::json!({ "note": "hi", "creds": { "token": "<sv_admin_1a2b3c4d>" } }),
+        )
+        .await;
+
+        assert!(out.contains("refused"), "the call was not refused: {out}");
+        assert!(
+            out.contains("creds.token"),
+            "the refusal must name the offending argument: {out}"
+        );
+        assert!(
+            server.seen.lock().expect("not poisoned").is_none(),
+            "the server was called anyway, so the secret left the process"
+        );
+    }
+
+    /// Both minted shapes, at any depth, including inside an array.
+    #[test]
+    fn every_minted_handle_shape_is_found_wherever_it_hides() {
+        assert_eq!(
+            resolved_secret_in(&serde_json::json!({ "a": ["x", { "b": "<value_12>" }] })),
+            Some("a[1].b".to_string())
+        );
+        assert_eq!(
+            resolved_secret_in(&serde_json::json!({ "k": "<sv_token>" })),
+            Some("k".to_string())
+        );
+    }
+
+    /// The guard REFUSES, so a false positive breaks a legitimate call. Markup is
+    /// the obvious victim: the loose lookup predicate treats any `<...>` as a
+    /// candidate, and reusing it here would reject ordinary HTML arguments.
+    #[test]
+    fn ordinary_markup_is_not_mistaken_for_a_secret() {
+        for benign in [
+            serde_json::json!({ "html": "<b>bold</b>" }),
+            serde_json::json!({ "tag": "<div>" }),
+            serde_json::json!({ "xml": "<root/>" }),
+            serde_json::json!({ "name": "<internal_name>" }),
+            serde_json::json!({ "empty": "<>" }),
+            serde_json::json!({ "almost": "<value_>" }),
+            serde_json::json!({ "notnum": "<value_abc>" }),
+        ] {
+            assert_eq!(
+                resolved_secret_in(&benign),
+                None,
+                "a legitimate argument was refused: {benign}"
+            );
+        }
     }
 
     /// Ownership is membership, not string shape. A built-in may contain `__`,
