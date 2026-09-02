@@ -2660,3 +2660,73 @@ dispatcher. Sin cambio de API pública. ADP no afectado.
 
 **Estado.** done.
 
+## 45. Un `llm_call` ya puede usar tools de un servidor MCP remoto
+
+**Qué cambió.** El cableado. Con esto la cadena cierra el circuito: un `tool_configurations` con
+`node_type: "mcp"` expone las tools del servidor remoto al modelo, y una llamada del modelo vuelve al
+servidor y regresa contenida.
+
+**El bloque MCP corre último entre los de tools, y eso sí es load-bearing.** `claimed` se siembra
+desde `tools`, así que cualquier push posterior le sería invisible. Y dos bloques anteriores
+(`gsheets`, `gdocs`) saltan una tool cuyo nombre ya existe — o sea que un nombre MCP llegando primero
+haría **desaparecer la built-in**. `drop_colliding` dice que MCP siempre pierde; eso solo es cierto si
+MCP va último. Verificado por grep, no por comentario.
+
+**La rama de dispatch va primera, pero como defensa, no porque decida algo.** Esa distinción la
+descubrió una mutación: mover el bloque debajo del toolkit **pasa la suite entera**, y con razón —
+`drop_colliding` ya garantiza en la exposición que los dos conjuntos son disjuntos, así que el orden
+no puede cambiar el resultado. Queda primera igual, porque el bloque de toolkits matchea la misma
+forma `<alias>__<sub_tool>` que produce `normalize`, y si esa invariante de exposición alguna vez se
+rompiera, este orden evita que la ambigüedad se resuelva en silencio hacia el lado equivocado. El
+comentario dice eso ahora, en vez de afirmar una necesidad que no existe.
+
+**La ranura diferida.** El executor se construye antes de que se ensamblen las tools, pero `wire`
+necesita los nombres que ese executor ya reclama, así que el dispatcher no puede existir todavía.
+Recibe un `Arc<OnceLock<McpDispatcher>>` vacío que el ensamblado llena después. La alternativa era
+reordenar una función de 6600 líneas.
+
+**El mismo pool que usó `wire`.** Uno distinto seguiría funcionando pero re-handshakearía cada turno,
+deshaciendo en silencio el techo LRU y el TTL del catálogo que el pool (§38) existe para sostener.
+
+**El operador vuelve a existir.** Hasta acá todo lo que produce este subsistema iba al **modelo**: las
+notas de `wire` se juntaban sin que nadie las emitiera, y los fallos de dispatch volvían como texto
+para el modelo. Ahora las notas salen por `tracing::warn!` sobre `colmena::mcp` y un resumen por turno
+por `info!`.
+
+Para los fallos de dispatch hizo falta más que un log: `call` devolvía un `String` y **el texto
+contenido se lee igual haya respondido el servidor o haya fallado**, así que ningún nivel de log podía
+distinguirlos. Ahora devuelve `McpDispatched { output, failed }`, y el executor emite `warn!` cuando
+falló y `debug!` cuando no. Importa el nivel: el filtro por defecto del binario es `info`, así que
+loguear todo en `debug!` —como hacía la primera versión de esta slice— dejaba a un servidor que falla
+**todas** las llamadas exactamente tan invisible como antes. El flag es del operador, no del modelo.
+
+**El aviso al modelo va último entre las secciones** del system message: es lo único que varía por
+turno, y cualquier cosa agregada después caería fuera del prefijo cacheable y se re-facturaría cada
+turno (§30).
+
+**Dos tests de integración en el executor.** Cuatro rondas de revisión señalaron que `llm.rs` y el
+executor no tenían ninguno. El executor sí era construible desde un test — bastaba mirar los que ya
+existían. Ahora se fija que un nombre MCP lo atienda la rama MCP, y que un nombre que MCP **no** posee
+caiga a través hasta las built-ins. La mutación `owns() -> true` mata el segundo. **`llm.rs` sigue sin
+tests**, y conviene decirlo en vez de dejar entender que se cubrieron los dos: la precedencia
+`inputs` sobre `config` al leer los specs, el llenado de la ranura y el orden de las secciones siguen
+sostenidos solo por inspección.
+
+**Y ese hueco escondía un defecto real.** El aviso al modelo se empujaba **dentro** de la guarda
+`if !sections.is_empty()`, que se evalúa antes. Un `llm_call` cuyas únicas tools son MCP, sin
+`system_message` propio, no tiene ninguna otra sección — así que con su único servidor caído el aviso
+se descartaba en silencio, justo en el caso para el que existe. Ahora se empuja antes de la guarda.
+
+**Dos costos residuales, declarados y no cerrados.** Un `llm_call` que baje `max_tool_result_bytes`
+por debajo de ~33 KB vuelve a cortar el marcador de cierre de la cerca: el techo de 32 KB asume el
+default de 50 KB del executor, y derivarlo del tope real sigue siendo el arreglo de fondo. Y cuando el
+modelo emite **varias** llamadas MCP en un mismo turno, el agent loop las despacha **secuencialmente**
+sin deadline agregado, así que N llamadas a un servidor lento suman N veces su timeout antes de que el
+usuario vea respuesta. Ese bucle es preexistente, pero hasta ahora despachaba cosas rápidas y locales;
+esta slice es la primera que mete ahí llamadas de red a terceros de forma sistemática. Ninguno de los
+dos bloquea, y los dos quedan escritos acá en vez de solo en un recibo.
+
+**Alcance.** Aditivo. Un grafo sin entradas `mcp` no cambia en un byte: el bloque entero está detrás
+de `mcp_specs.is_empty()`, y el executor ni siquiera recibe la ranura. ADP no afectado.
+
+**Estado.** done (cableado completo; falta el E2E vivo contra servidores reales).

@@ -22,6 +22,17 @@ use super::bind::McpBinding;
 use super::contain::{contain, nonce_for};
 use super::wire::McpRoute;
 
+/// One dispatched call: what the model reads, and whether it worked.
+///
+/// The flag exists for the OPERATOR. `output` is contained text either way and a
+/// caller cannot tell success from failure by looking at it, so without this a
+/// server failing every call is indistinguishable from one working perfectly in
+/// any log.
+pub struct McpDispatched {
+    pub output: String,
+    pub failed: bool,
+}
+
 /// Everything needed to route one turn's MCP calls.
 pub struct McpDispatcher {
     registry: Arc<McpConnectionRegistry>,
@@ -48,9 +59,11 @@ impl McpDispatcher {
     /// the name's shape. A built-in tool is free to contain `__`, and inferring
     /// ownership from the string would let MCP hijack its dispatch.
     ///
-    /// Whoever wires this into the executor must consult it BEFORE the built-in
-    /// branches, so that a name MCP does not own falls through to them untouched.
-    /// Stated as a requirement rather than as fact: no executor calls this yet.
+    /// `DagToolExecutor` consults this before its built-in branches, so a name
+    /// MCP does not own falls through to them untouched. That ordering is
+    /// defensive rather than decisive: `drop_colliding` already guarantees at
+    /// exposure that an MCP tool never takes a claimed name, so the two sets are
+    /// disjoint by the time anything is dispatched.
     pub fn owns(&self, exposed_name: &str) -> bool {
         self.routes.contains_key(exposed_name)
     }
@@ -65,28 +78,39 @@ impl McpDispatcher {
     /// `tool_call_id` seeds the delimiter nonce, so every result in a turn is
     /// fenced with a different token and content copied out of one result cannot
     /// forge the closing marker of another.
-    pub async fn call(&self, exposed_name: &str, arguments: Value, tool_call_id: &str) -> String {
+    pub async fn call(
+        &self,
+        exposed_name: &str,
+        arguments: Value,
+        tool_call_id: &str,
+    ) -> McpDispatched {
         let nonce = nonce_for(tool_call_id);
 
         let Some(route) = self.routes.get(exposed_name) else {
             // Unreachable through `owns`, but a caller that skipped it must not
             // get silence — and must not get an unfenced string either.
-            return contain(
-                "colmena",
-                exposed_name,
-                &nonce,
-                "this tool is not an MCP tool",
-                true,
-            );
+            return McpDispatched {
+                output: contain(
+                    "colmena",
+                    exposed_name,
+                    &nonce,
+                    "this tool is not an MCP tool",
+                    true,
+                ),
+                failed: true,
+            };
         };
         let Some(binding) = self.bindings.get(&route.alias) else {
-            return contain(
-                &route.alias,
-                &route.tool,
-                &nonce,
-                "this server is not connected in this run, so the tool cannot be called",
-                true,
-            );
+            return McpDispatched {
+                output: contain(
+                    &route.alias,
+                    &route.tool,
+                    &nonce,
+                    "this server is not connected in this run, so the tool cannot be called",
+                    true,
+                ),
+                failed: true,
+            };
         };
 
         let client = match self
@@ -96,13 +120,16 @@ impl McpDispatcher {
         {
             Ok(c) => c,
             Err(e) => {
-                return contain(
-                    &route.alias,
-                    &route.tool,
-                    &nonce,
-                    &format!("could not reach the server: {e}"),
-                    true,
-                )
+                return McpDispatched {
+                    output: contain(
+                        &route.alias,
+                        &route.tool,
+                        &nonce,
+                        &format!("could not reach the server: {e}"),
+                        true,
+                    ),
+                    failed: true,
+                }
             }
         };
 
@@ -131,20 +158,23 @@ async fn call_and_contain(
     tool: &str,
     nonce: &str,
     arguments: Value,
-) -> String {
+) -> McpDispatched {
     if let Some(path) = resolved_secret_in(&arguments) {
         // Refused before the network, so the value never leaves the process.
-        return contain(
-            alias,
-            tool,
-            nonce,
-            &format!(
-                "refused: the argument at {path} carries a secure-value handle. \
+        return McpDispatched {
+            failed: true,
+            output: contain(
+                alias,
+                tool,
+                nonce,
+                &format!(
+                    "refused: the argument at {path} carries a secure-value handle. \
                  Secrets resolved by the engine are never forwarded to an MCP \
                  server. Send the value the tool actually needs, or drop the field."
+                ),
+                true,
             ),
-            true,
-        );
+        };
     }
 
     match client.call_tool(tool, arguments).await {
@@ -152,8 +182,14 @@ async fn call_and_contain(
         // is still server-authored text, so it is contained exactly like a
         // success — an error message is a perfectly good place to hide an
         // injection. The flag only picks which ceiling bounds the body.
-        Ok(result) => contain(alias, tool, nonce, &result.content, result.is_error),
-        Err(e) => contain(alias, tool, nonce, &format!("the call failed: {e}"), true),
+        Ok(result) => McpDispatched {
+            output: contain(alias, tool, nonce, &result.content, result.is_error),
+            failed: result.is_error,
+        },
+        Err(e) => McpDispatched {
+            output: contain(alias, tool, nonce, &format!("the call failed: {e}"), true),
+            failed: true,
+        },
     }
 }
 
@@ -260,8 +296,8 @@ mod tests {
     }
 
     /// Deliberately NOT the same pair everywhere. Every test used to pass the
-    /// identical `"srv"`/`"thing"`, so a `call_and_contain` that ignored its
-    /// arguments and hardcoded those two values passed the whole suite.
+    /// same alias and a tool name of `"thing"` or `"t"`, so a `call_and_contain`
+    /// that ignored its arguments and hardcoded that pair passed the whole suite.
     const OTHER_ALIAS: &str = "docs-mirror";
     const OTHER_TOOL: &str = "fetch-page";
 
@@ -285,7 +321,8 @@ mod tests {
             "abcd1234",
             serde_json::json!({}),
         )
-        .await;
+        .await
+        .output;
 
         assert!(out.contains("the answer"), "content missing: {out}");
         assert!(out.ends_with("<<<END_UNTRUSTED_MCP id=abcd1234>>>"));
@@ -304,7 +341,8 @@ mod tests {
             "n1",
             serde_json::json!({}),
         )
-        .await;
+        .await
+        .output;
         let as_success = call_and_contain(
             &answering(&huge, false),
             "srv",
@@ -312,7 +350,8 @@ mod tests {
             "n1",
             serde_json::json!({}),
         )
-        .await;
+        .await
+        .output;
 
         assert!(
             as_error.len() < MCP_MAX_ERROR_BYTES + 512,
@@ -352,7 +391,8 @@ mod tests {
             "abcd1234",
             serde_json::json!({}),
         )
-        .await;
+        .await
+        .output;
 
         assert!(
             out.contains(r#"MCP server "srv", tool "thing""#),
@@ -369,7 +409,8 @@ mod tests {
             "abcd1234",
             serde_json::json!({}),
         )
-        .await;
+        .await
+        .output;
         assert!(
             other.contains(&format!(
                 r#"MCP server "{OTHER_ALIAS}", tool "{OTHER_TOOL}""#
@@ -389,8 +430,9 @@ mod tests {
             seen: std::sync::Mutex::new(None),
         };
 
-        let out =
-            call_and_contain(&broken, "srv", "thing", "abcd1234", serde_json::json!({})).await;
+        let out = call_and_contain(&broken, "srv", "thing", "abcd1234", serde_json::json!({}))
+            .await
+            .output;
 
         assert!(out.contains("the call failed"), "reason missing: {out}");
         assert!(out.ends_with("<<<END_UNTRUSTED_MCP id=abcd1234>>>"));
@@ -429,7 +471,10 @@ mod tests {
         .collect();
         let d = McpDispatcher::new(Arc::new(McpConnectionRegistry::new()), routes, bindings);
 
-        let out = d.call("srv__thing", serde_json::json!({}), "call_7").await;
+        let out = d
+            .call("srv__thing", serde_json::json!({}), "call_7")
+            .await
+            .output;
 
         assert!(
             out.contains("could not reach the server"),
@@ -448,6 +493,53 @@ mod tests {
         );
     }
 
+    /// The operator's only signal. The contained output reads the same whether
+    /// the server answered or failed, so without this flag a server failing every
+    /// call is indistinguishable from one working perfectly in any log.
+    #[tokio::test]
+    async fn a_failure_is_reported_as_one_even_though_its_text_looks_normal() {
+        let ok = call_and_contain(
+            &answering("fine", false),
+            "srv",
+            "thing",
+            "n1",
+            serde_json::json!({}),
+        )
+        .await;
+        assert!(!ok.failed, "a success was reported as a failure");
+
+        let server_said_error = call_and_contain(
+            &answering("it broke", true),
+            "srv",
+            "thing",
+            "n1",
+            serde_json::json!({}),
+        )
+        .await;
+        assert!(
+            server_said_error.failed,
+            "a server-reported error was not surfaced to the operator"
+        );
+
+        let transport_died = call_and_contain(
+            &FakeServer {
+                answer: Err(McpError::InvalidConfig {
+                    detail: "socket closed".to_string(),
+                }),
+                seen: std::sync::Mutex::new(None),
+            },
+            "srv",
+            "thing",
+            "n1",
+            serde_json::json!({}),
+        )
+        .await;
+        assert!(
+            transport_died.failed,
+            "a transport failure was not surfaced"
+        );
+    }
+
     /// A secret the engine resolved must not leave for a third party, and the
     /// refusal must happen BEFORE the network — the server must never see it.
     #[tokio::test]
@@ -461,7 +553,8 @@ mod tests {
             "abcd1234",
             serde_json::json!({ "note": "hi", "creds": { "token": "<sv_admin_1a2b3c4d>" } }),
         )
-        .await;
+        .await
+        .output;
 
         assert!(out.contains("refused"), "the call was not refused: {out}");
         assert!(
@@ -530,7 +623,10 @@ mod tests {
     async fn an_unconnected_server_returns_a_contained_error() {
         let d = dispatcher(&[("srv__thing", "srv", "thing")]);
 
-        let out = d.call("srv__thing", serde_json::json!({}), "call_1").await;
+        let out = d
+            .call("srv__thing", serde_json::json!({}), "call_1")
+            .await
+            .output;
 
         let nonce = nonce_for("call_1");
         assert!(
@@ -551,7 +647,8 @@ mod tests {
 
         let out = d
             .call("srv__missing", serde_json::json!({}), "call_9")
-            .await;
+            .await
+            .output;
 
         let nonce = nonce_for("call_9");
         assert!(
@@ -566,8 +663,14 @@ mod tests {
     async fn two_calls_in_one_turn_get_different_fences() {
         let d = dispatcher(&[("srv__thing", "srv", "thing")]);
 
-        let a = d.call("srv__thing", serde_json::json!({}), "call_a").await;
-        let b = d.call("srv__thing", serde_json::json!({}), "call_b").await;
+        let a = d
+            .call("srv__thing", serde_json::json!({}), "call_a")
+            .await
+            .output;
+        let b = d
+            .call("srv__thing", serde_json::json!({}), "call_b")
+            .await
+            .output;
 
         assert_ne!(
             nonce_for("call_a"),

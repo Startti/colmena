@@ -2342,8 +2342,25 @@ impl ExecutableNode for LlmNode {
             c.memory_mode == crate::dag_engine::domain::tool_configuration::MemoryMode::Dynamic
         });
 
+        // MCP: read the specs from the RAW config before `tool_configurations`
+        // moves into the executor on the next line. The dispatcher itself cannot
+        // be built yet — wiring needs the names this executor already claims — so
+        // it gets an empty slot now and is filled after tool assembly.
+        let mcp_specs = {
+            use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::mcp::collect_mcp_tool_configs;
+            inputs
+                .get("tool_configurations")
+                .or_else(|| config.get("tool_configurations"))
+                .map(collect_mcp_tool_configs)
+                .unwrap_or_default()
+        };
+        let mcp_slot = std::sync::Arc::new(std::sync::OnceLock::new());
+
         let tool_executor = {
             let mut executor = DagToolExecutor::new(registry, tool_configurations);
+            if !mcp_specs.is_empty() {
+                executor = executor.with_mcp(mcp_slot.clone());
+            }
             executor = executor
                 .with_conversation_history(conversation_repo.clone(), conversation_key.clone());
             // Per-llm_call override of the tool-result string cap. Inputs win
@@ -3122,6 +3139,73 @@ impl ExecutableNode for LlmNode {
             }
         }
 
+        // ---- MCP: bind, list and expose every declared remote server --------
+        //
+        // Placed after EVERY other tool block, and the placement is load-bearing
+        // rather than tidy: `claimed` is seeded from `tools`, so anything pushed
+        // after this point would be invisible to it. Two of the earlier blocks
+        // (gsheets, gdocs) skip a tool whose name is already present, so an MCP
+        // name landing first would make the BUILT-IN drop out — and dispatch
+        // checks MCP first, so the model's call would go to the third party.
+        // `drop_colliding` says MCP always loses; that is only true if MCP goes
+        // last.
+        let mcp_notice: Option<String> = if mcp_specs.is_empty() {
+            None
+        } else {
+            use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::mcp::{
+                unavailable_notice, wire, McpDispatcher,
+            };
+            let pool = crate::dag_engine::infrastructure::mcp_registry::global_mcp_registry();
+            let mut claimed: std::collections::HashSet<String> =
+                tools.iter().map(|t| t.name.clone()).collect();
+            let wiring = wire(
+                pool,
+                &mcp_specs,
+                &mut claimed,
+                self.secure_value_service.as_deref(),
+                &session_id_str,
+                agent_session_id_str.as_deref(),
+            )
+            .await;
+
+            // The operator's only view of what MCP did. Everything else this
+            // subsystem produces goes to the MODEL, so a server that vanished or
+            // a tool that lost its name would otherwise be invisible to whoever
+            // runs the agent.
+            for note in &wiring.notes {
+                tracing::warn!(target: "colmena::mcp", "{note}");
+            }
+            if !wiring.definitions.is_empty() {
+                tracing::info!(
+                    target: "colmena::mcp",
+                    exposed = wiring.definitions.len(),
+                    servers = wiring.bindings.len(),
+                    unavailable = wiring.unavailable.len(),
+                    "MCP tools exposed for this turn"
+                );
+            }
+
+            for td in &wiring.definitions {
+                if lazy_tool_loading {
+                    catalog.push(CatalogEntry {
+                        name: td.name.clone(),
+                        summary: summary_for_catalog(td.summary.as_deref(), &td.description),
+                    });
+                }
+            }
+            let notice = unavailable_notice(&wiring.unavailable);
+            tools.extend(wiring.definitions);
+            // The SAME pool `wire` just used. A different instance would still
+            // work but would re-handshake every turn, silently undoing the LRU
+            // bound and the catalog TTL the pool exists for.
+            let _ = mcp_slot.set(McpDispatcher::new(
+                std::sync::Arc::clone(pool),
+                wiring.routes,
+                wiring.bindings,
+            ));
+            notice
+        };
+
         // 2.2 Build the final system message. We assemble up to three sections,
         // each emitted only when relevant:
         //   - the user-provided `system_message` (if any),
@@ -3151,8 +3235,19 @@ impl ExecutableNode for LlmNode {
                 .get("__colmena_locale")
                 .and_then(|v| v.as_str())
                 .unwrap_or("es-CO");
-            let context_block = format_temporal_context_block(tz_str, loc_str, locale_str);
-            llm_config = llm_config.with_volatile_system_suffix(context_block);
+            let mut volatile = format_temporal_context_block(tz_str, loc_str, locale_str);
+            // The MCP unavailable notice rides here for the SAME reason the
+            // temporal block does, and it is the same mistake this block already
+            // documents: `sections` is built only when `!history_exists`, so a
+            // notice pushed there reaches the model on turn 1 and never again. A
+            // server that goes down at turn 5 of a conversation would never be
+            // announced. Carried as the volatile suffix it is recomputed every
+            // turn and placed outside the cached prefix.
+            if let Some(notice) = mcp_notice.as_ref() {
+                volatile.push_str("\n\n");
+                volatile.push_str(notice);
+            }
+            llm_config = llm_config.with_volatile_system_suffix(volatile);
         }
 
         // The combined message is pushed only when at least one section was

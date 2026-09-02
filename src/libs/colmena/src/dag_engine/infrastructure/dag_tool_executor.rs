@@ -80,6 +80,18 @@ pub struct DagToolExecutor {
     /// events (notably `subgraph` emitting `subgraph-*` child events). When
     /// `None`, tool-invoked nodes run silently (legacy behavior).
     observer: Option<Arc<dyn crate::dag_engine::domain::observer::ExecutionObserver>>,
+    /// Filled AFTER construction, which is why it is a slot rather than a value.
+    /// `wire` needs the set of names Colmena already claimed, and that set comes
+    /// from `available_tools()` on this very executor — so the dispatcher cannot
+    /// exist yet when the executor is built. The alternative was reordering a
+    /// 6600-line function.
+    mcp: Option<
+        Arc<
+            std::sync::OnceLock<
+                crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::mcp::McpDispatcher,
+            >,
+        >,
+    >,
     /// Optional documents context. When present, the executor intercepts the
     /// seven `document_*` synthetic tool calls and dispatches them to the
     /// underlying `DocumentRuntime` use cases instead of the normal
@@ -259,6 +271,7 @@ impl DagToolExecutor {
             skill_repository: None,
             skill_observer: None,
             observer: None,
+            mcp: None,
             documents_context: None,
             crdt_docs_context: None,
             describe_tool_lookup: None,
@@ -446,6 +459,23 @@ impl DagToolExecutor {
         observer: Option<Arc<dyn crate::dag_engine::domain::observer::ExecutionObserver>>,
     ) -> Self {
         self.observer = observer;
+        self
+    }
+
+    /// Attach the slot that will hold this turn's MCP dispatcher.
+    ///
+    /// Handed over empty on purpose — see the field's comment. Dispatch reads it
+    /// through `get()`, so a turn where wiring never filled it simply has no MCP
+    /// tools rather than a half-built one.
+    pub fn with_mcp(
+        mut self,
+        slot: Arc<
+            std::sync::OnceLock<
+                crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::mcp::McpDispatcher,
+            >,
+        >,
+    ) -> Self {
+        self.mcp = Some(slot);
         self
     }
 
@@ -1093,6 +1123,78 @@ impl DagToolExecutor {
                 obs(&result);
             }
             return Ok(describe_tool_into_tool_result(&tool_call.id, &result));
+        }
+
+        // --- MCP tools, routed back to the server that owns them ---
+        //
+        // First among the dispatch branches — as defence, NOT because the order
+        // decides anything today. `drop_colliding` already guarantees at EXPOSURE
+        // that an MCP tool never takes a name Colmena claimed, so the two sets
+        // are disjoint here and a mutation moving this block below the toolkit
+        // branch passes the suite. It stays first anyway: the toolkit branch
+        // matches the same `<alias>__<sub_tool>` shape MCP normalises to, so if
+        // that exposure-time invariant ever broke, this order is what keeps the
+        // ambiguity from being resolved silently in the wrong direction.
+        //
+        // `owns` is a membership test against the routes built at exposure, so it
+        // is false for every name MCP did not expose and those fall through
+        // untouched.
+        if let Some(dispatcher) = self.mcp.as_ref().and_then(|slot| slot.get()) {
+            let name = tool_call.function.name.as_str();
+            if dispatcher.owns(name) {
+                let args: serde_json::Value = if tool_call.function.arguments.trim().is_empty() {
+                    serde_json::json!({})
+                } else {
+                    // A malformed argument blob is the model's mistake and it can
+                    // fix it next turn, so it comes back as tool content rather
+                    // than as an error that ends the node.
+                    match serde_json::from_str(&tool_call.function.arguments) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            return Ok(ToolResult {
+                                tool_call_id: tool_call.id.clone(),
+                                success: true,
+                                output: format!(
+                                    "Arguments for '{name}' were not valid JSON: {e}. \
+                                     Send them again as a JSON object."
+                                ),
+                                error: None,
+                            })
+                        }
+                    }
+                };
+                let dispatched = dispatcher.call(name, args, &tool_call.id).await;
+                // The operator's copy. Everything else about this call goes to
+                // the MODEL, and the contained output reads the same whether the
+                // server answered or failed — so a failure is logged at WARN and
+                // is visible under the binary's default `info` filter. Logging
+                // the whole thing at `debug!` would have left a server failing
+                // every call invisible to whoever runs the agent, which is the
+                // condition this is here to surface.
+                if dispatched.failed {
+                    tracing::warn!(
+                        target: "colmena::mcp",
+                        tool = %name,
+                        "an MCP tool call failed"
+                    );
+                } else {
+                    tracing::debug!(
+                        target: "colmena::mcp",
+                        tool = %name,
+                        bytes = dispatched.output.len(),
+                        "dispatched an MCP tool call"
+                    );
+                }
+                return Ok(ToolResult {
+                    tool_call_id: tool_call.id.clone(),
+                    // `success` is about the DISPATCH, not the server's answer: a
+                    // failure the model can read and react to is a delivered tool
+                    // result, not a node error.
+                    success: true,
+                    output: dispatched.output,
+                    error: None,
+                });
+            }
         }
 
         // --- Synthetic load_attachment ---
@@ -2870,6 +2972,82 @@ mod tests {
 
         fn get_all_nodes(&self) -> HashMap<String, Arc<dyn ExecutableNode>> {
             self.nodes.clone()
+        }
+    }
+
+    /// A dispatcher that owns one exposed name and has no bindings, so a call it
+    /// claims comes back as a contained "not connected" message. That is enough
+    /// to prove WHICH branch handled the call.
+    fn mcp_slot_owning(
+        exposed: &str,
+    ) -> Arc<
+        std::sync::OnceLock<
+            crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::mcp::McpDispatcher,
+        >,
+    > {
+        use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::mcp::{
+            McpDispatcher, McpRoute,
+        };
+        let routes = [(
+            exposed.to_string(),
+            McpRoute {
+                alias: "srv".to_string(),
+                tool: "thing".to_string(),
+            },
+        )]
+        .into_iter()
+        .collect();
+        let slot = Arc::new(std::sync::OnceLock::new());
+        let _ = slot.set(McpDispatcher::new(
+            Arc::new(crate::dag_engine::infrastructure::mcp_registry::McpConnectionRegistry::new()),
+            routes,
+            std::collections::BTreeMap::new(),
+        ));
+        slot
+    }
+
+    /// The MCP branch is wired in and reached. Without it this name would fall
+    /// through every built-in branch and come back as an unknown tool.
+    #[tokio::test]
+    async fn an_mcp_name_is_dispatched_by_the_mcp_branch() {
+        let exec = DagToolExecutor::new(registry_with_subgraph(), dynamic_tool_configs())
+            .with_mcp(mcp_slot_owning("srv__thing"));
+        let call = ToolCall::new(
+            "call_1".into(),
+            FunctionCall::new("srv__thing".into(), "{}".into()),
+        );
+
+        let res = exec.execute(&call).await.unwrap();
+
+        assert!(
+            res.output.contains("UNTRUSTED_MCP"),
+            "the MCP branch did not handle it: {}",
+            res.output
+        );
+    }
+
+    /// And it does NOT hijack a name it does not own. `owns` is a membership
+    /// test, so a built-in shaped like an MCP name must reach its own branch —
+    /// the MCP check runs FIRST, which is exactly why this needs pinning.
+    #[tokio::test]
+    async fn a_name_mcp_does_not_own_falls_through_to_the_built_ins() {
+        let exec = DagToolExecutor::new(registry_with_subgraph(), dynamic_tool_configs())
+            .with_mcp(mcp_slot_owning("srv__thing"));
+        let call = ToolCall::new(
+            "call_2".into(),
+            FunctionCall::new("some__other_tool".into(), "{}".into()),
+        );
+
+        // Not unwrapped: falling through to the built-ins means this unknown
+        // name is REJECTED there, which is itself the proof. What must not
+        // happen is an Ok carrying a contained MCP result.
+        match exec.execute(&call).await {
+            Err(_) => {}
+            Ok(res) => assert!(
+                !res.output.contains("UNTRUSTED_MCP"),
+                "MCP swallowed a call it does not own: {}",
+                res.output
+            ),
         }
     }
 
