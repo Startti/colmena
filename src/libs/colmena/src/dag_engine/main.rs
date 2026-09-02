@@ -54,6 +54,20 @@ enum Commands {
         #[arg(long, default_value_t = false)]
         verbose: bool,
     },
+    /// Check a graph's configuration without running it.
+    ///
+    /// Reports fields a node does not accept, required fields that are not set,
+    /// node types the engine cannot run, and edges pointing at nodes that do
+    /// not exist. Advisory by default: it never changes how a graph runs.
+    Lint {
+        file_path: String,
+        /// Emit machine-readable JSON instead of a human-readable report.
+        #[arg(long, default_value = "text", value_parser = ["text", "json"])]
+        format: String,
+        /// Exit non-zero when there is any error or warning.
+        #[arg(long, default_value_t = false)]
+        strict: bool,
+    },
     Serve {
         file_path: String,
         #[arg(long, default_value = "0.0.0.0")]
@@ -171,6 +185,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     init_tracing(verbose);
 
     match cli.command {
+        Commands::Lint {
+            file_path,
+            format,
+            strict,
+        } => {
+            return run_lint(&file_path, &format, strict).await;
+        }
         Commands::Run {
             file_path,
             session_id,
@@ -482,5 +503,75 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         },
     }
 
+    Ok(())
+}
+
+/// Checks a graph file and prints a report.
+///
+/// Deliberately does not build an engine: linting is static, and requiring a
+/// database connection to check a JSON file would put the tool out of reach of
+/// exactly the people it is for.
+async fn run_lint(
+    file_path: &str,
+    format: &str,
+    strict: bool,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use colmena::dag_engine::domain::lint::{lint_graph_json, LintContext, Severity};
+
+    let contents = tokio::fs::read_to_string(file_path)
+        .await
+        .map_err(|e| format!("could not read {file_path}: {e}"))?;
+    let document: serde_json::Value = serde_json::from_str(&contents)
+        .map_err(|e| format!("{file_path} is not valid JSON: {e}"))?;
+
+    let ctx = LintContext::from_catalog();
+    let report =
+        lint_graph_json(&document, &ctx).map_err(|e| format!("{file_path} is not a graph: {e}"))?;
+
+    let errors = report.count(Severity::Error);
+    let warnings = report.count(Severity::Warning);
+
+    if format == "json" {
+        let payload = serde_json::json!({
+            "file": file_path,
+            "summary": {
+                "errors": errors,
+                "warnings": warnings,
+                "info": report.count(Severity::Info),
+            },
+            "diagnostics": report
+                .diagnostics
+                .iter()
+                .map(|d| serde_json::json!({
+                    "severity": d.severity.to_string(),
+                    "code": d.code.as_str(),
+                    "node_id": d.node_id,
+                    "field": d.field,
+                    "message": d.message,
+                    "suggestion": d.suggestion,
+                }))
+                .collect::<Vec<_>>(),
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else {
+        println!("Linting {file_path}");
+        if report.is_clean() {
+            println!("  no findings");
+        } else {
+            for d in &report.diagnostics {
+                println!("  {}", d.render());
+            }
+            println!(
+                "\n  {errors} error(s), {warnings} warning(s), {} info",
+                report.count(Severity::Info)
+            );
+        }
+    }
+
+    // Findings are advisory unless the caller asked otherwise, so that adding
+    // the linter to an existing pipeline cannot break it by surprise.
+    if strict && report.has_blocking_findings() {
+        std::process::exit(1);
+    }
     Ok(())
 }
