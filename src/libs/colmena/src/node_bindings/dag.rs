@@ -64,6 +64,13 @@ pub async fn serve_dag(file_path: String, host: Option<String>, port: Option<u16
 }
 
 /// Validate a graph object; throws `DagError` if it is not a valid graph.
+/// Checks that a graph object deserialises into the engine's `Graph`.
+///
+/// A *shape* check only, and weaker than loading the graph with
+/// `dag_engine run`: it does not call `Graph::validate`, so a node id
+/// containing `/`, a malformed `node_schema`, an invalid `memory_mode` and a
+/// misconfigured `mcp` block all pass here and fail there. It says nothing
+/// about the contents of a node's `config` — use `dag_engine lint` for that.
 #[napi]
 pub fn validate_graph(graph: Value) -> Result<()> {
     let _: crate::dag_engine::domain::graph::Graph = serde_json::from_value(graph)

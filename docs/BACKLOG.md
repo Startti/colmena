@@ -6,6 +6,52 @@ Si vas a empezar a trabajar en algo de acá, sacalo de esta lista y agregalo al 
 
 ---
 
+## Graph linter — follow-ups tras la fase 1 (2026-09-02)
+
+La fase 1 del linter aterrizó en `develop` en 5 PRs (#238, #239, #241, #242, #243).
+Guía: [`docs/developer_guide/51_graph_linter.md`](developer_guide/51_graph_linter.md).
+Lo que quedó abierto, en orden de importancia:
+
+- **`validate_graph` de los bindings no valida lo que su nombre promete.** Python
+  ([`python_bindings/mod.rs`](../src/libs/colmena/src/python_bindings/mod.rs)) y napi
+  ([`node_bindings/dag.rs`](../src/libs/colmena/src/node_bindings/dag.rs)) solo hacen
+  `serde_json::from_value::<Graph>()`; **no** llaman a `Graph::validate()`. Un grafo con
+  un node id con `/`, un `node_schema` malformado, un `memory_mode` inválido o un bloque
+  `mcp` mal configurado pasa el binding y falla al ejecutar. Las docs ya se corrigieron
+  para decir la verdad; **cablearlo es un cambio de comportamiento** (un grafo que hoy
+  pasa empezaría a fallar), así que va en su propio PR con nota en
+  [`docs/adp_migration/`](adp_migration/README.md). En el mismo PR conviene exponer
+  `lint_graph` a ambos bindings, que es lo que permitiría a ADP mostrar los hallazgos
+  en el canvas.
+
+- **Fase 2 del linter: mover la fuente de verdad al código.** Hoy
+  `docs/node_configurations.json` se mantiene a mano; los tests garantizan que la *lista
+  de tipos* no se desvíe del registry, pero no que los *campos* de cada tipo sigan al
+  código. El plan es un `ExecutableNode::config_schema()` con default `None` (aditivo, no
+  rompe ninguna implementación), migrando nodo por nodo con un test que compare schema
+  contra catálogo, y cuando los 37 devuelvan `Some`, pasar a **generar** el JSON — igual
+  que ya se hace con `module_dependency_map.md`.
+
+- **Tres grafos de ejemplo no cargan.** `tests/graphs/agents/forward_generated_artifact.json`,
+  `upload_inline_to_endpoint.json` y `upload_signed_url_to_endpoint.json` declaran `nodes`
+  como array en vez de mapa: `invalid type: sequence, expected a map`. Están anotados en
+  [`docs/examples/USAGE_EXAMPLES.md`](examples/USAGE_EXAMPLES.md) como pendientes de
+  reparación. Reescribirlos requiere verificar que además corran contra los servicios que
+  usan, no solo que deserialicen.
+
+- **`NO_CATALOG_COVERAGE` es inalcanzable desde la CLI.** `LintContext::from_catalog()`
+  deriva los tipos ejecutables del propio catálogo, así que un tipo sin entrada sale como
+  `UNKNOWN_NODE_TYPE` — un mensaje falso ("el motor no sabe ejecutarlo"). Los tests de
+  cobertura lo impiden dentro del repo. Arreglarlo de verdad implica que la CLI construya
+  el registry real, lo que hoy exigiría conexión a base de datos para revisar un archivo
+  JSON. Documentado como limitación en la guía 51.
+
+- **Menores.** `compact()` en `linter.rs` trunca *después* de envolver en comillas, así que
+  un string largo sale con comillas desbalanceadas (cosmético). Y el `schema()` de
+  `api_explorer` anuncia diez campos de config que el nodo nunca lee — drift interno del
+  `.rs`, no del catálogo, cuya entrada ya documenta `config_fields` vacío.
+
+
 ## 🚨 MÁXIMA PRIORIDAD — Colmena no puede ejecutar los modelos GPT-5.6 (2026-08-24)
 
 **Síntoma.** Cualquier `llm_call` contra `gpt-5.6-sol`, `gpt-5.6-terra` o
