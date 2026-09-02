@@ -914,3 +914,109 @@ mod media_tools_injection_tests {
         assert_eq!(gen.parameters.required, vec!["prompt"]);
     }
 }
+
+/// The linter can only check a node type the catalog documents. A type that is
+/// registered but undocumented is reported as "no coverage" rather than
+/// checked, so a silent gap here does not fail loudly at runtime — it just
+/// means graphs using that node are never validated.
+///
+/// The catalog and the registry drifted apart once already: five registered
+/// types (`tavily_client`, `api_explorer`, `image_generation`, `image_edit`,
+/// `tts`) were listed as valid but had no entry, and nothing detected it. This
+/// test is the guard against that recurring.
+#[cfg(test)]
+mod catalog_coverage_tests {
+    use super::*;
+    use crate::dag_engine::domain::lint::NodeCatalog;
+    use crate::dag_engine::infrastructure::pool_registry::{PgPoolRegistry, PoolConfig};
+    use crate::storage::infrastructure::LocalCacheStorageAdapter;
+
+    /// Builds the registry with every optional dependency wired.
+    ///
+    /// Four node types are registered conditionally — `secure_suspend` needs a
+    /// `SecureValueService`, and `image_generation` / `image_edit` / `tts` need
+    /// a storage adapter. A registry built without them would silently shrink
+    /// the set under test and let a missing catalog entry through.
+    fn build_fully_wired_registry() -> Arc<HashMapNodeRegistry> {
+        let pool_registry = Arc::new(PgPoolRegistry::new(PoolConfig::defaults()));
+        let repo_factory = Arc::new(
+            crate::llm::infrastructure::ConversationRepositoryFactory::new(pool_registry.clone()),
+        );
+        let sql_factory = Arc::new(
+            crate::dag_engine::infrastructure::sql_port_factory::SqlPortFactory::new(pool_registry),
+        );
+        let task_memory: Arc<dyn crate::dag_engine::domain::state::DagTaskMemoryRepository> =
+            Arc::new(super::registry_tavily_tests::StubTaskMemory);
+        let secure_values = Arc::new(SecureValueService::new(Arc::new(
+            super::registry_secure_suspend_tests::NoopRepo,
+        ) as Arc<_>));
+        let storage: Arc<dyn OutputStorageRepository> = Arc::new(LocalCacheStorageAdapter::new());
+
+        HashMapNodeRegistry::new_with_secure_values(
+            repo_factory,
+            sql_factory,
+            Some(task_memory),
+            Some(secure_values),
+            Some(storage),
+            None,
+        )
+    }
+
+    #[test]
+    fn the_fully_wired_registry_includes_the_conditional_node_types() {
+        let reg = build_fully_wired_registry();
+        for conditional in ["secure_suspend", "image_generation", "image_edit", "tts"] {
+            assert!(
+                reg.get_node(conditional).is_some(),
+                "{conditional} is registered conditionally and must be present in the \
+                 fully wired registry, otherwise this test under-reports coverage"
+            );
+        }
+    }
+
+    #[test]
+    fn every_registered_node_type_is_documented_in_the_catalog() {
+        let reg = build_fully_wired_registry();
+        let catalog = NodeCatalog::embedded();
+
+        let mut undocumented: Vec<String> = reg
+            .get_all_nodes()
+            .keys()
+            .filter(|t| catalog.entry(t).is_none())
+            .cloned()
+            .collect();
+        undocumented.sort();
+
+        assert!(
+            undocumented.is_empty(),
+            "these node types are registered but absent from \
+             docs/node_configurations.json: {undocumented:?}. \
+             The linter cannot check a graph that uses them — add an entry \
+             describing their config_fields."
+        );
+    }
+
+    #[test]
+    fn the_catalog_documents_no_node_type_the_engine_cannot_run() {
+        let reg = build_fully_wired_registry();
+        let registered = reg.get_all_nodes();
+
+        let phantom: Vec<&str> = catalog_types_not_registered(&registered);
+
+        assert!(
+            phantom.is_empty(),
+            "these node types are documented but not registered by the engine: \
+             {phantom:?}. Either the catalog describes a node that no longer \
+             exists, or registration was dropped."
+        );
+    }
+
+    fn catalog_types_not_registered(
+        registered: &std::collections::HashMap<String, Arc<dyn ExecutableNode>>,
+    ) -> Vec<&'static str> {
+        NodeCatalog::embedded()
+            .covered_node_types()
+            .filter(|t| !registered.contains_key(*t))
+            .collect()
+    }
+}

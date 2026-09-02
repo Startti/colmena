@@ -5,8 +5,8 @@
 
 **How to use (for the exploration/spec phase):** before opening files to assess a change, look up the target file below. **Used by** is its blast radius — the files that break if you change its public surface. **Depends on** is what it needs. Start by reading only those, not the whole repo.
 
-- Files indexed: **375**
-- Modules with at least one importer: **169**
+- Files indexed: **377**
+- Modules with at least one importer: **170**
 
 ## Blast-radius ranking (change these with the most care)
 
@@ -256,6 +256,16 @@
 #### `src/libs/colmena/src/dag_engine/domain/initializable_node.rs`
 - Module: `dag_engine::domain::initializable_node`
 - **Used by (2)**: `src/libs/colmena/src/dag_engine/domain/node.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/sql.rs`
+- Depends on (0): — (no intra-crate imports)
+
+#### `src/libs/colmena/src/dag_engine/domain/lint/catalog.rs`
+- Module: `dag_engine::domain::lint::catalog`
+- **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
+- Depends on (0): — (no intra-crate imports)
+
+#### `src/libs/colmena/src/dag_engine/domain/lint/mod.rs`
+- Module: `dag_engine::domain::lint`
+- **Used by (1)**: `src/libs/colmena/src/dag_engine/infrastructure/registry.rs`
 - Depends on (0): — (no intra-crate imports)
 
 #### `src/libs/colmena/src/dag_engine/domain/mod.rs`
@@ -786,7 +796,7 @@
 #### `src/libs/colmena/src/dag_engine/infrastructure/registry.rs`
 - Module: `dag_engine::infrastructure::registry`
 - **Used by (3)**: `src/libs/colmena/src/dag_engine/engine.rs`, `src/libs/colmena/src/node_bindings/registry.rs`, `src/libs/colmena/src/python_bindings/mod.rs`
-- Depends on (23): `dag_engine::application::ports`, `dag_engine::application::secure_value_service`, `dag_engine::domain::error`, `dag_engine::domain::node`, `dag_engine::domain::secure_value_repository`, `dag_engine::domain::state`, `dag_engine::domain::tool_configuration`, `dag_engine::domain::toolkit_node`, `dag_engine::infrastructure::dag_tool_executor`, `dag_engine::infrastructure::nodes`, `dag_engine::infrastructure::nodes::api_explorer`, `dag_engine::infrastructure::nodes::image_edit`, `dag_engine::infrastructure::nodes::image_generation`, `dag_engine::infrastructure::nodes::llm`, `dag_engine::infrastructure::nodes::tavily_client`, `dag_engine::infrastructure::nodes::tts`, `dag_engine::infrastructure::pool_registry`, `dag_engine::infrastructure::sql_port_factory`, `llm::domain`, `llm::domain::tool_executor`, `llm::infrastructure`, `storage::domain`, `storage::infrastructure`
+- Depends on (24): `dag_engine::application::ports`, `dag_engine::application::secure_value_service`, `dag_engine::domain::error`, `dag_engine::domain::lint`, `dag_engine::domain::node`, `dag_engine::domain::secure_value_repository`, `dag_engine::domain::state`, `dag_engine::domain::tool_configuration`, `dag_engine::domain::toolkit_node`, `dag_engine::infrastructure::dag_tool_executor`, `dag_engine::infrastructure::nodes`, `dag_engine::infrastructure::nodes::api_explorer`, `dag_engine::infrastructure::nodes::image_edit`, `dag_engine::infrastructure::nodes::image_generation`, `dag_engine::infrastructure::nodes::llm`, `dag_engine::infrastructure::nodes::tavily_client`, `dag_engine::infrastructure::nodes::tts`, `dag_engine::infrastructure::pool_registry`, `dag_engine::infrastructure::sql_port_factory`, `llm::domain`, `llm::domain::tool_executor`, `llm::infrastructure`, `storage::domain`, `storage::infrastructure`
 
 #### `src/libs/colmena/src/dag_engine/infrastructure/sql_ast.rs`
 - Module: `dag_engine::infrastructure::sql_ast`
