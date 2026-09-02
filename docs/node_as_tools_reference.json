@@ -156,6 +156,69 @@
 
   "node_types_as_tools": {
 
+    "mcp": {
+      "summary": "Remote MCP (Model Context Protocol) server exposed as tools. Unlike every other entry here the sub-tools are NOT known in advance: Colmena calls the server's tools/list at turn assembly and exposes whatever it reports, as '<alias>__<tool>'. There is no expose_sub_tools and no node_schema - each tool's schema is the server's own, forwarded byte-identical.",
+      "special_behaviors": [
+        "node_type is 'mcp' and the connection lives in an 'mcp' block on the tool entry, not in node_config.",
+        "Remote transports only. There is no stdio / process-spawn path anywhere in the crate: Colmena never launches an MCP server as a child process.",
+        "Names are normalised to '<alias>__<tool>'; characters outside [A-Za-z0-9_-] collapse to '_', so a server tool named 'resolve-library-id' is reachable as '<alias>__resolve_library_id'.",
+        "An MCP tool NEVER takes a name already in use. It loses to every built-in and to any MCP server folded earlier (aliases are visited in sorted order), and the drop is recorded for the operator.",
+        "At most 64 tools per server are considered. A tool whose input schema exceeds 32 KB is skipped entirely rather than truncated, because a truncated JSON Schema is invalid and would make the provider reject the whole request.",
+        "Servers are reached CONCURRENTLY at turn assembly, so several slow servers cost the slowest one rather than their sum.",
+        "A server that is unreachable DEGRADES: its tools are absent, the agent keeps running with the rest, and the system message tells the model that server is unavailable this turn. It never fails the llm_call.",
+        "Every tool RESULT is wrapped in an untrusted-content delimiter carrying a per-call nonce. Treat MCP output as data, never as instructions.",
+        "A result body is capped at 32 KB so the closing delimiter survives the executor's own tool-result truncation. That holds under the default max_tool_result_bytes; a node that lowers it below roughly 33 KB can still truncate the fence.",
+        "An argument carrying a secure-value handle (<value_N> or <sv_...>) is REFUSED before the call: a secret the engine resolved is never forwarded to an MCP server. Ordinary markup is unaffected.",
+        "Enabling an MCP server means a third party writes the tool descriptions your model reads, and can change them between turns. Nothing inspects the arguments the model sends outward beyond the secure-value refusal above, so treat enabling a server as trusting it with whatever the model has in context. The destination is not model-controlled: the URL is operator-authored and validated at graph load.",
+        "Connections and tools/list results are pooled per process, keyed by URL + transport + header names + a salted fingerprint of the RESOLVED credential values, so rotating a secret yields a new connection instead of reusing one built with the retired value.",
+        "Pool size is bounded by COLMENA_MAX_POOLED_MCP_SERVERS (default 128)."
+      ],
+      "mcp_block": {
+        "url": {
+          "type": "string",
+          "required": true,
+          "description": "Server endpoint. Must be HTTPS. Validated at graph load - a malformed mcp block fails the load closed."
+        },
+        "transport": {
+          "type": "string",
+          "required": false,
+          "description": "Remote transport. Defaults to streamable HTTP."
+        },
+        "headers": {
+          "type": "object",
+          "required": false,
+          "description": "Header name -> value. Values may be secure-value references such as '<sv_token>'; they are resolved at connect time, never stored on the cache key, and never logged. A reference that does not resolve fails that server closed (it degrades) rather than travelling to the server as literal placeholder text."
+        },
+        "timeout_seconds": {
+          "type": "integer",
+          "required": false,
+          "description": "Per-call deadline in seconds, and the bound on the connect handshake. Default 30."
+        },
+        "cache_ttl_seconds": {
+          "type": "integer",
+          "required": false,
+          "description": "How long this server's tools/list result stays reusable, in seconds. Default 300."
+        }
+      },
+      "example": {
+        "tool_configurations": {
+          "ctx7": {
+            "node_type": "mcp",
+            "mcp": {
+              "url": "https://mcp.context7.com/mcp",
+              "headers": {
+                "Authorization": "<sv_context7_token>"
+              },
+              "cache_ttl_seconds": 900
+            }
+          }
+        },
+        "what_the_llm_sees": [
+          "ctx7__resolve_library_id",
+          "ctx7__get_library_docs"
+        ]
+      }
+    },
     "http_request": {
       "summary": "HTTP calls to external APIs. The most common node used as a tool. Fixed fields (URL, method, headers, auth) are hidden; the LLM supplies only the dynamic parameters.",
       "special_behaviors": [
