@@ -2543,3 +2543,50 @@ mismo crate todavía puede llamarlo— pero saca de la API pública el primitivo
 **Alcance.** Módulo nuevo, aditivo, sin llamadores todavía. ADP no afectado.
 
 **Estado.** done.
+
+## 42. Rutear la llamada del modelo de vuelta al servidor MCP
+
+**Qué cambió.** `mcp/dispatch.rs` con `McpDispatcher`: encuentra el servidor detrás de un nombre
+expuesto, reenvía los argumentos verbatim, y devuelve el resultado por `contain` (§41). Es el viaje de
+vuelta de `wire` (§40).
+
+**La pertenencia se decide por membresía, no por forma del nombre.** Una tool built-in puede contener
+`__`; inferir propiedad desde el string dejaría que MCP le robe el dispatch — y el executor va a
+consultar esta rama **primero**.
+
+**Todos los caminos de retorno pasan por `contain`, incluidos los que nunca tocan la red.** Un
+llamador no distingue desde afuera cuál falló, así que un string sin cerca en cualquiera de ellos
+sería el único agujero de la contención. La ruta inexistente y el servidor sin binding devuelven texto
+envuelto igual que un resultado real.
+
+**Un fallo es error de tool, nunca del nodo** — igual que un `python_script` devuelve su traceback.
+Fallar el `llm_call` además tiraría los resultados de las otras tools del mismo turno.
+
+**La costura, y por qué existe.** `call` delega en `call_and_contain`, que toma `&dyn McpClientPort`.
+Sin eso, las tres ramas que llevan **todo resultado real** solo eran alcanzables con una conexión
+viva, y la revisión mostró la consecuencia: `result.is_error` viaja directo al selector de techo, y
+una mutación que lo invirtiera —o lo fijara— pasaba la suite entera. Ese flag decide si el cuerpo de
+un tercero se acota con 4 KB o con 32 KB. Las tres variantes mueren ahora.
+
+**Dos cosas más que nadie verificaba:** que los **argumentos del modelo lleguen al servidor** (se
+reenvían verbatim y descartarlos pasaba la suite) y que `alias` y `tool` caigan en **sus propias
+ranuras** del encuadre — intercambiarlos también pasaba, y dejaría el alias del operador y el nombre
+del tercero cambiados de lugar en una oración que Colmena dice con voz propia.
+
+**Dos huecos que la revisión encontró y que sí se pudieron cerrar acá.** Todos los tests usaban el
+**mismo par** de literales, así que un `call_and_contain` que ignorara sus argumentos y los hardcodeara
+pasaba los diez — la propiedad quedaba probada para un par, no para el reenvío. Y el mapa de
+`bindings` estaba **siempre vacío**, así que la búsqueda por `route.alias` nunca se ejercitaba y una
+regresión que buscara por nombre expuesto pasaba igual. La salida estaba a la vista y tardé dos rondas
+en verla: `bind` **no conecta** —solo resuelve credenciales y deriva la identidad de pool—, así que un
+binding se construye sin servidor y el fallo de conexión se ejercita de verdad. Ese test cubre ahora
+el lookup, la rama de conexión, y que su error vuelva contenido.
+
+**El doc de `owns` dejó de afirmar sobre código que no existe.** Decía que el executor consulta esta
+rama primero; no hay executor todavía. Ahora lo dice como **requisito** para quien cablee, que es lo
+que era.
+
+**Alcance.** Módulo nuevo, aditivo. Sin llamadores todavía: el cableado en `llm.rs` es la slice
+siguiente y es la que finalmente pone MCP al alcance del modelo. ADP no afectado.
+
+**Estado.** done.
