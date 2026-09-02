@@ -6,6 +6,8 @@
 
 pub mod bind;
 pub mod expose;
+pub mod wire;
 
 pub use bind::{bind, McpBinding};
 pub use expose::{collect_mcp_tool_configs, drop_colliding, exposed_definitions};
+pub use wire::{fold_catalog, Folded, McpRoute};

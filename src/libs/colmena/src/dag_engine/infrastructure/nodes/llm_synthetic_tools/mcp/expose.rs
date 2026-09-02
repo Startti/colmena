@@ -51,8 +51,15 @@ pub fn collect_mcp_tool_configs(raw: &Value) -> BTreeMap<String, McpServerSpec> 
 pub fn exposed_definitions(
     alias: &str,
     tools: &[McpToolDescriptor],
-) -> (Vec<ToolDefinition>, Vec<String>) {
+) -> (Vec<ToolDefinition>, BTreeMap<String, String>, Vec<String>) {
     let mut defs = Vec::new();
+    // Exposed name -> the tool that PRODUCED it, verbatim. Emitted here because
+    // this loop is the only place that knows which descriptor survived: a tool
+    // dropped for an oversized schema never reaches the `taken` set, so a later
+    // tool normalising the same way becomes the exposed one. A caller matching
+    // names against the catalog afterwards would find the DROPPED tool first and
+    // route the model's calls to a tool it was never shown.
+    let mut origins: BTreeMap<String, String> = BTreeMap::new();
     // At most one note per considered tool, and the loop below considers at
     // most `MCP_MAX_TOOLS_PER_SERVER` of them, so this is bounded by that same
     // ceiling without needing its own.
@@ -95,6 +102,7 @@ pub fn exposed_definitions(
             ));
             continue;
         }
+        origins.insert(exposed_name.clone(), tool.name.clone());
         defs.push(
             ToolDefinition::new(
                 exposed_name,
@@ -115,7 +123,7 @@ pub fn exposed_definitions(
         ));
     }
 
-    (defs, skipped)
+    (defs, origins, skipped)
 }
 
 /// `head_truncate`, but only when there is something to truncate.
@@ -252,7 +260,7 @@ mod tests {
             .iter()
             .find(|t| t.name == "resolve-library-id")
             .expect("fixture has resolve-library-id");
-        let (defs, _) = exposed_definitions("context7", &tools);
+        let (defs, _, _) = exposed_definitions("context7", &tools);
 
         let exposed = find(&defs, "context7__resolve-library-id");
         let override_schema = exposed
@@ -280,7 +288,7 @@ mod tests {
                 "properties": { "q": { "type": "string", "description": long } }
             }),
         }];
-        let (defs, _) = exposed_definitions("srv", &tools);
+        let (defs, _, _) = exposed_definitions("srv", &tools);
         let schema = find(&defs, "srv__verbose")
             .input_schema_override
             .as_ref()
@@ -315,7 +323,7 @@ mod tests {
                 input_schema: json!({ "type": "object" }),
             },
         ];
-        let (defs, skipped) = exposed_definitions("srv", &tools);
+        let (defs, _, skipped) = exposed_definitions("srv", &tools);
         assert_eq!(
             names(&defs),
             vec!["srv__healthy"],
@@ -342,7 +350,7 @@ mod tests {
     #[test]
     fn a_short_description_is_not_marked_as_truncated() {
         let tools = fixture("deepwiki_tools");
-        let (defs, _) = exposed_definitions("deepwiki", &tools);
+        let (defs, _, _) = exposed_definitions("deepwiki", &tools);
         for d in &defs {
             assert!(
                 !d.description.contains("[truncated"),
@@ -371,7 +379,7 @@ mod tests {
             description: huge,
             input_schema: json!({ "type": "object" }),
         }];
-        let (defs, _) = exposed_definitions("srv", &tools);
+        let (defs, _, _) = exposed_definitions("srv", &tools);
         let d = find(&defs, "srv__verbose");
         assert!(
             d.description.len() <= MCP_MAX_DESCRIPTION_BYTES,
@@ -407,7 +415,7 @@ mod tests {
                 input_schema: json!({ "type": "object" }),
             },
         ];
-        let (defs, skipped) = exposed_definitions("srv", &tools);
+        let (defs, _, skipped) = exposed_definitions("srv", &tools);
 
         assert_eq!(
             names(&defs),
@@ -438,7 +446,7 @@ mod tests {
             description: "x".to_string(),
             input_schema: json!({ "type": "object", "blob": "y".repeat(40 * 1024) }),
         }];
-        let (_defs, skipped) = exposed_definitions("srv", &tools);
+        let (_defs, _, skipped) = exposed_definitions("srv", &tools);
 
         assert_eq!(skipped.len(), 1, "the oversized schema excludes it");
         assert!(
@@ -478,7 +486,7 @@ mod tests {
                 input_schema: json!({ "type": "object" }),
             },
         ];
-        let (_defs, skipped) = exposed_definitions("srv", &tools);
+        let (_defs, _, skipped) = exposed_definitions("srv", &tools);
 
         assert_eq!(
             skipped.len(),
@@ -511,7 +519,7 @@ mod tests {
             description: "line one\nline two\u{1b}[2Jline three".to_string(),
             input_schema: json!({ "type": "object" }),
         }];
-        let (defs, _) = exposed_definitions("srv", &tools);
+        let (defs, _, _) = exposed_definitions("srv", &tools);
         let d = find(&defs, "srv__t");
 
         assert!(
@@ -533,7 +541,7 @@ mod tests {
             .iter()
             .find(|t| t.name == "resolve-library-id")
             .expect("fixture has it");
-        let (defs, _) = exposed_definitions("context7", &tools);
+        let (defs, _, _) = exposed_definitions("context7", &tools);
         let d = find(&defs, "context7__resolve-library-id");
         assert_eq!(
             d.description, source.description,
@@ -559,7 +567,7 @@ mod tests {
             })
             .collect();
 
-        let (defs, skipped) = exposed_definitions("srv", &tools);
+        let (defs, _, skipped) = exposed_definitions("srv", &tools);
 
         assert_eq!(
             defs.len(),
@@ -580,7 +588,7 @@ mod tests {
     #[test]
     fn mcp_exposed_name_context7_hyphenated_untouched() {
         let tools = fixture("context7_tools");
-        let (defs, _) = exposed_definitions("context7", &tools);
+        let (defs, _, _) = exposed_definitions("context7", &tools);
         assert!(
             names(&defs).contains(&"context7__resolve-library-id"),
             "hyphens must survive: {:?}",
@@ -608,7 +616,7 @@ mod tests {
                 input_schema: json!({}),
             },
         ];
-        let (defs, _) = exposed_definitions("srv", &tools);
+        let (defs, _, _) = exposed_definitions("srv", &tools);
         for d in &defs {
             assert!(
                 d.name.chars().count() <= 64,
@@ -627,7 +635,7 @@ mod tests {
     #[test]
     fn mcp_tool_definition_includes_summary_and_schema_override() {
         let tools = fixture("context7_tools");
-        let (defs, _) = exposed_definitions("context7", &tools);
+        let (defs, _, _) = exposed_definitions("context7", &tools);
         let d = find(&defs, "context7__resolve-library-id");
         let summary = d.summary.as_ref().expect("MCP tools carry a summary");
         assert!(
@@ -662,7 +670,7 @@ mod tests {
         // The server's tool normalizes to `describe_tool` only if the alias is
         // empty; use the real collision shape instead: a built-in already
         // holding the exposed name.
-        let (defs, _) = exposed_definitions("srv", &tools);
+        let (defs, _, _) = exposed_definitions("srv", &tools);
         let claimed: std::collections::HashSet<String> =
             ["srv__describe_tool".to_string()].into_iter().collect();
 
@@ -690,7 +698,7 @@ mod tests {
     #[test]
     fn mcp_tools_survive_when_no_name_is_claimed() {
         let tools = fixture("deepwiki_tools");
-        let (defs, _) = exposed_definitions("deepwiki", &tools);
+        let (defs, _, _) = exposed_definitions("deepwiki", &tools);
         let before = names(&defs).len();
         let (kept, warnings) = drop_colliding(defs, &std::collections::HashSet::new());
         assert_eq!(kept.len(), before);

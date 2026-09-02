@@ -2398,3 +2398,39 @@ proceso, así que dentro de él cada rama del fallback sería inalcanzable desde
 **Alcance.** Aditivo, sin llamadores todavía. ADP no afectado.
 
 **Estado.** done.
+
+## 39. Plegar el catálogo de un servidor MCP en tools y rutas
+
+**Qué cambió.** `mcp/wire.rs` con `fold_catalog`: dado el catálogo de un servidor y los nombres que
+Colmena ya repartió, produce las definiciones que sobreviven, las **rutas** para mandar una llamada de
+vuelta, y las notas que un operador necesita para entender qué se descartó. Sin red, sin credenciales,
+sin pool. `exposed_definitions` gana un tercer valor de retorno, el mapa de orígenes.
+
+**Por qué existe una tabla de rutas.** `normalize` es lossy: `foo.bar` y `foo/bar` colapsan ambos a
+`alias__foo_bar`, así que el nombre expuesto **no determina** el original y la vuelta no se puede
+invertir.
+
+**Preguntar, no re-derivar — y por qué la primera versión estaba mal.** El intento inicial buscaba
+`def.name` contra el catálogo con `normalize` y tomaba la primera coincidencia. Es incorrecto:
+`exposed_definitions` descarta un schema sobredimensionado **antes** de reclamar el nombre en su
+conjunto `taken`, así que una tool posterior que normaliza igual pasa a ser la expuesta — y la
+búsqueda por nombre encontraba primero la **descartada**. El modelo habría visto el esquema y la
+descripción de una tool mientras sus llamadas iban a otra, contra el mismo servidor de terceros. El
+bucle que construye la definición es el único que sabe cuál descriptor sobrevivió, así que ahora
+entrega esa respuesta en vez de que el llamador la adivine.
+
+**`claimed` se extiende por servidor.** Sin eso, `drop_colliding` solo compararía contra las built-in
+y dos servidores MCP con la misma tool llegarían ambos al proveedor, que Gemini rechaza. El contrato
+de `drop_colliding` es que una tool MCP **siempre** pierde un nombre disputado, y eso solo es cierto
+si `claimed` llega completo — responsabilidad del llamador, anotada en el doc de la función.
+
+**Por qué está separado de la E/S.** No es solo tamaño de revisión: la mitad que trae el catálogo
+construye su propia conexión desde un binding, así que no hay costura para pasarle un servidor falso.
+Todo lo de acá sería alcanzable únicamente a través de una llamada de red real.
+
+**Compatibilidad.** El tercer valor de retorno de `exposed_definitions` toca solo sus 16 call sites de
+test dentro del mismo módulo; la función no tiene consumidores fuera del crate. ADP no afectado.
+
+**Alcance.** Módulo nuevo, aditivo, sin llamadores todavía.
+
+**Estado.** done.
