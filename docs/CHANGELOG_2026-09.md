@@ -163,3 +163,50 @@ implementación de cada nodo. Además:
 
 **Estado.** done.
 
+---
+
+## 4. El catálogo de nodos deja de ser solo documentación
+
+**Qué cambió.** `docs/node_configurations.json` ahora se embebe en el binario con
+`include_str!` y se parsea a tipos (`NodeCatalog`, `NodeCatalogEntry`,
+`FieldSpec`) en `dag_engine::domain::lint::catalog`. Se embebe **ese mismo
+archivo**, no una copia: el documento que leen las personas y los agentes y el
+que consumirá el linter son los mismos bytes, así que no pueden discrepar. El
+precedente ya existía en `log_policy.rs`, que embebe una guía para verificar sus
+targets de logging.
+
+Tres tests nuevos impiden que el catálogo vuelva a desviarse:
+
+- `declared_node_types_all_have_an_entry` — el archivo no puede contradecirse a
+  sí mismo (declaraba 37 tipos válidos y documentaba 32).
+- `every_registered_node_type_is_documented_in_the_catalog` — todo tipo que el
+  registry sabe ejecutar tiene entrada.
+- `the_catalog_documents_no_node_type_the_engine_cannot_run` — y a la inversa.
+
+Los dos últimos construyen el registry **con todas sus dependencias opcionales**:
+`secure_suspend` solo se registra si hay `SecureValueService`, y
+`image_generation` / `image_edit` / `tts` solo si hay adapter de storage. Un
+registry armado sin ellas encogería el conjunto bajo prueba en silencio.
+
+Dos detalles que el tipado obligó a modelar de forma explícita:
+
+- **Obligatoriedad condicional.** `required` no siempre es booleano: `router.schema`
+  dice `"mode B only"`. `Requiredness::Conditional` conserva ese valor tal cual, y
+  `is_unconditional()` devuelve `false`, para que quien consuma el catálogo no
+  pueda tratar una condición no evaluable como un requisito duro.
+- **Config abierta.** `input` y `mock_input` emiten su propio `config` como datos
+  para los nodos siguientes, así que ninguna clave puede ser "inventada" en ellos.
+  El catálogo ya expresaba eso con una clave placeholder entre ángulos
+  (`<any_key>`) en `mock_input`; ahora está reconocido en el tipo, vía
+  `accepts_any_field()`, y aplicado también a `input`.
+
+**Sin cambio de comportamiento.** Nada consume todavía el catálogo en tiempo de
+ejecución: `NodeCatalog::embedded()` no se alcanza desde `run` ni desde `serve`.
+
+**Nota de empaquetado.** `docs/` queda fuera del package root del crate, así que
+`cargo package` no podría resolver el `include_str!`. Hoy no es una restricción
+—el crate se consume como dependencia git— pero si eso cambiara, el camino es
+generar un artefacto dentro del crate.
+
+**Estado.** done.
+

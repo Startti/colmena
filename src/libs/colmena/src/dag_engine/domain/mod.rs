@@ -12,6 +12,7 @@ pub mod toolkit_node;
 pub use secure_value_repository::SecureValueRepository;
 
 pub mod initializable_node;
+pub mod lint;
 pub mod sql_errors;
 pub mod sql_permissions;
 pub mod sql_ports;
