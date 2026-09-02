@@ -2461,7 +2461,7 @@ depende del orden: quién gana un nombre disputado no puede depender de quién c
 hacer, así que el system message declara la pérdida. Nombra el servidor y **no** las tools que faltan:
 el catálogo es justamente lo que no se pudo traer, y cualquier lista sería inventada. En un turno sano
 devuelve `None`, no un string vacío — un vacío igual cambiaría el prefijo cacheable y costaría una
-escritura de caché por turno (§30).
+escritura de caché por turno (§7).
 
 **El accesor y su advertencia.** `McpBinding::config()` es `pub(crate)`, no `pub`. El config que
 devuelve carga `header_refs`, que es `spec.headers` verbatim, y `resolve_headers` deja pasar
@@ -2700,31 +2700,51 @@ falló y `debug!` cuando no. Importa el nivel: el filtro por defecto del binario
 loguear todo en `debug!` —como hacía la primera versión de esta slice— dejaba a un servidor que falla
 **todas** las llamadas exactamente tan invisible como antes. El flag es del operador, no del modelo.
 
-**El aviso al modelo va último entre las secciones** del system message: es lo único que varía por
-turno, y cualquier cosa agregada después caería fuera del prefijo cacheable y se re-facturaría cada
-turno (§30).
+**El aviso al modelo viaja por `with_volatile_system_suffix`, no por `sections`.** Es lo único que
+varía por turno, así que va fuera del prefijo cacheable y no lo re-factura (§7). Y tiene que ir por
+ahí por una razón más dura que la caché: `sections` se arma **solo cuando no hay historial**, o sea
+únicamente en el primer turno. Un aviso puesto ahí llegaba al modelo en el turno 1 y nunca más, así
+que un servidor que se caía en el turno 5 no se anunciaba jamás. El sufijo volátil se recalcula en
+cada turno, que es exactamente para lo que este archivo ya lo había creado con el bloque temporal —
+cuyo propio comentario describe esa misma obsolescencia.
 
 **Dos tests de integración en el executor.** Cuatro rondas de revisión señalaron que `llm.rs` y el
 executor no tenían ninguno. El executor sí era construible desde un test — bastaba mirar los que ya
 existían. Ahora se fija que un nombre MCP lo atienda la rama MCP, y que un nombre que MCP **no** posee
 caiga a través hasta las built-ins. La mutación `owns() -> true` mata el segundo. **`llm.rs` sigue sin
 tests**, y conviene decirlo en vez de dejar entender que se cubrieron los dos: la precedencia
-`inputs` sobre `config` al leer los specs, el llenado de la ranura y el orden de las secciones siguen
-sostenidos solo por inspección.
+`inputs` sobre `config` al leer los specs, el llenado de la ranura y la construcción del aviso siguen
+sostenidos solo por inspección — y conviene subrayarlo, porque los **dos** CRITICALs de esta cadena
+vivieron justo ahí.
 
 **Y ese hueco escondía un defecto real.** El aviso al modelo se empujaba **dentro** de la guarda
 `if !sections.is_empty()`, que se evalúa antes. Un `llm_call` cuyas únicas tools son MCP, sin
 `system_message` propio, no tiene ninguna otra sección — así que con su único servidor caído el aviso
 se descartaba en silencio, justo en el caso para el que existe. Ahora se empuja antes de la guarda.
 
-**Dos costos residuales, declarados y no cerrados.** Un `llm_call` que baje `max_tool_result_bytes`
-por debajo de ~33 KB vuelve a cortar el marcador de cierre de la cerca: el techo de 32 KB asume el
-default de 50 KB del executor, y derivarlo del tope real sigue siendo el arreglo de fondo. Y cuando el
-modelo emite **varias** llamadas MCP en un mismo turno, el agent loop las despacha **secuencialmente**
-sin deadline agregado, así que N llamadas a un servidor lento suman N veces su timeout antes de que el
-usuario vea respuesta. Ese bucle es preexistente, pero hasta ahora despachaba cosas rápidas y locales;
-esta slice es la primera que mete ahí llamadas de red a terceros de forma sistemática. Ninguno de los
-dos bloquea, y los dos quedan escritos acá en vez de solo en un recibo.
+**Tres costos residuales, declarados y no cerrados.**
+
+*La cerca y el tope del executor.* Un `llm_call` que baje `max_tool_result_bytes` por debajo de
+~33 KB vuelve a cortar el marcador de cierre: el techo de 32 KB asume el default de 50 KB del
+executor, y derivarlo del tope real sigue siendo el arreglo de fondo. No es inducible por un atacante
+—ese valor sale solo de config del operador, nunca del modelo ni del servidor— así que es
+desconfiguración, no vector.
+
+*El costo del primer contacto.* Un servidor caído cuesta su `timeout` completo **antes** de que el
+modelo se invoque, porque el cooldown de §44 solo espacia los intentos **siguientes**. El fan-out es
+concurrente, así que N servidores caídos cuestan el más lento y no la suma — pero ese pico existe en
+el primer turno y hay que contarlo al dimensionar.
+
+*El bucle sin deadline agregado, que NO es un problema de MCP.* Cuando el modelo emite varias llamadas
+en un turno, el agent loop las despacha secuencialmente sin tope conjunto, así que N llamadas a un
+servidor lento suman N veces su timeout. **Esto es una brecha vieja de todo el loop, no una novedad de
+MCP**: `http_request`, `tavily_client`, `gsheets_*`, `gdocs_*` y los nodos de media ya pasan por ahí y
+ya acumulan latencia real de terceros. Una versión anterior de esta entrada decía que este bucle
+"hasta ahora despachaba cosas rápidas y locales" y que MCP era el primero en meterle red de terceros;
+era falso, y el efecto era achicar un problema sistémico haciéndolo ver como específico de esta
+feature. Se corrige acá porque de este texto alguien va a dimensionar capacidad.
+
+Ninguno de los tres bloquea, y los tres quedan escritos acá en vez de solo en un recibo.
 
 **Alcance.** Aditivo. Un grafo sin entradas `mcp` no cambia en un byte: el bloque entero está detrás
 de `mcp_specs.is_empty()`, y el executor ni siquiera recibe la ranura. ADP no afectado.
