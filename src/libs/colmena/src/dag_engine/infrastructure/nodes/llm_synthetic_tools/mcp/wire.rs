@@ -1,21 +1,150 @@
-//! Folding one MCP server's catalog into tools the model can see.
+//! Assembling every declared MCP server into one turn's tool set.
 //!
-//! The pure half of assembly: no network, no credentials, no pool. Given a
-//! server's catalog and the names Colmena has already handed out, it produces
-//! the tool definitions that survive, the routes needed to send a call back,
-//! and the notes an operator needs to understand what was dropped.
+//! Two halves. [`fold_catalog`] is pure — a catalog in, definitions and routes
+//! out — and is where the naming, collision and routing rules live. [`wire`] is
+//! the I/O around it: it resolves credentials, reaches every declared server,
+//! and folds what comes back.
 //!
-//! Split from the I/O that fetches the catalog, and not only for review size:
-//! the fetching half builds its own connection from a binding, so there is no
-//! seam to hand it a fake server. Everything below would otherwise be reachable
-//! only through a live network call.
+//! **Degrading is the contract, not a fallback.** A third-party server that is
+//! down must not take the agent with it: the operator declared MCP as one of
+//! several capabilities and the other tools still work. So [`wire`] returns no
+//! `Result` at all — a server that fails to bind or to answer `tools/list`
+//! contributes no tools, its alias lands in `unavailable`, and the agent runs
+//! on. Silence would be the wrong kind of degrading, though: a model that keeps
+//! its old belief about what it can do will promise work it can no longer
+//! perform, so [`unavailable_notice`] states the loss in the system message.
 
 use std::collections::{BTreeMap, HashSet};
+use std::sync::Arc;
 
+use futures::future::join_all;
+
+use crate::dag_engine::application::secure_value_service::SecureValueService;
+use crate::dag_engine::domain::tool_configuration::McpServerSpec;
+use crate::dag_engine::infrastructure::mcp_registry::McpConnectionRegistry;
 use crate::llm::domain::mcp::McpToolDescriptor;
 use crate::llm::domain::tools::ToolDefinition;
 
+use super::bind::{bind, McpBinding};
 use super::expose::{drop_colliding, exposed_definitions};
+
+/// One server's fan-out result: its binding and catalog, or why it dropped out.
+type Fetched<'a> = (
+    &'a String,
+    Result<(McpBinding, Arc<Vec<McpToolDescriptor>>), String>,
+);
+
+/// One turn's worth of MCP wiring.
+pub struct McpWiring {
+    /// Tools the provider will see, already de-collided across every server.
+    pub definitions: Vec<ToolDefinition>,
+    /// Exposed name -> the server and tool a call must be routed back to.
+    pub routes: BTreeMap<String, McpRoute>,
+    /// Operator-facing warnings. Meant for the log, not for the model.
+    pub notes: Vec<String>,
+    /// Aliases whose server contributed nothing this turn.
+    pub unavailable: Vec<String>,
+    /// Bindings for the servers that DID answer, so dispatch can route a call
+    /// back without resolving credentials a second time.
+    pub bindings: BTreeMap<String, McpBinding>,
+}
+
+/// Bind, list and expose every declared server, degrading past the ones that
+/// fail.
+///
+/// `claimed` must arrive holding every name Colmena has already given out, and
+/// is EXTENDED per server — see [`fold_catalog`], whose contract depends on it.
+///
+/// Servers are folded in `BTreeMap` order, so which one wins a contested name is
+/// deterministic across runs rather than a function of who answered first.
+pub async fn wire(
+    registry: &McpConnectionRegistry,
+    specs: &BTreeMap<String, McpServerSpec>,
+    claimed: &mut HashSet<String>,
+    secure_values: Option<&SecureValueService>,
+    session_id: &str,
+    agent_session_id: Option<&str>,
+) -> McpWiring {
+    let mut out = McpWiring {
+        definitions: Vec::new(),
+        routes: BTreeMap::new(),
+        notes: Vec::new(),
+        unavailable: Vec::new(),
+        bindings: BTreeMap::new(),
+    };
+
+    // Reach every server CONCURRENTLY. Sequentially, N servers that are slow but
+    // alive add up: each is bounded only by its own `timeout_seconds` (default
+    // 30) and nothing bounds the sum, so five of them could add over two minutes
+    // to EVERY turn — this runs before the model is invoked. Fanned out, the
+    // cost is the slowest single server rather than their total.
+    //
+    // Only the I/O is concurrent. The fold below stays sequential and in
+    // `BTreeMap` order, because `claimed` is order-dependent: which server wins
+    // a contested name must not depend on which one answered first.
+    let fetched: Vec<Fetched> = join_all(specs.iter().map(|(alias, spec)| async move {
+        let binding = match bind(alias, spec, secure_values, session_id, agent_session_id).await {
+            Ok(b) => b,
+            // Includes the credential refusals: a reference that did not resolve
+            // is a configuration fault, but it must not be fatal here either, or
+            // one stale secret takes down an agent whose other tools are fine.
+            Err(e) => return (alias, Err(format!("could not be prepared: {e}"))),
+        };
+        match registry
+            .tools(&binding.key, binding.config(), || binding.connect())
+            .await
+        {
+            Ok(catalog) => (alias, Ok((binding, catalog))),
+            Err(e) => (alias, Err(format!("did not list its tools: {e}"))),
+        }
+    }))
+    .await;
+
+    for (alias, result) in fetched {
+        let (binding, catalog) = match result {
+            Ok(pair) => pair,
+            Err(why) => {
+                out.notes.push(format!("MCP server '{alias}' {why}"));
+                out.unavailable.push(alias.clone());
+                continue;
+            }
+        };
+
+        let folded = fold_catalog(alias, &catalog, claimed);
+        out.notes.extend(folded.notes);
+        out.routes.extend(folded.routes);
+        out.definitions.extend(folded.definitions);
+        out.bindings.insert(alias.clone(), binding);
+    }
+
+    out
+}
+
+/// What the model is told about servers that contributed nothing.
+///
+/// `None` when nothing is missing, so a healthy turn adds no tokens and leaves
+/// the cached prompt prefix untouched — an empty string would still change it
+/// and cost a cache write every turn.
+///
+/// Says only that the server is unavailable. It does NOT name the tools that are
+/// missing: the catalog is exactly what could not be fetched, so any list would
+/// be invented.
+pub fn unavailable_notice(unavailable: &[String]) -> Option<String> {
+    if unavailable.is_empty() {
+        return None;
+    }
+    let names = unavailable
+        .iter()
+        .map(|a| format!("'{a}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!(
+        "Unavailable this turn: the MCP server(s) {names} did not respond, so none \
+         of their tools can be called right now. Do not promise or attempt work \
+         that depends on them; say plainly that the capability is unavailable, and \
+         use your other tools where they suffice."
+    ))
+}
 
 /// Where an exposed tool name came from.
 ///
@@ -108,6 +237,86 @@ mod tests {
             description: "does a thing".to_string(),
             input_schema: json!({ "type": "object" }),
         }
+    }
+
+    /// A server that cannot be reached must cost the agent its tools, not its
+    /// run. `wire` has no error path by design, so this is the whole contract.
+    #[tokio::test]
+    async fn an_unreachable_server_degrades_instead_of_failing() {
+        let registry = McpConnectionRegistry::new();
+        let mut specs = BTreeMap::new();
+        // Reserved by RFC 6761: guaranteed not to resolve, so this exercises a
+        // real connection failure rather than a mocked one. The 1s timeout
+        // matters — with the 30s default this would hang for half a minute in a
+        // sandbox whose resolver blocks instead of erroring.
+        specs.insert(
+            "dead".to_string(),
+            serde_json::from_value(json!({
+                "url": "https://invalid./mcp",
+                "timeout_seconds": 1
+            }))
+            .expect("spec parses"),
+        );
+        let mut claimed = HashSet::new();
+
+        let w = wire(&registry, &specs, &mut claimed, None, "s1", None).await;
+
+        assert!(w.definitions.is_empty(), "a dead server exposes no tools");
+        assert_eq!(w.unavailable, vec!["dead".to_string()]);
+        assert!(
+            w.bindings.is_empty(),
+            "a server that never answered must not be dispatchable"
+        );
+        assert!(!w.notes.is_empty(), "the operator must be told why");
+    }
+
+    /// A credential that does not resolve is an operator fault, but it must
+    /// degrade like any other failure rather than killing the node.
+    #[tokio::test]
+    async fn an_unresolvable_credential_degrades_rather_than_failing() {
+        let registry = McpConnectionRegistry::new();
+        let mut specs = BTreeMap::new();
+        specs.insert(
+            "needs-secret".to_string(),
+            serde_json::from_value(json!({
+                "url": "https://mcp.example.com/mcp",
+                "headers": { "Authorization": "<sv_missing>" }
+            }))
+            .expect("spec parses"),
+        );
+        let mut claimed = HashSet::new();
+
+        // No secure-value service: `bind` refuses the reference.
+        let w = wire(&registry, &specs, &mut claimed, None, "s1", None).await;
+
+        assert_eq!(w.unavailable, vec!["needs-secret".to_string()]);
+        assert!(w.definitions.is_empty());
+        let joined = w.notes.join(" ");
+        assert!(
+            joined.contains("Authorization"),
+            "the note must name the header so an operator can act: {joined}"
+        );
+        assert!(
+            !joined.contains("<sv_missing>"),
+            "the note must not echo the reference: {joined}"
+        );
+    }
+
+    /// The model has to learn it lost a capability, or it will keep promising
+    /// work it can no longer do.
+    #[test]
+    fn the_notice_names_every_unavailable_server() {
+        let n = unavailable_notice(&["alpha".to_string(), "beta".to_string()])
+            .expect("a notice is produced when something is missing");
+        assert!(n.contains("'alpha'"), "missing alpha: {n}");
+        assert!(n.contains("'beta'"), "missing beta: {n}");
+    }
+
+    /// A healthy turn must add nothing at all — an empty string would still
+    /// change the prompt prefix and cost a cache write every turn.
+    #[test]
+    fn a_healthy_turn_adds_no_notice() {
+        assert!(unavailable_notice(&[]).is_none());
     }
 
     /// The route is what makes a call routable at all. `normalize` is lossy, so
