@@ -597,3 +597,38 @@ piso del test de drift subió de 22 a 31.
 
 **Estado.** partial — 31/37. Faltan 6, todos del grupo caro.
 
+---
+
+## 16. Fase 2, slice 5: el clúster LLM y `tavily_client`
+
+**Qué cambió.** Migrados a `config_schema()`: `planner`, `critic`, `reactor`,
+`orchestrator` y `tavily_client`. **Van 36 de 37** — solo falta `llm_call`.
+
+**`planner.texts` no estaba documentado.** El planner lee `config.texts`
+(`planner.rs:275`) igual que `critic` y `reactor`, pero el catálogo solo lo
+documentaba en esos dos. Agregado. Ningún grafo del repo lo usaba, así que el
+falso positivo era latente, no activo.
+
+**Las tres `temperature` son genuinamente `read_only`.** `planner` y `critic`
+llaman al LLM con 0.1 y `reactor` con 0.2, todas hardcodeadas. El `read_only` del
+catálogo describe la realidad.
+
+**`orchestrator` declara sus cuatro sub-bloques con las constantes `KEY_*`** que
+el propio nodo usa para buscarlos, igual que `http_request` con sus reserved keys
+y `subgraph` con sus fuentes de grafo hijo. Renombrar una constante sin tocar el
+catálogo hace fallar el test.
+
+**`tavily_client`**: sus 18 campos se separan en dos grupos que la declaración
+documenta — nueve ajustes propios del nodo, y nueve argumentos de sub-tool que
+`build_effective_inputs` rellena desde config cuando el nodo corre como nodo de
+grafo en vez de como tool del LLM.
+
+**Falsa alarma verificada**: `orchestrator` lee `final_reactor` vía
+`KEY_FINAL_REACTOR` en una línea aparte del `.get(`, y un barrido ingenuo la
+pierde. El campo es real y requerido.
+
+**Sin ruido nuevo**: los mismos 80 hallazgos sobre los 300 grafos. Piso del test
+de drift: 31 → 36.
+
+**Estado.** partial — 36/37.
+

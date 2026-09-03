@@ -2096,6 +2096,12 @@
             { "name": "flights_agent", "description": "Searches for flights and compares prices" },
             { "name": "hotels_agent", "description": "Finds hotel accommodations based on budget and preferences" }
           ]
+        },
+        "texts": {
+          "type": "object",
+          "required": false,
+          "default": null,
+          "description": "Extra named text blocks appended to the planner's prompt, same shape as on 'critic' and 'reactor'. Read at planner.rs:275."
         }
       },
       "input_ports": {

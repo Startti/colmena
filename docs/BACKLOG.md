@@ -28,14 +28,14 @@ Lo que quedó abierto, en orden de importancia:
   acordado: solo hechos mecánicos** (nombres, `required`, `valid_values`, `read_only`); la
   prosa queda en el JSON a mano — no se generará el JSON completo.
 
-  **Migrados 31 de 37.** Slice 1: los 8 sin config + `exponential`. Slice 2: las tres
+  **Migrados 36 de 37.** Slice 1: los 8 sin config + `exponential`. Slice 2: las tres
   primitivas del builder y los 4 nodos que las ejercitan. Slice 3: los 9 fáciles.
-  Slice 4: los 9 medianos.
+  Slice 4: los 9 medianos. Slice 5: el clúster LLM (`planner`, `critic`, `reactor`,
+  `orchestrator`) y `tavily_client`.
 
-  **Faltan 6, todos caros**: el clúster LLM (`planner`, `critic`, `reactor`,
-  `orchestrator`), `tavily_client` (18 campos) y `llm_call` (33). Comparten
-  `llm_shared_fields` y son donde más probable es que el catálogo esté mal — migrarlos
-  puede obligar a corregirlo. Sugerido: un slice para los 5 y otro solo para `llm_call`.
+  **Falta 1: `llm_call`** (33 campos), el más grande y el de mayor riesgo de drift.
+  Cuando entre, los 37 estarán declarados y se puede pasar a **generar/verificar el set
+  de campos** del JSON desde el código; la prosa sigue autorada.
 
   Endgame: cuando los 37 declaren `config_schema()`, el *set de campos* del JSON pasa a ser
   verificado/generado; la prosa sigue autorada.

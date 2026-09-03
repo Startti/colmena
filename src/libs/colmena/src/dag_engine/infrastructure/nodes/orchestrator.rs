@@ -1,6 +1,7 @@
 use crate::colmena_log;
 use crate::dag_engine::application::ports::NodeRegistryPort;
 use crate::dag_engine::domain::events::DagExecutionEvent;
+use crate::dag_engine::domain::lint::{FieldSpec, NodeCatalogEntry};
 use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
 use crate::dag_engine::domain::observer::{ExecutionObserver, NodeEvent};
 use crate::dag_engine::domain::state::{DagTask, DagTaskMemoryRepository};
@@ -1887,6 +1888,25 @@ impl ExecutableNode for OrchestratorNode {
                 "final_response": "string"
             }
         })
+    }
+
+    fn config_schema(&self) -> Option<NodeCatalogEntry> {
+        // The four sub-component blocks are looked up through the KEY_* constants
+        // the node itself uses, so renaming one there cannot silently skip the
+        // catalog. `api_key` is only handed down to an internal planner that has
+        // none of its own.
+        Some(
+            NodeCatalogEntry::no_config()
+                .with_field("verbose", FieldSpec::of_type("boolean"))
+                .with_field("max_phases", FieldSpec::of_type("integer"))
+                .with_field("plan", FieldSpec::of_type("array"))
+                .with_field("api_key", FieldSpec::of_type("string"))
+                .with_field("agents", FieldSpec::of_type("object").required())
+                .with_field(KEY_PLANNER, FieldSpec::of_type("object").required())
+                .with_field(KEY_CRITIC, FieldSpec::of_type("object"))
+                .with_field(KEY_PHASE_REACTOR, FieldSpec::of_type("object"))
+                .with_field(KEY_FINAL_REACTOR, FieldSpec::of_type("object").required()),
+        )
     }
 }
 

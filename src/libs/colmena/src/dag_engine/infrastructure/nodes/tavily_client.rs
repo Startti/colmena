@@ -4,6 +4,7 @@
 //! Spec: docs/superpowers/specs/2026-04-23-web-nodes-a-tavily-client-design.md
 
 use crate::dag_engine::application::secure_value_service::SecureValueService;
+use crate::dag_engine::domain::lint::{FieldSpec, NodeCatalogEntry};
 use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
 use crate::dag_engine::domain::observer::ExecutionObserver;
 use crate::dag_engine::domain::toolkit_node::{SubToolDefinition, ToolkitNode, SUB_TOOL_INPUT_KEY};
@@ -344,6 +345,36 @@ impl ExecutableNode for TavilyClientNode {
                 "search_defaults": "object — merged into each search call"
             }
         })
+    }
+
+    fn config_schema(&self) -> Option<NodeCatalogEntry> {
+        // The first nine are the node's own settings; the rest are sub-tool
+        // arguments, which `build_effective_inputs` backfills from config when
+        // the node runs standalone rather than as an LLM tool.
+        Some(
+            NodeCatalogEntry::no_config()
+                .with_field("api_key", FieldSpec::of_type("string").required())
+                .with_field("search_defaults", FieldSpec::of_type("object"))
+                .with_field(
+                    "sub_tool",
+                    FieldSpec::of_type("string").valid_values(["search".into(), "fetch".into()]),
+                )
+                .with_field("timeout_seconds", FieldSpec::of_type("integer"))
+                .with_field("enable_cache", FieldSpec::of_type("boolean"))
+                .with_field("cache_ttl_seconds", FieldSpec::of_type("integer"))
+                .with_field("max_calls_per_run", FieldSpec::of_type("integer"))
+                .with_field("fail_on_limit", FieldSpec::of_type("boolean"))
+                .with_field("retry_policy", FieldSpec::of_type("object"))
+                .with_field("query", FieldSpec::of_type("string"))
+                .with_field("url", FieldSpec::of_type("string"))
+                .with_field("extract_format", FieldSpec::of_type("string"))
+                .with_field("max_results", FieldSpec::of_type("integer"))
+                .with_field("search_depth", FieldSpec::of_type("string"))
+                .with_field("time_range", FieldSpec::of_type("string"))
+                .with_field("include_content", FieldSpec::of_type("boolean"))
+                .with_field("include_domains", FieldSpec::of_type("array"))
+                .with_field("exclude_domains", FieldSpec::of_type("array")),
+        )
     }
 
     fn description(&self) -> Option<&str> {
