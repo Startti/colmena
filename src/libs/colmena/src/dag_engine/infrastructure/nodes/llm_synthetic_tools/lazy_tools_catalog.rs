@@ -1,6 +1,7 @@
 //! Catalog management for lazy tool loading. Pure data types and pure functions
 //! over conversation messages — no I/O, no provider awareness.
 
+use crate::dag_engine::domain::tool_configuration::ToolConfiguration;
 use crate::llm::domain::tools::{ParameterProperty, ToolDefinition, ToolParameters};
 use crate::llm::domain::{LlmMessage, MessageRole};
 use std::collections::{HashMap, HashSet};
@@ -25,6 +26,57 @@ pub fn current_turn_slice(messages: &[LlmMessage]) -> &[LlmMessage] {
 pub struct CatalogEntry {
     pub name: String,
     pub summary: String,
+}
+
+/// What the lazy catalog assembly produced for one set of `tool_configurations`.
+pub struct LazyCatalog {
+    /// The lines shown to the model, one per listed tool.
+    pub entries: Vec<CatalogEntry>,
+    /// The snapshot `describe_tool` resolves against. Each entry carries its
+    /// RESOLVED name, so a configuration that omitted `name` is still found and
+    /// rendered under its map key.
+    pub lookup: Vec<ToolConfiguration>,
+    /// Resolved names whose `summary` exceeds 200 chars and will be truncated.
+    /// Returned rather than logged so this function stays pure.
+    pub oversized_summaries: Vec<String>,
+}
+
+/// Assemble the lazy catalog from a graph's `tool_configurations`.
+///
+/// Two kinds of entry are skipped, both via
+/// [`ToolConfiguration::enters_lazy_catalog`]: an `eager` tool (it ships its own
+/// schema up front) and an `mcp` entry (a server, not a tool — its per-tool
+/// lines are added by the MCP wiring once the server has answered).
+///
+/// Every name is resolved through [`ToolConfiguration::effective_name`], falling
+/// back to the map key, because `name` is optional for EVERY node_type: without
+/// the fallback an entry whose author simply omitted it would reach the model as
+/// a nameless line and be unreachable by name.
+pub fn build_lazy_catalog(tool_configurations: &HashMap<String, ToolConfiguration>) -> LazyCatalog {
+    let mut out = LazyCatalog {
+        entries: Vec::new(),
+        lookup: Vec::new(),
+        oversized_summaries: Vec::new(),
+    };
+    for (map_key, cfg) in tool_configurations.iter() {
+        if !cfg.enters_lazy_catalog() {
+            continue;
+        }
+        let effective_name = cfg.effective_name(map_key).to_string();
+        if let Some(s) = &cfg.summary {
+            if s.chars().count() > 200 {
+                out.oversized_summaries.push(effective_name.clone());
+            }
+        }
+        out.entries.push(CatalogEntry {
+            name: effective_name.clone(),
+            summary: summary_for_catalog(cfg.summary.as_deref(), &cfg.description),
+        });
+        let mut resolved = cfg.clone();
+        resolved.name = effective_name;
+        out.lookup.push(resolved);
+    }
+    out
 }
 
 /// Args shape of a `describe_tool` call. Only `name` is used.
@@ -158,6 +210,68 @@ After describe_tool, the revealed tool appears in your available tools and you c
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Build the map the way a graph author writes it, through the same typed
+    /// parse `llm_call` uses, so these tests cannot drift from the real shape.
+    fn configs(raw: serde_json::Value) -> HashMap<String, ToolConfiguration> {
+        serde_json::from_value(raw).expect("tool_configurations must parse")
+    }
+
+    /// The call-site guarantee: an entry whose author omitted `name` is listed
+    /// under its map key — in the catalog the model reads AND in the snapshot
+    /// `describe_tool` matches against — never as an empty string.
+    #[test]
+    fn a_nameless_entry_is_listed_under_its_map_key() {
+        let out = build_lazy_catalog(&configs(serde_json::json!({
+            "buscar_precio": { "node_type": "http_request", "description": "Consulta precios." }
+        })));
+
+        assert_eq!(out.entries.len(), 1);
+        assert_eq!(out.entries[0].name, "buscar_precio");
+        assert_eq!(
+            out.lookup[0].name, "buscar_precio",
+            "describe_tool matches on this snapshot, so it must carry the resolved name too"
+        );
+    }
+
+    /// An `mcp` entry is a server, not a tool: it contributes no line of its
+    /// own. Paired with a listed tool so the assertion cannot pass by the
+    /// catalog simply coming back empty.
+    #[test]
+    fn an_mcp_entry_contributes_no_catalog_line() {
+        let out = build_lazy_catalog(&configs(serde_json::json!({
+            "deepwiki": { "node_type": "mcp", "mcp": { "url": "https://mcp.deepwiki.com/mcp" } },
+            "buscar": { "node_type": "http_request", "description": "Busca." }
+        })));
+
+        let names: Vec<&str> = out.entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, vec!["buscar"]);
+        assert_eq!(out.lookup.len(), 1);
+    }
+
+    /// An eager tool ships its own schema and is likewise absent.
+    #[test]
+    fn an_eager_entry_contributes_no_catalog_line() {
+        let out = build_lazy_catalog(&configs(serde_json::json!({
+            "ahora": { "node_type": "current_time", "eager": true },
+            "buscar": { "node_type": "http_request", "description": "Busca." }
+        })));
+
+        let names: Vec<&str> = out.entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, vec!["buscar"]);
+    }
+
+    /// The truncation warning must name the tool the operator can find, which
+    /// for a nameless entry is its map key rather than nothing at all.
+    #[test]
+    fn an_oversized_summary_is_reported_under_the_resolved_name() {
+        let long = "x".repeat(201);
+        let out = build_lazy_catalog(&configs(serde_json::json!({
+            "buscar_precio": { "node_type": "http_request", "summary": long }
+        })));
+
+        assert_eq!(out.oversized_summaries, vec!["buscar_precio".to_string()]);
+    }
 
     #[test]
     fn returns_summary_when_present_and_within_limit() {

@@ -278,8 +278,8 @@ pub use document_tools::{
 };
 
 pub use lazy_tools_catalog::{
-    build_describe_tool_definition, current_turn_slice, reconstruct_discovered_set,
-    summary_for_catalog, CatalogEntry,
+    build_describe_tool_definition, build_lazy_catalog, current_turn_slice,
+    reconstruct_discovered_set, summary_for_catalog, CatalogEntry,
 };
 
 pub use toolkit_packages::{find_package, ToolkitPackage, TOOLKIT_PACKAGES};
