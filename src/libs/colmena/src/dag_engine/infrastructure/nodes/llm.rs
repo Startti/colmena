@@ -17,9 +17,10 @@ use crate::dag_engine::application::ports::NodeRegistryPort;
 use crate::dag_engine::infrastructure::dag_tool_executor::DagToolExecutor;
 use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::{
     build_all_crdt_doc_tools, build_all_document_tools, build_describe_tool_definition,
-    build_load_skill_tool_definition, current_turn_slice, reconstruct_discovered_set,
-    summary_for_catalog, CatalogEntry, CrdtDocsContext, DescribeToolDispatchResult,
-    DocumentToolsContext, ATTACHMENTS_SYSTEM_PRELUDE, DOCUMENTS_SYSTEM_PRELUDE,
+    build_lazy_catalog, build_load_skill_tool_definition, current_turn_slice,
+    reconstruct_discovered_set, summary_for_catalog, CatalogEntry, CrdtDocsContext,
+    DescribeToolDispatchResult, DocumentToolsContext, ATTACHMENTS_SYSTEM_PRELUDE,
+    DOCUMENTS_SYSTEM_PRELUDE,
 };
 use crate::documents::application::DocumentRuntime;
 use crate::documents::domain::ids::SessionId as DocSessionId;
@@ -2011,7 +2012,8 @@ impl ExecutableNode for LlmNode {
                     Err(e) => {
                         return Err(format!(
                             "llm_call: tool_configurations failed to parse: {e}.\n\
-                             Hint: each entry needs `name` and `node_type`. Inside `node_schema`, \
+                             Hint: each entry needs `node_type` (`name` is optional and \
+                             defaults to the entry's key). Inside `node_schema`, \
                              every LLM-visible field needs `type` (string|number|integer|boolean|object|array). \
                              Fields with `fixed` may omit `type`. Fix the graph configuration and re-run."
                         )
@@ -2110,24 +2112,15 @@ impl ExecutableNode for LlmNode {
             // there are no tool_configurations AND no crdt_documents context.
             // We check for that case AFTER both sources have populated the
             // catalog (below, near the crdt_doc_* registration block).
-            for cfg in tool_configurations.values() {
-                if cfg.eager {
-                    continue;
-                }
-                if let Some(s) = &cfg.summary {
-                    if s.chars().count() > 200 {
-                        colmena_log!(
-                            "WARN: tool '{}' summary > 200 chars; will be truncated.",
-                            cfg.name
-                        );
-                    }
-                }
-                catalog.push(CatalogEntry {
-                    name: cfg.name.clone(),
-                    summary: summary_for_catalog(cfg.summary.as_deref(), &cfg.description),
-                });
-                lookup_for_describe.push(cfg.clone());
+            let assembled = build_lazy_catalog(&tool_configurations);
+            for name in &assembled.oversized_summaries {
+                colmena_log!(
+                    "WARN: tool '{}' summary > 200 chars; will be truncated.",
+                    name
+                );
             }
+            catalog.extend(assembled.entries);
+            lookup_for_describe.extend(assembled.lookup);
         }
 
         // Tools the LLM node has discovered via describe_tool during this execution

@@ -2750,3 +2750,53 @@ Ninguno de los tres bloquea, y los tres quedan escritos acá en vez de solo en u
 de `mcp_specs.is_empty()`, y el executor ni siquiera recibe la ranura. ADP no afectado.
 
 **Estado.** done (cableado completo; falta el E2E vivo contra servidores reales).
+
+## 46. La forma documentada de una entrada MCP ya carga
+
+**Qué cambió.** Dos arreglos que ningún test unitario encontró, hallados en la primera corrida real de
+MCP contra DeepWiki. El segundo lo introdujo el primero: un arreglo puede abrir un defecto que solo
+otra corrida real muestra.
+
+**`name` deja de ser obligatorio en `tool_configurations`.** La forma que §45 documentó como canónica
+—`{ "node_type": "mcp", "mcp": { "url": ... } }`— **no cargaba**: fallaba con `missing field 'name'`,
+porque el parseo tipado del mapa corre **antes** de que la lectura del bloque `mcp` intervenga. Una
+entrada MCP no tiene un nombre de tool que dar: el servidor publica muchas, y la clave del mapa es el
+**alias** que las prefija a todas.
+
+El arreglo terminó siendo `#[serde(default)]`, y no fue una decisión de diseño: `generate_base_tool_definition`
+**ya** caía a la clave del mapa cuando `name` estaba vacío, con un comentario que lo dice. La
+deserialización prohibía algo que el consumidor ya soportaba.
+
+**Una entrada MCP ya no ensucia el catálogo lazy.** Hacer `name` opcional activó un defecto latente:
+con `lazy_tool_loading`, el catálogo que ve el modelo se arma recorriendo `tool_configurations`, y una
+entrada `mcp` es un **servidor**, no una tool. Antes quedaba tapado porque `name` era obligatorio y
+siempre traía algo; con el campo opcional, cada servidor configurado aportaba una línea `- : <resumen>`
+—sin nombre— que el modelo no puede accionar. La regla vive ahora en
+`ToolConfiguration::enters_lazy_catalog`, que también absorbe la exclusión de las tools `eager`: sus
+líneas reales las agrega el cableado, una por tool expuesta, recién cuando el servidor contestó.
+
+**El alcance del arreglo 1 era más ancho que su motivo.** `#[serde(default)]` va en el campo, no en el
+`node_type`, así que `name` quedó opcional para **todas** las entradas: un `http_request` sin `name`
+antes moría en el parseo y ahora pasa con nombre vacío. La regla de nombre efectivo —`name` si no está
+vacío, si no la clave del mapa— ya existía en el despacho (`dag_tool_executor`) pero no en el catálogo;
+ahora vive en `ToolConfiguration::effective_name` y la usan el catálogo, la instantánea de
+`describe_tool` y el warning de resumen largo. Omitir `name` es una forma **soportada**, no una
+degradación callada. El texto de ayuda del parseo, que aún decía `name` obligatorio, se corrigió.
+
+**Por qué 2578 tests no lo vieron.** Los tests de MCP llamaban `collect_mcp_tool_configs` sobre JSON
+crudo. El helper **sí** estaba en el camino real —no es un helper desconectado— pero **todo lo que
+corre antes** quedaba afuera: la config moría en un parseo anterior y nunca llegaba. Los tests nuevos
+parsean la forma documentada por el **mismo** parseo tipado que usa `llm_call`.
+
+**El ensamblado del catálogo salió de `llm.rs` a una función pura.** El bucle inline se extrajo a
+`build_lazy_catalog` en `lazy_tools_catalog.rs`, con tests directos: cada exclusión (`mcp`, `eager`),
+el fallback de nombre y el reporte del resumen largo bajo el nombre resuelto. Antes lo respaldaba solo
+la corrida E2E; ahora es una unidad probada.
+
+**Verificado en vivo, no por inspección.** El grafo E2E no usaba `lazy_tool_loading` —el modo de producción— y por eso no vi yo el defecto del catálogo. DeepWiki ahora con `lazy_tool_loading` activo: `describe_tool`
+usado siete veces, dos tools MCP despachadas con su contención, cero líneas de catálogo sin nombre, y
+la respuesta describió la organización real del monorepo.
+
+**Alcance.** Aditivo: una entrada que trae `name` se comporta igual. ADP no afectado.
+
+**Estado.** done.

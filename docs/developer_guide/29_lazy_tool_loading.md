@@ -156,14 +156,22 @@ El motor expone tools al LLM por dos vías independientes; **solo una participa 
 
 > El sistema lazy **solo mira `tool_configurations`**. Cualquier tool listada en `enabled_tools` sale eager, sin importar el valor de `lazy_tool_loading`.
 
-Implementación en [`llm.rs`](../../src/libs/colmena/src/dag_engine/infrastructure/nodes/llm.rs) (resumido):
+Implementación en la función pura [`build_lazy_catalog`](../../src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/lazy_tools_catalog.rs) (resumido); `llm_call` la invoca y vuelca sus salidas:
 
 ```rust
-for cfg in tool_configurations.values() {
-    if cfg.eager { continue; }
-    catalog.push(CatalogEntry { name: cfg.name.clone(), summary: ... });
+for (map_key, cfg) in tool_configurations.iter() {
+    if !cfg.enters_lazy_catalog() { continue; } // salta eager y entradas mcp
+    let name = cfg.effective_name(map_key).to_string(); // name opcional -> clave
+    catalog.push(CatalogEntry { name, summary: ... });
 }
 ```
+
+### Servidores MCP en el catálogo lazy
+
+Una entrada con `node_type: "mcp"` **no** aporta una línea al catálogo: es un servidor, no una tool.
+Sus líneas reales las agrega el cableado —una por tool expuesta, ya prefijada (`<alias>__<tool>`)—
+cuando el servidor contesta el listado. Como `name` es opcional en una entrada `mcp`, si el bucle no la
+saltara aportaría una línea sin nombre (`- : <resumen>`) que el modelo no puede accionar.
 
 ### Patrones recomendados
 

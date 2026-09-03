@@ -1,0 +1,49 @@
+{
+  "nodes": {
+    "start": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/mcp-deepwiki",
+        "method": "POST",
+        "test_payload": {
+          "prompt": "Estoy evaluando si adoptar el repo modelcontextprotocol/servers. ¿Qué es y cómo está organizado? Respondeme corto."
+        }
+      }
+    },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "api_key": "${GEMINI_API_KEY}",
+        "model": "gemini-2.5-flash",
+        "system_message": "Sos un asistente técnico. Cuando una pregunta sea sobre un repositorio concreto, consultá las herramientas disponibles antes de responder en vez de contestar de memoria.",
+        "prompt": "{{prompt}}",
+        "max_tokens": 800,
+        "stream": true,
+        "tool_configurations": {
+          "deepwiki": {
+            "node_type": "mcp",
+            "mcp": {
+              "url": "https://mcp.deepwiki.com/mcp",
+              "timeout_seconds": 30
+            }
+          }
+        },
+        "lazy_tool_loading": true
+      }
+    },
+    "out": {
+      "type": "log"
+    }
+  },
+  "edges": [
+    {
+      "from": "start",
+      "to": "agent"
+    },
+    {
+      "from": "agent",
+      "to": "out"
+    }
+  ]
+}

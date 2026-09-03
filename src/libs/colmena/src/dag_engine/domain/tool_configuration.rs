@@ -392,7 +392,19 @@ pub fn validate_mcp_config(node_type: &str, tool_cfg: &Value) -> Result<(), Stri
 /// the LLM invokes the tool. See module-level docs for the three configuration approaches.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolConfiguration {
-    /// Name of the tool (shown to LLM)
+    /// Name of the tool shown to the LLM. Optional in the JSON config: when
+    /// absent it falls back to the `tool_configurations` MAP KEY, which
+    /// `DagToolExecutor::generate_tool_definition` already does. It is only
+    /// needed when the key is not the name you want the model to see — the
+    /// frontend uses UUID keys, for instance.
+    ///
+    /// Made optional because an `mcp` entry has no single tool name to give: the
+    /// server publishes many, and the key is the ALIAS that prefixes all of
+    /// them. Requiring it there forced the alias to be repeated for nothing, and
+    /// a graph that omitted it failed to load with `missing field 'name'` —
+    /// which is how the first live MCP run failed, against a configuration
+    /// written exactly as the canonical reference documented it.
+    #[serde(default)]
     pub name: String,
 
     /// Human-readable description for the LLM. Optional in the JSON config: when
@@ -494,6 +506,35 @@ impl ToolConfiguration {
     /// configuration.
     pub fn is_toolkit(&self) -> bool {
         self.expose_sub_tools.is_some()
+    }
+
+    /// The name this entry is actually known by: the `name` field when it is
+    /// non-empty, otherwise the `tool_configurations` MAP KEY.
+    ///
+    /// `name` is optional, so every consumer that shows or matches a tool name
+    /// must apply this same fallback or it will render a nameless entry. The
+    /// dispatch path in `dag_tool_executor` has always done this; the lazy
+    /// catalog must too.
+    pub fn effective_name<'a>(&'a self, map_key: &'a str) -> &'a str {
+        if self.name.is_empty() {
+            map_key
+        } else {
+            &self.name
+        }
+    }
+
+    /// Whether this entry contributes its own line to the lazy `describe_tool`
+    /// catalog.
+    ///
+    /// Two kinds of entry do not. An `eager` tool always ships its full schema
+    /// up front and never enters the catalog. An `mcp` entry is a **server**,
+    /// not a tool: it publishes many, its map key is the alias that prefixes
+    /// them, and its real catalog lines are added per exposed tool once the
+    /// server has answered. Listing the entry itself would show the model a
+    /// line it cannot act on — and since `name` is optional on an `mcp` entry,
+    /// that line would carry no name at all.
+    pub fn enters_lazy_catalog(&self) -> bool {
+        !self.eager && self.node_type != MCP_NODE_TYPE
     }
 
     /// Fail-closed guard for [`ToolConfiguration::memory_mode`]. Returns `Err`
@@ -794,6 +835,72 @@ pub fn parse_node_schema(schema: &NodeSchema) -> Result<ParsedNodeSchema, String
 
 #[cfg(test)]
 mod tests {
+    /// The exact shape the canonical reference documents for an MCP server, run
+    /// through the SAME typed parse `llm_call` uses.
+    ///
+    /// This is the test that was missing. The MCP unit tests all called
+    /// `collect_mcp_tool_configs` on raw JSON, which skips this parse entirely —
+    /// so a config that could never load passed every one of them, and the
+    /// defect only surfaced on the first live run, with `missing field 'name'`.
+    #[test]
+    fn the_documented_mcp_shape_parses_as_a_tool_configuration() {
+        let raw = serde_json::json!({
+            "deepwiki": {
+                "node_type": "mcp",
+                "mcp": { "url": "https://mcp.deepwiki.com/mcp" }
+            }
+        });
+
+        let parsed: HashMap<String, ToolConfiguration> =
+            serde_json::from_value(raw).expect("the documented MCP shape must parse");
+
+        let entry = parsed.get("deepwiki").expect("the entry survives");
+        assert_eq!(entry.node_type, "mcp");
+        assert!(
+            entry.name.is_empty(),
+            "name is omitted, and the executor falls back to the map key"
+        );
+    }
+
+    /// An ordinary tool whose author simply forgot `name` must still be listed
+    /// under its map key, not as a nameless line. `name` being optional is what
+    /// makes this reachable for every node_type, not only `mcp`.
+    #[test]
+    fn an_entry_without_a_name_falls_back_to_its_map_key() {
+        let raw = serde_json::json!({
+            "buscar_precio": { "node_type": "http_request" },
+            "6f1c-uuid-key": { "name": "buscador", "node_type": "http_request" }
+        });
+
+        let parsed: HashMap<String, ToolConfiguration> =
+            serde_json::from_value(raw).expect("parses");
+
+        assert_eq!(
+            parsed["buscar_precio"].effective_name("buscar_precio"),
+            "buscar_precio",
+            "an omitted name must resolve to the map key, never to the empty string"
+        );
+        assert_eq!(
+            parsed["6f1c-uuid-key"].effective_name("6f1c-uuid-key"),
+            "buscador",
+            "an explicit name still wins over the key"
+        );
+    }
+
+    /// A name that IS given still wins — the frontend uses UUID map keys and
+    /// carries the human name in this field.
+    #[test]
+    fn an_explicit_name_is_preserved() {
+        let raw = serde_json::json!({
+            "6f1c-uuid-key": { "name": "buscador", "node_type": "http_request" }
+        });
+
+        let parsed: HashMap<String, ToolConfiguration> =
+            serde_json::from_value(raw).expect("parses");
+
+        assert_eq!(parsed["6f1c-uuid-key"].name, "buscador");
+    }
+
     use super::*;
     use serde_json::json;
 
