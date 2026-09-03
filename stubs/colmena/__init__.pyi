@@ -115,7 +115,16 @@ def validate_graph(graph: Dict[str, Any]) -> None:
     so a node id containing ``/``, a malformed ``node_schema``, an invalid
     ``memory_mode`` or a misconfigured ``mcp`` block raise ``DagException``.
 
-    Says nothing about the contents of a node's ``config`` — use ``dag_engine lint``.
+    Says nothing about the contents of a node's ``config`` — use ``lint_graph``.
+    """
+
+def lint_graph(graph: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Report configuration problems in a graph dict without running it.
+
+    Returns one dict per finding, with ``severity``, ``code``, ``node_id``,
+    ``field``, ``message`` and ``suggestion``. Branch on ``code`` (stable), not
+    on ``message``. An empty list means no findings; findings are advisory and
+    never stop a graph from running.
     """
 
 def serve_dag(file_path: str, host: str = ..., port: int = ...) -> None:

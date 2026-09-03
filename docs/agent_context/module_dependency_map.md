@@ -275,7 +275,7 @@
 
 #### `src/libs/colmena/src/dag_engine/domain/lint/mod.rs`
 - Module: `dag_engine::domain::lint`
-- **Used by (1)**: `src/libs/colmena/src/dag_engine/infrastructure/registry.rs`
+- **Used by (3)**: `src/libs/colmena/src/dag_engine/infrastructure/registry.rs`, `src/libs/colmena/src/node_bindings/dag.rs`, `src/libs/colmena/src/python_bindings/mod.rs`
 - Depends on (0): — (no intra-crate imports)
 
 #### `src/libs/colmena/src/dag_engine/domain/mod.rs`
@@ -1732,7 +1732,7 @@
 #### `src/libs/colmena/src/node_bindings/dag.rs`
 - Module: `node_bindings::dag`
 - **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
-- Depends on (1): `node_bindings::stream`
+- Depends on (2): `dag_engine::domain::lint`, `node_bindings::stream`
 
 #### `src/libs/colmena/src/node_bindings/documents.rs`
 - Module: `node_bindings::documents`
@@ -1769,7 +1769,7 @@
 #### `src/libs/colmena/src/python_bindings/mod.rs`
 - Module: `python_bindings`
 - **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
-- Depends on (7): `dag_engine::application::ports`, `dag_engine::infrastructure::pool_registry`, `dag_engine::infrastructure::registry`, `dag_engine::infrastructure::sql_port_factory`, `llm::domain`, `llm::infrastructure`, `shared::infrastructure`
+- Depends on (8): `dag_engine::application::ports`, `dag_engine::domain::lint`, `dag_engine::infrastructure::pool_registry`, `dag_engine::infrastructure::registry`, `dag_engine::infrastructure::sql_port_factory`, `llm::domain`, `llm::infrastructure`, `shared::infrastructure`
 
 ### shared
 

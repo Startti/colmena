@@ -485,7 +485,7 @@ fn stream_dag<'py>(
 ///
 /// It still says nothing about the contents of a node's `config`: that is an
 /// untyped value, so an invented field passes silently here. Use
-/// `dag_engine lint` for that.
+/// [`lint_graph`] for that.
 #[pyfunction]
 fn validate_graph(graph: pyo3::Bound<'_, pyo3::PyAny>) -> PyResult<()> {
     let v: serde_json::Value =
@@ -495,6 +495,50 @@ fn validate_graph(graph: pyo3::Bound<'_, pyo3::PyAny>) -> PyResult<()> {
     g.validate()
         .map_err(|e| DagException::new_err(format!("invalid graph: {}", e)))?;
     Ok(())
+}
+
+/// Reports configuration problems in a graph dict without running it.
+///
+/// Where [`validate_graph`] answers "will the engine load this", this answers
+/// the question the author actually has: which of these config fields are real,
+/// and which did I invent? Returns a list of dicts, each with `severity`,
+/// `code`, `node_id`, `field`, `message` and `suggestion`.
+///
+/// Findings are advisory — nothing here stops a graph from running. Branch on
+/// `code`, which is stable; `message` is free to change. An empty list means no
+/// findings.
+///
+/// Takes the raw dict rather than a parsed graph on purpose: deserialising into
+/// `Graph` silently drops every undeclared key, so a node carrying
+/// `default_input_port` is already gone by the time a `Graph` exists.
+#[pyfunction]
+fn lint_graph<'py>(
+    py: Python<'py>,
+    graph: pyo3::Bound<'_, pyo3::PyAny>,
+) -> PyResult<pyo3::Bound<'py, pyo3::PyAny>> {
+    use crate::dag_engine::domain::lint::{lint_graph_json, LintContext};
+
+    let document: serde_json::Value =
+        pythonize::depythonize(&graph).map_err(|e| DagException::new_err(e.to_string()))?;
+    let report = lint_graph_json(&document, &LintContext::from_catalog())
+        .map_err(|e| DagException::new_err(format!("invalid graph: {}", e)))?;
+
+    let findings: Vec<serde_json::Value> = report
+        .diagnostics
+        .iter()
+        .map(|d| {
+            serde_json::json!({
+                "severity": d.severity.to_string(),
+                "code": d.code.as_str(),
+                "node_id": d.node_id,
+                "field": d.field,
+                "message": d.message,
+                "suggestion": d.suggestion,
+            })
+        })
+        .collect();
+
+    pythonize::pythonize(py, &findings).map_err(|e| DagException::new_err(e.to_string()))
 }
 
 /// Read-only handle to a `HashMapNodeRegistry`; exposes inspection helpers
@@ -675,6 +719,7 @@ fn colmena(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(stream_dag, m)?)?;
     m.add_function(wrap_pyfunction!(serve_dag, m)?)?;
     m.add_function(wrap_pyfunction!(validate_graph, m)?)?;
+    m.add_function(wrap_pyfunction!(lint_graph, m)?)?;
     m.add_function(wrap_pyfunction!(default_registry, m)?)?;
     m.add_class::<Registry>()?;
     m.add("DagException", _py.get_type::<DagException>())?;

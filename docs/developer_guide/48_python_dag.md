@@ -84,8 +84,8 @@ engine, sin red ni LLM.
 > `node_schema` malformado, un `memory_mode` inválido y un bloque `mcp` mal configurado.
 >
 > Lo que **no** hace: mirar el contenido del `config` de un nodo. Es un `Value` sin
-> tipar, así que un campo inventado pasa en silencio acá — para eso está
-> [`dag_engine lint`](51_graph_linter.md).
+> tipar, así que un campo inventado pasa en silencio acá — para eso está `lint_graph`,
+> abajo.
 
 ```python
 graph = {
@@ -101,6 +101,42 @@ graph = {
 }
 colmena.validate_graph(graph)   # OK -> None ; inválido -> DagException
 ```
+
+
+## `lint_graph` — encontrar campos de config inventados
+
+`validate_graph` contesta *"¿el engine puede cargar esto?"*. `lint_graph` contesta la
+pregunta que realmente tiene quien escribe el grafo: **cuáles de estos campos existen y
+cuáles me los inventé.**
+
+```python
+graph = {
+    "nodes": {
+        "chat": {
+            "type": "llm_call",
+            "config": {"provider": "openai", "api_key": "k", "modle": "gpt-4o"},
+        }
+    },
+    "edges": [],
+}
+
+for f in colmena.lint_graph(graph):
+    print(f["severity"], f["code"], f["node_id"], f["field"], "-", f["message"])
+# error UNKNOWN_FIELD chat modle - "modle" is not a configuration field of llm_call
+```
+
+Devuelve una lista de dicts con `severity`, `code`, `node_id`, `field`, `message` y
+`suggestion`. Lista vacía = sin hallazgos.
+
+**Ramificá sobre `code`**, que es estable (`UNKNOWN_FIELD`, `MISSING_REQUIRED_FIELD`,
+`EDGE_UNKNOWN_NODE`, …). El `message` es texto para humanos y puede cambiar.
+
+Los hallazgos son **advisory**: `lint_graph` nunca impide ejecutar un grafo, y solo lanza
+`DagException` si lo que le pasás no es un grafo.
+
+Recibe el dict crudo a propósito: deserializar a `Graph` descarta en silencio toda clave
+no declarada, así que un nodo con `default_input_port` ya no existe cuando hay un `Graph`.
+Reglas y limitaciones completas en [`51_graph_linter.md`](51_graph_linter.md).
 
 ## `inject_payload` — alimentar el trigger
 

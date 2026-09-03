@@ -72,8 +72,8 @@ pub async fn serve_dag(file_path: String, host: Option<String>, port: Option<u16
 /// invariants that would otherwise only surface at run time.
 ///
 /// It still says nothing about the contents of a node's `config`: that is an
-/// untyped value, so an invented field passes silently here. Use
-/// `dag_engine lint` for that.
+/// untyped value, so an invented field passes silently here. Use `lintGraph`
+/// for that.
 #[napi]
 pub fn validate_graph(graph: Value) -> Result<()> {
     let g: crate::dag_engine::domain::graph::Graph = serde_json::from_value(graph)
@@ -81,6 +81,43 @@ pub fn validate_graph(graph: Value) -> Result<()> {
     g.validate()
         .map_err(|e| Error::new(Status::InvalidArg, format!("invalid graph: {}", e)))?;
     Ok(())
+}
+
+/// Reports configuration problems in a graph object without running it.
+///
+/// Where `validateGraph` answers "will the engine load this", this answers the
+/// question the author actually has: which of these config fields are real, and
+/// which did I invent? Returns an array of findings, each with `severity`,
+/// `code`, `nodeId`, `field`, `message` and `suggestion`.
+///
+/// Findings are advisory — nothing here stops a graph from running. Branch on
+/// `code`, which is stable; `message` is free to change.
+///
+/// Takes the raw object rather than a parsed graph on purpose: deserialising
+/// into `Graph` silently drops every undeclared key, so a node carrying
+/// `defaultInputPort` is already gone by the time a `Graph` exists.
+#[napi]
+pub fn lint_graph(graph: Value) -> Result<Value> {
+    use crate::dag_engine::domain::lint::{lint_graph_json, LintContext};
+
+    let report = lint_graph_json(&graph, &LintContext::from_catalog())
+        .map_err(|e| Error::new(Status::InvalidArg, format!("invalid graph: {}", e)))?;
+
+    let findings: Vec<Value> = report
+        .diagnostics
+        .iter()
+        .map(|d| {
+            serde_json::json!({
+                "severity": d.severity.to_string(),
+                "code": d.code.as_str(),
+                "nodeId": d.node_id,
+                "field": d.field,
+                "message": d.message,
+                "suggestion": d.suggestion,
+            })
+        })
+        .collect();
+    Ok(Value::Array(findings))
 }
 
 // ==================== DAG Streaming Bindings ====================

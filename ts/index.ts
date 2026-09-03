@@ -121,6 +121,34 @@ export function validateGraph(graph: GraphObject): void {
   }
 }
 
+/** One problem the linter found in a graph. */
+export interface LintFinding {
+  /** `"error"`, `"warning"` or `"info"`. */
+  severity: string;
+  /** Stable identifier, e.g. `"UNKNOWN_FIELD"`. Branch on this, not on `message`. */
+  code: string;
+  /** The node the finding is about; `null` for graph-level findings. */
+  nodeId: string | null;
+  /** The config field, when the finding is about one. */
+  field: string | null;
+  message: string;
+  suggestion: string | null;
+}
+
+/**
+ * Report configuration problems in a graph without running it.
+ *
+ * Advisory: findings never stop a graph from running. An empty array means the
+ * linter found nothing.
+ */
+export function lintGraph(graph: GraphObject): LintFinding[] {
+  try {
+    return native.lintGraph(graph) as LintFinding[];
+  } catch (e) {
+    throw new DagError(e instanceof Error ? e.message : String(e));
+  }
+}
+
 /** A DAG execution event. `type` discriminates the variant; extra fields vary. */
 export type DagEvent =
   | { type: "node-start"; [k: string]: unknown }

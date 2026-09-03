@@ -13,8 +13,8 @@ Guía: [`docs/developer_guide/51_graph_linter.md`](developer_guide/51_graph_lint
 Lo que quedó abierto, en orden de importancia:
 
 - ~~**`validate_graph` de los bindings no valida lo que su nombre promete.**~~ —
-  **Cableado HECHO 2026-09-02** — ambos bindings llaman a `Graph::validate()`.
-  Exponer `lint_graph`/`lintGraph` va en su propio PR. Ver CHANGELOG §8 y
+  **HECHO 2026-09-02** — ambos bindings llaman a `Graph::validate()` y exponen
+  `lint_graph`/`lintGraph`. Ver CHANGELOG §8 y §9, y
   [`docs/adp_migration/2026-09-02-validate-graph-now-validates.md`](adp_migration/2026-09-02-validate-graph-now-validates.md).
   **Queda abierto lo más grande:** el camino de producción de ADP tampoco valida —
   `ColmenaEngine::execute_stream_cancellable` recibe un `Graph` sin llamar a

@@ -338,3 +338,45 @@ función en ningún lado; el worker entra por `execute_stream_cancellable` con u
 actualizados para decir qué valida y qué no.
 
 **Estado.** done.
+
+---
+
+## 9. `lint_graph` / `lintGraph` en los bindings
+
+**Qué cambió.** El linter de grafos queda expuesto a PyO3 y napi. Donde
+`validate_graph` contesta *"¿el engine puede cargar esto?"*, `lint_graph`
+contesta la pregunta que realmente tiene quien arma el grafo: **cuáles de estos
+campos existen y cuáles me los inventé.**
+
+```python
+findings = colmena.lint_graph(graph)   # lista de dicts; [] si no hay hallazgos
+```
+
+```ts
+const findings = lintGraph(graph);     // LintFinding[]
+```
+
+Cada hallazgo trae `severity`, `code`, `node_id`/`nodeId`, `field`, `message` y
+`suggestion`. **Los `code` son estables** (`UNKNOWN_FIELD`,
+`MISSING_REQUIRED_FIELD`, `EDGE_UNKNOWN_NODE`, …) y son lo que hay que consumir;
+el `message` es texto para humanos y puede cambiar.
+
+**Advisory.** Los hallazgos nunca impiden ejecutar un grafo; la función solo
+lanza si lo que recibe no es un grafo. Es la pieza que permitiría al canvas de
+ADP avisar de un campo inventado **antes** de correr el agente.
+
+**Recibe el objeto crudo a propósito.** Deserializar a `Graph` descarta en
+silencio toda clave no declarada, así que un nodo con `default_input_port` ya no
+existe cuando hay un `Graph` — y esa es justamente una invención real presente en
+los grafos de ejemplo del repo. Un test lo fija: `validate_graph` acepta ese
+grafo y `lint_graph` reporta `UNKNOWN_NODE_PROPERTY`.
+
+**Aditivo.** Función nueva en ambos bindings, tipo `LintFinding` en la fachada TS
+y firma en el `.pyi`. Nada existente cambia de comportamiento → **ADP no
+afectado**.
+
+**Guías.** [`48_python_dag.md`](developer_guide/48_python_dag.md) y
+[`49_typescript_dag.md`](developer_guide/49_typescript_dag.md).
+
+**Estado.** done.
+
