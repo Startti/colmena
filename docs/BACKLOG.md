@@ -28,14 +28,12 @@ Lo que quedó abierto, en orden de importancia:
   acordado: solo hechos mecánicos** (nombres, `required`, `valid_values`, `read_only`); la
   prosa queda en el JSON a mano — no se generará el JSON completo.
 
-  **Migrados 13 de 37.** Slice 1: los 8 sin config + `exponential`. Slice 2: las tres
-  primitivas que faltaban en el builder (`open_config()` para config abierta,
-  `with_reserved_input_keys()`, `FieldSpec::conditional()`) y los 4 nodos que las
-  ejercitan: `mock_input`, `input`, `router`, `http_request`.
+  **Migrados 22 de 37.** Slice 1: los 8 sin config + `exponential`. Slice 2: las tres
+  primitivas del builder (`open_config()`, `with_reserved_input_keys()`,
+  `FieldSpec::conditional()`) y los 4 nodos que las ejercitan (`mock_input`, `input`,
+  `router`, `http_request`). Slice 3: los 9 fáciles.
 
-  **Faltan 24**, sin primitivas nuevas por delante — solo autoría y auditoría:
-  - *Fáciles* (9): `secure_suspend`, `subgraph`, `python_script`, `trigger_webhook`,
-    `suspend`, `loop_controller`, `document_read`, `task_memory_writer`, `document_edit`.
+  **Faltan 15**, sin primitivas nuevas por delante — solo autoría y auditoría:
   - *Medianos* (9): `sql_query`, `output_parser`, `for_each`, `document_create`, `tts`,
     `image_generation`, `image_edit`, `socketio_request`, `information_extraction`.
   - *Caros* (6): el clúster LLM (`planner`, `critic`, `reactor`, `orchestrator`),

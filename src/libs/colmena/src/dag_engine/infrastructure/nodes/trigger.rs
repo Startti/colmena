@@ -1,3 +1,4 @@
+use crate::dag_engine::domain::lint::{FieldSpec, NodeCatalogEntry};
 use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
 use serde_json::{json, Value};
 use std::error::Error as StdError;
@@ -59,5 +60,21 @@ impl ExecutableNode for TriggerWebhookNode {
                 "output": "any"
             }
         })
+    }
+
+    fn config_schema(&self) -> Option<NodeCatalogEntry> {
+        // `path` is read by `api::serve_dag` when it registers the route;
+        // `method` is documented but never read — every route is registered as
+        // POST, so POST is the only value that matches reality.
+        Some(
+            NodeCatalogEntry::no_config()
+                .with_field("path", FieldSpec::of_type("string"))
+                .with_field(
+                    "method",
+                    FieldSpec::of_type("string").valid_values(["POST".into()]),
+                )
+                .with_field("test_payload", FieldSpec::of_type("any"))
+                .with_field("__payload__", FieldSpec::of_type("any")),
+        )
     }
 }

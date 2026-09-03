@@ -1,6 +1,7 @@
 use crate::colmena_log;
 use crate::dag_engine::application::ports::SubGraphExecutorPort;
 use crate::dag_engine::domain::events::DagExecutionEvent;
+use crate::dag_engine::domain::lint::{FieldSpec, NodeCatalogEntry};
 use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
 use crate::dag_engine::domain::observer::{ChildScopeObserver, ExecutionObserver, NodeEvent};
 use serde_json::{json, Value};
@@ -173,6 +174,23 @@ impl ExecutableNode for SubGraphNode {
                 "task": "string — the task or instruction for the sub-agent to perform"
             }
         })
+    }
+
+    fn config_schema(&self) -> Option<NodeCatalogEntry> {
+        // The two child-graph sources come from the constant the node itself
+        // uses to look them up, so adding one there cannot silently skip the
+        // catalog.
+        let mut entry =
+            NodeCatalogEntry::no_config().with_field("__agent_name", FieldSpec::of_type("string"));
+        for key in CHILD_GRAPH_SOURCE_KEYS {
+            let ty = if key == "child_graph_inline" {
+                "object"
+            } else {
+                "string"
+            };
+            entry = entry.with_field(key, FieldSpec::of_type(ty));
+        }
+        Some(entry)
     }
 
     async fn execute(

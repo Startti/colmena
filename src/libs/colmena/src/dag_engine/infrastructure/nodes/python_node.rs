@@ -1,3 +1,4 @@
+use crate::dag_engine::domain::lint::{FieldSpec, NodeCatalogEntry};
 use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
 use async_trait::async_trait;
 use pyo3::prelude::*;
@@ -327,6 +328,18 @@ impl ExecutableNode for PythonNode {
                 "<raw>": "The node emits the RAW value of the Python 'output' variable (number, string, bool, list, dict, or null). NOT wrapped in { 'output': ... }. default_output is None so implicit edges pass the value through unchanged."
             }
         })
+    }
+
+    fn config_schema(&self) -> Option<NodeCatalogEntry> {
+        Some(
+            NodeCatalogEntry::no_config()
+                .with_field("code", FieldSpec::of_type("string"))
+                .with_field(
+                    "sandbox_mode",
+                    FieldSpec::of_type("string").valid_values(["none".into(), "restricted".into()]),
+                )
+                .with_field("sandbox_timeout_secs", FieldSpec::of_type("number")),
+        )
     }
 }
 

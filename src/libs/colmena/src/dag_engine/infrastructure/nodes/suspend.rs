@@ -1,3 +1,4 @@
+use crate::dag_engine::domain::lint::{FieldSpec, NodeCatalogEntry};
 use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
 use crate::dag_engine::domain::observer::ExecutionObserver;
 use crate::dag_engine::infrastructure::nodes::qa_response_parser::{
@@ -115,6 +116,19 @@ impl ExecutableNode for SuspendNode {
 
     fn schema(&self) -> Value {
         json!({})
+    }
+
+    fn config_schema(&self) -> Option<NodeCatalogEntry> {
+        Some(
+            NodeCatalogEntry::no_config()
+                .with_field("id", FieldSpec::of_type("string").required())
+                .with_field("question", FieldSpec::of_type("string"))
+                .with_field(
+                    "question_type",
+                    FieldSpec::of_type("string").valid_values(["open".into(), "choice".into()]),
+                )
+                .with_field("options", FieldSpec::of_type("array")),
+        )
     }
 }
 

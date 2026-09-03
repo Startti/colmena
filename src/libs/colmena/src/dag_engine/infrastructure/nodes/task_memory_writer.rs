@@ -1,4 +1,5 @@
 use super::task_mutations;
+use crate::dag_engine::domain::lint::{FieldSpec, NodeCatalogEntry};
 use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
 use serde_json::{json, Value};
 use std::error::Error as StdError;
@@ -121,5 +122,16 @@ impl ExecutableNode for TaskMemoryWriterNode {
                 "extra_info": "object — empty on the normal path; carries `__colmena_status: \"SUSPENDED\"` and `all_tasks` on suspend, and `skipped_deletes` (array of ids) when a `delete_tasks` id was not a valid identifier"
             }
         })
+    }
+
+    fn config_schema(&self) -> Option<NodeCatalogEntry> {
+        Some(
+            NodeCatalogEntry::no_config()
+                .with_field("task_id", FieldSpec::of_type("string"))
+                .with_field("result", FieldSpec::of_type("any"))
+                .with_field("add_tasks", FieldSpec::of_type("array"))
+                .with_field("delete_tasks", FieldSpec::of_type("array"))
+                .with_field("suspend", FieldSpec::of_type("boolean")),
+        )
     }
 }
