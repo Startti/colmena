@@ -80,7 +80,14 @@ pub fn exposed_definitions(
     // the client untouched, so without this a single server could occupy the
     // model's entire tool list.
     for tool in tools.iter().take(MCP_MAX_TOOLS_PER_SERVER) {
-        let schema_bytes = serde_json::to_string(&tool.input_schema)
+        // Measure the schema Colmena will actually forward, not the raw one.
+        // `$schema` and `$id` are stripped before the provider sees it, so
+        // counting them here would reject a tool for size on bytes that never
+        // leave this process. The ceiling exists to protect the provider
+        // request, so it must weigh exactly what that request carries — and the
+        // stripped value is reused below as the override, computed once.
+        let forwarded_schema = without_schema_metadata(&tool.input_schema);
+        let schema_bytes = serde_json::to_string(&forwarded_schema)
             .map(|s| s.len())
             .unwrap_or(usize::MAX);
         if schema_bytes > MCP_MAX_SCHEMA_BYTES {
@@ -110,7 +117,7 @@ pub fn exposed_definitions(
                 ToolParameters::default(),
             )
             .with_summary(for_model(&tool.description, MCP_MAX_SUMMARY_BYTES))
-            .with_input_schema_override(without_schema_metadata(&tool.input_schema)),
+            .with_input_schema_override(forwarded_schema),
         );
     }
 
@@ -474,6 +481,49 @@ mod tests {
             "the report names the tool: {}",
             skipped[0]
         );
+    }
+
+    /// The ceiling weighs the FORWARDED schema, not the raw one. `$schema` and
+    /// `$id` are stripped before the provider sees the tool, so a schema that
+    /// only crosses the ceiling because of that metadata fits once it is gone —
+    /// and must be exposed, not rejected for bytes that never leave the process.
+    #[test]
+    fn a_schema_over_ceiling_only_with_metadata_is_still_exposed() {
+        // Body alone stays under the ceiling; the giant `$id` pushes the raw
+        // document over it. Stripping the metadata is what brings it back under.
+        let body = "b".repeat(30 * 1024);
+        let bloated_id = format!("https://example.com/{}", "x".repeat(4 * 1024));
+        let schema = json!({
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "$id": bloated_id,
+            "type": "object",
+            "properties": { "blob": { "type": "string", "description": body } }
+        });
+        assert!(
+            serde_json::to_string(&schema).unwrap().len() > MCP_MAX_SCHEMA_BYTES,
+            "raw schema must exceed the ceiling or the test proves nothing"
+        );
+        assert!(
+            serde_json::to_string(&without_schema_metadata(&schema))
+                .unwrap()
+                .len()
+                <= MCP_MAX_SCHEMA_BYTES,
+            "stripped schema must fit or the test proves nothing"
+        );
+
+        let tools = vec![McpToolDescriptor {
+            name: "big_id".to_string(),
+            title: None,
+            description: "fine once stripped".to_string(),
+            input_schema: schema,
+        }];
+        let (defs, _, skipped) = exposed_definitions("srv", &tools);
+        assert_eq!(
+            names(&defs),
+            vec!["srv__big_id"],
+            "a tool that fits after stripping metadata must be exposed"
+        );
+        assert!(skipped.is_empty(), "nothing should be skipped: {skipped:?}");
     }
 
     /// A short description must not arrive claiming it was cut.
