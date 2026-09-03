@@ -224,6 +224,32 @@ impl DagRunUseCase {
             let mut caller_specific_calls: HashMap<String, HashMap<String, u32>> = HashMap::new();
             let mut global_shared_state = serde_json::json!({});
 
+            // Structural validation, on every entry. This is the only place every
+            // caller converges: the CLI validates before calling, but the library
+            // entry points (`execute_stream`, `execute_stream_cancellable`,
+            // `run_dag`, `stream_sse_parts`) took a `Graph` and ran it unchecked —
+            // which is the path ADP's worker uses, so a graph with a node id
+            // containing `/`, a malformed `node_schema`, an invalid `memory_mode`
+            // or a misconfigured `mcp` block reached execution in production.
+            //
+            // Two of those four already failed later anyway (`node_schema` is
+            // re-parsed and `memory_mode` re-checked when tools are built), so this
+            // mostly moves the error earlier and gives it a better message. The
+            // other two failed silently — a misconfigured MCP server was simply
+            // ignored, which reads to the operator as "the model ignored my
+            // server". Cheap and network-free, so it runs before the pre-flight.
+            //
+            // Disable via COLMENA_GRAPH_VALIDATION=off (safety valve, same shape as
+            // COLMENA_PREFLIGHT_HEALTH).
+            if std::env::var("COLMENA_GRAPH_VALIDATION").ok().as_deref() != Some("off") {
+                graph.validate()?;
+            } else {
+                tracing::debug!(
+                    target: "colmena::engine",
+                    "graph structural validation disabled via COLMENA_GRAPH_VALIDATION=off"
+                );
+            }
+
             // Pre-flight: validate keys of the providers this graph will use (cached,
             // blocking). Runs on every entry (fresh/resume/subgraph re-enter here) —
             // the TTL cache is what makes per-turn ADP runs cheap (first turn checks,
