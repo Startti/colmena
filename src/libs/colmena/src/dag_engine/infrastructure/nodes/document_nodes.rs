@@ -7,6 +7,7 @@
 //! `$DYNAMIC`-compatible and can be exposed as LLM tools via the existing
 //! `dag_tool_executor` (spec §11.2, §11.3).
 
+use crate::dag_engine::domain::lint::{FieldSpec, NodeCatalogEntry};
 use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
 use crate::dag_engine::domain::observer::ExecutionObserver;
 use crate::documents::application::apply_patch::ApplyPatchInput;
@@ -309,6 +310,20 @@ impl ExecutableNode for DocumentEditNode {
             }
         })
     }
+
+    fn config_schema(&self) -> Option<NodeCatalogEntry> {
+        Some(
+            NodeCatalogEntry::no_config()
+                .with_field("artifact_id", FieldSpec::of_type("string").required())
+                .with_field("base_version", FieldSpec::of_type("string").required())
+                .with_field("ops", FieldSpec::of_type("array").required())
+                .with_field(
+                    "storage_backend",
+                    FieldSpec::of_type("string").valid_values(["localfs".into(), "gcs".into()]),
+                )
+                .with_field("storage_root", FieldSpec::of_type("string")),
+        )
+    }
 }
 
 /// `document_read` — reads the current (or a specific) IR of an artifact.
@@ -402,6 +417,19 @@ impl ExecutableNode for DocumentReadNode {
                 "output": "object {ir, version_id}"
             }
         })
+    }
+
+    fn config_schema(&self) -> Option<NodeCatalogEntry> {
+        Some(
+            NodeCatalogEntry::no_config()
+                .with_field("artifact_id", FieldSpec::of_type("string").required())
+                .with_field("version", FieldSpec::of_type("string"))
+                .with_field(
+                    "storage_backend",
+                    FieldSpec::of_type("string").valid_values(["localfs".into(), "gcs".into()]),
+                )
+                .with_field("storage_root", FieldSpec::of_type("string")),
+        )
     }
 }
 

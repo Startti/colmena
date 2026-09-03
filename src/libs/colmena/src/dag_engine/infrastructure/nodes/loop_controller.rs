@@ -1,3 +1,4 @@
+use crate::dag_engine::domain::lint::{FieldSpec, NodeCatalogEntry};
 use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
 use serde_json::{json, Value};
 use std::error::Error as StdError;
@@ -120,6 +121,24 @@ impl ExecutableNode for LoopControllerNode {
                 "final_result": "any (optional)"
             }
         })
+    }
+
+    fn config_schema(&self) -> Option<NodeCatalogEntry> {
+        Some(
+            NodeCatalogEntry::no_config()
+                .with_field(
+                    "loop_status",
+                    FieldSpec::of_type("string").valid_values([
+                        "NEXT_TURN".into(),
+                        "FINISHED".into(),
+                        "SUSPENDED".into(),
+                        "FINISHED_PHASE".into(),
+                    ]),
+                )
+                .with_field("suspend_flag", FieldSpec::of_type("boolean"))
+                .with_field("question", FieldSpec::of_type("string"))
+                .with_field("all_tasks", FieldSpec::of_type("any")),
+        )
     }
 }
 

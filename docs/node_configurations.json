@@ -251,8 +251,8 @@
           "type": "string",
           "required": false,
           "default": null,
-          "description": "The HTTP method this webhook accepts (e.g., 'POST', 'GET'). Defines which HTTP method triggers this webhook endpoint in serve mode. Most webhooks use POST since they receive payload data in the request body.",
-          "valid_values": ["GET", "POST", "PUT", "DELETE", "PATCH"],
+          "description": "Documented for readability only — the engine does NOT read this key. `serve` registers every trigger_webhook route as POST unconditionally (api.rs), so writing any other method silently gets you a POST route. The single accepted value is therefore 'POST'.",
+          "valid_values": ["POST"],
           "example": "POST"
         },
         "test_payload": {
@@ -1062,13 +1062,6 @@
             { "question": "Cuál es tu Amadeus client_id?", "name": "amadeus_client_id" },
             { "question": "Cuál es tu Amadeus client_secret?", "name": "amadeus_client_secret" }
           ]
-        },
-        "id": {
-          "type": "string",
-          "required": false,
-          "default": null,
-          "description": "ID estable del bloque de preguntas. Default: el __node_id del nodo. Las questions emitidas tienen IDs de la forma `<id>__1`, `<id>__2`, ...",
-          "example": "ask_amadeus_creds"
         }
       },
       "input_ports": {

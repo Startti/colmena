@@ -4,6 +4,7 @@
 //! See `docs/superpowers/specs/2026-05-07-secure-suspend-node-design.md`.
 
 use crate::dag_engine::application::secure_value_service::SecureValueService;
+use crate::dag_engine::domain::lint::{FieldSpec, NodeCatalogEntry};
 use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
 use crate::dag_engine::domain::observer::ExecutionObserver;
 use crate::dag_engine::domain::tool_configuration::{
@@ -372,6 +373,16 @@ impl ExecutableNode for SecureSuspendNode {
 
     fn schema(&self) -> Value {
         json!({})
+    }
+
+    fn config_schema(&self) -> Option<NodeCatalogEntry> {
+        // Only `secrets` is read: `parse_and_validate_secrets` walks it for each
+        // entry's `name`/`question`. The question ids come from `secrets[].name`,
+        // not from a config `id`.
+        Some(
+            NodeCatalogEntry::no_config()
+                .with_field("secrets", FieldSpec::of_type("array").required()),
+        )
     }
 }
 

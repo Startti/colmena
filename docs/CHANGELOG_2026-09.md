@@ -517,3 +517,44 @@ es el bloque OAuth config-only, y `secure` lo consume `SecureValueService`), y
 **Estado.** partial — 13/37. Faltan 24, ya sin primitivas nuevas por delante.
 Ver BACKLOG para la clasificación por dificultad.
 
+---
+
+## 14. Fase 2, slice 3: los 9 nodos fáciles — y dos campos fantasma que destapó
+
+**Qué cambió.** Migrados a `config_schema()`: `secure_suspend`, `subgraph`,
+`python_script`, `trigger_webhook`, `suspend`, `loop_controller`,
+`document_read`, `task_memory_writer` y `document_edit`. **Van 22 de 37.**
+
+`subgraph` deriva sus dos fuentes de grafo hijo de `CHILD_GRAPH_SOURCE_KEYS`, la
+constante que el propio nodo usa para buscarlas — mismo patrón que
+`http_request` con sus reserved keys.
+
+### Dos campos que el catálogo documentaba y nadie lee
+
+Auditar antes de declarar es el punto de la fase 2, y esta vez apareció esto:
+
+**`secure_suspend.id` — eliminado.** `effective_config` mezcla un `id` que viene
+de `inputs`, pero lo único que lo consume es `parse_and_validate_secrets`, que
+lee `secrets` y de cada entrada su `name`/`question`. El `id` nunca se lee. Es
+coherente con lo que ya decía CLAUDE.md: en `secure_suspend` el id de cada
+pregunta es `secrets[].name`, no un `config.id`. Ningún grafo del repo lo usaba.
+
+**`trigger_webhook.method` — acotado a `["POST"]`, no eliminado.** El motor
+**no lee** esta clave: `api::serve_dag` registra toda ruta de `trigger_webhook`
+como POST incondicionalmente. Pero el catálogo la declaraba aceptando
+`GET/POST/PUT/DELETE/PATCH`, o sea invitaba a escribir un método que después se
+ignora en silencio — una trampa latente.
+
+Eliminarla habría producido **123 hallazgos** de golpe (los 123 grafos del repo
+que la setean), todos sobre config que nunca hizo daño: los 123 escriben
+`"POST"`, que es justo lo que el motor hace. Acotar `valid_values` a `["POST"]`
+dice la verdad, deja el corpus en cero hallazgos nuevos, y ahora sí marca el caso
+que importa: un `"GET"` sale como `INVALID_FIELD_VALUE`. La descripción explica
+que la clave no se lee.
+
+**Sin cambio de comportamiento del motor** y sin ruido nuevo: el linter da los
+mismos 80 hallazgos sobre los 300 grafos de ejemplo. El piso del test de drift
+subió de 13 a 22.
+
+**Estado.** partial — 22/37. Faltan 15: 9 medianos y 6 caros.
+
