@@ -1656,13 +1656,6 @@
             }
           }
         },
-        "session_id": {
-          "type": "string",
-          "required": false,
-          "default": null,
-          "description": "A unique identifier for the conversation thread. When provided together with 'connection_url', enables persistent conversation memory — the LLM's message history (system, user, assistant messages) is stored in the database and loaded on subsequent calls with the same session_id. This allows multi-turn conversations where the LLM remembers previous exchanges. If not provided, the node generates a random UUID for a stateless single-turn call. The global '__colmena_session_id' from the DAG state takes highest priority, followed by input override, then config value.",
-          "example": "chat_session_001"
-        },
         "connection_url": {
           "type": "string",
           "required": false,
@@ -1755,6 +1748,12 @@
           "default": null,
           "description": "Shorthand for a single on-demand skills directory, equivalent to a one-entry 'skills.paths' array. Read from config only (not inputs). Same auto-detection and COLMENA_SKILLS_ALLOWED_DIRS whitelist rules apply. A sibling array form 'skills_paths' (list of strings) is also read for multiple directories. Both are merged with 'skills.paths' and deduped by skill name. A missing directory is a hard error. See developer_guide/24_skills.md.",
           "example": "./my_skills"
+        },
+        "skills_paths": {
+          "type": "array",
+          "required": false,
+          "default": null,
+          "description": "Several directories to scan for skills, same semantics as 'skills_path' but plural. Both are read and their results deduped by name (llm.rs:712-722)."
         },
         "crdt_documents": {
           "type": "object",

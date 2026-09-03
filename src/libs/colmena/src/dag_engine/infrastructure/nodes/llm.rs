@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 use crate::crdt_documents::{ArtifactId, CrdtDocumentsRuntime};
 use crate::dag_engine::application::ports::NodeRegistryPort;
+use crate::dag_engine::domain::lint::{FieldSpec, NodeCatalogEntry};
 use crate::dag_engine::infrastructure::dag_tool_executor::DagToolExecutor;
 use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::{
     build_all_crdt_doc_tools, build_all_document_tools, build_describe_tool_definition,
@@ -3950,6 +3951,58 @@ impl ExecutableNode for LlmNode {
                 "tool_calls": "array (optional)"
             }
         })
+    }
+
+    fn config_schema(&self) -> Option<NodeCatalogEntry> {
+        // The node's memory is keyed by the engine-injected
+        // `__colmena_agent_session_id` / `__colmena_session_id`, never by a
+        // config `session_id` — that read was removed in fc46c4db when llm_call
+        // switched to (agent_session_id, node_id_path) keying. So there is no
+        // `session_id` field here.
+        Some(
+            NodeCatalogEntry::no_config()
+                .with_field(
+                    "provider",
+                    FieldSpec::of_type("string").required().valid_values([
+                        "openai".into(),
+                        "google".into(),
+                        "anthropic".into(),
+                        "mock".into(),
+                    ]),
+                )
+                .with_field("api_key", FieldSpec::of_type("string").required())
+                .with_field("max_tool_result_bytes", FieldSpec::of_type("integer"))
+                .with_field("model", FieldSpec::of_type("string"))
+                .with_field("prompt", FieldSpec::of_type("any"))
+                .with_field("task", FieldSpec::of_type("any"))
+                .with_field("system_message", FieldSpec::of_type("string"))
+                .with_field("temperature", FieldSpec::of_type("number"))
+                .with_field("max_tokens", FieldSpec::of_type("integer"))
+                .with_field("max_iterations", FieldSpec::of_type("integer"))
+                .with_field("stream", FieldSpec::of_type("boolean"))
+                .with_field("enabled_tools", FieldSpec::of_type("string|array"))
+                .with_field("lazy_tool_loading", FieldSpec::of_type("boolean"))
+                .with_field("secure_suspend_allowed", FieldSpec::of_type("boolean"))
+                .with_field("attachments_enabled", FieldSpec::of_type("boolean"))
+                .with_field("summary_enabled", FieldSpec::of_type("boolean"))
+                .with_field("summary_max_chars", FieldSpec::of_type("integer"))
+                .with_field("summary_model", FieldSpec::of_type("string"))
+                .with_field("summary_timeout_secs", FieldSpec::of_type("integer"))
+                .with_field("summary_max_output_chars", FieldSpec::of_type("integer"))
+                .with_field("tool_configurations", FieldSpec::of_type("object"))
+                .with_field("skills", FieldSpec::of_type("object"))
+                .with_field("connection_url", FieldSpec::of_type("string"))
+                .with_field("user_request", FieldSpec::of_type("string"))
+                .with_field("verbose", FieldSpec::of_type("boolean"))
+                .with_field("files", FieldSpec::of_type("array"))
+                .with_field("write_to_memory", FieldSpec::of_type("boolean"))
+                .with_field("task_id", FieldSpec::of_type("string"))
+                .with_field("thinking_budget", FieldSpec::of_type("integer"))
+                .with_field("documents", FieldSpec::of_type("object"))
+                .with_field("skills_path", FieldSpec::of_type("string"))
+                .with_field("skills_paths", FieldSpec::of_type("array"))
+                .with_field("crdt_documents", FieldSpec::of_type("object")),
+        )
     }
 }
 

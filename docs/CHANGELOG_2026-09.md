@@ -632,3 +632,58 @@ de drift: 31 → 36.
 
 **Estado.** partial — 36/37.
 
+---
+
+## 17. Fase 2 COMPLETA: `llm_call` declarado, y `session_id` era una promesa vacía
+
+**Qué cambió.** `llm_call` declara sus 33 campos. **Los 37 tipos de nodo tienen
+`config_schema()`**, así que el catálogo ya no puede desviarse del código en el
+set de campos ni en sus hechos mecánicos.
+
+### `llm_call.session_id` no hacía nada desde abril
+
+El catálogo prometía:
+
+> *"When provided together with 'connection_url', enables persistent conversation
+> memory — the message history is stored in the database and loaded on subsequent
+> calls with the same session_id."*
+
+**Falso.** `conversation_key` (`llm.rs:1406`) se arma con
+`inputs.__colmena_agent_session_id`, `inputs.__colmena_session_id` y
+`inputs.__colmena_node_id_path`. No existe ningún `config.get("session_id")` en
+`llm.rs`, y el `__colmena_session_id` lo inyecta el motor desde el id efímero del
+run (`run_use_case.rs:531`), nunca desde la config del nodo.
+
+**Fue una regresión de documentación, no un bug de código.** El campo SÍ estuvo
+cableado, y lo desconectó a propósito `fc46c4db` (2026-04-28), *"switch llm_call
+to (agent_session_id, node_id_path) keying"*: con agente presente el historial se
+filtra por `(agent_session_id, node_id)` —mismo chat entre runs—, y sin agente cae
+a `(session_id, node_id)`, aislando cada run. El catálogo nunca se actualizó.
+Cablearlo de vuelta desharía esa decisión, así que se corrigió el documento.
+
+La guía canónica ya decía lo correcto
+([`15_memory_guide.md:141`](developer_guide/15_memory_guide.md)): el id de la
+memoria *"lo deriva el engine automáticamente del run actual — no lo configurás
+vos en el nodo"*, y para persistir entre runs va `agent_session_id`. Esa misma
+guía ya registra un fantasma idéntico y anterior (`thread_id`).
+
+**Efecto medible**: el linter pasa de 80 a 110 hallazgos sobre los 300 grafos de
+ejemplo. Los 30 nuevos son todos `session_id`, y son verdaderos: esos grafos
+llevan config inerte que hace creer a su autor que tiene memoria persistente.
+Limpiarlos queda anotado en BACKLOG.
+
+### `skills_paths` faltaba en el catálogo
+
+`llm_call` lee `skills_path` (un directorio) **y** `skills_paths` (varios), y
+deduplica por nombre (`llm.rs:712-722`). El catálogo solo documentaba el singular.
+Agregado.
+
+### Sobre la verificación de este slice
+
+La declaración de 33 campos se transcribió desde el catálogo, lo que vuelve el
+test de drift tautológico **para este nodo**. Por eso se verificó aparte que el
+conjunto declarado coincide exactamente con el que `llm.rs` lee de `config`:
+33 = 33, sin sobrantes ni faltantes.
+
+**Estado.** done — 37/37.
+

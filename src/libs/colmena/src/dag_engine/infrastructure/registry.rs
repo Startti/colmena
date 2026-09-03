@@ -1006,7 +1006,7 @@ mod catalog_coverage_tests {
         // Guard the guard: if nothing is migrated this test proves nothing, so
         // pin the first batch explicitly.
         assert!(
-            checked >= 36,
+            checked >= 37,
             "expected at least the migrated batches to be checked; got {checked}"
         );
     }
