@@ -85,8 +85,8 @@ engine, sin red ni LLM.
 > `node_schema` malformado, un `memory_mode` inválido y un bloque `mcp` mal configurado.
 >
 > Lo que **no** hace: mirar el contenido del `config` de un nodo. Es un `Value` sin
-> tipar, así que un campo inventado pasa en silencio acá — para eso está
-> [`dag_engine lint`](51_graph_linter.md).
+> tipar, así que un campo inventado pasa en silencio acá — para eso está `lintGraph`,
+> abajo.
 
 ```ts
 import { validateGraph, DagError } from "colmena-ai";
@@ -111,6 +111,38 @@ try {
 }
 ```
 
+
+## `lintGraph` — encontrar campos de config inventados
+
+`validateGraph` contesta *"¿el engine puede cargar esto?"*. `lintGraph` contesta la
+pregunta que realmente tiene quien escribe el grafo: **cuáles de estos campos existen y
+cuáles me los inventé.**
+
+```ts
+import { lintGraph } from "colmena-ai";
+
+const findings = lintGraph({
+  nodes: {
+    chat: { type: "llm_call", config: { provider: "openai", api_key: "k", modle: "gpt-4o" } },
+  },
+  edges: [],
+});
+
+for (const f of findings) {
+  console.log(f.severity, f.code, f.nodeId, f.field, "-", f.message);
+}
+// error UNKNOWN_FIELD chat modle - "modle" is not a configuration field of llm_call
+```
+
+Devuelve `LintFinding[]` con `severity`, `code`, `nodeId`, `field`, `message` y
+`suggestion`. Array vacío = sin hallazgos.
+
+**Ramificá sobre `code`**, que es estable; `message` es texto para humanos y puede
+cambiar. Los hallazgos son **advisory**: nunca impiden ejecutar un grafo.
+
+Recibe el objeto crudo a propósito: deserializar a `Graph` descarta en silencio toda
+clave no declarada. Reglas y limitaciones completas en
+[`51_graph_linter.md`](51_graph_linter.md).
 ## `injectPayload` — alimentar el trigger
 
 `injectPayload` deposita un objeto como payload entrante en los nodos `trigger_webhook`. Útil

@@ -146,6 +146,57 @@ def test_validate_graph_rejects_a_malformed_node_schema():
         colmena.validate_graph(graph)
 
 
+def test_lint_graph_reports_an_invented_field_with_a_suggestion():
+    """The headline case: a typo in a config field name."""
+    graph = {
+        "nodes": {
+            "chat": {
+                "type": "llm_call",
+                "config": {"provider": "openai", "api_key": "k", "modle": "gpt-4o"},
+            }
+        },
+        "edges": [],
+    }
+    findings = colmena.lint_graph(graph)
+    unknown = [f for f in findings if f["code"] == "UNKNOWN_FIELD"]
+    assert unknown, f"expected an UNKNOWN_FIELD finding, got {findings}"
+    assert unknown[0]["field"] == "modle"
+    assert unknown[0]["node_id"] == "chat"
+    assert "model" in unknown[0]["suggestion"]
+
+
+def test_lint_graph_returns_an_empty_list_for_a_clean_graph():
+    """No findings means an empty list, not an error."""
+    assert colmena.lint_graph(POWER_GRAPH) == []
+
+
+def test_lint_graph_sees_keys_that_validate_graph_cannot():
+    """`lint_graph` takes the raw dict, so it sees keys `Graph` would discard.
+
+    `default_input_port` is not a field of the engine's node struct, so it is
+    dropped during deserialization — `validate_graph` accepts this graph.
+    """
+    graph = {
+        "nodes": {"a": {"type": "log", "config": {}, "default_input_port": "x"}},
+        "edges": [],
+    }
+    assert colmena.validate_graph(graph) is None
+
+    codes = [f["code"] for f in colmena.lint_graph(graph)]
+    assert "UNKNOWN_NODE_PROPERTY" in codes, f"got {codes}"
+
+
+def test_lint_graph_is_advisory_and_does_not_raise():
+    """A graph full of findings still returns them rather than raising."""
+    graph = {
+        "nodes": {"a": {"type": "log", "config": {"nope": 1}}},
+        "edges": [{"from": "a", "to": "ghost"}],
+    }
+    findings = colmena.lint_graph(graph)
+    assert len(findings) >= 2
+    assert {"EDGE_UNKNOWN_NODE", "UNKNOWN_FIELD"} <= {f["code"] for f in findings}
+
+
 def test_default_registry_lists_node_types():
     """default_registry exposes the registered node types (no DB needed)."""
     node_types = colmena.default_registry().node_types()
