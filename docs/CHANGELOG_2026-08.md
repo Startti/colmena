@@ -2800,3 +2800,36 @@ la respuesta describió la organización real del monorepo.
 **Alcance.** Aditivo: una entrada que trae `name` se comporta igual. ADP no afectado.
 
 **Estado.** done.
+
+## 47. Un schema MCP con `$schema` ya no tira todas las tools del agente
+
+**Qué cambió.** El schema de entrada de una tool MCP se reenvía al proveedor byte a byte —es el
+contrato que publica el servidor y Colmena no está para reinterpretarlo—, con una excepción: se quitan
+las palabras clave de documento de JSON Schema, `$schema` y `$id`.
+
+**Por qué.** Gemini rechaza una clave desconocida en `function_declarations[].parameters` (un subconjunto
+de OpenAPI) con un **400 que mata el request entero**: no solo esa tool, no solo las de MCP, sino
+**todas** las que el agente tenía en ese turno. Context7 publica `$schema` —lo que JSON Schema estándar
+fomenta— y DeepWiki no; por eso uno funcionaba en vivo y el otro devolvía `INVALID_ARGUMENT` sin que la
+diferencia fuera evidente. `$schema` y `$id` describen el **documento**, no los parámetros, así que
+sacarlos no puede cambiar qué argumentos son válidos.
+
+**Acotado a propósito.** Solo esas dos claves, solo en el nivel superior. Los dialectos de schema entre
+proveedores difieren en más cosas que esta, y una capa de traducción general es un problema de diseño,
+no algo para improvisar acá. Se arregla lo que se observó romper.
+
+**Un test correcto puede cementar un error.** `mcp_schema_is_forwarded_byte_identical` usaba la sonda
+real de Context7 —la que trae el `$schema` que rompe— y **pasaba**: era fiel a lo que el código hacía.
+Lo que estaba mal era el contrato que fijaba. Ahora excluye los metadatos de ambos lados, exige
+byte-identidad de todo lo demás, y **afirma que la sonda siga trayendo `$schema`** para que no se vuelva
+vacuo en un refresh de fixture.
+
+**Verificado en vivo.** Context7 con `lazy_tool_loading`: dos llamadas encadenadas
+(`ctx7__resolve-library-id` y después `ctx7__query-docs` con el id resuelto), nonces distintos por
+llamada, y la respuesta trajo sintaxis de Axum de una versión reciente —la forma nueva, que no salía de
+la memoria del modelo. Antes de este arreglo el mismo grafo moría con el 400.
+
+**Alcance.** El filtrado solo afecta a tools MCP. ADP no afectado. Segunda de las dos rebanadas de los
+defectos que la primera corrida real destapó (la primera, §46, hizo cargar la forma documentada).
+
+**Estado.** done.
