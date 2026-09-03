@@ -80,7 +80,7 @@ impl<'de> Deserialize<'de> for Requiredness {
 }
 
 /// What the catalog knows about one configuration field of one node type.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct FieldSpec {
     /// The documented type, verbatim from the catalog.
     ///
@@ -107,7 +107,7 @@ pub struct FieldSpec {
 }
 
 /// What the catalog knows about one `node_type`.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct NodeCatalogEntry {
     /// The configuration fields this node type accepts, keyed by field name.
     #[serde(default)]
@@ -121,7 +121,61 @@ pub struct NodeCatalogEntry {
     pub reserved_input_keys: BTreeSet<String>,
 }
 
+impl FieldSpec {
+    /// A field of `field_type`, not required, no closed value set, author-settable.
+    ///
+    /// Chain [`Self::required`], [`Self::valid_values`] and [`Self::read_only`]
+    /// to add the rest. This is how a node declares its config in code (phase 2
+    /// of the linter): a node's [`config_schema`] is checked field-for-field
+    /// against the catalog, so the machine facts can no longer drift apart.
+    ///
+    /// [`config_schema`]: crate::dag_engine::domain::node::ExecutableNode::config_schema
+    pub fn of_type(field_type: impl Into<String>) -> Self {
+        FieldSpec {
+            field_type: field_type.into(),
+            required: Requiredness::Never,
+            valid_values: None,
+            read_only: false,
+        }
+    }
+
+    /// Mark the field as unconditionally required.
+    pub fn required(mut self) -> Self {
+        self.required = Requiredness::Always;
+        self
+    }
+
+    /// Mark the field as engine-populated and not author-settable.
+    pub fn read_only(mut self) -> Self {
+        self.read_only = true;
+        self
+    }
+
+    /// Restrict the field to a closed set of accepted values.
+    pub fn valid_values(mut self, values: impl IntoIterator<Item = Value>) -> Self {
+        self.valid_values = Some(values.into_iter().collect());
+        self
+    }
+}
+
 impl NodeCatalogEntry {
+    /// An entry that accepts no configuration fields at all.
+    ///
+    /// A node returning this from `config_schema` is asserting it reads nothing
+    /// from `config` — which the drift test then verifies against the catalog.
+    pub fn no_config() -> Self {
+        NodeCatalogEntry {
+            config_fields: BTreeMap::new(),
+            reserved_input_keys: BTreeSet::new(),
+        }
+    }
+
+    /// Add a documented field, builder-style.
+    pub fn with_field(mut self, name: impl Into<String>, spec: FieldSpec) -> Self {
+        self.config_fields.insert(name.into(), spec);
+        self
+    }
+
     /// Whether `field` is a documented configuration field of this node type.
     pub fn knows_field(&self, field: &str) -> bool {
         self.config_fields.contains_key(field)

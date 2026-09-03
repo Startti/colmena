@@ -1,4 +1,5 @@
 // --- IMPORTACIONES AÑADIDAS ---
+use crate::dag_engine::domain::lint::{FieldSpec, NodeCatalogEntry};
 use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
 use serde_json::{json, Value};
 use std::error::Error as StdError;
@@ -42,6 +43,11 @@ impl ExecutableNode for AddNode {
     fn schema(&self) -> Value {
         json!({"type": "add", "inputs": {"a": "number", "b": "number"}, "outputs": {"output": "number"}})
     }
+
+    fn config_schema(&self) -> Option<NodeCatalogEntry> {
+        // Reads only its `a`/`b` inputs; `execute` takes `_config`.
+        Some(NodeCatalogEntry::no_config())
+    }
 }
 
 // --- SubtractNode ---
@@ -66,6 +72,11 @@ impl ExecutableNode for SubtractNode {
     fn schema(&self) -> Value {
         json!({"type": "subtract", "inputs": {"a": "number", "b": "number"}, "outputs": {"output": "number"}})
     }
+
+    fn config_schema(&self) -> Option<NodeCatalogEntry> {
+        // Reads only its `a`/`b` inputs; `execute` takes `_config`.
+        Some(NodeCatalogEntry::no_config())
+    }
 }
 
 // --- MultiplyNode ---
@@ -89,6 +100,11 @@ impl ExecutableNode for MultiplyNode {
 
     fn schema(&self) -> Value {
         json!({"type": "multiply", "inputs": {"a": "number", "b": "number"}, "outputs": {"output": "number"}})
+    }
+
+    fn config_schema(&self) -> Option<NodeCatalogEntry> {
+        // Reads only its `a`/`b` inputs; `execute` takes `_config`.
+        Some(NodeCatalogEntry::no_config())
     }
 }
 
@@ -117,6 +133,11 @@ impl ExecutableNode for DivideNode {
 
     fn schema(&self) -> Value {
         json!({"type": "divide", "inputs": {"a": "number", "b": "number"}, "outputs": {"output": "number"}})
+    }
+
+    fn config_schema(&self) -> Option<NodeCatalogEntry> {
+        // Reads only its `a`/`b` inputs; `execute` takes `_config`.
+        Some(NodeCatalogEntry::no_config())
     }
 }
 
@@ -157,5 +178,13 @@ impl ExecutableNode for ExponentialNode {
             "config": {"exponent": "number"},
             "outputs": {"output": "number"}
         })
+    }
+
+    fn config_schema(&self) -> Option<NodeCatalogEntry> {
+        // Reads `config.exponent` (required); `base` arrives as an input.
+        Some(
+            NodeCatalogEntry::no_config()
+                .with_field("exponent", FieldSpec::of_type("number").required()),
+        )
     }
 }

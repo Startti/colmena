@@ -3,6 +3,7 @@
 //! Real, side-effect-free node intended for use as an LLM tool when the model
 //! needs the wall-clock time.
 
+use crate::dag_engine::domain::lint::NodeCatalogEntry;
 use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
 use crate::dag_engine::domain::observer::ExecutionObserver;
 use chrono::Utc;
@@ -35,6 +36,11 @@ impl ExecutableNode for CurrentTimeNode {
             "inputs": {},
             "outputs": { "output": "string" }
         })
+    }
+
+    fn config_schema(&self) -> Option<NodeCatalogEntry> {
+        // No config; emits the current UTC time.
+        Some(NodeCatalogEntry::no_config())
     }
 
     fn description(&self) -> Option<&str> {
