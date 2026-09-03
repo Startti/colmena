@@ -28,14 +28,19 @@ Lo que quedó abierto, en orden de importancia:
   acordado: solo hechos mecánicos** (nombres, `required`, `valid_values`, `read_only`); la
   prosa queda en el JSON a mano — no se generará el JSON completo.
 
-  **Migrados 36 de 37.** Slice 1: los 8 sin config + `exponential`. Slice 2: las tres
-  primitivas del builder y los 4 nodos que las ejercitan. Slice 3: los 9 fáciles.
-  Slice 4: los 9 medianos. Slice 5: el clúster LLM (`planner`, `critic`, `reactor`,
-  `orchestrator`) y `tavily_client`.
+  **COMPLETA: los 37 nodos declaran su `config_schema()`** (slices 1-6, CHANGELOG
+  §12-§17). El catálogo ya no puede desviarse del código en el set de campos ni en sus
+  hechos mecánicos: un test lo cruza nodo por nodo.
 
-  **Falta 1: `llm_call`** (33 campos), el más grande y el de mayor riesgo de drift.
-  Cuando entre, los 37 estarán declarados y se puede pasar a **generar/verificar el set
-  de campos** del JSON desde el código; la prosa sigue autorada.
+  **Siguiente paso opcional**: pasar a *generar* el set de campos del JSON desde el
+  código en vez de solo verificarlo. La prosa (`description`/`example`/`default`) sigue
+  autorada a mano por decisión de alcance.
+
+- **30 grafos de ejemplo llevan `llm_call.session_id`, que no hace nada.** El linter los
+  reporta desde §17. No es config peligrosa —solo inerte— pero engaña: sus autores creen
+  que fijan el hilo de conversación. La forma real es `agent_session_id` (ver
+  [`15_memory_guide.md`](developer_guide/15_memory_guide.md)). Limpiarlos es trabajo
+  mecánico y aparte.
 
   Endgame: cuando los 37 declaren `config_schema()`, el *set de campos* del JSON pasa a ser
   verificado/generado; la prosa sigue autorada.
