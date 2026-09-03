@@ -422,3 +422,26 @@ sección "De dónde sale la autoridad".
 
 **Estado.** done. Cierra la fase 1.
 
+---
+
+## 11. `api_explorer`: el `schema()` dejó de anunciar config que no lee
+
+**Qué cambió.** El `schema()` de `api_explorer` listaba un bloque `config` con diez
+campos (`enable_cache`, `cache_ttl_seconds`, `fuzzy_match_threshold`, …). **El nodo
+no lee ninguno**: se construye una sola vez al registrarse con
+`ApiSpecUseCaseConfig::default()` y su `execute` recibe `_config` sin usar. Un
+operador que ponía cualquiera de esos campos no obtenía efecto — y, ahora que el
+linter existe, un grafo que confiara en ellos recibiría un `UNKNOWN_FIELD` contra
+un `schema()` que los prometía.
+
+Se **eliminó** el bloque `config`, igual que se hizo con el flag fantasma
+`guardrail_enabled` de `sql_query` (§1). Ahora el `schema()` coincide con la
+entrada del catálogo, que ya documentaba `config_fields` vacío más un
+`config_note`. Un test fija que `schema()` no anuncie `config`.
+
+**Sin cambio de comportamiento.** El bloque `config` del `schema()` es puramente
+descriptivo — los tres consumidores de `schema()` leen solo `inputs`. → **ADP no
+afectado**.
+
+**Estado.** done. Último pendiente de la fase 1 del linter.
+

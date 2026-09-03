@@ -43,9 +43,12 @@ Lo que quedó abierto, en orden de importancia:
 
 - ~~**`compact()` deja comillas desbalanceadas.**~~ — **HECHO 2026-09-02**, mismo cambio.
 
-- **Menor pendiente.** El `schema()` de `api_explorer` anuncia diez campos de config que
-  el nodo nunca lee — drift interno del `.rs`, no del catálogo, cuya entrada ya documenta
-  `config_fields` vacío.
+- ~~**El `schema()` de `api_explorer` anuncia diez campos de config que el nodo nunca lee.**~~
+  — **HECHO 2026-09-03**, ver CHANGELOG §11. Bloque `config` eliminado del `schema()`;
+  ahora coincide con el `config_note` del catálogo.
+
+**Fase 1 cerrada.** Lo único que queda en esta lista es la fase 2 (arriba) y los tres
+grafos de ejemplo rotos, que son preexistentes y no del linter.
 
 
 ## 🚨 MÁXIMA PRIORIDAD — Colmena no puede ejecutar los modelos GPT-5.6 (2026-08-24)
