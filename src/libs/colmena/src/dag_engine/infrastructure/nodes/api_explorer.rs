@@ -519,21 +519,17 @@ impl ExecutableNode for ApiExplorerNode {
     }
 
     fn schema(&self) -> Value {
+        // No `config` block: this node takes no graph-level configuration. It is
+        // built once at registry time from `ApiSpecUseCaseConfig::default()`,
+        // and `execute` receives `_config` unused — so any key placed in a
+        // graph's config for this node is inert. The block previously listed
+        // here advertised ten cache/session/retry fields the node never reads,
+        // which the linter would report against a graph that trusted it. The
+        // catalog entry documents the same emptiness (`config_fields: {}` plus a
+        // `config_note`).
         json!({
             "inputs": { "__sub_tool": "string" },
-            "outputs": { "output": "any" },
-            "config": {
-                "enable_cache": "bool (default true)",
-                "cache_ttl_seconds": "u64 (default 86400)",
-                "max_cached_specs": "u64 (default 100)",
-                "session_idle_ttl_seconds": "u64 (default 900)",
-                "session_max_lifetime_seconds": "u64 (default 3600)",
-                "max_spec_size_bytes": "u64 (default 10 MiB)",
-                "spec_download_timeout_seconds": "u64 (default 60)",
-                "default_base_url_override": "string | null",
-                "fuzzy_match_threshold": "f32 (default 0.1)",
-                "retry_policy": { "max_attempts": "u32", "initial_backoff_ms": "u64" }
-            }
+            "outputs": { "output": "any" }
         })
     }
 
@@ -825,6 +821,22 @@ fn build_http_request_sub_tool() -> SubToolDefinition {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `schema()` must not advertise a `config` block: this node reads none, so
+    /// any field listed there is inert and would make the linter flag a graph
+    /// that trusted the advertised keys. It previously listed ten.
+    #[test]
+    fn schema_advertises_no_config_fields() {
+        let node = ApiExplorerNode::new();
+        let schema = node.schema();
+        assert!(
+            schema.get("config").is_none(),
+            "api_explorer takes no graph config; schema() must not advertise any: {schema}"
+        );
+        // The surface the executor actually consumes is still present.
+        assert!(schema.get("inputs").is_some());
+        assert!(schema.get("outputs").is_some());
+    }
 
     #[test]
     fn catalog_has_all_five_sub_tools() {
