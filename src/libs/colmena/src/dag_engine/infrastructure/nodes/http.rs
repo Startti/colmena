@@ -18,6 +18,7 @@
 //! `body` is parsed as JSON; if the response is not valid JSON, `body` is `null`.
 //! The default output port is `body`.
 
+use crate::dag_engine::domain::lint::{FieldSpec, NodeCatalogEntry};
 use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
 use bytes::Bytes;
 use futures::Stream;
@@ -1142,6 +1143,45 @@ impl ExecutableNode for HttpNode {
                 "body": "any"
             }
         })
+    }
+
+    fn config_schema(&self) -> Option<NodeCatalogEntry> {
+        // Request shape and auth come from config or inputs (inputs win); the
+        // four `max_*`/`allow_*` limits are read through `limit_usize`/`limit_bool`;
+        // `auth` is the config-only OAuth block; `secure` is the flag
+        // `SecureValueService` reads to encrypt this node's output.
+        Some(
+            NodeCatalogEntry::no_config()
+                .with_field("base_url", FieldSpec::of_type("string"))
+                .with_field("endpoint", FieldSpec::of_type("string"))
+                .with_field(
+                    "method",
+                    FieldSpec::of_type("string").valid_values([
+                        "GET".into(),
+                        "POST".into(),
+                        "PUT".into(),
+                        "DELETE".into(),
+                        "PATCH".into(),
+                    ]),
+                )
+                .with_field("headers", FieldSpec::of_type("object"))
+                .with_field("query_params", FieldSpec::of_type("object"))
+                .with_field("body", FieldSpec::of_type("any"))
+                .with_field("bearer_token", FieldSpec::of_type("string"))
+                .with_field("authorization", FieldSpec::of_type("string"))
+                .with_field("auth", FieldSpec::of_type("object"))
+                .with_field("secure", FieldSpec::of_type("boolean"))
+                .with_field("max_file_size_bytes", FieldSpec::of_type("integer"))
+                .with_field("max_parts", FieldSpec::of_type("integer"))
+                .with_field("url_download_timeout_secs", FieldSpec::of_type("integer"))
+                .with_field("allow_http_urls", FieldSpec::of_type("boolean"))
+                .with_reserved_input_keys(Self::RESERVED_KEYS.iter().copied())
+                .with_reserved_input_keys([
+                    "__colmena_session_id",
+                    "__node_id",
+                    "__colmena_resume_answer",
+                ]),
+        )
     }
 }
 

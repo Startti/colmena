@@ -26,6 +26,7 @@
 | 13 | `storage::domain` | `src/libs/colmena/src/storage/domain/mod.rs` |
 | 12 | `dag_engine::application::secure_value_service` | `src/libs/colmena/src/dag_engine/application/secure_value_service.rs` |
 | 12 | `dag_engine::domain::tool_configuration` | `src/libs/colmena/src/dag_engine/domain/tool_configuration.rs` |
+| 11 | `dag_engine::domain::lint` | `src/libs/colmena/src/dag_engine/domain/lint/mod.rs` |
 | 11 | `documents::domain::ports` | `src/libs/colmena/src/documents/domain/ports.rs` |
 | 11 | `text` | `src/libs/colmena/src/text/mod.rs` |
 | 10 | `dag_engine::application::ports` | `src/libs/colmena/src/dag_engine/application/ports.rs` |
@@ -39,7 +40,6 @@
 | 9 | `gdocs::application::co_edit_guard` | `src/libs/colmena/src/gdocs/application/co_edit_guard.rs` |
 | 9 | `llm::domain::mcp` | `src/libs/colmena/src/llm/domain/mcp.rs` |
 | 9 | `skills::domain` | `src/libs/colmena/src/skills/domain/mod.rs` |
-| 8 | `dag_engine::domain::lint` | `src/libs/colmena/src/dag_engine/domain/lint/mod.rs` |
 | 8 | `dag_engine::domain::sql_permissions` | `src/libs/colmena/src/dag_engine/domain/sql_permissions.rs` |
 | 8 | `dag_engine::domain::sql_ports` | `src/libs/colmena/src/dag_engine/domain/sql_ports.rs` |
 
@@ -275,7 +275,7 @@
 
 #### `src/libs/colmena/src/dag_engine/domain/lint/mod.rs`
 - Module: `dag_engine::domain::lint`
-- **Used by (8)**: `src/libs/colmena/src/dag_engine/infrastructure/nodes/api_explorer.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/current_time.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/debug.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/math.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/output.rs`, `src/libs/colmena/src/dag_engine/infrastructure/registry.rs`, `src/libs/colmena/src/node_bindings/dag.rs`, `src/libs/colmena/src/python_bindings/mod.rs`
+- **Used by (11)**: `src/libs/colmena/src/dag_engine/infrastructure/nodes/api_explorer.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/current_time.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/debug.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/http.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/input.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/math.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/output.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/router/node.rs`, `src/libs/colmena/src/dag_engine/infrastructure/registry.rs`, `src/libs/colmena/src/node_bindings/dag.rs`, `src/libs/colmena/src/python_bindings/mod.rs`
 - Depends on (0): — (no intra-crate imports)
 
 #### `src/libs/colmena/src/dag_engine/domain/mod.rs`
@@ -406,7 +406,7 @@
 #### `src/libs/colmena/src/dag_engine/infrastructure/nodes/http.rs`
 - Module: `dag_engine::infrastructure::nodes::http`
 - **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
-- Depends on (3): `dag_engine::domain::node`, `google_oauth::infrastructure`, `storage::domain`
+- Depends on (4): `dag_engine::domain::lint`, `dag_engine::domain::node`, `google_oauth::infrastructure`, `storage::domain`
 
 #### `src/libs/colmena/src/dag_engine/infrastructure/nodes/http_oauth.rs`
 - Module: `dag_engine::infrastructure::nodes::http_oauth`
@@ -426,7 +426,7 @@
 #### `src/libs/colmena/src/dag_engine/infrastructure/nodes/input.rs`
 - Module: `dag_engine::infrastructure::nodes::input`
 - **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
-- Depends on (1): `dag_engine::domain::node`
+- Depends on (2): `dag_engine::domain::lint`, `dag_engine::domain::node`
 
 #### `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm.rs`
 - Module: `dag_engine::infrastructure::nodes::llm`
@@ -681,7 +681,7 @@
 #### `src/libs/colmena/src/dag_engine/infrastructure/nodes/router/node.rs`
 - Module: `dag_engine::infrastructure::nodes::router::node`
 - **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
-- Depends on (5): `dag_engine::application::ports`, `dag_engine::domain::node`, `dag_engine::domain::observer`, `dag_engine::infrastructure::nodes::subgraph`, `llm::domain`
+- Depends on (6): `dag_engine::application::ports`, `dag_engine::domain::lint`, `dag_engine::domain::node`, `dag_engine::domain::observer`, `dag_engine::infrastructure::nodes::subgraph`, `llm::domain`
 
 #### `src/libs/colmena/src/dag_engine/infrastructure/nodes/router/when_dsl.rs`
 - Module: `dag_engine::infrastructure::nodes::router::when_dsl`

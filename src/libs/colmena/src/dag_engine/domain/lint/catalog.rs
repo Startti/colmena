@@ -145,6 +145,16 @@ impl FieldSpec {
         self
     }
 
+    /// Mark the field as required only under a condition the catalog states in
+    /// prose rather than formalises — e.g. `router.schema` is `"mode B only"`.
+    ///
+    /// The linter never reports such a field as missing: it cannot evaluate the
+    /// condition, and guessing produces errors on correct graphs.
+    pub fn conditional(mut self, condition: impl Into<Value>) -> Self {
+        self.required = Requiredness::Conditional(condition.into());
+        self
+    }
+
     /// Mark the field as engine-populated and not author-settable.
     pub fn read_only(mut self) -> Self {
         self.read_only = true;
@@ -170,9 +180,34 @@ impl NodeCatalogEntry {
         }
     }
 
+    /// An entry for a node that treats its whole `config` as free-form data, so
+    /// no key can be "invented" on it.
+    ///
+    /// `input` and `mock_input` emit their configuration as the payload for
+    /// downstream nodes. The catalog says this with the [`ANY_FIELD_KEY`]
+    /// placeholder, and so does this constructor — a node can still add the
+    /// specific keys it also gives meaning to, as `input` does with `data`.
+    pub fn open_config() -> Self {
+        NodeCatalogEntry::no_config().with_field(ANY_FIELD_KEY, FieldSpec::of_type("any"))
+    }
+
     /// Add a documented field, builder-style.
     pub fn with_field(mut self, name: impl Into<String>, spec: FieldSpec) -> Self {
         self.config_fields.insert(name.into(), spec);
+        self
+    }
+
+    /// Declare input keys the engine reserves for itself on this node type.
+    ///
+    /// Author-supplied config must not collide with these; only a handful of
+    /// nodes have them (today, `http_request`).
+    pub fn with_reserved_input_keys<I, S>(mut self, keys: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.reserved_input_keys
+            .extend(keys.into_iter().map(Into::into));
         self
     }
 
@@ -202,6 +237,12 @@ impl NodeCatalogEntry {
             .map(String::as_str)
     }
 }
+
+/// The placeholder key the catalog uses for a node whose whole `config` is data.
+///
+/// Named rather than spelled out at each use so the code a node writes and the
+/// document it is checked against cannot drift on the spelling alone.
+pub const ANY_FIELD_KEY: &str = "<any_key>";
 
 /// Whether a catalog key stands for "a name the author chooses" rather than a
 /// literal field, e.g. `<any_key>`.
@@ -478,6 +519,49 @@ mod tests {
         assert!(
             catalog.common_config_field("model").is_none(),
             "`model` is per-node-type, not engine-wide; it must stay in config_fields"
+        );
+    }
+
+    /// The three declaration shapes the catalog uses that a plain
+    /// `of_type(..).required()` cannot express. Each is checked against the real
+    /// document rather than against itself, so a mismatch in spelling or
+    /// semantics fails here rather than in a node's migration.
+    #[test]
+    fn open_config_builder_matches_the_documented_placeholder() {
+        let built = NodeCatalogEntry::open_config();
+        assert!(built.accepts_any_field());
+
+        let documented = NodeCatalog::embedded()
+            .entry("mock_input")
+            .expect("mock_input is documented");
+        assert_eq!(
+            &built, documented,
+            "open_config() must reproduce the catalog entry"
+        );
+    }
+
+    #[test]
+    fn conditional_builder_reproduces_a_prose_condition() {
+        let spec = FieldSpec::of_type("object").conditional("mode B only");
+        assert!(!spec.required.is_unconditional());
+
+        let documented = &NodeCatalog::embedded()
+            .entry("router")
+            .expect("router is documented")
+            .config_fields["schema"];
+        assert_eq!(&spec, documented);
+    }
+
+    #[test]
+    fn reserved_input_keys_builder_round_trips() {
+        let built = NodeCatalogEntry::no_config().with_reserved_input_keys(["a", "b"]);
+        assert_eq!(
+            built
+                .reserved_input_keys
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["a", "b"]
         );
     }
 

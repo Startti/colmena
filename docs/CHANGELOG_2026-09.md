@@ -482,3 +482,38 @@ ganaron `PartialEq` y constructores fluidos, ambos aditivos → **ADP no afectad
 **Estado.** partial — 9/37 nodos; el resto (incluidos config abierta y
 `reserved_input_keys`) en próximos slices. Ver BACKLOG.
 
+---
+
+## 13. Fase 2, slice 2: las tres formas que el builder no sabía expresar
+
+**Qué cambió.** El builder de `config_schema()` solo podía declarar campo/tipo/
+`required`/`valid_values`/`read_only`. El catálogo usa tres cosas más, y sin ellas
+cuatro nodos no se podían migrar:
+
+| Primitiva | Para qué | Nodo que la ejercita |
+|---|---|---|
+| `NodeCatalogEntry::open_config()` | nodos cuya config entera es dato — placeholder `<any_key>`, ahora la constante `ANY_FIELD_KEY` | `mock_input`, `input` |
+| `NodeCatalogEntry::with_reserved_input_keys()` | claves que el motor se reserva en ese nodo | `http_request` (13) |
+| `FieldSpec::conditional(v)` | obligatoriedad que el catálogo enuncia en prosa | `router.schema` (`"mode B only"`) |
+
+**Migrados 13 de 37** con estos cuatro: `mock_input`, `input`, `router` y
+`http_request`.
+
+**`http_request` deriva sus reserved keys de la constante real** que el nodo ya
+usa para filtrar parámetros salientes (`Self::RESERVED_KEYS`), en vez de repetir
+la lista. Si alguien agrega una clave ahí y olvida el catálogo, el test de drift
+falla — que es exactamente lo que la fase 2 busca.
+
+**Auditoría, que es el punto de migrar.** Se verificó campo por campo contra el
+código antes de declarar. Esta vez el catálogo estaba bien: los 14 campos de
+`http_request` son reales (cuatro se leen vía `limit_usize`/`limit_bool`, `auth`
+es el bloque OAuth config-only, y `secure` lo consume `SecureValueService`), y
+`router` lee 7 más `temperature`, que está hardcodeada en 0.1 y por eso figura
+`read_only`.
+
+**Sin cambio de comportamiento.** El linter sigue leyendo el catálogo;
+`config_schema()` solo se cruza en el test. Todo aditivo → **ADP no afectado**.
+
+**Estado.** partial — 13/37. Faltan 24, ya sin primitivas nuevas por delante.
+Ver BACKLOG para la clasificación por dificultad.
+

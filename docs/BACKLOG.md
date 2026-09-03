@@ -24,13 +24,26 @@ Lo que quedó abierto, en orden de importancia:
 
 - **Fase 2 del linter: mover la fuente de verdad al código — EN CURSO.** La maquinaria
   aterrizó: `ExecutableNode::config_schema()` (default `None`, aditivo) declara los hechos
-  mecánicos, y un test los cruza contra el catálogo (CHANGELOG §12). **Alcance acordado:
-  solo hechos mecánicos** (nombres, `required`, `valid_values`, `read_only`); la prosa
-  queda en el JSON a mano — no se generará el JSON completo. Migrados 9 de 37 nodos (los 8
-  sin config + `exponential`). Falta migrar el resto, incluidos los de config abierta
-  (`input`/`mock_input`, placeholder `<any_key>`) y los que tienen `reserved_input_keys`
-  (`http_request`). Endgame: cuando los 37 declaren `config_schema()`, el *set de campos*
-  del JSON pasa a ser verificado/generado; la prosa sigue autorada.
+  mecánicos, y un test los cruza contra el catálogo (CHANGELOG §12, §13). **Alcance
+  acordado: solo hechos mecánicos** (nombres, `required`, `valid_values`, `read_only`); la
+  prosa queda en el JSON a mano — no se generará el JSON completo.
+
+  **Migrados 13 de 37.** Slice 1: los 8 sin config + `exponential`. Slice 2: las tres
+  primitivas que faltaban en el builder (`open_config()` para config abierta,
+  `with_reserved_input_keys()`, `FieldSpec::conditional()`) y los 4 nodos que las
+  ejercitan: `mock_input`, `input`, `router`, `http_request`.
+
+  **Faltan 24**, sin primitivas nuevas por delante — solo autoría y auditoría:
+  - *Fáciles* (9): `secure_suspend`, `subgraph`, `python_script`, `trigger_webhook`,
+    `suspend`, `loop_controller`, `document_read`, `task_memory_writer`, `document_edit`.
+  - *Medianos* (9): `sql_query`, `output_parser`, `for_each`, `document_create`, `tts`,
+    `image_generation`, `image_edit`, `socketio_request`, `information_extraction`.
+  - *Caros* (6): el clúster LLM (`planner`, `critic`, `reactor`, `orchestrator`),
+    `tavily_client` (18 campos) y `llm_call` (33). Comparten `llm_shared_fields` y son
+    donde más probable es que el catálogo esté mal — migrarlos puede obligar a corregirlo.
+
+  Endgame: cuando los 37 declaren `config_schema()`, el *set de campos* del JSON pasa a ser
+  verificado/generado; la prosa sigue autorada.
 
 - **Tres grafos de ejemplo no cargan.** `tests/graphs/agents/forward_generated_artifact.json`,
   `upload_inline_to_endpoint.json` y `upload_signed_url_to_endpoint.json` declaran `nodes`
