@@ -728,3 +728,72 @@ que sólo lo habría escondido.
 
 **Estado.** done.
 
+---
+
+## 19. `short_ulid` truncaba el ULID a 12 chars y dejaba 2 de azar
+
+**Qué cambió.** `UlidIdGenerator::short_ulid()`
+(`documents/infrastructure/ids.rs`) construía el cuerpo de cada id así:
+
+```rust
+let ulid = ulid::Ulid::new().to_string();
+ulid[..12].to_ascii_lowercase()
+```
+
+Un ULID son 26 chars Crockford base32: **10 de timestamp (48 bits de ms) + 16 de
+aleatoriedad (80 bits)**. Cortar en `[..12]` conserva el timestamp entero y deja
+**2 chars de azar = 1024 valores distintos por milisegundo**. Todos los ids del
+módulo pasan por ahí — `art_`, `sheet_`, `tbl_`, `blk_`, `run_`, `row_`, `li_`,
+`sl_`, `asset_` — y son **ids persistidos**, así que esto era un defecto de
+integridad de datos, no un problema de tests.
+
+Tasa de colisión medida sobre ids emitidos seguidos dentro del mismo milisegundo:
+
+| ids | probabilidad de colisión |
+|---|---|
+| 8 | 2.9% |
+| 16 | 11.4% |
+| 32 | 38.0% |
+| 64 | 86.0% |
+
+**Cómo se manifestó.** El job "Test (3.12)" del PR #262 —un cambio de solo
+documentación— falló en `html_documents_e2e.rs` con
+`IRValidationFailed { path: "/slides/sl_01m1md27rf28/blocks/blk_01m1md27rgw0",
+reason: "duplicate block id (across all slides)" }`. Los dos ids comparten el
+prefijo de timestamp `01m1md27r`: mismo milisegundo. Pasaba 60/60 en macOS y
+fallaba de forma intermitente en CI, y por eso se leía como flaky. No era flaky:
+era una carrera real que las máquinas más rápidas pierden más seguido.
+
+**El arreglo.** El cuerpo pasa a tener **22 chars**: 10 de timestamp, 8 de
+aleatoriedad (40 bits) y 4 de una **secuencia local al proceso** (`AtomicU64`,
+codificada en el mismo alfabeto Crockford en minúscula).
+
+Los tres tramos cubren cosas distintas:
+
+- El **timestamp** mantiene los ids aproximadamente ordenables, como antes.
+- La **secuencia** vuelve la unicidad *estructural* dentro de un proceso, no
+  apenas probable: dos ids solo pueden repetirse si la secuencia da la vuelta, lo
+  que exige 2^20 ids dentro de un mismo milisegundo. Este es exactamente el caso
+  que rompía el test E2E, donde un documento entero se arma en una sola ráfaga.
+- Los **40 bits de azar** cubren el caso entre procesos, donde no hay contador
+  compartido.
+
+**Sin consumidores afectados.** Se verificó antes de cambiar el largo que nada
+asume 12 chars: no hay regex de id, ni validación de largo, ni ids generados
+hardcodeados en fixtures o snapshots. Las únicas comprobaciones sobre ids miran
+el prefijo semántico (`starts_with("blk_")`). Los renderers de HTML, Word y Excel
+tratan el id como opaco. Los ids ya persistidos siguen siendo válidos: el formato
+nunca se validó, así que ids viejos de 12 chars y nuevos de 22 conviven sin
+migración.
+
+**La cobertura anterior era vacua.** Los cuatro tests que ya existían comparaban
+**dos** ids (`assert_ne!(g.new_artifact_id(), g.new_artifact_id())`) — con 1024
+valores por ms eso falla ~0.1% de las veces, o sea casi nunca. Los dos tests
+nuevos emiten 20 000 ids en un loop apretado y 16 000 desde 8 hilos concurrentes.
+Se verificó que **fallan** contra la implementación vieja (5855 de 20 000 ids
+colisionaron) y pasan contra la nueva; no son tautológicos.
+
+**Documentación de referencia.** `docs/superpowers/specs/2026-04-21-documents-feature-design.md` §5.5,
+`docs/agent_context/audit/src__libs__colmena__src__documents__infrastructure__ids.rs.md`.
+
+**Estado.** done.

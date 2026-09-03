@@ -328,7 +328,11 @@ Validación estructural ejecuta **antes** de persistir una versión. IR inválid
 ### 5.5 ID generation
 
 IDs generados por un `IdGenerator` trait:
-- Default: ULID-like corto (12 chars base32, más el prefijo semántico)
+- Default: ULID-like corto (22 chars base32, más el prefijo semántico) — 10 de timestamp,
+  8 de aleatoriedad y 4 de una secuencia local al proceso. La secuencia hace que dos ids
+  emitidos en el mismo milisegundo por el mismo proceso no puedan repetirse; la
+  aleatoriedad cubre el caso entre procesos. Ningún consumidor asume un largo fijo:
+  la validación solo mira el prefijo semántico.
 - Test: contador determinístico para reproducibilidad
 
 ---
