@@ -108,6 +108,44 @@ def test_validate_graph_rejects_invalid_dict():
         colmena.validate_graph({"nodes": "not-a-dict"})
 
 
+def test_validate_graph_now_runs_structural_validation():
+    """A node id containing `/` is rejected.
+
+    This is the behavior change: before `validate_graph` only deserialised, so
+    this graph passed here and failed at run time. `/` is reserved for subgraph
+    path qualifiers, and `Graph::validate()` has always rejected it when the
+    engine loads a file.
+    """
+    graph = {
+        "nodes": {"a/b": {"type": "log", "config": {}}},
+        "edges": [],
+    }
+    with pytest.raises(colmena.DagException):
+        colmena.validate_graph(graph)
+
+
+def test_validate_graph_rejects_a_malformed_node_schema():
+    """An `array` field with no `items` is rejected rather than deserialised."""
+    graph = {
+        "nodes": {
+            "chat": {
+                "type": "llm_call",
+                "config": {
+                    "tool_configurations": {
+                        "t": {
+                            "node_type": "log",
+                            "node_schema": {"xs": {"type": "array"}},
+                        }
+                    }
+                },
+            }
+        },
+        "edges": [],
+    }
+    with pytest.raises(colmena.DagException):
+        colmena.validate_graph(graph)
+
+
 def test_default_registry_lists_node_types():
     """default_registry exposes the registered node types (no DB needed)."""
     node_types = colmena.default_registry().node_types()

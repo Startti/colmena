@@ -109,7 +109,14 @@ def stream_dag(
     """
 
 def validate_graph(graph: Dict[str, Any]) -> None:
-    """Validate a graph dict; raise ``DagException`` if it is not a valid graph."""
+    """Validate a graph dict the way ``dag_engine run`` does when it loads a file.
+
+    Deserialises into the engine's ``Graph`` and runs its structural validation,
+    so a node id containing ``/``, a malformed ``node_schema``, an invalid
+    ``memory_mode`` or a misconfigured ``mcp`` block raise ``DagException``.
+
+    Says nothing about the contents of a node's ``config`` — use ``dag_engine lint``.
+    """
 
 def serve_dag(file_path: str, host: str = ..., port: int = ...) -> None:
     """Serve a graph's webhook triggers as a (blocking) HTTP API."""

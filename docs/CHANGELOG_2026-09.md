@@ -315,3 +315,26 @@ que reciben `_config` sin usar — al correrlo muere con `Entrada no es un núme
 
 **Estado.** done.
 
+---
+
+## 8. Bindings: `validate_graph` ahora valida de verdad
+
+**Qué cambió.** `validate_graph` (PyO3) y `validateGraph` (napi) **solo
+deserializaban**: no llamaban a `Graph::validate()`, pese a que su doc afirmaba
+replicar la estrictez de `cargo run -- run <file>`. Ahora la llaman.
+
+**Cambio de comportamiento.** Cuatro clases de grafo que antes pasaban ahora se
+rechazan: node id con `/`, `node_schema` malformado, `memory_mode` inválido o sin
+`connection_url`, y bloque `mcp` mal configurado. Los cuatro **ya fallaban al
+ejecutar** — el cambio adelanta el error, no invalida nada que antes corriera.
+
+**ADP no afectado, verificado.** `apps/service/ia/platform/` no llama a esa
+función en ningún lado; el worker entra por `execute_stream_cancellable` con un
+`Graph` ya deserializado. Nota completa en
+[`docs/adp_migration/2026-09-02-validate-graph-now-validates.md`](adp_migration/2026-09-02-validate-graph-now-validates.md).
+
+**Guías.** [`48_python_dag.md`](developer_guide/48_python_dag.md),
+[`49_typescript_dag.md`](developer_guide/49_typescript_dag.md) y el `.pyi`
+actualizados para decir qué valida y qué no.
+
+**Estado.** done.
