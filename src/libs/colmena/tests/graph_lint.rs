@@ -8,7 +8,7 @@
 use colmena::dag_engine::domain::graph::Graph;
 use colmena::dag_engine::domain::lint::diagnostic::{Diagnostic, LintReport};
 use colmena::dag_engine::domain::lint::{
-    lint_graph, lint_graph_json, DiagnosticCode, LintContext, NodeCatalog, Severity,
+    lint_graph, lint_graph_json, DiagnosticCode, KnownNodeTypes, LintContext, NodeCatalog, Severity,
 };
 use std::collections::BTreeSet;
 
@@ -97,7 +97,7 @@ fn an_unregistered_node_type_is_an_error_when_the_registry_is_known() {
     let registered: BTreeSet<String> = ["llm_call".to_string()].into_iter().collect();
     let ctx = LintContext {
         catalog: NodeCatalog::embedded(),
-        registered_node_types: Some(&registered),
+        known_node_types: KnownNodeTypes::Registry(&registered),
     };
     let graph = graph_from(serde_json::json!({
         "nodes": { "x": { "type": "llm_kall", "config": { "bogus": 1 } } },
@@ -439,7 +439,7 @@ fn an_annotation_name_that_is_a_real_field_is_still_checked() {
     .expect("test catalog must parse");
     let ctx = LintContext {
         catalog: &catalog,
-        registered_node_types: None,
+        known_node_types: KnownNodeTypes::Unchecked,
     };
     let graph = graph_from(serde_json::json!({
         "nodes": { "n": { "type": "noted", "config": { "description": "invalid" } } },
@@ -605,6 +605,97 @@ fn from_catalog_checks_node_types_without_an_engine() {
     let d = find(&report, DiagnosticCode::UnknownNodeType).expect("must flag the type");
     assert_eq!(d.suggestion.as_deref(), Some("did you mean \"llm_call\"?"));
 }
+/// The defect this fixes: with only the catalog to go on, the linter used to
+/// report *"is not a node type this engine can run"* for any type without an
+/// entry. For a node that IS registered but not yet documented — the likeliest
+/// way an unknown type appears — that sentence is simply false.
+///
+/// Now an unrecognised type with no near-miss is reported as a gap in our own
+/// coverage, at info severity, and says nothing about the engine.
+#[test]
+fn an_undocumented_node_type_is_reported_as_missing_coverage_not_as_unrunnable() {
+    let ctx = LintContext::from_catalog();
+    let graph: Graph = serde_json::from_value(serde_json::json!({
+        "nodes": { "x": { "type": "brand_new_node", "config": { "whatever": 1 } } },
+        "edges": []
+    }))
+    .expect("valid graph");
+
+    let report = lint_graph(&graph, &ctx);
+    let d = report
+        .diagnostics
+        .iter()
+        .find(|d| d.node_id.as_deref() == Some("x"))
+        .expect("the node must be mentioned");
+
+    assert_eq!(d.code, DiagnosticCode::NoCatalogCoverage);
+    assert_eq!(d.severity, Severity::Info);
+    assert!(
+        !d.message.contains("engine can run"),
+        "must not claim anything about the engine: {}",
+        d.message
+    );
+    assert!(
+        !report
+            .diagnostics
+            .iter()
+            .any(|d| d.code == DiagnosticCode::UnknownField),
+        "an unchecked node's fields must not be called invented: {:?}",
+        report.diagnostics
+    );
+}
+
+/// A near-miss is still an error, because that is a typo rather than a new
+/// node — but the wording no longer overreaches.
+#[test]
+fn a_near_miss_node_type_is_an_error_worded_as_a_documentation_claim() {
+    let ctx = LintContext::from_catalog();
+    let graph: Graph = serde_json::from_value(serde_json::json!({
+        "nodes": { "x": { "type": "llm_kall", "config": {} } },
+        "edges": []
+    }))
+    .expect("valid graph");
+
+    let d = lint_graph(&graph, &ctx)
+        .diagnostics
+        .into_iter()
+        .find(|d| d.code == DiagnosticCode::UnknownNodeType)
+        .expect("a typo must still be an error");
+    assert_eq!(d.severity, Severity::Error);
+    assert_eq!(d.suggestion.as_deref(), Some("did you mean \"llm_call\"?"));
+    assert!(
+        !d.message.contains("engine can run"),
+        "the catalog cannot support that claim: {}",
+        d.message
+    );
+}
+
+/// With a real registry in hand, absence IS proof, so the stronger sentence is
+/// correct and must survive.
+#[test]
+fn with_a_registry_an_unknown_type_is_reported_as_unrunnable() {
+    let registered: BTreeSet<String> = ["llm_call".to_string()].into_iter().collect();
+    let catalog = NodeCatalog::embedded();
+    let ctx = LintContext::from_registry(catalog, &registered);
+    let graph: Graph = serde_json::from_value(serde_json::json!({
+        "nodes": { "x": { "type": "log", "config": {} } },
+        "edges": []
+    }))
+    .expect("valid graph");
+
+    let d = lint_graph(&graph, &ctx)
+        .diagnostics
+        .into_iter()
+        .find(|d| d.code == DiagnosticCode::UnknownNodeType)
+        .expect("`log` is absent from this registry");
+    assert_eq!(d.severity, Severity::Error);
+    assert!(
+        d.message.contains("engine can run"),
+        "a registry justifies the strong claim: {}",
+        d.message
+    );
+}
+
 #[test]
 fn from_catalog_accepts_every_real_node_type() {
     let ctx = LintContext::from_catalog();

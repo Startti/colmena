@@ -121,6 +121,29 @@ crudo puede reportarla.
 `lint_graph` sigue existiendo para quien ya tiene un `Graph` en la mano, como el
 worker de ADP, que recibe el grafo por Redis.
 
+## De dónde sale la autoridad
+
+El linter puede juzgar un tipo de nodo con dos grados de certeza distintos, y
+`KnownNodeTypes` los separa a propósito, porque deciden qué le está permitido
+**afirmar**:
+
+| Variante | Qué sabe | Qué reporta ante un tipo desconocido |
+|---|---|---|
+| `Registry(&set)` | El registry real del motor | `UNKNOWN_NODE_TYPE` (error): *"is not a node type this engine can run"*. La ausencia es prueba. |
+| `CatalogOnly` | Solo los tipos documentados | Si hay un tipo documentado a distancia de typo → `UNKNOWN_NODE_TYPE` (error), *"is not a documented node type"*. Si no → `NO_CATALOG_COVERAGE` (info): no puedo revisarlo. |
+| `Unchecked` | Nada | No opina sobre tipos de nodo. |
+
+La CLI usa `CatalogOnly`, que no cuesta nada construir —sin engine, sin base de
+datos— y es lo que permite lintear un archivo JSON suelto. Lo que resigna es la
+autoridad para decir que un tipo no se puede ejecutar: **decir eso con solo el
+catálogo en mano es falso para un nodo que sí está registrado pero todavía no
+documentado**, que es justamente la forma más probable de que aparezca un tipo
+desconocido. Un near-miss contra un tipo documentado sí es evidencia fuerte de
+typo, y se reporta como error.
+
+Si tenés un registry a mano, `LintContext::from_registry(catalog, &tipos)`
+recupera la afirmación fuerte.
+
 ## De dónde sale la verdad
 
 El catálogo de campos por nodo es
@@ -173,9 +196,5 @@ ruido, y sin medir eso no se nota.
 - **Las claves de la raíz del grafo no se revisan.** En los 301 grafos del repo,
   todas las claves raíz no declaradas son anotaciones; marcarlas enterraría los
   hallazgos que importan.
-- **`NO_CATALOG_COVERAGE` no se alcanza desde la CLI.** `LintContext::from_catalog()`
-  deriva los tipos ejecutables del propio catálogo, así que un tipo sin entrada
-  sale como `UNKNOWN_NODE_TYPE`. Los tests de cobertura del registry impiden que
-  eso pase dentro del repo; un consumidor externo que use ese contexto recibiría
-  el mensaje equivocado. Para obtener el comportamiento documentado hay que
-  construir el `LintContext` con la lista real del registry.
+- **Sin registry, el linter no afirma qué puede ejecutar el motor.** Es una
+  limitación deliberada, no un hueco: ver "De dónde sale la autoridad" abajo.
