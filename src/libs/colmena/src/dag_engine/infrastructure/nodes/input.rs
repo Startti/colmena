@@ -1,3 +1,4 @@
+use crate::dag_engine::domain::lint::{FieldSpec, NodeCatalogEntry};
 use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
 use serde_json::{json, Value};
 use std::error::Error as StdError;
@@ -116,5 +117,15 @@ impl ExecutableNode for InputNode {
                 "output": "any"
             }
         })
+    }
+
+    fn config_schema(&self) -> Option<NodeCatalogEntry> {
+        // Emits its config as the downstream payload, so any key is valid data.
+        // `data` and `__payload__` are the two keys it also gives meaning to.
+        Some(
+            NodeCatalogEntry::open_config()
+                .with_field("data", FieldSpec::of_type("any"))
+                .with_field("__payload__", FieldSpec::of_type("any")),
+        )
     }
 }

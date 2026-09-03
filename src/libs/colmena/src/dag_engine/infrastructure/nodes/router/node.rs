@@ -11,6 +11,7 @@ use std::sync::{Arc, OnceLock};
 
 use super::config::{parse_and_validate, RouterMode};
 use super::llm_direct::pick_branch as pick_llm_direct;
+use crate::dag_engine::domain::lint::{FieldSpec, NodeCatalogEntry};
 
 pub struct RouterNode {
     pub executor: Arc<OnceLock<Arc<dyn SubGraphExecutorPort>>>,
@@ -216,6 +217,39 @@ impl ExecutableNode for RouterNode {
                 "__decision": "object — { selected_branch, reason, extracted }"
             }
         })
+    }
+
+    fn config_schema(&self) -> Option<NodeCatalogEntry> {
+        // `mode`/`branches`/`schema`/`instructions` are parsed in `config.rs`;
+        // `provider`/`api_key`/`model` are read here. `temperature` is NOT
+        // settable: both modes call the LLM with it hardcoded to 0.1 for
+        // deterministic branch selection.
+        Some(
+            NodeCatalogEntry::no_config()
+                .with_field(
+                    "mode",
+                    FieldSpec::of_type("string")
+                        .required()
+                        .valid_values(["llm_direct".into(), "extract_and_route".into()]),
+                )
+                .with_field(
+                    "provider",
+                    FieldSpec::of_type("string").required().valid_values([
+                        "openai".into(),
+                        "google".into(),
+                        "anthropic".into(),
+                    ]),
+                )
+                .with_field("api_key", FieldSpec::of_type("string").required())
+                .with_field("model", FieldSpec::of_type("string"))
+                .with_field(
+                    "schema",
+                    FieldSpec::of_type("object").conditional("mode B only"),
+                )
+                .with_field("instructions", FieldSpec::of_type("string"))
+                .with_field("temperature", FieldSpec::of_type("number").read_only())
+                .with_field("branches", FieldSpec::of_type("array").required()),
+        )
     }
 }
 

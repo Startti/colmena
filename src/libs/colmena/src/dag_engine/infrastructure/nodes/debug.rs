@@ -87,4 +87,9 @@ impl ExecutableNode for MockInputNode {
     fn schema(&self) -> Value {
         json!({"type": "mock_input", "inputs": {}, "outputs": {"output": "any (from config)"}})
     }
+
+    fn config_schema(&self) -> Option<NodeCatalogEntry> {
+        // `execute` returns `config.clone()`: every key is payload, none a setting.
+        Some(NodeCatalogEntry::open_config())
+    }
 }
