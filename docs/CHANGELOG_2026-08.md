@@ -1582,6 +1582,12 @@ acierto permanente accidental.
 
 ## 29. Los headers de autenticación MCP llegan al servidor
 
+> **[ALCANCE SUPERADO POR §45.]**
+> El **mecanismo** que describe esta entrada sigue vigente. Lo que ya no es cierto es su
+> **Alcance**: `RmcpHttpClient::connect` tiene llamador de producción desde §45
+> (`mcp/bind.rs:175`), y la resolución de referencias vía secure values que anuncia como
+> "la pieza siguiente" llegó en §37/§43.
+
 **Bug real, no una mejora.** `RmcpHttpClient::connect` construía el transporte con
 `with_uri(url)` y nada más: `config.header_refs` **se ignoraba por completo**. Un servidor MCP con
 `Authorization` conectaba sin el header y devolvía 401, sin ninguna pista de que el header
@@ -2080,6 +2086,11 @@ alcance explícitamente.
 
 ## 34. La identidad de conexión MCP pasa a ser la credencial, no la sesión
 
+> **[ALCANCE SUPERADO POR §45.]**
+> El **mecanismo** que describe esta entrada sigue vigente. Lo que ya no es cierto es su
+> **Alcance**: hay llamador de producción desde §45 — `nodes/llm.rs:3152` construye el pool
+> vía `global_mcp_registry()`.
+
 **Qué cambió.** `McpServerKey` deja de scopear por `session_id`/`agent_session_id`
 y pasa a incluir un **fingerprint salado de los valores de header ya resueltos**.
 `McpConnectionRegistry` deja de saber conectar: recibe una factory y queda como pool puro.
@@ -2167,6 +2178,13 @@ afectado.
 suelta).
 
 ## 35. Exposición de tools MCP: el schema del servidor se reenvía tal cual
+
+> **[ALCANCE SUPERADO POR §45.]**
+> El **mecanismo** que describe esta entrada sigue vigente. Lo que ya no es cierto es su
+> **Sin llamador todavía**: la slice que anuncia —el cableado en `nodes/llm.rs`— es §45.
+> `exposed_definitions` se alcanza vía `mcp/wire.rs`, y `wrap_untrusted_content`, que esta
+> entrada describe como "ya existe en el dominio sin llamador", lo tiene desde §41
+> (`mcp/contain.rs:48`).
 
 **Qué cambió.** Nuevo módulo `nodes/llm_synthetic_tools/mcp/` que convierte el catálogo de un
 servidor MCP en `ToolDefinition`s: naming, techo de schema, política de colisión y lectura de la
@@ -2300,6 +2318,11 @@ producción recorre), y `DagToolExecutor::available_tools`
 
 ## 36. El puente entre una config MCP y una conexión viva
 
+> **[ALCANCE SUPERADO POR §45.]**
+> El **mecanismo** que describe esta entrada sigue vigente. Lo que ya no es cierto es su
+> **Sigue sin llamador**: el cableado `with_mcp` que difiere a "la slice siguiente" llegó en
+> §45 — `nodes/llm.rs:2356`.
+
 **Qué cambió.** Nuevo `mcp/bind.rs`: dado un `McpServerSpec` y los ids de sesión, resuelve las
 referencias de credencial, deriva la identidad de pool que implican, y produce la factory que
 `McpConnectionRegistry` espera. Es la pieza que faltaba entre la config y el cliente `rmcp` — hasta
@@ -2341,6 +2364,11 @@ alcanzables todas juntas en ese momento.
 
 ## 37. Una referencia de credencial que no resuelve ya no viaja al servidor
 
+> **[ALCANCE SUPERADO POR §45.]**
+> El **mecanismo** que describe esta entrada sigue vigente. Lo que ya no es cierto es su
+> **Alcance**: el módulo tiene llamador desde §45 — `mcp/bind.rs` se alcanza desde
+> `mcp/wire.rs`, que `nodes/llm.rs:3155` invoca.
+
 **Qué cambió.** `bind` ahora rechaza un header cuya referencia de secure value **no se resolvió**,
 en las dos ramas y no solo en una.
 
@@ -2373,6 +2401,10 @@ ninguno de los dos campos alimenta la clave del pool. Cada mutación mata exacta
 
 ## 38. Un pool de MCP por proceso
 
+> **[ALCANCE SUPERADO POR §45.]**
+> El **mecanismo** que describe esta entrada sigue vigente. Lo que ya no es cierto es su
+> **Alcance**: hay llamador desde §45 — `nodes/llm.rs:3152` llama `global_mcp_registry()`.
+
 **Qué cambió.** `global_mcp_registry()` — el pool que las slices §33-§34 construyeron pero que nadie
 instanciaba.
 
@@ -2400,6 +2432,11 @@ proceso, así que dentro de él cada rama del fallback sería inalcanzable desde
 **Estado.** done.
 
 ## 39. Plegar el catálogo de un servidor MCP en tools y rutas
+
+> **[ALCANCE SUPERADO POR §45.]**
+> El **mecanismo** que describe esta entrada sigue vigente. Lo que ya no es cierto es su
+> **Alcance**: el fold tiene llamador desde §45 — `assemble` corre dentro de `wire`, que
+> `nodes/llm.rs:3155` invoca.
 
 **Qué cambió.** `mcp/wire.rs` con `fold_catalog`: dado el catálogo de un servidor y los nombres que
 Colmena ya repartió, produce las definiciones que sobreviven, las **rutas** para mandar una llamada de
@@ -2436,6 +2473,11 @@ test dentro del mismo módulo; la función no tiene consumidores fuera del crate
 **Estado.** done.
 
 ## 40. Alcanzar todos los servidores MCP de un turno, en paralelo y degradando
+
+> **[ALCANCE SUPERADO POR §45.]**
+> El **mecanismo** que describe esta entrada sigue vigente. Lo que ya no es cierto es su
+> **Alcance**: el cableado que difiere a "la slice siguiente" es §45 — `nodes/llm.rs:3155`
+> llama `wire(...)` y consume `definitions`, `routes` y `bindings`.
 
 **Qué cambió.** La mitad de E/S de `wire.rs`: `wire` resuelve credenciales, alcanza cada servidor
 declarado, y pliega lo que vuelve con el `fold_catalog` de §39. Más `unavailable_notice` y el accesor
@@ -2496,6 +2538,12 @@ de secretos, que es lo que decía una versión anterior y le costó un linaje es
 **Estado.** done.
 
 ## 41. Contener un resultado MCP antes de que el modelo lo lea
+
+> **[ALCANCE SUPERADO POR §45.]**
+> El **mecanismo** que describe esta entrada sigue vigente. Lo que ya no es cierto es su
+> **Alcance**: el dispatcher que difiere a "la slice siguiente" es §42, y desde §45 se
+> construye de verdad — `mcp/dispatch.rs:22` usa `contain`, y `nodes/llm.rs:3195` arma el
+> `McpDispatcher`.
 
 **Qué cambió.** `mcp/contain.rs` con las primitivas de contención, más dos techos nuevos en
 `llm::domain::mcp`. El dispatcher que las usa va en la slice siguiente.
@@ -2567,6 +2615,11 @@ mismo crate todavía puede llamarlo— pero saca de la API pública el primitivo
 
 ## 42. Rutear la llamada del modelo de vuelta al servidor MCP
 
+> **[ALCANCE SUPERADO POR §45.]**
+> El **mecanismo** que describe esta entrada sigue vigente. Lo que ya no es cierto es su
+> **Alcance**: el cableado en `llm.rs` que anuncia como "la slice siguiente" es §45 —
+> `nodes/llm.rs:3195` llama `McpDispatcher::new`.
+
 **Qué cambió.** `mcp/dispatch.rs` con `McpDispatcher`: encuentra el servidor detrás de un nombre
 expuesto, reenvía los argumentos verbatim, y devuelve el resultado por `contain` (§41). Es el viaje de
 vuelta de `wire` (§40).
@@ -2613,6 +2666,11 @@ siguiente y es la que finalmente pone MCP al alcance del modelo. ADP no afectado
 **Estado.** done.
 
 ## 43. Un secreto resuelto por el motor no sale hacia un servidor MCP
+
+> **[ALCANCE SUPERADO POR §45.]**
+> El **mecanismo** que describe esta entrada sigue vigente. Lo que ya no es cierto es su
+> **Alcance**: el módulo tiene llamador desde §45 — `mcp/bind.rs` se alcanza desde
+> `mcp/wire.rs`, que `nodes/llm.rs:3155` invoca.
 
 **Qué cambió.** `dispatch` rechaza una llamada cuyos argumentos carguen un handle de secure value,
 **antes** de tocar la red.
