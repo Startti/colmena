@@ -31,6 +31,7 @@
 //! transport-level errors captured during the operation) and `advice`.
 //! The default output port is `response`.
 
+use crate::dag_engine::domain::lint::{FieldSpec, NodeCatalogEntry};
 use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
 use futures::FutureExt;
 use rust_socketio::asynchronous::{Client, ClientBuilder};
@@ -748,6 +749,29 @@ impl ExecutableNode for SocketIoNode {
                 "advice": "string (only present alongside transport_errors — actionable guidance for the caller/LLM)"
             }
         })
+    }
+
+    fn config_schema(&self) -> Option<NodeCatalogEntry> {
+        Some(
+            NodeCatalogEntry::no_config()
+                .with_field("url", FieldSpec::of_type("string").required())
+                .with_field("namespace", FieldSpec::of_type("string"))
+                .with_field("event", FieldSpec::of_type("string").required())
+                .with_field("payload", FieldSpec::of_type("any"))
+                .with_field("headers", FieldSpec::of_type("object"))
+                .with_field("cookies", FieldSpec::of_type("string"))
+                .with_field("wait_event", FieldSpec::of_type("string"))
+                .with_field("timeout_ms", FieldSpec::of_type("integer"))
+                .with_field(
+                    "transport",
+                    FieldSpec::of_type("string").valid_values([
+                        "websocket".into(),
+                        "any".into(),
+                        "polling".into(),
+                    ]),
+                )
+                .with_field("pre_events", FieldSpec::of_type("array")),
+        )
     }
 }
 

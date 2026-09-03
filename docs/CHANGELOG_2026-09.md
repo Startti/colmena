@@ -558,3 +558,42 @@ subió de 13 a 22.
 
 **Estado.** partial — 22/37. Faltan 15: 9 medianos y 6 caros.
 
+---
+
+## 15. Fase 2, slice 4: los 9 medianos — y 7 campos de documents sin documentar
+
+**Qué cambió.** Migrados a `config_schema()`: `sql_query`, `output_parser`,
+`for_each`, `document_create`, `tts`, `image_generation`, `image_edit`,
+`socketio_request` e `information_extraction`. **Van 31 de 37.**
+
+### El catálogo documentaba 2 de los 9 campos de almacenamiento de documents
+
+`DocumentRuntime::from_config` —al que los tres nodos de documents le pasan la
+config del nodo (`document_nodes.rs:54`)— lee **nueve** campos:
+`storage_backend`, `storage_root`, `asset_storage_root`, `gcs_bucket`,
+`gcs_prefix`, `asset_gcs_prefix`, `default_retention`, `max_asset_size_bytes` y
+`allowed_asset_mimes`. El catálogo documentaba **los dos primeros**.
+
+Consecuencia concreta: cualquier grafo que configurara documents contra GCS
+—`gcs_bucket`, `gcs_prefix`— recibía `UNKNOWN_FIELD` del linter sobre una
+configuración real y funcionando. Falsos positivos sobre un camino soportado, que
+el propio catálogo declara válido en `storage_backend.valid_values` (`localfs`,
+`gcs`).
+
+Los siete faltantes se agregaron a `document_create`, `document_edit` y
+`document_read`. Detalle revelador: la descripción de `storage_root` ya
+mencionaba `asset_storage_root` — quien escribió el doc conocía el campo y nunca
+lo documentó como tal.
+
+### Una falsa alarma que conviene registrar
+
+`sql.rs` lee `provider`, `model` y `api_key`, pero **del objeto anidado
+`guardrail_llm`**, no de la config del nodo. El catálogo tiene razón con sus 6
+campos. Un barrido de `*.get("...")` filtrando por receptores que contienen
+`cfg`/`config` los atribuye al nodo por error; hay que mirar el contexto.
+
+**Sin ruido nuevo**: los mismos 80 hallazgos sobre los 300 grafos de ejemplo. El
+piso del test de drift subió de 22 a 31.
+
+**Estado.** partial — 31/37. Faltan 6, todos del grupo caro.
+

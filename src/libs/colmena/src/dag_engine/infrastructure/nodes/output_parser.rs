@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use super::util::extract_with_schema::{extract_with_schema, ExtractInput};
 use super::util::inline_schema::inline_to_json_schema;
+use crate::dag_engine::domain::lint::{FieldSpec, NodeCatalogEntry};
 
 const DEFAULT_SYSTEM_MSG: &str = include_str!("../../../../text/prompts/extraction_system.md");
 
@@ -142,6 +143,25 @@ impl ExecutableNode for OutputParserNode {
                 "<schema fields>": "extracted JSON"
             }
         })
+    }
+
+    fn config_schema(&self) -> Option<NodeCatalogEntry> {
+        Some(
+            NodeCatalogEntry::no_config()
+                .with_field(
+                    "provider",
+                    FieldSpec::of_type("string").required().valid_values([
+                        "openai".into(),
+                        "google".into(),
+                        "anthropic".into(),
+                    ]),
+                )
+                .with_field("api_key", FieldSpec::of_type("string").required())
+                .with_field("model", FieldSpec::of_type("string"))
+                .with_field("schema", FieldSpec::of_type("object").required())
+                .with_field("instructions", FieldSpec::of_type("string"))
+                .with_field("temperature", FieldSpec::of_type("number")),
+        )
     }
 }
 

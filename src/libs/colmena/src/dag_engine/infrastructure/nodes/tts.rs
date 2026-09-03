@@ -49,6 +49,7 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 
 use crate::dag_engine::application::secure_value_service::SecureValueService;
+use crate::dag_engine::domain::lint::{FieldSpec, NodeCatalogEntry};
 use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
 use crate::dag_engine::domain::observer::ExecutionObserver;
 use crate::dag_engine::infrastructure::nodes::util::attachment_id::build_document_id;
@@ -316,6 +317,36 @@ impl ExecutableNode for TtsNode {
                 "speed": "float (optional) — openai 0.25-4.0; ignored by elevenlabs"
             }
         })
+    }
+
+    fn config_schema(&self) -> Option<NodeCatalogEntry> {
+        Some(
+            NodeCatalogEntry::no_config()
+                .with_field(
+                    "provider",
+                    FieldSpec::of_type("string").required().valid_values([
+                        "openai".into(),
+                        "elevenlabs".into(),
+                        "google".into(),
+                    ]),
+                )
+                .with_field("model", FieldSpec::of_type("string").required())
+                .with_field("api_key", FieldSpec::of_type("string").required())
+                .with_field("text", FieldSpec::of_type("string").required())
+                .with_field("voice", FieldSpec::of_type("string").required())
+                .with_field(
+                    "format",
+                    FieldSpec::of_type("string").valid_values([
+                        "mp3".into(),
+                        "mpeg".into(),
+                        "wav".into(),
+                        "opus".into(),
+                        "ogg".into(),
+                        "pcm".into(),
+                    ]),
+                )
+                .with_field("speed", FieldSpec::of_type("number")),
+        )
     }
 
     fn description(&self) -> Option<&str> {

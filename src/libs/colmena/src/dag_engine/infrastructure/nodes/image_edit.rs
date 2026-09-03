@@ -14,6 +14,7 @@ use base64::Engine;
 use serde_json::{json, Value};
 
 use crate::dag_engine::application::secure_value_service::SecureValueService;
+use crate::dag_engine::domain::lint::{FieldSpec, NodeCatalogEntry};
 use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
 use crate::dag_engine::domain::observer::ExecutionObserver;
 use crate::dag_engine::infrastructure::nodes::util::attachment_id::build_document_id;
@@ -441,6 +442,26 @@ impl ExecutableNode for ImageEditNode {
                 "n": "integer (optional, default 1, max 10)"
             }
         })
+    }
+
+    fn config_schema(&self) -> Option<NodeCatalogEntry> {
+        Some(
+            NodeCatalogEntry::no_config()
+                .with_field(
+                    "provider",
+                    FieldSpec::of_type("string")
+                        .required()
+                        .valid_values(["openai".into()]),
+                )
+                .with_field("model", FieldSpec::of_type("string"))
+                .with_field("api_key", FieldSpec::of_type("string").required())
+                .with_field("source_url", FieldSpec::of_type("string").required())
+                .with_field("mask_url", FieldSpec::of_type("string"))
+                .with_field("prompt", FieldSpec::of_type("string").required())
+                .with_field("size", FieldSpec::of_type("string"))
+                .with_field("quality", FieldSpec::of_type("string"))
+                .with_field("n", FieldSpec::of_type("integer")),
+        )
     }
 
     fn description(&self) -> Option<&str> {

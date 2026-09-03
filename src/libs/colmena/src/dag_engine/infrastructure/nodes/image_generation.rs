@@ -75,6 +75,7 @@ use serde_json::{json, Value};
 use tokio::sync::Mutex;
 
 use crate::dag_engine::application::secure_value_service::SecureValueService;
+use crate::dag_engine::domain::lint::{FieldSpec, NodeCatalogEntry};
 use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
 use crate::dag_engine::domain::observer::ExecutionObserver;
 use crate::dag_engine::infrastructure::nodes::util::attachment_id::build_document_id;
@@ -419,6 +420,26 @@ impl ExecutableNode for ImageGenerationNode {
                 "google_location": "string (optional, default us-central1)"
             }
         })
+    }
+
+    fn config_schema(&self) -> Option<NodeCatalogEntry> {
+        Some(
+            NodeCatalogEntry::no_config()
+                .with_field(
+                    "provider",
+                    FieldSpec::of_type("string")
+                        .required()
+                        .valid_values(["openai".into(), "google".into()]),
+                )
+                .with_field("model", FieldSpec::of_type("string").required())
+                .with_field("api_key", FieldSpec::of_type("string"))
+                .with_field("prompt", FieldSpec::of_type("string").required())
+                .with_field("size", FieldSpec::of_type("string"))
+                .with_field("quality", FieldSpec::of_type("string"))
+                .with_field("n", FieldSpec::of_type("integer"))
+                .with_field("google_project_id", FieldSpec::of_type("string"))
+                .with_field("google_location", FieldSpec::of_type("string")),
+        )
     }
 
     fn description(&self) -> Option<&str> {

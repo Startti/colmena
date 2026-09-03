@@ -7,6 +7,7 @@ use crate::dag_engine::application::list_tool_executor::{
     run_list, ExecPolicy, ItemStatus, OnError, DEFAULT_MAX_ITEMS,
 };
 use crate::dag_engine::application::ports::NodeRegistryPort;
+use crate::dag_engine::domain::lint::{FieldSpec, NodeCatalogEntry};
 use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
 use crate::dag_engine::domain::observer::{ChildScopeObserver, ExecutionObserver, NodeEvent};
 use crate::dag_engine::domain::tool_configuration::parse_node_schema;
@@ -627,6 +628,22 @@ impl ExecutableNode for ForEachNode {
             },
             "outputs": { "output": "object { total, ok, err, results[] }" }
         })
+    }
+
+    fn config_schema(&self) -> Option<NodeCatalogEntry> {
+        Some(
+            NodeCatalogEntry::no_config()
+                .with_field("target", FieldSpec::of_type("object").required())
+                .with_field("items", FieldSpec::of_type("array"))
+                .with_field("items_from", FieldSpec::of_type("object"))
+                .with_field(
+                    "on_error",
+                    FieldSpec::of_type("string").valid_values(["continue".into(), "abort".into()]),
+                )
+                .with_field("concurrency", FieldSpec::of_type("integer"))
+                .with_field("max_items", FieldSpec::of_type("integer"))
+                .with_field("results_to", FieldSpec::of_type("object")),
+        )
     }
 
     fn description(&self) -> Option<&str> {

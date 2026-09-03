@@ -198,6 +198,29 @@ impl ExecutableNode for DocumentCreateNode {
             }
         })
     }
+
+    fn config_schema(&self) -> Option<NodeCatalogEntry> {
+        Some(
+            NodeCatalogEntry::no_config()
+                .with_field("kind", FieldSpec::of_type("string").required())
+                .with_field("initial_ir", FieldSpec::of_type("object"))
+                .with_field("label", FieldSpec::of_type("string"))
+                .with_field("retention_limit", FieldSpec::of_type("integer"))
+                .with_field("session_id", FieldSpec::of_type("string"))
+                .with_field(
+                    "storage_backend",
+                    FieldSpec::of_type("string").valid_values(["localfs".into(), "gcs".into()]),
+                )
+                .with_field("storage_root", FieldSpec::of_type("string"))
+                .with_field("asset_storage_root", FieldSpec::of_type("string"))
+                .with_field("gcs_bucket", FieldSpec::of_type("string"))
+                .with_field("gcs_prefix", FieldSpec::of_type("string"))
+                .with_field("asset_gcs_prefix", FieldSpec::of_type("string"))
+                .with_field("default_retention", FieldSpec::of_type("integer"))
+                .with_field("max_asset_size_bytes", FieldSpec::of_type("integer"))
+                .with_field("allowed_asset_mimes", FieldSpec::of_type("array")),
+        )
+    }
 }
 
 /// `document_edit` — applies a patch (list of typed ops) to an existing
@@ -321,7 +344,14 @@ impl ExecutableNode for DocumentEditNode {
                     "storage_backend",
                     FieldSpec::of_type("string").valid_values(["localfs".into(), "gcs".into()]),
                 )
-                .with_field("storage_root", FieldSpec::of_type("string")),
+                .with_field("storage_root", FieldSpec::of_type("string"))
+                .with_field("asset_storage_root", FieldSpec::of_type("string"))
+                .with_field("gcs_bucket", FieldSpec::of_type("string"))
+                .with_field("gcs_prefix", FieldSpec::of_type("string"))
+                .with_field("asset_gcs_prefix", FieldSpec::of_type("string"))
+                .with_field("default_retention", FieldSpec::of_type("integer"))
+                .with_field("max_asset_size_bytes", FieldSpec::of_type("integer"))
+                .with_field("allowed_asset_mimes", FieldSpec::of_type("array")),
         )
     }
 }
@@ -428,7 +458,14 @@ impl ExecutableNode for DocumentReadNode {
                     "storage_backend",
                     FieldSpec::of_type("string").valid_values(["localfs".into(), "gcs".into()]),
                 )
-                .with_field("storage_root", FieldSpec::of_type("string")),
+                .with_field("storage_root", FieldSpec::of_type("string"))
+                .with_field("asset_storage_root", FieldSpec::of_type("string"))
+                .with_field("gcs_bucket", FieldSpec::of_type("string"))
+                .with_field("gcs_prefix", FieldSpec::of_type("string"))
+                .with_field("asset_gcs_prefix", FieldSpec::of_type("string"))
+                .with_field("default_retention", FieldSpec::of_type("integer"))
+                .with_field("max_asset_size_bytes", FieldSpec::of_type("integer"))
+                .with_field("allowed_asset_mimes", FieldSpec::of_type("array")),
         )
     }
 }
