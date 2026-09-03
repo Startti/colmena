@@ -5,6 +5,7 @@ use serde_json::{json, Value};
 use std::error::Error;
 use std::sync::Arc;
 
+use crate::dag_engine::domain::lint::{FieldSpec, NodeCatalogEntry};
 use crate::llm::application::AgentService;
 use crate::llm::domain::{
     ConversationKey, LlmConfig, LlmMessage, LlmProvider, LlmStreamPart, NodeIdPath, ProviderKind,
@@ -503,5 +504,29 @@ impl ExecutableNode for PlannerNode {
                 "extra_info.raw_response": "the raw LLM text the plan/questions were parsed from"
             }
         })
+    }
+
+    fn config_schema(&self) -> Option<NodeCatalogEntry> {
+        Some(
+            NodeCatalogEntry::no_config()
+                .with_field(
+                    "provider",
+                    FieldSpec::of_type("string").required().valid_values([
+                        "openai".into(),
+                        "google".into(),
+                        "anthropic".into(),
+                    ]),
+                )
+                .with_field("api_key", FieldSpec::of_type("string").required())
+                .with_field("model", FieldSpec::of_type("string"))
+                .with_field("system_message", FieldSpec::of_type("string"))
+                .with_field("verbose", FieldSpec::of_type("boolean"))
+                // Not settable: the planner calls the LLM with temperature 0.1.
+                .with_field("temperature", FieldSpec::of_type("number").read_only())
+                .with_field("thinking_budget", FieldSpec::of_type("integer"))
+                .with_field("streaming", FieldSpec::of_type("boolean"))
+                .with_field("agents", FieldSpec::of_type("array"))
+                .with_field("texts", FieldSpec::of_type("object")),
+        )
     }
 }

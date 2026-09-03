@@ -14,8 +14,8 @@
 |---:|---|---|
 | 80 | `llm::domain` | `src/libs/colmena/src/llm/domain/mod.rs` |
 | 37 | `dag_engine::domain::node` | `src/libs/colmena/src/dag_engine/domain/node.rs` |
+| 32 | `dag_engine::domain::lint` | `src/libs/colmena/src/dag_engine/domain/lint/mod.rs` |
 | 29 | `dag_engine::domain::observer` | `src/libs/colmena/src/dag_engine/domain/observer.rs` |
-| 27 | `dag_engine::domain::lint` | `src/libs/colmena/src/dag_engine/domain/lint/mod.rs` |
 | 25 | `llm::domain::tools` | `src/libs/colmena/src/llm/domain/tools.rs` |
 | 23 | `documents::domain` | `src/libs/colmena/src/documents/domain/mod.rs` |
 | 21 | `gdocs::domain` | `src/libs/colmena/src/gdocs/domain/mod.rs` |
@@ -275,7 +275,7 @@
 
 #### `src/libs/colmena/src/dag_engine/domain/lint/mod.rs`
 - Module: `dag_engine::domain::lint`
-- **Used by (27)**: `src/libs/colmena/src/dag_engine/infrastructure/nodes/api_explorer.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/current_time.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/debug.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/document_nodes.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/extraction.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/for_each.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/http.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/image_edit.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/image_generation.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/input.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/loop_controller.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/math.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/output.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/output_parser.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/python_node.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/router/node.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/secure_suspend.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/socketio.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/sql.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/subgraph.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/suspend.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/task_memory_writer.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/trigger.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/tts.rs`, `src/libs/colmena/src/dag_engine/infrastructure/registry.rs`, `src/libs/colmena/src/node_bindings/dag.rs`, `src/libs/colmena/src/python_bindings/mod.rs`
+- **Used by (32)**: `src/libs/colmena/src/dag_engine/infrastructure/nodes/api_explorer.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/critic.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/current_time.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/debug.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/document_nodes.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/extraction.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/for_each.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/http.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/image_edit.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/image_generation.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/input.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/loop_controller.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/math.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/orchestrator.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/output.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/output_parser.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/planner.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/python_node.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/reactor.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/router/node.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/secure_suspend.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/socketio.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/sql.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/subgraph.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/suspend.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/task_memory_writer.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/tavily_client.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/trigger.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/tts.rs`, `src/libs/colmena/src/dag_engine/infrastructure/registry.rs`, `src/libs/colmena/src/node_bindings/dag.rs`, `src/libs/colmena/src/python_bindings/mod.rs`
 - Depends on (0): — (no intra-crate imports)
 
 #### `src/libs/colmena/src/dag_engine/domain/mod.rs`
@@ -371,7 +371,7 @@
 #### `src/libs/colmena/src/dag_engine/infrastructure/nodes/critic.rs`
 - Module: `dag_engine::infrastructure::nodes::critic`
 - **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
-- Depends on (6): `dag_engine::domain::node`, `dag_engine::domain::observer`, `llm::application`, `llm::domain`, `llm::infrastructure`, `llm::infrastructure::persistence::in_memory_conversation_repository`
+- Depends on (7): `dag_engine::domain::lint`, `dag_engine::domain::node`, `dag_engine::domain::observer`, `llm::application`, `llm::domain`, `llm::infrastructure`, `llm::infrastructure::persistence::in_memory_conversation_repository`
 
 #### `src/libs/colmena/src/dag_engine/infrastructure/nodes/current_time.rs`
 - Module: `dag_engine::infrastructure::nodes::current_time`
@@ -626,7 +626,7 @@
 #### `src/libs/colmena/src/dag_engine/infrastructure/nodes/orchestrator.rs`
 - Module: `dag_engine::infrastructure::nodes::orchestrator`
 - **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
-- Depends on (5): `dag_engine::application::ports`, `dag_engine::domain::events`, `dag_engine::domain::node`, `dag_engine::domain::observer`, `dag_engine::domain::state`
+- Depends on (6): `dag_engine::application::ports`, `dag_engine::domain::events`, `dag_engine::domain::lint`, `dag_engine::domain::node`, `dag_engine::domain::observer`, `dag_engine::domain::state`
 
 #### `src/libs/colmena/src/dag_engine/infrastructure/nodes/output.rs`
 - Module: `dag_engine::infrastructure::nodes::output`
@@ -641,7 +641,7 @@
 #### `src/libs/colmena/src/dag_engine/infrastructure/nodes/planner.rs`
 - Module: `dag_engine::infrastructure::nodes::planner`
 - **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
-- Depends on (6): `dag_engine::domain::node`, `dag_engine::domain::observer`, `llm::application`, `llm::domain`, `llm::infrastructure`, `llm::infrastructure::persistence::in_memory_conversation_repository`
+- Depends on (7): `dag_engine::domain::lint`, `dag_engine::domain::node`, `dag_engine::domain::observer`, `llm::application`, `llm::domain`, `llm::infrastructure`, `llm::infrastructure::persistence::in_memory_conversation_repository`
 
 #### `src/libs/colmena/src/dag_engine/infrastructure/nodes/python_node.rs`
 - Module: `dag_engine::infrastructure::nodes::python_node`
@@ -656,7 +656,7 @@
 #### `src/libs/colmena/src/dag_engine/infrastructure/nodes/reactor.rs`
 - Module: `dag_engine::infrastructure::nodes::reactor`
 - **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
-- Depends on (6): `dag_engine::domain::node`, `dag_engine::domain::observer`, `llm::application`, `llm::domain`, `llm::infrastructure`, `llm::infrastructure::persistence::in_memory_conversation_repository`
+- Depends on (7): `dag_engine::domain::lint`, `dag_engine::domain::node`, `dag_engine::domain::observer`, `llm::application`, `llm::domain`, `llm::infrastructure`, `llm::infrastructure::persistence::in_memory_conversation_repository`
 
 #### `src/libs/colmena/src/dag_engine/infrastructure/nodes/router/config.rs`
 - Module: `dag_engine::infrastructure::nodes::router::config`
@@ -726,7 +726,7 @@
 #### `src/libs/colmena/src/dag_engine/infrastructure/nodes/tavily_client.rs`
 - Module: `dag_engine::infrastructure::nodes::tavily_client`
 - **Used by (1)**: `src/libs/colmena/src/dag_engine/infrastructure/registry.rs`
-- Depends on (9): `dag_engine::application::secure_value_service`, `dag_engine::domain::node`, `dag_engine::domain::observer`, `dag_engine::domain::toolkit_node`, `llm::domain`, `web::application::search_use_case`, `web::domain::errors`, `web::domain::search_port`, `web::infrastructure::tavily_adapter`
+- Depends on (10): `dag_engine::application::secure_value_service`, `dag_engine::domain::lint`, `dag_engine::domain::node`, `dag_engine::domain::observer`, `dag_engine::domain::toolkit_node`, `llm::domain`, `web::application::search_use_case`, `web::domain::errors`, `web::domain::search_port`, `web::infrastructure::tavily_adapter`
 
 #### `src/libs/colmena/src/dag_engine/infrastructure/nodes/trigger.rs`
 - Module: `dag_engine::infrastructure::nodes::trigger`
