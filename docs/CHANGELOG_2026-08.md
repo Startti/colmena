@@ -2457,6 +2457,27 @@ agregado.
 **Solo la E/S es concurrente.** El plegado sigue secuencial y en orden de `BTreeMap`, porque `claimed`
 depende del orden: quién gana un nombre disputado no puede depender de quién contestó primero.
 
+**Y ese orden es estructural, no una propiedad del combinador.** El plegado vive en `assemble`, que
+itera `specs` — el `BTreeMap` — y busca cada resultado por alias, en vez de recorrer el vector que
+devolvió el fan-out. La versión anterior recorría ese vector: era correcta, porque `join_all` resuelve
+en el orden de sus entradas, pero **nada lo obligaba**. Cambiarlo por un `FuturesUnordered` — la
+optimización obvia, ya que nada en el código decía que el orden importaba — habría compilado, pasado
+todas las pruebas, y entregado silenciosamente a la latencia de red la decisión de qué servidor se
+queda con un nombre disputado. Ahora el `BTreeMap` **es** el bucle, así que esa clase de regresión no
+existe. Lo fija además un test: dos alias que colisionan pese al prefijo (`normalize` mapea todo
+carácter fuera de `[A-Za-z0-9_-]` a `_`, así que `a.b` y `a_b` exponen ambos `a_b__search`), con el
+vector entregado a `assemble` en el orden inverso al del mapa — exactamente el estado que produciría un
+`FuturesUnordered` si contestara primero el alias que ordena después. `assemble` es privado y recibe lo
+ya traído, así que el seam no ensancha la API pública.
+
+**Un alias sin resultado se reporta, no se saltea.** Buscar por alias obliga a decidir qué pasa cuando
+no hay entrada. Es inalcanzable desde `wire` —hay un futuro por clave de `specs`—, pero se resuelve
+igual según el contrato del módulo: el alias entra en `unavailable` y deja nota, en vez de desaparecer
+en silencio. `expect` habría costado el turno entero por una condición que no puede ocurrir, y un
+`continue` pelado habría dejado al modelo sin enterarse de que perdió una capacidad, que es
+precisamente el mal modo de degradar que este módulo evita. Lo cubre un test propio: una rama con una
+afirmación de comportamiento que nada verifica es una afirmación sin respaldo.
+
 **El aviso al modelo.** Un modelo que conserva su creencia previa promete trabajo que ya no puede
 hacer, así que el system message declara la pérdida. Nombra el servidor y **no** las tools que faltan:
 el catálogo es justamente lo que no se pudo traer, y cualquier lista sería inventada. En un turno sano

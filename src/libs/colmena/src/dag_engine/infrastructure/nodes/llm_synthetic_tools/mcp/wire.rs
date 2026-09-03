@@ -14,7 +14,7 @@
 //! its old belief about what it can do will promise work it can no longer
 //! perform, so [`unavailable_notice`] states the loss in the system message.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use futures::future::join_all;
@@ -56,7 +56,8 @@ pub struct McpWiring {
 /// is EXTENDED per server — see [`fold_catalog`], whose contract depends on it.
 ///
 /// Servers are folded in `BTreeMap` order, so which one wins a contested name is
-/// deterministic across runs rather than a function of who answered first.
+/// deterministic across runs rather than a function of who answered first. See
+/// [`assemble`], which is where that order actually comes from.
 pub async fn wire(
     registry: &McpConnectionRegistry,
     specs: &BTreeMap<String, McpServerSpec>,
@@ -65,23 +66,15 @@ pub async fn wire(
     session_id: &str,
     agent_session_id: Option<&str>,
 ) -> McpWiring {
-    let mut out = McpWiring {
-        definitions: Vec::new(),
-        routes: BTreeMap::new(),
-        notes: Vec::new(),
-        unavailable: Vec::new(),
-        bindings: BTreeMap::new(),
-    };
-
     // Reach every server CONCURRENTLY. Sequentially, N servers that are slow but
     // alive add up: each is bounded only by its own `timeout_seconds` (default
     // 30) and nothing bounds the sum, so five of them could add over two minutes
     // to EVERY turn — this runs before the model is invoked. Fanned out, the
     // cost is the slowest single server rather than their total.
     //
-    // Only the I/O is concurrent. The fold below stays sequential and in
-    // `BTreeMap` order, because `claimed` is order-dependent: which server wins
-    // a contested name must not depend on which one answered first.
+    // Only the I/O is concurrent. `assemble` folds what comes back sequentially
+    // and in `BTreeMap` order, and takes that order from `specs` rather than
+    // from this vector — so nothing here needs to preserve it.
     let fetched: Vec<Fetched> = join_all(specs.iter().map(|(alias, spec)| async move {
         let binding = match bind(alias, spec, secure_values, session_id, agent_session_id).await {
             Ok(b) => b,
@@ -100,7 +93,51 @@ pub async fn wire(
     }))
     .await;
 
-    for (alias, result) in fetched {
+    assemble(specs, fetched, claimed)
+}
+
+/// Fold what the fan-out brought back into one turn's wiring.
+///
+/// Split out from [`wire`] so the ordering rule below can be tested without a
+/// live server on either end.
+///
+/// **The fold iterates `specs`, not `fetched`, and that is the whole point.**
+/// `claimed` is threaded through [`fold_catalog`], so fold order decides which
+/// server wins a contested tool name — it has to be `BTreeMap` order, never the
+/// order servers happened to answer in. Reading the results in arrival order
+/// would be correct today only because `join_all` resolves to its inputs'
+/// order; making the `BTreeMap` the loop itself means no future swap of the
+/// combinator (`FuturesUnordered` being the obvious one) can quietly hand the
+/// decision to network timing.
+fn assemble(
+    specs: &BTreeMap<String, McpServerSpec>,
+    fetched: Vec<Fetched>,
+    claimed: &mut HashSet<String>,
+) -> McpWiring {
+    let mut out = McpWiring {
+        definitions: Vec::new(),
+        routes: BTreeMap::new(),
+        notes: Vec::new(),
+        unavailable: Vec::new(),
+        bindings: BTreeMap::new(),
+    };
+
+    let mut by_alias: HashMap<&String, _> = fetched.into_iter().collect();
+
+    for alias in specs.keys() {
+        // Every alias has an entry — one future was spawned per spec key — so
+        // this is unreachable from `wire`. Taken rather than unwrapped anyway,
+        // because a panic here would cost the whole turn over a condition that
+        // cannot happen; and reported rather than skipped, because a caller
+        // that hands over a partial vector must degrade like an unreachable
+        // server, not in silence. A dropped alias the model is never told about
+        // leaves it promising work it can no longer do.
+        let Some(result) = by_alias.remove(alias) else {
+            out.notes
+                .push(format!("MCP server '{alias}' returned no result"));
+            out.unavailable.push(alias.clone());
+            continue;
+        };
         let (binding, catalog) = match result {
             Ok(pair) => pair,
             Err(why) => {
@@ -419,6 +456,122 @@ mod tests {
             f.routes.get(&exposed).map(|r| r.tool.as_str()),
             Some("foo/bar"),
             "the route must name the tool that was actually exposed"
+        );
+    }
+
+    /// The fold order must be the `BTreeMap`'s, NOT the order servers answered
+    /// in — otherwise which server owns a contested tool name is decided by
+    /// network timing, and two runs of the same graph expose different tools.
+    ///
+    /// Two aliases are needed that collide despite `normalize` prefixing the
+    /// alias: `normalize` maps every non-`[A-Za-z0-9_-]` character to `_`, so
+    /// `a.b` and `a_b` both expose `a_b__search`. `a.b` sorts FIRST (`.` is
+    /// 0x2E, `_` is 0x5F), so it must win — and the fetched vector below is
+    /// deliberately handed over in the opposite order, which is exactly the
+    /// state a `FuturesUnordered` would produce if `a_b` answered first.
+    #[tokio::test]
+    async fn the_first_alias_in_btreemap_order_wins_a_contested_name() {
+        let spec: McpServerSpec = serde_json::from_value(json!({
+            "url": "https://mcp.example.com/mcp"
+        }))
+        .expect("spec parses");
+
+        let mut specs = BTreeMap::new();
+        specs.insert("a.b".to_string(), spec.clone());
+        specs.insert("a_b".to_string(), spec.clone());
+
+        // `bind` only resolves headers and derives a pool key — there are none
+        // here and it never opens a connection, so both bindings are real.
+        let dotted = bind("a.b", &spec, None, "s1", None)
+            .await
+            .expect("binding a.b needs no credentials");
+        let underscored = bind("a_b", &spec, None, "s1", None)
+            .await
+            .expect("binding a_b needs no credentials");
+
+        let catalog = Arc::new(vec![descriptor("search")]);
+        let (dotted_alias, underscored_alias) = {
+            let mut keys = specs.keys();
+            (
+                keys.next().expect("two aliases"),
+                keys.next().expect("two aliases"),
+            )
+        };
+        assert_eq!(dotted_alias, "a.b", "the sort order this test rests on");
+
+        // Arrival order: the LATER-sorting alias first.
+        let fetched: Vec<Fetched> = vec![
+            (underscored_alias, Ok((underscored, catalog.clone()))),
+            (dotted_alias, Ok((dotted, catalog.clone()))),
+        ];
+
+        let mut claimed = HashSet::new();
+        let w = assemble(&specs, fetched, &mut claimed);
+
+        assert_eq!(
+            w.definitions.len(),
+            1,
+            "both servers normalise to one name, so only one tool is exposed"
+        );
+        assert_eq!(w.definitions[0].name, "a_b__search");
+        assert_eq!(
+            w.routes.get("a_b__search").map(|r| r.alias.as_str()),
+            Some("a.b"),
+            "the contested name must go to the first alias in BTreeMap order, \
+             not to the server that answered first"
+        );
+    }
+
+    /// An alias with no fetch result must be REPORTED, not skipped in silence.
+    ///
+    /// Unreachable from [`wire`], which spawns one future per spec key. It is
+    /// reachable for any other caller of [`assemble`], and the module's contract
+    /// is that a server contributing nothing still lands in `unavailable` — a
+    /// model never told it lost a capability goes on promising work it cannot
+    /// do. Without this test the branch is a behaviour claim nothing checks.
+    #[tokio::test]
+    async fn an_alias_with_no_result_is_reported_rather_than_dropped() {
+        let spec: McpServerSpec = serde_json::from_value(json!({
+            "url": "https://mcp.example.com/mcp"
+        }))
+        .expect("spec parses");
+
+        let mut specs = BTreeMap::new();
+        specs.insert("present".to_string(), spec.clone());
+        specs.insert("missing".to_string(), spec.clone());
+
+        let binding = bind("present", &spec, None, "s1", None)
+            .await
+            .expect("binding needs no credentials");
+        let present_alias = specs.keys().find(|a| *a == "present").expect("present");
+
+        // Deliberately partial: nothing at all for the "missing" alias.
+        let fetched: Vec<Fetched> = vec![(
+            present_alias,
+            Ok((binding, Arc::new(vec![descriptor("search")]))),
+        )];
+
+        let mut claimed = HashSet::new();
+        let w = assemble(&specs, fetched, &mut claimed);
+
+        assert_eq!(
+            w.unavailable,
+            vec!["missing".to_string()],
+            "the alias that produced nothing must reach the model's notice"
+        );
+        assert!(
+            w.notes.iter().any(|n| n.contains("missing")),
+            "and the operator must be told: {:?}",
+            w.notes
+        );
+        assert_eq!(
+            w.definitions.len(),
+            1,
+            "the healthy server still contributes its tool"
+        );
+        assert!(
+            w.bindings.contains_key("present") && !w.bindings.contains_key("missing"),
+            "only the server that answered is dispatchable"
         );
     }
 
