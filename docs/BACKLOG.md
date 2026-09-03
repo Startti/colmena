@@ -28,17 +28,14 @@ Lo que quedó abierto, en orden de importancia:
   acordado: solo hechos mecánicos** (nombres, `required`, `valid_values`, `read_only`); la
   prosa queda en el JSON a mano — no se generará el JSON completo.
 
-  **Migrados 22 de 37.** Slice 1: los 8 sin config + `exponential`. Slice 2: las tres
-  primitivas del builder (`open_config()`, `with_reserved_input_keys()`,
-  `FieldSpec::conditional()`) y los 4 nodos que las ejercitan (`mock_input`, `input`,
-  `router`, `http_request`). Slice 3: los 9 fáciles.
+  **Migrados 31 de 37.** Slice 1: los 8 sin config + `exponential`. Slice 2: las tres
+  primitivas del builder y los 4 nodos que las ejercitan. Slice 3: los 9 fáciles.
+  Slice 4: los 9 medianos.
 
-  **Faltan 15**, sin primitivas nuevas por delante — solo autoría y auditoría:
-  - *Medianos* (9): `sql_query`, `output_parser`, `for_each`, `document_create`, `tts`,
-    `image_generation`, `image_edit`, `socketio_request`, `information_extraction`.
-  - *Caros* (6): el clúster LLM (`planner`, `critic`, `reactor`, `orchestrator`),
-    `tavily_client` (18 campos) y `llm_call` (33). Comparten `llm_shared_fields` y son
-    donde más probable es que el catálogo esté mal — migrarlos puede obligar a corregirlo.
+  **Faltan 6, todos caros**: el clúster LLM (`planner`, `critic`, `reactor`,
+  `orchestrator`), `tavily_client` (18 campos) y `llm_call` (33). Comparten
+  `llm_shared_fields` y son donde más probable es que el catálogo esté mal — migrarlos
+  puede obligar a corregirlo. Sugerido: un slice para los 5 y otro solo para `llm_call`.
 
   Endgame: cuando los 37 declaren `config_schema()`, el *set de campos* del JSON pasa a ser
   verificado/generado; la prosa sigue autorada.

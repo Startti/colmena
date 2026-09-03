@@ -6,6 +6,7 @@ use std::error::Error;
 use std::sync::Arc;
 
 use super::task_mutations;
+use crate::dag_engine::domain::lint::{FieldSpec, NodeCatalogEntry};
 use crate::llm::domain::ProviderKind;
 
 /// Default system prompt template for ExtractionNode.
@@ -325,6 +326,26 @@ impl ExecutableNode for ExtractionNode {
                 "extra_info": "object — empty on the normal path; when the extraction requests suspension it carries `__colmena_status: \"SUSPENDED\"` and `all_tasks` (the updated task list); carries `skipped_deletes` (array of ids) when the critic named a `delete_tasks` id that is not a valid identifier"
             }
         })
+    }
+
+    fn config_schema(&self) -> Option<NodeCatalogEntry> {
+        Some(
+            NodeCatalogEntry::no_config()
+                .with_field(
+                    "provider",
+                    FieldSpec::of_type("string").required().valid_values([
+                        "openai".into(),
+                        "google".into(),
+                        "anthropic".into(),
+                    ]),
+                )
+                .with_field("api_key", FieldSpec::of_type("string").required())
+                .with_field("model", FieldSpec::of_type("string"))
+                .with_field("schema", FieldSpec::of_type("object").required())
+                .with_field("system_message", FieldSpec::of_type("string"))
+                .with_field("texts", FieldSpec::of_type("object"))
+                .with_field("verbose", FieldSpec::of_type("boolean")),
+        )
     }
 }
 

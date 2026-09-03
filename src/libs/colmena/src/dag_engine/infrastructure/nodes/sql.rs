@@ -6,6 +6,7 @@
 
 use crate::dag_engine::application::sql_execution_service::SqlExecutionService;
 use crate::dag_engine::domain::initializable_node::{InitContext, InitializableNode};
+use crate::dag_engine::domain::lint::{FieldSpec, NodeCatalogEntry};
 use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
 use crate::dag_engine::domain::observer::ExecutionObserver;
 use crate::dag_engine::domain::sql_errors::SqlNodeError;
@@ -721,6 +722,20 @@ impl ExecutableNode for SqlNode {
                 "truncated": "boolean"
             }
         })
+    }
+
+    fn config_schema(&self) -> Option<NodeCatalogEntry> {
+        // `provider`/`model`/`api_key` are read from the nested `guardrail_llm`
+        // object, not from the node's own config, so they are not fields here.
+        Some(
+            NodeCatalogEntry::no_config()
+                .with_field("connection_url", FieldSpec::of_type("string").required())
+                .with_field("setup_sql", FieldSpec::of_type("string"))
+                .with_field("permissions", FieldSpec::of_type("object"))
+                .with_field("runtime_limits", FieldSpec::of_type("object"))
+                .with_field("guardrail_llm", FieldSpec::of_type("object"))
+                .with_field("query", FieldSpec::of_type("string").required()),
+        )
     }
 
     fn description(&self) -> Option<&str> {

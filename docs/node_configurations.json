@@ -2633,6 +2633,48 @@
           "required": false,
           "default": ".colmena/documents",
           "description": "Filesystem root for the 'localfs' backend. Assets default to '.colmena/documents/assets' unless 'asset_storage_root' is set."
+        },
+        "asset_storage_root": {
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "Directory for asset blobs when storage_backend='localfs'. Defaults to a sibling of storage_root named '<artifacts_dir>_assets'. Read by DocumentRuntime::from_config."
+        },
+        "gcs_bucket": {
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "GCS bucket for artifacts when storage_backend='gcs'. Read by DocumentRuntime::from_config."
+        },
+        "gcs_prefix": {
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "Object key prefix for artifacts in GCS. Read by DocumentRuntime::from_config."
+        },
+        "asset_gcs_prefix": {
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "Object key prefix for asset blobs in GCS. Read by DocumentRuntime::from_config."
+        },
+        "default_retention": {
+          "type": "integer",
+          "required": false,
+          "default": null,
+          "description": "Default number of versions retained per artifact. Read by DocumentRuntime::from_config."
+        },
+        "max_asset_size_bytes": {
+          "type": "integer",
+          "required": false,
+          "default": null,
+          "description": "Ceiling on a single asset blob, in bytes. Read by DocumentRuntime::from_config."
+        },
+        "allowed_asset_mimes": {
+          "type": "array",
+          "required": false,
+          "default": null,
+          "description": "Whitelist of asset MIME types. Read by DocumentRuntime::from_config."
         }
       },
       "input_ports": {
@@ -2689,6 +2731,48 @@
           "required": false,
           "default": ".colmena/documents",
           "description": "Filesystem root for the 'localfs' backend."
+        },
+        "asset_storage_root": {
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "Directory for asset blobs when storage_backend='localfs'. Defaults to a sibling of storage_root named '<artifacts_dir>_assets'. Read by DocumentRuntime::from_config."
+        },
+        "gcs_bucket": {
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "GCS bucket for artifacts when storage_backend='gcs'. Read by DocumentRuntime::from_config."
+        },
+        "gcs_prefix": {
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "Object key prefix for artifacts in GCS. Read by DocumentRuntime::from_config."
+        },
+        "asset_gcs_prefix": {
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "Object key prefix for asset blobs in GCS. Read by DocumentRuntime::from_config."
+        },
+        "default_retention": {
+          "type": "integer",
+          "required": false,
+          "default": null,
+          "description": "Default number of versions retained per artifact. Read by DocumentRuntime::from_config."
+        },
+        "max_asset_size_bytes": {
+          "type": "integer",
+          "required": false,
+          "default": null,
+          "description": "Ceiling on a single asset blob, in bytes. Read by DocumentRuntime::from_config."
+        },
+        "allowed_asset_mimes": {
+          "type": "array",
+          "required": false,
+          "default": null,
+          "description": "Whitelist of asset MIME types. Read by DocumentRuntime::from_config."
         }
       },
       "input_ports": {
@@ -2737,6 +2821,48 @@
           "required": false,
           "default": ".colmena/documents",
           "description": "Filesystem root for the 'localfs' backend."
+        },
+        "asset_storage_root": {
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "Directory for asset blobs when storage_backend='localfs'. Defaults to a sibling of storage_root named '<artifacts_dir>_assets'. Read by DocumentRuntime::from_config."
+        },
+        "gcs_bucket": {
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "GCS bucket for artifacts when storage_backend='gcs'. Read by DocumentRuntime::from_config."
+        },
+        "gcs_prefix": {
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "Object key prefix for artifacts in GCS. Read by DocumentRuntime::from_config."
+        },
+        "asset_gcs_prefix": {
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "Object key prefix for asset blobs in GCS. Read by DocumentRuntime::from_config."
+        },
+        "default_retention": {
+          "type": "integer",
+          "required": false,
+          "default": null,
+          "description": "Default number of versions retained per artifact. Read by DocumentRuntime::from_config."
+        },
+        "max_asset_size_bytes": {
+          "type": "integer",
+          "required": false,
+          "default": null,
+          "description": "Ceiling on a single asset blob, in bytes. Read by DocumentRuntime::from_config."
+        },
+        "allowed_asset_mimes": {
+          "type": "array",
+          "required": false,
+          "default": null,
+          "description": "Whitelist of asset MIME types. Read by DocumentRuntime::from_config."
         }
       },
       "input_ports": {
