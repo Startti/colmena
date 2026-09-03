@@ -6,6 +6,12 @@ ve ADP antes y después, qué tiene que hacer ADP, y qué se rompe si no hace na
 
 Los cambios que quedan dentro del motor no llevan nota aquí.
 
+## 2026-09-02 — `validate_graph` valida de verdad
+
+| # | Nota | Acción de ADP | Qué se rompe si se ignora |
+|---|------|---------------|---------------------------|
+| 1 | [`validate_graph` ahora valida de verdad](2026-09-02-validate-graph-now-validates.md) | **Ninguna** — verificado que `platform/` no llama a esa función | Nada. Los casos que ahora rechaza ya fallaban al ejecutar |
+
 ## 2026-08-23 — `usage` separa input fresco de tokens de cache
 
 | # | Nota | Acción de ADP | Qué se rompe si se ignora |

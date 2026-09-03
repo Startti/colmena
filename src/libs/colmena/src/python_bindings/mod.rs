@@ -476,24 +476,23 @@ fn stream_dag<'py>(
     })
 }
 
-/// Checks that a graph dict deserialises into the engine's `Graph`.
+/// Checks a graph dict the way `dag_engine run` does when it loads a file.
 ///
-/// This is a *shape* check only. It catches a missing `nodes`/`edges`, a field
-/// of the wrong JSON type, or a malformed edge — nothing more.
+/// Deserialises into the engine's `Graph` and then runs `Graph::validate()`, so
+/// it rejects a node id containing `/`, a malformed `node_schema`, an invalid
+/// `memory_mode` and a misconfigured `mcp` block — the same structural
+/// invariants that would otherwise only surface at run time.
 ///
-/// It is **weaker than loading the graph with `dag_engine run`**, which also
-/// calls [`Graph::validate`] and so rejects a node id containing `/`, a
-/// malformed `node_schema`, an invalid `memory_mode` and a misconfigured `mcp`
-/// block. None of those are caught here.
-///
-/// It says nothing at all about the contents of a node's `config`: that is an
-/// untyped `Value`, so an invented field passes silently. Use
+/// It still says nothing about the contents of a node's `config`: that is an
+/// untyped value, so an invented field passes silently here. Use
 /// `dag_engine lint` for that.
 #[pyfunction]
 fn validate_graph(graph: pyo3::Bound<'_, pyo3::PyAny>) -> PyResult<()> {
     let v: serde_json::Value =
         pythonize::depythonize(&graph).map_err(|e| DagException::new_err(e.to_string()))?;
-    let _: crate::dag_engine::domain::graph::Graph = serde_json::from_value(v)
+    let g: crate::dag_engine::domain::graph::Graph = serde_json::from_value(v)
+        .map_err(|e| DagException::new_err(format!("invalid graph: {}", e)))?;
+    g.validate()
         .map_err(|e| DagException::new_err(format!("invalid graph: {}", e)))?;
     Ok(())
 }

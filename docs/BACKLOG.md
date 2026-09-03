@@ -12,17 +12,15 @@ La fase 1 del linter aterrizó en `develop` en 5 PRs (#238, #239, #241, #242, #2
 Guía: [`docs/developer_guide/51_graph_linter.md`](developer_guide/51_graph_linter.md).
 Lo que quedó abierto, en orden de importancia:
 
-- **`validate_graph` de los bindings no valida lo que su nombre promete.** Python
-  ([`python_bindings/mod.rs`](../src/libs/colmena/src/python_bindings/mod.rs)) y napi
-  ([`node_bindings/dag.rs`](../src/libs/colmena/src/node_bindings/dag.rs)) solo hacen
-  `serde_json::from_value::<Graph>()`; **no** llaman a `Graph::validate()`. Un grafo con
-  un node id con `/`, un `node_schema` malformado, un `memory_mode` inválido o un bloque
-  `mcp` mal configurado pasa el binding y falla al ejecutar. Las docs ya se corrigieron
-  para decir la verdad; **cablearlo es un cambio de comportamiento** (un grafo que hoy
-  pasa empezaría a fallar), así que va en su propio PR con nota en
-  [`docs/adp_migration/`](adp_migration/README.md). En el mismo PR conviene exponer
-  `lint_graph` a ambos bindings, que es lo que permitiría a ADP mostrar los hallazgos
-  en el canvas.
+- ~~**`validate_graph` de los bindings no valida lo que su nombre promete.**~~ —
+  **Cableado HECHO 2026-09-02** — ambos bindings llaman a `Graph::validate()`.
+  Exponer `lint_graph`/`lintGraph` va en su propio PR. Ver CHANGELOG §8 y
+  [`docs/adp_migration/2026-09-02-validate-graph-now-validates.md`](adp_migration/2026-09-02-validate-graph-now-validates.md).
+  **Queda abierto lo más grande:** el camino de producción de ADP tampoco valida —
+  `ColmenaEngine::execute_stream_cancellable` recibe un `Graph` sin llamar a
+  `Graph::validate()`, así que un grafo con node id inválido o `node_schema`
+  malformado llega hasta la ejecución. Cablearlo ahí impacta producción y necesita
+  su propia decisión.
 
 - **Fase 2 del linter: mover la fuente de verdad al código.** Hoy
   `docs/node_configurations.json` se mantiene a mano; los tests garantizan que la *lista

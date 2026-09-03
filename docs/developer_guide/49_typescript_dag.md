@@ -80,13 +80,13 @@ try {
 Acepta un `GraphObject` y lanza `DagError` si el grafo no deserializa al `Graph` del
 engine, sin red ni LLM.
 
-> **Es un chequeo de forma, y es más débil que cargar el grafo con `dag_engine run`.**
-> Detecta un `nodes`/`edges` ausente, un campo con el tipo JSON equivocado o un edge
-> malformado. **No** llama a `Graph::validate()`, así que un node id con `/`, un
-> `node_schema` malformado, un `memory_mode` inválido o un bloque `mcp` mal configurado
-> pasan acá y fallan al ejecutar. Y no dice nada sobre el contenido del `config` de un
-> nodo: es un `Value` sin tipar, así que un campo inventado pasa en silencio — para eso
-> está [`dag_engine lint`](51_graph_linter.md).
+> **Misma estrictez que cargar el grafo con `dag_engine run`.** Deserializa al `Graph`
+> del engine y corre `Graph::validate()`, así que rechaza un node id con `/`, un
+> `node_schema` malformado, un `memory_mode` inválido y un bloque `mcp` mal configurado.
+>
+> Lo que **no** hace: mirar el contenido del `config` de un nodo. Es un `Value` sin
+> tipar, así que un campo inventado pasa en silencio acá — para eso está
+> [`dag_engine lint`](51_graph_linter.md).
 
 ```ts
 import { validateGraph, DagError } from "colmena-ai";
