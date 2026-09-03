@@ -687,3 +687,44 @@ conjunto declarado coincide exactamente con el que `llm.rs` lee de `config`:
 
 **Estado.** done — 37/37.
 
+---
+
+## 18. El motor valida el grafo en toda entrada, no sólo desde el CLI
+
+**Qué cambió.** `Graph::validate()` ahora corre en `DagRunUseCase::execute_stream`,
+el único punto donde convergen todas las entradas. Antes sólo validaba el CLI
+(`api.rs`): las cuatro entradas de librería —`execute_stream`,
+`execute_stream_cancellable`, `run_dag`, `stream_sse_parts`— recibían un `Graph`
+y lo ejecutaban sin verificar, y **ésa es la que usa el worker de ADP**.
+
+Cerrado el hueco que quedó abierto al arreglar los bindings en §8: los bindings
+validaban, pero ADP no pasa por ellos.
+
+**Por qué el riesgo es menor de lo que parece.** De las cuatro cosas que
+`validate()` rechaza, dos ya fallaban igual más adelante: `node_schema` se
+re-parsea al construir tools (`dag_tool_executor.rs:928`) y `memory_mode` se
+re-verifica ahí mismo (`:922`). Para ésas esto sólo adelanta el error y mejora el
+mensaje. Las otras dos —bloque `mcp` mal configurado y node id con `/`— fallaban
+**en silencio**: un servidor MCP mal configurado simplemente se ignoraba, que
+para el operador se lee como "el modelo ignoró mi servidor".
+
+**Válvula de seguridad**: `COLMENA_GRAPH_VALIDATION=off`, misma forma que
+`COLMENA_PREFLIGHT_HEALTH=off`.
+
+**Sobre el test.** El que existía llamaba a `g.validate()` a mano — habría pasado
+feliz mientras nada la llamaba, que era exactamente el estado a corregir. El
+nuevo maneja `DagRunUseCase::execute_stream`, y corre en CI (no `#[ignore]`)
+porque un registry vacío alcanza: la validación ocurre antes de buscar ningún
+nodo. Se verificó por mutación que falla si se quita la llamada.
+
+Un detalle que costó encontrar: los dos tests que dependen de
+`COLMENA_GRAPH_VALIDATION` se pisaban entre sí, porque `set_var` es global al
+proceso y CI corre en paralelo. El síntoma era un error de nodo no encontrado que
+parecía cableado roto. Resuelto con un lock explícito, no con `--test-threads=1`,
+que sólo lo habría escondido.
+
+**Nota de migración para ADP**:
+[`2026-09-03-graph-validated-on-every-entry.md`](adp_migration/2026-09-03-graph-validated-on-every-entry.md).
+
+**Estado.** done.
+

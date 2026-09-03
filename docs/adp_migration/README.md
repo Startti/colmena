@@ -12,6 +12,12 @@ Los cambios que quedan dentro del motor no llevan nota aquí.
 |---|------|---------------|---------------------------|
 | 1 | [`validate_graph` ahora valida de verdad](2026-09-02-validate-graph-now-validates.md) | **Ninguna** — verificado que `platform/` no llama a esa función | Nada. Los casos que ahora rechaza ya fallaban al ejecutar |
 
+## 2026-09-03 — el motor valida el grafo en toda entrada
+
+| # | Nota | Acción de ADP | Qué se rompe si se ignora |
+|---|------|---------------|---------------------------|
+| 1 | [`Graph::validate()` corre en toda entrada](2026-09-03-graph-validated-on-every-entry.md) | Ninguna — el error viaja como cualquier `DagError`, sin cambio de formato SSE | Un grafo estructuralmente inválido falla al inicio en vez de más tarde o en silencio. Válvula: `COLMENA_GRAPH_VALIDATION=off` |
+
 ## 2026-08-23 — `usage` separa input fresco de tokens de cache
 
 | # | Nota | Acción de ADP | Qué se rompe si se ignora |
