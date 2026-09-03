@@ -37,17 +37,15 @@ Lo que quedó abierto, en orden de importancia:
   reparación. Reescribirlos requiere verificar que además corran contra los servicios que
   usan, no solo que deserialicen.
 
-- **`NO_CATALOG_COVERAGE` es inalcanzable desde la CLI.** `LintContext::from_catalog()`
-  deriva los tipos ejecutables del propio catálogo, así que un tipo sin entrada sale como
-  `UNKNOWN_NODE_TYPE` — un mensaje falso ("el motor no sabe ejecutarlo"). Los tests de
-  cobertura lo impiden dentro del repo. Arreglarlo de verdad implica que la CLI construya
-  el registry real, lo que hoy exigiría conexión a base de datos para revisar un archivo
-  JSON. Documentado como limitación en la guía 51.
+- ~~**`NO_CATALOG_COVERAGE` es inalcanzable desde la CLI.**~~ — **HECHO 2026-09-02**,
+  ver CHANGELOG §10. `KnownNodeTypes` separa los dos grados de certeza; con solo el
+  catálogo el linter ya no afirma qué puede ejecutar el motor.
 
-- **Menores.** `compact()` en `linter.rs` trunca *después* de envolver en comillas, así que
-  un string largo sale con comillas desbalanceadas (cosmético). Y el `schema()` de
-  `api_explorer` anuncia diez campos de config que el nodo nunca lee — drift interno del
-  `.rs`, no del catálogo, cuya entrada ya documenta `config_fields` vacío.
+- ~~**`compact()` deja comillas desbalanceadas.**~~ — **HECHO 2026-09-02**, mismo cambio.
+
+- **Menor pendiente.** El `schema()` de `api_explorer` anuncia diez campos de config que
+  el nodo nunca lee — drift interno del `.rs`, no del catálogo, cuya entrada ya documenta
+  `config_fields` vacío.
 
 
 ## 🚨 MÁXIMA PRIORIDAD — Colmena no puede ejecutar los modelos GPT-5.6 (2026-08-24)

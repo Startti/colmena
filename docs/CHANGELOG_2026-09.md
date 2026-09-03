@@ -380,3 +380,45 @@ afectado**.
 
 **Estado.** done.
 
+---
+
+## 10. Linter: dejar de afirmar lo que el catálogo no puede sostener
+
+**Qué cambió.** El linter reportaba *"is not a node type this engine can run"*
+para cualquier tipo sin entrada en el catálogo. Esa frase es **falsa** para un
+nodo que sí está registrado y solo le falta la entrada — que es la forma más
+probable de que aparezca un tipo desconocido: alguien agrega el nodo a
+`registry.rs`, olvida el catálogo y corre `lint` antes que los tests.
+
+`LintContext` ahora lleva un `KnownNodeTypes` que separa los dos grados de
+certeza, porque deciden qué le está permitido afirmar:
+
+| Variante | Ante un tipo desconocido |
+|---|---|
+| `Registry(&set)` | `UNKNOWN_NODE_TYPE` (error), *"is not a node type this engine can run"* — la ausencia es prueba |
+| `CatalogOnly` | near-miss → `UNKNOWN_NODE_TYPE` (error), *"is not a documented node type"*; si no → `NO_CATALOG_COVERAGE` (info) |
+| `Unchecked` | no opina |
+
+La CLI usa `CatalogOnly`. El typo (`llm_kall` → `llm_call`) sigue siendo un error
+con su sugerencia; lo que cambió es que un tipo genuinamente nuevo ya no recibe
+una afirmación inventada sobre el motor, y sus campos no se marcan como
+inventados. Nuevo constructor `LintContext::from_registry` para quien tenga el
+registry a mano.
+
+Efecto lateral bienvenido: `NO_CATALOG_COVERAGE` pasa a ser alcanzable desde la
+CLI. Antes era inalcanzable por construcción, y la guía 51 lo documentaba como
+limitación.
+
+**Y `compact()` dejaba comillas desbalanceadas.** Truncaba la forma ya
+entrecomillada, así que un valor largo salía como `"xxxxx...` y se leía como un
+string sin cerrar. Ahora trunca el contenido y después entrecomilla.
+
+**Sin cambio de API pública** más allá del `LintContext` que introdujo el propio
+linter en esta misma serie, y que todavía no tiene consumidores fuera del repo →
+**ADP no afectado**.
+
+**Documentación.** [`51_graph_linter.md`](developer_guide/51_graph_linter.md),
+sección "De dónde sale la autoridad".
+
+**Estado.** done. Cierra la fase 1.
+

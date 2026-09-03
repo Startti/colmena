@@ -9,7 +9,6 @@ use super::diagnostic::{Diagnostic, DiagnosticCode, LintReport, Severity};
 use crate::dag_engine::domain::graph::{Graph, NodeConfig};
 use serde_json::{Map, Value};
 use std::collections::BTreeSet;
-use std::sync::OnceLock;
 
 /// Keys the engine injects into a node's config or inputs at runtime.
 ///
@@ -34,51 +33,67 @@ pub struct LintContext<'a> {
     /// The field-level source of truth.
     pub catalog: &'a NodeCatalog,
 
-    /// The node types the engine can actually run.
-    ///
-    /// `None` when the caller has no registry at hand. The unknown-node-type
-    /// check is then skipped rather than guessed: the catalog is documentation
-    /// and is not authoritative about what is registered, so using it as a
-    /// substitute would produce confident, wrong errors.
-    pub registered_node_types: Option<&'a BTreeSet<String>>,
+    /// What the linter is entitled to conclude from a node type it has not seen.
+    pub known_node_types: KnownNodeTypes<'a>,
+}
+
+/// Where the linter's idea of "a real node type" comes from.
+///
+/// The variant matters because it decides what the linter may *assert*. Saying
+/// "this engine cannot run that node type" is only true when the set came from
+/// the engine's own registry; said on the strength of the catalog alone it is a
+/// confident guess, and wrong for a node that is registered but not yet
+/// documented.
+pub enum KnownNodeTypes<'a> {
+    /// The engine's registry. Absence proves the engine cannot run the type.
+    Registry(&'a BTreeSet<String>),
+
+    /// Only the catalog's documented types. Absence proves nothing about the
+    /// engine — only that the linter has no entry to check the node against.
+    CatalogOnly,
+
+    /// Do not draw conclusions about node types at all.
+    Unchecked,
 }
 
 impl<'a> LintContext<'a> {
-    /// A context backed by the embedded catalog and no registry.
+    /// A context backed by the embedded catalog that draws no conclusions about
+    /// node types.
     ///
-    /// Node types are not checked. Use [`Self::from_catalog`] unless you have a
-    /// specific reason to suppress that check.
+    /// Prefer [`Self::from_catalog`] unless you have a reason to suppress that
+    /// check entirely.
     pub fn with_embedded_catalog() -> LintContext<'static> {
         LintContext {
             catalog: NodeCatalog::embedded(),
-            registered_node_types: None,
+            known_node_types: KnownNodeTypes::Unchecked,
         }
     }
 
-    /// A context that also treats the catalog's documented types as the set the
-    /// engine can run.
+    /// A context that judges node types against the catalog alone.
     ///
-    /// This is sound because two tests in the registry enforce that the catalog
-    /// and the registry describe the same set of node types, in both
-    /// directions. It lets a caller check node types without paying to build an
-    /// engine, which needs database connections.
-    ///
-    /// One documented gap: four node types register only when an optional
-    /// dependency is wired — `secure_suspend` needs a `SecureValueService`, and
-    /// `image_generation` / `image_edit` / `tts` need a storage adapter. This
-    /// context treats them as available regardless, because it checks a graph
-    /// against what the engine *can* run, not against one deployment's wiring.
+    /// Costs nothing to build — no engine, no database — which is what lets the
+    /// `lint` subcommand check a JSON file. What it gives up is the authority to
+    /// say a type is unrunnable: for a type it has never seen it reports "I have
+    /// no entry for this", and only calls it a mistake when a documented type is
+    /// a near-miss away.
     pub fn from_catalog() -> LintContext<'static> {
-        static TYPES: OnceLock<BTreeSet<String>> = OnceLock::new();
-        let types = TYPES.get_or_init(|| {
-            NodeCatalog::embedded()
-                .covered_node_types()
-                .map(str::to_string)
-                .collect()
-        });
         LintContext {
             catalog: NodeCatalog::embedded(),
-            registered_node_types: Some(types),
+            known_node_types: KnownNodeTypes::CatalogOnly,
+        }
+    }
+
+    /// A context that judges node types against the engine's own registry.
+    ///
+    /// Use this when a registry is at hand: absence from it is proof, so an
+    /// unknown type is reported as an outright error.
+    pub fn from_registry(
+        catalog: &'a NodeCatalog,
+        registered: &'a BTreeSet<String>,
+    ) -> LintContext<'a> {
+        LintContext {
+            catalog,
+            known_node_types: KnownNodeTypes::Registry(registered),
         }
     }
 }
@@ -209,8 +224,12 @@ fn lint_node(
     ctx: &LintContext<'_>,
     report: &mut LintReport,
 ) {
-    if let Some(registered) = ctx.registered_node_types {
-        if !registered.contains(&node.node_type) {
+    // Judge the node type only as strongly as the context allows. Saying "this
+    // engine cannot run that type" on the strength of the catalog alone is
+    // false for a node that is registered but not yet documented — and that is
+    // the likeliest way for an unknown type to show up in practice.
+    match &ctx.known_node_types {
+        KnownNodeTypes::Registry(registered) if !registered.contains(&node.node_type) => {
             report.diagnostics.push(Diagnostic {
                 severity: Severity::Error,
                 code: DiagnosticCode::UnknownNodeType,
@@ -227,6 +246,40 @@ fn lint_node(
             // against; every field would be reported as invented.
             return;
         }
+        KnownNodeTypes::CatalogOnly if ctx.catalog.entry(&node.node_type).is_none() => {
+            // A near-miss against a documented type is strong evidence of a
+            // typo, and worth an error. Anything else is only a gap in our own
+            // coverage, and must not be dressed up as a claim about the engine.
+            let near = suggest(&node.node_type, ctx.catalog.covered_node_types());
+            report.diagnostics.push(match near {
+                Some(near) => Diagnostic {
+                    severity: Severity::Error,
+                    code: DiagnosticCode::UnknownNodeType,
+                    node_id: Some(node_id.to_string()),
+                    field: None,
+                    message: format!("\"{}\" is not a documented node type", node.node_type),
+                    suggestion: Some(format!("did you mean \"{near}\"?")),
+                },
+                None => Diagnostic {
+                    severity: Severity::Info,
+                    code: DiagnosticCode::NoCatalogCoverage,
+                    node_id: Some(node_id.to_string()),
+                    field: None,
+                    message: format!(
+                        "\"{}\" has no entry in the node catalog, so this node's \
+                         configuration was not checked",
+                        node.node_type
+                    ),
+                    suggestion: Some(
+                        "if the engine registers it, add an entry to \
+                         docs/node_configurations.json to enable checking"
+                            .into(),
+                    ),
+                },
+            });
+            return;
+        }
+        _ => {}
     }
 
     let Some(entry) = ctx.catalog.entry(&node.node_type) else {
@@ -520,15 +573,28 @@ fn json_type_name(value: &Value) -> &'static str {
 /// A short rendering of a value for a message, so a huge object cannot flood
 /// the report.
 fn compact(value: &Value) -> String {
-    let s = match value {
-        Value::String(s) => format!("\"{s}\""),
-        other => other.to_string(),
-    };
-    if s.chars().count() > 60 {
-        let truncated: String = s.chars().take(57).collect();
-        format!("{truncated}...")
-    } else {
-        s
+    // Truncate the string's *contents* and then quote, rather than cutting the
+    // already-quoted rendering: slicing after the opening quote left the closing
+    // one behind, so a long value came out as `"xxxxx...` and read as
+    // unterminated.
+    match value {
+        Value::String(text) => {
+            if text.chars().count() > 58 {
+                let head: String = text.chars().take(55).collect();
+                format!("\"{head}...\"")
+            } else {
+                format!("\"{text}\"")
+            }
+        }
+        other => {
+            let rendered = other.to_string();
+            if rendered.chars().count() > 60 {
+                let head: String = rendered.chars().take(57).collect();
+                format!("{head}...")
+            } else {
+                rendered
+            }
+        }
     }
 }
 
@@ -668,15 +734,39 @@ mod tests {
         assert_eq!(levenshtein("abc", ""), 3);
         assert_eq!(levenshtein("kitten", "sitting"), 3);
     }
+    /// A truncated value must still read as a complete quoted string.
+    /// Cutting the rendered form left the closing quote behind, so a long value
+    /// came out as `"xxxxx...` — which reads as an unterminated string and made
+    /// the message look like the linter had crashed mid-sentence.
     #[test]
-    fn compact_truncates_a_long_value() {
-        let long = Value::String("x".repeat(200));
-        let rendered = compact(&long);
+    fn compact_keeps_a_truncated_string_balanced() {
+        let rendered = compact(&Value::String("x".repeat(200)));
+        assert!(
+            rendered.starts_with('"') && rendered.ends_with('"'),
+            "quotes must balance; got {rendered}"
+        );
+        assert!(
+            rendered.contains("..."),
+            "must mark the truncation: {rendered}"
+        );
         assert!(
             rendered.chars().count() <= 60,
             "got {} chars",
             rendered.chars().count()
         );
+    }
+
+    #[test]
+    fn compact_leaves_a_short_string_intact() {
+        assert_eq!(compact(&Value::String("gpt-4o".into())), "\"gpt-4o\"");
+    }
+
+    #[test]
+    fn compact_truncates_a_long_non_string_without_adding_quotes() {
+        let long = Value::Array((0..100).map(Value::from).collect());
+        let rendered = compact(&long);
+        assert!(!rendered.starts_with('"'), "not a string: {rendered}");
         assert!(rendered.ends_with("..."));
+        assert!(rendered.chars().count() <= 60);
     }
 }

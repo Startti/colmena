@@ -15,4 +15,4 @@ pub mod linter;
 
 pub use catalog::{FieldSpec, NodeCatalog, NodeCatalogEntry, Requiredness};
 pub use diagnostic::{Diagnostic, DiagnosticCode, LintReport, Severity};
-pub use linter::{lint_graph, lint_graph_json, LintContext};
+pub use linter::{lint_graph, lint_graph_json, KnownNodeTypes, LintContext};
