@@ -1,0 +1,42 @@
+{
+  "nodes": {
+    "start": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/mcp-context7",
+        "method": "POST",
+        "test_payload": {
+          "prompt": "Necesito la forma correcta de definir un router en la última versión de Axum. Dame el fragmento y decime de qué versión sale."
+        }
+      }
+    },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "api_key": "${GEMINI_API_KEY}",
+        "model": "gemini-2.5-flash",
+        "system_message": "Sos un asistente técnico. Para preguntas sobre APIs de librerías concretas, consultá las herramientas disponibles antes de responder: tu memoria puede estar desactualizada.",
+        "prompt": "{{prompt}}",
+        "max_tokens": 900,
+        "stream": true,
+        "tool_configurations": {
+          "ctx7": {
+            "node_type": "mcp",
+            "mcp": {
+              "url": "https://mcp.context7.com/mcp",
+              "timeout_seconds": 30
+            }
+          }
+        }
+      }
+    },
+    "out": {
+      "type": "log"
+    }
+  },
+  "edges": [
+    { "from": "start", "to": "agent" },
+    { "from": "agent", "to": "out" }
+  ]
+}

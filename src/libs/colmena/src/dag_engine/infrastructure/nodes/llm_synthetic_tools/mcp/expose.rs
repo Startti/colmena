@@ -110,7 +110,7 @@ pub fn exposed_definitions(
                 ToolParameters::default(),
             )
             .with_summary(for_model(&tool.description, MCP_MAX_SUMMARY_BYTES))
-            .with_input_schema_override(tool.input_schema.clone()),
+            .with_input_schema_override(without_schema_metadata(&tool.input_schema)),
         );
     }
 
@@ -138,6 +138,41 @@ fn cap(s: &str, max_bytes: usize) -> String {
     } else {
         s.to_string()
     }
+}
+
+/// The same schema without the JSON Schema metadata keywords.
+///
+/// The schema is otherwise forwarded byte-identical on purpose — it is the
+/// contract the server publishes and Colmena is in no position to reinterpret
+/// it. `$schema` and `$id` are the exception because they describe the DOCUMENT,
+/// not the parameters: removing them cannot change which arguments are valid.
+///
+/// They are removed because Gemini rejects them outright. Its
+/// `function_declarations[].parameters` is an OpenAPI subset, so a single
+/// unknown key fails the WHOLE request with a 400 — not just that tool, and not
+/// just MCP's tools: every built-in the agent had goes down with it. That is the
+/// failure this module's own ceiling comment already warns about for oversized
+/// schemas, arriving through a different door. Context7 publishes `$schema` and
+/// DeepWiki does not, which is exactly why one worked live and the other
+/// returned INVALID_ARGUMENT.
+///
+/// Deliberately narrow: only these two keys, only at the top level. Provider
+/// schema dialects differ in more ways than this and a general translation layer
+/// is a real design problem, not something to improvise here. What is fixed is
+/// what was observed to break.
+fn without_schema_metadata(schema: &Value) -> Value {
+    let Some(map) = schema.as_object() else {
+        return schema.clone();
+    };
+    if !map.contains_key("$schema") && !map.contains_key("$id") {
+        return schema.clone();
+    }
+    Value::Object(
+        map.iter()
+            .filter(|(k, _)| k.as_str() != "$schema" && k.as_str() != "$id")
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect(),
+    )
 }
 
 /// A server-chosen description, made safe to hand the model.
@@ -252,14 +287,27 @@ mod tests {
 
     /// The server's schema is what the model must see. Re-deriving it — even
     /// "equivalently" — is how a required field or an enum silently changes
-    /// meaning, so this asserts byte identity, not structural equality.
+    /// meaning, so this asserts byte identity of everything that DEFINES a
+    /// parameter.
+    ///
+    /// It once asserted byte identity of the whole document, and it passed
+    /// against this very fixture while the feature was broken: Context7 publishes
+    /// `$schema`, Gemini rejects an unknown key with a 400, and the whole request
+    /// died — every tool, not only MCP's. The test was faithful to what the code
+    /// did; the contract it pinned was the wrong one. Now the document metadata
+    /// is excluded from BOTH sides and everything else must still match
+    /// byte-for-byte, so the narrowing cannot quietly widen into a rewrite.
     #[test]
-    fn mcp_schema_is_forwarded_byte_identical() {
+    fn mcp_schema_is_forwarded_byte_identical_apart_from_document_metadata() {
         let tools = fixture("context7_tools");
         let source = tools
             .iter()
             .find(|t| t.name == "resolve-library-id")
             .expect("fixture has resolve-library-id");
+        assert!(
+            source.input_schema.get("$schema").is_some(),
+            "this fixture must keep carrying $schema or the test proves nothing"
+        );
         let (defs, _, _) = exposed_definitions("context7", &tools);
 
         let exposed = find(&defs, "context7__resolve-library-id");
@@ -267,11 +315,98 @@ mod tests {
             .input_schema_override
             .as_ref()
             .expect("MCP tools carry the server schema verbatim, not a rebuilt one");
+        assert!(
+            override_schema.get("$schema").is_none(),
+            "document metadata must not reach the provider"
+        );
         assert_eq!(
             serde_json::to_string(override_schema).unwrap(),
-            serde_json::to_string(&source.input_schema).unwrap(),
-            "the forwarded schema must be byte-identical to the server's"
+            serde_json::to_string(&without_schema_metadata(&source.input_schema)).unwrap(),
+            "apart from the metadata, the forwarded schema must be byte-identical"
         );
+    }
+
+    /// Gemini fails the WHOLE request on an unknown key, so `$schema` — which
+    /// Context7 publishes and standard JSON Schema encourages — took down every
+    /// tool the agent had, MCP's and built-in alike. Observed live as a 400
+    /// INVALID_ARGUMENT before this was stripped.
+    #[test]
+    fn schema_document_metadata_is_not_forwarded() {
+        let tools = vec![McpToolDescriptor {
+            name: "resolve-library-id".to_string(),
+            title: None,
+            description: "finds a library".to_string(),
+            input_schema: json!({
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "$id": "https://example.com/s.json",
+                "type": "object",
+                "properties": { "query": { "type": "string" } },
+                "required": ["query"]
+            }),
+        }];
+
+        let (defs, _, _) = exposed_definitions("ctx7", &tools);
+        let sent = defs[0].input_schema_override.as_ref().expect("schema");
+
+        assert!(
+            sent.get("$schema").is_none(),
+            "$schema reached the provider"
+        );
+        assert!(sent.get("$id").is_none(), "$id reached the provider");
+    }
+
+    /// And nothing ELSE may be lost on the way. The schema is the server's
+    /// contract; stripping metadata must not quietly become rewriting it.
+    #[test]
+    fn everything_but_the_metadata_survives_untouched() {
+        let properties = json!({
+            "query": { "type": "string", "description": "what to look for" },
+            "libraryName": { "type": "string" }
+        });
+        let tools = vec![McpToolDescriptor {
+            name: "resolve-library-id".to_string(),
+            title: None,
+            description: "finds a library".to_string(),
+            input_schema: json!({
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "object",
+                "properties": properties,
+                "required": ["query"],
+                "additionalProperties": false
+            }),
+        }];
+
+        let (defs, _, _) = exposed_definitions("ctx7", &tools);
+        let sent = defs[0].input_schema_override.as_ref().expect("schema");
+
+        assert_eq!(sent.get("type"), Some(&json!("object")));
+        assert_eq!(sent.get("properties"), Some(&properties));
+        assert_eq!(sent.get("required"), Some(&json!(["query"])));
+        assert_eq!(
+            sent.get("additionalProperties"),
+            Some(&json!(false)),
+            "a key that is NOT metadata must survive"
+        );
+    }
+
+    /// A schema with no metadata must come through byte-identical, so the
+    /// stripping cannot become an unconditional rewrite.
+    #[test]
+    fn a_schema_without_metadata_is_passed_through_unchanged() {
+        let schema = json!({
+            "type": "object",
+            "properties": { "repoName": { "type": "string" } },
+            "required": ["repoName"]
+        });
+        let tools = vec![McpToolDescriptor {
+            name: "ask_question".to_string(),
+            title: None,
+            description: "asks".to_string(),
+            input_schema: schema.clone(),
+        }];
+
+        let (defs, _, _) = exposed_definitions("deepwiki", &tools);
+        assert_eq!(defs[0].input_schema_override.as_ref(), Some(&schema));
     }
 
     /// A long description nested INSIDE the schema is part of the contract the
