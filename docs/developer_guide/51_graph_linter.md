@@ -183,10 +183,13 @@ ruido, y sin medir eso no se nota.
 
 ## Limitaciones conocidas
 
-- **El catálogo se mantiene a mano.** Los tests garantizan que la *lista de
-  tipos* no se desvíe, pero no que los *campos* de cada tipo sigan al código. El
-  plan de fase 2 es declarar el schema en el propio `ExecutableNode` y pasar a
-  **generar** este JSON.
+- **El catálogo se mantiene a mano, y la fase 2 lo está cerrando nodo por nodo.**
+  Un nodo puede declarar sus campos en código vía `ExecutableNode::config_schema()`
+  (solo los hechos mecánicos: nombres, `required`, `valid_values`, `read_only`); un
+  test exige que esa declaración coincida con el catálogo, así que para un nodo
+  migrado los dos ya no pueden diverger. La prosa (`description`/`example`/`default`)
+  sigue viviendo en el JSON a propósito — es lo que leen humanos y agentes. Los
+  nodos que todavía devuelven `None` siguen respaldados solo por el catálogo.
 - **`tool_configurations` no se revisa a nivel de campo.** Lo que ya valida
   `Graph::validate()` (`memory_mode`, bloque `mcp`, `node_schema`) sigue siendo
   la única cobertura ahí.

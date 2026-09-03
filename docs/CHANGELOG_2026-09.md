@@ -445,3 +445,40 @@ afectado**.
 
 **Estado.** done. Último pendiente de la fase 1 del linter.
 
+---
+
+## 12. Fase 2 del linter: el código empieza a ser dueño de los campos
+
+**Qué cambió.** Nuevo método `ExecutableNode::config_schema() -> Option<NodeCatalogEntry>`
+(default `None`) con el que un nodo declara, en código, qué campos de config
+acepta. Un test cruza esa declaración contra `docs/node_configurations.json` y
+falla si divergen, así que para un nodo migrado el catálogo deja de ser
+"documentación mantenida a mano" y pasa a ser **demostrablemente correcto**.
+
+**Solo hechos mecánicos.** `config_schema()` declara nombres de campo,
+`required`, `valid_values` y `read_only` — lo único que el linter verifica. La
+prosa (`description`, `example`, `default`) sigue viviendo en el JSON a
+propósito: es lo que leen humanos y agentes, y meterla en literales de Rust
+volvería cada mejora de doc un recompilado. No se generará el JSON completo.
+
+**Aditivo y por lotes.** El default `None` significa "todavía no declarado —
+el catálogo sigue siendo su autoridad", así que la migración es nodo por nodo y
+no rompe ninguna implementación. Este cambio migra **9 de 37**: los ocho nodos
+sin config (`log`, `output`, `current_time`, `api_explorer`, `add`, `subtract`,
+`multiply`, `divide`) y `exponential` (un campo `exponent` requerido), que prueba
+las dos formas — entrada vacía y entrada con un campo tipado.
+
+El test es no-vacuo por construcción: exige un mínimo de 9 nodos comprobados, y
+se verificó por mutación que falla si un campo del código deja de ser `required`
+o si el código inventa un campo que el catálogo no tiene.
+
+**Sin cambio de comportamiento.** El linter sigue leyendo el catálogo; nada
+consume `config_schema()` en runtime todavía. `NodeCatalogEntry`/`FieldSpec`
+ganaron `PartialEq` y constructores fluidos, ambos aditivos → **ADP no afectado**.
+
+**Documentación.** [`51_graph_linter.md`](developer_guide/51_graph_linter.md),
+"Limitaciones conocidas".
+
+**Estado.** partial — 9/37 nodos; el resto (incluidos config abierta y
+`reserved_input_keys`) en próximos slices. Ver BACKLOG.
+

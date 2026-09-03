@@ -974,6 +974,43 @@ mod catalog_coverage_tests {
         }
     }
 
+    /// Phase 2 of the linter: a node's `config_schema()` is the source of truth
+    /// for which config fields it accepts, and it must agree with the catalog
+    /// field-for-field. This is what makes the catalog provably correct for a
+    /// migrated node rather than merely hand-maintained.
+    ///
+    /// `FieldSpec`/`NodeCatalogEntry` carry only the machine facts (name,
+    /// requiredness, valid_values, read_only), so equality here compares exactly
+    /// those — the prose in the catalog is not part of the check.
+    #[test]
+    fn a_migrated_node_config_schema_matches_the_catalog() {
+        let reg = build_fully_wired_registry();
+        let catalog = NodeCatalog::embedded();
+
+        let mut checked = 0;
+        for (node_type, node) in reg.get_all_nodes() {
+            let Some(declared) = node.config_schema() else {
+                continue; // not migrated yet — the catalog remains its authority
+            };
+            let documented = catalog.entry(&node_type).unwrap_or_else(|| {
+                panic!("{node_type} declares a config_schema but has no catalog entry")
+            });
+            assert_eq!(
+                &declared, documented,
+                "config_schema() for `{node_type}` disagrees with \
+                 docs/node_configurations.json (machine facts only)"
+            );
+            checked += 1;
+        }
+
+        // Guard the guard: if nothing is migrated this test proves nothing, so
+        // pin the first batch explicitly.
+        assert!(
+            checked >= 9,
+            "expected at least the first migrated batch to be checked; got {checked}"
+        );
+    }
+
     #[test]
     fn every_registered_node_type_is_documented_in_the_catalog() {
         let reg = build_fully_wired_registry();

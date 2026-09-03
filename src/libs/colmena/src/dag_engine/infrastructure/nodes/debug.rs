@@ -1,4 +1,5 @@
 // --- IMPORTACIONES AÑADIDAS ---
+use crate::dag_engine::domain::lint::NodeCatalogEntry;
 use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
 use serde_json::{json, Value};
 use std::error::Error as StdError;
@@ -54,6 +55,11 @@ impl ExecutableNode for LogNode {
 
     fn schema(&self) -> Value {
         json!({"type": "log", "inputs": {"input": "any"}, "outputs": {"output": "any"}})
+    }
+
+    fn config_schema(&self) -> Option<NodeCatalogEntry> {
+        // `execute` takes `_config`; the payload is the `input` edge.
+        Some(NodeCatalogEntry::no_config())
     }
 }
 

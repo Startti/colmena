@@ -10,6 +10,7 @@
 //! TTL sweeper, started at construction time.
 
 use crate::dag_engine::application::secure_value_service::SecureValueService;
+use crate::dag_engine::domain::lint::NodeCatalogEntry;
 use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
 use crate::dag_engine::domain::observer::ExecutionObserver;
 use crate::dag_engine::domain::toolkit_node::{SubToolDefinition, ToolkitNode, SUB_TOOL_INPUT_KEY};
@@ -531,6 +532,11 @@ impl ExecutableNode for ApiExplorerNode {
             "inputs": { "__sub_tool": "string" },
             "outputs": { "output": "any" }
         })
+    }
+
+    fn config_schema(&self) -> Option<NodeCatalogEntry> {
+        // Built from defaults at registry time; `execute` ignores `_config`.
+        Some(NodeCatalogEntry::no_config())
     }
 
     fn description(&self) -> Option<&str> {

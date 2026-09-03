@@ -22,13 +22,15 @@ Lo que quedó abierto, en orden de importancia:
   malformado llega hasta la ejecución. Cablearlo ahí impacta producción y necesita
   su propia decisión.
 
-- **Fase 2 del linter: mover la fuente de verdad al código.** Hoy
-  `docs/node_configurations.json` se mantiene a mano; los tests garantizan que la *lista
-  de tipos* no se desvíe del registry, pero no que los *campos* de cada tipo sigan al
-  código. El plan es un `ExecutableNode::config_schema()` con default `None` (aditivo, no
-  rompe ninguna implementación), migrando nodo por nodo con un test que compare schema
-  contra catálogo, y cuando los 37 devuelvan `Some`, pasar a **generar** el JSON — igual
-  que ya se hace con `module_dependency_map.md`.
+- **Fase 2 del linter: mover la fuente de verdad al código — EN CURSO.** La maquinaria
+  aterrizó: `ExecutableNode::config_schema()` (default `None`, aditivo) declara los hechos
+  mecánicos, y un test los cruza contra el catálogo (CHANGELOG §12). **Alcance acordado:
+  solo hechos mecánicos** (nombres, `required`, `valid_values`, `read_only`); la prosa
+  queda en el JSON a mano — no se generará el JSON completo. Migrados 9 de 37 nodos (los 8
+  sin config + `exponential`). Falta migrar el resto, incluidos los de config abierta
+  (`input`/`mock_input`, placeholder `<any_key>`) y los que tienen `reserved_input_keys`
+  (`http_request`). Endgame: cuando los 37 declaren `config_schema()`, el *set de campos*
+  del JSON pasa a ser verificado/generado; la prosa sigue autorada.
 
 - **Tres grafos de ejemplo no cargan.** `tests/graphs/agents/forward_generated_artifact.json`,
   `upload_inline_to_endpoint.json` y `upload_signed_url_to_endpoint.json` declaran `nodes`

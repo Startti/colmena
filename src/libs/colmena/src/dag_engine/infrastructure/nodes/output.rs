@@ -1,3 +1,4 @@
+use crate::dag_engine::domain::lint::NodeCatalogEntry;
 use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
 use crate::dag_engine::domain::observer::ExecutionObserver;
 use async_trait::async_trait;
@@ -39,5 +40,10 @@ impl ExecutableNode for OutputNode {
 
     fn schema(&self) -> Value {
         serde_json::json!({})
+    }
+
+    fn config_schema(&self) -> Option<NodeCatalogEntry> {
+        // `execute` takes `_config`; it wraps the `input` edge.
+        Some(NodeCatalogEntry::no_config())
     }
 }

@@ -38,6 +38,27 @@ pub trait ExecutableNode: Send + Sync {
     /// Esto será usado por el `frontend` en M2/M4.
     fn schema(&self) -> Value;
 
+    /// Declares which configuration fields this node accepts, or `None` while
+    /// the node has not been migrated to declare them.
+    ///
+    /// This is the phase-2 source of truth for the graph linter: rather than
+    /// trusting the hand-maintained `docs/node_configurations.json` to say which
+    /// fields a node reads, a node states it here, and a test asserts the two
+    /// agree. `None` means "not yet declared — fall back to the catalog"; it is
+    /// the default so migration is node-by-node and never breaks an existing
+    /// implementation.
+    ///
+    /// Only the machine-checkable facts live here — field names, requiredness,
+    /// accepted values, read-only. Prose (descriptions, examples, defaults)
+    /// stays in the catalog, which is what humans and agents read.
+    ///
+    /// Deliberately separate from [`Self::schema`], whose free-form `inputs`
+    /// block the tool executor consumes by substring; the two must not be
+    /// conflated.
+    fn config_schema(&self) -> Option<crate::dag_engine::domain::lint::NodeCatalogEntry> {
+        None
+    }
+
     /// Retorna una descripción legible por humanos (y LLMs) de lo que hace el nodo.
     /// Esto es crucial para que el LLM entienda cuándo y cómo usar este nodo como herramienta.
     fn description(&self) -> Option<&str> {

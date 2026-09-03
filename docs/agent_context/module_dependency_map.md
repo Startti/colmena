@@ -39,9 +39,9 @@
 | 9 | `gdocs::application::co_edit_guard` | `src/libs/colmena/src/gdocs/application/co_edit_guard.rs` |
 | 9 | `llm::domain::mcp` | `src/libs/colmena/src/llm/domain/mcp.rs` |
 | 9 | `skills::domain` | `src/libs/colmena/src/skills/domain/mod.rs` |
+| 8 | `dag_engine::domain::lint` | `src/libs/colmena/src/dag_engine/domain/lint/mod.rs` |
 | 8 | `dag_engine::domain::sql_permissions` | `src/libs/colmena/src/dag_engine/domain/sql_permissions.rs` |
 | 8 | `dag_engine::domain::sql_ports` | `src/libs/colmena/src/dag_engine/domain/sql_ports.rs` |
-| 8 | `gsheets::domain` | `src/libs/colmena/src/gsheets/domain/mod.rs` |
 
 ## Per-file dependencies
 
@@ -275,7 +275,7 @@
 
 #### `src/libs/colmena/src/dag_engine/domain/lint/mod.rs`
 - Module: `dag_engine::domain::lint`
-- **Used by (3)**: `src/libs/colmena/src/dag_engine/infrastructure/registry.rs`, `src/libs/colmena/src/node_bindings/dag.rs`, `src/libs/colmena/src/python_bindings/mod.rs`
+- **Used by (8)**: `src/libs/colmena/src/dag_engine/infrastructure/nodes/api_explorer.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/current_time.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/debug.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/math.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/output.rs`, `src/libs/colmena/src/dag_engine/infrastructure/registry.rs`, `src/libs/colmena/src/node_bindings/dag.rs`, `src/libs/colmena/src/python_bindings/mod.rs`
 - Depends on (0): — (no intra-crate imports)
 
 #### `src/libs/colmena/src/dag_engine/domain/mod.rs`
@@ -366,7 +366,7 @@
 #### `src/libs/colmena/src/dag_engine/infrastructure/nodes/api_explorer.rs`
 - Module: `dag_engine::infrastructure::nodes::api_explorer`
 - **Used by (2)**: `src/libs/colmena/src/dag_engine/infrastructure/dag_tool_executor.rs`, `src/libs/colmena/src/dag_engine/infrastructure/registry.rs`
-- Depends on (9): `dag_engine::application::secure_value_service`, `dag_engine::domain::node`, `dag_engine::domain::observer`, `dag_engine::domain::toolkit_node`, `llm::domain`, `web::application::api_spec_use_case`, `web::domain`, `web::domain::api_spec_port`, `web::infrastructure::openapi_adapter`
+- Depends on (10): `dag_engine::application::secure_value_service`, `dag_engine::domain::lint`, `dag_engine::domain::node`, `dag_engine::domain::observer`, `dag_engine::domain::toolkit_node`, `llm::domain`, `web::application::api_spec_use_case`, `web::domain`, `web::domain::api_spec_port`, `web::infrastructure::openapi_adapter`
 
 #### `src/libs/colmena/src/dag_engine/infrastructure/nodes/critic.rs`
 - Module: `dag_engine::infrastructure::nodes::critic`
@@ -376,12 +376,12 @@
 #### `src/libs/colmena/src/dag_engine/infrastructure/nodes/current_time.rs`
 - Module: `dag_engine::infrastructure::nodes::current_time`
 - **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
-- Depends on (2): `dag_engine::domain::node`, `dag_engine::domain::observer`
+- Depends on (3): `dag_engine::domain::lint`, `dag_engine::domain::node`, `dag_engine::domain::observer`
 
 #### `src/libs/colmena/src/dag_engine/infrastructure/nodes/debug.rs`
 - Module: `dag_engine::infrastructure::nodes::debug`
 - **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
-- Depends on (1): `dag_engine::domain::node`
+- Depends on (2): `dag_engine::domain::lint`, `dag_engine::domain::node`
 
 #### `src/libs/colmena/src/dag_engine/infrastructure/nodes/document_nodes.rs`
 - Module: `dag_engine::infrastructure::nodes::document_nodes`
@@ -616,7 +616,7 @@
 #### `src/libs/colmena/src/dag_engine/infrastructure/nodes/math.rs`
 - Module: `dag_engine::infrastructure::nodes::math`
 - **Used by (1)**: `src/libs/colmena/src/dag_engine/infrastructure/nodes/for_each.rs`
-- Depends on (1): `dag_engine::domain::node`
+- Depends on (2): `dag_engine::domain::lint`, `dag_engine::domain::node`
 
 #### `src/libs/colmena/src/dag_engine/infrastructure/nodes/mod.rs`
 - Module: `dag_engine::infrastructure::nodes`
@@ -631,7 +631,7 @@
 #### `src/libs/colmena/src/dag_engine/infrastructure/nodes/output.rs`
 - Module: `dag_engine::infrastructure::nodes::output`
 - **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
-- Depends on (2): `dag_engine::domain::node`, `dag_engine::domain::observer`
+- Depends on (3): `dag_engine::domain::lint`, `dag_engine::domain::node`, `dag_engine::domain::observer`
 
 #### `src/libs/colmena/src/dag_engine/infrastructure/nodes/output_parser.rs`
 - Module: `dag_engine::infrastructure::nodes::output_parser`
