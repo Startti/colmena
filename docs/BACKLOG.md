@@ -54,14 +54,43 @@ Lo que quedó abierto, en orden de importancia:
   quedó verificado de punta a punta contra un endpoint real; los otros dos necesitan una
   aplicación anfitriona que registre el adjunto.
 
-- **El linter no mira dentro de `tool_configurations`.** Revisa el `config` de cada nodo,
-  pero no el `node_schema` ni el `fixed_config` de las tools que ese nodo declara. Los dos
-  defectos que dejaban la URL vacía en los grafos de §20 —`url` en vez de `base_url`, y un
-  `fixed_config` inerte por convivir con `node_schema`— vivían ahí, y el linter dio "no
-  findings" sobre un grafo que no funcionaba. Es el mismo trabajo que ya hace para el
-  `config`, contra el `node_type` que la tool declara; lo nuevo es la regla de
-  `node_schema` gana sobre `fixed_config` (`dag_tool_executor.rs:1976`), que hoy no la
-  comprueba nadie.
+- **El linter dentro de `tool_configurations` — 1 de 3 rebanadas hecha.** Los dos defectos
+  que dejaban la URL vacía en los grafos de §20 vivían ahí, y el linter dio "no findings"
+  sobre un grafo que no funcionaba.
+
+  **Hecha (CHANGELOG §21):** el recorrido de `tool_configurations` desde el JSON crudo y
+  la regla de precedencia `DEAD_FIXED_CONFIG` — `node_schema` gana y descarta el
+  `fixed_config` entero (`dag_tool_executor.rs:1976`). Cubre el segundo defecto.
+
+  **Falta, rebanada 2 — los campos.** Cruzar cada clave de `node_schema` / `fixed_config`
+  contra el tipo de nodo al que la tool apunta. Cubre el primer defecto (`url` donde
+  `http_request` lee `base_url`). El set válido es `config_fields ∪ input_ports`, **no**
+  `config_fields` solo: medido sobre el corpus, usar solo `config_fields` da 16 falsos
+  positivos (`task` de `subgraph`, `rows`/`user` de `python_script`). Y hay tres clases de
+  placeholder que deciden la severidad, no dos: `<any_key>`/`<any_text>` son contrato
+  abierto y hay que callar; `<extra_keys>` (hoy sólo `http_request`) significa que la clave
+  se **acepta pero se reinterpreta** —termina como query param (`http.rs:264`)— y merece
+  warning, no error. Con esa forma, cero hallazgos sobre el corpus.
+
+  **Falta, también — el linter no reporta una entrada de tool malformada; el motor sí.**
+  Corrige una afirmación previa de este mismo item: sí existe diagnóstico. Si `node_schema`
+  viene como `null`, string, número, array, o como objeto con un campo anidado inválido,
+  `Graph::validate()` rechaza el grafo al cargar con
+  `InvalidToolSchema { reason: "malformed node_schema: …" }`
+  (`graph.rs:168-178`), y esa validación corre en **toda** entrada del motor desde el
+  §18. Lo que falta es que el linter lo diga **antes de correr**, que es su razón de ser:
+  hoy calla en casi todas esas formas, y en una (objeto con campo anidado inválido)
+  reporta `DEAD_FIXED_CONFIG` con un consejo que no arregla el problema real. Afinar el
+  guard de `DEAD_FIXED_CONFIG` para distinguirlas cambiaría un punto ciego por otro; lo
+  correcto es un código propio, `MALFORMED_TOOL_ENTRY`, que reproduzca el chequeo de
+  `validate()` sin ejecutar nada.
+
+  **Falta, rebanada 3 — las tools sintéticas.** 16 entradas del corpus apuntan a
+  `data_run_python`, `attachment_run_python`, `mcp`, `sql_inspect_attachment` y
+  `sql_bulk_insert_from_attachment`. No están en `registry.rs` —viven en
+  `llm_synthetic_tools/`— así que son una **tercera categoría** que `KnownNodeTypes` no
+  modela (tiene `Registry` / `CatalogOnly` / `Unchecked`). Sin resolverlo, la rebanada 2
+  arranca con 16 líneas de `NO_CATALOG_COVERAGE` permanentes.
 
 - ~~**`NO_CATALOG_COVERAGE` es inalcanzable desde la CLI.**~~ — **HECHO 2026-09-02**,
   ver CHANGELOG §10. `KnownNodeTypes` separa los dos grados de certeza; con solo el

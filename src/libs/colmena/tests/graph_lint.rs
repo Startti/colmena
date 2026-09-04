@@ -19,6 +19,13 @@ fn lint(json: serde_json::Value) -> LintReport {
     let ctx = LintContext::with_embedded_catalog();
     lint_graph(&graph_from(json), &ctx)
 }
+/// Lints through the raw-document entry point, which is the only one that sees
+/// keys `Graph` deserialization discards — `tool_configurations` findings among
+/// them.
+fn lint_json(json: serde_json::Value) -> LintReport {
+    let ctx = LintContext::with_embedded_catalog();
+    lint_graph_json(&json, &ctx).expect("test graph must deserialize")
+}
 fn codes(report: &LintReport) -> Vec<&'static str> {
     report.diagnostics.iter().map(|d| d.code.as_str()).collect()
 }
@@ -725,4 +732,429 @@ fn a_non_object_config_is_flagged_without_panicking() {
         "got {:?}",
         report.diagnostics
     );
+}
+
+/// The defect this rule exists for, reduced to its smallest form: the executor
+/// reads `node_schema` and never looks at `fixed_config`, so the plumbing in it
+/// silently never reaches the node.
+#[test]
+fn a_fixed_config_beside_a_node_schema_is_reported_as_dead() {
+    let report = lint_json(serde_json::json!({
+        "nodes": {
+            "agent": {
+                "type": "llm_call",
+                "config": {
+                    "provider": "google",
+                    "api_key": "k",
+                    "model": "gemini-2.5-flash",
+                    "tool_configurations": {
+                        "http_upload": {
+                            "node_type": "http_request",
+                            "fixed_config": { "base_url": "https://kb.test", "method": "POST" },
+                            "node_schema": { "body": { "type": "object", "required": true } }
+                        }
+                    }
+                }
+            }
+        },
+        "edges": []
+    }));
+
+    let d = find(&report, DiagnosticCode::DeadFixedConfig)
+        .expect("a fixed_config shadowed by node_schema must be caught");
+    assert_eq!(d.severity, Severity::Error);
+    assert_eq!(
+        d.field.as_deref(),
+        Some("tool_configurations.http_upload.fixed_config")
+    );
+    assert_eq!(d.node_id.as_deref(), Some("agent"));
+    // The message must name what is lost, not merely that something is wrong:
+    // the author's next question is always "which of my settings vanished?".
+    assert!(
+        d.message.contains("\"base_url\" and \"method\""),
+        "message must list the discarded keys, got: {}",
+        d.message
+    );
+    assert!(d
+        .suggestion
+        .as_deref()
+        .is_some_and(|s| s.contains("node_schema")));
+}
+
+/// Either one alone is the supported way to configure a tool. Reporting them
+/// would make the rule fire on almost every graph in the repo.
+#[test]
+fn either_block_on_its_own_is_silent() {
+    for tool in [
+        serde_json::json!({
+            "node_type": "http_request",
+            "fixed_config": { "base_url": "https://kb.test" }
+        }),
+        serde_json::json!({
+            "node_type": "http_request",
+            "node_schema": { "body": { "type": "object" } }
+        }),
+    ] {
+        let report = lint_json(serde_json::json!({
+            "nodes": {
+                "agent": {
+                    "type": "llm_call",
+                    "config": {
+                        "provider": "google", "api_key": "k", "model": "gemini-2.5-flash",
+                        "tool_configurations": { "t": tool }
+                    }
+                }
+            },
+            "edges": []
+        }));
+        assert!(
+            find(&report, DiagnosticCode::DeadFixedConfig).is_none(),
+            "one block alone must not be reported"
+        );
+    }
+}
+
+/// Discarding nothing costs nothing. An empty block is noise, not a bug.
+#[test]
+fn an_empty_fixed_config_is_not_worth_reporting() {
+    let report = lint_json(serde_json::json!({
+        "nodes": {
+            "agent": {
+                "type": "llm_call",
+                "config": {
+                    "provider": "google", "api_key": "k", "model": "gemini-2.5-flash",
+                    "tool_configurations": {
+                        "t": {
+                            "node_type": "http_request",
+                            "fixed_config": {},
+                            "node_schema": { "body": { "type": "object" } }
+                        }
+                    }
+                }
+            }
+        },
+        "edges": []
+    }));
+    assert!(find(&report, DiagnosticCode::DeadFixedConfig).is_none());
+}
+
+/// `lint_graph` takes a deserialized `Graph`, whose `config` is an opaque
+/// `Value` — the block survives there, but the raw-document walkers do not run.
+/// Pinning this keeps the two entry points from silently diverging in what they
+/// promise, the way `validate_graph` once did.
+#[test]
+fn the_rule_belongs_to_the_raw_document_path_only() {
+    let document = serde_json::json!({
+        "nodes": {
+            "agent": {
+                "type": "llm_call",
+                "config": {
+                    "provider": "google", "api_key": "k", "model": "gemini-2.5-flash",
+                    "tool_configurations": {
+                        "t": {
+                            "node_type": "http_request",
+                            "fixed_config": { "base_url": "https://kb.test" },
+                            "node_schema": { "body": { "type": "object" } }
+                        }
+                    }
+                }
+            }
+        },
+        "edges": []
+    });
+
+    assert!(find(&lint(document.clone()), DiagnosticCode::DeadFixedConfig).is_none());
+    assert!(find(&lint_json(document), DiagnosticCode::DeadFixedConfig).is_some());
+}
+
+/// Several tools in one node, and several nodes in one graph, must each be
+/// reported on their own rather than collapsing into a single finding.
+///
+/// The order asserted here is the one `LintReport::sort` imposes — by node id,
+/// then by `field`, which carries the tool name. The walker itself emits in
+/// document order and deliberately does not sort; a mutation that reverses any
+/// ordering inside it leaves this test green, which is the correct outcome and
+/// the reason no sorting lives there.
+#[test]
+fn every_offending_tool_is_reported_separately_under_the_report_ordering() {
+    let document = serde_json::json!({
+        "nodes": {
+            "second": {
+                "type": "llm_call",
+                "config": {
+                    "provider": "google", "api_key": "k", "model": "gemini-2.5-flash",
+                    "tool_configurations": {
+                        "zeta": {
+                            "node_type": "http_request",
+                            "fixed_config": { "base_url": "https://b.test" },
+                            "node_schema": { "body": { "type": "object" } }
+                        }
+                    }
+                }
+            },
+            "first": {
+                "type": "llm_call",
+                "config": {
+                    "provider": "google", "api_key": "k", "model": "gemini-2.5-flash",
+                    "tool_configurations": {
+                        "beta": {
+                            "node_type": "http_request",
+                            "fixed_config": { "base_url": "https://a.test" },
+                            "node_schema": { "body": { "type": "object" } }
+                        },
+                        "alpha": {
+                            "node_type": "http_request",
+                            "fixed_config": { "method": "POST" },
+                            "node_schema": { "body": { "type": "object" } }
+                        }
+                    }
+                }
+            }
+        },
+        "edges": []
+    });
+
+    let located: Vec<(String, String)> = lint_json(document)
+        .diagnostics
+        .iter()
+        .filter(|d| d.code == DiagnosticCode::DeadFixedConfig)
+        .map(|d| {
+            (
+                d.node_id.clone().unwrap_or_default(),
+                d.field.clone().unwrap_or_default(),
+            )
+        })
+        .collect();
+
+    assert_eq!(
+        located,
+        vec![
+            (
+                "first".to_string(),
+                "tool_configurations.alpha.fixed_config".to_string()
+            ),
+            (
+                "first".to_string(),
+                "tool_configurations.beta.fixed_config".to_string()
+            ),
+            (
+                "second".to_string(),
+                "tool_configurations.zeta.fixed_config".to_string()
+            ),
+        ]
+    );
+}
+
+/// A `tool_configurations` whose entries are not objects — or which is not one
+/// itself — is skipped rather than reported. Authors do write these by hand.
+///
+/// This does **not** prove panic-safety, and an earlier name for it claimed it
+/// did. `Value::get` and `Value::as_object` are total: on a string, an array or
+/// `null` they return `None` rather than panicking, so no arrangement of these
+/// fixtures can distinguish the guards from their absence. What it does pin is
+/// the behavior — malformed input yields no finding instead of a bogus one.
+#[test]
+fn malformed_tool_configurations_yield_no_finding() {
+    for tools in [
+        serde_json::json!("not-an-object"),
+        serde_json::json!([{ "node_type": "http_request" }]),
+        serde_json::json!({ "t": "not-an-object" }),
+        serde_json::json!({ "t": null }),
+    ] {
+        let report = lint_json(serde_json::json!({
+            "nodes": {
+                "agent": {
+                    "type": "llm_call",
+                    "config": {
+                        "provider": "google", "api_key": "k", "model": "gemini-2.5-flash",
+                        "tool_configurations": tools
+                    }
+                }
+            },
+            "edges": []
+        }));
+        assert!(find(&report, DiagnosticCode::DeadFixedConfig).is_none());
+    }
+}
+
+/// The message is read by a human deciding whether to act, so it has to be
+/// grammatical at both lengths — one discarded key and several.
+#[test]
+fn the_message_agrees_with_the_number_of_discarded_keys() {
+    let with = |fixed: serde_json::Value| {
+        let report = lint_json(serde_json::json!({
+            "nodes": {
+                "agent": {
+                    "type": "llm_call",
+                    "config": {
+                        "provider": "google", "api_key": "k", "model": "gemini-2.5-flash",
+                        "tool_configurations": {
+                            "t": {
+                                "node_type": "http_request",
+                                "fixed_config": fixed,
+                                "node_schema": { "body": { "type": "object" } }
+                            }
+                        }
+                    }
+                }
+            },
+            "edges": []
+        }));
+        find(&report, DiagnosticCode::DeadFixedConfig)
+            .expect("must be reported")
+            .message
+            .clone()
+    };
+
+    let one = with(serde_json::json!({ "base_url": "https://kb.test" }));
+    assert!(
+        one.contains("\"base_url\" never reaches the node"),
+        "singular form wrong: {one}"
+    );
+
+    let many = with(serde_json::json!({ "base_url": "https://kb.test", "method": "POST" }));
+    assert!(
+        many.contains("\"base_url\" and \"method\" never reach the node"),
+        "plural form wrong: {many}"
+    );
+}
+
+/// The case two lenses caught and the author's own mutations could not: a
+/// mutation only attacks code that exists, and this test did not.
+///
+/// `NodeSchema` is a `HashMap`, so `"node_schema": {}` deserializes to
+/// `Some(empty)`. The executor branches on `Option::is_some` and never looks
+/// inside, so PATH 0 is taken and the `fixed_config` is discarded exactly as if
+/// the schema had fields. A rule that required a non-empty schema was silent on
+/// the very defect it exists to catch.
+#[test]
+fn an_empty_node_schema_still_shadows_the_fixed_config() {
+    let report = lint_json(serde_json::json!({
+        "nodes": {
+            "agent": {
+                "type": "llm_call",
+                "config": {
+                    "provider": "google", "api_key": "k", "model": "gemini-2.5-flash",
+                    "tool_configurations": {
+                        "t": {
+                            "node_type": "http_request",
+                            "fixed_config": { "base_url": "https://kb.test" },
+                            "node_schema": {}
+                        }
+                    }
+                }
+            }
+        },
+        "edges": []
+    }));
+    assert!(
+        find(&report, DiagnosticCode::DeadFixedConfig).is_some(),
+        "an empty node_schema still wins PATH 0 and must be reported"
+    );
+}
+
+/// A `null` schema is not a schema, so the precedence rule stays silent.
+///
+/// The name matters: this pins the LINTER's silence, not a live `fixed_config`.
+/// `Graph::validate` deserializes the value into `NodeSchema` — a bare `HashMap`,
+/// not an `Option` — so an explicit `null` is rejected at load and the graph
+/// never runs at all. Only an ABSENT key reaches the executor with the
+/// `fixed_config` intact. Silence here is free either way, which is why the rule
+/// does not need to distinguish them.
+#[test]
+fn a_null_node_schema_does_not_trigger_the_precedence_rule() {
+    let report = lint_json(serde_json::json!({
+        "nodes": {
+            "agent": {
+                "type": "llm_call",
+                "config": {
+                    "provider": "google", "api_key": "k", "model": "gemini-2.5-flash",
+                    "tool_configurations": {
+                        "t": {
+                            "node_type": "http_request",
+                            "fixed_config": { "base_url": "https://kb.test" },
+                            "node_schema": null
+                        }
+                    }
+                }
+            }
+        },
+        "edges": []
+    }));
+    assert!(find(&report, DiagnosticCode::DeadFixedConfig).is_none());
+}
+
+/// The row of the guide's table that had documentation but no test until a
+/// fourth review round asked which shapes were pinned and which were merely
+/// asserted.
+///
+/// A scalar, an array or a boolean is not a schema, so the precedence rule stays
+/// silent — and `Graph::validate` rejects the graph at load anyway, so the
+/// silence costs nothing. Note this is a well-formed tool ENTRY whose
+/// `node_schema` VALUE is a scalar, which is a different fixture from
+/// `malformed_tool_configurations_yield_no_finding`, where the entry itself is
+/// malformed.
+#[test]
+fn a_scalar_node_schema_does_not_trigger_the_precedence_rule() {
+    for schema in [
+        serde_json::json!("not-a-schema"),
+        serde_json::json!(7),
+        serde_json::json!([]),
+        serde_json::json!(true),
+    ] {
+        let report = lint_json(serde_json::json!({
+            "nodes": {
+                "agent": {
+                    "type": "llm_call",
+                    "config": {
+                        "provider": "google", "api_key": "k", "model": "gemini-2.5-flash",
+                        "tool_configurations": {
+                            "t": {
+                                "node_type": "http_request",
+                                "fixed_config": { "base_url": "https://kb.test" },
+                                "node_schema": schema
+                            }
+                        }
+                    }
+                }
+            },
+            "edges": []
+        }));
+        assert!(
+            find(&report, DiagnosticCode::DeadFixedConfig).is_none(),
+            "a non-object node_schema is not a schema and must not be reported"
+        );
+    }
+}
+
+/// The remaining row: an object-shaped `node_schema` whose nested field is
+/// invalid. The rule DOES report it, because `is_object` looks at the top level
+/// only — and that is deliberate. `Graph::validate` rejects such a graph at load,
+/// so the finding lands on something that never runs; narrowing the guard to
+/// inspect nested validity would trade this harmless imprecision for a real
+/// blind spot, silencing the precedence rule on a malformed entry. The honest
+/// fix is a separate `MALFORMED_TOOL_ENTRY` code, recorded in BACKLOG.md.
+///
+/// Pinned so the behavior is deliberate rather than accidental.
+#[test]
+fn an_object_node_schema_with_an_invalid_nested_field_is_still_reported() {
+    let report = lint_json(serde_json::json!({
+        "nodes": {
+            "agent": {
+                "type": "llm_call",
+                "config": {
+                    "provider": "google", "api_key": "k", "model": "gemini-2.5-flash",
+                    "tool_configurations": {
+                        "t": {
+                            "node_type": "http_request",
+                            "fixed_config": { "base_url": "https://kb.test" },
+                            "node_schema": { "body": "not-a-field-definition" }
+                        }
+                    }
+                }
+            }
+        },
+        "edges": []
+    }));
+    assert!(find(&report, DiagnosticCode::DeadFixedConfig).is_some());
 }
