@@ -13,6 +13,8 @@ pub mod catalog;
 pub mod diagnostic;
 pub mod linter;
 
-pub use catalog::{FieldSpec, NodeCatalog, NodeCatalogEntry, Requiredness, ANY_FIELD_KEY};
+pub use catalog::{
+    FieldSpec, NodeCatalog, NodeCatalogEntry, Requiredness, UndeclaredKeyPolicy, ANY_FIELD_KEY,
+};
 pub use diagnostic::{Diagnostic, DiagnosticCode, LintReport, Severity};
 pub use linter::{lint_graph, lint_graph_json, KnownNodeTypes, LintContext};

@@ -1158,3 +1158,213 @@ fn an_object_node_schema_with_an_invalid_nested_field_is_still_reported() {
     }));
     assert!(find(&report, DiagnosticCode::DeadFixedConfig).is_some());
 }
+
+/// Builds a one-node graph whose single tool targets `node_type` with `block`
+/// set to `fields`, which is the shape every test below needs.
+fn tool_graph(node_type: &str, block: &str, fields: serde_json::Value) -> serde_json::Value {
+    let mut entry = serde_json::json!({ "node_type": node_type });
+    entry[block] = fields;
+    serde_json::json!({
+        "nodes": {
+            "agent": {
+                "type": "llm_call",
+                "config": {
+                    "provider": "google", "api_key": "k", "model": "gemini-2.5-flash",
+                    "tool_configurations": { "t": entry }
+                }
+            }
+        },
+        "edges": []
+    })
+}
+
+/// The defect this rule exists for, and the one a clean lint missed in section
+/// 20: `http_request` builds its URL from `base_url` + `endpoint` and has no
+/// `url` field at all.
+///
+/// It is a WARNING rather than an error because the engine does not ignore the
+/// key — it turns any non-reserved input into a query parameter — so the
+/// message has to say what actually happens instead of claiming the key is
+/// inert.
+#[test]
+fn a_key_the_target_node_repurposes_is_reported_as_a_warning() {
+    let report = lint_json(tool_graph(
+        "http_request",
+        "node_schema",
+        serde_json::json!({ "url": { "fixed": "https://kb.test" } }),
+    ));
+
+    let d = find(&report, DiagnosticCode::RepurposedToolField)
+        .expect("a repurposed key must be reported");
+    assert_eq!(d.severity, Severity::Warning);
+    assert_eq!(
+        d.field.as_deref(),
+        Some("tool_configurations.t.node_schema.url")
+    );
+    assert!(
+        d.message.contains("query parameter"),
+        "the message must say what the key actually becomes, got: {}",
+        d.message
+    );
+}
+
+/// The ordinary invented field, one level down from the node-level check.
+#[test]
+fn a_key_the_target_node_ignores_is_reported_as_an_error() {
+    let report = lint_json(tool_graph(
+        "sql_query",
+        "node_schema",
+        serde_json::json!({ "foo": { "type": "string" } }),
+    ));
+    let d = find(&report, DiagnosticCode::UnknownField).expect("an invented key must be caught");
+    assert_eq!(d.severity, Severity::Error);
+    assert_eq!(
+        d.field.as_deref(),
+        Some("tool_configurations.t.node_schema.foo")
+    );
+}
+
+/// A near miss should name the field the author meant, the way the node-level
+/// check already does.
+#[test]
+fn a_misspelt_tool_field_suggests_the_real_one() {
+    let report = lint_json(tool_graph(
+        "sql_query",
+        "node_schema",
+        serde_json::json!({ "conection_url": { "fixed": "x" } }),
+    ));
+    let d = find(&report, DiagnosticCode::UnknownField).expect("a typo must be caught");
+    assert_eq!(
+        d.suggestion.as_deref(),
+        Some("did you mean \"connection_url\"?")
+    );
+}
+
+/// The measurement that shaped this rule: a node dispatched as a tool receives
+/// its configured keys as INPUTS, so judging them against `config_fields` alone
+/// reports working graphs as broken. Across this repo's corpus that mistake
+/// produces 16 findings on graphs that work.
+///
+/// The fixtures are chosen to ISOLATE each half of the union, which an earlier
+/// version of this test failed to do — it used `subgraph.task` and
+/// `http_request.query_params`, and both passed for the wrong reason:
+/// `subgraph` accepts any key so the rule never reached the lookup, and
+/// `query_params` is also a `config_fields` entry. Mutations that deleted the
+/// input-port and reserved-key lookups left it green.
+///
+/// `add.a` is an input port of a CLOSED-contract node and appears in no
+/// `config_fields`. `http_request.query_parameters` — the backward-compatible
+/// spelling — is the one key in the whole catalog that exists ONLY in
+/// `reserved_input_keys`.
+#[test]
+fn an_input_port_or_reserved_key_is_not_an_invented_field() {
+    for (node_type, key) in [("add", "a"), ("http_request", "query_parameters")] {
+        let report = lint_json(tool_graph(
+            node_type,
+            "node_schema",
+            serde_json::json!({ key: { "type": "string" } }),
+        ));
+        assert!(
+            find(&report, DiagnosticCode::UnknownField).is_none()
+                && find(&report, DiagnosticCode::RepurposedToolField).is_none(),
+            "{node_type}.{key} is a real key and must not be reported"
+        );
+    }
+}
+
+/// A node type whose contract is "every key is data" cannot have an invented
+/// field. Without this the five open-config node types alone would dominate the
+/// report, the same way they did at the node level.
+#[test]
+fn a_node_type_that_accepts_any_key_is_never_reported() {
+    let report = lint_json(tool_graph(
+        "python_script",
+        "node_schema",
+        serde_json::json!({ "anything_at_all": { "type": "string" } }),
+    ));
+    assert!(find(&report, DiagnosticCode::UnknownField).is_none());
+}
+
+/// Engine-injected and annotation keys are exempt inside a tool entry for the
+/// same reason they are exempt on a node.
+#[test]
+fn engine_and_annotation_keys_are_exempt_inside_a_tool_entry() {
+    for key in ["__colmena_session_id", "_nota", "$comment", "comment"] {
+        let report = lint_json(tool_graph(
+            "sql_query",
+            "node_schema",
+            serde_json::json!({ key: { "fixed": "x" } }),
+        ));
+        assert!(
+            find(&report, DiagnosticCode::UnknownField).is_none(),
+            "{key} must be exempt"
+        );
+    }
+}
+
+/// All three blocks carry node field names, so all three are checked.
+/// `node_config` matters because it is the only one a toolkit entry uses —
+/// every `expose_sub_tools` entry in this repo's corpus configures its node
+/// through it and never through `fixed_config`.
+#[test]
+fn every_block_that_names_node_fields_is_checked() {
+    for block in ["node_schema", "fixed_config", "node_config"] {
+        let report = lint_json(tool_graph(
+            "sql_query",
+            block,
+            serde_json::json!({ "invented_here": { "type": "string" } }),
+        ));
+        let d = find(&report, DiagnosticCode::UnknownField)
+            .unwrap_or_else(|| panic!("block {block} must be checked"));
+        assert_eq!(
+            d.field.as_deref(),
+            Some(format!("tool_configurations.t.{block}.invented_here").as_str())
+        );
+    }
+}
+
+/// A tool targeting a node type the catalog does not document is reported once
+/// for the ENTRY, not once per key — otherwise the eleven `data_run_python`
+/// tools in this repo's corpus would bury everything else.
+#[test]
+fn an_uncatalogued_target_is_reported_once_per_entry() {
+    let report = lint_json(tool_graph(
+        "data_run_python",
+        "fixed_config",
+        serde_json::json!({ "sql": "select 1", "enable_gsheets": true, "code": "x" }),
+    ));
+
+    let coverage: Vec<_> = report
+        .diagnostics
+        .iter()
+        .filter(|d| {
+            d.code == DiagnosticCode::NoCatalogCoverage
+                && d.field.as_deref() == Some("tool_configurations.t")
+        })
+        .collect();
+    assert_eq!(coverage.len(), 1, "one info for the entry, not one per key");
+    assert_eq!(coverage[0].severity, Severity::Info);
+    assert!(find(&report, DiagnosticCode::UnknownField).is_none());
+}
+
+/// Without a `node_type` there is nothing to check the keys against. Guessing
+/// would be worse than silence; the engine rejects the entry at load anyway.
+#[test]
+fn a_tool_entry_without_a_node_type_is_left_alone() {
+    let report = lint_json(serde_json::json!({
+        "nodes": {
+            "agent": {
+                "type": "llm_call",
+                "config": {
+                    "provider": "google", "api_key": "k", "model": "gemini-2.5-flash",
+                    "tool_configurations": {
+                        "t": { "node_schema": { "whatever": { "type": "string" } } }
+                    }
+                }
+            }
+        },
+        "edges": []
+    }));
+    assert!(find(&report, DiagnosticCode::UnknownField).is_none());
+    assert!(find(&report, DiagnosticCode::NoCatalogCoverage).is_none());
+}

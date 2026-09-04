@@ -1014,3 +1014,119 @@ que faltan —campos cruzados contra el tipo de nodo destino, y tools sintética
 `KnownNodeTypes`— siguen en `BACKLOG.md`.
 
 **Estado.** done.
+
+---
+
+## 22. El linter revisa los campos de una tool contra el nodo al que apunta
+
+**Qué.** Segunda de las tres rebanadas abiertas por la §20. La §21 revisó la
+*forma* de una entrada de `tool_configurations`; ésta revisa su *contenido*: cada
+clave de `node_schema`, `fixed_config` y `node_config` se cruza contra el
+`node_type` destino. Cubre el defecto que quedaba: `url` declarado en
+`http_request`, cuyos campos son `base_url` y `endpoint`.
+
+### El set válido no es `config_fields`
+
+Un nodo despachado como tool recibe sus claves configuradas como **inputs**. El
+set correcto es `config_fields` + `input_ports` + `reserved_input_keys`. Medido
+sobre el corpus antes de escribir la regla: contra `config_fields` solo, 16 grafos
+que funcionan se reportan como rotos (`task` en `subgraph`, `rows` y `user` en
+`python_script`).
+
+### Tres severidades, decididas por el catálogo
+
+La pregunta no es "¿está declarada?" sino "¿qué hace el nodo con una clave que no
+declara?", y eso ya lo dice el catálogo con sus claves placeholder:
+
+| El tipo de nodo | Placeholder | Diagnóstico | Nodos |
+|---|---|---|---|
+| Acepta cualquier clave | `<any_key>`, `<any_text>` | nada | 5 |
+| La reinterpreta | `<extra_keys>` | `REPURPOSED_TOOL_FIELD` (warning) | 1 |
+| La ignora | ninguno | `UNKNOWN_FIELD` (error) | 31 |
+
+La fila del medio es la del bug real. `http_request` convierte toda clave no
+reservada en query param (`http.rs:264`), así que `url` no se ignoraba: salía como
+`?url=…` contra una URL base vacía. Llamarlo "campo inventado" habría sido mentira,
+así que el mensaje dice qué pasa de verdad.
+
+Que la regla lea la severidad del catálogo y no de una lista en el código tiene una
+consecuencia útil: un tipo de nodo nuevo obtiene el veredicto correcto
+documentándose, sin tocar el linter. Un placeholder que el linter no conozca cae a
+"acepta cualquier cosa" — el silencio es el veredicto seguro cuando el catálogo
+describe algo que esta regla no aprendió.
+
+### Dos decisiones de diseño
+
+**`input_ports` vive fuera de `NodeCatalogEntry`.** El cruce de la fase 2 compara
+la entrada entera contra el `config_schema()` de cada nodo, y el alcance acordado de
+esa declaración es el *config*. Meterlos adentro obligaría a los 37 nodos a declarar
+un segundo eje sin ganancia a nivel de nodo, así que el catálogo los guarda en un
+mapa lateral y deserializa el documento dos veces detrás del `OnceLock`.
+
+**Se revisa `node_config`.** Es el único bloque que usan las entradas toolkit: las
+15 del corpus configuran su nodo por ahí y nunca por `fixed_config`.
+
+### Ruido medido, y las nueve filas verificadas contra el binario
+
+`error` + `warning` queda en **80**, idéntico al baseline. Los 14 `info` nuevos son
+todos de tools sintéticas (`data_run_python` ×11 y tres más) y desaparecen con la
+rebanada 3. Las dos entradas `mcp` no emiten nada porque no tienen bloques de campos.
+
+Siguiendo la lección de la §21, la tabla de casos se **midió antes de escribir el
+guard**, no después: se generó un grafo por cada fila y se corrió el binario. Las
+nueve coinciden.
+
+### Una mutación volvió a encontrar un test que pasaba por la razón equivocada
+
+De cuatro mutaciones, dos no mataron nada al principio. El test que decía cubrir el
+set unido usaba `subgraph.task` y `http_request.query_params`, y ninguno de los dos
+aislaba lo que afirmaba: `subgraph` acepta cualquier clave, así que la regla nunca
+llegaba a consultar los input ports; y `query_params` también está en
+`config_fields`, así que la búsqueda en `reserved_input_keys` era irrelevante.
+Borrar cualquiera de las dos mitades del set dejaba el test verde.
+
+Los fixtures se cambiaron por los que sí aíslan: `add.a` es un input port de un nodo
+de contrato **cerrado**, y `http_request.query_parameters` es la única clave del
+catálogo que existe **sólo** en `reserved_input_keys`. Con ellos las cuatro
+mutaciones muerden.
+
+### La revisión encontró un fallback con costo invisible
+
+`undeclared_key_policy` responde `AcceptsAnything` ante un placeholder que no
+conoce — el silencio es el veredicto seguro, porque tratar al nodo como contrato
+cerrado reportaría como inventada cada clave configurada. Lo que la revisión
+señaló es que ese acierto tiene un costo que nadie vería: **una** clave placeholder
+nueva en `config_fields` o `input_ports` apaga la regla entera para ese tipo de
+nodo, en silencio.
+
+No es drift hipotético: el catálogo ya usa otros cinco nombres (`<branch_name>`,
+`<child_output>`, `<raw>`, `<raw_config>`, `<schema_fields>`), hoy sólo en
+`output_ports`, que esta regla no lee. Cualquiera de ellos migrando lo alcanzaría.
+
+El arreglo no fue cambiar el fallback —eso daría falsos positivos— sino convertir
+la pérdida silenciosa en un test que falla: un guard recorre el catálogo y nombra
+todo placeholder que la regla no maneje, explicando la consecuencia.
+
+Una segunda pasada de revisión señaló que ese guard, tal como estaba, probaba
+menos de lo que decía. **Pasaba gratis**: el catálogo shippeado está limpio, así
+que nunca ejercitaba su propia capacidad de detectar; y su lista de placeholders
+conocidos estaba **duplicada a mano**, de modo que borrar el brazo `<extra_keys>`
+de la producción lo dejaba igual de verde — detectaba drift del documento, no del
+código. Ambas cosas se arreglaron:
+
+- El escaneo se extrajo a un helper parametrizado por catálogo, y un test lo corre
+  contra un catálogo sintético con un placeholder inventado, comprobando que lo
+  nombra. La verificación dejó de ser una edición manual del documento real que
+  alguien tenía que acordarse de deshacer.
+- `placeholder_policy()` pasó a ser la **fuente única de verdad**: la producción y
+  el guard leen la misma función. Verificado por mutación — borrar el brazo
+  `<extra_keys>` ahora hace fallar el guard con
+  `does not know them: ["http_request.<extra_keys>"]`.
+
+Un tercer test fija el fallback en sí, para que sea una decisión y no un accidente.
+
+**Alcance.** Aditivo. Un `DiagnosticCode` nuevo, un mapa lateral en el catálogo, y
+tres métodos públicos. Ningún grafo existente cambia de resultado en severidades
+bloqueantes.
+
+**Estado.** done.

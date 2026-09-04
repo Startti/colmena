@@ -53,6 +53,9 @@ pub enum DiagnosticCode {
     NoCatalogCoverage,
     /// A tool declares `fixed_config` alongside `node_schema`, which wins.
     DeadFixedConfig,
+    /// A tool sets a key the target node type does not declare, on a node type
+    /// that repurposes unknown keys instead of ignoring them.
+    RepurposedToolField,
 }
 
 impl DiagnosticCode {
@@ -68,6 +71,7 @@ impl DiagnosticCode {
             DiagnosticCode::EdgeUnknownNode => "EDGE_UNKNOWN_NODE",
             DiagnosticCode::NoCatalogCoverage => "NO_CATALOG_COVERAGE",
             DiagnosticCode::DeadFixedConfig => "DEAD_FIXED_CONFIG",
+            DiagnosticCode::RepurposedToolField => "REPURPOSED_TOOL_FIELD",
         }
     }
 }

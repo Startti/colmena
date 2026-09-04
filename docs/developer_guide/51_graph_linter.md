@@ -57,6 +57,7 @@ camino de adopción para quien lo quiera en CI.
 | `FIELD_TYPE_MISMATCH` | warning | El tipo JSON no coincide con el documentado |
 | `EDGE_UNKNOWN_NODE` | error | Un edge apunta a un nodo que el grafo no define |
 | `DEAD_FIXED_CONFIG` | error | Una tool declara `fixed_config` junto a `node_schema`; el executor lee el segundo y **descarta el primero entero** |
+| `REPURPOSED_TOOL_FIELD` | warning | Una tool fija una clave que el nodo destino no declara, en un tipo de nodo que **reinterpreta** las claves desconocidas en vez de ignorarlas |
 | `NO_CATALOG_COVERAGE` | info | El tipo de nodo no tiene entrada en el catálogo: **no se revisó** |
 
 Los `code` son estables. Cualquier consumidor (la salida JSON, una UI sobre los
@@ -132,6 +133,71 @@ cambiaría un punto ciego por otro — una entrada malformada dejaría de dispar
 regla de precedencia — así que la respuesta correcta es un diagnóstico propio para
 la entrada malformada, no un guard más astuto. Anotado en
 [`BACKLOG.md`](../BACKLOG.md).
+
+## Los campos de una tool
+
+`DEAD_FIXED_CONFIG` revisa la *forma* de una entrada de tool. Esta regla revisa su
+*contenido*: cada clave de `node_schema`, `fixed_config` y `node_config` se cruza
+contra el `node_type` al que la tool apunta. Es el mismo chequeo que ya hace sobre
+el `config` de un nodo, un nivel más abajo — y es el que faltaba cuando tres grafos
+de este repo declararon `url` en `http_request`, cuyos campos son `base_url` y
+`endpoint`.
+
+**El set válido es `config_fields` + `input_ports` + `reserved_input_keys`.** Un
+nodo despachado como tool recibe sus claves configuradas como **inputs**, no como
+config. Medido sobre el corpus: revisar sólo contra `config_fields` reporta 16
+grafos que funcionan (`task` en `subgraph`, `rows` y `user` en `python_script`).
+
+**La severidad la decide lo que el nodo hace con una clave que no declara**, y eso
+lo dice el propio catálogo con sus claves placeholder:
+
+| El tipo de nodo | Placeholder | Diagnóstico | Cuántos nodos |
+|---|---|---|---|
+| Acepta cualquier clave como dato | `<any_key>`, `<any_text>` | nada | 5 |
+| La **reinterpreta** | `<extra_keys>` | `REPURPOSED_TOOL_FIELD` (warning) | 1 |
+| La ignora | ninguno | `UNKNOWN_FIELD` (error) | 31 |
+
+Un placeholder que la regla **no** conozca cae a "acepta cualquier cosa": el
+silencio es el veredicto seguro cuando el catálogo describe algo que el linter no
+aprendió, porque la alternativa —tratar al nodo como contrato cerrado— reporta como
+inventada cada clave que se le configure. Ese fallback tiene un costo invisible:
+**una** clave placeholder nueva apagaría la regla entera para ese tipo de nodo sin
+que nadie se entere. Por eso hay un test que recorre el catálogo y falla si aparece
+un placeholder que la regla no maneje, nombrándolo. No es drift hipotético — el
+catálogo ya usa otros cinco nombres (`<branch_name>`, `<child_output>`, `<raw>`,
+`<raw_config>`, `<schema_fields>`), hoy confinados a `output_ports`, que esta regla
+no lee.
+
+La fila del medio es la que importa y la que costó entender. `http_request`
+convierte **toda** clave no reservada en un query param
+([`http.rs`](../../src/libs/colmena/src/dag_engine/infrastructure/nodes/http.rs)),
+así que `url` no se ignoraba en silencio: salía como `?url=https://…` contra una
+URL base vacía. El mensaje lo dice tal cual, porque "campo inventado" habría sido
+mentira:
+
+```
+warning [REPURPOSED_TOOL_FIELD] node "agent".tool_configurations.t.node_schema.url:
+  "url" is not a field of "http_request"; that node type does not ignore an unknown
+  key, it repurposes it — the value will be sent as a query parameter instead of
+  configuring the node
+```
+
+Un `node_type` sin entrada en el catálogo produce **un** `NO_CATALOG_COVERAGE` por
+entrada de tool, no uno por clave: los once `data_run_python` del corpus enterrarían
+todo lo demás. Una entrada sin `node_type` no se toca — adivinar contra qué nodo
+revisar sería peor que callar, y el motor la rechaza al cargar igual.
+
+### Dos decisiones que no son obvias
+
+**`input_ports` vive fuera de `NodeCatalogEntry`.** El cruce de la fase 2 compara
+la entrada entera contra el `config_schema()` de cada nodo, y el alcance acordado
+de esa declaración es el *config* del nodo. Meter los input ports adentro obligaría
+a los 37 a declarar un segundo eje sin ganancia a nivel de nodo, así que el catálogo
+los guarda en un mapa lateral.
+
+**Se revisa también `node_config`.** Es el bloque que usan las entradas toolkit
+(`expose_sub_tools`): las 15 del corpus configuran su nodo por ahí y nunca por
+`fixed_config`.
 
 ## Las decisiones que evitan el ruido
 

@@ -4,7 +4,7 @@
 //! [`LintContext`], which keeps this layer free of infrastructure and makes
 //! every check trivially testable.
 
-use super::catalog::{is_placeholder_key, NodeCatalog, NodeCatalogEntry};
+use super::catalog::{is_placeholder_key, NodeCatalog, NodeCatalogEntry, UndeclaredKeyPolicy};
 use super::diagnostic::{Diagnostic, DiagnosticCode, LintReport, Severity};
 use crate::dag_engine::domain::graph::{Graph, NodeConfig};
 use serde_json::{Map, Value};
@@ -116,6 +116,7 @@ pub fn lint_graph_json(
     let mut report = lint_graph(&graph, ctx);
     lint_raw_node_properties(document, ctx, &mut report);
     lint_raw_tool_configurations(document, &mut report);
+    lint_raw_tool_fields(document, ctx, &mut report);
     report.sort();
     Ok(report)
 }
@@ -231,6 +232,137 @@ fn lint_raw_tool_configurations(document: &Value, report: &mut LintReport) {
                 fixed_keys[0]
             )),
         });
+    }
+}
+
+/// The blocks of a tool entry whose keys name fields of the target node.
+///
+/// `node_schema` and `fixed_config` are the two ways to configure a tool;
+/// `node_config` is the toolkit equivalent, used by every `expose_sub_tools`
+/// entry in this repo's corpus and by no other shape. All three carry node
+/// field names, so all three are checked the same way.
+const TOOL_FIELD_BLOCKS: [&str; 3] = ["node_schema", "fixed_config", "node_config"];
+
+/// Reports a tool field the target node type does not read.
+///
+/// This is the node-level `UNKNOWN_FIELD` check, one level down. A tool entry
+/// names a `node_type` and then configures it, and until now nothing checked
+/// those keys against that type — which is how three graphs in this repo came
+/// to declare `url` on `http_request`, whose fields are `base_url` and
+/// `endpoint`.
+///
+/// The key set is `config_fields` + `input_ports` + `reserved_input_keys`, not
+/// `config_fields` alone: a node dispatched as a tool receives its configured
+/// keys as *inputs*. Measured on this repo's corpus, checking `config_fields`
+/// alone reports 16 working graphs as broken.
+///
+/// Severity follows what the node type actually does with an undeclared key,
+/// which the catalog states through its placeholder keys:
+///
+/// - accepts anything (`<any_key>`, `<any_text>`) — silent, the key is the
+///   intended way to use it;
+/// - repurposes it (`<extra_keys>`, today only `http_request`, which turns any
+///   non-reserved input into a query parameter) — a warning, because the engine
+///   will not complain and the graph will quietly do something else;
+/// - ignores it — an error, the ordinary invented field.
+fn lint_raw_tool_fields(document: &Value, ctx: &LintContext<'_>, report: &mut LintReport) {
+    for (node_id, tool_name, entry) in tool_configuration_entries(document) {
+        let Some(node_type) = entry.get("node_type").and_then(Value::as_str) else {
+            // No `node_type` is a malformed entry the engine rejects at load;
+            // guessing which node's fields to check against would be worse
+            // than saying nothing.
+            continue;
+        };
+
+        if ctx.catalog.entry(node_type).is_none() {
+            if TOOL_FIELD_BLOCKS
+                .iter()
+                .any(|b| entry.get(b).and_then(Value::as_object).is_some())
+            {
+                report.diagnostics.push(Diagnostic {
+                    severity: Severity::Info,
+                    code: DiagnosticCode::NoCatalogCoverage,
+                    node_id: Some(node_id.clone()),
+                    field: Some(format!("tool_configurations.{tool_name}")),
+                    message: format!(
+                        "tool \"{tool_name}\" targets \"{node_type}\", which has no entry in \
+                         the node catalog, so its configuration was not checked"
+                    ),
+                    suggestion: Some(
+                        "add an entry to docs/node_configurations.json to enable checking".into(),
+                    ),
+                });
+            }
+            continue;
+        }
+
+        let policy = ctx
+            .catalog
+            .undeclared_key_policy(node_type)
+            .unwrap_or(UndeclaredKeyPolicy::AcceptsAnything);
+        if policy == UndeclaredKeyPolicy::AcceptsAnything {
+            continue;
+        }
+
+        for block in TOOL_FIELD_BLOCKS {
+            let Some(fields) = entry.get(block).and_then(Value::as_object) else {
+                continue;
+            };
+            for key in fields.keys() {
+                if key.starts_with(RESERVED_KEY_PREFIX)
+                    || is_annotation_key(key)
+                    || ctx
+                        .catalog
+                        .declares_tool_key(node_type, key)
+                        .unwrap_or(true)
+                {
+                    continue;
+                }
+                report.diagnostics.push(undeclared_tool_field(
+                    node_id, tool_name, block, key, node_type, policy, ctx,
+                ));
+            }
+        }
+    }
+}
+
+/// Builds the finding for one undeclared key, worded for the policy in force.
+fn undeclared_tool_field(
+    node_id: &str,
+    tool_name: &str,
+    block: &str,
+    key: &str,
+    node_type: &str,
+    policy: UndeclaredKeyPolicy,
+    ctx: &LintContext<'_>,
+) -> Diagnostic {
+    let did_you_mean = suggest(key, ctx.catalog.tool_key_names(node_type).into_iter())
+        .map(|s| format!("did you mean \"{s}\"?"));
+    let (severity, code, message, fallback) = match policy {
+        UndeclaredKeyPolicy::Repurposes => (
+            Severity::Warning,
+            DiagnosticCode::RepurposedToolField,
+            format!(
+                "\"{key}\" is not a field of \"{node_type}\"; that node type does not ignore an \
+                 unknown key, it repurposes it — the value will be sent as a query parameter \
+                 instead of configuring the node"
+            ),
+            "remove it, or use the field that does what you meant",
+        ),
+        _ => (
+            Severity::Error,
+            DiagnosticCode::UnknownField,
+            format!("\"{key}\" is not a field of \"{node_type}\", so the node never reads it"),
+            "remove it, or check docs/node_configurations.json for the field you meant",
+        ),
+    };
+    Diagnostic {
+        severity,
+        code,
+        node_id: Some(node_id.to_string()),
+        field: Some(format!("tool_configurations.{tool_name}.{block}.{key}")),
+        message,
+        suggestion: did_you_mean.or_else(|| Some(fallback.into())),
     }
 }
 

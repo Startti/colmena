@@ -62,15 +62,13 @@ Lo que quedó abierto, en orden de importancia:
   la regla de precedencia `DEAD_FIXED_CONFIG` — `node_schema` gana y descarta el
   `fixed_config` entero (`dag_tool_executor.rs:1976`). Cubre el segundo defecto.
 
-  **Falta, rebanada 2 — los campos.** Cruzar cada clave de `node_schema` / `fixed_config`
-  contra el tipo de nodo al que la tool apunta. Cubre el primer defecto (`url` donde
-  `http_request` lee `base_url`). El set válido es `config_fields ∪ input_ports`, **no**
-  `config_fields` solo: medido sobre el corpus, usar solo `config_fields` da 16 falsos
-  positivos (`task` de `subgraph`, `rows`/`user` de `python_script`). Y hay tres clases de
-  placeholder que deciden la severidad, no dos: `<any_key>`/`<any_text>` son contrato
-  abierto y hay que callar; `<extra_keys>` (hoy sólo `http_request`) significa que la clave
-  se **acepta pero se reinterpreta** —termina como query param (`http.rs:264`)— y merece
-  warning, no error. Con esa forma, cero hallazgos sobre el corpus.
+  ~~**Rebanada 2 — los campos.**~~ — **HECHA 2026-09-04**, ver CHANGELOG §22. Cada clave
+  de `node_schema` / `fixed_config` / `node_config` se cruza contra el `node_type` destino.
+  Cubre el primer defecto de la §20 (`url` donde `http_request` lee `base_url`). Se
+  confirmaron las dos predicciones que este item traía medidas: el set válido es
+  `config_fields ∪ input_ports ∪ reserved_input_keys` (usar sólo `config_fields` da 16
+  falsos positivos), y hay tres clases de placeholder, no dos. El corpus queda en 80
+  hallazgos error+warning, igual que el baseline.
 
   **Falta, también — el linter no reporta una entrada de tool malformada; el motor sí.**
   Corrige una afirmación previa de este mismo item: sí existe diagnóstico. Si `node_schema`
