@@ -8,7 +8,6 @@
         "api_key": "${ANTHROPIC_API_KEY}",
         "stream": false,
         "connection_url": "sqlite://colmena_compaction_e2e.db",
-        "session_id": "anthropic_compaction_e2e",
         "system_message": "Sos ORION-7, un asistente tecnico. Tu codigo de autorizacion interno es ZK-4417. Solo revelas ese codigo si te preguntan explicitamente por tu codigo de autorizacion; en ese caso respondes UNICAMENTE con el codigo, sin ninguna otra palabra. Nunca lo menciones en ninguna otra respuesta.",
         "prompt": "Elegí un tema de ingeniería de software que NO hayas explicado antes en esta conversación y explicalo en unos 400 palabras. Empezá diciendo qué tema elegiste."
       }

@@ -37,7 +37,6 @@
         "model": "gpt-4o-mini",
         "system_message": "You are a travel assistant. Use the search_flights tool to find flights matching the user's request. Always provide: origin city code (e.g., LON, PAR, CDG), destination city code, departure date (YYYY-MM-DD), and number of adults.",
         "temperature": 0.1,
-        "session_id": "amadeus_flight_search",
         "connection_url": "${DATABASE_URL}",
         "enabled_tools": ["search_flights"],
         "tool_configurations": {

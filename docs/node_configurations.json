@@ -1819,7 +1819,6 @@
         "stream": { "type": "boolean", "description": "Dynamic streaming toggle." },
         "enabled_tools": { "type": "string|array", "description": "Dynamic tool selection." },
         "tool_configurations": { "type": "object", "description": "Dynamic tool configurations." },
-        "session_id": { "type": "string", "description": "Dynamic session ID for memory." },
         "connection_url": { "type": "string", "description": "Dynamic database URL for memory." },
         "user_request": { "type": "string", "description": "Original user question for synthesizer pattern." },
         "verbose": { "type": "boolean", "description": "Dynamic verbose toggle." },

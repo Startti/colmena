@@ -35,7 +35,6 @@
         "provider": "google",
         "model": "gemini-2.5-flash",
         "api_key": "${GEMINI_API_KEY}",
-        "session_id": "canvas_builder_controlled",
         "connection_url": "${DATABASE_URL}",
         "temperature": 0.0,
         "reasoning_effort": "low",
