@@ -115,8 +115,134 @@ pub fn lint_graph_json(
     let graph: Graph = serde_json::from_value(document.clone())?;
     let mut report = lint_graph(&graph, ctx);
     lint_raw_node_properties(document, ctx, &mut report);
+    lint_raw_tool_configurations(document, &mut report);
     report.sort();
     Ok(report)
+}
+
+/// Visits every `tool_configurations` entry in the document.
+///
+/// Only `llm_call` reads the block, but this walker does not filter by node
+/// type: the findings it reports are about the tool entry's own shape, and an
+/// entry written under the wrong node type is already reported as an unknown
+/// field on that node.
+///
+/// Emits in whatever order the document holds. Sorting here would be dead
+/// weight: [`LintReport::sort`] orders the finished report by severity, node id,
+/// field and code, and every finding below puts the tool name in its `field`, so
+/// the output order is already settled by the time a caller sees it.
+///
+/// Yields `(node_id, tool_name, entry)` for each entry that is a JSON object.
+fn tool_configuration_entries(document: &Value) -> Vec<(&String, &String, &Value)> {
+    let Some(nodes) = document.get("nodes").and_then(Value::as_object) else {
+        return Vec::new();
+    };
+
+    let mut entries = Vec::new();
+    for (node_id, node) in nodes {
+        let Some(tools) = node
+            .get("config")
+            .and_then(|c| c.get("tool_configurations"))
+            .and_then(Value::as_object)
+        else {
+            continue;
+        };
+        for (tool_name, entry) in tools {
+            if entry.is_object() {
+                entries.push((node_id, tool_name, entry));
+            }
+        }
+    }
+    entries
+}
+
+/// Reports a `fixed_config` that the executor will never read.
+///
+/// `DagToolExecutor` builds a tool call's arguments in one `if`/`else if`:
+/// `node_schema` is PATH 0 and `fixed_config` is only reached when it is
+/// absent. So an entry carrying both silently discards the whole
+/// `fixed_config` block — every key in it, not just the colliding ones.
+///
+/// "Absent" means the JSON key is missing or `null`. An empty object still
+/// counts as present, because the executor branches on `Option::is_some` and
+/// never inspects the map.
+///
+/// This is not a hypothetical. Three example graphs in this repo declared
+/// `url`, `method`, `headers` and `allow_http_urls` in `fixed_config` next to a
+/// `node_schema` for `body`; the plumbing vanished and every run failed with
+/// `Invalid URL '': relative URL without a base`. A lint over the node's own
+/// config could not see it, because the mistake was one level down.
+///
+/// An empty `fixed_config` is not reported: discarding nothing costs nothing,
+/// and the author has no bug to fix.
+fn lint_raw_tool_configurations(document: &Value, report: &mut LintReport) {
+    for (node_id, tool_name, entry) in tool_configuration_entries(document) {
+        // Presence, not contents. The executor's branch is
+        // `if let Some(schema) = …node_schema.as_ref()`, and `NodeSchema` is a
+        // `HashMap`, so `"node_schema": {}` deserializes to `Some(empty)` and
+        // still takes PATH 0 — discarding the `fixed_config` just the same.
+        // Requiring a non-empty schema here would miss that graph entirely.
+        // Only an ABSENT key leaves `fixed_config` alive. An explicit `null`
+        // does not: `Graph::validate` deserializes this value into `NodeSchema`,
+        // a bare `HashMap` rather than an `Option`, so `null` — like any
+        // string, number, array or bool — is rejected at load and the graph
+        // never runs. Being silent on those shapes is therefore free: they
+        // cannot reach the executor either way.
+        //
+        // The two shapes this rule actually earns its keep on are the ones
+        // `validate` lets through: an empty object and a populated one. Both
+        // take PATH 0 and discard the `fixed_config`, which is the defect this
+        // rule exists to name.
+        let has_schema = entry.get("node_schema").is_some_and(Value::is_object);
+        let fixed_keys: Vec<&str> = entry
+            .get("fixed_config")
+            .and_then(Value::as_object)
+            .map(|f| f.keys().map(String::as_str).collect())
+            .unwrap_or_default();
+
+        if !has_schema || fixed_keys.is_empty() {
+            continue;
+        }
+
+        report.diagnostics.push(Diagnostic {
+            severity: Severity::Error,
+            code: DiagnosticCode::DeadFixedConfig,
+            node_id: Some(node_id.clone()),
+            field: Some(format!("tool_configurations.{tool_name}.fixed_config")),
+            message: format!(
+                "tool \"{tool_name}\" declares both \"node_schema\" and \"fixed_config\"; \
+                 the executor reads \"node_schema\" and discards \"fixed_config\" entirely, \
+                 so {} never {} the node",
+                render_key_list(&fixed_keys),
+                if fixed_keys.len() == 1 {
+                    "reaches"
+                } else {
+                    "reach"
+                }
+            ),
+            suggestion: Some(format!(
+                "move {} into \"node_schema\" as fixed fields, e.g. \
+                 \"{}\": {{ \"fixed\": … }}",
+                if fixed_keys.len() == 1 {
+                    "it".to_string()
+                } else {
+                    "each of them".to_string()
+                },
+                fixed_keys[0]
+            )),
+        });
+    }
+}
+
+/// Renders field names the way the message needs to read: `"a"`, `"a" and "b"`,
+/// `"a", "b" and "c"`.
+fn render_key_list(keys: &[&str]) -> String {
+    let quoted: Vec<String> = keys.iter().map(|k| format!("\"{k}\"")).collect();
+    match quoted.split_last() {
+        None => String::new(),
+        Some((last, [])) => last.clone(),
+        Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
+    }
 }
 
 /// Reports keys on a node object that the engine does not read.
@@ -667,6 +793,19 @@ mod tests {
         assert_eq!(
             type_mismatch("string|array", &serde_json::json!(1)),
             Some("string|array")
+        );
+    }
+    #[test]
+    fn render_key_list_reads_as_a_sentence_at_every_length() {
+        assert_eq!(render_key_list(&[]), "");
+        assert_eq!(render_key_list(&["url"]), "\"url\"");
+        assert_eq!(
+            render_key_list(&["url", "method"]),
+            "\"url\" and \"method\""
+        );
+        assert_eq!(
+            render_key_list(&["url", "method", "headers"]),
+            "\"url\", \"method\" and \"headers\""
         );
     }
     #[test]

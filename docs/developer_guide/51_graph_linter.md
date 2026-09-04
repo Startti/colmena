@@ -56,15 +56,87 @@ camino de adopción para quien lo quiera en CI.
 | `INVALID_FIELD_VALUE` | warning | Un valor fuera del conjunto documentado |
 | `FIELD_TYPE_MISMATCH` | warning | El tipo JSON no coincide con el documentado |
 | `EDGE_UNKNOWN_NODE` | error | Un edge apunta a un nodo que el grafo no define |
+| `DEAD_FIXED_CONFIG` | error | Una tool declara `fixed_config` junto a `node_schema`; el executor lee el segundo y **descarta el primero entero** |
 | `NO_CATALOG_COVERAGE` | info | El tipo de nodo no tiene entrada en el catálogo: **no se revisó** |
 
 Los `code` son estables. Cualquier consumidor (la salida JSON, una UI sobre los
 bindings) debe ramificar sobre ellos, nunca sobre el texto del mensaje.
 
+## `DEAD_FIXED_CONFIG`: la regla de precedencia
+
+Hay dos formas de configurar un nodo usado como tool, y **no se combinan**.
+`DagToolExecutor` arma los argumentos de la llamada en un solo `if`/`else if`:
+
+```rust
+let inputs = if let Some(schema) = tool_cfg.and_then(|c| c.node_schema.as_ref()) {
+    // PATH 0 (HIGHEST PRIORITY): node_schema
+    merge_args_into_schema(&schema_value, args.clone())?
+} else if let Some(fixed) = fixed_config.as_ref() {
+    // ...
+```
+
+Con `node_schema` presente, el `fixed_config` **entero** se descarta — no sólo
+las claves que colisionan. Escribir los dos es el anti-patrón que CLAUDE.md marca
+como *WRONG — mixing*, y el linter ahora lo reporta como error nombrando cada
+clave que se pierde:
+
+```
+error [DEAD_FIXED_CONFIG] node "agent".tool_configurations.http_upload.fixed_config:
+  tool "http_upload" declares both "node_schema" and "fixed_config"; the executor
+  reads "node_schema" and discards "fixed_config" entirely, so "url", "method",
+  "headers" and "allow_http_urls" never reach the node
+  — move each of them into "node_schema" as fixed fields, e.g. "url": { "fixed": … }
+```
+
+Ese ejemplo no es inventado: es el estado real de tres grafos de este repo antes
+de la §20. El síntoma era `Invalid URL '': relative URL without a base`, y el
+linter daba `no findings` porque el error estaba un nivel más abajo del `config`
+del nodo.
+
+Un `fixed_config` **vacío** junto a un `node_schema` no se reporta: descartar
+nada no cuesta nada, y el autor no tiene ningún bug que arreglar.
+
+**"Presente" no quiere decir "con campos".** `NodeSchema` es un `HashMap`, así
+que `"node_schema": {}` deserializa a `Some(mapa vacío)`, el `if let Some(schema)`
+matchea igual y el `fixed_config` se pierde exactamente como si el schema tuviera
+campos. La regla mira presencia, no contenido — la primera versión exigía un
+schema no vacío y era ciega justo al caso para el que existe. Lo encontraron dos
+lenses de revisión, no las mutaciones: una mutación sólo ataca código que existe,
+y ese test no existía.
+
+El campo pasa por **dos** compuertas, no una. `Graph::validate()` corre en toda
+entrada del motor ([`run_use_case.rs`](../../src/libs/colmena/src/dag_engine/application/run_use_case.rs))
+y deserializa el `node_schema` crudo a `NodeSchema`, que es un `HashMap` **pelado**
+—no un `Option`— así que rechaza el grafo antes de que ningún nodo corra:
+
+| `node_schema` | `Graph::validate()` | Si pasa, el executor | El linter |
+|---|---|---|---|
+| ausente | pasa (no hay nada que validar) | lee el `fixed_config` — **el único caso vivo** | calla, correcto |
+| `null` | **rechaza**: `malformed node_schema: invalid type: null` | nunca llega | calla |
+| `{}` | pasa: un mapa vacío es un mapa válido | PATH 0; descarta el `fixed_config` | **`DEAD_FIXED_CONFIG`** |
+| objeto poblado válido | pasa | PATH 0; descarta el `fixed_config` | **`DEAD_FIXED_CONFIG`** |
+| objeto con un campo anidado inválido | **rechaza**: `NodeSchemaField` exige objeto | nunca llega | reporta igual — ver abajo |
+| string, número, array, bool | **rechaza**: `invalid type` | nunca llega | calla |
+
+Dos consecuencias que conviene tener presentes:
+
+**Sólo la ausencia deja el `fixed_config` vivo.** Un `"node_schema": null` no es
+equivalente a omitirlo: `tool_cfg.get("node_schema")` devuelve `Some(Value::Null)`
+y el `HashMap` lo rechaza. El grafo entero falla al cargar.
+
+**La regla sólo aporta valor en las dos filas que pasan la validación.** Ahí es
+donde vivía el defecto de la §20. En las filas que `validate()` rechaza el linter
+puede callar (inofensivo) o reportar (la fila del campo anidado inválido), pero en
+ninguna de las dos importa: ese grafo no corre. Afinar la regla para distinguirlas
+cambiaría un punto ciego por otro — una entrada malformada dejaría de disparar la
+regla de precedencia — así que la respuesta correcta es un diagnóstico propio para
+la entrada malformada, no un guard más astuto. Anotado en
+[`BACKLOG.md`](../BACKLOG.md).
+
 ## Las decisiones que evitan el ruido
 
-Un linter con falsos positivos se ignora. Cuatro reglas existen sólo para eso, y
-cada una salió de medir contra los 301 grafos de ejemplo del repo.
+Un linter con falsos positivos se ignora. Cinco reglas existen sólo para eso, y
+cada una salió de medir contra los grafos de ejemplo del repo.
 
 **1. Sin cobertura no se opina.** Un tipo de nodo sin entrada en el catálogo
 produce un `NO_CATALOG_COVERAGE` (info) y **ni un solo** `UNKNOWN_FIELD`. Marcar
@@ -175,11 +247,16 @@ registry armado sin ellas encogería el conjunto bajo prueba en silencio.
 
 ## Ruido medido
 
-Sobre los 301 grafos de ejemplo del repo (298 parsean), el linter deja **252
-limpios** y produce **80 hallazgos**. Cada categoría restante fue auditada contra
-el código: no hay falsos positivos conocidos. Si agregás una regla, medí de nuevo
-— la primera versión de este linter producía 178 hallazgos de los que 132 eran
-ruido, y sin medir eso no se nota.
+Sobre los grafos de ejemplo del repo el linter produce **80 hallazgos**. Cada
+categoría fue auditada contra el código: no hay falsos positivos conocidos. Si
+agregás una regla, medí de nuevo — la primera versión de este linter producía 178
+hallazgos de los que 132 eran ruido, y sin medir eso no se nota.
+
+`DEAD_FIXED_CONFIG` se midió antes de escribirla: sobre las 206 entradas de
+`tool_configurations` del corpus dispara **cero** veces, porque los únicos tres
+casos que existían se corrigieron en la §20. Una regla que no dispara hoy no es
+una regla inútil: contra el grafo roto de entonces dispara y nombra las cuatro
+claves que se perdían.
 
 ## Limitaciones conocidas
 
@@ -190,9 +267,12 @@ ruido, y sin medir eso no se nota.
   migrado los dos ya no pueden diverger. La prosa (`description`/`example`/`default`)
   sigue viviendo en el JSON a propósito — es lo que leen humanos y agentes. Los
   nodos que todavía devuelven `None` siguen respaldados solo por el catálogo.
-- **`tool_configurations` no se revisa a nivel de campo.** Lo que ya valida
-  `Graph::validate()` (`memory_mode`, bloque `mcp`, `node_schema`) sigue siendo
-  la única cobertura ahí.
+- **`tool_configurations` se revisa sólo en su forma, todavía no campo por campo.**
+  `DEAD_FIXED_CONFIG` cubre el error de precedencia; los campos que una tool
+  declara dentro de `node_schema` o `fixed_config` aún **no** se cruzan contra el
+  tipo de nodo al que apuntan. Es un hueco real: los grafos de la §20 declaraban
+  `url` donde `http_request` lee `base_url`, y el linter no dijo nada. Lo demás lo
+  cubre `Graph::validate()` (`memory_mode`, bloque `mcp`, `node_schema`).
 - **Cuatro tipos condicionales se dan por disponibles.** El linter revisa el
   grafo contra lo que el motor *puede* ejecutar, no contra el cableado de un
   despliegue concreto.

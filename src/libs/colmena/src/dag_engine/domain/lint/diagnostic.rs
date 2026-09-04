@@ -51,6 +51,8 @@ pub enum DiagnosticCode {
     EdgeUnknownNode,
     /// The node's type has no catalog entry, so its config was not checked.
     NoCatalogCoverage,
+    /// A tool declares `fixed_config` alongside `node_schema`, which wins.
+    DeadFixedConfig,
 }
 
 impl DiagnosticCode {
@@ -65,6 +67,7 @@ impl DiagnosticCode {
             DiagnosticCode::FieldTypeMismatch => "FIELD_TYPE_MISMATCH",
             DiagnosticCode::EdgeUnknownNode => "EDGE_UNKNOWN_NODE",
             DiagnosticCode::NoCatalogCoverage => "NO_CATALOG_COVERAGE",
+            DiagnosticCode::DeadFixedConfig => "DEAD_FIXED_CONFIG",
         }
     }
 }

@@ -891,3 +891,126 @@ cargando igual — el linter lo reporta como campo desconocido, que es exactamen
 es.
 
 **Estado.** done.
+
+---
+
+## 21. El linter entra en `tool_configurations`: primera regla, la de precedencia
+
+**Qué.** Primera de tres rebanadas que cierran el hueco que abrió la §20: el
+linter revisaba el `config` de cada nodo pero no miraba el `node_schema` ni el
+`fixed_config` de sus tools, así que daba `no findings` sobre un grafo que no
+funcionaba.
+
+Esta rebanada agrega el recorrido y una sola regla, `DEAD_FIXED_CONFIG`.
+
+### Por qué el recorrido lee el JSON crudo
+
+`ToolConfiguration` no lleva `deny_unknown_fields`, así que una clave inventada
+dentro de una entrada de tool se descarta al deserializar y ya no existe cuando
+hay un `Graph`. Es exactamente la razón por la que existe `lint_graph_json`
+(§7), y por eso el nuevo walker cuelga de ahí y no de `lint_graph`. Un test fija
+esa asimetría para que los dos puntos de entrada no vuelvan a prometer lo mismo
+sin darlo, como pasó con `validate_graph` (§9).
+
+### La regla
+
+`DagToolExecutor` arma los argumentos en un `if`/`else if`: `node_schema` es
+PATH 0 y `fixed_config` sólo se alcanza si el primero está ausente
+(`dag_tool_executor.rs:1976`). Con los dos presentes, el `fixed_config` **entero**
+se descarta — no sólo las claves que colisionan.
+
+El mensaje nombra cada clave perdida, porque la pregunta siguiente del autor
+siempre es *cuál* de mis ajustes desapareció:
+
+```
+error [DEAD_FIXED_CONFIG] node "agent".tool_configurations.http_upload.fixed_config:
+  … discards "fixed_config" entirely, so "url", "method", "headers" and
+  "allow_http_urls" never reach the node
+```
+
+Un `fixed_config` vacío no se reporta: descartar nada no cuesta nada.
+
+### Ruido medido antes de escribir la regla
+
+Sobre las **206 entradas** de `tool_configurations` del corpus, la regla dispara
+**cero** veces — los únicos tres casos que existían se corrigieron en la §20. El
+corpus queda en 80 hallazgos, idéntico al baseline.
+
+Que no dispare hoy no la hace inútil: se reconstruyó el estado intermedio del
+grafo roto de entonces (ya como mapa, todavía con el `fixed_config` muerto) y se
+linteó con las dos versiones del binario. `develop` dice `no findings`; con esta
+rebanada sale el error nombrando las cuatro claves. Ese es el hueco, demostrado
+en vez de argumentado.
+
+### Una mutación encontró peso muerto
+
+De cinco mutaciones aplicadas a la regla, cuatro matan tests. La quinta —invertir
+el orden en que el walker emite las entradas— **no mató nada**, y tenía razón:
+`LintReport::sort` ya ordena por `(severity, node_id, field)` y el `field` de
+cada hallazgo lleva el nombre de la tool, así que ordenar dentro del walker era
+peso muerto. Se quitó, y el test que parecía cubrirlo se renombró para decir qué
+garantiza de verdad.
+
+### Y la revisión encontró el caso que las mutaciones no podían
+
+La primera versión de la regla exigía que el `node_schema` fuera un objeto **no
+vacío**. El executor no: su rama es `if let Some(schema)`, y como `NodeSchema` es
+un `HashMap`, `"node_schema": {}` deserializa a `Some(mapa vacío)` y toma PATH 0
+igual. Un grafo con `"node_schema": {}` junto a un `fixed_config` poblado perdía
+todo el `fixed_config` en runtime y el linter decía `no findings` — un falso
+negativo en la clase exacta de defecto para la que se escribió la regla, y encima
+la guía afirmaba lo contrario sin condición.
+
+Lo encontraron **dos lenses por separado** (`review-readability` y
+`review-reliability`), y se reprodujo con el binario antes de aceptarlo. Las
+cinco mutaciones previas no podían: todas atacan código escrito, y el problema
+era un caso **no** escrito. Un test ausente no tiene mutación que lo mate.
+
+La regla ahora mira presencia (`is_some_and(Value::is_object)`), no contenido.
+`null` sigue sin reportarse: es el único valor que deserializa a `None` y deja el
+`fixed_config` vivo de verdad. Dos tests nuevos fijan las dos ramas, y una sexta
+mutación —restaurar el `!is_empty()` original— mata el primero.
+
+Una segunda pasada de revisión sobre el candidato ya corregido encontró que el
+arreglo traía su propio exceso de afirmación: la guía decía que `null` era la
+**única** forma que dejaba el `fixed_config` vivo. Falso en un tercer caso — un
+`node_schema` que sea string, número o array hace que `tool_configurations` no
+parsee y el nodo falle entero (`llm.rs`), así que el `fixed_config` no está ni
+vivo ni descartado: no corre nada. La misma frase estaba repetida en un comentario
+del código y en el docstring de un test. Los tres se corrigieron, y la guía ahora
+lleva una tabla con los **tres** comportamientos en vez de dos. Que una entrada de
+tool malformada no tenga diagnóstico propio quedó anotado en `BACKLOG.md`.
+
+Una **tercera** pasada encontró que la corrección anterior seguía incompleta, y por
+la misma causa: describí el comportamiento del executor ignorando que
+`Graph::validate()` corre antes, en toda entrada del motor — cableado que se hizo
+en el §18, en esta misma serie. `validate()` deserializa el `node_schema` crudo a
+`NodeSchema`, que es un `HashMap` **pelado** y no un `Option`, así que rechaza el
+grafo al cargar cuando el valor es `null`, un escalar, un array, o un objeto con
+un campo anidado inválido. Dos consecuencias: `"node_schema": null` **no** deja el
+`fixed_config` vivo —sólo la ausencia lo hace—, y la afirmación del BACKLOG de que
+una entrada malformada "no tiene diagnóstico" era falsa: lo tiene, sólo que no es
+un hallazgo del linter. La guía pasa a una tabla de dos compuertas
+(`validate()` primero, executor después), y el test cuyo nombre prometía un
+`fixed_config` vivo se renombró a lo que fija de verdad: el silencio de la regla.
+
+Vale registrar el patrón, porque se repitió: **afirmé un límite sin enumerar los
+casos**. La primera corrección sí tocó la lógica —el guard pasó de exigir un
+schema no vacío a mirar presencia—; las siguientes fueron de documentación y de
+nombres. Una cuarta pasada encontró la misma falla una vez más, ahora en la
+cobertura: la fila de los escalares estaba documentada y sin test. Quedó fijada,
+junto con la del objeto de campo anidado inválido, así que hoy cada fila de la
+tabla tiene una prueba que la sostiene.
+
+La otra observación fue contra un test: `..._are_skipped_rather_than_panicking`
+prometía probar ausencia de pánico, pero `Value::get` y `Value::as_object` son
+totales —devuelven `None` sobre un string, un array o `null`— así que ninguna
+disposición de esos fixtures distingue el código con guards del código sin ellos.
+Se renombró a lo que sí fija: que una entrada malformada no produce hallazgo.
+
+**Alcance.** Aditivo. Un `DiagnosticCode` nuevo y una llamada más en
+`lint_graph_json`. Ningún grafo existente cambia de resultado. Las dos rebanadas
+que faltan —campos cruzados contra el tipo de nodo destino, y tools sintéticas en
+`KnownNodeTypes`— siguen en `BACKLOG.md`.
+
+**Estado.** done.
