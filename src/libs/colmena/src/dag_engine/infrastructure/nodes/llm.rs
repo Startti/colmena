@@ -3925,7 +3925,6 @@ impl ExecutableNode for LlmNode {
                 "prompt": "string (optional)",
                 "temperature": "number (optional)",
                 "max_tokens": "integer (optional)",
-                "session_id": "string (optional, enables memory)",
                 "connection_url": "string (optional, database connection for memory)",
                 "enabled_tools": "array of strings or '*' (optional, enables tool calling)",
                 "tool_configurations": "map<string, ToolConfiguration> (optional, partial config for tools)",
@@ -3940,7 +3939,6 @@ impl ExecutableNode for LlmNode {
                 "prompt": "string (optional)",
                 "temperature": "number (optional)",
                 "max_tokens": "integer (optional)",
-                "session_id": "string (optional, enables memory)",
                 "connection_url": "string (optional)",
                 "enabled_tools": "array of strings or '*' (optional)",
                 "files": "array of objects [{mime_type, data|path}] (optional)"

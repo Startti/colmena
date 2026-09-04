@@ -797,3 +797,97 @@ colisionaron) y pasan contra la nueva; no son tautológicos.
 `docs/agent_context/audit/src__libs__colmena__src__documents__infrastructure__ids.rs.md`.
 
 **Estado.** done.
+
+---
+
+## 20. Se borró el `session_id` inerte de `llm_call`, y cargaron los tres grafos rotos
+
+**Qué.** Dos pendientes que el linter había dejado anotados en `BACKLOG.md` y que se
+cierran juntos porque los dos son la misma clase de problema: un JSON que dice algo que
+el motor no hace.
+
+### El `session_id` que prometía memoria
+
+§17 quitó `session_id` de `llm_call` en `docs/node_configurations.json` tras verificar que
+el nodo lee `__colmena_session_id` / `__colmena_agent_session_id` inyectados por el motor
+y **nunca** el del `config`. Quedaba el rastro. Este cambio lo borra de las cuatro partes
+donde seguía vivo:
+
+1. **30 apariciones en 27 grafos de ejemplo** bajo `tests/graphs/`. Todas eran `llm_call`;
+   se comprobó nodo por nodo antes de tocar nada, porque `document_create` **sí** lee
+   `config.session_id` (`document_nodes.rs:42`) y no debía barrerse con la misma escoba.
+2. **`LlmNode::schema()`**, que lo anunciaba dos veces: en el bloque `config` y en el
+   bloque `inputs`. Lo segundo era lo grave — `dag_tool_executor.rs` convierte
+   `schema()["inputs"]` en los parámetros de la tool, así que un `llm_call` usado como
+   herramienta le ofrecía al modelo un parámetro `session_id` descrito como *"enables
+   memory"* que no hacía nada. Era opcional, nunca estuvo en `required`, y ningún test
+   lo afirmaba.
+3. **`llm_call.input_ports` del catálogo**, que lo declaraba como *"Dynamic session ID for
+   memory"*. El linter no lo había visto porque sólo cruza `config_fields`.
+4. **Dos guías** que lo enseñaban: el "Ejemplo 2: Con Memoria Conversacional" de
+   `14_llm_deep_dive.md` y la respuesta sobre persistencia de `16_data_flow_guide.md`.
+   Ambas pasan ahora a `--agent-session-id`, que es la forma que sí funciona.
+
+`connection_url` **se queda**: ese sí lo lee el nodo (`llm.rs:1454`), y sin él la memoria
+es sólo en proceso.
+
+### Los tres grafos que no deserializaban
+
+`forward_generated_artifact.json`, `upload_inline_to_endpoint.json` y
+`upload_signed_url_to_endpoint.json` declaraban `nodes` como array; `Graph` lo espera como
+`HashMap<String, NodeConfig>`, así que fallaban con `invalid type: sequence, expected a
+map` antes de llegar a ejecutarse.
+
+Pasarlos a mapa y **correrlos** destapó siete defectos más. Ninguno era visible mientras el
+archivo no cargaba, y ninguno lo habría encontrado sólo mirar el JSON:
+
+1. **`system_prompt`** en los tres. `llm_call` lee `system_message` (`llm.rs:1373`);
+   `system_prompt` no lo lee nadie. El prompt de sistema entero se descartaba en silencio.
+2. **`"type": "trigger"`** en los tres. El motor no registra `trigger` — registra
+   `trigger_webhook` (`registry.rs:102`). El grafo hermano que sí funciona
+   (`agent_multipart_upload.json`) usa `trigger_webhook` con el mismo id `trigger`, que es
+   de donde salió la confusión. Se les puso además un `test_payload` para que el `run`
+   local tenga con qué arrancar.
+3. **Sin `api_key`** en el `llm_call`. Lo reportó el linter en cuanto el archivo cargó.
+4. **`fixed_config` muerto.** Los tres declaraban `url`/`method`/`headers` en
+   `fixed_config` **y** un `node_schema` para `body`. `dag_tool_executor.rs:1976` toma
+   `node_schema` como PATH 0 y la rama de `fixed_config` es un `else if`: con `node_schema`
+   presente, el `fixed_config` entero no se lee. Es exactamente el anti-patrón que
+   `CLAUDE.md` marca como *WRONG — mixing*; ahora la plomería va como campos `fixed`
+   dentro del `node_schema`.
+5. **`url` no es un campo de `http_request`.** El nodo arma la URL con `base_url` +
+   `endpoint` (`http.rs:860-892`), y ambos caen a `""` si faltan. El síntoma era
+   `Invalid URL '': relative URL without a base`. El catálogo ya lo tenía bien; el grafo
+   no.
+6. **`attachment_id`** en `forward_generated_artifact.json`, en el prompt y en la
+   descripción de la tool. Plan B lo retiró el 2026-05-25: `image_generation` devuelve
+   `document_id` y nada más (`image_generation.rs:391`). El agente venía instruido a leer
+   una clave inexistente.
+7. **Cobertura imaginaria.** La descripción de los tres afirmaba ser usada por
+   `tests/attachment_uniform_resolution_test.rs`, y una agregaba que *"el test reescribe la
+   url"*. Ese test no carga ningún `.json`: maneja `HttpNode::execute` directamente. Su
+   propio encabezado los llama "companion graphs"; la descripción del grafo convirtió eso
+   en una afirmación de cobertura que nunca fue cierta.
+
+Los defectos 4 y 5 son los que importan: entre los dos, el `http_request` salía con la URL
+vacía. Un `dag_engine lint` limpio **no** los habría encontrado — el linter revisa el
+`config` del nodo, no el `node_schema` de una tool.
+
+**Verificación.** Los tres cargan y pasan `dag_engine lint` sin hallazgos.
+`forward_generated_artifact.json` se ejercitó de punta a punta contra un endpoint real
+(una copia apuntando a `httpbin.org/post`): el agente generó la imagen, el
+`$attachment:<document_id>` se resolvió, y el POST multipart devolvió `200` con la parte
+`file` de tipo `image/png` en la respuesta. Contra `kb.test` —el placeholder que el archivo
+commiteado conserva— llega hasta el DNS, que es lo correcto. Los otros dos terminan con el
+agente contestando que no hay documento adjunto: el CLI no tiene forma de registrar uno,
+eso lo hace la aplicación anfitriona, así que su ejecución completa **no** se verificó y no
+se afirma.
+
+**Sobre ADP.** Quitar `session_id` del bloque `inputs` cambia el JSON schema de la tool que
+se le manda al proveedor cuando un `llm_call` se expone como herramienta: desaparece un
+parámetro opcional que no tenía efecto. Ningún grafo del repo lo listaba en
+`exposed_inputs`. Un grafo persistido que traiga `session_id` en el `config` sigue
+cargando igual — el linter lo reporta como campo desconocido, que es exactamente lo que
+es.
+
+**Estado.** done.

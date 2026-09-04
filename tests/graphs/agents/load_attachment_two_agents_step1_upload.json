@@ -8,7 +8,6 @@
         "model": "gemini-2.5-flash",
         "api_key": "${GEMINI_API_KEY}",
         "connection_url": "${DATABASE_URL}",
-        "session_id": "two_agents_step1_uploader",
         "attachments_enabled": true,
         "summary_enabled": true,
         "system_message": "You are an upload acknowledger. Reply in one short sentence confirming the document was received. Do not describe its contents.",

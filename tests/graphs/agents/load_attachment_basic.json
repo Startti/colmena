@@ -7,7 +7,6 @@
         "model": "gemini-2.5-flash",
         "api_key": "${GEMINI_API_KEY}",
         "connection_url": "${DATABASE_URL}",
-        "session_id": "load_attachment_basic",
         "attachments_enabled": true,
         "system_message": "You are a helpful assistant. Answer the user's question using whichever resources are available in this conversation.",
         "prompt": "What is in the screenshot? Describe it in detail."

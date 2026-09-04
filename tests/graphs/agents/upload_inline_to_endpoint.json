@@ -1,32 +1,47 @@
 {
   "name": "upload_inline_to_endpoint",
   "version": "1.0",
-  "description": "Plan A end-to-end smoke graph. An inline-uploaded document is forwarded to a KB endpoint via http_request multipart using $attachment:<document_id>. Used by tests/attachment_uniform_resolution_test.rs (the test rewrites url to point at a wiremock server at runtime).",
-  "nodes": [
-    {
-      "id": "trigger",
-      "node_type": "trigger",
-      "config": {}
+  "description": "Plan A smoke graph, run by hand: an inline-uploaded document is forwarded to a KB endpoint via http_request multipart using $attachment:<document_id>. The deterministic coverage of that chain lives in tests/attachment_uniform_resolution_test.rs, which drives HttpNode directly and does NOT load this file; run this one with `dag_engine run` against a real endpoint.",
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/upload-inline",
+        "method": "POST",
+        "test_payload": {
+          "prompt": "Subí el documento adjunto al endpoint de la base de conocimiento."
+        }
+      }
     },
-    {
-      "id": "agent",
-      "node_type": "llm_call",
+    "agent": {
+      "type": "llm_call",
       "config": {
         "provider": "google",
+        "api_key": "${GEMINI_API_KEY}",
         "model": "gemini-2.5-flash",
-        "system_prompt": "You are an upload agent. The user attaches a document. Use the http_upload tool to POST it to the configured endpoint as multipart/form-data. The body MUST be {\"file\": \"$attachment:<document_id>\"} where <document_id> is the doc the user provided (see the catalog block in this message). Do not invent placeholders.",
-        "enabled_tools": ["http_upload"],
+        "system_message": "You are an upload agent. The user attaches a document. Use the http_upload tool to POST it to the configured endpoint as multipart/form-data. The body MUST be {\"file\": \"$attachment:<document_id>\"} where <document_id> is the doc the user provided (see the catalog block in this message). Do not invent placeholders.",
+        "enabled_tools": [
+          "http_upload"
+        ],
         "tool_configurations": {
           "http_upload": {
             "node_type": "http_request",
             "description": "Upload a file as multipart to the KB endpoint.",
-            "fixed_config": {
-              "url": "https://kb.test/documents",
-              "method": "POST",
-              "headers": { "Content-Type": "multipart/form-data" },
-              "allow_http_urls": true
-            },
             "node_schema": {
+              "base_url": {
+                "fixed": "https://kb.test/documents"
+              },
+              "method": {
+                "fixed": "POST"
+              },
+              "headers": {
+                "fixed": {
+                  "Content-Type": "multipart/form-data"
+                }
+              },
+              "allow_http_urls": {
+                "fixed": true
+              },
               "body": {
                 "type": "object",
                 "required": true,
@@ -37,8 +52,11 @@
         }
       }
     }
-  ],
+  },
   "edges": [
-    { "from": "trigger", "to": "agent" }
+    {
+      "from": "trigger",
+      "to": "agent"
+    }
   ]
 }

@@ -7,7 +7,6 @@
         "model": "gemini-2.5-flash",
         "api_key": "${GEMINI_API_KEY}",
         "connection_url": "${DATABASE_URL}",
-        "session_id": "load_attachment_optout",
         "attachments_enabled": true,
         "system_message": "You acknowledge uploads briefly.",
         "files": [
@@ -29,7 +28,6 @@
         "model": "gemini-2.5-flash",
         "api_key": "${GEMINI_API_KEY}",
         "connection_url": "${DATABASE_URL}",
-        "session_id": "load_attachment_optout",
         "attachments_enabled": false,
         "system_message": "You are a general-purpose assistant. Answer the user's question.",
         "prompt": "Do you have access to any attachments?"

@@ -8,7 +8,6 @@
         "model": "gemini-2.5-flash",
         "api_key": "${GEMINI_API_KEY}",
         "connection_url": "${DATABASE_URL}",
-        "session_id": "two_agents_step3_isolated",
         "attachments_enabled": false,
         "system_message": "You are an honest assistant. If you do not have access to any documents, say so explicitly. Do not invent contents.",
         "prompt": "¿Qué dice el documento que se subió antes en esta sesión? Si no tenés acceso a ningún documento, decímelo claramente."

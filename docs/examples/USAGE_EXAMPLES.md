@@ -156,7 +156,7 @@ Llamadas LLM, tool calling, streaming, thinking y patrones de extracción.
 | `tests/graphs/agents/http_tool_dynamic_placeholder_test.json` | Placeholders `$DYNAMIC` en config. |
 | `tests/graphs/agents/http_tool_node_schema_test.json` | Tool con JSON schema. |
 | `tests/graphs/agents/tools_lazy_basic.json` | Lazy tool loading. |
-| `tests/graphs/agents/forward_generated_artifact.json` | Forwarding de artefactos generados. ⚠️ **No carga** — ver nota abajo. |
+| `tests/graphs/agents/forward_generated_artifact.json` | Forwarding de artefactos generados. Requiere `OPENAI_API_KEY` y un endpoint real. |
 
 ```sh
 cargo run --bin dag_engine -- run tests/graphs/agents/agent_with_tools.json
@@ -267,22 +267,23 @@ canvas multimedia en ADP.
 | `tests/graphs/agents/load_attachment_two_agents_step2_read.json` | Paso 2: read (agente B, mismo session). |
 | `tests/graphs/agents/load_attachment_two_agents_step3_isolated.json` | Paso 3: aislamiento entre sesiones. |
 | `tests/graphs/agents/agent_multipart_upload.json` | Upload multipart desde un agente. |
-| `tests/graphs/agents/upload_inline_to_endpoint.json` | Upload inline a endpoint. ⚠️ **No carga** — ver nota abajo. |
-| `tests/graphs/agents/upload_signed_url_to_endpoint.json` | Upload vía signed URL. ⚠️ **No carga** — ver nota abajo. |
+| `tests/graphs/agents/upload_inline_to_endpoint.json` | Upload inline a endpoint. Requiere un endpoint real. |
+| `tests/graphs/agents/upload_signed_url_to_endpoint.json` | Upload vía signed URL. Requiere un endpoint real. |
 
 
-> ⚠️ **Tres de los grafos listados arriba no se pueden ejecutar hoy.**
-> `forward_generated_artifact.json`, `upload_inline_to_endpoint.json` y
-> `upload_signed_url_to_endpoint.json` declaran `nodes` como un **array**, y el motor
-> espera un mapa de `id → nodo`. Ninguno deserializa:
+> **Nota.** `forward_generated_artifact.json`, `upload_inline_to_endpoint.json` y
+> `upload_signed_url_to_endpoint.json` no cargaban: declaraban `nodes` como un array y
+> el motor espera un mapa de `id → nodo`. Reparados el 2026-09-03 (CHANGELOG §20), junto
+> con otros siete defectos que el fallo de carga tapaba — entre ellos un `url` que
+> `http_request` no lee (es `base_url` + `endpoint`) y un `fixed_config` que quedaba
+> muerto por convivir con `node_schema`. Los tres pasan
+> `cargo run --bin dag_engine -- lint <archivo>` sin hallazgos.
 >
-> ```
-> Error: "… is not a graph: invalid type: sequence, expected a map"
-> ```
->
-> Se documentan aquí como ejemplos pendientes de reparación, no como ejemplos
-> funcionales. `cargo run --bin dag_engine -- lint <archivo>` reporta el problema sin
-> ejecutar nada. Anotado en [`docs/BACKLOG.md`](../BACKLOG.md).
+> `forward_generated_artifact.json` genera su propio artefacto y se verificó de punta a
+> punta contra un endpoint real. Los otros dos esperan un documento adjunto, que registra
+> la aplicación anfitriona: corridos desde el CLI el agente responde, con razón, que no
+> hay adjunto. Los tres apuntan a `https://kb.test/documents`, un placeholder — cambiá
+> `base_url` por tu endpoint para ejercitarlos.
 
 ## 8. SQL (tool de base de datos)
 

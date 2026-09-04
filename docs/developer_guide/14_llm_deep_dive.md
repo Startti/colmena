@@ -569,12 +569,24 @@ Focus on: 1) Auth flaws, 2) Input validation, 3) Output encoding. Rate severity.
     "provider": "openai",
     "model": "gpt-4o-mini",
     "api_key": "${OPENAI_API_KEY}",
-    "session_id": "user_123_chat",
     "connection_url": "${DATABASE_URL}",
     "prompt": "What was my previous question?"
   }
 }
 ```
+
+El nodo no lleva ningún campo de sesión: el hilo lo determina el **run**, no el JSON.
+Para que la conversación sobreviva entre runs hay que pasar el mismo
+`--agent-session-id` en cada invocación:
+
+```bash
+cargo run --bin dag_engine -- run graph.json --agent-session-id user_123_chat
+```
+
+> Un `"session_id"` en el `config` de un `llm_call` **no hace nada** desde 2026-04-28: el
+> nodo lee el id que el motor le inyecta y nunca el del JSON. Se lo quitó del catálogo y
+> del `schema()` en 2026-09-03 justamente porque prometía una memoria que no daba. Ver
+> [`15_memory_guide.md`](15_memory_guide.md).
 
 ### **Ejemplo 3: Con Secure Values**
 

@@ -560,7 +560,9 @@ nodeB executes(inputs={result: "data", ...})
 **R:** El edge ÚLTIMO gana. O sé explícito para evitar ambigüedad.
 
 ### **P: ¿Los datos se pierden entre turnos?**
-**R:** Por defecto SÍ (efímero). Usa memoria (`session_id`) para persistencia.
+**R:** Por defecto SÍ (efímero). Para persistencia, dale `connection_url` al `llm_call`
+y corré con el mismo `--agent-session-id` en cada turno — no hay campo de sesión en el
+JSON del nodo. Ver [`15_memory_guide.md`](15_memory_guide.md).
 
 ### **P: ¿Cómo accedo a datos anidados?**
 **R:** Usa `{{object.property}}` o sé explícito en el edge:

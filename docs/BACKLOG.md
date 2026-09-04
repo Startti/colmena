@@ -36,21 +36,32 @@ Lo que quedó abierto, en orden de importancia:
   código en vez de solo verificarlo. La prosa (`description`/`example`/`default`) sigue
   autorada a mano por decisión de alcance.
 
-- **30 grafos de ejemplo llevan `llm_call.session_id`, que no hace nada.** El linter los
-  reporta desde §17. No es config peligrosa —solo inerte— pero engaña: sus autores creen
-  que fijan el hilo de conversación. La forma real es `agent_session_id` (ver
-  [`15_memory_guide.md`](developer_guide/15_memory_guide.md)). Limpiarlos es trabajo
-  mecánico y aparte.
+- ~~**30 grafos de ejemplo llevan `llm_call.session_id`, que no hace nada.**~~ —
+  **HECHO 2026-09-03**, ver CHANGELOG §20. Se quitaron las 30 apariciones, y también las
+  tres fuentes que las originaban: el `schema()` de `llm_call` (que lo anunciaba como
+  config *y* como input, y por esa vía se lo ofrecía a los LLM como parámetro de tool) y
+  el `input_ports` del catálogo. La forma real de fijar el hilo sigue siendo
+  `agent_session_id` (ver [`15_memory_guide.md`](developer_guide/15_memory_guide.md)).
 
-  Endgame: cuando los 37 declaren `config_schema()`, el *set de campos* del JSON pasa a ser
-  verificado/generado; la prosa sigue autorada.
+- ~~**Tres grafos de ejemplo no cargan.**~~ — **HECHO 2026-09-03**, ver CHANGELOG §20.
+  `forward_generated_artifact.json`, `upload_inline_to_endpoint.json` y
+  `upload_signed_url_to_endpoint.json` pasaron a `nodes` como mapa, y correrlos destapó
+  **siete defectos más** que el fallo de carga tapaba: `system_prompt` (el campo es
+  `system_message`), `"type": "trigger"` (el motor registra `trigger_webhook`), `api_key`
+  faltante, un `fixed_config` muerto por convivir con `node_schema`, `url` en vez de
+  `base_url`, el alias `attachment_id` que Plan B borró, y una descripción que se
+  atribuía cobertura de un test que nunca cargó estos archivos. `forward_generated_artifact`
+  quedó verificado de punta a punta contra un endpoint real; los otros dos necesitan una
+  aplicación anfitriona que registre el adjunto.
 
-- **Tres grafos de ejemplo no cargan.** `tests/graphs/agents/forward_generated_artifact.json`,
-  `upload_inline_to_endpoint.json` y `upload_signed_url_to_endpoint.json` declaran `nodes`
-  como array en vez de mapa: `invalid type: sequence, expected a map`. Están anotados en
-  [`docs/examples/USAGE_EXAMPLES.md`](examples/USAGE_EXAMPLES.md) como pendientes de
-  reparación. Reescribirlos requiere verificar que además corran contra los servicios que
-  usan, no solo que deserialicen.
+- **El linter no mira dentro de `tool_configurations`.** Revisa el `config` de cada nodo,
+  pero no el `node_schema` ni el `fixed_config` de las tools que ese nodo declara. Los dos
+  defectos que dejaban la URL vacía en los grafos de §20 —`url` en vez de `base_url`, y un
+  `fixed_config` inerte por convivir con `node_schema`— vivían ahí, y el linter dio "no
+  findings" sobre un grafo que no funcionaba. Es el mismo trabajo que ya hace para el
+  `config`, contra el `node_type` que la tool declara; lo nuevo es la regla de
+  `node_schema` gana sobre `fixed_config` (`dag_tool_executor.rs:1976`), que hoy no la
+  comprueba nadie.
 
 - ~~**`NO_CATALOG_COVERAGE` es inalcanzable desde la CLI.**~~ — **HECHO 2026-09-02**,
   ver CHANGELOG §10. `KnownNodeTypes` separa los dos grados de certeza; con solo el

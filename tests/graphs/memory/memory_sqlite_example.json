@@ -7,7 +7,6 @@
         "api_key": "${GEMINI_API_KEY}",
         "model": "gemini-2.5-flash",
         "system_message": "You are a helpful assistant with perfect memory.",
-        "session_id": "sqlite_test_thread_001",
         "connection_url": "sqlite://colmena_memory.db",
         "prompt": "My name is Alice and I love programming in Rust."
       }
@@ -18,7 +17,6 @@
         "provider": "google",
         "api_key": "${GEMINI_API_KEY}",
         "model": "gemini-2.5-flash",
-        "session_id": "sqlite_test_thread_001",
         "connection_url": "sqlite://colmena_memory.db",
         "prompt": "What is my name and what do I love?"
       }

@@ -25,7 +25,6 @@
         "provider": "google",
         "model": "gemini-2.5-flash",
         "api_key": "${GEMINI_API_KEY}",
-        "session_id": "llm_tool_suspend_flag_smoke",
         "connection_url": "${DATABASE_URL}",
         "temperature": 0.0,
         "stream": false,
