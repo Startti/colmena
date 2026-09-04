@@ -250,6 +250,44 @@ pub fn is_placeholder_key(key: &str) -> bool {
     key.starts_with('<') && key.ends_with('>')
 }
 
+/// What a node type does with a key it does not declare.
+///
+/// The distinction is the whole point of this enum: "not declared" is not the
+/// same verdict everywhere. Most node types ignore the key, a few treat any key
+/// as data, and one repurposes it into something else entirely — which is worse
+/// than ignoring it, because the graph then does something the author never
+/// wrote.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UndeclaredKeyPolicy {
+    /// Every key is meaningful to this node type (`<any_key>`, `<any_text>`).
+    /// Author-supplied keys are the intended way to use it, not mistakes.
+    AcceptsAnything,
+
+    /// The node accepts the key but gives it a different job — `http_request`
+    /// turns any non-reserved input into a query parameter. Worth a warning:
+    /// the engine will not complain, and the graph will not do what it says.
+    Repurposes,
+
+    /// The node reads a closed set of fields and ignores the rest.
+    Ignores,
+}
+
+/// What one placeholder key means, or `None` when this linter has not been
+/// taught that one.
+///
+/// The single source of truth for which placeholders are understood. Both
+/// [`NodeCatalog::undeclared_key_policy`] and the guard test that keeps the
+/// shipped catalog free of uninterpretable placeholders read it, so deleting a
+/// case here fails that test instead of silently switching the tool-field rule
+/// off for every node type that uses it.
+fn placeholder_policy(placeholder: &str) -> Option<UndeclaredKeyPolicy> {
+    match placeholder {
+        "<any_key>" | "<any_text>" => Some(UndeclaredKeyPolicy::AcceptsAnything),
+        "<extra_keys>" => Some(UndeclaredKeyPolicy::Repurposes),
+        _ => None,
+    }
+}
+
 /// The parsed catalog.
 #[derive(Debug, Clone)]
 pub struct NodeCatalog {
@@ -257,6 +295,22 @@ pub struct NodeCatalog {
     node_level_properties: BTreeSet<String>,
     declared_node_types: BTreeSet<String>,
     common_config_fields: BTreeMap<String, FieldSpec>,
+
+    /// Input port names per node type, kept OUTSIDE [`NodeCatalogEntry`] on
+    /// purpose.
+    ///
+    /// A node used as an LLM tool receives its `node_schema` / `fixed_config`
+    /// keys as *inputs*, so judging those keys against `config_fields` alone
+    /// reports working graphs as broken — measured on this repo's corpus, that
+    /// mistake produces 16 false positives (`task` on `subgraph`, `rows` and
+    /// `user` on `python_script`).
+    ///
+    /// It stays out of the entry because phase 2's cross-check compares a
+    /// node's `config_schema()` against the whole entry, and the agreed scope
+    /// of that declaration is the node's *config*. Putting input ports inside
+    /// would force all 37 nodes to declare a second axis for no gain at the
+    /// node level.
+    input_ports: BTreeMap<String, BTreeSet<String>>,
 }
 
 /// Mirrors only the parts of the catalog document this module consumes.
@@ -283,6 +337,22 @@ struct RawCommonConfigFields {
 struct RawCommonProperty {
     #[serde(default)]
     valid_values: Option<Vec<String>>,
+}
+
+/// A second, narrower view of the same document, read only for `input_ports`.
+///
+/// Deserializing the catalog twice is cheaper than the alternative: folding
+/// `input_ports` into [`NodeCatalogEntry`] would change what phase 2's
+/// cross-check compares, and it happens once per process behind a `OnceLock`.
+#[derive(Debug, Deserialize)]
+struct RawInputPortCatalog {
+    node_types: BTreeMap<String, RawInputPorts>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawInputPorts {
+    #[serde(default)]
+    input_ports: BTreeMap<String, Value>,
 }
 
 impl NodeCatalog {
@@ -324,11 +394,19 @@ impl NodeCatalog {
             .into_iter()
             .collect();
 
+        let ports: RawInputPortCatalog = serde_json::from_str(json)?;
+        let input_ports = ports
+            .node_types
+            .into_iter()
+            .map(|(node_type, p)| (node_type, p.input_ports.into_keys().collect()))
+            .collect();
+
         Ok(NodeCatalog {
             node_types: raw.node_types,
             node_level_properties,
             declared_node_types,
             common_config_fields: raw.common_config_fields.fields,
+            input_ports,
         })
     }
 
@@ -338,6 +416,94 @@ impl NodeCatalog {
     /// `None` means "cannot check", never "nothing is allowed".
     pub fn entry(&self, node_type: &str) -> Option<&NodeCatalogEntry> {
         self.node_types.get(node_type)
+    }
+
+    /// Whether `node_type` declares `key` as something it reads.
+    ///
+    /// The union of `config_fields`, `input_ports` and `reserved_input_keys`,
+    /// because a node used as an LLM tool receives its configured keys as
+    /// inputs. Judging against `config_fields` alone reports working graphs as
+    /// broken.
+    ///
+    /// Returns `None` when the catalog has no entry for `node_type`: "cannot
+    /// check", never "nothing is allowed".
+    pub fn declares_tool_key(&self, node_type: &str, key: &str) -> Option<bool> {
+        let entry = self.node_types.get(node_type)?;
+        if entry.config_fields.contains_key(key) || entry.reserved_input_keys.contains(key) {
+            return Some(true);
+        }
+        Some(
+            self.input_ports
+                .get(node_type)
+                .is_some_and(|ports| ports.contains(key)),
+        )
+    }
+
+    /// Every key `node_type` declares, for a "did you mean" suggestion.
+    ///
+    /// Placeholders are excluded: `<any_key>` is not a name anyone meant to
+    /// type.
+    pub fn tool_key_names<'a>(&'a self, node_type: &str) -> Vec<&'a str> {
+        let Some(entry) = self.node_types.get(node_type) else {
+            return Vec::new();
+        };
+        entry
+            .config_fields
+            .keys()
+            .map(String::as_str)
+            .chain(entry.reserved_input_keys.iter().map(String::as_str))
+            .chain(
+                self.input_ports
+                    .get(node_type)
+                    .into_iter()
+                    .flatten()
+                    .map(String::as_str),
+            )
+            .filter(|k| !is_placeholder_key(k))
+            .collect()
+    }
+
+    /// What `node_type` does with a key it does not declare.
+    ///
+    /// Read from the placeholder keys the catalog uses to describe open-ended
+    /// behavior, so a new node type gets the right verdict by documenting
+    /// itself rather than by editing the linter.
+    ///
+    /// Returns `None` when the catalog has no entry for `node_type`.
+    pub fn undeclared_key_policy(&self, node_type: &str) -> Option<UndeclaredKeyPolicy> {
+        let entry = self.node_types.get(node_type)?;
+        let placeholders = entry
+            .config_fields
+            .keys()
+            .map(String::as_str)
+            .chain(
+                self.input_ports
+                    .get(node_type)
+                    .into_iter()
+                    .flatten()
+                    .map(String::as_str),
+            )
+            .filter(|k| is_placeholder_key(k));
+
+        let mut policy = UndeclaredKeyPolicy::Ignores;
+        for placeholder in placeholders {
+            match placeholder_policy(placeholder) {
+                // The node's own data. Every key is intended.
+                Some(UndeclaredKeyPolicy::AcceptsAnything) => {
+                    return Some(UndeclaredKeyPolicy::AcceptsAnything)
+                }
+                // The node keeps the key but changes its job. Weaker than
+                // `AcceptsAnything`, so it does not win over it.
+                Some(other) => policy = other,
+                // An unrecognised placeholder means the catalog describes
+                // something this linter has not been taught. Staying at
+                // `Ignores` would assert more than we know, so treat it as
+                // open: silence is the safe verdict. A test guards the cost of
+                // that silence.
+                None => return Some(UndeclaredKeyPolicy::AcceptsAnything),
+            }
+        }
+        Some(policy)
     }
 
     /// The node types the catalog documents in full.
@@ -446,6 +612,124 @@ mod tests {
         assert!(
             !entry.knows_field("modle"),
             "typo must not be a known field"
+        );
+    }
+
+    /// Every placeholder in the blocks the tool-field rule reads, that
+    /// [`NodeCatalog::undeclared_key_policy`] does not understand.
+    ///
+    /// Parameterised by catalog so the guard below can assert the real document
+    /// is clean AND a second test can prove the scan actually detects — a guard
+    /// that only ever runs against a passing input proves nothing about its own
+    /// detection power.
+    fn unknown_placeholders(catalog: &NodeCatalog) -> Vec<String> {
+        let mut unknown: Vec<String> = Vec::new();
+        for node_type in catalog.covered_node_types() {
+            let entry = catalog.entry(node_type).expect("covered type has an entry");
+            let placeholders = entry
+                .config_fields
+                .keys()
+                .map(String::as_str)
+                .chain(
+                    catalog
+                        .input_ports
+                        .get(node_type)
+                        .into_iter()
+                        .flatten()
+                        .map(String::as_str),
+                )
+                .filter(|k| is_placeholder_key(k));
+            for placeholder in placeholders {
+                if placeholder_policy(placeholder).is_none() {
+                    unknown.push(format!("{node_type}.{placeholder}"));
+                }
+            }
+        }
+        unknown.sort();
+        unknown
+    }
+
+    /// The guard the reliability lens asked for: the shipped catalog must not
+    /// contain a placeholder the rule cannot interpret.
+    ///
+    /// [`NodeCatalog::undeclared_key_policy`] answers a placeholder it does not
+    /// recognise with `AcceptsAnything`, because asserting less would report
+    /// working graphs as broken. The cost of that choice is invisible: ONE new
+    /// placeholder in a node's `config_fields` or `input_ports` silently
+    /// disables the tool-field check for that whole node type, and nothing
+    /// would say so.
+    ///
+    /// This turns that silence into a failing test. It is not hypothetical
+    /// drift: the catalog already uses five other placeholder names
+    /// (`<branch_name>`, `<child_output>`, `<raw>`, `<raw_config>`,
+    /// `<schema_fields>`), all confined today to `output_ports`, which this
+    /// rule does not read. Any of them moving would trip this.
+    #[test]
+    fn every_placeholder_the_tool_field_rule_can_meet_is_one_it_understands() {
+        let unknown = unknown_placeholders(NodeCatalog::embedded());
+        assert!(
+            unknown.is_empty(),
+            "these placeholders appear where the tool-field rule reads, and it \
+             does not know them: {unknown:?}. Until `undeclared_key_policy` is \
+             taught what they mean, that rule is silently OFF for those node \
+             types. Add an arm for each, or move the placeholder to a block the \
+             rule does not read."
+        );
+    }
+
+    /// The guard above passes for free today, because the shipped catalog is
+    /// clean — so on its own it says nothing about whether the scan can detect.
+    /// This proves it can, without needing anyone to edit the real document by
+    /// hand and remember to put it back.
+    #[test]
+    fn the_placeholder_guard_detects_a_placeholder_the_rule_cannot_interpret() {
+        let drifted = NodeCatalog::parse(
+            r#"{
+                "common_node_properties": { "type": { "valid_values": ["add"] } },
+                "node_types": {
+                    "add": {
+                        "config_fields": {},
+                        "input_ports": {
+                            "a": { "type": "number", "required": true },
+                            "<inventado_nuevo>": { "type": "any", "required": false }
+                        }
+                    }
+                }
+            }"#,
+        )
+        .expect("test catalog must parse");
+
+        assert_eq!(
+            unknown_placeholders(&drifted),
+            vec!["add.<inventado_nuevo>".to_string()],
+            "the guard must name the offending node type and placeholder"
+        );
+    }
+
+    /// The fallback itself, pinned so it is a decision rather than an accident.
+    ///
+    /// Silence is the safe answer when the catalog describes behavior this
+    /// linter has not been taught: the alternative, treating the node as a
+    /// closed contract, reports every configured key on it as invented.
+    #[test]
+    fn an_unrecognised_placeholder_makes_the_rule_silent_rather_than_wrong() {
+        let catalog = NodeCatalog::parse(
+            r#"{
+                "common_node_properties": { "type": { "valid_values": ["future_node"] } },
+                "node_types": {
+                    "future_node": {
+                        "config_fields": { "known": { "type": "string", "required": false } },
+                        "input_ports": { "<something_new>": { "type": "any" } }
+                    }
+                }
+            }"#,
+        )
+        .expect("test catalog must parse");
+
+        assert_eq!(
+            catalog.undeclared_key_policy("future_node"),
+            Some(UndeclaredKeyPolicy::AcceptsAnything),
+            "an unknown placeholder must silence the rule, not make it guess"
         );
     }
 
