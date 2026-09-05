@@ -1163,7 +1163,9 @@ impl DagToolExecutor {
                         }
                     }
                 };
+                let started = std::time::Instant::now();
                 let dispatched = dispatcher.call(name, args, &tool_call.id).await;
+                let ms = started.elapsed().as_millis() as u64;
                 // The operator's copy. Everything else about this call goes to
                 // the MODEL, and the contained output reads the same whether the
                 // server answered or failed — so a failure is logged at WARN and
@@ -1174,14 +1176,20 @@ impl DagToolExecutor {
                 if dispatched.failed {
                     tracing::warn!(
                         target: "colmena::mcp",
+                        event = "mcp.dispatch_failed",
                         tool = %name,
+                        tool_call_id = %tool_call.id,
+                        ms = ms,
                         "an MCP tool call failed"
                     );
                 } else {
                     tracing::debug!(
                         target: "colmena::mcp",
+                        event = "mcp.dispatch_ok",
                         tool = %name,
+                        tool_call_id = %tool_call.id,
                         bytes = dispatched.output.len(),
+                        ms = ms,
                         "dispatched an MCP tool call"
                     );
                 }

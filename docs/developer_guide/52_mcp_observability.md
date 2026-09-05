@@ -1,10 +1,12 @@
 # 52. Observabilidad del módulo MCP — eventos `colmena::mcp`
 
-> PR1 de una cadena de 3. Documenta los eventos `tracing` que hoy existen bajo
-> el target `colmena::mcp` — dos nuevos en la ruta de fetch/connect
-> ([`wire.rs`](../../src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/mcp/wire.rs))
-> y dos retrofiteados en [`llm.rs`](../../src/libs/colmena/src/dag_engine/infrastructure/nodes/llm.rs)
-> para llevar el mismo campo `event`. Sigue el contrato general de
+> PR2 de una cadena de 3. PR1 documentó los eventos `tracing` de la ruta de
+> fetch/connect ([`wire.rs`](../../src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/mcp/wire.rs)).
+> Esta PR cierra la ruta de despacho: los dos eventos de
+> [`execute_inner`](../../src/libs/colmena/src/dag_engine/infrastructure/dag_tool_executor.rs)
+> ahora llevan `event =` y latencia (`ms`), y se agrega un tercer evento nuevo
+> en [`call_and_contain`](../../src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/mcp/dispatch.rs)
+> para la refusión de secure values. Sigue el contrato general de
 > [`50_logging_and_observability.md`](./50_logging_and_observability.md): la
 > librería emite, la aplicación decide el filtro.
 
@@ -31,7 +33,10 @@ y puede cambiar.
 - **Nunca** el valor de un header (credenciales, tokens) — solo sus nombres,
   y ni eso en estos eventos.
 - **Nunca** el cuerpo de un resultado de tool.
-- **Nunca** el contenido de los argumentos de una llamada.
+- **Nunca** el VALOR de los argumentos de una llamada. La única excepción es
+  el campo `path` de `mcp.dispatch_refused_secret`: nombra la UBICACIÓN del
+  argumento ofensivo (nombres de campo / índices, tipo `arguments.token` o
+  `items[2].secret`), nunca el valor que llevaba.
 - **Nunca** la URL completa de un servidor (puede llevar query string) —
   solo `host[:port]`, vía el helper `host_of` en `wire.rs`.
 
@@ -43,6 +48,9 @@ y puede cambiar.
 | `mcp.server_ready` | DEBUG | `alias`, `host`, `tools` (conteo expuesto tras dedupe), `ms` | Un servidor MCP respondió y sus tools quedaron expuestas al modelo. Uno por servidor sano. |
 | `mcp.wiring_note` | WARN | (mensaje libre en `notes`, sin campos estructurados) | El catch-all legible de `wire()`/`assemble()`. `notes` tiene **dos orígenes**: un drop a nivel de tool (colisión de nombre, schema sobredimensionado) y **también** un fallo a nivel de servidor, que además ya se reportó de forma estructurada en `mcp.server_unavailable`. Uno por nota. |
 | `mcp.tools_exposed` | INFO | `exposed`, `servers`, `unavailable` | Resumen de fin de turno: cuántas tools quedaron expuestas, cuántos servidores respondieron, cuántos alias quedaron fuera. Solo se emite si `exposed > 0`. |
+| `mcp.dispatch_failed` | WARN | `tool`, `tool_call_id`, `ms` | Una llamada a tool MCP falló — el servidor no fue alcanzable, respondió con error, o el fallo ocurrió antes de la red (ver `mcp.dispatch_refused_secret`). Emitido en `execute_inner`, uno por llamada fallida. |
+| `mcp.dispatch_ok` | DEBUG | `tool`, `tool_call_id`, `bytes`, `ms` | Una llamada a tool MCP se despachó y el servidor contestó sin error. Emitido en `execute_inner`, uno por llamada exitosa. |
+| `mcp.dispatch_refused_secret` | WARN | `alias`, `tool`, `path` | El motor bloqueó la llamada ANTES de tocar la red: los argumentos cargaban un handle de secure value resuelto por el engine. Emitido en `call_and_contain`. `path` nombra la ubicación del argumento ofensivo (nombres de campo / índices) — nunca el valor. Una llamada rechazada así también cuenta como `mcp.dispatch_failed` (el `failed: true` de `McpDispatched` llega hasta `execute_inner`), así que emite **dos** líneas. Para unirlas, usá el `tool_call_id` que lleva `mcp.dispatch_failed`: este evento **no** lo lleva todavía (enhebrarlo hasta `call_and_contain` obliga a tocar sus 12 call sites de test), así que con varias llamadas concurrentes a la misma tool la unión es por `tool` + tiempo. |
 
 `reason` es una etiqueta estable (`FetchFailure::label()` en `wire.rs`), no el
 texto de error — el string humano vive en la nota separada de `wiring.notes`,
@@ -68,14 +76,9 @@ inventar un `0` que un dashboard leería como "resolvió instantáneamente".
 
 ## Pendiente (fuera de alcance de esta PR)
 
-- Los dos eventos de despacho en
-  [`dag_tool_executor.rs`, función `execute_inner`](../../src/libs/colmena/src/dag_engine/infrastructure/dag_tool_executor.rs)
-  (`"an MCP tool call failed"` / `"dispatched an MCP tool call"`) todavía no
-  llevan `event =` ni latencia — se retrofitean en una PR de seguimiento de
-  esta misma cadena. (Citado por nombre de función, no por número de línea:
-  el número se desplaza con cada cambio en el archivo.)
 - Los eventos de acierto/fallo de caché del pool de conexiones MCP
-  (`McpConnectionRegistry`) llegan en otra PR de seguimiento.
+  (`mcp.pool_hit` / `mcp.pool_miss` en `McpConnectionRegistry`) llegan en la
+  PR3 de esta misma cadena.
 
 ## Ver también
 

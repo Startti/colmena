@@ -161,6 +161,14 @@ async fn call_and_contain(
 ) -> McpDispatched {
     if let Some(path) = resolved_secret_in(&arguments) {
         // Refused before the network, so the value never leaves the process.
+        tracing::warn!(
+            target: "colmena::mcp",
+            event = "mcp.dispatch_refused_secret",
+            alias = %alias,
+            tool = %tool,
+            path = %path,
+            "refused an MCP call carrying a secure-value handle"
+        );
         return McpDispatched {
             failed: true,
             output: contain(
