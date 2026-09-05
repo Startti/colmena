@@ -842,3 +842,23 @@ mod sanitize_tests {
         assert_eq!(v["properties"]["x"]["type"], json!("string"));
     }
 }
+
+/// Every `node_type` that is valid ONLY inside `tool_configurations`.
+///
+/// The engine has no runtime enumeration of these: each is a `pub const` in its
+/// own module and `llm.rs` exposes them through one `if` arm apiece. This array
+/// is the one place a reader can see the whole set, and the catalog's
+/// `tool_only_node_types` section is checked against it.
+///
+/// **Adding a synthetic tool means adding it here too.** Nothing forces that —
+/// a new tool absent from both this array and the catalog leaves the two
+/// agreeing on an incomplete set, and the guard passes. Closing that would need
+/// the exposure arms in `llm.rs` to be driven from a table rather than written
+/// out one by one, which is a larger change than this list is worth today.
+pub const TOOL_ONLY_NODE_TYPES: [&str; 5] = [
+    data_run_python::TOOL_DATA_RUN_PYTHON,
+    attachment_run_python::ATTACHMENT_RUN_PYTHON_TOOL_NAME,
+    sql_bulk_tools::SQL_INSPECT_ATTACHMENT_TOOL_NAME,
+    sql_bulk_tools::SQL_BULK_INSERT_TOOL_NAME,
+    crate::dag_engine::domain::tool_configuration::MCP_NODE_TYPE,
+];

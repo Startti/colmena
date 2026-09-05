@@ -288,6 +288,27 @@ fn placeholder_policy(placeholder: &str) -> Option<UndeclaredKeyPolicy> {
     }
 }
 
+/// How a tool-only type is turned on inside `tool_configurations`.
+///
+/// The distinction is not cosmetic: for a [`Self::MapKey`] type the entry's own
+/// `node_type` field is never read, so naming the entry anything else exposes
+/// nothing at all — silently, with no error, warning or log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolActivation {
+    /// Exposed when the `tool_configurations` MAP KEY equals the type's name.
+    MapKey,
+
+    /// Selected by the entry's `node_type` field, the ordinary way.
+    NodeType,
+}
+
+/// A name valid only as a `tool_configurations.<tool>.node_type`.
+#[derive(Debug, Clone)]
+pub struct ToolOnlyType {
+    /// How the entry is turned on. See [`ToolActivation`].
+    pub activated_by: ToolActivation,
+}
+
 /// The parsed catalog.
 #[derive(Debug, Clone)]
 pub struct NodeCatalog {
@@ -311,6 +332,17 @@ pub struct NodeCatalog {
     /// would force all 37 nodes to declare a second axis for no gain at the
     /// node level.
     input_ports: BTreeMap<String, BTreeSet<String>>,
+
+    /// Names valid only inside `tool_configurations`, never as a graph node's
+    /// `type`.
+    ///
+    /// They are absent from `node_types` by necessity, not by omission: that
+    /// map is closed in both directions against the engine's registry, and
+    /// these are synthetic tools `llm_call` assembles itself (or, for `mcp`, a
+    /// remote server alias). Without this list the linter cannot tell
+    /// `data_run_python` — correct, and used by eleven graphs here — from
+    /// `data_run_pythonn`, which exposes nothing.
+    tool_only_types: BTreeMap<String, ToolOnlyType>,
 }
 
 /// Mirrors only the parts of the catalog document this module consumes.
@@ -325,6 +357,8 @@ struct RawCatalog {
     common_node_properties: BTreeMap<String, RawCommonProperty>,
     #[serde(default)]
     common_config_fields: RawCommonConfigFields,
+    #[serde(default)]
+    tool_only_node_types: RawToolOnlyNodeTypes,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -353,6 +387,18 @@ struct RawInputPortCatalog {
 struct RawInputPorts {
     #[serde(default)]
     input_ports: BTreeMap<String, Value>,
+}
+
+/// The `tool_only_node_types` section, read from the same document.
+#[derive(Debug, Default, Deserialize)]
+struct RawToolOnlyNodeTypes {
+    #[serde(default)]
+    types: BTreeMap<String, RawToolOnlyType>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawToolOnlyType {
+    activated_by: String,
 }
 
 impl NodeCatalog {
@@ -407,6 +453,23 @@ impl NodeCatalog {
             declared_node_types,
             common_config_fields: raw.common_config_fields.fields,
             input_ports,
+            tool_only_types: raw
+                .tool_only_node_types
+                .types
+                .into_iter()
+                .map(|(name, raw)| {
+                    let activated_by = match raw.activated_by.as_str() {
+                        "node_type" => ToolActivation::NodeType,
+                        // `map_key` is the stricter reading, and the one that
+                        // makes the linter speak up. An unrecognised value falls
+                        // here on purpose: a catalog that says something this
+                        // code has not been taught should not silently become
+                        // the permissive case. A test names any such value.
+                        _ => ToolActivation::MapKey,
+                    };
+                    (name, ToolOnlyType { activated_by })
+                })
+                .collect(),
         })
     }
 
@@ -416,6 +479,20 @@ impl NodeCatalog {
     /// `None` means "cannot check", never "nothing is allowed".
     pub fn entry(&self, node_type: &str) -> Option<&NodeCatalogEntry> {
         self.node_types.get(node_type)
+    }
+
+    /// The tool-only type named `name`, or `None` when it is not one.
+    ///
+    /// `Some` means "this is a real thing, just not a graph node type" — which
+    /// is what lets the linter stop reporting missing catalog coverage for the
+    /// five synthetic names while still reporting a typo of one.
+    pub fn tool_only_type(&self, name: &str) -> Option<&ToolOnlyType> {
+        self.tool_only_types.get(name)
+    }
+
+    /// Every tool-only type name, for a "did you mean" suggestion.
+    pub fn tool_only_type_names(&self) -> impl Iterator<Item = &str> {
+        self.tool_only_types.keys().map(String::as_str)
     }
 
     /// Whether `node_type` declares `key` as something it reads.
@@ -647,6 +724,42 @@ mod tests {
         }
         unknown.sort();
         unknown
+    }
+
+    /// The fallback the parse comment promises, now actually exercised.
+    ///
+    /// A review found that comment claiming "a test names any such value" when
+    /// no such test existed. `map_key` is the stricter reading — it is the one
+    /// that makes the linter speak up — so an `activated_by` this code has not
+    /// been taught must land there rather than silently becoming the permissive
+    /// case.
+    #[test]
+    fn an_unrecognised_activation_is_read_as_the_stricter_one() {
+        let catalog = NodeCatalog::parse(
+            r#"{
+                "common_node_properties": { "type": { "valid_values": [] } },
+                "node_types": {},
+                "tool_only_node_types": {
+                    "types": {
+                        "future_tool": { "activated_by": "something_new" },
+                        "known_tool": { "activated_by": "node_type" }
+                    }
+                }
+            }"#,
+        )
+        .expect("test catalog must parse");
+
+        assert_eq!(
+            catalog
+                .tool_only_type("future_tool")
+                .map(|t| t.activated_by),
+            Some(ToolActivation::MapKey),
+            "an activation this code does not know must not become the permissive case"
+        );
+        assert_eq!(
+            catalog.tool_only_type("known_tool").map(|t| t.activated_by),
+            Some(ToolActivation::NodeType),
+        );
     }
 
     /// The guard the reliability lens asked for: the shipped catalog must not

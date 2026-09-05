@@ -56,6 +56,9 @@ pub enum DiagnosticCode {
     /// A tool sets a key the target node type does not declare, on a node type
     /// that repurposes unknown keys instead of ignoring them.
     RepurposedToolField,
+    /// A synthetic tool is named by `node_type` but not by the entry's key,
+    /// which is what actually turns it on — so it is never exposed.
+    ToolNeverExposed,
 }
 
 impl DiagnosticCode {
@@ -72,6 +75,7 @@ impl DiagnosticCode {
             DiagnosticCode::NoCatalogCoverage => "NO_CATALOG_COVERAGE",
             DiagnosticCode::DeadFixedConfig => "DEAD_FIXED_CONFIG",
             DiagnosticCode::RepurposedToolField => "REPURPOSED_TOOL_FIELD",
+            DiagnosticCode::ToolNeverExposed => "TOOL_NEVER_EXPOSED",
         }
     }
 }

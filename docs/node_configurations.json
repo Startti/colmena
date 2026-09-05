@@ -3346,6 +3346,40 @@
     }
   },
 
+  "tool_only_node_types": {
+    "description": "Names that are valid ONLY as a `tool_configurations.<tool>.node_type`, never as a graph node's `type`. They are not in the engine's node registry \u2014 they are synthetic tools assembled by `llm_call`, or (for `mcp`) a remote server alias. `node_types` above is closed in both directions against the registry, so these cannot live there. The graph linter reads this list to tell a real synthetic tool from a typo.",
+    "activated_by_explained": {
+      "map_key": "The tool is exposed when the tool_configurations MAP KEY equals this name. The entry's own `node_type` field is never read, so a key that differs silently exposes nothing. The tool's OWN behaviour is configured only through `fixed_config`, read by its own code: `node_schema` and `node_config` do not reach it. They are not inert everywhere, though \u2014 under lazy tool loading the entry still enters the `describe_tool` catalog, which reads `name`, `description`, `summary` and renders `node_schema` as the parameter table the model sees.",
+      "node_type": "The entry is selected by its `node_type` field, the ordinary way. The map key is the server alias that prefixes every tool the server publishes."
+    },
+    "types": {
+      "data_run_python": {
+        "description": "Unified tabular tool: runs Python over CSV/XLSX, Google Sheets and SQL sources. Capabilities are derived from `fixed_config` (`sql` present enables SQL, `enable_gsheets: true` enables Sheets).",
+        "activated_by": "map_key",
+        "defined_in": "src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/data_run_python.rs"
+      },
+      "attachment_run_python": {
+        "description": "DEPRECATED in favour of `data_run_python`. Runs Python over an uploaded attachment.",
+        "activated_by": "map_key",
+        "defined_in": "src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/attachment_run_python.rs"
+      },
+      "sql_inspect_attachment": {
+        "description": "Inspects an uploaded tabular attachment and reports its inferred schema before a bulk insert.",
+        "activated_by": "map_key",
+        "defined_in": "src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/sql_bulk_tools.rs"
+      },
+      "sql_bulk_insert_from_attachment": {
+        "description": "Bulk-inserts the rows of an uploaded tabular attachment into a SQL table.",
+        "activated_by": "map_key",
+        "defined_in": "src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/sql_bulk_tools.rs"
+      },
+      "mcp": {
+        "description": "A remote MCP server, not a tool. The sibling `mcp` block carries the server spec; the map key is the alias prefixing every tool that server publishes. `Graph::validate` fails the graph closed when an `mcp` block sits on any other node_type.",
+        "activated_by": "node_type",
+        "defined_in": "src/libs/colmena/src/dag_engine/domain/tool_configuration.rs"
+      }
+    }
+  },
   "tool_configuration_schema": {
     "description": "Schema for defining DAG nodes as LLM-callable tools within the llm_call node's 'tool_configurations' field. Each tool maps an LLM function call to a specific node type execution with fixed and dynamic parameters.",
     "fields": {
