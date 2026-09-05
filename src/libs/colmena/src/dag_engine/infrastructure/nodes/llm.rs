@@ -3166,12 +3166,18 @@ impl ExecutableNode for LlmNode {
             // subsystem produces goes to the MODEL, so a server that vanished or
             // a tool that lost its name would otherwise be invisible to whoever
             // runs the agent.
+            // `notes` has two origins — a server-level failure (already reported
+            // structurally by `mcp.server_unavailable`) and a tool-level drop
+            // from `fold_catalog` (a name collision, an oversized schema). It is
+            // the human-readable catch-all, so it gets a name that claims only
+            // that: counting server failures is `mcp.server_unavailable`'s job.
             for note in &wiring.notes {
-                tracing::warn!(target: "colmena::mcp", "{note}");
+                tracing::warn!(target: "colmena::mcp", event = "mcp.wiring_note", "{note}");
             }
             if !wiring.definitions.is_empty() {
                 tracing::info!(
                     target: "colmena::mcp",
+                    event = "mcp.tools_exposed",
                     exposed = wiring.definitions.len(),
                     servers = wiring.bindings.len(),
                     unavailable = wiring.unavailable.len(),
