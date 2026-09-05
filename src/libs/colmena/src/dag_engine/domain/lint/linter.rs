@@ -4,7 +4,9 @@
 //! [`LintContext`], which keeps this layer free of infrastructure and makes
 //! every check trivially testable.
 
-use super::catalog::{is_placeholder_key, NodeCatalog, NodeCatalogEntry, UndeclaredKeyPolicy};
+use super::catalog::{
+    is_placeholder_key, NodeCatalog, NodeCatalogEntry, ToolActivation, UndeclaredKeyPolicy,
+};
 use super::diagnostic::{Diagnostic, DiagnosticCode, LintReport, Severity};
 use crate::dag_engine::domain::graph::{Graph, NodeConfig};
 use serde_json::{Map, Value};
@@ -274,6 +276,20 @@ fn lint_raw_tool_fields(document: &Value, ctx: &LintContext<'_>, report: &mut Li
             continue;
         };
 
+        // A synthetic tool or an MCP alias is a real thing the catalog documents
+        // separately, because `node_types` is closed against the engine's
+        // registry and these are not registered nodes. Reporting missing
+        // coverage for them was noise on eleven correct graphs here; skipping
+        // them is also what makes that same report meaningful for a typo.
+        if let Some(tool_only) = ctx.catalog.tool_only_type(node_type) {
+            if tool_only.activated_by == ToolActivation::MapKey && tool_name != node_type {
+                report
+                    .diagnostics
+                    .push(never_exposed(node_id, tool_name, node_type));
+            }
+            continue;
+        }
+
         if ctx.catalog.entry(node_type).is_none() {
             if TOOL_FIELD_BLOCKS
                 .iter()
@@ -288,9 +304,24 @@ fn lint_raw_tool_fields(document: &Value, ctx: &LintContext<'_>, report: &mut Li
                         "tool \"{tool_name}\" targets \"{node_type}\", which has no entry in \
                          the node catalog, so its configuration was not checked"
                     ),
-                    suggestion: Some(
-                        "add an entry to docs/node_configurations.json to enable checking".into(),
-                    ),
+                    // Now that the catalog names the synthetic tools, a near
+                    // miss of one is worth saying out loud: before this the
+                    // same info fired for `data_run_python` and for
+                    // `data_run_pythonn`, and telling the author of a typo to
+                    // "add a catalog entry" sends them the wrong way.
+                    suggestion: suggest(
+                        node_type,
+                        ctx.catalog
+                            .covered_node_types()
+                            .chain(ctx.catalog.tool_only_type_names()),
+                    )
+                    .map(|s| format!("did you mean \"{s}\"?"))
+                    .or_else(|| {
+                        Some(
+                            "add an entry to docs/node_configurations.json to enable checking"
+                                .into(),
+                        )
+                    }),
                 });
             }
             continue;
@@ -323,6 +354,40 @@ fn lint_raw_tool_fields(document: &Value, ctx: &LintContext<'_>, report: &mut Li
                 ));
             }
         }
+    }
+}
+
+/// Reports a synthetic tool that will never be handed to the model.
+///
+/// These four are turned on by the `tool_configurations` MAP KEY, not by the
+/// entry's `node_type` — `llm.rs` collects the keys into `configured_aliases`
+/// and gates on `configured_aliases.contains(TOOL_DATA_RUN_PYTHON)`. The
+/// `node_type` field of such an entry is read by nothing.
+///
+/// So an entry keyed `my_python` with `"node_type": "data_run_python"` exposes
+/// no tool at all. Nothing says so: `available_tools` does look the name up in
+/// the registry, gets `None`, and skips the entry with no `else` arm and no
+/// log. The graph loads, validates, runs, and exits zero — the only symptom is
+/// an agent that says it cannot do the task.
+///
+/// The rule is deliberately narrow: it fires only when the catalog says the
+/// type is key-activated, so `mcp` — where `node_type` IS what selects the
+/// entry — is untouched.
+fn never_exposed(node_id: &str, tool_name: &str, node_type: &str) -> Diagnostic {
+    Diagnostic {
+        severity: Severity::Error,
+        code: DiagnosticCode::ToolNeverExposed,
+        node_id: Some(node_id.to_string()),
+        field: Some(format!("tool_configurations.{tool_name}")),
+        message: format!(
+            "\"{node_type}\" is turned on by the entry's KEY, not by its \"node_type\"; \
+             this entry is keyed \"{tool_name}\", so the tool is never handed to the \
+             model and nothing reports it at run time"
+        ),
+        suggestion: Some(format!(
+            "rename the entry key to \"{node_type}\", or drop the entry if the tool is \
+             not wanted"
+        )),
     }
 }
 

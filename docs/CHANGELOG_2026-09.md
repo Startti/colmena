@@ -1130,3 +1130,90 @@ tres métodos públicos. Ningún grafo existente cambia de resultado en severida
 bloqueantes.
 
 **Estado.** done.
+
+---
+
+## 23. Los cinco tipos que sólo existen dentro de `tool_configurations`
+
+**Qué.** Tercera y última rebanada del hueco que abrió la §20. Cierra los 14
+`info` que la §22 dejó sobre tools sintéticas, y con la misma información
+resuelve un defecto que el backlog no anticipaba.
+
+### La sección nueva del catálogo
+
+`node_types` está cerrado en las dos direcciones contra el registry del motor:
+un test falla si documenta algo que el motor no ejecuta, otro si el motor
+registra algo sin documentar. Pero cinco nombres son válidos como `node_type` de
+una tool sin ser nodos registrados — cuatro tools sintéticas que `llm_call`
+ensambla, más `mcp`, que es un servidor remoto. Van en `tool_only_node_types`,
+aparte, para no romper esa invariante.
+
+Sin esa lista el linter decía lo mismo de `data_run_python` —correcto, usado por
+once grafos— y de `data_run_pythonn`, que no expone nada. Ahora calla en el
+primero y en el segundo sugiere el nombre real.
+
+### El defecto que apareció midiendo
+
+Para las cuatro tools sintéticas, el `node_type` de la entrada **es inerte**. Lo
+que activa la tool es la **clave del mapa**: `llm_call` junta las claves en
+`configured_aliases` y pregunta `configured_aliases.contains(TOOL_DATA_RUN_PYTHON)`.
+
+```json
+"mi_python":       { "node_type": "data_run_python" }    // no expone NADA
+"data_run_python": { "node_type": "lo_que_sea" }         // sí expone la tool
+```
+
+Para cualquier otro nodo, poner un alias descriptivo es lo correcto y funciona.
+La regla se invierte sólo para estas cuatro, y nada avisa: `available_tools`
+busca el nombre en el registry, obtiene `None` y descarta la entrada **sin rama
+`else` y sin log** — la rama de toolkits de al lado sí advierte.
+
+Verificado corriendo dos grafos idénticos salvo la clave. El keyeado
+`data_run_python` emitió `tool-input-start`, `tool-input-available` y
+`tool-output-available`, y el modelo llamó la tool con `{"code":"output = 2 + 2"}`
+(falló después en `sql_connect_failed`, por una URL de Postgres inventada a
+propósito). El keyeado `mi_python` no emitió **ninguna** frame de tool y el agente
+contestó que no tenía herramienta. Los dos salieron con código 0.
+
+`TOOL_NEVER_EXPOSED` (error) reporta ese caso antes de correr nada. La regla lee
+la forma de activación desde el catálogo (`activated_by`), no de una lista en el
+código, así que `mcp` —donde el `node_type` sí selecciona la entrada— queda fuera
+por construcción y no por una excepción escrita a mano.
+
+### El guard de drift
+
+No existe **ninguna** enumeración de las tools sintéticas en el motor: cada
+nombre es una `pub const` en su propio módulo y la exposición son cuatro `if`
+sueltos en `llm.rs`. La lista del catálogo es entonces un espejo hecho a mano, y
+un espejo a mano se desvía. Un test en infraestructura —la única capa que ve las
+constantes y el catálogo a la vez; el linter es dominio y no debe alcanzarlas—
+los cruza en las dos direcciones. Verificado por mutación: sacar
+`data_run_python` del catálogo lo hace fallar nombrándolo.
+
+### Ruido medido
+
+`error` y `warning` quedan en 75 y 5, idénticos al baseline. Los `info` bajan de
+**14 a 0**.
+
+Un test existente se rompió al hacerlo, y con razón: usaba `data_run_python` como
+ejemplo de "tipo sin cobertura", y ese nombre ahora es conocido. Habría seguido
+en verde sin ejercitar la rama para la que se escribió. Se cambió por un nombre
+que no es ni node type ni tool-only.
+
+### Sobre las tres rebanadas
+
+| Rebanada | Rondas de revisión | Qué costó |
+|---|---:|---|
+| 1 — precedencia | 5 | afirmar límites sin enumerar los casos |
+| 2 — campos | 3 | fixtures que pasaban por la razón equivocada |
+| 3 — tipos tool-only | — | medir primero; el alcance cambió antes de escribir |
+
+En esta rebanada la exploración cambió el diseño **antes** de la primera línea de
+código: el backlog decía "tools sintéticas en `KnownNodeTypes`", y `KnownNodeTypes`
+resultó consultarse sólo para nodos del grafo, nunca para tools.
+
+**Alcance.** Aditivo. Una sección nueva en el catálogo, un `DiagnosticCode` nuevo
+y dos métodos públicos. Ningún grafo existente cambia de resultado en severidades
+bloqueantes.
+
+**Estado.** done.

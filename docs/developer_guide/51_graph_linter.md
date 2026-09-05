@@ -58,6 +58,7 @@ camino de adopción para quien lo quiera en CI.
 | `EDGE_UNKNOWN_NODE` | error | Un edge apunta a un nodo que el grafo no define |
 | `DEAD_FIXED_CONFIG` | error | Una tool declara `fixed_config` junto a `node_schema`; el executor lee el segundo y **descarta el primero entero** |
 | `REPURPOSED_TOOL_FIELD` | warning | Una tool fija una clave que el nodo destino no declara, en un tipo de nodo que **reinterpreta** las claves desconocidas en vez de ignorarlas |
+| `TOOL_NEVER_EXPOSED` | error | Una tool sintética nombrada en `node_type` pero **no en la clave** de la entrada, que es lo que realmente la activa — el modelo nunca la recibe |
 | `NO_CATALOG_COVERAGE` | info | El tipo de nodo no tiene entrada en el catálogo: **no se revisó** |
 
 Los `code` son estables. Cualquier consumidor (la salida JSON, una UI sobre los
@@ -198,6 +199,53 @@ los guarda en un mapa lateral.
 **Se revisa también `node_config`.** Es el bloque que usan las entradas toolkit
 (`expose_sub_tools`): las 15 del corpus configuran su nodo por ahí y nunca por
 `fixed_config`.
+
+## Los cinco tipos que sólo existen dentro de `tool_configurations`
+
+`node_types` en el catálogo está **cerrado en las dos direcciones** contra el
+registry del motor: un test falla si documenta algo que el motor no ejecuta, y
+otro si el motor registra algo sin documentar. Pero cinco nombres son válidos
+como `node_type` de una tool y **no** son nodos registrados — cuatro tools
+sintéticas que `llm_call` ensambla, más `mcp`, que es un servidor remoto. Viven
+en una sección aparte, `tool_only_node_types`.
+
+Sin esa lista el linter no podía distinguir `data_run_python` —correcto, y usado
+por once grafos de este repo— de `data_run_pythonn`, que no expone nada. Decía lo
+mismo de los dos.
+
+### La trampa: para cuatro de ellos, `node_type` es inerte
+
+Una entrada de `tool_configurations` tiene dos identificadores, la **clave** del
+mapa y el campo **`node_type`**. Para un nodo normal manda el `node_type`, y la
+clave es sólo el nombre que ve el modelo. Para estas cuatro es al revés:
+`llm_call` junta las claves en `configured_aliases` y pregunta
+`configured_aliases.contains("data_run_python")`. El `node_type` de esa entrada
+no lo lee nadie.
+
+```json
+"mi_python":       { "node_type": "data_run_python" }    // no expone NADA
+"data_run_python": { "node_type": "lo_que_sea" }         // sí expone la tool
+```
+
+Nada avisa. `available_tools` sí busca el nombre en el registry, obtiene `None`
+y descarta la entrada **sin rama `else` y sin log** — la rama de toolkits de al
+lado sí advierte, ésta no. El grafo carga, valida, corre y termina en cero; el
+único síntoma es un agente que dice que no puede hacer la tarea.
+
+Se verificó corriendo dos grafos idénticos salvo la clave: el keyeado
+`data_run_python` emitió frames `tool-input-*` y `tool-output-available` y el
+modelo llamó la tool; el keyeado `mi_python` no emitió ninguna frame de tool y el
+agente contestó que no tenía herramienta. Los dos salieron con código 0.
+
+`TOOL_NEVER_EXPOSED` reporta ese caso. La regla lee de qué forma se activa cada
+tipo desde el catálogo (`activated_by`), no de una lista en el código, así que
+`mcp` —donde el `node_type` **sí** selecciona la entrada— queda fuera por
+construcción y no por una excepción escrita a mano.
+
+Para estas cuatro, además, `node_schema`, `node_config`, `name` y `description`
+se **ignoran**: sólo se lee `fixed_config`, y lo lee código propio de cada tool.
+Por eso el catálogo documenta su existencia y su forma de activación, pero no sus
+campos — el linter no podría validarlos.
 
 ## Las decisiones que evitan el ruido
 

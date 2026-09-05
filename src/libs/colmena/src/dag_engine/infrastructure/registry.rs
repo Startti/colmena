@@ -1048,6 +1048,56 @@ mod catalog_coverage_tests {
         );
     }
 
+    /// The catalog's `tool_only_node_types` must name exactly the synthetic
+    /// tools the engine actually assembles.
+    ///
+    /// There is no enumeration of these anywhere in the engine — each name is a
+    /// standalone `pub const` in its own module, and exposure is four separate
+    /// `if` arms in `llm.rs`. The catalog list is therefore a hand-kept mirror,
+    /// and a hand-kept mirror drifts. This is the same both-directions
+    /// invariant `node_types` has against the registry:
+    ///
+    /// - a name in the catalog that no longer exists in code makes the linter
+    ///   accept a tool the engine will never expose;
+    /// - a name in code that is missing from the catalog brings back the noise
+    ///   this section removed, and silences `TOOL_NEVER_EXPOSED` for it.
+    ///
+    /// This test lives in infrastructure because that is the only layer that
+    /// can see both the consts and the catalog; the linter itself is domain and
+    /// must not reach for them.
+    #[test]
+    fn the_catalog_names_exactly_the_synthetic_tools_the_engine_assembles() {
+        use crate::dag_engine::domain::tool_configuration::MCP_NODE_TYPE;
+        use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::{
+            attachment_run_python::ATTACHMENT_RUN_PYTHON_TOOL_NAME,
+            data_run_python::TOOL_DATA_RUN_PYTHON,
+            sql_bulk_tools::{SQL_BULK_INSERT_TOOL_NAME, SQL_INSPECT_ATTACHMENT_TOOL_NAME},
+        };
+
+        let in_code: std::collections::BTreeSet<&str> = [
+            TOOL_DATA_RUN_PYTHON,
+            ATTACHMENT_RUN_PYTHON_TOOL_NAME,
+            SQL_INSPECT_ATTACHMENT_TOOL_NAME,
+            SQL_BULK_INSERT_TOOL_NAME,
+            MCP_NODE_TYPE,
+        ]
+        .into_iter()
+        .collect();
+
+        let in_catalog: std::collections::BTreeSet<&str> =
+            NodeCatalog::embedded().tool_only_type_names().collect();
+
+        assert_eq!(
+            in_catalog,
+            in_code,
+            "docs/node_configurations.json `tool_only_node_types` disagrees with the \
+             synthetic tools the engine assembles. Missing from the catalog: {:?}. \
+             Documented but gone from the code: {:?}.",
+            in_code.difference(&in_catalog).collect::<Vec<_>>(),
+            in_catalog.difference(&in_code).collect::<Vec<_>>()
+        );
+    }
+
     fn catalog_types_not_registered(
         registered: &std::collections::HashMap<String, Arc<dyn ExecutableNode>>,
     ) -> Vec<&'static str> {

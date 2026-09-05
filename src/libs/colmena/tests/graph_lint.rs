@@ -1324,12 +1324,17 @@ fn every_block_that_names_node_fields_is_checked() {
 }
 
 /// A tool targeting a node type the catalog does not document is reported once
-/// for the ENTRY, not once per key — otherwise the eleven `data_run_python`
-/// tools in this repo's corpus would bury everything else.
+/// for the ENTRY, not once per key — otherwise a single misconfigured tool
+/// would bury everything else under one finding per field.
+///
+/// The fixture was `data_run_python` until the catalog gained its
+/// `tool_only_node_types` section; that name is now known, so this test would
+/// have quietly stopped exercising the branch it was written for. It uses a
+/// name that is neither a node type nor a tool-only type.
 #[test]
 fn an_uncatalogued_target_is_reported_once_per_entry() {
     let report = lint_json(tool_graph(
-        "data_run_python",
+        "definitely_not_a_tool_type",
         "fixed_config",
         serde_json::json!({ "sql": "select 1", "enable_gsheets": true, "code": "x" }),
     ));
@@ -1367,4 +1372,117 @@ fn a_tool_entry_without_a_node_type_is_left_alone() {
     }));
     assert!(find(&report, DiagnosticCode::UnknownField).is_none());
     assert!(find(&report, DiagnosticCode::NoCatalogCoverage).is_none());
+}
+
+/// Builds a graph whose single tool entry is keyed `key` and targets `node_type`.
+fn keyed_tool_graph(key: &str, node_type: &str) -> serde_json::Value {
+    serde_json::json!({
+        "nodes": {
+            "agent": {
+                "type": "llm_call",
+                "config": {
+                    "provider": "google", "api_key": "k", "model": "gemini-2.5-flash",
+                    "tool_configurations": {
+                        key: {
+                            "node_type": node_type,
+                            "fixed_config": { "sql": { "connection_url": "postgres://x/y" } }
+                        }
+                    }
+                }
+            }
+        },
+        "edges": []
+    })
+}
+
+/// The defect this rule exists for, reproduced end to end before it was written.
+///
+/// The four synthetic tools are turned on by the `tool_configurations` MAP KEY,
+/// never by the entry's `node_type` — `llm.rs` collects the keys into
+/// `configured_aliases` and gates on `configured_aliases.contains(...)`. Two
+/// graphs identical except for that key were run through the engine: the one
+/// keyed `data_run_python` emitted `tool-input-*` and `tool-output-available`
+/// frames and the model called the tool; the one keyed `mi_python` emitted no
+/// tool frame at all and the agent answered that it had no tool. Both exited
+/// zero, and nothing in between said why.
+#[test]
+fn a_synthetic_tool_keyed_under_another_name_is_reported_as_never_exposed() {
+    let report = lint_json(keyed_tool_graph("mi_python", "data_run_python"));
+
+    let d = find(&report, DiagnosticCode::ToolNeverExposed)
+        .expect("a synthetic tool that will never be exposed must be caught");
+    assert_eq!(d.severity, Severity::Error);
+    assert_eq!(d.field.as_deref(), Some("tool_configurations.mi_python"));
+    assert!(
+        d.message.contains("KEY"),
+        "the message must name what actually turns the tool on, got: {}",
+        d.message
+    );
+    assert!(d
+        .suggestion
+        .as_deref()
+        .is_some_and(|s| s.contains("data_run_python")));
+}
+
+/// The working form, which must stay silent — it is how eleven graphs in this
+/// repo are written.
+#[test]
+fn a_synthetic_tool_keyed_by_its_own_name_is_left_alone() {
+    for name in [
+        "data_run_python",
+        "attachment_run_python",
+        "sql_inspect_attachment",
+        "sql_bulk_insert_from_attachment",
+    ] {
+        let report = lint_json(keyed_tool_graph(name, name));
+        assert!(
+            report.is_clean(),
+            "{name} keyed by its own name must produce nothing, got: {:?}",
+            codes(&report)
+        );
+    }
+}
+
+/// `mcp` is the exception and the reason the rule reads activation from the
+/// catalog instead of hardcoding a list: there the `node_type` field IS what
+/// selects the entry, and the map key is the server alias that prefixes every
+/// tool the server publishes. Reporting a mismatch would be a false positive on
+/// the documented, correct shape.
+#[test]
+fn an_mcp_entry_is_not_judged_by_its_key() {
+    let report = lint_json(serde_json::json!({
+        "nodes": {
+            "agent": {
+                "type": "llm_call",
+                "config": {
+                    "provider": "google", "api_key": "k", "model": "gemini-2.5-flash",
+                    "tool_configurations": {
+                        "deepwiki": {
+                            "node_type": "mcp",
+                            "mcp": { "url": "https://mcp.example.test/sse" }
+                        }
+                    }
+                }
+            }
+        },
+        "edges": []
+    }));
+    assert!(find(&report, DiagnosticCode::ToolNeverExposed).is_none());
+    assert!(find(&report, DiagnosticCode::NoCatalogCoverage).is_none());
+}
+
+/// Before the catalog named the synthetic tools, this info fired identically
+/// for `data_run_python` (correct, used by eleven graphs) and for a typo of it,
+/// so it could not distinguish them and its advice — add a catalog entry —
+/// pointed a typo the wrong way.
+#[test]
+fn a_mistyped_synthetic_tool_is_still_reported_and_names_the_real_one() {
+    let report = lint_json(keyed_tool_graph("data_run_pythonn", "data_run_pythonn"));
+
+    let d = find(&report, DiagnosticCode::NoCatalogCoverage)
+        .expect("an unknown target must still be reported");
+    assert_eq!(
+        d.suggestion.as_deref(),
+        Some("did you mean \"data_run_python\"?")
+    );
 }
