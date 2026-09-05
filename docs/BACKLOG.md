@@ -83,14 +83,24 @@ Lo que quedó abierto, en orden de importancia:
   correcto es un código propio, `MALFORMED_TOOL_ENTRY`, que reproduzca el chequeo de
   `validate()` sin ejecutar nada.
 
-  ~~**Rebanada 3 — las tools sintéticas.**~~ — **HECHA 2026-09-04**, ver CHANGELOG §23. El
-  catálogo gana `tool_only_node_types` con los cinco nombres válidos sólo dentro de
-  `tool_configurations`, y un test los cruza contra las constantes de producción en ambas
-  direcciones. Los 14 `info` del corpus desaparecen y un `node_type` sintético mal escrito
-  pasa a sugerir el nombre real. La investigación destapó además un defecto que este item
-  no anticipaba: para las cuatro tools sintéticas el `node_type` es **inerte** —la activa
-  la clave del mapa— así que una entrada keyeada con un alias no expone nada y nada lo
-  reporta. Cubierto por el código nuevo `TOOL_NEVER_EXPOSED`.
+  ~~**Rebanada 3 — las tools sintéticas.**~~ — **HECHA 2026-09-05**, ver CHANGELOG §23. El
+  catálogo nombra los cinco tipos válidos sólo dentro de `tool_configurations`
+  (`tool_only_node_types`), con un test que los cruza contra las constantes de producción
+  en ambas direcciones; los 14 `info` del corpus desaparecen y un `node_type` sintético mal
+  escrito sugiere el nombre real. Incluye `TOOL_NEVER_EXPOSED`, que reporta una entrada
+  sintética keyeada con un alias — caso que no expone nada y que nada reportaba.
+
+  Se intentó rebanar en "los nombres" y "la regla", y **no se puede**: saltear los nombres
+  sin la regla deja el caso roto en silencio total, peor que antes. Una revisión lo
+  clasificó como `worsened`; un test fija la lección.
+
+- **El linter aconseja mal cuando un tipo tool-only se usa como nodo del grafo.**
+  Preexistente, confirmado por revisión. `data_run_python` puesto como `type` de un nodo
+  reporta `NO_CATALOG_COVERAGE` con el consejo "agregá una entrada a
+  `docs/node_configurations.json`" — imposible de seguir, porque `node_types` está cerrado
+  en ambas direcciones contra el registry y esa entrada haría fallar el test suite. El
+  consejo correcto es que ese tipo va dentro de `tool_configurations`. El dato ya está
+  disponible en ambos caminos (`tool_only_type_names()`); falta usarlo en `lint_node`.
 
 - ~~**`NO_CATALOG_COVERAGE` es inalcanzable desde la CLI.**~~ — **HECHO 2026-09-02**,
   ver CHANGELOG §10. `KnownNodeTypes` separa los dos grados de certeza; con solo el

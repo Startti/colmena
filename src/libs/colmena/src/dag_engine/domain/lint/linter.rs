@@ -368,11 +368,19 @@ fn lint_raw_tool_fields(document: &Value, ctx: &LintContext<'_>, report: &mut Li
 /// no tool at all. Nothing says so: `available_tools` does look the name up in
 /// the registry, gets `None`, and skips the entry with no `else` arm and no
 /// log. The graph loads, validates, runs, and exits zero — the only symptom is
-/// an agent that says it cannot do the task.
+/// an agent that says it cannot do the task. Verified live on two graphs
+/// identical but for the key: the correctly keyed one emitted tool frames and
+/// the model called the tool; the other emitted none.
 ///
-/// The rule is deliberately narrow: it fires only when the catalog says the
-/// type is key-activated, so `mcp` — where `node_type` IS what selects the
-/// entry — is untouched.
+/// This rule is also why teaching the linter these five names cannot ship on
+/// its own. Skipping them unconditionally would take this exact broken shape
+/// from a weak `NO_CATALOG_COVERAGE` note to complete silence — a review caught
+/// that regression, and the answer was to land the rule with the names rather
+/// than after them.
+///
+/// Deliberately narrow: it fires only when the catalog says the type is
+/// key-activated, so `mcp` — where `node_type` IS what selects the entry — is
+/// untouched by construction rather than by a hand-written exception.
 fn never_exposed(node_id: &str, tool_name: &str, node_type: &str) -> Diagnostic {
     Diagnostic {
         severity: Severity::Error,

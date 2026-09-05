@@ -1395,35 +1395,6 @@ fn keyed_tool_graph(key: &str, node_type: &str) -> serde_json::Value {
     })
 }
 
-/// The defect this rule exists for, reproduced end to end before it was written.
-///
-/// The four synthetic tools are turned on by the `tool_configurations` MAP KEY,
-/// never by the entry's `node_type` — `llm.rs` collects the keys into
-/// `configured_aliases` and gates on `configured_aliases.contains(...)`. Two
-/// graphs identical except for that key were run through the engine: the one
-/// keyed `data_run_python` emitted `tool-input-*` and `tool-output-available`
-/// frames and the model called the tool; the one keyed `mi_python` emitted no
-/// tool frame at all and the agent answered that it had no tool. Both exited
-/// zero, and nothing in between said why.
-#[test]
-fn a_synthetic_tool_keyed_under_another_name_is_reported_as_never_exposed() {
-    let report = lint_json(keyed_tool_graph("mi_python", "data_run_python"));
-
-    let d = find(&report, DiagnosticCode::ToolNeverExposed)
-        .expect("a synthetic tool that will never be exposed must be caught");
-    assert_eq!(d.severity, Severity::Error);
-    assert_eq!(d.field.as_deref(), Some("tool_configurations.mi_python"));
-    assert!(
-        d.message.contains("KEY"),
-        "the message must name what actually turns the tool on, got: {}",
-        d.message
-    );
-    assert!(d
-        .suggestion
-        .as_deref()
-        .is_some_and(|s| s.contains("data_run_python")));
-}
-
 /// The working form, which must stay silent — it is how eleven graphs in this
 /// repo are written.
 #[test]
@@ -1443,11 +1414,18 @@ fn a_synthetic_tool_keyed_by_its_own_name_is_left_alone() {
     }
 }
 
-/// `mcp` is the exception and the reason the rule reads activation from the
-/// catalog instead of hardcoding a list: there the `node_type` field IS what
-/// selects the entry, and the map key is the server alias that prefixes every
-/// tool the server publishes. Reporting a mismatch would be a false positive on
-/// the documented, correct shape.
+/// `mcp` is a tool-only type like the other four, so it must not be reported as
+/// missing catalog coverage either — even though its shape is different: there
+/// the `node_type` field IS what selects the entry, and the map key is the
+/// server alias that prefixes every tool the server publishes.
+///
+/// The fixture carries a `fixed_config` it would not have in real life. That is
+/// deliberate, and a review caught the earlier version for lacking it: the
+/// coverage report only fires for an entry that has one of the field blocks, so
+/// without one this test passed whether the tool-only skip was present or
+/// deleted — it proved nothing about `mcp`. Verified by mutation: removing the
+/// skip entirely now fails this test, where before it stayed green and only its
+/// sibling noticed.
 #[test]
 fn an_mcp_entry_is_not_judged_by_its_key() {
     let report = lint_json(serde_json::json!({
@@ -1459,7 +1437,8 @@ fn an_mcp_entry_is_not_judged_by_its_key() {
                     "tool_configurations": {
                         "deepwiki": {
                             "node_type": "mcp",
-                            "mcp": { "url": "https://mcp.example.test/sse" }
+                            "mcp": { "url": "https://mcp.example.test/sse" },
+                            "fixed_config": { "unused_by_mcp": true }
                         }
                     }
                 }
@@ -1467,7 +1446,6 @@ fn an_mcp_entry_is_not_judged_by_its_key() {
         },
         "edges": []
     }));
-    assert!(find(&report, DiagnosticCode::ToolNeverExposed).is_none());
     assert!(find(&report, DiagnosticCode::NoCatalogCoverage).is_none());
 }
 
@@ -1485,4 +1463,81 @@ fn a_mistyped_synthetic_tool_is_still_reported_and_names_the_real_one() {
         d.suggestion.as_deref(),
         Some("did you mean \"data_run_python\"?")
     );
+}
+
+/// The case the whole slice exists for, and the one a review caught as
+/// newly-silenced: a synthetic tool named by `node_type` but keyed under
+/// something else is never handed to the model.
+///
+/// Reproduced live before the rule was written. Two graphs identical but for
+/// the map key: the one keyed `data_run_python` emitted `tool-input-*` and
+/// `tool-output-available`, and the model called the tool; the one keyed
+/// `mi_python` emitted no tool frame at all and the agent answered that it had
+/// no tool. Both exited zero.
+#[test]
+fn a_synthetic_tool_keyed_under_another_name_is_reported_as_never_exposed() {
+    let report = lint_json(keyed_tool_graph("mi_python", "data_run_python"));
+
+    let d = find(&report, DiagnosticCode::ToolNeverExposed)
+        .expect("a synthetic tool that will never be exposed must be caught");
+    assert_eq!(d.severity, Severity::Error);
+    assert_eq!(d.field.as_deref(), Some("tool_configurations.mi_python"));
+    assert!(
+        d.message.contains("KEY"),
+        "the message must name what actually turns the tool on, got: {}",
+        d.message
+    );
+    assert!(d
+        .suggestion
+        .as_deref()
+        .is_some_and(|s| s.contains("data_run_python")));
+}
+
+/// The regression guard for the reason this rule could not be deferred.
+///
+/// Teaching the linter the five tool-only names means skipping them, and an
+/// unconditional skip would take the mis-keyed shape above from a weak
+/// `NO_CATALOG_COVERAGE` note to complete silence — strictly worse than before
+/// the catalog knew the names at all. This pins that the mis-keyed entry is
+/// never silent: it must produce a finding, and specifically not the coverage
+/// note, which would be the wrong diagnosis.
+#[test]
+fn teaching_the_linter_these_names_never_makes_a_broken_entry_quieter() {
+    let report = lint_json(keyed_tool_graph("mi_python", "data_run_python"));
+
+    assert!(
+        !report.is_clean(),
+        "a mis-keyed synthetic tool must never lint clean"
+    );
+    assert!(
+        find(&report, DiagnosticCode::NoCatalogCoverage).is_none(),
+        "the coverage note is the wrong diagnosis here — the name IS known"
+    );
+}
+
+/// A tool-only type whose activation is by `node_type` rather than by the key
+/// must not be judged on its key. `mcp` is the only such type today, and its map
+/// key is deliberately the server alias, so comparing it would be a false
+/// positive on the documented, correct shape.
+#[test]
+fn a_node_type_activated_entry_is_not_judged_by_its_key() {
+    let report = lint_json(serde_json::json!({
+        "nodes": {
+            "agent": {
+                "type": "llm_call",
+                "config": {
+                    "provider": "google", "api_key": "k", "model": "gemini-2.5-flash",
+                    "tool_configurations": {
+                        "deepwiki": {
+                            "node_type": "mcp",
+                            "mcp": { "url": "https://mcp.example.test/sse" },
+                            "fixed_config": { "unused_by_mcp": true }
+                        }
+                    }
+                }
+            }
+        },
+        "edges": []
+    }));
+    assert!(find(&report, DiagnosticCode::ToolNeverExposed).is_none());
 }

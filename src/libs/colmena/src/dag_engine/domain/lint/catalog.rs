@@ -726,6 +726,42 @@ mod tests {
         unknown
     }
 
+    /// The fallback the parse comment promises, now actually exercised.
+    ///
+    /// A review found that comment claiming "a test names any such value" when
+    /// no such test existed. `map_key` is the stricter reading — it is the one
+    /// that makes the linter speak up — so an `activated_by` this code has not
+    /// been taught must land there rather than silently becoming the permissive
+    /// case.
+    #[test]
+    fn an_unrecognised_activation_is_read_as_the_stricter_one() {
+        let catalog = NodeCatalog::parse(
+            r#"{
+                "common_node_properties": { "type": { "valid_values": [] } },
+                "node_types": {},
+                "tool_only_node_types": {
+                    "types": {
+                        "future_tool": { "activated_by": "something_new" },
+                        "known_tool": { "activated_by": "node_type" }
+                    }
+                }
+            }"#,
+        )
+        .expect("test catalog must parse");
+
+        assert_eq!(
+            catalog
+                .tool_only_type("future_tool")
+                .map(|t| t.activated_by),
+            Some(ToolActivation::MapKey),
+            "an activation this code does not know must not become the permissive case"
+        );
+        assert_eq!(
+            catalog.tool_only_type("known_tool").map(|t| t.activated_by),
+            Some(ToolActivation::NodeType),
+        );
+    }
+
     /// The guard the reliability lens asked for: the shipped catalog must not
     /// contain a placeholder the rule cannot interpret.
     ///

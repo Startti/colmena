@@ -232,20 +232,33 @@ y descarta la entrada **sin rama `else` y sin log** — la rama de toolkits de a
 lado sí advierte, ésta no. El grafo carga, valida, corre y termina en cero; el
 único síntoma es un agente que dice que no puede hacer la tarea.
 
-Se verificó corriendo dos grafos idénticos salvo la clave: el keyeado
+Verificado corriendo dos grafos idénticos salvo la clave: el keyeado
 `data_run_python` emitió frames `tool-input-*` y `tool-output-available` y el
-modelo llamó la tool; el keyeado `mi_python` no emitió ninguna frame de tool y el
-agente contestó que no tenía herramienta. Los dos salieron con código 0.
+modelo llamó la tool; el keyeado `mi_python` no emitió ninguna frame de tool y
+el agente contestó que no tenía herramienta. Los dos salieron con código 0.
 
 `TOOL_NEVER_EXPOSED` reporta ese caso. La regla lee de qué forma se activa cada
-tipo desde el catálogo (`activated_by`), no de una lista en el código, así que
-`mcp` —donde el `node_type` **sí** selecciona la entrada— queda fuera por
-construcción y no por una excepción escrita a mano.
+tipo desde el catálogo (`activated_by`), así que `mcp` —donde el `node_type`
+**sí** selecciona la entrada— queda fuera por construcción y no por una
+excepción escrita a mano.
 
-Para estas cuatro, además, `node_schema`, `node_config`, `name` y `description`
-se **ignoran**: sólo se lee `fixed_config`, y lo lee código propio de cada tool.
-Por eso el catálogo documenta su existencia y su forma de activación, pero no sus
-campos — el linter no podría validarlos.
+**Por qué esta regla no podía ir en otra rebanada.** Enseñarle al linter estos
+cinco nombres significa **saltearlos**, y saltearlos sin la regla convierte el
+caso de arriba de un `NO_CATALOG_COVERAGE` débil a silencio completo — peor que
+antes de que el catálogo conociera los nombres. Lo detectó una revisión y la
+respuesta fue publicar las dos cosas juntas. Un test lo fija:
+`teaching_the_linter_these_names_never_makes_a_broken_entry_quieter`.
+
+El **comportamiento** de estas cuatro se configura sólo por `fixed_config`, que
+lee código propio de cada tool; `node_schema` y `node_config` no le llegan. Por
+eso el catálogo documenta su existencia y su forma de activación
+(`activated_by`), pero no sus campos — el linter no podría validarlos.
+
+Cuidado con leer eso como "esos bloques son inertes". No lo son: bajo **lazy tool
+loading** —lo que corre en producción— la entrada igual entra al catálogo de
+`describe_tool`, que lee `name`, `description` y `summary`, y renderiza el
+`node_schema` como la tabla de parámetros que ve el modelo. `enters_lazy_catalog`
+sólo excluye las entradas `eager` y las `mcp`.
 
 ## Las decisiones que evitan el ruido
 

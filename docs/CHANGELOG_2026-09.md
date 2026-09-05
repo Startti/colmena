@@ -1133,29 +1133,48 @@ bloqueantes.
 
 ---
 
-## 23. Los cinco tipos que sólo existen dentro de `tool_configurations`
+## 23. El catálogo nombra los cinco tipos que sólo existen dentro de `tool_configurations`
 
-**Qué.** Tercera y última rebanada del hueco que abrió la §20. Cierra los 14
-`info` que la §22 dejó sobre tools sintéticas, y con la misma información
-resuelve un defecto que el backlog no anticipaba.
+**Qué.** Cierra los 14 `info` que la §22 dejó sobre tools sintéticas, dándole al
+linter la información que le faltaba en vez de silenciarlo.
 
-### La sección nueva del catálogo
+### Por qué no podían ir en `node_types`
 
-`node_types` está cerrado en las dos direcciones contra el registry del motor:
-un test falla si documenta algo que el motor no ejecuta, otro si el motor
-registra algo sin documentar. Pero cinco nombres son válidos como `node_type` de
-una tool sin ser nodos registrados — cuatro tools sintéticas que `llm_call`
-ensambla, más `mcp`, que es un servidor remoto. Van en `tool_only_node_types`,
-aparte, para no romper esa invariante.
+Esa sección está cerrada en las dos direcciones contra el registry del motor: un
+test falla si documenta algo que el motor no ejecuta, otro si el motor registra
+algo sin documentar. Pero cinco nombres son válidos como `node_type` de una tool
+sin ser nodos registrados — cuatro tools sintéticas que `llm_call` ensambla, más
+`mcp`, que es un servidor remoto. Van en `tool_only_node_types`, aparte.
 
 Sin esa lista el linter decía lo mismo de `data_run_python` —correcto, usado por
-once grafos— y de `data_run_pythonn`, que no expone nada. Ahora calla en el
-primero y en el segundo sugiere el nombre real.
+once grafos de este repo— y de `data_run_pythonn`, que no expone nada. Ahora
+calla en el primero y en el segundo sugiere el nombre real, en vez de aconsejar
+"agregá una entrada al catálogo", que para un typo manda al lugar equivocado.
 
-### El defecto que apareció midiendo
+Cada entrada declara además cómo se activa (`activated_by`): `map_key` para las
+cuatro sintéticas, `node_type` para `mcp`. Ese hecho, verificado en el código, es
+la base de una regla que llega en la rebanada siguiente. Un `activated_by`
+desconocido cae en `map_key`, la lectura estricta — si cayera en la permisiva, esa
+regla quedaría apagada en silencio para ese tipo. Un test lo fija.
 
-Para las cuatro tools sintéticas, el `node_type` de la entrada **es inerte**. Lo
-que activa la tool es la **clave del mapa**: `llm_call` junta las claves en
+### El guard de drift, y lo que NO cubre
+
+El motor no enumeraba sus tools sintéticas en ningún lado: cada nombre es una
+`pub const` en su propio módulo y la exposición son cuatro `if` sueltos en
+`llm.rs`. Ahora hay una lista, `TOOL_ONLY_NODE_TYPES`, al lado de las tools, y un
+test en infraestructura —la única capa que ve la lista y el catálogo a la vez— la
+cruza en las dos direcciones. Verificado por mutación en ambos sentidos.
+
+**Lo que no cubre**: una sexta tool olvidada en la lista *y* en el catálogo deja a
+los dos coincidiendo en un conjunto incompleto, y el test pasa. Tener la lista en
+un solo lugar reduce dos sitios a uno, pero no cierra eso; cerrarlo exigiría que
+los `if` de `llm.rs` salieran de una tabla. Queda dicho en la doc del test, para
+que un run verde no se lea como más de lo que promete.
+
+### El defecto que la lista permite reportar: `TOOL_NEVER_EXPOSED`
+
+Para las cuatro tools sintéticas el `node_type` de la entrada **es inerte**. Lo
+que las activa es la **clave del mapa**: `llm_call` junta las claves en
 `configured_aliases` y pregunta `configured_aliases.contains(TOOL_DATA_RUN_PYTHON)`.
 
 ```json
@@ -1166,29 +1185,25 @@ que activa la tool es la **clave del mapa**: `llm_call` junta las claves en
 Para cualquier otro nodo, poner un alias descriptivo es lo correcto y funciona.
 La regla se invierte sólo para estas cuatro, y nada avisa: `available_tools`
 busca el nombre en el registry, obtiene `None` y descarta la entrada **sin rama
-`else` y sin log** — la rama de toolkits de al lado sí advierte.
+`else` y sin log**.
 
 Verificado corriendo dos grafos idénticos salvo la clave. El keyeado
-`data_run_python` emitió `tool-input-start`, `tool-input-available` y
-`tool-output-available`, y el modelo llamó la tool con `{"code":"output = 2 + 2"}`
-(falló después en `sql_connect_failed`, por una URL de Postgres inventada a
-propósito). El keyeado `mi_python` no emitió **ninguna** frame de tool y el agente
-contestó que no tenía herramienta. Los dos salieron con código 0.
+`data_run_python` emitió `tool-input-start` y `tool-output-available`, y el
+modelo llamó la tool con `{"code":"output = 2 + 2"}`. El keyeado `mi_python` no
+emitió **ninguna** frame de tool y el agente contestó que no tenía herramienta.
+Los dos salieron con código 0.
 
-`TOOL_NEVER_EXPOSED` (error) reporta ese caso antes de correr nada. La regla lee
-la forma de activación desde el catálogo (`activated_by`), no de una lista en el
-código, así que `mcp` —donde el `node_type` sí selecciona la entrada— queda fuera
-por construcción y no por una excepción escrita a mano.
+### Por qué esto no se pudo rebanar
 
-### El guard de drift
+Se intentó publicar la lista de nombres primero y la regla después. Una revisión
+lo clasificó como `worsened` y tenía razón: enseñarle al linter estos cinco
+nombres significa **saltearlos**, y saltearlos sin la regla convierte el caso de
+arriba de un `NO_CATALOG_COVERAGE` débil a **silencio completo** — estrictamente
+peor que antes de que el catálogo los conociera. La costura parecía limpia y no
+lo era.
 
-No existe **ninguna** enumeración de las tools sintéticas en el motor: cada
-nombre es una `pub const` en su propio módulo y la exposición son cuatro `if`
-sueltos en `llm.rs`. La lista del catálogo es entonces un espejo hecho a mano, y
-un espejo a mano se desvía. Un test en infraestructura —la única capa que ve las
-constantes y el catálogo a la vez; el linter es dominio y no debe alcanzarlas—
-los cruza en las dos direcciones. Verificado por mutación: sacar
-`data_run_python` del catálogo lo hace fallar nombrándolo.
+Van juntos, y un test fija la lección para que nadie vuelva a separarlos:
+`teaching_the_linter_these_names_never_makes_a_broken_entry_quieter`.
 
 ### Ruido medido
 
@@ -1196,24 +1211,11 @@ los cruza en las dos direcciones. Verificado por mutación: sacar
 **14 a 0**.
 
 Un test existente se rompió al hacerlo, y con razón: usaba `data_run_python` como
-ejemplo de "tipo sin cobertura", y ese nombre ahora es conocido. Habría seguido
-en verde sin ejercitar la rama para la que se escribió. Se cambió por un nombre
-que no es ni node type ni tool-only.
+ejemplo de "tipo sin cobertura", y ese nombre ahora es conocido. Habría seguido en
+verde sin ejercitar la rama para la que se escribió.
 
-### Sobre las tres rebanadas
-
-| Rebanada | Rondas de revisión | Qué costó |
-|---|---:|---|
-| 1 — precedencia | 5 | afirmar límites sin enumerar los casos |
-| 2 — campos | 3 | fixtures que pasaban por la razón equivocada |
-| 3 — tipos tool-only | — | medir primero; el alcance cambió antes de escribir |
-
-En esta rebanada la exploración cambió el diseño **antes** de la primera línea de
-código: el backlog decía "tools sintéticas en `KnownNodeTypes`", y `KnownNodeTypes`
-resultó consultarse sólo para nodos del grafo, nunca para tools.
-
-**Alcance.** Aditivo. Una sección nueva en el catálogo, un `DiagnosticCode` nuevo
-y dos métodos públicos. Ningún grafo existente cambia de resultado en severidades
-bloqueantes.
+**Alcance.** Aditivo. Una sección nueva en el catálogo, una lista de nombres, un
+`DiagnosticCode` nuevo y dos métodos públicos. Ningún grafo existente cambia de
+resultado en severidades bloqueantes.
 
 **Estado.** done.

@@ -1063,26 +1063,21 @@ mod catalog_coverage_tests {
     ///   this section removed, and silences `TOOL_NEVER_EXPOSED` for it.
     ///
     /// This test lives in infrastructure because that is the only layer that
-    /// can see both the consts and the catalog; the linter itself is domain and
+    /// can see both the list and the catalog; the linter itself is domain and
     /// must not reach for them.
+    ///
+    /// **What it does NOT catch**, stated so nobody reads more into a green run
+    /// than it earns: a sixth synthetic tool added to `llm.rs` and forgotten in
+    /// BOTH [`TOOL_ONLY_NODE_TYPES`] and the catalog leaves the two agreeing on
+    /// an incomplete set, and this passes. The engine exposes each synthetic
+    /// tool through its own hand-written `if` arm, so there is nothing to
+    /// enumerate from; closing that hole means driving those arms from a table,
+    /// which is a larger change than this guard is worth today.
     #[test]
     fn the_catalog_names_exactly_the_synthetic_tools_the_engine_assembles() {
-        use crate::dag_engine::domain::tool_configuration::MCP_NODE_TYPE;
-        use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::{
-            attachment_run_python::ATTACHMENT_RUN_PYTHON_TOOL_NAME,
-            data_run_python::TOOL_DATA_RUN_PYTHON,
-            sql_bulk_tools::{SQL_BULK_INSERT_TOOL_NAME, SQL_INSPECT_ATTACHMENT_TOOL_NAME},
-        };
+        use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::TOOL_ONLY_NODE_TYPES;
 
-        let in_code: std::collections::BTreeSet<&str> = [
-            TOOL_DATA_RUN_PYTHON,
-            ATTACHMENT_RUN_PYTHON_TOOL_NAME,
-            SQL_INSPECT_ATTACHMENT_TOOL_NAME,
-            SQL_BULK_INSERT_TOOL_NAME,
-            MCP_NODE_TYPE,
-        ]
-        .into_iter()
-        .collect();
+        let in_code: std::collections::BTreeSet<&str> = TOOL_ONLY_NODE_TYPES.into_iter().collect();
 
         let in_catalog: std::collections::BTreeSet<&str> =
             NodeCatalog::embedded().tool_only_type_names().collect();
