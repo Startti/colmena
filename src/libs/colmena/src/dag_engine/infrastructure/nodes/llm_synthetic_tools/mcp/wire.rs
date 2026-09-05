@@ -28,10 +28,51 @@ use crate::llm::domain::tools::ToolDefinition;
 use super::bind::{bind, McpBinding};
 use super::expose::{drop_colliding, exposed_definitions};
 
-/// One server's fan-out result: its binding and catalog, or why it dropped out.
+/// Why a server dropped out of a turn. A stable label for the log, distinct
+/// from the human-facing note text (which is free-form and may change).
+#[derive(Clone, Copy)]
+enum FetchFailure {
+    /// Credentials did not resolve, or the binding could not be built.
+    Prepare,
+    /// The binding was fine, but `tools/list` failed.
+    ToolsList,
+    /// The fan-out produced no entry at all for this alias.
+    NoResult,
+}
+
+impl FetchFailure {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Prepare => "prepare",
+            Self::ToolsList => "tools_list",
+            Self::NoResult => "no_result",
+        }
+    }
+}
+
+/// The host (and port, if non-default) a server URL points at — no scheme, no
+/// path, no query, no userinfo. Best-effort: never panics, and a malformed URL
+/// still yields something rather than nothing, since this is for a log line,
+/// not for validation.
+fn host_of(url: &str) -> &str {
+    let after_scheme = url.split_once("://").map_or(url, |(_, rest)| rest);
+    // Isolate the authority BEFORE looking for userinfo, or a literal '@' in
+    // the path/query would be mistaken for one.
+    let authority_end = after_scheme
+        .find(['/', '?', '#'])
+        .unwrap_or(after_scheme.len());
+    let authority = &after_scheme[..authority_end];
+    authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host)
+}
+
+/// One server's fan-out result: its binding and catalog, or why it dropped
+/// out — alongside how long the attempt took, for the log.
 type Fetched<'a> = (
     &'a String,
-    Result<(McpBinding, Arc<Vec<McpToolDescriptor>>), String>,
+    u64,
+    Result<(McpBinding, Arc<Vec<McpToolDescriptor>>), (FetchFailure, String)>,
 );
 
 /// One turn's worth of MCP wiring.
@@ -76,19 +117,35 @@ pub async fn wire(
     // and in `BTreeMap` order, and takes that order from `specs` rather than
     // from this vector — so nothing here needs to preserve it.
     let fetched: Vec<Fetched> = join_all(specs.iter().map(|(alias, spec)| async move {
+        let started = std::time::Instant::now();
         let binding = match bind(alias, spec, secure_values, session_id, agent_session_id).await {
             Ok(b) => b,
             // Includes the credential refusals: a reference that did not resolve
             // is a configuration fault, but it must not be fatal here either, or
             // one stale secret takes down an agent whose other tools are fine.
-            Err(e) => return (alias, Err(format!("could not be prepared: {e}"))),
+            Err(e) => {
+                let ms = started.elapsed().as_millis() as u64;
+                return (
+                    alias,
+                    ms,
+                    Err((FetchFailure::Prepare, format!("could not be prepared: {e}"))),
+                );
+            }
         };
-        match registry
+        let result = registry
             .tools(&binding.key, binding.config(), || binding.connect())
-            .await
-        {
-            Ok(catalog) => (alias, Ok((binding, catalog))),
-            Err(e) => (alias, Err(format!("did not list its tools: {e}"))),
+            .await;
+        let ms = started.elapsed().as_millis() as u64;
+        match result {
+            Ok(catalog) => (alias, ms, Ok((binding, catalog))),
+            Err(e) => (
+                alias,
+                ms,
+                Err((
+                    FetchFailure::ToolsList,
+                    format!("did not list its tools: {e}"),
+                )),
+            ),
         }
     }))
     .await;
@@ -122,9 +179,12 @@ fn assemble(
         bindings: BTreeMap::new(),
     };
 
-    let mut by_alias: HashMap<&String, _> = fetched.into_iter().collect();
+    let mut by_alias: HashMap<&String, _> =
+        fetched.into_iter().map(|(a, ms, r)| (a, (ms, r))).collect();
 
     for alias in specs.keys() {
+        let host = specs.get(alias).map_or("", |s| host_of(&s.url));
+
         // Every alias has an entry — one future was spawned per spec key — so
         // this is unreachable from `wire`. Taken rather than unwrapped anyway,
         // because a panic here would cost the whole turn over a condition that
@@ -132,26 +192,53 @@ fn assemble(
         // that hands over a partial vector must degrade like an unreachable
         // server, not in silence. A dropped alias the model is never told about
         // leaves it promising work it can no longer do.
-        let Some(result) = by_alias.remove(alias) else {
+        let Some((ms, result)) = by_alias.remove(alias) else {
             out.notes
                 .push(format!("MCP server '{alias}' returned no result"));
             out.unavailable.push(alias.clone());
+            tracing::warn!(
+                target: "colmena::mcp",
+                event = "mcp.server_unavailable",
+                alias = %alias,
+                host = %host,
+                reason = FetchFailure::NoResult.label(),
+                "an MCP server contributed no tools this turn"
+            );
             continue;
         };
         let (binding, catalog) = match result {
             Ok(pair) => pair,
-            Err(why) => {
+            Err((failure, why)) => {
                 out.notes.push(format!("MCP server '{alias}' {why}"));
                 out.unavailable.push(alias.clone());
+                tracing::warn!(
+                    target: "colmena::mcp",
+                    event = "mcp.server_unavailable",
+                    alias = %alias,
+                    host = %host,
+                    reason = failure.label(),
+                    ms = ms,
+                    "an MCP server contributed no tools this turn"
+                );
                 continue;
             }
         };
 
         let folded = fold_catalog(alias, &catalog, claimed);
+        let tools = folded.definitions.len();
         out.notes.extend(folded.notes);
         out.routes.extend(folded.routes);
         out.definitions.extend(folded.definitions);
         out.bindings.insert(alias.clone(), binding);
+        tracing::debug!(
+            target: "colmena::mcp",
+            event = "mcp.server_ready",
+            alias = %alias,
+            host = %host,
+            tools = tools,
+            ms = ms,
+            "an MCP server answered and its tools were exposed"
+        );
     }
 
     out
@@ -501,8 +588,8 @@ mod tests {
 
         // Arrival order: the LATER-sorting alias first.
         let fetched: Vec<Fetched> = vec![
-            (underscored_alias, Ok((underscored, catalog.clone()))),
-            (dotted_alias, Ok((dotted, catalog.clone()))),
+            (underscored_alias, 0, Ok((underscored, catalog.clone()))),
+            (dotted_alias, 0, Ok((dotted, catalog.clone()))),
         ];
 
         let mut claimed = HashSet::new();
@@ -548,6 +635,7 @@ mod tests {
         // Deliberately partial: nothing at all for the "missing" alias.
         let fetched: Vec<Fetched> = vec![(
             present_alias,
+            0,
             Ok((binding, Arc::new(vec![descriptor("search")]))),
         )];
 
@@ -591,5 +679,35 @@ mod tests {
             "MCP took a name Colmena had already claimed"
         );
         assert!(f.routes.is_empty(), "and it left a route behind");
+    }
+
+    /// `host_of` must never leak scheme, path, query or credentials into the
+    /// log — only host[:port].
+    #[test]
+    fn host_of_strips_everything_but_host_and_port() {
+        assert_eq!(host_of("https://mcp.context7.com/mcp"), "mcp.context7.com");
+        assert_eq!(host_of("https://host:8443/x?y=1"), "host:8443");
+        assert_eq!(host_of("host.example.com/mcp"), "host.example.com");
+        assert_eq!(
+            host_of("https://user:pass@host.example.com/mcp"),
+            "host.example.com",
+            "userinfo must not reach the log"
+        );
+        assert_eq!(host_of("https://host.example.com"), "host.example.com");
+        assert_eq!(
+            host_of("https://[::1]:8443/x"),
+            "[::1]:8443",
+            "an IPv6 literal authority must survive intact"
+        );
+        assert_eq!(host_of(""), "", "an empty URL must not panic");
+    }
+
+    /// The label is what a dashboard or alert keys on — it must not silently
+    /// change shape.
+    #[test]
+    fn fetch_failure_labels_are_stable() {
+        assert_eq!(FetchFailure::Prepare.label(), "prepare");
+        assert_eq!(FetchFailure::ToolsList.label(), "tools_list");
+        assert_eq!(FetchFailure::NoResult.label(), "no_result");
     }
 }
