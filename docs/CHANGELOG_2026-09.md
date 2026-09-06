@@ -1296,4 +1296,143 @@ ni de semántica de degradación. ADP no afectado. Referencia completa en
 además cómo atribuir el costo en contexto de cada servidor y la postura de seguridad
 vigente.
 
+---
+
+## 26. El linter dice, antes de correr, lo que el motor sólo decía al cargar
+
+**Qué.** Cierra los dos huecos que quedaban del track del linter, y los dos son
+la misma clase de problema: un diagnóstico que existía pero llegaba tarde, o un
+consejo que no se podía seguir.
+
+### `MALFORMED_TOOL_ENTRY`
+
+`Graph::validate()` rechaza el grafo entero cuando el `node_schema` de una tool
+no se puede leer, y desde el §18 esa validación corre en **toda** entrada del
+motor. El diagnóstico ya existía; lo que faltaba era decirlo antes de ejecutar,
+que es para lo que existe un linter.
+
+Son **dos** familias de rechazo, y hacen falta las dos. La primera es el bloque que
+no deserializa a `NodeSchema`: `null`, un escalar, un array, o un objeto alguna de
+cuyas entradas no es una definición de campo válida. La segunda es el bloque que
+deserializa bien pero `parse_node_schema` rechaza: un campo visible al LLM sin
+`type`, o uno `array` sin `items` / `items.type`. La segunda no es un detalle:
+`{ "body": { "required": true } }` es un `NodeSchemaField` impecable, así que la
+primera familia no lo ve y el motor igual lo rechaza.
+
+La regla lo dice **llamando a las mismas funciones** que usa `validate()`:
+deserializar a `NodeSchema` y después `parse_node_schema`. Las dos viven en el
+dominio, igual que el linter, así que compartirlas no cruza ninguna frontera —
+y hace la divergencia imposible por construcción, que es mejor que un test que
+la vigile.
+
+Verificado forma por forma contra el binario. Las nueve que el motor rechaza —seis
+de la primera familia, tres de la segunda— las reporta el linter; las dos que acepta
+—`node_schema` ausente y uno bien formado— no. Cero disparos sobre el corpus, que
+queda en 75 y 5 como el baseline.
+
+**Reportarlo silencia la regla de precedencia para esa entrada**, y sólo esa. El
+consejo de `DEAD_FIXED_CONFIG` —mover las claves dentro de ese mismo
+`node_schema`— dejaría el grafo igual de inejecutable, porque el schema es
+justamente lo que está roto. Un test de la §23 fijaba deliberadamente esa
+imprecisión mientras su propio docstring nombraba el remedio; ese test se borró
+en vez de dejarlo contradiciendo al nuevo.
+
+Las **reglas de campos no se silencian**: son defectos independientes. Una entrada
+con un `node_schema` malformado *y* una clave inventada en `fixed_config` reporta
+las dos cosas. Esconder la segunda costaba un viaje de ida y vuelta extra por algo
+que no tenía relación con la primera.
+
+### El mensaje nombra formas y claves, nunca un valor
+
+Reenviar el error de serde imprime el string ofensor **literalmente**
+(`Unexpected::Str`). Así que la forma más probable de cometer este error —poner un
+valor directo bajo la clave en vez de dentro de una definición de campo— copiaba
+ese valor a stdout, al reporte `--format json` y a los bindings. El caso típico no
+es inocente: `"node_schema": { "api_key": "sk-live-…" }` publicaba la credencial en
+el log de CI, que es justamente donde el cuerpo del grafo NO se imprime.
+
+`unreadable_schema_shape` describe la forma en su lugar —`` `api_key` es un
+string ``, `` `body` es un objeto pero no una definición de campo válida ``, `el
+bloque entero es un array``— con las claves ofensoras **ordenadas**, para que la
+oración no dependa del orden en que el autor las escribió. Los errores de
+`parse_node_schema` se reenvían sin tocar porque nombran la etiqueta del campo y
+nunca su valor.
+
+Una excepción que conviene nombrar en vez de fingir que no existe:
+`INVALID_FIELD_VALUE` **sí** imprime un valor, junto a la lista de aceptados. Pero
+sólo para un campo que el catálogo declara con `valid_values` —un enum cerrado como
+`method`—, donde no aterriza una credencial. La distinción que importa no es "valor
+sí / valor no", sino si el lugar es un enum documentado o una clave libre que nombra
+el autor.
+
+### Y el mensaje es el mismo en cada corrida
+
+`parse_node_schema` recorre un `HashMap` y devuelve el **primer** campo que le
+disgusta, así que con dos campos malos el motivo impreso dependía del seed del
+proceso. Tolerable para un crash de carga; no para un reporte que se diffea en CI.
+`first_parse_rejection` le pregunta de a un campo por vez en orden alfabético y se
+queda con la primera queja. Misma función, mismo veredicto, oración estable.
+
+Le pasa el esquema entero al final como **guarda contra deriva**, no porque atrape
+algo hoy: todos los errores de `parse_node_schema` viven en su bucle por campo, y su
+segunda pasada no tiene rama de error, así que un esquema cuyos campos pasan uno a
+uno no puede fallar entero. Verificado contra el binario con el caso que se había
+citado como contraejemplo —dos contenedores compartiendo una clave hija—: sin
+hallazgo. La justificación original de esa línea era falsa.
+
+### El consejo que no se podía seguir
+
+Un tipo tool-only puesto como `type` de un nodo del grafo se reportaba como
+`NO_CATALOG_COVERAGE` (info) aconsejando agregar una entrada al catálogo. Es
+imposible: `node_types` está cerrado en ambas direcciones contra el registry y esa
+entrada haría fallar el test suite.
+
+Ahora el consejo dice dónde va el nombre. La severidad depende del contexto: con
+`from_catalog` —lo que usa el CLI— pasa a `UNKNOWN_NODE_TYPE` (error, ese grafo no
+corre); con `with_embedded_catalog`, que no saca conclusiones sobre tipos de nodo,
+sigue siendo `NO_CATALOG_COVERAGE` (info) y sólo cambia el texto. Un tipo realmente
+desconocido conserva el consejo original; un test fija las dos ramas.
+
+### Verificación
+
+2771 tests, clippy limpio, links limpios. Corpus `error=75 warning=5 info=0`,
+idéntico al baseline.
+
+**Once mutaciones**, corridas contra los bytes que se publican y no contra una
+versión anterior. Las once matan un test: descartar el error de
+`parse_node_schema`, quitar la supresión de `DEAD_FIXED_CONFIG`, no distinguir el
+tipo tool-only en `lint_node`, volver a suprimir las reglas de campos, perder el
+consejo en el contexto `Unchecked`, imprimir el valor en vez de su forma, listar las
+claves ofensoras sin ordenar, truncar el bucle de sondeo a un solo campo, quitar su
+`keys.sort()`, preguntarle a `parse_node_schema` por el esquema entero, y hacer que
+la rama de objeto imprima el valor que encontró.
+
+Las últimas tres **no mataban siempre** cuando se midieron por primera vez, y eso
+fue el hallazgo útil: las tres dejan que el orden de un `HashMap` elija cuál de los
+cuatro campos malos del fixture se nombra, así que sobrevivían cuando la suerte les
+daba el correcto. Medidas: 18 de 20, 11 de 12, y una que había pasado por
+determinística sobre **una sola corrida**. El guard de estabilidad ahora repite el
+bloque veinte veces, y cada `lint_json` construye un mapa nuevo con un `RandomState`
+nuevo, así que una implementación rota tiene ~4⁻²⁰ de chance mientras la ordenada es
+invariante. Re-medidas con la repetición: 15 de 15 las tres.
+
+La última salió de una revisión y vale la pena por qué: la guarda de la fuga cubría
+**una de las dos ramas**. Su fixture tenía solo claves ofensoras no-objeto, así que
+la rama que reporta `` `creds` es un objeto pero no una definición de campo válida ``
+podía imprimir el valor y los 71 tests seguían en verde. Y esa es justamente la rama
+que una credencial alcanza primero: `{"creds": {"required": "sk-live-…", "type": 5}}`
+parece una definición de campo y falla solo porque una clave interna tiene el tipo
+equivocado. El fixture ahora lleva una fila así, con un segundo secreto un nivel
+más abajo.
+
+Dos detalles de los fixtures son el guard, no decoración. El de la fuga va escrito
+**fuera** de orden alfabético: con las claves ya ordenadas en el documento, quitar
+el `sort()` no cambia nada y el test pasa sobre una implementación rota. El de la
+estabilidad pone un campo **válido** en la primera posición alfabética, para que el
+bucle tenga que avanzar; con un campo malo ahí, truncarlo a una iteración pasaba
+igual.
+
+**Alcance.** Aditivo. Un `DiagnosticCode` nuevo y dos ramas de mensaje. Ningún
+grafo del corpus cambia de resultado.
+
 **Estado.** done.

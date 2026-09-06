@@ -6,115 +6,164 @@ Si vas a empezar a trabajar en algo de acá, sacalo de esta lista y agregalo al 
 
 ---
 
-## Graph linter — follow-ups tras la fase 1 (2026-09-02)
+## Graph linter y validación de configuración
 
-La fase 1 del linter aterrizó en `develop` en 5 PRs (#238, #239, #241, #242, #243).
-Guía: [`docs/developer_guide/51_graph_linter.md`](developer_guide/51_graph_linter.md).
-Lo que quedó abierto, en orden de importancia:
+**Qué es.** `dag_engine lint <archivo>` revisa la configuración de un grafo contra el
+catálogo embebido sin ejecutarlo. Es consultivo; `--strict` sale distinto de cero.
+Guía: [`51_graph_linter.md`](developer_guide/51_graph_linter.md).
 
-- ~~**`validate_graph` de los bindings no valida lo que su nombre promete.**~~ —
-  **HECHO 2026-09-02** — ambos bindings llaman a `Graph::validate()` y exponen
-  `lint_graph`/`lintGraph`. Ver CHANGELOG §8 y §9, y
-  [`docs/adp_migration/2026-09-02-validate-graph-now-validates.md`](adp_migration/2026-09-02-validate-graph-now-validates.md).
-  **Queda abierto lo más grande:** el camino de producción de ADP tampoco valida —
-  `ColmenaEngine::execute_stream_cancellable` recibe un `Graph` sin llamar a
-  `Graph::validate()`, así que un grafo con node id inválido o `node_schema`
-  malformado llega hasta la ejecución. Cablearlo ahí impacta producción y necesita
-  su propia decisión.
+**Dónde está.** Fase 1 cerrada (PRs #238, #239, #241, #242, #243). El linter entró
+después dentro de `tool_configurations`, que era su hueco grande: precedencia, campos,
+tools sintéticas y entradas malformadas (CHANGELOG §21-§23 y §26). Corpus de 303 grafos:
+`error=75 warning=5 info=0` — los 14 `info` de ruido desaparecieron y los 80
+error+warning son el baseline heredado.
 
-- **Fase 2 del linter: mover la fuente de verdad al código — EN CURSO.** La maquinaria
-  aterrizó: `ExecutableNode::config_schema()` (default `None`, aditivo) declara los hechos
-  mecánicos, y un test los cruza contra el catálogo (CHANGELOG §12, §13). **Alcance
-  acordado: solo hechos mecánicos** (nombres, `required`, `valid_values`, `read_only`); la
-  prosa queda en el JSON a mano — no se generará el JSON completo.
+**El principio del track**, que conviene no perder: el linter **llama a las mismas
+funciones que `Graph::validate()`** en vez de reimplementar sus reglas. Así no pueden
+divergir por construcción, que es mejor que un test que las vigile. Casi todo lo abierto
+abajo es aplicar ese mismo patrón a una puerta que todavía no lo tiene.
 
-  **COMPLETA: los 37 nodos declaran su `config_schema()`** (slices 1-6, CHANGELOG
-  §12-§17). El catálogo ya no puede desviarse del código en el set de campos ni en sus
-  hechos mecánicos: un test lo cruza nodo por nodo.
+### Abiertos
 
-  **Siguiente paso opcional**: pasar a *generar* el set de campos del JSON desde el
-  código en vez de solo verificarlo. La prosa (`description`/`example`/`default`) sigue
-  autorada a mano por decisión de alcance.
+Ordenados por importancia. Los ids son para poder referenciarlos en un PR.
 
-- ~~**30 grafos de ejemplo llevan `llm_call.session_id`, que no hace nada.**~~ —
-  **HECHO 2026-09-03**, ver CHANGELOG §20. Se quitaron las 30 apariciones, y también las
-  tres fuentes que las originaban: el `schema()` de `llm_call` (que lo anunciaba como
-  config *y* como input, y por esa vía se lo ofrecía a los LLM como parámetro de tool) y
-  el `input_ports` del catálogo. La forma real de fijar el hilo sigue siendo
-  `agent_session_id` (ver [`15_memory_guide.md`](developer_guide/15_memory_guide.md)).
+#### Cobertura — el motor rechaza y el linter no lo dice
 
-- ~~**Tres grafos de ejemplo no cargan.**~~ — **HECHO 2026-09-03**, ver CHANGELOG §20.
-  `forward_generated_artifact.json`, `upload_inline_to_endpoint.json` y
-  `upload_signed_url_to_endpoint.json` pasaron a `nodes` como mapa, y correrlos destapó
-  **siete defectos más** que el fallo de carga tapaba: `system_prompt` (el campo es
-  `system_message`), `"type": "trigger"` (el motor registra `trigger_webhook`), `api_key`
-  faltante, un `fixed_config` muerto por convivir con `node_schema`, `url` en vez de
-  `base_url`, el alias `attachment_id` que Plan B borró, y una descripción que se
-  atribuía cobertura de un test que nunca cargó estos archivos. `forward_generated_artifact`
-  quedó verificado de punta a punta contra un endpoint real; los otros dos necesitan una
-  aplicación anfitriona que registre el adjunto.
+- **L1 · Las otras cuatro puertas que `Graph::validate()` aplica a una entrada de tool.**
+  `MALFORMED_TOOL_ENTRY` cubre la quinta y última, el brazo `node_schema`. Las otras
+  cuatro rechazan el grafo entero al cargar y el linter calla. En el orden en que
+  `validate()` las aplica, con la función exacta de cada una:
 
-- **El linter dentro de `tool_configurations` — 1 de 3 rebanadas hecha.** Los dos defectos
-  que dejaban la URL vacía en los grafos de §20 vivían ahí, y el linter dio "no findings"
-  sobre un grafo que no funcionaba.
+  | # | Qué rechaza | Dónde vive el chequeo |
+  |---|---|---|
+  | 1 | `memory_mode` con un valor que no es del enum | `serde_json::from_value::<MemoryMode>` **inline** en `graph.rs` — no hay función de dominio |
+  | 2 | `memory_mode` sobre un tipo de nodo que no lleva memoria | `validate_memory_mode(node_type, mode)` |
+  | 3 | cualquier `memory_mode` que lleve memoria (`persistent` **y** `dynamic`) sin backend (`connection_url`) | `memory_backend_missing_reason(node_type, mode, tool_cfg)` — sale temprano sólo para `stateless` |
+  | 4 | bloque `mcp` malformado o con URL no-HTTPS | `validate_mcp_config(node_type, tool_cfg)` |
 
-  **Hecha (CHANGELOG §21):** el recorrido de `tool_configurations` desde el JSON crudo y
-  la regla de precedencia `DEAD_FIXED_CONFIG` — `node_schema` gana y descarta el
-  `fixed_config` entero (`dag_tool_executor.rs:1976`). Cubre el segundo defecto.
+  Tres de las cuatro son funciones de dominio ya existentes, así que aplica el mismo
+  patrón del track: llamarlas, no copiarlas. La #1 no lo es todavía — o se extrae, o el
+  linter deserializa igual que `validate()`. **El más accionable de la lista.**
 
-  ~~**Rebanada 2 — los campos.**~~ — **HECHA 2026-09-04**, ver CHANGELOG §22. Cada clave
-  de `node_schema` / `fixed_config` / `node_config` se cruza contra el `node_type` destino.
-  Cubre el primer defecto de la §20 (`url` donde `http_request` lee `base_url`). Se
-  confirmaron las dos predicciones que este item traía medidas: el set válido es
-  `config_fields ∪ input_ports ∪ reserved_input_keys` (usar sólo `config_fields` da 16
-  falsos positivos), y hay tres clases de placeholder, no dos. El corpus queda en 80
-  hallazgos error+warning, igual que el baseline.
+- **L1b · El linter no revisa la forma de los node ids.** `Graph::validate()` rechaza
+  cualquier id que contenga `/`, porque ese carácter está reservado para los
+  calificadores de path de subgrafo (`DagError::InvalidNodeId`). Ninguna regla del linter
+  lo mira, así que un grafo con un id así lintea limpio y no carga. Es la única puerta de
+  `validate()` que no es sobre una entrada de tool, y por eso se había perdido: una
+  versión anterior de L1 decía "las otras tres puertas" sin el calificador y la dejaba
+  fuera de la cuenta.
 
-  **Falta, también — el linter no reporta una entrada de tool malformada; el motor sí.**
-  Corrige una afirmación previa de este mismo item: sí existe diagnóstico. Si `node_schema`
-  viene como `null`, string, número, array, o como objeto con un campo anidado inválido,
-  `Graph::validate()` rechaza el grafo al cargar con
-  `InvalidToolSchema { reason: "malformed node_schema: …" }`
-  (`graph.rs:168-178`), y esa validación corre en **toda** entrada del motor desde el
-  §18. Lo que falta es que el linter lo diga **antes de correr**, que es su razón de ser:
-  hoy calla en casi todas esas formas, y en una (objeto con campo anidado inválido)
-  reporta `DEAD_FIXED_CONFIG` con un consejo que no arregla el problema real. Afinar el
-  guard de `DEAD_FIXED_CONFIG` para distinguirlas cambiaría un punto ciego por otro; lo
-  correcto es un código propio, `MALFORMED_TOOL_ENTRY`, que reproduzca el chequeo de
-  `validate()` sin ejecutar nada.
+- **L2 · Ninguna regla entra en un `subgraph` inline.** `tool_configuration_entries` y las
+  demás reglas crudas recorren `nodes.*.config.tool_configurations` y nada más, así que
+  un `node_schema` malformado dentro de un `child_graph_inline` lintea limpio y recién
+  falla al cargar — aunque `validate()` sí corre para los grafos hijos. Es una clase
+  entera de grafos sin revisar, no un caso borde. Limitación compartida por todas las
+  reglas crudas.
 
-  ~~**Rebanada 3 — las tools sintéticas.**~~ — **HECHA 2026-09-05**, ver CHANGELOG §23. El
-  catálogo nombra los cinco tipos válidos sólo dentro de `tool_configurations`
-  (`tool_only_node_types`), con un test que los cruza contra las constantes de producción
-  en ambas direcciones; los 14 `info` del corpus desaparecen y un `node_type` sintético mal
-  escrito sugiere el nombre real. Incluye `TOOL_NEVER_EXPOSED`, que reporta una entrada
-  sintética keyeada con un alias — caso que no expone nada y que nada reportaba.
+- **L2b · Tampoco entra en el `target` de un `for_each`, y ahí no hay red debajo.**
+  Mismo agujero que L2 en otro contenedor: `config.target` es `{node_type, node_schema}`,
+  la misma forma que una entrada de tool, y ninguna regla lo mira. Verificado contra el
+  binario en las dos formas de uso: como nodo del grafo, y expuesto en
+  `tool_configurations` con el schema de la entrada externa **válido** para que el
+  hallazgo no pueda venir de ahí. En las dos, un `target.node_schema` con `url` sobre
+  `http_request` —que lee `base_url`, el defecto exacto de la §20— y además malformado
+  (`"body": "not-an-object"`) da `no findings`.
 
-  Se intentó rebanar en "los nombres" y "la regla", y **no se puede**: saltear los nombres
-  sin la regla deja el caso roto en silencio total, peor que antes. Una revisión lo
-  clasificó como `worsened`; un test fija la lección.
+  **Es peor que L2, no igual.** Un `subgraph` inline malformado al menos falla al cargar,
+  porque `validate()` corre para los grafos hijos. El `target` de un `for_each` no pasa
+  por `validate()` —sólo mira `config.tool_configurations`— y el nodo, al despachar cada
+  fila, deserializa el schema y lo parsea dentro de dos `if let Ok(...)` **sin rama
+  else** ([`for_each.rs:424-428`](../src/libs/colmena/src/dag_engine/infrastructure/nodes/for_each.rs)):
+  si cualquiera falla, se saltea en silencio toda la validación de params requeridos por
+  fila y el lote sigue. O sea que un `target.node_schema` roto no lo reporta nadie —ni el
+  linter, ni la carga, ni la ejecución— y encima apaga el único chequeo por fila que el
+  nodo tiene. La corrección de esa rama silenciosa es trabajo de `for_each`, no del
+  linter, pero sale del mismo hallazgo.
 
-- **El linter aconseja mal cuando un tipo tool-only se usa como nodo del grafo.**
-  Preexistente, confirmado por revisión. `data_run_python` puesto como `type` de un nodo
-  reporta `NO_CATALOG_COVERAGE` con el consejo "agregá una entrada a
-  `docs/node_configurations.json`" — imposible de seguir, porque `node_types` está cerrado
-  en ambas direcciones contra el registry y esa entrada haría fallar el test suite. El
-  consejo correcto es que ese tipo va dentro de `tool_configurations`. El dato ya está
-  disponible en ambos caminos (`tool_only_type_names()`); falta usarlo en `lint_node`.
+- **L3 · El brazo `Registry` conserva el consejo viejo.** Un tipo tool-only usado como
+  `type` de un nodo del grafo recibe el consejo correcto bajo `CatalogOnly` (lo que usa
+  la CLI) y bajo `Unchecked`, pero bajo `Registry` sigue con el did-you-mean genérico y
+  no menciona `tool_configurations`. Sin test que cubra ese brazo con un nombre tool-only.
 
-- ~~**`NO_CATALOG_COVERAGE` es inalcanzable desde la CLI.**~~ — **HECHO 2026-09-02**,
-  ver CHANGELOG §10. `KnownNodeTypes` separa los dos grados de certeza; con solo el
-  catálogo el linter ya no afirma qué puede ejecutar el motor.
+#### Fugas de valor en mensajes de error
 
-- ~~**`compact()` deja comillas desbalanceadas.**~~ — **HECHO 2026-09-02**, mismo cambio.
+El linter dejó de imprimir valores de config (§26). Los dos caminos que quedan están
+fuera del linter pero son la misma clase de defecto.
 
-- ~~**El `schema()` de `api_explorer` anuncia diez campos de config que el nodo nunca lee.**~~
-  — **HECHO 2026-09-03**, ver CHANGELOG §11. Bloque `config` eliminado del `schema()`;
-  ahora coincide con el `config_note` del catálogo.
+- **L4 · `graph.rs` filtra el valor al rechazar el grafo.** Sigue haciendo
+  `format!("malformed node_schema: {e}")` con el error de serde crudo, y serde imprime el
+  string ofensor literalmente. Un `node_schema` con una credencial suelta la publica en
+  el `DagError::InvalidToolSchema` de carga. Es el camino que el linter espeja; el
+  arreglo es mover `unreadable_schema_shape` a un lugar que ambos puedan llamar.
 
-**Fase 1 cerrada.** Lo único que queda en esta lista es la fase 2 (arriba) y los tres
-grafos de ejemplo rotos, que son preexistentes y no del linter.
+- **L5 · `validate_mcp_config` imprime la URL ofensora** cuando no es HTTPS, y una URL de
+  MCP puede llevar credenciales en la query.
 
+- **L6 · Los diagnósticos hacen eco de identificadores sin truncar.** `compact()` recorta
+  a ~55 caracteres pero se llama en un solo lugar, `INVALID_FIELD_VALUE`. El resto
+  interpola `node_type`, el nombre de la tool y las claves crudas, así que un `node_type`
+  de varios KB inunda la salida de texto y el JSON. Son ranuras de identificador y no de
+  credencial: higiene de reporte, no fuga. Pre-existente.
+
+#### Fidelidad linter ↔ motor
+
+- **L7 · Pueden nombrar campos distintos.** Con dos campos malos en un `node_schema`, el
+  linter nombra el primero alfabético (`first_parse_rejection`) y `Graph::validate()` el
+  primero que le da el `HashMap`. Coinciden en que el grafo se rechaza; discrepan en cuál
+  campo aparece, así que el operador puede arreglar uno y ver el otro al cargar. Es un
+  tradeoff deliberado —un reporte que se diffea necesita ser estable, un crash de carga
+  no—, pero conviene decidir si el motor debería adoptar el mismo orden.
+
+#### Cobertura de tests
+
+- **L8 · Ningún test fija las métricas de ruido del corpus.** Los números que este track
+  usó como referencia —hoy `error=75 warning=5 info=0` sobre 303 grafos— se miden a mano
+  cada vez, así que un cambio en el catálogo o en las reglas puede regresar la reducción
+  de ruido sin que falle nada. Un harness que recorra `tests/graphs/**` y afirme el
+  conteo convierte la medición en una cerca.
+
+- **L9 · La guarda de las reglas de campos no cubre el bloque `node_schema`.** El test que
+  fija que un defecto independiente sobrevive a una entrada rechazada pone la clave
+  inventada en `fixed_config`, el bloque legible. Una supresión acotada al bloque
+  `node_schema` pasaría el test escondiendo justo la clase de diagnóstico que el test
+  nombra. Su fixture usa `node_schema: null`, que cuenta como ausente para la regla de
+  precedencia, así que tampoco ejercita esa interacción.
+
+#### Fase 2 — la fuente de verdad en el código
+
+- **L10 · Generar el set de campos en vez de verificarlo.** La maquinaria está completa:
+  los 37 nodos declaran `config_schema()` y un test los cruza contra el catálogo nodo por
+  nodo (CHANGELOG §12-§17), así que el catálogo ya no puede desviarse del código en
+  nombres, `required`, `valid_values` ni `read_only`. **Alcance acordado: solo hechos
+  mecánicos** — la prosa (`description`/`example`/`default`) queda autorada a mano. El
+  paso opcional es pasar de verificar a generar. Sin trigger; abrirlo solo si el
+  mantenimiento del JSON empieza a doler.
+
+### Cerrados
+
+| Item | Cerrado | Ref |
+|---|---|---|
+| `NO_CATALOG_COVERAGE` inalcanzable desde la CLI — `KnownNodeTypes` separa los dos grados de certeza | 2026-09-02 | §10 |
+| `compact()` dejaba comillas desbalanceadas | 2026-09-02 | §10 |
+| `validate_graph` de los bindings no validaba lo que su nombre prometía — nota de migración para ADP: [`2026-09-02-validate-graph-now-validates.md`](adp_migration/2026-09-02-validate-graph-now-validates.md) | 2026-09-02 | §8, §9 |
+| El `schema()` de `api_explorer` anunciaba diez campos que el nodo nunca lee | 2026-09-03 | §11 |
+| 30 grafos con `llm_call.session_id` inerte, más las tres fuentes que lo originaban | 2026-09-03 | §20 |
+| Tres grafos de ejemplo no cargaban — destapó siete defectos más que el fallo de carga tapaba. Sólo `forward_generated_artifact` quedó verificado E2E contra un endpoint real; los otros dos cargan pero necesitan una aplicación anfitriona que registre el adjunto para probarlos | 2026-09-03 | §20 |
+| Rebanada 1 — recorrido de `tool_configurations` y la regla de precedencia `DEAD_FIXED_CONFIG` | 2026-09-04 | §21 |
+| Rebanada 2 — cada clave se cruza contra el `node_type` destino | 2026-09-04 | §22 |
+| Rebanada 3 — las cinco tools sintéticas y `TOOL_NEVER_EXPOSED` | 2026-09-05 | §23 |
+| `MALFORMED_TOOL_ENTRY` y el consejo imposible de seguir para un tipo tool-only | 2026-09-05 | §26 |
+| El camino de producción no llamaba a `Graph::validate()` | 2026-09-04 | §18 |
+
+Dos lecciones del track que no son items y conviene no re-aprender:
+
+- **La rebanada 3 no se podía partir** en "los nombres" y "la regla". Saltear los nombres
+  sin la regla deja el caso roto en silencio total, peor que antes de conocerlos. Una
+  revisión lo clasificó como `worsened`; un test fija la lección.
+- **Un lint limpio no prueba que el grafo funcione.** El linter daba "no findings" sobre
+  tres grafos que no corrían, porque los dos defectos vivían dentro de
+  `tool_configurations` y ninguna regla entraba ahí. De ahí salió todo §21-§23 y §26, y L2 es
+  el mismo agujero un nivel más abajo.
 
 ## 🚨 MÁXIMA PRIORIDAD — Colmena no puede ejecutar los modelos GPT-5.6 (2026-08-24)
 

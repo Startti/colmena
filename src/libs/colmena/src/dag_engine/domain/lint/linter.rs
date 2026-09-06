@@ -9,6 +9,9 @@ use super::catalog::{
 };
 use super::diagnostic::{Diagnostic, DiagnosticCode, LintReport, Severity};
 use crate::dag_engine::domain::graph::{Graph, NodeConfig};
+use crate::dag_engine::domain::tool_configuration::{
+    parse_node_schema, NodeSchema, NodeSchemaField,
+};
 use serde_json::{Map, Value};
 use std::collections::BTreeSet;
 
@@ -117,6 +120,7 @@ pub fn lint_graph_json(
     let graph: Graph = serde_json::from_value(document.clone())?;
     let mut report = lint_graph(&graph, ctx);
     lint_raw_node_properties(document, ctx, &mut report);
+    lint_raw_malformed_tool_entries(document, &mut report);
     lint_raw_tool_configurations(document, &mut report);
     lint_raw_tool_fields(document, ctx, &mut report);
     report.sort();
@@ -159,6 +163,158 @@ fn tool_configuration_entries(document: &Value) -> Vec<(&String, &String, &Value
     entries
 }
 
+/// Why the engine will refuse this tool entry at load, if it will.
+///
+/// Reproduces `Graph::validate`'s `node_schema` check by calling the very same
+/// domain functions it calls — `NodeSchema` deserialization, then
+/// [`parse_node_schema`]. Reimplementing the rule here would let the two drift;
+/// sharing the code makes drift impossible by construction, and the linter is
+/// in the same layer, so reaching for them breaks no boundary.
+///
+/// The deserialization error itself is deliberately NOT forwarded — see
+/// [`unreadable_schema_shape`] for why.
+///
+/// `None` when the entry has no `node_schema` at all: absent is valid.
+fn node_schema_rejection(entry: &Value) -> Option<String> {
+    let schema_value = entry.get("node_schema")?;
+    match serde_json::from_value::<NodeSchema>(schema_value.clone()) {
+        Err(_) => Some(unreadable_schema_shape(schema_value)),
+        Ok(schema) => first_parse_rejection(&schema),
+    }
+}
+
+/// The first reason `parse_node_schema` refuses a schema, chosen deterministically.
+///
+/// Asking it about the whole schema at once would be the obvious call, and it
+/// is what `Graph::validate` does. But `NodeSchema` is a `HashMap` and
+/// `parse_node_schema` returns on the FIRST field it dislikes, so with two bad
+/// fields the reason it names depends on this process's hash seed — two `lint`
+/// runs over the same bytes would print different sentences into a report meant
+/// to be diffed. That is tolerable for a load-time crash and not for a linter.
+///
+/// So it is asked one field at a time, in sorted key order, and the first
+/// complaint wins. Same function, same verdict, stable sentence.
+///
+/// The whole schema is passed at the end as a DRIFT GUARD, not because it
+/// catches anything today: every error `parse_node_schema` can return lives in
+/// its per-field loop, and its second pass — the one that renames colliding
+/// container children — has no error path at all, so a schema whose fields all
+/// probe clean cannot fail as a whole. Verified against the binary with two
+/// containers sharing a child key: no finding. The call costs one pass and
+/// means that the day that function grows a genuinely cross-field error, the
+/// linter reports it instead of silently passing the entry.
+fn first_parse_rejection(schema: &NodeSchema) -> Option<String> {
+    let mut keys: Vec<&String> = schema.keys().collect();
+    keys.sort();
+    for key in keys {
+        let one: NodeSchema = std::iter::once((key.clone(), schema[key].clone())).collect();
+        if let Some(reason) = parse_node_schema(&one).err() {
+            return Some(reason);
+        }
+    }
+    parse_node_schema(schema).err()
+}
+
+/// Says why a `node_schema` could not be read, naming shapes and keys only.
+///
+/// The obvious implementation is to forward serde's own error, and the first
+/// version of this rule did. But serde renders `Unexpected::Str` with the
+/// literal string it found, so `"node_schema": {"api_key": "sk-live-…"}` — a
+/// common slip, and exactly the shape this rule exists to catch — copied the
+/// secret to stdout and into the `--format json` report, which is read in CI
+/// logs where the graph body itself is not printed.
+///
+/// One diagnostic in this linter does print a value — `INVALID_FIELD_VALUE`
+/// echoes what it found next to the accepted list — but only for a field the
+/// catalog declares with `valid_values`, a closed enum like `method`. No
+/// credential lands there. A `node_schema` key is the opposite: a free-form
+/// slot the author names, and the wrong value in it is exactly what this rule
+/// catches. So this one names shapes and keys only.
+///
+/// Offenders are sorted for a canonical order — the sentence then does not
+/// depend on the order the author happened to write the keys in. (It was never
+/// unstable across runs: `serde_json::Map` is ordered. The run-to-run
+/// instability lives in the other branch, and [`first_parse_rejection`] is what
+/// answers it.) `parse_node_schema`'s own errors are forwarded unchanged: they
+/// name the field label only, never its value.
+fn unreadable_schema_shape(schema: &Value) -> String {
+    let Some(fields) = schema.as_object() else {
+        return format!("the whole block is {}", json_shape(schema));
+    };
+    let mut offenders: Vec<String> = fields
+        .iter()
+        .filter(|(_, value)| serde_json::from_value::<NodeSchemaField>((*value).clone()).is_err())
+        .map(|(key, value)| {
+            if value.is_object() {
+                format!("`{key}` is an object but not a valid field definition")
+            } else {
+                format!("`{key}` is {}", json_shape(value))
+            }
+        })
+        .collect();
+    offenders.sort();
+    if offenders.is_empty() {
+        return "one of its entries is not a valid field definition".into();
+    }
+    offenders.join(", ")
+}
+
+/// Names a JSON value's shape without ever revealing what it holds.
+fn json_shape(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "a boolean",
+        Value::Number(_) => "a number",
+        Value::String(_) => "a string",
+        Value::Array(_) => "an array",
+        Value::Object(_) => "an object",
+    }
+}
+
+/// Reports a tool entry the engine will refuse before running anything.
+///
+/// `Graph::validate` rejects the whole graph when a tool's `node_schema` cannot
+/// be read, and since §18 that validation runs on every engine entry, not just
+/// the CLI. So the diagnosis already existed; what did not was saying it
+/// *before* the run, which is the linter's entire reason to exist.
+///
+/// Two families of rejection, and both are needed. The block may fail to
+/// deserialize into `NodeSchema` — `null`, a string, a number, an array, or an
+/// object one of whose entries is not a field definition — or it may
+/// deserialize cleanly and still be refused by `parse_node_schema`: an
+/// LLM-visible field with no `type`, or an `array` field with no `items` /
+/// `items.type`. The second family is not a corner: `{"body": {"required":
+/// true}}` is a perfectly well-formed `NodeSchemaField`, so the first check
+/// waves it through and the engine still refuses it.
+///
+/// Reporting this suppresses the PRECEDENCE rule for that entry, and only that
+/// one: `DEAD_FIXED_CONFIG` would tell the author to move keys into the very
+/// `node_schema` that is broken, which fixes nothing. The field rules keep
+/// firing — see the note at the suppression site.
+fn lint_raw_malformed_tool_entries(document: &Value, report: &mut LintReport) {
+    for (node_id, tool_name, entry) in tool_configuration_entries(document) {
+        let Some(reason) = node_schema_rejection(entry) else {
+            continue;
+        };
+        report.diagnostics.push(Diagnostic {
+            severity: Severity::Error,
+            code: DiagnosticCode::MalformedToolEntry,
+            node_id: Some(node_id.clone()),
+            field: Some(format!("tool_configurations.{tool_name}.node_schema")),
+            message: format!(
+                "tool \"{tool_name}\" has a node_schema the engine refuses at load: \
+                 {reason}"
+            ),
+            suggestion: Some(
+                "every entry in `node_schema` must be an object; an LLM-visible field needs \
+                 a `type`, and an `array` one also needs `items` with its own `type`; a \
+                 field with `fixed` may omit `type`"
+                    .into(),
+            ),
+        });
+    }
+}
+
 /// Reports a `fixed_config` that the executor will never read.
 ///
 /// `DagToolExecutor` builds a tool call's arguments in one `if`/`else if`:
@@ -180,6 +336,20 @@ fn tool_configuration_entries(document: &Value) -> Vec<(&String, &String, &Value
 /// and the author has no bug to fix.
 fn lint_raw_tool_configurations(document: &Value, report: &mut LintReport) {
     for (node_id, tool_name, entry) in tool_configuration_entries(document) {
+        // An entry the engine will refuse has no meaningful precedence problem,
+        // and this rule's advice — move the keys into `node_schema` — would fix
+        // nothing, because that schema is the thing that is broken.
+        // `MALFORMED_TOOL_ENTRY` already named the real cause.
+        //
+        // Note this suppression is deliberately narrow. The field rules are NOT
+        // suppressed: "this key is not a field of that node type" stays true
+        // and actionable whatever shape the `node_schema` is in, and hiding it
+        // would cost the author a second round trip for a defect that has
+        // nothing to do with the first. A review caught an earlier version of
+        // this change suppressing both.
+        if node_schema_rejection(entry).is_some() {
+            continue;
+        }
         // Presence, not contents. The executor's branch is
         // `if let Some(schema) = …node_schema.as_ref()`, and `NodeSchema` is a
         // `HashMap`, so `"node_schema": {}` deserializes to `Some(empty)` and
@@ -581,6 +751,32 @@ fn lint_node(
             // A near-miss against a documented type is strong evidence of a
             // typo, and worth an error. Anything else is only a gap in our own
             // coverage, and must not be dressed up as a claim about the engine.
+            // A tool-only type is not a near miss and not a coverage gap: it
+            // is an exact name used one level too high. Saying "add a catalog
+            // entry" would send its author somewhere they cannot go, since
+            // `node_types` is closed in both directions against the engine
+            // registry and that entry would fail the suite.
+            if ctx.catalog.tool_only_type(&node.node_type).is_some() {
+                report.diagnostics.push(Diagnostic {
+                    severity: Severity::Error,
+                    code: DiagnosticCode::UnknownNodeType,
+                    node_id: Some(node_id.to_string()),
+                    field: None,
+                    message: format!(
+                        "\"{}\" is not a node type; it is only valid as the \
+                         `node_type` of an entry inside a tool's \
+                         `tool_configurations`",
+                        node.node_type
+                    ),
+                    suggestion: Some(
+                        "move it into the `tool_configurations` of an `llm_call`, or use \
+                         a real node type here"
+                            .into(),
+                    ),
+                });
+                return;
+            }
+
             let near = suggest(&node.node_type, ctx.catalog.covered_node_types());
             report.diagnostics.push(match near {
                 Some(near) => Diagnostic {
@@ -624,9 +820,20 @@ fn lint_node(
                  configuration was not checked",
                 node.node_type
             ),
-            suggestion: Some(
-                "add an entry to docs/node_configurations.json to enable checking".into(),
-            ),
+            // A tool-only type here is not an uncovered node: it is a name
+            // that belongs one level down, inside `tool_configurations`.
+            // Telling its author to add a catalog entry sends them somewhere
+            // they cannot go — `node_types` is closed in both directions
+            // against the engine registry, so that entry would fail the suite.
+            suggestion: Some(if ctx.catalog.tool_only_type(&node.node_type).is_some() {
+                format!(
+                    "\"{}\" is only valid inside a tool's `tool_configurations`, \
+                     never as a node's `type`",
+                    node.node_type
+                )
+            } else {
+                "add an entry to docs/node_configurations.json to enable checking".into()
+            }),
         });
         return;
     };

@@ -75,7 +75,12 @@ impl Graph {
     ///   `/` in user-defined IDs would make the resulting paths ambiguous.
     /// - A misconfigured `memory_mode` on any tool (wrong node type, unknown value, or
     ///   a memory-bearing mode without a `connection_url` backend).
+    /// - A malformed `mcp` block, or one whose URL is not HTTPS.
     /// - Malformed `node_schema` on any tool in `tool_configurations`.
+    ///
+    /// Keep this list complete. `dag_engine lint` mirrors these gates one by one so it
+    /// can report them before a run, and it reads this comment to know what is left —
+    /// an omission here shows up as a gate nobody knows is unlinted.
     pub fn validate(&self) -> Result<(), crate::dag_engine::domain::error::DagError> {
         use crate::dag_engine::domain::error::DagError;
         use crate::dag_engine::domain::tool_configuration::{

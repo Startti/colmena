@@ -59,6 +59,9 @@ pub enum DiagnosticCode {
     /// A synthetic tool is named by `node_type` but not by the entry's key,
     /// which is what actually turns it on — so it is never exposed.
     ToolNeverExposed,
+    /// A tool entry's `node_schema` is shaped so the engine refuses the whole
+    /// graph at load. The linter says so before anything runs.
+    MalformedToolEntry,
 }
 
 impl DiagnosticCode {
@@ -76,6 +79,7 @@ impl DiagnosticCode {
             DiagnosticCode::DeadFixedConfig => "DEAD_FIXED_CONFIG",
             DiagnosticCode::RepurposedToolField => "REPURPOSED_TOOL_FIELD",
             DiagnosticCode::ToolNeverExposed => "TOOL_NEVER_EXPOSED",
+            DiagnosticCode::MalformedToolEntry => "MALFORMED_TOOL_ENTRY",
         }
     }
 }

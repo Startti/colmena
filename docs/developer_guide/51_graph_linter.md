@@ -59,6 +59,7 @@ camino de adopción para quien lo quiera en CI.
 | `DEAD_FIXED_CONFIG` | error | Una tool declara `fixed_config` junto a `node_schema`; el executor lee el segundo y **descarta el primero entero** |
 | `REPURPOSED_TOOL_FIELD` | warning | Una tool fija una clave que el nodo destino no declara, en un tipo de nodo que **reinterpreta** las claves desconocidas en vez de ignorarlas |
 | `TOOL_NEVER_EXPOSED` | error | Una tool sintética nombrada en `node_type` pero **no en la clave** de la entrada, que es lo que realmente la activa — el modelo nunca la recibe |
+| `MALFORMED_TOOL_ENTRY` | error | El `node_schema` de una tool está formado de modo que **el motor rechaza el grafo al cargar**; el linter lo dice antes de correr |
 | `NO_CATALOG_COVERAGE` | info | El tipo de nodo no tiene entrada en el catálogo: **no se revisó** |
 
 Los `code` son estables. Cualquier consumidor (la salida JSON, una UI sobre los
@@ -260,6 +261,90 @@ loading** —lo que corre en producción— la entrada igual entra al catálogo 
 `node_schema` como la tabla de parámetros que ve el modelo. `enters_lazy_catalog`
 sólo excluye las entradas `eager` y las `mcp`.
 
+## Decirlo antes de correr, no después
+
+`Graph::validate()` rechaza el grafo entero cuando el `node_schema` de una tool no
+se puede leer, y desde el §18 esa validación corre en **toda** entrada del motor,
+no sólo desde el CLI. Así que el diagnóstico ya existía; lo que faltaba era decirlo
+**antes** de ejecutar, que es la razón de ser del linter.
+
+Son dos familias de rechazo, no una, y hacen falta las dos para cubrir el caso:
+
+1. **El bloque no deserializa a `NodeSchema`** — `null`, un escalar, un array, o
+   un objeto alguna de cuyas entradas no es una definición de campo válida.
+2. **Deserializa pero `parse_node_schema` lo rechaza** — un campo visible al LLM
+   sin `type`, o uno de tipo `array` sin `items` / `items.type`. Ojo con esta
+   familia: `{ "body": { "required": true } }` es un `NodeSchemaField` perfectamente
+   bien formado, así que la primera familia no lo ve, y el motor igual lo rechaza.
+
+`MALFORMED_TOOL_ENTRY` lo dice, y lo dice **llamando a las mismas funciones** que
+usa `validate()` —deserializar a `NodeSchema` y después `parse_node_schema`— en vez
+de reimplementar la regla. Las dos viven en el dominio, igual que el linter, así
+que compartirlas no cruza ninguna frontera y hace la divergencia imposible por
+construcción.
+
+Verificado forma por forma contra el binario: las nueve que el motor rechaza —seis
+de la primera familia, tres de la segunda— las reporta el linter, y las dos que
+acepta —`node_schema` ausente y uno bien formado— no. La tabla de casos del test
+las enumera una por una.
+
+**El mensaje nombra formas y claves, nunca un valor.** La versión original
+reenviaba el error de serde tal cual, y serde imprime el string ofensor
+literalmente. Es decir que la forma más probable de cometer este error —poner un
+valor directo bajo la clave en vez de dentro de una definición de campo— copiaba
+ese valor a stdout y al reporte `--format json`, que se lee en logs de CI donde el
+cuerpo del grafo no aparece. Un `"node_schema": { "api_key": "sk-live-…" }` filtraba
+la credencial. Ahora dice `` `api_key` es un string ``, con las claves ofensoras
+ordenadas alfabéticamente: así la oración no depende del orden en que el autor
+escribió las claves. Los errores de `parse_node_schema` se reenvían sin tocar,
+porque nombran la etiqueta del campo y nunca su valor.
+
+Con una excepción que conviene nombrar en vez de fingir que no existe:
+`INVALID_FIELD_VALUE` **sí** imprime un valor, al lado de la lista de aceptados.
+Pero sólo para un campo que el catálogo declara con `valid_values` —un enum
+cerrado como `method`—, y ahí no aterriza una credencial. Una clave de
+`node_schema` es lo contrario: un lugar libre que nombra el autor.
+
+**Y una segunda fuente de inestabilidad, en la otra rama.** `parse_node_schema`
+recorre un `HashMap` y devuelve el **primer** campo que le disgusta, así que con
+dos campos malos el motivo que imprime depende del seed de hash del proceso. Para
+un crash de carga da igual; para un reporte que se diffea en CI, no. El linter le
+pregunta de a un campo por vez en orden alfabético y se queda con la primera queja
+—misma función, mismo veredicto, oración estable—, y al final le pasa el esquema
+entero igual, como **guarda contra deriva**: hoy no atrapa nada, porque todos los
+errores de esa función viven en su bucle por campo y su segunda pasada —la que
+renombra hijos de contenedor que colisionan— no tiene rama de error. Verificado
+contra el binario con dos contenedores compartiendo una clave hija: sin hallazgo.
+Cuesta una pasada y sirve para el día en que esa función crezca un error realmente
+entre campos.
+
+**Reportar esto silencia la regla de precedencia para esa entrada, y sólo esa.**
+El consejo de `DEAD_FIXED_CONFIG` —mover las claves *dentro* de ese mismo
+`node_schema`— dejaría el grafo igual de inejecutable, porque el schema es
+justamente lo que está roto. Antes de esta regla, un `node_schema` con un campo
+anidado inválido recibía exactamente ese consejo.
+
+Las **reglas de campos no se silencian**. Son defectos independientes: "esta clave
+no es un campo de ese tipo de nodo" sigue siendo verdad y sigue siendo accionable
+cualquiera sea la forma del `node_schema`, y esconderla costaría un viaje de ida y
+vuelta extra por algo que no tiene relación con el primer error. Una entrada
+malformada *y* con una clave inventada en `fixed_config` reporta las dos cosas.
+
+### Y un tipo tool-only usado como nodo del grafo
+
+Es un nombre exacto en el lugar equivocado, no un hueco de cobertura. Antes se
+reportaba como `NO_CATALOG_COVERAGE` (info) aconsejando agregar una entrada al
+catálogo — **imposible de seguir**, porque `node_types` está cerrado en ambas
+direcciones contra el registry y esa entrada haría fallar el test suite. Ahora el
+consejo dice dónde va el nombre. Un tipo realmente desconocido conserva el consejo
+original.
+
+La **severidad depende del contexto**, y conviene no confundirlas. Con
+`LintContext::from_catalog` —lo que usa el CLI— pasa a ser un `UNKNOWN_NODE_TYPE`
+(error, porque ese grafo no corre). Con `with_embedded_catalog` sigue siendo
+`NO_CATALOG_COVERAGE` (info): ese contexto no saca conclusiones sobre tipos de
+nodo, así que sólo cambia el texto del consejo.
+
 ## Las decisiones que evitan el ruido
 
 Un linter con falsos positivos se ignora. Cinco reglas existen sólo para eso, y
@@ -329,7 +414,7 @@ El linter puede juzgar un tipo de nodo con dos grados de certeza distintos, y
 | Variante | Qué sabe | Qué reporta ante un tipo desconocido |
 |---|---|---|
 | `Registry(&set)` | El registry real del motor | `UNKNOWN_NODE_TYPE` (error): *"is not a node type this engine can run"*. La ausencia es prueba. |
-| `CatalogOnly` | Solo los tipos documentados | Si hay un tipo documentado a distancia de typo → `UNKNOWN_NODE_TYPE` (error), *"is not a documented node type"*. Si no → `NO_CATALOG_COVERAGE` (info): no puedo revisarlo. |
+| `CatalogOnly` | Solo los tipos documentados | Si es un tipo tool-only → `UNKNOWN_NODE_TYPE` (error): el nombre va dentro de `tool_configurations`. Si hay un tipo documentado a distancia de typo → `UNKNOWN_NODE_TYPE` (error), *"is not a documented node type"*. Si no → `NO_CATALOG_COVERAGE` (info): no puedo revisarlo. |
 | `Unchecked` | Nada | No opina sobre tipos de nodo. |
 
 La CLI usa `CatalogOnly`, que no cuesta nada construir —sin engine, sin base de
@@ -394,12 +479,37 @@ claves que se perdían.
   migrado los dos ya no pueden diverger. La prosa (`description`/`example`/`default`)
   sigue viviendo en el JSON a propósito — es lo que leen humanos y agentes. Los
   nodos que todavía devuelven `None` siguen respaldados solo por el catálogo.
-- **`tool_configurations` se revisa sólo en su forma, todavía no campo por campo.**
-  `DEAD_FIXED_CONFIG` cubre el error de precedencia; los campos que una tool
-  declara dentro de `node_schema` o `fixed_config` aún **no** se cruzan contra el
-  tipo de nodo al que apuntan. Es un hueco real: los grafos de la §20 declaraban
-  `url` donde `http_request` lee `base_url`, y el linter no dijo nada. Lo demás lo
-  cubre `Graph::validate()` (`memory_mode`, bloque `mcp`, `node_schema`).
+- **De las cinco compuertas de `Graph::validate()`, el linter reproduce una.** Esta
+  es la limitación que más conviene tener presente, porque decide qué significa un
+  reporte limpio. `MALFORMED_TOOL_ENTRY` reproduce el brazo `node_schema`. Las otras
+  cuatro rechazan el grafo al cargar y el linter **no dice nada**: un `memory_mode`
+  con un valor que no es del enum, uno sobre un tipo de nodo que no lleva memoria,
+  uno que lleva memoria sin `connection_url`, y un bloque `mcp` malformado o con URL
+  no-HTTPS. Hay una sexta fuera de las entradas de tool —un node id que contiene
+  `/`— que tampoco se revisa.
+
+  **Qué significa entonces "no findings":** que el linter no encontró nada de lo que
+  sabe buscar, no que el motor vaya a cargar el grafo. El motor sigue siendo la
+  autoridad y falla cerrado en los cinco casos, así que lo que se pierde es el aviso
+  temprano, nunca una ejecución sin guardia. Los items abiertos están en el
+  [BACKLOG](../BACKLOG.md) como L1 y L1b.
+
+  *(Esta viñeta decía hasta la §22 que los campos de una tool no se cruzaban contra
+  su `node_type`. Eso se cerró en esa misma sección y la limitación quedó vieja
+  contradiciendo a "Los campos de una tool" más arriba.)*
+- **Ninguna regla entra en un grafo anidado.** Todas las reglas crudas recorren
+  `nodes.*.config.tool_configurations` y nada más, así que lo que viva un nivel más
+  abajo no se revisa: el `child_graph_inline` de un `subgraph`, y el `target` de un
+  `for_each` —que tiene la misma forma `{node_type, node_schema}` que una entrada de
+  tool—. Verificado contra el binario: un `url` sobre `http_request` dentro de un
+  `for_each.target` (el defecto exacto de la §20) lintea limpio.
+
+  Los dos no cuestan lo mismo. Un `subgraph` inline malformado igual falla al cargar,
+  porque `validate()` corre para los grafos hijos; el `target` de un `for_each` no pasa
+  por `validate()` **ni** falla al ejecutar, porque el nodo parsea ese schema dentro de
+  dos `if let Ok(...)` sin rama else y ante un error se saltea en silencio su propia
+  validación por fila. Ahí "no findings" no tiene ninguna autoridad debajo. Abiertos en
+  el [BACKLOG](../BACKLOG.md) como L2 y L2b.
 - **Cuatro tipos condicionales se dan por disponibles.** El linter revisa el
   grafo contra lo que el motor *puede* ejecutar, no contra el cableado de un
   despliegue concreto.
