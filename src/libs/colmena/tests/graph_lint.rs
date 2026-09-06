@@ -1127,38 +1127,6 @@ fn a_scalar_node_schema_does_not_trigger_the_precedence_rule() {
     }
 }
 
-/// The remaining row: an object-shaped `node_schema` whose nested field is
-/// invalid. The rule DOES report it, because `is_object` looks at the top level
-/// only — and that is deliberate. `Graph::validate` rejects such a graph at load,
-/// so the finding lands on something that never runs; narrowing the guard to
-/// inspect nested validity would trade this harmless imprecision for a real
-/// blind spot, silencing the precedence rule on a malformed entry. The honest
-/// fix is a separate `MALFORMED_TOOL_ENTRY` code, recorded in BACKLOG.md.
-///
-/// Pinned so the behavior is deliberate rather than accidental.
-#[test]
-fn an_object_node_schema_with_an_invalid_nested_field_is_still_reported() {
-    let report = lint_json(serde_json::json!({
-        "nodes": {
-            "agent": {
-                "type": "llm_call",
-                "config": {
-                    "provider": "google", "api_key": "k", "model": "gemini-2.5-flash",
-                    "tool_configurations": {
-                        "t": {
-                            "node_type": "http_request",
-                            "fixed_config": { "base_url": "https://kb.test" },
-                            "node_schema": { "body": "not-a-field-definition" }
-                        }
-                    }
-                }
-            }
-        },
-        "edges": []
-    }));
-    assert!(find(&report, DiagnosticCode::DeadFixedConfig).is_some());
-}
-
 /// Builds a one-node graph whose single tool targets `node_type` with `block`
 /// set to `fields`, which is the shape every test below needs.
 fn tool_graph(node_type: &str, block: &str, fields: serde_json::Value) -> serde_json::Value {
@@ -1540,4 +1508,336 @@ fn a_node_type_activated_entry_is_not_judged_by_its_key() {
         "edges": []
     }));
     assert!(find(&report, DiagnosticCode::ToolNeverExposed).is_none());
+}
+
+/// Builds a graph whose single tool entry carries `schema` as its `node_schema`.
+fn schema_tool_graph(schema: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "nodes": {
+            "agent": {
+                "type": "llm_call",
+                "config": {
+                    "provider": "google", "api_key": "k", "model": "gemini-2.5-flash",
+                    "tool_configurations": {
+                        "t": {
+                            "node_type": "http_request",
+                            "fixed_config": { "base_url": "https://kb.test" },
+                            "node_schema": schema
+                        }
+                    }
+                }
+            }
+        },
+        "edges": []
+    })
+}
+
+/// The linter now says, before anything runs, what the engine would only say at
+/// load — which is the whole point of having a linter.
+///
+/// `Graph::validate` refuses the graph for each of these shapes, and since
+/// section 18 that validation runs on every engine entry rather than just the
+/// CLI. Every shape below was checked against the built binary: the linter
+/// reports it and `dag_engine run` refuses it, with no case where one speaks and
+/// the other does not.
+#[test]
+fn a_node_schema_the_engine_will_refuse_is_reported_before_running() {
+    for (name, schema) in [
+        ("null", serde_json::json!(null)),
+        ("string", serde_json::json!("x")),
+        ("number", serde_json::json!(7)),
+        ("array", serde_json::json!([])),
+        ("bool", serde_json::json!(true)),
+        (
+            "nested field is not an object",
+            serde_json::json!({ "body": "nope" }),
+        ),
+        (
+            "llm-visible field without a type",
+            serde_json::json!({ "body": { "required": true } }),
+        ),
+        (
+            "array field without items",
+            serde_json::json!({ "rows": { "type": "array" } }),
+        ),
+        (
+            "array field whose items have no type",
+            serde_json::json!({ "rows": { "type": "array", "items": {} } }),
+        ),
+    ] {
+        let report = lint_json(schema_tool_graph(schema));
+        let d = find(&report, DiagnosticCode::MalformedToolEntry)
+            .unwrap_or_else(|| panic!("{name} must be reported"));
+        assert_eq!(d.severity, Severity::Error, "{name}");
+        assert_eq!(
+            d.field.as_deref(),
+            Some("tool_configurations.t.node_schema"),
+            "{name}"
+        );
+    }
+}
+
+/// With two fields the engine would refuse, the message names the same one
+/// every run.
+///
+/// `parse_node_schema` walks a `HashMap` and returns on the FIRST field it
+/// dislikes, so asking it about the whole schema hands the choice to the
+/// process's hash seed. A load-time crash can live with that; a report meant to
+/// be diffed in CI cannot. The linter asks one field at a time in sorted order,
+/// so `alpha` — first alphabetically, not first by hash — is always the one
+/// named.
+#[test]
+fn a_schema_with_two_bad_fields_always_names_the_same_one() {
+    // `alpha` sorts first and is VALID, so the probe loop has to advance past
+    // it — that is what makes this test bite a `take(1)` on the loop. The four
+    // bad fields after it are what make a whole-schema call unlikely to name
+    // `bravo` by luck: it picks one of them per process, so that mutation dies
+    // four runs in five.
+    // Repeated on purpose. One pass is not a guard: an unsorted implementation
+    // picks one of the four offenders per `HashMap`, so it lands on `bravo` —
+    // and passes — about one run in four. Every `lint_json` here builds a fresh
+    // map with a fresh `RandomState`, so twenty passes leave a broken
+    // implementation ~4^-20 of a chance, while the sorted one is invariant.
+    for pass in 0..20 {
+        let report = lint_json(schema_tool_graph(serde_json::json!({
+            "zulu": { "required": true },
+            "delta": { "required": true },
+            "bravo": { "required": true },
+            "echo": { "required": true },
+            "alpha": { "type": "string" },
+        })));
+        let d = find(&report, DiagnosticCode::MalformedToolEntry).expect("must be reported");
+        assert!(
+            d.message.contains("'bravo'"),
+            "pass {pass}: the sorted-first OFFENDER must be the one named, got: {}",
+            d.message
+        );
+        for later in ["'delta'", "'echo'", "'zulu'"] {
+            assert!(
+                !d.message.contains(later),
+                "pass {pass}: only the first offender is reported, but {later} appeared in: {}",
+                d.message
+            );
+        }
+    }
+}
+
+/// The message names shapes and keys, never a value.
+///
+/// The first version of this rule forwarded serde's own error, and serde
+/// renders the offending string literally. So the single most likely way to
+/// write this mistake — putting a value straight under a key instead of inside
+/// a field definition — printed that value to stdout and into the `--format
+/// json` report, which is read in CI logs where the graph body is not. A
+/// review caught it. Every other diagnostic in this linter echoes keys, node
+/// ids and type names only, and this test is what keeps this one in line.
+#[test]
+fn a_refused_node_schema_never_prints_the_value_it_found() {
+    let secret = "sk-live-must-never-be-printed";
+    // A second secret one level DOWN, so the object branch is covered too. It is
+    // the branch a credential is most likely to reach: `{"creds": {...}}` looks
+    // like a field definition and only fails because an inner key has the wrong
+    // type. Without a row like this the object branch could print what it found
+    // and every other test here would still pass.
+    let nested_secret = "sk-live-nested-must-never-be-printed";
+    // Written OUT of alphabetical order on purpose. With the keys already
+    // sorted in the document, dropping `offenders.sort()` changes nothing and
+    // the ordering assertion below passes over a broken implementation —
+    // `serde_json::Map` preserves document order, so the fixture IS the guard.
+    let report = lint_json(schema_tool_graph(serde_json::json!({
+        "rows": ["a"],
+        "api_key": secret,
+        "count": 7,
+        "creds": { "required": nested_secret, "type": 5 },
+    })));
+    let d = find(&report, DiagnosticCode::MalformedToolEntry).expect("must be reported");
+    let printed = format!("{} {}", d.message, d.suggestion.clone().unwrap_or_default());
+
+    assert!(
+        !printed.contains(secret),
+        "the secret leaked into the diagnostic: {printed}"
+    );
+    assert!(
+        !printed.contains(nested_secret),
+        "the nested secret leaked out of the object branch: {printed}"
+    );
+    assert!(!printed.contains('7'), "the number leaked: {printed}");
+
+    // The keys DO belong there — they are what the author has to go fix — and
+    // they are listed sorted, so two runs over the same file read the same.
+    assert!(
+        printed.contains("`api_key` is a string")
+            && printed.contains("`count` is a number")
+            && printed.contains("`rows` is an array")
+            && printed.contains("`creds` is an object but not a valid field definition"),
+        "each offending key must be named by shape: {printed}"
+    );
+    let api_at = printed.find("`api_key`").expect("api_key named");
+    let count_at = printed.find("`count`").expect("count named");
+    let creds_at = printed.find("`creds`").expect("creds named");
+    let rows_at = printed.find("`rows`").expect("rows named");
+    assert!(
+        api_at < count_at && count_at < creds_at && creds_at < rows_at,
+        "offenders must be listed in a canonical order, not the author's: {printed}"
+    );
+}
+
+/// The rule must not fire on the shapes the engine accepts, or it would report
+/// working graphs. An absent `node_schema` is valid, and so is a well-formed
+/// one.
+#[test]
+fn a_node_schema_the_engine_accepts_is_left_alone() {
+    let valid = lint_json(schema_tool_graph(
+        serde_json::json!({ "body": { "type": "object", "required": true } }),
+    ));
+    assert!(find(&valid, DiagnosticCode::MalformedToolEntry).is_none());
+
+    let absent = lint_json(serde_json::json!({
+        "nodes": {
+            "agent": {
+                "type": "llm_call",
+                "config": {
+                    "provider": "google", "api_key": "k", "model": "gemini-2.5-flash",
+                    "tool_configurations": {
+                        "t": { "node_type": "http_request", "fixed_config": { "base_url": "https://kb.test" } }
+                    }
+                }
+            }
+        },
+        "edges": []
+    }));
+    assert!(find(&absent, DiagnosticCode::MalformedToolEntry).is_none());
+}
+
+/// An entry the engine refuses has no meaningful precedence or field problem,
+/// and the other rules' advice would fix nothing. Before this, a `node_schema`
+/// whose nested field was invalid drew a `DEAD_FIXED_CONFIG` telling the author
+/// to move keys into that very schema — advice that leaves the graph just as
+/// unloadable.
+///
+/// This supersedes `an_object_node_schema_with_an_invalid_nested_field_is_still_reported`,
+/// which pinned that imprecision deliberately while its own docstring named the
+/// remedy: a separate `MALFORMED_TOOL_ENTRY` code. That is what this is, so the
+/// old test asserted behavior the fix removes and was deleted rather than left
+/// contradicting this one.
+#[test]
+fn a_refused_entry_reports_only_the_reason_it_is_refused() {
+    let report = lint_json(schema_tool_graph(serde_json::json!({ "body": "nope" })));
+
+    assert!(find(&report, DiagnosticCode::MalformedToolEntry).is_some());
+    assert!(
+        find(&report, DiagnosticCode::DeadFixedConfig).is_none(),
+        "the precedence rule must not pile onto an entry that will not load"
+    );
+}
+
+/// A tool-only name used one level too high is an exact name in the wrong
+/// place, not a coverage gap. Telling its author to add a catalog entry sends
+/// them somewhere they cannot go: `node_types` is closed in both directions
+/// against the engine registry, so that entry would fail the suite.
+#[test]
+fn a_tool_only_type_used_as_a_graph_node_says_where_it_belongs() {
+    let ctx = LintContext::from_catalog();
+    let document = serde_json::json!({
+        "nodes": { "raro": { "type": "data_run_python", "config": {} } },
+        "edges": []
+    });
+    let report = lint_graph_json(&document, &ctx).expect("valid graph");
+
+    let d = find(&report, DiagnosticCode::UnknownNodeType)
+        .expect("a tool-only type used as a node type must be reported");
+    assert_eq!(d.severity, Severity::Error);
+    assert!(
+        d.message.contains("tool_configurations"),
+        "the message must say where the name belongs, got: {}",
+        d.message
+    );
+}
+
+/// A type that is genuinely unknown keeps the original advice — the fix above
+/// must not swallow the ordinary case.
+#[test]
+fn a_genuinely_unknown_node_type_still_points_at_the_catalog() {
+    let ctx = LintContext::from_catalog();
+    let document = serde_json::json!({
+        "nodes": { "x": { "type": "no_such_thing_anywhere", "config": {} } },
+        "edges": []
+    });
+    let report = lint_graph_json(&document, &ctx).expect("valid graph");
+
+    let d = find(&report, DiagnosticCode::NoCatalogCoverage).expect("must be reported");
+    assert!(d
+        .suggestion
+        .as_deref()
+        .is_some_and(|s| s.contains("node_configurations.json")));
+}
+
+/// The suppression must be narrow, which an earlier version of it was not.
+///
+/// A malformed `node_schema` and an invented key in `fixed_config` are two
+/// independent defects. Suppressing the precedence rule is right — its advice
+/// is to move keys into the very schema that is broken. Suppressing the field
+/// rules is not: "this key is not a field of that node type" stays true and
+/// actionable whatever shape the schema is in, and hiding it costs the author a
+/// second round trip for a defect unrelated to the first.
+///
+/// Reproduced against the binary before the fix: the invented key vanished from
+/// the report entirely.
+#[test]
+fn a_refused_entry_still_reports_defects_that_stand_on_their_own() {
+    let report = lint_json(serde_json::json!({
+        "nodes": {
+            "agent": {
+                "type": "llm_call",
+                "config": {
+                    "provider": "google", "api_key": "k", "model": "gemini-2.5-flash",
+                    "tool_configurations": {
+                        "t": {
+                            "node_type": "http_request",
+                            "node_schema": null,
+                            "fixed_config": { "bogus_key": "x" }
+                        }
+                    }
+                }
+            }
+        },
+        "edges": []
+    }));
+
+    assert!(
+        find(&report, DiagnosticCode::MalformedToolEntry).is_some(),
+        "the refusal must still be reported"
+    );
+    let field = find(&report, DiagnosticCode::RepurposedToolField)
+        .expect("an invented key is a defect of its own and must survive the suppression");
+    assert_eq!(
+        field.field.as_deref(),
+        Some("tool_configurations.t.fixed_config.bogus_key")
+    );
+}
+
+/// The same correction on the other entry point.
+///
+/// `LintContext::with_embedded_catalog` draws no conclusions about node types,
+/// so it reaches a different arm of `lint_node` than the CLI's `from_catalog`
+/// does. Both were changed to name where a tool-only type belongs; a review
+/// pointed out only one of them had a test.
+#[test]
+fn the_unchecked_context_also_says_where_a_tool_only_type_belongs() {
+    let ctx = LintContext::with_embedded_catalog();
+    let document = serde_json::json!({
+        "nodes": { "raro": { "type": "data_run_python", "config": {} } },
+        "edges": []
+    });
+    let report = lint_graph_json(&document, &ctx).expect("valid graph");
+
+    let d = find(&report, DiagnosticCode::NoCatalogCoverage)
+        .expect("an uncovered type must still be reported here");
+    assert!(
+        d.suggestion
+            .as_deref()
+            .is_some_and(|s| s.contains("tool_configurations")),
+        "the advice must point at the right place, got: {:?}",
+        d.suggestion
+    );
 }
