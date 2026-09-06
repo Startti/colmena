@@ -210,10 +210,11 @@ impl McpConnectionRegistry {
         self.fetch_locks
             .remove_if(key, |_, lock| Arc::strong_count(lock) == 1);
         tracing::debug!(
-            target = "colmena::mcp_registry",
+            target: "colmena::mcp",
+            event = "mcp.pool_evicted",
             key = %key.as_str(),
             reason,
-            "mcp_connection_evicted"
+            "dropped a pooled MCP connection"
         );
     }
 
@@ -299,6 +300,13 @@ impl McpConnectionRegistry {
             let client = existing.clone();
             drop(existing);
             self.touch(key).await;
+            tracing::debug!(
+                target: "colmena::mcp",
+                event = "mcp.connection_reused",
+                key = %key.as_str(),
+                raced = false,
+                "reused a pooled MCP connection"
+            );
             return Ok(client);
         }
 
@@ -316,6 +324,13 @@ impl McpConnectionRegistry {
             let client = existing.clone();
             drop(existing);
             self.touch(key).await;
+            tracing::debug!(
+                target: "colmena::mcp",
+                event = "mcp.connection_reused",
+                key = %key.as_str(),
+                raced = true,
+                "reused a pooled MCP connection"
+            );
             return Ok(client);
         }
 
@@ -323,6 +338,17 @@ impl McpConnectionRegistry {
             let since = failed_at.elapsed();
             drop(failed_at);
             if since < config.timeout {
+                // The attempt is SKIPPED, and the caller degrades. Without this
+                // line a server inside its cooldown drops out of every turn with
+                // nothing in the log to say why.
+                tracing::debug!(
+                    target: "colmena::mcp",
+                    event = "mcp.connection_cooldown",
+                    key = %key.as_str(),
+                    since_ms = since.as_millis() as u64,
+                    window_ms = config.timeout.as_millis() as u64,
+                    "skipped dialling an MCP server that failed recently"
+                );
                 return Err(McpError::Transport {
                     // The key is a salted hash carrying no alias and no URL, so
                     // it would tell an operator nothing. The caller adds the
@@ -363,6 +389,13 @@ impl McpConnectionRegistry {
         // displacement can slip between them.
         self.register_and_pool(key, client.clone()).await;
         self.evict_if_needed().await;
+        tracing::debug!(
+            target: "colmena::mcp",
+            event = "mcp.connection_opened",
+            key = %key.as_str(),
+            pooled = self.clients.len(),
+            "opened and pooled a new MCP connection"
+        );
         Ok(client)
     }
 
@@ -397,6 +430,14 @@ impl McpConnectionRegistry {
             // one — the eviction order would be exactly backwards for the
             // access pattern the cache exists to serve.
             self.touch(key).await;
+            tracing::debug!(
+                target: "colmena::mcp",
+                event = "mcp.catalog_hit",
+                key = %key.as_str(),
+                tools = fresh.len(),
+                raced = false,
+                "served an MCP tool catalog from cache"
+            );
             return Ok(fresh);
         }
 
@@ -418,6 +459,14 @@ impl McpConnectionRegistry {
             // one — the eviction order would be exactly backwards for the
             // access pattern the cache exists to serve.
             self.touch(key).await;
+            tracing::debug!(
+                target: "colmena::mcp",
+                event = "mcp.catalog_hit",
+                key = %key.as_str(),
+                tools = fresh.len(),
+                raced = true,
+                "served an MCP tool catalog from cache"
+            );
             return Ok(fresh);
         }
 
@@ -463,6 +512,16 @@ impl McpConnectionRegistry {
         // Pinned by `a_catalog_cached_for_a_key_evicted_mid_fill_stays_collectable`,
         // which stages the racing eviction from inside `list_tools`.
         self.touch(key).await;
+        // Logged after the fetch rather than before it, so the count is the real
+        // one and a failed fetch is not reported as a miss that filled the cache
+        // — that path already leaves through `mcp.server_unavailable`.
+        tracing::debug!(
+            target: "colmena::mcp",
+            event = "mcp.catalog_miss",
+            key = %key.as_str(),
+            tools = tools.len(),
+            "fetched an MCP tool catalog and cached it"
+        );
         Ok(tools)
     }
 

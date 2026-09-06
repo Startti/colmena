@@ -34,7 +34,7 @@ Las secciones están organizadas por **tema**, no por orden numérico. Los prefi
 - [**Troubleshooting**](./developer_guide/18_troubleshooting.md) — Errores frecuentes del engine y bindings, con causas y fixes.
 - [**Logging y Observabilidad**](./developer_guide/50_logging_and_observability.md) — Contrato de targets `tracing` (`colmena::<nodo>` vs `colmena::payload::<tipo>`), gate doble sobre payloads (`RUST_LOG` + `COLMENA_LOG_PAYLOADS`), matriz de configuración por entorno.
 - [**Graph Linter**](./developer_guide/51_graph_linter.md) — `dag_engine lint`: detecta campos de config inventados, obligatorios ausentes, tipos de nodo inexistentes y edges colgados, sin ejecutar el grafo. Catálogo embebido, reglas anti-ruido, y por qué hay dos puntos de entrada.
-- [**Observabilidad MCP**](./developer_guide/52_mcp_observability.md) — Eventos `tracing` bajo el target `colmena::mcp` (`mcp.server_unavailable`, `mcp.server_ready`, `mcp.wiring_note`, `mcp.tools_exposed`): campos, niveles, y qué nunca se loguea.
+- [**Observabilidad MCP**](./developer_guide/52_mcp_observability.md) — Todos los eventos `tracing` bajo el target `colmena::mcp` (alcance de servidores, dispatch, caché de catálogo y pool de conexiones): campos, niveles, cuál usar para alertar, y qué nunca se loguea.
 
 ## 4. Contribuir, CI/CD, deploy
 
