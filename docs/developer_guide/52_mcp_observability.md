@@ -40,13 +40,15 @@ y puede cambiar.
   argumento ofensivo (nombres de campo / índices, tipo `arguments.token` o
   `items[2].secret`), nunca el valor que llevaba.
 - **Nunca** la URL completa de un servidor (puede llevar query string) —
-  solo `host[:port]`, vía el helper `host_of` en `wire.rs`.
+  solo `host[:port]`, vía el helper `host_for_log` en `mcp/allowlist.rs`. Es
+  un helper de DISPLAY, no de seguridad: la decisión de la allowlist usa un
+  parser separado (`dialed_host`) — ver "Postura de seguridad" más abajo.
 
 ## Tabla de eventos
 
 | Evento | Nivel | Campos | Cuándo |
 |---|---|---|---|
-| `mcp.server_unavailable` | WARN | `alias`, `host`, `reason` (`prepare` \| `tools_list` \| `no_result`), `ms` (ausente para `no_result`) | Un servidor MCP declarado no aportó tools este turno. `prepare`/`tools_list` vienen del fan-out real (falló el bind o `tools/list`) y siempre llevan `ms`. `no_result` es el caso degenerado en el que `assemble()` no encuentra ninguna entrada para un alias declarado — no hubo intento medible, así que no se inventa un `ms`. Uno por servidor caído. |
+| `mcp.server_unavailable` | WARN | `alias`, `host`, `reason` (`prepare` \| `tools_list` \| `no_result` \| `not_allowed`), `ms` (ausente para `no_result`) | Un servidor MCP declarado no aportó tools este turno. `prepare`/`tools_list`/`not_allowed` vienen del fan-out real y siempre llevan `ms` (para `not_allowed` es el tiempo hasta el chequeo de host, que corre ANTES de `bind()` — ver "Postura de seguridad" más abajo). `no_result` es el caso degenerado en el que `assemble()` no encuentra ninguna entrada para un alias declarado — no hubo intento medible, así que no se inventa un `ms`. `not_allowed` es el host-allowlist opcional (`COLMENA_MCP_ALLOWED_HOSTS`) rechazando el host. Uno por servidor caído. |
 | `mcp.server_ready` | DEBUG | `alias`, `host`, `tools` (conteo expuesto tras dedupe), `ms` | Un servidor MCP respondió y sus tools quedaron expuestas al modelo. Uno por servidor sano. |
 | `mcp.wiring_note` | WARN | (mensaje libre en `notes`, sin campos estructurados) | El catch-all legible de `wire()`/`assemble()`. `notes` tiene **dos orígenes**: un drop a nivel de tool (colisión de nombre, schema sobredimensionado) y **también** un fallo a nivel de servidor, que además ya se reportó de forma estructurada en `mcp.server_unavailable`. Uno por nota. |
 | `mcp.tools_exposed` | INFO | `exposed`, `servers`, `unavailable` | Resumen de fin de turno: cuántas tools quedaron expuestas, cuántos servidores respondieron, cuántos alias quedaron fuera. Solo se emite si `exposed > 0`. |
@@ -128,7 +130,7 @@ desglose por origen. Si algún día hace falta un número exacto en tokens, habr
 tokenizar el resultado contenido en el momento del dispatch — un costo de CPU por
 llamada que hoy no se paga porque la aproximación en bytes alcanza para decidir.
 
-## Postura de seguridad: cualquier URL, sin allowlist
+## Postura de seguridad: cualquier URL, allowlist opcional
 
 Un servidor MCP es un tercero que **escribe las descripciones de tools que tu modelo
 lee** y puede cambiarlas entre turnos. La postura actual es deliberada y conviene
@@ -144,19 +146,47 @@ tenerla escrita, porque define qué cubre esta instrumentación y qué no.
   resolvió nunca se reenvía.
 - Las credenciales de conexión viajan por `headers` con referencias a secure values,
   resueltas al conectar, nunca en la clave del pool ni en el log.
+- **Allowlist de hosts, OPT-IN.** `COLMENA_MCP_ALLOWED_HOSTS` acepta una lista de
+  hosts separados por coma (`host.example.com,otro.host`); vacía o sin definir
+  (el default) permite cualquier host — la postura de hoy no cambia hasta que un
+  operador la fija explícitamente. El match es sobre **HOSTNAME únicamente — el
+  puerto se ignora** (`host.example.com` en la lista permite tanto
+  `https://host.example.com/x` como `https://host.example.com:8443/x`) y es
+  **exacto y case-insensitive, sin wildcards ni coincidencia de subdominio**:
+  `example.com` en la lista NO cubre `sub.example.com`, y una entrada
+  `*.example.com` es un string literal que nunca matchea nada — un matcher
+  permisivo da falsa confianza, así que se optó por uno estricto. El host que
+  decide **es el mismo que usa el cliente HTTP para conectar**: `url_is_allowed`
+  deriva el host vía `reqwest::Url::parse` (el mismo parser WHATWG-compliant
+  que usa `rmcp` para dialear), nunca un parser de URLs propio — una versión
+  anterior de este control usaba un parser hand-rolled y era bypasseable con
+  `https://evil.internal\@allowed.example.com/mcp` (la barra invertida no
+  terminaba la autoridad para ese parser, pero sí para `reqwest`, que conectaba
+  a `evil.internal` mientras el control aprobaba `allowed.example.com`). **Una
+  URL que no parsea se rechaza cuando hay allowlist configurada** — fail
+  closed: un host que no se puede determinar no se puede avalar. El chequeo
+  corre **ANTES de resolver credenciales**: un host rechazado nunca llega a
+  `bind()`, así que un secreto nunca se resuelve ni se descifra para un
+  servidor que de todos modos no iba a ser contactado. Un host rechazado
+  **degrada como cualquier otro fallo** — el alias cae en `unavailable`, el
+  modelo es notificado, el turno sigue — nunca hace fallar el grafo. Se reporta
+  con `mcp.server_unavailable` y `reason = "not_allowed"`.
 
 **Lo que NO está controlado, y hay que decirlo:**
 
-- **No hay allowlist de hosts.** Cualquier URL HTTPS declarada en el grafo es
-  alcanzable, incluidos endpoints internos. Es superficie SSRF: la decide quien
-  escribe el grafo.
-- **Nada inspecciona los argumentos salientes** más allá del rechazo de secure
-  values. Si el modelo decide mandarle a un tercero algo que tenía en contexto, sale.
-  Es el problema del *confused deputy*, y sigue abierto.
+- **La allowlist no resuelve el confused deputy.** Acota A DÓNDE puede ir el
+  tráfico MCP, no QUÉ va en él: nada inspecha los argumentos salientes más allá
+  del rechazo de secure values. Si el modelo decide mandarle a un host permitido
+  algo que tenía en contexto, sale igual.
+- **Sin allowlist configurada, cualquier URL HTTPS declarada en el grafo es
+  alcanzable**, incluidos endpoints internos. Es superficie SSRF: la decide quien
+  escribe el grafo, y cerrarla es responsabilidad explícita del operador vía la
+  variable de entorno de arriba.
 
 Habilitar un servidor MCP equivale a confiarle a ese tercero lo que el modelo tenga
 en contexto. El destino, eso sí, **no lo elige el modelo**: la URL la escribe el
-operador y se valida al cargar el grafo.
+operador y se valida al cargar el grafo, y opcionalmente se acota además a una
+lista de hosts fijada por el operador que corre la instancia.
 
 ## Pendiente
 

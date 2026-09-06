@@ -25,6 +25,7 @@ use crate::dag_engine::infrastructure::mcp_registry::McpConnectionRegistry;
 use crate::llm::domain::mcp::McpToolDescriptor;
 use crate::llm::domain::tools::ToolDefinition;
 
+use super::allowlist::{allowed_hosts_from_env, host_for_log, url_is_allowed};
 use super::bind::{bind, McpBinding};
 use super::expose::{drop_colliding, exposed_definitions};
 
@@ -38,6 +39,10 @@ enum FetchFailure {
     ToolsList,
     /// The fan-out produced no entry at all for this alias.
     NoResult,
+    /// The server's host is not in `COLMENA_MCP_ALLOWED_HOSTS`. Checked
+    /// BEFORE `bind`, so a refused host never causes a credential to be
+    /// resolved or decrypted.
+    NotAllowed,
 }
 
 impl FetchFailure {
@@ -46,25 +51,9 @@ impl FetchFailure {
             Self::Prepare => "prepare",
             Self::ToolsList => "tools_list",
             Self::NoResult => "no_result",
+            Self::NotAllowed => "not_allowed",
         }
     }
-}
-
-/// The host (and port, if non-default) a server URL points at — no scheme, no
-/// path, no query, no userinfo. Best-effort: never panics, and a malformed URL
-/// still yields something rather than nothing, since this is for a log line,
-/// not for validation.
-fn host_of(url: &str) -> &str {
-    let after_scheme = url.split_once("://").map_or(url, |(_, rest)| rest);
-    // Isolate the authority BEFORE looking for userinfo, or a literal '@' in
-    // the path/query would be mistaken for one.
-    let authority_end = after_scheme
-        .find(['/', '?', '#'])
-        .unwrap_or(after_scheme.len());
-    let authority = &after_scheme[..authority_end];
-    authority
-        .rsplit_once('@')
-        .map_or(authority, |(_, host)| host)
 }
 
 /// One server's fan-out result: its binding and catalog, or why it dropped
@@ -116,8 +105,28 @@ pub async fn wire(
     // Only the I/O is concurrent. `assemble` folds what comes back sequentially
     // and in `BTreeMap` order, and takes that order from `specs` rather than
     // from this vector — so nothing here needs to preserve it.
+    let allowed_hosts = allowed_hosts_from_env();
+
+    let allowed_hosts = &allowed_hosts;
     let fetched: Vec<Fetched> = join_all(specs.iter().map(|(alias, spec)| async move {
         let started = std::time::Instant::now();
+
+        // Checked BEFORE `bind`, deliberately: a refused host must not cause
+        // credentials to be resolved or decrypted. An empty allowlist (unset
+        // or blank env var) allows everything, so this is a no-op unless an
+        // operator opted in.
+        if !url_is_allowed(&spec.url, allowed_hosts) {
+            let ms = started.elapsed().as_millis() as u64;
+            return (
+                alias,
+                ms,
+                Err((
+                    FetchFailure::NotAllowed,
+                    "was not contacted: its host is not in COLMENA_MCP_ALLOWED_HOSTS".to_string(),
+                )),
+            );
+        }
+
         let binding = match bind(alias, spec, secure_values, session_id, agent_session_id).await {
             Ok(b) => b,
             // Includes the credential refusals: a reference that did not resolve
@@ -183,7 +192,9 @@ fn assemble(
         fetched.into_iter().map(|(a, ms, r)| (a, (ms, r))).collect();
 
     for alias in specs.keys() {
-        let host = specs.get(alias).map_or("", |s| host_of(&s.url));
+        let host = specs
+            .get(alias)
+            .map_or_else(|| "<unparseable>".to_string(), |s| host_for_log(&s.url));
 
         // Every alias has an entry — one future was spawned per spec key — so
         // this is unreachable from `wire`. Taken rather than unwrapped anyway,
@@ -681,27 +692,6 @@ mod tests {
         assert!(f.routes.is_empty(), "and it left a route behind");
     }
 
-    /// `host_of` must never leak scheme, path, query or credentials into the
-    /// log — only host[:port].
-    #[test]
-    fn host_of_strips_everything_but_host_and_port() {
-        assert_eq!(host_of("https://mcp.context7.com/mcp"), "mcp.context7.com");
-        assert_eq!(host_of("https://host:8443/x?y=1"), "host:8443");
-        assert_eq!(host_of("host.example.com/mcp"), "host.example.com");
-        assert_eq!(
-            host_of("https://user:pass@host.example.com/mcp"),
-            "host.example.com",
-            "userinfo must not reach the log"
-        );
-        assert_eq!(host_of("https://host.example.com"), "host.example.com");
-        assert_eq!(
-            host_of("https://[::1]:8443/x"),
-            "[::1]:8443",
-            "an IPv6 literal authority must survive intact"
-        );
-        assert_eq!(host_of(""), "", "an empty URL must not panic");
-    }
-
     /// The label is what a dashboard or alert keys on — it must not silently
     /// change shape.
     #[test]
@@ -709,5 +699,6 @@ mod tests {
         assert_eq!(FetchFailure::Prepare.label(), "prepare");
         assert_eq!(FetchFailure::ToolsList.label(), "tools_list");
         assert_eq!(FetchFailure::NoResult.label(), "no_result");
+        assert_eq!(FetchFailure::NotAllowed.label(), "not_allowed");
     }
 }
