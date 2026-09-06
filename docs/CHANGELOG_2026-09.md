@@ -1297,3 +1297,76 @@ además cómo atribuir el costo en contexto de cada servidor y la postura de seg
 vigente.
 
 **Estado.** done.
+
+## 26. Allowlist de hosts para MCP, opcional y apagada por default
+
+**Qué cambió.** `COLMENA_MCP_ALLOWED_HOSTS` es una nueva variable de entorno,
+opcional, que restringe a qué hosts puede conectarse un servidor MCP declarado
+en un grafo. Acepta una lista separada por comas (`host.a,host.b`); cada
+entrada se recorta y se compara en minúsculas. El match es sobre **hostname
+únicamente** — el puerto se ignora, así que `host.a` en la lista permite tanto
+`https://host.a/x` como `https://host.a:8443/x` — y es **exacto**: sin
+wildcards, sin coincidencia de subdominio. `example.com` en la lista NO cubre
+`sub.example.com`, y una entrada `*.example.com` es un string literal que nunca
+matchea nada real — un matcher permisivo da falsa confianza y por eso se optó
+por uno estricto, documentado como tal.
+
+**Fix de un bypass SSRF verificado antes de mergear.** La primera versión de
+este módulo traía un parser de URLs hand-rolled (`host_of`) que partía la
+autoridad solo en `['/', '?', '#']` — nunca en `\`. El cliente HTTP real
+(`rmcp` sobre `reqwest`, cuyo tipo `Url` es el crate `url`, compatible con
+WHATWG) SÍ trata una barra invertida como terminador de autoridad para
+esquemas especiales como `https`. Con eso,
+`https://evil.internal\@allowed.example.com/mcp` era leído por `host_of` como
+host `allowed.example.com` (aprobado) mientras `reqwest` conectaba en realidad
+a `evil.internal`: un bypass completo del control. La corrección no fue
+agregar `\` al set de delimitadores — punycode, normalización y otras reglas
+WHATWG seguirían pudiendo disentir de un segundo parser hand-rolled — sino
+tener una única noción de "host", derivada del mismo parser que decide a dónde
+conecta el cliente. Ver más abajo.
+
+**Por qué.** Hoy cualquier URL HTTPS que un grafo declare para un servidor MCP
+es alcanzable, incluidos endpoints internos: es superficie SSRF, y la decide
+quien escribe el grafo, no quien opera la instancia. Esto le da al operador un
+control que hoy no existe, sin tocar los grafos que ya corren.
+
+**Garantía de compatibilidad.** Vacía o sin definir (el default) permite
+cualquier host — el comportamiento de hoy no cambia en absoluto hasta que un
+operador fija la variable explícitamente. Los tests de degradación existentes
+en `wire.rs` (servidor inalcanzable, credencial que no resuelve) no se
+tocaron.
+
+**Orden deliberado.** El chequeo corre en el fan-out de `wire()`, ANTES de
+llamar a `bind()`. Eso significa que un host rechazado **nunca** causa que se
+resuelva o se descifre una credencial — un secreto configurado para un
+servidor cuyo host está fuera de la allowlist ni siquiera se toca.
+
+**Degrada, no falla.** Un host rechazado se comporta exactamente como un
+servidor inalcanzable: la nueva variante `FetchFailure::NotAllowed` (etiqueta
+`not_allowed`) hace que el alias caiga en `unavailable`, el modelo sea
+notificado en el mensaje de sistema, y el turno siga con el resto de las
+tools. Nunca hace fallar el `llm_call` ni el grafo. Se reporta con
+`mcp.server_unavailable` y `reason = "not_allowed"`.
+
+**Qué NO resuelve.** La allowlist acota A DÓNDE puede ir el tráfico MCP, no
+QUÉ va en él — nada inspecciona los argumentos salientes más allá del rechazo
+de secure values que ya existía. El problema del *confused deputy* sigue
+abierto: si el modelo decide mandarle a un host permitido algo que tenía en
+contexto, sale igual.
+
+**Implementación.** Módulo `mcp/allowlist.rs` con `parse_allowlist` (pura) +
+`url_is_allowed` (pura, la decisión de seguridad — toma la URL completa, nunca
+un host ya extraído, para que ningún call site pueda pasarle el host de un
+parser distinto) + `allowed_hosts_from_env` (el thin wrapper que lee
+`std::env`, siguiendo el mismo patrón función-pura/wrapper-de-env que
+`pool_size_from` en `mcp_registry/mod.rs`). El host que decide viene de
+`dialed_host`, que llama a `reqwest::Url::parse` — el mismo parser que usa el
+transporte HTTP real para conectar — y devuelve `None` en vez de un valor
+best-effort cuando la URL no parsea; `url_is_allowed` trata ese `None` como
+rechazo (fail closed) cuando hay allowlist configurada. Para el log line
+existe `host_for_log`, separado deliberadamente y documentado como NO apto
+para decisiones de seguridad — mezclar ambos roles en un único helper (el
+extinto `host_of`) fue exactamente la causa raíz del bypass. Sin cambio de API
+pública; ADP no afectado.
+
+**Estado.** done.

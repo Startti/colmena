@@ -4,12 +4,14 @@
 //! server's catalog into `ToolDefinition`s the provider can see, and dispatch
 //! (a later slice) routes a call back to the server.
 
+pub mod allowlist;
 pub mod bind;
 pub mod contain;
 pub mod dispatch;
 pub mod expose;
 pub mod wire;
 
+pub use allowlist::{allowed_hosts_from_env, host_for_log, parse_allowlist, url_is_allowed};
 pub use bind::{bind, McpBinding};
 pub use contain::{contain, nonce_for};
 pub use dispatch::McpDispatcher;
