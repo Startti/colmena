@@ -1,0 +1,14 @@
+{
+  "nodes": {
+    "chat": {
+      "type": "llm_call",
+      "config": {
+        "provider": "openai",
+        "model": "gpt-4o",
+        "prompt": "hi"
+      }
+    }
+  },
+  "edges": [],
+  "_comment": "MISSING_REQUIRED_FIELD — no incoming edge can supply 'api_key', so it is an error rather than a warning."
+}

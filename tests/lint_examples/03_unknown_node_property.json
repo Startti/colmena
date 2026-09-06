@@ -1,0 +1,13 @@
+{
+  "nodes": {
+    "run": {
+      "type": "python_script",
+      "default_input_port": "code",
+      "config": {
+        "code": "output = 1"
+      }
+    }
+  },
+  "edges": [],
+  "_comment": "UNKNOWN_NODE_PROPERTY — 'default_input_port' sits beside 'type'/'config'; the engine discards it when loading. Everything else here is correct."
+}

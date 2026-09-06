@@ -1,0 +1,26 @@
+{
+  "nodes": {
+    "start": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/x",
+        "method": "POST"
+      }
+    },
+    "log_it": {
+      "type": "log",
+      "config": {}
+    }
+  },
+  "edges": [
+    {
+      "from": "start",
+      "to": "log_it"
+    },
+    {
+      "from": "log_it",
+      "to": "log_result"
+    }
+  ],
+  "_comment": "EDGE_UNKNOWN_NODE — the edge names a node the graph does not define; at run time it resolves to null and the graph appears to work."
+}

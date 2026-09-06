@@ -1,0 +1,38 @@
+{
+  "nodes": {
+    "start": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/hello",
+        "method": "POST",
+        "test_payload": {
+          "prompt": "hi"
+        }
+      }
+    },
+    "chat": {
+      "type": "llm_call",
+      "config": {
+        "provider": "openai",
+        "api_key": "${OPENAI_API_KEY}",
+        "model": "gpt-4o",
+        "prompt": "{{prompt}}"
+      }
+    },
+    "out": {
+      "type": "log",
+      "config": {}
+    }
+  },
+  "edges": [
+    {
+      "from": "start",
+      "to": "chat"
+    },
+    {
+      "from": "chat",
+      "to": "out"
+    }
+  ],
+  "_comment": "The control: a correct graph must produce no findings at all."
+}

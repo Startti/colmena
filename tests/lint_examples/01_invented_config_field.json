@@ -1,0 +1,15 @@
+{
+  "nodes": {
+    "chat": {
+      "type": "llm_call",
+      "config": {
+        "provider": "openai",
+        "api_key": "${OPENAI_API_KEY}",
+        "modle": "gpt-4o",
+        "prompt": "hi"
+      }
+    }
+  },
+  "edges": [],
+  "_comment": "UNKNOWN_FIELD — 'modle' is one edit away from 'model'. The graph loads, runs, and uses the default model."
+}

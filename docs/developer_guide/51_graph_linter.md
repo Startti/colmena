@@ -398,6 +398,132 @@ La **severidad depende del contexto**, y conviene no confundirlas. Con
 `NO_CATALOG_COVERAGE` (info): ese contexto no saca conclusiones sobre tipos de
 nodo, así que sólo cambia el texto del consejo.
 
+## Catálogo de ejemplos
+
+Cada archivo de [`tests/lint_examples/`](../../tests/lint_examples) está roto a
+propósito y demuestra **una** cosa. La salida de abajo no está transcrita a mano: es lo
+que imprime el binario, y
+[`tests/lint_examples.rs`](../../src/libs/colmena/tests/lint_examples.rs) falla si
+alguno deja de producir el diagnóstico que acá se muestra.
+
+Viven **fuera** de `tests/graphs/` a propósito: ese árbol es el corpus sobre el que se
+mide el ruido del linter, y archivos rotos a propósito envenenarían justo el número que
+dice si la herramienta vale la pena escuchar.
+
+Esta primera tanda cubre los diagnósticos **a nivel de nodo**. Los de
+`tool_configurations`, los del `target` de un `for_each` y el punto ciego del `subgraph`
+inline llegan en la tanda siguiente, junto con el test que exige que ningún
+`DiagnosticCode` se quede sin ejemplo.
+
+Para correr cualquiera:
+
+```bash
+cargo run --bin dag_engine -- lint tests/lint_examples/01_invented_config_field.json
+```
+
+### El campo inventado
+
+[`01_invented_config_field.json`](../../tests/lint_examples/01_invented_config_field.json) — `modle` está a una edición de `model`. El grafo carga, corre, y usa el modelo por defecto — el síntoma aparece después y no como error de configuración.
+
+```
+  error [UNKNOWN_FIELD] node "chat".modle: "modle" is not a configuration field of llm_call — did you mean "model"?
+
+  1 error(s), 0 warning(s), 0 info
+```
+
+### Un tipo de nodo que no existe
+
+[`02_unknown_node_type.json`](../../tests/lint_examples/02_unknown_node_type.json) — Un near-miss contra un tipo documentado es evidencia fuerte de typo, así que es error y no info.
+
+```
+  error [UNKNOWN_NODE_TYPE] node "chat": "llm_cal" is not a documented node type — did you mean "llm_call"?
+
+  1 error(s), 0 warning(s), 0 info
+```
+
+### Una clave del objeto nodo
+
+[`03_unknown_node_property.json`](../../tests/lint_examples/03_unknown_node_property.json) — Va al lado de `type`/`config`, no adentro. El motor la descarta al cargar y nadie avisa.
+
+```
+  error [UNKNOWN_NODE_PROPERTY] node "run".default_input_port: "default_input_port" is not a property of a node; the engine discards it when loading the graph — move it into "config" if the node reads it there
+
+  1 error(s), 0 warning(s), 0 info
+```
+
+### Un campo obligatorio que falta
+
+[`04_missing_required_field.json`](../../tests/lint_examples/04_missing_required_field.json) — Ningún edge entrante puede aportarlo, así que es error. Con un edge sin nombre de puerto sería warning.
+
+```
+  error [MISSING_REQUIRED_FIELD] node "chat".api_key: required field "api_key" is not set, and no incoming edge supplies it
+
+  1 error(s), 0 warning(s), 0 info
+```
+
+### Un valor fuera del conjunto documentado
+
+[`05_invalid_field_value.json`](../../tests/lint_examples/05_invalid_field_value.json) — El linter enumera los aceptados.
+
+```
+  warning [INVALID_FIELD_VALUE] node "call".method: "PATCHH" is not one of the documented values for "method" — accepted: "GET", "POST", "PUT", "DELETE", "PATCH"
+
+  0 error(s), 1 warning(s), 0 info
+```
+
+### El tipo JSON no coincide
+
+[`06_field_type_mismatch.json`](../../tests/lint_examples/06_field_type_mismatch.json) — Warning y no error: el catálogo tiene tipos en prosa (`any`, uniones), y equivocarse acá cuesta más que callarse.
+
+```
+  warning [FIELD_TYPE_MISMATCH] node "chat".temperature: "temperature" is documented as number but the value is a string
+
+  0 error(s), 1 warning(s), 0 info
+```
+
+### Un edge que no apunta a nada
+
+[`07_edge_to_nowhere.json`](../../tests/lint_examples/07_edge_to_nowhere.json) — En ejecución resuelve a `null` y el grafo *parece* funcionar. Nombrarlo es todo el punto.
+
+```
+  error [EDGE_UNKNOWN_NODE]: edge to="log_result" names a node that this graph does not define
+
+  1 error(s), 0 warning(s), 0 info
+```
+
+### Sin cobertura no se opina
+
+[`08_no_catalog_coverage.json`](../../tests/lint_examples/08_no_catalog_coverage.json) — No se parece a nada documentado, así que el linter dice que no puede revisarlo en vez de marcar cada campo como inventado.
+
+```
+  info [NO_CATALOG_COVERAGE] node "n": "quantum_flux_capacitor" has no entry in the node catalog, so this node's configuration was not checked — if the engine registers it, add an entry to docs/node_configurations.json to enable checking
+
+  0 error(s), 0 warning(s), 1 info
+```
+
+### Un campo que popula el motor
+
+[`09_read_only_field.json`](../../tests/lint_examples/09_read_only_field.json) — `router.temperature` está fija en 0.1 en los dos modos del nodo. Escribirla no hace nada.
+
+```
+  error [UNKNOWN_FIELD] node "route".temperature: "temperature" is populated by the engine on router and cannot be set here — remove it; the value written here has no effect
+
+  1 error(s), 0 warning(s), 0 info
+```
+
+### El control
+
+[`18_clean_graph.json`](../../tests/lint_examples/18_clean_graph.json) — Un grafo correcto no produce absolutamente nada. Sin esto, el resto del catálogo no prueba que el linter distinga.
+
+Y no alcanza con que el linter calle: **este control además corre**. Pasado por el motor
+contra OpenAI termina en `[DONE]` sin errores, con `promptTokens: 842` y
+`completionTokens: 20`. Un control que lintea limpio pero no arranca no serviría de
+control — diría que el linter calla, no que tiene razón.
+
+```
+  no findings
+```
+
 ## Las decisiones que evitan el ruido
 
 Un linter con falsos positivos se ignora. Cinco reglas existen sólo para eso, y

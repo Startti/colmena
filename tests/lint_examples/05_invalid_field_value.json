@@ -1,0 +1,14 @@
+{
+  "nodes": {
+    "call": {
+      "type": "http_request",
+      "config": {
+        "base_url": "https://example.com",
+        "endpoint": "/x",
+        "method": "PATCHH"
+      }
+    }
+  },
+  "edges": [],
+  "_comment": "INVALID_FIELD_VALUE — 'PATCHH' is outside the documented set for http_request.method."
+}

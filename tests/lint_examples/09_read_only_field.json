@@ -1,0 +1,43 @@
+{
+  "nodes": {
+    "route": {
+      "type": "router",
+      "config": {
+        "mode": "llm_direct",
+        "provider": "openai",
+        "api_key": "${OPENAI_API_KEY}",
+        "model": "gpt-4o",
+        "branches": [
+          {
+            "name": "support",
+            "description": "Questions about an existing order"
+          },
+          {
+            "name": "sales",
+            "description": "Questions about buying something"
+          }
+        ],
+        "temperature": 0.9
+      }
+    },
+    "support": {
+      "type": "log",
+      "config": {}
+    },
+    "sales": {
+      "type": "log",
+      "config": {}
+    }
+  },
+  "edges": [
+    {
+      "from": "route",
+      "to": "support"
+    },
+    {
+      "from": "route",
+      "to": "sales"
+    }
+  ],
+  "_comment": "UNKNOWN_FIELD on a read_only field — router.temperature is populated by the engine and hardcoded to 0.1 in both of the node's modes. Everything else here is correct."
+}
