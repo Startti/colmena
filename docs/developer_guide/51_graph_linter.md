@@ -410,10 +410,8 @@ Viven **fuera** de `tests/graphs/` a propósito: ese árbol es el corpus sobre e
 mide el ruido del linter, y archivos rotos a propósito envenenarían justo el número que
 dice si la herramienta vale la pena escuchar.
 
-Esta primera tanda cubre los diagnósticos **a nivel de nodo**. Los de
-`tool_configurations`, los del `target` de un `for_each` y el punto ciego del `subgraph`
-inline llegan en la tanda siguiente, junto con el test que exige que ningún
-`DiagnosticCode` se quede sin ejemplo.
+Un segundo test exige que **ningún `DiagnosticCode` se quede sin ejemplo**, así que uno
+nuevo no puede shipear con la tabla de códigos creciendo y el catálogo quedándose atrás.
 
 Para correr cualquiera:
 
@@ -431,6 +429,7 @@ cargo run --bin dag_engine -- lint tests/lint_examples/01_invented_config_field.
   1 error(s), 0 warning(s), 0 info
 ```
 
+
 ### Un tipo de nodo que no existe
 
 [`02_unknown_node_type.json`](../../tests/lint_examples/02_unknown_node_type.json) — Un near-miss contra un tipo documentado es evidencia fuerte de typo, así que es error y no info.
@@ -440,6 +439,7 @@ cargo run --bin dag_engine -- lint tests/lint_examples/01_invented_config_field.
 
   1 error(s), 0 warning(s), 0 info
 ```
+
 
 ### Una clave del objeto nodo
 
@@ -451,6 +451,7 @@ cargo run --bin dag_engine -- lint tests/lint_examples/01_invented_config_field.
   1 error(s), 0 warning(s), 0 info
 ```
 
+
 ### Un campo obligatorio que falta
 
 [`04_missing_required_field.json`](../../tests/lint_examples/04_missing_required_field.json) — Ningún edge entrante puede aportarlo, así que es error. Con un edge sin nombre de puerto sería warning.
@@ -460,6 +461,7 @@ cargo run --bin dag_engine -- lint tests/lint_examples/01_invented_config_field.
 
   1 error(s), 0 warning(s), 0 info
 ```
+
 
 ### Un valor fuera del conjunto documentado
 
@@ -471,6 +473,7 @@ cargo run --bin dag_engine -- lint tests/lint_examples/01_invented_config_field.
   0 error(s), 1 warning(s), 0 info
 ```
 
+
 ### El tipo JSON no coincide
 
 [`06_field_type_mismatch.json`](../../tests/lint_examples/06_field_type_mismatch.json) — Warning y no error: el catálogo tiene tipos en prosa (`any`, uniones), y equivocarse acá cuesta más que callarse.
@@ -480,6 +483,7 @@ cargo run --bin dag_engine -- lint tests/lint_examples/01_invented_config_field.
 
   0 error(s), 1 warning(s), 0 info
 ```
+
 
 ### Un edge que no apunta a nada
 
@@ -491,6 +495,7 @@ cargo run --bin dag_engine -- lint tests/lint_examples/01_invented_config_field.
   1 error(s), 0 warning(s), 0 info
 ```
 
+
 ### Sin cobertura no se opina
 
 [`08_no_catalog_coverage.json`](../../tests/lint_examples/08_no_catalog_coverage.json) — No se parece a nada documentado, así que el linter dice que no puede revisarlo en vez de marcar cada campo como inventado.
@@ -501,6 +506,7 @@ cargo run --bin dag_engine -- lint tests/lint_examples/01_invented_config_field.
   0 error(s), 0 warning(s), 1 info
 ```
 
+
 ### Un campo que popula el motor
 
 [`09_read_only_field.json`](../../tests/lint_examples/09_read_only_field.json) — `router.temperature` está fija en 0.1 en los dos modos del nodo. Escribirla no hace nada.
@@ -510,6 +516,106 @@ cargo run --bin dag_engine -- lint tests/lint_examples/01_invented_config_field.
 
   1 error(s), 0 warning(s), 0 info
 ```
+
+
+### `node_schema` descarta el `fixed_config` entero
+
+[`10_dead_fixed_config.json`](../../tests/lint_examples/10_dead_fixed_config.json) — La forma real que fallaba con `Invalid URL '': relative URL without a base`. El mensaje nombra cada clave que se pierde.
+
+```
+  error [DEAD_FIXED_CONFIG] node "agent".tool_configurations.upload.fixed_config: tool "upload" declares both "node_schema" and "fixed_config"; the executor reads "node_schema" and discards "fixed_config" entirely, so "base_url", "method" and "headers" never reach the node — move each of them into "node_schema" as fixed fields, e.g. "base_url": { "fixed": … }
+
+  1 error(s), 0 warning(s), 0 info
+```
+
+
+### Una clave que el nodo destino reinterpreta
+
+[`11_repurposed_tool_field.json`](../../tests/lint_examples/11_repurposed_tool_field.json) — `http_request` no ignora la clave desconocida: la manda como query param. Verificado contra httpbin en la §28 — por eso es warning y no silencio.
+
+```
+  warning [REPURPOSED_TOOL_FIELD] node "agent".tool_configurations.fetch.node_schema.query: "query" is not a field of "http_request"; that node type does not ignore an unknown key, it repurposes it — the value will be sent as a query parameter instead of configuring the node — remove it, or use the field that does what you meant
+  warning [REPURPOSED_TOOL_FIELD] node "agent".tool_configurations.fetch.node_schema.url: "url" is not a field of "http_request"; that node type does not ignore an unknown key, it repurposes it — the value will be sent as a query parameter instead of configuring the node — remove it, or use the field that does what you meant
+
+  0 error(s), 2 warning(s), 0 info
+```
+
+
+### Una tool sintética que nunca se expone
+
+[`12_tool_never_exposed.json`](../../tests/lint_examples/12_tool_never_exposed.json) — Estas se activan por la CLAVE de la entrada, no por su `node_type`. Nada lo reporta en ejecución: el agente simplemente dice que no puede.
+
+```
+  error [TOOL_NEVER_EXPOSED] node "agent".tool_configurations.mi_python: "data_run_python" is turned on by the entry's KEY, not by its "node_type"; this entry is keyed "mi_python", so the tool is never handed to the model and nothing reports it at run time — rename the entry key to "data_run_python", or drop the entry if the tool is not wanted
+
+  1 error(s), 0 warning(s), 0 info
+```
+
+
+### Una entrada de tool que el motor rechaza al cargar
+
+[`13_malformed_tool_entry.json`](../../tests/lint_examples/13_malformed_tool_entry.json) — `{"body": {"required": true}}` es un `NodeSchemaField` impecable, así que sólo lo agarra la segunda familia de rechazo.
+
+```
+  error [MALFORMED_TOOL_ENTRY] node "agent".tool_configurations.call.node_schema: tool "call" has a node_schema the engine refuses at load: node_schema field 'body' is LLM-visible but missing `type`. Add e.g. "type": "string" — required because the LLM needs to know what to generate. (Fields with `fixed` may omit `type`.) — every entry in `node_schema` must be an object; an LLM-visible field needs a `type`, and an `array` one also needs `items` with its own `type`; a field with `fixed` may omit `type`
+
+  1 error(s), 0 warning(s), 0 info
+```
+
+
+### El `target` de un `for_each`
+
+[`14_for_each_target_invented_field.json`](../../tests/lint_examples/14_for_each_target_invented_field.json) — El defecto de la §20 un contenedor más abajo. Mismo veredicto que en una entrada de tool, porque es la misma pregunta.
+
+```
+  warning [REPURPOSED_TOOL_FIELD] node "loop".target.node_schema.id: "id" is not a field of "http_request"; that node type does not ignore an unknown key, it repurposes it — the value will be sent as a query parameter instead of configuring the node — remove it, or use the field that does what you meant
+  warning [REPURPOSED_TOOL_FIELD] node "loop".target.node_schema.url: "url" is not a field of "http_request"; that node type does not ignore an unknown key, it repurposes it — the value will be sent as a query parameter instead of configuring the node — remove it, or use the field that does what you meant
+
+  0 error(s), 2 warning(s), 0 info
+```
+
+
+### Un `target` con el schema roto
+
+[`15_for_each_target_malformed_schema.json`](../../tests/lint_examples/15_for_each_target_malformed_schema.json) — **Acá el mensaje cambia**: a este grafo no lo rechaza nadie al cargar. Arranca, y muere fila por fila — medido, no deducido (§29).
+
+```
+  error [MALFORMED_TOOL_ENTRY] node "loop".target.node_schema: this target's node_schema cannot be parsed: `body` is a string. The graph still loads — `Graph::validate` does not inspect a for_each target — and every row then fails at dispatch with `Invalid node_schema`, so the batch dies mid-run instead of before it — every entry in `node_schema` must be an object; an LLM-visible field needs a `type`, and an `array` one also needs `items` with its own `type`; a field with `fixed` may omit `type`
+
+  1 error(s), 0 warning(s), 0 info
+```
+
+
+### Punto ciego conocido — un `subgraph` inline
+
+[`16_blind_spot_inline_subgraph.json`](../../tests/lint_examples/16_blind_spot_inline_subgraph.json) — Ese hijo tiene un `modle`, un campo inventado y un edge colgado. El linter reporta **cero**. Abierto como L2.
+
+```
+  no findings
+```
+
+
+### Varios defectos a la vez
+
+[`17_several_defects_at_once.json`](../../tests/lint_examples/17_several_defects_at_once.json) — Muestra el orden del reporte: errores primero, después por id de nodo, después por campo. Notá que `api_key` baja a warning porque `chat` tiene un edge entrante sin nombre de puerto.
+
+```
+  error [EDGE_UNKNOWN_NODE]: edge to="missing_node" names a node that this graph does not define
+  error [UNKNOWN_FIELD] node "chat".modle: "modle" is not a configuration field of llm_call — did you mean "model"?
+  error [UNKNOWN_NODE_PROPERTY] node "fetch".default_output_port: "default_output_port" is not a property of a node; the engine discards it when loading the graph — move it into "config" if the node reads it there
+  warning [MISSING_REQUIRED_FIELD] node "chat".api_key: required field "api_key" is not set in config — this node has an incoming edge with no port name, so the value may arrive through its default input port instead
+  warning [INVALID_FIELD_VALUE] node "fetch".method: "GETT" is not one of the documented values for "method" — accepted: "GET", "POST", "PUT", "DELETE", "PATCH"
+
+  3 error(s), 2 warning(s), 0 info
+```
+
+> **Lo que el ejemplo 16 no puede atrapar.** Su expectativa es "ningún hallazgo", y eso
+> falla el día que L2 cierre — verificado subiendo uno de sus defectos internos al nivel
+> superior: el test se pone en rojo. Lo que **no** detecta es que ese fixture deje de
+> estar roto: reparar un defecto adentro del hijo inline no cambia nada que el linter
+> pueda ver. Es inherente —el punto del ejemplo es justamente que nadie mira ahí— y por
+> eso lleva tres defectos distintos en vez de uno.
+
 
 ### El control
 

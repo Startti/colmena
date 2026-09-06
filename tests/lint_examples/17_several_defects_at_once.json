@@ -1,0 +1,32 @@
+{
+  "nodes": {
+    "fetch": {
+      "type": "http_request",
+      "default_output_port": "body",
+      "config": {
+        "base_url": "https://example.com",
+        "endpoint": "/x",
+        "method": "GETT"
+      }
+    },
+    "chat": {
+      "type": "llm_call",
+      "config": {
+        "provider": "openai",
+        "modle": "gpt-4o",
+        "prompt": "summarise"
+      }
+    }
+  },
+  "edges": [
+    {
+      "from": "fetch",
+      "to": "chat"
+    },
+    {
+      "from": "chat",
+      "to": "missing_node"
+    }
+  ],
+  "_comment": "Several defects in one graph, to show the report ordering: errors first, then by node id, then by field."
+}

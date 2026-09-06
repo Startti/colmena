@@ -1,0 +1,25 @@
+{
+  "nodes": {
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "openai",
+        "api_key": "k",
+        "model": "gpt-4o",
+        "prompt": "call it",
+        "tool_configurations": {
+          "call": {
+            "node_type": "http_request",
+            "node_schema": {
+              "body": {
+                "required": true
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "edges": [],
+  "_comment": "MALFORMED_TOOL_ENTRY — Graph::validate() refuses this graph at load. The message names the shape, never the value."
+}

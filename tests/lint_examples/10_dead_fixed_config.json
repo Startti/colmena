@@ -1,0 +1,32 @@
+{
+  "nodes": {
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "openai",
+        "api_key": "k",
+        "model": "gpt-4o",
+        "prompt": "upload it",
+        "tool_configurations": {
+          "upload": {
+            "node_type": "http_request",
+            "node_schema": {
+              "body": {
+                "type": "object",
+                "required": true,
+                "description": "payload"
+              }
+            },
+            "fixed_config": {
+              "base_url": "https://example.com",
+              "method": "POST",
+              "headers": {}
+            }
+          }
+        }
+      }
+    }
+  },
+  "edges": [],
+  "_comment": "DEAD_FIXED_CONFIG — node_schema wins and the whole fixed_config is discarded. This is the real shape that failed with \"Invalid URL '': relative URL without a base\"."
+}

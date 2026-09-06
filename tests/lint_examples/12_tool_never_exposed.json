@@ -1,0 +1,20 @@
+{
+  "nodes": {
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "openai",
+        "api_key": "k",
+        "model": "gpt-4o",
+        "prompt": "analyse it",
+        "tool_configurations": {
+          "mi_python": {
+            "node_type": "data_run_python"
+          }
+        }
+      }
+    }
+  },
+  "edges": [],
+  "_comment": "TOOL_NEVER_EXPOSED — data_run_python is switched on by the entry KEY, not by node_type, so this entry hands the model nothing."
+}

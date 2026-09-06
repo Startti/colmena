@@ -1,0 +1,30 @@
+{
+  "nodes": {
+    "nested": {
+      "type": "subgraph",
+      "config": {
+        "child_graph_inline": {
+          "nodes": {
+            "chat": {
+              "type": "llm_call",
+              "config": {
+                "provider": "openai",
+                "api_key": "k",
+                "modle": "gpt-4o",
+                "invented": 1
+              }
+            }
+          },
+          "edges": [
+            {
+              "from": "nowhere",
+              "to": "also_nowhere"
+            }
+          ]
+        }
+      }
+    }
+  },
+  "edges": [],
+  "_comment": "KNOWN BLIND SPOT (BACKLOG L2) — every defect below lives inside child_graph_inline and the linter reports NONE of them."
+}

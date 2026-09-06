@@ -1,0 +1,30 @@
+{
+  "nodes": {
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "openai",
+        "api_key": "k",
+        "model": "gpt-4o",
+        "prompt": "fetch it",
+        "tool_configurations": {
+          "fetch": {
+            "node_type": "http_request",
+            "node_schema": {
+              "url": {
+                "fixed": "https://example.com/api"
+              },
+              "query": {
+                "type": "string",
+                "required": true,
+                "description": "search"
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "edges": [],
+  "_comment": "REPURPOSED_TOOL_FIELD — http_request reads base_url/endpoint, never url; it turns any other key into a query parameter."
+}
