@@ -1,0 +1,22 @@
+{
+  "nodes": {
+    "loop": {
+      "type": "for_each",
+      "config": {
+        "items": [
+          {
+            "id": 1
+          }
+        ],
+        "target": {
+          "node_type": "http_request",
+          "node_schema": {
+            "body": "not-an-object"
+          }
+        }
+      }
+    }
+  },
+  "edges": [],
+  "_comment": "MALFORMED_TOOL_ENTRY inside a for_each target — nothing refuses this graph; it runs with every row unvalidated."
+}

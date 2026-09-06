@@ -1,0 +1,32 @@
+{
+  "nodes": {
+    "loop": {
+      "type": "for_each",
+      "config": {
+        "items": [
+          {
+            "id": 1
+          },
+          {
+            "id": 2
+          }
+        ],
+        "target": {
+          "node_type": "http_request",
+          "node_schema": {
+            "url": {
+              "fixed": "https://example.com/api"
+            },
+            "id": {
+              "type": "integer",
+              "required": true,
+              "description": "row id"
+            }
+          }
+        }
+      }
+    }
+  },
+  "edges": [],
+  "_comment": "REPURPOSED_TOOL_FIELD inside a for_each target — the section-20 defect one container down."
+}

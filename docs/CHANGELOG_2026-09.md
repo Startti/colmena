@@ -1693,3 +1693,48 @@ capturada en la guía.
 `error=75 warning=5 info=0` — los ejemplos no lo tocan, que es el punto de dónde viven.
 
 **Estado.** done.
+
+---
+
+## 31. El catálogo de ejemplos, completo (tanda 2)
+
+**Qué.** Los ocho ejemplos que faltaban: los cuatro diagnósticos de
+`tool_configurations`, los dos del `target` de un `for_each`, el punto ciego del
+`subgraph` inline y uno compuesto que muestra el orden del reporte. Con esto el catálogo
+llega a dieciocho y cubre **los doce** `DiagnosticCode`.
+
+Llega también el test que lo exige: `every_diagnostic_code_the_linter_can_emit_has_an_example`.
+Viajó con esta tanda a propósito — ponerlo en la §30 habría sido prometer una garantía
+que aquella tanda no podía cumplir, y la única forma de hacerlo pasar habría sido
+debilitarlo.
+
+### El ejemplo del punto ciego, y lo que su test no puede
+
+El ejemplo 16 mete tres defectos dentro de un `child_graph_inline` —un `modle`, un campo
+inventado y un edge colgado— y su expectativa es **ningún hallazgo**. Eso falla el día
+que L2 cierre, verificado subiendo uno de esos defectos al nivel superior: el test se
+pone en rojo.
+
+Lo que **no** puede atrapar es que ese fixture deje de estar roto: reparar un defecto
+adentro del hijo inline no cambia nada que el linter pueda ver, así que la expectativa
+sigue valiendo. Es inherente —el punto del ejemplo es justamente que nadie mira ahí— y
+por eso lleva tres defectos en vez de uno. Está dicho en el test y en la guía en lugar de
+dejarlo como un agujero que alguien descubra más tarde.
+
+Vale la pena nombrarlo porque la primera mutación que probé fue justamente ésa —reparar
+un defecto interno— y **pasó**. Una mutación que pasa no siempre acusa un test flojo: a
+veces acusa una mutación mal elegida. La distinción se resuelve mirando qué puede ver el
+código bajo prueba, no repitiendo la mutación.
+
+### Verificación
+
+**Tres mutaciones**: un código pierde su único ejemplo → rojo; reparar el defecto del
+ejemplo 10 → rojo; el punto ciego deja de estar en silencio → rojo. La cuarta (reparar un
+defecto **interno** del ejemplo 16) pasa, por lo de arriba.
+
+2803 tests, corpus `error=75 warning=5 info=0` sin cambios — los ejemplos siguen fuera de
+`tests/graphs/`, que es el punto de dónde viven.
+
+**Alcance.** Sin cambios de código: fixtures, tests y documentación.
+
+**Estado.** done.
