@@ -60,25 +60,20 @@ Ordenados por importancia. Los ids son para poder referenciarlos en un PR.
   entera de grafos sin revisar, no un caso borde. Limitación compartida por todas las
   reglas crudas.
 
-- **L2b · Tampoco entra en el `target` de un `for_each`, y ahí no hay red debajo.**
-  Mismo agujero que L2 en otro contenedor: `config.target` es `{node_type, node_schema}`,
-  la misma forma que una entrada de tool, y ninguna regla lo mira. Verificado contra el
-  binario en las dos formas de uso: como nodo del grafo, y expuesto en
-  `tool_configurations` con el schema de la entrada externa **válido** para que el
-  hallazgo no pueda venir de ahí. En las dos, un `target.node_schema` con `url` sobre
-  `http_request` —que lee `base_url`, el defecto exacto de la §20— y además malformado
-  (`"body": "not-an-object"`) da `no findings`.
+- **L2b-bis · Falta reportar un `target.node_schema` malformado.** La otra mitad de L2b,
+  rebanada aparte por el cap de 500 líneas. Omitirla no deja nada más callado que hoy
+  —nadie lo reporta— así que la costura es segura, a diferencia de la de la §23.
+  Verificado contra el binario: el grafo **carga** (`validate()` no mira un target) y
+  cada fila falla al despachar con `Invalid node_schema: …`, en las dos familias de
+  rechazo. El lote muere a mitad de la corrida en vez de antes, que es el viaje que
+  ahorraría el lint. Incluye el item de abajo.
 
-  **Es peor que L2, no igual.** Un `subgraph` inline malformado al menos falla al cargar,
-  porque `validate()` corre para los grafos hijos. El `target` de un `for_each` no pasa
-  por `validate()` —sólo mira `config.tool_configurations`— y el nodo, al despachar cada
-  fila, deserializa el schema y lo parsea dentro de dos `if let Ok(...)` **sin rama
-  else** ([`for_each.rs:424-428`](../src/libs/colmena/src/dag_engine/infrastructure/nodes/for_each.rs)):
-  si cualquiera falla, se saltea en silencio toda la validación de params requeridos por
-  fila y el lote sigue. O sea que un `target.node_schema` roto no lo reporta nadie —ni el
-  linter, ni la carga, ni la ejecución— y encima apaga el único chequeo por fila que el
-  nodo tiene. La corrección de esa rama silenciosa es trabajo de `for_each`, no del
-  linter, pero sale del mismo hallazgo.
+- **L2c · El par `if let Ok(...)` de `for_each` es código muerto, no una falla
+  silenciosa.** Este item nació diciendo lo contrario y la corrida E2E lo corrigió.
+  `merge_args_into_schema` corre **las mismas dos comprobaciones** unas líneas antes y
+  falla la fila, así que la guarda posterior es inalcanzable. No hay bug de
+  comportamiento: hay una guarda defensiva que invita a la lectura equivocada — a mí me
+  la hizo hacer. Vale borrarla o comentarla. **Sin urgencia**: no afecta ninguna corrida.
 
 - **L3 · El brazo `Registry` conserva el consejo viejo.** Un tipo tool-only usado como
   `type` de un nodo del grafo recibe el consejo correcto bajo `CatalogOnly` (lo que usa
@@ -153,6 +148,7 @@ fuera del linter pero son la misma clase de defecto.
 | Rebanada 2 — cada clave se cruza contra el `node_type` destino | 2026-09-04 | §22 |
 | Rebanada 3 — las cinco tools sintéticas y `TOOL_NEVER_EXPOSED` | 2026-09-05 | §23 |
 | `MALFORMED_TOOL_ENTRY` y el consejo imposible de seguir para un tipo tool-only | 2026-09-05 | §26 |
+| L2b (mitad) — el `target` de un `for_each` se revisa por sus tres puertas contra el tipo de nodo que despacha | 2026-09-06 | §28 |
 | El camino de producción no llamaba a `Graph::validate()` | 2026-09-04 | §18 |
 
 Dos lecciones del track que no son items y conviene no re-aprender:

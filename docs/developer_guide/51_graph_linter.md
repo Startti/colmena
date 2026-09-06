@@ -57,9 +57,9 @@ camino de adopción para quien lo quiera en CI.
 | `FIELD_TYPE_MISMATCH` | warning | El tipo JSON no coincide con el documentado |
 | `EDGE_UNKNOWN_NODE` | error | Un edge apunta a un nodo que el grafo no define |
 | `DEAD_FIXED_CONFIG` | error | Una tool declara `fixed_config` junto a `node_schema`; el executor lee el segundo y **descarta el primero entero** |
-| `REPURPOSED_TOOL_FIELD` | warning | Una tool fija una clave que el nodo destino no declara, en un tipo de nodo que **reinterpreta** las claves desconocidas en vez de ignorarlas |
+| `REPURPOSED_TOOL_FIELD` | warning | Una tool —o el `target` de un `for_each`— fija una clave que el nodo destino no declara, en un tipo de nodo que **reinterpreta** las claves desconocidas en vez de ignorarlas |
 | `TOOL_NEVER_EXPOSED` | error | Una tool sintética nombrada en `node_type` pero **no en la clave** de la entrada, que es lo que realmente la activa — el modelo nunca la recibe |
-| `MALFORMED_TOOL_ENTRY` | error | El `node_schema` de una tool está formado de modo que **el motor rechaza el grafo al cargar**; el linter lo dice antes de correr |
+| `MALFORMED_TOOL_ENTRY` | error | Un `node_schema` embebido que no se puede parsear. En una entrada de tool **el motor rechaza el grafo al cargar** y el linter lo dice antes de correr; en el `target` de un `for_each` no lo rechaza nadie, y el mensaje dice ese otro costo |
 | `NO_CATALOG_COVERAGE` | info | El tipo de nodo no tiene entrada en el catálogo: **no se revisó** |
 
 Los `code` son estables. Cualquier consumidor (la salida JSON, una UI sobre los
@@ -200,6 +200,28 @@ los guarda en un mapa lateral.
 **Se revisa también `node_config`.** Es el bloque que usan las entradas toolkit
 (`expose_sub_tools`): las 15 del corpus configuran su nodo por ahí y nunca por
 `fixed_config`.
+
+## El `target` de un `for_each`
+
+Un `for_each` embebe `{node_type, node_schema}` —**la misma forma que una entrada de
+tool**— y lo despacha una vez por fila. Ese bloque nombra campos de otro tipo de nodo,
+así que se revisa con la regla de arriba, la misma pregunta y la misma severidad:
+*¿ese tipo de nodo lee esta clave?*
+
+```
+warning [REPURPOSED_TOOL_FIELD] node "loop".target.node_schema.url:
+  "url" is not a field of "http_request"; that node type does not ignore an unknown
+  key, it repurposes it — the value will be sent as a query parameter instead of
+  configuring the node
+```
+
+Ese es el defecto de la §20 un contenedor más abajo, y hasta acá no lo veía nadie.
+
+**Tres puertas, no una.** El nodo resuelve su `target` con `cfg_or_input`, así que el
+bloque llega por el `config` del propio nodo, o —cuando el `for_each` está expuesto
+como tool— por `node_schema.target.fixed` o por `fixed_config.target` de la entrada.
+Las tres se recorren. Lo que el modelo elige en tiempo de ejecución no está acá para
+ser leído.
 
 ## Los cinco tipos que sólo existen dentro de `tool_configurations`
 
@@ -497,19 +519,13 @@ claves que se perdían.
   *(Esta viñeta decía hasta la §22 que los campos de una tool no se cruzaban contra
   su `node_type`. Eso se cerró en esa misma sección y la limitación quedó vieja
   contradiciendo a "Los campos de una tool" más arriba.)*
-- **Ninguna regla entra en un grafo anidado.** Todas las reglas crudas recorren
-  `nodes.*.config.tool_configurations` y nada más, así que lo que viva un nivel más
-  abajo no se revisa: el `child_graph_inline` de un `subgraph`, y el `target` de un
-  `for_each` —que tiene la misma forma `{node_type, node_schema}` que una entrada de
-  tool—. Verificado contra el binario: un `url` sobre `http_request` dentro de un
-  `for_each.target` (el defecto exacto de la §20) lintea limpio.
-
-  Los dos no cuestan lo mismo. Un `subgraph` inline malformado igual falla al cargar,
-  porque `validate()` corre para los grafos hijos; el `target` de un `for_each` no pasa
-  por `validate()` **ni** falla al ejecutar, porque el nodo parsea ese schema dentro de
-  dos `if let Ok(...)` sin rama else y ante un error se saltea en silencio su propia
-  validación por fila. Ahí "no findings" no tiene ninguna autoridad debajo. Abiertos en
-  el [BACKLOG](../BACKLOG.md) como L2 y L2b.
+- **Ninguna regla entra en un `subgraph` inline.** El `target` de un `for_each` ya se
+  revisa (ver arriba), pero el `child_graph_inline` de un `subgraph` sigue siendo un
+  `Value` opaco para el linter: los nodos que viven ahí adentro no se revisan, con
+  campos inventados y edges colgados incluidos. Lo que amortigua el caso es que un
+  hijo inline malformado igual falla al cargar, porque `validate()` sí corre para los
+  grafos hijos — se pierde el aviso temprano, no la guardia. Abierto en el
+  [BACKLOG](../BACKLOG.md) como L2.
 - **Cuatro tipos condicionales se dan por disponibles.** El linter revisa el
   grafo contra lo que el motor *puede* ejecutar, no contra el cableado de un
   despliegue concreto.

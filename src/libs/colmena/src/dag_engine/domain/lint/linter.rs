@@ -123,6 +123,7 @@ pub fn lint_graph_json(
     lint_raw_malformed_tool_entries(document, &mut report);
     lint_raw_tool_configurations(document, &mut report);
     lint_raw_tool_fields(document, ctx, &mut report);
+    lint_raw_for_each_targets(document, ctx, &mut report);
     report.sort();
     Ok(report)
 }
@@ -497,32 +498,154 @@ fn lint_raw_tool_fields(document: &Value, ctx: &LintContext<'_>, report: &mut Li
             continue;
         }
 
-        let policy = ctx
-            .catalog
-            .undeclared_key_policy(node_type)
-            .unwrap_or(UndeclaredKeyPolicy::AcceptsAnything);
-        if policy == UndeclaredKeyPolicy::AcceptsAnything {
-            continue;
-        }
-
         for block in TOOL_FIELD_BLOCKS {
             let Some(fields) = entry.get(block).and_then(Value::as_object) else {
                 continue;
             };
-            for key in fields.keys() {
-                if key.starts_with(RESERVED_KEY_PREFIX)
-                    || is_annotation_key(key)
-                    || ctx
-                        .catalog
-                        .declares_tool_key(node_type, key)
-                        .unwrap_or(true)
-                {
-                    continue;
-                }
-                report.diagnostics.push(undeclared_tool_field(
-                    node_id, tool_name, block, key, node_type, policy, ctx,
-                ));
+            check_configured_keys(
+                node_id,
+                &format!("tool_configurations.{tool_name}.{block}"),
+                fields,
+                node_type,
+                ctx,
+                report,
+            );
+        }
+    }
+}
+
+/// Checks the keys of one block that names fields of `node_type`.
+///
+/// Shared by the two places a node is configured from outside its own `config`:
+/// a tool entry's blocks, and the `target` a `for_each` dispatches per row. The
+/// question is identical in both — "does that node type read this key?" — so
+/// the answer, its severity and its wording must be too.
+///
+/// Silent when the node type accepts any key: on those, an author-supplied key
+/// is the intended way to use the node, not a mistake.
+fn check_configured_keys(
+    node_id: &str,
+    location: &str,
+    fields: &Map<String, Value>,
+    node_type: &str,
+    ctx: &LintContext<'_>,
+    report: &mut LintReport,
+) {
+    let policy = ctx
+        .catalog
+        .undeclared_key_policy(node_type)
+        .unwrap_or(UndeclaredKeyPolicy::AcceptsAnything);
+    if policy == UndeclaredKeyPolicy::AcceptsAnything {
+        return;
+    }
+    for key in fields.keys() {
+        if key.starts_with(RESERVED_KEY_PREFIX)
+            || is_annotation_key(key)
+            || ctx
+                .catalog
+                .declares_tool_key(node_type, key)
+                .unwrap_or(true)
+        {
+            continue;
+        }
+        report.diagnostics.push(undeclared_tool_field(
+            node_id, location, key, node_type, policy, ctx,
+        ));
+    }
+}
+
+/// The node type whose `config.target` embeds another node's configuration.
+const FOR_EACH_NODE_TYPE: &str = "for_each";
+
+/// Every `for_each` target in the document, with the dotted path that reaches it.
+///
+/// A `for_each` embeds `{node_type, node_schema}` — the same shape as a tool
+/// entry — and dispatches it once per row. That block therefore names fields of
+/// another node type, and until now nothing checked them: a `url` on
+/// `http_request`, the exact defect of section 20, went unreported here while
+/// being caught one container over.
+///
+/// The node resolves its `target` through `cfg_or_input`, so the block arrives
+/// by one of three doors and all three are walked: the node's own `config`, and
+/// — when the `for_each` is itself dispatched as an LLM tool — the entry's
+/// `node_schema.target.fixed` or its `fixed_config.target`. Anything the model
+/// is left to choose at run time is not here to be read.
+///
+/// Yields `(node_id, location, target)` for each target that is a JSON object.
+fn for_each_targets(document: &Value) -> Vec<(&String, String, &Value)> {
+    let Some(nodes) = document.get("nodes").and_then(Value::as_object) else {
+        return Vec::new();
+    };
+
+    let mut targets = Vec::new();
+    for (node_id, node) in nodes {
+        let Some(config) = node.get("config") else {
+            continue;
+        };
+
+        // Door 1: the node is a `for_each` in the graph.
+        if node.get("type").and_then(Value::as_str) == Some(FOR_EACH_NODE_TYPE) {
+            if let Some(target) = config.get("target").filter(|t| t.is_object()) {
+                targets.push((node_id, "target".to_string(), target));
             }
+        }
+
+        // Doors 2 and 3: a `for_each` exposed as a tool carries its target
+        // inside the entry, fixed — the model must not choose what to run.
+        let Some(tools) = config.get("tool_configurations").and_then(Value::as_object) else {
+            continue;
+        };
+        for (tool_name, entry) in tools {
+            if entry.get("node_type").and_then(Value::as_str) != Some(FOR_EACH_NODE_TYPE) {
+                continue;
+            }
+            for (path, target) in [
+                (
+                    format!("tool_configurations.{tool_name}.node_schema.target.fixed"),
+                    entry
+                        .get("node_schema")
+                        .and_then(|s| s.get("target"))
+                        .and_then(|t| t.get("fixed")),
+                ),
+                (
+                    format!("tool_configurations.{tool_name}.fixed_config.target"),
+                    entry.get("fixed_config").and_then(|f| f.get("target")),
+                ),
+            ] {
+                if let Some(target) = target.filter(|t| t.is_object()) {
+                    targets.push((node_id, path, target));
+                }
+            }
+        }
+    }
+    targets
+}
+
+/// Reports a `for_each` target key the node it dispatches does not read.
+///
+/// Same defect as on a tool entry, one container down, so it gets the same
+/// wording from the same function. A malformed `target.node_schema` is a
+/// separate finding and lands in its own change: leaving it out here makes
+/// nothing quieter than it already is, since nothing reports it today.
+fn lint_raw_for_each_targets(document: &Value, ctx: &LintContext<'_>, report: &mut LintReport) {
+    for (node_id, location, target) in for_each_targets(document) {
+        let Some(node_type) = target.get("node_type").and_then(Value::as_str) else {
+            // Without a target type there is nothing to check the keys against.
+            // The node itself fails the run with `target.node_type is required`.
+            continue;
+        };
+
+        // The keys are worth checking whatever shape the block is in: an
+        // invented field name is a defect of its own, and it stays true.
+        if let Some(fields) = target.get("node_schema").and_then(Value::as_object) {
+            check_configured_keys(
+                node_id,
+                &format!("{location}.node_schema"),
+                fields,
+                node_type,
+                ctx,
+                report,
+            );
         }
     }
 }
@@ -572,8 +695,7 @@ fn never_exposed(node_id: &str, tool_name: &str, node_type: &str) -> Diagnostic 
 /// Builds the finding for one undeclared key, worded for the policy in force.
 fn undeclared_tool_field(
     node_id: &str,
-    tool_name: &str,
-    block: &str,
+    location: &str,
     key: &str,
     node_type: &str,
     policy: UndeclaredKeyPolicy,
@@ -603,7 +725,7 @@ fn undeclared_tool_field(
         severity,
         code,
         node_id: Some(node_id.to_string()),
-        field: Some(format!("tool_configurations.{tool_name}.{block}.{key}")),
+        field: Some(format!("{location}.{key}")),
         message,
         suggestion: did_you_mean.or_else(|| Some(fallback.into())),
     }
