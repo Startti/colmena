@@ -59,7 +59,7 @@ camino de adopción para quien lo quiera en CI.
 | `DEAD_FIXED_CONFIG` | error | Una tool declara `fixed_config` junto a `node_schema`; el executor lee el segundo y **descarta el primero entero** |
 | `REPURPOSED_TOOL_FIELD` | warning | Una tool —o el `target` de un `for_each`— fija una clave que el nodo destino no declara, en un tipo de nodo que **reinterpreta** las claves desconocidas en vez de ignorarlas |
 | `TOOL_NEVER_EXPOSED` | error | Una tool sintética nombrada en `node_type` pero **no en la clave** de la entrada, que es lo que realmente la activa — el modelo nunca la recibe |
-| `MALFORMED_TOOL_ENTRY` | error | Un `node_schema` embebido que no se puede parsear. En una entrada de tool **el motor rechaza el grafo al cargar** y el linter lo dice antes de correr; en el `target` de un `for_each` no lo rechaza nadie, y el mensaje dice ese otro costo |
+| `MALFORMED_TOOL_ENTRY` | error | Un `node_schema` embebido que no se puede parsear. En una entrada de tool **el motor rechaza el grafo al cargar**; en el `target` de un `for_each` el grafo arranca y el lote **muere fila por fila**. En los dos casos el linter lo dice antes de correr |
 | `NO_CATALOG_COVERAGE` | info | El tipo de nodo no tiene entrada en el catálogo: **no se revisó** |
 
 Los `code` son estables. Cualquier consumidor (la salida JSON, una UI sobre los
@@ -222,6 +222,37 @@ bloque llega por el `config` del propio nodo, o —cuando el `for_each` está ex
 como tool— por `node_schema.target.fixed` o por `fixed_config.target` de la entrada.
 Las tres se recorren. Lo que el modelo elige en tiempo de ejecución no está acá para
 ser leído.
+
+### Un `node_schema` roto en un `target` falla tarde, no al cargar
+
+Y por eso su mensaje **no puede ser el de una entrada de tool**. Un `node_schema`
+malformado dentro de `tool_configurations` hace que `Graph::validate()` rechace el
+grafo **al cargar**; dentro de un `target` no, porque `validate()` sólo mira
+`config.tool_configurations`. El grafo arranca.
+
+Lo que pasa después está **medido**: cada fila falla al despachar con
+`Invalid node_schema: …`, porque `merge_args_into_schema` corre las mismas dos
+comprobaciones antes de que la fila vaya a ningún lado. El lote muere a mitad de la
+corrida en vez de antes — que es justamente el viaje que ahorra un lint.
+
+| Grafo corrido | Resultado |
+|---|---|
+| Control: schema **válido**, requerido que ninguna fila aporta | `err=2`, `missing required param 'must_be_present'` |
+| Familia 1: `"body": "not-an-object"` | `err=2`, `Invalid node_schema: invalid type: string` |
+| Familia 2: campo visible al LLM sin `type` | `err=2`, `Invalid node_schema: … is LLM-visible but missing type` |
+
+En los tres, cero requests salieron al servicio. Y sobre los mismos dos grafos el
+linter reporta `MALFORMED_TOOL_ENTRY` **sin correr nada**.
+
+> **Una afirmación anterior era falsa.** Decía que las filas despachaban **sin
+> validar**, razonando desde el par `if let Ok(...)` sin rama else de `for_each.rs`.
+> Correrlo lo desmintió: el merge rechaza la fila primero, así que ese bloque es
+> inalcanzable para un schema malformado. Mandaba a un operador a buscar filas
+> corruptas que no existen.
+
+**Las claves se revisan igual aunque el schema esté roto.** Son defectos
+independientes: que una clave no sea campo de ese tipo de nodo sigue siendo cierto y
+accionable cualquiera sea la forma del bloque.
 
 ## Los cinco tipos que sólo existen dentro de `tool_configurations`
 

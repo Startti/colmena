@@ -1965,3 +1965,79 @@ fn a_for_each_target_reached_through_fixed_config_is_checked_too() {
         Some("tool_configurations.loop.fixed_config.target.node_schema.url")
     );
 }
+
+/// A malformed target schema is NOT refused at load the way a tool entry's is:
+/// `Graph::validate` only inspects `config.tool_configurations`, so the graph
+/// starts. The message must not claim otherwise.
+///
+/// It must not claim the opposite either. An earlier version of this work said
+/// the rows dispatched UNVALIDATED, reasoned from the `if let Ok(...)` pair in
+/// `for_each.rs` that has no else arm. An E2E run falsified it: every row fails
+/// at dispatch with `Invalid node_schema`, because `merge_args_into_schema`
+/// runs those same two checks first. Both halves are pinned here so neither
+/// wrong sentence can come back.
+#[test]
+fn a_malformed_for_each_target_schema_says_what_the_run_actually_does() {
+    let report = lint_json(for_each_graph(serde_json::json!({
+        "node_type": "http_request",
+        "node_schema": { "body": "not-an-object" }
+    })));
+
+    let d = find(&report, DiagnosticCode::MalformedToolEntry)
+        .expect("a malformed target schema must be reported");
+    assert_eq!(d.field.as_deref(), Some("target.node_schema"));
+    assert!(
+        !d.message.contains("refuses at load"),
+        "nothing refuses this graph AT LOAD: {}",
+        d.message
+    );
+    assert!(
+        !d.message.contains("unvalidated"),
+        "the rows do not dispatch unvalidated — verified by running it — and saying \
+         so would send an operator hunting for corrupted rows that do not exist: {}",
+        d.message
+    );
+    assert!(
+        d.message.contains("fails at dispatch"),
+        "the message must say what the run actually does: {}",
+        d.message
+    );
+    assert!(
+        !d.message.contains("not-an-object"),
+        "the value must not be echoed: {}",
+        d.message
+    );
+}
+
+/// The second family of rejection: the block deserializes into `NodeSchema`
+/// cleanly and `parse_node_schema` still refuses it. `{"body": {"required":
+/// true}}` is a well-formed field, so the first check waves it through — and
+/// the run still dies, one row at a time.
+#[test]
+fn a_target_schema_that_only_parse_rejects_is_reported_too() {
+    let report = lint_json(for_each_graph(serde_json::json!({
+        "node_type": "http_request",
+        "node_schema": { "body": { "required": true } }
+    })));
+
+    assert!(
+        find(&report, DiagnosticCode::MalformedToolEntry).is_some(),
+        "the parse-only family must be caught: {:?}",
+        codes(&report)
+    );
+}
+
+/// A target whose schema the engine accepts must not be reported.
+#[test]
+fn a_target_schema_the_engine_accepts_is_left_alone() {
+    let report = lint_json(for_each_graph(serde_json::json!({
+        "node_type": "http_request",
+        "node_schema": { "base_url": { "fixed": "https://example.com" } }
+    })));
+
+    assert!(
+        find(&report, DiagnosticCode::MalformedToolEntry).is_none(),
+        "a well-formed schema must be left alone: {:?}",
+        codes(&report)
+    );
+}
