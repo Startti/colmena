@@ -1073,20 +1073,32 @@ fn lint_node(
                     message: format!("\"{}\" is not a documented node type", node.node_type),
                     suggestion: Some(format!("did you mean \"{near}\"?")),
                 },
+                // Absence from the catalog is PROOF here, not a gap. `node_types`
+                // is closed in both directions against the engine's registry —
+                // one test fails if the engine can run something undocumented,
+                // another if the catalog names something it cannot — and the
+                // harness builds that registry with its four conditional nodes.
+                // So in any build whose suite passes, a type with no entry is a
+                // type the engine cannot run, and that graph does not start.
+                //
+                // This used to be an info advising a catalog entry. That advice
+                // could not be followed: adding one would fail those very tests.
+                // `"type": "trigger"` is the case that matters — the engine
+                // registers `trigger_webhook` — and it was among the seven real
+                // defects section 20 uncovered while being reported as a note.
                 None => Diagnostic {
-                    severity: Severity::Info,
-                    code: DiagnosticCode::NoCatalogCoverage,
+                    severity: Severity::Error,
+                    code: DiagnosticCode::UnknownNodeType,
                     node_id: Some(node_id.to_string()),
                     field: None,
                     message: format!(
-                        "\"{}\" has no entry in the node catalog, so this node's \
-                         configuration was not checked",
+                        "\"{}\" is not a node type this engine can run; the catalog \
+                         documents every type the registry has, in both directions, and \
+                         this is not one of them",
                         node.node_type
                     ),
                     suggestion: Some(
-                        "if the engine registers it, add an entry to \
-                         docs/node_configurations.json to enable checking"
-                            .into(),
+                        "check docs/node_configurations.json for the type you meant".into(),
                     ),
                 },
             });

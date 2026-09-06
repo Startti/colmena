@@ -1835,3 +1835,60 @@ más las 28 pruebas de `for_each` en verde. Sin cambio de comportamiento observa
 **Alcance.** Refactor. Ningún cambio de API ni de salida → ADP no afectado.
 
 **Estado.** done.
+
+---
+
+## 34. Un tipo ausente del catálogo pasa a ser un error
+
+**Qué.** Cierra **L11**. Con sólo el catálogo en mano, un tipo de nodo sin entrada se
+reportaba como `NO_CATALOG_COVERAGE` (**info**) aconsejando agregar una entrada a
+`docs/node_configurations.json`. Ahora es `UNKNOWN_NODE_TYPE` (**error**).
+
+### Por qué la duda dejó de estar justificada
+
+La justificación original era buena: afirmar «el motor no puede correr ese tipo» con
+sólo el catálogo es **falso para un nodo registrado pero todavía no documentado**. Eso
+era cierto cuando se escribió.
+
+Dejó de serlo cuando `node_types` quedó cerrado **en ambas direcciones** contra el
+registry. Un tipo registrado sin documentar hace fallar
+`every_registered_node_type_is_documented_in_the_catalog`; uno documentado que el motor
+no registra hace fallar `the_catalog_documents_no_node_type_the_engine_cannot_run` — y
+el harness arma el registry **con** sus cuatro nodos condicionales, así que el conjunto
+bajo prueba no se encoge en silencio. En cualquier build cuya suite pase, el catálogo es
+espejo del registry, y la ausencia **prueba** que el grafo no arranca.
+
+Lo que costaba la duda era concreto: `"type": "trigger"` —el motor registra
+`trigger_webhook`— fue uno de los siete defectos reales que destapó la §20, y salía como
+una nota aconsejando una entrada de catálogo que **agregarla habría roto el test suite**.
+
+### El riesgo se midió antes de tomarlo
+
+Subir infos a errores cambia qué falla bajo `--strict`, así que la pregunta era cuánto.
+Medido sobre los 303 grafos: `NO_CATALOG_COVERAGE` a nivel de nodo dispara **cero
+veces**. El corpus queda idéntico —`error=75 warning=5 info=0`— y nada que hoy pase
+`--strict` deja de pasarlo.
+
+### Lo que NO cambió
+
+- El brazo `Unchecked` (`with_embedded_catalog`) sigue sin opinar sobre tipos de nodo:
+  existe para eso, y el catálogo de un build no dice nada de un motor por el que no se
+  preguntó.
+- El `node_type` de una **tool** sigue reportando falta de cobertura. Ese brazo no se
+  toca acá, y es el que mantiene `NO_CATALOG_COVERAGE` alcanzable — el ejemplo 08 del
+  catálogo se reapuntó a esa forma.
+
+### Tres tests reconciliados, no silenciados
+
+Dos tests preexistentes afirmaban el contrato viejo **con su razón escrita en el
+docstring**. Se reescribieron explicando por qué esa premisa murió, en vez de dar vuelta
+la aserción y seguir.
+
+El tercero era mío y estaba mal: afirmaba que el consejo no debía mencionar
+`node_configurations.json`. **Leer** ese archivo es un consejo perfectamente seguible;
+lo inseguible era **agregarle** una entrada. La aserción ahora dice eso.
+
+**Alcance.** Cambia la severidad de un diagnóstico bajo `CatalogOnly`. Ningún grafo del
+corpus cambia de veredicto → ADP no afectado.
+
+**Estado.** done.

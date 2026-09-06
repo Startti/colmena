@@ -612,15 +612,21 @@ fn from_catalog_checks_node_types_without_an_engine() {
     let d = find(&report, DiagnosticCode::UnknownNodeType).expect("must flag the type");
     assert_eq!(d.suggestion.as_deref(), Some("did you mean \"llm_call\"?"));
 }
-/// The defect this fixes: with only the catalog to go on, the linter used to
-/// report *"is not a node type this engine can run"* for any type without an
-/// entry. For a node that IS registered but not yet documented — the likeliest
-/// way an unknown type appears — that sentence is simply false.
+/// This test used to assert the opposite, and its premise has since died.
 ///
-/// Now an unrecognised type with no near-miss is reported as a gap in our own
-/// coverage, at info severity, and says nothing about the engine.
+/// It read: with only the catalog to go on, claiming *"is not a node type this
+/// engine can run"* is false for a node that IS registered but not yet
+/// documented. That was true when written. It stopped being true when
+/// `node_types` closed in both directions against the registry — a registered
+/// type that is undocumented now fails
+/// `every_registered_node_type_is_documented_in_the_catalog`, so the case the
+/// info existed to protect cannot occur in a build whose suite passes.
+///
+/// What the info cost was real: `"type": "trigger"` — the engine registers
+/// `trigger_webhook` — is a graph that does not start, and it was reported as a
+/// note advising a catalog entry that adding would fail the suite.
 #[test]
-fn an_undocumented_node_type_is_reported_as_missing_coverage_not_as_unrunnable() {
+fn an_undocumented_node_type_is_reported_as_unrunnable() {
     let ctx = LintContext::from_catalog();
     let graph: Graph = serde_json::from_value(serde_json::json!({
         "nodes": { "x": { "type": "brand_new_node", "config": { "whatever": 1 } } },
@@ -635,11 +641,11 @@ fn an_undocumented_node_type_is_reported_as_missing_coverage_not_as_unrunnable()
         .find(|d| d.node_id.as_deref() == Some("x"))
         .expect("the node must be mentioned");
 
-    assert_eq!(d.code, DiagnosticCode::NoCatalogCoverage);
-    assert_eq!(d.severity, Severity::Info);
+    assert_eq!(d.code, DiagnosticCode::UnknownNodeType);
+    assert_eq!(d.severity, Severity::Error);
     assert!(
-        !d.message.contains("engine can run"),
-        "must not claim anything about the engine: {}",
+        d.message.contains("engine can run"),
+        "absence from the catalog now proves it: {}",
         d.message
     );
     assert!(
@@ -1754,8 +1760,8 @@ fn a_tool_only_type_used_as_a_graph_node_says_where_it_belongs() {
     );
 }
 
-/// A type that is genuinely unknown keeps the original advice — the fix above
-/// must not swallow the ordinary case.
+/// A genuinely unknown type still points at the catalog to READ — the advice
+/// that changed was the one telling the author to ADD an entry there.
 #[test]
 fn a_genuinely_unknown_node_type_still_points_at_the_catalog() {
     let ctx = LintContext::from_catalog();
@@ -1765,7 +1771,7 @@ fn a_genuinely_unknown_node_type_still_points_at_the_catalog() {
     });
     let report = lint_graph_json(&document, &ctx).expect("valid graph");
 
-    let d = find(&report, DiagnosticCode::NoCatalogCoverage).expect("must be reported");
+    let d = find(&report, DiagnosticCode::UnknownNodeType).expect("must be reported");
     assert!(d
         .suggestion
         .as_deref()
@@ -2151,6 +2157,89 @@ fn a_correct_inline_child_is_left_alone() {
     assert!(
         report.is_clean(),
         "a correct child must be silent: {:?}",
+        codes(&report)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// L11 — what absence from the catalog proves
+// ---------------------------------------------------------------------------
+
+/// The catalog is closed in BOTH directions against the engine's registry —
+/// `every_registered_node_type_is_documented_in_the_catalog` fails if the engine
+/// can run something undocumented, and
+/// `the_catalog_documents_no_node_type_the_engine_cannot_run` fails the other
+/// way. So in any build where the suite passes, absence from the catalog PROVES
+/// the engine cannot run that type, and the graph will not start.
+///
+/// It used to be reported as `NO_CATALOG_COVERAGE` (info) advising a catalog
+/// entry — advice nobody could follow, since adding one would fail those very
+/// tests. `"type": "trigger"` is the real case: the engine registers
+/// `trigger_webhook`, and that graph does not run.
+#[test]
+fn a_type_absent_from_the_catalog_is_an_error_not_a_coverage_note() {
+    let ctx = LintContext::from_catalog();
+    let document = serde_json::json!({
+        "nodes": { "start": { "type": "trigger", "config": {} } },
+        "edges": []
+    });
+    let report = lint_graph_json(&document, &ctx).expect("must deserialize");
+
+    let d = find(&report, DiagnosticCode::UnknownNodeType)
+        .expect("an unrunnable type must be an error");
+    assert_eq!(d.severity, Severity::Error);
+    assert!(
+        find(&report, DiagnosticCode::NoCatalogCoverage).is_none(),
+        "it is not a gap in our coverage: {:?}",
+        codes(&report)
+    );
+    assert!(
+        !d.suggestion
+            .as_deref()
+            .unwrap_or("")
+            .contains("add an entry"),
+        "the old advice — ADD a catalog entry — could not be followed; pointing at \
+         the file to READ is fine: {:?}",
+        d.suggestion
+    );
+}
+
+/// The weaker context keeps its silence. `with_embedded_catalog` exists to draw
+/// no conclusions about node types at all, and a build's catalog says nothing
+/// about an engine it was not asked about.
+#[test]
+fn the_unchecked_context_still_draws_no_conclusion_about_node_types() {
+    let report = lint(serde_json::json!({
+        "nodes": { "start": { "type": "trigger", "config": {} } },
+        "edges": []
+    }));
+
+    assert!(
+        find(&report, DiagnosticCode::UnknownNodeType).is_none(),
+        "Unchecked must not claim what the engine can run: {:?}",
+        codes(&report)
+    );
+}
+
+/// A tool entry's `node_type` keeps reporting missing coverage, because that
+/// arm is not what this change touches — and it is the path that keeps
+/// `NO_CATALOG_COVERAGE` reachable at all.
+#[test]
+fn a_tool_targeting_an_uncatalogued_type_still_reports_missing_coverage() {
+    let report = lint_json(serde_json::json!({
+        "nodes": { "agent": { "type": "llm_call", "config": {
+            "provider": "openai", "api_key": "k", "model": "gpt-4o",
+            "tool_configurations": { "t": {
+                "node_type": "quantum_flux_capacitor",
+                "node_schema": { "x": { "fixed": 1 } }
+            }}
+        }}},
+        "edges": []
+    }));
+
+    assert!(
+        find(&report, DiagnosticCode::NoCatalogCoverage).is_some(),
+        "the tool arm must keep its info: {:?}",
         codes(&report)
     );
 }

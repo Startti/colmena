@@ -496,16 +496,15 @@ cargo run --bin dag_engine -- lint tests/lint_examples/01_invented_config_field.
 ```
 
 
-### Sin cobertura no se opina
+### Sin cobertura no se opina — sobre el `node_type` de una tool
 
-[`08_no_catalog_coverage.json`](../../tests/lint_examples/08_no_catalog_coverage.json) — No se parece a nada documentado, así que el linter dice que no puede revisarlo en vez de marcar cada campo como inventado.
+[`08_no_catalog_coverage.json`](../../tests/lint_examples/08_no_catalog_coverage.json) — Ese tipo no está documentado, así que el linter dice que no revisó la tool en vez de marcar cada clave como inventada. **Ojo con dónde vale esto**: a nivel de nodo del grafo, la ausencia del catálogo ya no es falta de cobertura sino prueba de que el motor no puede correrlo (ver abajo), y se reporta como error.
 
 ```
-  info [NO_CATALOG_COVERAGE] node "n": "quantum_flux_capacitor" has no entry in the node catalog, so this node's configuration was not checked — if the engine registers it, add an entry to docs/node_configurations.json to enable checking
+  info [NO_CATALOG_COVERAGE] node "agent".tool_configurations.flux: tool "flux" targets "quantum_flux_capacitor", which has no entry in the node catalog, so its configuration was not checked — add an entry to docs/node_configurations.json to enable checking
 
   0 error(s), 0 warning(s), 1 info
 ```
-
 
 ### Un campo que popula el motor
 
@@ -756,19 +755,30 @@ El linter puede juzgar un tipo de nodo con dos grados de certeza distintos, y
 | Variante | Qué sabe | Qué reporta ante un tipo desconocido |
 |---|---|---|
 | `Registry(&set)` | El registry real del motor | `UNKNOWN_NODE_TYPE` (error): *"is not a node type this engine can run"*. La ausencia es prueba. |
-| `CatalogOnly` | Solo los tipos documentados | Si es un tipo tool-only → `UNKNOWN_NODE_TYPE` (error): el nombre va dentro de `tool_configurations`. Si hay un tipo documentado a distancia de typo → `UNKNOWN_NODE_TYPE` (error), *"is not a documented node type"*. Si no → `NO_CATALOG_COVERAGE` (info): no puedo revisarlo. |
+| `CatalogOnly` | Solo los tipos documentados, que el registry espeja en ambas direcciones | **Siempre `UNKNOWN_NODE_TYPE` (error).** Si es tool-only, el consejo dice que el nombre va dentro de `tool_configurations`; si hay un tipo a distancia de typo, lo nombra; si no, dice que el motor no puede correrlo. |
 | `Unchecked` | Nada | No opina sobre tipos de nodo. |
 
 La CLI usa `CatalogOnly`, que no cuesta nada construir —sin engine, sin base de
-datos— y es lo que permite lintear un archivo JSON suelto. Lo que resigna es la
-autoridad para decir que un tipo no se puede ejecutar: **decir eso con solo el
-catálogo en mano es falso para un nodo que sí está registrado pero todavía no
-documentado**, que es justamente la forma más probable de que aparezca un tipo
-desconocido. Un near-miss contra un tipo documentado sí es evidencia fuerte de
-typo, y se reporta como error.
+datos— y es lo que permite lintear un archivo JSON suelto.
 
-Si tenés un registry a mano, `LintContext::from_registry(catalog, &tipos)`
-recupera la afirmación fuerte.
+**Y ya no resigna nada.** Esta sección decía que afirmar «el motor no puede correr
+ese tipo» con sólo el catálogo en mano *era falso para un nodo registrado pero no
+documentado todavía*. Eso era cierto cuando se escribió; dejó de serlo cuando
+`node_types` quedó cerrado **en ambas direcciones** contra el registry. Un tipo
+registrado sin documentar hace fallar
+`every_registered_node_type_is_documented_in_the_catalog`, y uno documentado que el
+motor no registra hace fallar `the_catalog_documents_no_node_type_the_engine_cannot_run`
+— con el harness armando el registry **con** sus cuatro nodos condicionales. En
+cualquier build cuya suite pase, el catálogo es espejo del registry.
+
+Así que la ausencia del catálogo **prueba** que el grafo no arranca, y se reporta como
+error. Lo que costaba la duda era concreto: `"type": "trigger"` —el motor registra
+`trigger_webhook`— fue uno de los siete defectos reales que destapó la §20, y salía
+como una nota aconsejando agregar una entrada al catálogo que agregarla habría roto
+el test suite.
+
+`LintContext::from_registry(catalog, &tipos)` sigue existiendo para quien tenga un
+registry a mano; hoy llega a la misma conclusión por un camino más corto.
 
 ## De dónde sale la verdad
 
