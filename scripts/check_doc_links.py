@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
 """Check that documentation references under docs/ point at files that exist.
 
-Two checks run:
+Three checks run:
 
 1. Every relative markdown link resolves to a real file.
 2. Every `tests/graphs/**.json` path named in a LIVING doc exists. Graph paths are
    usually written as inline code spans rather than links, so check 1 never sees
    them, yet a doc naming a graph nobody can run is just as broken.
+3. No rolling changelog reuses a section number. Sections are referenced by number
+   from the BACKLOG and from other entries, so two `## 26.` make every such
+   reference ambiguous -- and the reader has no way to tell which was meant. This
+   happened: two PRs merged the same day each appended a `## 26.`, and the
+   collision sat in `develop` unnoticed because nothing looked.
 
 Check 1 skips fenced code blocks and inline code spans, so a `[link](url)` shown as
 an example of markdown syntax is not reported as a real link. It also skips targets
@@ -34,6 +39,28 @@ FENCE = re.compile(r'^\s*(```|~~~)')
 INLINE_CODE = re.compile(r'`[^`]*`')
 LINE_SUFFIX = re.compile(r':L?\d+(?:-L?\d+)?$')
 GRAPH_REF = re.compile(r'tests/graphs/[A-Za-z0-9_/]*\.json')
+# A rolling changelog's top-level entries: `## 26. Title`. Only the number matters.
+CHANGELOG_SECTION = re.compile(r'^## (\d+)\.')
+
+# Collisions that predate this check, kept as data rather than fixed.
+#
+# Renumbering a historical entry is not free: sections are cited by number from
+# the BACKLOG and from plans, and those citations cannot all be resolved. The
+# BACKLOG cites "§24 de CHANGELOG_2026-06.md" three times for a router change,
+# and NEITHER section numbered 24 in that file is about the router -- so at
+# least one citation is already pointing somewhere unintended, and guessing
+# which entry should keep the number would bury that rather than surface it.
+#
+# The point of this check is to stop NEW collisions, which it does. These five
+# stay listed, where anyone can see them, until someone who knows that history
+# resolves them.
+KNOWN_SECTION_COLLISIONS = {
+    ("CHANGELOG_2026-06.md", 22),
+    ("CHANGELOG_2026-06.md", 23),
+    ("CHANGELOG_2026-06.md", 24),
+    ("CHANGELOG_2026-06.md", 25),
+    ("CHANGELOG_2026-06.md", 26),
+}
 # A real relative link carries a directory separator or a file extension. Prose
 # sometimes contains bracket-paren pairs that are not links at all -- an indexing
 # expression, or a diagram quoted with "" instead of backticks -- and those never
@@ -91,6 +118,28 @@ def graph_refs(path):
             for m in GRAPH_REF.finditer(line):
                 yield lineno, m.group(0)
 
+def duplicate_sections(path):
+    """Section numbers used more than once in one changelog, with their lines."""
+    seen, dupes = {}, []
+    with open(path, encoding="utf-8") as handle:
+        in_fence = False
+        for lineno, line in enumerate(handle, 1):
+            if FENCE.match(line):
+                in_fence = not in_fence
+                continue
+            if in_fence:
+                continue
+            match = CHANGELOG_SECTION.match(line)
+            if not match:
+                continue
+            number = int(match.group(1))
+            if number in seen:
+                dupes.append((lineno, number, seen[number]))
+            else:
+                seen[number] = lineno
+    return dupes
+
+
 def main(roots):
     broken, checked = [], 0
     for root in roots:
@@ -123,14 +172,31 @@ def main(roots):
                     if not os.path.exists(graph):
                         missing_graphs.append((doc, lineno, graph))
 
+    collisions, changelogs = [], 0
+    for root in roots:
+        for dirpath, _dirnames, filenames in os.walk(root):
+            for name in sorted(filenames):
+                if not (name.startswith("CHANGELOG_") and name.endswith(".md")):
+                    continue
+                doc = os.path.join(dirpath, name)
+                changelogs += 1
+                for lineno, number, first in duplicate_sections(doc):
+                    if (name, number) in KNOWN_SECTION_COLLISIONS:
+                        continue
+                    collisions.append((doc, lineno, number, first))
+
     for doc, lineno, target in broken:
         print(f"{doc}:{lineno}: broken link -> {target}")
     for doc, lineno, graph in missing_graphs:
         print(f"{doc}:{lineno}: doc names a graph that does not exist -> {graph}")
 
+    for doc, lineno, number, first in collisions:
+        print(f"{doc}:{lineno}: section {number} is already used at line {first}")
+
     print(f"\n{checked} relative links checked, {len(broken)} broken.")
     print(f"{graphs_checked} graph references checked, {len(missing_graphs)} missing.")
-    return 1 if (broken or missing_graphs) else 0
+    print(f"{changelogs} changelog(s) checked, {len(collisions)} duplicate section number(s).")
+    return 1 if (broken or missing_graphs or collisions) else 0
 
 if __name__ == "__main__":
     sys.exit(main(sys.argv[1:] or ["docs"]))
