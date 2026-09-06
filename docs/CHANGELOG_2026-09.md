@@ -1509,3 +1509,45 @@ extinto `host_of`) fue exactamente la causa raíz del bypass. Sin cambio de API
 pública; ADP no afectado.
 
 **Estado.** done.
+
+---
+
+## 27. `mcp.dispatch_failed` distingue clases de fallo, y `mcp.dispatch_refused_secret` ya lleva `tool_call_id`
+
+**Qué cambió.** Cierra los dos huecos que la entrada #25 había dejado explícitos
+como pendientes.
+
+**Antes.** Un timeout, un fallo de transporte, un error reportado por el servidor,
+una ruta no expuesta y un rechazo por secure value producían la MISMA línea WARN
+(`tool`, `tool_call_id`, `ms`): el `McpError` se absorbía en el texto contenido que
+lee el modelo y nunca llegaba al log. Un operador triando un tercero degradado no
+podía distinguir "lento/colgado" de "alcanzable pero fallando". Además,
+`mcp.dispatch_refused_secret` no llevaba `tool_call_id` mientras su hermano sí —
+como las tool calls de un turno corren concurrentes (`JoinSet` en `llm.rs`), unir
+dos rechazos simultáneos a la misma tool por `tool` + tiempo podía fallar.
+
+**Ahora.** `McpDispatched` lleva un campo `kind: DispatchKind` (nuevo tipo en
+`dispatch.rs`, mismo patrón que `FetchFailure` en `wire.rs`) con una etiqueta
+snake_case estable por cada camino real: `ok`, `unrouted`, `unbound`,
+`refused_secret`, `server_error`, y una por cada variante de `McpError`
+(`timeout`, `transport`, `handshake`, `protocol`, `tool_not_found`,
+`tool_call_failed`, `schema_too_large`, `invalid_config`). `mcp.dispatch_failed`
+ahora incluye `kind = dispatched.kind.label()`; `mcp.dispatch_ok` no lo lleva —
+su `kind` es siempre `ok`, así que sería un campo constante y puro ruido.
+`tool_call_id` ahora viaja hasta `call_and_contain` y llega a
+`mcp.dispatch_refused_secret`, así que las dos líneas que un rechazo por secreto
+produce (`mcp.dispatch_refused_secret` y `mcp.dispatch_failed` con
+`kind = "refused_secret"`) se unen por id, no por heurística.
+
+**Dónde vive el mapeo.** `impl From<&McpError> for DispatchKind` en `dispatch.rs`
+(infraestructura), no en `llm::domain::mcp` — ese módulo tiene la regla dura de
+cero dependencias de infraestructura, y `DispatchKind` nombra conceptos que el
+dominio no conoce (`unrouted`/`unbound` son de la tabla de rutas del dispatcher).
+
+**Alcance.** Instrumentación pura: el texto contenido que ve el modelo, el flag
+`failed`, el `ToolResult` devuelto, el control de flujo y el orden
+rechazo-antes-que-red no cambian. Sin cambio de API pública; ADP no afectado.
+Referencia completa, incluida la tabla de `kind` y su lectura operacional, en
+[`developer_guide/52`](developer_guide/52_mcp_observability.md).
+
+**Estado.** done.

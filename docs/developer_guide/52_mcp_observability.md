@@ -52,9 +52,49 @@ y puede cambiar.
 | `mcp.server_ready` | DEBUG | `alias`, `host`, `tools` (conteo expuesto tras dedupe), `ms` | Un servidor MCP respondió y sus tools quedaron expuestas al modelo. Uno por servidor sano. |
 | `mcp.wiring_note` | WARN | (mensaje libre en `notes`, sin campos estructurados) | El catch-all legible de `wire()`/`assemble()`. `notes` tiene **dos orígenes**: un drop a nivel de tool (colisión de nombre, schema sobredimensionado) y **también** un fallo a nivel de servidor, que además ya se reportó de forma estructurada en `mcp.server_unavailable`. Uno por nota. |
 | `mcp.tools_exposed` | INFO | `exposed`, `servers`, `unavailable` | Resumen de fin de turno: cuántas tools quedaron expuestas, cuántos servidores respondieron, cuántos alias quedaron fuera. Solo se emite si `exposed > 0`. |
-| `mcp.dispatch_failed` | WARN | `tool`, `tool_call_id`, `ms` | Una llamada a tool MCP falló — el servidor no fue alcanzable, respondió con error, o el fallo ocurrió antes de la red (ver `mcp.dispatch_refused_secret`). Emitido en `execute_inner`, uno por llamada fallida. |
-| `mcp.dispatch_ok` | DEBUG | `tool`, `tool_call_id`, `bytes`, `ms` | Una llamada a tool MCP se despachó y el servidor contestó sin error. Emitido en `execute_inner`, uno por llamada exitosa. |
-| `mcp.dispatch_refused_secret` | WARN | `alias`, `tool`, `path` | El motor bloqueó la llamada ANTES de tocar la red: los argumentos cargaban un handle de secure value resuelto por el engine. Emitido en `call_and_contain`. `path` nombra la ubicación del argumento ofensivo (nombres de campo / índices) — nunca el valor. Una llamada rechazada así también cuenta como `mcp.dispatch_failed` (el `failed: true` de `McpDispatched` llega hasta `execute_inner`), así que emite **dos** líneas. Para unirlas, usá el `tool_call_id` que lleva `mcp.dispatch_failed`: este evento **no** lo lleva todavía (enhebrarlo hasta `call_and_contain` obliga a tocar todos sus call sites de test), así que con varias llamadas concurrentes a la misma tool la unión es por `tool` + tiempo. |
+| `mcp.dispatch_failed` | WARN | `tool`, `tool_call_id`, `kind`, `ms` | Una llamada a tool MCP falló. `kind` es la clase de fallo — ver la tabla de abajo — y es lo único que distingue en el log un timeout de un error de transporte de un error reportado por el servidor: antes de esto todas esas rutas producían la misma línea porque el `McpError` se absorbía en el texto que ve el modelo y nunca llegaba al operador. Emitido en `execute_inner`, uno por llamada fallida. |
+| `mcp.dispatch_ok` | DEBUG | `tool`, `tool_call_id`, `bytes`, `ms` | Una llamada a tool MCP se despachó y el servidor contestó sin error. Su `kind` (`DispatchKind::Ok`) es siempre el mismo valor, así que no se loguea — sería ruido constante. Emitido en `execute_inner`, uno por llamada exitosa. |
+| `mcp.dispatch_refused_secret` | WARN | `alias`, `tool`, `tool_call_id`, `path` | El motor bloqueó la llamada ANTES de tocar la red: los argumentos cargaban un handle de secure value resuelto por el engine. Emitido en `call_and_contain`. `path` nombra la ubicación del argumento ofensivo (nombres de campo / índices) — nunca el valor. Una llamada rechazada así también cuenta como `mcp.dispatch_failed` con `kind = "refused_secret"` (el `failed: true` de `McpDispatched` llega hasta `execute_inner`), así que emite **dos** líneas — ambas con el mismo `tool_call_id`, así que unirlas ya no depende de `tool` + tiempo. |
+
+`kind` en `mcp.dispatch_failed` (y el `kind: DispatchKind` interno de
+`McpDispatched`) toma uno de estos valores estables (`DispatchKind::label()`
+en `dispatch.rs`, mismo patrón que `FetchFailure::label()` en `wire.rs`):
+
+| `kind` | Cuándo |
+|---|---|
+| `unrouted` | El nombre expuesto no está en la tabla de rutas construida al exponer las tools. Inalcanzable a través de `owns()` en la práctica, pero el dispatcher se cubre igual. |
+| `unbound` | La ruta existe pero no hay binding vivo para ese alias en esta corrida (el servidor no llegó a conectarse este turno). |
+| `refused_secret` | Rechazo antes de la red: un argumento traía un handle de secure value. Ver `mcp.dispatch_refused_secret` arriba. |
+| `server_error` | El servidor respondió `tools/call` con `isError: true` — es alcanzable, pero la llamada en sí falló. Ver la advertencia de abajo: depende de que el servidor use ese flag. |
+| `timeout` | `McpError::Timeout` — el servidor no contestó a tiempo. |
+| `transport` | `McpError::Transport` — la conexión falló a nivel de red. |
+| `handshake` | `McpError::Handshake` — el `initialize` de MCP falló. |
+| `protocol` | `McpError::Protocol` — el servidor respondió algo que no cumple el protocolo. |
+| `tool_not_found` | `McpError::ToolNotFound` — el servidor no reconoce el nombre de tool. |
+| `tool_call_failed` | `McpError::ToolCallFailed` — variante genérica de fallo reportado por el servidor a nivel de transporte (distinta de `server_error`, que es el `isError` de la respuesta JSON-RPC). |
+| `schema_too_large` | `McpError::SchemaTooLarge`. |
+| `invalid_config` | `McpError::InvalidConfig` — configuración de servidor inválida. |
+
+Operacionalmente: `timeout`/`transport`/`handshake` son "el servidor no
+responde o no se puede alcanzar" — la señal para investigar la red o la
+disponibilidad del tercero. `server_error`/`tool_call_failed`/`tool_not_found`
+son "el servidor contesta pero la llamada específica falla" — la tool en sí,
+o cómo la está usando el modelo. `refused_secret`/`unrouted`/`unbound` nunca
+tocan la red — son decisiones de Colmena, no del tercero. `schema_too_large`/
+`invalid_config`/`protocol` apuntan a un problema de configuración o de
+cumplimiento del protocolo por parte del servidor.
+
+> **No leas `dispatch_ok` como "al modelo le fue bien".** `server_error` depende
+> de que el servidor marque la respuesta con `isError: true`. Un servidor puede
+> devolver el texto de un error como **contenido normal**, y entonces la llamada
+> se registra como `mcp.dispatch_ok` aunque el modelo haya recibido un error.
+>
+> Verificado en vivo: pedirle a DeepWiki un repositorio inexistente devuelve
+> `Error fetching wiki for ...` con `isError` en falso, así que la línea dice
+> `dispatch_ok`. No es un defecto de la instrumentación —refleja fielmente lo
+> que el servidor declaró— pero significa que **el conteo de `dispatch_failed`
+> es un piso, no el total de llamadas que no sirvieron**. Para saber si una tool
+> está fallando de verdad hay que mirar el contenido, no solo el evento.
 | `mcp.catalog_hit` | DEBUG | `key`, `tools`, `raced` | El catálogo de `tools/list` se sirvió de caché, dentro de su `cache_ttl`. `raced: true` es el re-chequeo bajo el fetch lock: otra tarea llenó la entrada mientras esperábamos. |
 | `mcp.catalog_miss` | DEBUG | `key`, `tools` | La caché estaba vacía o vencida: se fue al servidor y el resultado quedó cacheado. Se emite DESPUÉS del fetch, así que el conteo es el real y un fetch fallido no aparece como miss (ese camino sale por `mcp.server_unavailable`). |
 | `mcp.connection_reused` | DEBUG | `key`, `raced` | Se reusó una conexión ya en el pool. `raced: true` es el re-chequeo bajo el creation lock. |
@@ -198,12 +238,6 @@ La cadena de observabilidad MCP está cerrada. Quedan estos follow-ups:
   módulo y filtrar por el nombre que declaran no los encuentra. Son 3 en
   `dag_engine/engine.rs` y 3 en `infrastructure/pool_registry/registry.rs`. El de
   MCP ya se arregló acá.
-- **`mcp.dispatch_failed` no distingue un timeout de un error del servidor**: el
-  `McpError` se absorbe en el texto que ve el modelo y nunca llega al log. Necesita
-  un campo `kind` en `McpDispatched`.
-- **`mcp.dispatch_refused_secret` no lleva `tool_call_id`** mientras su hermano sí;
-  las tool calls de un turno corren concurrentes, así que unir por `tool` + tiempo
-  puede fallar.
 
 > Nota sobre nombres: versiones previas de este documento anunciaban
 > `mcp.pool_hit` / `mcp.pool_miss`. Salieron con nombres más precisos porque el

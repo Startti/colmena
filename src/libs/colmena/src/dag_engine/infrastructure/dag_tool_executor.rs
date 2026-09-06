@@ -1179,6 +1179,7 @@ impl DagToolExecutor {
                         event = "mcp.dispatch_failed",
                         tool = %name,
                         tool_call_id = %tool_call.id,
+                        kind = dispatched.kind.label(),
                         ms = ms,
                         "an MCP tool call failed"
                     );

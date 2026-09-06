@@ -1,0 +1,42 @@
+{
+  "nodes": {
+    "start": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/mcp-dispatch-server-error",
+        "method": "POST",
+        "test_payload": {
+          "prompt": "Consultá la estructura del repositorio 'startti-nonexistent/definitely-not-a-real-repo-xyz789' usando la herramienta de wiki que tenés. Si la herramienta devuelve un error, decímelo textualmente y no inventes nada."
+        }
+      }
+    },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "api_key": "${GEMINI_API_KEY}",
+        "model": "gemini-2.5-flash",
+        "system_message": "Sos un asistente técnico. Usá las herramientas disponibles para responder. Si una herramienta falla, reportá el fallo tal cual; nunca inventes el contenido que la herramienta no devolvió.",
+        "prompt": "{{prompt}}",
+        "max_tokens": 600,
+        "stream": true,
+        "tool_configurations": {
+          "deepwiki": {
+            "node_type": "mcp",
+            "mcp": {
+              "url": "https://mcp.deepwiki.com/mcp",
+              "timeout_seconds": 30
+            }
+          }
+        }
+      }
+    },
+    "out": {
+      "type": "log"
+    }
+  },
+  "edges": [
+    { "from": "start", "to": "agent" },
+    { "from": "agent", "to": "out" }
+  ]
+}
