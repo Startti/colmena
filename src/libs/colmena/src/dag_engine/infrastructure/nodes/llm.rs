@@ -3185,14 +3185,21 @@ impl ExecutableNode for LlmNode {
                 );
             }
 
-            for td in &wiring.definitions {
-                if lazy_tool_loading {
-                    catalog.push(CatalogEntry {
-                        name: td.name.clone(),
-                        summary: summary_for_catalog(td.summary.as_deref(), &td.description),
-                    });
-                }
-            }
+            // MCP tools are deliberately NOT put in the lazy catalog.
+            //
+            // The catalog is the set `describe_tool` reveals on demand, and
+            // `describe_tool` resolves against `lookup_for_describe`, which holds
+            // `ToolConfiguration`s. An MCP tool has none — it is a `ToolDefinition`
+            // the server published — so it could be listed but never described.
+            // Cataloguing it would hide it from `tools[]` until a discovery that
+            // cannot happen, and on a graph whose only tools are MCP the model
+            // would be offered a `describe_tool` with no handler behind it.
+            //
+            // So they stay in `tools`, always present with the server's own
+            // schema. The cost is that a server exposing many tools ships all
+            // their schemas every turn; making them genuinely lazy means teaching
+            // `describe_tool` to answer from a `ToolDefinition`, which is a
+            // separate change.
             let notice = unavailable_notice(&wiring.unavailable);
             tools.extend(wiring.definitions);
             // The SAME pool `wire` just used. A different instance would still

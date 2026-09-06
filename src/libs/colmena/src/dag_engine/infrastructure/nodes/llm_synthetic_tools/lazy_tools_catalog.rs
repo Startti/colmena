@@ -45,8 +45,9 @@ pub struct LazyCatalog {
 ///
 /// Two kinds of entry are skipped, both via
 /// [`ToolConfiguration::enters_lazy_catalog`]: an `eager` tool (it ships its own
-/// schema up front) and an `mcp` entry (a server, not a tool — its per-tool
-/// lines are added by the MCP wiring once the server has answered).
+/// schema up front) and an `mcp` entry (a server, not a tool). Neither the MCP
+/// entry nor the tools its server exposes are ever catalogued — those stay in
+/// `tools`, always present; see `enters_lazy_catalog` for why.
 ///
 /// Every name is resolved through [`ToolConfiguration::effective_name`], falling
 /// back to the map key, because `name` is optional for EVERY node_type: without

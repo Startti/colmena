@@ -1219,3 +1219,38 @@ verde sin ejercitar la rama para la que se escribió.
 resultado en severidades bloqueantes.
 
 **Estado.** done.
+
+## 24. Las tools de un servidor MCP dejan de entrar al catálogo lazy
+
+**Qué cambió.** Con `lazy_tool_loading` activo, cada tool que un servidor MCP exponía
+recibía además una línea en el catálogo lazy. Ya no: quedan sólo en `tools`, siempre
+presentes, con el schema que publicó el servidor.
+
+**Por qué era un defecto.** El catálogo es lo que `describe_tool` revela a demanda, y
+`describe_tool` resuelve contra `lookup_for_describe`, que guarda `ToolConfiguration`s.
+Una tool MCP no tiene una —es un `ToolDefinition` que llegó del servidor—, así que podía
+listarse pero nunca describirse. Y estar en el catálogo la **escondía** de `tools[]` hasta
+ser "descubierta". En un grafo cuyas únicas tools son MCP el resultado era: el modelo
+recibía un `describe_tool` sin handler detrás, lo llamaba, y le volvía `Tool not found`.
+
+**Se curaba solo, por accidente.** `reconstruct_discovered_set` lee las **llamadas** del
+asistente, no sus resultados, así que un `describe_tool(name = X)` fallido igual marcaba X
+como descubierta y en la iteración siguiente la tool aparecía y funcionaba. Por eso el E2E
+terminaba bien: costaba dos o tres turnos y dejaba errores confusos en el contexto del
+modelo, no una falla visible.
+
+**Por qué no se arregló al revés.** La opción aparentemente obvia —dejar de anunciar
+`describe_tool` cuando no hay nada describible— **rompe la feature**: las tools MCP
+seguirían en el catálogo, ocultas detrás de un descubrimiento que ya nunca podría ocurrir,
+y pasarían a ser no invocables.
+
+**El costo, explícito.** Un servidor con muchas tools ahora manda todos sus schemas cada
+turno, que es justo lo que lazy existe para evitar (tope de 64 tools por servidor, hasta
+32 KB de schema cada una). Volverlas lazy de verdad exige enseñarle a `describe_tool` a
+responder desde un `ToolDefinition`; queda como trabajo aparte, no como olvido.
+
+**Alcance.** Sin cambio de API. Un grafo que mezcla tools lazy normales con MCP sigue
+igual: las primeras se catalogan y describen, las MCP quedan en el set siempre-presente.
+Sin `lazy_tool_loading` nada cambia. ADP no afectado.
+
+**Estado.** done.

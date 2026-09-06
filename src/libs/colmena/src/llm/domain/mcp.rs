@@ -32,8 +32,13 @@ use thiserror::Error;
 /// Cap for a top-level tool description forwarded to the model (bytes).
 pub const MCP_MAX_DESCRIPTION_BYTES: usize = 4 * 1024;
 
-/// Cap for the short lazy-loading catalog summary (bytes), matching the
-/// documented `ToolDefinition::summary` contract.
+/// Cap for a tool's short summary (bytes), matching the documented
+/// `ToolDefinition::summary` contract.
+///
+/// An MCP tool's summary no longer feeds a lazy catalog — MCP tools are never
+/// catalogued — but the field is still part of the definition the server's tool
+/// is exposed as, and this bound is what keeps a chatty server from writing an
+/// unbounded one.
 pub const MCP_MAX_SUMMARY_BYTES: usize = 200;
 
 /// Aggregate byte-size ceiling for a tool's forwarded JSON Schema. Schemas
