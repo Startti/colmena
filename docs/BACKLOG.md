@@ -60,14 +60,6 @@ Ordenados por importancia. Los ids son para poder referenciarlos en un PR.
   entera de grafos sin revisar, no un caso borde. Limitación compartida por todas las
   reglas crudas.
 
-- **L2b-bis · Falta reportar un `target.node_schema` malformado.** La otra mitad de L2b,
-  rebanada aparte por el cap de 500 líneas. Omitirla no deja nada más callado que hoy
-  —nadie lo reporta— así que la costura es segura, a diferencia de la de la §23.
-  Verificado contra el binario: el grafo **carga** (`validate()` no mira un target) y
-  cada fila falla al despachar con `Invalid node_schema: …`, en las dos familias de
-  rechazo. El lote muere a mitad de la corrida en vez de antes, que es el viaje que
-  ahorraría el lint. Incluye el item de abajo.
-
 - **L2c · El par `if let Ok(...)` de `for_each` es código muerto, no una falla
   silenciosa.** Este item nació diciendo lo contrario y la corrida E2E lo corrigió.
   `merge_args_into_schema` corre **las mismas dos comprobaciones** unas líneas antes y
@@ -149,6 +141,7 @@ fuera del linter pero son la misma clase de defecto.
 | Rebanada 3 — las cinco tools sintéticas y `TOOL_NEVER_EXPOSED` | 2026-09-05 | §23 |
 | `MALFORMED_TOOL_ENTRY` y el consejo imposible de seguir para un tipo tool-only | 2026-09-05 | §26 |
 | L2b (mitad) — el `target` de un `for_each` se revisa por sus tres puertas contra el tipo de nodo que despacha | 2026-09-06 | §28 |
+| L2b-bis — un `target.node_schema` malformado se reporta antes de correr, con el costo medido (el grafo carga y el lote muere fila por fila) | 2026-09-06 | §29 |
 | El camino de producción no llamaba a `Graph::validate()` | 2026-09-04 | §18 |
 
 Dos lecciones del track que no son items y conviene no re-aprender:

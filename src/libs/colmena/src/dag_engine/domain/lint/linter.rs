@@ -621,12 +621,29 @@ fn for_each_targets(document: &Value) -> Vec<(&String, String, &Value)> {
     targets
 }
 
-/// Reports a `for_each` target key the node it dispatches does not read.
+/// Reports what a `for_each` target says about the node type it dispatches.
 ///
-/// Same defect as on a tool entry, one container down, so it gets the same
-/// wording from the same function. A malformed `target.node_schema` is a
-/// separate finding and lands in its own change: leaving it out here makes
-/// nothing quieter than it already is, since nothing reports it today.
+/// Two findings. A key the target node does not read is the same defect as on a
+/// tool entry, one container down, so it gets the same wording from the same
+/// function.
+///
+/// A `node_schema` the engine cannot parse says something DIFFERENT from its
+/// tool-entry twin, and the difference is the whole reason it has its own
+/// sentence. A tool entry's is refused by `Graph::validate` at LOAD; a target's
+/// is not, because `validate` only inspects `config.tool_configurations`. The
+/// graph starts.
+///
+/// What happens then is measured, not read off the source: every row fails at
+/// dispatch with `Invalid node_schema: …`, because `merge_args_into_schema`
+/// runs the same two checks before the row goes anywhere. The batch dies
+/// mid-run instead of before it, which is the trip a lint saves.
+///
+/// An earlier version reasoned from the `if let Ok(...)` pair in `for_each.rs`
+/// that has no else arm and claimed the rows dispatched UNVALIDATED. Running it
+/// falsified that — the merge rejects the row first, so that branch is
+/// unreachable for a malformed schema. The claim was wrong in the direction
+/// that matters: it would have sent an operator hunting for corrupted rows that
+/// do not exist. See CHANGELOG section 29.
 fn lint_raw_for_each_targets(document: &Value, ctx: &LintContext<'_>, report: &mut LintReport) {
     for (node_id, location, target) in for_each_targets(document) {
         let Some(node_type) = target.get("node_type").and_then(Value::as_str) else {
@@ -634,6 +651,27 @@ fn lint_raw_for_each_targets(document: &Value, ctx: &LintContext<'_>, report: &m
             // The node itself fails the run with `target.node_type is required`.
             continue;
         };
+
+        if let Some(reason) = node_schema_rejection(target) {
+            report.diagnostics.push(Diagnostic {
+                severity: Severity::Error,
+                code: DiagnosticCode::MalformedToolEntry,
+                node_id: Some(node_id.clone()),
+                field: Some(format!("{location}.node_schema")),
+                message: format!(
+                    "this target's node_schema cannot be parsed: {reason}. The graph still \
+                     loads — `Graph::validate` does not inspect a for_each target — and every \
+                     row then fails at dispatch with `Invalid node_schema`, so the batch dies \
+                     mid-run instead of before it"
+                ),
+                suggestion: Some(
+                    "every entry in `node_schema` must be an object; an LLM-visible field needs \
+                     a `type`, and an `array` one also needs `items` with its own `type`; a \
+                     field with `fixed` may omit `type`"
+                        .into(),
+                ),
+            });
+        }
 
         // The keys are worth checking whatever shape the block is in: an
         // invented field name is a defect of its own, and it stays true.

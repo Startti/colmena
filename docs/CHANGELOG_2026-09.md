@@ -1574,3 +1574,60 @@ una guarda inalcanzable.
 Ningún grafo del corpus cambia de veredicto → ADP no afectado.
 
 **Estado.** done.
+
+---
+
+## 29. Un `target` malformado se reporta antes de correr, con el costo que de verdad tiene
+
+**Qué.** Segunda mitad de L2b, rebanada aparte de la §28 por el cap de 500 líneas. Un
+`target.node_schema` que el motor no puede parsear ahora se reporta como
+`MALFORMED_TOOL_ENTRY`, con las dos familias de rechazo: el bloque que no deserializa a
+`NodeSchema` (`"body": "not-an-object"`) y el que deserializa bien y `parse_node_schema`
+rechaza igual (un campo visible al LLM sin `type`).
+
+Reusa `node_schema_rejection`, la misma función que ya reproduce la compuerta de
+`Graph::validate()` para una entrada de tool. Lo que **no** reusa es el mensaje.
+
+### La afirmación que la corrida desmintió
+
+La primera versión de este trabajo decía —en el diagnóstico, en la guía §51 y en el
+cuerpo del PR— que un `target` malformado hacía despachar las filas **sin validar**. Lo
+había deducido del par `if let Ok(...)` sin rama else que hay en `for_each.rs`, que
+parece saltearse la validación de params requeridos por fila.
+
+**Correrlo lo desmintió.** `merge_args_into_schema` corre **esas mismas dos
+comprobaciones** unas líneas antes y falla la fila. Medido, con control de dos lados:
+
+| Grafo | total/ok/err | Error por fila | Requests al servicio |
+|---|---|---|---|
+| Control: schema válido, requerido que nadie aporta | 2/0/2 | `missing required param 'must_be_present'` | 0 |
+| Familia 1: `"body": "not-an-object"` | 2/0/2 | `Invalid node_schema: invalid type: string` | 0 |
+| Familia 2: campo sin `type` | 2/0/2 | `Invalid node_schema: … is LLM-visible but missing type` | 0 |
+
+Capturas en `/tmp/colmena_e2e/e2e_{b,c,d}_*.sse`. Sobre los mismos dos grafos el linter
+reporta `MALFORMED_TOOL_ENTRY` **sin correr nada**, que es el punto.
+
+El mensaje ahora dice lo que pasa: el grafo **carga**, y el lote muere a mitad de la
+corrida en vez de antes. Sigue siendo razón para lintearlo —es el viaje que se ahorra—
+pero es la razón verdadera. El error apuntaba en la peor dirección: mandaba a un
+operador a buscar filas corruptas que no existen.
+
+**Y arrastró un segundo defecto.** Al rebanar la §28 corté la regla pero **no revisé la
+fila de la tabla de códigos**, que quedó en `develop` describiendo un comportamiento que
+esa rebanada no shipeó. Corregida acá. La lección no es "revisá la tabla": es que
+rebanar deja referencias colgando en documentos que uno no está mirando, y hay que
+barrerlos igual que se barren los usos de un símbolo.
+
+### Verificación
+
+**Tres mutaciones**, todas matan un test: no reportar nunca, cegar la familia 2, y
+reportar todos los target en vez de sólo los rechazados. La segunda hubo que
+reformularla: la versión obvia dejaba `first_parse_rejection` sin usar y, con
+`warnings = "deny"`, fallaba la **compilación** en vez del test — una mutación que no
+compila no prueba nada.
+
+Corpus `error=75 warning=5 info=0`, sin cambios.
+
+**Alcance.** Aditivo. Ningún grafo del corpus cambia de veredicto → ADP no afectado.
+
+**Estado.** done.
