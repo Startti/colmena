@@ -1798,3 +1798,40 @@ comentario y se renombró el archivo, que decía `blind_spot` sobre algo que ya 
 del corpus cambia de veredicto → ADP no afectado.
 
 **Estado.** done.
+
+---
+
+## 33. La guarda de `for_each` deja de invitar a la lectura equivocada
+
+**Qué.** Cierra **L2c**. El nodo validaba los params requeridos de cada fila dentro de un
+par de `if let Ok(...)` **sin rama else**, que se lee como "si el schema no parsea,
+salteá el chequeo y seguí". Pasa a propagar con `?`.
+
+Ese item nació afirmando que ahí había una falla silenciosa; la §29 lo corrigió con una
+corrida (`merge_args_into_schema` hace las mismas dos comprobaciones unas líneas antes y
+falla la fila primero, así que la guarda era inalcanzable). Lo que quedaba era una forma
+que convenció a un lector —yo— de documentar un defecto que no existía, y que iba a
+volver a convencer al siguiente.
+
+### El refactor no es cosmético: se midió
+
+| Con la comprobación de `merge_args_into_schema` **cegada** | Resultado |
+|---|---|
+| Forma vieja (`if let Ok`, sin else) | `err=0` — **la fila despacha sin validar** |
+| Forma nueva (`?`) | la fila falla igual, con `Invalid node_schema` |
+
+O sea que la redundancia dejó de ser código muerto y pasó a ser **defensa en
+profundidad**: el chequeo por fila ya no depende de que el merge siga haciendo el suyo.
+Un punto único de fallo menos.
+
+La primera vez que intenté esta medición el script falló a mitad y el test corrió sobre
+código **sin mutar**, dando un "ok" que no medía nada. Se rehízo tomando el archivo de
+`HEAD` —que ya tiene la forma vieja— en vez de reconstruirla con reemplazos de texto.
+Una mutación a medio aplicar es indistinguible de una que no mata.
+
+**Verificación.** Test nuevo que fija la invariante (`a_target_schema_that_cannot_be_parsed_fails_the_row`)
+más las 28 pruebas de `for_each` en verde. Sin cambio de comportamiento observable.
+
+**Alcance.** Refactor. Ningún cambio de API ni de salida → ADP no afectado.
+
+**Estado.** done.

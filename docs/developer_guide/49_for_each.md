@@ -54,6 +54,18 @@ fan-out ocurre en Rust.
   campos `required` **antes** de despachar — una fila con un campo
   requerido faltante se reporta como `status: "err"` para esa fila
   únicamente (no aborta las demás, salvo `on_error: "abort"`).
+- Un `node_schema` que **no se puede parsear** también falla por fila, con
+  `Invalid node_schema: …`. Nada lo rechaza antes: `Graph::validate()` sólo
+  mira `config.tool_configurations`, así que el grafo **carga** y el lote muere
+  a mitad de la corrida. Por eso `dag_engine lint` lo reporta antes de correr
+  (ver [§51](51_graph_linter.md)).
+
+  El chequeo está en dos lugares a propósito: `merge_args_into_schema` lo hace
+  primero, y el nodo lo repite antes de leer los `required`. Es redundante hoy
+  y deliberado: **medido**, con la comprobación del merge cegada la fila igual
+  falla; con la forma anterior —un par de `if let Ok(...)` sin rama else— la
+  fila despachaba **sin validar**. Un punto único de fallo pasó a ser defensa
+  en profundidad.
 
 ## `items` vs `items_from`
 

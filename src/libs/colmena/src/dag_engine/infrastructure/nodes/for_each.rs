@@ -421,35 +421,41 @@ impl ExecutableNode for ForEachNode {
                     for (key, value) in forwarded_context {
                         merged.entry(key).or_insert(value);
                     }
-                    if let Ok(node_schema) = serde_json::from_value::<
-                        crate::dag_engine::domain::tool_configuration::NodeSchema,
-                    >(target_schema.clone())
-                    {
-                        if let Ok(parsed) = parse_node_schema(&node_schema) {
-                            for req in &parsed.required_params {
-                                // A required param may live at the top level of `merged`, or
-                                // (when it's a container child, e.g. an http_request's
-                                // `body.user_id`) nested inside its container object. Mirrors
-                                // the `real_key` logic in `merge_args_into_schema`.
-                                let present =
-                                    if let Some(container) = parsed.param_to_container.get(req) {
-                                        let real_key = req
-                                            .find('.')
-                                            .map(|p| &req[p + 1..])
-                                            .unwrap_or(req.as_str());
-                                        merged
-                                            .get(container)
-                                            .and_then(|v| v.as_object())
-                                            .is_some_and(|m| m.contains_key(real_key))
-                                    } else {
-                                        merged.contains_key(req)
-                                    };
-                                if !present {
-                                    return Err(format!(
-                                        "row {index}: missing required param '{req}'"
-                                    ));
-                                }
-                            }
+                    // Both of these already succeeded inside
+                    // `merge_args_into_schema` a few lines up, on this same
+                    // value, and its error was propagated with `?` — so a
+                    // malformed schema never reaches here.
+                    //
+                    // They used to be a pair of `if let Ok(...)` with no else
+                    // arm, which reads as "if it will not parse, skip the check
+                    // and carry on". It never did that, but the shape was
+                    // convincing enough to be documented as a silent-skip
+                    // defect until an E2E run disproved it. Propagating instead
+                    // says the same thing and cannot be misread; if the two
+                    // sites ever diverge, this fails loudly rather than
+                    // quietly dropping the guard.
+                    let node_schema: crate::dag_engine::domain::tool_configuration::NodeSchema =
+                        serde_json::from_value(target_schema.clone())
+                            .map_err(|e| format!("row {index}: Invalid node_schema: {e}"))?;
+                    let parsed = parse_node_schema(&node_schema)
+                        .map_err(|e| format!("row {index}: Invalid node_schema: {e}"))?;
+                    for req in &parsed.required_params {
+                        // A required param may live at the top level of `merged`, or
+                        // (when it's a container child, e.g. an http_request's
+                        // `body.user_id`) nested inside its container object. Mirrors
+                        // the `real_key` logic in `merge_args_into_schema`.
+                        let present = if let Some(container) = parsed.param_to_container.get(req) {
+                            let real_key =
+                                req.find('.').map(|p| &req[p + 1..]).unwrap_or(req.as_str());
+                            merged
+                                .get(container)
+                                .and_then(|v| v.as_object())
+                                .is_some_and(|m| m.contains_key(real_key))
+                        } else {
+                            merged.contains_key(req)
+                        };
+                        if !present {
+                            return Err(format!("row {index}: missing required param '{req}'"));
                         }
                     }
                     let node = registry.get_node(&target_type).ok_or_else(|| {
@@ -883,6 +889,51 @@ mod tests {
         assert!(
             !error.contains("missing required param"),
             "required-param guard falsely rejected a container-nested field: {error}"
+        );
+    }
+
+    /// A `target.node_schema` the engine cannot parse fails the row, loudly.
+    ///
+    /// Pins the invariant the dispatch path depends on: `merge_args_into_schema`
+    /// runs BOTH checks — deserializing into `NodeSchema`, then
+    /// `parse_node_schema` — before the row goes anywhere, so a malformed schema
+    /// can never reach the required-param guard below it. Nothing is silently
+    /// skipped, and no row dispatches unvalidated.
+    ///
+    /// Written because the opposite was believed and documented: the guard used
+    /// to sit inside two `if let Ok(...)` with no else arm, which reads as "if it
+    /// will not parse, skip the check and carry on". Running it showed the row
+    /// dies first. This test is what keeps that true.
+    #[tokio::test]
+    async fn a_target_schema_that_cannot_be_parsed_fails_the_row() {
+        let node = ForEachNode::new();
+        node.registry
+            .set(Arc::new(StubRegistry {
+                add: Arc::new(AddNode),
+                echo: None,
+            }))
+            .ok();
+
+        let mut inputs = NodeInputs::new();
+        inputs.insert(
+            "target".to_string(),
+            json!({ "node_type": "add", "node_schema": { "a": "not-an-object" } }),
+        );
+        inputs.insert("items".to_string(), json!([{"a": 1, "b": 2}]));
+        inputs.insert("on_error".to_string(), json!("continue"));
+
+        let mut state = json!({});
+        let out = node
+            .execute(&inputs, &json!({}), &mut state, None)
+            .await
+            .unwrap();
+
+        assert_eq!(out["output"]["err"], json!(1), "the row must fail");
+        assert_eq!(out["output"]["ok"], json!(0), "and must not dispatch");
+        let error = out["output"]["results"][0]["error"].as_str().unwrap();
+        assert!(
+            error.contains("Invalid node_schema"),
+            "the row must say why, not fail silently: {error}"
         );
     }
 
