@@ -83,7 +83,7 @@ fn measure() -> Measured {
 
 /// Update these three numbers in the SAME change that moves them, and say in
 /// the PR body which graphs moved and why.
-const EXPECTED_FILES: usize = 302;
+const EXPECTED_FILES: usize = 303;
 const EXPECTED_ERRORS: usize = 0;
 const EXPECTED_WARNINGS: usize = 3;
 const EXPECTED_INFOS: usize = 0;
