@@ -1509,3 +1509,68 @@ extinto `host_of`) fue exactamente la causa raíz del bypass. Sin cambio de API
 pública; ADP no afectado.
 
 **Estado.** done.
+
+---
+
+## 28. El linter entra en el `target` de un `for_each`
+
+**Qué.** Primera mitad de L2b. Un `for_each` embebe `{node_type, node_schema}` —la
+misma forma que una entrada de tool— y lo despacha una vez por fila. Ese bloque nombra
+campos de otro tipo de nodo y **ninguna regla lo miraba**, así que el defecto de la §20
+(`url` donde `http_request` lee `base_url`) seguía invisible un contenedor más abajo.
+
+Ahora se revisa con la regla que ya existía para los campos de una tool: misma
+pregunta, misma severidad, mismas palabras. La comprobación se extrajo a
+`check_configured_keys` y la usan los dos llamadores, así que no pueden divergir.
+
+**Tres puertas, no una.** El nodo resuelve su `target` con `cfg_or_input`, así que el
+bloque llega por el `config` del propio nodo o —cuando el `for_each` está expuesto como
+tool— por `node_schema.target.fixed` o `fixed_config.target` de la entrada. Las tres se
+recorren.
+
+### Verificación
+
+**E2E contra el servicio real** (`httpbin.org`), capturado en
+`/tmp/colmena_e2e/e2e_a_url_query.sse`. Un `for_each` de dos filas cuyo target declara
+`url` junto a un `base_url`/`endpoint` correctos: httpbin devuelve
+
+```
+"args":{"row_id":"1","url":"https://not-where-it-goes.example"}
+"args":{"row_id":"2","url":"https://not-where-it-goes.example"}
+```
+
+O sea que `url` **se fue como query param**, que es exactamente lo que dice el mensaje
+de `REPURPOSED_TOOL_FIELD`. La afirmación del diagnóstico está medida, no deducida.
+
+Corpus `error=75 warning=5 info=0`, idéntico al baseline, con **cero** hallazgos de
+`target`. Ese cero se comprobó que significa "los grafos están bien" y no "el walker
+está ciego": el corpus tiene 4 targets reales (1 como nodo del grafo, 3 por
+`node_schema.target.fixed`), e **inyectando una clave inventada en dos de esos archivos
+reales** la regla los reporta por las dos puertas. La tercera (`fixed_config.target`) no
+tiene ningún caso en el corpus, así que la sostiene sólo su test — dicho en su docstring.
+
+**Cuatro mutaciones**, todas matan un test: quitar la puerta del nodo, quitar
+`node_schema.target.fixed`, quitar `fixed_config.target`, y quitar el guard de "el nodo
+declara esta clave" — esta última prueba que el control negativo (un `base_url` correcto
+no se reporta) no pasa por vacío.
+
+### Lo que queda para la otra mitad
+
+Reportar un `target.node_schema` **malformado** se rebanó aparte por el cap de 500
+líneas (L2b-bis). Omitirlo no deja nada más callado que hoy, así que la costura es
+segura — a diferencia de la de la §23, donde saltear los nombres sin la regla dejaba un
+caso roto en silencio total.
+
+Esa mitad además trae una corrección: la primera versión de este trabajo afirmaba, en el
+diagnóstico y en la guía, que un target malformado hacía despachar las filas **sin
+validar**, razonando desde el par `if let Ok(...)` sin rama else de `for_each.rs`.
+**Correrlo lo desmintió**: cada fila falla con `Invalid node_schema: …` porque
+`merge_args_into_schema` corre esas mismas dos comprobaciones antes. Verificado para las
+dos familias de rechazo. El error importaba en la peor dirección —mandaba a buscar filas
+corruptas que no existen— y de paso reescribió L2c, que no es una falla silenciosa sino
+una guarda inalcanzable.
+
+**Alcance.** Aditivo: ninguna regla nueva, un contenedor nuevo para una que ya existía.
+Ningún grafo del corpus cambia de veredicto → ADP no afectado.
+
+**Estado.** done.

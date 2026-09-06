@@ -1841,3 +1841,127 @@ fn the_unchecked_context_also_says_where_a_tool_only_type_belongs() {
         d.suggestion
     );
 }
+
+// ---------------------------------------------------------------------------
+// L2b — the `target` of a `for_each`
+// ---------------------------------------------------------------------------
+
+/// A `for_each` node whose embedded target configures `http_request`.
+fn for_each_graph(target: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "nodes": {
+            "loop": {
+                "type": "for_each",
+                "config": { "items": [{ "a": 1 }], "target": target }
+            }
+        },
+        "edges": []
+    })
+}
+
+/// The section-20 defect, one container down: `http_request` reads `base_url`
+/// and `endpoint`, never `url`. Inside a tool entry this is already reported;
+/// inside a `for_each` target — the same `{node_type, node_schema}` shape —
+/// nothing looked.
+#[test]
+fn a_for_each_target_field_the_node_does_not_read_is_reported() {
+    let report = lint_json(for_each_graph(serde_json::json!({
+        "node_type": "http_request",
+        "node_schema": { "url": { "fixed": "https://example.com" } }
+    })));
+
+    let d = find(&report, DiagnosticCode::RepurposedToolField)
+        .expect("an invented target field must be caught");
+    assert_eq!(
+        d.field.as_deref(),
+        Some("target.node_schema.url"),
+        "the finding must point at the target, not at the node's own config"
+    );
+}
+
+#[test]
+fn a_for_each_target_field_the_node_does_read_is_left_alone() {
+    let report = lint_json(for_each_graph(serde_json::json!({
+        "node_type": "http_request",
+        "node_schema": { "base_url": { "fixed": "https://example.com" } }
+    })));
+
+    assert!(
+        find(&report, DiagnosticCode::RepurposedToolField).is_none()
+            && find(&report, DiagnosticCode::UnknownField).is_none(),
+        "a real field must not be reported: {:?}",
+        codes(&report)
+    );
+}
+
+/// A `for_each` dispatched as an LLM tool receives its `target` through the
+/// entry's own schema, so the same defect hides one level deeper.
+#[test]
+fn a_for_each_exposed_as_a_tool_has_its_target_checked_too() {
+    let report = lint_json(serde_json::json!({
+        "nodes": {
+            "agent": {
+                "type": "llm_call",
+                "config": {
+                    "provider": "google", "api_key": "k", "model": "gemini-2.5-flash",
+                    "tool_configurations": {
+                        "loop": {
+                            "node_type": "for_each",
+                            "node_schema": {
+                                "target": { "fixed": {
+                                    "node_type": "http_request",
+                                    "node_schema": { "url": { "fixed": "https://example.com" } }
+                                }},
+                                "items": { "type": "array", "items": { "type": "object" } }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "edges": []
+    }));
+
+    assert!(
+        find(&report, DiagnosticCode::RepurposedToolField).is_some(),
+        "the target of a for_each exposed as a tool must be checked: {:?}",
+        codes(&report)
+    );
+}
+
+/// The third door into a target: a `for_each` tool with no `node_schema` takes
+/// its whole configuration from `fixed_config`, and `cfg_or_input` finds the
+/// `target` there just the same. No graph in this repo uses it, so this test is
+/// the only thing holding the door open.
+#[test]
+fn a_for_each_target_reached_through_fixed_config_is_checked_too() {
+    let report = lint_json(serde_json::json!({
+        "nodes": {
+            "agent": {
+                "type": "llm_call",
+                "config": {
+                    "provider": "google", "api_key": "k", "model": "gemini-2.5-flash",
+                    "tool_configurations": {
+                        "loop": {
+                            "node_type": "for_each",
+                            "fixed_config": {
+                                "target": {
+                                    "node_type": "http_request",
+                                    "node_schema": { "url": { "fixed": "https://example.com" } }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "edges": []
+    }));
+
+    let d = find(&report, DiagnosticCode::RepurposedToolField)
+        .expect("a target reached through fixed_config must be checked");
+    assert_eq!(
+        d.field.as_deref(),
+        Some("tool_configurations.loop.fixed_config.target.node_schema.url")
+    );
+}
