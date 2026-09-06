@@ -528,11 +528,15 @@ impl ToolConfiguration {
     ///
     /// Two kinds of entry do not. An `eager` tool always ships its full schema
     /// up front and never enters the catalog. An `mcp` entry is a **server**,
-    /// not a tool: it publishes many, its map key is the alias that prefixes
-    /// them, and its real catalog lines are added per exposed tool once the
-    /// server has answered. Listing the entry itself would show the model a
-    /// line it cannot act on — and since `name` is optional on an `mcp` entry,
-    /// that line would carry no name at all.
+    /// not a tool: it publishes many and its map key is the alias that prefixes
+    /// them, so listing the entry itself would show the model a line it cannot
+    /// act on — and since `name` is optional on an `mcp` entry, that line would
+    /// carry no name at all.
+    ///
+    /// Nor do the tools that server exposes: they stay in `tools`, always
+    /// present with the server's own schema. `describe_tool` resolves against
+    /// `ToolConfiguration`s and an MCP tool has none, so cataloguing one would
+    /// hide it behind a discovery that can never happen.
     pub fn enters_lazy_catalog(&self) -> bool {
         !self.eager && self.node_type != MCP_NODE_TYPE
     }

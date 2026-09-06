@@ -166,12 +166,23 @@ for (map_key, cfg) in tool_configurations.iter() {
 }
 ```
 
-### Servidores MCP en el catálogo lazy
+### Las tools MCP nunca son lazy
 
-Una entrada con `node_type: "mcp"` **no** aporta una línea al catálogo: es un servidor, no una tool.
-Sus líneas reales las agrega el cableado —una por tool expuesta, ya prefijada (`<alias>__<tool>`)—
-cuando el servidor contesta el listado. Como `name` es opcional en una entrada `mcp`, si el bucle no la
-saltara aportaría una línea sin nombre (`- : <resumen>`) que el modelo no puede accionar.
+Ni la entrada ni sus tools entran al catálogo. La entrada `node_type: "mcp"` no aporta línea porque es
+un **servidor**, no una tool (y como `name` es opcional ahí, aportaría una línea sin nombre que el
+modelo no puede accionar). Y las tools que el servidor expone tampoco: quedan en `tools`, siempre
+presentes, con el schema que publicó el servidor.
+
+La razón es estructural. El catálogo es lo que `describe_tool` revela a demanda, y `describe_tool`
+resuelve contra `lookup_for_describe`, que guarda `ToolConfiguration`s. Una tool MCP no tiene una: es
+un `ToolDefinition` que llegó del servidor. Catalogarla la escondería de `tools[]` hasta un
+descubrimiento que no puede ocurrir, y en un grafo cuyas únicas tools son MCP el modelo recibiría un
+`describe_tool` sin handler detrás.
+
+**El costo:** un servidor que expone muchas tools manda todos sus schemas cada turno, que es
+justamente lo que lazy existe para evitar (el tope es 64 tools por servidor, hasta 32 KB de schema cada
+una). Volverlas lazy de verdad exige enseñarle a `describe_tool` a responder desde un
+`ToolDefinition`; es un cambio aparte.
 
 ### Patrones recomendados
 
