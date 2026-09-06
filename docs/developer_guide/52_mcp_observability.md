@@ -1,12 +1,14 @@
 # 52. Observabilidad del módulo MCP — eventos `colmena::mcp`
 
-> PR2 de una cadena de 3. PR1 documentó los eventos `tracing` de la ruta de
-> fetch/connect ([`wire.rs`](../../src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/mcp/wire.rs)).
-> Esta PR cierra la ruta de despacho: los dos eventos de
-> [`execute_inner`](../../src/libs/colmena/src/dag_engine/infrastructure/dag_tool_executor.rs)
-> ahora llevan `event =` y latencia (`ms`), y se agrega un tercer evento nuevo
-> en [`call_and_contain`](../../src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/mcp/dispatch.rs)
-> para la refusión de secure values. Sigue el contrato general de
+> Referencia de los eventos `tracing` que emite el módulo MCP, en las tres rutas
+> donde puede degradarse: el fetch/connect por servidor
+> ([`wire.rs`](../../src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/mcp/wire.rs)),
+> el despacho de una llamada
+> ([`execute_inner`](../../src/libs/colmena/src/dag_engine/infrastructure/dag_tool_executor.rs)
+> y [`call_and_contain`](../../src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/mcp/dispatch.rs)),
+> y el pool de conexiones y catálogos
+> ([`McpConnectionRegistry`](../../src/libs/colmena/src/dag_engine/infrastructure/mcp_registry/registry.rs)).
+> Sigue el contrato general de
 > [`50_logging_and_observability.md`](./50_logging_and_observability.md): la
 > librería emite, la aplicación decide el filtro.
 
@@ -50,7 +52,25 @@ y puede cambiar.
 | `mcp.tools_exposed` | INFO | `exposed`, `servers`, `unavailable` | Resumen de fin de turno: cuántas tools quedaron expuestas, cuántos servidores respondieron, cuántos alias quedaron fuera. Solo se emite si `exposed > 0`. |
 | `mcp.dispatch_failed` | WARN | `tool`, `tool_call_id`, `ms` | Una llamada a tool MCP falló — el servidor no fue alcanzable, respondió con error, o el fallo ocurrió antes de la red (ver `mcp.dispatch_refused_secret`). Emitido en `execute_inner`, uno por llamada fallida. |
 | `mcp.dispatch_ok` | DEBUG | `tool`, `tool_call_id`, `bytes`, `ms` | Una llamada a tool MCP se despachó y el servidor contestó sin error. Emitido en `execute_inner`, uno por llamada exitosa. |
-| `mcp.dispatch_refused_secret` | WARN | `alias`, `tool`, `path` | El motor bloqueó la llamada ANTES de tocar la red: los argumentos cargaban un handle de secure value resuelto por el engine. Emitido en `call_and_contain`. `path` nombra la ubicación del argumento ofensivo (nombres de campo / índices) — nunca el valor. Una llamada rechazada así también cuenta como `mcp.dispatch_failed` (el `failed: true` de `McpDispatched` llega hasta `execute_inner`), así que emite **dos** líneas. Para unirlas, usá el `tool_call_id` que lleva `mcp.dispatch_failed`: este evento **no** lo lleva todavía (enhebrarlo hasta `call_and_contain` obliga a tocar sus 12 call sites de test), así que con varias llamadas concurrentes a la misma tool la unión es por `tool` + tiempo. |
+| `mcp.dispatch_refused_secret` | WARN | `alias`, `tool`, `path` | El motor bloqueó la llamada ANTES de tocar la red: los argumentos cargaban un handle de secure value resuelto por el engine. Emitido en `call_and_contain`. `path` nombra la ubicación del argumento ofensivo (nombres de campo / índices) — nunca el valor. Una llamada rechazada así también cuenta como `mcp.dispatch_failed` (el `failed: true` de `McpDispatched` llega hasta `execute_inner`), así que emite **dos** líneas. Para unirlas, usá el `tool_call_id` que lleva `mcp.dispatch_failed`: este evento **no** lo lleva todavía (enhebrarlo hasta `call_and_contain` obliga a tocar todos sus call sites de test), así que con varias llamadas concurrentes a la misma tool la unión es por `tool` + tiempo. |
+| `mcp.catalog_hit` | DEBUG | `key`, `tools`, `raced` | El catálogo de `tools/list` se sirvió de caché, dentro de su `cache_ttl`. `raced: true` es el re-chequeo bajo el fetch lock: otra tarea llenó la entrada mientras esperábamos. |
+| `mcp.catalog_miss` | DEBUG | `key`, `tools` | La caché estaba vacía o vencida: se fue al servidor y el resultado quedó cacheado. Se emite DESPUÉS del fetch, así que el conteo es el real y un fetch fallido no aparece como miss (ese camino sale por `mcp.server_unavailable`). |
+| `mcp.connection_reused` | DEBUG | `key`, `raced` | Se reusó una conexión ya en el pool. `raced: true` es el re-chequeo bajo el creation lock. |
+| `mcp.connection_opened` | DEBUG | `key`, `pooled` (tamaño del pool tras insertar) | Se abrió un handshake nuevo y quedó en el pool. |
+| `mcp.connection_cooldown` | DEBUG | `key`, `since_ms`, `window_ms` | **El intento se SALTEÓ**: el servidor falló hace poco y otro intento costaría hasta su `timeout` antes de que corra el modelo, así que el llamador degrada de inmediato. Sin esta línea, un servidor en cooldown se cae de todos los turnos sin nada en el log que lo explique. |
+| `mcp.pool_evicted` | DEBUG | `key`, `reason` | El LRU soltó una conexión pooleada y todo su footprint (cliente + catálogo cacheado). `reason` es una etiqueta estable: `lru_capacity` (se superó `COLMENA_MAX_POOLED_MCP_SERVERS`) o `lru_capacity_displaced` (la clave fue desplazada al reinsertarse). La depuración de locks huérfanos (`sweep_orphan_locks`) NO emite este evento: solo suelta locks, nunca una conexión. |
+
+El registry tiene **dos cachés distintas**, y conviene no confundirlas al leer los
+logs: la **caché del catálogo** (`catalog_*`) guarda el resultado de `tools/list`
+por `cache_ttl` y expira por tiempo; el **pool de conexiones** (`connection_*`,
+`pool_evicted`) guarda el cliente vivo y se desaloja por LRU. Un `catalog_miss` no
+implica abrir conexión —puede reusar una pooleada—, y un `connection_opened` no
+implica refrescar el catálogo.
+
+`key` es el digest SHA-256 del `McpServerKey`: se deriva de la URL, el transporte,
+los NOMBRES de header y un fingerprint salado de los valores resueltos. Es seguro
+de imprimir y **no** lleva la URL ni credencial alguna; tampoco lleva el alias, así
+que para correlacionar con `alias`/`host` usá los eventos de `wire.rs`.
 
 `reason` es una etiqueta estable (`FetchFailure::label()` en `wire.rs`), no el
 texto de error — el string humano vive en la nota separada de `wiring.notes`,
@@ -74,11 +94,26 @@ puede recibir un vector de resultados parcial, con un alias declarado en
 intento cuya duración medir, así que el evento omite el campo `ms` en vez de
 inventar un `0` que un dashboard leería como "resolvió instantáneamente".
 
-## Pendiente (fuera de alcance de esta PR)
+## Pendiente
 
-- Los eventos de acierto/fallo de caché del pool de conexiones MCP
-  (`mcp.pool_hit` / `mcp.pool_miss` en `McpConnectionRegistry`) llegan en la
-  PR3 de esta misma cadena.
+La cadena de observabilidad MCP está cerrada. Quedan estos follow-ups:
+
+- **Seis eventos del crate no llevan el target que dicen llevar.** Usan
+  `target = "..."` (con IGUAL, que crea un campo llamado `target`) en vez de
+  `target: "..."` (la directiva del macro), así que su target real es el path del
+  módulo y filtrar por el nombre que declaran no los encuentra. Son 3 en
+  `dag_engine/engine.rs` y 3 en `infrastructure/pool_registry/registry.rs`. El de
+  MCP ya se arregló acá.
+- **`mcp.dispatch_failed` no distingue un timeout de un error del servidor**: el
+  `McpError` se absorbe en el texto que ve el modelo y nunca llega al log. Necesita
+  un campo `kind` en `McpDispatched`.
+- **`mcp.dispatch_refused_secret` no lleva `tool_call_id`** mientras su hermano sí;
+  las tool calls de un turno corren concurrentes, así que unir por `tool` + tiempo
+  puede fallar.
+
+> Nota sobre nombres: versiones previas de este documento anunciaban
+> `mcp.pool_hit` / `mcp.pool_miss`. Salieron con nombres más precisos porque el
+> registry no tiene una caché sino dos — de ahí `catalog_*` y `connection_*`.
 
 ## Ver también
 
