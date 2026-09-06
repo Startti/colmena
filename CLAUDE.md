@@ -66,21 +66,40 @@ implement → fix → docs → tests → cargo fmt → tests green → review st
 
 Never run `review start` mid-flight, with docs still pending.
 
-**Size the candidate before you freeze it.** Documentation counts toward the
-review tier exactly like code does, and docs run roughly 25-30% of a change in
-this repo — so a 300-line code change routinely lands at 450+ total and silently
-buys the 4-lens tier. Check the number first:
+## MANDATORY — A PR is at most 500 lines; above that, chain it
+
+**Hard cap: 500 total changed lines per PR.** A solution that needs more is
+split into a chained series of PRs, each landing independently on `develop`.
+This is about what a human can review well in one sitting — a 900-line PR is
+not reviewed, it is skimmed and approved.
+
+Documentation counts toward the total exactly like code does, and docs run
+roughly 25-30% of a change in this repo — so a 400-line code change routinely
+lands past the cap. Check the number **before opening the PR**, not after:
 
 ```bash
-python3 scripts/review_size.py
+python3 scripts/review_size.py --base-ref origin/develop
 ```
 
-It prints code/docs/total, the tier and lens count you will get, and the
-correction budget with its margin. Above 400 total lines a change that touches
-code jumps to 4 lenses (a pure-documentation change stays at one), and the
-correction budget saturates at 200 — so the larger the candidate,
-the *smaller* its proportional room to absorb findings before it escalates, and
-escalation has no reentry.
+It prints code/docs/total. Use `--base-ref origin/develop` (after a `git fetch`)
+to size a whole branch — a stale local `develop` silently measures merged PRs
+too. Above the cap, slice with the `chained-pr` skill.
+
+**Slice at a real seam, never at line 500.** Each PR in the chain has to be a
+coherent, independently mergeable unit with its own docs and its own tests — not
+an arbitrary cut that leaves the tree half-changed. If a change genuinely cannot
+be split without shipping something broken, say so explicitly in the PR body
+rather than slicing it badly.
+
+**Ship the chain sequentially off `develop`, not stacked.** A stacked child PR
+gets no CI in this repo (workflows fire only when the base is `develop`,
+`staging` or `main`), so each slice waits for its parent to merge, then branches
+fresh. Slower, but every slice actually gets verified.
+
+**Note on the number.** 500 is the repo's own judgement about reviewability. It
+replaced an earlier 400 that was inherited from the gentle-ai review tier system
+(above it a candidate bought four review lenses); that system is opt-in and
+currently off, so the threshold no longer derives its meaning from a tool.
 
 **The reported tier is a floor, not a ceiling.** Size is only one input: gentle-ai
 also forces `high` on non-size signals such as a file gaining mode `100755`
@@ -110,6 +129,40 @@ Python/Rust script tested in isolation.
   (see also the "Grafos JSON con tools reales" rule below).
 - Verifying a standalone library with unit tests is NOT the same as delivering a
   Colmena solution. The deliverable is a working graph exercised by the engine.
+
+### Every change ships with BOTH: tests and a real E2E graph run
+
+Unit tests and an end-to-end run answer different questions, so neither replaces
+the other. **Both are required, for every change** — features, bug fixes,
+refactors and security controls alike, not just new functionality.
+
+| | Answers |
+|---|---|
+| Unit test | Does the function compute the right thing? |
+| E2E graph | Does the behaviour actually happen in the running system? |
+
+Run the graph through the engine against the **real** service, capture the SSE to
+`/tmp/colmena_e2e/<name>.sse`, and assert against that capture — never against
+what you expect it to say.
+
+**Verify both directions of a control, not just the happy path.** A guard that is
+never observed refusing has not been tested. For an allowlist that means: it
+lets an approved host through, AND it blocks a non-approved one, AND the system
+degrades correctly instead of dying.
+
+**Corroborate with a second signal.** Token counts, byte sizes and event counts
+in the capture are independent evidence. A blocked MCP server should show not
+only zero tool calls but a visibly smaller prompt — if the count says blocked and
+the token usage says otherwise, trust neither until you know why.
+
+**Know where a claim is observable before concluding it failed.** Not everything
+appears in the SSE: the system message the model receives does not. Looking for
+it there and finding nothing proves the search was wrong, not that the code is
+broken. Check the model's actual behaviour instead.
+
+A change whose E2E cannot be run (no credentials, no reachable service) says so
+explicitly in the PR body. Silence reads as "verified", and that is worse than
+an admitted gap.
 
 ## Key Directories
 - `src/libs/colmena/src/` — All Rust source code

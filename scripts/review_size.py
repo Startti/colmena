@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""Report the review size of the current candidate BEFORE `gentle-ai review start`.
+"""Report the size of the current candidate BEFORE opening a PR.
 
-The review tier is decided by total changed lines, and documentation counts
-toward that total just like code does (verified empirically against the review
-store: `original_changed_lines == code + docs` for every recorded lineage).
-Since docs run roughly 25-30% of a change in this repo, a 300-line code change
-routinely lands at 450+ total and buys the 4-lens tier without anyone noticing.
+The repo caps a PR at 500 total changed lines; above that the work is split
+into a chained series. Documentation counts toward the total just like code
+does (verified empirically against the review store: `original_changed_lines
+== code + docs` for every recorded lineage). Since docs run roughly 25-30% of
+a change in this repo, a 400-line code change routinely lands past the cap
+without anyone noticing.
 
-Run this before freezing a candidate, so the tier is a decision instead of a
-surprise.
+Run this before opening the PR, so slicing is a decision instead of a surprise.
 
 Size and correction budget are exact: backtested against all 15 lineages
 recorded in the local review store, `changed_lines` and `correction_budget`
@@ -36,8 +36,14 @@ import os
 import subprocess
 import sys
 
-# A change at or below this many total lines stays out of the 4-lens tier.
-HIGH_TIER_LINES = 400
+# The repo's PR size limit. A change above this must be split into a chained
+# series instead of shipping as one PR.
+#
+# It started as the gentle-ai review threshold (above it a candidate bought the
+# 4-lens tier), but that system is opt-in and currently off, so the number no
+# longer inherits its meaning from a tool. It is now the repo's own judgement
+# about what a human can review well in one sitting.
+HIGH_TIER_LINES = 500
 
 # Paths whose presence forces the high tier regardless of size. Matched against
 # non-documentation paths only: a guide *about* OAuth is not a hot path.
