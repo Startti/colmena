@@ -1254,3 +1254,46 @@ igual: las primeras se catalogan y describen, las MCP quedan en el set siempre-p
 Sin `lazy_tool_loading` nada cambia. ADP no afectado.
 
 **Estado.** done.
+
+## 25. El módulo MCP deja de ser mudo (entrada retroactiva)
+
+**Qué cambió.** Tres PRs (#265, #270, #271) instrumentaron las tres rutas donde MCP
+puede degradarse. Se registran acá en conjunto porque ninguna dejó entrada propia
+—un descuido contra la regla de que la documentación viaja con el código—, y el
+comportamiento ya está en `develop`.
+
+**Antes.** El módulo emitía cuatro líneas sin nombre de evento y ninguna latencia.
+Con un servidor de un tercero lento o caído, la única señal era un conteo agregado
+*después* del hecho: no se podía saber **cuál** servidor falló, **por qué**, ni
+**cuánto tardó**. El pool era directamente invisible.
+
+**Ahora,** siguiendo la convención del repo (`target: "colmena::mcp"`,
+`event = "mcp.<acción>"`, campos, mensaje humano):
+
+- **Fetch/connect por servidor** (#265): `mcp.server_ready`, `mcp.server_unavailable`
+  con un `reason` estable (`prepare` / `tools_list` / `no_result`) y `ms`.
+- **Despacho** (#270): `ms` y `tool_call_id` en `mcp.dispatch_ok` /
+  `mcp.dispatch_failed`, más `mcp.dispatch_refused_secret` donde el motor bloquea un
+  secreto antes de la red.
+- **Pool** (#271): `connection_reused` / `connection_opened` / `connection_cooldown` y
+  `catalog_hit` / `catalog_miss`, más `pool_evicted`.
+
+**Tres decisiones que valen más que la lista.** `reason` es una etiqueta estable y no
+el texto de error, para que se pueda agrupar. `no_result` **omite** `ms` en vez de
+inventar un `0` que un dashboard leería como "resolvió instantáneamente". Y
+`connection_reused` / `catalog_hit` se emiten desde dos sitios cada uno —el fast path
+y el re-check tras el lock—, distinguidos por `raced`, para que la contención del
+single-flight se vea en vez de esconderse en una línea indistinguible.
+
+**Privacidad.** Nunca se loguea el valor de un header, el cuerpo de un resultado, ni
+los argumentos de una llamada. Sí: alias, host (sin scheme, path, query ni userinfo),
+conteos, tamaños, tiempos y la `key` del pool, que es un digest derivado de
+referencias y jamás de un secreto resuelto.
+
+**Alcance.** Instrumentación pura: ningún cambio de comportamiento, de scope de lock
+ni de semántica de degradación. ADP no afectado. Referencia completa en
+[`developer_guide/52`](developer_guide/52_mcp_observability.md), que ahora incluye
+además cómo atribuir el costo en contexto de cada servidor y la postura de seguridad
+vigente.
+
+**Estado.** done.

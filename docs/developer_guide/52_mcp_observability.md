@@ -94,6 +94,70 @@ puede recibir un vector de resultados parcial, con un alias declarado en
 intento cuya duración medir, así que el evento omite el campo `ms` en vez de
 inventar un `0` que un dashboard leería como "resolvió instantáneamente".
 
+## Atribuir el costo en tokens de un servidor MCP
+
+Una pregunta que aparece apenas MCP entra en producción: *¿cuánto me está costando
+el servidor X?* Se responde con lo que estos eventos ya emiten, sin instrumentación
+adicional.
+
+**Lo primero, para sacarlo del medio: el costo SÍ se cobra.** El resultado de una
+tool MCP entra al historial como mensaje `Tool` y por lo tanto aparece en los
+`promptTokens` del turno siguiente. Nunca fue costo perdido; lo que faltaba era
+saber *de quién* era.
+
+**La atribución es exacta, no una estimación.** El campo `bytes` de
+`mcp.dispatch_ok` es `dispatched.output.len()`, y ese `output` viaja **verbatim** al
+mensaje `Tool` (`agent_service.rs`, la construcción de `LlmMessage::tool` en el
+camino normal de éxito). Los bytes logueados **son** los bytes que entran al
+contexto — no hay resumen ni digest en el medio.
+
+Y como el campo `tool` lleva el nombre expuesto, que es `<alias>__<tool>`, el alias
+del servidor viene de prefijo. Agrupando por ese prefijo se obtiene el aporte de
+cada servidor:
+
+```
+# bytes de contexto aportados por servidor, en una ventana de logs
+event="mcp.dispatch_ok" | parse tool as "<alias>__*" | stats sum(bytes) by alias
+```
+
+**El límite, explícito.** Lo anterior da **bytes**, no tokens. La conversión depende
+del tokenizador del proveedor y del contenido (~4 bytes por token para prosa en
+inglés es la regla de bolsillo habitual, pero JSON denso rinde distinto). Colmena no
+tokeniza el resultado por su cuenta: reporta `promptTokens` del turno completo, sin
+desglose por origen. Si algún día hace falta un número exacto en tokens, habría que
+tokenizar el resultado contenido en el momento del dispatch — un costo de CPU por
+llamada que hoy no se paga porque la aproximación en bytes alcanza para decidir.
+
+## Postura de seguridad: cualquier URL, sin allowlist
+
+Un servidor MCP es un tercero que **escribe las descripciones de tools que tu modelo
+lee** y puede cambiarlas entre turnos. La postura actual es deliberada y conviene
+tenerla escrita, porque define qué cubre esta instrumentación y qué no.
+
+**Lo que está controlado:**
+
+- La **respuesta** del servidor llega envuelta en un delimitador de contenido no
+  confiable con un nonce por llamada, y anunciada como datos y nunca instrucciones.
+  El cuerpo tiene tope (32 KB) y el schema también (32 KB, máximo 64 tools).
+- Un argumento que lleve un handle de secure value resuelto por el engine se
+  **rechaza antes de la red** (`mcp.dispatch_refused_secret`). Un secreto que Colmena
+  resolvió nunca se reenvía.
+- Las credenciales de conexión viajan por `headers` con referencias a secure values,
+  resueltas al conectar, nunca en la clave del pool ni en el log.
+
+**Lo que NO está controlado, y hay que decirlo:**
+
+- **No hay allowlist de hosts.** Cualquier URL HTTPS declarada en el grafo es
+  alcanzable, incluidos endpoints internos. Es superficie SSRF: la decide quien
+  escribe el grafo.
+- **Nada inspecciona los argumentos salientes** más allá del rechazo de secure
+  values. Si el modelo decide mandarle a un tercero algo que tenía en contexto, sale.
+  Es el problema del *confused deputy*, y sigue abierto.
+
+Habilitar un servidor MCP equivale a confiarle a ese tercero lo que el modelo tenga
+en contexto. El destino, eso sí, **no lo elige el modelo**: la URL la escribe el
+operador y se valida al cargar el grafo.
+
 ## Pendiente
 
 La cadena de observabilidad MCP está cerrada. Quedan estos follow-ups:
