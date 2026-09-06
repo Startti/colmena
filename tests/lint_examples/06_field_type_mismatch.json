@@ -1,0 +1,16 @@
+{
+  "nodes": {
+    "chat": {
+      "type": "llm_call",
+      "config": {
+        "provider": "openai",
+        "api_key": "k",
+        "model": "gpt-4o",
+        "prompt": "hi",
+        "temperature": "0.7"
+      }
+    }
+  },
+  "edges": [],
+  "_comment": "FIELD_TYPE_MISMATCH — temperature is documented as a number and is given as a string."
+}

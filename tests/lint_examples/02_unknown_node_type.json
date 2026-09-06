@@ -1,0 +1,14 @@
+{
+  "nodes": {
+    "chat": {
+      "type": "llm_cal",
+      "config": {
+        "provider": "openai",
+        "api_key": "k",
+        "model": "gpt-4o"
+      }
+    }
+  },
+  "edges": [],
+  "_comment": "UNKNOWN_NODE_TYPE — 'llm_cal' is a typo of a documented type."
+}

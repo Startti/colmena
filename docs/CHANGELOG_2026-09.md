@@ -1631,3 +1631,65 @@ Corpus `error=75 warning=5 info=0`, sin cambios.
 **Alcance.** Aditivo. Ningún grafo del corpus cambia de veredicto → ADP no afectado.
 
 **Estado.** done.
+
+---
+
+## 30. Un catálogo de ejemplos rotos (tanda 1: los de nivel de nodo)
+
+**Qué.** Diez grafos deliberadamente rotos en
+[`tests/lint_examples/`](../tests/lint_examples), uno por cada diagnóstico **a nivel de
+nodo** más un control limpio, documentados en la guía §51 **con la salida real del
+binario** — generada, no transcrita. Un test falla si un ejemplo deja de producir el
+diagnóstico que la guía muestra.
+
+Viven **fuera** de `tests/graphs/`. Ese árbol es el corpus sobre el que se mide el ruido
+(`error=75 warning=5` sobre 303 grafos realistas), y meterle archivos rotos a propósito
+envenenaría justo el número que dice si la herramienta vale la pena escuchar.
+
+Los de `tool_configurations`, los del `target` de un `for_each` y el punto ciego del
+`subgraph` inline llegan en la tanda 2, junto con el test que exige que ningún
+`DiagnosticCode` se quede sin ejemplo. Ese test viaja con la tanda que **completa** la
+cobertura: ponerlo acá sería prometer una garantía que esta tanda no puede cumplir.
+
+### Lo que el ejercicio encontró
+
+Escribir los ejemplos falsificó tres cosas que yo había dado por buenas, y ese fue el
+valor real:
+
+- **`add` ignora su `config`.** El ejemplo de `UNKNOWN_NODE_PROPERTY` traía
+  `{"left": 1, "right": 10}` y salieron dos errores extra. No era un falso positivo:
+  `execute` recibe `_config` y lee sus inputs `a`/`b`. El ejemplo estaba mal, no la
+  herramienta.
+- **`trigger` no es un tipo de nodo.** El motor registra `trigger_webhook`. Mi grafo de
+  control "limpio" no lo estaba.
+- **`router.mode` y `router.branches` no son lo que asumí.** El linter me corrigió
+  mientras yo escribía el ejemplo que iba a ilustrar otra cosa.
+
+Los tres son la razón por la que los ejemplos se **corren** en vez de escribirse: un
+catálogo hecho de memoria documenta lo que uno cree, no lo que pasa.
+
+### Y un hallazgo que no se arregla acá
+
+`"type": "trigger"` sale como `NO_CATALOG_COVERAGE` (**info**) aconsejando agregar una
+entrada al catálogo — cuando ese grafo no arranca. La justificación de esa debilidad era
+que un tipo ausente del catálogo podría estar registrado sin documentar; desde que
+`node_types` quedó cerrado en ambas direcciones contra el registry eso **ya no puede
+pasar**. Subirlo a error cambia qué falla bajo `--strict`, así que va aparte: anotado
+como **L11** en el [BACKLOG](BACKLOG.md).
+
+### Verificación
+
+Los diez ejemplos se corren por el binario real y su salida es la que la guía muestra.
+El control además se pasó **por el motor**, no sólo por el linter: contra OpenAI termina
+en `[DONE]` sin errores, `promptTokens: 842`, `completionTokens: 20`
+(`/tmp/colmena_e2e/lint_example_18_clean.sse`). Un control que lintea limpio pero no
+arranca diría que el linter calla, no que tiene razón.
+
+Los otros nueve son grafos rotos a propósito: correrlos por el motor no agrega evidencia
+—fallarían, que es el punto— así que la corrida que importa para ellos es la del linter,
+capturada en la guía.
+
+**Alcance.** Sin cambios de código: fixtures, tests y documentación. El corpus sigue en
+`error=75 warning=5 info=0` — los ejemplos no lo tocan, que es el punto de dónde viven.
+
+**Estado.** done.

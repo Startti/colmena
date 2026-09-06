@@ -116,6 +116,24 @@ fuera del linter pero son la misma clase de defecto.
   nombra. Su fixture usa `node_schema: null`, que cuenta como ausente para la regla de
   precedencia, así que tampoco ejercita esa interacción.
 
+- **L11 · `CatalogOnly` afirma menos de lo que ya puede probar.** Salió de construir el
+  catálogo de ejemplos (§30): un nodo con `"type": "trigger"` —uno de los siete defectos
+  reales que destapó la §20, porque el motor registra `trigger_webhook`— sale como
+  `NO_CATALOG_COVERAGE`, **info**, aconsejando agregar una entrada al catálogo.
+
+  Ese consejo era correcto cuando se escribió: la justificación es que un tipo ausente
+  del catálogo *podría* estar registrado pero sin documentar. **Ya no puede.** Desde que
+  `node_types` quedó cerrado en ambas direcciones contra el registry
+  (`every_registered_node_type_is_documented_in_the_catalog` y
+  `the_catalog_documents_no_node_type_the_engine_cannot_run`, con el harness armando el
+  registry **con** sus cuatro nodos condicionales), la ausencia del catálogo **prueba**
+  que el motor no puede correr ese tipo. Ese grafo no arranca, y el linter lo llama info.
+
+  No es un cambio trivial de severidad: convierte infos en errores y por lo tanto
+  **cambia qué falla bajo `--strict`**. Hay que medir el corpus antes y decidir si la
+  prueba se toma como tal o si se prefiere seguir siendo conservador. Trigger: junto con
+  el trabajo de adopción en CI, donde `--strict` empieza a importar.
+
 #### Fase 2 — la fuente de verdad en el código
 
 - **L10 · Generar el set de campos en vez de verificarlo.** La maquinaria está completa:

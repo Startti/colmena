@@ -1,0 +1,12 @@
+{
+  "nodes": {
+    "n": {
+      "type": "quantum_flux_capacitor",
+      "config": {
+        "whatever": 1
+      }
+    }
+  },
+  "edges": [],
+  "_comment": "NO_CATALOG_COVERAGE (info) — not a near miss of anything documented, so the linter says it cannot check rather than guessing."
+}
