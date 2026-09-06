@@ -117,6 +117,18 @@ pub fn lint_graph_json(
     document: &Value,
     ctx: &LintContext<'_>,
 ) -> Result<LintReport, serde_json::Error> {
+    let mut report = lint_document(document, ctx)?;
+    report.sort();
+    Ok(report)
+}
+
+/// Every check this module makes about one graph document, unsorted.
+///
+/// Split out of [`lint_graph_json`] so a `subgraph`'s inline child can be run
+/// through the identical set of rules rather than a hand-picked subset — a
+/// child is a whole graph document, and anything true of a top-level one is
+/// true of it.
+fn lint_document(document: &Value, ctx: &LintContext<'_>) -> Result<LintReport, serde_json::Error> {
     let graph: Graph = serde_json::from_value(document.clone())?;
     let mut report = lint_graph(&graph, ctx);
     lint_raw_node_properties(document, ctx, &mut report);
@@ -124,8 +136,122 @@ pub fn lint_graph_json(
     lint_raw_tool_configurations(document, &mut report);
     lint_raw_tool_fields(document, ctx, &mut report);
     lint_raw_for_each_targets(document, ctx, &mut report);
-    report.sort();
+    lint_inline_children(document, ctx, &mut report);
     Ok(report)
+}
+
+/// Every graph written inline inside this document, with the path that reaches it.
+///
+/// A `subgraph`'s `child_graph_inline` is handed to the child executor exactly
+/// as written and deserialized there as a `Graph`, so its contents are real
+/// configuration — and until now no rule entered it: every walker above reads
+/// `nodes.*` of THIS document and stops. A `modle`, an invented field and a
+/// dangling edge inside a child all linted clean.
+///
+/// `child_graph_path` is deliberately not followed. Reading a sibling file
+/// would make the linter's answer depend on the filesystem it runs on, and the
+/// CLI's whole appeal is that it checks a JSON document as given.
+///
+/// Both doors are walked, mirroring `for_each`'s target: the node's own
+/// `config`, and — when the `subgraph` is dispatched as an LLM tool — the
+/// entry's `node_schema.child_graph_inline.fixed` or its
+/// `fixed_config.child_graph_inline`.
+///
+/// Yields `(path, child)` where `path` is what a child node id gets prefixed
+/// with. `/` is the separator the engine itself reserves for subgraph path
+/// qualifiers, and `Graph::validate` rejects it in author-written ids, so a
+/// prefixed id can never collide with a real one.
+fn inline_children(document: &Value) -> Vec<(String, &Value)> {
+    let Some(nodes) = document.get("nodes").and_then(Value::as_object) else {
+        return Vec::new();
+    };
+
+    let mut children = Vec::new();
+    for (node_id, node) in nodes {
+        let Some(config) = node.get("config") else {
+            continue;
+        };
+
+        if node.get("type").and_then(Value::as_str) == Some(SUBGRAPH_NODE_TYPE) {
+            if let Some(child) = config.get(INLINE_CHILD_KEY) {
+                children.push((node_id.clone(), child));
+            }
+        }
+
+        let Some(tools) = config.get("tool_configurations").and_then(Value::as_object) else {
+            continue;
+        };
+        for (tool_name, entry) in tools {
+            if entry.get("node_type").and_then(Value::as_str) != Some(SUBGRAPH_NODE_TYPE) {
+                continue;
+            }
+            for child in [
+                entry
+                    .get("node_schema")
+                    .and_then(|s| s.get(INLINE_CHILD_KEY))
+                    .and_then(|c| c.get("fixed")),
+                entry
+                    .get("fixed_config")
+                    .and_then(|f| f.get(INLINE_CHILD_KEY)),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                children.push((format!("{node_id}/{tool_name}"), child));
+            }
+        }
+    }
+    children
+}
+
+/// The node type that can carry a whole graph inside its configuration.
+const SUBGRAPH_NODE_TYPE: &str = "subgraph";
+
+/// The key under which that graph is written out rather than referenced.
+const INLINE_CHILD_KEY: &str = "child_graph_inline";
+
+/// Runs every rule over each inline child, attributing findings to their path.
+///
+/// Recursion is bounded by the document: a child is literal JSON, so there is
+/// no cycle to guard against and no depth to cap — which is also the engine's
+/// own position since the subgraph nesting limit was removed.
+///
+/// A child that does not deserialize as a graph is reported rather than
+/// swallowed: the executor deserializes it too, and fails the run there. Saying
+/// it first is the trade the whole linter makes.
+fn lint_inline_children(document: &Value, ctx: &LintContext<'_>, report: &mut LintReport) {
+    for (path, child) in inline_children(document) {
+        match lint_document(child, ctx) {
+            Ok(child_report) => {
+                for mut d in child_report.diagnostics {
+                    // A finding about a node becomes `parent/child`. One about
+                    // the graph itself — a dangling edge — has no id of its
+                    // own, and the path is then the only thing that says which
+                    // subgraph the reader should open.
+                    d.node_id = Some(match d.node_id {
+                        Some(id) => format!("{path}/{id}"),
+                        None => path.clone(),
+                    });
+                    report.diagnostics.push(d);
+                }
+            }
+            Err(e) => report.diagnostics.push(Diagnostic {
+                severity: Severity::Error,
+                code: DiagnosticCode::MalformedToolEntry,
+                node_id: Some(path.clone()),
+                field: Some(INLINE_CHILD_KEY.to_string()),
+                message: format!(
+                    "this inline child is not a graph, so the child executor fails the run \
+                     when it deserializes it: {e}"
+                ),
+                suggestion: Some(
+                    "an inline child needs a `nodes` map and an `edges` array, like any \
+                     other graph"
+                        .into(),
+                ),
+            }),
+        }
+    }
 }
 
 /// Visits every `tool_configurations` entry in the document.

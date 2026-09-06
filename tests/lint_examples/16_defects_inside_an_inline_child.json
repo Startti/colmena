@@ -26,5 +26,5 @@
     }
   },
   "edges": [],
-  "_comment": "KNOWN BLIND SPOT (BACKLOG L2) — every defect below lives inside child_graph_inline and the linter reports NONE of them."
+  "_comment": "Recursion into an inline child (BACKLOG L2, closed): every defect below lives inside child_graph_inline and is now reported, attributed to the path that reaches it."
 }

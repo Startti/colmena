@@ -44,18 +44,15 @@ fn expected(name: &str) -> &'static [&'static str] {
         "13_malformed_tool_entry.json" => &["MALFORMED_TOOL_ENTRY"],
         "14_for_each_target_invented_field.json" => &["REPURPOSED_TOOL_FIELD"],
         "15_for_each_target_malformed_schema.json" => &["MALFORMED_TOOL_ENTRY"],
-        // The blind spot. Every defect in this file lives inside
-        // `child_graph_inline`, and no rule enters there — so the catalogue
-        // documents silence, and this line is what fails the day L2 closes and
-        // someone forgets the example says otherwise. Verified by hoisting one
-        // of its inner defects to the top level: the test goes red.
+        // This entry used to read `&[]` and document a blind spot. L2 closed,
+        // and this line went red on its own — which is exactly what it was
+        // written for. The defects it holds live inside `child_graph_inline`
+        // and are now attributed to the path that reaches them.
         //
-        // What it CANNOT catch is this fixture quietly ceasing to be broken:
-        // repairing a defect inside the inline child changes nothing the linter
-        // can see, so the expectation still holds. That is inherent — the whole
-        // point of the example is that nothing looks in there — and it is why
-        // the fixture carries three separate defects rather than one.
-        "16_blind_spot_inline_subgraph.json" => &[],
+        // The old note also said this example could not detect its fixture
+        // quietly ceasing to be broken, because nothing looked inside. That is
+        // no longer true either: something looks now.
+        "16_defects_inside_an_inline_child.json" => &["UNKNOWN_FIELD", "EDGE_UNKNOWN_NODE"],
         "17_several_defects_at_once.json" => &[
             "EDGE_UNKNOWN_NODE",
             "UNKNOWN_FIELD",

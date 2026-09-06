@@ -586,14 +586,18 @@ cargo run --bin dag_engine -- lint tests/lint_examples/01_invented_config_field.
 ```
 
 
-### Punto ciego conocido — un `subgraph` inline
+### Defectos dentro de un `subgraph` inline
 
-[`16_blind_spot_inline_subgraph.json`](../../tests/lint_examples/16_blind_spot_inline_subgraph.json) — Ese hijo tiene un `modle`, un campo inventado y un edge colgado. El linter reporta **cero**. Abierto como L2.
+[`16_defects_inside_an_inline_child.json`](../../tests/lint_examples/16_defects_inside_an_inline_child.json) — Ese hijo tiene un `modle`, un campo inventado y dos edges colgados, y **cada hallazgo dice el path que lo alcanza**. Hasta que L2 cerró, este ejemplo documentaba silencio: su expectativa era «ningún hallazgo», y se puso en rojo sola el día que entró la recursión — que es para lo que estaba escrita.
 
 ```
-  no findings
-```
+  error [EDGE_UNKNOWN_NODE] node "nested": edge from="nowhere" names a node that this graph does not define
+  error [EDGE_UNKNOWN_NODE] node "nested": edge to="also_nowhere" names a node that this graph does not define
+  error [UNKNOWN_FIELD] node "nested/chat".invented: "invented" is not a configuration field of llm_call — the engine ignores it silently
+  error [UNKNOWN_FIELD] node "nested/chat".modle: "modle" is not a configuration field of llm_call — did you mean "model"?
 
+  4 error(s), 0 warning(s), 0 info
+```
 
 ### Varios defectos a la vez
 
@@ -609,13 +613,6 @@ cargo run --bin dag_engine -- lint tests/lint_examples/01_invented_config_field.
   3 error(s), 2 warning(s), 0 info
 ```
 
-> **Lo que el ejemplo 16 no puede atrapar.** Su expectativa es "ningún hallazgo", y eso
-> falla el día que L2 cierre — verificado subiendo uno de sus defectos internos al nivel
-> superior: el test se pone en rojo. Lo que **no** detecta es que ese fixture deje de
-> estar roto: reparar un defecto adentro del hijo inline no cambia nada que el linter
-> pueda ver. Es inherente —el punto del ejemplo es justamente que nadie mira ahí— y por
-> eso lleva tres defectos distintos en vez de uno.
-
 
 ### El control
 
@@ -629,6 +626,66 @@ control — diría que el linter calla, no que tiene razón.
 ```
   no findings
 ```
+
+## Adentro de un `subgraph` inline
+
+Un `child_graph_inline` es un **documento de grafo completo**: el motor se lo pasa tal
+cual al ejecutor hijo, que lo deserializa como `Graph` y lo valida. O sea que lo que hay
+adentro es configuración de verdad — y hasta acá ninguna regla entraba, porque todos los
+walkers leen los `nodes.*` de *este* documento y paran ahí.
+
+Ahora el hijo pasa por **el mismo set de reglas**, no por un subconjunto elegido a mano:
+cualquier cosa que sea cierta de un grafo de primer nivel lo es de un hijo. Cada hallazgo
+se atribuye al **path que lo alcanza**:
+
+```
+error [UNKNOWN_FIELD] node "nested/chat".modle: "modle" is not a configuration field of llm_call — did you mean "model"?
+error [EDGE_UNKNOWN_NODE] node "nested": edge to="also_nowhere" names a node that this graph does not define
+```
+
+El separador es `/` porque es el que el propio motor reserva para calificar paths de
+subgrafo, y `Graph::validate()` lo rechaza en ids escritos por autores — así que un id
+con prefijo nunca puede chocar con uno real. Un hallazgo sobre el grafo y no sobre un
+nodo —un edge colgado— no tiene id propio, y entonces el path es lo único que dice qué
+subgrafo abrir.
+
+**Dos puertas**, igual que el `target` de un `for_each`: el `config` del nodo, y —cuando
+el `subgraph` está expuesto como tool— `node_schema.child_graph_inline.fixed` o
+`fixed_config.child_graph_inline`.
+
+**La recursión no necesita tope.** Un hijo inline es JSON literal, así que no hay ciclo
+del que cuidarse ni profundidad que acotar — que es además la posición del propio motor
+desde que se quitó el límite de anidamiento.
+
+Un hijo que **no deserializa** como grafo se reporta en vez de tragarse: el ejecutor
+también lo deserializa, y falla la corrida ahí.
+
+### Corrido, no supuesto
+
+Un hijo inline con un edge cuyo origen no existe, pasado por el motor:
+
+```
+$ dag_engine lint  → error [EDGE_UNKNOWN_NODE] node "nested": edge from="typo_seed" …
+$ dag_engine run   → exit 0, [DONE], cero errores
+  salida final: {"start":…, "nested":{"seed":{"a":2,"b":3}}, "out":{"seed":…}}
+```
+
+El nodo `sum` del hijo **nunca produjo salida** —no aparece en el resultado— y aun así la
+corrida terminó bien. Es exactamente lo que la regla `EDGE_UNKNOWN_NODE` viene afirmando
+desde que existe: el endpoint que no nombra a nadie se resuelve a `null` en silencio, el
+nodo de abajo no recibe nada, y **el grafo parece funcionar**. Lo nuevo es que eso ahora
+se detecta también un nivel más abajo, donde hasta acá no miraba nadie.
+
+### Lo que esto destapó, y lo que no
+
+Sobre el corpus: **33 hijos inline en 20 archivos, con 80 nodos hijos** que nadie
+revisaba. Hallazgos nuevos: **cero**. Están bien escritos.
+
+Ese cero se comprobó, no se asumió: inyectando un campo inventado en un nodo hijo de dos
+archivos reales, la regla lo reporta por las dos puertas
+(`inner_subgraph/ask_user`, `analista/equipo_calculo/calculista`). El primer intento de
+esa comprobación dio *perdido* y era la mutación, no la regla: había caído en un nodo
+`input`, que acepta cualquier clave por diseño.
 
 ## Las decisiones que evitan el ruido
 
@@ -782,13 +839,11 @@ claves que se perdían.
   *(Esta viñeta decía hasta la §22 que los campos de una tool no se cruzaban contra
   su `node_type`. Eso se cerró en esa misma sección y la limitación quedó vieja
   contradiciendo a "Los campos de una tool" más arriba.)*
-- **Ninguna regla entra en un `subgraph` inline.** El `target` de un `for_each` ya se
-  revisa (ver arriba), pero el `child_graph_inline` de un `subgraph` sigue siendo un
-  `Value` opaco para el linter: los nodos que viven ahí adentro no se revisan, con
-  campos inventados y edges colgados incluidos. Lo que amortigua el caso es que un
-  hijo inline malformado igual falla al cargar, porque `validate()` sí corre para los
-  grafos hijos — se pierde el aviso temprano, no la guardia. Abierto en el
-  [BACKLOG](../BACKLOG.md) como L2.
+- **`child_graph_path` no se sigue.** El `child_graph_inline` de un `subgraph` sí se
+  revisa entero, recursivamente y por sus dos puertas; un hijo referenciado por ruta no,
+  porque leer un archivo hermano haría que la respuesta del linter dependa del sistema
+  de archivos donde corre, y el atractivo del CLI es justamente revisar un documento
+  como está dado. Lintealo por separado.
 - **Cuatro tipos condicionales se dan por disponibles.** El linter revisa el
   grafo contra lo que el motor *puede* ejecutar, no contra el cableado de un
   despliegue concreto.

@@ -1738,3 +1738,63 @@ defecto **interno** del ejemplo 16) pasa, por lo de arriba.
 **Alcance.** Sin cambios de código: fixtures, tests y documentación.
 
 **Estado.** done.
+
+---
+
+## 32. El linter entra en un `subgraph` inline
+
+**Qué.** Cierra **L2**, la última clase entera de grafos que el linter no revisaba. Un
+`child_graph_inline` es un documento de grafo completo —el motor se lo pasa tal cual al
+ejecutor hijo, que lo deserializa como `Graph` y lo valida—, pero ninguna regla entraba:
+todos los walkers leen los `nodes.*` de *ese* documento y paran ahí. Un `modle`, un campo
+inventado y un edge colgado adentro de un hijo linteaban limpio.
+
+Ahora el hijo pasa por **el mismo set de reglas**, no por un subconjunto elegido a mano.
+Para eso se extrajo `lint_document`: cualquier cosa cierta de un grafo de primer nivel lo
+es de un hijo, y elegir a mano cuáles reglas aplicar habría sido una decisión que envejece
+sola.
+
+Cada hallazgo se atribuye al **path que lo alcanza** (`nested/chat`), con `/` —el
+separador que el motor reserva para calificar paths de subgrafo y que `Graph::validate()`
+rechaza en ids de autor, así que un id con prefijo no puede chocar con uno real—. Un
+hallazgo sobre el grafo y no sobre un nodo usa el path solo, que es lo único que dice qué
+subgrafo abrir.
+
+Dos puertas, igual que el `target` de un `for_each`. Sin tope de recursión: un hijo inline
+es JSON literal, no hay ciclo ni profundidad que acotar. `child_graph_path` **no** se
+sigue: leer un archivo hermano haría que la respuesta dependa del sistema de archivos.
+
+### Corrido contra el motor, no supuesto
+
+Un hijo inline con un edge cuyo origen no existe: el linter lo reporta, y el motor
+**termina en `[DONE]` con exit 0 y cero errores** — mientras el nodo `sum` de ese hijo
+nunca produce salida, que ni siquiera aparece en el resultado final. Es la tesis de
+`EDGE_UNKNOWN_NODE` demostrada un nivel más abajo: el grafo hace silenciosamente menos de
+lo que dice, y nadie se entera. Captura en
+`/tmp/colmena_e2e/inline_child_dangling_edge.sse`.
+
+### Lo que destapó, y cómo se comprobó que el cero es un cero
+
+Sobre el corpus: **33 hijos inline en 20 archivos, 80 nodos hijos** que nadie revisaba.
+Hallazgos nuevos: **cero** — están bien escritos.
+
+Ese cero se comprobó inyectando un campo inventado en un nodo hijo de dos archivos
+**reales**: la regla lo reporta por las dos puertas (`inner_subgraph/ask_user`,
+`analista/equipo_calculo/calculista`).
+
+**El primer intento dio "perdido", y era la mutación.** Había caído en un nodo `input`,
+que acepta cualquier clave por diseño, así que no había nada que reportar. Es la segunda
+vez en este track que una mutación mal elegida se disfraza de regla rota; la forma de
+distinguirlas sigue siendo mirar qué puede ver el código bajo prueba.
+
+### El guard del catálogo hizo lo suyo
+
+El ejemplo 16 documentaba este punto ciego con la expectativa «ningún hallazgo», y su
+comentario decía que fallaría el día que L2 cerrara. **Falló solo**, nombrando
+`{"EDGE_UNKNOWN_NODE", "UNKNOWN_FIELD"}`. Se actualizó la expectativa, se reescribió el
+comentario y se renombró el archivo, que decía `blind_spot` sobre algo que ya no lo es.
+
+**Alcance.** Aditivo: ninguna regla nueva, un contenedor nuevo para todas. Ningún grafo
+del corpus cambia de veredicto → ADP no afectado.
+
+**Estado.** done.
