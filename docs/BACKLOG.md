@@ -53,13 +53,6 @@ Ordenados por importancia. Los ids son para poder referenciarlos en un PR.
   versión anterior de L1 decía "las otras tres puertas" sin el calificador y la dejaba
   fuera de la cuenta.
 
-- **L2c · El par `if let Ok(...)` de `for_each` es código muerto, no una falla
-  silenciosa.** Este item nació diciendo lo contrario y la corrida E2E lo corrigió.
-  `merge_args_into_schema` corre **las mismas dos comprobaciones** unas líneas antes y
-  falla la fila, así que la guarda posterior es inalcanzable. No hay bug de
-  comportamiento: hay una guarda defensiva que invita a la lectura equivocada — a mí me
-  la hizo hacer. Vale borrarla o comentarla. **Sin urgencia**: no afecta ninguna corrida.
-
 - **L3 · El brazo `Registry` conserva el consejo viejo.** Un tipo tool-only usado como
   `type` de un nodo del grafo recibe el consejo correcto bajo `CatalogOnly` (lo que usa
   la CLI) y bajo `Unchecked`, pero bajo `Registry` sigue con el did-you-mean genérico y
@@ -154,6 +147,7 @@ fuera del linter pero son la misma clase de defecto.
 | L2b (mitad) — el `target` de un `for_each` se revisa por sus tres puertas contra el tipo de nodo que despacha | 2026-09-06 | §28 |
 | L2b-bis — un `target.node_schema` malformado se reporta antes de correr, con el costo medido (el grafo carga y el lote muere fila por fila) | 2026-09-06 | §29 |
 | L2 — el `child_graph_inline` de un `subgraph` se revisa entero, recursivamente y por sus dos puertas, con cada hallazgo atribuido a su path | 2026-09-06 | §32 |
+| L2c — el par `if let Ok(...)` de `for_each` pasó a propagar; medido, convirtió un punto único de fallo en defensa en profundidad | 2026-09-06 | §33 |
 | El camino de producción no llamaba a `Graph::validate()` | 2026-09-04 | §18 |
 
 Dos lecciones del track que no son items y conviene no re-aprender:
