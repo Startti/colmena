@@ -53,13 +53,6 @@ Ordenados por importancia. Los ids son para poder referenciarlos en un PR.
   versión anterior de L1 decía "las otras tres puertas" sin el calificador y la dejaba
   fuera de la cuenta.
 
-- **L2 · Ninguna regla entra en un `subgraph` inline.** `tool_configuration_entries` y las
-  demás reglas crudas recorren `nodes.*.config.tool_configurations` y nada más, así que
-  un `node_schema` malformado dentro de un `child_graph_inline` lintea limpio y recién
-  falla al cargar — aunque `validate()` sí corre para los grafos hijos. Es una clase
-  entera de grafos sin revisar, no un caso borde. Limitación compartida por todas las
-  reglas crudas.
-
 - **L2c · El par `if let Ok(...)` de `for_each` es código muerto, no una falla
   silenciosa.** Este item nació diciendo lo contrario y la corrida E2E lo corrigió.
   `merge_args_into_schema` corre **las mismas dos comprobaciones** unas líneas antes y
@@ -160,6 +153,7 @@ fuera del linter pero son la misma clase de defecto.
 | `MALFORMED_TOOL_ENTRY` y el consejo imposible de seguir para un tipo tool-only | 2026-09-05 | §26 |
 | L2b (mitad) — el `target` de un `for_each` se revisa por sus tres puertas contra el tipo de nodo que despacha | 2026-09-06 | §28 |
 | L2b-bis — un `target.node_schema` malformado se reporta antes de correr, con el costo medido (el grafo carga y el lote muere fila por fila) | 2026-09-06 | §29 |
+| L2 — el `child_graph_inline` de un `subgraph` se revisa entero, recursivamente y por sus dos puertas, con cada hallazgo atribuido a su path | 2026-09-06 | §32 |
 | El camino de producción no llamaba a `Graph::validate()` | 2026-09-04 | §18 |
 
 Dos lecciones del track que no son items y conviene no re-aprender:

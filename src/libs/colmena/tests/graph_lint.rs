@@ -2041,3 +2041,116 @@ fn a_target_schema_the_engine_accepts_is_left_alone() {
         codes(&report)
     );
 }
+
+// ---------------------------------------------------------------------------
+// L2 — inside a `subgraph`'s inline child
+// ---------------------------------------------------------------------------
+
+/// A `subgraph` whose child is written inline, with `child` as its body.
+fn inline_subgraph(child: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "nodes": { "nested": { "type": "subgraph", "config": { "child_graph_inline": child } } },
+        "edges": []
+    })
+}
+
+/// The engine hands that inline object straight to the child executor, which
+/// deserializes it as a `Graph` and validates it. So the defects in it are real
+/// defects — they were simply invisible to every rule, which walked only the
+/// parent's own nodes.
+#[test]
+fn an_invented_field_inside_an_inline_child_is_reported() {
+    let report = lint_json(inline_subgraph(serde_json::json!({
+        "nodes": { "chat": { "type": "llm_call",
+                             "config": { "provider": "openai", "api_key": "k", "modle": "gpt-4o" } } },
+        "edges": []
+    })));
+
+    let d = find(&report, DiagnosticCode::UnknownField).expect("the child must be checked");
+    assert_eq!(
+        d.node_id.as_deref(),
+        Some("nested/chat"),
+        "the finding must name the path to the child node, not the bare id"
+    );
+    assert_eq!(d.field.as_deref(), Some("modle"));
+}
+
+/// A dangling edge inside the child carries no node id of its own, so the
+/// parent path is what tells the reader which subgraph it is in.
+#[test]
+fn a_dangling_edge_inside_an_inline_child_names_the_subgraph_it_is_in() {
+    let report = lint_json(inline_subgraph(serde_json::json!({
+        "nodes": { "a": { "type": "log", "config": {} } },
+        "edges": [{ "from": "a", "to": "nowhere" }]
+    })));
+
+    let d = find(&report, DiagnosticCode::EdgeUnknownNode).expect("child edges must be checked");
+    assert_eq!(d.node_id.as_deref(), Some("nested"));
+}
+
+/// Nesting is finite because the document is literal JSON, so the walk simply
+/// follows it down however deep it goes.
+#[test]
+fn a_child_of_a_child_is_reached_too() {
+    let report = lint_json(inline_subgraph(inline_subgraph(serde_json::json!({
+        "nodes": { "chat": { "type": "llm_call",
+                             "config": { "provider": "openai", "api_key": "k", "modle": "gpt-4o" } } },
+        "edges": []
+    }))));
+
+    let d = find(&report, DiagnosticCode::UnknownField).expect("two levels down must be checked");
+    assert_eq!(d.node_id.as_deref(), Some("nested/nested/chat"));
+}
+
+/// A `subgraph` dispatched as a tool carries its child in the entry, fixed.
+#[test]
+fn an_inline_child_reached_through_a_tool_entry_is_checked() {
+    let report = lint_json(serde_json::json!({
+        "nodes": { "agent": { "type": "llm_call", "config": {
+            "provider": "openai", "api_key": "k", "model": "gpt-4o",
+            "tool_configurations": { "helper": {
+                "node_type": "subgraph",
+                "node_schema": { "child_graph_inline": { "fixed": {
+                    "nodes": { "chat": { "type": "llm_call",
+                        "config": { "provider": "openai", "api_key": "k", "modle": "gpt-4o" } } },
+                    "edges": []
+                }}, "task": { "type": "string", "required": true, "description": "what to do" } }
+            }}
+        }}},
+        "edges": []
+    }));
+
+    let d =
+        find(&report, DiagnosticCode::UnknownField).expect("a tool's inline child must be checked");
+    assert_eq!(d.node_id.as_deref(), Some("agent/helper/chat"));
+}
+
+/// An inline child that is not a graph at all fails the run when the executor
+/// deserializes it. Saying so before the run is the same trade the rest of the
+/// linter makes.
+#[test]
+fn an_inline_child_that_is_not_a_graph_is_reported_rather_than_crashing_the_lint() {
+    let report = lint_json(inline_subgraph(serde_json::json!({ "nodes": "not-a-map" })));
+
+    assert!(
+        !report.is_clean(),
+        "a child that cannot deserialize must be reported: {:?}",
+        codes(&report)
+    );
+}
+
+/// A correct inline child must stay silent, or the rule is worse than the gap.
+#[test]
+fn a_correct_inline_child_is_left_alone() {
+    let report = lint_json(inline_subgraph(serde_json::json!({
+        "nodes": { "chat": { "type": "llm_call",
+                             "config": { "provider": "openai", "api_key": "k", "model": "gpt-4o" } } },
+        "edges": []
+    })));
+
+    assert!(
+        report.is_clean(),
+        "a correct child must be silent: {:?}",
+        codes(&report)
+    );
+}
