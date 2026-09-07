@@ -1989,3 +1989,57 @@ argumento que antes sólo aceptaba archivos. `--strict` significa exactamente lo
 significaba → ADP no afectado.
 
 **Estado.** done.
+
+---
+
+## 37. El motor deja de imprimir el valor que rechaza
+
+**Qué.** Cierra **L4 y L5**, y un tercer sitio que no estaba en la lista y era el peor.
+
+El linter dejó de publicar valores en la §26. Los caminos que toma **el motor** al
+rechazar un grafo quedaron abiertos, y los tres imprimían el string ofensor porque serde
+renderiza `Unexpected::Str` literalmente:
+
+| Sitio | Lo que imprimía |
+|---|---|
+| `graph.rs` — `node_schema` malformado (**L4**) | `invalid type: string "sk-live-…"` |
+| `validate_mcp_config` — URL no-HTTPS (**L5**) | `got 'http://host/x?token=sk-live-…'` |
+| `validate_mcp_config` — bloque `mcp` malformado (**no listado**) | `invalid type: string "Bearer sk-live-…"` |
+
+**El tercero es el más grave** y no estaba anotado: `mcp.headers` es exactamente donde
+vive un bearer token, y escribir `headers: "Bearer …"` en vez de un mapa es la forma
+ordinaria de equivocarse. Se midió antes de arreglarlo, con un secreto reconocible, para
+no afirmar una fuga sin verla.
+
+### Cómo quedaron
+
+```
+L4  -> malformed node_schema: `api_key` is a string
+L5  -> MCP server URL must be HTTPS, got scheme 'http' (…)
+L5b -> the 'mcp' block on this tool is malformed (`headers` is a string, `url` is a
+       string). Valid fields are url, transport (…), headers (string map), …
+```
+
+Quitar la fuga quitando la información no habría sido un arreglo: los tres siguen
+nombrando la clave o el esquema, que es la parte accionable.
+
+**`unreadable_schema_shape` se movió del linter al dominio compartido**, que es lo que el
+backlog prescribía: ahora el motor y el linter dicen literalmente lo mismo sobre un
+`node_schema` ilegible, por la misma función, y no pueden volver a separarse.
+
+El tercer sitio necesitó una función nueva, `describe_object_shapes`. **Lista todas las
+claves, no sólo la ofensora**, y eso es deliberado: serde no dice qué campo le disgustó, y
+re-derivarlo significaría repetir la spec acá, donde envejecería. Con cinco claves como
+máximo, el lector la encuentra comparando contra la lista de campos válidos que el
+llamador ya agrega.
+
+**Verificación.** Tres mutaciones, cada una reintroduce su fuga y pone el test en rojo. Un
+cuarto test fija que un bloque `mcp` **válido** sigue aceptándose — una guarda que rechaza
+todo no prueba nada — y un quinto imprime los tres mensajes para que se vea que siguen
+siendo accionables.
+
+**Alcance.** Cambia el texto de tres mensajes de error. Ningún código de error ni ninguna
+condición de rechazo cambió → ADP no afectado, salvo que algo estuviera parseando esos
+strings, que nunca fue contrato.
+
+**Estado.** done.
