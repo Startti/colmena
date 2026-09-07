@@ -16,21 +16,109 @@ use std::sync::Arc;
 use serde_json::Value;
 
 use crate::dag_engine::infrastructure::mcp_registry::McpConnectionRegistry;
-use crate::llm::domain::mcp::McpClientPort;
+use crate::llm::domain::mcp::{McpClientPort, McpError};
 
 use super::bind::McpBinding;
 use super::contain::{contain, nonce_for};
 use super::wire::McpRoute;
+
+/// Why a dispatch ended the way it did — the OPERATOR's failure-class signal.
+///
+/// `mcp.dispatch_failed` used to look identical for a timeout, a transport
+/// drop, a server-reported tool error, a missing route and a secure-value
+/// refusal — all warn lines carrying only `tool`/`tool_call_id`/`ms`. That
+/// makes triaging a degraded third party from the log alone impossible: a
+/// hanging server and a reachable-but-erroring one are indistinguishable.
+/// This enum is the stable, snake_case vocabulary a log line (or a dashboard
+/// built on it) can key on — labels must never change shape once shipped,
+/// which is why [`DispatchKind::label`] is unit-tested exhaustively, mirroring
+/// [`super::wire::FetchFailure`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DispatchKind {
+    /// The call reached the server and it answered without `isError`.
+    Ok,
+    /// `exposed_name` is not in the route table built at exposure.
+    Unrouted,
+    /// The route exists, but no binding for its alias is live this run.
+    Unbound,
+    /// Refused before the network: an argument carried a secure-value handle.
+    RefusedSecret,
+    /// The server answered `tools/call` with `isError: true`.
+    ServerError,
+    /// [`McpError::Timeout`].
+    Timeout,
+    /// [`McpError::Transport`].
+    Transport,
+    /// [`McpError::Handshake`].
+    Handshake,
+    /// [`McpError::Protocol`].
+    Protocol,
+    /// [`McpError::ToolNotFound`].
+    ToolNotFound,
+    /// [`McpError::ToolCallFailed`].
+    ToolCallFailed,
+    /// [`McpError::SchemaTooLarge`].
+    SchemaTooLarge,
+    /// [`McpError::InvalidConfig`].
+    InvalidConfig,
+}
+
+impl DispatchKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Unrouted => "unrouted",
+            Self::Unbound => "unbound",
+            Self::RefusedSecret => "refused_secret",
+            Self::ServerError => "server_error",
+            Self::Timeout => "timeout",
+            Self::Transport => "transport",
+            Self::Handshake => "handshake",
+            Self::Protocol => "protocol",
+            Self::ToolNotFound => "tool_not_found",
+            Self::ToolCallFailed => "tool_call_failed",
+            Self::SchemaTooLarge => "schema_too_large",
+            Self::InvalidConfig => "invalid_config",
+        }
+    }
+}
+
+/// Classify a domain [`McpError`] into the infrastructure-level
+/// [`DispatchKind`] vocabulary.
+///
+/// Lives here, not on `McpError` itself: `llm::domain::mcp` has the hard
+/// "ZERO infrastructure dependencies" rule (see its module doc), and
+/// `DispatchKind` is infrastructure — it names dag_engine dispatch outcomes
+/// that have no meaning inside the domain (e.g. `Unrouted`/`Unbound` are
+/// routing-table concepts the domain never sees). A free `From` impl here
+/// keeps the mapping in the crate that owns both types without adding a
+/// dependency in the wrong direction.
+impl From<&McpError> for DispatchKind {
+    fn from(err: &McpError) -> Self {
+        match err {
+            McpError::Timeout { .. } => Self::Timeout,
+            McpError::Transport { .. } => Self::Transport,
+            McpError::Handshake { .. } => Self::Handshake,
+            McpError::Protocol { .. } => Self::Protocol,
+            McpError::ToolNotFound { .. } => Self::ToolNotFound,
+            McpError::ToolCallFailed { .. } => Self::ToolCallFailed,
+            McpError::SchemaTooLarge { .. } => Self::SchemaTooLarge,
+            McpError::InvalidConfig { .. } => Self::InvalidConfig,
+        }
+    }
+}
 
 /// One dispatched call: what the model reads, and whether it worked.
 ///
 /// The flag exists for the OPERATOR. `output` is contained text either way and a
 /// caller cannot tell success from failure by looking at it, so without this a
 /// server failing every call is indistinguishable from one working perfectly in
-/// any log.
+/// any log. `kind` is the finer-grained failure class behind that flag — see
+/// [`DispatchKind`].
 pub struct McpDispatched {
     pub output: String,
     pub failed: bool,
+    pub kind: DispatchKind,
 }
 
 /// Everything needed to route one turn's MCP calls.
@@ -98,6 +186,7 @@ impl McpDispatcher {
                     true,
                 ),
                 failed: true,
+                kind: DispatchKind::Unrouted,
             };
         };
         let Some(binding) = self.bindings.get(&route.alias) else {
@@ -110,6 +199,7 @@ impl McpDispatcher {
                     true,
                 ),
                 failed: true,
+                kind: DispatchKind::Unbound,
             };
         };
 
@@ -129,6 +219,7 @@ impl McpDispatcher {
                         true,
                     ),
                     failed: true,
+                    kind: DispatchKind::from(&e),
                 }
             }
         };
@@ -139,6 +230,7 @@ impl McpDispatcher {
             &route.tool,
             &nonce,
             arguments,
+            tool_call_id,
         )
         .await
     }
@@ -158,6 +250,7 @@ async fn call_and_contain(
     tool: &str,
     nonce: &str,
     arguments: Value,
+    tool_call_id: &str,
 ) -> McpDispatched {
     if let Some(path) = resolved_secret_in(&arguments) {
         // Refused before the network, so the value never leaves the process.
@@ -166,6 +259,7 @@ async fn call_and_contain(
             event = "mcp.dispatch_refused_secret",
             alias = %alias,
             tool = %tool,
+            tool_call_id = %tool_call_id,
             path = %path,
             "refused an MCP call carrying a secure-value handle"
         );
@@ -182,6 +276,7 @@ async fn call_and_contain(
                 ),
                 true,
             ),
+            kind: DispatchKind::RefusedSecret,
         };
     }
 
@@ -193,10 +288,16 @@ async fn call_and_contain(
         Ok(result) => McpDispatched {
             output: contain(alias, tool, nonce, &result.content, result.is_error),
             failed: result.is_error,
+            kind: if result.is_error {
+                DispatchKind::ServerError
+            } else {
+                DispatchKind::Ok
+            },
         },
         Err(e) => McpDispatched {
             output: contain(alias, tool, nonce, &format!("the call failed: {e}"), true),
             failed: true,
+            kind: DispatchKind::from(&e),
         },
     }
 }
@@ -328,6 +429,7 @@ mod tests {
             "thing",
             "abcd1234",
             serde_json::json!({}),
+            "call_1",
         )
         .await
         .output;
@@ -348,6 +450,7 @@ mod tests {
             "t",
             "n1",
             serde_json::json!({}),
+            "call_1",
         )
         .await
         .output;
@@ -357,6 +460,7 @@ mod tests {
             "t",
             "n1",
             serde_json::json!({}),
+            "call_1",
         )
         .await
         .output;
@@ -380,7 +484,7 @@ mod tests {
         let server = answering("ok", false);
         let args = serde_json::json!({ "library": "serde", "topic": "derive" });
 
-        call_and_contain(&server, "srv", "thing", "abcd1234", args.clone()).await;
+        call_and_contain(&server, "srv", "thing", "abcd1234", args.clone(), "call_1").await;
 
         let seen = server.seen.lock().expect("not poisoned").clone();
         assert_eq!(seen, Some(args), "the server did not receive the arguments");
@@ -398,6 +502,7 @@ mod tests {
             "thing",
             "abcd1234",
             serde_json::json!({}),
+            "call_1",
         )
         .await
         .output;
@@ -416,6 +521,7 @@ mod tests {
             OTHER_TOOL,
             "abcd1234",
             serde_json::json!({}),
+            "call_1",
         )
         .await
         .output;
@@ -438,9 +544,16 @@ mod tests {
             seen: std::sync::Mutex::new(None),
         };
 
-        let out = call_and_contain(&broken, "srv", "thing", "abcd1234", serde_json::json!({}))
-            .await
-            .output;
+        let out = call_and_contain(
+            &broken,
+            "srv",
+            "thing",
+            "abcd1234",
+            serde_json::json!({}),
+            "call_1",
+        )
+        .await
+        .output;
 
         assert!(out.contains("the call failed"), "reason missing: {out}");
         assert!(out.ends_with("<<<END_UNTRUSTED_MCP id=abcd1234>>>"));
@@ -512,6 +625,7 @@ mod tests {
             "thing",
             "n1",
             serde_json::json!({}),
+            "call_1",
         )
         .await;
         assert!(!ok.failed, "a success was reported as a failure");
@@ -522,6 +636,7 @@ mod tests {
             "thing",
             "n1",
             serde_json::json!({}),
+            "call_1",
         )
         .await;
         assert!(
@@ -540,6 +655,7 @@ mod tests {
             "thing",
             "n1",
             serde_json::json!({}),
+            "call_1",
         )
         .await;
         assert!(
@@ -560,6 +676,7 @@ mod tests {
             "thing",
             "abcd1234",
             serde_json::json!({ "note": "hi", "creds": { "token": "<sv_admin_1a2b3c4d>" } }),
+            "call_1",
         )
         .await
         .output;
@@ -693,5 +810,181 @@ mod tests {
             "<<<END_UNTRUSTED_MCP id={}>>>",
             nonce_for("call_a")
         )));
+    }
+
+    /// Every label, pinned. Mirrors `wire.rs`'s
+    /// `fetch_failure_labels_are_stable` — these strings are the operator's
+    /// vocabulary for triaging `mcp.dispatch_failed`, and any silent rename
+    /// breaks whatever dashboard or alert keys on them.
+    #[test]
+    fn dispatch_kind_labels_are_stable() {
+        assert_eq!(DispatchKind::Ok.label(), "ok");
+        assert_eq!(DispatchKind::Unrouted.label(), "unrouted");
+        assert_eq!(DispatchKind::Unbound.label(), "unbound");
+        assert_eq!(DispatchKind::RefusedSecret.label(), "refused_secret");
+        assert_eq!(DispatchKind::ServerError.label(), "server_error");
+        assert_eq!(DispatchKind::Timeout.label(), "timeout");
+        assert_eq!(DispatchKind::Transport.label(), "transport");
+        assert_eq!(DispatchKind::Handshake.label(), "handshake");
+        assert_eq!(DispatchKind::Protocol.label(), "protocol");
+        assert_eq!(DispatchKind::ToolNotFound.label(), "tool_not_found");
+        assert_eq!(DispatchKind::ToolCallFailed.label(), "tool_call_failed");
+        assert_eq!(DispatchKind::SchemaTooLarge.label(), "schema_too_large");
+        assert_eq!(DispatchKind::InvalidConfig.label(), "invalid_config");
+    }
+
+    /// A secure-value refusal must be classified `refused_secret`, not folded
+    /// into a generic failure — this is the one refusal path that never
+    /// touches the network.
+    #[tokio::test]
+    async fn a_secure_value_refusal_is_kind_refused_secret() {
+        let server = answering("ok", false);
+
+        let dispatched = call_and_contain(
+            &server,
+            "srv",
+            "thing",
+            "abcd1234",
+            serde_json::json!({ "creds": { "token": "<sv_admin_1a2b3c4d>" } }),
+            "call_1",
+        )
+        .await;
+
+        assert_eq!(dispatched.kind, DispatchKind::RefusedSecret);
+    }
+
+    /// The server saying `isError: true` is a reachable server reporting a
+    /// tool failure — distinct from every transport-level `McpError`.
+    #[tokio::test]
+    async fn a_server_reported_error_is_kind_server_error() {
+        let dispatched = call_and_contain(
+            &answering("it broke", true),
+            "srv",
+            "thing",
+            "n1",
+            serde_json::json!({}),
+            "call_1",
+        )
+        .await;
+
+        assert_eq!(dispatched.kind, DispatchKind::ServerError);
+    }
+
+    /// A clean success is `Ok`, not just "not failed" — the success path also
+    /// carries a `kind`, so the log field is always present.
+    #[tokio::test]
+    async fn a_clean_success_is_kind_ok() {
+        let dispatched = call_and_contain(
+            &answering("fine", false),
+            "srv",
+            "thing",
+            "n1",
+            serde_json::json!({}),
+            "call_1",
+        )
+        .await;
+
+        assert_eq!(dispatched.kind, DispatchKind::Ok);
+    }
+
+    /// Every `McpError` variant maps to its own `DispatchKind`, reached
+    /// through the real `Err(e)` transport-failure branch of
+    /// `call_and_contain` — not just the `From` impl in isolation.
+    #[tokio::test]
+    async fn every_mcp_error_variant_maps_to_its_dispatch_kind() {
+        let cases: Vec<(McpError, DispatchKind)> = vec![
+            (
+                McpError::Timeout {
+                    server: "s".into(),
+                    seconds: 5,
+                },
+                DispatchKind::Timeout,
+            ),
+            (
+                McpError::Transport {
+                    server: "s".into(),
+                    reason: "reset".into(),
+                },
+                DispatchKind::Transport,
+            ),
+            (
+                McpError::Handshake {
+                    server: "s".into(),
+                    detail: "bad".into(),
+                },
+                DispatchKind::Handshake,
+            ),
+            (
+                McpError::Protocol {
+                    server: "s".into(),
+                    detail: "bad".into(),
+                },
+                DispatchKind::Protocol,
+            ),
+            (
+                McpError::ToolNotFound {
+                    server: "s".into(),
+                    tool: "t".into(),
+                },
+                DispatchKind::ToolNotFound,
+            ),
+            (
+                McpError::ToolCallFailed {
+                    server: "s".into(),
+                    tool: "t".into(),
+                    message: "bad".into(),
+                },
+                DispatchKind::ToolCallFailed,
+            ),
+            (
+                McpError::SchemaTooLarge {
+                    tool: "t".into(),
+                    bytes: 1,
+                    limit: 1,
+                },
+                DispatchKind::SchemaTooLarge,
+            ),
+            (
+                McpError::InvalidConfig {
+                    detail: "bad".into(),
+                },
+                DispatchKind::InvalidConfig,
+            ),
+        ];
+
+        for (err, expected) in cases {
+            let dispatched = call_and_contain(
+                &FakeServer {
+                    answer: Err(err.clone()),
+                    seen: std::sync::Mutex::new(None),
+                },
+                "srv",
+                "thing",
+                "n1",
+                serde_json::json!({}),
+                "call_1",
+            )
+            .await;
+            assert_eq!(
+                dispatched.kind, expected,
+                "McpError::{err:?} did not map to {expected:?}"
+            );
+        }
+    }
+
+    /// The two failure paths that never reach `call_and_contain` — unrouted
+    /// and unbound — must each carry their own kind, not fall back to a
+    /// generic failure.
+    #[tokio::test]
+    async fn unrouted_and_unbound_paths_carry_their_own_kind() {
+        let d = dispatcher(&[("srv__thing", "srv", "thing")]);
+
+        let unrouted = d
+            .call("srv__missing", serde_json::json!({}), "call_1")
+            .await;
+        assert_eq!(unrouted.kind, DispatchKind::Unrouted);
+
+        let unbound = d.call("srv__thing", serde_json::json!({}), "call_1").await;
+        assert_eq!(unbound.kind, DispatchKind::Unbound);
     }
 }
