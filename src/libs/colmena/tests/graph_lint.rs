@@ -2528,3 +2528,69 @@ fn no_diagnostic_message_is_flooded_by_a_long_identifier() {
         }
     }
 }
+
+// ── The catalog's example, cited where the author needs it ──────────────────
+//
+// `MISSING_REQUIRED_FIELD` said what was absent and never what the field should
+// look like, while the catalog it already loads carries a written example for
+// 156 of its 237 fields. These pin that the example reaches the message.
+
+/// The motivating case: `orchestrator.agents` is the finding that blocked the
+/// lint gate, and its example shows the exact shape the author was missing.
+#[test]
+fn a_missing_required_field_cites_the_catalog_example() {
+    let report = lint(serde_json::json!({
+        "nodes": { "orch": { "type": "orchestrator", "config": {} } },
+        "edges": []
+    }));
+    let d = report
+        .diagnostics
+        .iter()
+        .find(|d| {
+            d.code == DiagnosticCode::MissingRequiredField && d.field.as_deref() == Some("agents")
+        })
+        .expect("agents is required and unset");
+    let s = d.suggestion.as_deref().unwrap_or_default();
+    assert!(
+        s.contains("child_graph_inline") && s.contains("description"),
+        "the suggestion must carry the catalog's own example, got: {s}"
+    );
+}
+
+/// The softened case keeps its hedge AND gains the example: a warning is where
+/// the author is most likely to be guessing at the shape.
+#[test]
+fn the_softened_warning_keeps_its_hedge_and_gains_the_example() {
+    let report = lint(serde_json::json!({
+        "nodes": {
+            "src": { "type": "input", "config": {} },
+            "chat": { "type": "llm_call", "config": { "model": "gpt-4o" } }
+        },
+        "edges": [{ "from": "src", "to": "chat" }]
+    }));
+    let d = report
+        .diagnostics
+        .iter()
+        .find(|d| {
+            d.code == DiagnosticCode::MissingRequiredField && d.field.as_deref() == Some("provider")
+        })
+        .expect("provider is required and unset");
+    let s = d.suggestion.as_deref().unwrap_or_default();
+    assert!(s.contains("incoming edge"), "hedge must survive, got: {s}");
+    assert!(s.contains("openai"), "example must be cited, got: {s}");
+}
+
+/// A field the catalog documents without an example must not acquire an
+/// invented one. Silence is the honest output; a made-up example is worse than
+/// none because the reader cannot tell it apart from a documented one.
+#[test]
+fn a_field_with_no_catalog_example_gets_no_invented_one() {
+    let ctx = LintContext::from_catalog();
+    let missing = ctx
+        .catalog
+        .field_example("llm_call", "no_such_field_at_all");
+    assert!(
+        missing.is_none(),
+        "an undocumented field has no example to cite"
+    );
+}

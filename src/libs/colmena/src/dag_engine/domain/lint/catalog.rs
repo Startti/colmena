@@ -333,6 +333,17 @@ pub struct NodeCatalog {
     /// node level.
     input_ports: BTreeMap<String, BTreeSet<String>>,
 
+    /// The written example for a config field, keyed node type -> field.
+    ///
+    /// Prose, and kept OUTSIDE [`NodeCatalogEntry`] for the same reason
+    /// `input_ports` is: phase 2's cross-check compares a node's
+    /// `config_schema()` against the whole entry, and the agreed scope of that
+    /// declaration is the machine facts. An example is hand-authored
+    /// documentation -- putting it in the entry would make every 37 nodes
+    /// declare prose they have no business owning, and would turn a
+    /// documentation improvement into a failing test.
+    field_examples: BTreeMap<String, BTreeMap<String, Value>>,
+
     /// Names valid only inside `tool_configurations`, never as a graph node's
     /// `type`.
     ///
@@ -387,6 +398,27 @@ struct RawInputPortCatalog {
 struct RawInputPorts {
     #[serde(default)]
     input_ports: BTreeMap<String, Value>,
+}
+
+/// A third narrow view, read only for the per-field `example` prose.
+///
+/// Same trade as [`RawInputPortCatalog`]: another cheap pass over a document
+/// already in memory, in exchange for leaving phase 2's comparison alone.
+#[derive(Debug, Deserialize)]
+struct RawExampleCatalog {
+    node_types: BTreeMap<String, RawExampleEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawExampleEntry {
+    #[serde(default)]
+    config_fields: BTreeMap<String, RawExampleField>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawExampleField {
+    #[serde(default)]
+    example: Option<Value>,
 }
 
 /// The `tool_only_node_types` section, read from the same document.
@@ -447,12 +479,27 @@ impl NodeCatalog {
             .map(|(node_type, p)| (node_type, p.input_ports.into_keys().collect()))
             .collect();
 
+        let examples: RawExampleCatalog = serde_json::from_str(json)?;
+        let field_examples = examples
+            .node_types
+            .into_iter()
+            .map(|(node_type, entry)| {
+                let fields = entry
+                    .config_fields
+                    .into_iter()
+                    .filter_map(|(field, f)| f.example.map(|e| (field, e)))
+                    .collect();
+                (node_type, fields)
+            })
+            .collect();
+
         Ok(NodeCatalog {
             node_types: raw.node_types,
             node_level_properties,
             declared_node_types,
             common_config_fields: raw.common_config_fields.fields,
             input_ports,
+            field_examples,
             tool_only_types: raw
                 .tool_only_node_types
                 .types
@@ -477,6 +524,16 @@ impl NodeCatalog {
     /// coverage.
     ///
     /// `None` means "cannot check", never "nothing is allowed".
+    /// The catalog's written example for one config field, if it has one.
+    ///
+    /// `None` is the honest answer for a field the catalog documents without an
+    /// example, and for one it does not document at all. A caller must not
+    /// invent a substitute: a reader cannot tell a made-up example from a
+    /// documented one, which makes a wrong guess more expensive than silence.
+    pub fn field_example(&self, node_type: &str, field: &str) -> Option<&Value> {
+        self.field_examples.get(node_type)?.get(field)
+    }
+
     pub fn entry(&self, node_type: &str) -> Option<&NodeCatalogEntry> {
         self.node_types.get(node_type)
     }

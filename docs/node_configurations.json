@@ -2390,7 +2390,7 @@
               "child_graph_inline": {
                 "nodes": {
                   "in": { "type": "input", "config": {} },
-                  "llm": { "type": "llm_call", "config": {} },
+                  "llm": { "type": "llm_call", "config": { "provider": "google", "model": "gemini-2.5-flash", "api_key": "${GEMINI_API_KEY}" } },
                   "out": { "type": "output", "config": {} }
                 },
                 "edges": [
