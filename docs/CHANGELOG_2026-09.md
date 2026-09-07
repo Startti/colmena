@@ -2612,3 +2612,45 @@ agentes que corrieron: packing_expert      totalTokens: 1793
 ```
 
 Respuesta poblada, con lista de equipo y ropa.
+
+---
+
+## 47. Sale del repo una credencial de base de datos
+
+Tres archivos versionados llevaban una cadena de conexión completa —usuario, contraseña,
+host y base— a la instancia Postgres compartida.
+
+| Archivo | Qué era | Arreglo |
+|---|---|---|
+| `src/libs/colmena/output.log` | un log de ejecución commiteado por accidente | fuera del versionado + `.gitignore` |
+| `tests/graphs/external/adp_canvas_load_test.json` | la cadena literal en `connection_url` | `${DATABASE_URL}`, el placeholder que el catálogo documenta |
+| `docs/superpowers/plans/2026-04-29-adp-deploy-with-skills.md` | dos citas del script de deploy | valor redactado, forma conservada |
+
+### El origen ya estaba cerrado; esto son las copias
+
+La credencial no se escribió a mano en el log: **el motor la imprimía en cada arranque**
+(`DEBUG: DATABASE_URL=Ok("postgresql://…")`), y el log commiteado fue el lugar donde quedó
+una copia visible. Ese `print` se removió en `d273a666`; hoy `engine.rs:104` lee la
+variable con `std::env::var` y sólo la nombra en el mensaje de error **cuando falta**,
+nunca su valor. Verificado sobre el código en disco, no sobre el recuerdo.
+
+Vale nombrar el alcance que eso implica: mientras el `print` existió, la credencial pudo
+quedar en cualquier log de cualquier ejecución, no sólo en el que terminó en git.
+
+### Lo que este cambio NO hace
+
+**No cierra la exposición.** El valor sigue en el historial de git, y también en el repo
+de ADP, donde `deploy_gcp.sh` lo tiene como *default operativo* — si alguien corre ese
+script sin `DATABASE_URL` en el entorno, despliega los servicios con esa credencial. Eso
+va en un cambio aparte, en ese repo.
+
+**Lo único que cierra el acceso es rotar la contraseña en Cloud SQL.** Borrar archivos no
+la saca del historial, y mientras siga siendo válida el historial alcanza. La rotación
+corta `colmena-worker`, `colmena-api` y el job `attachment-gc` hasta que se redespliegan,
+así que necesita ventana y coordinación — no es una acción de este PR.
+
+### La regla, que importa más que el borrado
+
+`**/output.log` entra al `.gitignore` con el motivo escrito al lado. Sacar el archivo
+arregla este caso; la regla evita el siguiente, que es donde estaba el agujero real: un
+log de ejecución versionado publica lo que sea que el proceso haya impreso ese día.
