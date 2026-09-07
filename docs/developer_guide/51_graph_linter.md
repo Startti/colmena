@@ -862,20 +862,19 @@ claves que se perdían.
   migrado los dos ya no pueden diverger. La prosa (`description`/`example`/`default`)
   sigue viviendo en el JSON a propósito — es lo que leen humanos y agentes. Los
   nodos que todavía devuelven `None` siguen respaldados solo por el catálogo.
-- **De las cinco compuertas de `Graph::validate()`, el linter reproduce una.** Esta
-  es la limitación que más conviene tener presente, porque decide qué significa un
-  reporte limpio. `MALFORMED_TOOL_ENTRY` reproduce el brazo `node_schema`. Las otras
-  cuatro rechazan el grafo al cargar y el linter **no dice nada**: un `memory_mode`
-  con un valor que no es del enum, uno sobre un tipo de nodo que no lleva memoria,
-  uno que lleva memoria sin `connection_url`, y un bloque `mcp` malformado o con URL
-  no-HTTPS. Hay una sexta fuera de las entradas de tool —un node id que contiene
-  `/`— que tampoco se revisa.
+- **De las compuertas que `Graph::validate()` aplica a una entrada de tool, el linter
+  reproduce las cinco.** `MALFORMED_TOOL_ENTRY` las cubre todas: el `node_schema`
+  ilegible, un `memory_mode` fuera del enum, uno sobre un tipo de nodo que no lleva
+  memoria, uno que lleva memoria sin `connection_url`, y un bloque `mcp` malformado o
+  con URL no-HTTPS.
 
-  **Qué significa entonces "no findings":** que el linter no encontró nada de lo que
-  sabe buscar, no que el motor vaya a cargar el grafo. El motor sigue siendo la
-  autoridad y falla cerrado en los cinco casos, así que lo que se pierde es el aviso
-  temprano, nunca una ejecución sin guardia. Los items abiertos están en el
-  [BACKLOG](../BACKLOG.md) como L1 y L1b.
+  Cuatro de las cinco **llaman a la misma función de dominio** que usa `validate()`,
+  así que no pueden divergir. La quinta —el enum `memory_mode`— no tiene función de
+  dominio: `graph.rs` lo deserializa inline, y el linter hace lo mismo.
+
+  Queda una compuerta afuera, la única que no es sobre una entrada de tool: un node id
+  que contiene `/`, reservado para calificar paths de subgrafo. Abierta en el
+  [BACKLOG](../BACKLOG.md) como L1b.
 
   *(Esta viñeta decía hasta la §22 que los campos de una tool no se cruzaban contra
   su `node_type`. Eso se cerró en esa misma sección y la limitación quedó vieja
