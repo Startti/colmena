@@ -11,10 +11,10 @@
 //!
 //! Deliberately outside `tests/graphs/`. That tree is the corpus the linter's
 //! noise is measured over — 303 realistic graphs, `error=75 warning=5` — and
-//! dropping eighteen deliberately-broken files into it would poison the one
-//! number that says whether the tool is worth listening to.
+//! dropping deliberately-broken files into it would poison the one number that
+//! says whether the tool is worth listening to.
 
-use colmena::dag_engine::domain::lint::{lint_graph_json, LintContext};
+use colmena::dag_engine::domain::lint::{lint_graph_json, DiagnosticCode, LintContext};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
@@ -61,6 +61,7 @@ fn expected(name: &str) -> &'static [&'static str] {
             "INVALID_FIELD_VALUE",
         ],
         "18_clean_graph.json" => &[],
+        "19_invalid_node_id.json" => &["INVALID_NODE_ID"],
         other => panic!(
             "example {other} has no entry in this table. Every file in \
              tests/lint_examples/ is shown in guide 51 with its real output; add \
@@ -105,27 +106,19 @@ fn every_example_still_produces_the_diagnosis_the_guide_shows() {
 /// notices — the guide's table grows a row and the catalogue quietly falls
 /// behind it.
 ///
-/// The list is written out rather than derived: `DiagnosticCode` has no
-/// iteration, and adding one here by hand is the point at which someone has to
-/// think about which example demonstrates it.
+/// The list is DERIVED, from `DiagnosticCode::ALL`. It used to be written out
+/// here, on the reasoning that adding it by hand is when someone thinks about
+/// which example demonstrates it. That reasoning failed the first time it was
+/// tested: `INVALID_NODE_ID` shipped and this test stayed green, because a
+/// hand-written list cannot know about a code it was never told about. The
+/// thinking is now forced one level down, by the exhaustive match beside `ALL`
+/// that will not compile until a new variant is handled.
 #[test]
 fn every_diagnostic_code_the_linter_can_emit_has_an_example() {
-    let all_codes: BTreeSet<&str> = [
-        "UNKNOWN_NODE_TYPE",
-        "UNKNOWN_FIELD",
-        "UNKNOWN_NODE_PROPERTY",
-        "MISSING_REQUIRED_FIELD",
-        "INVALID_FIELD_VALUE",
-        "FIELD_TYPE_MISMATCH",
-        "EDGE_UNKNOWN_NODE",
-        "NO_CATALOG_COVERAGE",
-        "DEAD_FIXED_CONFIG",
-        "REPURPOSED_TOOL_FIELD",
-        "TOOL_NEVER_EXPOSED",
-        "MALFORMED_TOOL_ENTRY",
-    ]
-    .into_iter()
-    .collect();
+    // Asked, not copied. This test kept its own hand-written list, and a code
+    // added later slipped past it in silence — the guard demanding an example
+    // for every code did not know the new code existed.
+    let all_codes: BTreeSet<&str> = DiagnosticCode::ALL.iter().map(|c| c.as_str()).collect();
 
     let demonstrated: BTreeSet<&str> = example_files()
         .iter()

@@ -1,0 +1,10 @@
+{
+  "nodes": {
+    "outer/inner": {
+      "type": "log",
+      "config": {}
+    }
+  },
+  "edges": [],
+  "_comment": "INVALID_NODE_ID — the engine reserves '/' for subgraph path qualifiers and refuses this graph at load. It is the one Graph::validate() gate that is not about a tool entry, which is how it stayed unmirrored the longest."
+}
