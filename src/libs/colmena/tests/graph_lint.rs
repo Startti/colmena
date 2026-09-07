@@ -2452,3 +2452,79 @@ fn a_field_defect_inside_node_schema_survives_a_rejected_entry() {
         codes(&report)
     );
 }
+
+// ---------------------------------------------------------------------------
+// L6 — no diagnostic may be flooded by an identifier the author controls
+// ---------------------------------------------------------------------------
+
+/// A report is read in a terminal and in a CI log. `compact()` bounds the one
+/// slot that prints a VALUE, but a node type, a tool alias and a config key are
+/// author-written too, and nothing bounded those: a multi-kilobyte `node_type`
+/// drowned the whole report, text and JSON alike.
+///
+/// This asserts the property rather than patching call sites blindly — it is
+/// what says which of the forty interpolations actually overflow.
+#[test]
+fn no_diagnostic_message_is_flooded_by_a_long_identifier() {
+    let long = "x".repeat(4096);
+    let documents = [
+        // A node type nobody can read.
+        serde_json::json!({
+            "nodes": { "n": { "type": long, "config": { "whatever": 1 } } },
+            "edges": []
+        }),
+        // A tool alias, and a key inside its blocks.
+        serde_json::json!({
+            "nodes": { "agent": { "type": "llm_call", "config": {
+                "provider": "openai", "api_key": "k", "model": "gpt-4o",
+                "tool_configurations": {
+                    long.clone(): { "node_type": "http_request",
+                                    "node_schema": { long.clone(): { "fixed": 1 } } }
+                }
+            }}},
+            "edges": []
+        }),
+        // A config key on an ordinary node.
+        serde_json::json!({
+            "nodes": { "chat": { "type": "llm_call", "config": {
+                "provider": "openai", "api_key": "k", "model": "gpt-4o",
+                long.clone(): 1
+            }}},
+            "edges": []
+        }),
+        // A node property beside `type`/`config`.
+        serde_json::json!({
+            "nodes": { "chat": { "type": "log", long.clone(): 1, "config": {} } },
+            "edges": []
+        }),
+    ];
+
+    // Generous: prose plus a bounded identifier or two. The point is that it
+    // does not scale with the input.
+    const CEILING: usize = 600;
+
+    for document in documents {
+        let report = lint_json(document);
+        assert!(
+            !report.is_clean(),
+            "the fixture must produce findings or it proves nothing"
+        );
+        for d in &report.diagnostics {
+            assert!(
+                d.message.chars().count() <= CEILING,
+                "[{}] message is {} chars — an identifier is unbounded: {}…",
+                d.code.as_str(),
+                d.message.chars().count(),
+                d.message.chars().take(120).collect::<String>()
+            );
+            if let Some(s) = &d.suggestion {
+                assert!(
+                    s.chars().count() <= CEILING,
+                    "[{}] suggestion is {} chars",
+                    d.code.as_str(),
+                    s.chars().count()
+                );
+            }
+        }
+    }
+}

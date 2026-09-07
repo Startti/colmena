@@ -84,7 +84,7 @@ impl Graph {
     pub fn validate(&self) -> Result<(), crate::dag_engine::domain::error::DagError> {
         use crate::dag_engine::domain::error::DagError;
         use crate::dag_engine::domain::tool_configuration::{
-            memory_backend_missing_reason, parse_node_schema, validate_mcp_config,
+            first_parse_rejection, memory_backend_missing_reason, validate_mcp_config,
             validate_memory_mode, MemoryMode, NodeSchema,
         };
 
@@ -191,11 +191,21 @@ impl Graph {
                             ),
                         }
                     })?;
-                parse_node_schema(&schema).map_err(|reason| DagError::InvalidToolSchema {
-                    node_id: node_id.clone(),
-                    tool_name: tool_name.clone(),
-                    reason,
-                })?;
+                // `first_parse_rejection`, not `parse_node_schema` directly:
+                // the schema is a `HashMap`, so asking about the whole thing
+                // reports whichever bad field the hash order surfaced. With two
+                // of them the engine and the linter could name DIFFERENT ones,
+                // and an operator would fix the field the linter showed only to
+                // meet the other at load. Both now probe in sorted order,
+                // through the same function, which also makes this message
+                // stable between runs of the engine itself.
+                if let Some(reason) = first_parse_rejection(&schema) {
+                    return Err(DagError::InvalidToolSchema {
+                        node_id: node_id.clone(),
+                        tool_name: tool_name.clone(),
+                        reason,
+                    });
+                }
             }
         }
 

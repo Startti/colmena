@@ -10,8 +10,8 @@ use super::catalog::{
 use super::diagnostic::{Diagnostic, DiagnosticCode, LintReport, Severity};
 use crate::dag_engine::domain::graph::{Graph, NodeConfig};
 use crate::dag_engine::domain::tool_configuration::{
-    memory_backend_missing_reason, parse_node_schema, unreadable_schema_shape, validate_mcp_config,
-    validate_memory_mode, MemoryMode, NodeSchema,
+    first_parse_rejection, memory_backend_missing_reason, unreadable_schema_shape,
+    validate_mcp_config, validate_memory_mode, MemoryMode, NodeSchema,
 };
 use serde_json::{Map, Value};
 use std::collections::BTreeSet;
@@ -312,38 +312,6 @@ fn node_schema_rejection(entry: &Value) -> Option<String> {
     }
 }
 
-/// The first reason `parse_node_schema` refuses a schema, chosen deterministically.
-///
-/// Asking it about the whole schema at once would be the obvious call, and it
-/// is what `Graph::validate` does. But `NodeSchema` is a `HashMap` and
-/// `parse_node_schema` returns on the FIRST field it dislikes, so with two bad
-/// fields the reason it names depends on this process's hash seed — two `lint`
-/// runs over the same bytes would print different sentences into a report meant
-/// to be diffed. That is tolerable for a load-time crash and not for a linter.
-///
-/// So it is asked one field at a time, in sorted key order, and the first
-/// complaint wins. Same function, same verdict, stable sentence.
-///
-/// The whole schema is passed at the end as a DRIFT GUARD, not because it
-/// catches anything today: every error `parse_node_schema` can return lives in
-/// its per-field loop, and its second pass — the one that renames colliding
-/// container children — has no error path at all, so a schema whose fields all
-/// probe clean cannot fail as a whole. Verified against the binary with two
-/// containers sharing a child key: no finding. The call costs one pass and
-/// means that the day that function grows a genuinely cross-field error, the
-/// linter reports it instead of silently passing the entry.
-fn first_parse_rejection(schema: &NodeSchema) -> Option<String> {
-    let mut keys: Vec<&String> = schema.keys().collect();
-    keys.sort();
-    for key in keys {
-        let one: NodeSchema = std::iter::once((key.clone(), schema[key].clone())).collect();
-        if let Some(reason) = parse_node_schema(&one).err() {
-            return Some(reason);
-        }
-    }
-    parse_node_schema(schema).err()
-}
-
 /// The gates `Graph::validate` applies to a tool entry besides `node_schema`.
 ///
 /// `MALFORMED_TOOL_ENTRY` covered the `node_schema` arm; these are the other
@@ -619,8 +587,10 @@ fn lint_raw_tool_fields(document: &Value, ctx: &LintContext<'_>, report: &mut Li
                     node_id: Some(node_id.clone()),
                     field: Some(format!("tool_configurations.{tool_name}")),
                     message: format!(
-                        "tool \"{tool_name}\" targets \"{node_type}\", which has no entry in \
-                         the node catalog, so its configuration was not checked"
+                        "tool \"{}\" targets \"{}\", which has no entry in \
+                         the node catalog, so its configuration was not checked",
+                        ident(tool_name),
+                        ident(node_type)
                     ),
                     // Now that the catalog names the synthetic tools, a near
                     // miss of one is worth saying out loud: before this the
@@ -893,16 +863,22 @@ fn undeclared_tool_field(
             Severity::Warning,
             DiagnosticCode::RepurposedToolField,
             format!(
-                "\"{key}\" is not a field of \"{node_type}\"; that node type does not ignore an \
+                "\"{}\" is not a field of \"{}\"; that node type does not ignore an \
                  unknown key, it repurposes it — the value will be sent as a query parameter \
-                 instead of configuring the node"
+                 instead of configuring the node",
+                ident(key),
+                ident(node_type)
             ),
             "remove it, or use the field that does what you meant",
         ),
         _ => (
             Severity::Error,
             DiagnosticCode::UnknownField,
-            format!("\"{key}\" is not a field of \"{node_type}\", so the node never reads it"),
+            format!(
+                "\"{}\" is not a field of \"{}\", so the node never reads it",
+                ident(key),
+                ident(node_type)
+            ),
             "remove it, or check docs/node_configurations.json for the field you meant",
         ),
     };
@@ -997,8 +973,9 @@ fn lint_raw_node_properties(document: &Value, ctx: &LintContext<'_>, report: &mu
                 node_id: Some(node_id.clone()),
                 field: Some(key.clone()),
                 message: format!(
-                    "\"{key}\" is not a property of a node; the engine discards it when \
-                     loading the graph"
+                    "\"{}\" is not a property of a node; the engine discards it when \
+                     loading the graph",
+                    ident(key)
                 ),
                 suggestion: suggest(key, allowed.iter().copied())
                     .map(|s| format!("did you mean \"{s}\"?"))
@@ -1079,7 +1056,7 @@ fn lint_node(
                 field: None,
                 message: format!(
                     "\"{}\" is not a node type this engine can run",
-                    node.node_type
+                    ident(&node.node_type)
                 ),
                 // A tool-only name gets the same advice here as under the
                 // other two contexts. Which `KnownNodeTypes` the caller happens
@@ -1121,7 +1098,7 @@ fn lint_node(
                         "\"{}\" is not a node type; it is only valid as the \
                          `node_type` of an entry inside a tool's \
                          `tool_configurations`",
-                        node.node_type
+                        ident(&node.node_type)
                     ),
                     suggestion: Some(
                         "move it into the `tool_configurations` of an `llm_call`, or use \
@@ -1139,7 +1116,10 @@ fn lint_node(
                     code: DiagnosticCode::UnknownNodeType,
                     node_id: Some(node_id.to_string()),
                     field: None,
-                    message: format!("\"{}\" is not a documented node type", node.node_type),
+                    message: format!(
+                        "\"{}\" is not a documented node type",
+                        ident(&node.node_type)
+                    ),
                     suggestion: Some(format!("did you mean \"{near}\"?")),
                 },
                 // Absence from the catalog is PROOF here, not a gap. `node_types`
@@ -1164,7 +1144,7 @@ fn lint_node(
                         "\"{}\" is not a node type this engine can run; the catalog \
                          documents every type the registry has, in both directions, and \
                          this is not one of them",
-                        node.node_type
+                        ident(&node.node_type)
                     ),
                     suggestion: Some(
                         "check docs/node_configurations.json for the type you meant".into(),
@@ -1185,7 +1165,7 @@ fn lint_node(
             message: format!(
                 "\"{}\" has no entry in the node catalog, so this node's \
                  configuration was not checked",
-                node.node_type
+                ident(&node.node_type)
             ),
             // A tool-only type here is not an uncovered node: it is a name
             // that belongs one level down, inside `tool_configurations`.
@@ -1196,7 +1176,7 @@ fn lint_node(
                 format!(
                     "\"{}\" is only valid inside a tool's `tool_configurations`, \
                      never as a node's `type`",
-                    node.node_type
+                    ident(&node.node_type)
                 )
             } else {
                 "add an entry to docs/node_configurations.json to enable checking".into()
@@ -1275,7 +1255,11 @@ fn lint_field(
             code: DiagnosticCode::UnknownField,
             node_id: Some(node_id.to_string()),
             field: Some(field.to_string()),
-            message: format!("\"{field}\" is not a configuration field of {node_type}"),
+            message: format!(
+                "\"{}\" is not a configuration field of {}",
+                ident(field),
+                ident(node_type)
+            ),
             suggestion: suggest(
                 field,
                 entry
@@ -1473,6 +1457,24 @@ fn json_type_name(value: &Value) -> &'static str {
         Value::Array(_) => "an array",
         Value::Object(_) => "an object",
     }
+}
+
+/// A bounded rendering of an author-written identifier.
+///
+/// [`compact`] bounds the one slot that prints a VALUE. A node type, a tool
+/// alias and a config key are author-written too, and nothing bounded those: a
+/// multi-kilobyte `node_type` drowned the whole report, text and JSON alike.
+///
+/// The `field` and `node_id` of a [`Diagnostic`] are deliberately NOT passed
+/// through this. Those are addresses — a consumer looks the node up by them —
+/// and a truncated address points nowhere. Only the prose is bounded.
+fn ident(text: &str) -> String {
+    const MAX: usize = 60;
+    if text.chars().count() <= MAX {
+        return text.to_string();
+    }
+    let head: String = text.chars().take(MAX - 3).collect();
+    format!("{head}...")
 }
 
 /// A short rendering of a value for a message, so a huge object cannot flood

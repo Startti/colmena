@@ -2189,3 +2189,50 @@ Corpus `error=75 warning=5 info=0`, sostenido por la cerca de la §38.
 **Alcance.** Aditivo: un `DiagnosticCode` nuevo y dos ramas de consejo → ADP no afectado.
 
 **Estado.** done.
+
+---
+
+## 41. Identificadores acotados, y un solo campo nombrado
+
+**Qué.** Cierra **L6** y **L7**, los dos últimos accionables del track.
+
+### L6 — un identificador ya no inunda el reporte
+
+`compact()` acotaba el único lugar que imprime un **valor**. Un `node_type`, un alias de
+tool y una clave de config los escribe el autor igual, y nada los acotaba: un `node_type`
+de varios KB ahogaba el reporte entero, en texto y en JSON.
+
+No se parchearon las cuarenta interpolaciones a ciegas. Se escribió primero **un test de
+propiedad** —ningún mensaje puede escalar con el tamaño del identificador— y ese test fue
+señalando, uno por uno, **los cinco sitios que realmente se desbordaban**. Los otros
+treinta y cinco interpolan claves del catálogo, acotadas por construcción.
+
+El `field` y el `node_id` de un diagnóstico **no** pasan por ahí: son direcciones —un
+consumidor busca el nodo por ellas— y una dirección truncada no apunta a ningún lado.
+Sólo se acota la prosa.
+
+### L7 — el motor y el linter nombran el mismo campo
+
+Con dos campos malos en un `node_schema`, el linter nombraba el primero alfabético y
+`Graph::validate()` el primero que le daba el `HashMap`. Coincidían en rechazar el grafo y
+discrepaban en cuál mostrar, así que un operador arreglaba el que vio en el lint y se
+encontraba con el otro al cargar.
+
+`first_parse_rejection` se movió al dominio compartido y ahora **la llaman los dos**. Como
+efecto colateral, el mensaje del motor pasa a ser estable entre corridas: antes dependía
+del seed del proceso.
+
+**Una advertencia sobre cómo se verificó esto.** El test pasó la primera vez, **antes** de
+tocar el motor — y no probaba nada: `RandomState` se siembra una vez por proceso, así que
+el `HashMap` da el mismo orden en toda la corrida y repetir el test no varía nada. Lo que
+lo prueba es la mutación: revertir el motor a preguntar por el schema entero lo pone en
+rojo, nombrando `zulu` donde el linter nombra `alpha`. Un test verde sobre un
+comportamiento que depende de un seed es una moneda que salió cara.
+
+**Verificación.** Dos mutaciones: el motor vuelve al orden del `HashMap` → rojo; se
+invierte el orden del probe compartido → rojo. Corpus `error=75 warning=5 info=0`.
+
+**Alcance.** Cambia el texto de algunos mensajes y hace determinista uno del motor. Sin
+cambios de código de error ni de condiciones → ADP no afectado.
+
+**Estado.** done.
