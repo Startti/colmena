@@ -60,10 +60,15 @@
 | llm_tools_memory_test.json | ✅ OK | LLM + tool calling + memory |
 | llm_tools_memory_continuation.json | ✅ OK | Memory continuation |
 | travel_agent_amadeus.json | ✅ OK | Amadeus API integration |
-| trip_planner.json | ✅ OK | Multi-step planner |
 | trip_planner_v2.json | ✅ OK | Planner v2 |
 
-**Status**: ✅ 7/7 OK (100%)
+**Status**: ✅ 6/6 OK (100%)
+
+> `trip_planner.json` was listed here as ✅ OK and was not: it was broken at four
+> independent points (ledger finding #66) and was deleted rather than repaired,
+> since `trip_planner_v2.json` already covers the same case against the current
+> orchestrator contract. This audit checked that the graphs load, not that they
+> reach a populated result.
 
 ---
 

@@ -2320,3 +2320,95 @@ ADP no afectado.
 
 **Estado.** done.
 
+
+---
+
+## 43. Se enciende el gate del linter, y se borra el grafo que lo bloqueaba
+
+`tests/graphs/advanced/trip_planner.json` sale del repo y el lint de CI pasa de
+`--fail-on never` a `--fail-on error`. El corpus queda en **302 archivos, 0 errores,
+3 warnings**.
+
+### Por qué borrar y no arreglar
+
+El grafo reportaba 3 `MISSING_REQUIRED_FIELD` — su `orchestrator` tenía `config: {}`.
+Eso es el **cuarto de cuatro defectos independientes**, ya recorridos con el motor real
+en agosto y registrados como finding #66 del ledger:
+
+| # | Defecto |
+|---|---|
+| 1 | `{"from":"trigger","to":"planner"}` sin prefijo `texts.` → el `information_extraction` no recibía nada |
+| 2 | `trigger.plan → state_merger.injected_plan` es irresoluble por construcción: un `input` con config no vacía emite exactamente las keys que declara, y `plan` no es una |
+| 3 | `state_merger` lee `llm_plan['output']`, pero el payload de un `information_extraction` es el JSON de su `schema` — acá un array, sin key `output` |
+| 4 | `orchestrator` con `config` vacío ← **lo único que ve el linter** |
+
+El defecto 1 mataba el run antes de llegar al orquestador, así que el `config` vacío
+**nunca se ejercitó**. Los defectos 2 y 3 no son cableado sino diseño del grafo.
+
+Y la forma que hacía distinto a este grafo —un orquestador despachando a nodos
+top-level por puertos `dispatched_agents`— **ya no está soportada**
+(`orchestrator.rs:1541`):
+
+```
+Agent 'X' must be a subgraph: add 'child_graph_path' or 'child_graph_inline'
+to its config. Direct LLM agent configs are no longer supported.
+```
+
+Reescrito contra el contrato actual sería una copia de dos agentes de
+`trip_planner_v2.json`, que ya lintea limpio y cubre el mismo caso con tres. Dos docs
+de historia ya lo marcaban `❌ v1, superseded by v2`, y el propio finding #66 cerraba
+pidiendo decidir esto antes de repararlo.
+
+### Por qué `error` y no `warning`
+
+Un warning es el linter diciendo que **no puede probar** el hallazgo mirando sólo el
+grafo. Un gate que bloquea sobre un quizás admitido se gana el pedido de apagar el gate
+entero al primer falso positivo. Lo que bloquea es lo que el linter puede demostrar.
+
+Quedan 3 warnings, todos de `advanced/test_orchestrator.json`, que tiene el mismo
+`config` vacío. Se leen como warning y no como error sólo porque su único edge entrante
+no nombra puerto, y ahí el linter suaviza asumiendo que el valor podría llegar por el
+puerto por defecto. Para el `orchestrator` esa suavización es falsa —
+`orchestrator.rs:223` lee `agents` de `config` y no hay un solo `inputs.get("agents")` en
+el archivo— así que son **errores disfrazados de warning**. Enseñarle eso al linter es
+un cambio propio: BACKLOG **L12**.
+
+### Lo que atrapó cada cosa
+
+La cerca de la §38 se puso en rojo con los números exactos antes de que yo los
+escribiera:
+
+```
+left:  (302, 0, 3, 0)
+right: (303, 3, 3, 0)
+```
+
+Y el guard de doc-links marcó las **5** menciones al grafo en docs vivas. Ninguna se
+borró: son registros de trabajo pasado —la entrada de agosto que encontró los defectos y
+la fila del ledger que los siguió—. El grafo se fue, el hallazgo no. Van al
+`GRAPH_REF_ALLOWLIST` con esa razón escrita, que es para lo que existe.
+
+`tests/graphs/AUDIT_RESULTS.md` listaba este grafo como `✅ OK`. No lo era: esa auditoría
+verificó que los grafos **cargan**, no que llegan a un resultado. Queda dicho ahí.
+
+### E2E
+
+Lo que se borró es un grafo que no llegaba al final en ninguna de sus formas. Lo que lo
+reemplaza sí. `trip_planner_v2.json` corrido por el motor contra Gemini real
+(`gemini-2.5-flash`), con el criterio que pedía el propio finding #66 — *"assert it
+reaches finish with a populated final_response and zero node-skipped frames"*:
+
+```
+finishReason: "stop"        node-skipped: 0
+agentes que corrieron: budget_expert, clothing_expert, gear_expert
+totalTokens: 5828 (prompt 3638, completion 806, thinking 1384)
+```
+
+La respuesta final llega poblada: lista de ropa, lista de equipo y un total de $1555.
+Los tres agentes son `child_graph_inline`, que es la forma que el contrato actual exige y
+la que el grafo borrado no usaba.
+
+- Grafo: `tests/graphs/advanced/trip_planner_v2.json`
+- CI: `.github/workflows/ci-develop.yml`
+- Cerca: `src/libs/colmena/tests/corpus_noise.rs`
+- Ledger: finding #66, cerrado

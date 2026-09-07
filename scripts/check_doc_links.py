@@ -77,11 +77,18 @@ HISTORICAL = ("docs/superpowers", "docs/history", "docs/archive")
 # Their markdown links are still checked.
 PROSPECTIVE = ("docs/qa",)
 
-# A doc may deliberately name a graph that does not exist yet. Each entry must say
-# why, so the exception stays reviewable instead of silently absorbing regressions.
+# A doc may deliberately name a graph that does not exist -- either not yet, or
+# not any more. Each entry must say why, so the exception stays reviewable
+# instead of silently absorbing regressions.
 GRAPH_REF_ALLOWLIST = {
     # BACKLOG proposes creating this graph; it is a to-do, not a claim it exists.
     "tests/graphs/agents/gsheets_overwrite_e2e.json",
+    # Deleted, not missing: broken at four independent points (ledger finding
+    # #66) and superseded by `trip_planner_v2.json`. The docs that still name it
+    # are records of past work -- the 2026-08 changelog entry that found the
+    # defects, and the ledger row that tracked them. Rewriting either to remove
+    # the name would erase what was found; the graph is gone, the finding is not.
+    "tests/graphs/advanced/trip_planner.json",
 }
 
 def targets(path):
