@@ -390,6 +390,45 @@ pub fn json_shape(value: &Value) -> &'static str {
     }
 }
 
+/// The first reason `parse_node_schema` refuses a schema, chosen deterministically.
+///
+/// Asking it about the whole schema at once would be the obvious call, and it
+/// is what `Graph::validate` does. But `NodeSchema` is a `HashMap` and
+/// `parse_node_schema` returns on the FIRST field it dislikes, so with two bad
+/// fields the reason it names depends on this process's hash seed — two `lint`
+/// runs over the same bytes would print different sentences into a report meant
+/// to be diffed. That is tolerable for a load-time crash and not for a linter.
+///
+/// So it is asked one field at a time, in sorted key order, and the first
+/// complaint wins. Same function, same verdict, stable sentence.
+///
+/// `Graph::validate` calls this too. It used to hand the whole schema to
+/// `parse_node_schema` and report whatever the `HashMap` surfaced, so with two
+/// bad fields the engine and the linter could name DIFFERENT ones: an operator
+/// fixed the field the linter showed and met the other at load. Sharing the
+/// order removes that, and makes the engine's own message stable between runs
+/// as a side effect.
+///
+/// The whole schema is passed at the end as a DRIFT GUARD, not because it
+/// catches anything today: every error `parse_node_schema` can return lives in
+/// its per-field loop, and its second pass — the one that renames colliding
+/// container children — has no error path at all, so a schema whose fields all
+/// probe clean cannot fail as a whole. Verified against the binary with two
+/// containers sharing a child key: no finding. The call costs one pass and
+/// means that the day that function grows a genuinely cross-field error, the
+/// linter reports it instead of silently passing the entry.
+pub fn first_parse_rejection(schema: &NodeSchema) -> Option<String> {
+    let mut keys: Vec<&String> = schema.keys().collect();
+    keys.sort();
+    for key in keys {
+        let one: NodeSchema = std::iter::once((key.clone(), schema[key].clone())).collect();
+        if let Some(reason) = parse_node_schema(&one).err() {
+            return Some(reason);
+        }
+    }
+    parse_node_schema(schema).err()
+}
+
 /// Names every key of an object by shape, never by value.
 ///
 /// For a block whose fields are typed — an `mcp` server spec — serde's own

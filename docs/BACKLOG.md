@@ -27,26 +27,6 @@ abajo es aplicar ese mismo patrón a una puerta que todavía no lo tiene.
 
 Ordenados por importancia. Los ids son para poder referenciarlos en un PR.
 
-#### Fugas de valor en mensajes de error
-
-El linter dejó de imprimir valores de config (§26) y el motor también (§37). Lo que
-queda es higiene de reporte, no fuga.
-
-- **L6 · Los diagnósticos hacen eco de identificadores sin truncar.** `compact()` recorta
-  a ~55 caracteres pero se llama en un solo lugar, `INVALID_FIELD_VALUE`. El resto
-  interpola `node_type`, el nombre de la tool y las claves crudas, así que un `node_type`
-  de varios KB inunda la salida de texto y el JSON. Son ranuras de identificador y no de
-  credencial: higiene de reporte, no fuga. Pre-existente.
-
-#### Fidelidad linter ↔ motor
-
-- **L7 · Pueden nombrar campos distintos.** Con dos campos malos en un `node_schema`, el
-  linter nombra el primero alfabético (`first_parse_rejection`) y `Graph::validate()` el
-  primero que le da el `HashMap`. Coinciden en que el grafo se rechaza; discrepan en cuál
-  campo aparece, así que el operador puede arreglar uno y ver el otro al cargar. Es un
-  tradeoff deliberado —un reporte que se diffea necesita ser estable, un crash de carga
-  no—, pero conviene decidir si el motor debería adoptar el mismo orden.
-
 #### Fase 2 — la fuente de verdad en el código
 
 - **L10 · Generar el set de campos en vez de verificarlo.** La maquinaria está completa:
@@ -81,6 +61,7 @@ queda es higiene de reporte, no fuga.
 | L8 — los conteos de ruido del corpus pasan de medición a cerca, fijados en ambas direcciones | 2026-09-06 | §38 |
 | L1 — el linter espeja las cinco compuertas que `validate()` aplica a una entrada de tool; cuatro llamando a la misma función de dominio | 2026-09-07 | §39 |
 | L1b + L3 + L9 — el node id con `/`, el consejo del brazo `Registry`, y la guarda de campos dentro de `node_schema` | 2026-09-07 | §40 |
+| L6 + L7 — los identificadores se acotan en la prosa, y el motor nombra el mismo campo que el linter | 2026-09-07 | §41 |
 | El camino de producción no llamaba a `Graph::validate()` | 2026-09-04 | §18 |
 
 Dos lecciones del track que no son items y conviene no re-aprender:

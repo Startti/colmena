@@ -128,3 +128,51 @@ fn the_messages_still_say_what_is_wrong() {
         .unwrap_err()
     );
 }
+
+/// L7 — with two bad fields, the linter and the engine must name the SAME one.
+///
+/// They agreed the graph is refused and disagreed on which field to show, so an
+/// operator could fix the one the linter named and meet the other at load. The
+/// linter picks the first alphabetically, because a report that gets diffed has
+/// to be stable; the engine walked a `HashMap` and picked whatever it saw
+/// first, which is not even stable across its own runs.
+#[test]
+fn the_engine_names_the_same_field_the_linter_does() {
+    use colmena::dag_engine::domain::lint::{lint_graph_json, LintContext};
+
+    let document = serde_json::json!({
+        "nodes": { "agent": { "type": "llm_call", "config": {
+            "provider": "openai", "api_key": "k", "model": "gpt-4o",
+            "tool_configurations": { "t": {
+                "node_type": "http_request",
+                // Two fields the engine refuses, so there is something to disagree about.
+                "node_schema": {
+                    "zulu": { "required": true },
+                    "alpha": { "required": true }
+                }
+            }}
+        }}},
+        "edges": []
+    });
+
+    let graph: Graph = serde_json::from_value(document.clone()).expect("deserializes");
+    let engine = graph.validate().expect_err("refused at load").to_string();
+
+    let ctx = LintContext::from_catalog();
+    let report = lint_graph_json(&document, &ctx).expect("valid graph");
+    let linter = report
+        .diagnostics
+        .iter()
+        .find(|d| d.message.contains("node_schema"))
+        .map(|d| d.message.clone())
+        .expect("the linter reports it too");
+
+    assert!(
+        engine.contains("alpha") && linter.contains("alpha"),
+        "both must name the first field alphabetically.\n  engine: {engine}\n  linter: {linter}"
+    );
+    assert!(
+        !engine.contains("zulu"),
+        "naming the second one is what makes the operator fix twice: {engine}"
+    );
+}
