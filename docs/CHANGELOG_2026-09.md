@@ -2043,3 +2043,47 @@ condición de rechazo cambió → ADP no afectado, salvo que algo estuviera pars
 strings, que nunca fue contrato.
 
 **Estado.** done.
+
+---
+
+## 38. Los números del corpus dejan de medirse a mano
+
+**Qué.** Cierra **L8**. Cada cambio de este track citó `error=75 warning=5 info=0` sobre
+los grafos de ejemplo como evidencia de que una regla nueva no agregaba falsos positivos.
+**Nada sostenía esos números**: se re-medían a mano cada vez, así que una regla o una
+edición del catálogo podía deshacer la reducción de ruido sin que ningún test dijera nada.
+
+`tests/corpus_noise.rs` los fija: total por severidad, **y** el desglose por código —
+porque dos cambios que se cancelan dejan el total igual y cambian la mezcla.
+
+### Fijado en las dos direcciones, a propósito
+
+Que el conteo baje **no es automáticamente una buena noticia**. Una regla que deja de
+disparar es exactamente cómo se pierde cobertura en silencio, y es la forma que este
+archivo existe para atrapar. Las dos mutaciones lo comprueban:
+
+| Mutación | Resultado |
+|---|---|
+| Una regla **deja** de disparar | 🔴 2 de 3 tests |
+| Una regla dispara **de más** | 🔴 2 de 3 tests |
+
+Y un tercer test verifica que el corpus **se está leyendo de verdad** (más de 200
+archivos): una medición que silenciosamente no mide nada satisface "cero hallazgos"
+perfectamente.
+
+### Que el número se mueva no es un defecto
+
+Agregar un grafo, o arreglar uno, lo mueve legítimamente. Por eso el mensaje de fallo no
+finge que el corpus está congelado: dice qué hacer —actualizar las constantes en ese mismo
+cambio y decir en el PR qué grafos se movieron y por qué— e imprime el desglose por código
+para que la diferencia se lea de un vistazo. Lo que compra la cerca es que el movimiento
+tenga que **notarse**, en el cambio que lo causó.
+
+`tests/lint_examples/` queda deliberadamente afuera: esos están rotos a propósito y
+ahogarían la señal.
+
+**Alcance.** Sólo tests. Sin cambios de código → ADP no afectado.
+
+**Estado.** done.
+
+**Estado.** done.

@@ -80,12 +80,6 @@ queda es higiene de reporte, no fuga.
 
 #### Cobertura de tests
 
-- **L8 · Ningún test fija las métricas de ruido del corpus.** Los números que este track
-  usó como referencia —hoy `error=75 warning=5 info=0` sobre 303 grafos— se miden a mano
-  cada vez, así que un cambio en el catálogo o en las reglas puede regresar la reducción
-  de ruido sin que falle nada. Un harness que recorra `tests/graphs/**` y afirme el
-  conteo convierte la medición en una cerca.
-
 - **L9 · La guarda de las reglas de campos no cubre el bloque `node_schema`.** El test que
   fija que un defecto independiente sobrevive a una entrada rechazada pone la clave
   inventada en `fixed_config`, el bloque legible. Una supresión acotada al bloque
@@ -124,6 +118,7 @@ queda es higiene de reporte, no fuga.
 | L11 — un tipo ausente del catálogo pasa a error: el cierre bidireccional contra el registry lo convirtió en prueba. Impacto medido en el corpus: cero | 2026-09-06 | §34 |
 | Adopción en CI — modo directorio, `--fail-on <nivel>`, y el paso en `ci-develop.yml` en modo reporte | 2026-09-06 | §36 |
 | L4 + L5 — el motor deja de imprimir el valor rechazado, en sus tres sitios (uno no estaba listado: `mcp.headers`) | 2026-09-06 | §37 |
+| L8 — los conteos de ruido del corpus pasan de medición a cerca, fijados en ambas direcciones | 2026-09-06 | §38 |
 | El camino de producción no llamaba a `Graph::validate()` | 2026-09-04 | §18 |
 
 Dos lecciones del track que no son items y conviene no re-aprender:
