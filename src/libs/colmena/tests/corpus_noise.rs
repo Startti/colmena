@@ -2,8 +2,8 @@
 //!
 //! Every change in this track quoted the corpus counts over the repo's example
 //! graphs as evidence that a new rule added no false positives. They started at
-//! `error=75 warning=5` and are coming down as the graphs get fixed — this file
-//! is what makes each step of that visible.
+//! `error=75 warning=5` and reached `error=0` — this file is what makes each
+//! step of that visible.
 //! Nothing held those numbers: they were re-measured by hand each time, so a
 //! rule or a catalog edit could have undone the noise reduction and no test
 //! would have said a word.
@@ -83,8 +83,8 @@ fn measure() -> Measured {
 
 /// Update these three numbers in the SAME change that moves them, and say in
 /// the PR body which graphs moved and why.
-const EXPECTED_FILES: usize = 303;
-const EXPECTED_ERRORS: usize = 3;
+const EXPECTED_FILES: usize = 302;
+const EXPECTED_ERRORS: usize = 0;
 const EXPECTED_WARNINGS: usize = 3;
 const EXPECTED_INFOS: usize = 0;
 
@@ -120,10 +120,16 @@ fn the_corpus_noise_is_what_this_track_measured() {
 fn the_corpus_findings_break_down_the_way_they_did() {
     let m = measure();
     let expected: BTreeMap<&str, usize> = [
-        // All that is left: two orchestrator graphs written against an older
-        // contract, whose pieces are top-level nodes instead of config. Fixing
-        // them is a rewrite, not a cleanup.
-        ("MISSING_REQUIRED_FIELD", 6),
+        // All that is left, and all of it warnings: `advanced/test_orchestrator.json`
+        // has an `orchestrator` with an empty config, so `agents`, `planner` and
+        // `final_reactor` are all unset. It reads as a warning rather than an error
+        // only because its one incoming edge names no port, which is the linter's
+        // "the value may arrive through the default input port" softening. That
+        // softening is wrong for this node type -- `orchestrator.rs` reads those
+        // three from `config` and never looks in `inputs` -- so these three are
+        // errors wearing a warning's severity. Teaching the linter that is its own
+        // change; see BACKLOG.
+        ("MISSING_REQUIRED_FIELD", 3),
     ]
     .into_iter()
     .collect();

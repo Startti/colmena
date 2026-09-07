@@ -431,7 +431,6 @@ inglés (e.g. `=== PREVIOUS ATTEMPT — WHY IT FAILED ===`).
 | Grafo | Qué muestra |
 |-------|-------------|
 | `tests/graphs/advanced/test_orchestrator.json` | Orquestador básico. |
-| `tests/graphs/advanced/trip_planner.json` | Versión inicial del trip planner. |
 | `tests/graphs/advanced/trip_assistant.json` | Asistente con orquestador. |
 | `tests/graphs/advanced/trip_planner_replanning_test.json` | Replanificación. |
 | `tests/graphs/advanced/bridge_tasks_test.json` | Bridge tasks entre fases. |

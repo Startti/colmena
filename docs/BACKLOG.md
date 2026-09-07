@@ -37,6 +37,30 @@ Ordenados por importancia. Los ids son para poder referenciarlos en un PR.
   paso opcional es pasar de verificar a generar. Sin trigger; abrirlo solo si el
   mantenimiento del JSON empieza a doler.
 
+- **L12 · El puerto de entrada por defecto no salva a todos los nodos.** Cuando falta un
+  campo requerido y el nodo tiene un edge entrante **sin nombre de puerto**, el linter baja
+  el hallazgo de error a warning: el valor podría llegar por el puerto por defecto y no
+  puede probar lo contrario desde el grafo. Para el `orchestrator` eso es falso y
+  demostrable — `orchestrator.rs:223` lee `agents` de `config` y no hay un solo
+  `inputs.get("agents")` en el archivo; lo mismo vale para `planner` y `final_reactor`.
+  `advanced/test_orchestrator.json` son los 3 warnings que quedan en el corpus, y son
+  errores disfrazados. Arreglo: que el catálogo declare por campo si puede llegar por el
+  puerto por defecto, y que la suavización consulte eso en vez de asumir que sí. Trigger:
+  cualquiera de esos 3 warnings que alguien intente resolver y descubra que el grafo está
+  roto igual.
+
+- **L13 · El diagnóstico debería mostrar cómo se ve el campo bien escrito.** Hoy las
+  sugerencias son correctivas ("did you mean \"model\"?") y `MISSING_REQUIRED_FIELD` — el
+  código que más cuesta — sale sin ninguna. El ejemplo ya existe y el linter ya lo tiene
+  cargado: **156 de los 237 campos** del catálogo declaran `example`, y los 3 requeridos
+  del `orchestrator` lo tienen los tres. Falta que el diagnóstico lo cite. Primer paso sin
+  grafos nuevos; después, rellenar los `example` que faltan en campos requeridos
+  (`document_edit` tiene 3 requeridos y 0 ejemplos, `document_read` 1 y 0). Un ejemplo
+  **malo** por nodo es el tercer paso y probablemente innecesario: la mayoría de las reglas
+  son agnósticas del nodo, así que 37 ejemplos malos repiten el mismo código con distinto
+  disfraz. Si se hacen, van en `tests/lint_examples/` — **nunca** en `tests/graphs/`, que
+  es el corpus que el gate custodia.
+
 ### Cerrados
 
 | Item | Cerrado | Ref |

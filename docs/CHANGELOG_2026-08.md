@@ -1813,7 +1813,7 @@ El efecto práctico: un edge mal escrito era **indistinguible** de un run correc
 | Grafo | Edge que tenía | Edge correcto | En esta PR |
 |---|---|---|---|
 | [`tests/graphs/agents/extraction_example.json`](../tests/graphs/agents/extraction_example.json) | `{"from": "slack_message", "to": "extract_info"}` | `{"to": "extract_info.texts.slack_message"}` | **arreglado y verificado E2E** |
-| [`tests/graphs/advanced/trip_planner.json`](../tests/graphs/advanced/trip_planner.json) | `{"from": "trigger", "to": "planner"}` | `{"to": "planner.texts.request"}` | **NO tocado** — ver abajo |
+| `tests/graphs/advanced/trip_planner.json` (deleted 2026-09, see CHANGELOG_2026-09) | `{"from": "trigger", "to": "planner"}` | `{"to": "planner.texts.request"}` | **NO tocado** — ver abajo |
 
 Ambos son pre-existentes (verificado contra un checkout limpio), no los causó trabajo reciente. Las
 copias viejas en `src/libs/colmena/tests/` **tampoco funcionan**, aunque fallan distinto: usan

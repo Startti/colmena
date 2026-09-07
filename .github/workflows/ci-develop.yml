@@ -52,13 +52,16 @@ jobs:
       - name: Docs link and graph-reference guard
         run: python3 scripts/check_doc_links.py docs
 
-      # Report-only on purpose. The corpus carries 75 errors and 5 warnings
-      # today, so a gate would fail on day one and get switched off; this puts
-      # the findings where a reviewer sees them without blocking anyone. Flip
-      # `--fail-on never` to `--fail-on error` once that count reaches zero —
-      # the flag exists so that is a one-word change, not a rewrite.
-      - name: Graph lint (report only)
-        run: cargo run --bin dag_engine -- lint tests/graphs --fail-on never
+      # The gate, as of the corpus reaching zero errors. It ran report-only
+      # while 75 errors were cleaned up, which is the point of `--fail-on never`:
+      # adopt the linter without failing on day one.
+      #
+      # `error` and not `warning` on purpose. A warning is the linter saying it
+      # cannot prove the finding from the graph alone, and a gate that blocks on
+      # an admitted maybe earns a request to switch the whole gate off at the
+      # first false positive. What blocks here is what the linter can prove.
+      - name: Graph lint
+        run: cargo run --bin dag_engine -- lint tests/graphs --fail-on error
 
       - name: Clean target/wheels
         run: rm -rf target/wheels
