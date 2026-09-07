@@ -60,17 +60,8 @@ Ordenados por importancia. Los ids son para poder referenciarlos en un PR.
 
 #### Fugas de valor en mensajes de error
 
-El linter dejó de imprimir valores de config (§26). Los dos caminos que quedan están
-fuera del linter pero son la misma clase de defecto.
-
-- **L4 · `graph.rs` filtra el valor al rechazar el grafo.** Sigue haciendo
-  `format!("malformed node_schema: {e}")` con el error de serde crudo, y serde imprime el
-  string ofensor literalmente. Un `node_schema` con una credencial suelta la publica en
-  el `DagError::InvalidToolSchema` de carga. Es el camino que el linter espeja; el
-  arreglo es mover `unreadable_schema_shape` a un lugar que ambos puedan llamar.
-
-- **L5 · `validate_mcp_config` imprime la URL ofensora** cuando no es HTTPS, y una URL de
-  MCP puede llevar credenciales en la query.
+El linter dejó de imprimir valores de config (§26) y el motor también (§37). Lo que
+queda es higiene de reporte, no fuga.
 
 - **L6 · Los diagnósticos hacen eco de identificadores sin truncar.** `compact()` recorta
   a ~55 caracteres pero se llama en un solo lugar, `INVALID_FIELD_VALUE`. El resto
@@ -132,6 +123,7 @@ fuera del linter pero son la misma clase de defecto.
 | L2c — el par `if let Ok(...)` de `for_each` pasó a propagar; medido, convirtió un punto único de fallo en defensa en profundidad | 2026-09-06 | §33 |
 | L11 — un tipo ausente del catálogo pasa a error: el cierre bidireccional contra el registry lo convirtió en prueba. Impacto medido en el corpus: cero | 2026-09-06 | §34 |
 | Adopción en CI — modo directorio, `--fail-on <nivel>`, y el paso en `ci-develop.yml` en modo reporte | 2026-09-06 | §36 |
+| L4 + L5 — el motor deja de imprimir el valor rechazado, en sus tres sitios (uno no estaba listado: `mcp.headers`) | 2026-09-06 | §37 |
 | El camino de producción no llamaba a `Graph::validate()` | 2026-09-04 | §18 |
 
 Dos lecciones del track que no son items y conviene no re-aprender:

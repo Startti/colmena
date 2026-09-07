@@ -174,11 +174,21 @@ impl Graph {
                     continue;
                 };
                 let schema: NodeSchema =
-                    serde_json::from_value(schema_value.clone()).map_err(|e| {
+                    serde_json::from_value(schema_value.clone()).map_err(|_| {
                         DagError::InvalidToolSchema {
                             node_id: node_id.clone(),
                             tool_name: tool_name.clone(),
-                            reason: format!("malformed node_schema: {e}"),
+                            // NOT `{e}`: serde renders the offending string
+                            // literally, so a `node_schema` holding a
+                            // credential published it in this very error. The
+                            // linter stopped doing that in section 26 and this
+                            // path calls the same shared helper, so the two
+                            // cannot drift back apart.
+                            reason: format!(
+                                "malformed node_schema: {}",
+                                crate::dag_engine::domain::tool_configuration::
+                                    unreadable_schema_shape(schema_value)
+                            ),
                         }
                     })?;
                 parse_node_schema(&schema).map_err(|reason| DagError::InvalidToolSchema {
@@ -222,8 +232,14 @@ mod tests {
         assert!(err.contains("agent"), "must name the node: {err}");
     }
 
-    /// R3.2 — plaintext is refused at load, and the message quotes the URL so
-    /// the operator can see exactly what to change.
+    /// R3.2 — plaintext is refused at load, and the message names the SCHEME.
+    ///
+    /// It used to quote the whole URL, on the reasoning that the operator then
+    /// sees exactly what to change. The reasoning had a hole: an MCP endpoint
+    /// routinely carries a token in its query string, and this message is what
+    /// a refused graph writes to a log. The scheme is the actionable part —
+    /// nothing about `http` vs `https` needs the rest of the URL — so naming it
+    /// keeps the message fixable without publishing the credential.
     #[test]
     fn graph_validate_rejects_http_scheme() {
         let g = graph_with_tool(json!({
@@ -232,7 +248,11 @@ mod tests {
         }));
         let err = g.validate().unwrap_err().to_string();
         assert!(err.contains("HTTPS"), "{err}");
-        assert!(err.contains("http://mcp.example.com/mcp"), "{err}");
+        assert!(err.contains("scheme 'http'"), "must name the scheme: {err}");
+        assert!(
+            !err.contains("mcp.example.com"),
+            "the URL must not be echoed — it can carry a token: {err}"
+        );
     }
 
     /// The happy path must still load, defaults and all.

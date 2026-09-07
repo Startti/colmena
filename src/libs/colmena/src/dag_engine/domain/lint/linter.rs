@@ -10,7 +10,7 @@ use super::catalog::{
 use super::diagnostic::{Diagnostic, DiagnosticCode, LintReport, Severity};
 use crate::dag_engine::domain::graph::{Graph, NodeConfig};
 use crate::dag_engine::domain::tool_configuration::{
-    parse_node_schema, NodeSchema, NodeSchemaField,
+    parse_node_schema, unreadable_schema_shape, NodeSchema,
 };
 use serde_json::{Map, Value};
 use std::collections::BTreeSet;
@@ -340,62 +340,6 @@ fn first_parse_rejection(schema: &NodeSchema) -> Option<String> {
         }
     }
     parse_node_schema(schema).err()
-}
-
-/// Says why a `node_schema` could not be read, naming shapes and keys only.
-///
-/// The obvious implementation is to forward serde's own error, and the first
-/// version of this rule did. But serde renders `Unexpected::Str` with the
-/// literal string it found, so `"node_schema": {"api_key": "sk-live-…"}` — a
-/// common slip, and exactly the shape this rule exists to catch — copied the
-/// secret to stdout and into the `--format json` report, which is read in CI
-/// logs where the graph body itself is not printed.
-///
-/// One diagnostic in this linter does print a value — `INVALID_FIELD_VALUE`
-/// echoes what it found next to the accepted list — but only for a field the
-/// catalog declares with `valid_values`, a closed enum like `method`. No
-/// credential lands there. A `node_schema` key is the opposite: a free-form
-/// slot the author names, and the wrong value in it is exactly what this rule
-/// catches. So this one names shapes and keys only.
-///
-/// Offenders are sorted for a canonical order — the sentence then does not
-/// depend on the order the author happened to write the keys in. (It was never
-/// unstable across runs: `serde_json::Map` is ordered. The run-to-run
-/// instability lives in the other branch, and [`first_parse_rejection`] is what
-/// answers it.) `parse_node_schema`'s own errors are forwarded unchanged: they
-/// name the field label only, never its value.
-fn unreadable_schema_shape(schema: &Value) -> String {
-    let Some(fields) = schema.as_object() else {
-        return format!("the whole block is {}", json_shape(schema));
-    };
-    let mut offenders: Vec<String> = fields
-        .iter()
-        .filter(|(_, value)| serde_json::from_value::<NodeSchemaField>((*value).clone()).is_err())
-        .map(|(key, value)| {
-            if value.is_object() {
-                format!("`{key}` is an object but not a valid field definition")
-            } else {
-                format!("`{key}` is {}", json_shape(value))
-            }
-        })
-        .collect();
-    offenders.sort();
-    if offenders.is_empty() {
-        return "one of its entries is not a valid field definition".into();
-    }
-    offenders.join(", ")
-}
-
-/// Names a JSON value's shape without ever revealing what it holds.
-fn json_shape(value: &Value) -> &'static str {
-    match value {
-        Value::Null => "null",
-        Value::Bool(_) => "a boolean",
-        Value::Number(_) => "a number",
-        Value::String(_) => "a string",
-        Value::Array(_) => "an array",
-        Value::Object(_) => "an object",
-    }
 }
 
 /// Reports a tool entry the engine will refuse before running anything.

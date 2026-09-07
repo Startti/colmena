@@ -334,6 +334,89 @@ fn is_https_url(url: &str) -> bool {
 /// and the node.
 ///
 /// [`DagError::InvalidToolSchema`]: crate::dag_engine::domain::DagError
+/// Says why a `node_schema` could not be read, naming shapes and keys only.
+///
+/// The obvious implementation is to forward serde's own error, and the first
+/// version of this rule did. But serde renders `Unexpected::Str` with the
+/// literal string it found, so `"node_schema": {"api_key": "sk-live-…"}` — a
+/// common slip, and exactly the shape this rule exists to catch — copied the
+/// secret to stdout and into the `--format json` report, which is read in CI
+/// logs where the graph body itself is not printed.
+///
+/// One diagnostic in the linter does print a value — `INVALID_FIELD_VALUE`
+/// echoes what it found next to the accepted list — but only for a field the
+/// catalog declares with `valid_values`, a closed enum like `method`. No
+/// credential lands there. A `node_schema` key is the opposite: a free-form
+/// slot the author names, and the wrong value in it is exactly what this rule
+/// catches. So this one names shapes and keys only.
+///
+/// Offenders are sorted for a canonical order — the sentence then does not
+/// depend on the order the author happened to write the keys in. (It was never
+/// unstable across runs: `serde_json::Map` is ordered. The run-to-run
+/// instability lives in the other branch, and the linter's `first_parse_rejection` is what
+/// answers it.) `parse_node_schema`'s own errors are forwarded unchanged: they
+/// name the field label only, never its value.
+pub fn unreadable_schema_shape(schema: &Value) -> String {
+    let Some(fields) = schema.as_object() else {
+        return format!("the whole block is {}", json_shape(schema));
+    };
+    let mut offenders: Vec<String> = fields
+        .iter()
+        .filter(|(_, value)| serde_json::from_value::<NodeSchemaField>((*value).clone()).is_err())
+        .map(|(key, value)| {
+            if value.is_object() {
+                format!("`{key}` is an object but not a valid field definition")
+            } else {
+                format!("`{key}` is {}", json_shape(value))
+            }
+        })
+        .collect();
+    offenders.sort();
+    if offenders.is_empty() {
+        return "one of its entries is not a valid field definition".into();
+    }
+    offenders.join(", ")
+}
+
+/// Names a JSON value's shape without ever revealing what it holds.
+pub fn json_shape(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "a boolean",
+        Value::Number(_) => "a number",
+        Value::String(_) => "a string",
+        Value::Array(_) => "an array",
+        Value::Object(_) => "an object",
+    }
+}
+
+/// Names every key of an object by shape, never by value.
+///
+/// For a block whose fields are typed — an `mcp` server spec — serde's own
+/// error is the natural message and cannot be used: it renders the offending
+/// string literally, and `mcp.headers` is exactly where a bearer token lives.
+///
+/// It lists EVERY key, not just the offending one — serde does not report which
+/// field it disliked, and re-deriving that would mean restating the spec here,
+/// where it would rot. With at most five keys the reader finds it immediately
+/// by comparing against the accepted-fields list the caller appends. The
+/// alternative, staying silent about the shapes, would trade a leak for an
+/// unfixable message.
+pub fn describe_object_shapes(value: &Value) -> String {
+    let Some(fields) = value.as_object() else {
+        return format!("the whole block is {}", json_shape(value));
+    };
+    if fields.is_empty() {
+        return "the block is empty".into();
+    }
+    let mut described: Vec<String> = fields
+        .iter()
+        .map(|(key, v)| format!("`{key}` is {}", json_shape(v)))
+        .collect();
+    described.sort();
+    described.join(", ")
+}
+
 pub fn validate_mcp_config(node_type: &str, tool_cfg: &Value) -> Result<(), String> {
     let block = tool_cfg.get("mcp");
 
@@ -360,8 +443,12 @@ pub fn validate_mcp_config(node_type: &str, tool_cfg: &Value) -> Result<(), Stri
     }
 
     if !is_https_url(url) {
+        // The scheme, never the URL. An MCP endpoint routinely carries a token
+        // in its query string, and this message is what a refused graph writes
+        // to a log. The scheme is the whole actionable part anyway.
+        let scheme = url.split_once("://").map(|(s, _)| s).unwrap_or("none");
         return Err(format!(
-            "MCP server URL must be HTTPS, got '{url}' (these connections carry \
+            "MCP server URL must be HTTPS, got scheme '{scheme}' (these connections carry \
              credential headers, so plaintext transport is refused)"
         ));
     }
@@ -373,11 +460,15 @@ pub fn validate_mcp_config(node_type: &str, tool_cfg: &Value) -> Result<(), Stri
     // malformed". Failing closed here is the only place that distinction can
     // still be made.
     if let Some(block) = block {
-        if let Err(e) = serde_json::from_value::<McpServerSpec>(block.clone()) {
+        if serde_json::from_value::<McpServerSpec>(block.clone()).is_err() {
+            // NOT serde's message: `headers` is where a bearer token lives, and
+            // serde prints the offending string. Naming each key by shape says
+            // which one is wrong without saying what it holds.
             return Err(format!(
-                "the 'mcp' block on this tool is malformed: {e}. Valid fields are \
+                "the 'mcp' block on this tool is malformed ({}). Valid fields are \
                  url, transport (streamable_http | sse), headers (string map), \
-                 timeout_seconds and cache_ttl_seconds"
+                 timeout_seconds and cache_ttl_seconds",
+                describe_object_shapes(block)
             ));
         }
     }
@@ -952,9 +1043,17 @@ mod tests {
         );
         let err = validate_mcp_config(MCP_NODE_TYPE, &http).unwrap_err();
         assert!(err.contains("HTTPS"), "got: {err}");
+        // This assertion used to demand the opposite — that the message quote
+        // the offending URL "so it is fixable". An MCP URL can carry a token in
+        // its query, and this string ends up in logs, so quoting it traded a
+        // credential for information the scheme already provides.
         assert!(
-            err.contains("http://mcp.example.com/mcp"),
-            "the message must quote the offending URL so it is fixable: {err}"
+            err.contains("scheme 'http'"),
+            "the scheme is the fixable part, and it must still be named: {err}"
+        );
+        assert!(
+            !err.contains("mcp.example.com"),
+            "the URL itself must not be echoed: {err}"
         );
 
         for scheme in ["ws://", "file://", "ftp://"] {
