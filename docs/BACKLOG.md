@@ -27,21 +27,6 @@ abajo es aplicar ese mismo patrón a una puerta que todavía no lo tiene.
 
 Ordenados por importancia. Los ids son para poder referenciarlos en un PR.
 
-#### Cobertura — el motor rechaza y el linter no lo dice
-
-- **L1b · El linter no revisa la forma de los node ids.** `Graph::validate()` rechaza
-  cualquier id que contenga `/`, porque ese carácter está reservado para los
-  calificadores de path de subgrafo (`DagError::InvalidNodeId`). Ninguna regla del linter
-  lo mira, así que un grafo con un id así lintea limpio y no carga. Es la única puerta de
-  `validate()` que no es sobre una entrada de tool, y por eso se había perdido: una
-  versión anterior de L1 decía "las otras tres puertas" sin el calificador y la dejaba
-  fuera de la cuenta.
-
-- **L3 · El brazo `Registry` conserva el consejo viejo.** Un tipo tool-only usado como
-  `type` de un nodo del grafo recibe el consejo correcto bajo `CatalogOnly` (lo que usa
-  la CLI) y bajo `Unchecked`, pero bajo `Registry` sigue con el did-you-mean genérico y
-  no menciona `tool_configurations`. Sin test que cubra ese brazo con un nombre tool-only.
-
 #### Fugas de valor en mensajes de error
 
 El linter dejó de imprimir valores de config (§26) y el motor también (§37). Lo que
@@ -61,15 +46,6 @@ queda es higiene de reporte, no fuga.
   campo aparece, así que el operador puede arreglar uno y ver el otro al cargar. Es un
   tradeoff deliberado —un reporte que se diffea necesita ser estable, un crash de carga
   no—, pero conviene decidir si el motor debería adoptar el mismo orden.
-
-#### Cobertura de tests
-
-- **L9 · La guarda de las reglas de campos no cubre el bloque `node_schema`.** El test que
-  fija que un defecto independiente sobrevive a una entrada rechazada pone la clave
-  inventada en `fixed_config`, el bloque legible. Una supresión acotada al bloque
-  `node_schema` pasaría el test escondiendo justo la clase de diagnóstico que el test
-  nombra. Su fixture usa `node_schema: null`, que cuenta como ausente para la regla de
-  precedencia, así que tampoco ejercita esa interacción.
 
 #### Fase 2 — la fuente de verdad en el código
 
@@ -104,6 +80,7 @@ queda es higiene de reporte, no fuga.
 | L4 + L5 — el motor deja de imprimir el valor rechazado, en sus tres sitios (uno no estaba listado: `mcp.headers`) | 2026-09-06 | §37 |
 | L8 — los conteos de ruido del corpus pasan de medición a cerca, fijados en ambas direcciones | 2026-09-06 | §38 |
 | L1 — el linter espeja las cinco compuertas que `validate()` aplica a una entrada de tool; cuatro llamando a la misma función de dominio | 2026-09-07 | §39 |
+| L1b + L3 + L9 — el node id con `/`, el consejo del brazo `Registry`, y la guarda de campos dentro de `node_schema` | 2026-09-07 | §40 |
 | El camino de producción no llamaba a `Graph::validate()` | 2026-09-04 | §18 |
 
 Dos lecciones del track que no son items y conviene no re-aprender:

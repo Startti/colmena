@@ -62,9 +62,38 @@ pub enum DiagnosticCode {
     /// A tool entry's `node_schema` is shaped so the engine refuses the whole
     /// graph at load. The linter says so before anything runs.
     MalformedToolEntry,
+    /// A node id the engine refuses at load — today, one containing `/`, which
+    /// is reserved for subgraph path qualifiers.
+    InvalidNodeId,
 }
 
 impl DiagnosticCode {
+    /// Every code the linter can emit.
+    ///
+    /// Exists so a consumer — the example catalogue's completeness test above
+    /// all — can ask instead of keeping its own copy. It kept one, and a code
+    /// added later slipped past it in silence: the guard that was supposed to
+    /// demand an example for every code did not know the new code existed.
+    ///
+    /// Kept honest by `position` in this module's tests: that match is
+    /// exhaustive, so a new variant does not compile until someone opens this
+    /// file, which is the moment to add it here too.
+    pub const ALL: &'static [DiagnosticCode] = &[
+        DiagnosticCode::UnknownNodeType,
+        DiagnosticCode::UnknownField,
+        DiagnosticCode::UnknownNodeProperty,
+        DiagnosticCode::MissingRequiredField,
+        DiagnosticCode::InvalidFieldValue,
+        DiagnosticCode::FieldTypeMismatch,
+        DiagnosticCode::EdgeUnknownNode,
+        DiagnosticCode::NoCatalogCoverage,
+        DiagnosticCode::DeadFixedConfig,
+        DiagnosticCode::RepurposedToolField,
+        DiagnosticCode::ToolNeverExposed,
+        DiagnosticCode::MalformedToolEntry,
+        DiagnosticCode::InvalidNodeId,
+    ];
+
     /// The stable machine-readable name, e.g. `"UNKNOWN_FIELD"`.
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -80,6 +109,7 @@ impl DiagnosticCode {
             DiagnosticCode::RepurposedToolField => "REPURPOSED_TOOL_FIELD",
             DiagnosticCode::ToolNeverExposed => "TOOL_NEVER_EXPOSED",
             DiagnosticCode::MalformedToolEntry => "MALFORMED_TOOL_ENTRY",
+            DiagnosticCode::InvalidNodeId => "INVALID_NODE_ID",
         }
     }
 }
@@ -317,6 +347,50 @@ mod tests {
             d.render(),
             "warning [UNKNOWN_FIELD] node \"chat\".modle: \
              'modle' is not a field of llm_call — did you mean 'model'?"
+        );
+    }
+
+    /// Where a code sits in [`DiagnosticCode::ALL`].
+    ///
+    /// Exhaustive on purpose, and living in the tests so production carries no
+    /// dead code: adding a variant makes THIS fail to compile, which is the only
+    /// mechanical link between "a new code exists" and "the catalogue must
+    /// demonstrate it".
+    fn position(code: DiagnosticCode) -> usize {
+        match code {
+            DiagnosticCode::UnknownNodeType => 0,
+            DiagnosticCode::UnknownField => 1,
+            DiagnosticCode::UnknownNodeProperty => 2,
+            DiagnosticCode::MissingRequiredField => 3,
+            DiagnosticCode::InvalidFieldValue => 4,
+            DiagnosticCode::FieldTypeMismatch => 5,
+            DiagnosticCode::EdgeUnknownNode => 6,
+            DiagnosticCode::NoCatalogCoverage => 7,
+            DiagnosticCode::DeadFixedConfig => 8,
+            DiagnosticCode::RepurposedToolField => 9,
+            DiagnosticCode::ToolNeverExposed => 10,
+            DiagnosticCode::MalformedToolEntry => 11,
+            DiagnosticCode::InvalidNodeId => 12,
+        }
+    }
+
+    /// `ALL` and the exhaustive `position` match must agree, or the list a
+    /// consumer reads is not the list the linter can emit.
+    #[test]
+    fn every_code_is_listed_once_and_in_order() {
+        for (index, code) in DiagnosticCode::ALL.iter().enumerate() {
+            assert_eq!(
+                position(*code),
+                index,
+                "{code} is out of step between ALL and position()"
+            );
+        }
+        let names: std::collections::BTreeSet<&str> =
+            DiagnosticCode::ALL.iter().map(|c| c.as_str()).collect();
+        assert_eq!(
+            names.len(),
+            DiagnosticCode::ALL.len(),
+            "two codes share a string, so a consumer cannot tell them apart"
         );
     }
 

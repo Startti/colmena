@@ -133,6 +133,7 @@ fn lint_document(document: &Value, ctx: &LintContext<'_>) -> Result<LintReport, 
     let graph: Graph = serde_json::from_value(document.clone())?;
     let mut report = lint_graph(&graph, ctx);
     lint_raw_node_properties(document, ctx, &mut report);
+    lint_raw_node_ids(document, &mut report);
     lint_raw_malformed_tool_entries(document, &mut report);
     lint_raw_tool_configurations(document, &mut report);
     lint_raw_tool_fields(document, ctx, &mut report);
@@ -926,6 +927,40 @@ fn render_key_list(keys: &[&str]) -> String {
     }
 }
 
+/// Reports a node id the engine refuses at load.
+///
+/// `Graph::validate` rejects any id containing `/`, because that character
+/// qualifies a subgraph path (`subgraph_node/inner_node`). It is the only gate
+/// that is not about a tool entry, which is exactly how it stayed off the list
+/// while the other five were mirrored.
+///
+/// Reads the RAW document on purpose. The prefixed ids this module builds for
+/// findings inside an inline child — `nested/chat` — contain `/` by design and
+/// are not author-written; walking a `Graph`'s keys after that prefixing would
+/// report the linter's own notation as a defect.
+fn lint_raw_node_ids(document: &Value, report: &mut LintReport) {
+    let Some(nodes) = document.get("nodes").and_then(Value::as_object) else {
+        return;
+    };
+    let mut ids: Vec<&String> = nodes.keys().collect();
+    ids.sort();
+    for id in ids {
+        if !id.contains('/') {
+            continue;
+        }
+        report.diagnostics.push(Diagnostic {
+            severity: Severity::Error,
+            code: DiagnosticCode::InvalidNodeId,
+            node_id: Some(id.clone()),
+            field: None,
+            message: "a node id may not contain '/': the engine reserves it for \
+                      subgraph path qualifiers and refuses this graph at load"
+                .into(),
+            suggestion: Some("rename the node, e.g. with '_' instead".into()),
+        });
+    }
+}
+
 /// Reports keys on a node object that the engine does not read.
 ///
 /// Graph-root keys are deliberately *not* checked. Across this repo's 301
@@ -1046,8 +1081,22 @@ fn lint_node(
                     "\"{}\" is not a node type this engine can run",
                     node.node_type
                 ),
-                suggestion: suggest(&node.node_type, registered.iter().map(String::as_str))
-                    .map(|s| format!("did you mean \"{s}\"?")),
+                // A tool-only name gets the same advice here as under the
+                // other two contexts. Which `KnownNodeTypes` the caller happens
+                // to hold changes how strongly the linter may speak about the
+                // ENGINE; it says nothing about where a name belongs, and
+                // letting the advice vary by context was an accident of the arm
+                // being written first.
+                suggestion: if ctx.catalog.tool_only_type(&node.node_type).is_some() {
+                    Some(
+                        "move it into the `tool_configurations` of an `llm_call`, or use \
+                         a real node type here"
+                            .into(),
+                    )
+                } else {
+                    suggest(&node.node_type, registered.iter().map(String::as_str))
+                        .map(|s| format!("did you mean \"{s}\"?"))
+                },
             });
             // Without a real node type there is nothing to check the config
             // against; every field would be reported as invented.

@@ -2136,3 +2136,56 @@ Corpus `error=75 warning=5 info=0`, sin cambios — y ahora eso lo sostiene la c
 **Alcance.** Aditivo. Ningún grafo del corpus cambia de veredicto → ADP no afectado.
 
 **Estado.** done.
+
+---
+
+## 40. Tres cosas que el linter ya sabía y no decía
+
+**Qué.** Cierra **L1b**, **L3** y **L9**. Con esto el linter espeja **todas** las
+compuertas de `Graph::validate()`.
+
+**L1b — el node id con `/`.** El motor lo reserva para calificar paths de subgrafo y
+rechaza el grafo al cargar. Es la única compuerta que no es sobre una entrada de tool, y
+por eso fue la última: una versión anterior de L1 decía "las otras tres puertas" y la
+dejaba fuera de la cuenta. La regla lee el **documento crudo** a propósito: los ids con
+prefijo que este módulo construye para hallazgos dentro de un hijo inline (`nested/chat`)
+contienen `/` por diseño y no los escribió ningún autor.
+
+**L3 — el consejo del brazo `Registry`.** Un tipo tool-only usado como `type` de un nodo
+recibía el did-you-mean genérico bajo `Registry`, mientras que `CatalogOnly` y `Unchecked`
+decían dónde va el nombre. Qué `KnownNodeTypes` tenga el llamador cambia **con cuánta
+fuerza** el linter puede hablar del motor; no cambia dónde va un nombre.
+
+**L9 — la guarda de campos dentro de `node_schema`.** Resultó ser un hueco de test, no un
+defecto: el comportamiento ya era correcto. El test que fijaba que un defecto
+independiente sobrevive a una entrada rechazada ponía la clave inventada en
+`fixed_config`; una supresión acotada a `node_schema` lo pasaba escondiendo justo la clase
+que el test nombra. La mutación ahora la mata.
+
+### El guard de completitud que yo construí era vacuo
+
+Al agregar `INVALID_NODE_ID`, el test que exige un ejemplo por cada `DiagnosticCode`
+**siguió en verde**. Su lista de códigos estaba escrita a mano, así que no podía saber de
+un código que nadie le contó — exactamente la cobertura vacua que este track viene
+persiguiendo, en una herramienta de este track.
+
+El arreglo mueve el forcing function un nivel más abajo: `DiagnosticCode::ALL`, más un
+`match` exhaustivo que **no compila** hasta que alguien maneje la variante nueva. El test
+ahora deriva de ahí en vez de copiar. Vive en el módulo de tests para que producción no
+cargue código muerto —`warnings = "deny"` lo rechazaba— y CI compila los tests, así que
+la compuerta dispara igual.
+
+De paso quedaron corregidas dos frases de ese mismo archivo que el cambio volvió falsas:
+decía que la lista estaba escrita a mano *en vez de* derivada, y hablaba de dieciocho
+archivos cuando son diecinueve.
+
+**Verificación.** Cuatro mutaciones, todas matan un test: no reportar el node id,
+reportar todo id, revertir el consejo del brazo `Registry`, y suprimir las reglas de
+campos dentro de `node_schema`. Una quinta —quitar la llamada a la regla— **no compilaba**,
+tercera vez en el track, y se reformuló.
+
+Corpus `error=75 warning=5 info=0`, sostenido por la cerca de la §38.
+
+**Alcance.** Aditivo: un `DiagnosticCode` nuevo y dos ramas de consejo → ADP no afectado.
+
+**Estado.** done.

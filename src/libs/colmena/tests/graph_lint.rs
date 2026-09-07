@@ -2347,3 +2347,108 @@ fn entries_the_engine_accepts_are_left_alone() {
         );
     }
 }
+
+// L1b / L3 / L9 — three things the linter already knows and does not say
+// ---------------------------------------------------------------------------
+
+/// L1b — `Graph::validate` rejects any node id containing `/`, because that
+/// character is reserved for subgraph path qualifiers. It is the one gate that
+/// is not about a tool entry, which is how it stayed off the list.
+#[test]
+fn a_node_id_with_a_slash_is_reported() {
+    let report = lint_json(serde_json::json!({
+        "nodes": { "outer/inner": { "type": "log", "config": {} } },
+        "edges": []
+    }));
+
+    let d = find(&report, DiagnosticCode::InvalidNodeId)
+        .expect("the engine refuses this graph at load");
+    assert_eq!(d.node_id.as_deref(), Some("outer/inner"));
+    assert_eq!(d.severity, Severity::Error);
+}
+
+/// An id the engine accepts must stay unreported — including the prefixed ids
+/// the linter itself synthesises for findings inside an inline child, which are
+/// not author-written and must not be mistaken for them.
+#[test]
+fn ordinary_node_ids_are_left_alone() {
+    let report = lint_json(serde_json::json!({
+        "nodes": { "chat_1": { "type": "log", "config": {} } },
+        "edges": []
+    }));
+    assert!(find(&report, DiagnosticCode::InvalidNodeId).is_none());
+
+    let nested = lint_json(serde_json::json!({
+        "nodes": { "nested": { "type": "subgraph", "config": { "child_graph_inline": {
+            "nodes": { "inner": { "type": "log", "config": {} } },
+            "edges": []
+        }}}},
+        "edges": []
+    }));
+    assert!(
+        find(&nested, DiagnosticCode::InvalidNodeId).is_none(),
+        "a `parent/child` path the linter built itself is not an author's id: {:?}",
+        codes(&nested)
+    );
+}
+
+/// L3 — the `Registry` arm kept the generic did-you-mean for a tool-only type,
+/// while `CatalogOnly` and `Unchecked` both say where the name belongs. The
+/// advice should not depend on which context the caller happens to hold.
+#[test]
+fn the_registry_arm_also_says_where_a_tool_only_type_belongs() {
+    let catalog = NodeCatalog::embedded();
+    let registered: BTreeSet<String> = ["llm_call", "log"].iter().map(|s| s.to_string()).collect();
+    let ctx = LintContext::from_registry(catalog, &registered);
+
+    let document = serde_json::json!({
+        "nodes": { "n": { "type": "data_run_python", "config": {} } },
+        "edges": []
+    });
+    let report = lint_graph_json(&document, &ctx).expect("valid graph");
+
+    let d = find(&report, DiagnosticCode::UnknownNodeType).expect("must be reported");
+    assert!(
+        d.suggestion
+            .as_deref()
+            .is_some_and(|s| s.contains("tool_configurations")),
+        "the advice must not depend on which context the caller holds: {:?}",
+        d.suggestion
+    );
+}
+
+/// L9 — the guard that an independent defect survives a rejected entry put its
+/// invented key in `fixed_config`. A suppression scoped to the `node_schema`
+/// block would pass that test while hiding exactly the class it names.
+#[test]
+fn a_field_defect_inside_node_schema_survives_a_rejected_entry() {
+    let report = lint_json(serde_json::json!({
+        "nodes": { "agent": { "type": "llm_call", "config": {
+            "provider": "openai", "api_key": "k", "model": "gpt-4o",
+            "tool_configurations": { "t": {
+                "node_type": "http_request",
+                // Rejected as a whole (a field with no `type`), AND carrying an
+                // invented key in the same block.
+                "node_schema": {
+                    "body": { "required": true },
+                    "definitely_not_a_field": { "fixed": 1 }
+                }
+            }}
+        }}},
+        "edges": []
+    }));
+
+    assert!(
+        find(&report, DiagnosticCode::MalformedToolEntry).is_some(),
+        "the entry is refused: {:?}",
+        codes(&report)
+    );
+    assert!(
+        report.diagnostics.iter().any(|d| d
+            .field
+            .as_deref()
+            .is_some_and(|f| f.ends_with("definitely_not_a_field"))),
+        "the invented key is an independent defect and must survive: {:?}",
+        codes(&report)
+    );
+}

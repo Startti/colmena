@@ -91,6 +91,7 @@ fuera de CI: estaba construido, probado y documentado, y no lo corría nadie.
 | `REPURPOSED_TOOL_FIELD` | warning | Una tool —o el `target` de un `for_each`— fija una clave que el nodo destino no declara, en un tipo de nodo que **reinterpreta** las claves desconocidas en vez de ignorarlas |
 | `TOOL_NEVER_EXPOSED` | error | Una tool sintética nombrada en `node_type` pero **no en la clave** de la entrada, que es lo que realmente la activa — el modelo nunca la recibe |
 | `MALFORMED_TOOL_ENTRY` | error | Un `node_schema` embebido que no se puede parsear. En una entrada de tool **el motor rechaza el grafo al cargar**; en el `target` de un `for_each` el grafo arranca y el lote **muere fila por fila**. En los dos casos el linter lo dice antes de correr |
+| `INVALID_NODE_ID` | error | Un id de nodo que contiene `/`, reservado para calificar paths de subgrafo; el motor rechaza el grafo al cargar |
 | `NO_CATALOG_COVERAGE` | info | El tipo de nodo no tiene entrada en el catálogo: **no se revisó** |
 
 Los `code` son estables. Cualquier consumidor (la salida JSON, una UI sobre los
@@ -717,6 +718,16 @@ archivos reales, la regla lo reporta por las dos puertas
 esa comprobación dio *perdido* y era la mutación, no la regla: había caído en un nodo
 `input`, que acepta cualquier clave por diseño.
 
+### Un node id que el motor rechaza
+
+[`19_invalid_node_id.json`](../../tests/lint_examples/19_invalid_node_id.json) — El motor reserva `/` para calificar paths de subgrafo. Es la única compuerta de `Graph::validate()` que no es sobre una entrada de tool, y por eso fue la última en espejarse.
+
+```
+  error [INVALID_NODE_ID] node "outer/inner": a node id may not contain '/': the engine reserves it for subgraph path qualifiers and refuses this graph at load — rename the node, e.g. with '_' instead
+
+  1 error(s), 0 warning(s), 0 info
+```
+
 ## Las decisiones que evitan el ruido
 
 Un linter con falsos positivos se ignora. Cinco reglas existen sólo para eso, y
@@ -862,28 +873,20 @@ claves que se perdían.
   migrado los dos ya no pueden diverger. La prosa (`description`/`example`/`default`)
   sigue viviendo en el JSON a propósito — es lo que leen humanos y agentes. Los
   nodos que todavía devuelven `None` siguen respaldados solo por el catálogo.
-- **De las compuertas que `Graph::validate()` aplica a una entrada de tool, el linter
-  reproduce las cinco.** `MALFORMED_TOOL_ENTRY` las cubre todas: el `node_schema`
-  ilegible, un `memory_mode` fuera del enum, uno sobre un tipo de nodo que no lleva
-  memoria, uno que lleva memoria sin `connection_url`, y un bloque `mcp` malformado o
-  con URL no-HTTPS.
+- **El linter espeja ahora TODAS las compuertas de `Graph::validate()`.** Las cinco de
+  una entrada de tool —`node_schema` ilegible, `memory_mode` fuera del enum, sobre un
+  tipo de nodo sin memoria, con memoria y sin `connection_url`, y un bloque `mcp`
+  malformado o con URL no-HTTPS— y la sexta, la única que no es sobre una tool: un node
+  id que contiene `/`.
 
-  Cuatro de las cinco **llaman a la misma función de dominio** que usa `validate()`,
-  así que no pueden divergir. La quinta —el enum `memory_mode`— no tiene función de
-  dominio: `graph.rs` lo deserializa inline, y el linter hace lo mismo.
+  Cinco de las seis **llaman a la misma función de dominio** que usa el motor, así que no
+  pueden divergir. La restante —el enum `memory_mode`— no tiene función de dominio:
+  `graph.rs` lo deserializa inline y el linter hace lo mismo.
 
-  Queda una compuerta afuera, la única que no es sobre una entrada de tool: un node id
-  que contiene `/`, reservado para calificar paths de subgrafo. Abierta en el
-  [BACKLOG](../BACKLOG.md) como L1b.
+  Eso **no** convierte un reporte limpio en garantía de que el grafo corra: sigue siendo
+  "el linter no encontró nada de lo que sabe buscar". Lo que cambia es que ya no hay una
+  compuerta conocida del motor sobre la que calle.
 
-  *(Esta viñeta decía hasta la §22 que los campos de una tool no se cruzaban contra
-  su `node_type`. Eso se cerró en esa misma sección y la limitación quedó vieja
-  contradiciendo a "Los campos de una tool" más arriba.)*
-- **`child_graph_path` no se sigue.** El `child_graph_inline` de un `subgraph` sí se
-  revisa entero, recursivamente y por sus dos puertas; un hijo referenciado por ruta no,
-  porque leer un archivo hermano haría que la respuesta del linter dependa del sistema
-  de archivos donde corre, y el atractivo del CLI es justamente revisar un documento
-  como está dado. Lintealo por separado.
 - **Cuatro tipos condicionales se dan por disponibles.** El linter revisa el
   grafo contra lo que el motor *puede* ejecutar, no contra el cableado de un
   despliegue concreto.
