@@ -85,3 +85,7 @@ tests/agente-creador/
 .atl/
 .pi/
 implementation_plan.md
+
+# Run logs are not artifacts: one committed in March 2026 carried a live
+# database credential the engine printed at startup.
+**/output.log

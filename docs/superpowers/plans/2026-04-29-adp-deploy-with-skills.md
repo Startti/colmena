@@ -285,7 +285,7 @@ Edit `/home/daniel-garcia4/startti/adp/apps/service/ia/platform/deploy_gcp.sh`. 
 ```bash
 # ----- Runtime defaults (override via .env or shell exports) ------------------
 REDIS_URL=${REDIS_URL:-"redis://10.157.108.227:6379"}
-DATABASE_URL=${DATABASE_URL:-"postgresql://colmena:qwerty123@34.172.146.67:5432/colmena_llm_memory?sslmode=require"}
+DATABASE_URL=${DATABASE_URL:-"postgresql://colmena:<redacted>@<db-host>:5432/colmena_llm_memory?sslmode=require"}
 RUST_LOG=${RUST_LOG:-"info"}
 ```
 
@@ -294,7 +294,7 @@ Replace with:
 ```bash
 # ----- Runtime defaults (override via .env or shell exports) ------------------
 REDIS_URL=${REDIS_URL:-"redis://10.157.108.227:6379"}
-DATABASE_URL=${DATABASE_URL:-"postgresql://colmena:qwerty123@34.172.146.67:5432/colmena_llm_memory?sslmode=require"}
+DATABASE_URL=${DATABASE_URL:-"postgresql://colmena:<redacted>@<db-host>:5432/colmena_llm_memory?sslmode=require"}
 RUST_LOG=${RUST_LOG:-"info"}
 # Where the worker container expects ADP-specific skills (baked into the image).
 COLMENA_SKILLS_ALLOWED_DIRS=${COLMENA_SKILLS_ALLOWED_DIRS:-"/app/skills"}
