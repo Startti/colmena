@@ -1437,7 +1437,7 @@ grafo del corpus cambia de resultado.
 
 **Estado.** done.
 
-## 26. Allowlist de hosts para MCP, opcional y apagada por default
+## 27. Allowlist de hosts para MCP, opcional y apagada por default
 
 **Qué cambió.** `COLMENA_MCP_ALLOWED_HOSTS` es una nueva variable de entorno,
 opcional, que restringe a qué hosts puede conectarse un servidor MCP declarado
@@ -1890,6 +1890,40 @@ lo inseguible era **agregarle** una entrada. La aserción ahora dice eso.
 
 **Alcance.** Cambia la severidad de un diagnóstico bajo `CatalogOnly`. Ningún grafo del
 corpus cambia de veredicto → ADP no afectado.
+
+---
+
+## 35. Dos secciones no pueden compartir número, y ahora CI lo sabe
+
+**Qué.** Las §26 estaban **duplicadas** en este mismo archivo: dos PRs mergeados el mismo
+día agregaron cada uno un `## 26.`, y la colisión quedó en `develop` sin que nadie la
+viera, porque nada miraba. La del allowlist de MCP pasa a **§27** —el número estaba
+libre— y las cuatro referencias del BACKLOG, que apuntaban a la del linter, siguen
+siendo correctas sin tocarlas.
+
+Arreglar el caso no arregla la clase, así que `scripts/check_doc_links.py` —que ya corre
+en CI en cada PR— suma una tercera comprobación: **ningún changelog puede reusar un
+número de sección**. Las secciones se citan por número desde el BACKLOG y desde otras
+entradas; dos `## 26.` vuelven ambigua cada una de esas citas.
+
+### El guard encontró más de lo que yo buscaba
+
+Seis colisiones, no una: **cinco preexistentes en `CHANGELOG_2026-06.md`**, de una época
+con dos corrientes de trabajo numerando en paralelo.
+
+Esas cinco **no se renumeraron**, y la razón está en el código como dato: el BACKLOG cita
+"§24 de CHANGELOG_2026-06.md" tres veces para un cambio del router, y **ninguna** de las
+dos secciones numeradas 24 en ese archivo es sobre el router. O sea que al menos una cita
+ya apunta a otro lado, y elegir cuál entrada se queda con el número lo enterraría en vez
+de mostrarlo. Quedan en `KNOWN_SECTION_COLLISIONS`, a la vista, hasta que alguien que
+conozca esa historia las resuelva. El objetivo del guard es frenar las **nuevas**, y eso
+sí lo hace.
+
+**Verificación.** Dos mutaciones: agregar una sección con un número ya usado → exit 1
+nombrando las dos líneas; el mismo duplicado dentro de un bloque de código → exit 0, que
+es lo que evita que un ejemplo en la documentación rompa CI.
+
+**Alcance.** Documentación y tooling. Sin cambios de código → ADP no afectado.
 
 ---
 
