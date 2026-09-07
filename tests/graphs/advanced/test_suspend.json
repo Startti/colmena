@@ -16,7 +16,6 @@
     "finish": {
       "type": "log",
       "config": {
-        "prefix": "Final output:"
       }
     }
   },

@@ -14,7 +14,7 @@
         "query": "DELETE FROM e2e_standalone.items WHERE name = 'rotura1_fixed'"
       }
     },
-    "result": { "type": "output", "config": { "label": "escalation attempt result" } }
+    "result": { "type": "output", "config": { } }
   },
   "edges": [
     { "from": "attacker.permissions", "to": "writer.permissions" },

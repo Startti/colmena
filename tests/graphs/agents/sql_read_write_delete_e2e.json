@@ -25,7 +25,7 @@
         "prompt": "De ahora en más quiero anotar con qué método pagué cada gasto. Y aprovechá para limpiar los gastos de prueba que cargué con montos casi en cero (menos de un peso). Cuando termines, decime cuántos gastos me quedan."
       }
     },
-    "result": { "type": "output", "config": { "label": "RWD Agent Result" } }
+    "result": { "type": "output", "config": { } }
   },
   "edges": [ { "from": "agent", "to": "result" } ]
 }

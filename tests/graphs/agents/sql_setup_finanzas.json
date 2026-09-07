@@ -39,7 +39,7 @@
         "prompt": "Registrá un gasto de comida de $20 de hoy con descripción 'almuerzo', y después decime cuánto llevo gastado en total."
       }
     },
-    "result": { "type": "output", "config": { "label": "Finanzas Agent Result" } }
+    "result": { "type": "output", "config": { } }
   },
   "edges": [
     { "from": "finanzas_agent", "to": "result" }

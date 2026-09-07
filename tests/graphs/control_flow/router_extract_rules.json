@@ -36,10 +36,10 @@
         ]
       }
     },
-    "log_urgent":  { "type": "log", "config": { "prefix": "URGENT_SALES:" } },
-    "log_sales":   { "type": "log", "config": { "prefix": "SALES:" } },
-    "log_support": { "type": "log", "config": { "prefix": "SUPPORT:" } },
-    "log_billing": { "type": "log", "config": { "prefix": "BILLING:" } },
+    "log_urgent":  { "type": "log", "config": { } },
+    "log_sales":   { "type": "log", "config": { } },
+    "log_support": { "type": "log", "config": { } },
+    "log_billing": { "type": "log", "config": { } },
     "out": { "type": "output", "config": {} }
   },
   "edges": [

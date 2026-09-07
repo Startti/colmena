@@ -129,7 +129,7 @@
         "prompt": "¿Qué productos están por debajo del punto de reorden? Si hay alguno crítico, registra una compra de 30 unidades para reponerlo."
       }
     },
-    "result": { "type": "output", "config": { "label": "out" } }
+    "result": { "type": "output", "config": { } }
   },
   "edges": [
     { "from": "setup_params.q_create_inventory", "to": "create_inventory_table.query" },

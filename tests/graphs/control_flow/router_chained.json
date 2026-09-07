@@ -40,10 +40,10 @@
         ]
       }
     },
-    "log_command": { "type": "log", "config": { "prefix": "COMMAND:" } },
-    "log_es":      { "type": "log", "config": { "prefix": "ES:" } },
-    "log_en":      { "type": "log", "config": { "prefix": "EN:" } },
-    "log_other":   { "type": "log", "config": { "prefix": "OTHER:" } },
+    "log_command": { "type": "log", "config": { } },
+    "log_es":      { "type": "log", "config": { } },
+    "log_en":      { "type": "log", "config": { } },
+    "log_other":   { "type": "log", "config": { } },
     "out":         { "type": "output", "config": {} }
   },
   "edges": [

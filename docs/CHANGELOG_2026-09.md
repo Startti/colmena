@@ -2236,3 +2236,57 @@ invierte el orden del probe compartido → rojo. Corpus `error=75 warning=5 info
 cambios de código de error ni de condiciones → ADP no afectado.
 
 **Estado.** done.
+
+---
+
+## 42. Se limpia la configuración muerta del corpus (46 de 80)
+
+**Qué.** Primera tanda de la limpieza que hace falta para poder **encender** el gate del
+linter. De los 80 hallazgos sobre los 303 grafos de ejemplo, 46 eran configuración que el
+motor **nunca leyó**:
+
+| Clave | Veces | Por qué está muerta |
+|---|---|---|
+| `prefix` en un `log` | 21 | `LogNode::execute` recibe `_config`: ignora su configuración entera |
+| `label` en un `output` | 15 | idem `OutputNode::execute` |
+| `default_output_port` | 6 | propiedad de nodo que `NodeConfig` no declara; se descarta al cargar |
+| `default_input_port` | 4 | idem |
+
+**Se verificó quién tenía razón antes de tocar un grafo.** Veintiún apariciones de la
+misma clave huelen a falso positivo, no a veintiún grafos rotos — así que lo primero fue
+leer `debug.rs` y `output.rs`. Los dos toman `_config`. El linter tenía razón.
+
+Vale nombrar lo que eso significa: veintiún autores escribieron `"prefix": "RESULT:"`
+esperando que el log lo usara. **El motor nunca lo honró.** Borrarlo deja el grafo
+diciendo lo que hace; que la intención sea razonable es un argumento para una feature, no
+para dejar configuración inerte.
+
+### Dos intentos descartados, y el guard que los frenó
+
+El borrado se hizo con un guard: la estructura parseada tiene que diferir **sólo** en las
+claves buscadas. Rechazó dos implementaciones antes de aceptar la tercera.
+
+1. **Round-trip con `json.dump`** — reformateó los archivos enteros: **+1018/−287** para
+   borrar 46 líneas. Entierra el cambio y revienta el cap de 500.
+2. **Regex por línea sobre el archivo** — también mataba `prefix` y `label` que viven
+   dentro de un `node_schema`, donde son legítimos. El guard rechazó 20 archivos.
+
+En vez de ajustar el algoritmo por tercera vez a ciegas, se abrió uno de los rechazados y
+la causa era otra: nodos escritos **en una sola línea**, donde borrar la línea borra el
+nodo. La versión final rastrea el path JSON para el caso multilínea y recorta el fragmento
+para el inline. Diff final: **+37/−57**.
+
+### La cerca de la §38 hizo exactamente lo suyo
+
+Los dos tests de `corpus_noise.rs` se pusieron en rojo y pidieron actualizar las constantes
+**en este mismo cambio**, que es para lo que existen. Corpus: `error=75 warning=5` →
+**`error=29 warning=5`**.
+
+**Lo que queda (34) necesita juicio, no borrado**: siete `inputs` con plantillas reales
+que el motor descarta, cuatro `python_script` sin `code` —el campo se llama `code`, no
+`script`—, y un puñado de campos sueltos. Va en la tanda siguiente.
+
+**Alcance.** Sólo grafos de ejemplo y las constantes de la cerca. Sin cambios de código →
+ADP no afectado.
+
+**Estado.** done.

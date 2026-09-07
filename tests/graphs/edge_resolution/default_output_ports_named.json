@@ -15,15 +15,13 @@
         "test_payload": {
           "value": 42
         }
-      },
-      "default_output_port": "output"
+      }
     },
     "splitter": {
       "type": "python_script",
       "config": {
         "script": "return {'even': input % 2 == 0, 'doubled': input * 2, 'string': str(input)}"
-      },
-      "default_output_port": "result"
+      }
     },
     "log_even": {
       "type": "log"

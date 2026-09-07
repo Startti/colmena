@@ -10,7 +10,7 @@
       "type": "suspend",
       "config": { "id": "ask_two", "question": "Segunda pregunta?", "question_type": "open" }
     },
-    "finish": { "type": "log", "config": { "prefix": "cascade_result:" } }
+    "finish": { "type": "log", "config": { } }
   },
   "edges": [
     { "from": "start",   "to": "ask_one" },
