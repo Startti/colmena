@@ -32,18 +32,49 @@ Linting tests/graphs/edge_resolution/default_ports_chain.json
 Ese grafo estaba commiteado y falla al ejecutarse con
 `Entrada no es un número: a`. El linter lo detecta **sin correrlo**.
 
+También acepta un **directorio**, y revisa todos los `.json` que haya debajo:
+
+```bash
+cargo run --bin dag_engine -- lint tests/graphs
+#   303 file(s): 75 error(s), 5 warning(s), 0 info
+```
+
 Opciones:
 
 | Flag | Efecto |
 |---|---|
 | `--format json` | Salida legible por máquina, con `code` estable por hallazgo |
-| `--strict` | Sale con código ≠ 0 si hay algún error o warning |
+| `--fail-on <nivel>` | `error` \| `warning` \| `info` \| `never` (default). El nivel a partir del cual sale con código ≠ 0 |
+| `--strict` | Alias de `--fail-on warning`, para quien ya lo tenga escrito |
+
+En modo directorio los archivos limpios no imprimen nada —trescientas líneas de
+"no findings" tapan el puñado que importa— y al final va un total. La salida
+`--format json` de **un** archivo no cambió; la de un directorio envuelve esos
+mismos objetos en `files` y agrega un `summary`.
 
 El linter **no bloquea la ejecución**. `Graph::validate()` no cambió, y
 `dag_engine run` se comporta exactamente igual que antes. Los grafos que hoy
 corren en producción casi con seguridad contienen campos desconocidos, y
-volverlos fail-closed rompería agentes en marcha sin aviso. `--strict` es el
-camino de adopción para quien lo quiera en CI.
+volverlos fail-closed rompería agentes en marcha sin aviso.
+
+## En CI, hoy en modo reporte
+
+`ci-develop.yml` corre el linter sobre `tests/graphs` en cada PR **sin gatear**:
+
+```yaml
+- name: Graph lint (report only)
+  run: cargo run --bin dag_engine -- lint tests/graphs --fail-on never
+```
+
+Es a propósito, y el número explica por qué: el corpus arrastra **75 errores y 5
+warnings**. Un gate habría fallado el primer día y lo habrían apagado; así los
+hallazgos quedan donde un revisor los ve, sin bloquear a nadie.
+
+**Para encenderlo** hay que bajar ese conteo a cero y cambiar `--fail-on never`
+por `--fail-on error`. El flag existe justamente para que ese día sea un cambio
+de una palabra y no una reescritura — antes, el único gate disponible (`--strict`)
+fallaba también con warnings, y esa única decisión es lo que mantuvo al linter
+fuera de CI: estaba construido, probado y documentado, y no lo corría nadie.
 
 ## Qué revisa
 

@@ -131,6 +131,7 @@ fuera del linter pero son la misma clase de defecto.
 | L2 — el `child_graph_inline` de un `subgraph` se revisa entero, recursivamente y por sus dos puertas, con cada hallazgo atribuido a su path | 2026-09-06 | §32 |
 | L2c — el par `if let Ok(...)` de `for_each` pasó a propagar; medido, convirtió un punto único de fallo en defensa en profundidad | 2026-09-06 | §33 |
 | L11 — un tipo ausente del catálogo pasa a error: el cierre bidireccional contra el registry lo convirtió en prueba. Impacto medido en el corpus: cero | 2026-09-06 | §34 |
+| Adopción en CI — modo directorio, `--fail-on <nivel>`, y el paso en `ci-develop.yml` en modo reporte | 2026-09-06 | §36 |
 | El camino de producción no llamaba a `Graph::validate()` | 2026-09-04 | §18 |
 
 Dos lecciones del track que no son items y conviene no re-aprender:

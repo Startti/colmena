@@ -60,13 +60,20 @@ enum Commands {
     /// node types the engine cannot run, and edges pointing at nodes that do
     /// not exist. Advisory by default: it never changes how a graph runs.
     Lint {
+        /// A graph file, or a directory to check every `.json` below it.
         file_path: String,
         /// Emit machine-readable JSON instead of a human-readable report.
         #[arg(long, default_value = "text", value_parser = ["text", "json"])]
         format: String,
-        /// Exit non-zero when there is any error or warning.
+        /// Exit non-zero when there is any error or warning. Alias of
+        /// `--fail-on warning`, kept for callers that already script it.
         #[arg(long, default_value_t = false)]
         strict: bool,
+        /// The severity that makes this exit non-zero. `never` (the default)
+        /// only reports, which is how a pipeline adopts the linter without
+        /// breaking on day one.
+        #[arg(long, default_value = "never", value_parser = ["error", "warning", "info", "never"])]
+        fail_on: String,
     },
     Serve {
         file_path: String,
@@ -189,8 +196,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             file_path,
             format,
             strict,
+            fail_on,
         } => {
-            return run_lint(&file_path, &format, strict).await;
+            return run_lint(&file_path, &format, strict, &fail_on).await;
         }
         Commands::Run {
             file_path,
@@ -515,28 +523,50 @@ async fn run_lint(
     file_path: &str,
     format: &str,
     strict: bool,
+    fail_on: &str,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use colmena::dag_engine::domain::lint::{lint_graph_json, LintContext, Severity};
 
-    let contents = tokio::fs::read_to_string(file_path)
-        .await
+    // `--strict` predates `--fail-on` and means "fail on error or warning". It
+    // stays as the alias it always was rather than being deprecated out from
+    // under whoever already scripts it.
+    let threshold: Option<Severity> = if strict {
+        Some(Severity::Warning)
+    } else {
+        match fail_on {
+            "error" => Some(Severity::Error),
+            "warning" => Some(Severity::Warning),
+            "info" => Some(Severity::Info),
+            _ => None,
+        }
+    };
+
+    let paths = graph_files(std::path::Path::new(file_path))
         .map_err(|e| format!("could not read {file_path}: {e}"))?;
-    let document: serde_json::Value = serde_json::from_str(&contents)
-        .map_err(|e| format!("{file_path} is not valid JSON: {e}"))?;
+    if paths.is_empty() {
+        return Err(format!("{file_path} holds no .json files to lint").into());
+    }
 
     let ctx = LintContext::from_catalog();
-    let report =
-        lint_graph_json(&document, &ctx).map_err(|e| format!("{file_path} is not a graph: {e}"))?;
+    let mut reports = Vec::new();
+    for path in &paths {
+        let name = path.display().to_string();
+        let contents = tokio::fs::read_to_string(path)
+            .await
+            .map_err(|e| format!("could not read {name}: {e}"))?;
+        let document: serde_json::Value = serde_json::from_str(&contents)
+            .map_err(|e| format!("{name} is not valid JSON: {e}"))?;
+        let report =
+            lint_graph_json(&document, &ctx).map_err(|e| format!("{name} is not a graph: {e}"))?;
+        reports.push((name, report));
+    }
 
-    let errors = report.count(Severity::Error);
-    let warnings = report.count(Severity::Warning);
-
-    if format == "json" {
-        let payload = serde_json::json!({
-            "file": file_path,
+    let as_json = |name: &str, report: &colmena::dag_engine::domain::lint::LintReport| {
+        serde_json::json!({
+            "file": name,
             "summary": {
-                "errors": errors,
-                "warnings": warnings,
+                "errors": report.count(Severity::Error),
+                "warnings": report.count(Severity::Warning),
                 "info": report.count(Severity::Info),
             },
             "diagnostics": report
@@ -551,27 +581,171 @@ async fn run_lint(
                     "suggestion": d.suggestion,
                 }))
                 .collect::<Vec<_>>(),
-        });
-        println!("{}", serde_json::to_string_pretty(&payload)?);
-    } else {
-        println!("Linting {file_path}");
-        if report.is_clean() {
-            println!("  no findings");
+        })
+    };
+
+    let (errors, warnings, infos) = reports.iter().fold((0, 0, 0), |(e, w, i), (_, r)| {
+        (
+            e + r.count(Severity::Error),
+            w + r.count(Severity::Warning),
+            i + r.count(Severity::Info),
+        )
+    });
+
+    if format == "json" {
+        // One file keeps the shape it always had, so an existing consumer that
+        // passes a file sees no change. A directory gets a `files` array around
+        // that same per-file object plus a total.
+        if paths.len() == 1 {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&as_json(&reports[0].0, &reports[0].1))?
+            );
         } else {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "files": reports.iter().map(|(n, r)| as_json(n, r)).collect::<Vec<_>>(),
+                    "summary": {
+                        "files": reports.len(),
+                        "errors": errors,
+                        "warnings": warnings,
+                        "info": infos,
+                    },
+                }))?
+            );
+        }
+    } else {
+        for (name, report) in &reports {
+            // In directory mode a clean file is not worth a line each: 300 of
+            // them would bury the handful that matter.
+            if report.is_clean() && paths.len() > 1 {
+                continue;
+            }
+            println!("Linting {name}");
+            if report.is_clean() {
+                println!("  no findings");
+                continue;
+            }
             for d in &report.diagnostics {
                 println!("  {}", d.render());
             }
+            println!();
+        }
+        if paths.len() > 1 {
             println!(
-                "\n  {errors} error(s), {warnings} warning(s), {} info",
-                report.count(Severity::Info)
+                "  {} file(s): {errors} error(s), {warnings} warning(s), {infos} info",
+                reports.len()
             );
+        } else {
+            println!("  {errors} error(s), {warnings} warning(s), {infos} info");
         }
     }
 
     // Findings are advisory unless the caller asked otherwise, so that adding
     // the linter to an existing pipeline cannot break it by surprise.
-    if strict && report.has_blocking_findings() {
-        std::process::exit(1);
+    if let Some(threshold) = threshold {
+        if reports
+            .iter()
+            .any(|(_, r)| r.has_findings_at_or_above(threshold))
+        {
+            std::process::exit(1);
+        }
     }
     Ok(())
+}
+
+/// The `.json` files to lint under `path`: the file itself, or every one below
+/// a directory.
+///
+/// Directory mode is what makes the linter adoptable at all. Checking a repo
+/// meant one process per graph — 303 of them here — which nobody wires into CI,
+/// so the tool stayed built, tested, documented and unused.
+///
+/// Sorted, so two runs over the same tree print in the same order and a CI log
+/// can be diffed.
+fn graph_files(path: &std::path::Path) -> std::io::Result<Vec<std::path::PathBuf>> {
+    if !path.is_dir() {
+        return Ok(vec![path.to_path_buf()]);
+    }
+    let mut found = Vec::new();
+    let mut stack = vec![path.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir)? {
+            let entry = entry?.path();
+            if entry.is_dir() {
+                stack.push(entry);
+            } else if entry.extension().is_some_and(|x| x == "json") {
+                found.push(entry);
+            }
+        }
+    }
+    found.sort();
+    Ok(found)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::graph_files;
+    use std::fs;
+
+    /// A file is itself, whatever its extension: `lint path/to/graph.json` must
+    /// not start filtering the thing the caller named.
+    #[test]
+    fn a_file_path_yields_that_file() {
+        let dir = std::env::temp_dir().join(format!("lint_one_{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("g.json");
+        fs::write(&file, "{}").unwrap();
+
+        assert_eq!(graph_files(&file).unwrap(), vec![file.clone()]);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A directory yields every `.json` below it, at any depth, and nothing
+    /// else — the corpus this is for is `tests/graphs/**`, six subdirectories
+    /// deep in places.
+    #[test]
+    fn a_directory_yields_every_json_below_it_sorted() {
+        let dir = std::env::temp_dir().join(format!("lint_tree_{}", std::process::id()));
+        let nested = dir.join("agents").join("deep");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(dir.join("b.json"), "{}").unwrap();
+        fs::write(dir.join("a.json"), "{}").unwrap();
+        fs::write(dir.join("notes.md"), "x").unwrap();
+        fs::write(nested.join("c.json"), "{}").unwrap();
+
+        let found = graph_files(&dir).unwrap();
+        let names: Vec<String> = found
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        let mut sorted = names.clone();
+        sorted.sort();
+
+        assert_eq!(
+            sorted,
+            vec!["a.json", "b.json", "c.json"],
+            "every .json below the tree, and no .md"
+        );
+        // Ordering is by FULL path, not by file name — `agents/deep/c.json`
+        // lands between `a.json` and `b.json`. That groups a directory's graphs
+        // together in the report, which is what a reader wants; asserting the
+        // name order instead is what this test did first, and it was the
+        // assertion that was wrong, not the sort.
+        let mut by_path = found.clone();
+        by_path.sort();
+        assert_eq!(found, by_path, "a CI log has to be diffable across runs");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// An empty directory yields nothing, which the caller turns into an error
+    /// rather than a silent success — "0 files, 0 findings" reads as a pass.
+    #[test]
+    fn an_empty_directory_yields_nothing() {
+        let dir = std::env::temp_dir().join(format!("lint_empty_{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        assert!(graph_files(&dir).unwrap().is_empty());
+        fs::remove_dir_all(&dir).ok();
+    }
 }

@@ -1891,4 +1891,67 @@ lo inseguible era **agregarle** una entrada. La aserción ahora dice eso.
 **Alcance.** Cambia la severidad de un diagnóstico bajo `CatalogOnly`. Ningún grafo del
 corpus cambia de veredicto → ADP no afectado.
 
+---
+
+## 36. El linter entra en CI, en modo reporte
+
+**Qué.** Cierra el último item del track, y el más grande: el linter estaba construido,
+probado y documentado, y **no lo corría nadie**. Faltaban dos cosas concretas.
+
+**Modo directorio.** `lint` acepta ahora un directorio y revisa todos los `.json` que
+haya debajo. Antes revisaba un archivo por proceso — 303 acá — que es algo que nadie
+cablea a CI. Los archivos limpios no imprimen nada en ese modo (trescientos "no findings"
+tapan el puñado que importa) y al final va un total.
+
+**Gate por severidad.** `--fail-on error|warning|info|never`, default `never`. `--strict`
+queda como alias de `--fail-on warning` para quien ya lo tenga escrito.
+
+Ese default fijo era **la razón concreta** por la que no se podía adoptar: el único gate
+disponible fallaba con errores **y** warnings, y este corpus arrastra 75 y 5. Fallaba el
+primer día, y un gate que falla el primer día se apaga.
+
+### El paso de CI, y por qué no gatea
+
+```yaml
+- name: Graph lint (report only)
+  run: cargo run --bin dag_engine -- lint tests/graphs --fail-on never
+```
+
+Los hallazgos quedan donde un revisor los ve, sin bloquear a nadie. **Encenderlo es bajar
+ese conteo a cero y cambiar una palabra** — `never` por `error`. El flag existe para que
+ese día sea eso y no una reescritura.
+
+No se gatea hoy porque arreglar 80 hallazgos en 46 archivos es su propio trabajo, y
+mezclarlo acá habría escondido el cambio de herramienta adentro de una limpieza de
+corpus.
+
+### Verificación
+
+El gate, corrido en sus cuatro posiciones sobre el corpus real (75 errores, 5 warnings):
+
+| | exit |
+|---|---|
+| `--fail-on never` | 0 |
+| `--fail-on error` | 1 |
+| `--fail-on warning` | 1 |
+| `--fail-on info` | 1 |
+| `--strict` | 1 |
+
+Y sobre un grafo limpio, `--fail-on error` y `--fail-on warning` dan 0. Los 303 grafos en
+una sola invocación tardan ~6 s.
+
+Tres tests para `graph_files` (un archivo es él mismo; un directorio da todos los `.json`
+a cualquier profundidad y ningún `.md`; un directorio vacío da nada, que el llamador
+convierte en error en vez de un "0 archivos, 0 hallazgos" que se lee como aprobado).
+
+**Un test se escribió mal y el código tenía razón.** Afirmaba que los nombres salían
+ordenados alfabéticamente; el orden es por **path completo**, así que `agents/deep/c.json`
+cae entre `a.json` y `b.json` — que agrupa los grafos de un directorio, que es lo que
+quiere quien lee. Se corrigió la aserción, no el sort. Una mutación (`sort` → `reverse`)
+lo pone en rojo.
+
+**Alcance.** Aditivo: un flag nuevo con default que preserva el comportamiento, y un
+argumento que antes sólo aceptaba archivos. `--strict` significa exactamente lo que
+significaba → ADP no afectado.
+
 **Estado.** done.

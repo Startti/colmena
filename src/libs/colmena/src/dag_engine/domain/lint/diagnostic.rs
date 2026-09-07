@@ -152,6 +152,20 @@ impl LintReport {
             .any(|d| matches!(d.severity, Severity::Error | Severity::Warning))
     }
 
+    /// Whether anything at `threshold` or worse was found.
+    ///
+    /// `Severity` orders most-severe first, so "at or above" is `<=`. A caller
+    /// that wants a build to fail only on errors passes `Severity::Error`; one
+    /// that wants warnings too passes `Severity::Warning`.
+    ///
+    /// This exists because [`Self::has_blocking_findings`] fixes the threshold
+    /// at warning, and that single choice is what kept the linter out of CI:
+    /// this repo's own corpus carries 75 errors and 5 warnings, so the only
+    /// gate on offer failed on day one and nobody could adopt it gradually.
+    pub fn has_findings_at_or_above(&self, threshold: Severity) -> bool {
+        self.diagnostics.iter().any(|d| d.severity <= threshold)
+    }
+
     /// Sorts findings most-severe first, then by node, then by field, so two
     /// runs over the same graph always read the same way.
     pub fn sort(&mut self) {
@@ -231,6 +245,62 @@ mod tests {
             diagnostics: vec![diag(Severity::Warning, DiagnosticCode::UnknownField, "n")],
         };
         assert!(report.has_blocking_findings());
+    }
+
+    /// The threshold a CI gate is set to, exercised at every level.
+    ///
+    /// The corpus this repo lints carries errors AND warnings, so a gate fixed
+    /// at warning — the only one that existed — could never be switched on. A
+    /// gate that can be set to `Error` can.
+    #[test]
+    fn a_threshold_matches_its_own_level_and_everything_worse() {
+        let error_only = LintReport {
+            diagnostics: vec![diag(Severity::Error, DiagnosticCode::UnknownField, "n")],
+        };
+        let warning_only = LintReport {
+            diagnostics: vec![diag(Severity::Warning, DiagnosticCode::UnknownField, "n")],
+        };
+        let info_only = LintReport {
+            diagnostics: vec![diag(Severity::Info, DiagnosticCode::NoCatalogCoverage, "n")],
+        };
+
+        assert!(error_only.has_findings_at_or_above(Severity::Error));
+        assert!(error_only.has_findings_at_or_above(Severity::Warning));
+        assert!(error_only.has_findings_at_or_above(Severity::Info));
+
+        assert!(
+            !warning_only.has_findings_at_or_above(Severity::Error),
+            "a warning must not trip an error-only gate — that is the whole point"
+        );
+        assert!(warning_only.has_findings_at_or_above(Severity::Warning));
+
+        assert!(!info_only.has_findings_at_or_above(Severity::Error));
+        assert!(!info_only.has_findings_at_or_above(Severity::Warning));
+        assert!(info_only.has_findings_at_or_above(Severity::Info));
+    }
+
+    #[test]
+    fn a_clean_report_trips_no_threshold() {
+        let clean = LintReport::default();
+        for level in [Severity::Error, Severity::Warning, Severity::Info] {
+            assert!(!clean.has_findings_at_or_above(level));
+        }
+    }
+
+    /// The old fixed-threshold helper must keep meaning exactly what it meant,
+    /// since `--strict` still rides on it.
+    #[test]
+    fn the_fixed_warning_threshold_still_agrees_with_the_new_one() {
+        for severity in [Severity::Error, Severity::Warning, Severity::Info] {
+            let report = LintReport {
+                diagnostics: vec![diag(severity, DiagnosticCode::UnknownField, "n")],
+            };
+            assert_eq!(
+                report.has_blocking_findings(),
+                report.has_findings_at_or_above(Severity::Warning),
+                "disagreement at {severity}"
+            );
+        }
     }
 
     #[test]
