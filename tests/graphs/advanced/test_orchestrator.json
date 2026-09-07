@@ -3,36 +3,62 @@
     "trigger": {
       "type": "input",
       "config": {
-        "plan": [
-          {
-            "assigned_to": "clothing_expert",
-            "completed": false,
-            "task": "Pack Winter Clothes"
-          },
-          {
-            "assigned_to": "gear_expert",
-            "completed": false,
-            "task": "Pack Ski Equipment"
-          }
-        ]
+        "prompt": "I'm going to Bariloche for 2 days of skiing. What should I pack?"
       }
     },
     "orchestrator_node": {
       "type": "orchestrator",
-      "config": {}
-    },
-    "clothing_expert": {
-      "type": "log",
-      "config": {}
-    },
-    "gear_expert": {
-      "type": "log",
-      "config": {}
-    },
-    "finalizer": {
-      "type": "python_script",
       "config": {
-        "code": "output = {'__colmena_loop_status': status, 'plan': plan}"
+        "max_phases": 2,
+        "planner": {
+          "provider": "google",
+          "model": "gemini-2.5-flash",
+          "api_key": "${GEMINI_API_KEY}",
+          "allow_suspend": false,
+          "system_message": "Break the request into exactly one task and assign it to packing_expert."
+        },
+        "agents": {
+          "packing_expert": {
+            "description": "Recommends what to pack for a given trip.",
+            "child_graph_inline": {
+              "nodes": {
+                "in": {
+                  "type": "input",
+                  "config": {}
+                },
+                "llm": {
+                  "type": "llm_call",
+                  "config": {
+                    "provider": "google",
+                    "model": "gemini-2.5-flash",
+                    "api_key": "${GEMINI_API_KEY}",
+                    "system_message": "You are a packing assistant. Answer with a very short bulleted list. Be brief."
+                  }
+                },
+                "out": {
+                  "type": "output",
+                  "config": {}
+                }
+              },
+              "edges": [
+                {
+                  "from": "in",
+                  "to": "llm"
+                },
+                {
+                  "from": "llm",
+                  "to": "out"
+                }
+              ]
+            }
+          }
+        },
+        "final_reactor": {
+          "provider": "google",
+          "model": "gemini-2.5-flash",
+          "api_key": "${GEMINI_API_KEY}",
+          "system_message": "Combine the packing recommendations into one short paragraph."
+        }
       }
     }
   },
@@ -40,26 +66,6 @@
     {
       "from": "trigger",
       "to": "orchestrator_node"
-    },
-    {
-      "from": "orchestrator_node.dispatched_agents.clothing_expert",
-      "to": "clothing_expert"
-    },
-    {
-      "from": "orchestrator_node.dispatched_agents.gear_expert",
-      "to": "gear_expert"
-    },
-    {
-      "from": "clothing_expert",
-      "to": "finalizer"
-    },
-    {
-      "from": "gear_expert",
-      "to": "finalizer"
-    },
-    {
-      "from": "orchestrator_node",
-      "to": "finalizer"
     }
   ]
 }
