@@ -37,17 +37,22 @@ Ordenados por importancia. Los ids son para poder referenciarlos en un PR.
   paso opcional es pasar de verificar a generar. Sin trigger; abrirlo solo si el
   mantenimiento del JSON empieza a doler.
 
-- **L12 · El puerto de entrada por defecto no salva a todos los nodos.** Cuando falta un
-  campo requerido y el nodo tiene un edge entrante **sin nombre de puerto**, el linter baja
-  el hallazgo de error a warning: el valor podría llegar por el puerto por defecto y no
-  puede probar lo contrario desde el grafo. Para el `orchestrator` eso es falso y
-  demostrable — `orchestrator.rs:223` lee `agents` de `config` y no hay un solo
-  `inputs.get("agents")` en el archivo; lo mismo vale para `planner` y `final_reactor`.
-  `advanced/test_orchestrator.json` son los 3 warnings que quedan en el corpus, y son
-  errores disfrazados. Arreglo: que el catálogo declare por campo si puede llegar por el
-  puerto por defecto, y que la suavización consulte eso en vez de asumir que sí. Trigger:
-  cualquiera de esos 3 warnings que alguien intente resolver y descubra que el grafo está
-  roto igual.
+- **L12 · La suavización debe preguntar si el nodo LEE el campo desde `inputs`, no si
+  puede llegar.** Cuando falta un campo requerido y el nodo tiene un edge entrante **sin
+  nombre de puerto**, el linter baja el hallazgo de error a warning asumiendo que el valor
+  podría llegar por el puerto por defecto. **El encuadre original de este ítem era
+  incorrecto** y se corrigió midiendo el motor: `build_inputs_for` (`run_use_case.rs`)
+  usa `default_input()` del nodo para un edge sin punto, y si el nodo **no declara
+  ninguno** —sólo 12 de los 37 lo hacen— cae en auto-flatten y mergea **todas** las claves
+  del objeto upstream. Así que el valor sí puede llegar; para el `orchestrator`, `agents`
+  aterriza en `inputs` y **se ignora**, porque el nodo sólo consulta `plan`, `prompt` y
+  `user_message` (`orchestrator.rs:651,1001,1141`). La pregunta correcta es "¿el nodo
+  resuelve este campo desde `inputs`?", y es un hecho por nodo y por campo que el catálogo
+  debe declarar — fuera de `NodeCatalogEntry`, como `input_ports` y `field_examples`, para
+  no romper la comparación de la fase 2. **Dato de alcance**: de 48 campos requeridos en
+  el catálogo, sólo 6 aparecen con `inputs.get("<campo>")` en el código de algún nodo.
+  Por defecto, un nodo que no declara nada conserva la suavización actual, así que el
+  cambio es aditivo y no puede producir errores nuevos en grafos que no vemos.
 
 ### Cerrados
 

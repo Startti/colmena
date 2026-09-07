@@ -2561,3 +2561,54 @@ se hubiera detenido en el primer `exit=0` no habría visto el `config: {}` roto.
 aceptan, y ampliar el alcance acá sólo agranda el cambio.
 
 Cierra BACKLOG **L13**. Sin cambio de API pública → ADP no afectado.
+
+---
+
+## 46. El corpus llega a cero, y el último grafo roto se reescribe
+
+`advanced/test_orchestrator.json` era el único hallazgo que quedaba: 3 warnings
+`MISSING_REQUIRED_FIELD` por un `orchestrator` con `config: {}`.
+
+```
+303 archivos: 0 error(s), 3 warning(s)   →   303 archivos: 0 error(s), 0 warning(s)
+```
+
+Con eso el track cierra su medición: **de 80 hallazgos a cero**.
+
+### Por qué se reescribió y no se borró
+
+Es el mismo contrato muerto que el `trip_planner.json` de la §43 —despacho a nodos
+top-level por puertos `dispatched_agents`— pero acá había un motivo no-duplicado para
+conservarlo: **no existía en el corpus un orquestador mínimo escrito contra el contrato
+actual**. Los 13 orquestadores de un agente que hay ejercitan features específicas
+(critic feedback, HITL, anidamiento); ninguno es el caso base, y la guía de ejemplos
+señala a éste como "orquestador básico".
+
+De paso arregla algo que el linter **no** puede ver: sus dos agentes eran nodos `log`.
+CLAUDE.md lo prohíbe explícitamente — un placeholder como backing convierte la prueba en
+un mock y esconde fallos reales de ejecución. Ahora es un `packing_expert` de verdad.
+
+La forma salió del ejemplo del catálogo, el mismo que la §45 dejó verificado y ejecutable.
+
+### Lo que corrigió esto en el BACKLOG
+
+Preparando **L12** se midió el motor y **el encuadre del ítem era incorrecto**. Decía que
+el valor "no puede llegar por el puerto de entrada por defecto". Sí puede:
+`build_inputs_for` usa `default_input()` del nodo para un edge sin punto, y si el nodo no
+declara ninguno —**sólo 12 de los 37 lo hacen**, y el `orchestrator` no está entre
+ellos— cae en auto-flatten y mergea todas las claves del objeto upstream.
+
+Lo que ocurre es otra cosa: el valor llega y **se ignora**. El `orchestrator` sólo lee
+`plan`, `prompt` y `user_message` desde `inputs`. La pregunta correcta no es "¿puede
+llegar?" sino "¿el nodo lo lee de ahí?" — y eso cambia el arreglo, que ahora está escrito
+como corresponde en L12.
+
+### E2E
+
+```
+tests/graphs/advanced/test_orchestrator.json · gemini-2.5-flash
+finishReason: "stop"   node-skipped: 0   errores: 0
+agentes que corrieron: packing_expert      totalTokens: 1793
+```
+
+Respuesta poblada, con lista de equipo y ropa.

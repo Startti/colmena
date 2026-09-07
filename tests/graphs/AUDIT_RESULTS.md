@@ -55,7 +55,7 @@
 ### 3. **advanced/** — 7 grafos
 | Grafo | Estado | Notas |
 |-------|--------|-------|
-| test_orchestrator.json | ✅ OK | Multi-agent orchestration |
+| test_orchestrator.json | ✅ OK | Orquestador mínimo (reescrito 2026-09; antes tenía `config: {}` y agentes `log`) |
 | test_suspend.json | ✅ OK | Suspend/resume |
 | llm_tools_memory_test.json | ✅ OK | LLM + tool calling + memory |
 | llm_tools_memory_continuation.json | ✅ OK | Memory continuation |
