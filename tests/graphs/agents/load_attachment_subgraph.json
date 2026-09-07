@@ -24,7 +24,7 @@
     "child_graph": {
       "type": "subgraph",
       "config": {
-        "graph": {
+        "child_graph_inline": {
           "nodes": {
             "child": {
               "type": "llm_call",
@@ -33,7 +33,6 @@
                 "model": "gemini-2.5-flash",
                 "api_key": "${GEMINI_API_KEY}",
                 "connection_url": "${DATABASE_URL}",
-                "session_id": "load_attachment_subgraph_child",
                 "attachments_enabled": true,
                 "system_message": "You are a document analyst. Produce a one-line summary of any document the user asks about.",
                 "prompt": "Summarise the shared document in one line."
@@ -46,6 +45,9 @@
     }
   },
   "edges": [
-    { "from": "outer", "to": "child_graph" }
+    {
+      "from": "outer",
+      "to": "child_graph"
+    }
   ]
 }

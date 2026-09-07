@@ -2239,54 +2239,84 @@ cambios de código de error ni de condiciones → ADP no afectado.
 
 ---
 
-## 42. Se limpia la configuración muerta del corpus (46 de 80)
+## 42. Se limpia el corpus: 74 de 80 hallazgos
 
-**Qué.** Primera tanda de la limpieza que hace falta para poder **encender** el gate del
-linter. De los 80 hallazgos sobre los 303 grafos de ejemplo, 46 eran configuración que el
-motor **nunca leyó**:
+**Qué.** La limpieza que hace falta para poder **encender** el gate del linter. De los 80
+hallazgos sobre los 303 grafos de ejemplo quedan **6**.
+
+### Tanda 1 — configuración que el motor nunca leyó (46)
 
 | Clave | Veces | Por qué está muerta |
 |---|---|---|
 | `prefix` en un `log` | 21 | `LogNode::execute` recibe `_config`: ignora su configuración entera |
 | `label` en un `output` | 15 | idem `OutputNode::execute` |
-| `default_output_port` | 6 | propiedad de nodo que `NodeConfig` no declara; se descarta al cargar |
+| `default_output_port` | 6 | propiedad de nodo que `NodeConfig` no declara |
 | `default_input_port` | 4 | idem |
 
-**Se verificó quién tenía razón antes de tocar un grafo.** Veintiún apariciones de la
-misma clave huelen a falso positivo, no a veintiún grafos rotos — así que lo primero fue
+**Se verificó quién tenía razón antes de tocar un grafo.** Veintiuna apariciones de la
+misma clave huelen a falso positivo, no a veintiún grafos rotos, así que lo primero fue
 leer `debug.rs` y `output.rs`. Los dos toman `_config`. El linter tenía razón.
 
-Vale nombrar lo que eso significa: veintiún autores escribieron `"prefix": "RESULT:"`
-esperando que el log lo usara. **El motor nunca lo honró.** Borrarlo deja el grafo
-diciendo lo que hace; que la intención sea razonable es un argumento para una feature, no
-para dejar configuración inerte.
+Veintiún autores escribieron `"prefix": "RESULT:"` esperando que el log lo usara, y **el
+motor nunca lo honró**. Que la intención sea razonable es un argumento para una feature,
+no para dejar configuración inerte.
 
-### Dos intentos descartados, y el guard que los frenó
+### Tanda 2 — los que necesitaban juicio (28)
 
-El borrado se hizo con un guard: la estructura parseada tiene que diferir **sólo** en las
-claves buscadas. Rechazó dos implementaciones antes de aceptar la tercera.
+Cada campo se verificó contra el código antes de borrarlo, y **no todos eran iguales**:
 
-1. **Round-trip con `json.dump`** — reformateó los archivos enteros: **+1018/−287** para
-   borrar 46 líneas. Entierra el cambio y revienta el cap de 500.
-2. **Regex por línea sobre el archivo** — también mataba `prefix` y `label` que viven
-   dentro de un `node_schema`, donde son legítimos. El guard rechazó 20 archivos.
+- `reasoning_effort` no es un campo que `llm_call` lea: lo **emite** el adapter de OpenAI
+  derivándolo de `thinking_budget`.
+- `instructions` pertenece a `output_parser` y `router`, no a `llm_call`.
+- `max_steps`, `maxSteps`, `memoryWindow`, `marker_field`: **cero** ocurrencias en todo el
+  código Rust.
+- Los siete `inputs` a nivel de nodo llevaban plantillas reales que el motor descarta. En
+  un `log` y en un `http_request` con edge propio se borran; en dos `llm_call` se mueven a
+  `config.prompt`, que **sí** es campo de config y se templa desde los inputs con
+  `resolve_template_vars`. Eso es lo que el autor quiso.
+- Cuatro `python_script` estaban **doblemente rotos**: campo `script` en vez de `code`, y
+  `return` a nivel de módulo, que es `SyntaxError`. Corridos antes y después: antes el
+  nodo fallaba con `'code' field is missing`; ahora `data_source` produce los usuarios de
+  verdad.
 
-En vez de ajustar el algoritmo por tercera vez a ciegas, se abrió uno de los rechazados y
-la causa era otra: nodos escritos **en una sola línea**, donde borrar la línea borra el
-nodo. La versión final rastrea el path JSON para el caso multilínea y recorta el fragmento
-para el inline. Diff final: **+37/−57**.
+### Dos errores propios, y lo que los atrapó
 
-### La cerca de la §38 hizo exactamente lo suyo
+**El borrado masivo reformateó dos veces.** Un `json.dump` convirtió 46 líneas borradas en
+**+1018/−287**, y más tarde 190 líneas para borrar **una** clave. La segunda vez lo agarró
+`review_size.py`, no un test: 915 líneas contra un cap de 500. La versión final edita el
+texto preservando el formato.
 
-Los dos tests de `corpus_noise.rs` se pusieron en rojo y pidieron actualizar las constantes
-**en este mismo cambio**, que es para lo que existen. Corpus: `error=75 warning=5` →
-**`error=29 warning=5`**.
+**Un `subgraph` quedó peor que antes.** Se le borró la clave `graph` y quedó sin hijo:
+misma falla, menos la intención. El valor era un grafo inline completo, así que lo
+correcto era renombrarla a `child_graph_inline`. Restaurada de git y renombrada, el nodo
+pasó a funcionar.
 
-**Lo que queda (34) necesita juicio, no borrado**: siete `inputs` con plantillas reales
-que el motor descarta, cuatro `python_script` sin `code` —el campo se llama `code`, no
-`script`—, y un puñado de campos sueltos. Va en la tanda siguiente.
+**Y esa corrección destapó algo**: con el hijo inline bien nombrado, la recursión de la
+§32 entró y encontró un `session_id` inerte que la §20 había removido de otros 30 grafos.
+Se había salvado porque hasta esa sección nadie miraba ahí adentro.
+
+### La cerca de la §38 pidió sus números dos veces
+
+Los tests de `corpus_noise.rs` se pusieron en rojo después de cada tanda y exigieron
+actualizar las constantes en el mismo cambio, que es para lo que existen.
+
+```
+error=75 warning=5  →  error=29 warning=5  →  error=3 warning=3
+```
+
+### Los 6 que quedan, y por qué no se tocaron
+
+`advanced/test_orchestrator.json` y `advanced/trip_planner.json` están escritos contra un
+contrato **anterior** del orquestador: sus piezas viven como nodos top-level
+(`clothing_expert`, `finalizer`, un `planner` aparte) en vez de en el `config`, que es
+donde el nodo actual las lee. Arreglarlos es **reescribirlos**, no limpiarlos, y eso pide
+decidir qué debe demostrar cada demo — no inventarlo.
+
+**Por eso el gate sigue en modo reporte.** Encenderlo con `--fail-on error` requiere esos
+dos, y son el único bloqueante que queda.
 
 **Alcance.** Sólo grafos de ejemplo y las constantes de la cerca. Sin cambios de código →
 ADP no afectado.
 
 **Estado.** done.
+

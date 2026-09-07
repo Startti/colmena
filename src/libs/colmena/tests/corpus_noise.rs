@@ -84,8 +84,8 @@ fn measure() -> Measured {
 /// Update these three numbers in the SAME change that moves them, and say in
 /// the PR body which graphs moved and why.
 const EXPECTED_FILES: usize = 303;
-const EXPECTED_ERRORS: usize = 29;
-const EXPECTED_WARNINGS: usize = 5;
+const EXPECTED_ERRORS: usize = 3;
+const EXPECTED_WARNINGS: usize = 3;
 const EXPECTED_INFOS: usize = 0;
 
 #[test]
@@ -120,10 +120,10 @@ fn the_corpus_noise_is_what_this_track_measured() {
 fn the_corpus_findings_break_down_the_way_they_did() {
     let m = measure();
     let expected: BTreeMap<&str, usize> = [
-        ("UNKNOWN_FIELD", 19),
-        ("UNKNOWN_NODE_PROPERTY", 7),
+        // All that is left: two orchestrator graphs written against an older
+        // contract, whose pieces are top-level nodes instead of config. Fixing
+        // them is a rewrite, not a cleanup.
         ("MISSING_REQUIRED_FIELD", 6),
-        ("FIELD_TYPE_MISMATCH", 2),
     ]
     .into_iter()
     .collect();

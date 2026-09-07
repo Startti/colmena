@@ -2,8 +2,14 @@
   "comment": "Test graph for node_schema unified tool configuration. Demonstrates single-source-of-truth parameter definition with fixed, required, and optional fields. Uses jsonplaceholder.typicode.com for testing without external dependencies.",
   "metadata": {
     "category": "agents",
-    "features": ["node_schema", "http_tool", "llm_call"],
-    "requires_env": ["OPENAI_API_KEY"]
+    "features": [
+      "node_schema",
+      "http_tool",
+      "llm_call"
+    ],
+    "requires_env": [
+      "OPENAI_API_KEY"
+    ]
   },
   "nodes": {
     "trigger": {
@@ -25,7 +31,9 @@
         "system_message": "You are a blog post writer. Use the create_blog_post tool to create posts. The userId and author are always fixed. You provide the title and content. Tags are optional.",
         "temperature": 0.7,
         "stream": false,
-        "enabled_tools": ["create_blog_post"],
+        "enabled_tools": [
+          "create_blog_post"
+        ],
         "tool_configurations": {
           "create_blog_post": {
             "name": "create_blog_post",
@@ -78,10 +86,7 @@
       }
     },
     "log": {
-      "type": "log",
-      "inputs": {
-        "message": "✅ Blog Post Created\n\nTitle: {{title}}\nAuthor: {{author}}\nContent: {{content}}\nTags: {{tags}}\nPost ID: {{id}}"
-      }
+      "type": "log"
     }
   },
   "edges": [

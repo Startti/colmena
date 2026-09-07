@@ -9,7 +9,6 @@
     "show": {
       "type": "log",
       "config": {
-        "marker_field": "<sv_smoke>"
       }
     }
   },

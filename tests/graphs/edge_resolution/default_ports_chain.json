@@ -23,19 +23,16 @@
     "add_ten": {
       "type": "add",
       "config": {
-        "left": 10
       }
     },
     "multiply_two": {
       "type": "multiply",
       "config": {
-        "left": 2
       }
     },
     "subtract_five": {
       "type": "subtract",
       "config": {
-        "left": 5
       }
     },
     "log_result": {

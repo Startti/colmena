@@ -11,10 +11,8 @@
       "type": "llm_call",
       "config": {
         "model": "gemini-2.5-flash",
-        "maxSteps": 10,
         "description": "ADP agent creator agent",
         "temperature": 0,
-        "memoryWindow": "",
         "stream": true,
         "system_message": "You are a canvas automation agent for the ADP platform. You manage nodes and edges on a visual workflow canvas.\n\nWORKFLOW:\n1. Always first to see existing nodes, edges, and groups.\n",
         "connection_url": "postgresql://colmena:qwerty123@34.172.146.67:5432/colmena_llm_memory",
