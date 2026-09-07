@@ -55,13 +55,11 @@
     "log_escalate": {
       "type": "log",
       "config": {
-        "prefix": "ESCALATE:"
       }
     },
     "log_thank": {
       "type": "log",
       "config": {
-        "prefix": "THANK:"
       }
     },
     "out": {

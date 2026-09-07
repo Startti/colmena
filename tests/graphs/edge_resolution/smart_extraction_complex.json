@@ -10,19 +10,19 @@
     "data_source": {
       "type": "python_script",
       "config": {
-        "script": "return {'users': [{'id': 1, 'name': 'Alice', 'email': 'alice@example.com'}, {'id': 2, 'name': 'Bob', 'email': 'bob@example.com'}], 'metadata': {'total': 2, 'page': 1}}"
+        "code": "output = {'users': [{'id': 1, 'name': 'Alice', 'email': 'alice@example.com'}, {'id': 2, 'name': 'Bob', 'email': 'bob@example.com'}], 'metadata': {'total': 2, 'page': 1}}"
       }
     },
     "email_extractor": {
       "type": "python_script",
       "config": {
-        "script": "# Extract emails from users array\nemails = [user['email'] for user in users['users']]\nreturn {'email_list': emails, 'count': len(emails), 'users': users}"
+        "code": "# Extract emails from users array\nemails = [user['email'] for user in users['users']]\noutput = {'email_list': emails, 'count': len(emails), 'users': users}"
       }
     },
     "name_formatter": {
       "type": "python_script",
       "config": {
-        "script": "# Format user names from extracted users\nformatted = [f\"{u['name']} ({u['email']})\" for u in users['users']]\nreturn {'formatted_names': formatted}"
+        "code": "# Format user names from extracted users\nformatted = [f\"{u['name']} ({u['email']})\" for u in users['users']]\noutput = {'formatted_names': formatted}"
       }
     },
     "log_emails": {

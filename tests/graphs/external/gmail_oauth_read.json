@@ -2,8 +2,18 @@
   "comment": "E2E graph: an assistant that reads the user's Gmail and summarizes unread messages, calling the Gmail API via the http_request node's native OAuth2 (grant refresh_token). The auth block is config-only and fixed inside node_schema, so the LLM never sees the token. base_url/method/endpoint/auth are fixed (anti-exfiltration: the LLM cannot control the destination host); only query_params is LLM-visible. Requires real Gmail OAuth credentials (GMAIL_CLIENT_ID/GMAIL_CLIENT_SECRET/GMAIL_REFRESH_TOKEN) obtained ONCE offline (e.g. Google OAuth Playground) — do NOT run live without them.",
   "metadata": {
     "category": "external",
-    "features": ["llm_call", "http_request", "oauth2_refresh_token", "node_schema"],
-    "requires_env": ["GEMINI_API_KEY", "GMAIL_CLIENT_ID", "GMAIL_CLIENT_SECRET", "GMAIL_REFRESH_TOKEN"]
+    "features": [
+      "llm_call",
+      "http_request",
+      "oauth2_refresh_token",
+      "node_schema"
+    ],
+    "requires_env": [
+      "GEMINI_API_KEY",
+      "GMAIL_CLIENT_ID",
+      "GMAIL_CLIENT_SECRET",
+      "GMAIL_REFRESH_TOKEN"
+    ]
   },
   "nodes": {
     "trigger": {
@@ -63,10 +73,7 @@
       }
     },
     "log": {
-      "type": "log",
-      "inputs": {
-        "message": "📧 Resumen de correos no leídos:\n\n{{result}}"
-      }
+      "type": "log"
     }
   },
   "edges": [

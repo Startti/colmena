@@ -37,7 +37,6 @@
         "api_key": "${GEMINI_API_KEY}",
         "connection_url": "${DATABASE_URL}",
         "temperature": 0.0,
-        "reasoning_effort": "low",
         "stream": false,
         "skills": {
           "paths": ["/app/skills/adp-node-catalog"]

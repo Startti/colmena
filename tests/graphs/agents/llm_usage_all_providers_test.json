@@ -49,7 +49,6 @@
     "log_step": {
       "type": "log",
       "config": {
-        "message": "=== Usage comparison complete ==="
       }
     }
   },

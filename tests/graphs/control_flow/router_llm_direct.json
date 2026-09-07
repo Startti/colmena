@@ -24,9 +24,9 @@
         ]
       }
     },
-    "log_sales":   { "type": "log", "config": { "prefix": "SALES:" } },
-    "log_support": { "type": "log", "config": { "prefix": "SUPPORT:" } },
-    "log_billing": { "type": "log", "config": { "prefix": "BILLING:" } },
+    "log_sales":   { "type": "log", "config": { } },
+    "log_support": { "type": "log", "config": { } },
+    "log_billing": { "type": "log", "config": { } },
     "out": { "type": "output", "config": {} }
   },
   "edges": [

@@ -25,7 +25,7 @@
         "prompt": "Borrá los gastos viejos del mes pasado que ya no me sirven."
       }
     },
-    "result": { "type": "output", "config": { "label": "Read-Write Capability Result" } }
+    "result": { "type": "output", "config": { } }
   },
   "edges": [ { "from": "agent", "to": "result" } ]
 }

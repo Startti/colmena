@@ -19,7 +19,7 @@
         "query": "SELECT 'SQL_CANARY_2c8d4f61_e2e_marker' AS canary"
       }
     },
-    "result": { "type": "output", "config": { "label": "Logging Payload E2E Result" } }
+    "result": { "type": "output", "config": { } }
   },
   "edges": [
     { "from": "start", "to": "sql_probe.upstream_marker" },

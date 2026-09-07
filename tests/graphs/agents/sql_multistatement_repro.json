@@ -66,7 +66,7 @@
     },
     "final_select": { "type": "sql_query", "config": {} },
 
-    "out": { "type": "output", "config": { "label": "Multi-statement repro results" } }
+    "out": { "type": "output", "config": { } }
   },
   "edges": [
     { "from": "setup_params.query", "to": "setup.query" },

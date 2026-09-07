@@ -11,7 +11,7 @@
         "max_results": 3
       }
     },
-    "result": { "type": "output", "config": { "label": "tavily standalone search" } }
+    "result": { "type": "output", "config": { } }
   },
   "edges": [{ "from": "search", "to": "result" }]
 }

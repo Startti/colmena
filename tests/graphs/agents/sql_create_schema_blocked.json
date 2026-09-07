@@ -19,8 +19,7 @@
       "config": {}
     },
     "result": {
-      "type": "output",
-      "config": { "label": "DDL Result" }
+      "type": "output"
     }
   },
   "edges": [

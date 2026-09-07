@@ -62,7 +62,6 @@
     "result": {
       "type": "output",
       "config": {
-        "label": "Todo Agent Result"
       }
     }
   },

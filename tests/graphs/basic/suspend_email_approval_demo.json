@@ -46,9 +46,9 @@
         ]
       }
     },
-    "send":   { "type": "log", "config": { "prefix": "📤 EMAIL ENVIADO:" } },
-    "cancel": { "type": "log", "config": { "prefix": "🛑 EMAIL CANCELADO:" } },
-    "revise": { "type": "log", "config": { "prefix": "✏️  REVISIÓN PEDIDA:" } }
+    "send":   { "type": "log", "config": { } },
+    "cancel": { "type": "log", "config": { } },
+    "revise": { "type": "log", "config": { } }
   },
   "edges": [
     { "from": "request",                "to": "draft" },

@@ -114,10 +114,7 @@
       }
     },
     "log_results": {
-      "type": "log",
-      "inputs": {
-        "message": "✅ SECURE AGENT TEST COMPLETE\n\nToken (should be <value_N>): {{amadeus_token}}\nAgent analysis: {{agent_response}}"
-      }
+      "type": "log"
     }
   },
   "edges": [

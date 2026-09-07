@@ -1,7 +1,9 @@
 //! The corpus noise numbers, turned from a measurement into a fence.
 //!
-//! Every change in this track quoted `error=75 warning=5 info=0` over the
-//! repo's example graphs as evidence that a new rule added no false positives.
+//! Every change in this track quoted the corpus counts over the repo's example
+//! graphs as evidence that a new rule added no false positives. They started at
+//! `error=75 warning=5` and are coming down as the graphs get fixed — this file
+//! is what makes each step of that visible.
 //! Nothing held those numbers: they were re-measured by hand each time, so a
 //! rule or a catalog edit could have undone the noise reduction and no test
 //! would have said a word.
@@ -82,8 +84,8 @@ fn measure() -> Measured {
 /// Update these three numbers in the SAME change that moves them, and say in
 /// the PR body which graphs moved and why.
 const EXPECTED_FILES: usize = 303;
-const EXPECTED_ERRORS: usize = 75;
-const EXPECTED_WARNINGS: usize = 5;
+const EXPECTED_ERRORS: usize = 3;
+const EXPECTED_WARNINGS: usize = 3;
 const EXPECTED_INFOS: usize = 0;
 
 #[test]
@@ -118,10 +120,10 @@ fn the_corpus_noise_is_what_this_track_measured() {
 fn the_corpus_findings_break_down_the_way_they_did() {
     let m = measure();
     let expected: BTreeMap<&str, usize> = [
-        ("UNKNOWN_FIELD", 55),
-        ("UNKNOWN_NODE_PROPERTY", 17),
+        // All that is left: two orchestrator graphs written against an older
+        // contract, whose pieces are top-level nodes instead of config. Fixing
+        // them is a rewrite, not a cleanup.
         ("MISSING_REQUIRED_FIELD", 6),
-        ("FIELD_TYPE_MISMATCH", 2),
     ]
     .into_iter()
     .collect();

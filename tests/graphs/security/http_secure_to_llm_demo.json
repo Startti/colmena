@@ -35,10 +35,7 @@
         "api_key": "${api_key}",
         "system_message": "${system_message}",
         "stream": true,
-        "instructions": "Look at the sensitive data provided and analyze it. The <value_1>, <value_2>, <value_3> are secure hashes - never try to reverse them or guess what they are. Just describe the structure of the data and what it represents."
-      },
-      "inputs": {
-        "user_message": "Here is my sensitive configuration data:\n\n1. API Token: ${fetch_sensitive_config.body.json.api_token}\n2. Database Password: ${fetch_sensitive_config.body.json.database_password}\n3. Encryption Key: ${fetch_sensitive_config.body.json.encryption_key}\n\nAnalyze this data structure. Note that the values above are secure hashes, not the actual credentials."
+        "prompt": "Here is my sensitive configuration data:\n\n1. API Token: ${fetch_sensitive_config.body.json.api_token}\n2. Database Password: ${fetch_sensitive_config.body.json.database_password}\n3. Encryption Key: ${fetch_sensitive_config.body.json.encryption_key}\n\nAnalyze this data structure. Note that the values above are secure hashes, not the actual credentials."
       }
     }
   },

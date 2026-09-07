@@ -15,7 +15,7 @@
         "query": "INSERT INTO e2e_standalone.items (name) VALUES ('rotura1_fixed') RETURNING id, name"
       }
     },
-    "result": { "type": "output", "config": { "label": "standalone insert result" } }
+    "result": { "type": "output", "config": { } }
   },
   "edges": [{ "from": "writer", "to": "result" }]
 }

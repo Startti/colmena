@@ -18,36 +18,25 @@
             }
           }
         }
-      },
-      "default_output_port": "output"
+      }
     },
     "add_ten": {
       "type": "add",
       "config": {
-        "left": 10
-      },
-      "default_input_port": "right",
-      "default_output_port": "result"
+      }
     },
     "multiply_two": {
       "type": "multiply",
       "config": {
-        "left": 2
-      },
-      "default_input_port": "right",
-      "default_output_port": "result"
+      }
     },
     "subtract_five": {
       "type": "subtract",
       "config": {
-        "left": 5
-      },
-      "default_input_port": "right",
-      "default_output_port": "result"
+      }
     },
     "log_result": {
-      "type": "log",
-      "default_input_port": "input"
+      "type": "log"
     }
   },
   "edges": [

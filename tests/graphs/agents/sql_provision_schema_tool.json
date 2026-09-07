@@ -42,8 +42,7 @@
       }
     },
     "result": {
-      "type": "output",
-      "config": { "label": "SQL Agent Result" }
+      "type": "output"
     }
   },
   "edges": [

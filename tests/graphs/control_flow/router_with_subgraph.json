@@ -48,7 +48,7 @@
         ]
       }
     },
-    "log_escalate": { "type": "log", "config": { "prefix": "ESCALATE:" } },
+    "log_escalate": { "type": "log", "config": { } },
     "out": { "type": "output", "config": {} }
   },
   "edges": [

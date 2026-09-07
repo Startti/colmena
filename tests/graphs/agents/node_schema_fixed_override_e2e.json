@@ -34,7 +34,7 @@
         "prompt": "Send a note that says 'hola mundo'."
       }
     },
-    "result": { "type": "output", "config": { "label": "Override E2E Result" } }
+    "result": { "type": "output", "config": { } }
   },
   "edges": [
     { "from": "agent", "to": "result" }
