@@ -2243,3 +2243,107 @@ fn a_tool_targeting_an_uncatalogued_type_still_reports_missing_coverage() {
         codes(&report)
     );
 }
+
+// ---------------------------------------------------------------------------
+// L1 — the other four gates `Graph::validate()` applies to a tool entry
+// ---------------------------------------------------------------------------
+
+/// An `llm_call` carrying one tool entry, which is where all four gates live.
+fn tool_entry_graph(entry: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "nodes": { "agent": { "type": "llm_call", "config": {
+            "provider": "openai", "api_key": "k", "model": "gpt-4o",
+            "tool_configurations": { "t": entry }
+        }}},
+        "edges": []
+    })
+}
+
+/// Gate 1 — a `memory_mode` outside the enum. The check lives inline in
+/// `graph.rs` rather than in a domain function, so this is the one arm the
+/// linter has to deserialize for itself.
+#[test]
+fn a_memory_mode_outside_the_enum_is_reported() {
+    let report = lint_json(tool_entry_graph(serde_json::json!({
+        "node_type": "llm_call",
+        "memory_mode": "persistant"
+    })));
+
+    let d = find(&report, DiagnosticCode::MalformedToolEntry)
+        .expect("the engine refuses this graph at load");
+    assert_eq!(
+        d.field.as_deref(),
+        Some("tool_configurations.t.memory_mode")
+    );
+}
+
+/// Gate 2 — a memory mode on a node type that carries no memory.
+#[test]
+fn a_memory_mode_on_a_node_type_without_memory_is_reported() {
+    let report = lint_json(tool_entry_graph(serde_json::json!({
+        "node_type": "http_request",
+        "memory_mode": "persistent"
+    })));
+
+    assert!(
+        find(&report, DiagnosticCode::MalformedToolEntry).is_some(),
+        "only llm_call and subgraph carry memory: {:?}",
+        codes(&report)
+    );
+}
+
+/// Gate 3 — a memory-bearing mode with no `connection_url` behind it: memory
+/// would be in-process only and lost between runs.
+#[test]
+fn a_memory_bearing_mode_without_a_backend_is_reported() {
+    let report = lint_json(tool_entry_graph(serde_json::json!({
+        "node_type": "llm_call",
+        "memory_mode": "persistent",
+        "node_schema": { "provider": { "fixed": "openai" } }
+    })));
+
+    assert!(
+        find(&report, DiagnosticCode::MalformedToolEntry).is_some(),
+        "no connection_url means the memory does not survive the run: {:?}",
+        codes(&report)
+    );
+}
+
+/// Gate 4 — a malformed `mcp` block. Reuses `validate_mcp_config`, so the
+/// linter and the engine cannot disagree about what counts as malformed.
+#[test]
+fn a_malformed_mcp_block_is_reported() {
+    let report = lint_json(tool_entry_graph(serde_json::json!({
+        "node_type": "mcp",
+        "mcp": { "url": "http://insecure.example.com/mcp" }
+    })));
+
+    let d = find(&report, DiagnosticCode::MalformedToolEntry)
+        .expect("plaintext MCP transport is refused at load");
+    assert!(
+        !d.message.contains("insecure.example.com"),
+        "the linter must not echo the URL either — it can carry a token: {}",
+        d.message
+    );
+}
+
+/// The gates must stay silent on entries the engine accepts, or the rule is
+/// worse than the gap it fills.
+#[test]
+fn entries_the_engine_accepts_are_left_alone() {
+    for entry in [
+        serde_json::json!({ "node_type": "http_request" }),
+        serde_json::json!({ "node_type": "llm_call", "memory_mode": "stateless" }),
+        serde_json::json!({
+            "node_type": "mcp",
+            "mcp": { "url": "https://secure.example.com/mcp" }
+        }),
+    ] {
+        let report = lint_json(tool_entry_graph(entry.clone()));
+        assert!(
+            find(&report, DiagnosticCode::MalformedToolEntry).is_none(),
+            "{entry} is valid, but was reported: {:?}",
+            codes(&report)
+        );
+    }
+}

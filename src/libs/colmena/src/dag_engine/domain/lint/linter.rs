@@ -10,7 +10,8 @@ use super::catalog::{
 use super::diagnostic::{Diagnostic, DiagnosticCode, LintReport, Severity};
 use crate::dag_engine::domain::graph::{Graph, NodeConfig};
 use crate::dag_engine::domain::tool_configuration::{
-    parse_node_schema, unreadable_schema_shape, NodeSchema,
+    memory_backend_missing_reason, parse_node_schema, unreadable_schema_shape, validate_mcp_config,
+    validate_memory_mode, MemoryMode, NodeSchema,
 };
 use serde_json::{Map, Value};
 use std::collections::BTreeSet;
@@ -342,6 +343,70 @@ fn first_parse_rejection(schema: &NodeSchema) -> Option<String> {
     parse_node_schema(schema).err()
 }
 
+/// The gates `Graph::validate` applies to a tool entry besides `node_schema`.
+///
+/// `MALFORMED_TOOL_ENTRY` covered the `node_schema` arm; these are the other
+/// four, and each one rejects the WHOLE graph at load while the linter said
+/// nothing. Reported before a run for the same reason as the fifth: the trip is
+/// what a lint saves.
+///
+/// Three of the four are existing domain functions and are CALLED, not copied —
+/// the same choice `node_schema_rejection` makes. A reimplementation here would
+/// be free to drift from the gate it mirrors, and the drift would show up as a
+/// graph the linter blesses and the engine refuses, which is the exact failure
+/// this rule exists to remove.
+///
+/// The first has no domain function: `graph.rs` deserializes `MemoryMode`
+/// inline. Deserializing the same way is the closest available equivalent, and
+/// it is one line rather than a rule.
+///
+/// Yields `(field, reason)` so the caller can point at the offending key.
+fn other_validate_rejections(entry: &Value) -> Vec<(&'static str, String)> {
+    let node_type = entry
+        .get("node_type")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let mut found = Vec::new();
+
+    if let Some(raw) = entry.get("memory_mode") {
+        match serde_json::from_value::<MemoryMode>(raw.clone()) {
+            // Gate 1 echoes the value, which the rest of this module refuses
+            // to do. The line section 26 drew is not "never print a value" but
+            // WHERE the value came from: a closed enum the catalog declares —
+            // like `method`, which `INVALID_FIELD_VALUE` already echoes — as
+            // against a free-form slot the author names, like a `node_schema`
+            // key. `memory_mode` is the former, and the typo is the fix, so
+            // this side of the line is where it belongs. Anything else here
+            // would be inconsistent with its own sibling diagnostic.
+            Err(_) => found.push((
+                "memory_mode",
+                format!(
+                    "{} is not a memory_mode; the accepted values are \
+                     \"stateless\", \"persistent\" and \"dynamic\"",
+                    compact(raw)
+                ),
+            )),
+            Ok(mode) => {
+                // Gate 2.
+                if let Err(reason) = validate_memory_mode(node_type, mode) {
+                    found.push(("memory_mode", reason));
+                }
+                // Gate 3 — a memory-bearing mode with no backend behind it.
+                else if let Some(reason) = memory_backend_missing_reason(node_type, mode, entry) {
+                    found.push(("memory_mode", reason));
+                }
+            }
+        }
+    }
+
+    // Gate 4.
+    if let Err(reason) = validate_mcp_config(node_type, entry) {
+        found.push(("mcp", reason));
+    }
+
+    found
+}
+
 /// Reports a tool entry the engine will refuse before running anything.
 ///
 /// `Graph::validate` rejects the whole graph when a tool's `node_schema` cannot
@@ -364,6 +429,17 @@ fn first_parse_rejection(schema: &NodeSchema) -> Option<String> {
 /// firing — see the note at the suppression site.
 fn lint_raw_malformed_tool_entries(document: &Value, report: &mut LintReport) {
     for (node_id, tool_name, entry) in tool_configuration_entries(document) {
+        for (field, reason) in other_validate_rejections(entry) {
+            report.diagnostics.push(Diagnostic {
+                severity: Severity::Error,
+                code: DiagnosticCode::MalformedToolEntry,
+                node_id: Some(node_id.clone()),
+                field: Some(format!("tool_configurations.{tool_name}.{field}")),
+                message: format!("tool \"{tool_name}\" is refused by the engine at load: {reason}"),
+                suggestion: None,
+            });
+        }
+
         let Some(reason) = node_schema_rejection(entry) else {
             continue;
         };

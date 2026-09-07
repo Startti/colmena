@@ -29,22 +29,6 @@ Ordenados por importancia. Los ids son para poder referenciarlos en un PR.
 
 #### Cobertura — el motor rechaza y el linter no lo dice
 
-- **L1 · Las otras cuatro puertas que `Graph::validate()` aplica a una entrada de tool.**
-  `MALFORMED_TOOL_ENTRY` cubre la quinta y última, el brazo `node_schema`. Las otras
-  cuatro rechazan el grafo entero al cargar y el linter calla. En el orden en que
-  `validate()` las aplica, con la función exacta de cada una:
-
-  | # | Qué rechaza | Dónde vive el chequeo |
-  |---|---|---|
-  | 1 | `memory_mode` con un valor que no es del enum | `serde_json::from_value::<MemoryMode>` **inline** en `graph.rs` — no hay función de dominio |
-  | 2 | `memory_mode` sobre un tipo de nodo que no lleva memoria | `validate_memory_mode(node_type, mode)` |
-  | 3 | cualquier `memory_mode` que lleve memoria (`persistent` **y** `dynamic`) sin backend (`connection_url`) | `memory_backend_missing_reason(node_type, mode, tool_cfg)` — sale temprano sólo para `stateless` |
-  | 4 | bloque `mcp` malformado o con URL no-HTTPS | `validate_mcp_config(node_type, tool_cfg)` |
-
-  Tres de las cuatro son funciones de dominio ya existentes, así que aplica el mismo
-  patrón del track: llamarlas, no copiarlas. La #1 no lo es todavía — o se extrae, o el
-  linter deserializa igual que `validate()`. **El más accionable de la lista.**
-
 - **L1b · El linter no revisa la forma de los node ids.** `Graph::validate()` rechaza
   cualquier id que contenga `/`, porque ese carácter está reservado para los
   calificadores de path de subgrafo (`DagError::InvalidNodeId`). Ninguna regla del linter
@@ -119,6 +103,7 @@ queda es higiene de reporte, no fuga.
 | Adopción en CI — modo directorio, `--fail-on <nivel>`, y el paso en `ci-develop.yml` en modo reporte | 2026-09-06 | §36 |
 | L4 + L5 — el motor deja de imprimir el valor rechazado, en sus tres sitios (uno no estaba listado: `mcp.headers`) | 2026-09-06 | §37 |
 | L8 — los conteos de ruido del corpus pasan de medición a cerca, fijados en ambas direcciones | 2026-09-06 | §38 |
+| L1 — el linter espeja las cinco compuertas que `validate()` aplica a una entrada de tool; cuatro llamando a la misma función de dominio | 2026-09-07 | §39 |
 | El camino de producción no llamaba a `Graph::validate()` | 2026-09-04 | §18 |
 
 Dos lecciones del track que no son items y conviene no re-aprender:

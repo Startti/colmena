@@ -2087,3 +2087,52 @@ ahogarían la señal.
 **Estado.** done.
 
 **Estado.** done.
+
+---
+
+## 39. El linter espeja las cinco compuertas de una entrada de tool
+
+**Qué.** Cierra **L1**. `MALFORMED_TOOL_ENTRY` cubría una de las cinco compuertas que
+`Graph::validate()` aplica a una entrada de tool. Las otras cuatro **rechazan el grafo
+entero al cargar y el linter callaba**:
+
+| Compuerta | Dónde vive el chequeo |
+|---|---|
+| `memory_mode` fuera del enum | inline en `graph.rs` — no hay función de dominio |
+| `memory_mode` sobre un tipo de nodo sin memoria | `validate_memory_mode` |
+| modo con memoria sin `connection_url` | `memory_backend_missing_reason` |
+| bloque `mcp` malformado o URL no-HTTPS | `validate_mcp_config` |
+
+**Tres de las cuatro se llaman, no se copian** — la misma elección que hizo
+`node_schema_rejection`. Una reimplementación acá sería libre de divergir de la compuerta
+que espeja, y esa divergencia se vería como un grafo que el linter bendice y el motor
+rechaza: exactamente el fallo que la regla existe para eliminar. La cuarta no tiene
+función de dominio, así que el linter deserializa igual que `graph.rs`.
+
+### Una excepción a la regla de no imprimir valores, y por qué es coherente
+
+El mensaje del enum **sí** imprime lo que encontró, cuando el resto del módulo se niega.
+La línea que trazó la §26 no es "nunca imprimir un valor" sino **de dónde viene el
+valor**: un enum cerrado que el catálogo declara —como `method`, que
+`INVALID_FIELD_VALUE` ya imprime— contra una ranura libre que nombra el autor, como una
+clave de `node_schema`. `memory_mode` es lo primero, y el typo es el arreglo. Hacer otra
+cosa acá sería incoherente con su propio diagnóstico hermano.
+
+El bloque `mcp` no necesitó excepción: reusa `validate_mcp_config`, que desde la §37 ya
+no imprime la URL.
+
+### Verificación
+
+**Cuatro mutaciones, una por compuerta**, todas matan un test. La primera hubo que
+reformularla: la versión obvia no compilaba, y una mutación que no compila no prueba
+nada — segunda vez en este track.
+
+Un quinto test fija que las entradas que el motor **acepta** siguen sin reportarse: un
+`http_request` sin memoria, un `memory_mode: stateless`, y un `mcp` con URL HTTPS.
+
+Corpus `error=75 warning=5 info=0`, sin cambios — y ahora eso lo sostiene la cerca de la
+§38, no una medición a mano.
+
+**Alcance.** Aditivo. Ningún grafo del corpus cambia de veredicto → ADP no afectado.
+
+**Estado.** done.
