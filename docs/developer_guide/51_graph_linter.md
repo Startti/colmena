@@ -486,10 +486,27 @@ cargo run --bin dag_engine -- lint tests/lint_examples/01_invented_config_field.
 
 ### Un campo obligatorio que falta
 
+El diagnóstico **cita el ejemplo escrito en el catálogo** para ese campo. No es
+información nueva: `docs/node_configurations.json` declara un `example` en 156 de sus
+237 campos, y el linter ya carga ese archivo — lo que faltaba era que llegara a quien
+lee el error, en vez de mandarlo a buscar un archivo que el linter acababa de leer.
+
+Dos reglas gobiernan la cita:
+
+1. **Si el catálogo no documenta un ejemplo, no se inventa uno.** El silencio es la
+   salida honesta: quien lee no puede distinguir un ejemplo inventado de uno documentado,
+   así que una suposición errónea cuesta más que no mostrar nada.
+2. **Nunca se emite JSON truncado.** Por encima de `MAX_INLINE_EXAMPLE` (400 caracteres)
+   el mensaje apunta al catálogo en vez de imprimir un *prefijo* del objeto. Un objeto
+   cortado se lee como copiable y no lo es. Hoy ningún ejemplo llega a ese límite — el
+   más grande es `orchestrator.agents` con 280 — y un test lo afirma, así que cruzarlo
+   será una decisión y no una sorpresa.
+
+
 [`04_missing_required_field.json`](../../tests/lint_examples/04_missing_required_field.json) — Ningún edge entrante puede aportarlo, así que es error. Con un edge sin nombre de puerto sería warning.
 
 ```
-  error [MISSING_REQUIRED_FIELD] node "chat".api_key: required field "api_key" is not set, and no incoming edge supplies it
+  error [MISSING_REQUIRED_FIELD] node "chat".api_key: required field "api_key" is not set, and no incoming edge supplies it — the catalog documents it as "${OPENAI_API_KEY}"
 
   1 error(s), 0 warning(s), 0 info
 ```
@@ -638,7 +655,7 @@ cargo run --bin dag_engine -- lint tests/lint_examples/01_invented_config_field.
   error [EDGE_UNKNOWN_NODE]: edge to="missing_node" names a node that this graph does not define
   error [UNKNOWN_FIELD] node "chat".modle: "modle" is not a configuration field of llm_call — did you mean "model"?
   error [UNKNOWN_NODE_PROPERTY] node "fetch".default_output_port: "default_output_port" is not a property of a node; the engine discards it when loading the graph — move it into "config" if the node reads it there
-  warning [MISSING_REQUIRED_FIELD] node "chat".api_key: required field "api_key" is not set in config — this node has an incoming edge with no port name, so the value may arrive through its default input port instead
+  warning [MISSING_REQUIRED_FIELD] node "chat".api_key: required field "api_key" is not set in config — this node has an incoming edge with no port name, so the value may arrive through its default input port instead; if it does not, the catalog documents it as "${OPENAI_API_KEY}"
   warning [INVALID_FIELD_VALUE] node "fetch".method: "GETT" is not one of the documented values for "method" — accepted: "GET", "POST", "PUT", "DELETE", "PATCH"
 
   3 error(s), 2 warning(s), 0 info

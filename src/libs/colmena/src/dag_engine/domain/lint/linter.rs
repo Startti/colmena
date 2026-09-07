@@ -1201,7 +1201,15 @@ fn lint_node(
                 suggestion: None,
             });
         }
-        report_missing_required(node_id, entry, &Map::new(), graph, report);
+        report_missing_required(
+            node_id,
+            &node.node_type,
+            ctx.catalog,
+            entry,
+            &Map::new(),
+            graph,
+            report,
+        );
         return;
     };
 
@@ -1217,7 +1225,15 @@ fn lint_node(
         );
     }
 
-    report_missing_required(node_id, entry, config, graph, report);
+    report_missing_required(
+        node_id,
+        &node.node_type,
+        ctx.catalog,
+        entry,
+        config,
+        graph,
+        report,
+    );
 }
 
 fn lint_field(
@@ -1333,6 +1349,8 @@ fn lint_field(
 /// with no incoming edge at all can be called an outright error.
 fn report_missing_required(
     node_id: &str,
+    node_type: &str,
+    catalog: &NodeCatalog,
     entry: &NodeCatalogEntry,
     config: &Map<String, Value>,
     graph: &Graph,
@@ -1378,21 +1396,27 @@ fn report_missing_required(
             continue;
         }
 
+        // The catalog carries a written example for most fields and the linter
+        // already has it loaded; saying what is absent without saying what it
+        // should look like sends the reader to find a file the linter just read.
+        let example = example_clause(catalog, node_type, field);
+
         let (severity, message, suggestion) = if has_unnamed_incoming_edge {
+            let hedge = "this node has an incoming edge with no port name, so the value may \
+                         arrive through its default input port instead";
             (
                 Severity::Warning,
                 format!("required field \"{field}\" is not set in config"),
-                Some(
-                    "this node has an incoming edge with no port name, so the value may \
-                     arrive through its default input port instead"
-                        .to_string(),
-                ),
+                Some(match &example {
+                    Some(e) => format!("{hedge}; if it does not, {e}"),
+                    None => hedge.to_string(),
+                }),
             )
         } else {
             (
                 Severity::Error,
                 format!("required field \"{field}\" is not set, and no incoming edge supplies it"),
-                None,
+                example.clone(),
             )
         };
 
@@ -1404,6 +1428,60 @@ fn report_missing_required(
             message,
             suggestion,
         });
+    }
+}
+
+/// How much of a catalog example the linter prints inline.
+///
+/// The examples are small today -- 19 characters at the median across the 40
+/// required fields that have one, 280 at the largest (`orchestrator.agents`,
+/// which is exactly the case worth printing in full). This bound is headroom,
+/// not a squeeze.
+///
+/// What it exists for is the day someone documents a large one. Past the bound
+/// the linter points at the catalog instead of printing a PREFIX of the JSON: a
+/// truncated object reads as copy-pasteable and is not, which costs the reader
+/// more than showing nothing would.
+const MAX_INLINE_EXAMPLE: usize = 400;
+
+/// The catalog's example for a field, phrased for a diagnostic suggestion.
+///
+/// `None` when the catalog documents no example. Nothing is invented to fill
+/// the gap -- a reader cannot tell a guessed example from a documented one, so
+/// a wrong guess is worse than silence.
+fn example_clause(catalog: &NodeCatalog, node_type: &str, field: &str) -> Option<String> {
+    let example = catalog.field_example(node_type, field)?;
+    Some(phrase_example(example, node_type, field))
+}
+
+/// Phrases one example value, choosing inline or pointer by its rendered size.
+///
+/// Split from the lookup so the size decision is reachable in a test with a
+/// value of any size. Testing it only through the catalog would pin whichever
+/// branch today's documented examples happen to take, and leave the other
+/// unexercised until a catalog edit reached it in production.
+fn phrase_example(example: &Value, node_type: &str, field: &str) -> String {
+    let rendered = match serde_json::to_string(example) {
+        Ok(r) => r,
+        // Unreachable for a `Value` parsed from the catalog, but a panic here
+        // would take the whole lint down for a documentation defect.
+        Err(_) => {
+            return format!(
+                "the catalog documents an example that could not be rendered; see \
+             docs/node_configurations.json under \
+             node_types.{node_type}.config_fields.{field}.example"
+            )
+        }
+    };
+    if rendered.len() <= MAX_INLINE_EXAMPLE {
+        format!("the catalog documents it as {rendered}")
+    } else {
+        format!(
+            "the catalog documents an example {} characters long; see \
+             docs/node_configurations.json under \
+             node_types.{node_type}.config_fields.{field}.example",
+            rendered.len()
+        )
     }
 }
 
@@ -1688,5 +1766,67 @@ mod tests {
         assert!(!rendered.starts_with('"'), "not a string: {rendered}");
         assert!(rendered.ends_with("..."));
         assert!(rendered.chars().count() <= 60);
+    }
+
+    /// Past the bound the linter must point at the catalog, never print a
+    /// prefix of the JSON. A truncated object reads as copy-pasteable and is
+    /// not, so this asserts the pointer AND the absence of the payload.
+    #[test]
+    fn an_oversized_example_is_pointed_at_rather_than_truncated() {
+        let payload = "v".repeat(MAX_INLINE_EXAMPLE + 50);
+        let big = serde_json::json!({ "k": payload });
+        let out = phrase_example(&big, "orchestrator", "agents");
+
+        assert!(
+            out.contains("docs/node_configurations.json")
+                && out.contains("node_types.orchestrator.config_fields.agents.example"),
+            "must point at the catalog: {out}"
+        );
+        // The point of the branch: no PREFIX of the payload leaks into a
+        // message that would then read as copy-pasteable.
+        assert!(
+            !out.contains("vvvv"),
+            "no part of the value may be printed: {out}"
+        );
+    }
+
+    /// The other side of the same decision, so neither branch is pinned alone.
+    #[test]
+    fn an_example_within_the_bound_is_printed_in_full() {
+        let catalog = NodeCatalog::embedded();
+        let small = example_clause(catalog, "llm_call", "provider").expect("documented");
+        assert!(
+            small.contains("openai"),
+            "small example goes inline: {small}"
+        );
+        assert!(
+            !small.contains("docs/node_configurations.json"),
+            "an inline example must not also send the reader to the file: {small}"
+        );
+    }
+
+    /// The bound is worth nothing if every real example sits far below it and
+    /// nobody notices it drifting. This states what the catalog actually holds.
+    #[test]
+    fn every_documented_example_fits_inline_today() {
+        let catalog = NodeCatalog::embedded();
+        let oversized: Vec<String> = ["orchestrator", "for_each", "output_parser", "router"]
+            .iter()
+            .flat_map(|nt| {
+                ["agents", "target", "schema", "branches"]
+                    .iter()
+                    .filter_map(move |f| {
+                        let e = catalog.field_example(nt, f)?;
+                        let len = serde_json::to_string(e).ok()?.len();
+                        (len > MAX_INLINE_EXAMPLE).then(|| format!("{nt}.{f} = {len}"))
+                    })
+            })
+            .collect();
+        assert!(
+            oversized.is_empty(),
+            "these examples now exceed MAX_INLINE_EXAMPLE and take the pointer \
+             branch: {oversized:?}. That is allowed -- but it is a change in what \
+             readers see, so it should be a decision, not a surprise."
+        );
     }
 }

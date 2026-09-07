@@ -2451,3 +2451,113 @@ Referencia completa, incluida la tabla de `kind` y su lectura operacional, en
 [`developer_guide/52`](developer_guide/52_mcp_observability.md).
 
 **Estado.** done.
+
+---
+
+## 45. El linter dice cómo se ve el campo bien escrito
+
+`MISSING_REQUIRED_FIELD` decía qué faltaba y nunca qué forma tenía que tener. Ahora
+cita el ejemplo que el catálogo ya traía escrito.
+
+```
+error [MISSING_REQUIRED_FIELD] node "orch".agents: required field "agents" is not set,
+and no incoming edge supplies it — the catalog documents it as
+{"flights_agent":{"description":"Searches for flights using the Amadeus API",
+"child_graph_inline":{"nodes":{"in":{"type":"input","config":{}},...}}}}
+```
+
+No es información nueva. `docs/node_configurations.json` declara un `example` en **156 de
+sus 237 campos**, el linter **ya cargaba ese archivo**, y el campo `suggestion` del
+diagnóstico ya existía y se usaba para otros códigos. Lo único que faltaba era conectarlo.
+
+De los 40 campos requeridos con ejemplo, la mediana mide 19 caracteres y el mayor 280 —
+`orchestrator.agents`, que es justamente el que muestra la forma que le faltaba al grafo
+borrado en la §43.
+
+### Dos reglas, y por qué
+
+**No se inventa un ejemplo cuando el catálogo no tiene uno.** Quien lee no puede
+distinguir uno inventado de uno documentado, así que una suposición errónea cuesta más
+que el silencio.
+
+**No se emite JSON truncado.** Por encima de `MAX_INLINE_EXAMPLE` (400) el mensaje apunta
+al catálogo en vez de imprimir un prefijo del objeto: un objeto cortado se lee como
+copiable y no lo es. Hoy ningún ejemplo llega al límite, y un test afirma eso — cruzarlo
+será una decisión, no una sorpresa.
+
+El warning suavizado **conserva su matiz y suma la cita**: `…may arrive through its
+default input port instead; if it does not, the catalog documents it as …`. Es donde más
+sirve, porque es donde quien escribe está adivinando la forma.
+
+### Dónde vive el ejemplo, y por qué no en `FieldSpec`
+
+Fuera de `NodeCatalogEntry`, en un `field_examples` propio — el mismo lugar y la misma
+razón que `input_ports`. La fase 2 del linter compara el `config_schema()` de cada nodo
+contra la entry **entera**, y el alcance acordado de esa declaración son los hechos
+mecánicos. Meter prosa adentro obligaría a los 37 nodos a declarar documentación que no
+les corresponde, y convertiría cada mejora del catálogo en un test roto.
+
+### Lo que se verificó, no lo que se supuso
+
+Las dos mutaciones se corrieron:
+
+| Mutación | Resultado |
+|---|---|
+| La cita se calcula pero no llega al diagnóstico | **2 tests caen** |
+| El límite se ignora, todo va inline | **1 test cae** |
+
+La primera hubo que reformularla: escrita como "que `example_clause` devuelva `None`"
+**no compila** — `warnings = "deny"` convierte la función huérfana en error de build, y
+una mutación que no compila no prueba nada.
+
+Y el primer test del límite era **vacuo**: construía el valor grande y nunca se lo pasaba
+a la función, así que sólo ejercitaba la rama inline. Se partió `phrase_example` de la
+búsqueda en el catálogo para que la decisión de tamaño sea alcanzable con un valor de
+cualquier medida; probarla sólo a través del catálogo fija la rama que los ejemplos de hoy
+toman y deja la otra sin ejercitar hasta que una edición del catálogo la alcance en
+producción.
+
+### Lo que encontró el E2E: el consejo no se podía seguir hasta el final
+
+Se armó un grafo usando **sólo** los tres ejemplos que el linter cita, sin escribir nada
+a mano. Pasó de 3 errores a `no findings` — el consejo es aplicable literalmente. Pero al
+correrlo por el motor:
+
+```
+error: Missing 'provider' in inputs or config
+```
+
+El ejemplo de `orchestrator.agents` traía un `llm_call` interno con `config: {}`. Como
+documentación de la **forma** está bien; copiado tal cual, lintea limpio y muere al
+ejecutar. Un consejo que no llega hasta el final es medio consejo, y ése es justamente el
+punto de esta sección.
+
+No hizo falta inventar un criterio: **el ejemplo de `subgraph`, en el mismo archivo, ya lo
+hacía bien** — trae `provider`, `model` y `api_key`. El de `orchestrator` era el que se
+había quedado afuera. Se lo alineó además con sus propios hermanos `planner` y
+`final_reactor`, que usan google/gemini-2.5-flash.
+
+**Una línea de cambio**, con una guarda estructural que verifica que el JSON parseado
+difiera *sólo* en ese config — la misma disciplina que en la §42, donde un `json.dump`
+descuidado convirtió 46 líneas borradas en +1018/−287.
+
+Con eso, el ciclo cierra entero:
+
+```
+lint:   no findings
+run → suspend → resume:   finishReason: "stop"
+node-skipped: 0   ·   errores: 0   ·   totalTokens: 2517
+```
+
+El `planner` del ejemplo trae `allow_suspend: true`, así que el primer run **suspende** y
+pregunta ciudad, fechas y viajeros. Eso es comportamiento correcto, no defecto — pero
+significa que sin responder las preguntas los agentes nunca corren, y una verificación que
+se hubiera detenido en el primer `exit=0` no habría visto el `config: {}` roto.
+
+### Alcance
+
+`MISSING_REQUIRED_FIELD` solamente. Los otros códigos que podrían citar un ejemplo
+(`FIELD_TYPE_MISMATCH`, `INVALID_FIELD_VALUE`) quedan fuera a propósito: ya dicen lo que
+aceptan, y ampliar el alcance acá sólo agranda el cambio.
+
+Cierra BACKLOG **L13**. Sin cambio de API pública → ADP no afectado.
