@@ -33,8 +33,8 @@
 //! arguments the model believes are valid. Dropping is honest: the model loses a
 //! hint and the server still validates its own input.
 //!
-//! It also does not yet resolve `$ref`. That drop is the one that is NOT
-//! graceful — see [`conform`].
+//! The one keyword that is not merely dropped is `$ref`, because dropping it is
+//! the one drop that is NOT graceful — see [`conform`].
 
 use serde_json::{Map, Value};
 
@@ -94,20 +94,18 @@ const MAX_DEPTH: usize = 64;
 
 /// The same schema, carrying only what Gemini's protobuf will accept.
 ///
-/// # Known gap: `$ref`
+/// `$ref` is resolved BEFORE the filter runs, and that ordering is the whole
+/// reason this step exists. Dropping an unknown key costs a constraint; dropping
+/// a `$ref` costs the property's ENTIRE definition, leaving `{}` — a parameter
+/// the model is told nothing about, with no error anywhere to say so. So refs
+/// are inlined from `$defs` / `definitions` first, and only then do those maps
+/// fall away as unaccepted keys, their content already carried to where it was
+/// pointed at.
 ///
-/// `$ref` is rejected by Gemini like any other unaccepted key, so it is dropped
-/// — but this drop is the one that is not graceful. Every other drop costs a
-/// constraint; dropping a `$ref` costs the property's ENTIRE definition, leaving
-/// `{}`: a parameter the model is told nothing about, with no error anywhere to
-/// say so.
-///
-/// That is still strictly better than today, where the same schema fails the
-/// whole request, and it is deliberately not fixed here: resolving refs means
-/// carrying `$defs`/`definitions` bodies to their reference sites, which is its
-/// own change with its own failure modes (cycles, external URLs, missing
-/// definitions). Until then, a server that publishes `$ref` gets a working turn
-/// with a vaguer schema rather than no turn at all.
+/// A ref that cannot be resolved — an external URL, a pointer into a `$defs` the
+/// server did not ship — is left in place and then dropped by the filter. The
+/// property degrades to "anything", which is what an unresolvable reference
+/// honestly means to a reader who cannot fetch it.
 ///
 /// ```
 /// use colmena::llm::infrastructure::gemini_schema::conform;
@@ -125,7 +123,68 @@ const MAX_DEPTH: usize = 64;
 /// assert_eq!(sent["properties"]["owner"]["type"], "string");
 /// ```
 pub fn conform(schema: &Value) -> Value {
-    filter(schema, 0)
+    let mut resolved = schema.clone();
+    inline_refs(&mut resolved);
+    filter(&resolved, 0)
+}
+
+/// Lift `$defs` / `definitions` off the root, then substitute every local `$ref`
+/// with the body it names.
+///
+/// Only the root is read for definitions. JSON Schema allows them at any level,
+/// but a pointer is written against the document root (`#/$defs/X`), so a nested
+/// map is not addressable by the refs this resolves anyway.
+fn inline_refs(schema: &mut Value) {
+    let mut defs = Map::new();
+    if let Value::Object(map) = schema {
+        for key in ["$defs", "definitions"] {
+            if let Some(Value::Object(found)) = map.get(key) {
+                for (name, body) in found {
+                    defs.insert(name.clone(), body.clone());
+                }
+            }
+        }
+    }
+    if defs.is_empty() {
+        return;
+    }
+    substitute(schema, &defs, 0);
+}
+
+/// Replace `{"$ref": "#/$defs/X"}` with a copy of `X`, transitively.
+///
+/// The substituted body is walked with an INCREASED depth rather than a fresh
+/// one. That is what makes a self-referential definition terminate in the
+/// reference chain instead of consuming the schema's own nesting budget: without
+/// it, `Node.child: $ref Node` expands until the stack runs out.
+fn substitute(value: &mut Value, defs: &Map<String, Value>, depth: usize) {
+    if depth > MAX_DEPTH {
+        return;
+    }
+    match value {
+        Value::Object(map) => {
+            if let Some(Value::String(pointer)) = map.get("$ref") {
+                let name = pointer
+                    .strip_prefix("#/$defs/")
+                    .or_else(|| pointer.strip_prefix("#/definitions/"));
+                if let Some(body) = name.and_then(|n| defs.get(n)) {
+                    let mut expanded = body.clone();
+                    substitute(&mut expanded, defs, depth + 1);
+                    *value = expanded;
+                    return;
+                }
+            }
+            for child in map.values_mut() {
+                substitute(child, defs, depth + 1);
+            }
+        }
+        Value::Array(items) => {
+            for child in items.iter_mut() {
+                substitute(child, defs, depth + 1);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Keep the accepted keys, and recurse into the ones whose values are schemas.
@@ -388,24 +447,112 @@ mod tests {
         assert_eq!(sent["type"], "object");
     }
 
-    /// The documented gap, pinned so it is a decision and not a surprise: a
-    /// `$ref` is dropped, and the property degrades to "anything" rather than
-    /// failing the request. Inlining is a separate change.
+    /// Dropping `$ref` is the one drop that is not graceful: it takes the
+    /// property's whole definition, so the model is told nothing rather than
+    /// told less. The body has to reach the reference before the filter can
+    /// discard the pointer.
     #[test]
-    fn drops_a_ref_into_an_accepted_shape_rather_than_failing_the_request() {
+    fn inlines_a_ref_instead_of_leaving_the_property_undefined() {
         let raw = json!({
             "type": "object",
-            "$defs": { "Sort": { "type": "string", "enum": ["asc", "desc"] } },
-            "properties": { "order": { "$ref": "#/$defs/Sort" } }
+            "$defs": {
+                "Sort": { "type": "string", "enum": ["asc", "desc"] }
+            },
+            "properties": {
+                "order": { "$ref": "#/$defs/Sort" }
+            }
         });
 
         let sent = conform(&raw);
 
+        assert_eq!(sent["properties"]["order"]["type"], "string");
+        assert_eq!(sent["properties"]["order"]["enum"], json!(["asc", "desc"]));
         assert!(sent.get("$defs").is_none(), "$defs would 400");
+        assert!(sent["properties"]["order"].get("$ref").is_none());
+    }
+
+    /// Draft-04 spelling of the same thing. A server using it would otherwise
+    /// get exactly the ungraceful drop this step exists to avoid.
+    #[test]
+    fn inlines_a_ref_through_the_draft_04_definitions_key() {
+        let raw = json!({
+            "type": "object",
+            "definitions": { "Id": { "type": "integer", "minimum": 1 } },
+            "properties": { "id": { "$ref": "#/definitions/Id" } }
+        });
+
+        let sent = conform(&raw);
+
+        assert_eq!(sent["properties"]["id"]["type"], "integer");
+        assert_eq!(sent["properties"]["id"]["minimum"], 1);
+        assert!(sent.get("definitions").is_none());
+    }
+
+    /// A definition whose body itself points at another one. Resolving only the
+    /// first hop would leave a `$ref` behind for the filter to drop, which is
+    /// the failure this whole step exists to prevent — just one level deeper.
+    #[test]
+    fn resolves_a_ref_whose_body_points_at_another_ref() {
+        let raw = json!({
+            "type": "object",
+            "$defs": {
+                "Outer": { "type": "object", "properties": { "v": { "$ref": "#/$defs/Inner" } } },
+                "Inner": { "type": "string", "enum": ["a", "b"] }
+            },
+            "properties": { "nested": { "$ref": "#/$defs/Outer" } }
+        });
+
+        let sent = conform(&raw);
+
         assert_eq!(
-            sent["properties"]["order"],
-            json!({}),
-            "the property must degrade to the accepted empty schema"
+            sent["properties"]["nested"]["properties"]["v"]["enum"],
+            json!(["a", "b"]),
+            "the second hop was not resolved"
+        );
+    }
+
+    /// An unresolvable ref must not resurrect the pointer. The property degrades
+    /// to "anything", which is what a reference we cannot follow actually means.
+    #[test]
+    fn drops_a_ref_it_cannot_resolve_rather_than_forwarding_it() {
+        let raw = json!({
+            "type": "object",
+            "$defs": { "Known": { "type": "string" } },
+            "properties": {
+                "external": { "$ref": "https://other.example.com/schema.json" },
+                "missing": { "$ref": "#/$defs/NotShipped" }
+            }
+        });
+
+        let sent = conform(&raw);
+
+        assert!(sent["properties"]["external"].get("$ref").is_none());
+        assert!(sent["properties"]["missing"].get("$ref").is_none());
+        assert_eq!(sent["properties"]["external"], json!({}));
+    }
+
+    /// A definition that names itself expands forever without a bound. The
+    /// result only has to be finite and well-formed — a cyclic schema has no
+    /// faithful protobuf rendering, so terminating is the whole requirement.
+    #[test]
+    fn terminates_on_a_self_referential_definition() {
+        let raw = json!({
+            "type": "object",
+            "$defs": {
+                "Node": {
+                    "type": "object",
+                    "properties": { "child": { "$ref": "#/$defs/Node" } }
+                }
+            },
+            "properties": { "root": { "$ref": "#/$defs/Node" } }
+        });
+
+        let sent = conform(&raw);
+
+        assert_eq!(sent["properties"]["root"]["type"], "object");
+        assert!(
+            serde_json::to_string(&sent).is_ok(),
+            "a cycle must still produce a finite, serialisable schema"
         );
     }
 }
