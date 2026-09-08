@@ -2102,6 +2102,64 @@ genérica. Sin trigger urgente.
 
 ---
 
+## MCP — el diputado confundido (decisión de diseño pendiente)
+
+**Estado: abierto, y necesita una decisión antes que código.**
+
+El nombre es de la literatura de seguridad, pero la idea es simple: **el agente
+actúa por vos, y alguien más le dice qué hacer.**
+
+Cuando un operador prende un servidor MCP, un tercero pasa a escribir las
+descripciones de las tools que el modelo lee, y puede cambiarlas entre turnos. El
+modelo decide qué mandarle a esas tools **con todo lo que tiene en contexto**.
+
+Hoy lo único que se rechaza es un argumento que lleve un secure-value explícito
+(`<value_N>` / `<sv_...>`). Nada más se inspecciona.
+
+**El caso concreto:** un agente que primero consulta la base de datos del cliente
+y después llama una tool de un MCP. Nada impide que el modelo mande, en un
+argumento, algo que leyó de esa base.
+
+### Por qué no es una tarea de implementación
+
+Habría que decidir **qué cuenta como sensible en un argumento saliente**, y esa
+pregunta no tiene respuesta obvia:
+
+- ¿Un email? A veces es exactamente el dato que la tool necesita.
+- ¿Algo que salió de una consulta SQL? Puede ser el nombre de un producto.
+- ¿Un texto largo? Puede ser el documento que el usuario pidió resumir.
+
+**Un filtro a medias es peor que no tener nada**, porque instala la sensación de
+que hay protección donde no la hay. Por eso el primer paso es acordar qué protege
+y qué explícitamente NO protege, y escribirlo — no escribir el filtro.
+
+### Lo que ya acota el problema (y no hay que rehacer)
+
+- **El destino no lo elige el modelo.** La URL la escribe el operador y se valida
+  al cargar el grafo (HTTPS obligatorio).
+- **Allowlist opcional de hosts** vía `COLMENA_MCP_ALLOWED_HOSTS`. Acota *a dónde*
+  pueden ir los datos; no resuelve *qué* datos van.
+- **Todo resultado MCP viene envuelto** en un delimitador de contenido no
+  confiable con nonce por llamada.
+- **Los secure-values ya se rechazan** antes de la llamada.
+
+### Alternativas que vale la pena poner sobre la mesa cuando se retome
+
+1. **No hacer nada, y documentarlo fuerte.** Prender un servidor MCP = confiarle
+   lo que el modelo tenga en contexto. Es la posición honesta hoy.
+2. **Marcado en el origen.** Que los nodos que producen datos sensibles (SQL,
+   attachments) marquen su salida, y que se rechace un argumento que la contenga.
+   Caro y con falsos positivos, pero es el único enfoque que no adivina.
+3. **Presupuesto por turno.** No mirar el contenido sino el volumen: cuántos bytes
+   puede mandar un agente a un tercero por turno. Grosero, pero acota exfiltración
+   masiva sin decidir qué es sensible.
+
+Ninguna es obviamente correcta. Ese es el punto de dejarlo acá y no resolverlo
+solo.
+
+---
+
+
 ## Proceso / CI / Ops (deuda fuera de features)
 
 Items de proceso, no de producto. Antes solo vivían en notas de sesión; se
