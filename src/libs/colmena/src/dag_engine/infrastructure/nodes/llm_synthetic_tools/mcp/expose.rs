@@ -84,8 +84,15 @@ pub fn exposed_definitions(
         // `$schema` and `$id` are stripped before the provider sees it, so
         // counting them here would reject a tool for size on bytes that never
         // leave this process. The ceiling exists to protect the provider
-        // request, so it must weigh exactly what that request carries — and the
-        // stripped value is reused below as the override, computed once.
+        // request, so it must weigh what that request carries — and the stripped
+        // value is reused below as the override, computed once.
+        //
+        // Exact for Anthropic and OpenAI, an UPPER BOUND for Gemini: its adapter
+        // conforms the schema further to a protobuf allowlist, so what actually
+        // reaches Gemini is this size or smaller. That asymmetry is why the
+        // measurement stays here rather than moving next to the conforming — the
+        // exposure slice has no provider to ask, and a ceiling that guessed one
+        // would under-count for the other two.
         let forwarded_schema = without_schema_metadata(&tool.input_schema);
         let schema_bytes = serde_json::to_string(&forwarded_schema)
             .map(|s| s.len())
@@ -154,19 +161,29 @@ fn cap(s: &str, max_bytes: usize) -> String {
 /// it. `$schema` and `$id` are the exception because they describe the DOCUMENT,
 /// not the parameters: removing them cannot change which arguments are valid.
 ///
-/// They are removed because Gemini rejects them outright. Its
-/// `function_declarations[].parameters` is an OpenAPI subset, so a single
-/// unknown key fails the WHOLE request with a 400 — not just that tool, and not
-/// just MCP's tools: every built-in the agent had goes down with it. That is the
-/// failure this module's own ceiling comment already warns about for oversized
-/// schemas, arriving through a different door. Context7 publishes `$schema` and
-/// DeepWiki does not, which is exactly why one worked live and the other
-/// returned INVALID_ARGUMENT.
+/// This started as a Gemini fix — Gemini rejects both keys with a 400 that fails
+/// the whole request — and that job has since moved to where it belongs:
+/// [`crate::llm::infrastructure::gemini_schema::conform`] conforms the schema to
+/// Gemini's protobuf in the Gemini adapter, recursively and against a measured
+/// allowlist rather than the two keys that happened to be observed breaking.
 ///
-/// Deliberately narrow: only these two keys, only at the top level. Provider
-/// schema dialects differ in more ways than this and a general translation layer
-/// is a real design problem, not something to improvise here. What is fixed is
-/// what was observed to break.
+/// **This is not left behind as a redundant second copy of that.** What survives
+/// here is a different, provider-agnostic job: `$schema` and `$id` are document
+/// metadata that no model reads, so forwarding them spends tokens on every
+/// provider for no benefit — including Anthropic and OpenAI, which accept them
+/// happily and would otherwise carry roughly 59 bytes of nothing per tool
+/// (measured on the live Context7 catalog, ~6% of its schema bytes).
+///
+/// The split matters because the original defect was NOT "two sanitisers". It
+/// was one sanitiser doing a provider's job badly: a top-level, two-key denylist
+/// guarding a protobuf that rejects 14 of 32 common JSON Schema keywords. Moving
+/// the dialect work to the adapter fixed that. Deleting this would not simplify
+/// anything — it would send useless bytes to two providers and make the ceiling
+/// below weigh something no provider receives.
+///
+/// Deliberately narrow, and correct at that width: only keys that describe the
+/// document. Anything about a specific provider's grammar belongs in that
+/// provider's adapter, not here.
 fn without_schema_metadata(schema: &Value) -> Value {
     let Some(map) = schema.as_object() else {
         return schema.clone();

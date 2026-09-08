@@ -2822,3 +2822,54 @@ GitHub sigue en 3 tool calls y 0 errores de schema.
 Sólo Gemini. Queda un seguimiento: retirar `without_schema_metadata` de `mcp/expose.rs`, que
 quedó subsumido — cambia lo que reciben Anthropic y OpenAI, así que necesita su propio E2E.
 Sin cambio de API pública → ADP no afectado.
+
+## 50. Corrección: el saneador de `mcp/expose.rs` NO se retira, y el comentario que decía por qué existe estaba viejo
+
+**Qué cambió.** Sólo comentarios. Ningún cambio de comportamiento.
+
+Las §48 y §49 anunciaron un seguimiento: retirar `without_schema_metadata` de
+`mcp/expose.rs` porque quedaba "subsumido" por el conformador nuevo. **Ese anuncio estaba
+mal, y esta sección lo corrige** — `develop` es compartido y una afirmación equivocada ahí
+no se puede reescribir, sólo corregir.
+
+### Por qué no se retira
+
+Al ir a borrarlo apareció que sólo quedaba subsumido **para Gemini**. Para los otros dos
+providers sigue haciendo un trabajo real, y son dos trabajos distintos, no una duplicación:
+
+| Función | Trabajo | Alcance |
+|---|---|---|
+| `without_schema_metadata` | quita metadata del documento (`$schema`, `$id`) | agnóstico del provider |
+| `gemini_schema::conform` | conforma al protobuf de Gemini | específico del provider |
+
+`$schema` y `$id` no los lee ningún modelo. Mandarlos gasta tokens en **todos** los
+providers a cambio de nada: medido sobre el catálogo vivo de Context7, unos **59 bytes por
+tool, ~6% de sus bytes de schema**, que Anthropic y OpenAI aceptan encantados y tiran.
+
+Y hay un segundo efecto que el borrado habría roto en silencio: el techo de 32 KB **mide el
+schema saneado**. Sacando el saneo, mediría bytes que ningún provider recibe.
+
+### La lección, que es la parte que importa
+
+**El defecto original no era "hay dos saneadores".** Era *un* saneador haciendo el trabajo de
+un provider, mal: un denylist de dos claves, sólo en el nivel superior, custodiando un
+protobuf que rechaza 14 de 32 keywords. Mover el trabajo de dialecto al adapter arregló eso.
+Borrar lo que quedó no simplificaba nada — mandaba bytes inútiles a dos providers y dejaba el
+techo midiendo algo que nadie recibe.
+
+"Quedó subsumido" era una inferencia razonable desde la forma del código y falsa contra el
+código.
+
+### Qué se arregló entonces
+
+El comentario, que había quedado activamente engañoso. Decía:
+
+> *"Provider schema dialects differ in more ways than this and a general translation layer is
+> a real design problem, not something to improvise here."*
+
+Esa capa **ya existe** desde la §48. Alguien leyendo eso hoy concluiría que no está hecha.
+Ahora el comentario apunta a `gemini_schema::conform`, dice por qué esta función igual se
+queda, y el del techo aclara que su medida es **exacta para Anthropic y OpenAI y una cota
+superior para Gemini**, cuyo adapter conforma todavía más.
+
+Sin cambio de comportamiento → sin E2E nuevo. La suite entera pasa.
