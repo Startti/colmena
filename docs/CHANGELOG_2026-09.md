@@ -2757,3 +2757,68 @@ commiteado**.
 Sólo Gemini, y sólo `input_schema_override`. Dos seguimientos, cada uno con su propio E2E:
 inlinear `$ref`, y retirar el saneador viejo de `mcp/expose.rs` — que cambia lo que reciben
 Anthropic y OpenAI. Sin cambio de API pública → ADP no afectado.
+
+## 49. Un `$ref` de un servidor MCP se inlinea en vez de borrar la propiedad entera
+
+**Qué cambió.** Cierra el hueco que la §48 dejó anotado a propósito. Un schema MCP que use
+`$ref` con `$defs` o `definitions` ya no pierde la definición de esa propiedad cuando el
+provider es Gemini: el cuerpo referenciado se copia al sitio de la referencia antes de
+filtrar.
+
+### Por qué este descarte era distinto a los otros
+
+La §48 estableció que descartar una clave no aceptada es benigno: el modelo pierde una
+restricción y el servidor sigue validando su propia entrada. `$ref` es la excepción. No
+lleva una restricción — **es** la definición. Descartarlo deja `{}`, o sea un parámetro del
+que el modelo no sabe absolutamente nada, y sin error en ningún lado que lo diga.
+
+Medido contra la API viva, las tres formas del mismo schema:
+
+| Forma | Resultado |
+|---|---|
+| Cruda, como la publica el servidor (`$ref` + `$defs`) | **400** — tumba la request entera |
+| Lo que producía la §48 (`{"order": {}}`) | 200, pero el modelo elige a ciegas |
+| Lo que produce este cambio (inlineado) | 200, y el modelo devolvió `{"order": "asc"}` |
+
+Ese último renglón es el punto: con el enum presente el modelo eligió un valor válido del
+enum. El inlining no es cosmético.
+
+### Cómo
+
+`inline_refs` levanta `$defs` y `definitions` de la raíz y sustituye cada `#/$defs/X` por el
+cuerpo de `X`. Sólo lee la raíz: JSON Schema permite definiciones en cualquier nivel, pero un
+puntero se escribe contra la raíz del documento, así que un mapa anidado no es direccionable
+por los refs que esto resuelve.
+
+Tres detalles que valen su comentario en el código:
+
+- **Transitivo.** Un cuerpo que a su vez apunta a otra definición se resuelve también.
+  Resolver sólo el primer salto dejaría un `$ref` atrás para que el filtro lo descarte — o
+  sea el mismo fallo, un nivel más abajo.
+- **La sustitución camina con la profundidad AUMENTADA**, no con una fresca. Eso es lo que
+  hace que una definición auto-referencial (`Node.child: $ref Node`) termine en la cadena de
+  referencias en vez de consumir el presupuesto de anidamiento del schema.
+- **Un ref irresoluble se descarta**, no se reenvía. Una URL externa o una definición que el
+  servidor no mandó degradan a `{}`, que es lo que honestamente significa una referencia que
+  no se puede seguir.
+
+### Verificación
+
+13 tests unitarios (5 nuevos), **mutados**: no llamar a `inline_refs` mata 4; resolver sólo
+el primer salto mata 1; ignorar la forma draft-04 `definitions` mata 1; y pasar profundidad
+fresca en el salto revienta el proceso en el test del ciclo, que es exactamente lo que el
+bound evita.
+
+**Sobre el E2E: no hay servidor MCP alcanzable que publique `$ref`.** Lo medí en los tres —
+DeepWiki (3 tools), Context7 (2 tools) y GitHub con todos sus toolsets (44 tools): cero
+`$ref`, cero `$defs`, cero `definitions`. Así que la evidencia de comportamiento nuevo es la
+tabla de tres formas de arriba, contra la API real de Gemini, y no una corrida de grafo.
+
+Lo que **sí** se corrió E2E es la regresión: el mismo grafo de la §48 contra el MCP real de
+GitHub sigue en 3 tool calls y 0 errores de schema.
+
+### Alcance
+
+Sólo Gemini. Queda un seguimiento: retirar `without_schema_metadata` de `mcp/expose.rs`, que
+quedó subsumido — cambia lo que reciben Anthropic y OpenAI, así que necesita su propio E2E.
+Sin cambio de API pública → ADP no afectado.
