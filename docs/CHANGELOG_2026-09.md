@@ -2654,3 +2654,106 @@ así que necesita ventana y coordinación — no es una acción de este PR.
 `**/output.log` entra al `.gitignore` con el motivo escrito al lado. Sacar el archivo
 arregla este caso; la regla evita el siguiente, que es donde estaba el agujero real: un
 log de ejecución versionado publica lo que sea que el proceso haya impreso ese día.
+
+## 48. Los schemas de un servidor MCP se conforman al dialecto que Gemini acepta
+
+**Qué cambió.** Un `llm_call` con `provider: google` y un servidor MCP cuyo schema use
+cualquiera de 14 keywords de JSON Schema ya no falla. Antes fallaba **entero**: no la tool
+que traía la keyword, ni las tools de ese servidor — la request completa, con todos los
+built-ins del agente.
+
+### El caso que lo destapó
+
+El MCP remoto de GitHub (`https://api.githubcopilot.com/mcp/`) publica la extensión
+`x-mcp-header` **dentro de cada `properties.<campo>`**. Con 16 tools expuestos, Gemini
+devolvió 52 errores idénticos y cero tool calls:
+
+```
+Invalid JSON payload received. Unknown name "x-mcp-header"
+  at 'tools[0].function_declarations[N].parameters.properties[M].value'
+```
+
+El mismo grafo, sin tocar nada, funcionó contra Anthropic y OpenAI: ambos llamaron
+`github__list_pull_requests` y devolvieron datos reales. El defecto era de un solo provider.
+
+### Por qué no alcanzaba lo que ya había
+
+`parameters` en Gemini no es JSON Schema: es un protobuf, y un protobuf rechaza todo nombre
+que no declara. Medido contra la API viva (`gemini-2.5-flash`), **14 de 32 keywords comunes
+son rechazadas**: `$schema`, `$id`, `$ref`, `$defs`, `definitions`, `additionalProperties`,
+`examples` (el plural — `example` singular sí pasa), `const`, `exclusiveMinimum`,
+`exclusiveMaximum`, `multipleOf`, `uniqueItems`, `deprecated`, `readOnly`, `writeOnly`, y
+toda extensión `x-`.
+
+Colmena tenía **dos saneadores de fuerza desigual, y el débil cuidaba lo ajeno**:
+
+| Saneador | Qué quitaba | A qué se aplicaba |
+|---|---|---|
+| `llm_synthetic_tools/mod.rs` | recursivo; `$schema`, `additionalProperties`, inlinea `$ref` | schemas del repo |
+| `mcp/expose.rs` | `$schema` y `$id`, **sólo en el nivel superior** | schemas de terceros |
+
+Entre los dos cubrían 3 de las 15 claves. Y ambos eran **denylists sobre una gramática que
+es un allowlist**, así que sólo podían enumerar los fallos ya vistos. El comentario del
+propio `expose.rs` lo admitía: *"what is fixed is what was observed to break"*.
+
+### La solución
+
+Un módulo nuevo, `llm/infrastructure/gemini_schema.rs`, con un **allowlist** derivado de
+sondear la API viva keyword por keyword. Se aplica en el adapter de Gemini, sobre
+`input_schema_override` — la única puerta por la que entra JSON que Colmena no escribió (el
+camino normal pasa por `ParameterProperty`, un struct tipado que no puede cargar claves
+arbitrarias).
+
+**En el adapter, no en el módulo MCP**, y eso es deliberado en dos sentidos. Uno de
+evidencia: Anthropic y OpenAI aceptan las 15 claves, así que filtrar del lado de MCP les
+borraría restricciones que sí honran (`const`, `examples`, `exclusiveMinimum` son
+validaciones reales, no metadata). Otro de arquitectura: saber qué dialecto habla Google no
+es asunto del módulo que habla MCP.
+
+Dos decisiones que vale la pena no re-discutir:
+
+- **Allowlist, no denylist.** Lo habilita una asimetría medida: un schema de propiedad
+  vacío `{}`, o sin `type`, la API lo acepta (200). Entonces borrar de más cuesta una
+  restricción; borrar de menos cuesta el turno entero. Los modos de fallo no son
+  comparables.
+- **Se descarta, no se traduce.** `const: "x"` no se convierte en `enum: ["x"]` por
+  tentador que sea. Traducir es decidir que nuestra lectura del schema de un tercero le gana
+  a lo que escribió, y un error ahí cambia en silencio qué argumentos cree válidos el
+  modelo.
+
+### Hueco conocido: `$ref`
+
+`$ref` se descarta como cualquier otra clave no aceptada, pero ese descarte es el único que
+**no** es benigno: se lleva la definición entera de la propiedad y deja `{}`, sin error en
+ningún lado. Queda anotado y con un test que lo fija, porque sigue siendo estrictamente
+mejor que hoy — donde ese mismo schema tumba la request completa. Inlinear refs desde
+`$defs`/`definitions` tiene sus propios modos de fallo (ciclos, URLs externas, definiciones
+ausentes) y va en su propio cambio.
+
+### Verificación
+
+9 tests unitarios, **mutados para probar que son portantes**: sacar la recursión en
+`properties` mata cinco, sacarla en `items`/`not` mata dos, y desactivar el allowlist mata
+siete.
+
+E2E vivo contra el MCP real de GitHub con credencial real
+([`tests/graphs/agents/mcp_github_credentialed_e2e.json`](../tests/graphs/agents/mcp_github_credentialed_e2e.json)),
+en los tres providers:
+
+| Provider | Antes | Después |
+|---|---|---|
+| Gemini | 52 × 400, 0 tool calls | 3 tool calls, 0 errores |
+| Anthropic | 3 tool calls | 3 tool calls (sin cambio) |
+| OpenAI | 3 tool calls | 3 tool calls (sin cambio) |
+
+La respuesta del modelo se corroboró contra `gh pr list` — coincide, no es alucinación.
+
+El grafo commiteado usa `"Authorization": "<sv_github_token>"`, que es la forma de
+producción; la corrida viva se hizo con un token literal inyectado localmente y **no
+commiteado**.
+
+### Alcance
+
+Sólo Gemini, y sólo `input_schema_override`. Dos seguimientos, cada uno con su propio E2E:
+inlinear `$ref`, y retirar el saneador viejo de `mcp/expose.rs` — que cambia lo que reciben
+Anthropic y OpenAI. Sin cambio de API pública → ADP no afectado.

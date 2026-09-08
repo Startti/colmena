@@ -2,6 +2,7 @@ use crate::llm::domain::{
     FileSource, FunctionCall, LlmError, LlmRepository, LlmRequest, LlmResponse, LlmStream,
     LlmStreamChunk, LlmStreamPart, LlmUsage, MessageRole, ToolCall, ToolCallChunk,
 };
+use crate::llm::infrastructure::gemini_schema;
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
 use reqwest::Client;
@@ -241,7 +242,15 @@ impl GeminiAdapter {
                     decl.insert("name".to_string(), json!(tool.name));
                     decl.insert("description".to_string(), json!(tool.description));
                     if let Some(override_schema) = tool.input_schema_override.as_ref() {
-                        decl.insert("parameters".to_string(), override_schema.clone());
+                        // The only place a schema Colmena did not author reaches
+                        // a provider: an MCP server publishes its own and it is
+                        // forwarded verbatim. Gemini's `parameters` is a
+                        // protobuf, so one unrecognised key fails the WHOLE
+                        // request — every tool in it, not just this one.
+                        decl.insert(
+                            "parameters".to_string(),
+                            gemini_schema::conform(override_schema),
+                        );
                     } else if !tool.parameters.properties.is_empty() {
                         decl.insert(
                             "parameters".to_string(),
