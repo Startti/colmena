@@ -42,9 +42,17 @@ impl OpenAiAdapter {
     }
 
     fn build_messages(&self, request: &LlmRequest) -> Result<Vec<serde_json::Value>, LlmError> {
-        // Cache-safe temporal suffix (2026-06-11). Appended to the END of the
-        // system message content so OpenAI's automatic prefix cache still
-        // matches the stable prefix while the timestamp changes per turn.
+        // Cache-safe temporal suffix (2026-06-11), CHAT COMPLETIONS ONLY.
+        // Appended to the END of the system message content so OpenAI's
+        // automatic prefix cache still matches the stable prefix while the
+        // timestamp changes per turn. Measured live 2026-09-09 on gpt-4o:
+        // cache read stayed nonzero (≈2176) with the suffix appended this
+        // way — this placement is confirmed to work for Chat Completions.
+        // It does NOT transfer to the Responses API (`/v1/responses`); see
+        // `build_responses_request_body` below, which uses a different
+        // placement because this same approach measured write N/read 0
+        // there. We assert only what was measured, not OpenAI's internal
+        // cache mechanism.
         // A request can carry MORE THAN ONE System message — `history_compaction`
         // appends the conversation summary as a second one — so the suffix is
         // attached to the LAST of them only. Attaching it to every System
@@ -908,20 +916,45 @@ impl OpenAiAdapter {
         // for assistant messages with "Invalid value: 'input_text'. Supported
         // values are: 'output_text' and 'refusal'.") and dropped tool_calls
         // entirely. See colmena BACKLOG entry "OpenAI Responses API serialization".
-        // Cache-safe temporal suffix (2026-06-11). Appended to the END of the
-        // system message text so OpenAI's automatic prefix cache still matches
-        // the stable system prefix while the timestamp changes per turn. If no
-        // system message exists, a standalone system item is pushed at the
-        // front carrying just the suffix (nothing stable to cache anyway).
-        // Only the LAST System message carries the suffix — see `build_messages`.
+        //
+        // `/v1/responses` cache-read placement (measured 2026-09-09 and
+        // 2026-09-10, on the exact same captured request body, bisected by
+        // moving only the position of the stable System item). Serving a
+        // cache read requires BOTH of the following; we assert no mechanism
+        // beyond what was measured — neither is a claim about how OpenAI's
+        // cache actually works internally, only what reproducibly triggered
+        // a read in these two experiments:
+        //
+        //   1. Nothing stable may follow the volatile bytes. Concatenating
+        //      the suffix onto ANY item's text — whether the last system
+        //      message or a standalone system item — never produced a read
+        //      (write N / read 0, every turn). Pushing the volatile block
+        //      as a brand-new item at the very END of `input`, after
+        //      everything else, did (write ~31 / read ~2395 from turn 2
+        //      onward).
+        //   2. The stable System content must start at `input[0]`. Colmena
+        //      emits history as `[User, System, ...]` — with items kept in
+        //      that original order, the SAME captured body wrote 2733 bytes
+        //      and read 0 on the second call. Moving only the stable System
+        //      item to the front (still keeping the volatile item last) made
+        //      that identical second call write 0 and read 2733.
+        //
+        // So `input` is assembled in three passes: all System items except
+        // the volatile block, in their original relative order; then every
+        // remaining (non-System) item, in ITS original relative order; then
+        // the volatile block as the single trailing item. This never
+        // reorders the persisted history itself — `request.messages()` is
+        // read once, in order; only the WIRE serialization groups System
+        // first.
         let volatile_suffix = request.config().volatile_system_suffix();
-        let last_system_idx = request
-            .messages()
-            .iter()
-            .rposition(|m| m.role() == &MessageRole::System);
-        let mut suffix_applied = false;
-        let mut input_items: Vec<serde_json::Value> = Vec::new();
-        for (idx, msg) in request.messages().iter().enumerate() {
+        let mut system_items: Vec<serde_json::Value> = Vec::new();
+        let mut other_items: Vec<serde_json::Value> = Vec::new();
+        for msg in request.messages().iter() {
+            let input_items = if *msg.role() == MessageRole::System {
+                &mut system_items
+            } else {
+                &mut other_items
+            };
             match msg.role() {
                 MessageRole::Tool => {
                     let call_id = msg.tool_call_id().unwrap_or_default();
@@ -954,17 +987,7 @@ impl OpenAiAdapter {
                     }
                 }
                 MessageRole::System | MessageRole::User => {
-                    // Append the volatile suffix to the system message text.
-                    let text: String = if Some(idx) == last_system_idx {
-                        if let Some(suffix) = volatile_suffix {
-                            suffix_applied = true;
-                            format!("{}\n\n{}", msg.content(), suffix)
-                        } else {
-                            msg.content().to_string()
-                        }
-                    } else {
-                        msg.content().to_string()
-                    };
+                    let text: String = msg.content().to_string();
                     let mut content_arr = vec![json!({
                         "type": "input_text",
                         "text": text
@@ -1010,18 +1033,22 @@ impl OpenAiAdapter {
             }
         }
 
-        // No system message carried the suffix → push a standalone system item
-        // at the front with just the volatile block.
+        // Assemble the final `input` array: stable System items first (in
+        // their original relative order), then every other item (also in
+        // its original relative order) — this is condition (2) above.
+        let mut input_items = system_items;
+        input_items.extend(other_items);
+
+        // Push the volatile block as a fresh item, unconditionally the LAST
+        // element of `input` — never attached to a `function_call_output`
+        // (that item has no `content` array to attach to), never re-inserted
+        // into an existing system message. This is the one placement
+        // measurement showed to cache. See the comment above the loop.
         if let Some(suffix) = volatile_suffix {
-            if !suffix_applied {
-                input_items.insert(
-                    0,
-                    json!({
-                        "role": "system",
-                        "content": [{ "type": "input_text", "text": suffix }]
-                    }),
-                );
-            }
+            input_items.push(json!({
+                "role": "system",
+                "content": [{ "type": "input_text", "text": suffix }]
+            }));
         }
 
         let model = request.config().model();
@@ -1892,19 +1919,182 @@ mod tests {
         assert!(content.ends_with("## Temporal\n2026-06-11T14:00:00"));
     }
 
+    // ── Responses-path tail placement (2026-09-09) ───────────────────────
+    //
+    // On `/v1/responses` the volatile block must land as a fresh, separate
+    // item at the END of `input` — never concatenated onto a system
+    // message's text. Measured: a block that is not the last byte range in
+    // `input` never gets a cache read (write N/read 0 every turn, even as a
+    // separate system message); a block that IS last hits (write ~31/read
+    // ~2395 from turn 2 onward). See sdd/openai-responses-cache-fix/design.
+
+    #[test]
+    fn responses_places_volatile_block_as_last_input_item() {
+        let adapter = OpenAiAdapter::new();
+        let req = openai_req_with_suffix(Some("## Temporal\n2026-06-11T14:00:00"));
+        let body = adapter.build_responses_request_body(&req).unwrap();
+        let input = body["input"].as_array().unwrap();
+
+        // The original system item's text must be byte-identical to the
+        // stable prompt — no suffix concatenated onto it. Exclude the
+        // trailing tail item itself from this check.
+        let system_texts: Vec<&str> = input[..input.len() - 1]
+            .iter()
+            .filter(|m| m["role"] == "system")
+            .map(|m| m["content"][0]["text"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            system_texts,
+            vec!["stable system"],
+            "the stable system item must not carry the volatile suffix"
+        );
+
+        // The last item in `input` must be a fresh system item carrying
+        // exactly the volatile block, and nothing else in `input` may
+        // contain it.
+        let last = input.last().expect("input non-empty");
+        assert_eq!(last["role"], "system");
+        assert_eq!(
+            last["content"][0]["text"].as_str().unwrap(),
+            "## Temporal\n2026-06-11T14:00:00"
+        );
+
+        let occurrences = input
+            .iter()
+            .filter(|item| {
+                item["content"][0]["text"]
+                    .as_str()
+                    .map(|t| t.contains("## Temporal\n2026-06-11T14:00:00"))
+                    .unwrap_or(false)
+            })
+            .count();
+        assert_eq!(occurrences, 1, "volatile block must appear exactly once");
+    }
+
+    #[test]
+    fn responses_appends_volatile_item_after_function_call_output_tail() {
+        use crate::llm::domain::{FunctionCall, LlmMessage, ToolCall};
+
+        let system = LlmMessage::system("stable system".into()).unwrap();
+        let user = LlmMessage::user("hi".into()).unwrap();
+        let assistant = LlmMessage::assistant_with_tool_calls(
+            String::new(),
+            vec![ToolCall {
+                id: "call_1".into(),
+                call_type: "function".into(),
+                function: FunctionCall {
+                    name: "current_time".into(),
+                    arguments: "{}".into(),
+                },
+                response: None,
+                provider_signature: None,
+            }],
+        )
+        .unwrap();
+        let tool_result = LlmMessage::tool("call_1".into(), "2026-09-09T00:00:00Z".into()).unwrap();
+
+        let provider = crate::llm::domain::LlmProvider::new(
+            crate::llm::domain::ProviderKind::OpenAi,
+            "k".into(),
+            Some("gpt-5".into()),
+        )
+        .unwrap();
+        let mut config = crate::llm::domain::LlmConfig::new(provider);
+        config = config.with_volatile_system_suffix("## Temporal\n2026-09-09T00:00:00");
+        let req =
+            LlmRequest::new(vec![system, user, assistant, tool_result], config, false).unwrap();
+
+        let adapter = OpenAiAdapter::new();
+        let body = adapter.build_responses_request_body(&req).unwrap();
+        let input = body["input"].as_array().unwrap();
+
+        // The function_call_output tail item is untouched (no `content`
+        // array, no volatile text attached to it).
+        let tool_item = &input[input.len() - 2];
+        assert_eq!(tool_item["type"], "function_call_output");
+        assert_eq!(tool_item["call_id"], "call_1");
+        assert_eq!(tool_item["output"], "2026-09-09T00:00:00Z");
+        assert!(
+            tool_item.get("content").is_none(),
+            "function_call_output must never gain a content array"
+        );
+
+        // The volatile block rides as the LAST item, a separate system item.
+        let last = input.last().unwrap();
+        assert_eq!(last["role"], "system");
+        assert_eq!(
+            last["content"][0]["text"].as_str().unwrap(),
+            "## Temporal\n2026-09-09T00:00:00"
+        );
+    }
+
+    #[test]
+    fn responses_prefix_is_byte_stable_across_differing_suffixes() {
+        let adapter = OpenAiAdapter::new();
+        let req_a = openai_req_with_suffix(Some("## Temporal\nturn-1"));
+        let req_b = openai_req_with_suffix(Some("## Temporal\nturn-2"));
+
+        let body_a = adapter.build_responses_request_body(&req_a).unwrap();
+        let body_b = adapter.build_responses_request_body(&req_b).unwrap();
+        let input_a = body_a["input"].as_array().unwrap();
+        let input_b = body_b["input"].as_array().unwrap();
+
+        assert_eq!(input_a.len(), input_b.len());
+        assert!(input_a.len() >= 2, "need at least a stable item + tail");
+
+        // Every item except the last must be byte-identical across the two
+        // builds — the cacheable prefix never changes.
+        for (a, b) in input_a[..input_a.len() - 1]
+            .iter()
+            .zip(input_b[..input_b.len() - 1].iter())
+        {
+            assert_eq!(a, b, "prefix item must be byte-identical across turns");
+        }
+
+        // Neither suffix leaks into the prefix.
+        for item in &input_a[..input_a.len() - 1] {
+            let text = item["content"][0]["text"].as_str().unwrap_or("");
+            assert!(!text.contains("turn-1"));
+            assert!(!text.contains("turn-2"));
+        }
+
+        // Only the tail differs, and it carries only the corresponding
+        // suffix.
+        assert_eq!(
+            input_a.last().unwrap()["content"][0]["text"]
+                .as_str()
+                .unwrap(),
+            "## Temporal\nturn-1"
+        );
+        assert_eq!(
+            input_b.last().unwrap()["content"][0]["text"]
+                .as_str()
+                .unwrap(),
+            "## Temporal\nturn-2"
+        );
+    }
+
     #[test]
     fn responses_appends_volatile_suffix_after_stable_system() {
         let adapter = OpenAiAdapter::new();
         let req = openai_req_with_suffix(Some("## Temporal\n2026-06-11T14:00:00"));
         let body = adapter.build_responses_request_body(&req).unwrap();
         let input = body["input"].as_array().unwrap();
+
+        // Stable system item is byte-identical (no suffix concatenated).
         let system = input
             .iter()
-            .find(|m| m["role"] == "system")
-            .expect("system input item present");
-        let text = system["content"][0]["text"].as_str().unwrap();
-        assert!(text.starts_with("stable system"));
-        assert!(text.ends_with("## Temporal\n2026-06-11T14:00:00"));
+            .find(|m| m["role"] == "system" && m["content"][0]["text"] == "stable system")
+            .expect("stable system input item present, untouched");
+        assert_eq!(system["content"][0]["text"], "stable system");
+
+        // Volatile block rides as its own trailing item.
+        let last = input.last().unwrap();
+        assert_eq!(last["role"], "system");
+        assert_eq!(
+            last["content"][0]["text"].as_str().unwrap(),
+            "## Temporal\n2026-06-11T14:00:00"
+        );
     }
 
     #[test]
@@ -1969,14 +2159,171 @@ mod tests {
         let body = adapter.build_responses_request_body(&req).unwrap();
         let input = body["input"].as_array().unwrap();
 
+        // Both original System messages survive byte-identical — neither
+        // carries the suffix.
         let systems: Vec<&str> = input
             .iter()
             .filter(|m| m["role"] == "system")
             .map(|m| m["content"][0]["text"].as_str().unwrap())
             .collect();
-        assert_eq!(systems.len(), 2, "both System messages survive");
+        assert_eq!(systems.len(), 3, "both original systems + the tail item");
         assert_eq!(systems[0], "stable system");
-        assert!(systems[1].ends_with("## Temporal\n2026-08-22T10:00:00"));
+        assert_eq!(systems[1], "## Conversation summary (older turns)");
+
+        // The volatile block appears exactly once, as the LAST item.
+        let last = input.last().unwrap();
+        assert_eq!(last["role"], "system");
+        assert_eq!(
+            last["content"][0]["text"].as_str().unwrap(),
+            "## Temporal\n2026-08-22T10:00:00"
+        );
+    }
+
+    // ── System-first reordering for cache position 0 (2026-09-10) ────────
+    //
+    // Measured 2026-09-09 (see the comment above `build_responses_request_body`):
+    // `/v1/responses` serves a cache read only when BOTH (1) nothing stable
+    // follows the volatile bytes, AND (2) the stable System content starts
+    // at `input[0]`. Colmena emits history as `[User, System, ...]`, so
+    // without reordering, `input[0]` is the User prompt and condition (2)
+    // is never met.
+
+    fn openai_req_user_first(suffix: Option<&str>) -> LlmRequest {
+        use crate::llm::domain::{LlmConfig, LlmMessage, LlmProvider, ProviderKind};
+        let messages = vec![
+            LlmMessage::user("Usa la tool current_time".into()).unwrap(),
+            LlmMessage::system("stable system".into()).unwrap(),
+        ];
+        let provider =
+            LlmProvider::new(ProviderKind::OpenAi, "k".into(), Some("gpt-4o".into())).unwrap();
+        let mut config = LlmConfig::new(provider);
+        if let Some(s) = suffix {
+            config = config.with_volatile_system_suffix(s);
+        }
+        LlmRequest::new(messages, config, false).unwrap()
+    }
+
+    #[test]
+    fn responses_moves_stable_system_to_input_position_zero() {
+        let adapter = OpenAiAdapter::new();
+        let req = openai_req_user_first(Some("## Temporal\n2026-09-10T00:00:00"));
+        let body = adapter.build_responses_request_body(&req).unwrap();
+        let input = body["input"].as_array().unwrap();
+
+        assert_eq!(
+            input[0]["role"], "system",
+            "the stable System item must be at input position 0 for the \
+             Responses API to serve a cache read from it"
+        );
+        assert_eq!(input[0]["content"][0]["text"], "stable system");
+    }
+
+    #[test]
+    fn responses_moves_both_system_messages_to_front_preserving_order() {
+        use crate::llm::domain::{LlmConfig, LlmMessage, LlmProvider, ProviderKind};
+
+        // Compacted-conversation shape: TWO System messages (stable
+        // sections + compaction summary), interleaved with User turns.
+        let messages = vec![
+            LlmMessage::user("hi".into()).unwrap(),
+            LlmMessage::system("stable system".into()).unwrap(),
+            LlmMessage::system("## Conversation summary (older turns)".into()).unwrap(),
+            LlmMessage::user("and now?".into()).unwrap(),
+        ];
+        let provider =
+            LlmProvider::new(ProviderKind::OpenAi, "k".into(), Some("gpt-4o".into())).unwrap();
+        let mut config = LlmConfig::new(provider);
+        config = config.with_volatile_system_suffix("## Temporal\n2026-09-10T00:00:00");
+        let req = LlmRequest::new(messages, config, false).unwrap();
+
+        let adapter = OpenAiAdapter::new();
+        let body = adapter.build_responses_request_body(&req).unwrap();
+        let input = body["input"].as_array().unwrap();
+
+        // Both original System items lead `input`, in their original
+        // relative order — stable sections first, then the compaction
+        // summary.
+        assert_eq!(input[0]["role"], "system");
+        assert_eq!(input[0]["content"][0]["text"], "stable system");
+        assert_eq!(input[1]["role"], "system");
+        assert_eq!(
+            input[1]["content"][0]["text"],
+            "## Conversation summary (older turns)"
+        );
+
+        // The two User items follow, and the volatile block still rides
+        // last.
+        assert_eq!(input[2]["role"], "user");
+        assert_eq!(input[2]["content"][0]["text"], "hi");
+        assert_eq!(input[3]["role"], "user");
+        assert_eq!(input[3]["content"][0]["text"], "and now?");
+
+        let last = input.last().unwrap();
+        assert_eq!(last["role"], "system");
+        assert_eq!(
+            last["content"][0]["text"].as_str().unwrap(),
+            "## Temporal\n2026-09-10T00:00:00"
+        );
+        assert_eq!(input.len(), 5, "2 system + 2 user + 1 volatile tail");
+    }
+
+    #[test]
+    fn responses_reordering_preserves_relative_order_of_non_system_items() {
+        use crate::llm::domain::{FunctionCall, LlmMessage, ToolCall};
+
+        // A realistic tool-calling turn with the stable System message
+        // sandwiched between conversational items. The reordering must
+        // move only the System item to the front — it must NOT scramble
+        // the relative order of user / assistant / function_call_output.
+        let user1 = LlmMessage::user("Usa la tool current_time".into()).unwrap();
+        let system = LlmMessage::system("stable system".into()).unwrap();
+        let assistant = LlmMessage::assistant_with_tool_calls(
+            String::new(),
+            vec![ToolCall {
+                id: "call_1".into(),
+                call_type: "function".into(),
+                function: FunctionCall {
+                    name: "current_time".into(),
+                    arguments: "{}".into(),
+                },
+                response: None,
+                provider_signature: None,
+            }],
+        )
+        .unwrap();
+        let tool_result = LlmMessage::tool("call_1".into(), "2026-09-10T00:00:00Z".into()).unwrap();
+
+        let provider = crate::llm::domain::LlmProvider::new(
+            crate::llm::domain::ProviderKind::OpenAi,
+            "k".into(),
+            Some("gpt-5".into()),
+        )
+        .unwrap();
+        let mut config = crate::llm::domain::LlmConfig::new(provider);
+        config = config.with_volatile_system_suffix("## Temporal\n2026-09-10T00:00:00");
+        let req =
+            LlmRequest::new(vec![user1, system, assistant, tool_result], config, false).unwrap();
+
+        let adapter = OpenAiAdapter::new();
+        let body = adapter.build_responses_request_body(&req).unwrap();
+        let input = body["input"].as_array().unwrap();
+
+        // System first.
+        assert_eq!(input[0]["role"], "system");
+        assert_eq!(input[0]["content"][0]["text"], "stable system");
+
+        // Then the non-System items, in their ORIGINAL relative order:
+        // user -> function_call -> function_call_output.
+        assert_eq!(input[1]["role"], "user");
+        assert_eq!(input[1]["content"][0]["text"], "Usa la tool current_time");
+        assert_eq!(input[2]["type"], "function_call");
+        assert_eq!(input[2]["call_id"], "call_1");
+        assert_eq!(input[3]["type"], "function_call_output");
+        assert_eq!(input[3]["call_id"], "call_1");
+
+        // Volatile block last.
+        let last = input.last().unwrap();
+        assert_eq!(last["role"], "system");
     }
 
     // ── gpt-5 family: Responses API routing + tool serialization ──────────

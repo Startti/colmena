@@ -956,9 +956,38 @@ correcta en conversaciones largas) **sin romper el cache** del prefijo estable.
   `[primero (cache_control: ephemeral), ...siguientes (sin marker)]`. El marker
   cubre solo el **primer** bloque; todo lo que llegue después (más mensajes
   `system`, el bloque temporal) queda fuera del prefijo cacheado.
-- **OpenAI / Gemini**: el temporal se concatena al final del **último** mensaje
-  `system` / del `systemInstruction`; su prefix-cache automático cachea el
-  prefijo estable.
+- **OpenAI Chat Completions / Gemini**: el temporal se concatena al final del
+  **último** mensaje `system` / del `systemInstruction`; su prefix-cache
+  automático cachea el prefijo estable. Confirmado con medición viva en
+  gpt-4o (`cache_read` ≈2176, sin cambios).
+- **OpenAI Responses API** (`/v1/responses`, ruta gpt-5-family + tools): la
+  concatenación anterior **NO cacheaba** — medido write N/read 0 en cada
+  turno, tanto concatenado al system existente como como system message
+  separado. El fix (2026-09-09) empuja el bloque volátil como un **item
+  `system` nuevo, último elemento de `input`**, sin tocar ningún item
+  existente (nunca se adjunta a un `function_call_output`, que no tiene
+  `content`). Con esa colocación: write ~31/read ~2395 desde el turno 2. Ver
+  el addendum 2026-09 en el spec.
+  - Esa colocación sola resultó **insuficiente**: hace falta una segunda
+    condición, medida por separado el 2026-09-10 sobre el mismo body real
+    capturado. Colmena emite la historia como `[User, System, ...]`, así que
+    sin reordenar, el primer item de `input` es el prompt del usuario, no el
+    `system` estable — y esa misma llamada, con el bloque volátil ya al
+    final, seguía dando write 2733/read 0 en el turno 2. Moviendo únicamente
+    el `system` estable al frente (bisección: la única variable que cambió
+    fue su posición) la MISMA llamada pasó a write 0/read 2733. Las dos
+    condiciones medidas y verificadas por separado, sin afirmar mecanismo
+    interno de OpenAI más allá de lo medido: (1) nada estable puede seguir a
+    los bytes volátiles, (2) el contenido `system` estable debe empezar en
+    `input[0]`. `build_responses_request_body` ahora arma `input` en tres
+    pasadas: todos los `system` (salvo el bloque volátil) primero, en su
+    orden relativo original; luego el resto de los items en SU orden
+    relativo original; el bloque volátil al final. Esto reordena solo la
+    serialización al wire — la historia persistida y sus índices
+    (`SUMMARY_KEEP_FIRST_MSGS`, `history_compaction`, el coalescer de
+    `LlmRequest::new`) no se tocan. Una conversación compactada (dos
+    mensajes `system`: secciones estables + resumen) mueve ambos al frente
+    preservando su orden — el resumen queda en `input[1]`, no en `input[0]`.
 
 Antes del fix el timestamp iba al FRENTE del system y quedaba **congelado** en
 turn 1 (gate `if !history_exists`) para no romper el cache — al costo de mostrar
