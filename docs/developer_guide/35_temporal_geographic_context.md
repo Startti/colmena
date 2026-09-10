@@ -17,6 +17,28 @@ Los modelos de lenguaje no tienen reloj. Si les preguntás "¿qué día es hoy?"
 > en turn 1 para no invalidar el cache. Ver
 > [§14 — Bloque temporal cache-safe](14_llm_deep_dive.md) y el spec
 > [`2026-06-11-temporal-block-cache-safe-design.md`](../superpowers/specs/2026-06-11-temporal-block-cache-safe-design.md).
+>
+> **Actualización 2026-09-09 (OpenAI Responses API):** la colocación
+> "concatenado al final del último system message" es cache-safe en
+> Anthropic, Gemini y OpenAI Chat Completions, pero **NO** en `/v1/responses`
+> — medido en vivo: write N/read 0 en cada turno, nunca cachea. En ese
+> endpoint el bloque se empuja como un **item `system` nuevo y separado, al
+> final de `input`** en vez de concatenarse a un item existente. La regla de
+> fondo ("fuera del prefijo cacheado") no cambió; lo que cambió es qué
+> colocación la satisface en este endpoint. Ver el addendum 2026-09 en el
+> spec y `docs/developer_guide/14_llm_deep_dive.md` §14.
+>
+> **Actualización 2026-09-10 (posición del `system` estable):** la
+> colocación al final de `input` (2026-09-09) resultó **necesaria pero
+> insuficiente**. Colmena emite la historia como `[User, System, ...]`; sin
+> reordenar, el `system` estable no queda en `input[0]`, y bisección en vivo
+> sobre el mismo body capturado mostró que eso también impide la lectura de
+> cache en el turno 2 — aun con el bloque volátil ya al final. La segunda
+> condición, tan necesaria como la primera: **el contenido `system` estable
+> debe empezar en `input[0]`**. `build_responses_request_body` ahora
+> reordena la serialización (nunca la historia persistida) para que todo
+> `system` preceda al resto de los items, en su orden relativo original. Ver
+> el addendum 2026-09-10 en el spec y `docs/developer_guide/14_llm_deep_dive.md` §14.
 
 Esta feature inyecta automáticamente, en el `system_message` de cada `llm_call`, un bloque con:
 
@@ -211,6 +233,9 @@ El diagrama de abajo muestra exactamente cómo los tres fields del JSON terminan
 │   `LlmConfig::volatile_system_suffix` y cada adapter de provider lo agrega  │
 │   DESPUÉS del contenido system estable, fuera del prefijo cacheado (ver     │
 │   src/libs/colmena/src/llm/infrastructure/anthropic_adapter.rs:207-213).    │
+│   Excepción: OpenAI Responses API (`build_responses_request_body`) NO      │
+│   concatena — empuja un item `system` nuevo como último elemento de       │
+│   `input`; concatenar ahí medía write N/read 0 (nunca cacheaba).          │
 └─────────────────────────────────────────────────────────────────────────────┘
                                      │
                                      │ LlmRequest construction
@@ -246,7 +271,7 @@ El diagrama de abajo muestra exactamente cómo los tres fields del JSON terminan
 | Turno | Bloque temporal | Por qué |
 |---|---|---|
 | **1** (sin history persistido) | Se computa y se carga como `volatile_system_suffix` | El bloque de cómputo (`llm.rs:3041-3056`) corre siempre, independientemente de `history_exists`. |
-| **2+** (con history persistido) | SE RE-COMPUTA igual | Mismo bloque incondicional corre en cada ejecución del nodo; el timestamp se refresca cada turno vía `volatile_system_suffix`, que cada adapter agrega fuera del prefijo cacheado. |
+| **2+** (con history persistido) | SE RE-COMPUTA igual | Mismo bloque incondicional corre en cada ejecución del nodo; el timestamp se refresca cada turno vía `volatile_system_suffix`, que cada adapter coloca fuera del prefijo cacheado (concatenado al final del system, salvo OpenAI Responses API, que usa un item `system` separado al final de `input` — ver arriba). |
 
 > **Cache-safe desde 2026-06-11.** El timestamp SÍ se actualiza turno-a-turno. Ver el comentario en `llm.rs:3032-3040` y [§14 — Bloque temporal cache-safe](14_llm_deep_dive.md).
 

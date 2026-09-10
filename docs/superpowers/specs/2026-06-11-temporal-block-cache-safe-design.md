@@ -100,14 +100,76 @@ rompe persistencia ni la API pública (campo opcional aditivo).
 | Adapter | Cómo coloca el suffix | Cache |
 |---|---|---|
 | **Anthropic** (`build_request_body`) | Si hay suffix, emitir `system` como array de 2 bloques: `[{text: estable, cache_control: ephemeral}, {text: suffix}]`. El marker cubre solo el bloque 0. | Prefijo estable cacheado; temporal libre. |
-| **OpenAI** (`build_request_body`) | Concatenar el suffix al final del system content (`{estable}\n\n{suffix}`). | Prefix-cache automático cachea el estable. |
+| **OpenAI — Chat Completions** (`build_messages`) | Concatenar el suffix al final del system content (`{estable}\n\n{suffix}`). | Prefix-cache automático cachea el estable — **confirmado con medición viva** (ver addendum 2026-09 abajo). |
+| **OpenAI — Responses API** (`build_responses_request_body`) | **Ya NO concatena.** Empuja un item `system` nuevo y separado como **último elemento** de `input`, Y reordena `input` para que todo `system` (salvo ese bloque volátil) preceda al resto — el estable queda en `input[0]`. Ver addendums 2026-09-09 y 2026-09-10. | Sin ambos cambios: escritura N/lectura 0 en cada turno (nunca cachea). Con ambos: lectura no-cero desde el turno 2 (medido). |
 | **Gemini** (`convert_messages`) | Concatenar el suffix al final del `systemInstruction`. | Implicit cache cachea el estable. |
 
-**Nota OpenAI/Gemini:** no tienen marker explícito; su cache es automático por
-prefijo. Con el temporal al final, el prefijo estable se cachea solo. Para
-ellos el campo `volatile_system_suffix` es equivalente a concatenar — pero lo
-mantenemos uniforme para que los 3 adapters compartan semántica y para no
-persistir el temporal en historial.
+**Nota OpenAI Chat Completions/Gemini:** no tienen marker explícito; su cache
+es automático por prefijo. Con el temporal al final, el prefijo estable se
+cachea solo. Para ellos el campo `volatile_system_suffix` es equivalente a
+concatenar — pero lo mantenemos uniforme para que los adapters compartan
+semántica y para no persistir el temporal en historial.
+
+**OpenAI Responses API es la excepción** — ver addendum 2026-09 debajo. El
+"concatenar al final" que funciona para Chat Completions/Gemini deja de
+satisfacer el criterio "fuera del prefijo cacheado" en este endpoint
+específico.
+
+### Addendum 2026-09-09 — la Responses API necesita una colocación distinta
+
+Medido en vivo contra `/v1/responses` con un prefijo estable de ~2.4k tokens:
+
+| Colocación del bloque volátil | Resultado medido |
+|---|---|
+| Dentro del último system message (la regla original de §2.4) | write 2428 / read 0 — nunca cachea |
+| Como system message separado (no al final de `input`) | write 2432 / read 0 — nunca cachea |
+| Como **último elemento** de `input` (item `system` nuevo) | call 1: write 2426/read 0 (cold, esperado); calls 2-3: write 31/read 2395 |
+| Chat Completions con el mismo suffix (control, gpt-4o) | read 2176 — sigue cacheando, sin cambios |
+
+La intención de §2.1 ("el bloque volátil se inyecta **fuera** del prefijo
+cacheado") no cambió — lo que cambió es que, en `/v1/responses`, "al final
+del system message" dejó de satisfacer esa intención. La regla operativa,
+falsificable, es: **nada estable puede seguir a los bytes volátiles**. No se
+afirma un mecanismo interno de caché de OpenAI — solo lo medido. Fix aplicado
+en `build_responses_request_body` (colmena, 2026-09-09): se eliminó la
+concatenación por-item y el fallback de front-insert; ahora se empuja
+incondicionalmente un item `system` nuevo al final de `input` cuando existe
+suffix. Chat Completions, Anthropic y Gemini quedan sin cambios.
+
+### Addendum 2026-09-10 — la colocación al final de `input` era necesaria pero NO suficiente
+
+El addendum anterior dejó una segunda variable sin bisecar: la posición del
+item `system` **estable** dentro de `input`. Colmena emite la historia como
+`[User, System, ...]` (ver `SUMMARY_KEEP_FIRST_MSGS`, `history_compaction`,
+el coalescer de `LlmRequest::new` — ninguno se toca en este addendum). Con el
+fix del 2026-09-09 ya aplicado (bloque volátil al final), el item `system`
+estable seguía en la posición donde `request.messages()` lo trae, es decir
+**no** en `input[0]`.
+
+Bisección en vivo sobre el body real capturado, cambiando UNA sola variable
+— la posición del item `system` estable — y dejando todo lo demás
+(incluida la colocación al final del bloque volátil) igual:
+
+| Variante | Call 1 | Call 2 |
+|---|---|---|
+| Body real verbatim (`[user, system estable, system volátil]`) | write 0, read 0 | write 2733, read 0 |
+| MISMO body, `system` estable movido al frente | write 2733, read 0 | **write 0, read 2733** |
+
+Dos condiciones, ambas medidas y necesarias, ninguna suficiente por sí sola:
+1. Nada estable puede seguir a los bytes volátiles (addendum 2026-09-09).
+2. El contenido `system` estable debe empezar en `input[0]` (este addendum).
+
+Fix aplicado en `build_responses_request_body` (colmena, 2026-09-10): la
+función arma `input` en tres pasadas — todos los items `System` salvo el
+bloque volátil, en su orden relativo original; el resto de los items
+(user/assistant/function_call/function_call_output), también en su orden
+relativo original; el bloque volátil al final, sin cambios. Esto reordena
+solo la serialización al wire de esta función — nunca la historia
+persistida. Una conversación compactada (dos `system`: secciones estables +
+resumen de compactación) mueve ambos al frente preservando su orden relativo
+— el resumen queda en `input[1]`, no en `input[0]`, así que el prefijo
+cacheable llega hasta el resumen. Chat Completions, Anthropic y Gemini
+quedan sin cambios — ya emiten el `system` primero en su formato respectivo.
 
 ---
 

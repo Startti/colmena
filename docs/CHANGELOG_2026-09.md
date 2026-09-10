@@ -2873,3 +2873,86 @@ queda, y el del techo aclara que su medida es **exacta para Anthropic y OpenAI y
 superior para Gemini**, cuyo adapter conforma todavía más.
 
 Sin cambio de comportamiento → sin E2E nuevo. La suite entera pasa.
+
+## 51. Fix: el suffix temporal volátil nunca cacheaba en la OpenAI Responses API
+
+**Qué cambió (parte 1 — 2026-09-09).** `build_responses_request_body`
+(`llm/infrastructure/openai_adapter.rs`) concatenaba el bloque temporal/geográfico
+volátil al final del **último** mensaje `system` de `input` — la misma regla que
+funciona en Chat Completions, Anthropic y Gemini. En `/v1/responses` esa colocación
+**nunca cacheaba**: medido en vivo, write N/read 0 en cada turno, tanto concatenado al
+system existente como como system message separado. El fix empuja el bloque como un
+**item `system` nuevo, incondicionalmente el último elemento de `input`**, sin
+modificar ningún item existente — y en particular sin intentar adjuntarlo a un
+`function_call_output` (ese item no tiene `content`). Con esa colocación: turno 1
+write ~2426/read 0 (cold, esperado), turnos 2+ write ~31/read ~2395.
+
+**Qué cambió (parte 2 — 2026-09-10).** La parte 1 era **necesaria pero insuficiente**.
+Bisección en vivo sobre el body real capturado ([user, system estable, system
+volátil], que es el orden que Colmena emite — `[User, System, ...]`) cambiando SÓLO
+la posición del item `system` estable mostró que la misma llamada, con ese body
+verbatim, escribía 2733/leía 0 en la llamada 2 — pero moviendo únicamente el system
+estable al frente (sin tocar la colocación del bloque volátil, que sigue último) esa
+MISMA llamada pasó a escribir 0/leer 2733. `build_responses_request_body` ahora
+reordena `input` en el wire — nunca la historia persistida — en tres pasadas: todos
+los items `System` salvo el bloque volátil, preservando su orden relativo; luego el
+resto de los items (user/assistant/function_call/function_call_output), también en su
+orden relativo original; y por último el bloque volátil, como antes. Una conversación
+compactada, que lleva DOS mensajes `System` (secciones estables + resumen de
+compactación), mueve ambos al frente en su orden original — el resumen de
+compactación queda en la posición 1, no en la 0, así que el prefijo cacheable llega
+hasta el resumen.
+
+### Por qué "al final del mensaje" no era lo mismo que "al final de `input`"
+
+La intención original (spec `2026-06-11-temporal-block-cache-safe-design.md` §2.1) era
+"el bloque volátil se inyecta fuera del prefijo cacheado". En Chat Completions,
+Anthropic y Gemini, "al final del último system message" ya cumple eso — el prefijo
+cacheable termina ahí. En `/v1/responses` el motor de caché mide el `input` completo
+como secuencia de items, no el texto de un item aislado: un bloque volátil que termina
+un item que NO es el último de `input` sigue teniendo bytes estables detrás (el resto
+de `input`), así que el prefijo nunca es byte-idéntico entre turnos y nunca cachea. La
+regla operativa, falsificable, verificada por las tres colocaciones medidas: **nada
+estable puede seguir a los bytes volátiles**. No se afirma un mecanismo interno de OpenAI
+más allá de lo medido.
+
+Efecto colateral limpiado: el fallback de "no hay system message → insertar uno al
+frente" (`last_system_idx`/`suffix_applied`) quedó subsumido por la regla nueva —
+empujar incondicionalmente al final cubre ambos casos — y se eliminó.
+
+### Por qué la posición 0 también importa
+
+Colmena emite la historia como `[User, System, ...]` (ver `SUMMARY_KEEP_FIRST_MSGS`,
+`history_compaction` y el coalescer en `LlmRequest::new`, que nunca se tocan aquí — ver
+"Alcance"). Sin la reordenación de la parte 2, el primer item de `input` en
+`/v1/responses` es el prompt del usuario, no el contenido `System` estable. La
+bisección del 2026-09-10 mostró que eso basta para que el turno 2 no lea de caché,
+incluso ya con el bloque volátil correctamente al final: la segunda condición,
+**el contenido `System` estable debe empezar en `input[0]`**, es tan necesaria como la
+primera. Ambas están medidas sobre el mismo body capturado, cambiando una sola
+variable por vez — no se afirma ningún mecanismo interno adicional de OpenAI.
+
+### Alcance
+
+Sólo `build_responses_request_body` (ruta gpt-5-family + tools), y sólo la
+serialización — el ORDEN en que los items se escriben al wire. `build_messages`
+(Chat Completions), el adapter de Anthropic y el de Gemini quedan sin cambios —
+confirmado con tests de regresión y con medición viva en gpt-4o (`cache_read` ≈2176,
+sin cambios). La historia persistida (`llm_call`, `history_compaction`,
+`SUMMARY_KEEP_FIRST_MSGS`, el coalescer de `LlmRequest::new`) tampoco cambia — sus
+índices siguen siendo válidos, sólo cambia cómo esta función particular arma el
+array `input` a partir de ellos. Sin cambio de API pública, sin cambio de wire-format
+hacia ADP.
+
+### Documentación de referencia
+
+- Spec: [`docs/superpowers/specs/2026-06-11-temporal-block-cache-safe-design.md`](superpowers/specs/2026-06-11-temporal-block-cache-safe-design.md)
+  (addendum 2026-09-09, extendido 2026-09-10).
+- Dev guide: [`docs/developer_guide/35_temporal_geographic_context.md`](developer_guide/35_temporal_geographic_context.md),
+  [`docs/developer_guide/14_llm_deep_dive.md`](developer_guide/14_llm_deep_dive.md) §14.
+
+### Estado
+
+Done (unit tests + mutation check, ambas partes). El gate E2E vivo contra
+`/v1/responses` con la forma `function_call_output`-tail queda fuera de esta entrega
+(se maneja por separado).
