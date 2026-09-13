@@ -83,7 +83,9 @@ fn measure() -> Measured {
 
 /// Update these three numbers in the SAME change that moves them, and say in
 /// the PR body which graphs moved and why.
-const EXPECTED_FILES: usize = 305;
+// Bumped 305 -> 306: adds tests/graphs/basic/input_template_resolution.json
+// (the input node template-resolution E2E graph; lints clean).
+const EXPECTED_FILES: usize = 306;
 const EXPECTED_ERRORS: usize = 0;
 const EXPECTED_WARNINGS: usize = 0;
 const EXPECTED_INFOS: usize = 0;

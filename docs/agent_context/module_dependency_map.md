@@ -6,7 +6,7 @@
 **How to use (for the exploration/spec phase):** before opening files to assess a change, look up the target file below. **Used by** is its blast radius — the files that break if you change its public surface. **Depends on** is what it needs. Start by reading only those, not the whole repo.
 
 - Files indexed: **382**
-- Modules with at least one importer: **172**
+- Modules with at least one importer: **173**
 
 ## Blast-radius ranking (change these with the most care)
 
@@ -426,7 +426,7 @@
 #### `src/libs/colmena/src/dag_engine/infrastructure/nodes/input.rs`
 - Module: `dag_engine::infrastructure::nodes::input`
 - **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
-- Depends on (2): `dag_engine::domain::lint`, `dag_engine::domain::node`
+- Depends on (3): `dag_engine::domain::lint`, `dag_engine::domain::node`, `dag_engine::infrastructure::nodes::util::template`
 
 #### `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm.rs`
 - Module: `dag_engine::infrastructure::nodes::llm`
@@ -765,7 +765,7 @@
 
 #### `src/libs/colmena/src/dag_engine/infrastructure/nodes/util/template.rs`
 - Module: `dag_engine::infrastructure::nodes::util::template`
-- **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
+- **Used by (1)**: `src/libs/colmena/src/dag_engine/infrastructure/nodes/input.rs`
 - Depends on (0): — (no intra-crate imports)
 
 #### `src/libs/colmena/src/dag_engine/infrastructure/persistence/mod.rs`

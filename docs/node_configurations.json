@@ -168,20 +168,20 @@
 
     "input": {
       "name": "Input Node",
-      "description": "Provides static configuration data as output to downstream nodes. Acts as a data source that emits hardcoded values defined in its config. Supports '{{key}}' template syntax to resolve values from the DAG's global state, and allows upstream edge inputs to override individual fields. When config is empty, it acts as a pure passthrough — forwarding all injected inputs directly to its output. This is the primary way to inject initial data, configuration constants, or user parameters into a DAG flow.",
+      "description": "Provides static configuration data as output to downstream nodes. Acts as a data source that emits hardcoded values defined in its config. Supports '{{key}}' and '{{key.nested.path}}' template syntax (dot-path traversal, same resolver as llm_call): templates resolve against the engine's `state` first, then against the input keys an edge delivers — a key present in both resolves to the `state` value. A miss renders '' and never fails the node. A node-qualified path like '{{origen.plano}}' resolves when the edge names the target port ('\"to\": \"<node>.<port>\"'), because a named port delivers the source's payload intact under that port key; the same path renders '' on an unported edge, since auto-flatten never preserves the source node id as a key. When two different unported edges deliver the same top-level key, input assembly silently keeps only one value before any template ever runs (pre-existing engine behavior across all node types, not specific to this node) — name the target port to keep same-named keys from different sources separate. After templates resolve, upstream edge inputs can still override individual fields by matching key. When config is empty, it acts as a pure passthrough — forwarding all injected inputs directly to its output. When the node runs as an LLM tool or inside `for_each`, `state` is empty, so only `inputs` apply. This is the primary way to inject initial data, configuration constants, or user parameters into a DAG flow.",
       "category": "control_flow",
       "config_fields": {
         "<any_key>": {
           "type": "any",
           "required": false,
           "default": null,
-          "description": "Placeholder, not a literal field name. This node emits its configuration as the payload for downstream nodes, so any key the author chooses is valid data — there is no closed set of settings to check against. Values support '{{key}}' template resolution against graph state."
+          "description": "Placeholder, not a literal field name. This node emits its configuration as the payload for downstream nodes, so any key the author chooses is valid data — there is no closed set of settings to check against. Values support '{{key}}' template resolution against `state` first, then `inputs` as a fallback."
         },
         "data": {
           "type": "any",
           "required": false,
           "default": null,
-          "description": "The static data object to output. Can be any valid JSON value: string, number, boolean, object, or array. If present, this is the primary output of the node. Individual fields within this object can be overridden by upstream edge inputs with matching keys. If not provided, the entire config object is treated as the data source. Supports '{{key}}' and '{{key.nested}}' template syntax to dynamically resolve values from the DAG's global state at runtime.",
+          "description": "The static data object to output. Can be any valid JSON value: string, number, boolean, object, or array. If present, this is the primary output of the node. Individual fields within this object can be overridden by upstream edge inputs with matching keys. If not provided, the entire config object is treated as the data source. Supports '{{key}}' and '{{key.nested}}' template syntax to dynamically resolve values, checking `state` first and falling back to the input keys an edge delivers.",
           "example": { "question": "What is the capital of France?", "language": "English" }
         },
         "__payload__": {

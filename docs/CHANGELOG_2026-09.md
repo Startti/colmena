@@ -3006,3 +3006,44 @@ de otro nodo, el edge tiene que nombrar el puerto.
 Solo infraestructura: `nodes/util/template.rs` (nuevo), `nodes/util/mod.rs`,
 `nodes/llm.rs`. Sin cambio de API pública ni de wire-format; ADP no se ve
 afectado.
+
+## 53. Fix: el nodo `input` resuelve `{{key.nested}}` y los valores que llegan por edge
+
+**Defecto (A4 de [`qa/nodes/RESUMEN_GAPS.md`](qa/nodes/RESUMEN_GAPS.md)).**
+`input.rs` resolvía `{{...}}` con `state.get(key)` literal: sin traversal y solo
+contra `state`, que no contiene outputs de otros nodos. Casi todo template
+renderizaba `""` en silencio; solo resolvían claves de `state` como
+`{{session_id}}`.
+
+**Fix.** El nodo usa el resolver compartido de §52 buscando la clave raíz
+**primero en `state` y después en `inputs`**. Dot paths e índices de array se
+recorren, un no-string se renderiza como texto JSON y una clave ausente sigue
+dando `""`. `state` va primero (al revés que `llm_call`) porque una clave puede
+traer valores distintos en ambas fuentes (`session_id`, `plan`,
+`__colmena_subgraph_depth` entregados por edge): así toda clave que ya resolvía
+produce los mismos bytes. Como tool o dentro de `for_each`, `state` está vacío.
+
+**Puertos nombrados.** Un edge con puerto (`"to": "plantilla.origen"`) entrega el
+payload solo bajo esa clave (`{{origen.plano}}`); uno sin puerto aplana las
+claves del origen (`{{plano}}`) y ahí `{{origen.plano}}` da `""`. Dos edges sin
+puerto con la misma clave colapsan en una sin aviso — comportamiento
+preexistente del motor, no tocado aquí; el remedio es nombrar el puerto (ver
+[`16_data_flow_guide.md`](developer_guide/16_data_flow_guide.md)).
+
+**Tests.** Módulo nuevo en `input.rs`. Contra el lookup original fallan
+exactamente 7 (valores por edge, dot path, índice, no-string, anidado en array,
+puertos `cliente`/`vendedor`, no re-escaneo); 8 pasan con ambos y fijan lo que no
+cambia (`session_id`, solo-`state`, ausente, choque de nombres, override,
+passthrough, `__payload__` desde `config`).
+
+**E2E.** `tests/graphs/basic/input_template_resolution.json` (sin LLM):
+
+| Nodo | Edge | Resultado capturado |
+|---|---|---|
+| `plantilla` | puertos | `VALOR_PLANO`, `Ana`, UUID de sesión, `""` (ausente), `Ana` (cliente), `Luis` (vendedor) |
+| `plantilla_plana` | sin puerto | `VALOR_PLANO`, `Ana`, `{"nombre":"Ana"}`, `""` para `{{origen.plano}}` |
+| `sin_puerto` | dos sin puerto | solo `{"rol":"vendedor","nombre":"Luis"}` (ganó el edge posterior; observación, no contrato) |
+
+`dag_engine lint` limpio; `EXPECTED_FILES` 305 → 306. Sin cambio de API ni
+wire-format, pero los templates de `input` que antes daban `""` ahora
+renderizan su valor.
