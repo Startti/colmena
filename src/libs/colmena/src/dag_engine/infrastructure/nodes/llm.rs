@@ -911,55 +911,13 @@ impl LlmNode {
         }
     }
 
+    /// Resolve `{{key}}` / `{{key.nested}}` placeholders against `inputs`.
+    /// Delegates to the shared resolver in `nodes::util::template`, whose body
+    /// was moved verbatim from here, so the rendered output is unchanged.
     fn resolve_template_vars(value: &str, inputs: &NodeInputs) -> String {
-        let mut result = String::new();
-        let mut last_end = 0;
-
-        while let Some(start) = value[last_end..].find("{{") {
-            let absolute_start = last_end + start;
-            result.push_str(&value[last_end..absolute_start]);
-
-            if let Some(end) = value[absolute_start..].find("}}") {
-                let absolute_end = absolute_start + end + 1; // points to the last }
-                let var_path = value[absolute_start + 2..absolute_end - 1].trim();
-
-                let parts: Vec<&str> = var_path.splitn(2, '.').collect();
-                let val_str = if parts.is_empty() || parts[0].is_empty() {
-                    String::new()
-                } else {
-                    let root_key = parts[0];
-                    if let Some(root_val) = inputs.get(root_key) {
-                        if parts.len() == 1 {
-                            match root_val {
-                                Value::String(s) => s.clone(),
-                                _ => serde_json::to_string(root_val).unwrap_or_default(),
-                            }
-                        } else {
-                            let json_pointer = format!("/{}", parts[1].replace('.', "/"));
-                            if let Some(nested_val) = root_val.pointer(&json_pointer) {
-                                match nested_val {
-                                    Value::String(s) => s.clone(),
-                                    _ => serde_json::to_string(nested_val).unwrap_or_default(),
-                                }
-                            } else {
-                                String::new()
-                            }
-                        }
-                    } else {
-                        String::new()
-                    }
-                };
-
-                result.push_str(&val_str);
-                last_end = absolute_end + 1;
-            } else {
-                result.push_str(&value[absolute_start..]);
-                last_end = value.len();
-                break;
-            }
-        }
-        result.push_str(&value[last_end..]);
-        result
+        crate::dag_engine::infrastructure::nodes::util::template::render_template(value, |k| {
+            inputs.get(k)
+        })
     }
 }
 
@@ -6799,6 +6757,68 @@ mod effective_subgraph_depth_tests {
         assert_eq!(
             effective_subgraph_depth(&inputs(&[("__colmena_subgraph_depth", json!("nope"))])),
             0
+        );
+    }
+}
+
+// Characterization tests for `LlmNode::resolve_template_vars`. They were written
+// and passing against the original inline body, then left unedited when that
+// body moved to `nodes::util::template::render_template`: they pin the
+// behavior `llm_call` had before the move.
+#[cfg(test)]
+mod resolve_template_vars_characterization_tests {
+    use super::{LlmNode, NodeInputs};
+    use serde_json::json;
+
+    fn inputs(pairs: &[(&str, serde_json::Value)]) -> NodeInputs {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn flat_key_resolves() {
+        let inputs = inputs(&[("nombre", json!("Ana"))]);
+        assert_eq!(
+            LlmNode::resolve_template_vars("Hola {{nombre}}", &inputs),
+            "Hola Ana"
+        );
+    }
+
+    #[test]
+    fn dot_path_resolves() {
+        let inputs = inputs(&[("usuario", json!({"nombre": "Ana"}))]);
+        assert_eq!(
+            LlmNode::resolve_template_vars("Hola {{usuario.nombre}}", &inputs),
+            "Hola Ana"
+        );
+    }
+
+    #[test]
+    fn non_string_value_renders_as_json_text() {
+        let inputs = inputs(&[("usuario", json!({"nombre": "Ana"}))]);
+        assert_eq!(
+            LlmNode::resolve_template_vars("{{usuario}}", &inputs),
+            "{\"nombre\":\"Ana\"}"
+        );
+    }
+
+    #[test]
+    fn missing_key_renders_empty_string() {
+        let inputs = inputs(&[]);
+        assert_eq!(
+            LlmNode::resolve_template_vars("[{{no_existe}}]", &inputs),
+            "[]"
+        );
+    }
+
+    #[test]
+    fn unterminated_double_brace_is_left_literal() {
+        let inputs = inputs(&[("nombre", json!("Ana"))]);
+        assert_eq!(
+            LlmNode::resolve_template_vars("Hola {{nombre", &inputs),
+            "Hola {{nombre"
         );
     }
 }
