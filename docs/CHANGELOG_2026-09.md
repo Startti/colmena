@@ -2956,3 +2956,53 @@ hacia ADP.
 Done (unit tests + mutation check, ambas partes). El gate E2E vivo contra
 `/v1/responses` con la forma `function_call_output`-tail queda fuera de esta entrega
 (se maneja por separado).
+
+## 52. Refactor: el resolver de templates de `llm_call` pasa a `nodes/util/template.rs`
+
+**Qué cambió.** El cuerpo de `LlmNode::resolve_template_vars` (resolución de
+`{{key}}` y `{{key.nested.path}}` contra `inputs`) se movió sin cambios de
+lógica a una función compartida, `nodes::util::template::render_template`. La
+única diferencia de firma es que quien llama decide dónde se busca la clave
+raíz: `llm_call` sigue buscando en sus `inputs` a través de un wrapper de una
+línea, y sus tres call sites no se tocaron.
+
+**Por qué.** Es la primera mitad del arreglo del hallazgo A4 de
+[`qa/nodes/RESUMEN_GAPS.md`](qa/nodes/RESUMEN_GAPS.md): el nodo `input` resuelve
+`{{key.nested}}` con un lookup plano y sin traversal, y la segunda mitad lo
+conectará a este mismo resolver en vez de mantener una segunda copia de la
+misma semántica. Este PR no cambia todavía el nodo `input`.
+
+**Qué cambia en runtime.** Nada en el texto renderizado. Lo único nuevo es un
+evento `tracing::debug!` (target `colmena::dag_engine::template`, campo `path`,
+nunca el valor) cuando una clave o un path no existe; antes el fallo era
+completamente silencioso.
+
+**Tests.**
+
+- 5 tests de caracterización en `llm.rs` (clave plana, dot-path, valor no
+  string como texto JSON, clave inexistente → `""`, `{{` sin cerrar queda
+  literal). Se escribieron y pasaron contra el cuerpo original, y siguen verdes
+  sin editar después del movimiento.
+- 5 tests unitarios directos sobre `render_template`.
+
+**E2E.** Grafo de un solo uso (no versionado; la segunda mitad agrega el E2E
+permanente del nodo `input`), corrido con `dag_engine run` contra Gemini 2.5
+Flash: un nodo `input` entrega `{"plano": "VALOR_PLANO_7431", "usuario":
+{"nombre": "Ana_9912"}}` al puerto nombrado `eco.datos` de un `llm_call` cuyo
+`system_message` es `A={{datos.plano}} B={{datos.usuario.nombre}}
+C=[{{no_existe}}] D={{datos.usuario}}`, y otro nodo `input` le entrega el
+`prompt`. El modelo respondió
+`A=VALOR_PLANO_7431 B=Ana_9912 C=[] D={"nombre":"Ana_9912"}`.
+
+Un detalle que costó una corrida: `llm_call` declara `default_input = "prompt"`,
+así que un edge **sin puerto** hacia él entrega solo la clave `prompt` del
+origen y nada más. Con los datos por ese camino, los mismos templates
+renderizaron vacíos (`A= B= C=[] D=`) — no por el resolver, sino porque las
+claves nunca llegaron a `inputs`. Para que un template de `llm_call` vea datos
+de otro nodo, el edge tiene que nombrar el puerto.
+
+### Alcance
+
+Solo infraestructura: `nodes/util/template.rs` (nuevo), `nodes/util/mod.rs`,
+`nodes/llm.rs`. Sin cambio de API pública ni de wire-format; ADP no se ve
+afectado.
