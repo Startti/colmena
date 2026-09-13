@@ -36,13 +36,26 @@ La documentación (`node_configurations.json`, config_fields.data) menciona que 
 
 **Impacto QA:** Probar que `null`, `{}`, y `""` como input NO sobrescriben el config value.
 
-### C) Resolución de templates
+### C) Resolución de templates — RESUELTO
 
-**Hallazgo:** La documentación dice que el nodo soporta `{{key}}` Y `{{key.nested}}` ("Supports '{{key}}' and '{{key.nested}}' template syntax" en `node_configurations.json`), pero el código en línea 21-28 **solo soporta keys simples** (no anidadas). La función `resolve_templates` busca en `state.get(key)` donde `key` es la cadena extraída entre `{{` y `}}`.
+**Hallazgo histórico (ya no aplica):** la documentación decía que el nodo soporta `{{key}}` y `{{key.nested}}`, pero el código hacía lookup plano contra `state` (`state.get("foo.bar")` literal, sin traversal), y solo miraba `state` — nunca `inputs`.
 
-Ejemplo: `{{foo.bar}}` extraería la clave literal `"foo.bar"` del estado global (no `state["foo"]["bar"]`). Si el estado no tiene esa clave exacta, devuelve vacío.
+**Estado actual:** `input.rs` ahora delega en el mismo resolver que `llm_call`
+(`nodes::util::template::render_template`), con lookup **state primero,
+inputs como fallback**. `{{key.nested.path}}` hace traversal real vía JSON
+pointer (incluye índices de array: `{{items.0}}`), valores non-string se
+serializan a texto JSON, y una clave ausente en ambas fuentes renderiza `""`
+sin fallar el nodo. Una clave presente en ambas fuentes con valores distintos
+resuelve al valor de `state` (así se preserva exactamente el
+comportamiento previo para toda clave que ya resolvía).
 
-**Impacto QA:** Probar que `{{foo.bar}}` busca la clave `foo.bar` (string con punto), no acceso anidado. Si se quiere un acceso anidado real, el usuario debe proporcionar `foo.bar` como clave en el estado (poco probable).
+`{{origen.plano}}` resuelve solo si el edge nombra el puerto destino
+(`"to": "plantilla.origen"`); sin puerto renderiza `""` porque la clave
+`origen` no existe. Dos edges sin puerto con la misma clave colapsan en una
+sin aviso antes de resolver templates (preexistente en el motor, no tocado).
+
+**Impacto QA:** Ver Caso 3 (actualizado) y el grafo E2E
+`tests/graphs/basic/input_template_resolution.json`.
 
 ### D) Conversión de valores non-string en templates
 
@@ -148,37 +161,15 @@ La documentación NO especifica este comportamiento (dice "Only string values ar
 
 ---
 
-### Caso 3: Template resolution `{{key}}`
-**Objetivo:** Verificar que `{{key}}` en strings se reemplaza por valores del state.
+### Caso 3: Template resolution `{{key}}` y `{{key.nested.path}}` (actualizado)
+**Objetivo:** Verificar que `{{key}}` y `{{key.nested.path}}` resuelven contra `state` primero y contra `inputs` como fallback, incluyendo dot-path traversal desde un valor entregado por edge.
 
-**Grafo JSON mínimo:**
-```json
-{
-  "version": "0.1.0",
-  "nodes": [
-    {
-      "id": "inp",
-      "node_type": "input",
-      "config": {
-        "data": {
-          "greeting": "Hello, {{name}}!",
-          "farewell": "Goodbye, {{name}}!"
-        }
-      }
-    },
-    {
-      "id": "out",
-      "node_type": "output",
-      "config": {}
-    }
-  ],
-  "edges": [{"from": "inp:output", "to": "out:input"}]
-}
-```
+**Grafo JSON mínimo:** ver `tests/graphs/basic/input_template_resolution.json` — un nodo `origen` (input, con datos planos y anidados) edgeado hacia `plantilla` con puertos nombrados (`"to": "plantilla.origen"`), y hacia `plantilla_plana` sin puerto, para contrastar ambos casos.
 
-**Nota:** Este caso requiere inyectar un state global con `"name": "Alice"`. Sin un mecanismo en el grafo JSON para inyectar state, este caso es difícil de probar. Alternativa: usar un nodo `python_script` anterior que escriba en state (pero está fuera del control de `input`).
+**Resultado esperado (extracto):** `{{origen.plano}}` resuelve en `plantilla` (puerto nombrado) pero renderiza `""` en `plantilla_plana` (edge sin puerto, no hay clave `origen`); `{{usuario.nombre}}` resuelve por dot-path traversal cuando el edge entrega `usuario` como clave de nivel superior.
 
-**Verificación:** Si el state contiene `"name": "Alice"`, los strings deben ser `"Hello, Alice!"` y `"Goodbye, Alice!"`.
+**Verificación:** tabla E2E de CHANGELOG_2026-09 §53, contra el SSE capturado en `/tmp/colmena_e2e/input_template_resolution.sse`.
+
 
 ---
 

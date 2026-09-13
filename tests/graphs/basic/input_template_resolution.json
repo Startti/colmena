@@ -1,0 +1,67 @@
+{
+  "nodes": {
+    "origen": {
+      "type": "input",
+      "config": {
+        "data": {
+          "plano": "VALOR_PLANO",
+          "usuario": { "nombre": "Ana" }
+        }
+      }
+    },
+    "cliente": {
+      "type": "input",
+      "config": {
+        "data": {
+          "nombre": "Ana",
+          "rol": "cliente"
+        }
+      }
+    },
+    "vendedor": {
+      "type": "input",
+      "config": {
+        "data": {
+          "nombre": "Luis",
+          "rol": "vendedor"
+        }
+      }
+    },
+    "plantilla": {
+      "type": "input",
+      "config": {
+        "data": {
+          "campo_plano": "{{origen.plano}}",
+          "campo_usuario_nombre": "{{origen.usuario.nombre}}",
+          "campo_session": "{{session_id}}",
+          "campo_missing": "{{no_existe}}",
+          "campo_cliente": "{{cliente.nombre}}",
+          "campo_vendedor": "{{vendedor.nombre}}"
+        }
+      }
+    },
+    "plantilla_plana": {
+      "type": "input",
+      "config": {
+        "data": {
+          "campo_plano": "{{plano}}",
+          "campo_usuario_nombre": "{{usuario.nombre}}",
+          "campo_usuario_obj": "{{usuario}}",
+          "campo_origen_plano": "{{origen.plano}}"
+        }
+      }
+    },
+    "sin_puerto": {
+      "type": "input",
+      "config": {}
+    }
+  },
+  "edges": [
+    { "comment": "Named target port: origen's full payload arrives intact under the 'origen' key.", "from": "origen", "to": "plantilla.origen" },
+    { "comment": "Named target port: cliente's full payload arrives intact under the 'cliente' key.", "from": "cliente", "to": "plantilla.cliente" },
+    { "comment": "Named target port: vendedor's full payload arrives intact under the 'vendedor' key.", "from": "vendedor", "to": "plantilla.vendedor" },
+    { "comment": "Unported edge: origen's top-level keys auto-flatten into plantilla_plana's inputs; no 'origen' key exists at all.", "from": "origen", "to": "plantilla_plana" },
+    { "comment": "Unported edge: cliente's top-level keys ('nombre', 'rol') auto-flatten into sin_puerto's inputs.", "from": "cliente", "to": "sin_puerto" },
+    { "comment": "Unported edge: vendedor's top-level keys collide with cliente's ('nombre', 'rol') at auto-flatten, pre-existing engine behavior (not fixed by this change).", "from": "vendedor", "to": "sin_puerto" }
+  ]
+}

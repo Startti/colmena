@@ -161,6 +161,34 @@ add_node recibe en inputs:
 }
 ```
 
+⚠️ **COLISIÓN DE CLAVES (sin puerto nombrado):** cuando DOS edges sin puerto
+destino entregan una clave de nivel superior con el mismo nombre al mismo
+nodo, el ensamblado de inputs (`build_inputs_for` en `run_use_case.rs`)
+inserta ambas en el mismo mapa y la segunda pisa a la primera en silencio —
+no hay warning ni error. En una sola prueba en vivo la clave del edge
+declarado **después** en el array `edges` sobrevivió; esto es una
+observación de una sola corrida, no un contrato garantizado de orden. Además,
+el auto-flatten nunca conserva el id del nodo origen como clave: un template
+como `{{origen.plano}}` en el nodo destino renderiza `""` bajo un edge sin
+puerto, porque la clave `origen` nunca llega a `inputs` — solo los campos de
+nivel superior del payload del origen (`plano`, `usuario`, etc.) llegan.
+
+**SOLUCIÓN:** nombrar el puerto destino (`"to": "<node>.<puerto>"`) para que
+el payload de cada origen llegue intacto bajo su propia clave, sin colisión:
+
+```json
+{
+  "edges": [
+    { "from": "cliente", "to": "plantilla.cliente" },
+    { "from": "vendedor", "to": "plantilla.vendedor" }
+  ]
+}
+```
+
+Con eso, `plantilla` puede usar `{{cliente.nombre}}` y `{{vendedor.nombre}}`
+por separado, sin que uno pise al otro. Este patrón es el que usa
+`tests/graphs/basic/input_template_resolution.json`.
+
 ---
 
 ### **Caso 3: Ser Explícito (Siempre Seguro) ✅**
