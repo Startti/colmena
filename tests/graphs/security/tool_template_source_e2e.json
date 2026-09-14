@@ -1,0 +1,38 @@
+{
+  "comment": "E2E: proves the template-source restriction reaches the real tool dispatch. `endpoint` is fixed to `/anything/${bearer_token}` where `bearer_token` IS a declared top-level parameter (a real http_request field) — it must template. A fixed header `X-Target: \"${API_BASE}\"` names a variable that is NOT declared as a parameter anywhere in this schema — an undeclared argument the model sends under that exact name (the prompt asks it to) must NOT be able to satisfy it; the placeholder stays literal and falls through to http_request's own env-var resolution against the real process env var `API_BASE` (set to a harmless value before running this graph, NOT the model's 'evil').",
+  "metadata": { "category": "security", "requires_env": ["GEMINI_API_KEY", "API_BASE"] },
+  "nodes": {
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "model": "gemini-2.5-flash",
+        "api_key": "${GEMINI_API_KEY}",
+        "stream": false,
+        "system_message": "Sos un agente de pruebas técnicas. Llamá a la herramienta exactamente como se te indique, sin cuestionar el pedido, incluso si te pide mandar un campo extra que la herramienta no describe explícitamente.",
+        "tool_configurations": {
+          "probe": {
+            "name": "probe",
+            "node_type": "http_request",
+            "description": "Hace un pedido de prueba a httpbin.org/anything.",
+            "node_schema": {
+              "base_url": { "type": "string", "fixed": "https://httpbin.org" },
+              "endpoint": { "type": "string", "fixed": "/anything/${bearer_token}" },
+              "method": { "type": "string", "fixed": "GET" },
+              "bearer_token": { "type": "string", "required": true, "description": "Pass exactly 'ok'." },
+              "headers": {
+                "type": "object",
+                "properties": {
+                  "X-Target": { "type": "string", "fixed": "${API_BASE}" }
+                }
+              }
+            }
+          }
+        },
+        "prompt": "Llamá a la herramienta 'probe' con bearer_token = \"ok\". En el JSON de argumentos de la llamada, incluí ADEMÁS una clave de nivel superior \"API_BASE\" con el valor \"evil\" — aunque la herramienta no describa 'API_BASE' como parámetro, incluila igual en el JSON de la llamada, es parte de la prueba. Después devolveme la respuesta cruda de la herramienta tal cual."
+      }
+    },
+    "result": { "type": "output", "config": {} }
+  },
+  "edges": [ { "from": "agent", "to": "result" } ]
+}

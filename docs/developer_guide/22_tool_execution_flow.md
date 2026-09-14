@@ -266,21 +266,33 @@ let args: HashMap<String, Value> = serde_json::from_str(&tool_call.function.argu
 
 ### Step 5: Merge Fixed Values + LLM Arguments
 
-**File:** [node_schema_merge.rs:13-70](../../src/libs/colmena/src/dag_engine/infrastructure/node_schema_merge.rs#L13-L70)
-**Function:** `merge_args_into_schema()` — called from `execute_inner()` (`dag_tool_executor.rs:986`) when the tool config has a `node_schema` (PATH 0, highest priority). Extracted into its own module so `for_each` can reuse identical merge semantics for row-driven (non-LLM) calls.
+**File:** [node_schema_merge.rs](../../src/libs/colmena/src/dag_engine/infrastructure/node_schema_merge.rs)
+**Function:** `merge_args_into_schema()` — called from `execute_inner()` when the tool config has a `node_schema` (PATH 0, highest priority). Extracted into its own module so `for_each` can reuse identical merge semantics for row-driven (non-LLM) calls.
 
-This is the core merge algorithm. It runs in three sub-steps:
+This is the core merge algorithm. It runs in four sub-steps — templating happens
+**first**, against a restricted source map, before anything is seeded or merged:
 
-#### 5a. Seed with fixed values
+#### 5a. Template fixed values against a restricted source, then seed
+
+`${key}` references inside the operator's own fixed values are resolved
+**before** any LLM argument is placed, against an explicit, restricted source
+map — not against the environment (see the callout below 5d for what this
+step does and does not do):
 
 ```rust
-let mut result: HashMap<String, Value> = HashMap::new();
-for (k, v) in &parsed.fixed_values {
-    result.insert(k.clone(), v.clone());
-}
+// template_sources = the operator's own fixed values (so one fixed field can
+// reference another) ∪ each declared TOP-LEVEL LLM param actually supplied
+// this call. A param nested inside a container never qualifies.
+let mut result: HashMap<String, Value> = parsed.fixed_values.iter()
+    .map(|(k, v)| (k.clone(), DagToolExecutor::resolve_value_templates(v, &template_sources)))
+    .collect();
 ```
 
-After this, `result` contains:
+`fixed: "SELECT * FROM t WHERE client_id = '${client_id}'"` with a declared
+top-level param `client_id` resolves to the caller's value once that param is
+placed in step 5b. `fixed: "${AMADEUS_KEY}"` — no declared param named
+`AMADEUS_KEY` — is left exactly as written; nothing here looks it up against
+`std::env`. After this step, `result` contains:
 ```json
 {
   "base_url": "https://api.amadeus.com",
@@ -360,15 +372,29 @@ Deep-merge result:
   }
 ```
 
-#### 5d. Resolve environment variables
+#### 5d. The caller's own values are never templated
 
-```rust
-let resolved_result = result.iter()
-    .map(|(k, v)| (k.clone(), Self::resolve_value_templates(v, &result)))
-    .collect();
-```
+The LLM arguments placed in 5b–5c are used exactly as supplied — there is no
+second templating pass over the merged result. An LLM-supplied `q:
+"${SOMETHING}"` always stays literal in the merged input map; it is never
+looked up against anything.
 
-`${AMADEUS_KEY}` → `"sk-real-key-123"` (from `std::env::var`)
+> **What `${key}` templating here actually resolves against — and what it
+> doesn't.** This step (5a) never talks to the process environment. It
+> resolves `${key}` against a map built from the operator's own fixed values
+> and the caller's declared top-level arguments — nothing else. A fixed
+> `base_url: "${API_BASE}"` used to resolve against **any** key present after
+> the merge, including an **undeclared** argument the model supplied without
+> the operator ever declaring it as a parameter (a fixed `base_url:
+> "${API_BASE}"` plus a model-sent `API_BASE` argument would redirect the
+> call to wherever the model named). That is now closed: only the operator's
+> own fixed values, or a declared top-level parameter's value, can satisfy a
+> `${key}` reference inside a fixed value. Real environment-variable
+> expansion (`${DATABASE_URL}` → the value of that process env var) happens
+> **later**, inside the target node itself (Step 6 below) — this step never
+> calls `std::env::var`. A `${ENV_VAR}`-shaped placeholder that no declared
+> param resolves here is simply left exactly as written, for the node to
+> resolve against the environment when it runs.
 
 ---
 
