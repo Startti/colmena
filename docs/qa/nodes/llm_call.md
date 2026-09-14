@@ -24,6 +24,8 @@ Ejemplos verificados:
 
 ### 2.1 Campo `thinking_budget` (sin entrada en node_configurations.json)
 
+> ✅ **Resuelto en #221** (verificado contra el código el 2026-09-13): `node_configurations.json` documenta `thinking_budget` en `node_types.llm_call.config_fields`.
+
 **Qué documenta:** `docs/node_configurations.json` NO incluye `thinking_budget` como campo de configuración para llm_call.
 
 **Qué hace el código:** `llm.rs:1476-1481` — El código acepta `thinking_budget` (como u64 desde inputs o config) y lo pasa a `llm_config.with_thinking_budget(thinking_budget as u32)`. Es un campo válido que controla el budget de "thinking tokens" en proveedores que lo soportan (Anthropic).

@@ -20,6 +20,8 @@ Sin discrepancias detectadas. El código implementa todos los campos y comportam
 
 ### Hallazgo 2.1: Campo `thinking_budget` ausente en `node_configurations.json`
 
+> ✅ **Resuelto en #221** (verificado contra el código el 2026-09-13): `thinking_budget` está en `node_types.planner.config_fields`.
+
 **Qué dice la doc:** La sección de configuración en `docs/node_configurations.json` NO lista un campo `thinking_budget`.
 
 **Qué hace el código:** Línea 307-309 en `planner.rs`:
@@ -36,6 +38,8 @@ El nodo acepta un campo opcional `thinking_budget` (tipo integer/u64) y lo pasa 
 ---
 
 ### Hallazgo 2.2: Campo `streaming` ausente en `node_configurations.json`
+
+> ✅ **Resuelto en #221** (verificado contra el código el 2026-09-13): `streaming` está en `node_types.planner.config_fields`.
 
 **Qué dice la doc:** No hay mención de un campo `streaming` en la config del planner.
 

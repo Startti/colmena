@@ -18,6 +18,8 @@ Sin discrepancias detectadas. La documentación de campos obligatorios es conser
 
 ### 2.1 — Campo `temperature` en planner, critic, phase_reactor, final_reactor
 
+> ✅ **Resuelto en #221** (verificado contra el código el 2026-09-13): `temperature` está documentado en los cuatro sub-bloques: `read_only` en planner/critic/phase_reactor (delegan al nodo standalone) y configurable en `final_reactor`. `thinking_budget` también está documentado en los cuatro.
+
 **Dónde:** orchestrator.rs líneas 666-671 (final_reactor), similar patrón para planner/reactor
 
 ```rust
