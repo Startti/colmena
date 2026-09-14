@@ -3122,3 +3122,51 @@ proceso, NO en `"evil"`: el placeholder `${API_BASE}` nunca se resolvió
 contra el argumento del LLM, quedó literal después del merge y lo resolvió
 la propia resolución de variables de entorno de `http_request` contra el
 entorno real. Antes de este fix, `X-Target` habría llegado como `evil`.
+
+## 55. Fix: se descartan las claves `__colmena*`/`__node*` que el modelo manda como argumentos de tool
+
+Segundo paso de la procedencia de argumentos de tools (el primero fue §54).
+
+**El forjado.** El executor escribe claves de contexto del motor en `inputs`
+después de mezclar los argumentos del LLM, con `insert`, así que en general
+gana. Pero no siempre las escribe, y en esos huecos una copia forjada por el
+modelo llegaba intacta al nodo. Verificado contra el código:
+
+| Clave | La leen | ¿La reescribe el executor en una llamada plana? |
+|---|---|---|
+| `__colmena_resume_answer` | `llm.rs`, `suspend.rs`, `secure_suspend.rs`, `subgraph.rs`, `orchestrator.rs` | No: solo en un resume real |
+| `__node_id` | `llm.rs`, `secure_suspend.rs`, `for_each.rs` | Nunca: solo el loop de grafo la escribe |
+| `__colmena_session_id` / `__colmena_agent_session_id` | `llm.rs`, `subgraph.rs`, `secure_suspend.rs`, `tts.rs`, `image_*`, `http.rs`, `document_nodes.rs` | Solo si el executor tiene ese id configurado |
+| `__colmena_node_id_path`, `__colmena_subgraph_depth`, `__colmena_tool_name` | `llm.rs`, `subgraph.rs` | Sí, siempre |
+
+Un `__colmena_resume_answer` forjado le hace creer a un `llm_call` o a un
+`suspend` usado como tool que hay una respuesta humana que nunca se dio. Dos
+caminos no reescribían nada: el despacho de sub-tools de un toolkit y cada
+fila de `for_each`, donde el contexto reenviado usaba `or_insert` y una fila
+podía ganarle al `session_id` real.
+
+**Fix.** `DagToolExecutor::strip_engine_keys` descarta esas claves de los
+argumentos del modelo antes de cualquier merge (`node_schema`, `$DYNAMIC`,
+`field_mapping` legado, sin `fixed_config`) y en el despacho de sub-tools de
+toolkits. `for_each` limpia cada fila antes del merge y escribe el contexto
+reenviado con `insert` después. `subgraph` como tool pasa por el mismo camino;
+MCP reenvía los argumentos a un servidor externo sin tocar `inputs` de un nodo;
+los toolkits sintéticos no leen esas claves de sus argumentos.
+
+**Tests.** `strips_forged_resume_answer_on_plain_execute`,
+`strips_forged_node_id_on_plain_execute`,
+`real_resume_answer_wins_over_a_forged_one_in_the_same_call`,
+`toolkit_dispatch_strips_forged_engine_keys` (con un sub-tool `inspect` del
+toolkit de test `echo_toolkit.rs`), y en `for_each`
+`row_supplied_engine_key_is_stripped_not_just_unforwarded` y
+`row_supplied_session_id_does_not_override_forwarded_context`. Quitando los
+strips y volviendo a `or_insert`, fallan exactamente esos 5 (el de resume real
+pasa con los dos códigos).
+
+**E2E.** `tests/graphs/security/tool_strip_engine_keys_e2e.json`: Gemini 2.5
+Flash con un `for_each` como tool cuyo destino es `python_script` (no filtra
+nada propio, así que es un testigo limpio). El modelo mandó
+`{"items":[{"__colmena_session_id":"forged-session","bearer_token":"ok","__node_id":"forged"}]}`.
+Lo que vio el `python_script`: `__node_id` ausente, `__colmena_resume_answer`
+ausente y `__colmena_session_id` con el UUID real de la sesión, no
+`forged-session`. `dag_engine lint` limpio; `EXPECTED_FILES` 307 → 308.

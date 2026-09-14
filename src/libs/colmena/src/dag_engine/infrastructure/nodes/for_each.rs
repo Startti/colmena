@@ -11,6 +11,7 @@ use crate::dag_engine::domain::lint::{FieldSpec, NodeCatalogEntry};
 use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
 use crate::dag_engine::domain::observer::{ChildScopeObserver, ExecutionObserver, NodeEvent};
 use crate::dag_engine::domain::tool_configuration::parse_node_schema;
+use crate::dag_engine::infrastructure::dag_tool_executor::DagToolExecutor;
 use crate::dag_engine::infrastructure::node_schema_merge::merge_args_into_schema;
 use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::{
     dispatch_gsheets_create_spreadsheet, dispatch_gsheets_set_range,
@@ -25,11 +26,15 @@ use std::sync::{Arc, OnceLock};
 const MAX_CONCURRENCY: usize = 64;
 
 /// Ambient context keys forwarded from `for_each`'s own `inputs` into every
-/// per-row target dispatch (when present, and only if the target's merged
-/// args don't already set them). This keeps recursion/session context alive
-/// across a `for_each` boundary — e.g. `__colmena_subgraph_depth` so a
-/// `subgraph` target reached via `for_each` doesn't reset `MAX_SUBGRAPH_TOOL_DEPTH`
-/// to 0. Deliberately excludes `__node_id` / `__colmena_node_id_path`, which
+/// per-row target dispatch, written last so they are authoritative — a row
+/// can never override them (each row is stripped of any `__colmena*`/
+/// `__node*` key it tried to set before it is even merged, so in practice
+/// only an operator-declared fixed field with one of these literal names
+/// could still collide, and forwarding stays last so even that loses to the
+/// engine's own value). This keeps recursion/session context alive across a
+/// `for_each` boundary — e.g. `__colmena_subgraph_depth` so a `subgraph`
+/// target reached via `for_each` doesn't reset `MAX_SUBGRAPH_TOOL_DEPTH` to
+/// 0. Deliberately excludes `__node_id` / `__colmena_node_id_path`, which
 /// are for_each-specific and could collide with the target's own path logic.
 const FORWARDED_CONTEXT_KEYS: [&str; 3] = [
     "__colmena_subgraph_depth",
@@ -408,7 +413,7 @@ impl ExecutableNode for ForEachNode {
             let incremental_sink = incremental_sink.clone();
             async move {
                 let dispatch_result: Result<Value, String> = async {
-                    let row_map: HashMap<String, Value> = match &row {
+                    let mut row_map: HashMap<String, Value> = match &row {
                         Value::Object(m) => m.clone().into_iter().collect(),
                         other => {
                             let mut h = HashMap::new();
@@ -416,10 +421,19 @@ impl ExecutableNode for ForEachNode {
                             h
                         }
                     };
+                    // A row is model-authored when `for_each` is dispatched as
+                    // a tool (its `items` come from the LLM's own arguments) —
+                    // strip any `__colmena*`/`__node*` key it tried to set
+                    // before it can reach the merge below, same as an ordinary
+                    // tool call's arguments.
+                    DagToolExecutor::strip_engine_keys(&mut row_map);
                     let mut merged = merge_args_into_schema(&target_schema, row_map)
                         .map_err(|e| format!("row {index}: {e}"))?;
+                    // Written last with `insert` (not `entry().or_insert()`):
+                    // forwarded context is engine-authoritative and must win
+                    // over anything the row merge produced, not just fill gaps.
                     for (key, value) in forwarded_context {
-                        merged.entry(key).or_insert(value);
+                        merged.insert(key, value);
                     }
                     // Both of these already succeeded inside
                     // `merge_args_into_schema` a few lines up, on this same
@@ -1012,6 +1026,77 @@ mod tests {
         let result_output = &out["output"]["results"][0]["output"]["output"];
         assert_eq!(result_output["__colmena_subgraph_depth"], json!(3));
         assert!(result_output.get("__node_id").is_none());
+    }
+
+    /// A row is model-authored when `for_each` is dispatched as a tool (its
+    /// `items` come straight from the LLM's own arguments). A row that sets
+    /// `__colmena_session_id` itself must never win over the session id
+    /// `for_each` forwards from its own inputs — that would let a model
+    /// redirect a target's session-scoped state (secure values, conversation
+    /// memory) to a session of its own choosing.
+    #[tokio::test]
+    async fn row_supplied_session_id_does_not_override_forwarded_context() {
+        let node = ForEachNode::new();
+        node.registry
+            .set(Arc::new(StubRegistry {
+                add: Arc::new(AddNode),
+                echo: Some(Arc::new(EchoNode)),
+            }) as Arc<dyn NodeRegistryPort>)
+            .ok();
+
+        let mut inputs: NodeInputs = HashMap::new();
+        inputs.insert(
+            "target".to_string(),
+            json!({ "node_type": "echo", "node_schema": {} }),
+        );
+        inputs.insert(
+            "items".to_string(),
+            json!([{"a": 1, "__colmena_session_id": "row-forged-session"}]),
+        );
+        inputs.insert("__colmena_session_id".to_string(), json!("real-session"));
+
+        let mut state = json!({});
+        let out = node
+            .execute(&inputs, &json!({}), &mut state, None)
+            .await
+            .unwrap();
+        let result_output = &out["output"]["results"][0]["output"]["output"];
+        assert_eq!(result_output["__colmena_session_id"], json!("real-session"));
+        assert_eq!(result_output["a"], json!(1));
+    }
+
+    /// A row-supplied `__node_id` (or any other `__colmena*`/`__node*` key)
+    /// must be stripped before the row is merged, exactly like an ordinary
+    /// tool call's arguments — not merely left unforwarded.
+    #[tokio::test]
+    async fn row_supplied_engine_key_is_stripped_not_just_unforwarded() {
+        let node = ForEachNode::new();
+        node.registry
+            .set(Arc::new(StubRegistry {
+                add: Arc::new(AddNode),
+                echo: Some(Arc::new(EchoNode)),
+            }) as Arc<dyn NodeRegistryPort>)
+            .ok();
+
+        let mut inputs: NodeInputs = HashMap::new();
+        inputs.insert(
+            "target".to_string(),
+            json!({ "node_type": "echo", "node_schema": {} }),
+        );
+        inputs.insert(
+            "items".to_string(),
+            json!([{"a": 1, "__node_id": "forged", "__colmena_resume_answer": "forged"}]),
+        );
+
+        let mut state = json!({});
+        let out = node
+            .execute(&inputs, &json!({}), &mut state, None)
+            .await
+            .unwrap();
+        let result_output = &out["output"]["results"][0]["output"]["output"];
+        assert_eq!(result_output["a"], json!(1));
+        assert!(result_output.get("__node_id").is_none());
+        assert!(result_output.get("__colmena_resume_answer").is_none());
     }
 
     /// Every row runs the same target graph and so emits the same node ids.

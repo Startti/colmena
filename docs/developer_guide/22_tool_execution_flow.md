@@ -262,6 +262,35 @@ let args: HashMap<String, Value> = serde_json::from_str(&tool_call.function.argu
 // → { "origin": "JFK", "dest": "CDG", "date": "2026-05-15" }
 ```
 
+#### Step 4b: Reserved-prefix arguments are dropped before merge
+
+**Function:** `DagToolExecutor::strip_engine_keys()` — [dag_tool_executor.rs:275](../../src/libs/colmena/src/dag_engine/infrastructure/dag_tool_executor.rs#L275), called from `execute_inner()` right after parsing (above), and from the toolkit sub-tool dispatch path before the sub-tool discriminator is injected.
+
+Any argument key starting with `__colmena` or `__node` is removed from the
+parsed arguments **before** they reach any of the three merge strategies in
+Step 5 (`node_schema`, `$DYNAMIC`, legacy `field_mapping`) or the
+no-`fixed_config` passthrough. These prefixes are reserved for engine-authored
+context — session id, resume answer, subgraph depth, node id path, tool name —
+injected later in this same function (after Step 5, see `execute_inner`
+around dag_tool_executor.rs:2130 onward) with `insert()`, which is
+authoritative and overwrites anything already in `inputs`.
+
+That later injection is unconditional for some keys (`__colmena_node_id_path`,
+`__colmena_subgraph_depth`, `__colmena_tool_name`) but conditional for others:
+`__colmena_resume_answer` is only inserted when the call is an actual resume
+(`execute_with_resume_answer`), and `__colmena_session_id` /
+`__colmena_agent_session_id` only when the executor was built with a session
+id. On an ordinary (non-resume) call, or an executor with no session id
+configured, nothing downstream would have overwritten a model-forged copy of
+those keys — and `__node_id` is never written by `DagToolExecutor` in any tool
+dispatch path at all (only the graph execution loop sets it, in graph mode).
+Stripping first closes both cases uniformly instead of relying on each engine
+key happening to be reinjected later.
+
+A `for_each` row goes through the same strip (`ForEachNode`, in
+`nodes/for_each.rs`) before its own merge into the target's schema — see
+[49_for_each.md](49_for_each.md#las-claves-de-fila-se-filtran-antes-del-merge).
+
 ---
 
 ### Step 5: Merge Fixed Values + LLM Arguments

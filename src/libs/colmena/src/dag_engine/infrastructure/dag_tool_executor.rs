@@ -254,6 +254,28 @@ impl DagToolExecutor {
             _ => value.clone(),
         }
     }
+
+    /// Remove every argument whose key starts with `__colmena` or `__node`
+    /// from a model-supplied (or `for_each` row-supplied) argument map,
+    /// before it can reach a merge or a node's `inputs`.
+    ///
+    /// These prefixes are reserved for engine-authored keys — session id,
+    /// resume answer, subgraph depth, node id path, and so on. Most of them
+    /// are written unconditionally by the executor with `insert()` AFTER
+    /// this strip runs, so a forged copy would be overwritten anyway. But
+    /// not all of them: `__colmena_resume_answer` is only injected when this
+    /// call is an actual resume (`execute_with_resume_answer`), so an
+    /// ordinary tool call that never resumes anything leaves nothing to
+    /// overwrite a forged one; `__node_id` is never written by the executor
+    /// at all (only the graph execution loop sets it, in graph mode) — a
+    /// forged one survives unconditionally, every time, in every tool
+    /// dispatch path, with nothing downstream to catch it. Stripping first
+    /// closes both cases uniformly instead of relying on each engine key
+    /// happening to be reinjected later.
+    pub(crate) fn strip_engine_keys(args: &mut HashMap<String, Value>) {
+        args.retain(|k, _| !(k.starts_with("__colmena") || k.starts_with("__node")));
+    }
+
     /// Create a new executor with the given node registry and tool configurations.
     ///
     /// Call [`with_secure_values`](Self::with_secure_values) afterward if any tool uses
@@ -814,6 +836,10 @@ impl DagToolExecutor {
                     ),
                 }
             })?;
+        // This dispatch path never injects the executor's own engine keys
+        // (session id, resume answer, ...) at all, so nothing downstream
+        // would catch a forged one — strip before the node ever sees it.
+        Self::strip_engine_keys(&mut inputs);
 
         // Inject the reserved sub-tool discriminator.
         inputs.insert(
@@ -1976,10 +2002,15 @@ impl DagToolExecutor {
             };
 
         // 2. Parse arguments
-        let args: HashMap<String, Value> = serde_json::from_str(&tool_call.function.arguments)
+        let mut args: HashMap<String, Value> = serde_json::from_str(&tool_call.function.arguments)
             .map_err(|e| LlmError::InvalidToolCall {
                 reason: format!("Failed to parse arguments for tool {}: {}", node_type, e),
             })?;
+        // Strip any `__colmena*`/`__node*` key the model tried to send as an
+        // ordinary argument, before it can reach ANY of the three merge
+        // strategies below (node_schema, $DYNAMIC, legacy field_mapping) or
+        // the no-fixed_config passthrough.
+        Self::strip_engine_keys(&mut args);
 
         // 3. Build final_args with node_schema, $DYNAMIC substitution, or legacy field_mapping
         let inputs = if let Some(schema) = tool_cfg.and_then(|c| c.node_schema.as_ref()) {
@@ -4206,6 +4237,89 @@ mod tests {
         );
     }
 
+    /// The concrete forgery the existing test above did not cover: when the
+    /// caller never resumes anything (`resume_answer: None`), the executor
+    /// never inserts `__colmena_resume_answer` at all — so nothing overwrites
+    /// a copy the model puts in its own tool-call arguments. A downstream
+    /// `llm_call` reads that key directly (llm.rs) to decide it is replaying
+    /// a suspended tool call and to accept an empty `prompt` — a model could
+    /// use this to fake a human-in-the-loop answer that was never given.
+    #[tokio::test]
+    async fn strips_forged_resume_answer_on_plain_execute() {
+        let registry = Arc::new(MockRegistry::new());
+        let executor = DagToolExecutor::new(registry, HashMap::new());
+
+        let tool_call = ToolCall::new(
+            "call_forge_resume".to_string(),
+            FunctionCall::new(
+                "mock_tool".to_string(),
+                r#"{"a": "plain", "__colmena_resume_answer": "FORGED_BY_MODEL"}"#.to_string(),
+            ),
+        );
+
+        let result = executor.execute(&tool_call).await.unwrap();
+        assert!(result.success);
+        let output: Value = serde_json::from_str(&result.output).unwrap();
+        assert_eq!(output["a"], "plain");
+        assert!(
+            output.get("__colmena_resume_answer").is_none(),
+            "a forged __colmena_resume_answer must be stripped, not merely unset"
+        );
+    }
+
+    /// `__node_id` is never written by the executor at all (only the graph
+    /// execution loop sets it, in graph mode) — so of every engine key, this
+    /// is the one with nothing downstream to overwrite a forged copy. Several
+    /// nodes read it for user-facing error/log messages (llm.rs, extraction.rs).
+    #[tokio::test]
+    async fn strips_forged_node_id_on_plain_execute() {
+        let registry = Arc::new(MockRegistry::new());
+        let executor = DagToolExecutor::new(registry, HashMap::new());
+
+        let tool_call = ToolCall::new(
+            "call_forge_node_id".to_string(),
+            FunctionCall::new(
+                "mock_tool".to_string(),
+                r#"{"a": "plain", "__node_id": "forged_node_name"}"#.to_string(),
+            ),
+        );
+
+        let result = executor.execute(&tool_call).await.unwrap();
+        assert!(result.success);
+        let output: Value = serde_json::from_str(&result.output).unwrap();
+        assert_eq!(output["a"], "plain");
+        assert!(
+            output.get("__node_id").is_none(),
+            "a forged __node_id must be stripped"
+        );
+    }
+
+    /// A real resume answer (injected by the executor itself, via
+    /// `execute_with_resume_answer`) must still win even when the model's own
+    /// arguments also try to set the same key — engine-authoritative values
+    /// are written with `insert` AFTER the merge and after stripping.
+    #[tokio::test]
+    async fn real_resume_answer_wins_over_a_forged_one_in_the_same_call() {
+        let registry = Arc::new(MockRegistry::new());
+        let executor = DagToolExecutor::new(registry, HashMap::new());
+
+        let tool_call = ToolCall::new(
+            "call_resume_vs_forge".to_string(),
+            FunctionCall::new(
+                "mock_tool".to_string(),
+                r#"{"a": "plain", "__colmena_resume_answer": "FORGED_BY_MODEL"}"#.to_string(),
+            ),
+        );
+
+        let result = executor
+            .execute_with_resume_answer(&tool_call, "REAL_HUMAN_ANSWER")
+            .await
+            .unwrap();
+        assert!(result.success);
+        let output: Value = serde_json::from_str(&result.output).unwrap();
+        assert_eq!(output["__colmena_resume_answer"], "REAL_HUMAN_ANSWER");
+    }
+
     #[tokio::test]
     async fn execute_inner_injects_session_id_into_node_inputs() {
         // Build an executor with a known session_id and verify that every tool
@@ -4570,6 +4684,38 @@ mod toolkit_runtime_tests {
         // Output is a JSON-stringified value.
         let parsed: serde_json::Value = serde_json::from_str(&result.output).unwrap();
         assert_eq!(parsed.get("output").unwrap().as_str(), Some("hola"));
+    }
+
+    #[tokio::test]
+    async fn toolkit_dispatch_strips_forged_engine_keys() {
+        // The toolkit dispatch path never injects the executor's own engine
+        // keys at all (no session id, no resume answer, nothing) — so
+        // nothing downstream would ever overwrite a forged one. This is the
+        // sharpest version of the forgery: without stripping, whatever the
+        // model sends reaches the node completely unfiltered.
+        use crate::llm::domain::{FunctionCall, ToolCall};
+
+        let exec = build_executor_with_toolkit_all();
+
+        let call = ToolCall {
+            id: "call-inspect".to_string(),
+            call_type: "function".to_string(),
+            function: FunctionCall {
+                name: "web__inspect".to_string(),
+                arguments: r#"{"a":1,"__node_id":"forged","__colmena_resume_answer":"forged","__colmena_session_id":"forged"}"#
+                    .to_string(),
+            },
+            response: None,
+            provider_signature: None,
+        };
+        let result = exec.execute(&call).await.expect("execute ok");
+        assert!(result.success, "got error: {:?}", result.error);
+        let parsed: serde_json::Value = serde_json::from_str(&result.output).unwrap();
+        let echoed = parsed.get("output").unwrap();
+        assert_eq!(echoed["a"], serde_json::json!(1));
+        assert!(echoed.get("__node_id").is_none());
+        assert!(echoed.get("__colmena_resume_answer").is_none());
+        assert!(echoed.get("__colmena_session_id").is_none());
     }
 
     #[tokio::test]

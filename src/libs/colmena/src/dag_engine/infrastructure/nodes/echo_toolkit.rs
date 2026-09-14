@@ -43,6 +43,14 @@ impl ExecutableNode for EchoToolkitNode {
                     .ok_or("double: missing required 'n'")?;
                 Ok(json!({ "output": n * 2.0 }))
             }
+            "inspect" => {
+                // Echoes every input the node received, verbatim — used by
+                // tests to observe exactly what reached a toolkit node's
+                // `inputs`, including any engine-reserved key that should
+                // have been stripped before dispatch.
+                let map: serde_json::Map<String, Value> = inputs.clone().into_iter().collect();
+                Ok(json!({ "output": Value::Object(map) }))
+            }
             other => Err(format!("unknown sub_tool: {other}").into()),
         }
     }
@@ -83,6 +91,12 @@ impl ToolkitNode for EchoToolkitNode {
                 properties: double_props,
                 required: vec!["n".to_string()],
             },
+            SubToolDefinition {
+                name: Cow::Borrowed("inspect"),
+                description: "Return every input verbatim (test-only).".to_string(),
+                properties: HashMap::new(),
+                required: vec![],
+            },
         ]
     }
 }
@@ -120,12 +134,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn catalog_has_two_entries() {
+    async fn catalog_has_three_entries() {
         let node = EchoToolkitNode;
         let cat = node.sub_tool_catalog(&json!({}));
-        assert_eq!(cat.len(), 2);
+        assert_eq!(cat.len(), 3);
         assert!(cat.iter().any(|d| d.name == "echo"));
         assert!(cat.iter().any(|d| d.name == "double"));
+        assert!(cat.iter().any(|d| d.name == "inspect"));
     }
 
     #[tokio::test]

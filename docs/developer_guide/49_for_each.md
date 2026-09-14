@@ -284,6 +284,30 @@ intervención humana por fila.
   reporta el nivel de anidación. Ver
   [nota de migración](../adp_migration/2026-08-21-unbounded-subgraph-nesting.md).
 
+## Las claves de fila se filtran antes del merge
+
+Cuando `for_each` se despacha como tool LLM, sus `items` vienen directo de
+los argumentos que arma el modelo — una fila es, en ese sentido, tan
+"no confiable" como cualquier argumento de tool call. Antes de mezclar
+cada fila contra el schema del target (`merge_args_into_schema`), se le
+quita cualquier clave que empiece con `__colmena` o `__node`
+(`DagToolExecutor::strip_engine_keys`, la misma función que usa el
+despacho normal de tools — ver
+[22_tool_execution_flow.md](22_tool_execution_flow.md#step-4b-reserved-prefix-arguments-are-dropped-before-merge)).
+Sin este filtro una fila podría declarar, por ejemplo,
+`"__colmena_session_id": "otra-sesion"` y colar ese valor en el merge del
+target.
+
+El contexto reenviado (`__colmena_subgraph_depth`,
+`__colmena_session_id`, `__colmena_agent_session_id` — la lista de arriba)
+es **autoritativo**: se escribe con `insert()` (no
+`entry().or_insert()`) *después* del merge, así que gana incluso sobre
+un campo fijo declarado por el operador con ese mismo nombre literal. En
+la práctica esto ya no importa para una fila del modelo — sus copias se
+filtran antes de llegar al merge — pero mantiene la invariante también
+para el caso, mucho más raro, de un `node_schema` fijo del operador que
+reutilice uno de esos nombres.
+
 ## Linaje por fila en el stream
 
 Todas las filas corren el **mismo** grafo target, así que todas emiten los
