@@ -12,6 +12,8 @@
 
 ### 1.1 node_configurations.json — campos de config incompletos
 
+> ✅ **Resuelto en #221** (verificado contra el código el 2026-09-13): `thinking_budget` y `streaming` están en `node_types.critic.config_fields`, y `temperature` figura como `read_only` (fija en 0.1).
+
 **Problema:** `docs/node_configurations.json` documenta los campos `provider`, `api_key`, `model`, `system_message`, `verbose`, `texts` en la sección `critic.config_fields`.
 
 **Realidad en código:** `critic.rs` líneas 188-190 y 224-227 revelan que el nodo TAMBIÉN soporta:
@@ -363,7 +365,7 @@ source .env && cargo run --bin dag_engine -- run tests/graphs/agents/critic_susp
 
 | # | Tipo | Severidad | Descripción |
 |---|------|-----------|-------------|
-| 1.1 | Docs | Alta | `node_configurations.json` no documenta `thinking_budget` ni `streaming` |
+| ~~1.1~~ | Docs | Alta | ✅ Resuelto en #221: `thinking_budget` y `streaming` documentados |
 | 1.2 | Docs | Media | Temperatura fija (0.1) NO está explícitamente documentada como no-configurable |
 | 1.3 | Docs | Media | `node_ports_reference.md` no explica comportamiento cuando no hay textos (retorna `null`) |
 | 1.4 | Docs | Alta | `node_as_tools_reference.json` SIN entrada para `critic` |

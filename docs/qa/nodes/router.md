@@ -23,6 +23,8 @@
 
 ### A. Temperatura fija a 0.1
 
+> ✅ **Resuelto en #221** (verificado contra el código el 2026-09-13): `node_types.router.config_fields.temperature` figura como `read_only` (0.1) y aclara que el router no soporta `thinking_budget` ni streaming.
+
 **Hallazgo:** Ambos modos (A y B) fijan `temperature: 0.1` hardcoded en el prompt de sistema.
 
 - **Modo A (llm_direct.rs:72):** `temperature_override: Some(0.1)`

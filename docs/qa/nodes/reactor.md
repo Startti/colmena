@@ -16,12 +16,16 @@ Nota: La temperatura está hardcodeada a 0.2 en el código (reactor.rs:238, `wit
 ## 2) Código NO documentado
 
 ### 2.1) Campo `thinking_budget`
+> ✅ **Resuelto en #221** (verificado contra el código el 2026-09-13): `thinking_budget` está en `node_types.reactor.config_fields`.
+
 - **Ubicación**: `reactor.rs:239-241`
 - **Comportamiento**: El código soporta un campo de config `thinking_budget` (tipo u64) que se pasa al LLM para limitar el presupuesto de tokens de pensamiento (extended thinking / o1-thinking en Claude/OpenAI). Si está presente, se asigna a la config LLM vía `with_thinking_budget()`.
 - **Documentación**: NO aparece en `docs/node_configurations.json` (sección `config_fields` del reactor está incompleta).
 - **Impacto para QA**: Operadores no saben que pueden configurar `thinking_budget` ni para qué sirve. Las pruebas E2E que intenten validar extended thinking no encontrarán documentación de cómo habilitarlo en el reactor.
 
 ### 2.2) Campo `streaming`
+> ✅ **Resuelto en #221** (verificado contra el código el 2026-09-13): `streaming` está en `node_types.reactor.config_fields`.
+
 - **Ubicación**: `reactor.rs:275-307`
 - **Comportamiento**: El código soporta un campo booleano `streaming` (default false) que, cuando está activado, habilita callbacks de token en tiempo real. Los tokens se emiten a través del observer como eventos `LlmToken`, junto con eventos de uso de tokens (`LlmUsage`, `LlmMessageStart`, `LlmMessageFinish`). La implementación es condicional: si `streaming=false`, no se registra callback; si `streaming=true` y hay observer, los tokens se forwarden.
 - **Documentación**: NO aparece en `docs/node_configurations.json`.
