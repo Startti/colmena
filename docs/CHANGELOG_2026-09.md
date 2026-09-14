@@ -3047,3 +3047,78 @@ passthrough, `__payload__` desde `config`).
 `dag_engine lint` limpio; `EXPECTED_FILES` 305 → 306. Sin cambio de API ni
 wire-format, pero los templates de `input` que antes daban `""` ahora
 renderizan su valor.
+
+## 54. Fix: un argumento no declarado por el LLM ya no puede redirigir un valor `fixed` con `${VAR}`
+
+**Esto es un cambio de comportamiento deliberado, no un no-op.** Primera de
+una cadena de PRs de seguridad sobre la procedencia de `${VAR}` en el
+despacho de tools.
+
+**El hijack.** `merge_args_into_schema()` (usada por CADA llamada de tool con
+`node_schema` y por cada fila de `for_each`) templaba `${key}` dentro de los
+valores `fixed` del operador contra **todo** el mapa resultante después del
+merge — es decir, contra cualquier clave presente ahí, incluyendo un
+argumento que el LLM mandó sin que el operador lo hubiera declarado como
+parámetro. Un `fixed: "base_url": "${API_BASE}"` se resolvía si el modelo
+simplemente mandaba un argumento llamado `API_BASE`, redirigiendo la llamada
+a donde el modelo quisiera — sin que el operador hubiera declarado ese
+parámetro en ningún lado.
+
+**El fix.** El templado de valores `fixed` ahora corre **antes** del merge, y
+solo contra una fuente restringida: los propios valores `fixed` del operador
+(uno puede referenciar a otro) más cada parámetro **top-level declarado** que
+el llamador haya mandado en esa llamada. Un parámetro anidado dentro de un
+contenedor (`param_to_container`) nunca cuenta como fuente. El valor que
+manda el LLM nunca se templa a sí mismo — un argumento `q: "${ALGO}"` queda
+literal en el resultado.
+
+**Lo que se mantiene igual.** La forma que usa `sql_query` en ADP — un
+`query` fijo que referencia `${client_id}`/`${period}` por nombre, ambos
+declarados como parámetros top-level — sigue templando exactamente igual;
+hay un test de regresión específico para esa forma
+(`declared_top_level_param_still_templates_regression_guard` en
+`node_schema_merge.rs`). Un `${ENV_VAR}` que nadie declaró como parámetro
+queda literal, tal como hoy, a la espera de que el nodo lo resuelva contra el
+entorno cuando corra.
+
+**Residual conocido.** Los grafos ya persistidos en la base de datos de ADP
+no se pueden auditar desde este repo para confirmar que ninguno dependía de
+un argumento no declarado para templar un valor fijo — el análisis de código
+fuente en este repo y en `apps/service/ia/platform/` no encontró ningún caso
+así, pero es una verificación de código, no de datos en producción.
+
+**Tests.** `node_schema_merge.rs`: caracterización de la forma declarada
+(`declared_top_level_param_templates_into_a_fixed_value`), el hijack cerrado
+(`undeclared_arg_no_longer_templates_a_fixed_value`), el valor del LLM nunca
+se auto-templa (`llm_arg_value_is_never_templated_stays_literal`), el guard
+de regresión, y un guard adicional para parámetros anidados en contenedores.
+`dag_tool_executor.rs`: un test de integración
+(`undeclared_llm_arg_cannot_template_a_fixed_field_through_the_executor`)
+prueba que la restricción llega hasta el despacho real de tools, no solo a
+la función pura. Mutation check manual (sin `git stash`, copia en el
+scratchpad de la sesión): restaurar el templado post-merge sobre todo el
+mapa pone en rojo exactamente los dos tests que ejercitan el hijack cerrado
+y deja el resto en verde.
+
+**E2E.** `tests/graphs/security/tool_template_source_e2e.json` — un
+`llm_call` (Gemini 2.5 Flash) con `http_request` como tool contra
+`https://httpbin.org/anything`: `endpoint: "/anything/${bearer_token}"` con
+`bearer_token` declarado (un campo real de `http_request`, así que
+`dag_engine lint` no reporta nada) y un header `X-Target: "${API_BASE}"` con
+`API_BASE` NO declarado en ningún lado del schema. El prompt le pide al
+modelo que además mande un argumento `API_BASE: "evil"` que la tool no
+describe. Corrido en vivo (`API_BASE=from_env_7c21` en el proceso, un valor
+inocuo distinto de "evil", para que el pedido llegue a httpbin en vez de
+morir en un error ambiguo) — capture completo en
+`/tmp/colmena_e2e/tool_template_source.sse`. El modelo mandó exactamente
+`{"bearer_token":"ok","API_BASE":"evil"}`; httpbin devolvió 200 y el echo
+prueba las dos mitades a la vez: `"url":
+"https://httpbin.org/anything/ok?API_BASE=evil"` (el `bearer_token`
+declarado sí templó el `endpoint` a `/anything/ok`; el `API_BASE` no
+declarado nunca tocó ningún campo fijo, solo viajó como query param
+propio de su argumento) y `"headers": {"Authorization": "Bearer ok", ...,
+"X-Target": "from_env_7c21"}` — el header quedó en el valor real del
+proceso, NO en `"evil"`: el placeholder `${API_BASE}` nunca se resolvió
+contra el argumento del LLM, quedó literal después del merge y lo resolvió
+la propia resolución de variables de entorno de `http_request` contra el
+entorno real. Antes de este fix, `X-Target` habría llegado como `evil`.

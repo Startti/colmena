@@ -28,7 +28,7 @@
           "recommended": true,
           "description": "RECOMMENDED parameter strategy. A flat map of field names to NodeSchemaField objects. Fields with 'fixed' are hidden from the LLM. Fields without 'fixed' are exposed to the LLM with their type, description, and constraints. Container fields (type='object') support nested 'properties' for mixed fixed/dynamic sub-fields.",
           "NodeSchemaField": {
-            "fixed": "any — if present, field is hidden from LLM and always set to this value. Supports '${context.key}' and '${ENV_VAR}' resolution.",
+            "fixed": "any — if present, field is hidden from LLM and always set to this value. Supports '${context.key}' and '${ENV_VAR}' resolution. Note: a '${key}' reference inside a fixed value only resolves against the operator's own fixed values and DECLARED top-level tool parameters — an argument the LLM sends without the operator having declared it as a parameter can never satisfy it, even if the tool call happens to include an argument with that exact name.",
             "type": "string — JSON Schema type: 'string', 'number', 'boolean', 'object', 'array'. Required for LLM-visible fields.",
             "required": "boolean — whether the LLM must supply this field. Only meaningful when 'fixed' is absent.",
             "description": "string — description sent to the LLM. Include format expectations and examples.",

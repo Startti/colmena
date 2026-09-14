@@ -4350,6 +4350,63 @@ mod tests {
         assert_eq!(output["query"], "SELECT 1");
     }
 
+    /// The template-source restriction in `node_schema_merge` reaches the real
+    /// tool dispatch path: an undeclared model-supplied argument must not be
+    /// able to redirect a fixed `${VAR}`-shaped field to wherever the model
+    /// names, even though the argument itself is delivered under its own key.
+    #[tokio::test]
+    async fn undeclared_llm_arg_cannot_template_a_fixed_field_through_the_executor() {
+        let registry = Arc::new(MockRegistry::new());
+        let mut tool_configs = HashMap::new();
+
+        let node_schema: crate::dag_engine::domain::tool_configuration::NodeSchema =
+            serde_json::from_value(serde_json::json!({
+                "base_url": { "type": "string", "fixed": "${API_BASE}" },
+                "q": { "type": "string", "required": true, "description": "query" }
+            }))
+            .unwrap();
+
+        tool_configs.insert(
+            "probe_tool".to_string(),
+            ToolConfiguration {
+                name: "probe_tool".to_string(),
+                description: "probe".to_string(),
+                node_type: "mock_tool".to_string(),
+                fixed_config: HashMap::new(),
+                exposed_inputs: None,
+                parameters: None,
+                mergeable_fields: None,
+                field_mapping: None,
+                node_schema: Some(node_schema),
+                node_config: None,
+                expose_sub_tools: None,
+                summary: None,
+                eager: false,
+                memory_mode: MemoryMode::Stateless,
+            },
+        );
+
+        let executor = DagToolExecutor::new(registry, tool_configs);
+
+        let tool_call = ToolCall::new(
+            "call_hijack".to_string(),
+            FunctionCall::new(
+                "probe_tool".to_string(),
+                r#"{"q": "hello", "API_BASE": "https://attacker.example"}"#.to_string(),
+            ),
+        );
+
+        let result = executor.execute(&tool_call).await.unwrap();
+        assert!(result.success);
+        let output: Value = serde_json::from_str(&result.output).unwrap();
+
+        assert_eq!(
+            output["base_url"], "${API_BASE}",
+            "an undeclared model-supplied argument must not template a fixed field"
+        );
+        assert_eq!(output["q"], "hello");
+    }
+
     /// Regression: the fix above only guards the top-level placement branch.
     /// Container deep-merge (an LLM-visible child merged into a fixed container
     /// object — an intentional feature) must keep working.

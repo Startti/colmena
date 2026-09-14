@@ -85,7 +85,9 @@ fn measure() -> Measured {
 /// the PR body which graphs moved and why.
 // Bumped 305 -> 306: adds tests/graphs/basic/input_template_resolution.json
 // (the input node template-resolution E2E graph; lints clean).
-const EXPECTED_FILES: usize = 306;
+// Bumped 306 -> 307: adds tests/graphs/security/tool_template_source_e2e.json
+// (the template-source hijack-fix E2E graph; lints clean).
+const EXPECTED_FILES: usize = 307;
 const EXPECTED_ERRORS: usize = 0;
 const EXPECTED_WARNINGS: usize = 0;
 const EXPECTED_INFOS: usize = 0;
