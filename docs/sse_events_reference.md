@@ -50,10 +50,11 @@ Los eventos de subgrafo nunca se mezclan con los de top-level: si estás dentro 
 `status`/`errorText` son **aditivos** (un cierre exitoso no lleva ninguna
 clave). El contrato: un nodo que falla cierra con `"status": "error"` y
 `output: null`; `errorText` acompaña solo si el texto ya estaba enmascarado
-contra secure values. **Todavía nada en el motor emite `error: Some(..)`** —
-este es solo el campo y su mapeo a `status`/`errorText`; el primer emisor real
-(el cierre de una tool `llm_call`/`for_each`) llega en el PR siguiente de esta
-serie. El nodo raíz sigue cerrando con el frame `error` (más abajo). Ver la
+contra secure values. El primer emisor real es el cierre de una tool
+`llm_call`/`for_each` (`DagToolExecutor::execute_inner`, después de
+`mask_outbound`). La frontera propia de `subgraph` y los nodos internos de un
+run anidado **todavía no** reportan su falla — próximos PRs de esta serie. El
+nodo raíz sigue cerrando con el frame `error` (más abajo). Ver la
 [nota de migración](adp_migration/2026-09-15-node-end-error-status.md).
 
 ```json
@@ -386,8 +387,9 @@ Todos los eventos dentro de un nodo `subgraph` o de un agente-tarea del `orchest
 
 Además de los nodos internos, el propio `subgraph` emite un **par de frontera** con `node_type: "subgraph"` que delimita todo su sub-árbol. El `node_id` de esa frontera sale de, en orden: el nombre del agente (`orchestrator`), el id del nodo del grafo (ruta por aristas), o el nombre del tool que el modelo llamó (ruta tool).
 
-`status`/`errorText`: ver ["Nodo que falla"](#nodo-que-falla) arriba — nada los
-emite todavía en esta rama del stream.
+`status`/`errorText`: ver ["Nodo que falla"](#nodo-que-falla) arriba. La
+frontera de una tool `llm_call`/`for_each` los emite; la frontera propia del
+`subgraph` y sus nodos internos todavía no.
 
 > Desde 2026-08-21 la ruta tool **también** emite frontera. Antes no emitía ninguna: el fallback estaba escrito pero nada poblaba la clave de la que dependía, así que un `subgraph` usado como tool streameaba sin delimitador. Ver [nota de migración](adp_migration/2026-08-21-subgraph-tool-boundary-frames.md).
 >

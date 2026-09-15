@@ -6,11 +6,11 @@ ve ADP antes y después, qué tiene que hacer ADP, y qué se rompe si no hace na
 
 Los cambios que quedan dentro del motor no llevan nota aquí.
 
-## 2026-09-15 — `node-end`/`subgraph-node-end` ganan el contrato aditivo `status`/`errorText`
+## 2026-09-15 — `node-end`/`subgraph-node-end` ganan `status`/`errorText`; frontera de tool `llm_call`/`for_each` es el primer emisor
 
 | # | Nota | Acción de ADP | Qué se rompe si se ignora |
 |---|------|---------------|---------------------------|
-| 1 | [`status`/`errorText` — wire contract, sin emisores todavía](2026-09-15-node-end-error-status.md) | Ninguna todavía — nada emite el campo en esta entrega | Nada; ningún frame real trae `status`/`errorText` hasta el PR siguiente de esta serie |
+| 1 | [`status`/`errorText` en el cierre de una tool `llm_call`/`for_each`](2026-09-15-node-end-error-status.md) | Recomendada — cambio de una línea en `closeNode(...)` en `event-tree-builder.ts` y `colmena-events.reducer.ts` | Nada; sin el cambio, un sub-agente que falló sigue pintándose como `'done'`, igual que hoy |
 
 ## 2026-09-02 — `validate_graph` valida de verdad
 

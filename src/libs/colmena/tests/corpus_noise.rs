@@ -91,7 +91,9 @@ fn measure() -> Measured {
 // (the http_request env-provenance gate E2E graph; lints clean).
 // Bumped 309 -> 310: adds tests/graphs/security/secure_value_stream_leak_e2e.json
 // (the secure-value stream-masking E2E graph; lints clean).
-const EXPECTED_FILES: usize = 310;
+// Bumped 310 -> 311: adds tests/graphs/agents/llm_tool_error_boundary.json
+// (the node-end status/errorText E2E graph; lints clean).
+const EXPECTED_FILES: usize = 311;
 const EXPECTED_ERRORS: usize = 0;
 const EXPECTED_WARNINGS: usize = 0;
 const EXPECTED_INFOS: usize = 0;
