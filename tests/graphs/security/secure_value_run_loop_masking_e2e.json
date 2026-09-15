@@ -1,0 +1,23 @@
+{
+  "comment": "E2E: graph nodes (not tools) must not stream a secure value in plaintext. `ask` collects a secret; `probe` receives the handle over an edge, the run loop decrypts it, and the script echoes it (`es_handle`/`largo` prove it saw the REAL value). `strict` receives probe's raw echo over a plain edge (no handle left to decrypt) and fails with an error quoting it. Run twice with the same --agent-session-id: run 1 suspends, run 2 answers with a unique secret; assert that secret is absent from the whole run-2 capture, including the error frame.",
+  "metadata": {
+    "category": "security",
+    "features": ["secure_suspend", "secure_values", "outbound_masking", "python_script"],
+    "requires_env": ["DATABASE_URL"]
+  },
+  "nodes": {
+    "ask": { "type": "secure_suspend", "config": { "secrets": [ { "question": "Pega tu token de API:", "name": "api_token" } ] } },
+    "probe": {
+      "type": "python_script",
+      "config": { "sandbox_mode": "none", "code": "t = api_token\noutput = {\"eco\": t, \"es_handle\": t.startswith(\"<\"), \"largo\": len(t)}" }
+    },
+    "strict": {
+      "type": "python_script",
+      "config": { "sandbox_mode": "none", "code": "raise ValueError(\"formato invalido para token \" + eco)" }
+    }
+  },
+  "edges": [
+    { "from": "ask", "to": "probe" },
+    { "from": "probe", "to": "strict" }
+  ]
+}

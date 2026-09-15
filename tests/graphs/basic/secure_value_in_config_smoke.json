@@ -1,5 +1,5 @@
 {
-  "comment": "Smoke test for inject_secrets on config. The log node's config contains a handle <sv_smoke>; if the engine's inject_secrets covers config, the log node will see the real value 'smoke-value-xyz' (pre-populated by the test setup). If not, it sees the handle literal.",
+  "comment": "Smoke test for inject_secrets on config. The secret stored under the handle is itself the Python source, and `show.config.code` holds only the handle (substituted by the test setup). The script runs only if inject_secrets resolved the handle in config; unresolved, Python fails on the literal handle. Stream frames carry the handle, never the source.",
   "metadata": {
     "category": "basic",
     "features": ["secure_values", "inject_in_config"],
@@ -7,9 +7,8 @@
   },
   "nodes": {
     "show": {
-      "type": "log",
-      "config": {
-      }
+      "type": "python_script",
+      "config": { "sandbox_mode": "none", "code": "<sv_smoke>" }
     }
   },
   "edges": []

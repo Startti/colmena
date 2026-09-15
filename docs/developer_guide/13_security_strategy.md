@@ -509,7 +509,7 @@ The engine runs `inject_secrets` on a node's **inputs AND config** before execut
 
 ---
 
-### Note: A Decrypted Secret Has Two Egress Points, Both Masked (For Tool Dispatch)
+### Note: A Decrypted Secret Has Two Egress Points, Both Masked (Tool Dispatch And The Graph Run Loop)
 
 `inject_secrets` decrypts `<sv_*>`/`<value_N>` handles back into their real value before a node runs. That real value can then leave the engine through two separate channels, and both are masked back to the handle:
 
@@ -518,7 +518,7 @@ The engine runs `inject_secrets` on a node's **inputs AND config** before execut
 
 Both masking passes read from the same `applied_secrets` map `inject_secrets` returned, so a handle that never got decrypted is never a masking target, and a secret decrypted for one tool call cannot mask a different call's output.
 
-**Known limitation:** this covers a *tool* dispatch (`DagToolExecutor`). A **graph node** running as a normal DAG step (not via a tool call) does not go through this masking — its `node-start`/`node-finish` stream frames can still carry `config`/`inputs` with a decrypted secret verbatim. That is a separate, not-yet-implemented fix.
+**Graph-node coverage (the run loop):** the same masking applies to a node running as a normal DAG step, not just as a dispatched tool. `execute_stream` accumulates every `inject_secrets` result across the run into one run-scoped `(decrypted → handle)` map, and masks CLONES of `NodeStart` (`inputs`/`config`), `NodeFinish`/`SubgraphNodeFinish` `output`, every node-observer event (the node's `ExecutionObserver` is wrapped with `MaskingObserver` too), and node error text. Only the clones are masked — the node itself, `all_outputs`, and the persisted `DagRunState` keep the real value, since downstream nodes and resume need it. The root run's `GraphFinish` output is masked from that same map; a child run's (`path_prefix` set) is deliberately left unmasked, because `run_subgraph` reads that exact value as the `subgraph` node's return under the child's own fresh session id — a masked handle could be undecryptable there — and the child's own per-node frames are already masked with its own secrets, so nothing is lost on the stream.
 
 ---
 

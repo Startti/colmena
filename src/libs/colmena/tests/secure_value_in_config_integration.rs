@@ -1,21 +1,10 @@
-//! Regression test proving that `inject_secrets` does NOT cover node `config`.
+//! Regression test proving that `inject_secrets` covers node `config`.
 //!
-//! ## Bug description
-//! When a node's `config` contains a secure-value handle (e.g. `<sv_smoke>`),
-//! the engine's injection step only processes `inputs`, leaving the handle literal
-//! in `config`. This means any node that reads a secret from its own config (e.g.
-//! for static API keys, base URLs, etc.) never receives the real value.
-//!
-//! ## What this test does
-//! 1. Pre-populates `<sv_smoke>` → `"smoke-value-xyz"` in the Postgres secure-value
-//!    store for a unique session.
-//! 2. Runs a graph whose `log` node has `config.marker_field = "<sv_smoke>"`.
-//! 3. Inspects the `NodeStart` event for the `show` node.
-//! 4. Asserts that `config.marker_field` equals `"smoke-value-xyz"`.
-//!
-//! ## Expected outcome before the fix (Task 1 — TDD red phase)
-//! The assertion FAILS: `config.marker_field` equals `"<sv_smoke>"` (the raw handle),
-//! proving the bug. After Task 2 fixes the engine, the assertion will PASS.
+//! 1. Persists `SOURCE` — Python source — under a handle for a unique session.
+//! 2. Runs a `python_script` node `show` whose `config.code` is only that handle, so the
+//!    script runs only if `inject_secrets` resolved it in config (an input edge cannot
+//!    stand in: there is none).
+//! 3. Stream frames are masked back to the handle, so the source appears in none.
 //!
 //! Run with:
 //!   source .env && cargo test --test secure_value_in_config_integration -- --ignored
@@ -30,6 +19,8 @@ use serde_json::json;
 use std::sync::Arc;
 
 async fn engine() -> ColmenaEngine {
+    // `show` is a python_script; the binary initializes pyo3 in main, a test must too.
+    pyo3::Python::initialize();
     dotenvy::dotenv().ok();
     let cfg = EngineConfig::from_env().await.unwrap();
     ColmenaEngine::new(cfg).await.unwrap()
@@ -50,15 +41,13 @@ async fn cleanup(session_id: &str) {
     let _ = svc.cleanup(session_id).await;
 }
 
+/// Quote-free on purpose: serialized frames would escape quotes and hide a leak.
+const SOURCE: &str = "output = dict(config_injected=True)";
+
 fn smoke_graph(handle: &str) -> Graph {
     let raw = json!({
         "nodes": {
-            "show": {
-                "type": "log",
-                "config": {
-                    "marker_field": handle
-                }
-            }
+            "show": { "type": "python_script", "config": { "sandbox_mode": "none", "code": handle } }
         },
         "edges": []
     });
@@ -67,7 +56,7 @@ fn smoke_graph(handle: &str) -> Graph {
 
 #[tokio::test]
 #[ignore = "requires DATABASE_URL — run with `cargo test -- --ignored`"]
-async fn config_handle_is_not_injected_exposes_bug() {
+async fn config_handle_is_injected_before_the_node_runs() {
     dotenvy::dotenv().ok();
 
     let session_id = format!(
@@ -87,7 +76,7 @@ async fn config_handle_is_not_injected_exposes_bug() {
     let svc = SecureValueService::new(repo);
 
     let handle = svc
-        .persist_secret(&session_id, None, "test_setup", "smoke", "smoke-value-xyz")
+        .persist_secret(&session_id, None, "test_setup", "smoke", SOURCE)
         .await
         .expect("persist_secret must succeed");
 
@@ -112,39 +101,30 @@ async fn config_handle_is_not_injected_exposes_bug() {
         None,
     ));
 
-    // --- Step 3: collect the NodeStart event for the "show" node ---
-    let mut show_config: Option<serde_json::Value> = None;
-
+    // --- Step 3: the source ran; no frame carries it ---
+    let mut show = serde_json::Value::Null;
     while let Some(item) = stream.next().await {
         let ev = item.expect("stream event must not error");
-
-        if let DagExecutionEvent::NodeStart {
-            ref node_id,
-            ref config,
-            ..
+        let raw = serde_json::to_string(&ev).unwrap();
+        assert!(
+            !raw.contains(SOURCE),
+            "stream frame leaked the secret: {raw}"
+        );
+        if let DagExecutionEvent::NodeFinish {
+            node_id, output, ..
         } = ev
         {
             if node_id == "show" {
-                show_config = Some(config.clone());
+                show = output;
             }
         }
     }
-
     drop(stream);
 
-    // --- Step 4: assert the config field was injected ---
-    let config = show_config.expect("NodeStart event for 'show' must have fired");
-    let marker = config
-        .get("marker_field")
-        .and_then(|v| v.as_str())
-        .unwrap_or("<MISSING>");
-
-    // This assertion FAILS before the fix (marker == "<sv_smoke>"),
-    // and PASSES after the fix (marker == "smoke-value-xyz").
     assert_eq!(
-        marker, "smoke-value-xyz",
-        "config.marker_field must be the injected real value, not the handle. \
-         Got: {marker:?}. This means inject_secrets does not cover node config — the bug."
+        show,
+        json!({ "config_injected": true }),
+        "inject_secrets must resolve the config handle before the node runs"
     );
 
     cleanup(&session_id).await;

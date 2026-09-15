@@ -93,7 +93,9 @@ fn measure() -> Measured {
 // (the secure-value stream-masking E2E graph; lints clean).
 // Bumped 310 -> 311: adds tests/graphs/agents/llm_tool_error_boundary.json
 // (the node-end status/errorText E2E graph; lints clean).
-const EXPECTED_FILES: usize = 311;
+// Bumped 311 -> 312: adds tests/graphs/security/secure_value_run_loop_masking_e2e.json
+// (the run-loop secure-value masking E2E graph; lints clean).
+const EXPECTED_FILES: usize = 312;
 const EXPECTED_ERRORS: usize = 0;
 const EXPECTED_WARNINGS: usize = 0;
 const EXPECTED_INFOS: usize = 0;

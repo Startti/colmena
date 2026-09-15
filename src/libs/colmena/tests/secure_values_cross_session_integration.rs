@@ -7,10 +7,11 @@
 //! `inject_secrets` step inside `run_use_case` that covers both inputs and config.
 //!
 //! ## Graph
-//! Uses `tests/graphs/basic/secure_value_in_config_smoke.json` whose single `log` node
-//! has `config.marker_field = "<sv_smoke>"`. The test pre-populates `<sv_smoke>` under
-//! `session_a` + `agent_X`, then runs the engine under `session_b` + `agent_X` and checks
-//! that the `NodeStart` event for `show` has the resolved real value in `config.marker_field`.
+//! Uses `tests/graphs/basic/secure_value_in_config_smoke.json`: a `python_script` node
+//! `show` whose `config.code` is a handle. The secret persisted under `session_a` +
+//! `agent_X` is the Python source itself, so the script only runs (under `session_b` +
+//! `agent_X`) if the cross-session lookup resolved it. Stream frames carry the handle,
+//! never the source, so the source itself is asserted absent.
 //!
 //! Run with:
 //!   source .env && cargo test --test secure_values_cross_session_integration -- --ignored
@@ -24,6 +25,8 @@ use futures::StreamExt;
 use std::sync::Arc;
 
 async fn engine() -> ColmenaEngine {
+    // `show` is a python_script; the binary initializes pyo3 in main, a test must too.
+    pyo3::Python::initialize();
     dotenvy::dotenv().ok();
     let cfg = EngineConfig::from_env().await.unwrap();
     ColmenaEngine::new(cfg).await.unwrap()
@@ -41,8 +44,36 @@ fn smoke_config_graph(handle: &str) -> Graph {
     );
     let raw = std::fs::read_to_string(path).expect("secure_value_in_config_smoke.json must exist");
     let mut v: serde_json::Value = serde_json::from_str(&raw).expect("valid graph JSON");
-    v["nodes"]["show"]["config"]["marker_field"] = serde_json::Value::String(handle.to_string());
+    v["nodes"]["show"]["config"]["code"] = serde_json::Value::String(handle.to_string());
     serde_json::from_value(v).expect("valid graph JSON after handle substitution")
+}
+
+/// The secret: Python source that only runs if the handle was resolved. Quote-free
+/// on purpose: serialized frames would escape quotes and hide a leak.
+const SOURCE: &str = "output = dict(cross_session=True)";
+
+/// Drains the stream, asserting no event carries `real`, and returns `show`'s output.
+async fn show_output(
+    stream: &mut (impl futures::Stream<
+        Item = Result<DagExecutionEvent, colmena::dag_engine::domain::error::DagError>,
+    > + Unpin),
+    real: &str,
+) -> serde_json::Value {
+    let mut show = serde_json::Value::Null;
+    while let Some(item) = stream.next().await {
+        let ev = item.expect("stream event must not error");
+        let raw = serde_json::to_string(&ev).unwrap();
+        assert!(!raw.contains(real), "stream frame leaked the secret: {raw}");
+        if let DagExecutionEvent::NodeFinish {
+            node_id, output, ..
+        } = ev
+        {
+            if node_id == "show" {
+                show = output;
+            }
+        }
+    }
+    show
 }
 
 /// Delete all secure-value rows associated with a session and all dag_runs rows for the agent.
@@ -90,13 +121,7 @@ async fn agent_session_id_resolves_handle_persisted_in_another_session() {
     let svc = SecureValueService::new(repo);
 
     let handle = svc
-        .persist_secret(
-            &session_a,
-            Some(&agent_id),
-            "test_setup",
-            "smoke",
-            "the-real-cross-session-value",
-        )
+        .persist_secret(&session_a, Some(&agent_id), "test_setup", "smoke", SOURCE)
         .await
         .expect("persist_secret must succeed");
 
@@ -120,35 +145,13 @@ async fn agent_session_id_resolves_handle_persisted_in_another_session() {
         Some(agent_id.clone()),
     ));
 
-    // --- Step 3: collect the NodeStart event for the "show" node ---
-    let mut show_config: Option<serde_json::Value> = None;
-
-    while let Some(item) = stream.next().await {
-        let ev = item.expect("stream event must not error");
-        if let DagExecutionEvent::NodeStart {
-            ref node_id,
-            ref config,
-            ..
-        } = ev
-        {
-            if node_id == "show" {
-                show_config = Some(config.clone());
-            }
-        }
-    }
+    // --- Step 3/4: the persisted source ran; no frame carries it ---
+    let show = show_output(&mut stream, SOURCE).await;
     drop(stream);
-
-    // --- Step 4: assert cross-session injection resolved the handle ---
-    let config = show_config.expect("NodeStart for 'show' must have fired");
-    let marker = config
-        .get("marker_field")
-        .and_then(|v| v.as_str())
-        .unwrap_or("<MISSING>");
-
     assert_eq!(
-        marker, "the-real-cross-session-value",
-        "config.marker_field must equal the value persisted in session_a via agent_session_id; \
-         got: {marker:?}. Cross-session lookup is broken."
+        show,
+        serde_json::json!({ "cross_session": true }),
+        "cross-session lookup must resolve the handle persisted in session_a"
     );
 
     // --- Cleanup ---
