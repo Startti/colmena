@@ -1281,11 +1281,10 @@ mod subgraph_tool_failure_close_tests {
 
     #[tokio::test]
     async fn missing_executor_emits_no_boundary_frames() {
-        let node = SubGraphNode::new(); // no executor set at all
         let mut inputs = inline_graph_inputs();
         inputs.insert("__colmena_tool_name".to_string(), json!("Helper"));
         let obs = Arc::new(CapturingObserver::default());
-        let err = node
+        let err = SubGraphNode::new() // no executor set at all
             .execute(&inputs, &json!({}), &mut json!({}), Some(obs.clone()))
             .await
             .expect_err("no executor must fail");

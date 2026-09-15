@@ -32,13 +32,7 @@
                 "nodes": {
                   "helper_llm": {
                     "type": "llm_call",
-                    "config": {
-                      "provider": "google",
-                      "model": "gemini-does-not-exist-9000",
-                      "api_key": "${GEMINI_API_KEY}",
-                      "system_message": "Responde en una frase: {{task}}",
-                      "stream": true
-                    }
+                    "config": { "provider": "google", "model": "gemini-does-not-exist-9000", "api_key": "${GEMINI_API_KEY}", "system_message": "Responde en una frase: {{task}}", "stream": true }
                   },
                   "out": { "type": "output" }
                 },
@@ -49,9 +43,7 @@
         }
       }
     },
-    "out": {
-      "type": "output"
-    }
+    "out": { "type": "output" }
   },
   "edges": [
     { "from": "trigger", "to": "agent" },
