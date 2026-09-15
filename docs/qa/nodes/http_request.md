@@ -17,9 +17,17 @@ Fuentes de doc revisadas:
 
 ## 2) Código NO documentado
 
-### A. `bearer_token` resuelve ${ENV_VAR}, pero doc dice `supports_env_vars: false`
+### A. `bearer_token` resuelve ${ENV_VAR}, pero doc dice `supports_env_vars: false` — PARCIALMENTE RESUELTO (2026-09)
 
-**Hallazgo:**  
+**Parcialmente resuelto.** Doc corregida (`supports_env_vars: true`). El
+defecto real era el código: `resolve_env_vars` corría incondicionalmente
+sobre un valor `inputs`-sourced. `http.rs` ahora gatea `${VAR}` por
+provenance (`EnvPolicy`), pero **solo en el path JSON/no-multipart** — el
+path multipart sigue sin gate, pendiente en el próximo PR. Ver
+[13_security_strategy.md](../../developer_guide/13_security_strategy.md).
+E2E: [`tests/graphs/security/tool_env_provenance_e2e.json`](../../../tests/graphs/security/tool_env_provenance_e2e.json).
+
+**Hallazgo original (histórico):**  
 La doc en `node_configurations.json:938` declara:
 ```json
 "bearer_token": {

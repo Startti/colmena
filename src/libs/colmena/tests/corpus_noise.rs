@@ -87,7 +87,9 @@ fn measure() -> Measured {
 // (the input node template-resolution E2E graph; lints clean).
 // Bumped 306 -> 307: adds tests/graphs/security/tool_template_source_e2e.json
 // (the template-source hijack-fix E2E graph; lints clean).
-const EXPECTED_FILES: usize = 308;
+// Bumped 308 -> 309: adds tests/graphs/security/tool_env_provenance_e2e.json
+// (the http_request env-provenance gate E2E graph; lints clean).
+const EXPECTED_FILES: usize = 309;
 const EXPECTED_ERRORS: usize = 0;
 const EXPECTED_WARNINGS: usize = 0;
 const EXPECTED_INFOS: usize = 0;

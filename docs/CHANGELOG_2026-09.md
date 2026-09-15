@@ -3206,3 +3206,27 @@ variante de prompt sin commitear (el original pide un DELETE que el agente
 rechaza sin llamar la tool) para forzar un SELECT real. `connection_url`
 siguió resolviendo (fila real de `finanzas.gastos`); la captura SSE no
 contiene `__colmena_env_trusted_paths` (grep = 0).
+
+## 57. Fix: `http_request` ya no expande `${VAR}` en argumentos escritos por el modelo (requests no multipart)
+
+Cierra §56 para el path NO-multipart. `http.rs` consulta
+`EnvPolicy::from_inputs(inputs)` una vez por ejecución; un valor `inputs`
+expande `${VAR}` solo si `expand_if_trusted` marca su pointer confiable, un
+`config` sigue expandiendo siempre. Gateados: `base_url`, `endpoint`,
+`bearer_token`, `authorization`, `headers`/`query_params` hoja por hoja, los
+query params extra aplanados, `body` string/objeto recursivo. Un pointer no
+confiable sale literal, nunca error. **`execute_multipart` sin cambios**
+(sigue sin gate) — alcance del próximo PR.
+
+**Tests.** 4 en `http.rs::env_provenance_gating_tests`. Mutación (gate
+siempre permite): 2/4 fallan como se esperaba
+(`..._bearer_token_literal_and_never_errors_on_missing_var`,
+`..._query_param_header_and_body_leaf_literal`); restaurado, los 47 pasan.
+
+**E2E.** `tests/graphs/security/tool_env_provenance_e2e.json` — header
+`fixed` `X-Operator` expande, `bearer_token`/`query_params.probe`
+model-authored salen sin resolver. Probe aparece 2 veces, siempre como
+header del operador.
+
+**Pendiente.** `execute_multipart` y el resto de los nodos — ver
+[13_security_strategy.md](developer_guide/13_security_strategy.md).

@@ -908,7 +908,7 @@
 
     "http_request": {
       "name": "HTTP Request",
-      "description": "Makes HTTP requests to external APIs and returns the response. Supports GET, POST, PUT, DELETE, and PATCH methods with configurable headers, query parameters, request body, and authentication. All string values in config support '${VAR_NAME}' environment variable resolution — essential for injecting API keys and tokens securely. Input values override config values (inputs take priority). When used as an LLM tool (via tool_configurations), extra non-reserved input keys are automatically added as query parameters, enabling the LLM to control request parameters dynamically. NEW: any string value in the body that matches the pattern '$attachment:<storage_key>' is resolved by reading bytes from OutputStorageRepository and replaced with 'data:<mime>;base64,...'. This lets agents ship generated images/audio to external endpoints without ever seeing the raw bytes. MULTIPART MODE: When the resolved Content-Type header starts with 'multipart/', the body is interpreted as a multipart form. Each top-level field's value is treated as: a URL string (HEAD-validated then streamed in), a $attachment:<storage_key> string (streamed from OutputStorageRepository), a plain string (text part), an array (expanded to N parts under the same field), or an explicit object with url/attachment/value + optional filename/content_type. Number and boolean values are coerced to text. Null omits the field. Limits are configurable per request.",
+      "description": "Makes HTTP requests to external APIs and returns the response. Supports GET, POST, PUT, DELETE, and PATCH methods with configurable headers, query parameters, request body, and authentication. All string values in config support '${VAR_NAME}' environment variable resolution — essential for injecting API keys and tokens securely. Input values override config values (inputs take priority). When used as an LLM tool (via tool_configurations), extra non-reserved input keys are automatically added as query parameters, enabling the LLM to control request parameters dynamically. Since 2026-09, '${VAR_NAME}' resolution for an inputs-sourced value is gated by provenance for non-multipart requests (resolves only when operator-authored; a model-authored value is sent literally) — multipart requests still expand unconditionally, pending a follow-up PR; see docs/developer_guide/25_web_nodes.md. NEW: any string value in the body that matches the pattern '$attachment:<storage_key>' is resolved by reading bytes from OutputStorageRepository and replaced with 'data:<mime>;base64,...'. This lets agents ship generated images/audio to external endpoints without ever seeing the raw bytes. MULTIPART MODE: When the resolved Content-Type header starts with 'multipart/', the body is interpreted as a multipart form. Each top-level field's value is treated as: a URL string (HEAD-validated then streamed in), a $attachment:<storage_key> string (streamed from OutputStorageRepository), a plain string (text part), an array (expanded to N parts under the same field), or an explicit object with url/attachment/value + optional filename/content_type. Number and boolean values are coerced to text. Null omits the field. Limits are configurable per request.",
       "category": "integration",
       "config_fields": {
         "base_url": {
@@ -961,15 +961,16 @@
           "type": "string",
           "required": false,
           "default": null,
-          "description": "A convenience field for Bearer token authentication. When provided (typically via an input edge from an auth node), the node automatically sets the 'Authorization: Bearer {token}' header. This saves you from manually constructing the Authorization header. Commonly used with OAuth2 flows where a separate auth node obtains the access token.",
-          "supports_env_vars": false,
+          "description": "A convenience field for Bearer token authentication. When provided (typically via an input edge from an auth node), the node automatically sets the 'Authorization: Bearer {token}' header. This saves you from manually constructing the Authorization header. Commonly used with OAuth2 flows where a separate auth node obtains the access token. Supports '${VAR_NAME}' env var syntax, gated by provenance for non-multipart requests: always resolved for a config/operator-authored value; never for a model-authored LLM tool argument value (sent literally). Multipart requests still expand unconditionally (follow-up PR). See docs/developer_guide/25_web_nodes.md.",
+          "supports_env_vars": true,
           "example": "eyJhbGciOiJSUzI1NiIs..."
         },
         "authorization": {
           "type": "string",
           "required": false,
           "default": null,
-          "description": "A custom Authorization header value. Unlike 'bearer_token' which automatically prepends 'Bearer ', this field sets the Authorization header to exactly the value provided. Use this for non-Bearer auth schemes like Basic auth ('Basic base64encoded'), API keys ('ApiKey xyz'), or custom schemes.",
+          "description": "A custom Authorization header value. Unlike 'bearer_token' which automatically prepends 'Bearer ', this field sets the Authorization header to exactly the value provided. Use this for non-Bearer auth schemes like Basic auth ('Basic base64encoded'), API keys ('ApiKey xyz'), or custom schemes. Supports '${VAR_NAME}' env var syntax under the same provenance rule as 'bearer_token'.",
+          "supports_env_vars": true,
           "example": "Basic dXNlcjpwYXNz"
         },
         "auth": {

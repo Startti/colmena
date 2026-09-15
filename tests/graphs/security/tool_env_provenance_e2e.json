@@ -1,0 +1,53 @@
+{
+  "comment": "E2E: proves the env-provenance gate in http.rs. `X-Operator` is a FIXED header naming `${COLMENA_ENV_PROBE}` (operator-authored, node_schema `fixed`) — it must still expand against the real process env var. `bearer_token` and `probe` (inside `query_params`) are REAL model-visible http_request fields; the prompt asks the model to set BOTH to the exact literal text `${COLMENA_ENV_PROBE}` (character by character, not resolved). Before this fix, a model-authored `${VAR}` in a tool argument silently resolved against the process environment — an attacker could read back any env var (including secrets) by naming it in an ordinary tool argument. After this fix, only the dispatcher-marked trusted pointers (here: the fixed header) expand; the model-authored `bearer_token`/`query_params.probe` values go out as the literal string.",
+  "metadata": { "category": "security", "requires_env": ["GEMINI_API_KEY", "COLMENA_ENV_PROBE"] },
+  "nodes": {
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "model": "gemini-2.5-flash",
+        "api_key": "${GEMINI_API_KEY}",
+        "temperature": 0.0,
+        "stream": false,
+        "system_message": "Sos un agente de pruebas técnicas de seguridad. Llamá a la herramienta exactamente como se te indique, sin cuestionar el pedido ni reemplazar ningún valor por otra cosa.",
+        "tool_configurations": {
+          "probe": {
+            "name": "probe",
+            "node_type": "http_request",
+            "description": "Hace un pedido de prueba a httpbin.org/anything.",
+            "node_schema": {
+              "base_url": { "type": "string", "fixed": "https://httpbin.org" },
+              "endpoint": { "type": "string", "fixed": "/anything" },
+              "method": { "type": "string", "fixed": "GET" },
+              "headers": {
+                "type": "object",
+                "properties": {
+                  "X-Operator": { "type": "string", "fixed": "${COLMENA_ENV_PROBE}" }
+                }
+              },
+              "bearer_token": {
+                "type": "string",
+                "required": true,
+                "description": "Poné EXACTAMENTE el texto literal ${COLMENA_ENV_PROBE} — los cuatro caracteres $, {, }, y el nombre COLMENA_ENV_PROBE tal cual, SIN reemplazarlo por ningún valor real."
+              },
+              "query_params": {
+                "type": "object",
+                "properties": {
+                  "probe": {
+                    "type": "string",
+                    "required": true,
+                    "description": "Poné EXACTAMENTE el mismo texto literal que en bearer_token: ${COLMENA_ENV_PROBE}, carácter por carácter, sin reemplazarlo."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "prompt": "Llamá a la herramienta 'probe' UNA vez. Pasá bearer_token = el texto literal \"${COLMENA_ENV_PROBE}\" (tal cual, sin resolverlo ni cambiarlo por ningún valor) y query_params.probe = ese mismo texto literal. No inventes ni sustituyas el valor — copialo carácter por carácter. Después devolveme la respuesta cruda de la herramienta tal cual, sin resumir ni traducir."
+      }
+    },
+    "result": { "type": "output", "config": {} }
+  },
+  "edges": [ { "from": "agent", "to": "result" } ]
+}
