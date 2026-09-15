@@ -3294,8 +3294,7 @@ el valor real mientras el stream solo lleva el handle.
 cambio de forma.
 
 **Pendiente.** Los frames de un nodo de grafo normal (no despachado como tool)
-siguen sin enmascarar — ver
-[13_security_strategy.md](developer_guide/13_security_strategy.md).
+seguían sin enmascarar. Cerrado por §61.
 
 ## 60. La frontera de una tool `llm_call`/`for_each` es el primer emisor real de `status`/`errorText`
 
@@ -3326,3 +3325,44 @@ con un registro de nodos stub bajo la clave `llm_call`):
 
 **ADP.** Aditivo — [nota de migración](adp_migration/2026-09-15-node-end-error-status.md)
 actualizada; cambio recomendado de una línea en `closeNode(...)`.
+
+## 61. Fix: los frames de un nodo de grafo tampoco llevan valores seguros en texto plano
+
+**Problema (preexistente, reproducido en vivo).** §59 cerró el despacho de
+tools; el loop del grafo seguía filtrando. En `secure_suspend_login_direct.json`
+resumido, `node-start` de `login` traía el valor real en `inputs`, y `show`
+recibía los `<value_N>` de `login` descifrados y los traía reales en
+`node-start`/`node-end`.
+
+**Causa.** `execute_stream` descartaba el mapa `(descifrado → handle)` que
+devuelve `inject_secrets`, así que no había con qué enmascarar.
+
+**Fix.** `run_secrets` acumula ese mapa en todo el run. Se enmascaran CLONES en
+`NodeStart` (`inputs`/`config`), `NodeFinish`/`SubgraphNodeFinish`, el texto de
+error del nodo y los eventos de su observer (`MaskingObserver`, como en §59).
+El nodo, `all_outputs` y el estado persistido conservan el valor real. El
+`GraphFinish` se enmascara solo en el run raíz: el de un run hijo es el retorno
+del nodo `subgraph`, bajo una sesión que podría no descifrar el handle.
+
+**Tests.** `tests/secure_values_run_loop_masking.rs` (2, sin DB). Mutación
+(sin enmascarar `NodeStart`): ambos fallan. Dos tests con DB
+(`secure_value_in_config_integration`, `secure_values_cross_session_integration`)
+leían el valor real en `NodeStart.config` —justo la fuga—: ahora el secreto es
+el código Python de `show` (`basic/secure_value_in_config_smoke.json` pasó de
+`log` a `python_script`), que solo corre si el handle se resolvió. Mutaciones
+(inyección en `config` descartada; `config` de `NodeStart` sin enmascarar):
+ambos fallan.
+
+**E2E.** `tests/graphs/security/secure_value_run_loop_masking_e2e.json`, sin
+LLM, dos runs con el mismo `--agent-session-id`: `probe` hace eco del token y
+`strict` recibe ese eco crudo (sin handle) y falla citándolo. Con el loop de
+`develop`, el secreto en 4 frames (`probe` start/end, `strict` start, `error`);
+con el fix, en 0, y `largo: 14` prueba que `probe` recibió el valor real.
+`secure_suspend_login_direct.json` y el grafo de §59: 0.
+
+**Impacto en ADP.** `node-start`, `node-end`, `errorText` y el `finish` raíz
+(también el retorno de `run_dag`) traen el handle donde un nodo de grafo ecoaba
+un valor descifrado. Sin cambio de forma.
+
+**Pendiente.** El nodo `log` imprime su input descifrado por stdout del proceso
+(fuera del stream SSE).

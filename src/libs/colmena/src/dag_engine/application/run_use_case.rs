@@ -2,7 +2,7 @@ use crate::colmena_log;
 use crate::dag_engine::application::liveness::LivenessSettings;
 use crate::dag_engine::application::ports::{NodeRegistryPort, SubGraphExecutorPort};
 use crate::dag_engine::application::preflight;
-use crate::dag_engine::application::secure_value_service::SecureValueService;
+use crate::dag_engine::application::secure_value_service::{MaskingObserver, SecureValueService};
 use crate::dag_engine::domain::error::DagError;
 use crate::dag_engine::domain::graph::{Edge, Graph};
 use crate::dag_engine::domain::node::NodeInputs;
@@ -215,6 +215,9 @@ impl DagRunUseCase {
             use crate::dag_engine::domain::observer::NodeEvent;
 
             let mut all_outputs: HashMap<String, Value> = HashMap::new();
+            // (decrypted → handle) for every secret injected in this run. Masks
+            // streamed frames only; nodes and persisted state keep real values.
+            let mut run_secrets: HashMap<String, String> = HashMap::new();
             let mut active_queue: VecDeque<String> = VecDeque::new();
             let mut session_id = uuid::Uuid::new_v4().to_string();
             let mut active_agent_session_id: Option<String> = agent_session_id.clone();
@@ -515,20 +518,22 @@ impl DagRunUseCase {
                         let agent_for_inject = active_agent_session_id.as_deref();
                         let mut inputs_value = serde_json::to_value(&inputs)
                             .unwrap_or(Value::Object(Default::default()));
-                        if let Err(e) = svc
+                        match svc
                             .inject_secrets(&mut inputs_value, &session_id, agent_for_inject)
                             .await
                         {
-                            eprintln!("⚠️ Failed to inject secrets: {}", e);
+                            Ok(map) => run_secrets.extend(map),
+                            Err(e) => eprintln!("⚠️ Failed to inject secrets: {}", e),
                         }
                         if let Ok(injected_inputs) = serde_json::from_value::<NodeInputs>(inputs_value) {
                             inputs = injected_inputs;
                         }
-                        if let Err(e) = svc
+                        match svc
                             .inject_secrets(&mut node_config_value, &session_id, agent_for_inject)
                             .await
                         {
-                            eprintln!("⚠️ Failed to inject secrets in config: {}", e);
+                            Ok(map) => run_secrets.extend(map),
+                            Err(e) => eprintln!("⚠️ Failed to inject secrets in config: {}", e),
                         }
                     }
                 }
@@ -611,15 +616,23 @@ impl DagRunUseCase {
                     node_meta.insert(node_id.clone(), (model, provider, node_config.node_type.clone()));
                 }
 
+                // Masked CLONES only — the node itself still executes below with
+                // the real `inputs`/`node_config_value`.
+                let mut masked_start_inputs = serde_json::to_value(&inputs).unwrap_or(Value::Null);
+                let mut masked_start_config = node_config_value.clone();
+                SecureValueService::mask_secrets(&mut masked_start_inputs, &run_secrets);
+                SecureValueService::mask_secrets(&mut masked_start_config, &run_secrets);
                 yield DagExecutionEvent::NodeStart {
                     node_id: node_id.clone(),
                     node_type: node_config.node_type.clone(),
-                    inputs: serde_json::to_value(&inputs).unwrap_or(Value::Null),
-                    config: node_config_value.clone(),
+                    inputs: masked_start_inputs,
+                    config: masked_start_config,
                 };
 
                 let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-                let observer = Arc::new(ChannelObserver { tx });
+                let channel_observer: Arc<dyn crate::dag_engine::domain::observer::ExecutionObserver> =
+                    Arc::new(ChannelObserver { tx });
+                let observer = MaskingObserver::wrap(Some(channel_observer), &run_secrets);
 
                 // Snapshot the shared state before the node mutably borrows it, so the
                 // mid-node cancellation arm can persist a coherent (pre-node) state.
@@ -631,7 +644,7 @@ impl DagRunUseCase {
                 };
 
                 let output = {
-                    let execution_future = node_impl.execute(&inputs, &node_config_value, &mut global_shared_state, Some(observer));
+                    let execution_future = node_impl.execute(&inputs, &node_config_value, &mut global_shared_state, observer);
                     tokio::pin!(execution_future);
 
                     // ── Liveness clocks (spec: SPEC_STREAM_MIDRUN_LIVENESS) ─────
@@ -897,7 +910,11 @@ impl DagRunUseCase {
                     let output_result = output_opt.unwrap_or_else(|| {
                         Err(Box::new(DagError::NodeExecution("Future did not complete but channel closed".to_string())))
                     });
-                    output_result.map_err(|e| DagError::NodeExecution(e.to_string()))?
+                    output_result.map_err(|e| {
+                        let mut msg = Value::String(e.to_string());
+                        SecureValueService::mask_secrets(&mut msg, &run_secrets);
+                        DagError::NodeExecution(msg.as_str().unwrap_or_default().to_string())
+                    })?
                 };
 
                 // STEP 2: Hash output if secure: true (after executing)
@@ -922,16 +939,20 @@ impl DagRunUseCase {
                     }
                 }
 
+                // Masked CLONE only — `processed_output` itself stays real for
+                // `all_outputs`, persisted state, and the SUSPENDED check below.
+                let mut masked_finish_output = processed_output.clone();
+                SecureValueService::mask_secrets(&mut masked_finish_output, &run_secrets);
                 if node_config.node_type == "subgraph" {
                     yield DagExecutionEvent::SubgraphNodeFinish {
                         node_id: node_id.clone(),
-                        output: processed_output.clone(),
+                        output: masked_finish_output,
                         error: None,
                     };
                 } else {
                     yield DagExecutionEvent::NodeFinish {
                         node_id: node_id.clone(),
-                        output: processed_output.clone(),
+                        output: masked_finish_output,
                         error: None,
                     };
                 }
@@ -970,7 +991,13 @@ impl DagRunUseCase {
                         repo.save(&state).await?;
                     }
 
-                    yield DagExecutionEvent::GraphFinish { output: final_output };
+                    // Root run only: a child's GraphFinish is the parent subgraph
+                    // node's return value, under a session that may not decrypt a handle.
+                    let mut masked_graph_finish = final_output.clone();
+                    if path_prefix.is_none() {
+                        SecureValueService::mask_secrets(&mut masked_graph_finish, &run_secrets);
+                    }
+                    yield DagExecutionEvent::GraphFinish { output: masked_graph_finish };
                     return;
                 }
 
@@ -1169,7 +1196,12 @@ impl DagRunUseCase {
                 yield DagExecutionEvent::GraphUsageSummary { entries };
             }
 
-            yield DagExecutionEvent::GraphFinish { output: final_aggregated_output.clone() };
+            // See the SUSPENDED-path GraphFinish above: child runs stay unmasked.
+            let mut masked_final_aggregated = final_aggregated_output.clone();
+            if path_prefix.is_none() {
+                SecureValueService::mask_secrets(&mut masked_final_aggregated, &run_secrets);
+            }
+            yield DagExecutionEvent::GraphFinish { output: masked_final_aggregated };
         }
     }
 
