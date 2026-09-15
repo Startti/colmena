@@ -6,7 +6,7 @@
 **How to use (for the exploration/spec phase):** before opening files to assess a change, look up the target file below. **Used by** is its blast radius — the files that break if you change its public surface. **Depends on** is what it needs. Start by reading only those, not the whole repo.
 
 - Files indexed: **383**
-- Modules with at least one importer: **173**
+- Modules with at least one importer: **174**
 
 ## Blast-radius ranking (change these with the most care)
 
@@ -340,7 +340,7 @@
 
 #### `src/libs/colmena/src/dag_engine/infrastructure/env_provenance.rs`
 - Module: `dag_engine::infrastructure::env_provenance`
-- **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
+- **Used by (1)**: `src/libs/colmena/src/dag_engine/infrastructure/nodes/http.rs`
 - Depends on (0): — (no intra-crate imports)
 
 #### `src/libs/colmena/src/dag_engine/infrastructure/mcp_registry/key.rs`
@@ -411,7 +411,7 @@
 #### `src/libs/colmena/src/dag_engine/infrastructure/nodes/http.rs`
 - Module: `dag_engine::infrastructure::nodes::http`
 - **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
-- Depends on (4): `dag_engine::domain::lint`, `dag_engine::domain::node`, `google_oauth::infrastructure`, `storage::domain`
+- Depends on (5): `dag_engine::domain::lint`, `dag_engine::domain::node`, `dag_engine::infrastructure::env_provenance`, `google_oauth::infrastructure`, `storage::domain`
 
 #### `src/libs/colmena/src/dag_engine/infrastructure/nodes/http_oauth.rs`
 - Module: `dag_engine::infrastructure::nodes::http_oauth`

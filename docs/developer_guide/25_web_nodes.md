@@ -415,6 +415,24 @@ Implementación: `src/libs/colmena/src/dag_engine/infrastructure/nodes/api_explo
 
 ---
 
+## Resolución de `${VAR}` y provenance (`http_request`)
+
+Desde 2026-09, **solo para requests JSON/no-multipart**, `${VAR}` en
+`base_url`/`endpoint`/`headers`/`query_params`/`bearer_token`/
+`authorization`/`body` está gateado por provenance cuando el nodo corre
+como LLM tool: un valor **`config`** siempre resuelve; un valor **`inputs`**
+(argumento de tool) solo resuelve si el dispatcher marcó su JSON Pointer
+como confiable (ver `env_provenance.rs`) — sin este gate, un modelo podía
+leer cualquier variable de entorno nombrándola en un argumento ordinario.
+Un valor model-authored sale literal, sin error aunque falte la var.
+
+**Multipart todavía NO está gateado** — sigue expandiendo `${VAR}`
+model-authored sin restricción; cubierto en el próximo PR.
+
+E2E: [`tests/graphs/security/tool_env_provenance_e2e.json`](../../tests/graphs/security/tool_env_provenance_e2e.json).
+
+---
+
 ## Subida de archivos por multipart (`http_request`)
 
 Cuando el header `Content-Type` empieza con `multipart/`, el nodo `http_request` cambia al modo multipart: cada campo del `body` se interpreta como una parte del form. Los archivos se transmiten por **streaming** (URLs vía `bytes_stream`, attachments vía `OutputStorageRepository::read_stream`), sin bufferizar el payload completo en RAM del worker — clave para escalar en Cloud Run.

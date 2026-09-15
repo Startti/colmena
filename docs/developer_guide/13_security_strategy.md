@@ -1097,11 +1097,17 @@ identical to their operator-authored value
 (`__colmena_env_trusted_paths`, `env_provenance.rs`, wired in
 `DagToolExecutor::execute_inner` right after the merge — see
 [22_tool_execution_flow.md § 5e](22_tool_execution_flow.md#5e-env-expansion-provenance-which-values-may-later-resolve-var)).
-**Still pending:** no node gates its `${VAR}` expansion by this set yet —
-every node still expands `${VAR}` unconditionally. The pointer set is
-computed and carried correctly; per-node gating is a follow-up change, which
-also excludes the graph-edge path and `subgraph`/`llm_call`-as-tool child
-graphs (both run in legacy/unrestricted mode per the design).
+
+**`http_request` is partially covered** (2026-09, this PR): the
+**non-multipart** JSON/string path (`base_url`, `endpoint`, `headers`,
+`bearer_token`, `authorization`, `query_params`, `body`) gates `${VAR}` on
+this trusted-pointer set. **Multipart still expands unconditionally** —
+next PR. See [25_web_nodes.md](25_web_nodes.md). E2E:
+[`tests/graphs/security/tool_env_provenance_e2e.json`](../../tests/graphs/security/tool_env_provenance_e2e.json).
+
+**Still pending:** every other node still expands `${VAR}` unconditionally.
+The graph-edge path and `subgraph`/`llm_call`-as-tool child graphs also
+still run in legacy/unrestricted mode per the design.
 
 ---
 

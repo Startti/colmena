@@ -64,7 +64,8 @@ impl EnvPolicy {
 
 /// Escape one JSON Pointer (RFC 6901) reference-token segment: `~` → `~0`,
 /// `/` → `~1`. Applied per path segment before joining with `/`.
-fn escape_pointer_segment(segment: &str) -> String {
+/// `pub(crate)` so a node's own gating logic (e.g. `http.rs`) can build matching pointers.
+pub(crate) fn escape_pointer_segment(segment: &str) -> String {
     segment.replace('~', "~0").replace('/', "~1")
 }
 
