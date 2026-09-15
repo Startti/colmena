@@ -136,6 +136,7 @@ async fn secure_suspend_smoke_round_trip() {
         if let DagExecutionEvent::NodeFinish {
             ref node_id,
             ref output,
+            ..
         } = ev
         {
             if node_id == "ask_creds" {

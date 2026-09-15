@@ -219,7 +219,7 @@ async fn suspend_then_llm_resume_runs_llm_fresh() {
         // poet must have emitted a NodeFinish containing the scripted greeting.
         let poet_finish = events.iter().find(|ev| {
             matches!(ev,
-                DagExecutionEvent::NodeFinish { node_id, output }
+                DagExecutionEvent::NodeFinish { node_id, output, .. }
                 if node_id == "poet"
                     && output.to_string().contains("Hola")
             )

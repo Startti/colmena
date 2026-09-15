@@ -6,6 +6,12 @@ ve ADP antes y después, qué tiene que hacer ADP, y qué se rompe si no hace na
 
 Los cambios que quedan dentro del motor no llevan nota aquí.
 
+## 2026-09-15 — `node-end`/`subgraph-node-end` ganan el contrato aditivo `status`/`errorText`
+
+| # | Nota | Acción de ADP | Qué se rompe si se ignora |
+|---|------|---------------|---------------------------|
+| 1 | [`status`/`errorText` — wire contract, sin emisores todavía](2026-09-15-node-end-error-status.md) | Ninguna todavía — nada emite el campo en esta entrega | Nada; ningún frame real trae `status`/`errorText` hasta el PR siguiente de esta serie |
+
 ## 2026-09-02 — `validate_graph` valida de verdad
 
 | # | Nota | Acción de ADP | Qué se rompe si se ignora |

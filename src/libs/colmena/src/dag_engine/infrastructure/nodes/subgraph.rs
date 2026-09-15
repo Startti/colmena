@@ -422,6 +422,7 @@ impl ExecutableNode for SubGraphNode {
             let finish_event = DagExecutionEvent::SubgraphNodeFinish {
                 node_id: name.clone(),
                 output: final_output.clone(),
+                error: None,
             };
             if let Ok(raw) = serde_json::to_value(&finish_event) {
                 obs.on_event(NodeEvent::SubgraphChildEvent(raw));

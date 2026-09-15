@@ -13,7 +13,14 @@ pub enum DagExecutionEvent {
         config: Value,
     },
     #[serde(rename = "node_finish")]
-    NodeFinish { node_id: String, output: Value },
+    NodeFinish {
+        node_id: String,
+        output: Value,
+        /// Present only when the node failed (`output` is then `Value::Null`).
+        /// Additive: a successful frame is byte-identical to before this field.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<NodeEndError>,
+    },
     #[serde(rename = "llm_token")]
     LlmToken { node_id: String, token: String },
     #[serde(rename = "llm_tool_call")]
@@ -123,7 +130,13 @@ pub enum DagExecutionEvent {
     /// Emitted when a subgraph node completes. Carries `node_type: "subgraph"` so the
     /// data-stream protocol can distinguish it from a regular NodeFinish.
     #[serde(rename = "subgraph_node_finish")]
-    SubgraphNodeFinish { node_id: String, output: Value },
+    SubgraphNodeFinish {
+        node_id: String,
+        output: Value,
+        /// Same additive contract as `NodeFinish::error`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<NodeEndError>,
+    },
     /// Emitted just before GraphFinish. Summarises token usage per node with model and
     /// provider names for cost/audit visibility.
     #[serde(rename = "graph_usage_summary")]
@@ -197,6 +210,17 @@ pub enum DagExecutionEvent {
 /// deep, so the default is `1` rather than `0`.
 fn default_subgraph_depth() -> u32 {
     1
+}
+
+/// Marks a `NodeFinish`/`SubgraphNodeFinish` end frame as a failure. `message`
+/// is present only when the text was already masked against decrypted secure
+/// values at the site that built it — a site with no masking context leaves
+/// it `None` rather than emit unmasked text. `None` doesn't mean "no detail",
+/// only "not safe to put on the wire from here".
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct NodeEndError {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
 
 impl DagExecutionEvent {
@@ -688,6 +712,50 @@ mod tests {
                 );
             }
             other => panic!("expected SubgraphWrapped, got {other:?}"),
+        }
+    }
+
+    // ── NodeEndError / error field ──────────────────────────────────────────
+
+    /// A `node_finish` frame serialized by an older binary (no `error` key at
+    /// all) must still deserialize, with `error` defaulting to `None`. Also
+    /// covers the Some(..) roundtrip and its `skip_serializing_if` omission.
+    #[test]
+    fn legacy_finish_without_error_deserializes() {
+        let legacy = serde_json::json!({
+            "event": "node_finish",
+            "data": { "node_id": "n1", "output": { "ok": true } }
+        });
+        match serde_json::from_value(legacy).unwrap() {
+            DagExecutionEvent::NodeFinish {
+                node_id,
+                output,
+                error,
+            } => {
+                assert_eq!(node_id, "n1");
+                assert_eq!(output, serde_json::json!({ "ok": true }));
+                assert!(error.is_none(), "absent `error` key must default to None");
+            }
+            other => panic!("expected NodeFinish, got {other:?}"),
+        }
+
+        let failed = DagExecutionEvent::NodeFinish {
+            node_id: "n1".into(),
+            output: Value::Null,
+            error: Some(NodeEndError {
+                message: Some("boom".into()),
+            }),
+        };
+        let json = serde_json::to_value(&failed).unwrap();
+        assert_eq!(json["data"]["error"]["message"], "boom");
+        match serde_json::from_value(json).unwrap() {
+            DagExecutionEvent::NodeFinish { error, .. } => assert_eq!(
+                error,
+                Some(NodeEndError {
+                    message: Some("boom".into())
+                })
+            ),
+            other => panic!("expected NodeFinish, got {other:?}"),
         }
     }
 }

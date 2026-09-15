@@ -926,11 +926,13 @@ impl DagRunUseCase {
                     yield DagExecutionEvent::SubgraphNodeFinish {
                         node_id: node_id.clone(),
                         output: processed_output.clone(),
+                        error: None,
                     };
                 } else {
                     yield DagExecutionEvent::NodeFinish {
                         node_id: node_id.clone(),
                         output: processed_output.clone(),
+                        error: None,
                     };
                 }
 
