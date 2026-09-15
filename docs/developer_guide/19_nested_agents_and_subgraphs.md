@@ -509,7 +509,7 @@ Cuando el motor ejecuta un subgrafo (ya sea un nodo `subgraph` o un agente-tarea
 | Evento SSE | Cuándo se emite |
 |---|---|
 | `subgraph-node-start` | Al empezar a ejecutar un nodo dentro del subgrafo |
-| `subgraph-node-end` | Al completar un nodo dentro del subgrafo |
+| `subgraph-node-end` | Al completar **o fallar** un nodo dentro del subgrafo — ver ["Cuando el sub-agente falla"](#cuando-el-sub-agente-falla) |
 | `subgraph-text-start` | Primer token de un LLM interno |
 | `subgraph-text-delta` | Por cada token generado por un LLM interno |
 | `subgraph-text-end` | Al finalizar el LLM interno |
@@ -519,11 +519,19 @@ Cuando el motor ejecuta un subgrafo (ya sea un nodo `subgraph` o un agente-tarea
 | `subgraph-reasoning-start/delta/end` | Bloque de razonamiento de un LLM interno |
 | `subgraph-skill-loaded` | Skill cargada dentro del subgrafo |
 | `subgraph-usage-summary` | Resumen de tokens del subgrafo |
-| `subgraph-error` | Error dentro del subgrafo |
+| `subgraph-error` | **Nunca se emite hoy** — ningún código construye este evento; una falla que el padre sobrevive cierra como `subgraph-node-end` con `status:"error"` (ver abajo), no como `subgraph-error` |
 
 > Para la referencia completa de todos los eventos SSE, incluyendo los de nivel superior y los específicos del orchestrator, ver [docs/sse_events_reference.md](../sse_events_reference.md).
 
 Esto permite que el frontend distinga claramente cuándo habla cada agente en un flujo multi-agente.
+
+### Cuando el sub-agente falla
+
+Cuando el child de un `subgraph`-as-tool falla, la frontera cierra con
+`status: "error"` en vez de quedar abierta para siempre (`errorText` solo si
+vino del despacho como tool — masked, #310). SUSPENDED no es una falla, deja
+la frontera abierta a propósito; un nodo interno que falla todavía no cierra
+la suya — alcance de un PR posterior. Ver [sse_events_reference.md](../sse_events_reference.md#nodo-que-falla).
 
 ---
 

@@ -4,6 +4,8 @@
 Uso: python3 scripts/verify_node_end_status_e2e.py <archivo.sse> [banderas]
   --closed-error PATH          end en PATH con status=error y errorText no vacío
   --closed-ok PATH             end en PATH SIN clave `status`
+  --open PATH                  start en PATH, sin end correspondiente
+                                (frontera dejada abierta a propósito)
   --closed-before-tool-output  el/los --closed-error preceden al primer
                                 tool-output-available de nivel 0
   --balanced                   todo start tiene exactamente un end (por path)
@@ -51,7 +53,7 @@ def at(frames, types, path):
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("sse_file")
-    for flag in ("--closed-error", "--closed-ok", "--no-frame"):
+    for flag in ("--closed-error", "--closed-ok", "--open", "--no-frame"):
         p.add_argument(flag, action="append", default=[], metavar="PATH" if flag != "--no-frame" else "TYPE")
     p.add_argument("--closed-before-tool-output", action="store_true")
     p.add_argument("--balanced", action="store_true")
@@ -69,6 +71,11 @@ def main():
         matches = at(frames, ENDS, path)
         r.check(f"--closed-ok {path}", matches and "status" not in matches[0],
                  f"status present={'status' in matches[0]}" if matches else "no end frame found")
+
+    for path in args.open:
+        has_start = bool(at(frames, STARTS, path))
+        has_end = bool(at(frames, ENDS, path))
+        r.check(f"--open {path}", has_start and not has_end, f"start seen={has_start} end seen={has_end}")
 
     if args.closed_before_tool_output:
         out_idx = next((i for i, f in enumerate(frames)

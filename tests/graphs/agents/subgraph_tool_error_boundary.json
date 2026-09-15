@@ -1,0 +1,60 @@
+{
+  "comment": "Repro: a subgraph-as-tool whose child fails (model does not exist). Expected: the `Helper` boundary closes with status:error + errorText.",
+  "metadata": {
+    "category": "agents",
+    "features": ["subgraph_as_tool", "child_graph_inline", "llm_call", "error_path"],
+    "requires_env": ["GEMINI_API_KEY"]
+  },
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/subgraph_tool_error_boundary",
+        "method": "POST",
+        "test_payload": { "prompt": "Pídele al asistente Helper que me resuma en una frase qué es la fotosíntesis y cuéntame qué respondió." }
+      }
+    },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "model": "gemini-2.5-flash",
+        "api_key": "${GEMINI_API_KEY}",
+        "system_message": "Eres un coordinador. Para cualquier explicación delega en la tool `Helper`. Si la tool falla, díselo al usuario en una frase.",
+        "stream": true,
+        "tool_configurations": {
+          "Helper": {
+            "name": "Helper",
+            "node_type": "subgraph",
+            "description": "Asistente que explica un tema en una frase.",
+            "fixed_config": {
+              "child_graph_inline": {
+                "nodes": {
+                  "helper_llm": {
+                    "type": "llm_call",
+                    "config": {
+                      "provider": "google",
+                      "model": "gemini-does-not-exist-9000",
+                      "api_key": "${GEMINI_API_KEY}",
+                      "system_message": "Responde en una frase: {{task}}",
+                      "stream": true
+                    }
+                  },
+                  "out": { "type": "output" }
+                },
+                "edges": [{ "from": "helper_llm", "to": "out" }]
+              }
+            }
+          }
+        }
+      }
+    },
+    "out": {
+      "type": "output"
+    }
+  },
+  "edges": [
+    { "from": "trigger", "to": "agent" },
+    { "from": "agent.result", "to": "out" }
+  ]
+}

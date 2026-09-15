@@ -1,6 +1,6 @@
 use crate::colmena_log;
 use crate::dag_engine::application::ports::SubGraphExecutorPort;
-use crate::dag_engine::domain::events::DagExecutionEvent;
+use crate::dag_engine::domain::events::{DagExecutionEvent, NodeEndError};
 use crate::dag_engine::domain::lint::{FieldSpec, NodeCatalogEntry};
 use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
 use crate::dag_engine::domain::observer::{ChildScopeObserver, ExecutionObserver, NodeEvent};
@@ -23,6 +23,15 @@ use tokio::fs;
 /// Both uses derive from this constant on purpose: a new source key has to become
 /// invisible to the child by construction, not by remembering a second list.
 const CHILD_GRAPH_SOURCE_KEYS: [&str; 2] = ["child_graph_inline", "child_graph_path"];
+
+/// Where a subgraph boundary's name came from. Gates `errorText`: only `Tool`
+/// goes through `MaskingObserver` (#310) — `Agent`/`Edge` stream unmasked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BoundarySource {
+    Agent,
+    Edge,
+    Tool,
+}
 
 pub struct SubGraphNode {
     pub executor: Arc<OnceLock<Arc<dyn SubGraphExecutorPort>>>,
@@ -246,10 +255,13 @@ impl ExecutableNode for SubGraphNode {
         // dispatch never goes through that loop — so `boundary_name` was always
         // `None` there and a subgraph-as-tool silently emitted no boundary.
         let tool_name = Self::non_empty_str(inputs, "__colmena_tool_name");
-        let boundary_name = agent_name
+        let boundary: Option<(String, BoundarySource)> = agent_name
             .clone()
-            .or_else(|| Self::non_empty_str(inputs, "__node_id"))
-            .or_else(|| tool_name.clone());
+            .map(|n| (n, BoundarySource::Agent))
+            .or_else(|| Self::non_empty_str(inputs, "__node_id").map(|n| (n, BoundarySource::Edge)))
+            .or_else(|| tool_name.clone().map(|n| (n, BoundarySource::Tool)));
+        let boundary_name = boundary.as_ref().map(|(n, _)| n.clone());
+        let boundary_source = boundary.as_ref().map(|(_, s)| *s);
 
         // Observer handed to the CHILD run. On the two synthetic-boundary paths
         // — an orchestrator agent, or a tool call — the enclosing loop stamps its
@@ -357,6 +369,13 @@ impl ExecutableNode for SubGraphNode {
         // --- 3. STATE MAPPING (IN) ---
         let child_state = Self::build_child_state(inputs);
 
+        // Resolve BEFORE the boundary start: a missing executor must emit no
+        // start at all, not a start with no matching close.
+        let executor = self
+            .executor
+            .get()
+            .ok_or("SubGraphExecutorPort not initialized in SubGraphNode")?;
+
         // Emit subgraph node-start boundary event (orchestrator agent OR
         // subgraph-as-tool — see `boundary_name`).
         if let (Some(ref name), Some(ref obs)) = (&boundary_name, &_observer) {
@@ -380,10 +399,7 @@ impl ExecutableNode for SubGraphNode {
             child_path_prefix
         );
 
-        let result = self
-            .executor
-            .get()
-            .ok_or("SubGraphExecutorPort not initialized in SubGraphNode")?
+        let result = match executor
             .run_subgraph(
                 &child_session_id,
                 graph_json,
@@ -393,7 +409,29 @@ impl ExecutableNode for SubGraphNode {
                 agent_session_id.clone(),
                 child_path_prefix.clone(),
             )
-            .await?;
+            .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                // Close the boundary instead of leaving it dangling (the ADP
+                // bug). `errorText` gated per `BoundarySource`.
+                if let (Some(ref name), Some(ref obs)) = (&boundary_name, &_observer) {
+                    let message = match boundary_source {
+                        Some(BoundarySource::Tool) => Some(e.to_string()),
+                        _ => None,
+                    };
+                    let finish_event = DagExecutionEvent::SubgraphNodeFinish {
+                        node_id: name.clone(),
+                        output: Value::Null,
+                        error: Some(NodeEndError { message }),
+                    };
+                    if let Ok(raw) = serde_json::to_value(&finish_event) {
+                        obs.on_event(NodeEvent::SubgraphChildEvent(raw));
+                    }
+                }
+                return Err(e.into());
+            }
+        };
 
         // --- 4. SUSPEND BUBBLE-UP ---
         if result.get("__colmena_status").and_then(|v| v.as_str()) == Some("SUSPENDED") {
@@ -1029,6 +1067,276 @@ mod subgraph_as_tool_boundary_tests {
             None,
             "the edge path must not gain a wrapper of its own"
         );
+    }
+}
+
+/// The ADP-reported bug: a subgraph's boundary never closed on child failure.
+#[cfg(test)]
+mod subgraph_tool_failure_close_tests {
+    use super::*;
+    use crate::dag_engine::application::ports::SubGraphExecutorPort;
+    use crate::dag_engine::domain::error::DagError;
+    use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
+    use crate::dag_engine::domain::observer::{ExecutionObserver, NodeEvent};
+    use serde_json::json;
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct CapturingObserver(Mutex<Vec<NodeEvent>>);
+    impl ExecutionObserver for CapturingObserver {
+        fn on_event(&self, event: NodeEvent) {
+            self.0.lock().unwrap().push(event);
+        }
+    }
+    impl CapturingObserver {
+        /// Decoded inner events, in arrival order.
+        fn events(&self) -> Vec<DagExecutionEvent> {
+            self.0
+                .lock()
+                .unwrap()
+                .iter()
+                .filter_map(|e| match e {
+                    NodeEvent::SubgraphChildEvent(raw) => serde_json::from_value(raw.clone()).ok(),
+                    _ => None,
+                })
+                .collect()
+        }
+        fn is_empty(&self) -> bool {
+            self.0.lock().unwrap().is_empty()
+        }
+        fn finish(&self) -> Option<Option<NodeEndError>> {
+            self.events().into_iter().find_map(|e| match e {
+                DagExecutionEvent::SubgraphNodeFinish { error, .. } => Some(error),
+                _ => None,
+            })
+        }
+        fn has_start(&self) -> bool {
+            self.events()
+                .iter()
+                .any(|e| matches!(e, DagExecutionEvent::NodeStart { .. }))
+        }
+    }
+
+    fn inline_graph_inputs() -> NodeInputs {
+        let mut inputs: NodeInputs = NodeInputs::new();
+        inputs.insert(
+            "child_graph_inline".to_string(),
+            json!({ "nodes": {}, "edges": [] }),
+        );
+        inputs
+    }
+
+    /// `Fail` also emits one child event first, so ordering vs. the close
+    /// can be asserted.
+    enum Behavior {
+        Succeed,
+        Fail(&'static str),
+        Suspend,
+    }
+    struct StubExecutor(Behavior);
+    #[async_trait::async_trait]
+    impl SubGraphExecutorPort for StubExecutor {
+        async fn run_subgraph(
+            &self,
+            _s: &str,
+            _g: Value,
+            _st: Value,
+            observer: Option<Arc<dyn ExecutionObserver>>,
+            _p: Option<String>,
+            _a: Option<String>,
+            _pp: Option<String>,
+        ) -> Result<Value, DagError> {
+            if let (Behavior::Fail(_), Some(obs)) = (&self.0, &observer) {
+                let child = DagExecutionEvent::NodeStart {
+                    node_id: "helper_llm".into(),
+                    node_type: "llm_call".into(),
+                    inputs: json!({}),
+                    config: json!({}),
+                };
+                if let Ok(raw) = serde_json::to_value(child) {
+                    obs.on_event(NodeEvent::SubgraphChildEvent(raw));
+                }
+            }
+            match &self.0 {
+                Behavior::Succeed => Ok(json!({ "out": { "output": 42 } })),
+                Behavior::Fail(msg) => Err(DagError::NodeExecution(msg.to_string())),
+                Behavior::Suspend => {
+                    Ok(json!({ "__colmena_status": "SUSPENDED", "questions": [] }))
+                }
+            }
+        }
+        async fn resume_subgraph(
+            &self,
+            _s: &str,
+            _a: String,
+            _o: Option<Arc<dyn ExecutionObserver>>,
+            _ags: Option<String>,
+            _pp: Option<String>,
+        ) -> Result<Value, DagError> {
+            match &self.0 {
+                Behavior::Fail(msg) => Err(DagError::NodeExecution(msg.to_string())),
+                _ => Ok(Value::Null),
+            }
+        }
+        async fn find_child_session_id_for_resume(
+            &self,
+            _p: &str,
+            _n: &str,
+        ) -> Result<Option<String>, DagError> {
+            Ok(Some("child_session_1".to_string()))
+        }
+    }
+
+    /// Runs the node; injects `__colmena_tool_name` when `tool_name` is set.
+    async fn run(
+        behavior: Behavior,
+        mut inputs: NodeInputs,
+        config: Value,
+        tool_name: bool,
+    ) -> (
+        Result<Value, Box<dyn std::error::Error + Send + Sync>>,
+        Arc<CapturingObserver>,
+    ) {
+        if tool_name {
+            inputs.insert("__colmena_tool_name".to_string(), json!("Helper"));
+        }
+        let node = SubGraphNode::new();
+        node.executor
+            .set(Arc::new(StubExecutor(behavior)))
+            .ok()
+            .expect("executor set once");
+        let obs = Arc::new(CapturingObserver::default());
+        let result = node
+            .execute(&inputs, &config, &mut json!({}), Some(obs.clone()))
+            .await;
+        (result, obs)
+    }
+
+    // ── Tool source (__colmena_tool_name): masked (#310), errorText allowed ──
+
+    #[tokio::test]
+    async fn child_failure_closes_tool_boundary_with_error_status_and_returns_the_error() {
+        let (result, obs) = run(
+            Behavior::Fail("gemini-does-not-exist-9000: model not found"),
+            inline_graph_inputs(),
+            json!({}),
+            true,
+        )
+        .await;
+        assert!(result.unwrap_err().to_string().contains("model not found"));
+        let error = obs
+            .finish()
+            .flatten()
+            .expect("boundary must close with error");
+        assert_eq!(
+            error.message.as_deref(),
+            Some("Error de ejecución en el nodo: gemini-does-not-exist-9000: model not found")
+        );
+    }
+
+    #[tokio::test]
+    async fn child_failure_close_follows_child_events() {
+        let (_, obs) = run(
+            Behavior::Fail("boom"),
+            inline_graph_inputs(),
+            json!({}),
+            true,
+        )
+        .await;
+        let events = obs.events();
+        let child_idx = events
+            .iter()
+            .position(|e| matches!(e, DagExecutionEvent::SubgraphWrapped { .. }))
+            .expect("child event must be forwarded before the close");
+        let close_idx = events
+            .iter()
+            .position(|e| matches!(e, DagExecutionEvent::SubgraphNodeFinish { .. }))
+            .expect("boundary close must be emitted");
+        assert!(
+            child_idx < close_idx,
+            "child event at {child_idx}, close at {close_idx}"
+        );
+    }
+
+    #[tokio::test]
+    async fn success_close_carries_no_error() {
+        let (result, obs) = run(Behavior::Succeed, inline_graph_inputs(), json!({}), true).await;
+        result.expect("stub execute succeeds");
+        assert_eq!(
+            obs.finish(),
+            Some(None),
+            "successful close must not carry error"
+        );
+    }
+
+    #[tokio::test]
+    async fn suspended_child_leaves_boundary_open() {
+        let (result, obs) = run(Behavior::Suspend, inline_graph_inputs(), json!({}), true).await;
+        assert_eq!(result.unwrap()["__colmena_status"], "SUSPENDED");
+        assert!(
+            obs.has_start() && obs.finish().is_none(),
+            "boundary opens, stays open"
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_executor_emits_no_boundary_frames() {
+        let node = SubGraphNode::new(); // no executor set at all
+        let mut inputs = inline_graph_inputs();
+        inputs.insert("__colmena_tool_name".to_string(), json!("Helper"));
+        let obs = Arc::new(CapturingObserver::default());
+        let err = node
+            .execute(&inputs, &json!({}), &mut json!({}), Some(obs.clone()))
+            .await
+            .expect_err("no executor must fail");
+        assert!(err.to_string().contains("not initialized"));
+        assert!(obs.is_empty(), "no start, no close");
+    }
+
+    #[tokio::test]
+    async fn resume_failure_emits_no_unmatched_close() {
+        let mut inputs = inline_graph_inputs();
+        inputs.insert(
+            "__colmena_resume_answer".to_string(),
+            json!("Q[q1]: ?\nA[q1]: yes"),
+        );
+        let (result, obs) = run(Behavior::Fail("boom"), inputs, json!({}), true).await;
+        assert!(result.unwrap_err().to_string().contains("boom"));
+        assert!(
+            obs.is_empty(),
+            "resume branch has no start, so no close either"
+        );
+    }
+
+    // ── errorText source gating (this PR's amendment) ────────────────────────
+
+    #[tokio::test]
+    async fn agent_source_failure_close_omits_error_text() {
+        let config = json!({ "__agent_name": "Test_Runner" });
+        let (_, obs) = run(
+            Behavior::Fail("leaky secret"),
+            inline_graph_inputs(),
+            config,
+            false,
+        )
+        .await;
+        let error = obs
+            .finish()
+            .flatten()
+            .expect("boundary must still close with status:error");
+        assert_eq!(error.message, None, "orchestrator-agent path is unmasked");
+    }
+
+    #[tokio::test]
+    async fn edge_source_failure_close_omits_error_text() {
+        let mut inputs = inline_graph_inputs();
+        inputs.insert("__node_id".to_string(), json!("sub_node"));
+        let (_, obs) = run(Behavior::Fail("leaky secret"), inputs, json!({}), false).await;
+        let error = obs
+            .finish()
+            .flatten()
+            .expect("boundary must still close with status:error");
+        assert_eq!(error.message, None, "edge-based path is unmasked");
     }
 }
 
