@@ -3230,3 +3230,30 @@ header del operador.
 
 **Pendiente.** `execute_multipart` y el resto de los nodos — ver
 [13_security_strategy.md](developer_guide/13_security_strategy.md).
+
+## 58. `node-end`/`subgraph-node-end` ganan el wire contract aditivo `status`/`errorText` (sin emisores todavía)
+
+PR 1/4 de "cierre de fronteras en error" (`scratchpad/final_plan_subgraph_error_boundary.md`).
+Reporte de ADP: un sub-agente que falla no cierra su nodo en el árbol de UI, así
+que la respuesta final del padre queda anidada bajo una rama que nunca terminó.
+Este PR es solo el contrato de wire — **nada en el motor construye
+`error: Some(..)` todavía**; el primer emisor real (el cierre de una tool
+`llm_call`/`for_each`) llega en el PR siguiente de esta serie.
+
+**Wire.** `NodeFinish`/`SubgraphNodeFinish` (`events.rs`) ganan `error:
+Option<NodeEndError>` (aditivo, compatible con frames viejos). `SseMapper` lo
+traduce a `"status":"error"` + `"errorText"` (si `error.message` es `Some`) en
+las cuatro combinaciones `node-end`/`subgraph-node-end` × top-level/wrapped.
+Un cierre exitoso sigue sin `status` en absoluto — byte-idéntico a antes. Todo
+constructor existente de `NodeFinish`/`SubgraphNodeFinish` pasa `error: None`
+para seguir compilando bajo `warnings = "deny"`.
+
+**Tests.** `events.rs` (roundtrip + deserialización legacy),
+`sse_mapper.rs` (4: éxito sin `status`, error con/sin `errorText`, variante
+wrapped). Sin E2E en este PR — nada emite el campo todavía, así que no hay
+frame real que observar; los tests unitarios cubren serialización y mapeo. El
+E2E llega en el PR siguiente, cuando `DagToolExecutor` se vuelve el primer
+emisor.
+
+**ADP.** Aditivo, sin acción requerida todavía — [nota de
+migración](adp_migration/2026-09-15-node-end-error-status.md).

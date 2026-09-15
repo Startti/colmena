@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
-use crate::dag_engine::domain::events::DagExecutionEvent;
+use crate::dag_engine::domain::events::{DagExecutionEvent, NodeEndError};
 
 /// Stateful mapper from `DagExecutionEvent` to the SSE Data Stream Protocol JSON parts.
 ///
@@ -244,21 +244,23 @@ impl SseMapper {
                 "reason": reason
             })),
             DagExecutionEvent::TurnStart { .. } => None,
-            DagExecutionEvent::NodeFinish { node_id, output } => {
+            DagExecutionEvent::NodeFinish {
+                node_id,
+                output,
+                error,
+            } => {
                 let ntype = self.node_types.get(node_id).cloned().unwrap_or_default();
-                Some(json!({
-                    "type": "node-end",
-                    "node_id": node_id,
-                    "node_type": ntype,
-                    "output": output
-                }))
+                Some(Self::node_end_frame(
+                    "node-end", node_id, &ntype, output, error,
+                ))
             }
-            DagExecutionEvent::SubgraphNodeFinish { node_id, output } => Some(json!({
-                "type": "node-end",
-                "node_id": node_id,
-                "node_type": "subgraph",
-                "output": output
-            })),
+            DagExecutionEvent::SubgraphNodeFinish {
+                node_id,
+                output,
+                error,
+            } => Some(Self::node_end_frame(
+                "node-end", node_id, "subgraph", output, error,
+            )),
             DagExecutionEvent::LlmToken { token, .. } => {
                 let part_id = self
                     .text_block_ids
@@ -491,21 +493,31 @@ impl SseMapper {
                         "inputs": Self::clean_inputs(inputs)
                     }))
                 }
-                DagExecutionEvent::NodeFinish { node_id, output } => {
+                DagExecutionEvent::NodeFinish {
+                    node_id,
+                    output,
+                    error,
+                } => {
                     let ntype = self.node_types.get(node_id).cloned().unwrap_or_default();
-                    Some(json!({
-                        "type": "subgraph-node-end",
-                        "node_id": node_id,
-                        "node_type": ntype,
-                        "output": output
-                    }))
+                    Some(Self::node_end_frame(
+                        "subgraph-node-end",
+                        node_id,
+                        &ntype,
+                        output,
+                        error,
+                    ))
                 }
-                DagExecutionEvent::SubgraphNodeFinish { node_id, output } => Some(json!({
-                    "type": "subgraph-node-end",
-                    "node_id": node_id,
-                    "node_type": "subgraph",
-                    "output": output
-                })),
+                DagExecutionEvent::SubgraphNodeFinish {
+                    node_id,
+                    output,
+                    error,
+                } => Some(Self::node_end_frame(
+                    "subgraph-node-end",
+                    node_id,
+                    "subgraph",
+                    output,
+                    error,
+                )),
                 DagExecutionEvent::LlmToken { token, .. } => {
                     let part_id = self
                         .text_block_ids
@@ -682,6 +694,30 @@ impl SseMapper {
         parts
     }
 
+    /// Build a `node-end`/`subgraph-node-end` frame. `status`/`errorText`
+    /// appear only when `error` is `Some`, so a successful frame stays
+    /// byte-identical to before this field existed.
+    fn node_end_frame(
+        kind: &str,
+        node_id: &str,
+        node_type: &str,
+        output: &Value,
+        error: &Option<NodeEndError>,
+    ) -> Value {
+        match error {
+            None => {
+                json!({ "type": kind, "node_id": node_id, "node_type": node_type, "output": output })
+            }
+            Some(err) => {
+                let mut v = json!({ "type": kind, "node_id": node_id, "node_type": node_type, "output": output, "status": "error" });
+                if let Some(msg) = &err.message {
+                    v["errorText"] = json!(msg);
+                }
+                v
+            }
+        }
+    }
+
     fn clean_inputs(inputs: &Value) -> Value {
         if let Some(obj) = inputs.as_object() {
             Value::Object(
@@ -699,7 +735,7 @@ impl SseMapper {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dag_engine::domain::events::DagExecutionEvent;
+    use crate::dag_engine::domain::events::{DagExecutionEvent, NodeEndError};
 
     fn tool_call_sequence() -> Vec<DagExecutionEvent> {
         vec![
@@ -1177,6 +1213,7 @@ mod tests {
         DagExecutionEvent::NodeFinish {
             node_id: node_id.into(),
             output: json!({}),
+            error: None,
         }
     }
 
@@ -1253,5 +1290,72 @@ mod tests {
             parts[0]["path"], "ask_user",
             "path falls back to the node id, so the frame is placeable in the nested tree"
         );
+    }
+
+    // ── node-end status/errorText (additive) ────────────────────────────────
+    // Table-driven: one row per named case the design calls for — success has
+    // no `status` key at all; failure gets `status:"error"` and `errorText`
+    // only when the error carries a masked message; the wrapped variant maps
+    // to `subgraph-node-end` and still carries `level`/`path`.
+
+    #[test]
+    fn successful_node_end_has_no_status_field() {
+        let mut m = SseMapper::new();
+        let parts = m.map(&DagExecutionEvent::NodeFinish {
+            node_id: "n1".into(),
+            output: json!({ "ok": true }),
+            error: None,
+        });
+        let obj = parts[0].as_object().unwrap();
+        assert_eq!(parts[0]["type"], "node-end");
+        assert!(!obj.contains_key("status") && !obj.contains_key("errorText"));
+    }
+
+    #[test]
+    fn failed_node_end_carries_status_and_error_text() {
+        let mut m = SseMapper::new();
+        let parts = m.map(&DagExecutionEvent::NodeFinish {
+            node_id: "Helper".into(),
+            output: Value::Null,
+            error: Some(NodeEndError {
+                message: Some("model not found".into()),
+            }),
+        });
+        assert_eq!(parts[0]["type"], "node-end");
+        assert_eq!(parts[0]["status"], "error");
+        assert_eq!(parts[0]["errorText"], "model not found");
+        assert_eq!(parts[0]["output"], Value::Null);
+    }
+
+    /// No masking context at construction still marks `status:"error"`, but
+    /// omits `errorText` rather than `""`/`null`.
+    #[test]
+    fn failed_node_end_without_message_has_status_but_no_error_text() {
+        let mut m = SseMapper::new();
+        let parts = m.map(&DagExecutionEvent::SubgraphNodeFinish {
+            node_id: "Helper".into(),
+            output: Value::Null,
+            error: Some(NodeEndError { message: None }),
+        });
+        assert_eq!(parts[0]["status"], "error");
+        assert!(!parts[0].as_object().unwrap().contains_key("errorText"));
+    }
+
+    #[test]
+    fn failed_wrapped_subgraph_node_end_carries_status_level_and_path() {
+        let mut m = SseMapper::new();
+        let inner = DagExecutionEvent::SubgraphNodeFinish {
+            node_id: "Helper".into(),
+            output: Value::Null,
+            error: Some(NodeEndError {
+                message: Some("boom".into()),
+            }),
+        };
+        let parts = m.map(&wrap(inner, 1, "agent>Helper"));
+        assert_eq!(parts[0]["type"], "subgraph-node-end");
+        assert_eq!(parts[0]["status"], "error");
+        assert_eq!(parts[0]["errorText"], "boom");
+        assert_eq!(parts[0]["level"], 1);
+        assert_eq!(parts[0]["path"], "agent>Helper");
     }
 }

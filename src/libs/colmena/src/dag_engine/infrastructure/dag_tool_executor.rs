@@ -2373,6 +2373,7 @@ impl DagToolExecutor {
             let finish = DagExecutionEvent::SubgraphNodeFinish {
                 node_id: name.clone(),
                 output: result.as_ref().cloned().unwrap_or(Value::Null),
+                error: None,
             };
             if let Ok(raw) = serde_json::to_value(&finish) {
                 obs.on_event(NodeEvent::SubgraphChildEvent(raw));

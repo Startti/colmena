@@ -65,6 +65,7 @@ fn emit_internal_node_finish(
         let event = DagExecutionEvent::NodeFinish {
             node_id: node_id.to_string(),
             output,
+            error: None,
         };
         if let Ok(raw) = serde_json::to_value(&event) {
             obs.on_event(NodeEvent::SubgraphChildEvent(raw));
