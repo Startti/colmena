@@ -3170,3 +3170,39 @@ nada propio, así que es un testigo limpio). El modelo mandó
 Lo que vio el `python_script`: `__node_id` ausente, `__colmena_resume_answer`
 ausente y `__colmena_session_id` con el UUID real de la sesión, no
 `forged-session`. `dag_engine lint` limpio; `EXPECTED_FILES` 307 → 308.
+
+## 56. Provenance de expansión `${VAR}`: se calcula el conjunto de pointers confiables (aún sin gating por nodo)
+
+Tercer paso de la procedencia de argumentos de tools (§54 y §55 lo precedieron).
+Módulo nuevo `dag_engine/infrastructure/env_provenance.rs`: `ENV_TRUSTED_PATHS_KEY`
+(`__colmena_env_trusted_paths`), `EnvPolicy::{Legacy, Restricted}` con
+`from_inputs`/`may_expand`, `trusted_pointers`, `prune_after_secrets`.
+
+**La regla.** `trusted_pointers(authored_fixed, merged)` (§5a-5d de
+`22_tool_execution_flow.md`) produce un JSON pointer (RFC 6901) por cada hoja
+string que contiene `${` y es idéntica, en el mismo pointer, al valor
+autorado. Un objeto nunca es confiable como un todo — solo sus hojas. Un
+valor fijo ya templado en §5a puede diferir de su forma autorada para cuando
+corre este paso — correctamente no confiable.
+
+**Wiring.** `authored_fixed` sale de `parse_node_schema(schema).fixed_values`
+o del `fixed_config` crudo; vacío si no hay ninguno. La clave se escribe
+última entre las del motor, después de `strip_engine_keys`. Tras
+`inject_secrets`, `prune_after_secrets` descarta cualquier pointer cuyo valor
+haya cambiado.
+
+**Aún no cambia el comportamiento de ningún nodo.** Exposición verificada:
+`python_node.rs:125` y `trigger.rs:31-34` exponen TODOS los inputs sin
+filtrar (ya pre-existente) — la nueva clave solo lleva strings de pointers.
+`sse_mapper.rs:689`, `subgraph.rs:74` y `http.rs:254-255` ya filtran por
+prefijo sin cambios.
+
+**Tests.** 8 unitarios en `env_provenance.rs` + 3 de executor. Mutación:
+forzar `trusted_pointers` a confiar en todo + saltar el prune → 7 tests
+fallan; restaurado, vuelven a pasar.
+
+**E2E.** `tests/graphs/agents/sql_read_write_capability_e2e.json`, con una
+variante de prompt sin commitear (el original pide un DELETE que el agente
+rechaza sin llamar la tool) para forzar un SELECT real. `connection_url`
+siguió resolviendo (fila real de `finanzas.gastos`); la captura SSE no
+contiene `__colmena_env_trusted_paths` (grep = 0).

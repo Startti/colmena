@@ -425,6 +425,50 @@ looked up against anything.
 > param resolves here is simply left exactly as written, for the node to
 > resolve against the environment when it runs.
 
+#### 5e. Env-expansion provenance: which values may later resolve `${VAR}`
+
+**File:** [env_provenance.rs](../../src/libs/colmena/src/dag_engine/infrastructure/env_provenance.rs)
+
+Right after the merge (5a–5d) produces `inputs`, using the SAME
+operator-authored values that fed 5a as `authored_fixed` (the schema's
+`fixed_values` for `node_schema`, or the raw `fixed_config` map for
+`$DYNAMIC`/legacy — empty for neither), the executor computes
+`trusted_pointers(authored_fixed, inputs)`: one RFC 6901 JSON pointer per
+STRING leaf in `inputs` that contains `${` and is byte-identical to the
+authored value at that same pointer. A container is never itself trusted —
+only its string leaves. An LLM-introduced key with no counterpart in
+`authored_fixed` never produces a pointer (the walk only descends where
+`authored_fixed` has a value at the same key).
+
+This is why 5a templates fixed values only once, before this step: a fixed
+`base_url: "${API_BASE}"` still equals its authored form here, so it is
+trusted; a fixed `path: "/anything/${bearer_token}"` was already templated
+in 5a, so it may already differ from the authored string by the time this
+step runs — correctly NOT trusted.
+
+The pointer list is written last among the engine keys (§ Step 4b), under
+`__colmena_env_trusted_paths` (`env_provenance::ENV_TRUSTED_PATHS_KEY`) —
+after `strip_engine_keys` already removed any caller-supplied copy, so a
+forged value cannot survive. `EnvPolicy::from_inputs` is how a node will
+later read this key: no key → `Legacy` (expand everything, e.g. graph mode);
+key present but malformed → `Restricted(∅)`, i.e. **fail closed**.
+
+After `inject_secrets` (below) replaces any `<value_N>` placeholder with its
+decrypted value, `prune_after_secrets` drops any trusted pointer whose value
+just changed — a decrypted secret containing literal `${...}` text must
+never be re-interpreted as an env placeholder.
+
+**No node reads `__colmena_env_trusted_paths` yet.** This change only
+computes and carries the pointer set; gating `${VAR}` expansion per node
+behind `EnvPolicy::may_expand` is a follow-up (see
+`docs/developer_guide/13_security_strategy.md`).
+
+Order of operations in `execute_inner`: `strip_engine_keys(args)` → merge
+(5a–5d) → `trusted_pointers(authored_fixed, merged)` (5e) → insert engine
+keys (resume_answer, session ids, node_id_path, subgraph_depth, tool_name,
+unchanged order) → insert `__colmena_env_trusted_paths` LAST →
+`inject_secrets` → `prune_after_secrets` → `node.execute(inputs)`.
+
 ---
 
 ### Step 6: Execute the Target Node

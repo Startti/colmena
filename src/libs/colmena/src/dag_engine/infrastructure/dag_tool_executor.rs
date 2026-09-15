@@ -2127,6 +2127,26 @@ impl DagToolExecutor {
             args
         };
 
+        // ENV PROVENANCE: from the same merge inputs above, compute the set of
+        // pointers into `inputs` still identical to their operator-authored
+        // value — what a node will later consult via `EnvPolicy` to gate
+        // `${VAR}` expansion. See env_provenance.rs for the provenance rule.
+        let authored_fixed: HashMap<String, Value> =
+            if let Some(schema) = tool_cfg.and_then(|c| c.node_schema.as_ref()) {
+                use crate::dag_engine::domain::tool_configuration::parse_node_schema;
+                parse_node_schema(schema)
+                    .map(|parsed| parsed.fixed_values)
+                    .unwrap_or_default()
+            } else if let Some(fixed) = fixed_config.as_ref() {
+                fixed.clone()
+            } else {
+                HashMap::new()
+            };
+        let trusted_pointers = crate::dag_engine::infrastructure::env_provenance::trusted_pointers(
+            &authored_fixed,
+            &inputs,
+        );
+
         // Inject the resume answer AFTER all merging but BEFORE inject_secrets so that
         // secret resolution still applies uniformly and the key cannot be overridden by
         // anything in fixed_config or the LLM arguments.
@@ -2222,6 +2242,13 @@ impl DagToolExecutor {
             Value::String(tool_call.function.name.clone()),
         );
 
+        // Written last among the engine keys — `strip_engine_keys` already
+        // removed any caller-supplied copy, so this is the engine's own value.
+        inputs.insert(
+            crate::dag_engine::infrastructure::env_provenance::ENV_TRUSTED_PATHS_KEY.to_string(),
+            serde_json::to_value(&trusted_pointers).unwrap_or(Value::Array(Vec::new())),
+        );
+
         // Convert HashMap to NodeInputs (which is just HashMap<String, Value>)
         // SECURE VALUES: decrypt <value_N> placeholders before sending to the node.
         // The applied map `(decrypted_value → handle)` will be used by the outbound
@@ -2231,6 +2258,7 @@ impl DagToolExecutor {
         {
             let mut inputs_val =
                 serde_json::to_value(&inputs).unwrap_or(Value::Object(Default::default()));
+            let before_secrets = inputs_val.clone();
             applied_secrets = match svc
                 .inject_secrets(&mut inputs_val, sid, self.agent_session_id.as_deref())
                 .await
@@ -2241,6 +2269,26 @@ impl DagToolExecutor {
                     Default::default()
                 }
             };
+            // A decrypted secret may have landed at a pointer that was trusted;
+            // never let it be re-interpreted as an env placeholder.
+            if let Some(current) = inputs_val
+                .get(crate::dag_engine::infrastructure::env_provenance::ENV_TRUSTED_PATHS_KEY)
+                .cloned()
+                .and_then(|v| serde_json::from_value::<Vec<String>>(v).ok())
+            {
+                let pruned = crate::dag_engine::infrastructure::env_provenance::prune_after_secrets(
+                    current,
+                    &before_secrets,
+                    &inputs_val,
+                );
+                if let Value::Object(map) = &mut inputs_val {
+                    map.insert(
+                        crate::dag_engine::infrastructure::env_provenance::ENV_TRUSTED_PATHS_KEY
+                            .to_string(),
+                        serde_json::to_value(&pruned).unwrap_or(Value::Array(Vec::new())),
+                    );
+                }
+            }
             serde_json::from_value::<HashMap<String, Value>>(inputs_val).unwrap_or(inputs)
         } else {
             inputs
@@ -4578,6 +4626,113 @@ mod tests {
         // Both the fixed sub-field and the LLM-provided child coexist in the container.
         assert_eq!(output["body"]["fixed_key"], "FIXED_IN_BODY");
         assert_eq!(output["body"]["user_key"], "from_llm");
+    }
+
+    /// Shared boilerplate for the env-provenance tests below: a `mock_tool`
+    /// tool configuration with the given `node_schema`.
+    fn env_provenance_tool_config(name: &str, schema: serde_json::Value) -> ToolConfiguration {
+        ToolConfiguration {
+            name: name.to_string(),
+            description: format!("{name} tool"),
+            node_type: "mock_tool".to_string(),
+            fixed_config: HashMap::new(),
+            exposed_inputs: None,
+            parameters: None,
+            mergeable_fields: None,
+            field_mapping: None,
+            node_schema: Some(serde_json::from_value(schema).unwrap()),
+            node_config: None,
+            expose_sub_tools: None,
+            summary: None,
+            eager: false,
+            memory_mode: MemoryMode::Stateless,
+        }
+    }
+
+    /// An sql_query-shaped fixed `connection_url` must be trusted; the
+    /// model-authored `q` must never appear there and stays literal.
+    #[tokio::test]
+    async fn operator_fixed_connection_url_is_listed_as_trusted() {
+        let registry = Arc::new(MockRegistry::new());
+        let mut tool_configs = HashMap::new();
+        tool_configs.insert(
+            "sql_like_tool".to_string(),
+            env_provenance_tool_config(
+                "sql_like_tool",
+                serde_json::json!({
+                    "connection_url": { "type": "string", "fixed": "${DATABASE_URL}" },
+                    "q": { "type": "string", "required": true, "description": "query" }
+                }),
+            ),
+        );
+        let executor = DagToolExecutor::new(registry, tool_configs);
+        let tool_call = ToolCall::new(
+            "call_sql".to_string(),
+            FunctionCall::new(
+                "sql_like_tool".to_string(),
+                r#"{"q": "${PROBE}"}"#.to_string(),
+            ),
+        );
+
+        let result = executor.execute(&tool_call).await.unwrap();
+        let output: Value = serde_json::from_str(&result.output).unwrap();
+        let trusted: Vec<String> =
+            serde_json::from_value(output["__colmena_env_trusted_paths"].clone()).unwrap();
+
+        assert_eq!(trusted, vec!["/connection_url".to_string()]);
+        assert!(!trusted.contains(&"/q".to_string()));
+        assert_eq!(output["q"], "${PROBE}");
+    }
+
+    /// No `fixed_config`/`node_schema` means no authored value to be
+    /// identical to, so the trusted set is empty.
+    #[tokio::test]
+    async fn no_fixed_config_produces_empty_trusted_paths() {
+        let registry = Arc::new(MockRegistry::new());
+        let executor = DagToolExecutor::new(registry, HashMap::new());
+        let tool_call = ToolCall::new(
+            "call_raw".to_string(),
+            FunctionCall::new("mock_tool".to_string(), r#"{"a": "${PROBE}"}"#.to_string()),
+        );
+
+        let result = executor.execute(&tool_call).await.unwrap();
+        let output: Value = serde_json::from_str(&result.output).unwrap();
+        let trusted: Vec<String> =
+            serde_json::from_value(output["__colmena_env_trusted_paths"].clone()).unwrap();
+        assert!(trusted.is_empty());
+    }
+
+    /// A forged `__colmena_env_trusted_paths` argument is stripped before the
+    /// merge — the forged pointer must not survive into the final key.
+    #[tokio::test]
+    async fn forged_trusted_paths_key_cannot_inject_a_pointer() {
+        let registry = Arc::new(MockRegistry::new());
+        let mut tool_configs = HashMap::new();
+        tool_configs.insert(
+            "guarded_paths_tool".to_string(),
+            env_provenance_tool_config(
+                "guarded_paths_tool",
+                serde_json::json!({
+                    "connection_url": { "type": "string", "fixed": "${DATABASE_URL}" }
+                }),
+            ),
+        );
+        let executor = DagToolExecutor::new(registry, tool_configs);
+        let tool_call = ToolCall::new(
+            "call_forge".to_string(),
+            FunctionCall::new(
+                "guarded_paths_tool".to_string(),
+                r#"{"__colmena_env_trusted_paths": ["/q"], "q": "${SECRET}"}"#.to_string(),
+            ),
+        );
+
+        let result = executor.execute(&tool_call).await.unwrap();
+        let output: Value = serde_json::from_str(&result.output).unwrap();
+        let trusted: Vec<String> =
+            serde_json::from_value(output["__colmena_env_trusted_paths"].clone()).unwrap();
+
+        assert_eq!(trusted, vec!["/connection_url".to_string()]);
+        assert_eq!(output["q"], "${SECRET}");
     }
 }
 

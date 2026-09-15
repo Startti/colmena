@@ -1,4 +1,5 @@
 pub mod dag_tool_executor;
+pub mod env_provenance;
 pub mod mcp_registry;
 pub mod node_schema_merge;
 pub mod nodes;
