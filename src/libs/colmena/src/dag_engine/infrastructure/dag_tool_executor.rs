@@ -25,7 +25,7 @@
 use crate::colmena_log;
 use crate::dag_engine::application::ports::NodeRegistryPort;
 use crate::dag_engine::application::secure_value_service::{MaskingObserver, SecureValueService};
-use crate::dag_engine::domain::events::DagExecutionEvent;
+use crate::dag_engine::domain::events::{DagExecutionEvent, NodeEndError};
 use crate::dag_engine::domain::node::ExecutableNode;
 use crate::dag_engine::domain::observer::{ChildScopeObserver, ExecutionObserver, NodeEvent};
 use crate::dag_engine::domain::tool_configuration::{
@@ -2397,11 +2397,23 @@ impl DagToolExecutor {
             result
         };
 
+        // Boundary close: emitted after masking (and re-masked again by
+        // `masked_boundary_observer`, defense in depth), so `output` and — on
+        // failure — `errorText` never carry a decrypted secure value.
         if let (Some(name), Some(obs)) = (&boundary, &masked_boundary_observer) {
+            let (output, error) = match &result {
+                Ok(value) => (value.clone(), None),
+                Err(e) => (
+                    Value::Null,
+                    Some(NodeEndError {
+                        message: Some(e.to_string()),
+                    }),
+                ),
+            };
             let finish = DagExecutionEvent::SubgraphNodeFinish {
                 node_id: name.clone(),
-                output: result.as_ref().cloned().unwrap_or(Value::Null),
-                error: None,
+                output,
+                error,
             };
             if let Ok(raw) = serde_json::to_value(&finish) {
                 obs.on_event(NodeEvent::SubgraphChildEvent(raw));
@@ -5645,6 +5657,115 @@ mod ephemeral_path_tests {
         assert_ne!(
             DagToolExecutor::ephemeral_subgraph_path("call_1"),
             DagToolExecutor::ephemeral_subgraph_path("call_2")
+        );
+    }
+}
+
+/// The `llm_call`/`for_each`-as-tool stream boundary must report the child
+/// node's own failure on its close, not just leave the caller to infer it
+/// from `ToolResult::success`. See `SubgraphNodeFinish::error`.
+#[cfg(test)]
+mod inner_work_tool_boundary_tests {
+    use super::*;
+    use crate::dag_engine::domain::node::NodeInputs;
+    use crate::llm::domain::FunctionCall;
+    use serde_json::json;
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct CapturingObserver(Mutex<Vec<NodeEvent>>);
+    impl ExecutionObserver for CapturingObserver {
+        fn on_event(&self, event: NodeEvent) {
+            self.0.lock().unwrap().push(event);
+        }
+    }
+
+    /// Node registered under the `llm_call` key (so `scopes_child_events`
+    /// treats it as an inner-work tool), whose behavior is chosen per test.
+    struct StubInnerNode(bool);
+    #[async_trait::async_trait]
+    impl ExecutableNode for StubInnerNode {
+        async fn execute(
+            &self,
+            inputs: &NodeInputs,
+            _c: &Value,
+            _s: &mut Value,
+            _o: Option<Arc<dyn ExecutionObserver>>,
+        ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+            if self.0 {
+                Err("gemini-does-not-exist-9000: model not found".into())
+            } else {
+                Ok(serde_json::to_value(inputs)?)
+            }
+        }
+        fn schema(&self) -> Value {
+            json!({ "type": "llm_call", "inputs": {} })
+        }
+    }
+
+    struct InnerNodeRegistry(bool);
+    impl NodeRegistryPort for InnerNodeRegistry {
+        fn get_node(&self, node_type: &str) -> Option<Arc<dyn ExecutableNode>> {
+            (node_type == "llm_call")
+                .then(|| Arc::new(StubInnerNode(self.0)) as Arc<dyn ExecutableNode>)
+        }
+        fn get_all_nodes(&self) -> HashMap<String, Arc<dyn ExecutableNode>> {
+            HashMap::new()
+        }
+    }
+
+    /// Runs `llm_call` once against a stub node that fails iff `should_fail`,
+    /// and returns (`ToolResult::success`, `SubgraphNodeFinish.error`).
+    async fn run(should_fail: bool) -> (bool, Option<NodeEndError>) {
+        let obs = Arc::new(CapturingObserver::default());
+        let executor =
+            DagToolExecutor::new(Arc::new(InnerNodeRegistry(should_fail)), HashMap::new())
+                .with_observer(Some(obs.clone()));
+        let tool_call = ToolCall::new(
+            "call_inner_boundary".to_string(),
+            FunctionCall::new("llm_call".to_string(), r#"{"prompt": "hi"}"#.to_string()),
+        );
+        let result = executor.execute(&tool_call).await.unwrap();
+        let finish_error = obs
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .find_map(|e| match e {
+                NodeEvent::SubgraphChildEvent(raw) => {
+                    match serde_json::from_value::<DagExecutionEvent>(raw.clone()).ok()? {
+                        DagExecutionEvent::SubgraphNodeFinish { node_id, error, .. }
+                            if node_id == "llm_call" =>
+                        {
+                            Some(error)
+                        }
+                        _ => None,
+                    }
+                }
+                _ => None,
+            })
+            .flatten();
+        (result.success, finish_error)
+    }
+
+    #[tokio::test]
+    async fn inner_work_tool_failure_closes_boundary_with_error_status() {
+        let (success, error) = run(true).await;
+        assert!(!success, "the tool result must report the node's failure");
+        let error = error.expect("failure close must carry `error: Some(..)`");
+        assert_eq!(
+            error.message.as_deref(),
+            Some("gemini-does-not-exist-9000: model not found")
+        );
+    }
+
+    #[tokio::test]
+    async fn inner_work_tool_success_closes_boundary_without_error_status() {
+        let (success, error) = run(false).await;
+        assert!(success);
+        assert!(
+            error.is_none(),
+            "a successful close must not carry an error"
         );
     }
 }

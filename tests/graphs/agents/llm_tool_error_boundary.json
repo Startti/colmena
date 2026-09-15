@@ -1,0 +1,51 @@
+{
+  "comment": "Error-status E2E for an llm_call-as-tool boundary: `Helper` (node_type: llm_call) is fixed to a nonexistent model, so its node.execute() fails. Asserts DagToolExecutor's stream-boundary close emits SubgraphNodeFinish with status:error + errorText for `Helper`, and the run still finishes (tool failure, not a run abort).",
+  "metadata": {
+    "category": "agents",
+    "features": ["llm_call_as_tool", "error_path", "node_end_status"],
+    "requires_env": ["GEMINI_API_KEY"]
+  },
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/llm_tool_error_boundary",
+        "method": "POST",
+        "test_payload": {
+          "prompt": "Necesito que el asistente Helper me explique en una frase qué es la fotosíntesis. Es obligatorio que uses la tool Helper para responder, sin excepción."
+        }
+      }
+    },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "model": "gemini-2.5-flash",
+        "api_key": "${GEMINI_API_KEY}",
+        "temperature": 0,
+        "system_message": "Eres un coordinador. SIEMPRE debes delegar cualquier explicación en la tool `Helper`, sin excepción y sin responder tú mismo primero. Llama a `Helper` con el tema a explicar. Si la tool devuelve un error, informa al usuario en una frase que el asistente no pudo responder.",
+        "stream": true,
+        "tool_configurations": {
+          "Helper": {
+            "name": "Helper",
+            "node_type": "llm_call",
+            "description": "Asistente que explica un tema en una frase. SIEMPRE debe usarse para cualquier pregunta conceptual.",
+            "fixed_config": {
+              "provider": "google",
+              "model": "gemini-does-not-exist-9000",
+              "api_key": "${GEMINI_API_KEY}",
+              "stream": true
+            }
+          }
+        }
+      }
+    },
+    "out": {
+      "type": "output"
+    }
+  },
+  "edges": [
+    { "from": "trigger", "to": "agent" },
+    { "from": "agent.result", "to": "out" }
+  ]
+}

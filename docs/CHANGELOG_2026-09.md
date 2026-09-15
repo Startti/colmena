@@ -3296,3 +3296,33 @@ cambio de forma.
 **Pendiente.** Los frames de un nodo de grafo normal (no despachado como tool)
 siguen sin enmascarar — ver
 [13_security_strategy.md](developer_guide/13_security_strategy.md).
+
+## 60. La frontera de una tool `llm_call`/`for_each` es el primer emisor real de `status`/`errorText`
+
+PR 2/4 de "cierre de fronteras en error". §58 landeó solo el contrato de wire;
+este PR hace que `DagToolExecutor::execute_inner` lo llene de verdad —
+construido sobre el masking unificado que §59 acaba de introducir.
+
+**`DagToolExecutor::execute_inner`.** El cierre de la frontera de una tool
+`llm_call`/`for_each` (`scopes_child_events`) ya emitía su `SubgraphNodeFinish`
+en éxito y en error, en un único sitio DESPUÉS de `mask_outbound` (§59 lo
+movió ahí y lo puso a emitir sobre `masked_boundary_observer`) — eso no es
+nuevo. Cambia: ese sitio ahora rama en `Ok`/`Err` del `result` ya enmascarado:
+`Ok` sigue con `error: None`; `Err` construye `output: null` y `error:
+Some(NodeEndError { message: Some(<texto ya enmascarado por §59> ) })`. La
+frontera de `SubGraphNode` y los nodos internos de un run anidado **no** ganan
+`status` en este PR — alcance de los PRs 3 y 4.
+
+**Tests.** `dag_tool_executor.rs` (2, nuevo módulo `inner_work_tool_boundary_tests`
+con un registro de nodos stub bajo la clave `llm_call`):
+`inner_work_tool_failure_closes_boundary_with_error_status`,
+`inner_work_tool_success_closes_boundary_without_error_status`.
+
+**E2E.** `tests/graphs/agents/llm_tool_error_boundary.json` (Gemini real, tool
+`Helper` → `gemini-does-not-exist-9000`): cierre con `status:"error"` +
+`errorText`, antes del `tool-output-available`, sin frame `error`. Éxito:
+`tests/graphs/agents/subgraph_tool_basic.json`, sin `status`. Verificador:
+`scripts/verify_node_end_status_e2e.py`.
+
+**ADP.** Aditivo — [nota de migración](adp_migration/2026-09-15-node-end-error-status.md)
+actualizada; cambio recomendado de una línea en `closeNode(...)`.
