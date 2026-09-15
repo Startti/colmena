@@ -1,4 +1,8 @@
-use crate::dag_engine::domain::{error::DagError, secure_value_repository::SecureValueRepository};
+use crate::dag_engine::domain::{
+    error::DagError,
+    observer::{ExecutionObserver, NodeEvent},
+    secure_value_repository::SecureValueRepository,
+};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -18,6 +22,56 @@ pub struct SecureValueService {
 /// this rule would eventually let one session reuse another's credential.
 pub(crate) fn is_secure_value_placeholder(s: &str) -> bool {
     s.starts_with('<') && s.ends_with('>') && s.len() > 2
+}
+
+/// Masks decrypted secure values out of every stream event forwarded to
+/// `inner`, rewriting them back to their handles.
+///
+/// A tool call has two egresses for a secret it decrypted: the result handed
+/// to the LLM (masked by [`SecureValueService::mask_outbound`]) and the events
+/// its execution streams while it runs (child node frames of a subgraph tool,
+/// `for_each` batch frames, the boundary node-end). This covers the second.
+///
+/// Generic on purpose: the whole [`NodeEvent`] is serialized, masked and
+/// deserialized back, so a field added to any variant later is covered too.
+/// Limitation: a secret split across two separately streamed tokens is not
+/// caught.
+pub struct MaskingObserver {
+    inner: Arc<dyn ExecutionObserver>,
+    mapping: HashMap<String, String>,
+}
+
+impl MaskingObserver {
+    /// Returns `inner` unchanged when there is nothing to mask.
+    pub fn wrap(
+        inner: Option<Arc<dyn ExecutionObserver>>,
+        mapping: &HashMap<String, String>,
+    ) -> Option<Arc<dyn ExecutionObserver>> {
+        let inner = inner?;
+        if mapping.is_empty() {
+            return Some(inner);
+        }
+        Some(Arc::new(Self {
+            inner,
+            mapping: mapping.clone(),
+        }))
+    }
+}
+
+impl ExecutionObserver for MaskingObserver {
+    fn on_event(&self, event: NodeEvent) {
+        let masked = serde_json::to_value(&event).and_then(|mut raw| {
+            SecureValueService::mask_secrets(&mut raw, &self.mapping);
+            serde_json::from_value::<NodeEvent>(raw)
+        });
+        match masked {
+            Ok(event) => self.inner.on_event(event),
+            // Never forward the unmasked original.
+            Err(e) => {
+                tracing::warn!(error = %e, "dropping a stream event that could not be masked")
+            }
+        }
+    }
 }
 
 impl SecureValueService {
@@ -263,6 +317,11 @@ impl SecureValueService {
     /// skipped as a defense-in-depth check (secure_suspend already rejects
     /// short values at persist time).
     pub fn mask_outbound(&self, value: &mut Value, mapping: &HashMap<String, String>) {
+        Self::mask_secrets(value, mapping);
+    }
+
+    /// [`Self::mask_outbound`] without a service instance.
+    pub fn mask_secrets(value: &mut Value, mapping: &HashMap<String, String>) {
         if mapping.is_empty() {
             return;
         }
@@ -757,5 +816,53 @@ mod tests {
             .handle_exists("ephemeral_B", Some("agent_demo_001"), &handle)
             .await
             .unwrap());
+    }
+
+    #[derive(Default)]
+    struct RecordingObserver(Mutex<Vec<NodeEvent>>);
+    impl ExecutionObserver for RecordingObserver {
+        fn on_event(&self, event: NodeEvent) {
+            self.0.lock().unwrap().push(event);
+        }
+    }
+
+    #[test]
+    fn masking_observer_rewrites_secrets_to_handles_in_every_event_shape() {
+        let map: HashMap<String, String> =
+            [("SECRET_abcd".to_string(), "<sv_tok_1>".to_string())].into();
+        let sink = Arc::new(RecordingObserver::default());
+        let obs = MaskingObserver::wrap(Some(sink.clone()), &map).unwrap();
+
+        obs.on_event(NodeEvent::SubgraphChildEvent(serde_json::json!({
+            "event": "node_start", "data": { "inputs": { "token": "SECRET_abcd" } }
+        })));
+        obs.on_event(NodeEvent::BatchItemFinished {
+            node_id: "for_each".into(),
+            index: 0,
+            key: "token=\"SECRET_abcd\"".into(),
+            status: "ok".into(),
+        });
+        obs.on_event(NodeEvent::LlmToken {
+            token: "is SECRET_abcd".into(),
+        });
+
+        let events = sink.0.lock().unwrap();
+        assert_eq!(events.len(), 3, "no event may be dropped");
+        let all = serde_json::to_string(&*events).unwrap();
+        assert!(!all.contains("SECRET_abcd"), "leaked: {all}");
+        assert_eq!(
+            all.matches("<sv_tok_1>").count(),
+            3,
+            "masked in place: {all}"
+        );
+    }
+
+    #[test]
+    fn masking_observer_wrap_is_a_no_op_without_secrets() {
+        let sink: Arc<dyn ExecutionObserver> = Arc::new(RecordingObserver::default());
+        let same = MaskingObserver::wrap(Some(sink.clone()), &HashMap::new()).unwrap();
+        assert!(Arc::ptr_eq(&sink, &same));
+        let map: HashMap<String, String> = [("SECRET_abcd".into(), "<h>".into())].into();
+        assert!(MaskingObserver::wrap(None, &map).is_none());
     }
 }

@@ -1,0 +1,83 @@
+{
+  "comment": "E2E: a secure value must never appear in plaintext on the SSE stream. The agent collects a secret with secure_suspend (it only sees the handle) and passes the handle to three tools whose inner python_script reads the decrypted value: `verificar_token` (subgraph tool, echoes it), `verificar_lote` (for_each tool, echoes it per row) and `verificar_falla` (subgraph tool, raises an error quoting it). `es_handle` / `largo` prove the node received the REAL value (false / the secret's length) while the stream only carries the handle. Run twice with the same --agent-session-id: run 1 suspends, run 2 answers with a unique secret; assert that secret is absent from the whole run-2 capture.",
+  "metadata": {
+    "category": "security",
+    "features": ["secure_suspend", "secure_values", "outbound_masking", "subgraph_as_tool", "for_each", "python_script"],
+    "requires_env": ["GEMINI_API_KEY", "DATABASE_URL"]
+  },
+  "nodes": {
+    "trigger": { "type": "input", "config": { "default": "Necesito registrar mi token de API y comprobar que el sistema lo recibe bien." } },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "model": "gemini-2.5-flash",
+        "api_key": "${GEMINI_API_KEY}",
+        "connection_url": "${DATABASE_URL}",
+        "temperature": 0.0,
+        "stream": true,
+        "system_message": "Eres un agente de verificación de credenciales. Pide el token del usuario con `ask_secret` usando un único secreto llamado `api_token`. Con el handle que te devuelva, llama EXACTAMENTE UNA VEZ a cada tool: `verificar_token` (token = handle), `verificar_lote` (items = una sola fila con token = handle) y `verificar_falla` (token = handle). Pega el handle exacto, nunca inventes valores. Termina con una frase indicando si las tools devolvieron handles o valores en texto plano.",
+        "tool_configurations": {
+          "ask_secret": { "name": "ask_secret", "node_type": "secure_suspend" },
+          "verificar_token": {
+            "name": "verificar_token",
+            "node_type": "subgraph",
+            "description": "Verifica un token ejecutando un sub-grafo que lo lee.",
+            "node_schema": {
+              "child_graph_inline": { "fixed": {
+                "nodes": {
+                  "probe": { "type": "python_script", "config": { "sandbox_mode": "none", "code": "output = {\"eco\": token, \"es_handle\": token.startswith(\"<\"), \"largo\": len(token)}" } },
+                  "out": { "type": "output", "config": {} }
+                },
+                "edges": [ { "from": "probe", "to": "out" } ]
+              } },
+              "token": { "type": "string", "required": true, "description": "El handle <sv_*> devuelto por ask_secret." }
+            }
+          },
+          "verificar_lote": {
+            "name": "verificar_lote",
+            "node_type": "for_each",
+            "description": "Verifica una lista de tokens, uno por fila.",
+            "node_schema": {
+              "on_error": { "fixed": "continue" },
+              "items": {
+                "type": "array",
+                "required": true,
+                "description": "Filas, cada una con `token` = handle <sv_*>.",
+                "items": { "type": "object", "properties": { "token": { "type": "string", "required": true, "description": "El handle <sv_*>." } } }
+              },
+              "target": { "fixed": {
+                "node_type": "python_script",
+                "node_schema": {
+                  "sandbox_mode": { "fixed": "none" },
+                  "code": { "fixed": "output = {\"eco\": token, \"es_handle\": token.startswith(\"<\")}" },
+                  "token": { "type": "string", "required": true }
+                }
+              } }
+            }
+          },
+          "verificar_falla": {
+            "name": "verificar_falla",
+            "node_type": "subgraph",
+            "description": "Valida el formato de un token con un sub-grafo estricto.",
+            "node_schema": {
+              "child_graph_inline": { "fixed": {
+                "nodes": {
+                  "strict": { "type": "python_script", "config": { "sandbox_mode": "none", "code": "raise ValueError(\"formato invalido para token \" + token)" } },
+                  "out": { "type": "output", "config": {} }
+                },
+                "edges": [ { "from": "strict", "to": "out" } ]
+              } },
+              "token": { "type": "string", "required": true, "description": "El handle <sv_*> devuelto por ask_secret." }
+            }
+          }
+        }
+      }
+    },
+    "show": { "type": "log" }
+  },
+  "edges": [
+    { "from": "trigger", "to": "agent", "field": "prompt" },
+    { "from": "agent", "to": "show" }
+  ]
+}
