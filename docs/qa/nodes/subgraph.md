@@ -549,3 +549,23 @@ for e in events:
 **Resultado esperado**: Config wins (línea 51-52); child loads `{ "from": "config_key" }`.  
 **Pass/Fail**: Verificar que child usa config source (e.g., by checking its execution or logs).
 
+---
+
+### Caso S3.10: Boundary cierra cuando el child falla (subgraph-as-tool)
+
+**Objetivo**: un `subgraph`-as-tool cuyo child falla cierra su frontera en vez
+de quedar abierta para siempre (bug de ADP). Contrato completo:
+[guide 19](../../developer_guide/19_nested_agents_and_subgraphs.md#cuando-el-sub-agente-falla).
+
+```bash
+cargo run --bin dag_engine -- run tests/graphs/agents/subgraph_tool_error_boundary.json \
+  --session-id s3_10_001 > /tmp/colmena_e2e/subgraph_tool_error_boundary.sse
+python3 scripts/verify_node_end_status_e2e.py /tmp/colmena_e2e/subgraph_tool_error_boundary.sse \
+  --closed-error 'agent>Helper' --closed-before-tool-output \
+  --open 'agent>Helper>helper_llm' --no-frame error --no-frame subgraph-error
+```
+
+**Pass/Fail**: las 5 verificaciones del script pasan (verificado en vivo).
+Direcciones adicionales verificadas igual: éxito (`subgraph_tool_basic.json`)
+y SUSPENDED (`subgraph_tool_hitl.json` run 1).
+

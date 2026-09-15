@@ -3366,3 +3366,22 @@ un valor descifrado. Sin cambio de forma.
 
 **Pendiente.** El nodo `log` imprime su input descifrado por stdout del proceso
 (fuera del stream SSE).
+
+## 62. Fix: la frontera de un `subgraph`-as-tool cierra cuando su child falla (el bug reportado por ADP)
+
+PR 3/4 de "cierre de fronteras en error". Antes: la frontera de una tool
+`subgraph` cuyo child fallaba quedaba abierta para siempre. Ver
+[guide 19](developer_guide/19_nested_agents_and_subgraphs.md#cuando-el-sub-agente-falla)
+y [sse_events_reference.md](sse_events_reference.md#nodo-que-falla) para el
+contrato completo — no repetido aquí.
+
+**`SubGraphNode::execute`.** Resuelve el executor antes del `node-start`;
+`match` sobre `run_subgraph(...).await` cierra en `Err` antes de re-lanzar,
+con `errorText` gateado a `BoundarySource::Tool` (masked por
+`MaskingObserver`, #310/#312).
+
+**Tests.** `subgraph_tool_failure_close_tests` (8, TDD red-first — 5 fallan
+pre-fix). **E2E.** `subgraph_tool_error_boundary.json`, éxito y SUSPENDED
+verificados; `agent>Helper>helper_llm` queda abierto (PR siguiente).
+
+**ADP.** [Nota de migración](adp_migration/2026-09-15-subgraph-tool-boundary-closes-on-failure.md).

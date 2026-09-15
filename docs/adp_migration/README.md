@@ -6,11 +6,12 @@ ve ADP antes y después, qué tiene que hacer ADP, y qué se rompe si no hace na
 
 Los cambios que quedan dentro del motor no llevan nota aquí.
 
-## 2026-09-15 — `node-end`/`subgraph-node-end` ganan `status`/`errorText`; frontera de tool `llm_call`/`for_each` es el primer emisor
+## 2026-09-15 — `node-end`/`subgraph-node-end` ganan `status`/`errorText`; fronteras de tool cierran al fallar
 
 | # | Nota | Acción de ADP | Qué se rompe si se ignora |
 |---|------|---------------|---------------------------|
 | 1 | [`status`/`errorText` en el cierre de una tool `llm_call`/`for_each`](2026-09-15-node-end-error-status.md) | Recomendada — cambio de una línea en `closeNode(...)` en `event-tree-builder.ts` y `colmena-events.reducer.ts` | Nada; sin el cambio, un sub-agente que falló sigue pintándose como `'done'`, igual que hoy |
+| 2 | [La frontera de un `subgraph`-as-tool cierra cuando su child falla](2026-09-15-subgraph-tool-boundary-closes-on-failure.md) | Ninguna nueva — la mitigación de path-prefix en `fix/dangling-subgraph-nodes` se vuelve un no-op para la frontera (el nodo interno todavía la necesita) | Nada; el motor ya cierra el `node_id` de la frontera antes de que la mitigación tuviera que hacerlo |
 
 ## 2026-09-02 — `validate_graph` valida de verdad
 
