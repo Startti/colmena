@@ -1081,6 +1081,30 @@ Si pasaste handles viejos (`<sv_*>` sin sufijo) en conversation history persisti
 
 ---
 
+## Tool-argument `${VAR}` expansion provenance (2026-09)
+
+The goal (not yet enforced — see below): `${VAR}`-shaped placeholders
+anywhere in this document (the Amadeus `${context.amadeus_token}` examples, a
+fixed `bearer_token: "${AMADEUS_TOKEN}"`) should resolve against the process
+environment **only when operator-authored** — `node_schema` `fixed`,
+`fixed_config`, or the fixed portion of a `$DYNAMIC` template. An
+LLM-authored tool argument containing the identical-looking text (e.g. the
+model calling a tool with `q: "${DATABASE_URL}"`) should never be looked up
+against the environment.
+
+This dispatch computes, per tool call, the set of JSON pointers still
+identical to their operator-authored value
+(`__colmena_env_trusted_paths`, `env_provenance.rs`, wired in
+`DagToolExecutor::execute_inner` right after the merge — see
+[22_tool_execution_flow.md § 5e](22_tool_execution_flow.md#5e-env-expansion-provenance-which-values-may-later-resolve-var)).
+**Still pending:** no node gates its `${VAR}` expansion by this set yet —
+every node still expands `${VAR}` unconditionally. The pointer set is
+computed and carried correctly; per-node gating is a follow-up change, which
+also excludes the graph-edge path and `subgraph`/`llm_call`-as-tool child
+graphs (both run in legacy/unrestricted mode per the design).
+
+---
+
 ## References
 
 - [Secure Values — diseño](../dds/SECURE_VALUES_DISEÑO.md)
