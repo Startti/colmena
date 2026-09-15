@@ -3257,3 +3257,42 @@ emisor.
 
 **ADP.** Aditivo, sin acción requerida todavía — [nota de
 migración](adp_migration/2026-09-15-node-end-error-status.md).
+
+## 59. Fix: un valor seguro descifrado para una tool ya no viaja en texto plano por el stream
+
+**Problema (preexistente, reproducido en vivo).** El resultado que ve el LLM
+ya se enmascaraba, pero el stream SSE no. Con `secure_suspend` → handle
+`<sv_api_token_…>` pasado a tools: los frames `subgraph-node-start`/`-end` del
+hijo de un `subgraph` usado como tool, el `subgraph-node-end` de cierre de un
+`for_each` usado como tool y su `batch-item-finished.key` salían con el valor
+real. 8 apariciones del secreto en una sola captura.
+
+**Causa.** `DagToolExecutor` descifra los handles en `inputs`, pero
+`mask_outbound` solo tocaba el `ToolResult`. El observer que recibe el nodo
+despachado no enmascaraba nada, y el frame de cierre se emitía con el resultado
+crudo ANTES del bloque de enmascarado.
+
+**Fix.** `MaskingObserver` (`secure_value_service.rs`) serializa cada
+`NodeEvent`, reemplaza cada valor descifrado por su handle y lo reenvía; si no
+puede enmascarar, descarta el evento en vez de reenviarlo crudo. El executor
+envuelve con él el observer del nodo y el del boundary (no-op si la llamada no
+descifró nada), y el cierre del boundary ahora sale después de enmascarar.
+Genérico a propósito: cubre también campos agregados después (p. ej. el
+`error` de los frames de cierre).
+
+**Tests.** `masking_observer_*` (2) y
+`tool_dispatch_masks_decrypted_secrets_out_of_stream_events`. Mutaciones (sin
+envolver el observer del nodo; cierre crudo antes del enmascarado): ambas
+hacen fallar el test.
+
+**E2E.** `tests/graphs/security/secure_value_stream_leak_e2e.json`, dos runs con
+el mismo `--agent-session-id`: 0 apariciones del secreto en la captura del run
+2 (29 del handle). `es_handle: false` y `largo: 14` prueban que el nodo recibió
+el valor real mientras el stream solo lleva el handle.
+
+**Impacto en ADP.** Esos frames traen el handle donde traían el valor; sin
+cambio de forma.
+
+**Pendiente.** Los frames de un nodo de grafo normal (no despachado como tool)
+siguen sin enmascarar — ver
+[13_security_strategy.md](developer_guide/13_security_strategy.md).

@@ -509,6 +509,19 @@ The engine runs `inject_secrets` on a node's **inputs AND config** before execut
 
 ---
 
+### Note: A Decrypted Secret Has Two Egress Points, Both Masked (For Tool Dispatch)
+
+`inject_secrets` decrypts `<sv_*>`/`<value_N>` handles back into their real value before a node runs. That real value can then leave the engine through two separate channels, and both are masked back to the handle:
+
+1. **The tool result handed to the LLM** — `SecureValueService::mask_outbound` rewrites the node's `Ok`/`Err` output before it becomes the `ToolResult` the model reads.
+2. **Every stream event emitted while that tool runs** — a `subgraph` (or `llm_call`) dispatched as a tool can echo the secret into its own child node frames (`subgraph-node-start`/`subgraph-node-end`); `for_each` can echo it into `BatchItemFinished.key`; the tool's own boundary `subgraph_node_finish` frame can echo it in `output`. `DagToolExecutor` wraps the observer passed into the dispatched node — and the observer used for the boundary start/finish frames — with `MaskingObserver`, which masks every field of every emitted event generically (see `secure_value_service.rs`).
+
+Both masking passes read from the same `applied_secrets` map `inject_secrets` returned, so a handle that never got decrypted is never a masking target, and a secret decrypted for one tool call cannot mask a different call's output.
+
+**Known limitation:** this covers a *tool* dispatch (`DagToolExecutor`). A **graph node** running as a normal DAG step (not via a tool call) does not go through this masking — its `node-start`/`node-finish` stream frames can still carry `config`/`inputs` with a decrypted secret verbatim. That is a separate, not-yet-implemented fix.
+
+---
+
 ### Note: LLM Tool Suspend Propagation
 
 When `secure_suspend` (or any suspendable node) is used as an LLM tool via `tool_configurations`, the `llm_call` node propagates suspension correctly:

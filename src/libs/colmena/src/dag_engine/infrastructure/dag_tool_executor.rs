@@ -24,7 +24,7 @@
 
 use crate::colmena_log;
 use crate::dag_engine::application::ports::NodeRegistryPort;
-use crate::dag_engine::application::secure_value_service::SecureValueService;
+use crate::dag_engine::application::secure_value_service::{MaskingObserver, SecureValueService};
 use crate::dag_engine::domain::events::DagExecutionEvent;
 use crate::dag_engine::domain::node::ExecutableNode;
 use crate::dag_engine::domain::observer::{ChildScopeObserver, ExecutionObserver, NodeEvent};
@@ -2321,6 +2321,9 @@ impl DagToolExecutor {
         //
         // Every other node type keeps the raw observer. `subgraph` in particular
         // re-parents its own child events and would come out double-wrapped.
+        //
+        // Masked: whatever this node streams while it runs (a sub-agent's node
+        // frames, `for_each` rows) may echo a secret decrypted above.
         let node_observer: Option<Arc<dyn ExecutionObserver>> =
             if scopes_child_events(dispatched_node_type) {
                 self.observer
@@ -2329,16 +2332,19 @@ impl DagToolExecutor {
             } else {
                 self.observer.clone()
             };
+        let node_observer = MaskingObserver::wrap(node_observer, &applied_secrets);
 
         // Stream boundary. `subgraph` emits its own pair from inside the node,
         // but `llm_call` and `for_each` had none, so a consumer got their nested
         // frames with no marker saying where that sub-tree opened or closed —
         // two code paths in the frontend for what is the same idea. Emitted on
-        // the RAW observer so the boundary sits one level ABOVE the content it
-        // delimits, matching how a subgraph-as-tool already reads.
+        // the RAW observer (masked too) so the boundary sits one level ABOVE the
+        // content it delimits, matching how a subgraph-as-tool already reads.
         let boundary =
             scopes_child_events(dispatched_node_type).then(|| tool_call.function.name.clone());
-        if let (Some(name), Some(obs)) = (&boundary, &self.observer) {
+        let masked_boundary_observer =
+            MaskingObserver::wrap(self.observer.clone(), &applied_secrets);
+        if let (Some(name), Some(obs)) = (&boundary, &masked_boundary_observer) {
             // Identity of the node that is about to run. The run loop reads
             // `provider`/`model` off this frame to label the node's row in
             // `usage-summary`; without them the row reported `model: null,
@@ -2369,21 +2375,11 @@ impl DagToolExecutor {
             .execute(&inputs, &node_exec_config, &mut state, node_observer)
             .await;
 
-        if let (Some(name), Some(obs)) = (&boundary, &self.observer) {
-            let finish = DagExecutionEvent::SubgraphNodeFinish {
-                node_id: name.clone(),
-                output: result.as_ref().cloned().unwrap_or(Value::Null),
-                error: None,
-            };
-            if let Ok(raw) = serde_json::to_value(&finish) {
-                obs.on_event(NodeEvent::SubgraphChildEvent(raw));
-            }
-        }
-
         // SECURE VALUES (Task 11): mask decrypted secrets back to their handles
         // before any downstream handling. This runs unconditionally (independent of
         // `is_secure`) and on BOTH Ok and Err paths so error messages cannot leak
         // a secret either. Must precede `hash_output` so the masker sees raw values.
+        // Also precedes the boundary close below, which streams this result.
         let result = if let Some(svc) = &self.secure_value_service {
             match result {
                 Ok(mut value) => {
@@ -2400,6 +2396,17 @@ impl DagToolExecutor {
         } else {
             result
         };
+
+        if let (Some(name), Some(obs)) = (&boundary, &masked_boundary_observer) {
+            let finish = DagExecutionEvent::SubgraphNodeFinish {
+                node_id: name.clone(),
+                output: result.as_ref().cloned().unwrap_or(Value::Null),
+                error: None,
+            };
+            if let Ok(raw) = serde_json::to_value(&finish) {
+                obs.on_event(NodeEvent::SubgraphChildEvent(raw));
+            }
+        }
 
         // 4. Apply Secure Value hashing BEFORE returning to LLM
         // This is the critical step: if the tool has `secure: true`, all sensitive
@@ -4450,6 +4457,135 @@ mod tests {
 
         let exec = exec.with_subgraph_depth(2);
         assert_eq!(exec.subgraph_depth, 2);
+    }
+
+    /// Decrypts exactly one handle; every other repository operation is a no-op.
+    struct OneSecretRepo;
+
+    #[async_trait]
+    impl crate::dag_engine::domain::secure_value_repository::SecureValueRepository for OneSecretRepo {
+        async fn persist(
+            &self,
+            _: &str,
+            _: Option<&str>,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &str,
+        ) -> Result<(), crate::dag_engine::domain::error::DagError> {
+            Ok(())
+        }
+        async fn decrypt(
+            &self,
+            _: &str,
+            _: Option<&str>,
+            handle: &str,
+        ) -> Result<Option<String>, crate::dag_engine::domain::error::DagError> {
+            Ok((handle == "<sv_tok_1>").then(|| "LEAKTOK_q8w2e5".to_string()))
+        }
+        async fn cleanup(&self, _: &str) -> Result<(), crate::dag_engine::domain::error::DagError> {
+            Ok(())
+        }
+        async fn cleanup_expired(&self) -> Result<u64, crate::dag_engine::domain::error::DagError> {
+            Ok(0)
+        }
+        async fn cleanup_expired_for_run(
+            &self,
+            _: &str,
+            _: Option<&str>,
+        ) -> Result<u64, crate::dag_engine::domain::error::DagError> {
+            Ok(0)
+        }
+    }
+
+    /// Registered as `for_each`: streams the decrypted `token` as a row key and
+    /// echoes it in its output, as the real node does with a row's input.
+    struct SecretEchoNode;
+
+    #[async_trait]
+    impl ExecutableNode for SecretEchoNode {
+        async fn execute(
+            &self,
+            inputs: &NodeInputs,
+            _config: &Value,
+            _state: &mut Value,
+            observer: Option<Arc<dyn ExecutionObserver>>,
+        ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+            let token = inputs
+                .get("token")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            if let Some(obs) = &observer {
+                obs.on_event(NodeEvent::BatchItemFinished {
+                    node_id: "for_each".into(),
+                    index: 0,
+                    key: token.to_string(),
+                    status: "ok".into(),
+                });
+            }
+            Ok(serde_json::json!({ "eco": token }))
+        }
+
+        fn schema(&self) -> Value {
+            serde_json::json!({ "type": "for_each" })
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingStreamObserver(std::sync::Mutex<Vec<NodeEvent>>);
+    impl ExecutionObserver for RecordingStreamObserver {
+        fn on_event(&self, event: NodeEvent) {
+            self.0.lock().unwrap().push(event);
+        }
+    }
+
+    /// A secret decrypted for a tool call must not reach the event stream: not in
+    /// what the node streams while it runs, nor in the boundary close, which used
+    /// to be emitted with the raw result before masking ran.
+    #[tokio::test]
+    async fn tool_dispatch_masks_decrypted_secrets_out_of_stream_events() {
+        let mut nodes: HashMap<String, Arc<dyn ExecutableNode>> = HashMap::new();
+        nodes.insert("for_each".to_string(), Arc::new(SecretEchoNode));
+        let mut tool_configs = HashMap::new();
+        tool_configs.insert(
+            "verificar_lote".to_string(),
+            serde_json::from_value::<ToolConfiguration>(serde_json::json!({
+                "name": "verificar_lote",
+                "node_type": "for_each",
+                "node_schema": { "token": { "type": "string", "required": true } }
+            }))
+            .unwrap(),
+        );
+        let recorder = Arc::new(RecordingStreamObserver::default());
+        let exec = DagToolExecutor::new(Arc::new(MockRegistry { nodes }), tool_configs)
+            .with_secure_values(
+                Arc::new(SecureValueService::new(Arc::new(OneSecretRepo))),
+                "session_1".to_string(),
+            )
+            .with_observer(Some(recorder.clone() as Arc<dyn ExecutionObserver>));
+        let call = ToolCall::new(
+            "call_1".into(),
+            FunctionCall::new("verificar_lote".into(), r#"{"token":"<sv_tok_1>"}"#.into()),
+        );
+
+        let result = exec.execute(&call).await.unwrap();
+        assert!(result.success, "{}", result.output);
+
+        let events = recorder.0.lock().unwrap();
+        let stream = serde_json::to_string(&*events).unwrap();
+        assert!(!stream.contains("LEAKTOK_q8w2e5"), "leaked: {stream}");
+        let close = events
+            .iter()
+            .find_map(|e| match e {
+                NodeEvent::SubgraphChildEvent(v) if v["event"] == "subgraph_node_finish" => Some(v),
+                _ => None,
+            })
+            .expect("boundary close must still be emitted");
+        assert!(close.to_string().contains("<sv_tok_1>"), "{close}");
+        assert!(
+            stream.contains(r#""key":"<sv_tok_1>""#),
+            "row key must be masked, not dropped: {stream}"
+        );
     }
 
     /// Security: an LLM-supplied tool-call argument must NEVER override an
