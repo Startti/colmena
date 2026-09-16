@@ -50,13 +50,17 @@ Los eventos de subgrafo nunca se mezclan con los de top-level: si estás dentro 
 `status`/`errorText` son **aditivos** (un cierre exitoso no lleva ninguna
 clave). El contrato: un nodo que falla cierra con `"status": "error"` y
 `output: null`; `errorText` acompaña solo si el texto ya estaba enmascarado
-contra secure values (`MaskingObserver`, #310). Eso cubre el cierre de una
-tool `llm_call`/`for_each` y, desde esta entrega, la frontera propia de un
-`subgraph`-as-tool (`__colmena_tool_name`); un `subgraph` de `orchestrator` o
-por aristas cierra igual pero sin `errorText`. Los nodos internos de un run
-anidado **todavía no** reportan su falla — próximo PR de esta serie. El nodo
-raíz sigue cerrando con el frame `error` (más abajo). Ver la
-[nota de migración](adp_migration/2026-09-15-node-end-error-status.md).
+contra secure values (`MaskingObserver`, #310/#312) — el mismo string
+enmascarado que el `DagError` propagado, nunca el texto crudo. Eso cubre el
+cierre de una tool `llm_call`/`for_each`, la frontera de un `subgraph`-as-tool
+(`__colmena_tool_name`), y **todo nodo dentro de un run anidado** que falle.
+**Contrato:** todo `node-start`/`subgraph-node-start` recibe exactamente un
+cierre **por path** — un `subgraph` anidado por edge tiene DOS starts (el
+propio y su boundary interno, #313) y por tanto DOS ends. En el run **raíz**
+ese cierre es siempre el frame `error` de nivel superior (más abajo), nunca
+inferido de `path_prefix`. Ver
+las notas de migración [del contrato aditivo](adp_migration/2026-09-15-node-end-error-status.md)
+y [del cierre de nodos internos](adp_migration/2026-09-15-nested-node-failure-closes.md).
 
 ```json
 { "type": "subgraph-node-end", "node_id": "Helper", "output": null, "status": "error", "errorText": "Request failed: model not found" }

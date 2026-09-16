@@ -1,0 +1,42 @@
+{
+  "comment": "Live proof for the double-close fix (PR 4/4 of 'close nested node boundaries on failure'): an edge-wired `subgraph` node (`inner_sub`) nested one level inside another edge-wired `subgraph` node (`outer`), whose own inner node raises. Two DISTINCT start/end pairs must balance for node_id `inner_sub`: the run loop's own (path `outer>inner_sub`) and `SubGraphNode`'s self-emitted inner boundary (path `outer>inner_sub>inner_sub`, #313). An earlier version of this fix skipped the loop-level close whenever node_type==subgraph, reasoning it would double the self-close — it actually left the loop-level start permanently dangling, since the two pairs are at different paths, not duplicates.",
+  "metadata": {
+    "category": "advanced",
+    "features": ["subgraph", "nested_execution", "error_path", "node_end_status"],
+    "requires_env": ["DATABASE_URL"]
+  },
+  "nodes": {
+    "seed": {
+      "type": "input",
+      "config": {
+        "data": {
+          "child_graph_inline": {
+            "nodes": {
+              "seed2": {
+                "type": "input",
+                "config": {
+                  "data": {
+                    "child_graph_inline": {
+                      "nodes": {
+                        "boom": {
+                          "type": "python_script",
+                          "config": { "code": "raise Exception('boom: inner node failed')" }
+                        },
+                        "out": { "type": "output" }
+                      },
+                      "edges": [{ "from": "boom", "to": "out" }]
+                    }
+                  }
+                }
+              },
+              "inner_sub": { "type": "subgraph", "config": {} }
+            },
+            "edges": [{ "from": "seed2", "to": "inner_sub" }]
+          }
+        }
+      }
+    },
+    "outer": { "type": "subgraph", "config": {} }
+  },
+  "edges": [{ "from": "seed", "to": "outer" }]
+}

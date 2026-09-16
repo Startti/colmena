@@ -33,6 +33,10 @@ pub struct DagRunUseCase {
     /// the recursion ceiling stopped applying — no warning, no error. Seeding in
     /// memory makes the handover independent of persistence.
     seed_state: Option<Value>,
+    /// Set only by `run_subgraph`/`resume_subgraph` on the cloned child use
+    /// case — never derived from `path_prefix`. Gates the close-on-error
+    /// below; a root run's failing node stays closed only by `error`.
+    nested_run: bool,
 }
 
 impl DagRunUseCase {
@@ -46,6 +50,7 @@ impl DagRunUseCase {
             secure_value_service: None,
             liveness: LivenessSettings::default(),
             seed_state: None,
+            nested_run: false,
         }
     }
 
@@ -65,6 +70,7 @@ impl DagRunUseCase {
             secure_value_service: Some(secure_value_service),
             liveness: LivenessSettings::default(),
             seed_state: None,
+            nested_run: false,
         }
     }
 
@@ -90,6 +96,13 @@ impl DagRunUseCase {
     /// round-trip. See [`Self::seed_state`].
     pub fn with_seed_state(mut self, state: Value) -> Self {
         self.seed_state = Some(state);
+        self
+    }
+
+    /// Marks this use case as running a nested (child) graph.
+    #[allow(clippy::wrong_self_convention)] // "treat self as a nested run", not a type conversion
+    pub(crate) fn as_nested_run(mut self) -> Self {
+        self.nested_run = true;
         self
     }
 
@@ -211,8 +224,18 @@ impl DagRunUseCase {
         Item = Result<crate::dag_engine::domain::events::DagExecutionEvent, DagError>,
     > {
         async_stream::try_stream! {
-            use crate::dag_engine::domain::events::DagExecutionEvent;
+            use crate::dag_engine::domain::events::{DagExecutionEvent, NodeEndError};
             use crate::dag_engine::domain::observer::NodeEvent;
+
+            // Mirrors the success close below; shared by both failure closes.
+            fn finish_event(node_id: &str, node_type: &str, output: Value, error: Option<NodeEndError>) -> DagExecutionEvent {
+                let node_id = node_id.to_string();
+                if node_type == "subgraph" {
+                    DagExecutionEvent::SubgraphNodeFinish { node_id, output, error }
+                } else {
+                    DagExecutionEvent::NodeFinish { node_id, output, error }
+                }
+            }
 
             let mut all_outputs: HashMap<String, Value> = HashMap::new();
             // (decrypted → handle) for every secret injected in this run. Masks
@@ -904,17 +927,33 @@ impl DagRunUseCase {
                     }
 
                     if let Some(msg) = idle_abort_msg {
+                        // No decrypted secret here, so no masking needed.
+                        if self.nested_run {
+                            let error = Some(NodeEndError { message: Some(msg.clone()) });
+                            yield finish_event(&node_id, &node_config.node_type, Value::Null, error);
+                        }
                         Err(DagError::NodeExecution(msg))?;
                     }
 
                     let output_result = output_opt.unwrap_or_else(|| {
                         Err(Box::new(DagError::NodeExecution("Future did not complete but channel closed".to_string())))
                     });
-                    output_result.map_err(|e| {
-                        let mut msg = Value::String(e.to_string());
-                        SecureValueService::mask_secrets(&mut msg, &run_secrets);
-                        DagError::NodeExecution(msg.as_str().unwrap_or_default().to_string())
-                    })?
+                    match output_result {
+                        Ok(v) => v,
+                        Err(e) => {
+                            // Mask once; the same masked string closes the node
+                            // (if nested) AND becomes the propagated DagError —
+                            // never the raw pre-mask text on either path.
+                            let mut msg = Value::String(e.to_string());
+                            SecureValueService::mask_secrets(&mut msg, &run_secrets);
+                            let masked = msg.as_str().unwrap_or_default().to_string();
+                            if self.nested_run {
+                                let error = Some(NodeEndError { message: Some(masked.clone()) });
+                                yield finish_event(&node_id, &node_config.node_type, Value::Null, error);
+                            }
+                            Err(DagError::NodeExecution(masked))?
+                        }
+                    }
                 };
 
                 // STEP 2: Hash output if secure: true (after executing)
@@ -1448,17 +1487,22 @@ impl SubGraphExecutorPort for DagRunUseCase {
         }
 
         use futures::StreamExt;
-        let mut stream = Box::pin(self.clone().with_seed_state(seed).execute_stream(
-            graph,
-            Some(session_id.to_string()),
-            None,
-            true,
-            path_prefix,
-            agent_session_id,
-            // Subgraph children are interrupted via drop-propagation from the
-            // root, then cleaned up by cancel_running_descendants. No token here.
-            None,
-        ));
+        let mut stream = Box::pin(
+            self.clone()
+                .with_seed_state(seed)
+                .as_nested_run()
+                .execute_stream(
+                    graph,
+                    Some(session_id.to_string()),
+                    None,
+                    true,
+                    path_prefix,
+                    agent_session_id,
+                    // Subgraph children are interrupted via drop-propagation from the
+                    // root, then cleaned up by cancel_running_descendants. No token here.
+                    None,
+                ),
+        );
 
         let mut final_out = Value::Null;
         while let Some(res) = stream.next().await {
@@ -1508,7 +1552,7 @@ impl SubGraphExecutorPort for DagRunUseCase {
             .map_err(|e| DagError::NodeExecution(format!("Invalid sub-graph: {}", e)))?;
 
         use futures::StreamExt;
-        let mut stream = Box::pin(self.clone().execute_stream(
+        let mut stream = Box::pin(self.clone().as_nested_run().execute_stream(
             graph,
             Some(session_id.to_string()),
             Some(answer),
@@ -1649,5 +1693,296 @@ mod resuming_node_ids_tests {
         let all: HashMap<String, serde_json::Value> = HashMap::new();
         let set = DagRunUseCase::compute_resuming_node_ids(&all, &Some("ans".to_string()));
         assert!(set.is_empty());
+    }
+}
+
+/// One level deeper than #313: a node failing *inside* a nested run never closed either.
+#[cfg(test)]
+mod nested_failure_close_tests {
+    use super::*;
+    use crate::dag_engine::domain::error::DagError as Err_;
+    use crate::dag_engine::domain::events::DagExecutionEvent;
+    use crate::dag_engine::domain::node::ExecutableNode;
+    use crate::dag_engine::domain::observer::ExecutionObserver;
+    use crate::dag_engine::domain::secure_value_repository::SecureValueRepository;
+    use async_trait::async_trait;
+    use futures::StreamExt;
+    use std::error::Error as StdError;
+    use std::time::Duration;
+
+    /// One node, three scripted behaviors. `EchoBoom` reads `config` (where
+    /// secrets get decrypted for a static field), quoting one in its error.
+    enum ScriptedNode {
+        Boom(&'static str),
+        EchoBoom,
+        Sleepy(u64),
+    }
+    #[async_trait]
+    impl ExecutableNode for ScriptedNode {
+        async fn execute(
+            &self,
+            _i: &NodeInputs,
+            config: &Value,
+            _s: &mut Value,
+            _o: Option<Arc<dyn ExecutionObserver>>,
+        ) -> Result<Value, Box<dyn StdError + Send + Sync>> {
+            match self {
+                ScriptedNode::Boom(msg) => Err((*msg).into()),
+                ScriptedNode::EchoBoom => {
+                    let secret = config.get("token").and_then(|v| v.as_str()).unwrap_or("?");
+                    Err(format!("upstream call failed with token {secret}").into())
+                }
+                ScriptedNode::Sleepy(ms) => {
+                    tokio::time::sleep(Duration::from_millis(*ms)).await;
+                    Ok(json!({ "ok": true }))
+                }
+            }
+        }
+        fn schema(&self) -> Value {
+            json!({})
+        }
+    }
+
+    struct TestRegistry(HashMap<String, Arc<dyn ExecutableNode>>);
+    impl NodeRegistryPort for TestRegistry {
+        fn get_node(&self, node_type: &str) -> Option<Arc<dyn ExecutableNode>> {
+            self.0.get(node_type).cloned()
+        }
+        fn get_all_nodes(&self) -> HashMap<String, Arc<dyn ExecutableNode>> {
+            self.0.clone()
+        }
+    }
+
+    fn registry_with(node_type: &str, node: Arc<dyn ExecutableNode>) -> Arc<TestRegistry> {
+        let mut nodes: HashMap<String, Arc<dyn ExecutableNode>> = HashMap::new();
+        nodes.insert(node_type.to_string(), node);
+        Arc::new(TestRegistry(nodes))
+    }
+
+    fn single_node_graph(node_id: &str, node_type: &str) -> Graph {
+        serde_json::from_value(json!({
+            "nodes": { node_id: { "type": node_type, "config": {} } },
+            "edges": []
+        }))
+        .expect("valid graph JSON")
+    }
+
+    fn run(
+        uc: DagRunUseCase,
+        graph: Graph,
+    ) -> impl futures::Stream<Item = Result<DagExecutionEvent, Err_>> {
+        uc.execute_stream(graph, None, None, false, None, None, None)
+    }
+
+    /// Drains a stream, returning (all Ok events, first Err's message).
+    async fn drain(
+        stream: impl futures::Stream<Item = Result<DagExecutionEvent, Err_>>,
+    ) -> (Vec<DagExecutionEvent>, Option<String>) {
+        tokio::pin!(stream);
+        let mut events = Vec::new();
+        let mut err = None;
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(ev) => events.push(ev),
+                Err(e) => {
+                    err = Some(e.to_string());
+                    break;
+                }
+            }
+        }
+        (events, err)
+    }
+
+    /// Every finish frame's `data` closing `id` (wire encoding: covers both variants).
+    fn finishes(events: &[DagExecutionEvent], id: &str) -> Vec<Value> {
+        events
+            .iter()
+            .filter_map(|e| serde_json::to_value(e).ok())
+            .filter(|v| {
+                v["event"].as_str().is_some_and(|t| t.ends_with("finish"))
+                    && v["data"]["node_id"] == id
+            })
+            .map(|v| v["data"].clone())
+            .collect()
+    }
+
+    fn finish_for(events: &[DagExecutionEvent], id: &str) -> Option<Value> {
+        finishes(events, id).into_iter().next()
+    }
+
+    fn finish_count(events: &[DagExecutionEvent], id: &str) -> usize {
+        finishes(events, id).len()
+    }
+
+    #[tokio::test]
+    async fn nested_run_closes_failing_node_before_returning_err() {
+        let uc = DagRunUseCase::new(
+            registry_with("boom", Arc::new(ScriptedNode::Boom("boom"))),
+            None,
+        )
+        .as_nested_run();
+        let stream = run(uc, single_node_graph("n1", "boom"));
+        let (events, err) = drain(stream).await;
+        assert!(err.is_some(), "the failure must still propagate");
+        let data = finish_for(&events, "n1").expect("nested run must close the failing node");
+        assert_eq!(data["output"], Value::Null);
+        assert!(!data["error"].is_null(), "close must carry status:error");
+    }
+
+    #[tokio::test]
+    async fn root_run_failure_emits_no_finish_for_the_failing_node() {
+        // No `.as_nested_run()` — this is a root run.
+        let uc = DagRunUseCase::new(
+            registry_with("boom", Arc::new(ScriptedNode::Boom("boom"))),
+            None,
+        );
+        let stream = run(uc, single_node_graph("n1", "boom"));
+        let (events, err) = drain(stream).await;
+        assert!(err.is_some());
+        assert_eq!(
+            finish_count(&events, "n1"),
+            0,
+            "root run relies on the stream's own error frame, not a close"
+        );
+    }
+
+    /// A failing edge-wired `subgraph` still needs the loop-level close (no
+    /// real `SubGraphNode` here); full balance proven live by `edge_wired_subgraph_failure.json`.
+    #[tokio::test]
+    async fn nested_failing_subgraph_node_emits_its_loop_level_close() {
+        let uc = DagRunUseCase::new(
+            registry_with("subgraph", Arc::new(ScriptedNode::Boom("boom"))),
+            None,
+        )
+        .as_nested_run();
+        let stream = run(uc, single_node_graph("sg", "subgraph"));
+        let (events, err) = drain(stream).await;
+        assert!(err.is_some());
+        let data = finish_for(&events, "sg").expect("the loop-level close must still fire");
+        assert!(!data["error"].is_null(), "close must carry status:error");
+        assert_eq!(
+            finish_count(&events, "sg"),
+            1,
+            "exactly one loop-level close"
+        );
+    }
+
+    #[tokio::test]
+    async fn nested_idle_abort_closes_node_exactly_once() {
+        let liveness = LivenessSettings {
+            heartbeat_interval: None,
+            idle_timeout: Some(Duration::from_millis(150)),
+        };
+        let uc = DagRunUseCase::new(
+            registry_with("sleepy", Arc::new(ScriptedNode::Sleepy(3_000))),
+            None,
+        )
+        .as_nested_run()
+        .with_liveness(liveness);
+        let stream = run(uc, single_node_graph("n1", "sleepy"));
+        let (events, err) = drain(stream).await;
+        assert!(err.is_some(), "idle-abort must still fail the stream");
+        assert_eq!(
+            finish_count(&events, "n1"),
+            1,
+            "exactly one close, not zero or two"
+        );
+        let data = finish_for(&events, "n1").unwrap();
+        assert!(
+            data["error"]["message"].is_string(),
+            "the idle-abort message carries no secret, so it is not stripped"
+        );
+    }
+
+    #[tokio::test]
+    async fn failure_before_node_start_emits_no_close() {
+        // No "unregistered" node type in the registry — NodeTypeNotFound fires
+        // before any NodeStart is ever yielded.
+        let uc = DagRunUseCase::new(
+            registry_with("boom", Arc::new(ScriptedNode::Boom("boom"))),
+            None,
+        )
+        .as_nested_run();
+        let stream = run(uc, single_node_graph("n1", "unregistered"));
+        let (events, err) = drain(stream).await;
+        assert!(err.is_some());
+        assert!(
+            events.iter().all(|e| !matches!(
+                e,
+                DagExecutionEvent::NodeFinish { .. } | DagExecutionEvent::SubgraphNodeFinish { .. }
+            )),
+            "no start ever fired, so there must be nothing to close"
+        );
+    }
+
+    /// Decrypts exactly one handle; everything else is unreachable in this test.
+    struct OneSecretRepo;
+    #[async_trait]
+    impl SecureValueRepository for OneSecretRepo {
+        async fn persist(
+            &self,
+            _: &str,
+            _: Option<&str>,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &str,
+        ) -> Result<(), Err_> {
+            Ok(())
+        }
+        async fn decrypt(
+            &self,
+            _: &str,
+            _: Option<&str>,
+            handle: &str,
+        ) -> Result<Option<String>, Err_> {
+            Ok((handle == "<sv_tok_1>").then(|| "LEAKTOK_q8w2e5".to_string()))
+        }
+        async fn cleanup(&self, _: &str) -> Result<(), Err_> {
+            Ok(())
+        }
+        async fn cleanup_expired(&self) -> Result<u64, Err_> {
+            Ok(0)
+        }
+        async fn cleanup_expired_for_run(&self, _: &str, _: Option<&str>) -> Result<u64, Err_> {
+            Ok(0)
+        }
+    }
+
+    /// The close frame's `errorText` must be the SAME masked string as the propagated `DagError`.
+    #[tokio::test]
+    async fn nested_failing_node_close_carries_masked_error_text() {
+        let svc = Arc::new(SecureValueService::new(Arc::new(OneSecretRepo)));
+        let uc = DagRunUseCase::with_secure_values_and_service(
+            registry_with("echo_boom", Arc::new(ScriptedNode::EchoBoom)),
+            None,
+            svc,
+        )
+        .as_nested_run();
+
+        let graph: Graph = serde_json::from_value(json!({
+            "nodes": { "n1": { "type": "echo_boom", "config": { "token": "<sv_tok_1>" } } },
+            "edges": []
+        }))
+        .expect("valid graph JSON");
+
+        let stream = run(uc, graph);
+        let (events, err) = drain(stream).await;
+        let err = err.expect("the failure must still propagate");
+        assert!(
+            !err.contains("LEAKTOK_q8w2e5"),
+            "the propagated DagError leaked: {err}"
+        );
+
+        let data = finish_for(&events, "n1").expect("nested run must close the failing node");
+        let message = data["error"]["message"].as_str().unwrap_or("");
+        assert!(
+            !message.contains("LEAKTOK_q8w2e5"),
+            "the close frame leaked the decrypted secret: {message}"
+        );
+        assert!(
+            message.contains("<sv_tok_1>"),
+            "expected the masked handle, got: {message}"
+        );
     }
 }
