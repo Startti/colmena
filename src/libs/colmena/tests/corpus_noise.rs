@@ -97,7 +97,9 @@ fn measure() -> Measured {
 // (the run-loop secure-value masking E2E graph; lints clean).
 // Bumped 312 -> 313: adds tests/graphs/agents/subgraph_tool_error_boundary.json
 // (the subgraph-as-tool boundary-close-on-failure E2E graph; lints clean).
-const EXPECTED_FILES: usize = 313;
+// Bumped 313 -> 314: adds tests/graphs/advanced/edge_wired_subgraph_failure.json
+// (edge-wired nested subgraph double-close-guard E2E graph; lints clean).
+const EXPECTED_FILES: usize = 314;
 const EXPECTED_ERRORS: usize = 0;
 const EXPECTED_WARNINGS: usize = 0;
 const EXPECTED_INFOS: usize = 0;

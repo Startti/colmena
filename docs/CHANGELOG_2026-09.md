@@ -3382,6 +3382,23 @@ con `errorText` gateado a `BoundarySource::Tool` (masked por
 
 **Tests.** `subgraph_tool_failure_close_tests` (8, TDD red-first — 5 fallan
 pre-fix). **E2E.** `subgraph_tool_error_boundary.json`, éxito y SUSPENDED
-verificados; `agent>Helper>helper_llm` queda abierto (PR siguiente).
+verificados; `agent>Helper>helper_llm` queda abierto (cerrado en la entrada
+63).
 
 **ADP.** [Nota de migración](adp_migration/2026-09-15-subgraph-tool-boundary-closes-on-failure.md).
+
+## 63. Fix: un nodo interno dentro de un run anidado ahora cierra al fallar
+
+PR 4/4 de "cierre de fronteras en error" (cierra la serie). Un nodo que
+falla **dentro** de un run anidado ahora cierra a cualquier profundidad
+(gap de la entrada 62), sin excepción por `node_type` — un `subgraph`
+anidado recibe su propio cierre de loop igual que cualquier nodo, además
+del self-close de `SubGraphNode` (#313): dos pares start/end distintos, no
+un duplicado (ver PR para el hallazgo). `errorText` reusa el string ya
+enmascarado (#312) del `DagError` propagado. Run raíz sin cambios. Tests:
+`nested_failure_close_tests` (6, TDD red-first). E2E real:
+`subgraph_tool_error_boundary.json` y el nuevo
+`edge_wired_subgraph_failure.json` (`inner_sub` balanceado 2/2). Gaps en el
+PR: resume sin cobertura unitaria, `for_each` diferido a un PR siguiente.
+
+**ADP.** [Nota de migración](adp_migration/2026-09-15-nested-node-failure-closes.md).

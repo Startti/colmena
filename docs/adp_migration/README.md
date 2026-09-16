@@ -11,7 +11,8 @@ Los cambios que quedan dentro del motor no llevan nota aquí.
 | # | Nota | Acción de ADP | Qué se rompe si se ignora |
 |---|------|---------------|---------------------------|
 | 1 | [`status`/`errorText` en el cierre de una tool `llm_call`/`for_each`](2026-09-15-node-end-error-status.md) | Recomendada — cambio de una línea en `closeNode(...)` en `event-tree-builder.ts` y `colmena-events.reducer.ts` | Nada; sin el cambio, un sub-agente que falló sigue pintándose como `'done'`, igual que hoy |
-| 2 | [La frontera de un `subgraph`-as-tool cierra cuando su child falla](2026-09-15-subgraph-tool-boundary-closes-on-failure.md) | Ninguna nueva — la mitigación de path-prefix en `fix/dangling-subgraph-nodes` se vuelve un no-op para la frontera (el nodo interno todavía la necesita) | Nada; el motor ya cierra el `node_id` de la frontera antes de que la mitigación tuviera que hacerlo |
+| 2 | [La frontera de un `subgraph`-as-tool cierra cuando su child falla](2026-09-15-subgraph-tool-boundary-closes-on-failure.md) | Ninguna nueva — ver la nota 3, que cierra también el nodo interno | Nada; el motor ya cierra el `node_id` de la frontera antes de que la mitigación tuviera que hacerlo |
+| 3 | [Un nodo interno que falla dentro de un run anidado ahora cierra](2026-09-15-nested-node-failure-closes.md) | Recomendada — migrar `closeNode` a matchear por `path`, no solo `node_id` | Nada nuevo; cruce entre filas concurrentes de `for_each` sigue siendo un riesgo preexistente si `closeNode` solo mira `node_id` |
 
 ## 2026-09-02 — `validate_graph` valida de verdad
 

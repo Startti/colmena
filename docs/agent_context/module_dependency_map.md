@@ -226,7 +226,7 @@
 #### `src/libs/colmena/src/dag_engine/application/run_use_case.rs`
 - Module: `dag_engine::application::run_use_case`
 - **Used by (1)**: `src/libs/colmena/src/dag_engine/engine.rs`
-- Depends on (10): `dag_engine::application::liveness`, `dag_engine::application::ports`, `dag_engine::application::preflight`, `dag_engine::application::secure_value_service`, `dag_engine::domain::error`, `dag_engine::domain::events`, `dag_engine::domain::graph`, `dag_engine::domain::node`, `dag_engine::domain::observer`, `dag_engine::domain::state`
+- Depends on (11): `dag_engine::application::liveness`, `dag_engine::application::ports`, `dag_engine::application::preflight`, `dag_engine::application::secure_value_service`, `dag_engine::domain::error`, `dag_engine::domain::events`, `dag_engine::domain::graph`, `dag_engine::domain::node`, `dag_engine::domain::observer`, `dag_engine::domain::secure_value_repository`, `dag_engine::domain::state`
 
 #### `src/libs/colmena/src/dag_engine/application/secure_value_service.rs`
 - Module: `dag_engine::application::secure_value_service`
@@ -295,7 +295,7 @@
 
 #### `src/libs/colmena/src/dag_engine/domain/secure_value_repository.rs`
 - Module: `dag_engine::domain::secure_value_repository`
-- **Used by (3)**: `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/mcp/bind.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/secure_suspend.rs`, `src/libs/colmena/src/dag_engine/infrastructure/registry.rs`
+- **Used by (4)**: `src/libs/colmena/src/dag_engine/application/run_use_case.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/mcp/bind.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/secure_suspend.rs`, `src/libs/colmena/src/dag_engine/infrastructure/registry.rs`
 - Depends on (1): `dag_engine::domain::error`
 
 #### `src/libs/colmena/src/dag_engine/domain/sql_errors.rs`

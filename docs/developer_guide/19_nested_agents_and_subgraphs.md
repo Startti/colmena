@@ -529,9 +529,12 @@ Esto permite que el frontend distinga claramente cuándo habla cada agente en un
 
 Cuando el child de un `subgraph`-as-tool falla, la frontera cierra con
 `status: "error"` en vez de quedar abierta para siempre (`errorText` solo si
-vino del despacho como tool — masked, #310). SUSPENDED no es una falla, deja
-la frontera abierta a propósito; un nodo interno que falla todavía no cierra
-la suya — alcance de un PR posterior. Ver [sse_events_reference.md](../sse_events_reference.md#nodo-que-falla).
+vino del despacho como tool — masked, #310). SUSPENDED deja la frontera
+abierta a propósito. Un nodo **interno** que falla también cierra el suyo, a
+cualquier profundidad — mismo `errorText` enmascarado (#312). Un `subgraph`
+anidado por edge cierra DOS veces por diseño (su propio start/end y el de su
+boundary interno, #313 — pares distintos, no un duplicado). El run raíz
+sigue cerrando solo vía el frame `error`. Ver [sse_events_reference.md](../sse_events_reference.md#nodo-que-falla).
 
 ---
 
