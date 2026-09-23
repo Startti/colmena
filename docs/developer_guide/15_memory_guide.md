@@ -332,7 +332,11 @@ sin perder nada (el original siempre vive en la DB).
   presupuesto: arranca justo después del último `assistant` que respondió sin
   `tool_calls` (ver "Dónde se corta el historial" más abajo).
 - **Primeros 2 (full):** el mensaje inicial del usuario (el objetivo) y el
-  `system_message` se preservan completos.
+  `system_message` se preservan completos. Solo el `system_message` sigue en el
+  arreglo como mensaje; el objetivo pasa **completo** al resumen como su primera
+  línea, `[T0] USER (completo): …` — sin resumir, sin truncar y fuera del tope de
+  líneas. Como mensaje quedaba pegado a la pregunta abierta sin ningún turno del
+  asistente en medio (ver "El objetivo viaja dentro del resumen" más abajo).
 - **Medio (resumido):** todo lo que queda entre medio se colapsa en **un** mensaje
   `system` titulado `## Conversation summary`, con **una línea `[Tn]` por mensaje**.
 
@@ -341,8 +345,18 @@ sin perder nada (el original siempre vive en la DB).
 > `system` consecutivos. El request compactado queda así:
 >
 > ```
-> [ User(prompt inicial), System(prompt estable), System(## Conversation summary), ...recientes ]
+> [ System(prompt estable), System(## Conversation summary, con [T0] USER (completo) arriba), ...recientes ]
 > ```
+>
+> **El objetivo viaja dentro del resumen.** `llm_call` persiste el turno 1 como `[User, System]`, así
+> que la cabecera de 2 mensajes siempre tuvo la primera pregunta. Hasta el 2026-09-23 esa pregunta
+> viajaba como mensaje `User` mientras su respuesta ya estaba resumida: Anthropic y Gemini sacan
+> todos los `system` del arreglo, y el request quedaba con dos `User` seguidos (la primera pregunta
+> y la abierta) sin ningún turno del asistente en medio. El modelo contestaba las dos. Medido en
+> `gemini-3.5-flash` con una conversación real de dos turnos: 5/5 respuestas volvían a contestar la
+> primera pregunta; 0/5 con el objetivo dentro del resumen. Excepción: si la ventana reciente no
+> tiene ningún `User` propio (un cierre sin prompt nuevo), la cabecera se queda entera en el
+> arreglo, para que el request siga abriendo con un turno del usuario.
 >
 > **Por qué separados: prompt caching.** El adapter de Anthropic pone el marker `cache_control`
 > en el **primer** bloque `system` (ver [§14 — Prompt caching](14_llm_deep_dive.md)), así que el
@@ -585,7 +599,7 @@ La llamada de resumen es one-shot y **no** entra a `llm_node_history`.
 | Umbral verbatim | `250` chars | Por debajo → se manda tal cual, sin resumir |
 | Target del resumen | `~250` chars | Pedido por prompt (no hard-cut) |
 | Frontera de recientes | estructural (sin presupuesto) | Arranca justo después del último `assistant` sin `tool_calls`; todo desde ahí va completo, sin importar tamaño |
-| Primeros completos | `2` | Objetivo original + system |
+| Primeros completos | `2` | Objetivo original (como línea `[T0]` del resumen) + system |
 | Máx. líneas del resumen | `100` | Tope del bloque (las más viejas se omiten, recuperables) |
 
 Diseño completo:

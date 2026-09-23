@@ -3402,3 +3402,24 @@ enmascarado (#312) del `DagError` propagado. Run raíz sin cambios. Tests:
 PR: resume sin cobertura unitaria, `for_each` diferido a un PR siguiente.
 
 **ADP.** [Nota de migración](adp_migration/2026-09-15-nested-node-failure-closes.md).
+
+## 64. Fix: un agente con memoria ya no vuelve a contestar la primera pregunta en cada turno
+
+Desde la frontera por interacción (#176), la respuesta a la primera pregunta se
+resume a partir del turno 2, pero la pregunta seguía viajando como mensaje `User`
+en la cabecera de `SUMMARY_KEEP_FIRST_MSGS` (`llm_call` persiste el turno 1 como
+`[User, System]`). Anthropic y Gemini sacan todos los `system` del arreglo, el
+resumen incluido, así que el request llevaba la primera pregunta pegada a la abierta,
+sin ningún turno del asistente en medio, y el modelo contestaba las dos. Reportado
+por ADP en su agente principal del chat: «¿capital de Australia?» volvía a contestar
+«¿tasa de la Fed?».
+
+Ahora la cabecera solo deja en el arreglo sus `System`; el objetivo pasa completo al
+resumen como `[T0] USER (completo): …` (sin resumir, sin truncar, fuera del tope de
+100 líneas). Si la ventana reciente no trae ningún `User`, la cabecera queda entera
+como antes. Medido en `gemini-3.5-flash` sobre la conversación real reconstruida
+con este código: 5/5 respuestas re-contestaban la primera pregunta antes, 0/5
+después. OpenAI (que deja los `system` en su lugar) también recibe el arreglo nuevo.
+Tests: 4 nuevos en `history_compaction`. Guía: [§15](developer_guide/15_memory_guide.md).
+
+**ADP.** Sin cambio de contrato; basta con subir el tag.

@@ -161,11 +161,42 @@ pub async fn build_compacted_messages(
         }
     }
 
-    let mut lines: Vec<String> = Vec::new();
+    // (turn index, line) — the index is kept to name the omitted range below.
+    let mut lines: Vec<(usize, String)> = Vec::new();
+    // Head messages moved into the summary. Never capped, never summarized.
+    let mut head_lines: Vec<String> = Vec::new();
     let mut summarized_this_load = 0usize;
 
-    for idx in keep_first..b {
+    // Only the head's System messages stay on the wire as messages. `llm_call`
+    // persists turn 1 as `[User, System]`, and the user half belongs to an
+    // interaction that is already closed: its answer is summarized below.
+    // Gemini and Anthropic hoist every System message out of the array, the
+    // summary included, so a first question left on the wire lands right next
+    // to the open one with no assistant turn between them — and the model
+    // answers it again on every turn. It moves into the summary instead, still
+    // complete: the head is the objective of the conversation, and it keeps
+    // travelling in full whatever it weighs.
+    //
+    // Unless the recent window has no user turn of its own (the closing-
+    // assistant edge above): then the head stays whole, so the wire still
+    // opens with a user turn instead of an assistant one.
+    let tail_has_user = messages[b..]
+        .iter()
+        .any(|m| matches!(m.role(), MessageRole::User));
+    let stays_in_head = |m: &LlmMessage| !tail_has_user || matches!(m.role(), MessageRole::System);
+    for idx in 0..b {
+        if idx < keep_first && stays_in_head(&messages[idx]) {
+            continue;
+        }
         let msg = &messages[idx];
+        if idx < keep_first && msg.tool_calls().is_none_or(|tcs| tcs.is_empty()) {
+            head_lines.push(format!(
+                "[T{idx}] {} (completo): {}",
+                role_tag(msg),
+                msg.content()
+            ));
+            continue;
+        }
         let line = match classes[idx] {
             ValueClass::Scaffolding => {
                 let name = msg
@@ -230,12 +261,13 @@ pub async fn build_compacted_messages(
                 }
             }
         };
-        lines.push(line);
+        lines.push((idx, line));
     }
 
     // Cap de líneas: drop de las más viejas (recuperables por turno).
     let dropped = lines.len().saturating_sub(SUMMARY_MAX_LINES);
-    let kept: Vec<String> = lines.into_iter().skip(dropped).collect();
+    let omitted = (dropped > 0).then(|| (lines[0].0, lines[dropped - 1].0));
+    let kept: Vec<String> = lines.into_iter().skip(dropped).map(|(_, l)| l).collect();
 
     let mut summary = String::from("## Conversation summary (older turns)\n");
     summary.push_str(
@@ -245,10 +277,13 @@ pub async fn build_compacted_messages(
          recall_history(turn=N) para leer el original — nunca lo inventes ni lo \
          adivines.\n\n",
     );
-    if dropped > 0 {
+    for l in &head_lines {
+        summary.push_str(l);
+        summary.push('\n');
+    }
+    if let Some((first, last)) = omitted {
         summary.push_str(&format!(
-            "(turnos {keep_first}..{} omitidos — recuperables)\n",
-            keep_first + dropped - 1
+            "(turnos {first}..{last} omitidos — recuperables)\n"
         ));
     }
     for l in &kept {
@@ -257,7 +292,12 @@ pub async fn build_compacted_messages(
     }
 
     let mut out: Vec<LlmMessage> = Vec::new();
-    out.extend(messages[..keep_first].iter().cloned());
+    out.extend(
+        messages[..keep_first]
+            .iter()
+            .filter(|m| stays_in_head(m))
+            .cloned(),
+    );
     // The summary travels as its OWN System message and is NEVER merged into
     // the agent's system prompt, even though that leaves two consecutive
     // System messages.
@@ -912,6 +952,136 @@ mod tests {
             summary_of(&short),
             summary_of(&long),
             "guard is only meaningful while the summary itself does change"
+        );
+    }
+
+    // ── Only the open interaction travels as user/assistant turns ────────
+    //
+    // Gemini and Anthropic hoist every System message out of the message
+    // array, the summary included. A User message kept verbatim while its
+    // answer went into the summary therefore lands right next to the newest
+    // prompt with no assistant turn between them, and the model answers both.
+    // Measured on `gemini-3.5-flash` with a real two-turn conversation: 5/5
+    // replies answered the first question again; 0/5 once the first question
+    // went into the summary like any other closed turn.
+
+    fn non_system(msgs: &[LlmMessage]) -> Vec<(MessageRole, String)> {
+        msgs.iter()
+            .filter(|m| !matches!(m.role(), MessageRole::System))
+            .map(|m| (m.role().clone(), m.content().to_string()))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_closed_first_question_does_not_travel_next_to_the_open_one() {
+        let out = compact_at(0).await;
+
+        assert_eq!(
+            non_system(&out),
+            vec![(MessageRole::User, "pregunta abierta".to_string())],
+            "only the open interaction may travel as turns; got {:?}",
+            non_system(&out)
+        );
+        let summary = out
+            .iter()
+            .find(|m| m.content().starts_with("## Conversation summary"))
+            .expect("a summary block is emitted");
+        assert!(
+            summary
+                .content()
+                .contains("[T0] USER (completo): primera pregunta"),
+            "the closed first question must survive in the summary: {}",
+            summary.content()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_long_first_question_moves_into_the_summary_complete() {
+        // The head is the conversation's objective: it traveled complete as a
+        // message, and it keeps traveling complete as a summary line — not
+        // summarized, not truncated, and not dropped by the line cap.
+        let repo = Arc::new(InMemoryConversationRepository::new());
+        let k = ckey();
+        let objective = format!("{} FIN-DEL-OBJETIVO", "o".repeat(600));
+        repo.add_message(&k, LlmMessage::user(objective.clone()).unwrap())
+            .await
+            .unwrap();
+        repo.add_message(&k, LlmMessage::system(STABLE_SYSTEM.into()).unwrap())
+            .await
+            .unwrap();
+        for i in 0..SUMMARY_MAX_LINES {
+            repo.add_message(&k, LlmMessage::user(format!("pregunta {i}")).unwrap())
+                .await
+                .unwrap();
+            repo.add_message(&k, LlmMessage::assistant(format!("respuesta {i}")).unwrap())
+                .await
+                .unwrap();
+        }
+        repo.add_message(&k, LlmMessage::user("pregunta abierta".into()).unwrap())
+            .await
+            .unwrap();
+        let stored = repo.get_with_summaries(&k).await.unwrap();
+        let summarizer: Arc<dyn MessageSummarizer> = Arc::new(StubSummarizer);
+        let out = build_compacted_messages(&stored, &k, repo.as_ref(), Some(&summarizer)).await;
+
+        let summary = out
+            .iter()
+            .find(|m| m.content().starts_with("## Conversation summary"))
+            .expect("a summary block is emitted")
+            .content();
+        assert!(summary.contains("omitidos"), "the line cap must engage");
+        assert!(
+            summary.contains(&format!("[T0] USER (completo): {objective}")),
+            "the objective must survive complete"
+        );
+        assert_eq!(
+            non_system(&out),
+            vec![(MessageRole::User, "pregunta abierta".to_string())]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_system_first_history_does_not_keep_the_first_question_either() {
+        let repo = Arc::new(InMemoryConversationRepository::new());
+        let k = ckey();
+        for m in [
+            LlmMessage::system(STABLE_SYSTEM.into()).unwrap(),
+            LlmMessage::user("primera pregunta".into()).unwrap(),
+            LlmMessage::assistant("primera respuesta".into()).unwrap(),
+            LlmMessage::user("pregunta abierta".into()).unwrap(),
+        ] {
+            repo.add_message(&k, m).await.unwrap();
+        }
+        let stored = repo.get_with_summaries(&k).await.unwrap();
+        let out = build_compacted_messages(&stored, &k, repo.as_ref(), None).await;
+
+        assert_eq!(
+            non_system(&out),
+            vec![(MessageRole::User, "pregunta abierta".to_string())]
+        );
+        assert_eq!(out[0].content(), STABLE_SYSTEM);
+    }
+
+    #[tokio::test]
+    async fn a_tail_without_a_user_turn_keeps_the_first_question_ahead_of_it() {
+        // A resume with no new prompt and nothing pending leaves a closing
+        // assistant as the only recent message. Summarizing the first question
+        // too would put an assistant turn first on the wire.
+        let repo = Arc::new(InMemoryConversationRepository::new());
+        let k = ckey();
+        seed_user_first_history(&repo, &k, 1).await;
+        repo.add_message(&k, LlmMessage::assistant("respuesta final".into()).unwrap())
+            .await
+            .unwrap();
+        let stored = repo.get_with_summaries(&k).await.unwrap();
+        let out = build_compacted_messages(&stored, &k, repo.as_ref(), None).await;
+
+        assert_eq!(
+            non_system(&out),
+            vec![
+                (MessageRole::User, "primera pregunta".to_string()),
+                (MessageRole::Assistant, "respuesta final".to_string()),
+            ]
         );
     }
 }
