@@ -416,6 +416,13 @@ sequenceDiagram
 
 La clave `__colmena_resume_answer` es detectada por el `SubGraphNode` en la próxima llamada y enrutada directamente al `resume_subgraph` del hijo, sin re-ejecutar el grafo desde el principio.
 
+El `result` que el diagrama muestra devolviendo `C` y `S` tras el resume **es
+el mismo `extract_final_output` que corre en el camino fresco**: el valor del
+nodo `__colmena_is_output_node` del hijo, no su estado completo. Vale también
+cuando el subgrafo se usa como tool (`SubGraphExecutorPort`/`resume_subgraph`
+vía `DagToolExecutor::execute_with_resume_answer`, que además recorta el
+resultado con `scrub_tool_result_output` como cualquier tool fresca).
+
 ### Requisito: `connection_url` en cada `llm_call` que participe del HITL
 
 Un `llm_call` que suspende —sea el raíz o uno anidado dentro de un

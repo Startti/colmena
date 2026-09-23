@@ -6,6 +6,12 @@ ve ADP antes y después, qué tiene que hacer ADP, y qué se rompe si no hace na
 
 Los cambios que quedan dentro del motor no llevan nota aquí.
 
+## 2026-09-23 — una tool-subgrafo reanudada devuelve su salida, no el estado del hijo
+
+| # | Nota | Acción de ADP | Qué se rompe si se ignora |
+|---|------|---------------|---------------------------|
+| 1 | [Resume de subgrafo-como-tool extrae el nodo de salida](2026-09-23-subgraph-resume-output.md) | Ninguna — recomendado re-medir el banco del creador | Nada; el resultado de una tool reanudada solo puede volverse más chico y más limpio |
+
 ## 2026-09-15 — `node-end`/`subgraph-node-end` ganan `status`/`errorText`; fronteras de tool cierran al fallar
 
 | # | Nota | Acción de ADP | Qué se rompe si se ignora |

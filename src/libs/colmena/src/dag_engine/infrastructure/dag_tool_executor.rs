@@ -1104,7 +1104,11 @@ impl DagToolExecutor {
         tool_call: &ToolCall,
         resume_answer: &str,
     ) -> Result<ToolResult, LlmError> {
-        self.execute_inner(tool_call, Some(resume_answer)).await
+        let mut result = self.execute_inner(tool_call, Some(resume_answer)).await?;
+        // Same scrub as `ToolExecutor::execute` — a resumed tool result must not
+        // skip the binary/oversized-string cleanup a fresh call gets.
+        result.output = Self::scrub_tool_result_output(result.output, self.max_tool_result_bytes);
+        Ok(result)
     }
 
     /// Shared body for [`ToolExecutor::execute`] and [`execute_with_resume_answer`].
@@ -4259,16 +4263,23 @@ mod tests {
         assert!(output.get("headers").is_none() || output["headers"].is_null());
     }
 
-    #[tokio::test]
-    async fn execute_with_resume_answer_threads_value_into_node_inputs() {
-        // MockNode echoes inputs back as JSON — we can assert the resume key was injected.
+    /// Shared armado for the `execute_with_resume_answer` tests: a `MockNode`
+    /// echoes its inputs back as JSON, so whatever the resume path threads into
+    /// (or leaves out of) `inputs` shows up directly in the tool result output.
+    fn resume_answer_fixture() -> (DagToolExecutor, ToolCall) {
         let registry = Arc::new(MockRegistry::new());
         let executor = DagToolExecutor::new(registry, HashMap::new());
-
         let tool_call = ToolCall::new(
             "call_resume".to_string(),
             FunctionCall::new("mock_tool".to_string(), r#"{"a": "original"}"#.to_string()),
         );
+        (executor, tool_call)
+    }
+
+    #[tokio::test]
+    async fn execute_with_resume_answer_threads_value_into_node_inputs() {
+        // MockNode echoes inputs back as JSON — we can assert the resume key was injected.
+        let (executor, tool_call) = resume_answer_fixture();
 
         let result = executor
             .execute_with_resume_answer(&tool_call, "USER_ANSWER_42")
@@ -4282,6 +4293,21 @@ mod tests {
         assert_eq!(output["a"], "original");
         // The resume answer must have been injected under the reserved key.
         assert_eq!(output["__colmena_resume_answer"], "USER_ANSWER_42");
+    }
+
+    #[tokio::test]
+    async fn execute_with_resume_answer_scrubs_the_tool_result_like_execute() {
+        // Mismo armado que execute_with_resume_answer_threads_value_into_node_inputs.
+        let (executor, tool_call) = resume_answer_fixture();
+        let big = "x".repeat(60_000);
+        let res = executor
+            .execute_with_resume_answer(&tool_call, &big)
+            .await
+            .expect("resume executes");
+        assert!(
+            !res.output.contains(&big),
+            "a resumed tool result must go through scrub_tool_result_output"
+        );
     }
 
     #[tokio::test]

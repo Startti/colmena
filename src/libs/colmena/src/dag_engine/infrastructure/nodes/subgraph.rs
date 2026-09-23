@@ -111,6 +111,26 @@ impl SubGraphNode {
         Value::Object(child_state_obj)
     }
 
+    /// The value a subgraph hands back to its caller: the output node's value when
+    /// the child flagged one, the whole run otherwise. Shared by the fresh and the
+    /// resume paths, so a resumed tool returns what a fresh one would — and never
+    /// the child's full `all_outputs`, which can carry a fetched graph or a tool's
+    /// raw response.
+    fn extract_final_output(result: &Value) -> Value {
+        result
+            .as_object()
+            .and_then(|obj| {
+                obj.values().find(|v| {
+                    v.get("extra_info")
+                        .and_then(|ei| ei.get("__colmena_is_output_node"))
+                        .and_then(|f| f.as_bool())
+                        .unwrap_or(false)
+                })
+            })
+            .cloned()
+            .unwrap_or_else(|| result.clone())
+    }
+
     /// Optional ceiling for subgraph nesting depth.
     ///
     /// Nesting is **unbounded by default**. The engine no longer second-guesses
@@ -342,7 +362,7 @@ impl ExecutableNode for SubGraphNode {
                 // Bubble up
                 return Ok(result);
             }
-            return Ok(result);
+            return Ok(Self::extract_final_output(&result));
         }
 
         // --- 2. GRAPH LOADING ---
@@ -441,19 +461,7 @@ impl ExecutableNode for SubGraphNode {
 
         // --- 5. STATE MAPPING (OUT) ---
         // Find the node flagged as __colmena_is_output_node and extract its value.
-        let final_output = if let Some(obj) = result.as_object() {
-            obj.values()
-                .find(|v| {
-                    v.get("extra_info")
-                        .and_then(|ei| ei.get("__colmena_is_output_node"))
-                        .and_then(|f| f.as_bool())
-                        .unwrap_or(false)
-                })
-                .cloned()
-                .unwrap_or(result.clone())
-        } else {
-            result.clone()
-        };
+        let final_output = Self::extract_final_output(&result);
 
         // Emit subgraph node-end boundary event with final output
         if let (Some(ref name), Some(ref obs)) = (&boundary_name, &_observer) {
@@ -1132,6 +1140,11 @@ mod subgraph_tool_failure_close_tests {
         Succeed,
         Fail(&'static str),
         Suspend,
+        /// `resume_subgraph` returns a full child state (several nodes plus
+        /// `__colmena_session_id`) with one of them flagged as the output
+        /// node, so the resume branch's extraction can be exercised the same
+        /// way the fresh path already is.
+        ResumeWithOutputs,
     }
     struct StubExecutor(Behavior);
     #[async_trait::async_trait]
@@ -1158,7 +1171,9 @@ mod subgraph_tool_failure_close_tests {
                 }
             }
             match &self.0 {
-                Behavior::Succeed => Ok(json!({ "out": { "output": 42 } })),
+                Behavior::Succeed | Behavior::ResumeWithOutputs => {
+                    Ok(json!({ "out": { "output": 42 } }))
+                }
                 Behavior::Fail(msg) => Err(DagError::NodeExecution(msg.to_string())),
                 Behavior::Suspend => {
                     Ok(json!({ "__colmena_status": "SUSPENDED", "questions": [] }))
@@ -1175,6 +1190,11 @@ mod subgraph_tool_failure_close_tests {
         ) -> Result<Value, DagError> {
             match &self.0 {
                 Behavior::Fail(msg) => Err(DagError::NodeExecution(msg.to_string())),
+                Behavior::ResumeWithOutputs => Ok(json!({
+                    "http_1": { "status": 200, "body": { "api_key": "sk-must-not-leak" } },
+                    "out": { "output": 42, "extra_info": { "__colmena_is_output_node": true } },
+                    "__colmena_session_id": "child_session_1"
+                })),
                 _ => Ok(Value::Null),
             }
         }
@@ -1304,6 +1324,29 @@ mod subgraph_tool_failure_close_tests {
         assert!(
             obs.is_empty(),
             "resume branch has no start, so no close either"
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_returns_the_output_node_not_the_whole_child_state() {
+        let node = SubGraphNode::new();
+        node.executor
+            .set(Arc::new(StubExecutor(Behavior::ResumeWithOutputs)))
+            .ok()
+            .expect("executor set once");
+        let mut inputs = inline_graph_inputs();
+        inputs.insert("__colmena_resume_answer".to_string(), json!("yes"));
+        inputs.insert("__colmena_tool_name".to_string(), json!("Helper"));
+
+        let out = node
+            .execute(&inputs, &json!({}), &mut json!({}), None)
+            .await
+            .expect("resume succeeds");
+
+        assert_eq!(out["output"], json!(42));
+        assert!(
+            !out.to_string().contains("sk-must-not-leak"),
+            "a resumed tool must not hand the whole child state to the model: {out}"
         );
     }
 
