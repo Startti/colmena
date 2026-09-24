@@ -3590,3 +3590,53 @@ Capturas en
 acción nueva; ajustada para describir el estado de punta a punta (router,
 orquestador y preflight ya reconocen `child_graph_ref`) y la precisión
 `not_found` vs `unavailable` de un `agent_id` sin templar.
+
+## 69. Un `thread_id` fijo da un hilo de memoria por valor, sin exponerlo al modelo
+
+Task 4/5 de `child_graph_ref` (memoria por agente vía `Run My Agent`). Hasta acá,
+`memory_mode: "dynamic"` dejaba que el MODELO nombrara el hilo vía `thread_id`
+auto-expuesto y requerido; un `node_schema.thread_id` con `fixed` no tenía
+tratamiento especial — la plataforma no podía darle a cada agente su propio hilo sin
+que el modelo supiera que `thread_id` existe.
+
+**Qué cambió.** Nueva `DagToolExecutor::thread_id_is_fixed(cfg) -> bool` (`pub(crate)`,
+usada también por `llm.rs`): verdadera cuando `node_schema.thread_id.fixed` está
+presente. La consultan cuatro sitios: `generate_tool_definition` (deja de auto-exponer
+`thread_id` si es fijo); el dispatch (antes de sanear, rechaza una plantilla sin
+resolver con `ToolResult { success: false, error: Some("unresolved_thread_id") }`,
+nunca un hilo compartido); el eco `[hilo: <id>]` (se salta — existe para que el modelo
+reuse un id que ÉL inventó); y `list_threads` (`llm.rs::exposes_dynamic_memory` y
+`dynamic_tool_names` en `dag_tool_executor.rs`, excluye el tool). La memoria sigue
+keyando por el valor resuelto (`tool/<tool_name>/<valor>`): un hilo distinto por
+`agentId`.
+
+**Tests.** 6 nuevos en `dag_tool_executor.rs` (80 → 86 funciones de test): los 4 del
+brief (`a_fixed_thread_id_is_not_exposed_to_the_model`,
+`…_keys_memory_per_value_and_skips_the_thread_prefix`,
+`an_unresolved_fixed_thread_id_is_an_error_not_a_shared_thread`,
+`list_threads_leaves_out_fixed_thread_tools`) más
+`list_threads_dispatch_excludes_fixed_thread_tools`: el cuarto test del brief ejercita
+`available_tools()`, que en este archivo **nunca** agregó la tool `list_threads` (ese
+gating vive solo en `llm.rs`) — pasaba igual antes del fix, sin probar el filtro de
+dispatch que sí cambió. El quinto dispara `list_threads` contra un tool de hilo fijo con
+historial real sembrado. TDD red-first en los 4 restantes; el sexto,
+`exposes_dynamic_memory_respects_fixed_thread_id`, cierra un hueco de revisión — la
+exclusión de hilo fijo en `exposes_dynamic_memory` no tenía test propio, y revertirla no
+rompía `nodes::llm` (608) ni `dag_tool_executor::tests` (85).
+
+**Mutación.** `list_threads_leaves_out_fixed_thread_tools` pasaba antes del fix —
+revertir el filtro de `list_threads` a mano lo dejó en verde (de ahí el quinto test).
+El mismo revert pone en rojo `list_threads_dispatch_excludes_fixed_thread_tools`
+(`res.output` lista `archivador`) — revertido tras confirmar.
+
+**E2E.** `tests/graphs/agents/subgraph_fixed_thread_id/` (3 grafos, uno por turno),
+`gemini-2.5-flash`, Postgres local, mismo `--agent-session-id`. Turno 1: le dicen a `a1`
+un código → llama `archivador` con `{"agentId":"a1","task":"…"}`, sin `thread_id`. Turno
+2: `a2` no lo sabe (hilo aislado). Turno 3: `a1` lo recuerda. `llm_node_history` confirma
+`tool/archivador/a1/keeper` con turnos 1+3 y `tool/archivador/a2/keeper` aparte con solo
+turno 2; mensajes `tool` bajo `chat` empiezan con `{` — cero `[hilo:` en 21 filas ni en 3
+capturas SSE (`/tmp/colmena_e2e/fixed_thread_id_turn{1,2,3}.sse`).
+`tests/corpus_noise.rs`: 318 → 321.
+
+**ADP.** [Nota de migración](adp_migration/2026-09-23-fixed-thread-id.md) — compilar
+"Run My Agent" con `thread_id: { "fixed": "${agentId}" }` en su `node_schema`.

@@ -280,7 +280,7 @@ sobrevive entre runs).
 |---|---|---|
 | `stateless` (**default**) | `tool/<tool_call_id>` | Cada llamada aislada. Es lo de hoy; omitir el campo equivale a esto. |
 | `persistent` | `tool/<tool_name>` | Una sola conversación compartida por todas las llamadas al tool; todas acumulan en el mismo hilo y el modelo no maneja ningún identificador. **Activo.** |
-| `dynamic` | `tool/<tool_name>/<thread_id>` | El modelo nombra el hilo por llamada vía un parámetro `thread_id` **requerido** que el motor auto-expone; un id nuevo abre un hilo, un id previo lo continúa. **Activo.** |
+| `dynamic` | `tool/<tool_name>/<thread_id>` | El modelo nombra el hilo por llamada vía un parámetro `thread_id` **requerido** que el motor auto-expone; un id nuevo abre un hilo, un id previo lo continúa. **Activo.** Excepción: con `thread_id` **fijo** en `node_schema`, lo nombra la plataforma, no el modelo — ver más abajo. |
 
 Los tres modos están activos. Un modo con memoria (`persistent`/`dynamic`) **requiere
 `connection_url`** en el `llm_call` que recuerda — para un `subgraph`, en un `llm_call`
@@ -319,6 +319,16 @@ cuando no aplica).
   }
 }
 ```
+
+**`thread_id` fijo (la plataforma nombra el hilo, no el modelo).** En `dynamic`,
+`node_schema.thread_id` puede llevar `fixed` en vez de auto-exponerse — p. ej.
+`thread_id: { "fixed": "${agentId}" }` junto a un `agentId` LLM-visible en el mismo
+`node_schema` (templado contra él, `node_schema_merge.rs`). Efecto: el motor **no**
+auto-expone `thread_id`; la salida **no** lleva `[hilo: <id>]` (ese eco es para un id
+que el MODELO inventó, no uno fijo); el tool queda **afuera** de `list_threads`; y la
+memoria sigue keyando por el valor resuelto (`tool/<tool_name>/<valor>`) — un hilo
+**distinto por `agentId`**. Si el template no resuelve (`agentId` ausente o vacío), la
+llamada falla con `unresolved_thread_id` en vez de compartir hilo entre llamadas.
 
 `orchestrator` **no** está en el allowlist. Su propagación de `__colmena_node_id_path` sí
 funcionaría (despacha sub-agentes vía `SubGraphNode` con un clon de sus `inputs`), pero el

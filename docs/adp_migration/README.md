@@ -6,6 +6,12 @@ ve ADP antes y después, qué tiene que hacer ADP, y qué se rompe si no hace na
 
 Los cambios que quedan dentro del motor no llevan nota aquí.
 
+## 2026-09-23 — `thread_id` fijo: memoria por agente sin exponer el hilo al modelo
+
+| # | Nota | Acción de ADP | Qué se rompe si se ignora |
+|---|------|---------------|---------------------------|
+| 1 | [`thread_id` fijo en `node_schema` (`memory_mode: "dynamic"`)](2026-09-23-fixed-thread-id.md) | Compilar la tool "Run My Agent" con `thread_id: { "fixed": "${agentId}" }` para un hilo de memoria por agente | Nada; sin fijar `thread_id`, `dynamic` sigue como hoy — el modelo nombra el hilo él mismo |
+
 ## 2026-09-23 — `child_graph_ref`: un `subgraph` carga su hijo por referencia
 
 | # | Nota | Acción de ADP | Qué se rompe si se ignora |

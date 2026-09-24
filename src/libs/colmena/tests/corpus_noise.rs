@@ -106,7 +106,14 @@ fn measure() -> Measured {
 // tests/graphs/control_flow/router_subgraph_ref_unavailable.json,
 // tests/graphs/advanced/orchestrator_agent_by_reference_unavailable.json,
 // tests/graphs/basic/subgraph_ref_only_preflight.json. All three lint clean.
-const EXPECTED_FILES: usize = 318;
+// Bumped 318 -> 321: adds three E2E graphs for Task 4/5 of child_graph_ref (a
+// `dynamic` subgraph tool whose `thread_id` is FIXED via node_schema, one memory
+// thread per `agentId` with nothing exposed to the model):
+// tests/graphs/agents/subgraph_fixed_thread_id/turn1_tell_a1.json,
+// tests/graphs/agents/subgraph_fixed_thread_id/turn2_ask_a2.json,
+// tests/graphs/agents/subgraph_fixed_thread_id/turn3_recall_a1.json. All three
+// lint clean.
+const EXPECTED_FILES: usize = 321;
 const EXPECTED_ERRORS: usize = 0;
 const EXPECTED_WARNINGS: usize = 0;
 const EXPECTED_INFOS: usize = 0;

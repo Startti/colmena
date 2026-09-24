@@ -1,0 +1,30 @@
+{
+  "nodes": {
+    "chat": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "api_key": "${GEMINI_API_KEY}",
+        "model": "gemini-2.5-flash",
+        "connection_url": "${DATABASE_URL}",
+        "system_message": "Corres agentes de un usuario con la tool 'archivador'. Cada agente tiene un id corto (ej. 'a1', 'a2') que el usuario siempre menciona. SIEMPRE que el usuario nombre un agente, llama a 'archivador' con 'agentId' = ese id EXACTO tal como lo escribio el usuario (en minusculas, sin inventar variantes) y 'task' = la instruccion o pregunta, tal cual. Si el usuario DA un dato, pasalo como afirmacion para que el agente lo recuerde; si PREGUNTA, pasa la pregunta tal cual. No hay ningun 'thread_id' que manejar: la tool ya sabe a que hilo va cada agente.",
+        "prompt": "Preguntale al agente a2 cual es el codigo de acceso del proyecto.",
+        "tool_configurations": {
+          "archivador": {
+            "name": "archivador",
+            "node_type": "subgraph",
+            "description": "Corre el agente configurado por el usuario. Cada 'agentId' tiene su propia memoria, aislada de los demas agentes.",
+            "memory_mode": "dynamic",
+            "node_schema": {
+              "agentId": { "type": "string", "required": true, "description": "Id corto del agente a correr, tal como lo nombro el usuario (ej. 'a1')." },
+              "task": { "type": "string", "required": true, "description": "El mensaje literal para el agente: un dato que recordar o una pregunta." },
+              "child_graph_inline": { "fixed": { "nodes": { "keeper": { "type": "llm_call", "config": { "provider": "google", "api_key": "${GEMINI_API_KEY}", "model": "gemini-2.5-flash", "connection_url": "${DATABASE_URL}", "system_message": "Sos un asistente con memoria perfecta de ESTA conversacion (identificada por su hilo). Recorda con exactitud todo lo que te digan y respondelo cuando te pregunten. Si te preguntan algo que no se menciono antes en este hilo, decilo claramente ('no lo se' o similar). No inventes. Responde en una sola frase.", "prompt": "{{task}}" } } }, "edges": [] } },
+              "thread_id": { "fixed": "${agentId}" }
+            }
+          }
+        }
+      }
+    }
+  },
+  "edges": []
+}
