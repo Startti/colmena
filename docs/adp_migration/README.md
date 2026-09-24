@@ -6,11 +6,12 @@ ve ADP antes y después, qué tiene que hacer ADP, y qué se rompe si no hace na
 
 Los cambios que quedan dentro del motor no llevan nota aquí.
 
-## 2026-09-24 — el alias de un servidor MCP sale de `name`
+## 2026-09-24 — cliente MCP: el alias sale de `name` y `mcp.tools` filtra
 
 | # | Nota | Acción de ADP | Qué se rompe si se ignora |
 |---|------|---------------|---------------------------|
-| 1 | [El alias MCP es `name`, no la clave](2026-09-24-mcp-alias-from-name.md) | Ninguna — el compilador del arco MCP vía B (sin mergear al 2026-09-24) ya emite `name` | Nada; el modelo pasa de ver `<id-de-nodo>__<tool>` a `<name>__<tool>` |
+| 1 | [El alias MCP es `name`, no la clave](2026-09-24-mcp-alias-from-name.md) | Ninguna — el compilador del arco MCP vía B (Startti/adp#808, mergeado el 2026-09-24) ya emite `name` | Nada; el modelo pasa de ver `<id-de-nodo>__<tool>` a `<name>__<tool>` |
+| 2 | [`mcp.tools`: solo las tools listadas](2026-09-24-mcp-tools-allowlist.md) | Ninguna — el compilador del arco MCP vía B (Startti/adp#808, mergeado el 2026-09-24) ya emite `tools`; mantener `[]` = todas | Nada; el modelo deja de ver (y de poder llamar) las tools que el nodo no eligió |
 
 ## 2026-09-24 — nombre del agente en la frontera de un `child_graph_ref` y `provider_key_id` en el consumo
 

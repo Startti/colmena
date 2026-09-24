@@ -1,6 +1,6 @@
 # El alias de un servidor MCP sale de `name`
 
-**Acción de ADP: ninguna.** El compilador de ADP del arco MCP vía B (sin mergear al
+**Acción de ADP: ninguna.** El compilador de ADP del arco MCP vía B (Startti/adp#808, mergeado el
 2026-09-24) ya compila cada `mcpServer` como una entrada de `tool_configurations`
 indexada por id de nodo y con el nombre visible en `name`. Desde este cambio el motor lo
 usa.

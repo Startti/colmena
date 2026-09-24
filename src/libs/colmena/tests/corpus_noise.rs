@@ -119,7 +119,10 @@ fn measure() -> Measured {
 // Bumped 322 -> 323: adds tests/graphs/agents/mcp_deepwiki_named_e2e.json (an
 // MCP entry keyed by node id and named in `name`, the shape ADP compiles; the
 // model must see `deepwiki__<tool>`, not `<node-id>__<tool>`). Lints clean.
-const EXPECTED_FILES: usize = 323;
+// Bumped 323 -> 324: adds tests/graphs/agents/mcp_deepwiki_tools_e2e.json (the
+// same entry with `mcp.tools: ["ask_wiki_question", "no_such_tool"]`: one tool of
+// DeepWiki's three exposed, the unpublished one reported). Lints clean.
+const EXPECTED_FILES: usize = 324;
 const EXPECTED_ERRORS: usize = 0;
 const EXPECTED_WARNINGS: usize = 0;
 const EXPECTED_INFOS: usize = 0;

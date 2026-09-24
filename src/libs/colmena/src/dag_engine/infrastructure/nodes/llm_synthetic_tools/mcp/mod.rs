@@ -15,5 +15,5 @@ pub use allowlist::{allowed_hosts_from_env, host_for_log, parse_allowlist, url_i
 pub use bind::{bind, McpBinding};
 pub use contain::{contain, nonce_for};
 pub use dispatch::McpDispatcher;
-pub use expose::{collect_mcp_tool_configs, drop_colliding, exposed_definitions};
+pub use expose::{allowed_catalog, collect_mcp_tool_configs, drop_colliding};
 pub use wire::{fold_catalog, unavailable_notice, wire, Folded, McpRoute, McpWiring};

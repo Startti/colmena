@@ -3762,3 +3762,53 @@ llame `deepwiki__ask_question`—: Gemini devolvió `API_KEY_INVALID`.
 
 **ADP.** [Nota de migración](adp_migration/2026-09-24-mcp-alias-from-name.md) — ninguna
 acción: el compilador del arco MCP vía B (sin mergear al 2026-09-24) ya emite `name`.
+
+## 72. `mcp.tools`: qué tools de un servidor MCP se exponen
+
+**Qué cambió.** `McpServerSpec` gana `tools: Option<Vec<String>>` — los nombres **del
+servidor**, verbatim (`resolve-library-id`, no `ctx7__resolve-library-id`). Ausente o
+vacía = todas, que es el comportamiento previo: ningún grafo existente cambia; `null`
+cuenta como ausente. El compilador de ADP del arco MCP vía B (Startti/adp#808,
+mergeado el 2026-09-24) ya emite el campo; el motor lo ignoraba en silencio (el bloque no tiene
+`deny_unknown_fields`).
+
+El filtro (`expose::allowed_catalog`) se aplica en `fold_catalog`, el único camino a
+`exposed_definitions` —que pasa a `pub(super)`: fuera del módulo no se puede exponer sin
+filtrar—, compara nombres **crudos** antes de normalizar y deduplicar, y corre **antes**
+del tope de 64 tools por servidor: una tool listada al final de un catálogo grande
+sigue entrando (la nota del tope aclara que su conteo es posterior a `tools`). Una tool
+que el filtro deja afuera no tiene definición, así que tampoco reclama nombre ni tiene
+ruta: `McpDispatcher::owns` da `false`, así que una llamada que el modelo invente cae a
+las ramas built-in y se rechaza como tool desconocida —igual que cualquier nombre
+inventado— sin llegar al servidor (llamado directo, el despachador responde
+`Unrouted`, también sin tocar la red). Una tool listada que el servidor no publica se
+reporta al operador como `mcp.wiring_note` (una vez por nombre). Un `tools` que no es
+lista de strings falla la carga validada (`Graph::validate`, el linter), y el mensaje lo
+nombra entre los campos válidos; si llega en ejecución por `inputs.tool_configurations`,
+que no se valida, `collect_mcp_tool_configs` descarta ese servidor entero.
+
+**Tests.** 5 en `mcp/expose.rs` (los 4 del brief: sin `tools` → todas, `[]` → todas,
+con `tools` → solo esas, una afuera no llega a definirse y la listada sí; más: la lista
+compara contra el nombre del servidor, no el expuesto), 4 en `mcp/wire.rs` (la tool no
+listada no tiene ruta, `owns` da `false` y el despachador la rechaza con `Unrouted`; una
+listada pasada el tope de 64 se expone; una listada que el servidor no publica se
+reporta, deduplicada; con `foo/bar` sin listar antes de `foo.bar` listada,
+`srv__foo_bar` va a `foo.bar` y nada va a `foo/bar`) y 1 en `tool_configuration.rs`
+(forma inválida de `tools` falla la carga). Rojo primero contra un stub que devolvía el
+catálogo entero: 6 + 1 fallaban, las dos pinzas de compatibilidad (ausente, vacía)
+pasaban. Mutación: `[]` filtrando todo; toda lista filtrando todo; exponer el catálogo
+sin filtrar; filtrar después de normalizar, por nombre expuesto; sin nota; sin
+deduplicar — cada una pone en rojo su test.
+
+**E2E.** `tests/graphs/agents/mcp_deepwiki_tools_e2e.json` contra DeepWiki real, con
+`tools: ["ask_wiki_question", "no_such_tool"]`. Mismo límite que la entrada 71 (sin clave
+de LLM; `COLMENA_PREFLIGHT_HEALTH=off`), así que lo medido es el cableado: de las 3 tools
+del catálogo vivo, `mcp.server_ready alias=deepwiki tools=1`, `mcp.tools_exposed
+exposed=1` y un `mcp.wiring_note` por `no_such_tool`. **No se midió** el lado del modelo.
+La primera corrida listaba `ask_question`, el nombre del fixture de 2026-09-01: DeepWiki
+lo renombró a `ask_wiki_question`, y el motor expuso 0 tools y reportó las dos listadas
+como no publicadas — el caso para el que existe la nota, observado en vivo.
+`tests/corpus_noise.rs`: 323 → 324.
+
+**ADP.** [Nota de migración](adp_migration/2026-09-24-mcp-tools-allowlist.md) — ninguna
+acción obligatoria; `[]` significa "todas".

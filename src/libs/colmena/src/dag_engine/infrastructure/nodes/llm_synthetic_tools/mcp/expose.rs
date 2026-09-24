@@ -102,6 +102,61 @@ fn alias_for(key: &str, cfg: &Value, taken: &BTreeMap<String, McpServerSpec>) ->
     alias
 }
 
+/// The part of a server's catalog its spec allows the model to see.
+///
+/// `spec.tools` names the server's tools VERBATIM; absent or empty keeps them
+/// all, which is the behavior before the field existed. Empty is read as
+/// absent on purpose: a platform emitting `[]` for "no restriction" must not
+/// switch the whole server off.
+///
+/// Applied BEFORE [`exposed_definitions`], and so before its per-server
+/// ceiling: a listed tool late in a large catalog is still considered. And
+/// because routes are built only from the definitions that survive, a tool
+/// filtered out here gets no route either: `McpDispatcher::owns` is false for
+/// it, so a call the model invents falls through to the built-ins and is
+/// rejected as an unknown tool without reaching the server.
+pub fn allowed_catalog(
+    spec: &McpServerSpec,
+    tools: Vec<McpToolDescriptor>,
+) -> Vec<McpToolDescriptor> {
+    match spec.tools.as_deref() {
+        None | Some([]) => tools,
+        Some(listed) => tools
+            .into_iter()
+            .filter(|t| listed.contains(&t.name))
+            .collect(),
+    }
+}
+
+/// A note per listed tool the server did not publish, for the operator.
+///
+/// Not exposing it is correct — there is nothing to call — but silence is not:
+/// a server that renamed a tool would otherwise take it away from the model
+/// with nothing in the log to say which one or why. The listed names are the
+/// operator's own, bounded for the report all the same.
+pub fn unpublished_listed_tools(
+    alias: &str,
+    spec: &McpServerSpec,
+    catalog: &[McpToolDescriptor],
+) -> Vec<String> {
+    let Some(listed) = spec.tools.as_deref() else {
+        return Vec::new();
+    };
+    let mut seen = std::collections::BTreeSet::new();
+    listed
+        .iter()
+        .filter(|name| seen.insert(name.as_str()))
+        .filter(|name| !catalog.iter().any(|t| &t.name == *name))
+        .map(|name| {
+            format!(
+                "tool '{}' is listed in the 'tools' of MCP server '{alias}' but the \
+                 server does not publish it, so it was not exposed",
+                for_report(name)
+            )
+        })
+        .collect()
+}
+
 /// Tool definitions for one server's catalog, plus a note per excluded tool.
 ///
 /// The server's `input_schema` is forwarded VERBATIM via
@@ -113,7 +168,11 @@ fn alias_for(key: &str, cfg: &Value, taken: &BTreeMap<String, McpServerSpec>) ->
 /// A schema over `MCP_MAX_SCHEMA_BYTES` EXCLUDES its tool instead of being
 /// truncated: a truncated JSON Schema is invalid, and a provider rejecting the
 /// request would take the server's healthy tools down with it.
-pub fn exposed_definitions(
+///
+/// `pub(super)`, not `pub`: it does not apply `mcp.tools`, so a caller outside
+/// this module could expose what the spec leaves out. `fold_catalog` is the
+/// only way in, and it filters first.
+pub(super) fn exposed_definitions(
     alias: &str,
     tools: &[McpToolDescriptor],
 ) -> (Vec<ToolDefinition>, BTreeMap<String, String>, Vec<String>) {
@@ -196,8 +255,8 @@ pub fn exposed_definitions(
     if tools.len() > MCP_MAX_TOOLS_PER_SERVER {
         let dropped = tools.len() - MCP_MAX_TOOLS_PER_SERVER;
         skipped.push(format!(
-            "MCP server '{alias}' offered {} tools; only the first \
-             {MCP_MAX_TOOLS_PER_SERVER} were considered and {dropped} were not looked at",
+            "MCP server '{alias}' offered {} tools (after its 'tools' list, if any); \
+             only the first {MCP_MAX_TOOLS_PER_SERVER} were considered and {dropped} were not looked at",
             tools.len()
         ));
     }
@@ -1123,5 +1182,73 @@ mod tests {
             found["x"].url, "https://c.example.com/mcp",
             "name 'gh' taken, key 'x' free"
         );
+    }
+
+    #[test]
+    fn un_spec_sin_tools_expone_todas() {
+        let raw = json!({ "deepwiki": { "node_type": "mcp", "mcp": { "url": "https://mcp.deepwiki.com/mcp" } } });
+        let spec = &collect_mcp_tool_configs(&raw)["deepwiki"];
+        let total = fixture("deepwiki_tools").len();
+        assert_eq!(
+            allowed_catalog(spec, fixture("deepwiki_tools")).len(),
+            total
+        );
+    }
+
+    /// Same as absent: a platform that emits `[]` cannot switch the whole
+    /// server off by accident.
+    #[test]
+    fn un_tools_vacio_expone_todas() {
+        let raw = json!({ "deepwiki": { "node_type": "mcp", "mcp": { "url": "https://mcp.deepwiki.com/mcp", "tools": [] } } });
+        let spec = &collect_mcp_tool_configs(&raw)["deepwiki"];
+        let total = fixture("deepwiki_tools").len();
+        assert_eq!(
+            allowed_catalog(spec, fixture("deepwiki_tools")).len(),
+            total
+        );
+    }
+
+    #[test]
+    fn un_spec_con_tools_expone_solo_esas() {
+        let una = fixture("deepwiki_tools")[0].name.clone();
+        let raw = json!({ "deepwiki": { "node_type": "mcp", "mcp": { "url": "https://mcp.deepwiki.com/mcp", "tools": [una] } } });
+        let spec = &collect_mcp_tool_configs(&raw)["deepwiki"];
+        let kept = allowed_catalog(spec, fixture("deepwiki_tools"));
+        assert_eq!(
+            kept.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
+            vec![una.as_str()]
+        );
+    }
+
+    /// The first link of the chain: no definition, so no route. `wire.rs`
+    /// pins the second — that the dispatcher refuses the name.
+    #[test]
+    fn una_tool_fuera_de_la_lista_no_llega_a_definirse() {
+        let tools = fixture("deepwiki_tools");
+        let (una, otra) = (tools[0].name.clone(), tools[1].name.clone());
+        let raw = json!({ "deepwiki": { "node_type": "mcp", "mcp": { "url": "https://mcp.deepwiki.com/mcp", "tools": [una] } } });
+        let spec = &collect_mcp_tool_configs(&raw)["deepwiki"];
+        let (defs, _, _) = exposed_definitions(
+            "deepwiki",
+            &allowed_catalog(spec, fixture("deepwiki_tools")),
+        );
+        let excluida = normalize("deepwiki", &otra);
+        assert!(!names(&defs).contains(&excluida.as_str()));
+        // Absence alone passes for a filter that drops everything.
+        let listada = normalize("deepwiki", &una);
+        assert_eq!(names(&defs), vec![listada.as_str()]);
+    }
+
+    /// The list names the SERVER's tools, verbatim — not the exposed
+    /// `<alias>__<tool>` form. An exposed name matches nothing.
+    #[test]
+    fn the_list_matches_the_servers_own_names_not_the_exposed_ones() {
+        let una = fixture("deepwiki_tools")[0].name.clone();
+        let raw = json!({ "deepwiki": { "node_type": "mcp", "mcp": {
+            "url": "https://mcp.deepwiki.com/mcp",
+            "tools": [normalize("deepwiki", &una)]
+        } } });
+        let spec = &collect_mcp_tool_configs(&raw)["deepwiki"];
+        assert!(allowed_catalog(spec, fixture("deepwiki_tools")).is_empty());
     }
 }
