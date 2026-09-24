@@ -78,7 +78,25 @@
           "modes": {
             "stateless": "DEFAULT. Every call is an isolated conversation (node_id = tool/<tool_call_id>). Same as omitting the field — today's behavior.",
             "persistent": "One shared conversation for every call to this tool (node_id = tool/<tool_name>). Every call accumulates into the same thread; the model manages no identifier. Active.",
-            "dynamic": "The model names the thread per call via a REQUIRED 'thread_id' parameter the engine auto-exposes (node_id = tool/<tool_name>/<thread_id>). A new id starts a thread; a prior id continues it. Omitting it returns a correctable tool error (never silent isolation). The tool result echoes the id back as a '[hilo: <id>]' prefix so it survives context compaction. When at least one tool is 'dynamic', the engine also auto-exposes a synthetic 'list_threads' tool the model can call to enumerate existing threads (thread_id, messages, last_activity, opening) and pick the right one to resume; the per-tool query is capped at 100 rows (MAX_LISTED_NODE_ACTIVITY, shared by the Postgres/SQLite backends) and a tool's entry in the response carries 'truncated: true' when its rows hit that cap (omitted otherwise). Active."
+            "dynamic": "The model names the thread per call via a REQUIRED 'thread_id' parameter the engine auto-exposes (node_id = tool/<tool_name>/<thread_id>). A new id starts a thread; a prior id continues it. Omitting it returns a correctable tool error (never silent isolation). The tool result echoes the id back as a '[hilo: <id>]' prefix so it survives context compaction. When at least one tool is 'dynamic', the engine also auto-exposes a synthetic 'list_threads' tool the model can call to enumerate existing threads (thread_id, messages, last_activity, opening) and pick the right one to resume; the per-tool query is capped at 100 rows (MAX_LISTED_NODE_ACTIVITY, shared by the Postgres/SQLite backends) and a tool's entry in the response carries 'truncated: true' when its rows hit that cap (omitted otherwise). Active. EXCEPTION: see 'fixed_thread_id' below — when node_schema.thread_id carries 'fixed', the platform names the thread instead of the model."
+          },
+          "fixed_thread_id": {
+            "summary": "In 'dynamic' mode, node_schema.thread_id may itself be 'fixed' (e.g. { \"fixed\": \"${agentId}\" }, templated against another declared top-level param) so the PLATFORM names the thread per call, not the model. Built for a canvas/orchestration layer that gives each of a user's agents its own memory thread without the model ever choosing an id.",
+            "effects": [
+              "The engine does NOT auto-expose 'thread_id' as an LLM parameter — the model never sees it and has nothing to choose.",
+              "The tool result is NOT prefixed with '[hilo: <id>]' — that echo exists so the model can reuse an id IT invented; a fixed id was never the model's choice, so echoing it only adds noise.",
+              "The tool is left OUT of 'list_threads' (and does not count toward exposing the synthetic 'list_threads' tool at all) — it has no model-named threads to enumerate.",
+              "Memory still keys per resolved value (node_id = tool/<tool_name>/<resolved_thread_id>), so 'thread_id': { 'fixed': '${agentId}' } gives one memory thread per agentId with zero model awareness of thread_id.",
+              "If the fixed template does not resolve (the referenced param, e.g. 'agentId', was not supplied this call, or resolved to an empty string) the call fails with ToolResult.error = 'unresolved_thread_id' instead of silently falling back to a thread shared by every caller."
+            ],
+            "example": {
+              "node_schema": {
+                "agentId": { "type": "string", "required": true, "description": "id of the agent to run" },
+                "task": { "type": "string", "required": true, "description": "instruction for the sub-agent" },
+                "child_graph_ref": { "fixed": { "agent_id": "${agentId}" } },
+                "thread_id": { "fixed": "${agentId}" }
+              }
+            }
           }
         }
       }

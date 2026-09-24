@@ -2286,13 +2286,10 @@ impl ExecutableNode for LlmNode {
                 }
             };
 
-        // F-T4 (list_threads) — capture before `tool_configurations` moves
-        // into the executor below: whether any configured tool opted into
-        // `memory_mode: "dynamic"`. Gates exposure of the `list_threads`
-        // synthetic tool near the `tool_recall_history()` push further down.
-        let exposes_dynamic_memory = tool_configurations.values().any(|c| {
-            c.memory_mode == crate::dag_engine::domain::tool_configuration::MemoryMode::Dynamic
-        });
+        // F-T4 (list_threads) — capture before `tool_configurations` moves into the
+        // executor below: gates `list_threads` near the `tool_recall_history()` push
+        // further down. See (and unit-tested at) `DagToolExecutor::exposes_dynamic_memory`.
+        let exposes_dynamic_memory = DagToolExecutor::exposes_dynamic_memory(&tool_configurations);
 
         // MCP: read the specs from the RAW config before `tool_configurations`
         // moves into the executor on the next line. The dispatcher itself cannot

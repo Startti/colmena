@@ -208,6 +208,27 @@ impl DagToolExecutor {
         out.trim_matches('-').to_string()
     }
 
+    /// The platform, not the model, names the thread: `thread_id` comes fixed in the
+    /// node_schema (e.g. `"${agentId}"`, one memory thread per agent). When true, the
+    /// model never sees `thread_id` as a tool parameter, the tool's output is not
+    /// prefixed with `[hilo: …]` (that echo exists so the model can reuse an id it
+    /// chose — a fixed id was never its choice), and the tool has no model-named
+    /// threads to surface via `list_threads`.
+    pub(crate) fn thread_id_is_fixed(cfg: &ToolConfiguration) -> bool {
+        cfg.node_schema
+            .as_ref()
+            .and_then(|s| s.get(THREAD_ID_PARAM))
+            .is_some_and(|f| f.fixed.is_some())
+    }
+
+    /// Pure predicate `llm.rs` gates `list_threads` exposure with — true only
+    /// for a `dynamic` tool whose `thread_id` isn't fixed.
+    pub(crate) fn exposes_dynamic_memory(configs: &HashMap<String, ToolConfiguration>) -> bool {
+        configs
+            .values()
+            .any(|c| c.memory_mode == MemoryMode::Dynamic && !Self::thread_id_is_fixed(c))
+    }
+
     /// Resolve `${var}` and `${context.var}` placeholders in a string value
     /// using values from the inputs map. Only resolves keys present in `inputs`;
     /// unrecognized placeholders are left as-is.
@@ -897,7 +918,12 @@ impl DagToolExecutor {
         // starts a thread, a prior id continues it. Making it required turns a
         // missing id into a correctable tool error (see `execute_inner`) instead
         // of silent isolation.
-        if tool_config.memory_mode == MemoryMode::Dynamic {
+        //
+        // Exception: when `thread_id` comes FIXED in node_schema, the platform
+        // names the thread (e.g. one per `agentId`), not the model — there is
+        // nothing for it to choose, so it must not see the parameter at all.
+        if tool_config.memory_mode == MemoryMode::Dynamic && !Self::thread_id_is_fixed(tool_config)
+        {
             def.parameters.properties.insert(
                 THREAD_ID_PARAM.to_string(),
                 ParameterProperty::new(
@@ -1916,10 +1942,16 @@ impl DagToolExecutor {
             // built from this same name (`tool/<name>/<thread>`), so using the raw
             // config `name` here would return an empty/mismatched list and reject
             // the tool's real name as `unknown_or_non_dynamic_tool`.
+            //
+            // A tool whose `thread_id` is FIXED (platform-named, not model-named)
+            // is excluded: it has no model-named threads for `list_threads` to
+            // surface.
             let mut dynamic_tool_names: Vec<String> = self
                 .tool_configurations
                 .iter()
-                .filter(|(_, c)| c.memory_mode == MemoryMode::Dynamic)
+                .filter(|(_, c)| {
+                    c.memory_mode == MemoryMode::Dynamic && !Self::thread_id_is_fixed(c)
+                })
                 .map(|(k, c)| {
                     if c.name.is_empty() {
                         k.clone()
@@ -2192,9 +2224,32 @@ impl DagToolExecutor {
         //
         // Always strip any caller-supplied `thread_id` first: it is a meta-parameter
         // consumed here and must never reach the child as a task input.
+        //
+        // When `thread_id` is FIXED in node_schema, the platform names the thread
+        // (e.g. `"${agentId}"`) — the model never supplied it, so `inputs` holds
+        // whatever `merge_args_into_schema` templated. If the referenced param was
+        // never declared/supplied, the template is left unresolved (still contains
+        // `${`) rather than silently falling back to a thread shared by everyone:
+        // that is a correctable configuration error, not a routing decision.
         let memory_mode = tool_cfg.map(|c| c.memory_mode).unwrap_or_default();
-        let thread_id: Option<String> = inputs
-            .remove(THREAD_ID_PARAM)
+        let fixed_thread = tool_cfg.is_some_and(Self::thread_id_is_fixed);
+        let raw_thread = inputs.remove(THREAD_ID_PARAM);
+        if fixed_thread
+            && raw_thread
+                .as_ref()
+                .and_then(|v| v.as_str())
+                .is_none_or(|s| s.contains("${") || s.trim().is_empty())
+        {
+            return Ok(ToolResult {
+                tool_call_id: tool_call.id.clone(),
+                success: false,
+                output: "This tool's conversation thread comes from one of its arguments, and \
+                         that argument was missing. Call it again with every required argument."
+                    .to_string(),
+                error: Some("unresolved_thread_id".to_string()),
+            });
+        }
+        let thread_id: Option<String> = raw_thread
             .and_then(|v| v.as_str().map(Self::sanitize_thread_id))
             .filter(|s| !s.is_empty());
         let node_id_path = match memory_mode {
@@ -2465,9 +2520,13 @@ impl DagToolExecutor {
 
                 // In `dynamic` mode, echo the thread id back so the model can reuse it
                 // to continue this exact thread later — the id must survive context
-                // compaction, and the model's own history is where it does.
+                // compaction, and the model's own history is where it does. Skipped
+                // when the thread is FIXED: the model never chose this id, so echoing
+                // it teaches it nothing and only adds noise to the transcript.
                 let output = match (memory_mode, &thread_id) {
-                    (MemoryMode::Dynamic, Some(t)) => format!("[hilo: {t}]\n{}", safe_output),
+                    (MemoryMode::Dynamic, Some(t)) if !fixed_thread => {
+                        format!("[hilo: {t}]\n{}", safe_output)
+                    }
                     _ => safe_output.to_string(),
                 };
                 Ok(ToolResult {
@@ -3189,6 +3248,34 @@ mod tests {
         m
     }
 
+    /// A `dynamic` tool whose `thread_id` the platform fixes to `${agentId}` —
+    /// one memory thread per agent, not one the model names per call.
+    fn fixed_thread_tool_configs() -> HashMap<String, ToolConfiguration> {
+        let cfg: ToolConfiguration = serde_json::from_value(serde_json::json!({
+            "name": "archivador",
+            "node_type": "subgraph",
+            "memory_mode": "dynamic",
+            "node_schema": {
+                "agentId": { "type": "string", "required": true, "description": "agent" },
+                "task": { "type": "string", "required": true, "description": "task" },
+                "thread_id": { "fixed": "${agentId}" }
+            }
+        }))
+        .expect("valid tool configuration");
+        HashMap::from([("archivador".to_string(), cfg)])
+    }
+
+    /// Minimal `ToolCall` builder for tests that dispatch a call directly,
+    /// bypassing the LLM adapter. The id only needs to be present — dispatch
+    /// never branches on it outside the stateless `ephemeral_subgraph_path`
+    /// qualifier, which none of these tests exercise.
+    fn tool_call(name: &str, args: Value) -> ToolCall {
+        ToolCall::new(
+            "test_call".to_string(),
+            FunctionCall::new(name.to_string(), args.to_string()),
+        )
+    }
+
     #[test]
     fn sanitize_thread_id_normalizes_and_caps() {
         assert_eq!(
@@ -3202,6 +3289,17 @@ mod tests {
         assert_eq!(DagToolExecutor::sanitize_thread_id("  --  "), "");
         assert_eq!(DagToolExecutor::sanitize_thread_id("a/b\\c:d"), "a-b-c-d");
         assert!(DagToolExecutor::sanitize_thread_id(&"x".repeat(500)).len() <= 128);
+    }
+
+    /// Regression guard for the `list_threads` exclusion `llm.rs` gates on.
+    #[test]
+    fn exposes_dynamic_memory_respects_fixed_thread_id() {
+        assert!(!DagToolExecutor::exposes_dynamic_memory(
+            &fixed_thread_tool_configs()
+        ));
+        assert!(DagToolExecutor::exposes_dynamic_memory(
+            &dynamic_tool_configs()
+        ));
     }
 
     #[tokio::test]
@@ -3236,6 +3334,118 @@ mod tests {
             result.output.contains("thread_id is required"),
             "error must guide the model, got: {}",
             result.output
+        );
+    }
+
+    /// When `thread_id` comes fixed in `node_schema` (the platform names the
+    /// thread), the model never sees it as a tool parameter — there is
+    /// nothing for it to choose.
+    #[tokio::test]
+    async fn a_fixed_thread_id_is_not_exposed_to_the_model() {
+        let executor = DagToolExecutor::new(registry_with_subgraph(), fixed_thread_tool_configs());
+        let tools = executor.available_tools().await;
+        let t = tools.iter().find(|t| t.name == "archivador").unwrap();
+        assert!(!t.parameters.properties.contains_key("thread_id"));
+        assert!(!t.parameters.required.iter().any(|r| r == "thread_id"));
+    }
+
+    /// A fixed `thread_id` still keys memory per resolved value (one thread
+    /// per `agentId` here) and the output is not prefixed with `[hilo: …]` —
+    /// that echo exists so the MODEL can reuse an id it chose; a fixed id was
+    /// never the model's choice, so echoing it back teaches it nothing.
+    #[tokio::test]
+    async fn a_fixed_thread_id_keys_memory_per_value_and_skips_the_thread_prefix() {
+        let executor = DagToolExecutor::new(registry_with_subgraph(), fixed_thread_tool_configs());
+        let call_a = tool_call(
+            "archivador",
+            serde_json::json!({ "agentId": "agent-a", "task": "t" }),
+        );
+        let call_b = tool_call(
+            "archivador",
+            serde_json::json!({ "agentId": "agent-b", "task": "t" }),
+        );
+        let a = executor.execute(&call_a).await.unwrap();
+        let b = executor.execute(&call_b).await.unwrap();
+        assert!(a.output.contains("tool/archivador/agent-a"), "{}", a.output);
+        assert!(b.output.contains("tool/archivador/agent-b"), "{}", b.output);
+        assert!(!a.output.starts_with("[hilo:"), "{}", a.output);
+    }
+
+    /// A fixed `thread_id` still unresolved (the templated param was never
+    /// supplied) must be a correctable tool error, never a fallback to a
+    /// shared thread — silently sharing memory across agents would be worse
+    /// than refusing the call.
+    #[tokio::test]
+    async fn an_unresolved_fixed_thread_id_is_an_error_not_a_shared_thread() {
+        let executor = DagToolExecutor::new(registry_with_subgraph(), fixed_thread_tool_configs());
+        let call = tool_call("archivador", serde_json::json!({ "task": "t" }));
+        let res = executor.execute(&call).await.unwrap();
+        assert!(!res.success);
+        assert_eq!(res.error.as_deref(), Some("unresolved_thread_id"));
+    }
+
+    /// A fixed-thread tool has no model-named threads, so it has nothing to
+    /// offer `list_threads` — it must not even appear as a dynamic tool.
+    ///
+    /// `DagToolExecutor::available_tools()` never adds the `list_threads`
+    /// synthetic tool itself (that gating lives in `llm.rs`'s
+    /// `exposes_dynamic_memory`, verified separately), so this assertion holds
+    /// independently of the fixed-thread_id change — it is a same-file
+    /// regression guard from the brief, not proof the DISPATCH-level filter
+    /// (below) excludes fixed-thread tools. See
+    /// `list_threads_dispatch_excludes_fixed_thread_tools` for that.
+    #[tokio::test]
+    async fn list_threads_leaves_out_fixed_thread_tools() {
+        let executor = DagToolExecutor::new(registry_with_subgraph(), fixed_thread_tool_configs());
+        let tools = executor.available_tools().await;
+        assert!(
+            !tools.iter().any(|t| t.name == "list_threads"),
+            "no model-named threads to list"
+        );
+    }
+
+    /// The actual dispatch-time filter: a fixed-thread tool is excluded from
+    /// `dynamic_tool_names`, so `list_threads` (called with no `tool` filter,
+    /// i.e. "list everything") comes back empty even though the fixed-thread
+    /// tool has real history under `tool/archivador/agent-a/...` — that
+    /// history belongs to the platform's per-agent bookkeeping, not to
+    /// anything the model chose to name.
+    #[tokio::test]
+    async fn list_threads_dispatch_excludes_fixed_thread_tools() {
+        use crate::llm::domain::{
+            AgentSessionId, ConversationKey, ConversationRepository, LlmMessage, MessageRole,
+            NodeIdPath, SessionId,
+        };
+        use crate::llm::infrastructure::persistence::in_memory_conversation_repository::InMemoryConversationRepository;
+        let repo = std::sync::Arc::new(InMemoryConversationRepository::new());
+        let thread_key = ConversationKey {
+            session_id: SessionId("s".into()),
+            agent_session_id: Some(AgentSessionId("a".into())),
+            node_id: NodeIdPath("tool/archivador/agent-a/keeper".into()),
+        };
+        repo.add_message(
+            &thread_key,
+            LlmMessage::new(MessageRole::User, "hola".to_string()).unwrap(),
+        )
+        .await
+        .unwrap();
+        let parent_key = ConversationKey {
+            session_id: SessionId("s".into()),
+            agent_session_id: Some(AgentSessionId("a".into())),
+            node_id: NodeIdPath("chat".into()),
+        };
+        let exec = DagToolExecutor::new(registry_with_subgraph(), fixed_thread_tool_configs())
+            .with_conversation_history(repo, parent_key);
+        let call = ToolCall::new(
+            "call_1".into(),
+            FunctionCall::new("list_threads".into(), "{}".into()),
+        );
+        let res = exec.execute(&call).await.unwrap();
+        assert!(res.success, "list_threads should succeed: {}", res.output);
+        assert!(
+            !res.output.contains("archivador"),
+            "a fixed-thread tool's history must not surface via list_threads: {}",
+            res.output
         );
     }
 
