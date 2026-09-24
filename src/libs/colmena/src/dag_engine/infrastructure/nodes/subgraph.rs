@@ -113,6 +113,40 @@ impl SubGraphNode {
         }
     }
 
+    /// Loads the graph a `(key, source)` pair names: a ref through the
+    /// embedder's resolver, a path from disk, an inline graph as is. Shared by
+    /// a fresh run and a resume, so a resume loads exactly what a fresh run
+    /// would — for a ref, with the same `ChildGraphRequest`. `Err` is the text
+    /// the caller sees; a ref's display name comes back for the boundary.
+    async fn load_child_graph(
+        &self,
+        (source_key, graph_source): (&'static str, Value),
+        session_id: &str,
+        agent_session_id: Option<String>,
+        parent_path: &str,
+    ) -> Result<(Value, Option<String>), String> {
+        if source_key == CHILD_GRAPH_REF {
+            let resolved = self
+                .resolve_ref(&graph_source, session_id, agent_session_id, parent_path)
+                .await
+                .map_err(|e| e.to_string())?;
+            return Ok((resolved.graph, Some(resolved.display_name)));
+        }
+        if source_key == CHILD_GRAPH_INLINE || graph_source.is_object() {
+            return Ok((graph_source, None));
+        }
+        let Some(path_val) = graph_source.as_str() else {
+            return Err("child_graph source must be an inline object or a path string".into());
+        };
+        let path = std::path::Path::new(path_val);
+        if !path.exists() {
+            return Err(format!("child_graph_path not found: {}", path_val));
+        }
+        let contents = fs::read_to_string(path).await.map_err(|e| e.to_string())?;
+        let graph = serde_json::from_str(&contents).map_err(|e| e.to_string())?;
+        Ok((graph, None))
+    }
+
     /// True for keys that must never cross into the child graph's global state.
     ///
     /// Two families: the engine's own bookkeeping (`__colmena_*`, `__node_id`),
@@ -415,38 +449,21 @@ impl ExecutableNode for SubGraphNode {
         // --- 2. GRAPH LOADING ---
         // Source can come from `config` (edge-based path) or `inputs` (tool path,
         // where the executor merges fixed_config into inputs and passes config={}).
-        let (source_key, graph_source) = Self::resolve_child_graph_source(inputs, config).ok_or(
-            "SubGraphNode requires 'child_graph_inline', 'child_graph_path' or 'child_graph_ref' \
-             in config (edge path) or inputs (tool path)",
-        )?;
-
         // A ref is resolved here, before the boundary's start frame: a child that
         // never runs emits nothing. The resolved graph goes only to the executor
         // — never into `inputs`, a frame or this node's output.
-        // `display_name` feeds the boundary's start frame below.
-        let (graph_json, display_name) = if source_key == CHILD_GRAPH_REF {
-            let resolved = self
-                .resolve_ref(
-                    &graph_source,
-                    &parent_session_id,
-                    agent_session_id.clone(),
-                    &parent_path,
-                )
-                .await
-                .map_err(|e| e.to_string())?;
-            (resolved.graph, Some(resolved.display_name))
-        } else if source_key == CHILD_GRAPH_INLINE || graph_source.is_object() {
-            (graph_source, None)
-        } else if let Some(path_val) = graph_source.as_str() {
-            let path = std::path::Path::new(path_val);
-            if !path.exists() {
-                return Err(format!("child_graph_path not found: {}", path_val).into());
-            }
-            let contents = fs::read_to_string(path).await?;
-            (serde_json::from_str(&contents)?, None)
-        } else {
-            return Err("child_graph source must be an inline object or a path string".into());
-        };
+        let source = Self::resolve_child_graph_source(inputs, config).ok_or(
+            "SubGraphNode requires 'child_graph_inline', 'child_graph_path' or 'child_graph_ref' \
+             in config (edge path) or inputs (tool path)",
+        )?;
+        let (graph_json, display_name) = self
+            .load_child_graph(
+                source,
+                &parent_session_id,
+                agent_session_id.clone(),
+                &parent_path,
+            )
+            .await?;
 
         // --- 3. STATE MAPPING (IN) ---
         let child_state = Self::build_child_state(inputs);
