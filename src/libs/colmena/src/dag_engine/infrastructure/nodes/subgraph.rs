@@ -7,6 +7,7 @@ use crate::dag_engine::domain::child_graph_source::{
     CHILD_GRAPH_INLINE, CHILD_GRAPH_PATH, CHILD_GRAPH_REF, CHILD_GRAPH_SOURCE_KEYS,
 };
 use crate::dag_engine::domain::events::{DagExecutionEvent, NodeEndError};
+use crate::dag_engine::domain::graph_skeleton::SUBGRAPH_RESUME_INCOMPATIBLE;
 use crate::dag_engine::domain::lint::{FieldSpec, NodeCatalogEntry};
 use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
 use crate::dag_engine::domain::observer::{ChildScopeObserver, ExecutionObserver, NodeEvent};
@@ -147,6 +148,42 @@ impl SubGraphNode {
         Ok((graph, None))
     }
 
+    /// The graph a suspended child resumes with: derived again from the same
+    /// source a fresh run reads, so it carries this turn's keys, token and
+    /// skill paths. Never fails — a source that cannot give a graph becomes
+    /// `Unavailable`, which the executor turns into a closed row and that text.
+    async fn resume_graph(
+        &self,
+        stored_valve: bool,
+        inputs: &NodeInputs,
+        config: &Value,
+        session_id: &str,
+        agent_session_id: Option<String>,
+        parent_path: &str,
+    ) -> ResumeGraph {
+        if stored_valve {
+            return ResumeGraph::Stored;
+        }
+        let Some(source) = Self::resolve_child_graph_source(inputs, config) else {
+            return ResumeGraph::Unavailable(format!(
+                "{SUBGRAPH_RESUME_INCOMPATIBLE} the subgraph has no child graph source. \
+                 Run it again from the start."
+            ));
+        };
+        // A ref keeps its stored graph until the resolver is asked again on
+        // resume (the next change).
+        if source.0 == CHILD_GRAPH_REF {
+            return ResumeGraph::Stored;
+        }
+        match self
+            .load_child_graph(source, session_id, agent_session_id, parent_path)
+            .await
+        {
+            Ok((graph, _display_name)) => ResumeGraph::Fresh(graph),
+            Err(reason) => ResumeGraph::Unavailable(reason),
+        }
+    }
+
     /// True for keys that must never cross into the child graph's global state.
     ///
     /// Two families: the engine's own bookkeeping (`__colmena_*`, `__node_id`),
@@ -232,6 +269,27 @@ impl SubGraphNode {
                 .and_then(|raw| raw.trim().parse::<u64>().ok())
                 .filter(|n| *n > 0)
         })
+    }
+
+    /// `COLMENA_SUBGRAPH_RESUME_GRAPH=stored` resumes every child with the graph
+    /// stored in its row, as up to v0.16: a safety valve while the structure
+    /// check proves itself in production. Anything else, unset included,
+    /// derives the graph from the source. Read once, like the depth ceiling.
+    fn stored_resume_valve() -> bool {
+        static STORED: OnceLock<bool> = OnceLock::new();
+        *STORED.get_or_init(|| {
+            Self::valve_is_stored(
+                std::env::var("COLMENA_SUBGRAPH_RESUME_GRAPH")
+                    .ok()
+                    .as_deref(),
+            )
+        })
+    }
+
+    /// Pure half of [`Self::stored_resume_valve`], testable without touching
+    /// the process environment.
+    fn valve_is_stored(raw: Option<&str>) -> bool {
+        raw.is_some_and(|v| v.trim().eq_ignore_ascii_case("stored"))
     }
 
     /// Read `key` from inputs as a non-empty string. Used for the boundary-name
@@ -425,13 +483,26 @@ impl ExecutableNode for SubGraphNode {
                 child_session_id,
                 parent_path
             );
-            // Until the node derives its graph from the source (next change),
-            // every resume runs the copy stored in the child's row.
+            // The child resumes with the graph its source names NOW — this
+            // turn's keys, token and skill paths — not the copy its row kept;
+            // the executor checks the structure still matches. Derived only
+            // once there is a child to resume: for a ref, each derivation is a
+            // call to the embedder.
+            let graph = self
+                .resume_graph(
+                    Self::stored_resume_valve(),
+                    inputs,
+                    config,
+                    &parent_session_id,
+                    agent_session_id.clone(),
+                    &parent_path,
+                )
+                .await;
             let result = executor
                 .resume_subgraph(
                     &child_session_id,
                     resume_answer.to_string(),
-                    ResumeGraph::Stored,
+                    graph,
                     child_observer.clone(),
                     agent_session_id.clone(),
                     child_path_prefix.clone(),
@@ -1762,5 +1833,220 @@ mod child_graph_ref_tests {
         );
         let (graph, _) = exec.0.lock().unwrap().clone().unwrap();
         assert!(graph["nodes"]["x"].is_object());
+    }
+
+    /// Until the resolver is asked again on resume, a ref resumes with the
+    /// graph stored in its row and the resolver is not called.
+    #[tokio::test]
+    async fn a_ref_still_resumes_its_stored_graph() {
+        let node = SubGraphNode::new();
+        let exec = super::subgraph_resume_graph_tests::ResumingExecutor::finding(Some("child_1"));
+        let res = Arc::new(FakeResolver(Answer::Graph, Mutex::default()));
+        node.executor.set(exec.clone()).ok().unwrap();
+        node.resolver.set(res.clone()).ok().unwrap();
+        let mut inputs = ref_inputs("a1");
+        inputs.insert(
+            "__colmena_resume_answer".into(),
+            json!("Q[q]: ?\nA[q]: yes"),
+        );
+        node.execute(&inputs, &json!({}), &mut json!({}), None)
+            .await
+            .unwrap();
+        assert_eq!(exec.graph(), Some(ResumeGraph::Stored));
+        assert!(res.1.lock().unwrap().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod subgraph_resume_graph_tests {
+    //! On resume the node finds the suspended child first, then derives its
+    //! graph from the same source a fresh run reads, and hands it to the
+    //! executor as a `ResumeGraph`.
+    use super::*;
+    use crate::dag_engine::domain::error::DagError;
+    use serde_json::json;
+    use std::sync::Mutex;
+
+    /// Finds `child` (or nothing), records every call and the `ResumeGraph` it
+    /// was handed. `Unavailable` comes back as the real executor returns it: a
+    /// refusal carrying that text.
+    pub(super) struct ResumingExecutor {
+        child: Option<&'static str>,
+        calls: Mutex<Vec<&'static str>>,
+        resumed_with: Mutex<Option<ResumeGraph>>,
+    }
+    impl ResumingExecutor {
+        pub(super) fn finding(child: Option<&'static str>) -> Arc<Self> {
+            Arc::new(Self {
+                child,
+                calls: Mutex::default(),
+                resumed_with: Mutex::default(),
+            })
+        }
+        pub(super) fn graph(&self) -> Option<ResumeGraph> {
+            self.resumed_with.lock().unwrap().clone()
+        }
+    }
+    #[async_trait::async_trait]
+    impl SubGraphExecutorPort for ResumingExecutor {
+        async fn run_subgraph(
+            &self,
+            _s: &str,
+            _g: Value,
+            _st: Value,
+            _o: Option<Arc<dyn ExecutionObserver>>,
+            _p: Option<String>,
+            _a: Option<String>,
+            _pp: Option<String>,
+        ) -> Result<Value, DagError> {
+            self.calls.lock().unwrap().push("run");
+            Ok(
+                json!({ "out": { "text": "fresh", "extra_info": { "__colmena_is_output_node": true } } }),
+            )
+        }
+        async fn resume_subgraph(
+            &self,
+            _s: &str,
+            _a: String,
+            graph: ResumeGraph,
+            _o: Option<Arc<dyn ExecutionObserver>>,
+            _ags: Option<String>,
+            _pp: Option<String>,
+        ) -> Result<Value, DagError> {
+            self.calls.lock().unwrap().push("resume");
+            *self.resumed_with.lock().unwrap() = Some(graph.clone());
+            match graph {
+                ResumeGraph::Unavailable(reason) => Err(DagError::ResumeRefused(reason)),
+                _ => Ok(
+                    json!({ "out": { "text": "resumed", "extra_info": { "__colmena_is_output_node": true } } }),
+                ),
+            }
+        }
+        async fn find_child_session_id_for_resume(
+            &self,
+            _p: &str,
+            _n: &str,
+        ) -> Result<Option<String>, DagError> {
+            self.calls.lock().unwrap().push("find");
+            Ok(self.child.map(str::to_string))
+        }
+    }
+
+    fn graph_named(id: &str) -> Value {
+        json!({ "nodes": { id: { "type": "input", "config": {} } }, "edges": [] })
+    }
+
+    fn resume_inputs() -> NodeInputs {
+        let mut i = NodeInputs::new();
+        i.insert(
+            "__colmena_resume_answer".into(),
+            json!("Q[q]: ?\nA[q]: yes"),
+        );
+        i.insert("__colmena_session_id".into(), json!("s1"));
+        i
+    }
+
+    async fn resume(
+        inputs: NodeInputs,
+        config: Value,
+        exec: Arc<ResumingExecutor>,
+    ) -> Result<Value, String> {
+        let node = SubGraphNode::new();
+        node.executor.set(exec).ok().expect("executor once");
+        node.execute(&inputs, &config, &mut json!({}), None)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    #[tokio::test]
+    async fn a_tool_resume_hands_over_the_inline_graph_its_inputs_carry_now() {
+        let exec = ResumingExecutor::finding(Some("child_1"));
+        let mut inputs = resume_inputs();
+        inputs.insert("child_graph_inline".into(), graph_named("fresh"));
+        let out = resume(inputs, json!({}), exec.clone()).await.unwrap();
+        assert_eq!(out["text"], json!("resumed"));
+        assert_eq!(exec.graph(), Some(ResumeGraph::Fresh(graph_named("fresh"))));
+    }
+
+    #[tokio::test]
+    async fn an_edge_resume_takes_the_inline_graph_from_config_first() {
+        let exec = ResumingExecutor::finding(Some("child_1"));
+        let mut inputs = resume_inputs();
+        inputs.insert("child_graph_inline".into(), graph_named("from_inputs"));
+        let config = json!({ "child_graph_inline": graph_named("from_config") });
+        resume(inputs, config, exec.clone()).await.unwrap();
+        assert_eq!(
+            exec.graph(),
+            Some(ResumeGraph::Fresh(graph_named("from_config")))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_path_resume_reads_the_file_again() {
+        let path =
+            std::env::temp_dir().join(format!("subgraph_resume_{}.json", std::process::id()));
+        std::fs::write(&path, graph_named("from_file").to_string()).unwrap();
+        let exec = ResumingExecutor::finding(Some("child_1"));
+        let config = json!({ "child_graph_path": path.to_string_lossy() });
+        let res = resume(resume_inputs(), config, exec.clone()).await;
+        let _ = std::fs::remove_file(&path);
+        res.unwrap();
+        assert_eq!(
+            exec.graph(),
+            Some(ResumeGraph::Fresh(graph_named("from_file")))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_missing_path_is_unavailable_and_its_text_comes_back_verbatim() {
+        let exec = ResumingExecutor::finding(Some("child_1"));
+        let config = json!({ "child_graph_path": "/nonexistent/child.json" });
+        let err = resume(resume_inputs(), config, exec.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(err, "child_graph_path not found: /nonexistent/child.json");
+        assert!(matches!(exec.graph(), Some(ResumeGraph::Unavailable(_))));
+    }
+
+    #[tokio::test]
+    async fn no_source_is_unavailable_with_the_incompatible_prefix() {
+        let exec = ResumingExecutor::finding(Some("child_1"));
+        let err = resume(resume_inputs(), json!({}), exec.clone())
+            .await
+            .unwrap_err();
+        assert!(
+            err.starts_with("SUBGRAPH_RESUME_INCOMPATIBLE: the subgraph has no child graph source"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn without_a_suspended_child_nothing_is_resumed() {
+        let exec = ResumingExecutor::finding(None);
+        let mut inputs = resume_inputs();
+        inputs.insert("child_graph_inline".into(), graph_named("fresh"));
+        let err = resume(inputs, json!({}), exec.clone()).await.unwrap_err();
+        assert!(err.starts_with("No suspended child found"), "{err}");
+        assert_eq!(*exec.calls.lock().unwrap(), vec!["find"]);
+    }
+
+    #[tokio::test]
+    async fn the_stored_valve_skips_the_derivation() {
+        let node = SubGraphNode::new();
+        let mut inputs = resume_inputs();
+        inputs.insert("child_graph_inline".into(), graph_named("fresh"));
+        let graph = node
+            .resume_graph(true, &inputs, &json!({}), "s1", None, "")
+            .await;
+        assert_eq!(graph, ResumeGraph::Stored);
+    }
+
+    #[test]
+    fn only_stored_turns_the_valve_on() {
+        assert!(SubGraphNode::valve_is_stored(Some("stored")));
+        assert!(SubGraphNode::valve_is_stored(Some(" STORED ")));
+        for off in [None, Some(""), Some("fresh"), Some("off"), Some("1")] {
+            assert!(!SubGraphNode::valve_is_stored(off), "{off:?}");
+        }
     }
 }

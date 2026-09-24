@@ -4070,3 +4070,58 @@ igual que la entrada 67; `tests/graphs/basic/suspend_in_subgraph.json` (un
 
 **ADP.** Sin nota: nada cruza la frontera todavía — mismo texto de error, mismo
 comportamiento observable, solo se movió código dentro del motor.
+
+## 78. Un subgrafo reanudado corre el grafo que su fuente nombra hoy
+
+Task 3/4 de la cadena (`docs/superpowers/specs/2026-09-24-child-resume-rederive-design.md`,
+D3), segundo paso: conecta las entradas 73-75 y 77. `SubGraphNode` deja de pasar
+`ResumeGraph::Stored` en todo resume — **comportamiento observable**.
+
+**Qué cambió.** `resume_graph` (nuevo) decide qué `ResumeGraph` pasarle al
+ejecutor: sin válvula y con fuente, deriva con `load_child_graph` (`Fresh`) o
+falla (`Unavailable`, path inexistente o JSON roto); sin fuente,
+`Unavailable` con `SUBGRAPH_RESUME_INCOMPATIBLE:` adelante (entrada 73, primera
+vez que dispara en producción); un `child_graph_ref` sigue devolviendo `Stored`
+(el resolvedor no se vuelve a llamar todavía, PR posterior). La rama de resume
+pasó de "buscar el hijo → `resume_subgraph(Stored)`" a "buscar el hijo → derivar
+→ `resume_subgraph(ResumeGraph)`". Válvula `COLMENA_SUBGRAPH_RESUME_GRAPH=stored`
+(cualquier otro valor deriva), leída una vez por proceso vía `OnceLock` como
+`COLMENA_MAX_SUBGRAPH_DEPTH`, con su mitad pura (`valve_is_stored`) separada.
+Texto por tool: `ToolResult.error` empieza con el prefijo, `output` = `Error
+executing node <tool>: …`; por arista/orquestador/router: `Error de ejecución en
+el nodo: SUBGRAPH_RESUME_INCOMPATIBLE: …`. Los dos cierran la fila del hijo (y
+sus descendientes SUSPENDED, entrada 75) como `FAILED`. Ningún frame SSE nuevo.
+
+**Tests.** 9 nuevos en `subgraph.rs` (TDD red-first): 8 en
+`subgraph_resume_graph_tests` (inline/path derivados en resume, path inexistente,
+sin fuente, sin hijo suspendido, válvula, `valve_is_stored`) + 1 en
+`child_graph_ref_tests` (`a_ref_still_resumes_its_stored_graph`). `cargo test
+--lib nodes::subgraph`: 49 → 58 passed; `router`/`orchestrator` sin regresiones
+(35/5 passed).
+
+**Mutación.** 3, cada una en rojo (o confirmada equivalente) y revertida: (1)
+`resume_graph` siempre `Stored` → 5 rojos (no solo los 3 de inline/path: también
+los 2 casos `Unavailable`, porque ya no fallan donde antes fallaban); (2) derivar
+antes de buscar el hijo → sin cambios, equivalente a este nivel (derivar un
+inline no pasa por el executor mockeado; la Task 4 de la cadena sí lo detecta,
+porque ahí derivar es una llamada al resolvedor); (3) `valve_is_stored` sin
+`trim`/case-insensitive → rojo, solo, el caso `" STORED "`.
+
+**E2E.** `tests/graphs/advanced/subgraph_resume_fresh_graph/turn1_suspend.json`
+(nuevo; los dos turnos 2 se derivan con `jq` en el momento, ver su README — no se
+commitean). `EXPECTED_FILES` 324 → 325. Lint: 1 file, 0/0/0; corpus 325 files,
+0/0/0. Corridas reales contra `colmena_e2e_cgr`, esta rama (`new`) y
+`colmena_dag_engine-v0.16.0` (`old`): config nueva → `new`→`new` da `SELLO=v2`,
+`old`→`old` da `SELLO=v1` (confirma que el arreglo es lo que cambió); válvula
+(`new`→`new` con `COLMENA_SUBGRAPH_RESUME_GRAPH=stored`) → `SELLO=v1`; estructura
+nueva → `SUBGRAPH_RESUME_INCOMPATIBLE: … (removed: pregunta; added: confirmar;
+edges changed: 4)`, fila hija `FAILED`, sin `subgraph-node-end` de `sello`;
+compat (`old`→`new`) → `SELLO=v2`, fila hija `COMPLETED` — un run suspendido por
+v0.16 se reanuda fresco sin migración. Los cuatro turnos 1: `suspended`. Además,
+un nieto anidado a dos niveles con LLM real (`nested_resume_liveness_e2e.json`):
+1 salida de tool con un `sello` inyectado en el turno 2 en la rama del PR, 0 en
+la línea base v0.16.0; el `subgraph-usage-summary` del resume nombra
+`db_specialist_agent` (no `usage-summary`, que solo lleva el nodo raíz).
+
+**ADP.** [Nota de migración](adp_migration/2026-09-24-subgraph-resume-fresh-graph.md)
+actualizada.
