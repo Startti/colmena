@@ -1,6 +1,11 @@
 use crate::colmena_log;
-use crate::dag_engine::application::ports::{ChildGraphResolverPort, SubGraphExecutorPort};
-use crate::dag_engine::domain::child_graph_source::{CHILD_GRAPH_PATH, CHILD_GRAPH_SOURCE_KEYS};
+use crate::dag_engine::application::ports::{
+    ChildGraphRequest, ChildGraphResolveError, ChildGraphResolverPort, ResolvedChildGraph,
+    SubGraphExecutorPort,
+};
+use crate::dag_engine::domain::child_graph_source::{
+    CHILD_GRAPH_INLINE, CHILD_GRAPH_PATH, CHILD_GRAPH_REF, CHILD_GRAPH_SOURCE_KEYS,
+};
 use crate::dag_engine::domain::events::{DagExecutionEvent, NodeEndError};
 use crate::dag_engine::domain::lint::{FieldSpec, NodeCatalogEntry};
 use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
@@ -40,24 +45,72 @@ impl SubGraphNode {
         }
     }
 
-    /// Resolve the child graph source (inline object or path string) for both
-    /// the edge-based path (config) and the tool path (inputs).
+    /// Resolve the child graph source for both the edge-based path (config) and
+    /// the tool path (inputs), together with the key it came from: a
+    /// `child_graph_ref` is an object too, and only the key tells it apart from
+    /// an inline graph.
     ///
     /// Precedence: `config` wins over `inputs` so the legacy edge-based behavior
     /// is unchanged; the tool path supplies the value via `inputs` (because the
     /// executor merges `fixed_config` into inputs and passes `config = {}`).
-    fn resolve_child_graph_source(inputs: &NodeInputs, config: &Value) -> Option<Value> {
+    fn resolve_child_graph_source(
+        inputs: &NodeInputs,
+        config: &Value,
+    ) -> Option<(&'static str, Value)> {
         for key in CHILD_GRAPH_SOURCE_KEYS {
             if let Some(source) = config.get(key) {
-                return Some(source.clone());
+                return Some((key, source.clone()));
             }
         }
         for key in CHILD_GRAPH_SOURCE_KEYS {
             if let Some(source) = inputs.get(key) {
-                return Some(source.clone());
+                return Some((key, source.clone()));
             }
         }
         None
+    }
+
+    const RESOLVE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+    /// Resolve a `child_graph_ref` through the embedder's port. Runs BEFORE the
+    /// boundary's start frame, so a child that never runs emits nothing.
+    async fn resolve_ref(
+        &self,
+        reference: &Value,
+        session_id: &str,
+        agent_session_id: Option<String>,
+        parent_path: &str,
+    ) -> Result<ResolvedChildGraph, ChildGraphResolveError> {
+        // A `${agentId}` still in place means the model never sent the argument
+        // the `fixed` value templates from: refuse instead of asking for it.
+        let agent_id = reference
+            .get("agent_id")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty() && !s.contains("${"))
+            .ok_or_else(|| {
+                ChildGraphResolveError::NotFound(
+                    "child_graph_ref needs a resolved agent_id (was the model's agentId argument missing?)"
+                        .into(),
+                )
+            })?;
+        let resolver = self.resolver.get().ok_or_else(|| {
+            ChildGraphResolveError::Unavailable("no child graph resolver configured".into())
+        })?;
+        let req = ChildGraphRequest {
+            agent_id: agent_id.to_string(),
+            context: reference.get("context").cloned().unwrap_or(Value::Null),
+            session_id: session_id.to_string(),
+            agent_session_id,
+            parent_path: parent_path.to_string(),
+        };
+        match tokio::time::timeout(Self::RESOLVE_TIMEOUT, resolver.resolve(req)).await {
+            Ok(result) => result,
+            Err(_) => Err(ChildGraphResolveError::Unavailable(format!(
+                "resolver timed out after {}s",
+                Self::RESOLVE_TIMEOUT.as_secs()
+            ))),
+        }
     }
 
     /// True for keys that must never cross into the child graph's global state.
@@ -359,20 +412,35 @@ impl ExecutableNode for SubGraphNode {
         // --- 2. GRAPH LOADING ---
         // Source can come from `config` (edge-based path) or `inputs` (tool path,
         // where the executor merges fixed_config into inputs and passes config={}).
-        let graph_source = Self::resolve_child_graph_source(inputs, config).ok_or(
-            "SubGraphNode requires 'child_graph_inline' or 'child_graph_path' \
+        let (source_key, graph_source) = Self::resolve_child_graph_source(inputs, config).ok_or(
+            "SubGraphNode requires 'child_graph_inline', 'child_graph_path' or 'child_graph_ref' \
              in config (edge path) or inputs (tool path)",
         )?;
 
-        let graph_json = if graph_source.is_object() {
-            graph_source
+        // A ref is resolved here, before the boundary's start frame: a child that
+        // never runs emits nothing. The resolved graph goes only to the executor
+        // — never into `inputs`, a frame or this node's output.
+        // `_display_name` feeds the boundary's start frame in a later change.
+        let (graph_json, _display_name) = if source_key == CHILD_GRAPH_REF {
+            let resolved = self
+                .resolve_ref(
+                    &graph_source,
+                    &parent_session_id,
+                    agent_session_id.clone(),
+                    &parent_path,
+                )
+                .await
+                .map_err(|e| e.to_string())?;
+            (resolved.graph, Some(resolved.display_name))
+        } else if source_key == CHILD_GRAPH_INLINE || graph_source.is_object() {
+            (graph_source, None)
         } else if let Some(path_val) = graph_source.as_str() {
             let path = std::path::Path::new(path_val);
             if !path.exists() {
                 return Err(format!("child_graph_path not found: {}", path_val).into());
             }
             let contents = fs::read_to_string(path).await?;
-            serde_json::from_str(&contents)?
+            (serde_json::from_str(&contents)?, None)
         } else {
             return Err("child_graph source must be an inline object or a path string".into());
         };
@@ -477,7 +545,7 @@ mod subgraph_tool_input_config_tests {
     use serde_json::json;
 
     fn resolve_graph_source(inputs: &NodeInputs, config: &Value) -> Option<Value> {
-        SubGraphNode::resolve_child_graph_source(inputs, config)
+        SubGraphNode::resolve_child_graph_source(inputs, config).map(|(_, v)| v)
     }
 
     #[test]
@@ -523,7 +591,7 @@ mod subgraph_tool_input_config_tests {
         inputs.insert("child_graph_path".to_string(), json!("./from_inputs.json"));
         let config = json!({ "child_graph_path": "./from_config.json" });
         assert_eq!(
-            SubGraphNode::resolve_child_graph_source(&inputs, &config),
+            resolve_graph_source(&inputs, &config),
             Some(json!("./from_config.json"))
         );
     }
@@ -554,10 +622,7 @@ mod subgraph_tool_input_config_tests {
     fn returns_none_when_neither_config_nor_inputs_has_source() {
         let inputs: NodeInputs = NodeInputs::new();
         let config = json!({});
-        assert_eq!(
-            SubGraphNode::resolve_child_graph_source(&inputs, &config),
-            None
-        );
+        assert_eq!(resolve_graph_source(&inputs, &config), None);
     }
 }
 
@@ -730,7 +795,7 @@ mod subgraph_child_state_isolation_tests {
         inputs.insert("child_graph_inline".to_string(), inline_with_secrets());
 
         assert_eq!(
-            SubGraphNode::resolve_child_graph_source(&inputs, &json!({})),
+            SubGraphNode::resolve_child_graph_source(&inputs, &json!({})).map(|(_, v)| v),
             Some(inline_with_secrets()),
             "the node must still find its own graph"
         );
@@ -1418,5 +1483,235 @@ mod subgraph_suspend_passthrough_tests {
         assert_eq!(out["__colmena_status"], "SUSPENDED");
         assert_eq!(out["questions"][0]["id"], "q1");
         assert_eq!(out["questions"][0]["text"], "¿Cuántas personas?");
+    }
+}
+
+#[cfg(test)]
+mod child_graph_ref_tests {
+    //! `child_graph_ref`: the child graph is loaded by reference through the
+    //! embedder's `ChildGraphResolverPort`, resolved BEFORE the boundary's start
+    //! frame, and never reaches an output, a frame or the child's state.
+    use super::*;
+    use crate::dag_engine::domain::error::DagError;
+    use crate::dag_engine::domain::observer::{ExecutionObserver, NodeEvent};
+    use serde_json::json;
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct Obs(Mutex<Vec<NodeEvent>>);
+    impl ExecutionObserver for Obs {
+        fn on_event(&self, e: NodeEvent) {
+            self.0.lock().unwrap().push(e);
+        }
+    }
+    impl Obs {
+        fn dump(&self) -> String {
+            format!("{:?}", self.0.lock().unwrap())
+        }
+        fn is_empty(&self) -> bool {
+            self.0.lock().unwrap().is_empty()
+        }
+    }
+
+    /// Records the graph and state it is asked to run.
+    #[derive(Default)]
+    struct CapturingExecutor(Mutex<Option<(Value, Value)>>);
+    #[async_trait::async_trait]
+    impl SubGraphExecutorPort for CapturingExecutor {
+        async fn run_subgraph(
+            &self,
+            _s: &str,
+            graph: Value,
+            state: Value,
+            _o: Option<Arc<dyn ExecutionObserver>>,
+            _p: Option<String>,
+            _a: Option<String>,
+            _pp: Option<String>,
+        ) -> Result<Value, DagError> {
+            *self.0.lock().unwrap() = Some((graph, state));
+            Ok(
+                json!({ "out": { "text": "done", "extra_info": { "__colmena_is_output_node": true } } }),
+            )
+        }
+        async fn resume_subgraph(
+            &self,
+            _s: &str,
+            _a: String,
+            _o: Option<Arc<dyn ExecutionObserver>>,
+            _ags: Option<String>,
+            _pp: Option<String>,
+        ) -> Result<Value, DagError> {
+            Ok(Value::Null)
+        }
+        async fn find_child_session_id_for_resume(
+            &self,
+            _p: &str,
+            _n: &str,
+        ) -> Result<Option<String>, DagError> {
+            Ok(None)
+        }
+    }
+
+    enum Answer {
+        Graph,
+        Fail(ChildGraphResolveError),
+        Hang,
+    }
+    struct FakeResolver(Answer, Mutex<Vec<ChildGraphRequest>>);
+    #[async_trait::async_trait]
+    impl ChildGraphResolverPort for FakeResolver {
+        async fn resolve(
+            &self,
+            req: ChildGraphRequest,
+        ) -> Result<ResolvedChildGraph, ChildGraphResolveError> {
+            self.1.lock().unwrap().push(req);
+            match &self.0 {
+                Answer::Graph => Ok(ResolvedChildGraph {
+                    graph: json!({ "nodes": { "llm": { "type": "llm_call", "config": { "api_key": "sk-resolved-secret" } } }, "edges": [] }),
+                    display_name: "Agente de licitaciones".into(),
+                }),
+                Answer::Fail(e) => Err(e.clone()),
+                Answer::Hang => {
+                    tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+                    unreachable!()
+                }
+            }
+        }
+    }
+
+    fn ref_inputs(agent_id: &str) -> NodeInputs {
+        let mut i = NodeInputs::new();
+        i.insert(
+            "child_graph_ref".into(),
+            json!({ "agent_id": agent_id, "context": { "messageId": "m1" } }),
+        );
+        i.insert("__colmena_session_id".into(), json!("s1"));
+        i.insert("__colmena_agent_session_id".into(), json!("as1"));
+        i.insert(
+            "__colmena_node_id_path".into(),
+            json!("tool/Run_My_Agent/a1"),
+        );
+        i.insert("__colmena_tool_name".into(), json!("Run_My_Agent"));
+        i.insert("prompt".into(), json!("hi"));
+        i
+    }
+
+    fn node_with(answer: Answer) -> (SubGraphNode, Arc<CapturingExecutor>, Arc<FakeResolver>) {
+        let node = SubGraphNode::new();
+        let exec = Arc::new(CapturingExecutor::default());
+        let res = Arc::new(FakeResolver(answer, Mutex::default()));
+        node.executor.set(exec.clone()).ok().expect("executor once");
+        node.resolver.set(res.clone()).ok().expect("resolver once");
+        (node, exec, res)
+    }
+
+    async fn run(
+        node: &SubGraphNode,
+        agent_id: &str,
+        config: Value,
+        obs: Option<Arc<Obs>>,
+    ) -> Result<Value, String> {
+        let obs = obs.map(|o| o as Arc<dyn ExecutionObserver>);
+        node.execute(&ref_inputs(agent_id), &config, &mut json!({}), obs)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    fn assert_code(err: &str, code: &str) {
+        let prefix = format!("CHILD_GRAPH_RESOLVE_FAILED:{code}:");
+        assert!(err.starts_with(&prefix), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_ref_runs_the_resolved_graph_with_the_parent_context() {
+        let (node, exec, res) = node_with(Answer::Graph);
+        let out = run(&node, "a1", json!({}), None).await.unwrap();
+        assert_eq!(out["text"], json!("done"));
+        let (graph, _) = exec.0.lock().unwrap().clone().expect("executor ran");
+        assert!(graph["nodes"]["llm"].is_object(), "runs the resolved graph");
+        let req = res.1.lock().unwrap()[0].clone();
+        assert_eq!(req.agent_id, "a1");
+        assert_eq!(req.context, json!({ "messageId": "m1" }));
+        assert_eq!(req.session_id, "s1");
+        assert_eq!(req.agent_session_id.as_deref(), Some("as1"));
+        assert_eq!(req.parent_path, "tool/Run_My_Agent/a1");
+    }
+
+    #[tokio::test]
+    async fn the_resolved_graph_never_reaches_output_events_or_child_state() {
+        let (node, exec, _) = node_with(Answer::Graph);
+        let obs = Arc::new(Obs::default());
+        let out = run(&node, "a1", json!({}), Some(obs.clone()))
+            .await
+            .unwrap();
+        let (graph, state) = exec.0.lock().unwrap().clone().unwrap();
+        // The secret was in play: the child ran the resolved graph. Without this
+        // the assertions below would pass for a node that never resolved at all.
+        assert!(graph.to_string().contains("sk-resolved-secret"));
+        assert!(!obs.is_empty(), "the tool boundary emitted its frames");
+        assert!(!out.to_string().contains("sk-resolved-secret"));
+        assert!(
+            !obs.dump().contains("sk-resolved-secret"),
+            "no frame carries the graph"
+        );
+        assert!(
+            state.get("child_graph_ref").is_none(),
+            "the ref is plumbing, not child data"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_resolver_error_fails_with_the_stable_prefix_and_emits_no_frame() {
+        let forbidden = ChildGraphResolveError::Forbidden("not visible".into());
+        let (node, exec, _) = node_with(Answer::Fail(forbidden));
+        let obs = Arc::new(Obs::default());
+        let err = run(&node, "a1", json!({}), Some(obs.clone()))
+            .await
+            .unwrap_err();
+        assert_code(&err, "forbidden");
+        assert!(obs.is_empty(), "no start frame for a child that never ran");
+        assert!(exec.0.lock().unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn without_a_resolver_a_ref_is_unavailable() {
+        let node = SubGraphNode::new();
+        node.executor
+            .set(Arc::new(CapturingExecutor::default()))
+            .ok()
+            .unwrap();
+        let err = run(&node, "a1", json!({}), None).await.unwrap_err();
+        assert_code(&err, "unavailable");
+    }
+
+    #[tokio::test]
+    async fn an_unresolved_agent_id_template_is_not_found_and_never_asks_the_resolver() {
+        let (node, _, res) = node_with(Answer::Graph);
+        let err = run(&node, "${agentId}", json!({}), None).await.unwrap_err();
+        assert_code(&err, "not_found");
+        assert!(res.1.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_hung_resolver_times_out_as_unavailable() {
+        let (node, _, _) = node_with(Answer::Hang);
+        let err = run(&node, "a1", json!({}), None).await.unwrap_err();
+        assert_code(&err, "unavailable");
+        assert!(err.contains("timed out after 30s"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn an_inline_graph_in_config_wins_over_a_ref_in_inputs() {
+        let (node, exec, res) = node_with(Answer::Graph);
+        let inline = json!({ "nodes": { "x": { "type": "input", "config": {} } }, "edges": [] });
+        run(&node, "a1", json!({ "child_graph_inline": inline }), None)
+            .await
+            .unwrap();
+        assert!(
+            res.1.lock().unwrap().is_empty(),
+            "the resolver is not asked"
+        );
+        let (graph, _) = exec.0.lock().unwrap().clone().unwrap();
+        assert!(graph["nodes"]["x"].is_object());
     }
 }

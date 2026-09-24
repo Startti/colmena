@@ -3498,3 +3498,34 @@ dejando afuera el plumbing. Captura en
 `/tmp/colmena_e2e/child_graph_ref_2a_regression_structured.sse`.
 
 **ADP.** [Nota de migración](adp_migration/2026-09-23-child-graph-ref.md).
+
+## 67. Un `subgraph` carga su hijo por referencia (`child_graph_ref`)
+
+PR 2b/5 de `child_graph_ref` (spec 1.1-1.3). La fuente que la entrada 66 dejó
+reservada ahora se resuelve.
+
+**Qué cambió.** `resolve_child_graph_source` devuelve también la clave que encontró
+(un ref es un objeto, como un inline). Para `child_graph_ref`, `SubGraphNode` arma un
+`ChildGraphRequest` (el `agent_id` templado, el `context` tal cual, la sesión, la
+sesión estable y su propia ruta) y le pide el grafo al resolvedor **antes** del frame
+de inicio, con un tope de 30 s. Sin resolvedor → `unavailable`; un `agent_id` que
+todavía contiene `${` → `not_found` sin consultar al resolvedor. El error vuelve a la
+tool como `CHILD_GRAPH_RESOLVE_FAILED:<code>: <msg>`. El grafo resuelto va solo al
+ejecutor: no entra en `inputs`, en frames ni en la salida, y queda en
+`dag_runs.graph_json` como un inline.
+
+**Tests.** 7 en `child_graph_ref_tests` con un resolvedor doble (TDD: 6 rojos antes
+de la implementación; el de precedencia inline>ref ya pasaba). Mutaciones verificadas
+en rojo: el grafo en el frame de inicio, el ref en el estado del hijo, el frame de
+inicio antes del resolve y el guard de `${`.
+
+**E2E.** `tests/graphs/agents/child_graph_ref_unavailable.json`, `gemini-2.5-flash`,
+CLI sin resolvedor: el modelo llama `Run_My_Agent` con `agentId: "agt_demo_42"` y la
+tool devuelve `Error executing node Run_My_Agent: CHILD_GRAPH_RESOLVE_FAILED:unavailable:
+no child graph resolver configured`. Cero frames `subgraph-*`, y `usage-summary` trae
+un solo nodo (el padre). Que el motivo sea `unavailable` y no `not_found` muestra que
+`${agentId}` se templó. El camino positivo lo cubren los tests con el doble; su E2E
+completo llega con el worker de ADP. Captura en
+`/tmp/colmena_e2e/child_graph_ref_unavailable.sse`.
+
+**ADP.** [Nota de migración](adp_migration/2026-09-23-child-graph-ref.md), sección «Desde la entrada 67».

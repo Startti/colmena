@@ -1,7 +1,7 @@
 # `child_graph_ref`: el puerto con que el motor pide el grafo de un hijo
 
-**Acción de ADP: ninguna todavía.** El puerto existe pero el motor no lo consulta
-hasta el PR siguiente; el worker lo implementa en el plan de ADP.
+**Acción de ADP: implementar el puerto en el worker** para usar `child_graph_ref`
+(plan de ADP). Sin eso, todo ref falla con `unavailable`; nada más cambia.
 
 ## Qué cambia
 
@@ -53,9 +53,25 @@ pub child_graph_resolver: Option<Arc<dyn ChildGraphResolverPort>>,
 `from_env` y antes de `ColmenaEngine::new`. Queda cableado en `SubGraphNode` y en las
 ramas `subgraph` de `router`.
 
+## Desde la entrada 67: el motor resuelve el ref
+
+- Se resuelve **antes** del frame `subgraph-node-start`: un hijo que no se pudo
+  resolver no emite ningún frame.
+- Sin resolvedor → `unavailable: no child graph resolver configured`. Un `agent_id`
+  que todavía contiene `${` (el modelo no mandó el argumento) → `not_found`, sin
+  llamar al resolvedor. Si el resolvedor tarda más de 30 s → `unavailable`.
+- El error llega a la tool con el prefijo estable: `ToolResult.error` empieza con
+  `CHILD_GRAPH_RESOLVE_FAILED:<code>:`; el `output` (lo que muestra
+  `tool-output-available`) es `Error executing node <tool>: CHILD_GRAPH_RESOLVE_FAILED:…`.
+- El grafo resuelto no aparece en frames, en la salida de la tool ni en el estado del
+  hijo. Se guarda en `dag_runs.graph_json` del run hijo, igual que un inline hoy: un
+  resume corre esa versión y no vuelve a llamar al resolvedor.
+- `display_name` todavía no se usa (el nombre en la frontera llega en un PR posterior).
+
 ## Qué se rompe si se ignora
 
-Nada. `EngineConfig` suma un campo público: un literal `EngineConfig { … }` tiene que
+Nada para los grafos de hoy: solo un `subgraph` con `child_graph_ref` necesita el
+resolvedor, y sin él falla con `unavailable`. `EngineConfig` suma un campo público: un literal `EngineConfig { … }` tiene que
 agregar `child_graph_resolver: None`. El worker de ADP arma su config con
 `EngineConfig::from_env()` (`apps/service/ia/platform/worker/src/main.rs`), así que
 compila sin cambios.

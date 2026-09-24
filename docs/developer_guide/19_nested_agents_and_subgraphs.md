@@ -41,8 +41,12 @@ El motor de grafos de Colmena permite encapsular funcionalidades complejas en su
 
 | Campo | Tipo | Requerido | Descripción |
 |---|---|---|---|
-| `child_graph_path` | string | Uno u otro | Ruta al archivo JSON del grafo hijo |
-| `child_graph_inline` | object | Uno u otro | El grafo hijo como objeto JSON embebido |
+| `child_graph_path` | string | Uno de los tres | Ruta al archivo JSON del grafo hijo |
+| `child_graph_inline` | object | Uno de los tres | El grafo hijo como objeto JSON embebido |
+| `child_graph_ref` | object | Uno de los tres | El hijo por referencia; lo resuelve el embebedor (ver [Grafo por referencia](#grafo-por-referencia-child_graph_ref)) |
+
+Si hay más de una, gana la primera en este orden: `inline`, `path`, `ref` (y `config`
+antes que `inputs`).
 
 ### Flujo Interno del SubGraphNode
 
@@ -173,7 +177,7 @@ Por defecto el LLM ve un único parámetro `task` (string), que se inyecta como
 declara un `node_schema` y cada campo se inyecta como variable del hijo
 (`{{ciudad}}`, `{{fecha}}`, etc.). Del mapeo IN se filtran las claves internas del
 motor (`__colmena_*`, `__node_id`) y el plumbing del operador
-(`child_graph_inline`, `child_graph_path`). Todo lo demás pasa: los argumentos que
+(`child_graph_inline`, `child_graph_path`, `child_graph_ref`). Todo lo demás pasa: los argumentos que
 el modelo elige mandar en cada llamada —que no son enumerables por adelantado— y
 `files`, del que `llm.rs` resuelve los adjuntos.
 
@@ -193,6 +197,43 @@ el modelo elige mandar en cada llamada —que no son enumerables por adelantado�
   del padre con prefijo `subgraph-*`.
 - **Profundidad sin tope** — no hay límite de anidación; ver
   [Profundidad de anidación](#profundidad-de-anidación) más abajo.
+
+### Grafo por referencia (`child_graph_ref`)
+
+Un `subgraph` puede nombrar a su hijo por id en vez de traer el grafo. El motor no lo
+busca por su cuenta: se lo pide al embebedor por `ChildGraphResolverPort`
+(`EngineConfig.child_graph_resolver`; en ADP lo implementa el worker). Un ejemplo de
+tool que el modelo usa para correr cualquiera de los agentes del usuario:
+
+```json
+"Run_My_Agent": {
+  "name": "Run_My_Agent",
+  "node_type": "subgraph",
+  "description": "Corre uno de los agentes del usuario con una tarea.",
+  "node_schema": {
+    "child_graph_ref": { "fixed": { "agent_id": "${agentId}", "context": { "messageId": "m1" } } },
+    "agentId": { "type": "string", "required": true, "description": "Id del agente" },
+    "prompt":  { "type": "string", "required": true, "description": "La tarea" }
+  }
+}
+```
+
+- El `fixed` se templa con el argumento `agentId` del modelo, que no lo puede pisar.
+  `context` le llega al resolvedor tal cual; el motor no lo interpreta.
+- Se resuelve **antes** del frame `subgraph-node-start`: si falla, el hijo no emite
+  nada y la tool devuelve un error con prefijo estable
+  `CHILD_GRAPH_RESOLVE_FAILED:<not_found|forbidden|needs_config|not_runnable|unavailable>: <mensaje>`
+  (en `ToolResult.error`; el `output` que ve el modelo lo antepone con
+  `Error executing node <tool>: `).
+- Sin resolvedor → `unavailable`. Un `agent_id` que todavía contiene `${` (el modelo
+  no mandó `agentId`) → `not_found`, sin preguntarle al resolvedor. El resolve corta
+  a los 30 s → `unavailable`.
+- El grafo resuelto nunca entra en `inputs`, en un frame ni en la salida del nodo, y
+  el ref no pasa al estado del hijo. Sí queda en `dag_runs.graph_json` del run hijo,
+  como un inline: un resume reanuda esa versión sin volver a pedirla.
+
+Probado con `tests/graphs/agents/child_graph_ref_unavailable.json` (el CLI no
+configura resolvedor, así que ejercita el rechazo).
 
 ### `suspend` y `secure_suspend` como Tool (patrón `cfg_or_input`)
 

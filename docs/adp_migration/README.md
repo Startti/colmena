@@ -10,7 +10,7 @@ Los cambios que quedan dentro del motor no llevan nota aquí.
 
 | # | Nota | Acción de ADP | Qué se rompe si se ignora |
 |---|------|---------------|---------------------------|
-| 1 | [El puerto `ChildGraphResolverPort`](2026-09-23-child-graph-ref.md) | Ninguna todavía — el motor no lo consulta aún | Nada; `EngineConfig` suma un campo y el worker usa `from_env` |
+| 1 | [El puerto `ChildGraphResolverPort` y la fuente `child_graph_ref`](2026-09-23-child-graph-ref.md) | Implementar el puerto en el worker para usar refs | Nada; sin resolvedor, un ref falla con `CHILD_GRAPH_RESOLVE_FAILED:unavailable` |
 
 ## 2026-09-23 — una tool-subgrafo reanudada devuelve su salida, no el estado del hijo
 
