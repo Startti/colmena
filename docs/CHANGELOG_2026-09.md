@@ -4030,3 +4030,43 @@ reconexión en el dispatch. La dirección va únicamente a `mcp.dial_refused`.
 el `connect` de producción). E2E sin clave de LLM: deepwiki `server_ready` y `mcp.dial_refused`
 para `https://localhost/mcp` y `https://169.254.169.254/mcp`; con `HTTPS_PROXY` fijado DeepWiki
 responde y sin `.no_proxy()` cae. [Nota](adp_migration/2026-09-24-mcp-private-dial-guard.md).
+
+## 77. `SubGraphNode` loads its child graph through one function
+
+Task 3/4 de la cadena (`docs/superpowers/specs/2026-09-24-child-resume-rederive-design.md`,
+D3), primer paso: un refactor puro, sin comportamiento observable. Prepara el
+terreno para que un resume pueda derivar su grafo con la misma carga que el
+camino fresco — la entrada siguiente conecta eso.
+
+**Qué cambió.** La carga del camino fresco (`config`/`inputs` → resolver un
+`child_graph_ref`, tomar un `child_graph_inline` tal cual, o releer un
+`child_graph_path`) sale de `execute()` a `load_child_graph`, un método nuevo de
+`SubGraphNode`. El camino fresco es su único llamador por ahora; el mismo texto
+de error en cada rama, el mismo orden de chequeo (`ref` → `inline` → `path`). La
+rama de resume no cambia: sigue pasando `ResumeGraph::Stored` en su único call
+site de producción.
+
+**Tests.** Ninguno nuevo — es una extracción de método, cubierta por los tests
+existentes del camino fresco (`child_graph_ref_tests`, 8; `subgraph_tool_input_config_tests`,
+6; `subgraph_child_state_isolation_tests`, 8; y el resto de `nodes::subgraph`).
+`cargo test -p colmena_dag_engine --lib nodes::subgraph`: 49 passed (sin cambio),
+0 failed.
+
+**Mutación.** 1, en rojo y revertida a mano: invertir la condición
+`source_key == CHILD_GRAPH_REF` de `load_child_graph` a `!=` — 23 tests caen (todo
+lo que pasa por el camino fresco: los 8 de `child_graph_ref_tests`, los de
+`subgraph_as_tool_boundary_tests` y `subgraph_tool_failure_close_tests`),
+confirmando que la extracción no cambió en silencio el orden de las ramas.
+Revertida; `cargo test --lib nodes::subgraph` vuelve a 49 passed.
+
+**E2E.** Regresión: sin comportamiento nuevo, pero el único llamador de
+`load_child_graph` es el camino fresco y su firma interna cambió. Corridas reales
+contra `colmena_e2e_cgr` (Postgres local): `tests/graphs/agents/child_graph_ref_unavailable.json`
+(sin resolvedor configurado) — 1 `tool-output-available` con
+`CHILD_GRAPH_RESOLVE_FAILED:unavailable: no child graph resolver configured`,
+igual que la entrada 67; `tests/graphs/basic/suspend_in_subgraph.json` (un
+`child_graph_inline` fresco) — `finish.finishReason == "suspended"`, llega al
+`suspend` interno del hijo sin error.
+
+**ADP.** Sin nota: nada cruza la frontera todavía — mismo texto de error, mismo
+comportamiento observable, solo se movió código dentro del motor.
