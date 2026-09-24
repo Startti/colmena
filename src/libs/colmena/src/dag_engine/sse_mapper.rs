@@ -485,13 +485,26 @@ impl SseMapper {
                     config,
                 } => {
                     self.node_types.insert(node_id.clone(), node_type.clone());
-                    Some(json!({
+                    let mut frame = json!({
                         "type": "subgraph-node-start",
                         "node_id": node_id,
                         "node_type": node_type,
                         "config": config,
                         "inputs": Self::clean_inputs(inputs)
-                    }))
+                    });
+                    // A by-reference child's boundary carries the embedder's
+                    // display name in `config.node_label` (`SubGraphNode`);
+                    // lifted here to a top-level field so the UI reads it
+                    // without knowing that convention. Never added to the
+                    // `NodeStart` variant itself — this is the only place a
+                    // subgraph boundary is named. Only a `subgraph` start is a
+                    // boundary: an inner node's own config never renames it.
+                    if node_type == "subgraph" {
+                        if let Some(label) = config.get("node_label").and_then(|v| v.as_str()) {
+                            frame["node_label"] = json!(label);
+                        }
+                    }
+                    Some(frame)
                 }
                 DagExecutionEvent::NodeFinish {
                     node_id,
@@ -1111,6 +1124,67 @@ mod tests {
         assert_eq!(parts[0]["stage"], "running");
         assert_eq!(parts[0]["node_id"], "inner_node");
         assert_eq!(parts[0]["idleSecs"], 40);
+    }
+
+    // ── `node_label` on a by-reference child's boundary start ────────────────
+
+    #[test]
+    fn a_wrapped_start_lifts_config_node_label_to_the_frame() {
+        let mut mapper = SseMapper::new();
+        let ev = wrap(
+            DagExecutionEvent::NodeStart {
+                node_id: "Run_My_Agent".into(),
+                node_type: "subgraph".into(),
+                inputs: json!({}),
+                config: json!({ "node_label": "Agente de licitaciones" }),
+            },
+            1,
+            "root>Run_My_Agent",
+        );
+        let parts = mapper.map(&ev);
+        assert_eq!(parts[0]["type"], json!("subgraph-node-start"));
+        assert_eq!(parts[0]["node_label"], json!("Agente de licitaciones"));
+    }
+
+    #[test]
+    fn a_wrapped_start_without_config_node_label_carries_no_frame_label() {
+        let mut mapper = SseMapper::new();
+        let ev = wrap(
+            DagExecutionEvent::NodeStart {
+                node_id: "Run_My_Agent".into(),
+                node_type: "subgraph".into(),
+                inputs: json!({}),
+                config: json!({}),
+            },
+            1,
+            "root>Run_My_Agent",
+        );
+        let parts = mapper.map(&ev);
+        assert_eq!(parts[0]["type"], json!("subgraph-node-start"));
+        assert!(
+            parts[0].get("node_label").is_none(),
+            "no node_label in config must mean no node_label on the frame: {:?}",
+            parts[0]
+        );
+    }
+
+    #[test]
+    fn only_a_subgraph_boundary_start_is_named_from_its_config() {
+        // An inner node whose own config happens to have a `node_label` key is
+        // not a boundary: its config must not rename it on the frame.
+        let mut mapper = SseMapper::new();
+        let ev = wrap(
+            DagExecutionEvent::NodeStart {
+                node_id: "llm".into(),
+                node_type: "llm_call".into(),
+                inputs: json!({}),
+                config: json!({ "node_label": "spoofed" }),
+            },
+            2,
+            "root>Run_My_Agent>llm",
+        );
+        let parts = mapper.map(&ev);
+        assert!(parts[0].get("node_label").is_none(), "{:?}", parts[0]);
     }
 
     // ── Nested thinking frames (defect: planner split across two levels) ─────

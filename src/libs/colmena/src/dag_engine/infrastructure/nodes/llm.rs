@@ -3937,6 +3937,12 @@ impl ExecutableNode for LlmNode {
                     ]),
                 )
                 .with_field("api_key", FieldSpec::of_type("string").required())
+                // Opaque, non-secret billing id the embedder writes next to
+                // `api_key`. Not read by the engine's own logic — only echoed
+                // verbatim on this node's `usage-summary`/`subgraph-usage-summary`
+                // entry (`run_use_case::usage_entry`) so the embedder can
+                // attribute consumption back to the key that paid for it.
+                .with_field("provider_key_id", FieldSpec::of_type("string"))
                 .with_field("max_tool_result_bytes", FieldSpec::of_type("integer"))
                 .with_field("model", FieldSpec::of_type("string"))
                 .with_field("prompt", FieldSpec::of_type("any"))

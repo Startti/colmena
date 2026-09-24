@@ -113,7 +113,10 @@ fn measure() -> Measured {
 // tests/graphs/agents/subgraph_fixed_thread_id/turn2_ask_a2.json,
 // tests/graphs/agents/subgraph_fixed_thread_id/turn3_recall_a1.json. All three
 // lint clean.
-const EXPECTED_FILES: usize = 321;
+// Bumped 321 -> 322: adds tests/graphs/agents/provider_key_id_usage_e2e.json,
+// the Task 5/5 E2E for `llm_call.config.provider_key_id` (one node configures
+// it, a sibling does not; both run under the same trigger). Lints clean.
+const EXPECTED_FILES: usize = 322;
 const EXPECTED_ERRORS: usize = 0;
 const EXPECTED_WARNINGS: usize = 0;
 const EXPECTED_INFOS: usize = 0;

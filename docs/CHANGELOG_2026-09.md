@@ -3640,3 +3640,83 @@ capturas SSE (`/tmp/colmena_e2e/fixed_thread_id_turn{1,2,3}.sse`).
 
 **ADP.** [Nota de migración](adp_migration/2026-09-23-fixed-thread-id.md) — compilar
 "Run My Agent" con `thread_id: { "fixed": "${agentId}" }` en su `node_schema`.
+
+## 70. El nombre del agente en la frontera y la clave en cada entrada de consumo
+
+Task 5/5 (última) de `child_graph_ref`. `ResolvedChildGraph::display_name` (PR
+2/5, #317) llegaba hasta `SubGraphNode::execute` como `_display_name` — resuelto,
+nunca usado. Y `usage-summary`/`subgraph-usage-summary` no tenían forma de decir
+a qué clave de proveedor facturar un nodo, así que el embebedor tenía que
+mantener su propio mapeo `node_id → clave` por fuera del grafo.
+
+**Qué cambió.** (1) `SubGraphNode` renombra `_display_name` a `display_name` y lo
+mete en el `config` del `NodeStart` de la frontera como `{ "node_label": <nombre>
+}`; `SseMapper` lo levanta a un campo de primer nivel del `subgraph-node-start`
+envuelto (`config.node_label` → `frame.node_label`). Ninguna variante de
+`NodeStart` ganó un campo — es aditivo solo en la salida del mapper. La ruta de
+resume sigue sin emitir fronteras, como antes. (2) `llm_call` gana el campo de
+config opcional `provider_key_id` (string opaco, no secreto, catalogado en
+`docs/node_configurations.json` junto a `api_key`); el motor no lo interpreta,
+solo lo repite en la fila de consumo de ese nodo. (3) `node_meta` pasa de una
+tupla `(Option<String>, Option<String>, String)` a un struct `NodeMeta { model,
+provider, node_type, provider_key_id }`, y el armado de cada fila se extrae a
+`usage_entry(node_id, counts, meta: Option<&NodeMeta>) -> Value` (`pub(crate)`,
+pura) — el `provider_key_id` se inserta solo si `Some`, nunca como `null`.
+
+**Tests.** 8 nuevos, TDD red-first en los tres
+(`only_a_subgraph_boundary_start_is_named_from_its_config` fija que el mapper solo
+nombra un inicio `subgraph`, nunca un nodo interno con esa clave en su config):
+`nodes::subgraph::child_graph_ref_tests::the_boundary_start_of_a_ref_child_carries_the_agent_name`
+(1, reusa el `FakeResolver` existente cuya `Answer::Graph` ya devolvía
+`display_name: "Agente de licitaciones"`); en `sse_mapper.rs`,
+`a_wrapped_start_lifts_config_node_label_to_the_frame` y su contraparte negativa
+`a_wrapped_start_without_config_node_label_carries_no_frame_label` (2, reusan el
+helper `wrap()` ya presente en el archivo — no existe `wrapped()`/`map_event()`
+por ese nombre); en `run_use_case.rs`, módulo nuevo `usage_entry_tests` con
+`a_usage_entry_carries_the_llm_calls_provider_key_id`,
+`a_usage_entry_without_a_provider_key_id_omits_the_field` (dos formas de ausencia:
+sin `NodeMeta` y con `NodeMeta.provider_key_id: None`),
+`a_usage_entry_still_carries_the_pre_existing_fields` (regresión del refactor
+tupla→struct) y `a_usage_entry_omits_thinking_tokens_when_zero` (4). `cargo test`
+completo: 2772 tests de lib + resto de integración/doctests, 2981 `passed` en
+total, 0 `failed`, 74+ ignorados (gateados por `DATABASE_URL`/API en vivo, sin
+cambios).
+
+**Mutación.** Las tres piezas revertidas a mano, una por vez: `start_config`
+siempre vacío en `subgraph.rs` (el test de frontera se puso en rojo, sin tocar
+los otros 48 de ese archivo); el `if let Some(label) = …` borrado en
+`sse_mapper.rs` (el test de presencia rojo, el de ausencia se quedó en verde
+porque prueba exactamente lo contrario — así confirmado, no vacío); el bloque
+`if let Some(key) = meta.provider_key_id` comentado en `usage_entry` (el test de
+presencia rojo, el de ausencia y el de campos preexistentes en verde). Además,
+sacar `.with_field("provider_key_id", …)` de `llm.rs::config_schema()` sin tocar
+el catálogo puso en rojo el test preexistente
+`catalog_coverage_tests::a_migrated_node_config_schema_matches_the_catalog` —
+esa prueba ya actúa como guarda de mutación para el par código/catálogo. Los
+cuatro reverts, restaurados tras confirmar.
+
+**Catálogo.** `llm_call.config_schema()` gana `provider_key_id` (string, no
+`required`, sin `valid_values`); `docs/node_configurations.json` →
+`llm_call.config_fields.provider_key_id` con la misma forma
+(`required: false, default: null`). `cargo run --bin dag_engine -- lint
+tests/graphs --fail-on error`: 322 archivos, 0/0/0.
+
+**E2E.** `provider_key_id` — grafo nuevo
+`tests/graphs/agents/provider_key_id_usage_e2e.json`
+(`gemini-2.5-flash`, dos `llm_call` bajo el mismo trigger: `billed_step` con
+`config.provider_key_id: "test-key-123"`, `unbilled_step` sin ese campo).
+Corrida real contra `colmena_e2e_cgr` (Postgres local): la fila de
+`billed_step` en `usage-summary` trae `"provider_key_id":"test-key-123"`; la de
+`unbilled_step` no trae la clave (confirmado con `"provider_key_id" in n` en
+Python, no solo lectura visual del JSON). Captura en
+`/tmp/colmena_e2e/child_label_and_key_id_provider_key_id.sse`.
+`tests/corpus_noise.rs`: 321 → 322. `node_label` **no tiene E2E en este repo** —
+la CLI (`dag_engine run`) no tiene `ChildGraphResolverPort` cableado, así que un
+`child_graph_ref` nunca arranca ahí; queda cubierto solo por los dos tests
+unitarios de arriba. Su verificación end-to-end llega con el worker de ADP, que
+sí provee el resolvedor real.
+
+**ADP.** [Nota de migración](adp_migration/2026-09-24-child-label-and-key-id.md)
+— leer `node_label` del `subgraph-node-start` de un hijo por referencia; preferir
+`provider_key_id` de cada fila de `usage-summary`/`subgraph-usage-summary` al
+facturar consumo. Ambos aditivos.

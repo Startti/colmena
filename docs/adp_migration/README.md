@@ -6,6 +6,12 @@ ve ADP antes y después, qué tiene que hacer ADP, y qué se rompe si no hace na
 
 Los cambios que quedan dentro del motor no llevan nota aquí.
 
+## 2026-09-24 — nombre del agente en la frontera de un `child_graph_ref` y `provider_key_id` en el consumo
+
+| # | Nota | Acción de ADP | Qué se rompe si se ignora |
+|---|------|---------------|---------------------------|
+| 1 | [`node_label` en la frontera + `provider_key_id` por entrada de consumo](2026-09-24-child-label-and-key-id.md) | Leer `node_label` del `subgraph-node-start` de un hijo por referencia; preferir `provider_key_id` de cada fila de `usage-summary` al facturar | Nada; sin la acción, ADP sigue mostrando el `node_id` técnico como etiqueta y mantiene su propio mapeo de clave por nodo |
+
 ## 2026-09-23 — `thread_id` fijo: memoria por agente sin exponer el hilo al modelo
 
 | # | Nota | Acción de ADP | Qué se rompe si se ignora |

@@ -1493,6 +1493,13 @@
           "supports_env_vars": true,
           "example": "${OPENAI_API_KEY}"
         },
+        "provider_key_id": {
+          "type": "string",
+          "required": false,
+          "default": null,
+          "description": "Id opaco (no secreto) de la clave del proveedor; el motor lo repite en cada entrada de consumo para la facturación del embebedor.",
+          "example": "cmrx2n8vw001601s6v6hermav"
+        },
         "max_tool_result_bytes": {
           "type": "integer",
           "required": false,
