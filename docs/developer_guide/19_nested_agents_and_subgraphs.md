@@ -486,11 +486,12 @@ resultado con `scrub_tool_result_output` como cualquier tool fresca).
 ### Reanudar con el grafo actual
 
 Un hijo suspendido se reanuda con el grafo que su fuente nombra **en ese momento** —el
-inline del grafo fresco del padre, el archivo releído, el resolvedor otra vez—, no con la
-copia que guardó al suspenderse: así trae las claves, el token y las rutas de skills del
-turno que lo reanuda. Lo que el resume necesita del estado guardado (la cola, las
-salidas, la tool call pendiente en memoria) se busca por id de nodo, así que el grafo
-nuevo tiene que tener el mismo **esqueleto** que el guardado:
+inline del grafo fresco del padre, el archivo releído—, no con la copia que guardó al
+suspenderse (**salvo un `child_graph_ref`**, que todavía reanuda esa copia guardada: el
+resolvedor se vuelve a llamar recién en un PR posterior). Así trae las claves, el token
+y las rutas de skills del turno que lo reanuda. Lo que el resume necesita del estado
+guardado (la cola, las salidas, la tool call pendiente en memoria) se busca por id de
+nodo, así que el grafo nuevo tiene que tener el mismo **esqueleto** que el guardado:
 
 - los mismos ids de nodo, cada uno con el mismo `type`;
 - las mismas aristas `(from, to, cyclic)` (`cyclic` ausente = `false`).
@@ -513,15 +514,25 @@ de `CHANGELOG_2026-09.md`): non-breaking para quien implemente el puerto fuera d
 crate, mismo patrón que `cancel_running_descendants`.
 
 El texto que ve cada llamador depende de cómo se disparó el `subgraph`. Por tool
-(el patrón `cfg_or_input`, incluido `Run_My_Agent`), `ToolResult.error` empieza con
-`SUBGRAPH_RESUME_INCOMPATIBLE:` y el `output` que ve el modelo lo antepone con
-`Error executing node <tool>: `; el `llm_call` padre lo guarda como un resultado de
-tool más y sigue su turno, exactamente como cualquier otra tool que falla. Por
-arista, orquestador o router (sin un `llm_call` que absorba el error), el run entero
-falla con `Error de ejecución en el nodo: SUBGRAPH_RESUME_INCOMPATIBLE: …` — el
-prefijo `SUBGRAPH_RESUME_INCOMPATIBLE:` sigue estable adelante en los dos casos;
-lo que cambia es lo que lo envuelve. Ningún frame SSE nuevo: la rama de resume del
+(el patrón `cfg_or_input` con `child_graph_inline`/`child_graph_path`),
+`ToolResult.error` empieza con `SUBGRAPH_RESUME_INCOMPATIBLE:` y el `output` que
+ve el modelo lo antepone con `Error executing node <tool>: `; el `llm_call` padre
+lo guarda como un resultado de tool más y sigue su turno, exactamente como
+cualquier otra tool que falla. Por arista u orquestador (sin un `llm_call` que
+absorba el error), el run entero falla con `Error de ejecución en el nodo:
+SUBGRAPH_RESUME_INCOMPATIBLE: …`. Por router, el error de la rama se envuelve dos
+veces: primero `router/node.rs:160` antepone `router branch '<rama>': `, y el run
+lo vuelve a envolver como `Error de ejecución en el nodo: router branch '<rama>':
+SUBGRAPH_RESUME_INCOMPATIBLE: …`; el router también vuelve a elegir su rama en
+cada resume (su `execute` no distingue un resume de una corrida fresca), así que
+una rama del mismo esqueleto reanuda con la config de esa rama. El prefijo
+`SUBGRAPH_RESUME_INCOMPATIBLE:` sigue estable adelante en los tres casos; lo que
+cambia es lo que lo envuelve. Ningún frame SSE nuevo: la rama de resume del
 `SubGraphNode` sigue sin boundary propio, igual que antes de este cambio.
+`Run_My_Agent` es la excepción a todo esto: usa `child_graph_ref`, que todavía
+reanuda su copia guardada sin verificar el esqueleto, así que no puede fallar con
+`SUBGRAPH_RESUME_INCOMPATIBLE:` hasta que el resolvedor se vuelva a llamar en
+resume (un PR posterior; ver [Grafo por referencia](#grafo-por-referencia-child_graph_ref)).
 
 `COLMENA_SUBGRAPH_RESUME_GRAPH=stored` es la válvula de emergencia: con ella fijada
 (se lee una vez por proceso, como `COLMENA_MAX_SUBGRAPH_DEPTH`), todo resume vuelve
@@ -905,8 +916,10 @@ en cada nivel. Reanudar con `agent_session_id` encuentra automáticamente la hoj
 (el run SUSPENDED que no es padre de ningún otro SUSPENDED) y le pasa la respuesta
 del usuario. Cada nivel re-deriva el grafo de su hijo (ver
 [Reanudar con el grafo actual](#reanudar-con-el-grafo-actual)), así que un cambio
-de config llega a cualquier profundidad: no hace falta que el nivel más externo
-cambie para que uno interno vea sus claves o prompts nuevos.
+de config llega a cualquier profundidad — **excepto por debajo de un
+`child_graph_ref`**: ese nivel sigue reanudando su copia guardada (todavía no
+re-deriva), así que ningún nieto suyo ve una config nueva hasta que se reanude
+desde ahí de cero.
 
 ### Memoria LLM dentro del subgrafo
 

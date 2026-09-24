@@ -95,9 +95,11 @@ El desarrollador guide (doc línea 197-264) detalla 3 modes (`stateless`, `persi
 El código implementa un camino separado para resume: busca la sesión del hijo
 suspendido (`find_child_session_id_for_resume`), re-deriva el grafo con la **misma**
 función de carga que usa el camino fresco (`load_child_graph` — inline desde config o
-inputs de este turno, o el path releído) y se lo pasa a `resume_subgraph()` como
-`ResumeGraph::Fresh`, que compara su esqueleto contra el guardado antes de correr
-nada. `build_child_state()` sigue sin correr en resume (la sesión del hijo ya tiene
+inputs de este turno, o el path releído; un `child_graph_ref` es la excepción: sigue
+resumiendo `ResumeGraph::Stored`, su copia guardada, sin volver a llamar al
+resolvedor) y se lo pasa a `resume_subgraph()` como `ResumeGraph::Fresh` (o `Stored`
+para un ref), que compara su esqueleto contra el guardado antes de correr nada.
+`build_child_state()` sigue sin correr en resume (la sesión del hijo ya tiene
 estado) y el resume sigue sin re-emitir NodeStart/NodeEnd boundary events — ni
 frames SSE nuevos de ningún tipo: ver
 [19_nested_agents_and_subgraphs.md §Reanudar con el grafo actual](../../developer_guide/19_nested_agents_and_subgraphs.md#reanudar-con-el-grafo-actual).
