@@ -3485,8 +3485,9 @@ fuera del estado del hijo y el catálogo la acepta (tipo `object`), pero **todav
 se resuelve**: hasta la entrada 67, un subgrafo cuya única fuente es un ref falla con
 ``Invalid sub-graph JSON: missing field `nodes` `` (medido con el CLI).
 
-**Tests.** Sin tests nuevos: no hay comportamiento nuevo que probar. Siguen verdes los
-40 de `nodes::subgraph` y los de `registry::` (incluido
+**Tests.** Uno nuevo, `within_one_container_inline_and_path_come_before_a_ref`: fija
+el orden de `CHILD_GRAPH_SOURCE_KEYS` dentro de un mismo contenedor (reordenar la
+constante lo pone rojo). Siguen verdes los 40 de `nodes::subgraph` y los de `registry::` (incluido
 `a_migrated_node_config_schema_matches_the_catalog`, que obligó a declarar
 `child_graph_ref` en `docs/node_configurations.json`).
 
