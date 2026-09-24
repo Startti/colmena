@@ -3720,3 +3720,45 @@ sí provee el resolvedor real.
 — leer `node_label` del `subgraph-node-start` de un hijo por referencia; preferir
 `provider_key_id` de cada fila de `usage-summary`/`subgraph-usage-summary` al
 facturar consumo. Ambos aditivos.
+
+## 71. El alias de un servidor MCP sale de `name`, no de la clave
+
+**Qué cambió.** El alias de un servidor MCP —el prefijo de cada `<alias>__<tool>` que
+ve el modelo— era siempre la **clave** de `tool_configurations`, y `name` se ignoraba.
+El compilador de ADP del arco MCP vía B (sin mergear al 2026-09-24) indexa esas entradas
+por id de nodo (un cuid) y pone el nombre visible en `name`, así que el modelo veía
+`cmubmxq86001301s6gpndaze2__ask_question`. Ahora rige el mismo contrato que el resto de
+los tipos de tool: `name` si no está en blanco, y si no la clave. Se decide en **un solo lugar** (`collect_mcp_tool_configs`, vía `alias_for`), y
+de ahí sale el alias de los nombres expuestos, de las rutas del despachador, de los
+bindings, del aviso de servidor no disponible y del campo `alias` de los eventos
+`colmena::mcp`. Dos entradas que resuelven al mismo alias no se pisan: la segunda (en
+orden de documento) cae a su clave, y si también está tomada, a `<clave>_2`, `_3`…; cada
+respaldo se loguea como WARN `mcp.alias_fallback` (`key`, `wanted`, `alias`).
+
+**Compatibilidad.** Un grafo sin `name` en sus entradas `mcp` no cambia: el alias
+sigue siendo la clave (`sin_name_el_alias_es_la_clave`, `collect_reads_only_mcp_entries`).
+**Sí cambia** un grafo cuya entrada `mcp` trae un `name` no vacío distinto de su clave:
+sus nombres expuestos pasan de `<clave>__t` a `<name>__t`, y un system prompt que citaba
+los nombres viejos queda desalineado. La referencia decía que `name` se ignoraba y una
+versión anterior del motor lo exigía en las entradas MCP, así que grafos fuera del repo
+pueden traerlo. Ningún grafo del corpus está en ese caso.
+
+**Tests.** 6 nuevos en `mcp/expose.rs` (alias por `name`, por clave, `name` en blanco,
+dos `name` iguales, clave también tomada → sufijo, el WARN del respaldo) y 2 en
+`mcp/wire.rs`: uno sigue el alias de punta a punta (definición `deepwiki__ask_question`,
+ruta, binding y `McpDispatcher::owns`, sin rastro del cuid) y otro fija que el aviso de
+servidor caído nombra el alias y no la clave. Rojo primero: 5 fallaban, las 2 pinzas de
+compatibilidad pasaban. Mutación: ignorar `name`, quitar el `trim`, quitar el respaldo a la clave o
+todo el respaldo, o el `warn!` del respaldo — cada una pone en rojo su test.
+
+**E2E.** `tests/graphs/agents/mcp_deepwiki_named_e2e.json` (clave cuid, `name:
+"deepwiki"`, `enabled_tools: ["deepwiki"]`, la forma de ese compilador) contra DeepWiki
+real. Sin clave de LLM en el entorno, se corrió con `COLMENA_PREFLIGHT_HEALTH=off` y una
+clave inválida: el cableado MCP corre antes que el modelo, así que lo medido es
+`mcp.server_ready alias=deepwiki host=mcp.deepwiki.com tools=3` (antes del cambio, mismo
+grafo: `alias=cmubmxq86001301s6gpndaze2`). **No se midió** el lado del modelo —que vea y
+llame `deepwiki__ask_question`—: Gemini devolvió `API_KEY_INVALID`.
+`tests/corpus_noise.rs`: 322 → 323.
+
+**ADP.** [Nota de migración](adp_migration/2026-09-24-mcp-alias-from-name.md) — ninguna
+acción: el compilador del arco MCP vía B (sin mergear al 2026-09-24) ya emite `name`.

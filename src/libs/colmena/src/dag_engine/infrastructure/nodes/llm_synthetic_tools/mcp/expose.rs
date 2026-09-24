@@ -23,18 +23,83 @@ use crate::llm::domain::tools::{ToolDefinition, ToolParameters};
 /// already fails the load closed on one, so anything reaching this point has
 /// passed that gate. Returning empty for an entry that never validates would
 /// be dead defence; returning an error would be a second, divergent gate.
+///
+/// **The returned map is keyed by ALIAS, and this is the only place an alias
+/// is decided** — see [`alias_for`]. Exposure (`<alias>__<tool>`), the
+/// dispatcher's routes, the bindings, the unavailable notice and the `alias`
+/// field of every `colmena::mcp` event take it from these keys and from
+/// nowhere else. Two notions of alias would mean a tool offered under one name
+/// and dispatched under another.
 pub fn collect_mcp_tool_configs(raw: &Value) -> BTreeMap<String, McpServerSpec> {
+    let mut found = BTreeMap::new();
     let Some(entries) = raw.as_object() else {
-        return BTreeMap::new();
+        return found;
     };
-    entries
-        .iter()
-        .filter(|(_, cfg)| cfg.get("node_type").and_then(Value::as_str) == Some(MCP_NODE_TYPE))
-        .filter_map(|(alias, cfg)| {
-            let spec: McpServerSpec = serde_json::from_value(cfg.get("mcp")?.clone()).ok()?;
-            Some((alias.clone(), spec))
-        })
-        .collect()
+    for (key, cfg) in entries {
+        if cfg.get("node_type").and_then(Value::as_str) != Some(MCP_NODE_TYPE) {
+            continue;
+        }
+        let Some(spec) = cfg
+            .get("mcp")
+            .and_then(|block| serde_json::from_value::<McpServerSpec>(block.clone()).ok())
+        else {
+            continue;
+        };
+        let alias = alias_for(key, cfg, &found);
+        found.insert(alias, spec);
+    }
+    found
+}
+
+/// The alias of one MCP server: the entry's `name` when it has one, else its
+/// `tool_configurations` key — the contract [`ToolConfiguration::name`]
+/// documents for every tool kind ("what the model sees; absent → the key").
+/// A platform that keys entries by node id and names them in `name` would
+/// otherwise show the model `<node-id>__<tool>`.
+///
+/// Blank counts as absent: `name` is `#[serde(default)] String`, so an
+/// omitted one arrives as `""`. `name` is also TRIMMED here, which
+/// [`ToolConfiguration::effective_name`] does not do: padding would reach every
+/// exposed name as `_`. The two never judge the same entry — the lazy catalog,
+/// `effective_name`'s consumer, never lists an `mcp` entry.
+///
+/// An alias already taken falls back to the key; a key also taken gets `_2`,
+/// `_3`… appended. An entry never overwrites another — a map keyed by alias
+/// would otherwise keep one of two same-named servers and drop the other in
+/// silence. Entries are visited in document order (`serde_json` is built with
+/// `preserve_order`), so the first keeps the contested alias. A fallback is
+/// logged as `mcp.alias_fallback`: otherwise the operator sees the model use
+/// `<key>__<tool>` with nothing saying why.
+///
+/// [`ToolConfiguration::name`]: crate::dag_engine::domain::tool_configuration::ToolConfiguration::name
+/// [`ToolConfiguration::effective_name`]: crate::dag_engine::domain::tool_configuration::ToolConfiguration::effective_name
+fn alias_for(key: &str, cfg: &Value, taken: &BTreeMap<String, McpServerSpec>) -> String {
+    let name = cfg
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or("");
+    let wanted = if name.is_empty() { key } else { name };
+    if !taken.contains_key(wanted) {
+        return wanted.to_string();
+    }
+    let alias = if taken.contains_key(key) {
+        (2usize..)
+            .map(|n| format!("{key}_{n}"))
+            .find(|candidate| !taken.contains_key(candidate))
+            .expect("a finite map leaves some suffix free")
+    } else {
+        key.to_string()
+    };
+    tracing::warn!(
+        target: "colmena::mcp",
+        event = "mcp.alias_fallback",
+        key = %key,
+        wanted = %wanted,
+        alias = %alias,
+        "an MCP server's alias was already taken, so it fell back"
+    );
+    alias
 }
 
 /// Tool definitions for one server's catalog, plus a note per excluded tool.
@@ -929,5 +994,134 @@ mod tests {
     fn collect_is_empty_without_mcp_entries() {
         let raw = json!({ "run_python": { "node_type": "python_script" } });
         assert!(collect_mcp_tool_configs(&raw).is_empty());
+    }
+
+    /// A platform keys `tool_configurations` by node id and puts the name the
+    /// model should see in `name` — the contract `ToolConfiguration` documents
+    /// for every tool kind. Taking the alias from the key showed the model
+    /// `<cuid>__<tool>`.
+    #[test]
+    fn con_name_el_alias_es_name() {
+        let raw = json!({
+            "cmubmxq86001301s6gpndaze2": {
+                "node_type": "mcp", "name": "deepwiki",
+                "mcp": { "url": "https://mcp.deepwiki.com/mcp" }
+            }
+        });
+        let found = collect_mcp_tool_configs(&raw);
+        assert_eq!(found.keys().collect::<Vec<_>>(), vec!["deepwiki"]);
+    }
+
+    /// Compatibility: a hand-written graph without `name` does not change.
+    #[test]
+    fn sin_name_el_alias_es_la_clave() {
+        let raw = json!({ "deepwiki": { "node_type": "mcp", "mcp": { "url": "https://mcp.deepwiki.com/mcp" } } });
+        assert_eq!(
+            collect_mcp_tool_configs(&raw).keys().collect::<Vec<_>>(),
+            vec!["deepwiki"]
+        );
+    }
+
+    /// `name` is `#[serde(default)] String` on `ToolConfiguration`: absent
+    /// arrives as "", and blank must mean the same thing.
+    #[test]
+    fn un_name_en_blanco_cuenta_como_ausente() {
+        let raw = json!({ "k1": { "node_type": "mcp", "name": "  ", "mcp": { "url": "https://x.example.com/mcp" } } });
+        assert_eq!(
+            collect_mcp_tool_configs(&raw).keys().collect::<Vec<_>>(),
+            vec!["k1"]
+        );
+    }
+
+    /// A map keyed by alias would keep ONE of the two and drop the other
+    /// without a word. The second falls back to its key.
+    #[test]
+    fn dos_entradas_con_el_mismo_name_no_se_pisan() {
+        let raw = json!({
+            "k1": { "node_type": "mcp", "name": "gh", "mcp": { "url": "https://a.example.com/mcp" } },
+            "k2": { "node_type": "mcp", "name": "gh", "mcp": { "url": "https://b.example.com/mcp" } }
+        });
+        let found = collect_mcp_tool_configs(&raw);
+        assert_eq!(found.len(), 2);
+        let urls: Vec<&str> = found.values().map(|s| s.url.as_str()).collect();
+        assert!(urls.contains(&"https://a.example.com/mcp"));
+        assert!(urls.contains(&"https://b.example.com/mcp"));
+        assert_eq!(
+            found.keys().collect::<Vec<_>>(),
+            vec!["gh", "k2"],
+            "the first keeps the name, the second falls back to its key"
+        );
+    }
+
+    /// A fallback changes the names the model is offered, so the operator is
+    /// told: one WARN per entry that lost its alias, with the key, the name it
+    /// wanted and the alias it got. The entry that kept the name logs nothing.
+    #[test]
+    fn a_fallback_is_logged_with_the_key_the_wanted_name_and_the_alias() {
+        #[derive(Clone, Default)]
+        struct Buf(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Buf {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(b);
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let buf = Buf::default();
+        let sink = buf.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || sink.clone())
+            .with_ansi(false)
+            .finish();
+        let raw = json!({
+            "k1": { "node_type": "mcp", "name": "gh", "mcp": { "url": "https://a.example.com/mcp" } },
+            "k2": { "node_type": "mcp", "name": "gh", "mcp": { "url": "https://b.example.com/mcp" } }
+        });
+
+        tracing::subscriber::with_default(subscriber, || {
+            // A callsite's interest is cached process-wide. While this is the
+            // only subscriber alive, a test on another thread that reaches the
+            // `warn!` first caches it as "never" (measured: this test failed
+            // that way). So reach it, rebuild the cache with this subscriber in
+            // place, discard what was captured, and measure.
+            collect_mcp_tool_configs(&raw);
+            tracing::callsite::rebuild_interest_cache();
+            buf.0.lock().unwrap().clear();
+            collect_mcp_tool_configs(&raw)
+        });
+
+        let log = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        let lines: Vec<&str> = log
+            .lines()
+            .filter(|l| l.contains("mcp.alias_fallback"))
+            .collect();
+        assert_eq!(lines.len(), 1, "only the entry that lost logs: {log}");
+        for field in ["WARN", "key=k2", "wanted=gh", "alias=k2"] {
+            assert!(lines[0].contains(field), "no `{field}` in: {}", lines[0]);
+        }
+    }
+
+    /// The fallback key can itself be taken — here by another entry's `name`.
+    /// The suffix is the last resort, and nothing is ever overwritten.
+    #[test]
+    fn a_taken_name_and_a_taken_key_fall_back_to_a_suffix() {
+        let raw = json!({
+            "k1": { "node_type": "mcp", "name": "gh", "mcp": { "url": "https://a.example.com/mcp" } },
+            "gh": { "node_type": "mcp", "name": "gh", "mcp": { "url": "https://b.example.com/mcp" } },
+            "x":  { "node_type": "mcp", "name": "gh", "mcp": { "url": "https://c.example.com/mcp" } }
+        });
+        let found = collect_mcp_tool_configs(&raw);
+        assert_eq!(found.len(), 3, "no entry may overwrite another");
+        assert_eq!(found["gh"].url, "https://a.example.com/mcp");
+        assert_eq!(
+            found["gh_2"].url, "https://b.example.com/mcp",
+            "name 'gh' and key 'gh' both taken, so the key gets a suffix"
+        );
+        assert_eq!(
+            found["x"].url, "https://c.example.com/mcp",
+            "name 'gh' taken, key 'x' free"
+        );
     }
 }
