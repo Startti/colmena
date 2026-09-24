@@ -292,6 +292,49 @@ impl DagStateRepository for PostgresDagStateRepository {
 
         Ok(result.rows_affected())
     }
+
+    async fn fail_if_suspended(&self, session_id: &str) -> Result<bool, DagError> {
+        // A single conditional UPDATE: atomic, and a no-op (not an overwrite)
+        // when the row is no longer SUSPENDED — no read-modify-write race.
+        let result = sqlx::query(
+            "UPDATE dag_runs SET status = 'FAILED', updated_at = NOW() \
+              WHERE session_id = $1 AND status = 'SUSPENDED'",
+        )
+        .bind(session_id)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| DagError::StateError(format!("Database error on fail_if_suspended: {}", e)))?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn fail_suspended_descendants(&self, session_id: &str) -> Result<u64, DagError> {
+        // Same recursive-CTE shape as `cancel_running_descendants`: walk
+        // parent_session_id from session_id (excluded) and flip every
+        // still-SUSPENDED descendant to FAILED in one statement.
+        let result = sqlx::query(
+            "WITH RECURSIVE descendants AS ( \
+                 SELECT session_id FROM dag_runs WHERE parent_session_id = $1 \
+                 UNION ALL \
+                 SELECT d.session_id FROM dag_runs d \
+                     JOIN descendants x ON d.parent_session_id = x.session_id \
+             ) \
+             UPDATE dag_runs SET status = 'FAILED', updated_at = NOW() \
+              WHERE session_id IN (SELECT session_id FROM descendants) \
+                AND status = 'SUSPENDED'",
+        )
+        .bind(session_id)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| {
+            DagError::StateError(format!(
+                "Database error on fail_suspended_descendants: {}",
+                e
+            ))
+        })?;
+
+        Ok(result.rows_affected())
+    }
 }
 
 // ─── DagTaskMemoryRepository ──────────────────────────────────────────────────

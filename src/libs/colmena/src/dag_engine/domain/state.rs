@@ -122,6 +122,41 @@ pub trait DagStateRepository: Send + Sync {
     async fn cancel_running_descendants(&self, _root_session_id: &str) -> Result<u64, DagError> {
         Ok(0)
     }
+
+    /// Marks `session_id`'s own row `FAILED`, but only if it is currently
+    /// `SUSPENDED`. Returns whether the row was flipped. Used by a refused
+    /// resume to close a child's row without a full-row read-modify-write:
+    /// a caller that only needs the guard (not the rest of the state) gets an
+    /// atomic conditional update instead of a `get_by_id` + `save` pair a
+    /// concurrent writer could race.
+    ///
+    /// The default impl composes `get_by_id` and `save` and is therefore not
+    /// atomic under concurrent writers — good enough for in-memory / test
+    /// repositories, where there is no real concurrency to race.
+    async fn fail_if_suspended(&self, session_id: &str) -> Result<bool, DagError> {
+        match self.get_by_id(session_id).await? {
+            Some(mut state) if state.status == DagRunStatus::Suspended => {
+                state.status = DagRunStatus::Failed;
+                self.save(&state).await?;
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    /// Marks every `SUSPENDED` descendant of `session_id` (transitively, via
+    /// `parent_session_id`, excluding `session_id` itself) as `FAILED`. Used
+    /// alongside `fail_if_suspended` so a refused child's own suspended
+    /// descendants don't outlive it — a row left `SUSPENDED` under a `FAILED`
+    /// parent would otherwise count as its own chain in `find_resume_entry`.
+    ///
+    /// Returns the number of rows updated. The default impl is a no-op
+    /// (returns `Ok(0)`), the same acceptable gap `cancel_running_descendants`
+    /// leaves for in-memory / test repositories: nothing in this crate resumes
+    /// by walking descendants without a real, queryable table behind it.
+    async fn fail_suspended_descendants(&self, _session_id: &str) -> Result<u64, DagError> {
+        Ok(0)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

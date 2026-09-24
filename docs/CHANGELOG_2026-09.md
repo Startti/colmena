@@ -3839,7 +3839,8 @@ texto del rechazo, prefijo `SUBGRAPH_RESUME_INCOMPATIBLE:` (constante pública,
 estable como `SUBGRAPH_DEPTH_EXCEEDED:`), que nombra solo ids y tipos — nunca un
 valor de `config` — y tapa cada lista en 5 ítems con `+N more`. Nadie llama esta
 regla todavía: la entrada 74 la usa desde el ejecutor del resume
-(`resume_subgraph`), y la entrada 75 la aplica de punta a punta en `SubGraphNode`.
+(`resume_subgraph`), y un PR posterior la aplica de punta a punta en
+`SubGraphNode` (el que hace que `subgraph.rs` pase `Fresh` en vez de `Stored`).
 
 **Tests.** 8 nuevos, TDD red-first (Step 1 no compilaba: `GraphSkeleton`/
 `SkeletonDiff` no existían; Step 2 los deja en verde): `the_same_graph_has_no_diff`;
@@ -3868,7 +3869,8 @@ agregando `{:?}` de `self` al mensaje puso en rojo, sola,
 `the_message_leads_with_the_prefix_and_names_ids_and_types_only`. Las cuatro,
 revertidas tras confirmar; `cargo test --lib graph_skeleton` vuelve a 8 passed.
 
-**E2E.** No aplica: no hay comportamiento observable hasta la entrada 75.
+**E2E.** No aplica: no hay comportamiento observable hasta que `subgraph.rs`
+pase `Fresh` en producción (PR posterior).
 
 **ADP.** Sin nota: nada cruza la frontera todavía; la nota llega con la entrada 74.
 
@@ -3877,7 +3879,8 @@ revertidas tras confirmar; `cargo test --lib graph_skeleton` vuelve a 8 passed.
 Task 2/4 de la cadena (`docs/superpowers/specs/2026-09-24-child-resume-rederive-design.md`,
 D3). Conecta la regla de la entrada 73 (`GraphSkeleton`) al ejecutor del resume;
 `SubGraphNode` sigue pasando `ResumeGraph::Stored` en todo resume — **sin
-comportamiento observable todavía**, eso llega con la entrada 75.
+comportamiento observable todavía**, eso llega con un PR posterior, el que
+hace que `subgraph.rs` pase `Fresh`.
 
 **Qué cambió.** `SubGraphExecutorPort::resume_subgraph` gana `graph: ResumeGraph`
 (`application/ports.rs`): `Fresh(Value)` (grafo re-derivado, secretos ya
@@ -3939,7 +3942,73 @@ hijo (`agent_session_id`/`parent_session_id is not null`) queda `COMPLETED`.
 (índice actualizado en `docs/adp_migration/README.md`): ningún cambio de código
 — ADP no implementa `SubGraphExecutorPort` — pero el agente principal y la
 descripción de `Run My Agent` necesitan traducir `SUBGRAPH_RESUME_INCOMPATIBLE:`
-(entrada 75) cuando llegue.
+cuando `subgraph.rs` empiece a pasar `Fresh` (PR posterior).
+
+## 75. Un rechazo de resume cierra los descendientes SUSPENDED del hijo, y el cierre es atómico
+
+Ajuste de revisión sobre la entrada 74
+(`docs/superpowers/specs/2026-09-24-child-resume-rederive-design.md`, D4):
+`close_refused` cerraba solo la fila del hijo rechazado. En una cadena raíz →
+A → B (B es quien suspendió, lo que deja A también SUSPENDED), si el resume de
+A se rechaza, B se quedaba SUSPENDED bajo un padre ya FAILED —
+`find_resume_entry` lo cuenta como cadena propia ("Found N concurrent suspended
+chains") o elige una hoja obsoleta. Además `close_refused` era un
+read-modify-write de la fila completa: sin guarda SUSPENDED (podía voltear una
+fila COMPLETED) y con el commit de un escritor concurrente perdible entre el
+`get_by_id` y el `save`. Todavía latente —todo caller pasa `Stored` y nadie
+rechaza— hasta que un PR posterior haga que `subgraph.rs` pase `Fresh`; esta
+entrada tiene que llegar antes.
+
+**Qué cambió.** `DagStateRepository` (`domain/state.rs`) gana dos métodos con
+impl por defecto, mismo patrón que `cancel_running_descendants`:
+`fail_if_suspended` (compone `get_by_id`+`save` en el default) y
+`fail_suspended_descendants` (default `Ok(0)`, no-op aceptable para repos en
+memoria/test). `PostgresDagStateRepository`: `fail_if_suspended` es un único
+`UPDATE ... WHERE session_id = $1 AND status = 'SUSPENDED'`, atómico;
+`fail_suspended_descendants` reusa el CTE recursivo de
+`cancel_running_descendants` para voltear a FAILED cada descendiente todavía
+SUSPENDED (la fila misma queda afuera). `close_refused` (`run_use_case.rs`)
+llama primero `fail_if_suspended` y, solo si volteó la fila, a
+`fail_suspended_descendants`; si la fila ya no estaba SUSPENDED (cerrada por
+otro escritor, o terminal por otra razón) no toca nada más —no es su fila para
+cerrar, ni sus descendientes—. El texto del rechazo no cambia.
+
+**Tests.** 2 nuevos en `run_use_case.rs::resume_graph_tests` (11 en total, eran
+9): `a_refused_resume_closes_its_suspended_descendants_but_not_unrelated_rows`
+(cadena hijo→nieto, más una fila padre y una de otra cadena, ambas intactas) y
+`fail_if_suspended_leaves_a_completed_row_untouched` (contra el default del
+trait). `MemRepo` gana `fail_suspended_descendants` (recorrido transitivo real
+por `parent_session_id`); `fail_if_suspended` queda en el default del trait.
+Integración nueva, `#[ignore]`, `tests/resume_refuse_descendants.rs`: siembra
+root(SUSPENDED)→a(SUSPENDED)→b(SUSPENDED)→c(COMPLETED) más una fila SUSPENDED
+de otro chat; cierra `a`, confirma `a`/`b` en FAILED y `c`/root/la fila ajena
+intactos, y que `find_resume_entry` devuelve `root`, no `b`; un segundo test
+fija la guarda SUSPENDED de `fail_if_suspended` contra una fila COMPLETED.
+`cargo test -p colmena_dag_engine --lib`: 2819 passed (0 failed, 74 ignorados,
++2 sobre la entrada 74). `cargo test` completo (workspace): 3028 passed, 0
+failed, 144 ignorados.
+
+**Mutación.** 3, cada una en rojo y revertida a mano: (1) comentar la llamada a
+`fail_suspended_descendants` en `close_refused` → rojo, sola,
+`a_refused_resume_closes_its_suspended_descendants_but_not_unrelated_rows`; (2)
+quitar `AND status = 'SUSPENDED'` de cada UPDATE de Postgres, uno por vez →
+rojo, cada vez sola, en la integración (el de `fail_if_suspended` puso en rojo
+`fail_if_suspended_leaves_a_completed_row_untouched`; el del CTE puso en rojo
+`refusing_a_child_closes_its_suspended_descendants…`, que detectó a `c`,
+COMPLETED, volteada también); (3) el default de `fail_if_suspended` ignorando
+el guard de status → rojo, sola, la versión unitaria de
+`fail_if_suspended_leaves_a_completed_row_untouched`.
+
+**E2E.** Nada en producción rechaza todavía (todo caller pasa `Stored`), así
+que no hay corrida observable por SSE —eso llega con el PR que hace que
+`subgraph.rs` pase `Fresh`—. La evidencia end-to-end de esta entrada es la
+integración de Postgres de arriba, corrida real contra `colmena_e2e_cgr`
+(Postgres local, `--ignored`): 2 passed, 0 failed.
+
+**ADP.** [Nota de migración](adp_migration/2026-09-24-subgraph-resume-fresh-graph.md)
+actualizada: un rechazo también cierra los descendientes SUSPENDED del hijo, y
+`DagStateRepository` gana dos métodos con impl por defecto —no rompe a quien
+implemente el puerto fuera del crate—.
 
 ## 76. El cliente MCP no marca direcciones que no sean públicas
 
