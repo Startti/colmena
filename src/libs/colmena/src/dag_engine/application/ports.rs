@@ -64,3 +64,93 @@ pub trait SubGraphExecutorPort: Send + Sync {
         parent_node_path: &str,
     ) -> Result<Option<String>, DagError>;
 }
+
+/// Resolves a child graph named by reference (`child_graph_ref`). Implemented by
+/// the embedder: the ADP worker asks ADP for the agent's runnable graph. The
+/// resolved graph is never emitted, never returned to the model and never stored
+/// in a node output — only in the child run's own persisted state, like an inline
+/// graph.
+#[async_trait::async_trait]
+pub trait ChildGraphResolverPort: Send + Sync {
+    /// Returns the runnable graph for `req.agent_id`, or why it cannot run.
+    async fn resolve(
+        &self,
+        req: ChildGraphRequest,
+    ) -> Result<ResolvedChildGraph, ChildGraphResolveError>;
+}
+
+/// What the engine knows when a `subgraph` asks for a child by reference.
+#[derive(Debug, Clone)]
+pub struct ChildGraphRequest {
+    /// The ref's `agent_id`, already templated and trimmed.
+    pub agent_id: String,
+    /// The ref's `context`, verbatim (opaque to the engine).
+    pub context: Value,
+    /// The Colmena session of the run that owns the `subgraph` node.
+    pub session_id: String,
+    /// The embedder's stable session, when the run has one.
+    pub agent_session_id: Option<String>,
+    /// The `subgraph` node's own lineage path.
+    pub parent_path: String,
+}
+
+/// A child graph returned by the embedder.
+#[derive(Debug, Clone)]
+pub struct ResolvedChildGraph {
+    /// The runnable graph (`{ "nodes": …, "edges": … }`), secrets included.
+    pub graph: Value,
+    /// The agent's human-facing name.
+    pub display_name: String,
+}
+
+/// Why a `child_graph_ref` could not be resolved. Reaches the calling model as
+/// `CHILD_GRAPH_RESOLVE_FAILED:<code>: <message>`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChildGraphResolveError {
+    /// No agent with that id, or the ref carried no usable `agent_id`.
+    NotFound(String),
+    /// The agent exists but the run's session may not use it.
+    Forbidden(String),
+    /// The agent needs configuration its owner has not provided.
+    NeedsConfig(String),
+    /// The agent's graph is incomplete or empty.
+    NotRunnable(String),
+    /// No resolver configured, the resolver failed or it timed out.
+    Unavailable(String),
+}
+
+impl ChildGraphResolveError {
+    /// Stable code after the `CHILD_GRAPH_RESOLVE_FAILED:` prefix.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::NotFound(_) => "not_found",
+            Self::Forbidden(_) => "forbidden",
+            Self::NeedsConfig(_) => "needs_config",
+            Self::NotRunnable(_) => "not_runnable",
+            Self::Unavailable(_) => "unavailable",
+        }
+    }
+
+    fn message(&self) -> &str {
+        match self {
+            Self::NotFound(m)
+            | Self::Forbidden(m)
+            | Self::NeedsConfig(m)
+            | Self::NotRunnable(m)
+            | Self::Unavailable(m) => m,
+        }
+    }
+}
+
+impl std::fmt::Display for ChildGraphResolveError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "CHILD_GRAPH_RESOLVE_FAILED:{}: {}",
+            self.code(),
+            self.message()
+        )
+    }
+}
+
+impl std::error::Error for ChildGraphResolveError {}

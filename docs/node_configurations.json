@@ -501,6 +501,13 @@
             ]
           }
         },
+        "child_graph_ref": {
+          "type": "object",
+          "required": false,
+          "default": null,
+          "description": "Reserved: the child graph by reference, { \"agent_id\": \"<id>\", \"context\": { … } }, to be resolved at run time by the embedder's ChildGraphResolverPort (EngineConfig.child_graph_resolver). Recognised as a source key and never passed to the child's state, but not resolved yet by this engine version — use 'child_graph_inline' or 'child_graph_path'.",
+          "example": { "agent_id": "${agentId}", "context": { "messageId": "m1" } }
+        },
         "__agent_name": {
           "type": "string",
           "required": false,

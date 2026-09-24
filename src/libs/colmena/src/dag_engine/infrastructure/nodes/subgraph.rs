@@ -1,5 +1,6 @@
 use crate::colmena_log;
-use crate::dag_engine::application::ports::SubGraphExecutorPort;
+use crate::dag_engine::application::ports::{ChildGraphResolverPort, SubGraphExecutorPort};
+use crate::dag_engine::domain::child_graph_source::{CHILD_GRAPH_PATH, CHILD_GRAPH_SOURCE_KEYS};
 use crate::dag_engine::domain::events::{DagExecutionEvent, NodeEndError};
 use crate::dag_engine::domain::lint::{FieldSpec, NodeCatalogEntry};
 use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
@@ -8,21 +9,6 @@ use serde_json::{json, Value};
 use std::error::Error;
 use std::sync::{Arc, OnceLock};
 use tokio::fs;
-
-/// Operator-supplied keys that name the child graph itself.
-///
-/// They arrive either in the node's `config` (edge path) or in its `inputs` (tool
-/// path, where `DagToolExecutor` merges the tool's `fixed_config` into inputs and
-/// passes `config = {}`). Either way they are plumbing, never data for the child.
-///
-/// [`SubGraphNode::resolve_child_graph_source`] reads them, and
-/// [`SubGraphNode::is_excluded_from_child_state`] keeps them out of the child's
-/// global state — otherwise the child's own `input` node passes them through and
-/// they end up inside an LLM prompt, secrets already resolved.
-///
-/// Both uses derive from this constant on purpose: a new source key has to become
-/// invisible to the child by construction, not by remembering a second list.
-const CHILD_GRAPH_SOURCE_KEYS: [&str; 2] = ["child_graph_inline", "child_graph_path"];
 
 /// Where a subgraph boundary's name came from. Gates `errorText`: only `Tool`
 /// goes through `MaskingObserver` (#310) — `Agent`/`Edge` stream unmasked.
@@ -35,6 +21,9 @@ enum BoundarySource {
 
 pub struct SubGraphNode {
     pub executor: Arc<OnceLock<Arc<dyn SubGraphExecutorPort>>>,
+    /// The embedder's resolver for `child_graph_ref` sources, shared with
+    /// `RouterNode` like `executor`.
+    pub resolver: Arc<OnceLock<Arc<dyn ChildGraphResolverPort>>>,
 }
 
 impl Default for SubGraphNode {
@@ -47,6 +36,7 @@ impl SubGraphNode {
     pub fn new() -> Self {
         Self {
             executor: Arc::new(OnceLock::new()),
+            resolver: Arc::new(OnceLock::new()),
         }
     }
 
@@ -206,16 +196,17 @@ impl ExecutableNode for SubGraphNode {
     }
 
     fn config_schema(&self) -> Option<NodeCatalogEntry> {
-        // The two child-graph sources come from the constant the node itself
-        // uses to look them up, so adding one there cannot silently skip the
-        // catalog.
+        // The child-graph sources come from the constant the node itself uses
+        // to look them up, so adding one there cannot silently skip the
+        // catalog. Only the path is a string; the inline graph and the ref are
+        // objects.
         let mut entry =
             NodeCatalogEntry::no_config().with_field("__agent_name", FieldSpec::of_type("string"));
         for key in CHILD_GRAPH_SOURCE_KEYS {
-            let ty = if key == "child_graph_inline" {
-                "object"
-            } else {
+            let ty = if key == CHILD_GRAPH_PATH {
                 "string"
+            } else {
+                "object"
             };
             entry = entry.with_field(key, FieldSpec::of_type(ty));
         }
@@ -534,6 +525,28 @@ mod subgraph_tool_input_config_tests {
         assert_eq!(
             SubGraphNode::resolve_child_graph_source(&inputs, &config),
             Some(json!("./from_config.json"))
+        );
+    }
+
+    #[test]
+    fn within_one_container_inline_and_path_come_before_a_ref() {
+        // The order of CHILD_GRAPH_SOURCE_KEYS is a contract: inline, path, ref.
+        let mut inputs: NodeInputs = NodeInputs::new();
+        inputs.insert("child_graph_ref".to_string(), json!({ "agent_id": "a1" }));
+        inputs.insert(
+            "child_graph_inline".to_string(),
+            json!({ "from": "inline" }),
+        );
+        assert_eq!(
+            resolve_graph_source(&inputs, &json!({})),
+            Some(json!({ "from": "inline" }))
+        );
+
+        let config =
+            json!({ "child_graph_ref": { "agent_id": "a1" }, "child_graph_path": "./p.json" });
+        assert_eq!(
+            resolve_graph_source(&NodeInputs::new(), &config),
+            Some(json!("./p.json"))
         );
     }
 

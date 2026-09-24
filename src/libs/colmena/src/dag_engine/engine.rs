@@ -4,6 +4,7 @@
 //! value repositories, the node registry, and the `DagRunUseCase`. Consumers
 //! (CLI, HTTP worker, `run_dag`/`serve_dag`) build one per process.
 
+use crate::dag_engine::application::ports::ChildGraphResolverPort;
 use crate::dag_engine::application::run_use_case::DagRunUseCase;
 use crate::dag_engine::application::secure_value_service::SecureValueService;
 use crate::dag_engine::domain::error::DagError;
@@ -58,6 +59,9 @@ pub struct EngineConfig {
     /// Liveness knobs for the execution loop (heartbeat + idle watchdog).
     /// `from_env` reads COLMENA_HEARTBEAT_INTERVAL_SECS / COLMENA_IDLE_TIMEOUT_SECS.
     pub liveness: crate::dag_engine::application::liveness::LivenessSettings,
+    /// Resolves `child_graph_ref` sources on the embedder's side — the engine
+    /// never fetches a graph by itself. `from_env` leaves it `None`.
+    pub child_graph_resolver: Option<Arc<dyn ChildGraphResolverPort>>,
 }
 
 /// Parse a raw string value as a boolean, independent of any environment
@@ -220,6 +224,9 @@ impl EngineConfig {
             // (after the pool is pinned), so leave it None here.
             attachment_registry: None,
             liveness: crate::dag_engine::application::liveness::LivenessSettings::from_env(),
+            // Only an embedder can resolve a ref (e.g. the ADP worker); it sets
+            // this after `from_env`.
+            child_graph_resolver: None,
         })
     }
 }
@@ -305,6 +312,9 @@ impl ColmenaEngine {
             .with_liveness(liveness),
         );
         node_registry.set_subgraph_executor(use_case.clone());
+        if let Some(resolver) = config.child_graph_resolver.clone() {
+            node_registry.set_child_graph_resolver(resolver);
+        }
         node_registry.set_foreach_registry(node_registry.clone());
 
         tracing::info!(

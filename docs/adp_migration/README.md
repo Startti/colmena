@@ -6,6 +6,12 @@ ve ADP antes y después, qué tiene que hacer ADP, y qué se rompe si no hace na
 
 Los cambios que quedan dentro del motor no llevan nota aquí.
 
+## 2026-09-23 — `child_graph_ref`: un `subgraph` carga su hijo por referencia
+
+| # | Nota | Acción de ADP | Qué se rompe si se ignora |
+|---|------|---------------|---------------------------|
+| 1 | [El puerto `ChildGraphResolverPort`](2026-09-23-child-graph-ref.md) | Ninguna todavía — el motor no lo consulta aún | Nada; `EngineConfig` suma un campo y el worker usa `from_env` |
+
 ## 2026-09-23 — una tool-subgrafo reanudada devuelve su salida, no el estado del hijo
 
 | # | Nota | Acción de ADP | Qué se rompe si se ignora |
