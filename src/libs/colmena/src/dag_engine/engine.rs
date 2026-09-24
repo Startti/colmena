@@ -61,7 +61,9 @@ pub struct EngineConfig {
     pub liveness: crate::dag_engine::application::liveness::LivenessSettings,
     /// Resolves `child_graph_ref` sources on the embedder's side — the engine
     /// never fetches a graph by itself. `from_env` leaves it `None`, which makes
-    /// every ref fail with `CHILD_GRAPH_RESOLVE_FAILED:unavailable`.
+    /// a resolvable ref fail with `CHILD_GRAPH_RESOLVE_FAILED:unavailable` —
+    /// an `agent_id` still containing `${…}` (untemplated) fails earlier with
+    /// `not_found`, resolver present or not.
     pub child_graph_resolver: Option<Arc<dyn ChildGraphResolverPort>>,
 }
 

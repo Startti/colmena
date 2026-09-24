@@ -1,0 +1,41 @@
+{
+  "nodes": {
+    "trigger": {
+      "type": "input",
+      "config": {
+        "prompt": "I'm going to Bariloche for 2 days of skiing. What should I pack?"
+      }
+    },
+    "orchestrator_node": {
+      "type": "orchestrator",
+      "config": {
+        "max_phases": 2,
+        "planner": {
+          "provider": "google",
+          "model": "gemini-2.5-flash",
+          "api_key": "${GEMINI_API_KEY}",
+          "allow_suspend": false,
+          "system_message": "Break the request into exactly one task and assign it to packing_expert."
+        },
+        "agents": {
+          "packing_expert": {
+            "description": "Recommends what to pack for a given trip.",
+            "child_graph_ref": { "agent_id": "agt_demo_packing_expert" }
+          }
+        },
+        "final_reactor": {
+          "provider": "google",
+          "model": "gemini-2.5-flash",
+          "api_key": "${GEMINI_API_KEY}",
+          "system_message": "Combine the packing recommendations into one short paragraph."
+        }
+      }
+    }
+  },
+  "edges": [
+    {
+      "from": "trigger",
+      "to": "orchestrator_node"
+    }
+  ]
+}

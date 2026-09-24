@@ -1344,6 +1344,20 @@ mod tests {
     }
 
     #[test]
+    fn a_dynamic_subgraph_tool_by_reference_is_not_blocked_for_missing_memory() {
+        // Same as the external child_graph_path case: a ref is resolved at run
+        // time, so its (future) inline content cannot be inspected here — don't
+        // block. See feedback_vacuous_tests_pass_for_wrong_reason: this is proven
+        // non-vacuous by mutating `subgraph_inline_child` to also read the ref
+        // (see the mutation note in the task-3 report), which turns this red.
+        let cfg = json!({ "node_schema": { "child_graph_ref": { "fixed": { "agent_id": "${agentId}" } } } });
+        assert_eq!(
+            memory_backend_missing_reason("subgraph", MemoryMode::Dynamic, &cfg),
+            None
+        );
+    }
+
+    #[test]
     fn test_parse_node_schema_fixed_only() {
         let schema = serde_json::from_value::<NodeSchema>(json!({
             "base_url": { "type": "string", "fixed": "https://api.example.com" },

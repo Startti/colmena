@@ -1,0 +1,21 @@
+{
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/test-subgraph-ref-only-preflight",
+        "method": "POST",
+        "test_payload": { "note": "no LLM in this graph — exercises preflight only" }
+      }
+    },
+    "child": {
+      "type": "subgraph",
+      "config": {
+        "child_graph_ref": { "agent_id": "agt_demo_preflight_1" }
+      }
+    }
+  },
+  "edges": [
+    { "from": "trigger.note", "to": "child.task" }
+  ]
+}

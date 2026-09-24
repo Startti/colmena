@@ -216,7 +216,7 @@
 #### `src/libs/colmena/src/dag_engine/application/preflight.rs`
 - Module: `dag_engine::application::preflight`
 - **Used by (1)**: `src/libs/colmena/src/dag_engine/application/run_use_case.rs`
-- Depends on (5): `dag_engine::application::preflight_cache`, `dag_engine::domain::error`, `dag_engine::domain::graph`, `llm::domain`, `llm::infrastructure`
+- Depends on (6): `dag_engine::application::preflight_cache`, `dag_engine::domain::child_graph_source`, `dag_engine::domain::error`, `dag_engine::domain::graph`, `llm::domain`, `llm::infrastructure`
 
 #### `src/libs/colmena/src/dag_engine/application/preflight_cache.rs`
 - Module: `dag_engine::application::preflight_cache`
@@ -240,7 +240,7 @@
 
 #### `src/libs/colmena/src/dag_engine/domain/child_graph_source.rs`
 - Module: `dag_engine::domain::child_graph_source`
-- **Used by (1)**: `src/libs/colmena/src/dag_engine/infrastructure/nodes/subgraph.rs`
+- **Used by (4)**: `src/libs/colmena/src/dag_engine/application/preflight.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/orchestrator.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/router/config.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/subgraph.rs`
 - Depends on (0): — (no intra-crate imports)
 
 #### `src/libs/colmena/src/dag_engine/domain/error.rs`
@@ -641,7 +641,7 @@
 #### `src/libs/colmena/src/dag_engine/infrastructure/nodes/orchestrator.rs`
 - Module: `dag_engine::infrastructure::nodes::orchestrator`
 - **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
-- Depends on (6): `dag_engine::application::ports`, `dag_engine::domain::events`, `dag_engine::domain::lint`, `dag_engine::domain::node`, `dag_engine::domain::observer`, `dag_engine::domain::state`
+- Depends on (7): `dag_engine::application::ports`, `dag_engine::domain::child_graph_source`, `dag_engine::domain::events`, `dag_engine::domain::lint`, `dag_engine::domain::node`, `dag_engine::domain::observer`, `dag_engine::domain::state`
 
 #### `src/libs/colmena/src/dag_engine/infrastructure/nodes/output.rs`
 - Module: `dag_engine::infrastructure::nodes::output`
@@ -676,7 +676,7 @@
 #### `src/libs/colmena/src/dag_engine/infrastructure/nodes/router/config.rs`
 - Module: `dag_engine::infrastructure::nodes::router::config`
 - **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
-- Depends on (0): — (no intra-crate imports)
+- Depends on (1): `dag_engine::domain::child_graph_source`
 
 #### `src/libs/colmena/src/dag_engine/infrastructure/nodes/router/extract_and_route.rs`
 - Module: `dag_engine::infrastructure::nodes::router::extract_and_route`

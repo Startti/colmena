@@ -63,10 +63,10 @@ Estos eventos solo se emiten si existe un `boundary_name` (fallback: `__agent_na
 
 El código ejecuta un mapeo IN sofisticado (**no documentado en node_configurations.json**):
 - `build_child_state()` (línea 90-102) filtra claves internas usando `is_excluded_from_child_state()` (línea 72-76)
-- La constante `CHILD_GRAPH_SOURCE_KEYS` (línea 24) define qué se excluye: `["child_graph_inline", "child_graph_path"]`
+- La constante `CHILD_GRAPH_SOURCE_KEYS` (`domain/child_graph_source.rs`) define qué se excluye: `["child_graph_inline", "child_graph_path", "child_graph_ref"]`
 - Re-inserta `__colmena_subgraph_depth` (línea 97-100) como la ÚNICA key `__colmena_*` que survives al hijo
 
-**Impacto para QA**: Cualquier key que NO comience con `__colmena_` y NO esté en `CHILD_GRAPH_SOURCE_KEYS` alcanza el estado global del hijo (línea 91-95). Esto incluye `files`, `task`, y argumentos arbitrarios del modelo. El plumbing estático (`child_graph_inline`, `child_graph_path`) está deliberadamente excluido por seguridad (contiene secrets resueltos).
+**Impacto para QA**: Cualquier key que NO comience con `__colmena_` y NO esté en `CHILD_GRAPH_SOURCE_KEYS` alcanza el estado global del hijo (línea 91-95). Esto incluye `files`, `task`, y argumentos arbitrarios del modelo. El plumbing (`child_graph_inline`, `child_graph_path`, `child_graph_ref`) está deliberadamente excluido por seguridad (contiene secrets resueltos).
 
 ### Profundidad de anidación (unbounded by default)
 

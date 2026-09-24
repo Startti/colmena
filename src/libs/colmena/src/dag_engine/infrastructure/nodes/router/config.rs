@@ -1,4 +1,5 @@
 use super::when_dsl::WhenRule;
+use crate::dag_engine::domain::child_graph_source::CHILD_GRAPH_SOURCE_KEYS;
 use serde_json::Value;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -85,17 +86,21 @@ pub fn parse_and_validate(config: &Value) -> Result<RouterConfig, String> {
         let subgraph = b.get("subgraph").cloned();
 
         if let Some(sg) = &subgraph {
-            let has_path = sg.get("child_graph_path").is_some();
-            let has_inline = sg.get("child_graph_inline").is_some();
-            if has_path && has_inline {
+            let found: Vec<&str> = CHILD_GRAPH_SOURCE_KEYS
+                .iter()
+                .copied()
+                .filter(|k| sg.get(*k).is_some())
+                .collect();
+            if found.len() > 1 {
                 return Err(format!(
-                    "RouterConfigError: branch '{}' subgraph declares both child_graph_path and child_graph_inline — pick one",
-                    name
+                    "RouterConfigError: branch '{}' subgraph declares {} — pick one",
+                    name,
+                    found.join(" and ")
                 ));
             }
-            if !has_path && !has_inline {
+            if found.is_empty() {
                 return Err(format!(
-                    "RouterConfigError: branch '{}' subgraph requires child_graph_path or child_graph_inline",
+                    "RouterConfigError: branch '{}' subgraph requires child_graph_path, child_graph_inline or child_graph_ref",
                     name
                 ));
             }
@@ -256,7 +261,37 @@ mod tests {
             "branches": [ { "name": "a", "description": "x", "subgraph": {} } ]
         });
         let err = parse_and_validate(&cfg).unwrap_err();
-        assert!(err.contains("requires child_graph_path or child_graph_inline"));
+        assert!(err.contains("requires child_graph_path, child_graph_inline or child_graph_ref"));
+    }
+
+    #[test]
+    fn a_branch_subgraph_may_name_its_child_by_reference() {
+        let cfg = json!({
+            "mode": "llm_direct",
+            "branches": [ {
+                "name": "a",
+                "description": "x",
+                "subgraph": { "child_graph_ref": { "agent_id": "x" } }
+            } ]
+        });
+        assert!(parse_and_validate(&cfg).is_ok());
+    }
+
+    #[test]
+    fn a_branch_subgraph_with_two_sources_is_rejected() {
+        let cfg = json!({
+            "mode": "llm_direct",
+            "branches": [ {
+                "name": "a",
+                "description": "x",
+                "subgraph": {
+                    "child_graph_ref": { "agent_id": "x" },
+                    "child_graph_inline": { "nodes": {}, "edges": [] }
+                }
+            } ]
+        });
+        let err = parse_and_validate(&cfg).unwrap_err();
+        assert!(err.contains("pick one"));
     }
 
     #[test]

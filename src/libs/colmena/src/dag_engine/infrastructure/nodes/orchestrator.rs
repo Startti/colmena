@@ -1,5 +1,6 @@
 use crate::colmena_log;
 use crate::dag_engine::application::ports::NodeRegistryPort;
+use crate::dag_engine::domain::child_graph_source::CHILD_GRAPH_SOURCE_KEYS;
 use crate::dag_engine::domain::events::DagExecutionEvent;
 use crate::dag_engine::domain::lint::{FieldSpec, NodeCatalogEntry};
 use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
@@ -1539,16 +1540,18 @@ impl ExecutableNode for OrchestratorNode {
                                     )
                                 })?;
 
-                            // Agents must be subgraphs (child_graph_path or child_graph_inline).
-                            // Direct LLM agent configs are no longer supported — use child_graph_inline
-                            // with a minimal `in → llm_call → out` graph instead.
-                            if agent_node_cfg.get("child_graph_path").is_none()
-                                && agent_node_cfg.get("child_graph_inline").is_none()
+                            // Agents must be subgraphs (child_graph_path, child_graph_inline or
+                            // child_graph_ref). Direct LLM agent configs are no longer supported —
+                            // use child_graph_inline with a minimal `in → llm_call → out` graph
+                            // instead.
+                            if !CHILD_GRAPH_SOURCE_KEYS
+                                .iter()
+                                .any(|k| agent_node_cfg.get(*k).is_some())
                             {
                                 return Err(format!(
-                                    "Agent '{}' must be a subgraph: add 'child_graph_path' or \
-                                     'child_graph_inline' to its config. Direct LLM agent configs \
-                                     are no longer supported.",
+                                    "Agent '{}' must be a subgraph: add 'child_graph_path', \
+                                     'child_graph_inline' or 'child_graph_ref' to its config. \
+                                     Direct LLM agent configs are no longer supported.",
                                     task.assigned_to
                                 )
                                 .into());
