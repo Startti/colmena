@@ -3872,6 +3872,75 @@ revertidas tras confirmar; `cargo test --lib graph_skeleton` vuelve a 8 passed.
 
 **ADP.** Sin nota: nada cruza la frontera todavía; la nota llega con la entrada 74.
 
+## 74. El puerto de resume lleva el grafo con que reanudar (sin comportamiento nuevo)
+
+Task 2/4 de la cadena (`docs/superpowers/specs/2026-09-24-child-resume-rederive-design.md`,
+D3). Conecta la regla de la entrada 73 (`GraphSkeleton`) al ejecutor del resume;
+`SubGraphNode` sigue pasando `ResumeGraph::Stored` en todo resume — **sin
+comportamiento observable todavía**, eso llega con la entrada 75.
+
+**Qué cambió.** `SubGraphExecutorPort::resume_subgraph` gana `graph: ResumeGraph`
+(`application/ports.rs`): `Fresh(Value)` (grafo re-derivado, secretos ya
+resueltos, `Debug` redactado a mano), `Unavailable(String)` (la fuente no pudo
+dar uno) y `Stored` (comportamiento de hoy). `DagError` suma
+`ResumeRefused(String)` con `#[error("{0}")]` — sin el prefijo `"Error de
+ejecución en el nodo: "` de `NodeExecution`, para que
+`SUBGRAPH_RESUME_INCOMPATIBLE:`/`CHILD_GRAPH_RESOLVE_FAILED:` sigan liderando
+`ToolResult.error` también en el resume. `DagRunUseCase::plan_resume`
+(`run_use_case.rs`) decide sin correr nada: `Stored` corre el guardado
+(ilegible sigue siendo `Invalid sub-graph state JSON: …`, sin cerrar);
+`Unavailable` se rechaza tal cual; para `Fresh` el guardado se parsea
+**primero** — así gana su error si los dos están rotos, no el rechazo que
+cerraría la fila — y recién entonces se mira `fresh`: si no parsea, texto fijo
+(nunca el error de serde, que puede citar un valor del grafo); si sí, compara
+esqueletos (`GraphSkeleton::of(&stored).diff(&GraphSkeleton::of(&fresh))`) y
+corre el fresco si calzan, o rechaza con el `SkeletonDiff`; uno que calza pero
+falla `Graph::validate()` (fuera de `plan_resume`) también queda sin cerrar.
+Un rechazo cierra la fila `FAILED` vía `close_refused` (el grafo que ya tenía —
+el fresco nunca llega a `save`) para que un turno siguiente no la retome como
+`SUSPENDED`; `resume_subgraph` llama `plan_resume` y devuelve
+`DagError::ResumeRefused` sin tocar el stream ante un rechazo. `subgraph.rs`
+pasa `ResumeGraph::Stored` en su único call site de producción (`:396-405`);
+los tres dobles de test reciben el parámetro nuevo sin usarlo.
+
+**Tests.** 9 en total (eran 5). Nuevos, en `run_use_case.rs::resume_graph_tests`:
+`a_fresh_graph_that_fails_to_parse_is_refused_without_leaking_the_bad_value`
+(un `max_total_calls` no numérico con `"sk-fresh-secret"` — el rechazo lleva
+el prefijo y nunca el valor);
+`an_unparsable_stored_graph_is_todays_error_and_does_not_close_the_row` y
+`a_fresh_graph_that_fails_validation_does_not_close_the_row` (los dos casos
+sin cierre del ajuste 4, ambos `Suspended`, nunca `SUBGRAPH_RESUME_INCOMPATIBLE:`);
+`when_both_graphs_are_unparsable_the_stored_failure_wins_and_nothing_closes`
+(pin del orden de parseo). `a_changed_skeleton_is_refused…` ganó 3 asserts
+(`agent_session_id`/`parent_session_id`/`active_queue`): `close_refused` solo
+toca `status`. `cargo test -p colmena_dag_engine --lib`: 2817 passed (0
+failed, 74 ignorados — la rama recibió `## 76.` entre la 74 y esta revisión);
+filtrado a `resume_graph`: 9 passed; a `nodes::subgraph`: 49 passed; a
+`ports`: 21 passed, 1 ignorado.
+
+**Mutación.** Las 5 originales más dos de este seguimiento, en rojo y
+revertidas a mano: (6) `Err(_) => …` a `Err(e) => …{e}` puso en rojo, sola,
+`a_fresh_graph_that_fails_to_parse_is_refused_without_leaking_the_bad_value`
+(el secreto sembrado aparece en el mensaje); (7) deshacer el reordenamiento
+(parsear `fresh` antes que `stored`) puso en rojo, sola,
+`when_both_graphs_are_unparsable_the_stored_failure_wins_and_nothing_closes`.
+`cargo test --lib resume_graph` vuelve a 9 passed tras cada revert.
+
+**E2E.** Regresión: sin comportamiento nuevo, pero la firma de `resume_subgraph`
+cambió y todo resume pasa por ella. Corrida real contra `colmena_e2e_cgr`
+(Postgres local) con `tests/graphs/basic/suspend_in_subgraph.json`: turno 1
+(`subgraph_resume_2a_regression_1.sse`) suspende con
+`finishReason: "suspended"`; turno 2, con la respuesta a `confirm_transfer`
+(`subgraph_resume_2a_regression_2.sse`), resume y termina con
+`finishReason: "stop"`. Cero frames `error` en ninguno de los dos. La fila del
+hijo (`agent_session_id`/`parent_session_id is not null`) queda `COMPLETED`.
+
+**ADP.** [Nota de migración](adp_migration/2026-09-24-subgraph-resume-fresh-graph.md)
+(índice actualizado en `docs/adp_migration/README.md`): ningún cambio de código
+— ADP no implementa `SubGraphExecutorPort` — pero el agente principal y la
+descripción de `Run My Agent` necesitan traducir `SUBGRAPH_RESUME_INCOMPATIBLE:`
+(entrada 75) cuando llegue.
+
 ## 76. El cliente MCP no marca direcciones que no sean públicas
 
 **Qué cambió.** El motor se niega a conectar un servidor MCP en una dirección que no sea unicast

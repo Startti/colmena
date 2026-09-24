@@ -1,10 +1,11 @@
 use crate::colmena_log;
 use crate::dag_engine::application::liveness::LivenessSettings;
-use crate::dag_engine::application::ports::{NodeRegistryPort, SubGraphExecutorPort};
+use crate::dag_engine::application::ports::{NodeRegistryPort, ResumeGraph, SubGraphExecutorPort};
 use crate::dag_engine::application::preflight;
 use crate::dag_engine::application::secure_value_service::{MaskingObserver, SecureValueService};
 use crate::dag_engine::domain::error::DagError;
 use crate::dag_engine::domain::graph::{Edge, Graph};
+use crate::dag_engine::domain::graph_skeleton::{GraphSkeleton, SUBGRAPH_RESUME_INCOMPATIBLE};
 use crate::dag_engine::domain::node::NodeInputs;
 
 use serde_json::{json, Value};
@@ -1482,6 +1483,66 @@ fn node_event_advances_heartbeat(event: &crate::dag_engine::domain::observer::No
     }
 }
 
+/// What `resume_subgraph` does with the graph it was handed.
+enum ResumePlan {
+    Run(Graph),
+    /// Refuse before running anything: the row is closed and this text goes
+    /// back verbatim (it leads with a stable prefix).
+    Refuse(String),
+}
+
+impl DagRunUseCase {
+    /// Decides what a suspended child resumes with, before anything runs.
+    /// Only structure is compared (`GraphSkeleton`): a fresh graph may bring
+    /// new keys, tokens, skill paths or prompts, which is the point. An
+    /// unreadable STORED graph is an error as before, not a refusal.
+    fn plan_resume(stored: &Value, requested: ResumeGraph) -> Result<ResumePlan, DagError> {
+        let stored_graph = || {
+            serde_json::from_value::<Graph>(stored.clone()).map_err(|e| {
+                DagError::NodeExecution(format!("Invalid sub-graph state JSON: {}", e))
+            })
+        };
+        Ok(match requested {
+            ResumeGraph::Stored => ResumePlan::Run(stored_graph()?),
+            ResumeGraph::Unavailable(reason) => ResumePlan::Refuse(reason),
+            ResumeGraph::Fresh(fresh) => {
+                // Parse STORED first: its (unclosed) error wins if both are
+                // broken, over a Fresh-side refusal that would close the row.
+                let stored = stored_graph()?;
+                match serde_json::from_value::<Graph>(fresh) {
+                    // Fixed text: a serde error can quote a value from the graph.
+                    Err(_) => ResumePlan::Refuse(format!(
+                        "{SUBGRAPH_RESUME_INCOMPATIBLE} the child graph source no longer holds \
+                         a valid graph. Run it again from the start."
+                    )),
+                    Ok(fresh) => {
+                        match GraphSkeleton::of(&stored).diff(&GraphSkeleton::of(&fresh)) {
+                            Some(diff) => ResumePlan::Refuse(diff.to_string()),
+                            None => ResumePlan::Run(fresh),
+                        }
+                    }
+                }
+            }
+        })
+    }
+
+    /// A refused resume closes the child's row: its answer is spent and nobody
+    /// resumes it again, while a row left SUSPENDED counts as a second chain in
+    /// `find_resume_entry` and can be picked by `find_suspended_child` on a
+    /// later turn. The row keeps the graph it had — a fresh graph (and its
+    /// secrets) never reaches storage through a refusal. A failed save is
+    /// logged, not returned: the refusal is what the caller needs to see.
+    async fn close_refused(repo: &dyn DagStateRepository, mut state: DagRunState) {
+        state.status = DagRunStatus::Failed;
+        if let Err(e) = repo.save(&state).await {
+            eprintln!(
+                "⚠️ Failed to close refused child run {}: {}",
+                state.session_id, e
+            );
+        }
+    }
+}
+
 #[async_trait::async_trait]
 impl SubGraphExecutorPort for DagRunUseCase {
     async fn run_subgraph(
@@ -1565,25 +1626,32 @@ impl SubGraphExecutorPort for DagRunUseCase {
         &self,
         session_id: &str,
         answer: String,
+        graph: ResumeGraph,
         observer: Option<Arc<dyn crate::dag_engine::domain::observer::ExecutionObserver>>,
         agent_session_id: Option<String>,
         path_prefix: Option<String>,
     ) -> Result<Value, DagError> {
-        let state = if let Some(repo) = &self.state_repository {
-            repo.get_by_id(session_id).await?.ok_or_else(|| {
-                DagError::NodeExecution(format!(
-                    "Child session {} not found for resume",
-                    session_id
-                ))
-            })?
-        } else {
+        let Some(repo) = &self.state_repository else {
             return Err(DagError::NodeExecution(
                 "State repository missing for resume".to_string(),
             ));
         };
+        let state = repo.get_by_id(session_id).await?.ok_or_else(|| {
+            DagError::NodeExecution(format!("Child session {} not found for resume", session_id))
+        })?;
 
-        let graph: Graph = serde_json::from_value(state.graph_json)
-            .map_err(|e| DagError::NodeExecution(format!("Invalid sub-graph state JSON: {}", e)))?;
+        let graph = match Self::plan_resume(&state.graph_json, graph)? {
+            ResumePlan::Run(graph) => graph,
+            ResumePlan::Refuse(reason) => {
+                colmena_log!(
+                    "⛔ [SubGraph] Resume of child {} refused: {}",
+                    session_id,
+                    reason
+                );
+                Self::close_refused(&**repo, state).await;
+                return Err(DagError::ResumeRefused(reason));
+            }
+        };
         graph
             .validate()
             .map_err(|e| DagError::NodeExecution(format!("Invalid sub-graph: {}", e)))?;
@@ -2091,5 +2159,236 @@ mod nested_failure_close_tests {
             message.contains("<sv_tok_1>"),
             "expected the masked handle, got: {message}"
         );
+    }
+}
+
+#[cfg(test)]
+mod resume_graph_tests {
+    //! `resume_subgraph` with each `ResumeGraph`: a fresh graph runs when its
+    //! skeleton matches the stored one; a changed one, or an unavailable
+    //! source, is refused before anything runs and closes the child's row.
+    use super::*;
+    use crate::dag_engine::domain::node::ExecutableNode;
+    use crate::dag_engine::domain::observer::ExecutionObserver;
+    use async_trait::async_trait;
+    use std::error::Error as StdError;
+    use std::sync::Mutex;
+
+    /// Hands back the config it ran with, so a test can tell which graph ran.
+    struct EchoConfig;
+    #[async_trait]
+    impl ExecutableNode for EchoConfig {
+        async fn execute(
+            &self,
+            _i: &NodeInputs,
+            config: &Value,
+            _s: &mut Value,
+            _o: Option<Arc<dyn ExecutionObserver>>,
+        ) -> Result<Value, Box<dyn StdError + Send + Sync>> {
+            Ok(config.clone())
+        }
+        fn schema(&self) -> Value {
+            json!({})
+        }
+    }
+
+    struct EchoRegistry;
+    impl NodeRegistryPort for EchoRegistry {
+        fn get_node(&self, node_type: &str) -> Option<Arc<dyn ExecutableNode>> {
+            (node_type == "echo").then(|| Arc::new(EchoConfig) as Arc<dyn ExecutableNode>)
+        }
+        fn get_all_nodes(&self) -> HashMap<String, Arc<dyn ExecutableNode>> {
+            HashMap::new()
+        }
+    }
+
+    #[derive(Default)]
+    struct MemRepo(Mutex<HashMap<String, DagRunState>>);
+    impl MemRepo {
+        fn row(&self, id: &str) -> DagRunState {
+            self.0.lock().unwrap()[id].clone()
+        }
+    }
+    #[async_trait]
+    impl DagStateRepository for MemRepo {
+        async fn get_by_id(&self, id: &str) -> Result<Option<DagRunState>, DagError> {
+            Ok(self.0.lock().unwrap().get(id).cloned())
+        }
+        async fn save(&self, s: &DagRunState) -> Result<(), DagError> {
+            self.0
+                .lock()
+                .unwrap()
+                .insert(s.session_id.clone(), s.clone());
+            Ok(())
+        }
+        async fn find_resume_entry(&self, _: &str) -> Result<Option<String>, DagError> {
+            Ok(None)
+        }
+        async fn find_suspended_child(&self, _: &str) -> Result<Option<String>, DagError> {
+            Ok(None)
+        }
+    }
+
+    /// One `echo` node whose config says which version of the graph it is.
+    fn graph_with(node_id: &str, stamp: &str) -> Value {
+        json!({ "nodes": { node_id: { "type": "echo", "config": { "stamp": stamp } } }, "edges": [] })
+    }
+
+    /// A child suspended with `stored` as its graph and `sello` next in its queue.
+    fn suspended_child(stored: Value) -> (DagRunUseCase, Arc<MemRepo>) {
+        let repo = Arc::new(MemRepo::default());
+        repo.0.lock().unwrap().insert(
+            "child_1".into(),
+            DagRunState {
+                session_id: "child_1".into(),
+                agent_session_id: Some("chat_1".into()),
+                parent_session_id: Some("root_1".into()),
+                graph_json: stored,
+                all_outputs: HashMap::new(),
+                status: DagRunStatus::Suspended,
+                global_shared_state: json!({}),
+                active_queue: VecDeque::from(["sello".to_string()]),
+                execution_history: Vec::new(),
+                global_calls: HashMap::new(),
+                caller_specific_calls: HashMap::new(),
+            },
+        );
+        let uc = DagRunUseCase::new(
+            Arc::new(EchoRegistry),
+            Some(repo.clone() as Arc<dyn DagStateRepository>),
+        );
+        (uc, repo)
+    }
+
+    async fn resume(uc: &DagRunUseCase, graph: ResumeGraph) -> Result<Value, DagError> {
+        uc.resume_subgraph(
+            "child_1",
+            "Q[q]: ?\nA[q]: sí".into(),
+            graph,
+            None,
+            None,
+            None,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn a_fresh_graph_with_the_same_skeleton_resumes_with_its_new_config() {
+        let (uc, repo) = suspended_child(graph_with("sello", "v1"));
+        let out = resume(&uc, ResumeGraph::Fresh(graph_with("sello", "v2")))
+            .await
+            .expect("resumes");
+        assert_eq!(out["sello"]["stamp"], json!("v2"));
+        assert_eq!(repo.row("child_1").status, DagRunStatus::Completed);
+    }
+
+    #[tokio::test]
+    async fn a_changed_skeleton_is_refused_and_closes_the_row_keeping_its_graph() {
+        let (uc, repo) = suspended_child(graph_with("sello", "v1"));
+        let err = resume(
+            &uc,
+            ResumeGraph::Fresh(graph_with("timbre", "sk-fresh-secret")),
+        )
+        .await
+        .expect_err("refused");
+        let text = err.to_string();
+        assert!(text.starts_with("SUBGRAPH_RESUME_INCOMPATIBLE:"), "{text}");
+        assert!(
+            text.contains("removed: sello") && text.contains("added: timbre"),
+            "{text}"
+        );
+        assert!(!text.contains("sk-fresh-secret"), "{text}");
+        let row = repo.row("child_1");
+        assert_eq!(row.status, DagRunStatus::Failed);
+        assert_eq!(
+            row.graph_json,
+            graph_with("sello", "v1"),
+            "the fresh graph never reaches storage"
+        );
+        // `close_refused` only flips `status`; the rest of the row survives.
+        assert_eq!(row.agent_session_id, Some("chat_1".to_string()));
+        assert_eq!(row.parent_session_id, Some("root_1".to_string()));
+        assert_eq!(row.active_queue, VecDeque::from(["sello".to_string()]));
+    }
+
+    #[tokio::test]
+    async fn an_unavailable_source_closes_the_row_and_returns_its_text_verbatim() {
+        let (uc, repo) = suspended_child(graph_with("sello", "v1"));
+        let reason = "CHILD_GRAPH_RESOLVE_FAILED:forbidden: not in their selector";
+        let err = resume(&uc, ResumeGraph::Unavailable(reason.into()))
+            .await
+            .expect_err("refused");
+        assert_eq!(
+            err.to_string(),
+            reason,
+            "no «Error de ejecución en el nodo:» in front"
+        );
+        assert_eq!(repo.row("child_1").status, DagRunStatus::Failed);
+    }
+
+    #[tokio::test]
+    async fn stored_resumes_with_the_graph_the_row_kept() {
+        let (uc, repo) = suspended_child(graph_with("sello", "v1"));
+        let out = resume(&uc, ResumeGraph::Stored).await.expect("resumes");
+        assert_eq!(out["sello"]["stamp"], json!("v1"));
+        assert_eq!(repo.row("child_1").status, DagRunStatus::Completed);
+    }
+
+    /// Pins the fixed text in `plan_resume`'s `Err(_) => …` branch: a serde
+    /// error can quote a value straight out of the graph.
+    #[tokio::test]
+    async fn a_fresh_graph_that_fails_to_parse_is_refused_without_leaking_the_bad_value() {
+        let (uc, repo) = suspended_child(graph_with("sello", "v1"));
+        let mut fresh = graph_with("sello", "v2");
+        fresh["nodes"]["sello"]["max_total_calls"] = json!("sk-fresh-secret");
+        let err = resume(&uc, ResumeGraph::Fresh(fresh))
+            .await
+            .expect_err("refused");
+        let text = err.to_string();
+        assert!(text.starts_with("SUBGRAPH_RESUME_INCOMPATIBLE:"), "{text}");
+        assert!(!text.contains("sk-fresh-secret"), "{text}");
+        assert_eq!(repo.row("child_1").status, DagRunStatus::Failed);
+    }
+
+    /// Adjustment 4: an unreadable STORED graph is today's error, not a
+    /// refusal — `stored_graph()?` short-circuits before `close_refused` runs.
+    #[tokio::test]
+    async fn an_unparsable_stored_graph_is_todays_error_and_does_not_close_the_row() {
+        let (uc, repo) = suspended_child(json!({ "nodes": 1, "edges": [] }));
+        let err = resume(&uc, ResumeGraph::Stored)
+            .await
+            .expect_err("today's error, not a refusal");
+        let text = err.to_string();
+        assert!(text.contains("Invalid sub-graph state JSON:"), "{text}");
+        assert!(!text.starts_with("SUBGRAPH_RESUME_INCOMPATIBLE:"), "{text}");
+        assert_eq!(repo.row("child_1").status, DagRunStatus::Suspended);
+    }
+
+    /// Adjustment 4's other no-close case: `Graph::validate()` runs *outside*
+    /// `plan_resume`, so its failure is today's error, not a `ResumeRefused`.
+    #[tokio::test]
+    async fn a_fresh_graph_that_fails_validation_does_not_close_the_row() {
+        let (uc, repo) = suspended_child(graph_with("router/inner", "v1"));
+        let err = resume(&uc, ResumeGraph::Fresh(graph_with("router/inner", "v2")))
+            .await
+            .expect_err("today's validation error, not a refusal");
+        let text = err.to_string();
+        assert!(text.contains("Invalid sub-graph:"), "{text}");
+        assert!(!text.starts_with("SUBGRAPH_RESUME_INCOMPATIBLE:"), "{text}");
+        assert_eq!(repo.row("child_1").status, DagRunStatus::Suspended);
+    }
+
+    /// `plan_resume` parses STORED before `fresh`: when both are unparsable,
+    /// the stored failure must win over a Fresh-side refusal that would close.
+    #[tokio::test]
+    async fn when_both_graphs_are_unparsable_the_stored_failure_wins_and_nothing_closes() {
+        let (uc, repo) = suspended_child(json!({ "nodes": 1, "edges": [] }));
+        let err = resume(&uc, ResumeGraph::Fresh(json!({ "nodes": 2, "edges": [] })))
+            .await
+            .expect_err("the stored failure, not a refusal");
+        let text = err.to_string();
+        assert!(text.contains("Invalid sub-graph state JSON:"), "{text}");
+        assert!(!text.starts_with("SUBGRAPH_RESUME_INCOMPATIBLE:"), "{text}");
+        assert_eq!(repo.row("child_1").status, DagRunStatus::Suspended);
     }
 }

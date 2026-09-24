@@ -1,7 +1,7 @@
 use crate::colmena_log;
 use crate::dag_engine::application::ports::{
     ChildGraphRequest, ChildGraphResolveError, ChildGraphResolverPort, ResolvedChildGraph,
-    SubGraphExecutorPort,
+    ResumeGraph, SubGraphExecutorPort,
 };
 use crate::dag_engine::domain::child_graph_source::{
     CHILD_GRAPH_INLINE, CHILD_GRAPH_PATH, CHILD_GRAPH_REF, CHILD_GRAPH_SOURCE_KEYS,
@@ -391,10 +391,13 @@ impl ExecutableNode for SubGraphNode {
                 child_session_id,
                 parent_path
             );
+            // Until the node derives its graph from the source (next change),
+            // every resume runs the copy stored in the child's row.
             let result = executor
                 .resume_subgraph(
                     &child_session_id,
                     resume_answer.to_string(),
+                    ResumeGraph::Stored,
                     child_observer.clone(),
                     agent_session_id.clone(),
                     child_path_prefix.clone(),
@@ -982,6 +985,7 @@ mod subgraph_as_tool_boundary_tests {
             &self,
             _session_id: &str,
             _answer: String,
+            _graph: ResumeGraph,
             _observer: Option<Arc<dyn ExecutionObserver>>,
             _agent_session_id: Option<String>,
             _path_prefix: Option<String>,
@@ -1269,6 +1273,7 @@ mod subgraph_tool_failure_close_tests {
             &self,
             _s: &str,
             _a: String,
+            _g: ResumeGraph,
             _o: Option<Arc<dyn ExecutionObserver>>,
             _ags: Option<String>,
             _pp: Option<String>,
@@ -1544,6 +1549,7 @@ mod child_graph_ref_tests {
             &self,
             _s: &str,
             _a: String,
+            _g: ResumeGraph,
             _o: Option<Arc<dyn ExecutionObserver>>,
             _ags: Option<String>,
             _pp: Option<String>,
