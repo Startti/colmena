@@ -313,6 +313,7 @@ El texto completo también queda disponible en `output.final_response` del `node
   "node_type": "llm_call",
   "model": "gpt-4o",
   "provider": "openai",
+  "provider_key_id": "cmrx2n8vw001601s6v6hermav",
   "prompt_tokens": 1200,
   "completion_tokens": 340,
   "thinking_tokens": 150,
@@ -327,6 +328,15 @@ El texto completo también queda disponible en `output.final_response` del `node
 > un provider y un modelo distintos a los del padre, y esta fila reporta los
 > suyos. Hasta el 2026-08-23 llegaban en `null` para todo nodo anidado, lo que
 > permitía atribuir sus tokens pero no tarifarlos.
+
+> `provider_key_id` es **opcional y aditivo**: solo aparece cuando el
+> `llm_call` de esa fila declaró `config.provider_key_id` (string opaco, no
+> secreto, que el embebedor escribe junto a `api_key` — ver
+> `docs/node_configurations.json` → `llm_call.config_fields.provider_key_id`).
+> El motor no lo interpreta ni lo valida; lo repite tal cual para que el
+> embebedor pueda facturar el consumo a la clave que lo pagó. Un nodo sin ese
+> campo configurado no trae `provider_key_id` en su fila (nunca `null`). Misma
+> regla en `subgraph-usage-summary.nodes`.
 >
 > `prompt_tokens` es el input **fresco** — los tokens servidos desde cache nunca
 > están adentro, en ningún provider (los adapters normalizan la discrepancia
@@ -391,6 +401,8 @@ Todos los eventos dentro de un nodo `subgraph` o de un agente-tarea del `orchest
 | `subgraph-node-end` | `node_id`, `node_type`, `output`, `status`?, `errorText`? | Después de ejecutar un nodo interno |
 
 Además de los nodos internos, el propio `subgraph` emite un **par de frontera** con `node_type: "subgraph"` que delimita todo su sub-árbol. El `node_id` de esa frontera sale de, en orden: el nombre del agente (`orchestrator`), el id del nodo del grafo (ruta por aristas), o el nombre del tool que el modelo llamó (ruta tool).
+
+> Cuando la frontera viene de un `child_graph_ref` (el niño se carga por referencia, no inline ni por path), el `subgraph-node-start` de esa frontera trae un campo adicional `node_label` con el nombre de despliegue que devolvió el resolver del embebedor — pensado para que la UI muestre "Agente de licitaciones" en vez del id técnico del tool. `SubGraphNode` lo transporta dentro de `config.node_label` en el evento base; `SseMapper` lo levanta a un campo de primer nivel del frame envuelto (nunca se agregó una variante nueva a `NodeStart`). Ausente en cualquier otra frontera (agente nombrado, ruta por arista, `child_graph_inline`/`child_graph_path`). La ruta CLI (`dag_engine run`) no tiene resolver configurado, así que un hijo por referencia nunca arranca ahí — este campo solo se puede verificar hoy con tests unitarios; su E2E llega con el worker de ADP, que sí provee un `ChildGraphResolverPort`.
 
 `status`/`errorText`: ver ["Nodo que falla"](#nodo-que-falla) arriba — mismo
 contrato aquí. Los nodos internos de un run anidado todavía no reportan su
@@ -705,7 +717,7 @@ Para reanudar, el cliente envía las respuestas con el mismo `session_id`. El pl
 | `finish` | top | `finishReason`, `usage`, `output` | — |
 | `cancelled` | top | `reason`, `output` | — |
 | `error` | top | `errorText` | — |
-| `subgraph-node-start` | sub | `node_id`, `node_type`, `config`, `inputs` | — |
+| `subgraph-node-start` | sub | `node_id`, `node_type`, `config`, `inputs` | `node_label` |
 | `subgraph-node-end` | sub | `node_id`, `node_type`, `output` | `status`, `errorText` |
 | `subgraph-text-start` | sub | `id` | — |
 | `subgraph-text-delta` | sub | `id`, `delta` | — |

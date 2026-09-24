@@ -420,8 +420,8 @@ impl ExecutableNode for SubGraphNode {
         // A ref is resolved here, before the boundary's start frame: a child that
         // never runs emits nothing. The resolved graph goes only to the executor
         // — never into `inputs`, a frame or this node's output.
-        // `_display_name` feeds the boundary's start frame in a later change.
-        let (graph_json, _display_name) = if source_key == CHILD_GRAPH_REF {
+        // `display_name` feeds the boundary's start frame below.
+        let (graph_json, display_name) = if source_key == CHILD_GRAPH_REF {
             let resolved = self
                 .resolve_ref(
                     &graph_source,
@@ -456,13 +456,20 @@ impl ExecutableNode for SubGraphNode {
             .ok_or("SubGraphExecutorPort not initialized in SubGraphNode")?;
 
         // Emit subgraph node-start boundary event (orchestrator agent OR
-        // subgraph-as-tool — see `boundary_name`).
+        // subgraph-as-tool — see `boundary_name`). When the boundary came from a
+        // `child_graph_ref`, the resolver's display name travels in `config` as
+        // `node_label`; the SSE mapper lifts it to a top-level field on the
+        // wrapped `subgraph-node-start` frame (never a new `NodeStart` variant).
         if let (Some(ref name), Some(ref obs)) = (&boundary_name, &_observer) {
+            let start_config = match &display_name {
+                Some(label) => json!({ "node_label": label }),
+                None => Value::Object(Default::default()),
+            };
             let start_event = DagExecutionEvent::NodeStart {
                 node_id: name.clone(),
                 node_type: "subgraph".to_string(),
                 inputs: Value::Object(Default::default()),
-                config: Value::Object(Default::default()),
+                config: start_config,
             };
             if let Ok(raw) = serde_json::to_value(&start_event) {
                 obs.on_event(NodeEvent::SubgraphChildEvent(raw));
@@ -1635,6 +1642,25 @@ mod child_graph_ref_tests {
         assert_eq!(req.session_id, "s1");
         assert_eq!(req.agent_session_id.as_deref(), Some("as1"));
         assert_eq!(req.parent_path, "tool/Run_My_Agent/a1");
+    }
+
+    #[tokio::test]
+    async fn the_boundary_start_of_a_ref_child_carries_the_agent_name() {
+        let (node, _, _) = node_with(Answer::Graph);
+        let obs = Arc::new(Obs::default());
+        node.execute(
+            &ref_inputs("a1"),
+            &json!({}),
+            &mut json!({}),
+            Some(obs.clone()),
+        )
+        .await
+        .unwrap();
+        assert!(
+            obs.dump().contains("Agente de licitaciones"),
+            "{}",
+            obs.dump()
+        );
     }
 
     #[tokio::test]

@@ -1,0 +1,46 @@
+{
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/provider-key-id-usage",
+        "method": "POST",
+        "test_payload": {
+          "prompt": "Reply with exactly one word: hello."
+        }
+      }
+    },
+    "billed_step": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "api_key": "${GEMINI_API_KEY}",
+        "model": "gemini-2.5-flash",
+        "provider_key_id": "test-key-123",
+        "system_message": "You are terse. Reply with exactly one word.",
+        "max_tokens": 50,
+        "stream": true
+      }
+    },
+    "unbilled_step": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "api_key": "${GEMINI_API_KEY}",
+        "model": "gemini-2.5-flash",
+        "system_message": "You are terse. Reply with exactly one word.",
+        "max_tokens": 50,
+        "stream": true
+      }
+    },
+    "log_step": {
+      "type": "log"
+    }
+  },
+  "edges": [
+    { "from": "trigger", "to": "billed_step" },
+    { "from": "trigger", "to": "unbilled_step" },
+    { "from": "billed_step", "to": "log_step" },
+    { "from": "unbilled_step", "to": "log_step" }
+  ]
+}

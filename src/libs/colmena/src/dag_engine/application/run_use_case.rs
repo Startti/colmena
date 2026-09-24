@@ -415,9 +415,9 @@ impl DagRunUseCase {
             let mut stopped_early = false;
 
             // Usage tracking: accumulate token counts and model/provider per node_id.
-            // node_meta: node_id → (model, provider, node_type)
+            // node_meta: node_id → NodeMeta (model, provider, node_type, provider_key_id)
             // usage_accumulator: node_id → (prompt, completion, thinking, cache_read, cache_write)
-            let mut node_meta: HashMap<String, (Option<String>, Option<String>, String)> = HashMap::new();
+            let mut node_meta: HashMap<String, NodeMeta> = HashMap::new();
             let mut usage_accumulator: HashMap<String, (u32, u32, u32, u32, u32)> = HashMap::new();
 
             // Start cyclic execution loop
@@ -636,7 +636,8 @@ impl DagRunUseCase {
                 {
                     let model = node_config.config.get("model").and_then(|v| v.as_str()).map(|s| s.to_string());
                     let provider = node_config.config.get("provider").and_then(|v| v.as_str()).map(|s| s.to_string());
-                    node_meta.insert(node_id.clone(), (model, provider, node_config.node_type.clone()));
+                    let provider_key_id = node_config.config.get("provider_key_id").and_then(|v| v.as_str()).map(|s| s.to_string());
+                    node_meta.insert(node_id.clone(), NodeMeta { model, provider, node_type: node_config.node_type.clone(), provider_key_id });
                 }
 
                 // Masked CLONES only — the node itself still executes below with
@@ -868,7 +869,9 @@ impl DagRunUseCase {
                                                                 .and_then(|v| v.as_str()).map(|s| s.to_string());
                                                             let provider = inputs.get("provider").or_else(|| config.get("provider"))
                                                                 .and_then(|v| v.as_str()).map(|s| s.to_string());
-                                                            node_meta.insert(cid.clone(), (model, provider, ctype.clone()));
+                                                            let provider_key_id = config.get("provider_key_id")
+                                                                .and_then(|v| v.as_str()).map(|s| s.to_string());
+                                                            node_meta.insert(cid.clone(), NodeMeta { model, provider, node_type: ctype.clone(), provider_key_id });
                                                         }
                                                         DagExecutionEvent::LlmUsage { node_id: cid, prompt_tokens, completion_tokens, thinking_tokens, cache_read_tokens, cache_write_tokens } => {
                                                             let entry = usage_accumulator.entry(cid.clone()).or_insert((0, 0, 0, 0, 0));
@@ -1211,27 +1214,10 @@ impl DagRunUseCase {
 
             // Emit per-node usage summary before finishing
             if !usage_accumulator.is_empty() {
-                let entries: Vec<Value> = usage_accumulator.iter().map(|(nid, (pt, ct, tt, cr, cw))| {
-                    let (model, provider, ntype) = node_meta.get(nid)
-                        .map(|(m, p, t)| (m.clone(), p.clone(), t.clone()))
-                        .unwrap_or((None, None, String::new()));
-                    let mut obj = serde_json::Map::new();
-                    obj.insert("node_id".into(), json!(nid));
-                    obj.insert("node_type".into(), json!(ntype));
-                    obj.insert("model".into(), json!(model));
-                    obj.insert("provider".into(), json!(provider));
-                    obj.insert("prompt_tokens".into(), json!(pt));
-                    obj.insert("completion_tokens".into(), json!(ct));
-                    if *tt > 0 { obj.insert("thinking_tokens".into(), json!(tt)); }
-                    // Always emitted, `0` included: an absent cache field could not be
-                    // told apart from a provider that never reports one. Kept as two
-                    // fields because read and write bill at rates >10x apart.
-                    obj.insert("cache_read_tokens".into(), json!(cr));
-                    obj.insert("cache_write_tokens".into(), json!(cw));
-                    // Cache tokens count toward the total — they were processed and billed.
-                    obj.insert("total_tokens".into(), json!(pt + ct + tt + cr + cw));
-                    Value::Object(obj)
-                }).collect();
+                let entries: Vec<Value> = usage_accumulator
+                    .iter()
+                    .map(|(nid, counts)| usage_entry(nid, *counts, node_meta.get(nid)))
+                    .collect();
                 yield DagExecutionEvent::GraphUsageSummary { entries };
             }
 
@@ -1419,6 +1405,57 @@ impl crate::dag_engine::domain::observer::ExecutionObserver for ChannelObserver 
     fn on_event(&self, event: crate::dag_engine::domain::observer::NodeEvent) {
         let _ = self.tx.send(event);
     }
+}
+
+/// Per-node metadata tracked for the usage summary: which model/provider ran
+/// it, its node type, and (for `llm_call` nodes) the embedder-supplied
+/// billing id it was configured with.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct NodeMeta {
+    pub model: Option<String>,
+    pub provider: Option<String>,
+    pub node_type: String,
+    /// Opaque, non-secret billing id the embedder writes next to `api_key` in
+    /// an `llm_call` node's config (`docs/node_configurations.json`). Echoed
+    /// verbatim on that node's usage entry so the embedder can attribute
+    /// consumption to the key that paid for it — never inferred or validated
+    /// by the engine.
+    pub provider_key_id: Option<String>,
+}
+
+/// Build one `usage-summary` entry for a node. Pure and independently
+/// testable: `meta` absent (a node the run never saw a `NodeStart`/config for)
+/// falls back to `NodeMeta::default()`, matching the prior tuple-map
+/// `unwrap_or` behavior. `provider_key_id` is included only when configured —
+/// a node without one carries no such field, rather than `null`.
+pub(crate) fn usage_entry(
+    node_id: &str,
+    counts: (u32, u32, u32, u32, u32),
+    meta: Option<&NodeMeta>,
+) -> Value {
+    let (pt, ct, tt, cr, cw) = counts;
+    let meta = meta.cloned().unwrap_or_default();
+    let mut obj = serde_json::Map::new();
+    obj.insert("node_id".into(), json!(node_id));
+    obj.insert("node_type".into(), json!(meta.node_type));
+    obj.insert("model".into(), json!(meta.model));
+    obj.insert("provider".into(), json!(meta.provider));
+    if let Some(key) = meta.provider_key_id {
+        obj.insert("provider_key_id".into(), json!(key));
+    }
+    obj.insert("prompt_tokens".into(), json!(pt));
+    obj.insert("completion_tokens".into(), json!(ct));
+    if tt > 0 {
+        obj.insert("thinking_tokens".into(), json!(tt));
+    }
+    // Always emitted, `0` included: an absent cache field could not be
+    // told apart from a provider that never reports one. Kept as two
+    // fields because read and write bill at rates >10x apart.
+    obj.insert("cache_read_tokens".into(), json!(cr));
+    obj.insert("cache_write_tokens".into(), json!(cw));
+    // Cache tokens count toward the total — they were processed and billed.
+    obj.insert("total_tokens".into(), json!(pt + ct + tt + cr + cw));
+    Value::Object(obj)
 }
 
 /// Whether a `NodeEvent` received via the observer channel should advance the
@@ -1636,6 +1673,76 @@ mod seed_state_tests {
         let mut scalar = json!(5);
         DagRunUseCase::fold_seed_state(&mut scalar, Some(json!({ "a": 1 })));
         assert_eq!(scalar, json!(5));
+    }
+}
+
+#[cfg(test)]
+mod usage_entry_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn a_usage_entry_carries_the_llm_calls_provider_key_id() {
+        let meta = NodeMeta {
+            model: Some("m".into()),
+            provider: Some("google".into()),
+            node_type: "llm_call".into(),
+            provider_key_id: Some("key-1".into()),
+        };
+        let e = usage_entry("llm", (10, 5, 0, 0, 0), Some(&meta));
+        assert_eq!(e["provider_key_id"], json!("key-1"));
+    }
+
+    /// Without a `provider_key_id` (either no meta at all, or meta whose field
+    /// is `None`) the entry carries NO such key — not `null`. A consumer that
+    /// checks presence via `.get("provider_key_id").is_some()` must see it
+    /// absent, not a JSON null.
+    #[test]
+    fn a_usage_entry_without_a_provider_key_id_omits_the_field() {
+        let without_meta = usage_entry("llm", (10, 5, 0, 0, 0), None);
+        assert!(
+            without_meta.get("provider_key_id").is_none(),
+            "{without_meta}"
+        );
+
+        let meta_no_key = NodeMeta {
+            model: Some("m".into()),
+            provider: Some("google".into()),
+            node_type: "llm_call".into(),
+            provider_key_id: None,
+        };
+        let e = usage_entry("llm", (10, 5, 0, 0, 0), Some(&meta_no_key));
+        assert!(e.get("provider_key_id").is_none(), "{e}");
+    }
+
+    /// Regression guard for the tuple→struct refactor: model/provider/node_type
+    /// and the token math must all still land where the old inline map put
+    /// them.
+    #[test]
+    fn a_usage_entry_still_carries_the_pre_existing_fields() {
+        let meta = NodeMeta {
+            model: Some("gemini-2.5-flash".into()),
+            provider: Some("google".into()),
+            node_type: "llm_call".into(),
+            provider_key_id: None,
+        };
+        let e = usage_entry("llm", (10, 5, 2, 1, 1), Some(&meta));
+        assert_eq!(e["node_id"], json!("llm"));
+        assert_eq!(e["node_type"], json!("llm_call"));
+        assert_eq!(e["model"], json!("gemini-2.5-flash"));
+        assert_eq!(e["provider"], json!("google"));
+        assert_eq!(e["prompt_tokens"], json!(10));
+        assert_eq!(e["completion_tokens"], json!(5));
+        assert_eq!(e["thinking_tokens"], json!(2));
+        assert_eq!(e["cache_read_tokens"], json!(1));
+        assert_eq!(e["cache_write_tokens"], json!(1));
+        assert_eq!(e["total_tokens"], json!(19));
+    }
+
+    #[test]
+    fn a_usage_entry_omits_thinking_tokens_when_zero() {
+        let e = usage_entry("llm", (10, 5, 0, 0, 0), None);
+        assert!(e.get("thinking_tokens").is_none(), "{e}");
     }
 }
 
