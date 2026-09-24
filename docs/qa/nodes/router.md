@@ -612,7 +612,7 @@ cargo run --bin dag_engine -- run <padre.json> --agent-session-id qa_router_subg
 
 ### Caso 11: Validación de mutual exclusivity en subgrafo
 
-**Objetivo:** Verificar que una rama con `child_graph_path` no puede tener también `child_graph_inline`, y vice versa.
+**Objetivo:** Verificar que una rama declara exactamente una de `child_graph_path`, `child_graph_inline` o `child_graph_ref` — nunca dos, nunca ninguna.
 
 **Grafo JSON (inválido):**
 ```json
@@ -643,7 +643,7 @@ cargo run --bin dag_engine -- run <padre.json> --agent-session-id qa_router_subg
 }
 ```
 
-**Resultado esperado:** Error de validación durante carga: "subgraph debe tener exactamente uno de child_graph_path o child_graph_inline".
+**Resultado esperado:** Error de validación durante carga: "RouterConfigError: branch '<name>' subgraph declares child_graph_path and child_graph_inline — pick one" (con una sola clave presente, en cambio, la rama es válida — incluida una con solo `child_graph_ref`).
 
 **Verificación:** Proceso falla antes de ejecutar el nodo.
 

@@ -3529,3 +3529,64 @@ completo llega con el worker de ADP. Captura en
 `/tmp/colmena_e2e/child_graph_ref_unavailable.sse`.
 
 **ADP.** [Nota de migración](adp_migration/2026-09-23-child-graph-ref.md), sección «Desde la entrada 67».
+
+## 68. Router, orquestador y preflight reconocen `child_graph_ref`
+
+PR 3/5 de `child_graph_ref`. La entrada 67 resolvió el ref dentro de
+`SubGraphNode`; esta entrada lo hace reconocible en los otros tres sitios que
+enumeran las fuentes de un grafo hijo, para que dejen de tratar un ref-only
+config como si no tuviera fuente.
+
+**Qué cambió.** `router/config.rs`: la validación de una rama con `subgraph`
+ahora cuenta las tres claves de `CHILD_GRAPH_SOURCE_KEYS` en vez de mirar solo
+`child_graph_path`/`child_graph_inline`; sin ninguna → «requires
+child_graph_path, child_graph_inline or child_graph_ref»; con más de una →
+«declares `<las que encontró>` — pick one». `orchestrator.rs`: el chequeo
+«Agent must be a subgraph» que antes solo miraba dos claves ahora usa la misma
+constante. `preflight.rs`: `enumerate_requirements` salta un `child_graph_ref`
+con su propio mensaje («resolved at run time — checked when the subgraph
+actually runs») en vez de caer en el genérico «no static child graph source»,
+que antes trataba un ref-only config como sin fuente. `tool_configuration.rs`:
+sin cambio de comportamiento — `subgraph_inline_child` ya devolvía `None` para
+un ref (solo mira `child_graph_inline`) y `memory_backend_missing_reason` ya no
+bloquea ese `None` (mismo camino que un `child_graph_path` externo); un test
+nuevo lo documenta.
+
+**Tests.** `router::config`: 2 nuevos + 1 actualizado (11 → 13) —
+`a_branch_subgraph_may_name_its_child_by_reference` (ok con solo
+`child_graph_ref`), `a_branch_subgraph_with_two_sources_is_rejected`
+(`child_graph_ref` + `child_graph_inline` → «pick one»),
+`subgraph_rejects_neither_path_nor_inline` actualizado al mensaje de tres
+claves. `tool_configuration`: 1 nuevo,
+`a_dynamic_subgraph_tool_by_reference_is_not_blocked_for_missing_memory` (47 →
+48). `orchestrator` (5) y `preflight` (23) sin tests nuevos — el brief no los
+pidió; los cubre el E2E de esta entrada.
+
+**Mutación.** El test de memoria ya pasaba antes del PR — documenta
+comportamiento existente, así que se verificó que no pase por la razón
+equivocada. Mutar `subgraph_inline_child` para que también leyera `child_graph_ref` lo puso
+en rojo (devolvía el motivo de bloqueo en vez de `None`); revertido tras
+confirmar.
+
+**E2E.** Tres grafos nuevos, `gemini-2.5-flash`, Postgres local. (1)
+`tests/graphs/control_flow/router_subgraph_ref_unavailable.json`: una rama
+`answerable` con solo `child_graph_ref` ya no se rechaza al cargar (antes:
+«requires child_graph_path or child_graph_inline»); el router la elige y falla
+en runtime con `router branch 'answerable': CHILD_GRAPH_RESOLVE_FAILED:unavailable:
+no child graph resolver configured`. (2)
+`tests/graphs/advanced/orchestrator_agent_by_reference_unavailable.json`: el
+planner asigna la tarea a `packing_expert` (config con solo `child_graph_ref`,
+antes rechazada al validar el agente); el despacho falla con el mismo
+`CHILD_GRAPH_RESOLVE_FAILED:unavailable:`. (3)
+`tests/graphs/basic/subgraph_ref_only_preflight.json` (sin LLM, prueba solo
+preflight): con `RUST_LOG=colmena::preflight=debug` el log muestra
+`skipped=["subgraph.child_graph_ref: resolved at run time — checked when the
+subgraph actually runs"]` y `covered={}` — no bloquea, no inventa un requisito.
+Capturas en
+`/tmp/colmena_e2e/child_graph_ref_sites_{router,orchestrator,preflight}.sse`.
+`tests/corpus_noise.rs`: 315 → 318 (los tres grafos nuevos).
+
+**ADP.** [Nota de migración](adp_migration/2026-09-23-child-graph-ref.md) — sin
+acción nueva; ajustada para describir el estado de punta a punta (router,
+orquestador y preflight ya reconocen `child_graph_ref`) y la precisión
+`not_found` vs `unavailable` de un `agent_id` sin templar.

@@ -101,7 +101,12 @@ fn measure() -> Measured {
 // (edge-wired nested subgraph double-close-guard E2E graph; lints clean).
 // Bumped 314 -> 315: adds tests/graphs/agents/child_graph_ref_unavailable.json
 // (the child_graph_ref refusal-path E2E graph; lints clean).
-const EXPECTED_FILES: usize = 315;
+// Bumped 315 -> 318: adds three E2E graphs for PR 3/5 of child_graph_ref (router,
+// orchestrator and preflight now recognise the third source key):
+// tests/graphs/control_flow/router_subgraph_ref_unavailable.json,
+// tests/graphs/advanced/orchestrator_agent_by_reference_unavailable.json,
+// tests/graphs/basic/subgraph_ref_only_preflight.json. All three lint clean.
+const EXPECTED_FILES: usize = 318;
 const EXPECTED_ERRORS: usize = 0;
 const EXPECTED_WARNINGS: usize = 0;
 const EXPECTED_INFOS: usize = 0;

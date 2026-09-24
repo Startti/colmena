@@ -623,6 +623,12 @@ En el config del orchestrator, define cada agente con su descripción y ruta al 
 
 El Planner usa las `description` de cada agente para decidir a quién asignar cada tarea.
 
+Cada agente admite las mismas tres fuentes que el `subgraph` standalone
+(`child_graph_path`, `child_graph_inline` o `child_graph_ref` — ver [Grafo por
+referencia](#grafo-por-referencia-child_graph_ref)); exactamente una, si no el
+grafo falla al cargar con «Agent must be a subgraph: add 'child_graph_path',
+'child_graph_inline' or 'child_graph_ref' to its config».
+
 ### Variables Disponibles en el Grafo Hijo
 
 Cuando el orchestrator invoca un agente, inyecta automáticamente estas variables en el `global_shared_state` del hijo:

@@ -222,7 +222,10 @@ Cualquier rama (en cualquier modo) puede declarar un `subgraph` opcional. Cuando
 }
 ```
 
-- `child_graph_path` y `child_graph_inline` son mutuamente excluyentes (validado al init).
+- `child_graph_path`, `child_graph_inline` y `child_graph_ref` (grafo hijo por
+  referencia, resuelto en runtime por el embebedor — ver guía 19, «Grafo por
+  referencia») son mutuamente excluyentes: exactamente una debe estar presente
+  (validado al init).
 - Si el subgraph **suspende**, el SUSPENDED bubblea hacia arriba a través del port de la rama (mismo comportamiento que un `SubGraphNode` standalone).
 - Si el subgraph **falla**, el error se propaga con prefix `router branch '<name>': <upstream error>`.
 

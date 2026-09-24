@@ -393,7 +393,7 @@ erDiagram
 
 La config del orchestrator es **anidada**: cada sub-componente (`planner`, `critic`, `phase_reactor`, `final_reactor`) lleva su propio bloque con `provider`, `model`, `api_key` y `system_message`. **No** existen campos planos como `planner_system_message` o `model` en la raíz — `schema()` los rechaza.
 
-Cada agente en `agents` declara una `description` (usada por el Planner para decidir asignaciones) y un grafo hijo, normalmente vía `child_graph_inline` (definición embebida) o `child_graph_path` (ruta a otro JSON).
+Cada agente en `agents` declara una `description` (usada por el Planner para decidir asignaciones) y un grafo hijo por una de tres vías: `child_graph_inline` (definición embebida), `child_graph_path` (ruta a otro JSON) o `child_graph_ref` (por referencia, resuelto en runtime — ver guía 19, «Grafo por referencia»).
 
 Ejemplo canónico — derivado de [`tests/graphs/advanced/trip_planner_v2.json`](../../tests/graphs/advanced/trip_planner_v2.json):
 
@@ -466,7 +466,7 @@ Campos raíz:
 
 | Campo | Tipo | Descripción |
 |---|---|---|
-| `agents` | object | Mapa `nombre → { description, child_graph_inline | child_graph_path }`. El Planner usa `description` para asignar tareas; solo los agentes listados aquí son válidos. |
+| `agents` | object | Mapa `nombre → { description, child_graph_inline \| child_graph_path \| child_graph_ref }` (exactamente una de las tres). El Planner usa `description` para asignar tareas; solo los agentes listados aquí son válidos. |
 | `planner` | object | Sub-config del Planner LLM (ver más abajo). Si se omite, el orchestrator espera que la DB ya esté sembrada vía `inputs.plan` / `config.plan`. |
 | `critic` | object | Sub-config del Critic LLM. Si se omite, los resultados de los agentes se aceptan sin validación. |
 | `phase_reactor` | object | Sub-config del Phase Reactor. Si se omite, el orchestrator concatena los resultados de la fase (truncado a 4000 chars) como summary y no hay replanning. |

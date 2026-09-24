@@ -611,7 +611,7 @@
 
     "router": {
       "name": "Router",
-      "description": "Routes the input to one of N declared branches. Mode 'llm_direct': the LLM reads each branch's description and picks one by name. Mode 'extract_and_route': the LLM first extracts a JSON object against an inline schema, then declarative 'when' rules pick the branch in declaration order (first match wins). Each branch is a named output port; only the selected port emits a non-null payload, all others emit null. Each branch may optionally declare a 'subgraph' (path or inline) that runs internally before emission. Fails fast (no default branch) when no rule matches or the LLM picks an unknown branch — error embeds the extracted JSON for diagnostics. Always emits an additional '__decision' output port with { selected_branch, reason?, extracted? } for logging.",
+      "description": "Routes the input to one of N declared branches. Mode 'llm_direct': the LLM reads each branch's description and picks one by name. Mode 'extract_and_route': the LLM first extracts a JSON object against an inline schema, then declarative 'when' rules pick the branch in declaration order (first match wins). Each branch is a named output port; only the selected port emits a non-null payload, all others emit null. Each branch may optionally declare a 'subgraph' (child_graph_path, child_graph_inline or child_graph_ref — exactly one) that runs internally before emission. Fails fast (no default branch) when no rule matches or the LLM picks an unknown branch — error embeds the extracted JSON for diagnostics. Always emits an additional '__decision' output port with { selected_branch, reason?, extracted? } for logging.",
       "category": "control_flow",
       "config_fields": {
         "mode": {
@@ -2386,11 +2386,12 @@
           "type": "object",
           "required": true,
           "default": null,
-          "description": "A map of available specialist agents. Each key is the agent's unique ID (used in task assignments), and each value defines the agent's capabilities and subgraph. The orchestrator creates a SubGraphNode for each agent and executes it with the task description and context. Each agent entry MUST include either 'child_graph_inline' (embedded graph) or 'child_graph_path' (external file) defining the agent's DAG workflow.",
+          "description": "A map of available specialist agents. Each key is the agent's unique ID (used in task assignments), and each value defines the agent's capabilities and subgraph. The orchestrator creates a SubGraphNode for each agent and executes it with the task description and context. Each agent entry MUST include exactly one of 'child_graph_inline' (embedded graph), 'child_graph_path' (external file) or 'child_graph_ref' (resolved at run time by the embedder) defining the agent's DAG workflow.",
           "sub_fields": {
             "description": { "type": "string", "required": true, "description": "Human-readable description of what this agent specializes in. This is shown to the planner LLM to help it assign tasks to the most appropriate agent." },
             "child_graph_inline": { "type": "object", "required": false, "description": "Inline child graph definition with 'nodes' and 'edges'. See 'subgraph.child_graph_inline'." },
-            "child_graph_path": { "type": "string", "required": false, "description": "File path to the agent's graph JSON. See 'subgraph.child_graph_path'." }
+            "child_graph_path": { "type": "string", "required": false, "description": "File path to the agent's graph JSON. See 'subgraph.child_graph_path'." },
+            "child_graph_ref": { "type": "object", "required": false, "description": "The agent's graph by reference: { \"agent_id\": \"<id>\", \"context\": { … } }, resolved at run time through the embedder's ChildGraphResolverPort. See 'subgraph.child_graph_ref'." }
           },
           "example": {
             "flights_agent": {

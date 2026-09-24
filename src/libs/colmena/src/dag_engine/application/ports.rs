@@ -95,12 +95,25 @@ pub struct ChildGraphRequest {
 }
 
 /// A child graph returned by the embedder.
-#[derive(Debug, Clone)]
+///
+/// `Debug` is hand-written to redact `graph` — it carries secrets already
+/// resolved (see the field doc) — so a stray `{:?}` / `tracing::debug!` can
+/// never leak them (mirrors the redacted `Debug` convention on `OAuthAuthSpec`).
+#[derive(Clone)]
 pub struct ResolvedChildGraph {
     /// The runnable graph (`{ "nodes": …, "edges": … }`), secrets included.
     pub graph: Value,
     /// The agent's human-facing name.
     pub display_name: String,
+}
+
+impl std::fmt::Debug for ResolvedChildGraph {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResolvedChildGraph")
+            .field("display_name", &self.display_name)
+            .field("graph", &"<redacted>")
+            .finish()
+    }
 }
 
 /// Why a `child_graph_ref` could not be resolved. Reaches the calling model as
@@ -154,3 +167,28 @@ impl std::fmt::Display for ChildGraphResolveError {
 }
 
 impl std::error::Error for ChildGraphResolveError {}
+
+#[cfg(test)]
+mod resolved_child_graph_tests {
+    use super::ResolvedChildGraph;
+    use serde_json::json;
+
+    #[test]
+    fn debug_redacts_the_graph_but_keeps_the_display_name() {
+        let secret = "sk-super-secret-token-do-not-leak";
+        let r = ResolvedChildGraph {
+            graph: json!({
+                "nodes": { "llm": { "type": "llm_call", "config": { "api_key": secret } } },
+                "edges": []
+            }),
+            display_name: "Packing Expert".to_string(),
+        };
+        let debug_str = format!("{r:?}");
+        assert!(
+            !debug_str.contains(secret),
+            "Debug output must never contain a value from the graph: {debug_str}"
+        );
+        assert!(debug_str.contains("<redacted>"));
+        assert!(debug_str.contains("Packing Expert"));
+    }
+}

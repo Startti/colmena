@@ -16,6 +16,7 @@ use std::str::FromStr;
 use serde_json::Value;
 
 use crate::dag_engine::application::preflight_cache::shared_preflight_cache;
+use crate::dag_engine::domain::child_graph_source::{CHILD_GRAPH_REF, CHILD_GRAPH_SOURCE_KEYS};
 use crate::dag_engine::domain::error::DagError;
 use crate::dag_engine::domain::graph::Graph;
 use crate::llm::domain::ProviderKind;
@@ -156,12 +157,24 @@ fn collect_from_node(
     }
 
     if node_type == "subgraph" {
-        if config.get("child_graph_inline").is_none() && config.get("child_graph_path").is_none() {
-            // Neither static field set — most likely subgraph-as-tool, where
-            // the LLM supplies `child_graph_inline`/`path` at call time.
-            // Dynamic, unknowable pre-run — intentionally not covered.
+        if !CHILD_GRAPH_SOURCE_KEYS
+            .iter()
+            .any(|k| config.get(*k).is_some())
+        {
+            // No static field set — most likely subgraph-as-tool, where the
+            // LLM supplies the child graph source at call time. Dynamic,
+            // unknowable pre-run — intentionally not covered.
+            skipped.push("subgraph: no static child graph source (subgraph-as-tool?)".to_string());
+            return;
+        }
+
+        if config.get(CHILD_GRAPH_REF).is_some() {
+            // Resolved through `ChildGraphResolverPort` at run time — the
+            // referenced graph isn't known statically, so its providers can't
+            // be enumerated here either.
             skipped.push(
-                "subgraph: no static child_graph_inline/path (subgraph-as-tool?)".to_string(),
+                "subgraph.child_graph_ref: resolved at run time — checked when the subgraph actually runs"
+                    .to_string(),
             );
             return;
         }
