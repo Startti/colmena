@@ -90,14 +90,23 @@ El desarrollador guide (doc línea 197-264) detalla 3 modes (`stateless`, `persi
 
 **Hallazgo**: La documentación en developer_guide es correcta pero el `tool_configuration_schema` en `node_configurations.json` no incluye `memory_mode` como campo permitido en `tool_configurations.<tool>`. Esto es una omisión de doc schema, no un bug de código.
 
-### Resume path sin re-cargar graph
+### Resume path: busca el hijo, re-deriva el grafo, sigue sin frontera
 
-El código (línea 276-316) implementa un camino fast-path para resume:
-- Si `__colmena_resume_answer` está presente, busca la sesión del hijo (línea 285-293)
-- Llama `resume_subgraph()` directamente sin re-cargar el graph JSON (línea 300-308)
-- No re-emite NodeStart/NodeEnd boundary events en resume
+El código implementa un camino separado para resume: busca la sesión del hijo
+suspendido (`find_child_session_id_for_resume`), re-deriva el grafo con la **misma**
+función de carga que usa el camino fresco (`load_child_graph` — inline desde config o
+inputs de este turno, o el path releído) y se lo pasa a `resume_subgraph()` como
+`ResumeGraph::Fresh`, que compara su esqueleto contra el guardado antes de correr
+nada. `build_child_state()` sigue sin correr en resume (la sesión del hijo ya tiene
+estado) y el resume sigue sin re-emitir NodeStart/NodeEnd boundary events — ni
+frames SSE nuevos de ningún tipo: ver
+[19_nested_agents_and_subgraphs.md §Reanudar con el grafo actual](../../developer_guide/19_nested_agents_and_subgraphs.md#reanudar-con-el-grafo-actual).
 
-**Hallazgo**: No documentado que el resume es un camino separado que omite `build_child_state()` y carga de graph. Esto es correcto (la sesión del hijo ya tiene estado) pero la absence en docs da lugar a preguntas sobre qué datos están disponibles al resumir.
+**Hallazgo (cerrado)**: hasta CHANGELOG entrada 77 el resume pasaba siempre
+`ResumeGraph::Stored` (la copia guardada en `dag_runs.graph_json`), así que un
+cambio de config en el padre no llegaba al hijo hasta que corriera de cero. Desde
+la entrada 78 el resume re-deriva; la válvula `COLMENA_SUBGRAPH_RESUME_GRAPH=stored`
+vuelve al comportamiento anterior si hace falta.
 
 ---
 

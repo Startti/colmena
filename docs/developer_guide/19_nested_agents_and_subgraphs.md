@@ -53,15 +53,19 @@ antes que `inputs`).
 ```mermaid
 flowchart TD
     A([Parent llama a SubGraphNode]) --> B{¿Hay\n__colmena_resume_answer?}
-    B -->|Sí| C[resume_subgraph\ncon answer]
+    B -->|Sí| C1[Buscar el hijo\nsuspendido]
+    C1 --> C2[Derivar el grafo\nde la fuente actual]
+    C2 --> C3[resume_subgraph\ncon ResumeGraph]
+    C3 --> C4{¿Mismo\nesqueleto?}
+    C4 -->|No| C5([Fila FAILED +\nSUBGRAPH_RESUME_INCOMPATIBLE])
+    C4 -->|Sí| H
     B -->|No| D[Cargar graph JSON\ndesde path o inline]
 
     D --> E[Mapeo de estado IN\nfiltrar claves __colmena_*]
     E --> F[Emitir NodeStart\nevent boundary]
     F --> G[run_subgraph\ncomo sesión aislada]
 
-    C --> H{¿Child suspendido\notra vez?}
-    G --> H
+    G --> H{¿Child suspendido\notra vez?}
     H -->|Sí| I[Bubble-up SUSPENDED\nal padre]
     H -->|No| J[Mapeo de estado OUT\nbuscar __colmena_is_output_node]
     J --> K[Emitir SubgraphNodeFinish\nevent boundary]
@@ -192,7 +196,9 @@ el modelo elige mandar en cada llamada —que no son enumerables por adelantado�
 - **HITL (suspend/resume)** — si el sub-agente se suspende para preguntar al
   usuario, el `SUSPENDED` hace *bubble-up* por el loop de tools del padre
   reusando los mismos rieles que cualquier otra tool. El resume reanuda al hijo
-  en esa misma tool call (incluido multi-suspend anidado).
+  en esa misma tool call (incluido multi-suspend anidado), con el grafo que la
+  tool nombra en ese momento (ver
+  [Reanudar con el grafo actual](#reanudar-con-el-grafo-actual)).
 - **Streaming transparente** — los pasos internos del hijo se emiten al stream
   del padre con prefijo `subgraph-*`.
 - **Profundidad sin tope** — no hay límite de anidación; ver
@@ -230,7 +236,10 @@ tool que el modelo usa para correr cualquiera de los agentes del usuario:
   a los 30 s → `unavailable`.
 - El grafo resuelto nunca entra en `inputs`, en un frame ni en la salida del nodo, y
   el ref no pasa al estado del hijo. Sí queda en `dag_runs.graph_json` del run hijo,
-  como un inline: un resume reanuda esa versión sin volver a pedirla.
+  como un inline: un resume reanuda esa versión sin volver a pedirla (a diferencia
+  de `child_graph_inline`/`child_graph_path`, que un resume ya re-deriva — ver
+  [Reanudar con el grafo actual](#reanudar-con-el-grafo-actual); un ref lo hace
+  recién en un PR posterior).
 
 Probado con `tests/graphs/agents/child_graph_ref_unavailable.json` (el CLI no
 configura resolvedor, así que ejercita el rechazo).
@@ -476,10 +485,6 @@ resultado con `scrub_tool_result_output` como cualquier tool fresca).
 
 ### Reanudar con el grafo actual
 
-> Se aplica desde el PR que hace que `subgraph.rs` pase `Fresh` en vez de
-> `Stored` (todavía no mergeado); hasta entonces un hijo reanuda la copia de
-> su grafo guardada en `dag_runs.graph_json`.
-
 Un hijo suspendido se reanuda con el grafo que su fuente nombra **en ese momento** —el
 inline del grafo fresco del padre, el archivo releído, el resolvedor otra vez—, no con la
 copia que guardó al suspenderse: así trae las claves, el token y las rutas de skills del
@@ -506,6 +511,27 @@ ya `FAILED` y `find_resume_entry` la cuenta como una cadena aparte. `DagStateRep
 gana `fail_if_suspended`/`fail_suspended_descendants` con impl por defecto (entrada 75
 de `CHANGELOG_2026-09.md`): non-breaking para quien implemente el puerto fuera del
 crate, mismo patrón que `cancel_running_descendants`.
+
+El texto que ve cada llamador depende de cómo se disparó el `subgraph`. Por tool
+(el patrón `cfg_or_input`, incluido `Run_My_Agent`), `ToolResult.error` empieza con
+`SUBGRAPH_RESUME_INCOMPATIBLE:` y el `output` que ve el modelo lo antepone con
+`Error executing node <tool>: `; el `llm_call` padre lo guarda como un resultado de
+tool más y sigue su turno, exactamente como cualquier otra tool que falla. Por
+arista, orquestador o router (sin un `llm_call` que absorba el error), el run entero
+falla con `Error de ejecución en el nodo: SUBGRAPH_RESUME_INCOMPATIBLE: …` — el
+prefijo `SUBGRAPH_RESUME_INCOMPATIBLE:` sigue estable adelante en los dos casos;
+lo que cambia es lo que lo envuelve. Ningún frame SSE nuevo: la rama de resume del
+`SubGraphNode` sigue sin boundary propio, igual que antes de este cambio.
+
+`COLMENA_SUBGRAPH_RESUME_GRAPH=stored` es la válvula de emergencia: con ella fijada
+(se lee una vez por proceso, como `COLMENA_MAX_SUBGRAPH_DEPTH`), todo resume vuelve
+al comportamiento de hasta v0.16 — la copia guardada en `dag_runs.graph_json`, sin
+comparar esqueletos —. Sirve para apagar la verificación si algo se comporta
+distinto de lo esperado en producción, sin tener que revertir el release. Un run que
+quedó `SUSPENDED` bajo un worker v0.16 se reanuda con el grafo fresco sin ninguna
+migración de datos: la columna `graph_json` no cambia de forma, solo deja de ser lo
+único que un resume mira. Volver atrás (un worker v0.16 tomando un resume escrito
+por este) también es seguro: corre la copia guardada, como siempre hizo.
 
 ### Requisito: `connection_url` en cada `llm_call` que participe del HITL
 
@@ -877,7 +903,10 @@ lugar de colisionar.
 Si un subsubgrafo suspende, el árbol de `dag_runs` queda con `status = SUSPENDED`
 en cada nivel. Reanudar con `agent_session_id` encuentra automáticamente la hoja
 (el run SUSPENDED que no es padre de ningún otro SUSPENDED) y le pasa la respuesta
-del usuario.
+del usuario. Cada nivel re-deriva el grafo de su hijo (ver
+[Reanudar con el grafo actual](#reanudar-con-el-grafo-actual)), así que un cambio
+de config llega a cualquier profundidad: no hace falta que el nivel más externo
+cambie para que uno interno vea sus claves o prompts nuevos.
 
 ### Memoria LLM dentro del subgrafo
 

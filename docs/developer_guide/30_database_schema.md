@@ -137,7 +137,7 @@ execution after a HITL (Human-in-the-Loop) pause or a process restart.
 | `session_id` | `VARCHAR(255)` | NO | — | **Primary key.** Unique run identifier passed to the engine at startup |
 | `agent_session_id` | `VARCHAR(255)` | YES | — | Chat / conversation handle. Groups multiple runs (and their subgraph children) under the same external chat session. NULL for legacy runs that did not opt in |
 | `parent_session_id` | `VARCHAR(255)` | YES | — | When this row is a subgraph child, the parent run's `session_id`. NULL for root runs |
-| `graph_json` | `JSONB` | NO | — | Complete DAG graph definition as submitted to the engine — the source of truth used when resuming |
+| `graph_json` | `JSONB` | NO | — | Complete DAG graph definition as submitted to the engine — the graph the run was started or last suspended with. A root resume never reads it (the graph comes from the caller); a child resume reads only its skeleton, to check the graph its source names now — the whole graph only under `COLMENA_SUBGRAPH_RESUME_GRAPH=stored` |
 | `all_outputs` | `JSONB` | NO | — | `HashMap<node_id, output_value>` — accumulated outputs from every node that has run |
 | `status` | `VARCHAR(50)` | NO | — | Run lifecycle state: `RUNNING`, `SUSPENDED`, `COMPLETED`, or `FAILED` |
 | `active_queue` | `JSONB` | NO | `'[]'::jsonb` | `VecDeque<node_id>` — nodes still waiting to execute, serialized as a JSON array |
