@@ -122,7 +122,11 @@ fn measure() -> Measured {
 // Bumped 323 -> 324: adds tests/graphs/agents/mcp_deepwiki_tools_e2e.json (the
 // same entry with `mcp.tools: ["ask_wiki_question", "no_such_tool"]`: one tool of
 // DeepWiki's three exposed, the unpublished one reported). Lints clean.
-const EXPECTED_FILES: usize = 324;
+// Bumped 324 -> 325: adds tests/graphs/advanced/subgraph_resume_fresh_graph/turn1_suspend.json
+// (a resumed inline child runs the parent's current graph; turn 2 — config or
+// structure changed — is derived with jq at E2E time, not committed, per its
+// folder README). Lints clean.
+const EXPECTED_FILES: usize = 325;
 const EXPECTED_ERRORS: usize = 0;
 const EXPECTED_WARNINGS: usize = 0;
 const EXPECTED_INFOS: usize = 0;

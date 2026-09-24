@@ -1,0 +1,34 @@
+{
+  "comment": "E2E determinista (sin LLM): un hijo inline reanudado corre el grafo actual del padre. Ver README.md de esta carpeta.",
+  "metadata": {
+    "category": "advanced",
+    "features": ["subgraph", "suspend", "resume"],
+    "requires_env": ["DATABASE_URL"]
+  },
+  "nodes": {
+    "entrada": { "type": "input", "config": { "tarea": "sellar el documento" } },
+    "delegado": {
+      "type": "subgraph",
+      "config": {
+        "child_graph_inline": {
+          "nodes": {
+            "inicio": { "type": "input", "config": {} },
+            "pregunta": { "type": "suspend", "config": { "id": "pregunta_sello", "question": "¿Seguimos con el sello?" } },
+            "sello": { "type": "input", "config": { "data": { "sello": "SELLO=v1" } } },
+            "fin": { "type": "output", "config": {} }
+          },
+          "edges": [
+            { "from": "inicio", "to": "pregunta" },
+            { "from": "pregunta", "to": "sello" },
+            { "from": "sello", "to": "fin" }
+          ]
+        }
+      }
+    },
+    "salida": { "type": "output", "config": {} }
+  },
+  "edges": [
+    { "from": "entrada", "to": "delegado" },
+    { "from": "delegado", "to": "salida" }
+  ]
+}

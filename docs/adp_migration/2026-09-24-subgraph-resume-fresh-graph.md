@@ -1,11 +1,12 @@
 # Un hijo reanudado corre el grafo que su fuente nombra hoy
 
-**Acción de ADP:** al subir a v0.17.0, ningún cambio de código — ADP no implementa
+**Acción de ADP:** al subir a v0.18.0, ningún cambio de código — ADP no implementa
 `SubGraphExecutorPort` (`git grep SubGraphExecutorPort apps/`: cero). Sí hay que
 enseñarle al agente principal y a la descripción de `Run My Agent` el prefijo
-`SUBGRAPH_RESUME_INCOMPATIBLE:` (cuando el resume pase a usar el grafo fresco) y que
-un `CHILD_GRAPH_RESOLVE_FAILED:` puede llegar **después** de una pregunta respondida
-(cuando un `child_graph_ref` se vuelva a resolver al reanudar).
+`SUBGRAPH_RESUME_INCOMPATIBLE:`, que desde la entrada 78 es real. Un
+`CHILD_GRAPH_RESOLVE_FAILED:` puede llegar **después** de una pregunta respondida
+cuando un `child_graph_ref` se vuelva a resolver al reanudar (un PR posterior).
+Todavía no para `Run My Agent` (un `child_graph_ref`, sigue reanudando su copia guardada) ni para un inline de ADP (mantiene su estructura por construcción).
 
 ## Superficie de Rust (desde la entrada 74)
 
@@ -37,6 +38,25 @@ de v0.16.
   `find_resume_entry` no los cuente como una cadena propia. Sin efecto en ADP: no
   implementa el puerto, y todo caller sigue pasando `Stored`.
 
+## Desde la entrada 78: el comportamiento
+
+- Al reanudar, un `child_graph_inline` toma su grafo del que llega en ESTE job (en
+  ADP, la copia de cable del `suspendedDag` del turno del resume, con su token,
+  claves y skills); un `child_graph_path` relee el archivo. Un `child_graph_ref`
+  sigue reanudando la versión guardada hasta que el resolvedor se vuelva a llamar
+  en resume (un PR posterior).
+- Si el esqueleto (ids con `type` + aristas) cambió, nada corre y la fila del
+  hijo queda `FAILED`. Por tool: `ToolResult.error` empieza con
+  `SUBGRAPH_RESUME_INCOMPATIBLE:`; por arista, orquestador o router: el run
+  falla con `Error de ejecución en el nodo: SUBGRAPH_RESUME_INCOMPATIBLE: …`
+  (por router, con `router branch '<rama>': ` delante — vuelve a elegir su rama en cada resume).
+- Ningún frame SSE nuevo. Un run suspendido por v0.16 se reanuda fresco sin
+  migración; un worker v0.16 que tome un resume corre la copia guardada (volver
+  atrás es seguro). Válvula: `COLMENA_SUBGRAPH_RESUME_GRAPH=stored`.
+
 ## Qué se rompe si se ignora
 
-Nada en ADP: no implementa el puerto ni matchea `DagError`.
+Nada al compilar. En producción: el agente principal y la descripción de
+`Run My Agent` tratan `SUBGRAPH_RESUME_INCOMPATIBLE:` como una falla genérica en
+vez de explicarle al usuario que el agente cambió entre su pregunta y su
+respuesta.
