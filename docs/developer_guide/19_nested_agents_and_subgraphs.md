@@ -474,6 +474,31 @@ cuando el subgrafo se usa como tool (`SubGraphExecutorPort`/`resume_subgraph`
 vía `DagToolExecutor::execute_with_resume_answer`, que además recorta el
 resultado con `scrub_tool_result_output` como cualquier tool fresca).
 
+### Reanudar con el grafo actual
+
+> Se aplica desde la entrada 75 de `CHANGELOG_2026-09.md`; hasta entonces un hijo
+> reanuda la copia de su grafo guardada en `dag_runs.graph_json`.
+
+Un hijo suspendido se reanuda con el grafo que su fuente nombra **en ese momento** —el
+inline del grafo fresco del padre, el archivo releído, el resolvedor otra vez—, no con la
+copia que guardó al suspenderse: así trae las claves, el token y las rutas de skills del
+turno que lo reanuda. Lo que el resume necesita del estado guardado (la cola, las
+salidas, la tool call pendiente en memoria) se busca por id de nodo, así que el grafo
+nuevo tiene que tener el mismo **esqueleto** que el guardado:
+
+- los mismos ids de nodo, cada uno con el mismo `type`;
+- las mismas aristas `(from, to, cyclic)` (`cyclic` ausente = `false`).
+
+Todo lo demás puede cambiar: `config`, `timezone`/`location`/`locale`, `trigger_on`, los
+topes de llamadas. Si el esqueleto cambió, el resume falla sin correr nada y el error
+lista solo ids y tipos, nunca un valor de `config`:
+
+```
+SUBGRAPH_RESUME_INCOMPATIBLE: the child graph changed since it asked (removed: pregunta; added: confirmar; edges changed: 4). Run it again from the start.
+```
+
+La regla vive en `domain/graph_skeleton.rs` (`GraphSkeleton::of`, `GraphSkeleton::diff`).
+
 ### Requisito: `connection_url` en cada `llm_call` que participe del HITL
 
 Un `llm_call` que suspende —sea el raíz o uno anidado dentro de un

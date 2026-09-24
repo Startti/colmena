@@ -3812,3 +3812,62 @@ como no publicadas — el caso para el que existe la nota, observado en vivo.
 
 **ADP.** [Nota de migración](adp_migration/2026-09-24-mcp-tools-allowlist.md) — ninguna
 acción obligatoria; `[]` significa "todas".
+## 73. El esqueleto de un grafo: la regla con que un hijo se va a reanudar (sin comportamiento nuevo)
+
+Task 1/4 de la cadena que hace que un hijo suspendido (`subgraph` por arista, como
+tool, de orquestador o de router) se reanude con el grafo que su fuente nombra **en
+ese momento** y no con la copia guardada en `dag_runs.graph_json`
+(`docs/superpowers/specs/2026-09-24-child-resume-rederive-design.md`, D3). Esta
+entrada solo agrega la regla pura de dominio que va a decidir si el grafo fresco
+califica para reanudar: nadie la llama todavía.
+
+**Qué cambió.** `domain/graph_skeleton.rs` (nuevo), registrado en `domain/mod.rs`.
+`GraphSkeleton::of(&Graph)` reduce un grafo a su **esqueleto**: los ids de nodo con
+su `type` (`BTreeMap<String, String>`) y las aristas `(from, to, cyclic)`
+(`BTreeSet<(String, String, bool)>`, con `cyclic` ausente = `false`).
+`GraphSkeleton::diff(&self, fresh)` devuelve `None` si los dos esqueletos son
+iguales, o `Some(SkeletonDiff)` con lo que cambió: `removed`, `added`,
+`type_changed` (`(id, tipo guardado, tipo fresco)`) y `edges_changed` (cuántas
+aristas están en un esqueleto y no en el otro — una arista que solo cambió
+`cyclic` cuenta 2: la plana se va, la cíclica llega). Queda afuera del esqueleto
+—y por lo tanto puede cambiar libremente en un resume— todo lo que no sea id/tipo
+de nodo o arista: `config` de cada nodo (claves, prompts, rutas de skills),
+`timezone`/`location`/`locale` del grafo, `trigger_on` y los topes de llamadas
+(`max_total_calls`/`max_calls_from`); `trigger_on` queda afuera porque D3 no lo
+nombra y el loop de resume no lo lee. `SkeletonDiff` implementa `Display` con el
+texto del rechazo, prefijo `SUBGRAPH_RESUME_INCOMPATIBLE:` (constante pública,
+estable como `SUBGRAPH_DEPTH_EXCEEDED:`), que nombra solo ids y tipos — nunca un
+valor de `config` — y tapa cada lista en 5 ítems con `+N more`. Nadie llama esta
+regla todavía: la entrada 74 la usa desde el ejecutor del resume
+(`resume_subgraph`), y la entrada 75 la aplica de punta a punta en `SubGraphNode`.
+
+**Tests.** 8 nuevos, TDD red-first (Step 1 no compilaba: `GraphSkeleton`/
+`SkeletonDiff` no existían; Step 2 los deja en verde): `the_same_graph_has_no_diff`;
+`config_graph_context_and_limits_may_change_freely` (una `api_key`, un
+`system_message`, una ruta de skills, `max_total_calls` y el `timezone`/`locale`
+del grafo cambian sin producir diff); `an_absent_cyclic_flag_is_false`;
+`a_removed_or_added_node_is_named`; `a_changed_type_names_both_types`;
+`edges_differ_by_endpoints_and_by_cyclic` (agregar, quitar y voltear `cyclic`, las
+tres formas); `the_message_leads_with_the_prefix_and_names_ids_and_types_only`
+(siembra `sk-must-not-leak` en la config del nodo que cambia de tipo y confirma
+que el texto no la contiene); `long_lists_are_capped`. `cargo test -p
+colmena_dag_engine --lib`: 2773 → 2781 passed (74 ignorados sin cambio, 0 failed);
+filtrado a `graph_skeleton`: 8 passed.
+
+**Mutación.** Las 4 del plan, cada una en rojo y revertida a mano: (1) meter la
+`config` del nodo en el valor que guarda `nodes` (`format!("{}{}", node_type,
+config)` en vez de solo `node_type.clone()`) puso en rojo
+`config_graph_context_and_limits_may_change_freely` (además, de arrastre,
+`a_changed_type_names_both_types` y `the_message_leads_with_the_prefix…`,
+porque la config viajaba disfrazada de tipo); (2) forzar el tercer elemento de la
+tupla de arista a `false` siempre (`cyclic` deja de importar) puso en rojo
+`edges_differ_by_endpoints_and_by_cyclic` (el caso `cyclic`: `Some(2)` → `None`),
+sola; (3) `e.cyclic.unwrap_or(true)` puso en rojo `an_absent_cyclic_flag_is_false`
+(además `edges_differ_by_endpoints_and_by_cyclic`, de arrastre); (4) `SkeletonDiff::fmt`
+agregando `{:?}` de `self` al mensaje puso en rojo, sola,
+`the_message_leads_with_the_prefix_and_names_ids_and_types_only`. Las cuatro,
+revertidas tras confirmar; `cargo test --lib graph_skeleton` vuelve a 8 passed.
+
+**E2E.** No aplica: no hay comportamiento observable hasta la entrada 75.
+
+**ADP.** Sin nota: nada cruza la frontera todavía; la nota llega con la entrada 74.
