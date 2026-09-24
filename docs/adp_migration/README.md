@@ -6,6 +6,12 @@ ve ADP antes y después, qué tiene que hacer ADP, y qué se rompe si no hace na
 
 Los cambios que quedan dentro del motor no llevan nota aquí.
 
+## 2026-09-24 — un argumento del modelo ya no elige el grafo de un hijo
+
+| # | Nota | Acción de ADP | Qué se rompe si se ignora |
+|---|------|---------------|---------------------------|
+| 1 | [Fuentes de grafo hijo que la tool no ofrece](2026-09-24-tool-args-cannot-set-child-graph.md) | Ninguna de código; subir el motor | Nada; sin subir, el modelo puede elegir el grafo que corre el worker |
+
 ## 2026-09-24 — un hijo reanudado corre el grafo que su fuente nombra hoy
 
 | # | Nota | Acción de ADP | Qué se rompe si se ignora |

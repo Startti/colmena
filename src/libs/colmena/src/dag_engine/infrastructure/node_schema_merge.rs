@@ -1,10 +1,54 @@
 //! Pure merge of LLM/row args into a `node_schema`, extracted from
 //! `DagToolExecutor::execute_inner` so `for_each` reuses identical semantics.
 
+use crate::dag_engine::domain::child_graph_source::CHILD_GRAPH_SOURCE_KEYS;
 use crate::dag_engine::domain::tool_configuration::{parse_node_schema, NodeSchema};
 use crate::dag_engine::infrastructure::dag_tool_executor::DagToolExecutor;
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+
+/// Drop every child-graph source ([`CHILD_GRAPH_SOURCE_KEYS`]) the caller
+/// supplied but the tool never offered as a parameter.
+///
+/// A `subgraph` dispatched as a tool reads its source from `inputs`, where the
+/// caller's arguments land too, and an undeclared argument went through every
+/// merge untouched. Since the precedence is inline > path > ref, a model that
+/// added `child_graph_inline` or `child_graph_path` to its call outranked the
+/// operator's fixed `child_graph_ref` (or fixed path) and picked the graph the
+/// worker ran. A source the operator declares as a parameter still passes: that
+/// hands the model the choice on purpose. `offered` yields the parameter names
+/// the tool advertised, and runs only when the caller supplied a source.
+pub(crate) fn drop_unoffered_child_graph_sources(
+    args: &mut HashMap<String, Value>,
+    offered: impl FnOnce() -> HashSet<String>,
+) {
+    let supplied: Vec<&str> = CHILD_GRAPH_SOURCE_KEYS
+        .into_iter()
+        .filter(|key| args.contains_key(*key))
+        .collect();
+    if supplied.is_empty() {
+        return;
+    }
+    let offered = offered();
+    for key in supplied {
+        if !offered.contains(key) {
+            args.remove(key);
+            eprintln!(
+                "⚠️ [node_schema_merge] Ignoring arg '{key}' — a child-graph source the tool does not offer."
+            );
+        }
+    }
+}
+
+/// The parameters a `node_schema` offers its caller: its LLM-visible fields.
+/// Empty when the schema does not parse — the merge rejects it anyway.
+pub(crate) fn offered_params(node_schema: &Value) -> HashSet<String> {
+    serde_json::from_value::<NodeSchema>(node_schema.clone())
+        .ok()
+        .and_then(|schema| parse_node_schema(&schema).ok())
+        .map(|parsed| parsed.llm_properties.into_keys().collect())
+        .unwrap_or_default()
+}
 
 /// Merge caller-supplied args (LLM tool args, or a `for_each` row) into a
 /// parsed `node_schema`: template the operator's own fixed values against a

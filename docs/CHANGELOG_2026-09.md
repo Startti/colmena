@@ -4127,3 +4127,55 @@ Capturas en `/tmp/colmena_e2e/`: `final_{cfg,base,valve,shape,compat}_{1,2}.sse`
 
 **ADP.** [Nota de migración](adp_migration/2026-09-24-subgraph-resume-fresh-graph.md)
 actualizada.
+
+## 79. Fix: un argumento del modelo ya no elige el grafo que corre un `subgraph`
+
+**El agujero.** Un `subgraph` como tool lee su fuente de `inputs` (inline > path >
+ref), adonde un argumento no declarado llegaba intacto. Un `child_graph_inline` o
+`child_graph_path` agregado a la llamada le ganaba al `child_graph_ref` fijo de
+"Run My Agent" —sin consultar al resolvedor— o al path fijo de una tool legada, y
+el worker corría el grafo del modelo: `python_script` sin sandbox por defecto
+(`python_node.rs:213-217`), `${VAR}` del entorno en todo `config` (`http.rs:492`,
+`llm.rs:1225`, `sql.rs:115`), cualquier archivo del disco por path
+(`subgraph.rs:141-145`). El asset (inline fijo) ya estaba a salvo por precedencia.
+
+**Qué cambió.** `drop_unoffered_child_graph_sources` (`node_schema_merge.rs`) saca
+de los argumentos toda clave de `CHILD_GRAPH_SOURCE_KEYS` que la tool no ofrezca
+como parámetro (los de la definición que recibió el modelo; en `for_each`, los
+campos visibles del target), con un aviso sin valores. Corre junto a
+`strip_engine_keys`, antes de las cuatro estrategias de merge —dentro de
+`merge_args_into_schema` solo cubriría `node_schema`— y en cada fila de
+`for_each`. Una fuente declarada pasa (`probar_grafo` del graph builder). No se
+extiende a toda clave de configuración: filas de `for_each`, query params extra
+de `http_request`, globals de `python_script` y estado del hijo dependen hoy de
+que un argumento no declarado pase.
+
+**Tests.** 6 en `child_graph_source_arg_tests` (`dag_tool_executor.rs`), con un
+`SubGraphNode` real: 4 rojos antes del fix (inline y path contra ref fijo, inline
+contra path legado, `subgraph` por nombre crudo) y 2 guardas verdes en ambos lados
+(asset en sus dos formas, fuente declarada); 1 en `for_each.rs`, rojo antes.
+`EXPECTED_FILES` 324 → 325. `cargo test` completo: 3035 passed, 0 failed, 144 ignorados.
+
+**Mutación.** 5, rojas y revertidas a mano: sin la llamada del executor → los 4
+repros; sin la de `for_each` → su test; ignorar `offered` → las 2 guardas
+declaradas; lista a mano sin `child_graph_path` → el repro de path; el nombre
+crudo ofreciendo `child_graph_inline` → el repro crudo.
+
+**E2E.** `tests/graphs/security/tool_child_graph_source_e2e.json` por el CLI
+contra un stub local de `generateContent` (`GEMINI_BASE_URL`; llamadas exactas,
+sin modelo real), con `COLMENA_E2E_CANARY=canary_4f1e`. El modelo manda un grafo
+cuyo `python_script` lee la canaria: inline y por archivo a `Run_My_Agent`, inline
+a `especialista` (path legado) y a `probar_grafo` (lo declara). Sin el fix: 4
+`subgraph-node-start` de `pwn`, 4 `tool-output-available` con la canaria. Con el
+fix: 1 (`agent>probar_grafo>pwn`); `Run_My_Agent` da 2 veces
+`CHILD_GRAPH_RESOLVE_FAILED:unavailable` (no `not_found`: `agentId` templó);
+`especialista` corre su archivo; 3 avisos en stderr sin la canaria. Los
+`functionResponse` del stub coinciden. Capturas en
+`/tmp/colmena_e2e/tool_child_graph_source_{before,after}.sse`.
+
+**Fuera de alcance.** El despacho no compara el nombre de la tool con las
+expuestas: con el mismo stub, un `python_script` no expuesto corrió y leyó la
+canaria. PR aparte.
+
+**ADP.** [Nota](adp_migration/2026-09-24-tool-args-cannot-set-child-graph.md):
+ninguna acción de código; subir el motor.
