@@ -45,11 +45,15 @@ pub trait SubGraphExecutorPort: Send + Sync {
         path_prefix: Option<String>,
     ) -> Result<Value, DagError>;
 
-    /// Reanuda un subgrafo suspendido tras un Human-in-the-Loop.
+    /// Reanuda un subgrafo suspendido tras un Human-in-the-Loop con el grafo
+    /// que diga `graph` (ver [`ResumeGraph`]). Un `Fresh` cuyo esqueleto no
+    /// calza con el guardado, o un `Unavailable`, cierra la fila del hijo como
+    /// FAILED y devuelve `DagError::ResumeRefused` sin correr nada.
     async fn resume_subgraph(
         &self,
         session_id: &str,
         answer: String,
+        graph: ResumeGraph,
         observer: Option<Arc<dyn crate::dag_engine::domain::observer::ExecutionObserver>>,
         agent_session_id: Option<String>,
         path_prefix: Option<String>,
@@ -63,6 +67,35 @@ pub trait SubGraphExecutorPort: Send + Sync {
         parent_session_id: &str,
         parent_node_path: &str,
     ) -> Result<Option<String>, DagError>;
+}
+
+/// Which graph a suspended child resumes with.
+///
+/// `Debug` is hand-written: `Fresh` carries a runnable graph with its secrets
+/// already resolved, like [`ResolvedChildGraph`].
+#[derive(Clone, PartialEq)]
+pub enum ResumeGraph {
+    /// Derived again from the child's source (the parent's config or inputs,
+    /// the file, the resolver). The executor checks its skeleton against the
+    /// stored graph and refuses it if the structure changed.
+    Fresh(Value),
+    /// The source could not give a graph (the resolver refused, the file is
+    /// gone). The executor closes the child's row as FAILED and returns this
+    /// text verbatim.
+    Unavailable(String),
+    /// The graph stored in the child's row, as up to v0.16 — what the
+    /// `COLMENA_SUBGRAPH_RESUME_GRAPH=stored` valve passes.
+    Stored,
+}
+
+impl std::fmt::Debug for ResumeGraph {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Fresh(_) => f.write_str("Fresh(<redacted>)"),
+            Self::Unavailable(reason) => f.debug_tuple("Unavailable").field(reason).finish(),
+            Self::Stored => f.write_str("Stored"),
+        }
+    }
 }
 
 /// Resolves a child graph named by reference (`child_graph_ref`). Implemented by
@@ -171,7 +204,20 @@ impl std::error::Error for ChildGraphResolveError {}
 #[cfg(test)]
 mod resolved_child_graph_tests {
     use super::ResolvedChildGraph;
+    use super::ResumeGraph;
     use serde_json::json;
+
+    #[test]
+    fn resume_graph_debug_redacts_a_fresh_graph() {
+        let secret = "sk-super-secret-token-do-not-leak";
+        let g = ResumeGraph::Fresh(json!({
+            "nodes": { "llm": { "type": "llm_call", "config": { "api_key": secret } } },
+            "edges": []
+        }));
+        let debug_str = format!("{g:?}");
+        assert!(!debug_str.contains(secret), "{debug_str}");
+        assert!(debug_str.contains("Fresh"));
+    }
 
     #[test]
     fn debug_redacts_the_graph_but_keeps_the_display_name() {

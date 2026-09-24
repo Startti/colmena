@@ -54,4 +54,12 @@ pub enum DagError {
         tool_name: String,
         reason: String,
     },
+
+    /// Un resume de subgrafo que el ejecutor rechazó ANTES de correr nada: el
+    /// grafo del hijo cambió de forma (`SUBGRAPH_RESUME_INCOMPATIBLE:`) o su
+    /// fuente no pudo dar uno (p. ej. `CHILD_GRAPH_RESOLVE_FAILED:…`). El texto
+    /// viaja tal cual, con su prefijo estable adelante: es la única superficie
+    /// que ven el modelo y el embebedor. La fila del hijo ya quedó FAILED.
+    #[error("{0}")]
+    ResumeRefused(String),
 }
