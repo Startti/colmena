@@ -4031,7 +4031,7 @@ el `connect` de producción). E2E sin clave de LLM: deepwiki `server_ready` y `m
 para `https://localhost/mcp` y `https://169.254.169.254/mcp`; con `HTTPS_PROXY` fijado DeepWiki
 responde y sin `.no_proxy()` cae. [Nota](adp_migration/2026-09-24-mcp-private-dial-guard.md).
 
-## 77. `SubGraphNode` loads its child graph through one function
+## 77. `SubGraphNode` carga su grafo hijo con una sola función
 
 Task 3/4 de la cadena (`docs/superpowers/specs/2026-09-24-child-resume-rederive-design.md`,
 D3), primer paso: un refactor puro, sin comportamiento observable. Prepara el
@@ -4088,9 +4088,10 @@ pasó de "buscar el hijo → `resume_subgraph(Stored)`" a "buscar el hijo → de
 (cualquier otro valor deriva), leída una vez por proceso vía `OnceLock` como
 `COLMENA_MAX_SUBGRAPH_DEPTH`, con su mitad pura (`valve_is_stored`) separada.
 Texto por tool: `ToolResult.error` empieza con el prefijo, `output` = `Error
-executing node <tool>: …`; por arista/orquestador/router: `Error de ejecución en
+executing node <tool>: …`; por arista u orquestador: `Error de ejecución en
 el nodo: SUBGRAPH_RESUME_INCOMPATIBLE: …`. Los dos cierran la fila del hijo (y
 sus descendientes SUSPENDED, entrada 75) como `FAILED`. Ningún frame SSE nuevo.
+Por router, con `router branch '<rama>': ` delante (`router/node.rs:160`): vuelve a elegir su rama en cada resume, y una del mismo esqueleto reanuda con su config.
 
 **Tests.** 9 nuevos en `subgraph.rs` (TDD red-first): 8 en
 `subgraph_resume_graph_tests` (inline/path derivados en resume, path inexistente,
@@ -4122,6 +4123,7 @@ un nieto anidado a dos niveles con LLM real (`nested_resume_liveness_e2e.json`):
 1 salida de tool con un `sello` inyectado en el turno 2 en la rama del PR, 0 en
 la línea base v0.16.0; el `subgraph-usage-summary` del resume nombra
 `db_specialist_agent` (no `usage-summary`, que solo lleva el nodo raíz).
+Capturas en `/tmp/colmena_e2e/`: `final_{cfg,base,valve,shape,compat}_{1,2}.sse` y `subgraph_resume_nested{,_base}_{1,2}.sse`.
 
 **ADP.** [Nota de migración](adp_migration/2026-09-24-subgraph-resume-fresh-graph.md)
 actualizada.

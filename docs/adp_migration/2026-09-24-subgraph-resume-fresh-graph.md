@@ -6,6 +6,7 @@ enseñarle al agente principal y a la descripción de `Run My Agent` el prefijo
 `SUBGRAPH_RESUME_INCOMPATIBLE:`, que desde la entrada 78 es real. Un
 `CHILD_GRAPH_RESOLVE_FAILED:` puede llegar **después** de una pregunta respondida
 cuando un `child_graph_ref` se vuelva a resolver al reanudar (un PR posterior).
+Todavía no para `Run My Agent` (un `child_graph_ref`, sigue reanudando su copia guardada) ni para un inline de ADP (mantiene su estructura por construcción).
 
 ## Superficie de Rust (desde la entrada 74)
 
@@ -47,7 +48,8 @@ de v0.16.
 - Si el esqueleto (ids con `type` + aristas) cambió, nada corre y la fila del
   hijo queda `FAILED`. Por tool: `ToolResult.error` empieza con
   `SUBGRAPH_RESUME_INCOMPATIBLE:`; por arista, orquestador o router: el run
-  falla con `Error de ejecución en el nodo: SUBGRAPH_RESUME_INCOMPATIBLE: …`.
+  falla con `Error de ejecución en el nodo: SUBGRAPH_RESUME_INCOMPATIBLE: …`
+  (por router, con `router branch '<rama>': ` delante — vuelve a elegir su rama en cada resume).
 - Ningún frame SSE nuevo. Un run suspendido por v0.16 se reanuda fresco sin
   migración; un worker v0.16 que tome un resume corre la copia guardada (volver
   atrás es seguro). Válvula: `COLMENA_SUBGRAPH_RESUME_GRAPH=stored`.
