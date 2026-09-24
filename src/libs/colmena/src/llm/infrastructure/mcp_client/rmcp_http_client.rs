@@ -38,6 +38,8 @@
 //! its own outer timeout around `ServiceExt::serve`, unrelated to this.
 
 use std::collections::{BTreeMap, HashMap};
+use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -48,12 +50,18 @@ use rmcp::model::{
     ListToolsResult, Notification, PaginatedRequestParams, RequestId, ResourceContents,
     ServerResult, Tool,
 };
+use rmcp::service::ClientInitializeError;
 use rmcp::service::{Peer, PeerRequestOptions, RoleClient, RunningService};
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
+use rmcp::transport::streamable_http_client::StreamableHttpError;
 use rmcp::transport::StreamableHttpClientTransport;
 use rmcp::{ServiceError, ServiceExt};
+use rmcp_reqwest::dns::{Addrs, Name, Resolve, Resolving};
 use serde_json::Value;
 
+use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::mcp::allowlist::{
+    filter_dialable, host_for_log, non_public_literal, private_block_from_env,
+};
 use crate::llm::domain::mcp::{
     McpClientPort, McpError, McpServerConfig, McpToolDescriptor, McpToolResult,
     MCP_MAX_TOOLS_PER_SERVER,
@@ -65,6 +73,116 @@ use crate::llm::domain::text_bounds::head_truncate;
 /// one, just a brief pause so a genuinely transient failure (a mid-flight
 /// connection reset) has a moment to clear before the retry.
 const MCP_RETRY_BACKOFF: Duration = Duration::from_millis(75);
+
+/// A refusal, as the resolver returns it: found again BY TYPE ([`is_dial_refused`]), so
+/// no later error inherits the label. Its text is all the MODEL reads: an echoed internal
+/// address would make the guard an internal-DNS oracle; it goes to `mcp.dial_refused` only.
+#[derive(Debug, thiserror::Error)]
+#[error("destination is not a public address")]
+struct DialRefused;
+
+/// Whether `err`'s chain carries a [`DialRefused`]. rmcp's
+/// `StreamableHttpError::Client` has no `source()`, so the walk steps in by hand.
+fn is_dial_refused(err: &(dyn std::error::Error + 'static)) -> bool {
+    std::iter::successors(Some(err), |e| {
+        match e.downcast_ref::<StreamableHttpError<rmcp_reqwest::Error>>() {
+            Some(StreamableHttpError::Client(inner)) => Some(inner),
+            _ => e.source(),
+        }
+    })
+    .any(|e| e.is::<DialRefused>())
+}
+
+/// The DNS resolution every MCP request goes through: `inner`, then — while
+/// `block_private` — [`filter_dialable`]. It hands reqwest exactly the addresses
+/// it checked, so the address checked is the address dialled; checking in a
+/// separate resolution would leave a DNS-rebinding window between the two.
+struct DialGuard {
+    alias: String,
+    inner: Arc<dyn Resolve>,
+    block_private: bool,
+}
+
+impl DialGuard {
+    fn new(alias: &str, inner: Arc<dyn Resolve>, block_private: bool) -> Self {
+        Self {
+            alias: alias.to_string(),
+            inner,
+            block_private,
+        }
+    }
+
+    fn system(alias: &str, block_private: bool) -> Self {
+        Self::new(alias, Arc::new(SystemResolver), block_private)
+    }
+}
+
+impl Resolve for DialGuard {
+    fn resolve(&self, name: Name) -> Resolving {
+        let host = name.as_str().to_string();
+        let answer = self.inner.resolve(name);
+        let (alias, block) = (self.alias.clone(), self.block_private);
+        Box::pin(async move {
+            let mut ips: Vec<IpAddr> = answer.await?.map(|a| a.ip()).collect();
+            if block {
+                ips = filter_dialable(ips).map_err(|bad| match bad {
+                    Some(ip) => log_refusal(&alias, &host, ip),
+                    None => "resolved to no address".into(),
+                })?;
+            }
+            Ok(Box::new(ips.into_iter().map(|ip| SocketAddr::new(ip, 0))) as Addrs)
+        })
+    }
+}
+
+/// `getaddrinfo`, as reqwest's own default resolver (which it does not export).
+struct SystemResolver;
+
+impl Resolve for SystemResolver {
+    fn resolve(&self, name: Name) -> Resolving {
+        let host = name.as_str().to_string();
+        Box::pin(async move { Ok(Box::new(tokio::net::lookup_host((host, 0)).await?) as Addrs) })
+    }
+}
+
+fn log_refusal(alias: &str, host: &str, ip: IpAddr) -> Box<dyn std::error::Error + Send + Sync> {
+    tracing::warn!(
+        target: "colmena::mcp",
+        event = "mcp.dial_refused",
+        alias = %alias,
+        host = %host,
+        address = %ip,
+        "refused to dial an MCP server at a non-public address"
+    );
+    Box::new(DialRefused)
+}
+
+fn dial_refused(server: &str) -> McpError {
+    McpError::Transport {
+        server: server.to_string(),
+        reason: DialRefused.to_string(),
+    }
+}
+
+/// The `reqwest` client an MCP connection uses — built here, not by rmcp
+/// (`StreamableHttpClientTransport::from_config` builds its own, with no
+/// resolver hook), so the guard sits inside the resolution the socket uses.
+fn mcp_http_client(guard: DialGuard) -> Result<rmcp_reqwest::Client, McpError> {
+    rmcp_reqwest::Client::builder()
+        // As rmcp's default client: no idle pooling (every request resolves
+        // through the guard again, so a rebind after the handshake is caught)
+        // and no redirects (an IP-literal hop would skip the resolver).
+        .pool_max_idle_per_host(0)
+        .redirect(rmcp_reqwest::redirect::Policy::none())
+        // A proxy would resolve the target out of the guard's sight; nothing in
+        // the engine or ADP's deploys sets HTTP(S)_PROXY/ALL_PROXY.
+        .no_proxy()
+        .dns_resolver(guard)
+        .build()
+        .map_err(|e| McpError::InvalidConfig {
+            detail: format!("the MCP HTTP client could not be built: {e}"),
+        })
+}
 
 /// A live connection to one remote MCP server over `rmcp`'s streamable-HTTP
 /// client transport.
@@ -101,7 +219,8 @@ impl RmcpHttpClient {
                 ),
             });
         }
-        Self::connect_transport(server_label, config, resolved_headers).await
+        let guard = DialGuard::system(server_label, private_block_from_env());
+        Self::connect_transport(server_label, config, resolved_headers, guard).await
     }
 
     /// Everything `connect` does after the HTTPS guard — split out so tests
@@ -110,7 +229,14 @@ impl RmcpHttpClient {
         server_label: &str,
         config: &McpServerConfig,
         resolved_headers: &BTreeMap<String, String>,
+        guard: DialGuard,
     ) -> Result<Self, McpError> {
+        // An IP-literal host never reaches the resolver. Checked once: every
+        // request this transport makes goes to `config.url`, never a redirect.
+        if let Some(ip) = non_public_literal(&config.url).filter(|_| guard.block_private) {
+            log_refusal(server_label, &host_for_log(&config.url), ip);
+            return Err(dial_refused(server_label));
+        }
         // `StreamableHttpClientTransportConfig::default()` sets
         // `allow_stateless: true`: both stateless and session-issuing
         // servers work without a config flag (R2.3).
@@ -120,7 +246,8 @@ impl RmcpHttpClient {
         let mut transport_config =
             StreamableHttpClientTransportConfig::with_uri(config.url.clone());
         transport_config.custom_headers = build_custom_headers(server_label, resolved_headers)?;
-        let transport = StreamableHttpClientTransport::from_config(transport_config);
+        let transport =
+            StreamableHttpClientTransport::with_client(mcp_http_client(guard)?, transport_config);
 
         // `ClientCapabilities::default()` leaves `sampling: None`, so the
         // serialized `initialize` params never carry that key regardless of
@@ -141,9 +268,14 @@ impl RmcpHttpClient {
                 server: server_label.to_string(),
                 seconds: config.timeout.as_secs(),
             })?
-            .map_err(|e| McpError::Handshake {
-                server: server_label.to_string(),
-                detail: e.to_string(),
+            .map_err(|e| match &e {
+                ClientInitializeError::TransportError { error, .. } if is_dial_refused(error) => {
+                    dial_refused(server_label)
+                }
+                _ => McpError::Handshake {
+                    server: server_label.to_string(),
+                    detail: e.to_string(),
+                },
             })?;
 
         Ok(Self {
@@ -162,7 +294,7 @@ impl RmcpHttpClient {
         server_label: &str,
         config: &McpServerConfig,
     ) -> Result<Self, McpError> {
-        Self::connect_transport(server_label, config, &BTreeMap::new()).await
+        Self::connect_for_test_with_headers(server_label, config, &BTreeMap::new()).await
     }
 
     #[cfg(test)]
@@ -171,7 +303,9 @@ impl RmcpHttpClient {
         config: &McpServerConfig,
         resolved_headers: &BTreeMap<String, String>,
     ) -> Result<Self, McpError> {
-        Self::connect_transport(server_label, config, resolved_headers).await
+        // The escape hatch, explicitly: `wiremock` serves on loopback.
+        let guard = DialGuard::system(server_label, false);
+        Self::connect_transport(server_label, config, resolved_headers, guard).await
     }
 }
 
@@ -357,6 +491,9 @@ impl RmcpHttpClient {
     /// `rmcp` variants that don't fit a more specific case.
     fn service_error(&self, err: ServiceError) -> McpError {
         match err {
+            ServiceError::TransportSend(e) if is_dial_refused(&e) => {
+                dial_refused(&self.server_label)
+            }
             ServiceError::McpError(e) => McpError::Protocol {
                 server: self.server_label.clone(),
                 detail: e.to_string(),
@@ -1557,6 +1694,115 @@ mod tests {
             !msg.contains("SECRET"),
             "the rejection must not quote the resolved value back into a log: {msg}"
         );
+    }
+
+    // --- The non-public-address guard ---
+    use super::{mcp_http_client, DialGuard, DialRefused, ServiceError};
+    use rmcp::transport::DynamicTransportError;
+    use rmcp_reqwest::dns::{Addrs, Name, Resolve, Resolving};
+    use std::net::{IpAddr, SocketAddr};
+
+    /// A resolver that answers every name with the same addresses.
+    struct Answers(Vec<IpAddr>);
+
+    impl Resolve for Answers {
+        fn resolve(&self, _: Name) -> Resolving {
+            let addrs: Vec<SocketAddr> = self.0.iter().map(|ip| SocketAddr::new(*ip, 0)).collect();
+            Box::pin(async move { Ok(Box::new(addrs.into_iter()) as Addrs) })
+        }
+    }
+
+    fn ip(s: &str) -> IpAddr {
+        s.parse().unwrap()
+    }
+
+    /// The model-visible text of a refusal: generic, no address.
+    const REFUSED: &str = "MCP server 'g' transport error: destination is not a public address";
+
+    /// The guard sits INSIDE the resolution rmcp dials with: `mcp.test` resolves
+    /// nowhere real (RFC 6761), so reaching the mock at all proves this resolver is
+    /// in the path; with the guard on, that same loopback answer is refused.
+    #[tokio::test]
+    async fn a_name_resolving_to_a_private_address_is_refused_and_nothing_is_dialled() {
+        let server = MockServer::start().await;
+        Mock::given(wiremock::matchers::any())
+            .respond_with(mock(Vec::new(), None, None))
+            .mount(&server)
+            .await;
+        let cfg = config(format!("http://mcp.test:{}/", server.address().port()), 5);
+        let guard = |block| DialGuard::new("g", Arc::new(Answers(vec![ip("127.0.0.1")])), block);
+        let headers = BTreeMap::new();
+
+        let refused = RmcpHttpClient::connect_transport("g", &cfg, &headers, guard(true)).await;
+        assert_eq!(refused.unwrap_err().to_string(), REFUSED);
+        assert!(server.received_requests().await.unwrap().is_empty());
+
+        // The escape hatch, scoped to this one call: the same answer connects.
+        let client = RmcpHttpClient::connect_transport("g", &cfg, &headers, guard(false))
+            .await
+            .expect("with the guard off the fake answer is dialled");
+        // The label is read off each error, never off connection state: a refusal
+        // reads REFUSED, and a server's JSON-RPC error after it stays `Protocol`.
+        let marker = Box::new(DialRefused);
+        let refused = DynamicTransportError::from_parts("t", std::any::TypeId::of::<()>(), marker);
+        let refused = client.service_error(ServiceError::TransportSend(refused));
+        assert_eq!(refused.to_string(), REFUSED);
+        let genuine = ServiceError::McpError(rmcp::ErrorData::internal_error("boom", None));
+        let genuine = client.service_error(genuine);
+        assert!(matches!(genuine, McpError::Protocol { .. }), "{genuine}");
+    }
+
+    #[tokio::test]
+    async fn a_public_answer_reaches_reqwest_unchanged_and_in_order() {
+        let answer = vec![ip("8.8.8.8"), ip("2606:4700:4700::1111"), ip("1.1.1.1")];
+        let guard = DialGuard::new("g", Arc::new(Answers(answer.clone())), true);
+        let name: Name = "mcp.test".parse().unwrap();
+        let got: Vec<IpAddr> = guard.resolve(name).await.unwrap().map(|a| a.ip()).collect();
+        assert_eq!(got, answer);
+    }
+
+    /// reqwest asks no resolver about an IP-literal host, so this check stops
+    /// `http://127.0.0.1:<port>/`, the mock's own address. PRODUCTION `connect` turns
+    /// the guard on by itself (nothing here passes one); `localhost` falls in the resolver.
+    #[tokio::test]
+    async fn an_ip_literal_is_refused_before_connecting_and_connect_guards_by_default() {
+        let server = MockServer::start().await;
+        Mock::given(wiremock::matchers::any())
+            .respond_with(mock(Vec::new(), None, None))
+            .mount(&server)
+            .await;
+        let (cfg, guard) = (config(server.uri(), 5), DialGuard::system("g", true));
+        let refused = RmcpHttpClient::connect_transport("g", &cfg, &BTreeMap::new(), guard).await;
+        assert_eq!(refused.unwrap_err().to_string(), REFUSED);
+        assert!(server.received_requests().await.unwrap().is_empty());
+
+        let hatch = std::env::var("COLMENA_MCP_ALLOW_PRIVATE_HOSTS");
+        assert!(hatch.is_err(), "this test needs the default");
+        let urls = "https://0177.0.0.1/ https://[::1]/ https://169.254.169.254/ https://localhost/";
+        for url in urls.split(' ') {
+            let cfg = config(url.into(), 3);
+            let refused = RmcpHttpClient::connect("g", &cfg, &BTreeMap::new()).await;
+            assert_eq!(refused.unwrap_err().to_string(), REFUSED, "{url}");
+        }
+    }
+
+    /// No redirect is followed: an IP-literal hop would skip the resolver. The mock
+    /// is on loopback, so this client runs with the escape hatch — which is exactly
+    /// why the POLICY must stop the hop: the guard would not refuse it here.
+    #[tokio::test]
+    async fn a_redirect_is_never_followed() {
+        let server = MockServer::start().await;
+        let hop = ResponseTemplate::new(302).insert_header("location", "http://169.254.169.254/");
+        Mock::given(wiremock::matchers::any())
+            .respond_with(hop)
+            .mount(&server)
+            .await;
+        let client = mcp_http_client(DialGuard::system("g", false)).unwrap();
+        let answer = tokio::time::timeout(Duration::from_secs(5), client.post(server.uri()).send())
+            .await
+            .expect("a followed hop to 169.254.169.254 would hang here")
+            .expect("the 302 itself comes back");
+        assert_eq!(answer.status(), 302);
     }
 
     /// R2.8 — live, against a REAL MCP server. Every other test here mocks

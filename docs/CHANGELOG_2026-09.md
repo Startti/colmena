@@ -3871,3 +3871,24 @@ revertidas tras confirmar; `cargo test --lib graph_skeleton` vuelve a 8 passed.
 **E2E.** No aplica: no hay comportamiento observable hasta la entrada 75.
 
 **ADP.** Sin nota: nada cruza la frontera todavía; la nota llega con la entrada 74.
+
+## 76. El cliente MCP no marca direcciones que no sean públicas
+
+**Qué cambió.** El motor se niega a conectar un servidor MCP en una dirección que no sea unicast
+global — la tabla de `isGlobalUnicast` de ADP (`safeFetch`): IPv4 fuera de los 15 prefijos de IANA;
+IPv6 solo `2000::/3` menos `2001::/23`, `2001:db8::/32` y `2002::/16` (cae toda IPv4 mapeada y
+NAT64). Una dirección no pública, o ninguna, rechaza la respuesta DNS entera. **Encendida por
+defecto**; `COLMENA_MCP_ALLOW_PRIVATE_HOSTS` = `1`/`true` la apaga (se lee una vez por proceso),
+solo para desarrollo local. Producción no debe fijarla.
+
+**Dónde decide.** `RmcpHttpClient` arma su propio `reqwest::Client` (`with_client`) cuyo
+`dns::Resolve` devuelve exactamente lo que filtró: la IP chequeada es la IP marcada. Un host IP
+literal se chequea PARSEADO (`0177.0.0.1` → `127.0.0.1`). Sin redirecciones, sin pool ocioso (cada
+request re-resuelve) y `.no_proxy()`. Al cablear, el modelo solo recibe el aviso «did not respond» y
+`destination is not a public address` va a `mcp.wiring_note`; lo lee solo si lo rechaza una
+reconexión en el dispatch. La dirección va únicamente a `mcp.dial_refused`.
+
+**Verificación.** 9 tests nuevos; 11 mutaciones, cada una roja en su test (una apaga la guarda en
+el `connect` de producción). E2E sin clave de LLM: deepwiki `server_ready` y `mcp.dial_refused`
+para `https://localhost/mcp` y `https://169.254.169.254/mcp`; con `HTTPS_PROXY` fijado DeepWiki
+responde y sin `.no_proxy()` cae. [Nota](adp_migration/2026-09-24-mcp-private-dial-guard.md).

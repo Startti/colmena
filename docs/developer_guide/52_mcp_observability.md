@@ -54,6 +54,7 @@ grafo que indexa por id de nodo y nombra en `name` loguea el nombre, no el id.
 | Evento | Nivel | Campos | Cuándo |
 |---|---|---|---|
 | `mcp.server_unavailable` | WARN | `alias`, `host`, `reason` (`prepare` \| `tools_list` \| `no_result` \| `not_allowed`), `ms` (ausente para `no_result`) | Un servidor MCP declarado no aportó tools este turno. `prepare`/`tools_list`/`not_allowed` vienen del fan-out real y siempre llevan `ms` (para `not_allowed` es el tiempo hasta el chequeo de host, que corre ANTES de `bind()` — ver "Postura de seguridad" más abajo). `no_result` es el caso degenerado en el que `assemble()` no encuentra ninguna entrada para un alias declarado — no hubo intento medible, así que no se inventa un `ms`. `not_allowed` es el host-allowlist opcional (`COLMENA_MCP_ALLOWED_HOSTS`) rechazando el host. Uno por servidor caído. |
+| `mcp.dial_refused` | WARN | `alias`, `host`, `address` | El cliente se negó a marcar una dirección que no es unicast global (ver "Postura de seguridad"). Único lugar con la dirección resuelta. El servidor cae con `mcp.server_unavailable` (`reason = "tools_list"`) y `destination is not a public address` va a `mcp.wiring_note`: al cablear, el modelo solo recibe el aviso genérico («did not respond»). Lee ese texto solo si lo rechaza una reconexión en el dispatch. |
 | `mcp.server_ready` | DEBUG | `alias`, `host`, `tools` (conteo expuesto tras dedupe), `ms` | Un servidor MCP respondió y sus tools quedaron expuestas al modelo. Uno por servidor sano. |
 | `mcp.alias_fallback` | WARN | `key`, `wanted`, `alias` | El alias que pedía una entrada `mcp` (`wanted`: su `name`, o su clave si no tiene) ya lo tenía otra, así que cayó a su clave o a `<clave>_N` (`alias`). El modelo ve `<alias>__<tool>` para esa entrada. Uno por entrada que perdió su alias. |
 | `mcp.wiring_note` | WARN | (mensaje libre en `notes`, sin campos estructurados) | El catch-all legible de `wire()`/`assemble()`. `notes` tiene **dos orígenes**: un drop a nivel de tool (colisión de nombre, schema sobredimensionado, o una tool listada en `mcp.tools` que el servidor no publica) y **también** un fallo a nivel de servidor, que además ya se reportó de forma estructurada en `mcp.server_unavailable`. Uno por nota. |
@@ -218,6 +219,11 @@ tenerla escrita, porque define qué cubre esta instrumentación y qué no.
   modelo es notificado, el turno sigue — nunca hace fallar el grafo. Se reporta
   con `mcp.server_unavailable` y `reason = "not_allowed"`.
 
+- **Direcciones no públicas, ENCENDIDO por defecto.** El cliente solo marca unicast
+  global (la tabla de `isGlobalUnicast` de ADP), decidido dentro de la resolución DNS
+  que usa el socket, más un chequeo del host IP literal; sin redirecciones ni proxy.
+  `COLMENA_MCP_ALLOW_PRIVATE_HOSTS=1`/`true` lo apaga — solo desarrollo local; se lee una vez por proceso.
+
 **Lo que NO está controlado, y hay que decirlo:**
 
 - **La allowlist no resuelve el confused deputy.** Acota A DÓNDE puede ir el
@@ -225,7 +231,7 @@ tenerla escrita, porque define qué cubre esta instrumentación y qué no.
   del rechazo de secure values. Si el modelo decide mandarle a un host permitido
   algo que tenía en contexto, sale igual.
 - **Sin allowlist configurada, cualquier URL HTTPS declarada en el grafo es
-  alcanzable**, incluidos endpoints internos. Es superficie SSRF: la decide quien
+  alcanzable** si su dirección es pública. Es superficie SSRF: la decide quien
   escribe el grafo, y cerrarla es responsabilidad explícita del operador vía la
   variable de entorno de arriba.
 
