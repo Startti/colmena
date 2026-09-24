@@ -529,6 +529,28 @@ mod subgraph_tool_input_config_tests {
     }
 
     #[test]
+    fn within_one_container_inline_and_path_come_before_a_ref() {
+        // The order of CHILD_GRAPH_SOURCE_KEYS is a contract: inline, path, ref.
+        let mut inputs: NodeInputs = NodeInputs::new();
+        inputs.insert("child_graph_ref".to_string(), json!({ "agent_id": "a1" }));
+        inputs.insert(
+            "child_graph_inline".to_string(),
+            json!({ "from": "inline" }),
+        );
+        assert_eq!(
+            resolve_graph_source(&inputs, &json!({})),
+            Some(json!({ "from": "inline" }))
+        );
+
+        let config =
+            json!({ "child_graph_ref": { "agent_id": "a1" }, "child_graph_path": "./p.json" });
+        assert_eq!(
+            resolve_graph_source(&NodeInputs::new(), &config),
+            Some(json!("./p.json"))
+        );
+    }
+
+    #[test]
     fn returns_none_when_neither_config_nor_inputs_has_source() {
         let inputs: NodeInputs = NodeInputs::new();
         let config = json!({});
