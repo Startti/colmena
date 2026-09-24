@@ -361,6 +361,8 @@ pub fn fold_catalog(
 
 #[cfg(test)]
 mod tests {
+    use super::super::dispatch::McpDispatcher;
+    use super::super::expose::collect_mcp_tool_configs;
     use super::*;
     use crate::llm::domain::mcp::normalize;
     use serde_json::json;
@@ -690,6 +692,86 @@ mod tests {
             "MCP took a name Colmena had already claimed"
         );
         assert!(f.routes.is_empty(), "and it left a route behind");
+    }
+
+    /// ONE notion of alias, end to end. A platform keys the entry by node id and
+    /// names it in `name`; the model must be offered `deepwiki__<tool>` AND a
+    /// call to that name must route back and find a binding. If exposure took
+    /// the name while routes or bindings kept the key, the tool would be
+    /// offered under one alias and undispatchable under the other.
+    #[tokio::test]
+    async fn the_alias_from_name_is_the_one_exposed_routed_bound_and_dispatched() {
+        const NODE_ID: &str = "cmubmxq86001301s6gpndaze2";
+        let raw = json!({
+            NODE_ID: {
+                "node_type": "mcp", "name": "deepwiki",
+                "mcp": { "url": "https://mcp.deepwiki.com/mcp" }
+            }
+        });
+        let specs = collect_mcp_tool_configs(&raw);
+        let (alias, spec) = specs.iter().next().expect("one server");
+        let binding = bind(alias, spec, None, "s1", None)
+            .await
+            .expect("no credentials to resolve");
+        let fetched: Vec<Fetched> = vec![(
+            alias,
+            0,
+            Ok((binding, Arc::new(vec![descriptor("ask_question")]))),
+        )];
+
+        let mut claimed = HashSet::new();
+        let w = assemble(&specs, fetched, &mut claimed);
+
+        let exposed: Vec<&str> = w.definitions.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(exposed, vec!["deepwiki__ask_question"]);
+        assert_eq!(
+            w.routes
+                .get("deepwiki__ask_question")
+                .map(|r| r.alias.as_str()),
+            Some("deepwiki")
+        );
+        assert_eq!(
+            w.bindings.get("deepwiki").map(|b| b.alias.as_str()),
+            Some("deepwiki"),
+            "the route's alias must find its binding"
+        );
+        assert!(
+            !format!("{exposed:?} {:?} {:?}", w.routes, w.bindings.keys()).contains(NODE_ID),
+            "the node id must not leak into any alias"
+        );
+
+        let d = McpDispatcher::new(Arc::new(McpConnectionRegistry::new()), w.routes, w.bindings);
+        assert!(d.owns("deepwiki__ask_question"));
+        assert!(!d.owns(&normalize(NODE_ID, "ask_question")));
+    }
+
+    /// The degraded path names the server too — in the model's system
+    /// message. It must be the same alias the model would have seen on the
+    /// tools, not the node id.
+    #[tokio::test]
+    async fn an_unavailable_server_is_named_by_its_alias_not_its_key() {
+        let raw = json!({
+            "cmubmxq86001301s6gpndaze2": {
+                "node_type": "mcp", "name": "deepwiki",
+                // RFC 6761: never resolves. 1s so a blocking resolver cannot
+                // hang the test for the 30s default.
+                "mcp": { "url": "https://invalid./mcp", "timeout_seconds": 1 }
+            }
+        });
+        let specs = collect_mcp_tool_configs(&raw);
+        let mut claimed = HashSet::new();
+
+        let w = wire(
+            &McpConnectionRegistry::new(),
+            &specs,
+            &mut claimed,
+            None,
+            "s1",
+            None,
+        )
+        .await;
+
+        assert_eq!(w.unavailable, vec!["deepwiki".to_string()]);
     }
 
     /// The label is what a dashboard or alert keys on — it must not silently

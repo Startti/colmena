@@ -116,7 +116,10 @@ fn measure() -> Measured {
 // Bumped 321 -> 322: adds tests/graphs/agents/provider_key_id_usage_e2e.json,
 // the Task 5/5 E2E for `llm_call.config.provider_key_id` (one node configures
 // it, a sibling does not; both run under the same trigger). Lints clean.
-const EXPECTED_FILES: usize = 322;
+// Bumped 322 -> 323: adds tests/graphs/agents/mcp_deepwiki_named_e2e.json (an
+// MCP entry keyed by node id and named in `name`, the shape ADP compiles; the
+// model must see `deepwiki__<tool>`, not `<node-id>__<tool>`). Lints clean.
+const EXPECTED_FILES: usize = 323;
 const EXPECTED_ERRORS: usize = 0;
 const EXPECTED_WARNINGS: usize = 0;
 const EXPECTED_INFOS: usize = 0;

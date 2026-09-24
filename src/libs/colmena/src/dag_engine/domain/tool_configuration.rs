@@ -528,12 +528,14 @@ pub struct ToolConfiguration {
     /// needed when the key is not the name you want the model to see — the
     /// frontend uses UUID keys, for instance.
     ///
-    /// Made optional because an `mcp` entry has no single tool name to give: the
-    /// server publishes many, and the key is the ALIAS that prefixes all of
-    /// them. Requiring it there forced the alias to be repeated for nothing, and
-    /// a graph that omitted it failed to load with `missing field 'name'` —
-    /// which is how the first live MCP run failed, against a configuration
-    /// written exactly as the canonical reference documented it.
+    /// On an `mcp` entry this is the server's ALIAS — the prefix of every
+    /// `<alias>__<tool>` it exposes — with the same fallback to the key
+    /// (`collect_mcp_tool_configs` decides it, once, for exposure, routes and
+    /// bindings alike). Made optional because requiring it there forced the
+    /// alias to be repeated for nothing, and a graph that omitted it failed to
+    /// load with `missing field 'name'` — which is how the first live MCP run
+    /// failed, against a configuration written exactly as the canonical
+    /// reference documented it.
     #[serde(default)]
     pub name: String,
 
@@ -645,6 +647,10 @@ impl ToolConfiguration {
     /// must apply this same fallback or it will render a nameless entry. The
     /// dispatch path in `dag_tool_executor` has always done this; the lazy
     /// catalog must too.
+    ///
+    /// `name` is returned verbatim. An `mcp` entry's alias is decided in
+    /// `collect_mcp_tool_configs`, which also TRIMS it; the two never judge the
+    /// same entry, because the lazy catalog never lists an `mcp` one.
     pub fn effective_name<'a>(&'a self, map_key: &'a str) -> &'a str {
         if self.name.is_empty() {
             map_key
@@ -658,8 +664,8 @@ impl ToolConfiguration {
     ///
     /// Two kinds of entry do not. An `eager` tool always ships its full schema
     /// up front and never enters the catalog. An `mcp` entry is a **server**,
-    /// not a tool: it publishes many and its map key is the alias that prefixes
-    /// them, so listing the entry itself would show the model a line it cannot
+    /// not a tool: it publishes many and its alias (`name`, else the map key)
+    /// prefixes them, so listing the entry itself would show the model a line it cannot
     /// act on — and since `name` is optional on an `mcp` entry, that line would
     /// carry no name at all.
     ///
