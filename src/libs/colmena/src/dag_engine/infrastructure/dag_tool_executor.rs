@@ -899,6 +899,29 @@ impl DagToolExecutor {
         }
     }
 
+    /// The parameter names the model was shown for this tool: the configured
+    /// tool's definition, or — for a node called by its raw registry name — the
+    /// `inputs` its schema advertises (what `available_tools` lists for it).
+    fn offered_params(
+        &self,
+        tool_name: &str,
+        tool_cfg: Option<&ToolConfiguration>,
+        node: &Arc<dyn ExecutableNode>,
+    ) -> std::collections::HashSet<String> {
+        match tool_cfg {
+            Some(cfg) => self
+                .generate_tool_definition(tool_name, cfg, node)
+                .map(|def| def.parameters.properties.into_keys().collect())
+                .unwrap_or_default(),
+            None => node
+                .schema()
+                .get("inputs")
+                .and_then(Value::as_object)
+                .map(|inputs| inputs.keys().cloned().collect())
+                .unwrap_or_default(),
+        }
+    }
+
     /// Build the tool definition sent to the LLM, then auto-expose the `thread_id`
     /// selector when `memory_mode` is `dynamic`. Delegates the base shape to
     /// [`Self::generate_base_tool_definition`] so the injection applies uniformly
@@ -2047,6 +2070,11 @@ impl DagToolExecutor {
         // strategies below (node_schema, $DYNAMIC, legacy field_mapping) or
         // the no-fixed_config passthrough.
         Self::strip_engine_keys(&mut args);
+        // Same place, same reason: a child-graph source the tool never offered.
+        crate::dag_engine::infrastructure::node_schema_merge::drop_unoffered_child_graph_sources(
+            &mut args,
+            || self.offered_params(node_type, tool_cfg, &node),
+        );
 
         // 3. Build final_args with node_schema, $DYNAMIC substitution, or legacy field_mapping
         let inputs = if let Some(schema) = tool_cfg.and_then(|c| c.node_schema.as_ref()) {
@@ -6003,5 +6031,217 @@ mod inner_work_tool_boundary_tests {
             error.is_none(),
             "a successful close must not carry an error"
         );
+    }
+}
+
+/// A child-graph source (`CHILD_GRAPH_SOURCE_KEYS`) is the operator's plumbing:
+/// a model-supplied argument sets one only when the tool offered that exact key
+/// as a parameter. A REAL `SubGraphNode` runs behind the executor, so each test
+/// asserts on the graph the child actually ran, not on a merged map.
+#[cfg(test)]
+mod child_graph_source_arg_tests {
+    use super::*;
+    use crate::dag_engine::application::ports::{
+        ChildGraphRequest, ChildGraphResolveError, ChildGraphResolverPort, ResolvedChildGraph,
+        ResumeGraph, SubGraphExecutorPort,
+    };
+    use crate::dag_engine::domain::error::DagError;
+    use crate::dag_engine::infrastructure::nodes::subgraph::SubGraphNode;
+    use crate::llm::domain::FunctionCall;
+    use serde_json::json;
+    use std::io::Write;
+    use std::sync::Mutex;
+
+    fn graph(marker: &str) -> Value {
+        json!({ "nodes": { marker: { "type": "output", "config": {} } }, "edges": [] })
+    }
+
+    /// Records the graph the child was asked to run.
+    #[derive(Default)]
+    struct RanGraph(Mutex<Option<Value>>);
+    #[async_trait::async_trait]
+    impl SubGraphExecutorPort for RanGraph {
+        async fn run_subgraph(
+            &self,
+            _s: &str,
+            graph: Value,
+            _state: Value,
+            _o: Option<Arc<dyn ExecutionObserver>>,
+            _p: Option<String>,
+            _a: Option<String>,
+            _pp: Option<String>,
+        ) -> Result<Value, DagError> {
+            *self.0.lock().unwrap() = Some(graph);
+            Ok(json!({}))
+        }
+        async fn resume_subgraph(
+            &self,
+            _s: &str,
+            _a: String,
+            _g: ResumeGraph,
+            _o: Option<Arc<dyn ExecutionObserver>>,
+            _ags: Option<String>,
+            _pp: Option<String>,
+        ) -> Result<Value, DagError> {
+            Ok(Value::Null)
+        }
+        async fn find_child_session_id_for_resume(
+            &self,
+            _p: &str,
+            _n: &str,
+        ) -> Result<Option<String>, DagError> {
+            Ok(None)
+        }
+    }
+
+    /// Resolves every ref to `graph("resolved")`, recording the agent ids.
+    #[derive(Default)]
+    struct Resolver(Mutex<Vec<String>>);
+    #[async_trait::async_trait]
+    impl ChildGraphResolverPort for Resolver {
+        async fn resolve(
+            &self,
+            req: ChildGraphRequest,
+        ) -> Result<ResolvedChildGraph, ChildGraphResolveError> {
+            self.0.lock().unwrap().push(req.agent_id);
+            Ok(ResolvedChildGraph {
+                graph: graph("resolved"),
+                display_name: "Resolved".into(),
+            })
+        }
+    }
+
+    struct SubgraphRegistry(Arc<SubGraphNode>);
+    impl NodeRegistryPort for SubgraphRegistry {
+        fn get_node(&self, node_type: &str) -> Option<Arc<dyn ExecutableNode>> {
+            (node_type == "subgraph").then(|| self.0.clone() as Arc<dyn ExecutableNode>)
+        }
+        fn get_all_nodes(&self) -> HashMap<String, Arc<dyn ExecutableNode>> {
+            HashMap::from([("subgraph".to_string(), self.0.clone() as _)])
+        }
+    }
+
+    /// A graph file on disk, as a `child_graph_path` names one.
+    fn graph_file(marker: &str) -> tempfile::NamedTempFile {
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        write!(f, "{}", graph(marker)).unwrap();
+        f
+    }
+
+    /// Dispatches one call to `tool` (configured by `cfg`, or a raw node when
+    /// `None`); returns the graph the child ran and the agent ids resolved.
+    async fn dispatch(tool: &str, cfg: Option<Value>, args: Value) -> (Option<Value>, Vec<String>) {
+        let node = SubGraphNode::new();
+        let ran = Arc::new(RanGraph::default());
+        let resolver = Arc::new(Resolver::default());
+        node.executor.set(ran.clone()).ok().unwrap();
+        node.resolver.set(resolver.clone()).ok().unwrap();
+        let configs = cfg
+            .map(|c| HashMap::from([(tool.to_string(), serde_json::from_value(c).unwrap())]))
+            .unwrap_or_default();
+        let executor = DagToolExecutor::new(Arc::new(SubgraphRegistry(Arc::new(node))), configs);
+        let call = ToolCall::new(
+            "call_cg".to_string(),
+            FunctionCall::new(tool.to_string(), args.to_string()),
+        );
+        let _ = executor.execute(&call).await;
+        let ran = ran.0.lock().unwrap().clone();
+        let resolved = resolver.0.lock().unwrap().clone();
+        (ran, resolved)
+    }
+
+    /// ADP's "Run My Agent": the child comes from a fixed `child_graph_ref`.
+    fn run_my_agent() -> Value {
+        json!({
+            "name": "Run_My_Agent",
+            "node_type": "subgraph",
+            "memory_mode": "dynamic",
+            "node_schema": {
+                "agentId": { "type": "string", "required": true, "description": "agent" },
+                "prompt": { "type": "string", "required": true, "description": "prompt" },
+                "child_graph_ref": { "fixed": { "agent_id": "${agentId}" } },
+                "thread_id": { "fixed": "${agentId}" }
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn a_model_supplied_inline_graph_cannot_replace_a_fixed_ref() {
+        let args =
+            json!({ "agentId": "a1", "prompt": "hi", "child_graph_inline": graph("injected") });
+        let (ran, resolved) = dispatch("Run_My_Agent", Some(run_my_agent()), args).await;
+        assert_eq!(ran, Some(graph("resolved")));
+        assert_eq!(resolved, vec!["a1".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn a_model_supplied_path_cannot_replace_a_fixed_ref() {
+        let file = graph_file("from_disk");
+        let args = json!({ "agentId": "a1", "prompt": "hi", "child_graph_path": file.path() });
+        let (ran, resolved) = dispatch("Run_My_Agent", Some(run_my_agent()), args).await;
+        assert_eq!(ran, Some(graph("resolved")));
+        assert_eq!(resolved, vec!["a1".to_string()]);
+    }
+
+    /// Legacy shape (no `node_schema`): its unmapped args went straight to the
+    /// top level, where an inline graph outranks the fixed path.
+    #[tokio::test]
+    async fn a_legacy_fixed_path_is_not_replaced_by_a_model_supplied_inline() {
+        let file = graph_file("fixed_path");
+        let cfg = json!({
+            "name": "specialist",
+            "node_type": "subgraph",
+            "fixed_config": { "child_graph_path": file.path() }
+        });
+        let args = json!({ "task": "hi", "child_graph_inline": graph("injected") });
+        let (ran, _) = dispatch("specialist", Some(cfg), args).await;
+        assert_eq!(ran, Some(graph("fixed_path")));
+    }
+
+    /// A registered node called by its raw name offers only its schema's
+    /// `inputs` (`task` for `subgraph`), never a source.
+    #[tokio::test]
+    async fn a_raw_subgraph_call_cannot_bring_its_own_graph() {
+        let args = json!({ "task": "hi", "child_graph_inline": graph("injected") });
+        let (ran, _) = dispatch("subgraph", None, args).await;
+        assert_eq!(ran, None);
+    }
+
+    /// The asset shape — a fixed inline graph, in `fixed_config` or in
+    /// `node_schema` — already outranked any model-supplied source.
+    #[tokio::test]
+    async fn a_fixed_inline_graph_still_runs_in_both_shapes() {
+        let file = graph_file("injected_path");
+        let args = json!({ "task": "hi", "child_graph_inline": graph("injected"), "child_graph_path": file.path() });
+        let in_fixed_config = json!({
+            "name": "asset", "node_type": "subgraph",
+            "fixed_config": { "child_graph_inline": graph("asset") }
+        });
+        let in_node_schema = json!({
+            "name": "asset", "node_type": "subgraph",
+            "node_schema": {
+                "task": { "type": "string", "required": true, "description": "task" },
+                "child_graph_inline": { "fixed": graph("asset") }
+            }
+        });
+        for cfg in [in_fixed_config, in_node_schema] {
+            let (ran, _) = dispatch("asset", Some(cfg), args.clone()).await;
+            assert_eq!(ran, Some(graph("asset")));
+        }
+    }
+
+    /// An operator who DECLARES the source as a parameter hands it to the
+    /// model on purpose (`tests/graphs/agents/graph_builder/graph_builder.json`).
+    #[tokio::test]
+    async fn a_source_the_tool_declares_as_a_parameter_still_reaches_the_node() {
+        let cfg = json!({
+            "name": "probar_grafo", "node_type": "subgraph",
+            "node_schema": {
+                "child_graph_inline": { "type": "object", "required": true, "description": "graph" }
+            }
+        });
+        let args = json!({ "child_graph_inline": graph("built") });
+        let (ran, _) = dispatch("probar_grafo", Some(cfg), args).await;
+        assert_eq!(ran, Some(graph("built")));
     }
 }

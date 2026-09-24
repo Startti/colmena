@@ -12,7 +12,9 @@ use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
 use crate::dag_engine::domain::observer::{ChildScopeObserver, ExecutionObserver, NodeEvent};
 use crate::dag_engine::domain::tool_configuration::parse_node_schema;
 use crate::dag_engine::infrastructure::dag_tool_executor::DagToolExecutor;
-use crate::dag_engine::infrastructure::node_schema_merge::merge_args_into_schema;
+use crate::dag_engine::infrastructure::node_schema_merge::{
+    drop_unoffered_child_graph_sources, merge_args_into_schema, offered_params,
+};
 use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::{
     dispatch_gsheets_create_spreadsheet, dispatch_gsheets_set_range,
 };
@@ -427,6 +429,9 @@ impl ExecutableNode for ForEachNode {
                     // before it can reach the merge below, same as an ordinary
                     // tool call's arguments.
                     DagToolExecutor::strip_engine_keys(&mut row_map);
+                    drop_unoffered_child_graph_sources(&mut row_map, || {
+                        offered_params(&target_schema)
+                    });
                     let mut merged = merge_args_into_schema(&target_schema, row_map)
                         .map_err(|e| format!("row {index}: {e}"))?;
                     // Written last with `insert` (not `entry().or_insert()`):
@@ -1097,6 +1102,41 @@ mod tests {
         assert_eq!(result_output["a"], json!(1));
         assert!(result_output.get("__node_id").is_none());
         assert!(result_output.get("__colmena_resume_answer").is_none());
+    }
+
+    /// A row names a child-graph source only when the target's schema offers
+    /// that exact key as a parameter; the target's fixed ref stays in place.
+    #[tokio::test]
+    async fn a_row_sets_only_the_child_graph_sources_the_target_offers() {
+        let node = ForEachNode::new();
+        node.registry
+            .set(Arc::new(StubRegistry {
+                add: Arc::new(AddNode),
+                echo: Some(Arc::new(EchoNode)),
+            }) as Arc<dyn NodeRegistryPort>)
+            .ok();
+
+        let mut inputs: NodeInputs = HashMap::new();
+        inputs.insert(
+            "target".to_string(),
+            json!({ "node_type": "echo", "node_schema": {
+                "child_graph_ref": { "fixed": { "agent_id": "a1" } },
+                "child_graph_path": { "type": "string", "description": "declared" }
+            } }),
+        );
+        inputs.insert(
+            "items".to_string(),
+            json!([{ "child_graph_inline": { "nodes": {}, "edges": [] }, "child_graph_path": "p.json" }]),
+        );
+
+        let out = node
+            .execute(&inputs, &json!({}), &mut json!({}), None)
+            .await
+            .unwrap();
+        let seen = &out["output"]["results"][0]["output"]["output"];
+        assert!(seen.get("child_graph_inline").is_none(), "{seen}");
+        assert_eq!(seen["child_graph_path"], json!("p.json"));
+        assert_eq!(seen["child_graph_ref"], json!({ "agent_id": "a1" }));
     }
 
     /// Every row runs the same target graph and so emits the same node ids.

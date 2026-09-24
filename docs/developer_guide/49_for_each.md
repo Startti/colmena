@@ -298,6 +298,13 @@ Sin este filtro una fila podría declarar, por ejemplo,
 `"__colmena_session_id": "otra-sesion"` y colar ese valor en el merge del
 target.
 
+Por la misma razón se le quita a la fila toda fuente de grafo hijo
+(`child_graph_inline`, `child_graph_path`, `child_graph_ref`) que el
+`node_schema` del target no declare como campo visible: con un target
+`subgraph` de `child_graph_ref` fijo, una fila no puede elegir el grafo que
+corre (ver
+[22_tool_execution_flow.md](22_tool_execution_flow.md#step-4c-a-child-graph-source-the-tool-does-not-offer-is-dropped)).
+
 El contexto reenviado (`__colmena_subgraph_depth`,
 `__colmena_session_id`, `__colmena_agent_session_id` — la lista de arriba)
 es **autoritativo**: se escribe con `insert()` (no

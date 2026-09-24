@@ -170,6 +170,14 @@ La exclusión sale de una constante única en `domain/child_graph_source.rs`
 fuente nueva del grafo hijo queda invisible para el hijo por construcción, sin
 mantener una segunda lista.
 
+La misma constante decide qué no puede traer el modelo: un argumento con una de
+esas claves que la tool no ofrece como parámetro se descarta antes del merge
+([guía 22, Step 4c](22_tool_execution_flow.md#step-4c-a-child-graph-source-the-tool-does-not-offer-is-dropped)).
+Sin eso, un `child_graph_inline` agregado a la llamada le ganaba al
+`child_graph_ref` fijo y el worker corría el grafo que escribió el modelo.
+Declarar la fuente como parámetro (`"child_graph_inline": { "type": "object" }`)
+se lo entrega al modelo a propósito, con un `python_script` sin sandbox incluido.
+
 ### Entrada
 
 Por defecto el LLM ve un único parámetro `task` (string), que se inyecta como

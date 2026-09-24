@@ -291,6 +291,23 @@ A `for_each` row goes through the same strip (`ForEachNode`, in
 `nodes/for_each.rs`) before its own merge into the target's schema — see
 [49_for_each.md](49_for_each.md#las-claves-de-fila-se-filtran-antes-del-merge).
 
+#### Step 4c: A child-graph source the tool does not offer is dropped
+
+**Function:** `drop_unoffered_child_graph_sources()` in
+[node_schema_merge.rs](../../src/libs/colmena/src/dag_engine/infrastructure/node_schema_merge.rs),
+called right after `strip_engine_keys()`, and by `for_each` for each row.
+
+A `subgraph` tool reads its graph from `inputs` (inline > path > ref, the order
+of `CHILD_GRAPH_SOURCE_KEYS`), where undeclared arguments land too: a model that
+added `child_graph_inline` or `child_graph_path` outranked the operator's fixed
+`child_graph_ref` or path and chose the graph the worker ran. Any of those keys
+the tool does not offer is now removed before Step 5, with a warning that names
+the key, never its value. "Offered" = the parameters of the definition the model
+was sent (for a raw node name, its schema's `inputs`: `task` for `subgraph`); for
+a `for_each` row, the target's LLM-visible fields. A declared source still passes
+(`probar_grafo` in `tests/graphs/agents/graph_builder/graph_builder.json`) — and
+hands the model the worker: `python_script` without sandbox, `${VAR}` from env.
+
 ---
 
 ### Step 5: Merge Fixed Values + LLM Arguments

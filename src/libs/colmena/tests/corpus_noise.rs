@@ -126,7 +126,10 @@ fn measure() -> Measured {
 // (a resumed inline child runs the parent's current graph; turn 2 — config or
 // structure changed — is derived with jq at E2E time, not committed, per its
 // folder README). Lints clean.
-const EXPECTED_FILES: usize = 325;
+// Bumped 325 -> 326: adds tests/graphs/security/tool_child_graph_source_e2e.json
+// (a model-supplied child-graph source the tool does not offer is dropped).
+// Lints clean.
+const EXPECTED_FILES: usize = 326;
 const EXPECTED_ERRORS: usize = 0;
 const EXPECTED_WARNINGS: usize = 0;
 const EXPECTED_INFOS: usize = 0;
