@@ -3423,3 +3423,46 @@ después. OpenAI (que deja los `system` en su lugar) también recibe el arreglo 
 Tests: 4 nuevos en `history_compaction`. Guía: [§15](developer_guide/15_memory_guide.md).
 
 **ADP.** Sin cambio de contrato; basta con subir el tag.
+
+## 65. Fix: una tool-subgrafo reanudada devuelve su salida, no el estado del hijo
+
+Vale para **todo** subgrafo usado como tool, no solo para `child_graph_ref` (spec
+1.7, PR 1/5). La rama de resume de `SubGraphNode::execute` devolvía el `result`
+crudo del hijo — el mapa completo de sus nodos, `__colmena_session_id` incluido —
+en vez de extraer el nodo marcado `__colmena_is_output_node`, que es lo que el
+camino fresco siempre hizo. Un hijo con más de un nodo (p. ej. un `llm_call`
+seguido de `output`) filtraba al modelo el output crudo de cada nodo intermedio
+en cuanto el usuario contestaba una pregunta de HITL.
+
+**Qué cambió.** Nueva asociada privada `SubGraphNode::extract_final_output(result:
+&Value) -> Value`, compartida por las dos ramas: el camino fresco (que ya hacía
+esta búsqueda inline) y el de resume (que no la hacía). Además,
+`DagToolExecutor::execute_with_resume_answer` ahora pasa su resultado por
+`scrub_tool_result_output` antes de devolverlo — el mismo recorte de tamaño que
+`ToolExecutor::execute` ya aplicaba en el camino fresco, y que el resume se
+saltaba.
+
+**Tests.** `resume_returns_the_output_node_not_the_whole_child_state` (TDD
+red-first: fallaba en `assert_eq!(out["output"], json!(42))` porque `out` era el
+mapa entero) en `subgraph.rs`, nueva variante de stub `Behavior::ResumeWithOutputs`.
+`execute_with_resume_answer_scrubs_the_tool_result_like_execute` (TDD red-first:
+la salida contenía los 60 000 caracteres sin recortar) en `dag_tool_executor.rs`,
+reusa el armado de `execute_with_resume_answer_threads_value_into_node_inputs` vía
+el nuevo `resume_answer_fixture()`.
+
+**E2E.** `tests/graphs/agents/subgraph_tool_hitl.json` (T4: el padre `llm_call`
+expone `reservar` como tool-subgrafo; el hijo `sub/suspending_agent.json` tiene dos
+nodos, `agent` y `out`, y suspende con `preguntar_usuario`), `gemini-2.5-flash`,
+Postgres local. Run 1 (`--agent-session-id`) termina en SUSPENDED; run 2 responde
+con `--answer "Q[reserva_num_personas]: … A[reserva_num_personas]: 4 personas"`.
+Se lee el mensaje `tool` que el padre guarda en `llm_node_history` (lo que el
+modelo relee), con este fix y con `develop` sin él:
+
+| | Claves del resultado de `reservar` al reanudar | Largo |
+|---|---|---|
+| con el fix | `result`, `extra_info` | 116 |
+| `develop` (control) | `agent`, `out`, `__colmena_session_id` | 451 |
+
+Capturas en `/tmp/colmena_e2e/subgraph_resume_output_{fix,base}_{1,2}.sse`.
+
+**ADP.** [Nota de migración](adp_migration/2026-09-23-subgraph-resume-output.md).
