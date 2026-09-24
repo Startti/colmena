@@ -27,7 +27,9 @@ use crate::llm::domain::tools::ToolDefinition;
 
 use super::allowlist::{allowed_hosts_from_env, host_for_log, url_is_allowed};
 use super::bind::{bind, McpBinding};
-use super::expose::{drop_colliding, exposed_definitions};
+use super::expose::{
+    allowed_catalog, drop_colliding, exposed_definitions, unpublished_listed_tools,
+};
 
 /// Why a server dropped out of a turn. A stable label for the log, distinct
 /// from the human-facing note text (which is free-form and may change).
@@ -191,10 +193,8 @@ fn assemble(
     let mut by_alias: HashMap<&String, _> =
         fetched.into_iter().map(|(a, ms, r)| (a, (ms, r))).collect();
 
-    for alias in specs.keys() {
-        let host = specs
-            .get(alias)
-            .map_or_else(|| "<unparseable>".to_string(), |s| host_for_log(&s.url));
+    for (alias, spec) in specs {
+        let host = host_for_log(&spec.url);
 
         // Every alias has an entry — one future was spawned per spec key — so
         // this is unreachable from `wire`. Taken rather than unwrapped anyway,
@@ -235,7 +235,7 @@ fn assemble(
             }
         };
 
-        let folded = fold_catalog(alias, &catalog, claimed);
+        let folded = fold_catalog(alias, spec, &catalog, claimed);
         let tools = folded.definitions.len();
         out.notes.extend(folded.notes);
         out.routes.extend(folded.routes);
@@ -319,15 +319,24 @@ pub struct Folded {
 /// The caller is responsible for calling this with EVERY name Colmena has
 /// already claimed. `drop_colliding`'s contract is that an MCP tool always
 /// loses a contested name, and that is only true if `claimed` is complete.
+///
+/// `spec.tools` is applied HERE, before anything is exposed, because this is
+/// the only production path to [`exposed_definitions`]. A tool it filters out
+/// gets no definition, so it never claims a name and never gets a route:
+/// `McpDispatcher::owns` is false for it, and a call the model invents never
+/// reaches the server.
 pub fn fold_catalog(
     alias: &str,
+    spec: &McpServerSpec,
     catalog: &[McpToolDescriptor],
     claimed: &mut HashSet<String>,
 ) -> Folded {
-    let (defs, origins, skipped) = exposed_definitions(alias, catalog);
+    let allowed = allowed_catalog(spec, catalog.to_vec());
+    let (defs, origins, skipped) = exposed_definitions(alias, &allowed);
     let (kept, collisions) = drop_colliding(defs, claimed);
 
-    let mut notes = skipped;
+    let mut notes = unpublished_listed_tools(alias, spec, catalog);
+    notes.extend(skipped);
     notes.extend(collisions);
 
     let mut routes = BTreeMap::new();
@@ -361,7 +370,7 @@ pub fn fold_catalog(
 
 #[cfg(test)]
 mod tests {
-    use super::super::dispatch::McpDispatcher;
+    use super::super::dispatch::{DispatchKind, McpDispatcher};
     use super::super::expose::collect_mcp_tool_configs;
     use super::*;
     use crate::llm::domain::mcp::normalize;
@@ -374,6 +383,18 @@ mod tests {
             description: "does a thing".to_string(),
             input_schema: json!({ "type": "object" }),
         }
+    }
+
+    /// A spec with no `tools` list — every tool the server publishes.
+    fn open_spec() -> McpServerSpec {
+        serde_json::from_value(json!({ "url": "https://mcp.example.com/mcp" }))
+            .expect("spec parses")
+    }
+
+    /// A spec exposing only `tools`.
+    fn listing(tools: &[&str]) -> McpServerSpec {
+        serde_json::from_value(json!({ "url": "https://mcp.example.com/mcp", "tools": tools }))
+            .expect("spec parses")
     }
 
     /// A server that cannot be reached must cost the agent its tools, not its
@@ -463,7 +484,7 @@ mod tests {
         let catalog = vec![descriptor("resolve-library-id")];
         let mut claimed = HashSet::new();
 
-        let f = fold_catalog("ctx7", &catalog, &mut claimed);
+        let f = fold_catalog("ctx7", &open_spec(), &catalog, &mut claimed);
 
         assert_eq!(f.definitions.len(), 1);
         let exposed = f.definitions[0].name.clone();
@@ -488,7 +509,7 @@ mod tests {
         let catalog = vec![descriptor("foo.bar"), descriptor("foo/bar")];
         let mut claimed = HashSet::new();
 
-        let f = fold_catalog("srv", &catalog, &mut claimed);
+        let f = fold_catalog("srv", &open_spec(), &catalog, &mut claimed);
 
         assert_eq!(f.definitions.len(), 1, "the twin must not be exposed");
         assert_eq!(f.routes.len(), 1, "and it must not leave a route");
@@ -504,8 +525,8 @@ mod tests {
     #[test]
     fn a_second_server_cannot_displace_the_first() {
         let mut claimed = HashSet::new();
-        let a = fold_catalog("srv", &[descriptor("search")], &mut claimed);
-        let b = fold_catalog("srv", &[descriptor("search")], &mut claimed);
+        let a = fold_catalog("srv", &open_spec(), &[descriptor("search")], &mut claimed);
+        let b = fold_catalog("srv", &open_spec(), &[descriptor("search")], &mut claimed);
 
         assert_eq!(a.definitions.len(), 1);
         assert!(
@@ -544,7 +565,7 @@ mod tests {
         ];
         let mut claimed = HashSet::new();
 
-        let f = fold_catalog("srv", &catalog, &mut claimed);
+        let f = fold_catalog("srv", &open_spec(), &catalog, &mut claimed);
 
         assert_eq!(
             f.definitions.len(),
@@ -685,7 +706,7 @@ mod tests {
         let taken = normalize("srv", "search");
         claimed.insert(taken.clone());
 
-        let f = fold_catalog("srv", &[descriptor("search")], &mut claimed);
+        let f = fold_catalog("srv", &open_spec(), &[descriptor("search")], &mut claimed);
 
         assert!(
             f.definitions.is_empty(),
@@ -743,6 +764,103 @@ mod tests {
         let d = McpDispatcher::new(Arc::new(McpConnectionRegistry::new()), w.routes, w.bindings);
         assert!(d.owns("deepwiki__ask_question"));
         assert!(!d.owns(&normalize(NODE_ID, "ask_question")));
+    }
+
+    /// The second link of the allowlist. A tool left out of `tools` gets no
+    /// definition, so it gets no route — and the dispatcher refuses it even
+    /// when the model names it anyway. A model can emit any string; hiding a
+    /// tool from `tools[]` is only half of the control.
+    #[tokio::test]
+    async fn an_unlisted_tool_is_not_routed_and_the_dispatcher_refuses_it() {
+        let spec = listing(&["search"]);
+        let mut specs = BTreeMap::new();
+        specs.insert("srv".to_string(), spec.clone());
+        let binding = bind("srv", &spec, None, "s1", None)
+            .await
+            .expect("no credentials to resolve");
+        let alias = specs.keys().next().expect("one alias");
+        let catalog = vec![descriptor("search"), descriptor("delete_everything")];
+        let fetched: Vec<Fetched> = vec![(alias, 0, Ok((binding, Arc::new(catalog))))];
+
+        let mut claimed = HashSet::new();
+        let w = assemble(&specs, fetched, &mut claimed);
+
+        let exposed: Vec<&str> = w.definitions.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(exposed, vec!["srv__search"]);
+        assert!(!w.routes.contains_key("srv__delete_everything"));
+        assert!(
+            !claimed.contains("srv__delete_everything"),
+            "a tool that was never exposed must not claim a name either"
+        );
+
+        let d = McpDispatcher::new(Arc::new(McpConnectionRegistry::new()), w.routes, w.bindings);
+        assert!(d.owns("srv__search"));
+        assert!(!d.owns("srv__delete_everything"));
+        let refused = d.call("srv__delete_everything", json!({}), "call_1").await;
+        assert!(refused.failed);
+        assert_eq!(refused.kind, DispatchKind::Unrouted);
+    }
+
+    /// The list is applied BEFORE the per-server ceiling, so a listed tool
+    /// that sits past it on a large server is still exposed. The ceiling
+    /// bounds what reaches the model; a list already does, and a tool the
+    /// operator chose must not vanish for being late in the catalog.
+    #[test]
+    fn a_listed_tool_past_the_per_server_ceiling_is_still_exposed() {
+        use crate::llm::domain::mcp::MCP_MAX_TOOLS_PER_SERVER;
+        let catalog: Vec<McpToolDescriptor> = (0..MCP_MAX_TOOLS_PER_SERVER + 10)
+            .map(|i| descriptor(&format!("tool_{i}")))
+            .collect();
+        let last = format!("tool_{}", MCP_MAX_TOOLS_PER_SERVER + 9);
+        let mut claimed = HashSet::new();
+
+        let f = fold_catalog("srv", &listing(&[&last]), &catalog, &mut claimed);
+
+        let exposed: Vec<&str> = f.definitions.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(exposed, vec![normalize("srv", &last).as_str()]);
+        assert!(f.notes.is_empty(), "nothing was dropped: {:?}", f.notes);
+    }
+
+    /// A listed tool the server no longer publishes — renamed, removed — is
+    /// not exposed, and the operator is told, like every other drop here.
+    #[test]
+    fn a_listed_tool_the_server_does_not_publish_is_reported() {
+        let mut claimed = HashSet::new();
+
+        let f = fold_catalog(
+            "srv",
+            &listing(&["search", "gone", "gone"]),
+            &[descriptor("search")],
+            &mut claimed,
+        );
+
+        assert_eq!(f.definitions.len(), 1, "the published one is exposed");
+        assert_eq!(f.notes.len(), 1, "one note per missing tool: {:?}", f.notes);
+        assert!(
+            f.notes[0].contains("'gone'") && f.notes[0].contains("'srv'"),
+            "the note names the tool and the server: {}",
+            f.notes[0]
+        );
+    }
+
+    /// The list is matched by RAW name, before `normalize` and the same-server
+    /// dedup. `foo/bar` and `foo.bar` both normalise to `srv__foo_bar`, and the
+    /// unlisted one comes first: matching after normalisation would let it take
+    /// the listed tool's exposed name — and its route.
+    #[test]
+    fn the_list_is_matched_by_raw_name_before_normalisation() {
+        let catalog = vec![descriptor("foo/bar"), descriptor("foo.bar")];
+        let mut claimed = HashSet::new();
+
+        let f = fold_catalog("srv", &listing(&["foo.bar"]), &catalog, &mut claimed);
+
+        let route = f.routes.get("srv__foo_bar").map(|r| r.tool.as_str());
+        assert_eq!(route, Some("foo.bar"), "the listed tool owns the name");
+        assert!(
+            f.routes.values().all(|r| r.tool != "foo/bar"),
+            "no route may reach the unlisted tool: {:?}",
+            f.routes.values().map(|r| &r.tool).collect::<Vec<_>>()
+        );
     }
 
     /// The degraded path names the server too — in the model's system

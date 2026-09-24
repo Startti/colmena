@@ -289,6 +289,13 @@ pub struct McpServerSpec {
     pub transport: McpTransport,
     #[serde(default)]
     pub headers: BTreeMap<String, String>,
+    /// The server's tools to expose to the model, by the server's OWN names
+    /// (verbatim, e.g. `resolve-library-id` — not the exposed
+    /// `<alias>__<tool>` form). Absent, `null` or empty = every tool, which is the
+    /// behavior before this field existed, so no existing graph changes.
+    /// A tool left out gets no definition AND no dispatch route.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<String>>,
     #[serde(default = "default_mcp_timeout_seconds")]
     pub timeout_seconds: u64,
     #[serde(default = "default_mcp_cache_ttl_seconds")]
@@ -437,7 +444,7 @@ pub fn first_parse_rejection(schema: &NodeSchema) -> Option<String> {
 ///
 /// It lists EVERY key, not just the offending one — serde does not report which
 /// field it disliked, and re-deriving that would mean restating the spec here,
-/// where it would rot. With at most five keys the reader finds it immediately
+/// where it would rot. With at most six keys the reader finds it immediately
 /// by comparing against the accepted-fields list the caller appends. The
 /// alternative, staying silent about the shapes, would trade a leak for an
 /// unfixable message.
@@ -506,7 +513,8 @@ pub fn validate_mcp_config(node_type: &str, tool_cfg: &Value) -> Result<(), Stri
             return Err(format!(
                 "the 'mcp' block on this tool is malformed ({}). Valid fields are \
                  url, transport (streamable_http | sse), headers (string map), \
-                 timeout_seconds and cache_ttl_seconds",
+                 tools (list of the server's tool names), timeout_seconds and \
+                 cache_ttl_seconds",
                 describe_object_shapes(block)
             ));
         }
@@ -1060,6 +1068,31 @@ mod tests {
         assert!(spec.headers.is_empty());
         assert_eq!(spec.timeout_seconds, DEFAULT_MCP_TIMEOUT_SECONDS);
         assert_eq!(spec.cache_ttl_seconds, DEFAULT_MCP_CACHE_TTL_SECONDS);
+        assert_eq!(spec.tools, None, "no list means every tool, as before");
+    }
+
+    /// `tools` is part of the typed block, so a wrong shape fails the load
+    /// like any other malformed field — and the message lists it among the
+    /// valid ones, or the operator has no way to find the fix.
+    #[test]
+    fn a_tools_field_that_is_not_a_list_of_names_fails_the_load() {
+        for bad in [json!("search"), json!([1, 2]), json!({ "search": true })] {
+            let cfg = mcp_cfg(
+                MCP_NODE_TYPE,
+                json!({ "url": "https://mcp.example.com/mcp", "tools": bad }),
+            );
+            let err = validate_mcp_config(MCP_NODE_TYPE, &cfg).unwrap_err();
+            assert!(
+                err.contains("tools (list of the server's tool names)"),
+                "the valid-fields list must name `tools`: {err}"
+            );
+        }
+
+        let good = mcp_cfg(
+            MCP_NODE_TYPE,
+            json!({ "url": "https://mcp.example.com/mcp", "tools": ["search"] }),
+        );
+        assert!(validate_mcp_config(MCP_NODE_TYPE, &good).is_ok());
     }
 
     /// Fail-closed: an `mcp` tool with no reachable address is not a tool.

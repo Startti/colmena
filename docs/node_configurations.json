@@ -3390,7 +3390,7 @@
         "defined_in": "src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/sql_bulk_tools.rs"
       },
       "mcp": {
-        "description": "A remote MCP server, not a tool. The sibling `mcp` block carries the server spec; the entry's `name` (else its map key) is the alias prefixing every tool that server publishes. `Graph::validate` fails the graph closed when an `mcp` block sits on any other node_type.",
+        "description": "A remote MCP server, not a tool. The sibling `mcp` block carries the server spec; the entry's `name` (else its map key) is the alias prefixing every tool that server publishes, and an optional `mcp.tools` list narrows which of them are exposed. `Graph::validate` fails the graph closed when an `mcp` block sits on any other node_type.",
         "activated_by": "node_type",
         "defined_in": "src/libs/colmena/src/dag_engine/domain/tool_configuration.rs"
       }
