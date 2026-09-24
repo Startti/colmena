@@ -5,8 +5,8 @@
 
 **How to use (for the exploration/spec phase):** before opening files to assess a change, look up the target file below. **Used by** is its blast radius — the files that break if you change its public surface. **Depends on** is what it needs. Start by reading only those, not the whole repo.
 
-- Files indexed: **383**
-- Modules with at least one importer: **174**
+- Files indexed: **384**
+- Modules with at least one importer: **175**
 
 ## Blast-radius ranking (change these with the most care)
 
@@ -27,9 +27,9 @@
 | 13 | `llm::infrastructure` | `src/libs/colmena/src/llm/infrastructure/mod.rs` |
 | 13 | `storage::domain` | `src/libs/colmena/src/storage/domain/mod.rs` |
 | 12 | `dag_engine::application::secure_value_service` | `src/libs/colmena/src/dag_engine/application/secure_value_service.rs` |
+| 11 | `dag_engine::application::ports` | `src/libs/colmena/src/dag_engine/application/ports.rs` |
 | 11 | `documents::domain::ports` | `src/libs/colmena/src/documents/domain/ports.rs` |
 | 11 | `text` | `src/libs/colmena/src/text/mod.rs` |
-| 10 | `dag_engine::application::ports` | `src/libs/colmena/src/dag_engine/application/ports.rs` |
 | 10 | `dag_engine::infrastructure::pool_registry` | `src/libs/colmena/src/dag_engine/infrastructure/pool_registry/mod.rs` |
 | 10 | `documents::domain::artifact` | `src/libs/colmena/src/documents/domain/artifact.rs` |
 | 10 | `documents::domain::patch` | `src/libs/colmena/src/documents/domain/patch.rs` |
@@ -210,7 +210,7 @@
 
 #### `src/libs/colmena/src/dag_engine/application/ports.rs`
 - Module: `dag_engine::application::ports`
-- **Used by (10)**: `src/libs/colmena/src/dag_engine/application/run_use_case.rs`, `src/libs/colmena/src/dag_engine/infrastructure/dag_tool_executor.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/for_each.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/orchestrator.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/router/node.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/subgraph.rs`, `src/libs/colmena/src/dag_engine/infrastructure/registry.rs`, `src/libs/colmena/src/node_bindings/registry.rs`, `src/libs/colmena/src/python_bindings/mod.rs`
+- **Used by (11)**: `src/libs/colmena/src/dag_engine/application/run_use_case.rs`, `src/libs/colmena/src/dag_engine/engine.rs`, `src/libs/colmena/src/dag_engine/infrastructure/dag_tool_executor.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/for_each.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/orchestrator.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/router/node.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/subgraph.rs`, `src/libs/colmena/src/dag_engine/infrastructure/registry.rs`, `src/libs/colmena/src/node_bindings/registry.rs`, `src/libs/colmena/src/python_bindings/mod.rs`
 - Depends on (2): `dag_engine::domain::error`, `dag_engine::domain::node`
 
 #### `src/libs/colmena/src/dag_engine/application/preflight.rs`
@@ -237,6 +237,11 @@
 - Module: `dag_engine::application::sql_execution_service`
 - **Used by (1)**: `src/libs/colmena/src/dag_engine/infrastructure/nodes/sql.rs`
 - Depends on (4): `dag_engine::domain::sql_errors`, `dag_engine::domain::sql_permissions`, `dag_engine::domain::sql_ports`, `dag_engine::infrastructure::sql_ast`
+
+#### `src/libs/colmena/src/dag_engine/domain/child_graph_source.rs`
+- Module: `dag_engine::domain::child_graph_source`
+- **Used by (1)**: `src/libs/colmena/src/dag_engine/infrastructure/nodes/subgraph.rs`
+- Depends on (0): — (no intra-crate imports)
 
 #### `src/libs/colmena/src/dag_engine/domain/error.rs`
 - Module: `dag_engine::domain::error`
@@ -331,7 +336,7 @@
 #### `src/libs/colmena/src/dag_engine/engine.rs`
 - Module: `dag_engine::engine`
 - **Used by (1)**: `src/libs/colmena/src/dag_engine/log_policy.rs`
-- Depends on (17): `dag_engine::application::run_use_case`, `dag_engine::application::secure_value_service`, `dag_engine::domain::error`, `dag_engine::domain::events`, `dag_engine::domain::graph`, `dag_engine::domain::state`, `dag_engine::infrastructure::persistence`, `dag_engine::infrastructure::persistence::postgres_dag_state_repository`, `dag_engine::infrastructure::pool_registry`, `dag_engine::infrastructure::registry`, `dag_engine::infrastructure::sql_port_factory`, `dag_engine::sse_mapper`, `llm::domain`, `llm::infrastructure::persistence`, `llm::infrastructure::persistence::repository_factory`, `storage::domain`, `storage::infrastructure`
+- Depends on (18): `dag_engine::application::ports`, `dag_engine::application::run_use_case`, `dag_engine::application::secure_value_service`, `dag_engine::domain::error`, `dag_engine::domain::events`, `dag_engine::domain::graph`, `dag_engine::domain::state`, `dag_engine::infrastructure::persistence`, `dag_engine::infrastructure::persistence::postgres_dag_state_repository`, `dag_engine::infrastructure::pool_registry`, `dag_engine::infrastructure::registry`, `dag_engine::infrastructure::sql_port_factory`, `dag_engine::sse_mapper`, `llm::domain`, `llm::infrastructure::persistence`, `llm::infrastructure::persistence::repository_factory`, `storage::domain`, `storage::infrastructure`
 
 #### `src/libs/colmena/src/dag_engine/infrastructure/dag_tool_executor.rs`
 - Module: `dag_engine::infrastructure::dag_tool_executor`
@@ -716,7 +721,7 @@
 #### `src/libs/colmena/src/dag_engine/infrastructure/nodes/subgraph.rs`
 - Module: `dag_engine::infrastructure::nodes::subgraph`
 - **Used by (1)**: `src/libs/colmena/src/dag_engine/infrastructure/nodes/router/node.rs`
-- Depends on (6): `dag_engine::application::ports`, `dag_engine::domain::error`, `dag_engine::domain::events`, `dag_engine::domain::lint`, `dag_engine::domain::node`, `dag_engine::domain::observer`
+- Depends on (7): `dag_engine::application::ports`, `dag_engine::domain::child_graph_source`, `dag_engine::domain::error`, `dag_engine::domain::events`, `dag_engine::domain::lint`, `dag_engine::domain::node`, `dag_engine::domain::observer`
 
 #### `src/libs/colmena/src/dag_engine/infrastructure/nodes/suspend.rs`
 - Module: `dag_engine::infrastructure::nodes::suspend`

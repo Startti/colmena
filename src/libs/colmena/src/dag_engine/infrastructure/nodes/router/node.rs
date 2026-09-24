@@ -1,6 +1,6 @@
 //! Router node — declarative branching with LLM-direct and extract+rules modes.
 
-use crate::dag_engine::application::ports::SubGraphExecutorPort;
+use crate::dag_engine::application::ports::{ChildGraphResolverPort, SubGraphExecutorPort};
 use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
 use crate::dag_engine::domain::observer::ExecutionObserver;
 use crate::llm::domain::ProviderKind;
@@ -15,6 +15,7 @@ use crate::dag_engine::domain::lint::{FieldSpec, NodeCatalogEntry};
 
 pub struct RouterNode {
     pub executor: Arc<OnceLock<Arc<dyn SubGraphExecutorPort>>>,
+    pub resolver: Arc<OnceLock<Arc<dyn ChildGraphResolverPort>>>,
 }
 
 impl Default for RouterNode {
@@ -27,6 +28,7 @@ impl RouterNode {
     pub fn new() -> Self {
         Self {
             executor: Arc::new(OnceLock::new()),
+            resolver: Arc::new(OnceLock::new()),
         }
     }
 
@@ -133,6 +135,7 @@ impl ExecutableNode for RouterNode {
                 use crate::dag_engine::infrastructure::nodes::subgraph::SubGraphNode;
                 let sg_node = SubGraphNode {
                     executor: self.executor.clone(),
+                    resolver: self.resolver.clone(),
                 };
                 let mut sg_inputs = NodeInputs::new();
                 sg_inputs.insert("input".to_string(), input_raw.clone());

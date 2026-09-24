@@ -25,6 +25,7 @@ async fn engine_boots_with_pinned_pool_and_migrates() {
         storage: Arc::new(LocalCacheStorageAdapter::new()),
         attachment_registry: None,
         liveness: Default::default(),
+        child_graph_resolver: None,
     })
     .await
     .expect("engine boots");
@@ -52,6 +53,7 @@ async fn shutdown_is_idempotent() {
         storage: Arc::new(LocalCacheStorageAdapter::new()),
         attachment_registry: None,
         liveness: Default::default(),
+        child_graph_resolver: None,
     })
     .await
     .unwrap();

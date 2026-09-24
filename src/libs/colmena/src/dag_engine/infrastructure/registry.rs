@@ -1,5 +1,5 @@
 use crate::dag_engine::application::ports::NodeRegistryPort;
-use crate::dag_engine::application::ports::SubGraphExecutorPort;
+use crate::dag_engine::application::ports::{ChildGraphResolverPort, SubGraphExecutorPort};
 use crate::dag_engine::application::secure_value_service::SecureValueService;
 use crate::dag_engine::domain::node::ExecutableNode;
 use crate::dag_engine::domain::toolkit_node::ToolkitNode;
@@ -327,11 +327,13 @@ impl HashMapNodeRegistry {
             );
 
             // --- Registrar Router ---
-            // Share the same SubGraphExecutorPort OnceLock so a single
-            // set_subgraph_executor() call below wires both nodes.
+            // Share the same SubGraphExecutorPort and ChildGraphResolverPort
+            // OnceLocks so a single set_subgraph_executor() /
+            // set_child_graph_resolver() call below wires both nodes.
             let router_node = Arc::new(
                 crate::dag_engine::infrastructure::nodes::router::RouterNode {
                     executor: sub_node.executor.clone(),
+                    resolver: sub_node.resolver.clone(),
                 },
             );
             nodes.insert(
@@ -371,6 +373,14 @@ impl HashMapNodeRegistry {
     pub fn set_subgraph_executor(&self, executor: Arc<dyn SubGraphExecutorPort>) {
         if let Some(sub) = &self.subgraph_node {
             let _ = sub.executor.set(executor);
+        }
+    }
+
+    /// Injects the embedder's resolver for `child_graph_ref` sources. Shared
+    /// with the router's branch subgraphs through the same `OnceLock`.
+    pub fn set_child_graph_resolver(&self, resolver: Arc<dyn ChildGraphResolverPort>) {
+        if let Some(sub) = &self.subgraph_node {
+            let _ = sub.resolver.set(resolver);
         }
     }
 

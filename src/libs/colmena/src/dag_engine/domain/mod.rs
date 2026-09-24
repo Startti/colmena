@@ -1,4 +1,5 @@
 // Hacemos públicos los módulos `graph` y `node`
+pub mod child_graph_source;
 pub mod error;
 pub mod events;
 pub mod graph;

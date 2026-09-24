@@ -3466,3 +3466,34 @@ modelo relee), con este fix y con `develop` sin él:
 Capturas en `/tmp/colmena_e2e/subgraph_resume_output_{fix,base}_{1,2}.sse`.
 
 **ADP.** [Nota de migración](adp_migration/2026-09-23-subgraph-resume-output.md).
+
+## 66. El puerto `ChildGraphResolverPort` y su cableado (sin comportamiento nuevo)
+
+PR 2a/5 de `child_graph_ref` (spec 1.2 y «Ajustes al planificar» 5). Prepara que un
+`subgraph` cargue su hijo **por referencia** a través de un puerto que implementa el
+embebedor; la resolución en sí llega en la entrada siguiente.
+
+**Qué cambió.** Puerto nuevo en `application/ports.rs`: `ChildGraphResolverPort`
+(`resolve(ChildGraphRequest) -> Result<ResolvedChildGraph, ChildGraphResolveError>`),
+con cinco motivos de error y `Display` = `CHILD_GRAPH_RESOLVE_FAILED:<code>: <msg>`
+(`not_found`, `forbidden`, `needs_config`, `not_runnable`, `unavailable`). Se cablea
+como `SubGraphExecutorPort`: un `OnceLock` en `SubGraphNode` que `RouterNode`
+comparte, el setter `HashMapNodeRegistry::set_child_graph_resolver` y el campo
+`EngineConfig.child_graph_resolver` (`from_env` lo deja en `None`). Las claves de
+fuente se mudan a `domain/child_graph_source.rs` y suman `child_graph_ref`: ya queda
+fuera del estado del hijo y el catálogo la acepta (tipo `object`), pero **todavía no
+se resuelve**: hasta la entrada 67, un subgrafo cuya única fuente es un ref falla con
+``Invalid sub-graph JSON: missing field `nodes` `` (medido con el CLI).
+
+**Tests.** Sin tests nuevos: no hay comportamiento nuevo que probar. Siguen verdes los
+40 de `nodes::subgraph` y los de `registry::` (incluido
+`a_migrated_node_config_schema_matches_the_catalog`, que obligó a declarar
+`child_graph_ref` en `docs/node_configurations.json`).
+
+**E2E.** Regresión, `gemini-2.5-flash`: `tests/graphs/agents/subgraph_tool_structured.json`
+corre igual que antes (3 pares `subgraph-node-start`/`-end`, la tool devuelve el clima)
+y el `node-start` del hijo lleva solo `ciudad` y `fecha`: la constante mudada sigue
+dejando afuera el plumbing. Captura en
+`/tmp/colmena_e2e/child_graph_ref_2a_regression_structured.sse`.
+
+**ADP.** [Nota de migración](adp_migration/2026-09-23-child-graph-ref.md).

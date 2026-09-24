@@ -161,7 +161,7 @@ dentro de un prompt. Es una frontera de seguridad, no prolijidad — el
 resueltos (`api_key`, y el `connection_url` que [`memory_mode`](#memoria-del-sub-agente-memory_mode)
 exige para los modos con memoria).
 
-La exclusión sale de una constante única en `subgraph.rs`
+La exclusión sale de una constante única en `domain/child_graph_source.rs`
 (`CHILD_GRAPH_SOURCE_KEYS`), compartida por el resolver y por el mapeo IN: una
 fuente nueva del grafo hijo queda invisible para el hijo por construcción, sin
 mantener una segunda lista.
