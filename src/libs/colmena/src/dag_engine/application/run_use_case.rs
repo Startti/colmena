@@ -1505,19 +1505,24 @@ impl DagRunUseCase {
         Ok(match requested {
             ResumeGraph::Stored => ResumePlan::Run(stored_graph()?),
             ResumeGraph::Unavailable(reason) => ResumePlan::Refuse(reason),
-            ResumeGraph::Fresh(fresh) => match serde_json::from_value::<Graph>(fresh) {
-                // Fixed text: a serde error can quote a value from the graph.
-                Err(_) => ResumePlan::Refuse(format!(
-                    "{SUBGRAPH_RESUME_INCOMPATIBLE} the child graph source no longer holds \
-                     a valid graph. Run it again from the start."
-                )),
-                Ok(fresh) => {
-                    match GraphSkeleton::of(&stored_graph()?).diff(&GraphSkeleton::of(&fresh)) {
-                        Some(diff) => ResumePlan::Refuse(diff.to_string()),
-                        None => ResumePlan::Run(fresh),
+            ResumeGraph::Fresh(fresh) => {
+                // Parse STORED first: its (unclosed) error wins if both are
+                // broken, over a Fresh-side refusal that would close the row.
+                let stored = stored_graph()?;
+                match serde_json::from_value::<Graph>(fresh) {
+                    // Fixed text: a serde error can quote a value from the graph.
+                    Err(_) => ResumePlan::Refuse(format!(
+                        "{SUBGRAPH_RESUME_INCOMPATIBLE} the child graph source no longer holds \
+                         a valid graph. Run it again from the start."
+                    )),
+                    Ok(fresh) => {
+                        match GraphSkeleton::of(&stored).diff(&GraphSkeleton::of(&fresh)) {
+                            Some(diff) => ResumePlan::Refuse(diff.to_string()),
+                            None => ResumePlan::Run(fresh),
+                        }
                     }
                 }
-            },
+            }
         })
     }
 
@@ -2300,6 +2305,10 @@ mod resume_graph_tests {
             graph_with("sello", "v1"),
             "the fresh graph never reaches storage"
         );
+        // `close_refused` only flips `status`; the rest of the row survives.
+        assert_eq!(row.agent_session_id, Some("chat_1".to_string()));
+        assert_eq!(row.parent_session_id, Some("root_1".to_string()));
+        assert_eq!(row.active_queue, VecDeque::from(["sello".to_string()]));
     }
 
     #[tokio::test]
@@ -2323,5 +2332,63 @@ mod resume_graph_tests {
         let out = resume(&uc, ResumeGraph::Stored).await.expect("resumes");
         assert_eq!(out["sello"]["stamp"], json!("v1"));
         assert_eq!(repo.row("child_1").status, DagRunStatus::Completed);
+    }
+
+    /// Pins the fixed text in `plan_resume`'s `Err(_) => …` branch: a serde
+    /// error can quote a value straight out of the graph.
+    #[tokio::test]
+    async fn a_fresh_graph_that_fails_to_parse_is_refused_without_leaking_the_bad_value() {
+        let (uc, repo) = suspended_child(graph_with("sello", "v1"));
+        let mut fresh = graph_with("sello", "v2");
+        fresh["nodes"]["sello"]["max_total_calls"] = json!("sk-fresh-secret");
+        let err = resume(&uc, ResumeGraph::Fresh(fresh))
+            .await
+            .expect_err("refused");
+        let text = err.to_string();
+        assert!(text.starts_with("SUBGRAPH_RESUME_INCOMPATIBLE:"), "{text}");
+        assert!(!text.contains("sk-fresh-secret"), "{text}");
+        assert_eq!(repo.row("child_1").status, DagRunStatus::Failed);
+    }
+
+    /// Adjustment 4: an unreadable STORED graph is today's error, not a
+    /// refusal — `stored_graph()?` short-circuits before `close_refused` runs.
+    #[tokio::test]
+    async fn an_unparsable_stored_graph_is_todays_error_and_does_not_close_the_row() {
+        let (uc, repo) = suspended_child(json!({ "nodes": 1, "edges": [] }));
+        let err = resume(&uc, ResumeGraph::Stored)
+            .await
+            .expect_err("today's error, not a refusal");
+        let text = err.to_string();
+        assert!(text.contains("Invalid sub-graph state JSON:"), "{text}");
+        assert!(!text.starts_with("SUBGRAPH_RESUME_INCOMPATIBLE:"), "{text}");
+        assert_eq!(repo.row("child_1").status, DagRunStatus::Suspended);
+    }
+
+    /// Adjustment 4's other no-close case: `Graph::validate()` runs *outside*
+    /// `plan_resume`, so its failure is today's error, not a `ResumeRefused`.
+    #[tokio::test]
+    async fn a_fresh_graph_that_fails_validation_does_not_close_the_row() {
+        let (uc, repo) = suspended_child(graph_with("router/inner", "v1"));
+        let err = resume(&uc, ResumeGraph::Fresh(graph_with("router/inner", "v2")))
+            .await
+            .expect_err("today's validation error, not a refusal");
+        let text = err.to_string();
+        assert!(text.contains("Invalid sub-graph:"), "{text}");
+        assert!(!text.starts_with("SUBGRAPH_RESUME_INCOMPATIBLE:"), "{text}");
+        assert_eq!(repo.row("child_1").status, DagRunStatus::Suspended);
+    }
+
+    /// `plan_resume` parses STORED before `fresh`: when both are unparsable,
+    /// the stored failure must win over a Fresh-side refusal that would close.
+    #[tokio::test]
+    async fn when_both_graphs_are_unparsable_the_stored_failure_wins_and_nothing_closes() {
+        let (uc, repo) = suspended_child(json!({ "nodes": 1, "edges": [] }));
+        let err = resume(&uc, ResumeGraph::Fresh(json!({ "nodes": 2, "edges": [] })))
+            .await
+            .expect_err("the stored failure, not a refusal");
+        let text = err.to_string();
+        assert!(text.contains("Invalid sub-graph state JSON:"), "{text}");
+        assert!(!text.starts_with("SUBGRAPH_RESUME_INCOMPATIBLE:"), "{text}");
+        assert_eq!(repo.row("child_1").status, DagRunStatus::Suspended);
     }
 }

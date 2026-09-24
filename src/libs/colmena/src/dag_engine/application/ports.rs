@@ -46,9 +46,10 @@ pub trait SubGraphExecutorPort: Send + Sync {
     ) -> Result<Value, DagError>;
 
     /// Reanuda un subgrafo suspendido tras un Human-in-the-Loop con el grafo
-    /// que diga `graph` (ver [`ResumeGraph`]). Un `Fresh` cuyo esqueleto no
-    /// calza con el guardado, o un `Unavailable`, cierra la fila del hijo como
-    /// FAILED y devuelve `DagError::ResumeRefused` sin correr nada.
+    /// que diga `graph` (ver [`ResumeGraph`]). Un `Fresh` que no parsea como
+    /// grafo, o cuyo esqueleto no calza con el guardado, o un `Unavailable`,
+    /// cierra la fila del hijo como FAILED y devuelve `DagError::ResumeRefused`
+    /// sin correr nada.
     async fn resume_subgraph(
         &self,
         session_id: &str,
@@ -76,8 +77,9 @@ pub trait SubGraphExecutorPort: Send + Sync {
 #[derive(Clone, PartialEq)]
 pub enum ResumeGraph {
     /// Derived again from the child's source (the parent's config or inputs,
-    /// the file, the resolver). The executor checks its skeleton against the
-    /// stored graph and refuses it if the structure changed.
+    /// the file, the resolver). Refused — closing the child's row — when it
+    /// does not parse as a graph, or when its skeleton does not match the
+    /// stored one.
     Fresh(Value),
     /// The source could not give a graph (the resolver refused, the file is
     /// gone). The executor closes the child's row as FAILED and returns this

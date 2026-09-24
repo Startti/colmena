@@ -3,8 +3,9 @@
 **Acción de ADP:** al subir a v0.17.0, ningún cambio de código — ADP no implementa
 `SubGraphExecutorPort` (`git grep SubGraphExecutorPort apps/`: cero). Sí hay que
 enseñarle al agente principal y a la descripción de `Run My Agent` el prefijo
-`SUBGRAPH_RESUME_INCOMPATIBLE:` (cuando el resume pase a usar el grafo fresco) y que un `CHILD_GRAPH_RESOLVE_FAILED:`
-puede llegar **después** de una pregunta respondida (cuando un `child_graph_ref` se vuelva a resolver al reanudar).
+`SUBGRAPH_RESUME_INCOMPATIBLE:` (cuando el resume pase a usar el grafo fresco) y que
+un `CHILD_GRAPH_RESOLVE_FAILED:` puede llegar **después** de una pregunta respondida
+(cuando un `child_graph_ref` se vuelva a resolver al reanudar).
 
 ## Superficie de Rust (desde la entrada 74)
 
