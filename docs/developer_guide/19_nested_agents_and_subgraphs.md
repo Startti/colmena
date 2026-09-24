@@ -476,8 +476,9 @@ resultado con `scrub_tool_result_output` como cualquier tool fresca).
 
 ### Reanudar con el grafo actual
 
-> Se aplica desde la entrada 75 de `CHANGELOG_2026-09.md`; hasta entonces un hijo
-> reanuda la copia de su grafo guardada en `dag_runs.graph_json`.
+> Se aplica desde el PR que hace que `subgraph.rs` pase `Fresh` en vez de
+> `Stored` (todavía no mergeado); hasta entonces un hijo reanuda la copia de
+> su grafo guardada en `dag_runs.graph_json`.
 
 Un hijo suspendido se reanuda con el grafo que su fuente nombra **en ese momento** —el
 inline del grafo fresco del padre, el archivo releído, el resolvedor otra vez—, no con la
@@ -498,6 +499,13 @@ SUBGRAPH_RESUME_INCOMPATIBLE: the child graph changed since it asked (removed: p
 ```
 
 La regla vive en `domain/graph_skeleton.rs` (`GraphSkeleton::of`, `GraphSkeleton::diff`).
+
+Un rechazo cierra la fila `FAILED` del hijo (`close_refused`), y también las de sus
+propios descendientes que sigan `SUSPENDED` — si no, una fila así queda bajo un padre
+ya `FAILED` y `find_resume_entry` la cuenta como una cadena aparte. `DagStateRepository`
+gana `fail_if_suspended`/`fail_suspended_descendants` con impl por defecto (entrada 75
+de `CHANGELOG_2026-09.md`): non-breaking para quien implemente el puerto fuera del
+crate, mismo patrón que `cancel_running_descendants`.
 
 ### Requisito: `connection_url` en cada `llm_call` que participe del HITL
 

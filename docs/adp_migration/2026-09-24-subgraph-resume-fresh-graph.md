@@ -26,6 +26,17 @@ un `CHILD_GRAPH_RESOLVE_FAILED:` puede llegar **después** de una pregunta respo
 En la entrada 74 el motor todavía pasa `Stored` en todo resume: el comportamiento es el
 de v0.16.
 
+## Superficie de Rust (desde la entrada 75)
+
+- `DagStateRepository` (`domain/state.rs`) gana `fail_if_suspended` y
+  `fail_suspended_descendants`, ambos con impl por defecto — **non-breaking** para
+  quien implemente el trait fuera del crate, mismo patrón que
+  `cancel_running_descendants`.
+- Un rechazo cierra `FAILED` no solo la fila del hijo, también sus propios
+  descendientes que sigan `SUSPENDED` (`close_refused`), para que
+  `find_resume_entry` no los cuente como una cadena propia. Sin efecto en ADP: no
+  implementa el puerto, y todo caller sigue pasando `Stored`.
+
 ## Qué se rompe si se ignora
 
 Nada en ADP: no implementa el puerto ni matchea `DagError`.

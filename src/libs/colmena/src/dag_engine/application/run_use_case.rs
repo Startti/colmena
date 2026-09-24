@@ -1529,16 +1529,30 @@ impl DagRunUseCase {
     /// A refused resume closes the child's row: its answer is spent and nobody
     /// resumes it again, while a row left SUSPENDED counts as a second chain in
     /// `find_resume_entry` and can be picked by `find_suspended_child` on a
-    /// later turn. The row keeps the graph it had — a fresh graph (and its
-    /// secrets) never reaches storage through a refusal. A failed save is
-    /// logged, not returned: the refusal is what the caller needs to see.
-    async fn close_refused(repo: &dyn DagStateRepository, mut state: DagRunState) {
-        state.status = DagRunStatus::Failed;
-        if let Err(e) = repo.save(&state).await {
-            eprintln!(
-                "⚠️ Failed to close refused child run {}: {}",
-                state.session_id, e
-            );
+    /// later turn. Its own SUSPENDED descendants are closed for the same
+    /// reason — a leaf left SUSPENDED under a FAILED parent breaks the same
+    /// lookup. Uses `fail_if_suspended`'s conditional UPDATE instead of a
+    /// full-row read-modify-write, so a concurrent writer's commit is never
+    /// lost and a row that is no longer SUSPENDED (already closed, or terminal
+    /// for an unrelated reason) is never flipped — nor are its descendants
+    /// touched: a row this call didn't close isn't this call's to unwind.
+    /// The row(s) keep the graph they had — a fresh graph (and its secrets)
+    /// never reaches storage through a refusal. Failures are logged, not
+    /// returned: the refusal is what the caller needs to see.
+    async fn close_refused(repo: &dyn DagStateRepository, session_id: &str) {
+        match repo.fail_if_suspended(session_id).await {
+            Ok(true) => {
+                if let Err(e) = repo.fail_suspended_descendants(session_id).await {
+                    eprintln!(
+                        "⚠️ Failed to close refused child {}'s suspended descendants: {}",
+                        session_id, e
+                    );
+                }
+            }
+            Ok(false) => {}
+            Err(e) => {
+                eprintln!("⚠️ Failed to close refused child run {}: {}", session_id, e);
+            }
         }
     }
 }
@@ -1648,7 +1662,7 @@ impl SubGraphExecutorPort for DagRunUseCase {
                     session_id,
                     reason
                 );
-                Self::close_refused(&**repo, state).await;
+                Self::close_refused(&**repo, &state.session_id).await;
                 return Err(DagError::ResumeRefused(reason));
             }
         };
@@ -2227,6 +2241,36 @@ mod resume_graph_tests {
         async fn find_suspended_child(&self, _: &str) -> Result<Option<String>, DagError> {
             Ok(None)
         }
+        // `fail_if_suspended` is left at the trait default: it composes
+        // `get_by_id`/`save` above, which this repo already implements
+        // faithfully, so the default's guard logic is exactly what's under
+        // test here (see `fail_if_suspended_leaves_a_completed_row_untouched`).
+        async fn fail_suspended_descendants(&self, session_id: &str) -> Result<u64, DagError> {
+            let mut guard = self.0.lock().unwrap();
+            // Transitive walk over parent_session_id, breadth-first from
+            // session_id (excluded — the caller closes that row itself via
+            // `fail_if_suspended`).
+            let mut frontier = vec![session_id.to_string()];
+            let mut to_flip = Vec::new();
+            while let Some(parent) = frontier.pop() {
+                for (id, row) in guard.iter() {
+                    if row.parent_session_id.as_deref() == Some(parent.as_str()) {
+                        to_flip.push(id.clone());
+                        frontier.push(id.clone());
+                    }
+                }
+            }
+            let mut flipped = 0u64;
+            for id in to_flip {
+                if let Some(row) = guard.get_mut(&id) {
+                    if row.status == DagRunStatus::Suspended {
+                        row.status = DagRunStatus::Failed;
+                        flipped += 1;
+                    }
+                }
+            }
+            Ok(flipped)
+        }
     }
 
     /// One `echo` node whose config says which version of the graph it is.
@@ -2270,6 +2314,23 @@ mod resume_graph_tests {
             None,
         )
         .await
+    }
+
+    /// A bare row for seeding extra chain members / unrelated rows in a test.
+    fn bare_row(id: &str, parent: Option<&str>, status: DagRunStatus) -> DagRunState {
+        DagRunState {
+            session_id: id.into(),
+            agent_session_id: Some("chat_1".into()),
+            parent_session_id: parent.map(|s| s.to_string()),
+            graph_json: json!({}),
+            all_outputs: HashMap::new(),
+            status,
+            global_shared_state: json!({}),
+            active_queue: VecDeque::new(),
+            execution_history: Vec::new(),
+            global_calls: HashMap::new(),
+            caller_specific_calls: HashMap::new(),
+        }
     }
 
     #[tokio::test]
@@ -2390,5 +2451,62 @@ mod resume_graph_tests {
         assert!(text.contains("Invalid sub-graph state JSON:"), "{text}");
         assert!(!text.starts_with("SUBGRAPH_RESUME_INCOMPATIBLE:"), "{text}");
         assert_eq!(repo.row("child_1").status, DagRunStatus::Suspended);
+    }
+
+    /// A refused resume of `child_1` (parent `root_1`) closes `child_1` AND
+    /// its own SUSPENDED descendant `grandchild_1` — otherwise a row left
+    /// SUSPENDED under a FAILED parent counts as a second chain in
+    /// `find_resume_entry`. `root_1` (the parent, not a descendant) and an
+    /// unrelated SUSPENDED row elsewhere must stay untouched.
+    #[tokio::test]
+    async fn a_refused_resume_closes_its_suspended_descendants_but_not_unrelated_rows() {
+        let (uc, repo) = suspended_child(graph_with("sello", "v1"));
+        {
+            let mut rows = repo.0.lock().unwrap();
+            rows.insert(
+                "grandchild_1".into(),
+                bare_row("grandchild_1", Some("child_1"), DagRunStatus::Suspended),
+            );
+            rows.insert(
+                "root_1".into(),
+                bare_row("root_1", None, DagRunStatus::Suspended),
+            );
+            rows.insert(
+                "unrelated_1".into(),
+                bare_row("unrelated_1", Some("other_root"), DagRunStatus::Suspended),
+            );
+        }
+
+        let err = resume(&uc, ResumeGraph::Fresh(graph_with("timbre", "v2")))
+            .await
+            .expect_err("refused");
+        assert!(err.to_string().starts_with("SUBGRAPH_RESUME_INCOMPATIBLE:"));
+
+        assert_eq!(repo.row("child_1").status, DagRunStatus::Failed);
+        assert_eq!(repo.row("grandchild_1").status, DagRunStatus::Failed);
+        assert_eq!(
+            repo.row("root_1").status,
+            DagRunStatus::Suspended,
+            "the parent is not a descendant"
+        );
+        assert_eq!(
+            repo.row("unrelated_1").status,
+            DagRunStatus::Suspended,
+            "an unrelated chain must stay untouched"
+        );
+    }
+
+    /// `fail_if_suspended`'s guard (the trait default: `get_by_id` + `save`)
+    /// never flips a row that isn't SUSPENDED.
+    #[tokio::test]
+    async fn fail_if_suspended_leaves_a_completed_row_untouched() {
+        let repo = MemRepo::default();
+        repo.0.lock().unwrap().insert(
+            "done_1".into(),
+            bare_row("done_1", None, DagRunStatus::Completed),
+        );
+        let flipped = repo.fail_if_suspended("done_1").await.unwrap();
+        assert!(!flipped);
+        assert_eq!(repo.row("done_1").status, DagRunStatus::Completed);
     }
 }
