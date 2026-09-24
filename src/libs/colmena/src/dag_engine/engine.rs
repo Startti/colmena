@@ -60,7 +60,8 @@ pub struct EngineConfig {
     /// `from_env` reads COLMENA_HEARTBEAT_INTERVAL_SECS / COLMENA_IDLE_TIMEOUT_SECS.
     pub liveness: crate::dag_engine::application::liveness::LivenessSettings,
     /// Resolves `child_graph_ref` sources on the embedder's side — the engine
-    /// never fetches a graph by itself. `from_env` leaves it `None`.
+    /// never fetches a graph by itself. `from_env` leaves it `None`, which makes
+    /// every ref fail with `CHILD_GRAPH_RESOLVE_FAILED:unavailable`.
     pub child_graph_resolver: Option<Arc<dyn ChildGraphResolverPort>>,
 }
 

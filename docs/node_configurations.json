@@ -481,14 +481,14 @@
           "type": "string",
           "required": false,
           "default": null,
-          "description": "File system path to a JSON file containing the child graph definition. The file must contain a valid Colmena graph JSON with 'nodes' and 'edges'. The path can be absolute or relative to the working directory. At least one of 'child_graph_path' or 'child_graph_inline' must be provided. Use this when the child graph is stored as a separate file (good for reusability and maintenance).",
+          "description": "File system path to a JSON file containing the child graph definition. The file must contain a valid Colmena graph JSON with 'nodes' and 'edges'. The path can be absolute or relative to the working directory. At least one of 'child_graph_path', 'child_graph_inline' or 'child_graph_ref' must be provided; with several, the first in precedence order wins (inline, path, ref; config before inputs). Use this when the child graph is stored as a separate file (good for reusability and maintenance).",
           "example": "tests/graphs/agents/llm_call.json"
         },
         "child_graph_inline": {
           "type": "object",
           "required": false,
           "default": null,
-          "description": "An inline child graph definition embedded directly in the config. Must contain 'nodes' and 'edges' keys, just like a standalone graph JSON file. At least one of 'child_graph_path' or 'child_graph_inline' must be provided. Use this when the child graph is simple and tightly coupled to the parent (common in orchestrator agent definitions).",
+          "description": "An inline child graph definition embedded directly in the config. Must contain 'nodes' and 'edges' keys, just like a standalone graph JSON file. At least one of 'child_graph_path', 'child_graph_inline' or 'child_graph_ref' must be provided; with several, the first in precedence order wins (inline, path, ref; config before inputs). Use this when the child graph is simple and tightly coupled to the parent (common in orchestrator agent definitions).",
           "example": {
             "nodes": {
               "in": { "type": "input", "config": {} },
@@ -505,7 +505,7 @@
           "type": "object",
           "required": false,
           "default": null,
-          "description": "Reserved: the child graph by reference, { \"agent_id\": \"<id>\", \"context\": { … } }, to be resolved at run time by the embedder's ChildGraphResolverPort (EngineConfig.child_graph_resolver). Recognised as a source key and never passed to the child's state, but not resolved yet by this engine version — use 'child_graph_inline' or 'child_graph_path'.",
+          "description": "The child graph by reference: { \"agent_id\": \"<id>\", \"context\": { … } }. Resolved at run time through the embedder's ChildGraphResolverPort (EngineConfig.child_graph_resolver); 'context' is passed to it verbatim. The resolved graph is never emitted, returned to the model or stored in a node output. Without a resolver, or when resolution fails, the node fails with 'CHILD_GRAPH_RESOLVE_FAILED:<not_found|forbidden|needs_config|not_runnable|unavailable>: <message>' before emitting any boundary frame. An 'agent_id' still containing '${' (an untemplated tool argument) fails as not_found. Resolution times out after 30 s (unavailable).",
           "example": { "agent_id": "${agentId}", "context": { "messageId": "m1" } }
         },
         "__agent_name": {

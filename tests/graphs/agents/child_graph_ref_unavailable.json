@@ -1,0 +1,37 @@
+{
+  "comment": "E2E of the refusal path of child_graph_ref. The parent llm_call exposes `Run_My_Agent`, a subgraph tool whose only child source is `child_graph_ref` (agent_id templated from the model's `agentId`). The dag_engine CLI configures no ChildGraphResolverPort, so the call must fail with `CHILD_GRAPH_RESOLVE_FAILED:unavailable:` and emit no subgraph-node-start for the child. The positive path needs an embedder's resolver (unit tests use a fake one).",
+  "metadata": {
+    "category": "agents",
+    "features": ["subgraph_as_tool", "child_graph_ref", "node_schema", "error_path"],
+    "requires_env": ["GEMINI_API_KEY"]
+  },
+  "nodes": {
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "model": "gemini-2.5-flash",
+        "api_key": "${GEMINI_API_KEY}",
+        "stream": true,
+        "system_message": "Sos un coordinador. Cuando el usuario pida correr un agente, llamá a la tool `Run_My_Agent` con su `agentId` y la tarea en `prompt`. Si la tool falla, copiá el texto exacto del error en tu respuesta.",
+        "prompt": "Corré el agente agt_demo_42 con la tarea: resumí en una frase qué es la fotosíntesis.",
+        "tool_configurations": {
+          "Run_My_Agent": {
+            "name": "Run_My_Agent",
+            "node_type": "subgraph",
+            "description": "Corre uno de los agentes del usuario con una tarea.",
+            "node_schema": {
+              "child_graph_ref": {
+                "fixed": { "agent_id": "${agentId}", "context": { "origin": "e2e" } }
+              },
+              "agentId": { "type": "string", "required": true, "description": "Id del agente a correr" },
+              "prompt": { "type": "string", "required": true, "description": "La tarea para el agente" }
+            }
+          }
+        }
+      }
+    },
+    "out": { "type": "output", "config": {} }
+  },
+  "edges": [{ "from": "agent", "to": "out" }]
+}

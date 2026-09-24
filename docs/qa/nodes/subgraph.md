@@ -41,7 +41,7 @@ El código filtra y procesa 7 keys internas **no documentadas** en `node_configu
 
 | Validación | Línea | Behavior |
 |-------------|-------|----------|
-| `child_graph_source` falta | 321-324 | Error: "requires 'child_graph_inline' or 'child_graph_path'" |
+| `child_graph_source` falta | 321-324 | Error: "requires 'child_graph_inline', 'child_graph_path' or 'child_graph_ref'" |
 | `child_graph_path` file no existe | 330-331 | Error: "child_graph_path not found: {path}" |
 | Depth ceiling excedido | 261-270 | Error con prefijo `SUBGRAPH_DEPTH_EXCEEDED:` (solo si `COLMENA_MAX_SUBGRAPH_DEPTH` > 0 en env) |
 | `SubGraphExecutorPort` no inicializado | 281-283, 366-368 | Error: "SubGraphExecutorPort not initialized" |
@@ -225,7 +225,7 @@ cargo run --bin dag_engine -- run test_fail_path.json 2>&1 | grep -i "not found"
 }
 ```
 
-**Resultado esperado**: Error contiene "requires 'child_graph_inline' or 'child_graph_path'"  
+**Resultado esperado**: Error contiene "requires 'child_graph_inline', 'child_graph_path' or 'child_graph_ref'"  
 **Pass/Fail**: Error is caught at execute time.
 
 ---
