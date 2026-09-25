@@ -255,6 +255,7 @@ async fn agent_run_with_in_memory_repo_persists_marker_not_bytes() {
         ),
         response: None,
         provider_signature: None,
+        scope_index: None,
     };
 
     let turn1 = LlmResponse::new(

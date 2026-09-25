@@ -2245,10 +2245,10 @@ fn a_tool_targeting_an_uncatalogued_type_still_reports_missing_coverage() {
 }
 
 // ---------------------------------------------------------------------------
-// L1 — the other four gates `Graph::validate()` applies to a tool entry
+// L1 — the other five gates `Graph::validate()` applies to a tool entry
 // ---------------------------------------------------------------------------
 
-/// An `llm_call` carrying one tool entry, which is where all four gates live.
+/// An `llm_call` carrying one tool entry, which is where all five gates live.
 fn tool_entry_graph(entry: serde_json::Value) -> serde_json::Value {
     serde_json::json!({
         "nodes": { "agent": { "type": "llm_call", "config": {
@@ -2327,6 +2327,22 @@ fn a_malformed_mcp_block_is_reported() {
     );
 }
 
+/// Gate 5 — D1's `parallel` tool flag: opt-in, and when present it must be a
+/// JSON boolean. Mirrors `Graph::validate`'s inline `is_boolean()` check, the
+/// same way Gate 1 mirrors the inline `memory_mode` deserialization — no
+/// domain function backs either, so the linter reproduces the one line.
+#[test]
+fn a_non_boolean_parallel_is_reported() {
+    let report = lint_json(tool_entry_graph(serde_json::json!({
+        "node_type": "subgraph",
+        "parallel": "yes"
+    })));
+
+    let d = find(&report, DiagnosticCode::MalformedToolEntry)
+        .expect("the engine refuses this graph at load");
+    assert_eq!(d.field.as_deref(), Some("tool_configurations.t.parallel"));
+}
+
 /// The gates must stay silent on entries the engine accepts, or the rule is
 /// worse than the gap it fills.
 #[test]
@@ -2338,6 +2354,7 @@ fn entries_the_engine_accepts_are_left_alone() {
             "node_type": "mcp",
             "mcp": { "url": "https://secure.example.com/mcp" }
         }),
+        serde_json::json!({ "node_type": "subgraph", "parallel": true }),
     ] {
         let report = lint_json(tool_entry_graph(entry.clone()));
         assert!(

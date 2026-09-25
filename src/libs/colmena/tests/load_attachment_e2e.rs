@@ -47,6 +47,7 @@ impl LlmRepository for ScriptedLlm {
                 ),
                 response: None,
                 provider_signature: None,
+                scope_index: None,
             };
             Ok(
                 LlmResponse::new(LlmRequestId::new(), String::new(), scripted_provider())

@@ -94,6 +94,7 @@ pub fn synthetic_secure_suspend_tool(name: &str) -> ToolConfiguration {
         summary: None,
         eager: false,
         memory_mode: MemoryMode::Stateless,
+        parallel: false,
     }
 }
 

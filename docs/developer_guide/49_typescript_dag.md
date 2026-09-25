@@ -82,7 +82,8 @@ engine, sin red ni LLM.
 
 > **Misma estrictez que cargar el grafo con `dag_engine run`.** Deserializa al `Graph`
 > del engine y corre `Graph::validate()`, así que rechaza un node id con `/`, un
-> `node_schema` malformado, un `memory_mode` inválido y un bloque `mcp` mal configurado.
+> `node_schema` malformado, un `memory_mode` inválido, un bloque `mcp` mal configurado y
+> un `parallel` que no es booleano.
 >
 > Lo que **no** hace: mirar el contenido del `config` de un nodo. Es un `Value` sin
 > tipar, así que un campo inventado pasa en silencio acá — para eso está `lintGraph`,

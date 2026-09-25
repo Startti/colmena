@@ -4572,3 +4572,38 @@ esta sesión o de otra.
 `stream_resolver_impl` y `dag_tool_executor` (uno cada uno); rojos antes del fix.
 **ADP.** Una clave cruda en `$attachment:` da ahora `attachment not found`: va el
 `document_id` del catálogo. **Estado.** done (punto 11, parte A; sigue `image_edit`).
+
+## 86. Una entrada de tool puede declarar `parallel`, y solo como booleano
+
+**Qué cambió.** Una entrada de `tool_configurations` acepta `"parallel": true`: opt-in,
+por entrada, para que cada llamada de esa tool tenga su propia identidad en el stream.
+En este cambio solo se acepta y se valida; la corrida todavía no hace nada con él:
+- `Graph::validate` rechaza al cargar un `parallel` que no es booleano, con un error que
+  nombra el campo y la tool;
+- `dag_engine lint` lo espeja como `MALFORMED_TOOL_ENTRY` (quinta compuerta de
+  `other_validate_rejections`), así que el linter sigue cubriendo todas las de `validate`;
+- `ToolConfiguration.parallel` (por defecto `false`, no se serializa cuando es `false`) y
+  `ToolCall.scope_index` (`#[serde(skip)]`, `None` en todos los sitios que arman un
+  `ToolCall`) quedan listos para los cambios que los usan.
+
+Frames, memoria y orden de las llamadas: iguales que antes.
+
+**Tests.** 3 en `graph.rs` (rechaza `"yes"`, acepta `true`, acepta la clave ausente) y 1
+en `tests/graph_lint.rs`, más `{ "parallel": true }` en
+`entries_the_engine_accepts_are_left_alone`. La lib: 2857 passed (2854 antes);
+`graph_lint`: 101.
+
+**Mutación.** 3, rojas y revertidas: la polaridad del chequeo de `validate` invertida
+(caen el que rechaza y el que acepta `true`), el error de `validate` sin nombrar campo ni
+tool, y la compuerta del linter apagada (`a_non_boolean_parallel_is_reported`).
+
+**E2E.** Por el CLI, con el grafo de dos tools `subgraph` (`Run` con `parallel`): con
+`"parallel": true` el lint da 0/0/0; con `"parallel": "yes"` el lint da
+`MALFORMED_TOOL_ENTRY` en `tool_configurations.Run.parallel` y `dag_engine run` sale con
+código 1 y `Invalid graph: ... 'parallel' must be a boolean, got: "yes"` antes de correr
+nada. Corpus: 329 archivos, 0/0/0.
+
+**ADP.** Nada que cambiar. Un `parallel` no booleano ahora se rechaza al cargar; antes
+se ignoraba. Documentado en `docs/node_configurations.json`,
+`docs/node_as_tools_reference.json` y en la lista de compuertas de `Graph::validate()` de
+las guías 48, 49 y 51.

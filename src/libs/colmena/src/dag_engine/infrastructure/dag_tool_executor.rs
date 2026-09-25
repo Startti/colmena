@@ -3118,6 +3118,7 @@ fn synthesise_default_toolkit_config(alias: &str) -> ToolConfiguration {
         summary: None,
         eager: false,
         memory_mode: MemoryMode::Stateless,
+        parallel: false,
     }
 }
 
@@ -3683,6 +3684,7 @@ mod tests {
                 summary: None,
                 eager: false,
                 memory_mode: MemoryMode::Stateless,
+                parallel: false,
             },
         );
 
@@ -3728,6 +3730,7 @@ mod tests {
             summary: None,
             eager: false,
             memory_mode: MemoryMode::Stateless,
+            parallel: false,
         };
 
         // Malformed: array field without `items`.
@@ -3796,6 +3799,7 @@ mod tests {
                 summary: None,
                 eager: false,
                 memory_mode: MemoryMode::Stateless,
+                parallel: false,
             },
         );
 
@@ -3842,6 +3846,7 @@ mod tests {
                 summary: None,
                 eager: false,
                 memory_mode: MemoryMode::Stateless,
+                parallel: false,
             },
         );
 
@@ -3892,6 +3897,7 @@ mod tests {
                 summary: None,
                 eager: false,
                 memory_mode: MemoryMode::Stateless,
+                parallel: false,
             },
         );
 
@@ -3948,6 +3954,7 @@ mod tests {
                 summary: None,
                 eager: false,
                 memory_mode: MemoryMode::Stateless,
+                parallel: false,
             },
         );
 
@@ -4001,6 +4008,7 @@ mod tests {
                 summary: None,
                 eager: false,
                 memory_mode: MemoryMode::Stateless,
+                parallel: false,
             },
         );
 
@@ -4051,6 +4059,7 @@ mod tests {
                 summary: None,
                 eager: false,
                 memory_mode: MemoryMode::Stateless,
+                parallel: false,
             },
         );
 
@@ -4110,6 +4119,7 @@ mod tests {
                 summary: None,
                 eager: false,
                 memory_mode: MemoryMode::Stateless,
+                parallel: false,
             },
         );
 
@@ -4181,6 +4191,7 @@ mod tests {
                 summary: None,
                 eager: false,
                 memory_mode: MemoryMode::Stateless,
+                parallel: false,
             },
         );
 
@@ -4240,6 +4251,7 @@ mod tests {
                 summary: None,
                 eager: false,
                 memory_mode: MemoryMode::Stateless,
+                parallel: false,
             },
         );
 
@@ -4307,6 +4319,7 @@ mod tests {
                 summary: None,
                 eager: false,
                 memory_mode: MemoryMode::Stateless,
+                parallel: false,
             },
         );
 
@@ -4400,6 +4413,7 @@ mod tests {
             summary: None,
             eager: false,
             memory_mode: MemoryMode::Stateless,
+            parallel: false,
         };
         let executor =
             DagToolExecutor::new(registry, HashMap::new()).with_describe_tool_lookup(vec![cfg]);
@@ -4440,6 +4454,7 @@ mod tests {
             summary: None,
             eager: false,
             memory_mode: MemoryMode::Stateless,
+            parallel: false,
         };
 
         let observed: Arc<std::sync::Mutex<Vec<String>>> =
@@ -4498,6 +4513,7 @@ mod tests {
                 summary: None,
                 eager: false,
                 memory_mode: MemoryMode::Stateless,
+                parallel: false,
             },
         );
 
@@ -4917,6 +4933,7 @@ mod tests {
                 summary: None,
                 eager: false,
                 memory_mode: MemoryMode::Stateless,
+                parallel: false,
             },
         );
 
@@ -4977,6 +4994,7 @@ mod tests {
                 summary: None,
                 eager: false,
                 memory_mode: MemoryMode::Stateless,
+                parallel: false,
             },
         );
 
@@ -5038,6 +5056,7 @@ mod tests {
                 summary: None,
                 eager: false,
                 memory_mode: MemoryMode::Stateless,
+                parallel: false,
             },
         );
 
@@ -5078,6 +5097,7 @@ mod tests {
             summary: None,
             eager: false,
             memory_mode: MemoryMode::Stateless,
+            parallel: false,
         }
     }
 
@@ -5235,6 +5255,7 @@ mod toolkit_runtime_tests {
                 summary: None,
                 eager: false,
                 memory_mode: MemoryMode::Stateless,
+                parallel: false,
             },
         );
         DagToolExecutor::new(registry, configs)
@@ -5265,6 +5286,7 @@ mod toolkit_runtime_tests {
             },
             response: None,
             provider_signature: None,
+            scope_index: None,
         };
         let result = exec.execute(&call).await.expect("execute ok");
         assert!(result.success, "got error: {:?}", result.error);
@@ -5294,6 +5316,7 @@ mod toolkit_runtime_tests {
             },
             response: None,
             provider_signature: None,
+            scope_index: None,
         };
         let result = exec.execute(&call).await.expect("execute ok");
         assert!(result.success, "got error: {:?}", result.error);
@@ -5320,6 +5343,7 @@ mod toolkit_runtime_tests {
             },
             response: None,
             provider_signature: None,
+            scope_index: None,
         };
         let result = exec
             .execute(&call)
@@ -5353,6 +5377,7 @@ mod toolkit_runtime_tests {
                 summary: None,
                 eager: false,
                 memory_mode: MemoryMode::Stateless,
+                parallel: false,
             },
         );
         let exec = DagToolExecutor::new(registry, configs);
@@ -5478,6 +5503,7 @@ mod toolkit_runtime_tests {
             },
             response: None,
             provider_signature: None,
+            scope_index: None,
         };
 
         let result = executor
@@ -5547,6 +5573,7 @@ mod toolkit_runtime_tests {
             ),
             response: None,
             provider_signature: None,
+            scope_index: None,
         };
 
         let res = executor.execute(&call).await.unwrap();
@@ -5616,6 +5643,7 @@ mod attachment_plumbing_tests {
             function: FunctionCall::new("any".to_string(), r#"{}"#.to_string()),
             response: None,
             provider_signature: None,
+            scope_index: None,
         }
     }
 

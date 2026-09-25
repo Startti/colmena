@@ -170,6 +170,7 @@ mod tests {
             summary: None,
             eager: false,
             memory_mode: MemoryMode::Stateless,
+            parallel: false,
         }
     }
 

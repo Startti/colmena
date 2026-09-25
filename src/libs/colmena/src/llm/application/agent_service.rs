@@ -1206,6 +1206,7 @@ mod tests {
                 },
                 response: None,
                 provider_signature: None,
+                scope_index: None,
             })
             .collect();
         LlmMessage::assistant_with_tool_calls(String::new(), calls).unwrap()
@@ -1694,6 +1695,7 @@ mod tests {
                     },
                     response: None,
                     provider_signature: None,
+                    scope_index: None,
                 };
 
                 Ok(LlmResponse::new(
@@ -1823,6 +1825,7 @@ mod tests {
             },
             response: None,
             provider_signature: None,
+            scope_index: None,
         }
     }
 
@@ -1909,6 +1912,7 @@ mod tests {
             },
             response: None,
             provider_signature: None,
+            scope_index: None,
         }
     }
 
@@ -2072,6 +2076,7 @@ mod tests {
                     },
                     response: None,
                     provider_signature: None,
+                    scope_index: None,
                 })), // B (different signature → resets streak)
                 _ => Ok(text_response("finished")),
             }
@@ -2233,6 +2238,7 @@ mod tests {
                     },
                     response: None,
                     provider_signature: None,
+                    scope_index: None,
                 };
                 Ok(text_response("").with_tool_calls(vec![twin("c1"), twin("c2")]))
             } else {
@@ -2302,6 +2308,7 @@ mod tests {
                     },
                     response: None,
                     provider_signature: None,
+                    scope_index: None,
                 };
                 Ok(text_response("").with_tool_calls(vec![
                     triplet("c1"),
@@ -2372,6 +2379,7 @@ mod tests {
                 },
                 response: None,
                 provider_signature: None,
+                scope_index: None,
             };
             Ok(LlmResponse::new(
                 LlmRequestId::from_string("req-susp".to_string()).unwrap(),
@@ -2463,6 +2471,7 @@ mod tests {
                 },
                 response: None,
                 provider_signature: None,
+                scope_index: None,
             };
             Ok(LlmResponse::new(
                 LlmRequestId::from_string("req-batch".to_string()).unwrap(),
@@ -2575,6 +2584,7 @@ mod tests {
                 },
                 response: None,
                 provider_signature: None,
+                scope_index: None,
             };
             Ok(LlmResponse::new(
                 LlmRequestId::from_string("req-mixed".to_string()).unwrap(),
@@ -2690,6 +2700,7 @@ mod tests {
                     ),
                     response: None,
                     provider_signature: None,
+                    scope_index: None,
                 };
                 Ok(LlmResponse::new(
                     LlmRequestId::from_string("req-la-1".to_string()).unwrap(),
@@ -3046,6 +3057,7 @@ mod tests {
                     ),
                     response: None,
                     provider_signature: None,
+                    scope_index: None,
                 };
                 Ok(LlmResponse::new(
                     LlmRequestId::from_string("req-eph-1".to_string()).unwrap(),
