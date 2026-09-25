@@ -3579,7 +3579,7 @@
         "type": "boolean",
         "required": false,
         "default": false,
-        "description": "Operator-only, never shown to the LLM. When true, EVERY call of this tool gets its own identity, even when it is the only call in the message: it opens its child boundary as '<tool>#<k>', k being the call's index in the model's tool_calls message (its position, not a per-tool counter). The parent's tool-call frames do not name that scope yet. Memory is unchanged: the node_id still comes from memory_mode. Calls still run one after another. Any non-boolean value fails Graph::validate at load (lint: MALFORMED_TOOL_ENTRY).",
+        "description": "Operator-only, never shown to the LLM. When true, EVERY call of this tool gets its own identity, even when it is the only call in the message: it opens its child boundary as '<tool>#<k>', k being the call's index in the model's tool_calls message (its position, not a per-tool counter), and its tool-input-available / tool-output-available frames (and the subgraph-tool-* variants) carry childScope: '<tool>#<k>'. tool-input-start never carries it. Memory is unchanged: the node_id still comes from memory_mode. Calls still run one after another. Any non-boolean value fails Graph::validate at load (lint: MALFORMED_TOOL_ENTRY). See sse_events_reference.md ('childScope').",
         "example": true
       }
     },

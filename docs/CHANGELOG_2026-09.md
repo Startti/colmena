@@ -4723,3 +4723,42 @@ mandaba al eco los bytes de la otra sesión; después, `needs an agent_session_i
 documento. **ADP.** Sin cambios de API; un grafo que mandaba a propósito una clave
 `__colmena*`/`__node*` por un edge deja de recibirla (ninguno en `tests/graphs`).
 **Estado.** done (punto 11, parte A, revisión).
+
+## 90. Los frames de una llamada a una tool `parallel` nombran su frontera (`childScope`)
+
+**Qué cambió.** Cada llamada de una tool con `"parallel": true` ya abría su frontera como
+`<tool>#<k>` (entrada 87). Ahora sus frames lo dicen:
+- `NodeEvent` y `DagExecutionEvent::LlmToolCallStart/Finish` suman `child_scope`, opcional
+  y omitido cuando no hay valor. `from_node_event` y el mapeo de `run_use_case.rs` lo pasan.
+- En `llm.rs`, el callback del stream le pide el scope al ejecutor en el Start
+  (`ToolExecutor::child_scope`) y se lo da al Finish de la misma llamada por su id
+  (`ToolCallScopes`).
+- El `SseMapper` agrega `childScope` a `tool-input-available`, `tool-output-available` y
+  sus variantes `subgraph-tool-*`. Sin valor, el frame queda igual byte a byte.
+- Un resume vuelve a correr la llamada pendiente con el k que tenía en su mensaje
+  (`find_pending_tool_call` devuelve también su índice), así que el hijo reabre bajo el
+  mismo `<tool>#<k>`.
+
+`tool-input-start` no lleva `childScope`: sale del chunk del stream, antes de que la
+llamada tenga su k. El `childScope` de una llamada se lee de su `tool-input-available`.
+
+**Tests.** 8 en la lib, 2874 passed (2866 antes): 4 en `sse_mapper` (con scope, anidado,
+sin scope igual al frame de antes campo por campo, y el evento que serializa el campo solo
+con valor) y 4 en `llm.rs` (el Finish recibe el scope de su Start, dos llamadas abiertas
+guardan cada una el suyo, una llamada sin scope cierra sin él, y el índice de la llamada
+pendiente en su mensaje llega al resume).
+
+**Mutación.** 4, rojas y revertidas: `close` que pierde el scope (caen 2), el mapper que
+descarta `childScope` (caen los 2 que lo esperan), el mapper que escribe `null` cuando no
+hay scope (cae el del frame igual al de antes) y el resume sin k.
+
+**E2E.** Corrida ad hoc, sin commitear, del mismo E2E que en la entrada 87 (`ColmenaEngine`
+real contra Postgres, `Run`, `Nota` y `Run` en un mensaje): pasa entero. 45 frames:
+`childScope` `Run#0` y `Run#2` en `tool-input-available` y `tool-output-available` de cada
+`Run`, cada frontera entre los dos frames de su llamada; ninguno en los de `Nota` ni en los
+tres `tool-input-start`.
+
+**ADP.** Soportar `childScope` antes de subir el pin; ya está en Startti/adp#855. Los frames
+de una tool sin `parallel` no cambian. Actualizados `docs/sse_events_reference.md` (tablas y
+la sección «`childScope` — una llamada a una tool `parallel`»),
+`docs/node_configurations.json` y `docs/node_as_tools_reference.json`.
