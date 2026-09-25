@@ -48,8 +48,8 @@ S=rf_shape_$(date +%s)
 cargo run --bin dag_engine -- run $D/turn1_suspend.json --agent-session-id $S
 cargo run --bin dag_engine -- run $T2E --agent-session-id $S --answer "$ANS"
 
-# 3. En reposo (v0.19): con una clave centinela en la config del hijo, ninguna
-#    fila guarda config ni la clave, y el resume sigue corriendo v2
+# 3. En reposo (v0.19): con una clave centinela en la config del hijo, ningún
+#    graph_json guarda config ni la clave, y el resume sigue corriendo v2
 T1S=/tmp/turn1_centinela.json; T2S=/tmp/turn2_centinela.json
 jq '.nodes.delegado.config.child_graph_inline.nodes.fin.config.api_key = "sk-e2e-at-rest-sentinel-0000000000"' \
   $D/turn1_suspend.json > $T1S

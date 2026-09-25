@@ -55,7 +55,8 @@ de v0.16.
   (por router, con `router branch '<rama>': ` delante — vuelve a elegir su rama en cada resume).
 - Ningún frame SSE nuevo. Un run suspendido por v0.16 se reanuda fresco sin
   migración; un worker v0.16 que tome un resume corre la copia guardada (volver
-  atrás es seguro). Válvula: `COLMENA_SUBGRAPH_RESUME_GRAPH=stored`, que **ya no
+  atrás era seguro hasta v0.19: una fila escrita por v0.19 guarda solo el esqueleto,
+  y un worker v0.16 o v0.17 correría un grafo sin config). Válvula: `COLMENA_SUBGRAPH_RESUME_GRAPH=stored`, que **ya no
   existe desde v0.19** y no se debe fijar en v0.18 una vez que v0.19 escribió filas
   (ver [El grafo en reposo](2026-09-25-graph-at-rest.md)).
 

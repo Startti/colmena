@@ -243,8 +243,8 @@ tool que el modelo usa para correr cualquiera de los agentes del usuario:
   no mandó `agentId`) → `not_found`, sin preguntarle al resolvedor. El resolve corta
   a los 30 s → `unavailable`.
 - El grafo resuelto nunca entra en `inputs`, en un frame ni en la salida del nodo, y
-  el ref no pasa al estado del hijo. Sí queda en `dag_runs.graph_json` del run hijo,
-  como un inline. Un resume vuelve a pedirlo con el mismo pedido y compara su
+  el ref no pasa al estado del hijo. En `dag_runs.graph_json` del run hijo queda solo
+  su esqueleto desde v0.19, como el de un inline (antes, el grafo entero). Un resume vuelve a pedirlo con el mismo pedido y compara su
   estructura con la guardada ([Reanudar con el grafo actual](#reanudar-con-el-grafo-actual)):
   un agente despublicado o sin acceso falla con `CHILD_GRAPH_RESOLVE_FAILED:…` también
   después de una pregunta respondida.
@@ -549,8 +549,9 @@ cierran la fila del hijo como `FAILED`.
 
 **Desde v0.19 la fila guarda solo el esqueleto.** `dag_runs.graph_json` guarda
 `GraphSkeleton::at_rest_json(&graph)`: los ids con su `type` y las aristas, sin
-`config`. Ninguna clave de proveedor llega a la base, y el resume no pierde nada
-porque solo compara esqueletos. La válvula que existió en v0.18,
+`config`. Ninguna clave de proveedor llega a `graph_json`, y el resume no pierde nada
+porque solo compara esqueletos. Ojo: `global_shared_state.__graph_nodes` guarda otra
+copia de la `config` de cada nodo, y esta entrada no la toca. La válvula que existió en v0.18,
 `COLMENA_SUBGRAPH_RESUME_GRAPH=stored`, ya no existe: volvía a correr la copia
 guardada, y esa copia ya no tiene config con qué correr.
 
