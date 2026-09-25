@@ -1,0 +1,24 @@
+{
+  "comment": "Un turno detenido a medias no se reanuda en el siguiente (CHANGELOG 2026-09 §84). Turno 1: COLMENA_IDLE_TIMEOUT_SECS=2 y --session-id fijo; `modelo` duerme 4 s sin eventos, el watchdog lo aborta y la fila queda FAILED con cola [modelo]. Turno 2: el mismo --session-id con COLMENA_IDLE_TIMEOUT_SECS=0 y el mensaje cambiado con jq (.nodes.entrada.config.data.prompt = \"mensaje nuevo\"). Esperado: el turno 2 empieza por `entrada` y `modelo` devuelve {\"vio\": \"mensaje nuevo\"}. Antes del fix corría solo `modelo` con \"mensaje viejo\". Requiere DATABASE_URL.",
+  "metadata": {
+    "category": "basic",
+    "features": ["resume", "idle_watchdog", "python_script"],
+    "requires_env": ["DATABASE_URL"]
+  },
+  "nodes": {
+    "entrada": {
+      "type": "input",
+      "config": { "data": { "prompt": "mensaje viejo" } }
+    },
+    "modelo": {
+      "type": "python_script",
+      "config": {
+        "sandbox_mode": "none",
+        "code": "import time\ntime.sleep(4)\noutput = {\"vio\": prompt}"
+      }
+    }
+  },
+  "edges": [
+    { "from": "entrada.prompt", "to": "modelo.prompt" }
+  ]
+}

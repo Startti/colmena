@@ -250,6 +250,9 @@ impl DagRunUseCase {
             let mut global_calls: HashMap<String, u32> = HashMap::new();
             let mut caller_specific_calls: HashMap<String, HashMap<String, u32>> = HashMap::new();
             let mut global_shared_state = serde_json::json!({});
+            // False only for a run loaded by id whose last turn stopped part-way
+            // (`resumes_from_stored_queue`).
+            let mut resumes_stored_queue = true;
 
             // Structural validation, on every entry. This is the only place every
             // caller converges: the CLI validates before calling, but the library
@@ -307,8 +310,28 @@ impl DagRunUseCase {
                                 }
                             }
 
+                            // A turn that ended CANCELLED or FAILED left its queue
+                            // part-way: the interrupted node and what follows it,
+                            // fed by that turn's input (still in `all_outputs`).
+                            // Picking it up would run them on the old input and
+                            // skip the entry nodes that carry this turn's — ADP
+                            // sends the chat's run id every turn, so the user's new
+                            // message was lost. Such a turn starts from the entry
+                            // nodes, as after COMPLETED; the rest of the row
+                            // (outputs, shared state, counters) carries over as
+                            // before. Only SUSPENDED is waiting for this turn.
+                            resumes_stored_queue = Self::resumes_from_stored_queue(&state.status);
+                            if !resumes_stored_queue {
+                                colmena_log!(
+                                    "↩️ [RunUseCase] Run {} ended {}; its queue {:?} is not resumed — this turn starts from the entry nodes.",
+                                    id, state.status, state.active_queue
+                                );
+                            }
+
                             all_outputs = state.all_outputs;
-                            active_queue = state.active_queue;
+                            if resumes_stored_queue {
+                                active_queue = state.active_queue;
+                            }
                             session_id = state.session_id;
                             execution_history = state.execution_history;
                             global_calls = state.global_calls;
@@ -383,8 +406,16 @@ impl DagRunUseCase {
             // to gate `__colmena_resume_answer` injection.
             //
             // Spec: docs/superpowers/specs/2026-06-05-suspend-resume-answer-routing-fix-design.md §4.1
-            let resuming_node_ids: HashSet<String> =
-                Self::compute_resuming_node_ids(&all_outputs, &resume_answer);
+            //
+            // A run that stopped part-way resumes nothing: a SUSPENDED marker in
+            // its outputs is a question that turn abandoned (stopped after the
+            // answer arrived, before the node that asked ran again), and an
+            // answer sent now must not reach it.
+            let resuming_node_ids: HashSet<String> = if resumes_stored_queue {
+                Self::compute_resuming_node_ids(&all_outputs, &resume_answer)
+            } else {
+                HashSet::new()
+            };
 
             if !global_shared_state.is_object() {
                 global_shared_state = serde_json::json!({});
@@ -1227,6 +1258,23 @@ impl DagRunUseCase {
                 SecureValueService::mask_secrets(&mut masked_final_aggregated, &run_secrets);
             }
             yield DagExecutionEvent::GraphFinish { output: masked_final_aggregated };
+        }
+    }
+
+    /// Whether a run loaded by id picks up the queue, and the SUSPENDED
+    /// markers, its last turn left. Every status is decided here, with no
+    /// wildcard, so a new status has to be decided too.
+    fn resumes_from_stored_queue(status: &DagRunStatus) -> bool {
+        match status {
+            // Waiting for this turn: the node that asked heads the queue.
+            DagRunStatus::Suspended => true,
+            // Saved with an empty queue — at the end of a run, and by
+            // `run_subgraph` before a child starts — so there is nothing to
+            // pick up. Kept as they were.
+            DagRunStatus::Completed | DagRunStatus::Running => true,
+            // Stopped part-way (Stop, the idle watchdog). Nothing is waiting
+            // for their queue, which runs on the stopped turn's input.
+            DagRunStatus::Cancelled | DagRunStatus::Failed => false,
         }
     }
 
@@ -2576,5 +2624,331 @@ mod resume_graph_tests {
         let flipped = repo.fail_if_suspended("done_1").await.unwrap();
         assert!(!flipped);
         assert_eq!(repo.row("done_1").status, DagRunStatus::Completed);
+    }
+}
+
+#[cfg(test)]
+mod stored_run_status_tests {
+    //! A run loaded by id (Branch 1 — ADP sends its chat's run id on every
+    //! turn) whose last turn ended CANCELLED or FAILED starts the next turn
+    //! from the graph's entry nodes, like one after COMPLETED. Only a
+    //! SUSPENDED run picks up its queue. Each stored state here is the one
+    //! the engine itself persisted in an earlier turn, not a hand-built row.
+    use super::*;
+    use crate::dag_engine::domain::events::DagExecutionEvent;
+    use crate::dag_engine::domain::node::ExecutableNode;
+    use crate::dag_engine::domain::observer::{ExecutionObserver, NodeEvent};
+    use async_trait::async_trait;
+    use futures::StreamExt;
+    use std::error::Error as StdError;
+    use std::sync::Mutex;
+    use std::time::Duration;
+    use tokio_util::sync::CancellationToken;
+
+    /// The chat's input node: hands this turn's message on.
+    struct Input;
+    #[async_trait]
+    impl ExecutableNode for Input {
+        async fn execute(
+            &self,
+            _i: &NodeInputs,
+            config: &Value,
+            _s: &mut Value,
+            _o: Option<Arc<dyn ExecutionObserver>>,
+        ) -> Result<Value, Box<dyn StdError + Send + Sync>> {
+            Ok(json!({ "prompt": config["prompt"].clone() }))
+        }
+        fn schema(&self) -> Value {
+            json!({})
+        }
+    }
+
+    /// What the root LLM does on its first call; later calls answer.
+    enum First {
+        Answer,
+        /// Streams a token, then never returns: the turn is stopped while it
+        /// is in flight. The token tells the test this call has begun (a
+        /// `NodeStart` does not: the node's future may not have been polled).
+        Hang,
+        Suspend,
+    }
+
+    /// The root LLM: records the prompt and the resume answer of each call.
+    struct Llm {
+        first: Mutex<Option<First>>,
+        calls: Mutex<Vec<(Value, Option<Value>)>>,
+    }
+    impl Llm {
+        fn new(first: First) -> Arc<Self> {
+            Arc::new(Self {
+                first: Mutex::new(Some(first)),
+                calls: Mutex::new(Vec::new()),
+            })
+        }
+        fn calls(&self) -> Vec<(Value, Option<Value>)> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+    #[async_trait]
+    impl ExecutableNode for Llm {
+        async fn execute(
+            &self,
+            inputs: &NodeInputs,
+            _c: &Value,
+            _s: &mut Value,
+            observer: Option<Arc<dyn ExecutionObserver>>,
+        ) -> Result<Value, Box<dyn StdError + Send + Sync>> {
+            self.calls.lock().unwrap().push((
+                inputs.get("prompt").cloned().unwrap_or(Value::Null),
+                inputs.get("__colmena_resume_answer").cloned(),
+            ));
+            let first = self.first.lock().unwrap().take();
+            match first {
+                Some(First::Hang) => {
+                    if let Some(o) = &observer {
+                        o.on_event(NodeEvent::LlmToken {
+                            token: "Pensando".into(),
+                        });
+                    }
+                    std::future::pending::<()>().await;
+                    unreachable!()
+                }
+                Some(First::Suspend) => Ok(json!({
+                    "__colmena_status": "SUSPENDED",
+                    "question": "¿Sigo?"
+                })),
+                Some(First::Answer) | None => Ok(json!({ "text": "ok" })),
+            }
+        }
+        fn schema(&self) -> Value {
+            json!({})
+        }
+    }
+
+    struct Registry(Arc<Llm>);
+    impl NodeRegistryPort for Registry {
+        fn get_node(&self, node_type: &str) -> Option<Arc<dyn ExecutableNode>> {
+            match node_type {
+                "input" => Some(Arc::new(Input)),
+                "llm" => Some(self.0.clone()),
+                _ => None,
+            }
+        }
+        fn get_all_nodes(&self) -> HashMap<String, Arc<dyn ExecutableNode>> {
+            HashMap::new()
+        }
+    }
+
+    #[derive(Default)]
+    struct MemRepo(Mutex<HashMap<String, DagRunState>>);
+    impl MemRepo {
+        fn row(&self) -> DagRunState {
+            self.0.lock().unwrap()[RUN].clone()
+        }
+    }
+    #[async_trait]
+    impl DagStateRepository for MemRepo {
+        async fn get_by_id(&self, id: &str) -> Result<Option<DagRunState>, DagError> {
+            Ok(self.0.lock().unwrap().get(id).cloned())
+        }
+        async fn save(&self, s: &DagRunState) -> Result<(), DagError> {
+            self.0
+                .lock()
+                .unwrap()
+                .insert(s.session_id.clone(), s.clone());
+            Ok(())
+        }
+        async fn find_resume_entry(&self, _: &str) -> Result<Option<String>, DagError> {
+            Ok(None)
+        }
+        async fn find_suspended_child(&self, _: &str) -> Result<Option<String>, DagError> {
+            Ok(None)
+        }
+    }
+
+    /// The chat's run id, sent on every turn.
+    const RUN: &str = "run_chat_1";
+
+    /// `input → llm`, the input carrying this turn's message.
+    fn chat_graph(prompt: &str) -> Graph {
+        serde_json::from_value(json!({
+            "nodes": {
+                "input": { "type": "input", "config": { "prompt": prompt } },
+                "llm": { "type": "llm", "config": {} }
+            },
+            "edges": [ { "from": "input.prompt", "to": "llm.prompt" } ]
+        }))
+        .expect("valid graph JSON")
+    }
+
+    fn use_case(llm: &Arc<Llm>, repo: &Arc<MemRepo>, liveness: LivenessSettings) -> DagRunUseCase {
+        DagRunUseCase::new(
+            Arc::new(Registry(llm.clone())),
+            Some(repo.clone() as Arc<dyn DagStateRepository>),
+        )
+        .with_liveness(liveness)
+    }
+
+    /// How a turn is stopped, if it is.
+    enum Stop {
+        None,
+        /// The user presses Stop while the LLM is in flight.
+        AtLlm,
+        /// Stop lands before the first node (e.g. during the pre-flight).
+        BeforeStart,
+    }
+
+    /// One turn of the chat. Returns the nodes that started, in order, and
+    /// the stream's error, if any. A turn that hangs fails the test instead.
+    async fn turn(
+        uc: DagRunUseCase,
+        prompt: &str,
+        answer: Option<&str>,
+        stop: Stop,
+    ) -> (Vec<String>, Option<String>) {
+        let token = CancellationToken::new();
+        if matches!(stop, Stop::BeforeStart) {
+            token.cancel();
+        }
+        let stream = uc.execute_stream(
+            chat_graph(prompt),
+            Some(RUN.to_string()),
+            answer.map(str::to_string),
+            false,
+            None,
+            Some("chat_1".to_string()),
+            Some(token.clone()),
+        );
+        let drain = async {
+            tokio::pin!(stream);
+            let mut started = Vec::new();
+            let mut err = None;
+            while let Some(item) = stream.next().await {
+                match item {
+                    Ok(DagExecutionEvent::NodeStart { node_id, .. }) => started.push(node_id),
+                    Ok(DagExecutionEvent::LlmToken { node_id, .. })
+                        if node_id == "llm" && matches!(stop, Stop::AtLlm) =>
+                    {
+                        token.cancel();
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        err = Some(e.to_string());
+                        break;
+                    }
+                }
+            }
+            (started, err)
+        };
+        tokio::time::timeout(Duration::from_secs(10), drain)
+            .await
+            .expect("the turn hung")
+    }
+
+    /// The row a stopped turn leaves: its queue is the interrupted LLM, and
+    /// the input's output still holds the old message.
+    fn assert_stopped_mid_llm(row: &DagRunState, status: DagRunStatus) {
+        assert_eq!(row.status, status);
+        assert_eq!(row.active_queue, VecDeque::from(["llm".to_string()]));
+        assert_eq!(row.all_outputs["input"]["prompt"], json!("old prompt"));
+    }
+
+    /// The reported bug (ADP session `cmufruoxp000n01s68novaivi`): Stop,
+    /// then a new message, and the LLM got the previous one.
+    #[tokio::test]
+    async fn a_cancelled_turn_does_not_replay_its_queue_on_the_next_turn() {
+        let llm = Llm::new(First::Hang);
+        let repo = Arc::new(MemRepo::default());
+        let uc = use_case(&llm, &repo, LivenessSettings::disabled());
+
+        turn(uc.clone(), "old prompt", None, Stop::AtLlm).await;
+        assert_stopped_mid_llm(&repo.row(), DagRunStatus::Cancelled);
+
+        let before = llm.calls().len();
+        let (started, err) = turn(uc, "new prompt", None, Stop::None).await;
+        assert_eq!(err, None);
+        assert_eq!(llm.calls()[before..], [(json!("new prompt"), None)]);
+        assert_eq!(started, vec!["input", "llm"], "the input node runs first");
+        assert_eq!(repo.row().status, DagRunStatus::Completed);
+    }
+
+    /// Same for a turn the idle watchdog aborted (persisted FAILED).
+    #[tokio::test]
+    async fn a_failed_turn_does_not_replay_its_queue_on_the_next_turn() {
+        let llm = Llm::new(First::Hang);
+        let repo = Arc::new(MemRepo::default());
+        let liveness = LivenessSettings {
+            heartbeat_interval: None,
+            idle_timeout: Some(Duration::from_millis(100)),
+        };
+        let uc = use_case(&llm, &repo, liveness);
+
+        let (_, err) = turn(uc.clone(), "old prompt", None, Stop::None).await;
+        assert!(err.is_some(), "the idle watchdog fails the turn");
+        assert_stopped_mid_llm(&repo.row(), DagRunStatus::Failed);
+
+        let before = llm.calls().len();
+        let (started, err) = turn(uc, "new prompt", None, Stop::None).await;
+        assert_eq!(err, None);
+        assert_eq!(llm.calls()[before..], [(json!("new prompt"), None)]);
+        assert_eq!(started, vec!["input", "llm"], "the input node runs first");
+    }
+
+    /// Regression guard: a SUSPENDED run still resumes from its queue — the
+    /// LLM that asked runs first, with the answer and its own turn's input.
+    #[tokio::test]
+    async fn a_suspended_run_still_resumes_from_its_queue() {
+        let llm = Llm::new(First::Suspend);
+        let repo = Arc::new(MemRepo::default());
+        let uc = use_case(&llm, &repo, LivenessSettings::disabled());
+
+        turn(uc.clone(), "old prompt", None, Stop::None).await;
+        assert_eq!(repo.row().status, DagRunStatus::Suspended);
+        assert_eq!(repo.row().active_queue, VecDeque::from(["llm".to_string()]));
+
+        let (started, err) = turn(uc, "new prompt", Some("sí"), Stop::None).await;
+        assert_eq!(err, None);
+        assert_eq!(started, vec!["llm"], "no fresh start: the queue resumes");
+        assert_eq!(llm.calls()[1..], [(json!("old prompt"), Some(json!("sí")))]);
+    }
+
+    /// Unchanged: after a COMPLETED turn the next one starts from the input.
+    #[tokio::test]
+    async fn a_completed_run_starts_the_next_turn_from_the_input() {
+        let llm = Llm::new(First::Answer);
+        let repo = Arc::new(MemRepo::default());
+        let uc = use_case(&llm, &repo, LivenessSettings::disabled());
+
+        turn(uc.clone(), "old prompt", None, Stop::None).await;
+        assert_eq!(repo.row().status, DagRunStatus::Completed);
+
+        let (started, err) = turn(uc, "new prompt", None, Stop::None).await;
+        assert_eq!(err, None);
+        assert_eq!(started, vec!["input", "llm"]);
+        assert_eq!(llm.calls()[1..], [(json!("new prompt"), None)]);
+    }
+
+    /// A turn that answered a question and was stopped before the LLM ran
+    /// leaves the question's SUSPENDED marker in its outputs. A later turn
+    /// that sends an answer must not deliver it to that abandoned question.
+    #[tokio::test]
+    async fn a_stale_suspended_marker_in_a_cancelled_run_gets_no_answer() {
+        let llm = Llm::new(First::Suspend);
+        let repo = Arc::new(MemRepo::default());
+        let uc = use_case(&llm, &repo, LivenessSettings::disabled());
+
+        turn(uc.clone(), "old prompt", None, Stop::None).await;
+        turn(uc.clone(), "old prompt", Some("sí"), Stop::BeforeStart).await;
+        let row = repo.row();
+        assert_stopped_mid_llm(&row, DagRunStatus::Cancelled);
+        assert_eq!(
+            row.all_outputs["llm"]["__colmena_status"],
+            json!("SUSPENDED")
+        );
+
+        let (started, err) = turn(uc, "new prompt", Some("otra"), Stop::None).await;
+        assert_eq!(err, None);
+        assert_eq!(llm.calls()[1..], [(json!("new prompt"), None)]);
+        assert_eq!(started, vec!["input", "llm"]);
     }
 }

@@ -1369,7 +1369,8 @@ Semántica:
 - **Entre nodos**: al dispararse el token, el grafo se detiene **antes de iniciar el
   siguiente nodo**; el nodo en vuelo se **dropea** (las ops async tipo `reqwest`/`sqlx`
   abortan en su próximo await).
-- Persiste un estado terminal **`CANCELLED`** con los outputs parciales y la cola restante.
+- Persiste un estado terminal **`CANCELLED`** con los outputs parciales y la cola restante
+  (la cola queda como registro de dónde se detuvo; no se retoma, ver abajo).
 - Emite un evento terminal **`DagExecutionEvent::Cancelled { reason, partial_output }`**,
   que el `SseMapper` traduce a un frame `cancelled` (UX) seguido de `finish` (terminador).
 - Subgrafos: los hijos se interrumpen por **drop-propagation** desde la raíz y sus filas
@@ -1383,6 +1384,16 @@ Limitaciones conocidas:
 - Los writers desprendidos del nodo LLM (`tokio::spawn` de persistencia) terminan solos;
   son idempotentes/benignos.
 - `CANCELLED` es **terminal y no resumible** — para continuar, iniciar una nueva ejecución.
+
+**El turno siguiente con el mismo `session_id`** (ADP manda el id de run del chat en cada
+turno): el motor **no retoma la cola** de una fila `CANCELLED`. Arranca desde los nodos de
+entrada, como después de un `COMPLETED`, y conserva el resto de la fila (outputs, estado
+compartido, historial, contadores). Un marcador `SUSPENDED` que quedó en sus outputs (una
+pregunta respondida y detenida antes de que su nodo volviera a correr) no recibe el
+`answer` de ese turno. Lo mismo vale para la fila `FAILED` que deja el watchdog de
+inactividad (`COLMENA_IDLE_TIMEOUT_SECS`). Solo una fila `SUSPENDED` retoma su cola. Hasta
+v0.19.0 la cola se retomaba: el nodo interrumpido volvía a correr con la entrada del turno
+detenido y el mensaje nuevo se perdía ([CHANGELOG 2026-09 §84](../CHANGELOG_2026-09.md)).
 
 `engine.execute_stream(...)` (6 args, sin token) sigue disponible y completa normalmente.
 

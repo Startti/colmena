@@ -136,7 +136,10 @@ fn measure() -> Measured {
 // this graph only exercises the `unavailable` refusal path from the CLI; the
 // positive re-resolve path needs a stub resolver, covered by
 // `src/libs/colmena/tests/child_graph_ref_resume.rs`). Lints clean.
-const EXPECTED_FILES: usize = 328;
+// Bumped 328 -> 329: adds tests/graphs/basic/stopped_turn_fresh_queue.json (a turn
+// the idle watchdog stopped is not resumed by the next one under the same
+// session id; turn 2 is derived with jq, per the graph's `comment`). Lints clean.
+const EXPECTED_FILES: usize = 329;
 const EXPECTED_ERRORS: usize = 0;
 const EXPECTED_WARNINGS: usize = 0;
 const EXPECTED_INFOS: usize = 0;
