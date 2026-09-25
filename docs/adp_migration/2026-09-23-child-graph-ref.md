@@ -72,8 +72,9 @@ ausentes de antes.
   `CHILD_GRAPH_RESOLVE_FAILED:<code>:`; el `output` (lo que muestra
   `tool-output-available`) es `Error executing node <tool>: CHILD_GRAPH_RESOLVE_FAILED:…`.
 - El grafo resuelto no aparece en frames, en la salida de la tool ni en el estado del
-  hijo. Se guarda en `dag_runs.graph_json` del run hijo, igual que un inline hoy: un
-  resume corre esa versión y no vuelve a llamar al resolvedor.
+  hijo. Se guarda en `dag_runs.graph_json` del run hijo, como un inline. Desde la
+  entrada 80 un resume vuelve a llamar al resolvedor
+  ([nota](2026-09-24-subgraph-resume-fresh-graph.md)).
 - `display_name` todavía no se usa (el nombre en la frontera llega en un PR posterior).
 
 ## Qué se rompe si se ignora

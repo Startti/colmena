@@ -22,7 +22,7 @@ Los cambios que quedan dentro del motor no llevan nota aquí.
 
 | # | Nota | Acción de ADP | Qué se rompe si se ignora |
 |---|------|---------------|---------------------------|
-| 1 | [El resume re-deriva el grafo del hijo y verifica su estructura](2026-09-24-subgraph-resume-fresh-graph.md) | Ninguna de código; persona y descripción de `Run My Agent` aprenden `SUBGRAPH_RESUME_INCOMPATIBLE`; opcional: válvula | Nada al compilar; el principal traduce el error nuevo como una falla genérica |
+| 1 | [El resume re-deriva el grafo del hijo y verifica su estructura](2026-09-24-subgraph-resume-fresh-graph.md) | Ninguna de código; persona y descripción de `Run My Agent` aprenden `SUBGRAPH_RESUME_INCOMPATIBLE` y que un `CHILD_GRAPH_RESOLVE_FAILED` puede llegar después de una pregunta respondida; opcional: válvula | Nada al compilar; el principal traduce el error nuevo como una falla genérica |
 
 ## 2026-09-24 — cliente MCP: el alias sale de `name` y `mcp.tools` filtra
 
