@@ -249,6 +249,21 @@ The `ToolDefinition` is sent to the LLM provider (OpenAI, Gemini, Anthropic) as 
 
 The LLM only provides values for the parameters it can see — it has no knowledge of `base_url`, `apikey`, or any other fixed field.
 
+#### Step 3b: Only a name the request offered reaches the executor
+
+**File:** `llm/application/agent_service.rs` (ReAct loop, before `tool_executor.execute`)
+
+`DagToolExecutor` resolves any registered node type by name, and no provider
+adapter checks a returned name against the declared tools. So the loop runs a
+call only if its name is in `iteration_tools` — the exact list serialized into
+that request (`tool_configurations`, `enabled_tools`, the engine's synthetic
+tools, MCP). Anything else — e.g. a `python_script` the operator never
+exposed — gets `Error executing tool: Tool not found: <name>` (the same text as a
+name that does not exist; never the arguments) and a WARN `tool.not_offered`.
+Lazy mode keeps its own rules: a cataloged tool not loaded this turn gets its
+schema (the describe-before-use guard), and `describe_tool` still answers once
+the list stops carrying it.
+
 ---
 
 ### Step 4: Parse LLM Arguments

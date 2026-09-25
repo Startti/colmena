@@ -615,6 +615,60 @@ mod registry_api_explorer_tests {
 }
 
 #[cfg(test)]
+mod llm_call_offered_tools_tests {
+    //! An `llm_call` wired from the real registry — real tool assembly, real
+    //! `DagToolExecutor` — with a scripted model runs only what it offered.
+    use crate::dag_engine::application::ports::NodeRegistryPort;
+    use crate::llm::infrastructure::{OverrideGuard, ScriptedAdapter, ScriptedResponse};
+    use serde_json::{json, Value};
+    use std::sync::Arc;
+
+    fn call(tool_name: &str, arguments: Value) -> ScriptedResponse {
+        let id = format!("call_{tool_name}");
+        let tool_name = tool_name.to_string();
+        ScriptedResponse::ToolCall {
+            id,
+            tool_name,
+            arguments,
+        }
+    }
+
+    #[tokio::test]
+    async fn llm_call_runs_what_it_offered_and_refuses_a_registered_type_it_did_not() {
+        let _guard = OverrideGuard::install(Arc::new(ScriptedAdapter::new(vec![
+            call("multiply", json!({"a": 2, "b": 3})), // registered, never offered
+            call("sumar", json!({"a": 2, "b": 3})),    // declared by the operator
+            call("recall_history", json!({"turn": 1})), // added by the engine
+            ScriptedResponse::Text("listo".to_string()),
+        ])));
+        let config = json!({
+            "provider": "mock", "model": "m", "api_key": "k", "stream": false, "prompt": "hola",
+            "tool_configurations": { "sumar": { "node_type": "add" } }
+        });
+        let registry = super::registry_tavily_tests::build_registry();
+        let llm = registry.get_node("llm_call").expect("llm_call");
+        let (inputs, mut state) = (Default::default(), json!({}));
+        let out = llm.execute(&inputs, &config, &mut state, None).await;
+        let out = out.expect("llm_call finished");
+        let calls = out["extra_info"]["tool_calls"]
+            .as_array()
+            .expect("tool_calls");
+        let response = |name: &str| {
+            let call = calls.iter().find(|c| c["function"]["name"] == name);
+            call.map(|c| c["response"].clone()).expect(name)
+        };
+        let refusal = json!("Error executing tool: Tool not found: multiply");
+        assert_eq!(
+            response("multiply"),
+            refusal,
+            "an unoffered registered node ran"
+        );
+        assert_eq!(response("sumar"), json!({"output": 5.0}));
+        assert_eq!(response("recall_history")["turn"], json!(1));
+    }
+}
+
+#[cfg(test)]
 mod registry_secure_suspend_tests {
     use super::*;
     use crate::dag_engine::application::secure_value_service::SecureValueService;

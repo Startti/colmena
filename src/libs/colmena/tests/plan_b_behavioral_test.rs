@@ -287,7 +287,11 @@ async fn agent_run_with_in_memory_repo_persists_marker_not_bytes() {
         prompt: Some("please read the doc".to_string()),
         messages: None,
         config: LlmConfig::new(provider),
-        tools: vec![],
+        tools: vec![ToolDefinition::new(
+            "load_attachment".into(),
+            String::new(),
+            Default::default(),
+        )],
         tool_executor: &exec,
         max_tool_repeats: Some(5),
         max_turns: None,

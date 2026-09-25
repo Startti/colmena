@@ -60,6 +60,7 @@ Dos campos opcionales nuevos en cada `ToolConfiguration`:
    ```
 3. Cuando el LLM llama `describe_tool("X")`, el `DagToolExecutor` intercepta la call (mismo patrón que `load_skill`), genera el markdown curado del schema de `X`, y devuelve el contenido.
 4. En el siguiente request, `X` deja el catálogo (ya descubierta) y aparece tipada en `tools[]` con su schema completo. El LLM la invoca normalmente.
+5. El loop solo corre nombres de ese `tools[]` ([22 §3b](22_tool_execution_flow.md#step-3b-only-a-name-the-request-offered-reaches-the-executor)), con dos excepciones del lazy: una tool del catálogo aún no cargada devuelve su schema (la guarda de abajo), y `describe_tool` sigue respondiendo aunque ya no quede nada pendiente.
 
 ## Persistencia con memoria — descubrimiento POR TURNO (2026-06-27)
 

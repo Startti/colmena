@@ -154,7 +154,11 @@ async fn load_attachment_injects_synthetic_user_message_and_persists_history() {
         prompt: Some("read".to_string()),
         messages: None,
         config: LlmConfig::new(scripted_provider()),
-        tools: vec![],
+        tools: vec![ToolDefinition::new(
+            "load_attachment".into(),
+            String::new(),
+            Default::default(),
+        )],
         tool_executor: &exec,
         max_tool_repeats: Some(5),
         max_turns: None,

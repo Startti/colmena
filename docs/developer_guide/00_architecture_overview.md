@@ -176,7 +176,8 @@ DagRunUseCase::execute_stream(graph, resume_id, answer, ...)
     │     │
     │     │ Para nodos llm:
     │     │   AgentService::run()  →  loop ReAct
-    │     │     LLM call → tool_calls? → DagToolExecutor (impl ToolExecutor::execute())
+    │     │     LLM call → tool_calls? → ¿ofrecida en este request? (si no: Tool not found)
+    │     │                              → DagToolExecutor (impl ToolExecutor::execute())
     │     │                              → next LLM call with tool result
     │     │                              → repeat until no tool calls
     │     │
