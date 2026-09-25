@@ -2048,28 +2048,16 @@ impl DagToolExecutor {
         let node_type = &tool_call.function.name;
 
         // 1. Check if it's a configured tool or a raw node.
-        //    First try by map key (fast path), then by config.name (handles UUID keys from frontend).
-        let (node, fixed_config, tool_cfg) =
-            if let Some(config) = self.tool_configurations.get(node_type) {
+        let (node, fixed_config, tool_cfg) = match self.configured_tool(node_type) {
+            Some(config) => {
                 let node = self.registry.get_node(&config.node_type).ok_or_else(|| {
                     LlmError::ToolNotFound {
                         name: config.node_type.clone(),
                     }
                 })?;
                 (node, Some(config.fixed_config.clone()), Some(config))
-            } else if let Some(config) = self
-                .tool_configurations
-                .values()
-                .find(|c| c.name == *node_type)
-            {
-                // Fallback: LLM used the semantic name but the map key is a UUID
-                let node = self.registry.get_node(&config.node_type).ok_or_else(|| {
-                    LlmError::ToolNotFound {
-                        name: config.node_type.clone(),
-                    }
-                })?;
-                (node, Some(config.fixed_config.clone()), Some(config))
-            } else {
+            }
+            None => {
                 let node =
                     self.registry
                         .get_node(node_type)
@@ -2077,7 +2065,8 @@ impl DagToolExecutor {
                             name: node_type.clone(),
                         })?;
                 (node, None, None)
-            };
+            }
+        };
 
         // 2. Parse arguments
         let mut args: HashMap<String, Value> = serde_json::from_str(&tool_call.function.arguments)
@@ -2343,9 +2332,16 @@ impl DagToolExecutor {
         // inputs outward (notably `http_request`) scrub engine-internal keys by
         // that prefix, so this cannot leak into an outbound query string the way
         // `__colmena_subgraph_depth` once did.
+        //
+        // A `parallel` tool's call names it `<tool>#<k>` instead, so two calls
+        // in one batch open two paths rather than one. Only the boundary is
+        // renamed: memory stays keyed by `__colmena_node_id_path` above.
+        let scope_name = self
+            .child_scope(tool_call)
+            .unwrap_or_else(|| tool_call.function.name.clone());
         inputs.insert(
             "__colmena_tool_name".to_string(),
-            Value::String(tool_call.function.name.clone()),
+            Value::String(scope_name.clone()),
         );
 
         // Written last among the engine keys — `strip_engine_keys` already
@@ -2434,7 +2430,7 @@ impl DagToolExecutor {
             if scopes_child_events(dispatched_node_type) {
                 self.observer
                     .clone()
-                    .map(|inner| ChildScopeObserver::wrap(inner, tool_call.function.name.clone()))
+                    .map(|inner| ChildScopeObserver::wrap(inner, scope_name.clone()))
             } else {
                 self.observer.clone()
             };
@@ -2446,8 +2442,7 @@ impl DagToolExecutor {
         // two code paths in the frontend for what is the same idea. Emitted on
         // the RAW observer (masked too) so the boundary sits one level ABOVE the
         // content it delimits, matching how a subgraph-as-tool already reads.
-        let boundary =
-            scopes_child_events(dispatched_node_type).then(|| tool_call.function.name.clone());
+        let boundary = scopes_child_events(dispatched_node_type).then(|| scope_name.clone());
         let masked_boundary_observer =
             MaskingObserver::wrap(self.observer.clone(), &applied_secrets);
         if let (Some(name), Some(obs)) = (&boundary, &masked_boundary_observer) {
@@ -2590,6 +2585,16 @@ impl DagToolExecutor {
                 error: Some(e.to_string()),
             }),
         }
+    }
+}
+
+impl DagToolExecutor {
+    /// The `tool_configurations` entry a call named `name` dispatches to: by
+    /// map key first, then by `name` (the frontend keys entries by UUID).
+    fn configured_tool(&self, name: &str) -> Option<&ToolConfiguration> {
+        self.tool_configurations
+            .get(name)
+            .or_else(|| self.tool_configurations.values().find(|c| c.name == name))
     }
 }
 
@@ -2861,6 +2866,15 @@ impl ToolExecutor for DagToolExecutor {
         // reaches the LLM. Keeps the LLM context free of raw bytes by design.
         result.output = Self::scrub_tool_result_output(result.output, self.max_tool_result_bytes);
         Ok(result)
+    }
+
+    /// `<tool>#<k>` when the call's entry opted into `parallel` and the call
+    /// knows its index k; `None` otherwise.
+    fn child_scope(&self, call: &ToolCall) -> Option<String> {
+        let k = call.scope_index?;
+        self.configured_tool(&call.function.name)
+            .filter(|cfg| cfg.parallel)
+            .map(|_| format!("{}#{k}", call.function.name))
     }
 
     async fn available_tools(&self) -> Vec<crate::llm::domain::ToolDefinition> {
@@ -6327,5 +6341,202 @@ mod child_graph_source_arg_tests {
         let args = json!({ "child_graph_inline": graph("built") });
         let (ran, _) = dispatch("probar_grafo", Some(cfg), args).await;
         assert_eq!(ran, Some(graph("built")));
+    }
+}
+
+/// D2 of the parallel Run My Agent design: a call of a tool whose entry says
+/// `"parallel": true` gets its own identity — `<tool>#<k>`, k being its index
+/// in the model's `tool_calls` message — while its memory stays keyed exactly
+/// as before.
+#[cfg(test)]
+mod parallel_identity_tests {
+    use super::*;
+    use crate::dag_engine::domain::node::NodeInputs;
+    use crate::llm::domain::FunctionCall;
+    use serde_json::json;
+    use std::sync::Mutex;
+
+    /// Echoes its inputs, so a test reads the engine keys the dispatch set,
+    /// and emits one token on the observer it gets, so a test sees where that
+    /// observer puts the node's own events.
+    struct EchoNode;
+    #[async_trait::async_trait]
+    impl ExecutableNode for EchoNode {
+        async fn execute(
+            &self,
+            inputs: &NodeInputs,
+            _c: &Value,
+            _s: &mut Value,
+            observer: Option<Arc<dyn ExecutionObserver>>,
+        ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+            if let Some(obs) = observer {
+                obs.on_event(NodeEvent::LlmToken {
+                    token: "echo".into(),
+                });
+            }
+            Ok(serde_json::to_value(inputs)?)
+        }
+        fn schema(&self) -> Value {
+            json!({ "type": "echo", "inputs": {} })
+        }
+    }
+
+    /// `subgraph` names its own boundary from `__colmena_tool_name`;
+    /// `llm_call` gets its boundary from the executor itself.
+    struct EchoRegistry;
+    impl NodeRegistryPort for EchoRegistry {
+        fn get_node(&self, node_type: &str) -> Option<Arc<dyn ExecutableNode>> {
+            matches!(node_type, "subgraph" | "llm_call")
+                .then(|| Arc::new(EchoNode) as Arc<dyn ExecutableNode>)
+        }
+        fn get_all_nodes(&self) -> HashMap<String, Arc<dyn ExecutableNode>> {
+            HashMap::new()
+        }
+    }
+
+    #[derive(Default)]
+    struct CapturingObserver(Mutex<Vec<NodeEvent>>);
+    impl ExecutionObserver for CapturingObserver {
+        fn on_event(&self, event: NodeEvent) {
+            self.0.lock().unwrap().push(event);
+        }
+    }
+
+    /// The Run My Agent entry shape: a `subgraph` with `dynamic` memory whose
+    /// thread the platform fixes to `${agentId}`, plus `extra` (e.g.
+    /// `"parallel": true`) merged over it.
+    fn run_entry(extra: Value) -> HashMap<String, ToolConfiguration> {
+        let mut entry = json!({
+            "name": "Run",
+            "node_type": "subgraph",
+            "memory_mode": "dynamic",
+            "node_schema": {
+                "agentId": { "type": "string", "required": true, "description": "agent" },
+                "task": { "type": "string", "required": true, "description": "task" },
+                "thread_id": { "fixed": "${agentId}" }
+            }
+        });
+        for (k, v) in extra.as_object().unwrap() {
+            entry[k] = v.clone();
+        }
+        let cfg: ToolConfiguration = serde_json::from_value(entry).unwrap();
+        HashMap::from([("Run".to_string(), cfg)])
+    }
+
+    fn executor(configs: HashMap<String, ToolConfiguration>) -> DagToolExecutor {
+        DagToolExecutor::new(Arc::new(EchoRegistry), configs)
+    }
+
+    fn call(id: &str, name: &str, args: Value, k: Option<usize>) -> ToolCall {
+        let mut c = ToolCall::new(id.into(), FunctionCall::new(name.into(), args.to_string()));
+        c.scope_index = k;
+        c
+    }
+
+    fn run_call(id: &str, agent: &str, k: Option<usize>) -> ToolCall {
+        call(id, "Run", json!({ "agentId": agent, "task": "t" }), k)
+    }
+
+    #[test]
+    fn a_parallel_call_is_scoped_by_its_index_in_the_message() {
+        let exec = executor(run_entry(json!({ "parallel": true })));
+        assert_eq!(
+            exec.child_scope(&run_call("c", "a", Some(2))).as_deref(),
+            Some("Run#2")
+        );
+    }
+
+    #[test]
+    fn a_call_of_a_tool_that_did_not_opt_in_has_no_scope() {
+        for extra in [json!({}), json!({ "parallel": false })] {
+            let exec = executor(run_entry(extra));
+            assert_eq!(exec.child_scope(&run_call("c", "a", Some(2))), None);
+        }
+    }
+
+    #[test]
+    fn a_parallel_call_with_no_index_has_no_scope() {
+        let exec = executor(run_entry(json!({ "parallel": true })));
+        assert_eq!(exec.child_scope(&run_call("c", "a", None)), None);
+    }
+
+    /// Frontend entries are keyed by UUID and matched by `name`, the same
+    /// fallback dispatch uses.
+    #[test]
+    fn the_entry_is_found_by_name_when_its_key_is_not_the_tool_name() {
+        let cfg = run_entry(json!({ "parallel": true }))
+            .remove("Run")
+            .unwrap();
+        let exec = executor(HashMap::from([("8c1f-uuid".to_string(), cfg)]));
+        assert_eq!(
+            exec.child_scope(&run_call("c", "a", Some(0))).as_deref(),
+            Some("Run#0")
+        );
+    }
+
+    /// The boundary a `subgraph` opens is named from `__colmena_tool_name`, so
+    /// that is where `<tool>#<k>` lands. The memory path does NOT change.
+    #[tokio::test]
+    async fn a_parallel_subgraph_call_names_its_boundary_tool_hash_k_and_keeps_its_memory_path() {
+        let exec = executor(run_entry(json!({ "parallel": true })));
+        let out = exec
+            .execute(&run_call("c", "agent-a", Some(1)))
+            .await
+            .unwrap();
+        let inputs: Value = serde_json::from_str(&out.output).unwrap();
+        assert_eq!(inputs["__colmena_tool_name"], "Run#1");
+        assert_eq!(inputs["__colmena_node_id_path"], "tool/Run/agent-a");
+    }
+
+    #[tokio::test]
+    async fn a_call_of_a_tool_that_did_not_opt_in_keeps_the_bare_tool_name() {
+        let exec = executor(run_entry(json!({})));
+        let out = exec
+            .execute(&run_call("c", "agent-a", Some(1)))
+            .await
+            .unwrap();
+        let inputs: Value = serde_json::from_str(&out.output).unwrap();
+        assert_eq!(inputs["__colmena_tool_name"], "Run");
+        assert_eq!(inputs["__colmena_node_id_path"], "tool/Run/agent-a");
+    }
+
+    /// `llm_call` (and `for_each`) as a tool: the executor opens the boundary
+    /// itself and scopes the node's own events under it. Both use `<tool>#<k>`:
+    /// the node's token arrives lifted, stamped `Helper#3`, inside the pair.
+    #[tokio::test]
+    async fn a_parallel_llm_call_tool_opens_and_closes_its_boundary_as_tool_hash_k() {
+        let cfg: ToolConfiguration = serde_json::from_value(json!({
+            "name": "Helper", "node_type": "llm_call", "parallel": true,
+            "node_schema": { "prompt": { "type": "string", "required": true, "description": "p" } }
+        }))
+        .unwrap();
+        let obs = Arc::new(CapturingObserver::default());
+        let exec = executor(HashMap::from([("Helper".to_string(), cfg)]))
+            .with_observer(Some(obs.clone() as Arc<dyn ExecutionObserver>));
+        exec.execute(&call("c", "Helper", json!({ "prompt": "hi" }), Some(3)))
+            .await
+            .unwrap();
+
+        let scoped: Vec<(String, String)> = obs
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|e| match e {
+                NodeEvent::SubgraphChildEvent(raw) => Some((
+                    raw["event"].as_str()?.to_string(),
+                    raw["data"]["node_id"].as_str()?.to_string(),
+                )),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            scoped,
+            [
+                ("node_start".to_string(), "Helper#3".to_string()),
+                ("llm_token".to_string(), "Helper#3".to_string()),
+                ("subgraph_node_finish".to_string(), "Helper#3".to_string()),
+            ]
+        );
     }
 }
