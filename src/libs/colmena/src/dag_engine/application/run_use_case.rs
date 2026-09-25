@@ -395,11 +395,10 @@ impl DagRunUseCase {
             if let Some(obj) = global_shared_state.as_object_mut() {
                 obj.insert("session_id".to_string(), Value::String(session_id.clone()));
 
-                let mut graph_nodes_meta = serde_json::Map::new();
-                for (nid, node) in &graph.nodes {
-                    graph_nodes_meta.insert(nid.clone(), node.config.clone());
-                }
-                obj.insert("__graph_nodes".to_string(), Value::Object(graph_nodes_meta));
+                obj.insert(
+                    "__graph_nodes".to_string(),
+                    Self::planner_descriptions(&graph),
+                );
             }
 
             let mut current_caller: Option<String> = None;
@@ -1492,6 +1491,23 @@ enum ResumePlan {
 }
 
 impl DagRunUseCase {
+    /// `__graph_nodes`: what the planner may read about each node — its
+    /// `description`, nothing else. It used to hold every node's whole
+    /// `config`, resolved keys included, and it is persisted with the state.
+    fn planner_descriptions(graph: &Graph) -> Value {
+        let meta: serde_json::Map<String, Value> = graph
+            .nodes
+            .iter()
+            .filter_map(|(id, node)| {
+                node.config
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .map(|d| (id.clone(), json!({ "description": d })))
+            })
+            .collect();
+        Value::Object(meta)
+    }
+
     /// Decides what a suspended child resumes with, before anything runs.
     /// Only structure is compared (`GraphSkeleton`): a fresh graph may bring
     /// new keys, tokens, skill paths or prompts, which is the point. The row
@@ -1754,6 +1770,31 @@ mod seed_state_tests {
         let mut scalar = json!(5);
         DagRunUseCase::fold_seed_state(&mut scalar, Some(json!({ "a": 1 })));
         assert_eq!(scalar, json!(5));
+    }
+}
+
+#[cfg(test)]
+mod graph_nodes_meta_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// `__graph_nodes` is persisted with the state: it keeps only what the
+    /// planner reads, a string `description`, never the rest of `config`.
+    #[test]
+    fn graph_nodes_meta_keeps_only_string_descriptions() {
+        let g: Graph = serde_json::from_value(json!({
+            "nodes": {
+                "a": { "type": "llm_call", "config": { "description": "Busca", "api_key": "sk-e2e-at-rest-xxxxxxxxxxxx" } },
+                "b": { "type": "llm_call", "config": { "api_key": "sk-e2e-at-rest-yyyyyyyyyyyy" } },
+                "c": { "type": "llm_call", "config": { "description": 7 } }
+            },
+            "edges": []
+        }))
+        .unwrap();
+        assert_eq!(
+            DagRunUseCase::planner_descriptions(&g),
+            json!({ "a": { "description": "Busca" } })
+        );
     }
 }
 
@@ -2402,6 +2443,24 @@ mod resume_graph_tests {
         let row = repo.row("child_1");
         assert_eq!(row.status, DagRunStatus::Completed);
         assert_eq!(row.graph_json, at_rest(graph_with("sello", "v2")));
+    }
+
+    /// The state a run persists carries `__graph_nodes` with descriptions only:
+    /// the `stamp` (standing in for a key) of the node's config stays out.
+    #[tokio::test]
+    async fn the_persisted_state_keeps_only_node_descriptions() {
+        let (uc, repo) = suspended_child(at_rest(graph_with("sello", "v1")));
+        let mut fresh = graph_with("sello", "sk-e2e-at-rest-zzzzzzzzzzzz");
+        fresh["nodes"]["sello"]["config"]["description"] = json!("Sella");
+        resume(&uc, ResumeGraph::Fresh(fresh))
+            .await
+            .expect("resumes");
+        let state = repo.row("child_1").global_shared_state;
+        assert_eq!(
+            state["__graph_nodes"],
+            json!({ "sello": { "description": "Sella" } })
+        );
+        assert!(!state.to_string().contains("sk-e2e-at-rest-"), "{state}");
     }
 
     /// Pins the fixed text in `plan_resume`'s `Err(_) => …` branch: a serde
