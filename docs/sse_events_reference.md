@@ -196,7 +196,7 @@ modelo, y sus frames `tool-input-available` y `tool-output-available` llevan
 es el `path` del frame de la tool, seguido de `>` y el `childScope`. Así dos
 llamadas a la misma tool en un turno no comparten nodo en el árbol.
 
-Frames reales de un E2E, recortados.
+Frames reales del E2E (`src/libs/colmena/tests/parallel_tool_identity.rs`), recortados.
 El modelo pidió `Run`, `Nota` y `Run` en un solo mensaje; `Run` es `parallel`, `Nota` no:
 
 ```json

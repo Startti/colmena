@@ -359,6 +359,49 @@ prerrequisito antes de que `memory_mode` tenga sentido ahí. Los nodos internos 
 orchestrator (`planner`/`critic`/`reactor`) nunca son entradas de `tool_configurations` —
 heredan el path de su padre y por eso no se listan.
 
+### Varias llamadas a la misma tool en un turno (`parallel`)
+
+Un modelo puede pedir la misma tool dos veces en un mensaje. Por defecto las dos
+llamadas abren su frontera con el mismo nombre (`agent>Run`), así que en el stream sus
+árboles caen en el mismo nodo. `"parallel": true` en la entrada de
+`tool_configurations` le da a cada llamada su propia identidad. Es un campo del
+operador, nunca visible al LLM, y tiene que ser booleano. Cualquier otro valor falla la
+validación del grafo al cargar, y `dag_engine lint` lo reporta como
+`MALFORMED_TOOL_ENTRY`.
+
+```json
+"Run": {
+  "name": "Run",
+  "node_type": "subgraph",
+  "parallel": true,
+  "description": "Corre un agente con una tarea.",
+  "node_schema": { "...": "..." }
+}
+```
+
+- **Frontera `<tool>#<k>`.** Cada llamada abre su frontera como `<tool>#<k>`, donde k
+  es su índice en el mensaje `tool_calls` del modelo: la posición en el mensaje, no un
+  contador por tool. Pasa en toda llamada de una tool `parallel`, aunque sea la única del
+  mensaje. Con `[Run, Nota, Run]`, las fronteras son `agent>Run#0`, `agent>Nota` y
+  `agent>Run#2`.
+- **`childScope` en los frames.** `tool-input-available` y `tool-output-available` (y sus
+  variantes `subgraph-tool-*`) llevan `childScope: "<tool>#<k>"`. `tool-input-start` no
+  lo lleva nunca. Ver
+  [sse_events_reference.md](../sse_events_reference.md#childscope--una-llamada-a-una-tool-parallel).
+- **La memoria no cambia.** `<tool>#<k>` nombra solo la frontera del stream. El
+  `node_id` de la memoria sigue saliendo de `memory_mode` (`tool/<tool_name>/<thread_id>`
+  en `dynamic`), así que dos llamadas al mismo agente siguen compartiendo hilo.
+- **k es estable.** Con streaming, las llamadas se ordenan por el índice del proveedor
+  antes de persistirlas y despacharlas. Un resume recalcula k desde el mismo mensaje
+  persistido, y el hijo reanudado vuelve a abrir `<tool>#<k>`.
+- **Todavía en serie.** En esta versión `parallel` cambia solo la identidad: las
+  llamadas corren una después de la otra, en el orden del mensaje.
+- Una tool sin `parallel` no cambia en nada: frontera con el nombre pelado y frames
+  sin `childScope`.
+
+E2E: `tests/graphs/agents/parallel_tool_identity.json`, que corre
+`src/libs/colmena/tests/parallel_tool_identity.rs` con un modelo guionado.
+
 ### ¿Y si quiero un orchestrator dentro del loop de tools?
 
 No hace falta esperar a que `orchestrator` sea apto para tool: **envolvelo en un
