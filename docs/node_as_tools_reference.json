@@ -98,6 +98,12 @@
               }
             }
           }
+        },
+        "parallel": {
+          "type": "boolean",
+          "required": false,
+          "default": false,
+          "description": "Operator-only, never shown to the LLM. Opt-in flag asking that each call of this tool get its own identity in the stream. A non-boolean value fails graph validation at load. In this version the flag is only validated: the run does not act on it yet."
         }
       }
     },

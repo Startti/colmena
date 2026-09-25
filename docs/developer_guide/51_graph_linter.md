@@ -890,15 +890,16 @@ claves que se perdían.
   migrado los dos ya no pueden diverger. La prosa (`description`/`example`/`default`)
   sigue viviendo en el JSON a propósito — es lo que leen humanos y agentes. Los
   nodos que todavía devuelven `None` siguen respaldados solo por el catálogo.
-- **El linter espeja ahora TODAS las compuertas de `Graph::validate()`.** Las cinco de
+- **El linter espeja ahora TODAS las compuertas de `Graph::validate()`.** Las seis de
   una entrada de tool —`node_schema` ilegible, `memory_mode` fuera del enum, sobre un
-  tipo de nodo sin memoria, con memoria y sin `connection_url`, y un bloque `mcp`
-  malformado o con URL no-HTTPS— y la sexta, la única que no es sobre una tool: un node
-  id que contiene `/`.
+  tipo de nodo sin memoria, con memoria y sin `connection_url`, un bloque `mcp`
+  malformado o con URL no-HTTPS, y un `parallel` que no es booleano— y la séptima, la
+  única que no es sobre una tool: un node id que contiene `/`.
 
-  Cinco de las seis **llaman a la misma función de dominio** que usa el motor, así que no
-  pueden divergir. La restante —el enum `memory_mode`— no tiene función de dominio:
-  `graph.rs` lo deserializa inline y el linter hace lo mismo.
+  Cinco de las siete **llaman a la misma función de dominio** que usa el motor, así que
+  no pueden divergir. Las dos restantes no tienen función de dominio: `graph.rs`
+  deserializa el enum `memory_mode` inline y chequea `parallel` con `is_boolean()`, y el
+  linter hace lo mismo.
 
   Eso **no** convierte un reporte limpio en garantía de que el grafo corra: sigue siendo
   "el linter no encontró nada de lo que sabe buscar". Lo que cambia es que ya no hay una
