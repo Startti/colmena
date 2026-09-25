@@ -24,11 +24,18 @@ pub enum NodeEvent {
         tool_id: String,
         tool_name: String,
         tool_args: String,
+        /// `<tool>#<k>` when the tool is `parallel` (see
+        /// `ToolExecutor::child_scope`); absent otherwise.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        child_scope: Option<String>,
     },
     LlmToolCallFinish {
         tool_id: String,
         success: bool,
         output: String,
+        /// The same scope its `LlmToolCallStart` carried; absent otherwise.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        child_scope: Option<String>,
     },
     /// Emitted when the load_skill synthetic tool successfully loads a skill or reference.
     /// Fires in addition to LlmToolCallStart/Finish so frontends can render a skill-specific UI.

@@ -48,6 +48,11 @@ pub enum DagExecutionEvent {
         tool_id: String,
         tool_name: String,
         tool_args: String,
+        /// `<tool>#<k>` for a call of a `parallel` tool: the scope its child
+        /// boundary opens under. Additive: absent, the frame is byte-identical
+        /// to before this field.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        child_scope: Option<String>,
     },
     #[serde(rename = "llm_tool_call_finish")]
     LlmToolCallFinish {
@@ -55,6 +60,9 @@ pub enum DagExecutionEvent {
         tool_id: String,
         success: bool,
         output: String,
+        /// The same scope its `LlmToolCallStart` carried. Additive, as there.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        child_scope: Option<String>,
     },
     #[serde(rename = "llm_message_start")]
     LlmMessageStart { node_id: String },
@@ -272,21 +280,25 @@ impl DagExecutionEvent {
                 tool_id,
                 tool_name,
                 tool_args,
+                child_scope,
             } => Self::LlmToolCallStart {
                 node_id: nid(),
                 tool_id,
                 tool_name,
                 tool_args,
+                child_scope,
             },
             NodeEvent::LlmToolCallFinish {
                 tool_id,
                 success,
                 output,
+                child_scope,
             } => Self::LlmToolCallFinish {
                 node_id: nid(),
                 tool_id,
                 success,
                 output,
+                child_scope,
             },
             NodeEvent::SkillLoaded {
                 tool_id,
