@@ -14,9 +14,9 @@
 //!
 //! ## URL semantics
 //!
-//! - `storage_key`: bare filename (`<uuid>.<ext>`). Stable handle used by
-//!   `$attachment:<key>` placeholders and the `OutputStorageRepository.read`
-//!   path.
+//! - `storage_key`: bare filename (`<uuid>.<ext>`). Stable handle for the
+//!   `OutputStorageRepository.read` path; the attachment registry maps a
+//!   session's `document_id` to it for `$attachment:<document_id>`.
 //! - `read_url`: `http://127.0.0.1:<port>/files/<key>` — fetchable by any
 //!   HTTP client, opens in the browser, and (most importantly) keeps the
 //!   gen → load_attachment → cross-provider-upload pipeline working without
