@@ -4544,3 +4544,31 @@ siguiente vuelve a emitir los frames del nodo de entrada, como cualquier turno.
 4 tests nuevos (1 del punto 1, 3 del punto 2) sobre los 3059 que dejó el fix
 original: 9/9 en `stored_run_status_tests`, estable en 20 corridas seguidas.
 `cargo test` completo (`--verbose`): 3063 passed, 0 failed, 146 ignorados.
+
+## 85. Fix: `$attachment:<document_id>` en un body JSON pasa por el registro de la sesión
+
+**El bug.** El camino JSON de `http_request` leía el id de `"$attachment:<id>"` como clave
+de storage. Desde el Plan A el catálogo enseña `document_id`s, así que ningún adaptador
+resolvía un id del catálogo por JSON (ADP: `body.image_url = "$attachment:<document_id>"` →
+`not found in HttpCallback meta cache`), y la guía 32 decía lo contrario. Además, el JSON y
+el respaldo del resolver de multipart leían cualquier clave cruda escrita por el modelo, de
+esta sesión o de otra.
+
+**Qué cambió.**
+- JSON: con resolver cableado, el placeholder se resuelve con el `AttachmentStreamResolver`
+  de la sesión, como multipart, y se vuelve `data:<mime>;base64,…` (tope
+  `max_file_size_bytes`). Sin registro en el motor, sigue leyendo la clave (legacy).
+- `AttachmentStreamResolverImpl` ya no lee el id como clave cruda: lo que no es un
+  `document_id` de la sesión es `NotFound`, sin tocar el storage.
+- `DagToolExecutor::register_attachment_bytes` (`data_run_python`, `gdocs_export`,
+  `gsheets_export_xlsx`) registra su fila en la sesión, con `document_id` = la clave que ya
+  devolvía; si no, cerrar las claves crudas rompía reenviar esas salidas. Efecto lateral:
+  aparecen en el catálogo del turno siguiente y el `attachment_gc` las borra por TTL.
+- Preludio de adjuntos, guías 25 y 32 y `node_as_tools_reference.json`: JSON → `data:` URI
+  (útil solo si la API acepta data URIs); multipart → parte de archivo; clave cruda →
+  rechazo.
+
+**Tests.** `http.rs::session_attachment_tests` (4, resolver real sobre SQLite),
+`stream_resolver_impl` y `dag_tool_executor` (uno cada uno); rojos antes del fix.
+**ADP.** Una clave cruda en `$attachment:` da ahora `attachment not found`: va el
+`document_id` del catálogo. **Estado.** done (punto 11, parte A; sigue `image_edit`).

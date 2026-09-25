@@ -21,6 +21,7 @@
 use crate::dag_engine::domain::lint::{FieldSpec, NodeCatalogEntry};
 use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
 use crate::dag_engine::infrastructure::env_provenance::{escape_pointer_segment, EnvPolicy};
+use crate::dag_engine::infrastructure::nodes::util::session_attachment::read_session_attachment;
 use bytes::Bytes;
 use futures::Stream;
 use reqwest::{Method, Url};
@@ -37,9 +38,8 @@ pub struct HttpNode {
     /// in the body. When None, placeholders pass through unchanged (logged warn).
     storage: Option<Arc<dyn crate::storage::domain::OutputStorageRepository>>,
     /// Plan A: optional resolver for `$attachment:<document_id>` placeholders.
-    /// When `Some`, multipart attachment parts go through the resolver first
-    /// (document_id → storage_key → StoredStream); when `None`, the legacy
-    /// direct `storage.read_stream(<storage_key>)` path is used.
+    /// When `Some`, every placeholder (JSON and multipart) must be a
+    /// document_id of the session; when `None`, the id is a storage_key.
     attachment_resolver: Option<Arc<dyn crate::llm::domain::attachments::AttachmentStreamResolver>>,
     /// Shared OAuth provider cache. When set, a config `auth` block authenticates
     /// via the refresh_token grant, reusing one token per credential fingerprint.
@@ -302,9 +302,9 @@ impl HttpNode {
         self
     }
 
-    /// Plan A: wire an `AttachmentStreamResolver`. When present, multipart
-    /// `$attachment:<id>` parts route through it (document_id namespace, with
-    /// internal fallback to direct storage_key lookup for legacy flows).
+    /// Plan A: wire an `AttachmentStreamResolver`. When present, every
+    /// `$attachment:<id>` (JSON body and multipart) must be a `document_id`
+    /// of the calling session; raw storage_keys are rejected.
     pub fn with_attachment_resolver(
         mut self,
         resolver: Arc<dyn crate::llm::domain::attachments::AttachmentStreamResolver>,
@@ -367,27 +367,34 @@ impl HttpNode {
     }
 
     /// Recursively walks a JSON value, replacing every string of the form
-    /// `$attachment:<storage_key>` with `data:<mime>;base64,<bytes>`. Returns
-    /// an error if any placeholder cannot be resolved (no storage adapter,
-    /// or storage.read fails).
+    /// `$attachment:<id>` with `data:<mime>;base64,<bytes>`. With a resolver,
+    /// `<id>` is a document_id of `agent_session_id` of at most `max_bytes`;
+    /// without one, a storage_key. Any unresolved placeholder is an error.
     async fn resolve_attachment_placeholders(
         &self,
         val: Value,
+        agent_session_id: Option<&str>,
+        max_bytes: u64,
     ) -> Result<Value, Box<dyn StdError + Send + Sync>> {
         use base64::Engine;
 
         match val {
             Value::String(s) if s.starts_with(ATTACHMENT_PLACEHOLDER_PREFIX) => {
                 let id = &s[ATTACHMENT_PLACEHOLDER_PREFIX.len()..];
-                let storage = self.storage.as_ref().ok_or_else(|| {
-                    format!(
-                        "http_request: body contains '{s}' but no OutputStorageRepository is wired"
-                    )
-                })?;
-                let bytes = storage
-                    .read(id)
-                    .await
-                    .map_err(|e| -> Box<dyn StdError + Send + Sync> { Box::new(e) })?;
+                let bytes = if let Some(resolver) = self.attachment_resolver.as_ref() {
+                    read_session_attachment(resolver.as_ref(), agent_session_id, id, max_bytes)
+                        .await?
+                } else {
+                    let storage = self.storage.as_ref().ok_or_else(|| {
+                        format!(
+                            "http_request: body contains '{s}' but no OutputStorageRepository is wired"
+                        )
+                    })?;
+                    storage
+                        .read(id)
+                        .await
+                        .map_err(|e| -> Box<dyn StdError + Send + Sync> { Box::new(e) })?
+                };
                 let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes.bytes);
                 Ok(Value::String(format!(
                     "data:{};base64,{}",
@@ -397,14 +404,16 @@ impl HttpNode {
             Value::Object(map) => {
                 let mut out = serde_json::Map::new();
                 for (k, v) in map {
-                    out.insert(k, Box::pin(self.resolve_attachment_placeholders(v)).await?);
+                    let v = self.resolve_attachment_placeholders(v, agent_session_id, max_bytes);
+                    out.insert(k, Box::pin(v).await?);
                 }
                 Ok(Value::Object(out))
             }
             Value::Array(arr) => {
                 let mut out = Vec::with_capacity(arr.len());
                 for v in arr {
-                    out.push(Box::pin(self.resolve_attachment_placeholders(v)).await?);
+                    let v = self.resolve_attachment_placeholders(v, agent_session_id, max_bytes);
+                    out.push(Box::pin(v).await?);
                 }
                 Ok(Value::Array(out))
             }
@@ -868,10 +877,9 @@ impl HttpNode {
                 filename_override,
                 content_type_override,
             } => {
-                // Plan A: prefer the resolver (document_id namespace, with
-                // internal fallback to direct storage_key lookup for legacy
-                // flows). Fall back to direct storage when no resolver is
-                // wired — preserves pre-Plan A behavior.
+                // Plan A: with a resolver, `storage_key` holds a document_id
+                // of this session (a raw key is NotFound). Direct storage
+                // only when no resolver is wired (pre-Plan A behavior).
                 let stored = if let Some(resolver) = self.attachment_resolver.as_ref() {
                     let sid =
                         agent_session_id.ok_or_else(|| -> Box<dyn StdError + Send + Sync> {
@@ -1157,7 +1165,17 @@ impl ExecutableNode for HttpNode {
                 // by reading bytes via OutputStorageRepository. This is what
                 // lets agents pass generated artifacts to external endpoints
                 // without ever seeing the raw bytes in their context.
-                let resolved_body = self.resolve_attachment_placeholders(resolved_body).await?;
+                let sid = inputs
+                    .get("__colmena_agent_session_id")
+                    .and_then(|v| v.as_str());
+                let max = Self::limit_u64(
+                    config,
+                    "max_file_size_bytes",
+                    Self::DEFAULT_MAX_FILE_SIZE_BYTES,
+                );
+                let resolved_body = self
+                    .resolve_attachment_placeholders(resolved_body, sid, max)
+                    .await?;
                 // Never log body contents — may contain credentials or PII
                 request_builder = request_builder.json(&resolved_body);
             }
@@ -1481,6 +1499,146 @@ mod attachment_placeholder_tests {
         assert_eq!(out["status"], 200);
 
         std::env::remove_var("HTTP_NODE_TEST_TOKEN");
+    }
+}
+
+#[cfg(test)]
+mod session_attachment_tests {
+    //! `$attachment:<id>` with the session registry wired (as `registry.rs`
+    //! does): the id must be a document_id of the calling session, in a JSON
+    //! body and in multipart. A raw storage_key is never read.
+    use super::*;
+    use crate::llm::domain::attachments::{AttachmentSource, UpsertAttachmentInput};
+    use crate::llm::domain::{AttachmentRegistry, ProviderKind};
+    use crate::llm::infrastructure::attachments::AttachmentStreamResolverImpl;
+    use crate::llm::infrastructure::persistence::SqliteAttachmentRegistry;
+    use crate::storage::domain::{
+        MockOutputStorageRepository, OutputStorageRepository, StorageError, StoredStream,
+    };
+    use std::collections::HashMap;
+    use wiremock::matchers::{body_json, method};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const JPEG: &[u8] = &[0xDE, 0xAD]; // base64 "3q0="
+
+    fn served(k: &str) -> Result<(), StorageError> {
+        match k {
+            "k1" | "k2" => Ok(()),
+            _ => Err(StorageError::InvalidInput(format!("unknown key {k}"))),
+        }
+    }
+
+    /// `s1` owns `doc-1 → k1` and `s2` owns `doc-2 → k2`. Storage streams both
+    /// keys, so a raw key WOULD be readable; `read` has no expectation at all.
+    async fn run(body: Value, sid: Option<&str>, extra: Value, server: &MockServer) -> String {
+        let reg = SqliteAttachmentRegistry::new("sqlite::memory:")
+            .await
+            .unwrap();
+        for (s, doc, key) in [("s1", "doc-1", "k1"), ("s2", "doc-2", "k2")] {
+            let row = UpsertAttachmentInput {
+                agent_session_id: s.into(),
+                document_id: doc.into(),
+                provider: ProviderKind::Generated,
+                provider_file_id: key.into(),
+                mime_type: "image/jpeg".into(),
+                filename: "a.jpg".into(),
+                size_bytes: Some(2),
+                label: None,
+                description: None,
+                source: AttachmentSource::Path(key.into()),
+                storage_key: Some(key.into()),
+                origin: None,
+            };
+            reg.upsert(row).await.unwrap();
+        }
+        let mut storage = MockOutputStorageRepository::new();
+        storage.expect_read_stream().returning(|k| {
+            served(k)?;
+            let chunk: Result<Bytes, StorageError> = Ok(Bytes::from_static(JPEG));
+            let stream = Box::pin(futures::stream::once(async move { chunk }));
+            let (mime_type, filename) = ("image/jpeg".into(), "a.jpg".into());
+            Ok(StoredStream {
+                stream,
+                size_bytes: 2,
+                mime_type,
+                filename,
+            })
+        });
+        let storage: Arc<dyn OutputStorageRepository> = Arc::new(storage);
+        let reg: Arc<dyn AttachmentRegistry> = Arc::new(reg);
+        let resolver = Arc::new(AttachmentStreamResolverImpl::new(reg, storage.clone()));
+        let node = HttpNode::new()
+            .with_storage(storage)
+            .with_attachment_resolver(resolver);
+
+        let mut config = json!({ "base_url": server.uri(), "endpoint": "/", "method": "POST" });
+        config
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let mut inputs = HashMap::from([("body".to_string(), body)]);
+        if let Some(s) = sid {
+            inputs.insert("__colmena_agent_session_id".into(), json!(s));
+        }
+        match node.execute(&inputs, &config, &mut json!({}), None).await {
+            Ok(out) => format!("status {}", out["status"]),
+            Err(e) => e.to_string(),
+        }
+    }
+
+    /// A server that must never be called: the request has to fail first.
+    async fn untouched_server() -> MockServer {
+        let server = MockServer::start().await;
+        let never = Mock::given(method("POST")).respond_with(ResponseTemplate::new(200));
+        never.expect(0).mount(&server).await;
+        server
+    }
+
+    #[tokio::test]
+    async fn json_body_attachment_placeholder_resolves_document_id_via_resolver() {
+        let server = MockServer::start().await;
+        Mock::given(body_json(
+            json!({ "image_url": "data:image/jpeg;base64,3q0=" }),
+        ))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&server)
+        .await;
+        let body = json!({ "image_url": "$attachment:doc-1" });
+        assert_eq!(
+            run(body, Some("s1"), json!({}), &server).await,
+            "status 200"
+        );
+    }
+
+    #[tokio::test]
+    async fn json_body_attachment_placeholder_refuses_what_is_not_a_session_document_id() {
+        // A raw key of this session, a raw key of another session, and a
+        // document_id of another session: all readable by storage, none ours.
+        for id in ["k1", "k2", "doc-2"] {
+            let body = json!({ "image_url": format!("$attachment:{id}") });
+            let out = run(body, Some("s1"), json!({}), &untouched_server().await).await;
+            assert!(out.contains("attachment not found"), "{id}: {out}");
+        }
+    }
+
+    #[tokio::test]
+    async fn json_body_attachment_placeholder_needs_the_session_and_respects_the_size_cap() {
+        let server = untouched_server().await;
+        let body = json!({ "image_url": "$attachment:doc-1" });
+        let out = run(body.clone(), None, json!({}), &server).await;
+        assert!(out.contains("agent_session_id"), "{out}");
+        let cap = json!({ "max_file_size_bytes": 1 });
+        let out = run(body, Some("s1"), cap, &server).await;
+        assert!(out.contains("FileTooLarge"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn multipart_attachment_refuses_a_raw_storage_key() {
+        let multipart = json!({ "headers": { "Content-Type": "multipart/form-data" } });
+        let body = json!({ "file": "$attachment:k1" });
+        let out = run(body, Some("s1"), multipart, &untouched_server().await).await;
+        assert!(out.contains("attachment not found"), "{out}");
     }
 }
 

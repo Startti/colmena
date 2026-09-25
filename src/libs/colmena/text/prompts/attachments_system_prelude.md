@@ -1,7 +1,7 @@
 ## Conversation Attachments
 This conversation has one or more documents attached to it. They are listed in the catalog below (and in the description of the `load_attachment` tool), each with a `document_id`, label, mime type, and size.
 
-You will NOT see document content automatically — the catalog only advertises which documents exist. To read a document's content, you must call load_attachment(document_id). To forward a document to a downstream tool (for example `http_request` multipart) without reading it yourself, pass the string "$attachment:<document_id>" in that tool's args.
+You will NOT see document content automatically — the catalog only advertises which documents exist. To read a document's content, you must call load_attachment(document_id). To forward a document to a downstream tool without reading it yourself, pass the string "$attachment:<document_id>" in that tool's args, with a `document_id` from the catalog (any other value is rejected). What arrives depends on the request body: in a `multipart/form-data` body it becomes a file part; in a JSON body it becomes a `data:<mime>;base64,...` string, which only works if the receiving API accepts data URIs — it is never a URL.
 
 load_attachment results are ephemeral: the document content is available only for the turn in which you invoked the tool. Future turns will see a marker confirming the call happened, but not the content itself. Call load_attachment again if you need to re-read the document.
 

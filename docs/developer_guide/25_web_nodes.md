@@ -441,14 +441,14 @@ Cuando el header `Content-Type` empieza con `multipart/`, el nodo `http_request`
 
 | Forma del valor | Resultado |
 |---|---|
-| String `$attachment:<storage_key>` | Parte de archivo, bytes streameados desde el storage. |
+| String `$attachment:<document_id>` | Parte de archivo, bytes streameados desde el storage (ver abajo). |
 | String que empieza con `https://` (o `http://` si `allow_http_urls=true`) | Parte de archivo, HEAD para validar tamaño + GET streaming. |
 | Cualquier otro string | Text part (campo no-archivo). |
 | Number o boolean | Coerced a su representación string como text part. |
 | `null` | El campo se omite. |
 | Array | Se expande a N partes con el mismo `field_name`. |
 | Objeto `{ "url": "...", "filename": "...", "content_type": "..." }` | Parte de archivo con overrides explícitos. |
-| Objeto `{ "attachment": "<key>", "filename": "...", "content_type": "..." }` | Parte de archivo desde storage con overrides. |
+| Objeto `{ "attachment": "<document_id>", "filename": "...", "content_type": "..." }` | Parte de archivo desde storage con overrides. |
 | Objeto `{ "value": "...", "content_type": "..." }` | Text part con content-type custom. |
 
 ### Límites configurables
@@ -475,7 +475,7 @@ Cuando el header `Content-Type` empieza con `multipart/`, el nodo `http_request`
       "body": {
         "files": {
           "type": "array",
-          "items": { "type": "string", "description": "Signed URL o $attachment:<storage_key>" },
+          "items": { "type": "string", "description": "Signed URL o $attachment:<document_id>" },
           "required": true,
           "description": "Archivos a subir"
         }
@@ -495,18 +495,17 @@ El LLM solo ve `endpoint` y `files`. Todo lo demás (método, auth, content-type
 ### `$attachment:` resuelve los 3 orígenes (Plan A, 2026-05-25)
 
 A partir de Plan A, el placeholder `$attachment:<id>` en `http_request` se
-ruta por `AttachmentStreamResolver`, que resuelve `<id>` así:
+ruta por `AttachmentStreamResolver`: `<id>` es un **`document_id` de la sesión**
+(lookup en `conversation_attachments` por `(agent_session_id, document_id)`) y los
+bytes se streamean desde `OutputStorageRepository::read_stream(storage_key)`.
+Cubre uploads del usuario, artefactos de `image_generation`/`image_edit`/`tts` y
+los archivos que registran `data_run_python`, `gdocs_export` y `gsheets_export_xlsx`.
 
-1. **`document_id`** — primario: lookup en `conversation_attachments` por
-   `(agent_session_id, document_id)`; los bytes se streamean desde
-   `OutputStorageRepository::read_stream(storage_key)`. Cubre uploads del
-   usuario (inline + signed URL) y artefactos generados por tools
-   (`image_generation` / `image_edit` / `tts`).
-
-2. **`storage_key` crudo** — fallback: si el lookup de document_id falla,
-   el identificador se trata como `storage_key` directo de
-   `OutputStorageRepository`. Backwards-compat con flujos pre-Plan-A donde
-   `attachment_id` ERA el storage_key.
+Si el lookup falla, el error es `attachment not found` y no se lee nada: una clave
+de storage cruda o un id de otra sesión se rechazan aunque el storage los tenga
+(hasta 2026-09 la clave cruda se leía como respaldo; CHANGELOG 2026-09 §85). Igual
+en el body JSON, donde se vuelve un `data:` URI ([guía 32](32_multimedia_generation.md)).
+Sin `AttachmentRegistry` en el motor no hay resolver y el id se lee como clave (legacy).
 
 Los nuevos grafos deberían referenciar `document_id`s expuestos en el
 catálogo del LLM (ver el bloque de catálogo de attachments prepuesto al
