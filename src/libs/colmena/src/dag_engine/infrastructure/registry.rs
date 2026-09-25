@@ -65,11 +65,11 @@ impl HashMapNodeRegistry {
 
             // --- Plan A: AttachmentStreamResolver ---
             // Build a composite resolver from the registry + storage. When
-            // both are present, http_request can resolve `$attachment:<document_id>`
-            // by looking up the registry; on miss it falls back to treating the
-            // identifier as a raw storage_key (backwards compat). When either
+            // both are present, http_request resolves `$attachment:<document_id>`
+            // (JSON body and multipart) by looking up the session's registry; a
+            // miss is NotFound, never a raw storage_key read. When either
             // dependency is missing, the resolver is not built and http_request
-            // falls back to using `storage.read_stream` directly (legacy).
+            // reads the id as a storage_key directly (legacy).
             let attachment_resolver: Option<
                 Arc<dyn crate::llm::domain::attachments::AttachmentStreamResolver>,
             > = match (attachment_registry.as_ref(), storage.as_ref()) {
@@ -108,8 +108,8 @@ impl HashMapNodeRegistry {
             // from outputs of image_generation/edit/tts.
             //
             // Plan A: also pass the AttachmentStreamResolver when available so
-            // multipart parts sourced from `$attachment:<document_id>` look up
-            // the document via the registry (with raw-storage_key fallback).
+            // `$attachment:<document_id>` (JSON and multipart) looks up the
+            // document in the session's registry.
             // Native OAuth: one shared provider cache for all http_request usages
             // (and tool-calls) in this engine, keyed by credential fingerprint so the
             // same identity mints one token.

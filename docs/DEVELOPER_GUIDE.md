@@ -50,7 +50,7 @@ Las secciones están organizadas por **tema**, no por orden numérico. Los prefi
 - [**Nodo LLM Deep Dive**](./developer_guide/14_llm_deep_dive.md) — Parámetros avanzados, capacidades, configuración exhaustiva.
 - [**Tool Calling**](./developer_guide/09_tool_calling.md) — Configuración y uso de tool calling en el DAG.
 - [**Lazy Tool Loading**](./developer_guide/29_lazy_tool_loading.md) — Catálogo ligero + `describe_tool` para revelar schemas on-demand.
-- [**Load Attachment**](./developer_guide/31_load_attachment.md) — Documentos on-demand dentro del loop LLM (`load_attachment`, `$attachment:<key>`).
+- [**Load Attachment**](./developer_guide/31_load_attachment.md) — Documentos on-demand dentro del loop LLM (`load_attachment`, `$attachment:<document_id>`).
 - [**Skills**](./developer_guide/24_skills.md) — Paquetes de conocimiento markdown cargados via `load_skill`.
 - [**Temporal & Geographic Context**](./developer_guide/35_temporal_geographic_context.md) — Inyección automática de fecha/hora/ubicación/locale al `system_message`.
 - [**Subgrafos y agentes anidados**](./developer_guide/19_nested_agents_and_subgraphs.md) — El nodo `subgraph`, aislamiento de sesión, propagación HITL.

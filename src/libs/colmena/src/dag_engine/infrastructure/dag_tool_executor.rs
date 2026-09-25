@@ -681,10 +681,29 @@ impl DagToolExecutor {
             .store(req)
             .await
             .map_err(|e| format!("attachment_storage.store failed: {e}"))?;
-        // `storage_key` is the document_id surface for downstream tools.
-        // The host application (ADP worker) inserts the row into
-        // conversation_attachments out-of-band when this completes
-        // (registrar fan-out is owned by the LLM use case, not the executor).
+        // `storage_key` is the document_id surface for downstream tools, so it
+        // is registered in the session: `$attachment:<id>` and `fetch_attachment_*`
+        // only read ids the session registry knows. Fail-soft, like media nodes.
+        if let (Some(reg), Some(sid)) = (&self.attachment_registry, &self.agent_session_id) {
+            let key = stored.storage_key.clone();
+            let row = crate::llm::domain::attachments::UpsertAttachmentInput {
+                agent_session_id: sid.clone(),
+                document_id: key.clone(),
+                provider: crate::llm::domain::ProviderKind::Generated,
+                provider_file_id: key.clone(),
+                mime_type: stored.mime_type.clone(),
+                filename: stored.filename.clone(),
+                size_bytes: Some(stored.size_bytes),
+                label: None,
+                description: None,
+                source: crate::llm::domain::attachments::AttachmentSource::Path(key.clone()),
+                storage_key: Some(key),
+                origin: None,
+            };
+            if let Err(e) = reg.upsert(row).await {
+                tracing::warn!(error = %e, "register_attachment_bytes: registry upsert failed");
+            }
+        }
         Ok(stored.storage_key)
     }
 
@@ -5736,6 +5755,43 @@ mod attachment_plumbing_tests {
             .await
             .unwrap();
         assert_eq!(new_id, "sk_new_001");
+    }
+
+    #[tokio::test]
+    async fn register_attachment_bytes_registers_the_id_in_the_session() {
+        // `$attachment:<id>` resolves only ids the session registry knows.
+        use crate::llm::domain::AttachmentRegistry;
+        use crate::llm::infrastructure::persistence::SqliteAttachmentRegistry;
+        let reg = Arc::new(
+            SqliteAttachmentRegistry::new("sqlite::memory:")
+                .await
+                .unwrap(),
+        );
+        let mut mock_storage = MockOutputStorageRepository::new();
+        mock_storage.expect_store().returning(|req| {
+            let (storage_key, read_url) = ("sk_new_002".to_string(), String::new());
+            let (mime_type, filename, size_bytes) = (req.mime_type, req.filename, 3);
+            Ok(StoredOutput {
+                storage_key,
+                read_url,
+                mime_type,
+                filename,
+                size_bytes,
+            })
+        });
+        let executor = DagToolExecutor::new(Arc::new(DummyRegistry), Default::default())
+            .with_agent_session_id(Some("agent_42".into()))
+            .with_attachment_storage(Arc::new(mock_storage))
+            .with_attachment_registry(reg.clone());
+        let id = executor
+            .register_attachment_bytes(b"a,b".to_vec(), "text/csv".into(), "out.csv".into())
+            .await
+            .unwrap();
+        let row = reg.lookup_by_document_id("agent_42", &id).await.unwrap();
+        assert_eq!(
+            row.expect("registered").storage_key.as_deref(),
+            Some("sk_new_002")
+        );
     }
 
     #[tokio::test]

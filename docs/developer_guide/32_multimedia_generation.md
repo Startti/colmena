@@ -104,7 +104,7 @@ Cero credenciales GCS en el worker. host application es la única con creds y la
        /tmp/colmena-out/<uuid>.png   ← inspeccionable con `open`
 ```
 
-Sin red externa, sin GCS, sin host application. **Mismo shape de URL en el output** (HTTP fetchable) — por eso el flow del agente es idéntico bytes-wise: `load_attachment`, `$attachment:<key>`, vision input — todos funcionan sin código condicional.
+Sin red externa, sin GCS, sin host application. **Mismo shape de URL en el output** (HTTP fetchable) — por eso el flow del agente es idéntico bytes-wise: `load_attachment`, `$attachment:<document_id>`, vision input — todos funcionan sin código condicional.
 
 ### Setup de cada modo
 
@@ -140,7 +140,7 @@ Si seteás `COLMENA_LOCAL=false` y olvidás el callback URL o secret, el engine 
 | Editar una imagen ya generada | Nodo `image_edit` (OpenAI gpt-image-1 multipart). Acepta `source_url` en formato `data:`, `http(s)://` o `local://<key>`. |
 | Hacer text-to-speech | Nodo `tts` (OpenAI, ElevenLabs, o Google Gemini TTS). |
 | Que el LLM "vea" lo que generó | Llamar `load_attachment(document_id=<document_id>)` desde el agente — el resolver hace upload cross-provider lazy a la Files API del provider activo y lo inyecta como vision input en el siguiente turn. |
-| Mandar la imagen generada a un webhook | `http_request` con body que contiene `"$attachment:<document_id>"` — el engine resuelve el placeholder a `data:` URI antes del POST. |
+| Mandar la imagen generada a un webhook | `http_request` con `"$attachment:<document_id>"` en el body: en JSON llega como `data:<mime>;base64,…` (sirve solo si la API acepta data URIs; nunca es una URL), en multipart como parte de archivo. |
 | Inspeccionar artifacts en dev | `COLMENA_LOCAL=true` activa el adapter de disco + server HTTP local. Files en `/tmp/colmena-out/`, URLs `http://127.0.0.1:8765/files/<key>`. |
 
 ## Architectural invariant
@@ -213,7 +213,7 @@ Esto es lo más importante para entender por qué el flow funciona idéntico en 
 
 | Concepto | Significado |
 |---|---|
-| `storage_key` | Handle canónico — opaco, estable. Forma: `<uuid>.<ext>` en LocalHttp, `chat-attachments/<userId>/<sessionId>/generated/<cuid>-<name>` en HttpCallback. Es lo que va en `$attachment:<storage_key>` placeholders. |
+| `storage_key` | Handle canónico — opaco, estable. Forma: `<uuid>.<ext>` en LocalHttp, `chat-attachments/<userId>/<sessionId>/generated/<cuid>-<name>` en HttpCallback. **No** va en `$attachment:` (ahí va el `document_id`; una clave cruda se rechaza). |
 | `read_url` | URL fetchable — `http://127.0.0.1:8765/files/<key>` en dev (axum local), signed GCS URL en prod. Misma forma HTTP en ambos. |
 
 El agente (LLM) ve el tool output con la siguiente forma (Plan B, 2026-05-25):
@@ -396,9 +396,14 @@ funciona normalmente.
 > executor resuelva `$attachment:` en todos los args de tool. Tracked en
 > [`docs/superpowers/specs/2026-05-25-colmena-pending-followups.md`](../superpowers/specs/2026-05-25-colmena-pending-followups.md) §2.E.
 
-### 3. Enviar a endpoint externo — `$attachment:<key>` placeholder
+### 3. Enviar a endpoint externo — `$attachment:<document_id>` placeholder
 
-`http_request` ahora escanea recursivamente el body buscando strings que empiecen con `$attachment:` y los reemplaza por `data:<mime>;base64,...` antes de mandar el HTTP request.
+`http_request` escanea recursivamente el body JSON buscando strings `$attachment:<document_id>` y los reemplaza por `data:<mime>;base64,...` antes de mandar el request. El id se resuelve con el `AttachmentStreamResolver` de la sesión, igual que en multipart ([guía 25](25_web_nodes.md)):
+
+- tiene que ser un `document_id` de **esta** sesión (`__colmena_agent_session_id`); una clave de storage cruda o un id de otra sesión da `AttachmentResolveError: attachment not found`, sin leer nada;
+- el tamaño tope es `max_file_size_bytes` (100 MiB por defecto; si no, `FileTooLarge`);
+- el `data:` solo le sirve a una API que acepte data URIs. Si el campo pide una URL (`image_url`), `$attachment:` no la da;
+- sin registro de adjuntos (motor sin `AttachmentRegistry`), el id se lee como clave de storage (comportamiento previo).
 
 ```json
 {
@@ -423,7 +428,7 @@ funciona normalmente.
 }
 ```
 
-El LLM pasa `body: { image: "$attachment:abc.png" }`. El engine resuelve a `body: { image: "data:image/png;base64,iVBORw0..." }` antes del POST. **El LLM ve solo el handle corto, nunca los bytes.**
+El LLM pasa `body: { image: "$attachment:img_chart_a1b2c3d4" }`. El engine resuelve a `body: { image: "data:image/png;base64,iVBORw0..." }` antes del POST. **El LLM ve solo el handle corto, nunca los bytes.**
 
 ## Universal binary scrubber
 

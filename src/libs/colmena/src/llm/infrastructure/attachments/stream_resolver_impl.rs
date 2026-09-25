@@ -4,10 +4,9 @@
 //! 1. Look up `(agent_session_id, document_id)` in the registry.
 //! 2. If found and `storage_key` is set, call `storage.read_stream(storage_key)`.
 //!    Update `last_used_at` on success (best-effort, non-fatal).
-//! 3. If lookup misses, fall back to treating the identifier as a raw
-//!    `storage_key` (backwards compat: pre-Plan-A flows where attachment_id IS
-//!    the storage_key). No `last_used_at` update on the fallback path.
-//! 4. If everything misses, return `NotFound`.
+//! 3. If lookup misses, return `NotFound`. The identifier is never read as a
+//!    raw `storage_key`: callers pass model-written strings, and storage would
+//!    serve any key, including another session's.
 
 use std::sync::Arc;
 
@@ -16,7 +15,6 @@ use async_trait::async_trait;
 use crate::llm::domain::attachments::{
     AttachmentRegistry, AttachmentResolveError, AttachmentStreamResolver,
 };
-use crate::storage::domain::storage_error::StorageError;
 use crate::storage::domain::{OutputStorageRepository, StoredStream};
 
 /// Production [`AttachmentStreamResolver`] composing an
@@ -81,17 +79,11 @@ impl AttachmentStreamResolver for AttachmentStreamResolverImpl {
             return Ok(stream);
         }
 
-        // Path 2: backward-compat fallback — treat identifier as raw storage_key.
-        // `read_stream` returns `StorageError::InvalidInput` for unknown keys
-        // (per the OutputStorageRepository trait contract); we map that to
-        // `AttachmentResolveError::NotFound` so callers get a clear signal.
-        match self.storage.read_stream(document_id).await {
-            Ok(stream) => Ok(stream),
-            Err(StorageError::InvalidInput(_)) => Err(AttachmentResolveError::NotFound {
-                document_id: document_id.to_string(),
-            }),
-            Err(other) => Err(AttachmentResolveError::StorageError(other)),
-        }
+        // Not a document_id of this session (a raw storage_key, another
+        // session's id, a made-up id): NotFound, and storage is not asked.
+        Err(AttachmentResolveError::NotFound {
+            document_id: document_id.to_string(),
+        })
     }
 }
 
@@ -106,7 +98,7 @@ mod tests {
     use crate::llm::domain::attachments::{AttachmentSource, UpsertAttachmentInput};
     use crate::llm::domain::ProviderKind;
     use crate::llm::infrastructure::persistence::sqlite_attachment_registry::SqliteAttachmentRegistry;
-    use crate::storage::domain::MockOutputStorageRepository;
+    use crate::storage::domain::{MockOutputStorageRepository, StorageError};
 
     fn make_stream(body: &'static [u8], mime: &str, filename: &str) -> StoredStream {
         let s: Pin<Box<dyn Stream<Item = Result<Bytes, StorageError>> + Send>> =
@@ -172,49 +164,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resolve_falls_back_to_raw_storage_key_when_lookup_misses() {
-        // Empty registry — lookup_by_document_id returns None.
+    async fn resolve_never_reads_an_id_the_session_registry_does_not_know() {
+        // `agent_y` owns doc-1 → sk-1. For `agent_x`, a raw storage_key (known
+        // to storage or not), another session's document_id and an unknown id
+        // are all NotFound, and storage is never asked.
         let reg = SqliteAttachmentRegistry::new("sqlite::memory:")
             .await
             .unwrap();
-
-        let mut storage = MockOutputStorageRepository::new();
-        // Fallback path: identifier "sk-raw" is forwarded directly to storage.
-        storage
-            .expect_read_stream()
-            .withf(|k| k == "sk-raw")
-            .times(1)
-            .returning(|_| Ok(make_stream(b"raw-bytes", "image/png", "raw.png")));
-
-        let resolver = AttachmentStreamResolverImpl::new(Arc::new(reg), Arc::new(storage));
-
-        let out = resolver.resolve("agent_x", "sk-raw").await.unwrap();
-        assert_eq!(out.size_bytes, 9);
-        assert_eq!(out.mime_type, "image/png");
-        assert_eq!(out.filename, "raw.png");
-    }
-
-    #[tokio::test]
-    async fn resolve_returns_not_found_when_both_paths_miss() {
-        let reg = SqliteAttachmentRegistry::new("sqlite::memory:")
+        reg.upsert(base_upsert("agent_y", "doc-1", Some("sk-1".to_string())))
             .await
             .unwrap();
-
         let mut storage = MockOutputStorageRepository::new();
-        storage
-            .expect_read_stream()
-            .withf(|k| k == "missing-id")
-            .times(1)
-            .returning(|_| Err(StorageError::InvalidInput("unknown key".to_string())));
-
+        storage.expect_read_stream().never();
         let resolver = AttachmentStreamResolverImpl::new(Arc::new(reg), Arc::new(storage));
 
-        let err = resolver.resolve("agent_x", "missing-id").await.unwrap_err();
-        assert!(
-            matches!(err, AttachmentResolveError::NotFound { ref document_id } if document_id == "missing-id"),
-            "expected NotFound, got {:?}",
-            err
-        );
+        for id in ["sk-1", "doc-1", "sk-raw", "missing-id"] {
+            let err = resolver.resolve("agent_x", id).await.unwrap_err();
+            assert!(
+                matches!(err, AttachmentResolveError::NotFound { ref document_id } if document_id == id),
+                "{id}: expected NotFound, got {err:?}"
+            );
+        }
     }
 
     #[tokio::test]
