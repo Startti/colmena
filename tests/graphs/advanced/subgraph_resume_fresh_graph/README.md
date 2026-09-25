@@ -48,8 +48,8 @@ S=rf_shape_$(date +%s)
 cargo run --bin dag_engine -- run $D/turn1_suspend.json --agent-session-id $S
 cargo run --bin dag_engine -- run $T2E --agent-session-id $S --answer "$ANS"
 
-# 3. En reposo (v0.19): con una clave centinela en la config del hijo, ningún
-#    graph_json guarda config ni la clave, y el resume sigue corriendo v2
+# 3. En reposo (v0.19): con una clave centinela en la config del hijo, ninguna
+#    columna de la fila guarda la clave, y el resume sigue corriendo v2
 T1S=/tmp/turn1_centinela.json; T2S=/tmp/turn2_centinela.json
 jq '.nodes.delegado.config.child_graph_inline.nodes.fin.config.api_key = "sk-e2e-at-rest-sentinel-0000000000"' \
   $D/turn1_suspend.json > $T1S
@@ -57,7 +57,8 @@ jq '.nodes.delegado.config.child_graph_inline.nodes.sello.config.data.sello = "S
 R=rf_rest_$(date +%s)
 cargo run --bin dag_engine -- run $T1S --agent-session-id $R
 cargo run --bin dag_engine -- run $T2S --agent-session-id $R --answer "$ANS"
-psql -At -c "SELECT status, graph_json::text LIKE '%sk-e2e-at-rest-%', graph_json::text LIKE '%\"config\"%'
+psql -At -c "SELECT status, graph_json::text LIKE '%sk-e2e-at-rest-%', graph_json::text LIKE '%\"config\"%',
+  global_shared_state::text LIKE '%sk-e2e-at-rest-%', all_outputs::text LIKE '%sk-e2e-at-rest-%'
   FROM dag_runs WHERE agent_session_id = '$R'"
 ```
 
@@ -74,8 +75,9 @@ sed -n 's/^data: //p' captura.sse | grep -v '^\[DONE\]$' \
 ```
 
 Corrida 1: `{"sello":"SELLO=v2"}`. Corrida 3 (en reposo): `{"sello":"SELLO=v2"}`,
-y el `SELECT` da `COMPLETED|f|f` para la fila raíz y la del hijo. Con v0.18 da
-`t|t`: la fila guardaba el grafo entero, clave incluida. La válvula
+y el `SELECT` da `COMPLETED|f|f|f|f` para la fila raíz y la del hijo. Con v0.18 da
+`t|t|t|f`: la fila guardaba el grafo entero y la config en `__graph_nodes`, clave
+incluida. La válvula
 `COLMENA_SUBGRAPH_RESUME_GRAPH=stored` de v0.18 ya no existe (entrada 82 del
 CHANGELOG).
 Corrida 2: sin `subgraph-node-end` de `sello`; el frame `error` trae `errorText`

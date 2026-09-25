@@ -53,11 +53,22 @@ filas que escribe v0.19 ya no tienen config con qué correr.
 - **Por debajo de v0.18: no.** v0.17 y anteriores reanudan con la copia guardada y
   correrían un grafo sin config.
 
+## Qué cambió (entrada 83): `__graph_nodes`
+
+- `global_shared_state.__graph_nodes` pasa de la `config` entera de cada nodo (claves
+  incluidas, y el `child_graph_inline` de un `subgraph`) a
+  `{ "<id>": { "description": "<texto>" } }`, solo para los nodos con una `description`
+  de texto. Queda así en memoria y en reposo.
+- Su único lector, el planner, lee `description` y no cambia. Un nodo sin descripción
+  ya daba «No description provided.».
+- Con las dos entradas, ninguna columna de una fila escrita por v0.19 guarda una clave
+  de la config del grafo. Medido en el E2E con un centinela: `graph_json`,
+  `global_shared_state` y `all_outputs` limpios, en la raíz y en el hijo.
+- ADP: el backfill también reduce `__graph_nodes` en las filas viejas.
+
 ## Qué no cambia
 
-- `global_shared_state.__graph_nodes` sigue guardando la `config` de cada nodo hasta la
-  entrada siguiente de esta cadena, que lo reduce a descripciones.
-- `all_outputs` no cambia.
+- `all_outputs` no cambia: las salidas de las tools son datos de la corrida.
 - La corrida en memoria no cambia: el motor sigue corriendo el grafo entero que le manda
   el embebedor.
 

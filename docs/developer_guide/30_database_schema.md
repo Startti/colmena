@@ -137,14 +137,14 @@ execution after a HITL (Human-in-the-Loop) pause or a process restart.
 | `session_id` | `VARCHAR(255)` | NO | — | **Primary key.** Unique run identifier passed to the engine at startup |
 | `agent_session_id` | `VARCHAR(255)` | YES | — | Chat / conversation handle. Groups multiple runs (and their subgraph children) under the same external chat session. NULL for legacy runs that did not opt in |
 | `parent_session_id` | `VARCHAR(255)` | YES | — | When this row is a subgraph child, the parent run's `session_id`. NULL for root runs |
-| `graph_json` | `JSONB` | NO | — | The run's graph **skeleton** since v0.19 (`GraphSkeleton::at_rest_json`): node ids with their `type`, and edges — no `config`, so no resolved key reaches this column (`global_shared_state.__graph_nodes` holds a separate copy of each node's config). Rows written before v0.19 hold the whole graph. A root resume never reads it (the graph comes from the caller); a child resume — inline, path or ref alike — reads only its skeleton, to check the graph its source names now (for a ref, the resolver called again with the same request) |
+| `graph_json` | `JSONB` | NO | — | The run's graph **skeleton** since v0.19 (`GraphSkeleton::at_rest_json`): node ids with their `type`, and edges — no `config`, so no resolved key reaches this column. Since v0.19 `global_shared_state.__graph_nodes` keeps only each node's `description` too. Rows written before v0.19 hold the whole graph. A root resume never reads it (the graph comes from the caller); a child resume — inline, path or ref alike — reads only its skeleton, to check the graph its source names now (for a ref, the resolver called again with the same request) |
 | `all_outputs` | `JSONB` | NO | — | `HashMap<node_id, output_value>` — accumulated outputs from every node that has run |
 | `status` | `VARCHAR(50)` | NO | — | Run lifecycle state: `RUNNING`, `SUSPENDED`, `COMPLETED`, or `FAILED` |
 | `active_queue` | `JSONB` | NO | `'[]'::jsonb` | `VecDeque<node_id>` — nodes still waiting to execute, serialized as a JSON array |
 | `execution_history` | `JSONB` | NO | `'[]'::jsonb` | `Vec<[caller_id, target_id]>` — ordered log of every node invocation in the run |
 | `global_calls` | `JSONB` | NO | `'{}'::jsonb` | `HashMap<node_id, count>` — total number of times each node has been called; used for global call-limit checks |
 | `caller_specific_calls` | `JSONB` | NO | `'{}'::jsonb` | `HashMap<caller_id, HashMap<target_id, count>>` — per-caller invocation counts; used for caller-scoped call limits |
-| `global_shared_state` | `JSONB` | NO | `'{}'::jsonb` | Persistent whiteboard object readable and writable by every node in the run |
+| `global_shared_state` | `JSONB` | NO | `'{}'::jsonb` | Persistent whiteboard object readable and writable by every node in the run. Its `__graph_nodes` key maps node id → `{ "description" }` (what the planner reads); before v0.19 it held every node's whole `config`, resolved keys included |
 | `created_at` | `TIMESTAMPTZ` | YES | `CURRENT_TIMESTAMP` | When the run row was first inserted |
 | `updated_at` | `TIMESTAMPTZ` | YES | `CURRENT_TIMESTAMP` | Timestamp of the most recent state save |
 

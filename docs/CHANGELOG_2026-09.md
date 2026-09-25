@@ -4392,3 +4392,57 @@ válvula en v0.18 una vez desplegado v0.19.**
   fila en reposo, con la compatibilidad.
 - `docs/developer_guide/30_database_schema.md` (`graph_json`), `docs/qa/nodes/subgraph.md`
   y la nota `2026-09-24-subgraph-resume-fresh-graph.md` actualizados.
+
+## 83. `__graph_nodes` guarda solo las descripciones de los nodos
+
+Paso 2 de 2 del diseño de secretos en reposo (Startti/adp,
+`docs/superpowers/specs/2026-09-25-secretos-en-reposo-dag-runs-design.md`, D2). Con la
+entrada 82, cierra las claves de la config del grafo en `dag_runs`. **Comportamiento
+observable** en el estado guardado.
+
+**Qué cambió.**
+- **Antes.** `global_shared_state.__graph_nodes` se armaba en cada entrada con la
+  `config` entera de cada nodo: las claves de proveedor, y el `child_graph_inline`
+  de un `subgraph` con las claves del hijo. Se persistía con el estado en cada fila,
+  y un hijo lo recibía también en la semilla del padre.
+- **Ahora.** Se arma con `DagRunUseCase::planner_descriptions(&graph)`:
+  `{ "<id>": { "description": "<texto>" } }`, solo para los nodos cuya
+  `config.description` es un string.
+- **Su único lector, el planner, no cambia.** Lee `__graph_nodes.<id>.description` para
+  un agente dado como string, y un nodo sin descripción sigue dando «No description
+  provided.».
+
+**Tests.** Los dos en rojo primero:
+- `graph_nodes_meta_keeps_only_string_descriptions`: una descripción de texto queda,
+  y se descartan un nodo sin descripción, uno con descripción no textual y la
+  `api_key`.
+- `the_persisted_state_keeps_only_node_descriptions`: el resume de un hijo con la
+  config del nodo, centinela incluido, deja en la fila `__graph_nodes` =
+  `{"sello": {"description": "Sella"}}` y ningún centinela en el estado.
+- `cargo test -p colmena_dag_engine --lib`: 2845 passed, 0 failed, 74 ignorados.
+
+**Mutación.** Guardar `node.config.clone()` en vez de la descripción → rojo en los dos
+tests nuevos. Revertida.
+
+**E2E.** La corrida 3 del README de
+`tests/graphs/advanced/subgraph_resume_fresh_graph/`, ahora con el `SELECT` de las
+tres columnas (captura `/tmp/colmena_e2e/graph_at_rest_pr2_{1,2}.sse`). Las columnas
+son: estado · centinela en `graph_json` · `"config"` en `graph_json` · centinela en
+`global_shared_state` · centinela en `all_outputs`.
+- Esta entrada: turno 1 `SUSPENDED|f|f|f|f` y turno 2 `COMPLETED|f|f|f|f`, en la raíz
+  y en el hijo, con `{"sello":"SELLO=v2"}`.
+- Con la entrada 82 sola: `global_shared_state` daba `t`.
+- Con v0.18.0: `t|t|t|f`.
+
+Gates:
+- `cargo test` completo (workspace): 3054 passed, 0 failed, 146 ignorados;
+- `cargo clippy --all-targets -- -D warnings` limpio;
+- corpus: 328 archivos, 0/0/0;
+- `check_doc_counts` y `check_hexagonal_documents` en verde.
+
+**ADP.** [Nota de migración](adp_migration/2026-09-25-graph-at-rest.md), sección
+«Qué cambió (entrada 83)». El backfill de ADP (`scrub-dag-runs-at-rest`, Startti/adp#830)
+también reduce `__graph_nodes` en las filas viejas. Actualizados: guía 19 («Reanudar
+con el grafo actual»), `docs/developer_guide/30_database_schema.md` (`graph_json` y
+`global_shared_state`) y el README del E2E. **Tag `colmena_dag_engine-v0.19.0`**
+después de esta entrada.
