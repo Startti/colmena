@@ -35,7 +35,7 @@
 ### Attachment Plumbing
 - `DagToolExecutor::fetch_attachment_bytes()` — fetches raw bytes of registered attachment by document_id
 - `DagToolExecutor::fetch_attachment_stream()` — streaming counterpart for large payloads (multipart, COPY)
-- `DagToolExecutor::register_attachment_bytes()` — persists newly produced bytes and returns document_id
+- `DagToolExecutor::register_attachment_bytes()` — persists newly produced bytes, registers the row in the session (origin `generated_by:<tool>`) and returns document_id
 - `DagToolExecutor::lookup_attachment_meta()` — looks up original mime_type + filename from catalog
 - `DagToolExecutor::lookup_storage_key()` — resolves document_id → storage_key with fallback chain
 - `DagToolExecutor::lookup_storage_key_via_registry()` — live registry lookup for mid-turn outputs

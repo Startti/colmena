@@ -831,7 +831,8 @@ pub async fn dispatch_data_run_python_via_executor(
     let register: AttachmentRegistrar = Box::new(move |name: String, bytes: Vec<u8>| {
         Box::pin(async move {
             let mime = mime_from_name(&name);
-            exec.register_attachment_bytes(bytes, mime, name).await
+            exec.register_attachment_bytes(bytes, mime, name, TOOL_DATA_RUN_PYTHON)
+                .await
         })
     });
 

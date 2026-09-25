@@ -4571,7 +4571,19 @@ esta sesión o de otra.
 **Tests.** `http.rs::session_attachment_tests` (4, resolver real sobre SQLite),
 `stream_resolver_impl` y `dag_tool_executor` (uno cada uno); rojos antes del fix.
 **ADP.** Una clave cruda en `$attachment:` da ahora `attachment not found`: va el
-`document_id` del catálogo. **Estado.** done (punto 11, parte A; sigue `image_edit`).
+`document_id` del catálogo. **Otros hosts del motor.** Todo `ColmenaEngine` cablea un
+registro (`engine.rs`), así que un run sin `agent_session_id` falla `$attachment:` en un
+body JSON («needs an agent_session_id») donde antes leía la clave cruda, y no registra sus
+exportaciones. Los bindings de Python y Node no cablean registro: sin cambios.
+**Estado.** done (punto 11, parte A; sigue `image_edit`).
+
+**Revisión (mismo release).** Las exportaciones que registra `register_attachment_bytes`
+llevan `origin: generated_by:<tool>`, que el catálogo muestra. El `NotFound` agrega «use a
+document_id from the attachments catalog». `HttpCallbackStorageAdapter` saca la URL de los
+errores de reqwest (`without_url()`): una URL firmada de lectura o de subida ya no llega al
+error que ve el modelo (el camino JSON ahora pasa por `read_stream`). Tests: los de
+`register_attachment_bytes` y del rechazo JSON de `http.rs`, extendidos, y
+`a_transport_error_never_carries_the_signed_url`; rojos antes del fix, mutaciones muertas.
 
 ## 86. Una entrada de tool puede declarar `parallel`, y solo como booleano
 

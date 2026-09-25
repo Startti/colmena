@@ -22,7 +22,7 @@ pub enum AttachmentResolveError {
     /// No row in `conversation_attachments` matches the `(agent_session_id,
     /// document_id)` pair — either the id was hallucinated by the LLM or the
     /// row was GC'd (see Plan C).
-    #[error("attachment not found: document_id={document_id}")]
+    #[error("attachment not found: document_id={document_id}; use a document_id from the attachments catalog")]
     NotFound { document_id: String },
 
     /// Row exists but `storage_key` is `NULL` — happens for legacy rows
