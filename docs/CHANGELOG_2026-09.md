@@ -4763,10 +4763,10 @@ de una tool sin `parallel` no cambian. Actualizados `docs/sse_events_reference.m
 la sección «`childScope` — una llamada a una tool `parallel`»),
 `docs/node_configurations.json` y `docs/node_as_tools_reference.json`.
 
-## 88. E2E de la identidad de una llamada `parallel`, y la nota para ADP
+## 91. E2E de la identidad de una llamada `parallel`, y la nota para ADP
 
 **Qué cambió.** Nada en el motor. Llegan el E2E que prueba de punta a punta las
-entradas 86 y 87, la sección de la guía 19 y la nota de migración para ADP:
+entradas 87 y 90, la sección de la guía 19 y la nota de migración para ADP:
 - `tests/graphs/agents/parallel_tool_identity.json`: un `llm_call` con `stream: true` y dos
   tools `subgraph` con un hijo inline trivial (`entrada → salida`). `Run` declara
   `parallel`; `Nota`, no.
@@ -4775,7 +4775,7 @@ entradas 86 y 87, la sección de la guía 19 y la nota de migración para ADP:
   respuesta, así que el test trae su propio modelo guionado (`ParallelTurnModel`, por
   `OverrideGuard`). Ese modelo pide `Run`, `Nota` y `Run` en un solo mensaje (tres chunks
   con índices 0, 1 y 2) y después contesta «Listo.».
-- `corpus_noise`: `EXPECTED_FILES` pasa de 329 a 330.
+- `corpus_noise`: `EXPECTED_FILES` pasa de 330 a 331.
 
 **Tests.** Ninguno nuevo en la lib (2874 passed). `cargo test` completo: 3084 passed, 0
 failed, 147 ignorados (146 antes, más este E2E).
@@ -4797,7 +4797,7 @@ se parsea frame por frame:
 - corre en serie: cada `tool-input-available` llega después del `tool-output-available`
   anterior.
 
-Corpus: 330 archivos, 0/0/0.
+Corpus: 331 archivos, 0/0/0.
 
 **ADP.** [Nota de migración](adp_migration/2026-09-25-parallel-tool-calls.md), con su
 línea en el índice: soportar `childScope` antes de subir el pin (hecho en Startti/adp#855)
