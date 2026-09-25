@@ -243,8 +243,8 @@ tool que el modelo usa para correr cualquiera de los agentes del usuario:
   no mandó `agentId`) → `not_found`, sin preguntarle al resolvedor. El resolve corta
   a los 30 s → `unavailable`.
 - El grafo resuelto nunca entra en `inputs`, en un frame ni en la salida del nodo, y
-  el ref no pasa al estado del hijo. Sí queda en `dag_runs.graph_json` del run hijo,
-  como un inline. Un resume vuelve a pedirlo con el mismo pedido y compara su
+  el ref no pasa al estado del hijo. En `dag_runs.graph_json` del run hijo queda solo
+  su esqueleto desde v0.19, como el de un inline (antes, el grafo entero). Un resume vuelve a pedirlo con el mismo pedido y compara su
   estructura con la guardada ([Reanudar con el grafo actual](#reanudar-con-el-grafo-actual)):
   un agente despublicado o sin acceso falla con `CHILD_GRAPH_RESOLVE_FAILED:…` también
   después de una pregunta respondida.
@@ -547,15 +547,20 @@ resolvedor lo rechazó antes—; uno republicado con otra forma sí llega a comp
 falla con `SUBGRAPH_RESUME_INCOMPATIBLE:` como cualquier otra fuente. Los dos
 cierran la fila del hijo como `FAILED`.
 
-`COLMENA_SUBGRAPH_RESUME_GRAPH=stored` es la válvula de emergencia: con ella fijada
-(se lee una vez por proceso, como `COLMENA_MAX_SUBGRAPH_DEPTH`), todo resume vuelve
-al comportamiento de hasta v0.16 — la copia guardada en `dag_runs.graph_json`, sin
-comparar esqueletos —. Sirve para apagar la verificación si algo se comporta
-distinto de lo esperado en producción, sin tener que revertir el release. Un run que
-quedó `SUSPENDED` bajo un worker v0.16 se reanuda con el grafo fresco sin ninguna
-migración de datos: la columna `graph_json` no cambia de forma, solo deja de ser lo
-único que un resume mira. Volver atrás (un worker v0.16 tomando un resume escrito
-por este) también es seguro: corre la copia guardada, como siempre hizo.
+**Desde v0.19 la fila guarda solo el esqueleto.** `dag_runs.graph_json` guarda
+`GraphSkeleton::at_rest_json(&graph)`: los ids con su `type` y las aristas, sin
+`config`. Ninguna clave de proveedor llega a `graph_json`, y el resume no pierde nada
+porque solo compara esqueletos. Ojo: `global_shared_state.__graph_nodes` guarda otra
+copia de la `config` de cada nodo, y esta entrada no la toca. La válvula que existió en v0.18,
+`COLMENA_SUBGRAPH_RESUME_GRAPH=stored`, ya no existe: volvía a correr la copia
+guardada, y esa copia ya no tiene config con qué correr.
+
+Compatibilidad:
+- **Una fila escrita por v0.18 o antes** tiene el grafo entero. El esqueleto se
+  calcula igual, sin migrar datos.
+- **Volver de v0.19 a v0.18 es seguro**, porque v0.18 también reanuda con el grafo
+  fresco. La condición es no fijar la válvula en v0.18: correría un grafo sin config.
+- **Por debajo de v0.18, no:** esas versiones reanudan con la copia guardada.
 
 ### Requisito: `connection_url` en cada `llm_call` que participe del HITL
 

@@ -6,6 +6,12 @@ ve ADP antes y después, qué tiene que hacer ADP, y qué se rompe si no hace na
 
 Los cambios que quedan dentro del motor no llevan nota aquí.
 
+## 2026-09-25 — una fila de `dag_runs` guarda solo el esqueleto del grafo
+
+| # | Nota | Acción de ADP | Qué se rompe si se ignora |
+|---|------|---------------|---------------------------|
+| 1 | [El grafo en reposo](2026-09-25-graph-at-rest.md) | Ninguna de código; subir el motor y correr el backfill de filas viejas. **No fijar `COLMENA_SUBGRAPH_RESUME_GRAPH` en v0.18 después** | Nada al compilar, salvo quien construya `ResumeGraph::Stored`; sin backfill, las filas viejas siguen con claves en claro |
+
 ## 2026-09-24 — el modelo solo corre las tools que el request le ofreció
 
 | # | Nota | Acción de ADP | Qué se rompe si se ignora |

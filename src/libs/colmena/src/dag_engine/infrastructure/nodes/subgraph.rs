@@ -159,16 +159,12 @@ impl SubGraphNode {
     /// matches.
     async fn resume_graph(
         &self,
-        stored_valve: bool,
         inputs: &NodeInputs,
         config: &Value,
         session_id: &str,
         agent_session_id: Option<String>,
         parent_path: &str,
     ) -> ResumeGraph {
-        if stored_valve {
-            return ResumeGraph::Stored;
-        }
         let Some(source) = Self::resolve_child_graph_source(inputs, config) else {
             return ResumeGraph::Unavailable(format!(
                 "{SUBGRAPH_RESUME_INCOMPATIBLE} the subgraph has no child graph source. \
@@ -269,27 +265,6 @@ impl SubGraphNode {
                 .and_then(|raw| raw.trim().parse::<u64>().ok())
                 .filter(|n| *n > 0)
         })
-    }
-
-    /// `COLMENA_SUBGRAPH_RESUME_GRAPH=stored` resumes every child with the graph
-    /// stored in its row, as up to v0.16: a safety valve while the structure
-    /// check proves itself in production. Anything else, unset included,
-    /// derives the graph from the source. Read once, like the depth ceiling.
-    fn stored_resume_valve() -> bool {
-        static STORED: OnceLock<bool> = OnceLock::new();
-        *STORED.get_or_init(|| {
-            Self::valve_is_stored(
-                std::env::var("COLMENA_SUBGRAPH_RESUME_GRAPH")
-                    .ok()
-                    .as_deref(),
-            )
-        })
-    }
-
-    /// Pure half of [`Self::stored_resume_valve`], testable without touching
-    /// the process environment.
-    fn valve_is_stored(raw: Option<&str>) -> bool {
-        raw.is_some_and(|v| v.trim().eq_ignore_ascii_case("stored"))
     }
 
     /// Read `key` from inputs as a non-empty string. Used for the boundary-name
@@ -490,7 +465,6 @@ impl ExecutableNode for SubGraphNode {
             // call to the embedder.
             let graph = self
                 .resume_graph(
-                    Self::stored_resume_valve(),
                     inputs,
                     config,
                     &parent_session_id,
@@ -2131,25 +2105,5 @@ mod subgraph_resume_graph_tests {
         let err = resume(inputs, json!({}), exec.clone()).await.unwrap_err();
         assert!(err.starts_with("No suspended child found"), "{err}");
         assert_eq!(*exec.calls.lock().unwrap(), vec!["find"]);
-    }
-
-    #[tokio::test]
-    async fn the_stored_valve_skips_the_derivation() {
-        let node = SubGraphNode::new();
-        let mut inputs = resume_inputs();
-        inputs.insert("child_graph_inline".into(), graph_named("fresh"));
-        let graph = node
-            .resume_graph(true, &inputs, &json!({}), "s1", None, "")
-            .await;
-        assert_eq!(graph, ResumeGraph::Stored);
-    }
-
-    #[test]
-    fn only_stored_turns_the_valve_on() {
-        assert!(SubGraphNode::valve_is_stored(Some("stored")));
-        assert!(SubGraphNode::valve_is_stored(Some(" STORED ")));
-        for off in [None, Some(""), Some("fresh"), Some("off"), Some("1")] {
-            assert!(!SubGraphNode::valve_is_stored(off), "{off:?}");
-        }
     }
 }

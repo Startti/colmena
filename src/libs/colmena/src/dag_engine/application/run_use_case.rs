@@ -437,7 +437,7 @@ impl DagRunUseCase {
                             session_id: session_id.clone(),
                             agent_session_id: active_agent_session_id.clone(),
                             parent_session_id: parent_session_id_for_save.clone(),
-                            graph_json: serde_json::to_value(&graph).unwrap_or(Value::Null),
+                            graph_json: GraphSkeleton::at_rest_json(&graph),
                             all_outputs: all_outputs.clone(),
                             global_shared_state: global_shared_state.clone(),
                             execution_history: execution_history.clone(),
@@ -719,7 +719,7 @@ impl DagRunUseCase {
                                         session_id: session_id.clone(),
                                         agent_session_id: active_agent_session_id.clone(),
                                         parent_session_id: parent_session_id_for_save.clone(),
-                                        graph_json: serde_json::to_value(&graph).unwrap_or(Value::Null),
+                                        graph_json: GraphSkeleton::at_rest_json(&graph),
                                         all_outputs: all_outputs.clone(),
                                         global_shared_state: global_state_snapshot.clone(),
                                         execution_history: execution_history.clone(),
@@ -787,7 +787,7 @@ impl DagRunUseCase {
                                         session_id: session_id.clone(),
                                         agent_session_id: active_agent_session_id.clone(),
                                         parent_session_id: parent_session_id_for_save.clone(),
-                                        graph_json: serde_json::to_value(&graph).unwrap_or(Value::Null),
+                                        graph_json: GraphSkeleton::at_rest_json(&graph),
                                         all_outputs: all_outputs.clone(),
                                         global_shared_state: global_state_snapshot.clone(),
                                         execution_history: execution_history.clone(),
@@ -1022,7 +1022,7 @@ impl DagRunUseCase {
                             session_id: session_id.clone(),
                             agent_session_id: active_agent_session_id.clone(),
                             parent_session_id: parent_session_id_for_save.clone(),
-                            graph_json: serde_json::to_value(&graph).unwrap_or(Value::Null),
+                            graph_json: GraphSkeleton::at_rest_json(&graph),
                             all_outputs: all_outputs.clone(),
                             global_shared_state: global_shared_state.clone(),
                             execution_history: execution_history.clone(),
@@ -1158,7 +1158,7 @@ impl DagRunUseCase {
                     session_id: session_id.clone(),
                     agent_session_id: active_agent_session_id.clone(),
                     parent_session_id: parent_session_id_for_save.clone(),
-                    graph_json: serde_json::to_value(&graph).unwrap_or(Value::Null),
+                    graph_json: GraphSkeleton::at_rest_json(&graph),
                     all_outputs: all_outputs.clone(),
                     global_shared_state: global_shared_state.clone(),
                     execution_history: execution_history.clone(),
@@ -1494,21 +1494,20 @@ enum ResumePlan {
 impl DagRunUseCase {
     /// Decides what a suspended child resumes with, before anything runs.
     /// Only structure is compared (`GraphSkeleton`): a fresh graph may bring
-    /// new keys, tokens, skill paths or prompts, which is the point. An
-    /// unreadable STORED graph is an error as before, not a refusal.
+    /// new keys, tokens, skill paths or prompts, which is the point. The row
+    /// only needs to hold that skeleton — since v0.19 it holds nothing else
+    /// (`GraphSkeleton::at_rest_json`) — and older rows with the whole graph
+    /// compare the same way. An unreadable STORED graph is an error as
+    /// before, not a refusal.
     fn plan_resume(stored: &Value, requested: ResumeGraph) -> Result<ResumePlan, DagError> {
-        let stored_graph = || {
-            serde_json::from_value::<Graph>(stored.clone()).map_err(|e| {
-                DagError::NodeExecution(format!("Invalid sub-graph state JSON: {}", e))
-            })
-        };
         Ok(match requested {
-            ResumeGraph::Stored => ResumePlan::Run(stored_graph()?),
             ResumeGraph::Unavailable(reason) => ResumePlan::Refuse(reason),
             ResumeGraph::Fresh(fresh) => {
                 // Parse STORED first: its (unclosed) error wins if both are
                 // broken, over a Fresh-side refusal that would close the row.
-                let stored = stored_graph()?;
+                let stored = serde_json::from_value::<Graph>(stored.clone()).map_err(|e| {
+                    DagError::NodeExecution(format!("Invalid sub-graph state JSON: {}", e))
+                })?;
                 match serde_json::from_value::<Graph>(fresh) {
                     // Fixed text: a serde error can quote a value from the graph.
                     Err(_) => ResumePlan::Refuse(format!(
@@ -1569,7 +1568,7 @@ impl SubGraphExecutorPort for DagRunUseCase {
         agent_session_id: Option<String>,
         path_prefix: Option<String>,
     ) -> Result<Value, DagError> {
-        let graph: Graph = serde_json::from_value(graph_json.clone())
+        let graph: Graph = serde_json::from_value(graph_json)
             .map_err(|e| DagError::NodeExecution(format!("Invalid sub-graph JSON: {}", e)))?;
         graph
             .validate()
@@ -1586,7 +1585,7 @@ impl SubGraphExecutorPort for DagRunUseCase {
                 session_id: session_id.to_string(),
                 agent_session_id: agent_session_id.clone(),
                 parent_session_id: parent_session_id.clone(),
-                graph_json,
+                graph_json: GraphSkeleton::at_rest_json(&graph),
                 all_outputs: HashMap::new(),
                 global_shared_state: global_state,
                 execution_history: Vec::new(),
@@ -2387,12 +2386,22 @@ mod resume_graph_tests {
         assert_eq!(repo.row("child_1").status, DagRunStatus::Failed);
     }
 
+    fn at_rest(graph: Value) -> Value {
+        GraphSkeleton::at_rest_json(&serde_json::from_value(graph).expect("graph"))
+    }
+
+    /// Since v0.19 a row keeps only the skeleton. A resume still runs the
+    /// fresh graph, and the row it leaves behind is at rest again.
     #[tokio::test]
-    async fn stored_resumes_with_the_graph_the_row_kept() {
-        let (uc, repo) = suspended_child(graph_with("sello", "v1"));
-        let out = resume(&uc, ResumeGraph::Stored).await.expect("resumes");
-        assert_eq!(out["sello"]["stamp"], json!("v1"));
-        assert_eq!(repo.row("child_1").status, DagRunStatus::Completed);
+    async fn a_row_kept_at_rest_resumes_with_the_fresh_graph() {
+        let (uc, repo) = suspended_child(at_rest(graph_with("sello", "v1")));
+        let out = resume(&uc, ResumeGraph::Fresh(graph_with("sello", "v2")))
+            .await
+            .expect("resumes");
+        assert_eq!(out["sello"]["stamp"], json!("v2"));
+        let row = repo.row("child_1");
+        assert_eq!(row.status, DagRunStatus::Completed);
+        assert_eq!(row.graph_json, at_rest(graph_with("sello", "v2")));
     }
 
     /// Pins the fixed text in `plan_resume`'s `Err(_) => …` branch: a serde
@@ -2412,11 +2421,11 @@ mod resume_graph_tests {
     }
 
     /// Adjustment 4: an unreadable STORED graph is today's error, not a
-    /// refusal — `stored_graph()?` short-circuits before `close_refused` runs.
+    /// refusal — parsing it short-circuits before `close_refused` runs.
     #[tokio::test]
     async fn an_unparsable_stored_graph_is_todays_error_and_does_not_close_the_row() {
         let (uc, repo) = suspended_child(json!({ "nodes": 1, "edges": [] }));
-        let err = resume(&uc, ResumeGraph::Stored)
+        let err = resume(&uc, ResumeGraph::Fresh(graph_with("sello", "v2")))
             .await
             .expect_err("today's error, not a refusal");
         let text = err.to_string();

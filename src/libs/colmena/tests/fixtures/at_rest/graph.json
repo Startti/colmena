@@ -1,0 +1,20 @@
+{
+  "nodes": {
+    "entrada": { "type": "input", "config": { "data": { "tarea": "x" } } },
+    "agente": { "type": "llm_call", "max_total_calls": 3, "trigger_on": "NEXT_TURN",
+      "config": { "api_key": "sk-e2e-at-rest-fixture-000000000000", "description": "Busca" } },
+    "hijo": { "type": "subgraph", "config": { "child_graph_inline": {
+      "nodes": { "i": { "type": "input", "config": { "api_key": "sk-e2e-at-rest-fixture-111111111111" } } },
+      "edges": [] } } },
+    "salida": { "type": "output", "config": {} }
+  },
+  "edges": [
+    { "from": "entrada", "to": "agente" },
+    { "from": "agente", "to": "hijo", "cyclic": false },
+    { "from": "hijo", "to": "agente", "cyclic": true },
+    { "from": "hijo", "to": "salida" }
+  ],
+  "timezone": "Europe/Madrid",
+  "location": "Madrid",
+  "locale": "es-ES"
+}

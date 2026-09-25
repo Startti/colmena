@@ -70,7 +70,9 @@ pub trait SubGraphExecutorPort: Send + Sync {
     ) -> Result<Option<String>, DagError>;
 }
 
-/// Which graph a suspended child resumes with.
+/// Which graph a suspended child resumes with. There is no "the stored one":
+/// since v0.19 a run row keeps only the graph's skeleton
+/// (`GraphSkeleton::at_rest_json`), with no config to run.
 ///
 /// `Debug` is hand-written: `Fresh` carries a runnable graph with its secrets
 /// already resolved, like [`ResolvedChildGraph`].
@@ -85,9 +87,6 @@ pub enum ResumeGraph {
     /// gone). The executor closes the child's row as FAILED and returns this
     /// text verbatim.
     Unavailable(String),
-    /// The graph stored in the child's row, as up to v0.16 — what the
-    /// `COLMENA_SUBGRAPH_RESUME_GRAPH=stored` valve passes.
-    Stored,
 }
 
 impl std::fmt::Debug for ResumeGraph {
@@ -95,7 +94,6 @@ impl std::fmt::Debug for ResumeGraph {
         match self {
             Self::Fresh(_) => f.write_str("Fresh(<redacted>)"),
             Self::Unavailable(reason) => f.debug_tuple("Unavailable").field(reason).finish(),
-            Self::Stored => f.write_str("Stored"),
         }
     }
 }

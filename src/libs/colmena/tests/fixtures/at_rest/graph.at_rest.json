@@ -1,0 +1,14 @@
+{
+  "nodes": {
+    "entrada": { "type": "input" },
+    "agente": { "type": "llm_call" },
+    "hijo": { "type": "subgraph" },
+    "salida": { "type": "output" }
+  },
+  "edges": [
+    { "from": "entrada", "to": "agente" },
+    { "from": "agente", "to": "hijo" },
+    { "from": "hijo", "to": "agente", "cyclic": true },
+    { "from": "hijo", "to": "salida" }
+  ]
+}

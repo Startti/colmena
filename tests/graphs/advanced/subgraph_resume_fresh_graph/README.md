@@ -48,11 +48,17 @@ S=rf_shape_$(date +%s)
 cargo run --bin dag_engine -- run $D/turn1_suspend.json --agent-session-id $S
 cargo run --bin dag_engine -- run $T2E --agent-session-id $S --answer "$ANS"
 
-# 3. Válvula (vuelve al comportamiento hasta v0.16) -> el hijo corre v1
-V=rf_valve_$(date +%s)
-cargo run --bin dag_engine -- run $D/turn1_suspend.json --agent-session-id $V
-COLMENA_SUBGRAPH_RESUME_GRAPH=stored cargo run --bin dag_engine -- run $T2C \
-  --agent-session-id $V --answer "$ANS"
+# 3. En reposo (v0.19): con una clave centinela en la config del hijo, ningún
+#    graph_json guarda config ni la clave, y el resume sigue corriendo v2
+T1S=/tmp/turn1_centinela.json; T2S=/tmp/turn2_centinela.json
+jq '.nodes.delegado.config.child_graph_inline.nodes.fin.config.api_key = "sk-e2e-at-rest-sentinel-0000000000"' \
+  $D/turn1_suspend.json > $T1S
+jq '.nodes.delegado.config.child_graph_inline.nodes.sello.config.data.sello = "SELLO=v2"' $T1S > $T2S
+R=rf_rest_$(date +%s)
+cargo run --bin dag_engine -- run $T1S --agent-session-id $R
+cargo run --bin dag_engine -- run $T2S --agent-session-id $R --answer "$ANS"
+psql -At -c "SELECT status, graph_json::text LIKE '%sk-e2e-at-rest-%', graph_json::text LIKE '%\"config\"%'
+  FROM dag_runs WHERE agent_session_id = '$R'"
 ```
 
 ## Qué mirar
@@ -67,7 +73,11 @@ sed -n 's/^data: //p' captura.sse | grep -v '^\[DONE\]$' \
   | jq -c 'select(.type=="subgraph-node-end" and .node_id=="sello") | .output'
 ```
 
-Corrida 1: `{"sello":"SELLO=v2"}`. Corrida 3 (válvula): `{"sello":"SELLO=v1"}`.
+Corrida 1: `{"sello":"SELLO=v2"}`. Corrida 3 (en reposo): `{"sello":"SELLO=v2"}`,
+y el `SELECT` da `COMPLETED|f|f` para la fila raíz y la del hijo. Con v0.18 da
+`t|t`: la fila guardaba el grafo entero, clave incluida. La válvula
+`COLMENA_SUBGRAPH_RESUME_GRAPH=stored` de v0.18 ya no existe (entrada 82 del
+CHANGELOG).
 Corrida 2: sin `subgraph-node-end` de `sello`; el frame `error` trae `errorText`
 con `SUBGRAPH_RESUME_INCOMPATIBLE:`, nombrando `pregunta` y `confirmar`. El
 turno 1 de cada pareja: `finish.finishReason == "suspended"`.
