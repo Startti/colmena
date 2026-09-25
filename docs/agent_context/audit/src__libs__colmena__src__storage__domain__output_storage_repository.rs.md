@@ -14,11 +14,14 @@
 - `read()` (async fn, pub trait method) — Retrieve bytes for previously-stored output, supporting cross-provider lazy upload and `$attachment:<id>` attachment resolution; returns `StorageError::InvalidInput` for unknown keys
 - `read_stream()` (async fn, pub trait method) — Streaming variant of read() for multipart mode; implementations must yield bytes in order with accurate size_bytes metadata; returns `StorageError::InvalidInput` (unknown key) or `StorageError::BackendUnavailable` (source unreachable)
 - `delete()` (async fn, pub trait method) — Idempotent blob deletion (returns Ok whether blob existed or not); used by attachment_gc garbage collection; bubbles `StorageError::BackendUnavailable` on backend failure for retry
+- `read_url()` (async fn, pub trait method, DEFAULT-provided since v0.20.0 / Feature C part 1) — On-demand read URL for an existing `storage_key`, hinted to last `ttl_seconds`; default `Ok(None)` so a pre-existing implementer compiles and runs unchanged. Signing never lives in this library — a host overrides this to call its own signing protocol.
+- `supports_read_url()` (fn, pub trait method, DEFAULT-provided since v0.20.0 / Feature C part 1) — Capability hint for the `$attachment_url:` teaching gate (part 2, not yet implemented); default `false`, kept in sync with `read_url`'s default.
 
 ## File-level notes
 
 - Clean domain trait file with zero infrastructure dependencies
 - No unfinished code, dead symbols, or obvious improvements
-- All trait methods are properly async and bounded Send + Sync
+- All trait methods are properly async and bounded Send + Sync, except `supports_read_url` which is a plain sync fn — `#[async_trait]` leaves non-`async fn` trait methods untouched, and mixing the two on one trait is an existing pattern elsewhere in this codebase (e.g. `SkillRepository`)
 - Error handling via StorageError is consistent across all methods
 - Documentation is comprehensive and links use cases accurately
+- `read_url` / `supports_read_url` are additive (default-provided): `LocalCacheStorageAdapter` and `HttpCallbackStorageAdapter` do not override either and keep the default; only `LocalHttpStorageAdapter` overrides both

@@ -14,7 +14,7 @@
 - `OutputStorageRepository::read` (async fn, impl) — Fetches bytes from cached read_url; fails fast with InvalidInput if key not in cache (no cross-process support)  [FLAG: improvement — code duplication (line 190-200 vs 236-246)]
 - `OutputStorageRepository::read_stream` (async fn, impl) — Streams bytes from cached read_url without buffering; mirrors read() metadata lookup and error handling  [FLAG: improvement — code duplication (line 190-200 vs 236-246)]
 - `OutputStorageRepository::delete` (async fn, impl) — POST storage_key to sibling /delete endpoint; treats 404 as idempotent success and evicts the key from meta_cache
-- `tests` module — Comprehensive test suite covering: happy path store→read, error mapping (callback 401, PUT 500), empty bytes validation, cache eviction on delete, streaming, and URL derivation fallback logic
+- `tests` module — Comprehensive test suite covering: happy path store→read, error mapping (callback 401, PUT 500), empty bytes validation, cache eviction on delete, streaming, URL derivation fallback logic, and (Feature C part 1) that `read_url`/`supports_read_url` return the port default without any network call — this adapter does not yet implement real signing
 
 ## File-level notes
 

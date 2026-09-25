@@ -17,11 +17,13 @@
 - `OutputStorageRepository::read` (pub async fn) — reads file from disk with path-traversal validation
 - `OutputStorageRepository::read_stream` (pub async fn) — reads file as async stream with metadata (size, mime, filename)
 - `OutputStorageRepository::delete` (pub async fn) — deletes file, idempotent (no-op if missing)
-- `tests` (mod, private) — 11 comprehensive tests covering store/read/read_stream/delete, HTTP server behavior, error cases, path traversal
+- `OutputStorageRepository::read_url` (pub async fn, Feature C part 1, v0.20.0) — rebuilds the `http://127.0.0.1:<port>/files/<key>` URL on demand for an existing key, after a path-traversal + existence check identical in shape to `read()`; `ttl_seconds` is accepted but ignored (the static server never expires)
+- `OutputStorageRepository::supports_read_url` (pub fn, Feature C part 1, v0.20.0) — returns `true`; the only shipping adapter that does
+- `tests` (mod, private) — 16 comprehensive tests covering store/read/read_stream/delete/read_url, HTTP server behavior, error cases, path traversal
 
 ## File-level notes
 
-- **Duplication**: Path-traversal validation (`contains('/')`, `contains("..")`, `is_empty()`) repeated identically in 4 methods (serve_file line 95, read line 228, read_stream line 254, delete line 285). Should extract to private helper `validate_storage_key(key: &str) -> Result<(), StorageError>` to reduce duplication and ensure consistency.
+- **Duplication**: Path-traversal validation (`contains('/')`, `contains("..")`, `is_empty()`) repeated identically in now 5 methods (serve_file, read, read_stream, delete, and read_url added in Feature C part 1). Should extract to private helper `validate_storage_key(key: &str) -> Result<(), StorageError>` to reduce duplication and ensure consistency — not done here to keep the port-addition diff minimal; a good target for a follow-up cleanup PR.
 
 - **Type ergonomics**: `dir()` method returns `&PathBuf` (line 175); should be `&Path` for better caller ergonomics per Rust conventions.
 

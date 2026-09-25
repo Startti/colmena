@@ -22,6 +22,16 @@
 //!   gen → load_attachment → cross-provider-upload pipeline working without
 //!   special-casing because the LLM provider's Files API just does a GET.
 //!
+//! ## `OutputStorageRepository::read_url` (Feature C, part 1)
+//!
+//! This adapter also declares `supports_read_url() == true` and overrides
+//! `read_url(storage_key, ttl_seconds)` to build the same
+//! `http://127.0.0.1:<port>/files/<key>` URL on demand for an *existing*
+//! key — same shape as `store()`'s `read_url`, but callable later, e.g. by
+//! the `$attachment_url:` placeholder that a future PR adds to
+//! `http_request`. The static file server never expires, so `ttl_seconds`
+//! is accepted (per the port signature) but has no effect.
+//!
 //! ## Lifecycle
 //!
 //! The server runs in a Tokio task spawned at construction. A `oneshot`
@@ -299,6 +309,37 @@ impl OutputStorageRepository for LocalHttpStorageAdapter {
             ))),
         }
     }
+
+    async fn read_url(
+        &self,
+        storage_key: &str,
+        ttl_seconds: u64,
+    ) -> Result<Option<String>, StorageError> {
+        // The embedded axum server never expires a file: `ttl_seconds` is
+        // accepted (the port passes it through unconditionally) but has no
+        // effect here. Real TTL enforcement is a signing host's job (ADP).
+        let _ = ttl_seconds;
+        if storage_key.contains('/') || storage_key.contains("..") || storage_key.is_empty() {
+            return Err(StorageError::InvalidInput(format!(
+                "invalid storage_key '{storage_key}'"
+            )));
+        }
+        let path = self.dir.join(storage_key);
+        if tokio::fs::metadata(&path).await.is_err() {
+            return Err(StorageError::InvalidInput(format!(
+                "storage_key '{storage_key}' not readable at {}",
+                path.display()
+            )));
+        }
+        Ok(Some(format!(
+            "http://127.0.0.1:{}/files/{}",
+            self.port, storage_key
+        )))
+    }
+
+    fn supports_read_url(&self) -> bool {
+        true
+    }
 }
 
 #[cfg(test)]
@@ -527,5 +568,92 @@ mod tests {
                 "expected InvalidInput for '{bad}', got {err:?}"
             );
         }
+    }
+
+    // --- Feature C part 1: read_url / supports_read_url ---
+
+    #[tokio::test]
+    async fn read_url_returns_a_url_that_gets_the_stored_bytes() {
+        let tmp = TempDir::new().unwrap();
+        let adapter = LocalHttpStorageAdapter::new(tmp.path().to_path_buf(), 0)
+            .await
+            .unwrap();
+
+        let bytes = vec![0x89u8, 0x50, 0x4e, 0x47];
+        let stored = adapter
+            .store(req(bytes.clone(), "image/png"))
+            .await
+            .unwrap();
+
+        let url = adapter
+            .read_url(&stored.storage_key, 900)
+            .await
+            .unwrap()
+            .expect("LocalHttp must declare a read_url");
+        assert!(url.starts_with(&format!("http://127.0.0.1:{}/files/", adapter.port())));
+        assert!(url.ends_with(&stored.storage_key));
+
+        // The URL must actually be fetchable and return the right bytes —
+        // not just correctly shaped.
+        let resp = reqwest::get(&url).await.unwrap();
+        assert_eq!(resp.status(), 200);
+        let body = resp.bytes().await.unwrap();
+        assert_eq!(body.as_ref(), &bytes[..]);
+    }
+
+    #[tokio::test]
+    async fn read_url_unknown_key_errors() {
+        let tmp = TempDir::new().unwrap();
+        let adapter = LocalHttpStorageAdapter::new(tmp.path().to_path_buf(), 0)
+            .await
+            .unwrap();
+        let err = adapter
+            .read_url("does-not-exist.png", 900)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StorageError::InvalidInput(_)));
+    }
+
+    #[tokio::test]
+    async fn read_url_rejects_path_traversal() {
+        let tmp = TempDir::new().unwrap();
+        let adapter = LocalHttpStorageAdapter::new(tmp.path().to_path_buf(), 0)
+            .await
+            .unwrap();
+        for bad in ["../etc/passwd", "/tmp/foo", "sub/dir/key"] {
+            let err = adapter.read_url(bad, 900).await.unwrap_err();
+            assert!(
+                matches!(err, StorageError::InvalidInput(_)),
+                "expected InvalidInput for '{bad}', got {err:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn read_url_accepts_any_ttl_hint_since_the_local_server_never_expires() {
+        let tmp = TempDir::new().unwrap();
+        let adapter = LocalHttpStorageAdapter::new(tmp.path().to_path_buf(), 0)
+            .await
+            .unwrap();
+        let stored = adapter
+            .store(req(b"hello".to_vec(), "text/plain"))
+            .await
+            .unwrap();
+
+        // A 1-second hint and a 24h hint must both resolve to the exact same
+        // URL — this adapter has no expiry, so `ttl_seconds` is accepted but
+        // has no effect. Real TTL enforcement is a host adapter's job (ADP).
+        let url_short = adapter.read_url(&stored.storage_key, 1).await.unwrap();
+        let url_long = adapter.read_url(&stored.storage_key, 86_400).await.unwrap();
+        assert_eq!(url_short, url_long);
+    }
+
+    #[tokio::test]
+    async fn supports_read_url_is_true() {
+        let tmp = TempDir::new().unwrap();
+        let adapter = LocalHttpStorageAdapter::new(tmp.path().to_path_buf(), 0)
+            .await
+            .unwrap();
+        assert!(adapter.supports_read_url());
     }
 }

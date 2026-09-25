@@ -4723,3 +4723,74 @@ mandaba al eco los bytes de la otra sesión; después, `needs an agent_session_i
 documento. **ADP.** Sin cambios de API; un grafo que mandaba a propósito una clave
 `__colmena*`/`__node*` por un edge deja de recibirla (ninguno en `tests/graphs`).
 **Estado.** done (punto 11, parte A, revisión).
+
+## 91. `OutputStorageRepository` gana un método opcional `read_url` (feature C, parte 1 de 2)
+
+> Nota de numeración: la §90 queda reservada para un PR de seguridad en paralelo sobre
+> este mismo módulo; esta entrada usa §91 para no chocar con esa numeración.
+
+**Qué cambió.** El puerto `OutputStorageRepository` (`output_storage_repository.rs`) gana
+dos métodos, ambos con cuerpo por defecto — **aditivo**: un host que implementaba el
+trait antes de este cambio compila y corre sin tocar una línea:
+
+- `async fn read_url(&self, storage_key: &str, ttl_seconds: u64) -> Result<Option<String>,
+  StorageError>` — pide al host una URL de lectura para una clave ya existente, con un
+  TTL sugerido. Default `Ok(None)` ("este host no ofrece URLs de lectura"). Distinto del
+  campo `read_url` que ya devuelve `store()`: aquél se emite al escribir un objeto nuevo;
+  este método se pide después, para un objeto que puede ser viejo.
+- `fn supports_read_url(&self) -> bool` — pista de capacidad, default `false`, en sync
+  (no async — `#[async_trait]` deja intactos los métodos que no son `async fn`, como ya
+  hace `SkillRepository::list_available`). La usará la parte 2 (el placeholder
+  `$attachment_url:` en `http_request`, todavía sin tocar) para no enseñarle al modelo
+  una forma que en este host va a fallar siempre.
+
+**La firma sigue sin vivir en la librería.** Ninguno de los dos métodos nuevos llama a
+ningún protocolo de firmado; el default es puro y el único adaptador que sobreescribe
+`read_url` (`LocalHttpStorageAdapter`) solo reconstruye la URL de su propio servidor
+`axum` local — no firma nada. Un host que quiera URLs reales (ADP, firmando un GET de
+GCS) implementa su propio adaptador, como ya hace con `ChildGraphResolverPort` (#317,
+#806).
+
+**Comportamiento por adaptador** (los tres que ya existían):
+
+| Adaptador | `read_url` | `supports_read_url` |
+|---|---|---|
+| `LocalCacheStorageAdapter` | default (`Ok(None)`) — no lo sobreescribe | default (`false`) |
+| `LocalHttpStorageAdapter` | reconstruye `http://127.0.0.1:<port>/files/<key>` tras el mismo chequeo de path-traversal + existencia que `read()`; `ttl_seconds` se acepta pero no tiene efecto (el servidor estático no expira) | `true` |
+| `HttpCallbackStorageAdapter` | default (`Ok(None)`) — no lo sobreescribe; ADP implementará su propio adaptador en el worker para esto | default (`false`) |
+
+**Tests.** 3 en `output_storage_repository.rs` (default `Ok(None)` para un host que no lo
+implementa, ejercitado como `Arc<dyn OutputStorageRepository>` real y no solo como
+chequeo de compilación; el hint de capacidad en `false`; el argumento `ttl_seconds` llega
+sin modificar a una implementación que lo sobreescribe, vía un adaptador espía). 5 en
+`local_http_adapter.rs` (URL que efectivamente resuelve un GET con los bytes correctos;
+clave inexistente → `InvalidInput`; path-traversal rechazado igual que `read()`; el mismo
+storage_key da la misma URL con un TTL de 1s y de 24h — no hay expiración real que
+verificar; `supports_read_url() == true`). 2 en `local_cache_adapter.rs` y 2 en
+`http_callback_adapter.rs` (default `None`/`false` incluso para una clave que sí existe;
+para `HttpCallbackStorageAdapter`, contra un puerto que rechaza la conexión, para probar
+que el default no intenta ninguna llamada de red). 12 tests nuevos en total. Lib completa
+(`cargo test -p colmena_dag_engine`, todas las suites): 2887 passed, 0 failed, 74 ignored
+en la unitaria (2875 passed antes de este PR — 74 ignored sin cambio), más integración y
+doctests en verde sin ningún `FAILED` en ninguna suite.
+
+**Mutación.** 3, rojas y revertidas: (1) invertir el default del puerto a `Ok(Some(...))`
+tumba `default_read_url_is_ok_none_for_a_host_that_does_not_implement_it`; (2) quitar el
+chequeo de existencia en `LocalHttpStorageAdapter::read_url` (devolver la URL sin
+comprobar el archivo) tumba `read_url_unknown_key_errors`; (3) ignorar `ttl_seconds` en el
+adaptador espía de `output_storage_repository.rs` (no guardarlo) tumba
+`ttl_argument_reaches_the_implementation`.
+
+**E2E.** No aplica — este PR es solo el puerto y su documentación; ningún nodo ni el motor
+del grafo llaman a `read_url`/`supports_read_url` todavía (eso es la parte 2, el
+placeholder `$attachment_url:` en `http_request`, explícitamente fuera de alcance aquí).
+No hay comportamiento observable por un grafo real que verificar en este PR; se verifica
+en la parte 2, cuando el placeholder exista.
+
+**ADP.** Sin cambios de API para lo que ya usa — `read`/`read_stream`/`store`/`delete` no
+cambian de firma. Nada que actualizar hoy; cuando el worker de ADP quiera URLs reales
+firmadas, implementa `read_url`/`supports_read_url` en su propio adaptador
+`OutputStorageRepository` (no antes de la parte 2, que es la que efectivamente los usa).
+**Estado.** partial (feature C, parte 1 de 2 — falta la parte 2: el placeholder
+`$attachment_url:` en `http_request`, la sustitución fuera del contexto del LLM, y el
+adaptador de ADP).
