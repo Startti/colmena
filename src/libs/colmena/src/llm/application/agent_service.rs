@@ -421,9 +421,23 @@ impl AgentService {
                     return Ok(response);
                 }
 
+                // Each call's k: its index in this message's `tool_calls`. A
+                // `parallel` tool names its child boundary `<tool>#<k>` with it,
+                // so it is set before anything is emitted for the call, the
+                // repeat guard's answer included.
+                let tool_calls: Vec<ToolCall> = tool_calls
+                    .iter()
+                    .enumerate()
+                    .map(|(k, call)| {
+                        let mut call = call.clone();
+                        call.scope_index = Some(k);
+                        call
+                    })
+                    .collect();
+
                 // D. Execute each tool call (with consecutive-streak loop guard)
                 let mut rescue = false;
-                for tool_call in tool_calls {
+                for tool_call in &tool_calls {
                     let sig = tool_call_signature(
                         &tool_call.function.name,
                         &tool_call.function.arguments,
@@ -912,7 +926,13 @@ impl AgentService {
                 final_response = final_response.with_thinking_content(full_thinking);
             }
             if !accumulated_tool_calls.is_empty() {
-                let tools: Vec<ToolCall> = accumulated_tool_calls.into_values().collect();
+                // In the provider's index order, whatever order the chunks
+                // arrived in: this is the order the calls are persisted and
+                // dispatched in, and each one's k is its position in it.
+                let mut indexed: Vec<(usize, ToolCall)> =
+                    accumulated_tool_calls.into_iter().collect();
+                indexed.sort_by_key(|(index, _)| *index);
+                let tools: Vec<ToolCall> = indexed.into_iter().map(|(_, call)| call).collect();
                 final_response = final_response.with_tool_calls(tools);
             }
             if let Some(usage) = &completion_usage {
@@ -3325,5 +3345,151 @@ mod tests {
         let tools = offered(&["gsheets_read"]);
         let (ran, _) = run_calls(tools, Some(provider), Some(catalog), calls).await;
         assert_eq!(ran, ["describe_tool", "describe_tool", "gsheets_read"]);
+    }
+
+    // ---- Each call knows its index k in the model's `tool_calls` message ----
+
+    /// `(id, scope_index)` of every call an executor ran, in order.
+    type RanCalls = Arc<Mutex<Vec<(String, Option<usize>)>>>;
+
+    /// An executor that records `(id, scope_index)` for every call it runs.
+    fn recording_exec() -> (MockToolExec, RanCalls) {
+        let mut exec = MockToolExec::new();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let s = seen.clone();
+        exec.expect_execute().returning(move |call| {
+            s.lock().unwrap().push((call.id.clone(), call.scope_index));
+            Ok(ToolResult::success(call.id.clone(), "ran".to_string()))
+        });
+        (exec, seen)
+    }
+
+    fn stream_of(parts: Vec<LlmStreamPart>) -> LlmStream {
+        let provider = LlmProvider::new(
+            ProviderKind::OpenAi,
+            "key".to_string(),
+            Some("gpt-4".to_string()),
+        )
+        .unwrap();
+        let chunks: Vec<Result<LlmStreamChunk, LlmError>> = parts
+            .into_iter()
+            .map(|p| {
+                Ok(LlmStreamChunk::new(
+                    LlmRequestId::new(),
+                    p,
+                    provider.clone(),
+                    false,
+                ))
+            })
+            .collect();
+        Box::pin(futures::stream::iter(chunks))
+    }
+
+    /// A whole streamed tool call at provider index `index`.
+    fn call_chunk(index: usize, args: &str) -> LlmStreamPart {
+        LlmStreamPart::ToolCallChunk(ToolCallChunk {
+            index,
+            id: format!("c{index}"),
+            name: "t".to_string(),
+            args_chunk: args.to_string(),
+            provider_signature: None,
+        })
+    }
+
+    /// Streams `first` as the model's first answer and "done" after it.
+    /// Returns every stream part the run emitted and the persisted history.
+    async fn run_streamed(
+        first: Vec<LlmStreamPart>,
+        exec: &MockToolExec,
+    ) -> (Vec<LlmStreamPart>, Vec<LlmMessage>) {
+        let mut mock_llm = MockLlmRepo::new();
+        let turn = AtomicUsize::new(0);
+        mock_llm.expect_stream().returning(move |_| {
+            Ok(if turn.fetch_add(1, Ordering::SeqCst) == 0 {
+                stream_of(first.clone())
+            } else {
+                stream_of(vec![LlmStreamPart::Content("done".to_string())])
+            })
+        });
+        let (mock_conv, history) = stateful_conv_mock(vec![]);
+        let captured: Arc<Mutex<Vec<LlmStreamPart>>> = Arc::new(Mutex::new(Vec::new()));
+        let c = captured.clone();
+        let on_token: Box<dyn Fn(LlmStreamPart) + Send + Sync> =
+            Box::new(move |part| c.lock().unwrap().push(part));
+        let service = AgentService::new(Arc::new(mock_llm), Arc::new(mock_conv));
+        let resp = service
+            .run(AgentRunParams {
+                session_id: &test_key(),
+                prompt: Some("go".to_string()),
+                messages: None,
+                config: create_config(),
+                tools: offered(&["t"]),
+                tool_executor: exec,
+                max_tool_repeats: None,
+                max_turns: None,
+                on_token: Some(on_token),
+                tools_provider: None,
+                attachment_resolver: None,
+                agent_session_id: None,
+                lazy_catalog_names: None,
+            })
+            .await
+            .expect("run");
+        assert_eq!(resp.content(), "done");
+        let parts = captured.lock().unwrap().clone();
+        let history = history.lock().unwrap().clone();
+        (parts, history)
+    }
+
+    /// A streamed answer's tool calls are keyed by the provider's index, and
+    /// the chunks may arrive in any order (here index 1 before index 0). They
+    /// run — and are persisted — in index order, and each one's k is its
+    /// position in that order. Six calls, so an unordered map cannot pass by
+    /// luck.
+    #[tokio::test]
+    async fn streamed_tool_calls_run_in_the_order_of_their_index() {
+        let (exec, seen) = recording_exec();
+        let arrival = [1, 0, 5, 3, 2, 4];
+        let first = arrival
+            .iter()
+            .map(|&i| call_chunk(i, &format!(r#"{{"n":{i}}}"#)))
+            .collect();
+        let (_, history) = run_streamed(first, &exec).await;
+
+        let expected: Vec<(String, Option<usize>)> =
+            (0..6).map(|i| (format!("c{i}"), Some(i))).collect();
+        assert_eq!(*seen.lock().unwrap(), expected);
+
+        let persisted: Vec<String> = history
+            .iter()
+            .find_map(|m| m.tool_calls())
+            .expect("the assistant message carries the calls")
+            .iter()
+            .map(|c| c.id.clone())
+            .collect();
+        let in_order: Vec<String> = (0..6).map(|i| format!("c{i}")).collect();
+        assert_eq!(persisted, in_order);
+    }
+
+    /// The repeat guard answers the second of two identical calls without
+    /// running it. Its start frame still carries its own k, like every call.
+    #[tokio::test]
+    async fn a_call_the_repeat_guard_answers_still_carries_its_index() {
+        let (exec, seen) = recording_exec();
+        let first = vec![call_chunk(0, r#"{"n":1}"#), call_chunk(1, r#"{"n":1}"#)];
+        let (parts, _) = run_streamed(first, &exec).await;
+
+        assert_eq!(*seen.lock().unwrap(), [("c0".to_string(), Some(0))]);
+        let started: Vec<(String, Option<usize>)> = parts
+            .iter()
+            .filter_map(|p| match p {
+                LlmStreamPart::LlmToolCallStart(tc) => Some((tc.id.clone(), tc.scope_index)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            started,
+            [("c0".to_string(), Some(0)), ("c1".to_string(), Some(1))]
+        );
     }
 }

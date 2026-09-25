@@ -81,6 +81,18 @@ pub trait ToolExecutor: Send + Sync {
     /// In practice, this may return an empty vector, as tool filtering
     /// is done at the LlmNode level using `get_tools()` or `get_all_available_tools()`.
     async fn available_tools(&self) -> Vec<ToolDefinition>;
+
+    /// The scope this call's stream boundary opens under, when its tool opted
+    /// into `parallel`: `<tool>#<k>`, k being the call's index in the model's
+    /// `tool_calls` message ([`ToolCall::scope_index`]). The parent's tool-call
+    /// frames carry the same value as `childScope`, which is how a consumer
+    /// tells two calls of the same tool apart.
+    ///
+    /// `None` — the default — keeps the boundary named after the bare tool and
+    /// the frames exactly as they were.
+    fn child_scope(&self, _call: &ToolCall) -> Option<String> {
+        None
+    }
 }
 
 #[cfg(test)]
