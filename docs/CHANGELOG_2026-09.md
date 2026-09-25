@@ -4608,7 +4608,7 @@ se ignoraba. Documentado en `docs/node_configurations.json`,
 `docs/node_as_tools_reference.json` y en la lista de compuertas de `Graph::validate()` de
 las guías 48, 49 y 51.
 
-## 86. Una llamada a una tool `parallel` abre su frontera como `<tool>#<k>`
+## 87. Una llamada a una tool `parallel` abre su frontera como `<tool>#<k>`
 
 **Qué cambió.**
 - `agent_service` le pone a cada llamada su k (`ToolCall.scope_index`, su índice en el
