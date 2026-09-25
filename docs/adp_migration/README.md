@@ -6,6 +6,12 @@ ve ADP antes y después, qué tiene que hacer ADP, y qué se rompe si no hace na
 
 Los cambios que quedan dentro del motor no llevan nota aquí.
 
+## 2026-09-25 — una llamada a una tool `parallel` trae su propia identidad
+
+| # | Nota | Acción de ADP | Qué se rompe si se ignora |
+|---|------|---------------|---------------------------|
+| 1 | [`childScope` y la frontera `<tool>#<k>`](2026-09-25-parallel-tool-calls.md) | Soportar `childScope` antes de subir el pin (hecho en Startti/adp#855). `tool-input-start` nunca lo trae: se lee de `tool-input-available` | Nada para las tools sin `parallel`; las fronteras `<tool>#<k>` de una tool `parallel` no cuelgan de su llamada |
+
 ## 2026-09-25 — una fila de `dag_runs` guarda solo el esqueleto del grafo
 
 | # | Nota | Acción de ADP | Qué se rompe si se ignora |
