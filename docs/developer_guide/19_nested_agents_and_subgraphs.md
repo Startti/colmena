@@ -250,7 +250,9 @@ tool que el modelo usa para correr cualquiera de los agentes del usuario:
   después de una pregunta respondida.
 
 Probado con `tests/graphs/agents/child_graph_ref_unavailable.json` (el CLI no
-configura resolvedor, así que ejercita el rechazo).
+configura resolvedor, así que ejercita el rechazo) y con
+`tests/graphs/agents/child_graph_ref_resume.json` (el resume, con un resolvedor
+stub en `src/libs/colmena/tests/child_graph_ref_resume.rs`).
 
 ### `suspend` y `secure_suspend` como Tool (patrón `cfg_or_input`)
 

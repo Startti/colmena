@@ -1,0 +1,40 @@
+{
+  "comment": "E2E del resume de un child_graph_ref. Lo corre src/libs/colmena/tests/child_graph_ref_resume.rs con un resolvedor stub y ScriptedAdapter; por `dag_engine run` (sin resolvedor) solo ejercita el rechazo `unavailable`.",
+  "metadata": {
+    "category": "agents",
+    "features": ["subgraph_as_tool", "child_graph_ref", "suspend", "resume"],
+    "requires_env": ["GEMINI_API_KEY", "DATABASE_URL"]
+  },
+  "nodes": {
+    "pedido": { "type": "input", "config": { "prompt": "Corré el agente agt_sello con la tarea: sellá el documento." } },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "model": "gemini-2.5-flash",
+        "api_key": "${GEMINI_API_KEY}",
+        "connection_url": "${DATABASE_URL}",
+        "stream": false,
+        "system_message": "Cuando te pidan correr un agente, llamá a Run_My_Agent con su agentId y la tarea en prompt.",
+        "prompt": "{{prompt}}",
+        "tool_configurations": {
+          "Run_My_Agent": {
+            "name": "Run_My_Agent",
+            "node_type": "subgraph",
+            "description": "Corre uno de los agentes del usuario con una tarea.",
+            "node_schema": {
+              "child_graph_ref": { "fixed": { "agent_id": "${agentId}", "context": { "origin": "e2e" } } },
+              "agentId": { "type": "string", "required": true, "description": "Id del agente" },
+              "prompt": { "type": "string", "required": true, "description": "La tarea para el agente" }
+            }
+          }
+        }
+      }
+    },
+    "salida": { "type": "output", "config": {} }
+  },
+  "edges": [
+    { "from": "pedido", "to": "agent" },
+    { "from": "agent.result", "to": "salida" }
+  ]
+}
