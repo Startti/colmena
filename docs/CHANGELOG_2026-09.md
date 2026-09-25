@@ -4499,3 +4499,48 @@ turno 1 deja la fila `FAILED` con la cola `["modelo"]`. En el turno 2:
 
 **ADP.** Sin cambio de contrato; basta con subir el motor. Tras un Stop, el turno
 siguiente vuelve a emitir los frames del nodo de entrada, como cualquier turno.
+
+**Revisión (3 fixes, mismo release).**
+
+1. El bloqueo de inyección duraba un solo turno: el marcador `__colmena_status:
+   "SUSPENDED"` seguía en `all_outputs` aunque su nodo no volviera a correr. En un
+   grafo con ruteo, ese nodo podía quedar fuera del turno fresco que sigue a
+   `CANCELLED`/`FAILED` (el guardado `COMPLETED` de ese turno conservaba el
+   marcador), y un turno posterior que suspendiera en un nodo distinto lo
+   arrastraba como si también estuviera esperando esa respuesta, inyectándosela
+   si el nodo llegaba a correr. `DagRunUseCase::drop_stale_suspended_outputs`
+   ahora borra del `all_outputs` cargado, al leer una fila no retomada, toda
+   entrada que siga marcada `SUSPENDED` — no solo bloquea la inyección de ese
+   turno, la elimina para que no reaparezca. Test:
+   `a_stale_suspended_marker_dropped_at_load_never_resurfaces_later` (grafo de 5
+   turnos: suspende en `llm_a`, se cancela antes de retomar, un turno enrutado a
+   `llm_x` nunca toca `llm_a` y completa, `llm_b` suspende con su propia
+   pregunta, y al responderla `llm_a` vuelve a correr río abajo de `llm_b` sin
+   recibir esa respuesta). En rojo antes del fix: `llm_a` recibía
+   `Some("respuesta")`; mutación (comentar la llamada) confirma que solo ese
+   test cae.
+2. Una fila `SUSPENDED` hija de una raíz que termina `CANCELLED`/`FAILED` quedaba
+   huérfana: `cancel_running_descendants` solo cierra descendientes `RUNNING`. La
+   raíz nunca vuelve a retomar a esa hija, pero la fila seguía abierta y
+   `find_resume_entry`/`find_suspended_child` podían recogerla más tarde (ver la
+   sección "Concerns" del reporte de este fix). Los 3 puntos de guardado
+   terminal de `execute_stream` (entre nodos, a mitad de nodo, watchdog de
+   inactividad) ahora llaman también a `repo.fail_suspended_descendants` —ya
+   existía, usado por `close_refused` en el rechazo de un resume— junto al
+   `cancel_running_descendants` existente. 3 tests, uno por sitio
+   (`a_root_cancelled_between_nodes_closes_its_suspended_child`,
+   `a_root_cancelled_mid_node_closes_its_suspended_child`,
+   `a_root_failed_by_the_idle_watchdog_closes_its_suspended_child`), cada uno
+   rojo solo cuando se quita su propio sitio (mutación: eliminar cada llamada
+   por separado, más las 3 juntas).
+3. Nota para ADP: un turno detenido que ya persistió el mensaje `user` deja esa
+   fila colgando; el turno siguiente vuelve a mandar el suyo. `LlmRequest::new`
+   (`llm_request.rs`, `coalesce_consecutive_same_role`) fusiona mensajes
+   consecutivos del mismo rol antes de armar el request — así que el modelo ve
+   «mensaje viejo\n\nmensaje nuevo» en un solo turno `user`. Comportamiento
+   previo a este fix, documentado aquí porque es la superficie donde un stop se
+   nota si no se lo espera; no es un bug nuevo.
+
+4 tests nuevos (1 del punto 1, 3 del punto 2) sobre los 3059 que dejó el fix
+original: 9/9 en `stored_run_status_tests`, estable en 20 corridas seguidas.
+`cargo test` completo (`--verbose`): 3063 passed, 0 failed, 146 ignorados.

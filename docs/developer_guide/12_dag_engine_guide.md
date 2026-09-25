@@ -1375,7 +1375,11 @@ Semántica:
   que el `SseMapper` traduce a un frame `cancelled` (UX) seguido de `finish` (terminador).
 - Subgrafos: los hijos se interrumpen por **drop-propagation** desde la raíz y sus filas
   `RUNNING` se marcan `CANCELLED` vía `cancel_running_descendants` (CTE recursivo sobre
-  `parent_session_id`).
+  `parent_session_id`). Una fila `SUSPENDED` hija de la raíz (esperando su propia
+  pregunta, no interrumpida por el drop) no se toca por ese CTE; el mismo punto de
+  guardado llama además a `repo.fail_suspended_descendants` para cerrarla, porque la
+  raíz `CANCELLED`/`FAILED` nunca vuelve a retomarla y dejarla `SUSPENDED` la expone a
+  `find_resume_entry`/`find_suspended_child` en una lectura posterior.
 
 Limitaciones conocidas:
 - `python_script` y demás nodos `spawn_blocking` (pyo3) **corren hasta su propio timeout**;
@@ -1390,10 +1394,14 @@ turno): el motor **no retoma la cola** de una fila `CANCELLED`. Arranca desde lo
 entrada, como después de un `COMPLETED`, y conserva el resto de la fila (outputs, estado
 compartido, historial, contadores). Un marcador `SUSPENDED` que quedó en sus outputs (una
 pregunta respondida y detenida antes de que su nodo volviera a correr) no recibe el
-`answer` de ese turno. Lo mismo vale para la fila `FAILED` que deja el watchdog de
-inactividad (`COLMENA_IDLE_TIMEOUT_SECS`). Solo una fila `SUSPENDED` retoma su cola. Hasta
-v0.19.0 la cola se retomaba: el nodo interrumpido volvía a correr con la entrada del turno
-detenido y el mensaje nuevo se perdía ([CHANGELOG 2026-09 §84](../CHANGELOG_2026-09.md)).
+`answer` de ese turno **y se borra al cargar la fila** — no solo se ignora ese turno: si
+sobreviviera, un turno posterior que suspendiera en un nodo distinto podría confundirlo con
+una pregunta genuinamente pendiente y volver a inyectarle una respuesta ajena si ese nodo
+llegara a correr por otra vía del grafo. Lo mismo vale para la fila `FAILED` que deja el
+watchdog de inactividad (`COLMENA_IDLE_TIMEOUT_SECS`). Solo una fila `SUSPENDED` retoma su
+cola. Hasta v0.19.0 la cola se retomaba: el nodo interrumpido volvía a correr con la entrada
+del turno detenido y el mensaje nuevo se perdía; el marcador colgado se corrigió en la misma
+serie de fixes ([CHANGELOG 2026-09 §84](../CHANGELOG_2026-09.md)).
 
 `engine.execute_stream(...)` (6 args, sin token) sigue disponible y completa normalmente.
 
