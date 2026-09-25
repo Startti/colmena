@@ -4272,14 +4272,14 @@ prefijo) a `format!("{e:?}")` (el `Debug`, sin prefijo) → rojo, el de refusal
 (y de paso otros 4 del camino fresco que comparten la misma línea, confirmando
 que es la misma función la que sirve a los dos caminos).
 
-**E2E.** Commit siguiente en esta misma rama (`review_size.py` no daba los dos
+**E2E.** PR aparte, a continuación de esta entrada (`review_size.py` no daba los dos
 juntos: la integración de Postgres con el `StubResolver`, su fixture y el bump
 de corpus pesan solas ~370 líneas), integración nueva `#[ignore]`,
 `tests/child_graph_ref_resume.rs`: un `ColmenaEngine` real con un `StubResolver`
 (`EngineConfig.child_graph_resolver`, el CLI no configura ninguno) y
 `ScriptedAdapter` para el LLM, contra Postgres local (`colmena_e2e_cgr`).
-`tests/graphs/agents/child_graph_ref_resume.json` (nuevo; `EXPECTED_FILES` 325 →
-326) es el padre — el hijo lo da el stub, no está commiteado. Dos escenarios
+`tests/graphs/agents/child_graph_ref_resume.json` (nuevo; `EXPECTED_FILES` 327 →
+328) es el padre — el hijo lo da el stub, no está commiteado. Dos escenarios
 reales, capturados en `/tmp/colmena_e2e/`: `child_graph_ref_resume_v2.sse` (el
 resolvedor contesta `v1` al arrancar y `v2` al reanudar) — `subgraph-node-end`
 de `sello` da `{"sello":"SELLO=v2"}`
@@ -4297,8 +4297,8 @@ hallazgo de esta task, no anticipado por el plan). Mutación de integración: co
 el caso `ref → Stored` reintroducido, los dos escenarios fallan — el primero
 corre `SELLO=v1` en vez de `v2` (nunca deriva de nuevo) y el segundo no falla
 (el resolvedor rechazado nunca se consulta, el hijo completa con la copia
-vieja). Lint: 326 files, 0/0/0. `corpus_noise`: 3 passed. `cargo test` completo
-(workspace): 3040 passed, 0 failed, 146 ignorados.
+vieja). Lint: 328 files, 0/0/0. `corpus_noise`: 3 passed. `cargo test` completo
+(workspace): 3051 passed, 0 failed, 146 ignorados.
 
 **ADP.** [Nota de migración](adp_migration/2026-09-24-subgraph-resume-fresh-graph.md),
 sección «Desde la entrada 81». `docs/adp_migration/2026-09-23-child-graph-ref.md`
