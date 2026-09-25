@@ -329,6 +329,16 @@ impl DagRunUseCase {
                             }
 
                             all_outputs = state.all_outputs;
+                            if !resumes_stored_queue {
+                                // Injection into a stale marker is blocked below
+                                // for this turn only (`resuming_node_ids`), but
+                                // the marker itself must not outlive this turn
+                                // either: left in `all_outputs`, a node skipped
+                                // now by routing can still be mistaken for one
+                                // genuinely waiting when a *different* node
+                                // suspends on a later turn and routes back to it.
+                                Self::drop_stale_suspended_outputs(&mut all_outputs);
+                            }
                             if resumes_stored_queue {
                                 active_queue = state.active_queue;
                             }
@@ -478,6 +488,7 @@ impl DagRunUseCase {
                         };
                         repo.save(&state).await?;
                         let _ = repo.cancel_running_descendants(&session_id).await;
+                        let _ = repo.fail_suspended_descendants(&session_id).await;
                     }
                     yield DagExecutionEvent::Cancelled {
                         reason: None,
@@ -764,6 +775,7 @@ impl DagRunUseCase {
                                         eprintln!("⚠️ Failed to persist CANCELLED state: {}", e);
                                     }
                                     let _ = repo.cancel_running_descendants(&session_id).await;
+                                    let _ = repo.fail_suspended_descendants(&session_id).await;
                                 }
                                 yield DagExecutionEvent::Cancelled {
                                     reason: None,
@@ -830,6 +842,7 @@ impl DagRunUseCase {
                                         eprintln!("⚠️ Failed to persist FAILED state after idle abort: {}", e);
                                     }
                                     let _ = repo.cancel_running_descendants(&session_id).await;
+                                    let _ = repo.fail_suspended_descendants(&session_id).await;
                                 }
                                 // `Err(...)?` cannot be used here — this arm's body runs
                                 // inside the `select!`'s per-arm async block, whose return
@@ -1325,6 +1338,33 @@ impl DagRunUseCase {
             }
         }
         None
+    }
+
+    /// Remove every entry of `all_outputs` whose value is still marked
+    /// `__colmena_status: "SUSPENDED"` (reuses `find_status_by_key`, same
+    /// recursive match `compute_resuming_node_ids` uses).
+    ///
+    /// Called only when loading a row whose last turn was CANCELLED or
+    /// FAILED (`!resumes_from_stored_queue`). Skipping the injection for
+    /// that one turn (`resuming_node_ids` below) is not enough on its own:
+    /// a marker left in place survives into whatever this turn saves next
+    /// (e.g. a COMPLETED save, if the marked node happens not to run this
+    /// turn either), and a *later* turn that suspends at a different node
+    /// would then see it as another genuine resume target. Removing the
+    /// whole entry — not just the `__colmena_status` field — is safe:
+    /// nothing downstream distinguishes "no output yet" from "output
+    /// removed"; the node simply runs fresh if and when it is reached.
+    fn drop_stale_suspended_outputs(all_outputs: &mut HashMap<String, Value>) {
+        let stale: Vec<String> = all_outputs
+            .iter()
+            .filter(|(_, out)| {
+                Self::find_status_by_key(out, "__colmena_status") == Some("SUSPENDED".to_string())
+            })
+            .map(|(nid, _)| nid.clone())
+            .collect();
+        for nid in stale {
+            all_outputs.remove(&nid);
+        }
     }
 
     fn build_inputs_for(
@@ -2764,6 +2804,33 @@ mod stored_run_status_tests {
         async fn find_suspended_child(&self, _: &str) -> Result<Option<String>, DagError> {
             Ok(None)
         }
+        // Real semantics (not the no-op default): a transitive walk over
+        // `parent_session_id`, exactly like `resume_graph_tests`' own
+        // `MemRepo` — needed to verify review fix 2 (closing a CANCELLED/
+        // FAILED root's own SUSPENDED children).
+        async fn fail_suspended_descendants(&self, session_id: &str) -> Result<u64, DagError> {
+            let mut guard = self.0.lock().unwrap();
+            let mut frontier = vec![session_id.to_string()];
+            let mut to_flip = Vec::new();
+            while let Some(parent) = frontier.pop() {
+                for (id, row) in guard.iter() {
+                    if row.parent_session_id.as_deref() == Some(parent.as_str()) {
+                        to_flip.push(id.clone());
+                        frontier.push(id.clone());
+                    }
+                }
+            }
+            let mut flipped = 0u64;
+            for id in to_flip {
+                if let Some(row) = guard.get_mut(&id) {
+                    if row.status == DagRunStatus::Suspended {
+                        row.status = DagRunStatus::Failed;
+                        flipped += 1;
+                    }
+                }
+            }
+            Ok(flipped)
+        }
     }
 
     /// The chat's run id, sent on every turn.
@@ -2798,11 +2865,13 @@ mod stored_run_status_tests {
         BeforeStart,
     }
 
-    /// One turn of the chat. Returns the nodes that started, in order, and
-    /// the stream's error, if any. A turn that hangs fails the test instead.
-    async fn turn(
+    /// One turn of the chat, against an explicit graph (so a test can vary
+    /// the graph's shape turn to turn — a "routed" conversation). Returns
+    /// the nodes that started, in order, and the stream's error, if any. A
+    /// turn that hangs fails the test instead.
+    async fn turn_with(
         uc: DagRunUseCase,
-        prompt: &str,
+        graph: Graph,
         answer: Option<&str>,
         stop: Stop,
     ) -> (Vec<String>, Option<String>) {
@@ -2811,7 +2880,7 @@ mod stored_run_status_tests {
             token.cancel();
         }
         let stream = uc.execute_stream(
-            chat_graph(prompt),
+            graph,
             Some(RUN.to_string()),
             answer.map(str::to_string),
             false,
@@ -2843,6 +2912,17 @@ mod stored_run_status_tests {
         tokio::time::timeout(Duration::from_secs(10), drain)
             .await
             .expect("the turn hung")
+    }
+
+    /// One turn of the chat. Returns the nodes that started, in order, and
+    /// the stream's error, if any. A turn that hangs fails the test instead.
+    async fn turn(
+        uc: DagRunUseCase,
+        prompt: &str,
+        answer: Option<&str>,
+        stop: Stop,
+    ) -> (Vec<String>, Option<String>) {
+        turn_with(uc, chat_graph(prompt), answer, stop).await
     }
 
     /// The row a stopped turn leaves: its queue is the interrupted LLM, and
@@ -2950,5 +3030,224 @@ mod stored_run_status_tests {
         assert_eq!(err, None);
         assert_eq!(llm.calls()[1..], [(json!("new prompt"), None)]);
         assert_eq!(started, vec!["input", "llm"]);
+    }
+
+    // ── Review fix 1: a stale SUSPENDED marker must not outlive the fresh
+    // turn either, not just be skipped by it for one turn ─────────────────
+
+    /// Three LLM-shaped nodes so a "routed" conversation can be built across
+    /// turns: `llm` (node id `llm_a`), `llmx` (a filler, node id `llm_x`),
+    /// `llm2` (node id `llm_b`).
+    struct RoutedRegistry {
+        llm_a: Arc<Llm>,
+        llm_x: Arc<Llm>,
+        llm_b: Arc<Llm>,
+    }
+    impl NodeRegistryPort for RoutedRegistry {
+        fn get_node(&self, node_type: &str) -> Option<Arc<dyn ExecutableNode>> {
+            match node_type {
+                "input" => Some(Arc::new(Input)),
+                "llm" => Some(self.llm_a.clone()),
+                "llmx" => Some(self.llm_x.clone()),
+                "llm2" => Some(self.llm_b.clone()),
+                _ => None,
+            }
+        }
+        fn get_all_nodes(&self) -> HashMap<String, Arc<dyn ExecutableNode>> {
+            HashMap::new()
+        }
+    }
+
+    /// `input → llm_a`. Nothing else in the graph ever mentions `llm_a`
+    /// outside of this shape.
+    fn graph_only_a(prompt: &str) -> Graph {
+        serde_json::from_value(json!({
+            "nodes": {
+                "input": { "type": "input", "config": { "prompt": prompt } },
+                "llm_a": { "type": "llm", "config": {} }
+            },
+            "edges": [ { "from": "input.prompt", "to": "llm_a.prompt" } ]
+        }))
+        .expect("valid graph JSON")
+    }
+
+    /// `input → llm_x`. A turn routed here never touches `llm_a` at all.
+    fn graph_only_x(prompt: &str) -> Graph {
+        serde_json::from_value(json!({
+            "nodes": {
+                "input": { "type": "input", "config": { "prompt": prompt } },
+                "llm_x": { "type": "llmx", "config": {} }
+            },
+            "edges": [ { "from": "input.prompt", "to": "llm_x.prompt" } ]
+        }))
+        .expect("valid graph JSON")
+    }
+
+    /// `input → llm_b → llm_a`: `llm_a` only runs downstream of `llm_b`,
+    /// receiving whatever the engine thinks it should receive at that point.
+    fn graph_b_to_a(prompt: &str) -> Graph {
+        serde_json::from_value(json!({
+            "nodes": {
+                "input": { "type": "input", "config": { "prompt": prompt } },
+                "llm_b": { "type": "llm2", "config": {} },
+                "llm_a": { "type": "llm", "config": {} }
+            },
+            "edges": [
+                { "from": "input.prompt", "to": "llm_b.prompt" },
+                { "from": "llm_b.text", "to": "llm_a.prompt" }
+            ]
+        }))
+        .expect("valid graph JSON")
+    }
+
+    /// The reported bug's deeper shape: blocking injection for one turn
+    /// isn't enough if the marker itself keeps living in `all_outputs`.
+    /// `llm_a` suspends, then a turn that would answer it is cancelled
+    /// before it re-runs (its marker survives, same as the guard above).
+    /// The *next* turn is routed through an unrelated node and completes
+    /// normally without ever touching `llm_a` — under the old code, that
+    /// COMPLETED save still carries `llm_a`'s stale marker forward. Two
+    /// turns after the cancellation, a *different* node (`llm_b`) suspends
+    /// with its own, unrelated question; when the user answers it, `llm_a`
+    /// runs again (downstream of `llm_b`) and must not receive that answer.
+    #[tokio::test]
+    async fn a_stale_suspended_marker_dropped_at_load_never_resurfaces_later() {
+        let repo = Arc::new(MemRepo::default());
+        let registry = Arc::new(RoutedRegistry {
+            llm_a: Llm::new(First::Suspend),
+            llm_x: Llm::new(First::Answer),
+            llm_b: Llm::new(First::Suspend),
+        });
+        let uc = DagRunUseCase::new(
+            registry.clone(),
+            Some(repo.clone() as Arc<dyn DagStateRepository>),
+        )
+        .with_liveness(LivenessSettings::disabled());
+
+        // Turn 1: llm_a suspends.
+        turn_with(uc.clone(), graph_only_a("p1"), None, Stop::None).await;
+        assert_eq!(repo.row().status, DagRunStatus::Suspended);
+
+        // Turn 2: cancelled before llm_a re-runs — its marker survives.
+        turn_with(uc.clone(), graph_only_a("p2"), None, Stop::BeforeStart).await;
+        assert_eq!(repo.row().status, DagRunStatus::Cancelled);
+        assert_eq!(
+            repo.row().all_outputs["llm_a"]["__colmena_status"],
+            json!("SUSPENDED")
+        );
+
+        // Turn 3: the fresh turn after CANCELLED, routed through `llm_x`
+        // instead — `llm_a` is skipped entirely. Completes normally.
+        turn_with(uc.clone(), graph_only_x("p3"), None, Stop::None).await;
+        assert_eq!(repo.row().status, DagRunStatus::Completed);
+
+        // Turn 4: two turns after the cancellation, `llm_b` suspends with
+        // its own, unrelated question.
+        turn_with(uc.clone(), graph_b_to_a("p4"), None, Stop::None).await;
+        assert_eq!(repo.row().status, DagRunStatus::Suspended);
+
+        // Turn 5: the user answers llm_b's question. llm_a runs again,
+        // downstream of llm_b — it must not receive an answer meant for a
+        // question it never asked.
+        let before = registry.llm_a.calls().len();
+        let (started, err) = turn_with(uc, graph_b_to_a("p4"), Some("respuesta"), Stop::None).await;
+        assert_eq!(err, None);
+        assert!(
+            started.contains(&"llm_a".to_string()),
+            "llm_a must run this turn for the scenario to be meaningful; started={:?}",
+            started
+        );
+        assert_eq!(
+            registry.llm_a.calls()[before..]
+                .iter()
+                .map(|(_, ans)| ans.clone())
+                .collect::<Vec<_>>(),
+            vec![None],
+            "llm_a is not resuming anything; a two-turns-stale marker must not inject an answer"
+        );
+    }
+
+    // ── Review fix 2: a CANCELLED/FAILED root closes its own SUSPENDED
+    // children, the same way it already closes RUNNING ones ──────────────
+
+    /// A bare SUSPENDED child row, keyed only by `parent_session_id` — all
+    /// `fail_suspended_descendants`' transitive walk reads.
+    fn suspended_child_row(id: &str, parent: &str) -> DagRunState {
+        DagRunState {
+            session_id: id.into(),
+            agent_session_id: Some("chat_1".into()),
+            parent_session_id: Some(parent.into()),
+            graph_json: json!({}),
+            all_outputs: HashMap::new(),
+            status: DagRunStatus::Suspended,
+            global_shared_state: json!({}),
+            active_queue: VecDeque::new(),
+            execution_history: Vec::new(),
+            global_calls: HashMap::new(),
+            caller_specific_calls: HashMap::new(),
+        }
+    }
+
+    /// Between nodes (before the first node ever starts — Stop fired during
+    /// the pre-flight, the earliest point the hard-stop check runs).
+    #[tokio::test]
+    async fn a_root_cancelled_between_nodes_closes_its_suspended_child() {
+        let llm = Llm::new(First::Answer);
+        let repo = Arc::new(MemRepo::default());
+        repo.0
+            .lock()
+            .unwrap()
+            .insert("child_1".into(), suspended_child_row("child_1", RUN));
+        let uc = use_case(&llm, &repo, LivenessSettings::disabled());
+
+        turn(uc, "old prompt", None, Stop::BeforeStart).await;
+        assert_eq!(repo.row().status, DagRunStatus::Cancelled);
+        assert_eq!(
+            repo.0.lock().unwrap()["child_1"].status,
+            DagRunStatus::Failed
+        );
+    }
+
+    /// Mid-node (Stop while the LLM is in flight).
+    #[tokio::test]
+    async fn a_root_cancelled_mid_node_closes_its_suspended_child() {
+        let llm = Llm::new(First::Hang);
+        let repo = Arc::new(MemRepo::default());
+        repo.0
+            .lock()
+            .unwrap()
+            .insert("child_1".into(), suspended_child_row("child_1", RUN));
+        let uc = use_case(&llm, &repo, LivenessSettings::disabled());
+
+        turn(uc, "old prompt", None, Stop::AtLlm).await;
+        assert_eq!(repo.row().status, DagRunStatus::Cancelled);
+        assert_eq!(
+            repo.0.lock().unwrap()["child_1"].status,
+            DagRunStatus::Failed
+        );
+    }
+
+    /// The idle watchdog's FAILED save.
+    #[tokio::test]
+    async fn a_root_failed_by_the_idle_watchdog_closes_its_suspended_child() {
+        let llm = Llm::new(First::Hang);
+        let repo = Arc::new(MemRepo::default());
+        repo.0
+            .lock()
+            .unwrap()
+            .insert("child_1".into(), suspended_child_row("child_1", RUN));
+        let liveness = LivenessSettings {
+            heartbeat_interval: None,
+            idle_timeout: Some(Duration::from_millis(100)),
+        };
+        let uc = use_case(&llm, &repo, liveness);
+
+        let (_, err) = turn(uc, "old prompt", None, Stop::None).await;
+        assert!(err.is_some(), "the idle watchdog fails the turn");
+        assert_eq!(repo.row().status, DagRunStatus::Failed);
+        assert_eq!(
+            repo.0.lock().unwrap()["child_1"].status,
+            DagRunStatus::Failed
+        );
     }
 }
