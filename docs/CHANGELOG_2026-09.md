@@ -4277,7 +4277,7 @@ que es la misma función la que sirve a los dos caminos).
 el `StubResolver`, su fixture y el bump de corpus pesan solas ~370 líneas).
 
 **ADP.** [Nota de migración](adp_migration/2026-09-24-subgraph-resume-fresh-graph.md),
-sección «Desde la entrada 80». `docs/adp_migration/2026-09-23-child-graph-ref.md`
+sección «Desde la entrada 81». `docs/adp_migration/2026-09-23-child-graph-ref.md`
 actualizada (ya no dice que un resume no vuelve a llamar al resolvedor). Guía 19
 («Grafo por referencia», «Reanudar con el grafo actual», «Resume con árbol de
 runs») y `docs/qa/nodes/subgraph.md` (hallazgo cerrado) pierden sus tres

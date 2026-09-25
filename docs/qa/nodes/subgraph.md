@@ -100,7 +100,7 @@ vuelto a llamar con el mismo `ChildGraphRequest`, solo una vez que ya encontró 
 hijo suspendido) y se lo pasa a `resume_subgraph()` como `ResumeGraph::Fresh` (o
 `Unavailable` si la fuente no pudo dar un grafo), que compara su esqueleto contra
 el guardado antes de correr nada. **Cerrado**: los tres orígenes se re-derivan en
-resume por igual desde la entrada 80.
+resume por igual desde la entrada 81.
 `build_child_state()` sigue sin correr en resume (la sesión del hijo ya tiene
 estado) y el resume sigue sin re-emitir NodeStart/NodeEnd boundary events — ni
 frames SSE nuevos de ningún tipo: ver

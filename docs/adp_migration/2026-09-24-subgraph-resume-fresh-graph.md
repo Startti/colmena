@@ -5,7 +5,7 @@
 enseñarle al agente principal y a la descripción de `Run My Agent` el prefijo
 `SUBGRAPH_RESUME_INCOMPATIBLE:`, que desde la entrada 78 es real. Un
 `CHILD_GRAPH_RESOLVE_FAILED:` puede llegar **después** de una pregunta respondida:
-desde la entrada 80 esto alcanza también a `Run My Agent` (un `child_graph_ref`
+desde la entrada 81 esto alcanza también a `Run My Agent` (un `child_graph_ref`
 vuelve a pedirle el grafo al resolvedor en cada resume, no solo al arrancar) —
 un agente despublicado, borrado o sin acceso entre el suspend y el resume falla
 así. Un inline de ADP no puede fallar con este prefijo (mantiene su estructura
@@ -46,7 +46,7 @@ de v0.16.
 - Al reanudar, un `child_graph_inline` toma su grafo del que llega en ESTE job (en
   ADP, la copia de cable del `suspendedDag` del turno del resume, con su token,
   claves y skills); un `child_graph_path` relee el archivo. Un `child_graph_ref`
-  seguía reanudando la versión guardada hasta la entrada 80, que lo vuelve a pedir
+  seguía reanudando la versión guardada hasta la entrada 81, que lo vuelve a pedir
   al resolvedor también (ver más abajo).
 - Si el esqueleto (ids con `type` + aristas) cambió, nada corre y la fila del
   hijo queda `FAILED`. Por tool: `ToolResult.error` empieza con
@@ -57,7 +57,7 @@ de v0.16.
   migración; un worker v0.16 que tome un resume corre la copia guardada (volver
   atrás es seguro). Válvula: `COLMENA_SUBGRAPH_RESUME_GRAPH=stored`.
 
-## Desde la entrada 80: un `child_graph_ref` vuelve a pedir su grafo
+## Desde la entrada 81: un `child_graph_ref` vuelve a pedir su grafo
 
 - Al reanudar, el motor llama otra vez a `ChildGraphResolverPort::resolve` con el mismo
   `ChildGraphRequest` que armó al arrancar (`agent_id`, `context`, sesión, sesión
