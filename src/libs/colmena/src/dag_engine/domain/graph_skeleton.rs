@@ -10,6 +10,7 @@
 //! the call limits — may change, and that is the point.
 
 use crate::dag_engine::domain::graph::Graph;
+use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
@@ -43,6 +44,30 @@ impl GraphSkeleton {
                 .map(|e| (e.from.clone(), e.to.clone(), e.cyclic.unwrap_or(false)))
                 .collect(),
         }
+    }
+
+    /// What a run row keeps of its graph: the skeleton and nothing else, as
+    /// JSON that still deserializes as a [`Graph`] (`config` defaults to null).
+    /// Everything [`GraphSkeleton::of`] ignores — `config` with the resolved
+    /// keys, `timezone`/`location`/`locale`, `trigger_on`, the call limits —
+    /// never reaches `dag_runs`. `cyclic` is written only when true, which
+    /// `of` reads the same as absent. ADP's backfill writes this exact shape;
+    /// `tests/fixtures/at_rest/` pins it on both sides.
+    pub fn at_rest_json(graph: &Graph) -> Value {
+        let nodes: serde_json::Map<String, Value> = graph
+            .nodes
+            .iter()
+            .map(|(id, node)| (id.clone(), json!({ "type": node.node_type })))
+            .collect();
+        let edges: Vec<Value> = graph
+            .edges
+            .iter()
+            .map(|e| match e.cyclic {
+                Some(true) => json!({ "from": e.from, "to": e.to, "cyclic": true }),
+                _ => json!({ "from": e.from, "to": e.to }),
+            })
+            .collect();
+        json!({ "nodes": nodes, "edges": edges })
     }
 
     /// `None` when `fresh` has the same skeleton as `self` (the stored one).
@@ -288,5 +313,45 @@ mod tests {
             text.contains("added: n0, n1, n2, n3, n4, +3 more)"),
             "{text}"
         );
+    }
+
+    fn fixture(name: &str) -> Value {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/at_rest/");
+        let raw = std::fs::read_to_string(format!("{path}{name}")).expect("fixture");
+        serde_json::from_str(&raw).expect("fixture json")
+    }
+
+    /// ADP's backfill copies this fixture pair and asserts the same shape.
+    #[test]
+    fn at_rest_json_matches_the_shared_fixture() {
+        let at_rest = GraphSkeleton::at_rest_json(&graph(fixture("graph.json")));
+        assert_eq!(at_rest, fixture("graph.at_rest.json"));
+    }
+
+    #[test]
+    fn at_rest_json_keeps_nothing_secret() {
+        let text = GraphSkeleton::at_rest_json(&graph(fixture("graph.json"))).to_string();
+        for absent in [
+            "sk-e2e-at-rest-",
+            "config",
+            "timezone",
+            "location",
+            "locale",
+            "max_total_calls",
+            "trigger_on",
+            "\"cyclic\":false",
+        ] {
+            assert!(!text.contains(absent), "{absent} in {text}");
+        }
+    }
+
+    /// A row written at rest must resume exactly like one that kept the whole graph.
+    #[test]
+    fn the_at_rest_json_parses_back_to_the_same_skeleton() {
+        for g in [fixture("graph.json"), base()] {
+            let g = graph(g);
+            let back = graph(GraphSkeleton::at_rest_json(&g));
+            assert_eq!(GraphSkeleton::of(&back), GraphSkeleton::of(&g));
+        }
     }
 }
