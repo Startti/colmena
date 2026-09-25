@@ -1026,7 +1026,7 @@ pub async fn dispatch_export_xlsx_via_executor(
     let filename = format!("{}.xlsx", parsed.spreadsheet_id);
     let mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet".to_string();
     match executor
-        .register_attachment_bytes(bytes, mime.clone(), filename.clone())
+        .register_attachment_bytes(bytes, mime.clone(), filename.clone(), TOOL_EXPORT_XLSX)
         .await
     {
         Ok(attachment_id) => serde_json::json!({

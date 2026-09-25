@@ -1886,7 +1886,7 @@ while middle_end > keep_first && matches!(messages[middle_end].role(), MessageRo
 **Resolución (2026-06-07, ADP commit en `feat/fix-image-gen-edit-preset`):** Reemplazado en ADP `test_stream_cloud.html` por el preset `image_edit_from_web_url` que valida `image_edit` end-to-end usando una URL pública estable de Wikimedia como `source_url`, sin intentar chain desde `generate_image`. Adicionalmente las descripciones de `generate_image`, `speak_text` y `edit_image` del preset `multimedia_agent_dev` se corrigieron para reflejar el shape real post Plan B (solo `document_id`, sin `url` ni `attachment_id`) y advierten explícitamente que `edit_image.source_url` no acepta document_ids ni `$attachment:` placeholders.
 
 **Trabajo futuro relacionado (no parqueado acá, abrir nueva entrada cuando se necesite):** si se requiere demostrar chain `generate_image → edit_image` end-to-end en una demo, hay 2 caminos:
-- **Camino A — Extender `image_edit.fetch_image()`** en colmena para que acepte `$attachment:<document_id>` y resuelva via attachment registry. Requiere cambios en Rust + tests. ~2-4h.
+- ~~**Camino A — Extender `image_edit.fetch_image()`** en colmena para que acepte `$attachment:<document_id>` y resuelva via attachment registry.~~ Hecho 2026-09 (CHANGELOG 2026-09 §88).
 - **Camino B — Preset HTML con `resolve_attachment_url` tool** vía `http_request` a `/api/attachments/<id>/url` con cookie auth. Solo cambia el playground, no toca Rust. ~1h. Requiere ADP_SESSION_TOKEN en el panel de credenciales.
 
 Conservado para referencia histórica:

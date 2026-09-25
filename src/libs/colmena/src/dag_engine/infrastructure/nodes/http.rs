@@ -1619,6 +1619,8 @@ mod session_attachment_tests {
             let body = json!({ "image_url": format!("$attachment:{id}") });
             let out = run(body, Some("s1"), json!({}), &untouched_server().await).await;
             assert!(out.contains("attachment not found"), "{id}: {out}");
+            let hint = "use a document_id from the attachments catalog";
+            assert!(out.contains(hint), "{id}: {out}");
         }
     }
 

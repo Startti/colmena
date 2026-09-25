@@ -24,7 +24,7 @@
 ### Constructors & Builders
 - `HttpNode::new()` (fn, pub) — Create HttpNode with all optional fields set to None
 - `HttpNode::with_storage()` (fn, pub) — Wire output storage adapter for `$attachment:` resolution in JSON bodies
-- `HttpNode::with_attachment_resolver()` (fn, pub) — Wire Plan A attachment resolver (document_id namespace with fallback to storage_key)
+- `HttpNode::with_attachment_resolver()` (fn, pub) — Wire Plan A attachment resolver: `$attachment:<document_id>` in a JSON body or multipart resolves in the session; a raw storage_key is `NotFound`
 - `HttpNode::with_oauth_cache()` (fn, pub) — Wire shared OAuth provider cache for refresh_token grant
 
 ### Helpers (Private)

@@ -97,6 +97,12 @@ impl HttpCallbackStorageAdapter {
     }
 }
 
+/// A reqwest error on a signed URL, without the URL: its query string is the
+/// credential, and storage errors reach the model and the logs.
+fn unavailable(e: reqwest::Error) -> StorageError {
+    StorageError::BackendUnavailable(e.without_url().to_string())
+}
+
 #[derive(Debug, Deserialize)]
 struct SignResponse {
     put_url: String,
@@ -154,7 +160,7 @@ impl OutputStorageRepository for HttpCallbackStorageAdapter {
             .body(req.bytes)
             .send()
             .await
-            .map_err(|e| StorageError::UploadFailed(e.to_string()))?;
+            .map_err(|e| StorageError::UploadFailed(e.without_url().to_string()))?;
 
         if !put.status().is_success() {
             let status = put.status();
@@ -204,7 +210,7 @@ impl OutputStorageRepository for HttpCallbackStorageAdapter {
             .get(&meta.read_url)
             .send()
             .await
-            .map_err(|e| StorageError::BackendUnavailable(e.to_string()))?;
+            .map_err(unavailable)?;
 
         if !resp.status().is_success() {
             let status = resp.status();
@@ -214,11 +220,7 @@ impl OutputStorageRepository for HttpCallbackStorageAdapter {
             )));
         }
 
-        let bytes = resp
-            .bytes()
-            .await
-            .map_err(|e| StorageError::BackendUnavailable(e.to_string()))?
-            .to_vec();
+        let bytes = resp.bytes().await.map_err(unavailable)?.to_vec();
 
         Ok(StoredBytes {
             bytes,
@@ -250,7 +252,7 @@ impl OutputStorageRepository for HttpCallbackStorageAdapter {
             .get(&meta.read_url)
             .send()
             .await
-            .map_err(|e| StorageError::BackendUnavailable(e.to_string()))?;
+            .map_err(unavailable)?;
 
         if !resp.status().is_success() {
             let status = resp.status();
@@ -266,9 +268,7 @@ impl OutputStorageRepository for HttpCallbackStorageAdapter {
             ))
         })?;
 
-        let stream = resp
-            .bytes_stream()
-            .map(|chunk| chunk.map_err(|e| StorageError::BackendUnavailable(e.to_string())));
+        let stream = resp.bytes_stream().map(|chunk| chunk.map_err(unavailable));
 
         Ok(crate::storage::domain::StoredStream {
             stream: Box::pin(stream),
@@ -742,5 +742,32 @@ mod tests {
         let stored = adapter.store(req(vec![1, 2], "image/png")).await.unwrap();
         let err = adapter.read_stream(&stored.storage_key).await.unwrap_err();
         assert!(matches!(err, StorageError::UploadFailed(_)));
+    }
+
+    /// A transport error names no signed URL: http_request's JSON path and the
+    /// media nodes hand this error to the model. Port 1 refuses the connection.
+    #[tokio::test]
+    async fn a_transport_error_never_carries_the_signed_url() {
+        let server = MockServer::start().await;
+        let signed = "http://127.0.0.1:1/o?X-Goog-Signature=SIGNED";
+        let sign = serde_json::json!({ "put_url": signed, "read_url": signed, "storage_key": "k" });
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(sign))
+            .mount(&server)
+            .await;
+        let adapter = HttpCallbackStorageAdapter::new(server.uri(), "s".into());
+        let put = adapter.store(req(vec![1], "image/png")).await.unwrap_err();
+        let meta = CachedMeta {
+            read_url: signed.into(),
+            mime_type: "image/png".into(),
+            filename: "a.png".into(),
+        };
+        adapter.meta_cache.insert("k".into(), meta);
+        let read = adapter.read("k").await.unwrap_err();
+        let stream = adapter.read_stream("k").await.unwrap_err();
+        for err in [put, read, stream].map(|e| e.to_string()) {
+            assert!(err.contains("error sending request"), "{err}");
+            assert!(!err.contains("SIGNED"), "{err}");
+        }
     }
 }

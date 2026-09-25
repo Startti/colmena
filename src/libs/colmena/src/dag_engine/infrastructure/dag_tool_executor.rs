@@ -658,12 +658,14 @@ impl DagToolExecutor {
     /// Note: this does NOT update the in-memory `attachment_catalog` snapshot.
     /// The catalog is rebuilt by the LLM use case at the next turn boundary;
     /// new attachments registered mid-turn become visible at the start of the
-    /// following turn.
+    /// following turn. `tool_name` is the dispatcher's tool: the row's origin
+    /// is `generated_by:<tool_name>`, which the catalog shows.
     pub async fn register_attachment_bytes(
         &self,
         bytes: Vec<u8>,
         mime_type: String,
         filename: String,
+        tool_name: &str,
     ) -> Result<String, String> {
         let storage = self.attachment_storage.as_ref().ok_or_else(|| {
             "attachment_storage not wired: cannot register attachment bytes.".to_string()
@@ -698,7 +700,9 @@ impl DagToolExecutor {
                 description: None,
                 source: crate::llm::domain::attachments::AttachmentSource::Path(key.clone()),
                 storage_key: Some(key),
-                origin: None,
+                origin: Some(crate::llm::domain::attachments::origin::generated_by(
+                    tool_name,
+                )),
             };
             if let Err(e) = reg.upsert(row).await {
                 tracing::warn!(error = %e, "register_attachment_bytes: registry upsert failed");
@@ -5753,6 +5757,7 @@ mod attachment_plumbing_tests {
                 b"pdf-bytes".to_vec(),
                 "application/pdf".into(),
                 "x.pdf".into(),
+                "gdocs_export",
             )
             .await
             .unwrap_err();
@@ -5793,6 +5798,7 @@ mod attachment_plumbing_tests {
                 b"%PDF...".to_vec(),
                 "application/pdf".into(),
                 "export.pdf".into(),
+                "gdocs_export",
             )
             .await
             .unwrap();
@@ -5825,15 +5831,15 @@ mod attachment_plumbing_tests {
             .with_agent_session_id(Some("agent_42".into()))
             .with_attachment_storage(Arc::new(mock_storage))
             .with_attachment_registry(reg.clone());
+        let (csv, mime) = (b"a,b".to_vec(), "text/csv".to_string());
         let id = executor
-            .register_attachment_bytes(b"a,b".to_vec(), "text/csv".into(), "out.csv".into())
+            .register_attachment_bytes(csv, mime, "out.csv".into(), "data_run_python")
             .await
             .unwrap();
         let row = reg.lookup_by_document_id("agent_42", &id).await.unwrap();
-        assert_eq!(
-            row.expect("registered").storage_key.as_deref(),
-            Some("sk_new_002")
-        );
+        let row = row.expect("registered");
+        assert_eq!(row.storage_key.as_deref(), Some("sk_new_002"));
+        assert_eq!(row.origin.as_deref(), Some("generated_by:data_run_python"));
     }
 
     #[tokio::test]

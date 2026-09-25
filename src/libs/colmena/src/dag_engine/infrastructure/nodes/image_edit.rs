@@ -18,9 +18,14 @@ use crate::dag_engine::domain::lint::{FieldSpec, NodeCatalogEntry};
 use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
 use crate::dag_engine::domain::observer::ExecutionObserver;
 use crate::dag_engine::infrastructure::nodes::util::attachment_id::build_document_id;
+use crate::dag_engine::infrastructure::nodes::util::session_attachment::read_session_attachment;
 use crate::llm::domain::attachments::{origin, AttachmentSource, UpsertAttachmentInput};
 use crate::llm::domain::{AttachmentRegistry, ProviderKind};
+use crate::llm::infrastructure::attachments::AttachmentStreamResolverImpl;
 use crate::storage::domain::{OutputStorageRepository, StoreRequest};
+
+/// Cap on an attachment source (`$attachment:<document_id>`) read into memory.
+const MAX_SOURCE_BYTES: u64 = 100 * 1024 * 1024;
 
 pub struct ImageEditNode {
     storage: Arc<dyn OutputStorageRepository>,
@@ -75,6 +80,29 @@ impl ImageEditNode {
         } else {
             Ok(value.to_string())
         }
+    }
+
+    /// Resolve `source_url`/`mask_url`. `data:` and `http(s)` URLs are fetched
+    /// as given. With a registry wired, anything else is an attachment of the
+    /// session — `"$attachment:<document_id>"` or the bare id — and a storage
+    /// handle or raw key is NotFound, never read. Without one, legacy handles.
+    async fn resolve_source(
+        &self,
+        url: &str,
+        agent_session_id: Option<&str>,
+    ) -> Result<(Vec<u8>, String), Box<dyn StdError + Send + Sync>> {
+        let is_url = ["data:", "http://", "https://"]
+            .iter()
+            .any(|p| url.starts_with(p));
+        let Some(reg) = self.attachment_registry.as_ref().filter(|_| !is_url) else {
+            return self.fetch_image(url).await;
+        };
+        let id = url.strip_prefix("$attachment:").unwrap_or(url);
+        let resolver = AttachmentStreamResolverImpl::new(reg.clone(), self.storage.clone());
+        let got = read_session_attachment(&resolver, agent_session_id, id, MAX_SOURCE_BYTES)
+            .await
+            .map_err(|e| format!("image_edit: {e}"))?;
+        Ok((got.bytes, got.mime_type))
     }
 
     /// Fetch image bytes from a `data:` URI, `http(s)` URL, or `local://<key>`
@@ -260,9 +288,10 @@ impl ExecutableNode for ImageEditNode {
             });
 
         // Fetch source (and optional mask) bytes.
-        let (source_bytes, source_mime) = self.fetch_image(&source_url).await?;
+        let sid = agent_session_id.as_deref();
+        let (source_bytes, source_mime) = self.resolve_source(&source_url, sid).await?;
         let mask = if let Some(m) = &mask_url {
-            Some(self.fetch_image(m).await?)
+            Some(self.resolve_source(m, sid).await?)
         } else {
             None
         };
@@ -434,8 +463,8 @@ impl ExecutableNode for ImageEditNode {
                 "provider": "string (required) — openai (only supported today)",
                 "model": "string (optional, default gpt-image-1)",
                 "api_key": "string (required) — ${ENV_VAR} or secure-value placeholders supported",
-                "source_url": "string (required) — data: URI or http(s) URL of the image to edit",
-                "mask_url": "string (optional) — PNG with transparency marking the edit area",
+                "source_url": "string (required) — \"$attachment:<document_id>\" (or the bare document_id) of an image in this session, or a data:/http(s) URL",
+                "mask_url": "string (optional) — PNG with transparency marking the edit area; same forms as source_url",
                 "prompt": "string (required) — describes the desired edit",
                 "size": "string (optional)",
                 "quality": "string (optional, openai) — low|medium|high|auto",
@@ -466,12 +495,13 @@ impl ExecutableNode for ImageEditNode {
 
     fn description(&self) -> Option<&str> {
         Some(
-            "Edit an existing image given a text prompt. Source image is fetched from a \
-             URL (data: or http(s)). Optional mask marks the edit region. Returns \
-             { images: [{ document_id, mime_type, size_bytes }], provider, model } \
-             — same shape as image_generation so results can be chained. Use \
-             \"$attachment:<document_id>\" in downstream tool args to forward the \
-             image, or call load_attachment(document_id) to read it.",
+            "Edit an existing image given a text prompt. source_url (and the optional \
+             mask_url) is \"$attachment:<document_id>\" of an image in this session, \
+             or a data:/http(s) URL. Returns { images: [{ document_id, mime_type, \
+             size_bytes }], provider, model }, like image_generation. Forward a result \
+             as \"$attachment:<document_id>\": to image_edit, or in an http_request \
+             body (JSON: a data: URI; multipart: a file part; never a URL). Call \
+             load_attachment(document_id) to see it.",
         )
     }
 
@@ -891,5 +921,107 @@ mod tests {
             "Plan B removed the attachment_id legacy alias"
         );
         assert!(img.get("url").is_none(), "Plan B removed the url field");
+    }
+
+    // ---- `$attachment:<document_id>` sources, through the session registry ----
+
+    /// `agent_x` owns `img_1 → sk-src`. Storage would serve ANY handle via
+    /// `read` and streams `sk-src`, so a raw handle WOULD be readable.
+    async fn edit_with_registry(source: &str, mask: Option<&str>) -> Result<Value, String> {
+        use crate::llm::infrastructure::persistence::SqliteAttachmentRegistry;
+        use crate::storage::domain::{StorageError, StoredBytes, StoredStream};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/images/edits"))
+            .and(wiremock::matchers::body_string_contains("SRC-BYTES"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": [{ "b64_json": "AAAA" }]
+            })))
+            .mount(&server)
+            .await;
+        let reg = SqliteAttachmentRegistry::new("sqlite::memory:")
+            .await
+            .unwrap();
+        reg.upsert(UpsertAttachmentInput {
+            agent_session_id: "agent_x".into(),
+            document_id: "img_1".into(),
+            provider: ProviderKind::Generated,
+            provider_file_id: "sk-src".into(),
+            mime_type: "image/png".into(),
+            filename: "src.png".into(),
+            size_bytes: Some(9),
+            label: None,
+            description: None,
+            source: AttachmentSource::Path("sk-src".into()),
+            storage_key: Some("sk-src".into()),
+            origin: None,
+        })
+        .await
+        .unwrap();
+        let mut storage = MockOutputStorageRepository::new();
+        storage.expect_read_stream().returning(|k| {
+            if k != "sk-src" {
+                return Err(StorageError::InvalidInput(format!("unknown key {k}")));
+            }
+            let chunk: Result<bytes::Bytes, StorageError> =
+                Ok(bytes::Bytes::from_static(b"SRC-BYTES"));
+            let stream = Box::pin(futures::stream::once(async move { chunk }));
+            let (mime_type, filename) = ("image/png".into(), "src.png".into());
+            Ok(StoredStream {
+                stream,
+                size_bytes: 9,
+                mime_type,
+                filename,
+            })
+        });
+        storage.expect_read().returning(|_| {
+            let (bytes, mime_type, filename) =
+                (b"SRC-BYTES".to_vec(), "image/png".into(), "x.png".into());
+            Ok(StoredBytes {
+                bytes,
+                mime_type,
+                filename,
+            })
+        });
+        storage.expect_store().returning(|_| Ok(stored_ok("k")));
+        let node = ImageEditNode::new(Arc::new(storage))
+            .with_openai_base_url(server.uri())
+            .with_attachment_registry(Arc::new(reg));
+        let mut inputs: NodeInputs = HashMap::new();
+        inputs.insert("__colmena_agent_session_id".into(), json!("agent_x"));
+        inputs.insert("source_url".into(), json!(source));
+        if let Some(m) = mask {
+            inputs.insert("mask_url".into(), json!(m));
+        }
+        let cfg = base_config("unused");
+        node.execute(&inputs, &cfg, &mut json!({}), None)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    #[tokio::test]
+    async fn source_url_resolves_a_document_id_of_the_session() {
+        edit_with_registry("$attachment:img_1", Some("img_1"))
+            .await
+            .expect("$attachment:<id> source and bare-id mask resolve");
+    }
+
+    #[tokio::test]
+    async fn source_url_refuses_what_is_not_a_document_id_of_the_session() {
+        // Storage handles (ADP's `chat-attachments/…`, `local://…`) and raw
+        // keys are read by nobody once a registry is wired.
+        for src in [
+            "chat-attachments/u/s/a.png",
+            "local://sk-src",
+            "sk-src",
+            "$attachment:sk-src",
+        ] {
+            let err = edit_with_registry(src, None).await.unwrap_err();
+            assert!(err.contains("attachment not found"), "{src}: {err}");
+        }
+        let err = edit_with_registry("$attachment:img_1", Some("chat-attachments/m.png"))
+            .await
+            .unwrap_err();
+        assert!(err.contains("attachment not found"), "mask: {err}");
     }
 }

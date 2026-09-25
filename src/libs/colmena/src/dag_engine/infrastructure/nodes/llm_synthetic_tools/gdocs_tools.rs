@@ -1426,7 +1426,7 @@ pub async fn dispatch_export_via_executor(
     let filename = format!("{}.{}", parsed.doc_id, ext);
     let mime = fmt.mime().to_string();
     match executor
-        .register_attachment_bytes(bytes, mime.clone(), filename.clone())
+        .register_attachment_bytes(bytes, mime.clone(), filename.clone(), TOOL_EXPORT)
         .await
     {
         Ok(attachment_id) => serde_json::json!({

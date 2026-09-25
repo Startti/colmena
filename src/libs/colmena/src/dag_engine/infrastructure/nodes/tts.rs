@@ -353,8 +353,9 @@ impl ExecutableNode for TtsNode {
         Some(
             "Synthesize speech from text via OpenAI, ElevenLabs, or Google Gemini TTS. \
              Returns { audio: { document_id, mime_type, size_bytes, duration_ms }, \
-             provider, model }. Use \"$attachment:<document_id>\" in downstream tool \
-             args to forward the audio, or call load_attachment(document_id) to read it.",
+             provider, model }. Forward the audio as \"$attachment:<document_id>\" in \
+             an http_request body (JSON: a data: URI; multipart: a file part; never a \
+             URL), or call load_attachment(document_id) to read it.",
         )
     }
 

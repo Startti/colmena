@@ -58,7 +58,7 @@
   - Media: image_generation, image_edit, tts (conditional on storage)
   - Utilities: suspend, secure_suspend (conditional on secure service), information_extraction, output_parser, task_memory_writer
 
-- **Attachment Resolver**: Lines 66–83 build a composite `AttachmentStreamResolverImpl` only when both attachment_registry and storage are present, enabling `$attachment:<document_id>` placeholder resolution in HTTP multipart and LLM fallback paths. When either is absent, http_request falls back to direct storage_key lookup.
+- **Attachment Resolver**: Lines 66–83 build a composite `AttachmentStreamResolverImpl` only when both attachment_registry and storage are present, enabling `$attachment:<document_id>` placeholder resolution in http_request (JSON body and multipart) and image_edit. When either is absent, http_request reads the id as a raw storage_key (legacy).
 
 - **Media Node Conditionals**: Lines 284–320 register image_generation, tts, and image_edit only if storage adapter is provided. Each follows an identical pattern: storage check → optional secure values → optional attachment registry. This is correct but repetitive.
 
