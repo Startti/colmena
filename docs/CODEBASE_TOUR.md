@@ -323,17 +323,17 @@ Artifact storage for generated media (images, audio). Designed so the engine has
 **Layer breakdown:**
 
 - `storage/domain/`
-  - `output_storage_repository.rs` — **`OutputStorageRepository` trait**: `store(StoreRequest) → StoredOutput`, `read(storage_key) → Vec<u8>`, `read_stream(storage_key) → Stream`. `StoreRequest` carries bytes, mime type, filename, and session context. `StoredOutput` carries `storage_key` (stable handle) and `read_url` (short-lived URL for the LLM).
+  - `output_storage_repository.rs` — **`OutputStorageRepository` trait**: `store(StoreRequest) → StoredOutput`, `read(storage_key) → Vec<u8>`, `read_stream(storage_key) → Stream`, `delete(storage_key)`, plus (Feature C, additive since v0.20.0) `read_url(storage_key, ttl_seconds) → Option<String>` and `supports_read_url() -> bool`, both with a default (`Ok(None)` / `false`) so a pre-existing host adapter compiles unchanged. `StoreRequest` carries bytes, mime type, filename, and session context. `StoredOutput` carries `storage_key` (stable handle) and `read_url` (short-lived URL for the LLM, issued at write time — distinct from the on-demand `read_url` method).
   - `storage_error.rs` — `StorageError` enum.
 
 - `storage/infrastructure/`
-  - `local_cache_adapter.rs` — `LocalCacheStorageAdapter`: in-process `DashMap` keyed by `storage_key`. No filesystem, no network. Used for CLI runs and unit tests. `read_url = storage_key` (intentionally short to avoid TPM saturation).
-  - `local_http_adapter.rs` — `LocalHttpStorageAdapter`: spins up an Axum server on `127.0.0.1` to serve blobs via HTTP. Used in dev (`COLMENA_LOCAL=true`) for URL symmetry with production.
-  - `http_callback_adapter.rs` — `HttpCallbackStorageAdapter`: requests a signed PUT URL from the host app, uploads bytes, returns the resulting `read_url`. Used in production (the ADP worker). Never holds GCS credentials itself.
+  - `local_cache_adapter.rs` — `LocalCacheStorageAdapter`: in-process `DashMap` keyed by `storage_key`. No filesystem, no network. Used for CLI runs and unit tests. `read_url = storage_key` (intentionally short to avoid TPM saturation). Does not override the `read_url`/`supports_read_url` methods — inherits the port's default (`None`/`false`).
+  - `local_http_adapter.rs` — `LocalHttpStorageAdapter`: spins up an Axum server on `127.0.0.1` to serve blobs via HTTP. Used in dev (`COLMENA_LOCAL=true`) for URL symmetry with production. Overrides `read_url` to rebuild the same `http://127.0.0.1:<port>/files/<key>` URL on demand (`ttl_seconds` accepted, ignored — the local server never expires) and `supports_read_url` to `true`.
+  - `http_callback_adapter.rs` — `HttpCallbackStorageAdapter`: requests a signed PUT URL from the host app, uploads bytes, returns the resulting `read_url`. Used in production (the ADP worker). Never holds GCS credentials itself. Does not override `read_url`/`supports_read_url` — a host that wants real read URLs (e.g. ADP signing a GCS GET) provides its own adapter instead.
 
 **Key files to know:**
 
-- `storage/domain/output_storage_repository.rs` — the port. Three methods, two types. Read this before touching any storage adapter.
+- `storage/domain/output_storage_repository.rs` — the port. Six methods (four required, two additive-optional with defaults), three shipping adapters. Read this before touching any storage adapter.
 - `storage/infrastructure/http_callback_adapter.rs` — production behavior. Also handles the `delete` (Plan C GC) and `sign-get` (cross-process read) endpoints.
 
 **Common contribution patterns:**

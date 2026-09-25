@@ -16,6 +16,12 @@
 //! failures map to [`StorageError::BackendUnavailable`]. The delete step maps
 //! any non-success non-404 status to `BackendUnavailable` so the gc binary
 //! retries on the next scheduled run.
+//!
+//! Does not override [`read_url`](crate::storage::domain::OutputStorageRepository::read_url) —
+//! it relies on the port's default (`Ok(None)`). Feature C keeps signing out
+//! of this library on purpose (see the trait doc comment): a host that
+//! wants real read URLs provides its own `OutputStorageRepository` adapter,
+//! as ADP does in its worker.
 
 use async_trait::async_trait;
 use dashmap::DashMap;
@@ -769,5 +775,31 @@ mod tests {
             assert!(err.contains("error sending request"), "{err}");
             assert!(!err.contains("SIGNED"), "{err}");
         }
+    }
+
+    // --- Feature C part 1: read_url / supports_read_url ---
+    //
+    // HttpCallback does NOT override either method in this part — it relies
+    // on the port's default (`Ok(None)` / `false`) until ADP's own worker
+    // adapter implements real signing. No network mock needed: the default
+    // never contacts `callback_url`.
+
+    #[tokio::test]
+    async fn read_url_is_none_by_default_no_network_call_made() {
+        let adapter = HttpCallbackStorageAdapter::new(
+            "http://127.0.0.1:1/sign-put".to_string(),
+            "s3cr3t".to_string(),
+        );
+        // Port 1 refuses connections — if this method tried to reach the
+        // callback it would return a BackendUnavailable error, not `Ok`.
+        let got = adapter.read_url("chat-attachments/x", 900).await.unwrap();
+        assert_eq!(got, None);
+    }
+
+    #[test]
+    fn supports_read_url_is_false() {
+        let adapter =
+            HttpCallbackStorageAdapter::new("http://127.0.0.1:1/sign-put".to_string(), "s".into());
+        assert!(!adapter.supports_read_url());
     }
 }

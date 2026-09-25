@@ -14,6 +14,11 @@
 //! `cargo run` event-stream extraction examples. In production, the
 //! `HttpCallbackStorageAdapter` returns a real signed GCS URL of similar
 //! length, so the LLM-bound shape stays identical across environments.
+//!
+//! Does not override [`read_url`](OutputStorageRepository::read_url) or
+//! [`supports_read_url`](OutputStorageRepository::supports_read_url) — an
+//! in-memory, per-process cache has no URL to hand out, so it relies on the
+//! port's default (`Ok(None)` / `false`).
 
 use async_trait::async_trait;
 use dashmap::DashMap;
@@ -276,5 +281,31 @@ mod tests {
         let adapter = LocalCacheStorageAdapter::new();
         // Deleting a key that was never stored must succeed.
         adapter.delete("local://never-existed").await.unwrap();
+    }
+
+    // --- Feature C part 1: read_url / supports_read_url ---
+    //
+    // LocalCache does NOT override either method — it relies entirely on
+    // the port's default (`Ok(None)` / `false`). These tests pin that down
+    // as a deliberate choice (per the design: an in-memory, per-process
+    // cache has no URL to give out), not an oversight that a future PR
+    // could silently break by adding an override that returns `Some(..)`.
+
+    #[tokio::test]
+    async fn read_url_is_none_even_for_a_key_that_was_actually_stored() {
+        let adapter = LocalCacheStorageAdapter::new();
+        let stored = adapter
+            .store(req(b"hello".to_vec(), "text/plain"))
+            .await
+            .unwrap();
+
+        let got = adapter.read_url(&stored.storage_key, 900).await.unwrap();
+        assert_eq!(got, None);
+    }
+
+    #[test]
+    fn supports_read_url_is_false() {
+        let adapter = LocalCacheStorageAdapter::new();
+        assert!(!adapter.supports_read_url());
     }
 }

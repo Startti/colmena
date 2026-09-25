@@ -23,6 +23,8 @@
 - `read_stream_unknown_key_errors()` (test) — Verifies read_stream() returns InvalidInput error for missing keys.
 - `delete_removes_stored_blob_and_is_idempotent()` (test) — Verifies delete() removes entries and subsequent delete() is a no-op.
 - `delete_unknown_key_is_noop()` (test) — Verifies delete() succeeds on non-existent keys.
+- `read_url_is_none_even_for_a_key_that_was_actually_stored()` (test) — Pins down that this adapter relies on the port's default (Feature C part 1): an in-memory, per-process cache has no URL to give out.
+- `supports_read_url_is_false()` (test) — Same, for the capability hint.
 
 ## File-level notes
 
