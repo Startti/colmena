@@ -4226,3 +4226,60 @@ responde el schema, `sumar` corre, `python_script` rechazado. `EXPECTED_FILES` +
 
 **ADP.** [Nota](adp_migration/2026-09-24-unoffered-tool-refused.md): ninguna acción de
 código; subir el motor.
+
+## 81. Un `child_graph_ref` se vuelve a resolver al reanudar
+
+Task 4/4 de la cadena (`docs/superpowers/specs/2026-09-24-child-resume-rederive-design.md`,
+D3), último paso: conecta la excepción que dejó la entrada 78. `resume_graph`
+deja de devolver `ResumeGraph::Stored` para un `child_graph_ref` — **comportamiento
+observable**.
+
+**Qué cambió.** Una línea de código: el bloque que hacía `if source.0 ==
+CHILD_GRAPH_REF { return ResumeGraph::Stored; }` en `resume_graph` desaparece, así
+que un ref cae en la misma rama que inline/path y llama a `load_child_graph`, que
+ya sabía resolver un ref (la usa el camino fresco desde la entrada 67). El
+resolvedor recibe el mismo `ChildGraphRequest` que armaría una corrida fresca
+(`agent_id` ya templado, `context`, sesión, sesión estable, `parent_path`), y
+solo **después** de que `find_child_session_id_for_resume` encontró un hijo
+suspendido — sin hijo, no hay resolve, y en ADP eso importa: cada resolve acuña
+un token efímero nuevo. Un rechazo del resolvedor cierra la fila del hijo como
+`FAILED` y su texto llega verbatim con el prefijo estable (`CHILD_GRAPH_RESOLVE_FAILED:<code>: …`,
+vía `Unavailable`, ya lo hacía el ejecutor para inline/path desde la entrada 78);
+un agente editado sin cambiar su forma se reanuda con la versión nueva, con otra
+forma falla con `SUBGRAPH_RESUME_INCOMPATIBLE:`. Costo nuevo: un resolve por
+resume, hasta 30 s (el mismo timeout que el camino fresco). Ningún frame SSE
+nuevo — la rama de resume del `SubGraphNode` sigue sin boundary propio.
+
+**Tests.** 4 nuevos en `child_graph_ref_tests` (TDD red-first), reemplazando
+`a_ref_still_resumes_its_stored_graph`: `a_ref_resume_asks_the_resolver_again_with_the_request_a_fresh_run_made`
+(dos resolves, mismo `agent_id`/`context`/sesión/sesión estable/`parent_path`),
+`without_a_suspended_child_the_resolver_is_not_asked` (ya pasaba, la fija),
+`a_resolver_that_refuses_on_resume_fails_with_its_code_and_the_executor_gets_unavailable`
+y `a_ref_resume_puts_the_resolved_graph_in_no_frame_output_or_debug` (el secreto
+resuelto no aparece en el output, en un frame ni en `{:?}` del `ResumeGraph`).
+`cargo test -p colmena_dag_engine --lib nodes::subgraph`: 58 → 61 passed. `cargo
+test -p colmena_dag_engine --lib`: 2828 → 2831 passed (0 failed, 74 ignorados).
+
+**Mutación.** 3, cada una en rojo y revertida a mano: (1) volver a poner
+el caso `ref → Stored` → rojos los 3 tests nuevos que dependen del resolvedor (no
+el de "sin hijo", que no llama al resolvedor en ningún caso); (2) derivar el grafo
+**antes** de `find_child_session_id_for_resume` → rojo, solo,
+`without_a_suspended_child_the_resolver_is_not_asked` (con inline/path esta misma
+mutación era inobservable en la entrada 78 — un ref hace la derivación una
+llamada real al resolvedor, así que acá sí se nota); (3) en `load_child_graph`,
+cambiar el mapeo de error de un ref de `e.to_string()` (el `Display` con el
+prefijo) a `format!("{e:?}")` (el `Debug`, sin prefijo) → rojo, el de refusal
+(y de paso otros 4 del camino fresco que comparten la misma línea, confirmando
+que es la misma función la que sirve a los dos caminos).
+
+**E2E.** Llega en el próximo commit de esta misma rama, que amplía esta sección
+(`review_size.py` no daba los dos en un commit: la integración de Postgres con
+el `StubResolver`, su fixture y el bump de corpus pesan solas ~370 líneas).
+
+**ADP.** [Nota de migración](adp_migration/2026-09-24-subgraph-resume-fresh-graph.md),
+sección «Desde la entrada 81». `docs/adp_migration/2026-09-23-child-graph-ref.md`
+actualizada (ya no dice que un resume no vuelve a llamar al resolvedor). Guía 19
+(«Grafo por referencia», «Reanudar con el grafo actual», «Resume con árbol de
+runs») y `docs/qa/nodes/subgraph.md` (hallazgo cerrado) pierden sus tres
+menciones de «hasta un PR posterior»; `docs/developer_guide/30_database_schema.md`
+y `docs/node_as_tools_reference.json` igual.

@@ -152,6 +152,11 @@ impl SubGraphNode {
     /// source a fresh run reads, so it carries this turn's keys, token and
     /// skill paths. Never fails — a source that cannot give a graph becomes
     /// `Unavailable`, which the executor turns into a closed row and that text.
+    ///
+    /// For a ref this asks the embedder's resolver again, with the same
+    /// `ChildGraphRequest` a fresh run makes: a revoked agent is refused, a
+    /// republished one resumes with its new version if its structure still
+    /// matches.
     async fn resume_graph(
         &self,
         stored_valve: bool,
@@ -170,11 +175,6 @@ impl SubGraphNode {
                  Run it again from the start."
             ));
         };
-        // A ref keeps its stored graph until the resolver is asked again on
-        // resume (the next change).
-        if source.0 == CHILD_GRAPH_REF {
-            return ResumeGraph::Stored;
-        }
         match self
             .load_child_graph(source, session_id, agent_session_id, parent_path)
             .await
@@ -1835,25 +1835,128 @@ mod child_graph_ref_tests {
         assert!(graph["nodes"]["x"].is_object());
     }
 
-    /// Until the resolver is asked again on resume, a ref resumes with the
-    /// graph stored in its row and the resolver is not called.
-    #[tokio::test]
-    async fn a_ref_still_resumes_its_stored_graph() {
+    // ── resume: the resolver is asked again (this PR) ───────────────────────
+
+    use super::subgraph_resume_graph_tests::ResumingExecutor;
+
+    fn resuming_node(answer: Answer) -> (SubGraphNode, Arc<ResumingExecutor>, Arc<FakeResolver>) {
         let node = SubGraphNode::new();
-        let exec = super::subgraph_resume_graph_tests::ResumingExecutor::finding(Some("child_1"));
-        let res = Arc::new(FakeResolver(Answer::Graph, Mutex::default()));
-        node.executor.set(exec.clone()).ok().unwrap();
-        node.resolver.set(res.clone()).ok().unwrap();
-        let mut inputs = ref_inputs("a1");
+        let exec = ResumingExecutor::finding(Some("child_1"));
+        let res = Arc::new(FakeResolver(answer, Mutex::default()));
+        node.executor.set(exec.clone()).ok().expect("executor once");
+        node.resolver.set(res.clone()).ok().expect("resolver once");
+        (node, exec, res)
+    }
+
+    fn resuming(mut inputs: NodeInputs) -> NodeInputs {
         inputs.insert(
             "__colmena_resume_answer".into(),
             json!("Q[q]: ?\nA[q]: yes"),
         );
-        node.execute(&inputs, &json!({}), &mut json!({}), None)
+        inputs
+    }
+
+    #[tokio::test]
+    async fn a_ref_resume_asks_the_resolver_again_with_the_request_a_fresh_run_made() {
+        let (node, exec, res) = resuming_node(Answer::Graph);
+        node.execute(&ref_inputs("a1"), &json!({}), &mut json!({}), None)
             .await
             .unwrap();
-        assert_eq!(exec.graph(), Some(ResumeGraph::Stored));
-        assert!(res.1.lock().unwrap().is_empty());
+        node.execute(
+            &resuming(ref_inputs("a1")),
+            &json!({}),
+            &mut json!({}),
+            None,
+        )
+        .await
+        .unwrap();
+        let reqs = res.1.lock().unwrap().clone();
+        assert_eq!(reqs.len(), 2, "one resolve to start, one to resume");
+        let (fresh, resumed) = (&reqs[0], &reqs[1]);
+        assert_eq!(resumed.agent_id, fresh.agent_id);
+        assert_eq!(resumed.context, fresh.context);
+        assert_eq!(resumed.session_id, fresh.session_id);
+        assert_eq!(resumed.agent_session_id, fresh.agent_session_id);
+        assert_eq!(resumed.parent_path, fresh.parent_path);
+        assert!(
+            matches!(exec.graph(), Some(ResumeGraph::Fresh(g)) if g["nodes"]["llm"].is_object()),
+            "the executor resumes with the graph resolved now"
+        );
+    }
+
+    #[tokio::test]
+    async fn without_a_suspended_child_the_resolver_is_not_asked() {
+        let node = SubGraphNode::new();
+        let res = Arc::new(FakeResolver(Answer::Graph, Mutex::default()));
+        node.executor
+            .set(ResumingExecutor::finding(None))
+            .ok()
+            .unwrap();
+        node.resolver.set(res.clone()).ok().unwrap();
+        let err = node
+            .execute(
+                &resuming(ref_inputs("a1")),
+                &json!({}),
+                &mut json!({}),
+                None,
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.starts_with("No suspended child found"), "{err}");
+        assert!(
+            res.1.lock().unwrap().is_empty(),
+            "in ADP each resolve mints a session token"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_resolver_that_refuses_on_resume_fails_with_its_code_and_the_executor_gets_unavailable(
+    ) {
+        let forbidden = ChildGraphResolveError::Forbidden("not visible".into());
+        let (node, exec, _) = resuming_node(Answer::Fail(forbidden));
+        let obs = Arc::new(Obs::default());
+        let err = node
+            .execute(
+                &resuming(ref_inputs("a1")),
+                &json!({}),
+                &mut json!({}),
+                Some(obs.clone()),
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+        assert_code(&err, "forbidden");
+        assert_eq!(
+            exec.graph(),
+            Some(ResumeGraph::Unavailable(
+                "CHILD_GRAPH_RESOLVE_FAILED:forbidden: not visible".into()
+            ))
+        );
+        assert!(obs.is_empty(), "the resume branch opens no boundary");
+    }
+
+    #[tokio::test]
+    async fn a_ref_resume_puts_the_resolved_graph_in_no_frame_output_or_debug() {
+        let (node, exec, _) = resuming_node(Answer::Graph);
+        let obs = Arc::new(Obs::default());
+        let out = node
+            .execute(
+                &resuming(ref_inputs("a1")),
+                &json!({}),
+                &mut json!({}),
+                Some(obs.clone()),
+            )
+            .await
+            .unwrap();
+        // The secret was in play: without this the checks below pass for a node
+        // that never resolved at all.
+        assert!(
+            matches!(exec.graph(), Some(ResumeGraph::Fresh(g)) if g.to_string().contains("sk-resolved-secret"))
+        );
+        assert!(obs.is_empty());
+        assert!(!out.to_string().contains("sk-resolved-secret"));
+        assert!(!format!("{:?}", exec.graph()).contains("sk-resolved-secret"));
     }
 }
 
