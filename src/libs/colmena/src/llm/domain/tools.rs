@@ -247,6 +247,15 @@ pub struct ToolCall {
     /// without its signature. `None` for providers/models that don't emit one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_signature: Option<String>,
+
+    /// This call's position (`k`) within the model message's `tool_calls`
+    /// list. Not part of the wire format — it is filled in by the engine
+    /// after parsing the LLM response, not sent or received from any
+    /// provider. `None` until that assignment happens. Existing solely as a
+    /// data holder in this task; later tasks in the parallel-tool-identity
+    /// arc populate it and use it to scope `parallel` tool execution.
+    #[serde(skip)]
+    pub scope_index: Option<usize>,
 }
 
 impl ToolCall {
@@ -258,6 +267,7 @@ impl ToolCall {
             function,
             response: None,
             provider_signature: None,
+            scope_index: None,
         }
     }
 }

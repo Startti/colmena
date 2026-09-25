@@ -250,6 +250,7 @@ mod tests {
             },
             response: None,
             provider_signature: None,
+            scope_index: None,
         }
     }
 

@@ -77,6 +77,7 @@ impl Graph {
     ///   a memory-bearing mode without a `connection_url` backend).
     /// - A malformed `mcp` block, or one whose URL is not HTTPS.
     /// - Malformed `node_schema` on any tool in `tool_configurations`.
+    /// - A `parallel` tool flag that is present but not a JSON boolean.
     ///
     /// Keep this list complete. `dag_engine lint` mirrors these gates one by one so it
     /// can report them before a run, and it reads this comment to know what is left —
@@ -147,6 +148,20 @@ impl Graph {
                             node_id: node_id.clone(),
                             tool_name: tool_name.clone(),
                             reason,
+                        });
+                    }
+                }
+
+                // D1 — `parallel` is opt-in per tool entry. When present it must
+                // be a JSON boolean; anything else (a string, a number, an
+                // object) is rejected at load rather than silently coerced or
+                // ignored at dispatch time. Absent → not parallel → skipped.
+                if let Some(parallel_value) = tool_cfg.get("parallel") {
+                    if !parallel_value.is_boolean() {
+                        return Err(DagError::InvalidToolSchema {
+                            node_id: node_id.clone(),
+                            tool_name: tool_name.clone(),
+                            reason: format!("'parallel' must be a boolean, got: {parallel_value}"),
                         });
                     }
                 }
@@ -449,6 +464,38 @@ mod tests {
             "edges": []
         }))
         .unwrap();
+        assert!(g.validate().is_ok());
+    }
+
+    /// D1 — `parallel` is opt-in per tool entry, and when present it must be a
+    /// JSON boolean. A string like `"yes"` must be rejected at load, with a
+    /// message that names both the field and the offending tool.
+    #[test]
+    fn validate_rejects_non_boolean_parallel() {
+        let g = graph_with_tool(json!({
+            "node_type": "subgraph",
+            "parallel": "yes"
+        }));
+        let err = g.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("parallel"),
+            "should name the field, got: {err}"
+        );
+        assert!(err.contains("docs"), "should name the tool, got: {err}");
+    }
+
+    #[test]
+    fn validate_accepts_boolean_parallel() {
+        let g = graph_with_tool(json!({
+            "node_type": "subgraph",
+            "parallel": true
+        }));
+        assert!(g.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_accepts_absent_parallel() {
+        let g = graph_with_tool(json!({ "node_type": "subgraph" }));
         assert!(g.validate().is_ok());
     }
 }

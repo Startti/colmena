@@ -315,11 +315,11 @@ fn node_schema_rejection(entry: &Value) -> Option<String> {
 /// The gates `Graph::validate` applies to a tool entry besides `node_schema`.
 ///
 /// `MALFORMED_TOOL_ENTRY` covered the `node_schema` arm; these are the other
-/// four, and each one rejects the WHOLE graph at load while the linter said
-/// nothing. Reported before a run for the same reason as the fifth: the trip is
+/// five, and each one rejects the WHOLE graph at load while the linter said
+/// nothing. Reported before a run for the same reason as the sixth: the trip is
 /// what a lint saves.
 ///
-/// Three of the four are existing domain functions and are CALLED, not copied —
+/// Three of the five are existing domain functions and are CALLED, not copied —
 /// the same choice `node_schema_rejection` makes. A reimplementation here would
 /// be free to drift from the gate it mirrors, and the drift would show up as a
 /// graph the linter blesses and the engine refuses, which is the exact failure
@@ -327,7 +327,9 @@ fn node_schema_rejection(entry: &Value) -> Option<String> {
 ///
 /// The first has no domain function: `graph.rs` deserializes `MemoryMode`
 /// inline. Deserializing the same way is the closest available equivalent, and
-/// it is one line rather than a rule.
+/// it is one line rather than a rule. The fifth (`parallel`, D1) has none
+/// either: `graph.rs` checks `is_boolean()` inline, so the linter reproduces
+/// that same one line.
 ///
 /// Yields `(field, reason)` so the caller can point at the offending key.
 fn other_validate_rejections(entry: &Value) -> Vec<(&'static str, String)> {
@@ -371,6 +373,21 @@ fn other_validate_rejections(entry: &Value) -> Vec<(&'static str, String)> {
     // Gate 4.
     if let Err(reason) = validate_mcp_config(node_type, entry) {
         found.push(("mcp", reason));
+    }
+
+    // Gate 5 — D1's `parallel` flag is opt-in; when present it must be a JSON
+    // boolean. Echoing the value is fine for the same reason Gate 1's echo is:
+    // `parallel` is a closed two-value slot, not a free-form author string.
+    if let Some(parallel_value) = entry.get("parallel") {
+        if !parallel_value.is_boolean() {
+            found.push((
+                "parallel",
+                format!(
+                    "'parallel' must be true or false, got: {}",
+                    compact(parallel_value)
+                ),
+            ));
+        }
     }
 
     found

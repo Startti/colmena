@@ -638,6 +638,21 @@ pub struct ToolConfiguration {
     /// (current behavior). Validated by [`ToolConfiguration::validate_memory_config`].
     #[serde(default)]
     pub memory_mode: MemoryMode,
+
+    /// Opt-in: every call of this tool gets its own identity. Its stream
+    /// boundary opens as `<tool>#<k>` (k = the call's index in the model's
+    /// `tool_calls` message) and the parent's tool-call frames carry
+    /// `childScope`, so two calls in one batch stay apart. Its memory is
+    /// keyed as before (`tool/<tool>/<thread>`). Absent → `false`.
+    /// `Graph::validate` rejects a value that is not a boolean.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub parallel: bool,
+}
+
+/// `skip_serializing_if` for an opt-in flag: an entry that never opted in
+/// serializes exactly as it did before the flag existed.
+fn is_false(flag: &bool) -> bool {
+    !*flag
 }
 
 impl ToolConfiguration {
