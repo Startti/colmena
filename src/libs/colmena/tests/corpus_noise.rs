@@ -142,7 +142,11 @@ fn measure() -> Measured {
 // Bumped 329 -> 330: adds tests/graphs/security/graph_edge_engine_keys_e2e.json
 // (engine-reserved keys an upstream output carries do not reach a node through a
 // field-less edge in graph mode). Lints clean.
-const EXPECTED_FILES: usize = 330;
+// Bumped 330 -> 331: adds tests/graphs/agents/parallel_tool_identity.json (one
+// model message calls a `parallel` tool twice and a plain one once; run by
+// `src/libs/colmena/tests/parallel_tool_identity.rs` with a scripted model).
+// Lints clean.
+const EXPECTED_FILES: usize = 331;
 const EXPECTED_ERRORS: usize = 0;
 const EXPECTED_WARNINGS: usize = 0;
 const EXPECTED_INFOS: usize = 0;
