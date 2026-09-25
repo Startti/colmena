@@ -550,8 +550,9 @@ cierran la fila del hijo como `FAILED`.
 **Desde v0.19 la fila guarda solo el esqueleto.** `dag_runs.graph_json` guarda
 `GraphSkeleton::at_rest_json(&graph)`: los ids con su `type` y las aristas, sin
 `config`. Ninguna clave de proveedor llega a `graph_json`, y el resume no pierde nada
-porque solo compara esqueletos. Ojo: `global_shared_state.__graph_nodes` guarda otra
-copia de la `config` de cada nodo, y esta entrada no la toca. La válvula que existió en v0.18,
+porque solo compara esqueletos. `global_shared_state.__graph_nodes`, que guardaba otra
+copia de la `config` de cada nodo, guarda desde v0.19 solo su `description`, que es
+lo único que lee el planner. La válvula que existió en v0.18,
 `COLMENA_SUBGRAPH_RESUME_GRAPH=stored`, ya no existe: volvía a correr la copia
 guardada, y esa copia ya no tiene config con qué correr.
 

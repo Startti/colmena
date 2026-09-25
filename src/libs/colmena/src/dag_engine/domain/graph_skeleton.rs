@@ -51,7 +51,7 @@ impl GraphSkeleton {
     /// Everything [`GraphSkeleton::of`] ignores — `config` with the resolved
     /// keys, `timezone`/`location`/`locale`, `trigger_on`, the call limits —
     /// never reaches `dag_runs.graph_json`. (`global_shared_state.__graph_nodes`
-    /// is a separate copy of each node's config.) `cyclic` is written only when true, which
+    /// keeps only each node's `description`.) `cyclic` is written only when true, which
     /// `of` reads the same as absent. ADP's backfill writes this exact shape;
     /// `tests/fixtures/at_rest/` pins it on both sides.
     pub fn at_rest_json(graph: &Graph) -> Value {
