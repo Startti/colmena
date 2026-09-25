@@ -4607,3 +4607,45 @@ nada. Corpus: 329 archivos, 0/0/0.
 se ignoraba. Documentado en `docs/node_configurations.json`,
 `docs/node_as_tools_reference.json` y en la lista de compuertas de `Graph::validate()` de
 las guías 48, 49 y 51.
+
+## 86. Una llamada a una tool `parallel` abre su frontera como `<tool>#<k>`
+
+**Qué cambió.**
+- `agent_service` le pone a cada llamada su k (`ToolCall.scope_index`, su índice en el
+  mensaje `tool_calls` del modelo) antes de despacharla, también a la que contesta el guard
+  de repetición.
+- Con streaming, las llamadas se ordenan por el índice del proveedor antes de persistirlas y
+  despacharlas; antes salían en el orden de un `HashMap`. Vale para toda tool.
+- `ToolExecutor::child_scope`, `None` por defecto. En `DagToolExecutor` es `<tool>#<k>`
+  cuando la entrada tiene `"parallel": true` y la llamada trae k. Encuentra la entrada con
+  `configured_tool` (clave del mapa y después `name`), el mismo helper que ahora usa el paso
+  1 del despacho.
+- Ese nombre va a `__colmena_tool_name` (la frontera de un `subgraph`) y a la frontera y al
+  `ChildScopeObserver` que el ejecutor abre para `llm_call` y `for_each`. La memoria sigue en
+  `tool/<tool>/<thread>`.
+
+Los frames de la tool todavía no dicen qué frontera abrió cada llamada. Una tool sin
+`parallel` abre la frontera con el nombre pelado, como antes. Las llamadas siguen en serie.
+
+**Tests.** 9 en la lib, 2866 passed (2857 antes):
+- 7 en `dag_tool_executor::parallel_identity_tests`: el scope con y sin opt-in y sin k, la
+  entrada encontrada por `name`, la frontera de un `subgraph` con la memoria intacta, y un
+  `llm_call` como tool. Su nodo de prueba emite un token, y el test exige que llegue sellado
+  `Helper#3` entre la apertura y el cierre de la frontera.
+- 2 en `agent_service`: seis llamadas que llegan por stream en orden `[1,0,5,3,2,4]` corren
+  y se persisten en orden de índice, cada una con su k; la que contesta el guard de
+  repetición también trae su k.
+
+**Mutación.** 7, rojas y revertidas: sin el filtro de `parallel`; la frontera del
+`llm_call` con el nombre pelado; sin su `ChildScopeObserver` (el token no llega) o con él
+bajo el nombre pelado (llega sellado `Helper`); la memoria keyada por el scope; sin ordenar
+por índice (corren `c2, c4, c3, c5, c1, c0`); y `agent_service` sin k (caen los 2).
+
+**E2E.** Corrida ad hoc, sin commitear, de un `ColmenaEngine` real contra Postgres con el
+grafo de dos tools `subgraph` y un modelo guionado que pide `Run`, `Nota` y `Run` en un solo
+mensaje (`Run` con `parallel`): las fronteras salen `agent>Run#0`, `agent>Nota` y
+`agent>Run#2`, en serie, y ningún frame trae `childScope`.
+
+**ADP.** Nada que hacer: ADP todavía no emite `parallel`, y no debe emitirlo hasta que los
+frames de la tool nombren su frontera. Actualizados `docs/node_configurations.json` y
+`docs/node_as_tools_reference.json`.
