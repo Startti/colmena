@@ -250,6 +250,35 @@ pub(crate) fn resolve_synthetic_enabled_tools<'a>(
     (wants, excludes)
 }
 
+/// Pairs each of the parent's tool-call frames with the child scope its call
+/// opened under (`ToolExecutor::child_scope`).
+///
+/// `LlmToolCallStart` has the whole call, so it asks the executor.
+/// `LlmToolCallFinish` has only the call id, so it reads back what its start
+/// recorded. The stream callback is a shared `Fn`, hence the lock.
+#[derive(Clone, Default)]
+struct ToolCallScopes(Arc<std::sync::Mutex<HashMap<String, String>>>);
+
+impl ToolCallScopes {
+    /// The scope `call` opens under, remembered for its finish.
+    fn open(
+        &self,
+        executor: &dyn ToolExecutor,
+        call: &crate::llm::domain::ToolCall,
+    ) -> Option<String> {
+        let scope = executor.child_scope(call)?;
+        if let Ok(mut open) = self.0.lock() {
+            open.insert(call.id.clone(), scope.clone());
+        }
+        Some(scope)
+    }
+
+    /// The scope the call `tool_call_id` opened under, if it opened one.
+    fn close(&self, tool_call_id: &str) -> Option<String> {
+        self.0.lock().ok()?.remove(tool_call_id)
+    }
+}
+
 /// Walk a message history and return the first `ToolCall` from the latest
 /// `Assistant` message-with-tool_calls that has NO matching `Tool` message
 /// (by `tool_call_id`) appearing later in the list.
@@ -258,10 +287,11 @@ pub(crate) fn resolve_synthetic_enabled_tools<'a>(
 /// `__colmena_resume_answer`, the previous run persisted an assistant message
 /// containing the SUSPENDED tool call but did not persist a tool result for it.
 /// This function returns that pending call so the executor can dispatch it
-/// with the resume answer.
+/// with the resume answer, together with its index in that assistant message
+/// (its `k`, see `ToolCall::scope_index`).
 fn find_pending_tool_call(
     messages: &[crate::llm::domain::LlmMessage],
-) -> Option<crate::llm::domain::ToolCall> {
+) -> Option<(usize, crate::llm::domain::ToolCall)> {
     use crate::llm::domain::MessageRole;
 
     // Collect every tool_call_id that already has a Tool message somewhere in
@@ -280,14 +310,26 @@ fn find_pending_tool_call(
             continue;
         }
         if let Some(calls) = msg.tool_calls() {
-            for call in calls {
+            for (index, call) in calls.iter().enumerate() {
                 if !resolved.contains(call.id.as_str()) {
-                    return Some(call.clone());
+                    return Some((index, call.clone()));
                 }
             }
         }
     }
     None
+}
+
+/// The pending call, ready to run again with the k it had in its message
+/// (`ToolCall::scope_index`), so a `parallel` tool's child reopens under the
+/// same `<tool>#<k>` it suspended under.
+fn pending_call_to_resume(
+    messages: &[crate::llm::domain::LlmMessage],
+) -> Option<crate::llm::domain::ToolCall> {
+    find_pending_tool_call(messages).map(|(index, mut call)| {
+        call.scope_index = Some(index);
+        call
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -2420,6 +2462,9 @@ impl ExecutableNode for LlmNode {
             }
             executor
         };
+        // Behind an `Arc`: the stream callback below keeps a handle to read each
+        // call's child scope (`ToolExecutor::child_scope`).
+        let tool_executor = Arc::new(tool_executor);
 
         // Create AgentService
         // Note: AgentService expects Arc<dyn ConversationRepository>.
@@ -2483,7 +2528,7 @@ impl ExecutableNode for LlmNode {
         // receives the resolved tool result and continues.
         if let Some(answer) = resume_answer.as_deref() {
             let conversation = conversation_repo.get_by_id(&conversation_key).await?;
-            let maybe_pending = find_pending_tool_call(&conversation.messages);
+            let maybe_pending = pending_call_to_resume(&conversation.messages);
             // Single dispatch point for the resume decision; the `if let` below
             // only unwraps what this match already resolved.
             let pending_to_replay =
@@ -3331,6 +3376,8 @@ impl ExecutableNode for LlmNode {
         let on_token: Option<Box<dyn Fn(LlmStreamPart) + Send + Sync>> =
             if let Some(obs) = observer_for_stream {
                 let reasoning_id = current_reasoning_id.clone();
+                let scope_executor = tool_executor.clone();
+                let scopes = ToolCallScopes::default();
                 Some(Box::new(move |part: LlmStreamPart| {
                     use crate::dag_engine::domain::observer::NodeEvent;
                     match part {
@@ -3377,10 +3424,12 @@ impl ExecutableNode for LlmNode {
                             })
                         }
                         LlmStreamPart::LlmToolCallStart(tc) => {
+                            let child_scope = scopes.open(scope_executor.as_ref(), &tc);
                             obs.on_event(NodeEvent::LlmToolCallStart {
                                 tool_id: tc.id.clone(),
                                 tool_name: tc.function.name.clone(),
                                 tool_args: tc.function.arguments.clone(),
+                                child_scope,
                             })
                         }
                         LlmStreamPart::LlmToolCallFinish(res) => {
@@ -3388,6 +3437,7 @@ impl ExecutableNode for LlmNode {
                                 tool_id: res.tool_call_id.clone(),
                                 success: res.success,
                                 output: res.output.clone(),
+                                child_scope: scopes.close(&res.tool_call_id),
                             });
                         }
                         LlmStreamPart::LlmMessageStart => obs.on_event(NodeEvent::LlmMessageStart),
@@ -3481,7 +3531,7 @@ impl ExecutableNode for LlmNode {
                 messages: None,
                 config: llm_config,
                 tools,
-                tool_executor: &tool_executor,
+                tool_executor: tool_executor.as_ref(),
                 max_tool_repeats: Some(max_tool_repeats),
                 max_turns: None,
                 on_token,
@@ -3505,7 +3555,7 @@ impl ExecutableNode for LlmNode {
                 messages: Some(messages.clone()),
                 config: llm_config,
                 tools,
-                tool_executor: &tool_executor,
+                tool_executor: tool_executor.as_ref(),
                 max_tool_repeats: Some(max_tool_repeats),
                 max_turns: None,
                 on_token,
@@ -4917,7 +4967,7 @@ mod find_pending_tool_call_tests {
             LlmMessage::assistant_with_tool_calls("".to_string(), vec![tc("call_xyz", "ask")])
                 .unwrap(),
         ];
-        let pending = find_pending_tool_call(&messages).expect("must find one");
+        let (_, pending) = find_pending_tool_call(&messages).expect("must find one");
         assert_eq!(pending.id, "call_xyz");
         assert_eq!(pending.function.name, "ask");
     }
@@ -4945,7 +4995,7 @@ mod find_pending_tool_call_tests {
             LlmMessage::assistant_with_tool_calls("".to_string(), vec![tc("call_b", "ask_b")])
                 .unwrap(),
         ];
-        let pending = find_pending_tool_call(&messages).expect("must find one");
+        let (_, pending) = find_pending_tool_call(&messages).expect("must find one");
         assert_eq!(pending.id, "call_b");
     }
 
@@ -4966,8 +5016,92 @@ mod find_pending_tool_call_tests {
             .unwrap(),
             LlmMessage::tool("call_b".to_string(), "result_b".to_string()).unwrap(),
         ];
-        let pending = find_pending_tool_call(&messages).expect("must find one");
+        let (_, pending) = find_pending_tool_call(&messages).expect("must find one");
         assert_eq!(pending.id, "call_a");
+    }
+
+    /// The resume re-runs the pending call with the k it had when the model
+    /// asked for it: its index in its own assistant message, not in the
+    /// history and not among the unresolved calls.
+    #[test]
+    fn reports_the_index_of_the_pending_call_in_its_message() {
+        let messages = vec![
+            LlmMessage::assistant_with_tool_calls("".to_string(), vec![tc("old", "ask")]).unwrap(),
+            LlmMessage::tool("old".to_string(), "done".to_string()).unwrap(),
+            LlmMessage::assistant_with_tool_calls(
+                "".to_string(),
+                vec![
+                    tc("call_a", "Run"),
+                    tc("call_b", "Run"),
+                    tc("call_c", "Run"),
+                ],
+            )
+            .unwrap(),
+            LlmMessage::tool("call_a".to_string(), "result_a".to_string()).unwrap(),
+        ];
+        let (index, pending) = find_pending_tool_call(&messages).expect("must find one");
+        assert_eq!((index, pending.id.as_str()), (1, "call_b"));
+        let resumed = pending_call_to_resume(&messages).expect("must find one");
+        assert_eq!(
+            (resumed.id.as_str(), resumed.scope_index),
+            ("call_b", Some(1))
+        );
+    }
+}
+
+#[cfg(test)]
+mod tool_call_scope_tests {
+    use super::*;
+    use crate::llm::domain::{FunctionCall, LlmError, ToolCall, ToolDefinition, ToolResult};
+
+    /// Scopes calls of `Run` the way a `parallel` entry does; nothing else.
+    struct ScopingExec;
+    #[async_trait]
+    impl ToolExecutor for ScopingExec {
+        async fn execute(&self, _call: &ToolCall) -> Result<ToolResult, LlmError> {
+            unreachable!("scopes are read, never executed")
+        }
+        async fn available_tools(&self) -> Vec<ToolDefinition> {
+            vec![]
+        }
+        fn child_scope(&self, call: &ToolCall) -> Option<String> {
+            (call.function.name == "Run").then(|| format!("Run#{}", call.scope_index.unwrap()))
+        }
+    }
+
+    fn call(id: &str, name: &str, k: usize) -> ToolCall {
+        let mut c = ToolCall::new(id.into(), FunctionCall::new(name.into(), "{}".into()));
+        c.scope_index = Some(k);
+        c
+    }
+
+    #[test]
+    fn a_finish_carries_the_scope_its_start_opened() {
+        let scopes = ToolCallScopes::default();
+        assert_eq!(
+            scopes.open(&ScopingExec, &call("c1", "Run", 1)).as_deref(),
+            Some("Run#1")
+        );
+        assert_eq!(scopes.close("c1").as_deref(), Some("Run#1"));
+    }
+
+    /// Two calls open at once each keep their own scope, whatever order they
+    /// finish in.
+    #[test]
+    fn open_calls_keep_their_own_scopes() {
+        let scopes = ToolCallScopes::default();
+        scopes.open(&ScopingExec, &call("c0", "Run", 0));
+        scopes.open(&ScopingExec, &call("c1", "Run", 1));
+        assert_eq!(scopes.close("c1").as_deref(), Some("Run#1"));
+        assert_eq!(scopes.close("c0").as_deref(), Some("Run#0"));
+    }
+
+    #[test]
+    fn a_call_that_opened_no_scope_finishes_without_one() {
+        let scopes = ToolCallScopes::default();
+        assert_eq!(scopes.open(&ScopingExec, &call("c1", "Search", 0)), None);
+        assert_eq!(scopes.close("c1"), None);
+        assert_eq!(scopes.close("never-started"), None);
     }
 }
 

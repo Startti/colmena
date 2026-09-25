@@ -414,6 +414,7 @@ impl ExecutableNode for StuckToolNode {
                 tool_id: "call_1".to_string(),
                 tool_name: "stuck_tool".to_string(),
                 tool_args: "{}".to_string(),
+                child_scope: None,
             });
         }
         tokio::time::sleep(Duration::from_secs(30)).await;
