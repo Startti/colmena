@@ -27,7 +27,7 @@ El corazón de Colmena es el `DagRunUseCase`. Su función principal es transform
 
 ### El Ciclo de Ejecución (`execute_stream`)
 Cuando se inicia un grafo, el motor sigue estos pasos:
-1.  **Carga de Estado**: Si se pasa un `resume_id`, recupera el estado anterior de Postgres. Si no, inicializa una cola con los nodos que no tienen dependencias de entrada.
+1.  **Carga de Estado**: Si se pasa un `resume_id`, recupera el estado anterior de Postgres; retoma su cola solo si la fila quedó `SUSPENDED` (una `CANCELLED` o `FAILED` conserva outputs y estado pero no su cola — ver la sección Hard Stop de [§12](12_dag_engine_guide.md)). Si no hay cola que retomar, inicializa una con los nodos que no tienen dependencias de entrada.
 2.  **Bucle de Eventos**: Mientras haya nodos en la cola (`active_queue`):
     - **Validación de Entradas**: Verifica si todos los nodos predecesores han terminado y entregado sus datos.
     - **Construcción de Inputs**: Recolecta los datos de salida de los nodos padres usando **JSON Pointers** definidos en los `edges`.

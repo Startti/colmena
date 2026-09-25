@@ -4446,3 +4446,56 @@ también reduce `__graph_nodes` en las filas viejas. Actualizados: guía 19 («R
 con el grafo actual»), `docs/developer_guide/30_database_schema.md` (`graph_json` y
 `global_shared_state`) y el README del E2E. **Tag `colmena_dag_engine-v0.19.0`**
 después de esta entrada.
+
+## 84. Fix: un turno detenido ya no vuelve a correr su cola en el turno siguiente
+
+**El bug.** Reportado por ADP (sesión `cmufruoxp000n01s68novaivi`, 2026-09-24): el
+usuario detuvo un turno y escribió «procede con el plan», y el LLM raíz recibió el
+mensaje anterior. ADP manda en cada turno el `session_id` del run del chat, así que cada
+turno entra por la rama 1 de `execute_stream` (resume directo por id), que tomaba
+`active_queue` de la fila sin mirar `status`. Un turno cancelado a mitad de un nodo guarda
+`CANCELLED` con la cola `[nodo en vuelo, …]` y los outputs del turno, el del nodo de
+entrada con el mensaje viejo incluido. El turno siguiente arrancaba por esa cola: el nodo
+de entrada no corría y el LLM se armaba con el mensaje viejo de `all_outputs`. Con
+`COMPLETED` no pasaba porque la cola queda vacía. La fila `FAILED` que deja el watchdog de
+inactividad guarda la cola igual y daba el mismo efecto.
+
+**Qué cambió.** `DagRunUseCase::resumes_from_stored_queue` decide cada `DagRunStatus` sin
+comodín. `SUSPENDED` retoma su cola, como antes. `COMPLETED` y `RUNNING` se guardan con la
+cola vacía y quedan como estaban. `CANCELLED` y `FAILED` no la retoman: el turno arranca
+desde los nodos de entrada, como después de `COMPLETED`, y el resto de la fila (outputs,
+estado compartido, historial, contadores) se conserva como antes. Para esas filas tampoco
+se calcula `resuming_node_ids`: un `__colmena_status: "SUSPENDED"` que quedó en los
+outputs (un turno que respondió una pregunta y se detuvo antes de que su nodo volviera a
+correr, p. ej. un Stop durante el pre-flight) ya no recibe el `answer` de un turno
+posterior. La rama 2 (`find_resume_entry`) ya filtraba `SUSPENDED`.
+
+**Tests.** 5 en `run_use_case.rs` (`stored_run_status_tests`). Cada estado guardado lo
+escribe el motor en un turno anterior; ninguno es una fila armada a mano. En rojo antes
+del fix:
+- tras un `CANCELLED` (Stop con el LLM en vuelo) el LLM recibía `"old prompt"`;
+- tras un `FAILED` (watchdog) también;
+- el marcador viejo recibía el `answer` `"otra"`.
+
+En verde antes y después: un `SUSPENDED` retoma su cola con el `answer`, y tras un
+`COMPLETED` el turno arranca por la entrada. `cargo test` completo: 3059 passed,
+0 failed, 146 ignorados.
+
+**Mutación.** 4, rojas y revertidas:
+- tomar la cola sin mirar el estado → los 3 rojos;
+- calcular los marcadores sin mirar el estado → el del marcador;
+- `SUSPENDED` como detenido → la guarda de `SUSPENDED`;
+- `FAILED` como retomable → el de `FAILED`.
+
+**E2E.** `tests/graphs/basic/stopped_turn_fresh_queue.json` por el CLI contra un Postgres
+local, en dos turnos con el mismo `--session-id` (el turno 2 se deriva con `jq`, como dice
+el `comment` del grafo). El Stop no se puede disparar desde el CLI; el camino `FAILED`
+sí, con `COLMENA_IDLE_TIMEOUT_SECS=2`. En los dos binarios el
+turno 1 deja la fila `FAILED` con la cola `["modelo"]`. En el turno 2:
+- sin el fix (develop `78177dfc`), el SSE empieza en `modelo`, sin nodo de entrada como el
+  árbol del reporte, y devuelve `{"vio": "mensaje viejo"}`;
+- con el fix, empieza en `entrada` y devuelve `{"vio": "mensaje nuevo"}`; la fila queda
+  `COMPLETED` con el mensaje nuevo en `all_outputs.entrada`.
+
+**ADP.** Sin cambio de contrato; basta con subir el motor. Tras un Stop, el turno
+siguiente vuelve a emitir los frames del nodo de entrada, como cualquier turno.
