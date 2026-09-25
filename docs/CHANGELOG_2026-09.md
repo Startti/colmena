@@ -4307,3 +4307,88 @@ actualizada (ya no dice que un resume no vuelve a llamar al resolvedor). Guía 1
 runs») y `docs/qa/nodes/subgraph.md` (hallazgo cerrado) pierden sus tres
 menciones de «hasta un PR posterior»; `docs/developer_guide/30_database_schema.md`
 y `docs/node_as_tools_reference.json` igual.
+
+## 82. Una fila de `dag_runs` guarda solo el esqueleto del grafo
+
+Paso 1 de 2 del diseño de secretos en reposo (Startti/adp,
+`docs/superpowers/specs/2026-09-25-secretos-en-reposo-dag-runs-design.md`, D1, D3 y D6).
+**Comportamiento observable y rompe la API de Rust.**
+
+**Qué cambió.**
+- **La forma en reposo.** `GraphSkeleton::at_rest_json(&Graph) -> Value` (en
+  `domain/graph_skeleton.rs`) da lo único que una fila guarda del grafo:
+  `{"nodes": {id: {"type"}}, "edges": [{"from", "to", "cyclic"?}]}`. `cyclic` va solo
+  cuando es `true`. No van `config` (con las claves de proveedor ya resueltas),
+  `timezone`, `location`, `locale`, `trigger_on` ni los topes de llamadas.
+- **Los seis escritores la usan.** Antes todos hacían `serde_json::to_value(&graph)`:
+  - el arranque de un hijo (`run_subgraph`);
+  - las dos cancelaciones;
+  - el watchdog;
+  - el suspend;
+  - el fin.
+
+  Vale para la raíz y para el hijo. Desde la entrada 78, el resume de un hijo solo lee
+  el esqueleto guardado, y la raíz nunca leyó su `graph_json`.
+- **El puerto pierde `ResumeGraph::Stored`** y salen la válvula
+  `COLMENA_SUBGRAPH_RESUME_GRAPH=stored`, `stored_resume_valve` y `valve_is_stored`.
+  Ya no hay un grafo guardado que se pueda correr. **Rompe al compilar** a un
+  embebedor que construya `Stored`.
+- **`plan_resume` parsea el guardado solo en `Fresh`**, con el mismo error de antes si
+  no se lee.
+- **Un par de fixtures fija la forma**: `src/libs/colmena/tests/fixtures/at_rest/graph.json`
+  y `graph.at_rest.json`. ADP copia los dos para su backfill.
+
+**Tests.**
+- 3 nuevos en `graph_skeleton` (TDD, en rojo primero):
+  - igual al fixture;
+  - sin nada secreto: ni el centinela, ni `config`, ni el contexto del grafo, ni los
+    topes, ni `"cyclic":false`;
+  - vuelve a parsear con el mismo esqueleto, sobre el fixture y sobre `base()`.
+- `a_row_kept_at_rest_resumes_with_the_fresh_graph` reemplaza a
+  `stored_resumes_with_the_graph_the_row_kept`: una fila en reposo se reanuda con el
+  fresco (`stamp` v2), y la fila que queda al terminar está en reposo otra vez.
+- `an_unparsable_stored_graph_is_todays_error_and_does_not_close_the_row` pasa
+  `Fresh`: el guardado se parsea primero también ahí.
+- Salen los dos tests de la válvula.
+- `cargo test -p colmena_dag_engine --lib`: 2843 passed, 0 failed, 74 ignorados. Son +1 neto contra `develop`: +4 nuevos, −1 reemplazado y −2 de la válvula.
+
+**Mutación.** Cada una por separado, en rojo y revertida:
+1. conservar `config` en `at_rest_json` → rojo en el fixture y en «nada secreto»;
+2. escribir siempre `"cyclic": e.cyclic` → rojo en el fixture y en «nada secreto»;
+3. perder `cyclic: true` → rojo en el fixture y en «vuelve a parsear»;
+4. volver a `to_value(&graph)` en el escritor del fin → rojo en
+   `a_row_kept_at_rest_resumes_with_the_fresh_graph`.
+
+**E2E.** Determinista, sin LLM, contra Postgres local (`colmena_e2e_rest`, con las
+migraciones del crate), sobre `tests/graphs/advanced/subgraph_resume_fresh_graph/`
+(corrida 3 de su README, que reemplaza a la de la válvula).
+- **Montaje.** Se siembra un centinela `sk-e2e-at-rest-sentinel-…` en la config de
+  `fin` del hijo. Turno 1 suspende; turno 2 con `--answer` y `SELLO=v2`.
+- **Capturas** en `/tmp/colmena_e2e/graph_at_rest_{pr1,v018,rollback}_{1,2}.sse`.
+
+Columnas del `SELECT` sobre las filas de la raíz y del hijo: estado · centinela en
+`graph_json` · `"config"` en `graph_json` · centinela en `global_shared_state` ·
+centinela en `all_outputs`.
+
+| Binario | Turno 1 | Turno 2 | `sello` |
+|---|---|---|---|
+| Esta entrada | `SUSPENDED\|f\|f\|t\|f` | `COMPLETED\|f\|f\|t\|f` | `{"sello":"SELLO=v2"}` |
+| Línea base, tag v0.18.0 | `SUSPENDED\|t\|t\|t\|f` | `COMPLETED\|t\|t\|t\|f` | `{"sello":"SELLO=v2"}` |
+
+- `global_shared_state` todavía trae el centinela por `__graph_nodes`. Eso lo cierra
+  el paso 2 de esta cadena.
+- **Rollback medido:** el turno 1 con este binario (filas sin config) y el turno 2 con
+  el de v0.18.0 → `{"sello":"SELLO=v2"}`, las dos filas `COMPLETED`.
+
+Gates:
+- `cargo test` completo (workspace): 3052 passed, 0 failed, 146 ignorados;
+- `cargo clippy --all-targets -- -D warnings` limpio;
+- lint del corpus: 328 archivos, 0/0/0. `check_doc_links`, `check_doc_counts` y `check_hexagonal_documents` en verde.
+
+**ADP.** [Nota de migración](adp_migration/2026-09-25-graph-at-rest.md): no hay cambio
+de código, y después del deploy se corre el backfill de las filas viejas. **No fijar la
+válvula en v0.18 una vez desplegado v0.19.**
+- Guía 19 («Reanudar con el grafo actual»): el párrafo de la válvula pasa a ser el de la
+  fila en reposo, con la compatibilidad.
+- `docs/developer_guide/30_database_schema.md` (`graph_json`), `docs/qa/nodes/subgraph.md`
+  y la nota `2026-09-24-subgraph-resume-fresh-graph.md` actualizados.

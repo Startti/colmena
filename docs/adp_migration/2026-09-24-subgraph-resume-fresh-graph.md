@@ -55,7 +55,9 @@ de v0.16.
   (por router, con `router branch '<rama>': ` delante — vuelve a elegir su rama en cada resume).
 - Ningún frame SSE nuevo. Un run suspendido por v0.16 se reanuda fresco sin
   migración; un worker v0.16 que tome un resume corre la copia guardada (volver
-  atrás es seguro). Válvula: `COLMENA_SUBGRAPH_RESUME_GRAPH=stored`.
+  atrás es seguro). Válvula: `COLMENA_SUBGRAPH_RESUME_GRAPH=stored`, que **ya no
+  existe desde v0.19** y no se debe fijar en v0.18 una vez que v0.19 escribió filas
+  (ver [El grafo en reposo](2026-09-25-graph-at-rest.md)).
 
 ## Desde la entrada 81: un `child_graph_ref` vuelve a pedir su grafo
 
@@ -69,7 +71,8 @@ de v0.16.
   `CHILD_GRAPH_RESOLVE_FAILED:<code>:` **después** de la respuesta; un agente editado sin
   cambiar su forma se reanuda con la versión nueva; con otra forma,
   `SUBGRAPH_RESUME_INCOMPATIBLE:`. La fila del hijo queda `FAILED` en los dos casos.
-- La válvula `COLMENA_SUBGRAPH_RESUME_GRAPH=stored` también apaga esto.
+- La válvula `COLMENA_SUBGRAPH_RESUME_GRAPH=stored` también apaga esto (solo en v0.18;
+  en v0.19 no existe).
 
 ## Qué se rompe si se ignora
 

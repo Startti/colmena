@@ -109,8 +109,9 @@ frames SSE nuevos de ningún tipo: ver
 **Hallazgo (cerrado)**: hasta CHANGELOG entrada 77 el resume pasaba siempre
 `ResumeGraph::Stored` (la copia guardada en `dag_runs.graph_json`), así que un
 cambio de config en el padre no llegaba al hijo hasta que corriera de cero. Desde
-la entrada 78 el resume re-deriva; la válvula `COLMENA_SUBGRAPH_RESUME_GRAPH=stored`
-vuelve al comportamiento anterior si hace falta.
+la entrada 78 el resume re-deriva. Desde v0.19 la fila guarda solo el esqueleto
+(`GraphSkeleton::at_rest_json`), así que ya no hay copia guardada a la que volver:
+la válvula `COLMENA_SUBGRAPH_RESUME_GRAPH=stored` se quitó.
 
 ---
 

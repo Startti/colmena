@@ -547,15 +547,19 @@ resolvedor lo rechazó antes—; uno republicado con otra forma sí llega a comp
 falla con `SUBGRAPH_RESUME_INCOMPATIBLE:` como cualquier otra fuente. Los dos
 cierran la fila del hijo como `FAILED`.
 
-`COLMENA_SUBGRAPH_RESUME_GRAPH=stored` es la válvula de emergencia: con ella fijada
-(se lee una vez por proceso, como `COLMENA_MAX_SUBGRAPH_DEPTH`), todo resume vuelve
-al comportamiento de hasta v0.16 — la copia guardada en `dag_runs.graph_json`, sin
-comparar esqueletos —. Sirve para apagar la verificación si algo se comporta
-distinto de lo esperado en producción, sin tener que revertir el release. Un run que
-quedó `SUSPENDED` bajo un worker v0.16 se reanuda con el grafo fresco sin ninguna
-migración de datos: la columna `graph_json` no cambia de forma, solo deja de ser lo
-único que un resume mira. Volver atrás (un worker v0.16 tomando un resume escrito
-por este) también es seguro: corre la copia guardada, como siempre hizo.
+**Desde v0.19 la fila guarda solo el esqueleto.** `dag_runs.graph_json` guarda
+`GraphSkeleton::at_rest_json(&graph)`: los ids con su `type` y las aristas, sin
+`config`. Ninguna clave de proveedor llega a la base, y el resume no pierde nada
+porque solo compara esqueletos. La válvula que existió en v0.18,
+`COLMENA_SUBGRAPH_RESUME_GRAPH=stored`, ya no existe: volvía a correr la copia
+guardada, y esa copia ya no tiene config con qué correr.
+
+Compatibilidad:
+- **Una fila escrita por v0.18 o antes** tiene el grafo entero. El esqueleto se
+  calcula igual, sin migrar datos.
+- **Volver de v0.19 a v0.18 es seguro**, porque v0.18 también reanuda con el grafo
+  fresco. La condición es no fijar la válvula en v0.18: correría un grafo sin config.
+- **Por debajo de v0.18, no:** esas versiones reanudan con la copia guardada.
 
 ### Requisito: `connection_url` en cada `llm_call` que participe del HITL
 
