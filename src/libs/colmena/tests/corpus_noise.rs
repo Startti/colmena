@@ -139,7 +139,10 @@ fn measure() -> Measured {
 // Bumped 328 -> 329: adds tests/graphs/basic/stopped_turn_fresh_queue.json (a turn
 // the idle watchdog stopped is not resumed by the next one under the same
 // session id; turn 2 is derived with jq, per the graph's `comment`). Lints clean.
-const EXPECTED_FILES: usize = 329;
+// Bumped 329 -> 330: adds tests/graphs/security/graph_edge_engine_keys_e2e.json
+// (engine-reserved keys an upstream output carries do not reach a node through a
+// field-less edge in graph mode). Lints clean.
+const EXPECTED_FILES: usize = 330;
 const EXPECTED_ERRORS: usize = 0;
 const EXPECTED_WARNINGS: usize = 0;
 const EXPECTED_INFOS: usize = 0;

@@ -1530,7 +1530,7 @@ mod session_attachment_tests {
 
     /// `s1` owns `doc-1 → k1` and `s2` owns `doc-2 → k2`. Storage streams both
     /// keys, so a raw key WOULD be readable; `read` has no expectation at all.
-    async fn run(body: Value, sid: Option<&str>, extra: Value, server: &MockServer) -> String {
+    async fn node() -> HttpNode {
         let reg = SqliteAttachmentRegistry::new("sqlite::memory:")
             .await
             .unwrap();
@@ -1567,10 +1567,13 @@ mod session_attachment_tests {
         let storage: Arc<dyn OutputStorageRepository> = Arc::new(storage);
         let reg: Arc<dyn AttachmentRegistry> = Arc::new(reg);
         let resolver = Arc::new(AttachmentStreamResolverImpl::new(reg, storage.clone()));
-        let node = HttpNode::new()
+        HttpNode::new()
             .with_storage(storage)
-            .with_attachment_resolver(resolver);
+            .with_attachment_resolver(resolver)
+    }
 
+    async fn run(body: Value, sid: Option<&str>, extra: Value, server: &MockServer) -> String {
+        let node = node().await;
         let mut config = json!({ "base_url": server.uri(), "endpoint": "/", "method": "POST" });
         config
             .as_object_mut()
@@ -1641,6 +1644,77 @@ mod session_attachment_tests {
         let body = json!({ "file": "$attachment:k1" });
         let out = run(body, Some("s1"), multipart, &untouched_server().await).await;
         assert!(out.contains("attachment not found"), "{out}");
+    }
+
+    /// Graph mode, as when a `trigger_webhook` (or a model's JSON) feeds
+    /// http_request through a field-less edge: the payload's keys are
+    /// flattened into the node's inputs, and this payload names
+    /// `__colmena_agent_session_id` = `s2`. Returns the run's error, if any.
+    async fn run_graph(sid: Option<&str>, doc: &str, server: &MockServer) -> Option<String> {
+        use crate::dag_engine::application::ports::NodeRegistryPort;
+        use crate::dag_engine::application::run_use_case::DagRunUseCase;
+        use crate::dag_engine::infrastructure::nodes::trigger::TriggerWebhookNode;
+        use futures::StreamExt;
+
+        struct Nodes(Arc<HttpNode>);
+        impl NodeRegistryPort for Nodes {
+            fn get_node(&self, node_type: &str) -> Option<Arc<dyn ExecutableNode>> {
+                match node_type {
+                    "trigger_webhook" => Some(Arc::new(TriggerWebhookNode)),
+                    "http_request" => Some(self.0.clone()),
+                    _ => None,
+                }
+            }
+            fn get_all_nodes(&self) -> HashMap<String, Arc<dyn ExecutableNode>> {
+                HashMap::new()
+            }
+        }
+        let payload = json!({
+            "__colmena_agent_session_id": "s2",
+            "body": { "image_url": format!("$attachment:{doc}") },
+        });
+        let post = json!({ "base_url": server.uri(), "endpoint": "/", "method": "POST" });
+        let graph = serde_json::from_value(json!({
+            "nodes": {
+                "hook": { "type": "trigger_webhook", "config": { "test_payload": payload } },
+                "post": { "type": "http_request", "config": post },
+            },
+            "edges": [ { "from": "hook", "to": "post" } ],
+        }))
+        .unwrap();
+        let uc = DagRunUseCase::new(Arc::new(Nodes(Arc::new(node().await))), None);
+        let sid = sid.map(str::to_string);
+        let stream = uc.execute_stream(graph, None, None, false, None, sid, None);
+        tokio::pin!(stream);
+        while let Some(event) = stream.next().await {
+            if let Err(e) = event {
+                return Some(e.to_string());
+            }
+        }
+        None
+    }
+
+    #[tokio::test]
+    async fn a_session_id_forged_in_graph_inputs_does_not_reach_another_sessions_document() {
+        let out = run_graph(None, "doc-2", &untouched_server().await).await;
+        let refused =
+            |out: &Option<String>, why: &str| out.as_deref().is_some_and(|e| e.contains(why));
+        assert!(refused(&out, "needs an agent_session_id"), "{out:?}");
+        let out = run_graph(Some("s1"), "doc-2", &untouched_server().await).await;
+        assert!(refused(&out, "attachment not found"), "{out:?}");
+    }
+
+    #[tokio::test]
+    async fn the_engine_session_id_still_reaches_the_node_in_graph_mode() {
+        let server = MockServer::start().await;
+        let data_uri = json!({ "image_url": "data:image/jpeg;base64,3q0=" });
+        let answer = ResponseTemplate::new(200);
+        Mock::given(body_json(data_uri))
+            .respond_with(answer)
+            .expect(1)
+            .mount(&server)
+            .await;
+        assert_eq!(run_graph(Some("s1"), "doc-1", &server).await, None);
     }
 }
 

@@ -6,7 +6,7 @@ use crate::dag_engine::application::secure_value_service::{MaskingObserver, Secu
 use crate::dag_engine::domain::error::DagError;
 use crate::dag_engine::domain::graph::{Edge, Graph};
 use crate::dag_engine::domain::graph_skeleton::{GraphSkeleton, SUBGRAPH_RESUME_INCOMPATIBLE};
-use crate::dag_engine::domain::node::NodeInputs;
+use crate::dag_engine::domain::node::{strip_engine_keys, NodeInputs};
 
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -1482,6 +1482,11 @@ impl DagRunUseCase {
                 }
             }
         }
+        // Engine-reserved keys come only from the engine, which writes its own
+        // after this. An upstream object flattened by a field-less edge (a
+        // webhook payload, a model's JSON) could otherwise name the session
+        // whose attachments a node reads, or answer a suspend.
+        strip_engine_keys(&mut inputs);
         Ok(inputs)
     }
 }

@@ -4684,3 +4684,42 @@ conocida» de la guía 32 se borró.
 `<session-images>` enseña handles `chat-attachments/…` para `image_edit.source_url`: con
 este cambio fallan (ya fallaban entre procesos desde #79); tiene que pasar `document_id`s.
 **Estado.** done (punto 11, parte A, 2/2).
+
+## 89. Fix: un edge ya no elige la sesión cuyos adjuntos lee un nodo
+
+**El bug (preexistente).** En modo grafo, el loop inyecta `__colmena_agent_session_id` solo
+cuando el run tiene sesión de agente, y `build_inputs_for` aplana en los inputs las claves
+del objeto que llega por un edge sin puerto a un nodo sin `default_input` (`http_request`,
+`python_script`). Nada descartaba las claves del motor que traía ese objeto. En un run con
+registro de adjuntos y sin sesión, un `trigger_webhook` o un LLM conectado así a
+`http_request` con
+`{"__colmena_agent_session_id":"<víctima>","body":{"f":"$attachment:<doc de la víctima>"}}`
+resolvía el documento de otra sesión y lo mandaba. Con sesión, el motor pisaba esa clave,
+pero no `__colmena_resume_answer`, que fuera de un resume no inyecta: un payload podía
+retomar un hijo suspendido de un `subgraph` con una respuesta propia (`suspend` y
+`secure_suspend` tienen `default_input`, así que a ellos no llegaba).
+
+**Fix.** `strip_engine_keys` pasa al dominio (`dag_engine/domain/node.rs`; la usan el despacho
+de tools y `for_each` como antes) y `build_inputs_for` la aplica a los inputs que arma: toda
+clave `__colmena*`/`__node*` que trae un edge se descarta, y el loop escribe después las suyas.
+Lo que llega por el estado global (`__colmena_subgraph_depth` en un hijo) no cambia: se inyecta
+después.
+
+**Tests.** En `http.rs::session_attachment_tests`, un grafo real `trigger_webhook` →
+`http_request` con el resolver sobre SQLite: sin sesión, el payload falsificado da `needs an
+agent_session_id` y el servidor no recibe nada (rojo antes del fix: recibía el documento de
+`s2`); con sesión, `attachment not found`; y el id de sesión del motor sigue llegando (resuelve
+el documento propio). Mutaciones: sin el strip cae el primero; con un strip también después de
+la inyección caen los dos; el dominio sin `__node` tumba los 3 tests de strip de tools y
+`for_each`.
+
+**E2E.** `tests/graphs/security/graph_edge_engine_keys_e2e.json` (`python_script` como
+testigo; `EXPECTED_FILES` 329 → 330). Antes del fix: sin sesión veía `forged-session`, y con o
+sin sesión `forged-answer`. Después: sin sesión `<ABSENT>`, con `--agent-session-id e2e_real`
+el id real; `__colmena_resume_answer` `<ABSENT>`; `__node_id` = `witness`; `probe` llega. Con
+registro Postgres y storage LocalHttp, el mismo payload hacia `http_request`: antes del fix
+mandaba al eco los bytes de la otra sesión; después, `needs an agent_session_id` sin sesión y
+`attachment not found` con sesión, y el eco no recibe nada; con la sesión propia resuelve su
+documento. **ADP.** Sin cambios de API; un grafo que mandaba a propósito una clave
+`__colmena*`/`__node*` por un edge deja de recibirla (ninguno en `tests/graphs`).
+**Estado.** done (punto 11, parte A, revisión).
