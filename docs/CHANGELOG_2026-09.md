@@ -4685,7 +4685,7 @@ conocida» de la guía 32 se borró.
 este cambio fallan (ya fallaban entre procesos desde #79); tiene que pasar `document_id`s.
 **Estado.** done (punto 11, parte A, 2/2).
 
-## 87. Fix: un edge ya no elige la sesión cuyos adjuntos lee un nodo
+## 89. Fix: un edge ya no elige la sesión cuyos adjuntos lee un nodo
 
 **El bug (preexistente).** En modo grafo, el loop inyecta `__colmena_agent_session_id` solo
 cuando el run tiene sesión de agente, y `build_inputs_for` aplana en los inputs las claves
@@ -4696,7 +4696,8 @@ registro de adjuntos y sin sesión, un `trigger_webhook` o un LLM conectado así
 `{"__colmena_agent_session_id":"<víctima>","body":{"f":"$attachment:<doc de la víctima>"}}`
 resolvía el documento de otra sesión y lo mandaba. Con sesión, el motor pisaba esa clave,
 pero no `__colmena_resume_answer`, que fuera de un resume no inyecta: un payload podía
-contestar un `suspend`.
+retomar un hijo suspendido de un `subgraph` con una respuesta propia (`suspend` y
+`secure_suspend` tienen `default_input`, así que a ellos no llegaba).
 
 **Fix.** `strip_engine_keys` pasa al dominio (`dag_engine/domain/node.rs`; la usan el despacho
 de tools y `for_each` como antes) y `build_inputs_for` la aplica a los inputs que arma: toda
