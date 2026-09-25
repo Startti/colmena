@@ -447,8 +447,9 @@ impl ExecutableNode for ImageGenerationNode {
             "Generate one or more images from a text prompt. Supports OpenAI \
              (gpt-image-1, dall-e-3) and Google Vertex AI Imagen 4. Returns \
              { images: [{ document_id, mime_type, size_bytes }], provider, model }. \
-             Use \"$attachment:<document_id>\" in downstream tool args to forward \
-             the image, or call load_attachment(document_id) to read it.",
+             Forward an image as \"$attachment:<document_id>\": to image_edit, or in \
+             an http_request body (JSON: a data: URI; multipart: a file part; never a \
+             URL). Call load_attachment(document_id) to see it.",
         )
     }
 

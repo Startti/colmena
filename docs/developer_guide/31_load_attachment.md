@@ -196,7 +196,7 @@ Para forzar el reenvío sin lectura, el `system_message` solo necesita la
 **Detalles operativos:**
 
 - El multipart de `http_request` streamea end-to-end sin bufferear el archivo en memoria — un doc de decenas de MB no infla la RAM del worker.
-- El placeholder `$attachment:` se resuelve **solo en el nodo `http_request`** (no globalmente en el tool executor). Si necesitás reenviar desde otro tipo de nodo, ese nodo tiene que cablear el `AttachmentStreamResolver` igual que `http_request`.
+- El placeholder `$attachment:` se resuelve **solo en `http_request`** (body JSON y multipart) **y en `image_edit`** (`source_url`/`mask_url`), no globalmente en el tool executor. Si necesitás reenviar desde otro tipo de nodo, ese nodo tiene que cablear el `AttachmentStreamResolver` igual que `http_request`.
 - Validado en dev (2026-05-28): un PDF de 46 KB se reenvió a httpbin.org como `multipart/form-data` real sin que el LLM lo leyera; solo se gastaron ~50 tokens (metadata + tool call).
 
 ## Por qué existe

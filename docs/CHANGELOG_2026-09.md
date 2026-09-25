@@ -4649,3 +4649,26 @@ mensaje (`Run` con `parallel`): las fronteras salen `agent>Run#0`, `agent>Nota` 
 **ADP.** Nada que hacer: ADP todavía no emite `parallel`, y no debe emitirlo hasta que los
 frames de la tool nombren su frontera. Actualizados `docs/node_configurations.json` y
 `docs/node_as_tools_reference.json`.
+## 88. Fix: `image_edit` resuelve `$attachment:<document_id>` y deja de leer handles del modelo
+
+**El bug.** `image_edit.source_url` solo aceptaba `data:`, `http(s)` y los handles
+`local://…`/`chat-attachments/…`, que leía con `storage.read`. No resolvía
+`$attachment:<document_id>` ni un `document_id` pelado, aunque `image_generation` e
+`image_edit` le decían al modelo que los usara «in downstream tool args» (lo que hizo #76
+fase 1 y deshizo #79). Y un handle escrito por el modelo se leía tal cual: cualquier clave
+que el storage sirviera.
+
+**Qué cambió.** Con registro de adjuntos, `source_url` y `mask_url`: `data:`/`http(s)` se
+usan tal cual; cualquier otra cosa es `"$attachment:<document_id>"` (o el id pelado) de la
+sesión, resuelto con `AttachmentStreamResolverImpl` sobre el registro y el storage del nodo
+(tope 100 MiB); un handle o una clave cruda da `attachment not found` sin leer nada. Sin
+registro (motor standalone), los handles se siguen leyendo (legacy). Las descripciones de
+`image_generation`, `image_edit` y `tts` dicen qué produce cada forma. Guías 31 y 32,
+`node_as_tools_reference.json` y `node_configurations.json`, al día; la «Limitación
+conocida» de la guía 32 se borró.
+
+**Tests.** 2 en `image_edit.rs` (fuente y máscara por `document_id`; handles de ADP,
+`local://` y claves crudas → error). Rojos antes del fix. **ADP.** El bloque
+`<session-images>` enseña handles `chat-attachments/…` para `image_edit.source_url`: con
+este cambio fallan (ya fallaban entre procesos desde #79); tiene que pasar `document_id`s.
+**Estado.** done (punto 11, parte A, 2/2).

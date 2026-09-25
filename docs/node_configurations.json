@@ -3207,7 +3207,7 @@
           "type": "string",
           "required": true,
           "default": null,
-          "description": "The image to edit, as a data: URI or an http(s) URL. May arrive from an incoming edge instead of config — 'source_url' is this node's default input port.",
+          "description": "The image to edit: '$attachment:<document_id>' (or the bare document_id) of an image in this session, a data: URI, or an http(s) URL. May arrive from an incoming edge instead of config — 'source_url' is this node's default input port.",
           "example": "https://example.com/photo.png"
         },
         "mask_url": {
@@ -3999,7 +3999,7 @@
         "source_url": {
           "type": "string",
           "required": true,
-          "description": "Image to edit. Accepted: `data:<mime>;base64,...` URI OR http(s) URL. Typical usage chains the output of `image_generation` — pass the `url` field from that output here. Note: signed URLs from the production storage adapter expire after ~1h.",
+          "description": "Image to edit. Accepted: `$attachment:<document_id>` (or the bare `document_id`) of an image in this session — typically the output of `image_generation` —, a `data:<mime>;base64,...` URI, or an http(s) URL. With an attachment registry, a storage handle or raw key is rejected.",
           "example": "data:image/png;base64,iVBORw0KGgo..."
         },
         "mask_url": {
