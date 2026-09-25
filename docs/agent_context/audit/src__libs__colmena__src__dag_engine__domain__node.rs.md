@@ -5,6 +5,7 @@
 ## Symbols
 
 - `NodeInputs` (type alias, pub) — HashMap<String, Value> for passing named node outputs as inputs to downstream nodes
+- `strip_engine_keys()` (fn, pub) — Drops `__colmena*`/`__node*` keys from inputs the engine did not write (tool arguments, `for_each` rows, what graph edges deliver); used by `DagToolExecutor`, `for_each` and `build_inputs_for`
 - `ExecutableNode` (trait, pub) — Async trait defining the core contract all executable nodes must implement; requires Send + Sync for thread-safe execution
 - `ExecutableNode::execute` (async method) — Primary execution method: takes inputs, config, state, and optional observer; returns Value output or error
 - `ExecutableNode::schema` (method) — Returns JSON Schema describing node configuration fields, expected inputs, and output structure

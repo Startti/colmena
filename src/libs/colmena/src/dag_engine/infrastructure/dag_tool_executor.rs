@@ -294,7 +294,7 @@ impl DagToolExecutor {
     /// closes both cases uniformly instead of relying on each engine key
     /// happening to be reinjected later.
     pub(crate) fn strip_engine_keys(args: &mut HashMap<String, Value>) {
-        args.retain(|k, _| !(k.starts_with("__colmena") || k.starts_with("__node")));
+        crate::dag_engine::domain::node::strip_engine_keys(args);
     }
 
     /// Create a new executor with the given node registry and tool configurations.

@@ -189,6 +189,13 @@ Con eso, `plantilla` puede usar `{{cliente.nombre}}` y `{{vendedor.nombre}}`
 por separado, sin que uno pise al otro. Este patrón es el que usa
 `tests/graphs/basic/input_template_resolution.json`.
 
+🔒 **CLAVES DEL MOTOR:** un edge (con o sin puerto) nunca entrega una clave que
+empiece con `__colmena` o `__node`: `build_inputs_for` las descarta y el loop
+escribe después las suyas (`__colmena_session_id`, `__colmena_agent_session_id`,
+`__node_id`, `__colmena_node_id_path`, …). Un payload externo o el JSON de un
+modelo no elige la sesión cuyos adjuntos lee un nodo ni responde un `suspend`.
+Testigo: `tests/graphs/security/graph_edge_engine_keys_e2e.json`.
+
 ---
 
 ### **Caso 3: Ser Explícito (Siempre Seguro) ✅**

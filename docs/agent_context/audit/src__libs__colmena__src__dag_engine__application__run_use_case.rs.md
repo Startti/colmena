@@ -15,7 +15,7 @@
 - `DagRunUseCase::execute_stream()` (fn, pub) — Main async streaming executor: session/agent/resume lifecycle, queue-based DAG traversal, node input building, secret injection, execution with observer, liveness heartbeat+idle-abort watchdog, cancellation handling, state persistence, subgraph event relay and nesting, usage telemetry
 - `DagRunUseCase::compute_resuming_node_ids()` (fn, private) — Computes set of node IDs with `__colmena_status: "SUSPENDED"` from persisted outputs (guards against injecting resume_answer into non-resuming nodes)
 - `DagRunUseCase::find_status_by_key()` (fn, private) — Recursive JSON search for a key and returns its string value (used to detect SUSPENDED markers)
-- `DagRunUseCase::build_inputs_for()` (fn, private) — Constructs NodeInputs by resolving edges, source node outputs, default_output/default_input fields, and auto-flattening objects
+- `DagRunUseCase::build_inputs_for()` (fn, private) — Constructs NodeInputs by resolving edges, source node outputs, default_output/default_input fields, and auto-flattening objects; drops every engine-reserved key (`__colmena*`, `__node*`) the edges delivered, before the loop injects its own
 - `ChannelObserver` (struct, private) — Simple observer forwarding events via tokio mpsc channel
 - `ChannelObserver::on_event()` (impl ExecutionObserver, private) — Sends observer events to unbounded channel
 - `node_event_advances_heartbeat()` (fn, private) — Determines if a NodeEvent should reset the heartbeat liveness clock (excludes pure accounting events like LlmUsage)

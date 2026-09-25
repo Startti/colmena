@@ -305,6 +305,9 @@ key happening to be reinjected later.
 A `for_each` row goes through the same strip (`ForEachNode`, in
 `nodes/for_each.rs`) before its own merge into the target's schema — see
 [49_for_each.md](49_for_each.md#las-claves-de-fila-se-filtran-antes-del-merge).
+Graph mode applies it too: `build_inputs_for` drops the reserved keys its edges
+deliver before the loop injects its own (the rule lives in
+`dag_engine::domain::node::strip_engine_keys`; CHANGELOG 2026-09 §87).
 
 #### Step 4c: A child-graph source the tool does not offer is dropped
 

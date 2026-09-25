@@ -9,6 +9,15 @@ use std::sync::Arc;
 /// Usamos un HashMap para que las entradas sean nombradas (ej. "a", "b", "prompt").
 pub type NodeInputs = HashMap<String, Value>;
 
+/// Drops every key reserved for values only the engine writes (`__colmena*`,
+/// `__node*`: session ids, node id and path, resume answer, subgraph depth,
+/// tool name…) from inputs that did not come from the engine: a model's tool
+/// arguments, a `for_each` row, what a graph's edges deliver. The engine
+/// writes its own values after this runs.
+pub fn strip_engine_keys(inputs: &mut NodeInputs) {
+    inputs.retain(|k, _| !(k.starts_with("__colmena") || k.starts_with("__node")));
+}
+
 /// El "Puerto" principal para todos los nodos ejecutables.
 /// Define el contrato que debe implementar cualquier nodo (Adaptador).
 /// `Send + Sync` son necesarios para que el trait pueda ser usado de forma segura
