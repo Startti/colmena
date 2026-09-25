@@ -131,7 +131,12 @@ fn measure() -> Measured {
 // Bumped 326 -> 327: adds tests/graphs/security/tool_unoffered_dispatch_e2e.json (a
 // model call to a registered node the request did not offer is refused).
 // Lints clean.
-const EXPECTED_FILES: usize = 327;
+// Bumped 327 -> 328: adds tests/graphs/agents/child_graph_ref_resume.json (the
+// `child_graph_ref` resume E2E: `dag_engine run` has no resolver configured, so
+// this graph only exercises the `unavailable` refusal path from the CLI; the
+// positive re-resolve path needs a stub resolver, covered by
+// `src/libs/colmena/tests/child_graph_ref_resume.rs`). Lints clean.
+const EXPECTED_FILES: usize = 328;
 const EXPECTED_ERRORS: usize = 0;
 const EXPECTED_WARNINGS: usize = 0;
 const EXPECTED_INFOS: usize = 0;

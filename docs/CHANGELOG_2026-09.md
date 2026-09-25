@@ -4272,9 +4272,33 @@ prefijo) a `format!("{e:?}")` (el `Debug`, sin prefijo) → rojo, el de refusal
 (y de paso otros 4 del camino fresco que comparten la misma línea, confirmando
 que es la misma función la que sirve a los dos caminos).
 
-**E2E.** Llega en el próximo commit de esta misma rama, que amplía esta sección
-(`review_size.py` no daba los dos en un commit: la integración de Postgres con
-el `StubResolver`, su fixture y el bump de corpus pesan solas ~370 líneas).
+**E2E.** Commit siguiente en esta misma rama (`review_size.py` no daba los dos
+juntos: la integración de Postgres con el `StubResolver`, su fixture y el bump
+de corpus pesan solas ~370 líneas), integración nueva `#[ignore]`,
+`tests/child_graph_ref_resume.rs`: un `ColmenaEngine` real con un `StubResolver`
+(`EngineConfig.child_graph_resolver`, el CLI no configura ninguno) y
+`ScriptedAdapter` para el LLM, contra Postgres local (`colmena_e2e_cgr`).
+`tests/graphs/agents/child_graph_ref_resume.json` (nuevo; `EXPECTED_FILES` 325 →
+326) es el padre — el hijo lo da el stub, no está commiteado. Dos escenarios
+reales, capturados en `/tmp/colmena_e2e/`: `child_graph_ref_resume_v2.sse` (el
+resolvedor contesta `v1` al arrancar y `v2` al reanudar) — `subgraph-node-end`
+de `sello` da `{"sello":"SELLO=v2"}`
+(`jq -c 'select(.type=="subgraph-node-end" and .node_id=="sello") | .output'`),
+ningún frame contiene el marcador `sk-stub-graph-marker` del grafo completo, dos
+resolves con el mismo `agent_id`/`context`/`parent_path`, la fila hija
+`COMPLETED`; `child_graph_ref_resume_forbidden.sse` (el segundo resolve rechaza
+`Forbidden`) — el parent sigue (no `SUSPENDED`), ningún `sello` corrió, la fila
+hija `FAILED`. El texto `CHILD_GRAPH_RESOLVE_FAILED:forbidden: …` no llega por
+ningún frame SSE — un resume nunca dispara `LlmToolCallStart`/`Finish` (esos
+frames son del camino de despacho fresco de `llm.rs`; el resume llama
+`execute_with_resume_answer` y persiste el resultado directo en
+`llm_node_history` como mensaje `tool`, que es donde el test lo verifica;
+hallazgo de esta task, no anticipado por el plan). Mutación de integración: con
+el caso `ref → Stored` reintroducido, los dos escenarios fallan — el primero
+corre `SELLO=v1` en vez de `v2` (nunca deriva de nuevo) y el segundo no falla
+(el resolvedor rechazado nunca se consulta, el hijo completa con la copia
+vieja). Lint: 326 files, 0/0/0. `corpus_noise`: 3 passed. `cargo test` completo
+(workspace): 3040 passed, 0 failed, 146 ignorados.
 
 **ADP.** [Nota de migración](adp_migration/2026-09-24-subgraph-resume-fresh-graph.md),
 sección «Desde la entrada 81». `docs/adp_migration/2026-09-23-child-graph-ref.md`
