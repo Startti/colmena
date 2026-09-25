@@ -312,27 +312,37 @@ impl SseMapper {
                 tool_id,
                 tool_name,
                 tool_args,
+                child_scope,
                 ..
             } => {
                 let input = serde_json::from_str::<Value>(tool_args)
                     .unwrap_or_else(|_| Value::String(tool_args.clone()));
-                Some(json!({
-                    "type": "tool-input-available",
-                    "toolCallId": tool_id,
-                    "toolName": tool_name,
-                    "input": input
-                }))
+                Some(Self::with_child_scope(
+                    json!({
+                        "type": "tool-input-available",
+                        "toolCallId": tool_id,
+                        "toolName": tool_name,
+                        "input": input
+                    }),
+                    child_scope,
+                ))
             }
             DagExecutionEvent::LlmToolCallFinish {
-                tool_id, output, ..
+                tool_id,
+                output,
+                child_scope,
+                ..
             } => {
                 let out = serde_json::from_str::<Value>(output)
                     .unwrap_or_else(|_| Value::String(output.clone()));
-                Some(json!({
-                    "type": "tool-output-available",
-                    "toolCallId": tool_id,
-                    "output": out
-                }))
+                Some(Self::with_child_scope(
+                    json!({
+                        "type": "tool-output-available",
+                        "toolCallId": tool_id,
+                        "output": out
+                    }),
+                    child_scope,
+                ))
             }
             DagExecutionEvent::GraphFinish { output } => {
                 // Close any still-open text blocks before finish
@@ -570,27 +580,37 @@ impl SseMapper {
                     tool_id,
                     tool_name,
                     tool_args,
+                    child_scope,
                     ..
                 } => {
                     let input = serde_json::from_str::<Value>(tool_args)
                         .unwrap_or_else(|_| Value::String(tool_args.clone()));
-                    Some(json!({
-                        "type": "subgraph-tool-input-available",
-                        "toolCallId": tool_id,
-                        "toolName": tool_name,
-                        "input": input
-                    }))
+                    Some(Self::with_child_scope(
+                        json!({
+                            "type": "subgraph-tool-input-available",
+                            "toolCallId": tool_id,
+                            "toolName": tool_name,
+                            "input": input
+                        }),
+                        child_scope,
+                    ))
                 }
                 DagExecutionEvent::LlmToolCallFinish {
-                    tool_id, output, ..
+                    tool_id,
+                    output,
+                    child_scope,
+                    ..
                 } => {
                     let out = serde_json::from_str::<Value>(output)
                         .unwrap_or_else(|_| Value::String(output.clone()));
-                    Some(json!({
-                        "type": "subgraph-tool-output-available",
-                        "toolCallId": tool_id,
-                        "output": out
-                    }))
+                    Some(Self::with_child_scope(
+                        json!({
+                            "type": "subgraph-tool-output-available",
+                            "toolCallId": tool_id,
+                            "output": out
+                        }),
+                        child_scope,
+                    ))
                 }
                 DagExecutionEvent::ReasoningStart { id, .. } => Some(json!({
                     "type": "subgraph-reasoning-start",
@@ -731,6 +751,16 @@ impl SseMapper {
         }
     }
 
+    /// Add `childScope` to a tool-call frame whose call opened its child
+    /// boundary under a scope of its own (`<tool>#<k>`, a `parallel` tool).
+    /// Without one the frame is returned untouched.
+    fn with_child_scope(mut frame: Value, child_scope: &Option<String>) -> Value {
+        if let Some(scope) = child_scope {
+            frame["childScope"] = json!(scope);
+        }
+        frame
+    }
+
     fn clean_inputs(inputs: &Value) -> Value {
         if let Some(obj) = inputs.as_object() {
             Value::Object(
@@ -769,12 +799,14 @@ mod tests {
                 tool_id: "call_abc".into(),
                 tool_name: "getWeather".into(),
                 tool_args: "{\"city\":\"SF\"}".into(),
+                child_scope: None,
             },
             DagExecutionEvent::LlmToolCallFinish {
                 node_id: "llm_1".into(),
                 tool_id: "call_abc".into(),
                 success: true,
                 output: "{\"weather\":\"sunny\"}".into(),
+                child_scope: None,
             },
         ]
     }
@@ -1431,5 +1463,121 @@ mod tests {
         assert_eq!(parts[0]["errorText"], "boom");
         assert_eq!(parts[0]["level"], 1);
         assert_eq!(parts[0]["path"], "agent>Helper");
+    }
+
+    // ---- childScope: which child a parent's tool-call frame belongs to ----
+
+    fn start(child_scope: Option<&str>) -> DagExecutionEvent {
+        DagExecutionEvent::LlmToolCallStart {
+            node_id: "llm".into(),
+            tool_id: "call_1".into(),
+            tool_name: "Run".into(),
+            tool_args: r#"{"agentId":"a"}"#.into(),
+            child_scope: child_scope.map(str::to_string),
+        }
+    }
+
+    fn finish(child_scope: Option<&str>) -> DagExecutionEvent {
+        DagExecutionEvent::LlmToolCallFinish {
+            node_id: "llm".into(),
+            tool_id: "call_1".into(),
+            success: true,
+            output: r#"{"ok":true}"#.into(),
+            child_scope: child_scope.map(str::to_string),
+        }
+    }
+
+    fn wrapped(inner: DagExecutionEvent) -> DagExecutionEvent {
+        DagExecutionEvent::SubgraphWrapped {
+            inner: Box::new(inner),
+            depth: 1,
+            path: "agent>llm".into(),
+        }
+    }
+
+    #[test]
+    fn a_tool_call_with_a_child_scope_carries_it_on_its_frames() {
+        let mut mapper = SseMapper::new();
+        let input = mapper.map(&start(Some("Run#1")));
+        assert_eq!(input[0]["type"], "tool-input-available");
+        assert_eq!(input[0]["childScope"], "Run#1");
+        let output = mapper.map(&finish(Some("Run#1")));
+        assert_eq!(output[0]["type"], "tool-output-available");
+        assert_eq!(output[0]["childScope"], "Run#1");
+    }
+
+    #[test]
+    fn a_nested_tool_call_with_a_child_scope_carries_it_on_its_frames() {
+        let mut mapper = SseMapper::new();
+        let input = mapper.map(&wrapped(start(Some("Run#0"))));
+        assert_eq!(input[0]["type"], "subgraph-tool-input-available");
+        assert_eq!(input[0]["childScope"], "Run#0");
+        let output = mapper.map(&wrapped(finish(Some("Run#0"))));
+        assert_eq!(output[0]["type"], "subgraph-tool-output-available");
+        assert_eq!(output[0]["childScope"], "Run#0");
+    }
+
+    /// No scope, no change: every field, and nothing else, as before
+    /// `childScope` existed.
+    #[test]
+    fn a_tool_call_without_a_child_scope_maps_exactly_as_before() {
+        let mut mapper = SseMapper::new();
+        assert_eq!(
+            mapper.map(&start(None)),
+            [json!({
+                "type": "tool-input-available",
+                "toolCallId": "call_1",
+                "toolName": "Run",
+                "input": { "agentId": "a" },
+                "level": 0,
+                "path": "llm"
+            })]
+        );
+        assert_eq!(
+            mapper.map(&finish(None)),
+            [json!({
+                "type": "tool-output-available",
+                "toolCallId": "call_1",
+                "output": { "ok": true },
+                "level": 0,
+                "path": "llm"
+            })]
+        );
+        assert_eq!(
+            mapper.map(&wrapped(start(None))),
+            [json!({
+                "type": "subgraph-tool-input-available",
+                "toolCallId": "call_1",
+                "toolName": "Run",
+                "input": { "agentId": "a" },
+                "level": 1,
+                "path": "agent>llm"
+            })]
+        );
+        assert_eq!(
+            mapper.map(&wrapped(finish(None))),
+            [json!({
+                "type": "subgraph-tool-output-available",
+                "toolCallId": "call_1",
+                "output": { "ok": true },
+                "level": 1,
+                "path": "agent>llm"
+            })]
+        );
+    }
+
+    /// The event itself (what `colmena run` prints and what a subgraph hands
+    /// up as raw JSON) gains the field only when it has a value.
+    #[test]
+    fn the_event_serializes_child_scope_only_when_present() {
+        let without = serde_json::to_value(start(None)).unwrap();
+        assert!(without["data"].get("child_scope").is_none(), "{without}");
+        let with = serde_json::to_value(start(Some("Run#1"))).unwrap();
+        assert_eq!(with["data"]["child_scope"], "Run#1");
+        let back: DagExecutionEvent = serde_json::from_value(with).unwrap();
+        assert!(matches!(
+            back,
+            DagExecutionEvent::LlmToolCallStart { child_scope: Some(s), .. } if s == "Run#1"
+        ));
     }
 }

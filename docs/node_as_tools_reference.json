@@ -103,7 +103,7 @@
           "type": "boolean",
           "required": false,
           "default": false,
-          "description": "Operator-only, never shown to the LLM. When true, every call of this tool opens its child boundary as '<tool>#<k>' (k = the call's index in the model's tool_calls message, even when it is the only call); its tool-call frames do not name that scope yet. Memory keying is unchanged (memory_mode still decides the node_id). Calls still run one after another. A non-boolean value fails graph validation at load."
+          "description": "Operator-only, never shown to the LLM. When true, every call of this tool opens its child boundary as '<tool>#<k>' (k = the call's index in the model's tool_calls message, even when it is the only call) and its tool-input-available / tool-output-available frames (and subgraph-tool-* variants) carry childScope: '<tool>#<k>'; tool-input-start never does. Memory keying is unchanged (memory_mode still decides the node_id). Calls still run one after another. A non-boolean value fails graph validation at load. Verified example: tests/graphs/agents/parallel_tool_identity.json."
         }
       }
     },

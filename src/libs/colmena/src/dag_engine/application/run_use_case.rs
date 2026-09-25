@@ -880,13 +880,13 @@ impl DagRunUseCase {
                                                 entry.4 += cache_write_tokens.unwrap_or(0);
                                                 yield DagExecutionEvent::LlmUsage { node_id: node_id.clone(), prompt_tokens, completion_tokens, thinking_tokens, cache_read_tokens, cache_write_tokens };
                                             }
-                                            NodeEvent::LlmToolCallStart { tool_id, tool_name, tool_args } => {
+                                            NodeEvent::LlmToolCallStart { tool_id, tool_name, tool_args, child_scope } => {
                                                 last_tool = Some(tool_name.clone());
-                                                yield DagExecutionEvent::LlmToolCallStart { node_id: node_id.clone(), tool_id, tool_name, tool_args }
+                                                yield DagExecutionEvent::LlmToolCallStart { node_id: node_id.clone(), tool_id, tool_name, tool_args, child_scope }
                                             }
-                                            NodeEvent::LlmToolCallFinish { tool_id, success, output } => {
+                                            NodeEvent::LlmToolCallFinish { tool_id, success, output, child_scope } => {
                                                 last_tool = None;
-                                                yield DagExecutionEvent::LlmToolCallFinish { node_id: node_id.clone(), tool_id, success, output }
+                                                yield DagExecutionEvent::LlmToolCallFinish { node_id: node_id.clone(), tool_id, success, output, child_scope }
                                             }
                                             NodeEvent::SkillLoaded { tool_id, skill_name, reference, source, size_bytes } => yield DagExecutionEvent::SkillLoaded { node_id: node_id.clone(), tool_id, skill_name, reference, source, size_bytes },
                                             NodeEvent::ToolDescribed { tool_id, tool_name } => yield DagExecutionEvent::ToolDescribed { node_id: node_id.clone(), tool_id, tool_name },

@@ -4724,10 +4724,87 @@ documento. **ADP.** Sin cambios de API; un grafo que mandaba a propósito una cl
 `__colmena*`/`__node*` por un edge deja de recibirla (ninguno en `tests/graphs`).
 **Estado.** done (punto 11, parte A, revisión).
 
-## 91. `OutputStorageRepository` gana un método opcional `read_url` (feature C, parte 1 de 2)
+## 90. Los frames de una llamada a una tool `parallel` nombran su frontera (`childScope`)
 
-> Nota de numeración: la §90 queda reservada para un PR de seguridad en paralelo sobre
-> este mismo módulo; esta entrada usa §91 para no chocar con esa numeración.
+**Qué cambió.** Cada llamada de una tool con `"parallel": true` ya abría su frontera como
+`<tool>#<k>` (entrada 87). Ahora sus frames lo dicen:
+- `NodeEvent` y `DagExecutionEvent::LlmToolCallStart/Finish` suman `child_scope`, opcional
+  y omitido cuando no hay valor. `from_node_event` y el mapeo de `run_use_case.rs` lo pasan.
+- En `llm.rs`, el callback del stream le pide el scope al ejecutor en el Start
+  (`ToolExecutor::child_scope`) y se lo da al Finish de la misma llamada por su id
+  (`ToolCallScopes`).
+- El `SseMapper` agrega `childScope` a `tool-input-available`, `tool-output-available` y
+  sus variantes `subgraph-tool-*`. Sin valor, el frame queda igual byte a byte.
+- Un resume vuelve a correr la llamada pendiente con el k que tenía en su mensaje
+  (`find_pending_tool_call` devuelve también su índice), así que el hijo reabre bajo el
+  mismo `<tool>#<k>`.
+
+`tool-input-start` no lleva `childScope`: sale del chunk del stream, antes de que la
+llamada tenga su k. El `childScope` de una llamada se lee de su `tool-input-available`.
+
+**Tests.** 8 en la lib, 2874 passed (2866 antes): 4 en `sse_mapper` (con scope, anidado,
+sin scope igual al frame de antes campo por campo, y el evento que serializa el campo solo
+con valor) y 4 en `llm.rs` (el Finish recibe el scope de su Start, dos llamadas abiertas
+guardan cada una el suyo, una llamada sin scope cierra sin él, y el índice de la llamada
+pendiente en su mensaje llega al resume).
+
+**Mutación.** 4, rojas y revertidas: `close` que pierde el scope (caen 2), el mapper que
+descarta `childScope` (caen los 2 que lo esperan), el mapper que escribe `null` cuando no
+hay scope (cae el del frame igual al de antes) y el resume sin k.
+
+**E2E.** Corrida ad hoc, sin commitear, del mismo E2E que en la entrada 87 (`ColmenaEngine`
+real contra Postgres, `Run`, `Nota` y `Run` en un mensaje): pasa entero. 45 frames:
+`childScope` `Run#0` y `Run#2` en `tool-input-available` y `tool-output-available` de cada
+`Run`, cada frontera entre los dos frames de su llamada; ninguno en los de `Nota` ni en los
+tres `tool-input-start`.
+
+**ADP.** Soportar `childScope` antes de subir el pin; ya está en Startti/adp#855. Los frames
+de una tool sin `parallel` no cambian. Actualizados `docs/sse_events_reference.md` (tablas y
+la sección «`childScope` — una llamada a una tool `parallel`»),
+`docs/node_configurations.json` y `docs/node_as_tools_reference.json`.
+
+## 91. E2E de la identidad de una llamada `parallel`, y la nota para ADP
+
+**Qué cambió.** Nada en el motor. Llegan el E2E que prueba de punta a punta las
+entradas 87 y 90, la sección de la guía 19 y la nota de migración para ADP:
+- `tests/graphs/agents/parallel_tool_identity.json`: un `llm_call` con `stream: true` y dos
+  tools `subgraph` con un hijo inline trivial (`entrada → salida`). `Run` declara
+  `parallel`; `Nota`, no.
+- `src/libs/colmena/tests/parallel_tool_identity.rs`, `#[ignore]` y `#[serial]`: un
+  `ColmenaEngine` real contra Postgres. `ScriptedAdapter` da una sola tool call por
+  respuesta, así que el test trae su propio modelo guionado (`ParallelTurnModel`, por
+  `OverrideGuard`). Ese modelo pide `Run`, `Nota` y `Run` en un solo mensaje (tres chunks
+  con índices 0, 1 y 2) y después contesta «Listo.».
+- `corpus_noise`: `EXPECTED_FILES` pasa de 330 a 331.
+
+**Tests.** Ninguno nuevo en la lib (2874 passed). `cargo test` completo: 3084 passed, 0
+failed, 147 ignorados (146 antes, más este E2E).
+
+**Mutación.** 4 contra el E2E, rojas y revertidas: k fijo en 0 (`agent>Run#0` dos veces);
+sin el filtro de `parallel` (aparece `agent>Nota#1`); el mapper que escribe `childScopeX`; y
+el callback del stream de `llm.rs` que no le pasa el scope al Start (`childScope` ausente
+en `tool-input-available`). Esa última unión solo la cubre este E2E.
+
+**E2E.** `DATABASE_URL=postgres:///colmena_e2e_par SECURE_VALUES_KEY=... cargo test -p
+colmena_dag_engine --test parallel_tool_identity -- --ignored`: 1 passed. La base tiene las
+14 migraciones. El SSE queda en `/tmp/colmena_e2e/parallel_tool_identity.sse`, 45 frames, y
+se parsea frame por frame:
+- las fronteras son `agent>Run#0`, `agent>Nota` y `agent>Run#2`;
+- cada `Run` trae `childScope` `Run#0` o `Run#2` en `tool-input-available` y en
+  `tool-output-available`, y su frontera queda entre los dos frames;
+- los frames de `Nota` no traen la clave;
+- hay tres `tool-input-start`, ninguno con `childScope`;
+- corre en serie: cada `tool-input-available` llega después del `tool-output-available`
+  anterior.
+
+Corpus: 331 archivos, 0/0/0.
+
+**ADP.** [Nota de migración](adp_migration/2026-09-25-parallel-tool-calls.md), con su
+línea en el índice: soportar `childScope` antes de subir el pin (hecho en Startti/adp#855)
+y leerlo de `tool-input-available`. La guía 19 suma «Varias llamadas a la misma tool en un
+turno (`parallel`)». La referencia SSE cita este E2E, y `node_as_tools_reference.json` lo
+da como ejemplo verificado.
+## 92. `OutputStorageRepository` gana un método opcional `read_url` (feature C, parte 1 de 2)
 
 **Qué cambió.** El puerto `OutputStorageRepository` (`output_storage_repository.rs`) gana
 dos métodos, ambos con cuerpo por defecto — **aditivo**: un host que implementaba el

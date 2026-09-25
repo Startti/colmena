@@ -163,8 +163,8 @@ Emitido cuando el LLM llama a una herramienta.
 |--------|--------|--------|
 | `tool-input-start` | `toolCallId`, `toolName` | Primer chunk de argumentos (una vez por `toolCallId`) |
 | `tool-input-delta` | `toolCallId`, `inputTextDelta` | Chunk de argumentos en streaming |
-| `tool-input-available` | `toolCallId`, `toolName`, `input` | Argumentos completos y parseados |
-| `tool-output-available` | `toolCallId`, `output` | Resultado de ejecutar la herramienta |
+| `tool-input-available` | `toolCallId`, `toolName`, `input`; `childScope` si la tool es `parallel` | Argumentos completos y parseados |
+| `tool-output-available` | `toolCallId`, `output`; `childScope` si la tool es `parallel` | Resultado de ejecutar la herramienta |
 | `tool-described` | `nodeId`, `toolCallId`, `toolName` | Emitido cuando una invocación de `describe_tool` resuelve y el motor revela el schema completo de una tool perezosa. Permite al frontend mostrar "Schema de `<toolName>` listo" sin esperar al `tool-output-available`. Detalles en [29_lazy_tool_loading.md](./developer_guide/29_lazy_tool_loading.md). |
 
 Secuencia completa:
@@ -184,6 +184,49 @@ Secuencia con lazy loading (`tool-described` antes del schema):
 { "type": "tool-described",       "nodeId": "agent", "toolCallId": "call_xyz", "toolName": "search_orders" }
 { "type": "tool-output-available","toolCallId": "call_xyz", "output": { "name": "search_orders", "schema": { ... } } }
 ```
+
+#### `childScope` — una llamada a una tool `parallel`
+
+Una entrada de `tool_configurations` con `"parallel": true` le da a **cada** llamada
+su propia identidad, aunque el modelo la llame una sola vez: la llamada abre su
+frontera como `<tool>#<k>`, donde k es su índice en el mensaje `tool_calls` del
+modelo, y sus frames `tool-input-available` y `tool-output-available` llevan
+`childScope: "<tool>#<k>"`. Si la tool abre frontera (`subgraph`, `llm_call`,
+`for_each`), la del hijo de esa llamada es el `subgraph-node-start` cuyo `path`
+es el `path` del frame de la tool, seguido de `>` y el `childScope`. Así dos
+llamadas a la misma tool en un turno no comparten nodo en el árbol.
+
+Frames reales del E2E (`src/libs/colmena/tests/parallel_tool_identity.rs`), recortados.
+El modelo pidió `Run`, `Nota` y `Run` en un solo mensaje; `Run` es `parallel`, `Nota` no:
+
+```json
+{ "type": "tool-input-start",      "toolCallId": "call_clima",   "toolName": "Run",  "level": 0, "path": "agent" }
+{ "type": "tool-input-available",  "toolCallId": "call_clima",   "toolName": "Run",  "input": { "task": "clima" }, "childScope": "Run#0", "level": 0, "path": "agent" }
+{ "type": "subgraph-node-start",   "node_id": "Run#0", "node_type": "subgraph", "level": 1, "path": "agent>Run#0" }
+{ "type": "subgraph-node-end",     "node_id": "Run#0", "node_type": "subgraph", "level": 1, "path": "agent>Run#0" }
+{ "type": "tool-output-available", "toolCallId": "call_clima",   "output": { ... }, "childScope": "Run#0", "level": 0, "path": "agent" }
+{ "type": "tool-input-available",  "toolCallId": "call_nota",    "toolName": "Nota", "input": { "texto": "empecé" }, "level": 0, "path": "agent" }
+{ "type": "subgraph-node-start",   "node_id": "Nota", "node_type": "subgraph", "level": 1, "path": "agent>Nota" }
+{ "type": "tool-input-available",  "toolCallId": "call_precios", "toolName": "Run",  "input": { "task": "precios" }, "childScope": "Run#2", "level": 0, "path": "agent" }
+{ "type": "subgraph-node-start",   "node_id": "Run#2", "node_type": "subgraph", "level": 1, "path": "agent>Run#2" }
+```
+
+- k es la posición en el mensaje, no un contador por tool: la segunda llamada a
+  `Run` es `Run#2` porque `Nota` ocupa el índice 1.
+- Una tool sin `parallel` no cambia: sus frames no traen el campo (ausente, nunca
+  `null`) y su frontera lleva el nombre pelado (`agent>Nota`).
+- **`tool-input-start` nunca lleva `childScope`.** Sale del chunk del stream,
+  antes de que la llamada tenga su k (y un turno sin streaming no emite
+  `tool-input-start`). El `childScope` de una llamada se toma de su
+  `tool-input-available`, por el mismo `toolCallId`.
+- Lo mismo vale dentro de un subgrafo: `subgraph-tool-input-available` y
+  `subgraph-tool-output-available` llevan `childScope`, y
+  `subgraph-tool-input-start` no.
+- Una llamada que el motor contesta sin correrla (el guard de repetición, por
+  ejemplo) trae `childScope` igual, pero no abre frontera.
+- En esta versión las llamadas todavía corren una después de la otra: el
+  `tool-output-available` de una llega antes del `tool-input-available` de la
+  siguiente.
 
 ---
 
@@ -434,8 +477,8 @@ propia falla.
 |--------|--------|--------|
 | `subgraph-tool-input-start` | `toolCallId`, `toolName` | Primer chunk de args de tool interno |
 | `subgraph-tool-input-delta` | `toolCallId`, `inputTextDelta` | Chunk de args en streaming |
-| `subgraph-tool-input-available` | `toolCallId`, `toolName`, `input` | Args completos del tool |
-| `subgraph-tool-output-available` | `toolCallId`, `output` | Resultado del tool |
+| `subgraph-tool-input-available` | `toolCallId`, `toolName`, `input`; `childScope` si la tool es `parallel` | Args completos del tool |
+| `subgraph-tool-output-available` | `toolCallId`, `output`; `childScope` si la tool es `parallel` | Resultado del tool |
 | `subgraph-tool-described` | `nodeId`, `toolCallId`, `toolName` | Contraparte de subgrafo de `tool-described` — emitido cuando `describe_tool` resuelve dentro de un `subgraph` o agente-tarea del orchestrator. |
 
 ### Skill
@@ -704,10 +747,10 @@ Para reanudar, el cliente envía las respuestas con el mismo `session_id`. El pl
 | `reasoning-end` | top | `id` | — |
 | `tool-input-start` | top | `toolCallId`, `toolName` | — |
 | `tool-input-delta` | top | `toolCallId`, `inputTextDelta` | — |
-| `tool-input-available` | top | `toolCallId`, `toolName`, `input` | — |
+| `tool-input-available` | top | `toolCallId`, `toolName`, `input` | `childScope` |
 | `batch-progress` | top | `nodeId`, `total`, `completed`, `ok`, `err`, `inFlight` | — |
 | `batch-item-finished` | top | `nodeId`, `index`, `key`, `status` | — |
-| `tool-output-available` | top | `toolCallId`, `output` | — |
+| `tool-output-available` | top | `toolCallId`, `output` | `childScope` |
 | `skill-loaded` | top | `nodeId`, `toolCallId`, `skillName`, `source`, `sizeBytes` | `reference` |
 | `tool-described` | top | `nodeId`, `toolCallId`, `toolName` | — |
 | `status` | top/sub | `stage`, `node_id`, `idleSecs` | — |
@@ -727,8 +770,8 @@ Para reanudar, el cliente envía las respuestas con el mismo `session_id`. El pl
 | `subgraph-reasoning-end` | sub | `id` | — |
 | `subgraph-tool-input-start` | sub | `toolCallId`, `toolName` | — |
 | `subgraph-tool-input-delta` | sub | `toolCallId`, `inputTextDelta` | — |
-| `subgraph-tool-input-available` | sub | `toolCallId`, `toolName`, `input` | — |
-| `subgraph-tool-output-available` | sub | `toolCallId`, `output` | — |
+| `subgraph-tool-input-available` | sub | `toolCallId`, `toolName`, `input` | `childScope` |
+| `subgraph-tool-output-available` | sub | `toolCallId`, `output` | `childScope` |
 | `subgraph-tool-described` | sub | `nodeId`, `toolCallId`, `toolName` | — |
 | `subgraph-skill-loaded` | sub | `nodeId`, `toolCallId`, `skillName`, `source`, `sizeBytes` | `reference` |
 | `subgraph-usage-summary` | sub | `nodes` | — |
@@ -740,7 +783,7 @@ Para reanudar, el cliente envía las respuestas con el mismo `session_id`. El pl
 
 1. **Texto**: el `id` de `text-start` / `text-delta` / `text-end` es el identificador del bloque. Un nodo solo tiene un bloque de texto activo a la vez.
 
-2. **Tools**: el `toolCallId` conecta `tool-input-start` → `tool-input-delta*` → `tool-input-available` → `tool-output-available`. Los `toolCallId` de top-level y subgrafo son independientes (pueden repetirse sin colisión).
+2. **Tools**: el `toolCallId` conecta `tool-input-start` → `tool-input-delta*` → `tool-input-available` → `tool-output-available`. Los `toolCallId` de top-level y subgrafo son independientes (pueden repetirse sin colisión). Para una tool que abre frontera, la del hijo de esa llamada es el `subgraph-node-start` con `path` = `<path del frame>>` + `childScope` si `tool-input-available` lo trae (ver [`childScope`](#childscope--una-llamada-a-una-tool-parallel)), o + `toolName` si no, como siempre.
 
 3. **Thinking del orchestrator**: el `node_id` en `thinking-delta` siempre coincide con el `node_id` del `subgraph-node-start` / `subgraph-node-end` que lo envuelve. La tripleta siempre aparece en orden:
    ```
