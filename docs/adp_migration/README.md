@@ -6,6 +6,12 @@ ve ADP antes y después, qué tiene que hacer ADP, y qué se rompe si no hace na
 
 Los cambios que quedan dentro del motor no llevan nota aquí.
 
+## 2026-09-24 — el modelo solo corre las tools que el request le ofreció
+
+| # | Nota | Acción de ADP | Qué se rompe si se ignora |
+|---|------|---------------|---------------------------|
+| 1 | [Una tool no ofrecida no corre](2026-09-24-unoffered-tool-refused.md) | Ninguna de código; subir el motor | Nada; sin subir, un modelo inyectado corre cualquier nodo registrado (`python_script`) aunque el agente no lo exponga |
+
 ## 2026-09-24 — un argumento del modelo ya no elige el grafo de un hijo
 
 | # | Nota | Acción de ADP | Qué se rompe si se ignora |

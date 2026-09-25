@@ -17,6 +17,9 @@ const DISCOVERY_KEEP_RECENT_MSGS: usize = 8;
 /// Sus resultados viejos se colapsan a markers (recuperables re-llamando la tool).
 const DISCOVERY_TOOL_NAMES: &[&str] = &["load_skill", "describe_tool"];
 
+/// The lazy-loading discovery tool (`lazy_tool_loading`).
+const DESCRIBE_TOOL: &str = "describe_tool";
+
 /// LLM-facing text shown when a tool call with an identical `(name+args)`
 /// signature is repeated (loop guard). The prior result is prepended to this.
 const REPEAT_NUDGE_TEXT: &str = include_str!("../../../text/prompts/agent_loop/repeat_nudge.md");
@@ -95,6 +98,16 @@ pub fn unresolved_sibling_ids(messages: &[LlmMessage], skip_id: &str) -> Vec<Str
         .filter(|c| seen.insert(c.id.as_str()))
         .map(|c| c.id.clone())
         .collect()
+}
+
+/// The tool result the model gets for a call that failed or was refused.
+fn tool_error_result(tool_call_id: &str, e: LlmError) -> ToolResult {
+    ToolResult {
+        tool_call_id: tool_call_id.to_string(),
+        success: false,
+        output: format!("Error executing tool: {e}"),
+        error: Some(e.to_string()),
+    }
 }
 
 /// Parameters for running the agent
@@ -474,6 +487,17 @@ impl AgentService {
                         (callback)(LlmStreamPart::LlmToolCallStart(tool_call.clone()));
                     }
 
+                    // Whether the model may run this name. `iteration_tools` is
+                    // the very list serialized into the request above, so this
+                    // cannot drift from what the provider was sent. One lazy
+                    // exception: that list drops `describe_tool` once nothing is
+                    // pending, and re-describing a loaded tool only reads the
+                    // schema of a tool the operator declared.
+                    let name = &tool_call.function.name;
+                    let offered = iteration_tools.iter().any(|t| t.name == *name)
+                        || (name == DESCRIBE_TOOL
+                            && lazy_catalog_names.as_ref().is_some_and(|c| !c.is_empty()));
+
                     // Lazy describe-before-use guard (lazy_tool_loading only):
                     // if the model called a cataloged tool that is NOT loaded
                     // this turn (absent from `iteration_tools`), do NOT execute
@@ -483,13 +507,11 @@ impl AgentService {
                     // and it becomes callable on the next iteration.
                     let lazy_redirect: Option<ToolResult> = match &lazy_catalog_names {
                         Some(catalog) => {
-                            let name = &tool_call.function.name;
-                            let loaded_this_turn = iteration_tools.iter().any(|t| t.name == *name);
-                            if !loaded_this_turn && catalog.contains(name) {
+                            if !offered && catalog.contains(name) {
                                 let describe = ToolCall::new(
                                     format!("guard_{}", tool_call.id),
                                     crate::llm::domain::FunctionCall::new(
-                                        "describe_tool".to_string(),
+                                        DESCRIBE_TOOL.to_string(),
                                         serde_json::json!({ "name": name }).to_string(),
                                     ),
                                 );
@@ -516,14 +538,27 @@ impl AgentService {
 
                     let result = match lazy_redirect {
                         Some(redirect) => redirect,
+                        // Only an offered name runs. The executor resolves ANY
+                        // registered node type by name and no provider adapter
+                        // checks a returned name against the declared tools, so
+                        // without this an injected `python_script` call runs
+                        // code the operator never exposed. The refusal reads
+                        // like an unknown name: it says nothing about what the
+                        // registry holds, and never echoes the arguments.
+                        None if !offered => {
+                            tracing::warn!(
+                                target: "colmena::agent",
+                                event = "tool.not_offered",
+                                tool = ?name,
+                                tool_call_id = %tool_call.id,
+                                "agent_service: refused a call to a tool this request did not offer"
+                            );
+                            let refusal = LlmError::tool_not_found(name);
+                            tool_error_result(&tool_call.id, refusal)
+                        }
                         None => match tool_executor.execute(tool_call).await {
                             Ok(res) => res,
-                            Err(e) => ToolResult {
-                                tool_call_id: tool_call.id.clone(),
-                                success: false,
-                                output: format!("Error executing tool: {}", e),
-                                error: Some(e.to_string()),
-                            },
+                            Err(e) => tool_error_result(&tool_call.id, e),
                         },
                     };
 
@@ -1702,7 +1737,7 @@ mod tests {
                 prompt: Some(prompt),
                 messages: None,
                 config: create_config(),
-                tools: vec![], // Tools list doesn't matter for mock
+                tools: offered(&["add"]),
                 tool_executor: &mock_tool_exec,
                 max_tool_repeats: None,
                 max_turns: None,
@@ -1848,7 +1883,7 @@ mod tests {
                 prompt: Some("loop me".to_string()),
                 messages: None,
                 config: create_config(),
-                tools: vec![],
+                tools: offered(&["loop"]),
                 tool_executor: &mock_tool_exec,
                 max_tool_repeats: Some(3),
                 max_turns: None,
@@ -1983,7 +2018,7 @@ mod tests {
                 prompt: Some("go".to_string()),
                 messages: None,
                 config: create_config(),
-                tools: vec![],
+                tools: offered(&["loop"]),
                 tool_executor: &mock_tool_exec,
                 max_tool_repeats: Some(3),
                 max_turns: None,
@@ -2049,7 +2084,7 @@ mod tests {
                 prompt: Some("vary".to_string()),
                 messages: None,
                 config: create_config(),
-                tools: vec![],
+                tools: offered(&["loop", "other"]),
                 tool_executor: &mock_tool_exec,
                 max_tool_repeats: Some(3),
                 max_turns: None,
@@ -2105,7 +2140,7 @@ mod tests {
                 prompt: Some("loop forever".to_string()),
                 messages: None,
                 config: create_config(),
-                tools: vec![],
+                tools: offered(&["loop"]),
                 tool_executor: &mock_tool_exec,
                 max_tool_repeats: Some(3),
                 max_turns: Some(4),
@@ -2212,7 +2247,7 @@ mod tests {
                 prompt: Some("twin".to_string()),
                 messages: None,
                 config: create_config(),
-                tools: vec![],
+                tools: offered(&["loop"]),
                 tool_executor: &mock_tool_exec,
                 max_tool_repeats: Some(3),
                 max_turns: None,
@@ -2286,7 +2321,7 @@ mod tests {
                 prompt: Some("triple".to_string()),
                 messages: None,
                 config: create_config(),
-                tools: vec![],
+                tools: offered(&["loop"]),
                 tool_executor: &mock_tool_exec,
                 max_tool_repeats: Some(3),
                 max_turns: None,
@@ -2371,7 +2406,7 @@ mod tests {
                 prompt: Some(prompt),
                 messages: None,
                 config: create_config(),
-                tools: vec![],
+                tools: offered(&["suspend_tool"]),
                 tool_executor: &mock_tool_exec,
                 max_tool_repeats: None,
                 max_turns: None,
@@ -2468,7 +2503,7 @@ mod tests {
                 prompt: Some("hello".to_string()),
                 messages: None,
                 config: create_config(),
-                tools: vec![],
+                tools: offered(&["ask_user", "get_time", "add_numbers"]),
                 tool_executor: &mock_tool_exec,
                 max_tool_repeats: None,
                 max_turns: None,
@@ -2586,7 +2621,7 @@ mod tests {
                 prompt: Some("hello".to_string()),
                 messages: None,
                 config: create_config(),
-                tools: vec![],
+                tools: offered(&["ask_user", "get_time", "add_numbers"]),
                 tool_executor: &mock_tool_exec,
                 max_tool_repeats: None,
                 max_turns: None,
@@ -2763,7 +2798,7 @@ mod tests {
             prompt: Some("read the doc".to_string()),
             messages: None,
             config: create_config(),
-            tools: vec![],
+            tools: offered(&["load_attachment"]),
             tool_executor: &SentinelExec,
             max_tool_repeats: Some(5),
             max_turns: None,
@@ -2942,7 +2977,7 @@ mod tests {
             prompt: Some("read the doc".to_string()),
             messages: None,
             config: create_config(),
-            tools: vec![],
+            tools: offered(&["load_attachment"]),
             tool_executor: &SentinelExec,
             max_tool_repeats: Some(5),
             max_turns: None,
@@ -3116,7 +3151,7 @@ mod tests {
             prompt: Some("read".to_string()),
             messages: None,
             config: create_config(),
-            tools: vec![],
+            tools: offered(&["load_attachment"]),
             tool_executor: &SentinelExec,
             max_tool_repeats: Some(5),
             max_turns: None,
@@ -3157,5 +3192,126 @@ mod tests {
             turn2_has_files,
             "turn-2 in-memory request must include synthetic user_with_files"
         );
+    }
+
+    // ---- The model may only run what the request offered it ----
+
+    fn offered(names: &[&str]) -> Vec<ToolDefinition> {
+        let def = |n: &&str| ToolDefinition::new(n.to_string(), String::new(), Default::default());
+        names.iter().map(def).collect()
+    }
+
+    /// One turn in which the model emits `calls` (one per iteration), then
+    /// answers "done". Returns the names the executor ran and the history.
+    async fn run_calls(
+        tools: Vec<ToolDefinition>,
+        tools_provider: Option<ToolsProvider>,
+        lazy_catalog_names: Option<std::collections::HashSet<String>>,
+        calls: Vec<ToolCall>,
+    ) -> (Vec<String>, Vec<LlmMessage>) {
+        let mut mock_llm = MockLlmRepo::new();
+        let mut mock_tool_exec = MockToolExec::new();
+        let (mock_conv, history) = stateful_conv_mock(vec![]);
+        let ran = Arc::new(Mutex::new(Vec::<String>::new()));
+        let r = ran.clone();
+        mock_tool_exec.expect_execute().returning(move |call| {
+            r.lock().unwrap().push(call.function.name.clone());
+            Ok(ToolResult::success(call.id.clone(), "ran".to_string()))
+        });
+        let script = Mutex::new(calls.into_iter());
+        mock_llm.expect_call().returning(move |_| {
+            Ok(match script.lock().unwrap().next() {
+                Some(call) => tool_call_response(call),
+                None => text_response("done"),
+            })
+        });
+        let service = AgentService::new(Arc::new(mock_llm), Arc::new(mock_conv));
+        let resp = service
+            .run(AgentRunParams {
+                session_id: &test_key(),
+                prompt: Some("go".to_string()),
+                messages: None,
+                config: create_config(),
+                tools,
+                tool_executor: &mock_tool_exec,
+                max_tool_repeats: None,
+                max_turns: None,
+                on_token: None,
+                tools_provider,
+                attachment_resolver: None,
+                agent_session_id: None,
+                lazy_catalog_names,
+            })
+            .await
+            .expect("run");
+        assert_eq!(resp.content(), "done");
+        let ran = ran.lock().unwrap().clone();
+        let history = history.lock().unwrap().clone();
+        (ran, history)
+    }
+
+    fn tool_output(history: &[LlmMessage], id: &str) -> String {
+        history
+            .iter()
+            .find(|m| m.role() == &MessageRole::Tool && m.tool_call_id() == Some(id))
+            .map(|m| m.content().to_string())
+            .expect("every call gets a persisted tool message")
+    }
+
+    #[tokio::test]
+    async fn a_call_to_a_tool_the_request_did_not_offer_never_reaches_the_executor() {
+        let args = r#"{"code":"import os; output = os.environ"}"#;
+        let call = named_tool_call("c1", "python_script", args);
+        let (ran, history) = run_calls(offered(&["add", "multiply"]), None, None, vec![call]).await;
+        assert!(ran.is_empty(), "executor ran an unoffered tool: {ran:?}");
+        // Persisted, so a refused call can never be the resume path's pending call.
+        let refusal = tool_output(&history, "c1");
+        assert_eq!(
+            refusal,
+            "Error executing tool: Tool not found: python_script"
+        );
+    }
+
+    #[tokio::test]
+    async fn offered_tools_still_run_whatever_added_them() {
+        // A declared tool, an engine tool and an MCP-shaped name: the gate only
+        // asks whether the request carried the name.
+        let names = ["add", "recall_history", "github__search_issues"];
+        let calls = names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| named_tool_call(&format!("c{i}"), n, "{}"))
+            .collect();
+        let (ran, _) = run_calls(offered(&names), None, None, calls).await;
+        assert_eq!(ran, names);
+    }
+
+    #[tokio::test]
+    async fn a_lazy_tool_and_describe_tool_still_run_as_the_list_changes() {
+        // As in llm.rs: the per-iteration list offers `describe_tool` while the
+        // cataloged tool is pending, and the tool (without `describe_tool`) once
+        // any call named it this turn. The model calls the tool blind (the
+        // guard redirects: one `describe_tool` via the executor), describes it
+        // after the list dropped `describe_tool`, then calls it.
+        let provider: ToolsProvider = Box::new(|msgs: &[LlmMessage]| {
+            let discovered = msgs
+                .iter()
+                .filter_map(|m| m.tool_calls())
+                .any(|c| !c.is_empty());
+            offered(&[if discovered {
+                "gsheets_read"
+            } else {
+                "describe_tool"
+            }])
+        });
+        let calls = vec![
+            named_tool_call("c1", "gsheets_read", "{}"),
+            named_tool_call("c2", "describe_tool", r#"{"name":"gsheets_read"}"#),
+            named_tool_call("c3", "gsheets_read", "{}"),
+        ];
+        let catalog = ["gsheets_read".to_string()].into_iter().collect();
+        let tools = offered(&["gsheets_read"]);
+        let (ran, _) = run_calls(tools, Some(provider), Some(catalog), calls).await;
+        assert_eq!(ran, ["describe_tool", "describe_tool", "gsheets_read"]);
     }
 }

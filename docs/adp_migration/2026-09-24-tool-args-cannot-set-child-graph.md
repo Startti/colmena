@@ -17,4 +17,5 @@ sigue recibiéndola (no se verificó desde este repo si ADP compila alguna).
 
 Nada. Sin subir el motor, el modelo puede seguir eligiendo el grafo que corre el worker.
 Aparte: el despacho todavía no compara el nombre de la tool con las expuestas (una
-llamada a `python_script` por su nombre corre aunque el agente no la tenga); PR aparte.
+llamada a `python_script` por su nombre corre aunque el agente no la tenga); lo cierra
+[Una tool no ofrecida no corre](2026-09-24-unoffered-tool-refused.md).

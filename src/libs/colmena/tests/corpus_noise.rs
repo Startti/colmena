@@ -128,8 +128,10 @@ fn measure() -> Measured {
 // folder README). Lints clean.
 // Bumped 325 -> 326: adds tests/graphs/security/tool_child_graph_source_e2e.json
 // (a model-supplied child-graph source the tool does not offer is dropped).
+// Bumped 326 -> 327: adds tests/graphs/security/tool_unoffered_dispatch_e2e.json (a
+// model call to a registered node the request did not offer is refused).
 // Lints clean.
-const EXPECTED_FILES: usize = 326;
+const EXPECTED_FILES: usize = 327;
 const EXPECTED_ERRORS: usize = 0;
 const EXPECTED_WARNINGS: usize = 0;
 const EXPECTED_INFOS: usize = 0;

@@ -363,7 +363,12 @@ Cuando el LLM llama `"list_products"`, el engine busca primero por key del mapa 
 
 ## Ejecución
 
-Cuando el LLM decide usar una herramienta, `DagToolExecutor`:
+Antes, el loop del agente descarta un nombre que ese request no le ofreció al
+modelo: un nodo registrado que el grafo no expone (`python_script`, por ejemplo)
+vuelve como `Tool not found: <nombre>` sin correr
+([22 §3b](22_tool_execution_flow.md#step-3b-only-a-name-the-request-offered-reaches-the-executor)).
+
+Cuando el LLM decide usar una herramienta ofrecida, `DagToolExecutor`:
 1. Selecciona la estrategia: `node_schema` (si presente) → `$DYNAMIC` (si hay marcadores en `fixed_config`) → fallback deprecado.
 2. Resuelve el nombre efectivo: usa `tool_config.name` si no está vacío, fallback a la key del mapa.
 3. Mezcla los argumentos del LLM con los valores fijos según la estrategia seleccionada.

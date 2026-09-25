@@ -4175,7 +4175,54 @@ fix: 1 (`agent>probar_grafo>pwn`); `Run_My_Agent` da 2 veces
 
 **Fuera de alcance.** El despacho no compara el nombre de la tool con las
 expuestas: con el mismo stub, un `python_script` no expuesto corrió y leyó la
-canaria. PR aparte.
+canaria. Lo cierra la entrada 80.
 
 **ADP.** [Nota](adp_migration/2026-09-24-tool-args-cannot-set-child-graph.md):
 ninguna acción de código; subir el motor.
+
+## 80. Fix: el modelo solo corre las tools que el request le ofreció
+
+**El agujero.** El loop del agente le pasaba al executor cualquier nombre que el
+modelo emitiera, y `DagToolExecutor::execute_inner` cae al registro para un nombre
+que no es tool configurada y despacha las sintéticas por nombre sin mirar si se
+ofrecieron (`gsheets_*`, `gdocs_*`, `data_run_python`, `api_explorer__*`…).
+Ningún adapter (Gemini, OpenAI, Anthropic) compara el nombre devuelto con las tools
+declaradas. Con un stub del proveedor, un `llm_call` que ofrecía otras tools corrió
+un `python_script` que leyó una canaria del entorno. Es el «Fuera de alcance» de la 79.
+
+**Qué cambió.** `agent_service.rs:497` corre una llamada solo si su nombre está en
+`iteration_tools`, la lista que ese request serializó para el proveedor: no es una
+segunda lista y no puede divergir (declaradas, `enabled_tools`, sintéticas del motor,
+MCP, lazy ya cargadas). Si no, `Error executing tool: Tool not found: <nombre>` —el
+texto de un nombre inexistente: ni pista del registro ni eco de los argumentos— y un
+WARN `tool.not_offered` con nombre y `tool_call_id`. El rechazo se persiste como tool
+message, así que nunca es la llamada pendiente de un resume. Lazy conserva sus reglas:
+una tool del catálogo no cargada devuelve su schema, y `describe_tool` responde aunque
+la lista ya no lo traiga. En el loop y no en el executor: el executor se construye
+antes de armar la lista (y lazy la cambia por iteración); el loop es el único camino de
+una llamada del modelo. El replay de resume repite una llamada que ya pasó la guarda
+(salvo una historia suspendida por una versión anterior).
+
+**Tests.** 3 en `agent_service.rs` (el repro, rojo antes; tools ofrecidas declarada, del
+motor y con forma MCP; el flujo lazy) y 1 en `registry.rs` con el `llm_call` real y un
+modelo guionado: `multiply`, registrado y no ofrecido, devolvía `{"output":6.0}`; ahora
+`Tool not found`, y `sumar` (declarada) y `recall_history` (del motor) corren. 13 tests
+del loop y 2 de integración pasaban `tools: vec![]` y llamaban tools igual: ahora
+declaran lo que llaman. `cargo test` completo: 3041 passed, 0 failed, 144 ignorados.
+
+**Mutación.** 3, rojas y revertidas a mano: sin el rechazo → el repro y el de
+`registry.rs`; sin la excepción de `describe_tool` → el test lazy; la lista estática
+`tools` en vez de `iteration_tools` → el test lazy (la tool del catálogo corre a ciegas).
+
+**E2E.** `tests/graphs/security/tool_unoffered_dispatch_e2e.json` por el CLI contra un
+stub local de `generateContent` (`GEMINI_BASE_URL`), con `COLMENA_E2E_CANARY`. El
+request ofrece `["sumar","recall_history"]`; el modelo llama `python_script`,
+`api_explorer__list_endpoints`, `sumar` y `recall_history`. Sin el fix: la canaria en el
+SSE y en el `functionResponse`, y `api_explorer` corre. Con el fix: las dos primeras
+`Tool not found`, 0 canarias, 2 WARN; `sumar` = `{"output":5.0}` y `recall_history`
+responde en los dos. Variante lazy (derivada con `jq`): redirect, `describe_tool`
+responde el schema, `sumar` corre, `python_script` rechazado. `EXPECTED_FILES` +1; lint
+0/0/0. Capturas: `/tmp/colmena_e2e/tool_unoffered_dispatch{,_lazy}_{before,after}.sse`.
+
+**ADP.** [Nota](adp_migration/2026-09-24-unoffered-tool-refused.md): ninguna acción de
+código; subir el motor.
