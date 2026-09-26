@@ -35,6 +35,8 @@ pub const MAX_BYTES_ENV_VAR: &str = "COLMENA_ATTACHMENT_MAX_BYTES";
 pub const DEFAULT_MAX_BYTES: u64 = 100 * 1024 * 1024;
 /// URLs one request may visit, the first included: at most 4 redirects.
 const MAX_URLS: usize = 5;
+/// The whole-request deadline, and the most [`SignedUrlDownloader::with_timeout`] sets.
+const TOTAL_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// Whether an address may be dialled.
 type Dialable = fn(IpAddr) -> bool;
@@ -111,7 +113,7 @@ fn guarded_client(ok: Dialable) -> Client {
         .no_proxy()
         .connect_timeout(Duration::from_secs(10))
         // 600 s: generous for files up to ~500 MB on slow connections.
-        .timeout(Duration::from_secs(600))
+        .timeout(TOTAL_TIMEOUT)
         .user_agent(concat!("colmena/", env!("CARGO_PKG_VERSION")))
         .build()
         .expect("the attachment fetch client should build")
@@ -192,9 +194,9 @@ impl SignedUrlDownloader {
         self
     }
 
-    /// The same client with a whole-request deadline of `total` (else 600 s).
+    /// The same client with a whole-request deadline of `total`, at most 600 s.
     pub fn with_timeout(mut self, total: Duration) -> Self {
-        self.timeout = Some(total);
+        self.timeout = Some(total.min(TOTAL_TIMEOUT));
         self
     }
 
@@ -399,6 +401,13 @@ mod tests {
             panic!("expected a transport error")
         };
         assert!(!message.contains("query-value"), "{message}");
+    }
+
+    /// `with_timeout` never sets a deadline past the client's own 600 s.
+    #[test]
+    fn a_deadline_is_never_raised_past_600_s() {
+        let d = SignedUrlDownloader::public_only().with_timeout(Duration::from_secs(3600));
+        assert_eq!(d.timeout, Some(Duration::from_secs(600)));
     }
 
     #[tokio::test]
