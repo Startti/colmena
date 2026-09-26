@@ -196,9 +196,24 @@ impl SqlNode {
     }
 
     /// The key of the initialization a call shares: its resolved
-    /// `connection_url`.
-    fn init_key(connection_url: &str) -> InitKey {
-        Sha256::digest(connection_url.as_bytes()).into()
+    /// `connection_url` plus the config that initialization reads —
+    /// `permissions` (schema provisioning, sandbox, auto-RLS, the capability
+    /// text) but the per-call `tenant_user_id`, `setup_sql`, and
+    /// `runtime_limits.max_rows` (the description names it). Object keys are
+    /// sorted first, so their order never splits a key.
+    fn init_key(connection_url: &str, config: &Value) -> InitKey {
+        let mut permissions = config.get("permissions").cloned().unwrap_or_default();
+        if let Some(map) = permissions.as_object_mut() {
+            map.remove("tenant_user_id");
+        }
+        let mut read = json!([
+            connection_url,
+            permissions,
+            config.get("setup_sql"),
+            config.pointer("/runtime_limits/max_rows"),
+        ]);
+        read.sort_all_objects();
+        Sha256::digest(read.to_string().as_bytes()).into()
     }
 
     /// The adapter a call runs on: the registry's pool for `connection_url`
@@ -237,7 +252,7 @@ impl SqlNode {
         adapter: &PgPoolAdapter,
     ) -> Result<Arc<SqlNodeInit>, Box<dyn StdError + Send + Sync>> {
         self.inits
-            .get_or_try_init(Self::init_key(connection_url), || {
+            .get_or_try_init(Self::init_key(connection_url, config), || {
                 Self::do_initialize_inner(adapter, config)
             })
             .await
@@ -1280,36 +1295,59 @@ mod connection_provenance_tests {
         );
     }
 
-    /// Two URLs never share an initialization; one URL always does.
+    /// An initialization is shared only by calls with the same URL and the
+    /// same config it reads: `permissions` but `tenant_user_id`, `setup_sql`
+    /// and `runtime_limits.max_rows`, in any key order.
     #[test]
-    fn each_connection_url_has_its_own_initialization() {
-        let key = SqlNode::init_key;
-        let a = key("postgres://a.test/db");
-        assert_ne!(a, key("postgres://b.test/db"), "two URLs shared one key");
-        assert_eq!(a, key("postgres://a.test/db"));
+    fn the_init_key_is_the_url_and_the_config_the_initialization_reads() {
+        let base = json!({
+            "permissions": { "preset": "read_only", "allowed_schemas": ["s"], "tenant_user_id": "u1" },
+            "setup_sql": "CREATE TABLE IF NOT EXISTS s.t (id int)",
+            "runtime_limits": { "max_rows": 10, "statement_timeout_ms": 1000 },
+        });
+        let with = |pointer: &str, value: Value| {
+            let mut config = base.clone();
+            *config.pointer_mut(pointer).unwrap() = value;
+            config
+        };
+        let key = |config: &Value| SqlNode::init_key("postgres://a.test/db", config);
+        assert_ne!(key(&base), SqlNode::init_key("postgres://b.test/db", &base));
+        for (p, v) in [
+            ("/permissions/preset", json!("read_write")),
+            ("/permissions/allowed_schemas", json!(["s", "t"])),
+            ("/setup_sql", json!("SELECT 1")),
+            ("/runtime_limits/max_rows", json!(20)),
+        ] {
+            assert_ne!(key(&base), key(&with(p, v)), "{p} shared a key");
+        }
+        for (p, v) in [
+            ("/permissions/tenant_user_id", json!("u2")),
+            ("/runtime_limits/statement_timeout_ms", json!(5000)),
+        ] {
+            assert_eq!(key(&base), key(&with(p, v)), "{p} split a key");
+        }
+        let reordered = json!({
+            "query": "SELECT 2",
+            "runtime_limits": { "statement_timeout_ms": 1000, "max_rows": 10 },
+            "setup_sql": base["setup_sql"],
+            "permissions": { "allowed_schemas": ["s"], "tenant_user_id": "u1", "preset": "read_only" },
+        });
+        assert_eq!(key(&base), key(&reordered), "the order split a key");
     }
 
     /// One node instance serves every `sql_query` call. A call that names
     /// another `connection_url` connects to its own server: it never runs on
-    /// the connection an earlier call opened.
+    /// the connection an earlier call used.
     #[tokio::test]
-    #[ignore = "requires TEST_DATABASE_URL — run with `cargo test -- --ignored`"]
     async fn a_second_connection_url_never_runs_on_the_first_calls_connection() {
-        let Ok(db) = std::env::var("TEST_DATABASE_URL") else {
-            eprintln!("skip: TEST_DATABASE_URL not set");
-            return;
-        };
+        use super::init_cache_tests::{node_with, URL_A};
+        let (n, _registry, fake) = node_with(8).await;
         std::env::set_var(ENV, VALUE);
-        let n = node();
         let query = HashMap::from([("query".to_string(), json!("SELECT 1"))]);
-        n.execute(
-            &query,
-            &json!({ "connection_url": db }),
-            &mut json!({}),
-            None,
-        )
-        .await
-        .expect("the first call runs on the test database");
+        let first = json!({ "connection_url": URL_A });
+        n.execute(&query, &first, &mut json!({}), None)
+            .await
+            .expect("the first call runs");
         let (url, seen, h) = listener().await;
         let second = n
             .execute(
@@ -1320,6 +1358,7 @@ mod connection_provenance_tests {
             )
             .await;
         h.abort();
+        fake.abort();
         assert!(
             second.is_err(),
             "the second call ran on the first call's connection"
@@ -1418,13 +1457,13 @@ mod init_cache_tests {
     use crate::dag_engine::infrastructure::pool_registry::{PgPoolRegistry, PoolConfig};
     use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode};
 
-    const URL_A: &str = "postgres://u@a.test/db";
+    pub(super) const URL_A: &str = "postgres://u@a.test/db";
     const URL_B: &str = "postgres://u@b.test/db";
     const URL_C: &str = "postgres://u@c.test/db";
 
     /// A node whose registry holds a pool for `URL_A`, `URL_B` and `URL_C`
     /// and keeps at most `max_entries` of them.
-    async fn node_with(
+    pub(super) async fn node_with(
         max_entries: usize,
     ) -> (SqlNode, Arc<PgPoolRegistry>, tokio::task::JoinHandle<()>) {
         let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1450,10 +1489,6 @@ mod init_cache_tests {
         (SqlNode::new(factory), registry, h)
     }
 
-    async fn node() -> (SqlNode, Arc<PgPoolRegistry>, tokio::task::JoinHandle<()>) {
-        node_with(PoolConfig::defaults().max_entries).await
-    }
-
     /// A tool call: `config` is `{}`, every value arrives in `inputs`.
     async fn call(n: &SqlNode, args: Value) -> Result<Value, String> {
         let mut inputs: NodeInputs = serde_json::from_value(args).unwrap();
@@ -1471,7 +1506,7 @@ mod init_cache_tests {
     /// bound, per-URL pool and metrics hold for `sql_query` too.
     #[tokio::test]
     async fn every_call_takes_its_pool_from_the_registry() {
-        let (n, registry, h) = node().await;
+        let (n, registry, h) = node_with(8).await;
         for _ in 0..2 {
             call(&n, json!({ "connection_url": URL_A })).await.unwrap();
         }
@@ -1522,10 +1557,49 @@ mod init_cache_tests {
         assert_eq!(runs.load(SeqCst), 5, "the least recently used key stayed");
     }
 
+    /// `execute` keys its initialization by URL and the config it reads.
+    #[tokio::test]
+    async fn each_url_and_init_config_gets_its_own_initialization() {
+        let (n, _registry, h) = node_with(8).await;
+        let perms =
+            |preset: &str, tenant: &str| json!({ "preset": preset, "tenant_user_id": tenant });
+        for (url, permissions) in [
+            (URL_A, perms("read_only", "u1")),
+            (URL_A, perms("read_only", "u2")),
+            (URL_B, perms("read_only", "u1")),
+            (URL_A, perms("read_write", "u1")),
+        ] {
+            call(
+                &n,
+                json!({ "connection_url": url, "permissions": permissions }),
+            )
+            .await
+            .unwrap();
+        }
+        h.abort();
+        assert_eq!(entries(&n), 3);
+    }
+
+    /// Two configurations on one database each get their own description.
+    #[tokio::test]
+    async fn each_init_config_gets_its_own_description() {
+        let (n, _registry, h) = node_with(8).await;
+        let mut seen = Vec::new();
+        for max_rows in [5, 7] {
+            let config =
+                json!({ "connection_url": URL_A, "runtime_limits": { "max_rows": max_rows } });
+            let ctx = n.initialize(&config).await.unwrap();
+            seen.push(ctx.description_supplement.unwrap_or_default());
+        }
+        h.abort();
+        assert!(seen[0].contains("Max rows: 5"), "{}", seen[0]);
+        assert!(seen[1].contains("Max rows: 7"), "{}", seen[1]);
+    }
+
     /// A failed initialization leaves nothing behind.
     #[tokio::test]
     async fn a_failed_initialization_is_not_cached() {
-        let (n, _registry, h) = node().await;
+        let (n, _registry, h) = node_with(8).await;
         let failed = call(
             &n,
             json!({ "connection_url": URL_A, "setup_sql": "SELECT 1" }),
