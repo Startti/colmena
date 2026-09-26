@@ -93,6 +93,14 @@ pub trait ToolExecutor: Send + Sync {
     fn child_scope(&self, _call: &ToolCall) -> Option<String> {
         None
     }
+
+    /// For a call of a `parallel` tool, the key of the memory chain it belongs
+    /// to: calls with the same key use the same conversation thread, so they
+    /// must not run at the same time. `None` — the default — for a call whose
+    /// tool is not `parallel`.
+    fn parallel_chain_key(&self, _call: &ToolCall) -> Option<String> {
+        None
+    }
 }
 
 #[cfg(test)]

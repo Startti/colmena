@@ -2453,7 +2453,7 @@ struct MergedCall<'a> {
     tool_cfg: Option<&'a ToolConfiguration>,
     inputs: HashMap<String, Value>,
     /// What the merge ignored of the model's arguments, for the dispatch to
-    /// warn about: merging prints nothing, so a call merged twice warns once.
+    /// warn about: merging prints nothing, since a call is merged twice.
     warnings: Vec<String>,
 }
 
@@ -2474,6 +2474,9 @@ impl DagToolExecutor {
     /// resolve the entry and its node, parse the model's arguments, and merge
     /// them into the entry's authored config (node_schema, `$DYNAMIC`, or
     /// legacy field_mapping).
+    ///
+    /// Shared by `execute_inner` and [`resolved_thread`](Self::resolved_thread),
+    /// so the thread a call is chained by is the thread its dispatch runs on.
     #[allow(deprecated)]
     fn merge_call(&self, tool_call: &ToolCall) -> Result<MergedCall<'_>, LlmError> {
         use crate::dag_engine::infrastructure::node_schema_merge::{
@@ -2661,6 +2664,18 @@ impl DagToolExecutor {
         Ok(raw_thread
             .and_then(|v| v.as_str().map(Self::sanitize_thread_id))
             .filter(|s| !s.is_empty()))
+    }
+
+    /// The conversation thread `call` will run on: the `<thread>` of its
+    /// memory path `tool/<tool>/<thread>`, reached through the same merge and
+    /// the same resolution its dispatch uses. `None` when the call names no
+    /// usable thread or cannot be merged: such a call fails before it reaches
+    /// any memory.
+    fn resolved_thread(&self, call: &ToolCall) -> Option<String> {
+        let merged = self.merge_call(call).ok()?;
+        Self::thread_of(merged.tool_cfg, merged.inputs.get(THREAD_ID_PARAM))
+            .ok()
+            .flatten()
     }
 }
 
@@ -2941,6 +2956,27 @@ impl ToolExecutor for DagToolExecutor {
         self.configured_tool(&call.function.name)
             .filter(|cfg| cfg.parallel)
             .map(|_| format!("{}#{k}", call.function.name))
+    }
+
+    /// Calls with the same key share a conversation thread:
+    /// - `dynamic`: the tool and its resolved thread — two calls to the same
+    ///   agent share it, two agents do not;
+    /// - `persistent`: the tool, whose one thread every call shares;
+    /// - `stateless`: the call itself, which shares nothing.
+    fn parallel_chain_key(&self, call: &ToolCall) -> Option<String> {
+        let name = &call.function.name;
+        let cfg = self.configured_tool(name).filter(|cfg| cfg.parallel)?;
+        Some(match cfg.memory_mode {
+            MemoryMode::Dynamic => match self.resolved_thread(call) {
+                Some(thread) => format!("{name}\u{1f}{thread}"),
+                // No usable thread: the call fails before it reaches memory.
+                // It chains with this tool's other thread-less calls, so two
+                // identical calls still meet in one chain.
+                None => name.clone(),
+            },
+            MemoryMode::Persistent => name.clone(),
+            MemoryMode::Stateless => call.id.clone(),
+        })
     }
 
     async fn available_tools(&self) -> Vec<crate::llm::domain::ToolDefinition> {
@@ -6415,7 +6451,7 @@ mod child_graph_source_arg_tests {
 /// D2 of the parallel Run My Agent design: a call of a tool whose entry says
 /// `"parallel": true` gets its own identity — `<tool>#<k>`, k being its index
 /// in the model's `tool_calls` message — while its memory stays keyed exactly
-/// as before.
+/// as before. And its memory chain key names the thread it will run on.
 #[cfg(test)]
 mod parallel_identity_tests {
     use super::*;
@@ -6608,8 +6644,48 @@ mod parallel_identity_tests {
         );
     }
 
-    /// The merge prints nothing: it hands back what it ignored, and the
-    /// dispatch warns about it once.
+    #[test]
+    fn two_calls_to_the_same_agent_share_a_chain_key() {
+        let exec = executor(run_entry(json!({ "parallel": true })));
+        let a1 = exec.parallel_chain_key(&run_call("c1", "agent-a", Some(0)));
+        let a2 = exec.parallel_chain_key(&run_call("c2", "agent-a", Some(1)));
+        assert_eq!(a1.as_deref(), Some("Run\u{1f}agent-a"));
+        assert_eq!(a1, a2);
+    }
+
+    #[test]
+    fn calls_to_different_agents_have_different_chain_keys() {
+        let exec = executor(run_entry(json!({ "parallel": true })));
+        let a = exec.parallel_chain_key(&run_call("c1", "agent-a", Some(0)));
+        let b = exec.parallel_chain_key(&run_call("c2", "agent-b", Some(1)));
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn a_persistent_parallel_tool_chains_every_call_under_its_name() {
+        let exec = executor(run_entry(
+            json!({ "parallel": true, "memory_mode": "persistent" }),
+        ));
+        let a = exec.parallel_chain_key(&run_call("c1", "agent-a", Some(0)));
+        let b = exec.parallel_chain_key(&run_call("c2", "agent-b", Some(1)));
+        assert_eq!(a.as_deref(), Some("Run"));
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn a_stateless_parallel_tool_chains_each_call_alone() {
+        let exec = executor(run_entry(
+            json!({ "parallel": true, "memory_mode": "stateless" }),
+        ));
+        let a = exec.parallel_chain_key(&run_call("c1", "agent-a", Some(0)));
+        let b = exec.parallel_chain_key(&run_call("c2", "agent-a", Some(1)));
+        assert_eq!(a.as_deref(), Some("c1"));
+        assert_eq!(b.as_deref(), Some("c2"));
+    }
+
+    /// The chain key merges a call the way its dispatch does, then the
+    /// dispatch merges it again. So the merge prints nothing: it hands back
+    /// what it ignored, and the dispatch warns about it once.
     #[test]
     fn merging_a_call_returns_its_warnings_instead_of_printing_them() {
         let exec = executor(run_entry(json!({ "parallel": true })));
@@ -6621,5 +6697,14 @@ mod parallel_identity_tests {
         assert_eq!(merged.warnings.len(), 2, "{:?}", merged.warnings);
         assert!(merged.warnings[0].contains("'child_graph_inline'"));
         assert!(merged.warnings[1].contains("'thread_id'"));
+    }
+
+    #[test]
+    fn a_tool_that_did_not_opt_in_has_no_chain_key() {
+        let exec = executor(run_entry(json!({})));
+        assert_eq!(
+            exec.parallel_chain_key(&run_call("c1", "agent-a", Some(0))),
+            None
+        );
     }
 }
