@@ -1054,7 +1054,7 @@
       "default_output": "body",
       "requires": [],
       "supports_env_vars": true,
-      "reserved_input_keys": ["base_url", "endpoint", "method", "headers", "body", "query_params", "query_parameters", "bearer_token", "authorization", "secure", "__colmena_session_id", "__node_id", "__colmena_resume_answer"]
+      "reserved_input_keys": ["base_url", "endpoint", "method", "headers", "body", "query_params", "query_parameters", "bearer_token", "authorization", "secure", "session_id", "__colmena_session_id", "__node_id", "__colmena_resume_answer"]
     },
 
     "secure_suspend": {

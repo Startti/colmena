@@ -232,7 +232,7 @@ fn filename_from_url_path(url: &Url) -> String {
 
 impl HttpNode {
     /// Keys this node consumes itself; they must never travel as query params.
-    const RESERVED_KEYS: [&'static str; 10] = [
+    const RESERVED_KEYS: [&'static str; 11] = [
         "base_url",
         "endpoint",
         "method",
@@ -243,6 +243,9 @@ impl HttpNode {
         "bearer_token",
         "authorization",
         "secure", // internal Colmena flag — NEVER send to external APIs
+        // The run's id: global state hands it to every node. An API that needs a
+        // `session_id` param gets it through `query_params`.
+        "session_id",
     ];
 
     /// True for engine-injected bookkeeping inputs — the domain's
@@ -2548,6 +2551,16 @@ mod extra_query_params_tests {
 
     fn untrusted() -> EnvPolicy {
         EnvPolicy::Restricted(Default::default())
+    }
+
+    /// Global state hands the run's `session_id` to every node; it used to
+    /// reach external APIs as `?session_id=<run uuid>`.
+    #[test]
+    fn the_run_session_id_is_never_a_query_param() {
+        let given = inputs(&[("session_id", json!("run-uuid")), ("page", json!("2"))]);
+        let got = HttpNode::collect_extra_query_params(&given, &untrusted());
+        assert_eq!(got.get("session_id"), None);
+        assert_eq!(got.get("page"), Some(&json!("2")));
     }
 
     fn inputs(pairs: &[(&str, Value)]) -> NodeInputs {
