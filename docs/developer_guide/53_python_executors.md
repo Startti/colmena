@@ -65,6 +65,24 @@ runs the code over a byte stream, one request and one response per call
   `Python execution error: …` (malformed) or
   `PythonExecutorError: unsupported protocol version …`.
 
+### The per-call body
+
+`python_exec::child::handle_request` is what the process that runs the code
+does for one call: read one request frame (capped at the size the host
+allows), check its version, run the same helper the in-process executor
+runs, and write one response frame.
+
+- A request larger than the cap gets a `too_large` response, but only a host
+  whose write of that frame succeeded sees it; a host should check the size
+  before sending (it knows the cap), and the stream is not reused after it.
+- A request of another protocol version gets a version error stamped with the
+  child's own version, so the host's version check fires; the version is read
+  before the rest of the request, so a request of a different shape still
+  gets it.
+- A truncated request or one that is not valid JSON writes nothing: the host
+  sees the stream close. So does a panic in the helper. The process that hosts
+  the body is expected to exit after either.
+
 ## About `restricted`
 
 `restricted` validates imports and a few builtins before running. It helps
