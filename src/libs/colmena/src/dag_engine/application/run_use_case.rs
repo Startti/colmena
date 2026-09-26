@@ -429,6 +429,10 @@ impl DagRunUseCase {
             } else {
                 HashSet::new()
             };
+            // Snapshotted with it, for the same reason: the key each resuming
+            // `llm_call` asked its question under.
+            let asked_in =
+                Self::conversation_keys_asked_in(&graph, &all_outputs, &resuming_node_ids);
 
             if !global_shared_state.is_object() {
                 global_shared_state = serde_json::json!({});
@@ -630,12 +634,16 @@ impl DagRunUseCase {
 
                 // Inject __colmena_resume_answer only for nodes that were SUSPENDED
                 // in the persisted snapshot. See spec §3.1 and §4.1.2.
+                // The answer continues the conversation its question was asked
+                // in, so an `llm_call` that gets one runs under that key.
+                let mut resumed_path = None;
                 if let Some(ans) = &resume_answer {
                     if resuming_node_ids.contains(&node_id) {
                         inputs.insert(
                             "__colmena_resume_answer".to_string(),
                             Value::String(ans.clone()),
                         );
+                        resumed_path = asked_in.get(&node_id).cloned();
                     } else {
                         tracing::trace!(
                             target: "colmena::dag_engine",
@@ -644,10 +652,10 @@ impl DagRunUseCase {
                         );
                     }
                 }
-                let node_id_path = match &path_prefix {
+                let node_id_path = resumed_path.unwrap_or_else(|| match &path_prefix {
                     Some(prefix) => format!("{}/{}", prefix, node_id),
                     None => node_id.clone(),
-                };
+                });
 
                 inputs.insert("__colmena_session_id".to_string(), Value::String(session_id.clone()));
                 inputs.insert("__node_id".to_string(), Value::String(node_id.clone()));
@@ -1365,6 +1373,35 @@ impl DagRunUseCase {
                 } else {
                     None
                 }
+            })
+            .collect()
+    }
+
+    /// The key (`_conversation_key.node_id`) each resuming `llm_call` asked
+    /// its question under, from its stored SUSPENDED output.
+    ///
+    /// An answer continues the conversation its question was asked in, even
+    /// when this run derives another path for the node: a question asked in
+    /// a tool-invoked child before a tool's thread became its caller's own
+    /// was asked under the root's thread. Otherwise the stored key equals the
+    /// derived one. Only `llm_call` nodes, by type: a graph-level `subgraph`
+    /// node's stored output is its child's, which carries a grandchild's key.
+    fn conversation_keys_asked_in(
+        graph: &Graph,
+        all_outputs: &HashMap<String, Value>,
+        resuming_node_ids: &HashSet<String>,
+    ) -> HashMap<String, String> {
+        resuming_node_ids
+            .iter()
+            .filter(|id| {
+                graph
+                    .nodes
+                    .get(*id)
+                    .is_some_and(|n| n.node_type == "llm_call")
+            })
+            .filter_map(|id| {
+                let key = all_outputs.get(id)?["_conversation_key"]["node_id"].as_str()?;
+                (!key.is_empty()).then(|| (id.clone(), key.to_string()))
             })
             .collect()
     }
@@ -2099,6 +2136,151 @@ mod resuming_node_ids_tests {
         let all: HashMap<String, serde_json::Value> = HashMap::new();
         let set = DagRunUseCase::compute_resuming_node_ids(&all, &Some("ans".to_string()));
         assert!(set.is_empty());
+    }
+}
+
+/// A resumed `llm_call` continues the conversation its question was asked
+/// in: the `_conversation_key.node_id` its SUSPENDED output recorded, even
+/// when the path this turn derives for it is another one.
+#[cfg(test)]
+mod resumed_conversation_key_tests {
+    use super::*;
+    use crate::dag_engine::domain::node::ExecutableNode;
+    use crate::dag_engine::domain::observer::ExecutionObserver;
+    use async_trait::async_trait;
+    use futures::StreamExt;
+    use std::error::Error as StdError;
+    use std::sync::Mutex;
+
+    /// Asks on its first run, recording `config.asked_in` as the key it
+    /// asked under; answers on the next. Keeps the path of every run.
+    #[derive(Default)]
+    struct Asker(Mutex<Vec<Value>>);
+    #[async_trait]
+    impl ExecutableNode for Asker {
+        async fn execute(
+            &self,
+            inputs: &NodeInputs,
+            config: &Value,
+            _s: &mut Value,
+            _o: Option<Arc<dyn ExecutionObserver>>,
+        ) -> Result<Value, Box<dyn StdError + Send + Sync>> {
+            let mut paths = self.0.lock().unwrap();
+            paths.push(inputs["__colmena_node_id_path"].clone());
+            if paths.len() > 1 {
+                return Ok(json!({ "text": "ok" }));
+            }
+            Ok(json!({
+                "__colmena_status": "SUSPENDED",
+                "questions": [],
+                "_conversation_key": { "node_id": config["asked_in"].clone() },
+            }))
+        }
+        fn schema(&self) -> Value {
+            json!({})
+        }
+    }
+
+    struct Registry(Arc<Asker>);
+    impl NodeRegistryPort for Registry {
+        fn get_node(&self, _node_type: &str) -> Option<Arc<dyn ExecutableNode>> {
+            Some(self.0.clone())
+        }
+        fn get_all_nodes(&self) -> HashMap<String, Arc<dyn ExecutableNode>> {
+            HashMap::new()
+        }
+    }
+
+    #[derive(Default)]
+    struct MemRepo(Mutex<HashMap<String, DagRunState>>);
+    #[async_trait]
+    impl DagStateRepository for MemRepo {
+        async fn get_by_id(&self, id: &str) -> Result<Option<DagRunState>, DagError> {
+            Ok(self.0.lock().unwrap().get(id).cloned())
+        }
+        async fn save(&self, s: &DagRunState) -> Result<(), DagError> {
+            let mut rows = self.0.lock().unwrap();
+            rows.insert(s.session_id.clone(), s.clone());
+            Ok(())
+        }
+        async fn find_resume_entry(&self, _: &str) -> Result<Option<String>, DagError> {
+            Ok(None)
+        }
+        async fn find_suspended_child(&self, _: &str) -> Result<Option<String>, DagError> {
+            Ok(None)
+        }
+    }
+
+    /// The node runs in the child of a tool call keyed per caller…
+    const PREFIX: &str = "tool/Y/u/agent/tool/X/x";
+    const DERIVED: &str = "tool/Y/u/agent/tool/X/x/agent";
+    /// …and asked under the key it had before that: the root's thread.
+    const ASKED_IN: &str = "tool/X/x/agent";
+
+    /// Turn 1: `agent` (a `node_type`) asks. Turn 2, with `answer`: it runs
+    /// again. Returns the path of that second run.
+    async fn second_run_path(node_type: &str, asked_in: &str, answer: Option<&str>) -> Value {
+        let asker = Arc::new(Asker::default());
+        let repo = Arc::new(MemRepo::default());
+        let graph: Graph = serde_json::from_value(json!({
+            "nodes": { "agent": { "type": node_type, "config": { "asked_in": asked_in } } },
+            "edges": []
+        }))
+        .unwrap();
+        for turn_answer in [None, answer] {
+            let uc = DagRunUseCase::new(
+                Arc::new(Registry(asker.clone())),
+                Some(repo.clone() as Arc<dyn DagStateRepository>),
+            );
+            let stream = uc.execute_stream(
+                graph.clone(),
+                Some("run_1".to_string()),
+                turn_answer.map(str::to_string),
+                false,
+                Some(PREFIX.to_string()),
+                Some("chat_1".to_string()),
+                None,
+            );
+            tokio::pin!(stream);
+            while let Some(event) = stream.next().await {
+                event.expect("the turn runs");
+            }
+        }
+        let paths = asker.0.lock().unwrap().clone();
+        assert_eq!(paths.len(), 2, "{paths:?}");
+        assert_eq!(
+            paths[0], DERIVED,
+            "the question was asked at the derived path"
+        );
+        paths[1].clone()
+    }
+
+    #[tokio::test]
+    async fn a_resumed_llm_call_continues_where_its_question_was_asked() {
+        let path = second_run_path("llm_call", ASKED_IN, Some("sí")).await;
+        assert_eq!(path, ASKED_IN);
+    }
+
+    /// A graph-level `subgraph` node's stored output is its child's final
+    /// one, which carries a grandchild's `_conversation_key`.
+    #[tokio::test]
+    async fn a_resumed_subgraph_node_ignores_the_key_its_output_carries() {
+        let path = second_run_path("subgraph", ASKED_IN, Some("sí")).await;
+        assert_eq!(path, DERIVED);
+    }
+
+    #[tokio::test]
+    async fn a_turn_without_an_answer_runs_the_node_where_it_is_now() {
+        let path = second_run_path("llm_call", ASKED_IN, None).await;
+        assert_eq!(path, DERIVED);
+    }
+
+    /// A question asked after keys became per caller was asked under the
+    /// derived key: honoring it changes nothing.
+    #[tokio::test]
+    async fn a_stored_key_equal_to_the_derived_one_changes_nothing() {
+        let path = second_run_path("llm_call", DERIVED, Some("sí")).await;
+        assert_eq!(path, DERIVED);
     }
 }
 
