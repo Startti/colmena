@@ -3501,12 +3501,12 @@ mod graph_http_payload_tests {
             json!({}),
         )
         .await;
-        let leaked = other.received_requests().await.unwrap().iter().any(|r| {
+        let reached = other.received_requests().await.unwrap().iter().any(|r| {
             r.headers
                 .get("authorization")
                 .is_some_and(|v| v.to_str().unwrap().contains("author-token-c-test-only"))
         });
-        assert!(!leaked, "the author's bearer reached another host");
+        assert!(!reached, "the author's bearer reached another host");
 
         let other_host = other.uri().trim_start_matches("http://").to_string();
         let mut allowed = with_bearer;

@@ -7196,13 +7196,13 @@ mod author_owned_arg_tests {
             FunctionCall::new("open".into(), args.to_string()),
         );
         let result = executor.execute(&tc).await.unwrap();
-        let leaked = other.received_requests().await.unwrap().iter().any(|r| {
+        let reached = other.received_requests().await.unwrap().iter().any(|r| {
             r.headers
                 .get("authorization")
                 .is_some_and(|v| v == "Bearer author-fixed-test-only")
         });
         assert!(
-            !leaked,
+            !reached,
             "the author's fixed bearer reached a model-chosen host"
         );
         assert!(!result.success);

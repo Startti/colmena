@@ -2989,13 +2989,13 @@ mod redirect_tests {
             .execute(&HashMap::new(), &config, &mut json!({}), None)
             .await
             .unwrap();
-        let leaked = other.received_requests().await.unwrap().iter().any(|r| {
+        let reached = other.received_requests().await.unwrap().iter().any(|r| {
             r.headers
                 .get("x-api-key")
                 .is_some_and(|v| v == "redir-key-test-only")
         });
         assert!(
-            !leaked,
+            !reached,
             "the author's key followed a redirect to another origin"
         );
         assert_eq!(out["status"], 302);
