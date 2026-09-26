@@ -1136,7 +1136,7 @@
 
     "socketio_request": {
       "name": "Socket.IO Request",
-      "description": "Connects to a Socket.IO server, emits an event with a JSON payload, and receives the response via acknowledgment callback or a separate server event. Supports two response patterns: ack mode (default — server responds via Socket.IO acknowledgment callback) and wait-event mode (set 'wait_event' to listen for a named server event instead). Supports namespaces, cookie-based authentication, custom headers, and configurable transport (WebSocket, polling, or auto). All string values in config support '${VAR_NAME}' environment variable resolution — essential for injecting API URLs and tokens securely. Input values override config values (inputs take priority). Each execution creates a fresh connection, emits the event, collects the response, and disconnects.",
+      "description": "Connects to a Socket.IO server, emits an event with a JSON payload, and receives the response via acknowledgment callback or a separate server event. Supports two response patterns: ack mode (default — server responds via Socket.IO acknowledgment callback) and wait-event mode (set 'wait_event' to listen for a named server event instead). Supports namespaces, cookie-based authentication, custom headers, and configurable transport (WebSocket, polling, or auto). All string values in config support '${VAR_NAME}' environment variable resolution — essential for injecting API URLs and tokens securely; a value that arrives through inputs is sent as written unless it is a tool's fixed value. Input values override config values (inputs take priority), except url, namespace, headers, cookies and allowed_hosts, which an edge without a field, global state or an unoffered tool argument never sets. Each execution creates a fresh connection, emits the event, collects the response, and disconnects.",
       "category": "integration",
       "config_fields": {
         "url": {
@@ -1221,10 +1221,17 @@
               "payload": { "environmentId": "${ENVIRONMENT_ID}" }
             }
           ]
+        },
+        "allowed_hosts": {
+          "type": "array",
+          "required": false,
+          "default": null,
+          "description": "Author-set only. Cookies and headers the author configured (other than accept/content-type/user-agent-like ones) are sent only to the origin of the author's url; this list names other hosts ('host' or 'host:port') that may receive them when the url comes from runtime data (an edge that names url, an open tool field). Any other destination is refused with an error.",
+          "example": ["socket.example.com"]
         }
       },
       "input_ports": {
-        "url": { "type": "string", "description": "Dynamic server URL. Overrides config." },
+        "url": { "type": "string", "description": "Dynamic server URL (an edge that names it, or a tool field the author offers). Overrides config; the author's cookies/headers follow it only to the author's origin or allowed_hosts." },
         "namespace": { "type": "string", "description": "Dynamic namespace. Overrides config." },
         "event": { "type": "string", "description": "Dynamic event name. Overrides config." },
         "payload": { "type": "any", "description": "Dynamic payload. Overrides config entirely." },

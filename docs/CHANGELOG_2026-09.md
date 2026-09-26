@@ -5716,3 +5716,18 @@ bearer al host del modelo.
 **ADP.** Campo nuevo opcional `allowed_hosts` en `http_request`. Una tool o un grafo que manda
 credenciales del autor a un host que viene de datos debe listar ese host en `allowed_hosts`.
 **Estado.** done.
+
+## 112. Endurecimiento: las cookies y headers del autor en `socketio_request` van solo a su host
+
+**Qué cambia.** La regla de §111 llega a `socketio_request`: las `cookies` y los `headers` que
+configuró el autor (fuera de `accept*`/`cache-control`/`content-type`/`user-agent`) salen solo
+hacia el origen del `url` del autor. Si el `url` viene de datos y apunta a otro origen, el nodo
+falla antes de conectar, salvo que el host esté en `allowed_hosts` (campo nuevo, del autor).
+La comparación y la lista las comparte con `http_request`
+(`HttpNode::credential_destination_allowed`).
+
+**Tests.** `socketio.rs::env_gate_tests` (listener TCP): con un `url` de datos, el listener no
+recibe ninguna conexión; con su host en `allowed_hosts`, recibe la cookie del autor.
+
+**ADP.** Campo nuevo opcional `allowed_hosts` en `socketio_request`.
+**Estado.** done.

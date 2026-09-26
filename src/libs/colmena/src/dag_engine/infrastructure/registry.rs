@@ -1161,7 +1161,7 @@ mod catalog_coverage_tests {
             ),
             (
                 "socketio_request",
-                &["url", "namespace", "headers", "cookies"],
+                &["url", "namespace", "headers", "cookies", "allowed_hosts"],
             ),
             ("for_each", &["target"]),
             (

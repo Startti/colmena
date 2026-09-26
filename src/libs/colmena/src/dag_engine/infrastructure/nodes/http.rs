@@ -485,7 +485,7 @@ impl HttpNode {
 
     /// Header names that never carry a credential. Any other header the author
     /// sets counts as one for [`Self::carries_author_credentials`].
-    const NON_CREDENTIAL_HEADERS: &'static [&'static str] = &[
+    pub(crate) const NON_CREDENTIAL_HEADERS: &'static [&'static str] = &[
         "accept",
         "accept-encoding",
         "accept-language",
@@ -495,7 +495,11 @@ impl HttpNode {
     ];
 
     /// The author's value for `key`: from `config`, or a tool's `fixed` value.
-    fn author_value<'a>(inputs: &'a NodeInputs, config: &'a Value, key: &str) -> Option<&'a Value> {
+    pub(crate) fn author_value<'a>(
+        inputs: &'a NodeInputs,
+        config: &'a Value,
+        key: &str,
+    ) -> Option<&'a Value> {
         config.get(key).or_else(|| {
             inputs.get(key).filter(|_| {
                 crate::dag_engine::infrastructure::env_provenance::is_authored_input(inputs, key)
@@ -550,13 +554,30 @@ impl HttpNode {
         if !Self::carries_author_credentials(inputs, config) {
             return Ok(());
         }
+        let allowed = Self::author_value(inputs, config, "allowed_hosts");
+        Self::credential_destination_allowed(url, author_base_url, allowed).map_err(|host| {
+            format!(
+                "http_request: the credentials configured for this node are sent only to \
+                     its base_url's origin or to a host in `allowed_hosts`; '{host}' is neither"
+            )
+        })
+    }
+
+    /// `Ok` when `url` shares the origin of `author_base_url` or its host
+    /// (`"host"` or `"host:port"`) is in `allowed_hosts`; otherwise
+    /// `Err("host:port")`. Shared with `socketio_request`.
+    pub(crate) fn credential_destination_allowed(
+        url: &Url,
+        author_base_url: Option<&str>,
+        allowed_hosts: Option<&Value>,
+    ) -> Result<(), String> {
         let author_origin = author_base_url.and_then(|b| Url::parse(b).ok());
         if author_origin.is_some_and(|a| Self::same_origin(&a, url)) {
             return Ok(());
         }
         let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
         let host_port = format!("{host}:{}", url.port_or_known_default().unwrap_or_default());
-        let allowed = Self::author_value(inputs, config, "allowed_hosts")
+        let allowed = allowed_hosts
             .and_then(|v| v.as_array())
             .is_some_and(|hosts| {
                 hosts.iter().filter_map(|h| h.as_str()).any(|h| {
@@ -565,12 +586,10 @@ impl HttpNode {
                 })
             });
         if allowed {
-            return Ok(());
+            Ok(())
+        } else {
+            Err(host_port)
         }
-        Err(format!(
-            "http_request: the credentials configured for this node are sent only to its \
-             base_url's origin or to a host in `allowed_hosts`; '{host_port}' is neither"
-        ))
     }
 
     /// A client whose redirects never take the author's credentials to

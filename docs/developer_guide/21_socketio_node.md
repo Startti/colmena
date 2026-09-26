@@ -279,6 +279,13 @@ see [22_tool_execution_flow.md](22_tool_execution_flow.md)). `url`,
 field, global state or an unoffered tool argument never sets them
 (CHANGELOG 2026-09 §111 and §116).
 
+The `cookies` and `headers` the author configured (other than
+`accept*`/`cache-control`/`content-type`/`user-agent`) are sent only to the
+origin of the author's `url`. When `url` comes from runtime data (an edge that
+names it, an open tool field) and points elsewhere, the node fails before
+connecting unless the host is listed in `allowed_hosts` (`"host"` or
+`"host:port"`, author-set) — the same rule as `http_request` (§112).
+
 ---
 
 ## Example 1: Standalone Node — Ack Mode

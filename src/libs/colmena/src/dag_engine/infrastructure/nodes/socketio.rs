@@ -416,7 +416,7 @@ impl SocketIoNode {
 impl ExecutableNode for SocketIoNode {
     /// Where the connection goes and with which credentials is author-set.
     fn author_owned_inputs(&self) -> &'static [&'static str] {
-        &["url", "namespace", "headers", "cookies"]
+        &["url", "namespace", "headers", "cookies", "allowed_hosts"]
     }
 
     async fn execute(
@@ -488,6 +488,47 @@ impl ExecutableNode for SocketIoNode {
             .namespace(&namespace)
             .transport_type(transport_type)
             .reconnect(false);
+
+        // Cookies and headers the author configured go only to the author's
+        // `url` origin or to a host in `allowed_hosts` (same rule as
+        // `http_request`); a `url` from data may not take them elsewhere.
+        {
+            use crate::dag_engine::infrastructure::env_provenance::is_authored_input;
+            use crate::dag_engine::infrastructure::nodes::http::HttpNode;
+            let author = |key: &str| HttpNode::author_value(inputs, config, key);
+            let carries = author("cookies").is_some()
+                || author("headers")
+                    .and_then(|h| h.as_object())
+                    .is_some_and(|h| {
+                        h.keys().any(|k| {
+                            !HttpNode::NON_CREDENTIAL_HEADERS
+                                .contains(&k.to_ascii_lowercase().as_str())
+                        })
+                    });
+            if carries {
+                let author_url = match inputs.get("url") {
+                    Some(_) if !is_authored_input(inputs, "url") => config
+                        .get("url")
+                        .and_then(|v| v.as_str())
+                        .and_then(|s| Self::resolve_env_vars(s).ok()),
+                    _ => Some(url.clone()),
+                };
+                let target = reqwest::Url::parse(&url)
+                    .map_err(|e| format!("socketio_request: invalid url '{url}': {e}"))?;
+                HttpNode::credential_destination_allowed(
+                    &target,
+                    author_url.as_deref(),
+                    author("allowed_hosts"),
+                )
+                .map_err(|host| {
+                    format!(
+                        "socketio_request: the cookies/headers configured for this node are \
+                         sent only to its url's origin or to a host in `allowed_hosts`; \
+                         '{host}' is neither"
+                    )
+                })?;
+            }
+        }
 
         if let Some(cookies) = str_field("cookies")? {
             builder = builder.opening_header("Cookie", cookies);
@@ -814,7 +855,8 @@ impl ExecutableNode for SocketIoNode {
                         "polling".into(),
                     ]),
                 )
-                .with_field("pre_events", FieldSpec::of_type("array")),
+                .with_field("pre_events", FieldSpec::of_type("array"))
+                .with_field("allowed_hosts", FieldSpec::of_type("array")),
         )
     }
 }
@@ -1009,20 +1051,51 @@ mod env_gate_tests {
         (url, h)
     }
 
+    /// The author's cookies and headers go only to the author's `url` host
+    /// or an `allowed_hosts` entry, never to a `url` that came from data.
+    #[tokio::test]
+    async fn author_credentials_go_only_to_the_authors_host_or_allowed_hosts() {
+        std::env::set_var("COLMENA_CLASS_TEST_SIO_COOKIE", "sio-cookie-test-only");
+        let config = |allowed: Value| {
+            json!({
+                "url": "http://127.0.0.1:9", "event": "e", "timeout_ms": 300,
+                "cookies": "k=${COLMENA_CLASS_TEST_SIO_COOKIE}", "allowed_hosts": allowed
+            })
+        };
+        let (url, got) = listen().await;
+        let inputs = HashMap::from([("url".to_string(), json!(url))]);
+        let refused = SocketIoNode
+            .execute(&inputs, &config(json!([])), &mut json!({}), None)
+            .await;
+        assert!(refused.is_err(), "connected to a host that came from data");
+        let reached = tokio::time::timeout(Duration::from_millis(300), got).await;
+        assert!(reached.is_err(), "the data host received a connection");
+
+        let (url, got) = listen().await;
+        let host_port = url.trim_start_matches("http://").to_string();
+        let inputs = HashMap::from([("url".to_string(), json!(url))]);
+        let _ = SocketIoNode
+            .execute(&inputs, &config(json!([host_port])), &mut json!({}), None)
+            .await;
+        let req = tokio::time::timeout(Duration::from_secs(5), got)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(req.contains("k=sio-cookie-test-only"), "{req}");
+        std::env::remove_var("COLMENA_CLASS_TEST_SIO_COOKIE");
+    }
+
     #[tokio::test]
     async fn an_inputs_value_is_sent_as_written_while_config_expands() {
         std::env::set_var("COLMENA_CLASS_TEST_SIO", "sio-data-test-only");
         std::env::set_var("COLMENA_CLASS_TEST_SIO_CFG", "sio-config-test-only");
         let (url, got) = listen().await;
-        let inputs = HashMap::from([
-            ("url".to_string(), json!(url)),
-            (
-                "headers".to_string(),
-                json!({ "X-Data": "${COLMENA_CLASS_TEST_SIO}" }),
-            ),
-        ]);
+        let inputs = HashMap::from([(
+            "headers".to_string(),
+            json!({ "X-Data": "${COLMENA_CLASS_TEST_SIO}" }),
+        )]);
         let config = json!({
-            "event": "e", "timeout_ms": 300,
+            "url": url, "event": "e", "timeout_ms": 300,
             "cookies": "k=${COLMENA_CLASS_TEST_SIO_CFG}"
         });
         let _ = SocketIoNode
