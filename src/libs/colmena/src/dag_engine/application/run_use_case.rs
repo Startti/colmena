@@ -3445,6 +3445,38 @@ mod graph_http_payload_tests {
         std::env::remove_var("COLMENA_P4_TEST_TOKEN_B");
     }
 
+    /// Engine keys never survive `build_inputs_for`, whether an edge without a
+    /// field flattens them or an edge names them; an ordinary key still arrives.
+    #[test]
+    fn build_inputs_for_drops_engine_keys_on_both_edge_shapes() {
+        let g: Graph = serde_json::from_value(json!({
+            "nodes": {
+                "hook": { "type": "trigger_webhook", "config": {} },
+                "call": { "type": "http_request", "config": {} }
+            },
+            "edges": [
+                { "from": "hook", "to": "call" },
+                { "from": "hook.normal", "to": "call.__colmena_resume_answer" },
+                { "from": "hook.normal", "to": "call.__node_id" },
+                { "from": "hook.normal", "to": "call.__colmena_subgraph_depth" }
+            ]
+        }))
+        .unwrap();
+        let outputs = HashMap::from([(
+            "hook".to_string(),
+            json!({
+                "__colmena_resume_answer": "forged",
+                "__node_id": "forged",
+                "__colmena_subgraph_depth": 9,
+                "normal": "ok"
+            }),
+        )]);
+        let inputs = DagRunUseCase::new(Arc::new(Registry), None)
+            .build_inputs_for("call", &g.edges, &outputs, &g)
+            .unwrap();
+        assert_eq!(inputs, HashMap::from([("normal".to_string(), json!("ok"))]));
+    }
+
     /// Global state fills a missing input, but never an engine key the loop
     /// chose not to write — only the nesting depth a parent seeds.
     #[tokio::test]
