@@ -61,6 +61,13 @@ pub struct StoredMessage {
 /// `recall_history` tool. Shared by every `ConversationRepository` backend.
 pub const MAX_LISTED_NODE_ACTIVITY: i64 = 100;
 
+/// The path segment a tool's memory key hangs from: `tool/<name>…` from a
+/// root-level caller, `<caller>/tool/<name>…` from a caller inside a
+/// tool-invoked child, whose own path starts with `tool/`. Every rule that
+/// builds or recognizes those keys reads it from here: the key builder and
+/// its nested-caller check (`memory_node_path`).
+pub const TOOL_MEMORY_SEGMENT: &str = "tool";
+
 /// Per-`node_id` activity summary for thread enumeration (`list_threads`).
 #[derive(Debug, Clone)]
 pub struct NodeActivity {

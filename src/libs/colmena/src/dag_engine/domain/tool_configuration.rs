@@ -23,7 +23,7 @@
 //! The execution priority in `DagToolExecutor` is: `node_schema` → `$DYNAMIC` → deprecated.
 
 use crate::llm::domain::mcp::McpTransport;
-use crate::llm::domain::ParameterProperty;
+use crate::llm::domain::{ParameterProperty, TOOL_MEMORY_SEGMENT};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
@@ -100,19 +100,89 @@ impl SubToolFilter {
 ///
 /// Only meaningful for memory-bearing node types (see [`MEMORY_CAPABLE_NODE_TYPES`]).
 /// Absent in JSON → [`MemoryMode::Stateless`], preserving today's behavior.
+///
+/// The `node_id` of each mode is built by [`memory_node_path`]. A `persistent`
+/// or `dynamic` thread is per caller only inside a tool-invoked child: there
+/// the key is prefixed with that caller's path. Every other caller (the root,
+/// a graph-level subgraph child, an orchestrator agent at the root) shares the
+/// unprefixed key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum MemoryMode {
-    /// Every call is an isolated conversation. `node_id = tool/<tool_call_id>`.
-    /// The default, and the only mode active in the current build.
+    /// Every call is an isolated conversation. `node_id = tool/<tool_call_id>`,
+    /// whoever the caller is. The default.
     #[default]
     Stateless,
-    /// One persistent conversation shared by every call to this tool.
+    /// One persistent conversation. A caller inside a tool-invoked child has
+    /// its own, `node_id = <caller>/tool/<tool_name>`; every other caller shares
     /// `node_id = tool/<tool_name>`.
     Persistent,
     /// The model names the thread per call via a required `thread_id` parameter.
-    /// `node_id = tool/<tool_name>/<thread_id>`.
+    /// `node_id = tool/<tool_name>/<thread_id>`, or
+    /// `<caller>/tool/<tool_name>/<thread_id>` from a caller inside a
+    /// tool-invoked child.
     Dynamic,
+}
+
+/// A `dynamic` call named no thread: the model has to call again with one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MissingThreadId;
+
+/// The memory key (`node_id`) of one call to a tool with `mode`, in its
+/// root-level form (`caller` below says when it is prefixed):
+///
+/// - `persistent` → `tool/<name>`: one conversation its calls share.
+/// - `dynamic` → `tool/<name>/<thread>`: one per thread; no thread is
+///   [`MissingThreadId`].
+/// - `stateless` → `tool/<call_id>`: stable across a suspend/resume (the
+///   pending call is replayed with its id) and unique per call.
+///
+/// `caller` is the node id path of the `llm_call` that made the call. A
+/// caller whose path starts with `tool/` runs inside a tool-invoked child
+/// (every tool dispatch gives its child that prefix, and it is inherited at
+/// any depth). Its `persistent` and `dynamic` keys are its own:
+/// `<caller>/tool/<name>[/<thread>]`. So one tool called from the root and
+/// from inside another tool keeps two conversations, not one. Every other
+/// caller keeps `tool/<name>…`: the root, a graph-level subgraph child
+/// (`ventas/responder`), an orchestrator agent at the root. A `stateless`
+/// key is already unique per call and stays as it is.
+///
+/// Known edge: a root node whose id is literally `tool` gives the children
+/// of its graph-level subgraph `tool/…` paths, so they count as nested.
+pub fn memory_node_path(
+    caller: Option<&str>,
+    mode: MemoryMode,
+    name: &str,
+    thread: Option<&str>,
+    call_id: &str,
+) -> Result<String, MissingThreadId> {
+    match mode {
+        MemoryMode::Persistent => Ok(named_memory_path(caller, name)),
+        MemoryMode::Dynamic => thread
+            .filter(|t| !t.is_empty())
+            .map(|t| format!("{}/{t}", named_memory_path(caller, name)))
+            .ok_or(MissingThreadId),
+        MemoryMode::Stateless => Ok(format!("{TOOL_MEMORY_SEGMENT}/{call_id}")),
+    }
+}
+
+/// The prefix every `dynamic` thread of `name` lives under for `caller`:
+/// `tool/<name>/`, or `<caller>/tool/<name>/` (see [`memory_node_path`]).
+pub fn memory_thread_prefix(caller: Option<&str>, name: &str) -> String {
+    format!("{}/", named_memory_path(caller, name))
+}
+
+/// `tool/<name>`, under the caller's own path when the caller runs inside a
+/// tool-invoked child: its path starts with `tool/` ([`TOOL_MEMORY_SEGMENT`]).
+fn named_memory_path(caller: Option<&str>, name: &str) -> String {
+    let nested = caller.filter(|c| {
+        c.strip_prefix(TOOL_MEMORY_SEGMENT)
+            .is_some_and(|rest| rest.starts_with('/'))
+    });
+    match nested {
+        Some(caller) => format!("{caller}/{TOOL_MEMORY_SEGMENT}/{name}"),
+        None => format!("{TOOL_MEMORY_SEGMENT}/{name}"),
+    }
 }
 
 impl std::fmt::Display for MemoryMode {
@@ -643,7 +713,7 @@ pub struct ToolConfiguration {
     /// boundary opens as `<tool>#<k>` (k = the call's index in the model's
     /// `tool_calls` message) and the parent's tool-call frames carry
     /// `childScope`, so two calls in one batch stay apart. Its memory is
-    /// keyed as before (`tool/<tool>/<thread>`). Absent → `false`.
+    /// keyed as before ([`memory_node_path`]). Absent → `false`.
     /// `Graph::validate` rejects a value that is not a boolean.
     #[serde(default, skip_serializing_if = "is_false")]
     pub parallel: bool,
@@ -1257,6 +1327,77 @@ mod tests {
         assert_eq!(
             cfg("subgraph", json!("dynamic")).memory_mode,
             MemoryMode::Dynamic
+        );
+    }
+
+    /// Callers outside any tool-invoked child keep today's keys.
+    const ROOT_CALLERS: &[Option<&str>] = &[None, Some("agent"), Some("ventas/responder")];
+    /// Callers inside a tool-invoked child: under a dynamic tool's thread,
+    /// an llm_call invoked as a tool, an orchestrator agent inside a child,
+    /// an agent run by Run_My_Agent.
+    const NESTED_CALLERS: &[&str] = &[
+        "tool/Y/u/agent",
+        "tool/H",
+        "tool/Y/u/orch/agent",
+        "tool/Run_My_Agent/A/llm",
+    ];
+
+    /// `(mode, thread)` → the key a root caller gets. A fixed thread arrives
+    /// already templated (`${agentId}` → `agent-a`), like a model-named one.
+    fn keys_at_the_root() -> Vec<(MemoryMode, Option<&'static str>, &'static str)> {
+        vec![
+            (MemoryMode::Persistent, None, "tool/X"),
+            (MemoryMode::Dynamic, Some("t"), "tool/X/t"),
+            (MemoryMode::Dynamic, Some("agent-a"), "tool/X/agent-a"),
+            (MemoryMode::Stateless, None, "tool/call_1"),
+        ]
+    }
+
+    #[test]
+    fn a_caller_outside_a_tool_child_keeps_todays_keys() {
+        for caller in ROOT_CALLERS {
+            for (mode, thread, want) in keys_at_the_root() {
+                let got = memory_node_path(*caller, mode, "X", thread, "call_1");
+                assert_eq!(got.as_deref(), Ok(want), "{caller:?} {mode} {thread:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_caller_inside_a_tool_child_keys_a_named_thread_under_its_own_path() {
+        for caller in NESTED_CALLERS {
+            for (mode, thread, root_key) in keys_at_the_root() {
+                let want = match mode {
+                    MemoryMode::Stateless => root_key.to_string(),
+                    _ => format!("{caller}/{root_key}"),
+                };
+                let got = memory_node_path(Some(caller), mode, "X", thread, "call_1");
+                assert_eq!(got, Ok(want), "{caller} {mode} {thread:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_dynamic_call_with_no_thread_is_missing_its_thread_for_every_caller() {
+        let callers = ROOT_CALLERS
+            .iter()
+            .copied()
+            .chain(NESTED_CALLERS.iter().map(|c| Some(*c)));
+        for caller in callers {
+            for thread in [None, Some("")] {
+                let got = memory_node_path(caller, MemoryMode::Dynamic, "X", thread, "c");
+                assert_eq!(got, Err(MissingThreadId), "{caller:?} {thread:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_thread_prefix_is_the_dynamic_key_without_its_thread() {
+        assert_eq!(memory_thread_prefix(None, "X"), "tool/X/");
+        assert_eq!(memory_thread_prefix(Some("agent"), "X"), "tool/X/");
+        assert_eq!(
+            memory_thread_prefix(Some("tool/Y/u/agent"), "X"),
+            "tool/Y/u/agent/tool/X/"
         );
     }
 
