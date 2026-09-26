@@ -888,6 +888,31 @@ mod llm_call_tool_provenance_tests {
         );
     }
 
+    /// Outside local mode an `llm_call` whose `files` names a `path` fails
+    /// with `PathFieldNotAllowed` before any model call.
+    #[tokio::test]
+    async fn a_path_entry_fails_the_node_before_any_model_call() {
+        use crate::dag_engine::engine::local_mode;
+        assert!(!local_mode(), "the test process is not in local mode");
+        let script = vec![ScriptedResponse::Text("x".into())];
+        let model = Arc::new(ScriptedAdapter::new(script));
+        let _guard = OverrideGuard::install(model.clone());
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let config = json!({
+            "provider": "mock", "model": "m", "api_key": "k", "stream": false, "prompt": "go",
+            "files": [{ "mime_type": "text/plain", "path": file.path() }]
+        });
+        let registry = super::registry_tavily_tests::build_registry();
+        let llm = registry.get_node("llm_call").expect("llm_call");
+        let out = llm
+            .execute(&HashMap::new(), &config, &mut json!({}), None)
+            .await;
+        let err = out.unwrap_err().to_string();
+        let want = crate::llm::domain::LlmError::PathFieldNotAllowed.to_string();
+        assert!(err.contains(&want), "{err}");
+        assert_eq!(model.remaining(), 1, "the model was not called");
+    }
+
     /// Global state never hands an `llm_call` its `files`: the node starts
     /// without them.
     #[tokio::test]

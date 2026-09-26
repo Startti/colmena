@@ -528,14 +528,18 @@ impl Drop for ColmenaEngine {
 mod env_guard_rail_tests {
     //! Tests for the `COLMENA_LOCAL` env guard rail. These tests mutate
     //! process-wide environment variables and therefore MUST run serially.
+    //! They parse a variable of their own: a `COLMENA_LOCAL` set here could be
+    //! what `local_mode()` reads, once, for every other test in the process.
     use super::parse_bool_env;
     use serial_test::serial;
+
+    const VAR: &str = "COLMENA_TEST_PARSE_BOOL_ENV";
 
     /// Helper: clear all storage-relevant env vars before each test so we
     /// start from a known state.
     fn clean_env() {
         for v in [
-            "COLMENA_LOCAL",
+            VAR,
             "COLMENA_STORAGE_CALLBACK_URL",
             "COLMENA_STORAGE_CALLBACK_SECRET",
             "COLMENA_LOCAL_STORAGE_DIR",
@@ -550,9 +554,9 @@ mod env_guard_rail_tests {
     fn parse_bool_env_recognizes_truthy_values() {
         clean_env();
         for val in ["true", "TRUE", "1", "yes", "on", "  True  "] {
-            std::env::set_var("COLMENA_LOCAL", val);
+            std::env::set_var(VAR, val);
             assert_eq!(
-                parse_bool_env("COLMENA_LOCAL"),
+                parse_bool_env(VAR),
                 Some(true),
                 "value '{val}' should parse as true"
             );
@@ -565,9 +569,9 @@ mod env_guard_rail_tests {
     fn parse_bool_env_recognizes_falsy_values() {
         clean_env();
         for val in ["false", "FALSE", "0", "no", "off"] {
-            std::env::set_var("COLMENA_LOCAL", val);
+            std::env::set_var(VAR, val);
             assert_eq!(
-                parse_bool_env("COLMENA_LOCAL"),
+                parse_bool_env(VAR),
                 Some(false),
                 "value '{val}' should parse as false"
             );
@@ -579,15 +583,15 @@ mod env_guard_rail_tests {
     #[serial]
     fn parse_bool_env_returns_none_for_unset() {
         clean_env();
-        assert_eq!(parse_bool_env("COLMENA_LOCAL"), None);
+        assert_eq!(parse_bool_env(VAR), None);
     }
 
     #[test]
     #[serial]
     fn parse_bool_env_returns_none_for_garbage() {
         clean_env();
-        std::env::set_var("COLMENA_LOCAL", "maybe");
-        assert_eq!(parse_bool_env("COLMENA_LOCAL"), None);
+        std::env::set_var(VAR, "maybe");
+        assert_eq!(parse_bool_env(VAR), None);
         clean_env();
     }
 }
