@@ -6170,22 +6170,26 @@ segunda no ve: ese `llm_call` no crea fila en `dag_runs`). Nota:
 
 **Qué cambia.** Toda descarga de la URL de un adjunto (`files[].url` de `llm_call`) pasa por
 `SignedUrlDownloader`: las dos rutas de resolución (con y sin caché), la persistencia de bytes
-para `$attachment:<id>` (antes un `reqwest::get` sin límites), el resumen automático y la
-re-subida de las 24 h. El cliente baja solo `http`/`https` y marca solo direcciones públicas
-(unicast global, la regla del cliente MCP): un dominio se revisa dentro de la resolución DNS que
-usa el socket; una IP literal, en la URL y en cada salto de redirect (hasta 5). Sin proxy.
+para `$attachment:<id>`, el resumen automático y la re-subida de las 24 h. El cliente baja solo
+`http`/`https` y marca solo direcciones públicas (unicast global, la regla del cliente MCP): un
+dominio se revisa dentro de la resolución DNS que usa el socket; una IP literal, en la URL y en
+cada salto de redirect (sigue hasta 4). Sin proxy; todas las instancias comparten un cliente.
 Conexión 10 s, request completo 600 s y un tope de bytes: se rechaza por `Content-Length`, y un
 cuerpo que lo pasa corta el stream con error. Errores nuevos de `LlmError`:
 `AttachmentUrlRefused { reason }` (no se marca nada) y `AttachmentTooLarge { limit }`.
-Variables, leídas una vez por proceso: `COLMENA_ATTACHMENT_MAX_BYTES` (tope; por defecto 512 MiB)
-y `COLMENA_ATTACHMENT_ALLOW_PRIVATE_HOSTS=1|true` (apaga el chequeo de direcciones; solo
-desarrollo local). Se quita `SignedUrlDownloader::with_client`: el cliente es siempre el guardado.
+Variables, leídas una vez por proceso: `COLMENA_ATTACHMENT_MAX_BYTES` (tope; por defecto 100 MiB,
+por encima de los 100 MB por archivo que acepta ADP) y `COLMENA_ATTACHMENT_ALLOW_PRIVATE_HOSTS=1|true`
+(apaga el chequeo de direcciones; solo desarrollo local). Se quita
+`SignedUrlDownloader::with_client`: el cliente es siempre el guardado.
 
 **Tests.** `signed_url_downloader.rs`: un servidor en loopback (por IP y por nombre) no recibe
 ningún request; un redirect a una IP privada no se sigue; una URL `file:` no se lee; un cuerpo
-pasado del tope se rechaza y el stream termina tras el error. `llm.rs`: la persistencia de bytes
-no marca una dirección de loopback ni guarda nada.
+pasado del tope se rechaza por `Content-Length`, y uno en chunks termina el stream del cliente con
+un error; un error de transporte no lleva la URL. `llm.rs`: la persistencia de bytes no marca una
+dirección de loopback ni guarda nada. Los tests de polaridad usan un cliente solo público, sin
+depender de la variable.
 
-**ADP.** Sin cambios de API: las URLs firmadas de GCS son públicas. Un entorno local que sirva
+**ADP.** Sin cambios de SSE: las URLs firmadas de GCS son públicas. En Rust se quita
+`SignedUrlDownloader::with_client` y `LlmError` suma dos variantes. Un entorno local que sirva
 adjuntos desde `localhost` necesita `COLMENA_ATTACHMENT_ALLOW_PRIVATE_HOSTS=1`.
 **Estado.** done.

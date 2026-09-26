@@ -360,7 +360,7 @@ async fn generate_one_summary(
         acquire_bytes, extract_text, truncate_chars,
     };
 
-    // 1. Acquire bytes (no size bound — frontend enforces 100 MB).
+    // 1. Acquire bytes (a signed URL under the guarded client's byte cap).
     // `target.inline_bytes` carries the original bytes for Inline sources
     // (data: base64 uploads), since the upload pipeline consumed the first clone.
     let bytes = match acquire_bytes(&target.source, target.inline_bytes.as_deref(), fetcher).await {

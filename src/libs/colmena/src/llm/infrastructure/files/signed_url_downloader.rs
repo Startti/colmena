@@ -28,9 +28,10 @@ use crate::llm::domain::{BoxedByteStream, LlmError, SignedUrlFetcher};
 pub const ALLOW_PRIVATE_ENV_VAR: &str = "COLMENA_ATTACHMENT_ALLOW_PRIVATE_HOSTS";
 /// Byte cap of one fetch, a positive integer; else [`DEFAULT_MAX_BYTES`].
 pub const MAX_BYTES_ENV_VAR: &str = "COLMENA_ATTACHMENT_MAX_BYTES";
-/// 512 MiB, the largest single file the providers' Files APIs accept.
-pub const DEFAULT_MAX_BYTES: u64 = 512 * 1024 * 1024;
-const MAX_REDIRECTS: usize = 5;
+/// 100 MiB: the host application caps an uploaded file at 100 MB.
+pub const DEFAULT_MAX_BYTES: u64 = 100 * 1024 * 1024;
+/// URLs one request may visit, the first included: at most 4 redirects.
+const MAX_URLS: usize = 5;
 
 /// Whether an address may be dialled.
 type Dialable = fn(IpAddr) -> bool;
@@ -96,7 +97,7 @@ fn guarded_client(ok: Dialable) -> Client {
     crate::shared::http_client::builder()
         .dns_resolver(Arc::new(GuardedResolver(ok)))
         .redirect(redirect::Policy::custom(move |hop| {
-            if hop.previous().len() >= MAX_REDIRECTS {
+            if hop.previous().len() >= MAX_URLS {
                 hop.error("too many redirects")
             } else if literal_refused(hop.url(), ok) {
                 hop.error(DialRefused)
