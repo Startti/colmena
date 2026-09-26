@@ -5565,3 +5565,33 @@ sin el `NOT LIKE` en SQLite o en Postgres, su test; el ejecutor sin pasar quien 
 
 **ADP.** Nada: hasta el tramo 4/7, la lista de la raíz solo cambia en ese borde.
 **Estado.** done.
+
+## 133. La memoria de una tool, por quien la llama (4/7): se activa
+
+**Qué cambió.** `llm.rs` le pasa al `DagToolExecutor` el `node_id_path` del `llm_call`
+(`with_caller_node_path`). Con eso se activa la regla de los tramos 1/7 y 3/7: una tool
+`persistent` o `dynamic` llamada desde dentro de un hijo invocado como tool guarda su hilo en
+`<caller>/tool/<nombre>[/<hilo>]`, y `list_threads` lista los de quien llama. El mismo agente
+llamado desde la raíz y desde un hijo tiene dos hilos: una corrida fresca en uno ya no le
+contesta al otro su pregunta pendiente con `abandoned_tool_call.md`. No cambian la raíz, los
+hijos de un `subgraph` de nivel de grafo, los agentes de un `orchestrator` en la raíz ni
+`stateless`. Una pregunta hecha antes bajo la clave vieja se contesta sobre esa historia (tramo
+2/7).
+
+Cambio de semántica para grafos existentes: una tool con memoria dentro del hijo de una tool
+`stateless` (`tool/<tool_call_id>/…`) ahora recuerda dentro de esa llamada, no entre llamadas.
+La guía 19 todavía dice «Riesgo conocido»: se actualiza en el tramo 7/7; el E2E llega en 5/7 y
+6/7.
+
+**Tests.** Lib: 3021 passed. `registry::llm_call_caller_path_tests`: un `llm_call` real con
+modelo guionado llama un `subgraph` `persistent` `X`, y un `SubGraphExecutorPort` que registra
+recibe `path_prefix = tool/Y/u/agent/tool/X` desde un hijo y `tool/X` desde la raíz. Es el
+único unitario del cableado. `parallel_tool_suspend` (3), `parallel_tool_groups` (2),
+`parallel_tool_identity` (1), `child_graph_ref_resume` (2), `llm_tool_suspend_integration` (3)
+y `suspend_resume_routing` (2) siguen verdes.
+
+**Mutación.** Roja y revertida: `llm.rs` sin pasar quien llama, el test de `registry.rs`.
+
+**ADP.** Sin cambios de código. Antes de subir el pin, la medición en solo lectura de la nota de
+migración (tramo 7/7).
+**Estado.** done.

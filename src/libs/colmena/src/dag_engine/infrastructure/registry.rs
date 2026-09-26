@@ -675,6 +675,102 @@ mod llm_call_offered_tools_tests {
     }
 }
 
+/// An `llm_call` hands its own path to the executor that runs its tools, so a
+/// tool with memory it calls from inside a tool-invoked child keys under it.
+#[cfg(test)]
+mod llm_call_caller_path_tests {
+    use crate::dag_engine::application::ports::{
+        NodeRegistryPort, ResumeGraph, SubGraphExecutorPort,
+    };
+    use crate::dag_engine::domain::error::DagError;
+    use crate::dag_engine::domain::observer::ExecutionObserver;
+    use crate::llm::infrastructure::{OverrideGuard, ScriptedAdapter, ScriptedResponse};
+    use async_trait::async_trait;
+    use serde_json::{json, Value};
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    /// Records the path prefix each child run gets: the tool call's memory key.
+    #[derive(Default)]
+    struct ChildPrefixes(Mutex<Vec<Option<String>>>);
+    #[async_trait]
+    impl SubGraphExecutorPort for ChildPrefixes {
+        async fn run_subgraph(
+            &self,
+            _session_id: &str,
+            _graph_json: Value,
+            _global_state: Value,
+            _observer: Option<Arc<dyn ExecutionObserver>>,
+            _parent_session_id: Option<String>,
+            _agent_session_id: Option<String>,
+            path_prefix: Option<String>,
+        ) -> Result<Value, DagError> {
+            self.0.lock().unwrap().push(path_prefix);
+            Ok(json!({ "done": true }))
+        }
+        async fn resume_subgraph(
+            &self,
+            _session_id: &str,
+            _answer: String,
+            _graph: ResumeGraph,
+            _observer: Option<Arc<dyn ExecutionObserver>>,
+            _agent_session_id: Option<String>,
+            _path_prefix: Option<String>,
+        ) -> Result<Value, DagError> {
+            unreachable!("no call is resumed here")
+        }
+        async fn find_child_session_id_for_resume(
+            &self,
+            _parent_session_id: &str,
+            _parent_node_path: &str,
+        ) -> Result<Option<String>, DagError> {
+            Ok(None)
+        }
+    }
+
+    /// Runs an `llm_call` at `caller` whose model calls `X` (a `subgraph` with
+    /// `persistent` memory) once; returns the key X's child ran under.
+    async fn key_of_x_called_from(caller: &str) -> Option<String> {
+        let _guard = OverrideGuard::install(Arc::new(ScriptedAdapter::new(vec![
+            ScriptedResponse::ToolCall {
+                id: "c1".into(),
+                tool_name: "X".into(),
+                arguments: json!({ "task": "t" }),
+            },
+            ScriptedResponse::Text("listo".into()),
+        ])));
+        let registry = super::registry_tavily_tests::build_registry();
+        let children = Arc::new(ChildPrefixes::default());
+        registry.set_subgraph_executor(children.clone());
+        let config = json!({
+            "provider": "mock", "model": "m", "api_key": "k", "stream": false, "prompt": "hola",
+            "tool_configurations": { "X": {
+                "node_type": "subgraph", "memory_mode": "persistent",
+                "node_schema": {
+                    "child_graph_inline": { "fixed": { "nodes": {}, "edges": [] } },
+                    "task": { "type": "string", "required": true, "description": "t" }
+                }
+            } }
+        });
+        let inputs = HashMap::from([("__colmena_node_id_path".to_string(), json!(caller))]);
+        let llm = registry.get_node("llm_call").expect("llm_call");
+        llm.execute(&inputs, &config, &mut json!({}), None)
+            .await
+            .expect("llm_call finished");
+        let prefixes = children.0.lock().unwrap().clone();
+        assert_eq!(prefixes.len(), 1, "X ran once: {prefixes:?}");
+        prefixes[0].clone()
+    }
+
+    #[tokio::test]
+    async fn a_tool_called_from_inside_a_tool_child_keys_under_the_caller() {
+        let nested = key_of_x_called_from("tool/Y/u/agent").await;
+        assert_eq!(nested.as_deref(), Some("tool/Y/u/agent/tool/X"));
+        let root = key_of_x_called_from("agent").await;
+        assert_eq!(root.as_deref(), Some("tool/X"));
+    }
+}
+
 #[cfg(test)]
 mod registry_secure_suspend_tests {
     use super::*;
