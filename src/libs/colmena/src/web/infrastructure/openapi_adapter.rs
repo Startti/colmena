@@ -852,21 +852,28 @@ mod tests_fetch {
         let big = "x".repeat(10_000);
         Mock::given(method("GET"))
             .and(path("/big.yaml"))
-            .respond_with(ResponseTemplate::new(200).set_body_raw(big, "application/yaml"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(big.clone(), "application/yaml"))
+            .mount(&server)
+            .await;
+        // Chunked, with no `Content-Length`: capped on the stream.
+        let chunked = ResponseTemplate::new(200).insert_header("transfer-encoding", "chunked");
+        Mock::given(path("/chunked.yaml"))
+            .respond_with(chunked.set_body_raw(big, "application/yaml"))
             .mount(&server)
             .await;
 
-        let url = format!("{}/big.yaml", server.uri());
         let adapter = adapter_at(OpenApiAdapterConfig {
             max_bytes: 1024,
             ..OpenApiAdapterConfig::default()
         });
-        let err = adapter.fetch_raw(&url, None, None).await.unwrap_err();
-        match err {
-            WebDomainError::SpecTooLarge { limit_bytes, .. } => {
-                assert_eq!(limit_bytes, 1024);
+        for name in ["big", "chunked"] {
+            let url = format!("{}/{name}.yaml", server.uri());
+            match adapter.fetch_raw(&url, None, None).await.unwrap_err() {
+                WebDomainError::SpecTooLarge { limit_bytes, .. } => {
+                    assert_eq!(limit_bytes, 1024);
+                }
+                other => panic!("expected SpecTooLarge, got {other:?}"),
             }
-            other => panic!("expected SpecTooLarge, got {other:?}"),
         }
     }
 
@@ -905,29 +912,6 @@ mod tests_fetch {
             WebDomainError::Upstream { status: 500, .. } => {}
             other => panic!("expected Upstream(500), got {other:?}"),
         }
-    }
-
-    /// A chunked spec (no `Content-Length`) past the cap is `SpecTooLarge`.
-    #[tokio::test]
-    async fn fetch_raw_caps_a_chunked_body() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("http://{}/openapi.yaml", listener.local_addr().unwrap());
-        tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            let _ = socket.read(&mut [0u8; 4096]).await;
-            let chunk = format!("258\r\n{}\r\n", "x".repeat(0x258));
-            let head = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n";
-            let reply = format!("{head}{chunk}{chunk}0\r\n\r\n");
-            let _ = socket.write_all(reply.as_bytes()).await;
-        });
-        let adapter = adapter_at(OpenApiAdapterConfig {
-            max_bytes: 1024,
-            ..OpenApiAdapterConfig::default()
-        });
-        let err = adapter.fetch_raw(&url, None, None).await.unwrap_err();
-        let too_large = matches!(err, WebDomainError::SpecTooLarge { .. });
-        assert!(too_large, "{err:?}");
     }
 
     /// The adapter on the public-only client never dials a non-public address.

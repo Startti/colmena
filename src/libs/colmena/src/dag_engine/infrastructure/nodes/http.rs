@@ -116,8 +116,7 @@ impl MultipartUrlResolver {
         &self,
         url: &str,
     ) -> Result<ResolvedUrlPart, Box<dyn StdError + Send + Sync>> {
-        // Errors name the URL without its query or fragment (a signed URL's
-        // signature travels there).
+        // Errors name the URL without its query (a signed URL's signature).
         let shown = url.split(['?', '#']).next().unwrap_or(url);
         let parsed = Url::parse(url)
             .map_err(|e| format!("UrlValidationFailed: cannot parse '{shown}': {e}"))?;

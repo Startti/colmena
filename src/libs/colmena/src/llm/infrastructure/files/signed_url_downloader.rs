@@ -36,8 +36,6 @@ pub const MAX_BYTES_ENV_VAR: &str = "COLMENA_ATTACHMENT_MAX_BYTES";
 pub const DEFAULT_MAX_BYTES: u64 = 100 * 1024 * 1024;
 /// URLs one request may visit, the first included: at most 4 redirects.
 const MAX_URLS: usize = 5;
-/// The whole-request deadline, and the most [`SignedUrlDownloader::with_timeout`] sets.
-const TOTAL_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// Whether an address may be dialled.
 type Dialable = fn(IpAddr) -> bool;
@@ -114,7 +112,7 @@ fn guarded_client(ok: Dialable) -> Client {
         .no_proxy()
         .connect_timeout(Duration::from_secs(10))
         // 600 s: generous for files up to ~500 MB on slow connections.
-        .timeout(TOTAL_TIMEOUT)
+        .timeout(Duration::from_secs(600))
         .user_agent(concat!("colmena/", env!("CARGO_PKG_VERSION")))
         .build()
         .expect("the attachment fetch client should build")
@@ -197,7 +195,7 @@ impl SignedUrlDownloader {
 
     /// The same client with a whole-request deadline of `total`, at most 600 s.
     pub fn with_timeout(mut self, total: Duration) -> Self {
-        self.timeout = Some(total.min(TOTAL_TIMEOUT));
+        self.timeout = Some(total.min(Duration::from_secs(600)));
         self
     }
 

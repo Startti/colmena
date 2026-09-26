@@ -814,10 +814,8 @@ mod tests {
             .unwrap_err();
         assert!(err.to_string().contains("8-byte fetch limit"), "{err}");
         let got = server.received_requests().await.unwrap();
-        assert!(
-            got.iter().all(|r| r.method.as_str() == "GET"),
-            "an edit ran"
-        );
+        let only_gets = got.iter().all(|r| r.method.as_str() == "GET");
+        assert!(only_gets, "an edit ran");
     }
 
     #[tokio::test]
