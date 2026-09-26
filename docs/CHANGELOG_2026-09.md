@@ -6281,16 +6281,18 @@ imágenes, archivos o specs desde `localhost` necesita `COLMENA_ATTACHMENT_ALLOW
 ## 141. Fix: una imagen por URL a Anthropic u OpenAI entra al catálogo
 
 **Qué cambia.** Con `DATABASE_URL` (el camino con cache de `LlmCallUseCase::resolve_files`), una
-imagen de `files[]` con `url` para un modelo de Anthropic u OpenAI queda como URL: el adapter se
-la pasa al modelo y no se sube a la Files API. El Step 3 del `llm_call` solo registraba archivos
-subidos o texto inline, así que esa imagen caía en la rama de respaldo que el código daba por
-inalcanzable (`attachment.registration_skipped_unuploaded`): no entraba al catálogo,
-`load_attachment` no la encontraba y `$attachment:<id>` respondía `NotFound`. Como el mensaje
-inicial no lleva archivos (Plan B), el modelo no la veía. Ahora se registra como el texto inline:
-`provider_file_id` vacío, y el Step 3 baja la URL y guarda los bytes (`persist_attachment_bytes`
-ya bajaba las URL, con el cliente guardado de §137); `load_attachment` la sirve desde storage
-(base64) y `$attachment:<id>` reenvía los bytes. Si guardar los bytes falla, no se registra, igual
-que el texto inline. La decisión vive en `registration_file_id`.
+imagen de `files[]` con `url` para un modelo de Anthropic u OpenAI queda como URL en vez de
+subirse a la Files API (`resolve_one` la salta) — y bajo Plan B el nodo nunca se la entrega al
+adapter de todos modos, porque el mensaje inicial no lleva archivos. El Step 3 del `llm_call` solo
+registraba archivos subidos o texto inline, así que esa imagen caía en la rama de respaldo que el
+código daba por inalcanzable (`attachment.registration_skipped_unuploaded`): no entraba al
+catálogo, `load_attachment` no la encontraba y `$attachment:<id>` respondía `NotFound`. Ahora se
+registra como el texto inline: `provider_file_id` vacío, y el Step 3 baja la URL y guarda los
+bytes (`persist_attachment_bytes` ya bajaba las URL, con el cliente guardado de §137);
+`load_attachment` la sirve desde storage (base64) y `$attachment:<id>` reenvía los bytes. Si
+guardar los bytes falla, no se registra, igual que el texto inline. La decisión vive en
+`registration_file_id`. Sin dedup por `document_id` (`TODO(plan-a-opt)`), el fetch y el guardado
+se repiten cada vez que el archivo se manda de nuevo en un turno posterior.
 
 **Tests.** `llm.rs::resolver_tests::step3_registers_an_image_left_as_a_signed_url_with_its_bytes`:
 una imagen por `url` (servidor simulado), como `resolve_files` la deja con Anthropic u OpenAI
@@ -6311,6 +6313,26 @@ proveedores; `COLMENA_PREFLIGHT_HEALTH=off` y un `ANTHROPIC_BASE_URL` cerrado): 
 ocurre antes. El grafo pasa `dag_engine lint` sin hallazgos y sube el corpus de
 `tests/corpus_noise.rs` de 335 a 336 archivos.
 
-**ADP.** Sin cambios de API. Colmena ahora pide la URL de esas imágenes para guardar los bytes
-(antes solo la pedía el proveedor del modelo), con el cliente guardado de §137: un entorno local
-que las sirva desde `localhost` necesita `COLMENA_ATTACHMENT_ALLOW_PRIVATE_HOSTS=1`. **Estado.** done.
+**ADP.** Sin cambios de API. Antes de este fix nada pedía la URL de esas imágenes: la rama de
+respaldo las daba por inalcanzables y no entraban al catálogo. Colmena ahora la pide para guardar
+los bytes, con el cliente guardado de §137: un entorno local que las sirva desde `localhost`
+necesita `COLMENA_ATTACHMENT_ALLOW_PRIVATE_HOSTS=1`. **Estado.** done.
+
+## 142. Fix: `load_attachment` no manda una imagen que el proveedor no acepta inline, y no re-resume
+
+**Qué cambia.**
+- `load_attachment` verifica una imagen servida desde storage (un upload o una imagen registrada
+  por URL, §141) antes de mandarla inline: si pesa más que el cupo del proveedor o su mime type no
+  se acepta inline, devuelve un error de tool que el modelo ve, en vez de un 400 del proveedor que
+  corta el turno (`check_inline_image` / `inline_image_limit`, `llm.rs`: Anthropic 5 MB
+  jpeg/png/gif/webp; OpenAI y Google 20 MB, Google también heic/heif).
+- Step 3 no encola un resumen nuevo para un documento cuya fila ya tiene `description` de un turno
+  anterior (`should_queue_summary`): una imagen por URL se registra de nuevo en cada turno en que se
+  manda (sin dedup, `TODO(plan-a-opt)`).
+
+**Tests.** `resolver_refuses_an_inline_image_over_the_providers_cap` (5 MB + 1 byte para Anthropic
+da un error de tool con el tamaño); `check_inline_image_rejects_a_mime_type_the_provider_does_not_accept_inline`
+(`image/svg+xml` para Anthropic); `step3_skips_summary_for_a_document_whose_row_already_has_one`.
+
+**ADP.** Sin cambios de API.
+**Estado.** done.

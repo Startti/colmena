@@ -1,5 +1,5 @@
 {
-  "$comment": "An image sent as a signed URL to an Anthropic model with DATABASE_URL set stays a URL (the adapter hands it to the model), and Step 3 registers it with its bytes stored. Serve photo.png with `python3 -m http.server 18765` from its directory, run with COLMENA_ATTACHMENT_ALLOW_PRIVATE_HOSTS=1 (the attachment client refuses 127.0.0.1 otherwise) and a stable --agent-session-id, and query conversation_attachments for that session: img-url is there with a storage_key. The model is asked to describe the image.",
+  "$comment": "An image sent as a signed URL to an Anthropic model with DATABASE_URL set stays a URL instead of being uploaded (resolve_one skips it); under Plan B the node never hands that file to the adapter either way (the initial message carries no files), so Step 3 registers it with its bytes stored. Serve photo.png with `python3 -m http.server 18765` from its directory, run with COLMENA_ATTACHMENT_ALLOW_PRIVATE_HOSTS=1 (the attachment client refuses 127.0.0.1 otherwise) and a stable --agent-session-id, and query conversation_attachments for that session: img-url is there with a storage_key. The model is asked to load_attachment('img-url') and describe it.",
   "nodes": {
     "viewer": {
       "type": "llm_call",

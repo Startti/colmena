@@ -25,6 +25,9 @@
 - `sqlite_url_for_node()` — Extracts SQLite connection URL from node config
 - `format_temporal_context_block()` — Formats temporal context (ISO 8601 timestamp, location, locale, timezone) for LLM system message
 - `should_register_attachment_row()` — Gate: whether to register text-only attachment row (requires storage_key fallback when no provider_file_id)
+- `inline_image_limit()` — Per-provider cap and accepted mime types for an image `load_attachment` serves inline from storage (Anthropic 5 MB; OpenAI and Google 20 MB)
+- `check_inline_image()` — Refuses such an image over the cap or of a mime type the provider does not accept inline, as a tool error instead of a provider 400
+- `should_queue_summary()` — Step 3: no new auto-summary for a document whose catalog row already has a description
 - `registration_file_id()` — Step 3: the provider_file_id a resolved file registers with (the Files API id; empty for inline text and for an image left as a signed URL, both served from stored bytes), or None when it cannot be registered
 - `file_registrations()` — Step 3: document_id (from the parsed file), label, description and source for each resolved file, paired in order with its own `files[]` entry among the ones the parser kept (a file resolution dropped does not shift the rest, unless its entry has the same id, filename and mime_type as a later file's: that file then takes its label, description and url/path)
 - `parsed_from()` — Whether a `files[]` entry is the one a file was parsed from (same `id`, `filename`, `mime_type`, with the parser's defaults)
@@ -77,7 +80,7 @@
   - Looks up attachment by (agent_session_id, document_id) for current provider
   - Falls back to Generated provider row → cross-provider lazy upload if target provider row missing; the provider row it writes keeps the Generated row's storage_key
   - Handles stale provider_file_id recovery (re-uploads from recoverable sources after 24h)
-  - Serves text attachments from OutputStorageRepository (no provider file_id needed)
+  - Serves text attachments from OutputStorageRepository (no provider file_id needed); an image served this way is checked against the provider's inline cap and mime types first
   - Touches last_used_at for GC staleness tracking (best-effort)
 
 ### Test Modules (all under `#[cfg(test)]`)
@@ -87,7 +90,7 @@
 - `persist_attachment_bytes_tests` (5 async tests) — Tests byte persistence from inline/signed-URL sources, storage errors, precedence rules
 - `files_parser_tests` (11 tests) — Tests file JSON parsing: base64 data, size limits, signed URLs, data/URL precedence, legacy compat; and registration pairing when an entry is skipped (even one identical to the next) or a file dropped
 - `find_pending_tool_call_tests` (5 tests) — Tests tool call resume detection: unmatched calls, resolved calls, multiple messages, empty history, multiple calls per message
-- `resolver_tests` (9 async tests) — Tests AttachmentResolverImpl: re-upload on expiry, unknown documents, missing storage on Generated rows, text-from-storage fallback, Step-3 text persistence, `$attachment:<id>` still streaming the bytes after a lazy provider upload, Step 3 registering an image left as a signed URL with its bytes
+- `resolver_tests` (12 tests, 11 async) — Tests AttachmentResolverImpl: re-upload on expiry, unknown documents, missing storage on Generated rows, text-from-storage fallback, Step-3 text persistence, `$attachment:<id>` still streaming the bytes after a lazy provider upload, Step 3 registering an image left as a signed URL with its bytes, an inline image over the provider's cap or of an unaccepted mime type refused, no repeated summary for a row that already has a description
 
 ## File-level notes
 

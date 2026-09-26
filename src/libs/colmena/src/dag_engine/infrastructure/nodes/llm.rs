@@ -1179,6 +1179,12 @@ impl crate::llm::application::LoadAttachmentResolver for AttachmentResolverImpl 
                 .read(storage_key)
                 .await
                 .map_err(|e| format!("storage read for storage_key '{storage_key}': {e}"))?;
+            // I1: an image this large or of this mime type would be rejected
+            // by the provider itself (HTTP 400), failing the whole turn. Catch
+            // it here instead, as a tool error the model can react to.
+            if att.mime_type.starts_with("image/") {
+                check_inline_image(&self.provider, &att.mime_type, stored.bytes.len())?;
+            }
             return Ok(Some(FileData {
                 document_id: Some(att.document_id.clone()),
                 mime_type: att.mime_type.clone(),
@@ -1266,6 +1272,70 @@ impl crate::llm::application::LoadAttachmentResolver for AttachmentResolverImpl 
 
         Ok(Some(file_data))
     }
+}
+
+/// Per-provider limit on an inline (base64) image `load_attachment` can hand
+/// back for the empty-`provider_file_id` path above — `(max_bytes,
+/// accepted_mime_types)`, or `None` when the provider has no declared inline
+/// image limit (`Mock`; `Generated` never calls a real LLM). Checked 2026-09
+/// against each provider's docs:
+/// - Anthropic Messages API: a base64 image block is capped at 5 MB and
+///   accepts image/jpeg, image/png, image/gif, image/webp.
+/// - OpenAI vision-capable chat models: image inputs up to 20 MB in
+///   image/jpeg, image/png, image/webp, or non-animated image/gif.
+/// - Google Gemini: an inline (non-Files-API) image part is bounded by the
+///   ~20 MB total request-size limit; accepts image/jpeg, image/png,
+///   image/webp, image/heic, image/heif.
+fn inline_image_limit(provider: &ProviderKind) -> Option<(u64, &'static [&'static str])> {
+    const MB: u64 = 1024 * 1024;
+    match provider {
+        ProviderKind::Anthropic => Some((
+            5 * MB,
+            &["image/jpeg", "image/png", "image/gif", "image/webp"],
+        )),
+        ProviderKind::OpenAi => Some((
+            20 * MB,
+            &["image/jpeg", "image/png", "image/webp", "image/gif"],
+        )),
+        ProviderKind::Google => Some((
+            20 * MB,
+            &[
+                "image/jpeg",
+                "image/png",
+                "image/webp",
+                "image/heic",
+                "image/heif",
+            ],
+        )),
+        ProviderKind::Mock | ProviderKind::Generated => None,
+    }
+}
+
+/// Reject an inline image over `provider`'s cap, or of a mime type it does
+/// not accept inline, as a `String` — the `load_attachment` sentinel handler
+/// (`agent_service.rs`) turns an `Err` from the resolver into a tool result
+/// the model sees (`attachment_expired_unrecoverable`), instead of the bytes
+/// reaching the adapter and the provider answering with an HTTP 400 that
+/// fails the whole turn.
+fn check_inline_image(provider: &ProviderKind, mime_type: &str, len: usize) -> Result<(), String> {
+    let Some((max_bytes, accepted)) = inline_image_limit(provider) else {
+        return Ok(());
+    };
+    if !accepted.contains(&mime_type) {
+        return Err(format!(
+            "load_attachment: image mime type '{mime_type}' is not accepted inline by {provider} \
+             (accepts: {})",
+            accepted.join(", ")
+        ));
+    }
+    if len as u64 > max_bytes {
+        return Err(format!(
+            "load_attachment: image is {len} bytes, over {provider}'s {max_bytes}-byte inline cap \
+             — ask for a smaller image, or re-attach it so it can be uploaded to the provider's \
+             Files API instead of served inline"
+        ));
+    }
+    Ok(())
 }
 
 #[async_trait]
@@ -1968,21 +2038,36 @@ impl ExecutableNode for LlmNode {
                 );
 
                 if summary_enabled && description.is_none() {
-                    let inline_bytes_for_summary = if matches!(source, AttachmentSource::Inline) {
-                        file.retained_inline_bytes.clone()
-                    } else {
-                        None
-                    };
-                    let has_summarisable_source = !matches!(source, AttachmentSource::Inline)
-                        || inline_bytes_for_summary.is_some();
-                    if has_summarisable_source {
-                        summary_targets.push(SummaryTarget {
-                            document_id: document_id.clone(),
-                            source,
-                            mime_type: file.mime_type.clone(),
-                            filename: file.filename.clone(),
-                            inline_bytes: inline_bytes_for_summary,
-                        });
+                    // I2: a re-registration (e.g. a SignedUrl image, which has
+                    // no dedup and re-registers every turn it's sent,
+                    // TODO(plan-a-opt)) must not queue a fresh summary task
+                    // when the catalog row already has one from an earlier
+                    // turn — upsert's COALESCE keeps it even though this
+                    // turn's `description` is None.
+                    let existing_description = reg
+                        .lookup(sid, &document_id, provider_kind.clone())
+                        .await
+                        .ok()
+                        .flatten()
+                        .and_then(|row| row.description);
+                    if should_queue_summary(existing_description.as_deref()) {
+                        let inline_bytes_for_summary = if matches!(source, AttachmentSource::Inline)
+                        {
+                            file.retained_inline_bytes.clone()
+                        } else {
+                            None
+                        };
+                        let has_summarisable_source = !matches!(source, AttachmentSource::Inline)
+                            || inline_bytes_for_summary.is_some();
+                        if has_summarisable_source {
+                            summary_targets.push(SummaryTarget {
+                                document_id: document_id.clone(),
+                                source,
+                                mime_type: file.mime_type.clone(),
+                                filename: file.filename.clone(),
+                                inline_bytes: inline_bytes_for_summary,
+                            });
+                        }
                     }
                 }
             }
@@ -4406,6 +4491,19 @@ fn should_register_attachment_row(provider_file_id: &str, storage_key: &Option<S
     !(provider_file_id.is_empty() && storage_key.is_none())
 }
 
+/// I2: whether Step 3 should queue an auto-summary task for a file it just
+/// registered, given the `description` already on the catalog row for this
+/// `(agent_session_id, document_id, provider)` from an earlier turn (`None`
+/// when there was no row yet, or it had no description). Called only when
+/// this turn's own entry carried no `description` — a caller-supplied value
+/// always wins and never reaches here. An existing description is enough to
+/// skip: without this, a document that re-registers every turn it's
+/// attached (a `SignedUrl` image has no dedup yet, TODO(plan-a-opt)) would
+/// have its summary regenerated turn after turn.
+fn should_queue_summary(existing_description: Option<&str>) -> bool {
+    existing_description.is_none()
+}
+
 /// The `provider_file_id` Step 3 registers `file` with, or `None` when it
 /// cannot be registered.
 fn registration_file_id(file: &crate::llm::domain::FileData) -> Option<String> {
@@ -4420,9 +4518,12 @@ fn registration_file_id(file: &crate::llm::domain::FileData) -> Option<String> {
         // inline from OutputStorageRepository instead of via file_id.
         FileSource::InlineBytes { .. } if is_text_like(&file.mime_type) => Some(String::new()),
         // With a file cache (DATABASE_URL), an image for Anthropic or OpenAI
-        // stays a signed URL: the adapter passes the URL and the model fetches
-        // it (resolve_one). It never reaches the Files API either, so it is
-        // registered the same way; Step 3 fetches the URL to store its bytes.
+        // stays a signed URL instead of being uploaded (resolve_one skips
+        // it). Under Plan B the node never hands that file to the adapter
+        // either way — the initial user message carries no files — so it is
+        // registered the same way as text: Step 3 fetches the URL to store
+        // its bytes, and a later load_attachment serves them inline from
+        // storage (§141).
         FileSource::SignedUrl(_) if file.mime_type.starts_with("image/") => Some(String::new()),
         _ => None,
     }
@@ -5612,6 +5713,128 @@ mod resolver_tests {
     }
 
     #[tokio::test]
+    async fn resolver_refuses_an_inline_image_over_the_providers_cap() {
+        // I1: an image left as a signed URL (§141) is served through this
+        // same empty-provider_file_id path, as base64 InlineBytes. Sending
+        // one over Anthropic's 5 MB cap would fail the whole turn with a
+        // provider 400 — resolve() must catch it first, as a tool error.
+        use crate::llm::application::LoadAttachmentResolver;
+        use crate::llm::domain::attachments::{AttachmentSource, UpsertAttachmentInput};
+        use crate::llm::domain::AttachmentRegistry;
+        use crate::llm::domain::ProviderKind;
+        use crate::llm::infrastructure::persistence::SqliteAttachmentRegistry;
+        use crate::storage::domain::{OutputStorageRepository, StoreRequest};
+        use crate::storage::infrastructure::LocalCacheStorageAdapter;
+        use std::sync::Arc;
+
+        let storage: Arc<dyn OutputStorageRepository> = Arc::new(LocalCacheStorageAdapter::new());
+        let oversized = vec![0u8; 5 * 1024 * 1024 + 1];
+        let stored = storage
+            .store(StoreRequest {
+                bytes: oversized,
+                mime_type: "image/png".to_string(),
+                filename: "big.png".to_string(),
+                session_id: None,
+                agent_session_id: Some("agent_1".to_string()),
+            })
+            .await
+            .unwrap();
+
+        let registry: Arc<dyn AttachmentRegistry> = Arc::new(
+            SqliteAttachmentRegistry::new("sqlite::memory:")
+                .await
+                .unwrap(),
+        );
+        registry
+            .upsert(UpsertAttachmentInput {
+                agent_session_id: "agent_1".to_string(),
+                document_id: "img-big".to_string(),
+                provider: ProviderKind::Anthropic,
+                provider_file_id: String::new(),
+                mime_type: "image/png".to_string(),
+                filename: "big.png".to_string(),
+                size_bytes: Some(stored.size_bytes),
+                label: None,
+                description: None,
+                source: AttachmentSource::SignedUrl("https://example/big.png".to_string()),
+                storage_key: Some(stored.storage_key.clone()),
+                origin: None,
+            })
+            .await
+            .unwrap();
+
+        let resolver = AttachmentResolverImpl {
+            registry,
+            provider: ProviderKind::Anthropic,
+            api_key: "dummy".to_string(),
+            storage: Some(storage),
+        };
+        let err = resolver
+            .resolve("agent_1", "img-big")
+            .await
+            .expect_err("an image over the provider's inline cap must be a tool error");
+        assert!(
+            err.contains("5242881"),
+            "error should state the size: {err}"
+        );
+    }
+
+    #[test]
+    fn check_inline_image_rejects_a_mime_type_the_provider_does_not_accept_inline() {
+        // Anthropic image blocks accept jpeg/png/gif/webp only. A small size
+        // (10 bytes) isolates the mime check from the cap check.
+        let err = check_inline_image(&ProviderKind::Anthropic, "image/svg+xml", 10).unwrap_err();
+        assert!(err.contains("image/svg+xml"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn step3_skips_summary_for_a_document_whose_row_already_has_one() {
+        // I2: a SignedUrl image re-registers every turn it's sent
+        // (TODO(plan-a-opt)); the description an earlier turn's summary
+        // persisted must stop a fresh summary task from being queued, exactly
+        // as Step 3 checks it — via a lookup on the real registry.
+        use crate::llm::domain::attachments::{AttachmentSource, UpsertAttachmentInput};
+        use crate::llm::domain::{AttachmentRegistry, ProviderKind};
+        use crate::llm::infrastructure::persistence::SqliteAttachmentRegistry;
+        use std::sync::Arc;
+
+        let registry: Arc<dyn AttachmentRegistry> = Arc::new(
+            SqliteAttachmentRegistry::new("sqlite::memory:")
+                .await
+                .unwrap(),
+        );
+        registry
+            .upsert(UpsertAttachmentInput {
+                agent_session_id: "agent_1".to_string(),
+                document_id: "img-url".to_string(),
+                provider: ProviderKind::Anthropic,
+                provider_file_id: String::new(),
+                mime_type: "image/png".to_string(),
+                filename: "photo.png".to_string(),
+                size_bytes: Some(10),
+                label: None,
+                description: Some("A photo of a cat".to_string()),
+                source: AttachmentSource::SignedUrl("https://example/photo.png".to_string()),
+                storage_key: Some("key-1".to_string()),
+                origin: Some(crate::llm::domain::attachments::origin::USER_UPLOAD.to_string()),
+            })
+            .await
+            .unwrap();
+
+        // Turn 2: same image re-sent without an explicit description. Step 3
+        // looks the row up before deciding whether to queue a summary.
+        let existing_description = registry
+            .lookup("agent_1", "img-url", ProviderKind::Anthropic)
+            .await
+            .unwrap()
+            .and_then(|row| row.description);
+
+        assert!(!should_queue_summary(existing_description.as_deref()));
+        // Regression: with no prior description, a summary is still queued.
+        assert!(should_queue_summary(None));
+    }
+
+    #[tokio::test]
     async fn step3_text_persist_success_registers_row_with_storage_key_and_empty_file_id() {
         // (b) Step-3 for a text inline attachment, when persistence SUCCEEDS,
         // registers a catalog row with an EMPTY provider_file_id AND a
@@ -5959,10 +6182,18 @@ mod resolver_tests {
     }
 
     /// With a file cache (`DATABASE_URL` set), `resolve_files` leaves an image
-    /// for Anthropic or OpenAI as a signed URL: the adapter hands the URL to
-    /// the model (`llm_call_use_case`'s `*_image_signed_url_skips_upload`).
-    /// Step 3 registers that file with its bytes stored, so a later
-    /// `load_attachment` and `$attachment:<id>` both read them.
+    /// for Anthropic or OpenAI as a signed URL instead of uploading it
+    /// (`llm_call_use_case`'s `*_image_signed_url_skips_upload`); under Plan B
+    /// the node never hands that file to the adapter either way — the
+    /// initial user message carries no files. Step 3 registers it with its
+    /// bytes stored, so a later `load_attachment` and `$attachment:<id>` both
+    /// read them.
+    ///
+    /// Chains Step 3's helpers (`registration_file_id`,
+    /// `persist_attachment_bytes`, `should_register_attachment_row`, the
+    /// upsert) directly instead of driving them through `LlmNode::execute` —
+    /// the full wiring is covered by the E2E graph
+    /// `tests/graphs/agents/files_signed_url_image_registered.json`.
     #[tokio::test]
     async fn step3_registers_an_image_left_as_a_signed_url_with_its_bytes() {
         use crate::llm::application::LoadAttachmentResolver;
