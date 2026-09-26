@@ -18,7 +18,7 @@ impl SqlPortFactory {
         Self { registry }
     }
 
-    /// How many pools the registry keeps (its `max_entries`).
+    /// How many unpinned pools the registry keeps (its `max_entries`).
     pub fn max_pools(&self) -> usize {
         self.registry.max_entries()
     }

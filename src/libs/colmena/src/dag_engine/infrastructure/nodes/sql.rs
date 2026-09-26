@@ -100,10 +100,10 @@ impl<V> InitCache<V> {
 
 pub struct SqlNode {
     factory: Arc<SqlPortFactory>,
-    /// The initializations of the `connection_url`s callers named, as many as
-    /// the pool registry keeps pools. The registry holds one `SqlNode` for
-    /// every `sql_query` call, so a call only ever shares the initialization
-    /// of its own URL.
+    /// One initialization per [`SqlNode::init_key`], for up to
+    /// [`SqlPortFactory::max_pools`] keys. The node registry holds one
+    /// `SqlNode` for every `sql_query` call, so a call shares only the
+    /// initialization of its own `init_key`.
     inits: InitCache<SqlNodeInit>,
 }
 
@@ -203,10 +203,10 @@ impl SqlNode {
 
     /// The key of the initialization a call shares: its resolved
     /// `connection_url` plus the config that initialization reads —
-    /// `permissions` (schema provisioning, sandbox, auto-RLS, the capability
-    /// text) but the per-call `tenant_user_id`, `setup_sql`, and
-    /// `runtime_limits.max_rows` (the description names it). Object keys are
-    /// sorted first, so their order never splits a key.
+    /// `permissions` without `tenant_user_id` (provisioning, sandbox, auto-RLS,
+    /// the capability text); `setup_sql`; `runtime_limits.max_rows` (the
+    /// description names it). Object keys are sorted first, so their order
+    /// never splits a key.
     fn init_key(connection_url: &str, config: &Value) -> InitKey {
         let mut permissions = config.get("permissions").cloned().unwrap_or_default();
         if let Some(map) = permissions.as_object_mut() {
@@ -248,9 +248,9 @@ impl SqlNode {
             .map_err(|e| format!("Failed to acquire SQL pool: {}", e))?)
     }
 
-    /// The initialization of `connection_url`, run on `adapter` by the first
-    /// call with its key and shared by the later ones until it leaves the
-    /// cache.
+    /// The initialization of this call's [`Self::init_key`], run on `adapter`
+    /// by the first call with that key and shared by the later ones until it
+    /// leaves the cache.
     async fn get_or_init(
         &self,
         config: &Value,
@@ -272,7 +272,7 @@ impl SqlNode {
     ) -> Result<SqlNodeInit, Box<dyn StdError + Send + Sync>> {
         tracing::debug!(
             target: crate::dag_engine::log_policy::T_SQL,
-            "first call for this connection — initializing"
+            "first call with this key — initializing"
         );
         let max_rows = config
             .get("runtime_limits")
@@ -1302,8 +1302,8 @@ mod connection_provenance_tests {
     }
 
     /// An initialization is shared only by calls with the same URL and the
-    /// same config it reads: `permissions` but `tenant_user_id`, `setup_sql`
-    /// and `runtime_limits.max_rows`, in any key order.
+    /// same config it reads — `permissions` without `tenant_user_id`;
+    /// `setup_sql`; `runtime_limits.max_rows` — in any key order.
     #[test]
     fn the_init_key_is_the_url_and_the_config_the_initialization_reads() {
         let base = json!({
@@ -1355,14 +1355,8 @@ mod connection_provenance_tests {
             .await
             .expect("the first call runs");
         let (url, seen, h) = listener().await;
-        let second = n
-            .execute(
-                &query,
-                &json!({ "connection_url": url }),
-                &mut json!({}),
-                None,
-            )
-            .await;
+        let config = json!({ "connection_url": url });
+        let second = n.execute(&query, &config, &mut json!({}), None).await;
         h.abort();
         fake.abort();
         assert!(
@@ -1580,12 +1574,8 @@ mod init_cache_tests {
             (URL_B, perms("read_only", "u1")),
             (URL_A, perms("read_write", "u1")),
         ] {
-            call(
-                &n,
-                json!({ "connection_url": url, "permissions": permissions }),
-            )
-            .await
-            .unwrap();
+            let args = json!({ "connection_url": url, "permissions": permissions });
+            call(&n, args).await.unwrap();
         }
         h.abort();
         assert_eq!(entries(&n), 3);
@@ -1611,11 +1601,8 @@ mod init_cache_tests {
     #[tokio::test]
     async fn a_failed_initialization_is_not_cached() {
         let (n, _registry, h) = node_with(8).await;
-        let failed = call(
-            &n,
-            json!({ "connection_url": URL_A, "setup_sql": "SELECT 1" }),
-        )
-        .await;
+        let args = json!({ "connection_url": URL_A, "setup_sql": "SELECT 1" });
+        let failed = call(&n, args).await;
         h.abort();
         assert!(failed.unwrap_err().contains("setup_sql"));
         assert_eq!(entries(&n), 0, "a failed initialization stayed cached");
