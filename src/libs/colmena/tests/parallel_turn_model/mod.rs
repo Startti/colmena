@@ -1,5 +1,5 @@
 //! The scripted model of the parallel tool call E2Es
-//! (`parallel_tool_identity.rs`).
+//! (`parallel_tool_identity.rs`, `parallel_tool_groups.rs`).
 
 use async_trait::async_trait;
 use colmena::llm::domain::{

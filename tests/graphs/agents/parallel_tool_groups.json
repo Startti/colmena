@@ -1,0 +1,58 @@
+{
+  "comment": "E2E de la concurrencia de un grupo de llamadas `parallel`. Lo corre src/libs/colmena/tests/parallel_tool_groups.rs con un modelo guionado que pide Run dos veces en UN solo mensaje, con tareas distintas. Run es `parallel: true` y sin memoria, así que cada llamada es su propia cadena y las dos forman un grupo: corren a la vez (tope COLMENA_MAX_PARALLEL_TOOL_CALLS, default 4). El hijo duerme (python_script con sandbox_mode none: el modo restringido no deja importar time) 2,3 s para clima y 2 s para precios, así que el grupo tarda unos 2,3 s y no 4,3, y precios termina antes aunque el modelo la pidió segunda: su frame de fin sale primero y la historia queda igual en el orden del modelo. La línea base, en el mismo archivo de test, carga este grafo con `parallel: false`: las dos llamadas corren una tras otra, unos 4,3 s.",
+  "metadata": {
+    "category": "agents",
+    "features": ["subgraph_as_tool", "child_graph_inline", "parallel_tool_calls", "python_script"],
+    "requires_env": ["GEMINI_API_KEY", "DATABASE_URL"]
+  },
+  "nodes": {
+    "pedido": { "type": "input", "config": { "prompt": "Corré el agente dos veces a la vez, una por tema (clima y precios)." } },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "model": "gemini-2.5-flash",
+        "api_key": "${GEMINI_API_KEY}",
+        "connection_url": "${DATABASE_URL}",
+        "stream": true,
+        "system_message": "Para cada tema llamá a Run con la tarea. Pedí todas las llamadas en el mismo mensaje.",
+        "prompt": "{{prompt}}",
+        "tool_configurations": {
+          "Run": {
+            "name": "Run",
+            "node_type": "subgraph",
+            "parallel": true,
+            "description": "Corre un agente con una tarea. Tarda unos segundos.",
+            "node_schema": {
+              "child_graph_inline": {
+                "fixed": {
+                  "nodes": {
+                    "entrada": { "type": "input", "config": {} },
+                    "duerme": {
+                      "type": "python_script",
+                      "config": {
+                        "sandbox_mode": "none",
+                        "code": "import time\ntime.sleep(2.3 if task == \"clima\" else 2)\noutput = {\"hecha\": task}"
+                      }
+                    },
+                    "salida": { "type": "output", "config": {} }
+                  },
+                  "edges": [
+                    { "from": "entrada.task", "to": "duerme.task" },
+                    { "from": "duerme", "to": "salida" }
+                  ]
+                }
+              },
+              "task": { "type": "string", "required": true, "description": "La tarea para el agente" }
+            }
+          }
+        }
+      }
+    },
+    "salida": { "type": "output", "config": {} }
+  },
+  "edges": [
+    { "from": "pedido", "to": "agent" },
+    { "from": "agent.result", "to": "salida" }
+  ]
+}
