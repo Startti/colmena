@@ -2,6 +2,7 @@
 //! chosen once per process from `COLMENA_PYTHON_EXECUTOR`. See
 //! docs/developer_guide/53_python_executors.md.
 
+pub mod child;
 pub mod config;
 pub mod frame;
 pub mod inprocess;
