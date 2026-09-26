@@ -2,13 +2,14 @@
 //! a parent agent and its child agents all reach the one process-global
 //! override (`parallel_tool_suspend.rs`). The script sees each request (its
 //! system prompt and its messages) and returns a reply and how long to wait
-//! before giving it.
+//! before giving it. Every request is kept, in arrival order.
 
 use async_trait::async_trait;
 use colmena::llm::domain::{
     LlmError, LlmMessage, LlmRepository, LlmRequest, LlmResponse, LlmStream, LlmStreamChunk,
     LlmStreamPart, MessageRole, ToolCallChunk,
 };
+use std::sync::Mutex;
 use std::time::Duration;
 
 /// A request as the model received it.
@@ -61,17 +62,25 @@ type Script = dyn Fn(&Request) -> (Duration, Reply) + Send + Sync;
 
 pub struct CallerModel {
     script: Box<Script>,
+    seen: Mutex<Vec<Request>>,
 }
 
 impl CallerModel {
     pub fn new(script: impl Fn(&Request) -> (Duration, Reply) + Send + Sync + 'static) -> Self {
         Self {
             script: Box::new(script),
+            seen: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Every request the model received, in arrival order.
+    pub fn seen(&self) -> Vec<Request> {
+        self.seen.lock().unwrap().clone()
     }
 
     async fn reply(&self, request: &LlmRequest) -> Reply {
         let seen = Request::of(request);
+        self.seen.lock().unwrap().push(seen.clone());
         let (wait, reply) = (self.script)(&seen);
         tokio::time::sleep(wait).await;
         reply
