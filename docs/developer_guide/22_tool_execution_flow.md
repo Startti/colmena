@@ -498,7 +498,7 @@ values count as the author's (`__colmena_authored_inputs`, below) only when
 the whole `tool_configurations` is a dispatcher's `fixed` value
 (`is_authored_input`); otherwise they are data for the tools' nodes — a
 `fixed` `sandbox_mode`, `allowed_hosts` or `body` in it is not the author's
-(CHANGELOG 2026-09 §115). Its `${` leaves expand only when a dispatcher
+(CHANGELOG 2026-09 §122). Its `${` leaves expand only when a dispatcher
 vouched for every one of them (`env_provenance::subtree_trusted`); otherwise
 the authored copy is empty and nothing in it expands. `${UPPER_CASE}` names
 an env var and is never filled from `inputs` by that templating

@@ -5750,12 +5750,12 @@ nada; con el campo en `multipart_url_fields`, se baja.
 archivos para subir debe listar esos campos.
 **Estado.** done.
 
-## 114. Endurecimiento: un secreto descifrado en `config` nunca se lee como plantilla de entorno
+## 121. Endurecimiento: un secreto descifrado en `config` nunca se lee como plantilla de entorno
 
 **Qué cambia.** En modo grafo el motor inyecta los secure values en el `config` del nodo antes
 de ejecutarlo, y el nodo expande `${VAR}` en su `config` después. Si un valor descifrado que va
 a `config` contiene `${`, el motor no corre el nodo: lo falla con un error que nombra el handle
-(nunca el valor) y sugiere pasarlo por un edge, donde un valor de `inputs` no se expande (§101).
+(nunca el valor) y sugiere pasarlo por un edge, donde un valor de `inputs` no se expande (§107).
 `tavily_client`, que inyecta en su propio `node_config` de toolkit, usa un `api_key` descifrado
 tal cual y expande solo el `${VAR}` que escribió el autor. `image_generation`, `image_edit` y
 `tts` también inyectan en su copia de `config`, pero ahí el motor ya inyectó antes (modo grafo)
@@ -5769,14 +5769,14 @@ autor sí.
 debe llegar por un edge.
 **Estado.** done.
 
-## 115. Endurecimiento: un `tool_configurations` que llega como dato no aporta valores del autor
+## 122. Endurecimiento: un `tool_configurations` que llega como dato no aporta valores del autor
 
 **Qué cambia.** Cuando `llm_call` recibe `tool_configurations` por `inputs` (un edge que
 nombra el campo), sus `fixed` cuentan como del autor para el nodo de cada tool
 (`__colmena_authored_inputs`) solo si el `tool_configurations` entero es el `fixed` de la
 tool que despachó ese `llm_call` (`is_authored_input`). Si no, son datos: un `sandbox_mode`,
 `allowed_hosts`, `multipart_url_fields` o `body` fijado ahí no es del autor, y un `code`
-fijado ahí corre `restricted`. La expansión de `${VAR}` sigue su regla de §106
+fijado ahí corre `restricted`. La expansión de `${VAR}` sigue su regla de §112
 (`subtree_trusted`). `DagToolExecutor::with_authored_tool_configurations` recibe ese
 segundo dato.
 
