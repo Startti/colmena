@@ -5839,10 +5839,10 @@ a ese archivo su `label`, `description` y `url`/`path`.
 Un archivo cuyos bytes no se pudieron guardar se sigue registrando si está en la Files API del
 provider (`load_attachment` lo lee por su `provider_file_id`), y este turno no le pone
 `storage_key`: no figura como guardado y, como es la fila más reciente del id (§112),
-`$attachment:<id>` responde `StorageKeyMissing`. **Limitación:** el upsert conserva la clave que
-un turno anterior guardó en la fila de ese mismo provider (`COALESCE`), así que si el id se
-vuelve a subir con otros bytes y guardarlos falla, `$attachment:<id>` reenvía los bytes
-anteriores mientras `load_attachment` lee el archivo nuevo. Un archivo de texto inline
+`$attachment:<id>` responde `StorageKeyMissing`, salvo por esta **limitación:** el upsert
+conserva la clave que un turno anterior guardó en la fila de ese mismo provider (`COALESCE`),
+así que si el id se vuelve a subir con otros bytes y guardarlos falla, `$attachment:<id>`
+reenvía los bytes anteriores mientras `load_attachment` lee el archivo nuevo. Un archivo de texto inline
 (`data`/`path`) sin bytes guardados sigue sin registrarse; uno de texto con `url` se sube a la
 Files API y se registra sin clave como los demás. `attachment.registered` lleva ahora `stored`.
 

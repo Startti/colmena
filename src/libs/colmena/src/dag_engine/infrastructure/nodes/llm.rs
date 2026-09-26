@@ -1921,11 +1921,11 @@ impl ExecutableNode for LlmNode {
                 // file id as a fallback and still register even if storage failed.
                 // Such a row is registered as not stored: this turn sets no
                 // key. It is the id's newest row, so `$attachment:<id>`
-                // answers StorageKeyMissing. Limitation: the upsert keeps a
-                // key an earlier turn stored on this provider's row, so a
-                // re-upload of the id with new bytes whose persist failed
-                // forwards the OLD bytes via `$attachment:<id>` while
-                // load_attachment reads the new file.
+                // answers StorageKeyMissing, but for one limitation: the
+                // upsert keeps a key an earlier turn stored on this
+                // provider's row, so a re-upload of the id with new bytes
+                // whose persist failed forwards the OLD bytes via
+                // `$attachment:<id>` while load_attachment reads the new file.
                 if !should_register_attachment_row(&provider_file_id, &storage_key) {
                     tracing::warn!(
                         target: "colmena::attachment",
