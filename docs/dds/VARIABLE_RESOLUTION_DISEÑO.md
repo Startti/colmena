@@ -150,7 +150,7 @@ ${UPPERCASE}     → Environment variable (system)
 ${lowercase}     → Node output reference (DAG)
 ```
 
-Enforced by `llm_call` since CHANGELOG 2026-09 §98: its `${...}` templating of
+Enforced by `llm_call` since CHANGELOG 2026-09 §106: its `${...}` templating of
 tool `fixed` values never fills an `${UPPER_CASE}` name from `inputs`, and a
 value it templates in is data — it never expands `${VAR}` in the target node.
 
