@@ -385,7 +385,7 @@ async fn agent_thread(chat: &str) -> Vec<String> {
     sqlx::query_scalar(
         "SELECT role || ': ' || CASE role WHEN 'system' THEN '' ELSE content END \
          FROM llm_node_history WHERE agent_session_id = $1 AND node_id = 'agent' \
-         ORDER BY created_at",
+         ORDER BY created_at, id",
     )
     .bind(chat)
     .fetch_all(&pool.unwrap())

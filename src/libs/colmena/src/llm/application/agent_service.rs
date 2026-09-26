@@ -4846,6 +4846,17 @@ mod tests {
         assert!(cut < mark, "the marker follows the cut request: {text}");
     }
 
+    /// A Stop is often followed by a refinement ("más corto", "en inglés"):
+    /// both markers let the next message resume what it asks for.
+    #[test]
+    fn both_markers_resume_only_what_the_next_message_asks_for() {
+        let rule = "solo si el mensaje siguiente lo pide";
+        for text in [UNANSWERED_REQUEST_TEXT, ABANDONED_TOOL_CALL_TEXT] {
+            assert!(text.contains(rule), "{text}");
+            assert!(!text.contains("No l"), "no blanket refusal: {text}");
+        }
+    }
+
     #[test]
     fn the_unanswered_request_is_the_user_turn_the_thread_ends_on() {
         assert!(ends_on_unanswered_request(&[user(CUT)]));

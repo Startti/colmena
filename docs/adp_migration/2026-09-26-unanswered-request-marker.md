@@ -1,20 +1,21 @@
-# Tras un Stop, el mensaje siguiente no rehace el pedido detenido
+# Tras un Stop antes de la primera respuesta del modelo, el mensaje siguiente no rehace el pedido
 
 **Acción de ADP: ninguna.** Subir el pin de Colmena. Sin cambios de API, de SSE ni de base.
 
 ## Qué cambia
 
-Con Stop (`/chat/cancel`) antes de que el modelo conteste, el hilo del agente en
-`llm_node_history` quedaba en el `user` del pedido detenido. El mensaje siguiente (por ejemplo,
-uno en cola) llegaba al modelo pegado a ese, y el modelo hacía los dos: medido en dev, «decime
-solo "recibido"» volvió a anotar las cuatro notas del pedido detenido. Pasa lo mismo tras un
-turno que falla o que corta el watchdog antes de la primera respuesta.
+Con Stop (`/chat/cancel`) antes de que el modelo conteste (o un error, o el watchdog), el hilo
+en `llm_node_history` quedaba en el `user` del pedido detenido, y el mensaje siguiente llegaba
+pegado a ese: medido en dev, «decime solo "recibido"» volvió a anotar las cuatro notas del pedido
+detenido. Ahora la corrida siguiente guarda antes una fila `assistant` con este texto:
 
-Ahora la corrida siguiente guarda primero una fila `assistant` con este texto y después el
-prompt nuevo:
+> (Este pedido quedó sin respuesta: el turno se detuvo o falló antes de terminar. Retomalo solo
+> si el mensaje siguiente lo pide o se refiere a él.)
 
-> (Este pedido quedó sin respuesta: el turno se detuvo o falló antes de terminar. No lo retomes
-> salvo que te lo vuelvan a pedir.)
+Así un Stop seguido de un ajuste («más corto», «en inglés») sigue funcionando. Un Stop durante
+una tool (lo más común en el agente principal) lo cubre la curación de llamadas abandonadas
+(v0.20), cuyo texto ahora dice lo mismo («…Retomala solo si el mensaje siguiente lo pide o se
+refiere a ella.»); decía «No la retomes; si todavía hace falta, volvé a hacerla.».
 
 ## Qué ve ADP
 

@@ -6520,10 +6520,16 @@ no es `system` es un `user`. Es el caso hermano de §102 y no se pisan: con ids 
 termina en un `assistant` y, contestados, en un `tool`. `coalesce_consecutive_same_role` no
 cambia.
 
+Los dos textos dicen «Retomalo/Retomala solo si el mensaje siguiente lo pide o se refiere a
+él/ella»: tras un Stop suele venir un ajuste («más corto», «en inglés»). `abandoned_tool_call.md`
+(§102), que cubre un Stop durante una tool, decía «No la retomes; si todavía hace falta, volvé a
+hacerla.» e invitaba a rehacer el pedido detenido.
+
 **Tests.** `agent_service.rs`: `[user A]` + B manda `[A, marcador, B]` y lo guarda una vez;
 `[user A, system]` (turno 1) llega sin dos `user` juntos; un hilo contestado, uno con ids
 abiertos (solo el marcador de §102) y un resume no reciben marcador; el reintento tras una falla
-del proveedor marca una sola vez el prompt que quedó sin respuesta.
+del proveedor marca una sola vez el prompt que quedó sin respuesta; los dos textos llevan la
+regla (con el texto viejo de cualquiera de los dos, rojo).
 
 **Mutación.** Sin la curación, la request junta A y B; con el marcador como `user`, se juntan
 igual; con la curación también en el resume, el resume gana un marcador; sin saltar el `system`,
@@ -6537,4 +6543,4 @@ y el marcador en el resumen de turnos viejos, y su prompt solo. Sin la curación
 
 **ADP.** Sin cambios de API ni de SSE. Nota:
 [2026-09-26-unanswered-request-marker.md](adp_migration/2026-09-26-unanswered-request-marker.md).
-**Estado.** done.
+**Estado.** hecho; sin verificar con un modelo real, se mide en dev.
