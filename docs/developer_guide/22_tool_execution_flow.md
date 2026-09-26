@@ -331,7 +331,7 @@ the model was sent (for a raw node name, its schema's `inputs`); for a
 `for_each` row, the target's LLM-visible fields. A declared field still passes:
 declaring it is the author's explicit wiring (`probar_grafo` in
 `tests/graphs/agents/graph_builder/graph_builder.json` offers a child-graph
-source on purpose). CHANGELOG 2026-09 §105.
+source on purpose). CHANGELOG 2026-09 §111.
 
 ---
 
