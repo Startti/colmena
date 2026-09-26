@@ -45,6 +45,12 @@ pub(crate) const NOT_EXECUTED_ON_SUSPEND_TEXT: &str =
 const CLOSED_BY_PARALLEL_SUSPEND_TEXT: &str =
     include_str!("../../../text/prompts/agent_loop/closed_by_parallel_suspend.md");
 
+/// LLM-facing text persisted as the tool result of a call a thread's last turn
+/// left open (a question that was never resumed), when a new prompt starts a
+/// fresh run on that thread. See [`abandoned_call_ids`].
+const ABANDONED_QUESTION_TEXT: &str =
+    include_str!("../../../text/prompts/agent_loop/abandoned_question.md");
+
 /// LLM-facing instruction for the forced final synthesis ("rescue"). Appended
 /// as a user message before the terminal, tool-less LLM call.
 const RESCUE_SYNTHESIS_TEXT: &str =
@@ -86,6 +92,40 @@ pub trait LoadAttachmentResolver: Send + Sync {
 ///
 /// Order is preserved and ids are de-duplicated.
 pub fn unresolved_sibling_ids(messages: &[LlmMessage], skip_id: &str) -> Vec<String> {
+    unresolved_ids(messages, Some(skip_id))
+}
+
+/// Ids a thread's last turn left open: the thread ends on an assistant
+/// `tool_calls` message, with only `tool` messages after it, and these are its
+/// ids that have no `Tool` result. Order is preserved and ids are
+/// de-duplicated.
+///
+/// A suspend leaves its question's id open on purpose: the resume path finds
+/// it by that absence. When that question is never resumed (a second question
+/// a parallel group closed, a refused resume), the next prompt on the thread
+/// starts a fresh run, and the open id is a hard 400 on Anthropic and OpenAI,
+/// for that request and every later one.
+///
+/// A turn the thread already moved past is left alone: a `tool` message
+/// cannot follow a `user` or `assistant` one either, so answering it now would
+/// not mend the thread, and could break one a provider still accepts.
+fn abandoned_call_ids(messages: &[LlmMessage]) -> Vec<String> {
+    let ends_on_calls = messages
+        .iter()
+        .rev()
+        .find(|m| m.role() != &MessageRole::Tool)
+        .is_some_and(|m| {
+            m.role() == &MessageRole::Assistant && m.tool_calls().is_some_and(|c| !c.is_empty())
+        });
+    if !ends_on_calls {
+        return Vec::new();
+    }
+    unresolved_ids(messages, None)
+}
+
+/// Ids declared by the most recent assistant `tool_calls` message that have no
+/// `Tool` result in `messages`, except `skip_id`.
+fn unresolved_ids(messages: &[LlmMessage], skip_id: Option<&str>) -> Vec<String> {
     let resolved: std::collections::HashSet<&str> = messages
         .iter()
         .filter(|m| m.role() == &MessageRole::Tool)
@@ -102,7 +142,7 @@ pub fn unresolved_sibling_ids(messages: &[LlmMessage], skip_id: &str) -> Vec<Str
     latest_batch
         .into_iter()
         .flatten()
-        .filter(|c| c.id != skip_id)
+        .filter(|c| Some(c.id.as_str()) != skip_id)
         .filter(|c| !resolved.contains(c.id.as_str()))
         .filter(|c| seen.insert(c.id.as_str()))
         .map(|c| c.id.clone())
@@ -472,21 +512,25 @@ impl AgentService {
         // 2. Add user prompt (or pre-built messages)
         //    When `prompt` is `None` and `messages` is `None`, we continue from
         //    whatever is already in the conversation (resume path).
-        if let Some(custom_messages) = params.messages {
-            for custom_msg in custom_messages {
-                messages.push(custom_msg.clone());
-                self.conversation_repository
-                    .add_message(session_id, custom_msg)
-                    .await?;
-            }
-        } else if let Some(p) = prompt {
-            let user_message = LlmMessage::user(p)?;
-            messages.push(user_message.clone());
-            self.conversation_repository
-                .add_message(session_id, user_message)
+        let new_messages = match (params.messages, prompt) {
+            (Some(custom_messages), _) => custom_messages,
+            (None, Some(p)) => vec![LlmMessage::user(p)?],
+            // Resume path: continue from existing history.
+            (None, None) => Vec::new(),
+        };
+        // A fresh run first answers what the thread's last turn left open. A
+        // resume never gets here with new messages: its pending id is the
+        // resume path's to answer, with the human's answer.
+        if !new_messages.is_empty() {
+            self.close_abandoned_calls(session_id, &mut messages)
                 .await?;
         }
-        // else: prompt is None — continue from existing history (resume path)
+        for message in new_messages {
+            messages.push(message.clone());
+            self.conversation_repository
+                .add_message(session_id, message)
+                .await?;
+        }
 
         // Compute the compacted base ONCE (Hook C). Reload with summaries so it
         // sees the just-persisted prompt and any cached summaries. The same
@@ -818,9 +862,14 @@ impl AgentService {
                                     //
                                     // INVARIANT: same as the Echo::Call skip
                                     // above — this arm only runs once a
-                                    // suspension was already recorded, by an
-                                    // earlier call in `i`'s own chain. Nothing
-                                    // is written here for `i`'s id;
+                                    // suspension was already recorded. `i`'s
+                                    // chain stopped at an earlier call that
+                                    // suspended: when that call is the question
+                                    // the turn keeps, it set `suspended`; when
+                                    // it is a closed question, the kept one
+                                    // comes before it in the model's order and
+                                    // set it. Nothing is written here for `i`'s
+                                    // id;
                                     // `suspend()` below closes it with
                                     // `NOT_EXECUTED_ON_SUSPEND_TEXT`
                                     // (`unresolved_sibling_ids`) — an id left
@@ -1187,6 +1236,32 @@ impl AgentService {
         self.conversation_repository
             .add_message(session_id, tool_message)
             .await
+    }
+
+    /// Answers every call the thread's last turn left open
+    /// ([`abandoned_call_ids`]) with [`ABANDONED_QUESTION_TEXT`], persisted
+    /// like any other `tool` message, so the request a new prompt starts
+    /// carries no id without a result. On a thread with none it writes
+    /// nothing, so it is idempotent.
+    async fn close_abandoned_calls(
+        &self,
+        session_id: &ConversationKey,
+        messages: &mut Vec<LlmMessage>,
+    ) -> Result<(), LlmError> {
+        for id in abandoned_call_ids(messages) {
+            tracing::warn!(
+                target: "colmena::agent",
+                tool_call_id = %id,
+                "agent_service: a new prompt found a call its thread left open; \
+                 answering it with the abandoned-question marker"
+            );
+            let marker = LlmMessage::tool(id, ABANDONED_QUESTION_TEXT.trim().to_string())?;
+            messages.push(marker.clone());
+            self.conversation_repository
+                .add_message(session_id, marker)
+                .await?;
+        }
+        Ok(())
     }
 
     /// Ends the run on a call that suspended for human input. The assistant
@@ -4394,5 +4469,232 @@ mod tests {
             tool_output(&history, "c2"),
             format!("out c1\n\n{REPEAT_NUDGE_TEXT}").trim()
         );
+    }
+
+    // ---- A fresh run answers what its thread's last turn left open ----
+
+    /// A thread whose last turn suspended on `ask`: the model asked through
+    /// `ask` and `sib`, `sib` never ran and got the not-executed marker, and
+    /// `ask` was left open for a resume that never came (a question a parallel
+    /// group closed, or a refused resume).
+    fn thread_left_on_a_question() -> Vec<LlmMessage> {
+        vec![
+            LlmMessage::user("primera".to_string()).unwrap(),
+            asst_with_calls(&["ask", "sib"]),
+            LlmMessage::tool("sib".to_string(), NOT_EXECUTED_ON_SUSPEND_TEXT.to_string()).unwrap(),
+        ]
+    }
+
+    /// One turn on a thread holding `history`, answered "ok". `prompt` and
+    /// `messages` go to `AgentRunParams` as they are: `llm_call` sends a fresh
+    /// run's prompt in both, and a resume with neither. Returns the messages
+    /// of the request the provider got and the thread afterwards.
+    async fn turn_on(
+        history: Vec<LlmMessage>,
+        prompt: Option<&str>,
+        messages: Option<Vec<LlmMessage>>,
+    ) -> (Vec<LlmMessage>, Vec<LlmMessage>) {
+        let (mock_conv, thread) = stateful_conv_mock(history);
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let s = sent.clone();
+        let mut mock_llm = MockLlmRepo::new();
+        mock_llm.expect_call().times(1).returning(move |req| {
+            *s.lock().unwrap() = req.messages().to_vec();
+            Ok(text_response("ok"))
+        });
+        let exec = MockToolExec::new();
+        let service = AgentService::new(Arc::new(mock_llm), Arc::new(mock_conv));
+        let resp = service
+            .run(AgentRunParams {
+                session_id: &test_key(),
+                prompt: prompt.map(str::to_string),
+                messages,
+                config: create_config(),
+                tools: vec![],
+                tool_executor: &exec,
+                max_tool_repeats: None,
+                max_turns: None,
+                on_token: None,
+                tools_provider: None,
+                attachment_resolver: None,
+                agent_session_id: None,
+                lazy_catalog_names: None,
+            })
+            .await
+            .expect("run");
+        assert_eq!(resp.content(), "ok");
+        let sent = sent.lock().unwrap().clone();
+        let thread = thread.lock().unwrap().clone();
+        (sent, thread)
+    }
+
+    fn user(text: &str) -> LlmMessage {
+        LlmMessage::user(text.to_string()).unwrap()
+    }
+
+    /// Every id an assistant message declares that no `tool` message answers:
+    /// Anthropic and OpenAI reject a request that carries one.
+    fn open_ids(messages: &[LlmMessage]) -> Vec<String> {
+        let answered: std::collections::HashSet<&str> = messages
+            .iter()
+            .filter(|m| m.role() == &MessageRole::Tool)
+            .filter_map(|m| m.tool_call_id())
+            .collect();
+        messages
+            .iter()
+            .filter_map(|m| m.tool_calls())
+            .flatten()
+            .map(|c| c.id.clone())
+            .filter(|id| !answered.contains(id.as_str()))
+            .collect()
+    }
+
+    /// The content of every `tool` message that answers `id`.
+    fn answers_to(messages: &[LlmMessage], id: &str) -> Vec<String> {
+        messages
+            .iter()
+            .filter(|m| m.role() == &MessageRole::Tool && m.tool_call_id() == Some(id))
+            .map(|m| m.content().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn the_abandoned_calls_are_the_open_ids_of_the_turn_the_thread_ends_on() {
+        let mut thread = thread_left_on_a_question();
+        assert_eq!(abandoned_call_ids(&thread), vec!["ask".to_string()]);
+        // Once answered, nothing is left: the heal is idempotent.
+        thread.push(LlmMessage::tool("ask".into(), "x".into()).unwrap());
+        assert!(abandoned_call_ids(&thread).is_empty());
+    }
+
+    /// A turn the thread already moved past is left alone: a `tool` message
+    /// after a `user` one is rejected on its own, so it cannot mend it.
+    #[test]
+    fn a_turn_the_thread_moved_past_has_no_abandoned_calls() {
+        let mut thread = thread_left_on_a_question();
+        thread.push(user("después"));
+        assert!(abandoned_call_ids(&thread).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_fresh_run_answers_the_question_its_thread_left_open() {
+        let (sent, thread) = turn_on(
+            thread_left_on_a_question(),
+            Some("otra"),
+            Some(vec![user("otra")]),
+        )
+        .await;
+
+        assert_eq!(
+            open_ids(&sent),
+            Vec::<String>::new(),
+            "sent to the provider"
+        );
+        let abandoned = ABANDONED_QUESTION_TEXT.trim();
+        assert_eq!(answers_to(&sent, "ask"), [abandoned]);
+        assert_eq!(answers_to(&thread, "ask"), [abandoned], "persisted once");
+        // The sibling keeps its one answer.
+        assert_eq!(
+            answers_to(&thread, "sib"),
+            [NOT_EXECUTED_ON_SUSPEND_TEXT.trim()]
+        );
+        // The answer closes the last turn, before the new prompt.
+        let roles: Vec<MessageRole> = thread.iter().map(|m| m.role().clone()).collect();
+        assert_eq!(
+            roles,
+            [
+                MessageRole::User,
+                MessageRole::Assistant,
+                MessageRole::Tool,
+                MessageRole::Tool,
+                MessageRole::User,
+                MessageRole::Assistant,
+            ]
+        );
+        assert_eq!(thread[3].tool_call_id(), Some("ask"));
+        assert_eq!(thread[4].content(), "otra");
+    }
+
+    #[tokio::test]
+    async fn a_fresh_run_on_a_thread_with_every_call_answered_adds_nothing() {
+        let history = vec![
+            user("primera"),
+            asst_with_calls(&["a", "b"]),
+            LlmMessage::tool("a".into(), "hecho a".into()).unwrap(),
+            LlmMessage::tool("b".into(), "hecho b".into()).unwrap(),
+        ];
+        let (sent, thread) = turn_on(history.clone(), Some("otra"), None).await;
+
+        assert_eq!(open_ids(&sent), Vec::<String>::new());
+        assert_eq!(
+            thread.len(),
+            history.len() + 2,
+            "only the prompt and the reply"
+        );
+        assert_eq!(thread[..history.len()], history[..]);
+        assert_eq!(thread[history.len()].content(), "otra");
+    }
+
+    /// The resume entry belongs to the resume path: `llm_call` answers the
+    /// pending id with the human's answer before the loop starts, and the loop
+    /// never answers that id itself, not even while it is still open.
+    #[tokio::test]
+    async fn a_resume_answers_the_question_with_the_answer_not_the_marker() {
+        let mut history = thread_left_on_a_question();
+        // What `llm_call`'s resume block persists before it calls the loop.
+        history.push(LlmMessage::tool("ask".into(), "la respuesta".into()).unwrap());
+        let (sent, thread) = turn_on(history, None, None).await;
+
+        assert_eq!(open_ids(&sent), Vec::<String>::new());
+        assert_eq!(answers_to(&sent, "ask"), ["la respuesta"]);
+        assert_eq!(answers_to(&thread, "ask"), ["la respuesta"]);
+
+        let (_, thread) = turn_on(thread_left_on_a_question(), None, None).await;
+        assert_eq!(answers_to(&thread, "ask"), Vec::<String>::new());
+    }
+
+    /// A retry after a turn that failed at the provider: the first run already
+    /// answered the question and persisted its prompt, so the second adds no
+    /// second answer and its request stays valid.
+    #[tokio::test]
+    async fn a_second_fresh_run_adds_no_second_marker() {
+        let (mock_conv, thread) = stateful_conv_mock(thread_left_on_a_question());
+        let mut mock_llm = MockLlmRepo::new();
+        mock_llm.expect_call().times(1).returning(|_| {
+            Err(LlmError::RequestFailed {
+                message: "provider down".into(),
+            })
+        });
+        let exec = MockToolExec::new();
+        let failed = AgentService::new(Arc::new(mock_llm), Arc::new(mock_conv))
+            .run(AgentRunParams {
+                session_id: &test_key(),
+                prompt: Some("otra".into()),
+                messages: Some(vec![user("otra")]),
+                config: create_config(),
+                tools: vec![],
+                tool_executor: &exec,
+                max_tool_repeats: None,
+                max_turns: None,
+                on_token: None,
+                tools_provider: None,
+                attachment_resolver: None,
+                agent_session_id: None,
+                lazy_catalog_names: None,
+            })
+            .await;
+        assert!(failed.is_err());
+        let after_failure = thread.lock().unwrap().clone();
+        let abandoned = ABANDONED_QUESTION_TEXT.trim();
+        assert_eq!(answers_to(&after_failure, "ask"), [abandoned]);
+
+        let (sent, thread) = turn_on(
+            after_failure,
+            Some("otra vez"),
+            Some(vec![user("otra vez")]),
+        )
+        .await;
+        assert_eq!(open_ids(&sent), Vec::<String>::new());
+        assert_eq!(answers_to(&thread, "ask"), [abandoned], "still one answer");
     }
 }
