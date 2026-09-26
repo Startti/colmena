@@ -88,33 +88,78 @@ impl SqlNode {
         Value::Object(merged)
     }
 
+    /// Whether `key` of the effective config came from `inputs` (see
+    /// [`Self::build_effective_config`]): a governance key the `config` sets
+    /// never does.
+    fn input_supplied(config: &Value, inputs: &NodeInputs, key: &str) -> bool {
+        inputs.contains_key(key)
+            && !(Self::GOVERNANCE_KEYS.contains(&key) && config.get(key).is_some())
+    }
+
+    /// `connection_url`, env templates expanded only in the author's value:
+    /// always in `config`; in one that came from `inputs`, only at a pointer a
+    /// dispatcher vouched for (a tool's `fixed` value).
+    fn resolve_connection_url(config: &Value, inputs: &NodeInputs) -> Result<String, String> {
+        let from = if Self::input_supplied(config, inputs, "connection_url") {
+            inputs
+        } else {
+            &NodeInputs::new()
+        };
+        crate::dag_engine::infrastructure::env_provenance::resolve_credential(
+            from,
+            config,
+            "connection_url",
+            Self::resolve_env_vars,
+        )
+        .map_err(|e| format!("Failed to resolve connection_url: {e}"))?
+        .ok_or_else(|| "sql_query node requires 'connection_url' in config".to_string())
+    }
+
+    /// Resolve `${VAR}` in a string leaf of a governance object (`pointer`,
+    /// e.g. `/permissions/tenant_user_id`): always when the object is the
+    /// author's `config`; when it came from `inputs`, only at a pointer a
+    /// dispatcher vouched for — otherwise the value is used as written.
+    fn resolve_governance_leaf(
+        config: &Value,
+        inputs: &NodeInputs,
+        pointer: &str,
+        raw: &str,
+    ) -> Result<String, String> {
+        use crate::dag_engine::infrastructure::env_provenance::EnvPolicy;
+        let top = pointer.split('/').nth(1).unwrap_or_default();
+        if Self::input_supplied(config, inputs, top)
+            && !EnvPolicy::from_inputs(inputs).may_expand(pointer)
+        {
+            Ok(raw.to_string())
+        } else {
+            Self::resolve_env_vars(raw)
+        }
+    }
+
     /// Perform the full initialization and return the result.
     /// Called at most once — subsequent calls return the cached `SqlNodeInit`.
     async fn get_or_init(
         &self,
         config: &Value,
+        connection_url: &str,
     ) -> Result<&SqlNodeInit, Box<dyn StdError + Send + Sync>> {
         // We need to own config data in the closure; clone the parts we need.
         let config_owned = config.clone();
+        let url_owned = connection_url.to_string();
         self.init
             .get_or_try_init(|| async move {
-                Self::do_initialize_inner(&self.factory, &config_owned).await
+                Self::do_initialize_inner(&self.factory, &config_owned, &url_owned).await
             })
             .await
     }
 
-    /// Body of the initialization logic — called once by `get_or_init`.
+    /// Body of the initialization logic — called once by `get_or_init`, with
+    /// the `connection_url` its caller resolved.
     async fn do_initialize_inner(
         factory: &Arc<SqlPortFactory>,
         config: &Value,
+        connection_url: &str,
     ) -> Result<SqlNodeInit, Box<dyn StdError + Send + Sync>> {
-        let connection_url_raw = config
-            .get("connection_url")
-            .and_then(|v| v.as_str())
-            .ok_or("sql_query node requires 'connection_url' in config")?;
-        let connection_url = Self::resolve_env_vars(connection_url_raw)
-            .map_err(|e| format!("Failed to resolve connection_url: {}", e))?;
-
         let runtime_limits = config.get("runtime_limits");
         let statement_timeout_ms = runtime_limits
             .and_then(|r| r.get("statement_timeout_ms"))
@@ -134,7 +179,7 @@ impl SqlNode {
 
         // Acquire adapter from factory (gets or creates the registry pool)
         let adapter = factory
-            .get_adapter(&connection_url, statement_timeout_ms, work_mem_mb)
+            .get_adapter(connection_url, statement_timeout_ms, work_mem_mb)
             .await
             .map_err(|e| format!("Failed to acquire SQL pool: {}", e))?;
 
@@ -453,7 +498,9 @@ impl InitializableNode for SqlNode {
         &self,
         config: &Value,
     ) -> Result<InitContext, Box<dyn StdError + Send + Sync>> {
-        let init = self.get_or_init(config).await?;
+        // `config` is the author's (a tool's `fixed` values): it expands.
+        let connection_url = Self::resolve_connection_url(config, &NodeInputs::new())?;
+        let init = self.get_or_init(config, &connection_url).await?;
         Ok(InitContext {
             description_supplement: Some(init.description_supplement.clone()),
         })
@@ -494,24 +541,27 @@ impl ExecutableNode for SqlNode {
                 "first call — initializing connection pool"
             );
         }
-        let init = self
-            .get_or_init(&effective_config)
-            .await
-            .map_err(|e| format!("SqlNode initialization failed: {}", e))?;
+        let init = async {
+            let connection_url = Self::resolve_connection_url(config, inputs)?;
+            self.get_or_init(&effective_config, &connection_url).await
+        }
+        .await
+        .map_err(|e| format!("SqlNode initialization failed: {}", e))?;
 
         let permissions = SqlPermissions::from_config(effective_config.get("permissions"))
             .map_err(|e| format!("Invalid permissions: {}", e))?;
 
-        // Resolve tenant_user_id (may contain ${ENV_VAR})
+        // Resolve tenant_user_id (may contain ${ENV_VAR} in the author's value)
         let tenant_user_id: Option<String> = permissions.tenant_user_id().map(|raw| {
-            Self::resolve_env_vars(raw).unwrap_or_else(|e| {
-                tracing::warn!(
-                    target: crate::dag_engine::log_policy::T_SQL,
-                    error = %e,
-                    "failed to resolve tenant_user_id"
-                );
-                raw.to_string()
-            })
+            Self::resolve_governance_leaf(config, inputs, "/permissions/tenant_user_id", raw)
+                .unwrap_or_else(|e| {
+                    tracing::warn!(
+                        target: crate::dag_engine::log_policy::T_SQL,
+                        error = %e,
+                        "failed to resolve tenant_user_id"
+                    );
+                    raw.to_string()
+                })
         });
 
         let runtime_limits = effective_config.get("runtime_limits");
@@ -559,7 +609,13 @@ impl ExecutableNode for SqlNode {
                 // guardrailed query as `InvalidApiKey`. Surface the
                 // misconfiguration at engine startup instead so it appears
                 // before any traffic is served.
-                let api_key = Self::resolve_env_vars(api_key_raw).map_err(|e| {
+                let api_key = Self::resolve_governance_leaf(
+                    config,
+                    inputs,
+                    "/guardrail_llm/api_key",
+                    api_key_raw,
+                )
+                .map_err(|e| {
                     format!(
                         "sql node: guardrail_llm.api_key failed to resolve \
                          (`{api_key_raw}`): {e}. Set guardrail_llm.api_key to a \
@@ -1064,5 +1120,165 @@ mod setup_sql_tests {
             .await
             .ok();
         pool.close().await;
+    }
+}
+
+/// Where `connection_url` connects and what it sends there: a raw TCP listener
+/// records the startup message the Postgres client writes (the user name
+/// travels in it).
+#[cfg(test)]
+mod connection_provenance_tests {
+    use super::*;
+    use crate::dag_engine::application::ports::NodeRegistryPort;
+    use crate::dag_engine::infrastructure::dag_tool_executor::DagToolExecutor;
+    use crate::dag_engine::infrastructure::pool_registry::{PgPoolRegistry, PoolConfig};
+    use crate::llm::domain::ToolExecutor;
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    use tokio::io::AsyncReadExt;
+
+    const ENV: &str = "COLMENA_CLASS_TEST_SQL_USER";
+    const VALUE: &str = "sql-user-test-only";
+
+    fn node() -> SqlNode {
+        let config = PoolConfig {
+            acquire_timeout: std::time::Duration::from_millis(500),
+            ..PoolConfig::defaults()
+        };
+        let registry = Arc::new(PgPoolRegistry::new(config));
+        SqlNode::new(Arc::new(SqlPortFactory::new(registry)))
+    }
+
+    /// A listener that records every byte its connections write; the URL
+    /// names `${ENV}` as the user.
+    async fn listener() -> (String, Arc<Mutex<Vec<u8>>>, tokio::task::JoinHandle<()>) {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!(
+            "postgres://${{{ENV}}}@{}/db?sslmode=disable",
+            l.local_addr().unwrap()
+        );
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let sink = seen.clone();
+        let h = tokio::spawn(async move {
+            while let Ok((mut sock, _)) = l.accept().await {
+                let mut buf = vec![0u8; 4096];
+                let n = sock.read(&mut buf).await.unwrap_or(0);
+                sink.lock().unwrap().extend_from_slice(&buf[..n]);
+            }
+        });
+        (url, seen, h)
+    }
+
+    fn reached(seen: &Mutex<Vec<u8>>) -> bool {
+        String::from_utf8_lossy(&seen.lock().unwrap()).contains(VALUE)
+    }
+
+    /// A `connection_url` from `config` expands `${VAR}`; one that arrived as
+    /// data (an edge that names it, an offered tool argument) is used as
+    /// written, so the env value never reaches the server it names.
+    #[tokio::test]
+    async fn a_connection_url_from_data_never_expands_an_env_template() {
+        std::env::set_var(ENV, VALUE);
+        let (url, seen, h) = listener().await;
+        let query = HashMap::from([("query".to_string(), json!("SELECT 1"))]);
+        let _ = node()
+            .execute(
+                &query,
+                &json!({ "connection_url": url }),
+                &mut json!({}),
+                None,
+            )
+            .await;
+        assert!(reached(&seen), "the config URL did not expand (control)");
+        seen.lock().unwrap().clear();
+
+        let mut inputs = query.clone();
+        inputs.insert("connection_url".to_string(), json!(url));
+        let _ = node()
+            .execute(&inputs, &json!({}), &mut json!({}), None)
+            .await;
+        h.abort();
+        assert!(
+            !reached(&seen),
+            "a data connection_url expanded an env template"
+        );
+    }
+
+    /// `permissions.tenant_user_id` and `guardrail_llm.api_key` expand `${VAR}`
+    /// in the author's `config`; from `inputs`, only at a vouched pointer.
+    #[test]
+    fn a_governance_leaf_from_data_expands_only_at_a_vouched_pointer() {
+        use crate::dag_engine::infrastructure::env_provenance::ENV_TRUSTED_PATHS_KEY;
+        std::env::set_var("COLMENA_CLASS_TEST_SQL_LEAF", "leaf-test-only");
+        let raw = "${COLMENA_CLASS_TEST_SQL_LEAF}";
+        for (top, pointer) in [
+            ("permissions", "/permissions/tenant_user_id"),
+            ("guardrail_llm", "/guardrail_llm/api_key"),
+        ] {
+            let leaf = pointer.rsplit('/').next().unwrap();
+            let value = json!({ top: { leaf: raw } });
+            let resolve = |config: &Value, inputs: &NodeInputs| {
+                SqlNode::resolve_governance_leaf(config, inputs, pointer, raw).unwrap()
+            };
+            let mut inputs: NodeInputs = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(resolve(&value, &NodeInputs::new()), "leaf-test-only");
+            assert_eq!(resolve(&value, &inputs), "leaf-test-only", "config wins");
+            assert_eq!(
+                resolve(&json!({}), &inputs),
+                raw,
+                "{pointer} from data expanded"
+            );
+            inputs.insert(ENV_TRUSTED_PATHS_KEY.to_string(), json!([pointer]));
+            assert_eq!(resolve(&json!({}), &inputs), "leaf-test-only");
+        }
+        std::env::remove_var("COLMENA_CLASS_TEST_SQL_LEAF");
+    }
+
+    struct SqlRegistry;
+    impl NodeRegistryPort for SqlRegistry {
+        fn get_node(&self, node_type: &str) -> Option<Arc<dyn ExecutableNode>> {
+            (node_type == "sql_query").then(|| Arc::new(node()) as _)
+        }
+        fn get_all_nodes(&self) -> HashMap<String, Arc<dyn ExecutableNode>> {
+            HashMap::new()
+        }
+    }
+
+    /// Listing tools connects each `sql_query` tool ahead of time with its
+    /// `fixed` values; for tool configurations that arrived as data it does
+    /// not, so their `${VAR}` never reaches the server they name.
+    #[tokio::test]
+    async fn listing_tools_from_data_never_expands_their_connection_url() {
+        std::env::set_var(ENV, VALUE);
+        let (url, seen, h) = listener().await;
+        let tools: HashMap<
+            String,
+            crate::dag_engine::domain::tool_configuration::ToolConfiguration,
+        > = serde_json::from_value(json!({ "db": { "node_type": "sql_query", "node_schema": {
+                "connection_url": { "fixed": url },
+                "query": { "type": "string", "description": "sql" }
+            } } }))
+        .unwrap();
+        let list = |authored: bool| {
+            let tools = tools.clone();
+            async move {
+                DagToolExecutor::new(Arc::new(SqlRegistry), tools.clone())
+                    .with_authored_tool_configurations(tools, authored)
+                    .available_tools()
+                    .await;
+            }
+        };
+        list(true).await;
+        assert!(
+            reached(&seen),
+            "the author's tool did not connect (control)"
+        );
+        seen.lock().unwrap().clear();
+        list(false).await;
+        h.abort();
+        assert!(
+            !reached(&seen),
+            "a data tool's connection_url expanded an env template"
+        );
     }
 }
