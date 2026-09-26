@@ -46,10 +46,12 @@ const CLOSED_BY_PARALLEL_SUSPEND_TEXT: &str =
     include_str!("../../../text/prompts/agent_loop/closed_by_parallel_suspend.md");
 
 /// LLM-facing text persisted as the tool result of a call a thread's last turn
-/// left open (a question that was never resumed), when a new prompt starts a
-/// fresh run on that thread. See [`abandoned_call_ids`].
-const ABANDONED_QUESTION_TEXT: &str =
-    include_str!("../../../text/prompts/agent_loop/abandoned_question.md");
+/// left open, when a new prompt starts a fresh run on that thread. See
+/// [`abandoned_call_ids`]. Two causes leave one, and the text fits both: a
+/// question that was never resumed, and a run cut (a Stop, the watchdog) after
+/// its assistant message was saved and before its calls had results.
+const ABANDONED_TOOL_CALL_TEXT: &str =
+    include_str!("../../../text/prompts/agent_loop/abandoned_tool_call.md");
 
 /// LLM-facing instruction for the forced final synthesis ("rescue"). Appended
 /// as a user message before the terminal, tool-less LLM call.
@@ -104,7 +106,10 @@ pub fn unresolved_sibling_ids(messages: &[LlmMessage], skip_id: &str) -> Vec<Str
 /// it by that absence. When that question is never resumed (a second question
 /// a parallel group closed, a refused resume), the next prompt on the thread
 /// starts a fresh run, and the open id is a hard 400 on Anthropic and OpenAI,
-/// for that request and every later one.
+/// for that request and every later one. A run cut after its assistant message
+/// was saved (a Stop, the watchdog) leaves open the ids that still had no
+/// result: a call run alone saves its result as it finishes, a group's calls
+/// only when the group closes, and the calls after the cut never ran.
 ///
 /// A turn the thread already moved past is left alone: a `tool` message
 /// cannot follow a `user` or `assistant` one either, so answering it now would
@@ -1239,7 +1244,7 @@ impl AgentService {
     }
 
     /// Answers every call the thread's last turn left open
-    /// ([`abandoned_call_ids`]) with [`ABANDONED_QUESTION_TEXT`], persisted
+    /// ([`abandoned_call_ids`]) with [`ABANDONED_TOOL_CALL_TEXT`], persisted
     /// like any other `tool` message, so the request a new prompt starts
     /// carries no id without a result. On a thread with none it writes
     /// nothing, so it is idempotent.
@@ -1253,9 +1258,9 @@ impl AgentService {
                 target: "colmena::agent",
                 tool_call_id = %id,
                 "agent_service: a new prompt found a call its thread left open; \
-                 answering it with the abandoned-question marker"
+                 answering it with the abandoned-tool-call marker"
             );
-            let marker = LlmMessage::tool(id, ABANDONED_QUESTION_TEXT.trim().to_string())?;
+            let marker = LlmMessage::tool(id, ABANDONED_TOOL_CALL_TEXT.trim().to_string())?;
             messages.push(marker.clone());
             self.conversation_repository
                 .add_message(session_id, marker)
@@ -4590,7 +4595,7 @@ mod tests {
             Vec::<String>::new(),
             "sent to the provider"
         );
-        let abandoned = ABANDONED_QUESTION_TEXT.trim();
+        let abandoned = ABANDONED_TOOL_CALL_TEXT.trim();
         assert_eq!(answers_to(&sent, "ask"), [abandoned]);
         assert_eq!(answers_to(&thread, "ask"), [abandoned], "persisted once");
         // The sibling keeps its one answer.
@@ -4613,6 +4618,38 @@ mod tests {
         );
         assert_eq!(thread[3].tool_call_id(), Some("ask"));
         assert_eq!(thread[4].content(), "otra");
+    }
+
+    /// A Stop or the watchdog cuts a run after the assistant message is saved
+    /// and before any of its calls has a result: the thread ends on that
+    /// message with every id open, and none of them is a question.
+    #[tokio::test]
+    async fn a_fresh_run_answers_every_call_a_cut_turn_left_open() {
+        let history = vec![user("primera"), asst_with_calls(&["x", "y"])];
+        let (sent, thread) = turn_on(history, Some("otra"), Some(vec![user("otra")])).await;
+
+        assert_eq!(
+            open_ids(&sent),
+            Vec::<String>::new(),
+            "sent to the provider"
+        );
+        let abandoned = ABANDONED_TOOL_CALL_TEXT.trim();
+        for id in ["x", "y"] {
+            assert_eq!(answers_to(&sent, id), [abandoned], "{id} in the request");
+            assert_eq!(answers_to(&thread, id), [abandoned], "{id} persisted once");
+        }
+        let roles: Vec<MessageRole> = thread.iter().map(|m| m.role().clone()).collect();
+        assert_eq!(
+            roles,
+            [
+                MessageRole::User,
+                MessageRole::Assistant,
+                MessageRole::Tool,
+                MessageRole::Tool,
+                MessageRole::User,
+                MessageRole::Assistant,
+            ]
+        );
     }
 
     #[tokio::test]
@@ -4685,7 +4722,7 @@ mod tests {
             .await;
         assert!(failed.is_err());
         let after_failure = thread.lock().unwrap().clone();
-        let abandoned = ABANDONED_QUESTION_TEXT.trim();
+        let abandoned = ABANDONED_TOOL_CALL_TEXT.trim();
         assert_eq!(answers_to(&after_failure, "ask"), [abandoned]);
 
         let (sent, thread) = turn_on(

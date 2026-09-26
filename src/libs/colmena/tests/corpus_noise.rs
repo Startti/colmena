@@ -151,7 +151,12 @@ fn measure() -> Measured {
 // run by `src/libs/colmena/tests/parallel_tool_groups.rs` with a scripted model,
 // once as a group and once with `parallel: false` as the serial baseline).
 // Lints clean.
-const EXPECTED_FILES: usize = 332;
+// Bumped 332 -> 333: adds tests/graphs/agents/parallel_tool_suspend.json (a
+// parent calls a `parallel`, `dynamic` tool once per agent in one message and
+// the children are agents with memory that can ask through a `suspend` tool;
+// run by `src/libs/colmena/tests/parallel_tool_suspend.rs` with a model that
+// answers by who calls it). Lints clean.
+const EXPECTED_FILES: usize = 333;
 const EXPECTED_ERRORS: usize = 0;
 const EXPECTED_WARNINGS: usize = 0;
 const EXPECTED_INFOS: usize = 0;

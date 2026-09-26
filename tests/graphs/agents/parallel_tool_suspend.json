@@ -1,0 +1,72 @@
+{
+  "comment": "E2E de «esperar y preguntar»: una pregunta por turno dentro de un grupo de llamadas `parallel`. Lo corre src/libs/colmena/tests/parallel_tool_suspend.rs con un modelo guionado que contesta según quién lo llama (PADRE o HIJO, por el system prompt). Run es `parallel: true` y `dynamic` con el hilo fijo en `${agentId}` (como Run My Agent de ADP): dos agentes distintos son dos cadenas y forman un grupo. El hijo es un agente con memoria que puede preguntar con Preguntar (un `suspend`). Si pregunta uno solo, el turno espera al grupo y se suspende en esa pregunta; si preguntan dos, manda la primera en el orden del modelo, la fila del otro hijo queda FAILED y el modelo recibe el texto de closed_by_parallel_suspend.md. Re-correr el hijo cerrado en un turno nuevo funciona: la corrida fresca contesta el id que su hilo dejó abierto con abandoned_tool_call.md.",
+  "metadata": {
+    "category": "agents",
+    "features": ["subgraph_as_tool", "child_graph_inline", "parallel_tool_calls", "suspend", "hitl", "conversation_memory"],
+    "requires_env": ["GEMINI_API_KEY", "DATABASE_URL"]
+  },
+  "nodes": {
+    "pedido": { "type": "input", "config": { "prompt": "turno 1: corré alfa y beta a la vez." } },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "model": "gemini-2.5-flash",
+        "api_key": "${GEMINI_API_KEY}",
+        "connection_url": "${DATABASE_URL}",
+        "stream": true,
+        "system_message": "PADRE. Corrés agentes con Run, uno por agentId. Pedí todas las llamadas en el mismo mensaje.",
+        "prompt": "{{prompt}}",
+        "tool_configurations": {
+          "Run": {
+            "name": "Run",
+            "node_type": "subgraph",
+            "parallel": true,
+            "memory_mode": "dynamic",
+            "description": "Corre un agente con una tarea. El agente puede hacerle una pregunta al usuario.",
+            "node_schema": {
+              "agentId": { "type": "string", "required": true, "description": "El id del agente (alfa, beta)." },
+              "task": { "type": "string", "required": true, "description": "La tarea para el agente." },
+              "thread_id": { "fixed": "${agentId}" },
+              "child_graph_inline": {
+                "fixed": {
+                  "nodes": {
+                    "hijo": {
+                      "type": "llm_call",
+                      "config": {
+                        "provider": "google",
+                        "model": "gemini-2.5-flash",
+                        "api_key": "${GEMINI_API_KEY}",
+                        "connection_url": "${DATABASE_URL}",
+                        "stream": true,
+                        "system_message": "HIJO. Hacé la tarea. Si te falta un dato, preguntale al usuario con Preguntar.",
+                        "prompt": "{{task}}",
+                        "tool_configurations": {
+                          "Preguntar": {
+                            "name": "Preguntar",
+                            "node_type": "suspend",
+                            "description": "Le hace una pregunta al usuario y espera su respuesta.",
+                            "node_schema": {
+                              "id": { "fixed": "pregunta_hijo" },
+                              "question": { "type": "string", "required": true, "description": "La pregunta." }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "edges": []
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "salida": { "type": "output", "config": {} }
+  },
+  "edges": [
+    { "from": "pedido", "to": "agent" },
+    { "from": "agent.result", "to": "salida" }
+  ]
+}
