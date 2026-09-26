@@ -505,6 +505,8 @@ Schema reference: [`docs/node_configurations.json`](../node_configurations.json)
 
 The engine runs `inject_secrets` on a node's **inputs AND config** before execution. This means `<sv_*>` handles placed directly in `node.config` fields (e.g., when a canvas-builder pre-populates a child node's config with a handle) are resolved to real values at execution time, without needing an edge to carry the value through inputs.
 
+A node expands `${VAR}` in its `config` after this injection, so a decrypted value is never allowed to act as an env template there: when a secret injected into `config` contains `${`, the engine does not run the node and fails it with an error naming the handle (never the value). The same secret passed through an edge is sent as written, since an `inputs` value never expands in graph mode (CHANGELOG 2026-09 §107). `tavily_client`, which injects into its own toolkit `node_config`, uses a decrypted `api_key` as is (§121).
+
 **Spec:** [`docs/superpowers/specs/2026-05-07-inject-secrets-in-config-design.md`](../superpowers/specs/2026-05-07-inject-secrets-in-config-design.md)
 
 ---

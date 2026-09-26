@@ -67,6 +67,10 @@ pub struct DagToolExecutor {
     /// knows (see [`Self::with_authored_tool_configurations`]). `None` means
     /// `tool_configurations` is authored as given.
     authored_tool_configurations: Option<HashMap<String, ToolConfiguration>>,
+    /// Whether a tool's `fixed` values are the author's (listed under
+    /// `__colmena_authored_inputs`). `false` when the tool configurations
+    /// arrived as data: their `fixed` values are data too.
+    fixed_values_authored: bool,
     /// Optional SecureValueService for decrypting <value_N> placeholders during tool calls.
     secure_value_service: Option<Arc<SecureValueService>>,
     /// Session ID used to scope secret lookup.
@@ -318,6 +322,7 @@ impl DagToolExecutor {
             registry,
             tool_configurations,
             authored_tool_configurations: None,
+            fixed_values_authored: true,
             secure_value_service: None,
             session_id: None,
             agent_session_id: None,
@@ -344,12 +349,16 @@ impl DagToolExecutor {
     /// The tool configurations as their author wrote them — before any
     /// `${context.*}` templating, and empty when they came from runtime data.
     /// A `fixed` value may expand `${VAR}` only where it still equals this
-    /// authored value (see `env_provenance.rs`).
+    /// authored value (see `env_provenance.rs`). `fixed_values_authored` says
+    /// whether their `fixed` values count as the author's for the target node
+    /// (`__colmena_authored_inputs`): not when the configurations are data.
     pub fn with_authored_tool_configurations(
         mut self,
         authored: HashMap<String, ToolConfiguration>,
+        fixed_values_authored: bool,
     ) -> Self {
         self.authored_tool_configurations = Some(authored);
+        self.fixed_values_authored = fixed_values_authored;
         self
     }
 
@@ -2119,10 +2128,14 @@ impl DagToolExecutor {
             &authored_fixed,
             &inputs,
         );
-        let authored_keys = crate::dag_engine::infrastructure::env_provenance::authored_keys(
-            &authored_fixed,
-            &inputs,
-        );
+        let authored_keys = if self.fixed_values_authored {
+            crate::dag_engine::infrastructure::env_provenance::authored_keys(
+                &authored_fixed,
+                &inputs,
+            )
+        } else {
+            Vec::new()
+        };
 
         // Inject the resume answer AFTER all merging but BEFORE inject_secrets so that
         // secret resolution still applies uniformly and the key cannot be overridden by
