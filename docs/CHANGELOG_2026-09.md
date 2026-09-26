@@ -5747,3 +5747,22 @@ nada; con el campo en `multipart_url_fields`, se baja.
 **ADP.** Campo nuevo opcional `multipart_url_fields`. Una tool cuyo modelo pasa URLs de
 archivos para subir debe listar esos campos.
 **Estado.** done.
+
+## 114. Endurecimiento: un secreto descifrado en `config` nunca se lee como plantilla de entorno
+
+**Qué cambia.** En modo grafo el motor inyecta los secure values en el `config` del nodo antes
+de ejecutarlo, y el nodo expande `${VAR}` en su `config` después. Si un valor descifrado que va
+a `config` contiene `${`, el motor no corre el nodo: lo falla con un error que nombra el handle
+(nunca el valor) y sugiere pasarlo por un edge, donde un valor de `inputs` no se expande (§101).
+`tavily_client`, que inyecta en su propio `node_config` de toolkit, usa un `api_key` descifrado
+tal cual y expande solo el `${VAR}` que escribió el autor. `image_generation`, `image_edit` y
+`tts` también inyectan en su copia de `config`, pero ahí el motor ya inyectó antes (modo grafo)
+o el `config` es `{}` (modo tool).
+
+**Tests.** `graph_http_payload_tests`: un bearer en `config` cuyo secreto contiene `${VAR}` no
+manda el valor de la variable. `tavily_client.rs`: un `api_key` descifrado no se expande; el del
+autor sí.
+
+**ADP.** Sin cambios de API. Un secreto que contiene `${` y se usaba en el `config` de un nodo
+debe llegar por un edge.
+**Estado.** done.

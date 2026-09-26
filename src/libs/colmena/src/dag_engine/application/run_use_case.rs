@@ -580,6 +580,11 @@ impl DagRunUseCase {
 
                 // STEP 1: Inject secrets for non-LLM nodes (before executing)
                 let mut node_config_value = node_config.config.clone();
+                // The node expands `${VAR}` in its `config` AFTER this injection,
+                // so a decrypted value that holds an env template would be read
+                // as one. Env templates expand only in what the author wrote:
+                // such a value is refused, and the node does not run.
+                let mut config_secret_refusal: Option<String> = None;
                 if node_config.node_type != "llm" {
                     if let Some(svc) = &self.secure_value_service {
                         let agent_for_inject = active_agent_session_id.as_deref();
@@ -599,7 +604,18 @@ impl DagRunUseCase {
                             .inject_secrets(&mut node_config_value, &session_id, agent_for_inject)
                             .await
                         {
-                            Ok(map) => run_secrets.extend(map),
+                            Ok(map) => {
+                                if let Some(handle) =
+                                    map.iter().find(|(real, _)| real.contains("${")).map(|(_, h)| h)
+                                {
+                                    config_secret_refusal = Some(format!(
+                                        "secure value {handle} contains `${{`, which this node \
+                                         would read as an env template in its config; pass it \
+                                         through an edge instead"
+                                    ));
+                                }
+                                run_secrets.extend(map)
+                            }
                             Err(e) => eprintln!("⚠️ Failed to inject secrets in config: {}", e),
                         }
                     }
@@ -728,7 +744,12 @@ impl DagRunUseCase {
                 };
 
                 let output = {
-                    let execution_future = node_impl.execute(&inputs, &node_config_value, &mut global_shared_state, observer);
+                    let execution_future = async {
+                        match &config_secret_refusal {
+                            Some(msg) => Err(msg.clone().into()),
+                            None => node_impl.execute(&inputs, &node_config_value, &mut global_shared_state, observer).await,
+                        }
+                    };
                     tokio::pin!(execution_future);
 
                     // ── Liveness clocks (spec: SPEC_STREAM_MIDRUN_LIVENESS) ─────
@@ -3543,6 +3564,70 @@ mod graph_http_payload_tests {
         );
         let auth: Vec<_> = req.headers.get_all("authorization").iter().collect();
         assert_eq!(auth, ["Bearer author"], "a flattened credential arrived");
+    }
+
+    /// Decrypts one handle to a value that contains an env template.
+    struct TemplateSecretRepo;
+    #[async_trait::async_trait]
+    impl crate::dag_engine::domain::secure_value_repository::SecureValueRepository
+        for TemplateSecretRepo
+    {
+        async fn persist(
+            &self,
+            _: &str,
+            _: Option<&str>,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &str,
+        ) -> Result<(), DagError> {
+            Ok(())
+        }
+        async fn decrypt(
+            &self,
+            _: &str,
+            _: Option<&str>,
+            handle: &str,
+        ) -> Result<Option<String>, DagError> {
+            Ok((handle == "<sv_tok_1>").then(|| "pre-${COLMENA_CLASS_TEST_SECRET_ENV}".into()))
+        }
+        async fn cleanup(&self, _: &str) -> Result<(), DagError> {
+            Ok(())
+        }
+        async fn cleanup_expired(&self) -> Result<u64, DagError> {
+            Ok(0)
+        }
+        async fn cleanup_expired_for_run(&self, _: &str, _: Option<&str>) -> Result<u64, DagError> {
+            Ok(0)
+        }
+    }
+
+    /// A decrypted secret placed in a node's `config` is never read as an env
+    /// template: the env value never reaches the request.
+    #[tokio::test]
+    async fn a_secret_in_config_never_expands_an_env_template() {
+        std::env::set_var("COLMENA_CLASS_TEST_SECRET_ENV", "secret-env-test-only");
+        let author = server().await;
+        let g: Graph = serde_json::from_value(json!({
+            "nodes": { "call": { "type": "http_request", "config": {
+                "base_url": author.uri(), "endpoint": "/items", "method": "GET",
+                "bearer_token": "<sv_tok_1>"
+            } } },
+            "edges": []
+        }))
+        .unwrap();
+        let svc = Arc::new(SecureValueService::new(Arc::new(TemplateSecretRepo)));
+        let uc = DagRunUseCase::with_secure_values_and_service(Arc::new(Registry), None, svc);
+        let stream = uc.execute_stream(g, None, None, false, None, None, None);
+        tokio::pin!(stream);
+        while stream.next().await.is_some() {}
+        let leaked = author.received_requests().await.unwrap().iter().any(|r| {
+            r.headers
+                .get("authorization")
+                .is_some_and(|v| v.to_str().unwrap().contains("secret-env-test-only"))
+        });
+        assert!(!leaked, "a decrypted secret was read as an env template");
+        std::env::remove_var("COLMENA_CLASS_TEST_SECRET_ENV");
     }
 
     /// Engine keys never survive `build_inputs_for`, whether an edge without a

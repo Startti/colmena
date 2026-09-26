@@ -57,6 +57,17 @@ impl TavilyClientNode {
         }
     }
 
+    /// The api_key to send, from the author's value and the value after
+    /// secure-value injection: a decrypted secure value is used as is (never
+    /// read as an env template); the author's own `${VAR}` resolves.
+    fn resolve_api_key(authored: &str, injected: &str) -> Result<String, String> {
+        if authored != injected {
+            Ok(injected.to_string())
+        } else {
+            Self::resolve_env_var(authored)
+        }
+    }
+
     /// Build a SearchUseCase from the per-call config. Validates / resolves
     /// the api_key and applies defaults from the spec.
     pub(crate) async fn build_use_case(
@@ -88,7 +99,11 @@ impl TavilyClientNode {
                 "tavily_client: api_key passed as a literal — prefer ${{TAVILY_API_KEY}} or a secure value"
             );
         }
-        let api_key = Self::resolve_env_var(api_key_raw)?;
+        let authored = config
+            .get("api_key")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        let api_key = Self::resolve_api_key(authored, api_key_raw)?;
 
         let timeout_seconds = cfg_copy
             .get("timeout_seconds")
@@ -625,6 +640,19 @@ mod tests {
         let cat = node.sub_tool_catalog(&json!({}));
         let s = cat.iter().find(|s| s.name == "fetch").unwrap();
         assert!(s.required.contains(&"url".to_string()));
+    }
+
+    /// A decrypted secure value is used as is, never read as an env template;
+    /// the author's own `${VAR}` still resolves.
+    #[test]
+    fn a_decrypted_api_key_is_never_read_as_an_env_template() {
+        std::env::set_var("COLMENA_CLASS_TEST_TAVILY", "tavily-env-test-only");
+        let raw = "${COLMENA_CLASS_TEST_TAVILY}";
+        let injected = TavilyClientNode::resolve_api_key("<sv_k_1>", raw).unwrap();
+        assert_eq!(injected, raw);
+        let authored = TavilyClientNode::resolve_api_key(raw, raw).unwrap();
+        assert_eq!(authored, "tavily-env-test-only");
+        std::env::remove_var("COLMENA_CLASS_TEST_TAVILY");
     }
 
     #[test]
