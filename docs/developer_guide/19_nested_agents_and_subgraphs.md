@@ -299,8 +299,11 @@ sobrevive entre runs).
 | `memory_mode` | `node_id` | Comportamiento |
 |---|---|---|
 | `stateless` (**default**) | `tool/<tool_call_id>` | Cada llamada aislada. Es lo de hoy; omitir el campo equivale a esto. |
-| `persistent` | `tool/<tool_name>` | Una sola conversación compartida por todas las llamadas al tool; todas acumulan en el mismo hilo y el modelo no maneja ningún identificador. **Activo.** |
-| `dynamic` | `tool/<tool_name>/<thread_id>` | El modelo nombra el hilo por llamada vía un parámetro `thread_id` **requerido** que el motor auto-expone; un id nuevo abre un hilo, un id previo lo continúa. **Activo.** Excepción: con `thread_id` **fijo** en `node_schema`, lo nombra la plataforma, no el modelo — ver más abajo. |
+| `persistent` | `tool/<tool_name>`; desde dentro de un hijo invocado como tool, `<caller>/tool/<tool_name>` | Una sola conversación, compartida por todas las llamadas al tool de un mismo `llm_call` anidado; fuera de un hijo de tool, compartida (ver [De quién es el hilo](#de-quién-es-el-hilo)). Todas acumulan en el mismo hilo y el modelo no maneja ningún identificador. **Activo.** |
+| `dynamic` | `tool/<tool_name>/<thread_id>`; desde dentro de un hijo invocado como tool, `<caller>/tool/<tool_name>/<thread_id>` | El modelo nombra el hilo por llamada vía un parámetro `thread_id` **requerido** que el motor auto-expone; un id nuevo abre un hilo, un id previo lo continúa. **Activo.** Excepción: con `thread_id` **fijo** en `node_schema`, lo nombra la plataforma, no el modelo — ver más abajo. |
+
+`<caller>` es el camino del `llm_call` que hace la llamada. Ver
+[De quién es el hilo](#de-quién-es-el-hilo), al final de esta sección.
 
 Los tres modos están activos. Un modo con memoria (`persistent`/`dynamic`) **requiere
 `connection_url`** en el `llm_call` que recuerda — para un `subgraph`, en un `llm_call`
@@ -346,8 +349,8 @@ cuando no aplica).
 `node_schema` (templado contra él, `node_schema_merge.rs`). Efecto: el motor **no**
 auto-expone `thread_id`; la salida **no** lleva `[hilo: <id>]` (ese eco es para un id
 que el MODELO inventó, no uno fijo); el tool queda **afuera** de `list_threads`; y la
-memoria sigue keyando por el valor resuelto (`tool/<tool_name>/<valor>`) — un hilo
-**distinto por `agentId`**. Si el template no resuelve (`agentId` ausente o vacío), la
+memoria sigue keyando por el valor resuelto (`tool/<tool_name>/<valor>`, o bajo el
+camino de quien llama) — un hilo **distinto por `agentId`**. Si el template no resuelve (`agentId` ausente o vacío), la
 llamada falla con `unresolved_thread_id` en vez de compartir hilo entre llamadas.
 
 `orchestrator` **no** está en el allowlist. Su propagación de `__colmena_node_id_path` sí
@@ -359,6 +362,71 @@ apto para tool (un fallback a `inputs` como el `resolve_child_graph_source` de `
 prerrequisito antes de que `memory_mode` tenga sentido ahí. Los nodos internos del
 orchestrator (`planner`/`critic`/`reactor`) nunca son entradas de `tool_configurations` —
 heredan el path de su padre y por eso no se listan.
+
+#### De quién es el hilo
+
+Un hilo `persistent` o `dynamic` es de quien llama a la tool (`memory_node_path`, en
+`dag_engine/domain/tool_configuration.rs`):
+
+- **Desde la raíz, la clave es la de siempre:** `tool/<tool_name>[/<thread_id>]`. Tampoco
+  cambia para quien llama sin estar dentro de un hijo invocado como tool: el hijo de un
+  `subgraph` de nivel de grafo (`ventas/responder`) o un agente de un `orchestrator` en la
+  raíz. Esos siguen compartiendo el hilo con el `llm_call` raíz, como antes.
+- **Desde dentro de un hijo invocado como tool**, la clave cuelga del camino de quien
+  llama: `<caller>/tool/<tool_name>[/<thread_id>]`. Un `llm_call` está ahí cuando su
+  `node_id_path` empieza con `tool/`: todo despacho de tool le da ese prefijo a su hijo, y
+  se hereda a cualquier profundidad. Por ejemplo, el padre tiene `X` (`dynamic`, hilo fijo
+  en `${agentId}`) e `Y` (`persistent`), y el `llm_call` `hijo_y` del hijo de `Y` también
+  tiene `X`. El hilo `x` de `X` queda en `tool/X/x/agente_x` si lo llama el padre, y en
+  `tool/Y/hijo_y/tool/X/x/agente_x` si lo llama `hijo_y`. Son dos conversaciones: ninguna
+  lee la otra, y una corrida fresca en una no cura una pregunta pendiente en la otra.
+- **`stateless` no cambia:** `tool/<tool_call_id>` para cualquiera que llame, porque ya es
+  única por llamada.
+- **El hilo dura lo que dura el camino de quien llama.** Dentro del hijo de una tool
+  `stateless` (`tool/<tool_call_id>/…`), una tool con memoria recuerda dentro de esa
+  llamada, no entre llamadas. Para que recuerde entre llamadas, la tool de afuera también
+  tiene que tener memoria.
+- **`list_threads` lista los hilos de quien llama:** busca bajo `tool/<tool_name>/` en la
+  raíz y bajo `<caller>/tool/<tool_name>/` dentro de un hijo. Deja afuera las filas que
+  cuelgan de un hilo (`…/tool/…`, las de una tool que llamó el agente de ese hilo), antes
+  del tope de 100 filas.
+- **Una respuesta continúa la conversación donde se hizo la pregunta.** Un `llm_call`
+  que recibe la respuesta a su pregunta corre bajo el `_conversation_key.node_id` que
+  guardó su salida `SUSPENDED` en `dag_runs.all_outputs`, aunque el camino que se deriva
+  hoy sea otro (`run_use_case.rs`). Solo los nodos `llm_call`, y solo en el turno que trae
+  la respuesta. Así, una pregunta que un hijo anidado hizo antes de este cambio, bajo la
+  clave vieja (`tool/<tool_name>/…`), se contesta sobre esa historia. En una pregunta
+  hecha después, la clave guardada es la derivada y no cambia nada.
+
+Límites conocidos:
+
+- **Un `llm_call` invocado directamente como tool no guarda su clave.** Solo se honra la
+  clave de un `llm_call` que es nodo de un grafo, por ejemplo el de un hijo de una tool
+  `subgraph`. Un `llm_call` con memoria invocado como tool (`tool/<H>`), llamado desde
+  dentro de un hijo, que preguntó antes del cambio bajo `tool/<H>`, deriva
+  `<caller>/tool/<H>` al reanudar. Su salida `SUSPENDED` nunca se guardó en `all_outputs`,
+  y bajo la clave nueva el hilo está vacío. El resume no degrada a una corrida fresca:
+  corre sin prompt sobre un hilo sin mensajes, falla con `Empty message list`, y quien
+  llama recibe un resultado de tool fallido (`Error executing node llm_call: …`). La
+  respuesta se pierde, y quien llama ve el error. Pasa una sola vez, a través del cambio.
+  En dev hay 0 cadenas así, y ADP compila los assets como `subgraph`.
+- **La clave crece con la anidación.** Cada nivel `persistent` o `dynamic` suma hasta unos
+  230 bytes (`/tool/<tool_name>[/<thread_id>]/<nodo>`; peor caso: nombre ≤64 + hilo ≤128 +
+  nodo ~25). En ADP son unos 70 bytes por nivel. El índice btree de `llm_node_history`
+  admite unos 2704 bytes por entrada, así que en el peor caso el techo ronda los 11
+  niveles. Más allá, el `INSERT` falla con un error, no en silencio. Medido en dev:
+  profundidad máxima 4.
+- **Un nodo raíz cuyo id es `tool`.** Si tiene un `subgraph` de nivel de grafo, los
+  caminos de sus hijos empiezan con `tool/` y cuentan como anidados. Los ids de ADP son
+  cuids.
+- **Un nodo de un hijo cuyo id es `tool`.** Las filas de los nodos que cuelgan de él
+  (`…/<thread_id>/tool/<nodo>`) tienen un segmento `/tool/`, así que `list_threads` las
+  deja afuera como si fueran de una tool llamada desde el hilo (`is_nested_tool_memory`,
+  en `llm/domain/memory.rs`). Un hilo cuya única memoria está ahí no se lista.
+
+E2E: `tests/graphs/agents/nested_tool_memory.json`, que corre
+`src/libs/colmena/tests/nested_tool_memory.rs` con un modelo guionado. Ver
+[El mismo agente a dos niveles](#el-mismo-agente-a-dos-niveles-un-hilo-por-quien-llama).
 
 ### Varias llamadas a la misma tool en un turno (`parallel`)
 
@@ -390,8 +458,9 @@ validación del grafo al cargar, y `dag_engine lint` lo reporta como
   lo lleva nunca. Ver
   [sse_events_reference.md](../sse_events_reference.md#childscope--una-llamada-a-una-tool-parallel).
 - **La memoria no cambia.** `<tool>#<k>` nombra solo la frontera del stream. El
-  `node_id` de la memoria sigue saliendo de `memory_mode` (`tool/<tool_name>/<thread_id>`
-  en `dynamic`), así que dos llamadas al mismo agente siguen compartiendo hilo.
+  `node_id` de la memoria sigue saliendo de `memory_mode` y de quien llama
+  (`tool/<tool_name>/<thread_id>` en `dynamic`, desde la raíz), así que dos llamadas al
+  mismo agente desde el mismo `llm_call` siguen compartiendo hilo.
 - **k es estable.** Con streaming, las llamadas se ordenan por el índice del proveedor
   antes de persistirlas y despacharlas. Un resume recalcula k desde el mismo mensaje
   persistido, y el hijo reanudado vuelve a abrir `<tool>#<k>`.
@@ -841,16 +910,31 @@ La próxima corrida fresca contesta los abiertos con
 `abandoned_tool_call.md`, así que el modelo sabe que no tiene esos resultados y los
 vuelve a pedir si le hacen falta.
 
-#### Riesgo conocido: el hilo de una tool es absoluto
+#### El mismo agente a dos niveles: un hilo por quien llama
 
-El hilo de memoria de una tool es `tool/<nombre>[/<hilo>]`, no anidado bajo el camino
-del que la llama. El mismo agente llamado a la vez desde dos niveles distintos (el
-raíz lo llama, y también un hijo del raíz) comparte hilo. Si uno de los dos tiene una
-pregunta pendiente y el otro arranca fresco, la curación contesta la pregunta
-pendiente. El resume posterior de esa pregunta ya no encuentra la llamada y degrada a
-una corrida fresca, con un `warn` en el log (`resume_answer present but no pending
-tool call in history`). Antes de la curación, ese caso era un 400. No está arreglado:
-habría que anidar el hilo bajo el camino del que llama.
+Hasta v0.20.1 el hilo de memoria de una tool era `tool/<nombre>[/<hilo>]` para
+cualquiera que la llamara. El mismo agente llamado a la vez desde dos niveles (el raíz
+lo llama, y también un hijo del raíz) compartía hilo. Si uno tenía una pregunta
+pendiente y el otro arrancaba fresco, la curación contestaba la pregunta pendiente, y
+el resume de esa pregunta ya no encontraba la llamada y degradaba a una corrida fresca.
+
+Ya no pasa: llamado desde dentro de un hijo invocado como tool, el hilo cuelga del
+camino de quien llama (ver [De quién es el hilo](#de-quién-es-el-hilo)), así que cada
+nivel tiene el suyo. En el E2E (`nested_tool_memory`, escenario A), el padre pide en un
+mensaje `X{x}`, que pregunta, e `Y`, cuyo hijo llama a `X{x}` 600 ms después:
+
+- `tool/X/x/agente_x` conserva la pregunta abierta, sin el marcador;
+- lo que corrió `X` para `Y` queda en `tool/Y/hijo_y/tool/X/x/agente_x`, con sus dos
+  mensajes;
+- el resume le entrega la respuesta a `X`, y el padre termina.
+
+Sin el cambio, el hilo del raíz recibe el marcador y los mensajes del otro nivel, y el
+resume vuelve a preguntar. Siguen compartiendo hilo los que no están dentro de un hijo
+invocado como tool: el raíz, los hijos de un `subgraph` de nivel de grafo y los agentes
+de un `orchestrator` en la raíz. Entre ellos el riesgo de antes sigue: si el raíz y el
+hijo de un `subgraph` de nivel de grafo, o dos agentes de un `orchestrator` en la raíz
+que corren en paralelo, llaman la misma tool con el mismo hilo, una corrida fresca de uno
+todavía puede curar la pregunta pendiente del otro.
 
 #### Consecuencias prácticas al diseñar un agente HITL
 
