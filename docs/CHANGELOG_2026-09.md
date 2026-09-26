@@ -5956,7 +5956,7 @@ host no recibe ninguna conexión. `registry.rs`: la tabla de campos del autor in
 **ADP.** Sin cambios de API. Una región que no sea un nombre de región falla antes de la request.
 **Estado.** done.
 
-## 120. Endurecimiento: `sql_query` inicializa por `connection_url` y configuración
+## 129. Endurecimiento: `sql_query` inicializa por `connection_url` y configuración
 
 **Qué cambia.** La inicialización de `sql_query` (esquemas, `setup_sql`, introspección, RLS,
 descripción) es por `connection_url` resuelto y la configuración que lee (`SqlNode::init_key`:
