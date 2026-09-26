@@ -4,7 +4,9 @@
 //! Configure via `config`: `base_url`, `endpoint`, `method`, `headers`, `query_params`,
 //! `body`, `bearer_token`, `authorization`. `config` string values support `${ENV_VAR}`
 //! resolution; values arriving over edges never do (they may be a webhook payload or a
-//! model's output). Input edges override config values.
+//! model's output). Input edges override config values, except that `base_url`, `method`,
+//! `headers`, `bearer_token` and `authorization` only come over an edge that names them
+//! (`to: "<node>.base_url"`) — see [`ExecutableNode::author_owned_inputs`].
 //!
 //! ## As an LLM tool (via `tool_configurations`)
 //! When invoked by `DagToolExecutor`, extra non-reserved input keys with primitive values
@@ -230,7 +232,7 @@ fn filename_from_url_path(url: &Url) -> String {
 
 impl HttpNode {
     /// Keys this node consumes itself; they must never travel as query params.
-    const RESERVED_KEYS: [&'static str; 10] = [
+    const RESERVED_KEYS: [&'static str; 11] = [
         "base_url",
         "endpoint",
         "method",
@@ -241,9 +243,13 @@ impl HttpNode {
         "bearer_token",
         "authorization",
         "secure", // internal Colmena flag — NEVER send to external APIs
+        // The run's id: global state hands it to every node. An API that needs a
+        // `session_id` param gets it through `query_params`.
+        "session_id",
     ];
 
-    /// True for engine-injected bookkeeping inputs (`__colmena_*`, `__node*`).
+    /// True for engine-injected bookkeeping inputs — the domain's
+    /// [`crate::dag_engine::domain::node::is_engine_key`] (`__colmena*`, `__node*`).
     ///
     /// Matched by PREFIX rather than listed in [`Self::RESERVED_KEYS`]: that list has to be
     /// extended by hand every time the engine adds an internal input, and the one that gets
@@ -254,7 +260,7 @@ impl HttpNode {
     /// them rejected the request outright (HTTP 400, the param echoed back as an unexpected
     /// filter), breaking every tool call of an agent built against it.
     fn is_engine_internal(key: &str) -> bool {
-        key.starts_with("__colmena") || key.starts_with("__node")
+        crate::dag_engine::domain::node::is_engine_key(key)
     }
 
     /// Collects the leftover inputs that should travel as query params.
@@ -1222,6 +1228,19 @@ impl ExecutableNode for HttpNode {
     /// Human-readable description of this node type, used in LLM tool definitions.
     fn description(&self) -> Option<&str> {
         Some("Make HTTP requests to external APIs. Supports GET, POST, PUT, DELETE methods with custom headers and query parameters.")
+    }
+
+    /// Where the request goes, how, and with which credentials: author-set
+    /// fields are config-only unless an edge names them.
+    /// `endpoint`, `body` and query values stay data: they cannot change the host.
+    fn author_owned_inputs(&self) -> &'static [&'static str] {
+        &[
+            "base_url",
+            "method",
+            "headers",
+            "bearer_token",
+            "authorization",
+        ]
     }
 
     /// The default output port is `body` — the parsed JSON response body.
@@ -2532,6 +2551,16 @@ mod extra_query_params_tests {
 
     fn untrusted() -> EnvPolicy {
         EnvPolicy::Restricted(Default::default())
+    }
+
+    /// Global state hands the run's `session_id` to every node; it used to
+    /// reach external APIs as `?session_id=<run uuid>`.
+    #[test]
+    fn the_run_session_id_is_never_a_query_param() {
+        let given = inputs(&[("session_id", json!("run-uuid")), ("page", json!("2"))]);
+        let got = HttpNode::collect_extra_query_params(&given, &untrusted());
+        assert_eq!(got.get("session_id"), None);
+        assert_eq!(got.get("page"), Some(&json!("2")));
     }
 
     fn inputs(pairs: &[(&str, Value)]) -> NodeInputs {

@@ -75,7 +75,7 @@ flowchart TD
 
 ### Mapeo de Estado (IN)
 
-Las entradas del nodo `subgraph` se pasan al `global_shared_state` inicial del grafo hijo. Las claves internas del motor (`__colmena_*` y `__node_id`) se filtran automáticamente.
+Las entradas del nodo `subgraph` se pasan al `global_shared_state` inicial del grafo hijo. Las claves internas del motor (`__colmena*` y `__node*`, la misma regla `is_engine_key` de todos los filtros) se filtran automáticamente.
 
 ```
 Parent inputs:

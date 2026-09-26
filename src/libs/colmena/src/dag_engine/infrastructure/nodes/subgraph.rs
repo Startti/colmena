@@ -182,16 +182,15 @@ impl SubGraphNode {
 
     /// True for keys that must never cross into the child graph's global state.
     ///
-    /// Two families: the engine's own bookkeeping (`__colmena_*`, `__node_id`),
-    /// and the operator's child-graph plumbing ([`CHILD_GRAPH_SOURCE_KEYS`]).
+    /// Two families: the engine's own bookkeeping (`is_engine_key`: `__colmena*`,
+    /// `__node*`), and the operator's child-graph plumbing ([`CHILD_GRAPH_SOURCE_KEYS`]).
     /// Everything else — the model's tool arguments, `files`, whatever the parent
     /// put on the wire — is data the child is meant to see.
     ///
     /// Kept as a pure function so the rule is unit-testable without standing up a
     /// graph run.
     fn is_excluded_from_child_state(key: &str) -> bool {
-        key.starts_with("__colmena_")
-            || key == "__node_id"
+        crate::dag_engine::domain::node::is_engine_key(key)
             || CHILD_GRAPH_SOURCE_KEYS.contains(&key)
     }
 
@@ -838,6 +837,20 @@ mod subgraph_child_state_isolation_tests {
         assert!(state.get("__colmena_tool_name").is_none());
         assert!(state.get("__colmena_session_id").is_none());
         assert_eq!(state.get("task"), Some(&json!("algo")));
+    }
+
+    /// Same rule as every other engine-key filter: a `__node*` key other than
+    /// `__node_id` used to cross into the child.
+    #[test]
+    fn every_engine_prefixed_key_stays_excluded() {
+        let mut inputs: NodeInputs = NodeInputs::new();
+        inputs.insert("__node_id_path".to_string(), json!("forged"));
+        inputs.insert("__colmena".to_string(), json!("forged"));
+        inputs.insert("task".to_string(), json!("algo"));
+
+        let state = SubGraphNode::build_child_state(&inputs);
+
+        assert_eq!(state_keys(&state), vec!["__colmena_subgraph_depth", "task"]);
     }
 
     #[test]

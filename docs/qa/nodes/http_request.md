@@ -86,7 +86,7 @@ Los logs ayudan a inspeccionar la traza de ejecución, pero no están contractua
 **Hallazgo:**  
 El código en `http.rs:237` mantiene backward compatibility:
 ```rust
-const RESERVED_KEYS: [&'static str; 10] = [
+const RESERVED_KEYS: [&'static str; 11] = [
     ...
     "query_params",     // correct key used throughout
     "query_parameters", // kept for backward compat

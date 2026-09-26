@@ -881,15 +881,11 @@ impl LlmNode {
             return Ok(None);
         }
 
-        // Determine graph directory.
-        // Prefer __colmena_graph_path from inputs (injected upstream by the runner);
-        // fall back to current working directory.
-        let graph_dir: PathBuf = inputs
-            .get("__colmena_graph_path")
-            .and_then(|v| v.as_str())
-            .map(PathBuf::from)
-            .and_then(|p| p.parent().map(|pp| pp.to_path_buf()))
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        // Relative skill paths resolve against the working directory, which is
+        // also an allowed root. The engine never knows the graph file's path (the
+        // worker gets JSON, not a file), and reading one from `inputs` would let a
+        // value re-base those paths and widen the allowed roots.
+        let graph_dir: PathBuf = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
         let allowed = Self::parse_allowed_dirs_env();
 
@@ -6743,6 +6739,39 @@ mod agent_has_gdocs_edit_tools_tests {
         assert!(
             names.iter().any(|n| n == "gdocs-surgical-edits"),
             "expected `gdocs-surgical-edits` in repo catalog, got: {names:?}"
+        );
+    }
+
+    /// Relative skill paths resolve against the working directory: an input
+    /// naming a graph file neither re-bases them nor widens the allowed roots.
+    #[test]
+    fn an_input_graph_path_does_not_rebase_skill_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("p4-probe-skill");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            "---\nname: p4-probe-skill\ndescription: probe\n---\nbody\n",
+        )
+        .unwrap();
+        let cfg = json!({ "skills": { "paths": ["./p4-probe-skill"] } });
+        let mut inputs: NodeInputs = HashMap::new();
+        let graph_file = tmp.path().join("graph.json");
+        inputs.insert(
+            "__colmena_graph_path".to_string(),
+            json!(graph_file.to_string_lossy()),
+        );
+        let loaded = LlmNode::build_skill_repository_from_config(&cfg, &inputs)
+            .ok()
+            .flatten()
+            .is_some_and(|r| {
+                r.list_available()
+                    .iter()
+                    .any(|e| e.name == "p4-probe-skill")
+            });
+        assert!(
+            !loaded,
+            "a skill was loaded from the directory an input named"
         );
     }
 

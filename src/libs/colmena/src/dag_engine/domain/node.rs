@@ -9,13 +9,20 @@ use std::sync::Arc;
 /// Usamos un HashMap para que las entradas sean nombradas (ej. "a", "b", "prompt").
 pub type NodeInputs = HashMap<String, Value>;
 
-/// Drops every key reserved for values only the engine writes (`__colmena*`,
+/// True for a key reserved for values only the engine writes (`__colmena*`,
 /// `__node*`: session ids, node id and path, resume answer, subgraph depth,
-/// tool name…) from inputs that did not come from the engine: a model's tool
-/// arguments, a `for_each` row, what a graph's edges deliver. The engine
-/// writes its own values after this runs.
+/// tool name…). The one rule behind every filter of those keys — edges, tool
+/// arguments, `for_each` rows, global state, a subgraph's child state and the
+/// query string of `http_request` — so a new engine key is covered everywhere.
+pub fn is_engine_key(key: &str) -> bool {
+    key.starts_with("__colmena") || key.starts_with("__node")
+}
+
+/// Drops every engine key (see [`is_engine_key`]) from inputs that did not
+/// come from the engine: a model's tool arguments, a `for_each` row, what a
+/// graph's edges deliver. The engine writes its own values after this runs.
 pub fn strip_engine_keys(inputs: &mut NodeInputs) {
-    inputs.retain(|k, _| !(k.starts_with("__colmena") || k.starts_with("__node")));
+    inputs.retain(|k, _| !is_engine_key(k));
 }
 
 /// El "Puerto" principal para todos los nodos ejecutables.
@@ -88,6 +95,15 @@ pub trait ExecutableNode: Send + Sync {
         None
     }
 
+    /// Inputs only the graph's author may set: from the node's own `config`,
+    /// or through an edge that names the field (`to: "<node>.<field>"`).
+    /// The engine never fills them from an upstream object flattened by an
+    /// edge without a field, nor from global state — both can carry a
+    /// webhook payload or a model's output.
+    fn author_owned_inputs(&self) -> &'static [&'static str] {
+        &[]
+    }
+
     /// Optional: return a reference to self as [`InitializableNode`] so the
     /// tool executor can call `initialize()` to enrich the tool description
     /// with database schema / capability context before the first LLM turn.
@@ -96,5 +112,32 @@ pub trait ExecutableNode: Send + Sync {
     /// Override in nodes that implement [`InitializableNode`] (currently `sql_query`).
     fn as_initializable(&self) -> Option<&dyn InitializableNode> {
         None
+    }
+}
+
+#[cfg(test)]
+mod engine_key_tests {
+    use super::is_engine_key;
+
+    #[test]
+    fn engine_keys_are_the_colmena_and_node_prefixes() {
+        for k in [
+            "__colmena_session_id",
+            "__colmena",
+            "__colmenax",
+            "__node_id",
+            "__nodes",
+        ] {
+            assert!(is_engine_key(k), "{k}");
+        }
+        for k in [
+            "session_id",
+            "_colmena_x",
+            "node_id",
+            "__graph_nodes",
+            "x__colmena",
+        ] {
+            assert!(!is_engine_key(k), "{k}");
+        }
     }
 }

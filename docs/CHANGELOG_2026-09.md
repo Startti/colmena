@@ -5454,3 +5454,49 @@ header de `config` expandido; y sin clave nada de `inputs` se expande (también 
 (o en una fila de `for_each` fuera de sus `fixed`) ahora lo manda literal: el lugar de un
 secreto es `config` o un `fixed`. Ninguno en `tests/graphs`.
 **Estado.** done.
+
+## 108. Endurecimiento: los campos de destino y credenciales de `http_request` son del autor
+
+**Qué cambia.** `ExecutableNode::author_owned_inputs()` (dominio, vacío por defecto) nombra
+los campos que solo pone el autor: en `config`, o con un edge que nombra el campo
+(`to: "n.base_url"`). `http_request` declara `base_url`, `method`, `headers`, `bearer_token`
+y `authorization`. El auto-flatten de un edge sin puerto y el relleno desde el estado global
+los saltean, así que un objeto que llega como datos no cambia el destino, el método ni las
+credenciales que arma el autor. `endpoint`, `body` y los query params siguen siendo datos
+(no cambian el host: `base` + `/` + `endpoint`).
+
+**Tests.** En `graph_http_payload_tests`: un `base_url`/`method` aplanados no reemplazan los
+de `config` (el segundo mock no recibe nada; el autor recibe GET con su bearer); el estado
+global tampoco los reemplaza. El edge que nombra el campo (§107) sigue ganando.
+
+**ADP.** Sin cambios de API. Un grafo que mandaba `base_url`/`method`/`headers`/credenciales
+por un edge sin puerto o por el estado global debe nombrar el campo en el edge. Ninguno en
+`tests/graphs` (`dynamic_http.json` aplana `endpoint`, que sigue llegando).
+**Estado.** done.
+
+## 109. Endurecimiento de las claves del motor, tras §89, §107 y §108
+
+Cinco cambios, cada uno con su test.
+
+- **Una sola regla.** `is_engine_key` (`dag_engine/domain/node.rs`: `__colmena*`, `__node*`)
+  la usan `strip_engine_keys`, el filtro de query params de `http_request` y el estado hijo de
+  `subgraph`. Este último comparaba `__colmena_*` y `__node_id` exacto; ahora aplica la misma
+  regla de prefijo que los demás filtros.
+- **Estado global.** Nunca llena una clave del motor, salvo `__colmena_subgraph_depth` (la
+  profundidad que siembra el padre): las claves del motor las escribe solo el motor, la misma
+  regla que §89 aplica a los edges.
+- **`session_id` reservado en `http_request`.** El estado global lo pasa a cada nodo; el nodo
+  ya no lo reenvía como query param a una API externa (mismo criterio que `input.rs`,
+  `extraction.rs` y `sse_mapper.rs`). Una API que necesite ese parámetro lo recibe dentro de
+  `query_params`.
+- **Test de `build_inputs_for`.** `__colmena_resume_answer`, `__node_id` y
+  `__colmena_subgraph_depth` no llegan ni aplanados por un edge sin puerto ni por un edge que
+  los nombra; una clave normal sí.
+- **`__colmena_graph_path` ya no se lee.** Nadie lo escribía (el worker recibe JSON, no un
+  archivo), así que las rutas relativas de skills siempre resolvieron contra el directorio de
+  trabajo, y la guía 24 decía otra cosa (corregida). Se eligió borrar la lectura y no
+  inyectarlo: las raíces de skills salen de la configuración del autor y del directorio de
+  trabajo; inyectarlo pedía llevar la ruta del archivo por el API del motor para un caso que
+  solo tiene la CLI.
+
+**ADP.** Sin cambios de API. **Estado.** done.
