@@ -159,7 +159,11 @@ fn measure() -> Measured {
 // Bumped 333 -> 334: adds tests/graphs/agents/files_skipped_entry_keeps_ids.json
 // (`files: [bad, good]`, the unreadable entry is skipped and `good` is
 // registered under its own id). Lints clean.
-const EXPECTED_FILES: usize = 334;
+// Bumped 334 -> 335: adds tests/graphs/agents/nested_tool_memory.json (the same
+// tool with memory called by the root and from inside another tool's child
+// keeps two threads; run by `src/libs/colmena/tests/nested_tool_memory.rs` with
+// a model that answers by who calls it). Lints clean.
+const EXPECTED_FILES: usize = 335;
 const EXPECTED_ERRORS: usize = 0;
 const EXPECTED_WARNINGS: usize = 0;
 const EXPECTED_INFOS: usize = 0;
