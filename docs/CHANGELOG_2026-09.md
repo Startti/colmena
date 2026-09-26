@@ -6242,4 +6242,31 @@ que ninguna clave existente cambia. La guía 19, `node_as_tools_reference.json`
 (`per_caller.bounded_caller`) y la nota
 [`2026-09-26-nested-tool-memory-per-caller.md`](adp_migration/2026-09-26-nested-tool-memory-per-caller.md)
 dicen la forma acotada; el techo de ~11 niveles deja de existir.
+
+## 140. Endurecimiento: la imagen de `image_edit`, las partes URL de multipart y la spec de `api_explorer` se bajan con el cliente guardado
+
+**Qué cambia.** Tres descargas más de una URL que los datos del run pueden elegir pasan por el
+cliente guardado de §137 (`SignedUrlDownloader`: solo `http`/`https`, solo direcciones públicas,
+también en cada redirect, sin proxy, conexión 10 s y tope de bytes):
+- `image_edit`: `source_url`/`mask_url` `http(s)`; tope 100 MiB, el de una fuente `$attachment:`.
+- `http_request` multipart: las partes URL; `max_file_size_bytes` (sin pasar
+  `COLMENA_ATTACHMENT_MAX_BYTES`) corta también el stream; los errores muestran la URL sin query.
+- `api_explorer__load_spec`: la spec; 10 MiB (`SpecTooLarge`, con o sin `Content-Length`), 60 s y
+  GET condicional.
+
+Un destino no público falla sin marcarse (`not a public address` en el error de cada nodo). Las
+dos variables de §137 valen para las tres; el User-Agent es `colmena/<versión> (+<repositorio>)`.
+`SignedUrlDownloader` suma `fetch` (headers de la respuesta), `fetch_conditional` (solo
+`If-None-Match`/`If-Modified-Since`), `capped_at` (solo baja el tope) y `with_timeout` (hasta
+600 s). `source_url`/`mask_url` siguen sin ser campos del autor: en modo tool son la entrada del
+modelo; el destino lo cierra la guarda. No cambian la URL que devuelve el proveedor en
+`image_generation`/`image_edit` ni las que baja el propio proveedor (`gdocs`, Tavily, imágenes).
+
+**Tests.** `image_edit.rs`: una `source_url`/`mask_url` en loopback no recibe requests y no se pide
+la edición; una fuente pasada del tope se rechaza. `http.rs`: una parte URL en loopback no se baja,
+no se envía nada y el error no muestra la query. `openapi_adapter.rs`: la spec en loopback no
+recibe requests; una pasada del tope es `SpecTooLarge`. `multipart_http_test.rs` corre con la variable.
+
+**ADP.** Sin cambios de API: las URLs firmadas de GCS son públicas. Un entorno local que sirva
+imágenes, archivos o specs desde `localhost` necesita `COLMENA_ATTACHMENT_ALLOW_PRIVATE_HOSTS=1`.
 **Estado.** done.

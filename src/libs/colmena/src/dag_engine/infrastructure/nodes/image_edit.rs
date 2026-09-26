@@ -22,14 +22,17 @@ use crate::dag_engine::infrastructure::nodes::util::session_attachment::read_ses
 use crate::llm::domain::attachments::{origin, AttachmentSource, UpsertAttachmentInput};
 use crate::llm::domain::{AttachmentRegistry, ProviderKind};
 use crate::llm::infrastructure::attachments::AttachmentStreamResolverImpl;
+use crate::llm::infrastructure::files::SignedUrlDownloader;
 use crate::storage::domain::{OutputStorageRepository, StoreRequest};
 
-/// Cap on an attachment source (`$attachment:<document_id>`) read into memory.
+/// Cap on a source read into memory (an attachment or an http(s) URL).
 const MAX_SOURCE_BYTES: u64 = 100 * 1024 * 1024;
 
 pub struct ImageEditNode {
     storage: Arc<dyn OutputStorageRepository>,
     http: reqwest::Client,
+    /// Fetches an http(s) `source_url`/`mask_url`: public addresses only.
+    sources: SignedUrlDownloader,
     secure_values: Option<Arc<SecureValueService>>,
     attachment_registry: Option<Arc<dyn AttachmentRegistry>>,
     #[cfg(test)]
@@ -41,6 +44,7 @@ impl ImageEditNode {
         Self {
             storage,
             http: crate::shared::http_client::client(),
+            sources: SignedUrlDownloader::new().capped_at(MAX_SOURCE_BYTES),
             secure_values: None,
             attachment_registry: None,
             #[cfg(test)]
@@ -61,6 +65,12 @@ impl ImageEditNode {
     #[cfg(test)]
     fn with_openai_base_url(mut self, url: String) -> Self {
         self.test_openai_base_url = Some(url);
+        self
+    }
+
+    #[cfg(test)]
+    fn with_sources(mut self, sources: SignedUrlDownloader) -> Self {
+        self.sources = sources.capped_at(MAX_SOURCE_BYTES);
         self
     }
 
@@ -138,26 +148,13 @@ impl ImageEditNode {
                 .map_err(|e| format!("image_edit: data: URI base64 decode failed: {e}"))?;
             Ok((bytes, mime))
         } else if url.starts_with("http://") || url.starts_with("https://") {
-            // Some CDNs (Wikimedia, etc.) reject requests without a User-Agent.
-            // Send a generic one so fetches of public images succeed by default.
-            let resp = self
-                .http
-                .get(url)
-                .header(
-                    reqwest::header::USER_AGENT,
-                    "colmena-image-edit/0.3 (+https://github.com/Startti/colmena)",
-                )
-                .send()
-                .await?;
-            if !resp.status().is_success() {
-                return Err(format!(
-                    "image_edit: fetch source url failed: status={}",
-                    resp.status()
-                )
-                .into());
-            }
-            let mime = resp
-                .headers()
+            // The guarded client: public addresses only, `MAX_SOURCE_BYTES`.
+            use futures::TryStreamExt;
+            let failed =
+                |e: &dyn std::fmt::Display| format!("image_edit: fetch source url failed: {e}");
+            let got = self.sources.fetch(url).await.map_err(|e| failed(&e))?;
+            let mime = got
+                .headers
                 .get(reqwest::header::CONTENT_TYPE)
                 .and_then(|v| v.to_str().ok())
                 .unwrap_or("image/png")
@@ -166,7 +163,8 @@ impl ImageEditNode {
                 .unwrap_or("image/png")
                 .trim()
                 .to_string();
-            let bytes = resp.bytes().await?.to_vec();
+            let body = got.body.map_ok(|b| b.to_vec()).try_concat().await;
+            let bytes = body.map_err(|e| failed(&e))?;
             if bytes.is_empty() {
                 return Err("image_edit: source url returned empty body".into());
             }
@@ -578,7 +576,9 @@ mod tests {
             .with(always())
             .returning(|_| Ok(stored_ok("k1")));
 
-        let node = ImageEditNode::new(Arc::new(storage)).with_openai_base_url(server.uri());
+        let node = ImageEditNode::new(Arc::new(storage))
+            .with_openai_base_url(server.uri())
+            .with_sources(SignedUrlDownloader::allowing_private_hosts());
 
         let source_url = format!("{}/source.png", server.uri());
         let out = node
@@ -611,6 +611,32 @@ mod tests {
             "Plan B removed the url field"
         );
         assert_eq!(out["output"]["provider"], "openai");
+    }
+
+    /// An http(s) source or mask on a non-public address is never fetched,
+    /// and no edit is requested.
+    #[tokio::test]
+    async fn a_source_on_a_non_public_address_is_never_fetched() {
+        let server = MockServer::start().await; // records any request
+        let storage = MockOutputStorageRepository::new(); // store() must not run
+        let node = ImageEditNode::new(Arc::new(storage))
+            .with_openai_base_url(server.uri())
+            .with_sources(SignedUrlDownloader::public_only());
+        let url = format!("{}/source.png", server.uri());
+        let data = "data:image/png;base64,AA==";
+        for (source, mask) in [(url.as_str(), None), (data, Some(url.as_str()))] {
+            let mut cfg = base_config(source);
+            if let Some(m) = mask {
+                cfg["mask_url"] = json!(m);
+            }
+            let err = node
+                .execute(&HashMap::new(), &cfg, &mut json!({}), None)
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("not a public address"), "{err}");
+        }
+        assert!(server.received_requests().await.unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -748,7 +774,9 @@ mod tests {
             .await;
 
         let storage = MockOutputStorageRepository::new();
-        let node = ImageEditNode::new(Arc::new(storage)).with_openai_base_url(server.uri());
+        let node = ImageEditNode::new(Arc::new(storage))
+            .with_openai_base_url(server.uri())
+            .with_sources(SignedUrlDownloader::allowing_private_hosts());
 
         let source_url = format!("{}/missing.png", server.uri());
         let err = node
@@ -761,6 +789,29 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("fetch source url failed"));
+    }
+
+    /// A source past the byte cap is refused, and no edit is requested.
+    #[tokio::test]
+    async fn a_source_past_the_byte_cap_is_refused() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![0u8; 16]))
+            .mount(&server)
+            .await;
+        let sources = SignedUrlDownloader::allowing_private_hosts().capped_at(8);
+        let node = ImageEditNode::new(Arc::new(MockOutputStorageRepository::new()))
+            .with_openai_base_url(server.uri())
+            .with_sources(sources);
+        let cfg = base_config(&format!("{}/big.png", server.uri()));
+        let err = node
+            .execute(&HashMap::new(), &cfg, &mut json!({}), None)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("8-byte fetch limit"), "{err}");
+        let got = server.received_requests().await.unwrap();
+        let only_gets = got.iter().all(|r| r.method.as_str() == "GET");
+        assert!(only_gets, "an edit ran");
     }
 
     #[tokio::test]

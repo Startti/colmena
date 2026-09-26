@@ -14,6 +14,8 @@
 //! file are structured by pipeline stage so later tasks can add more
 //! without breaking earlier ones.
 
+use crate::llm::domain::LlmError;
+use crate::llm::infrastructure::files::SignedUrlDownloader;
 use crate::web::application::url_normalizer::{normalize_forge_url, NormalizedUrl};
 use crate::web::domain::{
     ApiKeyLocation, ApiSpecPort, Endpoint, HttpMethod, ParamType, ParameterSpec, ParsedSpec,
@@ -41,18 +43,25 @@ impl Default for OpenApiAdapterConfig {
 }
 
 pub struct OpenApiAdapter {
-    client: reqwest::Client,
+    /// The guarded client ([`SignedUrlDownloader`]): public addresses only.
+    fetcher: SignedUrlDownloader,
     config: OpenApiAdapterConfig,
 }
 
 impl OpenApiAdapter {
     pub fn new(config: OpenApiAdapterConfig) -> Result<Self, WebDomainError> {
-        let client = crate::shared::http_client::builder()
-            .timeout(config.timeout)
-            .user_agent("colmena-api-explorer/0.1")
-            .build()
-            .map_err(|e| WebDomainError::AdapterInit(format!("reqwest client init: {e}")))?;
-        Ok(Self { client, config })
+        Ok(Self::with_fetcher(SignedUrlDownloader::new(), config))
+    }
+
+    fn with_fetcher(fetcher: SignedUrlDownloader, config: OpenApiAdapterConfig) -> Self {
+        let fetcher = fetcher.capped_at(config.max_bytes);
+        let fetcher = fetcher.with_timeout(config.timeout);
+        Self { fetcher, config }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn allowing_private_hosts(config: OpenApiAdapterConfig) -> Self {
+        Self::with_fetcher(SignedUrlDownloader::allowing_private_hosts(), config)
     }
 
     /// Lower-level fetch stage. Returns the raw bytes plus response
@@ -69,50 +78,46 @@ impl OpenApiAdapter {
             rewritten: _,
         } = normalize_forge_url(input_url);
 
-        let mut req = self.client.get(&resolved);
-        if let Some(etag) = if_none_match {
-            req = req.header("If-None-Match", etag);
-        }
-        if let Some(lm) = if_modified_since {
-            req = req.header("If-Modified-Since", lm);
-        }
-
-        let resp = req.send().await.map_err(|e| {
-            if e.is_timeout() {
-                WebDomainError::Timeout {
-                    ms: self.config.timeout.as_millis() as u64,
-                }
-            } else {
-                WebDomainError::Upstream {
-                    status: 0,
-                    body: format!("fetch error: {e}"),
-                }
+        let started = std::time::Instant::now();
+        let upstream = |status, body| WebDomainError::Upstream { status, body };
+        // The client stops at the first byte past the cap: `size_bytes` is a floor.
+        let too_large = |limit: u64| WebDomainError::SpecTooLarge {
+            size_bytes: limit + 1,
+            limit_bytes: limit,
+        };
+        let (etag, since) = (if_none_match, if_modified_since);
+        let fetched = self.fetcher.fetch_conditional(&resolved, etag, since);
+        let resp = match fetched.await {
+            Ok(resp) => resp,
+            Err(LlmError::SignedUrlFetchFailed { status: 304 }) => {
+                return Ok(FetchRawResult::NotModified)
             }
-        })?;
-
-        let status = resp.status();
-        if status.as_u16() == 304 {
-            return Ok(FetchRawResult::NotModified);
-        }
-        if !status.is_success() {
-            return Err(WebDomainError::Upstream {
-                status: status.as_u16(),
-                body: format!("HTTP {} from {resolved}", status.as_u16()),
-            });
-        }
+            Err(LlmError::SignedUrlFetchFailed { status }) => {
+                return Err(upstream(status, format!("HTTP {status} from {resolved}")))
+            }
+            Err(LlmError::AttachmentUrlRefused { reason }) => {
+                return Err(upstream(0, format!("URL refused: {reason}")))
+            }
+            Err(LlmError::AttachmentTooLarge { limit }) => return Err(too_large(limit)),
+            Err(LlmError::NetworkError { .. }) if started.elapsed() >= self.config.timeout => {
+                let ms = self.config.timeout.as_millis() as u64;
+                return Err(WebDomainError::Timeout { ms });
+            }
+            Err(e) => return Err(upstream(0, format!("fetch error: {e}"))),
+        };
 
         let content_type = resp
-            .headers()
+            .headers
             .get(reqwest::header::CONTENT_TYPE)
             .and_then(|v| v.to_str().ok())
             .map(String::from);
         let etag = resp
-            .headers()
+            .headers
             .get(reqwest::header::ETAG)
             .and_then(|v| v.to_str().ok())
             .map(String::from);
         let last_modified = resp
-            .headers()
+            .headers
             .get(reqwest::header::LAST_MODIFIED)
             .and_then(|v| v.to_str().ok())
             .map(String::from);
@@ -127,22 +132,15 @@ impl OpenApiAdapter {
             }
         }
 
-        // Stream body with size cap. reqwest's content-length hint is best-effort;
-        // we count bytes as they arrive and abort past the cap.
-        let mut stream = resp.bytes_stream();
+        // Stream the body; the client caps it at `max_bytes` (`capped_at`).
+        let mut stream = resp.body;
         let mut buf: Vec<u8> = Vec::new();
         use futures::StreamExt;
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|e| WebDomainError::Upstream {
-                status: 0,
-                body: format!("stream error: {e}"),
+            let chunk = chunk.map_err(|e| match e.get_ref().and_then(|e| e.downcast_ref()) {
+                Some(LlmError::AttachmentTooLarge { limit }) => too_large(*limit),
+                _ => upstream(0, format!("stream error: {e}")),
             })?;
-            if (buf.len() as u64) + (chunk.len() as u64) > self.config.max_bytes {
-                return Err(WebDomainError::SpecTooLarge {
-                    size_bytes: buf.len() as u64 + chunk.len() as u64,
-                    limit_bytes: self.config.max_bytes,
-                });
-            }
             buf.extend_from_slice(&chunk);
         }
 
@@ -759,7 +757,7 @@ mod tests_fetch {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn adapter_at(config: OpenApiAdapterConfig) -> OpenApiAdapter {
-        OpenApiAdapter::new(config).unwrap()
+        OpenApiAdapter::allowing_private_hosts(config)
     }
 
     fn small_yaml() -> &'static str {
@@ -845,21 +843,28 @@ mod tests_fetch {
         let big = "x".repeat(10_000);
         Mock::given(method("GET"))
             .and(path("/big.yaml"))
-            .respond_with(ResponseTemplate::new(200).set_body_raw(big, "application/yaml"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(big.clone(), "application/yaml"))
+            .mount(&server)
+            .await;
+        // Chunked, with no `Content-Length`: capped on the stream.
+        let chunked = ResponseTemplate::new(200).insert_header("transfer-encoding", "chunked");
+        Mock::given(path("/chunked.yaml"))
+            .respond_with(chunked.set_body_raw(big, "application/yaml"))
             .mount(&server)
             .await;
 
-        let url = format!("{}/big.yaml", server.uri());
         let adapter = adapter_at(OpenApiAdapterConfig {
             max_bytes: 1024,
             ..OpenApiAdapterConfig::default()
         });
-        let err = adapter.fetch_raw(&url, None, None).await.unwrap_err();
-        match err {
-            WebDomainError::SpecTooLarge { limit_bytes, .. } => {
-                assert_eq!(limit_bytes, 1024);
+        for name in ["big", "chunked"] {
+            let url = format!("{}/{name}.yaml", server.uri());
+            match adapter.fetch_raw(&url, None, None).await.unwrap_err() {
+                WebDomainError::SpecTooLarge { limit_bytes, .. } => {
+                    assert_eq!(limit_bytes, 1024);
+                }
+                other => panic!("expected SpecTooLarge, got {other:?}"),
             }
-            other => panic!("expected SpecTooLarge, got {other:?}"),
         }
     }
 
@@ -898,6 +903,18 @@ mod tests_fetch {
             WebDomainError::Upstream { status: 500, .. } => {}
             other => panic!("expected Upstream(500), got {other:?}"),
         }
+    }
+
+    /// The adapter on the public-only client never dials a non-public address.
+    #[tokio::test]
+    async fn fetch_raw_never_dials_a_non_public_address() {
+        let server = MockServer::start().await; // records any request
+        let public_only = SignedUrlDownloader::public_only();
+        let adapter = OpenApiAdapter::with_fetcher(public_only, OpenApiAdapterConfig::default());
+        let url = format!("{}/openapi.yaml", server.uri());
+        let err = adapter.fetch_raw(&url, None, None).await.unwrap_err();
+        assert!(err.to_string().contains("not a public address"), "{err}");
+        assert!(server.received_requests().await.unwrap().is_empty());
     }
 }
 
@@ -982,7 +999,7 @@ mod tests_parse_swagger2 {
             .await;
 
         let url = format!("{}/ps.yaml", server.uri());
-        let adapter = OpenApiAdapter::new(OpenApiAdapterConfig::default()).unwrap();
+        let adapter = OpenApiAdapter::allowing_private_hosts(OpenApiAdapterConfig::default());
         let first = adapter.fetch_and_parse(&url, None, None).await.unwrap();
         let etag = match first {
             crate::web::domain::SpecFetchResult::Fresh { etag, .. } => etag,

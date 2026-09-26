@@ -203,7 +203,7 @@ Knobs principales:
 
 | Param | Tipo | Required | Notas |
 |---|---|---|---|
-| `url` | string | yes | URL pública a la spec (OpenAPI 3.x JSON/YAML o Swagger 2.0). Git-forge URLs se auto-normalizan a raw. |
+| `url` | string | yes | URL pública a la spec (OpenAPI 3.x JSON/YAML o Swagger 2.0). Git-forge URLs se auto-normalizan a raw. Se baja con el cliente guardado: solo direcciones públicas (CHANGELOG 2026-09 §140). |
 | `force_reload` | bool | no | default `false`. `true` invalida la entry de cache y vuelve a descargar. |
 
 Devuelve: `{ spec_url_input, resolved_url, original_format, internal_format, title, version, description, server_url, endpoints_count, tags, security_schemes, cached }`.
@@ -463,7 +463,7 @@ Cuando el header `Content-Type` empieza con `multipart/`, el nodo `http_request`
 | Forma del valor | Resultado |
 |---|---|
 | String `$attachment:<document_id>` | Parte de archivo, bytes streameados desde el storage (ver abajo). |
-| String que empieza con `https://` (o `http://` si `allow_http_urls=true`) | Parte de archivo, HEAD para validar tamaño + GET streaming. |
+| String que empieza con `https://` (o `http://` si `allow_http_urls=true`) | Parte de archivo: GET streaming con el cliente guardado, solo direcciones públicas (CHANGELOG 2026-09 §140). |
 | Cualquier otro string | Text part (campo no-archivo). |
 | Number o boolean | Coerced a su representación string como text part. |
 | `null` | El campo se omite. |
@@ -476,9 +476,9 @@ Cuando el header `Content-Type` empieza con `multipart/`, el nodo `http_request`
 
 | `config_field` | Default | Descripción |
 |---|---|---|
-| `max_file_size_bytes` | 100 MiB | Cap por parte de archivo. |
+| `max_file_size_bytes` | 100 MiB | Cap por parte de archivo, nunca por encima de `COLMENA_ATTACHMENT_MAX_BYTES`. |
 | `max_parts` | 10 | Cap total de partes por request. |
-| `url_download_timeout_secs` | 30 | Timeout HEAD + connect/headers del GET. |
+| `url_download_timeout_secs` | 30 | Timeout del GET completo (hasta 600 s). |
 | `allow_http_urls` | false | Permite `http://` plano (off por seguridad). |
 | `multipart_url_fields` | — | Campos de un `body` que llega como dato en los que el nodo baja la URL (del autor). |
 
