@@ -5220,7 +5220,7 @@ ejecutor solo lo cubre ese E2E.
 hasta la entrada 102. La guía 19 y la nota de migración dicen lo de antes hasta la
 entrada 106.
 
-## 101. Endurecimiento: `${VAR}` se expande solo en la configuración del autor
+## 103. Endurecimiento: `${VAR}` se expande solo en la configuración del autor
 
 **Qué cambia.** Un valor que llega por `inputs` (un edge, el estado global, una fila de
 `for_each`) ya no expande plantillas `${VAR}`, salvo que un despacho con provenance (el de
