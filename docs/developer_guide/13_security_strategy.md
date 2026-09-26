@@ -699,7 +699,7 @@ Web App → POST /amadeus-search
 - ❌ **Trust** process environment variables alone (use Webhook + Secure instead)
 - ❌ **Assume** HTTP-only TLS is sufficient (use certificate pinning for sensitive APIs)
 - ❌ **Forget** to add internal flags to `reserved_keys` — any unknown primitive in `inputs` gets sent as query param to external APIs
-- ❌ **Set** `COLMENA_LOCAL=true` on a shared worker: besides local storage, it lets a graph read the worker's disk through `files[].path` (CHANGELOG 2026-09 §122)
+- ❌ **Set** `COLMENA_LOCAL=true` on a shared worker: besides local storage, it lets a graph read the worker's disk through `files[].path` (CHANGELOG 2026-09 §138)
 
 ---
 

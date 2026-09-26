@@ -6,14 +6,14 @@ compartido no fijar esa variable ni `COLMENA_LOCAL=true`.
 
 ## Qué cambia
 
-- **El `llm_call` de un hijo ya no lee `files` de su estado** (CHANGELOG 2026-09 §122). `files` es un
+- **El `llm_call` de un hijo ya no lee `files` de su estado** (CHANGELOG 2026-09 §138). `files` es un
   campo del autor de `llm_call`: lo fijan `config.files` o un edge que nombra el campo
   (`to: "<nodo>.files"`), o un parámetro `files` que la tool ofrece. `subgraph` sigue copiando
   `files` al estado del hijo, pero su `llm_call` no lo toma de ahí; tampoco del estado global, de
   una fila de `for_each` ni de un argumento que la tool no ofrece.
-- **`files[].path` se lee solo con `COLMENA_LOCAL=true`** (§122). Fuera de ese modo la entrada
+- **`files[].path` se lee solo con `COLMENA_LOCAL=true`** (§138). Fuera de ese modo la entrada
   falla con `PathFieldNotAllowed`, sin leer nada.
-- **Toda URL de adjunto se baja con un cliente guardado** (§121): solo `http`/`https`, solo
+- **Toda URL de adjunto se baja con un cliente guardado** (§137): solo `http`/`https`, solo
   direcciones públicas, tope `COLMENA_ATTACHMENT_MAX_BYTES` (100 MiB por defecto).
 
 ## Qué ve ADP
@@ -21,7 +21,7 @@ compartido no fijar esa variable ni `COLMENA_LOCAL=true`.
 - Nada en el SSE. ADP pone los adjuntos en `config.files` de los `llm_call` de primer nivel, con
   URLs firmadas de GCS (públicas), y nunca usa `path` ni pasa `files` a un sub-agente.
 - Superficie de Rust: se quita `SignedUrlDownloader::with_client`; `LlmError` suma
-  `AttachmentUrlRefused` y `AttachmentTooLarge` (§121) y `PathFieldNotAllowed` (§122). Un `match`
+  `AttachmentUrlRefused` y `AttachmentTooLarge` (§137) y `PathFieldNotAllowed` (§138). Un `match`
   exhaustivo sobre `LlmError` necesita los brazos nuevos.
 - Desarrollo local: un adjunto en `localhost` (o en otra dirección no pública) falla con
   `attachment URL refused: destination is not a public address` si el worker no arrancó con

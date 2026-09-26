@@ -182,7 +182,7 @@ Boolean optional flag (`true | false`, default `false`). When enabled, tools in 
 #### `files` (adjuntos: imágenes y documentos)
 - **Tipo:** `array<FileEntry>` (opcional)
 - **Fuente:** `config.files`, o un edge que nombra el campo (`to: "<nodo>.files"`) o un parámetro `files` que la tool
-  ofrece. Es un campo del autor: el estado global, un objeto aplanado o un argumento no ofrecido no lo fijan (§122).
+  ofrece. Es un campo del autor: el estado global, un objeto aplanado o un argumento no ofrecido no lo fijan (§138).
 - **Descripción:** Archivos adjuntos al request — imágenes para visión, PDFs para extracción/análisis de documentos. Soporta inline (base64), URL firmada (GCS) y path local (legacy).
 - **Schema de cada entrada:**
   ```json
@@ -202,7 +202,7 @@ Boolean optional flag (`true | false`, default `false`). When enabled, tools in 
     Se baja con un solo cliente (`SignedUrlDownloader`): solo direcciones públicas, con timeouts y tope de bytes
     (CHANGELOG 2026-09 §137).
   - `path`: legacy local, < 30 MB. Se lee solo en modo local (`COLMENA_LOCAL=true`); fuera de él una entrada con
-    `path` falla con `PathFieldNotAllowed`, aunque traiga `data` o `url` (CHANGELOG 2026-09 §122).
+    `path` falla con `PathFieldNotAllowed`, aunque traiga `data` o `url` (CHANGELOG 2026-09 §138).
 - **Comportamiento por provider** (auto-detectado):
 
   | Provider  | Imagen | PDF / documento |

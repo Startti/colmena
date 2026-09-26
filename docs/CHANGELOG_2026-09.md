@@ -6187,7 +6187,7 @@ bytes no marca una dirección de loopback ni guarda nada.
 `COLMENA_ATTACHMENT_ALLOW_PRIVATE_HOSTS=1`.
 **Estado.** done.
 
-## 122. Endurecimiento: `files[].path` se lee solo en modo local, y `files` es un campo del autor
+## 138. Endurecimiento: `files[].path` se lee solo en modo local, y `files` es un campo del autor
 
 **Qué cambia.** `llm_call` lee `files[].path` del disco solo en modo local (`COLMENA_LOCAL=true`,
 leído una vez por proceso). Fuera de él, una entrada con `path` falla el nodo con
