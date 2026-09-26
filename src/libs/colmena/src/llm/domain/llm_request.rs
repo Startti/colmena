@@ -90,6 +90,47 @@ fn merge_same_role(a: LlmMessage, b: LlmMessage) -> LlmMessage {
     })
 }
 
+/// Put the `tool` messages that answer an assistant message in the order of
+/// its `tool_calls`.
+///
+/// History keeps `tool` messages in the order they were WRITTEN, which is not
+/// always the order of the calls. When call k of a message suspends, the
+/// calls after it get the "not executed" marker at suspend time and k's
+/// result is written on resume: `[k+1…, k]`. In a `parallel` group, the
+/// siblings' results (and the text of a closed question) are written when
+/// the group closes, and the kept question's on resume. Anthropic and OpenAI
+/// pair a result with its call by id; a Gemini `functionResponse` carries
+/// only the tool's name, so two calls to the same tool are paired by
+/// POSITION, and a reversed block hands each call the other's result.
+///
+/// For each assistant message with `tool_calls`, the contiguous run of `tool`
+/// messages right after it is stably sorted by the index of its
+/// `tool_call_id` in those calls. A result whose id that message does not
+/// make keeps its relative place, after the others. Nothing moves across a
+/// message that is not a `tool` result, and nothing is added or dropped.
+/// Pure, like coalescing: history is untouched, so a session stored out of
+/// order is sent in order on its next turn.
+pub fn order_tool_results_by_call(mut messages: Vec<LlmMessage>) -> Vec<LlmMessage> {
+    let mut at = 0;
+    while at < messages.len() {
+        let (head, rest) = messages.split_at_mut(at + 1);
+        let block = rest
+            .iter()
+            .take_while(|m| *m.role() == MessageRole::Tool)
+            .count();
+        if let Some(calls) = head[at].tool_calls() {
+            rest[..block].sort_by_key(|result| {
+                result
+                    .tool_call_id()
+                    .and_then(|id| calls.iter().position(|call| call.id == id))
+                    .unwrap_or(calls.len())
+            });
+        }
+        at += 1 + block;
+    }
+    messages
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmRequest {
     id: LlmRequestId,
@@ -116,7 +157,13 @@ impl LlmRequest {
         // any adjacent same-role messages (e.g. a dangling user left by a failed
         // turn) so a poisoned conversation self-heals instead of erroring here.
         // Persistence is untouched — recall_history keeps the originals.
-        let messages = coalesce_consecutive_same_role(messages);
+        //
+        // Then send each block of tool results in the order of its calls.
+        // After coalescing, not before: a merged assistant message carries
+        // the calls of both, and the results must follow the calls as the
+        // adapter sends them. Ordering only permutes `tool` messages, which
+        // coalescing never merges, so it leaves nothing to coalesce.
+        let messages = order_tool_results_by_call(coalesce_consecutive_same_role(messages));
 
         if messages.is_empty() {
             return Err(LlmError::EmptyMessages);
@@ -469,5 +516,156 @@ mod tests {
         ]);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].content(), "dangling\n\nnueva pregunta");
+    }
+
+    // ── Tool results in the order of their calls ─────────────────────────
+    //
+    // History keeps `tool` messages in the order they were written, which is
+    // not always the order of the calls: a question kept by a parallel group
+    // is answered on resume, after the results written when the group closed.
+    // Gemini pairs a `functionResponse` with its call by position, not by id.
+
+    fn call(id: &str) -> ToolCall {
+        ToolCall::new(
+            id.to_string(),
+            FunctionCall {
+                name: "Run".into(),
+                arguments: "{}".into(),
+            },
+        )
+    }
+
+    fn asks(ids: &[&str]) -> LlmMessage {
+        LlmMessage::assistant_with_tool_calls("".into(), ids.iter().map(|id| call(id)).collect())
+            .unwrap()
+    }
+
+    fn result(id: &str) -> LlmMessage {
+        LlmMessage::tool(id.to_string(), format!("result of {id}")).unwrap()
+    }
+
+    /// Each message as its `tool_call_id` (a `tool`) or its role, and every
+    /// `tool` still carries the content of its own call.
+    fn shape(messages: &[LlmMessage]) -> Vec<String> {
+        messages
+            .iter()
+            .map(|m| match m.tool_call_id() {
+                Some(id) => {
+                    assert_eq!(m.content(), format!("result of {id}"));
+                    id.to_string()
+                }
+                None => m.role().to_string(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_request_sends_results_in_the_order_of_their_calls() {
+        let request = LlmRequest::new(
+            vec![
+                LlmMessage::user("ask both".into()).unwrap(),
+                asks(&["call_a", "call_b"]),
+                result("call_b"),
+                result("call_a"),
+            ],
+            create_test_config(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            shape(request.messages()),
+            ["user", "assistant", "call_a", "call_b"]
+        );
+    }
+
+    #[test]
+    fn results_follow_the_calls_of_a_coalesced_assistant_message() {
+        // Two adjacent assistant messages reach the provider as one, with the
+        // calls of both; the results follow that merged list.
+        let request = LlmRequest::new(
+            vec![
+                LlmMessage::user("ask both".into()).unwrap(),
+                asks(&["call_a"]),
+                asks(&["call_b"]),
+                result("call_b"),
+                result("call_a"),
+            ],
+            create_test_config(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            shape(request.messages()),
+            ["user", "assistant", "call_a", "call_b"]
+        );
+    }
+
+    #[test]
+    fn three_results_follow_the_index_of_their_calls() {
+        let out = order_tool_results_by_call(vec![
+            asks(&["c0", "c1", "c2"]),
+            result("c2"),
+            result("c0"),
+            result("c1"),
+        ]);
+        assert_eq!(shape(&out), ["assistant", "c0", "c1", "c2"]);
+    }
+
+    #[test]
+    fn ordering_twice_is_ordering_once() {
+        let ordered = vec![
+            asks(&["c0", "c1", "c2"]),
+            result("c0"),
+            result("c1"),
+            result("c2"),
+        ];
+        let out = order_tool_results_by_call(ordered.clone());
+        assert_eq!(out, ordered, "an ordered block is left as it is");
+        let once =
+            order_tool_results_by_call(vec![asks(&["c0", "c1"]), result("c1"), result("c0")]);
+        let twice = order_tool_results_by_call(once.clone());
+        assert_eq!(twice, once);
+    }
+
+    #[test]
+    fn a_result_for_a_call_the_message_does_not_make_goes_to_the_end_of_its_block() {
+        let out = order_tool_results_by_call(vec![
+            asks(&["c1", "c2"]),
+            result("stray"),
+            result("c2"),
+            result("other_stray"),
+            result("c1"),
+        ]);
+        assert_eq!(
+            shape(&out),
+            ["assistant", "c1", "c2", "stray", "other_stray"]
+        );
+    }
+
+    #[test]
+    fn each_assistant_message_orders_only_its_own_block() {
+        // The same ids in both messages, in opposite orders: each block
+        // follows the calls of the message right before it.
+        let out = order_tool_results_by_call(vec![
+            asks(&["a", "b"]),
+            result("b"),
+            result("a"),
+            asks(&["b", "a"]),
+            result("a"),
+            result("b"),
+        ]);
+        assert_eq!(shape(&out), ["assistant", "a", "b", "assistant", "b", "a"]);
+    }
+
+    #[test]
+    fn a_message_that_is_not_a_tool_result_ends_the_block() {
+        let out = order_tool_results_by_call(vec![
+            asks(&["c1", "c2", "c3"]),
+            result("c3"),
+            result("c2"),
+            LlmMessage::user("meanwhile".into()).unwrap(),
+            result("c1"),
+        ]);
+        assert_eq!(shape(&out), ["assistant", "c2", "c3", "user", "c1"]);
     }
 }

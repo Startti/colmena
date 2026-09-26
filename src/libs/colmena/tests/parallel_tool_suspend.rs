@@ -315,6 +315,27 @@ fn answers_to(messages: &[LlmMessage], id: &str) -> Vec<String> {
         .collect()
 }
 
+/// The call ids of the assistant message that makes `call`, and the ids of
+/// the `tool` messages right after it, in the order the model received them.
+fn calls_and_results(messages: &[LlmMessage], call: &str) -> (Vec<String>, Vec<String>) {
+    let at = messages
+        .iter()
+        .position(|m| {
+            m.tool_calls()
+                .is_some_and(|c| c.iter().any(|c| c.id == call))
+        })
+        .unwrap_or_else(|| panic!("no message makes {call}"));
+    let calls = messages[at].tool_calls().unwrap().iter();
+    let results = messages[at + 1..]
+        .iter()
+        .take_while(|m| m.role() == &MessageRole::Tool)
+        .filter_map(|m| m.tool_call_id());
+    (
+        calls.map(|c| c.id.clone()).collect(),
+        results.map(str::to_string).collect(),
+    )
+}
+
 /// The child's final text in the result its parent read.
 fn child_said(result: &str) -> String {
     let result: Value = serde_json::from_str(result).unwrap_or_else(|_| panic!("{result}"));
@@ -512,6 +533,15 @@ async fn two_questions_in_a_group_keep_the_first_and_close_the_other_child() {
         child_said(&answers_to(&last.messages, "call_alfa")[0]),
         said
     );
+    // History holds beta's result first (written when the group closed) and
+    // alfa's last (written on resume). The model reads them in the order of
+    // its calls: Gemini pairs a result with its call by position.
+    let stored = tool_messages(&pool, &chat, "agent").await;
+    let stored: Vec<&str> = stored.iter().map(|(id, _)| id.as_str()).collect();
+    assert_eq!(stored, ["call_beta", "call_alfa"]);
+    let (calls, results) = calls_and_results(&last.messages, "call_alfa");
+    assert_eq!(calls, ["call_alfa", "call_beta"]);
+    assert_eq!(results, calls, "results out of the order of the calls");
 
     cleanup(&pool, &chat).await;
     eng.shutdown().await;
