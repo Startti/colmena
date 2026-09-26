@@ -617,11 +617,7 @@ mod tests {
     /// and no edit is requested.
     #[tokio::test]
     async fn a_source_on_a_non_public_address_is_never_fetched() {
-        let server = MockServer::start().await;
-        Mock::given(wiremock::matchers::any())
-            .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![0x89u8, 0x50]))
-            .mount(&server)
-            .await;
+        let server = MockServer::start().await; // records any request
         let storage = MockOutputStorageRepository::new(); // store() must not run
         let node = ImageEditNode::new(Arc::new(storage))
             .with_openai_base_url(server.uri())

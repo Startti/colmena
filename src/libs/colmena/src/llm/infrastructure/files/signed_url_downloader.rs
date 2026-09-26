@@ -113,7 +113,14 @@ fn guarded_client(ok: Dialable) -> Client {
         .connect_timeout(Duration::from_secs(10))
         // 600 s: generous for files up to ~500 MB on slow connections.
         .timeout(Duration::from_secs(600))
-        .user_agent(concat!("colmena/", env!("CARGO_PKG_VERSION")))
+        // With a contact: some hosts refuse an anonymous User-Agent.
+        .user_agent(concat!(
+            "colmena/",
+            env!("CARGO_PKG_VERSION"),
+            " (+",
+            env!("CARGO_PKG_REPOSITORY"),
+            ")"
+        ))
         .build()
         .expect("the attachment fetch client should build")
 }
@@ -493,5 +500,7 @@ mod tests {
             .unwrap();
         assert!(req.headers.get("authorization").is_none());
         assert!(req.headers.contains_key("if-none-match"));
+        let ua = req.headers.get("user-agent").unwrap().to_str().unwrap();
+        assert!(ua.contains(" (+https://"), "{ua}");
     }
 }

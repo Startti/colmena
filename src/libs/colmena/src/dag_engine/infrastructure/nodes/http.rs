@@ -2475,11 +2475,7 @@ mod multipart_execute_tests {
     /// A URL part on a non-public address is never fetched, and nothing is sent.
     #[tokio::test]
     async fn a_url_part_on_a_non_public_address_is_never_fetched() {
-        let server = MockServer::start().await;
-        Mock::given(wiremock::matchers::any())
-            .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![1, 2, 3]))
-            .mount(&server)
-            .await;
+        let server = MockServer::start().await; // records any request
         let body = serde_json::json!({ "file": format!("{}/f?sig=query-value", server.uri()) });
         let config = mk_config(&server.uri(), body);
         let out = HttpNode::new()
