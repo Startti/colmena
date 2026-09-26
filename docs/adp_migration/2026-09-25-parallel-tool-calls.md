@@ -169,6 +169,16 @@ Filas después de ese turno: en `dag_runs`, el hijo de `alfa` queda `SUSPENDED` 
 de arriba. El turno con la respuesta termina, y un tercer turno que vuelve a correr
 `beta` le manda a su modelo un hilo sin ids abiertos.
 
+### Los resultados llegan al modelo en el orden de las llamadas
+
+**Acción de ADP:** ninguna. En `llm_node_history`, el resultado de la pregunta que quedó
+se escribe en el resume, después del texto de las cerradas. Con Gemini, que empareja
+cada resultado con su llamada por posición, dos llamadas a Run My Agent en un mensaje
+podían recibir los resultados cruzados: en dev, el modelo leyó el texto de cierre de B como
+resultado de A y volvió a correr A. Ahora Colmena ordena los resultados según las
+llamadas al armar cada request. La historia guardada no cambia, y una sesión que ya
+quedó desordenada se arregla sola en su próximo turno.
+
 ## Documentación
 
 - [sse_events_reference.md](../sse_events_reference.md#childscope--una-llamada-a-una-tool-parallel)

@@ -1211,6 +1211,66 @@ mod tests {
         assert_eq!(fr["response"]["result"], "plain error text");
     }
 
+    // A `functionResponse` carries a name and no id, so two calls to the same
+    // tool are paired with their responses by position. Measured in dev: the
+    // parent called Run_My_Agent for A, then for B; B's question was closed
+    // when the group closed and A's result was written on resume, so history
+    // held B's text first, and the model read it as A's result.
+    #[test]
+    fn two_calls_to_one_tool_get_their_responses_in_call_order() {
+        use crate::llm::domain::{
+            FunctionCall, LlmConfig, LlmMessage, LlmProvider, LlmRequest, ProviderKind, ToolCall,
+        };
+        const CLOSED: &str =
+            include_str!("../../../text/prompts/agent_loop/closed_by_parallel_suspend.md");
+        let provider =
+            LlmProvider::new(ProviderKind::Google, "test_key".to_string(), None).unwrap();
+        let run = |id: &str, agent: &str| {
+            let args = serde_json::json!({ "agentId": agent }).to_string();
+            ToolCall::new(
+                id.to_string(),
+                FunctionCall::new("Run_My_Agent".to_string(), args),
+            )
+        };
+        let messages = vec![
+            LlmMessage::user("explain a loan, ask both".to_string()).unwrap(),
+            LlmMessage::assistant_with_tool_calls(
+                "".to_string(),
+                vec![run("call_fb8c", "A"), run("call_9eea", "B")],
+            )
+            .unwrap(),
+            LlmMessage::tool("call_9eea".to_string(), CLOSED.trim().to_string()).unwrap(),
+            LlmMessage::tool(
+                "call_fb8c".to_string(),
+                r#"{"result":"Un préstamo es …"}"#.to_string(),
+            )
+            .unwrap(),
+        ];
+        let req = LlmRequest::new(messages, LlmConfig::new(provider), false).unwrap();
+
+        let (_, contents) = GeminiAdapter::new().convert_messages(&req).unwrap();
+        let responses: Vec<serde_json::Value> = contents
+            .iter()
+            .filter(|c| c.role == "function")
+            .flat_map(|c| c.parts.as_deref().unwrap_or_default())
+            .filter_map(|p| p.function_response.clone())
+            .collect();
+
+        assert_eq!(
+            responses,
+            [
+                serde_json::json!({
+                    "name": "Run_My_Agent",
+                    "response": { "result": "Un préstamo es …" }
+                }),
+                serde_json::json!({
+                    "name": "Run_My_Agent",
+                    "response": { "result": CLOSED.trim() }
+                }),
+            ]
+        );
+    }
+
     // ---------------------------------------------------------------------
     // Implicit prompt caching (item 11, 2026-06-09) — Gemini 2.5+ models
     // automatically cache request prefixes (≥1024 tokens for 2.5-flash,
