@@ -2426,6 +2426,8 @@ podía distinguir "lento/colgado" de "alcanzable pero fallando". Además,
 como las tool calls de un turno corren concurrentes (`JoinSet` en `llm.rs`), unir
 dos rechazos simultáneos a la misma tool por `tool` + tiempo podía fallar.
 
+> Nota posterior (2026-09-25): lo del `JoinSet` era falso. Ese `JoinSet` de `llm.rs` resume adjuntos; las tool calls de un turno corrían en serie. Ver la [entrada 97](#97-un-grupo-de-llamadas-parallel-corre-a-la-vez-parallel-tools-2e).
+
 **Ahora.** `McpDispatched` lleva un campo `kind: DispatchKind` (nuevo tipo en
 `dispatch.rs`, mismo patrón que `FetchFailure` en `wire.rs`) con una etiqueta
 snake_case estable por cada camino real: `ok`, `unrouted`, `unbound`,
@@ -5004,3 +5006,44 @@ passed, 0 failed, 74 ignored, como en la entrada 95.
 **E2E.** No aplica: no hay cambio observable.
 
 **ADP.** Nada que hacer.
+
+## 97. Un grupo de llamadas `parallel` corre a la vez (parallel tools, 2e)
+
+**Qué cambió.** `AgentService::run` arma las tandas de cada mensaje con la clave de
+cadena y `plan_batches` (entrada 94). Una llamada sola corre igual que antes. Un grupo
+de llamadas `parallel` seguidas corre en tres pasos:
+1. el guard de repetición, sobre todo el grupo en el orden del modelo y con la misma
+   regla de racha que en serie. Una repetición no corre: recibe el resultado de la
+   primera de su racha, ya conocido o tomado después si esa corre en el grupo;
+2. las cadenas a la vez (`buffer_unordered`, hasta `COLMENA_MAX_PARALLEL_TOOL_CALLS`,
+   default 4, leído una vez por proceso), con las llamadas de una cadena en serie.
+   Cada llamada emite su Finish cuando termina;
+3. la historia, en el orden del modelo, con `answer_repeat` y `record_result`
+   (entradas 95 y 96).
+- Si una llamada del grupo suspende, su cadena para ahí: lo que sigue correría en el
+  hilo que espera al humano. Lo que corrió se escribe, y `suspend` cierra con «NO se
+  ejecutó» lo demás. Con dos suspensiones, hoy manda la primera en el orden del modelo
+  (`TODO(parallel-suspend)`).
+- Un `LoadAttachment` que salga de un grupo se contesta con su salida y un `warn`.
+- Los frames de una repetición del grupo salen después de los del grupo. Un run cortado
+  a mitad de grupo pierde los resultados ya terminados: la historia se escribe al final.
+
+**Tests.** 7 nuevos, con el reloj de tokio en pausa y un ejecutor que duerme y anota
+inicio, fin y pico: dos claves distintas se solapan, la misma clave no, la barrera, la
+historia en el orden del modelo cuando la llamada de después termina primero, el tope
+(5 claves, tope 2, pico 2), dos llamadas idénticas en un grupo y una suspensión en un
+grupo. Los 40 de antes pasan sin tocarlos. Lib: 2912 passed, 0 failed, 74 ignored
+(2905 en la entrada 96).
+
+**Mutación.** Rojas y revertidas editando:
+- `buffer_unordered(limit.min(1))`: 5 rojos (las dos claves, el tope, la historia y la
+  suspensión);
+- la historia en el orden de llegada: rojos el de la historia (`["c1", "c0"]`) y el de
+  las llamadas idénticas;
+- una cadena por llamada: rojos el de la misma clave y el de la suspensión.
+
+**E2E.** No en este paso: el E2E de tiempo, con un grafo real, va aparte.
+
+**ADP.** Sin código: los frames ya se asocian por `toolCallId` y `childScope`
+(Startti/adp#855). Pero ninguna tool debe declarar `parallel` todavía: con dos
+preguntas en un grupo, una queda sin hacer y su hijo suspendido.

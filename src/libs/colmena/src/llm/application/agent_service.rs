@@ -1,8 +1,10 @@
+use crate::llm::application::tool_batches::{plan_batches, Batch};
 use crate::llm::domain::{
     ConversationKey, ConversationRepository, FileData, LlmConfig, LlmError, LlmMessage,
     LlmRepository, LlmRequest, LlmResponse, LlmStreamPart, LlmUsage, MessageRole, ToolCall,
     ToolDefinition, ToolExecutor, ToolResult,
 };
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Number of trailing messages to keep verbatim when compacting old
@@ -130,6 +132,14 @@ struct CallCtx<'a> {
     on_token: &'a Option<Box<dyn Fn(LlmStreamPart) + Send + Sync>>,
 }
 
+/// Where the nudge of a repeat inside a group takes its echo from.
+enum Echo {
+    /// The streak's first result, from before the group.
+    Text(String),
+    /// The result of call `j`, the streak's first, inside the group.
+    Call(usize),
+}
+
 /// The loop guard's streak: it counts CONSECUTIVE repeats of one `(name+args)`
 /// signature, and resets the moment a different signature appears (the model
 /// made progress). `first` is the raw output of the streak's one real
@@ -252,6 +262,72 @@ async fn run_call(ctx: &CallCtx<'_>, tool_call: &ToolCall) -> CallOutcome {
     }
 }
 
+/// Runs a group's chains at the same time, at most `limit` at once. Returns
+/// `(index, outcome)` for every call that ran, in no particular order.
+async fn run_chains(
+    ctx: &CallCtx<'_>,
+    tool_calls: &[ToolCall],
+    chains: &[Vec<usize>],
+    repeats: &HashMap<usize, Echo>,
+    limit: usize,
+) -> Vec<(usize, CallOutcome)> {
+    use futures::StreamExt;
+    // Built up front from a named `async fn`: a closure returning an async
+    // block inside `buffer_unordered` trips rustc's higher-ranked lifetime
+    // check once `run` must be `Send`. Futures are lazy, so none starts here.
+    let chains: Vec<_> = chains
+        .iter()
+        .map(|chain| run_chain(ctx, tool_calls, chain, repeats))
+        .collect();
+    let ran: Vec<Vec<(usize, CallOutcome)>> = futures::stream::iter(chains)
+        .buffer_unordered(limit)
+        .collect()
+        .await;
+    ran.into_iter().flatten().collect()
+}
+
+/// Runs one chain's calls one after the other: they share a memory thread. A
+/// repeat the guard answered is skipped. The chain stops at a call that
+/// suspended, since the rest of it would run on the thread that waits for the
+/// human. Each call emits its Finish frame when it completes, unless it
+/// suspended.
+async fn run_chain(
+    ctx: &CallCtx<'_>,
+    tool_calls: &[ToolCall],
+    chain: &[usize],
+    repeats: &HashMap<usize, Echo>,
+) -> Vec<(usize, CallOutcome)> {
+    let mut ran = Vec::new();
+    for &i in chain {
+        if repeats.contains_key(&i) {
+            continue;
+        }
+        let outcome = match run_call(ctx, &tool_calls[i]).await {
+            // Only a tool that is not `parallel` loads an attachment, so none
+            // comes out of a group. If one does, its output is its answer.
+            CallOutcome::LoadAttachment(result, _) => {
+                tracing::warn!(
+                    target: "colmena::agent",
+                    tool_call_id = %result.tool_call_id,
+                    "agent_service: a parallel tool call asked to load an attachment; \
+                     answered with its output"
+                );
+                CallOutcome::Done(result)
+            }
+            outcome => outcome,
+        };
+        if let (CallOutcome::Done(result), Some(callback)) = (&outcome, ctx.on_token) {
+            (callback)(LlmStreamPart::LlmToolCallFinish(result.clone()));
+        }
+        let suspended = matches!(outcome, CallOutcome::Suspended(..));
+        ran.push((i, outcome));
+        if suspended {
+            break;
+        }
+    }
+    ran
+}
+
 /// Parameters for running the agent
 pub struct AgentRunParams<'a> {
     pub session_id: &'a ConversationKey,
@@ -298,6 +374,8 @@ pub struct AgentService {
     llm_repository: Arc<dyn LlmRepository>,
     conversation_repository: Arc<dyn ConversationRepository>,
     message_summarizer: Option<std::sync::Arc<dyn crate::llm::domain::MessageSummarizer>>,
+    /// How many chains of a parallel group run at the same time.
+    max_parallel_tool_calls: usize,
 }
 
 impl AgentService {
@@ -309,7 +387,16 @@ impl AgentService {
             llm_repository,
             conversation_repository,
             message_summarizer: None,
+            max_parallel_tool_calls: max_parallel(),
         }
+    }
+
+    /// Overrides [`max_parallel`] for one service, so a test sets the limit
+    /// without touching the process environment.
+    #[cfg(test)]
+    fn with_max_parallel_tool_calls(mut self, limit: usize) -> Self {
+        self.max_parallel_tool_calls = limit.max(1);
+        self
     }
 
     /// Inject the cheap-model summarizer used to compact old history at load.
@@ -571,7 +658,13 @@ impl AgentService {
                     })
                     .collect();
 
-                // D. Execute each tool call (with consecutive-streak loop guard)
+                // D. Execute the calls batch by batch, with the consecutive-
+                // streak loop guard: a call alone, as always, or a group of
+                // consecutive `parallel` calls whose chains run at the same time.
+                let keys: Vec<Option<String>> = tool_calls
+                    .iter()
+                    .map(|c| tool_executor.parallel_chain_key(c))
+                    .collect();
                 let call_ctx = CallCtx {
                     tool_executor,
                     iteration_tools: &iteration_tools,
@@ -579,7 +672,118 @@ impl AgentService {
                     on_token: &on_token,
                 };
                 let mut rescue = false;
-                for tool_call in &tool_calls {
+                for batch in plan_batches(&keys) {
+                    let tool_call = match batch {
+                        Batch::Alone(i) => &tool_calls[i],
+                        Batch::Group(chains) => {
+                            // The guard first, over the whole group in the
+                            // model's order. A repeat is answered, never run,
+                            // with the result of its streak's first call:
+                            // known now when that call ran before the group,
+                            // taken after the group when it runs inside it.
+                            let mut order: Vec<usize> = chains.concat();
+                            order.sort_unstable();
+                            let mut repeats: HashMap<usize, Echo> = HashMap::new();
+                            let mut streak_start = None;
+                            for &i in &order {
+                                let count = streak.advance(&tool_calls[i]);
+                                if count == 1 {
+                                    streak_start = Some(i);
+                                    continue;
+                                }
+                                let echo = match streak_start {
+                                    Some(j) => Echo::Call(j),
+                                    None => Echo::Text(streak.first.clone()),
+                                };
+                                repeats.insert(i, echo);
+                                if count >= max_tool_repeats as u32 {
+                                    rescue = true;
+                                }
+                            }
+
+                            // Then the chains, at the same time.
+                            let mut outcomes: Vec<Option<CallOutcome>> =
+                                tool_calls.iter().map(|_| None).collect();
+                            let ran = run_chains(
+                                &call_ctx,
+                                &tool_calls,
+                                &chains,
+                                &repeats,
+                                self.max_parallel_tool_calls,
+                            )
+                            .await;
+                            for (i, outcome) in ran {
+                                outcomes[i] = Some(outcome);
+                            }
+
+                            // Then the history, in the model's order.
+                            let mut suspended = None;
+                            for &i in &order {
+                                let tool_call = &tool_calls[i];
+                                if let Some(echo) = repeats.get(&i) {
+                                    let first = match echo {
+                                        Echo::Text(text) => text.as_str(),
+                                        Echo::Call(j) => match &outcomes[*j] {
+                                            Some(CallOutcome::Done(r)) => r.output.as_str(),
+                                            // Its twin suspended or never ran,
+                                            // so neither did it: closed below.
+                                            _ => continue,
+                                        },
+                                    };
+                                    self.answer_repeat(
+                                        session_id,
+                                        &on_token,
+                                        &mut messages,
+                                        &mut all_tool_calls_executed,
+                                        tool_call,
+                                        first,
+                                    )
+                                    .await?;
+                                    continue;
+                                }
+                                match &outcomes[i] {
+                                    Some(CallOutcome::Done(result)) => {
+                                        streak.first = result.output.clone();
+                                        self.record_result(
+                                            session_id,
+                                            &mut messages,
+                                            &mut all_tool_calls_executed,
+                                            tool_call,
+                                            result,
+                                        )
+                                        .await?;
+                                    }
+                                    Some(CallOutcome::Suspended(result, sentinel))
+                                        if suspended.is_none() =>
+                                    {
+                                        suspended = Some((result, sentinel));
+                                    }
+                                    // A later suspension (see the TODO below),
+                                    // or a call that never ran: its chain
+                                    // stopped at a suspension.
+                                    _ => {}
+                                }
+                            }
+
+                            // The group's results are written; a suspension
+                            // ends the run as it does for a call alone, and
+                            // closes every call that did not run.
+                            //
+                            // TODO(parallel-suspend, Task 7): with more than one
+                            // suspended call only the first, in the model's
+                            // order, is kept. The others get the not-executed
+                            // marker although they ran, and their child runs
+                            // stay suspended: Task 7 closes them with their own
+                            // text and closes their rows.
+                            if let Some((result, sentinel)) = suspended {
+                                return self
+                                    .suspend(session_id, &mut messages, result, sentinel)
+                                    .await;
+                            }
+                            continue;
+                        }
+                    };
+
                     // Repeated signature in a row (streak >= 2): nudge or rescue.
                     let count = streak.advance(tool_call);
                     if count > 1 {
@@ -1050,6 +1254,21 @@ fn default_hard_turn_cap() -> usize {
         .and_then(|s| s.trim().parse::<usize>().ok())
         .filter(|&n| n > 0)
         .unwrap_or(50)
+}
+
+/// How many chains of a group of `parallel` tool calls run at the same time:
+/// `COLMENA_MAX_PARALLEL_TOOL_CALLS` (positive integer), default 4. Unset,
+/// empty, unparseable or `0` means the default. Read once and cached: the value
+/// is process-wide configuration.
+fn max_parallel() -> usize {
+    static LIMIT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *LIMIT.get_or_init(|| {
+        std::env::var("COLMENA_MAX_PARALLEL_TOOL_CALLS")
+            .ok()
+            .and_then(|raw| raw.trim().parse::<usize>().ok())
+            .filter(|n| *n > 0)
+            .unwrap_or(4)
+    })
 }
 
 /// Fold one response's usage into the running cumulative usage.
@@ -3490,6 +3709,18 @@ mod tests {
         first: Vec<LlmStreamPart>,
         exec: &MockToolExec,
     ) -> (Vec<LlmStreamPart>, Vec<LlmMessage>) {
+        let (parts, history, resp) = run_streamed_on(first, exec, max_parallel()).await;
+        assert_eq!(resp.content(), "done");
+        (parts, history)
+    }
+
+    /// [`run_streamed`] on any executor, with at most `limit` chains of a
+    /// parallel group at a time, returning the run's response as well.
+    async fn run_streamed_on(
+        first: Vec<LlmStreamPart>,
+        exec: &dyn ToolExecutor,
+        limit: usize,
+    ) -> (Vec<LlmStreamPart>, Vec<LlmMessage>, LlmResponse) {
         let mut mock_llm = MockLlmRepo::new();
         let turn = AtomicUsize::new(0);
         mock_llm.expect_stream().returning(move |_| {
@@ -3504,7 +3735,8 @@ mod tests {
         let c = captured.clone();
         let on_token: Box<dyn Fn(LlmStreamPart) + Send + Sync> =
             Box::new(move |part| c.lock().unwrap().push(part));
-        let service = AgentService::new(Arc::new(mock_llm), Arc::new(mock_conv));
+        let service = AgentService::new(Arc::new(mock_llm), Arc::new(mock_conv))
+            .with_max_parallel_tool_calls(limit);
         let resp = service
             .run(AgentRunParams {
                 session_id: &test_key(),
@@ -3523,10 +3755,9 @@ mod tests {
             })
             .await
             .expect("run");
-        assert_eq!(resp.content(), "done");
         let parts = captured.lock().unwrap().clone();
         let history = history.lock().unwrap().clone();
-        (parts, history)
+        (parts, history, resp)
     }
 
     /// A streamed answer's tool calls are keyed by the provider's index, and
@@ -3579,5 +3810,206 @@ mod tests {
             started,
             [("c0".to_string(), Some(0)), ("c1".to_string(), Some(1))]
         );
+    }
+
+    // ---- A group of parallel calls runs concurrently ----
+
+    /// An executor whose calls sleep `ms` and record `start <id>` / `end <id>`
+    /// in the order they happen, and how many ran at once. A call's chain key
+    /// is its `key` argument (`"$id"`: its own id, as a stateless tool keys);
+    /// a call without one is not parallel. `"suspend":true` suspends.
+    #[derive(Default)]
+    struct TimedExec {
+        timeline: Mutex<Vec<String>>,
+        in_flight: AtomicUsize,
+        peak: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl ToolExecutor for TimedExec {
+        async fn execute(&self, call: &ToolCall) -> Result<ToolResult, LlmError> {
+            let args: serde_json::Value = serde_json::from_str(&call.function.arguments).unwrap();
+            let ms = args["ms"].as_u64().unwrap_or(10);
+            self.timeline
+                .lock()
+                .unwrap()
+                .push(format!("start {}", call.id));
+            let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak.fetch_max(now, Ordering::SeqCst);
+            tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+            self.in_flight.fetch_sub(1, Ordering::SeqCst);
+            self.timeline
+                .lock()
+                .unwrap()
+                .push(format!("end {}", call.id));
+            let output = if args["suspend"] == true {
+                r#"{"__colmena_status":"SUSPENDED","questions":[]}"#.to_string()
+            } else {
+                format!("out {}", call.id)
+            };
+            Ok(ToolResult::success(call.id.clone(), output))
+        }
+
+        async fn available_tools(&self) -> Vec<ToolDefinition> {
+            vec![]
+        }
+
+        fn parallel_chain_key(&self, call: &ToolCall) -> Option<String> {
+            let args: serde_json::Value = serde_json::from_str(&call.function.arguments).ok()?;
+            match args.get("key")?.as_str()? {
+                "$id" => Some(call.id.clone()),
+                key => Some(key.to_string()),
+            }
+        }
+    }
+
+    impl TimedExec {
+        fn at(&self, event: &str) -> usize {
+            let timeline = self.timeline.lock().unwrap();
+            timeline
+                .iter()
+                .position(|e| e == event)
+                .unwrap_or_else(|| panic!("no `{event}` in {timeline:?}"))
+        }
+    }
+
+    /// One streamed turn whose tool calls `c0..` carry `args`, run on a
+    /// [`TimedExec`] with at most `limit` chains at a time. Returns the
+    /// executor, every frame the run emitted, the history and the response.
+    async fn run_group(
+        args: &[&str],
+        limit: usize,
+    ) -> (TimedExec, Vec<LlmStreamPart>, Vec<LlmMessage>, LlmResponse) {
+        let first = args.iter().enumerate().map(|(i, a)| call_chunk(i, a));
+        let exec = TimedExec::default();
+        let (parts, history, resp) = run_streamed_on(first.collect(), &exec, limit).await;
+        (exec, parts, history, resp)
+    }
+
+    /// The ids of the tool messages in `history`, in order.
+    fn answered(history: &[LlmMessage]) -> Vec<&str> {
+        history
+            .iter()
+            .filter(|m| m.role() == &MessageRole::Tool)
+            .filter_map(|m| m.tool_call_id())
+            .collect()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn two_calls_with_different_keys_overlap() {
+        let (exec, ..) = run_group(&[r#"{"key":"a","ms":50}"#, r#"{"key":"b","ms":50}"#], 4).await;
+        assert!(
+            exec.at("start c1") < exec.at("end c0"),
+            "c1 waited for c0: {:?}",
+            exec.timeline.lock().unwrap()
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn two_calls_with_the_same_key_do_not_overlap() {
+        let (exec, ..) = run_group(
+            &[
+                r#"{"key":"a","ms":50,"n":0}"#,
+                r#"{"key":"a","ms":50,"n":1}"#,
+                r#"{"key":"b","ms":50}"#,
+            ],
+            4,
+        )
+        .await;
+        // Same key: one after the other. The other key runs beside them.
+        assert!(exec.at("end c0") < exec.at("start c1"));
+        assert!(exec.at("start c2") < exec.at("end c0"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_call_without_a_key_is_a_barrier() {
+        let (exec, ..) = run_group(
+            &[
+                r#"{"key":"a","ms":30}"#,
+                r#"{"ms":30}"#,
+                r#"{"key":"b","ms":30}"#,
+            ],
+            4,
+        )
+        .await;
+        assert_eq!(
+            *exec.timeline.lock().unwrap(),
+            ["start c0", "end c0", "start c1", "end c1", "start c2", "end c2"]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_history_keeps_the_models_order_when_a_later_call_finishes_first() {
+        let (_, parts, history, _) =
+            run_group(&[r#"{"key":"a","ms":80}"#, r#"{"key":"b","ms":10}"#], 4).await;
+        // Each frame when it happens: c1 finishes first.
+        let frames: Vec<String> = parts
+            .iter()
+            .filter_map(|p| match p {
+                LlmStreamPart::LlmToolCallStart(tc) => Some(format!("start {}", tc.id)),
+                LlmStreamPart::LlmToolCallFinish(r) => Some(format!("finish {}", r.tool_call_id)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(frames, ["start c0", "start c1", "finish c1", "finish c0"]);
+        // The history, in the model's order.
+        assert_eq!(answered(&history), ["c0", "c1"]);
+        assert_eq!(tool_output(&history, "c0"), "out c0");
+        assert_eq!(tool_output(&history, "c1"), "out c1");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_limit_bounds_how_many_chains_run_at_once() {
+        let args: Vec<String> = (0..5)
+            .map(|i| format!(r#"{{"key":"k{i}","ms":20}}"#))
+            .collect();
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let (exec, _, history, _) = run_group(&args, 2).await;
+        assert_eq!(exec.peak.load(Ordering::SeqCst), 2);
+        assert_eq!(answered(&history), ["c0", "c1", "c2", "c3", "c4"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn identical_calls_in_a_group_answer_the_second_with_the_firsts_result() {
+        // Same key (one chain) and, as a stateless tool keys, one chain each.
+        for key in ["a", "$id"] {
+            let call = format!(r#"{{"key":"{key}","ms":20}}"#);
+            let (exec, _, history, _) = run_group(&[&call, &call], 4).await;
+            assert_eq!(*exec.timeline.lock().unwrap(), ["start c0", "end c0"]);
+            assert_eq!(answered(&history), ["c0", "c1"]);
+            assert_eq!(
+                tool_output(&history, "c1"),
+                format!("out c0\n\n{REPEAT_NUDGE_TEXT}").trim()
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_suspension_in_a_group_keeps_what_ran_and_closes_what_did_not() {
+        let (exec, _, history, resp) = run_group(
+            &[
+                r#"{"key":"a","suspend":true}"#,
+                r#"{"key":"a","n":1}"#,
+                r#"{"key":"b"}"#,
+                r#"{"n":3}"#,
+            ],
+            4,
+        )
+        .await;
+        assert_eq!(resp.suspend().expect("suspended").tool_call_id, "c0");
+        // c1 shares c0's thread and c3 comes after the group: neither ran.
+        assert_eq!(
+            *exec.timeline.lock().unwrap(),
+            ["start c0", "start c2", "end c0", "end c2"]
+        );
+        // c0 stays pending for the resume; c2 keeps its result.
+        assert_eq!(answered(&history), ["c2", "c1", "c3"]);
+        assert_eq!(tool_output(&history, "c2"), "out c2");
+        for id in ["c1", "c3"] {
+            assert_eq!(
+                tool_output(&history, id),
+                NOT_EXECUTED_ON_SUSPEND_TEXT.trim()
+            );
+        }
     }
 }
