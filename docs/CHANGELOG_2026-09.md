@@ -4905,3 +4905,38 @@ en rojo (`left: 0, right: 2`). Revertida editando; verde.
 ninguna diferencia.
 
 **ADP.** Nada que hacer.
+
+## 94. La clave de cadena de una llamada `parallel` y `plan_batches` (parallel tools, 2b)
+
+**Qué cambió.** Las dos piezas puras con las que el loop del agente va a armar las
+tandas. Todavía nada las usa: el loop sigue corriendo las llamadas de a una.
+- `ToolExecutor::parallel_chain_key`, que por defecto da `None`. `DagToolExecutor` le da
+  una clave a cada llamada de una tool `parallel` según su hilo de memoria: el nombre de
+  la tool y el hilo resuelto en `dynamic`, el nombre en `persistent`, el id de la llamada
+  en `stateless`. Resuelve el hilo con `resolved_thread`, que usa el mismo `merge_call` y
+  el mismo `thread_of` que el despacho (entrada 93), así que la clave es el hilo en el
+  que corre la llamada. Una llamada `dynamic` sin hilo usable queda con el nombre de la
+  tool: falla antes de llegar a la memoria. Es la clave revisada junto con las entradas
+  86, 87, 90 y 91, y guardada hasta que algo la usara.
+- `plan_batches` (`llm/application/tool_batches.rs`), una función pura. En el orden del
+  modelo, una llamada sin clave corre sola, como barrera, y las llamadas seguidas con
+  clave forman un grupo, con una cadena por clave (misma clave, misma cadena, en orden).
+
+**Tests.** 9 nuevos. Lib: 2905 passed, 0 failed, 74 ignored (2896 en la entrada 93).
+- 5 de la clave: dos llamadas al mismo agente comparten clave, a agentes distintos no,
+  `persistent` encadena por nombre, `stateless` deja cada llamada sola, y una tool sin
+  `parallel` no tiene clave;
+- 4 de `plan_batches`: la barrera antes y después de un grupo, la clave repetida que
+  alarga su cadena, la entrada vacía y todas sin clave.
+
+**Mutación.** Rojas y revertidas editando:
+- la clave `dynamic` sin el hilo (solo el nombre): rojos
+  `two_calls_to_the_same_agent_share_a_chain_key` (`Some("Run")` contra
+  `Some("Run\u{1f}agent-a")`) y `calls_to_different_agents_have_different_chain_keys`;
+- la clave repetida que abre otra cadena: rojo
+  `repeated_key_extends_its_chain_in_model_order` (`[[0], [1], [2]]` contra
+  `[[0, 1], [2]]`).
+
+**E2E.** No aplica: ninguna de las dos piezas corre todavía en un grafo.
+
+**ADP.** Nada que hacer.
