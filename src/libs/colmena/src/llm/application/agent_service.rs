@@ -110,6 +110,32 @@ fn tool_error_result(tool_call_id: &str, e: LlmError) -> ToolResult {
     }
 }
 
+/// The loop guard's streak: it counts CONSECUTIVE repeats of one `(name+args)`
+/// signature, and resets the moment a different signature appears (the model
+/// made progress). `first` is the raw output of the streak's one real
+/// execution, echoed back in a nudge.
+#[derive(Default)]
+struct RepeatStreak {
+    sig: Option<String>,
+    count: u32,
+    first: String,
+}
+
+impl RepeatStreak {
+    /// Counts `tool_call` into the streak and returns the streak's length.
+    fn advance(&mut self, tool_call: &ToolCall) -> u32 {
+        let sig = tool_call_signature(&tool_call.function.name, &tool_call.function.arguments);
+        if self.sig.as_deref() == Some(sig.as_str()) {
+            self.count += 1;
+        } else {
+            self.sig = Some(sig);
+            self.count = 1;
+            self.first.clear();
+        }
+        self.count
+    }
+}
+
 /// Parameters for running the agent
 pub struct AgentRunParams<'a> {
     pub session_id: &'a ConversationKey,
@@ -276,13 +302,7 @@ impl AgentService {
         let mut all_tool_calls_executed = Vec::new();
         let mut cumulative_content = String::new();
 
-        // Loop-guard streak: counts CONSECUTIVE repeats of one signature, and
-        // resets the moment a different signature appears (the model made
-        // progress). `streak_first` is the raw output of this streak's one real
-        // execution, echoed back in a nudge.
-        let mut streak_sig: Option<String> = None;
-        let mut streak_count: u32 = 0;
-        let mut streak_first = String::new();
+        let mut streak = RepeatStreak::default();
 
         // 3. ReAct Loop — bounded by the per-run turn ceiling. Productive work
         //    is gated by the loop guard below, not by turns.
@@ -438,52 +458,18 @@ impl AgentService {
                 // D. Execute each tool call (with consecutive-streak loop guard)
                 let mut rescue = false;
                 for tool_call in &tool_calls {
-                    let sig = tool_call_signature(
-                        &tool_call.function.name,
-                        &tool_call.function.arguments,
-                    );
-                    if streak_sig.as_deref() == Some(sig.as_str()) {
-                        streak_count += 1;
-                    } else {
-                        streak_sig = Some(sig.clone());
-                        streak_count = 1;
-                        streak_first.clear();
-                    }
-                    let count = streak_count;
-
                     // Repeated signature in a row (streak >= 2): nudge or rescue.
+                    let count = streak.advance(tool_call);
                     if count > 1 {
-                        // `streak_first` is empty when the streak's first call
-                        // took an early-return path that never stored a result
-                        // (e.g. a repeated `load_attachment`, whose content was
-                        // already injected for that turn). The bare redirect is
-                        // the right nudge there — there is no prior result to echo.
-                        let body = if streak_first.is_empty() {
-                            REPEAT_NUDGE_TEXT.to_string()
-                        } else {
-                            format!("{streak_first}\n\n{REPEAT_NUDGE_TEXT}")
-                        };
-
-                        if let Some(callback) = &on_token {
-                            (callback)(LlmStreamPart::LlmToolCallStart(tool_call.clone()));
-                            (callback)(LlmStreamPart::LlmToolCallFinish(ToolResult {
-                                tool_call_id: tool_call.id.clone(),
-                                output: body.clone(),
-                                success: true,
-                                error: None,
-                            }));
-                        }
-
-                        let mut nudged_call = tool_call.clone();
-                        nudged_call.response = Some(serde_json::Value::String(body.clone()));
-                        all_tool_calls_executed.push(nudged_call);
-
-                        let tool_message = LlmMessage::tool(tool_call.id.clone(), body)?;
-                        messages.push(tool_message.clone());
-                        self.conversation_repository
-                            .add_message(session_id, tool_message)
-                            .await?;
-
+                        self.answer_repeat(
+                            session_id,
+                            &on_token,
+                            &mut messages,
+                            &mut all_tool_calls_executed,
+                            tool_call,
+                            &streak.first,
+                        )
+                        .await?;
                         if count >= max_tool_repeats as u32 {
                             // Loop guard tripped: still answer the rest of this
                             // turn's tool ids (done by continuing the loop), then
@@ -494,8 +480,6 @@ impl AgentService {
                     }
 
                     // Streak start (count == 1): real execution (existing path).
-                    let mut executed_call = tool_call.clone();
-
                     // Notify start of execution
                     if let Some(callback) = &on_token {
                         (callback)(LlmStreamPart::LlmToolCallStart(tool_call.clone()));
@@ -586,53 +570,9 @@ impl AgentService {
                         if parsed.get("__colmena_status").and_then(|v| v.as_str())
                             == Some("SUSPENDED")
                         {
-                            tracing::info!(
-                                target: "colmena::agent",
-                                tool_call_id = %result.tool_call_id,
-                                "agent_service: SUSPENDED detected in tool result, short-circuiting agent loop"
-                            );
-
-                            // The model may have asked for several tools in this
-                            // one turn. The suspend returns from the middle of
-                            // that batch, so every call ordered after it never
-                            // runs — deliberately: executing a side-effecting
-                            // call before the human answers would defeat the
-                            // gate the suspend exists to impose.
-                            //
-                            // Those ids are already persisted inside the
-                            // assistant message (step B), and an id without a
-                            // result is a hard 400 on Anthropic and OpenAI. So
-                            // close each one with an honest marker saying it did
-                            // not run. The suspending id is deliberately left
-                            // open — the resume path finds it by that absence.
-                            for orphan_id in unresolved_sibling_ids(&messages, &result.tool_call_id)
-                            {
-                                tracing::warn!(
-                                    target: "colmena::agent",
-                                    tool_call_id = %orphan_id,
-                                    suspended_by = %result.tool_call_id,
-                                    "agent_service: tool call left un-executed by a suspend in the \
-                                     same batch; closing it with a not-executed marker"
-                                );
-                                let marker = LlmMessage::tool(
-                                    orphan_id,
-                                    NOT_EXECUTED_ON_SUSPEND_TEXT.to_string(),
-                                )?;
-                                messages.push(marker.clone());
-                                self.conversation_repository
-                                    .add_message(session_id, marker)
-                                    .await?;
-                            }
-
-                            let questions = parsed
-                                .get("questions")
-                                .cloned()
-                                .unwrap_or(serde_json::Value::Null);
-                            return Ok(LlmResponse::suspended(
-                                result.tool_call_id.clone(),
-                                questions,
-                                result.output.clone(),
-                            ));
+                            return self
+                                .suspend(session_id, &mut messages, &result, parsed)
+                                .await;
                         }
                         if parsed.get("__colmena_status").and_then(|v| v.as_str())
                             == Some("LOAD_ATTACHMENT")
@@ -772,26 +712,21 @@ impl AgentService {
 
                     // Store this streak's first result so a later repeat can
                     // echo it in the nudge.
-                    streak_first = result.output.clone();
-
-                    // Populate tool call output tracker
-                    let parsed_output = serde_json::from_str::<serde_json::Value>(&result.output)
-                        .unwrap_or_else(|_| serde_json::Value::String(result.output.clone()));
-                    executed_call.response = Some(parsed_output);
-                    all_tool_calls_executed.push(executed_call);
+                    streak.first = result.output.clone();
 
                     // Notify result of execution
                     if let Some(callback) = &on_token {
                         (callback)(LlmStreamPart::LlmToolCallFinish(result.clone()));
                     }
 
-                    let tool_message =
-                        LlmMessage::tool(result.tool_call_id.clone(), result.output.clone())?;
-
-                    messages.push(tool_message.clone());
-                    self.conversation_repository
-                        .add_message(session_id, tool_message)
-                        .await?;
+                    self.record_result(
+                        session_id,
+                        &mut messages,
+                        &mut all_tool_calls_executed,
+                        tool_call,
+                        &result,
+                    )
+                    .await?;
                 }
 
                 if rescue {
@@ -844,6 +779,126 @@ impl AgentService {
             response = response.with_tool_calls(all_tool_calls_executed);
         }
         Ok(response)
+    }
+
+    /// Answers a repeated call with the loop guard's nudge instead of running
+    /// it: its frames, its entry in the executed calls and its persisted `tool`
+    /// message. `first` is the output of the streak's one real execution.
+    async fn answer_repeat(
+        &self,
+        session_id: &ConversationKey,
+        on_token: &Option<Box<dyn Fn(LlmStreamPart) + Send + Sync>>,
+        messages: &mut Vec<LlmMessage>,
+        executed: &mut Vec<ToolCall>,
+        tool_call: &ToolCall,
+        first: &str,
+    ) -> Result<(), LlmError> {
+        // `first` is empty when the streak's first call took an early-return
+        // path that never stored a result (e.g. a repeated `load_attachment`,
+        // whose content was already injected for that turn). The bare redirect
+        // is the right nudge there — there is no prior result to echo.
+        let body = if first.is_empty() {
+            REPEAT_NUDGE_TEXT.to_string()
+        } else {
+            format!("{first}\n\n{REPEAT_NUDGE_TEXT}")
+        };
+
+        if let Some(callback) = on_token {
+            (callback)(LlmStreamPart::LlmToolCallStart(tool_call.clone()));
+            (callback)(LlmStreamPart::LlmToolCallFinish(ToolResult {
+                tool_call_id: tool_call.id.clone(),
+                output: body.clone(),
+                success: true,
+                error: None,
+            }));
+        }
+
+        let mut nudged_call = tool_call.clone();
+        nudged_call.response = Some(serde_json::Value::String(body.clone()));
+        executed.push(nudged_call);
+
+        let tool_message = LlmMessage::tool(tool_call.id.clone(), body)?;
+        messages.push(tool_message.clone());
+        self.conversation_repository
+            .add_message(session_id, tool_message)
+            .await
+    }
+
+    /// Records a call's result: its entry in the executed calls (the output,
+    /// parsed when it is JSON) and its persisted `tool` message.
+    async fn record_result(
+        &self,
+        session_id: &ConversationKey,
+        messages: &mut Vec<LlmMessage>,
+        executed: &mut Vec<ToolCall>,
+        tool_call: &ToolCall,
+        result: &ToolResult,
+    ) -> Result<(), LlmError> {
+        let mut executed_call = tool_call.clone();
+        let parsed_output = serde_json::from_str::<serde_json::Value>(&result.output)
+            .unwrap_or_else(|_| serde_json::Value::String(result.output.clone()));
+        executed_call.response = Some(parsed_output);
+        executed.push(executed_call);
+
+        let tool_message = LlmMessage::tool(result.tool_call_id.clone(), result.output.clone())?;
+        messages.push(tool_message.clone());
+        self.conversation_repository
+            .add_message(session_id, tool_message)
+            .await
+    }
+
+    /// Ends the run on a call that suspended for human input. The assistant
+    /// message (with its tool_calls) is already persisted (step B), so the
+    /// resume path walks the history to find the pending call: the suspending
+    /// call gets no `tool` message — there is no result yet.
+    async fn suspend(
+        &self,
+        session_id: &ConversationKey,
+        messages: &mut Vec<LlmMessage>,
+        result: &ToolResult,
+        sentinel: &serde_json::Value,
+    ) -> Result<LlmResponse, LlmError> {
+        tracing::info!(
+            target: "colmena::agent",
+            tool_call_id = %result.tool_call_id,
+            "agent_service: SUSPENDED detected in tool result, short-circuiting agent loop"
+        );
+
+        // The model may have asked for several tools in this one turn. The
+        // suspend returns from the middle of that batch, so every call that
+        // has not run never runs — deliberately: executing a side-effecting
+        // call before the human answers would defeat the gate the suspend
+        // exists to impose.
+        //
+        // Those ids are already persisted inside the assistant message (step
+        // B), and an id without a result is a hard 400 on Anthropic and
+        // OpenAI. So close each one with an honest marker saying it did not
+        // run. The suspending id is deliberately left open — the resume path
+        // finds it by that absence.
+        for orphan_id in unresolved_sibling_ids(messages, &result.tool_call_id) {
+            tracing::warn!(
+                target: "colmena::agent",
+                tool_call_id = %orphan_id,
+                suspended_by = %result.tool_call_id,
+                "agent_service: tool call left un-executed by a suspend in the \
+                 same batch; closing it with a not-executed marker"
+            );
+            let marker = LlmMessage::tool(orphan_id, NOT_EXECUTED_ON_SUSPEND_TEXT.to_string())?;
+            messages.push(marker.clone());
+            self.conversation_repository
+                .add_message(session_id, marker)
+                .await?;
+        }
+
+        let questions = sentinel
+            .get("questions")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        Ok(LlmResponse::suspended(
+            result.tool_call_id.clone(),
+            questions,
+            result.output.clone(),
+        ))
     }
 
     /// One LLM round-trip (stream or call) for `request`. Emits the

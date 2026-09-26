@@ -4940,3 +4940,38 @@ tandas. Todavía nada las usa: el loop sigue corriendo las llamadas de a una.
 **E2E.** No aplica: ninguna de las dos piezas corre todavía en un grafo.
 
 **ADP.** Nada que hacer.
+
+## 95. El guard de repetición, el registro y la suspensión pasan a métodos (parallel tools, 2c)
+
+**Qué cambió.** Un refactor de `AgentService::run` sin cambio de comportamiento. Prepara
+el grupo concurrente, que va a usar estas piezas desde otro camino; por ahora solo las
+llama el loop en serie. Los comentarios viajan con el código.
+- La racha del guard (las tres variables `streak_*`) pasa a `RepeatStreak { sig, count,
+  first }`, con `advance(&ToolCall) -> u32`. Misma regla: cuenta las repeticiones
+  seguidas de una firma y se reinicia cuando aparece otra.
+- `answer_repeat`: contesta una repetición con el aviso en vez de correrla (sus frames
+  Start y Finish, su entrada en las llamadas ejecutadas, su mensaje `tool`).
+- `record_result`: la entrada de un resultado en las llamadas ejecutadas y su mensaje
+  `tool`.
+- `suspend`: cierra con el marcador «NO se ejecutó» las llamadas sin resultado y
+  devuelve `LlmResponse::suspended`.
+- Un detalle de orden: la entrada en las llamadas ejecutadas se agrega después del
+  frame Finish, no antes. Nada lee esa lista entre los dos.
+
+**Tests.** Ninguno nuevo ni tocado. Los 40 de `agent_service` pasan igual, entre ellos
+`two_identical_calls_in_one_turn_nudges_the_second`,
+`suspend_closes_tool_calls_left_unexecuted_in_the_same_batch` y los de
+`LOAD_ATTACHMENT`. Lib: 2905 passed, 0 failed, 74 ignored, como en la entrada 94.
+
+**Mutación.** Sobre el código movido, para ver que los tests de siempre lo cubren. Rojas
+y revertidas editando:
+- `suspend` sin cerrar ningún id (`.take(0)`): rojos
+  `suspend_closes_tool_calls_left_unexecuted_in_the_same_batch` y
+  `suspend_preserves_results_of_calls_that_ran_before_it`;
+- `RepeatStreak::advance` que nunca pasa de 1: 5 rojos, entre ellos
+  `two_identical_calls_in_one_turn_nudges_the_second` y
+  `streak_resets_when_a_different_signature_appears`.
+
+**E2E.** No aplica: no hay cambio observable.
+
+**ADP.** Nada que hacer.
