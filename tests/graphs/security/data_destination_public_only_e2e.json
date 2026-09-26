@@ -1,0 +1,29 @@
+{
+  "comment": "E2E (CHANGELOG 2026-09 section 143): an http_request destination that comes from data dials only public addresses, unless the author lists its host in allowed_hosts. trigger_webhook's test_payload stands in for data that names three destinations; each reaches an http_request through an edge that names base_url. Serve 127.0.0.1:8765 first (python3 -m http.server 8765 --bind 127.0.0.1). Expected: to_public (a public host) answers; to_listed (127.0.0.1:8765, in allowed_hosts) answers; to_link_local (not listed) fails before any connection with 'a destination that comes from data connects only to a public address'. The status edges order the calls: each call waits for the previous one's status, which also reaches its request as an `after` query parameter (the servers ignore it).",
+  "metadata": { "category": "security", "requires_env": [] },
+  "nodes": {
+    "hook": {
+      "type": "trigger_webhook",
+      "config": {
+        "test_payload": {
+          "public": "https://example.com",
+          "listed": "http://127.0.0.1:8765",
+          "link_local": "http://169.254.0.1"
+        }
+      }
+    },
+    "to_public": { "type": "http_request", "config": { "method": "GET" } },
+    "to_listed": {
+      "type": "http_request",
+      "config": { "method": "GET", "allowed_hosts": ["127.0.0.1:8765"] }
+    },
+    "to_link_local": { "type": "http_request", "config": { "method": "GET" } }
+  },
+  "edges": [
+    { "from": "hook.public", "to": "to_public.base_url" },
+    { "from": "hook.listed", "to": "to_listed.base_url" },
+    { "from": "to_public.status", "to": "to_listed.after" },
+    { "from": "hook.link_local", "to": "to_link_local.base_url" },
+    { "from": "to_listed.status", "to": "to_link_local.after" }
+  ]
+}

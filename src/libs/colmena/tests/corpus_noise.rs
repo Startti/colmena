@@ -166,7 +166,10 @@ fn measure() -> Measured {
 // Bumped 335 -> 336: adds tests/graphs/agents/files_signed_url_image_registered.json
 // (an image sent as a signed URL to an Anthropic model is registered with its
 // bytes stored). Lints clean.
-const EXPECTED_FILES: usize = 336;
+// Bumped 336 -> 337: adds tests/graphs/security/data_destination_public_only_e2e.json
+// (an http_request destination that comes from data dials only public addresses
+// unless allowed_hosts lists its host). Lints clean.
+const EXPECTED_FILES: usize = 337;
 const EXPECTED_ERRORS: usize = 0;
 const EXPECTED_WARNINGS: usize = 0;
 const EXPECTED_INFOS: usize = 0;

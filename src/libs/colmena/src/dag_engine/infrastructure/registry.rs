@@ -788,11 +788,32 @@ mod llm_call_caller_path_tests {
 #[cfg(test)]
 mod llm_call_tool_provenance_tests {
     use crate::dag_engine::application::ports::NodeRegistryPort;
+    use crate::dag_engine::domain::node::ExecutableNode;
+    use crate::dag_engine::infrastructure::nodes::{http::HttpNode, llm::LlmNode};
+    use crate::dag_engine::infrastructure::pool_registry::{PgPoolRegistry, PoolConfig};
+    use crate::llm::infrastructure::files::SignedUrlDownloader;
+    use crate::llm::infrastructure::ConversationRepositoryFactory;
     use crate::llm::infrastructure::{OverrideGuard, ScriptedAdapter, ScriptedResponse};
     use serde_json::{json, Value};
     use std::collections::HashMap;
     use std::sync::Arc;
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// The real registry, save an `http_request` that dials the loopback mock
+    /// as a public host: a tool that arrives as data has a destination from data.
+    struct MockAsPublic(Arc<super::HashMapNodeRegistry>);
+    impl NodeRegistryPort for MockAsPublic {
+        fn get_node(&self, t: &str) -> Option<Arc<dyn ExecutableNode>> {
+            if t != "http_request" {
+                return self.0.get_node(t);
+            }
+            let fetcher = SignedUrlDownloader::allowing_private_hosts();
+            Some(Arc::new(HttpNode::new().with_url_parts(fetcher)))
+        }
+        fn get_all_nodes(&self) -> HashMap<String, Arc<dyn ExecutableNode>> {
+            self.0.get_all_nodes()
+        }
+    }
 
     /// Runs an `llm_call` whose scripted model calls `fetch` once; returns the
     /// `q` query value the mock received.
@@ -823,8 +844,11 @@ mod llm_call_tool_provenance_tests {
             }
             _ => config["tool_configurations"] = tools,
         }
-        let registry = super::registry_tavily_tests::build_registry();
-        let llm = registry.get_node("llm_call").expect("llm_call");
+        let registry: Arc<dyn NodeRegistryPort> =
+            Arc::new(MockAsPublic(super::registry_tavily_tests::build_registry()));
+        let pools = Arc::new(PgPoolRegistry::new(PoolConfig::defaults()));
+        let repos = Arc::new(ConversationRepositoryFactory::new(pools));
+        let llm = LlmNode::new(repos, Arc::downgrade(&registry), None);
         llm.execute(&inputs, &config, &mut json!({}), None)
             .await
             .expect("llm_call finished");

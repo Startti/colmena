@@ -3571,7 +3571,11 @@ mod graph_http_payload_tests {
         fn get_node(&self, node_type: &str) -> Option<Arc<dyn ExecutableNode>> {
             match node_type {
                 "trigger_webhook" => Some(Arc::new(TriggerWebhookNode)),
-                "http_request" => Some(Arc::new(HttpNode::new())),
+                // The mocks stand in for public hosts.
+                "http_request" => Some(Arc::new(HttpNode::new().with_url_parts(
+                    crate::llm::infrastructure::files::SignedUrlDownloader::allowing_private_hosts(
+                    ),
+                ))),
                 _ => None,
             }
         }

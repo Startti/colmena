@@ -6,7 +6,8 @@
 //! resolution; values arriving over edges never do (they may be a webhook payload or a
 //! model's output). Input edges override config values, except that `base_url`, `method`,
 //! `headers`, `bearer_token` and `authorization` only come over an edge that names them
-//! (`to: "<node>.base_url"`) — see [`ExecutableNode::author_owned_inputs`].
+//! (`to: "<node>.base_url"`) — see [`ExecutableNode::author_owned_inputs`]. A `base_url`
+//! that comes from data dials only public addresses, unless `allowed_hosts` lists its host.
 //!
 //! ## As an LLM tool (via `tool_configurations`)
 //! When invoked by `DagToolExecutor`, extra non-reserved input keys with primitive values
@@ -26,6 +27,9 @@ use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
 use crate::dag_engine::infrastructure::env_provenance::{escape_pointer_segment, EnvPolicy};
 use crate::dag_engine::infrastructure::nodes::util::session_attachment::read_session_attachment;
 use crate::llm::domain::{BoxedByteStream, LlmError};
+use crate::llm::infrastructure::files::signed_url_downloader::{
+    is_dial_refused, DialGuard, DialRefused,
+};
 use crate::llm::infrastructure::files::SignedUrlDownloader;
 use reqwest::{Method, Url};
 use serde_json::{json, Value};
@@ -46,7 +50,8 @@ pub struct HttpNode {
     /// Shared OAuth provider cache. When set, a config `auth` block authenticates
     /// via the refresh_token grant, reusing one token per credential fingerprint.
     oauth_cache: Option<Arc<crate::google_oauth::infrastructure::OAuthProviderCache>>,
-    /// Fetches multipart URL parts: public addresses only.
+    /// Fetches multipart URL parts: public addresses only. Its address rule
+    /// also bounds a destination that comes from data.
     url_parts: SignedUrlDownloader,
 }
 
@@ -583,7 +588,7 @@ impl HttpNode {
     }
 
     /// Same scheme, host and port.
-    fn same_origin(a: &Url, b: &Url) -> bool {
+    pub(crate) fn same_origin(a: &Url, b: &Url) -> bool {
         a.scheme() == b.scheme()
             && a.host_str() == b.host_str()
             && a.port_or_known_default() == b.port_or_known_default()
@@ -640,24 +645,75 @@ impl HttpNode {
         }
     }
 
+    /// A destination that comes from data (not the origin of the author's
+    /// `base_url`) dials only addresses the process allows (public ones
+    /// unless `COLMENA_ATTACHMENT_ALLOW_PRIVATE_HOSTS` is set), redirects
+    /// included; a host in `allowed_hosts` is dialled at any address. `None`
+    /// for the author's destination, which is not checked.
+    fn destination_guard(
+        &self,
+        url: &Url,
+        author_base_url: Option<&str>,
+        allowed_hosts: Option<&Value>,
+    ) -> Result<Option<DialGuard>, Box<dyn StdError + Send + Sync>> {
+        let author = author_base_url.and_then(|b| Url::parse(b).ok());
+        if author.is_some_and(|a| Self::same_origin(&a, url)) {
+            return Ok(None);
+        }
+        let listed = Self::credential_destination_allowed(url, None, allowed_hosts).is_ok();
+        // A bare `"host"` entry lists every port; `"host:port"`, only that one.
+        let host = url.host_str().unwrap_or_default();
+        let bare = |h: &Value| h.as_str().is_some_and(|h| h.eq_ignore_ascii_case(host));
+        let bare = allowed_hosts
+            .and_then(Value::as_array)
+            .is_some_and(|l| l.iter().any(bare));
+        let port = url.port_or_known_default().filter(|_| !bare);
+        let guard = self.url_parts.guard(Some(host).filter(|_| listed), port);
+        if guard.refuses(url) {
+            return Err(Self::refused_destination());
+        }
+        Ok(Some(guard))
+    }
+
+    fn refused_destination() -> Box<dyn StdError + Send + Sync> {
+        "http_request: a destination that comes from data connects only to a public address \
+         or to a host in `allowed_hosts`, redirects included; this one is neither"
+            .into()
+    }
+
+    /// A send error; the address rule's refusal says so, without the URL.
+    fn send_error(e: reqwest::Error) -> Box<dyn StdError + Send + Sync> {
+        if is_dial_refused(&e) {
+            Self::refused_destination()
+        } else {
+            Box::new(e)
+        }
+    }
+
     /// A client whose redirects never take the author's credentials to
-    /// another origin: with credentials on the request, only a same-origin
-    /// redirect is followed (a cross-origin one is returned as is).
+    /// another origin (with credentials on the request, only a same-origin
+    /// redirect is followed; a cross-origin one is returned as is), and that
+    /// dials only where `guard` allows, on every hop.
     fn client_for(
         credentials: bool,
+        guard: Option<DialGuard>,
         builder: reqwest::ClientBuilder,
     ) -> reqwest::Result<reqwest::Client> {
-        if !credentials {
+        if !credentials && guard.is_none() {
             return builder.build();
         }
+        let builder = match &guard {
+            Some(g) => g.install(builder),
+            None => builder,
+        };
         builder
-            .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            .redirect(reqwest::redirect::Policy::custom(move |attempt| {
+                let first = attempt.previous().first();
                 if attempt.previous().len() > 10 {
                     attempt.error("too many redirects")
-                } else if attempt
-                    .previous()
-                    .first()
-                    .is_some_and(|first| Self::same_origin(first, attempt.url()))
+                } else if guard.as_ref().is_some_and(|g| g.refuses(attempt.url())) {
+                    attempt.error(DialRefused)
+                } else if !credentials || first.is_some_and(|f| Self::same_origin(f, attempt.url()))
                 {
                     attempt.follow()
                 } else {
@@ -954,6 +1010,7 @@ impl HttpNode {
         policy: &EnvPolicy,
         agent_session_id: Option<&str>,
         credentials: bool,
+        guard: Option<DialGuard>,
     ) -> Result<Value, Box<dyn StdError + Send + Sync>> {
         // Env-var resolution on string leaves before parsing, so `${VAR}` works
         // inside URLs and text values — gated for an `inputs` body, as on the
@@ -1025,6 +1082,7 @@ impl HttpNode {
         // Build the outbound request — same client tuning as JSON path
         let client = Self::client_for(
             credentials,
+            guard,
             crate::shared::http_client::builder().http1_only(),
         )?;
         let url = Url::parse(full_url).map_err(|e| format!("Invalid URL '{full_url}': {e}"))?;
@@ -1070,7 +1128,7 @@ impl HttpNode {
 
         println!("[HttpNode] → {method_str} {full_url} (multipart, {parts_count} parts)");
 
-        let response = req.multipart(form).send().await?;
+        let response = req.multipart(form).send().await.map_err(Self::send_error)?;
         let status = response.status().as_u16();
         println!("[HttpNode] ← {status} ({full_url})");
 
@@ -1262,11 +1320,14 @@ impl ExecutableNode for HttpNode {
         Self::check_credential_destination(&url, author_base_url.as_deref(), inputs, config)
             .map_err(Self::io_err)?;
         let credentials = Self::carries_author_credentials(inputs, config);
+        let allowed_hosts = Self::author_value(inputs, config, "allowed_hosts");
+        let guard = self.destination_guard(&url, author_base_url.as_deref(), allowed_hosts)?;
 
         // 3. Prepare Client and Request
         // Build client forcing HTTP/1.1 to avoid HTTP/2 issues with some APIs
         let client = Self::client_for(
             credentials,
+            guard.clone(),
             crate::shared::http_client::builder().http1_only(),
         )?;
 
@@ -1411,6 +1472,7 @@ impl ExecutableNode for HttpNode {
                     &policy,
                     agent_session_id,
                     credentials,
+                    guard,
                 )
                 .await;
         }
@@ -1468,7 +1530,7 @@ impl ExecutableNode for HttpNode {
             )
             .await?
         } else {
-            request_builder.send().await?
+            request_builder.send().await.map_err(Self::send_error)?
         };
         let status = response.status().as_u16();
         println!("[HttpNode] ← {} ({})", status, full_url_str);
@@ -3217,5 +3279,110 @@ mod redirect_tests {
             .await
             .unwrap();
         assert_eq!(out["status"], 200);
+    }
+}
+
+/// A destination that comes from data (a `base_url` the author did not set)
+/// dials only public addresses, redirects included, unless `allowed_hosts`
+/// lists its host; the author's own destination is not checked.
+#[cfg(test)]
+mod data_destination_tests {
+    use super::*;
+    use crate::dag_engine::infrastructure::env_provenance::AUTHORED_INPUTS_KEY;
+    use std::collections::HashMap;
+    use std::time::Duration;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    async fn server(reply: ResponseTemplate) -> MockServer {
+        let s = MockServer::start().await;
+        Mock::given(wiremock::matchers::any())
+            .respond_with(reply)
+            .mount(&s)
+            .await;
+        s
+    }
+
+    fn public_only() -> HttpNode {
+        HttpNode::new().with_url_parts(SignedUrlDownloader::public_only())
+    }
+
+    /// `base_url` from data; a dial that hangs (a non-routable address) times out.
+    async fn run(node: &HttpNode, base_url: &str, config: Value) -> Result<Value, String> {
+        let inputs = HashMap::from([("base_url".to_string(), json!(base_url))]);
+        let mut state = json!({});
+        let run = node.execute(&inputs, &config, &mut state, None);
+        match tokio::time::timeout(Duration::from_secs(5), run).await {
+            Ok(out) => out.map_err(|e| e.to_string()),
+            Err(_) => Err("timed out dialling".to_string()),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_non_public_destination_from_data_is_never_dialed() {
+        let s = server(ResponseTemplate::new(200)).await;
+        let by_name = s.uri().replace("127.0.0.1", "localhost");
+        let multipart = json!({ "method": "POST", "body": { "a": "b" },
+            "headers": { "Content-Type": "multipart/form-data" } });
+        let author = json!({ "base_url": s.uri() });
+        for (base, config) in [
+            (s.uri(), json!({})),
+            (by_name.clone(), json!({})),
+            (by_name, multipart),
+            ("http://169.254.169.254".to_string(), json!({})),
+            ("http://10.255.0.1".to_string(), json!({})),
+            ("http://[::1]:9".to_string(), json!({})),
+            // The author's host on another port or scheme is data's choice too.
+            ("http://127.0.0.1:9".to_string(), author.clone()),
+            (s.uri().replace("http:", "https:"), author),
+        ] {
+            let err = run(&public_only(), &base, config).await.unwrap_err();
+            assert!(err.contains("public address"), "{base}: {err}");
+        }
+        assert!(s.received_requests().await.unwrap().is_empty());
+    }
+
+    /// A destination from data the rule accepts (loopback, here) that
+    /// redirects to a non-public address: the hop is never dialled.
+    #[tokio::test]
+    async fn a_redirect_from_data_to_a_non_public_address_is_not_followed() {
+        let to = |loc: &str| ResponseTemplate::new(302).insert_header("location", loc);
+        let s = server(to("http://10.255.0.1/x")).await;
+        let loopback_as_public = SignedUrlDownloader::with_policy(|ip| ip.is_loopback(), 1024);
+        let node = HttpNode::new().with_url_parts(loopback_as_public);
+        let err = run(&node, &s.uri(), json!({})).await.unwrap_err();
+        assert!(err.contains("public address"), "{err}");
+        // A `"host:port"` entry exempts that port only.
+        let s = server(to("http://127.0.0.1:9/x")).await;
+        let listed = json!({ "allowed_hosts": [s.uri().trim_start_matches("http://")] });
+        let err = run(&public_only(), &s.uri(), listed).await.unwrap_err();
+        assert!(err.contains("public address"), "{err}");
+    }
+
+    /// The author's destination (in `config` or a tool's `fixed` value) and a
+    /// host in `allowed_hosts` still connect at a non-public address.
+    #[tokio::test]
+    async fn an_author_destination_or_a_listed_host_still_connects() {
+        let s = server(ResponseTemplate::new(200)).await;
+        let config = json!({ "base_url": s.uri() });
+        let out = public_only()
+            .execute(&HashMap::new(), &config, &mut json!({}), None)
+            .await;
+        assert_eq!(out.unwrap()["status"], 200);
+        let fixed = HashMap::from([
+            ("base_url".to_string(), json!(s.uri())),
+            (AUTHORED_INPUTS_KEY.to_string(), json!(["base_url"])),
+        ]);
+        let out = public_only()
+            .execute(&fixed, &json!({}), &mut json!({}), None)
+            .await;
+        assert_eq!(out.unwrap()["status"], 200);
+        let host_port = s.uri().trim_start_matches("http://").to_string();
+        let by_name = s.uri().replace("127.0.0.1", "localhost");
+        for (base, listed) in [(s.uri(), host_port), (by_name, "localhost".to_string())] {
+            let config = json!({ "allowed_hosts": [listed] });
+            let out = run(&public_only(), &base, config).await;
+            assert_eq!(out.unwrap()["status"], 200, "{base}");
+        }
+        assert_eq!(s.received_requests().await.unwrap().len(), 4);
     }
 }
