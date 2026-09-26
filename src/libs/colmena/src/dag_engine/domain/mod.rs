@@ -15,6 +15,7 @@ pub use secure_value_repository::SecureValueRepository;
 
 pub mod initializable_node;
 pub mod lint;
+pub mod python_executor;
 pub mod sql_errors;
 pub mod sql_permissions;
 pub mod sql_ports;

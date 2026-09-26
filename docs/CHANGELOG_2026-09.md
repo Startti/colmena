@@ -6389,3 +6389,25 @@ tarda es un rechazo. `http.rs`: con la variable no hay guarda.
 **ADP.** [Nota de migración](adp_migration/2026-09-26-data-destination-public-only.md). Sin cambios de
 SSE. En Rust, `SocketIoNode` se construye con `SocketIoNode::default()`.
 **Estado.** done.
+
+## 145. Refactor: el puerto `PythonExecutor` y su configuración por entorno
+
+**Qué cambia.** Se agrega el puerto de dominio `PythonExecutor`
+(`domain/python_executor.rs`): un pedido (`PythonRunRequest`: código, modo,
+plazo opcional, entradas JSON), un resultado (`PythonRunResult`: el `output`
+asignado y el stdout capturado; `python_node` lo re-exporta), un error
+(`PythonRunError`: `Python`, `Timeout`, `Internal`) y el tipo de executor
+(`ExecutorKind`: `inprocess`, `subprocess`, `remote`). También la configuración
+del proceso, `python_exec::config`: `COLMENA_PYTHON_EXECUTOR` (`inprocess` por
+defecto), `COLMENA_PYTHON_EXECUTOR_MODES` (`restricted` por defecto, o `all`) y
+`COLMENA_PYTHON_EXECUTOR_MAX_TIMEOUT_SECS` (3600 por defecto; segundos enteros
+mayores que 0). Un valor inválido es un error que nombra la variable y el valor,
+nunca un valor por defecto en silencio. Todavía nada usa el puerto: los
+llamadores pasan en las secciones siguientes.
+
+**Tests.** Unitarios del puerto (nombres de los tipos de executor, texto del
+error) y de la configuración (sin definir, en blanco, valores conocidos, un
+valor mal escrito es error).
+
+**ADP.** Sin cambios de API ni de SSE.
+**Estado.** done.

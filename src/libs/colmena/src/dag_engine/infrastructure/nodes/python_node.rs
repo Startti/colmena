@@ -77,15 +77,7 @@ fn validate_sandbox(py: Python<'_>, code: &str) -> Result<Option<String>, String
     }
 }
 
-/// Result of running a Python code string via the sandboxed helper.
-#[derive(Debug)]
-pub struct PythonRunResult {
-    /// The serialized value of the `output` variable in the user's namespace,
-    /// or `None` if the user did not assign `output`.
-    pub output: Option<Value>,
-    /// Captured stdout (best-effort — Python `print()` calls).
-    pub stdout: String,
-}
+pub use crate::dag_engine::domain::python_executor::PythonRunResult;
 
 /// Run a Python code string with the same semantics as the `python_script`
 /// DAG node. Used directly by other modules (e.g. `crdt_doc_run_python` tool)
