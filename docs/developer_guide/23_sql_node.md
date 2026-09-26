@@ -319,7 +319,7 @@ The critic uses a low-temperature call (`temperature: 0.0`, `max_tokens: 500`) f
 
 ## Initialization and Schema Introspection
 
-The SQL node implements `InitializableNode`. Steps 2-7 run once per resolved `connection_url` and the config they read (`SqlNode::init_key`: `permissions` without `tenant_user_id`, `setup_sql`, `runtime_limits.max_rows`), at DAG startup or on the first call with that key; concurrent callers wait on it. The node keeps the result (the description) for up to the registry's `max_entries` keys, least recently used out first, and never keeps a failed one (CHANGELOG 2026-09 §118):
+The SQL node implements `InitializableNode`. Steps 2-7 run once per resolved `connection_url` and the config they read (`SqlNode::init_key`: `permissions` without `tenant_user_id`, `setup_sql`, `runtime_limits.max_rows`), at DAG startup or on the first call with that key; concurrent callers wait on it, and if it fails the next of them runs it. The node keeps the result (the description) for up to the registry's `max_entries` keys, least recently used out first, and never keeps a failed one (CHANGELOG 2026-09 §120):
 
 1. **Connect** — Every call obtains the pool from the shared `PgPoolRegistry` via `SqlPortFactory::get_adapter(url, …)`, with its own `statement_timeout_ms` and `work_mem_mb`. If another node (or the internal state repository) already opened a pool for this URL, it is **reused**; otherwise a new pool is created and cached.
 2. **Provision schemas** (if `create_schemas_if_missing`, default `true`) — Checks each schema in `allowed_schemas` and creates the ones that don't exist. See below.
@@ -402,7 +402,7 @@ que crea tickets de gastos): el consumidor lo usa directamente, sin configurar n
 
 | Aspecto | Comportamiento |
 |---|---|
-| **Cuándo corre** | En el init del nodo (lazy: el primer uso de la DB en cada run). Después de provisionar `allowed_schemas` y **antes** de la introspección, así la descripción de la tool ya lista las tablas creadas. |
+| **Cuándo corre** | En el init del nodo: en la primera llamada con esa URL y configuración en el proceso (o al listar tools); de nuevo si sale del caché del nodo. Después de provisionar `allowed_schemas` y **antes** de la introspección, así la descripción de la tool ya lista las tablas creadas. |
 | **Nivel de confianza** | Operador — **no** pasa por el validador del LLM. Permite DDL (CREATE TABLE/SCHEMA) que el `query` del LLM tiene bloqueado. El LLM nunca ve `setup_sql`. |
 | **Idempotencia** | Corre en cada init. **Debés escribirlo idempotente.** La idempotencia la garantizan tus cláusulas SQL, no un flag de estado. |
 | **Atomicidad** | Una transacción; si cualquier statement falla, rollback completo y el init **hard-failea** con `Failed to run setup_sql: ...`. |
@@ -451,7 +451,7 @@ Un `INSERT` plano sin `ON CONFLICT` **se duplica en cada mensaje** — siempre u
 - **No hay guard "run-once".** Corre idempotente en cada init; no hay tabla de tracking. Para setups pesados con seed no idempotente, ver BACKLOG.
 - **No hay lint de idempotencia.** El motor confía en que el SQL es idempotente.
 - **1 DB = 1 tool con setup** es el patrón esperado. Varios nodos `sql_query` a la misma DB con la misma configuración comparten una inicialización; con configuraciones distintas, cada una corre su `setup_sql` (seguro por idempotencia).
-- **Aislamiento per-usuario** (otra DB / otro schema por usuario) requiere que el host (ADP) instancie el grafo fresco por run — que es como corre hoy.
+- **Aislamiento per-usuario** (otra DB / otro schema por usuario): una URL o una configuración de init distinta tiene su propia inicialización (`tenant_user_id` no cuenta: se aplica en cada query). El caché de inicializaciones es del motor, no del grafo: instanciar el grafo fresco por run no lo reinicia.
 - **Todo el bloque corre en UNA transacción implícita.** Por eso **no** uses statements que no pueden ejecutarse dentro de una transacción (`CREATE INDEX CONCURRENTLY`, `VACUUM`, `REINDEX CONCURRENTLY`) — fallan en runtime y abortan el init. Tampoco pongas `BEGIN`/`COMMIT` explícitos dentro de `setup_sql`: romperían la garantía all-or-nothing (lo posterior a tu `COMMIT` no se revierte). Para índices, usá `CREATE INDEX IF NOT EXISTS` (sin `CONCURRENTLY`).
 
 ---

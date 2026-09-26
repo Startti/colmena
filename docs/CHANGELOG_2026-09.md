@@ -5923,20 +5923,12 @@ del autor lleva `${VAR}` o un secreto debe listar ese host en `allowed_hosts`.
   lee los `fixed` como config del autor) solo con la tool tal como la escribió el autor: nunca
   para un `tool_configurations` que llegó como dato (§122) y con la copia previa al templating
   `${context.*}`.
-- La inicialización de `sql_query` es por `connection_url` resuelto y la configuración que lee
-  (`SqlNode::init_key`: `permissions` sin `tenant_user_id`, `setup_sql`, `runtime_limits.max_rows`):
-  cada llamada usa la conexión de su propia URL, también dentro de un grupo `parallel`, y dos
-  configuraciones sobre una misma base no comparten `setup_sql`, RLS ni descripción. Cada llamada
-  toma su pool del `PgPoolRegistry` con sus propios límites; el nodo guarda solo la descripción,
-  para hasta `max_entries` claves (el tope del registro; sale la menos usada) y nunca un fallo.
 
 **Tests.** `sql.rs::connection_provenance_tests` (un listener TCP registra el mensaje de
 inicio del cliente Postgres, que lleva el usuario): el `connection_url` de `config` expande la
 variable y el mismo por `inputs` no; listar tools del autor conecta con la variable expandida y
 las mismas tools como dato no; `tenant_user_id` y `api_key` por `inputs` expanden solo con un
-puntero avalado; una segunda URL llega a su propio servidor. `init_cache_tests` (pools del
-registro que nunca llegan a un servidor): la clave separa URL y configuración, cada llamada pide
-su pool al registro, el caché respeta el tope y no guarda un fallo.
+puntero avalado.
 
 **ADP.** Sin cambios de API. Un `connection_url` que un edge trae con `${VAR}` se usa sin
 expandir: la URL con variables va en `config` o en un `fixed`. Una tool `sql_query` cuyo
@@ -5944,8 +5936,7 @@ expandir: la URL con variables va en `config` o en un `fixed`. Una tool `sql_que
 
 **ADP.** Sin cambios de API. Un `connection_url` que un edge trae con `${VAR}` deja de
 expandirse: la URL va en `config` o en un `fixed`. Una tool `sql_query` cuyo `connection_url`
-`fixed` usa `${context.*}` ya no recibe el esquema de la base en su descripción. `setup_sql`
-corre una vez por `connection_url` y configuración en cada proceso (de nuevo si sale del caché).
+`fixed` usa `${context.*}` ya no recibe el esquema de la base en su descripción.
 **Estado.** done.
 
 ## 128. Endurecimiento: la región y el proyecto de Vertex en `image_generation` son del autor
@@ -5963,4 +5954,23 @@ implementa `openai`, contra un host fijo (`image_edit.rs` `openai_base_url`, y e
 host no recibe ninguna conexión. `registry.rs`: la tabla de campos del autor incluye los dos.
 
 **ADP.** Sin cambios de API. Una región que no sea un nombre de región falla antes de la request.
+**Estado.** done.
+
+## 120. Endurecimiento: `sql_query` inicializa por `connection_url` y configuración
+
+**Qué cambia.** La inicialización de `sql_query` (esquemas, `setup_sql`, introspección, RLS,
+descripción) es por `connection_url` resuelto y la configuración que lee (`SqlNode::init_key`:
+`permissions` sin `tenant_user_id`, `setup_sql`, `runtime_limits.max_rows`): cada llamada usa la
+conexión de su propia URL, también dentro de un grupo `parallel`, y dos configuraciones sobre una
+misma base no comparten inicialización. Cada llamada toma su pool del `PgPoolRegistry` con sus
+propios límites. El nodo guarda solo la descripción, hasta `max_entries` claves (el tope del
+registro; sale la menos usada), y nunca un fallo: las llamadas simultáneas de una clave esperan
+una sola inicialización y, si falla, la corre la siguiente que espera.
+
+**Tests.** `sql.rs`: una segunda URL llega a su propio servidor; la clave separa URL y
+configuración; cada llamada pide su pool al registro (pools que nunca llegan a un servidor); el
+caché respeta el tope, no guarda un fallo y lo deja a la llamada que esperaba.
+
+**ADP.** Sin cambios de API. `setup_sql` corre una vez por `connection_url` y configuración en
+cada proceso (de nuevo si sale del caché).
 **Estado.** done.

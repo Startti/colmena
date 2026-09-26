@@ -1,7 +1,7 @@
 # src/libs/colmena/src/dag_engine/infrastructure/nodes/sql.rs
 
 **Layer:** infrastructure  
-**Purpose:** SQL query node implementation for DAG execution. Provides PostgreSQL query execution with permission control, static/LLM validation, schema introspection, auto-RLS setup, and lazy connection pooling via OnceCell.
+**Purpose:** SQL query node implementation for DAG execution. Provides PostgreSQL query execution with permission control, static/LLM validation, schema introspection, auto-RLS setup, a per-call adapter from the pool registry, and a bounded cache of initializations (one `OnceCell` per `init_key`: URL + init config).
 
 ## Symbols
 
@@ -11,7 +11,7 @@
 - `MAX_SCHEMA_CHARS` (const, private) — threshold (8000) for truncating schema description by character count
 - `SqlNode::new()` (fn, pub) — constructor; the cache holds as many keys as the registry's `max_entries`
 - `SqlNode::get_or_init()` (fn, async, private) — one initialization per `init_key` (URL + permissions without tenant_user_id, setup_sql, max_rows), shared by concurrent callers
-- `SqlNode::do_initialize_inner()` (fn, async, private) — performs full setup: resolves connection URL, loads runtime limits/permissions, provisioning schemas, runs setup_sql, loads table/function metadata, builds description supplement, auto-RLS if enabled  [FLAG: improvement — non-idiomatic function name; "inner" suffix is unclear; consider `initialize_impl` or `perform_initialization`]
+- `SqlNode::do_initialize_inner()` (fn, async, private) — runs once per `init_key` on the adapter of the call that runs it: loads permissions and max_rows, provisions schemas, runs setup_sql, ensures the sandbox, loads table/function metadata, builds description supplement, auto-RLS if enabled  [FLAG: improvement — non-idiomatic function name; "inner" suffix is unclear; consider `initialize_impl` or `perform_initialization`]
 - `SqlNode::resolve_env_vars()` (fn, private) — replaces `${ENV_VAR}` placeholders in connection strings with environment values
 - `SqlNode::build_description_supplement()` (fn, private) — assembles tool description from table/function metadata, permissions, and LLM anti-patterns guidance; includes schema render (with graceful cap), capability statement, multi-statement query rules, blocked operations list
 - `SqlNode::render_schema()` (fn, private) — formats table schemas with columns, primary keys, foreign keys for LLM consumption; qualified names for SQL accuracy
