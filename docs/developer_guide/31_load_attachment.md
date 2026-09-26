@@ -468,7 +468,7 @@ files[i] sin description
    ↓
 acquire_bytes(source, fetcher, inline_bytes)
    ├─ AttachmentSource::SignedUrl → fetcher.stream(url) → Vec<u8>
-   ├─ AttachmentSource::Path      → tokio::fs::read(path)
+   ├─ AttachmentSource::Path      → tokio::fs::read(path) (solo en modo local, COLMENA_LOCAL=true)
    └─ AttachmentSource::Inline    → SummaryTarget::inline_bytes (clonados en resolve_one antes del upload)
    ↓
 extract_text(mime, bytes) → Option<String>

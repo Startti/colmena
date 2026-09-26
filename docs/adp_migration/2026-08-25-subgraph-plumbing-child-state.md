@@ -25,6 +25,7 @@ Lo que ustedes preguntaron explícitamente:
   exactamente ese set, tomado de sus 215 filas.
 - **`files` sigue pasando.** Es el que hace que el fix vaya en `subgraph.rs` y no en
   `input.rs`.
+  Reemplazado por CHANGELOG 2026-09 §138: el `llm_call` del hijo ya no lee `files` de su estado.
 - **La precedencia de resolución del grafo hijo es idéntica**: `config.inline` →
   `config.path` → `inputs.inline` → `inputs.path`. Los 5 tests que la fijaban siguen
   verdes.

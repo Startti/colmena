@@ -181,7 +181,8 @@ Boolean optional flag (`true | false`, default `false`). When enabled, tools in 
 
 #### `files` (adjuntos: imágenes y documentos)
 - **Tipo:** `array<FileEntry>` (opcional)
-- **Fuente:** `inputs.files` → `config.files`
+- **Fuente:** `config.files`, o un edge que nombra el campo (`to: "<nodo>.files"`) o un parámetro `files` que la tool
+  ofrece. Es un campo del autor: el estado global, un objeto aplanado o un argumento no ofrecido no lo fijan (§138).
 - **Descripción:** Archivos adjuntos al request — imágenes para visión, PDFs para extracción/análisis de documentos. Soporta inline (base64), URL firmada (GCS) y path local (legacy).
 - **Schema de cada entrada:**
   ```json
@@ -192,7 +193,7 @@ Boolean optional flag (`true | false`, default `false`). When enabled, tools in 
     "size_bytes": 47185920,            // hint, no ground truth
     "data":       null,                // base64 puro, < 30 MB
     "url":        "https://storage.googleapis.com/.../path?X-Goog-Signature=..."
-    // alternativa: "path": "/local/path.pdf" (solo dev/tests, < 30 MB)
+    // alternativa: "path": "/local/path.pdf" (solo en modo local, < 30 MB)
   }
   ```
 - **Reglas (mutuamente excluyentes, prioridad `data > url > path`):**
@@ -200,7 +201,8 @@ Boolean optional flag (`true | false`, default `false`). When enabled, tools in 
   - `url`: signed URL HTTPS a GCS. **Requiere `id`** (es la llave de cache `(document_id, provider)`). TTL típico de la URL: 6 h.
     Se baja con un solo cliente (`SignedUrlDownloader`): solo direcciones públicas, con timeouts y tope de bytes
     (CHANGELOG 2026-09 §137).
-  - `path`: legacy local, solo dev/tests, < 30 MB.
+  - `path`: legacy local, < 30 MB. Se lee solo en modo local (`COLMENA_LOCAL=true`); fuera de él una entrada con
+    `path` falla con `PathFieldNotAllowed`, aunque traiga `data` o `url` (CHANGELOG 2026-09 §138).
 - **Comportamiento por provider** (auto-detectado):
 
   | Provider  | Imagen | PDF / documento |
@@ -215,6 +217,7 @@ Boolean optional flag (`true | false`, default `false`). When enabled, tools in 
   - `UrlWithoutDocumentId` — `url` presente sin `id`. Bug de contrato.
   - `SignedUrlFetchFailed { status }` — GCS rechazó GET (URL expirada).
   - `AttachmentUrlRefused { reason }` (URL no `http(s)` o destino no público) y `AttachmentTooLarge { limit }` (pasa el tope).
+  - `PathFieldNotAllowed` — una entrada con `path` fuera del modo local.
   - `InvalidMimeType { mime, message }` — mime mal formado (precondición del caller).
   - `FileApiUploadFailed { provider, message }` — provider rechazó upload (cuota, key inválida).
   - `ProviderFileNotFound { provider_file_id }` — archivo borrado del provider; se recupera automáticamente con snapshot+retry.

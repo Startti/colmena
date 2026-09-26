@@ -192,7 +192,8 @@ declara un `node_schema` y cada campo se inyecta como variable del hijo
 motor (`__colmena_*`, `__node_id`) y el plumbing del operador
 (`child_graph_inline`, `child_graph_path`, `child_graph_ref`). Todo lo demás pasa: los argumentos que
 el modelo elige mandar en cada llamada —que no son enumerables por adelantado— y
-`files`, del que `llm.rs` resuelve los adjuntos.
+`files`. Un `llm_call` del hijo no toma `files` del estado global (es un campo del autor,
+CHANGELOG 2026-09 §138): sus adjuntos vienen de su `config` o de un edge que nombra `files`.
 
 ### Comportamiento
 

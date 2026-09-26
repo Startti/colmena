@@ -1718,7 +1718,7 @@
           "type": "array",
           "required": false,
           "default": null,
-          "description": "An array of file objects for multimodal LLM input (images, PDFs, documents). Each file can be provided either as a local file path or as base64-encoded inline data. The files are sent alongside the text prompt, enabling vision tasks (describe an image), document analysis (extract data from a PDF), and other multimodal use cases. Each file object requires 'mime_type' and either 'path' or 'data'. Optional fields per entry: 'id' (auto-generated if absent), 'label' (catalog label, falls back to filename), 'description' (short summary added to the catalog line).",
+          "description": "An array of file objects for multimodal LLM input (images, PDFs, documents). Each file can be provided either as a local file path or as base64-encoded inline data. The files are sent alongside the text prompt, enabling vision tasks (describe an image), document analysis (extract data from a PDF), and other multimodal use cases. Each file object requires 'mime_type' and either 'path' or 'data'. Optional fields per entry: 'id' (auto-generated if absent), 'label' (catalog label, falls back to filename), 'description' (short summary added to the catalog line). Author-owned: set in config or by an edge that names 'files', never by global state or an unoffered tool argument.",
           "items_schema": {
             "mime_type": {
               "type": "string",
@@ -1735,7 +1735,7 @@
             "path": {
               "type": "string",
               "required": false,
-              "description": "Local filesystem path to the file. The engine reads the file contents at runtime. Use either 'path' or 'data', not both.",
+              "description": "Local filesystem path to the file. Read only in local mode (COLMENA_LOCAL=true); outside it an entry with 'path' fails the node (PathFieldNotAllowed). Use either 'path' or 'data', not both.",
               "example": "tests/graphs/media/test_image.jpg"
             },
             "data": {

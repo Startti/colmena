@@ -166,6 +166,7 @@ El motor permite enviar archivos a los modelos de lenguaje (especialmente útil 
 **Ejemplos Verificados:**
 - `media/image_path.json`: Envía una imagen local para descripción.
 - `media/pdf_path.json`: Envía un PDF (ej. un poema) para análisis de texto.
+- Los dos `*_path.json` leen `files[].path`: corren solo con `COLMENA_LOCAL=true`.
 
 ---
 

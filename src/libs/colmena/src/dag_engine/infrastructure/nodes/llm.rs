@@ -363,7 +363,15 @@ async fn generate_one_summary(
     // 1. Acquire bytes (a signed URL under the guarded client's byte cap).
     // `target.inline_bytes` carries the original bytes for Inline sources
     // (data: base64 uploads), since the upload pipeline consumed the first clone.
-    let bytes = match acquire_bytes(&target.source, target.inline_bytes.as_deref(), fetcher).await {
+    let local = crate::dag_engine::engine::local_mode();
+    let bytes = match acquire_bytes(
+        &target.source,
+        target.inline_bytes.as_deref(),
+        fetcher,
+        local,
+    )
+    .await
+    {
         Ok(b) => b,
         Err(e) => {
             return SummaryOutcome::Skipped {
@@ -1260,9 +1268,9 @@ impl crate::llm::application::LoadAttachmentResolver for AttachmentResolverImpl 
 
 #[async_trait]
 impl ExecutableNode for LlmNode {
-    /// Tools, destinations, credentials and instructions are author-set: an
-    /// upstream object, global state or an unoffered tool argument never sets
-    /// them.
+    /// Tools, destinations, credentials, instructions and attachments
+    /// (`files`) are author-set: an upstream object, global state or an
+    /// unoffered tool argument never sets them.
     fn author_owned_inputs(&self) -> &'static [&'static str] {
         &[
             "provider",
@@ -1275,6 +1283,7 @@ impl ExecutableNode for LlmNode {
             "secure_suspend_allowed",
             "documents",
             "crdt_documents",
+            "files",
         ]
     }
 
@@ -1569,7 +1578,8 @@ impl ExecutableNode for LlmNode {
         // Check if there are any files passed in the node inputs
         if let Some(files_val) = inputs.get("files").or_else(|| config.get("files")) {
             if let Some(files_arr) = files_val.as_array() {
-                (resolved_files, parsed_entries) = parse_file_entries(files_arr)?;
+                (resolved_files, parsed_entries) =
+                    parse_file_entries(files_arr, crate::dag_engine::engine::local_mode())?;
             }
         }
 
@@ -4247,17 +4257,19 @@ const DEFAULT_FILENAME: &str = "upload.file";
 ///   "size_bytes": 123,                  // hint, not validated as ground truth
 ///   "data": "base64...",                // for files < 30 MB
 ///   "url": "https://...",               // for files >= 30 MB (signed URL)
-///   "path": "/local/path"               // legacy, < 30 MB only, dev/test
+///   "path": "/local/path"               // legacy, < 30 MB, `local_mode` only
 /// }
 /// ```
 ///
-/// Priority when multiple sources are present: data > url > path.
+/// Priority when multiple sources are present: data > url > path. Outside
+/// `local_mode` an entry that names a `path` fails (`PathFieldNotAllowed`).
 /// Returns the files and, for each, the index in `arr` of the entry it was
 /// parsed from. Per-file errors are logged and skipped; only the
 /// hard-limit errors (`DataFieldTooLarge`, `PathFieldTooLarge`,
-/// `UrlWithoutDocumentId`) propagate.
+/// `UrlWithoutDocumentId`, `PathFieldNotAllowed`) propagate.
 pub(crate) fn parse_file_entries(
     arr: &[serde_json::Value],
+    local_mode: bool,
 ) -> Result<(Vec<crate::llm::domain::FileData>, Vec<usize>), crate::llm::domain::LlmError> {
     use crate::llm::domain::{FileData, FileSource, LlmError};
     let mut out = Vec::with_capacity(arr.len());
@@ -4296,6 +4308,9 @@ pub(crate) fn parse_file_entries(
             .get("path")
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty());
+        if path_present.is_some() && !local_mode {
+            return Err(LlmError::PathFieldNotAllowed);
+        }
 
         let source = if let Some(data) = data_present {
             // Validate hint size first (cheap check before decode).
@@ -5032,7 +5047,7 @@ mod files_parser_tests {
 
     fn parse(files: serde_json::Value) -> Result<Vec<crate::llm::domain::FileData>, LlmError> {
         let arr = files.as_array().expect("array");
-        parse_file_entries(arr).map(|(files, _)| files)
+        parse_file_entries(arr, false).map(|(files, _)| files)
     }
 
     #[test]
@@ -5123,6 +5138,26 @@ mod files_parser_tests {
         assert!(matches!(parsed[0].source, FileSource::InlineBytes { .. }));
     }
 
+    /// Outside local mode an entry that names a `path` fails, whatever other
+    /// source it carries, and the file is never read.
+    #[test]
+    fn a_path_entry_fails_outside_local_mode() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), b"local-bytes").unwrap();
+        let path = file.path().to_str().unwrap();
+        for entry in [
+            json!({ "path": path }),
+            json!({ "data": "aGk=", "path": path }),
+        ] {
+            let r = parse(json!([entry]));
+            assert!(matches!(r, Err(LlmError::PathFieldNotAllowed)), "{r:?}");
+        }
+        let (local, _) = parse_file_entries(&[json!({ "path": path })], true).unwrap();
+        assert!(
+            matches!(&local[0].source, FileSource::InlineBytes { bytes } if bytes == b"local-bytes")
+        );
+    }
+
     #[test]
     fn malformed_entry_skipped() {
         let files = json!([
@@ -5144,7 +5179,7 @@ mod files_parser_tests {
              "label": "Good", "description": "the good one", "data": "aGVsbG8="}
         ]);
         let entries = entries.as_array().unwrap();
-        let (files, parsed) = parse_file_entries(entries).unwrap();
+        let (files, parsed) = parse_file_entries(entries, false).unwrap();
         assert_eq!(files.len(), 1);
 
         let got = file_registrations(&files, entries, &parsed);
@@ -5164,7 +5199,7 @@ mod files_parser_tests {
             {"filename": "c.pdf", "mime_type": "application/pdf", "label": "C", "data": "aGVsbG8="}
         ]);
         let entries = entries.as_array().unwrap();
-        let (mut files, parsed) = parse_file_entries(entries).unwrap();
+        let (mut files, parsed) = parse_file_entries(entries, false).unwrap();
         let labels = |files: &[crate::llm::domain::FileData]| -> Vec<Option<String>> {
             file_registrations(files, entries, &parsed)
                 .into_iter()
@@ -5185,7 +5220,7 @@ mod files_parser_tests {
         // must still not be taken for that file's entry.
         let entries = json!(["not a file", {"label": "L", "data": "aGVsbG8="}]);
         let entries = entries.as_array().unwrap();
-        let (files, parsed) = parse_file_entries(entries).unwrap();
+        let (files, parsed) = parse_file_entries(entries, false).unwrap();
 
         let got = file_registrations(&files, entries, &parsed);
         assert_eq!(got[0].label.as_deref(), Some("L"));
@@ -5202,7 +5237,7 @@ mod files_parser_tests {
              "label": "Kept", "data": "aGVsbG8="}
         ]);
         let entries = entries.as_array().unwrap();
-        let (files, parsed) = parse_file_entries(entries).unwrap();
+        let (files, parsed) = parse_file_entries(entries, false).unwrap();
         assert_eq!(parsed, [1]);
 
         let got = file_registrations(&files, entries, &parsed);

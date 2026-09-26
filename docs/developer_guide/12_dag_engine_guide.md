@@ -193,7 +193,8 @@ El nodo `llm_call` permite enviar archivos (imágenes y PDFs) a los modelos que 
 
 - **`mime_type`**: Tipo MIME del archivo (ej. `image/png`, `application/pdf`).
 - **`filename`**: (Recomendado) Nombre del archivo. Requerido por algunos proveedores como OpenAI para procesar documentos PDF.
-- **`path`**: Ruta al archivo en el disco local.
+- **`path`**: Ruta al archivo en el disco local. Solo en modo local (`COLMENA_LOCAL=true`); fuera de él la entrada falla
+  (ver [14_llm_deep_dive.md](14_llm_deep_dive.md)).
 - **`data`**: Contenido del archivo codificado en Base64 (si no se usa `path`).
 
 > [!NOTE]
