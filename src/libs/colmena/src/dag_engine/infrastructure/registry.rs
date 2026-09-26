@@ -888,6 +888,38 @@ mod llm_call_tool_provenance_tests {
         );
     }
 
+    /// Global state never hands an `llm_call` its `files`: the node starts
+    /// without them.
+    #[tokio::test]
+    async fn global_state_never_supplies_an_llm_calls_files() {
+        use crate::dag_engine::application::run_use_case::DagRunUseCase;
+        use crate::dag_engine::domain::events::DagExecutionEvent;
+        use futures::StreamExt;
+        let _guard = OverrideGuard::install(Arc::new(ScriptedAdapter::new(vec![
+            ScriptedResponse::Text("done".into()),
+        ])));
+        let seed = json!({ "files": [{ "mime_type": "text/plain", "data": "aGk=" }] });
+        let g = serde_json::from_value(json!({
+            "nodes": { "agent": { "type": "llm_call", "config": {
+                "provider": "mock", "model": "m", "api_key": "k", "stream": false, "prompt": "go"
+            } } },
+            "edges": []
+        }))
+        .unwrap();
+        let registry = super::registry_tavily_tests::build_registry();
+        let uc = DagRunUseCase::new(registry, None).with_seed_state(seed);
+        let stream = uc.execute_stream(g, None, None, false, None, None, None);
+        tokio::pin!(stream);
+        let mut inputs = None;
+        while let Some(event) = stream.next().await {
+            if let Ok(DagExecutionEvent::NodeStart { inputs: i, .. }) = event {
+                inputs = Some(i);
+            }
+        }
+        let inputs = inputs.expect("the llm_call started");
+        assert!(inputs.get("files").is_none(), "{inputs}");
+    }
+
     /// `${UPPER_CASE}` names an env var (VARIABLE_RESOLUTION_DISEÑO, rule 1):
     /// an input under that name never replaces the author's reference.
     #[tokio::test]
@@ -1355,6 +1387,7 @@ mod catalog_coverage_tests {
                     "secure_suspend_allowed",
                     "documents",
                     "crdt_documents",
+                    "files",
                 ],
             ),
             (

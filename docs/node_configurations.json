@@ -1718,7 +1718,7 @@
           "type": "array",
           "required": false,
           "default": null,
-          "description": "An array of file objects for multimodal LLM input (images, PDFs, documents). Each file can be provided either as a local file path or as base64-encoded inline data. The files are sent alongside the text prompt, enabling vision tasks (describe an image), document analysis (extract data from a PDF), and other multimodal use cases. Each file object requires 'mime_type' and either 'path' or 'data'. Optional fields per entry: 'id' (auto-generated if absent), 'label' (catalog label, falls back to filename), 'description' (short summary added to the catalog line).",
+          "description": "An array of file objects for multimodal LLM input (images, PDFs, documents). Each file can be provided either as a local file path or as base64-encoded inline data. The files are sent alongside the text prompt, enabling vision tasks (describe an image), document analysis (extract data from a PDF), and other multimodal use cases. Each file object requires 'mime_type' and either 'path' or 'data'. Optional fields per entry: 'id' (auto-generated if absent), 'label' (catalog label, falls back to filename), 'description' (short summary added to the catalog line). Author-owned: set in config or by an edge that names 'files', never by global state or an unoffered tool argument.",
           "items_schema": {
             "mime_type": {
               "type": "string",

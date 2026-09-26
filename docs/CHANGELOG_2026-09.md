@@ -6187,16 +6187,22 @@ bytes no marca una dirección de loopback ni guarda nada.
 `COLMENA_ATTACHMENT_ALLOW_PRIVATE_HOSTS=1`.
 **Estado.** done.
 
-## 122. Endurecimiento: `files[].path` se lee solo en modo local
+## 122. Endurecimiento: `files[].path` se lee solo en modo local, y `files` es un campo del autor
 
 **Qué cambia.** `llm_call` lee `files[].path` del disco solo en modo local (`COLMENA_LOCAL=true`,
 leído una vez por proceso). Fuera de él, una entrada con `path` falla el nodo con
 `PathFieldNotAllowed`, aunque traiga `data` o `url`, sin leer nada; el resumen automático tampoco
-lee una fuente `Path`.
+lee una fuente `Path`. `files` pasa a `author_owned_inputs` de `llm_call`: lo fijan la `config`,
+un edge que nombra `files` o un parámetro que la tool ofrece; el estado global (en un hijo, los
+argumentos de su padre), un objeto aplanado, una fila de `for_each` o un argumento no ofrecido,
+no. `subgraph` sigue copiando `files` al estado del hijo, pero su `llm_call` no lo lee de ahí.
 
 **Tests.** `llm.rs` `files_parser_tests`: fuera del modo local, una entrada con `path` (sola o con
 `data`) falla y el archivo no se lee; en modo local se lee. `byte_acquisition.rs`: una fuente
-`Path` no se lee fuera del modo local.
+`Path` no se lee fuera del modo local. `registry.rs`: un `files` del estado global no llega a los
+inputs del `llm_call`; la tabla de campos del autor incluye `files`.
 
-**ADP.** Sin cambios: ADP no usa `path`. Un grafo local con `path` corre con `COLMENA_LOCAL=true`.
+**ADP.** Sin cambios: ADP pone los adjuntos en `config.files` de los `llm_call` de primer nivel y
+nunca usa `path` ni pasa `files` a un sub-agente. Un grafo local con `path` corre con
+`COLMENA_LOCAL=true`.
 **Estado.** done.

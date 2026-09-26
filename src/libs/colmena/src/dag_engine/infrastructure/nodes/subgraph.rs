@@ -815,10 +815,10 @@ mod subgraph_child_state_isolation_tests {
 
     #[test]
     fn files_reaches_child_state() {
-        // `llm.rs` resolves attachments from `inputs.get("files")`. This is the
-        // key that must survive, and the reason the fix lives here rather than in
-        // `input.rs`: at this seam the exclusion is a known list, over there it
-        // would mean reasoning about every key.
+        // Only the plumbing is excluded: `files` survives like any other key. A
+        // child `llm_call` does not read it from global state (it is author-owned,
+        // CHANGELOG 2026-09 §122); it takes attachments from its own config or an
+        // edge that names the field.
         let mut inputs: NodeInputs = NodeInputs::new();
         inputs.insert("child_graph_inline".to_string(), inline_with_secrets());
         inputs.insert("files".to_string(), json!([{ "id": "file_123" }]));

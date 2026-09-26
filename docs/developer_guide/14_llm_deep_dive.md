@@ -181,7 +181,8 @@ Boolean optional flag (`true | false`, default `false`). When enabled, tools in 
 
 #### `files` (adjuntos: imágenes y documentos)
 - **Tipo:** `array<FileEntry>` (opcional)
-- **Fuente:** `inputs.files` → `config.files`
+- **Fuente:** `config.files`, o un edge que nombra el campo (`to: "<nodo>.files"`) o un parámetro `files` que la tool
+  ofrece. Es un campo del autor: el estado global, un objeto aplanado o un argumento no ofrecido no lo fijan (§122).
 - **Descripción:** Archivos adjuntos al request — imágenes para visión, PDFs para extracción/análisis de documentos. Soporta inline (base64), URL firmada (GCS) y path local (legacy).
 - **Schema de cada entrada:**
   ```json
