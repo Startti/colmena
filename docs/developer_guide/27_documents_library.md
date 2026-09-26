@@ -273,7 +273,7 @@ Implementaciones del port: [`LocalFsAssetStore`](../../src/libs/colmena/src/docu
 
 ## 6. Uso desde el DAG (3 nodos)
 
-Los 3 nodos comparten un `DocumentRuntime` por configuración via `OnceCell` (mismo patrón que `SqlNode`). Todos los campos de config admiten `$DYNAMIC` y `$ref`.
+Los 3 nodos comparten un `DocumentRuntime` por configuración via `OnceCell`. Todos los campos de config admiten `$DYNAMIC` y `$ref`.
 
 ### `document_create`
 

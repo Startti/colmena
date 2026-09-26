@@ -319,9 +319,9 @@ The critic uses a low-temperature call (`temperature: 0.0`, `max_tokens: 500`) f
 
 ## Initialization and Schema Introspection
 
-The SQL node implements `InitializableNode`, which runs once per resolved `connection_url` (either at DAG startup or on the first tool call that names that URL). The registry holds one `SqlNode` for every `sql_query` call, so each URL gets its own initialization (`SqlNode::init_cell`) and a call only ever runs on the connection its own URL names (CHANGELOG 2026-09 §118):
+The SQL node implements `InitializableNode`. Steps 2-7 run once per resolved `connection_url` and the config they read (`SqlNode::init_key`: `permissions` without `tenant_user_id`, `setup_sql`, `runtime_limits.max_rows`), at DAG startup or on the first call with that key; concurrent callers wait on it. The node keeps the result (the description) for up to the registry's `max_entries` keys, least recently used out first, and never keeps a failed one (CHANGELOG 2026-09 §118):
 
-1. **Connect** — Obtains the pool from the shared `PgPoolRegistry` via `SqlPortFactory::get_adapter(url)`. If another node (or the internal state repository) already opened a pool for this URL, it is **reused**; otherwise a new pool is created and cached. TOCTOU-safe via `tokio::sync::OnceCell`.
+1. **Connect** — Every call obtains the pool from the shared `PgPoolRegistry` via `SqlPortFactory::get_adapter(url, …)`, with its own `statement_timeout_ms` and `work_mem_mb`. If another node (or the internal state repository) already opened a pool for this URL, it is **reused**; otherwise a new pool is created and cached.
 2. **Provision schemas** (if `create_schemas_if_missing`, default `true`) — Checks each schema in `allowed_schemas` and creates the ones that don't exist. See below.
 3. **Ensure sandbox** — Creates the sandbox schema and registry tables (`function_registry`, `query_feedback`)
 4. **Load metadata** — Queries `information_schema.tables` for table names and `pg_catalog.obj_description` for table comments
@@ -358,12 +358,12 @@ as a query-time error instead.
 
 ### Shared-pool behavior
 
-Distintos nodos SQL con el **mismo** `connection_url` comparten el mismo `PgPoolAdapter` y por lo tanto el mismo pool sqlx. Implicaciones:
+Distintos nodos SQL con el **mismo** `connection_url` comparten el mismo pool sqlx del `PgPoolRegistry`; cada llamada lo envuelve en su propio `PgPoolAdapter`. Implicaciones:
 
 - El `statement_timeout_ms` y `work_mem_mb` se aplican con `SET LOCAL` dentro de la transacción de cada query — no afectan a otras conexiones del pool.
 - Si un nodo apunta al mismo URL que el `DATABASE_URL` del proceso, reutiliza el pool **pinned** del engine.
 - Cambiar `sslmode` crea una nueva entrada (pools separados). Ver [`13_security_strategy.md`](./13_security_strategy.md#postgres-pgpoolregistry) para la tabla de modos.
-- Nodos con URLs **distintas** nunca comparten conexión, aunque los atienda la misma instancia de `SqlNode`: la inicialización (pool, `setup_sql`, introspección) es por `connection_url` resuelto, y `setup_sql` corre una vez por URL.
+- Nodos con URLs **distintas** nunca comparten conexión, aunque los atienda la misma instancia de `SqlNode`; con la misma URL y otra configuración de init tampoco comparten `setup_sql`, RLS ni descripción.
 
 The **description supplement** is automatically appended to the tool's description when used as an LLM tool. This gives the LLM context about the database schema without manual configuration:
 
@@ -450,7 +450,7 @@ Un `INSERT` plano sin `ON CONFLICT` **se duplica en cada mensaje** — siempre u
 
 - **No hay guard "run-once".** Corre idempotente en cada init; no hay tabla de tracking. Para setups pesados con seed no idempotente, ver BACKLOG.
 - **No hay lint de idempotencia.** El motor confía en que el SQL es idempotente.
-- **1 DB = 1 tool con setup** es el patrón esperado. Varios nodos `sql_query` a la misma DB corren cada uno su propio `setup_sql` (seguro por idempotencia, pero redundante).
+- **1 DB = 1 tool con setup** es el patrón esperado. Varios nodos `sql_query` a la misma DB con la misma configuración comparten una inicialización; con configuraciones distintas, cada una corre su `setup_sql` (seguro por idempotencia).
 - **Aislamiento per-usuario** (otra DB / otro schema por usuario) requiere que el host (ADP) instancie el grafo fresco por run — que es como corre hoy.
 - **Todo el bloque corre en UNA transacción implícita.** Por eso **no** uses statements que no pueden ejecutarse dentro de una transacción (`CREATE INDEX CONCURRENTLY`, `VACUUM`, `REINDEX CONCURRENTLY`) — fallan en runtime y abortan el init. Tampoco pongas `BEGIN`/`COMMIT` explícitos dentro de `setup_sql`: romperían la garantía all-or-nothing (lo posterior a tu `COMMIT` no se revierte). Para índices, usá `CREATE INDEX IF NOT EXISTS` (sin `CONCURRENTLY`).
 

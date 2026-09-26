@@ -2068,12 +2068,6 @@ genérica. Sin trigger urgente.
   the `foreign_keys` list is incorrect for composite FKs. v1 supports single-column FKs
   only (documented). Fix: emit only single-column FK constraints, or correlate
   `position_in_unique_constraint`. See review of `feat/sql-schema-context-crud-preset`.
-- **`sql_query` single registry instance shares `OnceCell` across tool configs** —
-  two `tool_configurations` entries with different `connection_url`/`permissions` both
-  resolve to the one registered `sql_query` node `Arc`; `get_or_init` serves the first
-  caller's cached adapter + schema supplement to the second. Pre-existing (not a
-  regression). Only matters if multi-DB SQL tools in one agent become a use case; would
-  need one node instance per distinct config key.
 
 ---
 
