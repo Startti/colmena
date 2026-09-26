@@ -661,7 +661,14 @@ impl HttpNode {
             return Ok(None);
         }
         let listed = Self::credential_destination_allowed(url, None, allowed_hosts).is_ok();
-        let guard = self.url_parts.guard(url.host_str().filter(|_| listed));
+        // A bare `"host"` entry lists every port; `"host:port"`, only that one.
+        let host = url.host_str().unwrap_or_default();
+        let bare = |h: &Value| h.as_str().is_some_and(|h| h.eq_ignore_ascii_case(host));
+        let bare = allowed_hosts
+            .and_then(Value::as_array)
+            .is_some_and(|l| l.iter().any(bare));
+        let port = url.port_or_known_default().filter(|_| !bare);
+        let guard = self.url_parts.guard(Some(host).filter(|_| listed), port);
         if guard.refuses(url) {
             return Err(Self::refused_destination());
         }
@@ -3316,6 +3323,7 @@ mod data_destination_tests {
         let by_name = s.uri().replace("127.0.0.1", "localhost");
         let multipart = json!({ "method": "POST", "body": { "a": "b" },
             "headers": { "Content-Type": "multipart/form-data" } });
+        let author = json!({ "base_url": s.uri() });
         for (base, config) in [
             (s.uri(), json!({})),
             (by_name.clone(), json!({})),
@@ -3323,6 +3331,9 @@ mod data_destination_tests {
             ("http://169.254.169.254".to_string(), json!({})),
             ("http://10.255.0.1".to_string(), json!({})),
             ("http://[::1]:9".to_string(), json!({})),
+            // The author's host on another port or scheme is data's choice too.
+            ("http://127.0.0.1:9".to_string(), author.clone()),
+            (s.uri().replace("http:", "https:"), author),
         ] {
             let err = run(&public_only(), &base, config).await.unwrap_err();
             assert!(err.contains("public address"), "{base}: {err}");
@@ -3339,6 +3350,11 @@ mod data_destination_tests {
         let loopback_as_public = SignedUrlDownloader::with_policy(|ip| ip.is_loopback(), 1024);
         let node = HttpNode::new().with_url_parts(loopback_as_public);
         let err = run(&node, &s.uri(), json!({})).await.unwrap_err();
+        assert!(err.contains("public address"), "{err}");
+        // A `"host:port"` entry exempts that port only.
+        let s = server(to("http://127.0.0.1:9/x")).await;
+        let listed = json!({ "allowed_hosts": [s.uri().trim_start_matches("http://")] });
+        let err = run(&public_only(), &s.uri(), listed).await.unwrap_err();
         assert!(err.contains("public address"), "{err}");
     }
 

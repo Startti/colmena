@@ -59,22 +59,34 @@ fn refused(reason: impl ToString) -> LlmError {
 }
 
 /// Where a client may connect: addresses `ok` accepts, and any address of
-/// `exempt`, a host the author listed.
+/// `exempt`, a host the author listed (on `port` only, when its entry names one).
 #[derive(Clone)]
 pub(crate) struct DialGuard {
     ok: Dialable,
     exempt: Option<Arc<str>>,
+    port: Option<u16>,
 }
 
 impl DialGuard {
     pub(crate) fn new(ok: Dialable, exempt: Option<&str>) -> Self {
-        let exempt = exempt.map(Arc::from);
-        Self { ok, exempt }
+        let (exempt, port) = (exempt.map(Arc::from), None);
+        Self { ok, exempt, port }
     }
 
-    /// Whether `url`'s host is a refused IP literal; a name is the resolver's call.
+    /// Whether `url`'s host is a refused IP literal, or the listed host on a
+    /// port its entry does not name; a name is the resolver's call.
     pub(crate) fn refuses(&self, url: &Url) -> bool {
-        self.exempt.as_deref() != url.host_str() && literal_refused(url, self.ok)
+        let refused = match self.exempt.as_deref() == url.host_str() {
+            true => self
+                .port
+                .is_some_and(|p| url.port_or_known_default() != Some(p)),
+            false => literal_refused(url, self.ok),
+        };
+        if refused {
+            tracing::warn!(target: "colmena::egress", event = "egress.dial_refused",
+                host = url.host_str().unwrap_or_default(), "refused to dial this destination");
+        }
+        refused
     }
 
     /// `builder` resolving through the guard, with no proxy (a proxy
@@ -205,9 +217,11 @@ impl SignedUrlDownloader {
         Self::from_parts(client.clone(), *dialable, *max)
     }
 
-    /// This client's address rule, `exempt` aside (see [`DialGuard`]).
-    pub(crate) fn guard(&self, exempt: Option<&str>) -> DialGuard {
-        DialGuard::new(self.dialable, exempt)
+    /// This client's address rule, `exempt` aside (on `port` only, if set;
+    /// see [`DialGuard`]).
+    pub(crate) fn guard(&self, exempt: Option<&str>, port: Option<u16>) -> DialGuard {
+        let (ok, exempt) = (self.dialable, exempt.map(Arc::from));
+        DialGuard { ok, exempt, port }
     }
 
     #[cfg(test)]
