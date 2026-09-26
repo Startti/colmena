@@ -6,7 +6,9 @@ use crate::dag_engine::application::secure_value_service::{MaskingObserver, Secu
 use crate::dag_engine::domain::error::DagError;
 use crate::dag_engine::domain::graph::{Edge, Graph};
 use crate::dag_engine::domain::graph_skeleton::{GraphSkeleton, SUBGRAPH_RESUME_INCOMPATIBLE};
-use crate::dag_engine::domain::node::{is_engine_key, strip_engine_keys, NodeInputs};
+use crate::dag_engine::domain::node::{
+    config_sets_key, is_engine_key, strip_engine_keys, NodeInputs,
+};
 
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -661,15 +663,14 @@ impl DagRunUseCase {
                 // that empty object to a default_input field (e.g. "prompt"), which would
                 // otherwise block injection of the real value from global state.
                 // A child's global state is its parent's inputs (a model's tool
-                // arguments among them), so it never fills an author-owned input,
-                // nor an engine key the loop just chose not to write (a resume
-                // answer outside a resume, an agent session the run lacks) —
-                // except the nesting depth a parent seeds into its child.
+                // arguments among them), so it never fills a field the author
+                // set (an author-owned input, or one `config` sets), nor an
+                // engine key the loop just chose not to write (a resume answer
+                // outside a resume, an agent session the run lacks) — except the
+                // nesting depth a parent seeds into its child.
                 if let Some(obj) = global_shared_state.as_object() {
                     for (k, v) in obj {
-                        if node_impl.author_owned_inputs().contains(&k.as_str())
-                            || (is_engine_key(k) && k != "__colmena_subgraph_depth")
-                        {
+                        if is_engine_key(k) && k != "__colmena_subgraph_depth" {
                             continue;
                         }
                         let should_inject = match inputs.get(k) {
@@ -678,9 +679,16 @@ impl DagRunUseCase {
                             Some(Value::Object(o)) if o.is_empty() => true,
                             _ => false,
                         };
-                        if should_inject {
-                            inputs.insert(k.clone(), v.clone());
+                        if !should_inject {
+                            continue;
                         }
+                        if node_impl.author_owned_inputs().contains(&k.as_str())
+                            || config_sets_key(&node_config.config, k)
+                        {
+                            log_author_set_key_kept(&node_id, k, "global state");
+                            continue;
+                        }
+                        inputs.insert(k.clone(), v.clone());
                     }
                 }
 
@@ -1385,15 +1393,22 @@ impl DagRunUseCase {
         graph: &Graph,
     ) -> Result<NodeInputs, DagError> {
         let mut inputs: NodeInputs = HashMap::new();
-        let incoming_edges = all_edges
-            .iter()
-            .filter(|edge| edge.to.starts_with(current_node_id));
-        let author_owned = graph
-            .nodes
-            .get(current_node_id)
+        // The edge into this node itself, or into one of its fields — never
+        // into another node whose id merely starts with this one's.
+        let incoming_edges = all_edges.iter().filter(|edge| {
+            edge.to == current_node_id
+                || edge
+                    .to
+                    .strip_prefix(current_node_id)
+                    .is_some_and(|rest| rest.starts_with('.'))
+        });
+        let node_cfg = graph.nodes.get(current_node_id);
+        let author_owned = node_cfg
             .and_then(|cfg| self.registry.get_node(&cfg.node_type))
             .map(|node| node.author_owned_inputs())
             .unwrap_or(&[]);
+        let null = Value::Null;
+        let config = node_cfg.map(|cfg| &cfg.config).unwrap_or(&null);
 
         for edge in incoming_edges {
             let parts_to: Vec<&str> = edge.to.splitn(2, '.').collect();
@@ -1488,11 +1503,18 @@ impl DagRunUseCase {
                 if !inserted {
                     if let Some(obj) = value_to_pass.as_object() {
                         // Object — merge all its keys, except the ones only the
-                        // author may set (see `author_owned_inputs`).
+                        // author sets (see `author_owned_inputs`) and the ones
+                        // `config` sets (see `config_sets_key`).
                         for (k, v) in obj {
-                            if !author_owned.contains(&k.as_str()) {
-                                inputs.insert(k.clone(), v.clone());
+                            if author_owned.contains(&k.as_str()) || config_sets_key(config, k) {
+                                log_author_set_key_kept(
+                                    current_node_id,
+                                    k,
+                                    "an edge without a field",
+                                );
+                                continue;
                             }
+                            inputs.insert(k.clone(), v.clone());
                         }
                     } else {
                         // Non-object — use source node ID as key
@@ -1508,6 +1530,18 @@ impl DagRunUseCase {
         strip_engine_keys(&mut inputs);
         Ok(inputs)
     }
+}
+
+/// A value runtime data carried for a field the author set was not used. The
+/// value itself is never logged: it may be a payload or a model's output.
+fn log_author_set_key_kept(node_id: &str, key: &str, source: &str) {
+    tracing::warn!(
+        target: "colmena::dag_engine",
+        node_id = %node_id,
+        key = %key,
+        source = %source,
+        "author-set field kept; the runtime value was not used"
+    );
 }
 
 struct ChannelObserver {
@@ -3538,5 +3572,98 @@ mod graph_http_payload_tests {
 
         assert!(other.received_requests().await.unwrap().is_empty());
         only_request(&author).await;
+    }
+
+    /// A field the author set in `config` is config-only: global state (in a
+    /// child graph, the parent's inputs) never replaces it, while a key the
+    /// config leaves open still arrives.
+    #[tokio::test]
+    async fn global_state_never_replaces_a_field_the_config_sets() {
+        let author = server().await;
+        let edges = json!([{ "from": "hook.none", "to": "call.none" }]);
+        let seed = json!({ "endpoint": "/other", "q": "kept" });
+        run(json!({ "none": 1 }), &author, json!({}), edges, seed).await;
+
+        let req = only_request(&author).await;
+        assert_eq!(
+            req.url.path(),
+            "/items",
+            "global state replaced the author's endpoint"
+        );
+        assert_eq!(query(&req, "q").as_deref(), Some("kept"));
+    }
+
+    /// Same rule for an object flattened by an edge without a field.
+    #[tokio::test]
+    async fn a_flattened_payload_never_replaces_a_field_the_config_sets() {
+        let author = server().await;
+        let payload = json!({ "endpoint": "/other", "q": "kept" });
+        let edges = json!([{ "from": "hook", "to": "call" }]);
+        run(payload, &author, json!({}), edges, json!({})).await;
+
+        let req = only_request(&author).await;
+        assert_eq!(
+            req.url.path(),
+            "/items",
+            "a flattened value replaced the author's endpoint"
+        );
+        assert_eq!(query(&req, "q").as_deref(), Some("kept"));
+    }
+
+    /// Only an edge into `call` itself, or into one of its fields, reaches it —
+    /// never an edge into another node whose id starts with `call`.
+    #[test]
+    fn build_inputs_for_ignores_an_edge_into_a_node_whose_id_extends_it() {
+        let g: Graph = serde_json::from_value(json!({
+            "nodes": {
+                "hook": { "type": "trigger_webhook", "config": {} },
+                "call": { "type": "http_request", "config": {} },
+                "call2": { "type": "http_request", "config": {} }
+            },
+            "edges": [
+                { "from": "hook.target", "to": "call2.base_url" },
+                { "from": "hook.q", "to": "call.q" }
+            ]
+        }))
+        .unwrap();
+        let outputs = HashMap::from([(
+            "hook".to_string(),
+            json!({ "target": "https://other.test", "q": "ok" }),
+        )]);
+        let inputs = DagRunUseCase::new(Arc::new(Registry), None)
+            .build_inputs_for("call", &g.edges, &outputs, &g)
+            .unwrap();
+        assert_eq!(inputs, HashMap::from([("q".to_string(), json!("ok"))]));
+    }
+
+    /// Dropping an author-set key that runtime data carried is logged, so the
+    /// graph's author can see why the value did not arrive.
+    #[test]
+    fn a_dropped_author_set_key_is_logged() {
+        let g: Graph = serde_json::from_value(json!({
+            "nodes": {
+                "hook": { "type": "trigger_webhook", "config": {} },
+                "call": { "type": "http_request", "config": { "endpoint": "/items" } }
+            },
+            "edges": [{ "from": "hook", "to": "call" }]
+        }))
+        .unwrap();
+        let outputs = HashMap::from([(
+            "hook".to_string(),
+            json!({ "base_url": "https://other.test", "endpoint": "/other", "q": "ok" }),
+        )]);
+        let (inputs, log) = crate::dag_engine::log_policy::capture_warnings(|| {
+            DagRunUseCase::new(Arc::new(Registry), None)
+                .build_inputs_for("call", &g.edges, &outputs, &g)
+                .unwrap()
+        });
+        assert_eq!(inputs, HashMap::from([("q".to_string(), json!("ok"))]));
+        for key in ["key=base_url", "key=endpoint"] {
+            assert!(log.contains(key), "no warning for {key}: {log}");
+        }
+        assert!(
+            !log.contains("https://other.test"),
+            "the dropped value was logged"
+        );
     }
 }

@@ -198,12 +198,21 @@ Tampoco las llena el estado global (en un hijo, el input del padre), salvo
 `__colmena_subgraph_depth`, la profundidad que el padre siembra.
 Testigo: `tests/graphs/security/graph_edge_engine_keys_e2e.json`.
 
-🔒 **CAMPOS DEL AUTOR:** un nodo puede declarar campos que solo pone el autor
-(`ExecutableNode::author_owned_inputs`). El auto-flatten y el estado global
-nunca los llenan; un edge que nombra el campo, sí. En `http_request` son
-`base_url`, `method`, `headers`, `bearer_token` y `authorization`: el destino,
-el método y las credenciales los fija el autor. Y ningún valor que llega por un
-edge expande `${VAR}`: solo `config` lo hace (CHANGELOG 2026-09 §107 y §108).
+🔒 **CAMPOS DEL AUTOR:** un campo que el autor pone en `config` es solo de
+`config`: el auto-flatten de un edge sin puerto y el estado global (en un hijo,
+el input del padre) nunca lo reemplazan; un edge que nombra el campo, sí. Un
+string que renderiza su propia clave (`"prompt": "{{prompt}}"`) es el autor
+cableando ese campo a datos, así que no cuenta como fijado. Además, un nodo
+puede declarar campos que solo pone el autor aunque `config` no los tenga
+(`ExecutableNode::author_owned_inputs`): tampoco los llenan el auto-flatten ni
+el estado global. En `http_request` son `base_url`, `method`, `headers`,
+`bearer_token` y `authorization`: el destino, el método y las credenciales los
+fija el autor. Cada valor descartado deja un `warn` en `colmena::dag_engine`
+con el nodo y la clave (nunca el valor). Y ningún valor que llega por un edge
+expande `${VAR}`: solo `config` lo hace (CHANGELOG 2026-09 §101, §102 y §104).
+
+Un nodo recibe los edges cuyo `to` es su id o `<id>.<campo>`; un edge a otro
+nodo cuyo id empieza igual (`call2` para `call`) no le llega.
 
 ---
 

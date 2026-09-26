@@ -199,6 +199,41 @@ pub(crate) mod test_override {
     }
 }
 
+/// Test helper: run `f` under a subscriber that captures WARN and above as
+/// plain text, and return its result with everything captured.
+#[cfg(test)]
+pub(crate) fn capture_warnings<R>(f: impl FnOnce() -> R) -> (R, String) {
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
+    #[derive(Clone, Default)]
+    struct Buf(Arc<Mutex<Vec<u8>>>);
+    struct Handle(Arc<Mutex<Vec<u8>>>);
+    impl Write for Handle {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Buf {
+        type Writer = Handle;
+        fn make_writer(&'a self) -> Handle {
+            Handle(self.0.clone())
+        }
+    }
+    let buf = Buf::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(buf.clone())
+        .with_ansi(false)
+        .with_max_level(tracing::Level::WARN)
+        .finish();
+    let out = tracing::subscriber::with_default(subscriber, f);
+    let text = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap_or_default();
+    (out, text)
+}
+
 #[cfg(test)]
 mod tests {
     use crate::dag_engine::engine::parse_bool_str;
