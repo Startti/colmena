@@ -45,6 +45,10 @@ pub(crate) const T_REACTOR: &str = "colmena::reactor";
 /// the bodies themselves).
 pub(crate) const T_LLM: &str = "colmena::llm";
 
+/// Event target for Python executor metadata (executor kind, sizes, duration,
+/// outcome — never code, inputs, outputs or error text).
+pub(crate) const T_PYTHON_EXEC: &str = "colmena::python_exec";
+
 /// Payload target carrying the raw Python source body of a `python_script`
 /// node execution. Gated by both an `EnvFilter` directive AND
 /// `COLMENA_LOG_PAYLOADS` — see [`payload_trace`] and the module doc above.
@@ -346,6 +350,7 @@ mod tests {
             super::T_EXTRACTION,
             super::T_REACTOR,
             super::T_LLM,
+            super::T_PYTHON_EXEC,
             super::P_PYTHON_CODE,
             super::P_SQL_QUERY,
             super::P_PLANNER_PLAN,
