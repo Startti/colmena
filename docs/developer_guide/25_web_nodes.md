@@ -476,9 +476,9 @@ Cuando el header `Content-Type` empieza con `multipart/`, el nodo `http_request`
 
 | `config_field` | Default | Descripción |
 |---|---|---|
-| `max_file_size_bytes` | 100 MiB | Cap por parte de archivo. |
+| `max_file_size_bytes` | 100 MiB | Cap por parte de archivo, nunca por encima de `COLMENA_ATTACHMENT_MAX_BYTES`. |
 | `max_parts` | 10 | Cap total de partes por request. |
-| `url_download_timeout_secs` | 30 | Timeout del GET completo. |
+| `url_download_timeout_secs` | 30 | Timeout del GET completo (hasta 600 s). |
 | `allow_http_urls` | false | Permite `http://` plano (off por seguridad). |
 | `multipart_url_fields` | — | Campos de un `body` que llega como dato en los que el nodo baja la URL (del autor). |
 
