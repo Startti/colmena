@@ -918,6 +918,28 @@ La próxima corrida fresca contesta los abiertos con
 `abandoned_tool_call.md`, así que el modelo sabe que no tiene esos resultados y los
 vuelve a pedir si le hacen falta.
 
+#### Un pedido sin respuesta
+
+El caso hermano: un Stop, el watchdog o un error antes de la primera respuesta del
+modelo dejan el hilo en un `user` sin respuesta, porque el prompt se guarda antes de
+llamar al modelo. El prompt siguiente quedaba pegado a ese, y el modelo leía los dos
+como un solo pedido y rehacía el detenido (medido en dev). Los junta
+`coalesce_consecutive_same_role`; en el primer turno, el `system` que `llm_call` guarda
+detrás del `user` no los separa, porque el proveedor lo saca del arreglo.
+
+Por eso la corrida fresca, nunca el resume, guarda antes del prompt nuevo un
+`assistant` con
+[`unanswered_request.md`](../../src/libs/colmena/text/prompts/agent_loop/unanswered_request.md)
+si el último mensaje del hilo que no es `system` es un `user`:
+
+> (Este pedido quedó sin respuesta: el turno se detuvo o falló antes de terminar. No lo
+> retomes salvo que te lo vuelvan a pedir.)
+
+Las dos curaciones no se pisan: con ids abiertos el hilo termina en el `assistant` que
+los pidió y, contestados, en un `tool`. En el E2E (`cancellation_integration`), el
+modelo del turno siguiente a un Stop recibe el pedido detenido y el marcador en el
+resumen de turnos viejos, y el prompt nuevo solo.
+
 #### El mismo agente a dos niveles: un hilo por quien llama
 
 Hasta v0.20.1 el hilo de memoria de una tool era `tool/<nombre>[/<hilo>]` para

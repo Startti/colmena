@@ -1414,6 +1414,14 @@ cola. Hasta v0.19.0 la cola se retomaba: el nodo interrumpido volvía a correr c
 del turno detenido y el mensaje nuevo se perdía; el marcador colgado se corrigió en la misma
 serie de fixes ([CHANGELOG 2026-09 §84](../CHANGELOG_2026-09.md)).
 
+El hilo del agente tampoco arrastra el pedido detenido. `llm_call` guarda el prompt antes de
+llamar al modelo, así que un Stop antes de la primera respuesta deja el hilo en ese `user`. La
+corrida fresca del turno siguiente lo marca primero con un `assistant`
+([`unanswered_request.md`](../../src/libs/colmena/text/prompts/agent_loop/unanswered_request.md))
+y después guarda su prompt; antes, los dos pedidos llegaban juntos y el modelo rehacía el
+detenido ([§150](../CHANGELOG_2026-09.md), detalle en
+[19 → Un pedido sin respuesta](19_nested_agents_and_subgraphs.md#un-pedido-sin-respuesta)).
+
 `engine.execute_stream(...)` (6 args, sin token) sigue disponible y completa normalmente.
 
 ## 📚 Más Información

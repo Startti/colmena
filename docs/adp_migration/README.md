@@ -6,6 +6,12 @@ ve ADP antes y después, qué tiene que hacer ADP, y qué se rompe si no hace na
 
 Los cambios que quedan dentro del motor no llevan nota aquí.
 
+## 2026-09-26 — tras un Stop, el mensaje siguiente no rehace el pedido detenido
+
+| # | Nota | Acción de ADP | Qué se rompe si se ignora |
+|---|------|---------------|---------------------------|
+| 1 | [Pedido sin respuesta, marcado](2026-09-26-unanswered-request-marker.md) | Ninguna; subir el pin | Nada al compilar. Sin subir el pin, el mensaje siguiente a un Stop sigue rehaciendo el pedido detenido |
+
 ## 2026-09-26 — el hilo de memoria de una tool es de quien la llama
 
 | # | Nota | Acción de ADP | Qué se rompe si se ignora |
