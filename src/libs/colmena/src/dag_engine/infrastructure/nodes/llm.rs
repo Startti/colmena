@@ -535,6 +535,29 @@ impl LlmNode {
         self
     }
 
+    /// A credential field (`api_key`, `connection_url`) read inputs-first.
+    /// Env templates expand only in author config: an `inputs` value expands
+    /// `${VAR}` only at a pointer a dispatcher vouched for (a tool's `fixed`
+    /// value), and is otherwise used as written.
+    fn resolve_credential(
+        inputs: &NodeInputs,
+        config: &Value,
+        key: &str,
+    ) -> Result<Option<String>, String> {
+        use crate::dag_engine::infrastructure::env_provenance::EnvPolicy;
+        match inputs.get(key).and_then(|v| v.as_str()) {
+            Some(raw) if EnvPolicy::from_inputs(inputs).may_expand(&format!("/{key}")) => {
+                Self::resolve_env_var(raw).map(Some)
+            }
+            Some(raw) => Ok(Some(raw.to_string())),
+            None => config
+                .get(key)
+                .and_then(|v| v.as_str())
+                .map(Self::resolve_env_var)
+                .transpose(),
+        }
+    }
+
     fn resolve_env_var(value: &str) -> Result<String, String> {
         if value.starts_with("${") && value.ends_with("}") {
             let var_name = &value[2..value.len() - 1];
@@ -919,7 +942,13 @@ impl LlmNode {
 
                 // Look up in inputs with the full path
                 // inputs keys are flattened, e.g. "context.amadeus_token", "trigger.prompt", etc.
-                let val = if let Some(v) = inputs.get(var_path) {
+                // An `${UPPER_CASE}` name is an env reference (VARIABLE_RESOLUTION_DISEÑO,
+                // rule 1): it is left for the node to expand, never filled from inputs.
+                let env_shaped = !var_path.is_empty()
+                    && var_path
+                        .bytes()
+                        .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_');
+                let val = if let Some(v) = inputs.get(var_path).filter(|_| !env_shaped) {
                     match v {
                         Value::String(s) => s.clone(),
                         _ => v.to_string(),
@@ -1286,13 +1315,8 @@ impl ExecutableNode for LlmNode {
         };
 
         // API Key
-        let api_key_raw = inputs
-            .get("api_key")
-            .and_then(|v| v.as_str())
-            .or_else(|| config.get("api_key").and_then(|v| v.as_str()))
+        let api_key = Self::resolve_credential(inputs, config, "api_key")?
             .ok_or("Missing 'api_key' in inputs or config")?;
-
-        let api_key = Self::resolve_env_var(api_key_raw)?;
 
         // Model
         let model = inputs
@@ -1476,10 +1500,7 @@ impl ExecutableNode for LlmNode {
             };
 
         // Connection URL (Optional - for Memory Backend)
-        let connection_url_raw = inputs
-            .get("connection_url")
-            .and_then(|v| v.as_str())
-            .or_else(|| config.get("connection_url").and_then(|v| v.as_str()));
+        let connection_url = Self::resolve_credential(inputs, config, "connection_url")?;
 
         // --- 2. Prepare LLM Request ---
 
@@ -1534,8 +1555,7 @@ impl ExecutableNode for LlmNode {
 
         // 2.1 Load History if a Connection URL is configured (session_id is always present now).
         let mut repo_instance = None;
-        if let Some(url_raw) = connection_url_raw {
-            let connection_url = Self::resolve_env_var(url_raw)?;
+        if let Some(connection_url) = connection_url {
             let repo = self
                 .repository_factory
                 .get_repository(&connection_url)
@@ -2031,6 +2051,16 @@ impl ExecutableNode for LlmNode {
         // LLM with no visible diagnostic, and the model would improvise tool
         // calls as plain text. Hard-fail with a pedagogical message so the
         // graph author sees the exact field that broke.
+        // `tool_configurations` from `inputs` (an edge that names the field, a
+        // dispatcher's `fixed` value) is the author's only when a dispatcher
+        // vouched for every `${` leaf in it; otherwise its `fixed` values are
+        // data and never expand `${VAR}`.
+        let tools_authored = !inputs.contains_key("tool_configurations")
+            || crate::dag_engine::infrastructure::env_provenance::subtree_trusted(
+                inputs,
+                "tool_configurations",
+                &crate::dag_engine::infrastructure::env_provenance::EnvPolicy::from_inputs(inputs),
+            );
         let mut tool_configurations: HashMap<String, ToolConfiguration> = match inputs
             .get("tool_configurations")
             .or_else(|| config.get("tool_configurations"))
@@ -2074,6 +2104,15 @@ impl ExecutableNode for LlmNode {
         for tool_cfg in tool_configurations.values_mut() {
             crate::dag_engine::infrastructure::nodes::secure_suspend::apply_secure_suspend_tool_defaults(tool_cfg);
         }
+
+        // Provenance is taken here, before the `${context.*}` templating below:
+        // a `fixed` value is the author's only as written, so a value templated
+        // in from `inputs` never expands `${VAR}` in the target node.
+        let authored_tool_configurations = if tools_authored {
+            tool_configurations.clone()
+        } else {
+            HashMap::new()
+        };
 
         // Resolve context variables in both fixed_config and node_schema
         for tool_cfg in tool_configurations.values_mut() {
@@ -2376,7 +2415,8 @@ impl ExecutableNode for LlmNode {
         let mcp_slot = std::sync::Arc::new(std::sync::OnceLock::new());
 
         let tool_executor = {
-            let mut executor = DagToolExecutor::new(registry, tool_configurations);
+            let mut executor = DagToolExecutor::new(registry, tool_configurations)
+                .with_authored_tool_configurations(authored_tool_configurations);
             if !mcp_specs.is_empty() {
                 executor = executor.with_mcp(mcp_slot.clone());
             }
@@ -4526,6 +4566,39 @@ pub(crate) fn classify_resume(has_pending: bool, has_persistent_memory: bool) ->
         (true, _) => ResumeRouting::ReplayPending,
         (false, true) => ResumeRouting::DegradeToFreshRun,
         (false, false) => ResumeRouting::FailNoPersistence,
+    }
+}
+
+/// An `inputs` credential expands `${VAR}` only at a pointer a dispatcher
+/// vouched for; a `config` one always does.
+#[cfg(test)]
+mod credential_env_tests {
+    use super::*;
+    use crate::dag_engine::infrastructure::env_provenance::ENV_TRUSTED_PATHS_KEY;
+
+    #[test]
+    fn an_inputs_credential_expands_only_when_vouched_for() {
+        std::env::set_var("COLMENA_CLASS_TEST_LLM_KEY", "key-test-only");
+        let raw = json!("${COLMENA_CLASS_TEST_LLM_KEY}");
+        let resolve = |inputs: &NodeInputs, config: &Value| {
+            LlmNode::resolve_credential(inputs, config, "api_key").unwrap()
+        };
+        let config = json!({ "api_key": raw });
+        assert_eq!(
+            resolve(&HashMap::new(), &config).as_deref(),
+            Some("key-test-only")
+        );
+        let mut inputs = HashMap::from([("api_key".to_string(), raw.clone())]);
+        assert_eq!(
+            resolve(&inputs, &json!({})).as_deref(),
+            Some("${COLMENA_CLASS_TEST_LLM_KEY}")
+        );
+        inputs.insert(ENV_TRUSTED_PATHS_KEY.to_string(), json!(["/api_key"]));
+        assert_eq!(
+            resolve(&inputs, &json!({})).as_deref(),
+            Some("key-test-only")
+        );
+        std::env::remove_var("COLMENA_CLASS_TEST_LLM_KEY");
     }
 }
 

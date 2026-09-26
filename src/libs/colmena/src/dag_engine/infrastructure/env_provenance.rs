@@ -56,6 +56,37 @@ impl EnvPolicy {
     }
 }
 
+/// Whether every `${`-bearing string leaf of `inputs[key]` sits at a pointer
+/// `policy` trusts: the subtree is as its author wrote it (a dispatcher's
+/// `fixed` value), so the `fixed` values inside it are the author's too. A
+/// subtree without such a leaf has nothing to expand and counts as trusted.
+pub fn subtree_trusted(
+    inputs: &crate::dag_engine::domain::node::NodeInputs,
+    key: &str,
+    policy: &EnvPolicy,
+) -> bool {
+    fn all(v: &Value, pointer: &str, policy: &EnvPolicy) -> bool {
+        match v {
+            Value::String(s) => !s.contains("${") || policy.may_expand(pointer),
+            Value::Object(m) => m.iter().all(|(k, v)| {
+                all(
+                    v,
+                    &format!("{pointer}/{}", escape_pointer_segment(k)),
+                    policy,
+                )
+            }),
+            Value::Array(a) => a
+                .iter()
+                .enumerate()
+                .all(|(i, v)| all(v, &format!("{pointer}/{i}"), policy)),
+            _ => true,
+        }
+    }
+    inputs
+        .get(key)
+        .is_none_or(|v| all(v, &format!("/{}", escape_pointer_segment(key)), policy))
+}
+
 /// Escape one JSON Pointer (RFC 6901) reference-token segment: `~` → `~0`,
 /// `/` → `~1`. Applied per path segment before joining with `/`.
 /// `pub(crate)` so a node's own gating logic (e.g. `http.rs`) can build matching pointers.

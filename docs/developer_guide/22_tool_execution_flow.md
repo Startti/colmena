@@ -488,6 +488,17 @@ trusted; a fixed `path: "/anything/${bearer_token}"` was already templated
 in 5a, so it may already differ from the authored string by the time this
 step runs — correctly NOT trusted.
 
+`authored_fixed` comes from the tool configuration **as its author wrote
+it**: `llm_call` hands the executor a copy taken before its
+`${context.*}` templating (`with_authored_tool_configurations`), so a
+`fixed: "${context.term}"` that templating filled from `inputs` no longer
+equals its authored form and is never trusted. When `tool_configurations`
+itself came from `inputs` and a dispatcher did not vouch for every `${` leaf
+in it (`env_provenance::subtree_trusted`), the authored copy is empty: its
+`fixed` values are data and nothing in them expands. `${UPPER_CASE}` names
+an env var and is never filled from `inputs` by that templating
+(CHANGELOG 2026-09 §112).
+
 The pointer list is written last among the engine keys (§ Step 4b), under
 `__colmena_env_trusted_paths` (`env_provenance::ENV_TRUSTED_PATHS_KEY`) —
 after `strip_engine_keys` already removed any caller-supplied copy, so a

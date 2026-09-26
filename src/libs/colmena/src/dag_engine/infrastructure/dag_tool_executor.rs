@@ -63,6 +63,10 @@ pub type ToolDescribeObserver = Arc<
 pub struct DagToolExecutor {
     registry: Arc<dyn NodeRegistryPort>,
     tool_configurations: HashMap<String, ToolConfiguration>,
+    /// The tool configurations as their author wrote them, when the caller
+    /// knows (see [`Self::with_authored_tool_configurations`]). `None` means
+    /// `tool_configurations` is authored as given.
+    authored_tool_configurations: Option<HashMap<String, ToolConfiguration>>,
     /// Optional SecureValueService for decrypting <value_N> placeholders during tool calls.
     secure_value_service: Option<Arc<SecureValueService>>,
     /// Session ID used to scope secret lookup.
@@ -313,6 +317,7 @@ impl DagToolExecutor {
         Self {
             registry,
             tool_configurations,
+            authored_tool_configurations: None,
             secure_value_service: None,
             session_id: None,
             agent_session_id: None,
@@ -334,6 +339,18 @@ impl DagToolExecutor {
             subgraph_depth: 0,
             state_repository: None,
         }
+    }
+
+    /// The tool configurations as their author wrote them — before any
+    /// `${context.*}` templating, and empty when they came from runtime data.
+    /// A `fixed` value may expand `${VAR}` only where it still equals this
+    /// authored value (see `env_provenance.rs`).
+    pub fn with_authored_tool_configurations(
+        mut self,
+        authored: HashMap<String, ToolConfiguration>,
+    ) -> Self {
+        self.authored_tool_configurations = Some(authored);
+        self
     }
 
     /// Set the current subgraph nesting depth (0 at the top level).
@@ -2081,14 +2098,20 @@ impl DagToolExecutor {
         // pointers into `inputs` still identical to their operator-authored
         // value — what a node will later consult via `EnvPolicy` to gate
         // `${VAR}` expansion. See env_provenance.rs for the provenance rule.
+        let authored_cfg = match &self.authored_tool_configurations {
+            Some(authored) => authored
+                .get(node_type)
+                .or_else(|| authored.values().find(|c| c.name == *node_type)),
+            None => tool_cfg,
+        };
         let authored_fixed: HashMap<String, Value> =
-            if let Some(schema) = tool_cfg.and_then(|c| c.node_schema.as_ref()) {
+            if let Some(schema) = authored_cfg.and_then(|c| c.node_schema.as_ref()) {
                 use crate::dag_engine::domain::tool_configuration::parse_node_schema;
                 parse_node_schema(schema)
                     .map(|parsed| parsed.fixed_values)
                     .unwrap_or_default()
-            } else if let Some(fixed) = fixed_config.as_ref() {
-                fixed.clone()
+            } else if let Some(cfg) = authored_cfg.filter(|_| fixed_config.is_some()) {
+                cfg.fixed_config.clone()
             } else {
                 HashMap::new()
             };
