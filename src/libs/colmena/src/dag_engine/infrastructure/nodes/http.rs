@@ -812,6 +812,47 @@ impl HttpNode {
         }
     }
 
+    /// For a multipart body that arrived as data: outside the `enabled`
+    /// fields, a URL string becomes a text part (never fetched) and a
+    /// `{ "url": … }` part is refused. The fields the author enabled pass as is.
+    fn gate_multipart_urls(
+        body: &Value,
+        enabled: &[&str],
+    ) -> Result<Value, Box<dyn StdError + Send + Sync>> {
+        fn gate(field: &str, v: &Value) -> Result<Value, String> {
+            match v {
+                Value::String(s)
+                    if s.starts_with(URL_HTTPS_PREFIX) || s.starts_with(URL_HTTP_PREFIX) =>
+                {
+                    Ok(json!({ "value": s }))
+                }
+                Value::Array(a) => a
+                    .iter()
+                    .map(|x| gate(field, x))
+                    .collect::<Result<_, _>>()
+                    .map(Value::Array),
+                Value::Object(o) if o.contains_key("url") => Err(format!(
+                    "MultipartConfigError: field '{field}' asks the node to fetch a URL; \
+                     the author enables that per field in `multipart_url_fields`"
+                )),
+                other => Ok(other.clone()),
+            }
+        }
+        let Some(map) = body.as_object() else {
+            return Ok(body.clone());
+        };
+        let mut out = serde_json::Map::new();
+        for (field, v) in map {
+            let v = if enabled.contains(&field.as_str()) {
+                v.clone()
+            } else {
+                gate(field, v)?
+            };
+            out.insert(field.clone(), v);
+        }
+        Ok(Value::Object(out))
+    }
+
     fn classify_string_part(field: &str, s: &str) -> PartSpec {
         if let Some(rest) = s.strip_prefix(ATTACHMENT_PLACEHOLDER_PREFIX) {
             PartSpec::Attachment {
@@ -876,6 +917,22 @@ impl HttpNode {
                     .get("body")
                     .ok_or("MultipartConfigError: body is required in multipart mode")?,
             ),
+        };
+
+        // A body that arrived as data may name a URL for the node to fetch only
+        // in a field the author enabled (`multipart_url_fields`).
+        let body_from_data = inputs.get("body").is_some()
+            && !crate::dag_engine::infrastructure::env_provenance::is_authored_input(
+                inputs, "body",
+            );
+        let body_resolved = if body_from_data {
+            let enabled: Vec<&str> = Self::author_value(inputs, config, "multipart_url_fields")
+                .and_then(|v| v.as_array())
+                .map(|a| a.iter().filter_map(|f| f.as_str()).collect())
+                .unwrap_or_default();
+            Self::gate_multipart_urls(&body_resolved, &enabled)?
+        } else {
+            body_resolved
         };
 
         let parts = Self::parse_multipart_body(&body_resolved)?;
@@ -1405,6 +1462,7 @@ impl ExecutableNode for HttpNode {
             "bearer_token",
             "authorization",
             "allowed_hosts",
+            "multipart_url_fields",
         ]
     }
 
@@ -1470,6 +1528,7 @@ impl ExecutableNode for HttpNode {
                 .with_field("url_download_timeout_secs", FieldSpec::of_type("integer"))
                 .with_field("allow_http_urls", FieldSpec::of_type("boolean"))
                 .with_field("allowed_hosts", FieldSpec::of_type("array"))
+                .with_field("multipart_url_fields", FieldSpec::of_type("array"))
                 .with_reserved_input_keys(Self::RESERVED_KEYS.iter().copied())
                 .with_reserved_input_keys([
                     "__colmena_session_id",
@@ -2310,6 +2369,52 @@ mod multipart_execute_tests {
             "allow_http_urls": true, // wiremock is http://
             "body": body,
         })
+    }
+
+    /// A body that arrives as data names a URL for the node to fetch only in
+    /// a field the author enabled (`multipart_url_fields`): elsewhere the URL
+    /// is sent as text and never fetched, and a `{ "url": … }` part is refused.
+    #[tokio::test]
+    async fn a_data_body_url_is_fetched_only_in_an_author_enabled_field() {
+        let (upload, other) = (MockServer::start().await, MockServer::start().await);
+        Mock::given(method("POST"))
+            .and(path("/upload"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .mount(&upload)
+            .await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![1, 2, 3]))
+            .mount(&other)
+            .await;
+        let internal = format!("{}/internal", other.uri());
+        let mut config = mk_config(&upload.uri(), Value::Null);
+        config.as_object_mut().unwrap().remove("body");
+        let run = |config: Value, body: Value| async move {
+            let inputs = HashMap::from([("body".to_string(), body)]);
+            HttpNode::new()
+                .execute(&inputs, &config, &mut serde_json::json!({}), None)
+                .await
+        };
+
+        run(config.clone(), serde_json::json!({ "file": internal }))
+            .await
+            .unwrap();
+        assert!(
+            other.received_requests().await.unwrap().is_empty(),
+            "a data URL was fetched"
+        );
+        let sent = upload.received_requests().await.unwrap();
+        assert!(String::from_utf8_lossy(&sent[0].body).contains(&internal));
+
+        let object = serde_json::json!({ "file": { "url": internal } });
+        assert!(run(config.clone(), object).await.is_err());
+        assert!(other.received_requests().await.unwrap().is_empty());
+
+        config["multipart_url_fields"] = serde_json::json!(["file"]);
+        run(config, serde_json::json!({ "file": internal }))
+            .await
+            .unwrap();
+        assert_eq!(other.received_requests().await.unwrap().len(), 1);
     }
 
     #[tokio::test]

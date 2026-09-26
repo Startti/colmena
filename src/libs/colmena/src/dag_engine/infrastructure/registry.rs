@@ -1138,6 +1138,7 @@ mod catalog_coverage_tests {
                     "bearer_token",
                     "authorization",
                     "allowed_hosts",
+                    "multipart_url_fields",
                 ],
             ),
             (

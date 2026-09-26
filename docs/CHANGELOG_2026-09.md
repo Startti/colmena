@@ -5731,3 +5731,19 @@ recibe ninguna conexión; con su host en `allowed_hosts`, recibe la cookie del a
 
 **ADP.** Campo nuevo opcional `allowed_hosts` en `socketio_request`.
 **Estado.** done.
+
+## 113. Endurecimiento: en multipart, el nodo baja URLs de un `body` de datos solo donde el autor lo habilita
+
+**Qué cambia.** Si el `body` multipart de `http_request` llega por `inputs` y no es el `fixed`
+de la tool, el nodo baja una URL solo en los campos que el autor lista en el campo nuevo
+`multipart_url_fields` (del autor). En los demás campos un string URL sale como parte de
+texto y no se baja, y un objeto `{ "url": … }` se rechaza. Un `body` de `config` o `fixed` no
+cambia.
+
+**Tests.** `http.rs::multipart_execute_tests`: con un `body` de datos, el servidor de la URL
+no recibe ningún GET y el upload recibe la URL como texto; `{ "url": … }` falla sin bajar
+nada; con el campo en `multipart_url_fields`, se baja.
+
+**ADP.** Campo nuevo opcional `multipart_url_fields`. Una tool cuyo modelo pasa URLs de
+archivos para subir debe listar esos campos.
+**Estado.** done.
