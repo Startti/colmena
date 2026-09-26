@@ -3621,12 +3621,12 @@ mod graph_http_payload_tests {
         let stream = uc.execute_stream(g, None, None, false, None, None, None);
         tokio::pin!(stream);
         while stream.next().await.is_some() {}
-        let leaked = author.received_requests().await.unwrap().iter().any(|r| {
+        let reached = author.received_requests().await.unwrap().iter().any(|r| {
             r.headers
                 .get("authorization")
                 .is_some_and(|v| v.to_str().unwrap().contains("secret-env-test-only"))
         });
-        assert!(!leaked, "a decrypted secret was read as an env template");
+        assert!(!reached, "a decrypted secret was read as an env template");
         std::env::remove_var("COLMENA_CLASS_TEST_SECRET_ENV");
     }
 
