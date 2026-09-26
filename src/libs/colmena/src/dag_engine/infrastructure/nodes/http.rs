@@ -507,31 +507,76 @@ impl HttpNode {
         })
     }
 
-    /// Whether the request carries credentials the author configured: a
-    /// `bearer_token`/`authorization`, a header other than
-    /// [`Self::NON_CREDENTIAL_HEADERS`], or a query param/body value with an
-    /// env template.
-    fn carries_author_credentials(inputs: &NodeInputs, config: &Value) -> bool {
-        fn has_template(v: &Value) -> bool {
-            match v {
-                Value::String(s) => s.contains("${"),
-                Value::Object(m) => m.values().any(has_template),
-                Value::Array(a) => a.iter().any(has_template),
-                _ => false,
-            }
+    /// Whether `v` holds an env template anywhere.
+    pub(crate) fn has_template(v: &Value) -> bool {
+        match v {
+            Value::String(s) => s.contains("${"),
+            Value::Object(m) => m.values().any(Self::has_template),
+            Value::Array(a) => a.iter().any(Self::has_template),
+            _ => false,
         }
+    }
+
+    /// Whether a `headers` object holds a credential: a header other than
+    /// [`Self::NON_CREDENTIAL_HEADERS`], or any value with an env template.
+    pub(crate) fn headers_carry_credentials(headers: &Value) -> bool {
+        headers.as_object().is_some_and(|h| {
+            h.iter().any(|(k, v)| {
+                !Self::NON_CREDENTIAL_HEADERS.contains(&k.to_ascii_lowercase().as_str())
+                    || Self::has_template(v)
+            })
+        })
+    }
+
+    /// Whether the author's `fixed` leaves (`__colmena_authored_leaves`) hold a
+    /// credential: a leaf under one of `credential_fields`, or under `headers`
+    /// outside [`Self::NON_CREDENTIAL_HEADERS`], or one that `extra` accepts
+    /// by its top-level key.
+    pub(crate) fn authored_leaves_carry_credentials(
+        inputs: &NodeInputs,
+        credential_fields: &[&str],
+        extra: impl Fn(&str) -> bool,
+    ) -> bool {
+        use crate::dag_engine::infrastructure::env_provenance::{
+            listed_pointers, AUTHORED_LEAVES_KEY,
+        };
+        listed_pointers(inputs, AUTHORED_LEAVES_KEY)
+            .iter()
+            .any(|pointer| {
+                let mut segments = pointer.trim_start_matches('/').splitn(3, '/');
+                let (top, child) = (segments.next().unwrap_or(""), segments.next());
+                match (top, child) {
+                    ("headers", Some(name)) => {
+                        !Self::NON_CREDENTIAL_HEADERS.contains(&name.to_ascii_lowercase().as_str())
+                    }
+                    (top, _) if credential_fields.contains(&top) => true,
+                    (top, None) => extra(top),
+                    _ => false,
+                }
+            })
+    }
+
+    /// Whether the request carries credentials the author configured, in
+    /// `config` or as a tool's `fixed` value (whole or one leaf of a container
+    /// the caller also filled): a `bearer_token`/`authorization`, a header
+    /// other than [`Self::NON_CREDENTIAL_HEADERS`], any query param (in
+    /// `query_params` or a top-level extra one), an `endpoint`/`body` with an
+    /// env template, any value a dispatcher vouched for as the author's
+    /// `${VAR}`, or a `config` leaf the engine filled with a secure value.
+    fn carries_author_credentials(inputs: &NodeInputs, config: &Value) -> bool {
         let author = |key: &str| Self::author_value(inputs, config, key);
-        author("bearer_token").is_some()
+        crate::dag_engine::infrastructure::env_provenance::carries_env_or_secret(inputs)
+            || author("bearer_token").is_some()
             || author("authorization").is_some()
-            || author("headers")
-                .and_then(|h| h.as_object())
-                .is_some_and(|h| {
-                    h.keys().any(|k| {
-                        !Self::NON_CREDENTIAL_HEADERS.contains(&k.to_ascii_lowercase().as_str())
-                    })
-                })
-            || author("query_params").is_some_and(has_template)
-            || author("body").is_some_and(has_template)
+            || author("headers").is_some_and(Self::headers_carry_credentials)
+            || author("query_params").is_some_and(|q| q.as_object().is_none_or(|m| !m.is_empty()))
+            || author("endpoint").is_some_and(Self::has_template)
+            || author("body").is_some_and(Self::has_template)
+            || Self::authored_leaves_carry_credentials(
+                inputs,
+                &["bearer_token", "authorization", "query_params"],
+                |key| !Self::RESERVED_KEYS.contains(&key) && !Self::is_engine_internal(key),
+            )
     }
 
     /// Same scheme, host and port.
