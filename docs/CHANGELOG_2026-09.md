@@ -5608,4 +5608,56 @@ bearer literal; marcado como `fixed` del despacho, lo expande. El test existente
 en `config` sigue expandiendo.
 
 **ADP.** Sin cambios de API.
+
+## 115. Los resultados de las tools llegan al proveedor en el orden de sus llamadas
+
+**Qué cambió.** Medido en dev (2026-09-26, v0.20.0, `gemini-3.5-flash`): Auto llamó dos
+veces a `Run_My_Agent` en un mensaje, primero para A y después para B, `parallel` y con
+memoria `dynamic`. Los dos hijos preguntaron, quedó la de A y el motor cerró la de B. En
+`llm_node_history` del padre (por `created_at`) quedó el `tool` de B, con el texto de
+cierre, escrito al cerrar el grupo, y después el de A, escrito en el resume. En el turno
+reanudado el modelo volvió a correr A «para obtener la explicación»: leyó el texto de
+cierre como resultado de A. `gemini_adapter.rs` arma cada `functionResponse` con el
+`name` y el `response`, sin id, así que Gemini empareja dos llamadas a la misma tool con
+sus respuestas por posición. El mismo desorden sale sin grupos: en serie, si suspende la
+llamada k, las posteriores reciben «NO se ejecutó» al suspender y k se escribe en el
+resume (`[k+1…, k]`). También sale en un grupo cuya única pregunta no es la última
+llamada.
+- `llm_request.rs`: `order_tool_results_by_call`, pura. Para cada mensaje del asistente
+  con `tool_calls`, ordena el bloque contiguo de mensajes `tool` que le sigue según el
+  índice de su `tool_call_id` en esas llamadas. El orden es estable, y un resultado cuyo
+  id ese mensaje no hizo queda al final del bloque, en su orden. Nada cruza un mensaje
+  que no sea `tool`, y nada se agrega ni se pierde.
+- `LlmRequest::new` la llama después de `coalesce_consecutive_same_role`: un mensaje del
+  asistente fusionado lleva las llamadas de los dos, y los resultados siguen esa lista.
+  Ordenar solo permuta mensajes `tool`, que coalesce no fusiona, así que no deja nada
+  para fusionar. Vale para todos los proveedores. La historia guardada no cambia, así
+  que una sesión que ya quedó desordenada se manda en orden en su próximo turno.
+
+**Tests.** Lib: 2959 passed (antes 2951). En `llm_request.rs`: dos resultados
+invertidos vuelven al orden de las llamadas (por `LlmRequest::new`), también tras
+fusionar dos mensajes del asistente; tres llamadas con resultados [2, 0, 1] quedan [0, 1, 2]; un bloque ordenado
+no cambia, y ordenar dos veces es ordenar una; un resultado huérfano va al final de su
+bloque; dos mensajes del asistente con los mismos ids en orden opuesto ordenan cada uno
+el suyo; un `user` en el medio corta el bloque. En `gemini_adapter.rs`: el caso medido
+(dos `Run_My_Agent`, resultados invertidos) sale con el `functionResponse` de A primero
+y el texto de cierre segundo.
+
+**Mutación.** Rojas y revertidas:
+- sin la llamada en `LlmRequest::new`: rojos los 3 tests que pasan por `new` (el de
+  Gemini incluido) y el E2E B (`left: ["call_beta", "call_alfa"]`);
+- ordenar por la posición de aparición en el bloque y no por el índice de la llamada:
+  rojos 7 tests unitarios y el E2E B;
+- ordenar antes de coalesce, un huérfano al principio del bloque, un bloque que sigue
+  hasta el próximo asistente, y buscar los ids en el primer mensaje con llamadas: cada
+  una pone en rojo solo su test.
+
+**E2E.** `parallel_tool_suspend`, escenario B: después del resume, `llm_node_history`
+del padre guarda `call_beta` y después `call_alfa`, y la request del padre en el turno
+reanudado lleva los resultados en el orden de las llamadas (`call_alfa`, `call_beta`).
+Sin el arreglo, rojo. 3 passed; `parallel_tool_groups` (2) y `parallel_tool_identity`
+(1) siguen verdes.
+
+**ADP.** Sin cambios. La nota de migración de las tools `parallel` suma una sección con
+esto, y la guía 19 lo dice en «Suspensión dentro de un batch paralelo de tools».
 **Estado.** done.
