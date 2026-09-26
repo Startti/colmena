@@ -5837,11 +5837,14 @@ entrada tiene el mismo `id`, `filename` y `mime_type` que la de un archivo poste
 a ese archivo su `label`, `description` y `url`/`path`.
 
 Un archivo cuyos bytes no se pudieron guardar se sigue registrando si está en la Files API del
-provider (`load_attachment` lo lee por su `provider_file_id`), sin `storage_key`: no figura
-como guardado, `$attachment:<id>` responde `StorageKeyMissing` (con §112, solo si ninguna fila
-del id tiene clave) y el upsert conserva la clave que haya guardado un turno anterior. Un
-archivo de texto sin bytes guardados sigue sin registrarse. `attachment.registered` lleva
-ahora `stored`.
+provider (`load_attachment` lo lee por su `provider_file_id`), y este turno no le pone
+`storage_key`: no figura como guardado y, como es la fila más reciente del id (§112),
+`$attachment:<id>` responde `StorageKeyMissing`. **Limitación:** el upsert conserva la clave que
+un turno anterior guardó en la fila de ese mismo provider (`COALESCE`), así que si el id se
+vuelve a subir con otros bytes y guardarlos falla, `$attachment:<id>` reenvía los bytes
+anteriores mientras `load_attachment` lee el archivo nuevo. Un archivo de texto inline
+(`data`/`path`) sin bytes guardados sigue sin registrarse; uno de texto con `url` se sube a la
+Files API y se registra sin clave como los demás. `attachment.registered` lleva ahora `stored`.
 
 **Tests.** En `llm.rs::files_parser_tests`: `[bad, good]` → `good` conserva `doc-good`, su
 label y su description (antes: `doc-bad`); un archivo que la resolución descarta no corre la

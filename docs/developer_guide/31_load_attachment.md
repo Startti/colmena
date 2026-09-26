@@ -36,8 +36,10 @@ La matriz completa de elección está en
 
 ## Plan A — Persistent bytes for all attachment sources (2026-05-25)
 
-As of Plan A, every attachment registered in `conversation_attachments` has its
-bytes persisted in `OutputStorageRepository`. This is true regardless of source:
+As of Plan A, the bytes of each attachment registered in `conversation_attachments` are
+persisted to `OutputStorageRepository`, whatever its source (file uploads by the `llm_call`
+Step 3, generated artifacts by their node). Persisting an upload can fail; what is registered
+then is described below the list.
 
 - **Inline (base64 en `files[].data`):** los bytes se streamean al storage en el momento del registro.
 - **Signed URL (`files[].url`):** los bytes se descargan y se streamean al storage.
@@ -46,11 +48,18 @@ bytes persisted in `OutputStorageRepository`. This is true regardless of source:
   con `origin = generated_by:<tool>` y `source = Path(storage_key)`.
 
 Si guardar los bytes falla (o no hay `OutputStorageRepository`), un archivo que ya está en la
-Files API del provider se registra igual, sin `storage_key`: `load_attachment` lo lee por su
-`provider_file_id` y `$attachment:<document_id>` responde `StorageKeyMissing`; nunca se
-registra una clave inventada, y el upsert conserva la que haya guardado un turno anterior. Un
-archivo de texto, que solo se lee desde storage, no se registra. El evento
-`attachment.registered` lleva `stored` (CHANGELOG 2026-09 §113).
+Files API del provider se registra igual y este turno no le pone `storage_key` (nunca una clave
+inventada): `load_attachment` lo lee por su `provider_file_id`, y como esa es la fila más
+reciente del id, `$attachment:<document_id>` responde `StorageKeyMissing`, salvo que la fila de
+ese provider ya tuviera una clave (la limitación de abajo). Un archivo de texto inline
+(`data`/`path`), que solo se lee desde storage, no se registra; uno de texto con `url` se sube a
+la Files API y se registra sin clave como los demás. El evento `attachment.registered` lleva
+`stored` (CHANGELOG 2026-09 §113).
+
+**Limitación.** El upsert conserva la clave que un turno anterior guardó en la fila de ese
+mismo provider (`COALESCE`). Si el id se vuelve a subir con otros bytes y guardarlos falla,
+`$attachment:<document_id>` reenvía los bytes anteriores mientras `load_attachment` lee el
+archivo nuevo.
 
 Esto habilita el placeholder `$attachment:<document_id>` para nodos downstream
 (inicialmente `http_request` multipart) sin importar de dónde vino el documento.
