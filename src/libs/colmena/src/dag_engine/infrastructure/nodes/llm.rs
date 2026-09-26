@@ -1237,6 +1237,24 @@ impl crate::llm::application::LoadAttachmentResolver for AttachmentResolverImpl 
 
 #[async_trait]
 impl ExecutableNode for LlmNode {
+    /// Tools, destinations, credentials and instructions are author-set: an
+    /// upstream object, global state or an unoffered tool argument never sets
+    /// them.
+    fn author_owned_inputs(&self) -> &'static [&'static str] {
+        &[
+            "provider",
+            "api_key",
+            "system_message",
+            "connection_url",
+            "enabled_tools",
+            "tool_configurations",
+            "skills",
+            "secure_suspend_allowed",
+            "documents",
+            "crdt_documents",
+        ]
+    }
+
     async fn execute(
         &self,
         inputs: &NodeInputs,

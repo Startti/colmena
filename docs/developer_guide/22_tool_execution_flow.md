@@ -309,22 +309,23 @@ Graph mode applies it too: `build_inputs_for` drops the reserved keys its edges
 deliver before the loop injects its own (the rule lives in
 `dag_engine::domain::node::strip_engine_keys`; CHANGELOG 2026-09 §89).
 
-#### Step 4c: A child-graph source the tool does not offer is dropped
+#### Step 4c: A field only the author sets is dropped unless the tool offers it
 
-**Function:** `drop_unoffered_child_graph_sources()` in
+**Function:** `drop_unoffered_author_owned()` in
 [node_schema_merge.rs](../../src/libs/colmena/src/dag_engine/infrastructure/node_schema_merge.rs),
 called right after `strip_engine_keys()`, and by `for_each` for each row.
 
-A `subgraph` tool reads its graph from `inputs` (inline > path > ref, the order
-of `CHILD_GRAPH_SOURCE_KEYS`), where undeclared arguments land too: a model that
-added `child_graph_inline` or `child_graph_path` outranked the operator's fixed
-`child_graph_ref` or path and chose the graph the worker ran. Any of those keys
-the tool does not offer is now removed before Step 5, with a warning that names
-the key, never its value. "Offered" = the parameters of the definition the model
-was sent (for a raw node name, its schema's `inputs`: `task` for `subgraph`); for
-a `for_each` row, the target's LLM-visible fields. A declared source still passes
-(`probar_grafo` in `tests/graphs/agents/graph_builder/graph_builder.json`) — and
-hands the model the worker: `python_script` without sandbox, `${VAR}` from env.
+Author-set fields are config-only: an argument naming one of the target node's
+`author_owned_inputs()` (for example `headers` of `http_request`,
+`tool_configurations` of `llm_call`, `code` of `python_script`, `target` of
+`for_each`) or a child-graph source (`CHILD_GRAPH_SOURCE_KEYS`) is removed
+before Step 5 unless the tool offers it as a parameter, with a warning that
+names the key, never its value. "Offered" = the parameters of the definition
+the model was sent (for a raw node name, its schema's `inputs`); for a
+`for_each` row, the target's LLM-visible fields. A declared field still passes:
+declaring it is the author's explicit wiring (`probar_grafo` in
+`tests/graphs/agents/graph_builder/graph_builder.json` offers a child-graph
+source on purpose). CHANGELOG 2026-09 §105.
 
 ---
 

@@ -462,6 +462,11 @@ impl InitializableNode for SqlNode {
 
 #[async_trait::async_trait]
 impl ExecutableNode for SqlNode {
+    /// The governance fields (connection, permissions, limits) are author-set.
+    fn author_owned_inputs(&self) -> &'static [&'static str] {
+        Self::GOVERNANCE_KEYS
+    }
+
     async fn execute(
         &self,
         inputs: &NodeInputs,

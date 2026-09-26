@@ -359,6 +359,11 @@ impl SocketIoNode {
 
 #[async_trait::async_trait]
 impl ExecutableNode for SocketIoNode {
+    /// Where the connection goes and with which credentials is author-set.
+    fn author_owned_inputs(&self) -> &'static [&'static str] {
+        &["url", "namespace", "headers", "cookies"]
+    }
+
     async fn execute(
         &self,
         inputs: &NodeInputs,

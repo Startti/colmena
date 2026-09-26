@@ -1036,6 +1036,82 @@ mod catalog_coverage_tests {
         )
     }
 
+    /// Every field that decides a node's tools, destination, credentials,
+    /// instructions or code is author-set: runtime data (a flattened object,
+    /// global state, an unoffered tool argument) never fills it.
+    #[test]
+    fn fields_that_decide_tools_destinations_credentials_or_code_are_author_owned() {
+        let reg = build_fully_wired_registry();
+        let expected: &[(&str, &[&str])] = &[
+            (
+                "http_request",
+                &[
+                    "base_url",
+                    "method",
+                    "headers",
+                    "bearer_token",
+                    "authorization",
+                ],
+            ),
+            (
+                "llm_call",
+                &[
+                    "provider",
+                    "api_key",
+                    "system_message",
+                    "connection_url",
+                    "enabled_tools",
+                    "tool_configurations",
+                    "skills",
+                    "secure_suspend_allowed",
+                    "documents",
+                    "crdt_documents",
+                ],
+            ),
+            (
+                "python_script",
+                &["code", "sandbox_mode", "sandbox_timeout_secs"],
+            ),
+            (
+                "socketio_request",
+                &["url", "namespace", "headers", "cookies"],
+            ),
+            ("for_each", &["target"]),
+            (
+                "subgraph",
+                &["child_graph_inline", "child_graph_path", "child_graph_ref"],
+            ),
+            (
+                "sql_query",
+                &[
+                    "connection_url",
+                    "permissions",
+                    "runtime_limits",
+                    "guardrail_llm",
+                    "setup_sql",
+                ],
+            ),
+            ("image_generation", &["api_key"]),
+            ("image_edit", &["api_key"]),
+            ("tts", &["api_key"]),
+            ("information_extraction", &["system_message"]),
+            ("critic", &["system_message"]),
+            ("planner", &["system_message"]),
+            ("reactor", &["system_message"]),
+        ];
+        for (node_type, fields) in expected {
+            let node = reg
+                .get_node(node_type)
+                .unwrap_or_else(|| panic!("{node_type} not registered"));
+            for field in *fields {
+                assert!(
+                    node.author_owned_inputs().contains(field),
+                    "{node_type}.{field} is not author-owned"
+                );
+            }
+        }
+    }
+
     #[test]
     fn the_fully_wired_registry_includes_the_conditional_node_types() {
         let reg = build_fully_wired_registry();

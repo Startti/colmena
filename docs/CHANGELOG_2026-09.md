@@ -5522,3 +5522,29 @@ el valor. `config_sets_key_tests` cubre la excepción del template propio.
 global pisaran un valor de `config` debe nombrar el campo en el edge (`to: "n.campo"`) o
 dejarlo fuera de `config`.
 **Estado.** done.
+
+## 105. Endurecimiento: los campos del autor, declarados por nodo y respetados en modo tool
+
+**Qué cambia.** Cada nodo que decide tools, destino, credenciales, instrucciones o código
+declara esos campos en `author_owned_inputs()`: `llm_call` (`provider`, `api_key`,
+`system_message`, `connection_url`, `enabled_tools`, `tool_configurations`, `skills`,
+`secure_suspend_allowed`, `documents`, `crdt_documents`), `python_script` (`code`,
+`sandbox_mode`, `sandbox_timeout_secs`), `socketio_request` (`url`, `namespace`, `headers`,
+`cookies`), `for_each` (`target`), `subgraph` (las fuentes del grafo hijo), `sql_query` (sus
+campos de gobierno), `image_generation`/`image_edit`/`tts` (`api_key`) y
+`information_extraction`/`critic`/`planner`/`reactor` (`system_message`), además de los de
+`http_request` (§102). En modo grafo el auto-flatten y el estado global no los llenan (§102,
+§104). En modo tool, `drop_unoffered_author_owned` (antes
+`drop_unoffered_child_graph_sources`) descarta el argumento de uno de esos campos que la tool
+no ofrece como parámetro, en el despacho (dentro de `merge_call`, así que el aviso vuelve con
+los demás avisos del merge, §93) y en cada fila de `for_each`, con un aviso que nombra la
+clave, nunca el valor; un campo declarado en el `node_schema` sigue pasando.
+
+**Tests.** `author_owned_arg_tests` (despacho real a `http_request` contra un mock): un
+`headers` no declarado no llega; declarado, sí; el descarte vuelve como aviso de `merge_call`
+(la clave, nunca el valor). `for_each`: una fila no pone un `headers` que
+el target no ofrece. `registry.rs`: la tabla de campos del autor de cada nodo.
+
+**ADP.** Sin cambios de API. Una tool cuyo modelo mandaba uno de esos campos sin que el
+`node_schema` lo declarara debe declararlo como parámetro.
+**Estado.** done.

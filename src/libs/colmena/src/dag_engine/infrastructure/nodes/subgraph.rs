@@ -302,6 +302,11 @@ impl SubGraphNode {
 
 #[async_trait::async_trait]
 impl ExecutableNode for SubGraphNode {
+    /// The child graph's source is author-set.
+    fn author_owned_inputs(&self) -> &'static [&'static str] {
+        &crate::dag_engine::domain::child_graph_source::CHILD_GRAPH_SOURCE_KEYS
+    }
+
     fn schema(&self) -> Value {
         // The `inputs` map is what the tool-definition builder reads to expose
         // parameters to the LLM (it parses each value's string for type hints
