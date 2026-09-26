@@ -7,11 +7,15 @@
 //! with memory that can ask the user through `Preguntar` (a `suspend`). One
 //! scripted model answers every agent, by who calls it (the system prompt says
 //! PADRE or HIJO); a child's task says what it does ("preguntá" asks,
-//! "terminá" answers, "lento" waits first).
+//! "terminá" answers, "lento" waits first), and every request is kept.
 //!
 //! - A: one child asks, its sibling (called first) finishes: the turn waits
 //!   for the group, then suspends on the question; the resume answers it
 //!   under the same `Run#<k>`, with k = 1.
+//! - B: both children ask: the first in the model's order is kept, the other
+//!   child's row is FAILED and the model reads why.
+//! - C: after B, a fresh turn runs the closed child again, on the same memory
+//!   thread: its request carries no open tool call id.
 //!
 //! Writes each turn's SSE to `/tmp/colmena_e2e/parallel_tool_suspend_<x>.sse`.
 //!
@@ -25,13 +29,18 @@ use caller_model::{CallerModel, Reply, Request};
 use colmena::dag_engine::domain::graph::Graph;
 use colmena::dag_engine::engine::{ColmenaEngine, EngineConfig};
 use colmena::dag_engine::sse_mapper::SseMapper;
-use colmena::llm::domain::MessageRole;
+use colmena::llm::domain::{LlmMessage, MessageRole};
 use colmena::llm::infrastructure::OverrideGuard;
 use futures::StreamExt;
 use serde_json::{json, Value};
 use serial_test::serial;
 use std::sync::Arc;
 use std::time::Duration;
+
+/// What the model reads for a question the turn did not keep.
+const CLOSED: &str = include_str!("../text/prompts/agent_loop/closed_by_parallel_suspend.md");
+/// What a fresh run answers for a call its thread left open.
+const ABANDONED: &str = include_str!("../text/prompts/agent_loop/abandoned_tool_call.md");
 
 /// How long a child whose task says "lento" waits before it answers.
 const SLOW: Duration = Duration::from_millis(600);
@@ -162,6 +171,17 @@ impl Turn {
             .collect()
     }
 
+    /// The final text of the one child that ran in this turn.
+    fn child_result(&self) -> &str {
+        let ends: Vec<&Value> = self
+            .frames
+            .iter()
+            .filter(|f| f["type"] == "subgraph-node-end" && f["node_id"] == "hijo")
+            .collect();
+        assert_eq!(ends.len(), 1, "one child ran: {ends:?}");
+        ends[0]["output"]["result"].as_str().unwrap()
+    }
+
     fn assert_suspended_on(&self, question: &str, call: &str) {
         assert_eq!(self.finish["finishReason"], "suspended", "{}", self.finish);
         let output = &self.finish["output"];
@@ -218,9 +238,12 @@ async fn turn(
     Turn { frames, finish }
 }
 
+/// What the human answers to a child's question.
+const HUMAN: &str = "sí";
+
 /// The answer to the one question a child asks, in the resume format.
 fn answer(to: &str) -> String {
-    format!("Q[pregunta_hijo]: {to}\nA[pregunta_hijo]: sí")
+    format!("Q[pregunta_hijo]: {to}\nA[pregunta_hijo]: {HUMAN}")
 }
 
 /// `(status, all_outputs)` of every child run of the chat (a row with a
@@ -245,6 +268,81 @@ fn status_of<'a>(rows: &'a [(String, String)], agent: &str) -> Vec<&'a str> {
         .collect()
 }
 
+async fn suspended_children(pool: &sqlx::PgPool, chat: &str) -> i64 {
+    sqlx::query_scalar(
+        "SELECT count(*) FROM dag_runs WHERE agent_session_id = $1 \
+         AND parent_session_id IS NOT NULL AND status = 'SUSPENDED'",
+    )
+    .bind(chat)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+/// `(tool_call_id, content)` of every `tool` message of the thread of
+/// `node_id` (`agent` is the parent; a child is `tool/Run/<agentId>/hijo`).
+async fn tool_messages(pool: &sqlx::PgPool, chat: &str, node_id: &str) -> Vec<(String, String)> {
+    sqlx::query_as(
+        "SELECT tool_call_id, content FROM llm_node_history \
+         WHERE agent_session_id = $1 AND node_id = $2 AND role = 'tool' ORDER BY created_at",
+    )
+    .bind(chat)
+    .bind(node_id)
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+/// Every id an assistant message declares that no `tool` message answers:
+/// Anthropic and OpenAI reject a request that carries one with a 400.
+fn open_ids(messages: &[LlmMessage]) -> Vec<String> {
+    let answered: Vec<&str> = messages.iter().filter_map(|m| m.tool_call_id()).collect();
+    messages
+        .iter()
+        .filter_map(|m| m.tool_calls())
+        .flatten()
+        .map(|c| c.id.clone())
+        .filter(|id| !answered.contains(&id.as_str()))
+        .collect()
+}
+
+/// The content of every `tool` message that answers `id`.
+fn answers_to(messages: &[LlmMessage], id: &str) -> Vec<String> {
+    messages
+        .iter()
+        .filter(|m| m.role() == &MessageRole::Tool && m.tool_call_id() == Some(id))
+        .map(|m| m.content().to_string())
+        .collect()
+}
+
+/// The child's final text in the result its parent read.
+fn child_said(result: &str) -> String {
+    let result: Value = serde_json::from_str(result).unwrap_or_else(|_| panic!("{result}"));
+    result["hijo"]["result"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// The last request the parent's model received.
+fn last_parent_request(model: &CallerModel) -> Request {
+    model
+        .seen()
+        .into_iter()
+        .rev()
+        .find(|r| r.system.contains("PADRE"))
+        .unwrap()
+}
+
+/// The requests a child's model received on the run whose prompt is `task`.
+fn child_requests(model: &CallerModel, task: &str) -> Vec<Request> {
+    model
+        .seen()
+        .into_iter()
+        .filter(|r| r.system.contains("HIJO") && r.last_user() == task)
+        .collect()
+}
+
 async fn engine() -> ColmenaEngine {
     dotenvy::dotenv().ok();
     ColmenaEngine::new(EngineConfig::from_env().await.unwrap())
@@ -261,6 +359,19 @@ const TURNS_A: Turns = &[(
         ("call_alfa", "alfa", "alfa: preguntá"),
     ],
 )];
+
+/// B and C: both ask, beta first (alfa waits `SLOW`); in C a third turn runs
+/// beta again.
+const TURNS_BC: Turns = &[
+    (
+        "turno 1",
+        &[
+            ("call_alfa", "alfa", "alfa: preguntá lento"),
+            ("call_beta", "beta", "beta: preguntá"),
+        ],
+    ),
+    ("turno 3", &[("call_beta_2", "beta", "beta: terminá")]),
+];
 
 const ALFA_ASKS: &str = "¿alfa: seguimos?";
 
@@ -301,7 +412,8 @@ async fn a_question_waits_for_its_group_and_the_resume_answers_it_under_its_scop
 
     let second = turn(&eng, "turno 1", Some(&answer(ALFA_ASKS)), &chat, "a2").await;
     second.assert_done();
-    // The resumed child streams under the scope its call started with.
+    // The resumed child streams under the scope its call started with, and
+    // it read the human's answer.
     let paths = second.child_paths();
     assert!(!paths.is_empty(), "the resumed child streamed nothing");
     let under = format!("agent>{scope}>");
@@ -309,9 +421,162 @@ async fn a_question_waits_for_its_group_and_the_resume_answers_it_under_its_scop
         paths.iter().all(|p| format!("{p}>").starts_with(&under)),
         "{paths:?}"
     );
+    let said = second.child_result();
+    assert!(
+        said.starts_with("alfa: hecho, con") && said.contains(HUMAN),
+        "{said}"
+    );
     let rows = children(&pool, &chat).await;
     assert_eq!(status_of(&rows, "alfa"), ["COMPLETED"], "{rows:?}");
     assert_eq!(status_of(&rows, "beta"), ["COMPLETED"], "{rows:?}");
+
+    // The parent read both results, and nothing was left open.
+    let last = last_parent_request(&model);
+    assert_eq!(open_ids(&last.messages), Vec::<String>::new());
+    assert_eq!(
+        child_said(&answers_to(&last.messages, "call_alfa")[0]),
+        said
+    );
+    assert!(answers_to(&last.messages, "call_beta")[0].contains("beta: hecho"));
+
+    cleanup(&pool, &chat).await;
+    eng.shutdown().await;
+}
+
+/// Turns 1 and 2 of B, for C: both children ask, beta first, and the turn
+/// keeps alfa's question. Turn 2 answers it.
+async fn two_questions_then_the_answer(eng: &ColmenaEngine, chat: &str, sse: &str) {
+    let first = turn(eng, "turno 1", None, chat, &format!("{sse}1")).await;
+    first.assert_suspended_on(ALFA_ASKS, "call_alfa");
+    let answer = answer(ALFA_ASKS);
+    let second = turn(eng, "turno 1", Some(&answer), chat, &format!("{sse}2")).await;
+    second.assert_done();
+}
+
+#[tokio::test]
+#[serial]
+#[ignore = "requires DATABASE_URL — run with `cargo test -- --ignored`"]
+async fn two_questions_in_a_group_keep_the_first_and_close_the_other_child() {
+    let eng = engine().await;
+    let pool = pool().await;
+    let chat = unique_chat("b");
+    cleanup(&pool, &chat).await;
+    let model = Arc::new(CallerModel::new(script(TURNS_BC)));
+    let _guard = OverrideGuard::install(model.clone());
+
+    let first = turn(&eng, "turno 1", None, &chat, "b1").await;
+    // The first question in the model's order leads, though beta asked first.
+    first.assert_suspended_on(ALFA_ASKS, "call_alfa");
+    let (beta_asked, _) = first.one("subgraph-tool-input-available", "ask_beta");
+    let (alfa_asked, _) = first.one("subgraph-tool-input-available", "ask_alfa");
+    assert!(beta_asked < alfa_asked, "beta did not ask first");
+    // The other question is closed: the model reads why, as its result.
+    let (closed_at, closed) = first.one("tool-output-available", "call_beta");
+    assert_eq!(closed["output"], CLOSED.trim(), "{closed}");
+    assert_eq!(closed["childScope"], "Run#1", "{closed}");
+    assert!(closed_at < first.finish_at());
+    assert!(first.all("tool-output-available", "call_alfa").is_empty());
+    assert_eq!(
+        tool_messages(&pool, &chat, "agent").await,
+        [("call_beta".to_string(), CLOSED.trim().to_string())]
+    );
+    // Its child's row is closed too: the parent keeps one suspended child,
+    // the one the resume will find.
+    let rows = children(&pool, &chat).await;
+    assert_eq!(suspended_children(&pool, &chat).await, 1, "{rows:?}");
+    assert_eq!(status_of(&rows, "alfa"), ["SUSPENDED"], "{rows:?}");
+    assert_eq!(status_of(&rows, "beta"), ["FAILED"], "{rows:?}");
+
+    let second = turn(&eng, "turno 1", Some(&answer(ALFA_ASKS)), &chat, "b2").await;
+    second.assert_done();
+    let paths = second.child_paths();
+    assert!(!paths.is_empty(), "the resumed child streamed nothing");
+    assert!(
+        paths
+            .iter()
+            .all(|p| format!("{p}>").starts_with("agent>Run#0>")),
+        "{paths:?}"
+    );
+    let said = second.child_result();
+    assert!(
+        said.starts_with("alfa: hecho, con") && said.contains(HUMAN),
+        "{said}"
+    );
+    let rows = children(&pool, &chat).await;
+    assert_eq!(status_of(&rows, "alfa"), ["COMPLETED"], "{rows:?}");
+    assert_eq!(status_of(&rows, "beta"), ["FAILED"], "{rows:?}");
+    let last = last_parent_request(&model);
+    assert_eq!(open_ids(&last.messages), Vec::<String>::new());
+    assert_eq!(answers_to(&last.messages, "call_beta"), [CLOSED.trim()]);
+    assert_eq!(
+        child_said(&answers_to(&last.messages, "call_alfa")[0]),
+        said
+    );
+
+    cleanup(&pool, &chat).await;
+    eng.shutdown().await;
+}
+
+#[tokio::test]
+#[serial]
+#[ignore = "requires DATABASE_URL — run with `cargo test -- --ignored`"]
+async fn the_closed_child_runs_again_on_its_thread_with_no_open_call() {
+    let eng = engine().await;
+    let pool = pool().await;
+    let chat = unique_chat("c");
+    cleanup(&pool, &chat).await;
+    let model = Arc::new(CallerModel::new(script(TURNS_BC)));
+    let _guard = OverrideGuard::install(model.clone());
+    two_questions_then_the_answer(&eng, &chat, "c").await;
+    // Beta's thread ends on its question, which no one will answer.
+    let beta_thread = "tool/Run/beta/hijo";
+    assert_eq!(tool_messages(&pool, &chat, beta_thread).await, []);
+
+    // A fresh turn runs beta again, on the same memory thread.
+    let third = turn(&eng, "turno 3", None, &chat, "c3").await;
+    third.assert_done();
+    let (_, beta) = third.one("tool-output-available", "call_beta_2");
+    assert_eq!(beta["output"]["hijo"]["result"], "beta: hecho", "{beta}");
+
+    // What beta's model received: its first turn, its question answered once
+    // with the abandoned-call text, then the new task. No id is left open.
+    let requests = child_requests(&model, "beta: terminá");
+    assert_eq!(requests.len(), 1);
+    let sent = &requests[0].messages;
+    assert_eq!(
+        open_ids(sent),
+        Vec::<String>::new(),
+        "a 400 on Anthropic/OpenAI"
+    );
+    assert_eq!(answers_to(sent, "ask_beta"), [ABANDONED.trim()]);
+    let turns: Vec<(MessageRole, &str)> = sent
+        .iter()
+        .filter(|m| m.role() != &MessageRole::System)
+        .map(|m| (m.role().clone(), m.tool_call_id().unwrap_or(m.content())))
+        .collect();
+    assert_eq!(
+        turns,
+        [
+            (MessageRole::User, "beta: preguntá"),
+            (MessageRole::Assistant, ""),
+            (MessageRole::Tool, "ask_beta"),
+            (MessageRole::User, "beta: terminá"),
+        ]
+    );
+    assert_eq!(
+        tool_messages(&pool, &chat, beta_thread).await,
+        [("ask_beta".to_string(), ABANDONED.trim().to_string())]
+    );
+    let rows = children(&pool, &chat).await;
+    assert_eq!(
+        status_of(&rows, "beta"),
+        ["FAILED", "COMPLETED"],
+        "{rows:?}"
+    );
+    assert_eq!(
+        open_ids(&last_parent_request(&model).messages),
+        Vec::<String>::new()
+    );
 
     cleanup(&pool, &chat).await;
     eng.shutdown().await;
