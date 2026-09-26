@@ -6200,9 +6200,11 @@ no. `subgraph` sigue copiando `files` al estado del hijo, pero su `llm_call` no 
 **Tests.** `llm.rs` `files_parser_tests`: fuera del modo local, una entrada con `path` (sola o con
 `data`) falla y el archivo no se lee; en modo local se lee. `byte_acquisition.rs`: una fuente
 `Path` no se lee fuera del modo local. `registry.rs`: un `files` del estado global no llega a los
-inputs del `llm_call`; la tabla de campos del autor incluye `files`.
+inputs del `llm_call`; un `llm_call` con `path` falla antes de llamar al modelo; la tabla de campos
+del autor incluye `files`.
 
-**ADP.** Sin cambios: ADP pone los adjuntos en `config.files` de los `llm_call` de primer nivel y
-nunca usa `path` ni pasa `files` a un sub-agente. Un grafo local con `path` corre con
-`COLMENA_LOCAL=true`.
+**ADP.** [Nota de migración](adp_migration/2026-09-26-attachment-files-hardening.md). Sin cambios en
+producción: ADP pone los adjuntos en `config.files` de los `llm_call` de primer nivel y nunca usa
+`path` ni pasa `files` a un sub-agente. Un grafo local con `path` corre con `COLMENA_LOCAL=true`,
+que nunca va en un worker compartido: deja leer su disco.
 **Estado.** done.

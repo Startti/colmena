@@ -12,6 +12,12 @@ Los cambios que quedan dentro del motor no llevan nota aquí.
 |---|------|---------------|---------------------------|
 | 1 | [Memoria de una tool por quien la llama](2026-09-26-nested-tool-memory-per-caller.md) | Ninguna de código: subir el pin, actualizar los comentarios de `memory-mode.ts`, `role-shared.ts` y `creator-v2-defs.ts`, y medir prod en solo lectura antes de promover | Nada al compilar. Sin subir el pin, el mismo asset con memoria a dos niveles sigue compartiendo hilo, y una corrida de un nivel le contesta al otro su pregunta pendiente |
 
+## 2026-09-26 — adjuntos: el hijo no lee `files` de su estado, `path` solo en local, URLs solo públicas
+
+| # | Nota | Acción de ADP | Qué se rompe si se ignora |
+|---|------|---------------|---------------------------|
+| 1 | [`files` del autor, `path` en local, cliente guardado](2026-09-26-attachment-files-hardening.md) | Ninguna de código; en local, `COLMENA_ATTACHMENT_ALLOW_PRIVATE_HOSTS=1` para adjuntos en `localhost`; ni esa variable ni `COLMENA_LOCAL=true` en un worker compartido | Nada en producción; en local, un adjunto en `localhost` no se baja |
+
 ## 2026-09-25 — una llamada a una tool `parallel` trae su propia identidad
 
 | # | Nota | Acción de ADP | Qué se rompe si se ignora |
