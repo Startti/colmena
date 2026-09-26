@@ -5787,9 +5787,9 @@ segundo dato.
 **ADP.** Sin cambios de API.
 **Estado.** done.
 
-## 116. Endurecimiento: las credenciales del autor en `http_request` se cuentan por hoja, y el motor marca los secretos de `config`
+## 124. Endurecimiento: las credenciales del autor en `http_request` se cuentan por hoja, y el motor marca los secretos de `config`
 
-**Qué cambia.** La regla de §111 (las credenciales del autor van solo al origen del autor o a
+**Qué cambia.** La regla de §118 (las credenciales del autor van solo al origen del autor o a
 `allowed_hosts`) reconoce más credenciales:
 - **Por hoja.** El despacho de tools y `for_each` escriben la clave del motor
   `__colmena_authored_leaves` (`env_provenance::authored_leaves`): los punteros de cada hoja
