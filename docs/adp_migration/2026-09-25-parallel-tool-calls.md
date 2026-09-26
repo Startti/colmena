@@ -101,16 +101,77 @@ Frames reales del E2E `src/libs/colmena/tests/parallel_tool_groups.rs` (grafo
 Con cada hijo durmiendo 2 s y 2,3 s, el grupo tarda 2,31 s del primer
 `tool-input-available` al último `tool-output-available`; con `parallel: false`, 4,34 s.
 
-### Por qué todavía no declarar `parallel`
+### Por qué no declarar `parallel` en este paso
 
-Si en un grupo suspende más de una llamada (dos hijos que preguntan), hoy el motor
-conserva solo la primera pregunta en el orden del modelo. Las otras llamadas reciben el
-marcador «NO se ejecutó» aunque corrieron, y sus hijos quedan suspendidos. Un paso
-posterior espera a todas y hace las preguntas juntas. Hasta ese paso, una tool cuyo hijo
-puede preguntar no debe ser `parallel`.
+En este paso, si en un grupo suspendía más de una llamada (dos hijos que preguntan), el
+motor conservaba solo la primera pregunta en el orden del modelo. Las otras llamadas
+recibían el marcador «NO se ejecutó» aunque corrieron, y sus hijos quedaban suspendidos.
+El paso 3, abajo, lo cierra: desde ahí se puede declarar `parallel`.
+
+## Paso 3: una pregunta por turno dentro de un grupo
+
+**Acción de ADP:** ninguna de código. Desde este paso, `parallel` se puede declarar en
+una tool cuyo hijo pregunta, como Run My Agent.
+
+Cuando uno o más hijos de un grupo preguntan, el motor espera a que termine el grupo y
+suspende el turno en **una** pregunta: la de la primera llamada en el orden del modelo,
+aunque otra haya preguntado antes. Lo que ve ADP:
+
+- **Un solo `finish` con `finishReason: "suspended"`**, con la pregunta de esa llamada
+  en `output.questions` y su id en `output._pending_tool_call_id`. Se muestra y se
+  reanuda como cualquier otra pregunta.
+- **Los hermanos que terminaron llegan antes.** Su `tool-output-available`, con su
+  `childScope`, sale antes del `finish`, y su resultado queda en la historia.
+- **Cada otra pregunta se cierra.** Su llamada recibe un `tool-output-available` (con
+  su `childScope`) cuyo `output` es el texto que lee el modelo:
+  «Este agente hizo una pregunta mientras otro también preguntaba. No terminó: volvé a
+  correrlo solo cuando termine el otro.» Es un string, no un objeto. La fila del hijo en
+  `dag_runs` pasa a `FAILED`, con sus descendientes suspendidos, así que el padre queda
+  con un solo hijo `SUSPENDED`. La frontera de ese hijo (`subgraph-node-start` en
+  `agent>Run#1`) no recibe `subgraph-node-end`, como la de cualquier hijo suspendido.
+- **Las llamadas que no corrieron** (las que venían después de una pregunta en su misma
+  cadena, y las pedidas después del grupo) reciben el marcador «NO se ejecutó», como en
+  el paso 2.
+- **El resume** reanuda el hijo de la pregunta que quedó, con el mismo `childScope`: sus
+  frames llegan con `path` `agent>Run#0>…`. Como en todo resume de un `subgraph` usado
+  como tool, ese turno no emite otro `subgraph-node-start` de la frontera ni un
+  `tool-output-available` de la llamada reanudada. Tampoco emite el `subgraph-node-end`
+  de la frontera: la que se abrió en el turno de la pregunta no se cierra nunca.
+- **Re-correr el agente cerrado funciona.** El modelo puede volver a llamarlo en una
+  corrida siguiente, o en el mismo turno reanudado (después de leer el texto de cierre),
+  y lo hace en el mismo hilo de memoria. Ese hilo termina con la pregunta abierta, y
+  la corrida fresca la contesta primero con otro texto
+  («Esta llamada quedó sin resultado: la conversación siguió sin ella (se cortó, o era
+  una pregunta que no se contestó). No la retomes; si todavía hace falta, volvé a
+  hacerla.»). Sin eso, Anthropic y OpenAI devolverían 400 en ese hilo para siempre.
+  Esta curación vale para **todos** los agentes en una corrida fresca, no solo para Run
+  My Agent. También cubre un Stop o el watchdog a mitad de turno: el mensaje del
+  asistente ya estaba guardado con sus ids abiertos, y los resultados que ya habían
+  terminado en un grupo se pierden, porque se escriben al cerrar el grupo.
+
+Frames reales del E2E `src/libs/colmena/tests/parallel_tool_suspend.rs` (grafo
+`tests/graphs/agents/parallel_tool_suspend.json`), recortados. Los dos hijos preguntan;
+`beta` antes, pero el modelo pidió `alfa` primero:
+
+```json
+{ "type": "tool-input-available",  "toolCallId": "call_alfa", "childScope": "Run#0", "path": "agent" }
+{ "type": "subgraph-node-start",   "node_id": "Run#0", "node_type": "subgraph", "path": "agent>Run#0" }
+{ "type": "tool-input-available",  "toolCallId": "call_beta", "childScope": "Run#1", "path": "agent" }
+{ "type": "subgraph-node-start",   "node_id": "Run#1", "node_type": "subgraph", "path": "agent>Run#1" }
+{ "type": "subgraph-tool-input-available", "toolCallId": "ask_beta", "toolName": "Preguntar", "path": "agent>Run#1>hijo" }
+{ "type": "subgraph-tool-input-available", "toolCallId": "ask_alfa", "toolName": "Preguntar", "path": "agent>Run#0>hijo" }
+{ "type": "tool-output-available", "toolCallId": "call_beta", "output": "Este agente hizo una pregunta mientras otro también preguntaba. No terminó: volvé a correrlo solo cuando termine el otro.", "childScope": "Run#1", "path": "agent" }
+{ "type": "finish", "finishReason": "suspended", "output": { "questions": [{ "id": "pregunta_hijo", "question": "¿alfa: seguimos?" }], "_pending_tool_call_id": "call_alfa" } }
+```
+
+Filas después de ese turno: en `dag_runs`, el hijo de `alfa` queda `SUSPENDED` y el de
+`beta` `FAILED`. En `llm_node_history` del padre, el `tool` de `call_beta` tiene el texto
+de arriba. El turno con la respuesta termina, y un tercer turno que vuelve a correr
+`beta` le manda a su modelo un hilo sin ids abiertos.
 
 ## Documentación
 
 - [sse_events_reference.md](../sse_events_reference.md#childscope--una-llamada-a-una-tool-parallel)
 - [Guía 19, «Varias llamadas a la misma tool en un turno»](../developer_guide/19_nested_agents_and_subgraphs.md#varias-llamadas-a-la-misma-tool-en-un-turno-parallel)
 - [Guía 19, «Un grupo de llamadas `parallel` corre a la vez»](../developer_guide/19_nested_agents_and_subgraphs.md#un-grupo-de-llamadas-parallel-corre-a-la-vez)
+- [Guía 19, «Suspensión dentro de un batch paralelo de tools»](../developer_guide/19_nested_agents_and_subgraphs.md#suspensión-dentro-de-un-batch-paralelo-de-tools)

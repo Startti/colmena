@@ -441,15 +441,10 @@ El loop del agente reparte las llamadas de un mensaje en tandas, en el orden del
   que sus frames salen después de los del grupo.
 - **Si una llamada del grupo suspende** (un `suspend` o `secure_suspend` en su hijo),
   su cadena para ahí. Las otras cadenas terminan, porque ya estaban corriendo, y sus
-  resultados se escriben. Después el run se suspende como con una llamada sola: las
-  llamadas de esa cadena que no corrieron y las que el modelo pidió después del grupo
-  reciben el marcador «NO se ejecutó» (ver
-  [Suspensión dentro de un batch paralelo de tools](#suspensión-dentro-de-un-batch-paralelo-de-tools)).
-- **Varias preguntas en un grupo, todavía no.** Si suspende más de una llamada del
-  grupo, hoy se conserva solo la primera en el orden del modelo. Las otras reciben el
-  marcador aunque corrieron, y sus hijos quedan suspendidos. Esperar a todas y hacer
-  varias preguntas llega en un paso posterior; hasta entonces, no declares `parallel`
-  en una tool cuyo hijo pueda preguntar.
+  resultados se escriben. Después el run se suspende en **una** pregunta: si
+  preguntaron varias, la primera en el orden del modelo; las otras se cierran (fila del
+  hijo `FAILED`, y el modelo lee por qué). Detalle en
+  [Suspensión dentro de un batch paralelo de tools](#suspensión-dentro-de-un-batch-paralelo-de-tools).
 
 E2E: `tests/graphs/agents/parallel_tool_groups.json`, que corre
 `src/libs/colmena/tests/parallel_tool_groups.rs`. El modelo guionado pide `Run` dos
@@ -690,8 +685,15 @@ fresca a propósito, como defensa en profundidad.
 
 ### Suspensión dentro de un batch paralelo de tools
 
-Un modelo puede pedir **varias tools en un mismo turno**. Si una de ellas suspende,
-el loop del agente corta ahí: las llamadas ordenadas después **no se ejecutan**.
+Un modelo puede pedir **varias tools en un mismo turno**. Si una de ellas suspende, el
+turno se pausa en **una sola pregunta**. Qué pasa con las demás llamadas depende de
+cómo corren: una tras otra (tools sin `parallel`) o en un grupo (tools `parallel`, ver
+[Un grupo de llamadas `parallel` corre a la vez](#un-grupo-de-llamadas-parallel-corre-a-la-vez)).
+
+#### En serie: la pregunta corta el batch
+
+El loop del agente corta en la llamada que suspendió: las llamadas ordenadas después
+**no se ejecutan**.
 
 Eso es deliberado. Ejecutarlas igual invertiría la garantía que el `suspend` existe
 para imponer — un batch como `[preguntar("¿borro la base?"), borrar_base()]`
@@ -725,18 +727,136 @@ historial persistido:   (abierta)    marcador      marcador
                     respuesta del humano
 ```
 
-Consecuencias prácticas al diseñar un agente HITL:
+#### En un grupo `parallel`: la pregunta espera al grupo
+
+Cuando una llamada del grupo pregunta, las otras cadenas ya están corriendo. El loop
+espera a que termine todo el grupo y recién ahí arma el turno:
+
+- **Una pregunta por turno: la primera en el orden del modelo**, no la primera en
+  preguntar. En el E2E de abajo `beta` pregunta antes, pero el modelo pidió `alfa`
+  primero, y el turno se suspende en la pregunta de `alfa`.
+- **Cada otra pregunta se cierra.** El loop llama una vez por cada una a
+  `ToolExecutor::close_suspended`. `DagToolExecutor` pasa la fila del hijo de esa
+  llamada a `FAILED`, y también a sus descendientes que sigan `SUSPENDED`
+  (`fail_if_suspended` + `fail_suspended_descendants`, lo mismo que un resume
+  rechazado). Solo cierra la fila si su `parent_session_id` es este run. Así el padre
+  queda con un solo hijo `SUSPENDED`, el que `find_suspended_child` encuentra al
+  reanudar. El modelo recibe como resultado de la llamada cerrada el texto de
+  [`closed_by_parallel_suspend.md`](../../src/libs/colmena/text/prompts/agent_loop/closed_by_parallel_suspend.md),
+  y el stream lo trae en su `tool-output-available`:
+
+  > Este agente hizo una pregunta mientras otro también preguntaba. No terminó: volvé
+  > a correrlo solo cuando termine el otro.
+- **Lo que no corrió recibe «NO se ejecutó».** Son las llamadas que venían después de
+  cualquier pregunta en su misma cadena (la cadena se corta en su pregunta) y las que
+  el modelo pidió después del grupo. Una llamada que corrió nunca recibe el marcador.
+- **Lo que terminó queda.** El resultado de una cadena que terminó se escribe en la
+  historia, y su `tool-output-available` sale antes del `finish` suspendido.
+- **El resume contesta la que quedó.** Es la única llamada del mensaje del asistente
+  sin resultado. `llm_call` la reproduce con la respuesta y con el mismo k, así que el
+  hijo reanudado vuelve a colgarse de `<tool>#<k>`.
+
+Frames reales del E2E (`src/libs/colmena/tests/parallel_tool_suspend.rs`, escenario B),
+recortados. `Run` es `parallel` y `dynamic` con el hilo fijo en `${agentId}`, como Run
+My Agent; el modelo pidió `alfa` y `beta` en un mensaje, y los dos hijos preguntan:
+
+```json
+{ "type": "tool-input-available",  "toolCallId": "call_alfa", "input": { "agentId": "alfa", "task": "alfa: preguntá lento" }, "childScope": "Run#0", "path": "agent" }
+{ "type": "subgraph-node-start",   "node_id": "Run#0", "node_type": "subgraph", "path": "agent>Run#0" }
+{ "type": "tool-input-available",  "toolCallId": "call_beta", "input": { "agentId": "beta", "task": "beta: preguntá" }, "childScope": "Run#1", "path": "agent" }
+{ "type": "subgraph-node-start",   "node_id": "Run#1", "node_type": "subgraph", "path": "agent>Run#1" }
+{ "type": "subgraph-tool-input-available", "toolCallId": "ask_beta", "toolName": "Preguntar", "input": { "question": "¿beta: seguimos?" }, "path": "agent>Run#1>hijo" }
+{ "type": "subgraph-tool-input-available", "toolCallId": "ask_alfa", "toolName": "Preguntar", "input": { "question": "¿alfa: seguimos?" }, "path": "agent>Run#0>hijo" }
+{ "type": "tool-output-available", "toolCallId": "call_beta", "output": "Este agente hizo una pregunta mientras otro también preguntaba. No terminó: volvé a correrlo solo cuando termine el otro.", "childScope": "Run#1", "path": "agent" }
+{ "type": "finish", "finishReason": "suspended", "output": { "__colmena_status": "SUSPENDED", "questions": [{ "id": "pregunta_hijo", "question": "¿alfa: seguimos?" }], "_pending_tool_call_id": "call_alfa" } }
+```
+
+- En `dag_runs`, los hijos del padre quedan uno `SUSPENDED` (`alfa`) y uno `FAILED`
+  (`beta`); `SELECT count(*)` de los hijos `SUSPENDED` da 1.
+- En `llm_node_history` del padre (`node_id = 'agent'`), el único mensaje `tool` es el
+  de `call_beta`, con el texto de arriba.
+- El turno siguiente, con la respuesta, reanuda el hijo de `alfa` y el padre termina
+  con «Listo.». Los frames del hijo reanudado vienen con `path` `agent>Run#0>hijo`.
+  Como en cualquier resume de un `subgraph` usado como tool, ese turno no emite otro
+  `subgraph-node-start` de la frontera `agent>Run#0` ni un `tool-output-available` de
+  `call_alfa`. Tampoco emite el `subgraph-node-end` de `agent>Run#0`: la frontera que
+  se abrió en el turno 1 no se cierra nunca.
+- Ni la frontera de la pregunta que queda (`agent>Run#0`) ni la de la cerrada
+  (`agent>Run#1`) emiten `subgraph-node-end` en el turno 1: un hijo suspendido deja su
+  frontera abierta, como siempre.
+
+Con una sola pregunta y un hermano que termina (escenario A), el `tool-output-available`
+del hermano sale antes del `finish` suspendido, y los hijos quedan uno `SUSPENDED` y
+uno `COMPLETED`.
+
+#### Re-correr el agente cerrado
+
+El texto le dice al modelo que vuelva a correr el agente cerrado, y eso funciona. El
+hilo del hijo cerrado (con memoria; en Run My Agent, `dynamic` con un hilo por
+`agentId`) termina en el mensaje del asistente que pidió `Preguntar`, con ese id
+abierto. En la corrida siguiente sobre ese hilo, `AgentService::run` contesta primero,
+en el camino fresco y nunca en el resume, cada id que el último mensaje del asistente
+dejó sin resultado. Lo contesta con
+[`abandoned_tool_call.md`](../../src/libs/colmena/text/prompts/agent_loop/abandoned_tool_call.md),
+y después agrega el prompt nuevo:
+
+> Esta llamada quedó sin resultado: la conversación siguió sin ella (se cortó, o era
+> una pregunta que no se contestó). No la retomes; si todavía hace falta, volvé a
+> hacerla.
+
+Sin eso, la request llevaría el id abierto: un 400 en Anthropic y OpenAI, en esa
+request y en todas las siguientes del hilo. La curación vale para **todos** los
+agentes en una corrida fresca:
+- un hijo que un grupo cerró;
+- un hijo cuyo resume se rechazó (`close_refused`);
+- una corrida que un Stop o el watchdog cortó después de guardar el mensaje del
+  asistente, con los ids que todavía no tenían resultado (una llamada sola guarda el
+  suyo apenas termina).
+
+Solo se contesta el turno en el que termina el hilo. Un turno que el hilo ya dejó
+atrás (con un `user` o un `assistant` después) no se toca, porque un `tool` en ese
+lugar lo rechazan igual.
+
+En el E2E (escenario C), un tercer turno fresco vuelve a llamar a `beta` en el mismo
+hilo (`tool/Run/beta/hijo`). El modelo de `beta` recibe, sin contar el system:
+`user` «beta: preguntá», el `assistant` con `ask_beta`, el `tool` de `ask_beta` con
+el texto de arriba y `user` «beta: terminá». Ningún id queda abierto, y
+`llm_node_history` guarda un solo mensaje `tool` para `ask_beta`.
+
+#### Un Stop a mitad de grupo
+
+Los resultados de un grupo se escriben cuando el grupo cierra, pero el mensaje del
+asistente se guarda antes de correr las llamadas. Un Stop (o el watchdog) a mitad de
+grupo pierde los resultados de las llamadas que ya habían terminado, y deja abiertos
+los ids que todavía no tenían resultado: los del grupo y los de las llamadas
+posteriores. Las llamadas solas anteriores al grupo ya guardaron el suyo, una por una.
+La próxima corrida fresca contesta los abiertos con
+`abandoned_tool_call.md`, así que el modelo sabe que no tiene esos resultados y los
+vuelve a pedir si le hacen falta.
+
+#### Riesgo conocido: el hilo de una tool es absoluto
+
+El hilo de memoria de una tool es `tool/<nombre>[/<hilo>]`, no anidado bajo el camino
+del que la llama. El mismo agente llamado a la vez desde dos niveles distintos (el
+raíz lo llama, y también un hijo del raíz) comparte hilo. Si uno de los dos tiene una
+pregunta pendiente y el otro arranca fresco, la curación contesta la pregunta
+pendiente. El resume posterior de esa pregunta ya no encuentra la llamada y degrada a
+una corrida fresca, con un `warn` en el log (`resume_answer present but no pending
+tool call in history`). Antes de la curación, ese caso era un 400. No está arreglado:
+habría que anidar el hilo bajo el camino del que llama.
+
+#### Consecuencias prácticas al diseñar un agente HITL
 
 - **No asumas que las tools del mismo turno corrieron.** Si el modelo pregunta y
   actúa en la misma tanda, lo que sigue a la pregunta se pospone hasta después de
   la respuesta, y solo si el modelo lo vuelve a pedir.
-- **Un `suspend` por turno.** Dos tools que suspenden en el mismo batch no generan
-  dos preguntas: la primera suspende y la segunda queda marcada como no ejecutada.
-  Si necesitás dos datos del usuario, pedilos en una sola pregunta o en turnos
-  distintos. En un grupo de llamadas `parallel` las otras cadenas terminan antes de
-  suspender; ver [Un grupo de llamadas `parallel` corre a la vez](#un-grupo-de-llamadas-parallel-corre-a-la-vez).
+- **Una pregunta por turno.** Dos tools que suspenden en el mismo batch no generan
+  dos preguntas. En serie, la primera suspende y la segunda queda marcada como no
+  ejecutada. En un grupo `parallel`, la primera en el orden del modelo suspende y la
+  otra se cierra. Si necesitás dos datos del usuario, pedilos en una sola pregunta o
+  en turnos distintos.
 - **El costo es a lo sumo un turno extra**, cuando el modelo decide re-emitir la
-  llamada pospuesta.
+  llamada pospuesta o volver a correr la cerrada.
 - **El orden del batch lo elige el modelo, no tu prompt.** Por eso el síntoma es
   intermitente: si el modelo pone el `suspend` al final —cosa que hace a menudo— no
   queda ninguna llamada sin ejecutar y no se nota nada. Para reproducirlo a

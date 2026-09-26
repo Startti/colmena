@@ -5379,3 +5379,53 @@ de reanudar a `alfa`.
 
 **ADP.** Sin código. La guía 19 y la nota de migración citan estos frames en la entrada
 106.
+
+## 106. Docs: una pregunta por turno dentro de un grupo, y el paso 3 de la nota de ADP (parallel tools, 3f)
+
+**Qué cambió.** Solo docs, sobre lo de las entradas 101 a 105.
+- **Guía 19.** En la sección de grupos, las dos viñetas de suspensión («Si una llamada
+  del grupo suspende» y «Varias preguntas en un grupo, todavía no») pasan a una sola,
+  con el comportamiento nuevo. «Suspensión dentro de un batch paralelo de tools» se
+  reescribe en subsecciones:
+  - en serie, lo de antes;
+  - en un grupo: manda la primera en el orden del modelo, `close_suspended`, la fila
+    `FAILED`, el texto de cierre, «NO se ejecutó» solo para lo que no corrió, lo que
+    terminó queda, y el resume con el mismo k. Con frames y filas reales del escenario B;
+  - re-correr el cerrado: la curación, sus tres causas y la request del escenario C;
+  - un Stop a mitad de grupo: pierde los resultados ya terminados, y deja abiertos los
+    ids que todavía no tenían resultado (los del grupo y los posteriores);
+  - un riesgo conocido que no se arregla acá. El hilo de una tool es absoluto
+    (`tool/<nombre>/<hilo>`), así que el mismo agente llamado a la vez desde dos niveles
+    comparte hilo. Si uno tiene una pregunta pendiente y el otro arranca fresco, la
+    curación la contesta, y el resume degrada a una corrida fresca con un `warn` (antes
+    era un 400).
+- **Frames del resume.** El turno que reanuda la pregunta que quedó no emite otro
+  `subgraph-node-start` de su frontera, ni un `tool-output-available` de su llamada, ni
+  su `subgraph-node-end`: la frontera abierta en el turno de la pregunta no se cierra
+  nunca. Lo dicen la guía 19, la nota de ADP y `sse_events_reference.md`.
+- **Nota de migración de ADP.** «Por qué todavía no declarar `parallel`» pasa a «Por
+  qué no declarar `parallel` en este paso», y se suma el paso 3, con frames reales de B
+  y su línea en `adp_migration/README.md`.
+- `18_troubleshooting.md` suma la causa nueva del 400 (un hilo que termina con un id
+  abierto y recibe un prompt), cerrada en la entrada 102.
+- `sse_events_reference.md` suma la pregunta dentro de un grupo a la sección de
+  `childScope`.
+
+**Tests.** No aplica. `check_doc_links.py docs`: 0 rotos y 0 números de sección
+repetidos. Las anclas que se agregan o se usan resuelven. Los conteos fijados no
+cambian.
+
+**Mutación.** No aplica.
+
+**E2E.** No aplica. Los frames que citan la guía y la nota salen de los E2E de las
+entradas 104 y 105.
+
+**ADP.** Leer el paso 3 de la nota. No hace falta código, y desde este paso se puede
+declarar `parallel` en Run My Agent. ADP ve:
+- un solo `finish` suspendido, con la pregunta de la primera llamada;
+- el `tool-output-available` de cada pregunta cerrada, con su `childScope` y un
+  `output` string (el texto que lee el modelo), y la fila de su hijo `FAILED`;
+- el resume bajo el mismo `childScope`, sin `tool-output-available` de la llamada
+  reanudada ni `subgraph-node-end` de su frontera.
+
+La curación de ids abandonados vale para todos los agentes en corridas frescas.
