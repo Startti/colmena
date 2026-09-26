@@ -5829,8 +5829,12 @@ El parser salta una entrada que no puede leer (base64 inválido, `path` ilegible
 entregar, así que desde la primera entrada que faltaba cada archivo se registraba con el id y
 la metadata de otro: con `files: [bad, good]`, los bytes de `good` quedaban como `doc-bad`.
 Ahora el id sale del archivo parseado (`FileData.document_id`) y la metadata, de su propia
-entrada: `file_registrations` empareja cada archivo, en orden, con la siguiente entrada que
-tiene el `id`, el `filename` y el `mime_type` con que se parseó.
+entrada: `parse_file_entries` devuelve también el índice de la entrada de la que salió cada
+archivo, y `file_registrations` empareja cada archivo, en orden, con la siguiente de esas
+entradas que tiene el `id`, el `filename` y el `mime_type` con que se parseó; una entrada que el
+parser saltó nunca es candidata. Queda un caso: un archivo que la resolución descarta, cuya
+entrada tiene el mismo `id`, `filename` y `mime_type` que la de un archivo posterior, le presta
+a ese archivo su `label`, `description` y `url`/`path`.
 
 Un archivo cuyos bytes no se pudieron guardar se sigue registrando si está en la Files API del
 provider (`load_attachment` lo lee por su `provider_file_id`), sin `storage_key`: no figura
@@ -5842,7 +5846,8 @@ ahora `stored`.
 **Tests.** En `llm.rs::files_parser_tests`: `[bad, good]` → `good` conserva `doc-good`, su
 label y su description (antes: `doc-bad`); un archivo que la resolución descarta no corre la
 label de los siguientes (antes: `[A, B]` en vez de `[A, C]`); una entrada que no es un objeto
-no se toma por la de un archivo sin id (antes: sin label). E2E con el motor
+no se toma por la de un archivo sin id (antes: sin label); una entrada saltada con el mismo
+`id`, `filename` y `mime_type` que la siguiente no le presta su label (antes: `Skipped`). E2E con el motor
 (`tests/graphs/agents/files_skipped_entry_keeps_ids.json`, Postgres local,
 `LocalHttpStorageAdapter`): antes del fix la única fila era `doc-bad | Bad` con los bytes de
 `good.txt`; después, `doc-good | Good`. La llamada al modelo no se hizo (sin credenciales de

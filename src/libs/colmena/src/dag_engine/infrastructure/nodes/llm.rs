@@ -1563,11 +1563,13 @@ impl ExecutableNode for LlmNode {
 
         // 2.2 Add User Prompt (system message is pushed after tools are resolved — see below)
         let mut resolved_files = Vec::new();
+        // The `files[]` index of the entry each parsed file came from (Step 3).
+        let mut parsed_entries = Vec::new();
 
         // Check if there are any files passed in the node inputs
         if let Some(files_val) = inputs.get("files").or_else(|| config.get("files")) {
             if let Some(files_arr) = files_val.as_array() {
-                resolved_files = parse_file_entries(files_arr)?;
+                (resolved_files, parsed_entries) = parse_file_entries(files_arr)?;
             }
         }
 
@@ -1846,7 +1848,7 @@ impl ExecutableNode for LlmNode {
                 .cloned()
                 .unwrap_or_default();
 
-            let registrations = file_registrations(&resolved_files, &raw_entries);
+            let registrations = file_registrations(&resolved_files, &raw_entries, &parsed_entries);
             for (file, registration) in resolved_files.iter().zip(registrations) {
                 let FileRegistration {
                     document_id,
@@ -4243,16 +4245,18 @@ const DEFAULT_FILENAME: &str = "upload.file";
 /// ```
 ///
 /// Priority when multiple sources are present: data > url > path.
-/// Returns `Vec<FileData>`. Per-file errors are logged and skipped; only the
+/// Returns the files and, for each, the index in `arr` of the entry it was
+/// parsed from. Per-file errors are logged and skipped; only the
 /// hard-limit errors (`DataFieldTooLarge`, `PathFieldTooLarge`,
 /// `UrlWithoutDocumentId`) propagate.
 pub(crate) fn parse_file_entries(
     arr: &[serde_json::Value],
-) -> Result<Vec<crate::llm::domain::FileData>, crate::llm::domain::LlmError> {
+) -> Result<(Vec<crate::llm::domain::FileData>, Vec<usize>), crate::llm::domain::LlmError> {
     use crate::llm::domain::{FileData, FileSource, LlmError};
     let mut out = Vec::with_capacity(arr.len());
+    let mut kept = Vec::with_capacity(arr.len());
 
-    for file_obj in arr {
+    for (index, file_obj) in arr.iter().enumerate() {
         let Some(obj) = file_obj.as_object() else {
             continue;
         };
@@ -4351,9 +4355,10 @@ pub(crate) fn parse_file_entries(
             source,
             retained_inline_bytes: None,
         });
+        kept.push(index);
     }
 
-    Ok(out)
+    Ok((out, kept))
 }
 
 /// Persist the bytes of an inbound attachment (`inputs.files[]`) to the
@@ -4404,13 +4409,17 @@ struct FileRegistration {
 /// `files[]` entry it came from. The id is the one the file was parsed with.
 ///
 /// `files` is not a positional copy of `entries`: parsing skips an entry it
-/// cannot read and resolution drops a file it cannot deliver, so once an
-/// earlier entry is gone the n-th file is not the n-th entry. What survives
-/// both is order, so each file takes the next entry, in order, that has the
-/// `id`, `filename` and `mime_type` it was parsed with.
+/// cannot read and resolution drops a file it cannot deliver. `parsed` holds
+/// the index of the entry each parsed file came from, so skipped entries are
+/// never candidates. Resolution keeps order, so each file takes the next
+/// parsed entry, in order, that has the `id`, `filename` and `mime_type` it
+/// was parsed with. One case remains: a dropped file whose entry has the same
+/// `id`, `filename` and `mime_type` as a later file's lends that file its
+/// `label`, `description` and `url`/`path`.
 fn file_registrations(
     files: &[crate::llm::domain::FileData],
     entries: &[serde_json::Value],
+    parsed: &[usize],
 ) -> Vec<FileRegistration> {
     use crate::llm::domain::attachments::{generate_attachment_id, AttachmentSource};
     use crate::llm::domain::FileSource;
@@ -4419,12 +4428,12 @@ fn file_registrations(
     files
         .iter()
         .map(|file| {
-            let raw = entries[next..]
+            let raw = parsed[next..]
                 .iter()
-                .position(|entry| parsed_from(entry, file))
+                .position(|&i| entries.get(i).is_some_and(|entry| parsed_from(entry, file)))
                 .map(|offset| {
                     next += offset + 1;
-                    &entries[next - 1]
+                    &entries[parsed[next - 1]]
                 });
             let text = |key: &str| raw.and_then(|v| v.get(key)).and_then(|v| v.as_str());
             let source = match &file.source {
@@ -4997,7 +5006,7 @@ mod files_parser_tests {
 
     fn parse(files: serde_json::Value) -> Result<Vec<crate::llm::domain::FileData>, LlmError> {
         let arr = files.as_array().expect("array");
-        parse_file_entries(arr)
+        parse_file_entries(arr).map(|(files, _)| files)
     }
 
     #[test]
@@ -5109,10 +5118,10 @@ mod files_parser_tests {
              "label": "Good", "description": "the good one", "data": "aGVsbG8="}
         ]);
         let entries = entries.as_array().unwrap();
-        let files = parse_file_entries(entries).unwrap();
+        let (files, parsed) = parse_file_entries(entries).unwrap();
         assert_eq!(files.len(), 1);
 
-        let got = file_registrations(&files, entries);
+        let got = file_registrations(&files, entries, &parsed);
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].document_id, "doc-good");
         assert_eq!(got[0].label.as_deref(), Some("Good"));
@@ -5129,13 +5138,13 @@ mod files_parser_tests {
             {"filename": "c.pdf", "mime_type": "application/pdf", "label": "C", "data": "aGVsbG8="}
         ]);
         let entries = entries.as_array().unwrap();
+        let (mut files, parsed) = parse_file_entries(entries).unwrap();
         let labels = |files: &[crate::llm::domain::FileData]| -> Vec<Option<String>> {
-            file_registrations(files, entries)
+            file_registrations(files, entries, &parsed)
                 .into_iter()
                 .map(|r| r.label)
                 .collect()
         };
-        let mut files = parse_file_entries(entries).unwrap();
         let all = [Some("A".into()), Some("B".into()), Some("C".into())];
         assert_eq!(labels(&files), all);
 
@@ -5150,10 +5159,28 @@ mod files_parser_tests {
         // must still not be taken for that file's entry.
         let entries = json!(["not a file", {"label": "L", "data": "aGVsbG8="}]);
         let entries = entries.as_array().unwrap();
-        let files = parse_file_entries(entries).unwrap();
+        let (files, parsed) = parse_file_entries(entries).unwrap();
 
-        let got = file_registrations(&files, entries);
+        let got = file_registrations(&files, entries, &parsed);
         assert_eq!(got[0].label.as_deref(), Some("L"));
+    }
+
+    #[test]
+    fn a_skipped_entry_like_the_next_one_does_not_lend_it_its_metadata() {
+        // Two entries with the same id, filename and mime type; the parser
+        // skips the first one. The file comes from the second entry.
+        let entries = json!([
+            {"id": "doc-1", "filename": "a.txt", "mime_type": "text/plain",
+             "label": "Skipped", "data": "%%% not base64"},
+            {"id": "doc-1", "filename": "a.txt", "mime_type": "text/plain",
+             "label": "Kept", "data": "aGVsbG8="}
+        ]);
+        let entries = entries.as_array().unwrap();
+        let (files, parsed) = parse_file_entries(entries).unwrap();
+        assert_eq!(parsed, [1]);
+
+        let got = file_registrations(&files, entries, &parsed);
+        assert_eq!(got[0].label.as_deref(), Some("Kept"));
     }
 }
 

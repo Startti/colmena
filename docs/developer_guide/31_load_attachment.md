@@ -375,9 +375,11 @@ momentos:
 
 Cada archivo se registra con el `id` con que se parseó y con la metadata (`label`,
 `description`, `url`/`path`) de su propia entrada. Una entrada que el parser salta (base64
-inválido, `path` ilegible, sin `data`/`url`/`path`, algo que no es un objeto) o un archivo que
-la resolución descarta no corre el id ni la metadata de los que vienen después
-(CHANGELOG 2026-09 §113).
+inválido, `path` ilegible, sin `data`/`url`/`path`, algo que no es un objeto) nunca se empareja
+con un archivo, y un archivo que la resolución descarta no corre el id ni la metadata de los que
+vienen después, salvo en un caso: si la entrada del archivo descartado tiene el mismo `id`,
+`filename` y `mime_type` que la de un archivo posterior, ese archivo toma su `label`,
+`description` y `url`/`path` (el id es el suyo igual) (CHANGELOG 2026-09 §113).
 
 ## Subgrafos
 

@@ -14,7 +14,7 @@
 - `filter_enabled_tools()` — Filters tool catalog by `enabled_tools` config, supporting wildcard, toolkit aliases, and exclusions
 - `dedup_tools_by_name()` — Removes duplicate tool definitions by name, keeping first occurrence (config-wins over built-in)
 - `resolve_synthetic_enabled_tools()` — Resolves enabled tools for synthetic tool blocks (gsheets, gdocs) with same filter semantics
-- `parse_file_entries()` — Parses JSON file array entries into FileData, handling base64 data, signed URLs, size validation
+- `parse_file_entries()` — Parses JSON file array entries into FileData, handling base64 data, signed URLs, size validation; also returns the index of the entry each file came from
 
 ### Private Functions
 - `find_pending_tool_call()` — Finds first unresolved tool call in message history for resume path
@@ -25,7 +25,7 @@
 - `sqlite_url_for_node()` — Extracts SQLite connection URL from node config
 - `format_temporal_context_block()` — Formats temporal context (ISO 8601 timestamp, location, locale, timezone) for LLM system message
 - `should_register_attachment_row()` — Gate: whether to register text-only attachment row (requires storage_key fallback when no provider_file_id)
-- `file_registrations()` — Step 3: document_id (from the parsed file), label, description and source for each resolved file, paired in order with its own `files[]` entry (entries the parser skipped or files resolution dropped do not shift the rest)
+- `file_registrations()` — Step 3: document_id (from the parsed file), label, description and source for each resolved file, paired in order with its own `files[]` entry among the ones the parser kept (a file resolution dropped does not shift the rest, unless its entry has the same id, filename and mime_type as a later file's: that file then takes its label, description and url/path)
 - `parsed_from()` — Whether a `files[]` entry is the one a file was parsed from (same `id`, `filename`, `mime_type`, with the parser's defaults)
 - `persist_attachment_bytes()` — Persists attachment bytes (inline or fetched from signed URL) to OutputStorageRepository, returns storage key
 - `build_initial_user_message()` — Creates first user message (Plan B: no file content inline; catalog block tells model what's available)
@@ -84,7 +84,7 @@
 - `stream_default_tests` (3 tests) — Verifies streaming defaults to true, explicit false disables, inputs override config
 - `build_initial_user_message_tests` (2 tests) — Verifies Plan B: initial user message never carries file content inline
 - `persist_attachment_bytes_tests` (5 async tests) — Tests byte persistence from inline/signed-URL sources, storage errors, precedence rules
-- `files_parser_tests` (10 tests) — Tests file JSON parsing: base64 data, size limits, signed URLs, data/URL precedence, legacy compat; and registration pairing when an entry is skipped or a file dropped
+- `files_parser_tests` (11 tests) — Tests file JSON parsing: base64 data, size limits, signed URLs, data/URL precedence, legacy compat; and registration pairing when an entry is skipped (even one identical to the next) or a file dropped
 - `find_pending_tool_call_tests` (5 tests) — Tests tool call resume detection: unmatched calls, resolved calls, multiple messages, empty history, multiple calls per message
 - `resolver_tests` (8 async tests) — Tests AttachmentResolverImpl: re-upload on expiry, unknown documents, missing storage on Generated rows, text-from-storage fallback, Step-3 text persistence, `$attachment:<id>` still streaming the bytes after a lazy provider upload
 
