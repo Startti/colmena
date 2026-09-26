@@ -920,9 +920,9 @@ PROMPT DEL USUARIO
   1. PLANNER ──► Genera plan con tareas agrupadas por fase y las persiste en DB
        │
        ▼  (loop por fases)
-  2. EJECUTAR tareas de la fase actual
-     ├─ [parallel=true] todas las tareas en paralelo
-     └─ [parallel=false] una a una secuencialmente
+  2. EJECUTAR tareas de la fase actual, siempre de a una
+     ├─ [alguna pendiente con parallel=true] todas las pendientes de la fase en esta vuelta, en serie
+     └─ [ninguna parallel] una sola tarea por vuelta del loop
        │
        ▼
   3. CRITIC (opcional) ──► valida resultado ──► puede SUSPENDER ⏸ (allow_suspend)
@@ -938,6 +938,14 @@ PROMPT DEL USUARIO
        ▼
   OUTPUT: final_response
 ```
+
+> [!NOTE]
+> `parallel` en una tarea del plan **no** la corre a la vez que otras. Solo decide
+> cuántas tareas pendientes de la fase toma el orchestrator en una vuelta; después las
+> corre una por una (`orchestrator.rs`, el `for task in tasks_to_run` que espera cada
+> sub-agente antes de pasar al siguiente). Lo que sí corre a la vez son las llamadas a
+> tools `parallel` dentro de un `llm_call`: ver la
+> [guía 19](19_nested_agents_and_subgraphs.md#un-grupo-de-llamadas-parallel-corre-a-la-vez).
 
 ### Configuración Mínima
 
