@@ -30,7 +30,7 @@ use crate::dag_engine::domain::node::ExecutableNode;
 use crate::dag_engine::domain::observer::{ChildScopeObserver, ExecutionObserver, NodeEvent};
 use crate::dag_engine::domain::state::DagStateRepository;
 use crate::dag_engine::domain::tool_configuration::{
-    MemoryMode, ToolConfiguration, DYNAMIC_PLACEHOLDER,
+    memory_node_path, MemoryMode, MissingThreadId, ToolConfiguration, DYNAMIC_PLACEHOLDER,
 };
 use crate::llm::domain::{LlmError, ToolCall, ToolExecutor, ToolResult};
 use async_trait::async_trait;
@@ -163,6 +163,10 @@ pub struct DagToolExecutor {
     /// Current subgraph-tool nesting depth, threaded from the parent llm_call so
     /// tool-invoked subgraphs receive `depth` and can enforce the recursion limit.
     subgraph_depth: u64,
+    /// The node id path of the `llm_call` whose tools this executor runs. A
+    /// caller inside a tool-invoked child keeps its own thread of a tool with
+    /// memory ([`memory_node_path`]). `None`: keyed as a root caller.
+    caller_node_path: Option<String>,
     /// The runs' state rows, for [`ToolExecutor::close_suspended`] to close
     /// the child run of a question the turn does not keep. `None`: nothing is
     /// closed.
@@ -179,18 +183,6 @@ pub const DEFAULT_MAX_TOOL_RESULT_STRING_BYTES: usize = 50 * 1024;
 const THREAD_ID_PARAM: &str = "thread_id";
 
 impl DagToolExecutor {
-    /// Deterministic ephemeral path qualifier for a node invoked as a tool.
-    ///
-    /// Derived from the `tool_call.id` so it is stable across a suspend/resume
-    /// cycle (the same pending tool call is replayed with the same id), which
-    /// keeps a tool-invoked node's conversational memory (subgraph child, or a
-    /// bare llm_call) scoped consistently. It is
-    /// unique per tool call, so two calls to the same subgraph-tool do NOT share
-    /// memory (stateless isolation).
-    fn ephemeral_subgraph_path(tool_call_id: &str) -> String {
-        format!("tool/{tool_call_id}")
-    }
-
     /// Normalize an LLM-supplied `thread_id` into a safe path/DB-key fragment:
     /// keep `[A-Za-z0-9._-]`, replace every other run with a single `-`, trim
     /// leading/trailing `-`, and cap at 128 chars. Returns `""` when nothing
@@ -332,6 +324,7 @@ impl DagToolExecutor {
             max_tool_result_bytes: DEFAULT_MAX_TOOL_RESULT_STRING_BYTES,
             gsheets_seen_sheets: std::sync::Mutex::new(std::collections::HashSet::new()),
             subgraph_depth: 0,
+            caller_node_path: None,
             state_repository: None,
         }
     }
@@ -339,6 +332,14 @@ impl DagToolExecutor {
     /// Set the current subgraph nesting depth (0 at the top level).
     pub fn with_subgraph_depth(mut self, depth: u64) -> Self {
         self.subgraph_depth = depth;
+        self
+    }
+
+    /// Set the node id path of the `llm_call` whose tools this executor runs.
+    /// A tool with memory it calls from inside a tool-invoked child keys its
+    /// thread under this path ([`memory_node_path`]).
+    pub fn with_caller_node_path(mut self, path: String) -> Self {
+        self.caller_node_path = Some(path);
         self
     }
 
@@ -2135,6 +2136,10 @@ impl DagToolExecutor {
         //     isolation, so the model can retry with an id.
         //   - stateless (default) → `tool/<tool_call_id>`: an ephemeral per-call
         //     qualifier — stable across suspend/resume, unique across calls.
+        // A persistent or dynamic thread is per caller only inside a tool-invoked
+        // child: there it is `<caller>/tool/<tool_name>[/<thread_id>]`
+        // (`memory_node_path`), so a tool called at two levels keeps two threads.
+        // Every other caller shares `tool/<tool_name>[/<thread_id>]`.
         //
         // Always strip any caller-supplied `thread_id` first: it is a meta-parameter
         // consumed here and must never reach the child as a task input.
@@ -2158,22 +2163,24 @@ impl DagToolExecutor {
                 error: Some("unresolved_thread_id".to_string()),
             });
         };
-        let node_id_path = match memory_mode {
-            MemoryMode::Persistent => format!("tool/{}", tool_call.function.name),
-            MemoryMode::Dynamic => match &thread_id {
-                Some(t) => format!("tool/{}/{}", tool_call.function.name, t),
-                None => {
-                    return Ok(ToolResult {
-                        tool_call_id: tool_call.id.clone(),
-                        success: false,
-                        output: "thread_id is required for this tool: pass a NEW id to start \
-                                 a conversation thread, or a PRIOR id to continue one."
-                            .to_string(),
-                        error: Some("missing_thread_id".to_string()),
-                    });
-                }
-            },
-            MemoryMode::Stateless => Self::ephemeral_subgraph_path(&tool_call.id),
+        let node_id_path = match memory_node_path(
+            self.caller_node_path.as_deref(),
+            memory_mode,
+            &tool_call.function.name,
+            thread_id.as_deref(),
+            &tool_call.id,
+        ) {
+            Ok(path) => path,
+            Err(MissingThreadId) => {
+                return Ok(ToolResult {
+                    tool_call_id: tool_call.id.clone(),
+                    success: false,
+                    output: "thread_id is required for this tool: pass a NEW id to start \
+                             a conversation thread, or a PRIOR id to continue one."
+                        .to_string(),
+                    error: Some("missing_thread_id".to_string()),
+                });
+            }
         };
         inputs.insert(
             "__colmena_node_id_path".to_string(),
@@ -2680,10 +2687,10 @@ impl DagToolExecutor {
     }
 
     /// The conversation thread `call` will run on: the `<thread>` of its
-    /// memory path `tool/<tool>/<thread>`, reached through the same merge and
-    /// the same resolution its dispatch uses. `None` when the call names no
-    /// usable thread or cannot be merged: such a call fails before it reaches
-    /// any memory.
+    /// memory path `[<caller>/]tool/<tool>/<thread>`, reached through the same
+    /// merge and the same resolution its dispatch uses. `None` when the call
+    /// names no usable thread or cannot be merged: such a call fails before it
+    /// reaches any memory.
     fn resolved_thread(&self, call: &ToolCall) -> Option<String> {
         let merged = self.merge_call(call).ok()?;
         Self::thread_of(merged.tool_cfg, merged.inputs.get(THREAD_ID_PARAM))
@@ -3518,7 +3525,7 @@ mod tests {
 
     /// Minimal `ToolCall` builder for tests that dispatch a call directly,
     /// bypassing the LLM adapter. The id only needs to be present — dispatch
-    /// never branches on it outside the stateless `ephemeral_subgraph_path`
+    /// never branches on it outside the stateless `tool/<call_id>`
     /// qualifier, which none of these tests exercise.
     fn tool_call(name: &str, args: Value) -> ToolCall {
         ToolCall::new(
@@ -3807,6 +3814,93 @@ mod tests {
             res.output.contains("archivador"),
             "should be grouped under the map key 'archivador' (empty configured name falls back to it): {}",
             res.output
+        );
+    }
+
+    /// The memory key the echoing node received. A model-named thread's
+    /// output starts with `[hilo: …]`, so the JSON is read from its first `{`.
+    fn node_id_path_of(output: &str) -> String {
+        let echoed: Value = serde_json::from_str(&output[output.find('{').unwrap()..]).unwrap();
+        echoed["__colmena_node_id_path"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    /// `archivador` with `mode` and a model-named thread, called with `alfa`
+    /// by an executor whose caller is `caller` (none: built without one) at
+    /// subgraph depth `depth`.
+    async fn key_of_a_call(mode: &str, caller: Option<&str>, depth: u64) -> String {
+        let cfg: ToolConfiguration = serde_json::from_value(serde_json::json!({
+            "name": "archivador", "node_type": "subgraph", "memory_mode": mode,
+            "node_schema": { "task": { "type": "string", "required": true, "description": "t" } }
+        }))
+        .unwrap();
+        let mut exec = DagToolExecutor::new(
+            registry_with_subgraph(),
+            HashMap::from([("archivador".to_string(), cfg)]),
+        )
+        .with_subgraph_depth(depth);
+        if let Some(caller) = caller {
+            exec = exec.with_caller_node_path(caller.to_string());
+        }
+        let args = serde_json::json!({ "task": "t", "thread_id": "alfa" });
+        let res = exec.execute(&tool_call("archivador", args)).await.unwrap();
+        assert!(res.success, "{}", res.output);
+        node_id_path_of(&res.output)
+    }
+
+    /// `(mode, key a root caller gets)` for a call on thread `alfa`.
+    const ROOT_KEYS: [(&str, &str); 3] = [
+        ("persistent", "tool/archivador"),
+        ("dynamic", "tool/archivador/alfa"),
+        ("stateless", "tool/test_call"),
+    ];
+
+    #[tokio::test]
+    async fn a_caller_inside_a_tool_child_gets_its_own_thread_of_a_tool_with_memory() {
+        for (mode, root_key) in ROOT_KEYS {
+            let want = match mode {
+                "stateless" => root_key.to_string(), // unique per call already
+                _ => format!("tool/Y/u/agent/{root_key}"),
+            };
+            let got = key_of_a_call(mode, Some("tool/Y/u/agent"), 1).await;
+            assert_eq!(got, want, "{mode}");
+        }
+    }
+
+    /// Nested is not "deeper than the root": a graph-level subgraph child
+    /// and an orchestrator agent run one level down and keep the root's keys.
+    #[tokio::test]
+    async fn a_caller_outside_any_tool_child_keeps_todays_keys() {
+        let callers = [
+            (None, 0),
+            (Some("chat"), 0),
+            (Some("ventas/responder"), 1),
+            (Some("orch/agent"), 1),
+        ];
+        for (caller, depth) in callers {
+            for (mode, want) in ROOT_KEYS {
+                let got = key_of_a_call(mode, caller, depth).await;
+                assert_eq!(got, want, "{caller:?} {mode}");
+            }
+        }
+    }
+
+    /// A thread the platform fixes (`${agentId}`) is the caller's own too.
+    #[tokio::test]
+    async fn a_fixed_thread_called_from_inside_a_tool_child_is_the_callers_own() {
+        let exec = DagToolExecutor::new(registry_with_subgraph(), fixed_thread_tool_configs())
+            .with_subgraph_depth(1)
+            .with_caller_node_path("tool/Run_My_Agent/A/llm".to_string());
+        let call = tool_call(
+            "archivador",
+            serde_json::json!({ "agentId": "agent-a", "task": "t" }),
+        );
+        let res = exec.execute(&call).await.unwrap();
+        assert_eq!(
+            node_id_path_of(&res.output),
+            "tool/Run_My_Agent/A/llm/tool/archivador/agent-a"
         );
     }
 
@@ -6194,23 +6288,18 @@ mod scrubber_tests {
 }
 
 #[cfg(test)]
-mod ephemeral_path_tests {
+mod stateless_memory_path_tests {
     use super::*;
 
+    fn stateless(call_id: &str) -> String {
+        memory_node_path(None, MemoryMode::Stateless, "X", None, call_id).unwrap()
+    }
+
     #[test]
-    fn ephemeral_path_is_deterministic_from_tool_call_id() {
-        assert_eq!(
-            DagToolExecutor::ephemeral_subgraph_path("call_abc123"),
-            "tool/call_abc123"
-        );
-        assert_eq!(
-            DagToolExecutor::ephemeral_subgraph_path("call_abc123"),
-            DagToolExecutor::ephemeral_subgraph_path("call_abc123")
-        );
-        assert_ne!(
-            DagToolExecutor::ephemeral_subgraph_path("call_1"),
-            DagToolExecutor::ephemeral_subgraph_path("call_2")
-        );
+    fn a_stateless_path_is_deterministic_from_the_tool_call_id() {
+        assert_eq!(stateless("call_abc123"), "tool/call_abc123");
+        assert_eq!(stateless("call_abc123"), stateless("call_abc123"));
+        assert_ne!(stateless("call_1"), stateless("call_2"));
     }
 }
 
