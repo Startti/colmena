@@ -795,6 +795,7 @@ dependencies = [
  "futures",
  "google-cloud-storage",
  "http 1.4.0",
+ "hyper 0.14.32",
  "include_dir",
  "lru",
  "maud",

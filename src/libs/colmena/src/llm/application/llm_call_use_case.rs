@@ -1184,7 +1184,7 @@ mod retry_tests {
         let use_case = LlmCallUseCase::new(Arc::new(mock_repo))
             .with_file_cache(cache.clone())
             .with_file_provider_factory(Arc::new(FileProviderFactory::new()))
-            .with_signed_url_fetcher(Arc::new(SignedUrlDownloader::new()));
+            .with_signed_url_fetcher(Arc::new(SignedUrlDownloader::allowing_private_hosts()));
 
         let file = FileData {
             document_id: Some("doc-1".into()),

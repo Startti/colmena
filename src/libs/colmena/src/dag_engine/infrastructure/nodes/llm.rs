@@ -360,7 +360,7 @@ async fn generate_one_summary(
         acquire_bytes, extract_text, truncate_chars,
     };
 
-    // 1. Acquire bytes (no size bound — frontend enforces 100 MB).
+    // 1. Acquire bytes (a signed URL under the guarded client's byte cap).
     // `target.inline_bytes` carries the original bytes for Inline sources
     // (data: base64 uploads), since the upload pipeline consumed the first clone.
     let bytes = match acquire_bytes(&target.source, target.inline_bytes.as_deref(), fetcher).await {
@@ -1899,6 +1899,7 @@ impl ExecutableNode for LlmNode {
                         storage.as_ref(),
                         file.retained_inline_bytes.as_deref(),
                         &source,
+                        &crate::llm::infrastructure::files::SignedUrlDownloader::new(),
                         &file.mime_type,
                         &file.filename,
                         sid.as_str(),
@@ -4377,7 +4378,7 @@ pub(crate) fn parse_file_entries(
 ///      `FileSource::Uploaded` entries that retained their inline bytes after
 ///      provider upload.
 ///   2. Else, if `attachment_source` is `AttachmentSource::SignedUrl(url)` →
-///      re-fetch the URL via HTTP and persist the bytes. The original
+///      re-fetch the URL through `fetcher` and persist the bytes. The original
 ///      download has already happened (to upload to the provider's Files
 ///      API), but those bytes are not kept around.
 ///      TODO(plan-a-opt): share bytes with provider upload to avoid re-fetch.
@@ -4480,10 +4481,12 @@ fn parsed_from(entry: &serde_json::Value, file: &crate::llm::domain::FileData) -
 
 /// Returns `None` on any failure (logged at warn level); persistence is
 /// best-effort — the LLM call must continue even when storage is offline.
+#[allow(clippy::too_many_arguments)]
 async fn persist_attachment_bytes(
     storage: &dyn crate::storage::domain::OutputStorageRepository,
     retained_inline_bytes: Option<&[u8]>,
     attachment_source: &crate::llm::domain::attachments::AttachmentSource,
+    fetcher: &dyn crate::llm::domain::SignedUrlFetcher,
     mime_type: &str,
     filename: &str,
     agent_session_id: &str,
@@ -4491,38 +4494,23 @@ async fn persist_attachment_bytes(
 ) -> Option<String> {
     use crate::llm::domain::attachments::AttachmentSource;
     use crate::storage::domain::StoreRequest;
+    use futures::StreamExt;
 
     let bytes_for_storage: Option<Vec<u8>> = if let Some(b) = retained_inline_bytes {
         Some(b.to_vec())
     } else if let AttachmentSource::SignedUrl(url) = attachment_source {
-        // Re-fetch the bytes. We intentionally do not share an HTTP client
-        // here because this is an out-of-band, best-effort persistence path
-        // — perf is dominated by the provider upload that already happened.
+        // Re-fetch through the guarded attachment client (`fetcher`).
         // TODO(plan-a-opt): share bytes with provider upload to avoid re-fetch.
-        match reqwest::get(url.as_str()).await {
-            Ok(resp) => match resp.error_for_status() {
-                Ok(ok_resp) => match ok_resp.bytes().await {
-                    Ok(b) => Some(b.to_vec()),
-                    Err(e) => {
-                        tracing::warn!(
-                            target: "colmena::attachment",
-                            error = %e,
-                            document_id = %document_id,
-                            "failed to read signed-url bytes for storage persistence"
-                        );
-                        None
-                    }
-                },
-                Err(e) => {
-                    tracing::warn!(
-                        target: "colmena::attachment",
-                        error = %e,
-                        document_id = %document_id,
-                        "signed-url returned non-success status during storage persistence"
-                    );
-                    None
-                }
-            },
+        let fetched = async {
+            let mut body = fetcher.stream(url).await.map_err(|e| e.to_string())?;
+            let mut bytes = Vec::new();
+            while let Some(chunk) = body.next().await {
+                bytes.extend_from_slice(&chunk.map_err(|e| e.to_string())?);
+            }
+            Ok::<_, String>(bytes)
+        };
+        match fetched.await {
+            Ok(b) => Some(b),
             Err(e) => {
                 tracing::warn!(
                     target: "colmena::attachment",
@@ -4889,6 +4877,7 @@ mod persist_attachment_bytes_tests {
             &storage,
             Some(b"hello"),
             &AttachmentSource::Inline,
+            &crate::llm::infrastructure::files::SignedUrlDownloader::new(),
             "application/pdf",
             "x.pdf",
             "agent_1",
@@ -4914,6 +4903,7 @@ mod persist_attachment_bytes_tests {
             &storage,
             Some(b"local"),
             &AttachmentSource::SignedUrl("http://127.0.0.1:1/never-fetched".into()),
+            &crate::llm::infrastructure::files::SignedUrlDownloader::new(),
             "application/pdf",
             "x.pdf",
             "agent_1",
@@ -4935,6 +4925,7 @@ mod persist_attachment_bytes_tests {
             &storage,
             None,
             &AttachmentSource::Inline,
+            &crate::llm::infrastructure::files::SignedUrlDownloader::new(),
             "application/pdf",
             "x.pdf",
             "agent_1",
@@ -4969,6 +4960,7 @@ mod persist_attachment_bytes_tests {
             &storage,
             None,
             &AttachmentSource::SignedUrl(url),
+            &crate::llm::infrastructure::files::SignedUrlDownloader::allowing_private_hosts(),
             "application/pdf",
             "x.pdf",
             "agent_1",
@@ -4977,6 +4969,33 @@ mod persist_attachment_bytes_tests {
         .await;
 
         assert_eq!(key.as_deref(), Some("sk-url-test"));
+    }
+
+    /// Byte persistence fetches through the guarded client: a loopback URL is
+    /// never dialed and nothing is stored.
+    #[tokio::test]
+    async fn persistence_never_dials_a_non_public_address() {
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(wiremock::matchers::any())
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"x".to_vec()))
+            .mount(&server)
+            .await;
+        let storage = MockOutputStorageRepository::new(); // store() must not run
+        let url = format!("{}/f", server.uri());
+        let key = persist_attachment_bytes(
+            &storage,
+            None,
+            &AttachmentSource::SignedUrl(url),
+            &crate::llm::infrastructure::files::SignedUrlDownloader::public_only(),
+            "application/pdf",
+            "x.pdf",
+            "agent_1",
+            "doc-1",
+        )
+        .await;
+        assert!(key.is_none());
+        assert!(server.received_requests().await.unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -4993,6 +5012,7 @@ mod persist_attachment_bytes_tests {
             &storage,
             Some(b"hello"),
             &AttachmentSource::Inline,
+            &crate::llm::infrastructure::files::SignedUrlDownloader::new(),
             "application/pdf",
             "x.pdf",
             "agent_1",
@@ -5580,6 +5600,7 @@ mod resolver_tests {
             storage.as_ref(),
             Some(body.as_slice()),
             &AttachmentSource::Inline,
+            &crate::llm::infrastructure::files::SignedUrlDownloader::new(),
             "text/markdown",
             "notes.md",
             "agent_1",
@@ -5665,6 +5686,7 @@ mod resolver_tests {
             &storage,
             Some(body.as_slice()),
             &AttachmentSource::Inline,
+            &crate::llm::infrastructure::files::SignedUrlDownloader::new(),
             "text/markdown",
             "notes.md",
             "agent_1",

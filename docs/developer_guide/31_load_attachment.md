@@ -42,7 +42,9 @@ Step 3, generated artifacts by their node). Persisting an upload can fail; what 
 then is described below the list.
 
 - **Inline (base64 en `files[].data`):** los bytes se streamean al storage en el momento del registro.
-- **Signed URL (`files[].url`):** los bytes se descargan y se streamean al storage.
+- **Signed URL (`files[].url`):** los bytes se descargan y se streamean al storage. Esta descarga, la del
+  resumen automático y la de la re-subida de las 24 h usan el cliente guardado de `files[].url`
+  ([14_llm_deep_dive.md](14_llm_deep_dive.md), CHANGELOG 2026-09 §137).
 - **Generated artifact** (`image_generation` / `image_edit` / `tts`): los bytes ya
   viven en storage; el artefacto se registra automáticamente en `conversation_attachments`
   con `origin = generated_by:<tool>` y `source = Path(storage_key)`.
