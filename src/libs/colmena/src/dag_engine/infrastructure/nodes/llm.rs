@@ -4987,7 +4987,7 @@ mod persist_attachment_bytes_tests {
             &storage,
             None,
             &AttachmentSource::SignedUrl(url),
-            &crate::llm::infrastructure::files::SignedUrlDownloader::new(),
+            &crate::llm::infrastructure::files::SignedUrlDownloader::public_only(),
             "application/pdf",
             "x.pdf",
             "agent_1",

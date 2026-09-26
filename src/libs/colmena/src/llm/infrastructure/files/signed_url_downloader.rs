@@ -139,20 +139,33 @@ pub struct SignedUrlDownloader {
 
 impl SignedUrlDownloader {
     /// Public addresses only unless [`ALLOW_PRIVATE_ENV_VAR`] is set; byte cap
-    /// from [`MAX_BYTES_ENV_VAR`]. Both are read once per process.
+    /// from [`MAX_BYTES_ENV_VAR`]. Both are read once per process, and every
+    /// instance shares one client (one connection pool).
     pub fn new() -> Self {
-        static POLICY: OnceLock<(bool, u64)> = OnceLock::new();
-        let (block, max) = *POLICY.get_or_init(|| {
+        static SHARED: OnceLock<(Dialable, u64, Client)> = OnceLock::new();
+        let (dialable, max, client) = SHARED.get_or_init(|| {
             let env = |k: &str| std::env::var(k).ok();
             let max = env(MAX_BYTES_ENV_VAR).and_then(|v| v.trim().parse().ok());
             let block = private_block_from(env(ALLOW_PRIVATE_ENV_VAR).as_deref());
-            (block, max.filter(|n| *n > 0).unwrap_or(DEFAULT_MAX_BYTES))
+            let dialable: Dialable = if block { is_global_unicast } else { any_ip };
+            let max = max.filter(|n| *n > 0).unwrap_or(DEFAULT_MAX_BYTES);
+            (dialable, max, guarded_client(dialable))
         });
-        Self::with_policy(if block { is_global_unicast } else { any_ip }, max)
+        Self::from_parts(client.clone(), *dialable, *max)
     }
 
     fn with_policy(dialable: Dialable, max_bytes: u64) -> Self {
-        let client = guarded_client(dialable);
+        Self::from_parts(guarded_client(dialable), dialable, max_bytes)
+    }
+
+    /// Public addresses only, whatever the environment says (what `new()` is
+    /// when [`ALLOW_PRIVATE_ENV_VAR`] is unset).
+    #[cfg(test)]
+    pub(crate) fn public_only() -> Self {
+        Self::with_policy(is_global_unicast, DEFAULT_MAX_BYTES)
+    }
+
+    fn from_parts(client: Client, dialable: Dialable, max_bytes: u64) -> Self {
         Self {
             client,
             dialable,
@@ -296,17 +309,20 @@ mod tests {
         ));
     }
 
-    /// The production client never dials a loopback server.
+    /// The public-only client (`new()` with the variable unset) never dials a
+    /// loopback server.
     #[tokio::test]
     async fn a_non_public_address_is_never_dialed() {
+        assert!(private_block_from(None), "unset, the variable blocks");
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .respond_with(ResponseTemplate::new(200).set_body_bytes(b"x"))
             .mount(&server)
             .await;
         let by_name = server.uri().replace("127.0.0.1", "localhost");
+        let d = SignedUrlDownloader::public_only();
         for url in [server.uri(), by_name] {
-            let r = SignedUrlDownloader::new().stream(&format!("{url}/f")).await;
+            let r = d.stream(&format!("{url}/f")).await;
             assert!(
                 matches!(r, Err(LlmError::AttachmentUrlRefused { .. })),
                 "{url}"
