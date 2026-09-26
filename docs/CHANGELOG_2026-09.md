@@ -5334,7 +5334,7 @@ igual; por eso el orden de sus llamadas. Revertida editando.
 
 **ADP.** Sin código.
 
-## 105. Endurecimiento: `${VAR}` se expande solo en la configuración del autor
+## 106. Endurecimiento: `${VAR}` se expande solo en la configuración del autor
 
 **Qué cambia.** Un valor que llega por `inputs` (un edge, el estado global, una fila de
 `for_each`) ya no expande plantillas `${VAR}`, salvo que un despacho con provenance (el de
