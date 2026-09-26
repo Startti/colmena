@@ -1,19 +1,27 @@
 //! End-to-end tests for cooperative hard-stop / graph cancellation.
 //!
 //! Requires `DATABASE_URL` to be set and reachable. Each test cleans up its
-//! own `dag_runs` rows. Run with `cargo test -- --ignored`.
+//! own `dag_runs` and `llm_node_history` rows. Run with `cargo test -- --ignored`.
 //!
 //! The DAG stream is poll-driven (an `async_stream` generator): it only makes
 //! progress when polled. That makes "cancel between nodes" deterministic — once
 //! we receive a `NodeFinish` the generator is parked at the yield, so cancelling
 //! before the next poll is observed at the top of the next loop iteration.
 
+// Shared with the other scripted-model E2Es; this file reads only part of it.
+#[allow(dead_code)]
+mod caller_model;
+
+use caller_model::{CallerModel, Reply, Request};
 use colmena::dag_engine::domain::events::DagExecutionEvent;
 use colmena::dag_engine::domain::graph::Graph;
 use colmena::dag_engine::engine::{ColmenaEngine, EngineConfig};
 use colmena::dag_engine::sse_mapper::SseMapper;
+use colmena::llm::domain::{LlmMessage, MessageRole};
+use colmena::llm::infrastructure::OverrideGuard;
 use futures::StreamExt;
-use serde_json::json;
+use serde_json::{json, Value};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 use wiremock::matchers::{method, path};
@@ -64,11 +72,13 @@ async fn cleanup(chat: &str) {
     dotenvy::dotenv().ok();
     let url = std::env::var("DATABASE_URL").unwrap();
     let pool = sqlx::PgPool::connect(&url).await.unwrap();
-    sqlx::query("DELETE FROM dag_runs WHERE agent_session_id = $1")
-        .bind(chat)
-        .execute(&pool)
-        .await
-        .ok();
+    for table in ["dag_runs", "llm_node_history"] {
+        sqlx::query(&format!("DELETE FROM {table} WHERE agent_session_id = $1"))
+            .bind(chat)
+            .execute(&pool)
+            .await
+            .ok();
+    }
 }
 
 /// A pre-cancelled token stops the run before the first node executes: no
@@ -317,6 +327,150 @@ async fn cancel_mid_node_aborts_inflight_http_and_emits_sse() {
         "SSE must contain a finish terminator with finishReason=cancelled"
     );
     assert_eq!(status_for_chat(&chat).await.as_deref(), Some("CANCELLED"));
+
+    cleanup(&chat).await;
+    eng.shutdown().await;
+}
+
+// ---- The turn after a Stop: the stopped request reads as unanswered ----
+
+/// The request a Stop cuts while the model thinks, and the next message.
+/// Measured in dev before the fix: the next turn's model read the two as one
+/// request and did the stopped one again.
+const STOPPED: &str = "anotá cuatro notas: once, doce, trece y catorce";
+const NEXT: &str = "decime solo \"recibido\"";
+const UNANSWERED: &str = include_str!("../text/prompts/agent_loop/unanswered_request.md");
+
+/// One turn of an agent with memory (`connection_url`) on `chat`, with its
+/// SSE written to `/tmp/colmena_e2e/<name>.sse`. Returns the frames.
+async fn agent_turn(
+    eng: &ColmenaEngine,
+    prompt: &str,
+    chat: &str,
+    token: CancellationToken,
+    name: &str,
+) -> Vec<Value> {
+    let graph = serde_json::from_value(json!({
+        "nodes": {
+            "pedido": { "type": "input", "config": { "prompt": prompt } },
+            "agent": { "type": "llm_call", "config": {
+                "provider": "google", "model": "gemini-2.5-flash", "api_key": "scripted",
+                "connection_url": "${DATABASE_URL}", "stream": true,
+                "system_message": "Anotás lo que te piden.", "prompt": "{{prompt}}"
+            } },
+            "salida": { "type": "output", "config": {} }
+        },
+        "edges": [{ "from": "pedido", "to": "agent" }, { "from": "agent.result", "to": "salida" }]
+    }))
+    .unwrap();
+    let chat = Some(chat.to_string());
+    let stream = eng.execute_stream_cancellable(graph, None, None, false, None, chat, token);
+    let mut stream = Box::pin(stream);
+    let mut mapper = SseMapper::new();
+    let mut frames = Vec::new();
+    while let Some(item) = stream.next().await {
+        frames.extend(mapper.map(&item.expect("stream must not error")));
+    }
+    drop(stream);
+    std::fs::create_dir_all("/tmp/colmena_e2e").unwrap();
+    let sse: String = frames.iter().map(|f| format!("data: {f}\n\n")).collect();
+    std::fs::write(format!("/tmp/colmena_e2e/{name}.sse"), sse).unwrap();
+    frames
+}
+
+/// The agent's thread, oldest first, as `<role>: <content>`; a System
+/// message's content is left out.
+async fn agent_thread(chat: &str) -> Vec<String> {
+    let pool = sqlx::PgPool::connect(&std::env::var("DATABASE_URL").unwrap()).await;
+    sqlx::query_scalar(
+        "SELECT role || ': ' || CASE role WHEN 'system' THEN '' ELSE content END \
+         FROM llm_node_history WHERE agent_session_id = $1 AND node_id = 'agent' \
+         ORDER BY created_at, id",
+    )
+    .bind(chat)
+    .fetch_all(&pool.unwrap())
+    .await
+    .unwrap()
+}
+
+/// A Stop while the model thinks leaves the agent's thread on the request,
+/// with no reply. The next message is a fresh run on the same thread: it
+/// marks the stopped request before its own prompt, so its model reads the
+/// stopped request as left unanswered and the new one on a turn of its own.
+#[tokio::test]
+#[ignore = "requires DATABASE_URL — run with `cargo test -- --ignored`"]
+async fn the_turn_after_a_stop_reads_the_stopped_request_as_unanswered() {
+    let chat = unique_chat("cancel_unanswered");
+    cleanup(&chat).await;
+    let eng = engine().await;
+
+    // The model tells the test when it has the stopped request, then thinks
+    // for 10 s; it answers the next one at once.
+    let thinking = Arc::new(tokio::sync::Notify::new());
+    let got_it = thinking.clone();
+    let model = Arc::new(CallerModel::new(move |req: &Request| {
+        if req.last_user() == STOPPED {
+            got_it.notify_one();
+            return (Duration::from_secs(10), Reply::Text("anotadas".into()));
+        }
+        (Duration::ZERO, Reply::Text("recibido".into()))
+    }));
+    let _guard = OverrideGuard::install(model.clone());
+
+    // Turn 1: the Stop comes once the model has the request.
+    let token = CancellationToken::new();
+    let stop = token.clone();
+    tokio::spawn(async move {
+        thinking.notified().await;
+        stop.cancel();
+    });
+    let started = Instant::now();
+    let first = agent_turn(&eng, STOPPED, &chat, token, "unanswered_request_1").await;
+    assert!(started.elapsed() < Duration::from_secs(5), "not dropped");
+    assert!(first.iter().any(|f| f["type"] == "cancelled"), "{first:?}");
+    assert_eq!(status_for_chat(&chat).await.as_deref(), Some("CANCELLED"));
+    // `llm_call` persisted turn 1 as `[User, System]`, and no reply.
+    let stopped = format!("user: {STOPPED}");
+    assert_eq!(agent_thread(&chat).await, [stopped.as_str(), "system: "]);
+
+    // Turn 2: the next message, a fresh run on the same thread.
+    let token = CancellationToken::new();
+    let second = agent_turn(&eng, NEXT, &chat, token, "unanswered_request_2").await;
+    let finish = second.iter().find(|f| f["type"] == "finish").unwrap();
+    assert_eq!(finish["output"]["salida"]["result"], "recibido", "{finish}");
+
+    let seen = model.seen();
+    assert_eq!(seen.len(), 2, "one request per turn");
+    let sent = &seen[1].messages;
+    // What the model reads once the provider hoists the System messages.
+    let turns: Vec<(MessageRole, &str)> = sent
+        .iter()
+        .filter(|m| m.role() != &MessageRole::System)
+        .map(|m| (m.role().clone(), m.content()))
+        .collect();
+    let together = turns
+        .windows(2)
+        .any(|w| w[0].0 == MessageRole::User && w[1].0 == MessageRole::User);
+    assert!(!together, "two user turns together: {turns:?}");
+    assert_eq!(turns.last(), Some(&(MessageRole::User, NEXT)), "{turns:?}");
+    let text: Vec<&str> = sent.iter().map(LlmMessage::content).collect();
+    let text = text.join("\n");
+    let marked = text.find(UNANSWERED.trim()).expect("the marker reaches it");
+    assert!(text.find(STOPPED).unwrap() < marked, "{text}");
+    eprintln!("turn 2 request: {turns:?}\n{text}");
+
+    let marker = format!("assistant: {}", UNANSWERED.trim());
+    let next = format!("user: {NEXT}");
+    assert_eq!(
+        agent_thread(&chat).await,
+        [
+            stopped.as_str(),
+            "system: ",
+            &marker,
+            &next,
+            "assistant: recibido"
+        ]
+    );
 
     cleanup(&chat).await;
     eng.shutdown().await;

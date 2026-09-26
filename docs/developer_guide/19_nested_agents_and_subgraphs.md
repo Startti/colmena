@@ -885,8 +885,8 @@ dejó sin resultado. Lo contesta con
 y después agrega el prompt nuevo:
 
 > Esta llamada quedó sin resultado: la conversación siguió sin ella (se cortó, o era
-> una pregunta que no se contestó). No la retomes; si todavía hace falta, volvé a
-> hacerla.
+> una pregunta que no se contestó). Retomala solo si el mensaje siguiente lo pide o se
+> refiere a ella.
 
 Sin eso, la request llevaría el id abierto: un 400 en Anthropic y OpenAI, en esa
 request y en todas las siguientes del hilo. La curación vale para **todos** los
@@ -916,7 +916,30 @@ los ids que todavía no tenían resultado: los del grupo y los de las llamadas
 posteriores. Las llamadas solas anteriores al grupo ya guardaron el suyo, una por una.
 La próxima corrida fresca contesta los abiertos con
 `abandoned_tool_call.md`, así que el modelo sabe que no tiene esos resultados y los
-vuelve a pedir si le hacen falta.
+vuelve a pedir solo si el mensaje siguiente lo pide.
+
+#### Un pedido sin respuesta
+
+El caso hermano: un Stop, el watchdog o un error antes de la primera respuesta del
+modelo dejan el hilo en un `user` sin respuesta (el prompt se guarda antes de llamar al
+modelo). El prompt siguiente quedaba pegado a ese y el modelo rehacía el detenido
+(medido en dev): los junta `coalesce_consecutive_same_role`, o en el primer turno el
+proveedor, que saca del arreglo el `system` que `llm_call` guarda detrás del `user`. Por
+eso la corrida fresca, nunca el resume, guarda antes del prompt nuevo un `assistant` con
+[`unanswered_request.md`](../../src/libs/colmena/text/prompts/agent_loop/unanswered_request.md)
+si el último mensaje del hilo que no es `system` es un `user`:
+
+> (Este pedido quedó sin respuesta: el turno se detuvo o falló antes de terminar.
+> Retomalo solo si el mensaje siguiente lo pide o se refiere a él.)
+
+Desde §150 de `CHANGELOG_2026-09.md` los dos textos llevan esa regla: tras un Stop suele
+venir un ajuste («más corto», «en inglés»). El de las llamadas, que cubre un Stop durante
+una tool, decía «No la retomes; si todavía hace falta, volvé a hacerla.».
+
+Las dos curaciones no se pisan: con ids abiertos el hilo termina en el `assistant` que
+los pidió y, contestados, en un `tool`. En el E2E (`cancellation_integration`), el
+modelo del turno siguiente a un Stop recibe el pedido detenido y el marcador en el
+resumen de turnos viejos, y el prompt nuevo solo.
 
 #### El mismo agente a dos niveles: un hilo por quien llama
 

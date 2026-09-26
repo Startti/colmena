@@ -142,8 +142,8 @@ aunque otra haya preguntado antes. Lo que ve ADP:
   y lo hace en el mismo hilo de memoria. Ese hilo termina con la pregunta abierta, y
   la corrida fresca la contesta primero con otro texto
   («Esta llamada quedó sin resultado: la conversación siguió sin ella (se cortó, o era
-  una pregunta que no se contestó). No la retomes; si todavía hace falta, volvé a
-  hacerla.»). Sin eso, Anthropic y OpenAI devolverían 400 en ese hilo para siempre.
+  una pregunta que no se contestó). Retomala solo si el mensaje siguiente lo pide o se
+  refiere a ella.», texto desde §150 de `CHANGELOG_2026-09.md`). Sin eso, Anthropic y OpenAI devolverían 400 en ese hilo para siempre.
   Esta curación vale para **todos** los agentes en una corrida fresca, no solo para Run
   My Agent. También cubre un Stop o el watchdog a mitad de turno: el mensaje del
   asistente ya estaba guardado con sus ids abiertos, y los resultados que ya habían

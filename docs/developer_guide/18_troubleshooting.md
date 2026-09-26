@@ -997,6 +997,10 @@ Antes, un turno que fallaba tras persistir el mensaje del usuario dejaba un
 roles consecutivos (coalescing) y auto-cura. Si lo ves en una versión vieja:
 actualizá colmena o abrí un chat nuevo. Ver CHANGELOG §42.
 
+Fusionar ese `user` con el prompt siguiente hacía que el modelo rehiciera el pedido
+detenido. Desde la entrada 150 de `CHANGELOG_2026-09.md`, la corrida fresca lo marca antes
+con un `assistant` (`unanswered_request.md`) y los dos ya no se juntan.
+
 ---
 
 ## 🔒 Problemas con Secure Values en HTTP Tools

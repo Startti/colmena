@@ -13,6 +13,13 @@ use serde::{Deserialize, Serialize};
 /// normalizes the wire shape and self-heals such conversations. Pure; never
 /// touches persistence (recall_history keeps the originals verbatim).
 ///
+/// Joined with the next prompt, that row made the model do the stopped
+/// request again. A fresh `AgentService::run` now marks it with an assistant
+/// message (`text/prompts/agent_loop/unanswered_request.md`) before it
+/// persists its prompt, so the two no longer meet here. This stays the net
+/// for what that leaves: two such rows already together in older history,
+/// and a caller that sends several messages of one role.
+///
 /// The two exemptions:
 ///
 /// * `Tool` — parallel tool results are keyed by distinct `tool_call_id`, so

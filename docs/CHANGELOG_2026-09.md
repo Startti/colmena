@@ -6389,3 +6389,42 @@ tarda es un rechazo. `http.rs`: con la variable no hay guarda.
 **ADP.** [Nota de migración](adp_migration/2026-09-26-data-destination-public-only.md). Sin cambios de
 SSE. En Rust, `SocketIoNode` se construye con `SocketIoNode::default()`.
 **Estado.** done.
+
+## 150. Fix: un pedido que quedó sin respuesta no se rehace con el mensaje siguiente
+
+**Qué cambia.** Un Stop, el watchdog o un error antes de la primera respuesta del modelo dejan
+el hilo del agente en un `user` sin respuesta (el prompt se guarda antes de llamar al modelo).
+El prompt siguiente quedaba pegado a ese y el modelo leía los dos como un solo pedido:
+`coalesce_consecutive_same_role` los junta, y si era el primer turno el `system` que `llm_call`
+guarda detrás no los separa, porque el proveedor lo saca del arreglo. Medido en dev: tras un
+Stop, «decime solo "recibido"» volvió a anotar las cuatro notas del pedido detenido. Ahora
+`AgentService::run`, en el camino fresco y nunca en el resume, guarda antes del prompt nuevo un
+`assistant` con `text/prompts/agent_loop/unanswered_request.md` si el último mensaje del hilo que
+no es `system` es un `user`. Es el caso hermano de §102 y no se pisan: con ids abiertos el hilo
+termina en un `assistant` y, contestados, en un `tool`. `coalesce_consecutive_same_role` no
+cambia.
+
+Los dos textos dicen «Retomalo/Retomala solo si el mensaje siguiente lo pide o se refiere a
+él/ella»: tras un Stop suele venir un ajuste («más corto», «en inglés»). `abandoned_tool_call.md`
+(§102), que cubre un Stop durante una tool, decía «No la retomes; si todavía hace falta, volvé a
+hacerla.» e invitaba a rehacer el pedido detenido.
+
+**Tests.** `agent_service.rs`: `[user A]` + B manda `[A, marcador, B]` y lo guarda una vez;
+`[user A, system]` (turno 1) llega sin dos `user` juntos; un hilo contestado, uno con ids
+abiertos (solo el marcador de §102) y un resume no reciben marcador; el reintento tras una falla
+del proveedor marca una sola vez el prompt que quedó sin respuesta; los dos textos llevan la
+regla (con el texto viejo de cualquiera de los dos, rojo).
+
+**Mutación.** Sin la curación, la request junta A y B; con el marcador como `user`, se juntan
+igual; con la curación también en el resume, el resume gana un marcador; sin saltar el `system`,
+el turno 1 queda sin marcar; con «interacción abierta» en vez de «termina en `user`», los ids
+abiertos reciben las dos curaciones. Las cinco, en rojo.
+
+**E2E.** `cancellation_integration`, `the_turn_after_a_stop_reads_the_stopped_request_as_unanswered`
+(Postgres, modelo guionado): Stop con el modelo pensando, y el turno 2 recibe el pedido detenido
+y el marcador en el resumen de turnos viejos, y su prompt solo. Sin la curación, rojo:
+`two user turns together`. SSE en `/tmp/colmena_e2e/unanswered_request_{1,2}.sse`.
+
+**ADP.** Sin cambios de API ni de SSE. Nota:
+[2026-09-26-unanswered-request-marker.md](adp_migration/2026-09-26-unanswered-request-marker.md).
+**Estado.** hecho; sin verificar con un modelo real, se mide en dev.
