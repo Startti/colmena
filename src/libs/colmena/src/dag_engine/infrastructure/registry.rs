@@ -675,6 +675,92 @@ mod llm_call_offered_tools_tests {
     }
 }
 
+/// `${VAR}` in a tool's `fixed` value expands only when the author wrote it:
+/// `tool_configurations` from the node's `config` (or a dispatcher's trusted
+/// pointers), judged as written — before `${context.*}` templating.
+#[cfg(test)]
+mod llm_call_tool_provenance_tests {
+    use crate::dag_engine::application::ports::NodeRegistryPort;
+    use crate::llm::infrastructure::{OverrideGuard, ScriptedAdapter, ScriptedResponse};
+    use serde_json::{json, Value};
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// Runs an `llm_call` whose scripted model calls `fetch` once; returns the
+    /// `q` query value the mock received.
+    async fn fetch_q(config_extra: Value, inputs: HashMap<String, Value>, q: Value) -> String {
+        let s = MockServer::start().await;
+        Mock::given(wiremock::matchers::any())
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
+            .mount(&s)
+            .await;
+        let _guard = OverrideGuard::install(Arc::new(ScriptedAdapter::new(vec![
+            ScriptedResponse::ToolCall {
+                id: "c1".into(),
+                tool_name: "fetch".into(),
+                arguments: json!({}),
+            },
+            ScriptedResponse::Text("done".into()),
+        ])));
+        let tools = json!({ "fetch": { "node_type": "http_request", "node_schema": {
+            "base_url": { "fixed": s.uri() }, "method": { "fixed": "GET" }, "q": { "fixed": q }
+        } } });
+        let mut config = json!({
+            "provider": "mock", "model": "m", "api_key": "k", "stream": false, "prompt": "go"
+        });
+        let mut inputs = inputs;
+        match config_extra.get("tools_in") {
+            Some(Value::String(w)) if w == "inputs" => {
+                inputs.insert("tool_configurations".into(), tools);
+            }
+            _ => config["tool_configurations"] = tools,
+        }
+        let registry = super::registry_tavily_tests::build_registry();
+        let llm = registry.get_node("llm_call").expect("llm_call");
+        llm.execute(&inputs, &config, &mut json!({}), None)
+            .await
+            .expect("llm_call finished");
+        let got = s.received_requests().await.unwrap();
+        let q = got[0].url.query_pairs().find(|(k, _)| k == "q");
+        q.map(|(_, v)| v.to_string()).unwrap_or_default()
+    }
+
+    #[tokio::test]
+    async fn a_fixed_value_from_config_expands_but_one_from_inputs_does_not() {
+        std::env::set_var("COLMENA_CLASS_TEST_TC", "tc-value-test-only");
+        let q = json!("${COLMENA_CLASS_TEST_TC}");
+        let from_config = fetch_q(json!({}), HashMap::new(), q.clone()).await;
+        assert_eq!(from_config, "tc-value-test-only");
+        let from_inputs = fetch_q(json!({ "tools_in": "inputs" }), HashMap::new(), q).await;
+        assert_eq!(from_inputs, "${COLMENA_CLASS_TEST_TC}");
+        std::env::remove_var("COLMENA_CLASS_TEST_TC");
+    }
+
+    #[tokio::test]
+    async fn a_context_value_placed_in_a_fixed_value_never_expands() {
+        std::env::set_var("COLMENA_CLASS_TEST_CTX", "ctx-value-test-only");
+        let inputs = HashMap::from([(
+            "context.term".to_string(),
+            json!("${COLMENA_CLASS_TEST_CTX}"),
+        )]);
+        let q = fetch_q(json!({}), inputs, json!("${context.term}")).await;
+        assert_eq!(q, "${COLMENA_CLASS_TEST_CTX}");
+        std::env::remove_var("COLMENA_CLASS_TEST_CTX");
+    }
+
+    /// `${UPPER_CASE}` names an env var (VARIABLE_RESOLUTION_DISEÑO, rule 1):
+    /// an input under that name never replaces the author's reference.
+    #[tokio::test]
+    async fn an_input_never_replaces_an_env_reference_in_a_fixed_value() {
+        std::env::set_var("COLMENA_CLASS_TEST_ENV", "env-value-test-only");
+        let inputs = HashMap::from([("COLMENA_CLASS_TEST_ENV".to_string(), json!("from-data"))]);
+        let q = fetch_q(json!({}), inputs, json!("${COLMENA_CLASS_TEST_ENV}")).await;
+        assert_eq!(q, "env-value-test-only");
+        std::env::remove_var("COLMENA_CLASS_TEST_ENV");
+    }
+}
+
 #[cfg(test)]
 mod registry_secure_suspend_tests {
     use super::*;

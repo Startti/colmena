@@ -5548,3 +5548,28 @@ el target no ofrece. `registry.rs`: la tabla de campos del autor de cada nodo.
 **ADP.** Sin cambios de API. Una tool cuyo modelo mandaba uno de esos campos sin que el
 `node_schema` lo declarara debe declararlo como parámetro.
 **Estado.** done.
+
+## 106. Endurecimiento: en `llm_call`, `${VAR}` se expande solo en lo que escribió el autor
+
+**Qué cambia.**
+- La procedencia de los `fixed` de una tool se toma antes del templating `${context.*}`:
+  `llm_call` le pasa al ejecutor la copia de `tool_configurations` tal como la escribió el
+  autor (`DagToolExecutor::with_authored_tool_configurations`), y los punteros confiables se
+  calculan contra ella. Un valor que el templating trajo de `inputs` es dato y no expande
+  `${VAR}` en el nodo de la tool.
+- Un `tool_configurations` que llega por `inputs` es del autor solo si un despacho avaló cada
+  hoja con `${` (`env_provenance::subtree_trusted`); si no, sus `fixed` son datos.
+- El templating nunca llena un `${UPPER_CASE}` desde `inputs`: ese nombre es una variable de
+  entorno (regla 1 de `VARIABLE_RESOLUTION_DISEÑO.md`).
+- `api_key` y `connection_url` que llegan por `inputs` expanden `${VAR}` solo en un puntero
+  avalado (el `fixed` de una tool); los de `config` siempre.
+
+**Tests.** `registry.rs::llm_call_tool_provenance_tests` (registro real, modelo guionado,
+`http_request` contra un mock, variables solo de test): el `fixed` de `config` se expande y el
+mismo desde `inputs` llega literal; un `${context.*}` que trae `${VAR}` llega literal; un input
+con el nombre de la variable no reemplaza la referencia del autor.
+`llm.rs::credential_env_tests`: `api_key` de `config`, de `inputs` sin aval y con aval.
+
+**ADP.** Sin cambios de API. Un `fixed` que mezclaba `${context.*}` con `${VAR}` en el mismo
+string deja de expandir la variable: el secreto va en su propio campo `fixed`.
+**Estado.** done.
