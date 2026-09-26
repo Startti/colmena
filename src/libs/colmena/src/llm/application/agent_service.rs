@@ -727,7 +727,39 @@ impl AgentService {
                                             Some(CallOutcome::Done(r)) => r.output.as_str(),
                                             // Its twin suspended or never ran,
                                             // so neither did it: closed below.
-                                            _ => continue,
+                                            //
+                                            // INVARIANT: this arm only runs
+                                            // when a suspension was already
+                                            // recorded. `j < i` always (a
+                                            // streak's start is scanned before
+                                            // its repeats in this same
+                                            // ascending-order pass), so if
+                                            // `j`'s own outcome was Suspended
+                                            // or never ran, index `j` (or an
+                                            // even earlier index in its chain)
+                                            // already set `suspended` above
+                                            // by the time we reach `i` here.
+                                            // Skipping without writing a `tool`
+                                            // message for `i` is only safe
+                                            // because `suspend()` below closes
+                                            // every still-unresolved id with
+                                            // `NOT_EXECUTED_ON_SUSPEND_TEXT`
+                                            // (`unresolved_sibling_ids`) — an
+                                            // id left open with no result is a
+                                            // hard 400 on Anthropic ("tool_use
+                                            // ids were found without
+                                            // tool_result blocks") and OpenAI.
+                                            _ => {
+                                                debug_assert!(
+                                                    suspended.is_some(),
+                                                    "group repeat echo skipped `{}` (twin `{j}` \
+                                                     neither ran nor produced a Done result) but \
+                                                     no suspension was recorded; its id would be \
+                                                     left unresolved and 400 the next request",
+                                                    tool_call.id
+                                                );
+                                                continue;
+                                            }
                                         },
                                     };
                                     self.answer_repeat(
@@ -761,7 +793,28 @@ impl AgentService {
                                     // A later suspension (see the TODO below),
                                     // or a call that never ran: its chain
                                     // stopped at a suspension.
-                                    _ => {}
+                                    //
+                                    // INVARIANT: same as the Echo::Call skip
+                                    // above — this arm only runs once a
+                                    // suspension was already recorded, either
+                                    // by an earlier index in this pass (a
+                                    // later suspension) or by an earlier call
+                                    // in `i`'s own chain (never ran). Nothing
+                                    // is written here for `i`'s id;
+                                    // `suspend()` below closes it with
+                                    // `NOT_EXECUTED_ON_SUSPEND_TEXT`
+                                    // (`unresolved_sibling_ids`) — an id left
+                                    // open with no `tool` result is a hard 400
+                                    // on Anthropic and OpenAI.
+                                    _ => {
+                                        debug_assert!(
+                                            suspended.is_some(),
+                                            "group left call `{}` with no history entry and no \
+                                             suspension recorded; its id would be left \
+                                             unresolved and 400 the next request",
+                                            tool_call.id
+                                        );
+                                    }
                                 }
                             }
 
@@ -3986,11 +4039,16 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn a_suspension_in_a_group_keeps_what_ran_and_closes_what_did_not() {
+        // c0 and c2 are different chains (different keys), so both start at
+        // the same time. c2's `ms` is explicitly LONGER than c0's default so
+        // "end c0" before "end c2" follows from the code (different sleep
+        // durations), not from an accidental tie between two equal-duration
+        // sleeps racing in the timer wheel.
         let (exec, _, history, resp) = run_group(
             &[
                 r#"{"key":"a","suspend":true}"#,
                 r#"{"key":"a","n":1}"#,
-                r#"{"key":"b"}"#,
+                r#"{"key":"b","ms":50}"#,
                 r#"{"n":3}"#,
             ],
             4,
@@ -4011,5 +4069,204 @@ mod tests {
                 NOT_EXECUTED_ON_SUSPEND_TEXT.trim()
             );
         }
+    }
+
+    /// GROUP-PATH MIRROR of `three_identical_calls_in_one_turn_rescue_intra_turn`:
+    /// a SINGLE assistant turn emits the SAME `(name+args)` signature three
+    /// times as `parallel` calls, so `plan_batches` puts all three in ONE
+    /// group (one chain, since they share a key). The streak climbs 1→2→3
+    /// exactly as it does outside a group: the 1st runs for real, the 2nd and
+    /// 3rd are nudged (never re-run), and the 3rd hitting `max_tool_repeats`
+    /// must set `rescue` — the group path's own `rescue = true` at the
+    /// streak-counting loop above. Without it, this group would never trip
+    /// the loop guard and the run would climb to the hard turn cap instead of
+    /// the forced-synthesis rescue.
+    #[tokio::test]
+    async fn three_identical_parallel_calls_in_one_group_rescue_intra_turn() {
+        /// Every call of this tool is `parallel` and shares one chain key, so
+        /// three calls in one response land in a single `Batch::Group` chain
+        /// — the group path, never `Batch::Alone`.
+        struct OneChainExec {
+            executed: Mutex<Vec<String>>,
+        }
+
+        #[async_trait]
+        impl ToolExecutor for OneChainExec {
+            async fn execute(&self, call: &ToolCall) -> Result<ToolResult, LlmError> {
+                self.executed.lock().unwrap().push(call.id.clone());
+                Ok(ToolResult::success(call.id.clone(), "ok".to_string()))
+            }
+            async fn available_tools(&self) -> Vec<ToolDefinition> {
+                vec![]
+            }
+            fn parallel_chain_key(&self, _call: &ToolCall) -> Option<String> {
+                Some("chain".to_string())
+            }
+        }
+
+        let mut mock_llm = MockLlmRepo::new();
+        let key = test_key();
+        let (mock_conv, _conv_state) = stateful_conv_mock(vec![]);
+
+        let counter = Arc::new(AtomicUsize::new(0));
+        let c = counter.clone();
+        mock_llm.expect_call().returning(move |req| {
+            let n = c.fetch_add(1, Ordering::SeqCst);
+            if n == 0 {
+                let triplet = |id: &str| named_tool_call(id, "loop", "{}");
+                Ok(text_response("").with_tool_calls(vec![
+                    triplet("c1"),
+                    triplet("c2"),
+                    triplet("c3"),
+                ]))
+            } else {
+                // This 2nd LLM call must be the forced synthesis, not a normal
+                // continued turn — that's the whole thing under test. A normal
+                // turn would carry tools (`iteration_tools` is still non-empty)
+                // and end with this turn's nudge tool messages; only the
+                // rescue's own request is tool-less and ends with
+                // `RESCUE_SYNTHESIS_TEXT`. Asserting on the request's shape
+                // (rather than just the final text) means a missing
+                // `rescue = true` fails HERE, instead of silently producing
+                // the same final content via a normal extra turn.
+                assert!(
+                    !req.has_tools(),
+                    "a 2nd LLM call with tools attached means the group-path \
+                     rescue never tripped: the turn loop just continued as a \
+                     normal turn instead of breaking to forced synthesis"
+                );
+                assert_eq!(
+                    req.last_message().map(|m| m.content()),
+                    Some(RESCUE_SYNTHESIS_TEXT.trim()),
+                    "expected the rescue synthesis instruction as the request's \
+                     last message"
+                );
+                Ok(text_response("best effort after group rescue"))
+            }
+        });
+
+        let exec = OneChainExec {
+            executed: Mutex::new(Vec::new()),
+        };
+        let service = AgentService::new(Arc::new(mock_llm), Arc::new(mock_conv));
+        let result = service
+            .run(AgentRunParams {
+                session_id: &key,
+                prompt: Some("triple".to_string()),
+                messages: None,
+                config: create_config(),
+                tools: offered(&["loop"]),
+                tool_executor: &exec,
+                max_tool_repeats: Some(3),
+                max_turns: None,
+                on_token: None,
+                tools_provider: None,
+                attachment_resolver: None,
+                agent_session_id: None,
+                lazy_catalog_names: None,
+            })
+            .await;
+
+        assert!(
+            result.is_ok(),
+            "intra-turn group rescue must synthesize, not error"
+        );
+        assert_eq!(result.unwrap().content(), "best effort after group rescue");
+        assert_eq!(
+            *exec.executed.lock().unwrap(),
+            vec!["c1".to_string()],
+            "only the streak's first call may run; the 2nd and 3rd are nudges"
+        );
+    }
+
+    /// GROUP-PATH MIRROR of the Echo::Text branch (~:696): a repeat whose
+    /// streak started in a PREVIOUS batch or turn, so the group processing
+    /// this call scans it FIRST in its own `order` — `streak_start` never
+    /// gets set inside THIS group, so the echo must fall back to the
+    /// streak's carried-over `first` (`Echo::Text`), not `Echo::Call(j)`
+    /// (which would look for a sibling `j` inside a group that has none).
+    ///
+    /// Turn 1: one `parallel` call executes for real, alone in a one-call
+    /// group, and sets `streak.first`. Turn 2: the model repeats the exact
+    /// same call — still `parallel`, so still routed through the group path
+    /// — as the only call of a NEW group. The repeat's tool message must
+    /// carry turn 1's output, exactly like the serial path's nudge does for
+    /// a repeat whose streak started earlier.
+    #[tokio::test]
+    async fn a_groups_repeat_echoes_a_streak_that_started_in_an_earlier_batch() {
+        /// Every call of this tool is `parallel` and shares one chain, so a
+        /// single call per turn still goes through `Batch::Group`, never
+        /// `Batch::Alone`.
+        struct AlwaysChainedExec {
+            executed: Mutex<Vec<String>>,
+        }
+
+        #[async_trait]
+        impl ToolExecutor for AlwaysChainedExec {
+            async fn execute(&self, call: &ToolCall) -> Result<ToolResult, LlmError> {
+                self.executed.lock().unwrap().push(call.id.clone());
+                Ok(ToolResult::success(
+                    call.id.clone(),
+                    format!("out {}", call.id),
+                ))
+            }
+            async fn available_tools(&self) -> Vec<ToolDefinition> {
+                vec![]
+            }
+            fn parallel_chain_key(&self, _call: &ToolCall) -> Option<String> {
+                Some("only-chain".to_string())
+            }
+        }
+
+        let mut mock_llm = MockLlmRepo::new();
+        let key = test_key();
+        let (mock_conv, conv_state) = stateful_conv_mock(vec![]);
+
+        let counter = Arc::new(AtomicUsize::new(0));
+        let c = counter.clone();
+        mock_llm.expect_call().returning(move |_req| {
+            let n = c.fetch_add(1, Ordering::SeqCst);
+            Ok(match n {
+                0 => tool_call_response(named_tool_call("c1", "loop", "{}")),
+                1 => tool_call_response(named_tool_call("c2", "loop", "{}")),
+                _ => text_response("done"),
+            })
+        });
+
+        let exec = AlwaysChainedExec {
+            executed: Mutex::new(Vec::new()),
+        };
+        let service = AgentService::new(Arc::new(mock_llm), Arc::new(mock_conv));
+        let result = service
+            .run(AgentRunParams {
+                session_id: &key,
+                prompt: Some("go".to_string()),
+                messages: None,
+                config: create_config(),
+                tools: offered(&["loop"]),
+                tool_executor: &exec,
+                max_tool_repeats: Some(3),
+                max_turns: None,
+                on_token: None,
+                tools_provider: None,
+                attachment_resolver: None,
+                agent_session_id: None,
+                lazy_catalog_names: None,
+            })
+            .await;
+
+        assert!(result.is_ok(), "run must succeed: {:?}", result.err());
+        assert_eq!(result.unwrap().content(), "done");
+        assert_eq!(
+            *exec.executed.lock().unwrap(),
+            vec!["c1".to_string()],
+            "only turn 1's call must run; the repeat is a nudge, not a re-run"
+        );
+
+        let history = conv_state.lock().unwrap().clone();
+        assert_eq!(
+            tool_output(&history, "c2"),
+            format!("out c1\n\n{REPEAT_NUDGE_TEXT}").trim()
+        );
     }
 }

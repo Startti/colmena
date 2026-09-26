@@ -3,7 +3,9 @@
 //! then with text. `Run` declares `parallel: true`, so each of its calls opens
 //! its boundary as `Run#<k>` (k = the call's index in that message: 0 and 2)
 //! and its tool frames carry `childScope`; `Nota` did not opt in and keeps the
-//! bare name and frames without the field. Calls still run one after another.
+//! bare name and frames without the field. `Nota` is a barrier between the two
+//! `Run` calls, so each forms a group of one and the three run one after
+//! another.
 //! Writes the SSE the CLI would print to
 //! `/tmp/colmena_e2e/parallel_tool_identity.sse` and asserts on its frames.
 //!
@@ -11,87 +13,25 @@
 //!   SECURE_VALUES_KEY=$(openssl rand -hex 24) DATABASE_URL=postgres:///colmena_e2e_par \
 //!     cargo test -p colmena_dag_engine --test parallel_tool_identity -- --ignored --nocapture
 
-use async_trait::async_trait;
+mod parallel_turn_model;
+
 use colmena::dag_engine::domain::events::DagExecutionEvent;
 use colmena::dag_engine::domain::graph::Graph;
 use colmena::dag_engine::engine::{ColmenaEngine, EngineConfig};
 use colmena::dag_engine::sse_mapper::SseMapper;
-use colmena::llm::domain::{
-    LlmError, LlmRepository, LlmRequest, LlmResponse, LlmStream, LlmStreamChunk, LlmStreamPart,
-    ToolCallChunk,
-};
 use colmena::llm::infrastructure::OverrideGuard;
 use futures::StreamExt;
+use parallel_turn_model::{Call, ParallelTurnModel};
 use serde_json::Value;
 use serial_test::serial;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 /// `(id, tool, arguments)` in the order the model puts them in its message.
-const CALLS: [(&str, &str, &str); 3] = [
+const CALLS: [Call; 3] = [
     ("call_clima", "Run", r#"{"task":"clima"}"#),
     ("call_nota", "Nota", r#"{"texto":"empecé"}"#),
     ("call_precios", "Run", r#"{"task":"precios"}"#),
 ];
-
-/// `ScriptedAdapter` answers one tool call per response; a parallel turn needs
-/// several in the same message. First turn: the three calls, streamed as the
-/// provider would (one chunk each, with its index). Then: text. The engine
-/// streams whenever an observer is attached, so `call` is never reached.
-#[derive(Default)]
-struct ParallelTurnModel {
-    answered: Mutex<bool>,
-}
-
-#[async_trait]
-impl LlmRepository for ParallelTurnModel {
-    async fn call(&self, _request: LlmRequest) -> Result<LlmResponse, LlmError> {
-        unimplemented!("a run with an observer streams")
-    }
-
-    async fn stream(&self, request: LlmRequest) -> Result<LlmStream, LlmError> {
-        let first = !std::mem::replace(&mut *self.answered.lock().unwrap(), true);
-        let parts: Vec<LlmStreamPart> = if first {
-            CALLS
-                .iter()
-                .enumerate()
-                .map(|(index, (id, tool, args))| {
-                    LlmStreamPart::ToolCallChunk(ToolCallChunk {
-                        index,
-                        id: id.to_string(),
-                        name: tool.to_string(),
-                        args_chunk: args.to_string(),
-                        provider_signature: None,
-                    })
-                })
-                .collect()
-        } else {
-            vec![LlmStreamPart::Content("Listo.".into())]
-        };
-        let last = parts.len() - 1;
-        let chunks: Vec<Result<LlmStreamChunk, LlmError>> = parts
-            .into_iter()
-            .enumerate()
-            .map(|(i, part)| {
-                let provider = request.config().provider().clone();
-                Ok(LlmStreamChunk::new(
-                    request.id().clone(),
-                    part,
-                    provider,
-                    i == last,
-                ))
-            })
-            .collect();
-        Ok(Box::pin(futures::stream::iter(chunks)))
-    }
-
-    async fn health_check(&self) -> Result<(), LlmError> {
-        Ok(())
-    }
-
-    fn provider_name(&self) -> &'static str {
-        "scripted"
-    }
-}
 
 /// The committed graph, with a stand-in key: the scripted model never uses it.
 fn graph() -> Graph {
@@ -133,7 +73,8 @@ async fn each_parallel_call_opens_its_own_boundary_and_its_frames_name_it() {
     let eng = ColmenaEngine::new(EngineConfig::from_env().await.unwrap())
         .await
         .unwrap();
-    let _guard = OverrideGuard::install(Arc::new(ParallelTurnModel::default()));
+    let model = Arc::new(ParallelTurnModel::new(&CALLS));
+    let _guard = OverrideGuard::install(model.clone());
     let mut mapper = SseMapper::new();
     let mut frames = Vec::new();
     let mut finish = Value::Null;
@@ -177,7 +118,8 @@ async fn each_parallel_call_opens_its_own_boundary_and_its_frames_name_it() {
             .unwrap_or_else(|| panic!("no boundary at {path}"));
         assert!(input_at < boundary_at && boundary_at < output_at, "{id}");
 
-        // Still serial: this call starts after the previous one finished.
+        // Serial: `Nota` is a barrier, so no two of these calls share a group
+        // and each starts after the previous one finished.
         assert!(
             previous_output < input_at,
             "{id} started before the last ended"
@@ -204,5 +146,9 @@ async fn each_parallel_call_opens_its_own_boundary_and_its_frames_name_it() {
     for (id, _, _) in CALLS {
         frame(&frames, "tool-input-start", id);
     }
+
+    // The model read the three results in the order it asked for them.
+    let ids: Vec<&str> = CALLS.iter().map(|(id, _, _)| *id).collect();
+    assert_eq!(model.results_seen(), ids);
     eng.shutdown().await;
 }
