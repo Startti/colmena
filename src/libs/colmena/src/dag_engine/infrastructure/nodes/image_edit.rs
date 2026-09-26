@@ -623,7 +623,9 @@ mod tests {
             .mount(&server)
             .await;
         let storage = MockOutputStorageRepository::new(); // store() must not run
-        let node = ImageEditNode::new(Arc::new(storage)).with_openai_base_url(server.uri());
+        let node = ImageEditNode::new(Arc::new(storage))
+            .with_openai_base_url(server.uri())
+            .with_sources(SignedUrlDownloader::public_only());
         let url = format!("{}/source.png", server.uri());
         let data = "data:image/png;base64,AA==";
         for (source, mask) in [(url.as_str(), None), (data, Some(url.as_str()))] {

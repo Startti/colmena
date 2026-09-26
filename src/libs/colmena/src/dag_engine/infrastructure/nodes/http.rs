@@ -2481,6 +2481,7 @@ mod multipart_execute_tests {
         let body = serde_json::json!({ "file": format!("{}/f", server.uri()) });
         let config = mk_config(&server.uri(), body);
         let out = HttpNode::new()
+            .with_url_parts(SignedUrlDownloader::public_only())
             .execute(&HashMap::new(), &config, &mut serde_json::json!({}), None)
             .await;
         let err = out.unwrap_err().to_string();

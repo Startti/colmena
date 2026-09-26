@@ -907,7 +907,7 @@ mod tests_fetch {
         }
     }
 
-    /// The production adapter never dials a non-public address.
+    /// The adapter on the public-only client never dials a non-public address.
     #[tokio::test]
     async fn fetch_raw_never_dials_a_non_public_address() {
         let server = MockServer::start().await;
@@ -915,7 +915,8 @@ mod tests_fetch {
             .respond_with(ResponseTemplate::new(200).set_body_raw(small_yaml(), "application/yaml"))
             .mount(&server)
             .await;
-        let adapter = OpenApiAdapter::new(OpenApiAdapterConfig::default()).unwrap();
+        let public_only = SignedUrlDownloader::public_only();
+        let adapter = OpenApiAdapter::with_fetcher(public_only, OpenApiAdapterConfig::default());
         let url = format!("{}/openapi.yaml", server.uri());
         let err = adapter.fetch_raw(&url, None, None).await.unwrap_err();
         assert!(err.to_string().contains("not a public address"), "{err}");
