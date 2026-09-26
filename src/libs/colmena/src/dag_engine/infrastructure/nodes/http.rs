@@ -116,14 +116,17 @@ impl MultipartUrlResolver {
         &self,
         url: &str,
     ) -> Result<ResolvedUrlPart, Box<dyn StdError + Send + Sync>> {
+        // Errors name the URL without its query or fragment (a signed URL's
+        // signature travels there).
+        let shown = url.split(['?', '#']).next().unwrap_or(url);
         let parsed = Url::parse(url)
-            .map_err(|e| format!("UrlValidationFailed: cannot parse '{url}': {e}"))?;
+            .map_err(|e| format!("UrlValidationFailed: cannot parse '{shown}': {e}"))?;
         match parsed.scheme() {
             "https" => {}
             "http" if self.allow_http_urls => {}
             "http" => {
                 return Err(format!(
-                    "UrlValidationFailed: plain http:// URL '{url}' rejected (set allow_http_urls=true to permit)"
+                    "UrlValidationFailed: plain http:// URL '{shown}' rejected (set allow_http_urls=true to permit)"
                 )
                 .into());
             }
@@ -145,9 +148,9 @@ impl MultipartUrlResolver {
         let fetcher = fetcher.with_timeout(std::time::Duration::from_secs(self.timeout_secs));
         let resp = fetcher.fetch(url).await.map_err(|e| match e {
             LlmError::AttachmentTooLarge { limit } => {
-                format!("FileTooLarge: '{url}' is larger than {limit} bytes")
+                format!("FileTooLarge: '{shown}' is larger than {limit} bytes")
             }
-            e => format!("UrlValidationFailed: GET for '{url}' failed: {e}"),
+            e => format!("UrlValidationFailed: GET for '{shown}' failed: {e}"),
         })?;
         // Read Content-Length directly from the response header. Using the raw
         // header (not `resp.content_length()`) sidesteps reqwest's
@@ -158,14 +161,14 @@ impl MultipartUrlResolver {
             .and_then(|v| v.to_str().ok())
             .and_then(|s| s.trim().parse::<u64>().ok())
             .ok_or_else(|| {
-                format!("UrlValidationFailed: GET for '{url}' returned no Content-Length")
+                format!("UrlValidationFailed: GET for '{shown}' returned no Content-Length")
             })?;
         if size_bytes > self.max_file_size_bytes {
             // Drop `resp` before returning so the TCP connection closes and the
             // upstream stops transmitting. No body bytes ever reach the worker.
             drop(resp);
             return Err(format!(
-                "FileTooLarge: '{url}' declared {size_bytes} bytes, max is {}",
+                "FileTooLarge: '{shown}' declared {size_bytes} bytes, max is {}",
                 self.max_file_size_bytes
             )
             .into());
@@ -2478,7 +2481,7 @@ mod multipart_execute_tests {
             .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![1, 2, 3]))
             .mount(&server)
             .await;
-        let body = serde_json::json!({ "file": format!("{}/f", server.uri()) });
+        let body = serde_json::json!({ "file": format!("{}/f?sig=query-value", server.uri()) });
         let config = mk_config(&server.uri(), body);
         let out = HttpNode::new()
             .with_url_parts(SignedUrlDownloader::public_only())
@@ -2486,6 +2489,7 @@ mod multipart_execute_tests {
             .await;
         let err = out.unwrap_err().to_string();
         assert!(err.contains("not a public address"), "{err}");
+        assert!(!err.contains("query-value"), "{err}");
         assert!(server.received_requests().await.unwrap().is_empty());
     }
 
