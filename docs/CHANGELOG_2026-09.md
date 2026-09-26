@@ -5693,7 +5693,7 @@ usa tal cual. `api_key` ya es campo del autor en los tres (§111). `tavily_clien
 **ADP.** Sin cambios de API.
 **Estado.** done.
 
-## 111. Endurecimiento: las credenciales del autor en `http_request` van solo a su host
+## 118. Endurecimiento: las credenciales del autor en `http_request` van solo a su host
 
 **Qué cambia.**
 - Las credenciales que configuró el autor (`bearer_token`, `authorization`, un header fuera de

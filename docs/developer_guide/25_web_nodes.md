@@ -443,7 +443,7 @@ abierto en la tool) y es otro origen, el nodo falla con un error salvo que el
 host esté en `allowed_hosts` (`"host"` o `"host:port"`, solo del autor). Es la
 misma regla que ya aplicaba el bloque `auth` (`http_oauth.rs`). Con esas
 credenciales en la request, una redirección a otro origen no se sigue: el nodo
-devuelve el 3xx tal cual; sin ellas, se sigue como antes (CHANGELOG 2026-09 §111).
+devuelve el 3xx tal cual; sin ellas, se sigue como antes (CHANGELOG 2026-09 §118).
 
 E2E: [`tests/graphs/security/tool_env_provenance_e2e.json`](../../tests/graphs/security/tool_env_provenance_e2e.json).
 
