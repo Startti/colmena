@@ -1233,12 +1233,12 @@
           "type": "array",
           "required": false,
           "default": null,
-          "description": "Author-set only. Credentials the author configured (cookies, headers other than accept/content-type/user-agent-like ones, whole or one fixed leaf of a container the caller also fills; a payload or pre_events with ${VAR}; any value a dispatcher vouched for as the author's ${VAR}; any config value the engine filled with a secure value) are sent only to the origin of the author's url; this list names other hosts ('host' or 'host:port') that may receive them when the url comes from runtime data (an edge that names url, an open tool field). Any other destination is refused with an error.",
+          "description": "Author-set only. Credentials the author configured (cookies, headers other than accept/content-type/user-agent-like ones, whole or one fixed leaf of a container the caller also fills; a payload or pre_events with ${VAR}; any value a dispatcher vouched for as the author's ${VAR}; any config value the engine filled with a secure value) are sent only to the origin of the author's url; this list names other hosts ('host' or 'host:port') that may receive them when the url comes from runtime data (an edge that names url, an open tool field). Any other destination is refused with an error. A url from runtime data that this list does not name connects only to a public address and only over the websocket transport.",
           "example": ["socket.example.com"]
         }
       },
       "input_ports": {
-        "url": { "type": "string", "description": "Dynamic server URL (an edge that names it, or a tool field the author offers). Overrides config; the author's cookies/headers follow it only to the author's origin or allowed_hosts." },
+        "url": { "type": "string", "description": "Dynamic server URL (an edge that names it, or a tool field the author offers). Overrides config; the author's cookies/headers follow it only to the author's origin or allowed_hosts; unless allowed_hosts names it, it connects only to a public address, over websocket." },
         "namespace": { "type": "string", "description": "Dynamic namespace. Overrides config." },
         "event": { "type": "string", "description": "Dynamic event name. Overrides config." },
         "payload": { "type": "any", "description": "Dynamic payload. Overrides config entirely." },

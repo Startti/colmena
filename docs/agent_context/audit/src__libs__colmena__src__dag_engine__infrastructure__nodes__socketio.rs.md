@@ -12,7 +12,7 @@
 - `PreEventSpec` (struct, private) — one entry in `pre_events` array with event name, payload, optional wait_event, optional timeout override
 
 ### Main Node & ExecutableNode Implementation
-- `SocketIoNode` (struct, pub, unit) — stateless node implementing `ExecutableNode` for Socket.IO connections
+- `SocketIoNode` (struct, pub; `Default`) — stateless node implementing `ExecutableNode` for Socket.IO connections; `dialable` is where a `url` from data may connect (the process rule, `process_dialable()`): public addresses and websocket only, unless `allowed_hosts` names the host (CHANGELOG 2026-09 §125)
 
 ### Private Helper Methods (on SocketIoNode impl)
 - `resolve_env_vars` (fn, private) — resolve `${ENV_VAR}` placeholders in strings; identical to HttpNode's resolver

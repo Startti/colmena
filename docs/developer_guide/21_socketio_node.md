@@ -289,6 +289,13 @@ names it, an open tool field) and points elsewhere, the node fails before
 connecting unless the host is listed in `allowed_hosts` (`"host"` or
 `"host:port"`, author-set) — the same rule as `http_request` (§119).
 
+A `url` that comes from runtime data and is not the author's origin connects only to a public
+address and only over `transport: "websocket"` (`any` and `polling` are refused: polling follows
+redirects the check cannot see), unless `allowed_hosts` lists its host. The node resolves the name
+just before connecting; the Socket.IO client resolves it again when it opens the socket.
+`COLMENA_ATTACHMENT_ALLOW_PRIVATE_HOSTS=1` turns the address check off for local development
+(CHANGELOG 2026-09 §125).
+
 ---
 
 ## Example 1: Standalone Node — Ack Mode

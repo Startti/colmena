@@ -6364,3 +6364,24 @@ responden; uno link-local falla sin marcarse; sin `allowed_hosts`, el de loopbac
 SSE ni de API. Una tool con `base_url` abierto que deba llegar a un host no público lo lista en
 `allowed_hosts`.
 **Estado.** done.
+
+## 125. Endurecimiento: en `socketio_request`, una `url` que viene de datos se conecta solo a direcciones públicas y por websocket
+
+**Qué cambia.** Si la `url` de `socketio_request` viene de datos del run (un edge que la nombra, un
+campo abierto de la tool) y no es el origen de la `url` del autor, el nodo resuelve el host antes de
+conectar y se niega si alguna respuesta, o la IP literal, no es pública (la regla de §124). Esa
+`url` conecta solo por el transporte `websocket`: `any` y `polling` se niegan, porque el polling
+sigue redirects que el chequeo no ve. Un host en `allowed_hosts` (del autor) conecta como antes, con
+cualquier transporte. La `url` del autor no cambia. El cliente Socket.IO vuelve a resolver el
+nombre al abrir el socket: el chequeo vale para la resolución hecha justo antes. La misma variable
+(`COLMENA_ATTACHMENT_ALLOW_PRIVATE_HOSTS`) lo apaga en desarrollo local. `SocketIoNode` deja de ser
+un struct unitario: se construye con `SocketIoNode::default()`.
+
+**Tests.** `socketio.rs` `a_url_from_data_dials_only_public_addresses_over_websocket`: una `url` de
+datos en loopback (por IP y por nombre) no recibe conexión; con `polling` tampoco, aunque la
+dirección se acepte; por websocket, o listada en `allowed_hosts`, conecta; la `url` del autor
+conecta. Los tests de credenciales corren con un nodo que acepta toda dirección.
+
+**ADP.** [Nota de migración](adp_migration/2026-09-26-data-destination-public-only.md). Sin cambios de
+SSE. En Rust, `SocketIoNode` se construye con `SocketIoNode::default()`.
+**Estado.** done.
