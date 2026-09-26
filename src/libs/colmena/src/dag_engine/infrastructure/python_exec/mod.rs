@@ -3,7 +3,9 @@
 //! docs/developer_guide/53_python_executors.md.
 
 pub mod config;
+pub mod frame;
 pub mod inprocess;
+pub mod protocol;
 
 use crate::dag_engine::domain::python_executor::{
     ExecutorKind, PythonExecutor, PythonRunError, PythonRunRequest, PythonRunResult,
