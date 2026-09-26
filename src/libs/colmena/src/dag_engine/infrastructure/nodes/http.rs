@@ -245,7 +245,8 @@ impl HttpNode {
         "secure", // internal Colmena flag — NEVER send to external APIs
     ];
 
-    /// True for engine-injected bookkeeping inputs (`__colmena_*`, `__node*`).
+    /// True for engine-injected bookkeeping inputs — the domain's
+    /// [`crate::dag_engine::domain::node::is_engine_key`] (`__colmena*`, `__node*`).
     ///
     /// Matched by PREFIX rather than listed in [`Self::RESERVED_KEYS`]: that list has to be
     /// extended by hand every time the engine adds an internal input, and the one that gets
@@ -256,7 +257,7 @@ impl HttpNode {
     /// them rejected the request outright (HTTP 400, the param echoed back as an unexpected
     /// filter), breaking every tool call of an agent built against it.
     fn is_engine_internal(key: &str) -> bool {
-        key.starts_with("__colmena") || key.starts_with("__node")
+        crate::dag_engine::domain::node::is_engine_key(key)
     }
 
     /// Collects the leftover inputs that should travel as query params.
