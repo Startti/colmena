@@ -5610,7 +5610,7 @@ en `config` sigue expandiendo.
 **ADP.** Sin cambios de API.
 **Estado.** done.
 
-## 115. Endurecimiento: `socketio_request` expande `${VAR}` solo en la configuración del autor
+## 116. Endurecimiento: `socketio_request` expande `${VAR}` solo en la configuración del autor
 
 **Qué cambia.** `url`, `namespace`, `cookies`, `headers`, `payload` y `pre_events` se
 resuelven con la misma regla que `http_request`: un valor de `config` expande todo `${VAR}`;
@@ -5625,7 +5625,7 @@ header de `inputs` con `${VAR}` sale literal y la cookie de `config` sale expand
 **ADP.** Sin cambios de API.
 **Estado.** done.
 
-## 116. Endurecimiento: un `api_key` que llega como dato no se resuelve del entorno
+## 117. Endurecimiento: un `api_key` que llega como dato no se resuelve del entorno
 
 **Qué cambia.** `image_generation`, `image_edit` y `tts` leen `api_key` con
 `env_provenance::resolve_credential`, la misma regla que `llm_call` (§112): el de `config`
