@@ -11,8 +11,9 @@ compartido.
   campo abierto de la tool, una tool que llega como dato) y no es el origen del `base_url` del
   autor, el nodo marca solo direcciones públicas, también en cada redirect, y sin proxy. Un host en
   `allowed_hosts` se marca en cualquier dirección. El destino que fija el autor no cambia.
-- **`socketio_request`** (§125): una `url` que viene de datos, fuera de `allowed_hosts`, conecta solo a
-  direcciones públicas y solo por `transport: "websocket"`; `any` y `polling` se niegan.
+- **`socketio_request`** (§125): una `url` que viene de datos conecta solo por `transport: "websocket"`,
+  también con el host en `allowed_hosts`, y fuera de esa lista solo a direcciones públicas; un nombre
+  que no resuelve dentro de `timeout_ms` se niega.
 
 ## Qué ve ADP
 

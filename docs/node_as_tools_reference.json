@@ -696,7 +696,7 @@
         "Use ack mode (omit wait_event) when the server replies via the Socket.IO acknowledgment callback. Use wait_event when the server emits a separate broadcast event as the response.",
         "When the server scopes state per-socket (rooms, subscriptions, sessions), use pre_events to set up that state on the SAME connection before the main emit. Two separate socketio_request nodes will each open a fresh socket and lose the setup.",
         "The pre_events array goes inside node_schema with 'fixed' so the LLM cannot disable or alter the auth/setup chain. Failure of any pre_event aborts the call cleanly with success=false and failed_pre_event.",
-        "Inputs override config fields with the same name — useful when chaining: a previous node can dynamically supply 'url' or 'payload' via edges while the rest stays fixed. A url from data connects only to a public address and over websocket, unless the author lists its host in allowed_hosts.",
+        "Inputs override config fields with the same name — useful when chaining: a previous node can dynamically supply 'url' or 'payload' via edges while the rest stays fixed. A url from data connects only over websocket and, unless the author lists its host in allowed_hosts, only to a public address.",
         "On error the node returns { success: false, event, error, ... } instead of throwing. Branch on success in downstream nodes if you want the LLM to react to failures."
       ],
       "reference_graphs": [

@@ -987,9 +987,10 @@ Este bloque resume el estado real del cifrado en tránsito para cada componente 
   direcciones (`DialGuard`): solo públicas, en la resolución DNS y en cada redirect, sin proxy. Un host en
   `allowed_hosts` del autor se marca en cualquier dirección. `COLMENA_ATTACHMENT_ALLOW_PRIVATE_HOSTS` la apaga
   también (CHANGELOG 2026-09 §124).
-- `socketio_request`: una `url` de datos fuera de `allowed_hosts` se resuelve antes de conectar y se niega si una
-  respuesta no es pública; conecta solo por websocket (el polling sigue redirects). El cliente Socket.IO vuelve a
-  resolver al abrir el socket: el chequeo vale para la resolución hecha justo antes (CHANGELOG 2026-09 §125).
+- `socketio_request`: una `url` de datos conecta solo por websocket (el polling sigue redirects), listada o no; fuera
+  de `allowed_hosts` se resuelve una vez, dentro de `timeout_ms`, y se niega si no resuelve a tiempo o si una
+  respuesta no es pública. Por `ws://`/`http://` conecta a la dirección revisada con el nombre en `Host`; por `wss://`
+  la verificación TLS del certificado cubre el nombre (CHANGELOG 2026-09 §125).
 
 ## Brechas conocidas de TLS (Postgres, HTTP, Socket.IO)
 

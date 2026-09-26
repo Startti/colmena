@@ -12,9 +12,10 @@
 - `PreEventSpec` (struct, private) — one entry in `pre_events` array with event name, payload, optional wait_event, optional timeout override
 
 ### Main Node & ExecutableNode Implementation
-- `SocketIoNode` (struct, pub; `Default`) — stateless node implementing `ExecutableNode` for Socket.IO connections; `dialable` is where a `url` from data may connect (the process rule, `process_dialable()`): public addresses and websocket only, unless `allowed_hosts` names the host (CHANGELOG 2026-09 §125)
+- `SocketIoNode` (struct, pub; `Default`) — stateless node implementing `ExecutableNode` for Socket.IO connections; `dialable` is where a `url` from data may connect (the process rule, `process_rule()`; `None` is the development opt-out): websocket only and, unless `allowed_hosts` names the host, public addresses only, the name resolved once (`DialGuard::resolve_now`) and, over ws/http, dialled at the address checked with the name as `Host` (CHANGELOG 2026-09 §125)
 
 ### Private Helper Methods (on SocketIoNode impl)
+- `pinned` (fn, private) — a plaintext (`http`/`ws`) url rewritten to the address checked, plus the `Host` it names; `None` for `https`/`wss`, which keep the name for TLS verification
 - `resolve_env_vars` (fn, private) — resolve `${ENV_VAR}` placeholders in strings; identical to HttpNode's resolver
 - `resolve_env_vars_in_value` (fn, private) — recursively resolve env vars in all string values within a JSON Value (objects, arrays, scalars)
 - `payload_to_value` (fn, private) — convert `rust_socketio::Payload` enum to `serde_json::Value` (Text → single or array, Binary → base64 wrapper)
