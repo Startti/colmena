@@ -5261,6 +5261,44 @@ atrás; la curación de todos los ids del turno, contestados o no.
 **ADP.** Sin código. Desde acá re-correr el hijo cerrado ya no da 400; la nota de
 migración lo cuenta en la entrada 106.
 
+## 103. `close_suspended` cierra solo bajo este run y loguea qué pasó; el marcador sirve para un run cortado (parallel tools, 3c)
+
+**Qué cambió.**
+- **Guarda de padre.** `DagToolExecutor::close_suspended` (entrada 101) tomaba el id
+  del hijo de la salida de la tool y fallaba cualquier fila `SUSPENDED` con ese id.
+  Ahora lee la fila primero (`get_by_id`) y la cierra solo si su `parent_session_id`
+  es la sesión del ejecutor; sin session id no cierra nada.
+- **Logs, solo con ids, nunca valores.** Sin session id del ejecutor, `error` (antes
+  volvía en silencio). Fila no encontrada, `warn` «child row not found». Fila de otro
+  padre, `warn` «not a child of this run». Una falla al leer o cerrar, `error`: el
+  padre puede quedar con dos hijos `SUSPENDED`, y su resume va a fallar.
+- **Marcador neutro.** Un Stop o el watchdog cortan un run después de guardar el
+  mensaje del asistente, y dejan abiertos los ids que todavía no tenían resultado. La
+  curación de la entrada 102 los contestaba llamando «pregunta» a cada uno. El texto
+  pasa a `text/prompts/agent_loop/abandoned_tool_call.md` (antes
+  `abandoned_question.md`), escrito para las dos causas, y la constante a
+  `ABANDONED_TOOL_CALL_TEXT`.
+- **El grafo del E2E entra acá, sin su test.** `tests/graphs/agents/parallel_tool_suspend.json`
+  lo cubre el lint del corpus (333 archivos, 0/0/0), y `EXPECTED_FILES` de
+  `corpus_noise` pasa de 332 a 333. Su comentario y el de `corpus_noise` ya nombran
+  `parallel_tool_suspend.rs`, que llega en la entrada 104.
+
+**Tests.** 4 nuevos en la lib, 2929 passed (2925 en la entrada 102):
+- `close_suspended`: una fila `SUSPENDED` de otro padre queda como está, con su nieto;
+  sin session id no cierra y loguea `error` con `tool_call_id` y `child_session_id`;
+  una fila no encontrada loguea «child row not found». Los dos de logs capturan el
+  `tracing` y verifican que el valor de la pregunta no aparece;
+- la curación de un hilo cortado que termina en `A(x, y)` sin ningún `tool`: x e y se
+  contestan una vez cada uno, y la request no lleva ningún id abierto.
+
+**Mutación.** Rojas y revertidas editando: sin la guarda de padre (`left: Failed right:
+Suspended`); la curación de solo el primer id abierto (`left: ["y"] right: []`). Los
+dos tests de logs se vieron rojos antes del cambio.
+
+**E2E.** En las entradas 104 y 105.
+
+**ADP.** Sin código.
+
 ## 104. Endurecimiento: `${VAR}` se expande solo en la configuración del autor
 
 **Qué cambia.** Un valor que llega por `inputs` (un edge, el estado global, una fila de
