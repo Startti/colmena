@@ -25,12 +25,11 @@ use crate::dag_engine::domain::lint::{FieldSpec, NodeCatalogEntry};
 use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
 use crate::dag_engine::infrastructure::env_provenance::{escape_pointer_segment, EnvPolicy};
 use crate::dag_engine::infrastructure::nodes::util::session_attachment::read_session_attachment;
-use bytes::Bytes;
-use futures::Stream;
+use crate::llm::domain::{BoxedByteStream, LlmError};
+use crate::llm::infrastructure::files::SignedUrlDownloader;
 use reqwest::{Method, Url};
 use serde_json::{json, Value};
 use std::error::Error as StdError;
-use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -47,6 +46,8 @@ pub struct HttpNode {
     /// Shared OAuth provider cache. When set, a config `auth` block authenticates
     /// via the refresh_token grant, reusing one token per credential fingerprint.
     oauth_cache: Option<Arc<crate::google_oauth::infrastructure::OAuthProviderCache>>,
+    /// Fetches multipart URL parts: public addresses only.
+    url_parts: SignedUrlDownloader,
 }
 
 impl Default for HttpNode {
@@ -85,7 +86,7 @@ pub(crate) enum PartSpec {
 /// Resolution result for a single URL part: a streaming reader + the metadata
 /// we'll forward to the downstream multipart form.
 pub(crate) struct ResolvedUrlPart {
-    pub stream: Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send>>,
+    pub stream: BoxedByteStream,
     pub size_bytes: u64,
     pub content_type: String,
     pub filename: String,
@@ -106,6 +107,8 @@ pub(crate) struct MultipartUrlResolver {
     pub max_file_size_bytes: u64,
     pub timeout_secs: u64,
     pub allow_http_urls: bool,
+    /// The guarded client ([`SignedUrlDownloader`]).
+    pub fetcher: SignedUrlDownloader,
 }
 
 impl MultipartUrlResolver {
@@ -132,33 +135,25 @@ impl MultipartUrlResolver {
             }
         }
 
-        let client = crate::shared::http_client::builder()
-            .timeout(std::time::Duration::from_secs(self.timeout_secs))
-            .http1_only()
-            .build()?;
-
         // GET-only: HEAD is intentionally skipped because V4-signed URLs (GCS,
         // S3) are method-specific — a URL signed for GET returns 4xx on HEAD.
-        // `send().await?` resolves once response HEADERS arrive (body not
-        // consumed yet), so we can validate Content-Length and reject by
-        // dropping `resp` BEFORE any body bytes flow into the worker.
-        let resp = client
-            .get(parsed.clone())
-            .send()
-            .await
-            .map_err(|e| format!("UrlValidationFailed: GET for '{url}' failed: {e}"))?;
-        if !resp.status().is_success() {
-            return Err(format!(
-                "UrlValidationFailed: GET for '{url}' returned status {}",
-                resp.status()
-            )
-            .into());
-        }
+        // The guarded client dials public addresses only and returns once the
+        // response HEADERS arrive (body not consumed yet), so we can validate
+        // Content-Length and reject by dropping `resp` BEFORE any body bytes
+        // flow into the worker; a body past the cap ends its stream.
+        let fetcher = self.fetcher.clone().capped_at(self.max_file_size_bytes);
+        let fetcher = fetcher.with_timeout(std::time::Duration::from_secs(self.timeout_secs));
+        let resp = fetcher.fetch(url).await.map_err(|e| match e {
+            LlmError::AttachmentTooLarge { limit } => {
+                format!("FileTooLarge: '{url}' is larger than {limit} bytes")
+            }
+            e => format!("UrlValidationFailed: GET for '{url}' failed: {e}"),
+        })?;
         // Read Content-Length directly from the response header. Using the raw
         // header (not `resp.content_length()`) sidesteps reqwest's
         // decoded-body size_hint quirks.
         let size_bytes = resp
-            .headers()
+            .headers
             .get(reqwest::header::CONTENT_LENGTH)
             .and_then(|v| v.to_str().ok())
             .and_then(|s| s.trim().parse::<u64>().ok())
@@ -176,18 +171,17 @@ impl MultipartUrlResolver {
             .into());
         }
         let content_type = resp
-            .headers()
+            .headers
             .get(reqwest::header::CONTENT_TYPE)
             .and_then(|v| v.to_str().ok())
             .map(|s| s.split(';').next().unwrap_or(s).trim().to_string())
             .unwrap_or_else(|| "application/octet-stream".to_string());
         let filename =
-            filename_from_disposition(resp.headers().get(reqwest::header::CONTENT_DISPOSITION))
+            filename_from_disposition(resp.headers.get(reqwest::header::CONTENT_DISPOSITION))
                 .unwrap_or_else(|| filename_from_url_path(&parsed));
-        let stream = resp.bytes_stream();
 
         Ok(ResolvedUrlPart {
-            stream: Box::pin(stream),
+            stream: resp.body,
             size_bytes,
             content_type,
             filename,
@@ -298,7 +292,14 @@ impl HttpNode {
             storage: None,
             attachment_resolver: None,
             oauth_cache: None,
+            url_parts: SignedUrlDownloader::new(),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_url_parts(mut self, fetcher: SignedUrlDownloader) -> Self {
+        self.url_parts = fetcher;
+        self
     }
 
     pub fn with_storage(
@@ -1008,6 +1009,7 @@ impl HttpNode {
             max_file_size_bytes,
             timeout_secs,
             allow_http_urls,
+            fetcher: self.url_parts.clone(),
         };
 
         let parts_count = parts.len();
@@ -1111,10 +1113,7 @@ impl HttpNode {
                 let resolved = resolver.resolve(&url).await?;
                 let filename = filename_override.unwrap_or(resolved.filename);
                 let content_type = content_type_override.unwrap_or(resolved.content_type);
-                let mapped = resolved
-                    .stream
-                    .map(|chunk| chunk.map_err(std::io::Error::other));
-                let body = reqwest::Body::wrap_stream(mapped);
+                let body = reqwest::Body::wrap_stream(resolved.stream);
                 let part = reqwest::multipart::Part::stream_with_length(body, resolved.size_bytes)
                     .file_name(filename)
                     .mime_str(&content_type)?;
@@ -1807,6 +1806,7 @@ mod session_attachment_tests {
     use crate::storage::domain::{
         MockOutputStorageRepository, OutputStorageRepository, StorageError, StoredStream,
     };
+    use bytes::Bytes;
     use std::collections::HashMap;
     use wiremock::matchers::{body_json, method};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -2258,6 +2258,7 @@ mod multipart_url_resolution_tests {
             max_file_size_bytes: 100_000,
             timeout_secs: 5,
             allow_http_urls: true, // wiremock serves http://
+            fetcher: SignedUrlDownloader::allowing_private_hosts(),
         };
         let url = format!("{}/file", server.uri());
         let resolved = resolver.resolve(&url).await.unwrap();
@@ -2279,6 +2280,7 @@ mod multipart_url_resolution_tests {
             max_file_size_bytes: 100_000,
             timeout_secs: 5,
             allow_http_urls: true,
+            fetcher: SignedUrlDownloader::allowing_private_hosts(),
         };
         let url = format!("{}/missing", server.uri());
         let err = resolver.resolve(&url).await.unwrap_err();
@@ -2291,6 +2293,7 @@ mod multipart_url_resolution_tests {
             max_file_size_bytes: 100_000,
             timeout_secs: 5,
             allow_http_urls: false,
+            fetcher: SignedUrlDownloader::allowing_private_hosts(),
         };
         let err = resolver.resolve("http://example.com/x").await.unwrap_err();
         assert!(err.to_string().contains("http://"), "got {err}");
@@ -2302,6 +2305,7 @@ mod multipart_url_resolution_tests {
             max_file_size_bytes: 100_000,
             timeout_secs: 5,
             allow_http_urls: true,
+            fetcher: SignedUrlDownloader::allowing_private_hosts(),
         };
         let err = resolver.resolve("ftp://example.com/x").await.unwrap_err();
         assert!(err.to_string().contains("scheme"));
@@ -2329,6 +2333,7 @@ mod multipart_url_resolution_tests {
             max_file_size_bytes: 100_000,
             timeout_secs: 5,
             allow_http_urls: true,
+            fetcher: SignedUrlDownloader::allowing_private_hosts(),
         };
         let url = format!("{}/signed", server.uri());
         let resolved = resolver.resolve(&url).await.unwrap();
@@ -2363,6 +2368,7 @@ mod multipart_url_resolution_tests {
             max_file_size_bytes: 100,
             timeout_secs: 5,
             allow_http_urls: true,
+            fetcher: SignedUrlDownloader::allowing_private_hosts(),
         };
         let url = format!("{}/big", server.uri());
         let err = resolver.resolve(&url).await.unwrap_err();
@@ -2387,6 +2393,7 @@ mod multipart_url_resolution_tests {
             max_file_size_bytes: 100_000,
             timeout_secs: 5,
             allow_http_urls: true,
+            fetcher: SignedUrlDownloader::allowing_private_hosts(),
         };
         let url = format!("{}/file", server.uri());
         let resolved = resolver.resolve(&url).await.unwrap();
@@ -2437,6 +2444,7 @@ mod multipart_execute_tests {
         let run = |config: Value, body: Value| async move {
             let inputs = HashMap::from([("body".to_string(), body)]);
             HttpNode::new()
+                .with_url_parts(SignedUrlDownloader::allowing_private_hosts())
                 .execute(&inputs, &config, &mut serde_json::json!({}), None)
                 .await
         };
@@ -2460,6 +2468,24 @@ mod multipart_execute_tests {
             .await
             .unwrap();
         assert_eq!(other.received_requests().await.unwrap().len(), 1);
+    }
+
+    /// A URL part on a non-public address is never fetched, and nothing is sent.
+    #[tokio::test]
+    async fn a_url_part_on_a_non_public_address_is_never_fetched() {
+        let server = MockServer::start().await;
+        Mock::given(wiremock::matchers::any())
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![1, 2, 3]))
+            .mount(&server)
+            .await;
+        let body = serde_json::json!({ "file": format!("{}/f", server.uri()) });
+        let config = mk_config(&server.uri(), body);
+        let out = HttpNode::new()
+            .execute(&HashMap::new(), &config, &mut serde_json::json!({}), None)
+            .await;
+        let err = out.unwrap_err().to_string();
+        assert!(err.contains("not a public address"), "{err}");
+        assert!(server.received_requests().await.unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -2500,7 +2526,7 @@ mod multipart_execute_tests {
         let body = serde_json::json!({ "files": [url1, url2] });
         let config = mk_config(&server.uri(), body);
 
-        let node = HttpNode::new();
+        let node = HttpNode::new().with_url_parts(SignedUrlDownloader::allowing_private_hosts());
         let out = node
             .execute(
                 &HashMap::<String, Value>::new(),

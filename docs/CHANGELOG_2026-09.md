@@ -6208,3 +6208,33 @@ producción: ADP pone los adjuntos en `config.files` de los `llm_call` de primer
 `path` ni pasa `files` a un sub-agente. Un grafo local con `path` corre con `COLMENA_LOCAL=true`,
 que nunca va en un worker compartido: deja leer su disco.
 **Estado.** done.
+
+## 123. Endurecimiento: la imagen de `image_edit`, las partes URL de multipart y la spec de `api_explorer` se bajan con el cliente guardado
+
+**Qué cambia.** Tres descargas más de una URL que los datos del run pueden elegir pasan por el
+cliente guardado de §121 (`SignedUrlDownloader`: solo `http`/`https`, solo direcciones públicas,
+también en cada redirect, sin proxy, conexión 10 s y tope de bytes):
+- `image_edit`: `source_url`/`mask_url` `http(s)` (antes el cliente común, sin tope). Tope 100 MiB,
+  el mismo de una fuente `$attachment:`.
+- `http_request` multipart: las partes URL (antes con tope por `Content-Length`, sin chequeo de
+  dirección). `max_file_size_bytes` ahora también corta el stream; siguen
+  `url_download_timeout_secs` y `allow_http_urls`.
+- `api_explorer__load_spec`: la URL de la spec (10 MiB, 60 s y GET condicional, como antes).
+
+Un destino no público falla sin marcarse (`not a public address` en el error de cada nodo).
+`COLMENA_ATTACHMENT_ALLOW_PRIVATE_HOSTS` y `COLMENA_ATTACHMENT_MAX_BYTES` valen para las tres. El
+User-Agent de estas descargas pasa a `colmena/<versión>`. `SignedUrlDownloader` suma `fetch` y
+`fetch_with` (headers de la respuesta; headers extra del request), `capped_at` (solo baja el tope)
+y `with_timeout`. `source_url`/`mask_url` siguen sin ser campos del autor: en modo tool son la
+entrada del modelo; el destino lo cierra la guarda. No cambian: la URL que devuelve el proveedor en
+`image_generation`/`image_edit`, ni las URLs que baja el propio proveedor (imágenes por URL al
+modelo, `gdocs`, Tavily).
+
+**Tests.** `image_edit.rs`: una `source_url` o `mask_url` en loopback no recibe ningún request y no
+se pide la edición; una fuente pasada del tope se rechaza. `http.rs`: una parte URL en loopback no
+se baja y no se envía nada. `openapi_adapter.rs`: la spec en loopback no recibe ningún request.
+`tests/multipart_http_test.rs` corre con `COLMENA_ATTACHMENT_ALLOW_PRIVATE_HOSTS=1`.
+
+**ADP.** Sin cambios de API: las URLs firmadas de GCS son públicas. Un entorno local que sirva
+imágenes, archivos o specs desde `localhost` necesita `COLMENA_ATTACHMENT_ALLOW_PRIVATE_HOSTS=1`.
+**Estado.** done.

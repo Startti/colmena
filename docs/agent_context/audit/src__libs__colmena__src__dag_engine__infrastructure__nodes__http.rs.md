@@ -9,7 +9,7 @@
 - `HttpNode` (struct, pub) — Stateless HTTP request executor; wires optional storage, attachment resolver, and OAuth cache
 - `PartSpec` (enum, pub(crate)) — Single resolved multipart form part: Url, Attachment, or Text
 - `ResolvedUrlPart` (struct, pub(crate)) — URL resolution result with streaming reader, size, content-type, filename
-- `MultipartUrlResolver` (struct, pub(crate)) — Validates and downloads multipart parts from URLs, enforcing size/timeout limits and scheme checks
+- `MultipartUrlResolver` (struct, pub(crate)) — Validates and downloads multipart parts from URLs, enforcing size/timeout limits and scheme checks, through the guarded `SignedUrlDownloader` (`fetcher`, from `HttpNode.url_parts`: public addresses only; CHANGELOG 2026-09 §123)
 - `StubResolver` (struct, test-only) — Mock implementation of `AttachmentStreamResolver` for testing
 
 ### Constants

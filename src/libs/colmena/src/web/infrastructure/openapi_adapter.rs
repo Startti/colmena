@@ -14,6 +14,8 @@
 //! file are structured by pipeline stage so later tasks can add more
 //! without breaking earlier ones.
 
+use crate::llm::domain::LlmError;
+use crate::llm::infrastructure::files::SignedUrlDownloader;
 use crate::web::application::url_normalizer::{normalize_forge_url, NormalizedUrl};
 use crate::web::domain::{
     ApiKeyLocation, ApiSpecPort, Endpoint, HttpMethod, ParamType, ParameterSpec, ParsedSpec,
@@ -41,18 +43,24 @@ impl Default for OpenApiAdapterConfig {
 }
 
 pub struct OpenApiAdapter {
-    client: reqwest::Client,
+    /// The guarded client ([`SignedUrlDownloader`]): public addresses only.
+    fetcher: SignedUrlDownloader,
     config: OpenApiAdapterConfig,
 }
 
 impl OpenApiAdapter {
     pub fn new(config: OpenApiAdapterConfig) -> Result<Self, WebDomainError> {
-        let client = crate::shared::http_client::builder()
-            .timeout(config.timeout)
-            .user_agent("colmena-api-explorer/0.1")
-            .build()
-            .map_err(|e| WebDomainError::AdapterInit(format!("reqwest client init: {e}")))?;
-        Ok(Self { client, config })
+        Ok(Self::with_fetcher(SignedUrlDownloader::new(), config))
+    }
+
+    fn with_fetcher(fetcher: SignedUrlDownloader, config: OpenApiAdapterConfig) -> Self {
+        let fetcher = fetcher.with_timeout(config.timeout);
+        Self { fetcher, config }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn allowing_private_hosts(config: OpenApiAdapterConfig) -> Self {
+        Self::with_fetcher(SignedUrlDownloader::allowing_private_hosts(), config)
     }
 
     /// Lower-level fetch stage. Returns the raw bytes plus response
@@ -69,50 +77,49 @@ impl OpenApiAdapter {
             rewritten: _,
         } = normalize_forge_url(input_url);
 
-        let mut req = self.client.get(&resolved);
-        if let Some(etag) = if_none_match {
-            req = req.header("If-None-Match", etag);
-        }
-        if let Some(lm) = if_modified_since {
-            req = req.header("If-Modified-Since", lm);
-        }
-
-        let resp = req.send().await.map_err(|e| {
-            if e.is_timeout() {
-                WebDomainError::Timeout {
-                    ms: self.config.timeout.as_millis() as u64,
-                }
-            } else {
-                WebDomainError::Upstream {
-                    status: 0,
-                    body: format!("fetch error: {e}"),
-                }
+        use reqwest::header::{HeaderMap, HeaderValue, IF_MODIFIED_SINCE, IF_NONE_MATCH};
+        let mut headers = HeaderMap::new();
+        for (name, value) in [
+            (IF_NONE_MATCH, if_none_match),
+            (IF_MODIFIED_SINCE, if_modified_since),
+        ] {
+            if let Some(v) = value.and_then(|v| HeaderValue::from_str(v).ok()) {
+                headers.insert(name, v);
             }
-        })?;
+        }
 
-        let status = resp.status();
-        if status.as_u16() == 304 {
-            return Ok(FetchRawResult::NotModified);
-        }
-        if !status.is_success() {
-            return Err(WebDomainError::Upstream {
-                status: status.as_u16(),
-                body: format!("HTTP {} from {resolved}", status.as_u16()),
-            });
-        }
+        let started = std::time::Instant::now();
+        let upstream = |status, body| WebDomainError::Upstream { status, body };
+        let resp = match self.fetcher.fetch_with(&resolved, headers).await {
+            Ok(resp) => resp,
+            Err(LlmError::SignedUrlFetchFailed { status: 304 }) => {
+                return Ok(FetchRawResult::NotModified)
+            }
+            Err(LlmError::SignedUrlFetchFailed { status }) => {
+                return Err(upstream(status, format!("HTTP {status} from {resolved}")))
+            }
+            Err(LlmError::AttachmentUrlRefused { reason }) => {
+                return Err(upstream(0, format!("URL refused: {reason}")))
+            }
+            Err(LlmError::NetworkError { .. }) if started.elapsed() >= self.config.timeout => {
+                let ms = self.config.timeout.as_millis() as u64;
+                return Err(WebDomainError::Timeout { ms });
+            }
+            Err(e) => return Err(upstream(0, format!("fetch error: {e}"))),
+        };
 
         let content_type = resp
-            .headers()
+            .headers
             .get(reqwest::header::CONTENT_TYPE)
             .and_then(|v| v.to_str().ok())
             .map(String::from);
         let etag = resp
-            .headers()
+            .headers
             .get(reqwest::header::ETAG)
             .and_then(|v| v.to_str().ok())
             .map(String::from);
         let last_modified = resp
-            .headers()
+            .headers
             .get(reqwest::header::LAST_MODIFIED)
             .and_then(|v| v.to_str().ok())
             .map(String::from);
@@ -129,7 +136,7 @@ impl OpenApiAdapter {
 
         // Stream body with size cap. reqwest's content-length hint is best-effort;
         // we count bytes as they arrive and abort past the cap.
-        let mut stream = resp.bytes_stream();
+        let mut stream = resp.body;
         let mut buf: Vec<u8> = Vec::new();
         use futures::StreamExt;
         while let Some(chunk) = stream.next().await {
@@ -759,7 +766,7 @@ mod tests_fetch {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn adapter_at(config: OpenApiAdapterConfig) -> OpenApiAdapter {
-        OpenApiAdapter::new(config).unwrap()
+        OpenApiAdapter::allowing_private_hosts(config)
     }
 
     fn small_yaml() -> &'static str {
@@ -899,6 +906,21 @@ mod tests_fetch {
             other => panic!("expected Upstream(500), got {other:?}"),
         }
     }
+
+    /// The production adapter never dials a non-public address.
+    #[tokio::test]
+    async fn fetch_raw_never_dials_a_non_public_address() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(small_yaml(), "application/yaml"))
+            .mount(&server)
+            .await;
+        let adapter = OpenApiAdapter::new(OpenApiAdapterConfig::default()).unwrap();
+        let url = format!("{}/openapi.yaml", server.uri());
+        let err = adapter.fetch_raw(&url, None, None).await.unwrap_err();
+        assert!(err.to_string().contains("not a public address"), "{err}");
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
 }
 
 #[cfg(test)]
@@ -982,7 +1004,7 @@ mod tests_parse_swagger2 {
             .await;
 
         let url = format!("{}/ps.yaml", server.uri());
-        let adapter = OpenApiAdapter::new(OpenApiAdapterConfig::default()).unwrap();
+        let adapter = OpenApiAdapter::allowing_private_hosts(OpenApiAdapterConfig::default());
         let first = adapter.fetch_and_parse(&url, None, None).await.unwrap();
         let etag = match first {
             crate::web::domain::SpecFetchResult::Fresh { etag, .. } => etag,

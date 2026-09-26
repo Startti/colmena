@@ -9,8 +9,16 @@ use std::collections::HashMap;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+/// The upstream servers listen on loopback: this test binary lets the guarded
+/// client dial non-public addresses (local development only), before any fetch.
+fn allow_loopback_upstreams() {
+    use colmena::llm::infrastructure::files::signed_url_downloader::ALLOW_PRIVATE_ENV_VAR;
+    std::env::set_var(ALLOW_PRIVATE_ENV_VAR, "1");
+}
+
 #[tokio::test]
 async fn end_to_end_three_url_parts_multipart_upload() {
+    allow_loopback_upstreams();
     let upstream = MockServer::start().await;
     let downstream = MockServer::start().await;
 
@@ -95,6 +103,7 @@ async fn end_to_end_three_url_parts_multipart_upload() {
 
 #[tokio::test]
 async fn end_to_end_oversized_upstream_aborts_before_downstream_post() {
+    allow_loopback_upstreams();
     let upstream = MockServer::start().await;
     let downstream = MockServer::start().await;
 

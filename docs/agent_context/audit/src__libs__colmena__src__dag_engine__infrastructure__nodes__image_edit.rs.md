@@ -18,7 +18,7 @@
 
 - `ImageEditNode::resolve_env_var` (fn, private) — parses `${ENV_NAME}` syntax and resolves to environment variable value; error if not set
 
-- `ImageEditNode::fetch_image` (async fn, private) — fetches image bytes from `local://` (storage), `chat-attachments/` (storage), `data:` URI, or `http(s)` URL; detects MIME type; returns bytes and MIME
+- `ImageEditNode::fetch_image` (async fn, private) — fetches image bytes from `local://` (storage), `chat-attachments/` (storage), `data:` URI, or `http(s)` URL (through the guarded `SignedUrlDownloader` in `sources`: public addresses only, 100 MiB; CHANGELOG 2026-09 §123); detects MIME type; returns bytes and MIME
 
 - `ExecutableNode` impl block (impl, pub) — trait implementation for DAG engine node execution
 

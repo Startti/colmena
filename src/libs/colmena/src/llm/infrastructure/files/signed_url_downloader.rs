@@ -1,6 +1,8 @@
-//! The one client that fetches an attachment's URL (`files[].url`): both
-//! resolution paths of `llm_call`, byte persistence, the auto-summary and the
-//! 24 h re-upload go through it. http(s) only; it dials only global unicast
+//! The one client that fetches a URL whose bytes a node reads: an attachment's
+//! URL (`files[].url`: both resolution paths of `llm_call`, byte persistence,
+//! the auto-summary and the 24 h re-upload), `image_edit`'s http(s)
+//! `source_url`/`mask_url`, `http_request`'s multipart URL parts and
+//! `api_explorer`'s spec URL. http(s) only; it dials only global unicast
 //! addresses (the MCP client's rule), checked inside the DNS resolution the
 //! socket uses and, for an IP-literal host, on the URL and on every redirect
 //! hop; no proxy; connect 10 s, whole request 600 s; a byte cap. No
@@ -16,6 +18,7 @@ use bytes::Bytes;
 use futures::{StreamExt, TryStreamExt};
 use hyper::client::connect::dns::Name;
 use reqwest::dns::{Addrs, Resolve, Resolving};
+use reqwest::header::HeaderMap;
 use reqwest::{redirect, Client, Url};
 
 use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::mcp::allowlist::{
@@ -131,11 +134,19 @@ fn cap(
     Some(Ok(bytes))
 }
 
-/// The guarded HTTP client for attachment URLs (see the module doc).
+/// A 2xx response: its headers, and its body under the byte cap.
+pub struct Fetched {
+    pub headers: HeaderMap,
+    pub body: BoxedByteStream,
+}
+
+/// The guarded HTTP client (see the module doc).
+#[derive(Clone)]
 pub struct SignedUrlDownloader {
     client: Client,
     dialable: Dialable,
     max_bytes: u64,
+    timeout: Option<Duration>,
 }
 
 impl SignedUrlDownloader {
@@ -171,7 +182,20 @@ impl SignedUrlDownloader {
             client,
             dialable,
             max_bytes,
+            timeout: None,
         }
+    }
+
+    /// The same client with a lower byte cap (`max_bytes` never raises it).
+    pub fn capped_at(mut self, max_bytes: u64) -> Self {
+        self.max_bytes = self.max_bytes.min(max_bytes);
+        self
+    }
+
+    /// The same client with a whole-request deadline of `total` (else 600 s).
+    pub fn with_timeout(mut self, total: Duration) -> Self {
+        self.timeout = Some(total);
+        self
     }
 
     /// For tests against a loopback server: every address is dialable.
@@ -180,7 +204,12 @@ impl SignedUrlDownloader {
         Self::with_policy(any_ip, DEFAULT_MAX_BYTES)
     }
 
-    /// Streams the response body of an attachment URL.
+    /// Streams the response body of an attachment URL (see [`Self::fetch`]).
+    pub async fn stream(&self, url: &str) -> Result<BoxedByteStream, LlmError> {
+        Ok(self.fetch(url).await?.body)
+    }
+
+    /// GETs `url` and returns the response headers and its streamed body.
     ///
     /// Dropping the returned stream early aborts the underlying request
     /// and releases the HTTP connection. The downloader does not retry —
@@ -193,7 +222,12 @@ impl SignedUrlDownloader {
     ///   body that grows past it ends the stream with this error.
     /// - [`LlmError::NetworkError`] on transport failure (DNS, TCP, TLS, timeout).
     /// - [`LlmError::SignedUrlFetchFailed`] on any non-2xx HTTP status.
-    pub async fn stream(&self, url: &str) -> Result<BoxedByteStream, LlmError> {
+    pub async fn fetch(&self, url: &str) -> Result<Fetched, LlmError> {
+        self.fetch_with(url, HeaderMap::new()).await
+    }
+
+    /// [`Self::fetch`] with extra request headers (e.g. a conditional GET).
+    pub async fn fetch_with(&self, url: &str, headers: HeaderMap) -> Result<Fetched, LlmError> {
         let parsed = Url::parse(url).map_err(|_| refused("not a valid URL"))?;
         if !matches!(parsed.scheme(), "http" | "https") {
             return Err(refused("only http and https URLs are fetched"));
@@ -201,7 +235,11 @@ impl SignedUrlDownloader {
         if literal_refused(&parsed, self.dialable) {
             return Err(refused(DialRefused));
         }
-        let response = match self.client.get(parsed).send().await {
+        let mut request = self.client.get(parsed).headers(headers);
+        if let Some(total) = self.timeout {
+            request = request.timeout(total);
+        }
+        let response = match request.send().await {
             Ok(r) => r,
             Err(e) if is_dial_refused(&e) => return Err(refused(DialRefused)),
             Err(e) => {
@@ -221,10 +259,12 @@ impl SignedUrlDownloader {
         if response.content_length().is_some_and(|n| n > max) {
             return Err(LlmError::AttachmentTooLarge { limit: max });
         }
+        let headers = response.headers().clone();
         let body = response.bytes_stream().map_err(std::io::Error::other);
-        Ok(Box::pin(body.scan(Some(0), move |seen, c| {
+        let body = Box::pin(body.scan(Some(0), move |seen, c| {
             futures::future::ready(cap(seen, c, max))
-        })))
+        }));
+        Ok(Fetched { headers, body })
     }
 }
 
