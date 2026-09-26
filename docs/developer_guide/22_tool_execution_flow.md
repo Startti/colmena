@@ -517,7 +517,8 @@ value (`authored_keys`), and `__colmena_authored_leaves` (`AUTHORED_LEAVES_KEY`)
 the pointers of every scalar leaf still equal to it (`authored_leaves`) — a
 `fixed` header next to one the model set is listed there even though its
 `headers` object is not whole. `for_each` sends both per row too.
-`http_request` counts those leaves as the author's credentials (§124). A node that must
+`http_request` and `socketio_request` count those leaves as the author's
+credentials (§116, §117). A node that must
 tell the author's value from data regardless of `${` reads it with
 `is_authored_input` — `python_script` does, for `code` and `sandbox_mode`.
 

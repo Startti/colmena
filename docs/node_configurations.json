@@ -1233,7 +1233,7 @@
           "type": "array",
           "required": false,
           "default": null,
-          "description": "Author-set only. Cookies and headers the author configured (other than accept/content-type/user-agent-like ones) are sent only to the origin of the author's url; this list names other hosts ('host' or 'host:port') that may receive them when the url comes from runtime data (an edge that names url, an open tool field). Any other destination is refused with an error.",
+          "description": "Author-set only. Credentials the author configured (cookies, headers other than accept/content-type/user-agent-like ones, whole or one fixed leaf of a container the caller also fills; a payload or pre_events with ${VAR}; any value a dispatcher vouched for as the author's ${VAR}; any config value the engine filled with a secure value) are sent only to the origin of the author's url; this list names other hosts ('host' or 'host:port') that may receive them when the url comes from runtime data (an edge that names url, an open tool field). Any other destination is refused with an error.",
           "example": ["socket.example.com"]
         }
       },

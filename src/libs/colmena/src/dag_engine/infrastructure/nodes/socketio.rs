@@ -489,22 +489,25 @@ impl ExecutableNode for SocketIoNode {
             .transport_type(transport_type)
             .reconnect(false);
 
-        // Cookies and headers the author configured go only to the author's
-        // `url` origin or to a host in `allowed_hosts` (same rule as
-        // `http_request`); a `url` from data may not take them elsewhere.
+        // The author's credentials go only to the author's `url` origin or to
+        // a host in `allowed_hosts` (same rule as `http_request`); a `url`
+        // from data may not take them elsewhere. They are the cookies and
+        // headers the author set (whole, or a `fixed` leaf next to a caller's),
+        // a `payload`/`pre_events` with an env template, any value a
+        // dispatcher vouched for as the author's `${VAR}`, and any `config`
+        // leaf the engine filled with a secure value.
         {
-            use crate::dag_engine::infrastructure::env_provenance::is_authored_input;
+            use crate::dag_engine::infrastructure::env_provenance::{
+                carries_env_or_secret, is_authored_input,
+            };
             use crate::dag_engine::infrastructure::nodes::http::HttpNode;
             let author = |key: &str| HttpNode::author_value(inputs, config, key);
-            let carries = author("cookies").is_some()
-                || author("headers")
-                    .and_then(|h| h.as_object())
-                    .is_some_and(|h| {
-                        h.keys().any(|k| {
-                            !HttpNode::NON_CREDENTIAL_HEADERS
-                                .contains(&k.to_ascii_lowercase().as_str())
-                        })
-                    });
+            let carries = carries_env_or_secret(inputs)
+                || author("cookies").is_some()
+                || author("headers").is_some_and(HttpNode::headers_carry_credentials)
+                || author("payload").is_some_and(HttpNode::has_template)
+                || author("pre_events").is_some_and(HttpNode::has_template)
+                || HttpNode::authored_leaves_carry_credentials(inputs, &["cookies"], |_| false);
             if carries {
                 let author_url = match inputs.get("url") {
                     Some(_) if !is_authored_input(inputs, "url") => config
@@ -1083,6 +1086,63 @@ mod env_gate_tests {
             .unwrap();
         assert!(req.contains("k=sio-cookie-test-only"), "{req}");
         std::env::remove_var("COLMENA_CLASS_TEST_SIO_COOKIE");
+    }
+
+    /// Beyond cookies and a whole `headers` object, every author value the
+    /// connection carries stays on the author's host when `url` came from
+    /// data: a fixed header next to a caller's, a `payload` or `pre_events`
+    /// with an env template, a `config` leaf the engine filled with a secret.
+    #[tokio::test]
+    async fn every_author_value_stays_on_the_authors_host() {
+        use crate::dag_engine::domain::node::SECRET_CONFIG_PATHS_KEY;
+        use crate::dag_engine::infrastructure::env_provenance::AUTHORED_LEAVES_KEY;
+        std::env::set_var("COLMENA_CLASS_TEST_SIO_PAYLOAD", "sio-payload-test-only");
+        let base = json!({ "url": "http://127.0.0.1:9", "event": "e", "timeout_ms": 300 });
+        let with = |extra: Value| {
+            let mut c = base.clone();
+            c.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            c
+        };
+        let cases = [
+            (
+                json!({
+                    "headers": { "X-Api-Key": "fixed-key-test-only", "X-Trace": "t" },
+                    AUTHORED_LEAVES_KEY: ["/headers/X-Api-Key"]
+                }),
+                base.clone(),
+            ),
+            (
+                json!({}),
+                with(json!({ "payload": { "t": "${COLMENA_CLASS_TEST_SIO_PAYLOAD}" } })),
+            ),
+            (
+                json!({}),
+                with(json!({ "pre_events": [
+                    { "event": "a", "payload": { "t": "${COLMENA_CLASS_TEST_SIO_PAYLOAD}" } }
+                ] })),
+            ),
+            (
+                json!({ SECRET_CONFIG_PATHS_KEY: ["/payload/t"] }),
+                with(json!({ "payload": { "t": "decrypted-test-only" } })),
+            ),
+        ];
+        for (i, (extra_inputs, config)) in cases.into_iter().enumerate() {
+            let (url, got) = listen().await;
+            let mut inputs: NodeInputs = serde_json::from_value(extra_inputs).unwrap();
+            inputs.insert("url".to_string(), json!(url));
+            let refused = SocketIoNode
+                .execute(&inputs, &config, &mut json!({}), None)
+                .await;
+            assert!(refused.is_err(), "case {i}: connected to a host from data");
+            let reached = tokio::time::timeout(Duration::from_millis(300), got).await;
+            assert!(
+                reached.is_err(),
+                "case {i}: the data host received a connection"
+            );
+        }
+        std::env::remove_var("COLMENA_CLASS_TEST_SIO_PAYLOAD");
     }
 
     #[tokio::test]

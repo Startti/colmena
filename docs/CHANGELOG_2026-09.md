@@ -5849,3 +5849,22 @@ contenedor que mezcla credenciales `fixed` con campos de quien llama, un query p
 del autor, o un secreto en `config`, debe listar ese host en `allowed_hosts`. Con esas
 credenciales, una redirección a otro origen se devuelve (3xx) en vez de seguirse.
 **Estado.** done.
+
+## 117. Endurecimiento: `socketio_request` cuenta como credenciales del autor su `payload`, sus hojas `fixed` y los secretos de `config`
+
+**Qué cambia.** La regla de §112 (las credenciales del autor van solo al origen del `url` del
+autor o a `allowed_hosts`) reconoce, además de `cookies` y `headers` enteros:
+- una hoja `fixed` bajo `headers` (fuera de `accept*`/`cache-control`/`content-type`/
+  `user-agent`) o `cookies` junto a valores de quien llama (`__colmena_authored_leaves`, §116);
+- un `payload` o `pre_events` del autor con `${VAR}`, y un header con `${VAR}`;
+- cualquier puntero de `__colmena_env_trusted_paths` y cualquier hoja de `config` que el motor
+  llenó con un secure value (`__colmena_secret_config_paths`, §116).
+Comparte con `http_request` `HttpNode::headers_carry_credentials`, `has_template` y
+`authored_leaves_carry_credentials`.
+
+**Tests.** `socketio.rs::env_gate_tests`: con un `url` de datos, un header `fixed` por hoja, un
+`payload` y un `pre_events` con `${VAR}` y una hoja marcada como secreto no abren conexión.
+
+**ADP.** Sin cambios de API. Un `socketio_request` cuyo `url` viene de datos y cuyo `payload`
+del autor lleva `${VAR}` o un secreto debe listar ese host en `allowed_hosts`.
+**Estado.** done.
