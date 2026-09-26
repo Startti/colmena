@@ -6208,3 +6208,38 @@ producción: ADP pone los adjuntos en `config.files` de los `llm_call` de primer
 `path` ni pasa `files` a un sub-agente. Un grafo local con `path` corre con `COLMENA_LOCAL=true`,
 que nunca va en un worker compartido: deja leer su disco.
 **Estado.** done.
+
+## 139. La memoria de una tool, por quien la llama: la clave queda acotada a cualquier profundidad
+
+**Qué cambió.** Desde el tramo 4/7 (#133), la clave de una tool `persistent` o `dynamic` que
+se llama desde dentro de un hijo cuelga del camino de quien llama, y crecía con cada nivel: hasta
+unos 230 bytes por nivel. Los índices btree de `llm_node_history` (`idx_llm_history_agent_node`,
+`idx_llm_history_session_node`) rechazan una entrada de más de ~2704 bytes, así que el `INSERT`
+fallaba cerca de los 11 niveles. Ahora `memory_node_path` (`tool_configuration.rs`) reemplaza un
+camino de quien llama de más de 256 bytes (`CALLER_PATH_MAX`) por `tool/~<32 hex>`, los primeros
+16 bytes del SHA-256 del camino entero. La forma acotada sigue empezando con `tool/` (anidada), el
+hijo la hereda como prefijo y el nivel siguiente vuelve a acotar: la clave no pasa de 455 bytes a
+ninguna profundidad. Hasta 256 bytes nada cambia. `list_threads` busca bajo el mismo prefijo
+(`memory_thread_prefix` usa la misma función). El resume que honra `_conversation_key.node_id` no
+cambia: usa la clave guardada.
+
+**Tests.** Lib: 3034 passed. `tool_configuration.rs`: 256 bytes quedan legibles y 257 se acotan,
+y la forma acotada sigue anidada; un mismo camino da la misma clave, y dos caminos con el mismo
+último segmento, dos; una cadena de 50 niveles (nombre de 64, hilo de 128) nunca pasa de 600
+bytes, cada nivel anidado y con su propia clave. `list_threads.rs`: quien llama con un camino
+largo lista solo sus hilos, no los de otro camino largo que termina igual ni las tools llamadas
+dentro. `dag_tool_executor.rs`: lo que el ejecutor guarda desde un camino largo, `list_threads`
+lo lista con el repositorio en memoria. `registry.rs`: un `llm_call` real con un camino largo le
+pasa al hijo `path_prefix = tool/~<hex>/tool/X`. Postgres (`#[ignore]`): 3 passed. E2E:
+`nested_tool_memory` 3 passed, `parallel_tool_suspend` 3 passed.
+
+**Mutación.** Rojas y revertidas, una a la vez: sin acotar, 5 (la cadena: 663 bytes en el nivel
+3); acotar con `>=`, el borde; el digest solo del último segmento, 3 (la cadena repite clave desde
+el nivel 4, los dos caminos dan la misma y `list_threads` lista 2 hilos).
+
+**ADP.** Nada de código. En dev ninguna clave supera hoy 256 bytes (la más larga mide 123), así
+que ninguna clave existente cambia. La guía 19, `node_as_tools_reference.json`
+(`per_caller.bounded_caller`) y la nota
+[`2026-09-26-nested-tool-memory-per-caller.md`](adp_migration/2026-09-26-nested-tool-memory-per-caller.md)
+dicen la forma acotada; el techo de ~11 niveles deja de existir.
+**Estado.** done.
