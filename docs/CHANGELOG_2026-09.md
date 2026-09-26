@@ -5261,7 +5261,7 @@ atrás; la curación de todos los ids del turno, contestados o no.
 **ADP.** Sin código. Desde acá re-correr el hijo cerrado ya no da 400; la nota de
 migración lo cuenta en la entrada 106.
 
-## 103. Endurecimiento: `${VAR}` se expande solo en la configuración del autor
+## 104. Endurecimiento: `${VAR}` se expande solo en la configuración del autor
 
 **Qué cambia.** Un valor que llega por `inputs` (un edge, el estado global, una fila de
 `for_each`) ya no expande plantillas `${VAR}`, salvo que un despacho con provenance (el de

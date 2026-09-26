@@ -1117,7 +1117,7 @@ identical to their operator-authored value
 `for_each` sends the set for its rows (only the target's `fixed` values are
 trusted). With **no** set — graph mode, where a value arrived over an edge or
 from global state — nothing in `inputs` expands; only `config` does
-(CHANGELOG 2026-09 §103). See
+(CHANGELOG 2026-09 §104). See
 [25_web_nodes.md](25_web_nodes.md). E2E:
 [`tests/graphs/security/tool_env_provenance_e2e.json`](../../tests/graphs/security/tool_env_provenance_e2e.json).
 
