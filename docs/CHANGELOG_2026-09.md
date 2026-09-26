@@ -5512,3 +5512,26 @@ también para `stateless`, 2; el ejecutor sin pasar quien llama, 2.
 
 **ADP.** Nada: ninguna clave cambia en este tramo.
 **Estado.** done.
+
+## 131. La memoria de una tool, por quien la llama (2/7): una respuesta continúa donde se preguntó
+
+**Qué cambió.** `run_use_case.rs`: un `llm_call` que se reanuda con la respuesta corre bajo el
+`_conversation_key.node_id` que guardó su salida `SUSPENDED` en `dag_runs.all_outputs`, aunque
+el camino que se deriva hoy sea otro (`conversation_keys_asked_in`, tomado junto a
+`resuming_node_ids` antes del loop). Filtra por tipo, porque la salida de un `subgraph` de nivel
+de grafo trae la clave de un nieto, y solo aplica en el turno que trae la respuesta.
+
+Va antes de activar la clave por quien llama (tramo 4/7): una pregunta que un hijo anidado hizo
+bajo la clave de hoy (`tool/<nombre>/…`) se va a contestar sobre esa historia después del
+cambio. Mientras la clave no cambia, la guardada es la derivada y no cambia nada.
+
+**Tests.** Lib: 3012 passed. `run_use_case::resumed_conversation_key_tests`, con dos turnos
+reales por `execute_stream`: el `llm_call` reanudado corre bajo la clave guardada, un
+`subgraph` la ignora, un turno sin respuesta tampoco la usa, y una clave igual a la derivada no
+cambia nada.
+
+**Mutación.** Rojas y revertidas, una por test: no honrar la clave guardada; filtrar por la
+forma de la salida y no por el tipo; usarla sin respuesta (tomada de todo nodo `SUSPENDED`).
+
+**ADP.** Nada: el scrub en reposo de ADP (`dag-run-at-rest.ts`) conserva `_conversation_key`.
+**Estado.** done.
