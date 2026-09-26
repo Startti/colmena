@@ -20,24 +20,30 @@ use crate::dag_engine::infrastructure::sql_pool_adapter::PgPoolAdapter;
 use crate::dag_engine::infrastructure::sql_port_factory::SqlPortFactory;
 use crate::dag_engine::infrastructure::sql_static_validator::StaticRuleValidator;
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::error::Error as StdError;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::OnceCell;
 
-/// Holds the fully-initialized state of a `SqlNode`.
-/// Created exactly once per node instance via `OnceCell::get_or_try_init`.
+/// Holds the fully-initialized state of a `SqlNode` for one `connection_url`.
+/// Created exactly once per node instance and URL via `OnceCell::get_or_try_init`.
 struct SqlNodeInit {
     adapter: Arc<PgPoolAdapter>,
     description_supplement: String,
 }
 
+/// The initialization of one `connection_url`, shared by the calls that name it.
+type InitCell = Arc<OnceCell<Arc<SqlNodeInit>>>;
+
 pub struct SqlNode {
     factory: Arc<SqlPortFactory>,
-    /// Populated atomically on the first call that needs initialization.
-    /// `OnceCell` prevents the TOCTOU race where two concurrent callers both
-    /// observe `initialized == false` and both run the expensive setup work.
-    init: OnceCell<SqlNodeInit>,
+    /// One initialization per resolved `connection_url`, populated atomically on
+    /// the first call that names it. The registry holds one `SqlNode` for every
+    /// `sql_query` call, so a call only ever uses the connection its own URL
+    /// names. `OnceCell` prevents the TOCTOU race where two concurrent callers
+    /// both observe `initialized == false` and both run the expensive setup work.
+    inits: std::sync::Mutex<HashMap<String, InitCell>>,
 }
 
 const MAX_SCHEMA_TABLES: usize = 40;
@@ -47,7 +53,7 @@ impl SqlNode {
     pub fn new(factory: Arc<SqlPortFactory>) -> Self {
         Self {
             factory,
-            init: OnceCell::new(),
+            inits: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
@@ -136,21 +142,32 @@ impl SqlNode {
         }
     }
 
-    /// Perform the full initialization and return the result.
-    /// Called at most once — subsequent calls return the cached `SqlNodeInit`.
+    /// The initialization cell of `connection_url`: the same for every call
+    /// that names it, never one opened for another URL.
+    fn init_cell(&self, connection_url: &str) -> InitCell {
+        let mut inits = self.inits.lock().unwrap_or_else(|e| e.into_inner());
+        inits.entry(connection_url.to_string()).or_default().clone()
+    }
+
+    /// Perform the full initialization for `connection_url` and return the
+    /// result. Called at most once per URL — subsequent calls return the
+    /// cached `SqlNodeInit`.
     async fn get_or_init(
         &self,
         config: &Value,
         connection_url: &str,
-    ) -> Result<&SqlNodeInit, Box<dyn StdError + Send + Sync>> {
+    ) -> Result<Arc<SqlNodeInit>, Box<dyn StdError + Send + Sync>> {
         // We need to own config data in the closure; clone the parts we need.
         let config_owned = config.clone();
         let url_owned = connection_url.to_string();
-        self.init
-            .get_or_try_init(|| async move {
-                Self::do_initialize_inner(&self.factory, &config_owned, &url_owned).await
-            })
-            .await
+        let cell = self.init_cell(connection_url);
+        cell.get_or_try_init(|| async move {
+            Self::do_initialize_inner(&self.factory, &config_owned, &url_owned)
+                .await
+                .map(Arc::new)
+        })
+        .await
+        .cloned()
     }
 
     /// Body of the initialization logic — called once by `get_or_init`, with
@@ -533,16 +550,16 @@ impl ExecutableNode for SqlNode {
             .and_then(|v| v.as_str())
             .ok_or("sql_query node requires 'query' input")?;
 
-        // Lazy initialization: connect on first call if not already initialized.
+        // Lazy initialization: connect on the first call that names this URL.
         // OnceCell ensures concurrent callers wait on the same future — no TOCTOU race.
-        if self.init.get().is_none() {
-            tracing::debug!(
-                target: crate::dag_engine::log_policy::T_SQL,
-                "first call — initializing connection pool"
-            );
-        }
         let init = async {
             let connection_url = Self::resolve_connection_url(config, inputs)?;
+            if self.init_cell(&connection_url).get().is_none() {
+                tracing::debug!(
+                    target: crate::dag_engine::log_policy::T_SQL,
+                    "first call for this connection — initializing connection pool"
+                );
+            }
             self.get_or_init(&effective_config, &connection_url).await
         }
         .await
@@ -1201,6 +1218,57 @@ mod connection_provenance_tests {
         assert!(
             !reached(&seen),
             "a data connection_url expanded an env template"
+        );
+    }
+
+    /// Two URLs never share an initialization; one URL always does.
+    #[test]
+    fn each_connection_url_has_its_own_initialization() {
+        let n = node();
+        let a = n.init_cell("postgres://a.test/db");
+        let b = n.init_cell("postgres://b.test/db");
+        assert!(!Arc::ptr_eq(&a, &b), "two URLs shared one initialization");
+        assert!(Arc::ptr_eq(&a, &n.init_cell("postgres://a.test/db")));
+    }
+
+    /// One node instance serves every `sql_query` call. A call that names
+    /// another `connection_url` connects to its own server: it never runs on
+    /// the connection an earlier call opened.
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL — run with `cargo test -- --ignored`"]
+    async fn a_second_connection_url_never_runs_on_the_first_calls_connection() {
+        let Ok(db) = std::env::var("TEST_DATABASE_URL") else {
+            eprintln!("skip: TEST_DATABASE_URL not set");
+            return;
+        };
+        std::env::set_var(ENV, VALUE);
+        let n = node();
+        let query = HashMap::from([("query".to_string(), json!("SELECT 1"))]);
+        n.execute(
+            &query,
+            &json!({ "connection_url": db }),
+            &mut json!({}),
+            None,
+        )
+        .await
+        .expect("the first call runs on the test database");
+        let (url, seen, h) = listener().await;
+        let second = n
+            .execute(
+                &query,
+                &json!({ "connection_url": url }),
+                &mut json!({}),
+                None,
+            )
+            .await;
+        h.abort();
+        assert!(
+            second.is_err(),
+            "the second call ran on the first call's connection"
+        );
+        assert!(
+            reached(&seen),
+            "the second call never reached its own server"
         );
     }
 

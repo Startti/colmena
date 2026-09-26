@@ -5923,16 +5923,30 @@ del autor lleva `${VAR}` o un secreto debe listar ese host en `allowed_hosts`.
   lee los `fixed` como config del autor) solo con la tool tal como la escribió el autor: nunca
   para un `tool_configurations` que llegó como dato (§122) y con la copia previa al templating
   `${context.*}`.
+- La inicialización del nodo (pool, `setup_sql`, introspección del esquema) es por
+  `connection_url` resuelto (`SqlNode::init_cell`). El registro tiene una sola instancia de
+  `SqlNode` para todas las llamadas, y hasta ahora su primera inicialización servía a todas:
+  una llamada que nombraba otra URL corría sobre la conexión que otra llamada había abierto.
+  Ahora cada llamada usa solo la conexión de su propia URL, también dentro de un grupo de
+  llamadas `parallel` que corren a la vez.
 
 **Tests.** `sql.rs::connection_provenance_tests` (un listener TCP registra el mensaje de
 inicio del cliente Postgres, que lleva el usuario): el `connection_url` de `config` expande la
 variable y el mismo por `inputs` no; listar tools del autor conecta con la variable expandida y
 las mismas tools como dato no; `tenant_user_id` y `api_key` por `inputs` expanden solo con un
-puntero avalado.
+puntero avalado; dos URLs nunca comparten inicialización y, con `TEST_DATABASE_URL`, una
+segunda llamada con otra URL llega a su propio servidor en vez de correr sobre la conexión de
+la primera.
 
 **ADP.** Sin cambios de API. Un `connection_url` que un edge trae con `${VAR}` se usa sin
 expandir: la URL con variables va en `config` o en un `fixed`. Una tool `sql_query` cuyo
 `connection_url` `fixed` usa `${context.*}` no recibe el esquema de la base en su descripción.
+
+**ADP.** Sin cambios de API. Un `connection_url` que un edge trae con `${VAR}` deja de
+expandirse: la URL va en `config` o en un `fixed`. Una tool `sql_query` cuyo `connection_url`
+`fixed` usa `${context.*}` ya no recibe el esquema de la base en su descripción. Varios
+`sql_query` con bases distintas en el mismo proceso conectan cada uno a la suya, y `setup_sql`
+corre una vez por `connection_url`.
 **Estado.** done.
 
 ## 128. Endurecimiento: la región y el proyecto de Vertex en `image_generation` son del autor

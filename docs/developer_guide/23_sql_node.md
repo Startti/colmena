@@ -319,7 +319,7 @@ The critic uses a low-temperature call (`temperature: 0.0`, `max_tokens: 500`) f
 
 ## Initialization and Schema Introspection
 
-The SQL node implements `InitializableNode`, which runs once when the node is first loaded (either at DAG startup or on first tool call):
+The SQL node implements `InitializableNode`, which runs once per resolved `connection_url` (either at DAG startup or on the first tool call that names that URL). The registry holds one `SqlNode` for every `sql_query` call, so each URL gets its own initialization (`SqlNode::init_cell`) and a call only ever runs on the connection its own URL names (CHANGELOG 2026-09 §118):
 
 1. **Connect** — Obtains the pool from the shared `PgPoolRegistry` via `SqlPortFactory::get_adapter(url)`. If another node (or the internal state repository) already opened a pool for this URL, it is **reused**; otherwise a new pool is created and cached. TOCTOU-safe via `tokio::sync::OnceCell`.
 2. **Provision schemas** (if `create_schemas_if_missing`, default `true`) — Checks each schema in `allowed_schemas` and creates the ones that don't exist. See below.
@@ -363,6 +363,7 @@ Distintos nodos SQL con el **mismo** `connection_url` comparten el mismo `PgPool
 - El `statement_timeout_ms` y `work_mem_mb` se aplican con `SET LOCAL` dentro de la transacción de cada query — no afectan a otras conexiones del pool.
 - Si un nodo apunta al mismo URL que el `DATABASE_URL` del proceso, reutiliza el pool **pinned** del engine.
 - Cambiar `sslmode` crea una nueva entrada (pools separados). Ver [`13_security_strategy.md`](./13_security_strategy.md#postgres-pgpoolregistry) para la tabla de modos.
+- Nodos con URLs **distintas** nunca comparten conexión, aunque los atienda la misma instancia de `SqlNode`: la inicialización (pool, `setup_sql`, introspección) es por `connection_url` resuelto, y `setup_sql` corre una vez por URL.
 
 The **description supplement** is automatically appended to the tool's description when used as an LLM tool. This gives the LLM context about the database schema without manual configuration:
 
