@@ -26,6 +26,7 @@ use crate::llm::domain::mcp::McpTransport;
 use crate::llm::domain::{ParameterProperty, TOOL_MEMORY_SEGMENT};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
 
 /// Marker string used as a placeholder value in `fixed_config` to indicate that a field
@@ -128,6 +129,22 @@ pub enum MemoryMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MissingThreadId;
 
+/// The longest caller path, in bytes, a nested key keeps as it is. A longer
+/// one is replaced by its digest ([`memory_node_path`]), so a key stays under
+/// ~500 bytes at any depth. Without a cap it grows up to ~230 bytes per
+/// nested level, and the btree indexes on `llm_node_history`
+/// (`idx_llm_history_agent_node`, `idx_llm_history_session_node`) reject an
+/// entry past ~2704 bytes: the `INSERT` failed at about 11 levels.
+pub const CALLER_PATH_MAX: usize = 256;
+
+/// Bytes of SHA-256 a bounded caller keeps: 16, as 32 hex digits (128 bits).
+const BOUNDED_CALLER_DIGEST_BYTES: usize = 16;
+
+/// Opens the digest of a bounded caller, `tool/~<hex>`. The tool names the
+/// providers accept (`[A-Za-z0-9_-]`, plus `.`/`:` on Gemini) never hold it,
+/// so no readable caller reads like a bounded one.
+const BOUNDED_CALLER_MARK: char = '~';
+
 /// The memory key (`node_id`) of one call to a tool with `mode`, in its
 /// root-level form (`caller` below says when it is prefixed):
 ///
@@ -146,6 +163,12 @@ pub struct MissingThreadId;
 /// caller keeps `tool/<name>…`: the root, a graph-level subgraph child
 /// (`ventas/responder`), an orchestrator agent at the root. A `stateless`
 /// key is already unique per call and stays as it is.
+///
+/// A nested caller longer than [`CALLER_PATH_MAX`] bytes keys under
+/// `tool/~<32 hex>` instead: the first 16 bytes of the SHA-256 of its whole
+/// path. It is the same for one path and distinct for two, still starts with
+/// `tool/` (nested), and bounds the key at any depth: a child inherits the
+/// key as its path prefix, and the next level bounds again.
 ///
 /// Known edge: a root node whose id is literally `tool` gives the children
 /// of its graph-level subgraph `tool/…` paths, so they count as nested.
@@ -172,17 +195,32 @@ pub fn memory_thread_prefix(caller: Option<&str>, name: &str) -> String {
     format!("{}/", named_memory_path(caller, name))
 }
 
-/// `tool/<name>`, under the caller's own path when the caller runs inside a
-/// tool-invoked child: its path starts with `tool/` ([`TOOL_MEMORY_SEGMENT`]).
+/// `tool/<name>`, under the caller's own path ([`bounded_caller`]) when the
+/// caller runs inside a tool-invoked child: its path starts with `tool/`
+/// ([`TOOL_MEMORY_SEGMENT`]).
 fn named_memory_path(caller: Option<&str>, name: &str) -> String {
     let nested = caller.filter(|c| {
         c.strip_prefix(TOOL_MEMORY_SEGMENT)
             .is_some_and(|rest| rest.starts_with('/'))
     });
     match nested {
-        Some(caller) => format!("{caller}/{TOOL_MEMORY_SEGMENT}/{name}"),
+        Some(caller) => format!("{}/{TOOL_MEMORY_SEGMENT}/{name}", bounded_caller(caller)),
         None => format!("{TOOL_MEMORY_SEGMENT}/{name}"),
     }
+}
+
+/// A nested caller's path as its keys carry it: as it is up to
+/// [`CALLER_PATH_MAX`] bytes, `tool/~<32 hex>` past that.
+fn bounded_caller(caller: &str) -> std::borrow::Cow<'_, str> {
+    if caller.len() <= CALLER_PATH_MAX {
+        return caller.into();
+    }
+    let digest = Sha256::digest(caller.as_bytes());
+    let hex: String = digest[..BOUNDED_CALLER_DIGEST_BYTES]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    format!("{TOOL_MEMORY_SEGMENT}/{BOUNDED_CALLER_MARK}{hex}").into()
 }
 
 impl std::fmt::Display for MemoryMode {
@@ -1399,6 +1437,96 @@ mod tests {
             memory_thread_prefix(Some("tool/Y/u/agent"), "X"),
             "tool/Y/u/agent/tool/X/"
         );
+        let long = caller_of_len(CALLER_PATH_MAX + 1);
+        let key = memory_node_path(Some(&long), MemoryMode::Dynamic, "X", Some("t"), "c");
+        assert_eq!(
+            key,
+            Ok(format!("{}t", memory_thread_prefix(Some(&long), "X")))
+        );
+    }
+
+    /// A caller path of `len` bytes inside a tool-invoked child, ending in `/agent`.
+    fn caller_of_len(len: usize) -> String {
+        let (head, tail) = ("tool/Y/", "/agent");
+        format!("{head}{}{tail}", "u".repeat(len - head.len() - tail.len()))
+    }
+
+    /// `tool/~` and 32 lowercase hex digits: a caller path past the cap.
+    fn is_bounded_caller(caller: &str) -> bool {
+        caller.strip_prefix("tool/~").is_some_and(|hex| {
+            hex.len() == 32 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        })
+    }
+
+    /// The caller part of a key `<caller>/tool/X/t`.
+    fn caller_part(key: &str) -> &str {
+        key.strip_suffix("/tool/X/t").expect("a nested key")
+    }
+
+    #[test]
+    fn a_caller_path_past_the_cap_is_bounded_and_one_at_the_cap_is_not() {
+        let at_cap = caller_of_len(CALLER_PATH_MAX);
+        let got = memory_node_path(Some(&at_cap), MemoryMode::Persistent, "X", None, "c");
+        assert_eq!(got, Ok(format!("{at_cap}/tool/X")));
+
+        let past = caller_of_len(CALLER_PATH_MAX + 1);
+        let key = memory_node_path(Some(&past), MemoryMode::Dynamic, "X", Some("t"), "c").unwrap();
+        let bounded = caller_part(&key);
+        assert!(is_bounded_caller(bounded), "{key}");
+        // Still nested: the next level keys under it, readable again.
+        let next = format!("{bounded}/agent");
+        let got = memory_node_path(Some(&next), MemoryMode::Persistent, "Z", None, "c");
+        assert_eq!(got, Ok(format!("{next}/tool/Z")));
+    }
+
+    /// Two paths that share their last segment are two callers, not one.
+    #[test]
+    fn a_bounded_caller_is_the_same_for_one_path_and_distinct_for_two() {
+        let key = |caller: &str| {
+            memory_node_path(Some(caller), MemoryMode::Dynamic, "X", Some("t"), "c").unwrap()
+        };
+        let a = caller_of_len(CALLER_PATH_MAX + 1);
+        let b = a.replacen("tool/Y/", "tool/W/", 1);
+        assert_eq!(key(&a), key(&a));
+        assert_ne!(key(&a), key(&b));
+        assert!(is_bounded_caller(caller_part(&key(&b))));
+    }
+
+    /// Each level calls the tool from its child's node, one level down, with
+    /// the longest name and thread a key can hold. The key is at most
+    /// `CALLER_PATH_MAX` + `/tool/` + 64 + `/` + 128 = 455 bytes at any depth,
+    /// far under the ~2704 bytes a btree index entry takes.
+    #[test]
+    fn a_key_stays_bounded_through_fifty_levels_each_its_own() {
+        const KEY_CEILING: usize = 600;
+        let (name, thread, node) = ("n".repeat(64), "t".repeat(128), "k".repeat(25));
+        let own_tail = format!("/tool/{name}/{thread}");
+        let mut caller = "tool/Y/u/agent".to_string();
+        let mut keys = std::collections::HashSet::new();
+        for level in 1..=50 {
+            let key = memory_node_path(
+                Some(&caller),
+                MemoryMode::Dynamic,
+                &name,
+                Some(&thread),
+                "c",
+            )
+            .unwrap();
+            assert!(
+                key.len() <= KEY_CEILING,
+                "level {level}: {} bytes",
+                key.len()
+            );
+            assert!(
+                key.ends_with(&own_tail),
+                "level {level} is not nested: {key}"
+            );
+            assert!(
+                keys.insert(key.clone()),
+                "level {level} shares a key: {key}"
+            );
+            caller = format!("{key}/{node}");
+        }
     }
 
     #[test]

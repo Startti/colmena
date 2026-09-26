@@ -480,4 +480,41 @@ mod tests {
         assert_eq!(threads[0]["thread_id"], "gamma");
         assert_eq!(threads[0]["messages"], 5);
     }
+
+    /// A caller path past the cap lists under its bounded prefix: not the
+    /// tools called inside its threads, not the long path it replaced, and
+    /// not another long caller that ends like it.
+    #[tokio::test]
+    async fn a_caller_with_a_long_path_lists_its_own_threads() {
+        use crate::dag_engine::domain::tool_configuration::CALLER_PATH_MAX;
+        let caller = format!("tool/Y/{}/agent", "u".repeat(CALLER_PATH_MAX));
+        let other = caller.replacen("tool/Y/", "tool/W/", 1);
+        let prefix = memory_thread_prefix(Some(&caller), "archivador");
+        assert!(prefix.starts_with("tool/~"), "{prefix}");
+        let row = |node_id: String, n| na(&node_id, n, "2026-08-24T10:00:00Z", "hola");
+        let other_prefix = memory_thread_prefix(Some(&other), "archivador");
+        let repo: Arc<dyn ConversationRepository> = Arc::new(StubRepo {
+            rows: vec![
+                row(format!("{prefix}gamma/keeper"), 5),
+                row(
+                    format!("{prefix}gamma/keeper/tool/archivador/omega/keeper"),
+                    3,
+                ),
+                row(format!("{other_prefix}delta/keeper"), 2),
+                row(format!("{caller}/tool/archivador/zeta/keeper"), 1),
+            ],
+        });
+        let r = dispatch_list_threads(
+            &repo,
+            &key(),
+            Some(&caller),
+            &["archivador".to_string()],
+            serde_json::json!({ "tool": "archivador" }),
+        )
+        .await;
+        let threads = r["tools"][0]["threads"].as_array().unwrap();
+        assert_eq!(threads.len(), 1, "{threads:?}");
+        assert_eq!(threads[0]["thread_id"], "gamma");
+        assert_eq!(threads[0]["messages"], 5);
+    }
 }

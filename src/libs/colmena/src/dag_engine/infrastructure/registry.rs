@@ -769,6 +769,17 @@ mod llm_call_caller_path_tests {
         let root = key_of_x_called_from("agent").await;
         assert_eq!(root.as_deref(), Some("tool/X"));
     }
+
+    /// A caller path past the cap reaches the child bounded, and the child's
+    /// nodes inherit that short prefix.
+    #[tokio::test]
+    async fn a_caller_with_a_long_path_hands_the_child_a_bounded_key() {
+        use crate::dag_engine::domain::tool_configuration::CALLER_PATH_MAX;
+        let caller = format!("tool/Y/{}/agent", "u".repeat(CALLER_PATH_MAX));
+        let key = key_of_x_called_from(&caller).await.expect("a path prefix");
+        assert!(key.starts_with("tool/~"), "{key}");
+        assert!(key.ends_with("/tool/X") && key.len() < 64, "{key}");
+    }
 }
 
 #[cfg(test)]

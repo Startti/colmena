@@ -19,6 +19,11 @@ la llama:
   `<caller>/tool/<tool_name>[/<thread_id>]`. Por ejemplo, un agente A que corre Auto y
   tiene un asset S con `memoryMode` guarda a S en `tool/Run_My_Agent/A/<llm de A>/tool/S`,
   no en `tool/S`.
+- **Un camino de quien llama de más de 256 bytes se acota:** la clave cuelga de
+  `tool/~<32 hex>` (los primeros 16 bytes del SHA-256 del camino entero) en vez del
+  camino. Sigue empezando con `tool/`, y el nivel siguiente vuelve a acotar, así que la
+  clave no pasa de 455 bytes a ninguna profundidad. En dev ninguna clave supera hoy 256
+  bytes (la más larga mide 123), así que ninguna clave existente cambia por esto.
 - **`stateless` no cambia:** `tool/<tool_call_id>`, desde cualquier nivel. Los hijos del
   creador son `stateless`, así que sus claves quedan iguales.
 - `list_threads` lista solo los hilos de quien llama.
@@ -39,7 +44,8 @@ Con esto se cierran dos casos que hoy se pueden armar desde el canvas:
 
 - **Nada en el stream.** El `path` de los frames y el `childScope` no dependen de la clave
   de memoria.
-- **En `llm_node_history`,** filas nuevas con forma `tool/…/tool/…`. ADP no lee esa tabla
+- **En `llm_node_history`,** filas nuevas con forma `tool/…/tool/…` (o
+  `tool/~<hex>/tool/…`, con un camino de quien llama largo). ADP no lee esa tabla
   en runtime: el modelo Prisma `LlmNodeHistory` solo borra en cascada. Los scripts y evals
   que distinguen la raíz (id pelado) de lo anidado (`node_id LIKE 'tool/%'`), como
   `measure-root-routing.ts`, siguen valiendo.
@@ -77,12 +83,11 @@ Con esto se cierran dos casos que hoy se pueden armar desde el canvas:
   llm_call: …`) como resultado. La respuesta del usuario se pierde. Pasa una sola vez, a
   través de la subida del pin. En dev hay 0 cadenas así, y ADP compila los assets como
   `subgraph`. La consulta 3 de abajo mide cuántas quedan en prod.
-- **La clave crece con la anidación.** Cada nivel `persistent` o `dynamic` suma hasta unos
-  230 bytes (`/tool/<tool_name>[/<thread_id>]/<nodo>`; peor caso: nombre ≤64 + hilo ≤128 +
-  nodo ~25). En ADP son unos 70 bytes por nivel. El índice btree de `llm_node_history`
-  admite unos 2704 bytes por entrada, así que en el peor caso el techo ronda los 11
-  niveles. Más allá, el `INSERT` falla con un error, no en silencio. Medido en dev:
-  profundidad máxima 4.
+- **Una clave acotada no se lee.** No dice quién llamó: para saberlo, se compara su
+  digest con el SHA-256 de los `node_id` de la sesión. A cambio, la profundidad ya no
+  tiene tope por la clave (sin acotar, cada nivel sumaba hasta unos 230 bytes, y los
+  ~2704 bytes por entrada del índice btree de `llm_node_history` ponían el techo cerca de
+  11 niveles). Medido en dev: profundidad máxima 4, clave más larga 123 bytes.
 
 ## Medición en prod antes de promover
 

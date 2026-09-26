@@ -3928,15 +3928,30 @@ mod tests {
             agent_session_id: Some(AgentSessionId("a".into())),
             node_id: NodeIdPath(node.into()),
         };
-        for node in [
+        // A caller path past the cap: its thread `alfa` under the key this
+        // executor gives it, and a tool called inside that thread.
+        let cap = crate::dag_engine::domain::tool_configuration::CALLER_PATH_MAX;
+        let long = format!("tool/Y/{}/agent", "u".repeat(cap));
+        let alfa = key_of_a_call("dynamic", Some(&long), 1).await;
+        let long_rows = [
+            format!("{alfa}/keeper"),
+            format!("{alfa}/keeper/tool/archivador/debajo/keeper"),
+        ];
+        let rows = [
             "tool/archivador/raiz/keeper",
             "tool/archivador/raiz/keeper/tool/archivador/debajo/keeper",
             "tool/Y/u/agent/tool/archivador/propio/keeper",
-        ] {
+        ];
+        for node in rows.into_iter().chain(long_rows.iter().map(String::as_str)) {
             let msg = LlmMessage::user("hola".into()).unwrap();
             repo.add_message(&key(node), msg).await.unwrap();
         }
-        for (caller, thread) in [("tool/Y/u/agent", "propio"), ("chat", "raiz")] {
+        let callers = [
+            ("tool/Y/u/agent", "propio"),
+            ("chat", "raiz"),
+            (long.as_str(), "alfa"),
+        ];
+        for (caller, thread) in callers {
             let exec = DagToolExecutor::new(registry_with_subgraph(), dynamic_tool_configs())
                 .with_conversation_history(repo.clone(), key(caller))
                 .with_caller_node_path(caller.to_string());
