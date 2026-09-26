@@ -2399,7 +2399,10 @@ impl ExecutableNode for LlmNode {
                 executor = executor.with_mcp(mcp_slot.clone());
             }
             executor = executor
-                .with_conversation_history(conversation_repo.clone(), conversation_key.clone());
+                .with_conversation_history(conversation_repo.clone(), conversation_key.clone())
+                // Inside a tool-invoked child, a tool with memory is keyed
+                // under this node's own path.
+                .with_caller_node_path(node_id_path_str.clone());
             // Per-llm_call override of the tool-result string cap. Inputs win
             // over config so a graph can dynamically widen the cap when it
             // expects a large legitimate payload (e.g. a long document body).
