@@ -8,6 +8,9 @@
 //! hop; no proxy; connect 10 s, whole request 600 s; a byte cap. No
 //! `Authorization` header: a signed URL carries its signature in the query;
 //! the only headers a caller adds are conditional-GET ones.
+//!
+//! [`DialGuard`] is that address rule on its own: `http_request` applies it
+//! to a destination that comes from data.
 
 use std::error::Error;
 use std::net::{IpAddr, SocketAddr};
@@ -20,7 +23,7 @@ use futures::{StreamExt, TryStreamExt};
 use hyper::client::connect::dns::Name;
 use reqwest::dns::{Addrs, Resolve, Resolving};
 use reqwest::header::{HeaderMap, HeaderValue, IF_MODIFIED_SINCE, IF_NONE_MATCH};
-use reqwest::{redirect, Client, Url};
+use reqwest::{redirect, Client, ClientBuilder, Url};
 
 use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::mcp::allowlist::{
     is_global_unicast, private_block_from,
@@ -38,7 +41,7 @@ pub const DEFAULT_MAX_BYTES: u64 = 100 * 1024 * 1024;
 const MAX_URLS: usize = 5;
 
 /// Whether an address may be dialled.
-type Dialable = fn(IpAddr) -> bool;
+pub(crate) type Dialable = fn(IpAddr) -> bool;
 
 fn any_ip(_: IpAddr) -> bool {
     true
@@ -47,7 +50,7 @@ fn any_ip(_: IpAddr) -> bool {
 /// A refusal, found again by type in the error chain; it never names the address.
 #[derive(Debug, thiserror::Error)]
 #[error("destination is not a public address")]
-struct DialRefused;
+pub(crate) struct DialRefused;
 
 fn refused(reason: impl ToString) -> LlmError {
     LlmError::AttachmentUrlRefused {
@@ -55,12 +58,42 @@ fn refused(reason: impl ToString) -> LlmError {
     }
 }
 
+/// Where a client may connect: addresses `ok` accepts, and any address of
+/// `exempt`, a host the author listed.
+#[derive(Clone)]
+pub(crate) struct DialGuard {
+    ok: Dialable,
+    exempt: Option<Arc<str>>,
+}
+
+impl DialGuard {
+    pub(crate) fn new(ok: Dialable, exempt: Option<&str>) -> Self {
+        let exempt = exempt.map(Arc::from);
+        Self { ok, exempt }
+    }
+
+    /// Whether `url`'s host is a refused IP literal; a name is the resolver's call.
+    pub(crate) fn refuses(&self, url: &Url) -> bool {
+        self.exempt.as_deref() != url.host_str() && literal_refused(url, self.ok)
+    }
+
+    /// `builder` resolving through the guard, with no proxy (a proxy
+    /// resolves the name itself).
+    pub(crate) fn install(&self, builder: ClientBuilder) -> ClientBuilder {
+        builder
+            .dns_resolver(Arc::new(GuardedResolver(self.clone())))
+            .no_proxy()
+    }
+}
+
 /// Every answer dialable, or none is used (as `filter_dialable`).
-struct GuardedResolver(Dialable);
+struct GuardedResolver(DialGuard);
 
 impl Resolve for GuardedResolver {
     fn resolve(&self, name: Name) -> Resolving {
-        Box::pin(resolve_checked(name.as_str().to_string(), self.0))
+        let exempt = self.0.exempt.as_deref() == Some(name.as_str());
+        let ok = if exempt { any_ip } else { self.0.ok };
+        Box::pin(resolve_checked(name.as_str().to_string(), ok))
     }
 }
 
@@ -76,8 +109,8 @@ async fn resolve_checked(
         return Err("resolved to no address".into());
     }
     if !ips.iter().all(|ip| ok(*ip)) {
-        tracing::warn!(target: "colmena::attachment", event = "attachment.dial_refused", host = %host,
-            "refused to fetch an attachment from a non-public address");
+        tracing::warn!(target: "colmena::egress", event = "egress.dial_refused", host = %host,
+            "refused to dial a non-public address");
         return Err(Box::new(DialRefused));
     }
     Ok(Box::new(ips.into_iter().map(|ip| SocketAddr::new(ip, 0))))
@@ -92,24 +125,24 @@ fn literal_refused(url: &Url, ok: Dialable) -> bool {
     }
 }
 
-fn is_dial_refused(e: &reqwest::Error) -> bool {
+pub(crate) fn is_dial_refused(e: &reqwest::Error) -> bool {
     std::iter::successors(Some(e as &(dyn Error + 'static)), |&e| e.source())
         .any(|e| e.is::<DialRefused>())
 }
 
 fn guarded_client(ok: Dialable) -> Client {
-    crate::shared::http_client::builder()
-        .dns_resolver(Arc::new(GuardedResolver(ok)))
+    let guard = DialGuard::new(ok, None);
+    guard
+        .install(crate::shared::http_client::builder())
         .redirect(redirect::Policy::custom(move |hop| {
             if hop.previous().len() >= MAX_URLS {
                 hop.error("too many redirects")
-            } else if literal_refused(hop.url(), ok) {
+            } else if guard.refuses(hop.url()) {
                 hop.error(DialRefused)
             } else {
                 hop.follow()
             }
         }))
-        .no_proxy()
         .connect_timeout(Duration::from_secs(10))
         // 600 s: generous for files up to ~500 MB on slow connections.
         .timeout(Duration::from_secs(600))
@@ -164,18 +197,21 @@ impl SignedUrlDownloader {
     pub fn new() -> Self {
         static SHARED: OnceLock<(Dialable, u64, Client)> = OnceLock::new();
         let (dialable, max, client) = SHARED.get_or_init(|| {
-            let env = |k: &str| std::env::var(k).ok();
-            let max = env(MAX_BYTES_ENV_VAR).and_then(|v| v.trim().parse().ok());
-            let block = private_block_from(env(ALLOW_PRIVATE_ENV_VAR).as_deref());
-            let dialable: Dialable = if block { is_global_unicast } else { any_ip };
+            let max = std::env::var(MAX_BYTES_ENV_VAR).ok();
+            let max = max.and_then(|v| v.trim().parse().ok());
             let max = max.filter(|n| *n > 0).unwrap_or(DEFAULT_MAX_BYTES);
-            (dialable, max, guarded_client(dialable))
+            (process_dialable(), max, guarded_client(process_dialable()))
         });
         Self::from_parts(client.clone(), *dialable, *max)
     }
 
+    /// This client's address rule, `exempt` aside (see [`DialGuard`]).
+    pub(crate) fn guard(&self, exempt: Option<&str>) -> DialGuard {
+        DialGuard::new(self.dialable, exempt)
+    }
+
     #[cfg(test)]
-    fn with_policy(dialable: Dialable, max_bytes: u64) -> Self {
+    pub(crate) fn with_policy(dialable: Dialable, max_bytes: u64) -> Self {
         Self::from_parts(guarded_client(dialable), dialable, max_bytes)
     }
 
@@ -289,6 +325,20 @@ impl SignedUrlDownloader {
         }));
         Ok(Fetched { headers, body })
     }
+}
+
+/// Public addresses only unless [`ALLOW_PRIVATE_ENV_VAR`] is set; read once
+/// per process.
+pub(crate) fn process_dialable() -> Dialable {
+    static RULE: OnceLock<Dialable> = OnceLock::new();
+    *RULE.get_or_init(|| {
+        let raw = std::env::var(ALLOW_PRIVATE_ENV_VAR).ok();
+        if private_block_from(raw.as_deref()) {
+            is_global_unicast
+        } else {
+            any_ip
+        }
+    })
 }
 
 impl Default for SignedUrlDownloader {

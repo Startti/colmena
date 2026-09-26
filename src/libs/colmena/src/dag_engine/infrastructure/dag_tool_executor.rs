@@ -7268,10 +7268,14 @@ mod author_owned_arg_tests {
     use serde_json::json;
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
+    /// The mocks stand in for public hosts: only the credential rule refuses.
     struct HttpRegistry;
     impl NodeRegistryPort for HttpRegistry {
         fn get_node(&self, node_type: &str) -> Option<Arc<dyn ExecutableNode>> {
-            (node_type == "http_request").then(|| Arc::new(HttpNode::new()) as _)
+            let fetcher =
+                crate::llm::infrastructure::files::SignedUrlDownloader::allowing_private_hosts();
+            let node = HttpNode::new().with_url_parts(fetcher);
+            (node_type == "http_request").then(|| Arc::new(node) as _)
         }
         fn get_all_nodes(&self) -> HashMap<String, Arc<dyn ExecutableNode>> {
             HashMap::new()

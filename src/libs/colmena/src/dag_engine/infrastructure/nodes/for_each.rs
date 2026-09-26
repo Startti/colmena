@@ -1583,9 +1583,16 @@ mod http_target_env_tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
             .mount(&s)
             .await;
+        // A target from data has a destination from data: the mock stands in
+        // for a public host.
+        let fetcher =
+            crate::llm::infrastructure::files::SignedUrlDownloader::allowing_private_hosts();
         let node = ForEachNode::new();
         node.registry
-            .set(Arc::new(Registry(Arc::new(HttpNode::new()))) as Arc<dyn NodeRegistryPort>)
+            .set(
+                Arc::new(Registry(Arc::new(HttpNode::new().with_url_parts(fetcher))))
+                    as Arc<dyn NodeRegistryPort>,
+            )
             .ok();
         let target = json!({
             "node_type": "http_request",
