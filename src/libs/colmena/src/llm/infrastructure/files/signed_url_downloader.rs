@@ -9,8 +9,8 @@
 //! `Authorization` header: a signed URL carries its signature in the query;
 //! the only headers a caller adds are conditional-GET ones.
 //!
-//! [`DialGuard`] is that address rule on its own: `http_request` applies it
-//! to a destination that comes from data.
+//! [`DialGuard`] is that address rule on its own: `http_request` and
+//! `socketio_request` apply it to a destination that comes from data.
 
 use std::error::Error;
 use std::net::{IpAddr, SocketAddr};
@@ -89,6 +89,24 @@ impl DialGuard {
         refused
     }
 
+    /// For a client that resolves on its own: `Err` for a refused IP literal or a name that
+    /// does not resolve within `within` to dialable addresses only; else the name's first
+    /// answer, the address to connect to (`None` for an IP literal or the listed host).
+    pub(crate) async fn resolve_now(
+        &self,
+        url: &Url,
+        within: Duration,
+    ) -> Result<Option<IpAddr>, DialRefused> {
+        match url.host() {
+            Some(url::Host::Domain(d)) if self.exempt.as_deref() != Some(d) => {
+                let lookup = resolve_checked(d.to_string(), self.ok);
+                first_answer(lookup, within).await.map(Some)
+            }
+            _ if self.refuses(url) => Err(DialRefused),
+            _ => Ok(None),
+        }
+    }
+
     /// `builder` resolving through the guard, with no proxy (a proxy
     /// resolves the name itself).
     pub(crate) fn install(&self, builder: ClientBuilder) -> ClientBuilder {
@@ -126,6 +144,18 @@ async fn resolve_checked(
         return Err(Box::new(DialRefused));
     }
     Ok(Box::new(ips.into_iter().map(|ip| SocketAddr::new(ip, 0))))
+}
+
+/// The first address of a lookup that answers within `within`; a lookup that
+/// fails or answers late is a refusal.
+async fn first_answer(
+    lookup: impl std::future::Future<Output = Result<Addrs, Box<dyn Error + Send + Sync>>>,
+    within: Duration,
+) -> Result<IpAddr, DialRefused> {
+    match tokio::time::timeout(within, lookup).await {
+        Ok(Ok(mut addrs)) => addrs.next().map(|a| a.ip()).ok_or(DialRefused),
+        _ => Err(DialRefused),
+    }
 }
 
 /// An IP-literal host reaches no resolver: it is checked on the URL.
@@ -198,6 +228,8 @@ pub struct Fetched {
 pub struct SignedUrlDownloader {
     client: Client,
     dialable: Dialable,
+    /// Every address is dialable (the development opt-out): no [`Self::guard`].
+    open: bool,
     max_bytes: u64,
     timeout: Option<Duration>,
 }
@@ -212,21 +244,22 @@ impl SignedUrlDownloader {
             let max = std::env::var(MAX_BYTES_ENV_VAR).ok();
             let max = max.and_then(|v| v.trim().parse().ok());
             let max = max.filter(|n| *n > 0).unwrap_or(DEFAULT_MAX_BYTES);
-            (process_dialable(), max, guarded_client(process_dialable()))
+            let ok = process_rule().unwrap_or(any_ip);
+            (ok, max, guarded_client(ok))
         });
-        Self::from_parts(client.clone(), *dialable, *max)
+        Self::from_parts(client.clone(), *dialable, *max, process_rule().is_none())
     }
 
     /// This client's address rule, `exempt` aside (on `port` only, if set;
-    /// see [`DialGuard`]).
-    pub(crate) fn guard(&self, exempt: Option<&str>, port: Option<u16>) -> DialGuard {
+    /// see [`DialGuard`]); `None` when every address is dialable.
+    pub(crate) fn guard(&self, exempt: Option<&str>, port: Option<u16>) -> Option<DialGuard> {
         let (ok, exempt) = (self.dialable, exempt.map(Arc::from));
-        DialGuard { ok, exempt, port }
+        (!self.open).then_some(DialGuard { ok, exempt, port })
     }
 
     #[cfg(test)]
     pub(crate) fn with_policy(dialable: Dialable, max_bytes: u64) -> Self {
-        Self::from_parts(guarded_client(dialable), dialable, max_bytes)
+        Self::from_parts(guarded_client(dialable), dialable, max_bytes, false)
     }
 
     /// Public addresses only, whatever the environment says.
@@ -235,10 +268,11 @@ impl SignedUrlDownloader {
         Self::with_policy(is_global_unicast, DEFAULT_MAX_BYTES)
     }
 
-    fn from_parts(client: Client, dialable: Dialable, max_bytes: u64) -> Self {
+    fn from_parts(client: Client, dialable: Dialable, max_bytes: u64, open: bool) -> Self {
         Self {
             client,
             dialable,
+            open,
             max_bytes,
             timeout: None,
         }
@@ -259,7 +293,7 @@ impl SignedUrlDownloader {
     /// For tests against a loopback server: every address is dialable.
     #[cfg(test)]
     pub(crate) fn allowing_private_hosts() -> Self {
-        Self::with_policy(any_ip, DEFAULT_MAX_BYTES)
+        Self::from_parts(guarded_client(any_ip), any_ip, DEFAULT_MAX_BYTES, true)
     }
 
     /// Streams the response body of an attachment URL (see [`Self::fetch`]).
@@ -341,17 +375,13 @@ impl SignedUrlDownloader {
     }
 }
 
-/// Public addresses only unless [`ALLOW_PRIVATE_ENV_VAR`] is set; read once
-/// per process.
-pub(crate) fn process_dialable() -> Dialable {
-    static RULE: OnceLock<Dialable> = OnceLock::new();
+/// Public addresses only, or `None` (every address) when
+/// [`ALLOW_PRIVATE_ENV_VAR`] is set; read once per process.
+pub(crate) fn process_rule() -> Option<Dialable> {
+    static RULE: OnceLock<Option<Dialable>> = OnceLock::new();
     *RULE.get_or_init(|| {
         let raw = std::env::var(ALLOW_PRIVATE_ENV_VAR).ok();
-        if private_block_from(raw.as_deref()) {
-            is_global_unicast
-        } else {
-            any_ip
-        }
+        private_block_from(raw.as_deref()).then_some(is_global_unicast as Dialable)
     })
 }
 
@@ -486,6 +516,16 @@ mod tests {
             panic!("expected a transport error")
         };
         assert!(!message.contains("query-value"), "{message}");
+    }
+
+    /// A lookup that fails, or that does not answer in time, is a refusal.
+    #[tokio::test]
+    async fn a_lookup_that_fails_or_hangs_is_a_refusal() {
+        let failed = async { Err::<Addrs, _>("no answer".into()) };
+        assert!(first_answer(failed, Duration::from_secs(5)).await.is_err());
+        let hangs = first_answer(std::future::pending(), Duration::from_millis(50));
+        let ended = tokio::time::timeout(Duration::from_secs(5), hangs).await;
+        assert!(ended.expect("the lookup's own deadline ends it").is_err());
     }
 
     /// `with_timeout` never sets a deadline past the client's own 600 s.

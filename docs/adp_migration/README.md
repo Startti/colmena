@@ -16,7 +16,7 @@ Los cambios que quedan dentro del motor no llevan nota aquí.
 
 | # | Nota | Acción de ADP | Qué se rompe si se ignora |
 |---|------|---------------|---------------------------|
-| 1 | [Destino de datos, solo público](2026-09-26-data-destination-public-only.md) | Ninguna de código; una tool con destino abierto hacia un host no público lo lista en `allowed_hosts` | Nada con destinos públicos; uno interno sin listar deja de conectarse |
+| 1 | [Destino de datos, solo público](2026-09-26-data-destination-public-only.md) | Ninguna de código; una tool con destino abierto hacia un host no público lo lista en `allowed_hosts`; `SocketIoNode::default()` en Rust | Nada con destinos públicos; uno interno sin listar deja de conectarse, y una `url` de socketio de datos solo va por websocket |
 
 ## 2026-09-26 — adjuntos: el hijo no lee `files` de su estado, `path` solo en local, URLs solo públicas
 

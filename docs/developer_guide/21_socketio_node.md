@@ -289,6 +289,15 @@ names it, an open tool field) and points elsewhere, the node fails before
 connecting unless the host is listed in `allowed_hosts` (`"host"` or
 `"host:port"`, author-set) — the same rule as `http_request` (§119).
 
+A `url` that comes from runtime data and is not the author's origin connects only to a public
+address, unless `allowed_hosts` lists its host, and only over `transport: "websocket"`, listed or
+not (`any` and `polling` are refused: polling follows redirects the check cannot see). The node
+resolves the name once, within `timeout_ms`, and refuses a name that does not resolve in time; over
+`ws://`/`http://` the client connects to that address with the name as `Host`, while `wss://` and
+`https://` keep the name, which TLS certificate verification covers.
+`COLMENA_ATTACHMENT_ALLOW_PRIVATE_HOSTS=1` turns these checks off for local development
+(CHANGELOG 2026-09 §144).
+
 ---
 
 ## Example 1: Standalone Node — Ack Mode

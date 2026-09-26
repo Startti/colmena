@@ -649,7 +649,8 @@ impl HttpNode {
     /// `base_url`) dials only addresses the process allows (public ones
     /// unless `COLMENA_ATTACHMENT_ALLOW_PRIVATE_HOSTS` is set), redirects
     /// included; a host in `allowed_hosts` is dialled at any address. `None`
-    /// for the author's destination, which is not checked.
+    /// for the author's destination, which is not checked, and when that
+    /// variable is set (the plain client, system proxy included).
     fn destination_guard(
         &self,
         url: &Url,
@@ -668,7 +669,9 @@ impl HttpNode {
             .and_then(Value::as_array)
             .is_some_and(|l| l.iter().any(bare));
         let port = url.port_or_known_default().filter(|_| !bare);
-        let guard = self.url_parts.guard(Some(host).filter(|_| listed), port);
+        let Some(guard) = self.url_parts.guard(Some(host).filter(|_| listed), port) else {
+            return Ok(None);
+        };
         if guard.refuses(url) {
             return Err(Self::refused_destination());
         }
@@ -3359,7 +3362,8 @@ mod data_destination_tests {
     }
 
     /// The author's destination (in `config` or a tool's `fixed` value) and a
-    /// host in `allowed_hosts` still connect at a non-public address.
+    /// host in `allowed_hosts` still connect at a non-public address; with the
+    /// development opt-out there is no guard (the system proxy applies).
     #[tokio::test]
     async fn an_author_destination_or_a_listed_host_still_connects() {
         let s = server(ResponseTemplate::new(200)).await;
@@ -3384,5 +3388,9 @@ mod data_destination_tests {
             assert_eq!(out.unwrap()["status"], 200, "{base}");
         }
         assert_eq!(s.received_requests().await.unwrap().len(), 4);
+        // With every address dialable (the development opt-out), no guard.
+        let open = HttpNode::new().with_url_parts(SignedUrlDownloader::allowing_private_hosts());
+        let url = Url::parse("http://10.255.0.1").unwrap();
+        assert!(open.destination_guard(&url, None, None).unwrap().is_none());
     }
 }

@@ -6364,3 +6364,28 @@ responden; uno link-local falla sin marcarse; sin `allowed_hosts`, el de loopbac
 SSE ni de API. Una tool con `base_url` abierto que deba llegar a un host no público lo lista en
 `allowed_hosts`.
 **Estado.** done.
+
+## 144. Endurecimiento: en `socketio_request`, una `url` que viene de datos se conecta solo a direcciones públicas y por websocket
+
+**Qué cambia.** Si la `url` de `socketio_request` viene de datos del run (un edge que la nombra, un
+campo abierto de la tool) y no es el origen de la `url` del autor, el nodo resuelve el host antes de
+conectar, una vez y dentro de `timeout_ms`, y se niega si no resuelve a tiempo o si alguna respuesta,
+o la IP literal, no es pública (la regla de §143). Esa
+`url` conecta solo por el transporte `websocket`: `any` y `polling` se niegan, porque el polling
+sigue redirects que el chequeo no ve; también para un host en `allowed_hosts` (del autor), que no
+pasa el chequeo de direcciones. La `url` del autor no cambia. Por `ws://`/`http://` el cliente conecta
+a la primera dirección revisada, con el nombre en `Host`: no vuelve a resolver. `wss://`/`https://`
+conservan el nombre, que cubre la verificación TLS del certificado. La misma variable
+(`COLMENA_ATTACHMENT_ALLOW_PRIVATE_HOSTS`) lo apaga en desarrollo local; con ella `http_request` no
+instala guarda (vale el proxy del sistema). `SocketIoNode` deja de ser
+un struct unitario: se construye con `SocketIoNode::default()`.
+
+**Tests.** `socketio.rs` `env_gate_tests`: una `url` de datos en loopback (por IP y por nombre) no
+recibe conexión; con `polling` o `any` tampoco, aunque se acepte o esté listada; por websocket sí; un
+nombre que no resuelve y una `url` que no parsea se niegan (sin repetirla); un nombre conecta a su
+primera respuesta, con el nombre en `Host`, nunca a otra. `first_answer`: una resolución que falla o
+tarda es un rechazo. `http.rs`: con la variable no hay guarda.
+
+**ADP.** [Nota de migración](adp_migration/2026-09-26-data-destination-public-only.md). Sin cambios de
+SSE. En Rust, `SocketIoNode` se construye con `SocketIoNode::default()`.
+**Estado.** done.

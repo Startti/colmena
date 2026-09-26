@@ -34,12 +34,14 @@
 use crate::dag_engine::domain::lint::{FieldSpec, NodeCatalogEntry};
 use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
 use crate::dag_engine::infrastructure::env_provenance::{escape_pointer_segment, EnvPolicy};
+use crate::llm::infrastructure::files::signed_url_downloader::{process_rule, DialGuard, Dialable};
 use futures::FutureExt;
 use rust_socketio::asynchronous::{Client, ClientBuilder};
 use rust_socketio::{Payload, TransportType};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::error::Error as StdError;
+use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -70,9 +72,29 @@ struct PreEventSpec {
 
 /// Emits Socket.IO events and collects responses. Implements [`ExecutableNode`].
 /// Stateless — each execution creates a fresh connection.
-pub struct SocketIoNode;
+pub struct SocketIoNode {
+    /// Where a `url` that comes from data may connect; `None` (the opt-out): unchecked.
+    dialable: Option<Dialable>,
+}
+
+impl Default for SocketIoNode {
+    fn default() -> Self {
+        Self {
+            dialable: process_rule(),
+        }
+    }
+}
 
 impl SocketIoNode {
+    /// A plaintext `url` with its host replaced by `ip`, the address checked, and the
+    /// `Host` it names; `None` for `https`/`wss`, which keep the name (TLS verifies it).
+    fn pinned(url: &reqwest::Url, ip: IpAddr) -> Option<(String, String)> {
+        let host = &url[url::Position::BeforeHost..url::Position::AfterPort];
+        let mut to = url.clone();
+        let plaintext = matches!(url.scheme(), "http" | "ws");
+        (plaintext && to.set_ip_host(ip).is_ok()).then(|| (to.into(), host.to_string()))
+    }
+
     /// Resolve `${ENV_VAR}` placeholders in a string. Identical to HttpNode's resolver.
     fn resolve_env_vars(input: &str) -> Result<String, String> {
         let mut result = String::new();
@@ -484,11 +506,6 @@ impl ExecutableNode for SocketIoNode {
             _ => TransportType::Any,
         };
 
-        let mut builder = ClientBuilder::new(&url)
-            .namespace(&namespace)
-            .transport_type(transport_type)
-            .reconnect(false);
-
         // The author's credentials go only to the author's `url` origin or to
         // a host in `allowed_hosts` (same rule as `http_request`); a `url`
         // from data may not take them elsewhere. They are the cookies and
@@ -496,7 +513,7 @@ impl ExecutableNode for SocketIoNode {
         // a `payload`/`pre_events` with an env template, any value a
         // dispatcher vouched for as the author's `${VAR}`, and any `config`
         // leaf the engine filled with a secure value.
-        {
+        let (connect_url, host) = {
             use crate::dag_engine::infrastructure::env_provenance::{
                 carries_env_or_secret, is_authored_input,
             };
@@ -508,16 +525,16 @@ impl ExecutableNode for SocketIoNode {
                 || author("payload").is_some_and(HttpNode::has_template)
                 || author("pre_events").is_some_and(HttpNode::has_template)
                 || HttpNode::authored_leaves_carry_credentials(inputs, &["cookies"], |_| false);
+            let author_url = match inputs.get("url") {
+                Some(_) if !is_authored_input(inputs, "url") => config
+                    .get("url")
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| Self::resolve_env_vars(s).ok()),
+                _ => Some(url.clone()),
+            };
+            let target = reqwest::Url::parse(&url)
+                .map_err(|e| format!("socketio_request: `url` is not a valid URL: {e}"))?;
             if carries {
-                let author_url = match inputs.get("url") {
-                    Some(_) if !is_authored_input(inputs, "url") => config
-                        .get("url")
-                        .and_then(|v| v.as_str())
-                        .and_then(|s| Self::resolve_env_vars(s).ok()),
-                    _ => Some(url.clone()),
-                };
-                let target = reqwest::Url::parse(&url)
-                    .map_err(|e| format!("socketio_request: invalid url '{url}': {e}"))?;
                 HttpNode::credential_destination_allowed(
                     &target,
                     author_url.as_deref(),
@@ -531,6 +548,45 @@ impl ExecutableNode for SocketIoNode {
                     )
                 })?;
             }
+            // A `url` from data (not the author's origin) connects only to an
+            // address the process allows, resolved once here (see `pinned`),
+            // unless `allowed_hosts` lists its host; and only over websocket,
+            // listed or not: polling follows redirects no check sees.
+            let author_origin = author_url.and_then(|a| reqwest::Url::parse(&a).ok());
+            let from_data = !author_origin.is_some_and(|a| HttpNode::same_origin(&a, &target));
+            let allowed = author("allowed_hosts");
+            let listed = HttpNode::credential_destination_allowed(&target, None, allowed).is_ok();
+            match self.dialable.filter(|_| from_data) {
+                Some(_) if transport != "websocket" => {
+                    return Err(
+                        "socketio_request: a url that comes from data connects over the \
+                         websocket transport only"
+                            .into(),
+                    );
+                }
+                Some(ok) if !listed => {
+                    let within = Duration::from_millis(timeout_ms);
+                    let checked = DialGuard::new(ok, None).resolve_now(&target, within).await;
+                    let ip = checked.map_err(|_| {
+                        "socketio_request: a url that comes from data connects only to a host in \
+                         `allowed_hosts` or to a public address (a name must resolve within \
+                         `timeout_ms`); this one is neither"
+                    })?;
+                    match ip.and_then(|ip| Self::pinned(&target, ip)) {
+                        Some((to, host)) => (to, Some(host)),
+                        None => (url.clone(), None),
+                    }
+                }
+                _ => (url.clone(), None),
+            }
+        };
+
+        let mut builder = ClientBuilder::new(&connect_url)
+            .namespace(&namespace)
+            .transport_type(transport_type)
+            .reconnect(false);
+        if let Some(host) = host {
+            builder = builder.opening_header("Host", host);
         }
 
         if let Some(cookies) = str_field("cookies")? {
@@ -1043,15 +1099,27 @@ mod env_gate_tests {
 
     /// Accepts one connection and returns the bytes of its opening request.
     async fn listen() -> (String, tokio::task::JoinHandle<String>) {
-        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("http://{}", l.local_addr().unwrap());
+        let (port, h) = listen_on([127, 0, 0, 1].into()).await.unwrap();
+        (format!("http://127.0.0.1:{port}"), h)
+    }
+
+    async fn listen_on(
+        ip: std::net::IpAddr,
+    ) -> std::io::Result<(u16, tokio::task::JoinHandle<String>)> {
+        let l = tokio::net::TcpListener::bind((ip, 0)).await?;
+        let port = l.local_addr()?.port();
         let h = tokio::spawn(async move {
             let (mut sock, _) = l.accept().await.unwrap();
             let mut buf = vec![0u8; 8192];
             let n = sock.read(&mut buf).await.unwrap_or(0);
             String::from_utf8_lossy(&buf[..n]).to_lowercase()
         });
-        (url, h)
+        Ok((port, h))
+    }
+
+    /// Only the credential rule can refuse: the checks on a `url` from data are off.
+    fn any_address() -> SocketIoNode {
+        SocketIoNode { dialable: None }
     }
 
     /// The author's cookies and headers go only to the author's `url` host
@@ -1067,7 +1135,7 @@ mod env_gate_tests {
         };
         let (url, got) = listen().await;
         let inputs = HashMap::from([("url".to_string(), json!(url))]);
-        let refused = SocketIoNode
+        let refused = any_address()
             .execute(&inputs, &config(json!([])), &mut json!({}), None)
             .await;
         assert!(refused.is_err(), "connected to a host that came from data");
@@ -1077,7 +1145,7 @@ mod env_gate_tests {
         let (url, got) = listen().await;
         let host_port = url.trim_start_matches("http://").to_string();
         let inputs = HashMap::from([("url".to_string(), json!(url))]);
-        let _ = SocketIoNode
+        let _ = any_address()
             .execute(&inputs, &config(json!([host_port])), &mut json!({}), None)
             .await;
         let req = tokio::time::timeout(Duration::from_secs(5), got)
@@ -1132,7 +1200,7 @@ mod env_gate_tests {
             let (url, got) = listen().await;
             let mut inputs: NodeInputs = serde_json::from_value(extra_inputs).unwrap();
             inputs.insert("url".to_string(), json!(url));
-            let refused = SocketIoNode
+            let refused = any_address()
                 .execute(&inputs, &config, &mut json!({}), None)
                 .await;
             assert!(refused.is_err(), "case {i}: connected to a host from data");
@@ -1158,7 +1226,7 @@ mod env_gate_tests {
             "url": url, "event": "e", "timeout_ms": 300,
             "cookies": "k=${COLMENA_CLASS_TEST_SIO_CFG}"
         });
-        let _ = SocketIoNode
+        let _ = SocketIoNode::default()
             .execute(&inputs, &config, &mut json!({}), None)
             .await;
         let req = tokio::time::timeout(Duration::from_secs(5), got)
@@ -1170,5 +1238,113 @@ mod env_gate_tests {
         assert!(req.contains("k=sio-config-test-only"), "{req}");
         std::env::remove_var("COLMENA_CLASS_TEST_SIO");
         std::env::remove_var("COLMENA_CLASS_TEST_SIO_CFG");
+    }
+
+    /// A `url` that comes from data connects only to a public address and
+    /// over websocket (polling follows redirects), unless `allowed_hosts`
+    /// lists its host (websocket even then); the author's `url` is not checked.
+    #[tokio::test]
+    async fn a_url_from_data_dials_only_public_addresses_over_websocket() {
+        use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::mcp::allowlist::is_global_unicast;
+        let public_only = SocketIoNode {
+            dialable: Some(is_global_unicast),
+        };
+        let loopback_as_public = SocketIoNode {
+            dialable: Some(|ip| ip.is_loopback()),
+        };
+        let open = any_address();
+        let cases = [
+            (&open, "127.0.0.1", "polling", false, true),
+            (&public_only, "127.0.0.1", "websocket", false, false),
+            (&public_only, "localhost", "websocket", false, false),
+            (&loopback_as_public, "127.0.0.1", "polling", false, false),
+            (&loopback_as_public, "127.0.0.1", "any", false, false),
+            (&loopback_as_public, "127.0.0.1", "websocket", false, true),
+            (&public_only, "127.0.0.1", "polling", true, false),
+            (&public_only, "127.0.0.1", "any", true, false),
+            (&public_only, "127.0.0.1", "websocket", true, true),
+        ];
+        for (node, host, transport, listed, dials) in cases {
+            let (url, got) = listen().await;
+            let url = url.replace("127.0.0.1", host);
+            let host_port = url.trim_start_matches("http://");
+            let allowed = if listed {
+                json!([host_port])
+            } else {
+                json!([])
+            };
+            let inputs = HashMap::from([("url".to_string(), json!(url))]);
+            let config = json!({ "event": "e", "timeout_ms": 300, "transport": transport,
+                "allowed_hosts": allowed });
+            let out = node.execute(&inputs, &config, &mut json!({}), None).await;
+            let reached = tokio::time::timeout(Duration::from_millis(500), got).await;
+            assert_eq!(reached.is_ok(), dials, "{url} {transport}: {out:?}");
+        }
+        let (url, got) = listen().await;
+        let config = json!({ "url": url, "event": "e", "timeout_ms": 300 });
+        let _ = public_only
+            .execute(&HashMap::new(), &config, &mut json!({}), None)
+            .await;
+        let reached = tokio::time::timeout(Duration::from_secs(5), got).await;
+        assert!(reached.is_ok(), "the author's url was not dialled");
+    }
+
+    /// A name that does not resolve (in time) is refused before connecting, a
+    /// url that does not parse without repeating it; no wait for a cut lookup.
+    #[test]
+    fn an_unresolvable_or_invalid_url_from_data_is_refused() {
+        use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::mcp::allowlist::is_global_unicast;
+        let node = SocketIoNode {
+            dialable: Some(is_global_unicast),
+        };
+        let config = json!({ "event": "e", "timeout_ms": 300 });
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        for (url, says) in [
+            ("http://nonexistent.invalid:9", "public address"),
+            ("http://[x/?sig=q", "not a valid URL"),
+        ] {
+            let inputs = HashMap::from([("url".to_string(), json!(url))]);
+            let out = rt.block_on(node.execute(&inputs, &config, &mut json!({}), None));
+            let err = out.unwrap_err().to_string();
+            assert!(err.contains(says) && !err.contains("sig="), "{url}: {err}");
+        }
+        rt.shutdown_background();
+    }
+
+    /// A name from data is resolved once: the connection goes to its first
+    /// answer, with the name as `Host`, and never to another answer.
+    #[tokio::test]
+    async fn a_name_from_data_connects_to_the_address_it_was_checked_at() {
+        let node = SocketIoNode {
+            dialable: Some(|ip| ip.is_loopback()),
+        };
+        let answers = tokio::net::lookup_host(("localhost", 0)).await.unwrap();
+        for (i, addr) in answers.enumerate() {
+            let Ok((port, got)) = listen_on(addr.ip()).await else {
+                continue;
+            };
+            let url = format!("http://localhost:{port}");
+            let inputs = HashMap::from([("url".to_string(), json!(url))]);
+            let config = json!({ "event": "e", "timeout_ms": 300 });
+            let _ = node.execute(&inputs, &config, &mut json!({}), None).await;
+            let reached = tokio::time::timeout(Duration::from_millis(500), got).await;
+            if i == 0 {
+                let req = reached.expect("the first answer was not dialled").unwrap();
+                assert!(req.contains(&format!("host: localhost:{port}")), "{req}");
+            } else {
+                assert!(reached.is_err(), "{addr} is not the first answer");
+            }
+        }
+    }
+
+    /// `ws://` goes to the address checked, the name kept for `Host`; `wss://` keeps the name.
+    #[test]
+    fn a_plaintext_url_is_pinned_to_the_checked_address() {
+        let url = |s: &str| reqwest::Url::parse(s).unwrap();
+        let ip = "2001:db8::7".parse().unwrap();
+        let (to, host) = SocketIoNode::pinned(&url("ws://example.test:8080/s?q"), ip).unwrap();
+        let want = ("ws://[2001:db8::7]:8080/s?q", "example.test:8080");
+        assert_eq!((to.as_str(), host.as_str()), want);
+        assert!(SocketIoNode::pinned(&url("wss://example.test/"), ip).is_none());
     }
 }

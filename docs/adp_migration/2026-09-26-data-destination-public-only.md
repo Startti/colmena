@@ -11,11 +11,17 @@ compartido.
   campo abierto de la tool, una tool que llega como dato) y no es el origen del `base_url` del
   autor, el nodo marca solo direcciones públicas, también en cada redirect, y sin proxy. Un host en
   `allowed_hosts` se marca en cualquier dirección. El destino que fija el autor no cambia.
+- **`socketio_request`** (§144): una `url` que viene de datos conecta solo por `transport: "websocket"`,
+  también con el host en `allowed_hosts`, y fuera de esa lista solo a direcciones públicas; un nombre
+  que no resuelve dentro de `timeout_ms` se niega.
 
 ## Qué ve ADP
 
 - Nada en el SSE. Un destino rechazado es un error del nodo (o de la tool), sin la URL:
-  `http_request: a destination that comes from data connects only to a public address …`.
+  `http_request: a destination that comes from data connects only to a public address …` o
+  `socketio_request: a url that comes from data connects …`.
+- Superficie de Rust: `SocketIoNode` deja de ser un struct unitario; se construye con
+  `SocketIoNode::default()`.
 
 ## Qué se rompe si se ignora
 

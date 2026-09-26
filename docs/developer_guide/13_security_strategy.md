@@ -981,12 +981,16 @@ Este bloque resume el estado real del cifrado en tránsito para cada componente 
   `url_download_timeout_secs`) y la spec de `api_explorer__load_spec` (10 MiB, 60 s). Las dos variables valen para
   todas (CHANGELOG 2026-09 §140).
 
-### Destino de `http_request` que viene de datos
+### Destino que viene de datos (`http_request`, `socketio_request`)
 
 - Si `base_url` viene de datos y no es el origen del `base_url` del autor, la conexión usa la misma regla de
   direcciones (`DialGuard`): solo públicas, en la resolución DNS y en cada redirect, sin proxy. Un host en
   `allowed_hosts` del autor se marca en cualquier dirección. `COLMENA_ATTACHMENT_ALLOW_PRIVATE_HOSTS` la apaga
   también (CHANGELOG 2026-09 §143).
+- `socketio_request`: una `url` de datos conecta solo por websocket (el polling sigue redirects), listada o no; fuera
+  de `allowed_hosts` se resuelve una vez, dentro de `timeout_ms`, y se niega si no resuelve a tiempo o si una
+  respuesta no es pública. Por `ws://`/`http://` conecta a la dirección revisada con el nombre en `Host`; por `wss://`
+  la verificación TLS del certificado cubre el nombre (CHANGELOG 2026-09 §144).
 
 ## Brechas conocidas de TLS (Postgres, HTTP, Socket.IO)
 
