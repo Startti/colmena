@@ -3440,7 +3440,11 @@ mod graph_http_payload_tests {
             "a flattened base_url replaced the author's"
         );
         let req = only_request(&author).await;
-        assert_eq!(req.method.as_str(), "GET", "a flattened method replaced the author's");
+        assert_eq!(
+            req.method.as_str(),
+            "GET",
+            "a flattened method replaced the author's"
+        );
         assert_eq!(bearer(&req), "Bearer author-token-b-test-only");
         std::env::remove_var("COLMENA_P4_TEST_TOKEN_B");
     }
