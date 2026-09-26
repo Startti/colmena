@@ -103,7 +103,7 @@ Las 3 skills se cargan automáticamente, con sus referencias listas para `load_s
 
 ### Resolución de rutas
 
-- **Relativas** (`./my-skills`, `../shared`) → se resuelven contra el **directorio del JSON del grafo**, no contra el CWD del proceso.
+- **Relativas** (`./my-skills`, `../shared`) → se resuelven contra el **directorio de trabajo del proceso** (en el worker de ADP, `/app`), que también es una raíz permitida. El motor no conoce la ruta del JSON del grafo: el worker recibe JSON, no un archivo.
 - **Absolutas** (`/opt/colmena/team-skills`) → usadas tal cual.
 
 ### Symlinks
@@ -170,7 +170,7 @@ El LLM decide qué cargar en función de la sub-tarea. Las references **no apare
 
 ## Seguridad: allowed directories
 
-Por defecto, Colmena solo acepta paths *dentro* del directorio del JSON del grafo. Para permitir directorios compartidos, configura la variable de entorno:
+Por defecto, Colmena solo acepta paths *dentro* del directorio de trabajo del proceso. Para permitir directorios compartidos, configura la variable de entorno:
 
 ```bash
 COLMENA_SKILLS_ALLOWED_DIRS=/home/user/skills:/opt/colmena/shared-skills
