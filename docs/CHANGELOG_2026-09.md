@@ -5786,3 +5786,33 @@ segundo dato.
 
 **ADP.** Sin cambios de API.
 **Estado.** done.
+
+## 116. Endurecimiento: las credenciales del autor en `http_request` se cuentan por hoja, y el motor marca los secretos de `config`
+
+**Qué cambia.** La regla de §111 (las credenciales del autor van solo al origen del autor o a
+`allowed_hosts`) reconoce más credenciales:
+- **Por hoja.** El despacho de tools y `for_each` escriben la clave del motor
+  `__colmena_authored_leaves` (`env_provenance::authored_leaves`): los punteros de cada hoja
+  que sigue igual al `fixed` del autor, aunque su contenedor no esté entero (un header `fixed`
+  junto a uno que puso el modelo). `http_request` cuenta como credencial una hoja así bajo
+  `bearer_token`, `authorization`, `headers` (fuera de `accept*`/`cache-control`/
+  `content-type`/`user-agent`), `query_params` o un query param suelto.
+- **Todo valor avalado.** Cualquier puntero de `__colmena_env_trusted_paths` (un `${VAR}`
+  `fixed` del autor, en cualquier campo) cuenta como credencial.
+- **Query params.** Cualquier query param del autor cuenta, con o sin `${VAR}`; también un
+  `endpoint` o un header con `${VAR}`.
+- **Secretos en `config`.** En modo grafo el motor escribe `__colmena_secret_config_paths`
+  con los punteros de las hojas de `config` que `inject_secrets` llenó
+  (`domain::node::changed_leaves`), y `http_request` las cuenta como credenciales.
+
+**Tests.** `author_owned_arg_tests` (despacho real, `$DYNAMIC`): con `base_url` del modelo,
+ni un header `fixed` junto a uno del modelo ni un `${VAR}` `fixed` dentro del `body` llegan a
+ese host. `graph_http_payload_tests`: con un edge que nombra `base_url`, ni un query param
+literal de `config` ni un secreto descifrado en el `body` de `config` llegan al otro host.
+`env_provenance.rs` y `node.rs`: `authored_leaves` y `changed_leaves`.
+
+**ADP.** Sin cambios de API. Un grafo o una tool que manda a un host que viene de datos un
+contenedor que mezcla credenciales `fixed` con campos de quien llama, un query param literal
+del autor, o un secreto en `config`, debe listar ese host en `allowed_hosts`. Con esas
+credenciales, una redirección a otro origen se devuelve (3xx) en vez de seguirse.
+**Estado.** done.

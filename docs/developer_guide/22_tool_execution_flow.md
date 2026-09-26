@@ -513,7 +513,11 @@ this key: no key (graph mode) or a malformed one → `Restricted(∅)`, i.e.
 
 Next to it, `__colmena_authored_inputs` (`env_provenance::AUTHORED_INPUTS_KEY`)
 lists the top-level input keys whose whole value is still the author's `fixed`
-value (`authored_keys`); `for_each` sends it per row too. A node that must
+value (`authored_keys`), and `__colmena_authored_leaves` (`AUTHORED_LEAVES_KEY`)
+the pointers of every scalar leaf still equal to it (`authored_leaves`) — a
+`fixed` header next to one the model set is listed there even though its
+`headers` object is not whole. `for_each` sends both per row too.
+`http_request` counts those leaves as the author's credentials (§116). A node that must
 tell the author's value from data regardless of `${` reads it with
 `is_authored_input` — `python_script` does, for `code` and `sandbox_mode`.
 
@@ -529,8 +533,8 @@ never be re-interpreted as an env placeholder.
 Order of operations in `execute_inner`: `strip_engine_keys(args)` → merge
 (5a–5d) → `trusted_pointers(authored_fixed, merged)` (5e) → insert engine
 keys (resume_answer, session ids, node_id_path, subgraph_depth, tool_name,
-unchanged order) → insert `__colmena_env_trusted_paths` and
-`__colmena_authored_inputs` LAST →
+unchanged order) → insert `__colmena_env_trusted_paths`,
+`__colmena_authored_inputs` and `__colmena_authored_leaves` LAST →
 `inject_secrets` → `prune_after_secrets` → `node.execute(inputs)`.
 
 ---

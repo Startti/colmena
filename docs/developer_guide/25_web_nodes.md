@@ -434,10 +434,15 @@ siendo datos que un edge puede traer (§108).
 
 ### Credenciales atadas al host del autor
 
-Las credenciales que configuró el autor —`bearer_token`, `authorization`, un
-header que no sea `accept*`/`cache-control`/`content-type`/`user-agent`, o un
-query param o body con `${VAR}`, en `config` o como `fixed` de una tool— salen
-solo hacia el origen (esquema, host y puerto) del `base_url` del autor. Si el
+Las credenciales que configuró el autor salen solo hacia el origen (esquema,
+host y puerto) del `base_url` del autor. Son, en `config` o como `fixed` de una
+tool (entero, o una hoja `fixed` dentro de un contenedor que también llena quien
+llama: `__colmena_authored_leaves`): `bearer_token`, `authorization`, un header
+que no sea `accept*`/`cache-control`/`content-type`/`user-agent`, cualquier query
+param (en `query_params` o suelto), un `endpoint` o `body` con `${VAR}`; además
+todo valor que un despacho avaló como `${VAR}` del autor y toda hoja del
+`config` que el motor llenó con un secure value (`__colmena_secret_config_paths`,
+§116). Si el
 destino viene de datos (un edge que nombra `base_url`, un campo `base_url`
 abierto en la tool) y es otro origen, el nodo falla con un error salvo que el
 host esté en `allowed_hosts` (`"host"` o `"host:port"`, solo del autor). Es la

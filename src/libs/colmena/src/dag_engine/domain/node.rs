@@ -25,6 +25,43 @@ pub fn strip_engine_keys(inputs: &mut NodeInputs) {
     inputs.retain(|k, _| !is_engine_key(k));
 }
 
+/// Input key the engine writes, in graph mode, with the JSON pointers of the
+/// node's `config` leaves it filled with a decrypted secure value just before
+/// the node runs (see [`changed_leaves`]). A node that sends its `config` to a
+/// host counts those leaves as the author's credentials. Absent means none.
+pub const SECRET_CONFIG_PATHS_KEY: &str = "__colmena_secret_config_paths";
+
+/// The JSON pointers (RFC 6901) of the scalar leaves of `after` whose value
+/// differs from `before` at the same pointer.
+pub fn changed_leaves(before: &Value, after: &Value) -> Vec<String> {
+    fn walk(before: Option<&Value>, after: &Value, pointer: &mut String, out: &mut Vec<String>) {
+        let mut child = |segment: &str, b: Option<&Value>, a: &Value, out: &mut Vec<String>| {
+            let len = pointer.len();
+            pointer.push('/');
+            pointer.push_str(&segment.replace('~', "~0").replace('/', "~1"));
+            walk(b, a, pointer, out);
+            pointer.truncate(len);
+        };
+        match after {
+            Value::Object(map) => {
+                for (k, v) in map {
+                    child(k, before.and_then(|b| b.get(k)), v, out);
+                }
+            }
+            Value::Array(arr) => {
+                for (i, v) in arr.iter().enumerate() {
+                    child(&i.to_string(), before.and_then(|b| b.get(i)), v, out);
+                }
+            }
+            leaf if before != Some(leaf) => out.push(pointer.clone()),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    walk(Some(before), after, &mut String::new(), &mut out);
+    out
+}
+
 /// Whether the node's `config` sets `key` as the author's own value. A value
 /// set there is config-only: an upstream object flattened by an edge without a
 /// field, or global state, never replaces it (an edge that names the field
@@ -152,6 +189,20 @@ mod config_sets_key_tests {
         for k in ["empty", "prompt", "task", "missing"] {
             assert!(!config_sets_key(&config, k), "{k}");
         }
+    }
+}
+
+#[cfg(test)]
+mod changed_leaves_tests {
+    use super::changed_leaves;
+    use serde_json::json;
+
+    #[test]
+    fn only_the_leaves_whose_value_changed_are_listed() {
+        let before = json!({ "a": "<value_1>", "b": { "c/d": "<value_2>", "e": 1 }, "f": ["x"] });
+        let after = json!({ "a": "s1", "b": { "c/d": "s2", "e": 1 }, "f": ["x"] });
+        assert_eq!(changed_leaves(&before, &after), vec!["/a", "/b/c~1d"]);
+        assert!(changed_leaves(&after, &after).is_empty());
     }
 }
 
