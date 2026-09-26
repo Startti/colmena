@@ -25,6 +25,22 @@ pub fn strip_engine_keys(inputs: &mut NodeInputs) {
     inputs.retain(|k, _| !is_engine_key(k));
 }
 
+/// Whether the node's `config` sets `key` as the author's own value. A value
+/// set there is config-only: an upstream object flattened by an edge without a
+/// field, or global state, never replaces it (an edge that names the field
+/// still does). A string that renders that same key (`"prompt": "{{prompt}}"`)
+/// is the author wiring the field to runtime data, so it does not count.
+pub fn config_sets_key(config: &Value, key: &str) -> bool {
+    match config.get(key) {
+        None | Some(Value::Null) => false,
+        Some(Value::String(s)) => !s.split("{{").skip(1).any(|segment| {
+            let path = segment.split("}}").next().unwrap_or("").trim();
+            path == key || path.strip_prefix(key).is_some_and(|r| r.starts_with('.'))
+        }),
+        Some(_) => true,
+    }
+}
+
 /// El "Puerto" principal para todos los nodos ejecutables.
 /// Define el contrato que debe implementar cualquier nodo (Adaptador).
 /// `Send + Sync` son necesarios para que el trait pueda ser usado de forma segura
@@ -112,6 +128,30 @@ pub trait ExecutableNode: Send + Sync {
     /// Override in nodes that implement [`InitializableNode`] (currently `sql_query`).
     fn as_initializable(&self) -> Option<&dyn InitializableNode> {
         None
+    }
+}
+
+#[cfg(test)]
+mod config_sets_key_tests {
+    use super::config_sets_key;
+    use serde_json::json;
+
+    #[test]
+    fn a_config_value_is_author_set_unless_it_renders_its_own_key() {
+        let config = json!({
+            "endpoint": "/items",
+            "limit": 5,
+            "empty": null,
+            "prompt": "{{ prompt }}",
+            "task": "Do: {{task.text}}",
+            "other": "{{prompt}}"
+        });
+        for k in ["endpoint", "limit", "other"] {
+            assert!(config_sets_key(&config, k), "{k}");
+        }
+        for k in ["empty", "prompt", "task", "missing"] {
+            assert!(!config_sets_key(&config, k), "{k}");
+        }
     }
 }
 

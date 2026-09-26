@@ -5500,3 +5500,25 @@ Cinco cambios, cada uno con su test.
   solo tiene la CLI.
 
 **ADP.** Sin cambios de API. **Estado.** done.
+
+## 110. Endurecimiento: un campo que el autor fija en `config` es solo de `config`
+
+**Qué cambia.** Regla única en el ensamblado de inputs (`run_use_case.rs`), para todo tipo de
+nodo: el auto-flatten de un edge sin puerto y el relleno desde el estado global (en un hijo,
+el input del padre) nunca reemplazan un campo que `config` fija (`config_sets_key`, dominio);
+un edge que nombra el campo sí. Un string que renderiza su propia clave
+(`"prompt": "{{prompt}}"`) es el autor cableando ese campo a datos y no cuenta como fijado.
+Cada valor descartado (por esta regla o por `author_owned_inputs`) deja un `warn` en
+`colmena::dag_engine` con el nodo, la clave y el origen, nunca el valor. Y `build_inputs_for`
+toma solo los edges cuyo `to` es el id del nodo o `<id>.<campo>`, como ya hacía el scheduler:
+un edge a `call2.base_url` no llega a `call`.
+
+**Tests.** En `graph_http_payload_tests`: el estado global y un payload aplanado no
+reemplazan el `endpoint` de `config` (y una clave libre sigue llegando);
+`build_inputs_for` ignora el edge a `call2`; el `warn` nombra `base_url` y `endpoint` y no
+el valor. `config_sets_key_tests` cubre la excepción del template propio.
+
+**ADP.** Sin cambios de API. Un grafo que dependía de que un payload aplanado o el estado
+global pisaran un valor de `config` debe nombrar el campo en el edge (`to: "n.campo"`) o
+dejarlo fuera de `config`.
+**Estado.** done.
