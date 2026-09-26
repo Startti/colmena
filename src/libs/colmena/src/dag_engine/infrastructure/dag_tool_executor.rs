@@ -7173,6 +7173,41 @@ mod author_owned_arg_tests {
         assert!(!merged.warnings[0].contains("model-value"));
     }
 
+    /// A tool that leaves `base_url` open lets the model pick the host, but
+    /// the author's fixed bearer is not sent there unless `allowed_hosts`
+    /// names it.
+    #[tokio::test]
+    async fn an_open_base_url_never_carries_the_authors_fixed_bearer() {
+        let other = MockServer::start().await;
+        Mock::given(wiremock::matchers::any())
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
+            .mount(&other)
+            .await;
+        let cfg = json!({ "node_type": "http_request", "node_schema": {
+            "base_url": { "type": "string", "description": "host" },
+            "method": { "fixed": "GET" },
+            "bearer_token": { "fixed": "author-fixed-test-only" }
+        } });
+        let configs = HashMap::from([("open".to_string(), serde_json::from_value(cfg).unwrap())]);
+        let executor = DagToolExecutor::new(Arc::new(HttpRegistry), configs);
+        let args = json!({ "base_url": other.uri() });
+        let tc = ToolCall::new(
+            "c1".into(),
+            FunctionCall::new("open".into(), args.to_string()),
+        );
+        let result = executor.execute(&tc).await.unwrap();
+        let reached = other.received_requests().await.unwrap().iter().any(|r| {
+            r.headers
+                .get("authorization")
+                .is_some_and(|v| v == "Bearer author-fixed-test-only")
+        });
+        assert!(
+            !reached,
+            "the author's fixed bearer reached a model-chosen host"
+        );
+        assert!(!result.success);
+    }
+
     struct PythonRegistry;
     impl NodeRegistryPort for PythonRegistry {
         fn get_node(&self, node_type: &str) -> Option<Arc<dyn ExecutableNode>> {

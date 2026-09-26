@@ -3483,6 +3483,68 @@ mod graph_http_payload_tests {
         std::env::remove_var("COLMENA_P4_TEST_TOKEN_B");
     }
 
+    /// An edge that names `base_url` still sets it, but the author's resolved
+    /// bearer is sent only to the author's host (or an `allowed_hosts` entry):
+    /// the bearer value never reaches the other host.
+    #[tokio::test]
+    async fn author_credentials_go_only_to_the_authors_host_or_allowed_hosts() {
+        std::env::set_var("COLMENA_CLASS_TEST_TOKEN_C", "author-token-c-test-only");
+        let (author, other) = (server().await, server().await);
+        let edges = json!([{ "from": "hook.target", "to": "call.base_url" }]);
+        let with_bearer = json!({ "bearer_token": "${COLMENA_CLASS_TEST_TOKEN_C}" });
+        let payload = json!({ "target": other.uri() });
+        run(
+            payload.clone(),
+            &author,
+            with_bearer.clone(),
+            edges.clone(),
+            json!({}),
+        )
+        .await;
+        let reached = other.received_requests().await.unwrap().iter().any(|r| {
+            r.headers
+                .get("authorization")
+                .is_some_and(|v| v.to_str().unwrap().contains("author-token-c-test-only"))
+        });
+        assert!(!reached, "the author's bearer reached another host");
+
+        let other_host = other.uri().trim_start_matches("http://").to_string();
+        let mut allowed = with_bearer;
+        allowed["allowed_hosts"] = json!([other_host]);
+        run(payload, &author, allowed, edges, json!({})).await;
+        let req = only_request(&other).await;
+        assert_eq!(bearer(&req), "Bearer author-token-c-test-only");
+        std::env::remove_var("COLMENA_CLASS_TEST_TOKEN_C");
+    }
+
+    /// A flattened `headers`, `bearer_token` or `authorization` never reaches
+    /// the request: the author's credentials do.
+    #[tokio::test]
+    async fn flattened_credentials_never_replace_the_authors() {
+        let author = server().await;
+        let payload = json!({
+            "headers": { "X-Api-Key": "flat" },
+            "bearer_token": "flat-bearer",
+            "authorization": "flat-auth"
+        });
+        let extra = json!({ "bearer_token": "author" });
+        run(
+            payload,
+            &author,
+            extra,
+            json!([{ "from": "hook", "to": "call" }]),
+            json!({}),
+        )
+        .await;
+        let req = only_request(&author).await;
+        assert!(
+            req.headers.get("x-api-key").is_none(),
+            "a flattened header arrived"
+        );
+        let auth: Vec<_> = req.headers.get_all("authorization").iter().collect();
+        assert_eq!(auth, ["Bearer author"], "a flattened credential arrived");
+    }
+
     /// Engine keys never survive `build_inputs_for`, whether an edge without a
     /// field flattens them or an edge names them; an ordinary key still arrives.
     #[test]

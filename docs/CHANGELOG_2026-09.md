@@ -5692,3 +5692,27 @@ usa tal cual. `api_key` ya es campo del autor en los tres (§111). `tavily_clien
 
 **ADP.** Sin cambios de API.
 **Estado.** done.
+
+## 118. Endurecimiento: las credenciales del autor en `http_request` van solo a su host
+
+**Qué cambia.**
+- Las credenciales que configuró el autor (`bearer_token`, `authorization`, un header fuera de
+  `accept*`/`cache-control`/`content-type`/`user-agent`, un query param o body con `${VAR}`, en
+  `config` o como `fixed` de una tool) salen solo hacia el origen del `base_url` del autor. Si
+  el destino viene de datos (un edge que nombra `base_url`, un campo abierto en la tool) y es
+  otro origen, el nodo falla antes de conectar, salvo que el host esté en el nuevo campo
+  `allowed_hosts` (`"host"` o `"host:port"`, del autor). Misma regla que el bloque `auth`.
+- Con esas credenciales en la request, el cliente sigue solo redirecciones al mismo origen; una
+  a otro origen se devuelve tal cual (3xx). Sin credenciales del autor, nada cambia.
+- `allowed_hosts` es campo del autor (`author_owned_inputs`) y entra al catálogo.
+
+**Tests.** `graph_http_payload_tests`: con un edge que nombra `base_url` hacia otro host, el
+valor del bearer del autor no llega ahí; con ese host en `allowed_hosts`, llega. Un `headers` o
+`authorization` aplanados no llegan (las credenciales son las del autor). `http.rs`: una
+redirección a otro origen no lleva el header del autor y devuelve 302; sin credenciales, se
+sigue. `author_owned_arg_tests`: una tool con `base_url` abierto y bearer `fixed` no manda el
+bearer al host del modelo.
+
+**ADP.** Campo nuevo opcional `allowed_hosts` en `http_request`. Una tool o un grafo que manda
+credenciales del autor a un host que viene de datos debe listar ese host en `allowed_hosts`.
+**Estado.** done.
