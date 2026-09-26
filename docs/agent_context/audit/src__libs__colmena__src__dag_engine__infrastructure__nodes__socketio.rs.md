@@ -12,7 +12,7 @@
 - `PreEventSpec` (struct, private) — one entry in `pre_events` array with event name, payload, optional wait_event, optional timeout override
 
 ### Main Node & ExecutableNode Implementation
-- `SocketIoNode` (struct, pub; `Default`) — stateless node implementing `ExecutableNode` for Socket.IO connections; `dialable` is where a `url` from data may connect (the process rule, `process_rule()`; `None` is the development opt-out): websocket only and, unless `allowed_hosts` names the host, public addresses only, the name resolved once (`DialGuard::resolve_now`) and, over ws/http, dialled at the address checked with the name as `Host` (CHANGELOG 2026-09 §125)
+- `SocketIoNode` (struct, pub; `Default`) — stateless node implementing `ExecutableNode` for Socket.IO connections; `dialable` is where a `url` from data may connect (the process rule, `process_rule()`; `None` is the development opt-out): websocket only and, unless `allowed_hosts` names the host, public addresses only, the name resolved once (`DialGuard::resolve_now`) and, over ws/http, dialled at the address checked with the name as `Host` (CHANGELOG 2026-09 §144)
 
 ### Private Helper Methods (on SocketIoNode impl)
 - `pinned` (fn, private) — a plaintext (`http`/`ws`) url rewritten to the address checked, plus the `Host` it names; `None` for `https`/`wss`, which keep the name for TLS verification

@@ -6365,12 +6365,12 @@ SSE ni de API. Una tool con `base_url` abierto que deba llegar a un host no púb
 `allowed_hosts`.
 **Estado.** done.
 
-## 125. Endurecimiento: en `socketio_request`, una `url` que viene de datos se conecta solo a direcciones públicas y por websocket
+## 144. Endurecimiento: en `socketio_request`, una `url` que viene de datos se conecta solo a direcciones públicas y por websocket
 
 **Qué cambia.** Si la `url` de `socketio_request` viene de datos del run (un edge que la nombra, un
 campo abierto de la tool) y no es el origen de la `url` del autor, el nodo resuelve el host antes de
 conectar, una vez y dentro de `timeout_ms`, y se niega si no resuelve a tiempo o si alguna respuesta,
-o la IP literal, no es pública (la regla de §124). Esa
+o la IP literal, no es pública (la regla de §143). Esa
 `url` conecta solo por el transporte `websocket`: `any` y `polling` se niegan, porque el polling
 sigue redirects que el chequeo no ve; también para un host en `allowed_hosts` (del autor), que no
 pasa el chequeo de direcciones. La `url` del autor no cambia. Por `ws://`/`http://` el cliente conecta

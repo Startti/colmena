@@ -296,7 +296,7 @@ resolves the name once, within `timeout_ms`, and refuses a name that does not re
 `ws://`/`http://` the client connects to that address with the name as `Host`, while `wss://` and
 `https://` keep the name, which TLS certificate verification covers.
 `COLMENA_ATTACHMENT_ALLOW_PRIVATE_HOSTS=1` turns these checks off for local development
-(CHANGELOG 2026-09 §125).
+(CHANGELOG 2026-09 §144).
 
 ---
 
