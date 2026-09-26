@@ -691,6 +691,12 @@ turno se pausa en **una sola pregunta**. Qué pasa con las demás llamadas depen
 cómo corren: una tras otra (tools sin `parallel`) o en un grupo (tools `parallel`, ver
 [Un grupo de llamadas `parallel` corre a la vez](#un-grupo-de-llamadas-parallel-corre-a-la-vez)).
 
+En los dos casos la historia puede guardar los resultados en otro orden que el de las
+llamadas: el resume escribe el de la pregunta al final, después de los que se
+escribieron al suspender. `LlmRequest::new` se los manda al modelo en el orden de las llamadas de su
+mensaje del asistente, con cualquier proveedor. Gemini empareja cada `functionResponse`
+con su llamada por posición, no por id.
+
 #### En serie: la pregunta corta el batch
 
 El loop del agente corta en la llamada que suspendió: las llamadas ordenadas después
