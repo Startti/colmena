@@ -5850,15 +5850,15 @@ del autor, o un secreto en `config`, debe listar ese host en `allowed_hosts`. Co
 credenciales, una redirección a otro origen se devuelve (3xx) en vez de seguirse.
 **Estado.** done.
 
-## 117. Endurecimiento: `socketio_request` cuenta como credenciales del autor su `payload`, sus hojas `fixed` y los secretos de `config`
+## 126. Endurecimiento: `socketio_request` cuenta como credenciales del autor su `payload`, sus hojas `fixed` y los secretos de `config`
 
-**Qué cambia.** La regla de §112 (las credenciales del autor van solo al origen del `url` del
+**Qué cambia.** La regla de §119 (las credenciales del autor van solo al origen del `url` del
 autor o a `allowed_hosts`) reconoce, además de `cookies` y `headers` enteros:
 - una hoja `fixed` bajo `headers` (fuera de `accept*`/`cache-control`/`content-type`/
-  `user-agent`) o `cookies` junto a valores de quien llama (`__colmena_authored_leaves`, §116);
+  `user-agent`) o `cookies` junto a valores de quien llama (`__colmena_authored_leaves`, §124);
 - un `payload` o `pre_events` del autor con `${VAR}`, y un header con `${VAR}`;
 - cualquier puntero de `__colmena_env_trusted_paths` y cualquier hoja de `config` que el motor
-  llenó con un secure value (`__colmena_secret_config_paths`, §116).
+  llenó con un secure value (`__colmena_secret_config_paths`, §124).
 Comparte con `http_request` `HttpNode::headers_carry_credentials`, `has_template` y
 `authored_leaves_carry_credentials`.
 
@@ -5869,7 +5869,7 @@ Comparte con `http_request` `HttpNode::headers_carry_credentials`, `has_template
 del autor lleva `${VAR}` o un secreto debe listar ese host en `allowed_hosts`.
 **Estado.** done.
 
-## 118. Endurecimiento: `sql_query` expande `${VAR}` solo en la configuración del autor
+## 127. Endurecimiento: `sql_query` expande `${VAR}` solo en la configuración del autor
 
 **Qué cambia.**
 - `connection_url` se resuelve con `env_provenance::resolve_credential`: el de `config` (o un
@@ -5881,7 +5881,7 @@ del autor lleva `${VAR}` o un secreto debe listar ese host en `allowed_hosts`.
   `/guardrail_llm/api_key`).
 - Al listar tools, `DagToolExecutor` conecta de antemano un `sql_query` (`initialize()`, que
   lee los `fixed` como config del autor) solo con la tool tal como la escribió el autor: nunca
-  para un `tool_configurations` que llegó como dato (§115) y con la copia previa al templating
+  para un `tool_configurations` que llegó como dato (§122) y con la copia previa al templating
   `${context.*}`.
 
 **Tests.** `sql.rs::connection_provenance_tests` (un listener TCP registra el mensaje de

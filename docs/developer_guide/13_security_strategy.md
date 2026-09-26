@@ -507,7 +507,7 @@ The engine runs `inject_secrets` on a node's **inputs AND config** before execut
 
 A node expands `${VAR}` in its `config` after this injection, so a decrypted value is never allowed to act as an env template there: when a secret injected into `config` contains `${`, the engine does not run the node and fails it with an error naming the handle (never the value). The same secret passed through an edge is sent as written, since an `inputs` value never expands in graph mode (CHANGELOG 2026-09 §107). `tavily_client`, which injects into its own toolkit `node_config`, uses a decrypted `api_key` as is (§121).
 
-The engine also tells the node which `config` leaves it filled, under the engine key `__colmena_secret_config_paths` (JSON pointers, `domain::node::changed_leaves`). `http_request` and `socketio_request` count those leaves as the author's credentials: when the destination comes from runtime data, they are sent only to the author's origin or an `allowed_hosts` entry (§116, §117).
+The engine also tells the node which `config` leaves it filled, under the engine key `__colmena_secret_config_paths` (JSON pointers, `domain::node::changed_leaves`). `http_request` and `socketio_request` count those leaves as the author's credentials: when the destination comes from runtime data, they are sent only to the author's origin or an `allowed_hosts` entry (§124, §126).
 
 **Spec:** [`docs/superpowers/specs/2026-05-07-inject-secrets-in-config-design.md`](../superpowers/specs/2026-05-07-inject-secrets-in-config-design.md)
 

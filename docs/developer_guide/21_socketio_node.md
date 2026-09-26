@@ -284,7 +284,7 @@ author's `url`: `cookies` and `headers` (other than
 `accept*`/`cache-control`/`content-type`/`user-agent`), whole or as one `fixed`
 leaf next to a caller's; a `payload` or `pre_events` with `${VAR}`; any value a
 dispatcher vouched for as the author's `${VAR}`; any `config` leaf the engine
-filled with a secure value (§116, §117). When `url` comes from runtime data (an edge that
+filled with a secure value (§124, §126). When `url` comes from runtime data (an edge that
 names it, an open tool field) and points elsewhere, the node fails before
 connecting unless the host is listed in `allowed_hosts` (`"host"` or
 `"host:port"`, author-set) — the same rule as `http_request` (§119).

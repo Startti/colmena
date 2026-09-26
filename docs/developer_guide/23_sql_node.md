@@ -691,7 +691,7 @@ that names the field, a tool parameter the author offers) they are used as
 written. When listing tools, a `sql_query` tool connects ahead of time only with
 the tool configuration as its author wrote it: never for `tool_configurations`
 that arrived as data, and not after `${context.*}` templating changed its
-`fixed` values (CHANGELOG 2026-09 §118).
+`fixed` values (CHANGELOG 2026-09 §127).
 
 ---
 
