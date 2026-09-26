@@ -78,17 +78,6 @@ impl OpenApiAdapter {
             rewritten: _,
         } = normalize_forge_url(input_url);
 
-        use reqwest::header::{HeaderMap, HeaderValue, IF_MODIFIED_SINCE, IF_NONE_MATCH};
-        let mut headers = HeaderMap::new();
-        for (name, value) in [
-            (IF_NONE_MATCH, if_none_match),
-            (IF_MODIFIED_SINCE, if_modified_since),
-        ] {
-            if let Some(v) = value.and_then(|v| HeaderValue::from_str(v).ok()) {
-                headers.insert(name, v);
-            }
-        }
-
         let started = std::time::Instant::now();
         let upstream = |status, body| WebDomainError::Upstream { status, body };
         // The client stops at the first byte past the cap: `size_bytes` is a floor.
@@ -96,7 +85,9 @@ impl OpenApiAdapter {
             size_bytes: limit + 1,
             limit_bytes: limit,
         };
-        let resp = match self.fetcher.fetch_with(&resolved, headers).await {
+        let (etag, since) = (if_none_match, if_modified_since);
+        let fetched = self.fetcher.fetch_conditional(&resolved, etag, since);
+        let resp = match fetched.await {
             Ok(resp) => resp,
             Err(LlmError::SignedUrlFetchFailed { status: 304 }) => {
                 return Ok(FetchRawResult::NotModified)

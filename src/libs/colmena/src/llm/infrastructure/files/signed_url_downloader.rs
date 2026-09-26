@@ -19,7 +19,7 @@ use bytes::Bytes;
 use futures::{StreamExt, TryStreamExt};
 use hyper::client::connect::dns::Name;
 use reqwest::dns::{Addrs, Resolve, Resolving};
-use reqwest::header::{HeaderMap, IF_MODIFIED_SINCE, IF_NONE_MATCH};
+use reqwest::header::{HeaderMap, HeaderValue, IF_MODIFIED_SINCE, IF_NONE_MATCH};
 use reqwest::{redirect, Client, Url};
 
 use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::mcp::allowlist::{
@@ -224,12 +224,17 @@ impl SignedUrlDownloader {
     /// - [`LlmError::NetworkError`] on transport failure (DNS, TCP, TLS, timeout).
     /// - [`LlmError::SignedUrlFetchFailed`] on any non-2xx HTTP status.
     pub async fn fetch(&self, url: &str) -> Result<Fetched, LlmError> {
-        self.fetch_with(url, HeaderMap::new()).await
+        self.fetch_conditional(url, None, None).await
     }
 
-    /// [`Self::fetch`] as a conditional GET: of `headers`, only `If-None-Match`
-    /// and `If-Modified-Since` are sent.
-    pub async fn fetch_with(&self, url: &str, headers: HeaderMap) -> Result<Fetched, LlmError> {
+    /// [`Self::fetch`] as a conditional GET: `If-None-Match` and
+    /// `If-Modified-Since` are the only headers a caller adds.
+    pub async fn fetch_conditional(
+        &self,
+        url: &str,
+        if_none_match: Option<&str>,
+        if_modified_since: Option<&str>,
+    ) -> Result<Fetched, LlmError> {
         let parsed = Url::parse(url).map_err(|_| refused("not a valid URL"))?;
         if !matches!(parsed.scheme(), "http" | "https") {
             return Err(refused("only http and https URLs are fetched"));
@@ -238,9 +243,13 @@ impl SignedUrlDownloader {
             return Err(refused(DialRefused));
         }
         let mut request = self.client.get(parsed);
-        for name in [IF_NONE_MATCH, IF_MODIFIED_SINCE] {
-            if let Some(value) = headers.get(&name) {
-                request = request.header(name, value.clone());
+        let conditional = [
+            (IF_NONE_MATCH, if_none_match),
+            (IF_MODIFIED_SINCE, if_modified_since),
+        ];
+        for (name, value) in conditional {
+            if let Some(v) = value.and_then(|v| HeaderValue::from_str(v).ok()) {
+                request = request.header(name, v);
             }
         }
         if let Some(total) = self.timeout {
@@ -473,11 +482,8 @@ mod tests {
 
         let downloader = SignedUrlDownloader::allowing_private_hosts();
         let url = format!("{}/no-auth.pdf", server.uri());
-        let mut offered = HeaderMap::new();
-        offered.insert("authorization", "Bearer t".parse().unwrap());
-        offered.insert("cookie", "c=1".parse().unwrap());
-        offered.insert("if-none-match", "\"e\"".parse().unwrap());
-        let result = downloader.fetch_with(&url, offered).await;
+        let etag = Some("\"e\"");
+        let result = downloader.fetch_conditional(&url, etag, None).await;
         assert!(result.is_ok());
         // Validar via received requests:
         let received = server.received_requests().await.unwrap();
@@ -486,7 +492,6 @@ mod tests {
             .find(|r| r.url.path() == "/no-auth.pdf")
             .unwrap();
         assert!(req.headers.get("authorization").is_none());
-        assert!(req.headers.get("cookie").is_none());
         assert!(req.headers.contains_key("if-none-match"));
     }
 }
