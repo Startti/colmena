@@ -5574,7 +5574,7 @@ con el nombre de la variable no reemplaza la referencia del autor.
 string deja de expandir la variable: el secreto va en su propio campo `fixed`.
 **Estado.** done.
 
-## 107. Endurecimiento: el sandbox de `python_script` lo elige solo el autor
+## 113. Endurecimiento: el sandbox de `python_script` lo elige solo el autor
 
 **Qué cambia.** `sandbox_mode` y `sandbox_timeout_secs` salen de `config` o de un valor
 `fixed` de la tool; un valor que llega como dato (edge, estado global, argumento del modelo,
@@ -5595,7 +5595,7 @@ fijo `none` se respeta. `env_provenance.rs`: `authored_keys`.
 `pandas`, `numpy` y `scipy`.
 **Estado.** done.
 
-## 108. Endurecimiento: los `fixed` de un `target` de `for_each` son del autor solo si el `target` lo es
+## 114. Endurecimiento: los `fixed` de un `target` de `for_each` son del autor solo si el `target` lo es
 
 **Qué cambia.** `for_each` calcula por fila los punteros confiables y las claves del autor
 contra los `fixed` de su `target` solo cuando ese `target` viene de `config` o es el `fixed` de

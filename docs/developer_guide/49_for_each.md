@@ -385,7 +385,7 @@ tool no ofrece se descarta. Sus valores `fixed` son del autor solo cuando el
 `for_each` (`__colmena_authored_inputs`). Un `target` que llegó como dato (un
 edge que lo nombra, un parámetro declarado) aporta `fixed` que son datos: no
 expanden `${VAR}` ni cuentan como valores del autor en el nodo destino
-(CHANGELOG 2026-09 §108).
+(CHANGELOG 2026-09 §114).
 
 ## Ejemplo — uso como nodo de grafo
 

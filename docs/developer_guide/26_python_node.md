@@ -62,7 +62,7 @@ Author-set only: it comes from `config` or from a tool's `fixed` value
 state, a model's argument, a `for_each` row — is ignored. When the author sets
 no mode, the author's own code (in `config`, or a tool's `fixed` `code`) runs
 with `"none"`, and code that arrives as data (an edge that names `code`, a
-model's argument) runs `"restricted"` (CHANGELOG 2026-09 §107). The tool
+model's argument) runs `"restricted"` (CHANGELOG 2026-09 §113). The tool
 dispatcher and `for_each` tell the node which inputs are the author's `fixed`
 values through the engine key `__colmena_authored_inputs`.
 
