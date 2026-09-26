@@ -27,7 +27,7 @@
 - `should_register_attachment_row()` — Gate: whether to register text-only attachment row (requires storage_key fallback when no provider_file_id)
 - `file_registrations()` — Step 3: document_id (from the parsed file), label, description and source for each resolved file, paired in order with its own `files[]` entry among the ones the parser kept (a file resolution dropped does not shift the rest, unless its entry has the same id, filename and mime_type as a later file's: that file then takes its label, description and url/path)
 - `parsed_from()` — Whether a `files[]` entry is the one a file was parsed from (same `id`, `filename`, `mime_type`, with the parser's defaults)
-- `persist_attachment_bytes()` — Persists attachment bytes (inline or fetched from signed URL) to OutputStorageRepository, returns storage key
+- `persist_attachment_bytes()` — Persists attachment bytes (inline, or fetched from the signed URL through the given guarded fetcher) to OutputStorageRepository, returns storage key
 - `build_initial_user_message()` — Creates first user message (Plan B: no file content inline; catalog block tells model what's available)
 
 ### Structs

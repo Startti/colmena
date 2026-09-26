@@ -93,6 +93,12 @@ pub enum LlmError {
     #[error("signed URL fetch failed with status {status}")]
     SignedUrlFetchFailed { status: u16 },
 
+    #[error("attachment URL refused: {reason}")]
+    AttachmentUrlRefused { reason: String },
+
+    #[error("attachment exceeds the {limit}-byte fetch limit")]
+    AttachmentTooLarge { limit: u64 },
+
     #[error("file upload to {provider} Files API failed: {message}")]
     FileApiUploadFailed { provider: String, message: String },
 

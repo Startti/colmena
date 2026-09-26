@@ -52,6 +52,9 @@ rmcp_reqwest = { package = "reqwest", version = "0.13", default-features = false
 url = "2"
 http = "1"
 reqwest = { version = "0.11", features = ["json", "stream", "multipart", "rustls-tls"], default-features = false }
+# Only for `hyper::client::connect::dns::Name`, the type reqwest 0.11's `dns::Resolve` takes:
+# the attachment fetch client (`signed_url_downloader.rs`) guards its DNS like the MCP one.
+hyper = { version = "0.14", default-features = false, features = ["client", "tcp"] }
 
 # Error handling
 thiserror = "1.0"
