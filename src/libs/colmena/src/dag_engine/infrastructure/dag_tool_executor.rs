@@ -2119,6 +2119,10 @@ impl DagToolExecutor {
             &authored_fixed,
             &inputs,
         );
+        let authored_keys = crate::dag_engine::infrastructure::env_provenance::authored_keys(
+            &authored_fixed,
+            &inputs,
+        );
 
         // Inject the resume answer AFTER all merging but BEFORE inject_secrets so that
         // secret resolution still applies uniformly and the key cannot be overridden by
@@ -2242,6 +2246,10 @@ impl DagToolExecutor {
         inputs.insert(
             crate::dag_engine::infrastructure::env_provenance::ENV_TRUSTED_PATHS_KEY.to_string(),
             serde_json::to_value(&trusted_pointers).unwrap_or(Value::Array(Vec::new())),
+        );
+        inputs.insert(
+            crate::dag_engine::infrastructure::env_provenance::AUTHORED_INPUTS_KEY.to_string(),
+            serde_json::to_value(&authored_keys).unwrap_or(Value::Array(Vec::new())),
         );
 
         // Convert HashMap to NodeInputs (which is just HashMap<String, Value>)
@@ -7163,5 +7171,51 @@ mod author_owned_arg_tests {
         assert_eq!(merged.warnings.len(), 1, "{:?}", merged.warnings);
         assert!(merged.warnings[0].contains("'headers'"));
         assert!(!merged.warnings[0].contains("model-value"));
+    }
+
+    struct PythonRegistry;
+    impl NodeRegistryPort for PythonRegistry {
+        fn get_node(&self, node_type: &str) -> Option<Arc<dyn ExecutableNode>> {
+            (node_type == "python_script").then(|| {
+                Arc::new(crate::dag_engine::infrastructure::nodes::python_node::PythonNode) as _
+            })
+        }
+        fn get_all_nodes(&self) -> HashMap<String, Arc<dyn ExecutableNode>> {
+            HashMap::new()
+        }
+    }
+
+    /// The dispatcher tells the node which inputs are the author's `fixed`
+    /// values: fixed code keeps its `none` default and a fixed mode is honored,
+    /// while model-written code runs `restricted` unless the author said so.
+    #[tokio::test]
+    async fn fixed_python_values_are_the_authors_and_model_code_runs_restricted() {
+        pyo3::Python::initialize();
+        let run = |schema: Value, args: Value| async move {
+            let cfg = json!({ "node_type": "python_script", "node_schema": schema });
+            let configs = HashMap::from([("py".to_string(), serde_json::from_value(cfg).unwrap())]);
+            let executor = DagToolExecutor::new(Arc::new(PythonRegistry), configs);
+            let tc = ToolCall::new(
+                "c1".into(),
+                FunctionCall::new("py".into(), args.to_string()),
+            );
+            executor.execute(&tc).await.unwrap()
+        };
+        let code = "import os\noutput = 1";
+        let fixed_code = run(json!({ "code": { "fixed": code } }), json!({})).await;
+        assert!(fixed_code.success, "{}", fixed_code.output);
+        let model_schema = json!({ "code": { "type": "string", "description": "code" } });
+        let model_code = run(model_schema, json!({ "code": code })).await;
+        assert!(
+            !model_code.success,
+            "model code ran unsandboxed: {}",
+            model_code.output
+        );
+        let opted_in = json!({
+            "sandbox_mode": { "fixed": "none" },
+            "code": { "type": "string", "description": "code" }
+        });
+        let author_mode = run(opted_in, json!({ "code": code })).await;
+        assert!(author_mode.success, "{}", author_mode.output);
     }
 }

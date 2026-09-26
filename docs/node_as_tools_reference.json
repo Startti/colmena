@@ -915,7 +915,8 @@
         "All inputs except the reserved keys ('code', 'sandbox_mode', 'sandbox_timeout_secs') are injected as Python global variables.",
         "The script must assign its result to a variable named 'output'. Prefer a dict: output = {'count': 5, 'ids': [1,2,3]}. Returning null is allowed by simply not assigning 'output'.",
         "When sandbox_mode is 'restricted': imports are validated against a whitelist (math, json, re, datetime, collections, itertools, functools, string, decimal, statistics); banned builtins (open, exec, eval, compile, __import__) are blocked; execution is capped at sandbox_timeout_secs (default 10s).",
-        "When sandbox_mode is 'none' (default): full Python access, no AST check, no timeout. Only use for trusted code, never for LLM-authored code.",
+        "When sandbox_mode is 'none': full Python access, no AST check, no timeout. Only use for trusted code, never for LLM-authored code.",
+        "sandbox_mode and sandbox_timeout_secs are author-set only: a fixed value in node_schema/fixed_config. A model argument for them is ignored. When unset, fixed code runs 'none' and model-written code runs 'restricted'.",
         "On sandbox violation the node returns an error string ('SandboxViolation: ...') the LLM can read and retry with corrected code. SyntaxError is also surfaced.",
         "Markdown code-block wrappers (```python ... ```) at the start/end of the code are stripped automatically — safe to feed raw LLM output into the 'code' field.",
         "JSON objects/arrays passed via inputs become Python dicts/lists. Access with item['key'], not item.key."

@@ -502,6 +502,15 @@ impl ExecutableNode for ForEachNode {
                             .to_string(),
                         json!(trusted),
                     );
+                    let authored = crate::dag_engine::infrastructure::env_provenance::authored_keys(
+                        &parsed.fixed_values,
+                        &merged,
+                    );
+                    merged.insert(
+                        crate::dag_engine::infrastructure::env_provenance::AUTHORED_INPUTS_KEY
+                            .to_string(),
+                        json!(authored),
+                    );
                     let node = registry.get_node(&target_type).ok_or_else(|| {
                         format!("row {index}: unknown target node_type '{target_type}'")
                     })?;

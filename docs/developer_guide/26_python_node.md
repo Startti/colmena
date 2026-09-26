@@ -46,16 +46,25 @@ CPython's GIL is not async-safe, so the entire Python execution runs inside `tok
 | Field | Type | Required | Default | Description |
 |---|---|---|---|---|
 | `code` | string | One of `code` (config) or `code` input port must be present | — | The Python source to execute. Single expression or multi-line script. |
-| `sandbox_mode` | string | No | `"none"` | `"none"` runs with full Python access. `"restricted"` enables AST validation + timeout. |
+| `sandbox_mode` | string | No | `"none"` for the author's code, `"restricted"` for code that arrives as data | `"none"` runs with full Python access. `"restricted"` enables AST validation + timeout. Author-set only. |
 | `sandbox_timeout_secs` | number | No | `10` | Max execution seconds. Only enforced when `sandbox_mode` is `"restricted"`. |
 
 ### `code`
 
 Plain Python source. The script must assign its final result to a variable named `output`. Any JSON-serializable value is supported (numbers, strings, booleans, lists, dicts, nested combinations, `None`). If `output` is not defined after execution, the node returns `null`.
 
-When the `code` input port is present (e.g. an LLM emits the code into the edge), it overrides `config.code`. Markdown wrappers like ` ```python ... ``` ` are stripped automatically, so it is safe to feed raw LLM output directly into the node.
+When the `code` input port is present (an edge that names it, a model's tool argument, a tool's `fixed` value), it overrides `config.code`; an edge without a field and global state never set it (it is an author-owned input). Markdown wrappers like ` ```python ... ``` ` are stripped automatically, so it is safe to feed raw LLM output directly into the node.
 
 ### `sandbox_mode`
+
+Author-set only: it comes from `config` or from a tool's `fixed` value
+(`node_schema`/`fixed_config`). A value that arrives as data — an edge, global
+state, a model's argument, a `for_each` row — is ignored. When the author sets
+no mode, the author's own code (in `config`, or a tool's `fixed` `code`) runs
+with `"none"`, and code that arrives as data (an edge that names `code`, a
+model's argument) runs `"restricted"` (CHANGELOG 2026-09 §107). The tool
+dispatcher and `for_each` tell the node which inputs are the author's `fixed`
+values through the engine key `__colmena_authored_inputs`.
 
 | Value | Behavior |
 |---|---|
@@ -103,8 +112,8 @@ Wall-clock seconds budget for the Python script when `sandbox_mode` is `"restric
 | Port | Reserved? | Description |
 |---|---|---|
 | `code` | **Yes** | Overrides `config.code`. NOT injected as a variable. |
-| `sandbox_mode` | **Yes** | Overrides `config.sandbox_mode`. NOT injected as a variable. |
-| `sandbox_timeout_secs` | **Yes** | Overrides `config.sandbox_timeout_secs`. NOT injected as a variable. |
+| `sandbox_mode` | **Yes** | Used only as a tool's `fixed` value (author-set); otherwise ignored. NOT injected as a variable. |
+| `sandbox_timeout_secs` | **Yes** | Used only as a tool's `fixed` value (author-set); otherwise ignored. NOT injected as a variable. |
 | `<any_other_key>` | No | Injected into the script as a global Python variable with the same name. |
 
 **Reserved-key rule.** The keys `code`, `sandbox_mode`, and `sandbox_timeout_secs` are consumed as configuration. They are filtered out of the input map before injection so they never appear as Python variables. Every other key becomes a global variable accessible by name. JSON objects and arrays become Python `dict` and `list` respectively (via the `pythonize` crate).
@@ -358,7 +367,7 @@ output = item if item.get('active') else None
 
 ## Reserved Keys & Pitfalls
 
-- Sending `code`, `sandbox_mode`, or `sandbox_timeout_secs` through an edge always reconfigures the node — they are never seen as variables. If you genuinely want a variable named `code` in the script, rename the edge target (e.g. `code_template`).
+- `code`, `sandbox_mode` and `sandbox_timeout_secs` are never seen as variables. `code` sent through an edge that names it replaces `config.code` (and runs `restricted` unless the author set a mode); `sandbox_mode`/`sandbox_timeout_secs` through an edge are ignored. If you genuinely want a variable named `code` in the script, rename the edge target (e.g. `code_template`).
 - The `output` variable convention is mandatory. Returning a value via `return` or printing to stdout has no effect — the node looks for the literal name `output` in the locals dict.
 - Inputs are injected as **globals** of the script, not as function arguments. Subsequent assignments in the script can overwrite them.
 - The script runs in a fresh `dict` per execution. State does not persist between runs of the same node. For persistence, use `task_memory_writer` or the LLM memory layer.
