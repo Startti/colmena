@@ -25,6 +25,8 @@
 - `sqlite_url_for_node()` — Extracts SQLite connection URL from node config
 - `format_temporal_context_block()` — Formats temporal context (ISO 8601 timestamp, location, locale, timezone) for LLM system message
 - `should_register_attachment_row()` — Gate: whether to register text-only attachment row (requires storage_key fallback when no provider_file_id)
+- `file_registrations()` — Step 3: document_id (from the parsed file), label, description and source for each resolved file, paired in order with its own `files[]` entry (entries the parser skipped or files resolution dropped do not shift the rest)
+- `parsed_from()` — Whether a `files[]` entry is the one a file was parsed from (same `id`, `filename`, `mime_type`, with the parser's defaults)
 - `persist_attachment_bytes()` — Persists attachment bytes (inline or fetched from signed URL) to OutputStorageRepository, returns storage key
 - `build_initial_user_message()` — Creates first user message (Plan B: no file content inline; catalog block tells model what's available)
 
@@ -57,7 +59,7 @@
   - Resolves provider/model/api_key/system_message from inputs > config
   - Loads conversation history from persistence (if connection_url configured)
   - Resolves file entries (base64, signed URLs) with provider upload and caching
-  - Auto-registers uploads in AttachmentRegistry with cross-provider lazy upload fallback
+  - Auto-registers uploads in AttachmentRegistry with cross-provider lazy upload fallback; each file with its own `files[]` entry, and without a storage_key (event field `stored=false`) when its bytes could not be persisted
   - Assembles temporal context block (timestamp, location, timezone, locale)
   - Generates attachment summaries (tabular CSV/XLSX → structured, PDF/text → LLM/extraction)
   - Builds skill repository and system message with attachment catalog prelude
@@ -82,7 +84,7 @@
 - `stream_default_tests` (3 tests) — Verifies streaming defaults to true, explicit false disables, inputs override config
 - `build_initial_user_message_tests` (2 tests) — Verifies Plan B: initial user message never carries file content inline
 - `persist_attachment_bytes_tests` (5 async tests) — Tests byte persistence from inline/signed-URL sources, storage errors, precedence rules
-- `files_parser_tests` (7 tests) — Tests file JSON parsing: base64 data, size limits, signed URLs, data/URL precedence, legacy compat
+- `files_parser_tests` (10 tests) — Tests file JSON parsing: base64 data, size limits, signed URLs, data/URL precedence, legacy compat; and registration pairing when an entry is skipped or a file dropped
 - `find_pending_tool_call_tests` (5 tests) — Tests tool call resume detection: unmatched calls, resolved calls, multiple messages, empty history, multiple calls per message
 - `resolver_tests` (8 async tests) — Tests AttachmentResolverImpl: re-upload on expiry, unknown documents, missing storage on Generated rows, text-from-storage fallback, Step-3 text persistence, `$attachment:<id>` still streaming the bytes after a lazy provider upload
 

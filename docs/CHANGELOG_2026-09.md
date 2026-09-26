@@ -5819,3 +5819,35 @@ Anthropic contra un Files API simulado, y después `$attachment:img-1` da los mi
 Sin corrida E2E con un modelo real: este worktree no tiene credenciales de proveedores.
 
 **ADP.** Sin cambios de API ni de esquema. **Estado.** done.
+
+## 113. Fix: cada archivo de `files[]` se registra con su propio id
+
+**Qué cambia.** El registro de los archivos de un `llm_call` leía `id`, `label`,
+`description` y `url`/`path` de la entrada de `files[]` en la misma posición que el archivo.
+El parser salta una entrada que no puede leer (base64 inválido, `path` ilegible, sin
+`data`/`url`/`path`, algo que no es un objeto) y la resolución descarta un archivo que no pudo
+entregar, así que desde la primera entrada que faltaba cada archivo se registraba con el id y
+la metadata de otro: con `files: [bad, good]`, los bytes de `good` quedaban como `doc-bad`.
+Ahora el id sale del archivo parseado (`FileData.document_id`) y la metadata, de su propia
+entrada: `file_registrations` empareja cada archivo, en orden, con la siguiente entrada que
+tiene el `id`, el `filename` y el `mime_type` con que se parseó.
+
+Un archivo cuyos bytes no se pudieron guardar se sigue registrando si está en la Files API del
+provider (`load_attachment` lo lee por su `provider_file_id`), sin `storage_key`: no figura
+como guardado, `$attachment:<id>` responde `StorageKeyMissing` (con §112, solo si ninguna fila
+del id tiene clave) y el upsert conserva la clave que haya guardado un turno anterior. Un
+archivo de texto sin bytes guardados sigue sin registrarse. `attachment.registered` lleva
+ahora `stored`.
+
+**Tests.** En `llm.rs::files_parser_tests`: `[bad, good]` → `good` conserva `doc-good`, su
+label y su description (antes: `doc-bad`); un archivo que la resolución descarta no corre la
+label de los siguientes (antes: `[A, B]` en vez de `[A, C]`); una entrada que no es un objeto
+no se toma por la de un archivo sin id (antes: sin label). E2E con el motor
+(`tests/graphs/agents/files_skipped_entry_keeps_ids.json`, Postgres local,
+`LocalHttpStorageAdapter`): antes del fix la única fila era `doc-bad | Bad` con los bytes de
+`good.txt`; después, `doc-good | Good`. La llamada al modelo no se hizo (sin credenciales de
+proveedores; `COLMENA_PREFLIGHT_HEALTH=off` y un `OPENAI_BASE_URL` cerrado): el registro
+ocurre antes de esa llamada. El grafo nuevo pasa `dag_engine lint` sin hallazgos y sube el
+corpus de `tests/corpus_noise.rs` de 333 a 334 archivos (`EXPECTED_FILES`).
+
+**ADP.** Sin cambios de API. **Estado.** done.

@@ -1836,7 +1836,6 @@ impl ExecutableNode for LlmNode {
         if let (Some(reg), Some(sid)) =
             (attachment_registry.as_ref(), agent_session_id_str.as_ref())
         {
-            use crate::llm::domain::attachments::generate_attachment_id;
             use crate::llm::domain::attachments::{AttachmentSource, UpsertAttachmentInput};
             use crate::llm::domain::{is_text_like, FileSource};
 
@@ -1847,45 +1846,14 @@ impl ExecutableNode for LlmNode {
                 .cloned()
                 .unwrap_or_default();
 
-            for (idx, file) in resolved_files.iter().enumerate() {
-                let raw = raw_entries.get(idx);
-                let label = raw
-                    .and_then(|v| v.get("label"))
-                    .and_then(|v| v.as_str())
-                    .map(String::from);
-                let description = raw
-                    .and_then(|v| v.get("description"))
-                    .and_then(|v| v.as_str())
-                    .map(String::from);
-                let supplied_id = raw
-                    .and_then(|v| v.get("id"))
-                    .and_then(|v| v.as_str())
-                    .map(String::from);
-
-                let source = match &file.source {
-                    FileSource::SignedUrl(u) => AttachmentSource::SignedUrl(u.clone()),
-                    FileSource::Uploaded(_) => raw
-                        .and_then(|v| v.get("url"))
-                        .and_then(|v| v.as_str())
-                        .map(|u| AttachmentSource::SignedUrl(u.to_string()))
-                        .or_else(|| {
-                            raw.and_then(|v| v.get("path"))
-                                .and_then(|v| v.as_str())
-                                .map(|p| AttachmentSource::Path(p.to_string()))
-                        })
-                        .unwrap_or(AttachmentSource::Inline),
-                    FileSource::InlineBytes { .. } => AttachmentSource::Inline,
-                };
-
-                let document_id = supplied_id.unwrap_or_else(|| {
-                    generate_attachment_id(
-                        &file.filename,
-                        &file.mime_type,
-                        file.size_hint,
-                        &source,
-                        None,
-                    )
-                });
+            let registrations = file_registrations(&resolved_files, &raw_entries);
+            for (file, registration) in resolved_files.iter().zip(registrations) {
+                let FileRegistration {
+                    document_id,
+                    label,
+                    description,
+                    source,
+                } = registration;
 
                 let provider_file_id = match &file.source {
                     FileSource::Uploaded(r) => r.provider_file_id.clone(),
@@ -1949,6 +1917,10 @@ impl ExecutableNode for LlmNode {
                 // can't strand the attachment forever. Binary/non-empty
                 // provider_file_id rows are unaffected: they keep their real
                 // file id as a fallback and still register even if storage failed.
+                // Such a row is registered as not stored: `storage_key` stays
+                // NULL (the upsert keeps a key an earlier turn stored), the
+                // lookup behind `$attachment:<id>` prefers any row that has a
+                // key, and with none it answers StorageKeyMissing.
                 if !should_register_attachment_row(&provider_file_id, &storage_key) {
                     tracing::warn!(
                         target: "colmena::attachment",
@@ -1964,6 +1936,7 @@ impl ExecutableNode for LlmNode {
                 }
 
                 let origin = crate::llm::domain::attachments::origin::USER_UPLOAD.to_string();
+                let stored = storage_key.is_some();
                 let input = UpsertAttachmentInput {
                     agent_session_id: sid.clone(),
                     document_id: document_id.clone(),
@@ -1986,6 +1959,7 @@ impl ExecutableNode for LlmNode {
                     event = "attachment.registered",
                     agent_session_id = %sid,
                     document_id = %document_id,
+                    stored,
                     "registered attachment"
                 );
 
@@ -4249,6 +4223,9 @@ fn format_temporal_context_block(
 }
 
 const FILE_DATA_LIMIT_BYTES: u64 = 30 * 1024 * 1024;
+/// `mime_type` and `filename` of a `files[]` entry that omits them.
+const DEFAULT_MIME_TYPE: &str = "application/octet-stream";
+const DEFAULT_FILENAME: &str = "upload.file";
 
 /// Parses a JSON array of FileEntry objects into `Vec<FileData>`.
 ///
@@ -4283,12 +4260,12 @@ pub(crate) fn parse_file_entries(
         let mime_type = obj
             .get("mime_type")
             .and_then(|v| v.as_str())
-            .unwrap_or("application/octet-stream")
+            .unwrap_or(DEFAULT_MIME_TYPE)
             .to_string();
         let filename = obj
             .get("filename")
             .and_then(|v| v.as_str())
-            .unwrap_or("upload.file")
+            .unwrap_or(DEFAULT_FILENAME)
             .to_string();
         let document_id = obj
             .get("id")
@@ -4412,6 +4389,78 @@ pub(crate) fn parse_file_entries(
 /// as a fallback, so they are always registered even when storage failed.
 fn should_register_attachment_row(provider_file_id: &str, storage_key: &Option<String>) -> bool {
     !(provider_file_id.is_empty() && storage_key.is_none())
+}
+
+/// What Step 3 registers for one resolved file.
+#[derive(Debug)]
+struct FileRegistration {
+    document_id: String,
+    label: Option<String>,
+    description: Option<String>,
+    source: crate::llm::domain::attachments::AttachmentSource,
+}
+
+/// Derive the registration of every resolved file from the file and from the
+/// `files[]` entry it came from. The id is the one the file was parsed with.
+///
+/// `files` is not a positional copy of `entries`: parsing skips an entry it
+/// cannot read and resolution drops a file it cannot deliver, so once an
+/// earlier entry is gone the n-th file is not the n-th entry. What survives
+/// both is order, so each file takes the next entry, in order, that has the
+/// `id`, `filename` and `mime_type` it was parsed with.
+fn file_registrations(
+    files: &[crate::llm::domain::FileData],
+    entries: &[serde_json::Value],
+) -> Vec<FileRegistration> {
+    use crate::llm::domain::attachments::{generate_attachment_id, AttachmentSource};
+    use crate::llm::domain::FileSource;
+
+    let mut next = 0;
+    files
+        .iter()
+        .map(|file| {
+            let raw = entries[next..]
+                .iter()
+                .position(|entry| parsed_from(entry, file))
+                .map(|offset| {
+                    next += offset + 1;
+                    &entries[next - 1]
+                });
+            let text = |key: &str| raw.and_then(|v| v.get(key)).and_then(|v| v.as_str());
+            let source = match &file.source {
+                FileSource::SignedUrl(u) => AttachmentSource::SignedUrl(u.clone()),
+                FileSource::Uploaded(_) => text("url")
+                    .map(|u| AttachmentSource::SignedUrl(u.to_string()))
+                    .or_else(|| text("path").map(|p| AttachmentSource::Path(p.to_string())))
+                    .unwrap_or(AttachmentSource::Inline),
+                FileSource::InlineBytes { .. } => AttachmentSource::Inline,
+            };
+            let document_id = file.document_id.clone().unwrap_or_else(|| {
+                generate_attachment_id(
+                    &file.filename,
+                    &file.mime_type,
+                    file.size_hint,
+                    &source,
+                    None,
+                )
+            });
+            FileRegistration {
+                document_id,
+                label: text("label").map(String::from),
+                description: text("description").map(String::from),
+                source,
+            }
+        })
+        .collect()
+}
+
+/// Whether `file` is what `parse_file_entries` makes of `entry`.
+fn parsed_from(entry: &serde_json::Value, file: &crate::llm::domain::FileData) -> bool {
+    let text = |key: &str| entry.get(key).and_then(|v| v.as_str());
+    entry.is_object()
+        && text("id") == file.document_id.as_deref()
+        && text("filename").unwrap_or(DEFAULT_FILENAME) == file.filename
+        && text("mime_type").unwrap_or(DEFAULT_MIME_TYPE) == file.mime_type
 }
 
 /// Returns `None` on any failure (logged at warn level); persistence is
@@ -5047,6 +5096,64 @@ mod files_parser_tests {
         ]);
         let parsed = parse(files).unwrap();
         assert_eq!(parsed.len(), 1);
+    }
+
+    #[test]
+    fn a_skipped_entry_does_not_move_the_next_files_id() {
+        // `files: [bad, good]`: the first entry cannot be decoded and is
+        // skipped. The good file keeps its own id and its own metadata.
+        let entries = json!([
+            {"id": "doc-bad", "filename": "bad.txt", "mime_type": "text/plain",
+             "label": "Bad", "data": "%%% not base64"},
+            {"id": "doc-good", "filename": "good.txt", "mime_type": "text/plain",
+             "label": "Good", "description": "the good one", "data": "aGVsbG8="}
+        ]);
+        let entries = entries.as_array().unwrap();
+        let files = parse_file_entries(entries).unwrap();
+        assert_eq!(files.len(), 1);
+
+        let got = file_registrations(&files, entries);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].document_id, "doc-good");
+        assert_eq!(got[0].label.as_deref(), Some("Good"));
+        assert_eq!(got[0].description.as_deref(), Some("the good one"));
+    }
+
+    #[test]
+    fn a_file_dropped_after_parsing_does_not_move_the_next_files_metadata() {
+        // Resolution can drop a file too (an upload that failed). No entry
+        // has an id; each file still takes its own entry's label.
+        let entries = json!([
+            {"filename": "a.pdf", "mime_type": "application/pdf", "label": "A", "data": "aGVsbG8="},
+            {"filename": "b.pdf", "mime_type": "application/pdf", "label": "B", "data": "aGVsbG8="},
+            {"filename": "c.pdf", "mime_type": "application/pdf", "label": "C", "data": "aGVsbG8="}
+        ]);
+        let entries = entries.as_array().unwrap();
+        let labels = |files: &[crate::llm::domain::FileData]| -> Vec<Option<String>> {
+            file_registrations(files, entries)
+                .into_iter()
+                .map(|r| r.label)
+                .collect()
+        };
+        let mut files = parse_file_entries(entries).unwrap();
+        let all = [Some("A".into()), Some("B".into()), Some("C".into())];
+        assert_eq!(labels(&files), all);
+
+        files.remove(1);
+        assert_eq!(labels(&files), [Some("A".into()), Some("C".into())]);
+    }
+
+    #[test]
+    fn an_entry_that_is_not_an_object_is_no_files_entry() {
+        // A string in `files[]` is skipped by the parser. It has no id,
+        // filename or mime type, like the default-named file after it, and
+        // must still not be taken for that file's entry.
+        let entries = json!(["not a file", {"label": "L", "data": "aGVsbG8="}]);
+        let entries = entries.as_array().unwrap();
+        let files = parse_file_entries(entries).unwrap();
+
+        let got = file_registrations(&files, entries);
+        assert_eq!(got[0].label.as_deref(), Some("L"));
     }
 }
 

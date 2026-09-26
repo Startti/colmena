@@ -25,10 +25,11 @@ pub enum AttachmentResolveError {
     #[error("attachment not found: document_id={document_id}; use a document_id from the attachments catalog")]
     NotFound { document_id: String },
 
-    /// Row exists but `storage_key` is `NULL` — happens for legacy rows
+    /// Rows exist but none has a `storage_key` — happens for legacy rows
     /// registered before Plan A (when only the provider id was stored, with
-    /// no local copy). These rows cannot be re-streamed; the LLM should
-    /// re-attach the document.
+    /// no local copy) and for an upload whose bytes failed to persist (it
+    /// stays readable through its provider file id). These rows cannot be
+    /// re-streamed; the LLM should re-attach the document.
     #[error("attachment registered but storage_key is null (likely pre-migration row): document_id={document_id}")]
     StorageKeyMissing { document_id: String },
 

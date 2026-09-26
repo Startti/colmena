@@ -45,6 +45,13 @@ bytes persisted in `OutputStorageRepository`. This is true regardless of source:
   viven en storage; el artefacto se registra automáticamente en `conversation_attachments`
   con `origin = generated_by:<tool>` y `source = Path(storage_key)`.
 
+Si guardar los bytes falla (o no hay `OutputStorageRepository`), un archivo que ya está en la
+Files API del provider se registra igual, sin `storage_key`: `load_attachment` lo lee por su
+`provider_file_id` y `$attachment:<document_id>` responde `StorageKeyMissing`; nunca se
+registra una clave inventada, y el upsert conserva la que haya guardado un turno anterior. Un
+archivo de texto, que solo se lee desde storage, no se registra. El evento
+`attachment.registered` lleva `stored` (CHANGELOG 2026-09 §113).
+
 Esto habilita el placeholder `$attachment:<document_id>` para nodos downstream
 (inicialmente `http_request` multipart) sin importar de dónde vino el documento.
 
@@ -366,6 +373,12 @@ momentos:
 }
 ```
 
+Cada archivo se registra con el `id` con que se parseó y con la metadata (`label`,
+`description`, `url`/`path`) de su propia entrada. Una entrada que el parser salta (base64
+inválido, `path` ilegible, sin `data`/`url`/`path`, algo que no es un objeto) o un archivo que
+la resolución descarta no corre el id ni la metadata de los que vienen después
+(CHANGELOG 2026-09 §113).
+
 ## Subgrafos
 
 `agent_session_id` se propaga automáticamente al subgrafo. Eso significa que un `llm_call` dentro de un subgrafo ve el mismo catálogo que el padre, sin código adicional. Si querés aislamiento estricto, usá `attachments_enabled: false` en el `llm_call` del subgrafo.
@@ -404,8 +417,9 @@ PRIMARY KEY (agent_session_id, document_id, provider)
 - `tests/graphs/agents/load_attachment_subgraph.json` — parent registra + child subgrafo lee
 - `tests/graphs/agents/load_attachment_opt_out.json` — verifica que `attachments_enabled: false` oculta la tool
 - `tests/graphs/agents/load_attachment_auto_summary.json` — auto-summary con Gemini Flash + Postgres (no se pasa `description` para forzar la generación)
+- `tests/graphs/agents/files_skipped_entry_keeps_ids.json` — `files: [bad, good]`: la entrada ilegible se salta y `good` queda registrado como `doc-good` (este usa `openai` / `gpt-4.1-mini`)
 
-Todos usan `google` / `gemini-2.5-flash` con `${DATABASE_URL}` para memoria Postgres. Los URLs `$REPLACE_WITH_SIGNED_URL` son placeholders — sustituí por una signed URL real (GCS) antes de correr.
+Salvo el último, usan `google` / `gemini-2.5-flash` con `${DATABASE_URL}` para memoria Postgres. Los URLs `$REPLACE_WITH_SIGNED_URL` son placeholders — sustituí por una signed URL real (GCS) antes de correr.
 
 ---
 
