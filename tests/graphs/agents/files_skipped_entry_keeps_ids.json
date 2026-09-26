@@ -1,0 +1,38 @@
+{
+  "$comment": "files: [bad, good]. The first entry is not valid base64, so the parser skips it. Run with a stable --agent-session-id and query conversation_attachments for that session: the second file is registered as doc-good with label Good, and doc-bad is absent. The model is asked to load it and quote it back.",
+  "nodes": {
+    "reader": {
+      "type": "llm_call",
+      "config": {
+        "provider": "openai",
+        "model": "gpt-4.1-mini",
+        "api_key": "${OPENAI_API_KEY}",
+        "connection_url": "${DATABASE_URL}",
+        "attachments_enabled": true,
+        "summary_enabled": false,
+        "system_message": "Answer using the documents available in this conversation.",
+        "prompt": "Load the document labelled Good and quote its text exactly.",
+        "files": [
+          {
+            "id": "doc-bad",
+            "label": "Bad",
+            "filename": "bad.txt",
+            "mime_type": "text/plain",
+            "data": "%%% not base64 %%%"
+          },
+          {
+            "id": "doc-good",
+            "label": "Good",
+            "filename": "good.txt",
+            "mime_type": "text/plain",
+            "data": "aGVsbG8gZnJvbSB0aGUgZ29vZCBmaWxl"
+          }
+        ]
+      }
+    },
+    "out": { "type": "log" }
+  },
+  "edges": [
+    { "from": "reader", "to": "out" }
+  ]
+}

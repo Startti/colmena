@@ -7,7 +7,7 @@
 
 - `AttachmentResolveError` (enum, public) — discriminated error type distinguishing catalog-level failures (4xx) from infrastructure-level failures (5xx) for call-site routing
 - `AttachmentResolveError::NotFound` (variant, public) — indicates document_id not in `conversation_attachments` (hallucinated LLM id or post-GC row)
-- `AttachmentResolveError::StorageKeyMissing` (variant, public) — indicates row exists but `storage_key` is NULL (legacy pre-Plan A row with no local copy)
+- `AttachmentResolveError::StorageKeyMissing` (variant, public) — indicates the row the lookup picks has no `storage_key` (legacy pre-Plan A row with no local copy, or the newest upload of an id whose bytes failed to persist)
 - `AttachmentResolveError::Expired` (variant, public) — indicates catalog has revoked access (TTL elapsed or explicit revocation); backing blob may exist but will not be streamed
 - `AttachmentResolveError::StorageError` (variant, public) — propagated `StorageError` from the underlying adapter (network, permission, or missing blob)
 - `AttachmentResolveError::RegistryError` (variant, public) — propagated `AttachmentError` from registry query (connection, query error)
