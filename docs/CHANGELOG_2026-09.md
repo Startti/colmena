@@ -5299,6 +5299,41 @@ dos tests de logs se vieron rojos antes del cambio.
 
 **ADP.** Sin código.
 
+## 104. E2E: una pregunta en un grupo espera al grupo y se reanuda bajo su `childScope` (parallel tools, 3d)
+
+**Qué cambió.** Solo tests.
+- `src/libs/colmena/tests/caller_model/mod.rs`: un modelo guionado nuevo. Un guion
+  recibe cada request (system y mensajes) y devuelve la respuesta (texto, o llamadas, un
+  chunk por llamada con su índice) y cuánto esperar antes de darla. Es un módulo aparte
+  de `parallel_turn_model`, así los otros dos E2E no cargan código muerto. Todavía no
+  guarda las requests: eso llega con sus usos, en la entrada 105.
+- `src/libs/colmena/tests/parallel_tool_suspend.rs`, sobre el grafo de la entrada 103,
+  `#[ignore]` y `#[serial]`, contra un `ColmenaEngine` real y Postgres. El padre llama
+  a `Run` (`parallel`, `dynamic` con el hilo fijo en `${agentId}`, como Run My Agent)
+  una vez por agente en un mensaje. Cada hijo es un agente con memoria que puede
+  preguntar con `Preguntar` (un `suspend`). El guion contesta según quién llama (PADRE
+  o HIJO, por el system prompt).
+- **Escenario A, una pregunta y un hermano que termina.** El modelo pide primero a
+  `beta` (termina a los 600 ms) y después a `alfa` (pregunta enseguida), así que la
+  pregunta que queda es `Run#1`, no el k = 0 por defecto. Turno 1: la pregunta de `alfa`
+  sale antes que el `tool-output-available` de `beta` (`childScope` `Run#0`, «beta:
+  hecho»), y ese antes que el `finish` suspendido en la pregunta de `alfa`: el turno
+  esperó al grupo. `call_alfa` no tiene `tool-output-available`, y en `dag_runs` quedan
+  `alfa` `SUSPENDED` y `beta` `COMPLETED`. Turno 2, con la respuesta: el padre termina
+  con «Listo.», cada frame del hijo reanudado viene bajo `agent>Run#1>`, y los dos hijos
+  quedan `COMPLETED`.
+
+**Tests.** La lib no cambia (2929). `SECURE_VALUES_KEY=… DATABASE_URL=postgres:///colmena_e2e_par
+cargo test -p colmena_dag_engine --test parallel_tool_suspend -- --ignored`: 1 passed.
+
+**Mutación.** El resume siempre con k = 0 (`pending_call_to_resume`, en `llm.rs`): rojo
+A, con el hijo reanudado bajo `agent>Run#0>hijo`. Con la pregunta en `Run#0`, A pasaba
+igual; por eso el orden de sus llamadas. Revertida editando.
+
+**E2E.** Este. B, C y los chequeos de lo que recibe cada modelo, en la entrada 105.
+
+**ADP.** Sin código.
+
 ## 105. Endurecimiento: `${VAR}` se expande solo en la configuración del autor
 
 **Qué cambia.** Un valor que llega por `inputs` (un edge, el estado global, una fila de
