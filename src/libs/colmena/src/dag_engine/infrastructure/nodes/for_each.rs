@@ -477,6 +477,19 @@ impl ExecutableNode for ForEachNode {
                             return Err(format!("row {index}: missing required param '{req}'"));
                         }
                     }
+                    // A row is data (a model's `items`, an upstream payload); only
+                    // the target's `fixed` values are the author's. Same rule as a
+                    // tool dispatch, so a row never resolves `${VAR}`.
+                    let trusted =
+                        crate::dag_engine::infrastructure::env_provenance::trusted_pointers(
+                            &parsed.fixed_values,
+                            &merged,
+                        );
+                    merged.insert(
+                        crate::dag_engine::infrastructure::env_provenance::ENV_TRUSTED_PATHS_KEY
+                            .to_string(),
+                        json!(trusted),
+                    );
                     let node = registry.get_node(&target_type).ok_or_else(|| {
                         format!("row {index}: unknown target node_type '{target_type}'")
                     })?;
@@ -1441,5 +1454,78 @@ mod tests {
             "unexpected error message: {msg}"
         );
         assert!(msg.contains("string"), "expected type name in error: {msg}");
+    }
+}
+
+/// `for_each` → `http_request`: a row is data (from a model's `items` or an
+/// upstream payload) and never resolves `${VAR}`; the target's `fixed` values
+/// are the author's and still do. Test-only env vars, local mock server.
+#[cfg(test)]
+mod http_target_env_tests {
+    use super::*;
+    use crate::dag_engine::domain::node::ExecutableNode;
+    use crate::dag_engine::infrastructure::nodes::http::HttpNode;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    struct Registry(Arc<dyn ExecutableNode>);
+    impl NodeRegistryPort for Registry {
+        fn get_node(&self, node_type: &str) -> Option<Arc<dyn ExecutableNode>> {
+            (node_type == "http_request").then(|| self.0.clone())
+        }
+        fn get_all_nodes(&self) -> HashMap<String, Arc<dyn ExecutableNode>> {
+            HashMap::from([("http_request".to_string(), self.0.clone())])
+        }
+    }
+
+    #[tokio::test]
+    async fn a_row_value_is_sent_literally_while_a_fixed_value_still_resolves() {
+        std::env::set_var("COLMENA_P4_TEST_ROW", "row-value-test-only");
+        std::env::set_var("COLMENA_P4_TEST_FIXED", "fixed-token-test-only");
+        let s = MockServer::start().await;
+        Mock::given(wiremock::matchers::any())
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
+            .mount(&s)
+            .await;
+
+        let node = ForEachNode::new();
+        node.registry
+            .set(Arc::new(Registry(Arc::new(HttpNode::new()))) as Arc<dyn NodeRegistryPort>)
+            .ok();
+        let config = json!({
+            "target": {
+                "node_type": "http_request",
+                "node_schema": {
+                    "base_url":     { "fixed": s.uri() },
+                    "method":       { "fixed": "GET" },
+                    "bearer_token": { "fixed": "${COLMENA_P4_TEST_FIXED}" },
+                    "q":            { "type": "string", "required": true }
+                }
+            },
+            "items": [ { "q": "${COLMENA_P4_TEST_ROW}" } ]
+        });
+        let out = node
+            .execute(&HashMap::new(), &config, &mut json!({}), None)
+            .await
+            .unwrap();
+        assert_eq!(out["output"]["ok"], 1, "{out}");
+
+        let got = s.received_requests().await.unwrap();
+        let q = got[0]
+            .url
+            .query_pairs()
+            .find(|(k, _)| k == "q")
+            .map(|(_, v)| v.to_string());
+        assert_eq!(q.as_deref(), Some("${COLMENA_P4_TEST_ROW}"));
+        assert_eq!(
+            got[0]
+                .headers
+                .get("authorization")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "Bearer fixed-token-test-only"
+        );
+        std::env::remove_var("COLMENA_P4_TEST_ROW");
+        std::env::remove_var("COLMENA_P4_TEST_FIXED");
     }
 }

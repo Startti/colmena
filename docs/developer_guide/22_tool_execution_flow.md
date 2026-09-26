@@ -484,18 +484,17 @@ step runs — correctly NOT trusted.
 The pointer list is written last among the engine keys (§ Step 4b), under
 `__colmena_env_trusted_paths` (`env_provenance::ENV_TRUSTED_PATHS_KEY`) —
 after `strip_engine_keys` already removed any caller-supplied copy, so a
-forged value cannot survive. `EnvPolicy::from_inputs` is how a node will
-later read this key: no key → `Legacy` (expand everything, e.g. graph mode);
-key present but malformed → `Restricted(∅)`, i.e. **fail closed**.
+forged value cannot survive. `EnvPolicy::from_inputs` is how a node reads
+this key: no key (graph mode) or a malformed one → `Restricted(∅)`, i.e.
+**fail closed** — an `inputs` value never expands; `config` still does.
 
 After `inject_secrets` (below) replaces any `<value_N>` placeholder with its
 decrypted value, `prune_after_secrets` drops any trusted pointer whose value
 just changed — a decrypted secret containing literal `${...}` text must
 never be re-interpreted as an env placeholder.
 
-**No node reads `__colmena_env_trusted_paths` yet.** This change only
-computes and carries the pointer set; gating `${VAR}` expansion per node
-behind `EnvPolicy::may_expand` is a follow-up (see
+`http_request` reads `__colmena_env_trusted_paths` on both body paths, and
+`for_each` sends it for each row (see
 `docs/developer_guide/13_security_strategy.md`).
 
 Order of operations in `execute_inner`: `strip_engine_keys(args)` → merge

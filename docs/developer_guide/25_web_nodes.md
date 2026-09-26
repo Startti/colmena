@@ -417,17 +417,14 @@ Implementación: `src/libs/colmena/src/dag_engine/infrastructure/nodes/api_explo
 
 ## Resolución de `${VAR}` y provenance (`http_request`)
 
-Desde 2026-09, **solo para requests JSON/no-multipart**, `${VAR}` en
-`base_url`/`endpoint`/`headers`/`query_params`/`bearer_token`/
-`authorization`/`body` está gateado por provenance cuando el nodo corre
-como LLM tool: un valor **`config`** siempre resuelve; un valor **`inputs`**
-(argumento de tool) solo resuelve si el dispatcher marcó su JSON Pointer
-como confiable (ver `env_provenance.rs`) — sin este gate, un modelo podía
-leer cualquier variable de entorno nombrándola en un argumento ordinario.
-Un valor model-authored sale literal, sin error aunque falte la var.
-
-**Multipart todavía NO está gateado** — sigue expandiendo `${VAR}`
-model-authored sin restricción; cubierto en el próximo PR.
+`${VAR}` en `base_url`/`endpoint`/`headers`/`query_params`/`bearer_token`/
+`authorization`/`body` está gateado por provenance, en el path JSON y en el
+multipart: un valor **`config`** siempre resuelve; un valor **`inputs`** solo
+resuelve si un dispatcher marcó su JSON Pointer como confiable (ver
+`env_provenance.rs`). Lo marcan el despacho de tools (los `fixed` del autor) y
+`for_each` (los `fixed` de su `target`). Sin marca —modo grafo: lo que llega
+por un edge o del estado global— **nada** de `inputs` resuelve (CHANGELOG
+2026-09 §101). Un valor sin marca sale literal, sin error aunque falte la var.
 
 E2E: [`tests/graphs/security/tool_env_provenance_e2e.json`](../../tests/graphs/security/tool_env_provenance_e2e.json).
 
