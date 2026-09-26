@@ -5933,10 +5933,6 @@ puntero avalado.
 **ADP.** Sin cambios de API. Un `connection_url` que un edge trae con `${VAR}` se usa sin
 expandir: la URL con variables va en `config` o en un `fixed`. Una tool `sql_query` cuyo
 `connection_url` `fixed` usa `${context.*}` no recibe el esquema de la base en su descripción.
-
-**ADP.** Sin cambios de API. Un `connection_url` que un edge trae con `${VAR}` deja de
-expandirse: la URL va en `config` o en un `fixed`. Una tool `sql_query` cuyo `connection_url`
-`fixed` usa `${context.*}` ya no recibe el esquema de la base en su descripción.
 **Estado.** done.
 
 ## 128. Endurecimiento: la región y el proyecto de Vertex en `image_generation` son del autor
