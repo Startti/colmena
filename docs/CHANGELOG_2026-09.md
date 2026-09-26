@@ -6343,15 +6343,18 @@ da un error de tool con el tamaño); `check_inline_image_rejects_a_mime_type_the
 dato) y no es el origen del `base_url` del autor, la conexión marca solo direcciones públicas: la
 regla del cliente guardado de §121 (`DialGuard`), revisada en la resolución DNS del socket y, para
 una IP literal, en la URL y en cada salto de redirect. Sin proxy. Un host en `allowed_hosts`
-(`"host"` o `"host:port"`, del autor) se marca en cualquier dirección; los otros saltos de un
-redirect siguen la regla. El destino del autor (`config` o un `fixed` de la tool) no cambia. Vale en
+(`"host"` o `"host:port"`, del autor) se marca en cualquier dirección; una entrada `"host:port"` vale
+solo en ese puerto: un salto a ese host en otro puerto se niega. Los otros saltos de un redirect
+siguen la regla. El destino del autor (`config` o un `fixed` de la tool) no cambia. Vale en
 JSON y en multipart. Un destino rechazado falla sin marcarse, con un error que no lleva la URL
-(`http_request: a destination that comes from data connects only to a public address …`).
-`COLMENA_ATTACHMENT_ALLOW_PRIVATE_HOSTS=1|true` apaga también este chequeo: solo desarrollo local.
+(`http_request: a destination that comes from data connects only to a public address …`). Cada
+rechazo (también el de una IP literal) deja en el log `egress.dial_refused` (target `colmena::egress`,
+con el host). `COLMENA_ATTACHMENT_ALLOW_PRIVATE_HOSTS=1|true` apaga también este chequeo: solo local.
 
 **Tests.** `http.rs` `data_destination_tests`: un destino de datos en loopback (por IP y por nombre;
-JSON y multipart), link-local, privado o `[::1]` no recibe conexión; un redirect desde un destino
-aceptado a una IP privada no se sigue; el destino del autor (`config` o `fixed`) y un host en
+JSON y multipart), link-local, privado o `[::1]` no recibe conexión, ni el host del autor en otro
+puerto o esquema; no se sigue un redirect desde un destino aceptado a una IP privada, ni desde un host
+listado como `host:port` a otro puerto suyo; el destino del autor (`config` o `fixed`) y un host en
 `allowed_hosts` (IP:puerto y nombre) conectan. Los tests de credenciales con destino de datos corren
 con un nodo que acepta toda dirección: solo los rechaza la regla de credenciales. E2E:
 `tests/graphs/security/data_destination_public_only_e2e.json` (un host público y uno listado

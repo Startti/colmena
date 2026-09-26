@@ -455,8 +455,9 @@ devuelve el 3xx tal cual; sin ellas, se sigue como antes (CHANGELOG 2026-09 §11
 Si el destino viene de datos y no es el origen del `base_url` del autor, el nodo marca solo
 direcciones públicas (unicast global): un dominio se revisa en la resolución DNS del socket y una IP
 literal en la URL y en cada salto de redirect; sin proxy. Un host en `allowed_hosts` se marca en
-cualquier dirección; los demás saltos de un redirect siguen la regla. El destino del autor no se
-revisa. Vale en JSON y en multipart; `COLMENA_ATTACHMENT_ALLOW_PRIVATE_HOSTS=1` lo apaga en
+cualquier dirección (una entrada `host:port`, solo en ese puerto); los demás saltos de un redirect
+siguen la regla. El destino del autor no se revisa. Vale en JSON y en multipart. Cada rechazo deja
+`egress.dial_refused` en el log. `COLMENA_ATTACHMENT_ALLOW_PRIVATE_HOSTS=1` apaga el chequeo en
 desarrollo local (CHANGELOG 2026-09 §124). E2E:
 [`tests/graphs/security/data_destination_public_only_e2e.json`](../../tests/graphs/security/data_destination_public_only_e2e.json).
 
