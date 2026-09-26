@@ -6464,3 +6464,25 @@ devuelve el error de configuración. `corpus_noise` cuenta el grafo nuevo.
 
 **ADP.** Sin cambios de API ni de SSE.
 **Estado.** done.
+
+## 148. Python: el protocolo y las tramas de un executor aislado
+
+**Qué cambia.** Se agrega el formato con el que un executor aislado (todavía no
+disponible) le pasa un pedido al proceso que corre el código y recibe la
+respuesta: tramas de largo prefijado (4 bytes big-endian + JSON), con el largo
+chequeado contra un tope antes de reservar memoria o leer el cuerpo, en
+versión sync y async (`python_exec::frame`), y los mensajes `WireRequest` /
+`WireResponse` con versión, estado (`ok`, `python_error`, `timeout`,
+`crashed`, `too_large`) y su traducción a `PythonRunResult` /
+`PythonRunError` (`python_exec::protocol`). Un error de Python llega al modelo
+con el mismo texto que en proceso; los textos nuevos llevan el prefijo
+`Python execution error:` o `PythonExecutorError:`. Nada lo usa todavía.
+
+**Tests.** Ida y vuelta sync y async; tope chequeado antes del cuerpo (prefijo
+`0xFFFFFFFF` sin cuerpo); trama truncada; `output = None` distinto de no
+asignado; cada estado a su error; versión distinta; plazo del pedido vs. el
+del executor y saturación de un plazo enorme.
+
+**ADP.** Sin cambios de API ni de SSE. Guía:
+[53_python_executors.md](developer_guide/53_python_executors.md#wire-protocol-isolated-executors).
+**Estado.** done.
