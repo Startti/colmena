@@ -381,6 +381,14 @@ Un hilo `persistent` o `dynamic` es de quien llama a la tool (`memory_node_path`
   tiene `X`. El hilo `x` de `X` queda en `tool/X/x/agente_x` si lo llama el padre, y en
   `tool/Y/hijo_y/tool/X/x/agente_x` si lo llama `hijo_y`. Son dos conversaciones: ninguna
   lee la otra, y una corrida fresca en una no cura una pregunta pendiente en la otra.
+- **Un camino de quien llama de más de 256 bytes se acota** (`CALLER_PATH_MAX`). La clave
+  cuelga de `tool/~<32 hex>` en vez de ese camino: los primeros 16 bytes del SHA-256 del
+  camino entero. Es la misma para un mismo camino y distinta para dos, sigue empezando con
+  `tool/` (sigue siendo anidada), y el hijo la hereda como prefijo, así que el nivel
+  siguiente vuelve a acotar. A cualquier profundidad la clave no pasa de 455 bytes (256 +
+  `/tool/` + nombre ≤64 + `/` + hilo ≤128), lejos de los ~2704 que admite una entrada de
+  los índices btree de `llm_node_history`. Hasta 256 bytes, la clave es la legible de
+  arriba.
 - **`stateless` no cambia:** `tool/<tool_call_id>` para cualquiera que llame, porque ya es
   única por llamada.
 - **El hilo dura lo que dura el camino de quien llama.** Dentro del hijo de una tool
@@ -388,9 +396,9 @@ Un hilo `persistent` o `dynamic` es de quien llama a la tool (`memory_node_path`
   llamada, no entre llamadas. Para que recuerde entre llamadas, la tool de afuera también
   tiene que tener memoria.
 - **`list_threads` lista los hilos de quien llama:** busca bajo `tool/<tool_name>/` en la
-  raíz y bajo `<caller>/tool/<tool_name>/` dentro de un hijo. Deja afuera las filas que
-  cuelgan de un hilo (`…/tool/…`, las de una tool que llamó el agente de ese hilo), antes
-  del tope de 100 filas.
+  raíz y bajo `<caller>/tool/<tool_name>/` dentro de un hijo, acotado igual que la clave.
+  Deja afuera las filas que cuelgan de un hilo (`…/tool/…`, las de una tool que llamó el
+  agente de ese hilo), antes del tope de 100 filas.
 - **Una respuesta continúa la conversación donde se hizo la pregunta.** Un `llm_call`
   que recibe la respuesta a su pregunta corre bajo el `_conversation_key.node_id` que
   guardó su salida `SUSPENDED` en `dag_runs.all_outputs`, aunque el camino que se deriva
@@ -411,12 +419,11 @@ Límites conocidos:
   llama recibe un resultado de tool fallido (`Error executing node llm_call: …`). La
   respuesta se pierde, y quien llama ve el error. Pasa una sola vez, a través del cambio.
   En dev hay 0 cadenas así, y ADP compila los assets como `subgraph`.
-- **La clave crece con la anidación.** Cada nivel `persistent` o `dynamic` suma hasta unos
-  230 bytes (`/tool/<tool_name>[/<thread_id>]/<nodo>`; peor caso: nombre ≤64 + hilo ≤128 +
-  nodo ~25). En ADP son unos 70 bytes por nivel. El índice btree de `llm_node_history`
-  admite unos 2704 bytes por entrada, así que en el peor caso el techo ronda los 11
-  niveles. Más allá, el `INSERT` falla con un error, no en silencio. Medido en dev:
-  profundidad máxima 4.
+- **Una clave acotada no se lee.** No dice quién llamó: para saberlo, se compara su
+  digest con el SHA-256 de los `node_id` de la sesión. A cambio, la profundidad ya no
+  tiene tope por la clave (sin acotar, cada nivel sumaba hasta unos 230 bytes y el índice
+  btree ponía el techo cerca de 11 niveles). Medido en dev: profundidad máxima 4, clave
+  más larga 123 bytes; ninguna se acota.
 - **Un nodo raíz cuyo id es `tool`.** Si tiene un `subgraph` de nivel de grafo, los
   caminos de sus hijos empiezan con `tool/` y cuentan como anidados. Los ids de ADP son
   cuids.
