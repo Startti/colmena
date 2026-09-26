@@ -193,16 +193,20 @@ impl ExecutableNode for PythonNode {
         _state: &mut Value,
         _observer: Option<Arc<dyn crate::dag_engine::domain::observer::ExecutionObserver>>,
     ) -> Result<Value, Box<dyn StdError + Send + Sync>> {
-        // 1. Extract code — input port takes priority over config
-        let code = if let Some(input_code) = inputs.get("code").and_then(|v| v.as_str()) {
-            input_code.to_string()
-        } else {
-            config
-                .get("code")
-                .and_then(|v| v.as_str())
-                .ok_or("PythonNode error: 'code' field is missing in inputs or config")?
-                .to_string()
-        };
+        // 1. Extract code — input port takes priority over config. The code is
+        // the author's when it comes from `config` or is a tool's `fixed`
+        // value; otherwise it is data (an edge, a model's argument).
+        use crate::dag_engine::infrastructure::env_provenance::is_authored_input;
+        let (code, author_code) =
+            if let Some(input_code) = inputs.get("code").and_then(|v| v.as_str()) {
+                (input_code.to_string(), is_authored_input(inputs, "code"))
+            } else {
+                let code = config
+                    .get("code")
+                    .and_then(|v| v.as_str())
+                    .ok_or("PythonNode error: 'code' field is missing in inputs or config")?;
+                (code.to_string(), true)
+            };
 
         // Strip markdown code blocks (LLMs often wrap code in ```python ... ```)
         let code = code.trim();
@@ -214,17 +218,23 @@ impl ExecutableNode for PythonNode {
             code
         };
 
-        // 2. Extract sandbox config
-        let sandbox_mode = inputs
-            .get("sandbox_mode")
-            .or_else(|| config.get("sandbox_mode"))
+        // 2. Extract sandbox config. It is the author's alone: `config`, or a
+        // tool's `fixed` value — a value that arrived as data is ignored. When
+        // the author set no mode, the author's own code runs with `none` and
+        // code that arrived as data runs `restricted`.
+        let author_value = |key: &str| {
+            inputs
+                .get(key)
+                .filter(|_| is_authored_input(inputs, key))
+                .or_else(|| config.get(key))
+        };
+        let default_mode = if author_code { "none" } else { "restricted" };
+        let sandbox_mode = author_value("sandbox_mode")
             .and_then(|v| v.as_str())
-            .unwrap_or("none")
+            .unwrap_or(default_mode)
             .to_string();
 
-        let timeout_secs = inputs
-            .get("sandbox_timeout_secs")
-            .or_else(|| config.get("sandbox_timeout_secs"))
+        let timeout_secs = author_value("sandbox_timeout_secs")
             .and_then(|v| v.as_u64())
             .unwrap_or(10);
 
@@ -304,7 +314,7 @@ impl ExecutableNode for PythonNode {
                 },
                 "sandbox_mode": {
                     "type": "string",
-                    "description": "'none' (default) or 'restricted'. In 'restricted' mode the code is validated via AST: only whitelisted imports are allowed (math, json, re, datetime, collections, itertools, functools, string, decimal, statistics) and banned builtins (open, exec, eval, compile, __import__) are blocked. A timeout is also enforced."
+                    "description": "'none' or 'restricted'. Author-set only (config, or a tool's fixed value). Default: 'none' for the author's own code, 'restricted' for code that arrives as data (an edge, a model's argument). In 'restricted' mode the code is validated via AST: only whitelisted imports are allowed (math, json, re, datetime, collections, itertools, functools, string, decimal, statistics) and banned builtins (open, exec, eval, compile, __import__) are blocked. A timeout is also enforced."
                 },
                 "sandbox_timeout_secs": {
                     "type": "number",
@@ -315,14 +325,6 @@ impl ExecutableNode for PythonNode {
                 "code": {
                     "type": "string",
                     "description": "Reserved key. Python script to execute (overrides config.code). NOT injected as a Python variable."
-                },
-                "sandbox_mode": {
-                    "type": "string",
-                    "description": "Reserved key. Overrides config.sandbox_mode for this execution. NOT injected as a Python variable."
-                },
-                "sandbox_timeout_secs": {
-                    "type": "number",
-                    "description": "Reserved key. Overrides config.sandbox_timeout_secs for this execution. NOT injected as a Python variable."
                 },
                 "<any_key>": {
                     "type": "any",
@@ -558,6 +560,51 @@ mod tests {
                 other => panic!("requests should be rejected: {other:?}"),
             }
         });
+    }
+
+    /// Code that arrives as data (an edge, a model's argument) runs sandboxed
+    /// unless the author chose the mode; a data `sandbox_mode` is never used.
+    #[tokio::test]
+    async fn data_code_runs_restricted_and_a_data_sandbox_mode_is_ignored() {
+        pyo3::Python::initialize();
+        let code = json!("import os\noutput = 1");
+        for extra in [None, Some(json!("none"))] {
+            let mut inputs = HashMap::from([("code".to_string(), code.clone())]);
+            if let Some(mode) = extra {
+                inputs.insert("sandbox_mode".to_string(), mode);
+            }
+            let err = PythonNode
+                .execute(&inputs, &json!({}), &mut json!({}), None)
+                .await
+                .unwrap_err();
+            assert!(err.to_string().contains("SandboxViolation"), "got: {err}");
+        }
+    }
+
+    /// The author's code — in `config`, or a tool's `fixed` value — keeps the
+    /// `none` default, and the author's `sandbox_mode` is honored.
+    #[tokio::test]
+    async fn author_code_and_author_sandbox_mode_are_honored() {
+        use crate::dag_engine::infrastructure::env_provenance::AUTHORED_INPUTS_KEY;
+        pyo3::Python::initialize();
+        let code = json!("import os\noutput = 1");
+        let fixed = HashMap::from([
+            ("code".to_string(), code.clone()),
+            (AUTHORED_INPUTS_KEY.to_string(), json!(["code"])),
+        ]);
+        let out = PythonNode
+            .execute(&fixed, &json!({}), &mut json!({}), None)
+            .await;
+        assert_eq!(out.unwrap(), 1);
+        let data_code = HashMap::from([
+            ("code".to_string(), code),
+            ("sandbox_mode".to_string(), json!("none")),
+            (AUTHORED_INPUTS_KEY.to_string(), json!(["sandbox_mode"])),
+        ]);
+        let out = PythonNode
+            .execute(&data_code, &json!({}), &mut json!({}), None)
+            .await;
+        assert_eq!(out.unwrap(), 1);
     }
 
     #[tokio::test]

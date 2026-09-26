@@ -56,6 +56,37 @@ impl EnvPolicy {
     }
 }
 
+/// Input key carrying the top-level input keys whose whole value is the
+/// author's own `fixed` value for this dispatch (see [`authored_keys`]).
+/// Written by the tool dispatcher and `for_each` after the engine-key strip,
+/// so a caller cannot forge it; absent (graph mode) means none is.
+pub const AUTHORED_INPUTS_KEY: &str = "__colmena_authored_inputs";
+
+/// The top-level keys of `merged` whose value equals the author's value for
+/// that key in `authored` — the tool's `fixed` values the caller left as
+/// written. A key the caller set, or a value templating changed, is not listed.
+pub fn authored_keys(
+    authored: &HashMap<String, Value>,
+    merged: &HashMap<String, Value>,
+) -> Vec<String> {
+    let mut out: Vec<String> = merged
+        .iter()
+        .filter(|(k, v)| authored.get(*k) == Some(*v))
+        .map(|(k, _)| k.clone())
+        .collect();
+    out.sort();
+    out
+}
+
+/// Whether a dispatcher listed `key` under [`AUTHORED_INPUTS_KEY`]: its value
+/// in `inputs` is the author's `fixed` value, not runtime data.
+pub fn is_authored_input(inputs: &crate::dag_engine::domain::node::NodeInputs, key: &str) -> bool {
+    inputs
+        .get(AUTHORED_INPUTS_KEY)
+        .and_then(|v| v.as_array())
+        .is_some_and(|keys| keys.iter().any(|k| k.as_str() == Some(key)))
+}
+
 /// Whether every `${`-bearing string leaf of `inputs[key]` sits at a pointer
 /// `policy` trusts: the subtree is as its author wrote it (a dispatcher's
 /// `fixed` value), so the `fixed` values inside it are the author's too. A
@@ -212,6 +243,18 @@ mod tests {
         let merged = hm(json!({ "path": "/anything/secret-value-123" }));
         let ptrs = trusted_pointers(&authored, &merged);
         assert!(ptrs.is_empty());
+    }
+
+    #[test]
+    fn authored_keys_are_the_fixed_values_the_caller_left_as_written() {
+        let authored = hm(json!({ "code": "output = 1", "sandbox_mode": "none", "t": "${X}" }));
+        let merged =
+            hm(json!({ "code": "output = 1", "sandbox_mode": "restricted", "q": "x", "t": "v" }));
+        assert_eq!(authored_keys(&authored, &merged), vec!["code".to_string()]);
+        let inputs = hm(json!({ AUTHORED_INPUTS_KEY: ["code"] }));
+        assert!(is_authored_input(&inputs, "code"));
+        assert!(!is_authored_input(&inputs, "sandbox_mode"));
+        assert!(!is_authored_input(&hm(json!({ "code": "x" })), "code"));
     }
 
     #[test]

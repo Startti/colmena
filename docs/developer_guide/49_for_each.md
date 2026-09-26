@@ -378,6 +378,15 @@ el mismo que usa el nodo `suspend`):
 Esto permite usar el mismo nodo, sin cambios de código, tanto en un grafo
 estático como colgado de un `tool_configurations`.
 
+`target` es un campo del autor (`author_owned_inputs`): en modo grafo ni el
+auto-flatten ni el estado global lo llenan, y en modo tool un argumento que la
+tool no ofrece se descarta. Sus valores `fixed` son del autor solo cuando el
+`target` lo es: viene de `config`, o es el `fixed` de la tool que despachó el
+`for_each` (`__colmena_authored_inputs`). Un `target` que llegó como dato (un
+edge que lo nombra, un parámetro declarado) aporta `fixed` que son datos: no
+expanden `${VAR}` ni cuentan como valores del autor en el nodo destino
+(CHANGELOG 2026-09 §114).
+
 ## Ejemplo — uso como nodo de grafo
 
 `tests/graphs/basic/for_each_node.json`:

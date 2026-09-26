@@ -506,6 +506,12 @@ forged value cannot survive. `EnvPolicy::from_inputs` is how a node reads
 this key: no key (graph mode) or a malformed one → `Restricted(∅)`, i.e.
 **fail closed** — an `inputs` value never expands; `config` still does.
 
+Next to it, `__colmena_authored_inputs` (`env_provenance::AUTHORED_INPUTS_KEY`)
+lists the top-level input keys whose whole value is still the author's `fixed`
+value (`authored_keys`); `for_each` sends it per row too. A node that must
+tell the author's value from data regardless of `${` reads it with
+`is_authored_input` — `python_script` does, for `code` and `sandbox_mode`.
+
 After `inject_secrets` (below) replaces any `<value_N>` placeholder with its
 decrypted value, `prune_after_secrets` drops any trusted pointer whose value
 just changed — a decrypted secret containing literal `${...}` text must
@@ -518,7 +524,8 @@ never be re-interpreted as an env placeholder.
 Order of operations in `execute_inner`: `strip_engine_keys(args)` → merge
 (5a–5d) → `trusted_pointers(authored_fixed, merged)` (5e) → insert engine
 keys (resume_answer, session ids, node_id_path, subgraph_depth, tool_name,
-unchanged order) → insert `__colmena_env_trusted_paths` LAST →
+unchanged order) → insert `__colmena_env_trusted_paths` and
+`__colmena_authored_inputs` LAST →
 `inject_secrets` → `prune_after_secrets` → `node.execute(inputs)`.
 
 ---

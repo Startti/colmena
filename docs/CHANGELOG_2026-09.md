@@ -5573,3 +5573,39 @@ con el nombre de la variable no reemplaza la referencia del autor.
 **ADP.** Sin cambios de API. Un `fixed` que mezclaba `${context.*}` con `${VAR}` en el mismo
 string deja de expandir la variable: el secreto va en su propio campo `fixed`.
 **Estado.** done.
+
+## 113. Endurecimiento: el sandbox de `python_script` lo elige solo el autor
+
+**Qué cambia.** `sandbox_mode` y `sandbox_timeout_secs` salen de `config` o de un valor
+`fixed` de la tool; un valor que llega como dato (edge, estado global, argumento del modelo,
+fila de `for_each`) se ignora. Sin modo del autor, el código del autor (`config`, o un `code`
+`fixed`) corre con `none` como antes, y el código que llega como dato (un edge que nombra
+`code`, un argumento del modelo) corre `restricted`. El despacho de tools y `for_each` le dicen
+al nodo qué inputs son `fixed` del autor con la clave del motor `__colmena_authored_inputs`
+(`env_provenance::authored_keys` / `is_authored_input`). El nodo crudo deja de anunciar
+`sandbox_mode`/`sandbox_timeout_secs` como parámetros.
+
+**Tests.** `python_node.rs`: código como dato corre `restricted` con o sin un `sandbox_mode`
+de datos; el código `fixed` y el modo `fixed` del autor se respetan. `author_owned_arg_tests`
+(despacho real): `code` fijo corre `none`, el del modelo `restricted`, y un `sandbox_mode`
+fijo `none` se respeta. `env_provenance.rs`: `authored_keys`.
+
+**ADP.** Sin cambios de API. Una tool de Python cuyo modelo escribe el código y necesita
+`none` debe fijarlo (`"sandbox_mode": {"fixed": "none"}`); con `restricted` siguen permitidos
+`pandas`, `numpy` y `scipy`.
+**Estado.** done.
+
+## 114. Endurecimiento: los `fixed` de un `target` de `for_each` son del autor solo si el `target` lo es
+
+**Qué cambia.** `for_each` calcula por fila los punteros confiables y las claves del autor
+contra los `fixed` de su `target` solo cuando ese `target` viene de `config` o es el `fixed` de
+la tool que lo despachó (`is_authored_input(inputs, "target")`). Un `target` que llegó como
+dato aporta `fixed` que son datos: la fila no recibe punteros confiables ni claves del autor
+de ellos, así que no expanden `${VAR}` en el nodo destino.
+
+**Tests.** `for_each.rs::http_target_env_tests`: el mismo `target` por `inputs` manda el
+bearer literal; marcado como `fixed` del despacho, lo expande. El test existente con `target`
+en `config` sigue expandiendo.
+
+**ADP.** Sin cambios de API.
+**Estado.** done.
