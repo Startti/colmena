@@ -54,6 +54,7 @@ impl OpenApiAdapter {
     }
 
     fn with_fetcher(fetcher: SignedUrlDownloader, config: OpenApiAdapterConfig) -> Self {
+        let fetcher = fetcher.capped_at(config.max_bytes);
         let fetcher = fetcher.with_timeout(config.timeout);
         Self { fetcher, config }
     }
@@ -90,6 +91,11 @@ impl OpenApiAdapter {
 
         let started = std::time::Instant::now();
         let upstream = |status, body| WebDomainError::Upstream { status, body };
+        // The client stops at the first byte past the cap: `size_bytes` is a floor.
+        let too_large = |limit: u64| WebDomainError::SpecTooLarge {
+            size_bytes: limit + 1,
+            limit_bytes: limit,
+        };
         let resp = match self.fetcher.fetch_with(&resolved, headers).await {
             Ok(resp) => resp,
             Err(LlmError::SignedUrlFetchFailed { status: 304 }) => {
@@ -101,6 +107,7 @@ impl OpenApiAdapter {
             Err(LlmError::AttachmentUrlRefused { reason }) => {
                 return Err(upstream(0, format!("URL refused: {reason}")))
             }
+            Err(LlmError::AttachmentTooLarge { limit }) => return Err(too_large(limit)),
             Err(LlmError::NetworkError { .. }) if started.elapsed() >= self.config.timeout => {
                 let ms = self.config.timeout.as_millis() as u64;
                 return Err(WebDomainError::Timeout { ms });
@@ -134,22 +141,15 @@ impl OpenApiAdapter {
             }
         }
 
-        // Stream body with size cap. reqwest's content-length hint is best-effort;
-        // we count bytes as they arrive and abort past the cap.
+        // Stream the body; the client caps it at `max_bytes` (`capped_at`).
         let mut stream = resp.body;
         let mut buf: Vec<u8> = Vec::new();
         use futures::StreamExt;
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|e| WebDomainError::Upstream {
-                status: 0,
-                body: format!("stream error: {e}"),
+            let chunk = chunk.map_err(|e| match e.get_ref().and_then(|e| e.downcast_ref()) {
+                Some(LlmError::AttachmentTooLarge { limit }) => too_large(*limit),
+                _ => upstream(0, format!("stream error: {e}")),
             })?;
-            if (buf.len() as u64) + (chunk.len() as u64) > self.config.max_bytes {
-                return Err(WebDomainError::SpecTooLarge {
-                    size_bytes: buf.len() as u64 + chunk.len() as u64,
-                    limit_bytes: self.config.max_bytes,
-                });
-            }
             buf.extend_from_slice(&chunk);
         }
 
@@ -905,6 +905,29 @@ mod tests_fetch {
             WebDomainError::Upstream { status: 500, .. } => {}
             other => panic!("expected Upstream(500), got {other:?}"),
         }
+    }
+
+    /// A chunked spec (no `Content-Length`) past the cap is `SpecTooLarge`.
+    #[tokio::test]
+    async fn fetch_raw_caps_a_chunked_body() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/openapi.yaml", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let _ = socket.read(&mut [0u8; 4096]).await;
+            let chunk = format!("258\r\n{}\r\n", "x".repeat(0x258));
+            let head = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n";
+            let reply = format!("{head}{chunk}{chunk}0\r\n\r\n");
+            let _ = socket.write_all(reply.as_bytes()).await;
+        });
+        let adapter = adapter_at(OpenApiAdapterConfig {
+            max_bytes: 1024,
+            ..OpenApiAdapterConfig::default()
+        });
+        let err = adapter.fetch_raw(&url, None, None).await.unwrap_err();
+        let too_large = matches!(err, WebDomainError::SpecTooLarge { .. });
+        assert!(too_large, "{err:?}");
     }
 
     /// The adapter on the public-only client never dials a non-public address.
