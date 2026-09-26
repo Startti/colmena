@@ -5047,3 +5047,41 @@ grupo. Los 40 de antes pasan sin tocarlos. Lib: 2912 passed, 0 failed, 74 ignore
 **ADP.** Sin código: los frames ya se asocian por `toolCallId` y `childScope`
 (Startti/adp#855). Pero ninguna tool debe declarar `parallel` todavía: con dos
 preguntas en un grupo, una queda sin hacer y su hijo suspendido.
+
+## 98. Dos tests más del grupo, su invariante explícito y el modelo guionado compartido (parallel tools, 2f)
+
+**Qué cambió.** Solo tests, sobre el grupo de la entrada 97:
+- Los dos saltos de la pasada que escribe la historia del grupo (una repetición cuya
+  gemela no terminó, una llamada que no corrió) dependen de que ya haya una suspensión
+  anotada antes en esa pasada. Ahora es un `debug_assert!` con su comentario: si se
+  rompe, un id queda sin resultado, y eso es un 400 en Anthropic y OpenAI.
+- El test de la suspensión en un grupo le da 50 ms a `c2`. Antes `end c0` antes de
+  `end c2` dependía de un empate entre dos esperas iguales, no de algo que el código
+  garantiza.
+- `ParallelTurnModel`, el modelo guionado del E2E de la entrada 91, pasa a un módulo
+  compartido (`tests/parallel_turn_model/`) para el E2E que sigue. Recibe su lista de
+  llamadas y guarda los ids de los resultados que leyó el modelo. El E2E de identidad
+  afirma ahora ese orden, y dice por qué sus llamadas corren en serie: `Nota` no es
+  `parallel`, así que es una barrera.
+
+**Tests.** 2 nuevos en `agent_service`:
+- `three_identical_parallel_calls_in_one_group_rescue_intra_turn`: tres llamadas
+  idénticas en una misma cadena disparan el rescate. Mira la forma del segundo pedido
+  (sin tools, y con el texto de síntesis al final), no solo el texto final;
+- `a_groups_repeat_echoes_a_streak_that_started_in_an_earlier_batch`: la repetición en
+  un grupo nuevo repite el resultado de la tanda anterior.
+
+Lib: 2914 passed, 0 failed, 74 ignored (2912 en la entrada 97). E2E de identidad,
+ignorado: 1 passed.
+
+**Mutación.** Rojas y revertidas editando:
+- sin `rescue = true` en el grupo: rojo el test del rescate. El test del rescate en serie
+  no lo detecta con la misma mutación, porque solo mira el texto final;
+- el eco de la racha anterior vacío (`Echo::Text(String::new())`): rojo el de la tanda
+  anterior, sin la salida de `c1`.
+
+**E2E.** `DATABASE_URL=postgres:///colmena_e2e_par SECURE_VALUES_KEY=... cargo test -p
+colmena_dag_engine --test parallel_tool_identity -- --ignored`: 1 passed, con el orden
+`call_clima`, `call_nota`, `call_precios` en la historia que leyó el modelo.
+
+**ADP.** Nada que hacer.

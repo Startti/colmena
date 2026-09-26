@@ -1,5 +1,5 @@
 {
-  "comment": "E2E de la identidad de una llamada paralela. Lo corre src/libs/colmena/tests/parallel_tool_identity.rs con un modelo guionado que pide Run, Nota y Run en UN solo mensaje: cada llamada a Run (parallel: true) abre su frontera como Run#<k>, k = su índice en el mensaje (Run#0 y Run#2); Nota (sin parallel) abre la suya con el nombre pelado y sus frames no llevan childScope. Las llamadas corren todavía en serie.",
+  "comment": "E2E de la identidad de una llamada paralela. Lo corre src/libs/colmena/tests/parallel_tool_identity.rs con un modelo guionado que pide Run, Nota y Run en UN solo mensaje: cada llamada a Run (parallel: true) abre su frontera como Run#<k>, k = su índice en el mensaje (Run#0 y Run#2); Nota (sin parallel) abre la suya con el nombre pelado y sus frames no llevan childScope. Nota es una barrera entre las dos llamadas a Run: cada una forma un grupo de uno y las tres corren en serie.",
   "metadata": {
     "category": "agents",
     "features": ["subgraph_as_tool", "child_graph_inline", "parallel_tool_calls"],
