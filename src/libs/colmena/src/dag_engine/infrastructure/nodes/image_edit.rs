@@ -238,12 +238,13 @@ impl ExecutableNode for ImageEditNode {
             .or_else(|| cfg.get("model").and_then(|v| v.as_str()))
             .unwrap_or("gpt-image-1")
             .to_string();
-        let api_key_raw = inputs
-            .get("api_key")
-            .and_then(|v| v.as_str())
-            .or_else(|| cfg.get("api_key").and_then(|v| v.as_str()))
-            .ok_or("image_edit: api_key is required")?;
-        let api_key = Self::resolve_env_var(api_key_raw)?;
+        let api_key = crate::dag_engine::infrastructure::env_provenance::resolve_credential(
+            inputs,
+            &cfg,
+            "api_key",
+            Self::resolve_env_var,
+        )?
+        .ok_or("image_edit: api_key is required")?;
 
         // Inputs-over-config for LLM-controllable / chainable fields.
         let prompt = inputs
@@ -636,6 +637,41 @@ mod tests {
         node.execute(&HashMap::new(), &cfg, &mut json!({}), None)
             .await
             .expect("execute ok");
+    }
+
+    /// An `api_key` that arrives through `inputs` is sent as written.
+    #[tokio::test]
+    async fn an_inputs_api_key_is_not_resolved_from_the_environment() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/images/edits"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": [{ "b64_json": "AAAA" }]
+            })))
+            .mount(&server)
+            .await;
+        std::env::set_var("COLMENA_CLASS_TEST_EDIT_KEY", "edit-key-test-only");
+        let mut storage = MockOutputStorageRepository::new();
+        storage.expect_store().returning(|_| Ok(stored_ok("k")));
+        let node = ImageEditNode::new(Arc::new(storage)).with_openai_base_url(server.uri());
+        let mut cfg = base_config("data:image/png;base64,iVBORw==");
+        cfg.as_object_mut().unwrap().remove("api_key");
+        let inputs = HashMap::from([(
+            "api_key".to_string(),
+            json!("${COLMENA_CLASS_TEST_EDIT_KEY}"),
+        )]);
+        node.execute(&inputs, &cfg, &mut json!({}), None)
+            .await
+            .unwrap();
+        let got = server.received_requests().await.unwrap();
+        let auth = got[0]
+            .headers
+            .get("authorization")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert_eq!(auth, "Bearer ${COLMENA_CLASS_TEST_EDIT_KEY}");
+        std::env::remove_var("COLMENA_CLASS_TEST_EDIT_KEY");
     }
 
     #[tokio::test]

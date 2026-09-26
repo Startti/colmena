@@ -56,6 +56,29 @@ impl EnvPolicy {
     }
 }
 
+/// A credential field (`api_key`, `connection_url`, …) read inputs-first,
+/// with a node's own `${VAR}` resolver. Env templates expand only in author
+/// config: an `inputs` value expands only at a pointer a dispatcher vouched
+/// for (a tool's `fixed` value) and is otherwise used as written; a `config`
+/// value always expands.
+pub fn resolve_credential(
+    inputs: &crate::dag_engine::domain::node::NodeInputs,
+    config: &Value,
+    key: &str,
+    resolve: impl Fn(&str) -> Result<String, String>,
+) -> Result<Option<String>, String> {
+    let pointer = format!("/{}", escape_pointer_segment(key));
+    match inputs.get(key).and_then(|v| v.as_str()) {
+        Some(raw) if EnvPolicy::from_inputs(inputs).may_expand(&pointer) => resolve(raw).map(Some),
+        Some(raw) => Ok(Some(raw.to_string())),
+        None => config
+            .get(key)
+            .and_then(|v| v.as_str())
+            .map(resolve)
+            .transpose(),
+    }
+}
+
 /// Input key carrying the top-level input keys whose whole value is the
 /// author's own `fixed` value for this dispatch (see [`authored_keys`]).
 /// Written by the tool dispatcher and `for_each` after the engine-key strip,
@@ -255,6 +278,20 @@ mod tests {
         assert!(is_authored_input(&inputs, "code"));
         assert!(!is_authored_input(&inputs, "sandbox_mode"));
         assert!(!is_authored_input(&hm(json!({ "code": "x" })), "code"));
+    }
+
+    #[test]
+    fn an_inputs_credential_expands_only_at_a_vouched_pointer() {
+        let resolve = |raw: &str| Ok(raw.replace("${K}", "resolved"));
+        let config = json!({ "api_key": "${K}" });
+        let from = |inputs: &HashMap<String, Value>, config: &Value| {
+            resolve_credential(inputs, config, "api_key", resolve).unwrap()
+        };
+        assert_eq!(from(&HashMap::new(), &config).as_deref(), Some("resolved"));
+        let mut inputs = hm(json!({ "api_key": "${K}" }));
+        assert_eq!(from(&inputs, &json!({})).as_deref(), Some("${K}"));
+        inputs.insert(ENV_TRUSTED_PATHS_KEY.to_string(), json!(["/api_key"]));
+        assert_eq!(from(&inputs, &json!({})).as_deref(), Some("resolved"));
     }
 
     #[test]

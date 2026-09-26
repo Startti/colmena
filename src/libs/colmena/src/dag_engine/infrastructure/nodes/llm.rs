@@ -535,27 +535,19 @@ impl LlmNode {
         self
     }
 
-    /// A credential field (`api_key`, `connection_url`) read inputs-first.
-    /// Env templates expand only in author config: an `inputs` value expands
-    /// `${VAR}` only at a pointer a dispatcher vouched for (a tool's `fixed`
-    /// value), and is otherwise used as written.
+    /// A credential field (`api_key`, `connection_url`) read inputs-first; see
+    /// [`crate::dag_engine::infrastructure::env_provenance::resolve_credential`].
     fn resolve_credential(
         inputs: &NodeInputs,
         config: &Value,
         key: &str,
     ) -> Result<Option<String>, String> {
-        use crate::dag_engine::infrastructure::env_provenance::EnvPolicy;
-        match inputs.get(key).and_then(|v| v.as_str()) {
-            Some(raw) if EnvPolicy::from_inputs(inputs).may_expand(&format!("/{key}")) => {
-                Self::resolve_env_var(raw).map(Some)
-            }
-            Some(raw) => Ok(Some(raw.to_string())),
-            None => config
-                .get(key)
-                .and_then(|v| v.as_str())
-                .map(Self::resolve_env_var)
-                .transpose(),
-        }
+        crate::dag_engine::infrastructure::env_provenance::resolve_credential(
+            inputs,
+            config,
+            key,
+            Self::resolve_env_var,
+        )
     }
 
     fn resolve_env_var(value: &str) -> Result<String, String> {

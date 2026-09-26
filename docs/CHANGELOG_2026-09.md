@@ -5624,3 +5624,19 @@ header de `inputs` con `${VAR}` sale literal y la cookie de `config` sale expand
 
 **ADP.** Sin cambios de API.
 **Estado.** done.
+
+## 110. Endurecimiento: un `api_key` que llega como dato no se resuelve del entorno
+
+**Qué cambia.** `image_generation`, `image_edit` y `tts` leen `api_key` con
+`env_provenance::resolve_credential`, la misma regla que `llm_call` (§106): el de `config`
+expande `${VAR}`; el de `inputs` solo en un puntero avalado (el `fixed` de una tool) y si no se
+usa tal cual. `api_key` ya es campo del autor en los tres (§105). `tavily_client` e
+`information_extraction` no cambian: leen `api_key` solo de su `config`
+(`tavily_client.rs` `build_use_case`, `extraction.rs` `execute`).
+
+**Tests.** `image_generation` y `image_edit` (mock de OpenAI): un `api_key` de `inputs` con
+`${VAR}` llega literal en `Authorization`. `env_provenance.rs`: `resolve_credential` con
+`config`, con `inputs` sin aval y con aval.
+
+**ADP.** Sin cambios de API.
+**Estado.** done.

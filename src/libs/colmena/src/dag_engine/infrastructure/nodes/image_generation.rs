@@ -248,12 +248,14 @@ impl ExecutableNode for ImageGenerationNode {
         // 2) Provider dispatch returns Vec<(bytes, mime)>.
         let images: Vec<(Vec<u8>, String)> = match provider.as_str() {
             "openai" => {
-                let api_key_raw = inputs
-                    .get("api_key")
-                    .and_then(|v| v.as_str())
-                    .or_else(|| cfg.get("api_key").and_then(|v| v.as_str()))
+                let api_key =
+                    crate::dag_engine::infrastructure::env_provenance::resolve_credential(
+                        inputs,
+                        &cfg,
+                        "api_key",
+                        Self::resolve_env_var,
+                    )?
                     .ok_or("image_generation: api_key is required when provider=openai")?;
-                let api_key = Self::resolve_env_var(api_key_raw)?;
                 let quality = inputs
                     .get("quality")
                     .and_then(|v| v.as_str())
@@ -971,6 +973,39 @@ mod tests {
             desc.contains("inputs prompt"),
             "description should reflect the inputs prompt, got: {desc}"
         );
+    }
+
+    /// An `api_key` that arrives through `inputs` is sent as written: env
+    /// templates expand only in author config.
+    #[tokio::test]
+    async fn an_inputs_api_key_is_not_resolved_from_the_environment() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/images/generations"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": [{ "b64_json": "AAAA" }]
+            })))
+            .mount(&server)
+            .await;
+        std::env::set_var("COLMENA_CLASS_TEST_IMG_KEY", "img-key-test-only");
+        let mut storage = MockOutputStorageRepository::new();
+        storage.expect_store().returning(|_| Ok(stored_ok("k")));
+        let node = ImageGenerationNode::new(Arc::new(storage)).with_openai_base_url(server.uri());
+        let config = json!({ "provider": "openai", "model": "gpt-image-1", "prompt": "x" });
+        let inputs: NodeInputs =
+            HashMap::from([("api_key".into(), json!("${COLMENA_CLASS_TEST_IMG_KEY}"))]);
+        node.execute(&inputs, &config, &mut json!({}), None)
+            .await
+            .unwrap();
+        let got = server.received_requests().await.unwrap();
+        let auth = got[0]
+            .headers
+            .get("authorization")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert_eq!(auth, "Bearer ${COLMENA_CLASS_TEST_IMG_KEY}");
+        std::env::remove_var("COLMENA_CLASS_TEST_IMG_KEY");
     }
 
     #[tokio::test]
