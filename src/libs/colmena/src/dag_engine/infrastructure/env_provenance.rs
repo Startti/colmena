@@ -101,6 +101,43 @@ pub fn authored_keys(
     out
 }
 
+/// Input key carrying the JSON pointers of the scalar leaves of `inputs` that
+/// are still the author's `fixed` value for this dispatch — inside a container
+/// the caller also filled, too (see [`authored_leaves`]). Written next to
+/// [`AUTHORED_INPUTS_KEY`]; absent means none.
+pub const AUTHORED_LEAVES_KEY: &str = "__colmena_authored_leaves";
+
+/// The pointers of the scalar leaves of `merged` equal to the author's value
+/// at the same pointer in `authored`: a `fixed` header next to one the caller
+/// set is listed, the caller's is not.
+pub fn authored_leaves(
+    authored: &HashMap<String, Value>,
+    merged: &HashMap<String, Value>,
+) -> Vec<String> {
+    walk_all(authored, merged, &|m, a| !m.is_null() && m == a)
+}
+
+/// The pointers listed under an engine `key` of `inputs` (an array of
+/// strings); none when the key is absent or malformed.
+pub fn listed_pointers(
+    inputs: &crate::dag_engine::domain::node::NodeInputs,
+    key: &str,
+) -> Vec<String> {
+    inputs
+        .get(key)
+        .and_then(|v| serde_json::from_value::<Vec<String>>(v.clone()).ok())
+        .unwrap_or_default()
+}
+
+/// Whether this request carries a value from the author's environment or
+/// secrets: a pointer a dispatcher vouched for (a `fixed` `${VAR}`), or a
+/// `config` leaf the engine filled with a decrypted secure value.
+pub fn carries_env_or_secret(inputs: &crate::dag_engine::domain::node::NodeInputs) -> bool {
+    use crate::dag_engine::domain::node::SECRET_CONFIG_PATHS_KEY;
+    !listed_pointers(inputs, ENV_TRUSTED_PATHS_KEY).is_empty()
+        || !listed_pointers(inputs, SECRET_CONFIG_PATHS_KEY).is_empty()
+}
+
 /// Whether a dispatcher listed `key` under [`AUTHORED_INPUTS_KEY`]: its value
 /// in `inputs` is the author's `fixed` value, not runtime data.
 pub fn is_authored_input(inputs: &crate::dag_engine::domain::node::NodeInputs, key: &str) -> bool {
@@ -111,9 +148,9 @@ pub fn is_authored_input(inputs: &crate::dag_engine::domain::node::NodeInputs, k
 }
 
 /// Whether every `${`-bearing string leaf of `inputs[key]` sits at a pointer
-/// `policy` trusts: the subtree is as its author wrote it (a dispatcher's
-/// `fixed` value), so the `fixed` values inside it are the author's too. A
-/// subtree without such a leaf has nothing to expand and counts as trusted.
+/// `policy` trusts, so every env template in the subtree is the author's. A
+/// subtree without such a leaf has nothing to expand and counts as trusted;
+/// whether its other values are the author's is [`is_authored_input`].
 pub fn subtree_trusted(
     inputs: &crate::dag_engine::domain::node::NodeInputs,
     key: &str,
@@ -158,23 +195,38 @@ pub fn trusted_pointers(
     authored: &HashMap<String, Value>,
     merged: &HashMap<String, Value>,
 ) -> Vec<String> {
+    walk_all(authored, merged, &|m, a| {
+        m.as_str().is_some_and(|s| s.contains("${")) && m == a
+    })
+}
+
+/// Every pointer where `leaf(merged, authored)` holds, walking `merged` only
+/// where `authored` has a value at the same key/index. Sorted.
+fn walk_all(
+    authored: &HashMap<String, Value>,
+    merged: &HashMap<String, Value>,
+    leaf: &dyn Fn(&Value, &Value) -> bool,
+) -> Vec<String> {
     let mut out = Vec::new();
     for (top_key, merged_val) in merged {
         let Some(authored_val) = authored.get(top_key) else {
             continue;
         };
         let mut pointer = format!("/{}", escape_pointer_segment(top_key));
-        walk(merged_val, authored_val, &mut pointer, &mut out);
+        walk(merged_val, authored_val, &mut pointer, &mut out, leaf);
     }
     out.sort();
     out
 }
 
-fn walk(merged_val: &Value, authored_val: &Value, pointer: &mut String, out: &mut Vec<String>) {
+fn walk(
+    merged_val: &Value,
+    authored_val: &Value,
+    pointer: &mut String,
+    out: &mut Vec<String>,
+    leaf: &dyn Fn(&Value, &Value) -> bool,
+) {
     match merged_val {
-        Value::String(s) if s.contains("${") && authored_val.as_str() == Some(s.as_str()) => {
-            out.push(pointer.clone());
-        }
         Value::Object(map) => {
             if let Value::Object(auth_map) = authored_val {
                 for (k, v) in map {
@@ -182,7 +234,7 @@ fn walk(merged_val: &Value, authored_val: &Value, pointer: &mut String, out: &mu
                         let base_len = pointer.len();
                         pointer.push('/');
                         pointer.push_str(&escape_pointer_segment(k));
-                        walk(v, av, pointer, out);
+                        walk(v, av, pointer, out, leaf);
                         pointer.truncate(base_len);
                     }
                 }
@@ -195,12 +247,13 @@ fn walk(merged_val: &Value, authored_val: &Value, pointer: &mut String, out: &mu
                         let base_len = pointer.len();
                         pointer.push('/');
                         pointer.push_str(&i.to_string());
-                        walk(v, av, pointer, out);
+                        walk(v, av, pointer, out, leaf);
                         pointer.truncate(base_len);
                     }
                 }
             }
         }
+        v if leaf(v, authored_val) => out.push(pointer.clone()),
         _ => {}
     }
 }
@@ -278,6 +331,20 @@ mod tests {
         assert!(is_authored_input(&inputs, "code"));
         assert!(!is_authored_input(&inputs, "sandbox_mode"));
         assert!(!is_authored_input(&hm(json!({ "code": "x" })), "code"));
+    }
+
+    #[test]
+    fn authored_leaves_list_fixed_leaves_inside_a_container_the_caller_filled() {
+        let authored = hm(json!({ "headers": { "X-Key": "k", "X-Id": 7 }, "q": "a" }));
+        let merged =
+            hm(json!({ "headers": { "X-Key": "k", "X-Id": 8, "X-Other": "m" }, "q": "b" }));
+        assert_eq!(authored_leaves(&authored, &merged), vec!["/headers/X-Key"]);
+        let inputs = hm(json!({ AUTHORED_LEAVES_KEY: ["/headers/X-Key"] }));
+        assert_eq!(
+            listed_pointers(&inputs, AUTHORED_LEAVES_KEY),
+            vec!["/headers/X-Key"]
+        );
+        assert!(listed_pointers(&inputs, ENV_TRUSTED_PATHS_KEY).is_empty());
     }
 
     #[test]

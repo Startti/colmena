@@ -2128,13 +2128,14 @@ impl DagToolExecutor {
             &authored_fixed,
             &inputs,
         );
-        let authored_keys = if self.fixed_values_authored {
-            crate::dag_engine::infrastructure::env_provenance::authored_keys(
-                &authored_fixed,
-                &inputs,
+        let (authored_keys, authored_leaves) = if self.fixed_values_authored {
+            use crate::dag_engine::infrastructure::env_provenance as provenance;
+            (
+                provenance::authored_keys(&authored_fixed, &inputs),
+                provenance::authored_leaves(&authored_fixed, &inputs),
             )
         } else {
-            Vec::new()
+            (Vec::new(), Vec::new())
         };
 
         // Inject the resume answer AFTER all merging but BEFORE inject_secrets so that
@@ -2263,6 +2264,10 @@ impl DagToolExecutor {
         inputs.insert(
             crate::dag_engine::infrastructure::env_provenance::AUTHORED_INPUTS_KEY.to_string(),
             serde_json::to_value(&authored_keys).unwrap_or(Value::Array(Vec::new())),
+        );
+        inputs.insert(
+            crate::dag_engine::infrastructure::env_provenance::AUTHORED_LEAVES_KEY.to_string(),
+            serde_json::to_value(&authored_leaves).unwrap_or(Value::Array(Vec::new())),
         );
 
         // Convert HashMap to NodeInputs (which is just HashMap<String, Value>)
@@ -7219,6 +7224,50 @@ mod author_owned_arg_tests {
             "the author's fixed bearer reached a model-chosen host"
         );
         assert!(!result.success);
+    }
+
+    /// A fixed leaf inside a container the model also fills is still the
+    /// author's: a fixed header, or a fixed `${VAR}` in the body, is not sent
+    /// to a model-chosen host.
+    #[tokio::test]
+    async fn a_fixed_leaf_next_to_a_model_value_stays_on_the_authors_host() {
+        std::env::set_var("COLMENA_CLASS_TEST_LEAF", "leaf-env-test-only");
+        let fixed = [
+            json!({ "method": "GET",
+                "headers": { "X-Api-Key": "fixed-key-test-only", "X-Trace": "$DYNAMIC" } }),
+            json!({ "method": "POST",
+                "body": { "k": "${COLMENA_CLASS_TEST_LEAF}", "X-Trace": "$DYNAMIC" } }),
+        ];
+        for (i, mut fixed_config) in fixed.into_iter().enumerate() {
+            let other = MockServer::start().await;
+            Mock::given(wiremock::matchers::any())
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
+                .mount(&other)
+                .await;
+            fixed_config["base_url"] = json!("$DYNAMIC");
+            let cfg = json!({ "node_type": "http_request", "fixed_config": fixed_config });
+            let configs =
+                HashMap::from([("open".to_string(), serde_json::from_value(cfg).unwrap())]);
+            let executor = DagToolExecutor::new(Arc::new(HttpRegistry), configs);
+            let args = json!({ "base_url": other.uri(), "X-Trace": "model" });
+            let tc = ToolCall::new(
+                "c1".into(),
+                FunctionCall::new("open".into(), args.to_string()),
+            );
+            let result = executor.execute(&tc).await.unwrap();
+            let reached = other.received_requests().await.unwrap().iter().any(|r| {
+                r.headers
+                    .get("x-api-key")
+                    .is_some_and(|v| v == "fixed-key-test-only")
+                    || String::from_utf8_lossy(&r.body).contains("leaf-env-test-only")
+            });
+            assert!(
+                !reached,
+                "case {i}: an author value reached a model-chosen host"
+            );
+            assert!(!result.success, "case {i}");
+        }
+        std::env::remove_var("COLMENA_CLASS_TEST_LEAF");
     }
 
     struct PythonRegistry;

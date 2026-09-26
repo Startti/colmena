@@ -7,7 +7,8 @@ use crate::dag_engine::domain::error::DagError;
 use crate::dag_engine::domain::graph::{Edge, Graph};
 use crate::dag_engine::domain::graph_skeleton::{GraphSkeleton, SUBGRAPH_RESUME_INCOMPATIBLE};
 use crate::dag_engine::domain::node::{
-    config_sets_key, is_engine_key, strip_engine_keys, NodeInputs,
+    changed_leaves, config_sets_key, is_engine_key, strip_engine_keys, NodeInputs,
+    SECRET_CONFIG_PATHS_KEY,
 };
 
 use serde_json::{json, Value};
@@ -585,6 +586,9 @@ impl DagRunUseCase {
                 // as one. Env templates expand only in what the author wrote:
                 // such a value is refused, and the node does not run.
                 let mut config_secret_refusal: Option<String> = None;
+                // The config leaves a secret filled, for the node to count as
+                // the author's credentials (`SECRET_CONFIG_PATHS_KEY`).
+                let mut secret_config_paths: Vec<String> = Vec::new();
                 if node_config.node_type != "llm" {
                     if let Some(svc) = &self.secure_value_service {
                         let agent_for_inject = active_agent_session_id.as_deref();
@@ -600,11 +604,14 @@ impl DagRunUseCase {
                         if let Ok(injected_inputs) = serde_json::from_value::<NodeInputs>(inputs_value) {
                             inputs = injected_inputs;
                         }
+                        let config_before_secrets = node_config_value.clone();
                         match svc
                             .inject_secrets(&mut node_config_value, &session_id, agent_for_inject)
                             .await
                         {
                             Ok(map) => {
+                                secret_config_paths =
+                                    changed_leaves(&config_before_secrets, &node_config_value);
                                 if let Some(handle) =
                                     map.iter().find(|(real, _)| real.contains("${")).map(|(_, h)| h)
                                 {
@@ -644,6 +651,9 @@ impl DagRunUseCase {
 
                 inputs.insert("__colmena_session_id".to_string(), Value::String(session_id.clone()));
                 inputs.insert("__node_id".to_string(), Value::String(node_id.clone()));
+                if !secret_config_paths.is_empty() {
+                    inputs.insert(SECRET_CONFIG_PATHS_KEY.to_string(), json!(secret_config_paths));
+                }
                 inputs.insert(
                     "__colmena_node_id_path".to_string(),
                     Value::String(node_id_path.clone()),
@@ -3589,7 +3599,11 @@ mod graph_http_payload_tests {
             _: Option<&str>,
             handle: &str,
         ) -> Result<Option<String>, DagError> {
-            Ok((handle == "<sv_tok_1>").then(|| "pre-${COLMENA_CLASS_TEST_SECRET_ENV}".into()))
+            Ok(match handle {
+                "<sv_tok_1>" => Some("pre-${COLMENA_CLASS_TEST_SECRET_ENV}".into()),
+                "<sv_tok_2>" => Some("plain-secret-test-only".into()),
+                _ => None,
+            })
         }
         async fn cleanup(&self, _: &str) -> Result<(), DagError> {
             Ok(())
@@ -3628,6 +3642,49 @@ mod graph_http_payload_tests {
         });
         assert!(!reached, "a decrypted secret was read as an env template");
         std::env::remove_var("COLMENA_CLASS_TEST_SECRET_ENV");
+    }
+
+    /// A literal query param and a secret the engine placed in a `config` body
+    /// are the author's credentials too: with an edge that names `base_url`,
+    /// neither reaches the other host.
+    #[tokio::test]
+    async fn literal_query_params_and_config_secrets_stay_on_the_authors_host() {
+        let (author, other) = (server().await, server().await);
+        let edges = json!([{ "from": "hook.target", "to": "call.base_url" }]);
+        let payload = json!({ "target": other.uri() });
+        let literal = json!({ "query_params": { "key": "literal-key-test-only" } });
+        run(payload.clone(), &author, literal, edges.clone(), json!({})).await;
+        assert!(
+            other.received_requests().await.unwrap().is_empty(),
+            "a literal query param reached another host"
+        );
+
+        let g: Graph = serde_json::from_value(json!({
+            "nodes": {
+                "hook": { "type": "trigger_webhook", "config": { "test_payload": payload } },
+                "call": { "type": "http_request", "config": {
+                    "base_url": author.uri(), "endpoint": "/items", "method": "POST",
+                    "body": { "token": "<sv_tok_2>" }
+                } }
+            },
+            "edges": edges
+        }))
+        .unwrap();
+        let svc = Arc::new(SecureValueService::new(Arc::new(TemplateSecretRepo)));
+        let uc = DagRunUseCase::with_secure_values_and_service(Arc::new(Registry), None, svc);
+        let stream = uc.execute_stream(g, None, None, false, None, None, None);
+        tokio::pin!(stream);
+        while stream.next().await.is_some() {}
+        let reached = other
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .any(|r| String::from_utf8_lossy(&r.body).contains("plain-secret-test-only"));
+        assert!(
+            !reached,
+            "a secret from the config body reached another host"
+        );
     }
 
     /// Engine keys never survive `build_inputs_for`, whether an edge without a
