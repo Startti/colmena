@@ -6084,3 +6084,24 @@ y `suspend_resume_routing` (2) siguen verdes.
 **ADP.** Sin cambios de código. Antes de subir el pin, la medición en solo lectura de la nota de
 migración (tramo 7/7).
 **Estado.** done.
+
+## 134. La memoria de una tool, por quien la llama (5/7): E2E del mismo agente a dos niveles
+
+**Qué cambió.** Solo tests. `tests/graphs/agents/nested_tool_memory.json` (lint limpio;
+`corpus_noise` pasa a 335) corre en `src/libs/colmena/tests/nested_tool_memory.rs` con Postgres
+y un modelo guionado que contesta según quién lo llama. El padre tiene `X` (`parallel`,
+`dynamic` con el hilo fijo en `${agentId}`) e `Y` (`parallel`, `persistent`), y el hijo de `Y`
+también tiene `X`. B y D llegan en el tramo 6/7.
+
+**E2E.** 1 passed.
+- A: en un mensaje, `X{x}` pregunta e `Y` corre `X{x}` 600 ms después. `tool/X/x/agente_x`
+  conserva la pregunta sin marcador, `tool/Y/hijo_y/tool/X/x/agente_x` tiene sus dos mensajes,
+  y el resume le entrega la respuesta a `X`.
+- C, en A: las claves del chat son `agent`, `tool/X/x/agente_x`, `tool/Y/hijo_y` y
+  `tool/Y/hijo_y/tool/X/x/agente_x`.
+
+**Mutación.** Roja y revertida: `llm.rs` sin pasar quien llama. El hilo de la raíz recibe el
+marcador de `abandoned_tool_call.md` y los mensajes del otro nivel.
+
+**ADP.** Nada.
+**Estado.** done.
