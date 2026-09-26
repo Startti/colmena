@@ -1,11 +1,11 @@
 //! Per-leaf provenance for `${VAR}` environment-variable expansion in
 //! tool-dispatched node arguments.
 //!
-//! An LLM-authored tool argument must never resolve a `${VAR}` placeholder
-//! against the process environment — otherwise a model could read back a
-//! secret by naming its env var (`q: "${DATABASE_URL}"`) as an ordinary tool
-//! argument. Operator-authored values (`node_schema` `fixed`, `fixed_config`,
-//! the fixed portion of a `$DYNAMIC` template) must keep resolving as today.
+//! Env templates expand only in values the author wrote: a `${VAR}`
+//! placeholder in a tool argument the model supplied is sent as written and
+//! never resolved against the process environment. Operator-authored values
+//! (`node_schema` `fixed`, `fixed_config`, the fixed portion of a `$DYNAMIC`
+//! template) keep resolving.
 //!
 //! The dispatcher (`DagToolExecutor`) computes, once per tool call, the set
 //! of JSON pointers into the merged tool arguments whose STRING value is
