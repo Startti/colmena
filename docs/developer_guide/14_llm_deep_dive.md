@@ -214,8 +214,7 @@ Boolean optional flag (`true | false`, default `false`). When enabled, tools in 
   - `DataFieldTooLarge { size }` — `data` con `size_bytes > 30 MB`. Bug del emisor.
   - `UrlWithoutDocumentId` — `url` presente sin `id`. Bug de contrato.
   - `SignedUrlFetchFailed { status }` — GCS rechazó GET (URL expirada).
-  - `AttachmentUrlRefused { reason }` — la URL no es `http(s)` o su destino no es una dirección pública; no se marca nada.
-  - `AttachmentTooLarge { limit }` — el adjunto pasa el tope de bytes.
+  - `AttachmentUrlRefused { reason }` (URL no `http(s)` o destino no público) y `AttachmentTooLarge { limit }` (pasa el tope).
   - `InvalidMimeType { mime, message }` — mime mal formado (precondición del caller).
   - `FileApiUploadFailed { provider, message }` — provider rechazó upload (cuota, key inválida).
   - `ProviderFileNotFound { provider_file_id }` — archivo borrado del provider; se recupera automáticamente con snapshot+retry.
