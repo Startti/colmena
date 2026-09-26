@@ -54,7 +54,7 @@ reciente del id, `$attachment:<document_id>` responde `StorageKeyMissing`, salvo
 ese provider ya tuviera una clave (la limitación de abajo). Un archivo de texto inline
 (`data`/`path`), que solo se lee desde storage, no se registra; uno de texto con `url` se sube a
 la Files API y se registra sin clave como los demás. El evento `attachment.registered` lleva
-`stored` (CHANGELOG 2026-09 §113).
+`stored` (CHANGELOG 2026-09 §125).
 
 **Limitación.** El upsert conserva la clave que un turno anterior guardó en la fila de ese
 mismo provider (`COALESCE`). Si el id se vuelve a subir con otros bytes y guardarlos falla,
@@ -388,7 +388,7 @@ inválido, `path` ilegible, sin `data`/`url`/`path`, algo que no es un objeto) n
 con un archivo, y un archivo que la resolución descarta no corre el id ni la metadata de los que
 vienen después, salvo en un caso: si la entrada del archivo descartado tiene el mismo `id`,
 `filename` y `mime_type` que la de un archivo posterior, ese archivo toma su `label`,
-`description` y `url`/`path` (el id es el suyo igual) (CHANGELOG 2026-09 §113).
+`description` y `url`/`path` (el id es el suyo igual) (CHANGELOG 2026-09 §125).
 
 ## Subgrafos
 

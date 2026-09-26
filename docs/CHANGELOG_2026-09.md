@@ -5820,7 +5820,7 @@ Sin corrida E2E con un modelo real: este worktree no tiene credenciales de prove
 
 **ADP.** Sin cambios de API ni de esquema. **Estado.** done.
 
-## 113. Fix: cada archivo de `files[]` se registra con su propio id
+## 125. Fix: cada archivo de `files[]` se registra con su propio id
 
 **Qué cambia.** El registro de los archivos de un `llm_call` leía `id`, `label`,
 `description` y `url`/`path` de la entrada de `files[]` en la misma posición que el archivo.
@@ -5838,7 +5838,7 @@ a ese archivo su `label`, `description` y `url`/`path`.
 
 Un archivo cuyos bytes no se pudieron guardar se sigue registrando si está en la Files API del
 provider (`load_attachment` lo lee por su `provider_file_id`), y este turno no le pone
-`storage_key`: no figura como guardado y, como es la fila más reciente del id (§112),
+`storage_key`: no figura como guardado y, como es la fila más reciente del id (§123),
 `$attachment:<id>` responde `StorageKeyMissing`, salvo por esta **limitación:** el upsert
 conserva la clave que un turno anterior guardó en la fila de ese mismo provider (`COALESCE`),
 así que si el id se vuelve a subir con otros bytes y guardarlos falla, `$attachment:<id>`
