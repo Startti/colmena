@@ -497,7 +497,7 @@ itself came from `inputs` and a dispatcher did not vouch for every `${` leaf
 in it (`env_provenance::subtree_trusted`), the authored copy is empty: its
 `fixed` values are data and nothing in them expands. `${UPPER_CASE}` names
 an env var and is never filled from `inputs` by that templating
-(CHANGELOG 2026-09 §106).
+(CHANGELOG 2026-09 §112).
 
 The pointer list is written last among the engine keys (§ Step 4b), under
 `__colmena_env_trusted_paths` (`env_provenance::ENV_TRUSTED_PATHS_KEY`) —

@@ -5549,7 +5549,7 @@ el target no ofrece. `registry.rs`: la tabla de campos del autor de cada nodo.
 `node_schema` lo declarara debe declararlo como parámetro.
 **Estado.** done.
 
-## 106. Endurecimiento: en `llm_call`, `${VAR}` se expande solo en lo que escribió el autor
+## 112. Endurecimiento: en `llm_call`, `${VAR}` se expande solo en lo que escribió el autor
 
 **Qué cambia.**
 - La procedencia de los `fixed` de una tool se toma antes del templating `${context.*}`:
