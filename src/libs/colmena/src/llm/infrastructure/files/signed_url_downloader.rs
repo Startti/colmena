@@ -155,6 +155,7 @@ impl SignedUrlDownloader {
         Self::from_parts(client.clone(), *dialable, *max)
     }
 
+    #[cfg(test)]
     fn with_policy(dialable: Dialable, max_bytes: u64) -> Self {
         Self::from_parts(guarded_client(dialable), dialable, max_bytes)
     }
