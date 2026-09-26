@@ -77,7 +77,7 @@ Detalles importantes:
 - **Imagen por URL con Anthropic u OpenAI:** queda como URL, sin `file_id`. El Step 3 del
   `llm_call` baja la URL, guarda los bytes y la registra en el catálogo con `provider_file_id`
   vacío: `load_attachment` la sirve desde storage (base64) y `$attachment:<document_id>` reenvía
-  los bytes. Hasta CHANGELOG 2026-09 §114, con `DATABASE_URL` no se registraba.
+  los bytes. Hasta CHANGELOG 2026-09 §141, con `DATABASE_URL` no se registraba.
 - **Gemini** resumable upload requiere chunks intermedios de tamaño **exactamente** múltiplo de 8 MB (`CHUNK_SIZE`). El último chunk puede ser de cualquier tamaño.
 
 ## Cache persistido en Postgres

@@ -6278,7 +6278,7 @@ recibe requests; una pasada del tope es `SpecTooLarge`. `multipart_http_test.rs`
 imágenes, archivos o specs desde `localhost` necesita `COLMENA_ATTACHMENT_ALLOW_PRIVATE_HOSTS=1`.
 **Estado.** done.
 
-## 114. Fix: una imagen por URL a Anthropic u OpenAI entra al catálogo
+## 141. Fix: una imagen por URL a Anthropic u OpenAI entra al catálogo
 
 **Qué cambia.** Con `DATABASE_URL` (el camino con cache de `LlmCallUseCase::resolve_files`), una
 imagen de `files[]` con `url` para un modelo de Anthropic u OpenAI queda como URL: el adapter se

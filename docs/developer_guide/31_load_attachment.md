@@ -47,7 +47,7 @@ then is described below the list.
   ([14_llm_deep_dive.md](14_llm_deep_dive.md), CHANGELOG 2026-09 §137). También se guardan los
   de una imagen que, con Anthropic u OpenAI y `DATABASE_URL`, se le pasa al modelo como URL sin
   subirla a la Files API: se registra con `provider_file_id` vacío y `load_attachment` la sirve
-  desde storage (CHANGELOG 2026-09 §114).
+  desde storage (CHANGELOG 2026-09 §141).
 - **Generated artifact** (`image_generation` / `image_edit` / `tts`): los bytes ya
   viven en storage; el artefacto se registra automáticamente en `conversation_attachments`
   con `origin = generated_by:<tool>` y `source = Path(storage_key)`.
