@@ -2670,6 +2670,36 @@ mod resume_graph_tests {
         assert!(!flipped);
         assert_eq!(repo.row("done_1").status, DagRunStatus::Completed);
     }
+
+    /// A child run that suspends names itself in its output's `session_id`:
+    /// `DagToolExecutor::close_suspended` finds the row to close by it.
+    #[tokio::test]
+    async fn a_suspended_child_run_names_itself_in_its_output() {
+        let repo = Arc::new(MemRepo::default());
+        let uc = DagRunUseCase::new(
+            Arc::new(EchoRegistry),
+            Some(repo.clone() as Arc<dyn DagStateRepository>),
+        );
+        let ask = json!({ "__colmena_status": "SUSPENDED", "questions": [] });
+        let graph = json!({ "nodes": { "ask": { "type": "echo", "config": ask } }, "edges": [] });
+        let out = uc
+            .run_subgraph(
+                "child_9",
+                graph,
+                json!({}),
+                None,
+                Some("root_1".into()),
+                None,
+                None,
+            )
+            .await
+            .expect("runs");
+        assert_eq!(out["__colmena_status"], json!("SUSPENDED"));
+        assert_eq!(out["session_id"], json!("child_9"));
+        let row = repo.row("child_9");
+        assert_eq!(row.status, DagRunStatus::Suspended);
+        assert_eq!(row.parent_session_id.as_deref(), Some("root_1"));
+    }
 }
 
 #[cfg(test)]

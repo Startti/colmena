@@ -101,6 +101,14 @@ pub trait ToolExecutor: Send + Sync {
     fn parallel_chain_key(&self, _call: &ToolCall) -> Option<String> {
         None
     }
+
+    /// Closes what a call that suspended left waiting, when its question is
+    /// not the one the turn pauses on: two calls of one parallel group asked
+    /// and only the first, in the model's order, is kept. `outcome` is the
+    /// call's parsed `SUSPENDED` output. Called at most once per call.
+    ///
+    /// The default does nothing: an executor with nothing left waiting.
+    async fn close_suspended(&self, _call: &ToolCall, _outcome: &serde_json::Value) {}
 }
 
 #[cfg(test)]

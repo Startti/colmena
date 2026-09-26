@@ -38,6 +38,13 @@ const REPEAT_NUDGE_TEXT: &str = include_str!("../../../text/prompts/agent_loop/r
 pub(crate) const NOT_EXECUTED_ON_SUSPEND_TEXT: &str =
     include_str!("../../../text/prompts/agent_loop/not_executed_on_suspend.md");
 
+/// LLM-facing text persisted as the tool result of a call in a parallel group
+/// that suspended while an earlier call of the same group (in the model's
+/// order) also did. A turn pauses on one question, so this one is closed: the
+/// call ran, did not finish, and can be run again alone once the other ends.
+const CLOSED_BY_PARALLEL_SUSPEND_TEXT: &str =
+    include_str!("../../../text/prompts/agent_loop/closed_by_parallel_suspend.md");
+
 /// LLM-facing instruction for the forced final synthesis ("rescue"). Appended
 /// as a user message before the terminal, tool-less LLM call.
 const RESCUE_SYNTHESIS_TEXT: &str =
@@ -716,7 +723,9 @@ impl AgentService {
                                 outcomes[i] = Some(outcome);
                             }
 
-                            // Then the history, in the model's order.
+                            // Then the history, in the model's order. The
+                            // first call that suspended, in that order, is the
+                            // question the turn pauses on.
                             let mut suspended = None;
                             for &i in &order {
                                 let tool_call = &tool_calls[i];
@@ -736,7 +745,8 @@ impl AgentService {
                                             // ascending-order pass), so if
                                             // `j`'s own outcome was Suspended
                                             // or never ran, index `j` (or an
-                                            // even earlier index in its chain)
+                                            // even earlier index: its chain's,
+                                            // or the question the turn keeps)
                                             // already set `suspended` above
                                             // by the time we reach `i` here.
                                             // Skipping without writing a `tool`
@@ -790,16 +800,26 @@ impl AgentService {
                                     {
                                         suspended = Some((result, sentinel));
                                     }
-                                    // A later suspension (see the TODO below),
-                                    // or a call that never ran: its chain
-                                    // stopped at a suspension.
+                                    // A turn pauses on one question: a later
+                                    // one ran, and is closed.
+                                    Some(CallOutcome::Suspended(_, sentinel)) => {
+                                        self.close_question(
+                                            session_id,
+                                            &on_token,
+                                            &mut messages,
+                                            tool_executor,
+                                            tool_call,
+                                            sentinel,
+                                        )
+                                        .await?;
+                                    }
+                                    // A call that never ran: its chain stopped
+                                    // at a suspension.
                                     //
                                     // INVARIANT: same as the Echo::Call skip
                                     // above — this arm only runs once a
-                                    // suspension was already recorded, either
-                                    // by an earlier index in this pass (a
-                                    // later suspension) or by an earlier call
-                                    // in `i`'s own chain (never ran). Nothing
+                                    // suspension was already recorded, by an
+                                    // earlier call in `i`'s own chain. Nothing
                                     // is written here for `i`'s id;
                                     // `suspend()` below closes it with
                                     // `NOT_EXECUTED_ON_SUSPEND_TEXT`
@@ -820,14 +840,9 @@ impl AgentService {
 
                             // The group's results are written; a suspension
                             // ends the run as it does for a call alone, and
-                            // closes every call that did not run.
-                            //
-                            // TODO(parallel-suspend, Task 7): with more than one
-                            // suspended call only the first, in the model's
-                            // order, is kept. The others get the not-executed
-                            // marker although they ran, and their child runs
-                            // stay suspended: Task 7 closes them with their own
-                            // text and closes their rows.
+                            // closes every call that did not run: what follows
+                            // a suspended call in its chain, and every call
+                            // after the group.
                             if let Some((result, sentinel)) = suspended {
                                 return self
                                     .suspend(session_id, &mut messages, result, sentinel)
@@ -1131,6 +1146,43 @@ impl AgentService {
         executed.push(executed_call);
 
         let tool_message = LlmMessage::tool(result.tool_call_id.clone(), result.output.clone())?;
+        messages.push(tool_message.clone());
+        self.conversation_repository
+            .add_message(session_id, tool_message)
+            .await
+    }
+
+    /// Closes a call of a group that suspended after an earlier call of the
+    /// group, in the model's order, did. The turn pauses on that one question,
+    /// so the executor closes what this call left waiting (its child run), its
+    /// Start frame gets a Finish, and its `tool` message tells the model to run
+    /// it again alone once the other ends.
+    async fn close_question(
+        &self,
+        session_id: &ConversationKey,
+        on_token: &Option<Box<dyn Fn(LlmStreamPart) + Send + Sync>>,
+        messages: &mut Vec<LlmMessage>,
+        tool_executor: &dyn ToolExecutor,
+        tool_call: &ToolCall,
+        sentinel: &serde_json::Value,
+    ) -> Result<(), LlmError> {
+        tracing::info!(
+            target: "colmena::agent",
+            tool_call_id = %tool_call.id,
+            "agent_service: a second question in a parallel group; closing it"
+        );
+        tool_executor.close_suspended(tool_call, sentinel).await;
+
+        let text = CLOSED_BY_PARALLEL_SUSPEND_TEXT.trim().to_string();
+        if let Some(callback) = on_token {
+            (callback)(LlmStreamPart::LlmToolCallFinish(ToolResult {
+                tool_call_id: tool_call.id.clone(),
+                output: text.clone(),
+                success: false,
+                error: None,
+            }));
+        }
+        let tool_message = LlmMessage::tool(tool_call.id.clone(), text)?;
         messages.push(tool_message.clone());
         self.conversation_repository
             .add_message(session_id, tool_message)
@@ -3870,12 +3922,15 @@ mod tests {
     /// An executor whose calls sleep `ms` and record `start <id>` / `end <id>`
     /// in the order they happen, and how many ran at once. A call's chain key
     /// is its `key` argument (`"$id"`: its own id, as a stateless tool keys);
-    /// a call without one is not parallel. `"suspend":true` suspends.
+    /// a call without one is not parallel. `"suspend":true` suspends, with a
+    /// sentinel naming the call in `from`.
     #[derive(Default)]
     struct TimedExec {
         timeline: Mutex<Vec<String>>,
         in_flight: AtomicUsize,
         peak: AtomicUsize,
+        /// Every `close_suspended` call: the call's id and its sentinel.
+        closed: Mutex<Vec<(String, serde_json::Value)>>,
     }
 
     #[async_trait]
@@ -3896,7 +3951,7 @@ mod tests {
                 .unwrap()
                 .push(format!("end {}", call.id));
             let output = if args["suspend"] == true {
-                r#"{"__colmena_status":"SUSPENDED","questions":[]}"#.to_string()
+                TimedExec::sentinel(&call.id).to_string()
             } else {
                 format!("out {}", call.id)
             };
@@ -3914,9 +3969,19 @@ mod tests {
                 key => Some(key.to_string()),
             }
         }
+
+        async fn close_suspended(&self, call: &ToolCall, outcome: &serde_json::Value) {
+            let entry = (call.id.clone(), outcome.clone());
+            self.closed.lock().unwrap().push(entry);
+        }
     }
 
     impl TimedExec {
+        /// What call `id` returns when it suspends.
+        fn sentinel(id: &str) -> serde_json::Value {
+            serde_json::json!({ "__colmena_status": "SUSPENDED", "questions": [], "from": id })
+        }
+
         fn at(&self, event: &str) -> usize {
             let timeline = self.timeline.lock().unwrap();
             timeline
@@ -4069,6 +4134,67 @@ mod tests {
                 NOT_EXECUTED_ON_SUSPEND_TEXT.trim()
             );
         }
+        // One question: nothing to close.
+        assert!(exec.closed.lock().unwrap().is_empty());
+    }
+
+    /// Two calls of one group ask. The turn pauses on the first in the model's
+    /// order, here the one that finishes last. The second is closed: its child
+    /// run through `close_suspended`, once, and its answer tells the model to
+    /// run it again alone. Only what did not run gets the not-executed marker:
+    /// what follows either question on its thread, and what follows the group.
+    /// Each of those comes before a call that ran.
+    #[tokio::test(start_paused = true)]
+    async fn two_questions_in_a_group_keep_the_first_and_close_the_second() {
+        let (exec, parts, history, resp) = run_group(
+            &[
+                r#"{"key":"a","suspend":true,"ms":50}"#,
+                r#"{"key":"a","n":1}"#,
+                r#"{"key":"b"}"#,
+                r#"{"key":"c","suspend":true}"#,
+                r#"{"key":"c","n":4}"#,
+                r#"{"key":"d","ms":20}"#,
+                r#"{"n":6}"#,
+            ],
+            4,
+        )
+        .await;
+        assert_eq!(resp.suspend().expect("suspended").tool_call_id, "c0");
+        assert_eq!(
+            *exec.closed.lock().unwrap(),
+            [("c3".to_string(), TimedExec::sentinel("c3"))]
+        );
+        let timeline = exec.timeline.lock().unwrap().clone();
+        for id in ["c1", "c4", "c6"] {
+            assert!(!timeline.contains(&format!("start {id}")), "{id} ran");
+        }
+        // c0 stays pending. What ran is answered in the model's order, then
+        // what did not run.
+        assert_eq!(answered(&history), ["c2", "c3", "c5", "c1", "c4", "c6"]);
+        assert_eq!(tool_output(&history, "c2"), "out c2");
+        assert_eq!(tool_output(&history, "c5"), "out c5");
+        let closed = CLOSED_BY_PARALLEL_SUSPEND_TEXT.trim();
+        assert_eq!(tool_output(&history, "c3"), closed);
+        for id in ["c1", "c4", "c6"] {
+            assert_eq!(
+                tool_output(&history, id),
+                NOT_EXECUTED_ON_SUSPEND_TEXT.trim()
+            );
+        }
+        // The closed call's Start gets its Finish; the pending one's does not.
+        let finished: Vec<(&str, &str)> = parts
+            .iter()
+            .filter_map(|p| match p {
+                LlmStreamPart::LlmToolCallFinish(r) => {
+                    Some((r.tool_call_id.as_str(), r.output.as_str()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            finished,
+            [("c2", "out c2"), ("c5", "out c5"), ("c3", closed)]
+        );
     }
 
     /// GROUP-PATH MIRROR of `three_identical_calls_in_one_turn_rescue_intra_turn`:
