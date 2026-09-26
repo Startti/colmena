@@ -7,7 +7,7 @@
 
 - `OpenApiAdapterConfig` (struct, pub) — configuration container with `max_bytes` and `timeout` limits for the fetch pipeline
 - `OpenApiAdapterConfig::default()` (impl, pub) — default config: 10 MB limit, 60-second timeout
-- `OpenApiAdapter` (struct, pub) — holds the guarded `SignedUrlDownloader` (public addresses only; CHANGELOG 2026-09 §123) and config; main adapter entry point
+- `OpenApiAdapter` (struct, pub) — holds the guarded `SignedUrlDownloader` (public addresses only; CHANGELOG 2026-09 §140) and config; main adapter entry point
 - `OpenApiAdapter::new()` (fn, pub) — constructor: the guarded client capped at `max_bytes` (`AttachmentTooLarge` → `SpecTooLarge`), with the config timeout
 - `OpenApiAdapter::fetch_raw()` (async fn, pub(crate)) — lower-level fetch with streaming body, size enforcement, HTML detection, and conditional GET support; returns metadata (content-type, ETag, Last-Modified, resolved URL)
 - `FetchRawResult` (enum, pub(crate)) — result type for `fetch_raw`: `Fresh` (with body + headers) or `NotModified` (304 response)

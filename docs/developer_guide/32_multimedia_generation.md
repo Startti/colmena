@@ -375,7 +375,7 @@ versiones anteriores) pierde contra cualquier otra, aunque sea más nueva (CHANG
 `image_edit` acepta en `source_url` y `mask_url`:
 
 - `data:` URIs y URLs `http(s)://`: se usan tal cual; una URL se baja con el cliente guardado de
-  los adjuntos: solo direcciones públicas, tope 100 MiB (CHANGELOG 2026-09 §123);
+  los adjuntos: solo direcciones públicas, tope 100 MiB (CHANGELOG 2026-09 §140);
 - cualquier otra cosa es un adjunto: `"$attachment:<document_id>"` o el
   `document_id` pelado, resuelto con el `AttachmentStreamResolver` de la sesión
   (`__colmena_agent_session_id`), tope 100 MiB. Un handle de storage

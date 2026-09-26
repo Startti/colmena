@@ -6209,10 +6209,10 @@ producción: ADP pone los adjuntos en `config.files` de los `llm_call` de primer
 que nunca va en un worker compartido: deja leer su disco.
 **Estado.** done.
 
-## 123. Endurecimiento: la imagen de `image_edit`, las partes URL de multipart y la spec de `api_explorer` se bajan con el cliente guardado
+## 140. Endurecimiento: la imagen de `image_edit`, las partes URL de multipart y la spec de `api_explorer` se bajan con el cliente guardado
 
 **Qué cambia.** Tres descargas más de una URL que los datos del run pueden elegir pasan por el
-cliente guardado de §121 (`SignedUrlDownloader`: solo `http`/`https`, solo direcciones públicas,
+cliente guardado de §137 (`SignedUrlDownloader`: solo `http`/`https`, solo direcciones públicas,
 también en cada redirect, sin proxy, conexión 10 s y tope de bytes):
 - `image_edit`: `source_url`/`mask_url` `http(s)`; tope 100 MiB, el de una fuente `$attachment:`.
 - `http_request` multipart: las partes URL; `max_file_size_bytes` (sin pasar
@@ -6221,7 +6221,7 @@ también en cada redirect, sin proxy, conexión 10 s y tope de bytes):
   GET condicional.
 
 Un destino no público falla sin marcarse (`not a public address` en el error de cada nodo). Las
-dos variables de §121 valen para las tres; el User-Agent es `colmena/<versión> (+<repositorio>)`.
+dos variables de §137 valen para las tres; el User-Agent es `colmena/<versión> (+<repositorio>)`.
 `SignedUrlDownloader` suma `fetch` (headers de la respuesta), `fetch_conditional` (solo
 `If-None-Match`/`If-Modified-Since`), `capped_at` (solo baja el tope) y `with_timeout` (hasta
 600 s). `source_url`/`mask_url` siguen sin ser campos del autor: en modo tool son la entrada del

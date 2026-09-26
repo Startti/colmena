@@ -203,7 +203,7 @@ Knobs principales:
 
 | Param | Tipo | Required | Notas |
 |---|---|---|---|
-| `url` | string | yes | URL pública a la spec (OpenAPI 3.x JSON/YAML o Swagger 2.0). Git-forge URLs se auto-normalizan a raw. Se baja con el cliente guardado: solo direcciones públicas (CHANGELOG 2026-09 §123). |
+| `url` | string | yes | URL pública a la spec (OpenAPI 3.x JSON/YAML o Swagger 2.0). Git-forge URLs se auto-normalizan a raw. Se baja con el cliente guardado: solo direcciones públicas (CHANGELOG 2026-09 §140). |
 | `force_reload` | bool | no | default `false`. `true` invalida la entry de cache y vuelve a descargar. |
 
 Devuelve: `{ spec_url_input, resolved_url, original_format, internal_format, title, version, description, server_url, endpoints_count, tags, security_schemes, cached }`.
@@ -463,7 +463,7 @@ Cuando el header `Content-Type` empieza con `multipart/`, el nodo `http_request`
 | Forma del valor | Resultado |
 |---|---|
 | String `$attachment:<document_id>` | Parte de archivo, bytes streameados desde el storage (ver abajo). |
-| String que empieza con `https://` (o `http://` si `allow_http_urls=true`) | Parte de archivo: GET streaming con el cliente guardado, solo direcciones públicas (CHANGELOG 2026-09 §123). |
+| String que empieza con `https://` (o `http://` si `allow_http_urls=true`) | Parte de archivo: GET streaming con el cliente guardado, solo direcciones públicas (CHANGELOG 2026-09 §140). |
 | Cualquier otro string | Text part (campo no-archivo). |
 | Number o boolean | Coerced a su representación string como text part. |
 | `null` | El campo se omite. |

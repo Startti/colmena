@@ -9,7 +9,7 @@
 - `SignedUrlDownloader::new()` (fn, pub) — The guarded client; `COLMENA_ATTACHMENT_ALLOW_PRIVATE_HOSTS` / `COLMENA_ATTACHMENT_MAX_BYTES` (default 100 MiB) read once per process, with one shared `reqwest::Client` (10s connect, 600s total)
 - `GuardedResolver`, `literal_refused`, `guarded_client`, `cap` (private) — DNS check, IP-literal check (URL and redirect hops), client build, byte cap on the stream
 - `SignedUrlDownloader::stream()` (fn, pub async) — Streams the body; `AttachmentUrlRefused` (nothing dialled), `AttachmentTooLarge`, `NetworkError`, `SignedUrlFetchFailed`
-- `SignedUrlDownloader::fetch()` / `fetch_conditional()` (fn, pub async) — Same checks; returns `Fetched { headers, body }`; `fetch_conditional` adds only `If-None-Match` / `If-Modified-Since`. Also used by `image_edit`, `http_request` multipart URL parts and `api_explorer` (CHANGELOG 2026-09 §123)
+- `SignedUrlDownloader::fetch()` / `fetch_conditional()` (fn, pub async) — Same checks; returns `Fetched { headers, body }`; `fetch_conditional` adds only `If-None-Match` / `If-Modified-Since`. Also used by `image_edit`, `http_request` multipart URL parts and `api_explorer` (CHANGELOG 2026-09 §140)
 - `SignedUrlDownloader::capped_at()` / `with_timeout()` (fn, pub) — Lower the byte cap (never raise it); whole-request deadline (at most 600 s)
 - `Default for SignedUrlDownloader` (impl) — Delegates to `new()`
 - `SignedUrlFetcher for SignedUrlDownloader` (impl) — Implements domain trait by delegating to `stream()`
