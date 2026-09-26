@@ -118,8 +118,11 @@ mod tests {
     fn call(req: &WireRequest, max: usize) -> io::Result<WireResponse> {
         pyo3::Python::initialize();
         let (mut ours, mut theirs) = UnixStream::pair()?;
-        let t = std::thread::spawn(move || handle_request(&mut theirs, max));
+        // The whole request goes in before the child starts: the socket
+        // buffer holds it, so a child that answers early and closes (as it
+        // does for an oversized request) never races the host's write.
         frame::write_frame(&mut ours, &serde_json::to_vec(req).unwrap())?;
+        let t = std::thread::spawn(move || handle_request(&mut theirs, max));
         let bytes = frame::read_frame(&mut ours, 1 << 20);
         t.join().unwrap()?;
         Ok(serde_json::from_slice(&bytes?).unwrap())
