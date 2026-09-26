@@ -290,7 +290,11 @@ if let Err(e) = reg.upsert(upsert).await {
 | `quality` | opcional (openai) | `low | medium | high | auto` |
 | `n` | opcional | Default 1, max 10 (clamped) |
 | `google_project_id` | opcional* (google) | **Best practice: omitir.** Si no está en config se lee de `GOOGLE_CLOUD_PROJECT` (o `GOOGLE_PROJECT_ID`) env var del worker. |
-| `google_location` | opcional (google) | Default `us-central1`. Si no está en config se lee de `GOOGLE_CLOUD_LOCATION` (o `GOOGLE_LOCATION`) env var. |
+| `google_location` | opcional (google) | Default `us-central1`. Si no está en config se lee de `GOOGLE_CLOUD_LOCATION` (o `GOOGLE_LOCATION`) env var. Solo un nombre de región (minúsculas, dígitos y `-`): forma parte del host de la request, así que otro valor falla antes de pedir nada. |
+
+`google_project_id` y `google_location` son campos del autor, como `api_key`: un edge sin
+campo, el estado global o un argumento que la tool no ofrece nunca los fijan (CHANGELOG
+2026-09 §128). `image_edit` no tiene esta ruta: solo implementa `openai`, contra un host fijo.
 
 **Output**: `{ "output": { "images": [...], "provider", "model" } }`.
 

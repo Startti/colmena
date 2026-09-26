@@ -1284,7 +1284,10 @@ mod catalog_coverage_tests {
                     "setup_sql",
                 ],
             ),
-            ("image_generation", &["api_key"]),
+            (
+                "image_generation",
+                &["api_key", "google_project_id", "google_location"],
+            ),
             ("image_edit", &["api_key"]),
             ("tts", &["api_key"]),
             ("information_extraction", &["system_message"]),
@@ -1300,6 +1303,21 @@ mod catalog_coverage_tests {
                 assert!(
                     node.author_owned_inputs().contains(field),
                     "{node_type}.{field} is not author-owned"
+                );
+            }
+        }
+    }
+
+    /// An edge without a field hands its whole payload to the node's
+    /// `default_input`, so that port is data and never an author-owned field.
+    #[test]
+    fn no_default_input_is_an_author_owned_field() {
+        let reg = build_fully_wired_registry();
+        for (node_type, node) in reg.get_all_nodes() {
+            if let Some(port) = node.default_input() {
+                assert!(
+                    !node.author_owned_inputs().contains(&port),
+                    "{node_type}.{port} is both the default input and author-owned"
                 );
             }
         }

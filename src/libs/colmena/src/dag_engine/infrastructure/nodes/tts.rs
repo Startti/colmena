@@ -67,6 +67,10 @@ pub struct TtsNode {
     /// instead of building one via the factory. Bypasses provider dispatch.
     #[cfg(test)]
     test_repository: Option<Arc<dyn crate::llm::domain::tts_repository::TtsRepository>>,
+    /// Test-only override of the OpenAI base URL: the real adapter, with the
+    /// resolved `api_key`, sends its request there.
+    #[cfg(test)]
+    test_openai_base_url: Option<String>,
 }
 
 impl TtsNode {
@@ -77,6 +81,8 @@ impl TtsNode {
             attachment_registry: None,
             #[cfg(test)]
             test_repository: None,
+            #[cfg(test)]
+            test_openai_base_url: None,
         }
     }
 
@@ -201,6 +207,11 @@ impl ExecutableNode for TtsNode {
             #[cfg(test)]
             if let Some(r) = &self.test_repository {
                 r.clone()
+            } else if let Some(url) = &self.test_openai_base_url {
+                Arc::new(
+                    crate::llm::infrastructure::OpenAiTtsAdapter::new(api_key)
+                        .with_base_url(url.clone()),
+                )
             } else {
                 build_tts_repository(&provider, api_key)
                     .map_err(|e| -> Box<dyn StdError + Send + Sync> { Box::new(e) })?
@@ -446,6 +457,55 @@ mod tests {
         assert!(audio.get("url").is_none(), "Plan B removed the url field");
         assert_eq!(audio["mime_type"], "audio/mpeg");
         assert_eq!(audio["duration_ms"], 500);
+    }
+
+    /// The `api_key` the adapter sends: from `config` it expands `${VAR}`;
+    /// from `inputs` without a vouched pointer it is sent as written.
+    #[tokio::test]
+    async fn an_api_key_from_data_reaches_the_provider_as_written() {
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        std::env::set_var("COLMENA_CLASS_TEST_TTS_KEY", "tts-key-test-only");
+        let server = MockServer::start().await;
+        Mock::given(wiremock::matchers::any())
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        let node = TtsNode {
+            test_openai_base_url: Some(server.uri()),
+            ..TtsNode::new(Arc::new(MockOutputStorageRepository::new()))
+        };
+        let key = json!("${COLMENA_CLASS_TEST_TTS_KEY}");
+        let mut config = base_config();
+        config["api_key"] = key.clone();
+        let _ = node
+            .execute(&HashMap::new(), &config, &mut json!({}), None)
+            .await;
+        let inputs = HashMap::from([("api_key".to_string(), key)]);
+        let _ = node
+            .execute(&inputs, &base_config(), &mut json!({}), None)
+            .await;
+        let sent: Vec<String> = server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| {
+                r.headers
+                    .get("authorization")
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(
+            sent,
+            [
+                "Bearer tts-key-test-only",
+                "Bearer ${COLMENA_CLASS_TEST_TTS_KEY}"
+            ]
+        );
+        std::env::remove_var("COLMENA_CLASS_TEST_TTS_KEY");
     }
 
     #[tokio::test]
