@@ -4871,3 +4871,37 @@ firmadas, implementa `read_url`/`supports_read_url` en su propio adaptador
 **Estado.** partial (feature C, parte 1 de 2 — falta la parte 2: el placeholder
 `$attachment_url:` en `http_request`, la sustitución fuera del contexto del LLM, y el
 adaptador de ADP).
+
+## 93. El merge de una llamada a una tool devuelve sus avisos (parallel tools, 2a)
+
+**Qué cambió.** `DagToolExecutor::execute_inner` resolvía la entrada y su nodo, parseaba
+los argumentos del modelo y los mergeaba en la config del autor, todo en línea. Esos
+pasos 1-3 pasan, sin cambios, a `merge_call -> MergedCall`, y la resolución del
+`thread_id` pasa a `thread_of`. Es la preparación de la clave de cadena del paso
+siguiente, que mergea cada llamada `parallel` igual que su despacho, antes de
+despacharla.
+- Fix: el merge ya no imprime sus dos avisos (una fuente de grafo hijo que la tool no
+  ofrece, un argumento que choca con un campo fijo). `merge_call` los devuelve en
+  `MergedCall.warnings` y `execute_inner` los imprime una vez. Si no, una llamada
+  mergeada dos veces avisaría dos veces.
+- `drop_unoffered_child_graph_sources` y `merge_args_into_schema` conservan su nombre y
+  siguen imprimiendo, para `for_each` y los tests; las variantes `*_silently` devuelven
+  los avisos.
+- Un cambio chico: los avisos salen después de un merge exitoso. Un merge que falla
+  después (un node_schema inválido) ya no imprime los argumentos ignorados; la llamada
+  falla igual, con su error.
+
+**Tests.** 1 nuevo, `merging_a_call_returns_its_warnings_instead_of_printing_them`: una
+llamada a `Run` con `thread_id` (choca con el `${agentId}` fijo) y `child_graph_inline`
+(no ofrecido) devuelve los dos avisos, en ese orden. El traslado a `merge_call` lo
+cubren los tests del despacho que ya existían, sin tocarlos (por ejemplo
+`an_unresolved_fixed_thread_id_is_an_error_not_a_shared_thread`). Lib: 2896 passed,
+0 failed, 74 ignored (2895 antes).
+
+**Mutación.** `MergedCall { warnings: Vec::new(), .. }` en `merge_call`: el test nuevo
+en rojo (`left: 0, right: 2`). Revertida editando; verde.
+
+**E2E.** No aplica: fuera de cuántas veces sale un aviso por stderr, un grafo no ve
+ninguna diferencia.
+
+**ADP.** Nada que hacer.

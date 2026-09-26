@@ -2051,157 +2051,18 @@ impl DagToolExecutor {
 
         let node_type = &tool_call.function.name;
 
-        // 1. Check if it's a configured tool or a raw node.
-        let (node, fixed_config, tool_cfg) = match self.configured_tool(node_type) {
-            Some(config) => {
-                let node = self.registry.get_node(&config.node_type).ok_or_else(|| {
-                    LlmError::ToolNotFound {
-                        name: config.node_type.clone(),
-                    }
-                })?;
-                (node, Some(config.fixed_config.clone()), Some(config))
-            }
-            None => {
-                let node =
-                    self.registry
-                        .get_node(node_type)
-                        .ok_or_else(|| LlmError::ToolNotFound {
-                            name: node_type.clone(),
-                        })?;
-                (node, None, None)
-            }
-        };
-
-        // 2. Parse arguments
-        let mut args: HashMap<String, Value> = serde_json::from_str(&tool_call.function.arguments)
-            .map_err(|e| LlmError::InvalidToolCall {
-                reason: format!("Failed to parse arguments for tool {}: {}", node_type, e),
-            })?;
-        // Strip any `__colmena*`/`__node*` key the model tried to send as an
-        // ordinary argument, before it can reach ANY of the three merge
-        // strategies below (node_schema, $DYNAMIC, legacy field_mapping) or
-        // the no-fixed_config passthrough.
-        Self::strip_engine_keys(&mut args);
-        // Same place, same reason: a child-graph source the tool never offered.
-        crate::dag_engine::infrastructure::node_schema_merge::drop_unoffered_child_graph_sources(
-            &mut args,
-            || self.offered_params(node_type, tool_cfg, &node),
-        );
-
-        // 3. Build final_args with node_schema, $DYNAMIC substitution, or legacy field_mapping
-        let inputs = if let Some(schema) = tool_cfg.and_then(|c| c.node_schema.as_ref()) {
-            // PATH 0 (HIGHEST PRIORITY): node_schema
-            let schema_value =
-                serde_json::to_value(schema).map_err(|e| LlmError::InvalidToolCall {
-                    reason: format!("Invalid node_schema for tool {}: {}", node_type, e),
-                })?;
-            crate::dag_engine::infrastructure::node_schema_merge::merge_args_into_schema(
-                &schema_value,
-                args.clone(),
-            )
-            .map_err(|e| LlmError::InvalidToolCall {
-                reason: format!("Invalid node_schema for tool {}: {}", node_type, e),
-            })?
-        } else if let Some(fixed) = fixed_config.as_ref() {
-            // Check if using new $DYNAMIC system
-            let dynamic_fields = Self::collect_dynamic_fields(fixed);
-            if !dynamic_fields.is_empty() {
-                // New path: walk fixed_config, substitute $DYNAMIC with LLM values
-                let mut result: HashMap<String, Value> = HashMap::new();
-
-                for (container_key, container_val) in fixed {
-                    match container_val {
-                        // Top-level $DYNAMIC → substitute directly
-                        Value::String(s) if s == DYNAMIC_PLACEHOLDER => {
-                            if let Some(v) = args.get(container_key) {
-                                result.insert(container_key.clone(), v.clone());
-                            }
-                            // if LLM didn't provide it, omit (will likely cause node error)
-                        }
-                        // Object container → rebuild with substitutions
-                        Value::Object(obj) => {
-                            let mut rebuilt = serde_json::Map::new();
-                            for (field_key, field_val) in obj {
-                                if field_val.as_str() == Some(DYNAMIC_PLACEHOLDER) {
-                                    // Replace with LLM value (use field_key as param name)
-                                    if let Some(v) = args.get(field_key) {
-                                        rebuilt.insert(field_key.clone(), v.clone());
-                                    }
-                                    // if not provided, skip (field absent from request)
-                                } else {
-                                    // Fixed value: keep as-is
-                                    rebuilt.insert(field_key.clone(), field_val.clone());
-                                }
-                            }
-                            result.insert(container_key.clone(), Value::Object(rebuilt));
-                        }
-                        // Any other fixed value (string, number, bool) → keep as-is
-                        _ => {
-                            result.insert(container_key.clone(), container_val.clone());
-                        }
-                    }
-                }
-
-                result
-            } else {
-                // Old path: field_mapping + mergeable_fields (backward compatibility)
-                let mut final_args: HashMap<String, Value> = HashMap::new();
-                let mut remaining_args = args.clone();
-
-                // Step A: Apply field_mapping
-                if let Some(mapping) = tool_cfg.and_then(|c| c.field_mapping.as_ref()) {
-                    for (param_name, dest_field) in mapping {
-                        if let Some(value) = remaining_args.remove(param_name) {
-                            let container = final_args
-                                .entry(dest_field.clone())
-                                .or_insert_with(|| Value::Object(serde_json::Map::new()));
-                            if let Value::Object(map) = container {
-                                map.insert(param_name.clone(), value);
-                            }
-                        }
-                    }
-                }
-
-                // Remaining unmapped args go to top level
-                for (k, v) in remaining_args {
-                    final_args.insert(k, v);
-                }
-
-                // Step B: Merge/apply fixed_config
-                let mergeable: &[String] = tool_cfg
-                    .and_then(|c| c.mergeable_fields.as_deref())
-                    .unwrap_or(&[]);
-
-                for (k, fixed_val) in fixed {
-                    if mergeable.contains(k) {
-                        // Merge: fixed is the base, dynamic is the overlay
-                        match (fixed_val, final_args.get(k)) {
-                            (Value::Object(fixed_obj), Some(Value::Object(dyn_obj))) => {
-                                let mut merged = fixed_obj.clone();
-                                for (dk, dv) in dyn_obj {
-                                    merged.insert(dk.clone(), dv.clone());
-                                }
-                                final_args.insert(k.clone(), Value::Object(merged));
-                            }
-                            // fixed is object but no dynamic counterpart → use fixed as-is
-                            (_, None) => {
-                                final_args.insert(k.clone(), fixed_val.clone());
-                            }
-                            // non-object types: dynamic already in final_args, fixed ignored
-                            _ => {}
-                        }
-                    } else {
-                        // Non-mergeable: always apply fixed
-                        final_args.insert(k.clone(), fixed_val.clone());
-                    }
-                }
-
-                final_args
-            }
-        } else {
-            // No fixed_config: just use args as-is
-            args
-        };
+        // Steps 1-3: the entry, its node, and the model's arguments merged
+        // into the entry's authored config.
+        let MergedCall {
+            node,
+            fixed_config,
+            tool_cfg,
+            inputs,
+            warnings,
+        } = self.merge_call(tool_call)?;
+        for warning in warnings {
+            eprintln!("{warning}");
+        }
 
         // ENV PROVENANCE: from the same merge inputs above, compute the set of
         // pointers into `inputs` still identical to their operator-authored
@@ -2274,12 +2135,7 @@ impl DagToolExecutor {
         let memory_mode = tool_cfg.map(|c| c.memory_mode).unwrap_or_default();
         let fixed_thread = tool_cfg.is_some_and(Self::thread_id_is_fixed);
         let raw_thread = inputs.remove(THREAD_ID_PARAM);
-        if fixed_thread
-            && raw_thread
-                .as_ref()
-                .and_then(|v| v.as_str())
-                .is_none_or(|s| s.contains("${") || s.trim().is_empty())
-        {
+        let Ok(thread_id) = Self::thread_of(tool_cfg, raw_thread.as_ref()) else {
             return Ok(ToolResult {
                 tool_call_id: tool_call.id.clone(),
                 success: false,
@@ -2288,10 +2144,7 @@ impl DagToolExecutor {
                     .to_string(),
                 error: Some("unresolved_thread_id".to_string()),
             });
-        }
-        let thread_id: Option<String> = raw_thread
-            .and_then(|v| v.as_str().map(Self::sanitize_thread_id))
-            .filter(|s| !s.is_empty());
+        };
         let node_id_path = match memory_mode {
             MemoryMode::Persistent => format!("tool/{}", tool_call.function.name),
             MemoryMode::Dynamic => match &thread_id {
@@ -2592,6 +2445,22 @@ impl DagToolExecutor {
     }
 }
 
+/// A tool call after steps 1-3 of dispatch ([`DagToolExecutor::merge_call`]):
+/// no engine key injected yet.
+struct MergedCall<'a> {
+    node: Arc<dyn ExecutableNode>,
+    fixed_config: Option<HashMap<String, Value>>,
+    tool_cfg: Option<&'a ToolConfiguration>,
+    inputs: HashMap<String, Value>,
+    /// What the merge ignored of the model's arguments, for the dispatch to
+    /// warn about: merging prints nothing, so a call merged twice warns once.
+    warnings: Vec<String>,
+}
+
+/// A `thread_id` fixed in node_schema whose template did not resolve: the
+/// argument it names was never supplied.
+struct UnresolvedThread;
+
 impl DagToolExecutor {
     /// The `tool_configurations` entry a call named `name` dispatches to: by
     /// map key first, then by `name` (the frontend keys entries by UUID).
@@ -2599,6 +2468,199 @@ impl DagToolExecutor {
         self.tool_configurations
             .get(name)
             .or_else(|| self.tool_configurations.values().find(|c| c.name == name))
+    }
+
+    /// Steps 1-3 of a dispatch that reaches a configured entry or a raw node:
+    /// resolve the entry and its node, parse the model's arguments, and merge
+    /// them into the entry's authored config (node_schema, `$DYNAMIC`, or
+    /// legacy field_mapping).
+    #[allow(deprecated)]
+    fn merge_call(&self, tool_call: &ToolCall) -> Result<MergedCall<'_>, LlmError> {
+        use crate::dag_engine::infrastructure::node_schema_merge::{
+            drop_unoffered_child_graph_sources_silently, merge_args_into_schema_silently,
+        };
+        let node_type = &tool_call.function.name;
+
+        // 1. Check if it's a configured tool or a raw node.
+        let (node, fixed_config, tool_cfg) = match self.configured_tool(node_type) {
+            Some(config) => {
+                let node = self.registry.get_node(&config.node_type).ok_or_else(|| {
+                    LlmError::ToolNotFound {
+                        name: config.node_type.clone(),
+                    }
+                })?;
+                (node, Some(config.fixed_config.clone()), Some(config))
+            }
+            None => {
+                let node =
+                    self.registry
+                        .get_node(node_type)
+                        .ok_or_else(|| LlmError::ToolNotFound {
+                            name: node_type.clone(),
+                        })?;
+                (node, None, None)
+            }
+        };
+
+        // 2. Parse arguments
+        let mut args: HashMap<String, Value> = serde_json::from_str(&tool_call.function.arguments)
+            .map_err(|e| LlmError::InvalidToolCall {
+                reason: format!("Failed to parse arguments for tool {}: {}", node_type, e),
+            })?;
+        // Strip any `__colmena*`/`__node*` key the model tried to send as an
+        // ordinary argument, before it can reach ANY of the three merge
+        // strategies below (node_schema, $DYNAMIC, legacy field_mapping) or
+        // the no-fixed_config passthrough.
+        Self::strip_engine_keys(&mut args);
+        // Same place, same reason: a child-graph source the tool never offered.
+        let mut warnings = drop_unoffered_child_graph_sources_silently(&mut args, || {
+            self.offered_params(node_type, tool_cfg, &node)
+        });
+
+        // 3. Build final_args with node_schema, $DYNAMIC substitution, or legacy field_mapping
+        let inputs = if let Some(schema) = tool_cfg.and_then(|c| c.node_schema.as_ref()) {
+            // PATH 0 (HIGHEST PRIORITY): node_schema
+            let schema_value =
+                serde_json::to_value(schema).map_err(|e| LlmError::InvalidToolCall {
+                    reason: format!("Invalid node_schema for tool {}: {}", node_type, e),
+                })?;
+            let (inputs, ignored) = merge_args_into_schema_silently(&schema_value, args.clone())
+                .map_err(|e| LlmError::InvalidToolCall {
+                    reason: format!("Invalid node_schema for tool {}: {}", node_type, e),
+                })?;
+            warnings.extend(ignored);
+            inputs
+        } else if let Some(fixed) = fixed_config.as_ref() {
+            // Check if using new $DYNAMIC system
+            let dynamic_fields = Self::collect_dynamic_fields(fixed);
+            if !dynamic_fields.is_empty() {
+                // New path: walk fixed_config, substitute $DYNAMIC with LLM values
+                let mut result: HashMap<String, Value> = HashMap::new();
+
+                for (container_key, container_val) in fixed {
+                    match container_val {
+                        // Top-level $DYNAMIC → substitute directly
+                        Value::String(s) if s == DYNAMIC_PLACEHOLDER => {
+                            if let Some(v) = args.get(container_key) {
+                                result.insert(container_key.clone(), v.clone());
+                            }
+                            // if LLM didn't provide it, omit (will likely cause node error)
+                        }
+                        // Object container → rebuild with substitutions
+                        Value::Object(obj) => {
+                            let mut rebuilt = serde_json::Map::new();
+                            for (field_key, field_val) in obj {
+                                if field_val.as_str() == Some(DYNAMIC_PLACEHOLDER) {
+                                    // Replace with LLM value (use field_key as param name)
+                                    if let Some(v) = args.get(field_key) {
+                                        rebuilt.insert(field_key.clone(), v.clone());
+                                    }
+                                    // if not provided, skip (field absent from request)
+                                } else {
+                                    // Fixed value: keep as-is
+                                    rebuilt.insert(field_key.clone(), field_val.clone());
+                                }
+                            }
+                            result.insert(container_key.clone(), Value::Object(rebuilt));
+                        }
+                        // Any other fixed value (string, number, bool) → keep as-is
+                        _ => {
+                            result.insert(container_key.clone(), container_val.clone());
+                        }
+                    }
+                }
+
+                result
+            } else {
+                // Old path: field_mapping + mergeable_fields (backward compatibility)
+                let mut final_args: HashMap<String, Value> = HashMap::new();
+                let mut remaining_args = args.clone();
+
+                // Step A: Apply field_mapping
+                if let Some(mapping) = tool_cfg.and_then(|c| c.field_mapping.as_ref()) {
+                    for (param_name, dest_field) in mapping {
+                        if let Some(value) = remaining_args.remove(param_name) {
+                            let container = final_args
+                                .entry(dest_field.clone())
+                                .or_insert_with(|| Value::Object(serde_json::Map::new()));
+                            if let Value::Object(map) = container {
+                                map.insert(param_name.clone(), value);
+                            }
+                        }
+                    }
+                }
+
+                // Remaining unmapped args go to top level
+                for (k, v) in remaining_args {
+                    final_args.insert(k, v);
+                }
+
+                // Step B: Merge/apply fixed_config
+                let mergeable: &[String] = tool_cfg
+                    .and_then(|c| c.mergeable_fields.as_deref())
+                    .unwrap_or(&[]);
+
+                for (k, fixed_val) in fixed {
+                    if mergeable.contains(k) {
+                        // Merge: fixed is the base, dynamic is the overlay
+                        match (fixed_val, final_args.get(k)) {
+                            (Value::Object(fixed_obj), Some(Value::Object(dyn_obj))) => {
+                                let mut merged = fixed_obj.clone();
+                                for (dk, dv) in dyn_obj {
+                                    merged.insert(dk.clone(), dv.clone());
+                                }
+                                final_args.insert(k.clone(), Value::Object(merged));
+                            }
+                            // fixed is object but no dynamic counterpart → use fixed as-is
+                            (_, None) => {
+                                final_args.insert(k.clone(), fixed_val.clone());
+                            }
+                            // non-object types: dynamic already in final_args, fixed ignored
+                            _ => {}
+                        }
+                    } else {
+                        // Non-mergeable: always apply fixed
+                        final_args.insert(k.clone(), fixed_val.clone());
+                    }
+                }
+
+                final_args
+            }
+        } else {
+            // No fixed_config: just use args as-is
+            args
+        };
+
+        Ok(MergedCall {
+            node,
+            fixed_config,
+            tool_cfg,
+            inputs,
+            warnings,
+        })
+    }
+
+    /// The conversation thread a merged call names: its `thread_id` input,
+    /// sanitized; `None` when absent or empty.
+    ///
+    /// `Err` when the platform fixes `thread_id` in node_schema (e.g.
+    /// `"${agentId}"`) and the template is still unresolved: the referenced
+    /// argument was missing. That is a correctable configuration error, never
+    /// a fallback to a thread shared by everyone.
+    fn thread_of(
+        tool_cfg: Option<&ToolConfiguration>,
+        raw_thread: Option<&Value>,
+    ) -> Result<Option<String>, UnresolvedThread> {
+        if tool_cfg.is_some_and(Self::thread_id_is_fixed)
+            && raw_thread
+                .and_then(|v| v.as_str())
+                .is_none_or(|s| s.contains("${") || s.trim().is_empty())
+        {
+            return Err(UnresolvedThread);
+        }
+        Ok(raw_thread
+            .and_then(|v| v.as_str().map(Self::sanitize_thread_id))
+            .filter(|s| !s.is_empty()))
     }
 }
 
@@ -6544,5 +6606,20 @@ mod parallel_identity_tests {
                 ("subgraph_node_finish".to_string(), "Helper#3".to_string()),
             ]
         );
+    }
+
+    /// The merge prints nothing: it hands back what it ignored, and the
+    /// dispatch warns about it once.
+    #[test]
+    fn merging_a_call_returns_its_warnings_instead_of_printing_them() {
+        let exec = executor(run_entry(json!({ "parallel": true })));
+        let args = json!({
+            "agentId": "agent-a", "task": "t",
+            "thread_id": "forged", "child_graph_inline": {}
+        });
+        let merged = exec.merge_call(&call("c", "Run", args, Some(0))).unwrap();
+        assert_eq!(merged.warnings.len(), 2, "{:?}", merged.warnings);
+        assert!(merged.warnings[0].contains("'child_graph_inline'"));
+        assert!(merged.warnings[1].contains("'thread_id'"));
     }
 }
