@@ -198,10 +198,8 @@ Boolean optional flag (`true | false`, default `false`). When enabled, tools in 
 - **Reglas (mutuamente excluyentes, prioridad `data > url > path`):**
   - `data`: inline base64 — solo válido si raw < 30 MB. El emisor decide el threshold a 30 MB.
   - `url`: signed URL HTTPS a GCS. **Requiere `id`** (es la llave de cache `(document_id, provider)`). TTL típico de la URL: 6 h.
-    Se baja con un solo cliente (`SignedUrlDownloader`): solo `http`/`https`, solo direcciones públicas (también en
-    cada redirect), sin proxy, 10 s de conexión, 600 s en total y un tope de bytes (`COLMENA_ATTACHMENT_MAX_BYTES`,
-    100 MiB por defecto). `COLMENA_ATTACHMENT_ALLOW_PRIVATE_HOSTS=1` apaga el chequeo de direcciones: solo
-    desarrollo local (CHANGELOG 2026-09 §137).
+    Se baja con un solo cliente (`SignedUrlDownloader`): solo direcciones públicas, con timeouts y tope de bytes
+    (CHANGELOG 2026-09 §137).
   - `path`: legacy local, solo dev/tests, < 30 MB.
 - **Comportamiento por provider** (auto-detectado):
 
