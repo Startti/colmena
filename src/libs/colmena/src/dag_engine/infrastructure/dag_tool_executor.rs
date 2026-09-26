@@ -28,6 +28,7 @@ use crate::dag_engine::application::secure_value_service::{MaskingObserver, Secu
 use crate::dag_engine::domain::events::{DagExecutionEvent, NodeEndError};
 use crate::dag_engine::domain::node::ExecutableNode;
 use crate::dag_engine::domain::observer::{ChildScopeObserver, ExecutionObserver, NodeEvent};
+use crate::dag_engine::domain::state::DagStateRepository;
 use crate::dag_engine::domain::tool_configuration::{
     MemoryMode, ToolConfiguration, DYNAMIC_PLACEHOLDER,
 };
@@ -162,6 +163,10 @@ pub struct DagToolExecutor {
     /// Current subgraph-tool nesting depth, threaded from the parent llm_call so
     /// tool-invoked subgraphs receive `depth` and can enforce the recursion limit.
     subgraph_depth: u64,
+    /// The runs' state rows, for [`ToolExecutor::close_suspended`] to close
+    /// the child run of a question the turn does not keep. `None`: nothing is
+    /// closed.
+    state_repository: Option<Arc<dyn DagStateRepository>>,
 }
 
 /// Default per-string cap for tool results (50 KB). Above this, the string is
@@ -327,12 +332,20 @@ impl DagToolExecutor {
             max_tool_result_bytes: DEFAULT_MAX_TOOL_RESULT_STRING_BYTES,
             gsheets_seen_sheets: std::sync::Mutex::new(std::collections::HashSet::new()),
             subgraph_depth: 0,
+            state_repository: None,
         }
     }
 
     /// Set the current subgraph nesting depth (0 at the top level).
     pub fn with_subgraph_depth(mut self, depth: u64) -> Self {
         self.subgraph_depth = depth;
+        self
+    }
+
+    /// Wire the runs' state rows, so a question closed in a parallel group
+    /// closes its child run ([`ToolExecutor::close_suspended`]).
+    pub fn with_state_repository(mut self, repo: Arc<dyn DagStateRepository>) -> Self {
+        self.state_repository = Some(repo);
         self
     }
 
@@ -2977,6 +2990,41 @@ impl ToolExecutor for DagToolExecutor {
             MemoryMode::Persistent => name.clone(),
             MemoryMode::Stateless => call.id.clone(),
         })
+    }
+
+    /// Closes the child run of a `subgraph` call whose question the turn does
+    /// not keep, and the child's own suspended descendants, so the parent is
+    /// left with the one suspended child `find_suspended_child` resumes. The
+    /// child is the run its SUSPENDED output names in `session_id`. As a
+    /// refused resume does, only a row still SUSPENDED is closed, and a row
+    /// this call did not close keeps its descendants. Failures are logged:
+    /// the turn still pauses on its one question.
+    async fn close_suspended(&self, call: &ToolCall, outcome: &Value) {
+        let Some(repo) = &self.state_repository else {
+            return;
+        };
+        let name = call.function.name.as_str();
+        let node_type = self.configured_tool(name).map_or(name, |c| &c.node_type);
+        if node_type != "subgraph" {
+            return;
+        }
+        let Some(child) = outcome.get("session_id").and_then(Value::as_str) else {
+            return;
+        };
+        let closed = match repo.fail_if_suspended(child).await {
+            Ok(true) => repo.fail_suspended_descendants(child).await.map(|_| ()),
+            Ok(false) => Ok(()),
+            Err(e) => Err(e),
+        };
+        if let Err(e) = closed {
+            tracing::warn!(
+                target: "colmena::agent",
+                tool_call_id = %call.id,
+                child_session_id = %child,
+                error = %e,
+                "close_suspended: failed to close the child run of a closed question"
+            );
+        }
     }
 
     async fn available_tools(&self) -> Vec<crate::llm::domain::ToolDefinition> {
@@ -6706,5 +6754,161 @@ mod parallel_identity_tests {
             exec.parallel_chain_key(&run_call("c1", "agent-a", Some(0))),
             None
         );
+    }
+}
+
+/// A second question in a group of parallel calls is closed: `close_suspended`
+/// fails the child run of that call and the child's own suspended
+/// descendants, so its parent keeps one suspended child, the one the turn
+/// pauses on.
+#[cfg(test)]
+mod close_suspended_tests {
+    use super::*;
+    use crate::dag_engine::domain::error::DagError;
+    use crate::dag_engine::domain::state::{DagRunState, DagRunStatus, DagStateRepository};
+    use crate::llm::domain::FunctionCall;
+    use serde_json::json;
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct MemRepo(Mutex<HashMap<String, DagRunState>>);
+
+    impl MemRepo {
+        fn with(rows: &[(&str, Option<&str>, DagRunStatus)]) -> Arc<Self> {
+            let repo = Self::default();
+            for (id, parent, status) in rows {
+                let row = DagRunState {
+                    session_id: id.to_string(),
+                    agent_session_id: Some("chat".into()),
+                    parent_session_id: parent.map(str::to_string),
+                    graph_json: json!({}),
+                    all_outputs: HashMap::new(),
+                    status: status.clone(),
+                    global_shared_state: json!({}),
+                    active_queue: VecDeque::new(),
+                    execution_history: Vec::new(),
+                    global_calls: HashMap::new(),
+                    caller_specific_calls: HashMap::new(),
+                };
+                repo.0.lock().unwrap().insert(id.to_string(), row);
+            }
+            Arc::new(repo)
+        }
+
+        fn status(&self, id: &str) -> DagRunStatus {
+            self.0.lock().unwrap()[id].status.clone()
+        }
+    }
+
+    #[async_trait]
+    impl DagStateRepository for MemRepo {
+        async fn get_by_id(&self, id: &str) -> Result<Option<DagRunState>, DagError> {
+            Ok(self.0.lock().unwrap().get(id).cloned())
+        }
+        async fn save(&self, s: &DagRunState) -> Result<(), DagError> {
+            let mut rows = self.0.lock().unwrap();
+            rows.insert(s.session_id.clone(), s.clone());
+            Ok(())
+        }
+        async fn find_resume_entry(&self, _: &str) -> Result<Option<String>, DagError> {
+            Ok(None)
+        }
+        async fn find_suspended_child(&self, _: &str) -> Result<Option<String>, DagError> {
+            Ok(None)
+        }
+        /// Every SUSPENDED row under `session_id`, transitively, as the
+        /// Postgres repository does.
+        async fn fail_suspended_descendants(&self, session_id: &str) -> Result<u64, DagError> {
+            let mut rows = self.0.lock().unwrap();
+            let mut frontier = vec![session_id.to_string()];
+            let mut flipped = 0;
+            while let Some(parent) = frontier.pop() {
+                for row in rows.values_mut() {
+                    if row.parent_session_id.as_deref() == Some(parent.as_str()) {
+                        frontier.push(row.session_id.clone());
+                        if row.status == DagRunStatus::Suspended {
+                            row.status = DagRunStatus::Failed;
+                            flipped += 1;
+                        }
+                    }
+                }
+            }
+            Ok(flipped)
+        }
+    }
+
+    struct EchoRegistry;
+    impl NodeRegistryPort for EchoRegistry {
+        fn get_node(&self, _: &str) -> Option<Arc<dyn ExecutableNode>> {
+            None
+        }
+        fn get_all_nodes(&self) -> HashMap<String, Arc<dyn ExecutableNode>> {
+            HashMap::new()
+        }
+    }
+
+    /// `Run` is a `subgraph` tool; `Echo` is not.
+    fn executor(repo: &Arc<MemRepo>) -> DagToolExecutor {
+        let entry = |name: &str, node_type: &str| {
+            let cfg = json!({ "name": name, "node_type": node_type, "parallel": true });
+            (name.to_string(), serde_json::from_value(cfg).unwrap())
+        };
+        let configs = HashMap::from([entry("Run", "subgraph"), entry("Echo", "echo")]);
+        DagToolExecutor::new(Arc::new(EchoRegistry), configs)
+            .with_state_repository(repo.clone() as Arc<dyn DagStateRepository>)
+    }
+
+    fn call(name: &str) -> ToolCall {
+        ToolCall::new("c1".into(), FunctionCall::new(name.into(), "{}".into()))
+    }
+
+    /// A child run's SUSPENDED output names the child in `session_id`.
+    fn suspended(child: &str) -> Value {
+        json!({ "__colmena_status": "SUSPENDED", "questions": [], "session_id": child })
+    }
+
+    /// `root` asked through `child_a` (the question the turn keeps) and
+    /// `child_b` (the one closed), which asked through `grand_b`.
+    fn two_children(child_b: DagRunStatus) -> Arc<MemRepo> {
+        MemRepo::with(&[
+            ("root", None, DagRunStatus::Running),
+            ("child_a", Some("root"), DagRunStatus::Suspended),
+            ("child_b", Some("root"), child_b),
+            ("grand_b", Some("child_b"), DagRunStatus::Suspended),
+        ])
+    }
+
+    #[tokio::test]
+    async fn closing_a_question_fails_its_child_and_the_child_s_suspended_descendants() {
+        let repo = two_children(DagRunStatus::Suspended);
+        executor(&repo)
+            .close_suspended(&call("Run"), &suspended("child_b"))
+            .await;
+        assert_eq!(repo.status("child_b"), DagRunStatus::Failed);
+        assert_eq!(repo.status("grand_b"), DagRunStatus::Failed);
+        // The question the turn pauses on, and its parent, are untouched.
+        assert_eq!(repo.status("child_a"), DagRunStatus::Suspended);
+        assert_eq!(repo.status("root"), DagRunStatus::Running);
+    }
+
+    #[tokio::test]
+    async fn a_child_that_is_no_longer_suspended_is_left_as_it_is() {
+        let repo = two_children(DagRunStatus::Completed);
+        executor(&repo)
+            .close_suspended(&call("Run"), &suspended("child_b"))
+            .await;
+        assert_eq!(repo.status("child_b"), DagRunStatus::Completed);
+        assert_eq!(repo.status("grand_b"), DagRunStatus::Suspended);
+    }
+
+    #[tokio::test]
+    async fn a_call_that_is_not_a_subgraph_closes_nothing() {
+        let repo = two_children(DagRunStatus::Suspended);
+        executor(&repo)
+            .close_suspended(&call("Echo"), &suspended("child_b"))
+            .await;
+        assert_eq!(repo.status("child_b"), DagRunStatus::Suspended);
+        assert_eq!(repo.status("grand_b"), DagRunStatus::Suspended);
     }
 }

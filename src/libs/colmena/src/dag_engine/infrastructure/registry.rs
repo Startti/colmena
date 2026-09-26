@@ -40,6 +40,7 @@ impl HashMapNodeRegistry {
             None,
             None,
             None,
+            None,
         )
     }
 
@@ -50,6 +51,8 @@ impl HashMapNodeRegistry {
     /// no quedan registrados — igual patrón que `secure_suspend` con
     /// `SecureValueService`. Cuando `attachment_registry` es `None`, los
     /// nodos media siguen registrados pero NO registran sus outputs (fail-soft).
+    /// `state_repository` lets an `llm_call` close the child run of a question
+    /// a group of parallel tool calls does not keep; `None` leaves it open.
     pub fn new_with_secure_values(
         repository_factory: Arc<ConversationRepositoryFactory>,
         sql_port_factory: Arc<crate::dag_engine::infrastructure::sql_port_factory::SqlPortFactory>,
@@ -59,6 +62,7 @@ impl HashMapNodeRegistry {
         secure_value_service: Option<Arc<SecureValueService>>,
         storage: Option<Arc<dyn OutputStorageRepository>>,
         attachment_registry: Option<Arc<dyn AttachmentRegistry>>,
+        state_repository: Option<Arc<dyn crate::dag_engine::domain::state::DagStateRepository>>,
     ) -> Arc<Self> {
         Arc::new_cyclic(|weak_self| {
             let mut nodes: HashMap<String, Arc<dyn ExecutableNode>> = HashMap::new();
@@ -144,6 +148,9 @@ impl HashMapNodeRegistry {
             // If a SecureValueService is available, attach it so tool calls can decrypt secrets
             if let Some(svc) = secure_value_service.clone() {
                 llm_node = llm_node.with_secure_values(svc);
+            }
+            if let Some(repo) = state_repository {
+                llm_node = llm_node.with_state_repository(repo);
             }
             // Attach storage so the AttachmentResolver can read bytes for
             // `provider: Generated` rows when doing cross-provider lazy upload.
@@ -739,6 +746,7 @@ mod registry_secure_suspend_tests {
             Some(svc),
             None,
             None,
+            None,
         )
     }
 
@@ -802,6 +810,7 @@ mod media_tools_injection_tests {
             Some(task_memory),
             None,
             Some(storage),
+            None,
             None,
         )
     }
@@ -1022,6 +1031,7 @@ mod catalog_coverage_tests {
             Some(task_memory),
             Some(secure_values),
             Some(storage),
+            None,
             None,
         )
     }
