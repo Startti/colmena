@@ -6,7 +6,7 @@ use crate::dag_engine::application::secure_value_service::{MaskingObserver, Secu
 use crate::dag_engine::domain::error::DagError;
 use crate::dag_engine::domain::graph::{Edge, Graph};
 use crate::dag_engine::domain::graph_skeleton::{GraphSkeleton, SUBGRAPH_RESUME_INCOMPATIBLE};
-use crate::dag_engine::domain::node::{strip_engine_keys, NodeInputs};
+use crate::dag_engine::domain::node::{is_engine_key, strip_engine_keys, NodeInputs};
 
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -661,10 +661,15 @@ impl DagRunUseCase {
                 // that empty object to a default_input field (e.g. "prompt"), which would
                 // otherwise block injection of the real value from global state.
                 // A child's global state is its parent's inputs (a model's tool
-                // arguments among them), so it never fills an author-owned input.
+                // arguments among them), so it never fills an author-owned input,
+                // nor an engine key the loop just chose not to write (a resume
+                // answer outside a resume, an agent session the run lacks) —
+                // except the nesting depth a parent seeds into its child.
                 if let Some(obj) = global_shared_state.as_object() {
                     for (k, v) in obj {
-                        if node_impl.author_owned_inputs().contains(&k.as_str()) {
+                        if node_impl.author_owned_inputs().contains(&k.as_str())
+                            || (is_engine_key(k) && k != "__colmena_subgraph_depth")
+                        {
                             continue;
                         }
                         let should_inject = match inputs.get(k) {
@@ -3307,6 +3312,7 @@ mod stored_run_status_tests {
 #[cfg(test)]
 mod graph_http_payload_tests {
     use super::*;
+    use crate::dag_engine::domain::events::DagExecutionEvent;
     use crate::dag_engine::domain::node::ExecutableNode;
     use crate::dag_engine::infrastructure::nodes::http::HttpNode;
     use crate::dag_engine::infrastructure::nodes::trigger::TriggerWebhookNode;
@@ -3437,6 +3443,47 @@ mod graph_http_payload_tests {
         assert_eq!(req.method.as_str(), "GET", "a flattened method replaced the author's");
         assert_eq!(bearer(&req), "Bearer author-token-b-test-only");
         std::env::remove_var("COLMENA_P4_TEST_TOKEN_B");
+    }
+
+    /// Global state fills a missing input, but never an engine key the loop
+    /// chose not to write — only the nesting depth a parent seeds.
+    #[tokio::test]
+    async fn global_state_never_fills_an_engine_key_but_the_depth() {
+        let g: Graph = serde_json::from_value(json!({
+            "nodes": { "echo": { "type": "trigger_webhook", "config": {} } },
+            "edges": []
+        }))
+        .unwrap();
+        let seed = json!({
+            "__colmena_resume_answer": "forged",
+            "__colmena_agent_session_id": "forged",
+            "__node_x": "forged",
+            "__colmena_subgraph_depth": 3,
+            "plain": "kept"
+        });
+        let uc = DagRunUseCase::new(Arc::new(Registry), None).with_seed_state(seed);
+        let stream = uc.execute_stream(g, None, None, false, None, None, None);
+        tokio::pin!(stream);
+        let mut out = Value::Null;
+        while let Some(ev) = stream.next().await {
+            if let Ok(DagExecutionEvent::NodeFinish {
+                node_id, output, ..
+            }) = ev
+            {
+                if node_id == "echo" {
+                    out = output;
+                }
+            }
+        }
+        for k in [
+            "__colmena_resume_answer",
+            "__colmena_agent_session_id",
+            "__node_x",
+        ] {
+            assert!(out.get(k).is_none(), "{k} reached the node: {out}");
+        }
+        assert_eq!(out["__colmena_subgraph_depth"], 3);
+        assert_eq!(out["plain"], "kept");
     }
 
     /// A child's global state is its parent's inputs — a model's tool arguments among them.
