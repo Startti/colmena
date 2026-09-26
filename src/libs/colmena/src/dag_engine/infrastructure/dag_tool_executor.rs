@@ -3182,7 +3182,18 @@ impl ToolExecutor for DagToolExecutor {
                 // connects to the DB, loads the table schema, and builds a
                 // capability statement), append the supplement to the description
                 // so the LLM sees the full schema context from the very first turn.
-                if let Some(initializable) = node.as_initializable() {
+                // `initialize()` reads the tool's `fixed` values as the author's
+                // config (env templates expand), so it runs only on the tool as
+                // its author wrote it: never for tool configurations that
+                // arrived as data, and on the copy taken before templating.
+                let authored_config = match &self.authored_tool_configurations {
+                    _ if !self.fixed_values_authored => None,
+                    Some(authored) => authored.get(name),
+                    None => Some(config),
+                };
+                if let (Some(initializable), Some(config)) =
+                    (node.as_initializable(), authored_config)
+                {
                     use crate::dag_engine::domain::tool_configuration::parse_node_schema;
                     // Build effective config from node_schema fixed values so that
                     // initialize() can connect with the correct credentials/permissions.

@@ -684,6 +684,15 @@ All string values in config support `${VAR_NAME}` syntax:
 
 Resolution is **not recursive** — only top-level string values containing `${...}` are expanded. Nested objects within `permissions` or `runtime_limits` are JSON objects, not strings.
 
+Templates expand only in the author's values. `connection_url`,
+`permissions.tenant_user_id` and `guardrail_llm.api_key` expand when they come
+from `config` or from a tool's `fixed` value; when they arrive as data (an edge
+that names the field, a tool parameter the author offers) they are used as
+written. When listing tools, a `sql_query` tool connects ahead of time only with
+the tool configuration as its author wrote it: never for `tool_configurations`
+that arrived as data, and not after `${context.*}` templating changed its
+`fixed` values (CHANGELOG 2026-09 §127).
+
 ---
 
 ## Example 1: Standalone Node — Read-Only Query

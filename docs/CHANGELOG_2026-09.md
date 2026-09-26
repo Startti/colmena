@@ -5889,3 +5889,48 @@ ocurre antes de esa llamada. El grafo nuevo pasa `dag_engine lint` sin hallazgos
 corpus de `tests/corpus_noise.rs` de 333 a 334 archivos (`EXPECTED_FILES`).
 
 **ADP.** Sin cambios de API. **Estado.** done.
+
+## 126. Endurecimiento: `socketio_request` cuenta como credenciales del autor su `payload`, sus hojas `fixed` y los secretos de `config`
+
+**Qué cambia.** La regla de §119 (las credenciales del autor van solo al origen del `url` del
+autor o a `allowed_hosts`) reconoce, además de `cookies` y `headers` enteros:
+- una hoja `fixed` bajo `headers` (fuera de `accept*`/`cache-control`/`content-type`/
+  `user-agent`) o `cookies` junto a valores de quien llama (`__colmena_authored_leaves`, §124);
+- un `payload` o `pre_events` del autor con `${VAR}`, y un header con `${VAR}`;
+- cualquier puntero de `__colmena_env_trusted_paths` y cualquier hoja de `config` que el motor
+  llenó con un secure value (`__colmena_secret_config_paths`, §124).
+Comparte con `http_request` `HttpNode::headers_carry_credentials`, `has_template` y
+`authored_leaves_carry_credentials`.
+
+**Tests.** `socketio.rs::env_gate_tests`: con un `url` de datos, un header `fixed` por hoja, un
+`payload` y un `pre_events` con `${VAR}` y una hoja marcada como secreto no abren conexión.
+
+**ADP.** Sin cambios de API. Un `socketio_request` cuyo `url` viene de datos y cuyo `payload`
+del autor lleva `${VAR}` o un secreto debe listar ese host en `allowed_hosts`.
+**Estado.** done.
+
+## 127. Endurecimiento: `sql_query` expande `${VAR}` solo en la configuración del autor
+
+**Qué cambia.**
+- `connection_url` se resuelve con `env_provenance::resolve_credential`: el de `config` (o un
+  `fixed` de una tool, avalado por el despacho) expande `${VAR}`; uno que llega como dato (un
+  edge que nombra el campo, un parámetro que la tool ofrece) se usa tal cual. El nodo sabe qué
+  claves de su config efectiva vinieron de `inputs` (`SqlNode::input_supplied`).
+- `permissions.tenant_user_id` y `guardrail_llm.api_key` expanden `${VAR}` si su objeto es del
+  `config`; si vino de `inputs`, solo en el puntero avalado (`/permissions/tenant_user_id`,
+  `/guardrail_llm/api_key`).
+- Al listar tools, `DagToolExecutor` conecta de antemano un `sql_query` (`initialize()`, que
+  lee los `fixed` como config del autor) solo con la tool tal como la escribió el autor: nunca
+  para un `tool_configurations` que llegó como dato (§122) y con la copia previa al templating
+  `${context.*}`.
+
+**Tests.** `sql.rs::connection_provenance_tests` (un listener TCP registra el mensaje de
+inicio del cliente Postgres, que lleva el usuario): el `connection_url` de `config` expande la
+variable y el mismo por `inputs` no; listar tools del autor conecta con la variable expandida y
+las mismas tools como dato no; `tenant_user_id` y `api_key` por `inputs` expanden solo con un
+puntero avalado.
+
+**ADP.** Sin cambios de API. Un `connection_url` que un edge trae con `${VAR}` se usa sin
+expandir: la URL con variables va en `config` o en un `fixed`. Una tool `sql_query` cuyo
+`connection_url` `fixed` usa `${context.*}` no recibe el esquema de la base en su descripción.
+**Estado.** done.
