@@ -6486,3 +6486,23 @@ del executor y saturación de un plazo enorme.
 **ADP.** Sin cambios de API ni de SSE. Guía:
 [53_python_executors.md](developer_guide/53_python_executors.md#wire-protocol-isolated-executors).
 **Estado.** done.
+
+## 149. Python: el cuerpo del proceso que corre una llamada aislada
+
+**Qué cambia.** `python_exec::child::handle_request`: lo que hace, por cada
+llamada, el proceso que corre el código en un executor aislado (todavía no
+disponible). Lee una trama de pedido con tope, chequea la versión (leída antes
+que el resto del pedido), corre el mismo helper que el executor en proceso y
+escribe una trama de respuesta. Un pedido más grande que el tope recibe
+`too_large`; uno de otra versión, un error de versión con la versión propia del
+proceso, así el chequeo del host se dispara; uno truncado o que no es JSON no
+recibe nada (el host ve el stream cerrado). `CallHeader` y `MAX_HEADER_BYTES`
+quedan para el ajuste por llamada. Nada lo usa todavía.
+
+**Tests.** Sobre `UnixStream::pair()`: una llamada normal, un error de Python,
+pedido más grande que el tope, versión distinta (con la forma de hoy y con otra
+forma), pedido truncado y JSON inválido (sin respuesta, EOF del otro lado).
+
+**ADP.** Sin cambios de API ni de SSE. Guía:
+[53_python_executors.md](developer_guide/53_python_executors.md#the-per-call-body).
+**Estado.** done.
