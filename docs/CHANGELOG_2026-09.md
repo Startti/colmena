@@ -5594,3 +5594,18 @@ fijo `none` se respeta. `env_provenance.rs`: `authored_keys`.
 `none` debe fijarlo (`"sandbox_mode": {"fixed": "none"}`); con `restricted` siguen permitidos
 `pandas`, `numpy` y `scipy`.
 **Estado.** done.
+
+## 108. Endurecimiento: los `fixed` de un `target` de `for_each` son del autor solo si el `target` lo es
+
+**Qué cambia.** `for_each` calcula por fila los punteros confiables y las claves del autor
+contra los `fixed` de su `target` solo cuando ese `target` viene de `config` o es el `fixed` de
+la tool que lo despachó (`is_authored_input(inputs, "target")`). Un `target` que llegó como
+dato aporta `fixed` que son datos: la fila no recibe punteros confiables ni claves del autor
+de ellos, así que no expanden `${VAR}` en el nodo destino.
+
+**Tests.** `for_each.rs::http_target_env_tests`: el mismo `target` por `inputs` manda el
+bearer literal; marcado como `fixed` del despacho, lo expande. El test existente con `target`
+en `config` sigue expandiendo.
+
+**ADP.** Sin cambios de API.
+**Estado.** done.

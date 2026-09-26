@@ -290,6 +290,13 @@ impl ExecutableNode for ForEachNode {
         let target = cfg_or_input(config, inputs, "target")
             .cloned()
             .ok_or("for_each: missing `target` (embedded tool config)")?;
+        // The target's `fixed` values are the author's only when the target is:
+        // from `config`, or a dispatcher's `fixed` value. Otherwise they are
+        // data, and a row gets no trusted pointer nor authored key from them.
+        let target_authored = config.get("target").is_some()
+            || crate::dag_engine::infrastructure::env_provenance::is_authored_input(
+                inputs, "target",
+            );
         let target_type = target
             .get("node_type")
             .and_then(|v| v.as_str())
@@ -492,9 +499,14 @@ impl ExecutableNode for ForEachNode {
                     // A row is data (a model's `items`, an upstream payload); only
                     // the target's `fixed` values are the author's. Same rule as a
                     // tool dispatch, so a row never resolves `${VAR}`.
+                    let authored_fixed = if target_authored {
+                        parsed.fixed_values.clone()
+                    } else {
+                        HashMap::new()
+                    };
                     let trusted =
                         crate::dag_engine::infrastructure::env_provenance::trusted_pointers(
-                            &parsed.fixed_values,
+                            &authored_fixed,
                             &merged,
                         );
                     merged.insert(
@@ -503,7 +515,7 @@ impl ExecutableNode for ForEachNode {
                         json!(trusted),
                     );
                     let authored = crate::dag_engine::infrastructure::env_provenance::authored_keys(
-                        &parsed.fixed_values,
+                        &authored_fixed,
                         &merged,
                     );
                     merged.insert(
@@ -1548,6 +1560,54 @@ mod http_target_env_tests {
         );
         std::env::remove_var("COLMENA_P4_TEST_ROW");
         std::env::remove_var("COLMENA_P4_TEST_FIXED");
+    }
+
+    /// A target's `fixed` values are the author's only when the target is:
+    /// from `config`, or a dispatcher's `fixed` value. A target that arrived
+    /// as data has data for `fixed` values, and they never expand `${VAR}`.
+    #[tokio::test]
+    async fn a_target_that_arrived_as_data_never_expands_its_fixed_values() {
+        use crate::dag_engine::infrastructure::env_provenance::AUTHORED_INPUTS_KEY;
+        std::env::set_var("COLMENA_CLASS_TEST_FE", "fe-token-test-only");
+        let s = MockServer::start().await;
+        Mock::given(wiremock::matchers::any())
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
+            .mount(&s)
+            .await;
+        let node = ForEachNode::new();
+        node.registry
+            .set(Arc::new(Registry(Arc::new(HttpNode::new()))) as Arc<dyn NodeRegistryPort>)
+            .ok();
+        let target = json!({
+            "node_type": "http_request",
+            "node_schema": {
+                "base_url":     { "fixed": s.uri() },
+                "method":       { "fixed": "GET" },
+                "bearer_token": { "fixed": "${COLMENA_CLASS_TEST_FE}" }
+            }
+        });
+        let config = json!({ "items": [ {} ] });
+        let data = HashMap::from([("target".to_string(), target.clone())]);
+        let mut fixed = data.clone();
+        fixed.insert(AUTHORED_INPUTS_KEY.to_string(), json!(["target"]));
+        for inputs in [data, fixed] {
+            node.execute(&inputs, &config, &mut json!({}), None)
+                .await
+                .unwrap();
+        }
+        let got = s.received_requests().await.unwrap();
+        let bearer = |i: usize| {
+            got[i]
+                .headers
+                .get("authorization")
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .to_string()
+        };
+        assert_eq!(bearer(0), "Bearer ${COLMENA_CLASS_TEST_FE}");
+        assert_eq!(bearer(1), "Bearer fe-token-test-only");
+        std::env::remove_var("COLMENA_CLASS_TEST_FE");
     }
 
     /// A row never sets a field only the author sets unless the target's
