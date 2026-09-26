@@ -5334,6 +5334,52 @@ igual; por eso el orden de sus llamadas. Revertida editando.
 
 **ADP.** Sin código.
 
+## 105. E2E: dos preguntas en un grupo, re-correr el hijo cerrado, y lo que recibe cada modelo (parallel tools, 3e)
+
+**Qué cambió.** Solo tests, sobre el E2E de la entrada 104.
+- `caller_model` guarda cada request, en orden de llegada (`seen()`).
+- **A, completo.** El texto final del hijo reanudado trae la respuesta humana («sí»), y
+  el padre lee ese mismo texto como resultado de `call_alfa`. La última request del
+  padre no lleva ningún id abierto y lee los dos resultados.
+- **B, dos preguntas.** `alfa`, pedida primero, pregunta a los 600 ms, y `beta`
+  enseguida: la de `beta` sale antes, pero manda la de `alfa`, la primera en el orden
+  del modelo. `call_beta` tiene un `tool-output-available` con `childScope` `Run#1` y
+  un `output` string, el texto de `closed_by_parallel_suspend.md`, antes del `finish`;
+  `call_alfa` no tiene ninguno. En `llm_node_history` del padre el único `tool` es el
+  de `call_beta`, con ese texto. En `dag_runs` hay un solo hijo `SUSPENDED` (`alfa`), y
+  `beta` queda `FAILED`. Turno 2: los frames del hijo reanudado vienen bajo
+  `agent>Run#0>`, su texto final trae la respuesta, `alfa` queda `COMPLETED` y `beta`
+  sigue `FAILED`. La última request del padre no lleva ids abiertos, y contesta
+  `call_beta` con el texto de cierre.
+- **C, re-correr el cerrado.** Después de los dos turnos de B, el hilo de `beta`
+  (`tool/Run/beta/hijo`) no tiene ningún `tool`: su pregunta quedó abierta. Un tercer
+  turno fresco vuelve a llamar a `beta` («beta: terminá») en el mismo hilo. Su modelo
+  recibe una sola request, sin ids abiertos: `user` «beta: preguntá», el `assistant`
+  con `ask_beta`, el `tool` de `ask_beta` con el texto de `abandoned_tool_call.md` (una
+  vez) y `user` «beta: terminá». `llm_node_history` guarda ese único `tool`, y los hijos
+  de `beta` quedan `FAILED` y `COMPLETED`.
+
+**Tests.** La lib no cambia (2929). El E2E, con el mismo comando de la entrada 104: 3
+passed. Los E2E de `parallel_tool_groups` (2) y `parallel_tool_identity` (1) siguen
+verdes.
+
+**Mutación.** Rojas y revertidas editando:
+- sin llamar a `close_suspended`: rojos B (2 hijos `SUSPENDED`, `left: 2 right: 1`) y C;
+- sin repositorio en el registro del motor (7º argumento de `new_with_secure_values` en
+  `engine.rs`): los mismos rojos. Es el único test del cableado motor → registro →
+  `llm_call` → `DagToolExecutor`;
+- sin la curación en el camino fresco: rojo C (`left: ["ask_beta"] right: []`);
+- el resume con otra respuesta que la afirmada: rojos A y B.
+
+Con la primera y la segunda, el turno 2 de C no termina en «Listo.» (`left: Null`):
+con dos hijos `SUSPENDED`, la salida es la SUSPENDED guardada del hijo de `beta`, en vez
+de reanudar a `alfa`.
+
+**E2E.** Este.
+
+**ADP.** Sin código. La guía 19 y la nota de migración citan estos frames en la entrada
+106.
+
 ## 106. Endurecimiento: `${VAR}` se expande solo en la configuración del autor
 
 **Qué cambia.** Un valor que llega por `inputs` (un edge, el estado global, una fila de
