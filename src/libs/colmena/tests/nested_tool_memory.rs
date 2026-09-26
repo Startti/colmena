@@ -14,7 +14,11 @@
 //! - A: in one message, X{x} asks and Y runs X{x} after a wait. The nested
 //!   X runs on its own thread, so it does not heal the root's open question,
 //!   and the resume answers it.
-//! - C, in A: the root's keys are today's (`tool/X/x/agente_x`).
+//! - B: X{x} at the root on turn 1, Y→X{x} on turn 2. The nested X reads
+//!   only its own conversation, and the root's thread is untouched.
+//! - C, in A and B: the root's keys are today's (`tool/X/x/agente_x`).
+//! - D: a nested chain suspended under the key the build before this change
+//!   gave it (the root's) resumes on that history.
 //!
 //! Writes each turn's SSE to `/tmp/colmena_e2e/nested_tool_memory_<x>.sse`.
 //!
@@ -363,6 +367,151 @@ async fn a_nested_call_leaves_the_roots_question_open_and_the_resume_answers_it(
     assert_done(&second);
     assert_x_read_the_answer(&model);
     assert_answered_on(&pool, &chat, ROOT_X).await;
+
+    cleanup(&pool, &chat).await;
+    eng.shutdown().await;
+}
+
+/// B: X{x} at the root, then Y→X{x} on the next turn.
+const TURNS_B: Turns = &[
+    ("turno 1", &[("call_x", "X", "x", "x: terminá (raíz)")]),
+    ("turno 2", &[("call_y", "Y", "", "→ x: terminá (Y)")]),
+];
+
+#[tokio::test]
+#[serial]
+#[ignore = "requires DATABASE_URL — run with `cargo test -- --ignored`"]
+async fn a_nested_call_reads_only_its_own_thread_and_leaves_the_roots_alone() {
+    let eng = engine().await;
+    let pool = pool().await;
+    let chat = unique_chat("b");
+    cleanup(&pool, &chat).await;
+    let model = Arc::new(CallerModel::new(script(TURNS_B)));
+    let _guard = OverrideGuard::install(model.clone());
+
+    assert_done(&turn(&eng, "turno 1", None, &chat, "b1").await);
+    let root_thread = [
+        said("user", "x: terminá (raíz)"),
+        said("assistant", "x: hecho"),
+    ];
+    assert_eq!(thread(&pool, &chat, ROOT_X).await, root_thread);
+    // C: the root's X keeps today's key.
+    assert_eq!(keys(&pool, &chat).await, ["agent", ROOT_X]);
+
+    assert_done(&turn(&eng, "turno 2", None, &chat, "b2").await);
+    // The nested X's model read only its own task: the root's thread is not
+    // in its messages, nor in the summary of earlier turns a system message
+    // would carry.
+    let sent = x_requests(&model, "x: terminá (Y)");
+    assert_eq!(sent.len(), 1);
+    let messages = &sent[0].messages;
+    assert_eq!(turns_of(messages), [(MessageRole::User, "x: terminá (Y)")]);
+    let seen: Vec<&str> = messages.iter().map(|m| m.content()).collect();
+    assert!(seen.iter().all(|m| !m.contains("raíz")), "{seen:?}");
+    assert_eq!(thread(&pool, &chat, ROOT_X).await, root_thread);
+    assert_eq!(
+        thread(&pool, &chat, NESTED_X).await,
+        [
+            said("user", "x: terminá (Y)"),
+            said("assistant", "x: hecho")
+        ]
+    );
+    assert_eq!(
+        keys(&pool, &chat).await,
+        ["agent", ROOT_X, HIJO_Y, NESTED_X]
+    );
+
+    cleanup(&pool, &chat).await;
+    eng.shutdown().await;
+}
+
+/// Rewrites the chat's nested X key into the one the build before this
+/// change wrote (the root's), wherever it is kept: the history's `node_id`
+/// and the `_conversation_key` of X's SUSPENDED output in `dag_runs`. The
+/// two builds write the same rows otherwise, so the result is the chain as
+/// that build left it.
+async fn keyed_as_before_the_change(pool: &sqlx::PgPool, chat: &str) {
+    let history = sqlx::query(
+        "UPDATE llm_node_history SET node_id = $3 WHERE agent_session_id = $1 AND node_id = $2",
+    )
+    .bind(chat)
+    .bind(NESTED_X)
+    .bind(ROOT_X)
+    .execute(pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        history.rows_affected(),
+        3,
+        "X's system prompt, task and question"
+    );
+    let runs = sqlx::query(
+        "UPDATE dag_runs SET all_outputs = replace(all_outputs::text, $2, $3)::jsonb \
+         WHERE agent_session_id = $1 AND strpos(all_outputs::text, $2) > 0",
+    )
+    .bind(chat)
+    .bind(NESTED_X)
+    .bind(ROOT_X)
+    .execute(pool)
+    .await
+    .unwrap();
+    assert_eq!(runs.rows_affected(), 1, "X's child run");
+    let left: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM dag_runs r WHERE agent_session_id = $1 AND strpos(r::text, $2) > 0",
+    )
+    .bind(chat)
+    .bind(NESTED_X)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    assert_eq!(left, 0, "no row names the new key");
+}
+
+/// D: Y→X{x} asks.
+const TURNS_D: Turns = &[("turno 1", &[("call_y", "Y", "", "→ x: preguntá")])];
+
+/// D runs on its own 8 MiB thread: a question two levels down overflows the
+/// 2 MiB stack of a test thread in a debug build with full debuginfo, with or
+/// without per-caller memory.
+#[test]
+#[serial]
+#[ignore = "requires DATABASE_URL — run with `cargo test -- --ignored`"]
+fn a_nested_question_asked_under_the_old_key_is_answered_on_that_history() {
+    std::thread::Builder::new()
+        .stack_size(8 << 20)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(a_nested_question_under_the_old_key())
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+async fn a_nested_question_under_the_old_key() {
+    let eng = engine().await;
+    let pool = pool().await;
+    let chat = unique_chat("d");
+    cleanup(&pool, &chat).await;
+    let model = Arc::new(CallerModel::new(script(TURNS_D)));
+    let _guard = OverrideGuard::install(model.clone());
+
+    let first = turn(&eng, "turno 1", None, &chat, "d1").await;
+    assert_suspended_on_x(&first, "call_y");
+    assert_eq!(thread(&pool, &chat, NESTED_X).await, asked());
+    keyed_as_before_the_change(&pool, &chat).await;
+    assert_eq!(thread(&pool, &chat, ROOT_X).await, asked());
+
+    // The resume honors the old key X's question was stored under, not the
+    // one it derives now, so X continues where it asked.
+    let second = turn(&eng, "turno 1", Some(&answer()), &chat, "d2").await;
+    assert_done(&second);
+    assert_x_read_the_answer(&model);
+    assert_answered_on(&pool, &chat, ROOT_X).await;
+    assert_eq!(thread(&pool, &chat, NESTED_X).await, []);
 
     cleanup(&pool, &chat).await;
     eng.shutdown().await;

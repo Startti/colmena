@@ -5616,3 +5616,29 @@ marcador de `abandoned_tool_call.md` y los mensajes del otro nivel.
 
 **ADP.** Nada.
 **Estado.** done.
+
+## 135. La memoria de una tool, por quien la llama (6/7): E2E de la lectura y del resume a través del cambio
+
+**Qué cambió.** Solo tests: `nested_tool_memory.rs` suma los escenarios B y D al E2E del tramo
+5/7.
+
+**E2E.** 3 passed.
+- B: `X{x}` desde la raíz y, en el turno siguiente, `Y`→`X{x}`. El modelo de `X` bajo `Y` recibe
+  solo su tarea: ningún mensaje, ni el resumen de turnos viejos del system, trae la de la raíz.
+  El hilo de la raíz no cambia. C: las claves son `agent` y `tool/X/x/agente_x` tras el turno
+  1, y suman `tool/Y/hijo_y` y `tool/Y/hijo_y/tool/X/x/agente_x` tras el 2.
+- D: `Y`→`X{x}` pregunta, y el test reescribe la clave nueva por la vieja en
+  `llm_node_history` y en `dag_runs.all_outputs`, como la dejaba v0.20.1 (ninguna otra columna
+  la nombra). El resume honra la clave vieja y contesta sobre esa historia.
+
+D corre en un hilo propio de 8 MiB: el turno 1, una pregunta a profundidad 2, desborda los
+2 MiB de pila del hilo de un test en un build de debug con debuginfo completa, también sin
+este cambio.
+
+**Mutación.** Rojas y revertidas: `llm.rs` sin pasar quien llama, A, B y D (en B, el resumen
+del system trae la tarea de la raíz); el resume sin honrar la clave guardada, D (el `llm_call`
+de `X` reanuda sobre un hilo vacío y falla con `Empty message list`, y el error le llega a `Y`
+como resultado).
+
+**ADP.** Nada.
+**Estado.** done.
