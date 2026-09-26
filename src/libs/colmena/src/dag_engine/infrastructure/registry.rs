@@ -749,6 +749,49 @@ mod llm_call_tool_provenance_tests {
         std::env::remove_var("COLMENA_CLASS_TEST_CTX");
     }
 
+    /// Global state (in a child graph, the parent's inputs — a model's tool
+    /// arguments among them) never hands an `llm_call` its tools: no request
+    /// reaches the server a state-supplied tool points at.
+    #[tokio::test]
+    async fn global_state_never_supplies_an_llm_calls_tools() {
+        use crate::dag_engine::application::run_use_case::DagRunUseCase;
+        use crate::dag_engine::domain::graph::Graph;
+        use futures::StreamExt;
+        let s = MockServer::start().await;
+        Mock::given(wiremock::matchers::any())
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
+            .mount(&s)
+            .await;
+        let _guard = OverrideGuard::install(Arc::new(ScriptedAdapter::new(vec![
+            ScriptedResponse::ToolCall {
+                id: "c1".into(),
+                tool_name: "x".into(),
+                arguments: json!({}),
+            },
+            ScriptedResponse::Text("done".into()),
+        ])));
+        let seed = json!({ "tool_configurations": { "x": {
+            "node_type": "http_request",
+            "fixed_config": { "base_url": s.uri(), "method": "GET" }
+        } } });
+        let g: Graph = serde_json::from_value(json!({
+            "nodes": { "agent": { "type": "llm_call", "config": {
+                "provider": "mock", "model": "m", "api_key": "k", "stream": false, "prompt": "go"
+            } } },
+            "edges": []
+        }))
+        .unwrap();
+        let registry = super::registry_tavily_tests::build_registry();
+        let uc = DagRunUseCase::new(registry, None).with_seed_state(seed);
+        let stream = uc.execute_stream(g, None, None, false, None, None, None);
+        tokio::pin!(stream);
+        while stream.next().await.is_some() {}
+        assert!(
+            s.received_requests().await.unwrap().is_empty(),
+            "a state-supplied tool ran"
+        );
+    }
+
     /// `${UPPER_CASE}` names an env var (VARIABLE_RESOLUTION_DISEÑO, rule 1):
     /// an input under that name never replaces the author's reference.
     #[tokio::test]
@@ -758,6 +801,68 @@ mod llm_call_tool_provenance_tests {
         let q = fetch_q(json!({}), inputs, json!("${COLMENA_CLASS_TEST_ENV}")).await;
         assert_eq!(q, "env-value-test-only");
         std::env::remove_var("COLMENA_CLASS_TEST_ENV");
+    }
+
+    /// A `tool_configurations` that arrives as data is never the author's, even
+    /// with no env template in it: its `fixed` code is data and runs sandboxed,
+    /// whatever `sandbox_mode` it fixes. The same tools from `config` run as
+    /// the author set them (the code writes its marker directory).
+    #[tokio::test]
+    async fn tool_configurations_from_inputs_never_count_as_authored() {
+        pyo3::Python::initialize();
+        let marker = std::env::temp_dir().join(format!(
+            "colmena-authored-tools-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let code = format!(
+            "import os\nos.makedirs(r\"{}\", exist_ok=True)\noutput = 1",
+            marker.display()
+        );
+        let tools = json!({ "py": { "node_type": "python_script", "node_schema": {
+            "code": { "fixed": code }, "sandbox_mode": { "fixed": "none" }
+        } } });
+        let run = |tools_in_inputs: bool| {
+            let tools = tools.clone();
+            async move {
+                let _guard = OverrideGuard::install(Arc::new(ScriptedAdapter::new(vec![
+                    ScriptedResponse::ToolCall {
+                        id: "c1".into(),
+                        tool_name: "py".into(),
+                        arguments: json!({}),
+                    },
+                    ScriptedResponse::Text("done".into()),
+                ])));
+                let mut config = json!({
+                    "provider": "mock", "model": "m", "api_key": "k", "stream": false,
+                    "prompt": "go"
+                });
+                let mut inputs = HashMap::new();
+                if tools_in_inputs {
+                    inputs.insert("tool_configurations".to_string(), tools);
+                } else {
+                    config["tool_configurations"] = tools;
+                }
+                let registry = super::registry_tavily_tests::build_registry();
+                let llm = registry.get_node("llm_call").expect("llm_call");
+                llm.execute(&inputs, &config, &mut json!({}), None)
+                    .await
+                    .expect("llm_call finished");
+            }
+        };
+        run(false).await;
+        assert!(marker.exists(), "the author's tool did not run as set");
+        std::fs::remove_dir(&marker).unwrap();
+        run(true).await;
+        let ran_unsandboxed = marker.exists();
+        let _ = std::fs::remove_dir(&marker);
+        assert!(
+            !ran_unsandboxed,
+            "fixed code from a data tool_configurations ran with the fixed sandbox_mode"
+        );
     }
 }
 

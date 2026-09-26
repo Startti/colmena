@@ -2044,14 +2044,19 @@ impl ExecutableNode for LlmNode {
         // calls as plain text. Hard-fail with a pedagogical message so the
         // graph author sees the exact field that broke.
         // `tool_configurations` from `inputs` (an edge that names the field, a
-        // dispatcher's `fixed` value) is the author's only when a dispatcher
-        // vouched for every `${` leaf in it; otherwise its `fixed` values are
-        // data and never expand `${VAR}`.
-        let tools_authored = !inputs.contains_key("tool_configurations")
-            || crate::dag_engine::infrastructure::env_provenance::subtree_trusted(
+        // dispatcher's `fixed` value) is the author's only when it is, whole,
+        // a dispatcher's `fixed` value; otherwise its `fixed` values are data
+        // for the tools' nodes. Its `${` leaves expand only where a dispatcher
+        // vouched for every one of them.
+        use crate::dag_engine::infrastructure::env_provenance as provenance;
+        let tools_from_inputs = inputs.contains_key("tool_configurations");
+        let tools_authored =
+            !tools_from_inputs || provenance::is_authored_input(inputs, "tool_configurations");
+        let tools_env_trusted = !tools_from_inputs
+            || provenance::subtree_trusted(
                 inputs,
                 "tool_configurations",
-                &crate::dag_engine::infrastructure::env_provenance::EnvPolicy::from_inputs(inputs),
+                &provenance::EnvPolicy::from_inputs(inputs),
             );
         let mut tool_configurations: HashMap<String, ToolConfiguration> = match inputs
             .get("tool_configurations")
@@ -2100,7 +2105,7 @@ impl ExecutableNode for LlmNode {
         // Provenance is taken here, before the `${context.*}` templating below:
         // a `fixed` value is the author's only as written, so a value templated
         // in from `inputs` never expands `${VAR}` in the target node.
-        let authored_tool_configurations = if tools_authored {
+        let authored_tool_configurations = if tools_env_trusted {
             tool_configurations.clone()
         } else {
             HashMap::new()
@@ -2408,7 +2413,7 @@ impl ExecutableNode for LlmNode {
 
         let tool_executor = {
             let mut executor = DagToolExecutor::new(registry, tool_configurations)
-                .with_authored_tool_configurations(authored_tool_configurations);
+                .with_authored_tool_configurations(authored_tool_configurations, tools_authored);
             if !mcp_specs.is_empty() {
                 executor = executor.with_mcp(mcp_slot.clone());
             }

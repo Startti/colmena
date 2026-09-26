@@ -5543,7 +5543,9 @@ clave, nunca el valor; un campo declarado en el `node_schema` sigue pasando.
 **Tests.** `author_owned_arg_tests` (despacho real a `http_request` contra un mock): un
 `headers` no declarado no llega; declarado, sí; el descarte vuelve como aviso de `merge_call`
 (la clave, nunca el valor). `for_each`: una fila no pone un `headers` que
-el target no ofrece. `registry.rs`: la tabla de campos del autor de cada nodo.
+el target no ofrece. `registry.rs`: la tabla de campos del autor de cada nodo, y un grafo real
+con modelo guionado en el que el estado global no le da tools a un `llm_call` (ningún request
+llega al servidor de la tool del estado).
 
 **ADP.** Sin cambios de API. Una tool cuyo modelo mandaba uno de esos campos sin que el
 `node_schema` lo declarara debe declararlo como parámetro.
@@ -5746,4 +5748,41 @@ nada; con el campo en `multipart_url_fields`, se baja.
 
 **ADP.** Campo nuevo opcional `multipart_url_fields`. Una tool cuyo modelo pasa URLs de
 archivos para subir debe listar esos campos.
+**Estado.** done.
+
+## 121. Endurecimiento: un secreto descifrado en `config` nunca se lee como plantilla de entorno
+
+**Qué cambia.** En modo grafo el motor inyecta los secure values en el `config` del nodo antes
+de ejecutarlo, y el nodo expande `${VAR}` en su `config` después. Si un valor descifrado que va
+a `config` contiene `${`, el motor no corre el nodo: lo falla con un error que nombra el handle
+(nunca el valor) y sugiere pasarlo por un edge, donde un valor de `inputs` no se expande (§107).
+`tavily_client`, que inyecta en su propio `node_config` de toolkit, usa un `api_key` descifrado
+tal cual y expande solo el `${VAR}` que escribió el autor. `image_generation`, `image_edit` y
+`tts` también inyectan en su copia de `config`, pero ahí el motor ya inyectó antes (modo grafo)
+o el `config` es `{}` (modo tool).
+
+**Tests.** `graph_http_payload_tests`: un bearer en `config` cuyo secreto contiene `${VAR}` no
+manda el valor de la variable. `tavily_client.rs`: un `api_key` descifrado no se expande; el del
+autor sí.
+
+**ADP.** Sin cambios de API. Un secreto que contiene `${` y se usaba en el `config` de un nodo
+debe llegar por un edge.
+**Estado.** done.
+
+## 122. Endurecimiento: un `tool_configurations` que llega como dato no aporta valores del autor
+
+**Qué cambia.** Cuando `llm_call` recibe `tool_configurations` por `inputs` (un edge que
+nombra el campo), sus `fixed` cuentan como del autor para el nodo de cada tool
+(`__colmena_authored_inputs`) solo si el `tool_configurations` entero es el `fixed` de la
+tool que despachó ese `llm_call` (`is_authored_input`). Si no, son datos: un `sandbox_mode`,
+`allowed_hosts`, `multipart_url_fields` o `body` fijado ahí no es del autor, y un `code`
+fijado ahí corre `restricted`. La expansión de `${VAR}` sigue su regla de §112
+(`subtree_trusted`). `DagToolExecutor::with_authored_tool_configurations` recibe ese
+segundo dato.
+
+**Tests.** `registry.rs::llm_call_tool_provenance_tests`: las mismas tools de Python con
+`code` y `sandbox_mode: "none"` fijos corren como las fijó el autor desde `config` y
+`restricted` desde `inputs` (el código no deja su marca en disco).
+
+**ADP.** Sin cambios de API.
 **Estado.** done.
