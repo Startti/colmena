@@ -53,6 +53,12 @@ const CLOSED_BY_PARALLEL_SUSPEND_TEXT: &str =
 const ABANDONED_TOOL_CALL_TEXT: &str =
     include_str!("../../../text/prompts/agent_loop/abandoned_tool_call.md");
 
+/// LLM-facing text persisted as an assistant message after a request a
+/// thread's last turn left unanswered, when a new prompt starts a fresh run
+/// on that thread. See [`ends_on_unanswered_request`].
+const UNANSWERED_REQUEST_TEXT: &str =
+    include_str!("../../../text/prompts/agent_loop/unanswered_request.md");
+
 /// LLM-facing instruction for the forced final synthesis ("rescue"). Appended
 /// as a user message before the terminal, tool-less LLM call.
 const RESCUE_SYNTHESIS_TEXT: &str =
@@ -126,6 +132,28 @@ fn abandoned_call_ids(messages: &[LlmMessage]) -> Vec<String> {
         return Vec::new();
     }
     unresolved_ids(messages, None)
+}
+
+/// Whether the thread ends on a `user` message no assistant answered: its
+/// last message that is not `System` is a `User` one.
+///
+/// A run persists its prompt before it calls the model, so a Stop, the
+/// watchdog or an error before the first reply leaves the thread there. The
+/// next prompt would then land right after it, and the model reads the two
+/// as one request (`coalesce_consecutive_same_role` joins them, or the
+/// provider does once it hoists a System message between them): it does the
+/// stopped one again. System messages are looked past because `llm_call`
+/// persists turn 1 as `[User, System]`, and Gemini and Anthropic hoist them
+/// out of the array.
+///
+/// A thread that ends on open calls is [`abandoned_call_ids`]' to answer;
+/// once it is, it ends on a `tool` message, which this leaves alone.
+fn ends_on_unanswered_request(messages: &[LlmMessage]) -> bool {
+    messages
+        .iter()
+        .rev()
+        .find(|m| m.role() != &MessageRole::System)
+        .is_some_and(|m| m.role() == &MessageRole::User)
 }
 
 /// Ids declared by the most recent assistant `tool_calls` message that have no
@@ -525,9 +553,13 @@ impl AgentService {
         };
         // A fresh run first answers what the thread's last turn left open. A
         // resume never gets here with new messages: its pending id is the
-        // resume path's to answer, with the human's answer.
+        // resume path's to answer, with the human's answer. The two heals
+        // never meet on one tail: open calls end on an assistant message and,
+        // once answered, on a `tool` one; an unanswered request ends on `user`.
         if !new_messages.is_empty() {
             self.close_abandoned_calls(session_id, &mut messages)
+                .await?;
+            self.mark_unanswered_request(session_id, &mut messages)
                 .await?;
         }
         for message in new_messages {
@@ -1267,6 +1299,31 @@ impl AgentService {
                 .await?;
         }
         Ok(())
+    }
+
+    /// Marks the request the thread's last turn left without a reply
+    /// ([`ends_on_unanswered_request`]) with an assistant message carrying
+    /// [`UNANSWERED_REQUEST_TEXT`], so the new prompt is not read as part of
+    /// it and the model knows it stopped. The marker ends the thread on an
+    /// assistant message, so a second run writes no second one.
+    async fn mark_unanswered_request(
+        &self,
+        session_id: &ConversationKey,
+        messages: &mut Vec<LlmMessage>,
+    ) -> Result<(), LlmError> {
+        if !ends_on_unanswered_request(messages) {
+            return Ok(());
+        }
+        tracing::warn!(
+            target: "colmena::agent",
+            "agent_service: a new prompt found a request its thread left unanswered; \
+             marking it before the new prompt"
+        );
+        let marker = LlmMessage::assistant(UNANSWERED_REQUEST_TEXT.trim().to_string())?;
+        messages.push(marker.clone());
+        self.conversation_repository
+            .add_message(session_id, marker)
+            .await
     }
 
     /// Ends the run on a call that suspended for human input. The assistant
@@ -4692,7 +4749,8 @@ mod tests {
 
     /// A retry after a turn that failed at the provider: the first run already
     /// answered the question and persisted its prompt, so the second adds no
-    /// second answer and its request stays valid.
+    /// second answer and its request stays valid. The prompt left without a
+    /// reply gets the request marker, once.
     #[tokio::test]
     async fn a_second_fresh_run_adds_no_second_marker() {
         let (mock_conv, thread) = stateful_conv_mock(thread_left_on_a_question());
@@ -4724,6 +4782,7 @@ mod tests {
         let after_failure = thread.lock().unwrap().clone();
         let abandoned = ABANDONED_TOOL_CALL_TEXT.trim();
         assert_eq!(answers_to(&after_failure, "ask"), [abandoned]);
+        assert_eq!(markers_in(&after_failure), 0);
 
         let (sent, thread) = turn_on(
             after_failure,
@@ -4733,5 +4792,148 @@ mod tests {
         .await;
         assert_eq!(open_ids(&sent), Vec::<String>::new());
         assert_eq!(answers_to(&thread, "ask"), [abandoned], "still one answer");
+        // The failed run's prompt got no reply: the retry marks it, once.
+        assert_eq!(markers_in(&thread), 1);
+        assert_eq!(said(&thread[5..7]), said(&[marker(), user("otra vez")]));
+    }
+
+    // ---- A fresh run marks a request its thread left unanswered ----
+
+    /// The request a Stop cut before any reply, measured in dev: the next
+    /// message's run did it again instead of answering `ASKED_NEXT`.
+    const CUT: &str = "anotá cuatro notas: once, doce, trece y catorce";
+    const ASKED_NEXT: &str = "decime solo \"recibido\"";
+
+    fn system(text: &str) -> LlmMessage {
+        LlmMessage::system(text.to_string()).unwrap()
+    }
+
+    fn assistant(text: &str) -> LlmMessage {
+        LlmMessage::assistant(text.to_string()).unwrap()
+    }
+
+    fn marker() -> LlmMessage {
+        assistant(UNANSWERED_REQUEST_TEXT.trim())
+    }
+
+    fn said(messages: &[LlmMessage]) -> Vec<(MessageRole, &str)> {
+        messages
+            .iter()
+            .map(|m| (m.role().clone(), m.content()))
+            .collect()
+    }
+
+    fn markers_in(messages: &[LlmMessage]) -> usize {
+        let marker = (MessageRole::Assistant, UNANSWERED_REQUEST_TEXT.trim());
+        said(messages).into_iter().filter(|m| *m == marker).count()
+    }
+
+    /// The model reads the cut request, then the marker, then the new prompt
+    /// on a turn of its own. Gemini and Anthropic hoist every System message
+    /// out of the array, so one between two `user` turns does not part them.
+    fn assert_read_as_left_unanswered(sent: &[LlmMessage]) {
+        let mut turns = said(sent);
+        turns.retain(|(role, _)| role != &MessageRole::System);
+        let together = turns
+            .windows(2)
+            .any(|w| w[0].0 == MessageRole::User && w[1].0 == MessageRole::User);
+        assert!(!together, "two user turns together: {turns:?}");
+        assert_eq!(turns.last(), Some(&(MessageRole::User, ASKED_NEXT)));
+        let text: Vec<&str> = sent.iter().map(|m| m.content()).collect();
+        let text = text.join("\n");
+        let cut = text.find(CUT).expect("the cut request reaches the model");
+        let mark = text.find(marker().content()).expect("the marker too");
+        assert!(cut < mark, "the marker follows the cut request: {text}");
+    }
+
+    /// A Stop is often followed by a refinement ("más corto", "en inglés"):
+    /// both markers let the next message resume what it asks for.
+    #[test]
+    fn both_markers_resume_only_what_the_next_message_asks_for() {
+        let rule = "solo si el mensaje siguiente lo pide";
+        for text in [UNANSWERED_REQUEST_TEXT, ABANDONED_TOOL_CALL_TEXT] {
+            assert!(text.contains(rule), "{text}");
+            assert!(!text.contains("No l"), "no blanket refusal: {text}");
+        }
+    }
+
+    #[test]
+    fn the_unanswered_request_is_the_user_turn_the_thread_ends_on() {
+        assert!(ends_on_unanswered_request(&[user(CUT)]));
+        // `llm_call` persists turn 1 as `[User, System]`.
+        assert!(ends_on_unanswered_request(&[user(CUT), system("S")]));
+        // Once marked, nothing is left: the heal is idempotent.
+        assert!(!ends_on_unanswered_request(&[user(CUT), marker()]));
+        assert!(!ends_on_unanswered_request(&[user(CUT), assistant("ok")]));
+        // Open calls are `close_abandoned_calls`' to answer, and once answered
+        // the thread ends on a `tool` message.
+        let calls = asst_with_calls(&["x"]);
+        assert!(!ends_on_unanswered_request(&[user(CUT), calls.clone()]));
+        let answer = LlmMessage::tool("x".into(), "hecho".into()).unwrap();
+        assert!(!ends_on_unanswered_request(&[user(CUT), calls, answer]));
+        assert!(!ends_on_unanswered_request(&[]));
+        assert!(!ends_on_unanswered_request(&[system("S")]));
+    }
+
+    #[tokio::test]
+    async fn a_fresh_run_marks_the_request_its_thread_left_unanswered() {
+        let next = Some(vec![user(ASKED_NEXT)]);
+        let (sent, thread) = turn_on(vec![user(CUT)], Some(ASKED_NEXT), next).await;
+
+        assert_eq!(said(&sent), said(&[user(CUT), marker(), user(ASKED_NEXT)]));
+        assert_read_as_left_unanswered(&sent);
+        let persisted = [user(CUT), marker(), user(ASKED_NEXT), assistant("ok")];
+        assert_eq!(said(&thread), said(&persisted), "once, before the prompt");
+    }
+
+    /// The shape measured in dev: the cut request was the thread's first, so
+    /// `llm_call` had persisted `[User, System]`, and the marker has to look
+    /// past the System message the provider hoists.
+    #[tokio::test]
+    async fn a_first_turn_left_unanswered_is_marked_past_its_system_prompt() {
+        let history = vec![user(CUT), system("S")];
+        let next = Some(vec![user(ASKED_NEXT)]);
+        let (sent, thread) = turn_on(history, Some(ASKED_NEXT), next).await;
+
+        assert_read_as_left_unanswered(&sent);
+        let persisted = [user(CUT), system("S"), marker(), user(ASKED_NEXT)];
+        assert_eq!(said(&thread[..4]), said(&persisted));
+    }
+
+    #[tokio::test]
+    async fn a_thread_whose_last_request_was_answered_gets_no_marker() {
+        let history = vec![user(CUT), assistant("anotadas")];
+        let next = Some(vec![user(ASKED_NEXT)]);
+        let (sent, thread) = turn_on(history, Some(ASKED_NEXT), next).await;
+
+        assert_eq!(markers_in(&sent), 0);
+        let persisted = [user(CUT), assistant("anotadas"), user(ASKED_NEXT)];
+        assert_eq!(said(&thread[..3]), said(&persisted));
+    }
+
+    /// Open calls and an unanswered request are two tails, one heal each: the
+    /// calls get the tool-call marker, which leaves the thread on a `tool`
+    /// message, and no request marker follows.
+    #[tokio::test]
+    async fn a_thread_left_on_open_calls_gets_only_the_tool_call_marker() {
+        use MessageRole::{Assistant, Tool, User};
+        let history = vec![user(CUT), asst_with_calls(&["x"])];
+        let next = Some(vec![user(ASKED_NEXT)]);
+        let (sent, thread) = turn_on(history, Some(ASKED_NEXT), next).await;
+
+        assert_eq!(markers_in(&sent), 0, "{:?}", said(&sent));
+        assert_eq!(answers_to(&thread, "x"), [ABANDONED_TOOL_CALL_TEXT.trim()]);
+        let roles: Vec<MessageRole> = thread.iter().map(|m| m.role().clone()).collect();
+        assert_eq!(roles, [User, Assistant, Tool, User, Assistant]);
+    }
+
+    /// A resume brings no new prompt, so there is no second request to keep
+    /// apart: the thread is continued as it is.
+    #[tokio::test]
+    async fn a_resume_marks_nothing() {
+        let (sent, thread) = turn_on(vec![user(CUT)], None, None).await;
+
+        assert_eq!(said(&sent), said(&[user(CUT)]));
+        assert_eq!(said(&thread), said(&[user(CUT), assistant("ok")]));
     }
 }
