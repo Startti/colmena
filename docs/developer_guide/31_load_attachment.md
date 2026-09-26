@@ -45,9 +45,10 @@ then is described below the list.
 - **Signed URL (`files[].url`):** los bytes se descargan y se streamean al storage. Esta descarga, la del
   resumen automático y la de la re-subida de las 24 h usan el cliente guardado de `files[].url`
   ([14_llm_deep_dive.md](14_llm_deep_dive.md), CHANGELOG 2026-09 §137). También se guardan los
-  de una imagen que, con Anthropic u OpenAI y `DATABASE_URL`, se le pasa al modelo como URL sin
-  subirla a la Files API: se registra con `provider_file_id` vacío y `load_attachment` la sirve
-  desde storage (CHANGELOG 2026-09 §141).
+  de una imagen que, con Anthropic u OpenAI y `DATABASE_URL`, se deja como URL sin subirla a la
+  Files API (Plan B nunca se la entrega al adapter: el mensaje inicial no lleva archivos): se
+  registra con `provider_file_id` vacío y `load_attachment` la sirve desde storage (CHANGELOG
+  2026-09 §141).
 - **Generated artifact** (`image_generation` / `image_edit` / `tts`): los bytes ya
   viven en storage; el artefacto se registra automáticamente en `conversation_attachments`
   con `origin = generated_by:<tool>` y `source = Path(storage_key)`.
@@ -419,6 +420,12 @@ Gemini caduca los `file_id` a las 48h. Cuando una fila en `conversation_attachme
 ```
 
 Ambos se devuelven como `ToolResult` ordinario para que el modelo pueda recuperarse (pedir al usuario, intentar otro id, etc.).
+
+`attachment_expired_unrecoverable` también cubre una imagen servida desde storage (texto inline
+o una que quedó como signed URL, §141) que el proveedor no aceptaría inline: mimetype no
+soportado o bytes por encima de su cupo (Anthropic 5 MB; OpenAI y Google 20 MB). Se detecta antes
+de mandarla, en vez de dejar que el proveedor conteste un 400 que tira el turno entero (CHANGELOG
+2026-09 §142).
 
 ## Tabla `conversation_attachments`
 
