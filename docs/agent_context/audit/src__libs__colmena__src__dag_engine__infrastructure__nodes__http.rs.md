@@ -41,7 +41,7 @@
 - `HttpNode::parse_multipart_body()` (fn, pub(crate)) — Convert JSON body object to flat Vec<PartSpec>; errors on non-object or unrecognized object shapes
 - `HttpNode::push_parts_for_value()` (fn, private) — Recursive parser for multipart value: null → skip, string → classify, number/bool → text, array → expand, object → extract url/attachment/value
 - `HttpNode::classify_string_part()` (fn, private) — Classify string as `$attachment:` (Attachment), http(s):// (Url), or plain (Text)
-- `HttpNode::destination_guard()` / `client_for()` (fn, private) — A destination from data (not the author's `base_url` origin) dials only public addresses on every hop, unless `allowed_hosts` names it; with author credentials, only same-origin redirects (CHANGELOG 2026-09 §124, §111)
+- `HttpNode::destination_guard()` / `client_for()` (fn, private) — A destination from data (not the author's `base_url` origin) dials only public addresses on every hop, unless `allowed_hosts` names it; with author credentials, only same-origin redirects (CHANGELOG 2026-09 §143, §118)
 - `HttpNode::execute_multipart()` (fn, private async) — Branch path for multipart requests: parse body → resolve URLs/attachments → build form → POST with merged headers
 - `HttpNode::add_part_to_form()` (fn, private async) — Stream a single PartSpec into reqwest multipart form (Text direct, Url/Attachment via streaming)
 

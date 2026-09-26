@@ -6336,12 +6336,12 @@ da un error de tool con el tamaño); `check_inline_image_rejects_a_mime_type_the
 
 **ADP.** Sin cambios de API.
 
-## 124. Endurecimiento: en `http_request`, un destino que viene de datos se marca solo en direcciones públicas
+## 143. Endurecimiento: en `http_request`, un destino que viene de datos se marca solo en direcciones públicas
 
 **Qué cambia.** Si el destino de `http_request` viene de datos del run (un edge que nombra
 `base_url`, un `base_url` abierto en la tool, una tool o un `target` de `for_each` que llegan como
 dato) y no es el origen del `base_url` del autor, la conexión marca solo direcciones públicas: la
-regla del cliente guardado de §121 (`DialGuard`), revisada en la resolución DNS del socket y, para
+regla del cliente guardado de §137 (`DialGuard`), revisada en la resolución DNS del socket y, para
 una IP literal, en la URL y en cada salto de redirect. Sin proxy. Un host en `allowed_hosts`
 (`"host"` o `"host:port"`, del autor) se marca en cualquier dirección; una entrada `"host:port"` vale
 solo en ese puerto: un salto a ese host en otro puerto se niega. Los otros saltos de un redirect

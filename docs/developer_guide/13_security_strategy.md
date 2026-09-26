@@ -986,7 +986,7 @@ Este bloque resume el estado real del cifrado en tránsito para cada componente 
 - Si `base_url` viene de datos y no es el origen del `base_url` del autor, la conexión usa la misma regla de
   direcciones (`DialGuard`): solo públicas, en la resolución DNS y en cada redirect, sin proxy. Un host en
   `allowed_hosts` del autor se marca en cualquier dirección. `COLMENA_ATTACHMENT_ALLOW_PRIVATE_HOSTS` la apaga
-  también (CHANGELOG 2026-09 §124).
+  también (CHANGELOG 2026-09 §143).
 
 ## Brechas conocidas de TLS (Postgres, HTTP, Socket.IO)
 

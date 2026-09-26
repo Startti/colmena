@@ -7,7 +7,7 @@ compartido.
 
 ## Qué cambia
 
-- **`http_request`** (CHANGELOG 2026-09 §124): si `base_url` viene de datos (un edge que lo nombra, un
+- **`http_request`** (CHANGELOG 2026-09 §143): si `base_url` viene de datos (un edge que lo nombra, un
   campo abierto de la tool, una tool que llega como dato) y no es el origen del `base_url` del
   autor, el nodo marca solo direcciones públicas, también en cada redirect, y sin proxy. Un host en
   `allowed_hosts` se marca en cualquier dirección. El destino que fija el autor no cambia.
