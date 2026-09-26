@@ -5934,3 +5934,20 @@ puntero avalado.
 expandir: la URL con variables va en `config` o en un `fixed`. Una tool `sql_query` cuyo
 `connection_url` `fixed` usa `${context.*}` no recibe el esquema de la base en su descripción.
 **Estado.** done.
+
+## 119. Endurecimiento: la región y el proyecto de Vertex en `image_generation` son del autor
+
+**Qué cambia.** `google_project_id` y `google_location` pasan a `author_owned_inputs` de
+`image_generation`: un objeto aplanado, el estado global o un argumento que la tool no ofrece
+no los fijan (un edge que nombra el campo o un parámetro ofrecido sí). `google_location` forma
+parte del host de la request a Vertex (`<región>-aiplatform.googleapis.com`), que lleva el
+token de la cuenta del worker: el nodo acepta solo un nombre de región (minúsculas, dígitos y
+`-`) y con cualquier otro valor falla antes de pedir nada. `image_edit` no cambia: solo
+implementa `openai`, contra un host fijo (`image_edit.rs` `openai_base_url`, y el chequeo de
+`provider`).
+
+**Tests.** `image_generation.rs`: con un `google_location` de datos que nombra otro host, ese
+host no recibe ninguna conexión. `registry.rs`: la tabla de campos del autor incluye los dos.
+
+**ADP.** Sin cambios de API. Una región que no sea un nombre de región falla antes de la request.
+**Estado.** done.

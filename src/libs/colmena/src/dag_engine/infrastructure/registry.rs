@@ -1284,7 +1284,10 @@ mod catalog_coverage_tests {
                     "setup_sql",
                 ],
             ),
-            ("image_generation", &["api_key"]),
+            (
+                "image_generation",
+                &["api_key", "google_project_id", "google_location"],
+            ),
             ("image_edit", &["api_key"]),
             ("tts", &["api_key"]),
             ("information_extraction", &["system_message"]),

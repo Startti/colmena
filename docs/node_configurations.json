@@ -3163,14 +3163,14 @@
           "type": "string",
           "required": false,
           "default": null,
-          "description": "GCP project for Vertex AI. Required when provider is 'google', but best omitted from graph JSON: it falls back to the GOOGLE_CLOUD_PROJECT env var.",
+          "description": "GCP project for Vertex AI. Required when provider is 'google', but best omitted from graph JSON: it falls back to the GOOGLE_CLOUD_PROJECT env var. Author-set: an edge without a field, global state or an unoffered tool argument never sets it.",
           "supports_env_vars": true
         },
         "google_location": {
           "type": "string",
           "required": false,
           "default": "us-central1",
-          "description": "Vertex AI region. Falls back to the GOOGLE_CLOUD_LOCATION env var; best omitted from graph JSON.",
+          "description": "Vertex AI region. Falls back to the GOOGLE_CLOUD_LOCATION env var; best omitted from graph JSON. Author-set like google_project_id, and a region name only (lowercase letters, digits and '-'): it is part of the request's host, so any other value fails before a request is made.",
           "supports_env_vars": true
         }
       },
@@ -3889,7 +3889,7 @@
           "type": "string",
           "required": false,
           "default": "us-central1",
-          "description": "Vertex AI region. Ignored when provider='openai'. Like google_project_id, best practice is to OMIT this from the graph config — resolved via GOOGLE_CLOUD_LOCATION (or GOOGLE_LOCATION) env var, falling back to 'us-central1' if neither is set. Override in the graph only when a specific graph needs a non-default region.",
+          "description": "Vertex AI region. Ignored when provider='openai'. Like google_project_id, best practice is to OMIT this from the graph config — resolved via GOOGLE_CLOUD_LOCATION (or GOOGLE_LOCATION) env var, falling back to 'us-central1' if neither is set. Override in the graph only when a specific graph needs a non-default region. A region name only (lowercase letters, digits and '-'); any other value fails before a request is made.",
           "example": "us-central1 (omit unless overriding env default)"
         }
       },

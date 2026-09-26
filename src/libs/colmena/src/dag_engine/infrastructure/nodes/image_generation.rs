@@ -162,9 +162,10 @@ impl ImageGenerationNode {
 
 #[async_trait]
 impl ExecutableNode for ImageGenerationNode {
-    /// The provider credential is author-set.
+    /// The provider credential is author-set, and so are the Vertex project
+    /// and region: the region names the request's host.
     fn author_owned_inputs(&self) -> &'static [&'static str] {
-        &["api_key"]
+        &["api_key", "google_project_id", "google_location"]
     }
 
     async fn execute(
@@ -303,6 +304,20 @@ impl ExecutableNode for ImageGenerationNode {
                     .or_else(|| std::env::var("GOOGLE_CLOUD_LOCATION").ok())
                     .or_else(|| std::env::var("GOOGLE_LOCATION").ok())
                     .unwrap_or_else(|| "us-central1".to_string());
+                // The region is part of the request's host
+                // (`<region>-aiplatform.googleapis.com`), so it is a region name
+                // and nothing else.
+                if location.is_empty()
+                    || !location
+                        .bytes()
+                        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+                {
+                    return Err(format!(
+                        "image_generation: google_location '{location}' is not a region name \
+                         (lowercase letters, digits and '-')"
+                    )
+                    .into());
+                }
                 self.vertex_generate(&project, &location, &model, &prompt, n)
                     .await?
             }
@@ -670,6 +685,33 @@ mod tests {
             filename: "image_0.png".into(),
             size_bytes: 2,
         }
+    }
+
+    /// A Vertex `google_location` that arrives as data never moves the
+    /// request, which carries the worker's cloud token, off Google's
+    /// `<region>-aiplatform.googleapis.com` host.
+    #[tokio::test]
+    async fn a_data_location_never_moves_the_vertex_request_to_another_host() {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        let accepted = tokio::spawn(async move { l.accept().await.is_ok() });
+        let node = ImageGenerationNode::new(Arc::new(MockOutputStorageRepository::new()));
+        *node.vertex_token.lock().await = Some(CachedToken {
+            token: "token-test-only".into(),
+            expires_at: Instant::now() + Duration::from_secs(3600),
+        });
+        let inputs = HashMap::from([
+            ("google_location".to_string(), json!(format!("{addr}/x#"))),
+            ("prompt".to_string(), json!("p")),
+        ]);
+        let config = json!({ "provider": "google", "model": "m", "google_project_id": "p" });
+        let result = node.execute(&inputs, &config, &mut json!({}), None).await;
+        assert!(result.is_err());
+        let reached = tokio::time::timeout(Duration::from_millis(300), accepted).await;
+        assert!(
+            reached.is_err(),
+            "the request went to a host the data named"
+        );
     }
 
     #[tokio::test]
