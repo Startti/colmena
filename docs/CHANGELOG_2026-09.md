@@ -5890,7 +5890,7 @@ variable y el mismo por `inputs` no; listar tools del autor conecta con la varia
 las mismas tools como dato no; `tenant_user_id` y `api_key` por `inputs` expanden solo con un
 puntero avalado.
 
-**ADP.** Sin cambios de API. Un `connection_url` que un edge trae con `${VAR}` deja de
-expandirse: la URL va en `config` o en un `fixed`. Una tool `sql_query` cuyo `connection_url`
-`fixed` usa `${context.*}` ya no recibe el esquema de la base en su descripción.
+**ADP.** Sin cambios de API. Un `connection_url` que un edge trae con `${VAR}` se usa sin
+expandir: la URL con variables va en `config` o en un `fixed`. Una tool `sql_query` cuyo
+`connection_url` `fixed` usa `${context.*}` no recibe el esquema de la base en su descripción.
 **Estado.** done.
