@@ -5501,7 +5501,7 @@ Cinco cambios, cada uno con su test.
 
 **ADP.** Sin cambios de API. **Estado.** done.
 
-## 104. Endurecimiento: un campo que el autor fija en `config` es solo de `config`
+## 110. Endurecimiento: un campo que el autor fija en `config` es solo de `config`
 
 **Qué cambia.** Regla única en el ensamblado de inputs (`run_use_case.rs`), para todo tipo de
 nodo: el auto-flatten de un edge sin puerto y el relleno desde el estado global (en un hijo,

@@ -209,7 +209,7 @@ el estado global. En `http_request` son `base_url`, `method`, `headers`,
 `bearer_token` y `authorization`: el destino, el método y las credenciales los
 fija el autor. Cada valor descartado deja un `warn` en `colmena::dag_engine`
 con el nodo y la clave (nunca el valor). Y ningún valor que llega por un edge
-expande `${VAR}`: solo `config` lo hace (CHANGELOG 2026-09 §101, §102 y §104).
+expande `${VAR}`: solo `config` lo hace (CHANGELOG 2026-09 §107, §108 y §110).
 
 Un nodo recibe los edges cuyo `to` es su id o `<id>.<campo>`; un edge a otro
 nodo cuyo id empieza igual (`call2` para `call`) no le llega.
