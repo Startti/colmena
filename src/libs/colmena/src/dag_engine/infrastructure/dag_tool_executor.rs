@@ -2995,10 +2995,11 @@ impl ToolExecutor for DagToolExecutor {
     /// Closes the child run of a `subgraph` call whose question the turn does
     /// not keep, and the child's own suspended descendants, so the parent is
     /// left with the one suspended child `find_suspended_child` resumes. The
-    /// child is the run its SUSPENDED output names in `session_id`. As a
-    /// refused resume does, only a row still SUSPENDED is closed, and a row
-    /// this call did not close keeps its descendants. Failures are logged:
-    /// the turn still pauses on its one question.
+    /// child is the run its SUSPENDED output names in `session_id`, and only a
+    /// child of this executor's run is closed: that id comes from the tool's
+    /// output. As a refused resume does, only a row still SUSPENDED is closed,
+    /// and a row this call did not close keeps its descendants. Failures are
+    /// logged: the turn still pauses on its one question.
     async fn close_suspended(&self, call: &ToolCall, outcome: &Value) {
         let Some(repo) = &self.state_repository else {
             return;
@@ -3011,18 +3012,56 @@ impl ToolExecutor for DagToolExecutor {
         let Some(child) = outcome.get("session_id").and_then(Value::as_str) else {
             return;
         };
-        let closed = match repo.fail_if_suspended(child).await {
-            Ok(true) => repo.fail_suspended_descendants(child).await.map(|_| ()),
-            Ok(false) => Ok(()),
+        // The child's row names its parent from the same `session_id` this
+        // executor injects as `__colmena_session_id`; without one, no row can
+        // be told to be this run's.
+        let Some(parent) = self.session_id.as_deref() else {
+            tracing::error!(
+                target: "colmena::agent",
+                tool_call_id = %call.id,
+                child_session_id = %child,
+                "close_suspended: this run has no session id, so its child cannot be closed; \
+                 the parent may keep two SUSPENDED children, and its resume will fail"
+            );
+            return;
+        };
+        let closed = match repo.get_by_id(child).await {
+            Ok(Some(row)) if row.parent_session_id.as_deref() == Some(parent) => {
+                match repo.fail_if_suspended(child).await {
+                    Ok(true) => repo.fail_suspended_descendants(child).await.map(|_| ()),
+                    Ok(false) => Ok(()),
+                    Err(e) => Err(e),
+                }
+            }
+            Ok(None) => {
+                tracing::warn!(
+                    target: "colmena::agent",
+                    tool_call_id = %call.id,
+                    child_session_id = %child,
+                    "close_suspended: child row not found; nothing to close"
+                );
+                Ok(())
+            }
+            Ok(Some(_)) => {
+                tracing::warn!(
+                    target: "colmena::agent",
+                    tool_call_id = %call.id,
+                    child_session_id = %child,
+                    "close_suspended: the run this call names is not a child of this run; \
+                     left as it is"
+                );
+                Ok(())
+            }
             Err(e) => Err(e),
         };
         if let Err(e) = closed {
-            tracing::warn!(
+            tracing::error!(
                 target: "colmena::agent",
                 tool_call_id = %call.id,
                 child_session_id = %child,
                 error = %e,
-                "close_suspended: failed to close the child run of a closed question"
+                "close_suspended: failed to close the child run of a closed question; \
+                 its parent may keep two SUSPENDED children, and its resume will fail"
             );
         }
     }
@@ -6848,7 +6887,8 @@ mod close_suspended_tests {
         }
     }
 
-    /// `Run` is a `subgraph` tool; `Echo` is not.
+    /// The executor of `root`'s `llm_call`. `Run` is a `subgraph` tool; `Echo`
+    /// is not.
     fn executor(repo: &Arc<MemRepo>) -> DagToolExecutor {
         let entry = |name: &str, node_type: &str| {
             let cfg = json!({ "name": name, "node_type": node_type, "parallel": true });
@@ -6856,6 +6896,7 @@ mod close_suspended_tests {
         };
         let configs = HashMap::from([entry("Run", "subgraph"), entry("Echo", "echo")]);
         DagToolExecutor::new(Arc::new(EchoRegistry), configs)
+            .with_session_id("root".into())
             .with_state_repository(repo.clone() as Arc<dyn DagStateRepository>)
     }
 
@@ -6910,5 +6951,97 @@ mod close_suspended_tests {
             .await;
         assert_eq!(repo.status("child_b"), DagRunStatus::Suspended);
         assert_eq!(repo.status("grand_b"), DagRunStatus::Suspended);
+    }
+
+    /// The id comes from the tool's output: a SUSPENDED row it names under
+    /// another run is not this run's question, and is left as it is.
+    #[tokio::test]
+    async fn a_suspended_run_under_another_parent_is_left_as_it_is() {
+        let repo = MemRepo::with(&[
+            ("root", None, DagRunStatus::Running),
+            ("other_root", None, DagRunStatus::Running),
+            ("stranger", Some("other_root"), DagRunStatus::Suspended),
+            ("grand_s", Some("stranger"), DagRunStatus::Suspended),
+        ]);
+        executor(&repo)
+            .close_suspended(&call("Run"), &suspended("stranger"))
+            .await;
+        assert_eq!(repo.status("stranger"), DagRunStatus::Suspended);
+        assert_eq!(repo.status("grand_s"), DagRunStatus::Suspended);
+    }
+
+    /// Everything `close_suspended` logs while it closes `outcome`, whose one
+    /// question carries a value that must never reach the log.
+    async fn logged_closing(exec: &DagToolExecutor, child: &str) -> String {
+        use std::io::Write;
+        use tracing_subscriber::fmt;
+
+        #[derive(Clone, Default)]
+        struct Buf(Arc<Mutex<Vec<u8>>>);
+        struct Handle(Arc<Mutex<Vec<u8>>>);
+        impl<'a> fmt::MakeWriter<'a> for Buf {
+            type Writer = Handle;
+            fn make_writer(&'a self) -> Handle {
+                Handle(self.0.clone())
+            }
+        }
+        impl Write for Handle {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let buf = Buf::default();
+        let subscriber = fmt::Subscriber::builder()
+            .with_writer(buf.clone())
+            .with_ansi(false)
+            .with_max_level(tracing::Level::TRACE)
+            .finish();
+        let mut outcome = suspended(child);
+        outcome["questions"] = json!([{ "id": "q", "question": "VALOR-DE-LA-PREGUNTA" }]);
+        let guard = tracing::subscriber::set_default(subscriber);
+        exec.close_suspended(&call("Run"), &outcome).await;
+        drop(guard);
+        let log = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        assert!(!log.contains("VALOR-DE-LA-PREGUNTA"), "{log}");
+        log
+    }
+
+    /// Without the run's own id no row can be told to be its child, so nothing
+    /// closes, and the parent keeps two SUSPENDED children: an error, with ids.
+    #[tokio::test]
+    async fn without_a_session_id_nothing_closes_and_it_is_logged_as_an_error() {
+        let repo = two_children(DagRunStatus::Suspended);
+        let exec =
+            DagToolExecutor::new(Arc::new(EchoRegistry), executor(&repo).tool_configurations)
+                .with_state_repository(repo.clone() as Arc<dyn DagStateRepository>);
+        let log = logged_closing(&exec, "child_b").await;
+        assert_eq!(repo.status("child_b"), DagRunStatus::Suspended);
+        let line = log
+            .lines()
+            .find(|l| l.contains("ERROR"))
+            .unwrap_or_else(|| panic!("{log}"));
+        assert!(
+            line.contains("tool_call_id=c1") && line.contains("child_session_id=child_b"),
+            "{line}"
+        );
+    }
+
+    /// A child the output names but the repository does not have is not
+    /// "under another run": the log says what happened.
+    #[tokio::test]
+    async fn a_child_row_that_is_not_found_is_logged_as_not_found() {
+        let repo = two_children(DagRunStatus::Suspended);
+        let log = logged_closing(&executor(&repo), "ghost").await;
+        assert!(log.contains("child row not found"), "{log}");
+        assert!(!log.contains("not a child of this run"), "{log}");
+        assert!(
+            log.contains("tool_call_id=c1") && log.contains("child_session_id=ghost"),
+            "{log}"
+        );
     }
 }
