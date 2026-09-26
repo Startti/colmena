@@ -11,7 +11,6 @@
 //!
 //! See E-T14 in the implementation plan.
 
-use crate::dag_engine::infrastructure::nodes::python_node::execute_sandboxed_helper;
 use crate::gsheets::domain::{ReadOptions, ReadResponse, SheetsClient, SpreadsheetId};
 use crate::gsheets::infrastructure::config::GSheetsConfig;
 use crate::gsheets::infrastructure::http_client::{rectangle_to_records, GoogleSheetsHttpClient};
@@ -403,18 +402,21 @@ pub async fn dispatch_gsheets_run_python_with_client(
     // 4. Wrap user code with prelude/postlude.
     let wrapped_code = wrap_user_code(&parsed.code);
 
-    // 5. Run in spawn_blocking with timeout.
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(CODE_TIMEOUT_SECS),
-        tokio::task::spawn_blocking(move || {
-            execute_sandboxed_helper(&wrapped_code, "restricted", CODE_TIMEOUT_SECS, &inputs)
-        }),
+    // 5. Run through the configured Python executor with timeout.
+    let result = crate::dag_engine::infrastructure::python_exec::run(
+        crate::dag_engine::domain::python_executor::PythonRunRequest {
+            code: wrapped_code,
+            mode: "restricted".to_string(),
+            timeout: Some(std::time::Duration::from_secs(CODE_TIMEOUT_SECS)),
+            inputs,
+        },
     )
     .await;
 
+    use crate::dag_engine::domain::python_executor::PythonRunError;
     let helper_result = match result {
-        Ok(Ok(Ok(r))) => r,
-        Ok(Ok(Err(e))) => {
+        Ok(r) => r,
+        Err(PythonRunError::Python(e)) => {
             return serde_json::json!({
                 "output": serde_json::Value::Null,
                 "stdout": "",
@@ -422,13 +424,10 @@ pub async fn dispatch_gsheets_run_python_with_client(
                 "loaded_columns": loaded_columns,
             });
         }
-        Ok(Err(join_err)) => {
-            return serde_json::json!({
-                "error": format!("internal join error: {join_err}"),
-                "loaded_columns": loaded_columns,
-            });
+        Err(PythonRunError::Internal(e)) => {
+            return serde_json::json!({ "error": e, "loaded_columns": loaded_columns });
         }
-        Err(_) => {
+        Err(PythonRunError::Timeout) => {
             return serde_json::json!({
                 "error": format!("code execution exceeded {CODE_TIMEOUT_SECS}s timeout"),
                 "loaded_columns": loaded_columns,

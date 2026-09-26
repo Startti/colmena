@@ -13,11 +13,13 @@ It serves two main use cases:
 **Registered as:** `"python_script"` in the node registry
 **Feature flag:** none — `pyo3` and `pythonize` are unconditional dependencies in `src/libs/colmena/Cargo.toml`, and `main.rs` calls `pyo3::Python::initialize()` unconditionally, so `python_script` works without `--features python`. The `python` cargo feature only gates `pyo3-async-runtimes` (used for PyO3 async bindings, not this node).
 
+Where the code runs: see [53_python_executors.md](53_python_executors.md).
+
 ---
 
 ## Architecture
 
-The node is intentionally small: there is no separate use case or domain port. Execution lives entirely inside `python_node.rs`.
+The node is intentionally small: it resolves `code`, `sandbox_mode` and the input map, then hands the run to `python_exec::run`, which dispatches to the process-wide `PythonExecutor` port (see [53_python_executors.md](53_python_executors.md)).
 
 ```
 ┌────────────────────────────────────────────────────────────┐
@@ -28,16 +30,32 @@ The node is intentionally small: there is no separate use case or domain port. E
 │   2. Strip ```python ... ``` markdown wrappers              │
 │   3. Resolve `sandbox_mode` and `sandbox_timeout_secs`      │
 │   4. Filter reserved keys from the input map                │
-│   5. spawn_blocking → Python::attach:                        │
+│   5. Build a PythonRunRequest, call python_exec::run(req)   │
+└───────────────────────────┬──────────────────────────────────┘
+                            │
+                            ▼
+┌────────────────────────────────────────────────────────────┐
+│              python_exec::run (dispatcher)                  │
+│         infrastructure/python_exec/mod.rs                   │
+│   Applies the modes policy and the default deadline, then    │
+│   hands the request to the configured PythonExecutor port.   │
+└───────────────────────────┬──────────────────────────────────┘
+                            │ (default: InProcessExecutor)
+                            ▼
+┌────────────────────────────────────────────────────────────┐
+│                   InProcessExecutor                          │
+│         infrastructure/python_exec/inprocess.rs              │
+│                                                             │
+│   spawn_blocking → Python::attach:                           │
 │        • If restricted: AST validation                      │
 │        • Inject inputs as global Python variables           │
 │        • py.run(code)                                       │
 │        • Extract `output` variable → JSON                   │
-│   6. If restricted: wrap in tokio::time::timeout            │
+│   Wrapped in tokio::time::timeout when a deadline applies     │
 └────────────────────────────────────────────────────────────┘
 ```
 
-CPython's GIL is not async-safe, so the entire Python execution runs inside `tokio::task::spawn_blocking`. This isolates the GIL on a dedicated blocking-pool thread and keeps the async runtime responsive.
+CPython's GIL is not async-safe, so the entire Python execution runs inside `tokio::task::spawn_blocking`. This isolates the GIL on a dedicated blocking-pool thread and keeps the async runtime responsive. See [53_python_executors.md](53_python_executors.md) for the executor port itself.
 
 ---
 
@@ -503,7 +521,7 @@ The node strips ` ```python ... ``` ` automatically, so this works. If you ever 
 
 ### Unit-test runs but `cargo test` for `sandbox_timeout_secs` would hang
 
-This is intentional. A direct end-to-end test would deadlock the harness because the blocking thread holding the GIL cannot be cancelled. The wiring is verified through the e2e graph `tests/graphs/agents/python_sandbox_tool_test.json`. The `tokio::time::timeout` primitive itself is upstream-tested by tokio.
+A direct `sandbox_timeout_secs` test exists (`restricted_timeout_text_is_unchanged` in `python_node.rs`): it runs a bounded wall-clock loop (a fixed duration, not a fixed iteration count, so it isn't sensitive to CPU speed) that always finishes on its own, well past the configured timeout, so the test can't hang. An *unbounded* loop would still hang the harness, because the blocking thread holding the GIL cannot be cancelled. The wiring is also verified through the e2e graph `tests/graphs/agents/python_sandbox_tool_test.json`. The `tokio::time::timeout` primitive itself is upstream-tested by tokio.
 
 ---
 

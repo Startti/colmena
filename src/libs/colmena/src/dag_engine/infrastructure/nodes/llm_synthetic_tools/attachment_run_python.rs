@@ -19,16 +19,14 @@
 //!
 //! ## Sandbox
 //!
-//! Reuses `execute_sandboxed_helper` from `nodes::python_node` in the same
-//! `restricted` mode as `gsheets_run_python` and `crdt_doc_run_python`.
-//! Imports are AST-validated:
+//! Runs through the process's configured Python executor (see
+//! docs/developer_guide/53_python_executors.md) in the same `restricted`
+//! mode as `gsheets_run_python` and `crdt_doc_run_python`. Imports are
+//! AST-validated as an aid to the author, not an isolation boundary:
 //!   - **Allowed:** pandas, numpy, scipy.stats, math, datetime, decimal,
 //!     json, re, statistics, string, collections, functools, itertools.
 //!   - **Blocked:** os, sys, subprocess, socket, urllib, requests,
-//!     importlib, builtins, ctypes (anything that could escape the sandbox).
-//!
-//! No filesystem access, no network access. The attachment bytes live in
-//! Python memory only for the duration of the call.
+//!     importlib, builtins, ctypes.
 //!
 //! ## Both inline AND signed-URL attachments are supported
 //!
@@ -254,27 +252,24 @@ pub async fn dispatch_attachment_run_python_via_executor(
     inputs.insert("_attachment_records".to_string(), records_value);
     let wrapped = wrap_user_code(&args.code);
 
-    // 6. Run in `spawn_blocking` with a wall-clock timeout. Same pattern as
-    //    `gsheets_run_python`.
+    // 6. Run through the configured Python executor with a wall-clock
+    //    timeout. Same pattern as `gsheets_run_python`.
     let started = std::time::Instant::now();
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(CODE_TIMEOUT_SECS),
-        tokio::task::spawn_blocking(move || {
-            crate::dag_engine::infrastructure::nodes::python_node::execute_sandboxed_helper(
-                &wrapped,
-                "restricted",
-                CODE_TIMEOUT_SECS,
-                &inputs,
-            )
-        }),
+    let result = crate::dag_engine::infrastructure::python_exec::run(
+        crate::dag_engine::domain::python_executor::PythonRunRequest {
+            code: wrapped,
+            mode: "restricted".to_string(),
+            timeout: Some(std::time::Duration::from_secs(CODE_TIMEOUT_SECS)),
+            inputs,
+        },
     )
     .await;
-
     let duration_ms = started.elapsed().as_millis() as u64;
 
+    use crate::dag_engine::domain::python_executor::PythonRunError;
     let helper_result = match result {
-        Ok(Ok(Ok(r))) => r,
-        Ok(Ok(Err(e))) => {
+        Ok(r) => r,
+        Err(PythonRunError::Python(e)) => {
             let resp = AttachmentRunPythonResponse {
                 stdout: String::new(),
                 result: serde_json::Value::Null,
@@ -286,13 +281,8 @@ pub async fn dispatch_attachment_run_python_via_executor(
             };
             return Ok(success_envelope(call_id, &resp));
         }
-        Ok(Err(join_err)) => {
-            return Ok(err_envelope(
-                call_id,
-                format!("internal join error: {join_err}"),
-            ));
-        }
-        Err(_) => {
+        Err(PythonRunError::Internal(e)) => return Ok(err_envelope(call_id, e)),
+        Err(PythonRunError::Timeout) => {
             return Ok(err_envelope(
                 call_id,
                 format!("code execution exceeded {CODE_TIMEOUT_SECS}s timeout"),

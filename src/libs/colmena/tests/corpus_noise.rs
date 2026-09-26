@@ -169,7 +169,9 @@ fn measure() -> Measured {
 // Bumped 336 -> 337: adds tests/graphs/security/data_destination_public_only_e2e.json
 // (an http_request destination that comes from data dials only public addresses
 // unless allowed_hosts lists its host). Lints clean.
-const EXPECTED_FILES: usize = 337;
+// Bumped 337 -> 338: adds tests/graphs/basic/python_executor_smoke.json. Lints
+// clean.
+const EXPECTED_FILES: usize = 338;
 const EXPECTED_ERRORS: usize = 0;
 const EXPECTED_WARNINGS: usize = 0;
 const EXPECTED_INFOS: usize = 0;

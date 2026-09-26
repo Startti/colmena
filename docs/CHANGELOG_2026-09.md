@@ -6437,3 +6437,30 @@ que sincroniza los targets de log con la guía 50 incluye el nuevo.
 
 **ADP.** Sin cambios de API ni de SSE.
 **Estado.** done.
+
+## 147. Refactor: cada llamada Python pasa por `python_exec::run`, instalado al arrancar
+
+**Qué cambia.** El nodo `python_script` y las tools `data_run_python`,
+`gsheets_run_python`, `attachment_run_python` y `crdt_doc_run_python` corren su
+código por `python_exec::run` (§146), con el puerto de §145. Con la
+configuración por defecto el comportamiento es el mismo —textos de error y de
+plazo, forma de las respuestas—, con una excepción: si la tarea interna de
+`python_script` falla al unirse (solo alcanzable por un bug del helper), el
+error ahora dice `internal join error: …` (antes `Task join error: …` en
+`restricted` y el texto sin prefijo en `none`). El motor instala el executor al
+arrancar (`EngineConfig::from_env`, y el CLI para todo subcomando salvo `lint`,
+así su salida JSON queda limpia): un valor inválido, o un
+executor aislado todavía no disponible (`subprocess`, `remote`), frena el
+proceso con un mensaje que nombra la variable y el valor. Guía nueva:
+[53_python_executors.md](developer_guide/53_python_executors.md).
+
+**Tests.** E2E `tests/graphs/basic/python_executor_smoke.json` (pandas en
+`restricted`, stdlib en `none`, firma HMAC encadenada) en verde con
+`COLMENA_PYTHON_EXECUTOR` sin definir, y el mismo grafo se niega a arrancar con
+un valor inválido y con `subprocess`. Test de caracterización del texto de
+plazo de `python_script` en `restricted`. `tests/python_executor_startup.rs`:
+un valor inválido frena `EngineConfig::from_env` y cada `run` posterior
+devuelve el error de configuración. `corpus_noise` cuenta el grafo nuevo.
+
+**ADP.** Sin cambios de API ni de SSE.
+**Estado.** done.

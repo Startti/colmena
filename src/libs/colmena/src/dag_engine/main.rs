@@ -191,6 +191,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     ) || verbose_env();
     init_tracing(verbose);
 
+    // Skip for `Lint`: it never runs Python, and the one-time `info!` install
+    // event would otherwise go to stdout (the default tracing formatter) and
+    // pollute `--format json`, which is documented as machine-readable (see
+    // docs/developer_guide/51_graph_linter.md).
+    if !matches!(cli.command, Commands::Lint { .. }) {
+        colmena::dag_engine::infrastructure::python_exec::install_from_env()
+            .map_err(|e| format!("python executor: {e}"))?;
+    }
+
     match cli.command {
         Commands::Lint {
             file_path,

@@ -1299,9 +1299,11 @@ llegue a un nodo de output o que su `loop_controller` emita `FINISHED`.
 ```rust
 use colmena::dag_engine::engine::{ColmenaEngine, EngineConfig};
 
-let config = EngineConfig::from_env().await?;      // lee DATABASE_URL + COLMENA_POOL_*
+let config = EngineConfig::from_env().await?;      // lee DATABASE_URL + COLMENA_POOL_* e instala el executor de Python
 let engine = ColmenaEngine::new(config).await?;
 ```
+
+`EngineConfig::from_env` también instala el executor de Python del proceso (`COLMENA_PYTHON_EXECUTOR` y afines) — ver [53_python_executors.md](53_python_executors.md). Un valor inválido falla acá, en el arranque, en vez de en la primera llamada a Python.
 
 `ColmenaEngine::new` pin'ea el pool interno, corre las migraciones de state + secure_values sobre él, e inyecta el registry en todos los factories.
 
