@@ -394,13 +394,69 @@ validación del grafo al cargar, y `dag_engine lint` lo reporta como
 - **k es estable.** Con streaming, las llamadas se ordenan por el índice del proveedor
   antes de persistirlas y despacharlas. Un resume recalcula k desde el mismo mensaje
   persistido, y el hijo reanudado vuelve a abrir `<tool>#<k>`.
-- **Todavía en serie.** En esta versión `parallel` cambia solo la identidad: las
-  llamadas corren una después de la otra, en el orden del mensaje.
-- Una tool sin `parallel` no cambia en nada: frontera con el nombre pelado y frames
-  sin `childScope`.
+- **Corren a la vez.** Las llamadas `parallel` seguidas de un mismo mensaje forman un
+  grupo que corre concurrente. Ver «Un grupo de llamadas `parallel` corre a la vez»,
+  abajo.
+- Una tool sin `parallel` no cambia en nada: frontera con el nombre pelado, frames sin
+  `childScope`, y corre sola, como siempre.
 
 E2E: `tests/graphs/agents/parallel_tool_identity.json`, que corre
 `src/libs/colmena/tests/parallel_tool_identity.rs` con un modelo guionado.
+
+#### Un grupo de llamadas `parallel` corre a la vez
+
+El loop del agente reparte las llamadas de un mensaje en tandas, en el orden del modelo
+(`plan_batches`, en `llm/application/tool_batches.rs`):
+
+- **Barrera.** Una llamada a una tool sin `parallel` corre sola. Lo que el modelo pidió
+  antes termina antes de que empiece, y lo que pidió después empieza cuando terminó.
+- **Grupo.** Las llamadas `parallel` seguidas forman un grupo. Dentro del grupo se
+  juntan en **cadenas** por su clave de memoria (`parallel_chain_key`, en
+  `DagToolExecutor`). Las cadenas corren a la vez; las llamadas de una misma cadena
+  comparten un hilo de memoria y corren una tras otra, en el orden del modelo.
+
+  | `memory_mode` | Cadena | Efecto |
+  |---|---|---|
+  | `stateless` (default) | una por llamada | todas a la vez |
+  | `persistent` | una por tool | las llamadas a esa tool, en serie: comparten el único hilo |
+  | `dynamic` | una por tool e hilo resuelto | hilos distintos a la vez, el mismo hilo en serie. Con `thread_id: { "fixed": "${agentId}" }`, cada `agentId` es su propia cadena. Sin un hilo usable (la llamada falla antes de tocar la memoria), las llamadas de esa tool comparten una cadena |
+
+- **Tope.** A lo sumo `COLMENA_MAX_PARALLEL_TOOL_CALLS` cadenas de un grupo corren a la
+  vez; las demás esperan lugar. Entero positivo, default **4**; vacío, inválido o `0`
+  vale el default. Se lee una vez por proceso, y el tope es por grupo, no global.
+- **Frames a medida que pasan.** Cada llamada emite su `tool-input-available` cuando
+  empieza y su `tool-output-available` cuando termina, así que los frames de un grupo
+  se intercalan: el hijo que termina primero cierra primero, aunque el modelo lo haya
+  pedido segundo. Cada frame se cuelga de su frontera por `childScope`.
+- **La historia, en el orden del modelo.** Los resultados se escriben en la
+  conversación cuando termina el grupo, en el orden del mensaje y no en el que
+  terminaron. El modelo lee lo mismo que si hubieran corrido en serie. Por lo mismo,
+  si el run se corta a mitad del grupo (un Stop, por ejemplo), los resultados que ya
+  habían terminado no llegan a la historia.
+- **El guard de repetición no cambia.** Recorre el grupo en el orden del modelo, con la
+  misma regla de racha consecutiva que en serie, no por cadena. Una llamada con la
+  misma firma que la anterior no corre: recibe el resultado de la primera de su racha,
+  y al llegar a `max_tool_repeats` el loop pasa a la síntesis final después de cerrar
+  el turno. Dentro de un grupo, la repetición se contesta al escribir la historia, así
+  que sus frames salen después de los del grupo.
+- **Si una llamada del grupo suspende** (un `suspend` o `secure_suspend` en su hijo),
+  su cadena para ahí. Las otras cadenas terminan, porque ya estaban corriendo, y sus
+  resultados se escriben. Después el run se suspende como con una llamada sola: las
+  llamadas de esa cadena que no corrieron y las que el modelo pidió después del grupo
+  reciben el marcador «NO se ejecutó» (ver
+  [Suspensión dentro de un batch paralelo de tools](#suspensión-dentro-de-un-batch-paralelo-de-tools)).
+- **Varias preguntas en un grupo, todavía no.** Si suspende más de una llamada del
+  grupo, hoy se conserva solo la primera en el orden del modelo. Las otras reciben el
+  marcador aunque corrieron, y sus hijos quedan suspendidos. Esperar a todas y hacer
+  varias preguntas llega en un paso posterior; hasta entonces, no declares `parallel`
+  en una tool cuyo hijo pueda preguntar.
+
+E2E: `tests/graphs/agents/parallel_tool_groups.json`, que corre
+`src/libs/colmena/tests/parallel_tool_groups.rs`. El modelo guionado pide `Run` dos
+veces en un mensaje; un hijo duerme 2,3 s y el otro 2 s. En grupo, las dos llamadas
+tardan 2,31 s desde el primer `tool-input-available` hasta el último
+`tool-output-available`. Con `parallel: false`, la línea base del mismo archivo, tardan
+4,34 s.
 
 ### ¿Y si quiero un orchestrator dentro del loop de tools?
 
@@ -677,7 +733,8 @@ Consecuencias prácticas al diseñar un agente HITL:
 - **Un `suspend` por turno.** Dos tools que suspenden en el mismo batch no generan
   dos preguntas: la primera suspende y la segunda queda marcada como no ejecutada.
   Si necesitás dos datos del usuario, pedilos en una sola pregunta o en turnos
-  distintos.
+  distintos. En un grupo de llamadas `parallel` las otras cadenas terminan antes de
+  suspender; ver [Un grupo de llamadas `parallel` corre a la vez](#un-grupo-de-llamadas-parallel-corre-a-la-vez).
 - **El costo es a lo sumo un turno extra**, cuando el modelo decide re-emitir la
   llamada pospuesta.
 - **El orden del batch lo elige el modelo, no tu prompt.** Por eso el síntoma es

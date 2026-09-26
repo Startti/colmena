@@ -5,7 +5,7 @@
 //! and its tool frames carry `childScope`; `Nota` did not opt in and keeps the
 //! bare name and frames without the field. `Nota` is a barrier between the two
 //! `Run` calls, so each forms a group of one and the three run one after
-//! another.
+//! another (`parallel_tool_groups.rs` covers a group that runs concurrently).
 //! Writes the SSE the CLI would print to
 //! `/tmp/colmena_e2e/parallel_tool_identity.sse` and asserts on its frames.
 //!

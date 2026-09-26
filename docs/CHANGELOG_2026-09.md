@@ -5085,3 +5085,55 @@ colmena_dag_engine --test parallel_tool_identity -- --ignored`: 1 passed, con el
 `call_clima`, `call_nota`, `call_precios` en la historia que leyó el modelo.
 
 **ADP.** Nada que hacer.
+
+## 99. E2E de un grupo de llamadas `parallel`, y la guía 19 (parallel tools, 2g)
+
+**Qué cambió.** El E2E con tiempos del grupo de la entrada 97, y la documentación de
+cómo corre un grupo.
+- `tests/graphs/agents/parallel_tool_groups.json`: una tool `Run`, `parallel` y sin
+  memoria, cuyo hijo es `entrada → python_script → salida`. El script duerme 2,3 s para
+  `clima` y 2 s para `precios`. El modelo guionado (el módulo compartido de la entrada
+  98) pide las dos en un mensaje.
+- `tests/parallel_tool_groups.rs`: dos tests ignorados, en grupo y la línea base con
+  `parallel: false`. Cada frame del SSE lleva su tiempo de llegada como comentario
+  (`: +<ms>`).
+- La guía 19 suma «Un grupo de llamadas `parallel` corre a la vez»: la barrera, las
+  cadenas por clave de memoria (una tabla por `memory_mode`), el tope, los frames
+  intercalados, la historia en el orden del modelo, el guard, la suspensión en un
+  grupo, y por qué todavía no con varias preguntas. El bullet «Todavía en serie» ya no
+  era cierto: ahora apunta a esa sección.
+- `sse_events_reference.md` (`childScope`): los frames de un grupo se intercalan y se
+  asocian por `toolCallId` y `childScope`, con frames reales del E2E.
+- `node_configurations.json` y `node_as_tools_reference.json`: el campo `parallel` ya
+  no dice que las llamadas corren en serie.
+- El E2E de identidad, su grafo y el módulo compartido nombran este E2E.
+  `EXPECTED_FILES` del corpus pasa de 331 a 332, 0/0/0.
+
+**Tests.** Qué afirma el E2E en grupo, con el tiempo primero:
+- del primer `tool-input-available` al último `tool-output-available` pasa menos de 1,5
+  veces el hijo más corto, y cada hijo dura al menos 2 s;
+- las fronteras `agent>Run#0` y `agent>Run#1` se solapan, y los frames de cada llamada
+  llevan su `childScope`;
+- `precios` cierra antes que `clima`, y la historia que lee el modelo es `call_clima`,
+  `call_precios`.
+
+La línea base afirma dos fronteras `agent>Run` sin `childScope`, la segunda después de
+la primera, y al menos 2 veces el hijo más corto. `cargo test` completo: 60 suites, 3124
+passed, 0 failed, 149 ignorados (147 antes, más estos dos). Lib: 2914, sin cambio.
+
+**Mutación.** `buffer_unordered(limit.min(1))`: el E2E en grupo en rojo por el tiempo
+(«the group took 4.411255458s, the shorter child 2.040661625s: not concurrent»), y la
+línea base en verde. Revertida editando; verde.
+
+**E2E.** `DATABASE_URL=postgres:///colmena_e2e_par SECURE_VALUES_KEY=... cargo test -p
+colmena_dag_engine --test parallel_tool_groups --test parallel_tool_identity --
+--ignored`: 3 passed.
+- En grupo: 2,32 s, con un hijo de 2,02 s (1,15 veces). Los dos `tool-input-available`
+  a los +153 ms; `precios` cierra a los +2171 ms y `clima` a los +2472 ms, aunque el
+  modelo la pidió primero.
+- En serie: 4,35 s, 2,15 veces el hijo más corto.
+- La guía y la referencia SSE citan la corrida en la que se escribieron: 2,31 s en grupo
+  y 4,34 s en serie, con los mismos frames a +30, +2045 y +2340 ms.
+
+**ADP.** Nada nuevo respecto de la entrada 97: sin código, y ninguna tool declara
+`parallel` todavía.

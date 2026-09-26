@@ -146,7 +146,12 @@ fn measure() -> Measured {
 // model message calls a `parallel` tool twice and a plain one once; run by
 // `src/libs/colmena/tests/parallel_tool_identity.rs` with a scripted model).
 // Lints clean.
-const EXPECTED_FILES: usize = 331;
+// Bumped 331 -> 332: adds tests/graphs/agents/parallel_tool_groups.json (one
+// model message calls a stateless `parallel` tool twice and both children sleep;
+// run by `src/libs/colmena/tests/parallel_tool_groups.rs` with a scripted model,
+// once as a group and once with `parallel: false` as the serial baseline).
+// Lints clean.
+const EXPECTED_FILES: usize = 332;
 const EXPECTED_ERRORS: usize = 0;
 const EXPECTED_WARNINGS: usize = 0;
 const EXPECTED_INFOS: usize = 0;

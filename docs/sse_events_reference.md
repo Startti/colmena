@@ -224,9 +224,31 @@ El modelo pidió `Run`, `Nota` y `Run` en un solo mensaje; `Run` es `parallel`, 
   `subgraph-tool-input-start` no.
 - Una llamada que el motor contesta sin correrla (el guard de repetición, por
   ejemplo) trae `childScope` igual, pero no abre frontera.
-- En esta versión las llamadas todavía corren una después de la otra: el
-  `tool-output-available` de una llega antes del `tool-input-available` de la
-  siguiente.
+- **Las llamadas de un grupo `parallel` corren a la vez**, así que sus frames se
+  intercalan: cada `tool-input-available` sale cuando su llamada empieza y cada
+  `tool-output-available` cuando termina, y el `tool-output-available` de una
+  llamada pedida después puede llegar primero. Asociá los frames por `toolCallId` y
+  la frontera por `childScope`, nunca por posición. Una tool sin `parallel` es una
+  barrera y corre sola, como antes. Cómo se arman los grupos:
+  [guía 19](developer_guide/19_nested_agents_and_subgraphs.md#un-grupo-de-llamadas-parallel-corre-a-la-vez).
+
+Frames reales del E2E `src/libs/colmena/tests/parallel_tool_groups.rs`, recortados, con
+su tiempo de llegada. El modelo pidió `Run` dos veces en un mensaje; el hijo de `clima`
+duerme 2,3 s y el de `precios` 2 s, así que `precios` cierra primero:
+
+```json
+// +30 ms
+{ "type": "tool-input-available",  "toolCallId": "call_clima",   "toolName": "Run", "input": { "task": "clima" },   "childScope": "Run#0", "level": 0, "path": "agent" }
+{ "type": "subgraph-node-start",   "node_id": "Run#0", "node_type": "subgraph", "level": 1, "path": "agent>Run#0" }
+{ "type": "tool-input-available",  "toolCallId": "call_precios", "toolName": "Run", "input": { "task": "precios" }, "childScope": "Run#1", "level": 0, "path": "agent" }
+{ "type": "subgraph-node-start",   "node_id": "Run#1", "node_type": "subgraph", "level": 1, "path": "agent>Run#1" }
+// +2045 ms
+{ "type": "subgraph-node-end",     "node_id": "Run#1", "node_type": "subgraph", "level": 1, "path": "agent>Run#1" }
+{ "type": "tool-output-available", "toolCallId": "call_precios", "output": { "result": { "hecha": "precios" } }, "childScope": "Run#1", "level": 0, "path": "agent" }
+// +2340 ms
+{ "type": "subgraph-node-end",     "node_id": "Run#0", "node_type": "subgraph", "level": 1, "path": "agent>Run#0" }
+{ "type": "tool-output-available", "toolCallId": "call_clima",   "output": { "result": { "hecha": "clima" } },   "childScope": "Run#0", "level": 0, "path": "agent" }
+```
 
 ---
 
