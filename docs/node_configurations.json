@@ -1027,6 +1027,13 @@
           "default": false,
           "description": "When false, plain http:// URLs in multipart parts are rejected (SSRF mitigation). Set true to permit insecure URLs.",
           "example": true
+        },
+        "allowed_hosts": {
+          "type": "array",
+          "required": false,
+          "default": null,
+          "description": "Author-set only. Credentials the author configured (bearer_token, authorization, a header other than accept/content-type/user-agent-like ones, a query param or body value with ${VAR}) are sent only to the origin of the author's base_url; this list names other hosts ('host' or 'host:port') that may receive them when the destination comes from runtime data (an edge that names base_url, an open tool field). Any other destination is refused with an error. With credentials on the request, a redirect to another origin is not followed.",
+          "example": ["api.example.com"]
         }
       },
       "input_ports": {

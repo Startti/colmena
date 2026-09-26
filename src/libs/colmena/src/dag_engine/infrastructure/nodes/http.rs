@@ -483,6 +483,123 @@ impl HttpNode {
         Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
     }
 
+    /// Header names that never carry a credential. Any other header the author
+    /// sets counts as one for [`Self::carries_author_credentials`].
+    const NON_CREDENTIAL_HEADERS: &'static [&'static str] = &[
+        "accept",
+        "accept-encoding",
+        "accept-language",
+        "cache-control",
+        "content-type",
+        "user-agent",
+    ];
+
+    /// The author's value for `key`: from `config`, or a tool's `fixed` value.
+    fn author_value<'a>(inputs: &'a NodeInputs, config: &'a Value, key: &str) -> Option<&'a Value> {
+        config.get(key).or_else(|| {
+            inputs.get(key).filter(|_| {
+                crate::dag_engine::infrastructure::env_provenance::is_authored_input(inputs, key)
+            })
+        })
+    }
+
+    /// Whether the request carries credentials the author configured: a
+    /// `bearer_token`/`authorization`, a header other than
+    /// [`Self::NON_CREDENTIAL_HEADERS`], or a query param/body value with an
+    /// env template.
+    fn carries_author_credentials(inputs: &NodeInputs, config: &Value) -> bool {
+        fn has_template(v: &Value) -> bool {
+            match v {
+                Value::String(s) => s.contains("${"),
+                Value::Object(m) => m.values().any(has_template),
+                Value::Array(a) => a.iter().any(has_template),
+                _ => false,
+            }
+        }
+        let author = |key: &str| Self::author_value(inputs, config, key);
+        author("bearer_token").is_some()
+            || author("authorization").is_some()
+            || author("headers")
+                .and_then(|h| h.as_object())
+                .is_some_and(|h| {
+                    h.keys().any(|k| {
+                        !Self::NON_CREDENTIAL_HEADERS.contains(&k.to_ascii_lowercase().as_str())
+                    })
+                })
+            || author("query_params").is_some_and(has_template)
+            || author("body").is_some_and(has_template)
+    }
+
+    /// Same scheme, host and port.
+    fn same_origin(a: &Url, b: &Url) -> bool {
+        a.scheme() == b.scheme()
+            && a.host_str() == b.host_str()
+            && a.port_or_known_default() == b.port_or_known_default()
+    }
+
+    /// The author's credentials go only to the author's origin (the `base_url`
+    /// the author set) or to a host listed in the author's `allowed_hosts`
+    /// (`"host"` or `"host:port"`), mirroring the `auth` block's rule in
+    /// `http_oauth.rs`. `url` is where the request is about to go.
+    fn check_credential_destination(
+        url: &Url,
+        author_base_url: Option<&str>,
+        inputs: &NodeInputs,
+        config: &Value,
+    ) -> Result<(), String> {
+        if !Self::carries_author_credentials(inputs, config) {
+            return Ok(());
+        }
+        let author_origin = author_base_url.and_then(|b| Url::parse(b).ok());
+        if author_origin.is_some_and(|a| Self::same_origin(&a, url)) {
+            return Ok(());
+        }
+        let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
+        let host_port = format!("{host}:{}", url.port_or_known_default().unwrap_or_default());
+        let allowed = Self::author_value(inputs, config, "allowed_hosts")
+            .and_then(|v| v.as_array())
+            .is_some_and(|hosts| {
+                hosts.iter().filter_map(|h| h.as_str()).any(|h| {
+                    let h = h.to_ascii_lowercase();
+                    h == host || h == host_port
+                })
+            });
+        if allowed {
+            return Ok(());
+        }
+        Err(format!(
+            "http_request: the credentials configured for this node are sent only to its \
+             base_url's origin or to a host in `allowed_hosts`; '{host_port}' is neither"
+        ))
+    }
+
+    /// A client whose redirects never take the author's credentials to
+    /// another origin: with credentials on the request, only a same-origin
+    /// redirect is followed (a cross-origin one is returned as is).
+    fn client_for(
+        credentials: bool,
+        builder: reqwest::ClientBuilder,
+    ) -> reqwest::Result<reqwest::Client> {
+        if !credentials {
+            return builder.build();
+        }
+        builder
+            .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                if attempt.previous().len() > 10 {
+                    attempt.error("too many redirects")
+                } else if attempt
+                    .previous()
+                    .first()
+                    .is_some_and(|first| Self::same_origin(first, attempt.url()))
+                {
+                    attempt.follow()
+                } else {
+                    attempt.stop()
+                }
+            }))
+            .build()
+    }
+
     /// Expand `${VAR}` in `raw` only if `pointer` is trusted by `policy`.
     fn expand_if_trusted(raw: &str, pointer: &str, policy: &EnvPolicy) -> Result<String, String> {
         if policy.may_expand(pointer) {
@@ -728,6 +845,7 @@ impl HttpNode {
         config: &Value,
         policy: &EnvPolicy,
         agent_session_id: Option<&str>,
+        credentials: bool,
     ) -> Result<Value, Box<dyn StdError + Send + Sync>> {
         // Env-var resolution on string leaves before parsing, so `${VAR}` works
         // inside URLs and text values — gated for an `inputs` body, as on the
@@ -780,7 +898,10 @@ impl HttpNode {
         }
 
         // Build the outbound request — same client tuning as JSON path
-        let client = crate::shared::http_client::builder().http1_only().build()?;
+        let client = Self::client_for(
+            credentials,
+            crate::shared::http_client::builder().http1_only(),
+        )?;
         let url = Url::parse(full_url).map_err(|e| format!("Invalid URL '{full_url}': {e}"))?;
         let method = reqwest::Method::from_str(method_str)
             .map_err(|e| format!("Invalid HTTP method '{method_str}': {e}"))?;
@@ -1000,9 +1121,32 @@ impl ExecutableNode for HttpNode {
         let method = Method::from_str(method_str)
             .map_err(|e| format!("Invalid HTTP method '{}': {}", method_str, e))?;
 
+        // The author's `base_url`: the effective one, unless it came from
+        // runtime data (an edge that names it, an open tool field) — then the
+        // one in `config`, if any. Credentials never leave that origin.
+        let author_base_url = match inputs.get("base_url") {
+            Some(_)
+                if !crate::dag_engine::infrastructure::env_provenance::is_authored_input(
+                    inputs, "base_url",
+                ) =>
+            {
+                config
+                    .get("base_url")
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| Self::resolve_env_vars(s).ok())
+            }
+            _ => Some(base_url.clone()),
+        };
+        Self::check_credential_destination(&url, author_base_url.as_deref(), inputs, config)
+            .map_err(Self::io_err)?;
+        let credentials = Self::carries_author_credentials(inputs, config);
+
         // 3. Prepare Client and Request
         // Build client forcing HTTP/1.1 to avoid HTTP/2 issues with some APIs
-        let client = crate::shared::http_client::builder().http1_only().build()?;
+        let client = Self::client_for(
+            credentials,
+            crate::shared::http_client::builder().http1_only(),
+        )?;
 
         println!("[HttpNode] → {} {}", method, url);
 
@@ -1144,6 +1288,7 @@ impl ExecutableNode for HttpNode {
                     config,
                     &policy,
                     agent_session_id,
+                    credentials,
                 )
                 .await;
         }
@@ -1240,6 +1385,7 @@ impl ExecutableNode for HttpNode {
             "headers",
             "bearer_token",
             "authorization",
+            "allowed_hosts",
         ]
     }
 
@@ -1304,6 +1450,7 @@ impl ExecutableNode for HttpNode {
                 .with_field("max_parts", FieldSpec::of_type("integer"))
                 .with_field("url_download_timeout_secs", FieldSpec::of_type("integer"))
                 .with_field("allow_http_urls", FieldSpec::of_type("boolean"))
+                .with_field("allowed_hosts", FieldSpec::of_type("array"))
                 .with_reserved_input_keys(Self::RESERVED_KEYS.iter().copied())
                 .with_reserved_input_keys([
                     "__colmena_session_id",
@@ -2809,5 +2956,71 @@ mod env_provenance_gating_tests {
             "trusted-value"
         );
         std::env::remove_var("HTTP_GATING_TEST_TRUSTED");
+    }
+}
+
+/// The author's credentials stay on the author's origin: a redirect to
+/// another origin is not followed while they ride on the request.
+#[cfg(test)]
+mod redirect_tests {
+    use super::*;
+    use std::collections::HashMap;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn a_cross_origin_redirect_never_carries_author_credentials() {
+        std::env::set_var("COLMENA_CLASS_TEST_REDIR", "redir-key-test-only");
+        let (author, other) = (MockServer::start().await, MockServer::start().await);
+        Mock::given(wiremock::matchers::any())
+            .respond_with(
+                ResponseTemplate::new(302).insert_header("location", format!("{}/x", other.uri())),
+            )
+            .mount(&author)
+            .await;
+        Mock::given(wiremock::matchers::any())
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
+            .mount(&other)
+            .await;
+        let config = json!({
+            "base_url": author.uri(), "endpoint": "/a", "method": "GET",
+            "headers": { "X-Api-Key": "${COLMENA_CLASS_TEST_REDIR}" }
+        });
+        let out = HttpNode::new()
+            .execute(&HashMap::new(), &config, &mut json!({}), None)
+            .await
+            .unwrap();
+        let leaked = other.received_requests().await.unwrap().iter().any(|r| {
+            r.headers
+                .get("x-api-key")
+                .is_some_and(|v| v == "redir-key-test-only")
+        });
+        assert!(
+            !leaked,
+            "the author's key followed a redirect to another origin"
+        );
+        assert_eq!(out["status"], 302);
+        std::env::remove_var("COLMENA_CLASS_TEST_REDIR");
+    }
+
+    /// Without author credentials a redirect is followed as before.
+    #[tokio::test]
+    async fn a_redirect_without_author_credentials_is_followed() {
+        let (author, other) = (MockServer::start().await, MockServer::start().await);
+        Mock::given(wiremock::matchers::any())
+            .respond_with(
+                ResponseTemplate::new(302).insert_header("location", format!("{}/x", other.uri())),
+            )
+            .mount(&author)
+            .await;
+        Mock::given(wiremock::matchers::any())
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
+            .mount(&other)
+            .await;
+        let config = json!({ "base_url": author.uri(), "endpoint": "/a", "method": "GET" });
+        let out = HttpNode::new()
+            .execute(&HashMap::new(), &config, &mut json!({}), None)
+            .await
+            .unwrap();
+        assert_eq!(out["status"], 200);
     }
 }

@@ -1137,6 +1137,7 @@ mod catalog_coverage_tests {
                     "headers",
                     "bearer_token",
                     "authorization",
+                    "allowed_hosts",
                 ],
             ),
             (

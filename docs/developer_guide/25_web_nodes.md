@@ -432,6 +432,19 @@ campo (`"to": "<nodo>.base_url"`), nunca de un objeto aplanado por un edge sin
 puerto ni del estado global. `endpoint`, `body` y los query params siguen
 siendo datos que un edge puede traer (§108).
 
+### Credenciales atadas al host del autor
+
+Las credenciales que configuró el autor —`bearer_token`, `authorization`, un
+header que no sea `accept*`/`cache-control`/`content-type`/`user-agent`, o un
+query param o body con `${VAR}`, en `config` o como `fixed` de una tool— salen
+solo hacia el origen (esquema, host y puerto) del `base_url` del autor. Si el
+destino viene de datos (un edge que nombra `base_url`, un campo `base_url`
+abierto en la tool) y es otro origen, el nodo falla con un error salvo que el
+host esté en `allowed_hosts` (`"host"` o `"host:port"`, solo del autor). Es la
+misma regla que ya aplicaba el bloque `auth` (`http_oauth.rs`). Con esas
+credenciales en la request, una redirección a otro origen no se sigue: el nodo
+devuelve el 3xx tal cual; sin ellas, se sigue como antes (CHANGELOG 2026-09 §111).
+
 E2E: [`tests/graphs/security/tool_env_provenance_e2e.json`](../../tests/graphs/security/tool_env_provenance_e2e.json).
 
 ---
