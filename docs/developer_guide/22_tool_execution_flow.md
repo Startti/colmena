@@ -493,9 +493,14 @@ it**: `llm_call` hands the executor a copy taken before its
 `${context.*}` templating (`with_authored_tool_configurations`), so a
 `fixed: "${context.term}"` that templating filled from `inputs` no longer
 equals its authored form and is never trusted. When `tool_configurations`
-itself came from `inputs` and a dispatcher did not vouch for every `${` leaf
-in it (`env_provenance::subtree_trusted`), the authored copy is empty: its
-`fixed` values are data and nothing in them expands. `${UPPER_CASE}` names
+itself came from `inputs`, two questions are answered apart. Its `fixed`
+values count as the author's (`__colmena_authored_inputs`, below) only when
+the whole `tool_configurations` is a dispatcher's `fixed` value
+(`is_authored_input`); otherwise they are data for the tools' nodes — a
+`fixed` `sandbox_mode`, `allowed_hosts` or `body` in it is not the author's
+(CHANGELOG 2026-09 §115). Its `${` leaves expand only when a dispatcher
+vouched for every one of them (`env_provenance::subtree_trusted`); otherwise
+the authored copy is empty and nothing in it expands. `${UPPER_CASE}` names
 an env var and is never filled from `inputs` by that templating
 (CHANGELOG 2026-09 §112).
 

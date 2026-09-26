@@ -5768,3 +5768,21 @@ autor sí.
 **ADP.** Sin cambios de API. Un secreto que contiene `${` y se usaba en el `config` de un nodo
 debe llegar por un edge.
 **Estado.** done.
+
+## 115. Endurecimiento: un `tool_configurations` que llega como dato no aporta valores del autor
+
+**Qué cambia.** Cuando `llm_call` recibe `tool_configurations` por `inputs` (un edge que
+nombra el campo), sus `fixed` cuentan como del autor para el nodo de cada tool
+(`__colmena_authored_inputs`) solo si el `tool_configurations` entero es el `fixed` de la
+tool que despachó ese `llm_call` (`is_authored_input`). Si no, son datos: un `sandbox_mode`,
+`allowed_hosts`, `multipart_url_fields` o `body` fijado ahí no es del autor, y un `code`
+fijado ahí corre `restricted`. La expansión de `${VAR}` sigue su regla de §106
+(`subtree_trusted`). `DagToolExecutor::with_authored_tool_configurations` recibe ese
+segundo dato.
+
+**Tests.** `registry.rs::llm_call_tool_provenance_tests`: las mismas tools de Python con
+`code` y `sandbox_mode: "none"` fijos corren como las fijó el autor desde `config` y
+`restricted` desde `inputs` (el código no deja su marca en disco).
+
+**ADP.** Sin cambios de API.
+**Estado.** done.
