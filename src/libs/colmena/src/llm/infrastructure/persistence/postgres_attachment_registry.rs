@@ -251,10 +251,11 @@ impl AttachmentRegistry for PostgresAttachmentRegistry {
         Ok(())
     }
 
-    /// Provider is intentionally ignored. A row with a `storage_key` wins over one without
-    /// (a provider row a lazy upload wrote is newer than the `Generated` row that holds the
-    /// bytes); then the most recently refreshed; then `provider` ASC for a deterministic
-    /// winner when rows share the same `refreshed_at`.
+    /// Provider is intentionally ignored. A row without a `storage_key` and without an
+    /// `origin` (what a lazy provider upload writes; it is newer than the `Generated` row that
+    /// holds the bytes) loses to every other row; then the most recently refreshed wins, even
+    /// without a key (a newer upload of the id whose bytes were not stored fails openly); then
+    /// `provider` ASC for a deterministic winner when rows share the same `refreshed_at`.
     async fn lookup_by_document_id(
         &self,
         agent_session_id: &str,
@@ -267,7 +268,7 @@ impl AttachmentRegistry for PostgresAttachmentRegistry {
                     storage_key, origin, last_used_at
              FROM conversation_attachments
              WHERE agent_session_id = $1 AND document_id = $2
-             ORDER BY (storage_key IS NULL), refreshed_at DESC, provider ASC
+             ORDER BY (storage_key IS NULL AND origin IS NULL), refreshed_at DESC, provider ASC
              LIMIT 1",
         )
         .bind(agent_session_id)
@@ -515,9 +516,14 @@ mod tests {
         // newer provider row without one. The id resolves to the key.
         let reg = make_registry().await;
         let sid = format!("test_sess_{}", uuid::Uuid::new_v4());
-        for (provider, file_id, storage_key) in [
-            (ProviderKind::Generated, "sk-img", Some("sk-img")),
-            (ProviderKind::OpenAi, "file-abc", None),
+        for (provider, file_id, storage_key, origin) in [
+            (
+                ProviderKind::Generated,
+                "sk-img",
+                Some("sk-img"),
+                Some("generated_by:image_generation"),
+            ),
+            (ProviderKind::OpenAi, "file-abc", None, None),
         ] {
             reg.upsert(UpsertAttachmentInput {
                 agent_session_id: sid.clone(),
@@ -531,7 +537,7 @@ mod tests {
                 description: None,
                 source: AttachmentSource::Path("sk-img".to_string()),
                 storage_key: storage_key.map(String::from),
-                origin: None,
+                origin: origin.map(String::from),
             })
             .await
             .unwrap();
@@ -553,6 +559,53 @@ mod tests {
             .expect("row present");
         assert_eq!(got.storage_key.as_deref(), Some("sk-img"));
         assert_eq!(got.provider, ProviderKind::Generated);
+    }
+
+    #[ignore = "requires DATABASE_URL — run with `cargo test -- --ignored`"]
+    #[tokio::test]
+    async fn lookup_by_document_id_a_newer_keyless_upload_wins_over_an_older_key_pg() {
+        // Same case as the SQLite test: an older `user_upload` row with a key
+        // and a newer one of another provider without it. The newer row wins.
+        let reg = make_registry().await;
+        let sid = format!("test_sess_{}", uuid::Uuid::new_v4());
+        for (provider, storage_key) in [
+            (ProviderKind::Anthropic, Some("sk-old")),
+            (ProviderKind::OpenAi, None),
+        ] {
+            reg.upsert(UpsertAttachmentInput {
+                agent_session_id: sid.clone(),
+                document_id: "doc-1".to_string(),
+                provider,
+                provider_file_id: "pf".to_string(),
+                mime_type: "application/pdf".to_string(),
+                filename: "a.pdf".to_string(),
+                size_bytes: Some(100),
+                label: None,
+                description: None,
+                source: AttachmentSource::Inline,
+                storage_key: storage_key.map(String::from),
+                origin: Some("user_upload".to_string()),
+            })
+            .await
+            .unwrap();
+        }
+        sqlx::query(
+            "UPDATE conversation_attachments
+                SET refreshed_at = NOW() - INTERVAL '1 hour'
+              WHERE agent_session_id = $1 AND provider = 'anthropic'",
+        )
+        .bind(&sid)
+        .execute(&*reg.pool)
+        .await
+        .unwrap();
+
+        let got = reg
+            .lookup_by_document_id(&sid, "doc-1")
+            .await
+            .unwrap()
+            .expect("row present");
+        assert_eq!(got.provider, ProviderKind::OpenAi);
+        assert_eq!(got.storage_key, None);
     }
 
     #[ignore = "requires DATABASE_URL — run with `cargo test -- --ignored`"]

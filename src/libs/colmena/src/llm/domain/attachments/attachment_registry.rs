@@ -83,11 +83,13 @@ pub trait AttachmentRegistry: Send + Sync {
 
     /// Plan A: lookup attachment by `(agent_session_id, document_id)` across
     /// all providers (one row per provider in practice — cross-provider lazy
-    /// upload creates additional rows). When several rows exist, a row with a
-    /// `storage_key` wins over one without, then the most recently refreshed
-    /// wins: the id resolves to the row that says where the bytes are, even
-    /// when a keyless provider row is newer. Used by `AttachmentStreamResolver`
-    /// which only needs `storage_key`, not `provider_file_id`.
+    /// upload creates additional rows). When several rows exist, a row with
+    /// neither `storage_key` nor `origin` (what a lazy provider upload writes)
+    /// loses to every other row, then the most recently refreshed wins: the id
+    /// resolves to the row that says where the bytes are even when a lazy
+    /// upload row is newer, and a newer upload of the id without stored bytes
+    /// still wins (and fails openly). Used by `AttachmentStreamResolver` which
+    /// only needs `storage_key`, not `provider_file_id`.
     async fn lookup_by_document_id(
         &self,
         agent_session_id: &str,

@@ -5758,15 +5758,21 @@ Files API y agrega la fila de ese provider, que se escribía sin `storage_key` y
 `$attachment:<id>` (y `image_edit`, `http_request` y las tools que leen por `document_id`)
 respondía `StorageKeyMissing`: generar, mirar y editar fallaba siempre. Dos cambios:
 
-- `lookup_by_document_id` (Postgres y SQLite) ordena por `(storage_key IS NULL)`, después
-  `refreshed_at DESC` y `provider ASC`: gana una fila con clave. Cubre también las filas sin
-  clave que ya escribieron versiones anteriores.
+- `lookup_by_document_id` (Postgres y SQLite) ordena por
+  `(storage_key IS NULL AND origin IS NULL)`, después `refreshed_at DESC` y `provider ASC`:
+  solo pierden las filas sin clave y sin `origin`, que son las que escribe la subida perezosa
+  (cubre también las que ya escribieron versiones anteriores). Una fila sin clave de Step 3
+  (`user_upload`) o `generated` más nueva sigue ganando y falla a la vista
+  (`StorageKeyMissing`): es una subida nueva del id, y la clave más vieja de otro provider
+  puede tener otros bytes.
 - La subida perezosa guarda en la fila del provider el `storage_key` de la fila `generated`
   (los bytes no se movieron).
 
 **Tests.** En `sqlite_attachment_registry.rs` y `postgres_attachment_registry.rs` (este con
 `#[ignore]`, corrido contra un Postgres local): una fila `generated` con clave y una de OpenAI
-sin clave, más nueva; gana la clave (antes: `None`). En
+sin clave ni `origin`, más nueva; gana la clave (antes: `None`). Una fila `user_upload` de
+Anthropic con clave y una `user_upload` de OpenAI sin clave, más nueva; gana la de OpenAI
+(con `(storage_key IS NULL)` solo: la de Anthropic). En
 `llm.rs::resolver_tests::attachment_placeholder_reads_the_bytes_after_a_lazy_provider_upload`:
 una imagen en `LocalCacheStorageAdapter` registrada como `generated`, `load_attachment` desde
 Anthropic contra un Files API simulado, y después `$attachment:img-1` da los mismos bytes

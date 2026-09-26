@@ -279,11 +279,12 @@ impl AttachmentRegistry for SqliteAttachmentRegistry {
         Ok(())
     }
 
-    /// Provider is intentionally ignored. A row with a `storage_key` wins over one without
-    /// (a provider row a lazy upload wrote is newer than the `Generated` row that holds the
-    /// bytes); then the most recently refreshed; then `provider` ASC for a deterministic
-    /// winner when rows share the same `refreshed_at` (SQLite stores timestamps at second
-    /// resolution, so ties are likely in fast-running tests).
+    /// Provider is intentionally ignored. A row without a `storage_key` and without an
+    /// `origin` (what a lazy provider upload writes; it is newer than the `Generated` row that
+    /// holds the bytes) loses to every other row; then the most recently refreshed wins, even
+    /// without a key (a newer upload of the id whose bytes were not stored fails openly); then
+    /// `provider` ASC for a deterministic winner when rows share the same `refreshed_at`
+    /// (SQLite stores timestamps at second resolution, so ties are likely in fast-running tests).
     async fn lookup_by_document_id(
         &self,
         agent_session_id: &str,
@@ -296,7 +297,7 @@ impl AttachmentRegistry for SqliteAttachmentRegistry {
                     storage_key, origin, last_used_at
              FROM conversation_attachments
              WHERE agent_session_id = ? AND document_id = ?
-             ORDER BY (storage_key IS NULL), refreshed_at DESC, provider ASC
+             ORDER BY (storage_key IS NULL AND origin IS NULL), refreshed_at DESC, provider ASC
              LIMIT 1",
         )
         .bind(agent_session_id)
@@ -688,9 +689,14 @@ mod tests {
         // this fix wrote that row without a key. It is the newer row, and the
         // id must still resolve to the row that says where the bytes are.
         let reg = make_registry().await;
-        for (provider, file_id, storage_key) in [
-            (ProviderKind::Generated, "sk-img", Some("sk-img")),
-            (ProviderKind::OpenAi, "file-abc", None),
+        for (provider, file_id, storage_key, origin) in [
+            (
+                ProviderKind::Generated,
+                "sk-img",
+                Some("sk-img"),
+                Some("generated_by:image_generation"),
+            ),
+            (ProviderKind::OpenAi, "file-abc", None, None),
         ] {
             reg.upsert(UpsertAttachmentInput {
                 agent_session_id: "s1".to_string(),
@@ -704,7 +710,7 @@ mod tests {
                 description: None,
                 source: AttachmentSource::Path("sk-img".to_string()),
                 storage_key: storage_key.map(String::from),
-                origin: None,
+                origin: origin.map(String::from),
             })
             .await
             .unwrap();
@@ -726,6 +732,52 @@ mod tests {
             .expect("row present");
         assert_eq!(got.storage_key.as_deref(), Some("sk-img"));
         assert_eq!(got.provider, ProviderKind::Generated);
+    }
+
+    #[tokio::test]
+    async fn lookup_by_document_id_a_newer_keyless_upload_wins_over_an_older_key() {
+        // Only the keyless rows a lazy upload writes (no origin) give way to a
+        // key. A newer upload of the id whose bytes were not stored is the
+        // current version: the older key of another provider may hold other
+        // bytes, so the id resolves to the keyless row and fails openly.
+        let reg = make_registry().await;
+        for (provider, storage_key) in [
+            (ProviderKind::Anthropic, Some("sk-old")),
+            (ProviderKind::OpenAi, None),
+        ] {
+            reg.upsert(UpsertAttachmentInput {
+                agent_session_id: "s1".to_string(),
+                document_id: "doc-1".to_string(),
+                provider,
+                provider_file_id: "pf".to_string(),
+                mime_type: "application/pdf".to_string(),
+                filename: "a.pdf".to_string(),
+                size_bytes: Some(100),
+                label: None,
+                description: None,
+                source: AttachmentSource::Inline,
+                storage_key: storage_key.map(String::from),
+                origin: Some("user_upload".to_string()),
+            })
+            .await
+            .unwrap();
+        }
+        sqlx::query(
+            "UPDATE conversation_attachments
+                SET refreshed_at = datetime('now', '-1 hour')
+              WHERE provider = 'anthropic'",
+        )
+        .execute(&*reg.pool)
+        .await
+        .unwrap();
+
+        let got = reg
+            .lookup_by_document_id("s1", "doc-1")
+            .await
+            .unwrap()
+            .expect("row present");
+        assert_eq!(got.provider, ProviderKind::OpenAi);
+        assert_eq!(got.storage_key, None);
     }
 
     #[tokio::test]

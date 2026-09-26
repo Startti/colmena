@@ -2,7 +2,7 @@
 //!
 //! Resolution strategy:
 //! 1. Look up `(agent_session_id, document_id)` in the registry; of several
-//!    provider rows, one that has a `storage_key` wins.
+//!    provider rows, a keyless lazy-upload row (no `origin`) loses to the rest.
 //! 2. If found and `storage_key` is set, call `storage.read_stream(storage_key)`.
 //!    Update `last_used_at` on success (best-effort, non-fatal).
 //! 3. If lookup misses, return `NotFound`. The identifier is never read as a
