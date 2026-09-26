@@ -3,9 +3,11 @@
 //! Mirrors the `recall_history` wiring: a `with_conversation_history(repo, key)`
 //! builder supplies the deps; the dispatch arm intercepts the tool name.
 
+use crate::dag_engine::domain::tool_configuration::memory_thread_prefix;
 use crate::llm::domain::tools::ToolDefinition;
 use crate::llm::domain::{
-    ConversationKey, ConversationRepository, NodeActivity, MAX_LISTED_NODE_ACTIVITY,
+    is_nested_tool_memory, ConversationKey, ConversationRepository, NodeActivity,
+    MAX_LISTED_NODE_ACTIVITY,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -40,10 +42,12 @@ pub fn tool_list_threads() -> ToolDefinition {
 }
 
 /// Group per-node_id rows into per-thread entries. `node_id` is
-/// `tool/<tool_name>/<thread_id>[/<child...>]`; the thread id is the first
-/// segment after the `tool/<tool_name>/` prefix. Rows sharing a thread id merge
-/// (sum messages, max last_activity, opening from the row with the
-/// lexicographically-smallest `node_id`).
+/// `<prefix><thread_id>[/<child...>]`, where `prefix` is the caller's
+/// `tool/<tool_name>/` ([`memory_thread_prefix`]); the thread id is the first
+/// segment after it. Rows sharing a thread id merge (sum messages, max
+/// last_activity, opening from the row with the lexicographically-smallest
+/// `node_id`). A row of a tool called from inside a thread is another
+/// caller's memory ([`is_nested_tool_memory`]): it adds to no thread.
 ///
 /// Neither the Postgres/SQLite backends (`GROUP BY node_id` with no outer
 /// `ORDER BY`) nor the in-memory backend (`HashMap` iteration) guarantee an
@@ -51,16 +55,18 @@ pub fn tool_list_threads() -> ToolDefinition {
 /// earliest by time" (`NodeActivity` carries no first-activity timestamp to
 /// order by), only a stable, deterministic tie-break so repeated calls return
 /// the same `opening` for a given thread.
-fn aggregate_threads(tool_name: &str, mut rows: Vec<NodeActivity>) -> Vec<ThreadInfo> {
+fn aggregate_threads(prefix: &str, mut rows: Vec<NodeActivity>) -> Vec<ThreadInfo> {
     use std::collections::HashMap;
     rows.sort_by(|a, b| a.node_id.cmp(&b.node_id));
-    let prefix = format!("tool/{tool_name}/");
     // thread_id -> (messages, max_last, best_opening, best_opening_key)
     let mut acc: HashMap<String, ThreadInfo> = HashMap::new();
     for r in rows {
-        let Some(rest) = r.node_id.strip_prefix(&prefix) else {
+        let Some(rest) = r.node_id.strip_prefix(prefix) else {
             continue;
         };
+        if is_nested_tool_memory(rest) {
+            continue;
+        }
         // `str::split` always yields at least one item (the whole string when
         // there's no separator), so the first segment is always present —
         // no `unwrap_or` fallback is reachable here.
@@ -101,10 +107,13 @@ fn truncate(s: &str, max: usize) -> String {
 }
 
 /// Dispatch a `list_threads` call. `dynamic_tool_names` is the set of configured
-/// tools whose `memory_mode == Dynamic`. Returns a serde_json value for the LLM.
+/// tools whose `memory_mode == Dynamic`; `caller` is the node id path of the
+/// `llm_call` asking, whose own threads are listed. Returns a serde_json value
+/// for the LLM.
 pub async fn dispatch_list_threads(
     repo: &Arc<dyn ConversationRepository>,
     key: &ConversationKey,
+    caller: Option<&str>,
     dynamic_tool_names: &[String],
     args: serde_json::Value,
 ) -> serde_json::Value {
@@ -125,7 +134,7 @@ pub async fn dispatch_list_threads(
     let keying = key.keying();
     let mut tools_json = Vec::new();
     for name in targets {
-        let prefix = format!("tool/{name}/");
+        let prefix = memory_thread_prefix(caller, &name);
         let rows = match repo.list_node_activity(keying, &prefix).await {
             Ok(r) => r,
             Err(e) => return serde_json::json!({ "error": format!("query_failed: {e}") }),
@@ -134,7 +143,7 @@ pub async fn dispatch_list_threads(
         // means there may be more threads/children than shown, so flag it
         // for the model rather than silently returning a partial list.
         let truncated = rows.len() >= MAX_LISTED_NODE_ACTIVITY as usize;
-        let threads = aggregate_threads(&name, rows);
+        let threads = aggregate_threads(&prefix, rows);
         let mut entry = serde_json::json!({ "tool": name, "threads": threads });
         if truncated {
             entry["truncated"] = serde_json::Value::Bool(true);
@@ -180,7 +189,7 @@ mod tests {
                 "abrir beta",
             ),
         ];
-        let out = aggregate_threads("archivador", rows);
+        let out = aggregate_threads("tool/archivador/", rows);
         // sorted by last_activity desc → alfa (11:00) before beta (09:00)
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].thread_id, "alfa");
@@ -193,7 +202,7 @@ mod tests {
     #[test]
     fn aggregate_handles_bare_llm_call_thread_without_child_suffix() {
         let rows = vec![na("tool/asesor/caso-12", 5, "2026-08-24T12:00:00Z", "hola")];
-        let out = aggregate_threads("asesor", rows);
+        let out = aggregate_threads("tool/asesor/", rows);
         assert_eq!(out[0].thread_id, "caso-12");
     }
 
@@ -217,7 +226,7 @@ mod tests {
                 "abrir alfa",
             ),
         ];
-        let out = aggregate_threads("archivador", rows);
+        let out = aggregate_threads("tool/archivador/", rows);
         assert_eq!(out[0].thread_id, "alfa");
         assert_eq!(out[0].opening.as_deref(), Some("abrir alfa"));
     }
@@ -304,6 +313,7 @@ mod tests {
         let r = dispatch_list_threads(
             &repo,
             &key(),
+            None,
             &dynamic_tool_names,
             serde_json::json!({"tool": "not_dynamic"}),
         )
@@ -335,6 +345,7 @@ mod tests {
         let r = dispatch_list_threads(
             &repo,
             &key(),
+            None,
             &dynamic_tool_names,
             serde_json::json!({"tool": "archivador"}),
         )
@@ -361,6 +372,7 @@ mod tests {
         let r = dispatch_list_threads(
             &repo,
             &key(),
+            None,
             &dynamic_tool_names,
             serde_json::json!({"tool": "archivador"}),
         )
@@ -381,10 +393,91 @@ mod tests {
         let r = dispatch_list_threads(
             &repo,
             &key(),
+            None,
             &dynamic_tool_names,
             serde_json::json!({"tool": "archivador"}),
         )
         .await;
         assert!(r["tools"][0].get("truncated").is_none());
+    }
+
+    /// One session's rows for `archivador`, at the root and nested: the
+    /// root's thread `alfa`; a thread `delta` a tool child keeps under `alfa`
+    /// (`…/alfa/agent/tool/…`), and a tool the bare llm of `alfa` calls
+    /// (`…/alfa/tool/…`); a nested caller's own thread `gamma`.
+    fn root_and_nested_rows() -> Vec<NodeActivity> {
+        let row = |node_id: &str, n| na(node_id, n, "2026-08-24T10:00:00Z", "hola");
+        vec![
+            row("tool/archivador/alfa/keeper", 4),
+            row("tool/archivador/alfa/agent/tool/archivador/delta/keeper", 3),
+            row("tool/archivador/alfa/tool/z", 2),
+            row("tool/Y/u/agent/tool/archivador/gamma/keeper", 5),
+        ]
+    }
+
+    async fn threads_for(caller: Option<&str>) -> Vec<serde_json::Value> {
+        let repo: Arc<dyn ConversationRepository> = Arc::new(StubRepo {
+            rows: root_and_nested_rows(),
+        });
+        let r = dispatch_list_threads(
+            &repo,
+            &key(),
+            caller,
+            &["archivador".to_string()],
+            serde_json::json!({ "tool": "archivador" }),
+        )
+        .await;
+        r["tools"][0]["threads"].as_array().unwrap().clone()
+    }
+
+    #[tokio::test]
+    async fn a_nested_caller_lists_only_its_own_threads() {
+        let threads = threads_for(Some("tool/Y/u/agent")).await;
+        assert_eq!(threads.len(), 1, "{threads:?}");
+        assert_eq!(threads[0]["thread_id"], "gamma");
+        assert_eq!(threads[0]["messages"], 5);
+    }
+
+    /// Nested keys now live under a root thread's prefix. They are another
+    /// caller's threads: they neither show up nor add to `alfa`'s count.
+    #[tokio::test]
+    async fn the_root_leaves_out_the_threads_nested_under_its_own() {
+        for caller in [None, Some("chat")] {
+            let threads = threads_for(caller).await;
+            assert_eq!(threads.len(), 1, "{caller:?}: {threads:?}");
+            assert_eq!(threads[0]["thread_id"], "alfa");
+            assert_eq!(threads[0]["messages"], 4, "{caller:?}");
+        }
+    }
+
+    /// The same rule one level down: a tool called from inside a nested
+    /// caller's own thread `gamma` keys under it, by its `keeper` child
+    /// (`…/gamma/keeper/tool/…`) or by a bare llm child (`…/gamma/tool/…`).
+    /// Those are another caller's threads, not `gamma`'s.
+    #[tokio::test]
+    async fn a_nested_caller_leaves_out_the_tools_called_inside_its_own_threads() {
+        let row = |node_id: &str, n| na(node_id, n, "2026-08-24T10:00:00Z", "hola");
+        let repo: Arc<dyn ConversationRepository> = Arc::new(StubRepo {
+            rows: vec![
+                row("tool/Y/u/agent/tool/archivador/gamma/keeper", 5),
+                row(
+                    "tool/Y/u/agent/tool/archivador/gamma/keeper/tool/archivador/omega/keeper",
+                    3,
+                ),
+                row("tool/Y/u/agent/tool/archivador/gamma/tool/z", 2),
+            ],
+        });
+        let r = dispatch_list_threads(
+            &repo,
+            &key(),
+            Some("tool/Y/u/agent"),
+            &["archivador".to_string()],
+            serde_json::json!({ "tool": "archivador" }),
+        )
+        .await;
+        let threads = r["tools"][0]["threads"].as_array().unwrap();
+        assert_eq!(threads.len(), 1, "{threads:?}");
+        assert_eq!(threads[0]["thread_id"], "gamma");
+        assert_eq!(threads[0]["messages"], 5);
     }
 }

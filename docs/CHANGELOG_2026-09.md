@@ -6024,3 +6024,33 @@ forma de la salida y no por el tipo; usarla sin respuesta (tomada de todo nodo `
 
 **ADP.** Nada: el scrub en reposo de ADP (`dag-run-at-rest.ts`) conserva `_conversation_key`.
 **Estado.** done.
+
+## 132. La memoria de una tool, por quien la llama (3/7): `list_threads` lista los hilos de quien llama
+
+**Qué cambió.**
+- `list_threads` busca bajo el prefijo de quien llama (`memory_thread_prefix`: `tool/<nombre>/`
+  en la raíz, `<caller>/tool/<nombre>/` dentro de un hijo). `DagToolExecutor` le pasa su
+  `caller_node_path`.
+- `aggregate_threads` deja afuera las filas que cuelgan de un hilo (`…/tool/…`, las de una tool
+  que llamó el agente de ese hilo: `is_nested_tool_memory`), en cualquier nivel.
+- `list_node_activity` (Postgres, SQLite y en memoria) las saca antes del tope de 100 filas,
+  para que no lo llenen ni marquen `truncated`. En SQL es un `NOT LIKE` con el segmento
+  `TOOL_MEMORY_SEGMENT`, que no tiene metacaracteres de `LIKE`.
+
+Borde conocido: las filas bajo un nodo de un hijo cuyo id es `tool` también tienen `/tool/` y
+quedan afuera. Hasta el tramo 4/7 quien llama siempre es la raíz, y bajo `tool/<nombre>/` solo
+hay filas anidadas en ese borde.
+
+**Tests.** Lib: 3020 passed. `list_threads.rs`: quien llama anidado lista solo sus hilos, la
+raíz deja afuera los anidados bajo los suyos, y quien llama anidado deja afuera las tools
+llamadas dentro de sus hilos. `dag_tool_executor.rs`: `list_threads` por quien llama, con el
+repositorio en memoria. `list_node_activity_leaves_out_tools_called_inside_a_thread` en los tres
+backends (el de Postgres, `#[ignore]`: 3 passed con `DATABASE_URL`) y su gemelo del nivel
+anidado en memoria. `TOOL_MEMORY_SEGMENT` es un segmento sin metacaracteres de `LIKE`.
+
+**Mutación.** Rojas y revertidas: sin el filtro en `aggregate_threads`, 2; filtrar ahí solo bajo
+el prefijo de la raíz, solo el test del nivel anidado; lo mismo en el backend en memoria, 2 y 1;
+sin el `NOT LIKE` en SQLite o en Postgres, su test; el ejecutor sin pasar quien llama, su test.
+
+**ADP.** Nada: hasta el tramo 4/7, la lista de la raíz solo cambia en ese borde.
+**Estado.** done.

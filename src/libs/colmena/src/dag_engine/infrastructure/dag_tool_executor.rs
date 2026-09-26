@@ -2025,9 +2025,9 @@ impl DagToolExecutor {
             // Use the LLM-visible name (mirrors `generate_base_tool_definition`'s
             // `effective_name`: the configured `name`, falling back to the
             // `tool_configurations` map key when `name` is empty). `node_id` is
-            // built from this same name (`tool/<name>/<thread>`), so using the raw
-            // config `name` here would return an empty/mismatched list and reject
-            // the tool's real name as `unknown_or_non_dynamic_tool`.
+            // built from this same name (`[<caller>/]tool/<name>/<thread>`), so
+            // using the raw config `name` here would return an empty/mismatched
+            // list and reject the tool's real name as `unknown_or_non_dynamic_tool`.
             //
             // A tool whose `thread_id` is FIXED (platform-named, not model-named)
             // is excluded: it has no model-named threads for `list_threads` to
@@ -2056,7 +2056,16 @@ impl DagToolExecutor {
                     }
                 })?
             };
-            let result = dispatch_list_threads(repo, key, &dynamic_tool_names, args).await;
+            // The threads under the same prefix this caller's calls key under
+            // (`memory_thread_prefix`).
+            let result = dispatch_list_threads(
+                repo,
+                key,
+                self.caller_node_path.as_deref(),
+                &dynamic_tool_names,
+                args,
+            )
+            .await;
             let success =
                 !matches!(&result, serde_json::Value::Object(m) if m.contains_key("error"));
             return Ok(crate::llm::domain::ToolResult {
@@ -3964,6 +3973,43 @@ mod tests {
             node_id_path_of(&res.output),
             "tool/Run_My_Agent/A/llm/tool/archivador/agent-a"
         );
+    }
+
+    /// `list_threads` lists the caller's own threads: a nested caller its
+    /// own, the root only the root's — not the ones nested under them.
+    #[tokio::test]
+    async fn list_threads_lists_the_threads_of_its_caller() {
+        use crate::llm::domain::{
+            AgentSessionId, ConversationKey, ConversationRepository, LlmMessage, NodeIdPath,
+            SessionId,
+        };
+        use crate::llm::infrastructure::persistence::in_memory_conversation_repository::InMemoryConversationRepository;
+        let repo = std::sync::Arc::new(InMemoryConversationRepository::new());
+        let key = |node: &str| ConversationKey {
+            session_id: SessionId("s".into()),
+            agent_session_id: Some(AgentSessionId("a".into())),
+            node_id: NodeIdPath(node.into()),
+        };
+        for node in [
+            "tool/archivador/raiz/keeper",
+            "tool/archivador/raiz/keeper/tool/archivador/debajo/keeper",
+            "tool/Y/u/agent/tool/archivador/propio/keeper",
+        ] {
+            let msg = LlmMessage::user("hola".into()).unwrap();
+            repo.add_message(&key(node), msg).await.unwrap();
+        }
+        for (caller, thread) in [("tool/Y/u/agent", "propio"), ("chat", "raiz")] {
+            let exec = DagToolExecutor::new(registry_with_subgraph(), dynamic_tool_configs())
+                .with_conversation_history(repo.clone(), key(caller))
+                .with_caller_node_path(caller.to_string());
+            let call = tool_call("list_threads", serde_json::json!({}));
+            let res = exec.execute(&call).await.unwrap();
+            let out: Value = serde_json::from_str(&res.output).unwrap();
+            let threads = &out["tools"][0]["threads"];
+            assert_eq!(threads.as_array().unwrap().len(), 1, "{caller}: {threads}");
+            assert_eq!(threads[0]["thread_id"], thread, "{caller}");
+            assert_eq!(threads[0]["messages"], 1, "{caller}");
+        }
     }
 
     #[tokio::test]
