@@ -51,6 +51,12 @@ impl PgPoolRegistry {
         }
     }
 
+    /// How many unpinned pools the registry keeps before it evicts the least
+    /// recently used one.
+    pub fn max_entries(&self) -> usize {
+        self.config.max_entries
+    }
+
     fn build_pool_options(&self) -> PgPoolOptions {
         PgPoolOptions::new()
             .min_connections(self.config.min_conn_per_url)

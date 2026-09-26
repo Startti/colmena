@@ -19,25 +19,92 @@ use crate::dag_engine::infrastructure::sql_llm_critic::LlmCriticAdapter;
 use crate::dag_engine::infrastructure::sql_pool_adapter::PgPoolAdapter;
 use crate::dag_engine::infrastructure::sql_port_factory::SqlPortFactory;
 use crate::dag_engine::infrastructure::sql_static_validator::StaticRuleValidator;
+use lru::LruCache;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::error::Error as StdError;
+use std::future::Future;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::OnceCell;
 
-/// Holds the fully-initialized state of a `SqlNode`.
-/// Created exactly once per node instance via `OnceCell::get_or_try_init`.
+/// What an initialization leaves for the calls that share it. The connection
+/// is not part of it: every call takes its adapter from the pool registry.
 struct SqlNodeInit {
-    adapter: Arc<PgPoolAdapter>,
     description_supplement: String,
+}
+
+/// Names one initialization (see [`SqlNode::init_key`]): a digest, so the
+/// key has a fixed size and the cache keeps no URL.
+type InitKey = [u8; 32];
+
+type InitCell<V> = Arc<OnceCell<Arc<V>>>;
+
+/// Results computed once per key, bounded: when full, the least recently used
+/// key goes first. Concurrent callers of one key wait on the same `OnceCell`;
+/// a failed initialization leaves no entry once no caller waits on it.
+struct InitCache<V> {
+    cells: std::sync::Mutex<LruCache<InitKey, InitCell<V>>>,
+}
+
+impl<V> InitCache<V> {
+    fn new(capacity: usize) -> Self {
+        let capacity = NonZeroUsize::new(capacity.max(1)).expect("capacity > 0");
+        Self {
+            cells: std::sync::Mutex::new(LruCache::new(capacity)),
+        }
+    }
+
+    fn cells(&self) -> std::sync::MutexGuard<'_, LruCache<InitKey, InitCell<V>>> {
+        self.cells.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The value of `key`, running `init` if no call has produced it yet.
+    async fn get_or_try_init<E, Fut>(
+        &self,
+        key: InitKey,
+        init: impl FnOnce() -> Fut,
+    ) -> Result<Arc<V>, E>
+    where
+        Fut: Future<Output = Result<V, E>>,
+    {
+        // Clones are handed out only under the lock. `get_or_insert` evicts a
+        // cell whose `init` is still running only when `max_entries` other
+        // keys are used meanwhile; a later caller of its key starts another.
+        let cell = self.cells().get_or_insert(key, Default::default).clone();
+        let result = cell
+            .get_or_try_init(|| async move { init().await.map(Arc::new) })
+            .await
+            .cloned();
+        if result.is_err() {
+            // A caller still waiting runs `init` next, so the cell leaves only
+            // when the cache is its last holder.
+            drop(cell);
+            let mut cells = self.cells();
+            if cells
+                .peek(&key)
+                .is_some_and(|c| Arc::strong_count(c) == 1 && !c.initialized())
+            {
+                cells.pop(&key);
+            }
+        }
+        result
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.cells().len()
+    }
 }
 
 pub struct SqlNode {
     factory: Arc<SqlPortFactory>,
-    /// Populated atomically on the first call that needs initialization.
-    /// `OnceCell` prevents the TOCTOU race where two concurrent callers both
-    /// observe `initialized == false` and both run the expensive setup work.
-    init: OnceCell<SqlNodeInit>,
+    /// One initialization per [`SqlNode::init_key`], for up to
+    /// [`SqlPortFactory::max_pools`] keys. The node registry holds one
+    /// `SqlNode` for every `sql_query` call, so a call shares only the
+    /// initialization of its own `init_key`.
+    inits: InitCache<SqlNodeInit>,
 }
 
 const MAX_SCHEMA_TABLES: usize = 40;
@@ -45,10 +112,8 @@ const MAX_SCHEMA_CHARS: usize = 8000;
 
 impl SqlNode {
     pub fn new(factory: Arc<SqlPortFactory>) -> Self {
-        Self {
-            factory,
-            init: OnceCell::new(),
-        }
+        let inits = InitCache::new(factory.max_pools());
+        Self { factory, inits }
     }
 
     /// Governance fields that carry authority (credentials, permissions, sandbox
@@ -136,52 +201,87 @@ impl SqlNode {
         }
     }
 
-    /// Perform the full initialization and return the result.
-    /// Called at most once — subsequent calls return the cached `SqlNodeInit`.
+    /// The key of the initialization a call shares: its resolved
+    /// `connection_url` plus the config that initialization reads —
+    /// `permissions` without `tenant_user_id` (provisioning, sandbox, auto-RLS,
+    /// the capability text); `setup_sql`; `runtime_limits.max_rows` (the
+    /// description names it). Object keys are sorted first, so their order
+    /// never splits a key.
+    fn init_key(connection_url: &str, config: &Value) -> InitKey {
+        let mut permissions = config.get("permissions").cloned().unwrap_or_default();
+        if let Some(map) = permissions.as_object_mut() {
+            map.remove("tenant_user_id");
+        }
+        let mut read = json!([
+            connection_url,
+            permissions,
+            config.get("setup_sql"),
+            config.pointer("/runtime_limits/max_rows"),
+        ]);
+        read.sort_all_objects();
+        Sha256::digest(read.to_string().as_bytes()).into()
+    }
+
+    /// The adapter a call runs on: the registry's pool for `connection_url`
+    /// (the registry's fast path once the pool exists) with this call's own
+    /// `statement_timeout_ms` and `work_mem_mb`.
+    async fn adapter_for(
+        &self,
+        config: &Value,
+        connection_url: &str,
+    ) -> Result<Arc<PgPoolAdapter>, Box<dyn StdError + Send + Sync>> {
+        let limit = |key: &str, default: u64| {
+            config
+                .get("runtime_limits")
+                .and_then(|r| r.get(key))
+                .and_then(Value::as_u64)
+                .unwrap_or(default)
+        };
+        let (timeout_ms, work_mem_mb) = (
+            limit("statement_timeout_ms", 30_000),
+            limit("work_mem_mb", 64),
+        );
+        Ok(self
+            .factory
+            .get_adapter(connection_url, timeout_ms, work_mem_mb)
+            .await
+            .map_err(|e| format!("Failed to acquire SQL pool: {}", e))?)
+    }
+
+    /// The initialization of this call's [`Self::init_key`], run on `adapter`
+    /// by the first call with that key and shared by the later ones until it
+    /// leaves the cache.
     async fn get_or_init(
         &self,
         config: &Value,
         connection_url: &str,
-    ) -> Result<&SqlNodeInit, Box<dyn StdError + Send + Sync>> {
-        // We need to own config data in the closure; clone the parts we need.
-        let config_owned = config.clone();
-        let url_owned = connection_url.to_string();
-        self.init
-            .get_or_try_init(|| async move {
-                Self::do_initialize_inner(&self.factory, &config_owned, &url_owned).await
+        adapter: &PgPoolAdapter,
+    ) -> Result<Arc<SqlNodeInit>, Box<dyn StdError + Send + Sync>> {
+        self.inits
+            .get_or_try_init(Self::init_key(connection_url, config), || {
+                Self::do_initialize_inner(adapter, config)
             })
             .await
     }
 
-    /// Body of the initialization logic — called once by `get_or_init`, with
-    /// the `connection_url` its caller resolved.
+    /// Body of the initialization logic — called once per key by
+    /// `get_or_init`, on the adapter of the call that runs it.
     async fn do_initialize_inner(
-        factory: &Arc<SqlPortFactory>,
+        adapter: &PgPoolAdapter,
         config: &Value,
-        connection_url: &str,
     ) -> Result<SqlNodeInit, Box<dyn StdError + Send + Sync>> {
-        let runtime_limits = config.get("runtime_limits");
-        let statement_timeout_ms = runtime_limits
-            .and_then(|r| r.get("statement_timeout_ms"))
-            .and_then(|v| v.as_u64())
-            .unwrap_or(30_000);
-        let work_mem_mb = runtime_limits
-            .and_then(|r| r.get("work_mem_mb"))
-            .and_then(|v| v.as_u64())
-            .unwrap_or(64);
-        let max_rows = runtime_limits
+        tracing::debug!(
+            target: crate::dag_engine::log_policy::T_SQL,
+            "first call with this key — initializing"
+        );
+        let max_rows = config
+            .get("runtime_limits")
             .and_then(|r| r.get("max_rows"))
             .and_then(|v| v.as_u64())
             .unwrap_or(100);
 
         let permissions = SqlPermissions::from_config(config.get("permissions"))
             .map_err(|e| format!("Invalid permissions config: {}", e))?;
-
-        // Acquire adapter from factory (gets or creates the registry pool)
-        let adapter = factory
-            .get_adapter(connection_url, statement_timeout_ms, work_mem_mb)
-            .await
-            .map_err(|e| format!("Failed to acquire SQL pool: {}", e))?;
 
         // Operator-driven schema provisioning: ensure every schema listed in
         // `allowed_schemas` exists, creating the missing ones. This is distinct
@@ -194,7 +294,7 @@ impl SqlNode {
                 .map(str::to_string)
                 .collect();
             if !listed.is_empty() {
-                let conn: &dyn SqlConnectionPort = adapter.as_ref();
+                let conn: &dyn SqlConnectionPort = adapter;
                 let missing = conn
                     .missing_schemas(&listed)
                     .await
@@ -226,7 +326,7 @@ impl SqlNode {
                     bytes = trimmed.len(),
                     "running setup_sql"
                 );
-                let conn: &dyn SqlConnectionPort = adapter.as_ref();
+                let conn: &dyn SqlConnectionPort = adapter;
                 conn.execute_setup_sql(trimmed)
                     .await
                     .map_err(|e| format!("Failed to run setup_sql: {}", e))?;
@@ -256,7 +356,7 @@ impl SqlNode {
             .unwrap_or_default();
 
         let tables: Vec<crate::dag_engine::domain::sql_ports::TableSchema> = {
-            let conn: &dyn SqlConnectionPort = adapter.as_ref();
+            let conn: &dyn SqlConnectionPort = adapter;
             conn.load_table_schemas(&allowed_schemas)
                 .await
                 .unwrap_or_default()
@@ -294,7 +394,6 @@ impl SqlNode {
         }
 
         Ok(SqlNodeInit {
-            adapter,
             description_supplement,
         })
     }
@@ -500,7 +599,8 @@ impl InitializableNode for SqlNode {
     ) -> Result<InitContext, Box<dyn StdError + Send + Sync>> {
         // `config` is the author's (a tool's `fixed` values): it expands.
         let connection_url = Self::resolve_connection_url(config, &NodeInputs::new())?;
-        let init = self.get_or_init(config, &connection_url).await?;
+        let adapter = self.adapter_for(config, &connection_url).await?;
+        let init = self.get_or_init(config, &connection_url, &adapter).await?;
         Ok(InitContext {
             description_supplement: Some(init.description_supplement.clone()),
         })
@@ -533,17 +633,15 @@ impl ExecutableNode for SqlNode {
             .and_then(|v| v.as_str())
             .ok_or("sql_query node requires 'query' input")?;
 
-        // Lazy initialization: connect on first call if not already initialized.
-        // OnceCell ensures concurrent callers wait on the same future — no TOCTOU race.
-        if self.init.get().is_none() {
-            tracing::debug!(
-                target: crate::dag_engine::log_policy::T_SQL,
-                "first call — initializing connection pool"
-            );
-        }
-        let init = async {
+        // This call's adapter, from the registry; the initialization runs on
+        // the first call with its key, and concurrent callers wait on it.
+        let (adapter, init) = async {
             let connection_url = Self::resolve_connection_url(config, inputs)?;
-            self.get_or_init(&effective_config, &connection_url).await
+            let adapter = self.adapter_for(&effective_config, &connection_url).await?;
+            let init = self
+                .get_or_init(&effective_config, &connection_url, &adapter)
+                .await?;
+            Ok::<_, Box<dyn StdError + Send + Sync>>((adapter, init))
         }
         .await
         .map_err(|e| format!("SqlNode initialization failed: {}", e))?;
@@ -641,7 +739,6 @@ impl ExecutableNode for SqlNode {
             };
 
         let sandbox_schema = permissions.sandbox_schema().to_string();
-        let adapter = init.adapter.clone();
         let registry = Arc::new(PgRegistryAdapter::new(adapter.pool(), sandbox_schema))
             as Arc<dyn crate::dag_engine::domain::sql_ports::FunctionRegistryPort>;
 
@@ -1204,6 +1301,74 @@ mod connection_provenance_tests {
         );
     }
 
+    /// An initialization is shared only by calls with the same URL and the
+    /// same config it reads — `permissions` without `tenant_user_id`;
+    /// `setup_sql`; `runtime_limits.max_rows` — in any key order.
+    #[test]
+    fn the_init_key_is_the_url_and_the_config_the_initialization_reads() {
+        let base = json!({
+            "permissions": { "preset": "read_only", "allowed_schemas": ["s"], "tenant_user_id": "u1" },
+            "setup_sql": "CREATE TABLE IF NOT EXISTS s.t (id int)",
+            "runtime_limits": { "max_rows": 10, "statement_timeout_ms": 1000 },
+        });
+        let with = |pointer: &str, value: Value| {
+            let mut config = base.clone();
+            *config.pointer_mut(pointer).unwrap() = value;
+            config
+        };
+        let key = |config: &Value| SqlNode::init_key("postgres://a.test/db", config);
+        assert_ne!(key(&base), SqlNode::init_key("postgres://b.test/db", &base));
+        for (p, v) in [
+            ("/permissions/preset", json!("read_write")),
+            ("/permissions/allowed_schemas", json!(["s", "t"])),
+            ("/setup_sql", json!("SELECT 1")),
+            ("/runtime_limits/max_rows", json!(20)),
+        ] {
+            assert_ne!(key(&base), key(&with(p, v)), "{p} shared a key");
+        }
+        for (p, v) in [
+            ("/permissions/tenant_user_id", json!("u2")),
+            ("/runtime_limits/statement_timeout_ms", json!(5000)),
+        ] {
+            assert_eq!(key(&base), key(&with(p, v)), "{p} split a key");
+        }
+        let reordered = json!({
+            "query": "SELECT 2",
+            "runtime_limits": { "statement_timeout_ms": 1000, "max_rows": 10 },
+            "setup_sql": base["setup_sql"],
+            "permissions": { "allowed_schemas": ["s"], "tenant_user_id": "u1", "preset": "read_only" },
+        });
+        assert_eq!(key(&base), key(&reordered), "the order split a key");
+    }
+
+    /// One node instance serves every `sql_query` call. A call that names
+    /// another `connection_url` connects to its own server: it never runs on
+    /// the connection an earlier call used.
+    #[tokio::test]
+    async fn a_second_connection_url_never_runs_on_the_first_calls_connection() {
+        use super::init_cache_tests::{node_with, URL_A};
+        let (n, _registry, fake) = node_with(8).await;
+        std::env::set_var(ENV, VALUE);
+        let query = HashMap::from([("query".to_string(), json!("SELECT 1"))]);
+        let first = json!({ "connection_url": URL_A });
+        n.execute(&query, &first, &mut json!({}), None)
+            .await
+            .expect("the first call runs");
+        let (url, seen, h) = listener().await;
+        let config = json!({ "connection_url": url });
+        let second = n.execute(&query, &config, &mut json!({}), None).await;
+        h.abort();
+        fake.abort();
+        assert!(
+            second.is_err(),
+            "the second call ran on the first call's connection"
+        );
+        assert!(
+            reached(&seen),
+            "the second call never reached its own server"
+        );
+    }
+
     /// `permissions.tenant_user_id` and `guardrail_llm.api_key` expand `${VAR}`
     /// in the author's `config`; from `inputs`, only at a vouched pointer.
     #[test]
@@ -1280,5 +1445,166 @@ mod connection_provenance_tests {
             !reached(&seen),
             "a data tool's connection_url expanded an env template"
         );
+    }
+}
+
+/// What `SqlNode` keeps between calls. The registry's pools here never reach
+/// a server: a listener closes each connection, so every query fails fast and
+/// an initialization completes with no tables.
+#[cfg(test)]
+mod init_cache_tests {
+    use super::*;
+    use crate::dag_engine::infrastructure::pool_registry::{PgPoolRegistry, PoolConfig};
+    use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode};
+
+    pub(super) const URL_A: &str = "postgres://u@a.test/db";
+    const URL_B: &str = "postgres://u@b.test/db";
+    const URL_C: &str = "postgres://u@c.test/db";
+
+    /// A node whose registry holds a pool for `URL_A`, `URL_B` and `URL_C`
+    /// and keeps at most `max_entries` of them.
+    pub(super) async fn node_with(
+        max_entries: usize,
+    ) -> (SqlNode, Arc<PgPoolRegistry>, tokio::task::JoinHandle<()>) {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = l.local_addr().unwrap().port();
+        let h = tokio::spawn(async move { while l.accept().await.is_ok() {} });
+        let registry = Arc::new(PgPoolRegistry::new(PoolConfig {
+            max_entries,
+            ..PoolConfig::defaults()
+        }));
+        for url in [URL_A, URL_B, URL_C] {
+            let options = PgConnectOptions::new()
+                .host("127.0.0.1")
+                .port(port)
+                .username("u")
+                .ssl_mode(PgSslMode::Disable);
+            let pool = PgPoolOptions::new()
+                .max_connections(1)
+                .acquire_timeout(std::time::Duration::from_millis(500))
+                .connect_lazy_with(options);
+            registry.insert_for_test(url, Arc::new(pool), false);
+        }
+        let factory = Arc::new(SqlPortFactory::new(registry.clone()));
+        (SqlNode::new(factory), registry, h)
+    }
+
+    /// A tool call: `config` is `{}`, every value arrives in `inputs`.
+    async fn call(n: &SqlNode, args: Value) -> Result<Value, String> {
+        let mut inputs: NodeInputs = serde_json::from_value(args).unwrap();
+        inputs.insert("query".to_string(), json!("SELECT 1"));
+        n.execute(&inputs, &json!({}), &mut json!({}), None)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    fn entries(n: &SqlNode) -> usize {
+        n.inits.len()
+    }
+
+    /// Every call takes its pool from the registry, so the registry's LRU
+    /// bound, per-URL pool and metrics hold for `sql_query` too.
+    #[tokio::test]
+    async fn every_call_takes_its_pool_from_the_registry() {
+        let (n, registry, h) = node_with(8).await;
+        for _ in 0..2 {
+            call(&n, json!({ "connection_url": URL_A })).await.unwrap();
+        }
+        h.abort();
+        assert_eq!(registry.snapshot_metrics().get_or_create_total, 2);
+    }
+
+    /// The node keeps at most as many initializations as the registry keeps
+    /// pools, however many URLs its callers name.
+    #[tokio::test]
+    async fn the_node_keeps_as_many_initializations_as_the_registry_keeps_pools() {
+        let (n, _registry, h) = node_with(2).await;
+        for url in [URL_A, URL_B, URL_C] {
+            call(&n, json!({ "connection_url": url })).await.unwrap();
+        }
+        h.abort();
+        assert_eq!(entries(&n), 2);
+    }
+
+    /// The cache runs `init` once per key (also for concurrent callers),
+    /// keeps no failure, and when full drops the least recently used key. A
+    /// failure with a caller still waiting leaves the cell to that caller.
+    #[tokio::test]
+    async fn the_cache_runs_once_per_key_keeps_no_failure_and_drops_the_least_recent() {
+        use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+        let (runs, cache) = (AtomicUsize::new(0), InitCache::<u8>::new(2));
+        let get = |key: u8, ok: bool| {
+            let (runs, cache) = (&runs, &cache);
+            async move {
+                let init = || async move {
+                    runs.fetch_add(1, SeqCst);
+                    tokio::task::yield_now().await;
+                    ok.then_some(key).ok_or(())
+                };
+                cache.get_or_try_init([key; 32], init).await.map(|v| *v)
+            }
+        };
+        assert_eq!(get(1, false).await, Err(()));
+        assert_eq!(cache.len(), 0, "a failure stayed cached");
+        assert_eq!(tokio::join!(get(1, true), get(1, true)), (Ok(1), Ok(1)));
+        assert_eq!(runs.load(SeqCst), 2, "one key initialized twice");
+        get(2, true).await.unwrap();
+        get(1, true).await.unwrap();
+        get(3, true).await.unwrap();
+        assert_eq!((runs.load(SeqCst), cache.len()), (4, 2));
+        get(1, true).await.unwrap();
+        assert_eq!(runs.load(SeqCst), 4, "the recently used key was dropped");
+        get(2, true).await.unwrap();
+        assert_eq!(runs.load(SeqCst), 5, "the least recently used key stayed");
+        assert_eq!(tokio::join!(get(4, false), get(4, true)), (Err(()), Ok(4)));
+        assert_eq!(cache.len(), 2, "the waiter's initialization left the cache");
+        get(4, true).await.unwrap();
+        assert_eq!(runs.load(SeqCst), 7, "a later call initialized it again");
+    }
+
+    /// `execute` keys its initialization by URL and the config it reads.
+    #[tokio::test]
+    async fn each_url_and_init_config_gets_its_own_initialization() {
+        let (n, _registry, h) = node_with(8).await;
+        let perms =
+            |preset: &str, tenant: &str| json!({ "preset": preset, "tenant_user_id": tenant });
+        for (url, permissions) in [
+            (URL_A, perms("read_only", "u1")),
+            (URL_A, perms("read_only", "u2")),
+            (URL_B, perms("read_only", "u1")),
+            (URL_A, perms("read_write", "u1")),
+        ] {
+            let args = json!({ "connection_url": url, "permissions": permissions });
+            call(&n, args).await.unwrap();
+        }
+        h.abort();
+        assert_eq!(entries(&n), 3);
+    }
+
+    /// Two configurations on one database each get their own description.
+    #[tokio::test]
+    async fn each_init_config_gets_its_own_description() {
+        let (n, _registry, h) = node_with(8).await;
+        let mut seen = Vec::new();
+        for max_rows in [5, 7] {
+            let config =
+                json!({ "connection_url": URL_A, "runtime_limits": { "max_rows": max_rows } });
+            let ctx = n.initialize(&config).await.unwrap();
+            seen.push(ctx.description_supplement.unwrap_or_default());
+        }
+        h.abort();
+        assert!(seen[0].contains("Max rows: 5"), "{}", seen[0]);
+        assert!(seen[1].contains("Max rows: 7"), "{}", seen[1]);
+    }
+
+    /// A failed initialization leaves nothing behind.
+    #[tokio::test]
+    async fn a_failed_initialization_is_not_cached() {
+        let (n, _registry, h) = node_with(8).await;
+        let args = json!({ "connection_url": URL_A, "setup_sql": "SELECT 1" });
+        let failed = call(&n, args).await;
+        h.abort();
+        assert!(failed.unwrap_err().contains("setup_sql"));
+        assert_eq!(entries(&n), 0, "a failed initialization stayed cached");
     }
 }

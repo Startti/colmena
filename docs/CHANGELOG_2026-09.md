@@ -5951,3 +5951,22 @@ host no recibe ninguna conexión. `registry.rs`: la tabla de campos del autor in
 
 **ADP.** Sin cambios de API. Una región que no sea un nombre de región falla antes de la request.
 **Estado.** done.
+
+## 129. Endurecimiento: `sql_query` inicializa por `connection_url` y configuración
+
+**Qué cambia.** La inicialización de `sql_query` (esquemas, `setup_sql`, introspección, RLS,
+descripción) es por `connection_url` resuelto y la configuración que lee (`SqlNode::init_key`:
+`permissions` sin `tenant_user_id`, `setup_sql`, `runtime_limits.max_rows`): cada llamada usa la
+conexión de su propia URL, también dentro de un grupo `parallel`, y dos configuraciones sobre una
+misma base no comparten inicialización. Cada llamada toma su pool del `PgPoolRegistry` con sus
+propios límites. El nodo guarda solo la descripción, hasta `max_entries` claves (el tope del
+registro; sale la menos usada), y nunca un fallo: las llamadas simultáneas de una clave esperan
+una sola inicialización y, si falla, la corre la siguiente que espera.
+
+**Tests.** `sql.rs`: una segunda URL llega a su propio servidor; la clave separa URL y
+configuración; cada llamada pide su pool al registro (pools que nunca llegan a un servidor); el
+caché respeta el tope, no guarda un fallo y lo deja a la llamada que esperaba.
+
+**ADP.** Sin cambios de API. `setup_sql` corre una vez por `connection_url` y configuración en
+cada proceso (de nuevo si sale del caché).
+**Estado.** done.

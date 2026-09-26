@@ -18,6 +18,11 @@ impl SqlPortFactory {
         Self { registry }
     }
 
+    /// How many unpinned pools the registry keeps (its `max_entries`).
+    pub fn max_pools(&self) -> usize {
+        self.registry.max_entries()
+    }
+
     /// Obtain a `PgPoolAdapter` wrapping the shared registry pool for `url`.
     pub async fn get_adapter(
         &self,
