@@ -6,7 +6,8 @@
 //! addresses (the MCP client's rule), checked inside the DNS resolution the
 //! socket uses and, for an IP-literal host, on the URL and on every redirect
 //! hop; no proxy; connect 10 s, whole request 600 s; a byte cap. No
-//! `Authorization` header: a signed URL carries its signature in the query.
+//! `Authorization` header: a signed URL carries its signature in the query;
+//! the only headers a caller adds are conditional-GET ones.
 
 use std::error::Error;
 use std::net::{IpAddr, SocketAddr};
@@ -18,7 +19,7 @@ use bytes::Bytes;
 use futures::{StreamExt, TryStreamExt};
 use hyper::client::connect::dns::Name;
 use reqwest::dns::{Addrs, Resolve, Resolving};
-use reqwest::header::HeaderMap;
+use reqwest::header::{HeaderMap, IF_MODIFIED_SINCE, IF_NONE_MATCH};
 use reqwest::{redirect, Client, Url};
 
 use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::mcp::allowlist::{
@@ -228,7 +229,8 @@ impl SignedUrlDownloader {
         self.fetch_with(url, HeaderMap::new()).await
     }
 
-    /// [`Self::fetch`] with extra request headers (e.g. a conditional GET).
+    /// [`Self::fetch`] as a conditional GET: of `headers`, only `If-None-Match`
+    /// and `If-Modified-Since` are sent.
     pub async fn fetch_with(&self, url: &str, headers: HeaderMap) -> Result<Fetched, LlmError> {
         let parsed = Url::parse(url).map_err(|_| refused("not a valid URL"))?;
         if !matches!(parsed.scheme(), "http" | "https") {
@@ -237,7 +239,12 @@ impl SignedUrlDownloader {
         if literal_refused(&parsed, self.dialable) {
             return Err(refused(DialRefused));
         }
-        let mut request = self.client.get(parsed).headers(headers);
+        let mut request = self.client.get(parsed);
+        for name in [IF_NONE_MATCH, IF_MODIFIED_SINCE] {
+            if let Some(value) = headers.get(&name) {
+                request = request.header(name, value.clone());
+            }
+        }
         if let Some(total) = self.timeout {
             request = request.timeout(total);
         }
@@ -468,7 +475,11 @@ mod tests {
 
         let downloader = SignedUrlDownloader::allowing_private_hosts();
         let url = format!("{}/no-auth.pdf", server.uri());
-        let result = downloader.stream(&url).await;
+        let mut offered = HeaderMap::new();
+        offered.insert("authorization", "Bearer t".parse().unwrap());
+        offered.insert("cookie", "c=1".parse().unwrap());
+        offered.insert("if-none-match", "\"e\"".parse().unwrap());
+        let result = downloader.fetch_with(&url, offered).await;
         assert!(result.is_ok());
         // Validar via received requests:
         let received = server.received_requests().await.unwrap();
@@ -477,5 +488,7 @@ mod tests {
             .find(|r| r.url.path() == "/no-auth.pdf")
             .unwrap();
         assert!(req.headers.get("authorization").is_none());
+        assert!(req.headers.get("cookie").is_none());
+        assert!(req.headers.contains_key("if-none-match"));
     }
 }
