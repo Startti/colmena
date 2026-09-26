@@ -40,6 +40,31 @@ it anyway). A host that builds `EngineConfig` by hand (without going through
 `COLMENA_PYTHON_EXECUTOR` value surfaces only at the first Python call instead
 of at boot, and the install event never fires.
 
+## Wire protocol (isolated executors)
+
+Isolated executors (not available in this build yet) talk to the process that
+runs the code over a byte stream, one request and one response per call
+(`python_exec::protocol`, `python_exec::frame`):
+
+- **Frames.** A 4-byte big-endian length followed by that many bytes of JSON.
+  The reader checks the length against a limit before it allocates or reads
+  the body; a longer frame is refused (`frame::is_frame_too_large`), and a
+  stream that ends mid-frame is an `UnexpectedEof`.
+- **Request** (`WireRequest`): `v` (protocol version, `1`), `code`, `mode`,
+  `timeout_ms` (the request's own deadline when it has one, else the
+  executor's; saturates instead of wrapping) and `inputs`.
+- **Response** (`WireResponse`): `v`, `status` (`ok`, `python_error`,
+  `timeout`, `crashed`, `too_large`), `output_set` and `output` (so a code
+  that assigned `output = None` is told apart from one that never assigned
+  it), `stdout`, `message` and `exec_ms`.
+- **Mapping back.** `ok` → the result; `python_error` → the message as is
+  (the model sees the same text as in process); `timeout` → the caller's own
+  timeout text; `crashed` → a fixed `Python execution error: …` text (a
+  message sent by the process is ignored); `too_large` → its message. A
+  missing message, or a response with another `v`, becomes
+  `Python execution error: …` (malformed) or
+  `PythonExecutorError: unsupported protocol version …`.
+
 ## About `restricted`
 
 `restricted` validates imports and a few builtins before running. It helps
