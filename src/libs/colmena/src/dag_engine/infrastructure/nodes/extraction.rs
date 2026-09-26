@@ -40,6 +40,11 @@ impl ExtractionNode {
 
 #[async_trait]
 impl ExecutableNode for ExtractionNode {
+    /// The instructions are author-set.
+    fn author_owned_inputs(&self) -> &'static [&'static str] {
+        &["system_message"]
+    }
+
     async fn execute(
         &self,
         inputs: &NodeInputs,

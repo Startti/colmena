@@ -111,6 +111,11 @@ impl TtsNode {
 
 #[async_trait]
 impl ExecutableNode for TtsNode {
+    /// The provider credential is author-set.
+    fn author_owned_inputs(&self) -> &'static [&'static str] {
+        &["api_key"]
+    }
+
     async fn execute(
         &self,
         inputs: &NodeInputs,

@@ -13,7 +13,7 @@ use crate::dag_engine::domain::observer::{ChildScopeObserver, ExecutionObserver,
 use crate::dag_engine::domain::tool_configuration::parse_node_schema;
 use crate::dag_engine::infrastructure::dag_tool_executor::DagToolExecutor;
 use crate::dag_engine::infrastructure::node_schema_merge::{
-    drop_unoffered_child_graph_sources, merge_args_into_schema, offered_params,
+    drop_unoffered_author_owned, merge_args_into_schema, offered_params,
 };
 use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::{
     dispatch_gsheets_create_spreadsheet, dispatch_gsheets_set_range,
@@ -269,6 +269,11 @@ fn results_sheet_row(
 
 #[async_trait::async_trait]
 impl ExecutableNode for ForEachNode {
+    /// The target (its node type and its `fixed` values) is author-set.
+    fn author_owned_inputs(&self) -> &'static [&'static str] {
+        &["target"]
+    }
+
     async fn execute(
         &self,
         inputs: &NodeInputs,
@@ -404,6 +409,13 @@ impl ExecutableNode for ForEachNode {
             .filter_map(|&key| inputs.get(key).map(|v| (key.to_string(), v.clone())))
             .collect();
 
+        // The fields only the target's author sets: a row sets one only when the
+        // target's schema offers it.
+        let target_owned: &'static [&'static str] = registry
+            .get_node(&target_type)
+            .map(|n| n.author_owned_inputs())
+            .unwrap_or(&[]);
+
         // Per-row dispatch: merge the row into the target schema, run the target node.
         let dispatch = |index: usize, row: Value| {
             let node_id = node_id.clone();
@@ -429,7 +441,7 @@ impl ExecutableNode for ForEachNode {
                     // before it can reach the merge below, same as an ordinary
                     // tool call's arguments.
                     DagToolExecutor::strip_engine_keys(&mut row_map);
-                    drop_unoffered_child_graph_sources(&mut row_map, || {
+                    drop_unoffered_author_owned(&mut row_map, target_owned, || {
                         offered_params(&target_schema)
                     });
                     let mut merged = merge_args_into_schema(&target_schema, row_map)
@@ -1527,5 +1539,39 @@ mod http_target_env_tests {
         );
         std::env::remove_var("COLMENA_P4_TEST_ROW");
         std::env::remove_var("COLMENA_P4_TEST_FIXED");
+    }
+
+    /// A row never sets a field only the author sets unless the target's
+    /// schema offers it.
+    #[tokio::test]
+    async fn a_row_never_sets_an_undeclared_author_owned_field() {
+        let s = MockServer::start().await;
+        Mock::given(wiremock::matchers::any())
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
+            .mount(&s)
+            .await;
+        let node = ForEachNode::new();
+        node.registry
+            .set(Arc::new(Registry(Arc::new(HttpNode::new()))) as Arc<dyn NodeRegistryPort>)
+            .ok();
+        let config = json!({
+            "target": {
+                "node_type": "http_request",
+                "node_schema": {
+                    "base_url": { "fixed": s.uri() },
+                    "method":   { "fixed": "GET" },
+                    "q":        { "type": "string", "required": true }
+                }
+            },
+            "items": [ { "q": "x", "headers": { "X-Extra": "row" } } ]
+        });
+        node.execute(&HashMap::new(), &config, &mut json!({}), None)
+            .await
+            .unwrap();
+        let got = s.received_requests().await.unwrap();
+        assert!(
+            got[0].headers.get("x-extra").is_none(),
+            "an undeclared header arrived"
+        );
     }
 }

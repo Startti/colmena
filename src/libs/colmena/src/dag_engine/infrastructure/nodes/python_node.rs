@@ -181,6 +181,11 @@ pub fn execute_sandboxed_helper(
 
 #[async_trait]
 impl ExecutableNode for PythonNode {
+    /// The code and its sandbox are author-set.
+    fn author_owned_inputs(&self) -> &'static [&'static str] {
+        &["code", "sandbox_mode", "sandbox_timeout_secs"]
+    }
+
     async fn execute(
         &self,
         inputs: &NodeInputs,

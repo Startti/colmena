@@ -182,6 +182,11 @@ impl ImageEditNode {
 
 #[async_trait]
 impl ExecutableNode for ImageEditNode {
+    /// The provider credential is author-set.
+    fn author_owned_inputs(&self) -> &'static [&'static str] {
+        &["api_key"]
+    }
+
     async fn execute(
         &self,
         inputs: &NodeInputs,

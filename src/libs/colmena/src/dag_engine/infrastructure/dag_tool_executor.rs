@@ -2493,7 +2493,7 @@ impl DagToolExecutor {
     #[allow(deprecated)]
     fn merge_call(&self, tool_call: &ToolCall) -> Result<MergedCall<'_>, LlmError> {
         use crate::dag_engine::infrastructure::node_schema_merge::{
-            drop_unoffered_child_graph_sources_silently, merge_args_into_schema_silently,
+            drop_unoffered_author_owned_silently, merge_args_into_schema_silently,
         };
         let node_type = &tool_call.function.name;
 
@@ -2528,10 +2528,12 @@ impl DagToolExecutor {
         // strategies below (node_schema, $DYNAMIC, legacy field_mapping) or
         // the no-fixed_config passthrough.
         Self::strip_engine_keys(&mut args);
-        // Same place, same reason: a child-graph source the tool never offered.
-        let mut warnings = drop_unoffered_child_graph_sources_silently(&mut args, || {
-            self.offered_params(node_type, tool_cfg, &node)
-        });
+        // Same place, same reason: a field only the author sets (a child-graph
+        // source, the node's author-owned inputs) that the tool never offered.
+        let mut warnings =
+            drop_unoffered_author_owned_silently(&mut args, node.author_owned_inputs(), || {
+                self.offered_params(node_type, tool_cfg, &node)
+            });
 
         // 3. Build final_args with node_schema, $DYNAMIC substitution, or legacy field_mapping
         let inputs = if let Some(schema) = tool_cfg.and_then(|c| c.node_schema.as_ref()) {
@@ -7043,5 +7045,100 @@ mod close_suspended_tests {
             log.contains("tool_call_id=c1") && log.contains("child_session_id=ghost"),
             "{log}"
         );
+    }
+}
+
+/// A tool argument never sets a field only the author sets (the target node's
+/// `author_owned_inputs`) unless the tool offers it as a parameter.
+#[cfg(test)]
+mod author_owned_arg_tests {
+    use super::*;
+    use crate::dag_engine::infrastructure::nodes::http::HttpNode;
+    use crate::llm::domain::FunctionCall;
+    use serde_json::json;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    struct HttpRegistry;
+    impl NodeRegistryPort for HttpRegistry {
+        fn get_node(&self, node_type: &str) -> Option<Arc<dyn ExecutableNode>> {
+            (node_type == "http_request").then(|| Arc::new(HttpNode::new()) as _)
+        }
+        fn get_all_nodes(&self) -> HashMap<String, Arc<dyn ExecutableNode>> {
+            HashMap::new()
+        }
+    }
+
+    /// Calls `search` (an `http_request` fixed on the mock) with `args`, plus
+    /// `extra` schema fields; returns the one request the mock received.
+    async fn call(extra: Value, args: Value) -> wiremock::Request {
+        let s = MockServer::start().await;
+        Mock::given(wiremock::matchers::any())
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
+            .mount(&s)
+            .await;
+        let mut schema = json!({
+            "base_url": { "fixed": s.uri() },
+            "method": { "fixed": "GET" },
+            "q": { "type": "string", "description": "query" }
+        });
+        schema
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let cfg = json!({ "node_type": "http_request", "node_schema": schema });
+        let configs = HashMap::from([("search".to_string(), serde_json::from_value(cfg).unwrap())]);
+        let executor = DagToolExecutor::new(Arc::new(HttpRegistry), configs);
+        let tc = ToolCall::new(
+            "c1".into(),
+            FunctionCall::new("search".into(), args.to_string()),
+        );
+        executor.execute(&tc).await.unwrap();
+        s.received_requests().await.unwrap().remove(0)
+    }
+
+    #[tokio::test]
+    async fn an_undeclared_author_owned_argument_is_dropped() {
+        let args = json!({ "q": "x", "headers": { "X-Extra": "model" } });
+        let req = call(json!({}), args).await;
+        assert!(
+            req.headers.get("x-extra").is_none(),
+            "an undeclared header arrived"
+        );
+        assert_eq!(req.url.query(), Some("q=x"));
+    }
+
+    /// Offering the field as a parameter is the author's explicit wiring.
+    #[tokio::test]
+    async fn a_declared_author_owned_argument_still_arrives() {
+        let extra = json!({ "headers": { "type": "object", "description": "headers" } });
+        let args = json!({ "q": "x", "headers": { "X-Extra": "model" } });
+        let req = call(extra, args).await;
+        assert_eq!(req.headers.get("x-extra").unwrap(), "model");
+    }
+
+    /// The drop happens inside the merge, so the chain key and the dispatch
+    /// see the same arguments, and it comes back with the merge's other
+    /// warnings: the key, never the value.
+    #[test]
+    fn a_dropped_author_owned_argument_is_a_merge_warning() {
+        let cfg = json!({
+            "node_type": "http_request",
+            "node_schema": {
+                "base_url": { "fixed": "http://127.0.0.1:9" },
+                "q": { "type": "string", "description": "query" }
+            }
+        });
+        let configs = HashMap::from([("search".to_string(), serde_json::from_value(cfg).unwrap())]);
+        let executor = DagToolExecutor::new(Arc::new(HttpRegistry), configs);
+        let args = json!({ "q": "x", "headers": { "X-Extra": "model-value" } });
+        let tc = ToolCall::new(
+            "c1".into(),
+            FunctionCall::new("search".into(), args.to_string()),
+        );
+        let merged = executor.merge_call(&tc).unwrap();
+        assert!(!merged.inputs.contains_key("headers"));
+        assert_eq!(merged.warnings.len(), 1, "{:?}", merged.warnings);
+        assert!(merged.warnings[0].contains("'headers'"));
+        assert!(!merged.warnings[0].contains("model-value"));
     }
 }

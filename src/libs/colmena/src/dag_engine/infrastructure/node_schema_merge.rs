@@ -7,35 +7,39 @@ use crate::dag_engine::infrastructure::dag_tool_executor::DagToolExecutor;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
-/// Drop every child-graph source ([`CHILD_GRAPH_SOURCE_KEYS`]) the caller
-/// supplied but the tool never offered as a parameter.
+/// Drop every argument the caller supplied for a field only the author sets —
+/// the target node's `author_owned_inputs` and every child-graph source
+/// ([`CHILD_GRAPH_SOURCE_KEYS`]) — that the tool does not offer as a parameter.
 ///
-/// A `subgraph` dispatched as a tool reads its source from `inputs`, where the
-/// caller's arguments land too, and an undeclared argument went through every
-/// merge untouched. Since the precedence is inline > path > ref, a model that
-/// added `child_graph_inline` or `child_graph_path` to its call outranked the
-/// operator's fixed `child_graph_ref` (or fixed path) and picked the graph the
-/// worker ran. A source the operator declares as a parameter still passes: that
-/// hands the model the choice on purpose. `offered` yields the parameter names
-/// the tool advertised, and runs only when the caller supplied a source.
-pub(crate) fn drop_unoffered_child_graph_sources(
+/// An undeclared argument otherwise goes through every merge untouched, and a
+/// node reads `inputs` first: a `subgraph` would take its child graph from it,
+/// an `http_request` its headers. A field the author declares as a parameter
+/// still passes: that hands the caller the choice on purpose. `offered` yields
+/// the parameter names the tool advertised, and runs only when the caller
+/// supplied such a field. Each drop is printed as a warning that names the
+/// key, never the value.
+pub(crate) fn drop_unoffered_author_owned(
     args: &mut HashMap<String, Value>,
+    author_owned: &[&str],
     offered: impl FnOnce() -> HashSet<String>,
 ) {
-    for warning in drop_unoffered_child_graph_sources_silently(args, offered) {
+    for warning in drop_unoffered_author_owned_silently(args, author_owned, offered) {
         eprintln!("{warning}");
     }
 }
 
-/// [`drop_unoffered_child_graph_sources`], returning its warnings instead of
+/// [`drop_unoffered_author_owned`], returning its warnings instead of
 /// printing them.
-pub(crate) fn drop_unoffered_child_graph_sources_silently(
+pub(crate) fn drop_unoffered_author_owned_silently(
     args: &mut HashMap<String, Value>,
+    author_owned: &[&str],
     offered: impl FnOnce() -> HashSet<String>,
 ) -> Vec<String> {
-    let supplied: Vec<&str> = CHILD_GRAPH_SOURCE_KEYS
-        .into_iter()
-        .filter(|key| args.contains_key(*key))
+    let supplied: Vec<String> = CHILD_GRAPH_SOURCE_KEYS
+        .iter()
+        .chain(author_owned)
+        .filter(|key| args.contains_key(**key))
+        .map(|key| key.to_string())
         .collect();
     if supplied.is_empty() {
         return Vec::new();
@@ -43,10 +47,10 @@ pub(crate) fn drop_unoffered_child_graph_sources_silently(
     let offered = offered();
     let mut warnings = Vec::new();
     for key in supplied {
-        if !offered.contains(key) {
-            args.remove(key);
+        if !offered.contains(&key) {
+            args.remove(&key);
             warnings.push(format!(
-                "⚠️ [node_schema_merge] Ignoring arg '{key}' — a child-graph source the tool does not offer."
+                "⚠️ [node_schema_merge] Ignoring arg '{key}' — an author-set field the tool does not offer."
             ));
         }
     }
