@@ -251,9 +251,10 @@ impl AttachmentRegistry for PostgresAttachmentRegistry {
         Ok(())
     }
 
-    /// Provider is intentionally ignored — returns the most recently refreshed row across all
-    /// providers for the (session, document) pair. Secondary sort by `provider` ASC ensures a
-    /// deterministic winner when multiple rows share the same `refreshed_at`.
+    /// Provider is intentionally ignored. A row with a `storage_key` wins over one without
+    /// (a provider row a lazy upload wrote is newer than the `Generated` row that holds the
+    /// bytes); then the most recently refreshed; then `provider` ASC for a deterministic
+    /// winner when rows share the same `refreshed_at`.
     async fn lookup_by_document_id(
         &self,
         agent_session_id: &str,
@@ -266,7 +267,7 @@ impl AttachmentRegistry for PostgresAttachmentRegistry {
                     storage_key, origin, last_used_at
              FROM conversation_attachments
              WHERE agent_session_id = $1 AND document_id = $2
-             ORDER BY refreshed_at DESC, provider ASC
+             ORDER BY (storage_key IS NULL), refreshed_at DESC, provider ASC
              LIMIT 1",
         )
         .bind(agent_session_id)
@@ -505,6 +506,53 @@ mod tests {
         let row = got.unwrap();
         assert_eq!(row.storage_key.as_deref(), Some("sk-1"));
         assert_eq!(row.origin.as_deref(), Some("user_upload"));
+    }
+
+    #[ignore = "requires DATABASE_URL — run with `cargo test -- --ignored`"]
+    #[tokio::test]
+    async fn lookup_by_document_id_prefers_the_row_that_holds_the_bytes_pg() {
+        // Same case as the SQLite test: a `Generated` row with the key and a
+        // newer provider row without one. The id resolves to the key.
+        let reg = make_registry().await;
+        let sid = format!("test_sess_{}", uuid::Uuid::new_v4());
+        for (provider, file_id, storage_key) in [
+            (ProviderKind::Generated, "sk-img", Some("sk-img")),
+            (ProviderKind::OpenAi, "file-abc", None),
+        ] {
+            reg.upsert(UpsertAttachmentInput {
+                agent_session_id: sid.clone(),
+                document_id: "img-1".to_string(),
+                provider,
+                provider_file_id: file_id.to_string(),
+                mime_type: "image/png".to_string(),
+                filename: "img.png".to_string(),
+                size_bytes: Some(100),
+                label: None,
+                description: None,
+                source: AttachmentSource::Path("sk-img".to_string()),
+                storage_key: storage_key.map(String::from),
+                origin: None,
+            })
+            .await
+            .unwrap();
+        }
+        sqlx::query(
+            "UPDATE conversation_attachments
+                SET refreshed_at = NOW() - INTERVAL '1 hour'
+              WHERE agent_session_id = $1 AND provider = 'generated'",
+        )
+        .bind(&sid)
+        .execute(&*reg.pool)
+        .await
+        .unwrap();
+
+        let got = reg
+            .lookup_by_document_id(&sid, "img-1")
+            .await
+            .unwrap()
+            .expect("row present");
+        assert_eq!(got.storage_key.as_deref(), Some("sk-img"));
+        assert_eq!(got.provider, ProviderKind::Generated);
     }
 
     #[ignore = "requires DATABASE_URL — run with `cargo test -- --ignored`"]

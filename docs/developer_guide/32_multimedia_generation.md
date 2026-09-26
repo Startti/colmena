@@ -350,12 +350,19 @@ Patrón idéntico al de attachments uploaded por el usuario (ver [`31_load_attac
    lookup(provider=Generated) → row found →
    storage.read(storage_key) → bytes →
    file_provider.upload_streaming(bytes) → provider_file_id en Files API del provider →
-   registry.upsert con (provider=current, provider_file_id=nuevo)
+   registry.upsert con (provider=current, provider_file_id=nuevo,
+                        storage_key=el de la fila Generated)
 5. AgentService inyecta synthetic user message con FileData::Uploaded
 6. Siguiente turn: LLM "ve" la imagen vía vision multimodal
 ```
 
 Esto se llama **cross-provider lazy upload**. Si generaste con OpenAI y después cambias a Anthropic en otro turn, la primera vez que `load_attachment` se llame desde Anthropic, el bytes se uploadea a Anthropic Files API y la fila se persiste para que sucesivas calls hagan fast path.
+
+Después de mirarla, la imagen se sigue pudiendo reenviar o editar con
+`$attachment:<document_id>`: la fila nueva guarda el mismo `storage_key`, y la búsqueda
+por `document_id` prefiere una fila con `storage_key` a una sin él, aunque la sin clave sea
+más nueva (las filas que escribieron versiones anteriores no la guardaban;
+CHANGELOG 2026-09 §112).
 
 ### 2. Editar una imagen generada — `image_edit` chaining
 

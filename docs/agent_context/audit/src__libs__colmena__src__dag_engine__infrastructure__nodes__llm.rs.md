@@ -72,7 +72,7 @@
 
 - `impl LoadAttachmentResolver for AttachmentResolverImpl` — Async resolve method:
   - Looks up attachment by (agent_session_id, document_id) for current provider
-  - Falls back to Generated provider row → cross-provider lazy upload if target provider row missing
+  - Falls back to Generated provider row → cross-provider lazy upload if target provider row missing; the provider row it writes keeps the Generated row's storage_key
   - Handles stale provider_file_id recovery (re-uploads from recoverable sources after 24h)
   - Serves text attachments from OutputStorageRepository (no provider file_id needed)
   - Touches last_used_at for GC staleness tracking (best-effort)
@@ -84,7 +84,7 @@
 - `persist_attachment_bytes_tests` (5 async tests) — Tests byte persistence from inline/signed-URL sources, storage errors, precedence rules
 - `files_parser_tests` (7 tests) — Tests file JSON parsing: base64 data, size limits, signed URLs, data/URL precedence, legacy compat
 - `find_pending_tool_call_tests` (5 tests) — Tests tool call resume detection: unmatched calls, resolved calls, multiple messages, empty history, multiple calls per message
-- `resolver_tests` (5 async tests) — Tests AttachmentResolverImpl: re-upload on expiry, unknown documents, missing storage on Generated rows, text-from-storage fallback, Step-3 text persistence
+- `resolver_tests` (8 async tests) — Tests AttachmentResolverImpl: re-upload on expiry, unknown documents, missing storage on Generated rows, text-from-storage fallback, Step-3 text persistence, `$attachment:<id>` still streaming the bytes after a lazy provider upload
 
 ## File-level notes
 
