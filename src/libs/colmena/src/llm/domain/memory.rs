@@ -65,8 +65,21 @@ pub const MAX_LISTED_NODE_ACTIVITY: i64 = 100;
 /// root-level caller, `<caller>/tool/<name>…` from a caller inside a
 /// tool-invoked child, whose own path starts with `tool/`. Every rule that
 /// builds or recognizes those keys reads it from here: the key builder and
-/// its nested-caller check (`memory_node_path`).
+/// its nested-caller check (`memory_node_path`), [`is_nested_tool_memory`],
+/// and the `NOT LIKE` pattern of the SQL backends' `list_node_activity`.
+/// Those put it in the pattern unescaped, so it holds no LIKE metacharacter
+/// (`%`, `_`, `\`), and no `/`, being one segment.
 pub const TOOL_MEMORY_SEGMENT: &str = "tool";
+
+/// Whether a `node_id` listed under a thread prefix is the memory of a tool
+/// called from inside that thread rather than the thread's own conversation.
+/// `rest` is the `node_id` after the prefix. A caller inside a tool-invoked
+/// child keys its tools under its own path (`<caller>/tool/<name>…`), so
+/// such rows hold a `/tool/` segment ([`TOOL_MEMORY_SEGMENT`]). Known edge:
+/// a child node whose id is literally `tool` also holds one.
+pub fn is_nested_tool_memory(rest: &str) -> bool {
+    rest.contains(&format!("/{TOOL_MEMORY_SEGMENT}/"))
+}
 
 /// Per-`node_id` activity summary for thread enumeration (`list_threads`).
 #[derive(Debug, Clone)]
@@ -126,8 +139,10 @@ pub trait ConversationRepository: Send + Sync {
     }
 
     /// List per-`node_id` activity for every `node_id` starting with `node_id_prefix`,
-    /// keyed by `keying` (("agent_session_id"|"session_id", value)). Backends override;
-    /// the default returns empty so non-DB stubs stay valid.
+    /// keyed by `keying` (("agent_session_id"|"session_id", value)), leaving out
+    /// the memory of tools called from inside a listed thread
+    /// ([`is_nested_tool_memory`]) before the [`MAX_LISTED_NODE_ACTIVITY`] cap.
+    /// Backends override; the default returns empty so non-DB stubs stay valid.
     async fn list_node_activity(
         &self,
         keying: (&str, &str),
@@ -160,5 +175,12 @@ mod tests {
             node_id: NodeIdPath("n".into()),
         };
         assert_eq!(key.keying(), ("session_id", "sess_y"));
+    }
+
+    /// The SQL backends put the segment in a LIKE pattern unescaped.
+    #[test]
+    fn the_tool_memory_segment_is_one_segment_with_no_like_metacharacter() {
+        assert!(!TOOL_MEMORY_SEGMENT.is_empty());
+        assert!(!TOOL_MEMORY_SEGMENT.contains(['%', '_', '\\', '/']));
     }
 }

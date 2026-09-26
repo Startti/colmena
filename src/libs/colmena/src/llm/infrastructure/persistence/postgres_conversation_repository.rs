@@ -1,7 +1,7 @@
 use super::hydration::hydrate_message;
 use crate::llm::domain::{
     Conversation, ConversationKey, ConversationRepository, LlmError, LlmMessage, MessageRole,
-    NodeActivity, StoredMessage, MAX_LISTED_NODE_ACTIVITY,
+    NodeActivity, StoredMessage, MAX_LISTED_NODE_ACTIVITY, TOOL_MEMORY_SEGMENT,
 };
 
 use async_trait::async_trait;
@@ -193,6 +193,7 @@ impl ConversationRepository for PostgresConversationRepository {
                        ORDER BY h2.created_at ASC, h2.id ASC LIMIT 1) AS opening \
              FROM llm_node_history h1 \
              WHERE h1.{col} = $1 AND h1.node_id LIKE $2 ESCAPE '\\' \
+               AND h1.node_id NOT LIKE $4 ESCAPE '\\' \
              GROUP BY h1.node_id \
              ORDER BY max(h1.created_at) DESC \
              LIMIT $3"
@@ -205,10 +206,14 @@ impl ConversationRepository for PostgresConversationRepository {
             .replace('%', "\\%")
             .replace('_', "\\_");
         let like = format!("{}%", escaped_prefix);
+        // A tool called from inside a listed thread (`is_nested_tool_memory`).
+        // The segment needs no escaping: it holds no LIKE metacharacter.
+        let nested = format!("{escaped_prefix}%/{TOOL_MEMORY_SEGMENT}/%");
         let rows = sqlx::query(&sql)
             .bind(val)
             .bind(&like)
             .bind(MAX_LISTED_NODE_ACTIVITY)
+            .bind(&nested)
             .fetch_all(&self.pool)
             .await
             .map_err(|e| LlmError::RequestFailed {
@@ -321,5 +326,34 @@ mod summary_tests {
 
         repo.delete(&alfa).await.unwrap();
         repo.delete(&beta).await.unwrap();
+    }
+    /// A tool called from inside a listed thread keys under it
+    /// (`<thread path>/tool/<name>…`). That is another caller's memory: it
+    /// is left out in the query, before the row cap.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL — run with `cargo test -- --ignored`"]
+    async fn pg_list_node_activity_leaves_out_tools_called_inside_a_thread() {
+        let url = std::env::var("DATABASE_URL").unwrap();
+        let repo = PostgresConversationRepository::new(sqlx::PgPool::connect(&url).await.unwrap());
+        let agent = "pg_nested_tool_rows_001";
+        let nodes = [
+            "tool/t/alfa/keeper",
+            "tool/t/alfa/keeper/tool/z",
+            "tool/t/alfa/tool/z/b",
+        ];
+        for node in nodes {
+            repo.delete(&node_key(agent, node)).await.unwrap();
+            let msg = LlmMessage::user("hola".into()).unwrap();
+            repo.add_message(&node_key(agent, node), msg).await.unwrap();
+        }
+        let rows = repo
+            .list_node_activity(("agent_session_id", agent), "tool/t/")
+            .await
+            .unwrap();
+        let ids: Vec<&str> = rows.iter().map(|r| r.node_id.as_str()).collect();
+        assert_eq!(ids, vec!["tool/t/alfa/keeper"]);
+        for node in nodes {
+            repo.delete(&node_key(agent, node)).await.unwrap();
+        }
     }
 }

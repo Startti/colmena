@@ -1,6 +1,6 @@
 use crate::llm::domain::{
-    Conversation, ConversationKey, ConversationRepository, LlmError, LlmMessage, MessageRole,
-    NodeActivity, StoredMessage,
+    is_nested_tool_memory, Conversation, ConversationKey, ConversationRepository, LlmError,
+    LlmMessage, MessageRole, NodeActivity, StoredMessage,
 };
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -100,7 +100,10 @@ impl ConversationRepository for InMemoryConversationRepository {
         let map = self.inner.lock().unwrap();
         let mut out = Vec::new();
         for ((id, node_id), msgs) in map.iter() {
-            if id != val || !node_id.starts_with(node_id_prefix) {
+            let Some(rest) = node_id.strip_prefix(node_id_prefix) else {
+                continue;
+            };
+            if id != val || is_nested_tool_memory(rest) {
                 continue;
             }
             let opening = msgs
@@ -243,5 +246,54 @@ mod tests {
             .unwrap();
         assert_eq!(alfa.message_count, 2);
         assert_eq!(alfa.opening.as_deref(), Some("abrir alfa"));
+    }
+    /// A tool called from inside a listed thread keys under it
+    /// (`<thread path>/tool/<name>…`): another caller's memory, left out.
+    #[tokio::test]
+    async fn list_node_activity_leaves_out_tools_called_inside_a_thread() {
+        let repo = InMemoryConversationRepository::new();
+        for node in [
+            "tool/archivador/alfa/keeper",
+            "tool/archivador/alfa/keeper/tool/z",
+            "tool/archivador/alfa/tool/z/b",
+        ] {
+            let msg = LlmMessage::user("hola".into()).unwrap();
+            repo.add_message(&k(Some("agent-1"), "s", node), msg)
+                .await
+                .unwrap();
+        }
+        let rows = repo
+            .list_node_activity(("agent_session_id", "agent-1"), "tool/archivador/")
+            .await
+            .unwrap();
+        let ids: Vec<&str> = rows.iter().map(|r| r.node_id.as_str()).collect();
+        assert_eq!(ids, vec!["tool/archivador/alfa/keeper"]);
+    }
+
+    /// The same one level down: under a nested caller's prefix
+    /// (`<caller>/tool/<name>/`), the tools called inside its own threads are
+    /// left out.
+    #[tokio::test]
+    async fn list_node_activity_leaves_out_tools_called_inside_a_nested_callers_thread() {
+        let repo = InMemoryConversationRepository::new();
+        for node in [
+            "tool/Y/u/agent/tool/archivador/gamma/keeper",
+            "tool/Y/u/agent/tool/archivador/gamma/keeper/tool/archivador/omega/keeper",
+            "tool/Y/u/agent/tool/archivador/gamma/tool/z",
+        ] {
+            let msg = LlmMessage::user("hola".into()).unwrap();
+            repo.add_message(&k(Some("agent-1"), "s", node), msg)
+                .await
+                .unwrap();
+        }
+        let rows = repo
+            .list_node_activity(
+                ("agent_session_id", "agent-1"),
+                "tool/Y/u/agent/tool/archivador/",
+            )
+            .await
+            .unwrap();
+        let ids: Vec<&str> = rows.iter().map(|r| r.node_id.as_str()).collect();
+        assert_eq!(ids, vec!["tool/Y/u/agent/tool/archivador/gamma/keeper"]);
     }
 }

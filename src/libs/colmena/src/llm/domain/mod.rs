@@ -40,8 +40,9 @@ pub use llm_repository::{LlmRepository, LlmStream};
 pub use llm_request::LlmRequest;
 pub use llm_response::{LlmResponse, LlmStreamChunk, LlmStreamPart, SuspendInfo, ToolCallChunk};
 pub use memory::{
-    AgentSessionId, Conversation, ConversationKey, ConversationRepository, NodeActivity,
-    NodeIdPath, SessionId, StoredMessage, MAX_LISTED_NODE_ACTIVITY, TOOL_MEMORY_SEGMENT,
+    is_nested_tool_memory, AgentSessionId, Conversation, ConversationKey, ConversationRepository,
+    NodeActivity, NodeIdPath, SessionId, StoredMessage, MAX_LISTED_NODE_ACTIVITY,
+    TOOL_MEMORY_SEGMENT,
 };
 pub use message_summarizer::MessageSummarizer;
 pub use signed_url_fetcher::SignedUrlFetcher;
