@@ -88,6 +88,15 @@ pub trait ExecutableNode: Send + Sync {
         None
     }
 
+    /// Inputs only the graph's author may set: from the node's own `config`,
+    /// or through an edge that names the field (`to: "<node>.<field>"`).
+    /// The engine never fills them from an upstream object flattened by an
+    /// edge without a field, nor from global state — both can carry a
+    /// webhook payload or a model's output.
+    fn author_owned_inputs(&self) -> &'static [&'static str] {
+        &[]
+    }
+
     /// Optional: return a reference to self as [`InitializableNode`] so the
     /// tool executor can call `initialize()` to enrich the tool description
     /// with database schema / capability context before the first LLM turn.

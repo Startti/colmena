@@ -4,7 +4,9 @@
 //! Configure via `config`: `base_url`, `endpoint`, `method`, `headers`, `query_params`,
 //! `body`, `bearer_token`, `authorization`. `config` string values support `${ENV_VAR}`
 //! resolution; values arriving over edges never do (they may be a webhook payload or a
-//! model's output). Input edges override config values.
+//! model's output). Input edges override config values, except that `base_url`, `method`,
+//! `headers`, `bearer_token` and `authorization` only come over an edge that names them
+//! (`to: "<node>.base_url"`) — see [`ExecutableNode::author_owned_inputs`].
 //!
 //! ## As an LLM tool (via `tool_configurations`)
 //! When invoked by `DagToolExecutor`, extra non-reserved input keys with primitive values
@@ -1222,6 +1224,19 @@ impl ExecutableNode for HttpNode {
     /// Human-readable description of this node type, used in LLM tool definitions.
     fn description(&self) -> Option<&str> {
         Some("Make HTTP requests to external APIs. Supports GET, POST, PUT, DELETE methods with custom headers and query parameters.")
+    }
+
+    /// Where the request goes, how, and with which credentials: author-set
+    /// fields are config-only unless an edge names them.
+    /// `endpoint`, `body` and query values stay data: they cannot change the host.
+    fn author_owned_inputs(&self) -> &'static [&'static str] {
+        &[
+            "base_url",
+            "method",
+            "headers",
+            "bearer_token",
+            "authorization",
+        ]
     }
 
     /// The default output port is `body` — the parsed JSON response body.

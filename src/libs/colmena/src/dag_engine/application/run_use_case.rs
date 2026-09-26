@@ -660,8 +660,13 @@ impl DagRunUseCase {
                 // InputNode with an empty config outputs `{}` and build_inputs_for assigns
                 // that empty object to a default_input field (e.g. "prompt"), which would
                 // otherwise block injection of the real value from global state.
+                // A child's global state is its parent's inputs (a model's tool
+                // arguments among them), so it never fills an author-owned input.
                 if let Some(obj) = global_shared_state.as_object() {
                     for (k, v) in obj {
+                        if node_impl.author_owned_inputs().contains(&k.as_str()) {
+                            continue;
+                        }
                         let should_inject = match inputs.get(k) {
                             None => true,
                             Some(Value::Null) => true,
@@ -1378,6 +1383,12 @@ impl DagRunUseCase {
         let incoming_edges = all_edges
             .iter()
             .filter(|edge| edge.to.starts_with(current_node_id));
+        let author_owned = graph
+            .nodes
+            .get(current_node_id)
+            .and_then(|cfg| self.registry.get_node(&cfg.node_type))
+            .map(|node| node.author_owned_inputs())
+            .unwrap_or(&[]);
 
         for edge in incoming_edges {
             let parts_to: Vec<&str> = edge.to.splitn(2, '.').collect();
@@ -1471,9 +1482,12 @@ impl DagRunUseCase {
                 // If no default_input, try auto-flattening as last resort
                 if !inserted {
                     if let Some(obj) = value_to_pass.as_object() {
-                        // Object — merge all its keys
+                        // Object — merge all its keys, except the ones only the
+                        // author may set (see `author_owned_inputs`).
                         for (k, v) in obj {
-                            inputs.insert(k.clone(), v.clone());
+                            if !author_owned.contains(&k.as_str()) {
+                                inputs.insert(k.clone(), v.clone());
+                            }
                         }
                     } else {
                         // Non-object — use source node ID as key
@@ -3400,5 +3414,46 @@ mod graph_http_payload_tests {
             Some("${COLMENA_P4_TEST_EXPLICIT}")
         );
         std::env::remove_var("COLMENA_P4_TEST_EXPLICIT");
+    }
+
+    #[tokio::test]
+    async fn a_flattened_payload_cannot_redirect_the_request_nor_change_its_method() {
+        std::env::set_var("COLMENA_P4_TEST_TOKEN_B", "author-token-b-test-only");
+        let (author, other) = (server().await, server().await);
+        run(
+            json!({ "base_url": other.uri(), "method": "DELETE" }),
+            &author,
+            json!({ "bearer_token": "${COLMENA_P4_TEST_TOKEN_B}" }),
+            json!([{ "from": "hook", "to": "call" }]),
+            json!({}),
+        )
+        .await;
+
+        assert!(
+            other.received_requests().await.unwrap().is_empty(),
+            "a flattened base_url replaced the author's"
+        );
+        let req = only_request(&author).await;
+        assert_eq!(req.method.as_str(), "GET", "a flattened method replaced the author's");
+        assert_eq!(bearer(&req), "Bearer author-token-b-test-only");
+        std::env::remove_var("COLMENA_P4_TEST_TOKEN_B");
+    }
+
+    /// A child's global state is its parent's inputs — a model's tool arguments among them.
+    #[tokio::test]
+    async fn global_state_cannot_redirect_the_request() {
+        let (author, other) = (server().await, server().await);
+        let edges = json!([{ "from": "hook.none", "to": "call.none" }]);
+        run(
+            json!({ "none": 1 }),
+            &author,
+            json!({}),
+            edges,
+            json!({ "base_url": other.uri() }),
+        )
+        .await;
+
+        assert!(other.received_requests().await.unwrap().is_empty());
+        only_request(&author).await;
     }
 }

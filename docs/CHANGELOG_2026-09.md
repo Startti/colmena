@@ -5454,3 +5454,22 @@ header de `config` expandido; y sin clave nada de `inputs` se expande (también 
 (o en una fila de `for_each` fuera de sus `fixed`) ahora lo manda literal: el lugar de un
 secreto es `config` o un `fixed`. Ninguno en `tests/graphs`.
 **Estado.** done.
+
+## 102. Endurecimiento: los campos de destino y credenciales de `http_request` son del autor
+
+**Qué cambia.** `ExecutableNode::author_owned_inputs()` (dominio, vacío por defecto) nombra
+los campos que solo pone el autor: en `config`, o con un edge que nombra el campo
+(`to: "n.base_url"`). `http_request` declara `base_url`, `method`, `headers`, `bearer_token`
+y `authorization`. El auto-flatten de un edge sin puerto y el relleno desde el estado global
+los saltean, así que un objeto que llega como datos no cambia el destino, el método ni las
+credenciales que arma el autor. `endpoint`, `body` y los query params siguen siendo datos
+(no cambian el host: `base` + `/` + `endpoint`).
+
+**Tests.** En `graph_http_payload_tests`: un `base_url`/`method` aplanados no reemplazan los
+de `config` (el segundo mock no recibe nada; el autor recibe GET con su bearer); el estado
+global tampoco los reemplaza. El edge que nombra el campo (§101) sigue ganando.
+
+**ADP.** Sin cambios de API. Un grafo que mandaba `base_url`/`method`/`headers`/credenciales
+por un edge sin puerto o por el estado global debe nombrar el campo en el edge. Ninguno en
+`tests/graphs` (`dynamic_http.json` aplana `endpoint`, que sigue llegando).
+**Estado.** done.

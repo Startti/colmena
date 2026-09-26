@@ -426,6 +426,12 @@ resuelve si un dispatcher marcó su JSON Pointer como confiable (ver
 por un edge o del estado global— **nada** de `inputs` resuelve (CHANGELOG
 2026-09 §107). Un valor sin marca sale literal, sin error aunque falte la var.
 
+En modo grafo, además, `base_url`, `method`, `headers`, `bearer_token` y
+`authorization` son **del autor**: salen de `config` o de un edge que nombra el
+campo (`"to": "<nodo>.base_url"`), nunca de un objeto aplanado por un edge sin
+puerto ni del estado global. `endpoint`, `body` y los query params siguen
+siendo datos que un edge puede traer (§102).
+
 E2E: [`tests/graphs/security/tool_env_provenance_e2e.json`](../../tests/graphs/security/tool_env_provenance_e2e.json).
 
 ---
