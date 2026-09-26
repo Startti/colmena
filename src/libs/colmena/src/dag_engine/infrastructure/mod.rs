@@ -5,6 +5,7 @@ pub mod node_schema_merge;
 pub mod nodes;
 pub mod persistence;
 pub mod pool_registry;
+pub mod python_exec;
 pub mod registry;
 pub mod sql_ast;
 pub mod sql_function_registry;
