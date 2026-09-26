@@ -9,8 +9,8 @@
 //! `Authorization` header: a signed URL carries its signature in the query;
 //! the only headers a caller adds are conditional-GET ones.
 //!
-//! [`DialGuard`] is that address rule on its own: `http_request` applies it
-//! to a destination that comes from data.
+//! [`DialGuard`] is that address rule on its own: `http_request` and
+//! `socketio_request` apply it to a destination that comes from data.
 
 use std::error::Error;
 use std::net::{IpAddr, SocketAddr};
@@ -87,6 +87,17 @@ impl DialGuard {
                 host = url.host_str().unwrap_or_default(), "refused to dial this destination");
         }
         refused
+    }
+
+    /// [`Self::refuses`], and for a name, whether an answer resolved now is
+    /// not dialable: for a client that resolves on its own.
+    pub(crate) async fn refuses_now(&self, url: &Url) -> bool {
+        match url.host() {
+            Some(url::Host::Domain(d)) if self.exempt.as_deref() != Some(d) => {
+                matches!(resolve_checked(d.to_string(), self.ok).await, Err(e) if e.is::<DialRefused>())
+            }
+            _ => self.refuses(url),
+        }
     }
 
     /// `builder` resolving through the guard, with no proxy (a proxy

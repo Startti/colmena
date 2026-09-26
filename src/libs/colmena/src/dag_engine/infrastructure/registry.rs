@@ -129,7 +129,10 @@ impl HashMapNodeRegistry {
             nodes.insert("http_request".to_string(), Arc::new(http_node));
 
             // --- Registrar Nodos Socket.IO ---
-            nodes.insert("socketio_request".to_string(), Arc::new(SocketIoNode));
+            nodes.insert(
+                "socketio_request".to_string(),
+                Arc::new(SocketIoNode::default()),
+            );
 
             // --- Register SQL Node ---
             nodes.insert(
