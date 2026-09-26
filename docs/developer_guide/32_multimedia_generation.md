@@ -294,7 +294,7 @@ if let Err(e) = reg.upsert(upsert).await {
 
 `google_project_id` y `google_location` son campos del autor, como `api_key`: un edge sin
 campo, el estado global o un argumento que la tool no ofrece nunca los fijan (CHANGELOG
-2026-09 §119). `image_edit` no tiene esta ruta: solo implementa `openai`, contra un host fijo.
+2026-09 §128). `image_edit` no tiene esta ruta: solo implementa `openai`, contra un host fijo.
 
 **Output**: `{ "output": { "images": [...], "provider", "model" } }`.
 

@@ -5935,7 +5935,7 @@ expandir: la URL con variables va en `config` o en un `fixed`. Una tool `sql_que
 `connection_url` `fixed` usa `${context.*}` no recibe el esquema de la base en su descripción.
 **Estado.** done.
 
-## 119. Endurecimiento: la región y el proyecto de Vertex en `image_generation` son del autor
+## 128. Endurecimiento: la región y el proyecto de Vertex en `image_generation` son del autor
 
 **Qué cambia.** `google_project_id` y `google_location` pasan a `author_owned_inputs` de
 `image_generation`: un objeto aplanado, el estado global o un argumento que la tool no ofrece
