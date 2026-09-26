@@ -338,8 +338,7 @@ mod tests {
         assert!(matches!(r, Err(LlmError::AttachmentUrlRefused { .. })));
     }
 
-    /// Past the byte cap: refused on `Content-Length`, and a body that grows
-    /// past it ends the stream with an error.
+    /// A `Content-Length` past the byte cap is refused before the body.
     #[tokio::test]
     async fn a_body_past_the_byte_cap_is_not_read() {
         let server = MockServer::start().await;
@@ -353,16 +352,35 @@ mod tests {
             r,
             Err(LlmError::AttachmentTooLarge { limit: 1024 })
         ));
+    }
 
-        let chunks = (0..3).map(|_| Ok(Bytes::from(vec![0u8; 600])));
-        let capped: Vec<_> = futures::stream::iter(chunks)
-            .scan(Some(0), |seen, c| {
-                futures::future::ready(cap(seen, c, 1000))
-            })
-            .collect()
-            .await;
-        assert_eq!(capped.len(), 2, "the stream ends after the error");
-        assert!(capped[0].is_ok() && capped[1].is_err());
+    /// A chunked body (no `Content-Length`) that grows past the byte cap ends
+    /// the stream with one error, after at most `cap` bytes.
+    #[tokio::test]
+    async fn a_streamed_body_past_the_byte_cap_ends_in_an_error() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let _ = socket.read(&mut [0u8; 4096]).await;
+            let chunk = format!("258\r\n{}\r\n", "x".repeat(0x258));
+            let head = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n";
+            let reply = format!("{head}{chunk}{chunk}{chunk}0\r\n\r\n");
+            let _ = socket.write_all(reply.as_bytes()).await;
+        });
+        let d = SignedUrlDownloader::with_policy(any_ip, 1024);
+        let stream = d.stream(&format!("http://{addr}/f")).await.unwrap();
+        let items: Vec<_> = stream.collect().await;
+        let (last, read) = items.split_last().expect("at least the error");
+        let err = last.as_ref().expect_err("the stream ends with the error");
+        let inner = err.get_ref().and_then(|e| e.downcast_ref());
+        assert!(matches!(
+            inner,
+            Some(LlmError::AttachmentTooLarge { limit: 1024 })
+        ));
+        let read: usize = read.iter().map(|c| c.as_ref().map_or(0, |b| b.len())).sum();
+        assert!(read <= 1024 && items[..items.len() - 1].iter().all(Result::is_ok));
     }
 
     #[tokio::test]
