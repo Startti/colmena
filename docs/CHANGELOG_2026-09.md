@@ -6209,7 +6209,7 @@ producción: ADP pone los adjuntos en `config.files` de los `llm_call` de primer
 que nunca va en un worker compartido: deja leer su disco.
 **Estado.** done.
 
-## 138. La memoria de una tool, por quien la llama: la clave queda acotada a cualquier profundidad
+## 139. La memoria de una tool, por quien la llama: la clave queda acotada a cualquier profundidad
 
 **Qué cambió.** Desde el tramo 4/7 (#133), la clave de una tool `persistent` o `dynamic` que
 se llama desde dentro de un hijo cuelga del camino de quien llama, y crecía con cada nivel: hasta
