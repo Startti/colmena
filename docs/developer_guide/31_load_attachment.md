@@ -44,7 +44,10 @@ then is described below the list.
 - **Inline (base64 en `files[].data`):** los bytes se streamean al storage en el momento del registro.
 - **Signed URL (`files[].url`):** los bytes se descargan y se streamean al storage. Esta descarga, la del
   resumen automático y la de la re-subida de las 24 h usan el cliente guardado de `files[].url`
-  ([14_llm_deep_dive.md](14_llm_deep_dive.md), CHANGELOG 2026-09 §137).
+  ([14_llm_deep_dive.md](14_llm_deep_dive.md), CHANGELOG 2026-09 §137). También se guardan los
+  de una imagen que, con Anthropic u OpenAI y `DATABASE_URL`, se le pasa al modelo como URL sin
+  subirla a la Files API: se registra con `provider_file_id` vacío y `load_attachment` la sirve
+  desde storage (CHANGELOG 2026-09 §141).
 - **Generated artifact** (`image_generation` / `image_edit` / `tts`): los bytes ya
   viven en storage; el artefacto se registra automáticamente en `conversation_attachments`
   con `origin = generated_by:<tool>` y `source = Path(storage_key)`.
@@ -79,6 +82,14 @@ demás, y entre esas gana la más reciente, aunque no tenga clave: una subida nu
 bytes no se guardaron falla a la vista en vez de reenviar una clave vieja (CHANGELOG 2026-09
 §123). Un id que la sesión no registró da `NotFound` y nunca se
 lee como `storage_key` directo (CHANGELOG 2026-09 §85).
+
+**Limitación conocida.** La recuperación a las 24h (`refresh_provider_file_id`, disparada por
+`load_attachment` sobre una fila recuperable) le pone un `refreshed_at` nuevo a la fila que
+refresca sin tocarle el `storage_key`. Si esa fila es un `user_upload` sin clave (un guardado de
+bytes que falló antes, CHANGELOG 2026-09 §125) y queda como la más reciente, gana sobre una fila
+de otro provider que sí tiene clave — la democión de arriba no aplica: su `origin` es
+`user_upload`, no `NULL` — y `$attachment:<document_id>` responde `StorageKeyMissing` aunque el
+documento tenga bytes guardados en la otra fila (CHANGELOG 2026-09 §123).
 
 Background y decisiones:
 - Spec: [`docs/superpowers/specs/2026-05-25-attachment-uniform-resolution-design.md`](../superpowers/specs/2026-05-25-attachment-uniform-resolution-design.md)
@@ -431,8 +442,9 @@ PRIMARY KEY (agent_session_id, document_id, provider)
 - `tests/graphs/agents/load_attachment_opt_out.json` — verifica que `attachments_enabled: false` oculta la tool
 - `tests/graphs/agents/load_attachment_auto_summary.json` — auto-summary con Gemini Flash + Postgres (no se pasa `description` para forzar la generación)
 - `tests/graphs/agents/files_skipped_entry_keeps_ids.json` — `files: [bad, good]`: la entrada ilegible se salta y `good` queda registrado como `doc-good` (este usa `openai` / `gpt-4.1-mini`)
+- `tests/graphs/agents/files_signed_url_image_registered.json` — una imagen por `url` a un modelo de Anthropic con `DATABASE_URL` queda registrada como `img-url` con su `storage_key` (usa `anthropic` / `claude-haiku-4-5-20251001` y una URL local; ver su `$comment`)
 
-Salvo el último, usan `google` / `gemini-2.5-flash` con `${DATABASE_URL}` para memoria Postgres. Los URLs `$REPLACE_WITH_SIGNED_URL` son placeholders — sustituí por una signed URL real (GCS) antes de correr.
+Salvo los dos últimos, usan `google` / `gemini-2.5-flash` con `${DATABASE_URL}` para memoria Postgres. Los URLs `$REPLACE_WITH_SIGNED_URL` son placeholders — sustituí por una signed URL real (GCS) antes de correr.
 
 ---
 

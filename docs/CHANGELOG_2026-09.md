@@ -5818,6 +5818,13 @@ Anthropic contra un Files API simulado, y después `$attachment:img-1` da los mi
 (antes: `StorageKeyMissing`); la fila de Anthropic guarda el `storage_key` (antes: `None`).
 Sin corrida E2E con un modelo real: este worktree no tiene credenciales de proveedores.
 
+**Limitación (review, documentada, no se toca).** `refresh_provider_file_id` (la recuperación a
+las 24h) le pone un `refreshed_at` nuevo a la fila que refresca sin tocarle el `storage_key`. Si
+esa fila es un `user_upload` sin clave (necesita un guardado de bytes fallido antes, §125) y queda
+como la más reciente, gana sobre una fila de otro provider con clave — su `origin` no es `NULL`,
+así que la democión de arriba no la alcanza — y `$attachment:<document_id>` responde
+`StorageKeyMissing` aunque el documento tenga bytes en la otra fila. Documentado en guide 31.
+
 **ADP.** Sin cambios de API ni de esquema. **Estado.** done.
 
 ## 124. Endurecimiento: las credenciales del autor en `http_request` se cuentan por hoja, y el motor marca los secretos de `config`
@@ -6270,3 +6277,40 @@ recibe requests; una pasada del tope es `SpecTooLarge`. `multipart_http_test.rs`
 **ADP.** Sin cambios de API: las URLs firmadas de GCS son públicas. Un entorno local que sirva
 imágenes, archivos o specs desde `localhost` necesita `COLMENA_ATTACHMENT_ALLOW_PRIVATE_HOSTS=1`.
 **Estado.** done.
+
+## 141. Fix: una imagen por URL a Anthropic u OpenAI entra al catálogo
+
+**Qué cambia.** Con `DATABASE_URL` (el camino con cache de `LlmCallUseCase::resolve_files`), una
+imagen de `files[]` con `url` para un modelo de Anthropic u OpenAI queda como URL: el adapter se
+la pasa al modelo y no se sube a la Files API. El Step 3 del `llm_call` solo registraba archivos
+subidos o texto inline, así que esa imagen caía en la rama de respaldo que el código daba por
+inalcanzable (`attachment.registration_skipped_unuploaded`): no entraba al catálogo,
+`load_attachment` no la encontraba y `$attachment:<id>` respondía `NotFound`. Como el mensaje
+inicial no lleva archivos (Plan B), el modelo no la veía. Ahora se registra como el texto inline:
+`provider_file_id` vacío, y el Step 3 baja la URL y guarda los bytes (`persist_attachment_bytes`
+ya bajaba las URL, con el cliente guardado de §137); `load_attachment` la sirve desde storage
+(base64) y `$attachment:<id>` reenvía los bytes. Si guardar los bytes falla, no se registra, igual
+que el texto inline. La decisión vive en `registration_file_id`.
+
+**Tests.** `llm.rs::resolver_tests::step3_registers_an_image_left_as_a_signed_url_with_its_bytes`:
+una imagen por `url` (servidor simulado), como `resolve_files` la deja con Anthropic u OpenAI
+(`SignedUrl`), pasa por el Step 3 (`registration_file_id`, `persist_attachment_bytes`, la
+compuerta, el upsert); después `load_attachment` desde Anthropic devuelve sus bytes y
+`$attachment:img-1` los reenvía (antes: `registration_file_id` daba `None`). Con un cliente
+guardado que rechaza el host (loopback) no se guarda nada, la imagen no se registra y el servidor
+no recibe el pedido. E2E con el motor
+(`tests/graphs/agents/files_signed_url_image_registered.json`, Postgres local,
+`COLMENA_LOCAL=true`, la imagen servida en `127.0.0.1`): antes del fix,
+`attachment.registration_skipped_unuploaded`, cero filas y la URL nunca pedida; después, con
+`COLMENA_ATTACHMENT_ALLOW_PRIVATE_HOSTS=1`, `attachment.registered` con `stored=true`, un solo
+`GET /photo.png` y la fila `img-url | anthropic | '' | <storage_key> | signed_url | user_upload |
+Photo`, con los bytes guardados iguales a la imagen (sha256); sin esa variable, el cliente
+rechaza la dirección («destination is not a public address»), `attachment.registration_skipped`,
+cero filas y ningún pedido al servidor. La llamada al modelo no se hizo (sin credenciales de
+proveedores; `COLMENA_PREFLIGHT_HEALTH=off` y un `ANTHROPIC_BASE_URL` cerrado): el registro
+ocurre antes. El grafo pasa `dag_engine lint` sin hallazgos y sube el corpus de
+`tests/corpus_noise.rs` de 335 a 336 archivos.
+
+**ADP.** Sin cambios de API. Colmena ahora pide la URL de esas imágenes para guardar los bytes
+(antes solo la pedía el proveedor del modelo), con el cliente guardado de §137: un entorno local
+que las sirva desde `localhost` necesita `COLMENA_ATTACHMENT_ALLOW_PRIVATE_HOSTS=1`. **Estado.** done.

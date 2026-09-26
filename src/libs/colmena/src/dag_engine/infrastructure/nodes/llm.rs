@@ -1154,12 +1154,14 @@ impl crate::llm::application::LoadAttachmentResolver for AttachmentResolverImpl 
             );
         }
 
-        // Text-like inline attachments are stored bytes-only: they were never
-        // uploaded to the provider Files API (no provider_file_id), so we can't
-        // hand back a FileSource::Uploaded. Instead read the bytes back from
+        // Text-like inline attachments (and images passed as a signed URL)
+        // are stored bytes-only: they were never uploaded to the provider
+        // Files API (no provider_file_id), so we can't hand back a
+        // FileSource::Uploaded. Instead read the bytes back from
         // OutputStorageRepository and return them as InlineBytes — the adapter
-        // sends text inline (data:/input_file part) which works without any
-        // provider file. This is the load_attachment path for the proxy case.
+        // sends them inline (data:/input_file part; base64 for an image) which
+        // works without any provider file. This is the load_attachment path
+        // for the proxy case.
         if att.provider_file_id.is_empty() {
             let storage_key = att.storage_key.as_deref().ok_or_else(|| {
                 format!(
@@ -1849,7 +1851,6 @@ impl ExecutableNode for LlmNode {
             (attachment_registry.as_ref(), agent_session_id_str.as_ref())
         {
             use crate::llm::domain::attachments::{AttachmentSource, UpsertAttachmentInput};
-            use crate::llm::domain::{is_text_like, FileSource};
 
             let raw_entries: Vec<serde_json::Value> = inputs
                 .get("files")
@@ -1867,35 +1868,21 @@ impl ExecutableNode for LlmNode {
                     source,
                 } = registration;
 
-                let provider_file_id = match &file.source {
-                    FileSource::Uploaded(r) => r.provider_file_id.clone(),
-                    // Text-like inline attachments are deliberately NOT uploaded
-                    // to the provider Files API (see is_text_like / resolve_one).
-                    // They still get a catalog row + storage bytes so that
-                    // load_attachment can serve them on later turns. The
-                    // provider_file_id is left empty — the load_attachment
-                    // resolver detects the empty id and serves the bytes inline
-                    // from OutputStorageRepository instead of via file_id.
-                    FileSource::InlineBytes { .. } if is_text_like(&file.mime_type) => {
-                        String::new()
-                    }
-                    // A non-text file that is still not Uploaded here means
-                    // resolution neither uploaded it nor aborted — with #200 the
-                    // no-cache path now fails closed, so this should be
-                    // unreachable. Keep the skip as a backstop but make the drop
-                    // auditable instead of silent.
-                    _ => {
-                        tracing::warn!(
-                            target: "colmena::attachment",
-                            event = "attachment.registration_skipped_unuploaded",
-                            agent_session_id = %sid,
-                            mime = %file.mime_type,
-                            filename = %file.filename,
-                            "skipping catalog registration for '{}': the file was never uploaded to the provider Files API; the model will not see it this turn",
-                            file.filename
-                        );
-                        continue;
-                    }
+                // A file registration_file_id refuses means resolution
+                // neither uploaded it nor aborted — with #200 the no-cache
+                // path fails closed, so this should be unreachable. Keep the
+                // skip as a backstop but make the drop auditable.
+                let Some(provider_file_id) = registration_file_id(file) else {
+                    tracing::warn!(
+                        target: "colmena::attachment",
+                        event = "attachment.registration_skipped_unuploaded",
+                        agent_session_id = %sid,
+                        mime = %file.mime_type,
+                        filename = %file.filename,
+                        "skipping catalog registration for '{}': the file was never uploaded to the provider Files API; the model will not see it this turn",
+                        file.filename
+                    );
+                    continue;
                 };
 
                 // Plan A — Foundation: persist bytes uniformly to
@@ -1920,10 +1907,11 @@ impl ExecutableNode for LlmNode {
                     None
                 };
 
-                // Text-like inline attachments have NO provider_file_id fallback:
-                // load_attachment can only serve them via storage_key. If byte
-                // persistence failed (storage_key is None), registering the
-                // catalog row would write a permanently-unresolvable entry
+                // Text-like inline attachments (and images left as a signed
+                // URL) have NO provider_file_id fallback: load_attachment can
+                // only serve them via storage_key. If byte persistence failed
+                // (storage_key is None), registering the catalog row would
+                // write a permanently-unresolvable entry
                 // (empty provider_file_id AND no storage_key) — load_attachment
                 // would error "has no provider_file_id and no storage_key".
                 // Skip registration in that case so a transient storage hiccup
@@ -1945,7 +1933,7 @@ impl ExecutableNode for LlmNode {
                         document_id = %document_id,
                         mime = %file.mime_type,
                         filename = %file.filename,
-                        "skipping catalog registration for text attachment {}: byte persistence failed; the model will not see this document this turn",
+                        "skipping catalog registration for {}: it is served only from stored bytes and byte persistence failed; the model will not see this document this turn",
                         document_id
                     );
                     continue;
@@ -4403,19 +4391,41 @@ pub(crate) fn parse_file_entries(
 ///
 /// Decide whether a resolved attachment should be registered in the catalog.
 ///
-/// A text-like inline attachment is registered with an EMPTY `provider_file_id`
-/// (it is never uploaded to the provider Files API) and is resolvable ONLY via
-/// its `storage_key`. If byte persistence failed (`storage_key` is `None`), the
-/// row would have neither a `provider_file_id` nor a `storage_key`, so
-/// `load_attachment` could never resolve it — it would error with "has no
-/// provider_file_id and no storage_key". Registering such a row turns a
-/// transient storage hiccup into a permanently-unreadable attachment, so we
-/// skip it.
+/// A text-like inline attachment, or an image left as a signed URL, is
+/// registered with an EMPTY `provider_file_id` (it is never uploaded to the
+/// provider Files API) and is resolvable ONLY via its `storage_key`. If byte
+/// persistence failed (`storage_key` is `None`), the row would have neither a
+/// `provider_file_id` nor a `storage_key`, so `load_attachment` could never
+/// resolve it — it would error with "has no provider_file_id and no
+/// storage_key". Registering such a row turns a transient storage hiccup into
+/// a permanently-unreadable attachment, so we skip it.
 ///
 /// Binary / provider-uploaded attachments keep their real `provider_file_id`
 /// as a fallback, so they are always registered even when storage failed.
 fn should_register_attachment_row(provider_file_id: &str, storage_key: &Option<String>) -> bool {
     !(provider_file_id.is_empty() && storage_key.is_none())
+}
+
+/// The `provider_file_id` Step 3 registers `file` with, or `None` when it
+/// cannot be registered.
+fn registration_file_id(file: &crate::llm::domain::FileData) -> Option<String> {
+    use crate::llm::domain::{is_text_like, FileSource};
+    match &file.source {
+        FileSource::Uploaded(r) => Some(r.provider_file_id.clone()),
+        // Text-like inline attachments are deliberately NOT uploaded to the
+        // provider Files API (see is_text_like / resolve_one). They still get
+        // a catalog row + storage bytes so that load_attachment can serve them
+        // on later turns. The provider_file_id is left empty — the
+        // load_attachment resolver detects the empty id and serves the bytes
+        // inline from OutputStorageRepository instead of via file_id.
+        FileSource::InlineBytes { .. } if is_text_like(&file.mime_type) => Some(String::new()),
+        // With a file cache (DATABASE_URL), an image for Anthropic or OpenAI
+        // stays a signed URL: the adapter passes the URL and the model fetches
+        // it (resolve_one). It never reaches the Files API either, so it is
+        // registered the same way; Step 3 fetches the URL to store its bytes.
+        FileSource::SignedUrl(_) if file.mime_type.starts_with("image/") => Some(String::new()),
+        _ => None,
+    }
 }
 
 /// What Step 3 registers for one resolved file.
@@ -5946,6 +5956,122 @@ mod resolver_tests {
             .expect("the lazy upload persisted its row");
         assert_eq!(row.provider_file_id, "file_lazy");
         assert_eq!(row.storage_key.as_deref(), Some(key.as_str()));
+    }
+
+    /// With a file cache (`DATABASE_URL` set), `resolve_files` leaves an image
+    /// for Anthropic or OpenAI as a signed URL: the adapter hands the URL to
+    /// the model (`llm_call_use_case`'s `*_image_signed_url_skips_upload`).
+    /// Step 3 registers that file with its bytes stored, so a later
+    /// `load_attachment` and `$attachment:<id>` both read them.
+    #[tokio::test]
+    async fn step3_registers_an_image_left_as_a_signed_url_with_its_bytes() {
+        use crate::llm::application::LoadAttachmentResolver;
+        use crate::llm::domain::attachments::{
+            origin, AttachmentStreamResolver, UpsertAttachmentInput,
+        };
+        use crate::llm::domain::{AttachmentRegistry, FileSource, ProviderKind};
+        use crate::llm::infrastructure::attachments::AttachmentStreamResolverImpl;
+        use crate::llm::infrastructure::files::SignedUrlDownloader;
+        use crate::llm::infrastructure::persistence::SqliteAttachmentRegistry;
+        use crate::storage::domain::OutputStorageRepository;
+        use crate::storage::infrastructure::LocalCacheStorageAdapter;
+        use futures::TryStreamExt;
+        use std::sync::Arc;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let image = b"\x89PNG image behind a signed url".to_vec();
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/img.png"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(image.clone()))
+            .mount(&server)
+            .await;
+        let entries = serde_json::json!([{
+            "id": "img-1", "filename": "img.png", "mime_type": "image/png",
+            "url": format!("{}/img.png", server.uri())
+        }]);
+        let entries = entries.as_array().unwrap();
+        let (files, parsed) = parse_file_entries(entries, false).unwrap();
+        let file = &files[0];
+        assert!(matches!(file.source, FileSource::SignedUrl(_)));
+
+        // Step 3, as the node runs it: the bytes are fetched through the
+        // guarded attachment client. One that refuses the loopback host
+        // stores nothing, so the image is not registered.
+        let provider_file_id =
+            registration_file_id(file).expect("an image left as a signed URL is registered");
+        let registration = file_registrations(&files, entries, &parsed).remove(0);
+        let storage: Arc<dyn OutputStorageRepository> = Arc::new(LocalCacheStorageAdapter::new());
+        let refused = persist_attachment_bytes(
+            storage.as_ref(),
+            file.retained_inline_bytes.as_deref(),
+            &registration.source,
+            &SignedUrlDownloader::public_only(),
+            &file.mime_type,
+            &file.filename,
+            "agent_1",
+            &registration.document_id,
+        )
+        .await;
+        assert!(!should_register_attachment_row(&provider_file_id, &refused));
+        let storage_key = persist_attachment_bytes(
+            storage.as_ref(),
+            file.retained_inline_bytes.as_deref(),
+            &registration.source,
+            &SignedUrlDownloader::allowing_private_hosts(),
+            &file.mime_type,
+            &file.filename,
+            "agent_1",
+            &registration.document_id,
+        )
+        .await;
+        assert!(should_register_attachment_row(
+            &provider_file_id,
+            &storage_key
+        ));
+        let registry: Arc<dyn AttachmentRegistry> = Arc::new(
+            SqliteAttachmentRegistry::new("sqlite::memory:")
+                .await
+                .unwrap(),
+        );
+        registry
+            .upsert(UpsertAttachmentInput {
+                agent_session_id: "agent_1".to_string(),
+                document_id: registration.document_id,
+                provider: ProviderKind::Anthropic,
+                provider_file_id,
+                mime_type: file.mime_type.clone(),
+                filename: file.filename.clone(),
+                size_bytes: file.size_hint,
+                label: registration.label,
+                description: registration.description,
+                source: registration.source,
+                storage_key,
+                origin: Some(origin::USER_UPLOAD.to_string()),
+            })
+            .await
+            .unwrap();
+
+        // A later load_attachment from Anthropic reads the stored bytes.
+        let loader = AttachmentResolverImpl {
+            registry: registry.clone(),
+            provider: ProviderKind::Anthropic,
+            api_key: "test-key".to_string(),
+            storage: Some(storage.clone()),
+        };
+        let loaded = loader.resolve("agent_1", "img-1").await.unwrap();
+        match loaded.expect("the image loads").source {
+            FileSource::InlineBytes { bytes } => assert_eq!(bytes, image),
+            other => panic!("expected the stored bytes, got {other:?}"),
+        }
+        // `$attachment:img-1` streams them.
+        let forward = AttachmentStreamResolverImpl::new(registry, storage);
+        let stream = forward.resolve("agent_1", "img-1").await.unwrap();
+        let chunks: Vec<bytes::Bytes> = stream.stream.try_collect().await.unwrap();
+        assert_eq!(chunks.concat(), image);
+        // Only the allowed fetch reached the server.
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
     }
 }
 

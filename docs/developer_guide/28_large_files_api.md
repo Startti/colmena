@@ -74,6 +74,10 @@ Detalles importantes:
 
 - **Anthropic** rechaza `{"type": "file", "file_id": "..."}` para `image.source` — solo acepta `base64` o `url`. Para PDFs sí lo acepta, pero **requiere** el header `anthropic-beta: files-api-2025-04-14` también en la llamada de generación.
 - **OpenAI** Chat Completions requiere `image_url.url`; `file_id` para imágenes solo funciona vía Responses API. Y en Responses, `file_id` y `filename` son **mutuamente excluyentes**.
+- **Imagen por URL con Anthropic u OpenAI:** queda como URL, sin `file_id`. El Step 3 del
+  `llm_call` baja la URL, guarda los bytes y la registra en el catálogo con `provider_file_id`
+  vacío: `load_attachment` la sirve desde storage (base64) y `$attachment:<document_id>` reenvía
+  los bytes. Hasta CHANGELOG 2026-09 §141, con `DATABASE_URL` no se registraba.
 - **Gemini** resumable upload requiere chunks intermedios de tamaño **exactamente** múltiplo de 8 MB (`CHUNK_SIZE`). El último chunk puede ser de cualquier tamaño.
 
 ## Cache persistido en Postgres

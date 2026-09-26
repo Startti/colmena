@@ -30,7 +30,7 @@ pub enum AttachmentResolveError {
     /// with no local copy) and for the newest upload of an id whose bytes
     /// failed to persist (it stays readable through its provider file id).
     /// These rows cannot be re-streamed; the LLM should re-attach the document.
-    #[error("attachment registered but storage_key is null (likely pre-migration row): document_id={document_id}")]
+    #[error("attachment registered but its bytes were not stored: document_id={document_id}")]
     StorageKeyMissing { document_id: String },
 
     /// Row exists but the registry has marked it expired (TTL elapsed or
