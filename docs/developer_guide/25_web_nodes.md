@@ -475,6 +475,14 @@ Cuando el header `Content-Type` empieza con `multipart/`, el nodo `http_request`
 | `max_parts` | 10 | Cap total de partes por request. |
 | `url_download_timeout_secs` | 30 | Timeout HEAD + connect/headers del GET. |
 | `allow_http_urls` | false | Permite `http://` plano (off por seguridad). |
+| `multipart_url_fields` | — | Campos de un `body` que llega como dato en los que el nodo baja la URL (del autor). |
+
+**URLs en un `body` que llega como dato.** Si el `body` viene de `inputs` (un
+edge que lo nombra, un argumento del modelo) y no es el `fixed` de la tool, el
+nodo baja una URL solo en los campos que el autor lista en
+`multipart_url_fields`. En cualquier otro campo, un string URL se manda como
+parte de texto (no se baja) y un objeto `{ "url": … }` se rechaza con error. Un
+`body` de `config` (o `fixed`) se comporta igual que antes (CHANGELOG 2026-09 §120).
 
 ### Ejemplo — Subir archivos al KB de ADP (como LLM tool)
 

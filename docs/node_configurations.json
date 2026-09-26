@@ -915,7 +915,7 @@
 
     "http_request": {
       "name": "HTTP Request",
-      "description": "Makes HTTP requests to external APIs and returns the response. Supports GET, POST, PUT, DELETE, and PATCH methods with configurable headers, query parameters, request body, and authentication. All string values in config support '${VAR_NAME}' environment variable resolution — essential for injecting API keys and tokens securely. Input values override config values (inputs take priority), except base_url, method, headers, bearer_token and authorization: those come only from config or from an edge that names the field, never from an object flattened by an edge without a field nor from global state. When used as an LLM tool (via tool_configurations), extra non-reserved input keys are automatically added as query parameters, enabling the LLM to control request parameters dynamically. '${VAR_NAME}' resolution for an inputs-sourced value is gated by provenance, on the JSON and the multipart path: it resolves only at a pointer a dispatcher vouched for (a tool's or a for_each target's fixed value); anything else, including every value that arrives over a graph edge, is sent literally; see docs/developer_guide/25_web_nodes.md. Any string value in the body of the form '$attachment:<document_id>' (a document_id from this session's attachments catalog, resolved through the session's attachment registry; a raw storage key is rejected with 'attachment not found' and nothing is read) is replaced with 'data:<mime>;base64,...', which only helps an API that accepts data URIs. This lets agents ship generated images/audio to external endpoints without ever seeing the raw bytes. MULTIPART MODE: When the resolved Content-Type header starts with 'multipart/', the body is interpreted as a multipart form. Each top-level field's value is treated as: a URL string (HEAD-validated then streamed in), a $attachment:<document_id> string (the same catalog document_id, streamed as a file part), a plain string (text part), an array (expanded to N parts under the same field), or an explicit object with url/attachment/value + optional filename/content_type. Number and boolean values are coerced to text. Null omits the field. Limits are configurable per request.",
+      "description": "Makes HTTP requests to external APIs and returns the response. Supports GET, POST, PUT, DELETE, and PATCH methods with configurable headers, query parameters, request body, and authentication. All string values in config support '${VAR_NAME}' environment variable resolution — essential for injecting API keys and tokens securely. Input values override config values (inputs take priority), except base_url, method, headers, bearer_token and authorization: those come only from config or from an edge that names the field, never from an object flattened by an edge without a field nor from global state. When used as an LLM tool (via tool_configurations), extra non-reserved input keys are automatically added as query parameters, enabling the LLM to control request parameters dynamically. '${VAR_NAME}' resolution for an inputs-sourced value is gated by provenance, on the JSON and the multipart path: it resolves only at a pointer a dispatcher vouched for (a tool's or a for_each target's fixed value); anything else, including every value that arrives over a graph edge, is sent literally; see docs/developer_guide/25_web_nodes.md. Any string value in the body of the form '$attachment:<document_id>' (a document_id from this session's attachments catalog, resolved through the session's attachment registry; a raw storage key is rejected with 'attachment not found' and nothing is read) is replaced with 'data:<mime>;base64,...', which only helps an API that accepts data URIs. This lets agents ship generated images/audio to external endpoints without ever seeing the raw bytes. MULTIPART MODE: When the resolved Content-Type header starts with 'multipart/', the body is interpreted as a multipart form. Each top-level field's value is treated as: a URL string (HEAD-validated then streamed in; for a body that arrives as data, only in a field listed in multipart_url_fields — elsewhere it is sent as text), a $attachment:<document_id> string (the same catalog document_id, streamed as a file part), a plain string (text part), an array (expanded to N parts under the same field), or an explicit object with url/attachment/value + optional filename/content_type. Number and boolean values are coerced to text. Null omits the field. Limits are configurable per request.",
       "category": "integration",
       "config_fields": {
         "base_url": {
@@ -1034,6 +1034,13 @@
           "default": null,
           "description": "Author-set only. Credentials the author configured (bearer_token, authorization, a header other than accept/content-type/user-agent-like ones, a query param or body value with ${VAR}) are sent only to the origin of the author's base_url; this list names other hosts ('host' or 'host:port') that may receive them when the destination comes from runtime data (an edge that names base_url, an open tool field). Any other destination is refused with an error. With credentials on the request, a redirect to another origin is not followed.",
           "example": ["api.example.com"]
+        },
+        "multipart_url_fields": {
+          "type": "array",
+          "required": false,
+          "default": null,
+          "description": "Author-set only. For a multipart body that arrives as data (an edge that names body, a model's argument), the body fields in which a URL is fetched and uploaded as a file. In any other field of such a body a URL string is sent as a text part and never fetched, and a { url: ... } part is refused. A body from config (or a tool's fixed body) is unaffected.",
+          "example": ["file"]
         }
       },
       "input_ports": {
@@ -1136,7 +1143,7 @@
 
     "socketio_request": {
       "name": "Socket.IO Request",
-      "description": "Connects to a Socket.IO server, emits an event with a JSON payload, and receives the response via acknowledgment callback or a separate server event. Supports two response patterns: ack mode (default — server responds via Socket.IO acknowledgment callback) and wait-event mode (set 'wait_event' to listen for a named server event instead). Supports namespaces, cookie-based authentication, custom headers, and configurable transport (WebSocket, polling, or auto). All string values in config support '${VAR_NAME}' environment variable resolution — essential for injecting API URLs and tokens securely. Input values override config values (inputs take priority). Each execution creates a fresh connection, emits the event, collects the response, and disconnects.",
+      "description": "Connects to a Socket.IO server, emits an event with a JSON payload, and receives the response via acknowledgment callback or a separate server event. Supports two response patterns: ack mode (default — server responds via Socket.IO acknowledgment callback) and wait-event mode (set 'wait_event' to listen for a named server event instead). Supports namespaces, cookie-based authentication, custom headers, and configurable transport (WebSocket, polling, or auto). All string values in config support '${VAR_NAME}' environment variable resolution — essential for injecting API URLs and tokens securely; a value that arrives through inputs is sent as written unless it is a tool's fixed value. Input values override config values (inputs take priority), except url, namespace, headers, cookies and allowed_hosts, which an edge without a field, global state or an unoffered tool argument never sets. Each execution creates a fresh connection, emits the event, collects the response, and disconnects.",
       "category": "integration",
       "config_fields": {
         "url": {
@@ -1221,10 +1228,17 @@
               "payload": { "environmentId": "${ENVIRONMENT_ID}" }
             }
           ]
+        },
+        "allowed_hosts": {
+          "type": "array",
+          "required": false,
+          "default": null,
+          "description": "Author-set only. Cookies and headers the author configured (other than accept/content-type/user-agent-like ones) are sent only to the origin of the author's url; this list names other hosts ('host' or 'host:port') that may receive them when the url comes from runtime data (an edge that names url, an open tool field). Any other destination is refused with an error.",
+          "example": ["socket.example.com"]
         }
       },
       "input_ports": {
-        "url": { "type": "string", "description": "Dynamic server URL. Overrides config." },
+        "url": { "type": "string", "description": "Dynamic server URL (an edge that names it, or a tool field the author offers). Overrides config; the author's cookies/headers follow it only to the author's origin or allowed_hosts." },
         "namespace": { "type": "string", "description": "Dynamic namespace. Overrides config." },
         "event": { "type": "string", "description": "Dynamic event name. Overrides config." },
         "payload": { "type": "any", "description": "Dynamic payload. Overrides config entirely." },
