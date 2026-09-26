@@ -5818,6 +5818,13 @@ Anthropic contra un Files API simulado, y después `$attachment:img-1` da los mi
 (antes: `StorageKeyMissing`); la fila de Anthropic guarda el `storage_key` (antes: `None`).
 Sin corrida E2E con un modelo real: este worktree no tiene credenciales de proveedores.
 
+**Limitación (review, documentada, no se toca).** `refresh_provider_file_id` (la recuperación a
+las 24h) le pone un `refreshed_at` nuevo a la fila que refresca sin tocarle el `storage_key`. Si
+esa fila es un `user_upload` sin clave (necesita un guardado de bytes fallido antes, §113) y queda
+como la más reciente, gana sobre una fila de otro provider con clave — su `origin` no es `NULL`,
+así que la democión de arriba no la alcanza — y `$attachment:<document_id>` responde
+`StorageKeyMissing` aunque el documento tenga bytes en la otra fila. Documentado en guide 31.
+
 **ADP.** Sin cambios de API ni de esquema. **Estado.** done.
 
 ## 124. Endurecimiento: las credenciales del autor en `http_request` se cuentan por hoja, y el motor marca los secretos de `config`

@@ -83,6 +83,14 @@ bytes no se guardaron falla a la vista en vez de reenviar una clave vieja (CHANG
 §123). Un id que la sesión no registró da `NotFound` y nunca se
 lee como `storage_key` directo (CHANGELOG 2026-09 §85).
 
+**Limitación conocida.** La recuperación a las 24h (`refresh_provider_file_id`, disparada por
+`load_attachment` sobre una fila recuperable) le pone un `refreshed_at` nuevo a la fila que
+refresca sin tocarle el `storage_key`. Si esa fila es un `user_upload` sin clave (un guardado de
+bytes que falló antes, CHANGELOG 2026-09 §113) y queda como la más reciente, gana sobre una fila
+de otro provider que sí tiene clave — la democión de arriba no aplica: su `origin` es
+`user_upload`, no `NULL` — y `$attachment:<document_id>` responde `StorageKeyMissing` aunque el
+documento tenga bytes guardados en la otra fila (CHANGELOG 2026-09 §112).
+
 Background y decisiones:
 - Spec: [`docs/superpowers/specs/2026-05-25-attachment-uniform-resolution-design.md`](../superpowers/specs/2026-05-25-attachment-uniform-resolution-design.md)
 - Plan: [`docs/superpowers/plans/2026-05-25-attachment-uniform-resolution-plan-a.md`](../superpowers/plans/2026-05-25-attachment-uniform-resolution-plan-a.md)
