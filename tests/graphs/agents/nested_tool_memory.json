@@ -1,0 +1,101 @@
+{
+  "comment": "E2E de la memoria de una tool por quien la llama. Lo corre src/libs/colmena/tests/nested_tool_memory.rs con un modelo guionado que contesta según quién lo llama (PADRE, HIJO-Y o AGENTE-X, por el system prompt). El padre tiene X (`parallel`, `dynamic` con el hilo fijo en `${agentId}`, como Run My Agent de ADP) e Y (`parallel`, `persistent`); el hijo de Y también tiene X, con la misma configuración. El hijo de X es un agente con memoria que puede preguntar con Preguntar (un `suspend`). X llamado por el padre guarda su hilo en `tool/X/<agentId>/agente_x`, como siempre; X llamado desde el hijo de Y lo guarda bajo el camino de quien lo llama: `tool/Y/hijo_y/tool/X/<agentId>/agente_x`. Así, el mismo X a dos niveles no comparte hilo: una corrida fresca en un nivel no cura la pregunta pendiente del otro, y ninguno lee la conversación del otro.",
+  "metadata": {
+    "category": "agents",
+    "features": ["subgraph_as_tool", "child_graph_inline", "parallel_tool_calls", "suspend", "hitl", "conversation_memory"],
+    "requires_env": ["GEMINI_API_KEY", "DATABASE_URL"]
+  },
+  "nodes": {
+    "pedido": { "type": "input", "config": { "prompt": "turno 1: corré X e Y a la vez." } },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google", "model": "gemini-2.5-flash", "api_key": "${GEMINI_API_KEY}",
+        "connection_url": "${DATABASE_URL}", "stream": true,
+        "system_message": "PADRE. Corrés X e Y con una tarea cada uno. Pedí todas las llamadas en el mismo mensaje.",
+        "prompt": "{{prompt}}",
+        "tool_configurations": {
+          "X": {
+            "name": "X", "node_type": "subgraph", "parallel": true, "memory_mode": "dynamic",
+            "description": "Corre el agente X con una tarea. X puede hacerle una pregunta al usuario.",
+            "node_schema": {
+              "agentId": { "type": "string", "required": true, "description": "El hilo de X." },
+              "task": { "type": "string", "required": true, "description": "La tarea para X." },
+              "thread_id": { "fixed": "${agentId}" },
+              "child_graph_inline": { "fixed": { "edges": [], "nodes": { "agente_x": {
+                "type": "llm_call",
+                "config": {
+                  "provider": "google", "model": "gemini-2.5-flash", "api_key": "${GEMINI_API_KEY}",
+                  "connection_url": "${DATABASE_URL}", "stream": true,
+                  "system_message": "AGENTE-X. Hacé la tarea. Si te falta un dato, preguntale al usuario con Preguntar.",
+                  "prompt": "{{task}}",
+                  "tool_configurations": {
+                    "Preguntar": {
+                      "name": "Preguntar", "node_type": "suspend",
+                      "description": "Le hace una pregunta al usuario y espera su respuesta.",
+                      "node_schema": {
+                        "id": { "fixed": "pregunta_x" },
+                        "question": { "type": "string", "required": true, "description": "La pregunta." }
+                      }
+                    }
+                  }
+                }
+              } } } }
+            }
+          },
+          "Y": {
+            "name": "Y", "node_type": "subgraph", "parallel": true, "memory_mode": "persistent",
+            "description": "Corre el agente Y con una tarea. Y trabaja con X.",
+            "node_schema": {
+              "task": { "type": "string", "required": true, "description": "La tarea para Y." },
+              "child_graph_inline": { "fixed": { "edges": [], "nodes": { "hijo_y": {
+                "type": "llm_call",
+                "config": {
+                  "provider": "google", "model": "gemini-2.5-flash", "api_key": "${GEMINI_API_KEY}",
+                  "connection_url": "${DATABASE_URL}", "stream": true,
+                  "system_message": "HIJO-Y. Hacé la tarea con X.",
+                  "prompt": "{{task}}",
+                  "tool_configurations": {
+                    "X": {
+                      "name": "X", "node_type": "subgraph", "parallel": true, "memory_mode": "dynamic",
+                      "description": "Corre el agente X con una tarea. X puede hacerle una pregunta al usuario.",
+                      "node_schema": {
+                        "agentId": { "type": "string", "required": true, "description": "El hilo de X." },
+                        "task": { "type": "string", "required": true, "description": "La tarea para X." },
+                        "thread_id": { "fixed": "${agentId}" },
+                        "child_graph_inline": { "fixed": { "edges": [], "nodes": { "agente_x": {
+                          "type": "llm_call",
+                          "config": {
+                            "provider": "google", "model": "gemini-2.5-flash", "api_key": "${GEMINI_API_KEY}",
+                            "connection_url": "${DATABASE_URL}", "stream": true,
+                            "system_message": "AGENTE-X. Hacé la tarea. Si te falta un dato, preguntale al usuario con Preguntar.",
+                            "prompt": "{{task}}",
+                            "tool_configurations": {
+                              "Preguntar": {
+                                "name": "Preguntar", "node_type": "suspend",
+                                "description": "Le hace una pregunta al usuario y espera su respuesta.",
+                                "node_schema": {
+                                  "id": { "fixed": "pregunta_x" },
+                                  "question": { "type": "string", "required": true, "description": "La pregunta." }
+                                }
+                              }
+                            }
+                          }
+                        } } } }
+                      }
+                    }
+                  }
+                }
+              } } } }
+            }
+          }
+        }
+      }
+    },
+    "salida": { "type": "output", "config": {} }
+  },
+  "edges": [
+    { "from": "pedido", "to": "agent" },
+    { "from": "agent.result", "to": "salida" }
+  ]
+}

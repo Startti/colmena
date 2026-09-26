@@ -156,7 +156,11 @@ fn measure() -> Measured {
 // the children are agents with memory that can ask through a `suspend` tool;
 // run by `src/libs/colmena/tests/parallel_tool_suspend.rs` with a model that
 // answers by who calls it). Lints clean.
-const EXPECTED_FILES: usize = 333;
+// Bumped 333 -> 334: adds tests/graphs/agents/nested_tool_memory.json (the same
+// tool with memory called by the root and from inside another tool's child
+// keeps two threads; run by `src/libs/colmena/tests/nested_tool_memory.rs` with
+// a model that answers by who calls it). Lints clean.
+const EXPECTED_FILES: usize = 334;
 const EXPECTED_ERRORS: usize = 0;
 const EXPECTED_WARNINGS: usize = 0;
 const EXPECTED_INFOS: usize = 0;
