@@ -186,7 +186,7 @@ mod tests {
     #[test]
     fn no_key_fails_closed_and_expands_nothing() {
         // Graph mode: a value that arrived over an edge or from global state.
-        let inputs: HashMap<String, Value> = hm(json!({ "q": "${DATABASE_URL}" }));
+        let inputs: HashMap<String, Value> = hm(json!({ "q": "${COLMENA_TEST_VAR}" }));
         let policy = EnvPolicy::from_inputs(&inputs);
         assert_eq!(policy, EnvPolicy::Restricted(HashSet::new()));
         assert!(!policy.may_expand("/q"));
