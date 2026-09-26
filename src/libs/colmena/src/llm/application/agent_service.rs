@@ -110,6 +110,26 @@ fn tool_error_result(tool_call_id: &str, e: LlmError) -> ToolResult {
     }
 }
 
+/// What running one call produced, before the loop writes its history or emits
+/// its Finish frame.
+enum CallOutcome {
+    /// The call's answer: the tool's result, a refusal or a redirect.
+    Done(ToolResult),
+    /// The tool suspended for human input; carries its parsed sentinel.
+    Suspended(ToolResult, serde_json::Value),
+    /// The tool asked the loop to load an attachment; carries its parsed sentinel.
+    LoadAttachment(ToolResult, serde_json::Value),
+}
+
+/// What [`run_call`] needs from the current ReAct iteration.
+struct CallCtx<'a> {
+    tool_executor: &'a dyn ToolExecutor,
+    /// The tools serialized into this iteration's request.
+    iteration_tools: &'a [ToolDefinition],
+    lazy_catalog_names: Option<&'a std::collections::HashSet<String>>,
+    on_token: &'a Option<Box<dyn Fn(LlmStreamPart) + Send + Sync>>,
+}
+
 /// The loop guard's streak: it counts CONSECUTIVE repeats of one `(name+args)`
 /// signature, and resets the moment a different signature appears (the model
 /// made progress). `first` is the raw output of the streak's one real
@@ -133,6 +153,102 @@ impl RepeatStreak {
             self.first.clear();
         }
         self.count
+    }
+}
+
+/// Runs one call for real: emits its Start frame, then refuses a name the
+/// request did not offer, redirects an undiscovered lazy tool to its schema, or
+/// dispatches it to the executor. It writes no history and emits no Finish
+/// frame: the caller does, in the model's order.
+async fn run_call(ctx: &CallCtx<'_>, tool_call: &ToolCall) -> CallOutcome {
+    // Notify start of execution
+    if let Some(callback) = ctx.on_token {
+        (callback)(LlmStreamPart::LlmToolCallStart(tool_call.clone()));
+    }
+
+    // Whether the model may run this name. `iteration_tools` is
+    // the very list serialized into the request, so this
+    // cannot drift from what the provider was sent. One lazy
+    // exception: that list drops `describe_tool` once nothing is
+    // pending, and re-describing a loaded tool only reads the
+    // schema of a tool the operator declared.
+    let name = &tool_call.function.name;
+    let offered = ctx.iteration_tools.iter().any(|t| t.name == *name)
+        || (name == DESCRIBE_TOOL && ctx.lazy_catalog_names.is_some_and(|c| !c.is_empty()));
+
+    // Lazy describe-before-use guard (lazy_tool_loading only):
+    // if the model called a cataloged tool that is NOT loaded
+    // this turn (absent from `iteration_tools`), do NOT execute
+    // it blind — return its schema as a redirect so the model
+    // re-calls it with correct args. The original call stays in
+    // history, so per-turn discovery marks the tool discovered
+    // and it becomes callable on the next iteration.
+    let lazy_redirect: Option<ToolResult> = match ctx.lazy_catalog_names {
+        Some(catalog) => {
+            if !offered && catalog.contains(name) {
+                let describe = ToolCall::new(
+                    format!("guard_{}", tool_call.id),
+                    crate::llm::domain::FunctionCall::new(
+                        DESCRIBE_TOOL.to_string(),
+                        serde_json::json!({ "name": name }).to_string(),
+                    ),
+                );
+                let schema = match ctx.tool_executor.execute(&describe).await {
+                    Ok(r) => r.output,
+                    Err(_) => format!("(schema unavailable for '{name}')"),
+                };
+                Some(ToolResult {
+                    tool_call_id: tool_call.id.clone(),
+                    success: true,
+                    output: format!(
+                        "⚠️ NOT A RESULT. The tool `{name}` was not loaded this turn, \
+                         so it was NOT executed. Below is its schema — call `{name}` \
+                         again now with arguments that match it.\n\n{schema}"
+                    ),
+                    error: None,
+                })
+            } else {
+                None
+            }
+        }
+        None => None,
+    };
+
+    let result = match lazy_redirect {
+        Some(redirect) => redirect,
+        // Only an offered name runs. The executor resolves ANY
+        // registered node type by name and no provider adapter
+        // checks a returned name against the declared tools, so
+        // without this an injected `python_script` call runs
+        // code the operator never exposed. The refusal reads
+        // like an unknown name: it says nothing about what the
+        // registry holds, and never echoes the arguments.
+        None if !offered => {
+            tracing::warn!(
+                target: "colmena::agent",
+                event = "tool.not_offered",
+                tool = ?name,
+                tool_call_id = %tool_call.id,
+                "agent_service: refused a call to a tool this request did not offer"
+            );
+            let refusal = LlmError::tool_not_found(name);
+            tool_error_result(&tool_call.id, refusal)
+        }
+        None => match ctx.tool_executor.execute(tool_call).await {
+            Ok(res) => res,
+            Err(e) => tool_error_result(&tool_call.id, e),
+        },
+    };
+
+    // A sentinel is detected before anything is persisted. On SUSPENDED the
+    // call has no result yet: the resume path finds it by that absence.
+    let Ok(sentinel) = serde_json::from_str::<serde_json::Value>(&result.output) else {
+        return CallOutcome::Done(result);
+    };
+    match sentinel.get("__colmena_status").and_then(|v| v.as_str()) {
+        Some("SUSPENDED") => CallOutcome::Suspended(result, sentinel),
+        Some("LOAD_ATTACHMENT") => CallOutcome::LoadAttachment(result, sentinel),
+        _ => CallOutcome::Done(result),
     }
 }
 
@@ -456,6 +572,12 @@ impl AgentService {
                     .collect();
 
                 // D. Execute each tool call (with consecutive-streak loop guard)
+                let call_ctx = CallCtx {
+                    tool_executor,
+                    iteration_tools: &iteration_tools,
+                    lazy_catalog_names: lazy_catalog_names.as_ref(),
+                    on_token: &on_token,
+                };
                 let mut rescue = false;
                 for tool_call in &tool_calls {
                     // Repeated signature in a row (streak >= 2): nudge or rescue.
@@ -479,104 +601,15 @@ impl AgentService {
                         continue;
                     }
 
-                    // Streak start (count == 1): real execution (existing path).
-                    // Notify start of execution
-                    if let Some(callback) = &on_token {
-                        (callback)(LlmStreamPart::LlmToolCallStart(tool_call.clone()));
-                    }
-
-                    // Whether the model may run this name. `iteration_tools` is
-                    // the very list serialized into the request above, so this
-                    // cannot drift from what the provider was sent. One lazy
-                    // exception: that list drops `describe_tool` once nothing is
-                    // pending, and re-describing a loaded tool only reads the
-                    // schema of a tool the operator declared.
-                    let name = &tool_call.function.name;
-                    let offered = iteration_tools.iter().any(|t| t.name == *name)
-                        || (name == DESCRIBE_TOOL
-                            && lazy_catalog_names.as_ref().is_some_and(|c| !c.is_empty()));
-
-                    // Lazy describe-before-use guard (lazy_tool_loading only):
-                    // if the model called a cataloged tool that is NOT loaded
-                    // this turn (absent from `iteration_tools`), do NOT execute
-                    // it blind — return its schema as a redirect so the model
-                    // re-calls it with correct args. The original call stays in
-                    // history, so per-turn discovery marks the tool discovered
-                    // and it becomes callable on the next iteration.
-                    let lazy_redirect: Option<ToolResult> = match &lazy_catalog_names {
-                        Some(catalog) => {
-                            if !offered && catalog.contains(name) {
-                                let describe = ToolCall::new(
-                                    format!("guard_{}", tool_call.id),
-                                    crate::llm::domain::FunctionCall::new(
-                                        DESCRIBE_TOOL.to_string(),
-                                        serde_json::json!({ "name": name }).to_string(),
-                                    ),
-                                );
-                                let schema = match tool_executor.execute(&describe).await {
-                                    Ok(r) => r.output,
-                                    Err(_) => format!("(schema unavailable for '{name}')"),
-                                };
-                                Some(ToolResult {
-                                    tool_call_id: tool_call.id.clone(),
-                                    success: true,
-                                    output: format!(
-                                        "⚠️ NOT A RESULT. The tool `{name}` was not loaded this turn, \
-                                         so it was NOT executed. Below is its schema — call `{name}` \
-                                         again now with arguments that match it.\n\n{schema}"
-                                    ),
-                                    error: None,
-                                })
-                            } else {
-                                None
-                            }
-                        }
-                        None => None,
-                    };
-
-                    let result = match lazy_redirect {
-                        Some(redirect) => redirect,
-                        // Only an offered name runs. The executor resolves ANY
-                        // registered node type by name and no provider adapter
-                        // checks a returned name against the declared tools, so
-                        // without this an injected `python_script` call runs
-                        // code the operator never exposed. The refusal reads
-                        // like an unknown name: it says nothing about what the
-                        // registry holds, and never echoes the arguments.
-                        None if !offered => {
-                            tracing::warn!(
-                                target: "colmena::agent",
-                                event = "tool.not_offered",
-                                tool = ?name,
-                                tool_call_id = %tool_call.id,
-                                "agent_service: refused a call to a tool this request did not offer"
-                            );
-                            let refusal = LlmError::tool_not_found(name);
-                            tool_error_result(&tool_call.id, refusal)
-                        }
-                        None => match tool_executor.execute(tool_call).await {
-                            Ok(res) => res,
-                            Err(e) => tool_error_result(&tool_call.id, e),
-                        },
-                    };
-
-                    // Detect SUSPENDED before persisting the tool message.
-                    // The assistant message (with tool_calls) was already persisted above
-                    // (step B), so the resume path can walk the history to find the pending
-                    // tool call. We must NOT persist the tool result — we don't have one yet.
-                    let parsed_sentinel =
-                        serde_json::from_str::<serde_json::Value>(&result.output).ok();
-                    if let Some(parsed) = parsed_sentinel.as_ref() {
-                        if parsed.get("__colmena_status").and_then(|v| v.as_str())
-                            == Some("SUSPENDED")
-                        {
+                    // Streak start (count == 1): real execution.
+                    let result = match run_call(&call_ctx, tool_call).await {
+                        CallOutcome::Done(result) => result,
+                        CallOutcome::Suspended(result, sentinel) => {
                             return self
-                                .suspend(session_id, &mut messages, &result, parsed)
+                                .suspend(session_id, &mut messages, &result, &sentinel)
                                 .await;
                         }
-                        if parsed.get("__colmena_status").and_then(|v| v.as_str())
-                            == Some("LOAD_ATTACHMENT")
-                        {
+                        CallOutcome::LoadAttachment(result, parsed) => {
                             let document_id = parsed
                                 .get("document_id")
                                 .and_then(|v| v.as_str())
@@ -708,7 +741,7 @@ impl AgentService {
                             }
                             continue;
                         }
-                    }
+                    };
 
                     // Store this streak's first result so a later repeat can
                     // echo it in the nudge.

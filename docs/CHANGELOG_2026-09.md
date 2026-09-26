@@ -4975,3 +4975,32 @@ y revertidas editando:
 **E2E.** No aplica: no hay cambio observable.
 
 **ADP.** Nada que hacer.
+
+## 96. Correr una llamada pasa a `run_call -> CallOutcome` (parallel tools, 2d)
+
+**Qué cambió.** El segundo refactor de `AgentService::run` sin cambio de comportamiento,
+después de la entrada 95. El cuerpo que ejecuta una llamada sale del loop y pasa, tal
+cual, a `run_call(&CallCtx, &ToolCall) -> CallOutcome`: el frame Start, el chequeo de que
+el nombre estaba ofrecido, la redirección de una tool lazy no cargada, el rechazo de un
+nombre no ofrecido y el despacho al ejecutor. Después clasifica el centinela:
+`Done(ToolResult)`, `Suspended(ToolResult, Value)` o `LoadAttachment(ToolResult, Value)`.
+No escribe historia ni emite el Finish: eso lo hace quien la llama.
+- `CallCtx` junta lo que `run_call` necesita de la iteración: el ejecutor, las tools de
+  este pedido (`iteration_tools`), el catálogo lazy y `on_token`.
+- En el loop, `Suspended` llama a `suspend` (entrada 95) y `LoadAttachment` corre el
+  bloque de siempre, sin tocarlo. `Done` sigue como antes: el Finish y `record_result`.
+- Así un grupo puede correr varias llamadas a la vez y escribir la historia después, en
+  el orden del modelo.
+
+**Tests.** Ninguno nuevo ni tocado: los 40 de `agent_service` pasan igual. Lib: 2905
+passed, 0 failed, 74 ignored, como en la entrada 95.
+
+**Mutación.** Sobre el código movido. Rojas y revertidas editando:
+- `run_call` sin rechazar un nombre no ofrecido: rojo
+  `a_call_to_a_tool_the_request_did_not_offer_never_reaches_the_executor`;
+- el brazo `SUSPENDED` que nunca coincide: rojos
+  `detects_suspended_tool_result_and_short_circuits` y los dos de suspensión en un batch.
+
+**E2E.** No aplica: no hay cambio observable.
+
+**ADP.** Nada que hacer.
