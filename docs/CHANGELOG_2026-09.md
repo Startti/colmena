@@ -6131,3 +6131,38 @@ como resultado).
 
 **ADP.** Nada.
 **Estado.** done.
+
+## 136. La memoria de una tool, por quien la llama (7/7): docs y nota de migración de ADP
+
+**Qué cambió.** Solo docs; con este tramo la documentación dice lo que el motor hace desde el
+tramo 4/7.
+- Guía 19: la tabla de `memory_mode` da la clave por quien llama, y la nueva «De quién es el
+  hilo» dice qué cambia, qué no (la raíz, los hijos de un `subgraph` de nivel de grafo, los
+  agentes de un `orchestrator` en la raíz, `stateless`), que el hilo dura lo que dura el camino
+  de quien llama, `list_threads` por quien llama y el resume bajo la clave guardada. «Riesgo
+  conocido: el hilo de una tool es absoluto» pasa a «El mismo agente a dos niveles», resuelto
+  con el E2E; entre quienes siguen compartiendo hilo, una corrida fresca todavía puede curar
+  la pregunta pendiente de otro.
+- `node_as_tools_reference.json` (`memory_mode.per_caller`), `node_configurations.json` y
+  `CLAUDE.md` dicen la regla.
+- Nota de ADP `2026-09-26-nested-tool-memory-per-caller.md` y su fila en el README.
+
+Límites, en la guía, el JSON y la nota:
+- un `llm_call` invocado directamente como tool no guarda su clave. Si preguntó antes del
+  cambio desde un hijo, el resume corre sobre un hilo vacío y falla con `Empty message
+  list`: la respuesta se pierde una vez y quien llama recibe un error de tool visible;
+- cada nivel suma hasta unos 230 bytes a la clave (peor caso: nombre ≤64 + hilo ≤128 + nodo
+  ~25; en ADP unos 70), y en el peor caso el índice btree pone el techo cerca de 11 niveles.
+  Medido en dev: profundidad máxima 4;
+- un nodo de la raíz, o de un hijo, cuyo id es `tool`.
+
+**Tests.** `check_doc_links`: 0 rotos, 0 números duplicados. `check_doc_counts.sh`: al día.
+
+**ADP.** Sin cambios de código ni de base: subir el pin y actualizar tres comentarios
+(`memory-mode.ts`, `role-shared.ts`, `creator-v2-defs.ts`). En dev no cambia de clave ninguna
+fila. Antes de promover, correr en prod, en solo lectura, las tres consultas de la nota: hilos
+que cambian de clave, cadenas suspendidas a profundidad 2 o más, y preguntas abiertas en el
+hilo de un `llm_call` invocado como tool bajo la clave vieja (el primer límite, que la
+segunda no ve: ese `llm_call` no crea fila en `dag_runs`). Nota:
+[`2026-09-26-nested-tool-memory-per-caller.md`](adp_migration/2026-09-26-nested-tool-memory-per-caller.md).
+**Estado.** done.
