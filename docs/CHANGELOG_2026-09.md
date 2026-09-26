@@ -5299,7 +5299,7 @@ dos tests de logs se vieron rojos antes del cambio.
 
 **ADP.** Sin código.
 
-## 104. Endurecimiento: `${VAR}` se expande solo en la configuración del autor
+## 105. Endurecimiento: `${VAR}` se expande solo en la configuración del autor
 
 **Qué cambia.** Un valor que llega por `inputs` (un edge, el estado global, una fila de
 `for_each`) ya no expande plantillas `${VAR}`, salvo que un despacho con provenance (el de
