@@ -5220,6 +5220,47 @@ ejecutor solo lo cubre ese E2E.
 hasta la entrada 102. La guía 19 y la nota de migración dicen lo de antes hasta la
 entrada 106.
 
+## 102. Una corrida fresca contesta la pregunta que su hilo dejó abierta (parallel tools, 3b)
+
+**Qué cambió.** Un `suspend` deja el id de su pregunta sin resultado a propósito: el
+resume la encuentra por esa ausencia. Una pregunta que nunca se reanuda (la que un grupo
+cerró en la entrada 101, o un resume rechazado por `close_refused`) queda abierta en su
+hilo. Los hilos de las tools `persistent` y `dynamic` se comparten entre llamadas, así
+que la llamada siguiente a ese agente arrancaba fresca sobre el mismo hilo y mandaba el
+id abierto: un 400 en Anthropic y OpenAI, en esa request y en todas las siguientes.
+- `AgentService::run`, en el camino fresco (con prompt o mensajes nuevos, nunca en el
+  resume), contesta primero los ids sin resultado del turno en el que termina el hilo
+  (un mensaje del asistente con `tool_calls` seguido solo de mensajes `tool`), y
+  después agrega el prompt. La respuesta es el texto de
+  `text/prompts/agent_loop/abandoned_question.md`, persistida como cualquier `tool`,
+  con un `warn` por id. Vale para todos los agentes, no solo para Run My Agent.
+- Un turno que el hilo ya dejó atrás (con un `user` o un `assistant` después) no se
+  toca: un `tool` en ese lugar lo rechazan igual. La curación es idempotente.
+- `unresolved_sibling_ids` y el helper nuevo `abandoned_call_ids` comparten
+  `unresolved_ids`; lo de antes no cambia.
+- El comentario del invariante del brazo «nunca corrió» del grupo dice ahora que, para
+  el sucesor de una pregunta cerrada, `suspended` lo fijó la pregunta que quedó.
+- El texto dice «pregunta», aunque la misma curación también contesta los ids de una
+  corrida cortada. La entrada 103 lo cambia por uno neutro, en un archivo con otro
+  nombre.
+
+**Tests.** 6 nuevos en la lib, 2925 passed (2919 en la entrada 101):
+- una corrida fresca con la forma de entrada de `llm_call` contesta la pregunta abierta
+  una sola vez, en la request y en el hilo, y la request no lleva ningún id abierto;
+- un hilo sin ids abiertos no cambia;
+- el resume contesta con la respuesta, no con el marcador;
+- un reintento (la primera corrida falla en el proveedor) no agrega un segundo marcador;
+- 2 del helper: el turno en el que termina el hilo, y uno que el hilo dejó atrás.
+
+**Mutación.** Rojas y revertidas editando: sin la curación (`left: ["ask"] right:
+[]`); la curación también en el resume; la curación sobre un turno que el hilo dejó
+atrás; la curación de todos los ids del turno, contestados o no.
+
+**E2E.** En la entrada 105 (el escenario C re-corre el hijo cerrado en su hilo).
+
+**ADP.** Sin código. Desde acá re-correr el hijo cerrado ya no da 400; la nota de
+migración lo cuenta en la entrada 106.
+
 ## 103. Endurecimiento: `${VAR}` se expande solo en la configuración del autor
 
 **Qué cambia.** Un valor que llega por `inputs` (un edge, el estado global, una fila de
