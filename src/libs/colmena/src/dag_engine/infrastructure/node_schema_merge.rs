@@ -22,22 +22,35 @@ pub(crate) fn drop_unoffered_child_graph_sources(
     args: &mut HashMap<String, Value>,
     offered: impl FnOnce() -> HashSet<String>,
 ) {
+    for warning in drop_unoffered_child_graph_sources_silently(args, offered) {
+        eprintln!("{warning}");
+    }
+}
+
+/// [`drop_unoffered_child_graph_sources`], returning its warnings instead of
+/// printing them.
+pub(crate) fn drop_unoffered_child_graph_sources_silently(
+    args: &mut HashMap<String, Value>,
+    offered: impl FnOnce() -> HashSet<String>,
+) -> Vec<String> {
     let supplied: Vec<&str> = CHILD_GRAPH_SOURCE_KEYS
         .into_iter()
         .filter(|key| args.contains_key(*key))
         .collect();
     if supplied.is_empty() {
-        return;
+        return Vec::new();
     }
     let offered = offered();
+    let mut warnings = Vec::new();
     for key in supplied {
         if !offered.contains(key) {
             args.remove(key);
-            eprintln!(
+            warnings.push(format!(
                 "⚠️ [node_schema_merge] Ignoring arg '{key}' — a child-graph source the tool does not offer."
-            );
+            ));
         }
     }
+    warnings
 }
 
 /// The parameters a `node_schema` offers its caller: its LLM-visible fields.
@@ -73,6 +86,18 @@ pub(crate) fn merge_args_into_schema(
     node_schema: &Value,
     args: HashMap<String, Value>,
 ) -> Result<HashMap<String, Value>, String> {
+    let (merged, warnings) = merge_args_into_schema_silently(node_schema, args)?;
+    for warning in warnings {
+        eprintln!("{warning}");
+    }
+    Ok(merged)
+}
+
+/// [`merge_args_into_schema`], returning its warnings instead of printing them.
+pub(crate) fn merge_args_into_schema_silently(
+    node_schema: &Value,
+    args: HashMap<String, Value>,
+) -> Result<(HashMap<String, Value>, Vec<String>), String> {
     let node_schema: NodeSchema = serde_json::from_value(node_schema.clone())
         .map_err(|e| format!("Invalid node_schema: {e}"))?;
     let parsed =
@@ -104,6 +129,7 @@ pub(crate) fn merge_args_into_schema(
         })
         .collect();
 
+    let mut warnings = Vec::new();
     for (param_name, param_value) in &args {
         if let Some(container) = parsed.param_to_container.get(param_name) {
             let entry = result
@@ -129,15 +155,15 @@ pub(crate) fn merge_args_into_schema(
             }
         } else if parsed.fixed_values.contains_key(param_name) {
             // A supplied arg must NEVER override an operator-declared `fixed` field.
-            eprintln!(
+            warnings.push(format!(
                 "⚠️ [node_schema_merge] Ignoring arg '{param_name}' — collides with a fixed field."
-            );
+            ));
         } else {
             result.insert(param_name.clone(), param_value.clone());
         }
     }
 
-    Ok(result)
+    Ok((result, warnings))
 }
 
 #[cfg(test)]
