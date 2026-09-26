@@ -311,16 +311,22 @@ deliver before the loop injects its own (the rule lives in
 
 #### Step 4c: A field only the author sets is dropped unless the tool offers it
 
-**Function:** `drop_unoffered_author_owned()` in
+**Function:** `drop_unoffered_author_owned_silently()` in
 [node_schema_merge.rs](../../src/libs/colmena/src/dag_engine/infrastructure/node_schema_merge.rs),
-called right after `strip_engine_keys()`, and by `for_each` for each row.
+called inside `DagToolExecutor::merge_call()` right after `strip_engine_keys()`.
+`for_each` calls the printing wrapper, `drop_unoffered_author_owned()`, for
+each row.
 
 Author-set fields are config-only: an argument naming one of the target node's
 `author_owned_inputs()` (for example `headers` of `http_request`,
 `tool_configurations` of `llm_call`, `code` of `python_script`, `target` of
 `for_each`) or a child-graph source (`CHILD_GRAPH_SOURCE_KEYS`) is removed
-before Step 5 unless the tool offers it as a parameter, with a warning that
-names the key, never its value. "Offered" = the parameters of the definition
+before Step 5 unless the tool offers it as a parameter. Each drop yields a
+warning that names the key, never its value: `merge_call()` returns it in
+`MergedCall.warnings` with the merge's other warnings, and `execute_inner()`
+prints them once. Since the drop happens inside `merge_call()`, the chain key
+of a parallel group (`parallel_chain_key()` → `resolved_thread()`) sees the
+same arguments the dispatch runs with. "Offered" = the parameters of the definition
 the model was sent (for a raw node name, its schema's `inputs`); for a
 `for_each` row, the target's LLM-visible fields. A declared field still passes:
 declaring it is the author's explicit wiring (`probar_grafo` in
