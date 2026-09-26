@@ -3106,7 +3106,7 @@
           "type": "string",
           "required": false,
           "default": null,
-          "description": "OpenAI API key. Not used by the google provider, which authenticates through Application Default Credentials. Supports '${ENV_VAR}' and secure-value placeholders.",
+          "description": "OpenAI API key. Not used by the google provider, which authenticates through Application Default Credentials. Supports '${ENV_VAR}' (in config, or a tool's fixed value; an api_key that arrives as data is used as written) and secure-value placeholders.",
           "supports_env_vars": true,
           "example": "${OPENAI_API_KEY}"
         },
@@ -3199,7 +3199,7 @@
           "type": "string",
           "required": true,
           "default": null,
-          "description": "OpenAI API key. Supports '${ENV_VAR}' and secure-value placeholders.",
+          "description": "OpenAI API key. Supports '${ENV_VAR}' (in config, or a tool's fixed value; an api_key that arrives as data is used as written) and secure-value placeholders.",
           "supports_env_vars": true,
           "example": "${OPENAI_API_KEY}"
         },
@@ -3295,7 +3295,7 @@
           "type": "string",
           "required": true,
           "default": null,
-          "description": "Provider API key. Supports '${ENV_VAR}' and secure-value placeholders.",
+          "description": "Provider API key. Supports '${ENV_VAR}' (in config, or a tool's fixed value; an api_key that arrives as data is used as written) and secure-value placeholders.",
           "supports_env_vars": true,
           "example": "${OPENAI_API_KEY}"
         },

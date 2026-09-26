@@ -5661,3 +5661,34 @@ Sin el arreglo, rojo. 3 passed; `parallel_tool_groups` (2) y `parallel_tool_iden
 **ADP.** Sin cambios. La nota de migración de las tools `parallel` suma una sección con
 esto, y la guía 19 lo dice en «Suspensión dentro de un batch paralelo de tools».
 **Estado.** done.
+
+## 116. Endurecimiento: `socketio_request` expande `${VAR}` solo en la configuración del autor
+
+**Qué cambia.** `url`, `namespace`, `cookies`, `headers`, `payload` y `pre_events` se
+resuelven con la misma regla que `http_request`: un valor de `config` expande todo `${VAR}`;
+uno de `inputs` solo en las hojas que un despacho avaló (`EnvPolicy`), y si no se manda tal
+cual. La resolución de los payloads pasa de `emit_step` a la lectura de los campos, así que
+una variable de `config` inexistente falla antes de conectar. `url`, `namespace`, `headers` y
+`cookies` ya son campos del autor (§111).
+
+**Tests.** `socketio.rs::env_gate_tests` (un listener TCP registra la request de apertura): un
+header de `inputs` con `${VAR}` sale literal y la cookie de `config` sale expandida.
+
+**ADP.** Sin cambios de API.
+**Estado.** done.
+
+## 117. Endurecimiento: un `api_key` que llega como dato no se resuelve del entorno
+
+**Qué cambia.** `image_generation`, `image_edit` y `tts` leen `api_key` con
+`env_provenance::resolve_credential`, la misma regla que `llm_call` (§112): el de `config`
+expande `${VAR}`; el de `inputs` solo en un puntero avalado (el `fixed` de una tool) y si no se
+usa tal cual. `api_key` ya es campo del autor en los tres (§111). `tavily_client` e
+`information_extraction` no cambian: leen `api_key` solo de su `config`
+(`tavily_client.rs` `build_use_case`, `extraction.rs` `execute`).
+
+**Tests.** `image_generation` y `image_edit` (mock de OpenAI): un `api_key` de `inputs` con
+`${VAR}` llega literal en `Authorization`. `env_provenance.rs`: `resolve_credential` con
+`config`, con `inputs` sin aval y con aval.
+
+**ADP.** Sin cambios de API.
+**Estado.** done.

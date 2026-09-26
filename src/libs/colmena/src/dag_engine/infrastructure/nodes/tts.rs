@@ -160,12 +160,13 @@ impl ExecutableNode for TtsNode {
             .map(String::from)
             .or_else(|| cfg.get("model").and_then(|v| v.as_str()).map(String::from))
             .ok_or("tts: model is required")?;
-        let api_key_raw = inputs
-            .get("api_key")
-            .and_then(|v| v.as_str())
-            .or_else(|| cfg.get("api_key").and_then(|v| v.as_str()))
-            .ok_or("tts: api_key is required")?;
-        let api_key = Self::resolve_env_var(api_key_raw)?;
+        let api_key = crate::dag_engine::infrastructure::env_provenance::resolve_credential(
+            inputs,
+            &cfg,
+            "api_key",
+            Self::resolve_env_var,
+        )?
+        .ok_or("tts: api_key is required")?;
 
         // Inputs-over-config for LLM-controllable / chainable fields.
         let text = inputs

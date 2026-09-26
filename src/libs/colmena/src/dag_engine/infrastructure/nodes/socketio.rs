@@ -33,6 +33,7 @@
 
 use crate::dag_engine::domain::lint::{FieldSpec, NodeCatalogEntry};
 use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
+use crate::dag_engine::infrastructure::env_provenance::{escape_pointer_segment, EnvPolicy};
 use futures::FutureExt;
 use rust_socketio::asynchronous::{Client, ClientBuilder};
 use rust_socketio::{Payload, TransportType};
@@ -116,6 +117,59 @@ impl SocketIoNode {
             }
             other => Ok(other.clone()),
         }
+    }
+
+    /// Env templates expand only in author config: a value from `config`
+    /// resolves every `${VAR}`; a value from `inputs` (`pointer` is where it
+    /// sits) resolves only the leaves a dispatcher vouched for, and is
+    /// otherwise sent as written.
+    fn resolve_gated(
+        val: &Value,
+        pointer: Option<&str>,
+        policy: &EnvPolicy,
+    ) -> Result<Value, String> {
+        let Some(pointer) = pointer else {
+            return Self::resolve_env_vars_in_value(val);
+        };
+        Ok(match val {
+            Value::String(s) if policy.may_expand(pointer) => {
+                Value::String(Self::resolve_env_vars(s)?)
+            }
+            Value::Object(map) => {
+                let mut out = serde_json::Map::new();
+                for (k, v) in map {
+                    let p = format!("{pointer}/{}", escape_pointer_segment(k));
+                    out.insert(k.clone(), Self::resolve_gated(v, Some(&p), policy)?);
+                }
+                Value::Object(out)
+            }
+            Value::Array(arr) => Value::Array(
+                arr.iter()
+                    .enumerate()
+                    .map(|(i, v)| Self::resolve_gated(v, Some(&format!("{pointer}/{i}")), policy))
+                    .collect::<Result<_, _>>()?,
+            ),
+            other => other.clone(),
+        })
+    }
+
+    /// Read `key` inputs-first and resolve it per [`Self::resolve_gated`].
+    fn resolve_field(
+        inputs: &NodeInputs,
+        config: &Value,
+        key: &str,
+        policy: &EnvPolicy,
+    ) -> Result<Option<Value>, Box<dyn StdError + Send + Sync>> {
+        let resolved = match inputs.get(key) {
+            Some(v) => Some(Self::resolve_gated(v, Some(&format!("/{key}")), policy)),
+            None => config
+                .get(key)
+                .map(|v| Self::resolve_gated(v, None, policy)),
+        };
+        resolved.transpose().map_err(|e| {
+            Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
+                as Box<dyn StdError + Send + Sync>
+        })
     }
 
     /// Extract a Value from the Payload enum.
@@ -250,7 +304,8 @@ impl SocketIoNode {
         exc_rx: &mut mpsc::UnboundedReceiver<Value>,
         wait_slots: &WaitSlots,
     ) -> Result<Value, String> {
-        let resolved_payload = Self::resolve_env_vars_in_value(payload)?;
+        // Resolved by the caller (`resolve_field`): config expands, inputs are gated.
+        let resolved_payload = payload.clone();
         let timeout_dur = Duration::from_millis(timeout_ms);
 
         println!(
@@ -372,18 +427,15 @@ impl ExecutableNode for SocketIoNode {
         _observer: Option<Arc<dyn crate::dag_engine::domain::observer::ExecutionObserver>>,
     ) -> Result<Value, Box<dyn StdError + Send + Sync>> {
         // ---- 1. Resolve top-level config (inputs > config) ----
-        let url_raw =
-            Self::get_str(inputs, config, "url").ok_or("socketio_request: 'url' is required")?;
-        let url = Self::resolve_env_vars(url_raw).map_err(|e| {
-            Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
-                as Box<dyn StdError + Send + Sync>
-        })?;
-
-        let namespace = Self::get_str(inputs, config, "namespace").unwrap_or("/");
-        let namespace = Self::resolve_env_vars(namespace).map_err(|e| {
-            Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
-                as Box<dyn StdError + Send + Sync>
-        })?;
+        // `${VAR}` expands in `config`; an `inputs` value only where a
+        // dispatcher vouched for it (see `resolve_gated`).
+        let policy = EnvPolicy::from_inputs(inputs);
+        let str_field = |key: &str| -> Result<Option<String>, Box<dyn StdError + Send + Sync>> {
+            Ok(Self::resolve_field(inputs, config, key, &policy)?
+                .and_then(|v| v.as_str().map(str::to_string)))
+        };
+        let url = str_field("url")?.ok_or("socketio_request: 'url' is required")?;
+        let namespace = str_field("namespace")?.unwrap_or_else(|| "/".to_string());
 
         let event_name = Self::get_str(inputs, config, "event")
             .ok_or("socketio_request: 'event' is required")?
@@ -399,18 +451,13 @@ impl ExecutableNode for SocketIoNode {
         // `transport: "any"` explicitly to restore polling-first + upgrade.
         let transport = Self::get_str(inputs, config, "transport").unwrap_or("websocket");
 
-        // Main payload (inputs > config). Env vars resolved later in emit_step.
-        let main_payload = inputs
-            .get("payload")
-            .or_else(|| config.get("payload"))
-            .cloned()
-            .unwrap_or(json!({}));
+        // Main payload (inputs > config), env-resolved per `resolve_gated`.
+        let main_payload =
+            Self::resolve_field(inputs, config, "payload", &policy)?.unwrap_or(json!({}));
 
         // ---- 2. Parse pre_events ----
-        let pre_events_val = inputs
-            .get("pre_events")
-            .or_else(|| config.get("pre_events"));
-        let pre_events = Self::parse_pre_events(pre_events_val).map_err(|e| {
+        let pre_events_val = Self::resolve_field(inputs, config, "pre_events", &policy)?;
+        let pre_events = Self::parse_pre_events(pre_events_val.as_ref()).map_err(|e| {
             Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
                 as Box<dyn StdError + Send + Sync>
         })?;
@@ -442,23 +489,15 @@ impl ExecutableNode for SocketIoNode {
             .transport_type(transport_type)
             .reconnect(false);
 
-        if let Some(cookies_raw) = Self::get_str(inputs, config, "cookies") {
-            let cookies = Self::resolve_env_vars(cookies_raw).map_err(|e| {
-                Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
-                    as Box<dyn StdError + Send + Sync>
-            })?;
+        if let Some(cookies) = str_field("cookies")? {
             builder = builder.opening_header("Cookie", cookies);
         }
 
-        let headers_val = inputs.get("headers").or_else(|| config.get("headers"));
-        if let Some(headers) = headers_val.and_then(|v| v.as_object()) {
+        let headers_val = Self::resolve_field(inputs, config, "headers", &policy)?;
+        if let Some(headers) = headers_val.as_ref().and_then(|v| v.as_object()) {
             for (k, v) in headers {
                 if let Some(v_str) = v.as_str() {
-                    let v_resolved = Self::resolve_env_vars(v_str).map_err(|e| {
-                        Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
-                            as Box<dyn StdError + Send + Sync>
-                    })?;
-                    builder = builder.opening_header(k, v_resolved);
+                    builder = builder.opening_header(k, v_str.to_string());
                 }
             }
         }
@@ -946,5 +985,57 @@ mod tests {
     fn payload_to_compact_string_serializes_object() {
         let p = Payload::Text(vec![json!({ "code": 1 })]);
         assert_eq!(SocketIoNode::payload_to_compact_string(p), "{\"code\":1}");
+    }
+}
+
+/// Env templates expand only in author config: a value that arrives through
+/// `inputs` is sent as written. A raw TCP listener stands in for the server
+/// and records the opening request.
+#[cfg(test)]
+mod env_gate_tests {
+    use super::*;
+    use tokio::io::AsyncReadExt;
+
+    /// Accepts one connection and returns the bytes of its opening request.
+    async fn listen() -> (String, tokio::task::JoinHandle<String>) {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", l.local_addr().unwrap());
+        let h = tokio::spawn(async move {
+            let (mut sock, _) = l.accept().await.unwrap();
+            let mut buf = vec![0u8; 8192];
+            let n = sock.read(&mut buf).await.unwrap_or(0);
+            String::from_utf8_lossy(&buf[..n]).to_lowercase()
+        });
+        (url, h)
+    }
+
+    #[tokio::test]
+    async fn an_inputs_value_is_sent_as_written_while_config_expands() {
+        std::env::set_var("COLMENA_CLASS_TEST_SIO", "sio-data-test-only");
+        std::env::set_var("COLMENA_CLASS_TEST_SIO_CFG", "sio-config-test-only");
+        let (url, got) = listen().await;
+        let inputs = HashMap::from([
+            ("url".to_string(), json!(url)),
+            (
+                "headers".to_string(),
+                json!({ "X-Data": "${COLMENA_CLASS_TEST_SIO}" }),
+            ),
+        ]);
+        let config = json!({
+            "event": "e", "timeout_ms": 300,
+            "cookies": "k=${COLMENA_CLASS_TEST_SIO_CFG}"
+        });
+        let _ = SocketIoNode
+            .execute(&inputs, &config, &mut json!({}), None)
+            .await;
+        let req = tokio::time::timeout(Duration::from_secs(5), got)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(req.contains("x-data: ${colmena_class_test_sio}"), "{req}");
+        assert!(!req.contains("sio-data-test-only"), "{req}");
+        assert!(req.contains("k=sio-config-test-only"), "{req}");
+        std::env::remove_var("COLMENA_CLASS_TEST_SIO");
+        std::env::remove_var("COLMENA_CLASS_TEST_SIO_CFG");
     }
 }

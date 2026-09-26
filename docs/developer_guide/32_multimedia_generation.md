@@ -284,7 +284,7 @@ if let Err(e) = reg.upsert(upsert).await {
 |---|---|---|
 | `provider` | sí | `openai` o `google` |
 | `model` | sí | `gpt-image-1`, `dall-e-3` (OpenAI); `imagen-4.0-generate-001` (Vertex) |
-| `api_key` | sí (openai) | Soporta `${OPENAI_API_KEY}` + secure-value placeholders |
+| `api_key` | sí (openai) | Soporta `${OPENAI_API_KEY}` + secure-value placeholders. `${VAR}` se expande solo en `config` o en el `fixed` de una tool; un `api_key` que llega como dato se usa tal cual (también en `image_edit` y `tts`) |
 | `prompt` | sí | Detalle del prompt — inputs-over-config, podés pasarlo por edge o LLM tool arg |
 | `size` | opcional | Default `1024x1024` |
 | `quality` | opcional (openai) | `low | medium | high | auto` |
