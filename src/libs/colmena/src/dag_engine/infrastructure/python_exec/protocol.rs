@@ -38,12 +38,15 @@ pub struct WireRequest {
 }
 
 impl WireRequest {
+    /// Uses `req.timeout` when the caller set one, otherwise falls back to
+    /// `timeout` (the dispatcher's own deadline for the call).
     pub fn new(req: PythonRunRequest, timeout: Duration) -> Self {
+        let timeout = req.timeout.unwrap_or(timeout);
         Self {
             v: WIRE_VERSION,
             code: req.code,
             mode: req.mode,
-            timeout_ms: timeout.as_millis() as u64,
+            timeout_ms: u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
             inputs: req.inputs,
         }
     }
@@ -126,12 +129,17 @@ impl WireResponse {
                 output: self.output_set.then(|| self.output.unwrap_or(Value::Null)),
                 stdout: self.stdout,
             }),
-            WireStatus::PythonError => {
-                Err(PythonRunError::Python(self.message.unwrap_or_default()))
-            }
+            WireStatus::PythonError => Err(PythonRunError::Python(
+                self.message
+                    .unwrap_or_else(|| MALFORMED_MESSAGE.to_string()),
+            )),
             WireStatus::Timeout => Err(PythonRunError::Timeout),
             WireStatus::Crashed => Err(PythonRunError::Python(CRASHED_MESSAGE.to_string())),
             WireStatus::TooLarge => Err(PythonRunError::Python(
+                // The size limit that was exceeded isn't carried on the wire,
+                // so a message-less `TooLarge` can't be reworded into the
+                // specific input/result-too-large text; fall back like any
+                // other malformed response.
                 self.message
                     .unwrap_or_else(|| MALFORMED_MESSAGE.to_string()),
             )),
@@ -214,6 +222,61 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&w).unwrap()["timeout_ms"],
             json!(30000)
+        );
+    }
+
+    #[test]
+    fn requests_own_timeout_overrides_the_fallback() {
+        let req = PythonRunRequest {
+            code: "c".into(),
+            mode: "none".into(),
+            timeout: Some(std::time::Duration::from_secs(5)),
+            inputs: Default::default(),
+        };
+        let w = WireRequest::new(req, std::time::Duration::from_secs(30));
+        assert_eq!(serde_json::to_value(&w).unwrap()["timeout_ms"], json!(5000));
+    }
+
+    #[test]
+    fn absurd_timeout_saturates_instead_of_wrapping() {
+        // `Duration::as_millis()` returns a `u128`; a duration this size
+        // overflows `u64` and must saturate rather than wrap.
+        let huge = std::time::Duration::from_secs(u64::MAX);
+        let req = PythonRunRequest {
+            code: "c".into(),
+            mode: "none".into(),
+            timeout: None,
+            inputs: Default::default(),
+        };
+        let w = WireRequest::new(req, huge);
+        assert_eq!(
+            serde_json::to_value(&w).unwrap()["timeout_ms"],
+            json!(u64::MAX)
+        );
+    }
+
+    #[test]
+    fn python_error_without_message_falls_back_to_malformed() {
+        let r = WireResponse::status_only(WireStatus::PythonError, None);
+        assert_eq!(
+            r.into_result().unwrap_err(),
+            PythonRunError::Python(MALFORMED_MESSAGE.into())
+        );
+    }
+
+    #[test]
+    fn too_large_with_message_is_reported_verbatim() {
+        let msg = input_too_large_message(1024 * 1024);
+        let r = WireResponse::status_only(WireStatus::TooLarge, Some(msg.clone()));
+        assert_eq!(r.into_result().unwrap_err(), PythonRunError::Python(msg));
+    }
+
+    #[test]
+    fn too_large_without_message_falls_back_to_malformed() {
+        let r = WireResponse::status_only(WireStatus::TooLarge, None);
+        assert_eq!(
+            r.into_result().unwrap_err(),
+            PythonRunError::Python(MALFORMED_MESSAGE.into())
         );
     }
 }
