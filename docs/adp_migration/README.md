@@ -12,6 +12,12 @@ Los cambios que quedan dentro del motor no llevan nota aquí.
 |---|------|---------------|---------------------------|
 | 1 | [Memoria de una tool por quien la llama](2026-09-26-nested-tool-memory-per-caller.md) | Ninguna de código: subir el pin, actualizar los comentarios de `memory-mode.ts`, `role-shared.ts` y `creator-v2-defs.ts`, y medir prod en solo lectura antes de promover | Nada al compilar. Sin subir el pin, el mismo asset con memoria a dos niveles sigue compartiendo hilo, y una corrida de un nivel le contesta al otro su pregunta pendiente |
 
+## 2026-09-26 — un destino que viene de datos, solo a direcciones públicas
+
+| # | Nota | Acción de ADP | Qué se rompe si se ignora |
+|---|------|---------------|---------------------------|
+| 1 | [Destino de datos, solo público](2026-09-26-data-destination-public-only.md) | Ninguna de código; una tool con destino abierto hacia un host no público lo lista en `allowed_hosts` | Nada con destinos públicos; uno interno sin listar deja de conectarse |
+
 ## 2026-09-26 — adjuntos: el hijo no lee `files` de su estado, `path` solo en local, URLs solo públicas
 
 | # | Nota | Acción de ADP | Qué se rompe si se ignora |

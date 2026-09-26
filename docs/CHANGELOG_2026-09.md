@@ -6335,4 +6335,27 @@ da un error de tool con el tamaño); `check_inline_image_rejects_a_mime_type_the
 (`image/svg+xml` para Anthropic); `step3_skips_summary_for_a_document_whose_row_already_has_one`.
 
 **ADP.** Sin cambios de API.
+
+## 124. Endurecimiento: en `http_request`, un destino que viene de datos se marca solo en direcciones públicas
+
+**Qué cambia.** Si el destino de `http_request` viene de datos del run (un edge que nombra
+`base_url`, un `base_url` abierto en la tool, una tool o un `target` de `for_each` que llegan como
+dato) y no es el origen del `base_url` del autor, la conexión marca solo direcciones públicas: la
+regla del cliente guardado de §121 (`DialGuard`), revisada en la resolución DNS del socket y, para
+una IP literal, en la URL y en cada salto de redirect. Sin proxy. Un host en `allowed_hosts`
+(`"host"` o `"host:port"`, del autor) se marca en cualquier dirección; los otros saltos de un
+redirect siguen la regla. El destino del autor (`config` o un `fixed` de la tool) no cambia. Vale en
+JSON y en multipart. Un destino rechazado falla sin marcarse, con un error que no lleva la URL
+(`http_request: a destination that comes from data connects only to a public address …`).
+`COLMENA_ATTACHMENT_ALLOW_PRIVATE_HOSTS=1|true` apaga también este chequeo: solo desarrollo local.
+
+**Tests.** `http.rs` `data_destination_tests`: un destino de datos en loopback (por IP y por nombre;
+JSON y multipart), link-local, privado o `[::1]` no recibe conexión; un redirect desde un destino
+aceptado a una IP privada no se sigue; el destino del autor (`config` o `fixed`) y un host en
+`allowed_hosts` (IP:puerto y nombre) conectan. Los tests de credenciales con destino de datos corren
+con un nodo que acepta toda dirección: solo los rechaza la regla de credenciales.
+
+**ADP.** [Nota de migración](adp_migration/2026-09-26-data-destination-public-only.md). Sin cambios de
+SSE ni de API. Una tool con `base_url` abierto que deba llegar a un host no público lo lista en
+`allowed_hosts`.
 **Estado.** done.
