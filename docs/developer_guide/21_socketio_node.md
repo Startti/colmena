@@ -20,7 +20,7 @@ The `socketio_request` node connects to a Socket.IO server, emits an event with 
 
 ## Configuration Reference
 
-All config fields support `${VAR_NAME}` environment variable resolution in string values.
+All config fields support `${VAR_NAME}` environment variable resolution in string values (config only — see [Environment Variable Resolution](#environment-variable-resolution)).
 
 | Field | Type | Required | Default | Description |
 |---|---|---|---|---|
@@ -270,6 +270,14 @@ All string values in config and payload support `${VAR_NAME}` syntax:
 ```
 
 Resolution is **recursive** — nested string values inside objects and arrays within the payload are also resolved. Non-string values (numbers, booleans, null) are passed through unchanged.
+
+Env templates expand only in author config: a value that arrives through
+`inputs` (an edge, a model's argument) is sent as written, unless it is a
+tool's `fixed` value the dispatcher vouched for (`__colmena_env_trusted_paths`,
+see [22_tool_execution_flow.md](22_tool_execution_flow.md)). `url`,
+`namespace`, `headers` and `cookies` are also author-owned: an edge without a
+field, global state or an unoffered tool argument never sets them
+(CHANGELOG 2026-09 §105 and §109).
 
 ---
 

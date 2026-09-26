@@ -5609,3 +5609,18 @@ en `config` sigue expandiendo.
 
 **ADP.** Sin cambios de API.
 **Estado.** done.
+
+## 109. Endurecimiento: `socketio_request` expande `${VAR}` solo en la configuración del autor
+
+**Qué cambia.** `url`, `namespace`, `cookies`, `headers`, `payload` y `pre_events` se
+resuelven con la misma regla que `http_request`: un valor de `config` expande todo `${VAR}`;
+uno de `inputs` solo en las hojas que un despacho avaló (`EnvPolicy`), y si no se manda tal
+cual. La resolución de los payloads pasa de `emit_step` a la lectura de los campos, así que
+una variable de `config` inexistente falla antes de conectar. `url`, `namespace`, `headers` y
+`cookies` ya son campos del autor (§105).
+
+**Tests.** `socketio.rs::env_gate_tests` (un listener TCP registra la request de apertura): un
+header de `inputs` con `${VAR}` sale literal y la cookie de `config` sale expandida.
+
+**ADP.** Sin cambios de API.
+**Estado.** done.
