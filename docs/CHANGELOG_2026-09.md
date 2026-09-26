@@ -5748,7 +5748,7 @@ nada; con el campo en `multipart_url_fields`, se baja.
 archivos para subir debe listar esos campos.
 **Estado.** done.
 
-## 112. Fix: un `document_id` resuelve a la fila que tiene los bytes
+## 123. Fix: un `document_id` resuelve a la fila que tiene los bytes
 
 **Qué cambia.** Un documento puede tener una fila por provider en `conversation_attachments`.
 `image_generation`, `image_edit` y `tts` registran la de `generated`, con su `storage_key`. El

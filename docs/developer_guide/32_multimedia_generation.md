@@ -362,7 +362,7 @@ Después de mirarla, la imagen se sigue pudiendo reenviar o editar con
 `$attachment:<document_id>`: la fila nueva guarda el mismo `storage_key`, y en la búsqueda
 por `document_id` una fila de subida perezosa sin clave (sin `origin`; las que escribieron
 versiones anteriores) pierde contra cualquier otra, aunque sea más nueva (CHANGELOG 2026-09
-§112).
+§123).
 
 ### 2. Editar una imagen generada — `image_edit` chaining
 

@@ -59,7 +59,7 @@ puede tener una fila por provider (la subida perezosa de `load_attachment` agreg
 una); una fila sin `storage_key` ni `origin` (la de una subida perezosa) pierde contra las
 demás, y entre esas gana la más reciente, aunque no tenga clave: una subida nueva del id cuyos
 bytes no se guardaron falla a la vista en vez de reenviar una clave vieja (CHANGELOG 2026-09
-§112). Un id que la sesión no registró da `NotFound` y nunca se
+§123). Un id que la sesión no registró da `NotFound` y nunca se
 lee como `storage_key` directo (CHANGELOG 2026-09 §85).
 
 Background y decisiones:
