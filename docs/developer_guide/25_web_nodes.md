@@ -424,7 +424,7 @@ resuelve si un dispatcher marcó su JSON Pointer como confiable (ver
 `env_provenance.rs`). Lo marcan el despacho de tools (los `fixed` del autor) y
 `for_each` (los `fixed` de su `target`). Sin marca —modo grafo: lo que llega
 por un edge o del estado global— **nada** de `inputs` resuelve (CHANGELOG
-2026-09 §106). Un valor sin marca sale literal, sin error aunque falte la var.
+2026-09 §107). Un valor sin marca sale literal, sin error aunque falte la var.
 
 E2E: [`tests/graphs/security/tool_env_provenance_e2e.json`](../../tests/graphs/security/tool_env_provenance_e2e.json).
 

@@ -5380,7 +5380,7 @@ de reanudar a `alfa`.
 **ADP.** Sin código. La guía 19 y la nota de migración citan estos frames en la entrada
 106.
 
-## 106. Endurecimiento: `${VAR}` se expande solo en la configuración del autor
+## 107. Endurecimiento: `${VAR}` se expande solo en la configuración del autor
 
 **Qué cambia.** Un valor que llega por `inputs` (un edge, el estado global, una fila de
 `for_each`) ya no expande plantillas `${VAR}`, salvo que un despacho con provenance (el de
