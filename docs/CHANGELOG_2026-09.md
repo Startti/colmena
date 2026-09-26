@@ -5970,3 +5970,34 @@ caché respeta el tope, no guarda un fallo y lo deja a la llamada que esperaba.
 **ADP.** Sin cambios de API. `setup_sql` corre una vez por `connection_url` y configuración en
 cada proceso (de nuevo si sale del caché).
 **Estado.** done.
+
+## 130. La memoria de una tool, por quien la llama (1/7): la regla, sin cablear
+
+**Qué cambió.** El hilo de una tool con memoria `persistent` o `dynamic` es
+`tool/<nombre>[/<hilo>]` para cualquiera que la llame, así que el mismo agente llamado desde
+dos niveles comparte hilo (guía 19, «Riesgo conocido»). Este tramo trae la regla que lo
+separa, sin activarla:
+- `tool_configuration.rs`: `memory_node_path(caller, mode, name, thread, call_id)`, pura, y
+  `memory_thread_prefix`. Si el `node_id_path` del `llm_call` que llama empieza con `tool/`
+  (está dentro de un hijo invocado como tool), `persistent` y `dynamic` quedan en
+  `<caller>/tool/<nombre>[/<hilo>]`; si no, en la clave de siempre. `stateless` sigue en
+  `tool/<tool_call_id>`. El segmento `tool` es `TOOL_MEMORY_SEGMENT` (`llm/domain/memory.rs`).
+- `DagToolExecutor::with_caller_node_path` guarda el camino de quien llama, y `execute_inner`
+  arma la clave con `memory_node_path` (reemplaza el `match` en línea y
+  `ephemeral_subgraph_path`).
+
+Nadie llama todavía a `with_caller_node_path` (`llm.rs` se cablea en el tramo 4/7): toda clave
+sigue igual. Los doc comments de `MemoryMode` ya dicen la regla; la guía 19, en el tramo 7/7.
+
+**Tests.** Lib: 3008 passed. `tool_configuration.rs`: la tabla de claves por quien llama
+(`None`, `agent`, `ventas/responder`; `tool/Y/u/agent`, `tool/H`, `tool/Y/u/orch/agent`,
+`tool/Run_My_Agent/A/llm`) y por modo, `dynamic` sin hilo, y el prefijo. `dag_tool_executor.rs`:
+un `subgraph` despachado desde un hijo, desde fuera (con `ventas/responder` y `orch/agent` a
+profundidad 1) y con el hilo fijo de `Run_My_Agent`. El test de `stateless` pasa a
+`stateless_memory_path_tests`.
+
+**Mutación.** Rojas y revertidas: el predicado `subgraph_depth > 0`, 3; la clave anidada
+también para `stateless`, 2; el ejecutor sin pasar quien llama, 2.
+
+**ADP.** Nada: ninguna clave cambia en este tramo.
+**Estado.** done.
