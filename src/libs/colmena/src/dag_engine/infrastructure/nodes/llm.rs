@@ -1091,7 +1091,9 @@ impl crate::llm::application::LoadAttachmentResolver for AttachmentResolverImpl 
                         Some(u) => u.to_string(),
                         None => String::new(),
                     }),
-                    storage_key: None,
+                    // The bytes did not move: this row points at them too,
+                    // so `$attachment:<id>` resolves whichever row it reads.
+                    storage_key: gen.storage_key.clone(),
                     origin: None,
                 };
                 if let Err(e) = self.registry.upsert(upsert).await {
@@ -1116,7 +1118,7 @@ impl crate::llm::application::LoadAttachmentResolver for AttachmentResolverImpl 
                     source: gen.source,
                     registered_at: gen.registered_at,
                     refreshed_at: chrono::Utc::now(),
-                    storage_key: None,
+                    storage_key: gen.storage_key,
                     origin: None,
                     last_used_at: None,
                 }
@@ -5622,6 +5624,131 @@ mod resolver_tests {
             after.last_used_at.is_some(),
             "D10: load_attachment resolve() must touch last_used_at"
         );
+    }
+
+    /// Points `ANTHROPIC_BASE_URL` at a mock server while it lives.
+    struct AnthropicBaseUrl(Option<String>);
+
+    impl AnthropicBaseUrl {
+        fn set(url: &str) -> Self {
+            let previous = std::env::var("ANTHROPIC_BASE_URL").ok();
+            std::env::set_var("ANTHROPIC_BASE_URL", url);
+            Self(previous)
+        }
+    }
+
+    impl Drop for AnthropicBaseUrl {
+        fn drop(&mut self) {
+            match &self.0 {
+                Some(url) => std::env::set_var("ANTHROPIC_BASE_URL", url),
+                None => std::env::remove_var("ANTHROPIC_BASE_URL"),
+            }
+        }
+    }
+
+    /// Generate, look at it, forward it: an image registered as `Generated`
+    /// is loaded from an Anthropic model (lazy upload to its Files API, which
+    /// adds an Anthropic row), and `$attachment:<id>` still streams its bytes.
+    #[tokio::test]
+    #[serial_test::serial(base_url_env)]
+    async fn attachment_placeholder_reads_the_bytes_after_a_lazy_provider_upload() {
+        use crate::llm::application::LoadAttachmentResolver;
+        use crate::llm::domain::attachments::{
+            origin, AttachmentSource, AttachmentStreamResolver, UpsertAttachmentInput,
+        };
+        use crate::llm::domain::{AttachmentRegistry, FileSource, ProviderKind};
+        use crate::llm::infrastructure::attachments::AttachmentStreamResolverImpl;
+        use crate::llm::infrastructure::persistence::SqliteAttachmentRegistry;
+        use crate::storage::domain::{OutputStorageRepository, StoreRequest};
+        use crate::storage::infrastructure::LocalCacheStorageAdapter;
+        use futures::TryStreamExt;
+        use std::sync::Arc;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let storage: Arc<dyn OutputStorageRepository> = Arc::new(LocalCacheStorageAdapter::new());
+        let image = b"\x89PNG generated image".to_vec();
+        let stored = storage
+            .store(StoreRequest {
+                bytes: image.clone(),
+                mime_type: "image/png".to_string(),
+                filename: "img.png".to_string(),
+                session_id: None,
+                agent_session_id: Some("agent_1".to_string()),
+            })
+            .await
+            .unwrap();
+        let key = stored.storage_key.clone();
+
+        // What image_generation registers.
+        let registry: Arc<dyn AttachmentRegistry> = Arc::new(
+            SqliteAttachmentRegistry::new("sqlite::memory:")
+                .await
+                .unwrap(),
+        );
+        registry
+            .upsert(UpsertAttachmentInput {
+                agent_session_id: "agent_1".to_string(),
+                document_id: "img-1".to_string(),
+                provider: ProviderKind::Generated,
+                provider_file_id: key.clone(),
+                mime_type: "image/png".to_string(),
+                filename: "img.png".to_string(),
+                size_bytes: Some(image.len() as u64),
+                label: None,
+                description: Some("Image generated".to_string()),
+                source: AttachmentSource::Path(key.clone()),
+                storage_key: Some(key.clone()),
+                origin: Some(origin::generated_by("image_generation")),
+            })
+            .await
+            .unwrap();
+
+        let files_api = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/files"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "file_lazy",
+                "type": "file",
+                "filename": "img.png"
+            })))
+            .expect(1)
+            .mount(&files_api)
+            .await;
+
+        // load_attachment from an Anthropic model.
+        let loader = AttachmentResolverImpl {
+            registry: registry.clone(),
+            provider: ProviderKind::Anthropic,
+            api_key: "test-key".to_string(),
+            storage: Some(storage.clone()),
+        };
+        let loaded = {
+            let _base_url = AnthropicBaseUrl::set(&files_api.uri());
+            loader.resolve("agent_1", "img-1").await.unwrap()
+        };
+        match loaded.expect("the image loads").source {
+            FileSource::Uploaded(r) => assert_eq!(r.provider_file_id, "file_lazy"),
+            other => panic!("expected an upload to the Files API, got {other:?}"),
+        }
+
+        // `$attachment:img-1` afterwards.
+        let forward = AttachmentStreamResolverImpl::new(registry.clone(), storage.clone());
+        let stream = forward
+            .resolve("agent_1", "img-1")
+            .await
+            .expect("the id still resolves to the stored bytes");
+        let chunks: Vec<bytes::Bytes> = stream.stream.try_collect().await.unwrap();
+        assert_eq!(chunks.concat(), image);
+
+        // The Anthropic row says where the bytes are, too.
+        let row = registry
+            .lookup("agent_1", "img-1", ProviderKind::Anthropic)
+            .await
+            .unwrap()
+            .expect("the lazy upload persisted its row");
+        assert_eq!(row.provider_file_id, "file_lazy");
+        assert_eq!(row.storage_key.as_deref(), Some(key.as_str()));
     }
 }
 

@@ -14,17 +14,17 @@
 - `refresh_provider_file_id` (fn, pub async) — UPDATE provider_file_id and refreshed_at where (agent_session_id, document_id, provider), errors NotFound if no rows affected
 - `list_for_session` (fn, pub async) — SELECT all attachments for session_id, ordered ascending by registered_at
 - `update_description` (fn, pub async) — UPDATE description field by (agent_session_id, document_id, provider), errors NotFound if no rows affected
-- `lookup_by_document_id` (fn, pub async) — SELECT most recent by (agent_session_id, document_id) ignoring provider, ordered DESC refreshed_at then ASC provider for determinism
+- `lookup_by_document_id` (fn, pub async) — SELECT one row by (agent_session_id, document_id) ignoring provider: a row with neither storage_key nor origin (a lazy provider upload) last, then DESC refreshed_at, then ASC provider for determinism
 - `touch_last_used` (fn, pub async) — UPDATE last_used_at=NOW() for ALL rows matching (agent_session_id, document_id) across all providers, no-op if none exist
 - `find_stale_attachments` (fn, pub async) — SELECT rows where COALESCE(last_used_at, registered_at) < cutoff, ordered ASC, limited to query.limit
 - `delete_attachment` (fn, pub async) — DELETE all rows for (agent_session_id, document_id), idempotent (no error if none exist)
-- `tests` (mod, cfg(test)) — 11 integration tests covering upsert, lookup, refresh, update_description, lookup_by_document_id, touch_last_used, find_stale_attachments, delete_attachment; all marked #[ignore] for database-dependent gating
+- `tests` (mod, cfg(test)) — 13 integration tests covering upsert, lookup, refresh, update_description, lookup_by_document_id (including a keyed row winning over a newer lazy-upload row, and a newer keyless `user_upload` row winning over an older keyed one), touch_last_used, find_stale_attachments, delete_attachment; all marked #[ignore] for database-dependent gating
 
 ## File-level notes
 
 - **Defensive optional-column handling** (lines 87–96): storage_key, origin, and last_used_at use `.ok().flatten()` to gracefully handle NULL or missing columns on legacy rows (Plan A migration safety).
-- **Deterministic ordering** in `lookup_by_document_id` (line 269): secondary sort by provider ASC ensures stable winner when multiple rows share same refreshed_at.
+- **Ordering** in `lookup_by_document_id` (line 270): `(storage_key IS NULL AND origin IS NULL)` first, so the id resolves to the row that holds the bytes even when a lazy-upload provider row without a key is newer, while a newer keyless Step-3 or Generated row still wins and fails openly; provider ASC keeps a stable winner when rows share the same refreshed_at.
 - **Idempotent delete** (lines 330–340): does not error if no rows match, consistent with attachment GC lifecycle.
 - **Multi-provider lifecycle**: `touch_last_used` updates all provider copies of a document in one call, reflecting the semantic "user accessed this doc" across all integrations.
-- **Test coverage**: 11 tests (all #[ignore]-gated) cover core paths; tests use UUID-based session IDs to avoid concurrency conflicts in shared test DB.
+- **Test coverage**: 13 tests (all #[ignore]-gated) cover core paths; tests use UUID-based session IDs to avoid concurrency conflicts in shared test DB.
 - **No blocking issues**: SQL queries are straightforward sqlx patterns, error handling is uniform via AttachmentError domain type, no unimplemented stubs or TODO comments.

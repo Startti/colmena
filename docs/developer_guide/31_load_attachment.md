@@ -54,9 +54,13 @@ El catálogo que ve el LLM en su system message lista cada documento con su
 - `"$attachment:<document_id>"` para reenviar los bytes (p. ej. a un endpoint multipart).
 
 Resolución: un `AttachmentStreamResolver` (port en `domain`, impl en
-`infrastructure`) hace `document_id → storage_key → StoredStream`. La impl
-también soporta un fallback de backward-compat que trata al identificador
-como `storage_key` directo para flujos previos a Plan A.
+`infrastructure`) hace `document_id → storage_key → StoredStream`. Un documento
+puede tener una fila por provider (la subida perezosa de `load_attachment` agrega
+una); una fila sin `storage_key` ni `origin` (la de una subida perezosa) pierde contra las
+demás, y entre esas gana la más reciente, aunque no tenga clave: una subida nueva del id cuyos
+bytes no se guardaron falla a la vista en vez de reenviar una clave vieja (CHANGELOG 2026-09
+§123). Un id que la sesión no registró da `NotFound` y nunca se
+lee como `storage_key` directo (CHANGELOG 2026-09 §85).
 
 Background y decisiones:
 - Spec: [`docs/superpowers/specs/2026-05-25-attachment-uniform-resolution-design.md`](../superpowers/specs/2026-05-25-attachment-uniform-resolution-design.md)

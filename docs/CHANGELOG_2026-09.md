@@ -5787,6 +5787,39 @@ segundo dato.
 **ADP.** Sin cambios de API.
 **Estado.** done.
 
+## 123. Fix: un `document_id` resuelve a la fila que tiene los bytes
+
+**Qué cambia.** Un documento puede tener una fila por provider en `conversation_attachments`.
+`image_generation`, `image_edit` y `tts` registran la de `generated`, con su `storage_key`. El
+primer `load_attachment` desde un modelo de OpenAI, Anthropic o Gemini sube la imagen a su
+Files API y agrega la fila de ese provider, que se escribía sin `storage_key` y con un
+`refreshed_at` más nuevo. `lookup_by_document_id` devolvía la más reciente, así que desde ahí
+`$attachment:<id>` (y `image_edit`, `http_request` y las tools que leen por `document_id`)
+respondía `StorageKeyMissing`: generar, mirar y editar fallaba siempre. Dos cambios:
+
+- `lookup_by_document_id` (Postgres y SQLite) ordena por
+  `(storage_key IS NULL AND origin IS NULL)`, después `refreshed_at DESC` y `provider ASC`:
+  solo pierden las filas sin clave y sin `origin`, que son las que escribe la subida perezosa
+  (cubre también las que ya escribieron versiones anteriores). Una fila sin clave de Step 3
+  (`user_upload`) o `generated` más nueva sigue ganando y falla a la vista
+  (`StorageKeyMissing`): es una subida nueva del id, y la clave más vieja de otro provider
+  puede tener otros bytes.
+- La subida perezosa guarda en la fila del provider el `storage_key` de la fila `generated`
+  (los bytes no se movieron).
+
+**Tests.** En `sqlite_attachment_registry.rs` y `postgres_attachment_registry.rs` (este con
+`#[ignore]`, corrido contra un Postgres local): una fila `generated` con clave y una de OpenAI
+sin clave ni `origin`, más nueva; gana la clave (antes: `None`). Una fila `user_upload` de
+Anthropic con clave y una `user_upload` de OpenAI sin clave, más nueva; gana la de OpenAI
+(con `(storage_key IS NULL)` solo: la de Anthropic). En
+`llm.rs::resolver_tests::attachment_placeholder_reads_the_bytes_after_a_lazy_provider_upload`:
+una imagen en `LocalCacheStorageAdapter` registrada como `generated`, `load_attachment` desde
+Anthropic contra un Files API simulado, y después `$attachment:img-1` da los mismos bytes
+(antes: `StorageKeyMissing`); la fila de Anthropic guarda el `storage_key` (antes: `None`).
+Sin corrida E2E con un modelo real: este worktree no tiene credenciales de proveedores.
+
+**ADP.** Sin cambios de API ni de esquema. **Estado.** done.
+
 ## 124. Endurecimiento: las credenciales del autor en `http_request` se cuentan por hoja, y el motor marca los secretos de `config`
 
 **Qué cambia.** La regla de §118 (las credenciales del autor van solo al origen del autor o a
