@@ -42,8 +42,8 @@ type InitKey = [u8; 32];
 type InitCell<V> = Arc<OnceCell<Arc<V>>>;
 
 /// Results computed once per key, bounded: when full, the least recently used
-/// key goes first. A failed initialization leaves no entry, and concurrent
-/// callers of one key wait on the same initialization (`OnceCell`).
+/// key goes first. Concurrent callers of one key wait on the same `OnceCell`;
+/// a failed initialization leaves no entry once no caller waits on it.
 struct InitCache<V> {
     cells: std::sync::Mutex<LruCache<InitKey, InitCell<V>>>,
 }
@@ -69,16 +69,22 @@ impl<V> InitCache<V> {
     where
         Fut: Future<Output = Result<V, E>>,
     {
+        // Clones are handed out only under the lock. `get_or_insert` evicts a
+        // cell whose `init` is still running only when `max_entries` other
+        // keys are used meanwhile; a later caller of its key starts another.
         let cell = self.cells().get_or_insert(key, Default::default).clone();
         let result = cell
             .get_or_try_init(|| async move { init().await.map(Arc::new) })
             .await
             .cloned();
         if result.is_err() {
+            // A caller still waiting runs `init` next, so the cell leaves only
+            // when the cache is its last holder.
+            drop(cell);
             let mut cells = self.cells();
             if cells
                 .peek(&key)
-                .is_some_and(|c| Arc::ptr_eq(c, &cell) && !c.initialized())
+                .is_some_and(|c| Arc::strong_count(c) == 1 && !c.initialized())
             {
                 cells.pop(&key);
             }
@@ -1527,7 +1533,8 @@ mod init_cache_tests {
     }
 
     /// The cache runs `init` once per key (also for concurrent callers),
-    /// keeps no failure, and when full drops the least recently used key.
+    /// keeps no failure, and when full drops the least recently used key. A
+    /// failure with a caller still waiting leaves the cell to that caller.
     #[tokio::test]
     async fn the_cache_runs_once_per_key_keeps_no_failure_and_drops_the_least_recent() {
         use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
@@ -1555,6 +1562,10 @@ mod init_cache_tests {
         assert_eq!(runs.load(SeqCst), 4, "the recently used key was dropped");
         get(2, true).await.unwrap();
         assert_eq!(runs.load(SeqCst), 5, "the least recently used key stayed");
+        assert_eq!(tokio::join!(get(4, false), get(4, true)), (Err(()), Ok(4)));
+        assert_eq!(cache.len(), 2, "the waiter's initialization left the cache");
+        get(4, true).await.unwrap();
+        assert_eq!(runs.load(SeqCst), 7, "a later call initialized it again");
     }
 
     /// `execute` keys its initialization by URL and the config it reads.
