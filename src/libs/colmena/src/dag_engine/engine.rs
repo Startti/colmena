@@ -10,7 +10,7 @@ use crate::dag_engine::application::secure_value_service::SecureValueService;
 use crate::dag_engine::domain::error::DagError;
 use crate::dag_engine::domain::events::DagExecutionEvent;
 use crate::dag_engine::domain::graph::Graph;
-use crate::dag_engine::domain::state::DagTaskMemoryRepository;
+use crate::dag_engine::domain::state::{DagStateRepository, DagTaskMemoryRepository};
 use crate::dag_engine::infrastructure::persistence::postgres_dag_state_repository::PostgresDagStateRepository;
 use crate::dag_engine::infrastructure::persistence::PostgresSecureValueRepository;
 use crate::dag_engine::infrastructure::pool_registry::{
@@ -304,6 +304,7 @@ impl ColmenaEngine {
             Some(secure_value_service.clone()),
             Some(config.storage.clone()),
             Some(attachment_registry.clone()),
+            Some(state_repo.clone() as Arc<dyn DagStateRepository>),
         );
 
         let use_case = Arc::new(

@@ -443,6 +443,9 @@ pub struct LlmNode {
     /// `provider: Generated` artifacts to a chat provider's Files API on first
     /// `load_attachment` call.
     storage: Option<Arc<dyn crate::storage::domain::OutputStorageRepository>>,
+    /// Optional runs' state rows — propagated to DagToolExecutor, which closes
+    /// the child run of a question a parallel group does not keep.
+    state_repository: Option<Arc<dyn crate::dag_engine::domain::state::DagStateRepository>>,
 }
 
 impl LlmNode {
@@ -496,7 +499,18 @@ impl LlmNode {
             task_memory_repo,
             secure_value_service: None,
             storage: None,
+            state_repository: None,
         }
+    }
+
+    /// Builder: attach the runs' state rows so DagToolExecutor can close the
+    /// child run of a question a parallel group does not keep.
+    pub fn with_state_repository(
+        mut self,
+        repo: Arc<dyn crate::dag_engine::domain::state::DagStateRepository>,
+    ) -> Self {
+        self.state_repository = Some(repo);
+        self
     }
 
     /// Builder: attach a SecureValueService so it is forwarded to DagToolExecutor during tool calls.
@@ -2376,6 +2390,9 @@ impl ExecutableNode for LlmNode {
             // Thread the parent observer so tool-invoked subgraphs emit subgraph-* events.
             executor = executor.with_observer(_observer.clone());
             executor = executor.with_subgraph_depth(effective_subgraph_depth(inputs));
+            if let Some(repo) = self.state_repository.clone() {
+                executor = executor.with_state_repository(repo);
+            }
             if let Some(ctx) = documents_context.clone() {
                 executor = executor.with_documents(ctx);
             }

@@ -5169,3 +5169,53 @@ números de sección) y `check_doc_counts.sh`; las anclas nuevas se revisaron ap
 asocia los frames por `toolCallId` y `childScope`. Pero ADP no declara `parallel` en
 ninguna tool hasta el paso que maneja varias preguntas en un grupo: hoy, con dos
 preguntas en un grupo, una queda sin hacer y su hijo suspendido.
+
+## 101. Una pregunta por turno dentro de un grupo `parallel` (parallel tools, 3a)
+
+**Qué cambió.** Cuando una o más llamadas de un grupo `parallel` suspenden, el loop
+espera a que termine el grupo y suspende el turno en **una** pregunta: la de la primera
+llamada en el orden del modelo, no la primera en preguntar. Cierra el
+`TODO(parallel-suspend)` de la entrada 97.
+- **Las otras preguntas se cierran.** Método nuevo `ToolExecutor::close_suspended(call,
+  outcome)`, con cuerpo por defecto vacío, que el loop llama una vez por cada otra
+  llamada suspendida. `DagToolExecutor` pasa la fila del hijo a `FAILED` con
+  `fail_if_suspended` y, solo si la cerró, a sus descendientes `SUSPENDED` con
+  `fail_suspended_descendants`, como `close_refused`. No hace nada sin repositorio, con
+  una tool que no es `subgraph` o sin `session_id` en la salida SUSPENDED del hijo, que
+  ya lo traía (queda fijado por test). El modelo recibe
+  `text/prompts/agent_loop/closed_by_parallel_suspend.md`, y el stream emite el
+  `tool-output-available` de esa llamada con el mismo texto. El padre queda con un solo
+  hijo `SUSPENDED`, el que `find_suspended_child` reanuda; con dos, elegía por
+  `updated_at`.
+- **«NO se ejecutó» va solo a lo que no corrió:** los sucesores de cadena de cualquier
+  pregunta y las llamadas posteriores al grupo.
+- **Cableado.** El repositorio de estado llega al ejecutor por un 7º parámetro de
+  `HashMapNodeRegistry::new_with_secure_values` (`ColmenaEngine::new` pasa el suyo,
+  `HashMapNodeRegistry::new` pasa `None`), y sigue por `LlmNode::with_state_repository`
+  y `DagToolExecutor::with_state_repository`. Es un cambio de firma pública; en este
+  repo solo lo llaman `engine.rs` y los tests.
+- **Queda abierto hasta la entrada 102.** El hilo de memoria del hijo cerrado termina
+  con su pregunta sin resultado. Re-correrlo, que es lo que pide el texto, manda ese id
+  abierto: un 400 en Anthropic y OpenAI.
+
+**Tests.** 5 nuevos en la lib, 2919 passed (2914 en la entrada 100):
+- `agent_service`: dos preguntas en un grupo `c0..c6` (manda `c0` aunque `c3` preguntó
+  antes, `close_suspended` una vez con `c3`, historia `[c2, c3, c5, c1, c4, c6]`, los
+  Finish); el test de suspensión en grupo de la entrada 97, ampliado (no cierra nada);
+- `dag_tool_executor`, `close_suspended`: cierra al hijo y a sus descendientes
+  suspendidos, deja una fila que ya no está suspendida, no hace nada con una tool que no
+  es `subgraph`;
+- `run_use_case`: un hijo suspendido se nombra en su salida (`session_id`).
+
+**Mutación.** Rojas y revertidas editando: el marcador también para la segunda pregunta;
+sin llamar a `close_suspended` (`left: [] right: [("c3", …)]`); que mande la última
+pregunta (`left: "c3" right: "c0"`); el sucesor de cadena sin marcador (rojos los dos
+tests de grupo); sin la guarda de `subgraph`; los descendientes de una fila que esta
+llamada no cerró; un hijo suspendido que no se nombra en su salida.
+
+**E2E.** En las entradas 104 y 105. El cableado motor → registro → `llm_call` →
+ejecutor solo lo cubre ese E2E.
+
+**ADP.** Todavía ninguna tool debe declarar `parallel`: re-correr el hijo cerrado da 400
+hasta la entrada 102. La guía 19 y la nota de migración dicen lo de antes hasta la
+entrada 106.
