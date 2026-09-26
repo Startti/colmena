@@ -701,7 +701,7 @@ node-start              { node_id: "orch_1", node_type: "orchestrator" }
   thinking-delta        { node_id: "planner", node_type: "planner", delta: "...}]" }
   subgraph-node-end     { node_id: "planner", node_type: "planner", output: { result: { items: [...] } } }
 
-  ── Agente-tarea (en paralelo con otros agentes) ─────────────
+  ── Agente-tarea (de a una: ver la nota abajo) ───────────────
   subgraph-node-start              { node_id: "experto_vuelos", node_type: "llm_call" }
     subgraph-tool-input-start      { toolCallId: "tc_1", toolName: "search_flights" }
     subgraph-tool-input-available  { toolCallId: "tc_1", input: { origin: "MAD", ... } }
@@ -723,6 +723,14 @@ node-end        { node_id: "orch_1", node_type: "orchestrator", output: { final_
 usage-summary   { nodes: [...] }
 finish          { finishReason: "stop", usage: {...}, output: {...} }
 ```
+
+> **Las tareas del orchestrator corren de a una, aun con `parallel: true`.** Si
+> alguna tarea pendiente de la fase es `parallel`, el orchestrator toma todas las
+> pendientes de la fase en la misma vuelta; si ninguna lo es, toma una por vuelta.
+> En los dos casos las corre una después de la otra, así que el bloque de un
+> agente-tarea cierra (`subgraph-node-end`) antes de que abra el del siguiente.
+> Lo que corre a la vez son las llamadas a tools `parallel` dentro de un `llm_call`
+> ([`childScope`](#childscope--una-llamada-a-una-tool-parallel)).
 
 ---
 

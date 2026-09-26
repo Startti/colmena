@@ -2341,7 +2341,7 @@
 
     "orchestrator": {
       "name": "Orchestrator",
-      "description": "The master multi-agent coordination node. Manages the full lifecycle of a complex task: planning, agent execution, quality review, phase summarization, dynamic replanning, and final synthesis. Internally orchestrates planner, critic, phase_reactor, and final_reactor components — each an LLM call with its own configuration. Agents are executed as subgraphs (child DAGs). Supports phased execution (tasks in the same phase run in parallel), bridge tasks (immediate follow-ups within a phase), and 5 suspension points for human-in-the-loop interaction. Requires PostgreSQL for task and state persistence (DATABASE_URL environment variable).",
+      "description": "The master multi-agent coordination node. Manages the full lifecycle of a complex task: planning, agent execution, quality review, phase summarization, dynamic replanning, and final synthesis. Internally orchestrates planner, critic, phase_reactor, and final_reactor components — each an LLM call with its own configuration. Agents are executed as subgraphs (child DAGs). Supports phased execution (the tasks of a phase run one at a time, even when marked parallel), bridge tasks (immediate follow-ups within a phase), and 5 suspension points for human-in-the-loop interaction. Requires PostgreSQL for task and state persistence (DATABASE_URL environment variable).",
       "category": "orchestration",
       "config_fields": {
         "verbose": {

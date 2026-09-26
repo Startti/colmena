@@ -5137,3 +5137,35 @@ colmena_dag_engine --test parallel_tool_groups --test parallel_tool_identity --
 
 **ADP.** Nada nuevo respecto de la entrada 97: sin código, y ninguna tool declara
 `parallel` todavía.
+
+## 100. La nota de ADP del paso 2, y tres afirmaciones viejas sobre concurrencia (parallel tools, 2h)
+
+**Qué cambió.** Solo documentación.
+- La [nota de migración](adp_migration/2026-09-25-parallel-tool-calls.md) suma «Paso 2:
+  un grupo de llamadas `parallel` corre a la vez», con su línea en el índice. Qué ve ADP
+  en un grupo (frames intercalados, la historia en el orden del modelo, los frames de
+  una repetición después de los del grupo), con los frames y los tiempos del E2E de la
+  entrada 99. La frase del paso 1 «todavía corren una después de la otra» ahora dice
+  que era cierta en ese paso.
+- Tres afirmaciones viejas sobre concurrencia eran falsas. El orchestrator no cambia
+  en este arco:
+  - la guía 12 y `sse_events_reference.md` decían que el orchestrator corre en paralelo
+    las tareas `parallel=true` de una fase. Las corre de a una (`orchestrator.rs`, el
+    `for task in tasks_to_run` que espera cada sub-agente); `parallel` solo decide
+    cuántas pendientes toma en una vuelta. La guía 12 suma una nota que apunta a lo que
+    sí corre a la vez (guía 19);
+  - `node_configurations.json` decía lo mismo del orchestrator;
+  - la entrada 44 decía que las tool calls de un turno corrían concurrentes por un
+    `JoinSet` en `llm.rs`: su nota al pie está desde la entrada 97.
+
+**Tests.** No aplica: no cambia código. Siguen verdes `check_doc_links.py` (links y
+números de sección) y `check_doc_counts.sh`; las anclas nuevas se revisaron aparte.
+
+**Mutación.** No aplica.
+
+**E2E.** No aplica; los frames y tiempos que cita la nota salen del E2E de la entrada 99.
+
+**ADP.** Leer el paso 2 de la nota. No hace falta código, porque Startti/adp#855 ya
+asocia los frames por `toolCallId` y `childScope`. Pero ADP no declara `parallel` en
+ninguna tool hasta el paso que maneja varias preguntas en un grupo: hoy, con dos
+preguntas en un grupo, una queda sin hacer y su hijo suspendido.
