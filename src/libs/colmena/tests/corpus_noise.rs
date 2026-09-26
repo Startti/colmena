@@ -156,7 +156,10 @@ fn measure() -> Measured {
 // the children are agents with memory that can ask through a `suspend` tool;
 // run by `src/libs/colmena/tests/parallel_tool_suspend.rs` with a model that
 // answers by who calls it). Lints clean.
-const EXPECTED_FILES: usize = 333;
+// Bumped 333 -> 334: adds tests/graphs/agents/files_skipped_entry_keeps_ids.json
+// (`files: [bad, good]`, the unreadable entry is skipped and `good` is
+// registered under its own id). Lints clean.
+const EXPECTED_FILES: usize = 334;
 const EXPECTED_ERRORS: usize = 0;
 const EXPECTED_WARNINGS: usize = 0;
 const EXPECTED_INFOS: usize = 0;

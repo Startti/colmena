@@ -5849,3 +5849,43 @@ contenedor que mezcla credenciales `fixed` con campos de quien llama, un query p
 del autor, o un secreto en `config`, debe listar ese host en `allowed_hosts`. Con esas
 credenciales, una redirección a otro origen se devuelve (3xx) en vez de seguirse.
 **Estado.** done.
+
+## 125. Fix: cada archivo de `files[]` se registra con su propio id
+
+**Qué cambia.** El registro de los archivos de un `llm_call` leía `id`, `label`,
+`description` y `url`/`path` de la entrada de `files[]` en la misma posición que el archivo.
+El parser salta una entrada que no puede leer (base64 inválido, `path` ilegible, sin
+`data`/`url`/`path`, algo que no es un objeto) y la resolución descarta un archivo que no pudo
+entregar, así que desde la primera entrada que faltaba cada archivo se registraba con el id y
+la metadata de otro: con `files: [bad, good]`, los bytes de `good` quedaban como `doc-bad`.
+Ahora el id sale del archivo parseado (`FileData.document_id`) y la metadata, de su propia
+entrada: `parse_file_entries` devuelve también el índice de la entrada de la que salió cada
+archivo, y `file_registrations` empareja cada archivo, en orden, con la siguiente de esas
+entradas que tiene el `id`, el `filename` y el `mime_type` con que se parseó; una entrada que el
+parser saltó nunca es candidata. Queda un caso: un archivo que la resolución descarta, cuya
+entrada tiene el mismo `id`, `filename` y `mime_type` que la de un archivo posterior, le presta
+a ese archivo su `label`, `description` y `url`/`path`.
+
+Un archivo cuyos bytes no se pudieron guardar se sigue registrando si está en la Files API del
+provider (`load_attachment` lo lee por su `provider_file_id`), y este turno no le pone
+`storage_key`: no figura como guardado y, como es la fila más reciente del id (§123),
+`$attachment:<id>` responde `StorageKeyMissing`, salvo por esta **limitación:** el upsert
+conserva la clave que un turno anterior guardó en la fila de ese mismo provider (`COALESCE`),
+así que si el id se vuelve a subir con otros bytes y guardarlos falla, `$attachment:<id>`
+reenvía los bytes anteriores mientras `load_attachment` lee el archivo nuevo. Un archivo de texto inline
+(`data`/`path`) sin bytes guardados sigue sin registrarse; uno de texto con `url` se sube a la
+Files API y se registra sin clave como los demás. `attachment.registered` lleva ahora `stored`.
+
+**Tests.** En `llm.rs::files_parser_tests`: `[bad, good]` → `good` conserva `doc-good`, su
+label y su description (antes: `doc-bad`); un archivo que la resolución descarta no corre la
+label de los siguientes (antes: `[A, B]` en vez de `[A, C]`); una entrada que no es un objeto
+no se toma por la de un archivo sin id (antes: sin label); una entrada saltada con el mismo
+`id`, `filename` y `mime_type` que la siguiente no le presta su label (antes: `Skipped`). E2E con el motor
+(`tests/graphs/agents/files_skipped_entry_keeps_ids.json`, Postgres local,
+`LocalHttpStorageAdapter`): antes del fix la única fila era `doc-bad | Bad` con los bytes de
+`good.txt`; después, `doc-good | Good`. La llamada al modelo no se hizo (sin credenciales de
+proveedores; `COLMENA_PREFLIGHT_HEALTH=off` y un `OPENAI_BASE_URL` cerrado): el registro
+ocurre antes de esa llamada. El grafo nuevo pasa `dag_engine lint` sin hallazgos y sube el
+corpus de `tests/corpus_noise.rs` de 333 a 334 archivos (`EXPECTED_FILES`).
+
+**ADP.** Sin cambios de API. **Estado.** done.
