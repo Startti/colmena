@@ -966,8 +966,6 @@ Este bloque resume el estado real del cifrado en tránsito para cada componente 
 - Internamente usa rustls (vía tungstenite) — mismo comportamiento que HTTP: solo CAs públicas.
 - Config expone `transport: any|websocket|polling`, pero **ninguna opción TLS custom**.
 
----
-
 ## Egress: URLs que elige un run
 
 ### Adjuntos por URL (`files[].url`)
@@ -977,8 +975,6 @@ Este bloque resume el estado real del cifrado en tránsito para cada componente 
   10 s de conexión, 600 s en total, tope `COLMENA_ATTACHMENT_MAX_BYTES` (100 MiB). Un destino no público falla con
   `AttachmentUrlRefused` sin marcarse. `COLMENA_ATTACHMENT_ALLOW_PRIVATE_HOSTS=1|true` apaga el chequeo: solo
   desarrollo local (CHANGELOG 2026-09 §121).
-
----
 
 ## Brechas conocidas de TLS (Postgres, HTTP, Socket.IO)
 

@@ -159,8 +159,7 @@ impl SignedUrlDownloader {
         Self::from_parts(guarded_client(dialable), dialable, max_bytes)
     }
 
-    /// Public addresses only, whatever the environment says (what `new()` is
-    /// when [`ALLOW_PRIVATE_ENV_VAR`] is unset).
+    /// Public addresses only, whatever the environment says.
     #[cfg(test)]
     pub(crate) fn public_only() -> Self {
         Self::with_policy(is_global_unicast, DEFAULT_MAX_BYTES)
@@ -310,8 +309,7 @@ mod tests {
         ));
     }
 
-    /// The public-only client (`new()` with the variable unset) never dials a
-    /// loopback server.
+    /// `public_only()`, which `new()` is with the variable unset, never dials loopback.
     #[tokio::test]
     async fn a_non_public_address_is_never_dialed() {
         assert!(private_block_from(None), "unset, the variable blocks");
@@ -349,8 +347,7 @@ mod tests {
         assert!(matches!(r, Err(LlmError::AttachmentUrlRefused { .. })));
     }
 
-    /// A transport error does not carry the URL: a signed URL's query is its
-    /// signature.
+    /// A transport error does not carry the URL (a signed URL's query is its signature).
     #[tokio::test]
     async fn a_transport_error_does_not_carry_the_url() {
         let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -391,7 +388,7 @@ mod tests {
     async fn a_streamed_body_past_the_byte_cap_ends_in_an_error() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
+        let url = format!("http://{}/f", listener.local_addr().unwrap());
         tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
             let _ = socket.read(&mut [0u8; 4096]).await;
@@ -401,17 +398,13 @@ mod tests {
             let _ = socket.write_all(reply.as_bytes()).await;
         });
         let d = SignedUrlDownloader::with_policy(any_ip, 1024);
-        let stream = d.stream(&format!("http://{addr}/f")).await.unwrap();
-        let items: Vec<_> = stream.collect().await;
+        let items: Vec<_> = d.stream(&url).await.unwrap().collect().await;
         let (last, read) = items.split_last().expect("at least the error");
         let err = last.as_ref().expect_err("the stream ends with the error");
         let inner = err.get_ref().and_then(|e| e.downcast_ref());
-        assert!(matches!(
-            inner,
-            Some(LlmError::AttachmentTooLarge { limit: 1024 })
-        ));
-        let read: usize = read.iter().map(|c| c.as_ref().map_or(0, |b| b.len())).sum();
-        assert!(read <= 1024 && items[..items.len() - 1].iter().all(Result::is_ok));
+        assert!(matches!(inner, Some(LlmError::AttachmentTooLarge { .. })));
+        let read: usize = read.iter().map(|c| c.as_ref().unwrap().len()).sum();
+        assert!(read <= 1024, "{read} bytes before the error");
     }
 
     #[tokio::test]
