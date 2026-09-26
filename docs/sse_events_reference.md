@@ -231,6 +231,13 @@ El modelo pidió `Run`, `Nota` y `Run` en un solo mensaje; `Run` es `parallel`, 
   la frontera por `childScope`, nunca por posición. Una tool sin `parallel` es una
   barrera y corre sola, como antes. Cómo se arman los grupos:
   [guía 19](developer_guide/19_nested_agents_and_subgraphs.md#un-grupo-de-llamadas-parallel-corre-a-la-vez).
+- **Una pregunta dentro de un grupo** espera a que el grupo termine, y el turno se
+  suspende en una sola: la de la primera llamada en el orden del modelo, que no tiene
+  `tool-output-available` ni en ese turno ni en el resume, y cuya frontera no recibe
+  `subgraph-node-end`. Cada otra llamada que preguntó recibe un
+  `tool-output-available` con su `childScope` y un `output` string, el texto que lee el
+  modelo, y su hijo se cierra (`FAILED`). Detalle y frames:
+  [guía 19](developer_guide/19_nested_agents_and_subgraphs.md#suspensión-dentro-de-un-batch-paralelo-de-tools).
 
 Frames reales del E2E `src/libs/colmena/tests/parallel_tool_groups.rs`, recortados, con
 su tiempo de llegada. El modelo pidió `Run` dos veces en un mensaje; el hijo de `clima`

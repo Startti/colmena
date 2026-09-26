@@ -12,6 +12,7 @@ Los cambios que quedan dentro del motor no llevan nota aquí.
 |---|------|---------------|---------------------------|
 | 1 | [`childScope` y la frontera `<tool>#<k>`](2026-09-25-parallel-tool-calls.md) | Soportar `childScope` antes de subir el pin (hecho en Startti/adp#855). `tool-input-start` nunca lo trae: se lee de `tool-input-available` | Nada para las tools sin `parallel`; las fronteras `<tool>#<k>` de una tool `parallel` no cuelgan de su llamada |
 | 2 | [Un grupo de llamadas `parallel` corre a la vez](2026-09-25-parallel-tool-calls.md#paso-2-un-grupo-de-llamadas-parallel-corre-a-la-vez) | Ninguna de código (#855 ya asocia por `toolCallId` y `childScope`). No declarar `parallel` en ninguna tool hasta el paso que maneja varias preguntas en un grupo | Nada para las tools sin `parallel`; con `parallel`, dos preguntas en un grupo dejan una sin hacer y su hijo suspendido |
+| 3 | [Una pregunta por turno dentro de un grupo](2026-09-25-parallel-tool-calls.md#paso-3-una-pregunta-por-turno-dentro-de-un-grupo) | Ninguna de código. Desde este paso se puede declarar `parallel` en una tool cuyo hijo pregunta (Run My Agent) | Nada. Una pregunta cerrada llega como un `tool-output-available` cuyo `output` es un string (el texto que lee el modelo), y su hijo queda `FAILED` |
 
 ## 2026-09-25 — una fila de `dag_runs` guarda solo el esqueleto del grafo
 

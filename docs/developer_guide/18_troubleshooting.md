@@ -563,6 +563,13 @@ ejecutar recibe un marcador "no se ejecutó", y el camino de resume sanea ademá
 historiales escritos por builds anteriores —basta con reanudar la conversación una
 vez más—. Si seguís viendo el error, estás corriendo un build previo a esa fecha.
 
+Otra causa del mismo 400, cerrada en la entrada 102 de `CHANGELOG_2026-09.md`: un hilo
+que terminaba con un id abierto recibía un prompt nuevo encima. Pasaba con una pregunta
+que nunca se reanudó (la de un hijo que un grupo `parallel` cerró, o un resume
+rechazado) y con una corrida cortada por un Stop después de guardar el mensaje del
+asistente. Ahora la corrida fresca contesta primero esos ids con
+`abandoned_tool_call.md`.
+
 **Detalle completo y consecuencias de diseño:**
 [19_nested_agents_and_subgraphs.md → Suspensión dentro de un batch paralelo de tools](19_nested_agents_and_subgraphs.md#suspensión-dentro-de-un-batch-paralelo-de-tools).
 
