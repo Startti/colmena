@@ -974,7 +974,7 @@ Este bloque resume el estado real del cifrado en tránsito para cada componente 
   públicas (revisadas en la resolución DNS del socket, y la IP literal en la URL y en cada redirect), sin proxy,
   10 s de conexión, 600 s en total, tope `COLMENA_ATTACHMENT_MAX_BYTES` (100 MiB). Un destino no público falla con
   `AttachmentUrlRefused` sin marcarse. `COLMENA_ATTACHMENT_ALLOW_PRIVATE_HOSTS=1|true` apaga el chequeo: solo
-  desarrollo local (CHANGELOG 2026-09 §121).
+  desarrollo local (CHANGELOG 2026-09 §137).
 
 ## Brechas conocidas de TLS (Postgres, HTTP, Socket.IO)
 

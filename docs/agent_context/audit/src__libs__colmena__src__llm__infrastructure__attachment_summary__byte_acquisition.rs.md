@@ -21,7 +21,7 @@
 ## File-level notes
 
 - Module design rationale documented at top: v1 re-downloads (SignedUrl) or re-reads (Path) because inline sources are consumed during upload and not retained elsewhere
-- A SignedUrl source is fetched by the injected fetcher; production passes the guarded `SignedUrlDownloader`, whose byte cap applies (`COLMENA_ATTACHMENT_MAX_BYTES`, CHANGELOG 2026-09 §121)
+- A SignedUrl source is fetched by the injected fetcher; production passes the guarded `SignedUrlDownloader`, whose byte cap applies (`COLMENA_ATTACHMENT_MAX_BYTES`, CHANGELOG 2026-09 §137)
 - Stream-based chunked reading for SignedUrl is appropriate for potentially large files
 - Test coverage includes inline with/without bytes and SignedUrl streaming; Path case (filesystem I/O) omitted but not required for unit tests
 - All error cases properly wrapped with context messages

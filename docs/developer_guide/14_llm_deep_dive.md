@@ -201,7 +201,7 @@ Boolean optional flag (`true | false`, default `false`). When enabled, tools in 
     Se baja con un solo cliente (`SignedUrlDownloader`): solo `http`/`https`, solo direcciones públicas (también en
     cada redirect), sin proxy, 10 s de conexión, 600 s en total y un tope de bytes (`COLMENA_ATTACHMENT_MAX_BYTES`,
     100 MiB por defecto). `COLMENA_ATTACHMENT_ALLOW_PRIVATE_HOSTS=1` apaga el chequeo de direcciones: solo
-    desarrollo local (CHANGELOG 2026-09 §121).
+    desarrollo local (CHANGELOG 2026-09 §137).
   - `path`: legacy local, solo dev/tests, < 30 MB.
 - **Comportamiento por provider** (auto-detectado):
 

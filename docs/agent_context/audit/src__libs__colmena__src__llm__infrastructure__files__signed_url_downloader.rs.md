@@ -1,7 +1,7 @@
 # src/libs/colmena/src/llm/infrastructure/files/signed_url_downloader.rs
 
 **Layer:** infrastructure  
-**Purpose:** The one guarded HTTP client for attachment URLs (`files[].url`): http(s) only, global unicast addresses only (DNS resolver + IP-literal check on the URL and each redirect hop), no proxy, connect/total timeouts and a byte cap; no Authorization header (a signed URL carries its signature in the query). CHANGELOG 2026-09 §121.
+**Purpose:** The one guarded HTTP client for attachment URLs (`files[].url`): http(s) only, global unicast addresses only (DNS resolver + IP-literal check on the URL and each redirect hop), no proxy, connect/total timeouts and a byte cap; no Authorization header (a signed URL carries its signature in the query). CHANGELOG 2026-09 §137.
 
 ## Symbols
 
