@@ -277,7 +277,7 @@ tool's `fixed` value the dispatcher vouched for (`__colmena_env_trusted_paths`,
 see [22_tool_execution_flow.md](22_tool_execution_flow.md)). `url`,
 `namespace`, `headers` and `cookies` are also author-owned: an edge without a
 field, global state or an unoffered tool argument never sets them
-(CHANGELOG 2026-09 §105 and §109).
+(CHANGELOG 2026-09 §111 and §115).
 
 ---
 
