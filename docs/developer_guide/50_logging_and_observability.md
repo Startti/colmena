@@ -75,6 +75,7 @@ familias, con semántica distinta:
 | `colmena::extraction` | Metadata de la salida parseada del nodo `extraction` | `field_count` — nunca el JSON parseado en sí |
 | `colmena::reactor` | Metadata del nodo `reactor` | `system_message_len`, `context_texts_len`, `response_len` — nunca el prompt, el contexto ni la respuesta |
 | `colmena::llm` | Metadata del nodo `llm_call` | `prompt_len`, `has_system_message`, `response_len` — nunca el prompt ni la respuesta |
+| `colmena::python_exec` | Metadata del executor de Python: evento por corrida (`debug`) más el evento único `python executor installed` (`info`, una vez por proceso) | `executor`, `mode`, `code_len`, `duration_ms`, `outcome` (por corrida); `executor`, `modes` (instalación) — nunca el código, los datos ni el texto del error |
 | `colmena::payload::python_code` | Código Python crudo del nodo `python_script` | El body completo del script, sin truncar |
 | `colmena::payload::sql_query` | SQL crudo del nodo `sql_query` | La consulta completa, sin truncar |
 | `colmena::payload::planner_plan` | Plan renderizado del orchestrator (líneas `[agent]: task → ctx`) | Texto generado por el LLM, sin truncar |

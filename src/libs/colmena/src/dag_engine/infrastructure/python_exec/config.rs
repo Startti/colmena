@@ -18,6 +18,16 @@ pub enum ModesPolicy {
     All,
 }
 
+impl ModesPolicy {
+    /// The env value that produces this variant (`COLMENA_PYTHON_EXECUTOR_MODES`).
+    pub(crate) fn as_str(&self) -> &'static str {
+        match self {
+            ModesPolicy::Restricted => "restricted",
+            ModesPolicy::All => "all",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{0}")]
 pub struct ExecutorConfigError(pub String);
@@ -117,6 +127,12 @@ mod tests {
             cfg(&[(ENV_MAX_TIMEOUT, "120")]).unwrap().max_timeout,
             Duration::from_secs(120)
         );
+    }
+
+    #[test]
+    fn modes_names_are_the_env_values() {
+        assert_eq!(ModesPolicy::Restricted.as_str(), "restricted");
+        assert_eq!(ModesPolicy::All.as_str(), "all");
     }
 
     #[test]

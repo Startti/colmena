@@ -6411,3 +6411,29 @@ valor mal escrito es error).
 
 **ADP.** Sin cambios de API ni de SSE.
 **Estado.** done.
+
+## 146. Refactor: el despachador de Python y el executor en proceso
+
+**Qué cambia.** `python_exec::run` es el punto de entrada para correr Python:
+aplica la política de modos (con un executor aislado configurado, el modo
+`restricted` —o todos, con `COLMENA_PYTHON_EXECUTOR_MODES=all`— va a ese
+executor; el resto corre en proceso) y le da el plazo por defecto
+(`COLMENA_PYTHON_EXECUTOR_MAX_TIMEOUT_SECS`) solo a un pedido aislado que no
+trae uno propio: es un valor por defecto, no un tope. `InProcessExecutor` corre
+el código como hasta hoy (`spawn_blocking` y un plazo solo si el pedido lo
+trae). `install_from_env` instala la configuración una vez por proceso; un
+valor inválido queda guardado y cada `run` devuelve `PythonExecutorError: …`.
+Los executors aislados todavía no existen: pedirlos es un error de
+configuración. Target de log nuevo `colmena::python_exec`: un evento `info` al
+instalarse ("python executor installed", `executor` y `modes`) y uno `debug`
+por llamada ("python run": `executor`, `mode`, `code_len`, `duration_ms`,
+`outcome`), nunca código, entradas, salidas, stdout ni texto de error. Todavía
+ningún llamador pasa por acá (sección siguiente).
+
+**Tests.** Unitarios del despachador (política de modos, plazo por defecto,
+executor en proceso no se trata como aislado, executors aislados rechazados) y
+del executor en proceso con Python real (salida, error, plazo vencido); el test
+que sincroniza los targets de log con la guía 50 incluye el nuevo.
+
+**ADP.** Sin cambios de API ni de SSE.
+**Estado.** done.
