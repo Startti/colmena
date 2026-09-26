@@ -2,8 +2,9 @@
 //!
 //! ## Standalone use
 //! Configure via `config`: `base_url`, `endpoint`, `method`, `headers`, `query_params`,
-//! `body`, `bearer_token`, `authorization`. All string values support `${ENV_VAR}` resolution.
-//! Input edges override config values (inputs take priority over config).
+//! `body`, `bearer_token`, `authorization`. `config` string values support `${ENV_VAR}`
+//! resolution; values arriving over edges never do (they may be a webhook payload or a
+//! model's output). Input edges override config values.
 //!
 //! ## As an LLM tool (via `tool_configurations`)
 //! When invoked by `DagToolExecutor`, extra non-reserved input keys with primitive values
@@ -447,8 +448,7 @@ impl HttpNode {
     }
 
     /// Resolve `${ENV_VAR}` in all string values within a JSON Value (recursive).
-    /// Unconditional — used for `config`-sourced values (always trusted) and,
-    /// for now, the multipart path (gated in a follow-up PR).
+    /// Unconditional — only for `config`-sourced values, which are always trusted.
     fn resolve_env_vars_in_value(val: &Value) -> Value {
         match val {
             Value::String(s) => {
@@ -468,7 +468,7 @@ impl HttpNode {
         }
     }
 
-    // --- Env-provenance gating, NON-multipart path only (see env_provenance.rs).
+    // --- Env-provenance gating, both body paths (see env_provenance.rs).
     // An `inputs` value expands `${VAR}` only if trusted; `config` always expands.
 
     /// Wraps a `resolve_env_vars`-family `String` error as the boxed error
@@ -712,6 +712,7 @@ impl HttpNode {
         config.get(key).and_then(|v| v.as_bool()).unwrap_or(default)
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn execute_multipart(
         &self,
         full_url: &str,
@@ -719,16 +720,20 @@ impl HttpNode {
         merged_headers: &serde_json::Map<String, Value>,
         inputs: &NodeInputs,
         config: &Value,
+        policy: &EnvPolicy,
         agent_session_id: Option<&str>,
     ) -> Result<Value, Box<dyn StdError + Send + Sync>> {
-        let body_val = inputs
-            .get("body")
-            .or_else(|| config.get("body"))
-            .ok_or("MultipartConfigError: body is required in multipart mode")?;
-
-        // Apply env-var resolution to string leaves before parsing so that
-        // `${VAR}` works inside URLs and text values, matching JSON path.
-        let body_resolved = Self::resolve_env_vars_in_value(body_val);
+        // Env-var resolution on string leaves before parsing, so `${VAR}` works
+        // inside URLs and text values — gated for an `inputs` body, as on the
+        // JSON path.
+        let body_resolved = match inputs.get("body") {
+            Some(b) => Self::resolve_env_vars_in_value_gated(b, "/body", policy),
+            None => Self::resolve_env_vars_in_value(
+                config
+                    .get("body")
+                    .ok_or("MultipartConfigError: body is required in multipart mode")?,
+            ),
+        };
 
         let parts = Self::parse_multipart_body(&body_resolved)?;
 
@@ -777,41 +782,37 @@ impl HttpNode {
         req = req.header("User-Agent", "colmena-http-node/0.1");
 
         // Forward all headers EXCEPT Content-Type — reqwest will set
-        // multipart/form-data; boundary=... itself.
+        // multipart/form-data; boundary=... itself. An `inputs` header wins
+        // over the `config` one of the same name and is gated like on the
+        // JSON path.
+        let input_headers = inputs.get("headers").and_then(|v| v.as_object());
         for (k, v) in merged_headers {
             if k.eq_ignore_ascii_case("content-type") {
                 continue;
             }
             if let Some(v_str) = v.as_str() {
-                let v_resolved = Self::resolve_env_vars(v_str).map_err(|e| {
-                    Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
-                        as Box<dyn StdError + Send + Sync>
-                })?;
+                let v_resolved = if input_headers.is_some_and(|h| h.contains_key(k)) {
+                    let pointer = format!("/headers/{}", escape_pointer_segment(k));
+                    Self::expand_if_trusted(v_str, &pointer, policy)
+                } else {
+                    Self::resolve_env_vars(v_str)
+                }
+                .map_err(Self::io_err)?;
                 req = req.header(k, v_resolved);
             }
         }
-        // Auth: read from `inputs` first (priority), then `config` fallback;
-        // resolve `${ENV_VAR}` so a fixed `bearer_token` in `config` works.
-        if let Some(token) = inputs
-            .get("bearer_token")
-            .and_then(|v| v.as_str())
-            .or_else(|| config.get("bearer_token").and_then(|v| v.as_str()))
+        // Auth: `inputs` first (gated), then `config` (always resolves, so a
+        // fixed `bearer_token: "${TOKEN}"` in `config` works).
+        if let Some(token) =
+            Self::resolve_priority_opt(inputs, config, "bearer_token", "/bearer_token", policy)
+                .map_err(Self::io_err)?
         {
-            let token = Self::resolve_env_vars(token).map_err(|e| {
-                Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
-                    as Box<dyn StdError + Send + Sync>
-            })?;
             req = req.header("Authorization", format!("Bearer {token}"));
         }
-        if let Some(auth) = inputs
-            .get("authorization")
-            .and_then(|v| v.as_str())
-            .or_else(|| config.get("authorization").and_then(|v| v.as_str()))
+        if let Some(auth) =
+            Self::resolve_priority_opt(inputs, config, "authorization", "/authorization", policy)
+                .map_err(Self::io_err)?
         {
-            let auth = Self::resolve_env_vars(auth).map_err(|e| {
-                Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
-                    as Box<dyn StdError + Send + Sync>
-            })?;
             req = req.header("Authorization", auth);
         }
 
@@ -939,8 +940,9 @@ impl ExecutableNode for HttpNode {
     /// `bearer_token`, `authorization`), the value from `inputs` takes priority over `config`.
     ///
     /// # Env var resolution
-    /// All string values in `config` (and input headers) support `${VAR_NAME}` syntax, resolved
-    /// via `std::env::var` at call time. This is the primary mechanism for injecting API keys.
+    /// All string values in `config` support `${VAR_NAME}` syntax, resolved via `std::env::var`
+    /// at call time. This is the primary mechanism for injecting API keys. An `inputs` value
+    /// resolves only at a pointer a tool dispatcher vouched for (see [`EnvPolicy`]).
     ///
     /// # Extra query params
     /// Any input key not in `reserved_keys` that holds a primitive value (string, number, bool)
@@ -959,7 +961,7 @@ impl ExecutableNode for HttpNode {
         _observer: Option<Arc<dyn crate::dag_engine::domain::observer::ExecutionObserver>>,
     ) -> Result<Value, Box<dyn StdError + Send + Sync>> {
         // 0. Env-provenance policy for this dispatch (see env_provenance.rs).
-        // Legacy (no key present) expands every pointer — today's behavior.
+        // No key present (graph mode) → no `inputs` value expands; `config` does.
         let policy = EnvPolicy::from_inputs(inputs);
 
         // 1. Parse Configuration (Inputs > Config)
@@ -1134,6 +1136,7 @@ impl ExecutableNode for HttpNode {
                     &merged_headers,
                     inputs,
                     config,
+                    &policy,
                     agent_session_id,
                 )
                 .await;
@@ -2527,6 +2530,10 @@ mod extra_query_params_tests {
     use super::*;
     use std::collections::HashMap;
 
+    fn untrusted() -> EnvPolicy {
+        EnvPolicy::Restricted(Default::default())
+    }
+
     fn inputs(pairs: &[(&str, Value)]) -> NodeInputs {
         pairs
             .iter()
@@ -2546,7 +2553,7 @@ mod extra_query_params_tests {
             ("__colmena_resume_answer", json!("yes")),
             ("__node_id", json!("n1")),
         ]);
-        let got = HttpNode::collect_extra_query_params(&given, &EnvPolicy::Legacy);
+        let got = HttpNode::collect_extra_query_params(&given, &untrusted());
 
         assert!(got.is_empty(), "engine-internal inputs leaked: {got:?}");
     }
@@ -2561,7 +2568,7 @@ mod extra_query_params_tests {
             ("authorization", json!("Bearer t")),
             ("secure", json!(true)),
         ]);
-        let got = HttpNode::collect_extra_query_params(&given, &EnvPolicy::Legacy);
+        let got = HttpNode::collect_extra_query_params(&given, &untrusted());
 
         assert!(got.is_empty(), "reserved keys leaked: {got:?}");
     }
@@ -2575,7 +2582,7 @@ mod extra_query_params_tests {
             ("active", json!(true)),
             ("__colmena_subgraph_depth", json!(0)),
         ]);
-        let got = HttpNode::collect_extra_query_params(&given, &EnvPolicy::Legacy);
+        let got = HttpNode::collect_extra_query_params(&given, &untrusted());
 
         assert_eq!(got.len(), 3);
         assert_eq!(got.get("page"), Some(&json!("1")));
@@ -2591,15 +2598,15 @@ mod extra_query_params_tests {
             ("nil", Value::Null),
             ("keep", json!("yes")),
         ]);
-        let got = HttpNode::collect_extra_query_params(&given, &EnvPolicy::Legacy);
+        let got = HttpNode::collect_extra_query_params(&given, &untrusted());
 
         assert_eq!(got.len(), 1);
         assert_eq!(got.get("keep"), Some(&json!("yes")));
     }
 }
 
-/// Env-provenance gate, non-multipart path only (multipart: follow-up PR).
-/// An `inputs`-sourced `${VAR}` expands only when trusted; untrusted never errors.
+/// Env-provenance gate. An `inputs`-sourced `${VAR}` expands only when
+/// trusted; untrusted never errors.
 #[cfg(test)]
 mod env_provenance_gating_tests {
     use super::*;
@@ -2624,14 +2631,14 @@ mod env_provenance_gating_tests {
             .expect("execute ok")
     }
 
-    /// Characterization (pass on old and new code): `EnvPolicy::Legacy` keeps expanding.
+    /// Graph mode (no trusted-paths key): an edge-delivered value never expands.
     #[tokio::test]
-    async fn legacy_inputs_bearer_token_still_resolves_env_var() {
+    async fn no_key_leaves_an_inputs_bearer_token_literal() {
         std::env::set_var("HTTP_GATING_TEST_LEGACY", "legacy-secret");
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/me"))
-            .and(header("authorization", "Bearer legacy-secret"))
+            .and(header("authorization", "Bearer ${HTTP_GATING_TEST_LEGACY}"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
             .mount(&server)
             .await;
@@ -2702,6 +2709,45 @@ mod env_provenance_gating_tests {
         assert_eq!(body["a"]["b"], "${PROBE}");
 
         std::env::remove_var("PROBE");
+    }
+
+    /// The multipart path honors the policy too (it used to resolve every value):
+    /// untrusted body leaf, header and bearer stay literal; `config` still resolves.
+    #[tokio::test]
+    async fn restricted_policy_leaves_untrusted_multipart_values_literal() {
+        std::env::set_var("HTTP_GATING_TEST_MP", "multipart-test-only");
+        std::env::set_var("HTTP_GATING_TEST_MP_CFG", "config-test-only");
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
+            .mount(&server)
+            .await;
+
+        let inputs = HashMap::from([
+            (
+                "headers".to_string(),
+                json!({ "Content-Type": "multipart/form-data", "X-Target": "${HTTP_GATING_TEST_MP}" }),
+            ),
+            (
+                "body".to_string(),
+                json!({ "note": "${HTTP_GATING_TEST_MP}" }),
+            ),
+            ("bearer_token".to_string(), json!("${HTTP_GATING_TEST_MP}")),
+            (ENV_TRUSTED_PATHS_KEY.to_string(), restricted(&[])),
+        ]);
+        let mut config = cfg(&server.uri(), "/upload", "POST");
+        config["headers"] = json!({ "X-Author": "${HTTP_GATING_TEST_MP_CFG}" });
+        assert_eq!(run(inputs, config).await["status"], 200);
+
+        let req = &server.received_requests().await.unwrap()[0];
+        let raw = String::from_utf8_lossy(&req.body);
+        assert!(!raw.contains("multipart-test-only") && raw.contains("${HTTP_GATING_TEST_MP}"));
+        let header = |k: &str| req.headers.get(k).unwrap().to_str().unwrap().to_string();
+        assert_eq!(header("x-target"), "${HTTP_GATING_TEST_MP}");
+        assert_eq!(header("authorization"), "Bearer ${HTTP_GATING_TEST_MP}");
+        assert_eq!(header("x-author"), "config-test-only");
+        std::env::remove_var("HTTP_GATING_TEST_MP");
+        std::env::remove_var("HTTP_GATING_TEST_MP_CFG");
     }
 
     /// Pass on both: a listed header pointer expands exactly that leaf.

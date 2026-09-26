@@ -1111,16 +1111,17 @@ identical to their operator-authored value
 `DagToolExecutor::execute_inner` right after the merge — see
 [22_tool_execution_flow.md § 5e](22_tool_execution_flow.md#5e-env-expansion-provenance-which-values-may-later-resolve-var)).
 
-**`http_request` is partially covered** (2026-09, this PR): the
-**non-multipart** JSON/string path (`base_url`, `endpoint`, `headers`,
-`bearer_token`, `authorization`, `query_params`, `body`) gates `${VAR}` on
-this trusted-pointer set. **Multipart still expands unconditionally** —
-next PR. See [25_web_nodes.md](25_web_nodes.md). E2E:
+**`http_request` is covered on both body paths** (JSON and multipart):
+`base_url`, `endpoint`, `headers`, `bearer_token`, `authorization`,
+`query_params` and `body` gate `${VAR}` on this trusted-pointer set.
+`for_each` sends the set for its rows (only the target's `fixed` values are
+trusted). With **no** set — graph mode, where a value arrived over an edge or
+from global state — nothing in `inputs` expands; only `config` does
+(CHANGELOG 2026-09 §107). See
+[25_web_nodes.md](25_web_nodes.md). E2E:
 [`tests/graphs/security/tool_env_provenance_e2e.json`](../../tests/graphs/security/tool_env_provenance_e2e.json).
 
 **Still pending:** every other node still expands `${VAR}` unconditionally.
-The graph-edge path and `subgraph`/`llm_call`-as-tool child graphs also
-still run in legacy/unrestricted mode per the design.
 
 ---
 

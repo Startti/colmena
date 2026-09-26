@@ -1,18 +1,20 @@
 //! Per-leaf provenance for `${VAR}` environment-variable expansion in
 //! tool-dispatched node arguments.
 //!
-//! An LLM-authored tool argument must never resolve a `${VAR}` placeholder
-//! against the process environment — otherwise a model could read back a
-//! secret by naming its env var (`q: "${DATABASE_URL}"`) as an ordinary tool
-//! argument. Operator-authored values (`node_schema` `fixed`, `fixed_config`,
-//! the fixed portion of a `$DYNAMIC` template) must keep resolving as today.
+//! Env templates expand only in values the author wrote: a `${VAR}`
+//! placeholder in a tool argument the model supplied is sent as written and
+//! never resolved against the process environment. Operator-authored values
+//! (`node_schema` `fixed`, `fixed_config`, the fixed portion of a `$DYNAMIC`
+//! template) keep resolving.
 //!
 //! The dispatcher (`DagToolExecutor`) computes, once per tool call, the set
 //! of JSON pointers into the merged tool arguments whose STRING value is
 //! byte-identical to the operator-authored value at that same pointer. That
-//! set travels with the call as `__colmena_env_trusted_paths`, for a node to
-//! later consult via [`EnvPolicy`] — no node reads this key yet; that wiring
-//! is a follow-up change. Equality-at-pointer covers `node_schema`,
+//! set travels with the call as `__colmena_env_trusted_paths`, which
+//! `http_request` consults via [`EnvPolicy`]; `for_each` sends it for its
+//! rows too. With no key at all — a graph edge, global state — nothing in
+//! `inputs` is trusted: only a node's own `config` expands `${VAR}`.
+//! Equality-at-pointer covers `node_schema`,
 //! `$DYNAMIC`, and legacy `field_mapping` in one function, and naturally
 //! excludes any leaf an LLM argument touched. Whole objects are never
 //! trusted — only individual string leaves.
@@ -21,44 +23,36 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
 /// Tool-argument key carrying the trusted-pointer set for this dispatch.
-/// Absent means legacy (unrestricted) behavior; present but malformed means
-/// fail closed (nothing is trusted).
+/// Absent or malformed means fail closed (nothing in `inputs` is trusted).
 pub const ENV_TRUSTED_PATHS_KEY: &str = "__colmena_env_trusted_paths";
 
 /// Whether a given input pointer is allowed to expand `${VAR}` against the
 /// process environment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EnvPolicy {
-    /// No `ENV_TRUSTED_PATHS_KEY` was present in the node's inputs — the
-    /// caller is not a provenance-aware dispatch (e.g. graph mode). Every
-    /// pointer may expand, matching today's behavior.
-    Legacy,
-    /// The key was present. Only pointers in this set may expand. A
-    /// malformed key parses to `Restricted(HashSet::new())` — fail closed.
+    /// Only pointers in this set may expand. A missing key (graph mode: the
+    /// value came over an edge or from global state) or a malformed one
+    /// parses to `Restricted(HashSet::new())` — fail closed.
     Restricted(HashSet<String>),
 }
 
 impl EnvPolicy {
-    /// Derive the policy from a node's raw inputs. No key → [`Self::Legacy`].
-    /// A key present but not a JSON array of strings → `Restricted(empty)`,
-    /// i.e. fail closed rather than silently trusting everything.
+    /// Derive the policy from a node's raw inputs. No key, or a key that is
+    /// not a JSON array of strings → `Restricted(empty)`: an input value only
+    /// expands when a provenance-aware dispatcher vouched for its pointer.
     pub fn from_inputs(inputs: &crate::dag_engine::domain::node::NodeInputs) -> Self {
-        match inputs.get(ENV_TRUSTED_PATHS_KEY) {
-            None => EnvPolicy::Legacy,
-            Some(value) => match serde_json::from_value::<Vec<String>>(value.clone()) {
-                Ok(pointers) => EnvPolicy::Restricted(pointers.into_iter().collect()),
-                Err(_) => EnvPolicy::Restricted(HashSet::new()),
-            },
-        }
+        let pointers = inputs
+            .get(ENV_TRUSTED_PATHS_KEY)
+            .and_then(|v| serde_json::from_value::<Vec<String>>(v.clone()).ok())
+            .unwrap_or_default();
+        EnvPolicy::Restricted(pointers.into_iter().collect())
     }
 
     /// Whether the value at `pointer` may resolve `${VAR}` against the
     /// process environment.
     pub fn may_expand(&self, pointer: &str) -> bool {
-        match self {
-            EnvPolicy::Legacy => true,
-            EnvPolicy::Restricted(set) => set.contains(pointer),
-        }
+        let EnvPolicy::Restricted(set) = self;
+        set.contains(pointer)
     }
 }
 
@@ -190,11 +184,12 @@ mod tests {
     }
 
     #[test]
-    fn no_key_is_legacy_and_expands_everything() {
-        let inputs: HashMap<String, Value> = hm(json!({ "q": "hello" }));
+    fn no_key_fails_closed_and_expands_nothing() {
+        // Graph mode: a value that arrived over an edge or from global state.
+        let inputs: HashMap<String, Value> = hm(json!({ "q": "${COLMENA_TEST_VAR}" }));
         let policy = EnvPolicy::from_inputs(&inputs);
-        assert_eq!(policy, EnvPolicy::Legacy);
-        assert!(policy.may_expand("/anything"));
+        assert_eq!(policy, EnvPolicy::Restricted(HashSet::new()));
+        assert!(!policy.may_expand("/q"));
     }
 
     #[test]
@@ -203,10 +198,7 @@ mod tests {
             ENV_TRUSTED_PATHS_KEY: { "not": "an array of strings" }
         }));
         let policy = EnvPolicy::from_inputs(&inputs);
-        match &policy {
-            EnvPolicy::Restricted(set) => assert!(set.is_empty()),
-            EnvPolicy::Legacy => panic!("malformed key must fail closed, not fall back to legacy"),
-        }
+        assert_eq!(policy, EnvPolicy::Restricted(HashSet::new()));
         assert!(!policy.may_expand("/connection_url"));
     }
 

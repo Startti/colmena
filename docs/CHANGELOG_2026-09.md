@@ -5429,3 +5429,28 @@ declarar `parallel` en Run My Agent. ADP ve:
   reanudada ni `subgraph-node-end` de su frontera.
 
 La curación de ids abandonados vale para todos los agentes en corridas frescas.
+
+## 107. Endurecimiento: `${VAR}` se expande solo en la configuración del autor
+
+**Qué cambia.** Un valor que llega por `inputs` (un edge, el estado global, una fila de
+`for_each`) ya no expande plantillas `${VAR}`, salvo que un despacho con provenance (el de
+tools o `for_each`) marque su puntero como un valor `fixed` del autor. `EnvPolicy::from_inputs`
+sin la clave `__colmena_env_trusted_paths` (o con una malformada) es `Restricted(∅)`; se
+borra `Legacy`. `config` sigue expandiendo siempre, así que el `bearer_token: "${TOKEN}"` del
+autor funciona igual. El path multipart de `http_request` aplica la misma política que el JSON
+a body, headers y `bearer_token`/`authorization` de `inputs`. `for_each` manda por fila los
+punteros de los `fixed` de su `target` (`trusted_pointers`, la misma regla del despacho de
+tools).
+
+**Tests.** `run_use_case.rs::graph_http_payload_tests` (grafo real `trigger_webhook` →
+`http_request`, mocks locales, variables solo de test): un valor aplanado llega literal y el
+`${VAR}` de `config` se expande; un edge que nombra el campo fija `base_url` y su valor no se
+expande. `for_each.rs::http_target_env_tests`: la fila llega literal, el `fixed` se expande.
+En `http.rs`, multipart con punteros vacíos: body, header y bearer de `inputs` literales,
+header de `config` expandido; y sin clave nada de `inputs` se expande (también en
+`env_provenance.rs`).
+
+**ADP.** Sin cambios de API. Un grafo que ponía `${VAR}` en un valor que llega por un edge
+(o en una fila de `for_each` fuera de sus `fixed`) ahora lo manda literal: el lugar de un
+secreto es `config` o un `fixed`. Ninguno en `tests/graphs`.
+**Estado.** done.

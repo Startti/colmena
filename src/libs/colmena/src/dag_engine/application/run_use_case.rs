@@ -3286,3 +3286,119 @@ mod stored_run_status_tests {
         );
     }
 }
+
+/// Graph mode: what a payload may do to an `http_request` node. Test-only env
+/// vars; two local mock servers stand in for the author's API and for whoever
+/// controls the payload.
+#[cfg(test)]
+mod graph_http_payload_tests {
+    use super::*;
+    use crate::dag_engine::domain::node::ExecutableNode;
+    use crate::dag_engine::infrastructure::nodes::http::HttpNode;
+    use crate::dag_engine::infrastructure::nodes::trigger::TriggerWebhookNode;
+    use futures::StreamExt;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    struct Registry;
+    impl NodeRegistryPort for Registry {
+        fn get_node(&self, node_type: &str) -> Option<Arc<dyn ExecutableNode>> {
+            match node_type {
+                "trigger_webhook" => Some(Arc::new(TriggerWebhookNode)),
+                "http_request" => Some(Arc::new(HttpNode::new())),
+                _ => None,
+            }
+        }
+        fn get_all_nodes(&self) -> HashMap<String, Arc<dyn ExecutableNode>> {
+            HashMap::new()
+        }
+    }
+
+    async fn server() -> MockServer {
+        let s = MockServer::start().await;
+        Mock::given(wiremock::matchers::any())
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
+            .mount(&s)
+            .await;
+        s
+    }
+
+    /// `hook` emits `payload`; `call` is an `http_request` aimed at `author`.
+    async fn run(payload: Value, author: &MockServer, extra: Value, edges: Value, seed: Value) {
+        let mut call = json!({ "base_url": author.uri(), "endpoint": "/items", "method": "GET" });
+        call.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let g: Graph = serde_json::from_value(json!({
+            "nodes": {
+                "hook": { "type": "trigger_webhook", "config": { "test_payload": payload } },
+                "call": { "type": "http_request", "config": call }
+            },
+            "edges": edges
+        }))
+        .unwrap();
+        let uc = DagRunUseCase::new(Arc::new(Registry), None).with_seed_state(seed);
+        let stream = uc.execute_stream(g, None, None, false, None, None, None);
+        tokio::pin!(stream);
+        while stream.next().await.is_some() {}
+    }
+
+    async fn only_request(s: &MockServer) -> wiremock::Request {
+        let mut got = s.received_requests().await.unwrap();
+        assert_eq!(got.len(), 1, "expected exactly one request");
+        got.remove(0)
+    }
+
+    fn query(req: &wiremock::Request, key: &str) -> Option<String> {
+        req.url
+            .query_pairs()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.to_string())
+    }
+
+    fn bearer(req: &wiremock::Request) -> &str {
+        req.headers.get("authorization").unwrap().to_str().unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_flattened_value_never_expands_an_env_var_while_config_still_does() {
+        std::env::set_var("COLMENA_P4_TEST_TOKEN_A", "author-token-a-test-only");
+        std::env::set_var("COLMENA_P4_TEST_FLAT", "flat-value-test-only");
+        let author = server().await;
+        run(
+            json!({ "q": "${COLMENA_P4_TEST_FLAT}" }),
+            &author,
+            json!({ "bearer_token": "${COLMENA_P4_TEST_TOKEN_A}" }),
+            json!([{ "from": "hook", "to": "call" }]),
+            json!({}),
+        )
+        .await;
+
+        let req = only_request(&author).await;
+        assert_eq!(query(&req, "q").as_deref(), Some("${COLMENA_P4_TEST_FLAT}"));
+        assert_eq!(bearer(&req), "Bearer author-token-a-test-only");
+        std::env::remove_var("COLMENA_P4_TEST_TOKEN_A");
+        std::env::remove_var("COLMENA_P4_TEST_FLAT");
+    }
+
+    /// An edge that NAMES the field is the author's wiring and still wins; what
+    /// flows through it is still data, never an env lookup.
+    #[tokio::test]
+    async fn an_explicit_edge_still_sets_base_url_but_its_value_does_not_expand() {
+        std::env::set_var("COLMENA_P4_TEST_EXPLICIT", "explicit-value-test-only");
+        let (author, wired) = (server().await, server().await);
+        let edges = json!([
+            { "from": "hook.target", "to": "call.base_url" },
+            { "from": "hook.q", "to": "call.q" }
+        ]);
+        let payload = json!({ "target": wired.uri(), "q": "${COLMENA_P4_TEST_EXPLICIT}" });
+        run(payload, &author, json!({}), edges, json!({})).await;
+
+        assert!(author.received_requests().await.unwrap().is_empty());
+        let req = only_request(&wired).await;
+        assert_eq!(
+            query(&req, "q").as_deref(),
+            Some("${COLMENA_P4_TEST_EXPLICIT}")
+        );
+        std::env::remove_var("COLMENA_P4_TEST_EXPLICIT");
+    }
+}
