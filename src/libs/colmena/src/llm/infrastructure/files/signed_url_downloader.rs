@@ -192,7 +192,7 @@ impl SignedUrlDownloader {
             Err(e) if is_dial_refused(&e) => return Err(refused(DialRefused)),
             Err(e) => {
                 return Err(LlmError::NetworkError {
-                    message: format!("signed URL fetch failed: {}", e),
+                    message: format!("signed URL fetch failed: {}", e.without_url()),
                 })
             }
         };
@@ -330,6 +330,20 @@ mod tests {
         let d = SignedUrlDownloader::with_policy(loopback_only, DEFAULT_MAX_BYTES);
         let r = d.stream(&format!("{}/f", server.uri())).await;
         assert!(matches!(r, Err(LlmError::AttachmentUrlRefused { .. })));
+    }
+
+    /// A transport error does not carry the URL: a signed URL's query is its
+    /// signature.
+    #[tokio::test]
+    async fn a_transport_error_does_not_carry_the_url() {
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/f?sig=query-value", closed.local_addr().unwrap());
+        drop(closed);
+        let d = SignedUrlDownloader::allowing_private_hosts();
+        let Err(LlmError::NetworkError { message }) = d.stream(&url).await else {
+            panic!("expected a transport error")
+        };
+        assert!(!message.contains("query-value"), "{message}");
     }
 
     #[tokio::test]
