@@ -482,7 +482,7 @@ edge que lo nombra, un argumento del modelo) y no es el `fixed` de la tool, el
 nodo baja una URL solo en los campos que el autor lista en
 `multipart_url_fields`. En cualquier otro campo, un string URL se manda como
 parte de texto (no se baja) y un objeto `{ "url": … }` se rechaza con error. Un
-`body` de `config` (o `fixed`) se comporta igual que antes (CHANGELOG 2026-09 §113).
+`body` de `config` (o `fixed`) se comporta igual que antes (CHANGELOG 2026-09 §120).
 
 ### Ejemplo — Subir archivos al KB de ADP (como LLM tool)
 

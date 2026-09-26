@@ -284,7 +284,7 @@ The `cookies` and `headers` the author configured (other than
 origin of the author's `url`. When `url` comes from runtime data (an edge that
 names it, an open tool field) and points elsewhere, the node fails before
 connecting unless the host is listed in `allowed_hosts` (`"host"` or
-`"host:port"`, author-set) — the same rule as `http_request` (§112).
+`"host:port"`, author-set) — the same rule as `http_request` (§119).
 
 ---
 

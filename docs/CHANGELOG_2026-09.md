@@ -5717,9 +5717,9 @@ bearer al host del modelo.
 credenciales del autor a un host que viene de datos debe listar ese host en `allowed_hosts`.
 **Estado.** done.
 
-## 112. Endurecimiento: las cookies y headers del autor en `socketio_request` van solo a su host
+## 119. Endurecimiento: las cookies y headers del autor en `socketio_request` van solo a su host
 
-**Qué cambia.** La regla de §111 llega a `socketio_request`: las `cookies` y los `headers` que
+**Qué cambia.** La regla de §118 llega a `socketio_request`: las `cookies` y los `headers` que
 configuró el autor (fuera de `accept*`/`cache-control`/`content-type`/`user-agent`) salen solo
 hacia el origen del `url` del autor. Si el `url` viene de datos y apunta a otro origen, el nodo
 falla antes de conectar, salvo que el host esté en `allowed_hosts` (campo nuevo, del autor).
@@ -5732,7 +5732,7 @@ recibe ninguna conexión; con su host en `allowed_hosts`, recibe la cookie del a
 **ADP.** Campo nuevo opcional `allowed_hosts` en `socketio_request`.
 **Estado.** done.
 
-## 113. Endurecimiento: en multipart, el nodo baja URLs de un `body` de datos solo donde el autor lo habilita
+## 120. Endurecimiento: en multipart, el nodo baja URLs de un `body` de datos solo donde el autor lo habilita
 
 **Qué cambia.** Si el `body` multipart de `http_request` llega por `inputs` y no es el `fixed`
 de la tool, el nodo baja una URL solo en los campos que el autor lista en el campo nuevo
