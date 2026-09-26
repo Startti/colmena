@@ -6353,7 +6353,9 @@ JSON y en multipart. Un destino rechazado falla sin marcarse, con un error que n
 JSON y multipart), link-local, privado o `[::1]` no recibe conexión; un redirect desde un destino
 aceptado a una IP privada no se sigue; el destino del autor (`config` o `fixed`) y un host en
 `allowed_hosts` (IP:puerto y nombre) conectan. Los tests de credenciales con destino de datos corren
-con un nodo que acepta toda dirección: solo los rechaza la regla de credenciales.
+con un nodo que acepta toda dirección: solo los rechaza la regla de credenciales. E2E:
+`tests/graphs/security/data_destination_public_only_e2e.json` (un host público y uno listado
+responden; uno link-local falla sin marcarse; sin `allowed_hosts`, el de loopback tampoco se marca).
 
 **ADP.** [Nota de migración](adp_migration/2026-09-26-data-destination-public-only.md). Sin cambios de
 SSE ni de API. Una tool con `base_url` abierto que deba llegar a un host no público lo lista en
