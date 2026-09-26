@@ -5,9 +5,8 @@
 //! For v1 we re-download (signed URLs) or re-read (paths). Inline sources
 //! already carry the bytes in memory.
 //!
-//! No size cap is enforced here — the upload boundary (frontend) already
-//! caps file sizes at 100 MB, so adding a redundant backend check would
-//! be dead code.
+//! A signed URL is fetched through the guarded attachment client, whose
+//! byte cap applies.
 
 use crate::llm::domain::attachments::AttachmentSource;
 use crate::llm::domain::signed_url_fetcher::SignedUrlFetcher;
@@ -32,8 +31,8 @@ pub enum AcquireError {
 /// `inline_bytes` carries the bytes from `FileSource::InlineBytes` upstream,
 /// because they are not stored anywhere else after the upload streams them.
 ///
-/// No size cap is enforced — the frontend already caps uploads at 100 MB,
-/// so this helper accepts arbitrary-size inputs.
+/// A signed URL is fetched through the guarded attachment client, whose
+/// byte cap applies.
 pub async fn acquire_bytes(
     source: &AttachmentSource,
     inline_bytes: Option<&[u8]>,
