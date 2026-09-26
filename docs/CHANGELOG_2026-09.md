@@ -5543,7 +5543,9 @@ clave, nunca el valor; un campo declarado en el `node_schema` sigue pasando.
 **Tests.** `author_owned_arg_tests` (despacho real a `http_request` contra un mock): un
 `headers` no declarado no llega; declarado, sí; el descarte vuelve como aviso de `merge_call`
 (la clave, nunca el valor). `for_each`: una fila no pone un `headers` que
-el target no ofrece. `registry.rs`: la tabla de campos del autor de cada nodo.
+el target no ofrece. `registry.rs`: la tabla de campos del autor de cada nodo, y un grafo real
+con modelo guionado en el que el estado global no le da tools a un `llm_call` (ningún request
+llega al servidor de la tool del estado).
 
 **ADP.** Sin cambios de API. Una tool cuyo modelo mandaba uno de esos campos sin que el
 `node_schema` lo declarara debe declararlo como parámetro.
