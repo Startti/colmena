@@ -1735,7 +1735,7 @@
             "path": {
               "type": "string",
               "required": false,
-              "description": "Local filesystem path to the file. The engine reads the file contents at runtime. Use either 'path' or 'data', not both.",
+              "description": "Local filesystem path to the file. Read only in local mode (COLMENA_LOCAL=true); outside it an entry with 'path' fails the node (PathFieldNotAllowed). Use either 'path' or 'data', not both.",
               "example": "tests/graphs/media/test_image.jpg"
             },
             "data": {

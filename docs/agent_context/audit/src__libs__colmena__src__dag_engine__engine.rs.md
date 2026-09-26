@@ -18,6 +18,7 @@
   - `liveness` (field) — Heartbeat + idle-timeout settings for execution loop
 
 - `parse_bool_env` (fn, private) — Parses truthy/falsy string env values to Option<bool>
+- `local_mode` (fn, pub(crate)) — `COLMENA_LOCAL=true`, read once per process; gates `llm_call` `files[].path` reads
 
 - `EngineConfig::from_env` (method, pub async) — Builds config from environment variables with multi-tier storage adapter fallback (explicit local/prod via COLMENA_LOCAL, implicit via callback/local-dir/in-memory)
 

@@ -6186,3 +6186,17 @@ bytes no marca una dirección de loopback ni guarda nada.
 `SignedUrlDownloader::with_client`. Un entorno local que sirva adjuntos desde `localhost` necesita
 `COLMENA_ATTACHMENT_ALLOW_PRIVATE_HOSTS=1`.
 **Estado.** done.
+
+## 122. Endurecimiento: `files[].path` se lee solo en modo local
+
+**Qué cambia.** `llm_call` lee `files[].path` del disco solo en modo local (`COLMENA_LOCAL=true`,
+leído una vez por proceso). Fuera de él, una entrada con `path` falla el nodo con
+`PathFieldNotAllowed`, aunque traiga `data` o `url`, sin leer nada; el resumen automático tampoco
+lee una fuente `Path`.
+
+**Tests.** `llm.rs` `files_parser_tests`: fuera del modo local, una entrada con `path` (sola o con
+`data`) falla y el archivo no se lee; en modo local se lee. `byte_acquisition.rs`: una fuente
+`Path` no se lee fuera del modo local.
+
+**ADP.** Sin cambios: ADP no usa `path`. Un grafo local con `path` corre con `COLMENA_LOCAL=true`.
+**Estado.** done.

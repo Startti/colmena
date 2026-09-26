@@ -88,6 +88,13 @@ pub(crate) fn parse_bool_env(name: &str) -> Option<bool> {
     std::env::var(name).ok().and_then(|v| parse_bool_str(&v))
 }
 
+/// Local mode: `COLMENA_LOCAL=true`, read once per process. Only then is an
+/// `llm_call`'s `files[].path` read from disk.
+pub(crate) fn local_mode() -> bool {
+    static LOCAL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *LOCAL.get_or_init(|| parse_bool_env("COLMENA_LOCAL") == Some(true))
+}
+
 impl EngineConfig {
     /// Build the engine config from environment variables. **Async** because
     /// `LocalHttpStorageAdapter` (dev mode with disk + HTTP server) needs to

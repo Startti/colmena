@@ -87,6 +87,9 @@ pub enum LlmError {
     #[error("path file exceeds 30 MB limit (got {size} bytes); use url for large files")]
     PathFieldTooLarge { size: u64 },
 
+    #[error("files[].path is read only in local mode (COLMENA_LOCAL=true)")]
+    PathFieldNotAllowed,
+
     #[error("url field requires id field to enable cache lookup")]
     UrlWithoutDocumentId,
 

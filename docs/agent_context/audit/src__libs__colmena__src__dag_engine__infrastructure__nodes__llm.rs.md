@@ -14,7 +14,7 @@
 - `filter_enabled_tools()` — Filters tool catalog by `enabled_tools` config, supporting wildcard, toolkit aliases, and exclusions
 - `dedup_tools_by_name()` — Removes duplicate tool definitions by name, keeping first occurrence (config-wins over built-in)
 - `resolve_synthetic_enabled_tools()` — Resolves enabled tools for synthetic tool blocks (gsheets, gdocs) with same filter semantics
-- `parse_file_entries()` — Parses JSON file array entries into FileData, handling base64 data, signed URLs, size validation; also returns the index of the entry each file came from
+- `parse_file_entries()` — Parses JSON file array entries into FileData, handling base64 data, signed URLs, size validation; returns the index of the entry each file was parsed from; an entry naming `path` fails outside local mode (`PathFieldNotAllowed`)
 
 ### Private Functions
 - `find_pending_tool_call()` — Finds first unresolved tool call in message history for resume path
