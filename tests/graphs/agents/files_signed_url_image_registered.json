@@ -1,0 +1,31 @@
+{
+  "$comment": "An image sent as a signed URL to an Anthropic model with DATABASE_URL set stays a URL (the adapter hands it to the model), and Step 3 registers it with its bytes stored. Serve photo.png with `python3 -m http.server 18765` from its directory, run with COLMENA_ATTACHMENT_ALLOW_PRIVATE_HOSTS=1 (the attachment client refuses 127.0.0.1 otherwise) and a stable --agent-session-id, and query conversation_attachments for that session: img-url is there with a storage_key. The model is asked to describe the image.",
+  "nodes": {
+    "viewer": {
+      "type": "llm_call",
+      "config": {
+        "provider": "anthropic",
+        "model": "claude-haiku-4-5-20251001",
+        "api_key": "${ANTHROPIC_API_KEY}",
+        "connection_url": "${DATABASE_URL}",
+        "attachments_enabled": true,
+        "summary_enabled": false,
+        "system_message": "Answer using the documents available in this conversation.",
+        "prompt": "Load the image labelled Photo and describe it in one sentence.",
+        "files": [
+          {
+            "id": "img-url",
+            "label": "Photo",
+            "filename": "photo.png",
+            "mime_type": "image/png",
+            "url": "http://127.0.0.1:18765/photo.png"
+          }
+        ]
+      }
+    },
+    "out": { "type": "log" }
+  },
+  "edges": [
+    { "from": "viewer", "to": "out" }
+  ]
+}

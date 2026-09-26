@@ -163,7 +163,10 @@ fn measure() -> Measured {
 // tool with memory called by the root and from inside another tool's child
 // keeps two threads; run by `src/libs/colmena/tests/nested_tool_memory.rs` with
 // a model that answers by who calls it). Lints clean.
-const EXPECTED_FILES: usize = 335;
+// Bumped 335 -> 336: adds tests/graphs/agents/files_signed_url_image_registered.json
+// (an image sent as a signed URL to an Anthropic model is registered with its
+// bytes stored). Lints clean.
+const EXPECTED_FILES: usize = 336;
 const EXPECTED_ERRORS: usize = 0;
 const EXPECTED_WARNINGS: usize = 0;
 const EXPECTED_INFOS: usize = 0;
