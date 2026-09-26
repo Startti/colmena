@@ -203,7 +203,7 @@ Testigo: `tests/graphs/security/graph_edge_engine_keys_e2e.json`.
 nunca los llenan; un edge que nombra el campo, sí. En `http_request` son
 `base_url`, `method`, `headers`, `bearer_token` y `authorization`: el destino,
 el método y las credenciales los fija el autor. Y ningún valor que llega por un
-edge expande `${VAR}`: solo `config` lo hace (CHANGELOG 2026-09 §101 y §102).
+edge expande `${VAR}`: solo `config` lo hace (CHANGELOG 2026-09 §107 y §108).
 
 ---
 

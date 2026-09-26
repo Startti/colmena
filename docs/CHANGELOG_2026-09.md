@@ -5455,7 +5455,7 @@ header de `config` expandido; y sin clave nada de `inputs` se expande (también 
 secreto es `config` o un `fixed`. Ninguno en `tests/graphs`.
 **Estado.** done.
 
-## 102. Endurecimiento: los campos de destino y credenciales de `http_request` son del autor
+## 108. Endurecimiento: los campos de destino y credenciales de `http_request` son del autor
 
 **Qué cambia.** `ExecutableNode::author_owned_inputs()` (dominio, vacío por defecto) nombra
 los campos que solo pone el autor: en `config`, o con un edge que nombra el campo
@@ -5467,14 +5467,14 @@ credenciales que arma el autor. `endpoint`, `body` y los query params siguen sie
 
 **Tests.** En `graph_http_payload_tests`: un `base_url`/`method` aplanados no reemplazan los
 de `config` (el segundo mock no recibe nada; el autor recibe GET con su bearer); el estado
-global tampoco los reemplaza. El edge que nombra el campo (§101) sigue ganando.
+global tampoco los reemplaza. El edge que nombra el campo (§107) sigue ganando.
 
 **ADP.** Sin cambios de API. Un grafo que mandaba `base_url`/`method`/`headers`/credenciales
 por un edge sin puerto o por el estado global debe nombrar el campo en el edge. Ninguno en
 `tests/graphs` (`dynamic_http.json` aplana `endpoint`, que sigue llegando).
 **Estado.** done.
 
-## 103. Endurecimiento de las claves del motor, tras §89, §101 y §102
+## 109. Endurecimiento de las claves del motor, tras §89, §107 y §108
 
 Cinco cambios, cada uno con su test.
 

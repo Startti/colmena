@@ -430,7 +430,7 @@ En modo grafo, además, `base_url`, `method`, `headers`, `bearer_token` y
 `authorization` son **del autor**: salen de `config` o de un edge que nombra el
 campo (`"to": "<nodo>.base_url"`), nunca de un objeto aplanado por un edge sin
 puerto ni del estado global. `endpoint`, `body` y los query params siguen
-siendo datos que un edge puede traer (§102).
+siendo datos que un edge puede traer (§108).
 
 E2E: [`tests/graphs/security/tool_env_provenance_e2e.json`](../../tests/graphs/security/tool_env_provenance_e2e.json).
 
