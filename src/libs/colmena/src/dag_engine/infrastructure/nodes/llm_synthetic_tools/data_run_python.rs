@@ -530,22 +530,20 @@ pub async fn dispatch_core(
     let wrapped = wrap_user_code(&user_code);
     let inputs = rbindings.inputs.clone();
     let loaded_columns = rbindings.loaded_columns.clone();
-    let sandbox = tokio::time::timeout(
-        std::time::Duration::from_secs(CODE_TIMEOUT_SECS),
-        tokio::task::spawn_blocking(move || {
-            crate::dag_engine::infrastructure::nodes::python_node::execute_sandboxed_helper(
-                &wrapped,
-                "restricted",
-                CODE_TIMEOUT_SECS,
-                &inputs,
-            )
-        }),
+    let sandbox = crate::dag_engine::infrastructure::python_exec::run(
+        crate::dag_engine::domain::python_executor::PythonRunRequest {
+            code: wrapped,
+            mode: "restricted".to_string(),
+            timeout: Some(std::time::Duration::from_secs(CODE_TIMEOUT_SECS)),
+            inputs,
+        },
     )
     .await;
 
+    use crate::dag_engine::domain::python_executor::PythonRunError;
     let helper = match sandbox {
-        Ok(Ok(Ok(r))) => r,
-        Ok(Ok(Err(e))) => {
+        Ok(r) => r,
+        Err(PythonRunError::Python(e)) => {
             return serde_json::json!({
                 "output": Value::Null,
                 "stdout": String::new(),
@@ -553,15 +551,15 @@ pub async fn dispatch_core(
                 "loaded_columns": loaded_columns,
             });
         }
-        Ok(Err(join_err)) => {
+        Err(PythonRunError::Internal(e)) => {
             return serde_json::json!({
                 "output": Value::Null,
                 "stdout": String::new(),
-                "error": format!("internal join error: {join_err}"),
+                "error": e,
                 "loaded_columns": loaded_columns,
             });
         }
-        Err(_) => {
+        Err(PythonRunError::Timeout) => {
             return serde_json::json!({
                 "output": Value::Null,
                 "stdout": String::new(),

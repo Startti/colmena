@@ -100,6 +100,14 @@ impl EngineConfig {
     /// `LocalHttpStorageAdapter` (dev mode with disk + HTTP server) needs to
     /// bind a TCP listener during construction.
     ///
+    /// Also installs the process-wide Python executor from
+    /// `COLMENA_PYTHON_EXECUTOR` (and `..._MODES`, `..._MAX_TIMEOUT_SECS`),
+    /// idempotently — later calls in the same process are no-ops beyond
+    /// returning the already-installed kind, and the one-time `info` install
+    /// event fires only for the first successful call. An invalid value for
+    /// any of the three variables fails this call, naming the variable and
+    /// value; the executor never falls back to `inprocess`.
+    ///
     /// ## Storage adapter selection
     ///
     /// The explicit guard rail is `COLMENA_LOCAL` (true/false):
@@ -119,6 +127,9 @@ impl EngineConfig {
             EngineError::Other("DATABASE_URL must be set to build ColmenaEngine".to_string())
         })?;
         let pool_config = PoolConfig::from_env()?;
+
+        crate::dag_engine::infrastructure::python_exec::install_from_env()
+            .map_err(|e| EngineError::Other(format!("python executor: {e}")))?;
 
         let local_flag = parse_bool_env("COLMENA_LOCAL");
 

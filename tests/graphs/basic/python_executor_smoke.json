@@ -1,0 +1,40 @@
+{
+  "_comment": "Smoke of the Python executor: restricted pandas, none-mode stdlib, request signing. Run with each COLMENA_PYTHON_EXECUTOR value; the log line from target colmena::python_exec names the executor used. Prerequisites: the embedded interpreter must be able to import pandas — point PYTHONPATH at a venv's site-packages (never install into the system Python); the per-run line needs RUST_LOG=colmena::python_exec=debug.",
+  "metadata": { "category": "basic", "requires_env": [] },
+  "nodes": {
+    "rows": {
+      "type": "python_script",
+      "config": {
+        "sandbox_mode": "restricted",
+        "code": "output = [{'k': i % 3, 'v': i} for i in range(1000)]"
+      }
+    },
+    "pandas": {
+      "type": "python_script",
+      "config": {
+        "sandbox_mode": "restricted",
+        "code": "import pandas as pd\ndf = pd.DataFrame(rows)\noutput = {str(k): int(v) for k, v in df.groupby('k')['v'].sum().items()}"
+      }
+    },
+    "stdlib": {
+      "type": "python_script",
+      "config": {
+        "code": "import csv, io, json\nbuf = io.StringIO()\nw = csv.writer(buf)\nw.writerow(['a', 'b'])\nw.writerow([1, 2])\noutput = {'csv': buf.getvalue(), 'json': json.dumps(pandas, sort_keys=True)}"
+      }
+    },
+    "sign": {
+      "type": "python_script",
+      "config": {
+        "sandbox_mode": "restricted",
+        "code": "import hmac, hashlib, base64\noutput = base64.b64encode(hmac.new(b'k', stdlib['json'].encode(), hashlib.sha256).digest()).decode()"
+      }
+    },
+    "log": { "type": "log" }
+  },
+  "edges": [
+    { "from": "rows", "to": "pandas.rows" },
+    { "from": "pandas", "to": "stdlib.pandas" },
+    { "from": "stdlib", "to": "sign.stdlib" },
+    { "from": "sign", "to": "log" }
+  ]
+}

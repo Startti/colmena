@@ -80,14 +80,15 @@ fn validate_sandbox(py: Python<'_>, code: &str) -> Result<Option<String>, String
 pub use crate::dag_engine::domain::python_executor::PythonRunResult;
 
 /// Run a Python code string with the same semantics as the `python_script`
-/// DAG node. Used directly by other modules (e.g. `crdt_doc_run_python` tool)
-/// that need fine-grained control of the namespace and result extraction.
+/// DAG node. Gives fine-grained control of the namespace and result
+/// extraction to the caller.
 ///
 /// * `sandbox_mode`: `"none"` (full Python) or `"restricted"` (AST validation
 ///   + import whitelist + banned-builtin enforcement).
 /// * `_timeout_secs`: reserved for the caller. This helper does NOT enforce a
-///   timeout — wrap the call in `tokio::task::spawn_blocking` +
-///   `tokio::time::timeout` if you need it.
+///   timeout. Called by `python_exec::inprocess`; new callers should go
+///   through `crate::dag_engine::infrastructure::python_exec::run` instead,
+///   which applies the timeout.
 /// * `inputs`: a map of variable_name → JSON value to inject as Python globals
 ///   before executing the code.
 ///
@@ -257,30 +258,31 @@ impl ExecutableNode for PythonNode {
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
 
-        let code = code.to_string();
-        let sandbox_mode_clone = sandbox_mode.clone();
+        use crate::dag_engine::domain::python_executor::{PythonRunError, PythonRunRequest};
+        use crate::dag_engine::infrastructure::python_exec;
 
-        // 4. Schedule blocking execution (CPython is not async-safe).
-        let blocking_task = tokio::task::spawn_blocking(move || -> Result<Value, String> {
-            let result =
-                execute_sandboxed_helper(&code, &sandbox_mode_clone, timeout_secs, &helper_inputs)?;
-            Ok(result.output.unwrap_or(Value::Null))
-        });
-
-        // 5. Apply timeout in restricted mode; plain await otherwise.
-        let output_json = if sandbox_mode == "restricted" {
-            tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), blocking_task)
-                .await
-                .map_err(|_| {
-                    format!(
-                        "SandboxTimeout: execution exceeded {} seconds",
-                        timeout_secs
-                    )
-                })?
-                .map_err(|e| format!("Task join error: {e}"))?
-                .map_err(|e| -> Box<dyn StdError + Send + Sync> { e.into() })?
-        } else {
-            blocking_task.await??
+        let restricted = sandbox_mode == "restricted";
+        let result = python_exec::run(PythonRunRequest {
+            code: code.to_string(),
+            mode: sandbox_mode.clone(),
+            // `restricted` keeps its author-set deadline; `none` has none of its own.
+            timeout: restricted.then(|| std::time::Duration::from_secs(timeout_secs)),
+            inputs: helper_inputs,
+        })
+        .await;
+        let output_json = match result {
+            Ok(r) => r.output.unwrap_or(Value::Null),
+            Err(PythonRunError::Timeout) => {
+                let secs = if restricted {
+                    timeout_secs
+                } else {
+                    python_exec::max_timeout().as_secs()
+                };
+                return Err(format!("SandboxTimeout: execution exceeded {secs} seconds").into());
+            }
+            Err(PythonRunError::Python(e)) | Err(PythonRunError::Internal(e)) => {
+                return Err(e.into())
+            }
         };
 
         Ok(output_json)
@@ -496,14 +498,42 @@ mod tests {
         assert_eq!(result, "module");
     }
 
-    // NOTE: A direct end-to-end test of `sandbox_timeout_secs` would deadlock
-    // the test harness. `tokio::time::timeout` correctly returns Err(Elapsed)
-    // after N seconds, but the underlying spawn_blocking thread (running an
-    // infinite Python loop holding the GIL) cannot be cancelled. Tokio's
-    // runtime drop waits for blocking tasks to finish, so the test process
-    // hangs even though the timeout fired. The timeout primitive itself is
-    // upstream-tested by tokio. We verify wiring via the e2e graph in
-    // tests/graphs/agents/python_sandbox_tool_test.json.
+    // NOTE: `tokio::time::timeout` correctly returns Err(Elapsed) after N
+    // seconds, but the underlying spawn_blocking thread (running an infinite
+    // Python loop holding the GIL) keeps running past the deadline, and
+    // tokio's runtime drop waits for blocking tasks to finish — so an
+    // unbounded loop would hang the test harness even though the timeout
+    // fired. The test below uses a bounded loop instead, which always
+    // finishes on its own and so is safe to await directly. We verify wiring
+    // via the e2e graph in tests/graphs/agents/python_sandbox_tool_test.json.
+
+    /// Characterization test: pins the `restricted`-mode timeout error text
+    /// exactly as it reads today, before and after the switch to
+    /// `python_exec::run`.
+    #[tokio::test]
+    async fn restricted_timeout_text_is_unchanged() {
+        pyo3::Python::initialize();
+        let node = PythonNode;
+        let inputs = HashMap::new();
+        // Wall-clock loop (~3s): `datetime` is on the restricted-mode
+        // allow-list, so the loop runs for a fixed duration instead of a
+        // fixed iteration count, whose runtime varies with CPU speed. It
+        // always finishes on its own after ~3s, well past the 1s node
+        // timeout below, so the test can't hang.
+        let config = json!({
+            "code": "import datetime\nend = datetime.datetime.now() + datetime.timedelta(seconds=3)\nwhile datetime.datetime.now() < end:\n    pass",
+            "sandbox_mode": "restricted",
+            "sandbox_timeout_secs": 1
+        });
+        let err = node
+            .execute(&inputs, &config, &mut json!({}), None)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "SandboxTimeout: execution exceeded 1 seconds"
+        );
+    }
 
     #[test]
     fn restricted_mode_allows_pandas_import() {

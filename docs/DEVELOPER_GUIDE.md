@@ -74,6 +74,7 @@ Las secciones están organizadas por **tema**, no por orden numérico. Los prefi
 - [**Nodo SQL Query**](./developer_guide/23_sql_node.md) — Permisos granulares, validación AST + critic opcional, sandbox, RLS, auto-creación de schemas.
 - [**Nodos Web**](./developer_guide/25_web_nodes.md) — `http_request` (incluye multipart streaming y OAuth2 nativo), `tavily_client`, `api_explorer`, `browser`.
 - [**Nodo Python Script**](./developer_guide/26_python_node.md) — `python_script`: PyO3, sandbox `restricted`, threading.
+- [**Python executors**](./developer_guide/53_python_executors.md) — `COLMENA_PYTHON_EXECUTOR`: dónde corre cada llamada Python, instalación al arrancar, observabilidad.
 - [**Multimedia Generation**](./developer_guide/32_multimedia_generation.md) — `image_generation`, `image_edit`, `tts`; storage abstracto con 3 adapters.
 - [**Router & Output Parser**](./developer_guide/37_router_and_output_parser.md) — `router` (LLM direct vs extract+rules) y `output_parser` (extracción tipada post-LLM).
 - [**CRDT Documents**](./developer_guide/38_crdt_documents.md) — Workbooks colaborativos en tiempo real sobre `yrs::Doc`.
