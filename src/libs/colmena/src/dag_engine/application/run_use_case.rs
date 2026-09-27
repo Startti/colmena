@@ -125,8 +125,10 @@ impl DagRunUseCase {
         self
     }
 
-    /// Runs every node with `calls` in scope. See [`Self::call_registry`].
-    pub fn with_call_registry(mut self, calls: Arc<CallCancels>) -> Self {
+    /// Runs every node with `calls` in scope. The registry's turn token must be
+    /// this run's own cancel token (see `CallCancels::new`): the engine builds
+    /// both from one `RunControl`.
+    pub(crate) fn with_call_registry(mut self, calls: Arc<CallCancels>) -> Self {
         self.call_registry = Some(calls);
         self
     }
