@@ -1,6 +1,8 @@
 use crate::llm::application::tool_batches::{plan_batches, Batch};
 use crate::llm::domain::call_cancels::{self, CallCancels};
-use crate::llm::domain::steering::{is_steering_id, SteeringInbox, SteeringMessage};
+use crate::llm::domain::steering::{
+    is_steering_id, outside_steering, SteeringInbox, SteeringMessage,
+};
 use crate::llm::domain::{
     ConversationKey, ConversationRepository, FileData, LlmConfig, LlmError, LlmMessage,
     LlmRepository, LlmRequest, LlmResponse, LlmStreamPart, LlmUsage, MessageRole, ToolCall,
@@ -255,19 +257,21 @@ impl RepeatStreak {
 /// cancelled before it started never runs, and one cancelled while it runs is
 /// answered with [`call_cancels::CANCELLED_BY_PERSON_TEXT`]. It writes no
 /// history and emits no Finish frame: the caller does, in the model's order.
+/// The call's work runs outside the node's steering scope: nothing a call runs
+/// reads the person's messages.
 async fn run_call(ctx: &CallCtx<'_>, tool_call: &ToolCall) -> CallOutcome {
     // Notify start of execution
     if let Some(callback) = ctx.on_token {
         (callback)(LlmStreamPart::LlmToolCallStart(tool_call.clone()));
     }
     let Some(calls) = call_cancels::current_registry() else {
-        return dispatch_call(ctx, tool_call, None).await;
+        return outside_steering(dispatch_call(ctx, tool_call, None)).await;
     };
     let Some(token) = calls.begin(&tool_call.id) else {
         return CallOutcome::Done(call_cancels::cancelled_result(&tool_call.id));
     };
     let _ended = EndOnDrop(&calls, &tool_call.id);
-    dispatch_call(ctx, tool_call, Some((&*calls, &token))).await
+    outside_steering(dispatch_call(ctx, tool_call, Some((&*calls, &token)))).await
 }
 
 /// Ends a call in its registry when dropped: when [`run_call`] returns, and
@@ -5932,5 +5936,51 @@ mod tests {
             said(&history),
             [(MessageRole::User, "go"), (MessageRole::Assistant, "A")]
         );
+    }
+
+    /// A tool that answers whether it found an inbox to take.
+    struct Peeks;
+
+    #[async_trait]
+    impl ToolExecutor for Peeks {
+        async fn execute(&self, call: &ToolCall) -> Result<ToolResult, LlmError> {
+            let found = crate::llm::domain::steering::take_inbox().is_some();
+            Ok(ToolResult::success(call.id.clone(), found.to_string()))
+        }
+
+        async fn available_tools(&self) -> Vec<ToolDefinition> {
+            vec![]
+        }
+    }
+
+    /// Nothing a call runs (a tool that is an `llm_call`, a child run) reads
+    /// the person's messages: the call's work runs outside the node's scope.
+    #[tokio::test]
+    async fn a_calls_work_runs_with_no_inbox_in_scope() {
+        let inbox: Option<Arc<dyn SteeringInbox>> = Some(Arc::new(InMemorySteeringInbox::new()));
+        let (_, history, _) = crate::llm::domain::steering::in_steering(
+            inbox,
+            run_streamed_on(vec![call_chunk(0, "{}")], &Peeks, 4),
+        )
+        .await;
+        assert_eq!(tool_output(&history, "c0"), "false");
+    }
+
+    /// `run` (what `critic`, `planner`, `reactor`, `orchestrator` and
+    /// `extract_with_schema` call) never reads, even with an inbox in scope.
+    #[tokio::test]
+    async fn run_does_not_read_an_inbox_in_scope() {
+        let spy = Arc::new(Spy::default());
+        let (_, _, resp) = crate::llm::domain::steering::in_steering(
+            Some(spy.clone()),
+            run_streamed_on(
+                vec![LlmStreamPart::Content("hola".into())],
+                &MockToolExec::new(),
+                4,
+            ),
+        )
+        .await;
+        assert_eq!(resp.content(), "hola");
+        assert!(spy.ops().is_empty(), "{:?}", spy.ops());
     }
 }

@@ -11,6 +11,7 @@ use crate::dag_engine::domain::node::{
     SECRET_CONFIG_PATHS_KEY,
 };
 use crate::llm::domain::call_cancels::{in_registry, CallCancels};
+use crate::llm::domain::steering::{in_steering, SteeringInbox};
 
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -47,6 +48,12 @@ pub struct DagRunUseCase {
     /// (a child's included: a child's stream is polled inside its parent's
     /// node) registers its calls there. `None`: calls run as before.
     call_registry: Option<Arc<CallCancels>>,
+    /// The inbox of what the person writes while the run works
+    /// ([`RunControl::with_steering`](super::run_control::RunControl::with_steering)).
+    /// Every `llm_call` node of THIS run gets it in its slot; any other node
+    /// gets none, a nested run never has one (`as_nested_run` drops it), and
+    /// its nodes hide the parent's.
+    steering: Option<Arc<dyn SteeringInbox>>,
 }
 
 impl DagRunUseCase {
@@ -62,6 +69,7 @@ impl DagRunUseCase {
             seed_state: None,
             nested_run: false,
             call_registry: None,
+            steering: None,
         }
     }
 
@@ -83,6 +91,7 @@ impl DagRunUseCase {
             seed_state: None,
             nested_run: false,
             call_registry: None,
+            steering: None,
         }
     }
 
@@ -115,6 +124,8 @@ impl DagRunUseCase {
     #[allow(clippy::wrong_self_convention)] // "treat self as a nested run", not a type conversion
     pub(crate) fn as_nested_run(mut self) -> Self {
         self.nested_run = true;
+        // A child never reads the person's messages: only the root's agent does.
+        self.steering = None;
         self
     }
 
@@ -130,6 +141,13 @@ impl DagRunUseCase {
     /// both from one `RunControl`.
     pub(crate) fn with_call_registry(mut self, calls: Arc<CallCancels>) -> Self {
         self.call_registry = Some(calls);
+        self
+    }
+
+    /// Puts `inbox` in the slot of every `llm_call` node of this run. See
+    /// [`Self::steering`].
+    pub(crate) fn with_steering_inbox(mut self, inbox: Option<Arc<dyn SteeringInbox>>) -> Self {
+        self.steering = inbox;
         self
     }
 
@@ -796,9 +814,14 @@ impl DagRunUseCase {
                     let execution_future = Some(async {
                         match &config_secret_refusal {
                             Some(msg) => Err(msg.clone().into()),
-                            None => in_registry(
-                                self.call_registry.clone(),
-                                node_impl.execute(&inputs, &node_config_value, &mut global_shared_state, observer),
+                            // Only an `llm_call` gets the inbox: another node that
+                            // runs `llm_call`s directly (a `for_each`'s rows) finds none.
+                            None => in_steering(
+                                self.steering.clone().filter(|_| node_config.node_type == "llm_call"),
+                                in_registry(
+                                    self.call_registry.clone(),
+                                    node_impl.execute(&inputs, &node_config_value, &mut global_shared_state, observer),
+                                ),
                             ).await,
                         }
                     });
@@ -4427,12 +4450,17 @@ mod graph_http_payload_tests {
 mod call_registry_tests {
     //! A run built with a per-call cancel registry runs every node with it in
     //! scope (the agent loop registers its calls there); one built without it
-    //! runs them as before.
+    //! runs them as before. The steering inbox goes the other way: only a root
+    //! run built with one hands it to its `llm_call` nodes, and every other
+    //! node and run hides an outer one.
     use super::*;
     use crate::dag_engine::domain::events::DagExecutionEvent;
     use crate::dag_engine::domain::node::ExecutableNode;
     use crate::dag_engine::domain::observer::ExecutionObserver;
     use crate::llm::domain::call_cancels::{current_registry, CallCancels};
+    use crate::llm::domain::steering::{
+        in_steering, take_inbox, InMemorySteeringInbox, SteeringInbox,
+    };
     use async_trait::async_trait;
     use futures::StreamExt;
     use std::error::Error as StdError;
@@ -4449,7 +4477,7 @@ mod call_registry_tests {
             _s: &mut Value,
             _o: Option<Arc<dyn ExecutionObserver>>,
         ) -> Result<Value, Box<dyn StdError + Send + Sync>> {
-            Ok(json!({ "in_scope": current_registry().is_some() }))
+            Ok(json!({ "in_scope": current_registry().is_some(), "took": take_inbox().is_some() }))
         }
         fn schema(&self) -> Value {
             json!({})
@@ -4459,7 +4487,8 @@ mod call_registry_tests {
     struct ProbeRegistry;
     impl NodeRegistryPort for ProbeRegistry {
         fn get_node(&self, node_type: &str) -> Option<Arc<dyn ExecutableNode>> {
-            (node_type == "probe").then(|| Arc::new(Probe) as Arc<dyn ExecutableNode>)
+            matches!(node_type, "probe" | "llm_call")
+                .then(|| Arc::new(Probe) as Arc<dyn ExecutableNode>)
         }
         fn get_all_nodes(&self) -> HashMap<String, Arc<dyn ExecutableNode>> {
             HashMap::new()
@@ -4468,8 +4497,13 @@ mod call_registry_tests {
 
     /// What the probe answered in a one-node run.
     async fn probe(uc: DagRunUseCase) -> Value {
+        probe_as(uc, "probe").await
+    }
+
+    /// What the probe answered as a node of type `node_type`.
+    async fn probe_as(uc: DagRunUseCase, node_type: &str) -> Value {
         let graph: Graph = serde_json::from_value(
-            json!({ "nodes": { "p": { "type": "probe", "config": {} } }, "edges": [] }),
+            json!({ "nodes": { "p": { "type": node_type, "config": {} } }, "edges": [] }),
         )
         .unwrap();
         let stream = uc.execute_stream(graph, None, None, false, None, None, None);
@@ -4499,5 +4533,39 @@ mod call_registry_tests {
     async fn without_one_nothing_is_in_scope() {
         let uc = DagRunUseCase::new(Arc::new(ProbeRegistry), None);
         assert_eq!(probe(uc).await["in_scope"], json!(false));
+    }
+
+    fn inbox() -> Option<Arc<dyn SteeringInbox>> {
+        Some(Arc::new(InMemorySteeringInbox::new()))
+    }
+
+    #[tokio::test]
+    async fn a_root_run_with_an_inbox_hands_it_to_its_llm_calls() {
+        let uc = DagRunUseCase::new(Arc::new(ProbeRegistry), None).with_steering_inbox(inbox());
+        assert_eq!(probe_as(uc, "llm_call").await["took"], json!(true));
+    }
+
+    /// A node that is not an `llm_call` (a `for_each` runs `llm_call` rows
+    /// directly, in its own task) finds none.
+    #[tokio::test]
+    async fn a_root_node_that_is_not_an_llm_call_finds_none() {
+        let uc = DagRunUseCase::new(Arc::new(ProbeRegistry), None).with_steering_inbox(inbox());
+        assert_eq!(probe(uc).await["took"], json!(false));
+    }
+
+    #[tokio::test]
+    async fn a_nested_run_has_none_and_hides_its_parents() {
+        let uc = DagRunUseCase::new(Arc::new(ProbeRegistry), None)
+            .with_steering_inbox(inbox())
+            .as_nested_run();
+        let took = in_steering(inbox(), probe_as(uc, "llm_call")).await["took"].clone();
+        assert_eq!(took, json!(false));
+    }
+
+    #[tokio::test]
+    async fn a_run_without_one_hides_an_outer_one() {
+        let uc = DagRunUseCase::new(Arc::new(ProbeRegistry), None);
+        let took = in_steering(inbox(), probe_as(uc, "llm_call")).await["took"].clone();
+        assert_eq!(took, json!(false));
     }
 }
