@@ -983,6 +983,8 @@ orquestador usado como tool) se suelta como en un Stop y las filas de ese grafo 
 [guía 12](12_dag_engine_guide.md#cancelar-una-llamada-sola-execute_stream_controlled).
 El resultado de la llamada lleva `status: "cancelled"` en su frame
 ([referencia de SSE](../sse_events_reference.md#status-cancelled--una-llamada-que-la-persona-cortó-sola)).
+E2E: `tests/graphs/agents/cancel_one_child.json`, que corre
+`src/libs/colmena/tests/cancel_one_child.rs`.
 
 #### El mismo agente a dos niveles: un hilo por quien llama
 

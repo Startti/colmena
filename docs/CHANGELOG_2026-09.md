@@ -6523,3 +6523,20 @@ y el Stop del turno no produce ninguno. El E2E del repo llega en §157. Regresi�
 `cancellation_integration`, `parallel_tool_groups`, `parallel_tool_suspend`, `nested_tool_memory`.
 
 **ADP.** [Nota de migración](adp_migration/2026-09-26-cancel-one-call.md#el-frame). **Estado.** done.
+
+## 157. E2E: cortar un hijo corta solo ese; el Stop del turno sigue cortando todo
+
+**Qué cambia.** Nada en el motor: el E2E `tests/graphs/agents/cancel_one_child.json`
+(`src/libs/colmena/tests/cancel_one_child.rs`, Postgres, el modelo guionado y un `RunControl`) fija
+§153-§156 de punta a punta. `corpus_noise`: 338 → 339 archivos, 0/0/0.
+
+**Tests.** Con dos hijos a la vez, cortar uno deja su fila `CANCELLED`, cierra su nodo y su frontera
+con `CANCELLED_BY_PERSON`, contesta su llamada con el texto y `status: "cancelled"`, el otro termina
+después y el padre contesta; el turno dura ~1,6 s en vez de 30. El Stop del turno sigue cortando
+todo (`CANCELLED` la raíz y los dos hijos, en ~0,1-0,3 s): no contesta ninguna llamada, ningún frame
+lleva `status` y nada se cierra con `CANCELLED_BY_PERSON`. Los dos escenarios pasaron 11 de 11
+corridas. Es también el E2E que faltaba para §155: sin el registro en `execute_stream_controlled`,
+el corte tarda los 30 s.
+
+**ADP.** Nada nuevo: [nota de migración](adp_migration/2026-09-26-cancel-one-call.md). **Tag**
+`colmena_dag_engine-v0.21.2` (v0.21.1 + §152-§157). **Estado.** done.
