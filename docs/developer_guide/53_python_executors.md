@@ -90,6 +90,20 @@ single-threaded, binds a 0600 socket, prints `READY` and forks one child per con
 child always ends in `_exit`). It exits `3` if a startup check fails; a child exits `70` on a protocol error. The host
 must start it from a long-lived thread: it is killed when that thread exits. Logs are JSON fields only.
 
+### The subprocess executor (Linux, not selectable yet)
+
+`python_exec::subprocess` supervises the warm template: it starts it from a dedicated long-lived thread (the template
+dies with that thread) with only `TEMPLATE_ENV`, replaces it when it exits, and retries a failed start after a pause.
+Its stderr is read as JSON events with known fields only; any other line is dropped and counted. Settings:
+
+| Variable | Default |
+|---|---|
+| `COLMENA_PYTHON_EXECUTOR_BIN` | `python_executor` |
+| `COLMENA_PYTHON_EXECUTOR_SLOTS` | CPU cores, at most 8 (1-64) |
+| `COLMENA_PYTHON_EXECUTOR_MEMORY_MB` | 2048 (256-65536) |
+| `COLMENA_PYTHON_EXECUTOR_HIDE_PATHS` | none (`:`-separated paths) |
+| `COLMENA_PYTHON_EXECUTOR_MAX_REQUEST_MB`, `…_MAX_RESPONSE_MB` | 256 (1-4095) |
+
 ## About `restricted`
 
 `restricted` validates imports and a few builtins before running. It helps

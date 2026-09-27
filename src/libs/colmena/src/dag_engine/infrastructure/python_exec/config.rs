@@ -2,12 +2,20 @@
 //! variables once. An invalid value is an error, never a silent default.
 
 use crate::dag_engine::domain::python_executor::ExecutorKind;
+use std::path::PathBuf;
 use std::time::Duration;
 
 pub const ENV_EXECUTOR: &str = "COLMENA_PYTHON_EXECUTOR";
 pub const ENV_MODES: &str = "COLMENA_PYTHON_EXECUTOR_MODES";
 pub const ENV_MAX_TIMEOUT: &str = "COLMENA_PYTHON_EXECUTOR_MAX_TIMEOUT_SECS";
 pub const DEFAULT_MAX_TIMEOUT: Duration = Duration::from_secs(3600);
+pub const ENV_BIN: &str = "COLMENA_PYTHON_EXECUTOR_BIN";
+pub const ENV_SLOTS: &str = "COLMENA_PYTHON_EXECUTOR_SLOTS";
+pub const ENV_MEMORY_MB: &str = "COLMENA_PYTHON_EXECUTOR_MEMORY_MB";
+pub const ENV_HIDE_PATHS: &str = "COLMENA_PYTHON_EXECUTOR_HIDE_PATHS";
+pub const ENV_MAX_REQUEST_MB: &str = "COLMENA_PYTHON_EXECUTOR_MAX_REQUEST_MB";
+pub const ENV_MAX_RESPONSE_MB: &str = "COLMENA_PYTHON_EXECUTOR_MAX_RESPONSE_MB";
+const MIB: usize = 1024 * 1024;
 
 /// Which sandbox modes go to an isolated executor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,10 +46,80 @@ pub struct ExecutorConfig {
     pub modes: ModesPolicy,
     /// Deadline for requests that carry none of their own.
     pub max_timeout: Duration,
+    pub subprocess: SubprocessConfig,
+}
+
+/// Settings of the subprocess executor (Linux).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SubprocessConfig {
+    pub bin: PathBuf,
+    pub slots: usize,
+    /// Memory each child may use on top of the warm template it forks from.
+    pub memory_mb: u64,
+    pub uid_base: u32,
+    pub tmp_mb: u64,
+    pub hide_paths: Vec<PathBuf>,
+    pub max_request_bytes: usize,
+    pub max_response_bytes: usize,
 }
 
 pub(crate) fn invalid(var: &str, value: &str, expected: &str) -> ExecutorConfigError {
     ExecutorConfigError(format!("{var}={value:?} is invalid; expected {expected}"))
+}
+
+fn parse_in<T: std::str::FromStr + PartialOrd>(
+    get: &impl Fn(&str) -> Option<String>,
+    var: &str,
+    default: T,
+    min: T,
+    max: T,
+) -> Result<T, ExecutorConfigError> {
+    match get(var)
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+    {
+        None => Ok(default),
+        Some(v) => match v.parse::<T>() {
+            Ok(n) if n >= min && n <= max => Ok(n),
+            _ => Err(invalid(var, &v, "a number in the supported range")),
+        },
+    }
+}
+
+impl SubprocessConfig {
+    pub fn from_lookup(get: &impl Fn(&str) -> Option<String>) -> Result<Self, ExecutorConfigError> {
+        let bin = match get(ENV_BIN)
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+        {
+            Some(p) => PathBuf::from(p),
+            None => std::env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().map(|d| d.join("python_executor")))
+                .unwrap_or_else(|| PathBuf::from("python_executor")),
+        };
+        let cores = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(2);
+        Ok(Self {
+            bin,
+            slots: parse_in(get, ENV_SLOTS, cores.min(8), 1, 64)?,
+            memory_mb: parse_in(get, ENV_MEMORY_MB, 2048, 256, 65536)?,
+            uid_base: 20000,
+            tmp_mb: 64,
+            hide_paths: get(ENV_HIDE_PATHS)
+                .map(|v| {
+                    v.split(':')
+                        .map(str::trim)
+                        .filter(|p| !p.is_empty())
+                        .map(PathBuf::from)
+                        .collect()
+                })
+                .unwrap_or_default(),
+            max_request_bytes: parse_in(get, ENV_MAX_REQUEST_MB, 256usize, 1, 4095)? * MIB,
+            max_response_bytes: parse_in(get, ENV_MAX_RESPONSE_MB, 256usize, 1, 4095)? * MIB,
+        })
+    }
 }
 
 impl ExecutorConfig {
@@ -79,6 +157,7 @@ impl ExecutorConfig {
             kind,
             modes,
             max_timeout,
+            subprocess: SubprocessConfig::from_lookup(&get)?,
         })
     }
 }
@@ -126,6 +205,37 @@ mod tests {
         assert_eq!(
             cfg(&[(ENV_MAX_TIMEOUT, "120")]).unwrap().max_timeout,
             Duration::from_secs(120)
+        );
+    }
+
+    #[test]
+    fn subprocess_defaults_and_overrides() {
+        let c = cfg(&[]).unwrap().subprocess;
+        assert_eq!(c.memory_mb, 2048);
+        assert_eq!(c.max_request_bytes, 256 * 1024 * 1024);
+        assert!(c.bin.ends_with("python_executor"));
+        let c = cfg(&[
+            ("COLMENA_PYTHON_EXECUTOR_SLOTS", "3"),
+            ("COLMENA_PYTHON_EXECUTOR_MEMORY_MB", "1024"),
+            ("COLMENA_PYTHON_EXECUTOR_HIDE_PATHS", "/data:/etc/extra"),
+        ])
+        .unwrap()
+        .subprocess;
+        assert_eq!((c.slots, c.memory_mb), (3, 1024));
+        assert_eq!(
+            c.hide_paths,
+            vec![PathBuf::from("/data"), PathBuf::from("/etc/extra")]
+        );
+        assert!(cfg(&[("COLMENA_PYTHON_EXECUTOR_SLOTS", "0")]).is_err());
+        assert!(cfg(&[("COLMENA_PYTHON_EXECUTOR_MEMORY_MB", "100")]).is_err());
+    }
+
+    #[test]
+    fn hidden_paths_are_trimmed() {
+        let c = cfg(&[(ENV_HIDE_PATHS, " /data : /x ")]).unwrap().subprocess;
+        assert_eq!(
+            c.hide_paths,
+            vec![PathBuf::from("/data"), PathBuf::from("/x")]
         );
     }
 
