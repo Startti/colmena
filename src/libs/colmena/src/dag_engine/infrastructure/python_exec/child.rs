@@ -6,6 +6,8 @@ use super::protocol::{self, WireRequest, WireResponse, WireStatus, WIRE_VERSION}
 use crate::dag_engine::infrastructure::nodes::python_node::execute_sandboxed_helper;
 use serde::{Deserialize, Serialize};
 use std::io::{self, Read, Write};
+#[cfg(target_os = "linux")]
+use std::os::unix::net::UnixStream;
 use std::time::Instant;
 
 /// Cap on the `CallHeader` frame a host sends before the first request on a
@@ -24,18 +26,15 @@ pub struct CallHeader {
     pub max_request_bytes: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct JailSpec {
-    pub uid_base: u32,
-    pub tmp_mb: u64,
-    pub hide_paths: Vec<std::path::PathBuf>,
-}
+#[cfg(target_os = "linux")]
+pub use super::jail::JailSpec;
 
 /// Exit code of the warm template when it stops before printing `READY`.
 pub const EXIT_NOT_READY: i32 = 3;
 /// Exit code of a forked child whose call ended in an error or a panic
 /// instead of a complete response.
 pub const EXIT_PROTOCOL: i32 = 70;
+/// Exit code of a forked child that could not enter the process jail.
 pub const EXIT_JAIL: i32 = 71;
 
 fn invalid(e: impl std::fmt::Display) -> io::Error {
@@ -73,7 +72,7 @@ fn reseed_if_loaded(module: &str) -> io::Result<()> {
 /// registered (atexit handlers, buffered stdio), and a panic is caught here
 /// silently, so nothing reaches the stderr the template shares with children.
 #[cfg(target_os = "linux")]
-pub fn serve_forked(conn: std::os::unix::net::UnixStream, jail: &JailSpec) -> ! {
+pub fn serve_forked(conn: UnixStream, jail: &JailSpec) -> ! {
     std::panic::set_hook(Box::new(|_| {}));
     let served = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         serve_forked_inner(conn, jail)
@@ -91,15 +90,28 @@ pub fn serve_forked(conn: std::os::unix::net::UnixStream, jail: &JailSpec) -> ! 
 }
 
 #[cfg(target_os = "linux")]
-fn serve_forked_inner(
-    mut conn: std::os::unix::net::UnixStream,
-    _jail: &JailSpec,
+fn serve_forked_inner(conn: UnixStream, jail: &JailSpec) -> io::Result<()> {
+    serve_isolated(conn, |header, conn| {
+        match super::jail::enter(jail, header, conn) {
+            Ok(conn) => conn,
+            // Nothing is reported on the channel: the executor sees the process end.
+            Err(_) => unsafe { libc::_exit(EXIT_JAIL) },
+        }
+    })
+}
+
+/// Sends the pid, reads the header, isolates the process with `isolate` and
+/// only then reads and serves the request.
+#[cfg(target_os = "linux")]
+fn serve_isolated(
+    mut conn: UnixStream,
+    isolate: impl FnOnce(&CallHeader, UnixStream) -> UnixStream,
 ) -> io::Result<()> {
     conn.write_all(&std::process::id().to_be_bytes())?;
     let header: CallHeader =
         serde_json::from_slice(&frame::read_frame(&mut conn, MAX_HEADER_BYTES)?)
             .map_err(invalid)?;
-    // Process isolation belongs here: after the header, before the request is read.
+    let mut conn = isolate(&header, conn);
     reseed_numpy()?;
     handle_request(&mut conn, header.max_request_bytes)
 }
@@ -341,20 +353,16 @@ mod forked_tests {
     use serde_json::json;
     use std::os::unix::net::UnixStream;
 
-    /// Runs `serve_forked_inner` on one end of a pair. From the other it reads
-    /// the pid before sending anything, then sends `frames` (one write each)
-    /// and returns the pid, whatever came back and the result.
+    /// Runs `serve_isolated` on one end of a pair, with no isolation: the jail
+    /// would isolate the test process itself. From the other end it reads the
+    /// pid before sending anything, then sends `frames` (one write each) and
+    /// returns the pid, whatever came back and the result.
     fn serve(frames: &[Vec<u8>]) -> (u32, Vec<u8>, io::Result<()>) {
         pyo3::Python::initialize();
         let (mut ours, theirs) = UnixStream::pair().unwrap();
         ours.set_read_timeout(Some(std::time::Duration::from_secs(10)))
             .unwrap();
-        let jail = JailSpec {
-            uid_base: 0,
-            tmp_mb: 0,
-            hide_paths: vec![],
-        };
-        let t = std::thread::spawn(move || serve_forked_inner(theirs, &jail));
+        let t = std::thread::spawn(move || serve_isolated(theirs, |_, conn| conn));
         let mut pid = [0u8; 4];
         ours.read_exact(&mut pid).unwrap();
         for f in frames {

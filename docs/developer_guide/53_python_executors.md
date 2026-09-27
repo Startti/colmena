@@ -109,6 +109,18 @@ response; a passed deadline kills the child (`Timeout`), and an abandoned call's
 once it is gone. The template gets only the host's `LANG`, `LC_ALL` and `LC_CTYPE` (same text encodings as in process),
 no `PYTHONPATH`/`PYTHONHOME`. Memory and CPU limits are sent but not enforced yet. The host must ignore `SIGPIPE`.
 
+### Process isolation (Linux)
+
+Each per-call child isolates itself after the header and before it reads the request, in this order: fds 0-2 to
+`/dev/null` and every other descriptor but the call's closed; new mount, network, IPC and UTS namespaces (the network
+namespace is empty: no DNS, loopback or outside route); a private `/tmp` (`tmpfs`, 64 MiB) and the host directories in
+`DEFAULT_HIDDEN` plus `…_HIDE_PATHS` covered read-only; one unprivileged uid/gid per slot (`uid_base + slot`, 20000 by
+default); `no_new_privs` and death with the template; limits on address space (the template's size plus
+`…_MEMORY_MB`), CPU seconds, file size, descriptors, processes and core files. A failed step ends the child (exit 71)
+before any code runs. There is no syscall filter yet. The template needs root and `CAP_SYS_ADMIN`; without them every
+call ends with the crashed text. The uid range `uid_base..uid_base+slots` must belong to one executor per PID
+namespace and to no real user.
+
 ## About `restricted`
 
 `restricted` validates imports and a few builtins before running. It helps
