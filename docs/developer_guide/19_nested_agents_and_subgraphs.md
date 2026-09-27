@@ -979,7 +979,8 @@ de arriba. Con el Stop del turno el hijo no cierra nada: lo desarma la raíz. Un
 reanudado después de contestar su pregunta no se corta por llamada: la reanudación no pasa
 por `run_call`. Una tool que corre un grafo anidado sin adoptar su token (un router o un
 orquestador usado como tool) se suelta como en un Stop y las filas de ese grafo quedan
-`RUNNING`: la interfaz no ofrece el corte ahí.
+`RUNNING`: la interfaz no ofrece el corte ahí. Quién pide el corte:
+[guía 12](12_dag_engine_guide.md#cancelar-una-llamada-sola-execute_stream_controlled).
 
 #### El mismo agente a dos niveles: un hilo por quien llama
 
