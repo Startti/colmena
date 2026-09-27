@@ -3587,6 +3587,11 @@ impl ExecutableNode for LlmNode {
                         LlmStreamPart::LlmMessageFinish(usage) => {
                             obs.on_event(NodeEvent::LlmMessageFinish(usage));
                         }
+                        // Always, like `LlmToolCallStart`: the loop already
+                        // saved the message, so the client must hear of it.
+                        LlmStreamPart::UserMessageConsumed { id } => {
+                            obs.on_event(NodeEvent::UserMessageConsumed { id })
+                        }
                         _ => {}
                     }
                 }))
@@ -7784,13 +7789,14 @@ mod resolve_template_vars_characterization_tests {
 
 /// The `llm_call` takes its node's steering inbox once, before it replays a
 /// pending call on resume (`execute_with_resume_answer` runs outside
-/// `run_call`, so `outside_steering` does not cover it).
+/// `run_call`, so `outside_steering` does not cover it), and announces what
+/// its loop read.
 #[cfg(test)]
 mod steering_take_tests {
     use super::LlmNode;
     use crate::dag_engine::application::ports::NodeRegistryPort;
     use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
-    use crate::dag_engine::domain::observer::ExecutionObserver;
+    use crate::dag_engine::domain::observer::{ExecutionObserver, NodeEvent};
     use crate::dag_engine::infrastructure::pool_registry::{PgPoolRegistry, PoolConfig};
     use crate::llm::domain::steering::{in_steering, take_inbox, InMemorySteeringInbox};
     use crate::llm::infrastructure::ConversationRepositoryFactory;
@@ -7871,5 +7877,46 @@ mod steering_take_tests {
             "the resumed call found it"
         );
         assert!(inbox.is_closed(), "the loop did not get it");
+    }
+
+    /// Every event the node emits.
+    #[derive(Default)]
+    struct Heard(Mutex<Vec<NodeEvent>>);
+    impl ExecutionObserver for Heard {
+        fn on_event(&self, event: NodeEvent) {
+            self.0.lock().unwrap().push(event);
+        }
+    }
+
+    /// A read reaches the node's observer even with `stream: false`, like a
+    /// tool call's start: the loop already saved the message.
+    #[tokio::test]
+    async fn a_read_message_reaches_the_observer_even_without_streaming() {
+        let _guard = OverrideGuard::install(Arc::new(ScriptedAdapter::new(vec![
+            ScriptedResponse::Text("listo".into()),
+        ])));
+        let db = tempfile::NamedTempFile::new().unwrap();
+        let config = json!({
+            "provider": "mock", "model": "m", "api_key": "k", "stream": false, "prompt": "go",
+            "connection_url": format!("sqlite://{}", db.path().display()),
+        });
+        let registry: Arc<dyn NodeRegistryPort> = Arc::new(OnlyPeek(Arc::default()));
+        let pools = Arc::new(PgPoolRegistry::new(PoolConfig::defaults()));
+        let repos = Arc::new(ConversationRepositoryFactory::new(pools));
+        let llm = LlmNode::new(repos, Arc::downgrade(&registry), None);
+        let inputs = HashMap::from([("__colmena_session_id".to_string(), json!("s1"))]);
+        let inbox = Arc::new(InMemorySteeringInbox::new());
+        assert!(inbox.push("m1", "y también esto"));
+        let heard = Arc::new(Heard::default());
+        let mut state = json!({});
+        let run = llm.execute(&inputs, &config, &mut state, Some(heard.clone()));
+        in_steering(Some(inbox), run).await.unwrap();
+        let read: Vec<String> = (heard.0.lock().unwrap().iter())
+            .filter_map(|e| match e {
+                NodeEvent::UserMessageConsumed { id } => Some(id.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(read, ["m1"]);
     }
 }
