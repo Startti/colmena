@@ -6568,3 +6568,14 @@ las nueve llegaban con el nodo vivo. Regresión E2E: `cancel_one_child` (10 de 1
 la raíz y el corte por llamada. Hacer lo mismo en el brazo de inactividad pone en rojo el watchdog.
 
 **ADP.** Sin cambios de API ni de SSE. **Estado.** done.
+
+## 163. Python: `cryptography` permitido en modo `restricted` para firmas asimétricas
+
+**Qué cambia.** `cryptography` entra a la lista de imports de `restricted`, junto a `hmac`, `hashlib`, `base64` y
+`secrets`. Sirve para las APIs que piden una firma RS256/ES256 con un par de llaves (Snowflake `KEYPAIR_JWT`, cuentas de
+servicio de GCP, GitHub Apps). `jwt` (PyJWT) sigue bloqueado porque `PyJWKClient` abre red por `urllib`. La plantilla
+caliente no cambia: el módulo se importa en la llamada.
+**Tests.** El validador acepta `from cryptography.hazmat.primitives import …` y rechaza `import jwt` y
+`from jwt import PyJWKClient`. Guía: [26_python_node.md](developer_guide/26_python_node.md).
+**ADP.** El worker tiene que instalar `python3-cryptography`. **Estado.** done.
+

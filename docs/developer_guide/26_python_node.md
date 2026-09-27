@@ -71,7 +71,7 @@ values through the engine key `__colmena_authored_inputs`.
 | `"none"` | Full Python access. No AST check, no timeout. Use for code authored by you. |
 | `"restricted"` | AST validation runs before execution. Only whitelisted imports are allowed; banned builtins are blocked. Execution is wrapped in `tokio::time::timeout`. |
 
-**Allowed imports (restricted mode):** `math`, `json`, `re`, `datetime`, `collections`, `itertools`, `functools`, `string`, `decimal`, `statistics`, `pandas`, `numpy`, `scipy`, `hmac`, `hashlib`, `base64`, `secrets`.
+**Allowed imports (restricted mode):** `math`, `json`, `re`, `datetime`, `collections`, `itertools`, `functools`, `string`, `decimal`, `statistics`, `pandas`, `numpy`, `scipy`, `hmac`, `hashlib`, `base64`, `secrets`, `cryptography`.
 
 **Banned builtins (restricted mode):** `open`, `exec`, `eval`, `compile`, `__import__`.
 
@@ -96,6 +96,21 @@ credenciales (solo una firma efímera de un solo uso) y el sandbox se mantiene i
 > ⚠️ El validador compara **el módulo raíz** (`nombre.split('.')[0]`). Por eso `urllib` no se
 > puede permitir "solo para `urllib.parse`": abriría también `urllib.request` y con ello la red.
 > El percent-encoding hay que implementarlo a mano (RFC 3986).
+
+#### Firma asimétrica (`cryptography`)
+
+`cryptography` se permite para las APIs que autentican con un par de llaves y piden una firma
+RS256/ES256 (Snowflake `KEYPAIR_JWT`, cuentas de servicio de GCP, GitHub Apps). Solo trabaja
+sobre los bytes que recibe: la llave privada llega como PEM en un campo `fixed` o un binding,
+nunca se lee de una ruta. No abre sockets. El patrón es el mismo de dos pasos: el script firma
+y devuelve el token, y `http_request` hace la llamada.
+
+`jwt` (PyJWT) **sigue bloqueado**: `jwt.PyJWKClient` descarga llaves por `urllib`, así que
+permitir el módulo abriría la red desde el sandbox. El JWT se arma a mano (encabezado y payload
+en base64url, firma con `cryptography`).
+
+La librería tiene que estar instalada en la imagen que corre el Python (en ADP, el worker:
+`python3-cryptography`); si no está, el import falla al ejecutar, no al validar.
 
 On a sandbox violation the node returns a `SandboxViolation: ...` error string the LLM can read and retry from. Syntax errors are returned as `SyntaxError: ...`.
 
