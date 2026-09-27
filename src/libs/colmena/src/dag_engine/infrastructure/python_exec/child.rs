@@ -24,8 +24,53 @@ pub struct CallHeader {
     pub max_request_bytes: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct JailSpec {
+    pub uid_base: u32,
+    pub tmp_mb: u64,
+    pub hide_paths: Vec<std::path::PathBuf>,
+}
+
+pub const EXIT_PROTOCOL: i32 = 70;
+pub const EXIT_JAIL: i32 = 71;
+
 fn invalid(e: impl std::fmt::Display) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, e.to_string())
+}
+
+#[cfg(target_os = "linux")]
+const RESEED_NUMPY: &str = "import numpy as _np\n_np.random.seed()\ndel _np\n";
+
+/// Numpy's global generator is not reseeded by `os.fork()`; without this two
+/// calls would draw the same numbers.
+#[cfg(target_os = "linux")]
+fn reseed_numpy() {
+    if let Ok(code) = std::ffi::CString::new(RESEED_NUMPY) {
+        let _ = pyo3::Python::attach(|py| py.run(code.as_c_str(), None, None));
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub fn serve_forked(conn: std::os::unix::net::UnixStream, jail: &JailSpec) -> ! {
+    let code = match serve_forked_inner(conn, jail) {
+        Ok(()) => 0,
+        Err(_) => EXIT_PROTOCOL,
+    };
+    unsafe { libc::_exit(code) }
+}
+
+#[cfg(target_os = "linux")]
+fn serve_forked_inner(
+    mut conn: std::os::unix::net::UnixStream,
+    _jail: &JailSpec,
+) -> io::Result<()> {
+    conn.write_all(&std::process::id().to_be_bytes())?;
+    let header: CallHeader =
+        serde_json::from_slice(&frame::read_frame(&mut conn, MAX_HEADER_BYTES)?)
+            .map_err(invalid)?;
+    // Process isolation belongs here: after the header, before the request is read.
+    reseed_numpy();
+    handle_request(&mut conn, header.max_request_bytes)
 }
 
 /// A `{ "v": u32 }`-only view of a request body, parsed before the full

@@ -25,6 +25,10 @@ path = "src/attachment_gc/main.rs"
 name = "colmena_oauth_setup"
 path = "src/bin/colmena_oauth_setup.rs"
 
+[[bin]]
+name = "python_executor"
+path = "src/bin/python_executor.rs"
+
 [[example]]
 name = "gcs_spike"
 path = "examples/gcs_spike.rs"
@@ -145,6 +149,9 @@ ulid = "1"
 maud = "0.26"
 
 parking_lot = "0.12"
+
+# Isolated Python executor (Linux): poll, wait4, prctl, _exit.
+libc = "0.2"
 
 # Documents feature — GCS backend (optional, gated on `gcs` feature)
 google-cloud-storage = { version = "1", optional = true }
