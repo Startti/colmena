@@ -971,6 +971,14 @@ suelta). Sin registro, todo corre como siempre.
 Lo que la llamada ya hizo (notas guardadas, requests enviados) queda hecho: el texto no
 promete deshacerlo.
 
+**Un hijo usado como tool se corta con su llamada.** El `subgraph` adopta el token de su
+llamada y se lo pasa a la corrida del hijo. Al cortarse, la fila del hijo queda `CANCELLED`
+(y sus descendientes cerrados), su nodo en curso y su frontera cierran con `status: "error"`
+y un `errorText` que empieza con `CANCELLED_BY_PERSON`, y la llamada se contesta con el texto
+de arriba. Con el Stop del turno el hijo no cierra nada: lo desarma la raíz. Un hijo
+reanudado después de contestar su pregunta no se corta por llamada: la reanudación no pasa
+por `run_call`.
+
 #### El mismo agente a dos niveles: un hilo por quien llama
 
 Hasta v0.20.1 el hilo de memoria de una tool era `tool/<nombre>[/<hilo>]` para
