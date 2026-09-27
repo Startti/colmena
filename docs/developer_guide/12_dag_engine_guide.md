@@ -1488,6 +1488,23 @@ Un mensaje con un id que no pasa `is_steering_id` o con el texto en blanco se sa
 buzón se cierra cuando el bucle vuelve, como sea que vuelva (una pregunta, el rescate, un
 error).
 
+**La respuesta final no pierde un mensaje.** Cuando el modelo contesta sin llamadas, el
+bucle hace `take_or_close()`. Si trae algo, lo lee y sigue: la respuesta que ya salió
+queda, y la continuación se suma a la misma respuesta. Si no trae nada, el buzón queda
+cerrado en la misma operación y la respuesta vuelve; lo que llegue después se rechaza y el
+cliente lo manda como turno. No hay instante en que un mensaje se pierda o se lea dos
+veces. Cada vuelta así gasta una iteración de `max_turns` (`COLMENA_HARD_TURN_CAP`), y al
+agotarse el bucle cae al rescate, como siempre.
+
+**Leer es guardar y anunciar.** Una corrida sin `on_token` no toma del buzón: un mensaje
+guardado sin su `UserMessageConsumed` volvería como turno y el modelo lo vería dos veces.
+El cierre de `run_steered` es explícito, no un guard de `Drop`: un future soltado (un
+Stop) no cierra el buzón, lo cierra su dueño al terminar el job. Si guardar un mensaje
+falla, ni ese ni los que siguen en su lote se anuncian (un `warn` dice cuántos) y el
+cliente los manda como turno. Si el guardado se hizo y solo falló la respuesta, ese envío
+es un duplicado: una segunda ventana, más rara, además de la de un Stop justo después de
+guardar.
+
 ## 📚 Más Información
 
 - **[20_orchestrator_architecture.md](./20_orchestrator_architecture.md)** — Guía completa del orchestrator: HITL, bridge tasks, fases, critic feedback loop y replanning dinámico con diagramas Mermaid
