@@ -255,6 +255,12 @@ pub enum LlmStreamPart {
     ThinkingContent(String),
     /// The current reasoning block has ended.
     ThinkingEnd,
+    /// The loop read a message the person wrote while it worked
+    /// (`llm::domain::steering`): it is in the history, after what the loop
+    /// had done, and goes in the next request. `id` is the client's.
+    UserMessageConsumed {
+        id: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
