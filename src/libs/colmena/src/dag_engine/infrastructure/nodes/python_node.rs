@@ -26,6 +26,13 @@ _ALLOWED_IMPORTS = {
     # (`urllib`, `socket`, `requests`, ...) stay banned, so the signed request
     # must go out through the `http_request` node, where it remains auditable.
     'hmac', 'hashlib', 'base64', 'secrets',
+    # Asymmetric signing. APIs with key-pair auth (Snowflake KEYPAIR_JWT, GCP
+    # service accounts, GitHub Apps) need an RS256/ES256 signature, which the
+    # modules above cannot compute. `cryptography` only works on bytes it is
+    # given (keys come as PEM bytes, never read from a path) and opens no
+    # socket. `jwt` (PyJWT) stays banned: its `PyJWKClient` fetches keys over
+    # urllib, which would give sandboxed code a way out to the network.
+    'cryptography',
 }
 _BANNED_BUILTINS = {'open', 'exec', 'eval', 'compile', '__import__'}
 
@@ -568,6 +575,38 @@ mod tests {
             match result {
                 Ok(None) => {}
                 other => panic!("expected `from scipy import stats` to pass: {other:?}"),
+            }
+        });
+    }
+
+    #[test]
+    fn restricted_mode_allows_cryptography_import() {
+        pyo3::Python::initialize();
+        pyo3::Python::attach(|py| {
+            let code = "from cryptography.hazmat.primitives import hashes, serialization\n\
+                        from cryptography.hazmat.primitives.asymmetric import padding\n\
+                        output = 1";
+            match validate_sandbox(py, code) {
+                Ok(None) => {}
+                other => panic!("expected cryptography to pass: {other:?}"),
+            }
+        });
+    }
+
+    /// PyJWT is not allowed: `jwt.PyJWKClient` fetches keys through urllib,
+    /// so allowing the module would open a network path from the sandbox.
+    #[test]
+    fn restricted_mode_still_rejects_jwt_import() {
+        pyo3::Python::initialize();
+        pyo3::Python::attach(|py| {
+            for code in [
+                "import jwt\noutput = 1",
+                "from jwt import PyJWKClient\noutput = 1",
+            ] {
+                match validate_sandbox(py, code) {
+                    Ok(Some(v)) => assert!(v.contains("SandboxViolation"), "got: {v}"),
+                    other => panic!("jwt should be rejected: {other:?}"),
+                }
             }
         });
     }
