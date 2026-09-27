@@ -6615,3 +6615,25 @@ falla también cierra. Sin buzón, todos los tests de siempre pasan sin tocarlos
 
 **ADP.** Sin cambios de API ni de SSE todavía: nadie pone un buzón en una corrida.
 **Estado.** done.
+
+## 166. Mensajes a mitad de corrida: la respuesta final toma o cierra
+
+**Qué cambia.** En una respuesta final (sin llamadas), el bucle llama
+`take_or_close()` (§164): con algo esperando, lo lee (§165) y sigue, y la continuación se
+suma a `content`; sin nada, el buzón queda cerrado en la misma operación. Cada vuelta gasta
+una iteración de `max_turns` y al agotarse cae al rescate. De la revisión de §164 y §165:
+una corrida sin `on_token` no lee (guardaría sin anunciar y el mensaje volvería como
+turno); los `warn` del buzón llevan el `session_id` (y el largo de un id malo, que no se
+muestra), y un guardado que falla dice cuántos mensajes del lote quedan sin leer. La doc de
+`run_steered` y la guía dicen que el cierre es explícito (un future soltado no cierra: lo
+cierra el dueño del buzón al terminar el job) y nombran una segunda ventana de duplicado,
+un guardado que se hizo pero informó error.
+
+**Tests.** `agent_service.rs`: un mensaje que llega mientras el modelo escribe la respuesta
+se lee y la respuesta sigue (`content` = `"A\n\nB"`); una respuesta sin nada esperando
+cierra con `take_or_close` y un mensaje posterior se rechaza; leer en cada respuesta igual
+termina en el rescate al agotar `max_turns`; una corrida sin `on_token` no toma del buzón.
+Guía: [12_dag_engine_guide.md](developer_guide/12_dag_engine_guide.md).
+
+**ADP.** Sin cambios todavía.
+**Estado.** done.

@@ -556,10 +556,14 @@ impl AgentService {
 
     /// [`run`](Self::run) that also reads, between steps, what the person
     /// writes while it works ([`steering`](crate::llm::domain::steering)): at
-    /// the top of each iteration it takes what is waiting. The inbox is closed
+    /// the top of each iteration it takes what is waiting, and at a final
+    /// answer it takes or closes the inbox in one operation, so a message that
+    /// arrives right then is read and the loop goes on. The inbox is closed
     /// when the loop returns, however it returns (a suspend, the rescue, an
-    /// error through `?`); closing it twice does nothing. With `None` it is
-    /// `run`.
+    /// error through `?`); closing it twice does nothing. The close is
+    /// explicit, not a drop guard: a dropped future (a Stop) does not close
+    /// it, and whoever owns the inbox closes it when the job ends. Without
+    /// `on_token` the loop does not read. With `None` it is `run`.
     pub async fn run_steered<'a>(
         &self,
         params: AgentRunParams<'a>,
@@ -586,6 +590,10 @@ impl AgentService {
         let tools = params.tools;
         let tool_executor = params.tool_executor;
         let on_token = params.on_token;
+        // A message read with nowhere to announce it would be saved but never
+        // shown read, and the client would send it again as the next turn:
+        // without `on_token` the loop does not read.
+        let steering = steering.filter(|_| on_token.is_some());
         let tools_provider = params.tools_provider;
         let lazy_catalog_names = params.lazy_catalog_names;
         let params_resolver = params.attachment_resolver;
@@ -814,6 +822,23 @@ impl AgentService {
                     cumulative_content.push_str("\n\n");
                 }
                 cumulative_content.push_str(content);
+            }
+
+            // A final answer (no calls) closes the inbox in the same operation
+            // that finds it empty. A message that came while the model wrote
+            // it is read now and the loop goes on: this answer stays, and the
+            // next one adds to `cumulative_content`. Each such round costs one
+            // of `max_turns`; past them the loop ends in the rescue.
+            if let Some(inbox) = steering {
+                if response.tool_calls().is_none_or(|c| c.is_empty()) {
+                    let read = inbox.take_or_close().await;
+                    if self
+                        .read_steering(session_id, &on_token, &mut messages, &mut streak, read)
+                        .await?
+                    {
+                        continue;
+                    }
+                }
             }
 
             // C. Check if LLM wants to use tools (Response might not have tool calls if streamed!)
@@ -1283,10 +1308,14 @@ impl AgentService {
         read: Vec<SteeringMessage>,
     ) -> Result<bool, LlmError> {
         let mut any = false;
-        for m in read {
+        let taken = read.len();
+        for (k, m) in read.into_iter().enumerate() {
             if !is_steering_id(&m.id) {
+                // The id itself is withheld: it may be anything.
                 tracing::warn!(
                     target: "colmena::agent",
+                    session_id = %session_id.session_id.0,
+                    id_len = m.id.len(),
                     "agent_service: skipped a steering message whose id cannot travel in a frame"
                 );
                 continue;
@@ -1294,14 +1323,29 @@ impl AgentService {
             let Ok(message) = LlmMessage::user(m.text) else {
                 tracing::warn!(
                     target: "colmena::agent",
+                    session_id = %session_id.session_id.0,
                     id = %m.id,
                     "agent_service: skipped a blank steering message"
                 );
                 continue;
             };
-            self.conversation_repository
+            if let Err(e) = self
+                .conversation_repository
                 .add_message(session_id, message.clone())
-                .await?;
+                .await
+            {
+                // Neither this message nor the rest of the batch is announced,
+                // so the client sends them again as the next turn. A save that
+                // was written but reported failure makes that resend a
+                // duplicate.
+                tracing::warn!(
+                    target: "colmena::agent",
+                    session_id = %session_id.session_id.0,
+                    unread = taken - k,
+                    "agent_service: a steering message failed to save; it and the rest of its batch go unread"
+                );
+                return Err(e);
+            }
             messages.push(message);
             if let Some(callback) = on_token {
                 (callback)(LlmStreamPart::UserMessageConsumed { id: m.id });
@@ -5785,5 +5829,108 @@ mod tests {
         let run = steered(plan, &MockToolExec::new(), spy.clone()).await;
         assert!(run.response.is_err());
         assert_eq!(spy.ops(), ["take", "close"]);
+    }
+
+    #[tokio::test]
+    async fn a_message_that_comes_while_the_model_writes_its_answer_is_read_and_the_answer_goes_on()
+    {
+        let inbox = Arc::new(InMemorySteeringInbox::new());
+        let during = inbox.clone();
+        let mut plan = Plan::replies(vec![text("A"), text("B")]);
+        plan.during = Box::new(move |n| {
+            if n == 0 {
+                assert!(during.push("m1", "y esto"));
+            }
+        });
+        let run = steered(plan, &MockToolExec::new(), inbox.clone()).await;
+
+        assert_eq!(run.answer(), "A\n\nB");
+        let sent = said(&run.requests[1]);
+        assert_eq!(
+            sent[sent.len() - 2..],
+            [(MessageRole::Assistant, "A"), (MessageRole::User, "y esto")]
+        );
+        assert_eq!(consumed(&run.parts), ["m1"]);
+        assert!(
+            inbox.is_closed(),
+            "the second answer found nothing and closed it"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_final_answer_with_nothing_waiting_closes_the_inbox_in_the_same_operation() {
+        let spy = Arc::new(Spy::default());
+        let run = steered(
+            Plan::replies(vec![text("A")]),
+            &MockToolExec::new(),
+            spy.clone(),
+        )
+        .await;
+        assert_eq!(run.answer(), "A");
+        assert_eq!(spy.ops(), ["take", "take_or_close", "close"]);
+        assert!(
+            !spy.inner.push("m9", "tarde"),
+            "a message after the answer is refused"
+        );
+    }
+
+    /// Each read at a final answer costs one of `max_turns`: past them the
+    /// loop ends in the rescue, as always.
+    #[tokio::test]
+    async fn reading_at_every_answer_still_ends_at_max_turns_in_the_rescue() {
+        let inbox = Arc::new(InMemorySteeringInbox::new());
+        let during = inbox.clone();
+        let mut plan = Plan::replies(vec![text("A"), text("B"), text("R")]);
+        plan.during = Box::new(move |n| {
+            if n < 2 {
+                assert!(during.push(&format!("m{n}"), "seguí"));
+            }
+        });
+        plan.max_turns = Some(2);
+        let run = steered(plan, &MockToolExec::new(), inbox.clone()).await;
+
+        assert_eq!(run.requests.len(), 3, "two turns and the rescue");
+        let rescue = run.requests[2].last().unwrap().content();
+        assert!(rescue.contains(RESCUE_SYNTHESIS_TEXT.trim()), "{rescue}");
+        assert_eq!(consumed(&run.parts), ["m0", "m1"]);
+        assert_eq!(run.answer(), "A\n\nB\n\nR");
+        assert!(inbox.is_closed());
+    }
+
+    /// With nowhere to announce a read (no `on_token`), the loop does not
+    /// read: a message saved but never shown read would come back as the
+    /// next turn, and the model would get it twice.
+    #[tokio::test]
+    async fn a_run_with_no_on_token_does_not_read() {
+        let spy = Arc::new(Spy::default());
+        assert!(spy.inner.push("m1", "sin aviso"));
+        let mut mock_llm = MockLlmRepo::new();
+        mock_llm.expect_call().returning(|_| Ok(text_response("A")));
+        let (mock_conv, thread) = stateful_conv_mock(vec![]);
+        let service = AgentService::new(Arc::new(mock_llm), Arc::new(mock_conv));
+        let exec = MockToolExec::new();
+        let params = AgentRunParams {
+            session_id: &test_key(),
+            prompt: Some("go".to_string()),
+            messages: None,
+            config: create_config(),
+            tools: vec![],
+            tool_executor: &exec,
+            max_tool_repeats: None,
+            max_turns: None,
+            on_token: None,
+            tools_provider: None,
+            attachment_resolver: None,
+            agent_session_id: None,
+            lazy_catalog_names: None,
+        };
+        let response = service.run_steered(params, Some(spy.clone())).await;
+        assert_eq!(response.unwrap().content(), "A");
+        assert_eq!(spy.ops(), ["close"]);
+        let history = thread.lock().unwrap().clone();
+        assert_eq!(
+            said(&history),
+            [(MessageRole::User, "go"), (MessageRole::Assistant, "A")]
+        );
     }
 }
