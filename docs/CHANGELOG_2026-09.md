@@ -6865,3 +6865,22 @@ Guía: [12_dag_engine_guide.md](developer_guide/12_dag_engine_guide.md); referen
 **ADP.** El frame es nuevo y aditivo; el árbol de eventos de ADP ya lo lee (adp#890). La
 nota de migración llega con el E2E, en el cambio siguiente de esta serie.
 **Estado.** done.
+
+## 170. Mensajes a mitad de corrida, de punta a punta
+
+**Qué cambia.** Nada de código: el E2E y la nota de migración de §164 a §169.
+
+**Tests.** E2E `src/libs/colmena/tests/read_while_working.rs` (Postgres, modelo guionado,
+sobre `cancel_one_child.json`, sin grafo nuevo): un mensaje escrito mientras corre un hijo
+va en el pedido siguiente del padre después del resultado, queda en su historia en ese
+lugar, sale como `user-message-consumed` (de `agent`, nunca de un hijo) después del
+resultado y la respuesta final cierra el buzón; uno escrito durante un grupo de dos se lee
+recién después de los dos resultados, en el pedido y en la historia. Una sola corrida raíz,
+`COMPLETED`. Los dos fallan con `run` en vez de `run_steered` en `llm.rs` y sin
+`with_steering_inbox` en `engine.rs` (esa línea solo la cubre este E2E).
+Guía: [12_dag_engine_guide.md](developer_guide/12_dag_engine_guide.md).
+
+**ADP.** [Nota de migración](adp_migration/2026-09-27-read-while-working.md): subir el pin a
+`colmena_dag_engine-v0.21.5`; con `steering: true`, el worker arma el buzón en Redis, lo pasa
+con `RunControl::with_steering` y lo cierra al terminar el job.
+**Estado.** done.
