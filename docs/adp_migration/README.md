@@ -6,6 +6,12 @@ ve ADP antes y después, qué tiene que hacer ADP, y qué se rompe si no hace na
 
 Los cambios que quedan dentro del motor no llevan nota aquí.
 
+## 2026-09-26 — cancelar una llamada sola
+
+| # | Nota | Acción de ADP | Qué se rompe si se ignora |
+|---|------|---------------|---------------------------|
+| 1 | [Cancelar una llamada sola](2026-09-26-cancel-one-call.md) | Subir el pin; el worker usa `execute_stream_controlled` y pasa cada pedido a `RunControl::cancel_call` | Nada: sin `RunControl` todo corre como hoy |
+
 ## 2026-09-26 — tras un Stop antes de la primera respuesta del modelo, el mensaje siguiente no rehace el pedido
 
 | # | Nota | Acción de ADP | Qué se rompe si se ignora |

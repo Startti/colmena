@@ -10,6 +10,7 @@ use crate::dag_engine::domain::node::{
     changed_leaves, config_sets_key, is_engine_key, strip_engine_keys, NodeInputs,
     SECRET_CONFIG_PATHS_KEY,
 };
+use crate::llm::domain::call_cancels::{in_registry, CallCancels};
 
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -41,6 +42,11 @@ pub struct DagRunUseCase {
     /// case — never derived from `path_prefix`. Gates the close-on-error
     /// below; a root run's failing node stays closed only by `error`.
     nested_run: bool,
+    /// The run's per-call cancel registry ([`RunControl`](super::run_control::RunControl)).
+    /// Every node runs with it in scope, so an agent loop anywhere in the run
+    /// (a child's included: a child's stream is polled inside its parent's
+    /// node) registers its calls there. `None`: calls run as before.
+    call_registry: Option<Arc<CallCancels>>,
 }
 
 impl DagRunUseCase {
@@ -55,6 +61,7 @@ impl DagRunUseCase {
             liveness: LivenessSettings::default(),
             seed_state: None,
             nested_run: false,
+            call_registry: None,
         }
     }
 
@@ -75,6 +82,7 @@ impl DagRunUseCase {
             liveness: LivenessSettings::default(),
             seed_state: None,
             nested_run: false,
+            call_registry: None,
         }
     }
 
@@ -114,6 +122,14 @@ impl DagRunUseCase {
     /// build the use case directly get `LivenessSettings::default()`.
     pub fn with_liveness(mut self, liveness: LivenessSettings) -> Self {
         self.liveness = liveness;
+        self
+    }
+
+    /// Runs every node with `calls` in scope. The registry's turn token must be
+    /// this run's own cancel token (see `CallCancels::new`): the engine builds
+    /// both from one `RunControl`.
+    pub(crate) fn with_call_registry(mut self, calls: Arc<CallCancels>) -> Self {
+        self.call_registry = Some(calls);
         self
     }
 
@@ -775,7 +791,10 @@ impl DagRunUseCase {
                     let execution_future = async {
                         match &config_secret_refusal {
                             Some(msg) => Err(msg.clone().into()),
-                            None => node_impl.execute(&inputs, &node_config_value, &mut global_shared_state, observer).await,
+                            None => in_registry(
+                                self.call_registry.clone(),
+                                node_impl.execute(&inputs, &node_config_value, &mut global_shared_state, observer),
+                            ).await,
                         }
                     };
                     tokio::pin!(execution_future);
@@ -4286,5 +4305,84 @@ mod graph_http_payload_tests {
             !log.contains("https://other.test"),
             "the dropped value was logged"
         );
+    }
+}
+
+#[cfg(test)]
+mod call_registry_tests {
+    //! A run built with a per-call cancel registry runs every node with it in
+    //! scope (the agent loop registers its calls there); one built without it
+    //! runs them as before.
+    use super::*;
+    use crate::dag_engine::domain::events::DagExecutionEvent;
+    use crate::dag_engine::domain::node::ExecutableNode;
+    use crate::dag_engine::domain::observer::ExecutionObserver;
+    use crate::llm::domain::call_cancels::{current_registry, CallCancels};
+    use async_trait::async_trait;
+    use futures::StreamExt;
+    use std::error::Error as StdError;
+    use tokio_util::sync::CancellationToken;
+
+    /// Answers whether a registry is in scope while it runs.
+    struct Probe;
+    #[async_trait]
+    impl ExecutableNode for Probe {
+        async fn execute(
+            &self,
+            _i: &NodeInputs,
+            _c: &Value,
+            _s: &mut Value,
+            _o: Option<Arc<dyn ExecutionObserver>>,
+        ) -> Result<Value, Box<dyn StdError + Send + Sync>> {
+            Ok(json!({ "in_scope": current_registry().is_some() }))
+        }
+        fn schema(&self) -> Value {
+            json!({})
+        }
+    }
+
+    struct ProbeRegistry;
+    impl NodeRegistryPort for ProbeRegistry {
+        fn get_node(&self, node_type: &str) -> Option<Arc<dyn ExecutableNode>> {
+            (node_type == "probe").then(|| Arc::new(Probe) as Arc<dyn ExecutableNode>)
+        }
+        fn get_all_nodes(&self) -> HashMap<String, Arc<dyn ExecutableNode>> {
+            HashMap::new()
+        }
+    }
+
+    /// What the probe answered in a one-node run.
+    async fn probe(uc: DagRunUseCase) -> Value {
+        let graph: Graph = serde_json::from_value(
+            json!({ "nodes": { "p": { "type": "probe", "config": {} } }, "edges": [] }),
+        )
+        .unwrap();
+        let stream = uc.execute_stream(graph, None, None, false, None, None, None);
+        tokio::pin!(stream);
+        let mut out = Value::Null;
+        while let Some(ev) = stream.next().await {
+            if let DagExecutionEvent::NodeFinish {
+                node_id, output, ..
+            } = ev.unwrap()
+            {
+                if node_id == "p" {
+                    out = output;
+                }
+            }
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn with_a_registry_every_node_runs_with_it_in_scope() {
+        let calls = Arc::new(CallCancels::new(CancellationToken::new()));
+        let uc = DagRunUseCase::new(Arc::new(ProbeRegistry), None).with_call_registry(calls);
+        assert_eq!(probe(uc).await["in_scope"], json!(true));
+    }
+
+    #[tokio::test]
+    async fn without_one_nothing_is_in_scope() {
+        let uc = DagRunUseCase::new(Arc::new(ProbeRegistry), None);
+        assert_eq!(probe(uc).await["in_scope"], json!(false));
     }
 }

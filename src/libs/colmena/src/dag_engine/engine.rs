@@ -26,6 +26,8 @@ use crate::storage::infrastructure::{
     HttpCallbackStorageAdapter, LocalCacheStorageAdapter, LocalHttpStorageAdapter,
 };
 
+pub use crate::dag_engine::application::run_control::RunControl;
+
 use futures::Stream;
 use serde_json::Value;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -440,6 +442,48 @@ impl ColmenaEngine {
             agent_session_id,
             Some(cancel_token),
         )
+    }
+
+    /// [`execute_stream_cancellable`](Self::execute_stream_cancellable) with
+    /// one more control: `control.cancel_call(tool_call_id)` stops that tool
+    /// call only, at any depth, and the rest of the turn goes on. The call is
+    /// answered with `cancelled_by_person.md`; a `subgraph` used as a tool
+    /// stops its child, whose row closes CANCELLED.
+    /// `control.cancel_token().cancel()` is the usual hard stop.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let control = RunControl::new(tokio_util::sync::CancellationToken::new());
+    /// let stream = engine.execute_stream_controlled(
+    ///     graph, None, None, false, None, Some(chat), control.clone(),
+    /// );
+    /// // From elsewhere:
+    /// control.cancel_call("toolu_01"); // stops that call
+    /// control.cancel_token().cancel(); // stops the run
+    /// ```
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_stream_controlled(
+        &self,
+        graph: Graph,
+        resume_session_id: Option<String>,
+        resume_answer: Option<String>,
+        include_extra_info: bool,
+        path_prefix: Option<String>,
+        agent_session_id: Option<String>,
+        control: RunControl,
+    ) -> impl Stream<Item = Result<DagExecutionEvent, DagError>> + Send + '_ {
+        (*self.use_case)
+            .clone()
+            .with_call_registry(control.calls())
+            .execute_stream(
+                graph,
+                resume_session_id,
+                resume_answer,
+                include_extra_info,
+                path_prefix,
+                agent_session_id,
+                Some(control.cancel_token().clone()),
+            )
     }
 
     /// Streams a graph's execution as **SSE-mapped parts** — the Vercel-AI-SDK

@@ -1419,6 +1419,39 @@ prompt se guarda antes de llamar al modelo). La corrida fresca siguiente lo marc
 
 `engine.execute_stream(...)` (6 args, sin token) sigue disponible y completa normalmente.
 
+### Cancelar una llamada sola (`execute_stream_controlled`)
+
+`execute_stream_controlled` es `execute_stream_cancellable` con un `RunControl` en vez del
+token: el mismo token del turno más un registro de cancelaciones por llamada
+(`CallCancels`), que el motor pone en el alcance de cada nodo de la corrida.
+
+```rust
+use colmena::dag_engine::engine::RunControl;
+
+let control = RunControl::new(CancellationToken::new());
+let stream = engine.execute_stream_controlled(
+    graph, None, None, false, None, Some(chat), control.clone(),
+);
+// Desde otro task / endpoint:
+control.cancel_call("toolu_01"); // corta esa llamada; el turno sigue
+control.cancel_token().cancel(); // el Stop de siempre
+```
+
+- `cancel_call(id)` corta la llamada con ese `tool_call_id`, en cualquier nivel de la
+  corrida (un hijo hereda el registro). Devuelve `false` si esa llamada ya terminó. Un id
+  que todavía no arrancó queda anotado: si una llamada con ese id arranca después, no corre.
+- La llamada se contesta con `cancelled_by_person.md`; qué pasa en cada caso:
+  [guía 19](19_nested_agents_and_subgraphs.md#cancelar-una-llamada-sola).
+- Un `subgraph` usado como tool le pasa al hijo el token de su llamada
+  (`SubGraphExecutorPort::run_subgraph`, parámetro `cancel`). Al dispararse, la corrida
+  del hijo hace lo que hace la raíz al cancelarse —guarda su fila `CANCELLED` y cierra sus
+  descendientes corriendo y suspendidos— pero, en vez de emitir `Cancelled`, cierra su
+  nodo en curso con el error y devuelve `DagError::Cancelled` (`CANCELLED_BY_PERSON: …`).
+- El Stop del turno dispara también los tokens de las llamadas, pero un hijo no hace nada
+  por su cuenta: lo desarma la raíz, que cierra su fila `CANCELLED` con
+  `cancel_running_descendants`, como antes. Ninguna llamada se contesta, nada se cierra con
+  `CANCELLED_BY_PERSON` y el turno termina con `cancelled` + `finish`, como siempre.
+
 ## 📚 Más Información
 
 - **[20_orchestrator_architecture.md](./20_orchestrator_architecture.md)** — Guía completa del orchestrator: HITL, bridge tasks, fases, critic feedback loop y replanning dinámico con diagramas Mermaid
