@@ -502,6 +502,9 @@ impl DagRunUseCase {
                     // A `Cancelled` event here is dropped by the parent's
                     // mapper and leaves a `null` that reads as a success.
                     if self.nested_run {
+                        if turn_stopped() {
+                            std::future::pending::<()>().await;
+                        }
                         Err(DagError::Cancelled)?;
                     }
                     yield DagExecutionEvent::Cancelled {
@@ -845,6 +848,9 @@ impl DagRunUseCase {
                                 // Nested: close the node and raise after the
                                 // loop, like the idle abort below.
                                 if self.nested_run {
+                                    if turn_stopped() {
+                                        std::future::pending::<()>().await;
+                                    }
                                     nested_cancelled = true;
                                     break;
                                 }
@@ -1809,6 +1815,17 @@ impl DagRunUseCase {
             }
         }
     }
+}
+
+/// Whether the whole turn this run belongs to was stopped (the composer's
+/// Stop), and not only the call that runs it: a nested run's token is its
+/// call's, a child of the turn's, so both fire it. On a turn Stop a nested run
+/// saves its row CANCELLED and then waits: the root's own cancel arm tears the
+/// whole run down, as before per-call cancels existed, and nothing in the child
+/// is closed with `CANCELLED_BY_PERSON`, which would read as the person cutting
+/// that one call. Without a registry in scope: `false`.
+fn turn_stopped() -> bool {
+    crate::llm::domain::call_cancels::current_registry().is_some_and(|calls| calls.turn_stopped())
 }
 
 #[async_trait::async_trait]
@@ -3590,8 +3607,21 @@ mod stored_run_status_tests {
         stop: Stop,
     ) -> (Vec<DagExecutionEvent>, Option<String>) {
         let token = CancellationToken::new();
+        let (events, end) = nested_turn_on(uc, stop, token.clone(), &token).await;
+        (events, end.expect("the turn hung"))
+    }
+
+    /// [`nested_turn`] on the run's `token`, where `stop` fires `trigger`:
+    /// the token itself, or the turn it is a child of. `end` is how the
+    /// stream ended (its error, if any), or `None` if it never did (10 s).
+    async fn nested_turn_on(
+        uc: DagRunUseCase,
+        stop: Stop,
+        token: CancellationToken,
+        trigger: &CancellationToken,
+    ) -> (Vec<DagExecutionEvent>, Option<Option<String>>) {
         if matches!(stop, Stop::BeforeStart) {
-            token.cancel();
+            trigger.cancel();
         }
         let stream = uc.as_nested_run().execute_stream(
             chat_graph("old prompt"),
@@ -3600,32 +3630,29 @@ mod stored_run_status_tests {
             false,
             None,
             Some("chat_1".to_string()),
-            Some(token.clone()),
+            Some(token),
         );
+        let mut events = Vec::new();
         let drain = async {
             tokio::pin!(stream);
-            let mut events = Vec::new();
-            let mut err = None;
             while let Some(item) = stream.next().await {
                 match item {
                     Ok(ev) => {
                         let at_llm = matches!(&ev, DagExecutionEvent::LlmToken { node_id, .. } if node_id == "llm");
                         if at_llm && matches!(stop, Stop::AtLlm) {
-                            token.cancel();
+                            trigger.cancel();
                         }
                         events.push(ev);
                     }
-                    Err(e) => {
-                        err = Some(e.to_string());
-                        break;
-                    }
+                    Err(e) => return Some(e.to_string()),
                 }
             }
-            (events, err)
+            None
         };
-        tokio::time::timeout(Duration::from_secs(10), drain)
+        let end = tokio::time::timeout(Duration::from_secs(10), drain)
             .await
-            .expect("the turn hung")
+            .ok();
+        (events, end)
     }
 
     /// A child run cancelled through its call, mid-node: its row is
@@ -3683,6 +3710,37 @@ mod stored_run_status_tests {
             .any(|e| matches!(e, DagExecutionEvent::Cancelled { .. })));
         assert_eq!(repo.row().status, DagRunStatus::Cancelled);
         assert!(llm.calls().is_empty());
+    }
+
+    /// A turn Stop fires every call's token, a child's too, but it is not a
+    /// cancel of that child's call: the child saves its row CANCELLED and
+    /// waits for the root, whose own cancel arm tears the whole run down. It
+    /// closes nothing and raises nothing: a `CANCELLED_BY_PERSON` close would
+    /// read as the person cutting this one child. Time is paused, so the wait
+    /// for a turn that never ends passes at once.
+    #[tokio::test(start_paused = true)]
+    async fn a_turn_stop_closes_nothing_in_a_nested_run() {
+        use crate::llm::domain::call_cancels::{in_registry, CallCancels};
+        for stop in [Stop::BeforeStart, Stop::AtLlm] {
+            let llm = Llm::new(First::Hang);
+            let repo = Arc::new(MemRepo::default());
+            let turn = CancellationToken::new();
+            let calls = Arc::new(CallCancels::new(turn.clone()));
+            let token = calls.begin("c1").expect("not cancelled");
+            let uc = use_case(&llm, &repo, LivenessSettings::disabled());
+            let run = nested_turn_on(uc, stop, token, &turn);
+            let (events, end) = in_registry(Some(calls), run).await;
+            assert_eq!(end, None, "the child waits for the root: {events:?}");
+            let closed = |e: &DagExecutionEvent| {
+                matches!(
+                    e,
+                    DagExecutionEvent::NodeFinish { error: Some(_), .. }
+                        | DagExecutionEvent::Cancelled { .. }
+                )
+            };
+            assert!(!events.iter().any(closed), "{events:?}");
+            assert_eq!(repo.row().status, DagRunStatus::Cancelled);
+        }
     }
 }
 
