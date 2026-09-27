@@ -6674,3 +6674,11 @@ HIDE_PATHS,MAX_REQUEST_MB,MAX_RESPONSE_MB}`). `subprocess` sigue sin poder elegi
 **Tests.** Configuración; filtro de stderr; la plantilla sobrevive al hilo de la primera llamada; arranque fallido con
 pausa. Guía: [53_python_executors.md](developer_guide/53_python_executors.md#the-subprocess-executor-linux-not-selectable-yet).
 **ADP.** Sin cambios. **Estado.** done.
+
+## 159. Python: el executor por subproceso corre cada llamada en un hijo (Linux, todavía no seleccionable)
+
+**Qué cambia.** Cada llamada toma un slot, chequea el tamaño del pedido antes de enviarlo, pide un hijo a la plantilla y
+lee una respuesta con tope; un plazo vencido mata al hijo y una llamada abandonada lo mata y libera el slot recién cuando
+el hijo terminó. La plantilla recibe del host solo `LANG`, `LC_ALL` y `LC_CTYPE`. Sigue sin poder elegirse.
+**Tests.** Integración en Linux con pandas: resultado, error, plazo, tamaño, llamada abandonada, un slot a la vez,
+paridad de codificación con el executor en proceso. **ADP.** Sin cambios. **Estado.** done.

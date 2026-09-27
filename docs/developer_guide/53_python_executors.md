@@ -104,6 +104,11 @@ Its stderr is read as JSON events with known fields only; any other line is drop
 | `COLMENA_PYTHON_EXECUTOR_HIDE_PATHS` | none (`:`-separated paths) |
 | `COLMENA_PYTHON_EXECUTOR_MAX_REQUEST_MB`, `…_MAX_RESPONSE_MB` | 256 (1-4095) |
 
+Each call takes a slot, checks the request size first, forks a child through the template and reads one capped
+response; a passed deadline kills the child (`Timeout`), and an abandoned call's child is killed and its slot freed
+once it is gone. The template gets only the host's `LANG`, `LC_ALL` and `LC_CTYPE` (same text encodings as in process),
+no `PYTHONPATH`/`PYTHONHOME`. Memory and CPU limits are sent but not enforced yet. The host must ignore `SIGPIPE`.
+
 ## About `restricted`
 
 `restricted` validates imports and a few builtins before running. It helps
