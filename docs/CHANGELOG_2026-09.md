@@ -6553,3 +6553,16 @@ re-siembra numpy (falla cerrado) y termina con `_exit`. Sale con `3` si falla un
 todavía. Guía: [53_python_executors.md](developer_guide/53_python_executors.md#the-warm-template-linux).
 **Tests.** Linux: pid antes que nada, cabecera válida, no JSON y demasiado grande; conteo de hilos. **ADP.** Sin
 cambios. **Estado.** done.
+
+## 152. Una llamada a una tool se puede cancelar sola: el registro
+
+**Qué cambia.** Nuevo `CallCancels` (`llm/domain/call_cancels.rs`): el registro de cancelaciones por
+llamada de una corrida, con un token por `tool_call_id` hijo del token del turno, los ids pedidos
+antes de arrancar (hasta 1024) y el texto `agent_loop/cancelled_by_person.md`. Todavía no lo usa
+nadie: el bucle lo conecta en §153. Sin registro en el alcance, todo corre como hoy.
+
+**Tests.** Cancelar antes de arrancar, mientras corre y después de terminar; un id repetido o vacío
+no toma el cancel de otra llamada; el tope; el Stop del turno dispara todos los tokens y no contesta
+la llamada; un trabajo no adoptado se suelta y uno adoptado se espera.
+
+**ADP.** Sin cambios. **Estado.** done.
