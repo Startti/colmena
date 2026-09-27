@@ -1,0 +1,61 @@
+{
+  "comment": "E2E de «cancelar un agente hijo por separado». Lo corre src/libs/colmena/tests/cancel_one_child.rs con un modelo guionado (PADRE o HIJO, por el system prompt) y un RunControl. El padre corre alfa y beta a la vez con Run (parallel, memoria dynamic con el hilo fijo en ${agentId}, como Run My Agent de ADP). El test corta la llamada de alfa apenas su hijo empieza: la fila de alfa queda CANCELLED y su llamada se contesta con cancelled_by_person.md; beta termina y el padre contesta. Con el Stop del turno, en cambio, se corta todo y ninguna llamada se contesta.",
+  "metadata": {
+    "category": "agents",
+    "features": ["subgraph_as_tool", "child_graph_inline", "parallel_tool_calls", "conversation_memory"],
+    "requires_env": ["GEMINI_API_KEY", "DATABASE_URL"]
+  },
+  "nodes": {
+    "pedido": { "type": "input", "config": { "prompt": "corré alfa y beta a la vez." } },
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "model": "gemini-2.5-flash",
+        "api_key": "${GEMINI_API_KEY}",
+        "connection_url": "${DATABASE_URL}",
+        "stream": true,
+        "system_message": "PADRE. Corrés agentes con Run, uno por agentId. Pedí todas las llamadas en el mismo mensaje.",
+        "prompt": "{{prompt}}",
+        "tool_configurations": {
+          "Run": {
+            "name": "Run",
+            "node_type": "subgraph",
+            "parallel": true,
+            "memory_mode": "dynamic",
+            "description": "Corre un agente con una tarea.",
+            "node_schema": {
+              "agentId": { "type": "string", "required": true, "description": "El id del agente (alfa, beta)." },
+              "task": { "type": "string", "required": true, "description": "La tarea para el agente." },
+              "thread_id": { "fixed": "${agentId}" },
+              "child_graph_inline": {
+                "fixed": {
+                  "nodes": {
+                    "hijo": {
+                      "type": "llm_call",
+                      "config": {
+                        "provider": "google",
+                        "model": "gemini-2.5-flash",
+                        "api_key": "${GEMINI_API_KEY}",
+                        "connection_url": "${DATABASE_URL}",
+                        "stream": true,
+                        "system_message": "HIJO. Hacé la tarea.",
+                        "prompt": "{{task}}"
+                      }
+                    }
+                  },
+                  "edges": []
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "salida": { "type": "output", "config": {} }
+  },
+  "edges": [
+    { "from": "pedido", "to": "agent" },
+    { "from": "agent.result", "to": "salida" }
+  ]
+}

@@ -171,7 +171,10 @@ fn measure() -> Measured {
 // unless allowed_hosts lists its host). Lints clean.
 // Bumped 337 -> 338: adds tests/graphs/basic/python_executor_smoke.json. Lints
 // clean.
-const EXPECTED_FILES: usize = 338;
+// Bumped 338 -> 339: adds tests/graphs/agents/cancel_one_child.json (a child
+// used as a tool is cancelled through its call while its sibling finishes).
+// Lints clean.
+const EXPECTED_FILES: usize = 339;
 const EXPECTED_ERRORS: usize = 0;
 const EXPECTED_WARNINGS: usize = 0;
 const EXPECTED_INFOS: usize = 0;
