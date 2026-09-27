@@ -2,15 +2,17 @@
 //! Each accepted connection gets a fresh process (`os.fork()` from Python so
 //! CPython's after-fork hooks run); the template itself never runs user code.
 
-use super::child::{self, JailSpec};
+use super::child::{self, JailSpec, EXIT_NOT_READY};
+use pyo3::exceptions::PyImportError;
 use pyo3::prelude::*;
-use serde_json::json;
-use std::ffi::CString;
+use serde_json::{json, Value};
+use std::ffi::CStr;
 use std::io::{self, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::io::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 /// The only environment the template (and every child) starts with.
 pub const TEMPLATE_ENV: &[(&str, &str)] = &[
@@ -20,29 +22,100 @@ pub const TEMPLATE_ENV: &[(&str, &str)] = &[
     ("MKL_NUM_THREADS", "1"),
 ];
 
-const WARM_IMPORTS: &str = "import pandas, numpy, scipy.stats, json, math, re, datetime, collections, itertools, functools, string, decimal, statistics, hmac, hashlib, base64, secrets, io, csv, ast\n";
+const WARM_IMPORTS: &CStr = c"import pandas, numpy, scipy.stats, json, math, re, datetime, collections, itertools, functools, string, decimal, statistics, hmac, hashlib, base64, secrets, io, csv, ast\n";
+
+/// Pause after a failed `poll`/`accept`, so a lasting failure does not spin.
+const ERROR_PAUSE: Duration = Duration::from_millis(200);
 
 pub struct ZygoteArgs {
     pub socket: PathBuf,
     pub jail: JailSpec,
 }
 
-pub(crate) fn log(event: serde_json::Value) {
+pub(crate) fn log(event: Value) {
     // stderr is read by the executor and forwarded to tracing.
     let _ = writeln!(io::stderr(), "{event}");
 }
 
-fn warm_imports() -> Result<(), String> {
-    let code = CString::new(WARM_IMPORTS).map_err(|e| e.to_string())?;
+/// A Python exception's type name, never its message.
+fn error_type(py: Python<'_>, e: &PyErr) -> Option<String> {
+    e.get_type(py).name().ok().map(|n| n.to_string())
+}
+
+fn warm_imports() -> Result<(), Value> {
     Python::attach(|py| {
-        py.run(code.as_c_str(), None, None)
-            .map_err(|e| e.to_string())
+        py.run(WARM_IMPORTS, None, None).map_err(|e| {
+            let module = e
+                .is_instance_of::<PyImportError>(py)
+                .then(|| e.value(py).getattr("name").ok()?.extract::<String>().ok())
+                .flatten();
+            json!({"event": "warm_imports_failed", "error_type": error_type(py, &e), "module": module})
+        })
     })
 }
 
-fn python_fork() -> Result<i32, String> {
-    Python::attach(|py| -> PyResult<i32> { py.import("os")?.call_method0("fork")?.extract() })
-        .map_err(|e| e.to_string())
+fn python_fork() -> Result<i32, Value> {
+    Python::attach(|py| {
+        let forked = py.import("os").and_then(|os| os.call_method0("fork"));
+        forked.and_then(|pid| pid.extract()).map_err(|e| {
+            let errno = e.value(py).getattr("errno").ok();
+            let errno = errno.and_then(|n| n.extract::<i32>().ok());
+            json!({"event": "fork_failed", "error_type": error_type(py, &e), "errno": errno})
+        })
+    })
+}
+
+/// Asks the kernel to kill the template when its parent goes. The signal
+/// follows the parent THREAD that started this process, not the parent
+/// process: the host must start the template from a dedicated thread that
+/// lives as long as the template should, never from a pooled or short-lived one.
+fn die_with_parent() -> Result<(), Value> {
+    let parent = unsafe { libc::getppid() };
+    // `prctl` is variadic and reads its arguments as `unsigned long`, so they
+    // are passed at that width.
+    let rc = unsafe {
+        libc::prctl(
+            libc::PR_SET_PDEATHSIG,
+            libc::SIGKILL as libc::c_ulong,
+            0 as libc::c_ulong,
+            0 as libc::c_ulong,
+            0 as libc::c_ulong,
+        )
+    };
+    if rc != 0 {
+        let errno = io::Error::last_os_error().raw_os_error();
+        return Err(json!({"event": "pdeathsig_failed", "errno": errno}));
+    }
+    // A parent that exited before `prctl` took effect sends no signal: this
+    // process has already been re-parented.
+    if unsafe { libc::getppid() } != parent {
+        return Err(json!({"event": "parent_exited"}));
+    }
+    Ok(())
+}
+
+/// `os.fork()` copies only the calling thread, so it is safe only while the
+/// template has one: a second thread (a BLAS pool, say) could hold a lock the
+/// children inherit held. Checked after the imports, which could start one.
+fn check_single_threaded() -> Result<(), Value> {
+    match std::fs::read_dir("/proc/self/task").map(Iterator::count) {
+        Ok(1) => Ok(()),
+        Ok(n) => Err(json!({"event": "template_not_single_threaded", "threads": n})),
+        Err(e) => Err(json!({"event": "thread_count_failed", "errno": e.raw_os_error()})),
+    }
+}
+
+/// Creates the socket owner-only. `umask` is process-wide, which is safe here
+/// because the template is single-threaded; the previous mask is restored so
+/// the children inherit the one the template started with.
+fn bind_private(socket: &Path) -> Result<UnixListener, Value> {
+    let previous = unsafe { libc::umask(0o077) };
+    let bound = UnixListener::bind(socket);
+    unsafe { libc::umask(previous) };
+    let listener = bound.map_err(|e| json!({"event": "bind_failed", "errno": e.raw_os_error()}))?;
+    std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o600))
+        .map_err(|e| json!({"event": "socket_permissions_failed", "errno": e.raw_os_error()}))?;
+    Ok(listener)
 }
 
 fn reap_children() {
@@ -93,31 +166,22 @@ fn accept_with_timeout(l: &UnixListener, ms: i32) -> io::Result<Option<UnixStrea
     Ok(Some(s))
 }
 
-pub fn run(args: ZygoteArgs) -> i32 {
-    // Dies with the process that started it. `prctl` is variadic and reads its
-    // arguments as `unsigned long`, so they are passed at that width.
-    unsafe {
-        libc::prctl(
-            libc::PR_SET_PDEATHSIG,
-            libc::SIGKILL as libc::c_ulong,
-            0 as libc::c_ulong,
-            0 as libc::c_ulong,
-            0 as libc::c_ulong,
-        )
-    };
+fn start(socket: &Path) -> Result<UnixListener, Value> {
+    die_with_parent()?;
     pyo3::Python::initialize();
-    if let Err(e) = warm_imports() {
-        log(json!({"event": "warm_imports_failed", "error": e}));
-        return 3;
-    }
-    let listener = match UnixListener::bind(&args.socket) {
+    warm_imports()?;
+    check_single_threaded()?;
+    bind_private(socket)
+}
+
+pub fn run(args: ZygoteArgs) -> i32 {
+    let listener = match start(&args.socket) {
         Ok(l) => l,
-        Err(e) => {
-            log(json!({"event": "bind_failed", "error": e.to_string()}));
-            return 3;
+        Err(event) => {
+            log(event);
+            return EXIT_NOT_READY;
         }
     };
-    let _ = std::fs::set_permissions(&args.socket, std::fs::Permissions::from_mode(0o600));
     println!("READY");
     let _ = io::stdout().flush();
     loop {
@@ -129,10 +193,40 @@ pub fn run(args: ZygoteArgs) -> i32 {
                     child::serve_forked(conn, &args.jail)
                 }
                 Ok(_) => drop(conn),
-                Err(e) => log(json!({"event": "fork_failed", "error": e})),
+                Err(event) => log(event),
             },
             Ok(None) => {}
-            Err(e) => log(json!({"event": "accept_failed", "error": e.to_string()})),
+            Err(e) => {
+                log(json!({"event": "accept_failed", "errno": e.raw_os_error()}));
+                std::thread::sleep(ERROR_PAUSE);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Only a forked child is single-threaded under the multi-threaded test
+    /// harness: there one thread passes the check and a second is reported.
+    #[test]
+    fn the_check_counts_the_threads_of_the_process() {
+        match unsafe { libc::fork() } {
+            0 => {
+                let ok = std::panic::catch_unwind(|| {
+                    let one = check_single_threaded().is_ok();
+                    let (_keep, wait) = std::sync::mpsc::channel::<()>();
+                    let _waiter = std::thread::spawn(move || wait.recv());
+                    one && check_single_threaded().is_err_and(|e| e["threads"] == 2)
+                });
+                unsafe { libc::_exit(i32::from(!ok.unwrap_or(false))) }
+            }
+            pid => {
+                let mut status = 0;
+                assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+                assert!(libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0);
+            }
         }
     }
 }
