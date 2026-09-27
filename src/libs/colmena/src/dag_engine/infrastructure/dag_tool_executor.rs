@@ -6571,6 +6571,7 @@ mod child_graph_source_arg_tests {
             _p: Option<String>,
             _a: Option<String>,
             _pp: Option<String>,
+            _cancel: Option<tokio_util::sync::CancellationToken>,
         ) -> Result<Value, DagError> {
             *self.0.lock().unwrap() = Some(graph);
             Ok(json!({}))

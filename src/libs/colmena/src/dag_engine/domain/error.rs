@@ -62,4 +62,13 @@ pub enum DagError {
     /// que ven el modelo y el embebedor. La fila del hijo ya quedó FAILED.
     #[error("{0}")]
     ResumeRefused(String),
+
+    /// La persona canceló la llamada que corría esta corrida anidada (un
+    /// `subgraph` usado como tool, con el token de su llamada). La fila del
+    /// hijo ya quedó `CANCELLED` y sus descendientes cerrados. Empieza con
+    /// `CANCELLED_BY_PERSON` (`llm::domain::call_cancels::CALL_CANCELLED_CODE`):
+    /// quien pinta el cierre de un nodo distingue por ese prefijo lo que cortó
+    /// la cancelación de lo que falló.
+    #[error("CANCELLED_BY_PERSON: la persona canceló esta corrida antes de que terminara")]
+    Cancelled,
 }

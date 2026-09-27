@@ -6585,3 +6585,29 @@ en el mismo poll; un future soltado a mitad deja la llamada terminada en el regi
 `cancellation_integration`, `parallel_tool_groups`, `parallel_tool_suspend`.
 
 **ADP.** Sin cambios de API ni de SSE. **Estado.** done.
+
+## 154. Un hijo usado como tool se corta con su llamada y cierra su fila
+
+**Qué cambia.** Un `subgraph` usado como tool adopta el token de su llamada
+(`call_cancels::adopt_current_call`, §152) y se lo pasa a la corrida del hijo
+(`SubGraphExecutorPort::run_subgraph`, parámetro nuevo `cancel`). Una corrida anidada cuyo token se
+dispara guarda su fila `CANCELLED` y cierra sus descendientes, como la raíz, pero en vez de emitir
+`Cancelled` (que el mapper del padre descartaba, dejando un `null` que se leía como éxito) cierra su
+nodo en curso con el error y devuelve `DagError::Cancelled` (`CANCELLED_BY_PERSON: …`, variante
+nueva); `run_call` (§153) la espera y contesta la llamada con el texto de la cancelación. El Stop del
+turno también dispara ese token, pero el hijo no hace nada por su cuenta: lo desarma la raíz, que
+cierra su fila con `cancel_running_descendants`, como antes. Si el hijo guardara su fila, el desarme
+de la raíz podía congelarlo a mitad de la consulta con la conexión del pool tomada, y la raíz no
+podía guardar la suya (medido con Postgres, dos hijos y las dos conexiones por URL de siempre: 2 de
+3 turnos quedaron ~30 s colgados y sin fila raíz; con el cambio, 15 de 15 limpios). La raíz no
+cambia, y nada de esto corre todavía: sin registro en el alcance ningún hijo recibe token.
+
+**Tests.** `run_use_case.rs`: una corrida anidada cortada a mitad de nodo cierra el nodo con el
+error, termina en `DagError::Cancelled` y deja su fila `CANCELLED` y sus descendientes cerrados;
+cortada entre nodos, igual y sin nodo que cerrar; con el Stop del turno no guarda, no cierra ni
+levanta nada. `subgraph.rs`: como tool le pasa al hijo el token de su llamada; por arista, ninguno.
+Regresión E2E: `cancellation_integration`, `parallel_tool_groups`, `parallel_tool_suspend`,
+`nested_tool_memory`, `llm_tool_suspend_integration`, `suspend_resume_routing`.
+
+**ADP.** Sin cambios de SSE. En Rust, `run_subgraph` gana un parámetro y `DagError` una variante;
+ADP no usa ninguno de los dos. **Estado.** done.
