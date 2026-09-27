@@ -477,6 +477,9 @@ impl DagRunUseCase {
                 // partial outputs), clean up any RUNNING descendants, emit the
                 // terminal `Cancelled` event, and end the stream.
                 if cancel_token.as_ref().is_some_and(|t| t.is_cancelled()) {
+                    if self.nested_run && turn_stopped() {
+                        std::future::pending::<()>().await;
+                    }
                     let mut remaining = active_queue.clone();
                     remaining.push_front(node_id.clone());
                     if let Some(repo) = &self.state_repository {
@@ -502,9 +505,6 @@ impl DagRunUseCase {
                     // A `Cancelled` event here is dropped by the parent's
                     // mapper and leaves a `null` that reads as a success.
                     if self.nested_run {
-                        if turn_stopped() {
-                            std::future::pending::<()>().await;
-                        }
                         Err(DagError::Cancelled)?;
                     }
                     yield DagExecutionEvent::Cancelled {
@@ -821,6 +821,9 @@ impl DagRunUseCase {
                                     None => std::future::pending::<()>().await,
                                 }
                             } => {
+                                if self.nested_run && turn_stopped() {
+                                    std::future::pending::<()>().await;
+                                }
                                 let mut remaining = active_queue.clone();
                                 remaining.push_front(node_id.clone());
                                 if let Some(repo) = &self.state_repository {
@@ -848,9 +851,6 @@ impl DagRunUseCase {
                                 // Nested: close the node and raise after the
                                 // loop, like the idle abort below.
                                 if self.nested_run {
-                                    if turn_stopped() {
-                                        std::future::pending::<()>().await;
-                                    }
                                     nested_cancelled = true;
                                     break;
                                 }
@@ -1820,10 +1820,13 @@ impl DagRunUseCase {
 /// Whether the whole turn this run belongs to was stopped (the composer's
 /// Stop), and not only the call that runs it: a nested run's token is its
 /// call's, a child of the turn's, so both fire it. On a turn Stop a nested run
-/// saves its row CANCELLED and then waits: the root's own cancel arm tears the
-/// whole run down, as before per-call cancels existed, and nothing in the child
-/// is closed with `CANCELLED_BY_PERSON`, which would read as the person cutting
-/// that one call. Without a registry in scope: `false`.
+/// does nothing and waits, as before per-call cancels existed: the root's own
+/// cancel arm tears the whole run down and closes the child's row
+/// (`cancel_running_descendants`). Closing the child's node with
+/// `CANCELLED_BY_PERSON` would read as the person cutting that one call, and a
+/// save of its own could be frozen mid-query by that teardown, holding the
+/// pool connection the root's save needs. Without a registry in scope:
+/// `false`.
 fn turn_stopped() -> bool {
     crate::llm::domain::call_cancels::current_registry().is_some_and(|calls| calls.turn_stopped())
 }
@@ -3713,17 +3716,24 @@ mod stored_run_status_tests {
     }
 
     /// A turn Stop fires every call's token, a child's too, but it is not a
-    /// cancel of that child's call: the child saves its row CANCELLED and
-    /// waits for the root, whose own cancel arm tears the whole run down. It
-    /// closes nothing and raises nothing: a `CANCELLED_BY_PERSON` close would
-    /// read as the person cutting this one child. Time is paused, so the wait
-    /// for a turn that never ends passes at once.
+    /// cancel of that child's call: the child does nothing and waits for the
+    /// root, whose own cancel arm tears the whole run down and closes the
+    /// child's row (`cancel_running_descendants`), as before per-call cancels
+    /// existed. It closes nothing, raises nothing and saves nothing: a
+    /// `CANCELLED_BY_PERSON` close would read as the person cutting this one
+    /// child, and a save frozen mid-query by the root's teardown would keep
+    /// the pool connection the root's own save needs. Time is paused, so the
+    /// wait for a turn that never ends passes at once.
     #[tokio::test(start_paused = true)]
-    async fn a_turn_stop_closes_nothing_in_a_nested_run() {
+    async fn a_turn_stop_leaves_a_nested_run_to_the_root() {
         use crate::llm::domain::call_cancels::{in_registry, CallCancels};
         for stop in [Stop::BeforeStart, Stop::AtLlm] {
             let llm = Llm::new(First::Hang);
             let repo = Arc::new(MemRepo::default());
+            // The row `run_subgraph` saves before the child starts.
+            let mut row = suspended_child_row(RUN, "root");
+            row.status = DagRunStatus::Running;
+            repo.0.lock().unwrap().insert(RUN.into(), row);
             let turn = CancellationToken::new();
             let calls = Arc::new(CallCancels::new(turn.clone()));
             let token = calls.begin("c1").expect("not cancelled");
@@ -3739,7 +3749,11 @@ mod stored_run_status_tests {
                 )
             };
             assert!(!events.iter().any(closed), "{events:?}");
-            assert_eq!(repo.row().status, DagRunStatus::Cancelled);
+            assert_eq!(
+                repo.row().status,
+                DagRunStatus::Running,
+                "the root closes it"
+            );
         }
     }
 }
