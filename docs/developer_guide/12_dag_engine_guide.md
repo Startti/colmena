@@ -1453,6 +1453,9 @@ control.cancel_token().cancel(); // el Stop de siempre
   por su cuenta: lo desarma la raíz, que cierra su fila `CANCELLED` con
   `cancel_running_descendants`, como antes. Ninguna llamada se contesta, nada se cierra con
   `CANCELLED_BY_PERSON` y el turno termina con `cancelled` + `finish`, como siempre.
+  La raíz dropea su nodo en vuelo antes de cerrar filas: un hijo frenado a mitad de una consulta
+  suelta así la conexión del pool que esas escrituras necesitan
+  ([CHANGELOG 2026-09 §160](../CHANGELOG_2026-09.md)).
 
 ## 📚 Más Información
 
