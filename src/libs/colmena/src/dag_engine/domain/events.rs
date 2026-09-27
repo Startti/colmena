@@ -63,6 +63,11 @@ pub enum DagExecutionEvent {
         /// The same scope its `LlmToolCallStart` carried. Additive, as there.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         child_scope: Option<String>,
+        /// The person cancelled this call on its own
+        /// (`llm::domain::call_cancels::is_cancelled_result`). Additive: `false`
+        /// is not written, and a frame without it reads as `false`.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        cancelled: bool,
     },
     #[serde(rename = "llm_message_start")]
     LlmMessageStart { node_id: String },
@@ -293,12 +298,14 @@ impl DagExecutionEvent {
                 success,
                 output,
                 child_scope,
+                cancelled,
             } => Self::LlmToolCallFinish {
                 node_id: nid(),
                 tool_id,
                 success,
                 output,
                 child_scope,
+                cancelled,
             },
             NodeEvent::SkillLoaded {
                 tool_id,
@@ -769,5 +776,27 @@ mod tests {
             ),
             other => panic!("expected NodeFinish, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn from_node_event_keeps_a_cancelled_finish() {
+        let ev = DagExecutionEvent::from_node_event(
+            NodeEvent::LlmToolCallFinish {
+                tool_id: "c1".into(),
+                success: false,
+                output: "x".into(),
+                child_scope: None,
+                cancelled: true,
+            },
+            "llm",
+        )
+        .unwrap();
+        assert!(matches!(
+            ev,
+            DagExecutionEvent::LlmToolCallFinish {
+                cancelled: true,
+                ..
+            }
+        ));
     }
 }

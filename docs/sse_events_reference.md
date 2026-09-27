@@ -164,7 +164,7 @@ Emitido cuando el LLM llama a una herramienta.
 | `tool-input-start` | `toolCallId`, `toolName` | Primer chunk de argumentos (una vez por `toolCallId`) |
 | `tool-input-delta` | `toolCallId`, `inputTextDelta` | Chunk de argumentos en streaming |
 | `tool-input-available` | `toolCallId`, `toolName`, `input`; `childScope` si la tool es `parallel` | Argumentos completos y parseados |
-| `tool-output-available` | `toolCallId`, `output`; `childScope` si la tool es `parallel` | Resultado de ejecutar la herramienta |
+| `tool-output-available` | `toolCallId`, `output`; `childScope` si la tool es `parallel`; `status: "cancelled"` si la persona cortó esa llamada | Resultado de ejecutar la herramienta |
 | `tool-described` | `nodeId`, `toolCallId`, `toolName` | Emitido cuando una invocación de `describe_tool` resuelve y el motor revela el schema completo de una tool perezosa. Permite al frontend mostrar "Schema de `<toolName>` listo" sin esperar al `tool-output-available`. Detalles en [29_lazy_tool_loading.md](./developer_guide/29_lazy_tool_loading.md). |
 
 Secuencia completa:
@@ -256,6 +256,31 @@ duerme 2,3 s y el de `precios` 2 s, así que `precios` cierra primero:
 { "type": "subgraph-node-end",     "node_id": "Run#0", "node_type": "subgraph", "level": 1, "path": "agent>Run#0" }
 { "type": "tool-output-available", "toolCallId": "call_clima",   "output": { "result": { "hecha": "clima" } },   "childScope": "Run#0", "level": 0, "path": "agent" }
 ```
+
+#### `status: "cancelled"` — una llamada que la persona cortó sola
+
+Con `execute_stream_controlled`, `RunControl::cancel_call(id)` corta una llamada y el resto
+del turno sigue ([guía 12](developer_guide/12_dag_engine_guide.md#cancelar-una-llamada-sola-execute_stream_controlled)).
+Su `tool-output-available` (o `subgraph-tool-output-available`) lleva `status: "cancelled"`,
+y su `output` es el texto que lee el modelo. Ningún otro frame trae el campo. Si la llamada
+era un `subgraph` usado como tool, antes llegan los cierres de su nodo en curso y de su
+frontera, con `status: "error"` y un `errorText` que empieza con `CANCELLED_BY_PERSON`: quien
+arma el árbol los lee como cortados por la cancelación, no como fallas.
+
+Frames reales de una corrida con Postgres y el modelo guionado, recortados. El modelo pidió
+`Run` para alfa y beta en un mensaje; se cortó la llamada de alfa apenas arrancó su hijo, y
+beta terminó después:
+
+```json
+{ "type": "subgraph-node-end",     "node_id": "hijo",  "node_type": "llm_call", "output": null, "status": "error", "errorText": "CANCELLED_BY_PERSON: la persona canceló esta corrida antes de que terminara", "level": 2, "path": "agent>Run#0>hijo" }
+{ "type": "subgraph-node-end",     "node_id": "Run#0", "node_type": "subgraph", "output": null, "status": "error", "errorText": "CANCELLED_BY_PERSON: la persona canceló esta corrida antes de que terminara", "level": 1, "path": "agent>Run#0" }
+{ "type": "tool-output-available", "toolCallId": "call_alfa", "output": "La persona canceló este agente antes de que terminara.", "childScope": "Run#0", "status": "cancelled", "level": 0, "path": "agent" }
+{ "type": "subgraph-node-end",     "node_id": "Run#1", "node_type": "subgraph", "output": { ... }, "level": 1, "path": "agent>Run#1" }
+{ "type": "tool-output-available", "toolCallId": "call_beta", "output": { ... }, "childScope": "Run#1", "level": 0, "path": "agent" }
+```
+
+El Stop del turno no produce este campo: termina con `cancelled` + `finish`, como siempre, y
+nada se cierra con `CANCELLED_BY_PERSON`.
 
 ---
 
@@ -507,7 +532,7 @@ propia falla.
 | `subgraph-tool-input-start` | `toolCallId`, `toolName` | Primer chunk de args de tool interno |
 | `subgraph-tool-input-delta` | `toolCallId`, `inputTextDelta` | Chunk de args en streaming |
 | `subgraph-tool-input-available` | `toolCallId`, `toolName`, `input`; `childScope` si la tool es `parallel` | Args completos del tool |
-| `subgraph-tool-output-available` | `toolCallId`, `output`; `childScope` si la tool es `parallel` | Resultado del tool |
+| `subgraph-tool-output-available` | `toolCallId`, `output`; `childScope` si la tool es `parallel`; `status: "cancelled"` si la persona cortó esa llamada | Resultado del tool |
 | `subgraph-tool-described` | `nodeId`, `toolCallId`, `toolName` | Contraparte de subgrafo de `tool-described` — emitido cuando `describe_tool` resuelve dentro de un `subgraph` o agente-tarea del orchestrator. |
 
 ### Skill
@@ -787,7 +812,7 @@ Para reanudar, el cliente envía las respuestas con el mismo `session_id`. El pl
 | `tool-input-available` | top | `toolCallId`, `toolName`, `input` | `childScope` |
 | `batch-progress` | top | `nodeId`, `total`, `completed`, `ok`, `err`, `inFlight` | — |
 | `batch-item-finished` | top | `nodeId`, `index`, `key`, `status` | — |
-| `tool-output-available` | top | `toolCallId`, `output` | `childScope` |
+| `tool-output-available` | top | `toolCallId`, `output` | `childScope`, `status` |
 | `skill-loaded` | top | `nodeId`, `toolCallId`, `skillName`, `source`, `sizeBytes` | `reference` |
 | `tool-described` | top | `nodeId`, `toolCallId`, `toolName` | — |
 | `status` | top/sub | `stage`, `node_id`, `idleSecs` | — |
@@ -808,7 +833,7 @@ Para reanudar, el cliente envía las respuestas con el mismo `session_id`. El pl
 | `subgraph-tool-input-start` | sub | `toolCallId`, `toolName` | — |
 | `subgraph-tool-input-delta` | sub | `toolCallId`, `inputTextDelta` | — |
 | `subgraph-tool-input-available` | sub | `toolCallId`, `toolName`, `input` | `childScope` |
-| `subgraph-tool-output-available` | sub | `toolCallId`, `output` | `childScope` |
+| `subgraph-tool-output-available` | sub | `toolCallId`, `output` | `childScope`, `status` |
 | `subgraph-tool-described` | sub | `nodeId`, `toolCallId`, `toolName` | — |
 | `subgraph-skill-loaded` | sub | `nodeId`, `toolCallId`, `skillName`, `source`, `sizeBytes` | `reference` |
 | `subgraph-usage-summary` | sub | `nodes` | — |

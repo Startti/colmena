@@ -331,17 +331,21 @@ impl SseMapper {
                 tool_id,
                 output,
                 child_scope,
+                cancelled,
                 ..
             } => {
                 let out = serde_json::from_str::<Value>(output)
                     .unwrap_or_else(|_| Value::String(output.clone()));
-                Some(Self::with_child_scope(
-                    json!({
-                        "type": "tool-output-available",
-                        "toolCallId": tool_id,
-                        "output": out
-                    }),
-                    child_scope,
+                Some(Self::with_cancelled(
+                    Self::with_child_scope(
+                        json!({
+                            "type": "tool-output-available",
+                            "toolCallId": tool_id,
+                            "output": out
+                        }),
+                        child_scope,
+                    ),
+                    *cancelled,
                 ))
             }
             DagExecutionEvent::GraphFinish { output } => {
@@ -599,17 +603,21 @@ impl SseMapper {
                     tool_id,
                     output,
                     child_scope,
+                    cancelled,
                     ..
                 } => {
                     let out = serde_json::from_str::<Value>(output)
                         .unwrap_or_else(|_| Value::String(output.clone()));
-                    Some(Self::with_child_scope(
-                        json!({
-                            "type": "subgraph-tool-output-available",
-                            "toolCallId": tool_id,
-                            "output": out
-                        }),
-                        child_scope,
+                    Some(Self::with_cancelled(
+                        Self::with_child_scope(
+                            json!({
+                                "type": "subgraph-tool-output-available",
+                                "toolCallId": tool_id,
+                                "output": out
+                            }),
+                            child_scope,
+                        ),
+                        *cancelled,
                     ))
                 }
                 DagExecutionEvent::ReasoningStart { id, .. } => Some(json!({
@@ -761,6 +769,15 @@ impl SseMapper {
         frame
     }
 
+    /// Add `status: "cancelled"` to the result frame of a call the person
+    /// cancelled on its own. Any other frame is returned untouched.
+    fn with_cancelled(mut frame: Value, cancelled: bool) -> Value {
+        if cancelled {
+            frame["status"] = json!("cancelled");
+        }
+        frame
+    }
+
     fn clean_inputs(inputs: &Value) -> Value {
         if let Some(obj) = inputs.as_object() {
             Value::Object(
@@ -807,6 +824,7 @@ mod tests {
                 success: true,
                 output: "{\"weather\":\"sunny\"}".into(),
                 child_scope: None,
+                cancelled: false,
             },
         ]
     }
@@ -1484,6 +1502,7 @@ mod tests {
             success: true,
             output: r#"{"ok":true}"#.into(),
             child_scope: child_scope.map(str::to_string),
+            cancelled: false,
         }
     }
 
@@ -1579,5 +1598,64 @@ mod tests {
             back,
             DagExecutionEvent::LlmToolCallStart { child_scope: Some(s), .. } if s == "Run#1"
         ));
+    }
+
+    #[test]
+    fn a_call_the_person_cancelled_says_so_on_its_result_frame() {
+        let mut mapper = SseMapper::new();
+        let cancelled = DagExecutionEvent::LlmToolCallFinish {
+            node_id: "llm".into(),
+            tool_id: "call_1".into(),
+            success: false,
+            output: "La persona canceló este agente antes de que terminara.".into(),
+            child_scope: Some("Run#1".into()),
+            cancelled: true,
+        };
+        let top = mapper.map(&cancelled);
+        assert_eq!(top[0]["type"], "tool-output-available");
+        assert_eq!(top[0]["status"], "cancelled");
+        assert_eq!(top[0]["childScope"], "Run#1");
+        let nested = mapper.map(&wrapped(cancelled.clone()));
+        assert_eq!(nested[0]["type"], "subgraph-tool-output-available");
+        assert_eq!(nested[0]["status"], "cancelled");
+        // The worker API ends a stream on these substrings (stream.rs:77).
+        for part in top.iter().chain(nested.iter()) {
+            let text = part.to_string();
+            assert!(!text.contains(r#""type":"finish""#), "{text}");
+            assert!(!text.contains(r#""type":"error""#), "{text}");
+        }
+    }
+
+    #[test]
+    fn any_other_result_frame_has_no_status() {
+        let mut mapper = SseMapper::new();
+        for success in [true, false] {
+            let finish = DagExecutionEvent::LlmToolCallFinish {
+                node_id: "llm".into(),
+                tool_id: "call_1".into(),
+                success,
+                output: "x".into(),
+                child_scope: None,
+                cancelled: false,
+            };
+            let parts = mapper.map(&finish);
+            assert!(parts[0].get("status").is_none(), "{}", parts[0]);
+        }
+    }
+
+    #[test]
+    fn a_finish_without_the_field_reads_as_not_cancelled_and_false_is_not_written() {
+        let raw = json!({ "event": "llm_tool_call_finish",
+            "data": { "node_id": "n", "tool_id": "t", "success": true, "output": "o" } });
+        let ev: DagExecutionEvent = serde_json::from_value(raw).unwrap();
+        assert!(matches!(
+            ev,
+            DagExecutionEvent::LlmToolCallFinish {
+                cancelled: false,
+                ..
+            }
+        ));
+        let back = serde_json::to_value(&ev).unwrap();
+        assert!(back["data"].get("cancelled").is_none(), "{back}");
     }
 }

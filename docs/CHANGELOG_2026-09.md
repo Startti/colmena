@@ -6631,6 +6631,23 @@ del repo llega con el frame. Regresión E2E: las mismas seis de §154.
 **ADP.** [Nota de migración](adp_migration/2026-09-26-cancel-one-call.md). Sin cambios de SSE
 todavía. **Estado.** done.
 
+## 156. El resultado de una llamada cortada lo dice (`status: "cancelled"`)
+
+**Qué cambia.** `tool-output-available` y `subgraph-tool-output-available` suman
+`"status": "cancelled"` cuando la persona cortó esa llamada (§153-§155); todo otro frame queda
+igual byte por byte. `LlmToolCallFinish` (en `NodeEvent` y `DagExecutionEvent`) gana `cancelled`,
+aditivo: un `false` no se escribe y un frame sin el campo se lee como `false`. El nodo `llm_call` lo
+toma del `ToolResult` de la llamada (`call_cancels::is_cancelled_result`).
+
+**Tests.** `sse_mapper.rs`: el frame cortado (arriba y anidado) lleva el campo y no contiene
+`"type":"finish"` ni `"type":"error"`; ningún otro lo lleva; ida y vuelta de serde. `events.rs`:
+`from_node_event` lo conserva. Probado de punta a punta con Postgres y el modelo guionado (dos
+hijos a la vez, se corta uno): el resultado del cortado es el único frame con `status: "cancelled"`
+y el Stop del turno no produce ninguno. El E2E del repo llega en §157. Regresión E2E:
+`cancellation_integration`, `parallel_tool_groups`, `parallel_tool_suspend`, `nested_tool_memory`.
+
+**ADP.** [Nota de migración](adp_migration/2026-09-26-cancel-one-call.md#el-frame). **Estado.** done.
+
 ## 156. Python: el executor por subproceso supervisa la plantilla (Linux, todavía no seleccionable)
 
 **Qué cambia.** `python_exec::subprocess` arranca la plantilla caliente desde un hilo propio de vida larga, con solo
