@@ -1473,6 +1473,19 @@ bucle sigue sin leer. `InMemorySteeringInbox` es el buzón en memoria (tests, un
 proceso). Un id viaja en un frame solo si es de `[A-Za-z0-9_.-]{1,256}` y no son solo puntos
 (`is_steering_id`, igual que `valid_id` del worker de ADP).
 
+**El bucle lee en el tope de cada paso.** `AgentService::run_steered(params, inbox)` es
+`run` con un buzón (`run(params)` es `run_steered(params, None)`). En el tope de cada
+iteración, antes de armar el pedido, toma lo que espera y lo lee: cada mensaje, en orden,
+se guarda en la historia como `user`, entra en el pedido de esa misma iteración (después de
+los resultados de las tools) y sale como `LlmStreamPart::UserMessageConsumed { id }`. Entre
+guardarlo y anunciarlo no hay `await`. Nunca lee con un id del último mensaje del
+asistente abierto (`abandoned_call_ids`); con un grupo en paralelo corriendo, el bucle está
+esperando al grupo, así que el mensaje espera al grupo entero. Leer reinicia la racha del
+guard de repetición: correr otra vez lo mismo porque la persona lo pidió no es un bucle.
+Un mensaje con un id que no pasa `is_steering_id` o con el texto en blanco se salta. El
+buzón se cierra cuando el bucle vuelve, como sea que vuelva (una pregunta, el rescate, un
+error).
+
 ## 📚 Más Información
 
 - **[20_orchestrator_architecture.md](./20_orchestrator_architecture.md)** — Guía completa del orchestrator: HITL, bridge tasks, fases, critic feedback loop y replanning dinámico con diagramas Mermaid

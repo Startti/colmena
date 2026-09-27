@@ -6594,3 +6594,24 @@ descarta lo que quedaba y cerrar dos veces no hace nada; `is_steering_id`.
 
 **ADP.** Sin cambios de API ni de SSE todavía.
 **Estado.** done.
+
+## 165. Mensajes a mitad de corrida: el bucle lee en el tope de cada paso
+
+**Qué cambia.** `AgentService::run_steered(params, inbox)` (§164): en el tope de cada
+iteración toma lo que espera en el buzón y, por mensaje y en orden, lo guarda en la
+historia como `user`, lo suma al pedido de esa iteración y emite
+`UserMessageConsumed { id }`, sin `await` entre guardar y emitir. No lee con un id del
+último mensaje del asistente abierto. Leer reinicia la racha del guard. Un id que no puede
+viajar en un frame o un texto en blanco se saltan. El buzón se cierra al volver el bucle,
+como sea que vuelva. `run(params)` es `run_steered(params, None)`: sin buzón, el bucle es
+el de siempre. `AgentRunParams` no cambia.
+
+**Tests.** `agent_service.rs`: un mensaje escrito mientras corre una llamada va en el
+pedido siguiente después del resultado, queda en la historia en ese lugar y su evento sale
+entre el resultado y el pedido; dos en un paso son dos filas, dos eventos y un solo mensaje
+de usuario en el pedido; no lee con un id abierto; la racha se reinicia; un id malo o un
+texto en blanco se saltan; un grupo que suspende cierra sin volver a tomar; una corrida que
+falla también cierra. Sin buzón, todos los tests de siempre pasan sin tocarlos.
+
+**ADP.** Sin cambios de API ni de SSE todavía: nadie pone un buzón en una corrida.
+**Estado.** done.
