@@ -6648,7 +6648,7 @@ y el Stop del turno no produce ninguno. El E2E del repo llega en §157. Regresi�
 
 **ADP.** [Nota de migración](adp_migration/2026-09-26-cancel-one-call.md#el-frame). **Estado.** done.
 
-## 156. Python: el executor por subproceso supervisa la plantilla (Linux, todavía no seleccionable)
+## 158. Python: el executor por subproceso supervisa la plantilla (Linux, todavía no seleccionable)
 
 **Qué cambia.** `python_exec::subprocess` arranca la plantilla caliente desde un hilo propio de vida larga, con solo
 `TEMPLATE_ENV`, la reemplaza si termina y reintenta un arranque fallido después de una pausa; su stderr pasa al log
