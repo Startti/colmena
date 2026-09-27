@@ -7,6 +7,8 @@ pub mod config;
 pub mod frame;
 pub mod inprocess;
 pub mod protocol;
+#[cfg(target_os = "linux")]
+pub mod zygote;
 
 use crate::dag_engine::domain::python_executor::{
     ExecutorKind, PythonExecutor, PythonRunError, PythonRunRequest, PythonRunResult,

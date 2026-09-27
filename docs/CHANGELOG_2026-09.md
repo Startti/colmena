@@ -6544,3 +6544,12 @@ y el marcador en el resumen de turnos viejos, y su prompt solo. Sin la curación
 **ADP.** Sin cambios de API ni de SSE. Nota:
 [2026-09-26-unanswered-request-marker.md](adp_migration/2026-09-26-unanswered-request-marker.md).
 **Estado.** hecho; sin verificar con un modelo real, se mide en dev.
+
+## 151. Python: el binario `python_executor` y la plantilla caliente (Linux)
+
+**Qué cambia.** Binario nuevo `python_executor` (`zygote --socket`): un Python con los módulos pesados importados una
+vez, que verifica tener un solo hilo, abre un socket 0600, imprime `READY` y hace un fork por conexión; cada hijo
+re-siembra numpy (falla cerrado) y termina con `_exit`. Sale con `3` si falla un chequeo de arranque. Nada lo lanza
+todavía. Guía: [53_python_executors.md](developer_guide/53_python_executors.md#the-warm-template-linux).
+**Tests.** Linux: pid antes que nada, cabecera válida, no JSON y demasiado grande; conteo de hilos. **ADP.** Sin
+cambios. **Estado.** done.

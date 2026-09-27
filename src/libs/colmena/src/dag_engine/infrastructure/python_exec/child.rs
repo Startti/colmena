@@ -24,8 +24,84 @@ pub struct CallHeader {
     pub max_request_bytes: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct JailSpec {
+    pub uid_base: u32,
+    pub tmp_mb: u64,
+    pub hide_paths: Vec<std::path::PathBuf>,
+}
+
+/// Exit code of the warm template when it stops before printing `READY`.
+pub const EXIT_NOT_READY: i32 = 3;
+/// Exit code of a forked child whose call ended in an error or a panic
+/// instead of a complete response.
+pub const EXIT_PROTOCOL: i32 = 70;
+pub const EXIT_JAIL: i32 = 71;
+
 fn invalid(e: impl std::fmt::Display) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, e.to_string())
+}
+
+/// Numpy's global generator is not reseeded by `os.fork()`; without this two
+/// calls would draw the same numbers. Only a numpy loaded before the fork holds
+/// that copied state: when it is not in `sys.modules` there is nothing to
+/// reseed (its first import seeds itself). A loaded numpy that fails to reseed
+/// is an error, so no call runs with a generator copied from the template.
+#[cfg(target_os = "linux")]
+fn reseed_numpy() -> io::Result<()> {
+    reseed_if_loaded("numpy")
+}
+
+#[cfg(target_os = "linux")]
+fn reseed_if_loaded(module: &str) -> io::Result<()> {
+    use pyo3::prelude::*;
+    pyo3::Python::attach(|py| -> PyResult<()> {
+        let loaded = py
+            .import("sys")?
+            .getattr("modules")?
+            .call_method1("get", (module,))?;
+        if !loaded.is_none() {
+            loaded.getattr("random")?.call_method0("seed")?;
+        }
+        Ok(())
+    })
+    .map_err(invalid)
+}
+
+/// Serves one call in a process forked from the template and exits: 0 after a
+/// response, [`EXIT_PROTOCOL`] otherwise. `_exit` skips what the template
+/// registered (atexit handlers, buffered stdio), and a panic is caught here
+/// silently, so nothing reaches the stderr the template shares with children.
+#[cfg(target_os = "linux")]
+pub fn serve_forked(conn: std::os::unix::net::UnixStream, jail: &JailSpec) -> ! {
+    std::panic::set_hook(Box::new(|_| {}));
+    let served = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        serve_forked_inner(conn, jail)
+    }));
+    let code = match served {
+        Ok(Ok(())) => 0,
+        Ok(Err(_)) => EXIT_PROTOCOL,
+        Err(payload) => {
+            // Dropping the payload could panic again, outside this boundary.
+            std::mem::forget(payload);
+            EXIT_PROTOCOL
+        }
+    };
+    unsafe { libc::_exit(code) }
+}
+
+#[cfg(target_os = "linux")]
+fn serve_forked_inner(
+    mut conn: std::os::unix::net::UnixStream,
+    _jail: &JailSpec,
+) -> io::Result<()> {
+    conn.write_all(&std::process::id().to_be_bytes())?;
+    let header: CallHeader =
+        serde_json::from_slice(&frame::read_frame(&mut conn, MAX_HEADER_BYTES)?)
+            .map_err(invalid)?;
+    // Process isolation belongs here: after the header, before the request is read.
+    reseed_numpy()?;
+    handle_request(&mut conn, header.max_request_bytes)
 }
 
 /// A `{ "v": u32 }`-only view of a request body, parsed before the full
@@ -256,5 +332,103 @@ mod tests {
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
         let mut buf = [0u8; 1];
         assert_eq!(ours.read(&mut buf).unwrap(), 0);
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod forked_tests {
+    use super::*;
+    use serde_json::json;
+    use std::os::unix::net::UnixStream;
+
+    /// Runs `serve_forked_inner` on one end of a pair. From the other it reads
+    /// the pid before sending anything, then sends `frames` (one write each)
+    /// and returns the pid, whatever came back and the result.
+    fn serve(frames: &[Vec<u8>]) -> (u32, Vec<u8>, io::Result<()>) {
+        pyo3::Python::initialize();
+        let (mut ours, theirs) = UnixStream::pair().unwrap();
+        ours.set_read_timeout(Some(std::time::Duration::from_secs(10)))
+            .unwrap();
+        let jail = JailSpec {
+            uid_base: 0,
+            tmp_mb: 0,
+            hide_paths: vec![],
+        };
+        let t = std::thread::spawn(move || serve_forked_inner(theirs, &jail));
+        let mut pid = [0u8; 4];
+        ours.read_exact(&mut pid).unwrap();
+        for f in frames {
+            ours.write_all(f).unwrap();
+        }
+        ours.shutdown(std::net::Shutdown::Write).unwrap();
+        // A child that leaves bytes unread resets the stream after its answer.
+        let mut back = Vec::new();
+        let _ = ours.read_to_end(&mut back);
+        (u32::from_be_bytes(pid), back, t.join().unwrap())
+    }
+
+    fn framed(bytes: &[u8]) -> Vec<u8> {
+        let mut f = Vec::new();
+        frame::write_frame(&mut f, bytes).unwrap();
+        f
+    }
+
+    fn header(max: usize) -> Vec<u8> {
+        let h = json!({"slot": 0, "memory_mb": 256, "cpu_secs": 5, "max_request_bytes": max});
+        framed(h.to_string().as_bytes())
+    }
+
+    fn request() -> Vec<u8> {
+        let r = json!({"v": WIRE_VERSION, "code": "output = 1", "mode": "none", "timeout_ms": 5000, "inputs": {}});
+        framed(r.to_string().as_bytes())
+    }
+
+    fn response(back: &[u8]) -> WireResponse {
+        serde_json::from_slice(&frame::read_frame(&mut &back[..], 1 << 20).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn the_pid_comes_first_and_a_valid_call_is_served() {
+        let (pid, back, result) = serve(&[header(1 << 20), request()]);
+        assert_eq!(pid, std::process::id());
+        result.unwrap();
+        let r = response(&back);
+        assert_eq!(r.status, WireStatus::Ok);
+        assert_eq!(r.output, Some(json!(1)));
+    }
+
+    #[test]
+    fn a_header_that_is_not_json_is_invalid_data_with_no_response() {
+        let (_, back, result) = serve(&[framed(b"not json")]);
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidData);
+        assert!(back.is_empty());
+    }
+
+    #[test]
+    fn an_oversized_header_is_refused_on_its_length() {
+        let too_long = u32::try_from(MAX_HEADER_BYTES + 1).unwrap();
+        let (_, back, result) = serve(&[too_long.to_be_bytes().to_vec()]);
+        assert!(frame::is_frame_too_large(&result.unwrap_err()));
+        assert!(back.is_empty());
+    }
+
+    /// Stand-ins under names of their own: the tests share one interpreter,
+    /// and a real `numpy` in `sys.modules` must stay untouched.
+    #[test]
+    fn a_loaded_generator_that_fails_to_reseed_is_an_error() {
+        pyo3::Python::initialize();
+        let setup = c"import sys, types
+def fail():
+    raise RuntimeError('seed')
+ns = types.SimpleNamespace
+sys.modules['_reseed_probe_ok'] = ns(random=ns(seed=lambda: None))
+sys.modules['_reseed_probe_failing'] = ns(random=ns(seed=fail))
+";
+        pyo3::Python::attach(|py| py.run(setup, Some(&pyo3::types::PyDict::new(py)), None))
+            .unwrap();
+        assert!(reseed_if_loaded("_reseed_probe_absent").is_ok());
+        assert!(reseed_if_loaded("_reseed_probe_ok").is_ok());
+        let err = reseed_if_loaded("_reseed_probe_failing").unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }
 }
