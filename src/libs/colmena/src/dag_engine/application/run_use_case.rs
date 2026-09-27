@@ -788,7 +788,12 @@ impl DagRunUseCase {
                 };
 
                 let output = {
-                    let execution_future = async {
+                    // In an `Option` so that an arm that stops the run can drop
+                    // the node (`set(None)`) before its first write. A nested
+                    // child frozen mid-query inside the node keeps its pooled
+                    // connection until then, and the run's own writes may need
+                    // that connection.
+                    let execution_future = Some(async {
                         match &config_secret_refusal {
                             Some(msg) => Err(msg.clone().into()),
                             None => in_registry(
@@ -796,7 +801,7 @@ impl DagRunUseCase {
                                 node_impl.execute(&inputs, &node_config_value, &mut global_shared_state, observer),
                             ).await,
                         }
-                    };
+                    });
                     tokio::pin!(execution_future);
 
                     // ── Liveness clocks (spec: SPEC_STREAM_MIDRUN_LIVENESS) ─────
@@ -824,22 +829,28 @@ impl DagRunUseCase {
                     let mut output_opt = None;
                     loop {
                         tokio::select! {
-                            res = &mut execution_future, if output_opt.is_none() => {
+                            res = async {
+                                match execution_future.as_mut().as_pin_mut() {
+                                    Some(node) => node.await,
+                                    None => std::future::pending().await,
+                                }
+                            }, if output_opt.is_none() => {
                                 output_opt = Some(res);
                             }
                             // ── Hard-stop check (mid-node) ─────────────────────────
                             // Cancellation requested while the node is in flight. We
-                            // drop `execution_future` by returning, which aborts the
-                            // in-flight async work (reqwest/sqlx abort at their next
-                            // await; blocking spawn_blocking threads run to their own
-                            // timeout but their result is discarded). Persist CANCELLED
-                            // and emit the terminal event.
+                            // drop `execution_future` first, before any write, which
+                            // aborts the in-flight async work (reqwest/sqlx abort at
+                            // their next await; blocking spawn_blocking threads run to
+                            // their own timeout but their result is discarded). Persist
+                            // CANCELLED and emit the terminal event.
                             _ = async {
                                 match &cancel_token {
                                     Some(t) => t.cancelled().await,
                                     None => std::future::pending::<()>().await,
                                 }
                             } => {
+                                execution_future.set(None);
                                 if self.nested_run && turn_stopped() {
                                     std::future::pending::<()>().await;
                                 }
@@ -899,9 +910,9 @@ impl DagRunUseCase {
                             }
                             // ── Idle watchdog (mid-node) ───────────────────────
                             // No real event for `idle_timeout`: treat the node as
-                            // hung. Drop the future (same interruption semantics
-                            // as hard-stop), persist FAILED, fail the stream with
-                            // a descriptive error. Heartbeats never feed
+                            // hung. Drop the future first (same interruption
+                            // semantics as hard-stop), persist FAILED, fail the
+                            // stream with a descriptive error. Heartbeats never feed
                             // `last_activity`, so they cannot mask a hang.
                             _ = async {
                                 match idle_timeout {
@@ -909,6 +920,7 @@ impl DagRunUseCase {
                                     None => std::future::pending::<()>().await,
                                 }
                             }, if output_opt.is_none() => {
+                                execution_future.set(None);
                                 let idle_secs = idle_timeout.map(|t| t.as_secs()).unwrap_or(0);
                                 let tool_suffix = last_tool
                                     .as_ref()
@@ -3052,9 +3064,20 @@ mod stored_run_status_tests {
     use async_trait::async_trait;
     use futures::StreamExt;
     use std::error::Error as StdError;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Mutex;
     use std::time::Duration;
     use tokio_util::sync::CancellationToken;
+
+    /// What a `Hang` call holds until its future is dropped. Stands for a
+    /// nested child frozen mid-query inside the node: its pooled connection
+    /// goes back to the pool only when the future holding it is dropped.
+    struct Held<'a>(&'a AtomicBool);
+    impl Drop for Held<'_> {
+        fn drop(&mut self) {
+            self.0.store(false, Ordering::SeqCst);
+        }
+    }
 
     /// The chat's input node: hands this turn's message on.
     struct Input;
@@ -3088,12 +3111,15 @@ mod stored_run_status_tests {
     struct Llm {
         first: Mutex<Option<First>>,
         calls: Mutex<Vec<(Value, Option<Value>)>>,
+        /// `true` while a `Hang` call's future is alive (see [`Held`]).
+        hanging: AtomicBool,
     }
     impl Llm {
         fn new(first: First) -> Arc<Self> {
             Arc::new(Self {
                 first: Mutex::new(Some(first)),
                 calls: Mutex::new(Vec::new()),
+                hanging: AtomicBool::new(false),
             })
         }
         fn calls(&self) -> Vec<(Value, Option<Value>)> {
@@ -3116,6 +3142,8 @@ mod stored_run_status_tests {
             let first = self.first.lock().unwrap().take();
             match first {
                 Some(First::Hang) => {
+                    self.hanging.store(true, Ordering::SeqCst);
+                    let _held = Held(&self.hanging);
                     if let Some(o) = &observer {
                         o.on_event(NodeEvent::LlmToken {
                             token: "Pensando".into(),
@@ -3800,6 +3828,93 @@ mod stored_run_status_tests {
             assert_eq!(repo.row().status, DagRunStatus::Cancelled);
             assert!(!turn.is_cancelled());
         }
+    }
+
+    /// [`MemRepo`] that notes each write it gets, and whether the LLM's
+    /// `Hang` call was still alive (its future not yet dropped) at the time.
+    struct Watched {
+        rows: Arc<MemRepo>,
+        llm: Arc<Llm>,
+        writes: Mutex<Vec<(String, bool)>>,
+    }
+    impl Watched {
+        fn note(&self, write: String) {
+            let alive = self.llm.hanging.load(Ordering::SeqCst);
+            self.writes.lock().unwrap().push((write, alive));
+        }
+    }
+    #[async_trait]
+    impl DagStateRepository for Watched {
+        async fn get_by_id(&self, id: &str) -> Result<Option<DagRunState>, DagError> {
+            self.rows.get_by_id(id).await
+        }
+        async fn save(&self, s: &DagRunState) -> Result<(), DagError> {
+            self.note(format!("save {:?}", s.status));
+            self.rows.save(s).await
+        }
+        async fn find_resume_entry(&self, id: &str) -> Result<Option<String>, DagError> {
+            self.rows.find_resume_entry(id).await
+        }
+        async fn find_suspended_child(&self, id: &str) -> Result<Option<String>, DagError> {
+            self.rows.find_suspended_child(id).await
+        }
+        async fn cancel_running_descendants(&self, id: &str) -> Result<u64, DagError> {
+            self.note("cancel_running_descendants".into());
+            self.rows.cancel_running_descendants(id).await
+        }
+        async fn fail_suspended_descendants(&self, id: &str) -> Result<u64, DagError> {
+            self.note("fail_suspended_descendants".into());
+            self.rows.fail_suspended_descendants(id).await
+        }
+    }
+
+    /// Every arm that stops a run with a node in flight (the Stop mid-node,
+    /// the idle watchdog, a nested run's own call cancel) drops that node
+    /// before its first write. A nested child frozen mid-query inside the node
+    /// keeps its pooled connection until then: two of them, at the default two
+    /// connections per URL, starved the root's three writes (~30 s), and the
+    /// root row was never written.
+    #[tokio::test]
+    async fn an_arm_that_stops_a_run_drops_the_node_in_flight_before_it_writes() {
+        use DagRunStatus::{Cancelled, Failed};
+        let idle = LivenessSettings {
+            heartbeat_interval: None,
+            idle_timeout: Some(Duration::from_millis(100)),
+        };
+        let off = LivenessSettings::disabled();
+        let cases = [
+            ("root Stop", false, off, Stop::AtLlm, Cancelled),
+            ("root idle", false, idle, Stop::None, Failed),
+            ("call cancel", true, off, Stop::AtLlm, Cancelled),
+        ];
+        // Per case: each write, and whether the node was still in flight.
+        let (mut seen, mut want) = (Vec::new(), Vec::new());
+        for (case, nested, liveness, stop, status) in cases {
+            let llm = Llm::new(First::Hang);
+            let repo = Arc::new(Watched {
+                rows: Arc::new(MemRepo::default()),
+                llm: llm.clone(),
+                writes: Mutex::default(),
+            });
+            let uc = DagRunUseCase::new(
+                Arc::new(Registry(llm.clone())),
+                Some(repo.clone() as Arc<dyn DagStateRepository>),
+            )
+            .with_liveness(liveness);
+            if nested {
+                nested_turn(uc, stop).await;
+            } else {
+                turn(uc, "old prompt", None, stop).await;
+            }
+            seen.push((case, repo.writes.lock().unwrap().clone()));
+            let writes = [
+                format!("save {status:?}"),
+                "cancel_running_descendants".into(),
+                "fail_suspended_descendants".into(),
+            ];
+            want.push((case, writes.map(|w| (w, false)).to_vec()));
+        }
+        assert_eq!(seen, want);
     }
 }
 
