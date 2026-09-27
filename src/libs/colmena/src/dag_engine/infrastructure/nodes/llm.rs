@@ -1,6 +1,7 @@
 use crate::colmena_log;
 use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
 use crate::dag_engine::domain::tool_configuration::ToolConfiguration;
+use crate::llm::domain::call_cancels::is_cancelled_result;
 use crate::llm::domain::{
     AgentSessionId, ConversationKey, LlmConfig, LlmMessage, LlmProvider, LlmStreamPart, NodeIdPath,
     ProviderKind, SessionId, ToolExecutor,
@@ -3574,6 +3575,7 @@ impl ExecutableNode for LlmNode {
                                 success: res.success,
                                 output: res.output.clone(),
                                 child_scope: scopes.close(&res.tool_call_id),
+                                cancelled: is_cancelled_result(&res),
                             });
                         }
                         LlmStreamPart::LlmMessageStart => obs.on_event(NodeEvent::LlmMessageStart),
