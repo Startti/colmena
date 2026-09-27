@@ -36,8 +36,10 @@ pub trait SubGraphExecutorPort: Send + Sync {
     /// Ejecuta un subgrafo desde cero. `cancel` es el token de la llamada que
     /// corre al hijo (un `subgraph` usado como tool): si se dispara, la corrida
     /// del hijo guarda su fila `CANCELLED`, cierra su nodo en curso y devuelve
-    /// `DagError::Cancelled`. Con `None` el hijo se corta solo cuando se suelta
-    /// la corrida de la raíz.
+    /// `DagError::Cancelled`. Si el token se disparó porque se cortó el turno
+    /// entero (el Stop), el hijo no toca la base y espera: la corrida la desarma
+    /// la raíz, como antes. Con `None` el hijo se corta solo cuando se suelta la
+    /// corrida de la raíz.
     async fn run_subgraph(
         &self,
         session_id: &str,
