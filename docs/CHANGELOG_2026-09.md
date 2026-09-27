@@ -6709,3 +6709,15 @@ las nueve llegaban con el nodo vivo. Regresión E2E: `cancel_one_child` (10 de 1
 la raíz y el corte por llamada. Hacer lo mismo en el brazo de inactividad pone en rojo el watchdog.
 
 **ADP.** Sin cambios de API ni de SSE. **Estado.** done.
+
+## 161. Python: la jaula de proceso de cada llamada aislada (Linux, todavía no seleccionable)
+
+**Qué cambia.** El hijo de cada llamada se aísla antes de leer el pedido: descriptores (0-2 a `/dev/null`, el resto
+cerrado), namespaces de montaje, red (vacía), IPC y UTS, `/tmp` privado y directorios del host tapados, un uid sin
+privilegios por slot, `no_new_privs` y límites (memoria, CPU, archivos, procesos). Un paso que falla termina el hijo
+(salida 71) sin correr código. La plantilla necesita root y `CAP_SYS_ADMIN`. Todavía sin filtro de syscalls; `subprocess`
+sigue sin poder elegirse.
+**Tests.** Integración con `COLMENA_PYEXEC_JAIL_TESTS=1` (contenedor root con `CAP_SYS_ADMIN`): sin DNS, sin loopback,
+sin salida; descriptores; los tests de antes, dentro de la jaula. Sin la variable, cada test se saltea y lo dice.
+Guía: [53_python_executors.md](developer_guide/53_python_executors.md#process-isolation-linux).
+**ADP.** Sin cambios. **Estado.** done.
