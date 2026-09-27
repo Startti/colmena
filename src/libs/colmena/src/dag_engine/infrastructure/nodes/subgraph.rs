@@ -554,6 +554,16 @@ impl ExecutableNode for SubGraphNode {
             child_path_prefix
         );
 
+        // A child run as a TOOL takes the token of the call that runs it,
+        // adopting it: `run_call` then waits for the child instead of dropping
+        // it. Cancelling that call stops the child, which closes its row
+        // CANCELLED and its node in flight, and returns an error. Every other
+        // path keeps today's drop-propagation from the root.
+        let cancel = match boundary_source {
+            Some(BoundarySource::Tool) => crate::llm::domain::call_cancels::adopt_current_call(),
+            _ => None,
+        };
+
         let result = match executor
             .run_subgraph(
                 &child_session_id,
@@ -563,6 +573,7 @@ impl ExecutableNode for SubGraphNode {
                 Some(parent_session_id.clone()),
                 agent_session_id.clone(),
                 child_path_prefix.clone(),
+                cancel,
             )
             .await
         {
@@ -1053,6 +1064,7 @@ mod subgraph_as_tool_boundary_tests {
             _parent_session_id: Option<String>,
             _agent_session_id: Option<String>,
             _path_prefix: Option<String>,
+            _cancel: Option<tokio_util::sync::CancellationToken>,
         ) -> Result<Value, DagError> {
             if let Some(obs) = &_observer {
                 if let Ok(raw) = serde_json::to_value(stub_child_event()) {
@@ -1327,6 +1339,7 @@ mod subgraph_tool_failure_close_tests {
             _p: Option<String>,
             _a: Option<String>,
             _pp: Option<String>,
+            _cancel: Option<tokio_util::sync::CancellationToken>,
         ) -> Result<Value, DagError> {
             if let (Behavior::Fail(_), Some(obs)) = (&self.0, &observer) {
                 let child = DagExecutionEvent::NodeStart {
@@ -1619,6 +1632,7 @@ mod child_graph_ref_tests {
             _p: Option<String>,
             _a: Option<String>,
             _pp: Option<String>,
+            _cancel: Option<tokio_util::sync::CancellationToken>,
         ) -> Result<Value, DagError> {
             *self.0.lock().unwrap() = Some((graph, state));
             Ok(
@@ -1993,6 +2007,7 @@ mod subgraph_resume_graph_tests {
             _p: Option<String>,
             _a: Option<String>,
             _pp: Option<String>,
+            _cancel: Option<tokio_util::sync::CancellationToken>,
         ) -> Result<Value, DagError> {
             self.calls.lock().unwrap().push("run");
             Ok(
@@ -2123,5 +2138,110 @@ mod subgraph_resume_graph_tests {
         let err = resume(inputs, json!({}), exec.clone()).await.unwrap_err();
         assert!(err.starts_with("No suspended child found"), "{err}");
         assert_eq!(*exec.calls.lock().unwrap(), vec!["find"]);
+    }
+}
+
+#[cfg(test)]
+mod call_token_tests {
+    //! A `subgraph` used as a tool hands its child the token of the call that
+    //! runs it (adopting it); on the edge path it hands none.
+    use super::*;
+    use crate::dag_engine::domain::error::DagError;
+    use crate::llm::domain::call_cancels::{run_as_call, CallCancels};
+    use serde_json::json;
+    use std::sync::Mutex;
+    use tokio_util::sync::CancellationToken;
+
+    /// Records the token `run_subgraph` is handed.
+    #[derive(Default)]
+    struct TokenExecutor(Mutex<Option<Option<CancellationToken>>>);
+    #[async_trait::async_trait]
+    impl SubGraphExecutorPort for TokenExecutor {
+        async fn run_subgraph(
+            &self,
+            _s: &str,
+            _g: Value,
+            _st: Value,
+            _o: Option<Arc<dyn ExecutionObserver>>,
+            _p: Option<String>,
+            _a: Option<String>,
+            _pp: Option<String>,
+            cancel: Option<CancellationToken>,
+        ) -> Result<Value, DagError> {
+            *self.0.lock().unwrap() = Some(cancel);
+            Ok(
+                json!({ "out": { "text": "done", "extra_info": { "__colmena_is_output_node": true } } }),
+            )
+        }
+        async fn resume_subgraph(
+            &self,
+            _s: &str,
+            _a: String,
+            _g: ResumeGraph,
+            _o: Option<Arc<dyn ExecutionObserver>>,
+            _ags: Option<String>,
+            _pp: Option<String>,
+        ) -> Result<Value, DagError> {
+            Ok(Value::Null)
+        }
+        async fn find_child_session_id_for_resume(
+            &self,
+            _p: &str,
+            _n: &str,
+        ) -> Result<Option<String>, DagError> {
+            Ok(None)
+        }
+    }
+
+    fn inputs(as_tool: bool) -> NodeInputs {
+        let mut i = NodeInputs::new();
+        i.insert(
+            "child_graph_inline".into(),
+            json!({ "nodes": { "n": { "type": "log", "config": {} } }, "edges": [] }),
+        );
+        i.insert("__colmena_session_id".into(), json!("s1"));
+        if as_tool {
+            i.insert("__colmena_tool_name".into(), json!("Run#0"));
+        } else {
+            i.insert("__node_id".into(), json!("sub"));
+        }
+        i
+    }
+
+    /// Runs the node as the work of call `c1` and returns the token its child
+    /// got. When it got one, cancelling `c1` must fire it: it is the call's.
+    async fn token_handed(as_tool: bool) -> Option<CancellationToken> {
+        let node = SubGraphNode::new();
+        let exec = Arc::new(TokenExecutor::default());
+        node.executor.set(exec.clone()).ok().expect("executor once");
+        let calls = CallCancels::new(CancellationToken::new());
+        let token = calls.begin("c1").unwrap();
+        let run = run_as_call(&calls, &token, async {
+            node.execute(&inputs(as_tool), &json!({}), &mut json!({}), None)
+                .await
+                .map_err(|e| e.to_string())
+        });
+        run.await.expect("not cancelled").expect("runs");
+        let handed = exec
+            .0
+            .lock()
+            .unwrap()
+            .take()
+            .expect("run_subgraph was called");
+        if let Some(handed) = &handed {
+            assert!(calls.cancel("c1"));
+            assert!(handed.is_cancelled(), "not the call's token");
+        }
+        handed
+    }
+
+    #[tokio::test]
+    async fn a_subgraph_run_as_a_tool_hands_its_child_the_calls_token() {
+        assert!(token_handed(true).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn a_subgraph_on_the_edge_path_hands_none() {
+        assert!(token_handed(false).await.is_none());
     }
 }

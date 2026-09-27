@@ -707,6 +707,7 @@ mod llm_call_caller_path_tests {
             _parent_session_id: Option<String>,
             _agent_session_id: Option<String>,
             path_prefix: Option<String>,
+            _cancel: Option<tokio_util::sync::CancellationToken>,
         ) -> Result<Value, DagError> {
             self.0.lock().unwrap().push(path_prefix);
             Ok(json!({ "done": true }))
