@@ -6540,3 +6540,31 @@ el corte tarda los 30 s.
 
 **ADP.** Nada nuevo: [nota de migración](adp_migration/2026-09-26-cancel-one-call.md). **Tag**
 `colmena_dag_engine-v0.21.2` (v0.21.1 + §152-§157). **Estado.** done.
+
+
+## 160. La raíz suelta el nodo en vuelo antes de cerrar filas
+
+**Qué cambia.** Los dos brazos de `execute_stream` que cortan una corrida con un nodo en vuelo (el
+Stop a mitad de nodo y el watchdog de inactividad) guardaban la fila y cerraban los descendientes con
+el futuro del nodo todavía vivo. Un hijo usado como tool, frenado a mitad de una consulta dentro de
+ese nodo, conserva su conexión del pool hasta que el futuro se suelta. Con un corte por llamada
+(§154) y el Stop del turno en el mismo instante, dos hijos así agotaban las dos conexiones por URL de
+siempre: las tres escrituras de la raíz esperaban 3 × `acquire_timeout` (~30 s) y la fila raíz no se
+escribía nunca. Un Stop que agarra a un hijo a mitad de una escritura común tenía la misma forma
+desde antes de la serie. Ahora el futuro vive en un `Option` y los dos brazos lo sueltan primero,
+antes de cualquier escritura. Lo demás queda igual: la raíz `CANCELLED` (o `FAILED` por
+inactividad), los descendientes corriendo `CANCELLED`, los suspendidos `FAILED` y los mismos eventos.
+Con el Stop del turno un hijo sigue sin escribir y espera a la raíz, y un corte por llamada sigue
+cerrando su propia fila. Entre nodos no hay nodo en vuelo, así que ese brazo no cambia.
+
+**Tests.** `run_use_case.rs`: un LLM colgado cuyo futuro sostiene una guarda, y un repositorio que
+anota en cada escritura si la guarda seguía viva. En el Stop de la raíz, el watchdog de la raíz y el
+corte por llamada de un hijo, las tres escrituras llegan con el nodo ya suelto; antes del cambio,
+las nueve llegaban con el nodo vivo. Regresión E2E: `cancel_one_child` (10 de 10),
+`cancellation_integration`, `parallel_tool_groups`, `parallel_tool_suspend`, `nested_tool_memory`,
+`suspend_resume_routing`.
+
+**Mutación.** Soltar el nodo después de las escrituras en el brazo del Stop pone en rojo el Stop de
+la raíz y el corte por llamada. Hacer lo mismo en el brazo de inactividad pone en rojo el watchdog.
+
+**ADP.** Sin cambios de API ni de SSE. **Estado.** done.
