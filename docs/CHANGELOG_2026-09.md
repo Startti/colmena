@@ -6611,3 +6611,22 @@ Regresión E2E: `cancellation_integration`, `parallel_tool_groups`, `parallel_to
 
 **ADP.** Sin cambios de SSE. En Rust, `run_subgraph` gana un parámetro y `DagError` una variante;
 ADP no usa ninguno de los dos. **Estado.** done.
+
+## 155. `RunControl`: cortar una llamada sola desde afuera
+
+**Qué cambia.** `ColmenaEngine::execute_stream_controlled` recibe un `RunControl` (el token del turno
+y el registro `CallCancels` de §152) y pone el registro en el alcance de cada nodo de la corrida, hijos
+incluidos (`DagRunUseCase::with_call_registry`): `control.cancel_call(id)` corta una llamada en
+cualquier nivel y el resto del turno sigue; `control.cancel_token().cancel()` es el Stop de siempre.
+Con esto corren de verdad el bucle (§153) y el hijo usado como tool (§154). Sin `RunControl`
+(`execute_stream_cancellable`, la CLI, los bindings) todo corre como antes.
+
+**Tests.** `run_use_case.rs`: con registro cada nodo lo tiene en su alcance; sin él, no.
+`run_control.rs`: una llamada o el turno entero. Probado de punta a punta con Postgres y el modelo
+guionado (dos hijos en paralelo, prueba descartable): cortar uno deja su fila `CANCELLED`, cierra su
+nodo y su frontera con `CANCELLED_BY_PERSON`, contesta su llamada con el texto y el otro termina
+(`COMPLETED`, ~1,6 s en vez de 30); el Stop del turno cierra todo sin contestar ninguna llamada. El E2E
+del repo llega con el frame. Regresión E2E: las mismas seis de §154.
+
+**ADP.** [Nota de migración](adp_migration/2026-09-26-cancel-one-call.md). Sin cambios de SSE
+todavía. **Estado.** done.
