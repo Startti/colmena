@@ -986,6 +986,15 @@ El resultado de la llamada lleva `status: "cancelled"` en su frame
 E2E: `tests/graphs/agents/cancel_one_child.json`, que corre
 `src/libs/colmena/tests/cancel_one_child.rs`.
 
+#### Un hijo nunca lee lo que escribe la persona
+
+Con `RunControl::with_steering`, el agente de la raíz lee entre pasos lo que la persona
+escribe mientras trabaja
+([guía 12](12_dag_engine_guide.md#leer-un-mensaje-a-mitad-de-corrida-steeringinbox)). Un hijo
+—un `subgraph` usado como tool, uno por arista, uno reanudado— nunca lo lee: su corrida no
+tiene buzón y el trabajo de la llamada corre fuera del alcance del de la raíz. Un grupo en
+paralelo se espera entero: el mensaje va en el pedido que sigue a todos sus resultados.
+
 #### El mismo agente a dos niveles: un hilo por quien llama
 
 Hasta v0.20.1 el hilo de memoria de una tool era `tool/<nombre>[/<hilo>]` para

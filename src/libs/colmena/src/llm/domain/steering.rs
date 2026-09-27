@@ -8,15 +8,16 @@
 //! ([`SteeringInbox::take_or_close`]), so a message arriving at that instant
 //! is never lost nor read twice; whatever is left when the loop returns is
 //! dropped by [`SteeringInbox::close`], and the client, which still has it,
-//! sends it as the next turn. This module only defines the inbox: the loop,
-//! and the engine that gives the root's `llm_call` its inbox, come in the
-//! next changes of this series.
+//! sends it as the next turn. The engine hands the inbox only to the root's
+//! `llm_call` ([`in_steering`], [`take_inbox`]): nothing else a run runs
+//! reads it.
 //!
 //! The trait never fails toward the engine: an implementation that cannot
 //! reach its store logs and returns nothing, and the loop goes on unread.
 
 use std::collections::VecDeque;
-use std::sync::Mutex;
+use std::future::Future;
+use std::sync::{Arc, Mutex};
 
 /// One message: the client's id (so the client knows which one was read)
 /// and its text.
@@ -117,6 +118,37 @@ impl SteeringInbox for InMemorySteeringInbox {
     }
 }
 
+tokio::task_local! {
+    /// The inbox of the node this code runs in, until its `llm_call` takes it
+    /// ([`take_inbox`]). Empty in any other node, in a node of a nested run
+    /// and in a call's work.
+    static SLOT: Arc<Mutex<Option<Arc<dyn SteeringInbox>>>>;
+}
+
+/// Runs `fut` (a node's execution) with `inbox` in its slot. The engine wraps
+/// every node of a run this way: a root run built with an inbox puts it in
+/// the slot of its `llm_call` nodes, and every other node and run (a nested
+/// one, one without an inbox) puts none, which hides an outer one.
+pub async fn in_steering<F: Future>(inbox: Option<Arc<dyn SteeringInbox>>, fut: F) -> F::Output {
+    SLOT.scope(Arc::new(Mutex::new(inbox)), fut).await
+}
+
+/// Runs a call's work with no inbox in scope: nothing a call runs (a tool
+/// that is an `llm_call`, a child run) reads the person's messages.
+pub(crate) async fn outside_steering<F: Future>(fut: F) -> F::Output {
+    in_steering(None, fut).await
+}
+
+/// Takes the inbox of the node this code runs in, once: the `llm_call` that
+/// runs the node takes it before anything else, so nothing it runs inside
+/// finds it (a pending call it resumes on its own, outside `run_call`).
+/// `None` outside a node, or once taken.
+pub(crate) fn take_inbox() -> Option<Arc<dyn SteeringInbox>> {
+    SLOT.try_with(|slot| slot.lock().unwrap().take())
+        .ok()
+        .flatten()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -185,5 +217,31 @@ mod tests {
         ] {
             assert!(!is_steering_id(bad), "{bad}");
         }
+    }
+
+    fn boxed() -> Option<Arc<dyn SteeringInbox>> {
+        Some(Arc::new(InMemorySteeringInbox::new()))
+    }
+
+    #[tokio::test]
+    async fn the_inbox_is_taken_once_inside_its_scope_and_is_not_there_outside() {
+        assert!(take_inbox().is_none());
+        let (first, second) = in_steering(boxed(), async {
+            (take_inbox().is_some(), take_inbox().is_some())
+        })
+        .await;
+        assert!(first, "the first taker gets it");
+        assert!(!second, "only once");
+    }
+
+    #[tokio::test]
+    async fn outside_steering_hides_the_inbox_of_the_scope_around_it() {
+        let (inner, after) = in_steering(boxed(), async {
+            let inner = outside_steering(async { take_inbox().is_some() }).await;
+            (inner, take_inbox().is_some())
+        })
+        .await;
+        assert!(!inner, "a call's work finds none");
+        assert!(after, "and the node still has its own");
     }
 }

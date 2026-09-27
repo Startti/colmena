@@ -1460,8 +1460,7 @@ control.cancel_token().cancel(); // el Stop de siempre
 ### Leer un mensaje a mitad de corrida (`SteeringInbox`)
 
 El buzón donde espera lo que la persona escribe mientras un agente trabaja, para que el
-agente lo lea entre pasos (el bucle y el motor lo conectan en los cambios siguientes de esta
-serie). Los mensajes esperan en un `SteeringInbox`
+agente lo lea entre pasos. Los mensajes esperan en un `SteeringInbox`
 (`src/libs/colmena/src/llm/domain/steering.rs`), cada uno con el `id` que le dio el
 cliente y su texto:
 
@@ -1504,6 +1503,28 @@ falla, ni ese ni los que siguen en su lote se anuncian (un `warn` dice cuántos)
 cliente los manda como turno. Si el guardado se hizo y solo falló la respuesta, ese envío
 es un duplicado: una segunda ventana, más rara, además de la de un Stop justo después de
 guardar.
+
+**Quién lo lee: solo el `llm_call` de la raíz.** El buzón llega con
+`RunControl::with_steering(inbox)` a `execute_stream_controlled`:
+
+```rust
+let control = RunControl::new(CancellationToken::new()).with_steering(inbox);
+let stream = engine.execute_stream_controlled(
+    graph, None, None, false, None, Some(chat), control.clone(),
+);
+```
+
+El caso de uso pone el buzón en un slot alrededor de cada nodo `llm_call` de la corrida raíz
+(`steering::in_steering`); cualquier otro nodo tiene el slot vacío, así que las filas de un
+`for_each` (que corre sus `llm_call` directo, en su propia tarea) no lo encuentran. Una
+corrida anidada no lo tiene (`as_nested_run` lo suelta) y sus nodos tapan el de afuera; el
+trabajo de cada llamada (`run_call`) corre con el slot vacío. El nodo `llm_call` toma el
+buzón una sola vez al empezar (`take_inbox`) y corre `run_steered`: nada de lo que corre
+adentro lo encuentra, tampoco una llamada pendiente que reanuda (esa corre fuera de
+`run_call`). `critic`, `planner`, `reactor`, `orchestrator` y `extract_with_schema` llaman
+`run` y no leen. Cerrar el buzón es del job, no del nodo: en un grafo raíz con dos `llm_call`,
+o con uno que vuelve a correr en un ciclo, el segundo lo encuentra cerrado. Está pensado
+para un grafo de un solo agente, como el de Auto.
 
 ## 📚 Más Información
 

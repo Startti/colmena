@@ -2655,6 +2655,11 @@ impl ExecutableNode for LlmNode {
             );
         let agent_service = AgentService::new(llm_repo_arc, conversation_repo.clone())
             .with_message_summarizer(message_summarizer);
+        // What the person writes while this node works, when it is the root's
+        // agent of a run that accepts it (`llm::domain::steering`). Taken once,
+        // before anything runs: a pending call this node resumes below, or an
+        // `llm_call` it runs as a tool, finds none.
+        let steering = crate::llm::domain::steering::take_inbox();
 
         // Resume path — when re-entered with `__colmena_resume_answer`, the
         // assistant message that requested the SUSPENDED tool was already
@@ -3834,7 +3839,7 @@ impl ExecutableNode for LlmNode {
 
         let summary_timeout_dur = std::time::Duration::from_secs(summary_timeout_secs);
         let (agent_run_result, summary_outcome) = tokio::join!(
-            agent_service.run(params),
+            agent_service.run_steered(params, steering),
             tokio::time::timeout(summary_timeout_dur, summary_fut),
         );
 
@@ -7774,5 +7779,97 @@ mod resolve_template_vars_characterization_tests {
             LlmNode::resolve_template_vars("Hola {{nombre", &inputs),
             "Hola {{nombre"
         );
+    }
+}
+
+/// The `llm_call` takes its node's steering inbox once, before it replays a
+/// pending call on resume (`execute_with_resume_answer` runs outside
+/// `run_call`, so `outside_steering` does not cover it).
+#[cfg(test)]
+mod steering_take_tests {
+    use super::LlmNode;
+    use crate::dag_engine::application::ports::NodeRegistryPort;
+    use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
+    use crate::dag_engine::domain::observer::ExecutionObserver;
+    use crate::dag_engine::infrastructure::pool_registry::{PgPoolRegistry, PoolConfig};
+    use crate::llm::domain::steering::{in_steering, take_inbox, InMemorySteeringInbox};
+    use crate::llm::infrastructure::ConversationRepositoryFactory;
+    use crate::llm::infrastructure::{OverrideGuard, ScriptedAdapter, ScriptedResponse};
+    use async_trait::async_trait;
+    use serde_json::{json, Value};
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    /// A tool that suspends when called and, when resumed, notes whether it
+    /// found an inbox to take.
+    #[derive(Default)]
+    struct Peek(Mutex<Vec<bool>>);
+
+    #[async_trait]
+    impl ExecutableNode for Peek {
+        async fn execute(
+            &self,
+            inputs: &NodeInputs,
+            _c: &Value,
+            _s: &mut Value,
+            _o: Option<Arc<dyn ExecutionObserver>>,
+        ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+            if !inputs.contains_key("__colmena_resume_answer") {
+                return Ok(json!({ "__colmena_status": "SUSPENDED", "questions": [] }));
+            }
+            self.0.lock().unwrap().push(take_inbox().is_some());
+            Ok(json!({ "ok": true }))
+        }
+        fn schema(&self) -> Value {
+            json!({})
+        }
+    }
+
+    struct OnlyPeek(Arc<Peek>);
+    impl NodeRegistryPort for OnlyPeek {
+        fn get_node(&self, t: &str) -> Option<Arc<dyn ExecutableNode>> {
+            (t == "peek").then(|| self.0.clone() as Arc<dyn ExecutableNode>)
+        }
+        fn get_all_nodes(&self) -> HashMap<String, Arc<dyn ExecutableNode>> {
+            HashMap::new()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_resumed_call_finds_no_inbox_and_the_loop_gets_it() {
+        let _guard = OverrideGuard::install(Arc::new(ScriptedAdapter::new(vec![
+            ScriptedResponse::ToolCall {
+                id: "c1".into(),
+                tool_name: "peek".into(),
+                arguments: json!({}),
+            },
+            ScriptedResponse::Text("listo".into()),
+        ])));
+        let db = tempfile::NamedTempFile::new().unwrap();
+        let config = json!({
+            "provider": "mock", "model": "m", "api_key": "k", "stream": false, "prompt": "go",
+            "connection_url": format!("sqlite://{}", db.path().display()),
+            "tool_configurations": { "peek": { "node_type": "peek" } }
+        });
+        let peek = Arc::new(Peek::default());
+        let registry: Arc<dyn NodeRegistryPort> = Arc::new(OnlyPeek(peek.clone()));
+        let pools = Arc::new(PgPoolRegistry::new(PoolConfig::defaults()));
+        let repos = Arc::new(ConversationRepositoryFactory::new(pools));
+        let llm = LlmNode::new(repos, Arc::downgrade(&registry), None);
+        let mut inputs = HashMap::from([("__colmena_session_id".to_string(), json!("s1"))]);
+        let first = llm.execute(&inputs, &config, &mut json!({}), None).await;
+        assert_eq!(first.unwrap()["__colmena_status"], "SUSPENDED");
+
+        inputs.insert("__colmena_resume_answer".into(), json!("sí"));
+        let inbox = Arc::new(InMemorySteeringInbox::new());
+        let mut state = json!({});
+        let resumed = llm.execute(&inputs, &config, &mut state, None);
+        in_steering(Some(inbox.clone()), resumed).await.unwrap();
+        assert_eq!(
+            *peek.0.lock().unwrap(),
+            [false],
+            "the resumed call found it"
+        );
+        assert!(inbox.is_closed(), "the loop did not get it");
     }
 }

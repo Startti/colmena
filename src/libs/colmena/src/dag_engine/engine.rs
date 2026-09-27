@@ -461,6 +461,8 @@ impl ColmenaEngine {
     /// answered with `cancelled_by_person.md`; a `subgraph` used as a tool
     /// stops its child, whose row closes CANCELLED.
     /// `control.cancel_token().cancel()` is the usual hard stop.
+    /// `RunControl::with_steering(inbox)`: the root's agent also reads, between
+    /// steps, what the person writes while it works (`llm::domain::steering`).
     ///
     /// # Example
     /// ```ignore
@@ -486,6 +488,7 @@ impl ColmenaEngine {
         (*self.use_case)
             .clone()
             .with_call_registry(control.calls())
+            .with_steering_inbox(control.steering())
             .execute_stream(
                 graph,
                 resume_session_id,
