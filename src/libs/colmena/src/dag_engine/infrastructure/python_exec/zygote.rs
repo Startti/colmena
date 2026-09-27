@@ -91,6 +91,17 @@ fn die_with_parent() -> Result<(), Value> {
     Ok(())
 }
 
+/// Makes the template the parent of whatever a child leaves behind when it
+/// ends, so `reap_children` collects those processes too.
+fn adopt_orphans() -> Result<(), Value> {
+    let (on, zero): (libc::c_ulong, libc::c_ulong) = (1, 0);
+    if unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, on, zero, zero, zero) } != 0 {
+        let errno = io::Error::last_os_error().raw_os_error();
+        return Err(json!({"event": "subreaper_failed", "errno": errno}));
+    }
+    Ok(())
+}
+
 /// `os.fork()` copies only the calling thread, so it is safe only while the
 /// template has one: a second thread (a BLAS pool, say) could hold a lock the
 /// children inherit held. Checked after the imports, which could start one.
@@ -165,6 +176,7 @@ fn accept_with_timeout(l: &UnixListener, ms: i32) -> io::Result<Option<UnixStrea
 
 fn start(socket: &Path) -> Result<UnixListener, Value> {
     die_with_parent()?;
+    adopt_orphans()?;
     pyo3::Python::initialize();
     warm_imports()?;
     check_single_threaded()?;

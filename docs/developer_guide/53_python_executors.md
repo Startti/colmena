@@ -123,6 +123,11 @@ before any code runs. There is no syscall filter yet. The template needs root an
 call ends with the crashed text. The uid range `uid_base..uid_base+slots` must belong to one executor per PID
 namespace and to no real user.
 
+Processes a call starts end with the call: before a slot is reused, everything running as its uid is stopped (and
+the template reaps the orphans). If that cannot be done even on a second try, the slot is retired; once none is left,
+calls fail with `PythonExecutorError: no usable Python slot is left…` until the process restarts. The host signals a
+call's child through a pidfd (the pid when pidfds are unavailable).
+
 ## About `restricted`
 
 `restricted` validates imports and a few builtins before running. It helps
