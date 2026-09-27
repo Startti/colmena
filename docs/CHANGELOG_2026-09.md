@@ -6597,10 +6597,10 @@ nodo en curso con el error y devuelve `DagError::Cancelled` (`CANCELLED_BY_PERSO
 nueva); `run_call` (§153) la espera y contesta la llamada con el texto de la cancelación. El Stop del
 turno también dispara ese token, pero el hijo no hace nada por su cuenta: lo desarma la raíz, que
 cierra su fila con `cancel_running_descendants`, como antes. Si el hijo guardara su fila, el desarme
-de la raíz lo congelaba a mitad de la consulta con la conexión del pool tomada y la raíz no podía
-guardar la suya (medido con Postgres: dos hijos y las dos conexiones por URL de siempre dejaban el
-turno ~30 s colgado y sin fila raíz). La raíz no cambia, y nada de esto corre todavía: sin registro en
-el alcance ningún hijo recibe token.
+de la raíz podía congelarlo a mitad de la consulta con la conexión del pool tomada, y la raíz no
+podía guardar la suya (medido con Postgres, dos hijos y las dos conexiones por URL de siempre: 2 de
+3 turnos quedaron ~30 s colgados y sin fila raíz; con el cambio, 15 de 15 limpios). La raíz no
+cambia, y nada de esto corre todavía: sin registro en el alcance ningún hijo recibe token.
 
 **Tests.** `run_use_case.rs`: una corrida anidada cortada a mitad de nodo cierra el nodo con el
 error, termina en `DagError::Cancelled` y deja su fila `CANCELLED` y sus descendientes cerrados;
