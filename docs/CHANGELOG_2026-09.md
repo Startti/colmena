@@ -6828,3 +6828,13 @@ Guías: [12_dag_engine_guide.md](developer_guide/12_dag_engine_guide.md) y
 **ADP.** Rust: `RunControl::with_steering(Arc<dyn SteeringInbox>)` es nuevo. Sin cambios de
 SSE todavía.
 **Estado.** done.
+
+## 168. Python: los procesos de una llamada aislada terminan con ella (Linux, todavía no seleccionable)
+
+**Qué cambia.** Antes de reusar un slot, se detiene todo lo que corre con su uid (un ayudante del host baja a ese uid y
+señala lo que alcanza; el host verifica su salida). Si falla, se reintenta una vez tras una pausa; si vuelve a fallar,
+el slot se retira para siempre, y sin slots las llamadas fallan en el acto con un `PythonExecutorError` claro. La
+plantilla adopta y cosecha los huérfanos de sus hijos. El host señala al hijo de una llamada por `pidfd` (por pid si no
+hay pidfds) y conserva el slot durante el cierre del runtime hasta que el hijo termina o vence su gracia.
+**Tests.** Contenedor root: un nieto que duerme no sobrevive a la llamada (dos variantes); slot retirado ante un kill
+fallido; llamada abandonada; cierre del runtime. **ADP.** Sin cambios. **Estado.** done.
