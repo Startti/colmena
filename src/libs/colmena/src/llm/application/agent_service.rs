@@ -560,8 +560,10 @@ impl AgentService {
     /// answer it takes or closes the inbox in one operation, so a message that
     /// arrives right then is read and the loop goes on. The inbox is closed
     /// when the loop returns, however it returns (a suspend, the rescue, an
-    /// error through `?`); closing it twice does nothing. With `None` it is
-    /// `run`.
+    /// error through `?`); closing it twice does nothing. The close is
+    /// explicit, not a drop guard: a dropped future (a Stop) does not close
+    /// it, and whoever owns the inbox closes it when the job ends. Without
+    /// `on_token` the loop does not read. With `None` it is `run`.
     pub async fn run_steered<'a>(
         &self,
         params: AgentRunParams<'a>,
@@ -588,6 +590,10 @@ impl AgentService {
         let tools = params.tools;
         let tool_executor = params.tool_executor;
         let on_token = params.on_token;
+        // A message read with nowhere to announce it would be saved but never
+        // shown read, and the client would send it again as the next turn:
+        // without `on_token` the loop does not read.
+        let steering = steering.filter(|_| on_token.is_some());
         let tools_provider = params.tools_provider;
         let lazy_catalog_names = params.lazy_catalog_names;
         let params_resolver = params.attachment_resolver;
@@ -1302,10 +1308,14 @@ impl AgentService {
         read: Vec<SteeringMessage>,
     ) -> Result<bool, LlmError> {
         let mut any = false;
-        for m in read {
+        let taken = read.len();
+        for (k, m) in read.into_iter().enumerate() {
             if !is_steering_id(&m.id) {
+                // The id itself is withheld: it may be anything.
                 tracing::warn!(
                     target: "colmena::agent",
+                    session_id = %session_id.session_id.0,
+                    id_len = m.id.len(),
                     "agent_service: skipped a steering message whose id cannot travel in a frame"
                 );
                 continue;
@@ -1313,14 +1323,29 @@ impl AgentService {
             let Ok(message) = LlmMessage::user(m.text) else {
                 tracing::warn!(
                     target: "colmena::agent",
+                    session_id = %session_id.session_id.0,
                     id = %m.id,
                     "agent_service: skipped a blank steering message"
                 );
                 continue;
             };
-            self.conversation_repository
+            if let Err(e) = self
+                .conversation_repository
                 .add_message(session_id, message.clone())
-                .await?;
+                .await
+            {
+                // Neither this message nor the rest of the batch is announced,
+                // so the client sends them again as the next turn. A save that
+                // was written but reported failure makes that resend a
+                // duplicate.
+                tracing::warn!(
+                    target: "colmena::agent",
+                    session_id = %session_id.session_id.0,
+                    unread = taken - k,
+                    "agent_service: a steering message failed to save; it and the rest of its batch go unread"
+                );
+                return Err(e);
+            }
             messages.push(message);
             if let Some(callback) = on_token {
                 (callback)(LlmStreamPart::UserMessageConsumed { id: m.id });
@@ -5870,5 +5895,42 @@ mod tests {
         assert_eq!(consumed(&run.parts), ["m0", "m1"]);
         assert_eq!(run.answer(), "A\n\nB\n\nR");
         assert!(inbox.is_closed());
+    }
+
+    /// With nowhere to announce a read (no `on_token`), the loop does not
+    /// read: a message saved but never shown read would come back as the
+    /// next turn, and the model would get it twice.
+    #[tokio::test]
+    async fn a_run_with_no_on_token_does_not_read() {
+        let spy = Arc::new(Spy::default());
+        assert!(spy.inner.push("m1", "sin aviso"));
+        let mut mock_llm = MockLlmRepo::new();
+        mock_llm.expect_call().returning(|_| Ok(text_response("A")));
+        let (mock_conv, thread) = stateful_conv_mock(vec![]);
+        let service = AgentService::new(Arc::new(mock_llm), Arc::new(mock_conv));
+        let exec = MockToolExec::new();
+        let params = AgentRunParams {
+            session_id: &test_key(),
+            prompt: Some("go".to_string()),
+            messages: None,
+            config: create_config(),
+            tools: vec![],
+            tool_executor: &exec,
+            max_tool_repeats: None,
+            max_turns: None,
+            on_token: None,
+            tools_provider: None,
+            attachment_resolver: None,
+            agent_session_id: None,
+            lazy_catalog_names: None,
+        };
+        let response = service.run_steered(params, Some(spy.clone())).await;
+        assert_eq!(response.unwrap().content(), "A");
+        assert_eq!(spy.ops(), ["close"]);
+        let history = thread.lock().unwrap().clone();
+        assert_eq!(
+            said(&history),
+            [(MessageRole::User, "go"), (MessageRole::Assistant, "A")]
+        );
     }
 }
