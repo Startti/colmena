@@ -101,3 +101,29 @@ impl LlmProviderFactory {
 
 Es crítico testear tanto `call` como `stream`. Se recomienda usar el crate `wiremock` para simular las respuestas del API y verificar que el mapeo de `ToolCall` y `Usage` sea correcto.
 
+
+### 5. Capacidades que no son chat: modelos de decisión tipada
+
+No todo modelo es un proveedor de chat. `LlmRepository` promete mensajes de entrada y texto (más
+tool calls) de salida; un modelo que no genera texto no cumple ese contrato y no se registra ahí.
+Para esos casos hay un puerto propio, igual que TTS tiene `TtsRepository`.
+
+`DecisionModelRepository` (`llm/domain/decision_model_repository.rs`) recibe un `state` (texto, objeto
+JSON o arreglo, nunca `null`) y preguntas tipadas, y devuelve respuestas tipadas con probabilidades:
+
+| Pregunta (`QuestionKind`) | Qué pide | Respuesta (`Answer`) |
+|---|---|---|
+| `Noul { criteria }` | sí/no; `criteria` opcional con `when_true` / `when_false` | `Noul { probability }` (0 a 1) |
+| `Choice { options }` | elegir una opción de un conjunto cerrado; cada opción con descripción opcional | `Choice { choice, probabilities, confidence }` |
+| `Score { levels }` | ubicar en una escala ordenada (`levels[0]` es el nivel más bajo) | `Score { score, probabilities, confidence }` (`score` fraccional) |
+
+El dominio (`llm/domain/decision_model.rs`) valida solo reglas neutrales, antes de cualquier llamada:
+`state` no nulo, al menos una pregunta, ids de pregunta únicos, al menos una opción con claves únicas y
+al menos un nivel. Los límites de cada proveedor (por ejemplo, máximo de opciones o de niveles) los
+valida su adapter, también antes de la red. `DecisionUsage { input_tokens, output_tokens }` se reporta
+como `NodeEvent::LlmUsage` (prompt y completion).
+
+Este modelo no escribe texto: solo elige entre lo que se le ofrece. Para extraer un valor del texto,
+el código propone los candidatos y el modelo elige uno. Si el valor correcto puede no estar entre los
+candidatos, incluí una opción de escape: sin ella, el modelo elige igual la opción más parecida.
+El primer adapter es TypeSafe Jev (ver `CHANGELOG_2026-09.md` §182).
