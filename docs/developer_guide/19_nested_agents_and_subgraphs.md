@@ -941,6 +941,36 @@ los pidió y, contestados, en un `tool`. En el E2E (`cancellation_integration`),
 modelo del turno siguiente a un Stop recibe el pedido detenido y el marcador en el
 resumen de turnos viejos, y el prompt nuevo solo.
 
+#### Cancelar una llamada sola
+
+Además del Stop del turno, una corrida puede cortar **una** llamada a una tool y dejar que
+el resto del turno siga. Una corrida puede tener un registro `CallCancels`
+(`src/libs/colmena/src/llm/domain/call_cancels.rs`): un token por llamada, hijo del token
+del turno, y los ids que se pidió cortar antes de que su llamada arrancara. Quien corre el
+turno lo pone en el alcance (`call_cancels::in_registry`); `run_call` lo toma de ahí,
+registra cada llamada al empezar y la da por terminada al volver (también si su future se
+suelta). Sin registro, todo corre como siempre.
+
+- **Cortada antes de arrancar** (en cola detrás del límite del grupo, o todavía en el
+  stream del modelo): no corre. Su Start sale igual, y su resultado es el de abajo.
+- **Cortada mientras corre:** el trabajo se suelta, como en un Stop, y la llamada se
+  contesta con
+  [`cancelled_by_person.md`](../../src/libs/colmena/text/prompts/agent_loop/cancelled_by_person.md):
+  «La persona canceló este agente antes de que terminara.» (`ToolResult` con
+  `success: false` y `error: "CANCELLED_BY_PERSON"`). Las demás llamadas del grupo siguen;
+  en una cadena de memoria (el mismo agente dos veces) corre la siguiente.
+- **Un trabajo que adoptó su token** (`call_cancels::adopt_current_call`) no se suelta: el
+  bucle lo espera a que se corte solo. Si vuelve con un error o un resultado fallido, la
+  llamada se contesta igual que arriba; si terminó bien antes de cortarse, se queda con su
+  resultado.
+- **Terminada, en pausa por una pregunta o un id que ninguna llamada tiene:** no pasa
+  nada. `CallCancels::cancel` devuelve `false` para una llamada terminada.
+- **El Stop del turno no cambia:** dispara el token de cada llamada, pero el bucle no
+  contesta ninguna; la corrida la desarma el motor, como antes.
+
+Lo que la llamada ya hizo (notas guardadas, requests enviados) queda hecho: el texto no
+promete deshacerlo.
+
 #### El mismo agente a dos niveles: un hilo por quien llama
 
 Hasta v0.20.1 el hilo de memoria de una tool era `tool/<nombre>[/<hilo>]` para

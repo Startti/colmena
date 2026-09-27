@@ -1,4 +1,5 @@
 use crate::llm::application::tool_batches::{plan_batches, Batch};
+use crate::llm::domain::call_cancels::{self, CallCancels};
 use crate::llm::domain::{
     ConversationKey, ConversationRepository, FileData, LlmConfig, LlmError, LlmMessage,
     LlmRepository, LlmRequest, LlmResponse, LlmStreamPart, LlmUsage, MessageRole, ToolCall,
@@ -6,6 +7,7 @@ use crate::llm::domain::{
 };
 use std::collections::HashMap;
 use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 
 /// Number of trailing messages to keep verbatim when compacting old
 /// discovery/scaffolding tool results (e.g. `load_skill`, `describe_tool`)
@@ -246,16 +248,48 @@ impl RepeatStreak {
     }
 }
 
-/// Runs one call for real: emits its Start frame, then refuses a name the
-/// request did not offer, redirects an undiscovered lazy tool to its schema, or
-/// dispatches it to the executor. It writes no history and emits no Finish
-/// frame: the caller does, in the model's order.
+/// Runs one call: emits its Start frame, then dispatches it
+/// ([`dispatch_call`]). In a run with a per-call cancel registry
+/// ([`call_cancels`]) the call is registered while it runs: one the person
+/// cancelled before it started never runs, and one cancelled while it runs is
+/// answered with [`call_cancels::CANCELLED_BY_PERSON_TEXT`]. It writes no
+/// history and emits no Finish frame: the caller does, in the model's order.
 async fn run_call(ctx: &CallCtx<'_>, tool_call: &ToolCall) -> CallOutcome {
     // Notify start of execution
     if let Some(callback) = ctx.on_token {
         (callback)(LlmStreamPart::LlmToolCallStart(tool_call.clone()));
     }
+    let Some(calls) = call_cancels::current_registry() else {
+        return dispatch_call(ctx, tool_call, None).await;
+    };
+    let Some(token) = calls.begin(&tool_call.id) else {
+        return CallOutcome::Done(call_cancels::cancelled_result(&tool_call.id));
+    };
+    let _ended = EndOnDrop(&calls, &tool_call.id);
+    dispatch_call(ctx, tool_call, Some((&*calls, &token))).await
+}
 
+/// Ends a call in its registry when dropped: when [`run_call`] returns, and
+/// also when its future is dropped midway (a panic, or the run of an adopted
+/// child cut by its own cancel, which drops its loop's calls). Otherwise the
+/// id would stay running, and a later cancel would be accepted for a call
+/// that is over.
+struct EndOnDrop<'a>(&'a CallCancels, &'a str);
+
+impl Drop for EndOnDrop<'_> {
+    fn drop(&mut self) {
+        self.0.end(self.1);
+    }
+}
+
+/// Dispatches one call for real: refuses a name the request did not offer,
+/// redirects an undiscovered lazy tool to its schema, or runs it on the
+/// executor ([`execute_call`]), under its cancel token when it has one.
+async fn dispatch_call(
+    ctx: &CallCtx<'_>,
+    tool_call: &ToolCall,
+    cancel: Option<(&CallCancels, &CancellationToken)>,
+) -> CallOutcome {
     // Whether the model may run this name. `iteration_tools` is
     // the very list serialized into the request, so this
     // cannot drift from what the provider was sent. One lazy
@@ -324,10 +358,7 @@ async fn run_call(ctx: &CallCtx<'_>, tool_call: &ToolCall) -> CallOutcome {
             let refusal = LlmError::tool_not_found(name);
             tool_error_result(&tool_call.id, refusal)
         }
-        None => match ctx.tool_executor.execute(tool_call).await {
-            Ok(res) => res,
-            Err(e) => tool_error_result(&tool_call.id, e),
-        },
+        None => execute_call(ctx, tool_call, cancel).await,
     };
 
     // A sentinel is detected before anything is persisted. On SUSPENDED the
@@ -339,6 +370,29 @@ async fn run_call(ctx: &CallCtx<'_>, tool_call: &ToolCall) -> CallOutcome {
         Some("SUSPENDED") => CallOutcome::Suspended(result, sentinel),
         Some("LOAD_ATTACHMENT") => CallOutcome::LoadAttachment(result, sentinel),
         _ => CallOutcome::Done(result),
+    }
+}
+
+/// Runs the call on the executor. Under a cancel token, a call the person
+/// cancelled is answered as cancelled whether its work was dropped
+/// ([`call_cancels::run_as_call`] gave `None`) or stopped by itself and failed
+/// (a child run that adopted the token returns an error). A call that finished
+/// well despite a late cancel keeps its result.
+async fn execute_call(
+    ctx: &CallCtx<'_>,
+    tool_call: &ToolCall,
+    cancel: Option<(&CallCancels, &CancellationToken)>,
+) -> ToolResult {
+    let exec = ctx.tool_executor.execute(tool_call);
+    let Some((calls, token)) = cancel else {
+        return exec
+            .await
+            .unwrap_or_else(|e| tool_error_result(&tool_call.id, e));
+    };
+    match call_cancels::run_as_call(calls, token, exec).await {
+        Some(Ok(result)) if result.success || !token.is_cancelled() => result,
+        Some(Err(e)) if !token.is_cancelled() => tool_error_result(&tool_call.id, e),
+        _ => call_cancels::cancelled_result(&tool_call.id),
     }
 }
 
@@ -1710,7 +1764,7 @@ mod tests {
 
     use mockall::mock;
     use mockall::predicate::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     /// Configures a `MockConversationRepo` backed by shared, mutable state so
@@ -3963,6 +4017,20 @@ mod tests {
         exec: &dyn ToolExecutor,
         limit: usize,
     ) -> (Vec<LlmStreamPart>, Vec<LlmMessage>, LlmResponse) {
+        let frames = Arc::new(Mutex::new(Vec::new()));
+        let (history, resp) = run_streamed_into(first, exec, limit, frames.clone()).await;
+        let parts = frames.lock().unwrap().clone();
+        (parts, history, resp)
+    }
+
+    /// [`run_streamed_on`], pushing each frame to `frames` as the run emits
+    /// it: a test that drops the run midway still sees what it emitted.
+    async fn run_streamed_into(
+        first: Vec<LlmStreamPart>,
+        exec: &dyn ToolExecutor,
+        limit: usize,
+        frames: Arc<Mutex<Vec<LlmStreamPart>>>,
+    ) -> (Vec<LlmMessage>, LlmResponse) {
         let mut mock_llm = MockLlmRepo::new();
         let turn = AtomicUsize::new(0);
         mock_llm.expect_stream().returning(move |_| {
@@ -3973,10 +4041,8 @@ mod tests {
             })
         });
         let (mock_conv, history) = stateful_conv_mock(vec![]);
-        let captured: Arc<Mutex<Vec<LlmStreamPart>>> = Arc::new(Mutex::new(Vec::new()));
-        let c = captured.clone();
         let on_token: Box<dyn Fn(LlmStreamPart) + Send + Sync> =
-            Box::new(move |part| c.lock().unwrap().push(part));
+            Box::new(move |part| frames.lock().unwrap().push(part));
         let service = AgentService::new(Arc::new(mock_llm), Arc::new(mock_conv))
             .with_max_parallel_tool_calls(limit);
         let resp = service
@@ -3997,9 +4063,8 @@ mod tests {
             })
             .await
             .expect("run");
-        let parts = captured.lock().unwrap().clone();
         let history = history.lock().unwrap().clone();
-        (parts, history, resp)
+        (history, resp)
     }
 
     /// A streamed answer's tool calls are keyed by the provider's index, and
@@ -4060,7 +4125,10 @@ mod tests {
     /// in the order they happen, and how many ran at once. A call's chain key
     /// is its `key` argument (`"$id"`: its own id, as a stateless tool keys);
     /// a call without one is not parallel. `"suspend":true` suspends, with a
-    /// sentinel naming the call in `from`.
+    /// sentinel naming the call in `from`. `"fail":true` answers a failed
+    /// result, `"err":true` an executor error. `"adopt":true` first adopts
+    /// the call's token and waits for it to fire; `ms` is then the time the
+    /// call takes to stop by itself.
     #[derive(Default)]
     struct TimedExec {
         timeline: Mutex<Vec<String>>,
@@ -4081,12 +4149,27 @@ mod tests {
                 .push(format!("start {}", call.id));
             let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
             self.peak.fetch_max(now, Ordering::SeqCst);
+            if args["adopt"] == true {
+                let token = call_cancels::adopt_current_call().expect("runs as a call");
+                token.cancelled().await;
+            }
             tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
             self.in_flight.fetch_sub(1, Ordering::SeqCst);
             self.timeline
                 .lock()
                 .unwrap()
                 .push(format!("end {}", call.id));
+            if args["err"] == true {
+                return Err(LlmError::tool_execution_failed("boom"));
+            }
+            if args["fail"] == true {
+                return Ok(ToolResult {
+                    tool_call_id: call.id.clone(),
+                    success: false,
+                    output: format!("failed {}", call.id),
+                    error: Some("boom".to_string()),
+                });
+            }
             let output = if args["suspend"] == true {
                 TimedExec::sentinel(&call.id).to_string()
             } else {
@@ -4935,5 +5018,306 @@ mod tests {
 
         assert_eq!(said(&sent), said(&[user(CUT)]));
         assert_eq!(said(&thread), said(&[user(CUT), assistant("ok")]));
+    }
+
+    // ---- A call can be cancelled on its own ----
+
+    /// [`run_group`] with a per-call cancel registry in scope. Each `(ms, id)`
+    /// cancels call `id` `ms` after the turn starts; returns what each cancel
+    /// answered, in order.
+    async fn run_group_cancelling(
+        args: &[&str],
+        limit: usize,
+        cancels: &[(u64, &'static str)],
+    ) -> (TimedExec, Vec<LlmStreamPart>, Vec<LlmMessage>, Vec<bool>) {
+        let calls = Arc::new(CallCancels::new(CancellationToken::new()));
+        let handles: Vec<_> = cancels
+            .iter()
+            .map(|&(ms, id)| {
+                let calls = calls.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+                    calls.cancel(id)
+                })
+            })
+            .collect();
+        let (exec, parts, history, _) =
+            call_cancels::in_registry(Some(calls), run_group(args, limit)).await;
+        let mut accepted = Vec::new();
+        for handle in handles {
+            accepted.push(handle.await.unwrap());
+        }
+        (exec, parts, history, accepted)
+    }
+
+    /// The Finish frame of call `id`.
+    fn finish_of<'a>(parts: &'a [LlmStreamPart], id: &str) -> &'a ToolResult {
+        parts
+            .iter()
+            .find_map(|p| match p {
+                LlmStreamPart::LlmToolCallFinish(r) if r.tool_call_id == id => Some(r),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no Finish frame for {id}"))
+    }
+
+    fn cancelled_text() -> &'static str {
+        call_cancels::CANCELLED_BY_PERSON_TEXT.trim()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_call_cancelled_while_it_runs_is_answered_as_cancelled_and_its_sibling_finishes() {
+        let started = tokio::time::Instant::now();
+        let (exec, parts, history, accepted) = run_group_cancelling(
+            &[r#"{"key":"a","ms":50}"#, r#"{"key":"b","ms":60000}"#],
+            4,
+            &[(5, "c1")],
+        )
+        .await;
+        assert_eq!(accepted, [true]);
+        assert_eq!(
+            *exec.timeline.lock().unwrap(),
+            ["start c0", "start c1", "end c0"]
+        );
+        assert_eq!(tool_output(&history, "c0"), "out c0");
+        assert_eq!(tool_output(&history, "c1"), cancelled_text());
+        assert!(call_cancels::is_cancelled_result(finish_of(&parts, "c1")));
+        assert!(!call_cancels::is_cancelled_result(finish_of(&parts, "c0")));
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(60),
+            "c1 was not cut"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_call_cancelled_while_queued_behind_the_limit_never_runs() {
+        let (exec, parts, history, accepted) = run_group_cancelling(
+            &[r#"{"key":"a","ms":50}"#, r#"{"key":"b","ms":50}"#],
+            1,
+            &[(5, "c1")],
+        )
+        .await;
+        assert_eq!(accepted, [true]);
+        assert_eq!(*exec.timeline.lock().unwrap(), ["start c0", "end c0"]);
+        assert_eq!(tool_output(&history, "c1"), cancelled_text());
+        // Its Start frame still goes out, so every Finish has its Start.
+        assert!(parts
+            .iter()
+            .any(|p| matches!(p, LlmStreamPart::LlmToolCallStart(tc) if tc.id == "c1")));
+        assert!(call_cancels::is_cancelled_result(finish_of(&parts, "c1")));
+    }
+
+    /// Two calls to the same agent share its memory thread and run one after
+    /// the other: cancelling the first lets the second run.
+    #[tokio::test(start_paused = true)]
+    async fn cancelling_one_call_of_a_memory_chain_lets_the_next_one_run() {
+        let (exec, _, history, _) = run_group_cancelling(
+            &[
+                r#"{"key":"a","ms":60000,"n":0}"#,
+                r#"{"key":"a","ms":10,"n":1}"#,
+            ],
+            4,
+            &[(5, "c0")],
+        )
+        .await;
+        assert_eq!(
+            *exec.timeline.lock().unwrap(),
+            ["start c0", "start c1", "end c1"]
+        );
+        assert_eq!(tool_output(&history, "c0"), cancelled_text());
+        assert_eq!(tool_output(&history, "c1"), "out c1");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancelling_a_call_that_already_finished_is_a_no_op() {
+        let (_, parts, history, accepted) = run_group_cancelling(
+            &[r#"{"key":"a","ms":10}"#, r#"{"key":"b","ms":100}"#],
+            4,
+            &[(50, "c0")],
+        )
+        .await;
+        assert_eq!(accepted, [false]);
+        assert_eq!(tool_output(&history, "c0"), "out c0");
+        assert!(!call_cancels::is_cancelled_result(finish_of(&parts, "c0")));
+    }
+
+    /// A call that paused on a question ended: cancelling it does nothing.
+    #[tokio::test(start_paused = true)]
+    async fn cancelling_a_call_that_paused_on_a_question_is_a_no_op() {
+        let (_, _, _, accepted) =
+            run_group_cancelling(&[r#"{"key":"a","suspend":true}"#], 4, &[(50, "c0")]).await;
+        assert_eq!(accepted, [false]);
+    }
+
+    /// A call's future can be dropped midway: a panic, or the run of an
+    /// adopted child cut by its own cancel, which drops its loop's calls.
+    #[tokio::test(start_paused = true)]
+    async fn a_call_dropped_midway_still_ends() {
+        let calls = Arc::new(CallCancels::new(CancellationToken::new()));
+        let exec = TimedExec::default();
+        let run = call_cancels::in_registry(
+            Some(calls.clone()),
+            run_streamed_on(vec![call_chunk(0, r#"{"ms":60000}"#)], &exec, 4),
+        );
+        let out = tokio::time::timeout(std::time::Duration::from_millis(5), run).await;
+        assert!(out.is_err(), "the run was dropped midway");
+        assert_eq!(*exec.timeline.lock().unwrap(), ["start c0"]);
+        assert!(!calls.cancel("c0"), "a dropped call counts as ended");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_call_alone_is_cancelled_the_same_way() {
+        let (exec, _, history, _) =
+            run_group_cancelling(&[r#"{"ms":60000}"#], 4, &[(5, "c0")]).await;
+        assert_eq!(*exec.timeline.lock().unwrap(), ["start c0"]);
+        assert_eq!(tool_output(&history, "c0"), cancelled_text());
+    }
+
+    /// An executor whose call adopts its token and, when it fires, stops by
+    /// itself with a failure, as a child run that closed its row does (shaped
+    /// like `DagToolExecutor`'s answer to a node error).
+    struct AdoptingExec;
+    #[async_trait]
+    impl ToolExecutor for AdoptingExec {
+        async fn execute(&self, call: &ToolCall) -> Result<ToolResult, LlmError> {
+            let token = call_cancels::adopt_current_call().expect("runs as a call");
+            token.cancelled().await;
+            let error = "CANCELLED_BY_PERSON: …".to_string();
+            Ok(ToolResult {
+                tool_call_id: call.id.clone(),
+                success: false,
+                output: format!("Error executing node subgraph: {error}"),
+                error: Some(error),
+            })
+        }
+
+        async fn available_tools(&self) -> Vec<ToolDefinition> {
+            vec![]
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_call_whose_work_stopped_by_itself_is_answered_as_cancelled() {
+        let calls = Arc::new(CallCancels::new(CancellationToken::new()));
+        let c = calls.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            c.cancel("c0");
+        });
+        let (_, history, _) = call_cancels::in_registry(
+            Some(calls),
+            run_streamed_on(vec![call_chunk(0, "{}")], &AdoptingExec, 4),
+        )
+        .await;
+        assert_eq!(tool_output(&history, "c0"), cancelled_text());
+    }
+
+    // Only a call whose token fired and that did not succeed is answered as
+    // cancelled: every other outcome keeps its own answer.
+
+    #[tokio::test(start_paused = true)]
+    async fn a_call_that_fails_without_a_cancel_keeps_its_failure() {
+        let (_, parts, history, _) = run_group_cancelling(&[r#"{"fail":true}"#], 4, &[]).await;
+        assert_eq!(tool_output(&history, "c0"), "failed c0");
+        assert!(!call_cancels::is_cancelled_result(finish_of(&parts, "c0")));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_call_whose_executor_errs_without_a_cancel_keeps_its_error() {
+        let (_, parts, history, _) = run_group_cancelling(&[r#"{"err":true}"#], 4, &[]).await;
+        assert_eq!(
+            tool_output(&history, "c0"),
+            "Error executing tool: Tool execution failed: boom"
+        );
+        assert!(!call_cancels::is_cancelled_result(finish_of(&parts, "c0")));
+    }
+
+    /// The call's work adopted its token and finished well after the cancel
+    /// (as a child that suspends as the cancel lands keeps its suspension).
+    #[tokio::test(start_paused = true)]
+    async fn an_adopted_call_that_succeeds_after_a_late_cancel_keeps_its_result() {
+        let (exec, parts, history, accepted) =
+            run_group_cancelling(&[r#"{"adopt":true,"ms":20}"#], 4, &[(5, "c0")]).await;
+        assert_eq!(accepted, [true]);
+        assert_eq!(
+            *exec.timeline.lock().unwrap(),
+            ["start c0", "end c0"],
+            "the loop waited for the adopted work"
+        );
+        assert_eq!(tool_output(&history, "c0"), "out c0");
+        assert!(!call_cancels::is_cancelled_result(finish_of(&parts, "c0")));
+    }
+
+    /// The composer's Stop cancels the turn: the loop answers no call (the
+    /// engine tears the run down, as before per-call cancels). If it answered,
+    /// the model's next reply ("done") would end the run inside the timeout.
+    #[tokio::test(start_paused = true)]
+    async fn a_turn_stop_answers_no_call() {
+        let turn = CancellationToken::new();
+        let calls = Arc::new(CallCancels::new(turn.clone()));
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            turn.cancel();
+        });
+        let run = call_cancels::in_registry(Some(calls), run_group(&[r#"{"ms":60000}"#], 4));
+        let out = tokio::time::timeout(std::time::Duration::from_secs(1), run).await;
+        assert!(out.is_err(), "the loop answered a call of a stopped turn");
+    }
+
+    /// An executor whose call adopts its token and fails the moment it fires:
+    /// its work ends in the very poll that saw the cancel.
+    #[derive(Default)]
+    struct QuitsAtOnceExec {
+        quit: AtomicBool,
+    }
+    #[async_trait]
+    impl ToolExecutor for QuitsAtOnceExec {
+        async fn execute(&self, call: &ToolCall) -> Result<ToolResult, LlmError> {
+            let token = call_cancels::adopt_current_call().expect("runs as a call");
+            token.cancelled().await;
+            self.quit.store(true, Ordering::SeqCst);
+            Ok(ToolResult {
+                tool_call_id: call.id.clone(),
+                success: false,
+                output: "child stopped".to_string(),
+                error: Some("child stopped".to_string()),
+            })
+        }
+
+        async fn available_tools(&self) -> Vec<ToolDefinition> {
+            vec![]
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_turn_stop_answers_no_call_even_when_its_work_stops_at_once() {
+        let turn = CancellationToken::new();
+        let calls = Arc::new(CallCancels::new(turn.clone()));
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            turn.cancel();
+        });
+        let exec = QuitsAtOnceExec::default();
+        let frames = Arc::new(Mutex::new(Vec::new()));
+        let run = call_cancels::in_registry(
+            Some(calls),
+            run_streamed_into(vec![call_chunk(0, "{}")], &exec, 4, frames.clone()),
+        );
+        let out = tokio::time::timeout(std::time::Duration::from_secs(1), run).await;
+        assert!(exec.quit.load(Ordering::SeqCst), "the work saw the Stop");
+        let frames = frames.lock().unwrap();
+        assert!(frames
+            .iter()
+            .any(|p| matches!(p, LlmStreamPart::LlmToolCallStart(tc) if tc.id == "c0")));
+        assert!(
+            !frames
+                .iter()
+                .any(|p| matches!(p, LlmStreamPart::LlmToolCallFinish(_))),
+            "the loop answered a call of a stopped turn"
+        );
+        assert!(
+            out.is_err(),
+            "the run was not left for the engine to tear down"
+        );
     }
 }
