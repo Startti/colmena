@@ -6801,3 +6801,30 @@ Guía: [12_dag_engine_guide.md](developer_guide/12_dag_engine_guide.md).
 
 **ADP.** Sin cambios todavía.
 **Estado.** done.
+
+## 167. Mensajes a mitad de corrida: solo el `llm_call` de la raíz lee
+
+**Qué cambia.** `RunControl::with_steering(inbox)` le da un buzón (§164) a
+`execute_stream_controlled`. El caso de uso lo pone en un slot alrededor de cada nodo
+`llm_call` de la corrida raíz (`steering::in_steering`); cualquier otro nodo tiene el slot
+vacío (un `for_each` corre filas de `llm_call` directo, en su propia tarea); una corrida
+anidada lo suelta (`as_nested_run`) y sus nodos tapan el de afuera; `run_call` corre el
+trabajo de cada llamada con el slot vacío (`outside_steering`). El `llm_call` toma el buzón
+una sola vez al empezar, antes de reanudar una llamada pendiente (`take_inbox`: la
+reanudación corre fuera de `run_call`), y corre `run_steered` (§165, §166). Sin buzón en el
+`RunControl`, todo corre como antes. El nodo todavía no convierte `UserMessageConsumed` en
+un evento: con buzón, un mensaje se lee sin frame hasta el cambio siguiente de esta serie.
+
+**Tests.** `steering.rs`: el buzón se toma una sola vez adentro de su alcance, y
+`outside_steering` lo tapa. `run_control.rs`: el buzón viaja solo si se da.
+`run_use_case.rs`: una corrida raíz con buzón se lo da a sus `llm_call`; un nodo de otro
+tipo no lo encuentra; una anidada no tiene y tapa el del padre; una sin buzón tapa uno de
+afuera. `agent_service.rs`: el trabajo de una llamada no ve buzón; `run` no lee aunque haya
+uno. `llm.rs`: al reanudar, la llamada pendiente no encuentra el buzón y el bucle sí lo
+recibe (lo cierra al volver).
+Guías: [12_dag_engine_guide.md](developer_guide/12_dag_engine_guide.md) y
+[19_nested_agents_and_subgraphs.md](developer_guide/19_nested_agents_and_subgraphs.md).
+
+**ADP.** Rust: `RunControl::with_steering(Arc<dyn SteeringInbox>)` es nuevo. Sin cambios de
+SSE todavía.
+**Estado.** done.
