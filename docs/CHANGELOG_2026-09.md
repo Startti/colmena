@@ -6545,12 +6545,21 @@ y el marcador en el resumen de turnos viejos, y su prompt solo. Sin la curación
 [2026-09-26-unanswered-request-marker.md](adp_migration/2026-09-26-unanswered-request-marker.md).
 **Estado.** hecho; sin verificar con un modelo real, se mide en dev.
 
-## 151. Una llamada a una tool se puede cancelar sola: el registro
+## 151. Python: el binario `python_executor` y la plantilla caliente (Linux)
+
+**Qué cambia.** Binario nuevo `python_executor` (`zygote --socket`): un Python con los módulos pesados importados una
+vez, que verifica tener un solo hilo, abre un socket 0600, imprime `READY` y hace un fork por conexión; cada hijo
+re-siembra numpy (falla cerrado) y termina con `_exit`. Sale con `3` si falla un chequeo de arranque. Nada lo lanza
+todavía. Guía: [53_python_executors.md](developer_guide/53_python_executors.md#the-warm-template-linux).
+**Tests.** Linux: pid antes que nada, cabecera válida, no JSON y demasiado grande; conteo de hilos. **ADP.** Sin
+cambios. **Estado.** done.
+
+## 152. Una llamada a una tool se puede cancelar sola: el registro
 
 **Qué cambia.** Nuevo `CallCancels` (`llm/domain/call_cancels.rs`): el registro de cancelaciones por
 llamada de una corrida, con un token por `tool_call_id` hijo del token del turno, los ids pedidos
 antes de arrancar (hasta 1024) y el texto `agent_loop/cancelled_by_person.md`. Todavía no lo usa
-nadie: el bucle lo conecta en §152. Sin registro en el alcance, todo corre como hoy.
+nadie: el bucle lo conecta en §153. Sin registro en el alcance, todo corre como hoy.
 
 **Tests.** Cancelar antes de arrancar, mientras corre y después de terminar; un id repetido o vacío
 no toma el cancel de otra llamada; el tope; el Stop del turno dispara todos los tokens y no contesta

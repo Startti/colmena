@@ -83,6 +83,13 @@ runs, and write one response frame.
   sees the stream close. So does a panic in the helper. The process that hosts
   the body is expected to exit after either.
 
+### The warm template (Linux)
+
+`python_executor zygote --socket <path>` starts one Python with the heavy modules imported once, checks it is
+single-threaded, binds a 0600 socket, prints `READY` and forks one child per connection (per-call numpy reseed; the
+child always ends in `_exit`). It exits `3` if a startup check fails; a child exits `70` on a protocol error. The host
+must start it from a long-lived thread: it is killed when that thread exits. Logs are JSON fields only.
+
 ## About `restricted`
 
 `restricted` validates imports and a few builtins before running. It helps
