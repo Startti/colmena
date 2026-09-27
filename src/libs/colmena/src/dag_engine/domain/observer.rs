@@ -36,6 +36,11 @@ pub enum NodeEvent {
         /// The same scope its `LlmToolCallStart` carried; absent otherwise.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         child_scope: Option<String>,
+        /// The person cancelled this call on its own
+        /// (`llm::domain::call_cancels::is_cancelled_result`). Additive: `false`
+        /// is not written, and a frame without it reads as `false`.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        cancelled: bool,
     },
     /// Emitted when the load_skill synthetic tool successfully loads a skill or reference.
     /// Fires in addition to LlmToolCallStart/Finish so frontends can render a skill-specific UI.

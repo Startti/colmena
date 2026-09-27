@@ -980,9 +980,9 @@ impl DagRunUseCase {
                                                 last_tool = Some(tool_name.clone());
                                                 yield DagExecutionEvent::LlmToolCallStart { node_id: node_id.clone(), tool_id, tool_name, tool_args, child_scope }
                                             }
-                                            NodeEvent::LlmToolCallFinish { tool_id, success, output, child_scope } => {
+                                            NodeEvent::LlmToolCallFinish { tool_id, success, output, child_scope, cancelled } => {
                                                 last_tool = None;
-                                                yield DagExecutionEvent::LlmToolCallFinish { node_id: node_id.clone(), tool_id, success, output, child_scope }
+                                                yield DagExecutionEvent::LlmToolCallFinish { node_id: node_id.clone(), tool_id, success, output, child_scope, cancelled }
                                             }
                                             NodeEvent::SkillLoaded { tool_id, skill_name, reference, source, size_bytes } => yield DagExecutionEvent::SkillLoaded { node_id: node_id.clone(), tool_id, skill_name, reference, source, size_bytes },
                                             NodeEvent::ToolDescribed { tool_id, tool_name } => yield DagExecutionEvent::ToolDescribed { node_id: node_id.clone(), tool_id, tool_name },
