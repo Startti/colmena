@@ -1,5 +1,6 @@
 use crate::llm::application::tool_batches::{plan_batches, Batch};
 use crate::llm::domain::call_cancels::{self, CallCancels};
+use crate::llm::domain::steering::{is_steering_id, SteeringInbox, SteeringMessage};
 use crate::llm::domain::{
     ConversationKey, ConversationRepository, FileData, LlmConfig, LlmError, LlmMessage,
     LlmRepository, LlmRequest, LlmResponse, LlmStreamPart, LlmUsage, MessageRole, ToolCall,
@@ -550,6 +551,33 @@ impl AgentService {
     /// # Returns
     /// Final response from the LLM after tool execution
     pub async fn run<'a>(&self, params: AgentRunParams<'a>) -> Result<LlmResponse, LlmError> {
+        self.run_steered(params, None).await
+    }
+
+    /// [`run`](Self::run) that also reads, between steps, what the person
+    /// writes while it works ([`steering`](crate::llm::domain::steering)): at
+    /// the top of each iteration it takes what is waiting. The inbox is closed
+    /// when the loop returns, however it returns (a suspend, the rescue, an
+    /// error through `?`); closing it twice does nothing. With `None` it is
+    /// `run`.
+    pub async fn run_steered<'a>(
+        &self,
+        params: AgentRunParams<'a>,
+        steering: Option<Arc<dyn SteeringInbox>>,
+    ) -> Result<LlmResponse, LlmError> {
+        let out = self.react_loop(params, steering.as_deref()).await;
+        if let Some(inbox) = &steering {
+            inbox.close().await;
+        }
+        out
+    }
+
+    /// The ReAct loop. See [`run_steered`](Self::run_steered).
+    async fn react_loop<'a>(
+        &self,
+        params: AgentRunParams<'a>,
+        steering: Option<&dyn SteeringInbox>,
+    ) -> Result<LlmResponse, LlmError> {
         let max_tool_repeats = params.max_tool_repeats.unwrap_or(3);
         let max_turns = params.max_turns.unwrap_or_else(default_hard_turn_cap);
         let session_id = params.session_id;
@@ -658,6 +686,19 @@ impl AgentService {
                 max = max_turns,
                 "agent_service: iteration start"
             );
+
+            // What the person wrote while the loop worked, read at the top of
+            // a step: it goes in this very request, after the results. Never
+            // with an id of the last assistant message open: every batch
+            // answers all its ids before its `continue` and a suspend returns,
+            // so this check is the net.
+            if let Some(inbox) = steering {
+                if abandoned_call_ids(&messages).is_empty() {
+                    let read = inbox.take().await;
+                    self.read_steering(session_id, &on_token, &mut messages, &mut streak, read)
+                        .await?;
+                }
+            }
 
             // A. Call LLM with tools
             let should_stream = on_token.is_some();
@@ -1224,6 +1265,53 @@ impl AgentService {
             response = response.with_tool_calls(all_tool_calls_executed);
         }
         Ok(response)
+    }
+
+    /// Reads the messages `read`, in order: each one is saved to the history
+    /// as a `user` message, added to `messages` (so the request built next
+    /// carries it) and announced with `UserMessageConsumed { id }`, with no
+    /// `await` between saving it and announcing it. A message whose id cannot
+    /// travel in a frame, or whose text is blank, is skipped. Reading resets
+    /// the repeat streak: running the same call again because the person
+    /// asked for it is not a loop. Returns whether it read any.
+    async fn read_steering(
+        &self,
+        session_id: &ConversationKey,
+        on_token: &Option<Box<dyn Fn(LlmStreamPart) + Send + Sync>>,
+        messages: &mut Vec<LlmMessage>,
+        streak: &mut RepeatStreak,
+        read: Vec<SteeringMessage>,
+    ) -> Result<bool, LlmError> {
+        let mut any = false;
+        for m in read {
+            if !is_steering_id(&m.id) {
+                tracing::warn!(
+                    target: "colmena::agent",
+                    "agent_service: skipped a steering message whose id cannot travel in a frame"
+                );
+                continue;
+            }
+            let Ok(message) = LlmMessage::user(m.text) else {
+                tracing::warn!(
+                    target: "colmena::agent",
+                    id = %m.id,
+                    "agent_service: skipped a blank steering message"
+                );
+                continue;
+            };
+            self.conversation_repository
+                .add_message(session_id, message.clone())
+                .await?;
+            messages.push(message);
+            if let Some(callback) = on_token {
+                (callback)(LlmStreamPart::UserMessageConsumed { id: m.id });
+            }
+            any = true;
+        }
+        if any {
+            *streak = RepeatStreak::default();
+        }
+        Ok(any)
     }
 
     /// Answers a repeated call with the loop guard's nudge instead of running
@@ -5320,5 +5408,382 @@ mod tests {
             out.is_err(),
             "the run was not left for the engine to tear down"
         );
+    }
+
+    // ---- What the person writes while the loop works ----
+
+    use crate::llm::domain::steering::InMemorySteeringInbox;
+
+    /// An inbox that notes each operation, around an [`InMemorySteeringInbox`].
+    #[derive(Default)]
+    struct Spy {
+        inner: InMemorySteeringInbox,
+        ops: Mutex<Vec<&'static str>>,
+    }
+
+    impl Spy {
+        fn ops(&self) -> Vec<&'static str> {
+            self.ops.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl SteeringInbox for Spy {
+        async fn take(&self) -> Vec<SteeringMessage> {
+            self.ops.lock().unwrap().push("take");
+            self.inner.take().await
+        }
+        async fn take_or_close(&self) -> Vec<SteeringMessage> {
+            self.ops.lock().unwrap().push("take_or_close");
+            self.inner.take_or_close().await
+        }
+        async fn close(&self) {
+            self.ops.lock().unwrap().push("close");
+            self.inner.close().await
+        }
+    }
+
+    /// A tool that, the first time it runs, leaves `say` in the inbox (the
+    /// person writing while it runs) and answers `out <id>`. Counts its runs.
+    struct Writes {
+        inbox: Arc<InMemorySteeringInbox>,
+        say: Mutex<Vec<(&'static str, &'static str)>>,
+        runs: AtomicUsize,
+    }
+
+    impl Writes {
+        fn new(inbox: &Arc<InMemorySteeringInbox>, say: &[(&'static str, &'static str)]) -> Self {
+            Self {
+                inbox: inbox.clone(),
+                say: Mutex::new(say.to_vec()),
+                runs: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl ToolExecutor for Writes {
+        async fn execute(&self, call: &ToolCall) -> Result<ToolResult, LlmError> {
+            self.runs.fetch_add(1, Ordering::SeqCst);
+            let say: Vec<_> = self.say.lock().unwrap().drain(..).collect();
+            for (id, text) in say {
+                assert!(
+                    self.inbox.push(id, text),
+                    "the inbox is open while a call runs"
+                );
+            }
+            Ok(ToolResult::success(
+                call.id.clone(),
+                format!("out {}", call.id),
+            ))
+        }
+
+        async fn available_tools(&self) -> Vec<ToolDefinition> {
+            vec![]
+        }
+    }
+
+    /// How a steered test run goes.
+    struct Plan {
+        /// What the model answers, in order; the last one again if asked more.
+        replies: Vec<Vec<LlmStreamPart>>,
+        /// Runs while the model writes its n-th reply (0-based).
+        during: Box<dyn Fn(usize) + Send + Sync>,
+        /// The thread before the run.
+        history: Vec<LlmMessage>,
+        /// `None`: a resume, which goes on from the thread.
+        prompt: Option<&'static str>,
+        max_turns: Option<usize>,
+        max_tool_repeats: Option<usize>,
+        /// The provider fails on every request.
+        fail: bool,
+    }
+
+    impl Plan {
+        fn replies(replies: Vec<Vec<LlmStreamPart>>) -> Self {
+            Self {
+                replies,
+                during: Box::new(|_| {}),
+                history: vec![],
+                prompt: Some("go"),
+                max_turns: None,
+                max_tool_repeats: None,
+                fail: false,
+            }
+        }
+    }
+
+    /// What a steered run saw and left.
+    struct Steered {
+        /// The messages of each request, in order.
+        requests: Vec<Vec<LlmMessage>>,
+        parts: Vec<LlmStreamPart>,
+        history: Vec<LlmMessage>,
+        response: Result<LlmResponse, LlmError>,
+    }
+
+    impl Steered {
+        fn answer(&self) -> &str {
+            self.response.as_ref().expect("the run answered").content()
+        }
+    }
+
+    /// One `run_steered` on `inbox`, as `plan` says; calls run on `exec`.
+    async fn steered(
+        plan: Plan,
+        exec: &dyn ToolExecutor,
+        inbox: Arc<dyn SteeringInbox>,
+    ) -> Steered {
+        let Plan {
+            replies,
+            during,
+            history,
+            prompt,
+            max_turns,
+            max_tool_repeats,
+            fail,
+        } = plan;
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let seen = requests.clone();
+        let mut mock_llm = MockLlmRepo::new();
+        mock_llm.expect_stream().returning(move |req| {
+            let n = {
+                let mut seen = seen.lock().unwrap();
+                seen.push(req.messages().to_vec());
+                seen.len() - 1
+            };
+            if fail {
+                return Err(LlmError::tool_execution_failed("provider down"));
+            }
+            during(n);
+            Ok(stream_of(replies[n.min(replies.len() - 1)].clone()))
+        });
+        let (mock_conv, thread) = stateful_conv_mock(history);
+        let frames = Arc::new(Mutex::new(Vec::new()));
+        let sink = frames.clone();
+        let saved = thread.clone();
+        let on_token: Box<dyn Fn(LlmStreamPart) + Send + Sync> = Box::new(move |part| {
+            if matches!(part, LlmStreamPart::UserMessageConsumed { .. }) {
+                let last = saved.lock().unwrap().last().map(|m| m.role().clone());
+                assert_eq!(last, Some(MessageRole::User), "announced, not saved");
+            }
+            sink.lock().unwrap().push(part)
+        });
+        let service = AgentService::new(Arc::new(mock_llm), Arc::new(mock_conv));
+        let response = service
+            .run_steered(
+                AgentRunParams {
+                    session_id: &test_key(),
+                    prompt: prompt.map(str::to_string),
+                    messages: None,
+                    config: create_config(),
+                    tools: offered(&["t"]),
+                    tool_executor: exec,
+                    max_tool_repeats,
+                    max_turns,
+                    on_token: Some(on_token),
+                    tools_provider: None,
+                    attachment_resolver: None,
+                    agent_session_id: None,
+                    lazy_catalog_names: None,
+                },
+                Some(inbox),
+            )
+            .await;
+        let requests = requests.lock().unwrap().clone();
+        let parts = frames.lock().unwrap().clone();
+        let history = thread.lock().unwrap().clone();
+        Steered {
+            requests,
+            parts,
+            history,
+            response,
+        }
+    }
+
+    /// The ids of the messages the loop announced it read, in order.
+    fn consumed(parts: &[LlmStreamPart]) -> Vec<&str> {
+        parts
+            .iter()
+            .filter_map(|p| match p {
+                LlmStreamPart::UserMessageConsumed { id } => Some(id.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Where the first part that `matches` is.
+    fn first(parts: &[LlmStreamPart], matches: impl Fn(&LlmStreamPart) -> bool) -> usize {
+        parts.iter().position(matches).expect("the part is there")
+    }
+
+    /// A reply that is only text.
+    fn text(t: &str) -> Vec<LlmStreamPart> {
+        vec![LlmStreamPart::Content(t.to_string())]
+    }
+
+    #[tokio::test]
+    async fn a_message_written_while_a_call_runs_goes_in_the_next_request_after_the_result() {
+        let inbox = Arc::new(InMemorySteeringInbox::new());
+        let exec = Writes::new(&inbox, &[("m1", "y en inglés")]);
+        let run = steered(
+            Plan::replies(vec![vec![call_chunk(0, "{}")], text("done")]),
+            &exec,
+            inbox.clone(),
+        )
+        .await;
+
+        // The next request: the call's result, then the message.
+        let sent = said(&run.requests[1]);
+        assert_eq!(
+            sent[sent.len() - 2..],
+            [
+                (MessageRole::Tool, "out c0"),
+                (MessageRole::User, "y en inglés")
+            ]
+        );
+        // The thread keeps it right there, as a `user` message.
+        let thread = said(&run.history);
+        let at = thread
+            .iter()
+            .position(|m| *m == (MessageRole::User, "y en inglés"))
+            .unwrap();
+        assert_eq!(thread[at - 1], (MessageRole::Tool, "out c0"));
+        assert_eq!(thread[at + 1], (MessageRole::Assistant, "done"));
+        // Its event: after the call's result, before the next request.
+        assert_eq!(consumed(&run.parts), ["m1"]);
+        let read = first(&run.parts, |p| {
+            matches!(p, LlmStreamPart::UserMessageConsumed { .. })
+        });
+        let result = first(&run.parts, |p| {
+            matches!(p, LlmStreamPart::LlmToolCallFinish(_))
+        });
+        let second_request = run
+            .parts
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| matches!(p, LlmStreamPart::LlmMessageStart))
+            .nth(1)
+            .map(|(i, _)| i)
+            .unwrap();
+        assert!(result < read && read < second_request, "{:?}", run.parts);
+        assert_eq!(run.answer(), "done");
+    }
+
+    #[tokio::test]
+    async fn two_messages_in_one_step_are_two_rows_two_events_and_one_user_message_on_the_wire() {
+        let inbox = Arc::new(InMemorySteeringInbox::new());
+        let exec = Writes::new(&inbox, &[("m1", "uno"), ("m2", "dos")]);
+        let run = steered(
+            Plan::replies(vec![vec![call_chunk(0, "{}")], text("done")]),
+            &exec,
+            inbox.clone(),
+        )
+        .await;
+
+        assert_eq!(consumed(&run.parts), ["m1", "m2"]);
+        let thread = said(&run.history);
+        let at = thread
+            .iter()
+            .position(|m| *m == (MessageRole::User, "uno"))
+            .unwrap();
+        assert_eq!(thread[at + 1], (MessageRole::User, "dos"));
+        // `coalesce_consecutive_same_role` joins them for the provider.
+        assert_eq!(
+            said(&run.requests[1]).last(),
+            Some(&(MessageRole::User, "uno\n\ndos"))
+        );
+    }
+
+    /// A resumed run whose thread still ends on an open call: the step does
+    /// not read, since a `user` message there would split the call from its
+    /// result.
+    #[tokio::test]
+    async fn a_step_does_not_read_while_an_id_of_the_last_assistant_message_is_open() {
+        let inbox = Arc::new(InMemorySteeringInbox::new());
+        assert!(inbox.push("m1", "tarde"));
+        let mut plan = Plan::replies(vec![text("done")]);
+        plan.history = vec![user("primera"), asst_with_calls(&["c0"])];
+        plan.prompt = None;
+        let run = steered(plan, &MockToolExec::new(), inbox.clone()).await;
+        let first_request = said(&run.requests[0]);
+        assert!(
+            !first_request.contains(&(MessageRole::User, "tarde")),
+            "{first_request:?}"
+        );
+    }
+
+    /// The person asked for the same call again: reading resets the repeat
+    /// streak, so the call runs instead of being nudged.
+    #[tokio::test]
+    async fn reading_a_message_resets_the_repeat_streak() {
+        let inbox = Arc::new(InMemorySteeringInbox::new());
+        let exec = Writes::new(&inbox, &[("m1", "otra vez")]);
+        let mut plan = Plan::replies(vec![
+            vec![call_chunk(0, r#"{"n":1}"#)],
+            vec![call_chunk(0, r#"{"n":1}"#)],
+            text("done"),
+        ]);
+        plan.max_tool_repeats = Some(2);
+        let run = steered(plan, &exec, inbox.clone()).await;
+        assert_eq!(exec.runs.load(Ordering::SeqCst), 2, "the second call ran");
+        assert!(
+            !run.history
+                .iter()
+                .any(|m| m.content().contains(REPEAT_NUDGE_TEXT.trim())),
+            "nudged"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_message_with_a_bad_id_or_a_blank_text_is_skipped() {
+        let inbox = Arc::new(InMemorySteeringInbox::new());
+        let exec = Writes::new(&inbox, &[("a:b", "id malo"), ("m2", "   "), ("m3", "bien")]);
+        let run = steered(
+            Plan::replies(vec![vec![call_chunk(0, "{}")], text("done")]),
+            &exec,
+            inbox.clone(),
+        )
+        .await;
+        assert_eq!(consumed(&run.parts), ["m3"]);
+        let users: Vec<&str> = said(&run.history)
+            .into_iter()
+            .filter(|(role, _)| *role == MessageRole::User)
+            .map(|(_, content)| content)
+            .collect();
+        assert_eq!(users, ["go", "bien"]);
+    }
+
+    /// A group that suspends: the step took before it, and after it the loop
+    /// returned on the question (its id left open) and closed the inbox,
+    /// without taking again.
+    #[tokio::test(start_paused = true)]
+    async fn a_group_that_suspends_closes_the_inbox_without_taking_again() {
+        let spy = Arc::new(Spy::default());
+        let exec = TimedExec::default();
+        let run = steered(
+            Plan::replies(vec![vec![
+                call_chunk(0, r#"{"key":"a","suspend":true}"#),
+                call_chunk(1, r#"{"key":"b","ms":10}"#),
+            ]]),
+            &exec,
+            spy.clone(),
+        )
+        .await;
+        assert!(run.response.as_ref().unwrap().suspend().is_some());
+        assert_eq!(open_ids(&run.history), ["c0"]);
+        assert_eq!(spy.ops(), ["take", "close"]);
+    }
+
+    /// However the loop returns, the inbox ends closed: here the provider
+    /// fails on the first request and the error goes out through `?`.
+    #[tokio::test]
+    async fn a_run_that_fails_closes_the_inbox_too() {
+        let spy = Arc::new(Spy::default());
+        let mut plan = Plan::replies(vec![text("never")]);
+        plan.fail = true;
+        let run = steered(plan, &MockToolExec::new(), spy.clone()).await;
+        assert!(run.response.is_err());
+        assert_eq!(spy.ops(), ["take", "close"]);
     }
 }
