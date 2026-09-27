@@ -6630,3 +6630,13 @@ del repo llega con el frame. Regresión E2E: las mismas seis de §154.
 
 **ADP.** [Nota de migración](adp_migration/2026-09-26-cancel-one-call.md). Sin cambios de SSE
 todavía. **Estado.** done.
+
+## 152. Python: el executor por subproceso supervisa la plantilla (Linux, todavía no seleccionable)
+
+**Qué cambia.** `python_exec::subprocess` arranca la plantilla caliente desde un hilo propio de vida larga, con solo
+`TEMPLATE_ENV`, la reemplaza si termina y reintenta un arranque fallido después de una pausa; su stderr pasa al log
+solo como eventos JSON con campos conocidos. Configuración nueva (`COLMENA_PYTHON_EXECUTOR_{BIN,SLOTS,MEMORY_MB,
+HIDE_PATHS,MAX_REQUEST_MB,MAX_RESPONSE_MB}`). `subprocess` sigue sin poder elegirse.
+**Tests.** Configuración; filtro de stderr; la plantilla sobrevive al hilo de la primera llamada; arranque fallido con
+pausa. Guía: [53_python_executors.md](developer_guide/53_python_executors.md#the-subprocess-executor-linux-not-selectable-yet).
+**ADP.** Sin cambios. **Estado.** done.
