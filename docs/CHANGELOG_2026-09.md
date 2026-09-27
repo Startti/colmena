@@ -7078,3 +7078,25 @@ el modo del `router`.
 
 **ADP.** Sin impacto: sin cambios de API pública, bindings ni SSE.
 **Estado.** done.
+
+## 189. Adapter TypeSafe Jev: errores tipados, límites del proveedor y factory (Jev, 3/7)
+
+**Qué cambia.** Completa el adapter de §188. Los errores del proveedor dejan de ser todos `Upstream`:
+401/403 → `Auth`; 400/422 → `InvalidRequest`, leyendo las tres formas de `detail` que devuelve Jev
+(objeto con `error_type` y `message`, texto, o lista de validación `loc: msg`); 429 → `RateLimited`;
+5xx, incluido 529 → `Upstream`; timeout → `Timeout`. Antes de la red rechaza más de 255 opciones o más
+de 10 niveles, sin enviar nada. Una respuesta que elige una opción que no se ofreció es
+`MalformedResponse`. Nueva factory `build_decision_model_repository` (proveedor `"typesafe"`), que usará
+el modo del `router`. Guía: `developer_guide/04_adding_providers.md` §5.
+
+**Tests.** Tabla de errores con los cuerpos capturados del API real (401 `authentication_error`, 400
+`Unknown model`, 400 `max_tokens_exceeded`, 400 texto, 422 lista, 429, 503, 529), timeout con una
+respuesta demorada, límites sin ningún request (`expect(0)`) y cuerpos 200 inválidos (no JSON, opción no
+ofrecida, respuesta faltante, tipo desconocido). Factory: `typesafe` construye; proveedor desconocido o
+key vacía fallan.
+
+**E2E.** Todavía ningún nodo usa el adapter; la evidencia real sigue siendo
+`live_choice_call_against_typesafe` (`#[ignore]`). El grafo E2E llega con el modo del `router`.
+
+**ADP.** Sin impacto: sin cambios de API pública, bindings ni SSE.
+**Estado.** done.
