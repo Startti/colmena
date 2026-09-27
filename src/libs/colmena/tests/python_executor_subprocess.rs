@@ -11,6 +11,7 @@ use colmena::dag_engine::infrastructure::python_exec::config::SubprocessConfig;
 use colmena::dag_engine::infrastructure::python_exec::inprocess::InProcessExecutor;
 use colmena::dag_engine::infrastructure::python_exec::protocol::result_too_large_message;
 use colmena::dag_engine::infrastructure::python_exec::subprocess::SubprocessExecutor;
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
@@ -20,7 +21,10 @@ fn jail_tests_enabled() -> bool {
     std::env::var("COLMENA_PYEXEC_JAIL_TESTS").as_deref() == Ok("1")
 }
 
-fn executor_with(slots: usize, max_response_bytes: usize) -> Option<SubprocessExecutor> {
+fn executor_with(
+    slots: usize,
+    edit: impl FnOnce(&mut SubprocessConfig),
+) -> Option<SubprocessExecutor> {
     if !jail_tests_enabled() {
         eprintln!("skipped: set COLMENA_PYEXEC_JAIL_TESTS=1 (Linux, root, CAP_SYS_ADMIN)");
         return None;
@@ -41,12 +45,13 @@ fn executor_with(slots: usize, max_response_bytes: usize) -> Option<SubprocessEx
     // Uids of their own: the tests run side by side, each with its executor.
     static NEXT: AtomicU32 = AtomicU32::new(0);
     cfg.uid_base = 20000 + 100 * NEXT.fetch_add(1, Ordering::Relaxed);
-    cfg.max_response_bytes = max_response_bytes;
+    cfg.max_response_bytes = 1 << 20;
+    edit(&mut cfg);
     Some(SubprocessExecutor::new(cfg, Duration::from_secs(60)).unwrap())
 }
 
 fn executor(slots: usize) -> Option<SubprocessExecutor> {
-    executor_with(slots, 1 << 20)
+    executor_with(slots, |_| {})
 }
 
 fn req(code: &str, secs: u64) -> PythonRunRequest {
@@ -190,7 +195,7 @@ async fn a_dead_child_is_reported_not_hung() {
 
 #[tokio::test]
 async fn a_result_over_the_limit_is_refused() {
-    let Some(ex) = executor_with(1, 1024) else {
+    let Some(ex) = executor_with(1, |c| c.max_response_bytes = 1024) else {
         return;
     };
     let e = ex.run(req("output = 'x' * 4096", 10)).await.unwrap_err();
@@ -275,4 +280,67 @@ async fn the_child_keeps_only_its_connection_and_null_streams() {
         r.output,
         Some(serde_json::json!([5, devnull, devnull, devnull]))
     );
+}
+
+/// A configured path that is a file is covered like a directory: a call can
+/// read the file only while it is not configured.
+#[tokio::test]
+async fn a_hidden_file_cannot_be_read() {
+    let Some(plain) = executor(1) else { return };
+    // Outside /tmp, which every child replaces with its own. The name is
+    // unique, and the file goes when `temp` drops, also on failure.
+    let temp = tempfile::NamedTempFile::new_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let file = temp.path().to_path_buf();
+    std::fs::write(&file, "seen").unwrap();
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let code = format!(
+        "try:\n    output = open({:?}).read()\nexcept OSError:\n    output = 'unreadable'",
+        file.display().to_string()
+    );
+    let hiding = executor_with(1, |c| c.hide_paths = vec![file.clone()]).unwrap();
+    let seen = plain.run(req(&code, 10)).await.unwrap().output;
+    let hidden = hiding.run(req(&code, 10)).await.unwrap().output;
+    assert_eq!(
+        (seen, hidden),
+        (
+            Some(serde_json::json!("seen")),
+            Some(serde_json::json!("unreadable"))
+        )
+    );
+}
+
+/// The child's /proc lists its own processes only: not the template it was
+/// forked from, nor this test.
+#[tokio::test]
+async fn the_child_sees_only_its_own_processes() {
+    let Some(ex) = executor(1) else { return };
+    let code = format!(
+        "import os\n\
+         pids = [p for p in os.listdir('/proc') if p.isdigit()]\n\
+         output = [pids == [str(os.getpid())], os.path.exists(f'/proc/{{os.getppid()}}'), os.path.exists('/proc/{}')]",
+        std::process::id()
+    );
+    let r = ex.run(req(&code, 10)).await.unwrap();
+    assert_eq!(r.output, Some(serde_json::json!([true, false, false])));
+}
+
+/// The entries of /proc that describe the machine or let it be driven are
+/// covered in the child's fresh /proc, and pandas, numpy and scipy still work
+/// there.
+#[tokio::test]
+async fn the_kernel_entries_of_proc_are_covered() {
+    let Some(ex) = executor(1) else { return };
+    let code = "import os, stat\n\
+         import numpy as np, pandas as pd, scipy.stats\n\
+         def shown(p):\n\
+         \x20   if not os.path.lexists(p):\n\
+         \x20       return False\n\
+         \x20   if os.path.isdir(p):\n\
+         \x20       return len(os.listdir(p)) > 0\n\
+         \x20   return not stat.S_ISCHR(os.stat(p).st_mode)\n\
+         names = ['acpi', 'asound', 'bus', 'fs', 'irq', 'kcore', 'keys', 'latency_stats', 'sched_debug', 'scsi', 'sys', 'sysrq-trigger', 'timer_list', 'timer_stats']\n\
+         frame = pd.DataFrame({'k': [1, 1, 2], 'v': np.array([1.0, 2.0, 3.0])})\n\
+         output = [[n for n in names if shown('/proc/' + n)], frame.groupby('k')['v'].sum().tolist(), float(scipy.stats.norm.cdf(0))]";
+    let r = ex.run(req(code, 20)).await.unwrap();
+    assert_eq!(r.output, Some(serde_json::json!([[], [3.0, 3.0], 0.5])));
 }

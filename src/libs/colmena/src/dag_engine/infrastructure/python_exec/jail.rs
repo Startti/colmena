@@ -15,9 +15,32 @@ use std::ptr;
 /// The call's connection inside the jail. Every other descriptor above the
 /// standard three is closed, and those three point at `/dev/null`.
 pub const CHANNEL_FD: RawFd = 3;
-/// Host directories every child sees as empty and read-only.
+/// Paths every child finds covered: host directories, and the entries of
+/// its fresh `/proc` that describe the machine or let it be driven, which a
+/// container runtime usually masks in the host's own `/proc`.
 pub const DEFAULT_HIDDEN: &[&str] = &[
-    "/app", "/root", "/home", "/run", "/var/tmp", "/dev/shm", "/srv", "/mnt",
+    "/app",
+    "/root",
+    "/home",
+    "/run",
+    "/var/tmp",
+    "/dev/shm",
+    "/srv",
+    "/mnt",
+    "/proc/acpi",
+    "/proc/asound",
+    "/proc/bus",
+    "/proc/fs",
+    "/proc/irq",
+    "/proc/kcore",
+    "/proc/keys",
+    "/proc/latency_stats",
+    "/proc/sched_debug",
+    "/proc/scsi",
+    "/proc/sys",
+    "/proc/sysrq-trigger",
+    "/proc/timer_list",
+    "/proc/timer_stats",
 ];
 const MIB: u64 = 1024 * 1024;
 const NOFILE: u64 = 256;
@@ -29,7 +52,7 @@ pub struct JailSpec {
     pub uid_base: u32,
     /// Size of each child's private `/tmp`, and the largest file it may write.
     pub tmp_mb: u64,
-    /// Directories hidden on top of [`DEFAULT_HIDDEN`].
+    /// Absolute paths hidden on top of [`DEFAULT_HIDDEN`], files included.
     pub hide_paths: Vec<PathBuf>,
 }
 
@@ -105,25 +128,77 @@ fn vm_size_bytes() -> io::Result<u64> {
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "VmSize not found"))
 }
 
+/// Fails on any entry it cannot read: a descriptor left unlisted would stay open.
 fn close_fds_above(keep: RawFd) -> io::Result<()> {
-    let fds: Vec<RawFd> = std::fs::read_dir("/proc/self/fd")?
-        .filter_map(|e| e.ok()?.file_name().to_str()?.parse().ok())
-        .filter(|&fd| fd > keep)
-        .collect();
+    let mut fds = Vec::new();
+    for entry in std::fs::read_dir("/proc/self/fd")? {
+        let name = entry?.file_name();
+        let fd: RawFd = name
+            .to_str()
+            .and_then(|n| n.parse().ok())
+            .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))?;
+        if fd > keep {
+            fds.push(fd);
+        }
+    }
     for fd in fds {
         unsafe { libc::close(fd) };
     }
     Ok(())
 }
 
+/// Covers `path` so that nothing of it shows: an empty read-only tmpfs over a
+/// directory, the null device, which cannot be opened there, over anything
+/// else. A path that does not exist is left alone.
+fn hide(path: &Path) -> io::Result<()> {
+    use io::ErrorKind::{NotADirectory, NotFound};
+    let meta = match std::fs::metadata(path) {
+        Ok(meta) => meta,
+        Err(e) if matches!(e.kind(), NotFound | NotADirectory) => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    let flags = libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC | libc::MS_RDONLY;
+    if meta.is_dir() {
+        return mount(
+            Some("tmpfs"),
+            path,
+            Some("tmpfs"),
+            flags,
+            Some("size=16k,mode=0555"),
+        );
+    }
+    // A bind mount takes its flags from a remount.
+    mount(Some("/dev/null"), path, None, libc::MS_BIND, None)?;
+    mount(
+        None,
+        path,
+        None,
+        libc::MS_REMOUNT | libc::MS_BIND | flags,
+        None,
+    )
+}
+
+/// The uid and gid of `slot`: `u32::MAX`, which [`enter`] refuses, when the
+/// sum does not fit.
 pub fn uid_for(spec: &JailSpec, slot: u32) -> u32 {
     spec.uid_base.saturating_add(slot)
+}
+
+/// The id `slot` runs as, refused when it is 0, which is root, or
+/// `u32::MAX`, which `setresuid` reads as "leave this id unchanged".
+fn slot_id(spec: &JailSpec, slot: u32) -> io::Result<u32> {
+    match uid_for(spec, slot) {
+        0 | u32::MAX => Err(io::Error::from(io::ErrorKind::InvalidInput)),
+        id => Ok(id),
+    }
 }
 
 /// Isolates the calling process for one call and returns its connection, now
 /// at [`CHANNEL_FD`]. Only for a single-threaded process that exits after the
 /// call: nothing here can be undone.
 pub fn enter(spec: &JailSpec, hdr: &CallHeader, conn: UnixStream) -> Result<UnixStream, JailError> {
+    // First, before anything in the process changes.
+    let id = slot_id(spec, hdr.slot).map_err(at("identity"))?;
     let template = unsafe { libc::getppid() };
     let template_vm = vm_size_bytes().map_err(at("limits"))?;
 
@@ -152,8 +227,8 @@ pub fn enter(spec: &JailSpec, hdr: &CallHeader, conn: UnixStream) -> Result<Unix
     })
     .map_err(at("namespaces"))?;
 
-    // 3. Mounts: private root, a fresh /tmp as the working directory, and
-    //    empty read-only tmpfs over host directories.
+    // 3. Mounts: private root, a fresh /tmp as the working directory, a /proc
+    //    that lists only this uid's processes, and host paths covered.
     mount(
         None,
         Path::new("/"),
@@ -170,24 +245,30 @@ pub fn enter(spec: &JailSpec, hdr: &CallHeader, conn: UnixStream) -> Result<Unix
         Some(&format!("size={}m,mode=1777", spec.tmp_mb)),
     )
     .map_err(at("mounts"))?;
+    // What kernels do with `hidepid=invisible` differs. From 5.8 each proc
+    // mount keeps its own options and this one applies it. Before 4.8, and
+    // from 5.1 to 5.7, the value is not understood and the mount fails. From
+    // 4.8 to 5.0 the mount reuses the proc superblock the PID namespace
+    // already has without reading any option, so it succeeds and every
+    // process stays listed; the check after the uid change fails the jail.
+    mount(
+        Some("proc"),
+        Path::new("/proc"),
+        Some("proc"),
+        libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC,
+        Some("hidepid=invisible"),
+    )
+    .map_err(at("mounts"))?;
     let hidden = DEFAULT_HIDDEN
         .iter()
         .map(PathBuf::from)
         .chain(spec.hide_paths.iter().cloned());
-    for p in hidden.filter(|p| p.is_dir() && p != Path::new("/tmp")) {
-        mount(
-            Some("tmpfs"),
-            &p,
-            Some("tmpfs"),
-            libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC | libc::MS_RDONLY,
-            Some("size=16k,mode=0555"),
-        )
-        .map_err(at("mounts"))?;
+    for p in hidden.filter(|p| p != Path::new("/tmp")) {
+        hide(&p).map_err(at("mounts"))?;
     }
     std::env::set_current_dir("/tmp").map_err(at("mounts"))?;
 
     // 4. Identity: one unprivileged uid/gid per slot.
-    let id = uid_for(spec, hdr.slot);
     check(unsafe { libc::setgroups(0, ptr::null()) }).map_err(at("identity"))?;
     check(unsafe { libc::setresgid(id, id, id) }).map_err(at("identity"))?;
     check(unsafe { libc::setresuid(id, id, id) }).map_err(at("identity"))?;
@@ -198,6 +279,12 @@ pub fn enter(spec: &JailSpec, hdr: &CallHeader, conn: UnixStream) -> Result<Unix
     prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL as libc::c_ulong).map_err(at("privileges"))?;
     if unsafe { libc::getppid() } != template {
         return Err(at("privileges")(io::Error::other("the template exited")));
+    }
+    // Only now, without root's view, does /proc show what this uid sees.
+    match Path::new(&format!("/proc/{template}")).try_exists() {
+        Ok(false) => {}
+        Ok(true) => return Err(at("mounts")(io::Error::other("the template is listed"))),
+        Err(e) => return Err(at("mounts")(e)),
     }
 
     // 6. Limits. Memory is a budget on top of what the template already maps.
@@ -216,4 +303,26 @@ pub fn enter(spec: &JailSpec, hdr: &CallHeader, conn: UnixStream) -> Result<Unix
     set_limit(libc::RLIMIT_CORE, 0, 0).map_err(at("limits"))?;
 
     Ok(unsafe { UnixStream::from_raw_fd(CHANNEL_FD) })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn root_and_an_overflowing_slot_uid_are_refused() {
+        let spec = |uid_base| JailSpec {
+            uid_base,
+            tmp_mb: 1,
+            hide_paths: vec![],
+        };
+        assert_eq!(uid_for(&spec(u32::MAX - 1), 2), u32::MAX);
+        for (uid_base, slot) in [(0, 0), (u32::MAX - 1, 1), (u32::MAX - 1, 2)] {
+            let id = slot_id(&spec(uid_base), slot);
+            assert!(id.is_err(), "{uid_base} + {slot}: {id:?}");
+        }
+        assert_eq!(slot_id(&spec(0), 1).unwrap(), 1);
+        assert_eq!(slot_id(&spec(20000), 3).unwrap(), 20003);
+        assert_eq!(slot_id(&spec(u32::MAX - 2), 1).unwrap(), u32::MAX - 1);
+    }
 }

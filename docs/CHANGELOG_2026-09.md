@@ -6722,7 +6722,28 @@ sin salida; descriptores; los tests de antes, dentro de la jaula. Sin la variabl
 Guía: [53_python_executors.md](developer_guide/53_python_executors.md#process-isolation-linux).
 **ADP.** Sin cambios. **Estado.** done.
 
-## 162. Mensajes a mitad de corrida: el buzón (`SteeringInbox`)
+## 162. Python: la jaula falla cerrada en rutas ocultas, uid y descriptores; `/proc` privado
+
+**Qué cambia.** Una ruta de `COLMENA_PYTHON_EXECUTOR_HIDE_PATHS` relativa es un error de configuración; en el hijo, una
+ruta que no existe se saltea, un directorio se tapa con un `tmpfs` vacío de solo lectura, cualquier otra cosa que
+exista con un `/dev/null` `nodev` de solo lectura, y lo demás falla la jaula. El uid del slot se valida primero (0 y
+`u32::MAX`, rechazados). Un error al cerrar descriptores falla la jaula. El hijo monta un `/proc` propio con
+`hidepid=invisible`, tapa las entradas que un runtime de contenedores suele enmascarar y, después de cambiar de uid,
+falla si todavía ve el proceso de la plantilla (kernels 4.8-5.0 ignoran la opción).
+**Tests.** Contenedor root: un archivo oculto no se lee, el hijo no ve el pid de la plantilla, ruta relativa rechazada;
+`slot_id` probado como función pura. **ADP.** Sin cambios. **Estado.** done.
+
+## 163. Python: `cryptography` permitido en modo `restricted` para firmas asimétricas
+
+**Qué cambia.** `cryptography` entra a la lista de imports de `restricted`, junto a `hmac`, `hashlib`, `base64` y
+`secrets`. Sirve para las APIs que piden una firma RS256/ES256 con un par de llaves (Snowflake `KEYPAIR_JWT`, cuentas de
+servicio de GCP, GitHub Apps). `jwt` (PyJWT) sigue bloqueado porque `PyJWKClient` abre red por `urllib`. La plantilla
+caliente no cambia: el módulo se importa en la llamada.
+**Tests.** El validador acepta `from cryptography.hazmat.primitives import …` y rechaza `import jwt` y
+`from jwt import PyJWKClient`. Guía: [26_python_node.md](developer_guide/26_python_node.md).
+**ADP.** El worker tiene que instalar `python3-cryptography`. **Estado.** done.
+
+## 164. Mensajes a mitad de corrida: el buzón (`SteeringInbox`)
 
 **Qué cambia.** Nuevo `llm/domain/steering.rs`: `SteeringMessage { id, text }`, el trait
 `SteeringInbox` (`take`, `take_or_close` en una sola operación, `close`; hacia el motor no
