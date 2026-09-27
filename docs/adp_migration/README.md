@@ -6,6 +6,12 @@ ve ADP antes y después, qué tiene que hacer ADP, y qué se rompe si no hace na
 
 Los cambios que quedan dentro del motor no llevan nota aquí.
 
+## 2026-09-27 — leer un mensaje a mitad de corrida
+
+| # | Nota | Acción de ADP | Qué se rompe si se ignora |
+|---|------|---------------|---------------------------|
+| 1 | [Leer un mensaje a mitad de corrida](2026-09-27-read-while-working.md) | Subir el pin a `v0.21.5`; con `steering: true`, el worker arma un `SteeringInbox` en Redis, lo pasa con `RunControl::with_steering` y lo cierra al terminar el job; el árbol lee `user-message-consumed` | Nada: sin buzón todo corre como hoy |
+
 ## 2026-09-26 — cancelar una llamada sola
 
 | # | Nota | Acción de ADP | Qué se rompe si se ignora |

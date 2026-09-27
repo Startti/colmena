@@ -1535,6 +1535,10 @@ después reenvían los que quedaron en su canal, antes de `Cancelled` o del erro
 solo vacía el canal con `try_recv`, no espera nada. Queda la ventana de un Stop entre
 guardar el mensaje y anunciarlo, que no tiene frame que reenviar.
 
+E2E: `src/libs/colmena/tests/read_while_working.rs` (sobre
+`tests/graphs/agents/cancel_one_child.json`). Qué tiene que hacer quien la usa:
+[nota de migración](../adp_migration/2026-09-27-read-while-working.md).
+
 ## 📚 Más Información
 
 - **[20_orchestrator_architecture.md](./20_orchestrator_architecture.md)** — Guía completa del orchestrator: HITL, bridge tasks, fases, critic feedback loop y replanning dinámico con diagramas Mermaid
