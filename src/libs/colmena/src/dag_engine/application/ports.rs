@@ -33,7 +33,11 @@ pub trait NodeRegistryPort: Send + Sync {
 #[async_trait::async_trait]
 #[allow(clippy::too_many_arguments)]
 pub trait SubGraphExecutorPort: Send + Sync {
-    /// Ejecuta un subgrafo desde cero.
+    /// Ejecuta un subgrafo desde cero. `cancel` es el token de la llamada que
+    /// corre al hijo (un `subgraph` usado como tool): si se dispara, la corrida
+    /// del hijo guarda su fila `CANCELLED`, cierra su nodo en curso y devuelve
+    /// `DagError::Cancelled`. Con `None` el hijo se corta solo cuando se suelta
+    /// la corrida de la raíz.
     async fn run_subgraph(
         &self,
         session_id: &str,
@@ -43,6 +47,7 @@ pub trait SubGraphExecutorPort: Send + Sync {
         parent_session_id: Option<String>,
         agent_session_id: Option<String>,
         path_prefix: Option<String>,
+        cancel: Option<tokio_util::sync::CancellationToken>,
     ) -> Result<Value, DagError>;
 
     /// Reanuda un subgrafo suspendido tras un Human-in-the-Loop con el grafo

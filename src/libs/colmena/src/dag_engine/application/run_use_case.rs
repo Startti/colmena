@@ -1822,6 +1822,7 @@ impl SubGraphExecutorPort for DagRunUseCase {
         parent_session_id: Option<String>,
         agent_session_id: Option<String>,
         path_prefix: Option<String>,
+        cancel: Option<tokio_util::sync::CancellationToken>,
     ) -> Result<Value, DagError> {
         let graph: Graph = serde_json::from_value(graph_json)
             .map_err(|e| DagError::NodeExecution(format!("Invalid sub-graph JSON: {}", e)))?;
@@ -1864,9 +1865,13 @@ impl SubGraphExecutorPort for DagRunUseCase {
                     true,
                     path_prefix,
                     agent_session_id,
-                    // Subgraph children are interrupted via drop-propagation from the
-                    // root, then cleaned up by cancel_running_descendants. No token here.
-                    None,
+                    // The token of the call that runs this child when it runs
+                    // as a tool: cancelling that call stops this run, which
+                    // closes its row CANCELLED and fails with
+                    // `DagError::Cancelled`. Without one the child stops only
+                    // when the root's run is dropped (then
+                    // `cancel_running_descendants` closes its row).
+                    cancel,
                 ),
         );
 
@@ -2980,6 +2985,7 @@ mod resume_graph_tests {
                 json!({}),
                 None,
                 Some("root_1".into()),
+                None,
                 None,
                 None,
             )
