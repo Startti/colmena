@@ -6566,3 +6566,22 @@ no toma el cancel de otra llamada; el tope; el Stop del turno dispara todos los 
 la llamada; un trabajo no adoptado se suelta y uno adoptado se espera.
 
 **ADP.** Sin cambios. **Estado.** done.
+
+## 153. Una llamada a una tool se puede cancelar sola: el bucle
+
+**Qué cambia.** `run_call` usa el registro de §152 cuando la corrida tiene uno en el alcance: una
+llamada que la persona canceló antes de arrancar no corre, y una cancelada mientras corre se contesta
+con `agent_loop/cancelled_by_person.md` («La persona canceló este agente antes de que terminara.»,
+`error: "CANCELLED_BY_PERSON"`). Las demás llamadas del grupo siguen; en una cadena de memoria corre la
+siguiente. Solo se contesta como cancelada una llamada cuyo token se disparó y cuyo resultado no es un
+éxito: una falla o un error sin cancel conservan el suyo, y un trabajo adoptado que terminó bien
+conserva su resultado. El Stop del turno no contesta ninguna llamada. Nadie pone todavía el registro
+en el alcance de una corrida del motor: eso llega con el hijo usado como tool.
+
+**Tests.** `agent_service.rs`: en un grupo la cancelada se contesta y la hermana termina; una en cola
+detrás del límite no corre; cadena de memoria; terminada o en pausa sin cambio; cada celda de cómo se
+contesta una llamada bajo registro; el Stop del turno no contesta ninguna, aunque el trabajo se corte
+en el mismo poll; un future soltado a mitad deja la llamada terminada en el registro. Regresión E2E:
+`cancellation_integration`, `parallel_tool_groups`, `parallel_tool_suspend`.
+
+**ADP.** Sin cambios de API ni de SSE. **Estado.** done.
