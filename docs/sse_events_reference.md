@@ -267,9 +267,9 @@ era un `subgraph` usado como tool, antes llegan los cierres de su nodo en curso 
 frontera, con `status: "error"` y un `errorText` que empieza con `CANCELLED_BY_PERSON`: quien
 arma el árbol los lee como cortados por la cancelación, no como fallas.
 
-Frames reales de una corrida con Postgres y el modelo guionado, recortados. El modelo pidió
-`Run` para alfa y beta en un mensaje; se cortó la llamada de alfa apenas arrancó su hijo, y
-beta terminó después:
+Frames reales del E2E `src/libs/colmena/tests/cancel_one_child.rs`, recortados. El modelo
+pidió `Run` para alfa y beta en un mensaje; el test cortó la llamada de alfa apenas arrancó
+su hijo, y beta terminó después:
 
 ```json
 { "type": "subgraph-node-end",     "node_id": "hijo",  "node_type": "llm_call", "output": null, "status": "error", "errorText": "CANCELLED_BY_PERSON: la persona canceló esta corrida antes de que terminara", "level": 2, "path": "agent>Run#0>hijo" }
