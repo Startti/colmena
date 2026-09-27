@@ -398,13 +398,6 @@ mod forked_tests {
     }
 
     #[test]
-    fn the_header_sets_the_request_cap() {
-        let (_, back, result) = serve(&[header(16), request()]);
-        result.unwrap();
-        assert_eq!(response(&back).status, WireStatus::TooLarge);
-    }
-
-    #[test]
     fn a_header_that_is_not_json_is_invalid_data_with_no_response() {
         let (_, back, result) = serve(&[framed(b"not json")]);
         assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidData);

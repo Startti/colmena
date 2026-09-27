@@ -24,9 +24,6 @@ pub const TEMPLATE_ENV: &[(&str, &str)] = &[
 
 const WARM_IMPORTS: &CStr = c"import pandas, numpy, scipy.stats, json, math, re, datetime, collections, itertools, functools, string, decimal, statistics, hmac, hashlib, base64, secrets, io, csv, ast\n";
 
-/// Pause after a failed `poll`/`accept`, so a lasting failure does not spin.
-const ERROR_PAUSE: Duration = Duration::from_millis(200);
-
 pub struct ZygoteArgs {
     pub socket: PathBuf,
     pub jail: JailSpec,
@@ -198,7 +195,8 @@ pub fn run(args: ZygoteArgs) -> i32 {
             Ok(None) => {}
             Err(e) => {
                 log(json!({"event": "accept_failed", "errno": e.raw_os_error()}));
-                std::thread::sleep(ERROR_PAUSE);
+                // Pause so a lasting `poll`/`accept` failure does not spin.
+                std::thread::sleep(Duration::from_millis(200));
             }
         }
     }
@@ -214,6 +212,7 @@ mod tests {
     fn the_check_counts_the_threads_of_the_process() {
         match unsafe { libc::fork() } {
             0 => {
+                unsafe { libc::alarm(10) }; // a hang after fork fails instead of blocking waitpid
                 let ok = std::panic::catch_unwind(|| {
                     let one = check_single_threaded().is_ok();
                     let (_keep, wait) = std::sync::mpsc::channel::<()>();
