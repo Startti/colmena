@@ -1501,7 +1501,8 @@ impl AgentService {
                             | LlmStreamPart::LlmToolCallStart(_)
                             | LlmStreamPart::LlmToolCallFinish(_)
                             | LlmStreamPart::LlmMessageStart
-                            | LlmStreamPart::LlmMessageFinish(_) => {}
+                            | LlmStreamPart::LlmMessageFinish(_)
+                            | LlmStreamPart::UserMessageConsumed { .. } => {}
                         }
                     }
                     Err(e) => return Err(e),

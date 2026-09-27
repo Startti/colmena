@@ -14,6 +14,7 @@ pub mod mcp;
 pub mod memory;
 pub mod message_summarizer;
 pub mod signed_url_fetcher;
+pub mod steering;
 pub(crate) mod text_bounds;
 pub mod tool_executor;
 pub mod tools;

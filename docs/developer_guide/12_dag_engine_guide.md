@@ -1457,6 +1457,24 @@ control.cancel_token().cancel(); // el Stop de siempre
   suelta así la conexión del pool que esas escrituras necesitan
   ([CHANGELOG 2026-09 §160](../CHANGELOG_2026-09.md)).
 
+### Leer un mensaje a mitad de corrida (`SteeringInbox`)
+
+El buzón donde espera lo que la persona escribe mientras un agente trabaja, para que el
+agente lo lea entre pasos (el bucle y el motor lo conectan en los cambios siguientes de esta
+serie). Los mensajes esperan en un `SteeringInbox`
+(`src/libs/colmena/src/llm/domain/steering.rs`), cada uno con el `id` que le dio el
+cliente y su texto:
+
+- `take()`: todo lo que espera, en orden. El buzón sigue abierto.
+- `take_or_close()`: en una sola operación, lo que espera o, si no hay nada, cierra el
+  buzón. Lo que llega después se rechaza y el cliente lo manda como turno.
+- `close()`: lo cierra y descarta lo que quedaba. Cerrarlo dos veces no hace nada.
+
+Hacia el motor no falla: una implementación que no llega a su almacén no devuelve nada y el
+bucle sigue sin leer. `InMemorySteeringInbox` es el buzón en memoria (tests, un solo
+proceso). Un id viaja en un frame solo si es de `[A-Za-z0-9_.-]{1,256}` y no son solo puntos
+(`is_steering_id`, igual que `valid_id` del worker de ADP).
+
 ## 📚 Más Información
 
 - **[20_orchestrator_architecture.md](./20_orchestrator_architecture.md)** — Guía completa del orchestrator: HITL, bridge tasks, fases, critic feedback loop y replanning dinámico con diagramas Mermaid
