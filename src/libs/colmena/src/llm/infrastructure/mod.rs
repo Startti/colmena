@@ -17,6 +17,7 @@ pub mod persistence;
 pub mod scripted_adapter;
 mod tool_args;
 pub mod tts_provider_factory;
+pub mod typesafe_jev_adapter;
 
 pub use anthropic_adapter::AnthropicAdapter;
 pub use cheap_models::cheap_model_for;
@@ -32,3 +33,4 @@ pub use persistence::{
 };
 pub use scripted_adapter::{ScriptedAdapter, ScriptedResponse};
 pub use tts_provider_factory::build_tts_repository;
+pub use typesafe_jev_adapter::TypesafeJevAdapter;
