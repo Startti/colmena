@@ -497,6 +497,13 @@ impl DagRunUseCase {
                         let _ = repo.cancel_running_descendants(&session_id).await;
                         let _ = repo.fail_suspended_descendants(&session_id).await;
                     }
+                    // A nested run is cancelled through the call that runs it
+                    // (a `subgraph` used as a tool): its caller needs an error.
+                    // A `Cancelled` event here is dropped by the parent's
+                    // mapper and leaves a `null` that reads as a success.
+                    if self.nested_run {
+                        Err(DagError::Cancelled)?;
+                    }
                     yield DagExecutionEvent::Cancelled {
                         reason: None,
                         partial_output: serde_json::to_value(&all_outputs).unwrap_or(Value::Null),
@@ -790,6 +797,7 @@ impl DagRunUseCase {
                     let mut last_beat = last_forwarded;
                     let mut last_tool: Option<String> = None;
                     let mut idle_abort_msg: Option<String> = None;
+                    let mut nested_cancelled = false;
 
                     let mut output_opt = None;
                     loop {
@@ -833,6 +841,12 @@ impl DagRunUseCase {
                                     }
                                     let _ = repo.cancel_running_descendants(&session_id).await;
                                     let _ = repo.fail_suspended_descendants(&session_id).await;
+                                }
+                                // Nested: close the node and raise after the
+                                // loop, like the idle abort below.
+                                if self.nested_run {
+                                    nested_cancelled = true;
+                                    break;
                                 }
                                 yield DagExecutionEvent::Cancelled {
                                     reason: None,
@@ -1028,6 +1042,17 @@ impl DagRunUseCase {
                                 }
                             }
                         }
+                    }
+
+                    if nested_cancelled {
+                        // The node in flight was dropped: close it with the
+                        // cancel's text, so the parent's tree shows it cut and
+                        // not running, then fail the child run.
+                        let error = Some(NodeEndError {
+                            message: Some(DagError::Cancelled.to_string()),
+                        });
+                        yield finish_event(&node_id, &node_config.node_type, Value::Null, error);
+                        Err(DagError::Cancelled)?;
                     }
 
                     if let Some(msg) = idle_abort_msg {
@@ -3550,6 +3575,108 @@ mod stored_run_status_tests {
             repo.0.lock().unwrap()["child_1"].status,
             DagRunStatus::Failed
         );
+    }
+
+    /// One turn of a NESTED run (a child's use case). Returns every event and
+    /// the stream's error, if any. A turn that hangs fails the test instead.
+    async fn nested_turn(
+        uc: DagRunUseCase,
+        stop: Stop,
+    ) -> (Vec<DagExecutionEvent>, Option<String>) {
+        let token = CancellationToken::new();
+        if matches!(stop, Stop::BeforeStart) {
+            token.cancel();
+        }
+        let stream = uc.as_nested_run().execute_stream(
+            chat_graph("old prompt"),
+            Some(RUN.to_string()),
+            None,
+            false,
+            None,
+            Some("chat_1".to_string()),
+            Some(token.clone()),
+        );
+        let drain = async {
+            tokio::pin!(stream);
+            let mut events = Vec::new();
+            let mut err = None;
+            while let Some(item) = stream.next().await {
+                match item {
+                    Ok(ev) => {
+                        let at_llm = matches!(&ev, DagExecutionEvent::LlmToken { node_id, .. } if node_id == "llm");
+                        if at_llm && matches!(stop, Stop::AtLlm) {
+                            token.cancel();
+                        }
+                        events.push(ev);
+                    }
+                    Err(e) => {
+                        err = Some(e.to_string());
+                        break;
+                    }
+                }
+            }
+            (events, err)
+        };
+        tokio::time::timeout(Duration::from_secs(10), drain)
+            .await
+            .expect("the turn hung")
+    }
+
+    /// A child run cancelled through its call, mid-node: its row is
+    /// CANCELLED, its own descendants are closed, the node in flight is closed
+    /// with the cancel's text, and the stream ends in `DagError::Cancelled` —
+    /// never in a `Cancelled` event, which the parent's mapper drops, leaving
+    /// a `null` that reads as success.
+    #[tokio::test]
+    async fn a_nested_run_cancelled_mid_node_closes_its_node_and_ends_in_an_error() {
+        let llm = Llm::new(First::Hang);
+        let repo = Arc::new(MemRepo::default());
+        repo.0
+            .lock()
+            .unwrap()
+            .insert("grandchild".into(), suspended_child_row("grandchild", RUN));
+        let uc = use_case(&llm, &repo, LivenessSettings::disabled());
+        let (events, err) = nested_turn(uc, Stop::AtLlm).await;
+        assert_eq!(err, Some(DagError::Cancelled.to_string()));
+        assert!(err
+            .as_deref()
+            .is_some_and(|e| e.starts_with(crate::llm::domain::call_cancels::CALL_CANCELLED_CODE)));
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, DagExecutionEvent::Cancelled { .. })),
+            "{events:?}"
+        );
+        let closed = events.iter().find_map(|e| match e {
+            DagExecutionEvent::NodeFinish {
+                node_id,
+                error: Some(error),
+                ..
+            } if node_id == "llm" => error.message.clone(),
+            _ => None,
+        });
+        assert_eq!(closed, Some(DagError::Cancelled.to_string()), "{events:?}");
+        assert_stopped_mid_llm(&repo.row(), DagRunStatus::Cancelled);
+        assert_eq!(
+            repo.0.lock().unwrap()["grandchild"].status,
+            DagRunStatus::Failed,
+            "its own descendants are closed, as the root's are"
+        );
+    }
+
+    /// Cancelled before its first node: nothing to close, same error, same row.
+    #[tokio::test]
+    async fn a_nested_run_cancelled_between_nodes_ends_in_an_error() {
+        let llm = Llm::new(First::Answer);
+        let repo = Arc::new(MemRepo::default());
+        let uc = use_case(&llm, &repo, LivenessSettings::disabled());
+        let (events, err) = nested_turn(uc, Stop::BeforeStart).await;
+        assert_eq!(err, Some(DagError::Cancelled.to_string()));
+        assert!(!events
+            .iter()
+            .any(|e| matches!(e, DagExecutionEvent::Cancelled { .. })));
+        assert_eq!(repo.row().status, DagRunStatus::Cancelled);
+        assert!(llm.calls().is_empty());
     }
 }
 
