@@ -86,6 +86,28 @@ fn parse_in<T: std::str::FromStr + PartialOrd>(
     }
 }
 
+/// Absolute paths separated by `:`. A relative one would be resolved against
+/// whatever directory the executor started in, not the path meant.
+fn hide_paths(get: &impl Fn(&str) -> Option<String>) -> Result<Vec<PathBuf>, ExecutorConfigError> {
+    let Some(v) = get(ENV_HIDE_PATHS) else {
+        return Ok(Vec::new());
+    };
+    let paths: Vec<PathBuf> = v
+        .split(':')
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(PathBuf::from)
+        .collect();
+    if paths.iter().all(|p| p.is_absolute()) {
+        return Ok(paths);
+    }
+    Err(invalid(
+        ENV_HIDE_PATHS,
+        &v,
+        "absolute paths separated by ':'",
+    ))
+}
+
 impl SubprocessConfig {
     pub fn from_lookup(get: &impl Fn(&str) -> Option<String>) -> Result<Self, ExecutorConfigError> {
         let bin = match get(ENV_BIN)
@@ -107,15 +129,7 @@ impl SubprocessConfig {
             memory_mb: parse_in(get, ENV_MEMORY_MB, 2048, 256, 65536)?,
             uid_base: 20000,
             tmp_mb: 64,
-            hide_paths: get(ENV_HIDE_PATHS)
-                .map(|v| {
-                    v.split(':')
-                        .map(str::trim)
-                        .filter(|p| !p.is_empty())
-                        .map(PathBuf::from)
-                        .collect()
-                })
-                .unwrap_or_default(),
+            hide_paths: hide_paths(get)?,
             max_request_bytes: parse_in(get, ENV_MAX_REQUEST_MB, 256usize, 1, 4095)? * MIB,
             max_response_bytes: parse_in(get, ENV_MAX_RESPONSE_MB, 256usize, 1, 4095)? * MIB,
         })
@@ -237,6 +251,12 @@ mod tests {
             c.hide_paths,
             vec![PathBuf::from("/data"), PathBuf::from("/x")]
         );
+    }
+
+    #[test]
+    fn a_relative_hidden_path_is_an_error() {
+        let e = cfg(&[(ENV_HIDE_PATHS, "/data:data")]).unwrap_err();
+        assert!(e.0.contains(ENV_HIDE_PATHS), "{e}");
     }
 
     #[test]
