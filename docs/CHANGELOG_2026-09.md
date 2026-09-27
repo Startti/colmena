@@ -6579,3 +6579,18 @@ caliente no cambia: el módulo se importa en la llamada.
 `from jwt import PyJWKClient`. Guía: [26_python_node.md](developer_guide/26_python_node.md).
 **ADP.** El worker tiene que instalar `python3-cryptography`. **Estado.** done.
 
+## 164. Mensajes a mitad de corrida: el buzón (`SteeringInbox`)
+
+**Qué cambia.** Nuevo `llm/domain/steering.rs`: `SteeringMessage { id, text }`, el trait
+`SteeringInbox` (`take`, `take_or_close` en una sola operación, `close`; hacia el motor no
+falla) y `InMemorySteeringInbox`, el buzón en memoria. `is_steering_id` dice qué id puede
+viajar en un frame (`[A-Za-z0-9_.-]{1,256}`). `LlmStreamPart` gana
+`UserMessageConsumed { id }`, la parte que el bucle va a emitir al leer un mensaje. Nadie
+lee un buzón todavía: sin cambios de comportamiento.
+
+**Tests.** `steering.rs`: `take` entrega en orden y deja el buzón abierto; `take_or_close`
+entrega lo que espera o, sin nada, cierra, y lo que llega después se rechaza; `close`
+descarta lo que quedaba y cerrar dos veces no hace nada; `is_steering_id`.
+
+**ADP.** Sin cambios de API ni de SSE todavía.
+**Estado.** done.
