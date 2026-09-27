@@ -8,6 +8,8 @@ pub mod frame;
 pub mod inprocess;
 pub mod protocol;
 #[cfg(target_os = "linux")]
+pub mod subprocess;
+#[cfg(target_os = "linux")]
 pub mod zygote;
 
 use crate::dag_engine::domain::python_executor::{
