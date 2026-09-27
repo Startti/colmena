@@ -284,6 +284,31 @@ nada se cierra con `CANCELLED_BY_PERSON`.
 
 ---
 
+### Mensaje leído — `user-message-consumed`
+
+| Evento | Campos | Descripción |
+|--------|--------|-------------|
+| `user-message-consumed` | `id`, `node_id` | El agente de la raíz leyó, entre pasos, un mensaje que la persona escribió mientras trabajaba ([guía 12](developer_guide/12_dag_engine_guide.md#leer-un-mensaje-a-mitad-de-corrida-steeringinbox)) |
+
+Solo con `RunControl::with_steering`, y solo del nodo `llm_call` de la raíz. Va después de
+los resultados de las tools del paso en el que se leyó (un grupo en paralelo se espera
+entero) y antes de lo que el agente escribe después, que sigue con el mismo `id` de texto.
+Lleva el `id` que el cliente le dio al mensaje, no el texto. Nunca sale con prefijo
+`subgraph-`: un hijo no lee. Ni el frame ni el `id` (`[A-Za-z0-9_.-]{1,256}`) contienen
+`"type":"finish"` ni `"type":"error"`, las subcadenas por las que la API del worker corta el
+stream.
+
+```json
+{ "type": "tool-output-available", "toolCallId": "call_alfa", "output": { ... }, "level": 0, "path": "agent" }
+{ "type": "user-message-consumed", "id": "m1", "node_id": "agent", "level": 0, "path": "agent" }
+{ "type": "agent-turn", "phase": "start", "node_id": "agent", "level": 0, "path": "agent" }
+```
+
+Con un Stop, o con el vigía de inactividad, un mensaje que el agente ya guardó en su
+historia sale igual, antes de `cancelled` o del `error`.
+
+---
+
 ### Skill — herramienta `load_skill`
 
 Emitido cuando el LLM invoca la herramienta sintética `load_skill`.
@@ -815,6 +840,7 @@ Para reanudar, el cliente envía las respuestas con el mismo `session_id`. El pl
 | `tool-output-available` | top | `toolCallId`, `output` | `childScope`, `status` |
 | `skill-loaded` | top | `nodeId`, `toolCallId`, `skillName`, `source`, `sizeBytes` | `reference` |
 | `tool-described` | top | `nodeId`, `toolCallId`, `toolName` | — |
+| `user-message-consumed` | top | `id`, `node_id` | — |
 | `status` | top/sub | `stage`, `node_id`, `idleSecs` | — |
 | `agent-turn` | top/sub | `phase`, `node_id` | — |
 | `thinking-delta` | top | `node_id`, `node_type`, `delta` | — |
