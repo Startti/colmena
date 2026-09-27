@@ -3756,6 +3756,32 @@ mod stored_run_status_tests {
             );
         }
     }
+
+    /// The other side of that discriminant: a registry is in scope (as in
+    /// every real run) and only the CALL is cancelled. The nested run still
+    /// closes itself and raises; it does not wait for a root that is not
+    /// stopping.
+    #[tokio::test(start_paused = true)]
+    async fn a_call_cancel_under_a_registry_still_closes_the_nested_run() {
+        use crate::llm::domain::call_cancels::{in_registry, CallCancels};
+        for stop in [Stop::BeforeStart, Stop::AtLlm] {
+            let llm = Llm::new(First::Hang);
+            let repo = Arc::new(MemRepo::default());
+            let turn = CancellationToken::new();
+            let calls = Arc::new(CallCancels::new(turn.clone()));
+            let token = calls.begin("c1").expect("not cancelled");
+            let uc = use_case(&llm, &repo, LivenessSettings::disabled());
+            let run = nested_turn_on(uc, stop, token.clone(), &token);
+            let (events, end) = in_registry(Some(calls), run).await;
+            assert_eq!(
+                end,
+                Some(Some(DagError::Cancelled.to_string())),
+                "{events:?}"
+            );
+            assert_eq!(repo.row().status, DagRunStatus::Cancelled);
+            assert!(!turn.is_cancelled());
+        }
+    }
 }
 
 /// Graph mode: what a payload may do to an `http_request` node. Test-only env
