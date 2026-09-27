@@ -830,7 +830,7 @@ impl AgentService {
             // next one adds to `cumulative_content`. Each such round costs one
             // of `max_turns`; past them the loop ends in the rescue.
             if let Some(inbox) = steering {
-                if !response.tool_calls().is_some_and(|c| !c.is_empty()) {
+                if response.tool_calls().is_none_or(|c| c.is_empty()) {
                     let read = inbox.take_or_close().await;
                     if self
                         .read_steering(session_id, &on_token, &mut messages, &mut streak, read)
