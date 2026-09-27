@@ -110,7 +110,8 @@ impl SubprocessConfig {
             hide_paths: get(ENV_HIDE_PATHS)
                 .map(|v| {
                     v.split(':')
-                        .filter(|p| !p.trim().is_empty())
+                        .map(str::trim)
+                        .filter(|p| !p.is_empty())
                         .map(PathBuf::from)
                         .collect()
                 })
@@ -227,6 +228,15 @@ mod tests {
         );
         assert!(cfg(&[("COLMENA_PYTHON_EXECUTOR_SLOTS", "0")]).is_err());
         assert!(cfg(&[("COLMENA_PYTHON_EXECUTOR_MEMORY_MB", "100")]).is_err());
+    }
+
+    #[test]
+    fn hidden_paths_are_trimmed() {
+        let c = cfg(&[(ENV_HIDE_PATHS, " /data : /x ")]).unwrap().subprocess;
+        assert_eq!(
+            c.hide_paths,
+            vec![PathBuf::from("/data"), PathBuf::from("/x")]
+        );
     }
 
     #[test]

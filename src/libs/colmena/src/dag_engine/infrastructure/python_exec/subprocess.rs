@@ -1,7 +1,8 @@
-//! Runs each Python call in a fresh child forked from a warm template process
-//! (`python_executor zygote`). The template starts with an empty environment,
-//! from a thread this executor owns: the template is killed when the thread
-//! that started it exits, so that thread lives as long as the executor.
+//! Supervises the warm template process (`python_executor zygote`): starts it
+//! with the environment `TEMPLATE_ENV`, replaces it once it has exited and
+//! forwards its known stderr events. The template is started from a thread
+//! this executor owns, because it is killed when the thread that started it
+//! exits; that thread lives as long as the executor.
 
 use super::child::EXIT_NOT_READY;
 use super::config::{ExecutorConfigError, SubprocessConfig};
@@ -151,7 +152,9 @@ impl SubprocessExecutor {
         let (tx, rx) = tokio::sync::oneshot::channel();
         let (cfg, dropped) = (self.cfg.clone(), self.stderr_dropped.clone());
         let job: Job = Box::new(move || {
-            // A start nobody waits for any more is dropped here, which stops it.
+            // A start whose caller stopped waiting still runs until READY (or
+            // `READY_TIMEOUT`); a template it returns is then dropped here,
+            // which stops it.
             let _ = tx.send(start_template(&cfg, dropped));
         });
         self.spawner
