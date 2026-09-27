@@ -133,7 +133,6 @@ impl CallCancels {
     /// [`end`](Self::end)ed. A cancel never names `""` (see
     /// [`cancel`](Self::cancel)), so a call without an id is never cancelled
     /// by id either.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn begin(&self, tool_call_id: &str) -> Option<CancellationToken> {
         let mut state = self.state.lock().unwrap();
         if state.requested.remove(tool_call_id) {
@@ -156,7 +155,6 @@ impl CallCancels {
 
     /// A call ended, whatever its outcome: once every call that began with
     /// its id ended, a later cancel is a no-op.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn end(&self, tool_call_id: &str) {
         let mut state = self.state.lock().unwrap();
         if let Some(running) = state.running.get_mut(tool_call_id) {
@@ -170,7 +168,6 @@ impl CallCancels {
     }
 
     /// The whole turn was stopped (the composer's Stop).
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn turn_stopped(&self) -> bool {
         self.turn.is_cancelled()
     }
@@ -202,7 +199,6 @@ pub async fn in_registry<F: Future>(calls: Option<Arc<CallCancels>>, fut: F) -> 
 }
 
 /// The registry of the run this code runs in, if it has one.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn current_registry() -> Option<Arc<CallCancels>> {
     REGISTRY.try_with(Arc::clone).ok()
 }
@@ -227,7 +223,6 @@ pub fn adopt_current_call() -> Option<CancellationToken> {
 /// - the work adopted the token ([`adopt_current_call`]): waits for it to stop
 ///   by itself, and returns what it returned;
 /// - otherwise: drops the work and returns `None`.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) async fn run_as_call<F: Future>(
     calls: &CallCancels,
     token: &CancellationToken,
@@ -480,6 +475,27 @@ mod tests {
         let out =
             tokio::time::timeout(Duration::from_secs(1), run_as_call(&calls, &token, work)).await;
         assert!(finished.load(Ordering::SeqCst), "the work saw the Stop");
+        assert!(out.is_err(), "a turn Stop is not answered");
+    }
+
+    /// The person cancels the call, then stops the turn while the call's
+    /// adopted work is still winding down.
+    #[tokio::test(start_paused = true)]
+    async fn a_turn_stop_while_adopted_work_winds_down_is_not_answered() {
+        let (turn, calls) = registry();
+        let token = calls.begin("a").unwrap();
+        let work = async {
+            adopt_current_call()
+                .expect("runs as a call")
+                .cancelled()
+                .await;
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            "stopped by itself"
+        };
+        cancel_in(&token, 5);
+        cancel_in(&turn, 10);
+        let out =
+            tokio::time::timeout(Duration::from_secs(1), run_as_call(&calls, &token, work)).await;
         assert!(out.is_err(), "a turn Stop is not answered");
     }
 }
