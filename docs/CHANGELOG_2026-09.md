@@ -6664,3 +6664,31 @@ Guías: [12_dag_engine_guide.md](developer_guide/12_dag_engine_guide.md) y
 **ADP.** Rust: `RunControl::with_steering(Arc<dyn SteeringInbox>)` es nuevo. Sin cambios de
 SSE todavía.
 **Estado.** done.
+
+
+## 169. Mensajes a mitad de corrida: el frame `user-message-consumed`
+
+**Qué cambia.** La lectura de un mensaje (§165) viaja `LlmStreamPart` → `NodeEvent` →
+`DagExecutionEvent::UserMessageConsumed { node_id, id }` → el frame
+`{"type":"user-message-consumed","id","node_id"}`, aditivo y solo de nivel superior (solo
+lee el `llm_call` de la raíz, §167). `llm.rs` lo convierte siempre, también con
+`stream: false`, como el arranque de una llamada: con él se cierra el hueco de §167, donde
+un mensaje se leía sin frame. Después de soltar el nodo (§160), los brazos del Stop y del
+vigía de inactividad reenvían los `UserMessageConsumed` que quedaron en su canal, antes de
+`Cancelled` y del error: un mensaje que el agente ya guardó llega al cliente. El reenvío
+solo vacía el canal (`try_recv`) y no espera nada.
+
+**Tests.** `sse_mapper.rs`: la forma del frame y que no contiene `"type":"finish"` ni
+`"type":"error"`; uno envuelto no da frame. `events.rs`: `from_node_event` lo marca con su
+nodo, ida y vuelta de serde. `llm.rs`: una lectura llega al observador con `stream: false`.
+`run_use_case.rs`: un nodo que lee y termina lo emite antes de su `node-end`; uno que
+anuncia un mensaje y se detiene en el mismo instante lo reenvía antes de `Cancelled` (32
+corridas: `select!` sondea sus brazos desde uno al azar); con el tiempo en pausa, uno que
+anuncia justo cuando vence el vigía lo reenvía antes del error (32 corridas); el helper
+reenvía solo los mensajes leídos, en orden.
+Guía: [12_dag_engine_guide.md](developer_guide/12_dag_engine_guide.md); referencia:
+[sse_events_reference.md](sse_events_reference.md).
+
+**ADP.** El frame es nuevo y aditivo; el árbol de eventos de ADP ya lo lee (adp#890). La
+nota de migración llega con el E2E, en el cambio siguiente de esta serie.
+**Estado.** done.

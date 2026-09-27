@@ -198,6 +198,11 @@ pub enum DagExecutionEvent {
     /// the idle watchdog that guards against hung nodes.
     #[serde(rename = "progress")]
     Progress { node_id: String, idle_secs: u64 },
+    /// The root's agent read a message the person wrote while it worked: it
+    /// went into its history and its next request. `id` is the client's.
+    /// A child run never reads, so it is never wrapped.
+    #[serde(rename = "user_message_consumed")]
+    UserMessageConsumed { node_id: String, id: String },
     /// Wraps a DagExecutionEvent emitted from inside a subgraph execution.
     /// The frontend receives these with a "subgraph-" prefix on the event type.
     ///
@@ -375,6 +380,9 @@ impl DagExecutionEvent {
                 token,
             },
             NodeEvent::ReasoningEnd { id } => Self::ReasoningEnd { node_id: nid(), id },
+            NodeEvent::UserMessageConsumed { id } => {
+                Self::UserMessageConsumed { node_id: nid(), id }
+            }
             NodeEvent::SubgraphChildEvent(_) => return None,
         })
     }
@@ -436,6 +444,7 @@ impl DagExecutionEvent {
             | DagExecutionEvent::BatchProgress { node_id, .. }
             | DagExecutionEvent::BatchItemFinished { node_id, .. }
             | DagExecutionEvent::Progress { node_id, .. }
+            | DagExecutionEvent::UserMessageConsumed { node_id, .. }
             | DagExecutionEvent::NodeSkipped { node_id, .. } => Some(node_id),
             _ => None,
         }
@@ -797,6 +806,26 @@ mod tests {
                 cancelled: true,
                 ..
             }
+        ));
+    }
+
+    #[test]
+    fn from_node_event_stamps_a_read_message_with_its_node() {
+        let ev = DagExecutionEvent::from_node_event(
+            NodeEvent::UserMessageConsumed { id: "m1".into() },
+            "agent",
+        )
+        .unwrap();
+        assert!(
+            matches!(&ev, DagExecutionEvent::UserMessageConsumed { node_id, id } if node_id == "agent" && id == "m1"),
+            "{ev:?}"
+        );
+        assert_eq!(ev.node_id(), Some("agent"));
+        let back: DagExecutionEvent =
+            serde_json::from_value(serde_json::to_value(&ev).unwrap()).unwrap();
+        assert!(matches!(
+            back,
+            DagExecutionEvent::UserMessageConsumed { .. }
         ));
     }
 }

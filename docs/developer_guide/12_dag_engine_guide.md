@@ -1524,6 +1524,15 @@ adentro lo encuentra, tampoco una llamada pendiente que reanuda (esa corre fuera
 o con uno que vuelve a correr en un ciclo, el segundo lo encuentra cerrado. Está pensado
 para un grafo de un solo agente, como el de Auto.
 
+**El evento.** El `llm_call` convierte cada lectura en `NodeEvent::UserMessageConsumed`
+siempre, también con `stream: false` (como el arranque de una llamada), y sale como
+`DagExecutionEvent::UserMessageConsumed { node_id, id }` y como el frame
+`user-message-consumed` ([referencia de SSE](../sse_events_reference.md#mensaje-leído--user-message-consumed)).
+Un Stop o el vigía de inactividad sueltan el nodo primero (`execution_future.set(None)`) y
+después reenvían los que quedaron en su canal, antes de `Cancelled` o del error: el reenvío
+solo vacía el canal con `try_recv`, no espera nada. Queda la ventana de un Stop entre
+guardar el mensaje y anunciarlo, que no tiene frame que reenviar.
+
 ## 📚 Más Información
 
 - **[20_orchestrator_architecture.md](./20_orchestrator_architecture.md)** — Guía completa del orchestrator: HITL, bridge tasks, fases, critic feedback loop y replanning dinámico con diagramas Mermaid
