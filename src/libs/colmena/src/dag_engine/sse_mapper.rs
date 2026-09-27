@@ -491,6 +491,14 @@ impl SseMapper {
                 "key": key,
                 "status": status,
             })),
+            // The root's agent read a message the person wrote while it worked.
+            // The id, never the text: the client has it. Never `subgraph-`: a
+            // child never reads.
+            DagExecutionEvent::UserMessageConsumed { node_id, id } => Some(json!({
+                "type": "user-message-consumed",
+                "id": id,
+                "node_id": node_id
+            })),
             DagExecutionEvent::SubgraphWrapped { inner, .. } => match Self::deep_base(inner) {
                 DagExecutionEvent::NodeStart {
                     node_id,
@@ -1657,5 +1665,33 @@ mod tests {
         ));
         let back = serde_json::to_value(&ev).unwrap();
         assert!(back["data"].get("cancelled").is_none(), "{back}");
+    }
+
+    #[test]
+    fn a_read_message_is_one_frame_with_its_id_and_its_node() {
+        let mut mapper = SseMapper::new();
+        let parts = mapper.map(&DagExecutionEvent::UserMessageConsumed {
+            node_id: "agent".into(),
+            id: "q7_a.b-c".into(),
+        });
+        assert_eq!(parts.len(), 1, "{parts:?}");
+        assert_eq!(parts[0]["type"], "user-message-consumed");
+        assert_eq!(parts[0]["id"], "q7_a.b-c");
+        assert_eq!(parts[0]["node_id"], "agent");
+        assert_eq!(parts[0]["level"], 0);
+        // The worker API ends a stream on these substrings (stream.rs:77).
+        let text = parts[0].to_string();
+        assert!(!text.contains(r#""type":"finish""#), "{text}");
+        assert!(!text.contains(r#""type":"error""#), "{text}");
+    }
+
+    #[test]
+    fn a_child_never_reads_so_a_wrapped_one_maps_to_nothing() {
+        let mut mapper = SseMapper::new();
+        let parts = mapper.map(&wrapped(DagExecutionEvent::UserMessageConsumed {
+            node_id: "llm".into(),
+            id: "m1".into(),
+        }));
+        assert!(parts.is_empty(), "{parts:?}");
     }
 }

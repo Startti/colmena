@@ -95,6 +95,11 @@ pub enum NodeEvent {
     ReasoningEnd {
         id: String,
     },
+    /// The agent loop read a message the person wrote while it worked
+    /// (`llm::domain::steering`). Only a root's `llm_call` emits it.
+    UserMessageConsumed {
+        id: String,
+    },
     /// Raw DagExecutionEvent from a child subgraph execution.
     /// Child node IDs are preserved so the parent stream can re-yield them as-is.
     SubgraphChildEvent(serde_json::Value),

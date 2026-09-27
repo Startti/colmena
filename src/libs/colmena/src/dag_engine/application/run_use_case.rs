@@ -907,6 +907,11 @@ impl DagRunUseCase {
                                     nested_cancelled = true;
                                     break;
                                 }
+                                // A read message the node announced before it
+                                // was dropped (its channel is all that is left).
+                                for read in consumed_left_in(&mut rx, &node_id) {
+                                    yield read;
+                                }
                                 yield DagExecutionEvent::Cancelled {
                                     reason: None,
                                     partial_output: serde_json::to_value(&all_outputs).unwrap_or(Value::Null),
@@ -984,6 +989,9 @@ impl DagRunUseCase {
                                 // out of the loop so it can be raised as a stream-level
                                 // `Err` there, matching every other abort path (hard-stop,
                                 // node error) that drain consumers already handle.
+                                for read in consumed_left_in(&mut rx, &node_id) {
+                                    yield read;
+                                }
                                 idle_abort_msg = Some(msg);
                                 break;
                             }
@@ -1032,6 +1040,7 @@ impl DagRunUseCase {
                                             NodeEvent::ReasoningStart { id } => yield DagExecutionEvent::ReasoningStart { node_id: node_id.clone(), id },
                                             NodeEvent::ReasoningDelta { id, token } => yield DagExecutionEvent::ReasoningDelta { node_id: node_id.clone(), id, token },
                                             NodeEvent::ReasoningEnd { id } => yield DagExecutionEvent::ReasoningEnd { node_id: node_id.clone(), id },
+                                            NodeEvent::UserMessageConsumed { id } => yield DagExecutionEvent::UserMessageConsumed { node_id: node_id.clone(), id },
                                             NodeEvent::SubgraphChildEvent(raw) => {
                                                 // Re-yield child events preserving their original node IDs.
                                                 // GraphFinish is suppressed — SubgraphNodeFinish (below) serves that role.
@@ -1779,6 +1788,30 @@ fn node_event_advances_heartbeat(event: &crate::dag_engine::domain::observer::No
         }
         _ => true,
     }
+}
+
+/// The `UserMessageConsumed` events still in a node's channel, in order.
+/// Called by an arm that stops the run right after it dropped the node
+/// (`execution_future.set(None)`), so the channel holds everything the node
+/// emitted: a message the loop already saved to its history must reach the
+/// client, which otherwise sends it again as the next turn. `try_recv` only:
+/// it never awaits.
+fn consumed_left_in(
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<crate::dag_engine::domain::observer::NodeEvent>,
+    node_id: &str,
+) -> Vec<crate::dag_engine::domain::events::DagExecutionEvent> {
+    use crate::dag_engine::domain::events::DagExecutionEvent;
+    use crate::dag_engine::domain::observer::NodeEvent;
+    let mut out = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        if let NodeEvent::UserMessageConsumed { id } = event {
+            out.push(DagExecutionEvent::UserMessageConsumed {
+                node_id: node_id.to_string(),
+                id,
+            });
+        }
+    }
+    out
 }
 
 /// What `resume_subgraph` does with the graph it was handed.
@@ -4567,5 +4600,211 @@ mod call_registry_tests {
         let uc = DagRunUseCase::new(Arc::new(ProbeRegistry), None);
         let took = in_steering(inbox(), probe_as(uc, "llm_call")).await["took"].clone();
         assert_eq!(took, json!(false));
+    }
+}
+
+#[cfg(test)]
+mod read_on_stop_tests {
+    //! A read message's event that the node emitted just before the turn was
+    //! stopped (or the idle watchdog fired) is not lost: the arm that drops
+    //! the node forwards what was left in its channel, before `Cancelled` or
+    //! the error.
+    use super::*;
+    use crate::dag_engine::domain::events::DagExecutionEvent;
+    use crate::dag_engine::domain::node::ExecutableNode;
+    use crate::dag_engine::domain::observer::{ExecutionObserver, NodeEvent};
+    use async_trait::async_trait;
+    use futures::StreamExt;
+    use std::error::Error as StdError;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+    use tokio_util::sync::CancellationToken;
+
+    /// Emits `UserMessageConsumed { id: "m1" }`. With a token, it then stops
+    /// the turn itself and never returns: the event and the Stop are both
+    /// ready at once. Without one it returns.
+    struct ReadsThenStops(Option<CancellationToken>);
+
+    #[async_trait]
+    impl ExecutableNode for ReadsThenStops {
+        async fn execute(
+            &self,
+            _i: &NodeInputs,
+            _c: &Value,
+            _s: &mut Value,
+            observer: Option<Arc<dyn ExecutionObserver>>,
+        ) -> Result<Value, Box<dyn StdError + Send + Sync>> {
+            if let Some(o) = &observer {
+                o.on_event(NodeEvent::UserMessageConsumed { id: "m1".into() });
+            }
+            let Some(token) = &self.0 else {
+                return Ok(json!({}));
+            };
+            token.cancel();
+            std::future::pending::<()>().await;
+            unreachable!()
+        }
+        fn schema(&self) -> Value {
+            json!({})
+        }
+    }
+
+    /// Sleeps exactly the idle timeout, emits `UserMessageConsumed { id: "m1" }`
+    /// (noting that it did) and never returns.
+    struct ReadsAtTheDeadline(Duration, Arc<AtomicBool>);
+
+    #[async_trait]
+    impl ExecutableNode for ReadsAtTheDeadline {
+        async fn execute(
+            &self,
+            _i: &NodeInputs,
+            _c: &Value,
+            _s: &mut Value,
+            observer: Option<Arc<dyn ExecutionObserver>>,
+        ) -> Result<Value, Box<dyn StdError + Send + Sync>> {
+            tokio::time::sleep(self.0).await;
+            if let Some(o) = &observer {
+                o.on_event(NodeEvent::UserMessageConsumed { id: "m1".into() });
+                self.1.store(true, Ordering::SeqCst);
+            }
+            std::future::pending::<()>().await;
+            unreachable!()
+        }
+        fn schema(&self) -> Value {
+            json!({})
+        }
+    }
+
+    struct One(Arc<dyn ExecutableNode>);
+    impl NodeRegistryPort for One {
+        fn get_node(&self, node_type: &str) -> Option<Arc<dyn ExecutableNode>> {
+            (node_type == "reads").then(|| self.0.clone())
+        }
+        fn get_all_nodes(&self) -> HashMap<String, Arc<dyn ExecutableNode>> {
+            HashMap::new()
+        }
+    }
+
+    fn graph() -> Graph {
+        serde_json::from_value(
+            json!({ "nodes": { "agent": { "type": "reads", "config": {} } }, "edges": [] }),
+        )
+        .unwrap()
+    }
+
+    /// Whether the read message's event came out before `Cancelled`.
+    async fn read_before_cancelled() -> bool {
+        let token = CancellationToken::new();
+        let node = Arc::new(ReadsThenStops(Some(token.clone())));
+        let uc = DagRunUseCase::new(Arc::new(One(node)), None)
+            .with_liveness(LivenessSettings::disabled());
+        let stream = uc.execute_stream(graph(), None, None, false, None, None, Some(token));
+        tokio::pin!(stream);
+        let mut read = false;
+        while let Some(item) = stream.next().await {
+            match item.unwrap() {
+                DagExecutionEvent::UserMessageConsumed { node_id, id } => {
+                    assert_eq!((node_id.as_str(), id.as_str()), ("agent", "m1"));
+                    read = true;
+                }
+                DagExecutionEvent::Cancelled { .. } => return read,
+                _ => {}
+            }
+        }
+        panic!("the turn ended without Cancelled");
+    }
+
+    /// A node that reads and finishes: the event is stamped with the node and
+    /// goes out before the node's end.
+    #[tokio::test]
+    async fn a_read_message_goes_out_before_its_node_ends() {
+        let node = Arc::new(ReadsThenStops(None));
+        let uc = DagRunUseCase::new(Arc::new(One(node)), None);
+        let stream = uc.execute_stream(graph(), None, None, false, None, None, None);
+        let seen: Vec<String> = stream
+            .filter_map(|e| async move {
+                match e.unwrap() {
+                    DagExecutionEvent::UserMessageConsumed { node_id, id } => {
+                        Some(format!("read {node_id} {id}"))
+                    }
+                    DagExecutionEvent::NodeFinish { node_id, .. } => Some(format!("end {node_id}")),
+                    _ => None,
+                }
+            })
+            .collect()
+            .await;
+        assert_eq!(seen, ["read agent m1", "end agent"]);
+    }
+
+    /// `select!` polls its arms from a random one: without the forward, the
+    /// event is lost whenever the Stop's arm is polled before `rx`'s, which
+    /// is most runs. 32 runs.
+    #[tokio::test]
+    async fn a_stop_forwards_a_read_message_before_cancelled() {
+        for run in 0..32 {
+            assert!(read_before_cancelled().await, "lost on run {run}");
+        }
+    }
+
+    /// The idle watchdog's arm forwards too. Time is paused and the node
+    /// sleeps exactly the idle timeout, so both timers fire together: when
+    /// `select!` polls the node before the watchdog, the node emits and the
+    /// watchdog still wins, with the event left in the channel. Some runs
+    /// the watchdog is polled first and the node never emits.
+    #[tokio::test(start_paused = true)]
+    async fn an_idle_abort_forwards_a_read_message_before_its_error() {
+        let idle = Duration::from_secs(5);
+        let mut emitted_runs = 0;
+        for run in 0..32 {
+            let emitted = Arc::new(AtomicBool::new(false));
+            let node = Arc::new(ReadsAtTheDeadline(idle, emitted.clone()));
+            let uc =
+                DagRunUseCase::new(Arc::new(One(node)), None).with_liveness(LivenessSettings {
+                    heartbeat_interval: None,
+                    idle_timeout: Some(idle),
+                });
+            let stream = uc.execute_stream(graph(), None, None, false, None, None, None);
+            tokio::pin!(stream);
+            let mut read = false;
+            loop {
+                match stream.next().await.expect("the run ended without an error") {
+                    Ok(DagExecutionEvent::UserMessageConsumed { .. }) => read = true,
+                    Ok(_) => {}
+                    Err(e) => {
+                        assert!(e.to_string().contains("liveness watchdog"), "{e}");
+                        break;
+                    }
+                }
+            }
+            let emitted = emitted.load(Ordering::SeqCst);
+            assert_eq!(read, emitted, "run {run}: emitted {emitted}, read {read}");
+            emitted_runs += usize::from(emitted);
+        }
+        assert!(
+            emitted_runs > 0,
+            "the node never emitted: nothing was tested"
+        );
+    }
+
+    #[test]
+    fn what_is_left_in_the_channel_forwards_only_read_messages_in_order() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        tx.send(NodeEvent::UserMessageConsumed { id: "m1".into() })
+            .unwrap();
+        tx.send(NodeEvent::LlmToken { token: "x".into() }).unwrap();
+        tx.send(NodeEvent::UserMessageConsumed { id: "m2".into() })
+            .unwrap();
+        drop(tx);
+        let left: Vec<String> = consumed_left_in(&mut rx, "agent")
+            .into_iter()
+            .map(|e| match e {
+                DagExecutionEvent::UserMessageConsumed { node_id, id } => {
+                    assert_eq!(node_id, "agent");
+                    id
+                }
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(left, ["m1", "m2"]);
     }
 }
