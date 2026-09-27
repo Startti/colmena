@@ -10,6 +10,7 @@ use colmena::dag_engine::domain::python_executor::{
 use colmena::dag_engine::infrastructure::python_exec::config::SubprocessConfig;
 use colmena::dag_engine::infrastructure::python_exec::inprocess::InProcessExecutor;
 use colmena::dag_engine::infrastructure::python_exec::protocol::result_too_large_message;
+use colmena::dag_engine::infrastructure::python_exec::selftest;
 use colmena::dag_engine::infrastructure::python_exec::subprocess::SubprocessExecutor;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
@@ -366,4 +367,58 @@ async fn the_kernel_entries_of_proc_are_covered() {
          output = [[n for n in names if shown('/proc/' + n)], frame.groupby('k')['v'].sum().tolist(), float(scipy.stats.norm.cdf(0))]";
     let r = ex.run(req(code, 20)).await.unwrap();
     assert_eq!(r.output, Some(serde_json::json!([[], [3.0, 3.0], 0.5])));
+}
+
+/// Runs `python_executor self-test` with `args`: its exit code and checks.
+fn self_test(args: &[&str]) -> (Option<i32>, Vec<serde_json::Value>) {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_python_executor"))
+        .arg("self-test")
+        .args(args)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let checks = stdout.lines().map(|l| serde_json::from_str(l).unwrap());
+    (out.status.code(), checks.collect())
+}
+
+/// Every layer holds, a configured file among the hidden paths.
+#[test]
+fn the_self_test_proves_every_layer() {
+    if !jail_tests_enabled() {
+        return;
+    }
+    let temp = tempfile::NamedTempFile::new_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o644)).unwrap();
+    let file = temp.path().to_str().unwrap();
+    let (code, checks) = self_test(&["--uid-base", "50000", "--hide", file]);
+    let layers: Vec<&str> = checks.iter().filter_map(|c| c["layer"].as_str()).collect();
+    for layer in [
+        "descriptors",
+        "identity",
+        "no_new_privs",
+        "limit_memory",
+        "proc_processes",
+        "proc_entries",
+        "hidden_paths",
+        "private_tmp",
+        "network_dns",
+        "network_loopback",
+        "network_public",
+        "mount_namespace",
+    ] {
+        assert!(layers.contains(&layer), "{layer} not checked: {layers:?}");
+    }
+    assert!(checks.iter().all(|c| c["ok"] == true), "{checks:#?}");
+    assert_eq!(code, Some(0));
+}
+
+/// A layer that cannot be applied fails the self-test: here a slot uid
+/// that does not fit, which is refused before anything else changes.
+#[test]
+fn the_self_test_fails_when_a_layer_cannot_be_applied() {
+    let base = u32::MAX - selftest::SELF_TEST_SLOT;
+    let (code, checks) = self_test(&["--uid-base", &base.to_string()]);
+    let refused = serde_json::json!({"layer": "identity", "ok": false, "reason": "not_applied"});
+    assert!(checks.contains(&refused), "{checks:#?}");
+    assert_eq!(code, Some(3));
 }

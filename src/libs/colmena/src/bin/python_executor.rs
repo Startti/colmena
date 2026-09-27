@@ -3,7 +3,8 @@
 #[cfg(target_os = "linux")]
 mod linux {
     use clap::{Parser, Subcommand};
-    use colmena::dag_engine::infrastructure::python_exec::{child::JailSpec, zygote};
+    use colmena::dag_engine::infrastructure::python_exec::child::{JailSpec, EXIT_NOT_READY};
+    use colmena::dag_engine::infrastructure::python_exec::{selftest, zygote};
     use std::path::PathBuf;
 
     #[derive(Parser)]
@@ -26,9 +27,29 @@ mod linux {
             uid_base: u32,
             #[arg(long, default_value_t = 64)]
             tmp_mb: u64,
-            #[arg(long = "hide")]
+            #[arg(long = "hide", value_parser = absolute)]
             hide: Vec<PathBuf>,
         },
+        /// Proves each layer of the process jail in a throwaway child. Prints
+        /// one JSON object per check and exits 0 only when every one held.
+        SelfTest {
+            #[arg(long, default_value_t = 20000)]
+            uid_base: u32,
+            #[arg(long, default_value_t = 64)]
+            tmp_mb: u64,
+            #[arg(long = "hide", value_parser = absolute)]
+            hide: Vec<PathBuf>,
+        },
+    }
+
+    /// A relative path would be resolved against the working directory.
+    fn absolute(s: &str) -> Result<PathBuf, String> {
+        let path = PathBuf::from(s);
+        if path.is_absolute() {
+            Ok(path)
+        } else {
+            Err("expected an absolute path".into())
+        }
     }
 
     pub fn main() -> i32 {
@@ -46,6 +67,25 @@ mod linux {
                     hide_paths: hide,
                 },
             }),
+            Cmd::SelfTest {
+                uid_base,
+                tmp_mb,
+                hide,
+            } => {
+                let spec = JailSpec {
+                    uid_base,
+                    tmp_mb,
+                    hide_paths: hide,
+                };
+                let (code, checks) = match selftest::run(&spec) {
+                    Ok(checks) => (0, checks),
+                    Err(checks) => (EXIT_NOT_READY, checks),
+                };
+                for check in checks {
+                    println!("{}", serde_json::to_string(&check).unwrap_or_default());
+                }
+                code
+            }
         }
     }
 }
