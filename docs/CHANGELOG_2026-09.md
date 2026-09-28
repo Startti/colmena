@@ -7032,3 +7032,19 @@ por `subprocess`; la variante en proceso, que hoy mezcla lo que imprimen, queda 
 de las cuatro tools tabulares quedan visibles para el test (`#[doc(hidden)] pub`). Este banco encontró el float que
 arregló §181. **Tests.** Contenedor root: 17/17 con `subprocess` y `MODES=all`; con la configuración por defecto no hay
 nada que comparar; con un preludio roto el banco falla (antes pasaba). **ADP.** Sin cambios. **Estado.** done.
+
+## 184. `http_request`: `"$attachment_url:<document_id>"` pone en un body JSON una URL que da el host (parte 2 de 2)
+
+**Qué cambia.** En el body JSON de `http_request`, un string que es entero `"$attachment_url:<document_id>"` se reemplaza
+por una URL de lectura de ese documento de la sesión que emite el storage del host (`resolve_url`, 900 s), con las
+guardas de §180: solo hacia una dirección que fijó el autor, sin redirección a otro origen, y la URL (y sus valores
+largos de query) vuelve como el placeholder en la salida y en los errores. Un id que no es de la sesión da error; un
+host sin URLs da `AttachmentUrlUnavailable` y sugiere `$attachment:`. Límites de la limpieza (por subcadena): un eco
+partido en pedazos, una URL cuyo secreto va en el path o una codificación no listada pueden mostrar partes; un valor
+inocuo de 16+ caracteres en la respuesta también se reemplaza. **Tests.** Sustitución y eco; sin URL que dar (id
+desconocido, otra sesión, host sin URLs); sin redirección a otro origen; errores y formas del eco limpios (umbral 15/16);
+grafo E2E `tests/graphs/security/attachment_url_author_fixed_e2e.json`, corrido: el eco bajó los 80 bytes del PNG, el
+log muestra el placeholder y ninguna línea del motor tiene el link; la dirección de datos falla antes de pedir; un host
+sin URLs falla sin pedidos. Para correrlo: fila `e2e_img` → `e2e-checker.png` en `conversation_attachments` para la
+sesión `e2e-url-001`, el PNG en `COLMENA_LOCAL_STORAGE_DIR` y un eco en 127.0.0.1:8766. **ADP.** Llega con el próximo
+tag; el adaptador del worker ya da URLs (recorta el TTL a 24 h). **Estado.** done.

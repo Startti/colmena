@@ -21,6 +21,15 @@
 //! Always returns `{ "status": u16, "body": Value }`.
 //! `body` is parsed as JSON; if the response is not valid JSON, `body` is `null`.
 //! The default output port is `body`.
+//!
+//! ## Attachments
+//! In a JSON body, a whole string `"$attachment:<document_id>"` becomes a
+//! `data:` URI of that document of the session, and
+//! `"$attachment_url:<document_id>"` a read URL the host's storage issues for
+//! it — only toward an address the author fixed (`base_url` and `endpoint` in
+//! `config` or a tool's `fixed` values), with no redirect to another origin.
+//! The node's output and error texts show the placeholder wherever the
+//! response repeats that URL or its long query values.
 
 use crate::dag_engine::domain::lint::{FieldSpec, NodeCatalogEntry};
 use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
@@ -441,13 +450,74 @@ impl HttpNode {
         }
     }
 
-    /// Whether `v` holds a `"$attachment_url:<document_id>"` string anywhere.
+    /// Lifetime asked of the host for each `$attachment_url:` URL: 15 minutes.
+    const DEFAULT_ATTACHMENT_URL_TTL_SECS: u64 = 900;
+
+    /// Whether a string value of `v`, at any depth, is a
+    /// `"$attachment_url:<document_id>"`. Object keys are not looked at.
     fn has_attachment_url(v: &Value) -> bool {
         match v {
             Value::String(s) => s.starts_with(ATTACHMENT_URL_PLACEHOLDER_PREFIX),
             Value::Object(m) => m.values().any(Self::has_attachment_url),
             Value::Array(a) => a.iter().any(Self::has_attachment_url),
             _ => false,
+        }
+    }
+
+    /// Replaces every `"$attachment_url:<document_id>"` string in `val` with
+    /// a read URL the host's storage issues for that document of the session,
+    /// valid for about `ttl_seconds`, and records it with its placeholder in
+    /// `issued`, to scrub the output. Fails when the id is not the session's,
+    /// or the host issues no URLs.
+    async fn resolve_attachment_urls(
+        &self,
+        val: Value,
+        agent_session_id: Option<&str>,
+        ttl_seconds: u64,
+        issued: &mut Vec<(String, String)>,
+    ) -> Result<Value, Box<dyn StdError + Send + Sync>> {
+        match val {
+            Value::String(s) if s.starts_with(ATTACHMENT_URL_PLACEHOLDER_PREFIX) => {
+                let id = &s[ATTACHMENT_URL_PLACEHOLDER_PREFIX.len()..];
+                let resolver = self.attachment_resolver.as_ref().ok_or_else(|| {
+                    format!(
+                        "AttachmentResolveError: '{s}' needs the session's attachment registry, \
+                         and this engine has none"
+                    )
+                })?;
+                let sid = agent_session_id.ok_or_else(|| {
+                    format!("AttachmentResolveError: '{s}' needs an agent_session_id")
+                })?;
+                let url = resolver
+                    .resolve_url(sid, id, ttl_seconds)
+                    .await
+                    .map_err(|e| format!("AttachmentResolveError: {e}"))?
+                    .ok_or_else(|| {
+                        format!(
+                            "AttachmentUrlUnavailable: this host does not provide attachment \
+                             URLs; use \"$attachment:{id}\" for the bytes"
+                        )
+                    })?;
+                issued.push((url.clone(), s));
+                Ok(Value::String(url))
+            }
+            Value::Object(map) => {
+                let mut out = serde_json::Map::new();
+                for (k, v) in map {
+                    let v = self.resolve_attachment_urls(v, agent_session_id, ttl_seconds, issued);
+                    out.insert(k, Box::pin(v).await?);
+                }
+                Ok(Value::Object(out))
+            }
+            Value::Array(arr) => {
+                let mut out = Vec::with_capacity(arr.len());
+                for v in arr {
+                    let v = self.resolve_attachment_urls(v, agent_session_id, ttl_seconds, issued);
+                    out.push(Box::pin(v).await?);
+                }
+                Ok(Value::Array(out))
+            }
+            other => Ok(other),
         }
     }
 
@@ -546,10 +616,10 @@ impl HttpNode {
     }
 
     const URL_FORM_NEEDS_AUTHORED_ADDRESS: &'static str =
-        "http_request: \"$attachment_url:<document_id>\" is replaced only when the node's \
-         configuration fixes the request's address (base_url and endpoint, in config or as a \
-         tool's fixed values); here part of it comes from runtime data (a tool argument, an \
-         edge). Use \"$attachment:<document_id>\" to send the file's content instead";
+        "http_request: \"$attachment_url:<document_id>\" needs a node configuration that \
+         fixes the request's address (base_url and endpoint, in config or as a tool's fixed \
+         values); here part of it comes from runtime data (a tool argument, an edge). Use \
+         \"$attachment:<document_id>\" to send the file's content instead";
 
     /// Whether the request's address is the author's: `base_url` and
     /// `endpoint` each come from `config` (absent from `inputs`) or are a
@@ -561,12 +631,6 @@ impl HttpNode {
             .into_iter()
             .all(|k| !inputs.contains_key(k) || is_authored_input(inputs, k))
     }
-
-    /// The URL form toward the author's address, while this build issues
-    /// no URL: refused, so it never goes out as text.
-    const URL_FORM_NOT_ISSUED_YET: &'static str =
-        "http_request: \"$attachment_url:<document_id>\" is not available in this build yet; \
-         use \"$attachment:<document_id>\" to send the file's content instead";
 
     fn resolve_env_vars(input: &str) -> Result<String, String> {
         let mut result = String::new();
@@ -640,11 +704,9 @@ impl HttpNode {
         config: &'a Value,
         key: &str,
     ) -> Option<&'a Value> {
-        config.get(key).or_else(|| {
-            inputs.get(key).filter(|_| {
-                crate::dag_engine::infrastructure::env_provenance::is_authored_input(inputs, key)
-            })
-        })
+        config
+            .get(key)
+            .or_else(|| inputs.get(key).filter(|_| is_authored_input(inputs, key)))
     }
 
     /// Whether `v` holds an env template anywhere.
@@ -1161,10 +1223,7 @@ impl HttpNode {
 
         // A body that arrived as data may name a URL for the node to fetch only
         // in a field the author enabled (`multipart_url_fields`).
-        let body_from_data = inputs.get("body").is_some()
-            && !crate::dag_engine::infrastructure::env_provenance::is_authored_input(
-                inputs, "body",
-            );
+        let body_from_data = inputs.get("body").is_some() && !is_authored_input(inputs, "body");
         let body_resolved = if body_from_data {
             let enabled: Vec<&str> = Self::author_value(inputs, config, "multipart_url_fields")
                 .and_then(|v| v.as_array())
@@ -1440,16 +1499,10 @@ impl ExecutableNode for HttpNode {
         // runtime data (an edge that names it, an open tool field) — then the
         // one in `config`, if any. Credentials never leave that origin.
         let author_base_url = match inputs.get("base_url") {
-            Some(_)
-                if !crate::dag_engine::infrastructure::env_provenance::is_authored_input(
-                    inputs, "base_url",
-                ) =>
-            {
-                config
-                    .get("base_url")
-                    .and_then(|v| v.as_str())
-                    .and_then(|s| Self::resolve_env_vars(s).ok())
-            }
+            Some(_) if !is_authored_input(inputs, "base_url") => config
+                .get("base_url")
+                .and_then(|v| v.as_str())
+                .and_then(|s| Self::resolve_env_vars(s).ok()),
             _ => Some(base_url.clone()),
         };
         Self::check_credential_destination(&url, author_base_url.as_deref(), inputs, config)
@@ -1626,6 +1679,10 @@ impl ExecutableNode for HttpNode {
                 .await;
         }
 
+        // Every `$attachment_url:` URL this request carries, with the
+        // placeholder it replaced (see `scrub_issued_urls`).
+        let mut issued: Vec<(String, String)> = Vec::new();
+
         if let Some(body) = body_val {
             if let Some(s) = body.as_str() {
                 let s_resolved = if body_from_inputs.is_some() {
@@ -1638,12 +1695,9 @@ impl ExecutableNode for HttpNode {
                 request_builder = request_builder.body(s_resolved);
             } else if let Some(resolved_body) = json_body {
                 // `$attachment_url:` only toward the author's address, checked
-                // before any attachment is read; this build issues no URL yet.
+                // before any attachment is read.
                 if carries_url && !Self::address_is_authored(inputs) {
                     return Err(Self::URL_FORM_NEEDS_AUTHORED_ADDRESS.into());
-                }
-                if carries_url {
-                    return Err(Self::URL_FORM_NOT_ISSUED_YET.into());
                 }
                 // Then resolve any `$attachment:<id>` placeholders to data: URIs
                 // by reading bytes via OutputStorageRepository. This is what
@@ -1660,6 +1714,14 @@ impl ExecutableNode for HttpNode {
                 let resolved_body = self
                     .resolve_attachment_placeholders(resolved_body, sid, max)
                     .await?;
+                // `$attachment_url:<document_id>` → a URL the host issues.
+                let resolved_body = if carries_url {
+                    let ttl = Self::DEFAULT_ATTACHMENT_URL_TTL_SECS;
+                    self.resolve_attachment_urls(resolved_body, sid, ttl, &mut issued)
+                        .await?
+                } else {
+                    resolved_body
+                };
                 // Never log body contents — may contain credentials or PII
                 request_builder = request_builder.json(&resolved_body);
             }
@@ -1670,8 +1732,8 @@ impl ExecutableNode for HttpNode {
         // println!("DEBUG: Headers: {:?}", request_builder); // RequestBuilder doesn't implement Debug nicely for headers
 
         // An issued attachment URL never leaves the node, in an error's text
-        // either (a redirect hop's URL, say). None is issued yet.
-        let forms = Self::scrub_forms(&[]);
+        // either (a redirect hop's URL, say).
+        let forms = Self::scrub_forms(&issued);
         let response = if let Some(provider) = oauth_provider {
             crate::dag_engine::infrastructure::nodes::http_oauth::send_with_oauth_retry(
                 request_builder,
@@ -2222,30 +2284,120 @@ mod session_attachment_tests {
     }
 }
 
-/// `"$attachment_url:<document_id>"` in a JSON body: the rules that hold
-/// before any URL is issued.
+/// `"$attachment_url:<document_id>"` in a JSON body, with the session
+/// registry wired: `s1` owns `doc-1 → k1` and `doc-3 → k3`, `s2` owns
+/// `doc-2 → k2`.
 #[cfg(test)]
 mod attachment_url_tests {
     use super::*;
     use crate::dag_engine::infrastructure::env_provenance::AUTHORED_INPUTS_KEY;
-    use crate::storage::domain::MockOutputStorageRepository;
+    use crate::llm::domain::attachments::{AttachmentSource, UpsertAttachmentInput};
+    use crate::llm::domain::{AttachmentRegistry, ProviderKind};
+    use crate::llm::infrastructure::attachments::AttachmentStreamResolverImpl;
+    use crate::llm::infrastructure::persistence::SqliteAttachmentRegistry;
+    use crate::storage::domain::{
+        MockOutputStorageRepository, OutputStorageRepository, StorageError, StoreRequest,
+        StoredBytes, StoredOutput, StoredStream,
+    };
     use std::collections::HashMap;
-    use wiremock::matchers::method;
+    use std::sync::Mutex;
+    use wiremock::matchers::{body_json, method};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     const PLACEHOLDER: &str = "$attachment_url:doc-1";
+    /// The signature of every URL [`UrlStorage`] issues.
     const SIG: &str = "3f9a1c07e5b24d8e9a6c1f0b7d3e5a2c4b6d8f0e1a3c5e7b9d1f3a5c7e9b1d3f";
 
     /// A signed read URL's shape: an object path, a credential with `@` and
-    /// `/`, an expiry and a hex signature.
-    fn signed() -> String {
+    /// `/`, an expiry, a 15-character value and a hex signature.
+    fn signed(key: &str) -> String {
         format!(
-            "https://storage.example.test/bucket/sessions/k1.png\
+            "https://storage.example.test/bucket/sessions/{key}.png\
              ?X-Goog-Algorithm=GOOG4-RSA-SHA256\
              &X-Goog-Credential=svc%40proj.example.test%2F20260927%2Fauto%2Fstorage%2Fgoog4_request\
              &X-Goog-Date=20260927T120000Z&X-Goog-Expires=900&X-Goog-SignedHeaders=host\
-             &alt=media&X-Goog-Signature={SIG}"
+             &userProject=example-project&alt=media&X-Goog-Signature={SIG}"
         )
+    }
+
+    /// Issues [`signed`] for the document's key; records each TTL asked.
+    #[derive(Default)]
+    struct UrlStorage(Mutex<Vec<u64>>);
+
+    #[async_trait::async_trait]
+    impl OutputStorageRepository for UrlStorage {
+        async fn store(&self, _: StoreRequest) -> Result<StoredOutput, StorageError> {
+            unimplemented!()
+        }
+        async fn read(&self, _: &str) -> Result<StoredBytes, StorageError> {
+            unimplemented!()
+        }
+        async fn read_stream(&self, _: &str) -> Result<StoredStream, StorageError> {
+            unimplemented!()
+        }
+        async fn delete(&self, _: &str) -> Result<(), StorageError> {
+            Ok(())
+        }
+        async fn read_url(&self, key: &str, ttl: u64) -> Result<Option<String>, StorageError> {
+            self.0.lock().unwrap().push(ttl);
+            Ok(Some(signed(key)))
+        }
+    }
+
+    async fn node(storage: Arc<dyn OutputStorageRepository>) -> HttpNode {
+        let reg = SqliteAttachmentRegistry::new("sqlite::memory:")
+            .await
+            .unwrap();
+        for (s, doc, key) in [
+            ("s1", "doc-1", "k1"),
+            ("s2", "doc-2", "k2"),
+            ("s1", "doc-3", "k3"),
+        ] {
+            let row = UpsertAttachmentInput {
+                agent_session_id: s.into(),
+                document_id: doc.into(),
+                provider: ProviderKind::Generated,
+                provider_file_id: key.into(),
+                mime_type: "image/png".into(),
+                filename: "a.png".into(),
+                size_bytes: Some(2),
+                label: None,
+                description: None,
+                source: AttachmentSource::Path(key.into()),
+                storage_key: Some(key.into()),
+                origin: None,
+            };
+            reg.upsert(row).await.unwrap();
+        }
+        let reg: Arc<dyn AttachmentRegistry> = Arc::new(reg);
+        let resolver = Arc::new(AttachmentStreamResolverImpl::new(reg, storage.clone()));
+        HttpNode::new()
+            .with_storage(storage)
+            .with_attachment_resolver(resolver)
+    }
+
+    /// Runs `http` as session `s1`.
+    async fn post(http: &HttpNode, mut inputs: NodeInputs, config: Value) -> Result<Value, String> {
+        inputs.insert("__colmena_agent_session_id".into(), json!("s1"));
+        http.execute(&inputs, &config, &mut json!({}), None)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    fn cfg(server: &MockServer) -> Value {
+        json!({ "base_url": server.uri(), "endpoint": "/jobs", "method": "POST" })
+    }
+
+    fn body(v: Value) -> NodeInputs {
+        HashMap::from([("body".to_string(), v)])
+    }
+
+    /// A server that must never be called: the node has to fail first.
+    async fn untouched() -> MockServer {
+        let server = MockServer::start().await;
+        let never = Mock::given(method("POST")).respond_with(ResponseTemplate::new(200));
+        never.expect(0).mount(&server).await;
+        server
     }
 
     /// Python's `urllib.parse.quote(s, safe)`: `%XX` (uppercase) for every
@@ -2262,10 +2414,11 @@ mod attachment_url_tests {
 
     /// Each form an echo writes of an issued URL, or of its signature alone,
     /// comes back as the placeholder: in a nested value, in an object key
-    /// and in an error's text. A short query value elsewhere is kept.
+    /// and in an error's text. A query value of 16 characters is a token,
+    /// one of 15 is kept.
     #[test]
     fn every_form_an_echo_writes_is_scrubbed() {
-        let url = signed();
+        let url = signed("k1");
         let forms = HttpNode::scrub_forms(&[(url.clone(), PLACEHOLDER.into())]);
         let scrub = |s: &str| {
             let v = json!({ "a": [{ "b": s }], s: 0 });
@@ -2280,12 +2433,14 @@ mod attachment_url_tests {
             url.replace('&', "&amp;"), // HTML
             quote(&url, "/"),        // percent-encoded, `/` kept
             quote(&url, ""),         // percent-encoded strictly
+            urlencoding::decode(&url).unwrap().into_owned(), // percent-decoded
             SIG.to_string(),         // a partial echo: the signature only
+            "GOOG4-RSA-SHA256".into(), // a 16-character query value
         ] {
             let expected = json!({ "a": [{ "b": shown }], shown.as_str(): 0 });
             assert_eq!(scrub(&format!("see {echo}.")), (expected, shown.clone()));
         }
-        let kept = "cache: X-Goog-Expires=900&alt=media";
+        let kept = "cache: X-Goog-Expires=900&userProject=example-project";
         let expected = json!({ "a": [{ "b": kept }], kept: 0 });
         assert_eq!(scrub(kept), (expected, kept.to_string()));
     }
@@ -2331,24 +2486,13 @@ mod attachment_url_tests {
     /// POSTs `body` (with `inputs`) to a server that must never be called;
     /// storage has no expectations, so reading any attachment panics.
     async fn refused(body: Value, mut inputs: NodeInputs, mut config: Value) -> String {
-        let server = MockServer::start().await;
-        let never = Mock::given(method("POST")).respond_with(ResponseTemplate::new(200));
-        never.expect(0).mount(&server).await;
+        let server = untouched().await;
         config["base_url"] = json!(server.uri());
         config["method"] = json!("POST");
         inputs.insert("body".into(), body);
         let node = HttpNode::new().with_storage(Arc::new(MockOutputStorageRepository::new()));
         let out = node.execute(&inputs, &config, &mut json!({}), None).await;
         out.unwrap_err().to_string()
-    }
-
-    /// Toward the author's address the form is refused, with a fixed text:
-    /// this build issues no URL yet. Nothing is sent.
-    #[tokio::test]
-    async fn the_url_form_is_refused_until_it_is_issued() {
-        let body = json!({ "image_url": PLACEHOLDER });
-        let err = refused(body, HashMap::new(), json!({ "endpoint": "/jobs" })).await;
-        assert!(err.contains("is not available in this build yet"), "{err}");
     }
 
     /// Toward a data address the address rule answers first, before any
@@ -2359,6 +2503,130 @@ mod attachment_url_tests {
         let data = HashMap::from([("endpoint".to_string(), json!("/jobs"))]);
         let err = refused(both, data, json!({})).await;
         assert!(err.contains("fixes the request's address"), "{err}");
+    }
+
+    /// The host's URL goes out in place of the placeholder, asked for 900 s.
+    /// The API's echoes of it (as is, percent-encoded, in a JSON text, the
+    /// signature alone, as a key) come back as the placeholder.
+    #[tokio::test]
+    async fn the_url_placeholder_becomes_the_url_the_host_issues() {
+        let server = MockServer::start().await;
+        let url = signed("k1");
+        let echoes = [
+            url.clone(),
+            quote(&url, ""),
+            url.replace('/', "\\/"),
+            SIG.into(),
+        ];
+        let mut reply = json!({ "echo": echoes.map(|e| format!("see {e}.")) });
+        reply[url.as_str()] = json!("as a key");
+        Mock::given(body_json(json!({ "image_url": url, "keep": "x" })))
+            .respond_with(ResponseTemplate::new(400).set_body_json(reply))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let storage = Arc::new(UrlStorage::default());
+        let sent = body(json!({ "image_url": PLACEHOLDER, "keep": "x" }));
+        let out = post(&node(storage.clone()).await, sent, cfg(&server)).await;
+        assert_eq!(*storage.0.lock().unwrap(), vec![900], "the default TTL");
+        let shown = format!("see {PLACEHOLDER}.");
+        let echo = [&shown, &shown, &shown, &shown];
+        let expected = json!({ "echo": echo, PLACEHOLDER: "as a key" });
+        assert_eq!(out.unwrap(), json!({ "status": 400, "body": expected }));
+    }
+
+    /// No URL is asked for an id that is not the session's (a raw key of this
+    /// session, one of another session, another session's document_id) nor
+    /// without a session; a host without URLs and an engine without a
+    /// registry fail with a clear error. Nothing is sent.
+    #[tokio::test]
+    async fn the_url_form_fails_clearly_when_there_is_no_url_to_give() {
+        let server = untouched().await;
+        let storage = Arc::new(UrlStorage::default());
+        let http = node(storage.clone()).await;
+        let cache = crate::storage::infrastructure::LocalCacheStorageAdapter::new();
+        let cache = node(Arc::new(cache)).await;
+        let bare = HttpNode::new().with_storage(storage.clone());
+        let url_of = |id: &str| body(json!({ "image_url": format!("$attachment_url:{id}") }));
+        let no_url = "this host does not provide attachment URLs; use \"$attachment:doc-1\"";
+        for (node, id, why) in [
+            (&http, "k1", "attachment not found"),
+            (&http, "k2", "attachment not found"),
+            (&http, "doc-2", "attachment not found"),
+            (&cache, "doc-1", no_url),
+            (&bare, "doc-1", "needs the session's attachment registry"),
+        ] {
+            let err = post(node, url_of(id), cfg(&server)).await.unwrap_err();
+            assert!(err.contains(why), "{id}: {err}");
+        }
+        let (doc, config) = (url_of("doc-1"), cfg(&server));
+        let no_session = http.execute(&doc, &config, &mut json!({}), None).await;
+        let err = no_session.unwrap_err().to_string();
+        assert!(err.contains("needs an agent_session_id"), "{err}");
+        assert!(storage.0.lock().unwrap().is_empty(), "a URL was asked for");
+    }
+
+    /// Placeholders nested in arrays and objects are all replaced; storage
+    /// is asked once per occurrence, the same id twice included.
+    #[tokio::test]
+    async fn every_placeholder_is_replaced_once_per_occurrence() {
+        let server = MockServer::start().await;
+        let (u1, u3) = (signed("k1"), signed("k3"));
+        let expected = json!({ "parts": [[u1], { "img": u3 }], "again": u1 });
+        Mock::given(body_json(expected))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let storage = Arc::new(UrlStorage::default());
+        let d3 = "$attachment_url:doc-3";
+        let sent = json!({ "parts": [[PLACEHOLDER], { "img": d3 }], "again": PLACEHOLDER });
+        let out = post(&node(storage.clone()).await, body(sent), cfg(&server)).await;
+        assert_eq!(out.unwrap()["status"], 200);
+        assert_eq!(*storage.0.lock().unwrap(), vec![900, 900, 900]);
+    }
+
+    /// A redirect to another origin is not followed: the URL reaches only
+    /// the author's address, and the 3xx comes back as the reply.
+    #[tokio::test]
+    async fn a_redirect_never_takes_the_url_to_another_origin() {
+        let (author, other) = (MockServer::start().await, MockServer::start().await);
+        let to_other = ResponseTemplate::new(307)
+            .insert_header("location", format!("{}/x", other.uri()))
+            .set_body_json(json!({ "src": signed("k1") }));
+        Mock::given(method("POST"))
+            .respond_with(to_other)
+            .expect(1)
+            .mount(&author)
+            .await;
+        let http = node(Arc::new(UrlStorage::default())).await;
+        let sent = body(json!({ "image_url": PLACEHOLDER }));
+        let out = post(&http, sent, cfg(&author)).await.unwrap();
+        assert!(other.received_requests().await.unwrap().is_empty());
+        assert_eq!(
+            out,
+            json!({ "status": 307, "body": { "src": PLACEHOLDER } })
+        );
+    }
+
+    /// An error after the URL was issued is scrubbed too: here, redirects
+    /// within the author's origin that carry it, until there are too many.
+    #[tokio::test]
+    async fn an_error_text_never_carries_the_url() {
+        let server = MockServer::start().await;
+        let hop = format!("{}/fetch?src={}", server.uri(), quote(&signed("k1"), ""));
+        Mock::given(wiremock::matchers::any())
+            .respond_with(ResponseTemplate::new(307).insert_header("location", hop))
+            .mount(&server)
+            .await;
+        let http = node(Arc::new(UrlStorage::default())).await;
+        let sent = body(json!({ "image_url": PLACEHOLDER }));
+        let err = post(&http, sent, cfg(&server)).await.unwrap_err();
+        assert!(
+            err.contains("src=$attachment_url:doc-1): too many"),
+            "{err}"
+        );
+        assert!(!err.contains(SIG), "{err}");
     }
 }
 
