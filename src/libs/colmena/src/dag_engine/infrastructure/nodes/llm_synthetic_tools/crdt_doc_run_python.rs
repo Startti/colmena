@@ -521,7 +521,8 @@ async fn crdt_write_full(
 
 // ── helpers ──────────────────────────────────────────────────────────────
 
-fn wrap_user_code(user_code: &str) -> String {
+#[doc(hidden)]
+pub fn wrap_user_code(user_code: &str) -> String {
     format!("{CRDT_PY_PRELUDE}{user_code}{CRDT_PY_POSTLUDE}")
 }
 

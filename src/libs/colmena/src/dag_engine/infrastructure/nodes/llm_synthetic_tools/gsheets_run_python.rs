@@ -535,7 +535,8 @@ use super::sheet_writer::{write_output_sheets, LoadedSnapshot};
 /// (collect `output`). Unlike `crdt_doc_run_python` we do NOT auto-build
 /// `pd.DataFrame(...)` for each binding — the LLM picks the shape it
 /// wants (DataFrame, dict-of-lists, raw list of dicts).
-fn wrap_user_code(user_code: &str) -> String {
+#[doc(hidden)]
+pub fn wrap_user_code(user_code: &str) -> String {
     format!("{GSHEETS_PY_PRELUDE}{user_code}{GSHEETS_PY_POSTLUDE}")
 }
 

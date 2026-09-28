@@ -43,7 +43,8 @@ const DATA_PY_POSTLUDE: &str =
 /// sandboxed script has `pd`/`np`/`stats` in scope and, on exit, packages
 /// `output`/`output_tables`/`output_sheets`/`output_attachments` into a
 /// single `output` dict the dispatcher parses.
-fn wrap_user_code(user_code: &str) -> String {
+#[doc(hidden)]
+pub fn wrap_user_code(user_code: &str) -> String {
     format!("{DATA_PY_PRELUDE}{user_code}{DATA_PY_POSTLUDE}")
 }
 

@@ -138,7 +138,8 @@ pub fn build_attachment_run_python_tool_definition() -> crate::llm::domain::tool
 /// The wrapper uses indented blocks so the user's code can include
 /// top-level imports of allowed modules (the sandbox validates the
 /// surrounding wrapper too, so all imports MUST be in the allow-list).
-fn wrap_user_code(code: &str) -> String {
+#[doc(hidden)]
+pub fn wrap_user_code(code: &str) -> String {
     // Note: `pd.DataFrame(_attachment_records)` keeps every column as
     // `object` dtype (CSV values arrived as strings). The user can coerce
     // with `df = df.astype(...)` or `pd.to_numeric(df['col'], errors='coerce')`
