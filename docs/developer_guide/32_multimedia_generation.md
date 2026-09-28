@@ -140,7 +140,7 @@ Si seteás `COLMENA_LOCAL=false` y olvidás el callback URL o secret, el engine 
 | Editar una imagen ya generada | Nodo `image_edit` (OpenAI gpt-image-1 multipart). `source_url`: `"$attachment:<document_id>"` (o el `document_id` pelado) de una imagen de la sesión, un `data:` URI o una URL `http(s)://`. |
 | Hacer text-to-speech | Nodo `tts` (OpenAI, ElevenLabs, o Google Gemini TTS). |
 | Que el LLM "vea" lo que generó | Llamar `load_attachment(document_id=<document_id>)` desde el agente — el resolver hace upload cross-provider lazy a la Files API del provider activo y lo inyecta como vision input en el siguiente turn. |
-| Mandar la imagen generada a un webhook | `http_request` con `"$attachment:<document_id>"` en el body: en JSON llega como `data:<mime>;base64,…` (sirve solo si la API acepta data URIs; nunca es una URL), en multipart como parte de archivo. |
+| Mandar la imagen generada a un webhook | `http_request` con `"$attachment:<document_id>"` en el body: en JSON llega como `data:<mime>;base64,…` (sirve solo si la API acepta data URIs; nunca es una URL), en multipart como parte de archivo. Si la API pide un link en vez del contenido (`image_url`, `file_url`), `"$attachment_url:<document_id>"` (§4, solo body JSON). |
 | Inspeccionar artifacts en dev | `COLMENA_LOCAL=true` activa el adapter de disco + server HTTP local. Files en `/tmp/colmena-out/`, URLs `http://127.0.0.1:8765/files/<key>`. |
 
 ## Architectural invariant
@@ -391,7 +391,7 @@ versiones anteriores) pierde contra cualquier otra, aunque sea más nueva (CHANG
 
 - tiene que ser un `document_id` de **esta** sesión (`__colmena_agent_session_id`); una clave de storage cruda o un id de otra sesión da `AttachmentResolveError: attachment not found`, sin leer nada;
 - el tamaño tope es `max_file_size_bytes` (100 MiB por defecto; si no, `FileTooLarge`);
-- el `data:` solo le sirve a una API que acepte data URIs. Si el campo pide una URL (`image_url`), `$attachment:` no la da;
+- el `data:` solo le sirve a una API que acepte data URIs. Si el campo pide una URL (`image_url`), `$attachment:` no la da: para eso está `$attachment_url:` (abajo);
 - sin registro de adjuntos (motor sin `AttachmentRegistry`), el id se lee como clave de storage (comportamiento previo).
 
 ```json
@@ -418,6 +418,42 @@ versiones anteriores) pierde contra cualquier otra, aunque sea más nueva (CHANG
 ```
 
 El LLM pasa `body: { image: "$attachment:img_chart_a1b2c3d4" }`. El engine resuelve a `body: { image: "data:image/png;base64,iVBORw0..." }` antes del POST. **El LLM ve solo el handle corto, nunca los bytes.**
+
+### 4. Mandar un link en vez de los bytes — `$attachment_url:<document_id>`
+
+Para una API que pide la URL del archivo y la baja ella (`image_url`, `file_url`, la entrada de un trabajo
+asíncrono), el LLM escribe `"$attachment_url:<document_id>"` como valor entero de un campo del body
+**JSON**. `http_request` busca el id en el registro de la sesión (igual que `$attachment:`) y le pide al
+storage del host una URL de lectura (`OutputStorageRepository::read_url(storage_key, ttl)`); la firma no
+vive en la librería.
+
+- **Solo hacia la dirección del autor, solo JSON.** `base_url`, `endpoint` y cualquier header `Host` tienen
+  que ser `config` o un `fixed` intacto de la tool; si alguno viene de datos, o la forma aparece en
+  `query_params` o en una parte multipart, el nodo falla antes de pedir la URL y antes de conectarse
+  (`needs a node configuration that fixes the request's address…` / `is accepted only as a whole string
+  value in a JSON body…`). `allowed_hosts` no cambia esto; el pedido nunca sigue una redirección a otro
+  origen.
+- **TTL.** `attachment_url_ttl_seconds` (del autor; entero positivo; 900 por defecto), leído solo cuando el
+  body trae la forma; reservado (nunca query param); el host puede recortarlo, la librería lo pasa tal cual.
+- **Nunca vuelve al modelo; host sin URLs.** Cada URL emitida (y su forma percent-encoded) vuelve como su
+  placeholder en la salida del nodo. Si `read_url` da `None` (p. ej. `LocalCacheStorageAdapter`), el nodo
+  falla con `this host does not provide attachment URLs; use "$attachment:<id>" for the bytes`.
+
+```json
+"node_schema": {
+  "base_url": { "type": "string", "fixed": "https://api.example.com" },
+  "endpoint": { "type": "string", "fixed": "/v1/image-jobs" },
+  "method": { "type": "string", "fixed": "POST" },
+  "attachment_url_ttl_seconds": { "type": "integer", "fixed": 3600 },
+  "body": { "type": "object", "properties": {
+    "image_url": { "type": "string", "required": true,
+      "description": "Link to the source image: \"$attachment_url:<document_id>\" of an image in this conversation." }
+  } }
+}
+```
+
+E2E: [`attachment_url_author_fixed_e2e.json`](../../tests/graphs/security/attachment_url_author_fixed_e2e.json),
+[`attachment_url_ttl_e2e.json`](../../tests/graphs/security/attachment_url_ttl_e2e.json).
 
 ## Universal binary scrubber
 
