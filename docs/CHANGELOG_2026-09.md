@@ -7032,3 +7032,13 @@ por `subprocess`; la variante en proceso, que hoy mezcla lo que imprimen, queda 
 de las cuatro tools tabulares quedan visibles para el test (`#[doc(hidden)] pub`). Este banco encontró el float que
 arregló §181. **Tests.** Contenedor root: 17/17 con `subprocess` y `MODES=all`; con la configuración por defecto no hay
 nada que comparar; con un preludio roto el banco falla (antes pasaba). **ADP.** Sin cambios. **Estado.** done.
+
+## 186. CI: las suites de Python corren con el executor aislado (Linux)
+
+**Qué cambia.** Job nuevo `python-executor` en `ci-develop.yml`: contenedor Debian bookworm con `CAP_SYS_ADMIN` (sin
+seccomp ni apparmor del runtime), pandas/numpy/scipy de Debian y un Postgres de servicio. Corre los tests unitarios del
+executor, las dos suites de la jaula (falla si alguna se saltó), `python_executor self-test`, las suites del nodo y de
+las tools de Python y el banco de equivalencia con `subprocess` y `MODES=all`, el banco con los modos por defecto y el
+grafo smoke con `subprocess` (cuatro llamadas `ok`). Es la primera vez que la jaula y el filtro de syscalls corren en
+x86_64. Cuatro tests de `gsheets_run_python` se saltan por nombre: con pandas fallan igual en todo executor (pendiente
+aparte). Guía 53: sección «Testing». **Tests.** El job mismo, en esta PR. **ADP.** Sin cambios. **Estado.** done.
