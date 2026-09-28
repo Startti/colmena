@@ -543,6 +543,12 @@ impl LlmNode {
         self
     }
 
+    /// The system message's attachments prelude: it teaches the URL form only
+    /// when this node's storage issues read URLs (`supports_read_url`).
+    fn attachments_section(&self) -> String {
+        attachments_prelude(self.storage.as_deref())
+    }
+
     /// A credential field (`api_key`, `connection_url`) read inputs-first; see
     /// [`crate::dag_engine::infrastructure::env_provenance::resolve_credential`].
     fn resolve_credential(
@@ -3446,9 +3452,7 @@ impl ExecutableNode for LlmNode {
                 sections.push(DOCUMENTS_SYSTEM_PRELUDE.to_string());
             }
             if !attachment_catalog.is_empty() {
-                // The URL form is taught only when this host's storage
-                // issues read URLs (`supports_read_url`).
-                sections.push(attachments_prelude(self.storage.as_deref()));
+                sections.push(self.attachments_section());
                 // Plan A: append the per-document catalog block so the LLM
                 // knows which `document_id`s are available in the session
                 // (for `load_attachment(...)` and `$attachment:<id>`
@@ -7679,6 +7683,30 @@ fn effective_subgraph_depth(inputs: &NodeInputs) -> u64 {
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
     inbound + u64::from(inputs.contains_key("__colmena_tool_name"))
+}
+
+/// The system message's attachments section follows the node's storage.
+#[cfg(test)]
+mod attachments_section_tests {
+    use super::*;
+    use crate::dag_engine::infrastructure::pool_registry::{PgPoolRegistry, PoolConfig};
+    use crate::dag_engine::infrastructure::registry::HashMapNodeRegistry;
+    use crate::storage::infrastructure::LocalHttpStorageAdapter;
+
+    #[tokio::test]
+    async fn the_url_form_is_taught_only_with_a_storage_that_issues_urls() {
+        let pools = Arc::new(PgPoolRegistry::new(PoolConfig::defaults()));
+        let registry: Weak<dyn NodeRegistryPort> = Weak::<HashMapNodeRegistry>::new();
+        let repos = Arc::new(ConversationRepositoryFactory::new(pools));
+        let llm = || LlmNode::new(repos.clone(), registry.clone(), None);
+        let dir = tempfile::TempDir::new().unwrap();
+        let local = LocalHttpStorageAdapter::new(dir.path().to_path_buf(), 0)
+            .await
+            .unwrap();
+        assert!(!llm().attachments_section().contains("$attachment_url:"));
+        let taught = llm().with_storage(Arc::new(local)).attachments_section();
+        assert!(taught.contains("\"$attachment_url:<document_id>\""));
+    }
 }
 
 #[cfg(test)]
