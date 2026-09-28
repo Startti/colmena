@@ -2,7 +2,7 @@
 //! variables once. An invalid value is an error, never a silent default.
 
 use crate::dag_engine::domain::python_executor::ExecutorKind;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
 pub const ENV_EXECUTOR: &str = "COLMENA_PYTHON_EXECUTOR";
@@ -86,8 +86,17 @@ fn parse_in<T: std::str::FromStr + PartialOrd>(
     }
 }
 
-/// Absolute paths separated by `:`. A relative one would be resolved against
-/// whatever directory the executor started in, not the path meant.
+/// Whether any component of `p` is `..`. A `..` component would let a
+/// configured path walk back out of what it looks like it names lexically
+/// (`/home/../etc/app.key`), which the self-test's nested-path exclusion
+/// reasons about by prefix, not by resolving the path.
+fn has_parent_dir_component(p: &Path) -> bool {
+    p.components().any(|c| c == Component::ParentDir)
+}
+
+/// Absolute paths separated by `:`, none with a `..` component. A relative
+/// one would be resolved against whatever directory the executor started in,
+/// not the path meant.
 fn hide_paths(get: &impl Fn(&str) -> Option<String>) -> Result<Vec<PathBuf>, ExecutorConfigError> {
     let Some(v) = get(ENV_HIDE_PATHS) else {
         return Ok(Vec::new());
@@ -98,13 +107,16 @@ fn hide_paths(get: &impl Fn(&str) -> Option<String>) -> Result<Vec<PathBuf>, Exe
         .filter(|p| !p.is_empty())
         .map(PathBuf::from)
         .collect();
-    if paths.iter().all(|p| p.is_absolute()) {
+    if paths
+        .iter()
+        .all(|p| p.is_absolute() && !has_parent_dir_component(p))
+    {
         return Ok(paths);
     }
     Err(invalid(
         ENV_HIDE_PATHS,
         &v,
-        "absolute paths separated by ':'",
+        "absolute paths separated by ':', none with a '..' component",
     ))
 }
 
@@ -257,6 +269,14 @@ mod tests {
     fn a_relative_hidden_path_is_an_error() {
         let e = cfg(&[(ENV_HIDE_PATHS, "/data:data")]).unwrap_err();
         assert!(e.0.contains(ENV_HIDE_PATHS), "{e}");
+    }
+
+    #[test]
+    fn a_hidden_path_with_a_parent_dir_component_is_an_error() {
+        let e = cfg(&[(ENV_HIDE_PATHS, "/home/../etc/app.key")]).unwrap_err();
+        assert!(e.0.contains(ENV_HIDE_PATHS), "{e}");
+        assert!(cfg(&[(ENV_HIDE_PATHS, "/data:/etc/../secret")]).is_err());
+        assert!(cfg(&[(ENV_HIDE_PATHS, "/data")]).is_ok());
     }
 
     #[test]

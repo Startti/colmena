@@ -13,8 +13,8 @@ use colmena::dag_engine::infrastructure::python_exec::protocol::result_too_large
 use colmena::dag_engine::infrastructure::python_exec::selftest;
 use colmena::dag_engine::infrastructure::python_exec::subprocess::SubprocessExecutor;
 use std::collections::BTreeSet;
-use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -376,6 +376,27 @@ async fn the_kernel_entries_of_proc_are_covered() {
 #[tokio::test]
 async fn a_call_cannot_create_a_message_queue_outside_its_namespace() {
     let Some(ex) = executor(1) else { return };
+    // Precondition: without a real /dev/mqueue here, the child's inability to
+    // create an entry there would prove nothing — assert this test's own
+    // process can, so a runner missing it can't pass vacuously.
+    let mqueue = Path::new("/dev/mqueue");
+    assert!(
+        mqueue.is_dir(),
+        "/dev/mqueue must exist as a directory in the test environment"
+    );
+    let probe = mqueue.join(format!(
+        "colmena-mqueue-precondition-{}",
+        std::process::id()
+    ));
+    std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .mode(0o600)
+        .open(&probe)
+        .unwrap_or_else(|e| panic!("cannot create an entry under /dev/mqueue here: {e}"));
+    std::fs::remove_file(&probe).unwrap();
+
     let path = format!("/dev/mqueue/colmena-test-{}", std::process::id());
     let code = format!(
         "import os\n\
@@ -425,12 +446,17 @@ fn the_self_test_proves_every_layer() {
 }
 
 /// A layer that cannot be applied fails the self-test: here a slot uid
-/// that does not fit, which is refused before anything else changes.
+/// that does not fit, which is refused before anything else changes. With
+/// only that one layer reported, the set is short of every other layer the
+/// probe would have added, so the report is also incomplete.
 #[test]
 fn the_self_test_fails_when_a_layer_cannot_be_applied() {
     let base = u32::MAX - selftest::SELF_TEST_SLOT;
     let (code, checks) = self_test(&["--uid-base", &base.to_string()]);
     let refused = serde_json::json!({"layer": "identity", "ok": false, "reason": "not_applied"});
+    let incomplete =
+        serde_json::json!({"layer": "self_test", "ok": false, "reason": "incomplete_report"});
     assert!(checks.contains(&refused), "{checks:#?}");
+    assert!(checks.contains(&incomplete), "{checks:#?}");
     assert_eq!(code, Some(3));
 }

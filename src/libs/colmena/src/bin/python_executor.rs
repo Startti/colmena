@@ -42,14 +42,22 @@ mod linux {
         },
     }
 
-    /// A relative path would be resolved against the working directory.
+    /// A relative path would be resolved against the working directory, and a
+    /// `..` component would let a path walk back out of what it looks like it
+    /// names lexically (`/home/../etc/app.key`), which the self-test's
+    /// nested-path exclusion reasons about by prefix, not by resolving it.
     fn absolute(s: &str) -> Result<PathBuf, String> {
         let path = PathBuf::from(s);
-        if path.is_absolute() {
-            Ok(path)
-        } else {
-            Err("expected an absolute path".into())
+        if !path.is_absolute() {
+            return Err("expected an absolute path".into());
         }
+        if path
+            .components()
+            .any(|c| c == std::path::Component::ParentDir)
+        {
+            return Err("must not contain a '..' component".into());
+        }
+        Ok(path)
     }
 
     pub fn main() -> i32 {
@@ -86,6 +94,28 @@ mod linux {
                 }
                 code
             }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn a_plain_absolute_path_is_accepted() {
+            assert_eq!(absolute("/data").unwrap(), PathBuf::from("/data"));
+        }
+
+        #[test]
+        fn a_relative_path_is_rejected() {
+            assert!(absolute("data").is_err());
+        }
+
+        #[test]
+        fn a_path_with_a_parent_dir_component_is_rejected() {
+            assert!(absolute("/home/../etc/app.key").is_err());
+            assert!(absolute("../etc/app.key").is_err());
+            assert!(absolute("/etc/app.key/..").is_err());
         }
     }
 }

@@ -6918,3 +6918,12 @@ hilo, no quiere ningún callsite y no sube ningún nivel; con él, el de la capt
 **Tests.** `a_warning_is_captured_even_when_another_thread_reached_it_first` fuerza ese orden: falla 20 de 20 sin el
 arreglo. Con el arreglo, 0 de 300 corridas de `graph_http_payload_tests` y 0 de 100 de `run_use_case`. Borrar el `warn!`
 de `log_author_set_key_kept` pone rojo a `a_dropped_author_set_key_is_logged`. **ADP.** Sin cambios. **Estado.** done.
+
+## 174. Python: las rutas tapadas rechazan `..` y el setup del self-test tiene sus propios códigos (Linux)
+
+**Qué cambia.** `…_HIDE_PATHS` y `--hide` rechazan una ruta con un componente `..` (el self-test salta las rutas
+anidadas bajo otra tapa con una comparación de prefijo). Si la plantilla no puede leer sus namespaces, su tabla de
+montajes o su tamaño, el self-test lo dice con `namespace_unreadable`, `mounts_unreadable` o `vm_size_unreadable`;
+`missing_layer` pasa a llamarse `incomplete_report`. **Tests.** Contenedor root: el test de `/dev/mqueue` comprueba antes
+que el directorio exista y acepte una entrada; la lectura de `/proc/net/dev`, la exclusión de rutas anidadas y el
+rechazo de `..` tienen tests unitarios que corren en CI. **ADP.** Sin cambios. **Estado.** done.
