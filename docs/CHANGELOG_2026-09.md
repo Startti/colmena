@@ -6949,3 +6949,13 @@ Dependencia nueva solo en Linux x86_64/aarch64: `seccompiler` 0.5. `subprocess` 
 **Tests.** Contenedor root: self-test 26/26; hilos dentro del hijo; una llamada no puede crear un proceso; la limpieza
 por uid mata un proceso que quedó con el uid del slot; quitar el filtro o la regla de `clone` hace fallar su capa. Los
 tres programas tienen tests unitarios que corren en CI. **ADP.** Sin cambios. **Estado.** done.
+
+## 177. `data_run_python` recibe los valores reales de los identificadores seguros
+
+**Qué cambia.** `data_run_python` se despacha antes de la inyección genérica de secretos, así que un `<value_N>` en sus
+argumentos (por ejemplo, un binding `data` con la salida segura de otra tool) llegaba a Python como el texto literal del
+identificador. Ahora la rama de `data_run_python` resuelve los identificadores en sus argumentos y enmascara los valores
+descifrados en el resultado que ve el LLM, igual que la ruta genérica.
+**Tests.** `data_run_python_resolves_secure_value_handles_in_its_args` (ignorado en CI porque necesita pandas): Python
+recibe el valor descifrado y el resultado lo muestra enmascarado. Sin el arreglo, Python veía `<sv_tok_1>`.
+**ADP.** Sin cambios de API. **Estado.** done.
