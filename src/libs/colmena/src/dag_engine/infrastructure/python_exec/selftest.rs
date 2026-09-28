@@ -6,9 +6,10 @@
 use super::child::CallHeader;
 use super::jail::{self, JailSpec, CHANNEL_FD, DEFAULT_HIDDEN, NOFILE, NPROC};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::os::unix::io::{FromRawFd, IntoRawFd};
 use std::os::unix::net::UnixStream;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -26,6 +27,29 @@ const HEADER: CallHeader = CallHeader {
 /// A probe still running after this counts as failed.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(30);
 const CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
+/// Every layer a complete report carries, the template's own check last. A
+/// report with any other set of layers fails.
+pub const LAYERS: &[&str] = &[
+    "descriptors",
+    "identity",
+    "no_new_privs",
+    "parent_death_signal",
+    "limit_memory",
+    "limit_cpu",
+    "limit_file_size",
+    "limit_open_files",
+    "limit_processes",
+    "limit_core",
+    "proc_processes",
+    "proc_entries",
+    "hidden_paths",
+    "private_tmp",
+    "network_dns",
+    "network_loopback",
+    "network_link_local",
+    "network_public",
+    "mount_namespace",
+];
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LayerCheck {
@@ -51,10 +75,12 @@ fn check(layer: &str, ok: bool, held: &str, failed: &str) -> LayerCheck {
     outcome(layer, if ok { held } else { failed }, held)
 }
 
-fn failure(layer: &str, reason: &str, e: &io::Error) -> LayerCheck {
+fn failure(layer: &str, reason: &str, errno: Option<i32>) -> LayerCheck {
     LayerCheck {
-        errno: e.raw_os_error(),
-        ..outcome(layer, reason, "")
+        layer: layer.into(),
+        ok: false,
+        reason: reason.into(),
+        errno,
     }
 }
 
@@ -63,6 +89,8 @@ struct Before {
     /// A listener in the template's network namespace.
     loopback_port: u16,
     tmp_dev: u64,
+    /// The hidden paths to check, each directory with its device.
+    hidden: Vec<(PathBuf, Option<u64>)>,
 }
 
 /// Besides the channel only 0, 1 and 2 are open, and they are the null device.
@@ -161,6 +189,57 @@ fn covered(path: &Path) -> bool {
     }
 }
 
+/// Every hidden path: the defaults, then the configured ones.
+fn all_hidden(spec: &JailSpec) -> impl Iterator<Item = PathBuf> + '_ {
+    let defaults = DEFAULT_HIDDEN.iter().map(PathBuf::from);
+    defaults.chain(spec.hide_paths.iter().cloned())
+}
+
+/// An entry of the fresh `/proc`, checked as `proc_entries`.
+fn in_proc(path: &Path) -> bool {
+    path.starts_with("/proc") && path != Path::new("/proc")
+}
+
+/// The hidden paths the template sees, each directory with its device, which
+/// its cover replaces. Not those under `/tmp` or under another hidden path:
+/// that cover hides them already.
+fn hidden_before(spec: &JailSpec) -> Vec<(PathBuf, Option<u64>)> {
+    let all: Vec<PathBuf> = all_hidden(spec).filter(|p| !in_proc(p)).collect();
+    let tmp = Path::new("/tmp");
+    let covers = || all.iter().map(PathBuf::as_path).chain([tmp]);
+    let nested = |p: &Path| covers().any(|c| c != p && p.starts_with(c));
+    let seen = |p: &PathBuf| {
+        let meta = std::fs::metadata(p).ok()?;
+        Some((p.clone(), meta.is_dir().then(|| meta.dev())))
+    };
+    let checked = all.iter().filter(|p| p.as_path() != tmp && !nested(p));
+    checked.filter_map(seen).collect()
+}
+
+/// Nothing of a hidden path shows: a directory is another filesystem, its
+/// cover; anything else is the null device, which does not open there. A
+/// path gone since the template looked is covered from above.
+fn hidden_paths(hidden: &[(PathBuf, Option<u64>)]) -> LayerCheck {
+    let shown = |(path, dev): &(PathBuf, Option<u64>)| {
+        let meta = match std::fs::metadata(path) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return None,
+            Err(_) => return Some("unverified"),
+            Ok(meta) => meta,
+        };
+        let covered = match dev {
+            Some(dev) => meta.dev() != *dev,
+            None => {
+                meta.file_type().is_char_device()
+                    && meta.rdev() == libc::makedev(1, 3)
+                    && std::fs::File::open(path).is_err()
+            }
+        };
+        (!covered).then_some("uncovered")
+    };
+    let reason = hidden.iter().find_map(shown).unwrap_or("covered");
+    outcome("hidden_paths", reason, "covered")
+}
+
 /// Four network routes, each checked on its own. The loopback listener is the
 /// template's: only a network namespace of the probe's own keeps it
 /// unreachable.
@@ -186,18 +265,9 @@ fn probe(spec: &JailSpec, before: &Before) -> Vec<LayerCheck> {
     out.extend(privileges());
     out.extend(limits(spec));
     out.push(own_processes_only());
-    let (in_proc, others): (Vec<&str>, Vec<&str>) = DEFAULT_HIDDEN
-        .iter()
-        .copied()
-        .partition(|p| p.starts_with("/proc/"));
-    let proc_covered = in_proc.iter().all(|p| covered(Path::new(p)));
+    let proc_covered = all_hidden(spec).filter(|p| in_proc(p)).all(|p| covered(&p));
     out.push(check("proc_entries", proc_covered, "covered", "readable"));
-    let mut hidden = others
-        .into_iter()
-        .map(PathBuf::from)
-        .chain(spec.hide_paths.iter().cloned());
-    let hidden_covered = hidden.all(|p| covered(&p));
-    out.push(check("hidden_paths", hidden_covered, "covered", "readable"));
+    out.push(hidden_paths(&before.hidden));
     let in_tmp = std::env::current_dir().is_ok_and(|d| d == Path::new("/tmp"));
     let fresh = std::fs::metadata("/tmp").is_ok_and(|m| m.dev() != before.tmp_dev);
     out.push(check("private_tmp", in_tmp && fresh, "private", "shared"));
@@ -224,7 +294,7 @@ fn probe_in_child(spec: &JailSpec, before: &Before, channel: UnixStream) -> bool
             let _ = channel.into_raw_fd();
             probe(spec, before)
         }
-        Err(e) => vec![failure(e.layer, "not_applied", &e.source)],
+        Err(e) => vec![failure(e.layer, "not_applied", e.source.raw_os_error())],
     };
     let mut channel = unsafe { UnixStream::from_raw_fd(CHANNEL_FD) };
     serde_json::to_vec(&checks).is_ok_and(|report| channel.write_all(&report).is_ok())
@@ -254,15 +324,16 @@ pub fn run(spec: &JailSpec) -> Result<Vec<LayerCheck>, Vec<LayerCheck>> {
         let before = Before {
             loopback_port: listener.local_addr()?.port(),
             tmp_dev: std::fs::metadata("/tmp")?.dev(),
+            hidden: hidden_before(spec),
         };
         Ok((listener, before, ours, theirs))
     };
     let (listener, before, mut ours, theirs) =
-        setup().map_err(|e| vec![failure("self_test", "setup_failed", &e)])?;
+        setup().map_err(|e| vec![failure("self_test", "setup_failed", e.raw_os_error())])?;
     let pid = match unsafe { libc::fork() } {
         -1 => {
             let e = io::Error::last_os_error();
-            return Err(vec![failure("self_test", "fork_failed", &e)]);
+            return Err(vec![failure("self_test", "fork_failed", e.raw_os_error())]);
         }
         0 => {
             drop(ours);
@@ -285,12 +356,17 @@ pub fn run(spec: &JailSpec) -> Result<Vec<LayerCheck>, Vec<LayerCheck>> {
     let exited = wait(pid).is_some_and(|s| libc::WIFEXITED(s) && libc::WEXITSTATUS(s) == 0);
     drop(listener);
     let mut checks: Vec<LayerCheck> = serde_json::from_slice(&report).unwrap_or_default();
-    if checks.is_empty() || !exited {
-        checks.push(check("self_test", false, "reported", "no_report"));
-    }
+    let reported = exited && !checks.is_empty();
     // The child's mounts stayed in its own namespace.
     let kept = std::fs::metadata("/tmp").is_ok_and(|m| m.dev() == before.tmp_dev);
     checks.push(check("mount_namespace", kept, "private", "propagated"));
+    let layers: BTreeSet<&str> = checks.iter().map(|c| c.layer.as_str()).collect();
+    let complete = layers == LAYERS.iter().copied().collect();
+    if !reported {
+        checks.push(failure("self_test", "no_report", None));
+    } else if !complete {
+        checks.push(failure("self_test", "missing_layer", None));
+    }
     if checks.iter().all(|c| c.ok) {
         Ok(checks)
     } else {

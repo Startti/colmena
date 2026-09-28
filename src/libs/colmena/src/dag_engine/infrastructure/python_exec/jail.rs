@@ -25,6 +25,8 @@ pub const DEFAULT_HIDDEN: &[&str] = &[
     "/run",
     "/var/tmp",
     "/dev/shm",
+    // The message queues of the IPC namespace that mounted it, not the child's.
+    "/dev/mqueue",
     "/srv",
     "/mnt",
     "/proc/acpi",

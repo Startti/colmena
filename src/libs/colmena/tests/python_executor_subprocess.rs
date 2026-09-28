@@ -12,6 +12,7 @@ use colmena::dag_engine::infrastructure::python_exec::inprocess::InProcessExecut
 use colmena::dag_engine::infrastructure::python_exec::protocol::result_too_large_message;
 use colmena::dag_engine::infrastructure::python_exec::selftest;
 use colmena::dag_engine::infrastructure::python_exec::subprocess::SubprocessExecutor;
+use std::collections::BTreeSet;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -369,6 +370,27 @@ async fn the_kernel_entries_of_proc_are_covered() {
     assert_eq!(r.output, Some(serde_json::json!([[], [3.0, 3.0], 0.5])));
 }
 
+/// A path under /dev/mqueue reaches the message queues of the IPC namespace
+/// that mounted it, not the child's own: it is covered, so a call cannot
+/// create a queue there.
+#[tokio::test]
+async fn a_call_cannot_create_a_message_queue_outside_its_namespace() {
+    let Some(ex) = executor(1) else { return };
+    let path = format!("/dev/mqueue/colmena-test-{}", std::process::id());
+    let code = format!(
+        "import os\n\
+         try:\n\
+         \x20   os.close(os.open({path:?}, os.O_CREAT | os.O_RDWR, 0o600))\n\
+         \x20   output = 'created'\n\
+         except OSError:\n\
+         \x20   output = 'refused'"
+    );
+    let r = ex.run(req(&code, 10)).await.unwrap().output;
+    // Removed from here as well, so a queue the call did create does not stay.
+    let left = std::fs::remove_file(&path).is_ok();
+    assert_eq!((r, left), (Some(serde_json::json!("refused")), false));
+}
+
 /// Runs `python_executor self-test` with `args`: its exit code and checks.
 fn self_test(args: &[&str]) -> (Option<i32>, Vec<serde_json::Value>) {
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_python_executor"))
@@ -381,33 +403,23 @@ fn self_test(args: &[&str]) -> (Option<i32>, Vec<serde_json::Value>) {
     (out.status.code(), checks.collect())
 }
 
-/// Every layer holds, a configured file among the hidden paths.
+/// Every layer reports and holds, a configured file among the hidden paths.
 #[test]
 fn the_self_test_proves_every_layer() {
     if !jail_tests_enabled() {
         return;
     }
-    let temp = tempfile::NamedTempFile::new_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    // Under no directory the jail covers, whose cover would hide the file
+    // before its own. The name is unique, and the file goes when `temp` drops.
+    let temp = tempfile::Builder::new()
+        .prefix("colmena-selftest-")
+        .tempfile_in("/opt")
+        .unwrap();
     std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o644)).unwrap();
     let file = temp.path().to_str().unwrap();
     let (code, checks) = self_test(&["--uid-base", "50000", "--hide", file]);
-    let layers: Vec<&str> = checks.iter().filter_map(|c| c["layer"].as_str()).collect();
-    for layer in [
-        "descriptors",
-        "identity",
-        "no_new_privs",
-        "limit_memory",
-        "proc_processes",
-        "proc_entries",
-        "hidden_paths",
-        "private_tmp",
-        "network_dns",
-        "network_loopback",
-        "network_public",
-        "mount_namespace",
-    ] {
-        assert!(layers.contains(&layer), "{layer} not checked: {layers:?}");
-    }
+    let layers: BTreeSet<&str> = checks.iter().filter_map(|c| c["layer"].as_str()).collect();
+    assert_eq!(layers, selftest::LAYERS.iter().copied().collect());
     assert!(checks.iter().all(|c| c["ok"] == true), "{checks:#?}");
     assert_eq!(code, Some(0));
 }
