@@ -5,8 +5,8 @@
 
 **How to use (for the exploration/spec phase):** before opening files to assess a change, look up the target file below. **Used by** is its blast radius — the files that break if you change its public surface. **Depends on** is what it needs. Start by reading only those, not the whole repo.
 
-- Files indexed: **405**
-- Modules with at least one importer: **188**
+- Files indexed: **406**
+- Modules with at least one importer: **189**
 
 ## Blast-radius ranking (change these with the most care)
 
@@ -1517,12 +1517,12 @@
 
 #### `src/libs/colmena/src/llm/domain/decision_model.rs`
 - Module: `llm::domain::decision_model`
-- **Used by (1)**: `src/libs/colmena/src/llm/domain/decision_model_repository.rs`
+- **Used by (2)**: `src/libs/colmena/src/llm/domain/decision_model_repository.rs`, `src/libs/colmena/src/llm/infrastructure/typesafe_jev_adapter.rs`
 - Depends on (0): — (no intra-crate imports)
 
 #### `src/libs/colmena/src/llm/domain/decision_model_repository.rs`
 - Module: `llm::domain::decision_model_repository`
-- **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
+- **Used by (1)**: `src/libs/colmena/src/llm/infrastructure/typesafe_jev_adapter.rs`
 - Depends on (1): `llm::domain::decision_model`
 
 #### `src/libs/colmena/src/llm/domain/file_cache_repository.rs`
@@ -1844,6 +1844,11 @@
 - Module: `llm::infrastructure::tts_provider_factory`
 - **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
 - Depends on (2): `llm::domain::tts_repository`, `llm::infrastructure`
+
+#### `src/libs/colmena/src/llm/infrastructure/typesafe_jev_adapter.rs`
+- Module: `llm::infrastructure::typesafe_jev_adapter`
+- **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
+- Depends on (2): `llm::domain::decision_model`, `llm::domain::decision_model_repository`
 
 #### `src/libs/colmena/src/llm/mod.rs`
 - Module: `llm`

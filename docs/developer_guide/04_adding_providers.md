@@ -126,4 +126,9 @@ como `NodeEvent::LlmUsage` (prompt y completion).
 Este modelo no escribe texto: solo elige entre lo que se le ofrece. Para extraer un valor del texto,
 el código propone los candidatos y el modelo elige uno. Si el valor correcto puede no estar entre los
 candidatos, incluí una opción de escape: sin ella, el modelo elige igual la opción más parecida.
-El primer adapter es TypeSafe Jev (ver `CHANGELOG_2026-09.md` §182).
+El primer adapter es TypeSafe Jev (`llm/infrastructure/typesafe_jev_adapter.rs`), que se construye
+con `TypesafeJevAdapter::new(api_key)`. Hace `POST https://api.typesafe.ai/v1/systemone`
+con `Authorization: Bearer <api_key>`, timeout de 10 s y sin reintentos: un error del proveedor falla
+la llamada. La `api_key` es obligatoria y explícita (por ejemplo `"${TYPESAFE_API_KEY}"`); vacía, es un
+error de configuración que nombra `TYPESAFE_API_KEY`. Un status que no es 2xx es `Upstream`; un 200
+que no se entiende es `MalformedResponse`.

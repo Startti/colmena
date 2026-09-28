@@ -7058,3 +7058,23 @@ las tools de Python y el banco de equivalencia con `subprocess` y `MODES=all`, e
 grafo smoke con `subprocess` (cuatro llamadas `ok`). Es la primera vez que la jaula y el filtro de syscalls corren en
 x86_64. Cuatro tests de `gsheets_run_python` se saltan por nombre: con pandas fallan igual en todo executor (pendiente
 aparte). Guía 53: sección «Testing». **Tests.** El job mismo, en esta PR. **ADP.** Sin cambios. **Estado.** done.
+
+## 188. Adapter TypeSafe Jev para `DecisionModelRepository` (Jev, 2/7)
+
+**Qué cambia.** El puerto de §182 tiene su primer adapter: `TypesafeJevAdapter`
+(`llm/infrastructure/typesafe_jev_adapter.rs`), con el camino feliz. Hace `POST /v1/systemone` con
+Bearer, timeout de 10 s y sin reintentos, y traduce las respuestas noul/choice/score con su `usage`.
+Una `api_key` vacía es un error de configuración que nombra `TYPESAFE_API_KEY`. Por ahora todo status
+no 2xx es `Upstream`: el mapeo fino de errores, los límites del proveedor y la factory llegan en el cambio siguiente.
+Guía: `developer_guide/04_adding_providers.md` §5.
+
+**Tests.** `typesafe_jev_adapter.rs` con wiremock y respuestas capturadas del API real: forma exacta del
+request (noul con y sin criterios, choice con descripción y `null`, score), header Bearer, respuestas
+choice/noul/score con `usage`, y un 503 como `Upstream`.
+
+**E2E.** Todavía ningún nodo usa el adapter. La evidencia contra el servicio real es
+`live_choice_call_against_typesafe` (`#[ignore]`, requiere `TYPESAFE_API_KEY`). El grafo E2E llega con
+el modo del `router`.
+
+**ADP.** Sin impacto: sin cambios de API pública, bindings ni SSE.
+**Estado.** done.
