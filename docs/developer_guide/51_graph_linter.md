@@ -735,6 +735,17 @@ archivos reales, la regla lo reporta por las dos puertas
 esa comprobación dio *perdido* y era la mutación, no la regla: había caído en un nodo
 `input`, que acepta cualquier clave por diseño.
 
+### Un `router` en modo `decision_model` que el motor rechaza
+
+`Graph::validate()` y el linter llaman a la misma `router_rules::decision_model_rejection`, así que
+reportan exactamente lo que el motor va a rechazar al cargar:
+
+```
+  error [INVALID_FIELD_VALUE] node "route": RouterConfigError: fallback_branch 'nobody' does not name a declared branch; the engine refuses this graph at load
+
+  1 error(s), 0 warning(s), 0 info
+```
+
 ### Un node id que el motor rechaza
 
 [`19_invalid_node_id.json`](../../tests/lint_examples/19_invalid_node_id.json) — El motor reserva `/` para calificar paths de subgrafo. Es la única compuerta de `Graph::validate()` que no es sobre una entrada de tool, y por eso fue la última en espejarse.
@@ -893,10 +904,12 @@ claves que se perdían.
 - **El linter espeja ahora TODAS las compuertas de `Graph::validate()`.** Las seis de
   una entrada de tool —`node_schema` ilegible, `memory_mode` fuera del enum, sobre un
   tipo de nodo sin memoria, con memoria y sin `connection_url`, un bloque `mcp`
-  malformado o con URL no-HTTPS, y un `parallel` que no es booleano— y la séptima, la
-  única que no es sobre una tool: un node id que contiene `/`.
+  malformado o con URL no-HTTPS, y un `parallel` que no es booleano—, la séptima, un
+  node id que contiene `/`, y la octava, las reglas del modo `decision_model` del
+  `router` (`fallback_branch` ausente o no declarada, `none_of_these` reservado,
+  `min_confidence` fuera de `(0, 1]`).
 
-  Cinco de las siete **llaman a la misma función de dominio** que usa el motor, así que
+  Seis de las ocho **llaman a la misma función de dominio** que usa el motor, así que
   no pueden divergir. Las dos restantes no tienen función de dominio: `graph.rs`
   deserializa el enum `memory_mode` inline y chequea `parallel` con `is_boolean()`, y el
   linter hace lo mismo.

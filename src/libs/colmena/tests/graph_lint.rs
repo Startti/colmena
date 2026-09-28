@@ -2611,3 +2611,48 @@ fn a_field_with_no_catalog_example_gets_no_invented_one() {
         "an undocumented field has no example to cite"
     );
 }
+
+/// `Graph::validate` refuses a `decision_model` router whose `fallback_branch`
+/// is missing or undeclared, so the linter reports it before a run. The catalog
+/// keeps `api_key` required in every mode, so its absence is still reported.
+#[test]
+fn a_decision_model_router_breaking_its_rules_is_reported() {
+    let branches = serde_json::json!([
+        { "name": "refund", "description": "wants money back" },
+        { "name": "human", "description": "needs a person" }
+    ]);
+    let report = lint_json(serde_json::json!({
+        "nodes": { "route": { "type": "router", "config": {
+            "mode": "decision_model", "provider": "typesafe",
+            "fallback_branch": "nobody", "branches": branches
+        } } },
+        "edges": []
+    }));
+    let d = report
+        .diagnostics
+        .iter()
+        .find(|d| d.message.contains("fallback_branch 'nobody'"))
+        .expect("the engine refuses this graph at load");
+    assert_eq!(
+        (d.node_id.as_deref(), d.severity),
+        (Some("route"), Severity::Error)
+    );
+    let missing = find(&report, DiagnosticCode::MissingRequiredField).expect("api_key is required");
+    assert_eq!(missing.field.as_deref(), Some("api_key"));
+
+    let clean = lint_json(serde_json::json!({
+        "nodes": { "route": { "type": "router", "config": {
+            "mode": "decision_model", "provider": "typesafe", "api_key": "${TYPESAFE_API_KEY}",
+            "fallback_branch": "human", "branches": branches
+        } } },
+        "edges": []
+    }));
+    assert!(
+        !clean
+            .diagnostics
+            .iter()
+            .any(|d| d.severity == Severity::Error),
+        "{:?}",
+        clean.diagnostics
+    );
+}
