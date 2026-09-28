@@ -86,6 +86,46 @@ impl AttachmentStreamResolver for AttachmentStreamResolverImpl {
             document_id: document_id.to_string(),
         })
     }
+
+    async fn resolve_url(
+        &self,
+        agent_session_id: &str,
+        document_id: &str,
+        ttl_seconds: u64,
+    ) -> Result<Option<String>, AttachmentResolveError> {
+        // Same lookup as `resolve`: an id the session's registry does not
+        // know is NotFound, and storage is not asked for a URL.
+        let row = self
+            .registry
+            .lookup_by_document_id(agent_session_id, document_id)
+            .await?
+            .ok_or_else(|| AttachmentResolveError::NotFound {
+                document_id: document_id.to_string(),
+            })?;
+        let key = row
+            .storage_key
+            .ok_or_else(|| AttachmentResolveError::StorageKeyMissing {
+                document_id: document_id.to_string(),
+            })?;
+        let url = self.storage.read_url(&key, ttl_seconds).await?;
+        // A URL handed out is a use: the GC (days since the last use) keeps
+        // the object well past the URL's life. Best-effort, like `resolve`.
+        if url.is_some() {
+            if let Err(e) = self
+                .registry
+                .touch_last_used(agent_session_id, document_id)
+                .await
+            {
+                tracing::warn!(
+                    target: "colmena::attachment",
+                    error = %e,
+                    document_id = %document_id,
+                    "touch_last_used failed (non-fatal)"
+                );
+            }
+        }
+        Ok(url)
+    }
 }
 
 #[cfg(test)]
@@ -213,5 +253,32 @@ mod tests {
             "expected StorageKeyMissing, got {:?}",
             err
         );
+    }
+
+    #[tokio::test]
+    async fn resolve_url_asks_storage_for_the_rows_key_with_the_ttl() {
+        let reg = SqliteAttachmentRegistry::new("sqlite::memory:")
+            .await
+            .unwrap();
+        reg.upsert(base_upsert("agent_x", "doc-1", Some("sk-1".to_string())))
+            .await
+            .unwrap();
+        let mut storage = MockOutputStorageRepository::new();
+        storage
+            .expect_read_url()
+            .withf(|key: &str, ttl: &u64| key == "sk-1" && *ttl == 3600)
+            .times(1)
+            .returning(|_, _| Ok(Some("https://files.test/sk-1?sig=x".to_string())));
+        let reg: Arc<dyn AttachmentRegistry> = Arc::new(reg);
+        let resolver = AttachmentStreamResolverImpl::new(reg.clone(), Arc::new(storage));
+
+        let url = resolver
+            .resolve_url("agent_x", "doc-1", 3600)
+            .await
+            .unwrap();
+        assert_eq!(url.as_deref(), Some("https://files.test/sk-1?sig=x"));
+        // A URL handed out is a use: the GC counts days since the last one.
+        let row = reg.lookup_by_document_id("agent_x", "doc-1").await.unwrap();
+        assert!(row.expect("row").last_used_at.is_some());
     }
 }
