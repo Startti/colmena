@@ -13,6 +13,7 @@
 - `StubResolver` (struct, test-only) — Mock implementation of `AttachmentStreamResolver` for testing
 
 ### Constants
+- `ATTACHMENT_URL_PLACEHOLDER_PREFIX` (const str) — `"$attachment_url:"`, the whole-string form of a session attachment's read URL in a JSON body
 - `ATTACHMENT_PLACEHOLDER_PREFIX` (const str) — `"$attachment:"`
 - `URL_HTTP_PREFIX` (const str) — `"http://"`
 - `URL_HTTPS_PREFIX` (const str) — `"https://"`
@@ -28,6 +29,7 @@
 - `HttpNode::with_oauth_cache()` (fn, pub) — Wire shared OAuth provider cache for refresh_token grant
 
 ### Helpers (Private)
+- `has_attachment_url()` / `address_is_authored()` / `scrub_forms()` / `scrub_text()` / `scrub_issued_urls()` / `scrub_error()` — guards of the attachment URL form: a whole-string `$attachment_url:` value in a JSON body; only toward a `base_url`+`endpoint` the author fixed (checked before any `$attachment:` read and before connecting); no redirect for such a request; every issued URL, and its long query values, in the forms an echo writes (JSON-encoded, HTML, percent-encoded) come back as the placeholder in output and error texts. The form itself is refused until the URL is issued (CHANGELOG 2026-09 §180)
 - `HttpNode::is_engine_internal()` (fn, private) — Check if key is engine-injected bookkeeping (`__colmena*` or `__node*`)
 - `HttpNode::collect_extra_query_params()` (fn, private) — Filter inputs to extract non-reserved primitives for query string
 - `HttpNode::resolve_env_vars()` (fn, private) — Replace `${VAR_NAME}` with `std::env::var`; returns error if var not found
@@ -56,6 +58,7 @@
 - `filename_from_url_path()` (fn, private) — Extract last URL path segment (URL-decoded) as fallback filename; falls back to `"file"` if empty
 
 ### Test Modules
+- `attachment_url_tests` (mod, cfg(test)) — scrub forms table, author-address table, whole-string detection; the form is refused and nothing is sent; the address is checked before any attachment is read
 - `attachment_placeholder_tests` (mod, cfg(test)) — 3 tests: placeholder resolution to data: URI, no placeholder pass-through, error without storage
 - `multipart_detection_tests` (mod, cfg(test)) — 6 tests: case-insensitive detection, boundary param, various MIME types, non-multipart rejection
 - `multipart_body_parser_tests` (mod, cfg(test)) — 8 tests: string URL/attachment/text classification, arrays, explicit objects with overrides, null handling, malformed rejection
