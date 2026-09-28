@@ -120,24 +120,31 @@ read-only `nodev` `/dev/null`, a missing path is skipped) covered, `/dev/mqueue`
 not cover a message-queue filesystem mounted there); one unprivileged uid/gid per slot (`uid_base + slot`, 20000 by
 default); `no_new_privs` and death with the template; limits on address space (the template's size plus
 `…_MEMORY_MB`), CPU seconds, file size, descriptors, processes and core files. A failed step ends the child (exit 71)
-before any code runs. There is no syscall filter yet. The template needs root and `CAP_SYS_ADMIN`; without them every
+before any code runs. The last step is a syscall filter: creating sockets, starting processes or programs (`fork`,
+`clone` without `CLONE_THREAD`, `execve`), tracing, mounts, namespaces, keyrings, BPF, `io_uring`, and module, swap and
+reboot calls return `EPERM`; `clone3` returns `ENOSYS`, so threads are created through `clone`; on x86_64 every x32
+syscall number returns `EPERM`; other architectures have no filter and the jail does not start. Threads work. Code that
+uses `multiprocessing`, `subprocess`, an `asyncio` event loop (its self-pipe is a socket pair) or a library that probes
+the system with a subprocess gets a `PermissionError` or `OSError`. The template needs root and `CAP_SYS_ADMIN`; without them every
 call ends with the crashed text. The uid range `uid_base..uid_base+slots` must belong to one executor per PID
 namespace and to no real user.
 
-Processes a call starts end with the call: before a slot is reused, everything running as its uid is stopped (and
-the template reaps the orphans). If that cannot be done even on a second try, the slot is retired; once none is left,
+A call cannot start a process. As a second line, before a slot is reused, everything running as its uid is stopped
+(and the template reaps the orphans). If that cannot be done even on a second try, the slot is retired; once none is left,
 calls fail with `PythonExecutorError: no usable Python slot is left…` until the process restarts. The host signals a
 call's child through a pidfd (the pid when pidfds are unavailable).
 
 ### Startup self-test (Linux)
 
 Before it binds its socket, the template forks a throwaway child that enters the jail as slot 9999 (uid
-`uid_base + 9999`, reserved) and checks 24 layers by their effect: descriptors, uid/gid, `no_new_privs`, the
+`uid_base + 9999`, reserved) and checks 26 layers by their effect: descriptors, uid/gid, `no_new_privs`, the
 parent-death signal, each limit (the address space within the template's size plus the call's budget), each namespace
 by its `/proc/self/ns` inode (network, mount, IPC and UTS differ from the template's), the private `/proc` (the
 template's pid hidden, masked entries covered), the covered paths (a directory is on another device; a file is the
-read-only `/dev/null` and cannot be opened), a private `/tmp`, no network (DNS, loopback, link-local and a public
-address unreachable; only `lo` and the kernel's per-namespace fallback tunnel devices listed) and, from the template
+read-only `/dev/null` and cannot be opened), a private `/tmp`, the syscall filter (a socket and a new process are
+refused with `EPERM`; on x86_64 an x32-numbered socket call too), no network (DNS, loopback, link-local and a public
+address unreachable, though with the filter `socket()` is refused before any route is tried; only `lo` and the
+kernel's per-namespace fallback tunnel devices listed) and, from the template
 once the probe is done, no mount added to its namespace. Each result is a JSON line `{layer, ok, reason, errno?}`
 with fixed reason codes. A report that does not carry exactly these layers fails as `incomplete_report`; a template
 that cannot read its own namespaces, mounts or size fails as `namespace_unreadable`, `mounts_unreadable` or

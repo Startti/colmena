@@ -9,6 +9,22 @@ pub mod inprocess;
 #[cfg(target_os = "linux")]
 pub mod jail;
 pub mod protocol;
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+pub mod seccomp;
+/// No syscall filter is built for other architectures: installing one fails,
+/// so the jail step fails and the template does not start.
+#[cfg(all(
+    target_os = "linux",
+    not(any(target_arch = "x86_64", target_arch = "aarch64"))
+))]
+pub mod seccomp {
+    pub fn apply() -> std::io::Result<()> {
+        Err(std::io::Error::from_raw_os_error(libc::ENOSYS))
+    }
+}
 #[cfg(target_os = "linux")]
 pub mod selftest;
 #[cfg(target_os = "linux")]

@@ -6937,3 +6937,15 @@ de más de 100 K filas (120 K consumos de Truora) ya no se corta al leer. `attac
 mantienen los 100 K.
 **Tests.** El mismo CSV de 150 filas se rechaza con tope 100 y carga con tope 200.
 **ADP.** Sin cambios de API. **Estado.** done.
+
+## 176. Python: la jaula termina con un filtro de syscalls (Linux)
+
+**Qué cambia.** Último paso de la jaula: sockets, procesos nuevos y programas (`fork`, `clone` sin `CLONE_THREAD`,
+`execve`), trazado, montajes, namespaces, llaveros, BPF, `io_uring` y llamadas de módulos, swap y reinicio devuelven
+`EPERM`; `clone3` devuelve `ENOSYS` para que los hilos se creen por `clone`; en x86_64 todo número de syscall x32
+devuelve `EPERM`; en otras arquitecturas no hay filtro y la jaula no arranca. Los hilos funcionan; `multiprocessing`,
+`subprocess` y un loop de `asyncio` fallan con `PermissionError`/`OSError`. El self-test suma dos capas (26).
+Dependencia nueva solo en Linux x86_64/aarch64: `seccompiler` 0.5. `subprocess` sigue sin poder elegirse.
+**Tests.** Contenedor root: self-test 26/26; hilos dentro del hijo; una llamada no puede crear un proceso; la limpieza
+por uid mata un proceso que quedó con el uid del slot; quitar el filtro o la regla de `clone` hace fallar su capa. Los
+tres programas tienen tests unitarios que corren en CI. **ADP.** Sin cambios. **Estado.** done.
