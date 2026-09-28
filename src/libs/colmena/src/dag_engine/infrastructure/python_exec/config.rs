@@ -15,6 +15,7 @@ pub const ENV_MEMORY_MB: &str = "COLMENA_PYTHON_EXECUTOR_MEMORY_MB";
 pub const ENV_HIDE_PATHS: &str = "COLMENA_PYTHON_EXECUTOR_HIDE_PATHS";
 pub const ENV_MAX_REQUEST_MB: &str = "COLMENA_PYTHON_EXECUTOR_MAX_REQUEST_MB";
 pub const ENV_MAX_RESPONSE_MB: &str = "COLMENA_PYTHON_EXECUTOR_MAX_RESPONSE_MB";
+pub const ENV_REFUSE_OUTPUT: &str = "COLMENA_PYTHON_EXECUTOR_REFUSE_OUTPUT";
 const MIB: usize = 1024 * 1024;
 
 /// Which sandbox modes go to an isolated executor.
@@ -61,6 +62,9 @@ pub struct SubprocessConfig {
     pub hide_paths: Vec<PathBuf>,
     pub max_request_bytes: usize,
     pub max_response_bytes: usize,
+    /// Literals a result may not contain, e.g. the prefix of a credential
+    /// type: a result with any of them does not leave the executor.
+    pub refuse_output: Vec<String>,
 }
 
 pub(crate) fn invalid(var: &str, value: &str, expected: &str) -> ExecutorConfigError {
@@ -144,6 +148,15 @@ impl SubprocessConfig {
             hide_paths: hide_paths(get)?,
             max_request_bytes: parse_in(get, ENV_MAX_REQUEST_MB, 256usize, 1, 4095)? * MIB,
             max_response_bytes: parse_in(get, ENV_MAX_RESPONSE_MB, 256usize, 1, 4095)? * MIB,
+            refuse_output: get(ENV_REFUSE_OUTPUT)
+                .map(|v| {
+                    v.split(',')
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default(),
         })
     }
 }
@@ -277,6 +290,17 @@ mod tests {
         assert!(e.0.contains(ENV_HIDE_PATHS), "{e}");
         assert!(cfg(&[(ENV_HIDE_PATHS, "/data:/etc/../secret")]).is_err());
         assert!(cfg(&[(ENV_HIDE_PATHS, "/data")]).is_ok());
+    }
+
+    #[test]
+    fn refused_output_literals_are_trimmed_and_blank_ones_dropped() {
+        assert!(cfg(&[]).unwrap().subprocess.refuse_output.is_empty());
+        let c = cfg(&[(ENV_REFUSE_OUTPUT, " ab- ,, cd_ , ")])
+            .unwrap()
+            .subprocess;
+        assert_eq!(c.refuse_output, vec!["ab-".to_string(), "cd_".to_string()]);
+        let blank = cfg(&[(ENV_REFUSE_OUTPUT, " , ,")]).unwrap().subprocess;
+        assert!(blank.refuse_output.is_empty());
     }
 
     #[test]

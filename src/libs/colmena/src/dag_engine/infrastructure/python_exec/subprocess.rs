@@ -12,7 +12,7 @@ use super::frame;
 use super::jail::{self, JailSpec};
 use super::protocol::{
     input_too_large_message, result_too_large_message, WireRequest, WireResponse, CRASHED_MESSAGE,
-    MALFORMED_MESSAGE,
+    MALFORMED_MESSAGE, REFUSED_MESSAGE,
 };
 use super::zygote::TEMPLATE_ENV;
 use crate::dag_engine::domain::python_executor::{
@@ -85,6 +85,8 @@ pub enum RawFailure {
     Crashed,
     RequestTooLarge,
     ResponseTooLarge,
+    /// The result contains a literal of the output policy.
+    Refused,
     Unavailable(String),
 }
 
@@ -99,6 +101,7 @@ impl RawFailure {
             RawFailure::ResponseTooLarge => {
                 PythonRunError::Python(result_too_large_message(cfg.max_response_bytes))
             }
+            RawFailure::Refused => PythonRunError::Python(REFUSED_MESSAGE.to_string()),
             RawFailure::Unavailable(m) => PythonRunError::Internal(m),
         }
     }
@@ -347,6 +350,9 @@ fn reap(mut conn: UnixStream, slot: Slot) {
 }
 
 impl SubprocessExecutor {
+    /// Fails unless the binary exists and this process runs as root: each
+    /// child switches to an unprivileged user of its own, which only root may
+    /// do. The template starts on the first call, or on [`Self::warm`].
     pub fn new(cfg: SubprocessConfig, max_timeout: Duration) -> Result<Self, ExecutorConfigError> {
         if !cfg.bin.is_file() {
             return Err(ExecutorConfigError(format!(
@@ -354,6 +360,20 @@ impl SubprocessExecutor {
                 cfg.bin.display()
             )));
         }
+        if unsafe { libc::geteuid() } != 0 {
+            return Err(ExecutorConfigError(
+                "the subprocess executor must start as root inside its container: children switch to unprivileged users".into(),
+            ));
+        }
+        Self::unchecked(cfg, max_timeout)
+    }
+
+    /// [`Self::new`] without its checks, for the unit tests' stand-in
+    /// templates, which run without root.
+    fn unchecked(
+        cfg: SubprocessConfig,
+        max_timeout: Duration,
+    ) -> Result<Self, ExecutorConfigError> {
         let (spawner, jobs) = mpsc::channel::<Job>();
         // Ends when the executor drops `spawner`; the template goes with it.
         std::thread::Builder::new()
@@ -515,8 +535,26 @@ impl SubprocessExecutor {
         if tokio::time::timeout(EXIT_GRACE, drain(conn)).await.is_ok() {
             child.live = None;
         }
-        result
+        // Output, stdout and error text travel in this one body.
+        match result {
+            Ok(bytes)
+                if self
+                    .cfg
+                    .refuse_output
+                    .iter()
+                    .any(|p| contains(&bytes, p.as_bytes())) =>
+            {
+                tracing::warn!(target: T_PYTHON_EXEC, "python result refused by the output policy");
+                Err(RawFailure::Refused)
+            }
+            other => other,
+        }
     }
+}
+
+/// Whether `needle` occurs in `haystack`; never for an empty `needle`.
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    !needle.is_empty() && haystack.windows(needle.len()).any(|w| w == needle)
 }
 
 #[async_trait]
@@ -709,7 +747,7 @@ mod tests {
         cfg.bin = bin;
         (
             dir,
-            SubprocessExecutor::new(cfg, Duration::from_secs(60)).unwrap(),
+            SubprocessExecutor::unchecked(cfg, Duration::from_secs(60)).unwrap(),
         )
     }
 
@@ -895,6 +933,31 @@ mod tests {
             let e = io::Error::from_raw_os_error(errno);
             assert_eq!(no_pidfds(&e), unavailable, "{errno}");
         }
+    }
+
+    #[test]
+    fn contains_finds_a_literal_anywhere_and_never_an_empty_one() {
+        for (haystack, needle, found) in [
+            ("abc-def", "abc", true),
+            ("abc-def", "c-d", true),
+            ("abc-def", "def", true),
+            ("abc-def", "abc-def", true),
+            ("abc-def", "abd", false),
+            ("abc", "abcd", false),
+            ("abc", "", false),
+            ("", "a", false),
+        ] {
+            let seen = contains(haystack.as_bytes(), needle.as_bytes());
+            assert_eq!(seen, found, "{needle:?} in {haystack:?}");
+        }
+    }
+
+    #[test]
+    fn a_refused_result_is_a_python_error_with_a_fixed_message() {
+        let cfg = SubprocessConfig::from_lookup(&|_: &str| None::<String>).unwrap();
+        let e = RawFailure::Refused.into_run_error(&cfg);
+        assert_eq!(e, PythonRunError::Python(REFUSED_MESSAGE.to_string()));
+        assert!(REFUSED_MESSAGE.starts_with("Python execution error:"));
     }
 
     #[tokio::test]

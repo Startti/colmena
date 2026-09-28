@@ -141,11 +141,35 @@ impl Dispatcher {
         let inprocess: Arc<dyn PythonExecutor> = Arc::new(inprocess::InProcessExecutor);
         let isolated: Arc<dyn PythonExecutor> = match cfg.kind {
             ExecutorKind::InProcess => inprocess.clone(),
-            other => {
+            #[cfg(target_os = "linux")]
+            ExecutorKind::Subprocess => {
+                let exec = Arc::new(subprocess::SubprocessExecutor::new(
+                    cfg.subprocess.clone(),
+                    cfg.max_timeout,
+                )?);
+                // The template imports its modules now, so the first call does
+                // not wait for them.
+                if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                    let warm = exec.clone();
+                    handle.spawn(async move {
+                        if let Err(e) = warm.warm().await {
+                            tracing::warn!(target: T_PYTHON_EXEC, error = %e, "python template not ready");
+                        }
+                    });
+                }
+                exec
+            }
+            #[cfg(not(target_os = "linux"))]
+            ExecutorKind::Subprocess => {
                 return Err(ExecutorConfigError(format!(
-                    "{}={} is not available in this build",
-                    config::ENV_EXECUTOR,
-                    other.as_str()
+                    "{}=subprocess requires Linux",
+                    config::ENV_EXECUTOR
+                )))
+            }
+            ExecutorKind::Remote => {
+                return Err(ExecutorConfigError(format!(
+                    "{}=remote is not available in this build",
+                    config::ENV_EXECUTOR
                 )))
             }
         };
@@ -311,14 +335,40 @@ mod tests {
     }
 
     #[test]
-    fn isolated_kinds_are_refused_until_they_exist() {
-        for kind in ["subprocess", "remote"] {
-            let cfg = config::ExecutorConfig::from_lookup(|k| {
-                (k == config::ENV_EXECUTOR).then(|| kind.to_string())
-            })
-            .unwrap();
-            let err = Dispatcher::build(&cfg).err().expect("must refuse");
-            assert!(err.0.contains("not available"), "{err}");
+    fn remote_is_refused_until_it_exists() {
+        let cfg = config::ExecutorConfig::from_lookup(|k| {
+            (k == config::ENV_EXECUTOR).then(|| "remote".to_string())
+        })
+        .unwrap();
+        let err = Dispatcher::build(&cfg).err().expect("must refuse");
+        assert!(err.0.contains("remote is not available"), "{err}");
+    }
+
+    /// `subprocess` is built on Linux by a process that runs as root, and
+    /// refused anywhere else. An existing file stands in for the binary, so
+    /// only the platform and the effective uid decide.
+    #[test]
+    fn subprocess_is_built_on_linux_by_root_only() {
+        let bin = std::env::current_exe().unwrap().display().to_string();
+        let cfg = config::ExecutorConfig::from_lookup(|k| match k {
+            config::ENV_EXECUTOR => Some("subprocess".to_string()),
+            config::ENV_BIN => Some(bin.clone()),
+            _ => None,
+        })
+        .unwrap();
+        let built = Dispatcher::build(&cfg);
+        #[cfg(target_os = "linux")]
+        if unsafe { libc::geteuid() } == 0 {
+            let kind = built.map(|d| d.isolated.kind()).ok();
+            assert_eq!(kind, Some(ExecutorKind::Subprocess));
+        } else {
+            let err = built.err().expect("must refuse without root");
+            assert!(err.0.contains("must start as root"), "{err}");
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let err = built.err().expect("must refuse");
+            assert!(err.0.contains("subprocess requires Linux"), "{err}");
         }
     }
 
