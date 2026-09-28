@@ -7001,7 +7001,7 @@ decimales cuesta más (del orden del doble en ese paso), sin otro cambio visible
 `protocol::tests::floats_keep_every_bit_across_the_wire` fallaba sin la feature y pasa con ella; la suite de lib en
 macOS pasa entera. **ADP.** El worker lee floats exactos al subir el pin. **Estado.** done.
 
-## 182. Python: banco de equivalencia entre executors
+## 183. Python: banco de equivalencia entre executors
 
 **Qué cambia.** `tests/python_executor_golden.rs` corre 17 casos en proceso y en el executor que elige el entorno, y
 exige el mismo resultado (stdout incluido); cada caso fija además qué debe dar (un valor o un error de un tipo), así dos
