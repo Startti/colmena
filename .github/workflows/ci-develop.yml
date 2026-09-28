@@ -97,6 +97,8 @@ jobs:
   python-executor:
     name: Python executors (Linux, isolated)
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     container:
       image: debian:bookworm
       options: --cap-add SYS_ADMIN --security-opt seccomp=unconfined --security-opt apparmor=unconfined
@@ -120,6 +122,8 @@ jobs:
       COLMENA_PYEXEC_JAIL_TESTS: "1"
     steps:
       - name: System packages (same Python stack as a Debian bookworm deployment)
+        env:
+          DEBIAN_FRONTEND: noninteractive
         run: |
           apt-get update
           apt-get install -y --no-install-recommends ca-certificates curl git build-essential pkg-config libssl-dev \
@@ -146,17 +150,24 @@ jobs:
       - name: Executor unit tests
         run: cargo test -p colmena_dag_engine --lib python_exec
 
+      # Without COLMENA_PYEXEC_JAIL_TESTS=1 each jail test prints a skip line and
+      # passes; the step fails if one does.
       - name: Isolation and subprocess suites
-        run: cargo test --test python_executor_subprocess --test python_executor_isolation
+        run: |
+          cargo test --test python_executor_subprocess --test python_executor_isolation -- --nocapture 2>&1 | tee jail-suites.log
+          if grep -F 'skipped: set COLMENA_PYEXEC_JAIL_TESTS' jail-suites.log; then exit 1; fi
 
       - name: Executor self-test
         run: target/debug/python_executor self-test
 
       # The crdt suites are ignored by default (they need pandas), hence
-      # --include-ignored. Four gsheets tests expect an interpreter without
-      # pandas and fail with it under any executor; the test job, which has no
-      # pandas, runs them. The golden test prints its summary only after it
-      # compared every case; without it nothing was compared.
+      # --include-ignored. Four gsheets tests fail whenever the embedded Python
+      # has pandas, under any executor (stale mocks, and an assertion on a field
+      # only error results carry); without pandas they return before their
+      # assertions. No job runs those assertions today; they are skipped here.
+      # The golden test prints its summary only after it compared every case;
+      # without it nothing was compared. It runs on one test thread so its two
+      # tests do not compete for the executor's slots.
       - name: Python suites under the subprocess executor, every mode
         env:
           COLMENA_PYTHON_EXECUTOR: subprocess
@@ -167,7 +178,7 @@ jobs:
             --skip dispatch_inline_data_binding_reaches_sandbox --skip dispatch_inline_2d_array_is_converted_to_records \
             --skip multi_sheet_write_back_three_tabs --skip multi_sheet_collision_retries_with_suffix
           cargo test --test crdt_run_python_sandbox_test --test crdt_doc_run_python_test --test crdt_doc_cross_sheet_e2e_test -- --include-ignored
-          cargo test --test python_executor_golden -- --nocapture 2>&1 | tee golden-all.log
+          cargo test --test python_executor_golden -- --nocapture --test-threads=1 2>&1 | tee golden-all.log
           grep -F 'golden: 17 cases match' golden-all.log
           test "$(grep -c 'concurrent .*: each call kept its own stdout' golden-all.log)" -eq 2
 
@@ -176,7 +187,7 @@ jobs:
           COLMENA_PYTHON_EXECUTOR: subprocess
         run: |
           export COLMENA_PYTHON_EXECUTOR_BIN="$GITHUB_WORKSPACE/target/debug/python_executor"
-          cargo test --test python_executor_golden -- --nocapture 2>&1 | tee golden-default.log
+          cargo test --test python_executor_golden -- --nocapture --test-threads=1 2>&1 | tee golden-default.log
           grep -F 'golden: 17 cases match' golden-default.log
           grep -F 'concurrent restricted: each call kept its own stdout' golden-default.log
 
