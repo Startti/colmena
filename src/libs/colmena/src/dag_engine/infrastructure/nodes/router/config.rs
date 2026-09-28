@@ -1,11 +1,21 @@
 use super::when_dsl::WhenRule;
 use crate::dag_engine::domain::child_graph_source::CHILD_GRAPH_SOURCE_KEYS;
+use crate::dag_engine::domain::router_rules;
 use serde_json::Value;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum RouterMode {
     LlmDirect,
     ExtractAndRoute,
+    DecisionModel,
+}
+
+fn mode_label(mode: &RouterMode) -> &'static str {
+    match mode {
+        RouterMode::LlmDirect => "llm_direct",
+        RouterMode::ExtractAndRoute => "extract_and_route",
+        RouterMode::DecisionModel => "decision_model",
+    }
 }
 
 #[derive(Debug)]
@@ -34,6 +44,7 @@ pub fn parse_and_validate(config: &Value) -> Result<RouterConfig, String> {
     let mode = match mode_str {
         "llm_direct" => RouterMode::LlmDirect,
         "extract_and_route" => RouterMode::ExtractAndRoute,
+        "decision_model" => RouterMode::DecisionModel,
         other => return Err(format!("RouterConfigError: invalid mode '{}'", other)),
     };
 
@@ -45,12 +56,19 @@ pub fn parse_and_validate(config: &Value) -> Result<RouterConfig, String> {
         return Err("RouterConfigError: at least one branch required".to_string());
     }
 
+    // decision_model's fallback_branch/reserved-name/min_confidence rule is a
+    // single pure function shared with Graph::validate and the linter
+    // (design decision #3) — never re-implemented here.
+    if let Some(msg) = router_rules::decision_model_rejection(config) {
+        return Err(msg);
+    }
+
     let name_re = regex::Regex::new(NAME_RE).unwrap();
     let mut seen_names = std::collections::HashSet::new();
     let mut branches = Vec::with_capacity(branches_val.len());
 
     let inline_schema = match mode {
-        RouterMode::LlmDirect => None,
+        RouterMode::LlmDirect | RouterMode::DecisionModel => None,
         RouterMode::ExtractAndRoute => {
             let s = config
                 .get("schema")
@@ -107,16 +125,18 @@ pub fn parse_and_validate(config: &Value) -> Result<RouterConfig, String> {
         }
 
         match mode {
-            RouterMode::LlmDirect => {
+            RouterMode::LlmDirect | RouterMode::DecisionModel => {
                 if when_val.is_some() {
                     return Err(format!(
-                        "RouterConfigError: 'when' not allowed in llm_direct mode (branch '{}')",
+                        "RouterConfigError: 'when' not allowed in {} mode (branch '{}')",
+                        mode_label(&mode),
                         name
                     ));
                 }
                 if description.is_none() {
                     return Err(format!(
-                        "RouterConfigError: llm_direct requires description per branch (branch '{}')",
+                        "RouterConfigError: {} requires description per branch (branch '{}')",
+                        mode_label(&mode),
                         name
                     ));
                 }
@@ -307,5 +327,80 @@ mod tests {
         let cfg = parse_and_validate(&cfg).unwrap();
         assert_eq!(cfg.mode, RouterMode::LlmDirect);
         assert_eq!(cfg.branches.len(), 3);
+    }
+
+    #[test]
+    fn decision_model_happy_path_three_branches() {
+        let cfg = json!({
+            "mode": "decision_model",
+            "provider": "typesafe",
+            "api_key": "${TYPESAFE_API_KEY}",
+            "fallback_branch": "human_review",
+            "branches": [
+                { "name": "refund",   "description": "wants money back" },
+                { "name": "sales",    "description": "wants to buy" },
+                { "name": "human_review", "description": "needs a person" }
+            ]
+        });
+        let cfg = parse_and_validate(&cfg).unwrap();
+        assert_eq!(cfg.mode, RouterMode::DecisionModel);
+        assert_eq!(cfg.branches.len(), 3);
+    }
+
+    #[test]
+    fn decision_model_requires_description_per_branch() {
+        let cfg = json!({
+            "mode": "decision_model",
+            "fallback_branch": "a",
+            "branches": [ { "name": "a" } ]
+        });
+        let err = parse_and_validate(&cfg).unwrap_err();
+        assert!(err.contains("decision_model requires description per branch"));
+    }
+
+    #[test]
+    fn decision_model_rejects_branch_with_when() {
+        let cfg = json!({
+            "mode": "decision_model",
+            "fallback_branch": "a",
+            "branches": [ { "name": "a", "description": "x", "when": { "field": "y", "equals": "z" } } ]
+        });
+        let err = parse_and_validate(&cfg).unwrap_err();
+        assert!(err.contains("'when' not allowed in decision_model"));
+    }
+
+    #[test]
+    fn decision_model_without_fallback_branch_is_rejected_at_runtime_parse() {
+        let cfg = json!({
+            "mode": "decision_model",
+            "branches": [ { "name": "a", "description": "x" } ]
+        });
+        let err = parse_and_validate(&cfg).unwrap_err();
+        assert!(err.contains("requires 'fallback_branch'"));
+    }
+
+    #[test]
+    fn decision_model_rejects_reserved_branch_name() {
+        let cfg = json!({
+            "mode": "decision_model",
+            "fallback_branch": "a",
+            "branches": [
+                { "name": "a", "description": "x" },
+                { "name": "none_of_these", "description": "y" }
+            ]
+        });
+        let err = parse_and_validate(&cfg).unwrap_err();
+        assert!(err.contains("reserved"));
+    }
+
+    #[test]
+    fn llm_direct_still_rejects_fallback_branch() {
+        let cfg = json!({
+            "mode": "llm_direct",
+            "fallback_branch": "a",
+            "branches": [ { "name": "a", "description": "x" } ]
+        });
+        let err = parse_and_validate(&cfg).unwrap_err();
+        assert!(err.contains("only allowed in decision_model"));
     }
 }

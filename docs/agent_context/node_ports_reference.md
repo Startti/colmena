@@ -16,7 +16,7 @@ In Colmena's DAG engine, each node has optional **default ports** for input and 
 |---|---|---|
 | **suspend** | Human-in-the-loop gate | Pauses execution, waits for user `--answer`, resumes with that answer |
 | **loop_controller** | Manages loop state | Controls loop continuation based on `loop_status` input |
-| **router** | Declarative branching | Routes input to one of N named output ports. Mode `llm_direct` lets the LLM pick a branch by name; mode `extract_and_route` extracts JSON then matches `when` rules. Each branch may optionally run a subgraph. Always emits `__decision`. Fails fast on no-match (no default branch). |
+| **router** | Declarative branching | Routes input to one of N named output ports. Mode `llm_direct` lets the LLM pick a branch by name; mode `extract_and_route` extracts JSON then matches `when` rules; mode `decision_model` uses a TypeSafe Jev decision call with confidence gating and a required `fallback_branch`. Each branch may optionally run a subgraph. Always emits `__decision`. Fails fast on no-match (no default branch). |
 | **input** | Static configuration | Emits `config` as output; useful for providing constants or test data |
 | **for_each** | Deterministic list fan-out | Runs an embedded `target` node once per row of a list (Rust-side iteration, not the LLM re-calling a tool in a loop). Usable as a graph node (config-driven) and as an LLM tool (`node_schema`-driven, `target`/policy fields `fixed`). List source: `items` (inline array), `items_from` (`source: "sheet"` in v1), or an input edge carrying an array. Emits `batch-progress` and `batch-item-finished` SSE events. HITL fail-closed: a suspend inside a row becomes that row's error. See [§49](../developer_guide/49_for_each.md). |
 

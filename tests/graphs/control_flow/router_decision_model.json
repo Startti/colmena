@@ -1,0 +1,42 @@
+{
+  "nodes": {
+    "trigger": {
+      "type": "trigger_webhook",
+      "config": {
+        "path": "/test-router-decision-model",
+        "method": "POST",
+        "test_payload": {
+          "user_message": "Me cobraron dos veces la suscripción de agosto, quiero que me devuelvan la plata"
+        }
+      }
+    },
+    "router": {
+      "type": "router",
+      "config": {
+        "mode": "decision_model",
+        "provider": "typesafe",
+        "api_key": "${TYPESAFE_API_KEY}",
+        "fallback_branch": "human_review",
+        "branches": [
+          { "name": "refund",            "description": "Wants money back for a charge." },
+          { "name": "technical_support", "description": "Something in the product is broken." },
+          { "name": "sales",             "description": "Wants to buy or upgrade." },
+          { "name": "human_review",      "description": "Needs a person." }
+        ]
+      }
+    },
+    "log_refund":            { "type": "log", "config": { } },
+    "log_technical_support": { "type": "log", "config": { } },
+    "log_sales":              { "type": "log", "config": { } },
+    "log_human_review":      { "type": "log", "config": { } },
+    "out": { "type": "output", "config": {} }
+  },
+  "edges": [
+    { "from": "trigger.user_message", "to": "router.input" },
+    { "from": "router.refund",            "to": "log_refund" },
+    { "from": "router.technical_support", "to": "log_technical_support" },
+    { "from": "router.sales",             "to": "log_sales" },
+    { "from": "router.human_review",      "to": "log_human_review" },
+    { "from": "router.__decision", "to": "out" }
+  ]
+}
