@@ -7,12 +7,15 @@
 - `AttachmentStreamResolverImpl` (struct, pub) — Production resolver composing registry + storage adapters; shared via Arc across nodes and concurrent DAG runs
 - `AttachmentStreamResolverImpl::new()` (fn, pub) — Constructor accepting registry and storage as `Arc<dyn _>` to enable shared multi-node access
 - `AttachmentStreamResolver` impl for `AttachmentStreamResolverImpl` (impl, pub) — Async trait implementation
+- `AttachmentStreamResolverImpl::resolve_url()` (fn, async) — Registry lookup (miss → `NotFound`, storage not asked), `StorageKeyMissing`, then `storage.read_url(key, ttl)`; touches `last_used_at` when a URL is issued
   - `resolve()` (fn, async) — Looks up `(agent_session_id, document_id)` in the registry and streams the row's storage_key from storage; a registry miss is `NotFound` (the error tells the model to use a document_id from the attachments catalog) and storage is not called; non-fatal errors on `touch_last_used` are logged as warn
 - `tests::make_stream()` (fn, private) — Helper to construct `StoredStream` from static bytes with mime/filename metadata for test fixtures
 - `tests::base_upsert()` (fn, private) — Helper to construct `UpsertAttachmentInput` with common fields for test cases
 - `tests::resolve_via_document_id_uses_storage_key_from_registry()` (test, async) — Verifies registry lookup path succeeds and triggers `touch_last_used` side effect
 - `tests::resolve_never_reads_an_id_the_session_registry_does_not_know()` (test, async) — A raw key of this or another session, another session's document_id and an unknown id are all `NotFound`; storage is never called
 - `tests::resolve_returns_storage_key_missing_when_row_has_no_storage_key()` (test, async) — Verifies error when registry row exists but storage_key is None (pre-Plan-A legacy case)
+- `tests::resolve_url_asks_storage_for_the_rows_key_with_the_ttl()` (test, async) — The row's key and the TTL reach `read_url`; the URL comes back and `last_used_at` is set
+- `tests::resolve_url_outside_the_session_is_not_found_and_storage_is_not_asked()` (test, async) — Another session's document id and a raw storage key are `NotFound`; storage is never called
 
 ## File-level notes
 

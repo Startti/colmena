@@ -13,6 +13,7 @@
 - `AttachmentResolveError::RegistryError` (variant, public) — propagated `AttachmentError` from registry query (connection, query error)
 - `AttachmentStreamResolver` (trait, public) — async port for resolving attachments to streams; consumers implement this trait with concrete registry + storage adapters
 - `AttachmentStreamResolver::resolve` (async method, public) — given `agent_session_id` and `document_id`, returns a `StoredStream` and updates `last_used_at` as a side effect
+- `AttachmentStreamResolver::resolve_url` (async method, public, default `Ok(None)`) — same session lookup as `resolve`, then the storage's `read_url` for the row's key with the TTL unclamped; `None` = the host issues no URLs
 - `tests` (module, private) — unit test module
 - `error_variants_are_distinct` (fn, private) — smoke test verifying error variants format differently in debug output
 
