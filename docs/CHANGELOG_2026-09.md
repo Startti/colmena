@@ -6894,3 +6894,12 @@ comprueba cada capa por su efecto (descriptores, uid/gid, `no_new_privs`, límit
 sin poder elegirse.
 **Tests.** Contenedor root: el self-test pasa; apagar una capa lo hace fallar en esa capa; sin `CAP_SYS_ADMIN` reporta
 la capa no aplicada. **ADP.** Sin cambios. **Estado.** done.
+
+## 172. Python: el self-test prueba cada capa por su efecto (Linux)
+
+**Qué cambia.** Las rutas tapadas se prueban por dispositivo (un directorio tapado está en otro dispositivo; un archivo
+tapado es `/dev/null` y no se abre), no por verse vacías; `/dev/mqueue` se tapa. Cada namespace se prueba por su inodo,
+y se comprueban las interfaces de red, el presupuesto de memoria contra el tamaño de la plantilla y que no se agregó
+ningún montaje: 24 capas. Un reporte sin exactamente esas capas falla. Una ruta configurada que el uid del slot no
+alcanza falla como `unverified`. **Tests.** Contenedor root: 24/24; quitar cada capa la hace fallar en esa capa; una
+llamada no crea una cola en `/dev/mqueue`. **ADP.** Sin cambios. **Estado.** done.
