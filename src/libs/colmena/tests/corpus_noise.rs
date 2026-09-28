@@ -174,7 +174,11 @@ fn measure() -> Measured {
 // Bumped 338 -> 339: adds tests/graphs/agents/cancel_one_child.json (a child
 // used as a tool is cancelled through its call while its sibling finishes).
 // Lints clean.
-const EXPECTED_FILES: usize = 339;
+// Bumped 339 -> 340: adds tests/graphs/security/attachment_url_author_fixed_e2e.json
+// (a whole-string "$attachment_url:<document_id>" in an http_request JSON body
+// becomes a URL the host issues, only toward the author's address). Lints
+// clean.
+const EXPECTED_FILES: usize = 340;
 const EXPECTED_ERRORS: usize = 0;
 const EXPECTED_WARNINGS: usize = 0;
 const EXPECTED_INFOS: usize = 0;
