@@ -2,7 +2,8 @@
 //!
 //! Follows `web/infrastructure/tavily_adapter.rs`: one client from
 //! `shared::http_client::builder()`, a 10 s timeout, and no retry, so a vendor
-//! error fails the call.
+//! error fails the call. Vendor limits (255 choice options, 10 score levels) are
+//! checked before any request.
 //!
 //! Wire shape, verified against the live API:
 //! - request `{"state", "model", "questions": {id: {"type", "instructions"?, "criteria"?}}}`;
@@ -24,6 +25,8 @@ use crate::llm::domain::decision_model_repository::{DecisionModelError, Decision
 
 const DEFAULT_BASE_URL: &str = "https://api.typesafe.ai";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_CHOICE_OPTIONS: usize = 255;
+const MAX_SCORE_LEVELS: usize = 10;
 const MAX_ERROR_BODY_CHARS: usize = 512;
 
 pub struct TypesafeJevAdapter {
@@ -54,6 +57,12 @@ impl TypesafeJevAdapter {
         self.base_url = base_url.to_string();
         self
     }
+
+    #[cfg(test)]
+    fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.client = client(timeout).expect("test client");
+        self
+    }
 }
 
 fn client(timeout: Duration) -> Result<reqwest::Client, DecisionModelError> {
@@ -61,6 +70,22 @@ fn client(timeout: Duration) -> Result<reqwest::Client, DecisionModelError> {
         .timeout(timeout)
         .build()
         .map_err(|e| DecisionModelError::Configuration(format!("http client: {e}")))
+}
+
+fn check_vendor_limits(request: &DecisionRequest) -> Result<(), DecisionModelError> {
+    for (id, question) in &request.questions {
+        let (count, max, what) = match &question.kind {
+            QuestionKind::Choice { options } => (options.len(), MAX_CHOICE_OPTIONS, "options"),
+            QuestionKind::Score { levels } => (levels.len(), MAX_SCORE_LEVELS, "levels"),
+            QuestionKind::Noul { .. } => continue,
+        };
+        if count > max {
+            return Err(DecisionModelError::InvalidInput(format!(
+                "question '{id}' has {count} {what}; TypeSafe Jev allows at most {max}"
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn request_body(request: &DecisionRequest) -> Value {
@@ -142,7 +167,7 @@ fn parse_response(
     let mut wire: WireResponse = serde_json::from_str(body)
         .map_err(|e| malformed(format!("unexpected response body: {e}")))?;
     let mut answers = BTreeMap::new();
-    for (id, _) in &request.questions {
+    for (id, question) in &request.questions {
         let answer = match wire.answers.remove(id) {
             None => return Err(malformed(format!("no answer for question '{id}'"))),
             Some(WireAnswer::Noul { noul }) => Answer::Noul { probability: noul },
@@ -150,11 +175,20 @@ fn parse_response(
                 choice,
                 probabilities,
                 confidence,
-            }) => Answer::Choice {
-                choice,
-                probabilities,
-                confidence,
-            },
+            }) => {
+                let offered = matches!(&question.kind,
+                    QuestionKind::Choice { options } if options.iter().any(|o| o.key == choice));
+                if !offered {
+                    return Err(malformed(format!(
+                        "answer '{id}' picked '{choice}', which was not offered"
+                    )));
+                }
+                Answer::Choice {
+                    choice,
+                    probabilities,
+                    confidence,
+                }
+            }
             Some(WireAnswer::Score {
                 score,
                 probabilities,
@@ -174,13 +208,78 @@ fn parse_response(
     })
 }
 
+/// Maps a non-2xx response. 400/422 bodies come in three shapes:
+/// `{detail: {error_type, message}}`, `{detail: "text"}` and
+/// `{detail: [{loc, msg}, ...]}`.
 fn map_error(status: u16, body: &str) -> DecisionModelError {
-    let body = body.chars().take(MAX_ERROR_BODY_CHARS).collect();
-    DecisionModelError::Upstream { status, body }
+    let truncated: String = body.chars().take(MAX_ERROR_BODY_CHARS).collect();
+    match status {
+        401 | 403 => DecisionModelError::Auth(truncated),
+        429 => DecisionModelError::RateLimited,
+        400 | 422 => {
+            let detail = serde_json::from_str::<Value>(body)
+                .ok()
+                .and_then(|v| v.get("detail").cloned());
+            let (error_type, message) = match detail {
+                Some(Value::Object(d)) => (
+                    d.get("error_type")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                    d.get("message")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                ),
+                Some(Value::String(text)) => (None, text),
+                Some(Value::Array(items)) => (
+                    None,
+                    items
+                        .iter()
+                        .map(validation_entry)
+                        .collect::<Vec<_>>()
+                        .join("; "),
+                ),
+                _ => (None, truncated),
+            };
+            DecisionModelError::InvalidRequest {
+                status,
+                error_type,
+                message,
+            }
+        }
+        _ => DecisionModelError::Upstream {
+            status,
+            body: truncated,
+        },
+    }
+}
+
+fn validation_entry(item: &Value) -> String {
+    let loc = item
+        .get("loc")
+        .and_then(Value::as_array)
+        .map(|parts| {
+            parts
+                .iter()
+                .map(|p| {
+                    p.as_str()
+                        .map(str::to_string)
+                        .unwrap_or_else(|| p.to_string())
+                })
+                .collect::<Vec<_>>()
+                .join(".")
+        })
+        .unwrap_or_default();
+    let msg = item.get("msg").and_then(Value::as_str).unwrap_or_default();
+    format!("{loc}: {msg}")
 }
 
 fn transport_error(err: reqwest::Error) -> DecisionModelError {
-    DecisionModelError::Transport(err.to_string())
+    if err.is_timeout() {
+        DecisionModelError::Timeout
+    } else {
+        DecisionModelError::Transport(err.to_string())
+    }
 }
 
 #[async_trait]
@@ -190,6 +289,7 @@ impl DecisionModelRepository for TypesafeJevAdapter {
         request: DecisionRequest,
     ) -> Result<DecisionResponse, DecisionModelError> {
         request.validate()?;
+        check_vendor_limits(&request)?;
         let response = self
             .client
             .post(format!("{}/v1/systemone", self.base_url))
@@ -326,6 +426,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn vendor_limits_fail_before_any_request() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let adapter = TypesafeJevAdapter::new("k")
+            .unwrap()
+            .with_base_url(&server.uri());
+        let keys: Vec<String> = (0..256).map(|i| format!("o{i}")).collect();
+        let keys: Vec<&str> = keys.iter().map(String::as_str).collect();
+        let levels = (0..11).map(|i| i.to_string()).collect();
+        for req in [
+            request(vec![("c", choice(&keys))]),
+            request(vec![("s", QuestionKind::Score { levels })]),
+        ] {
+            let err = adapter.decide(req).await.unwrap_err();
+            assert!(
+                matches!(&err, DecisionModelError::InvalidInput(m) if m.contains("at most")),
+                "{err}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn sends_bearer_key_and_parses_a_real_choice_response() {
         let server = MockServer::start().await;
         let req = request(vec![(
@@ -395,16 +521,107 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_non_success_status_is_an_upstream_error() {
-        let (_server, adapter) = serve(503, "unavailable").await;
+    async fn malformed_success_bodies_are_rejected() {
+        let cases = [
+            ("not json", "<html>oops</html>"),
+            (
+                "choice not offered",
+                r#"{"model":"m","answers":{"q":{"type":"choice","choice":"zzz","confidence":1.0,"probabilities":{}}}}"#,
+            ),
+            ("missing answer", r#"{"model":"m","answers":{}}"#),
+            (
+                "unknown type",
+                r#"{"model":"m","answers":{"q":{"type":"extract","value":"x"}}}"#,
+            ),
+        ];
+        for (name, body) in cases {
+            let (_server, adapter) = serve(200, body).await;
+            let err = adapter
+                .decide(request(vec![("q", choice(&["a", "b"]))]))
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, DecisionModelError::MalformedResponse(_)),
+                "{name}: {err:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn vendor_errors_map_to_domain_errors() {
+        // Error bodies captured from the live API.
+        type Check = fn(&DecisionModelError) -> bool;
+        let cases: Vec<(u16, &str, Check)> = vec![
+            (
+                401,
+                r#"{"detail":{"error_type":"authentication_error","message":"Cannot authenticate with the server."}}"#,
+                |e| matches!(e, DecisionModelError::Auth(_)),
+            ),
+            (
+                400,
+                r#"{"detail":{"error_type":"api_usage_error","message":"Unknown model: jev-1.12"}}"#,
+                |e| {
+                    matches!(e, DecisionModelError::InvalidRequest { status: 400, error_type: Some(t), message }
+                    if t == "api_usage_error" && message == "Unknown model: jev-1.12")
+                },
+            ),
+            (
+                400,
+                r#"{"detail":{"error_type":"max_tokens_exceeded"}}"#,
+                |e| matches!(e, DecisionModelError::InvalidRequest { error_type: Some(t), .. } if t == "max_tokens_exceeded"),
+            ),
+            (
+                400,
+                r#"{"detail":"Too many choices. Must have at most 255 choices."}"#,
+                |e| {
+                    matches!(e, DecisionModelError::InvalidRequest { error_type: None, message, .. }
+                    if message.starts_with("Too many choices"))
+                },
+            ),
+            (
+                422,
+                r#"{"detail":[{"type":"missing","loc":["body","model"],"msg":"Field required","input":{}}]}"#,
+                |e| {
+                    matches!(e, DecisionModelError::InvalidRequest { status: 422, message, .. }
+                    if message == "body.model: Field required")
+                },
+            ),
+            (429, "rate limited", |e| {
+                matches!(e, DecisionModelError::RateLimited)
+            }),
+            (529, "overloaded", |e| {
+                matches!(e, DecisionModelError::Upstream { status: 529, .. })
+            }),
+            (503, "unavailable", |e| {
+                matches!(e, DecisionModelError::Upstream { status: 503, .. })
+            }),
+        ];
+        for (status, body, expected) in cases {
+            let (_server, adapter) = serve(status, body).await;
+            let err = adapter
+                .decide(request(vec![("q", choice(&["a"]))]))
+                .await
+                .unwrap_err();
+            assert!(expected(&err), "status {status}: got {err:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_slow_vendor_is_a_timeout() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_millis(500)))
+            .mount(&server)
+            .await;
+        let adapter = TypesafeJevAdapter::new("k")
+            .unwrap()
+            .with_base_url(&server.uri())
+            .with_timeout(Duration::from_millis(50));
         let err = adapter
             .decide(request(vec![("q", choice(&["a"]))]))
             .await
             .unwrap_err();
-        assert!(
-            matches!(err, DecisionModelError::Upstream { status: 503, .. }),
-            "{err:?}"
-        );
+        assert!(matches!(err, DecisionModelError::Timeout), "{err:?}");
     }
 
     #[tokio::test]

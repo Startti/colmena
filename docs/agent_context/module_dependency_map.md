@@ -5,7 +5,7 @@
 
 **How to use (for the exploration/spec phase):** before opening files to assess a change, look up the target file below. **Used by** is its blast radius — the files that break if you change its public surface. **Depends on** is what it needs. Start by reading only those, not the whole repo.
 
-- Files indexed: **406**
+- Files indexed: **407**
 - Modules with at least one importer: **189**
 
 ## Blast-radius ranking (change these with the most care)
@@ -24,9 +24,9 @@
 | 15 | `llm::domain::attachments` | `src/libs/colmena/src/llm/domain/attachments/mod.rs` |
 | 14 | `dag_engine::domain::error` | `src/libs/colmena/src/dag_engine/domain/error.rs` |
 | 14 | `dag_engine::domain::tool_configuration` | `src/libs/colmena/src/dag_engine/domain/tool_configuration.rs` |
+| 14 | `llm::infrastructure` | `src/libs/colmena/src/llm/infrastructure/mod.rs` |
 | 14 | `storage::domain` | `src/libs/colmena/src/storage/domain/mod.rs` |
 | 13 | `dag_engine::application::ports` | `src/libs/colmena/src/dag_engine/application/ports.rs` |
-| 13 | `llm::infrastructure` | `src/libs/colmena/src/llm/infrastructure/mod.rs` |
 | 12 | `dag_engine::application::secure_value_service` | `src/libs/colmena/src/dag_engine/application/secure_value_service.rs` |
 | 11 | `documents::domain::ports` | `src/libs/colmena/src/documents/domain/ports.rs` |
 | 11 | `text` | `src/libs/colmena/src/text/mod.rs` |
@@ -1522,7 +1522,7 @@
 
 #### `src/libs/colmena/src/llm/domain/decision_model_repository.rs`
 - Module: `llm::domain::decision_model_repository`
-- **Used by (1)**: `src/libs/colmena/src/llm/infrastructure/typesafe_jev_adapter.rs`
+- **Used by (2)**: `src/libs/colmena/src/llm/infrastructure/decision_model_provider_factory.rs`, `src/libs/colmena/src/llm/infrastructure/typesafe_jev_adapter.rs`
 - Depends on (1): `llm::domain::decision_model`
 
 #### `src/libs/colmena/src/llm/domain/file_cache_repository.rs`
@@ -1690,6 +1690,11 @@
 - **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
 - Depends on (1): `llm::domain`
 
+#### `src/libs/colmena/src/llm/infrastructure/decision_model_provider_factory.rs`
+- Module: `llm::infrastructure::decision_model_provider_factory`
+- **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
+- Depends on (2): `llm::domain::decision_model_repository`, `llm::infrastructure`
+
 #### `src/libs/colmena/src/llm/infrastructure/elevenlabs_tts_adapter.rs`
 - Module: `llm::infrastructure::elevenlabs_tts_adapter`
 - **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
@@ -1777,7 +1782,7 @@
 
 #### `src/libs/colmena/src/llm/infrastructure/mod.rs`
 - Module: `llm::infrastructure`
-- **Used by (13)**: `src/libs/colmena/src/dag_engine/application/preflight.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/critic.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/planner.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/reactor.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/tts.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/util/extract_with_schema.rs`, `src/libs/colmena/src/dag_engine/infrastructure/registry.rs`, `src/libs/colmena/src/dag_engine/infrastructure/sql_llm_critic.rs`, `src/libs/colmena/src/llm/infrastructure/llm_provider_factory.rs`, `src/libs/colmena/src/llm/infrastructure/tts_provider_factory.rs`, `src/libs/colmena/src/node_bindings/registry.rs`, `src/libs/colmena/src/python_bindings/mod.rs`
+- **Used by (14)**: `src/libs/colmena/src/dag_engine/application/preflight.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/critic.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/planner.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/reactor.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/tts.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/util/extract_with_schema.rs`, `src/libs/colmena/src/dag_engine/infrastructure/registry.rs`, `src/libs/colmena/src/dag_engine/infrastructure/sql_llm_critic.rs`, `src/libs/colmena/src/llm/infrastructure/decision_model_provider_factory.rs`, `src/libs/colmena/src/llm/infrastructure/llm_provider_factory.rs`, `src/libs/colmena/src/llm/infrastructure/tts_provider_factory.rs`, `src/libs/colmena/src/node_bindings/registry.rs`, `src/libs/colmena/src/python_bindings/mod.rs`
 - Depends on (0): — (no intra-crate imports)
 
 #### `src/libs/colmena/src/llm/infrastructure/openai_adapter.rs`

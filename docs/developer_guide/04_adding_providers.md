@@ -127,8 +127,11 @@ Este modelo no escribe texto: solo elige entre lo que se le ofrece. Para extraer
 el código propone los candidatos y el modelo elige uno. Si el valor correcto puede no estar entre los
 candidatos, incluí una opción de escape: sin ella, el modelo elige igual la opción más parecida.
 El primer adapter es TypeSafe Jev (`llm/infrastructure/typesafe_jev_adapter.rs`), que se construye
-con `TypesafeJevAdapter::new(api_key)`. Hace `POST https://api.typesafe.ai/v1/systemone`
+con `build_decision_model_repository("typesafe", api_key)`. Hace `POST https://api.typesafe.ai/v1/systemone`
 con `Authorization: Bearer <api_key>`, timeout de 10 s y sin reintentos: un error del proveedor falla
-la llamada. La `api_key` es obligatoria y explícita (por ejemplo `"${TYPESAFE_API_KEY}"`); vacía, es un
-error de configuración que nombra `TYPESAFE_API_KEY`. Un status que no es 2xx es `Upstream`; un 200
-que no se entiende es `MalformedResponse`.
+la llamada. Antes de la red valida los límites de Jev (máximo 255 opciones por `choice` y 10 niveles
+por `score`). La `api_key` es obligatoria y explícita (por ejemplo `"${TYPESAFE_API_KEY}"`); vacía, es
+un error de configuración que nombra `TYPESAFE_API_KEY`. Los errores se mapean así: 401/403 →
+`Auth`; 400/422 → `InvalidRequest` (con `error_type` cuando viene); 429 → `RateLimited`; 5xx, incluido
+529 → `Upstream`; timeout → `Timeout`; un 200 que no se entiende, o que elige una opción que no se
+ofreció → `MalformedResponse`.
