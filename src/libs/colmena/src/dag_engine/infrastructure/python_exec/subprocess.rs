@@ -740,15 +740,64 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("template");
         let starts = dir.path().join("starts").display().to_string();
-        std::fs::write(&bin, format!("#!/bin/sh\necho >> {starts}\n{body}\n")).unwrap();
-        std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755))
-            .unwrap();
+        write_executable(&bin, &format!("#!/bin/sh\necho >> {starts}\n{body}\n"));
         let mut cfg = SubprocessConfig::from_lookup(&|_: &str| None::<String>).unwrap();
         cfg.bin = bin;
         (
             dir,
             SubprocessExecutor::unchecked(cfg, Duration::from_secs(60)).unwrap(),
         )
+    }
+
+    /// Writes `script` to `path` from a child shell and makes it executable,
+    /// so that this process never holds a writable descriptor on a file it
+    /// later executes. Such a descriptor, even `O_CLOEXEC`, is copied into any
+    /// child another test thread forks while it is open, and stays there until
+    /// that child execs or exits; executing the file inside that window fails
+    /// with ETXTBSY ("Text file busy"). Renaming would not help: the copy
+    /// holds the inode, whatever its name. The shell's `printf` is a builtin,
+    /// so the file is closed once the shell has exited and `status()` returns.
+    fn write_executable(path: &std::path::Path, script: &str) {
+        let written = Command::new("/bin/sh")
+            .args(["-c", r#"printf '%s' "$1" > "$0""#])
+            .arg(path)
+            .arg(script)
+            .status()
+            .unwrap();
+        assert!(written.success(), "{written}");
+        std::fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+    }
+
+    /// Other tests fork while `fake` writes its script, so every script it
+    /// writes must run at once however busy the process is forking. Written
+    /// with `std::fs::write` instead, about one run in ten fails with ETXTBSY.
+    #[test]
+    fn a_written_script_runs_while_other_threads_fork() {
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let forkers: Vec<_> = (0..4)
+            .map(|_| {
+                let stop = stop.clone();
+                std::thread::spawn(move || {
+                    while !stop.load(Ordering::Relaxed) {
+                        let _ = Command::new("/bin/true").status();
+                    }
+                })
+            })
+            .collect();
+        let dir = tempfile::tempdir().unwrap();
+        let runs: Vec<_> = (0..200)
+            .map(|i| {
+                let bin = dir.path().join(i.to_string());
+                write_executable(&bin, "#!/bin/sh\nexit 0\n");
+                Command::new(&bin).status()
+            })
+            .collect();
+        stop.store(true, Ordering::Relaxed);
+        forkers.into_iter().for_each(|f| f.join().unwrap());
+        for (i, run) in runs.into_iter().enumerate() {
+            assert!(run.as_ref().is_ok_and(|s| s.success()), "run {i}: {run:?}");
+        }
     }
 
     fn starts(dir: &tempfile::TempDir) -> usize {
