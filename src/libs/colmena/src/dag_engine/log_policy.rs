@@ -205,6 +205,11 @@ pub(crate) mod test_override {
 
 /// Test helper: run `f` under a subscriber that captures WARN and above as
 /// plain text, and return its result with everything captured.
+///
+/// Only what `f` logs on the calling thread is captured: the subscriber is
+/// thread-local. Other tests keep running on other threads meanwhile, and
+/// [`keep_a_second_dispatcher_registered`] is what stops them from hiding a
+/// callsite from it.
 #[cfg(test)]
 pub(crate) fn capture_warnings<R>(f: impl FnOnce() -> R) -> (R, String) {
     use std::io::Write;
@@ -233,9 +238,53 @@ pub(crate) fn capture_warnings<R>(f: impl FnOnce() -> R) -> (R, String) {
         .with_ansi(false)
         .with_max_level(tracing::Level::WARN)
         .finish();
+    keep_a_second_dispatcher_registered();
     let out = tracing::subscriber::with_default(subscriber, f);
     let text = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap_or_default();
     (out, text)
+}
+
+/// A callsite caches, process-wide, whether any subscriber wants it, and
+/// works that out when a thread first reaches it. tracing-core asks every
+/// registered dispatcher — unless the latest one was the only one alive when
+/// it was registered: then it asks only the reaching thread's default. So
+/// while a capture's subscriber is the only one, a test on another thread,
+/// with no subscriber of its own, that reaches a `warn!` first caches it as
+/// "never", and the capture misses it on its own thread (measured: 34 of 300
+/// runs of `graph_http_payload_tests` lost `a_dropped_author_set_key_is_logged`
+/// that way). A dispatcher registered for the rest of the process keeps the
+/// capture's from ever being the only one. This one is installed on no
+/// thread, wants no callsite and raises no level.
+#[cfg(test)]
+fn keep_a_second_dispatcher_registered() {
+    use tracing::level_filters::LevelFilter;
+    use tracing::span::{Attributes, Id, Record};
+    use tracing::subscriber::Interest;
+    use tracing::{Dispatch, Event, Metadata, Subscriber};
+
+    struct Bystander;
+    impl Subscriber for Bystander {
+        fn register_callsite(&self, _: &'static Metadata<'static>) -> Interest {
+            Interest::never()
+        }
+        fn max_level_hint(&self) -> Option<LevelFilter> {
+            Some(LevelFilter::OFF)
+        }
+        fn enabled(&self, _: &Metadata<'_>) -> bool {
+            false
+        }
+        fn new_span(&self, _: &Attributes<'_>) -> Id {
+            Id::from_u64(1)
+        }
+        fn record(&self, _: &Id, _: &Record<'_>) {}
+        fn record_follows_from(&self, _: &Id, _: &Id) {}
+        fn event(&self, _: &Event<'_>) {}
+        fn enter(&self, _: &Id) {}
+        fn exit(&self, _: &Id) {}
+    }
+
+    static BYSTANDER: OnceLock<Dispatch> = OnceLock::new();
+    BYSTANDER.get_or_init(|| Dispatch::new(Bystander));
 }
 
 #[cfg(test)]
@@ -304,6 +353,25 @@ mod tests {
             assert!(super::payload_logging_enabled());
         }
         assert!(super::test_override::get().is_none());
+    }
+
+    // ── capture_warnings ────────────────────────────────────────────────
+
+    /// The race `capture_warnings` must survive, forced: while the capture is
+    /// open, another thread (with no subscriber of its own) is the first to
+    /// reach a `warn!`, and only then does the capturing thread reach it.
+    /// The callsite is used by this test alone, so it is fresh every run.
+    #[test]
+    fn a_warning_is_captured_even_when_another_thread_reached_it_first() {
+        fn warn_here() {
+            tracing::warn!("reached by two threads");
+        }
+        let ((), log) = super::capture_warnings(|| {
+            std::thread::spawn(warn_here).join().unwrap();
+            warn_here();
+        });
+        // Once: the other thread's is not this capture's to see.
+        assert_eq!(log.matches("reached by two threads").count(), 1, "{log:?}");
     }
 
     // ── Production resolution path ──────────────────────────────────────

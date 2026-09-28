@@ -6903,3 +6903,18 @@ y se comprueban las interfaces de red, el presupuesto de memoria contra el tama�
 ningún montaje: 24 capas. Un reporte sin exactamente esas capas falla. Una ruta configurada que el uid del slot no
 alcanza falla como `unverified`. **Tests.** Contenedor root: 24/24; quitar cada capa la hace fallar en esa capa; una
 llamada no crea una cola en `/dev/mqueue`. **ADP.** Sin cambios. **Estado.** done.
+
+## 173. Tests: la captura de `warn` ya no pierde un `warn!` que otro test alcanzó primero
+
+**Qué cambia.** Solo tests. `a_dropped_author_set_key_is_logged` (§110) fallaba a veces: 34 de 300 corridas de
+`graph_http_payload_tests`, 2 a 5 de 200 de los tests de `run_use_case`, nunca corrido solo. La causa estaba en
+`log_policy::capture_warnings`, no en el motor: el `warn!` sale en el hilo del test (todo es sincrónico), pero el interés
+de un callsite se cachea para todo el proceso y se calcula cuando un hilo lo alcanza por primera vez. tracing-core le
+pregunta a cada dispatcher registrado, salvo cuando el último registrado era el único vivo: entonces le pregunta solo al
+default del hilo que llega. Mientras el subscriber de la captura era el único, otro test del módulo (un payload aplanado
+que pierde `endpoint`) llegaba primero a ese `warn!` desde un hilo sin subscriber y lo dejaba cacheado como «nunca»: la
+captura quedaba vacía. `capture_warnings` ahora registra, una vez por proceso, un dispatcher que no se instala en ningún
+hilo, no quiere ningún callsite y no sube ningún nivel; con él, el de la captura nunca es el único.
+**Tests.** `a_warning_is_captured_even_when_another_thread_reached_it_first` fuerza ese orden: falla 20 de 20 sin el
+arreglo. Con el arreglo, 0 de 300 corridas de `graph_http_payload_tests` y 0 de 100 de `run_use_case`. Borrar el `warn!`
+de `log_author_set_key_kept` pone rojo a `a_dropped_author_set_key_is_logged`. **ADP.** Sin cambios. **Estado.** done.
