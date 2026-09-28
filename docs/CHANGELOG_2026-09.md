@@ -6711,3 +6711,14 @@ Guía: [12_dag_engine_guide.md](developer_guide/12_dag_engine_guide.md).
 `colmena_dag_engine-v0.21.5`; con `steering: true`, el worker arma el buzón en Redis, lo pasa
 con `RunControl::with_steering` y lo cierra al terminar el job.
 **Estado.** done.
+
+
+## 175. `data_run_python`: un adjunto como binding carga hasta 500.000 filas
+
+**Qué cambia.** `parse_attachment_to_records` recibe el tope de filas de quien la llama, en lugar de usar siempre
+`MAX_BULK_INSERT_ROWS` (100 K). Un binding de adjunto (CSV/XLSX) de `data_run_python` usa
+`ATTACHMENT_BINDING_MAX_ROWS` (500 K): carga en pandas y `output_tables` escribe por partes, así que un export mensual
+de más de 100 K filas (120 K consumos de Truora) ya no se corta al leer. `attachment_run_python` y la inserción masiva
+mantienen los 100 K.
+**Tests.** El mismo CSV de 150 filas se rechaza con tope 100 y carga con tope 200.
+**ADP.** Sin cambios de API. **Estado.** done.
