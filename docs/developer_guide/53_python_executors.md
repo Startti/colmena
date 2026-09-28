@@ -116,7 +116,8 @@ Each per-call child isolates itself after the header and before it reads the req
 namespace is empty: no DNS, loopback or outside route); a private `/tmp` (`tmpfs`, 64 MiB); a fresh `/proc` with `hidepid=invisible` (the jail
 fails if the template is still listed after the uid change) whose runtime-masked entries are covered; the host
 paths in `DEFAULT_HIDDEN` plus `…_HIDE_PATHS` (absolute; a directory gets an empty read-only `tmpfs`, a file a
-read-only `nodev` `/dev/null`, a missing path is skipped) covered; one unprivileged uid/gid per slot (`uid_base + slot`, 20000 by
+read-only `nodev` `/dev/null`, a missing path is skipped) covered, `/dev/mqueue` among them (a new IPC namespace does
+not cover a message-queue filesystem mounted there); one unprivileged uid/gid per slot (`uid_base + slot`, 20000 by
 default); `no_new_privs` and death with the template; limits on address space (the template's size plus
 `…_MEMORY_MB`), CPU seconds, file size, descriptors, processes and core files. A failed step ends the child (exit 71)
 before any code runs. There is no syscall filter yet. The template needs root and `CAP_SYS_ADMIN`; without them every
@@ -131,12 +132,19 @@ call's child through a pidfd (the pid when pidfds are unavailable).
 ### Startup self-test (Linux)
 
 Before it binds its socket, the template forks a throwaway child that enters the jail as slot 9999 (uid
-`uid_base + 9999`, reserved) and checks each layer by its effect: descriptors, uid/gid, `no_new_privs`, the limits,
-the private `/proc` (the template's pid hidden), the covered paths, a private `/tmp` and no network route. Each result
-is a JSON line `{layer, ok, reason, errno?}` with fixed reason codes. Any failure logs `self_test_failed` and the
-template exits 3; success is implied by `READY`. `python_executor self-test [--uid-base N] [--tmp-mb N] [--hide /abs]`
-runs the same checks (same values as the executor settings; root and `CAP_SYS_ADMIN` needed): exit 0 when every layer
-holds, 3 when one fails, 2 for bad arguments.
+`uid_base + 9999`, reserved) and checks 24 layers by their effect: descriptors, uid/gid, `no_new_privs`, the
+parent-death signal, each limit (the address space within the template's size plus the call's budget), each namespace
+by its `/proc/self/ns` inode (network, mount, IPC and UTS differ from the template's), the private `/proc` (the
+template's pid hidden, masked entries covered), the covered paths (a directory is on another device; a file is the
+read-only `/dev/null` and cannot be opened), a private `/tmp`, no network (DNS, loopback, link-local and a public
+address unreachable; only `lo` and the kernel's per-namespace fallback tunnel devices listed) and, from the template
+once the probe is done, no mount added to its namespace. Each result is a JSON line `{layer, ok, reason, errno?}`
+with fixed reason codes; a report that does not carry exactly these layers fails. A configured path the slot uid
+cannot reach (a file under a directory it cannot enter) fails as `unverified`: cover that directory instead. Any
+failure logs `self_test_failed` and the template exits 3; success is implied by `READY`.
+`python_executor self-test [--uid-base N] [--tmp-mb N] [--hide /abs]` runs the same checks (same values as the
+executor settings; root and `CAP_SYS_ADMIN` needed): exit 0 when every layer holds, 3 when one fails, 2 for bad
+arguments.
 
 ## About `restricted`
 

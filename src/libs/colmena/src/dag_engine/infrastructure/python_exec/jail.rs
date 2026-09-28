@@ -25,6 +25,8 @@ pub const DEFAULT_HIDDEN: &[&str] = &[
     "/run",
     "/var/tmp",
     "/dev/shm",
+    // The message queues of the IPC namespace that mounted it, not the child's.
+    "/dev/mqueue",
     "/srv",
     "/mnt",
     "/proc/acpi",
@@ -118,7 +120,7 @@ fn set_limit(resource: libc::__rlimit_resource_t, soft: u64, hard: u64) -> io::R
     check(unsafe { libc::setrlimit(resource, &lim) }).map(|_| ())
 }
 
-fn vm_size_bytes() -> io::Result<u64> {
+pub(crate) fn vm_size_bytes() -> io::Result<u64> {
     let status = std::fs::read_to_string("/proc/self/status")?;
     status
         .lines()
