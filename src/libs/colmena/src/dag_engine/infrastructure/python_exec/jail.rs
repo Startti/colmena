@@ -1,6 +1,7 @@
 //! Isolation applied by each per-call child before it reads its request.
 //! Order matters: descriptors, namespaces, mounts, identity, privileges,
-//! limits. There is no syscall filter yet.
+//! limits and, last, the syscall filter, which refuses calls the steps
+//! before it make.
 
 use super::child::CallHeader;
 use serde::{Deserialize, Serialize};
@@ -303,6 +304,10 @@ pub fn enter(spec: &JailSpec, hdr: &CallHeader, conn: UnixStream) -> Result<Unix
     set_limit(libc::RLIMIT_NOFILE, NOFILE, NOFILE).map_err(at("limits"))?;
     set_limit(libc::RLIMIT_NPROC, NPROC, NPROC).map_err(at("limits"))?;
     set_limit(libc::RLIMIT_CORE, 0, 0).map_err(at("limits"))?;
+
+    // 7. Syscall filter, last: it refuses calls the steps above make, and
+    //    no_new_privs lets a process without privileges install it.
+    super::seccomp::apply().map_err(at("syscall_filter"))?;
 
     Ok(unsafe { UnixStream::from_raw_fd(CHANNEL_FD) })
 }

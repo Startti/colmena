@@ -53,6 +53,8 @@ pub const LAYERS: &[&str] = &[
     "network_link_local",
     "network_public",
     "network_interfaces",
+    "syscall_filter_sockets",
+    "syscall_filter_processes",
     "host_mounts",
 ];
 /// What the probe may map after the template measures itself and before the
@@ -347,6 +349,32 @@ fn interfaces() -> LayerCheck {
     outcome("network_interfaces", reason, "loopback_only")
 }
 
+/// The syscall filter refuses a socket of any kind and a new process, each
+/// with EPERM. The probe is single-threaded, so it may fork; a process that
+/// does start exits at once and is reaped before the report.
+fn syscall_filter() -> [LayerCheck; 2] {
+    let refused = |rc: libc::c_int| {
+        rc == -1 && io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    };
+    let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0) };
+    let sockets = refused(fd);
+    if fd >= 0 {
+        unsafe { libc::close(fd) };
+    }
+    let pid = unsafe { libc::fork() };
+    if pid == 0 {
+        unsafe { libc::_exit(0) };
+    }
+    let processes = refused(pid);
+    if pid > 0 {
+        wait(pid);
+    }
+    [
+        check("syscall_filter_sockets", sockets, "refused", "allowed"),
+        check("syscall_filter_processes", processes, "refused", "allowed"),
+    ]
+}
+
 fn probe(spec: &JailSpec, before: &Before) -> Vec<LayerCheck> {
     // First, while nothing else the probe opens is open.
     let mut out = vec![descriptors(), identity(jail::uid_for(spec, SELF_TEST_SLOT))];
@@ -362,6 +390,7 @@ fn probe(spec: &JailSpec, before: &Before) -> Vec<LayerCheck> {
     out.push(check("private_tmp", in_tmp && fresh, "private", "shared"));
     out.extend(network(before.loopback_port));
     out.push(interfaces());
+    out.extend(syscall_filter());
     out
 }
 

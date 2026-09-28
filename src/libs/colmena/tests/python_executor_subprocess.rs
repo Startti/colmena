@@ -142,27 +142,53 @@ async fn an_abandoned_call_kills_its_child() {
     assert!(next.await.expect("the slot came back").is_ok());
 }
 
-/// What the call's code starts ends with the call: nothing keeps running as
-/// the slot's uid once the result is back, whether the process it started
-/// kept the call's connection open or closed every descriptor.
+/// The call's code cannot start a process: `os.fork()` and `subprocess` each
+/// raise an error the code can catch, the call returns normally with it, and
+/// nothing runs as the slot's uid afterwards.
 #[tokio::test]
-async fn processes_the_code_starts_do_not_outlive_the_call() {
+async fn a_call_cannot_start_a_process() {
     let Some(ex) = executor(1) else { return };
     let uid = slot_uid(&ex).await;
-    for detach in ["pass", "os.closerange(0, 1024)"] {
-        let code = format!(
-            "import os, time\n\
-             pid = os.fork()\n\
-             if pid == 0:\n\
-             \x20   {detach}\n\
-             \x20   time.sleep(60)\n\
-             \x20   os._exit(0)\n\
-             os.kill(pid, 0)\n\
-             output = 1"
-        );
-        ex.run(req(&code, 20)).await.unwrap();
-        assert!(none_left(uid).await, "still running after `{detach}`");
-    }
+    let code = "import os, subprocess\n\
+         def attempt(start):\n\
+         \x20   try:\n\
+         \x20       start()\n\
+         \x20       return 'started'\n\
+         \x20   except OSError as e:\n\
+         \x20       return type(e).__name__\n\
+         def fork():\n\
+         \x20   if os.fork() == 0:\n\
+         \x20       os._exit(0)\n\
+         output = [attempt(fork), attempt(lambda: subprocess.run(['/bin/true']))]";
+    let r = ex.run(req(code, 20)).await.unwrap();
+    assert_eq!(
+        r.output,
+        Some(serde_json::json!(["PermissionError", "PermissionError"]))
+    );
+    assert!(
+        none_left(uid).await,
+        "a process still runs as the slot's uid"
+    );
+}
+
+/// Threads still start inside the child: only new processes are refused.
+/// `clone3` answers ENOSYS, so a libc that tries it first falls back to
+/// `clone`. It is also asked directly: a libc that never tries it would not
+/// show a wrong answer.
+#[tokio::test]
+async fn threads_still_work_inside_the_child() {
+    let Some(ex) = executor(1) else { return };
+    let code = "import ctypes, errno, threading\n\
+         res = []\n\
+         t = threading.Thread(target=lambda: res.append(7))\n\
+         t.start()\n\
+         t.join()\n\
+         SYS_clone3 = 435\n\
+         libc = ctypes.CDLL(None, use_errno=True)\n\
+         rc = libc.syscall(SYS_clone3, None, 0)\n\
+         output = [res, rc, errno.errorcode.get(ctypes.get_errno())]";
+    let r = ex.run(req(code, 10)).await.unwrap();
+    assert_eq!(r.output, Some(serde_json::json!([[7], -1, "ENOSYS"])));
 }
 
 #[tokio::test]
