@@ -238,6 +238,16 @@ fn covered(path: &Path) -> bool {
     }
 }
 
+/// Whether `p` sits under one of `covers` other than itself: a path there is
+/// hidden by that cover already, so the self-test does not check it on its
+/// own account. Pure and lexical (prefix comparison, no filesystem access),
+/// same as the exclusion it stands in for — see [`hidden_before`], which
+/// covers a hidden path first so a `..` component in a configured path can't
+/// walk it back out from under a cover it lexically sits inside of.
+fn nested_under<'a>(p: &Path, mut covers: impl Iterator<Item = &'a Path>) -> bool {
+    covers.any(|c| c != p && p.starts_with(c))
+}
+
 /// Every hidden path: the defaults, then the configured ones.
 fn all_hidden(spec: &JailSpec) -> impl Iterator<Item = PathBuf> + '_ {
     let defaults = DEFAULT_HIDDEN.iter().map(PathBuf::from);
@@ -256,7 +266,7 @@ fn hidden_before(spec: &JailSpec) -> Vec<(PathBuf, Option<u64>)> {
     let all: Vec<PathBuf> = all_hidden(spec).filter(|p| !in_proc(p)).collect();
     let tmp = Path::new("/tmp");
     let covers = || all.iter().map(PathBuf::as_path).chain([tmp]);
-    let nested = |p: &Path| covers().any(|c| c != p && p.starts_with(c));
+    let nested = |p: &Path| nested_under(p, covers());
     let seen = |p: &PathBuf| {
         let meta = std::fs::metadata(p).ok()?;
         Some((p.clone(), meta.is_dir().then(|| meta.dev())))
@@ -308,6 +318,22 @@ fn network(loopback_port: u16) -> Vec<LayerCheck> {
     out
 }
 
+/// Interface names in `/proc/net/dev`'s content: two header lines, then one
+/// `name: counters` line per interface. Pure so CI can exercise it on fixed
+/// text without a real `/proc`.
+fn interface_names(dev: &str) -> Vec<&str> {
+    dev.lines()
+        .skip(2)
+        .map(|l| l.split(':').next().unwrap_or("").trim())
+        .collect()
+}
+
+/// Only loopback, and the kernel's own per-namespace fallback tunnel devices.
+fn only_loopback(names: &[&str]) -> bool {
+    let allowed = |n: &&str| *n == "lo" || FALLBACK_TUNNELS.contains(n);
+    names.contains(&"lo") && names.iter().all(allowed)
+}
+
 /// The probe's network namespace has loopback and no interface besides the
 /// tunnel devices a kernel may create in any namespace. Read from `/proc`,
 /// this needs no socket.
@@ -315,15 +341,7 @@ fn interfaces() -> LayerCheck {
     let Ok(dev) = std::fs::read_to_string("/proc/net/dev") else {
         return outcome("network_interfaces", "unlisted", "loopback_only");
     };
-    // Two header lines, then one `name: counters` line per interface.
-    let names: Vec<&str> = dev
-        .lines()
-        .skip(2)
-        .map(|l| l.split(':').next().unwrap_or("").trim())
-        .collect();
-    let allowed = |n: &&str| *n == "lo" || FALLBACK_TUNNELS.contains(n);
-    let only = names.contains(&"lo") && names.iter().all(allowed);
-    let reason = if only {
+    let reason = if only_loopback(&interface_names(&dev)) {
         "loopback_only"
     } else {
         "other_interface"
@@ -386,30 +404,53 @@ fn wait(pid: libc::pid_t) -> Option<libc::c_int> {
     }
 }
 
+fn setup_error(reason: &str, e: io::Error) -> Vec<LayerCheck> {
+    vec![failure("self_test", reason, e.raw_os_error())]
+}
+
+/// What [`run`] reads before it forks. Three of its reads get a reason of
+/// their own so their failure is distinguishable from the rest: a namespace
+/// inode, the mount table and the template's own memory size. Anything else
+/// that fails here (the channel pair, the loopback listener, its port, /tmp's
+/// device) stays `setup_failed`.
+fn setup(
+    spec: &JailSpec,
+) -> Result<(TcpListener, Before, UnixStream, UnixStream), Vec<LayerCheck>> {
+    let (ours, theirs) = UnixStream::pair().map_err(|e| setup_error("setup_failed", e))?;
+    // Open until the probe ends and out of its reach. Opened after the pair,
+    // so never at fd 3: it is also a descriptor the jail must close.
+    let listener =
+        TcpListener::bind(("127.0.0.1", 0)).map_err(|e| setup_error("setup_failed", e))?;
+    let loopback_port = listener
+        .local_addr()
+        .map_err(|e| setup_error("setup_failed", e))?
+        .port();
+    let tmp_dev = std::fs::metadata("/tmp")
+        .map_err(|e| setup_error("setup_failed", e))?
+        .dev();
+    let namespaces = NAMESPACES
+        .iter()
+        .map(|(_, ns)| namespace_inode(ns))
+        .collect::<io::Result<_>>()
+        .map_err(|e| setup_error("namespace_unreadable", e))?;
+    let mounts = mount_count().map_err(|e| setup_error("mounts_unreadable", e))?;
+    let vm_size = jail::vm_size_bytes().map_err(|e| setup_error("vm_size_unreadable", e))?;
+    let before = Before {
+        loopback_port,
+        tmp_dev,
+        hidden: hidden_before(spec),
+        namespaces,
+        mounts,
+        vm_size,
+    };
+    Ok((listener, before, ours, theirs))
+}
+
 /// Forks a child that enters the jail as [`SELF_TEST_SLOT`] and checks each
 /// layer; `Ok` only when every check held. Only for a single-threaded
 /// process: the child allocates after the fork.
 pub fn run(spec: &JailSpec) -> Result<Vec<LayerCheck>, Vec<LayerCheck>> {
-    let setup = || -> io::Result<_> {
-        let (ours, theirs) = UnixStream::pair()?;
-        // Open until the probe ends and out of its reach. Opened after the
-        // pair, so never at fd 3: it is also a descriptor the jail must close.
-        let listener = TcpListener::bind(("127.0.0.1", 0))?;
-        let before = Before {
-            loopback_port: listener.local_addr()?.port(),
-            tmp_dev: std::fs::metadata("/tmp")?.dev(),
-            hidden: hidden_before(spec),
-            namespaces: NAMESPACES
-                .iter()
-                .map(|(_, ns)| namespace_inode(ns))
-                .collect::<io::Result<_>>()?,
-            mounts: mount_count()?,
-            vm_size: jail::vm_size_bytes()?,
-        };
-        Ok((listener, before, ours, theirs))
-    };
-    let (listener, before, mut ours, theirs) =
-        setup().map_err(|e| vec![failure("self_test", "setup_failed", e.raw_os_error())])?;
+    let (listener, before, mut ours, theirs) = setup(spec)?;
     let pid = match unsafe { libc::fork() } {
         -1 => {
             let e = io::Error::last_os_error();
@@ -447,11 +488,74 @@ pub fn run(spec: &JailSpec) -> Result<Vec<LayerCheck>, Vec<LayerCheck>> {
     if !reported {
         checks.push(failure("self_test", "no_report", None));
     } else if !complete {
-        checks.push(failure("self_test", "missing_layer", None));
+        // Either a layer is absent (a jail layer failed before the probe
+        // could run at all) or the set carries one the template does not
+        // know, which is just as much a report it cannot trust.
+        checks.push(failure("self_test", "incomplete_report", None));
     }
     if checks.iter().all(|c| c.ok) {
         Ok(checks)
     } else {
         Err(checks)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // A real `/proc/net/dev`'s two header lines, then one `name: counters`
+    // line per interface — exercised here on fixed text so CI covers this
+    // parsing without root or a jail container.
+    const HEADER: &str = "Inter-|   Receive                                                |  Transmit\n face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed\n";
+
+    fn dev(interfaces: &str) -> String {
+        format!("{HEADER}{interfaces}")
+    }
+
+    #[test]
+    fn loopback_alone_is_recognized() {
+        let dev = dev("    lo: 100 1 0 0 0 0 0 0  100 1 0 0 0 0 0 0\n");
+        let names = interface_names(&dev);
+        assert_eq!(names, ["lo"]);
+        assert!(only_loopback(&names));
+    }
+
+    #[test]
+    fn a_fallback_tunnel_device_does_not_fail_the_check() {
+        let dev = dev("    lo: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n\
+              tunl0: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n\
+            ip6tnl0: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n");
+        assert!(only_loopback(&interface_names(&dev)));
+    }
+
+    #[test]
+    fn another_interface_fails_the_check() {
+        let dev = dev(
+            "    lo: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n  eth0: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n",
+        );
+        assert!(!only_loopback(&interface_names(&dev)));
+    }
+
+    #[test]
+    fn no_loopback_at_all_fails_the_check() {
+        let dev = dev("  eth0: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n");
+        assert!(!only_loopback(&interface_names(&dev)));
+        assert!(!only_loopback(&[]));
+    }
+
+    #[test]
+    fn a_path_under_a_cover_other_than_itself_is_nested() {
+        let covers = [Path::new("/var/tmp"), Path::new("/tmp")];
+        assert!(nested_under(Path::new("/var/tmp/x"), covers.into_iter()));
+        assert!(nested_under(Path::new("/tmp/x/y"), covers.into_iter()));
+    }
+
+    #[test]
+    fn a_cover_itself_and_an_unrelated_path_are_not_nested() {
+        let covers = [Path::new("/var/tmp"), Path::new("/tmp")];
+        assert!(!nested_under(Path::new("/var/tmp"), covers.into_iter()));
+        assert!(!nested_under(Path::new("/etc"), covers.into_iter()));
+        assert!(!nested_under(Path::new("/var/tmpfoo"), covers.into_iter()));
     }
 }
