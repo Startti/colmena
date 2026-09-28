@@ -7120,3 +7120,25 @@ cadena, con su grafo E2E.
 
 **ADP.** Sin impacto.
 **Estado.** done.
+
+## 191. `decide_branch`: el modelo de decisión elige la rama del `router` (Jev, 5/7)
+
+**Qué cambia.** Nuevo `nodes/router/decision_model.rs` con `decide_branch`, que recibe el puerto
+`DecisionModelRepository` (§182) y arma una sola pregunta `choice` cuyas opciones son las ramas
+declaradas (su `description` como criterio) más la opción `none_of_these`, cuyo texto vive en
+`text/prompts/router_decision_model_none.md`. Llama al modelo, emite `NodeEvent::LlmUsage` (input →
+prompt, output → completion), aplica el `gate` de §190 y devuelve la rama y el `__decision`:
+`selected_branch`, `reason`, `extracted: null`, `model_choice`, `confidence`, `min_confidence`,
+`probabilities` y `model`. Un error del proveedor hace fallar la llamada: nunca va a la rama de fallback,
+para que una caída no se confunda con baja confianza. Modelo por defecto: `jev-1.13.0`, fijo, porque el
+umbral de confianza se calibra por modelo.
+
+**Tests.** Con `MockDecisionModelRepository`: elección confiada (con evento de usage), tabla de fallback
+(`none_of_these` y baja confianza), error del repositorio que falla sin ir al fallback, y el request con
+cada rama más `none_of_these` y sus textos.
+
+**E2E.** No aplica todavía: el nodo `router` usa esta función en el cambio siguiente, con su
+grafo E2E.
+
+**ADP.** Sin impacto.
+**Estado.** done.
