@@ -437,7 +437,8 @@ vive en la librería.
   body trae la forma; reservado (nunca query param); el host puede recortarlo, la librería lo pasa tal cual.
 - **Nunca vuelve al modelo; host sin URLs.** Cada URL emitida (y su forma percent-encoded) vuelve como su
   placeholder en la salida del nodo. Si `read_url` da `None` (p. ej. `LocalCacheStorageAdapter`), el nodo
-  falla con `this host does not provide attachment URLs; use "$attachment:<id>" for the bytes`.
+  falla con `this host does not provide attachment URLs; use "$attachment:<id>" for the bytes`; el preludio
+  de adjuntos enseña la forma solo si `supports_read_url()` es `true`.
 
 ```json
 "node_schema": {
@@ -453,7 +454,8 @@ vive en la librería.
 ```
 
 E2E: [`attachment_url_author_fixed_e2e.json`](../../tests/graphs/security/attachment_url_author_fixed_e2e.json),
-[`attachment_url_ttl_e2e.json`](../../tests/graphs/security/attachment_url_ttl_e2e.json).
+[`attachment_url_ttl_e2e.json`](../../tests/graphs/security/attachment_url_ttl_e2e.json),
+[`attachment_url_taught_e2e.json`](../../tests/graphs/security/attachment_url_taught_e2e.json).
 
 ## Universal binary scrubber
 

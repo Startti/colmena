@@ -66,7 +66,7 @@
   - Auto-registers uploads in AttachmentRegistry with cross-provider lazy upload fallback; each file with its own `files[]` entry, and without a storage_key (event field `stored=false`) when its bytes could not be persisted
   - Assembles temporal context block (timestamp, location, timezone, locale)
   - Generates attachment summaries (tabular CSV/XLSX → structured, PDF/text → LLM/extraction)
-  - Builds skill repository and system message with attachment catalog prelude
+  - Builds skill repository and system message with attachment catalog prelude — `attachments_section()` returns `attachments_prelude(self.storage.as_deref())`, so the `$attachment_url:` paragraph appears only when the storage issues read URLs (tested)
   - Invokes AgentService for multi-turn LLM loop with tool calling
   - Handles resume path (pending tool call + answer injection)
   - Persists final conversation state

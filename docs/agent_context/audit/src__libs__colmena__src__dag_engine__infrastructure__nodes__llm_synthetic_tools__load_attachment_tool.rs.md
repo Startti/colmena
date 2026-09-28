@@ -7,6 +7,8 @@
 
 - `LOAD_ATTACHMENT_TOOL_NAME` (const, pub) — constant string identifier for the load_attachment tool
 - `ATTACHMENTS_SYSTEM_PRELUDE` (const, pub) — auto-injected system message explaining attachment availability and ephemeral semantics to the LLM
+- `ATTACHMENT_URL_PRELUDE` (const, pub) — `text/prompts/attachment_url_prelude.md`
+- `attachments_prelude(storage)` (fn, pub) — the prelude, plus the URL form only when `storage.supports_read_url()`
 - `build_load_attachment_tool_definition` (fn, pub) — constructs ToolDefinition with description embedding the attachment catalog and enum of document IDs from the catalog
 - `dispatch_load_attachment` (fn, pub) — executes a load_attachment tool call; returns success sentinel (`__colmena_status: LOAD_ATTACHMENT`) for known document IDs or structured error JSON for unknown IDs
 - `mk_attachment` (fn, private) — test helper factory creating ConversationAttachment stub with minimal required fields
@@ -19,6 +21,8 @@
 - `tests::dispatch_missing_document_id_is_invalid_tool_call` (test) — verifies missing parameter raises InvalidToolCall error
 - `prelude_tests::prelude_explains_no_autoinject_behavior` (test) — verifies prelude markdown instructs LLM to call load_attachment proactively
 - `prelude_tests::prelude_explains_ephemeral_load_attachment` (test) — verifies prelude markdown warns that load_attachment results are ephemeral per turn
+- `prelude_tests::a_host_without_read_urls_is_not_taught_the_url_form` (test) — `attachments_prelude(None)` and with a `LocalCacheStorageAdapter` both equal `ATTACHMENTS_SYSTEM_PRELUDE` verbatim, no `$attachment_url:` mention
+- `prelude_tests::a_host_that_issues_read_urls_is_taught_the_url_form` (test) — with a `LocalHttpStorageAdapter`, the prelude starts with `ATTACHMENTS_SYSTEM_PRELUDE` and also mentions both `"$attachment_url:<document_id>"` and `"$attachment:<document_id>"`
 
 ## File-level notes
 
