@@ -18,6 +18,24 @@ pub const LOAD_ATTACHMENT_TOOL_NAME: &str = "load_attachment";
 pub const ATTACHMENTS_SYSTEM_PRELUDE: &str =
     include_str!("../../../../../text/prompts/attachments_system_prelude.md");
 
+/// Appended to [`ATTACHMENTS_SYSTEM_PRELUDE`] only when the host's storage
+/// issues read URLs (`OutputStorageRepository::supports_read_url`), so the
+/// model is never taught `"$attachment_url:<document_id>"` where it fails.
+pub const ATTACHMENT_URL_PRELUDE: &str =
+    include_str!("../../../../../text/prompts/attachment_url_prelude.md");
+
+/// The attachments prelude for the host's `storage`.
+pub fn attachments_prelude(
+    storage: Option<&dyn crate::storage::domain::OutputStorageRepository>,
+) -> String {
+    let base = ATTACHMENTS_SYSTEM_PRELUDE.trim_end();
+    if storage.is_some_and(|s| s.supports_read_url()) {
+        format!("{base}\n\n{}", ATTACHMENT_URL_PRELUDE.trim_end())
+    } else {
+        base.to_string()
+    }
+}
+
 /// Build the `ToolDefinition` for `load_attachment`. The catalog is a snapshot
 /// taken at the start of `llm_call.execute`. The caller is responsible for
 /// passing only the entries that belong to the current provider.
@@ -250,5 +268,31 @@ mod prelude_tests {
                 || ATTACHMENTS_SYSTEM_PRELUDE.contains("turn only"),
             "prelude should warn that load_attachment results are ephemeral"
         );
+    }
+
+    #[test]
+    fn a_host_without_read_urls_is_not_taught_the_url_form() {
+        use crate::storage::domain::OutputStorageRepository;
+        use crate::storage::infrastructure::LocalCacheStorageAdapter;
+        let cache = LocalCacheStorageAdapter::new();
+        let cache: &dyn OutputStorageRepository = &cache;
+        for storage in [None, Some(cache)] {
+            let text = attachments_prelude(storage);
+            assert_eq!(text, ATTACHMENTS_SYSTEM_PRELUDE.trim_end());
+            assert!(!text.contains("$attachment_url:"));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_host_that_issues_read_urls_is_taught_the_url_form() {
+        use crate::storage::infrastructure::LocalHttpStorageAdapter;
+        let dir = tempfile::TempDir::new().unwrap();
+        let local = LocalHttpStorageAdapter::new(dir.path().to_path_buf(), 0)
+            .await
+            .unwrap();
+        let text = attachments_prelude(Some(&local));
+        assert!(text.starts_with(ATTACHMENTS_SYSTEM_PRELUDE.trim_end()));
+        assert!(text.contains("\"$attachment_url:<document_id>\""));
+        assert!(text.contains("\"$attachment:<document_id>\""));
     }
 }

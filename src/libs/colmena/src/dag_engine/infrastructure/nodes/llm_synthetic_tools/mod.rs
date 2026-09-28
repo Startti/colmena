@@ -285,8 +285,8 @@ pub use lazy_tools_catalog::{
 pub use toolkit_packages::{find_package, ToolkitPackage, TOOLKIT_PACKAGES};
 
 pub use load_attachment_tool::{
-    build_load_attachment_tool_definition, dispatch_load_attachment, ATTACHMENTS_SYSTEM_PRELUDE,
-    LOAD_ATTACHMENT_TOOL_NAME,
+    attachments_prelude, build_load_attachment_tool_definition, dispatch_load_attachment,
+    ATTACHMENTS_SYSTEM_PRELUDE, LOAD_ATTACHMENT_TOOL_NAME,
 };
 
 pub use load_skill_tool::{

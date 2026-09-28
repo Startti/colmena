@@ -7209,3 +7209,15 @@ query param; `registry.rs`: author-owned y coincide con `config_schema`. Mutacio
 TTL sin mirar autoría, clave fuera de `RESERVED_KEYS`, un tope en el TTL. E2E `attachment_url_ttl_e2e.json` (sin
 modelo), corrido: TTL 3600 → el eco baja los 80 bytes y la salida muestra el placeholder; TTL 0 → error sin pedido.
 **ADP.** Llega con el próximo tag. **Estado.** done.
+
+## 195. `$attachment_url:`: el modelo aprende la forma solo en un host que da URLs (feature C completa)
+
+**Qué cambia.** El preludio de adjuntos (`attachments_prelude`) suma `text/prompts/attachment_url_prelude.md` solo si el
+storage declara `supports_read_url()`; sin eso queda como estaba. El párrafo dice que una tool que manda un pedido
+HTTP puede llevar el link a un adjunto de la conversación como `"$attachment_url:<document_id>"` en un campo de su body
+JSON, que el link va solo a la dirección fija de la tool y que el modelo nunca lo ve. `LlmNode` lo arma en
+`attachments_section()`. Nota de migración para ADP. **Tests.** Sin storage o con `LocalCacheStorageAdapter` el
+preludio es el de antes; con `LocalHttpStorageAdapter` suma la forma; el nodo `llm_call` lo cablea (un test lo fija).
+Mutación roja: el preludio que enseña sin mirar la capacidad. E2E `attachment_url_taught_e2e.json` (con modelo): no
+corrido, sin clave del proveedor; linteado limpio. **ADP.** [Nota de migración](adp_migration/2026-09-28-attachment-url-placeholder.md).
+**Estado.** done.

@@ -1,0 +1,42 @@
+{
+  "comment": "E2E (CHANGELOG 2026-09 section 195): the model learns \"$attachment_url:<document_id>\" from the attachments prelude only when the host's storage issues read URLs. The prompt asks for a link without naming the placeholder. Echo on 127.0.0.1:8766. With COLMENA_LOCAL=true the echo receives a link and downloads the 80 bytes, and send_image's result shows the placeholder. With in-memory storage the model is not taught the form and the echo receives no link.",
+  "metadata": { "category": "security", "requires_env": ["GEMINI_API_KEY", "DATABASE_URL", "SECURE_VALUES_KEY"] },
+  "nodes": {
+    "agent": {
+      "type": "llm_call",
+      "config": {
+        "provider": "google",
+        "model": "gemini-2.5-flash",
+        "api_key": "${GEMINI_API_KEY}",
+        "connection_url": "${DATABASE_URL}",
+        "attachments_enabled": true,
+        "temperature": 0.0,
+        "stream": false,
+        "files": [
+          { "id": "taught_img", "mime_type": "image/png", "filename": "checker.png", "data": "iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAF0lEQVR42mP4zwAE/zFJ7KL/oVKDTgcA6TA/wXdxU+wAAAAASUVORK5CYII=" }
+        ],
+        "system_message": "You send files to an image service with the send_image tool.",
+        "prompt": "Send the attached image to the image service with send_image. The service downloads the image from a link you put in image_url; it does not accept the image's content. Then reply with the tool's raw result.",
+        "enabled_tools": ["send_image"],
+        "tool_configurations": {
+          "send_image": {
+            "name": "send_image",
+            "node_type": "http_request",
+            "description": "Queues an image job on the image service.",
+            "node_schema": {
+              "base_url": { "type": "string", "fixed": "http://127.0.0.1:8766" },
+              "endpoint": { "type": "string", "fixed": "/jobs" },
+              "method": { "type": "string", "fixed": "POST" },
+              "attachment_url_ttl_seconds": { "type": "integer", "fixed": 3600 },
+              "body": { "type": "object", "properties": {
+                "image_url": { "type": "string", "required": true, "description": "A link the service downloads the image from." }
+              } }
+            }
+          }
+        }
+      }
+    },
+    "result": { "type": "output", "config": {} }
+  },
+  "edges": [ { "from": "agent", "to": "result" } ]
+}

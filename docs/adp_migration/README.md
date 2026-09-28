@@ -6,6 +6,12 @@ ve ADP antes y después, qué tiene que hacer ADP, y qué se rompe si no hace na
 
 Los cambios que quedan dentro del motor no llevan nota aquí.
 
+## 2026-09-28 — un link corto al adjunto en `http_request`
+
+| # | Nota | Acción de ADP | Qué se rompe si se ignora |
+|---|------|---------------|---------------------------|
+| 1 | [`$attachment_url:`](2026-09-28-attachment-url-placeholder.md) | Subir el pin, regenerar el allowlist y alinear los textos que dicen «never a URL» | Nada al compilar; el campo nuevo se rechaza como inventado y el modelo recibe reglas opuestas |
+
 ## 2026-09-27 — leer un mensaje a mitad de corrida
 
 | # | Nota | Acción de ADP | Qué se rompe si se ignora |

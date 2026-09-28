@@ -15,7 +15,7 @@
 - `read_stream()` (async fn, pub trait method) — Streaming variant of read() for multipart mode; implementations must yield bytes in order with accurate size_bytes metadata; returns `StorageError::InvalidInput` (unknown key) or `StorageError::BackendUnavailable` (source unreachable)
 - `delete()` (async fn, pub trait method) — Idempotent blob deletion (returns Ok whether blob existed or not); used by attachment_gc garbage collection; bubbles `StorageError::BackendUnavailable` on backend failure for retry
 - `read_url()` (async fn, pub trait method, DEFAULT-provided since v0.20.0 / Feature C part 1) — On-demand read URL for an existing `storage_key`, hinted to last `ttl_seconds`; default `Ok(None)` so a pre-existing implementer compiles and runs unchanged. Signing never lives in this library — a host overrides this to call its own signing protocol.
-- `supports_read_url()` (fn, pub trait method, DEFAULT-provided since v0.20.0 / Feature C part 1) — Capability hint for the `$attachment_url:` teaching gate (part 2, not yet implemented); default `false`, kept in sync with `read_url`'s default.
+- `supports_read_url()` (fn, pub trait method, DEFAULT-provided since v0.20.0 / Feature C part 1) — Capability hint for the `$attachment_url:` teaching gate (consumed by `attachments_prelude` since CHANGELOG 2026-09 §195); default `false`, kept in sync with `read_url`'s default.
 
 ## File-level notes
 
