@@ -26,8 +26,9 @@
 //! In a JSON body, a whole string `"$attachment:<document_id>"` becomes a
 //! `data:` URI of that document of the session, and
 //! `"$attachment_url:<document_id>"` a read URL the host's storage issues for
-//! it — only toward an address the author fixed (`base_url` and `endpoint` in
-//! `config` or a tool's `fixed` values), with no redirect to another origin.
+//! it — only toward an address the author fixed (`base_url`, `endpoint` and
+//! any `Host` header in `config` or a tool's `fixed` values), with no redirect
+//! to another origin. In query params or a multipart part the form fails.
 //! The node's output and error texts show the placeholder wherever the
 //! response repeats that URL or its long query values.
 
@@ -617,19 +618,36 @@ impl HttpNode {
 
     const URL_FORM_NEEDS_AUTHORED_ADDRESS: &'static str =
         "http_request: \"$attachment_url:<document_id>\" needs a node configuration that \
-         fixes the request's address (base_url and endpoint, in config or as a tool's fixed \
-         values); here part of it comes from runtime data (a tool argument, an edge). Use \
-         \"$attachment:<document_id>\" to send the file's content instead";
+         fixes the request's address (base_url, endpoint and any Host header, in config or as \
+         a tool's fixed values); here part of it comes from runtime data (a tool argument, an \
+         edge). Use \"$attachment:<document_id>\" to send the file's content instead";
+
+    const URL_FORM_ONLY_IN_JSON_BODY: &'static str =
+        "http_request: \"$attachment_url:<document_id>\" is accepted only as a whole string \
+         value in a JSON body, not in query params or a multipart part. In a multipart body, \
+         \"$attachment:<document_id>\" sends the file as a part";
 
     /// Whether the request's address is the author's: `base_url` and
     /// `endpoint` each come from `config` (absent from `inputs`) or are a
-    /// tool's `fixed` value left as written (`__colmena_authored_inputs`).
-    /// A value from runtime data — an edge, global state, a model's argument,
-    /// a `$DYNAMIC` part — is not; `allowed_hosts` does not change that.
+    /// tool's `fixed` value left as written (`__colmena_authored_inputs`),
+    /// and so does any `Host` header (some front-ends route by it; a fixed
+    /// leaf in `__colmena_authored_leaves` counts). A value from runtime
+    /// data — an edge, global state, a model's argument, a `$DYNAMIC` part —
+    /// is not; `allowed_hosts` does not change that.
     fn address_is_authored(inputs: &NodeInputs) -> bool {
-        ["base_url", "endpoint"]
-            .into_iter()
-            .all(|k| !inputs.contains_key(k) || is_authored_input(inputs, k))
+        use crate::dag_engine::infrastructure::env_provenance::{
+            listed_pointers, AUTHORED_LEAVES_KEY,
+        };
+        let fixed = |k: &str| !inputs.contains_key(k) || is_authored_input(inputs, k);
+        let leaves = listed_pointers(inputs, AUTHORED_LEAVES_KEY);
+        let fixed_host = |k: &String| {
+            let leaf = format!("/headers/{}", escape_pointer_segment(k));
+            !k.eq_ignore_ascii_case("host") || leaves.contains(&leaf)
+        };
+        let headers = inputs.get("headers").and_then(Value::as_object);
+        fixed("base_url")
+            && fixed("endpoint")
+            && (fixed("headers") || headers.is_none_or(|h| h.keys().all(fixed_host)))
     }
 
     fn resolve_env_vars(input: &str) -> Result<String, String> {
@@ -1221,6 +1239,10 @@ impl HttpNode {
             ),
         };
 
+        if Self::has_attachment_url(&body_resolved) {
+            return Err(Self::URL_FORM_ONLY_IN_JSON_BODY.into());
+        }
+
         // A body that arrived as data may name a URL for the node to fetch only
         // in a field the author enabled (`multipart_url_fields`).
         let body_from_data = inputs.get("body").is_some() && !is_authored_input(inputs, "body");
@@ -1636,6 +1658,14 @@ impl ExecutableNode for HttpNode {
         let extra_params = Self::collect_extra_query_params(inputs, &policy);
         if !extra_params.is_empty() {
             request_builder = request_builder.query(&extra_params);
+        }
+        // `$attachment_url:` is replaced only in a JSON body; in a query
+        // param it would travel as written.
+        let queries = [config.get("query_params"), inputs.get("query_params")];
+        if queries.into_iter().flatten().any(Self::has_attachment_url)
+            || extra_params.values().any(Self::has_attachment_url)
+        {
+            return Err(Self::URL_FORM_ONLY_IN_JSON_BODY.into());
         }
 
         // 6. Body (Inputs or Config) — branch on multipart vs JSON/string
@@ -2290,7 +2320,9 @@ mod session_attachment_tests {
 #[cfg(test)]
 mod attachment_url_tests {
     use super::*;
-    use crate::dag_engine::infrastructure::env_provenance::AUTHORED_INPUTS_KEY;
+    use crate::dag_engine::infrastructure::env_provenance::{
+        AUTHORED_INPUTS_KEY, AUTHORED_LEAVES_KEY,
+    };
     use crate::llm::domain::attachments::{AttachmentSource, UpsertAttachmentInput};
     use crate::llm::domain::{AttachmentRegistry, ProviderKind};
     use crate::llm::infrastructure::attachments::AttachmentStreamResolverImpl;
@@ -2446,7 +2478,8 @@ mod attachment_url_tests {
     }
 
     /// Each part of the address is the author's when absent from `inputs`
-    /// (it is in `config`) or listed as a tool's fixed value;
+    /// (it is in `config`) or listed as a tool's fixed value; a `Host`
+    /// header is part of it (whole `headers` or its own leaf listed);
     /// `allowed_hosts` changes nothing.
     #[test]
     fn the_address_is_the_authors_only_when_each_part_is() {
@@ -2454,6 +2487,9 @@ mod attachment_url_tests {
         let fixed = |listed: Value| json!({ "base_url": base, "endpoint": "/jobs", key: listed });
         let listed_host = json!({ "base_url": base, "allowed_hosts": ["api.example.test"],
             key: ["allowed_hosts"] });
+        let host = |more: Value| json!({ "headers": { "HOST": "a", "Accept": "b" }, key: more });
+        let fixed_leaf =
+            json!({ "headers": { "Host": "a" }, AUTHORED_LEAVES_KEY: ["/headers/Host"] });
         for (inputs, authored) in [
             (json!({}), true),
             (json!({ "base_url": base }), false),
@@ -2461,6 +2497,10 @@ mod attachment_url_tests {
             (fixed(json!(["base_url", "endpoint"])), true),
             (fixed(json!(["base_url"])), false),
             (listed_host, false),
+            (host(json!([])), false),
+            (json!({ "headers": { "Accept": "*/*" } }), true),
+            (host(json!(["headers"])), true),
+            (fixed_leaf, true),
         ] {
             let inputs: NodeInputs = serde_json::from_value(inputs).unwrap();
             let got = HttpNode::address_is_authored(&inputs);
@@ -2627,6 +2667,71 @@ mod attachment_url_tests {
             "{err}"
         );
         assert!(!err.contains(SIG), "{err}");
+    }
+
+    const ONLY_IN_JSON: &str = "only as a whole string value in a JSON body";
+
+    /// In multipart, `$attachment:` already sends the file as a part: the
+    /// URL form fails before any part is read and nothing is sent.
+    #[tokio::test]
+    async fn a_multipart_body_refuses_the_url_form() {
+        let server = untouched().await;
+        let storage = Arc::new(UrlStorage::default());
+        let http = node(storage.clone()).await;
+        let mut config = cfg(&server);
+        config["headers"] = json!({ "Content-Type": "multipart/form-data" });
+        let file = body(json!({ "a": "$attachment:doc-1", "file": PLACEHOLDER }));
+        let err = post(&http, file, config).await.unwrap_err();
+        assert!(
+            err.contains(ONLY_IN_JSON) && err.contains("\"$attachment:"),
+            "{err}"
+        );
+        assert!(storage.0.lock().unwrap().is_empty());
+    }
+
+    /// In query params (the node's, the caller's, a flat tool argument) the
+    /// form would travel as written: it fails before any storage read, even
+    /// with a JSON body that carries it too, and nothing is sent.
+    #[tokio::test]
+    async fn query_params_refuse_the_url_form() {
+        let server = untouched().await;
+        let storage = Arc::new(UrlStorage::default());
+        let http = node(storage.clone()).await;
+        let q = json!({ "src": PLACEHOLDER });
+        let mut in_config = cfg(&server);
+        in_config["query_params"] = q.clone();
+        for (extra, config) in [
+            (None, in_config),
+            (Some(("query_params", q)), cfg(&server)),
+            (Some(("src", json!(PLACEHOLDER))), cfg(&server)),
+        ] {
+            let mut inputs = body(json!({ "image_url": PLACEHOLDER }));
+            inputs.extend(extra.map(|(k, v)| (k.to_string(), v)));
+            let err = post(&http, inputs, config).await.unwrap_err();
+            assert!(err.contains(ONLY_IN_JSON), "{err}");
+        }
+        assert!(storage.0.lock().unwrap().is_empty(), "a URL was asked for");
+    }
+
+    /// Some front-ends route by `Host`: one from runtime data refuses the
+    /// form even toward the author's address; the author's own goes out.
+    #[tokio::test]
+    async fn a_host_header_from_data_refuses_the_url_form() {
+        let server = MockServer::start().await;
+        let ok = Mock::given(method("POST")).respond_with(ResponseTemplate::new(200));
+        ok.expect(1).mount(&server).await;
+        let storage = Arc::new(UrlStorage::default());
+        let http = node(storage.clone()).await;
+        let host = json!({ "host": "other.example.test" });
+        let mut data = body(json!({ "image_url": PLACEHOLDER }));
+        data.insert("headers".into(), host.clone());
+        let err = post(&http, data, cfg(&server)).await.unwrap_err();
+        assert!(err.contains("fixes the request's address"), "{err}");
+        assert!(storage.0.lock().unwrap().is_empty(), "a URL was asked for");
+        let mut config = cfg(&server);
+        config["headers"] = host;
+        let authored = body(json!({ "image_url": PLACEHOLDER }));
+        assert_eq!(post(&http, authored, config).await.unwrap()["status"], 200);
     }
 }
 
