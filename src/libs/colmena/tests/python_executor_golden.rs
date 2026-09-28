@@ -2,8 +2,10 @@
 //! Golden equivalence between Python executors. Every case runs in-process
 //! and through the executor the environment selects
 //! (`COLMENA_PYTHON_EXECUTOR`, `COLMENA_PYTHON_EXECUTOR_MODES`,
-//! `COLMENA_PYTHON_EXECUTOR_BIN`), and the whole result must match. With the
-//! default (`inprocess`) there is nothing to compare and the tests say so.
+//! `COLMENA_PYTHON_EXECUTOR_BIN`). Each side must give the case's expected
+//! outcome (a result, or a given kind of error), and then the whole results
+//! must match. With the default (`inprocess`) there is nothing to compare and
+//! the tests say so.
 //! The subprocess executor needs root and CAP_SYS_ADMIN, and the cases need
 //! pandas, numpy and scipy.
 
@@ -69,13 +71,50 @@ fn columns(var: &str) -> Value {
     json!({ var: ["id", "grp", "amount"] })
 }
 
-fn cases() -> Vec<(&'static str, PythonRunRequest)> {
+/// What a case must produce on each side before the two are compared, so two
+/// identical failures cannot pass for equivalence.
+#[derive(Debug, Clone, Copy)]
+enum Expect {
+    Ok,
+    /// A Python error whose text starts with this.
+    Err(&'static str),
+}
+
+const VIOLATION_IMPORT: Expect = Expect::Err("SandboxViolation: import 'os' is not allowed");
+const VIOLATION_BUILTIN: Expect = Expect::Err("SandboxViolation: 'open' is not allowed");
+const SYNTAX: Expect = Expect::Err("SyntaxError: ");
+const KEY_ERROR: Expect = Expect::Err("Python execution error: KeyError: 'missing'");
+const CONVERSION: Expect = Expect::Err("Failed to convert Python 'output' to JSON: ");
+
+fn assert_outcome(
+    name: &str,
+    side: &str,
+    r: &Result<PythonRunResult, PythonRunError>,
+    expect: Expect,
+) {
+    let held = match (expect, r) {
+        (Expect::Ok, Ok(_)) => true,
+        (Expect::Err(prefix), Err(PythonRunError::Python(m))) => m.starts_with(prefix),
+        _ => false,
+    };
+    assert!(
+        held,
+        "golden case {name}: {side} gave {r:?}, expected {expect:?}"
+    );
+}
+
+fn cases() -> Vec<(&'static str, Expect, PythonRunRequest)> {
+    let data = |code: &str, n: usize| {
+        let pairs = [("sales", rows(n)), ("_loaded_columns", columns("sales"))];
+        case(data_run_python::wrap_user_code(code), "restricted", &pairs)
+    };
     vec![
-        ("scalar-none", case("output = 6 * 7".into(), "none", &[])),
-        ("unset-output", case("x = 1".into(), "restricted", &[])),
-        ("none-output", case("output = None".into(), "restricted", &[])),
+        ("scalar-none", Expect::Ok, case("output = 6 * 7".into(), "none", &[])),
+        ("unset-output", Expect::Ok, case("x = 1".into(), "restricted", &[])),
+        ("none-output", Expect::Ok, case("output = None".into(), "restricted", &[])),
         (
             "stdout-unicode",
+            Expect::Ok,
             case(
                 "print('ñandú 😀')\nprint('línea 2')\noutput = 'ok'".into(),
                 "restricted",
@@ -84,6 +123,7 @@ fn cases() -> Vec<(&'static str, PythonRunRequest)> {
         ),
         (
             "json-boundary",
+            Expect::Ok,
             case(
                 "import numpy as np\noutput = {'i': int(np.int64(5)), 'f': float(np.float64(0.1)), 'nested': [[1, {'a': None}], True], 's': 'ü'}".into(),
                 "restricted",
@@ -92,20 +132,24 @@ fn cases() -> Vec<(&'static str, PythonRunRequest)> {
         ),
         (
             "big-int-conversion-error",
+            CONVERSION,
             case("output = 2**70".into(), "restricted", &[]),
         ),
-        ("violation", case("import os".into(), "restricted", &[])),
+        ("violation", VIOLATION_IMPORT, case("import os".into(), "restricted", &[])),
         (
             "banned-builtin",
+            VIOLATION_BUILTIN,
             case("output = open('x')".into(), "restricted", &[]),
         ),
-        ("syntax", case("output = (".into(), "restricted", &[])),
+        ("syntax", SYNTAX, case("output = (".into(), "restricted", &[])),
         (
             "exception",
+            KEY_ERROR,
             case("output = {}['missing']".into(), "restricted", &[]),
         ),
         (
             "hmac-signing",
+            Expect::Ok,
             case(
                 "import hmac, hashlib, base64\noutput = base64.b64encode(hmac.new(key.encode(), msg.encode(), hashlib.sha256).digest()).decode()".into(),
                 "restricted",
@@ -114,6 +158,7 @@ fn cases() -> Vec<(&'static str, PythonRunRequest)> {
         ),
         (
             "stdlib-none-csv-io",
+            Expect::Ok,
             case(
                 "import csv, io\nb = io.StringIO()\nw = csv.writer(b)\nw.writerows([['a', 'b'], [1, 2]])\noutput = b.getvalue()".into(),
                 "none",
@@ -122,26 +167,23 @@ fn cases() -> Vec<(&'static str, PythonRunRequest)> {
         ),
         (
             "data-run-python-groupby",
-            case(
-                data_run_python::wrap_user_code(
-                    "df = pd.DataFrame(sales)\noutput = df.groupby('grp')['amount'].sum().round(6).to_dict()",
-                ),
-                "restricted",
-                &[("sales", rows(10_000)), ("_loaded_columns", columns("sales"))],
+            Expect::Ok,
+            data(
+                "df = pd.DataFrame(sales)\noutput = df.groupby('grp')['amount'].sum().round(6).to_dict()",
+                10_000,
             ),
         ),
         (
             "data-run-python-sinks",
-            case(
-                data_run_python::wrap_user_code(
-                    "df = pd.DataFrame(sales)\noutput_tables = {'s.t': df.head(3)}\noutput_sheets = {'Hoja': df.tail(2)}\noutput_attachments = {'out.csv': df.head(1)}\noutput = len(df)",
-                ),
-                "restricted",
-                &[("sales", rows(50)), ("_loaded_columns", columns("sales"))],
+            Expect::Ok,
+            data(
+                "df = pd.DataFrame(sales)\noutput_tables = {'s.t': df.head(3)}\noutput_sheets = {'Hoja': df.tail(2)}\noutput_attachments = {'out.csv': df.head(1)}\noutput = len(df)",
+                50,
             ),
         ),
         (
             "gsheets-run-python",
+            Expect::Ok,
             case(
                 gsheets_run_python::wrap_user_code(
                     "df = pd.DataFrame(data)\noutput_sheets = {'Resumen': df.describe().reset_index()}\noutput = int(df['id'].max())",
@@ -152,6 +194,7 @@ fn cases() -> Vec<(&'static str, PythonRunRequest)> {
         ),
         (
             "attachment-run-python",
+            Expect::Ok,
             case(
                 attachment_run_python::wrap_user_code("print(df.shape)\nresult = df.head(2)"),
                 "restricted",
@@ -160,6 +203,7 @@ fn cases() -> Vec<(&'static str, PythonRunRequest)> {
         ),
         (
             "crdt-doc-run-python",
+            Expect::Ok,
             case(
                 crdt_doc_run_python::wrap_user_code("d = dfs['s1']\noutput = int(d['id'].sum())"),
                 "restricted",
@@ -185,15 +229,19 @@ fn normalize(r: Result<PythonRunResult, PythonRunError>) -> Value {
 async fn every_case_matches_the_in_process_result() {
     let Some(cfg) = isolated_config() else { return };
     let (mut isolated, mut local) = (0, 0);
-    for (name, req) in cases() {
-        if routed(&cfg, &req.mode) {
+    for (name, expect, req) in cases() {
+        let side = if routed(&cfg, &req.mode) {
             isolated += 1;
+            cfg.kind.as_str()
         } else {
             local += 1;
-        }
-        let expected = normalize(InProcessExecutor.run(req.clone()).await);
-        let actual = normalize(python_exec::run(req).await);
-        assert_eq!(actual, expected, "golden case {name}");
+            "inprocess"
+        };
+        let expected = InProcessExecutor.run(req.clone()).await;
+        assert_outcome(name, "the in-process executor", &expected, expect);
+        let actual = python_exec::run(req).await;
+        assert_outcome(name, &format!("the {side} executor"), &actual, expect);
+        assert_eq!(normalize(actual), normalize(expected), "golden case {name}");
     }
     eprintln!(
         "golden: {} cases match; {isolated} ran through the {} executor, {local} in-process on both sides (modes {:?})",
