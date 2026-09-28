@@ -7000,3 +7000,13 @@ build que incluye el crate (la unificación de features de Cargo lo extiende a l
 decimales cuesta más (del orden del doble en ese paso), sin otro cambio visible. **Tests.**
 `protocol::tests::floats_keep_every_bit_across_the_wire` fallaba sin la feature y pasa con ella; la suite de lib en
 macOS pasa entera. **ADP.** El worker lee floats exactos al subir el pin. **Estado.** done.
+
+## 182. Python: banco de equivalencia entre executors
+
+**Qué cambia.** `tests/python_executor_golden.rs` corre 17 casos en proceso y en el executor que elige el entorno, y
+exige el mismo resultado (stdout incluido); cada caso fija además qué debe dar (un valor o un error de un tipo), así dos
+fallas iguales no cuentan como coincidencia. Un test de llamadas concurrentes prueba que cada una recibe solo su stdout
+por `subprocess`; la variante en proceso, que hoy mezcla lo que imprimen, queda marcada como ignorada. Los envoltorios
+de las cuatro tools tabulares quedan visibles para el test (`#[doc(hidden)] pub`). Este banco encontró el float que
+arregló §181. **Tests.** Contenedor root: 17/17 con `subprocess` y `MODES=all`; con la configuración por defecto no hay
+nada que comparar; con un preludio roto el banco falla (antes pasaba). **ADP.** Sin cambios. **Estado.** done.

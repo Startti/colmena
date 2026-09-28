@@ -169,6 +169,19 @@ For model-written code or anything else you did not write, use `COLMENA_PYTHON_E
 `COLMENA_PYTHON_EXECUTOR_MODES=all`, on Linux, in a container where the host starts as root with `CAP_SYS_ADMIN`; run
 `python_executor self-test` there first. In process, `restricted` is an aid to authors, not an isolation boundary.
 
+## Equivalence with the in-process executor
+
+`tests/python_executor_golden.rs` runs 17 cases (plain scripts, `restricted` refusals, syntax and runtime errors, a
+value that cannot become JSON, and the four tabular tools' wrappers over pandas) both in process and through the
+executor the environment selects, and requires the same result, stdout included. Each case also states what it must
+produce (a value, or an error of a given kind), so two identical failures do not count as a match. With the default
+`inprocess` there is nothing to compare and the test says so; run it with `COLMENA_PYTHON_EXECUTOR=subprocess`
+(`COLMENA_PYTHON_EXECUTOR_MODES=all` to route every case) in a root container with `CAP_SYS_ADMIN`.
+
+Concurrent calls: through `subprocess` each call has its own process, so each gets only its own stdout. In process,
+the executor swaps the interpreter's `sys.stdout` for each call, so two calls running at the same time can mix what
+they print; `concurrent_in_process_calls_keep_their_own_stdout` records that and is ignored by default.
+
 ## About `restricted`
 
 `restricted` validates imports and a few builtins before running. It helps
