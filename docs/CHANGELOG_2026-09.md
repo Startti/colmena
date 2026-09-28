@@ -6904,7 +6904,7 @@ ningún montaje: 24 capas. Un reporte sin exactamente esas capas falla. Una ruta
 alcanza falla como `unverified`. **Tests.** Contenedor root: 24/24; quitar cada capa la hace fallar en esa capa; una
 llamada no crea una cola en `/dev/mqueue`. **ADP.** Sin cambios. **Estado.** done.
 
-## 173. Python: las rutas tapadas rechazan `..` y el setup del self-test tiene sus propios códigos (Linux)
+## 174. Python: las rutas tapadas rechazan `..` y el setup del self-test tiene sus propios códigos (Linux)
 
 **Qué cambia.** `…_HIDE_PATHS` y `--hide` rechazan una ruta con un componente `..` (el self-test salta las rutas
 anidadas bajo otra tapa con una comparación de prefijo). Si la plantilla no puede leer sus namespaces, su tabla de
