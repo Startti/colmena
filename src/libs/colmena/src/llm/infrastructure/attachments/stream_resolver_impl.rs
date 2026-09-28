@@ -281,4 +281,25 @@ mod tests {
         let row = reg.lookup_by_document_id("agent_x", "doc-1").await.unwrap();
         assert!(row.expect("row").last_used_at.is_some());
     }
+
+    #[tokio::test]
+    async fn resolve_url_outside_the_session_is_not_found_and_storage_is_not_asked() {
+        let reg = SqliteAttachmentRegistry::new("sqlite::memory:")
+            .await
+            .unwrap();
+        reg.upsert(base_upsert("agent_x", "doc-1", Some("sk-1".to_string())))
+            .await
+            .unwrap();
+        // No expectation: any call to storage panics.
+        let storage = MockOutputStorageRepository::new();
+        let resolver = AttachmentStreamResolverImpl::new(Arc::new(reg), Arc::new(storage));
+
+        for (session, id) in [("agent_y", "doc-1"), ("agent_x", "sk-1")] {
+            let err = resolver.resolve_url(session, id, 900).await.unwrap_err();
+            assert!(
+                matches!(err, AttachmentResolveError::NotFound { .. }),
+                "{session}/{id}: {err:?}"
+            );
+        }
+    }
 }
