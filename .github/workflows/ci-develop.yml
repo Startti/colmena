@@ -90,3 +90,106 @@ jobs:
 
       - name: Run Node tests
         run: npm test
+
+  # The isolated Python executor needs Linux, root and CAP_SYS_ADMIN (each call
+  # runs in fresh namespaces as an unprivileged user of its own), so this job
+  # runs in a privileged Debian container with the distribution's Python stack.
+  python-executor:
+    name: Python executors (Linux, isolated)
+    runs-on: ubuntu-latest
+    container:
+      image: debian:bookworm
+      options: --cap-add SYS_ADMIN --security-opt seccomp=unconfined --security-opt apparmor=unconfined
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: colmena
+          POSTGRES_PASSWORD: colmena
+          POSTGRES_DB: colmena
+        options: >-
+          --health-cmd "pg_isready -U colmena -d colmena"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    defaults:
+      run:
+        shell: bash
+    env:
+      PYO3_PYTHON: python3
+      COLMENA_PYEXEC_JAIL_TESTS: "1"
+    steps:
+      - name: System packages (same Python stack as a Debian bookworm deployment)
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates curl git build-essential pkg-config libssl-dev \
+            python3 python3-dev libpython3.11 python3-pandas python3-numpy python3-scipy
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - name: Build
+        run: cargo build --bin python_executor --bin dag_engine
+
+      # A filter that matches no test passes without running anything.
+      - name: Every test filter used below matches tests
+        run: |
+          for f in python_exec python_node data_run_python gsheets_run_python attachment_run_python crdt_doc_run_python; do
+            n=$(cargo test -p colmena_dag_engine --lib -- --list "$f" | grep -c ': test$' || true)
+            echo "$f: $n tests"
+            test "$n" -gt 0
+          done
+
+      - name: Executor unit tests
+        run: cargo test -p colmena_dag_engine --lib python_exec
+
+      - name: Isolation and subprocess suites
+        run: cargo test --test python_executor_subprocess --test python_executor_isolation
+
+      - name: Executor self-test
+        run: target/debug/python_executor self-test
+
+      # The crdt suites are ignored by default (they need pandas), hence
+      # --include-ignored. Four gsheets tests expect an interpreter without
+      # pandas and fail with it under any executor; the test job, which has no
+      # pandas, runs them. The golden test prints its summary only after it
+      # compared every case; without it nothing was compared.
+      - name: Python suites under the subprocess executor, every mode
+        env:
+          COLMENA_PYTHON_EXECUTOR: subprocess
+          COLMENA_PYTHON_EXECUTOR_MODES: all
+        run: |
+          export COLMENA_PYTHON_EXECUTOR_BIN="$GITHUB_WORKSPACE/target/debug/python_executor"
+          cargo test -p colmena_dag_engine --lib -- python_node data_run_python gsheets_run_python attachment_run_python crdt_doc_run_python \
+            --skip dispatch_inline_data_binding_reaches_sandbox --skip dispatch_inline_2d_array_is_converted_to_records \
+            --skip multi_sheet_write_back_three_tabs --skip multi_sheet_collision_retries_with_suffix
+          cargo test --test crdt_run_python_sandbox_test --test crdt_doc_run_python_test --test crdt_doc_cross_sheet_e2e_test -- --include-ignored
+          cargo test --test python_executor_golden -- --nocapture 2>&1 | tee golden-all.log
+          grep -F 'golden: 17 cases match' golden-all.log
+          test "$(grep -c 'concurrent .*: each call kept its own stdout' golden-all.log)" -eq 2
+
+      - name: Golden equivalence under the subprocess executor, default modes
+        env:
+          COLMENA_PYTHON_EXECUTOR: subprocess
+        run: |
+          export COLMENA_PYTHON_EXECUTOR_BIN="$GITHUB_WORKSPACE/target/debug/python_executor"
+          cargo test --test python_executor_golden -- --nocapture 2>&1 | tee golden-default.log
+          grep -F 'golden: 17 cases match' golden-default.log
+          grep -F 'concurrent restricted: each call kept its own stdout' golden-default.log
+
+      - name: Smoke graph under the subprocess executor
+        env:
+          DATABASE_URL: postgres://colmena:colmena@postgres:5432/colmena
+          COLMENA_PYTHON_EXECUTOR: subprocess
+          COLMENA_PYTHON_EXECUTOR_MODES: all
+          RUST_LOG: colmena::python_exec=debug
+          NO_COLOR: "1"
+        run: |
+          export COLMENA_PYTHON_EXECUTOR_BIN="$GITHUB_WORKSPACE/target/debug/python_executor"
+          export SECURE_VALUES_KEY="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
+          cargo run --bin dag_engine -- run tests/graphs/basic/python_executor_smoke.json 2>&1 | tee smoke.log
+          test "$(grep -c 'python run executor="subprocess" .*outcome="ok"' smoke.log)" -eq 4
+          if grep -E '"type":"error"|"status":"error"' smoke.log; then exit 1; fi
