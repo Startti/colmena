@@ -76,53 +76,108 @@ impl ExecutableNode for RouterNode {
             other => serde_json::to_string_pretty(other)?,
         };
 
-        // 3. Resolve LLM provider config (shared by both modes).
+        // 3. Resolve provider/api_key/model. decision_model bypasses
+        // ProviderKind entirely (design decision #1: it has no vendor slot
+        // for "typesafe"), so this stays generic and only the ok_or/map_err
+        // messages branch — the shape of the extraction is identical.
+        let is_decision_model = cfg.mode == RouterMode::DecisionModel;
         let provider_str = config
             .get("provider")
             .and_then(|v| v.as_str())
             .ok_or("Router: missing 'provider' in config")?;
-        let provider_kind = match provider_str.to_lowercase().as_str() {
-            "openai" => ProviderKind::OpenAi,
-            "google" => ProviderKind::Google,
-            "anthropic" => ProviderKind::Anthropic,
-            _ => return Err(format!("Router: invalid provider '{}'", provider_str).into()),
-        };
-        let api_key_raw = config
-            .get("api_key")
-            .and_then(|v| v.as_str())
-            .ok_or("Router: missing 'api_key' in config")?;
-        let api_key = Self::resolve_env_var(api_key_raw)
-            .map_err(|e| -> Box<dyn Error + Send + Sync> { e.into() })?;
+        let api_key_raw =
+            config
+                .get("api_key")
+                .and_then(|v| v.as_str())
+                .ok_or(if is_decision_model {
+                    "Router: missing 'api_key' in config — decision_model mode requires an \
+                 explicit value, e.g. \"api_key\": \"${TYPESAFE_API_KEY}\""
+                } else {
+                    "Router: missing 'api_key' in config"
+                })?;
+        let api_key =
+            Self::resolve_env_var(api_key_raw).map_err(|e| -> Box<dyn Error + Send + Sync> {
+                if is_decision_model {
+                    format!("Router: {e} — decision_model mode requires TYPESAFE_API_KEY to be set")
+                        .into()
+                } else {
+                    e.into()
+                }
+            })?;
         let model = config
             .get("model")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
 
         // 4. Pick a branch.
-        let (idx, reason, extracted): (usize, String, Option<Value>) = match cfg.mode {
-            RouterMode::LlmDirect => {
-                let (i, r) = pick_llm_direct(
-                    &cfg,
-                    provider_kind,
-                    api_key,
-                    model,
-                    user_text,
-                    observer.clone(),
+        let (idx, reason, extracted, decision_extra): (
+            usize,
+            String,
+            Option<Value>,
+            Option<Value>,
+        ) = if is_decision_model {
+            if provider_str != "typesafe" {
+                return Err(format!(
+                    "Router: decision_model mode requires provider 'typesafe', got '{}'",
+                    provider_str
                 )
-                .await?;
-                (i, r, None)
+                .into());
             }
-            RouterMode::ExtractAndRoute => {
-                let (i, ex) = super::extract_and_route::pick_branch(
-                    &cfg,
-                    provider_kind,
-                    api_key,
-                    model,
-                    user_text,
-                    observer.clone(),
-                )
-                .await?;
-                (i, String::new(), Some(ex))
+            let repo =
+                crate::llm::infrastructure::build_decision_model_repository("typesafe", api_key)
+                    .map_err(|e| -> Box<dyn Error + Send + Sync> { e.to_string().into() })?;
+            let fallback_branch = config
+                .get("fallback_branch")
+                .and_then(|v| v.as_str())
+                .ok_or("Router: missing 'fallback_branch' in config")?;
+            let min_confidence = config
+                .get("min_confidence")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(super::decision_model::DEFAULT_MIN_CONFIDENCE);
+            let (i, decision) = super::decision_model::decide_branch(
+                &cfg,
+                repo.as_ref(),
+                model,
+                fallback_branch,
+                min_confidence,
+                user_text,
+                observer.clone(),
+            )
+            .await?;
+            (i, String::new(), None, Some(decision))
+        } else {
+            let provider_kind = match provider_str.to_lowercase().as_str() {
+                "openai" => ProviderKind::OpenAi,
+                "google" => ProviderKind::Google,
+                "anthropic" => ProviderKind::Anthropic,
+                _ => return Err(format!("Router: invalid provider '{}'", provider_str).into()),
+            };
+            match cfg.mode {
+                RouterMode::LlmDirect => {
+                    let (i, r) = pick_llm_direct(
+                        &cfg,
+                        provider_kind,
+                        api_key,
+                        model,
+                        user_text,
+                        observer.clone(),
+                    )
+                    .await?;
+                    (i, r, None, None)
+                }
+                RouterMode::ExtractAndRoute => {
+                    let (i, ex) = super::extract_and_route::pick_branch(
+                        &cfg,
+                        provider_kind,
+                        api_key,
+                        model,
+                        user_text,
+                        observer.clone(),
+                    )
+                    .await?;
+                    (i, String::new(), Some(ex), None)
+                }
+                RouterMode::DecisionModel => unreachable!("handled above"),
             }
         };
 
@@ -167,13 +222,18 @@ impl ExecutableNode for RouterNode {
         };
 
         // 5. Emit __decision + one payload per port (null for non-selected).
+        // decision_model already builds its full __decision object (design's
+        // "keeps existing keys, adds model_choice/confidence/..."); the other
+        // two modes keep the original three-key shape.
         let mut out = Map::new();
         out.insert(
             "__decision".to_string(),
-            json!({
-                "selected_branch": selected.name,
-                "reason": reason,
-                "extracted": extracted
+            decision_extra.unwrap_or_else(|| {
+                json!({
+                    "selected_branch": selected.name,
+                    "reason": reason,
+                    "extracted": extracted
+                })
             }),
         );
         for (i, b) in cfg.branches.iter().enumerate() {
@@ -224,16 +284,20 @@ impl ExecutableNode for RouterNode {
 
     fn config_schema(&self) -> Option<NodeCatalogEntry> {
         // `mode`/`branches`/`schema`/`instructions` are parsed in `config.rs`;
-        // `provider`/`api_key`/`model` are read here. `temperature` is NOT
-        // settable: both modes call the LLM with it hardcoded to 0.1 for
-        // deterministic branch selection.
+        // `provider`/`api_key`/`model`/`fallback_branch`/`min_confidence` are
+        // read here. `temperature` is NOT settable: llm_direct and
+        // extract_and_route call the LLM with it hardcoded to 0.1 for
+        // deterministic branch selection (decision_model does not use it at
+        // all — the decision model has no temperature knob).
         Some(
             NodeCatalogEntry::no_config()
                 .with_field(
                     "mode",
-                    FieldSpec::of_type("string")
-                        .required()
-                        .valid_values(["llm_direct".into(), "extract_and_route".into()]),
+                    FieldSpec::of_type("string").required().valid_values([
+                        "llm_direct".into(),
+                        "extract_and_route".into(),
+                        "decision_model".into(),
+                    ]),
                 )
                 .with_field(
                     "provider",
@@ -241,6 +305,7 @@ impl ExecutableNode for RouterNode {
                         "openai".into(),
                         "google".into(),
                         "anthropic".into(),
+                        "typesafe".into(),
                     ]),
                 )
                 .with_field("api_key", FieldSpec::of_type("string").required())
@@ -251,7 +316,15 @@ impl ExecutableNode for RouterNode {
                 )
                 .with_field("instructions", FieldSpec::of_type("string"))
                 .with_field("temperature", FieldSpec::of_type("number").read_only())
-                .with_field("branches", FieldSpec::of_type("array").required()),
+                .with_field("branches", FieldSpec::of_type("array").required())
+                .with_field(
+                    "fallback_branch",
+                    FieldSpec::of_type("string").conditional("decision_model only"),
+                )
+                .with_field(
+                    "min_confidence",
+                    FieldSpec::of_type("number").conditional("decision_model only"),
+                ),
         )
     }
 }
@@ -358,5 +431,46 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("pick one"));
+    }
+
+    /// Each bad decision_model config fails before any request, with an error
+    /// naming what to fix. `None` removes the key; `Some(v)` overrides it.
+    #[tokio::test]
+    async fn decision_model_config_errors_fail_before_any_request() {
+        let cases: [(&str, Option<Value>, &str); 4] = [
+            (
+                "provider",
+                Some(json!("openai")),
+                "requires provider 'typesafe'",
+            ),
+            ("api_key", None, "TYPESAFE_API_KEY"),
+            (
+                "api_key",
+                Some(json!("${TYPESAFE_API_KEY_DOES_NOT_EXIST}")),
+                "TYPESAFE_API_KEY",
+            ),
+            ("fallback_branch", None, "requires 'fallback_branch'"),
+        ];
+        for (key, value, expected) in cases {
+            let mut cfg = json!({
+                "mode": "decision_model", "provider": "typesafe", "api_key": "fake",
+                "fallback_branch": "human_review",
+                "branches": [
+                    { "name": "refund", "description": "wants money back" },
+                    { "name": "human_review", "description": "needs a person" }
+                ]
+            });
+            let obj = cfg.as_object_mut().unwrap();
+            match value {
+                Some(v) => obj.insert(key.to_string(), v),
+                None => obj.remove(key),
+            };
+            let err = RouterNode::new()
+                .execute(&inputs(json!("hola")), &cfg, &mut json!({}), None)
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(expected), "{key}: {err}");
+        }
     }
 }
