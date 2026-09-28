@@ -1,5 +1,5 @@
 {
-  "comment": "E2E (CHANGELOG 2026-09 section 192): the author's attachment_url_ttl_seconds. Same seed and echo as attachment_url_author_fixed_e2e.json (row e2e_img for --agent-session-id e2e-url-001). with_ttl (3600 in its config) posts the link and the echo downloads the 80 bytes; bad_ttl (0) fails with 'attachment_url_ttl_seconds must be a positive whole number of seconds' before any request.",
+  "comment": "E2E (CHANGELOG 2026-09 section 193): the author's attachment_url_ttl_seconds. Same seed and echo as attachment_url_author_fixed_e2e.json (row e2e_img for --agent-session-id e2e-url-001). with_ttl (3600 in its config) posts the link and the echo downloads the 80 bytes; bad_ttl (0) fails with 'attachment_url_ttl_seconds must be a positive whole number of seconds' before any request.",
   "metadata": { "category": "security", "requires_env": ["DATABASE_URL", "SECURE_VALUES_KEY"] },
   "nodes": {
     "hook": { "type": "trigger_webhook", "config": { "test_payload": { "body": { "image_url": "$attachment_url:e2e_img" } } } },

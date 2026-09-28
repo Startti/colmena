@@ -7143,7 +7143,7 @@ grafo E2E.
 **ADP.** Sin impacto.
 **Estado.** done.
 
-## 192. `$attachment_url:`: solo en un body JSON, un `Host` de datos no la lleva, y el autor fija cuánto vive la URL
+## 193. `$attachment_url:`: solo en un body JSON, un `Host` de datos no la lleva, y el autor fija cuánto vive la URL
 
 **Qué cambia.** La regla de dirección de §184 cubre también un header `Host` de datos: mismo error, que ahora nombra
 "base_url, endpoint and any Host header". La forma se acepta solo como valor entero de un string en un body **JSON**:

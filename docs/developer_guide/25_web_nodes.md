@@ -470,7 +470,7 @@ si `base_url`, `endpoint` y cualquier header `Host` son del autor (`config` o un
 como valor entero de un string en un body JSON (nunca en `query_params` ni en una parte multipart); si no,
 el nodo falla, aunque el host esté en `allowed_hosts`, y no sigue una redirección a otro origen. Detalle,
 TTL (`attachment_url_ttl_seconds`, leído solo cuando el body trae la forma) y scrub de la salida: [guía 32
-§4](32_multimedia_generation.md) (CHANGELOG 2026-09 §184, §192).
+§4](32_multimedia_generation.md) (CHANGELOG 2026-09 §184, §193).
 
 ---
 
