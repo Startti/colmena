@@ -1436,6 +1436,7 @@ mod catalog_coverage_tests {
                     "authorization",
                     "allowed_hosts",
                     "multipart_url_fields",
+                    "attachment_url_ttl_seconds",
                 ],
             ),
             (

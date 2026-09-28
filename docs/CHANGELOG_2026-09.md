@@ -7192,3 +7192,20 @@ con error, y `dag_engine run` del mismo grafo se niega a cargarlo (`Invalid grap
 
 **ADP.** Sin impacto: solo cambia el resultado para grafos que usan el modo nuevo con un config inválido.
 **Estado.** done.
+
+## 194. `$attachment_url:`: solo en un body JSON, un `Host` de datos no la lleva, y el autor fija cuánto vive la URL
+
+**Qué cambia.** La regla de dirección de §184 cubre también un header `Host` de datos: mismo error, que ahora nombra
+"base_url, endpoint and any Host header". La forma se acepta solo como valor entero de un string en un body **JSON**:
+en `query_params` o en una parte multipart falla, antes de leer adjuntos y de conectarse, con `is accepted only as a
+whole string value in a JSON body, not in query params or a multipart part` (en multipart `$attachment:` ya manda el
+archivo); otra entrada que termina como query param va tal como está escrita. `attachment_url_ttl_seconds` (config de
+`http_request`, del autor; entero positivo, 900 por defecto) fija cuánto vive la URL; se lee solo cuando el body trae
+la forma, un valor de dato se ignora, es reservado (nunca query param) y se pasa sin tope a `read_url` (el host lo
+recorta). Solo cuenta `Host`: `X-Forwarded-Host` y `Forwarded` no entran en la regla. Catálogo y guías 25 y 32.
+**Tests.** Multipart, `query_params` y `Host` de datos rechazan; una entrada plana con la forma no hace fallar el
+pedido; el TTL es el del autor y nunca de datos, llega sin tope (604800) y uno inválido se rechaza; la clave nunca es
+query param; `registry.rs`: author-owned y coincide con `config_schema`. Mutaciones rojas: sin el rechazo en multipart,
+TTL sin mirar autoría, clave fuera de `RESERVED_KEYS`, un tope en el TTL. E2E `attachment_url_ttl_e2e.json` (sin
+modelo), corrido: TTL 3600 → el eco baja los 80 bytes y la salida muestra el placeholder; TTL 0 → error sin pedido.
+**ADP.** Llega con el próximo tag. **Estado.** done.

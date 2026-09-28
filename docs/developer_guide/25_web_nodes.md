@@ -463,6 +463,15 @@ proxy del sistema) en desarrollo local (CHANGELOG 2026-09 §143, §144). E2E:
 
 E2E: [`tests/graphs/security/tool_env_provenance_e2e.json`](../../tests/graphs/security/tool_env_provenance_e2e.json).
 
+### Un link a un adjunto, solo hacia la dirección del autor
+
+`"$attachment_url:<document_id>"` en el body JSON se reemplaza por una URL de lectura que da el host, solo
+si `base_url`, `endpoint` y cualquier header `Host` son del autor (`config` o un `fixed` intacto) y solo
+como valor entero de un string en un body JSON (nunca en `query_params` ni en una parte multipart); si no,
+el nodo falla, aunque el host esté en `allowed_hosts`, y no sigue una redirección a otro origen. Detalle,
+TTL (`attachment_url_ttl_seconds`, leído solo cuando el body trae la forma) y scrub de la salida: [guía 32
+§4](32_multimedia_generation.md) (CHANGELOG 2026-09 §184, §194).
+
 ---
 
 ## Subida de archivos por multipart (`http_request`)
