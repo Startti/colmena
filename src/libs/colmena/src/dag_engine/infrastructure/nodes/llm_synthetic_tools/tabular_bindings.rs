@@ -184,6 +184,13 @@ pub struct SqlBindingCtx {
 const SQL_BINDING_MAX_ROWS: u64 = 100_001;
 const SQL_BINDING_ROW_LIMIT: u64 = 100_000;
 
+/// Row ceiling for an attachment (CSV/XLSX) binding. Higher than the 100 K of
+/// `attachment_run_python` and bulk insert: a binding loads into pandas and
+/// `output_tables` writes back in chunks, so a monthly export past 100 K rows
+/// (e.g. 120 K consumption rows) must still load. Bounded so a runaway file
+/// cannot exhaust the worker memory.
+pub(crate) const ATTACHMENT_BINDING_MAX_ROWS: u64 = 500_000;
+
 /// Fetches attachment bytes for [`BindingKind::Attachment`] bindings.
 /// Input is the `attachment_id`; output is `(bytes, mime_type_or_filename)`
 /// — the second element is passed as both `mime_type` and `filename` hints
@@ -412,6 +419,7 @@ async fn resolve_one(
                     b.delimiter.as_deref(),
                     b.sheet_name.as_deref(),
                     b.header_row,
+                    ATTACHMENT_BINDING_MAX_ROWS,
                 )
                 .map_err(|message| {
                     binding_error(

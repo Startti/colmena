@@ -553,8 +553,10 @@ pub type AttachmentRecords = (Vec<String>, Vec<serde_json::Map<String, serde_jso
 ///
 /// Returns `Err` if:
 /// - bytes exceed `MAX_ATTACHMENT_BYTES` (50 MB)
-/// - row count exceeds `MAX_BULK_INSERT_ROWS` (100 K) — the helper would
-///   otherwise stream all 1M+ rows into Python memory unbounded
+/// - row count exceeds `max_rows` — the helper would otherwise stream all
+///   1M+ rows into Python memory unbounded. `attachment_run_python` passes
+///   [`MAX_BULK_INSERT_ROWS`] (100 K); a `data_run_python` binding passes its
+///   own, higher ceiling (it loads into pandas and writes back in chunks)
 /// - mime is not CSV/XLSX (caller falls back to the LLM-error envelope)
 ///
 /// Values are emitted as JSON strings (CSV native shape); pandas re-infers
@@ -566,6 +568,7 @@ pub fn parse_attachment_to_records(
     delimiter: Option<&str>,
     sheet_name: Option<&str>,
     header_row: Option<u32>,
+    max_rows: u64,
 ) -> Result<AttachmentRecords, String> {
     if bytes.len() as u64 > MAX_ATTACHMENT_BYTES {
         return Err(format!(
@@ -585,8 +588,8 @@ pub fn parse_attachment_to_records(
             )
         })?;
     match format {
-        FileFormat::Csv => parse_csv_to_records(bytes, delimiter, header_row),
-        FileFormat::Xlsx => parse_xlsx_to_records(bytes, sheet_name, header_row),
+        FileFormat::Csv => parse_csv_to_records(bytes, delimiter, header_row, max_rows),
+        FileFormat::Xlsx => parse_xlsx_to_records(bytes, sheet_name, header_row, max_rows),
     }
 }
 
@@ -594,6 +597,7 @@ fn parse_csv_to_records(
     bytes: &[u8],
     delimiter: Option<&str>,
     header_row: Option<u32>,
+    max_rows: u64,
 ) -> Result<AttachmentRecords, String> {
     let header_row = header_row.unwrap_or(DEFAULT_HEADER_ROW).max(1) as usize;
     let delimiter_byte = match delimiter {
@@ -639,9 +643,9 @@ fn parse_csv_to_records(
     for rec in iter {
         let rec =
             rec.map_err(|e| format!("CSV row parse error at row {}: {e}", records.len() + 1))?;
-        if records.len() as u64 >= MAX_BULK_INSERT_ROWS {
+        if records.len() as u64 >= max_rows {
             return Err(format!(
-                "CSV exceeds {MAX_BULK_INSERT_ROWS} rows — run_python cannot load the full DataFrame. \
+                "CSV exceeds {max_rows} rows — run_python cannot load the full DataFrame. \
                  Use sql_bulk_insert_from_attachment for large files, or filter the data before upload."
             ));
         }
@@ -665,6 +669,7 @@ fn parse_xlsx_to_records(
     bytes: &[u8],
     sheet_name: Option<&str>,
     header_row: Option<u32>,
+    max_rows: u64,
 ) -> Result<AttachmentRecords, String> {
     use calamine::{open_workbook_from_rs, Reader, Xlsx};
     use std::io::Cursor;
@@ -714,9 +719,9 @@ fn parse_xlsx_to_records(
     }
 
     let data_row_count = height - header_row;
-    if data_row_count as u64 > MAX_BULK_INSERT_ROWS {
+    if data_row_count as u64 > max_rows {
         return Err(format!(
-            "XLSX exceeds {MAX_BULK_INSERT_ROWS} rows — run_python cannot load the full DataFrame. \
+            "XLSX exceeds {max_rows} rows — run_python cannot load the full DataFrame. \
              Filter the data before upload."
         ));
     }
@@ -1627,6 +1632,25 @@ fn is_timestamp(v: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The row ceiling is the caller's: the same file is refused under a low
+    /// cap and loads under a higher one (a binding's 500 K vs run_python's 100 K).
+    #[test]
+    fn parse_attachment_row_cap_is_the_callers() {
+        let mut csv = String::from("a,b\n");
+        for i in 0..150 {
+            csv.push_str(&format!("{i},x\n"));
+        }
+        let err =
+            parse_attachment_to_records(csv.as_bytes(), "text/csv", "t.csv", None, None, None, 100)
+                .expect_err("150 rows must exceed a 100-row cap");
+        assert!(err.contains("exceeds 100 rows"), "got: {err}");
+        let (cols, rows) =
+            parse_attachment_to_records(csv.as_bytes(), "text/csv", "t.csv", None, None, None, 200)
+                .expect("150 rows fit a 200-row cap");
+        assert_eq!(cols, vec!["a", "b"]);
+        assert_eq!(rows.len(), 150);
+    }
 
     #[test]
     fn inferred_type_str_roundtrip() {
