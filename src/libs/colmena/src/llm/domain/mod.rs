@@ -1,5 +1,7 @@
 pub mod attachments;
 pub mod call_cancels;
+pub mod decision_model;
+pub mod decision_model_repository;
 pub mod file_cache_repository;
 pub mod file_provider_factory_port;
 pub mod file_provider_repository;
@@ -27,6 +29,13 @@ pub use attachments::{
     AttachmentError, AttachmentRegistry, AttachmentSource, ConversationAttachment,
     StaleAttachmentQuery, UpsertAttachmentInput,
 };
+pub use decision_model::{
+    Answer, ChoiceOption, DecisionRequest, DecisionResponse, DecisionUsage, NoulCriteria, Question,
+    QuestionKind,
+};
+#[cfg(test)]
+pub use decision_model_repository::MockDecisionModelRepository;
+pub use decision_model_repository::{DecisionModelError, DecisionModelRepository};
 pub use file_cache_repository::{CachedFileEntry, FileCacheRepository};
 pub use file_provider_factory_port::FileProviderFactoryPort;
 pub use file_provider_repository::{BoxedByteStream, FileProviderRepository};
