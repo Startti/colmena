@@ -128,6 +128,16 @@ the template reaps the orphans). If that cannot be done even on a second try, th
 calls fail with `PythonExecutorError: no usable Python slot is left…` until the process restarts. The host signals a
 call's child through a pidfd (the pid when pidfds are unavailable).
 
+### Startup self-test (Linux)
+
+Before it binds its socket, the template forks a throwaway child that enters the jail as slot 9999 (uid
+`uid_base + 9999`, reserved) and checks each layer by its effect: descriptors, uid/gid, `no_new_privs`, the limits,
+the private `/proc` (the template's pid hidden), the covered paths, a private `/tmp` and no network route. Each result
+is a JSON line `{layer, ok, reason, errno?}` with fixed reason codes. Any failure logs `self_test_failed` and the
+template exits 3; success is implied by `READY`. `python_executor self-test [--uid-base N] [--tmp-mb N] [--hide /abs]`
+runs the same checks (same values as the executor settings; root and `CAP_SYS_ADMIN` needed): exit 0 when every layer
+holds, 3 when one fails, 2 for bad arguments.
+
 ## About `restricted`
 
 `restricted` validates imports and a few builtins before running. It helps

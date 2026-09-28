@@ -6884,3 +6884,13 @@ Guía: [12_dag_engine_guide.md](developer_guide/12_dag_engine_guide.md).
 `colmena_dag_engine-v0.21.5`; con `steering: true`, el worker arma el buzón en Redis, lo pasa
 con `RunControl::with_steering` y lo cierra al terminar el job.
 **Estado.** done.
+
+## 171. Python: la plantilla prueba cada capa de la jaula antes de aceptar trabajo (Linux)
+
+**Qué cambia.** Antes de abrir su socket, la plantilla lanza un hijo descartable que entra en la jaula como slot 9999 y
+comprueba cada capa por su efecto (descriptores, uid/gid, `no_new_privs`, límites, `/proc` privado, rutas tapadas,
+`/tmp` privado, sin red). Si una falla, registra `self_test_failed` y sale con 3: no hay modo parcialmente aislado.
+`python_executor self-test` corre lo mismo (salida 0 si todo se cumple, 3 si no, 2 por argumentos). `subprocess` sigue
+sin poder elegirse.
+**Tests.** Contenedor root: el self-test pasa; apagar una capa lo hace fallar en esa capa; sin `CAP_SYS_ADMIN` reporta
+la capa no aplicada. **ADP.** Sin cambios. **Estado.** done.
