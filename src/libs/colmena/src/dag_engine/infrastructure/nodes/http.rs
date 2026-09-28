@@ -248,7 +248,7 @@ fn filename_from_url_path(url: &Url) -> String {
 
 impl HttpNode {
     /// Keys this node consumes itself; they must never travel as query params.
-    const RESERVED_KEYS: [&'static str; 11] = [
+    const RESERVED_KEYS: [&'static str; 12] = [
         "base_url",
         "endpoint",
         "method",
@@ -262,6 +262,8 @@ impl HttpNode {
         // The run's id: global state hands it to every node. An API that needs a
         // `session_id` param gets it through `query_params`.
         "session_id",
+        // Author-set lifetime of an `$attachment_url:` URL — never a query param.
+        "attachment_url_ttl_seconds",
     ];
 
     /// True for engine-injected bookkeeping inputs — the domain's
@@ -453,6 +455,21 @@ impl HttpNode {
 
     /// Lifetime asked of the host for each `$attachment_url:` URL: 15 minutes.
     const DEFAULT_ATTACHMENT_URL_TTL_SECS: u64 = 900;
+
+    /// The lifetime to ask of the host for each `$attachment_url:` URL: the
+    /// author's `attachment_url_ttl_seconds` (in `config`, or a tool's `fixed`
+    /// value), a positive whole number of seconds, else 900. A value from
+    /// runtime data is not the author's and is ignored. The host may cap it.
+    fn attachment_url_ttl(inputs: &NodeInputs, config: &Value) -> Result<u64, String> {
+        match Self::author_value(inputs, config, "attachment_url_ttl_seconds") {
+            None | Some(Value::Null) => Ok(Self::DEFAULT_ATTACHMENT_URL_TTL_SECS),
+            Some(v) => v.as_u64().filter(|n| *n > 0).ok_or_else(|| {
+                "http_request: attachment_url_ttl_seconds must be a positive whole number \
+                 of seconds"
+                    .to_string()
+            }),
+        }
+    }
 
     /// Whether a string value of `v`, at any depth, is a
     /// `"$attachment_url:<document_id>"`. Object keys are not looked at.
@@ -1724,11 +1741,13 @@ impl ExecutableNode for HttpNode {
                 // Never log body contents — may contain credentials or PII
                 request_builder = request_builder.body(s_resolved);
             } else if let Some(resolved_body) = json_body {
-                // `$attachment_url:` only toward the author's address, checked
-                // before any attachment is read.
+                // `$attachment_url:` only toward the author's address and with
+                // a valid lifetime, both checked before any attachment is read.
                 if carries_url && !Self::address_is_authored(inputs) {
                     return Err(Self::URL_FORM_NEEDS_AUTHORED_ADDRESS.into());
                 }
+                let ttl = carries_url.then(|| Self::attachment_url_ttl(inputs, config));
+                let ttl = ttl.transpose().map_err(Self::io_err)?;
                 // Then resolve any `$attachment:<id>` placeholders to data: URIs
                 // by reading bytes via OutputStorageRepository. This is what
                 // lets agents pass generated artifacts to external endpoints
@@ -1745,12 +1764,12 @@ impl ExecutableNode for HttpNode {
                     .resolve_attachment_placeholders(resolved_body, sid, max)
                     .await?;
                 // `$attachment_url:<document_id>` → a URL the host issues.
-                let resolved_body = if carries_url {
-                    let ttl = Self::DEFAULT_ATTACHMENT_URL_TTL_SECS;
-                    self.resolve_attachment_urls(resolved_body, sid, ttl, &mut issued)
-                        .await?
-                } else {
-                    resolved_body
+                let resolved_body = match ttl {
+                    Some(ttl) => {
+                        self.resolve_attachment_urls(resolved_body, sid, ttl, &mut issued)
+                            .await?
+                    }
+                    None => resolved_body,
                 };
                 // Never log body contents — may contain credentials or PII
                 request_builder = request_builder.json(&resolved_body);
@@ -1799,8 +1818,9 @@ impl ExecutableNode for HttpNode {
         Some("Make HTTP requests to external APIs. Supports GET, POST, PUT, DELETE methods with custom headers and query parameters.")
     }
 
-    /// Where the request goes, how, and with which credentials: author-set
-    /// fields are config-only unless an edge names them.
+    /// Where the request goes, how, with which credentials, and the lifetime
+    /// of an `$attachment_url:` URL: author-set fields are config-only unless
+    /// an edge names them.
     /// `endpoint`, `body` and query values stay data: they cannot change the host.
     fn author_owned_inputs(&self) -> &'static [&'static str] {
         &[
@@ -1811,6 +1831,7 @@ impl ExecutableNode for HttpNode {
             "authorization",
             "allowed_hosts",
             "multipart_url_fields",
+            "attachment_url_ttl_seconds",
         ]
     }
 
@@ -1877,6 +1898,7 @@ impl ExecutableNode for HttpNode {
                 .with_field("allow_http_urls", FieldSpec::of_type("boolean"))
                 .with_field("allowed_hosts", FieldSpec::of_type("array"))
                 .with_field("multipart_url_fields", FieldSpec::of_type("array"))
+                .with_field("attachment_url_ttl_seconds", FieldSpec::of_type("integer"))
                 .with_reserved_input_keys(Self::RESERVED_KEYS.iter().copied())
                 .with_reserved_input_keys([
                     "__colmena_session_id",
@@ -2732,6 +2754,57 @@ mod attachment_url_tests {
         config["headers"] = host;
         let authored = body(json!({ "image_url": PLACEHOLDER }));
         assert_eq!(post(&http, authored, config).await.unwrap()["status"], 200);
+    }
+
+    /// The author's value (config, or a tool's `fixed` one) reaches the host;
+    /// a value from runtime data is ignored; none travels as a query param.
+    #[tokio::test]
+    async fn the_ttl_is_the_authors_value_and_never_a_data_value() {
+        let server = MockServer::start().await;
+        let ok = Mock::given(method("POST")).respond_with(ResponseTemplate::new(200));
+        ok.expect(3).mount(&server).await;
+        let storage = Arc::new(UrlStorage::default());
+        let http = node(storage.clone()).await;
+        let placeholder = || body(json!({ "image_url": PLACEHOLDER }));
+        let mut config = cfg(&server);
+        config["attachment_url_ttl_seconds"] = json!(3600);
+        post(&http, placeholder(), config).await.unwrap();
+        let mut fixed = placeholder();
+        fixed.insert("attachment_url_ttl_seconds".into(), json!(7200));
+        fixed.insert(
+            AUTHORED_INPUTS_KEY.into(),
+            json!(["attachment_url_ttl_seconds"]),
+        );
+        post(&http, fixed, cfg(&server)).await.unwrap();
+        let mut data = placeholder();
+        data.insert("attachment_url_ttl_seconds".into(), json!(60));
+        post(&http, data, cfg(&server)).await.unwrap();
+        assert_eq!(*storage.0.lock().unwrap(), vec![3600, 7200, 900]);
+        let sent = server.received_requests().await.unwrap();
+        assert!(
+            sent.iter().all(|r| r.url.query().is_none()),
+            "a query param"
+        );
+    }
+
+    /// Anything but a positive whole number fails before any attachment is
+    /// read, and nothing is sent.
+    #[tokio::test]
+    async fn a_ttl_that_is_not_a_positive_whole_number_is_refused() {
+        let server = untouched().await;
+        let storage = Arc::new(UrlStorage::default());
+        let http = node(storage.clone()).await;
+        for bad in [json!(0), json!(-5), json!("3600"), json!(1.5)] {
+            let mut config = cfg(&server);
+            config["attachment_url_ttl_seconds"] = bad.clone();
+            let both = body(json!({ "image_url": PLACEHOLDER, "file": "$attachment:doc-1" }));
+            let err = post(&http, both, config).await.unwrap_err();
+            assert!(
+                err.contains("attachment_url_ttl_seconds must be"),
+                "{bad}: {err}"
+            );
+        }
+        assert!(storage.0.lock().unwrap().is_empty(), "a URL was asked for");
     }
 }
 
@@ -3661,6 +3734,7 @@ mod extra_query_params_tests {
             ("bearer_token", json!("t")),
             ("authorization", json!("Bearer t")),
             ("secure", json!(true)),
+            ("attachment_url_ttl_seconds", json!(3600)),
         ]);
         let got = HttpNode::collect_extra_query_params(&given, &untrusted());
 
