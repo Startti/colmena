@@ -1391,7 +1391,33 @@ impl DagToolExecutor {
                     .get(TOOL_DATA_RUN_PYTHON)
                     .map(|tc| tc.fixed_config.clone())
                     .unwrap_or_default();
-                let value = dispatch_data_run_python_via_executor(self, tool_call, &fixed).await;
+                // Secure values: this synthetic tool returns before the generic
+                // `inject_secrets` below, so a `<value_N>` handle in its args
+                // (e.g. an inline `data` binding holding another tool's secure
+                // output) would reach Python as the literal handle. Resolve the
+                // handles here, and mask the decrypted values back out of the
+                // result the LLM sees, exactly as the generic path does.
+                let mut call = tool_call.clone();
+                let mut applied_secrets: HashMap<String, String> = HashMap::new();
+                if let (Some(svc), Some(sid)) = (&self.secure_value_service, &self.session_id) {
+                    if let Ok(mut args) = serde_json::from_str::<Value>(&call.function.arguments) {
+                        match svc
+                            .inject_secrets(&mut args, sid, self.agent_session_id.as_deref())
+                            .await
+                        {
+                            Ok(map) => applied_secrets = map,
+                            Err(e) => eprintln!(
+                                "⚠️ [DagToolExecutor] Failed to inject secrets into data_run_python: {}",
+                                e
+                            ),
+                        }
+                        call.function.arguments = args.to_string();
+                    }
+                }
+                let mut value = dispatch_data_run_python_via_executor(self, &call, &fixed).await;
+                if let Some(svc) = &self.secure_value_service {
+                    svc.mask_outbound(&mut value, &applied_secrets);
+                }
                 return Ok(crate::llm::domain::tools::ToolResult::success(
                     tool_call.id.clone(),
                     value.to_string(),
@@ -5317,6 +5343,43 @@ mod tests {
             stream.contains(r#""key":"<sv_tok_1>""#),
             "row key must be masked, not dropped: {stream}"
         );
+    }
+
+    /// `data_run_python` returns before the generic secret injection, so a
+    /// secure-value handle in its args must be resolved on its own path: Python
+    /// sees the real value, and the result the LLM gets has it masked back.
+    #[tokio::test]
+    #[ignore = "executes the PyO3 pandas sandbox (not installed in CI); run with \
+                `cargo test -- --ignored` and pandas on the interpreter's path"]
+    async fn data_run_python_resolves_secure_value_handles_in_its_args() {
+        pyo3::Python::initialize();
+        let exec = DagToolExecutor::new(Arc::new(MockRegistry::new()), HashMap::new())
+            .with_secure_values(
+                Arc::new(SecureValueService::new(Arc::new(OneSecretRepo))),
+                "session_1".to_string(),
+            );
+        let args = serde_json::json!({
+            "bindings": [{"var": "rows", "data": [{"v": "<sv_tok_1>"}]}],
+            "code": "output = {'visto': rows[0]['v'], 'largo': len(rows[0]['v'])}"
+        });
+        let call = ToolCall::new(
+            "call_1".into(),
+            FunctionCall::new("data_run_python".into(), args.to_string()),
+        );
+
+        let result = exec.execute(&call).await.unwrap();
+        let out: Value = serde_json::from_str(&result.output).unwrap();
+        assert_eq!(
+            out["output"]["largo"],
+            serde_json::json!("LEAKTOK_q8w2e5".len()),
+            "Python must receive the decrypted value, not the handle: {out}"
+        );
+        assert!(
+            !result.output.contains("LEAKTOK_q8w2e5"),
+            "the decrypted value must be masked out of the result: {}",
+            result.output
+        );
+        assert_eq!(out["output"]["visto"], "<sv_tok_1>", "{out}");
     }
 
     /// Security: an LLM-supplied tool-call argument must NEVER override an
