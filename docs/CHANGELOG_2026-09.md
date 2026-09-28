@@ -6959,3 +6959,13 @@ descifrados en el resultado que ve el LLM, igual que la ruta genérica.
 **Tests.** `data_run_python_resolves_secure_value_handles_in_its_args` (ignorado en CI porque necesita pandas): Python
 recibe el valor descifrado y el resultado lo muestra enmascarado. Sin el arreglo, Python veía `<sv_tok_1>`.
 **ADP.** Sin cambios de API. **Estado.** done.
+
+## 179. Python: el executor `subprocess` se puede elegir (Linux)
+
+**Qué cambia.** `COLMENA_PYTHON_EXECUTOR=subprocess` corre cada llamada en un hijo enjaulado que sale de una plantilla
+caliente (Linux; el host arranca como root en su contenedor); sin root no arranca. La plantilla se calienta al
+arrancar; mientras no arranque, cada llamada falla con `PythonExecutorError`, nunca en proceso.
+`COLMENA_PYTHON_EXECUTOR_REFUSE_OUTPUT`: un resultado que contiene un literal configurado no sale (segunda capa: se
+compara byte a byte). `remote` sigue sin poder elegirse. Guía 53: sección para correr código que no escribiste.
+**Tests.** Contenedor root: suite de aislamiento y de subprocess; el grafo smoke con `subprocess` da la misma firma que
+en proceso; sin root el motor no arranca. **ADP.** Sin cambios (no usa la bandera). **Estado.** done.
