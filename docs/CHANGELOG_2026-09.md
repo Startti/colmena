@@ -6927,3 +6927,13 @@ montajes o su tamaño, el self-test lo dice con `namespace_unreadable`, `mounts_
 `missing_layer` pasa a llamarse `incomplete_report`. **Tests.** Contenedor root: el test de `/dev/mqueue` comprueba antes
 que el directorio exista y acepte una entrada; la lectura de `/proc/net/dev`, la exclusión de rutas anidadas y el
 rechazo de `..` tienen tests unitarios que corren en CI. **ADP.** Sin cambios. **Estado.** done.
+
+## 175. `data_run_python`: un adjunto como binding carga hasta 500.000 filas
+
+**Qué cambia.** `parse_attachment_to_records` recibe el tope de filas de quien la llama, en lugar de usar siempre
+`MAX_BULK_INSERT_ROWS` (100 K). Un binding de adjunto (CSV/XLSX) de `data_run_python` usa
+`ATTACHMENT_BINDING_MAX_ROWS` (500 K): carga en pandas y `output_tables` escribe por partes, así que un export mensual
+de más de 100 K filas (120 K consumos de Truora) ya no se corta al leer. `attachment_run_python` y la inserción masiva
+mantienen los 100 K.
+**Tests.** El mismo CSV de 150 filas se rechaza con tope 100 y carga con tope 200.
+**ADP.** Sin cambios de API. **Estado.** done.

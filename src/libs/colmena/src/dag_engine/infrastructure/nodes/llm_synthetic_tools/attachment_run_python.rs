@@ -239,6 +239,7 @@ pub async fn dispatch_attachment_run_python_via_executor(
         args.delimiter.as_deref(),
         args.sheet_name.as_deref(),
         args.header_row,
+        super::sql_bulk_tools::MAX_BULK_INSERT_ROWS,
     ) {
         Ok(t) => t,
         Err(e) => return Ok(err_envelope(call_id, e)),
