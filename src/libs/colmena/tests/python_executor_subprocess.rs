@@ -98,6 +98,24 @@ async fn slot_uid(ex: &SubprocessExecutor) -> u32 {
     u32::try_from(uid).unwrap()
 }
 
+/// A process that does not run as root cannot start the executor: each child
+/// switches to an unprivileged user of its own, which only root may do. Needs
+/// no jail, so it is not gated; as root there is nothing to check.
+#[test]
+fn without_root_the_executor_does_not_start() {
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("skipped: runs as root");
+        return;
+    }
+    let mut cfg = SubprocessConfig::from_lookup(&|_: &str| None::<String>).unwrap();
+    cfg.bin = PathBuf::from(env!("CARGO_BIN_EXE_python_executor"));
+    let e = SubprocessExecutor::new(cfg, Duration::from_secs(60)).err();
+    assert_eq!(
+        e.map(|e| e.0).as_deref(),
+        Some("the subprocess executor must start as root inside its container: children switch to unprivileged users")
+    );
+}
+
 #[tokio::test]
 async fn runs_pandas_in_a_child() {
     let Some(ex) = executor(2) else { return };

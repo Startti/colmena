@@ -13,6 +13,8 @@ pub const WIRE_VERSION: u32 = 1;
 pub const CRASHED_MESSAGE: &str = "Python execution error: the Python process ended without returning a result (it may have exceeded its memory or CPU limit)";
 pub const MALFORMED_MESSAGE: &str =
     "Python execution error: the Python process returned a malformed result";
+pub const REFUSED_MESSAGE: &str =
+    "Python execution error: the result was refused by the executor's output policy";
 
 pub fn input_too_large_message(limit_bytes: usize) -> String {
     format!(

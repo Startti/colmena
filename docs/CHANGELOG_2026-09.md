@@ -6968,3 +6968,13 @@ registro de la sesión (como `resolve`) y le pide al storage `read_url` con la `
 si el storage del host no da URLs (default del trait, así compila todo implementador anterior). Nadie lo llama todavía:
 lo usa `http_request` en la PR siguiente. **Tests.** La clave de la fila y el TTL llegan a `read_url` y se marca
 `last_used_at`; fuera de la sesión es `NotFound` y el storage no se llama. **ADP.** Sin cambios. **Estado.** done.
+
+## 179. Python: el executor `subprocess` se puede elegir (Linux)
+
+**Qué cambia.** `COLMENA_PYTHON_EXECUTOR=subprocess` corre cada llamada en un hijo enjaulado que sale de una plantilla
+caliente (Linux; el host arranca como root en su contenedor); sin root no arranca. La plantilla se calienta al
+arrancar; mientras no arranque, cada llamada falla con `PythonExecutorError`, nunca en proceso.
+`COLMENA_PYTHON_EXECUTOR_REFUSE_OUTPUT`: un resultado que contiene un literal configurado no sale (segunda capa: se
+compara byte a byte). `remote` sigue sin poder elegirse. Guía 53: sección para correr código que no escribiste.
+**Tests.** Contenedor root: suite de aislamiento y de subprocess; el grafo smoke con `subprocess` da la misma firma que
+en proceso; sin root el motor no arranca. **ADP.** Sin cambios (no usa la bandera). **Estado.** done.

@@ -12,6 +12,7 @@ stay in the host process; Python only receives JSON inputs and returns JSON.
 | `COLMENA_PYTHON_EXECUTOR` | Where the code runs | Status |
 |---|---|---|
 | `inprocess` (default) | inside the host process, embedded interpreter | available |
+| `subprocess` | a jailed child process per call, forked from a warm template (Linux; the host starts as root inside its container) | available |
 
 Any other value is a configuration error: the host fails at startup (when it
 calls `install_from_env`, as `EngineConfig::from_env` does, and as the
@@ -90,7 +91,7 @@ single-threaded, binds a 0600 socket, prints `READY` and forks one child per con
 child always ends in `_exit`). It exits `3` if a startup check fails; a child exits `70` on a protocol error. The host
 must start it from a long-lived thread: it is killed when that thread exits. Logs are JSON fields only.
 
-### The subprocess executor (Linux, not selectable yet)
+### The subprocess executor (Linux)
 
 `python_exec::subprocess` supervises the warm template: it starts it from a dedicated long-lived thread (the template
 dies with that thread) with only `TEMPLATE_ENV`, replaces it when it exits, and retries a failed start after a pause.
@@ -103,11 +104,18 @@ Its stderr is read as JSON events with known fields only; any other line is drop
 | `COLMENA_PYTHON_EXECUTOR_MEMORY_MB` | 2048 (256-65536) |
 | `COLMENA_PYTHON_EXECUTOR_HIDE_PATHS` | none (`:`-separated absolute paths, no `..`) |
 | `COLMENA_PYTHON_EXECUTOR_MAX_REQUEST_MB`, `…_MAX_RESPONSE_MB` | 256 (1-4095) |
+| `COLMENA_PYTHON_EXECUTOR_REFUSE_OUTPUT` | none (`,`-separated literals, e.g. a credential prefix) |
 
 Each call takes a slot, checks the request size first, forks a child through the template and reads one capped
 response; a passed deadline kills the child (`Timeout`), and an abandoned call's child is killed and its slot freed
 once it is gone. The template gets only the host's `LANG`, `LC_ALL` and `LC_CTYPE` (same text encodings as in process),
-no `PYTHONPATH`/`PYTHONHOME`. Memory and CPU limits are sent but not enforced yet. The host must ignore `SIGPIPE`.
+no `PYTHONPATH`/`PYTHONHOME`. The host must ignore `SIGPIPE`. `SubprocessExecutor::new` refuses to start unless the
+host runs as root (children switch to unprivileged users). The template is warmed in the background at startup; while it
+cannot start (its self-test fails, the binary is missing) every call fails with a `PythonExecutorError`, never by running
+the code in process. A result that contains any `…_REFUSE_OUTPUT` literal, byte for byte, does not leave: the call
+fails with `Python execution error: the result was refused by the executor's output policy`. That is a second layer,
+not a replacement for the process isolation: an encoded or transformed value does not match, and the in-process
+executor does not apply it.
 
 ### Process isolation (Linux)
 
@@ -155,11 +163,17 @@ failure logs `self_test_failed` and the template exits 3; success is implied by 
 executor settings; root and `CAP_SYS_ADMIN` needed): exit 0 when every layer holds, 3 when one fails, 2 for bad
 arguments.
 
+## Running code you did not write
+
+For model-written code or anything else you did not write, use `COLMENA_PYTHON_EXECUTOR=subprocess` with
+`COLMENA_PYTHON_EXECUTOR_MODES=all`, on Linux, in a container where the host starts as root with `CAP_SYS_ADMIN`; run
+`python_executor self-test` there first. In process, `restricted` is an aid to authors, not an isolation boundary.
+
 ## About `restricted`
 
 `restricted` validates imports and a few builtins before running. It helps
 authors stay within the supported module set; it is not an isolation boundary.
-No isolated executor is available in this build yet.
+Isolation comes from the `subprocess` executor (Linux).
 
 ## Observability
 

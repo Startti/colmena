@@ -136,7 +136,7 @@ On a sandbox violation the node returns a `SandboxViolation: ...` error string t
 
 Wall-clock seconds budget for the Python script when `sandbox_mode` is `"restricted"`. On timeout the caller receives `SandboxTimeout: execution exceeded N seconds`.
 
-> **Known limitation.** A tight CPU loop holds the GIL and cannot be cancelled by `tokio::time::timeout`. The error is still surfaced to the caller, but the underlying blocking-pool thread remains busy until the process restarts. In long-running `serve` mode this can starve the blocking pool over time. For LLM-generated code this is acceptable in practice — tight loops are rare and recoverable. Avoid using the python_script node as a true multi-tenant sandbox for fully untrusted code.
+> **Timeouts.** With `COLMENA_PYTHON_EXECUTOR=subprocess` the code runs in a separate process that is killed at the deadline. In process, a tight loop holds the GIL: the caller still gets the timeout error, but the blocking-pool thread stays busy until the loop ends or the process restarts, which in a long-running `serve` can starve the pool. For code you did not write, see [Python executors](53_python_executors.md#running-code-you-did-not-write).
 
 ---
 
