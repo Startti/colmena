@@ -7173,6 +7173,26 @@ nodo de la rama elegida recibe el mensaje.
 **ADP.** Sin impacto: el modo es opt-in por grafo; sin cambios de API pública, bindings ni SSE.
 **Estado.** done. El rechazo al cargar el grafo (`Graph::validate` y linter) llega en el cambio siguiente.
 
+## 193. El `router` en modo `decision_model` se valida al cargar el grafo (Jev, 7/7)
+
+**Qué cambia.** `Graph::validate` aplica la regla de §190 a cada nodo `router`: un grafo con
+`fallback_branch` ausente o no declarada, una rama llamada `none_of_these`, un `min_confidence` fuera de
+`(0, 1]`, o esos campos en otro modo, se rechaza al cargar, antes de que corra ningún nodo y dispare
+efectos. `dag_engine lint` reporta lo mismo (`INVALID_FIELD_VALUE`) llamando a la misma función, y
+sigue marcando la falta de `api_key`. Guías: `51_graph_linter.md` (el linter espeja ahora ocho
+compuertas) y `37_router_and_output_parser.md`.
+
+**Tests.** `graph.rs`: rechaza un `decision_model` sin fallback y acepta uno válido y los otros modos.
+`tests/graph_lint.rs`: reporta el fallback no declarado y la `api_key` ausente, y deja limpio un config
+válido.
+
+**E2E.** Con el binario: `dag_engine lint --strict` sobre un router con `fallback_branch: "nobody"` sale
+con error, y `dag_engine run` del mismo grafo se niega a cargarlo (`Invalid graph: ... fallback_branch
+'nobody' does not name a declared branch`). El grafo válido de §192 lintea limpio y corre.
+
+**ADP.** Sin impacto: solo cambia el resultado para grafos que usan el modo nuevo con un config inválido.
+**Estado.** done.
+
 ## 194. `$attachment_url:`: solo en un body JSON, un `Host` de datos no la lleva, y el autor fija cuánto vive la URL
 
 **Qué cambia.** La regla de dirección de §184 cubre también un header `Host` de datos: mismo error, que ahora nombra

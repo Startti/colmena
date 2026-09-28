@@ -134,6 +134,7 @@ fn lint_document(document: &Value, ctx: &LintContext<'_>) -> Result<LintReport, 
     let mut report = lint_graph(&graph, ctx);
     lint_raw_node_properties(document, ctx, &mut report);
     lint_raw_node_ids(document, &mut report);
+    lint_raw_router_rules(document, &mut report);
     lint_raw_malformed_tool_entries(document, &mut report);
     lint_raw_tool_configurations(document, &mut report);
     lint_raw_tool_fields(document, ctx, &mut report);
@@ -951,6 +952,37 @@ fn lint_raw_node_ids(document: &Value, report: &mut LintReport) {
                 .into(),
             suggestion: Some("rename the node, e.g. with '_' instead".into()),
         });
+    }
+}
+
+/// Reproduces `Graph::validate`'s router gate by calling the same
+/// `router_rules::decision_model_rejection`, so the two cannot drift.
+fn lint_raw_router_rules(document: &Value, report: &mut LintReport) {
+    let Some(nodes) = document.get("nodes").and_then(Value::as_object) else {
+        return;
+    };
+    let mut ids: Vec<&String> = nodes.keys().collect();
+    ids.sort();
+    for id in ids {
+        let node = &nodes[id];
+        if node.get("type").and_then(Value::as_str) != Some("router") {
+            continue;
+        }
+        let Some(config) = node.get("config") else {
+            continue;
+        };
+        if let Some(reason) =
+            crate::dag_engine::domain::router_rules::decision_model_rejection(config)
+        {
+            report.diagnostics.push(Diagnostic {
+                severity: Severity::Error,
+                code: DiagnosticCode::InvalidFieldValue,
+                node_id: Some(id.clone()),
+                field: None,
+                message: format!("{reason}; the engine refuses this graph at load"),
+                suggestion: None,
+            });
+        }
     }
 }
 
