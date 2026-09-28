@@ -301,7 +301,9 @@ fn hidden_paths(hidden: &[(PathBuf, Option<u64>)]) -> LayerCheck {
 
 /// Four network routes, each checked on its own. The loopback listener is the
 /// template's: only a network namespace of the probe's own keeps it
-/// unreachable.
+/// unreachable. With the syscall filter, `socket()` is refused before any
+/// route is tried; the namespace itself is proven by `namespace_network` and
+/// `network_interfaces`.
 fn network(loopback_port: u16) -> Vec<LayerCheck> {
     let resolved = ("example.com", 443).to_socket_addrs().is_ok();
     let mut out = vec![check("network_dns", !resolved, "unresolved", "resolved")];
@@ -353,19 +355,35 @@ fn interfaces() -> LayerCheck {
 /// with EPERM. The probe is single-threaded, so it may fork; a process that
 /// does start exits at once and is reaped before the report.
 fn syscall_filter() -> [LayerCheck; 2] {
-    let refused = |rc: libc::c_int| {
+    let refused = |rc: libc::c_long| {
         rc == -1 && io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
     };
     let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0) };
-    let sockets = refused(fd);
+    let sockets = refused(fd.into());
     if fd >= 0 {
         unsafe { libc::close(fd) };
     }
+    // x86_64 kernels may also take the same call by its x32 number. The
+    // filter answers it with EPERM; a kernel without x32 would answer ENOSYS
+    // itself, which does not count.
+    #[cfg(target_arch = "x86_64")]
+    let sockets = {
+        let x32 = libc::SYS_socket | 0x4000_0000;
+        let domain = libc::c_long::from(libc::AF_INET);
+        let kind = libc::c_long::from(libc::SOCK_DGRAM);
+        let zero: libc::c_long = 0;
+        let fd = unsafe { libc::syscall(x32, domain, kind, zero) };
+        let held = refused(fd);
+        if fd >= 0 {
+            unsafe { libc::close(fd as libc::c_int) };
+        }
+        sockets && held
+    };
     let pid = unsafe { libc::fork() };
     if pid == 0 {
         unsafe { libc::_exit(0) };
     }
-    let processes = refused(pid);
+    let processes = refused(pid.into());
     if pid > 0 {
         wait(pid);
     }

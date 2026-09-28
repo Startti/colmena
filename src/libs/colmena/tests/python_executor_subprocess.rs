@@ -14,6 +14,7 @@ use colmena::dag_engine::infrastructure::python_exec::selftest;
 use colmena::dag_engine::infrastructure::python_exec::subprocess::SubprocessExecutor;
 use std::collections::BTreeSet;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
@@ -171,6 +172,42 @@ async fn a_call_cannot_start_a_process() {
     );
 }
 
+/// Whatever still runs as the slot's uid when a call ends is stopped then,
+/// whoever started it. A call's code cannot start a process, so a stand-in
+/// started here as that uid takes its place; it is this test's child, so its
+/// exit status shows what ended it.
+#[tokio::test]
+async fn what_runs_as_the_slots_uid_is_stopped_after_a_call() {
+    let Some(ex) = executor(1) else { return };
+    let uid = slot_uid(&ex).await;
+    assert!(none_left(uid).await, "the first call's child still runs");
+    let mut stand_in = std::process::Command::new("/bin/sleep")
+        .arg("300")
+        .uid(uid)
+        .gid(uid)
+        .spawn()
+        .unwrap();
+    assert_eq!(processes_of(uid), 1, "the stand-in runs as the slot's uid");
+    ex.run(req("output = 1", 10)).await.unwrap();
+    let t0 = Instant::now();
+    let mut status = stand_in.try_wait().unwrap();
+    while status.is_none() && t0.elapsed() < Duration::from_secs(5) {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        status = stand_in.try_wait().unwrap();
+    }
+    if status.is_none() {
+        // Still running: ended here, so the test leaves nothing behind.
+        stand_in.kill().unwrap();
+        stand_in.wait().unwrap();
+    }
+    let signal = status.and_then(|s| s.signal());
+    assert_eq!(signal, Some(libc::SIGKILL), "{status:?}");
+    assert!(
+        none_left(uid).await,
+        "a process still runs as the slot's uid"
+    );
+}
+
 /// Threads still start inside the child: only new processes are refused.
 /// `clone3` answers ENOSYS, so a libc that tries it first falls back to
 /// `clone`. It is also asked directly: a libc that never tries it would not
@@ -290,6 +327,9 @@ async fn text_encodings_match_the_in_process_interpreter() {
 async fn the_child_network_namespace_has_no_route_anywhere() {
     let Some(ex) = executor(1) else { return };
     // A listener in the test's own namespace: the child must not reach it either.
+    // With the syscall filter, `socket()` is refused before any route is
+    // tried; the namespace itself is proven by the self-test's
+    // `namespace_network` and `network_interfaces`.
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let code = format!(

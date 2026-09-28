@@ -9,6 +9,16 @@ use seccompiler::{
 use std::collections::BTreeMap;
 use std::io;
 
+/// The architecture the programs are built for: the one this is compiled for.
+#[cfg(target_arch = "x86_64")]
+const ARCH: TargetArch = TargetArch::x86_64;
+#[cfg(target_arch = "aarch64")]
+const ARCH: TargetArch = TargetArch::aarch64;
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+compile_error!(
+    "the syscall filter of the isolated Python executor supports x86_64 and aarch64 only"
+);
+
 const DENIED_COMMON: &[i64] = &[
     libc::SYS_socket,
     libc::SYS_socketpair,
@@ -100,12 +110,45 @@ fn clone3_filter(arch: TargetArch) -> io::Result<BpfProgram> {
         .map_err(err)
 }
 
-/// Installs both filters on the calling thread; threads it starts later
+/// x86_64 kernels may also accept the x32 numbering of the same calls under
+/// the same arch value: the number with bit 30 set. The programs above
+/// compare exact numbers, so this one refuses every number with that bit.
+/// EPERM, not ENOSYS: a kernel without x32 already answers ENOSYS, so EPERM
+/// shows that the filter answered. Other arch values are left to the
+/// programs above.
+#[cfg(target_arch = "x86_64")]
+fn x32_filter() -> BpfProgram {
+    use seccompiler::sock_filter;
+    /// `AUDIT_ARCH_X86_64` of `linux/audit.h`.
+    const AUDIT_ARCH_X86_64: u32 = 0xC000_003E;
+    const X32_SYSCALL_BIT: u32 = 0x4000_0000;
+    let insn = |code: u32, k: u32, jt: u8, jf: u8| sock_filter {
+        code: code as u16,
+        jt,
+        jf,
+        k,
+    };
+    let load = |offset| insn(libc::BPF_LD | libc::BPF_W | libc::BPF_ABS, offset, 0, 0);
+    let ret = |action| insn(libc::BPF_RET | libc::BPF_K, action, 0, 0);
+    let jump = |op| libc::BPF_JMP | op | libc::BPF_K;
+    vec![
+        load(4), // seccomp_data.arch
+        insn(jump(libc::BPF_JEQ), AUDIT_ARCH_X86_64, 0, 3),
+        load(0), // seccomp_data.nr
+        insn(jump(libc::BPF_JGE), X32_SYSCALL_BIT, 0, 1),
+        ret(libc::SECCOMP_RET_ERRNO | libc::EPERM as u32),
+        ret(libc::SECCOMP_RET_ALLOW),
+    ]
+}
+
+/// Installs every program on the calling thread; threads it starts later
 /// inherit them. Nothing here can be undone.
 pub fn apply() -> io::Result<()> {
-    let arch = TargetArch::try_from(std::env::consts::ARCH).map_err(err)?;
-    apply_filter(&deny_filter(arch)?).map_err(err)?;
-    apply_filter(&clone3_filter(arch)?).map_err(err)
+    apply_filter(&deny_filter(ARCH)?).map_err(err)?;
+    apply_filter(&clone3_filter(ARCH)?).map_err(err)?;
+    #[cfg(target_arch = "x86_64")]
+    apply_filter(&x32_filter()).map_err(err)?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -114,11 +157,24 @@ mod tests {
 
     /// `BPF_JMP | BPF_JEQ | BPF_K`: how a program compares the syscall number.
     const JEQ: u16 = 0x15;
+    /// `BPF_RET | BPF_K`: a return with a fixed action.
+    const RET: u16 = 0x06;
 
     fn compares(program: &BpfProgram, nr: i64) -> bool {
         program
             .iter()
             .any(|i| i.code == JEQ && i64::from(i.k) == nr)
+    }
+
+    /// Whether the program returns `errno` somewhere and ends allowing the
+    /// call, which is what a number it does not list reaches.
+    fn answers(program: &BpfProgram, errno: i32) -> bool {
+        let refused = libc::SECCOMP_RET_ERRNO | errno as u32;
+        let returns = |i: &seccompiler::sock_filter, k| i.code == RET && i.k == k;
+        program.iter().any(|i| returns(i, refused))
+            && program
+                .last()
+                .is_some_and(|i| returns(i, libc::SECCOMP_RET_ALLOW))
     }
 
     /// The numbers are those of the target this test is built for; for the
@@ -130,7 +186,31 @@ mod tests {
             let mut listed = DENIED_COMMON.iter().chain(DENIED_ARCH);
             assert!(listed.all(|&nr| compares(&deny, nr)), "{arch:?}");
             assert!(compares(&deny, libc::SYS_clone), "{arch:?}");
-            assert!(compares(&clone3_filter(arch).unwrap(), libc::SYS_clone3));
+            assert!(answers(&deny, libc::EPERM), "{arch:?}");
+            let clone3 = clone3_filter(arch).unwrap();
+            assert!(compares(&clone3, libc::SYS_clone3), "{arch:?}");
+            assert!(answers(&clone3, libc::ENOSYS), "{arch:?}");
         }
+    }
+
+    /// The x86_64 x32 program, instruction by instruction: EPERM for a
+    /// number with the x32 bit under the x86_64 arch value, allow for
+    /// anything else.
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn the_x32_program_refuses_x32_numbers_with_eperm() {
+        let listing: Vec<_> = x32_filter()
+            .iter()
+            .map(|i| (i.code, i.jt, i.jf, i.k))
+            .collect();
+        let expected: [(u16, u8, u8, u32); 6] = [
+            (0x20, 0, 0, 4),           // ld [4]: arch
+            (0x15, 0, 3, 0xC000_003E), // jeq AUDIT_ARCH_X86_64, else to allow
+            (0x20, 0, 0, 0),           // ld [0]: nr
+            (0x35, 0, 1, 0x4000_0000), // jge x32 bit, else to allow
+            (0x06, 0, 0, 0x0005_0001), // ret SECCOMP_RET_ERRNO | EPERM
+            (0x06, 0, 0, 0x7FFF_0000), // ret SECCOMP_RET_ALLOW
+        ];
+        assert_eq!(listing, expected);
     }
 }
