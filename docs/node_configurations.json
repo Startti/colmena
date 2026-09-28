@@ -1046,7 +1046,7 @@
           "type": "integer",
           "required": false,
           "default": 900,
-          "description": "Author-set only. How long, in seconds, the URL issued for a '$attachment_url:<document_id>' placeholder should stay valid. Raise it for an API that downloads the file later, from a queue. The host may cap it. A positive whole number; anything else fails the call.",
+          "description": "Author-set only. How long, in seconds, the URL issued for a '$attachment_url:<document_id>' placeholder should stay valid. Raise it for an API that downloads the file later, from a queue. The host may cap it. A positive whole number; anything else fails a call whose JSON body carries the placeholder.",
           "example": 3600
         }
       },

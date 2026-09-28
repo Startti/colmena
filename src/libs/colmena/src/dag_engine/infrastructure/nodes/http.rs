@@ -28,7 +28,7 @@
 //! `"$attachment_url:<document_id>"` a read URL the host's storage issues for
 //! it — only toward an address the author fixed (`base_url`, `endpoint` and
 //! any `Host` header in `config` or a tool's `fixed` values), with no redirect
-//! to another origin. In query params or a multipart part the form fails.
+//! to another origin. In `query_params` or a multipart part the form fails.
 //! The node's output and error texts show the placeholder wherever the
 //! response repeats that URL or its long query values.
 
@@ -453,7 +453,7 @@ impl HttpNode {
         }
     }
 
-    /// Lifetime asked of the host for each `$attachment_url:` URL: 15 minutes.
+    /// Lifetime asked of the host when the author sets none: 15 minutes.
     const DEFAULT_ATTACHMENT_URL_TTL_SECS: u64 = 900;
 
     /// The lifetime to ask of the host for each `$attachment_url:` URL: the
@@ -1676,12 +1676,11 @@ impl ExecutableNode for HttpNode {
         if !extra_params.is_empty() {
             request_builder = request_builder.query(&extra_params);
         }
-        // `$attachment_url:` is replaced only in a JSON body; in a query
-        // param it would travel as written.
+        // `$attachment_url:` is replaced only in a JSON body; in `query_params`
+        // it would travel as written. A flat input is not checked: in a child
+        // graph, global state hands every node the parent's arguments.
         let queries = [config.get("query_params"), inputs.get("query_params")];
-        if queries.into_iter().flatten().any(Self::has_attachment_url)
-            || extra_params.values().any(Self::has_attachment_url)
-        {
+        if queries.into_iter().flatten().any(Self::has_attachment_url) {
             return Err(Self::URL_FORM_ONLY_IN_JSON_BODY.into());
         }
 
@@ -2711,9 +2710,9 @@ mod attachment_url_tests {
         assert!(storage.0.lock().unwrap().is_empty());
     }
 
-    /// In query params (the node's, the caller's, a flat tool argument) the
-    /// form would travel as written: it fails before any storage read, even
-    /// with a JSON body that carries it too, and nothing is sent.
+    /// In `query_params` (the node's or the caller's) the form would travel
+    /// as written: it fails before any storage read, even with a JSON body
+    /// that carries it too, and nothing is sent.
     #[tokio::test]
     async fn query_params_refuse_the_url_form() {
         let server = untouched().await;
@@ -2722,17 +2721,26 @@ mod attachment_url_tests {
         let q = json!({ "src": PLACEHOLDER });
         let mut in_config = cfg(&server);
         in_config["query_params"] = q.clone();
-        for (extra, config) in [
-            (None, in_config),
-            (Some(("query_params", q)), cfg(&server)),
-            (Some(("src", json!(PLACEHOLDER))), cfg(&server)),
-        ] {
+        for (extra, config) in [(None, in_config), (Some(("query_params", q)), cfg(&server))] {
             let mut inputs = body(json!({ "image_url": PLACEHOLDER }));
             inputs.extend(extra.map(|(k, v)| (k.to_string(), v)));
             let err = post(&http, inputs, config).await.unwrap_err();
             assert!(err.contains(ONLY_IN_JSON), "{err}");
         }
         assert!(storage.0.lock().unwrap().is_empty(), "a URL was asked for");
+    }
+
+    /// A flat input is left as written (in a child graph, global state hands
+    /// the parent's arguments to every node): a request without the form runs.
+    #[tokio::test]
+    async fn a_flat_input_with_the_form_does_not_fail_the_request() {
+        let server = MockServer::start().await;
+        let ok = Mock::given(method("GET")).respond_with(ResponseTemplate::new(200));
+        ok.expect(1).mount(&server).await;
+        let http = node(Arc::new(UrlStorage::default())).await;
+        let flat = HashMap::from([("image_url".to_string(), json!(PLACEHOLDER))]);
+        let config = json!({ "base_url": server.uri(), "method": "GET" });
+        assert_eq!(post(&http, flat, config).await.unwrap()["status"], 200);
     }
 
     /// Some front-ends route by `Host`: one from runtime data refuses the
@@ -2756,8 +2764,9 @@ mod attachment_url_tests {
         assert_eq!(post(&http, authored, config).await.unwrap()["status"], 200);
     }
 
-    /// The author's value (config, or a tool's `fixed` one) reaches the host;
-    /// a value from runtime data is ignored; none travels as a query param.
+    /// The author's value (config, or a tool's `fixed` one) reaches the host
+    /// as is, above any host's cap too; a value from runtime data is ignored;
+    /// none travels as a query param.
     #[tokio::test]
     async fn the_ttl_is_the_authors_value_and_never_a_data_value() {
         let server = MockServer::start().await;
@@ -2766,25 +2775,20 @@ mod attachment_url_tests {
         let storage = Arc::new(UrlStorage::default());
         let http = node(storage.clone()).await;
         let placeholder = || body(json!({ "image_url": PLACEHOLDER }));
+        let ttl = "attachment_url_ttl_seconds";
         let mut config = cfg(&server);
-        config["attachment_url_ttl_seconds"] = json!(3600);
+        config[ttl] = json!(3600);
         post(&http, placeholder(), config).await.unwrap();
         let mut fixed = placeholder();
-        fixed.insert("attachment_url_ttl_seconds".into(), json!(7200));
-        fixed.insert(
-            AUTHORED_INPUTS_KEY.into(),
-            json!(["attachment_url_ttl_seconds"]),
-        );
+        fixed.insert(ttl.into(), json!(604_800));
+        fixed.insert(AUTHORED_INPUTS_KEY.into(), json!([ttl]));
         post(&http, fixed, cfg(&server)).await.unwrap();
         let mut data = placeholder();
-        data.insert("attachment_url_ttl_seconds".into(), json!(60));
+        data.insert(ttl.into(), json!(60));
         post(&http, data, cfg(&server)).await.unwrap();
-        assert_eq!(*storage.0.lock().unwrap(), vec![3600, 7200, 900]);
+        assert_eq!(*storage.0.lock().unwrap(), vec![3600, 604_800, 900]);
         let sent = server.received_requests().await.unwrap();
-        assert!(
-            sent.iter().all(|r| r.url.query().is_none()),
-            "a query param"
-        );
+        assert!(sent.iter().all(|r| r.url.query().is_none()));
     }
 
     /// Anything but a positive whole number fails before any attachment is
