@@ -7023,6 +7023,16 @@ el adapter, y el grafo E2E con el modo del router.
 **ADP.** Sin impacto: sin cambios de API pública, bindings ni SSE.
 **Estado.** done.
 
+## 185. Python: banco de equivalencia entre executors
+
+**Qué cambia.** `tests/python_executor_golden.rs` corre 17 casos en proceso y en el executor que elige el entorno, y
+exige el mismo resultado (stdout incluido); cada caso fija además qué debe dar (un valor o un error de un tipo), así dos
+fallas iguales no cuentan como coincidencia. Un test de llamadas concurrentes prueba que cada una recibe solo su stdout
+por `subprocess`; la variante en proceso, que hoy mezcla lo que imprimen, queda marcada como ignorada. Los envoltorios
+de las cuatro tools tabulares quedan visibles para el test (`#[doc(hidden)] pub`). Este banco encontró el float que
+arregló §181. **Tests.** Contenedor root: 17/17 con `subprocess` y `MODES=all`; con la configuración por defecto no hay
+nada que comparar; con un preludio roto el banco falla (antes pasaba). **ADP.** Sin cambios. **Estado.** done.
+
 ## 184. `http_request`: `"$attachment_url:<document_id>"` pone en un body JSON una URL que da el host (parte 2 de 2)
 
 **Qué cambia.** En el body JSON de `http_request`, un string que es entero `"$attachment_url:<document_id>"` se reemplaza
