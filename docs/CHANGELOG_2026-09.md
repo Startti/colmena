@@ -7100,3 +7100,23 @@ key vacía fallan.
 
 **ADP.** Sin impacto: sin cambios de API pública, bindings ni SSE.
 **Estado.** done.
+
+## 190. Reglas puras del modo `decision_model` del `router` (Jev, 4/7)
+
+**Qué cambia.** Nuevo módulo de dominio `dag_engine/domain/router_rules.rs`, sin I/O, con las dos reglas
+del futuro modo `decision_model` del `router`, para que runtime, `Graph::validate` y el linter usen una
+sola implementación. `decision_model_rejection(config)` rechaza, en ese modo, un `fallback_branch`
+ausente o que no nombra una rama declarada, una rama llamada `none_of_these` (reservada para la opción
+que inyecta el motor) y un `min_confidence` fuera de `(0, 1]`; en los otros modos rechaza
+`fallback_branch` y `min_confidence`. `gate(choice, confidence, min_confidence)` decide: `none_of_these`
+→ fallback con motivo `none_of_these`; confianza menor al umbral → fallback con motivo
+`low_confidence`; si no, la rama elegida (justo en el umbral pasa).
+
+**Tests.** Tablas de `decision_model_rejection` (cada rechazo y configs válidas en los tres modos) y de
+`gate` (confiado, `none_of_these`, baja confianza, umbral exacto).
+
+**E2E.** No aplica todavía: nadie llama estas funciones. El modo del `router` que las usa llega después en la
+cadena, con su grafo E2E.
+
+**ADP.** Sin impacto.
+**Estado.** done.

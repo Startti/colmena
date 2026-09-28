@@ -5,7 +5,7 @@
 
 **How to use (for the exploration/spec phase):** before opening files to assess a change, look up the target file below. **Used by** is its blast radius — the files that break if you change its public surface. **Depends on** is what it needs. Start by reading only those, not the whole repo.
 
-- Files indexed: **407**
+- Files indexed: **408**
 - Modules with at least one importer: **189**
 
 ## Blast-radius ranking (change these with the most care)
@@ -316,6 +316,11 @@
 #### `src/libs/colmena/src/dag_engine/domain/python_executor.rs`
 - Module: `dag_engine::domain::python_executor`
 - **Used by (10)**: `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/attachment_run_python.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/crdt_doc_run_python.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/data_run_python.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/gsheets_run_python.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/python_node.rs`, `src/libs/colmena/src/dag_engine/infrastructure/python_exec/config.rs`, `src/libs/colmena/src/dag_engine/infrastructure/python_exec/inprocess.rs`, `src/libs/colmena/src/dag_engine/infrastructure/python_exec/mod.rs`, `src/libs/colmena/src/dag_engine/infrastructure/python_exec/protocol.rs`, `src/libs/colmena/src/dag_engine/infrastructure/python_exec/subprocess.rs`
+- Depends on (0): — (no intra-crate imports)
+
+#### `src/libs/colmena/src/dag_engine/domain/router_rules.rs`
+- Module: `dag_engine::domain::router_rules`
+- **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
 - Depends on (0): — (no intra-crate imports)
 
 #### `src/libs/colmena/src/dag_engine/domain/secure_value_repository.rs`
