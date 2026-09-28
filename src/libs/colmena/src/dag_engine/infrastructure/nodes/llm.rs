@@ -18,11 +18,10 @@ use crate::dag_engine::application::ports::NodeRegistryPort;
 use crate::dag_engine::domain::lint::{FieldSpec, NodeCatalogEntry};
 use crate::dag_engine::infrastructure::dag_tool_executor::DagToolExecutor;
 use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::{
-    build_all_crdt_doc_tools, build_all_document_tools, build_describe_tool_definition,
-    build_lazy_catalog, build_load_skill_tool_definition, current_turn_slice,
-    reconstruct_discovered_set, summary_for_catalog, CatalogEntry, CrdtDocsContext,
-    DescribeToolDispatchResult, DocumentToolsContext, ATTACHMENTS_SYSTEM_PRELUDE,
-    DOCUMENTS_SYSTEM_PRELUDE,
+    attachments_prelude, build_all_crdt_doc_tools, build_all_document_tools,
+    build_describe_tool_definition, build_lazy_catalog, build_load_skill_tool_definition,
+    current_turn_slice, reconstruct_discovered_set, summary_for_catalog, CatalogEntry,
+    CrdtDocsContext, DescribeToolDispatchResult, DocumentToolsContext, DOCUMENTS_SYSTEM_PRELUDE,
 };
 use crate::documents::application::DocumentRuntime;
 use crate::documents::domain::ids::SessionId as DocSessionId;
@@ -3447,7 +3446,9 @@ impl ExecutableNode for LlmNode {
                 sections.push(DOCUMENTS_SYSTEM_PRELUDE.to_string());
             }
             if !attachment_catalog.is_empty() {
-                sections.push(ATTACHMENTS_SYSTEM_PRELUDE.to_string());
+                // The URL form is taught only when this host's storage
+                // issues read URLs (`supports_read_url`).
+                sections.push(attachments_prelude(self.storage.as_deref()));
                 // Plan A: append the per-document catalog block so the LLM
                 // knows which `document_id`s are available in the session
                 // (for `load_attachment(...)` and `$attachment:<id>`
