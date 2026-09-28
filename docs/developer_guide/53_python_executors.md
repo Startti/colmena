@@ -182,6 +182,22 @@ Concurrent calls: through `subprocess` each call has its own process, so each ge
 the executor swaps the interpreter's `sys.stdout` for each call, so two calls running at the same time can mix what
 they print; `concurrent_in_process_calls_keep_their_own_stdout` records that and is ignored by default.
 
+## Testing
+
+The jail suites (`tests/python_executor_subprocess.rs`, `tests/python_executor_isolation.rs`) and the equivalence bench
+need Linux, root and `CAP_SYS_ADMIN`; they run only with `COLMENA_PYEXEC_JAIL_TESTS=1` and otherwise print a skip line.
+Locally, run them in a container:
+`docker run --rm --cap-add SYS_ADMIN --security-opt seccomp=unconfined --security-opt apparmor=unconfined
+-e COLMENA_PYEXEC_JAIL_TESTS=1 -v "$PWD":/work -w /work <image with Rust, python3-dev and pandas> cargo test --test
+python_executor_subprocess --test python_executor_isolation`.
+
+CI runs them in the `python-executor` job of `ci-develop.yml` (Debian bookworm container with those options, pandas,
+numpy and scipy from Debian): the executor's unit tests, both jail suites (the step fails on any skip line),
+`python_executor self-test`, the Python node and tool suites and the equivalence bench under `subprocess` with
+`COLMENA_PYTHON_EXECUTOR_MODES=all`, the bench again with the default modes, and the smoke graph under `subprocess`
+(four `python run` events with `outcome="ok"`). Four `gsheets_run_python` tests are skipped there by name: with pandas
+installed they fail the same way under every executor, and no job runs their assertions today.
+
 ## About `restricted`
 
 `restricted` validates imports and a few builtins before running. It helps

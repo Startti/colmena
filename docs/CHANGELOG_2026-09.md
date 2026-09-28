@@ -7048,3 +7048,13 @@ log muestra el placeholder y ninguna línea del motor tiene el link; la direcci�
 sin URLs falla sin pedidos. Para correrlo: fila `e2e_img` → `e2e-checker.png` en `conversation_attachments` para la
 sesión `e2e-url-001`, el PNG en `COLMENA_LOCAL_STORAGE_DIR` y un eco en 127.0.0.1:8766. **ADP.** Llega con el próximo
 tag; el adaptador del worker ya da URLs (recorta el TTL a 24 h). **Estado.** done.
+
+## 187. CI: las suites de Python corren con el executor aislado (Linux)
+
+**Qué cambia.** Job nuevo `python-executor` en `ci-develop.yml`: contenedor Debian bookworm con `CAP_SYS_ADMIN` (sin
+seccomp ni apparmor del runtime), pandas/numpy/scipy de Debian y un Postgres de servicio. Corre los tests unitarios del
+executor, las dos suites de la jaula (falla si alguna se saltó), `python_executor self-test`, las suites del nodo y de
+las tools de Python y el banco de equivalencia con `subprocess` y `MODES=all`, el banco con los modos por defecto y el
+grafo smoke con `subprocess` (cuatro llamadas `ok`). Es la primera vez que la jaula y el filtro de syscalls corren en
+x86_64. Cuatro tests de `gsheets_run_python` se saltan por nombre: con pandas fallan igual en todo executor (pendiente
+aparte). Guía 53: sección «Testing». **Tests.** El job mismo, en esta PR. **ADP.** Sin cambios. **Estado.** done.
