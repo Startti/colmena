@@ -28,9 +28,9 @@
 //! `read_url(storage_key, ttl_seconds)` to build the same
 //! `http://127.0.0.1:<port>/files/<key>` URL on demand for an *existing*
 //! key — same shape as `store()`'s `read_url`, but callable later, e.g. by
-//! the `$attachment_url:` placeholder that a future PR adds to
-//! `http_request`. The static file server never expires, so `ttl_seconds`
-//! is accepted (per the port signature) but has no effect.
+//! the `$attachment_url:` placeholder of `http_request`'s JSON body. The
+//! static file server never expires, so `ttl_seconds` is accepted (per the
+//! port signature) but has no effect.
 //!
 //! ## Lifecycle
 //!

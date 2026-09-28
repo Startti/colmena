@@ -15,6 +15,7 @@
 ### Constants
 - `ATTACHMENT_URL_PLACEHOLDER_PREFIX` (const str) — `"$attachment_url:"`, the whole-string form of a session attachment's read URL in a JSON body
 - `ATTACHMENT_PLACEHOLDER_PREFIX` (const str) — `"$attachment:"`
+- `HttpNode::DEFAULT_ATTACHMENT_URL_TTL_SECS` (const u64) — 900, the lifetime asked of the host for each `$attachment_url:` URL
 - `URL_HTTP_PREFIX` (const str) — `"http://"`
 - `URL_HTTPS_PREFIX` (const str) — `"https://"`
 - `HttpNode::RESERVED_KEYS` (const array) — 10 keys never sent as query params (base_url, endpoint, method, headers, body, query_params/query_parameters, bearer_token, authorization, secure)
@@ -29,7 +30,7 @@
 - `HttpNode::with_oauth_cache()` (fn, pub) — Wire shared OAuth provider cache for refresh_token grant
 
 ### Helpers (Private)
-- `has_attachment_url()` / `address_is_authored()` / `scrub_forms()` / `scrub_text()` / `scrub_issued_urls()` / `scrub_error()` — guards of the attachment URL form: a whole-string `$attachment_url:` value in a JSON body; only toward a `base_url`+`endpoint` the author fixed (checked before any `$attachment:` read and before connecting); no redirect for such a request; every issued URL, and its long query values, in the forms an echo writes (JSON-encoded, HTML, percent-encoded) come back as the placeholder in output and error texts. The form itself is refused until the URL is issued (CHANGELOG 2026-09 §180)
+- `has_attachment_url()` / `resolve_attachment_urls()` / `address_is_authored()` / `scrub_forms()` / `scrub_text()` / `scrub_issued_urls()` / `scrub_error()` — the attachment URL form: a whole-string `$attachment_url:` value in a JSON body becomes a read URL the host issues (`AttachmentStreamResolver::resolve_url`, TTL 900 s); only toward a `base_url`+`endpoint` the author fixed (checked before any `$attachment:` read and before connecting); no redirect to another origin for such a request; every issued URL, and each of its query values of 16+ characters once decoded, comes back as the placeholder in output and error texts, also in the forms an echo writes (JSON-encoded, HTML, percent-encoded). Limits: matching is by substring, so an echo split in pieces, a URL whose secret is in its path (no query), or an encoding not listed can show parts; a harmless 16+ character value elsewhere in the response (e.g. an algorithm name) is replaced too (CHANGELOG 2026-09 §180, §184)
 - `HttpNode::is_engine_internal()` (fn, private) — Check if key is engine-injected bookkeeping (`__colmena*` or `__node*`)
 - `HttpNode::collect_extra_query_params()` (fn, private) — Filter inputs to extract non-reserved primitives for query string
 - `HttpNode::resolve_env_vars()` (fn, private) — Replace `${VAR_NAME}` with `std::env::var`; returns error if var not found
@@ -58,7 +59,7 @@
 - `filename_from_url_path()` (fn, private) — Extract last URL path segment (URL-decoded) as fallback filename; falls back to `"file"` if empty
 
 ### Test Modules
-- `attachment_url_tests` (mod, cfg(test)) — scrub forms table, author-address table, whole-string detection; the form is refused and nothing is sent; the address is checked before any attachment is read
+- `attachment_url_tests` (mod, cfg(test)) — the placeholder becomes the issued URL and the echo shows the placeholder; no URL to give (unknown id, another session, host without URLs) is a clear error; author-address and whole-string tables; no redirect to another origin; error texts and every echo form scrubbed (threshold 15/16 pinned); the address is checked before any attachment is read
 - `attachment_placeholder_tests` (mod, cfg(test)) — 3 tests: placeholder resolution to data: URI, no placeholder pass-through, error without storage
 - `multipart_detection_tests` (mod, cfg(test)) — 6 tests: case-insensitive detection, boundary param, various MIME types, non-multipart rejection
 - `multipart_body_parser_tests` (mod, cfg(test)) — 8 tests: string URL/attachment/text classification, arrays, explicit objects with overrides, null handling, malformed rejection

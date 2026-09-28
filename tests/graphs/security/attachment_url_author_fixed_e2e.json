@@ -1,0 +1,31 @@
+{
+  "comment": "E2E (CHANGELOG 2026-09 section 184): \"$attachment_url:<document_id>\" in an http_request JSON body. Seed first (see that section): a row e2e_img -> storage key e2e-checker.png for --agent-session-id e2e-url-001, the 80-byte PNG in COLMENA_LOCAL_STORAGE_DIR, and the echo on 127.0.0.1:8766. test_payload stands in for data: a body with the placeholder and an address. to_author (base_url and endpoint in its config) posts it: the echo downloads the 80 bytes from 127.0.0.1:8765/files/e2e-checker.png and `shown` logs image_url as $attachment_url:e2e_img, never the link. Then to_data_address (base_url from the payload; allowed_hosts lists it so only this rule decides) fails with 'fixes the request's address' before any request. Without the row, to_author fails with 'attachment not found'; with in-memory storage, with 'this host does not provide attachment URLs'.",
+  "metadata": { "category": "security", "requires_env": ["DATABASE_URL", "SECURE_VALUES_KEY"] },
+  "nodes": {
+    "hook": {
+      "type": "trigger_webhook",
+      "config": {
+        "test_payload": {
+          "body": { "image_url": "$attachment_url:e2e_img" },
+          "address": "http://127.0.0.1:8766"
+        }
+      }
+    },
+    "to_author": {
+      "type": "http_request",
+      "config": { "base_url": "http://127.0.0.1:8766", "endpoint": "/jobs", "method": "POST" }
+    },
+    "shown": { "type": "log" },
+    "to_data_address": {
+      "type": "http_request",
+      "config": { "endpoint": "/jobs", "method": "POST", "allowed_hosts": ["127.0.0.1:8766"] }
+    }
+  },
+  "edges": [
+    { "from": "hook.body", "to": "to_author.body" },
+    { "from": "to_author", "to": "shown" },
+    { "from": "hook.address", "to": "to_data_address.base_url" },
+    { "from": "hook.body", "to": "to_data_address.body" },
+    { "from": "shown.fetched_bytes", "to": "to_data_address.after" }
+  ]
+}
