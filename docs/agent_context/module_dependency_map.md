@@ -22,10 +22,10 @@
 | 20 | `documents::domain::ids` | `src/libs/colmena/src/documents/domain/ids.rs` |
 | 17 | `crdt_documents` | `src/libs/colmena/src/crdt_documents/mod.rs` |
 | 15 | `llm::domain::attachments` | `src/libs/colmena/src/llm/domain/attachments/mod.rs` |
+| 15 | `storage::domain` | `src/libs/colmena/src/storage/domain/mod.rs` |
 | 14 | `dag_engine::domain::error` | `src/libs/colmena/src/dag_engine/domain/error.rs` |
 | 14 | `dag_engine::domain::tool_configuration` | `src/libs/colmena/src/dag_engine/domain/tool_configuration.rs` |
 | 14 | `llm::infrastructure` | `src/libs/colmena/src/llm/infrastructure/mod.rs` |
-| 14 | `storage::domain` | `src/libs/colmena/src/storage/domain/mod.rs` |
 | 13 | `dag_engine::application::ports` | `src/libs/colmena/src/dag_engine/application/ports.rs` |
 | 12 | `dag_engine::application::secure_value_service` | `src/libs/colmena/src/dag_engine/application/secure_value_service.rs` |
 | 11 | `documents::domain::ports` | `src/libs/colmena/src/documents/domain/ports.rs` |
@@ -466,7 +466,7 @@
 #### `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm.rs`
 - Module: `dag_engine::infrastructure::nodes::llm`
 - **Used by (1)**: `src/libs/colmena/src/dag_engine/infrastructure/registry.rs`
-- Depends on (35): `crdt_documents`, `dag_engine::application::ports`, `dag_engine::domain::lint`, `dag_engine::domain::node`, `dag_engine::domain::observer`, `dag_engine::domain::tool_configuration`, `dag_engine::infrastructure::dag_tool_executor`, `dag_engine::infrastructure::env_provenance`, `dag_engine::infrastructure::nodes::llm_synthetic_tools`, `dag_engine::infrastructure::nodes::llm_synthetic_tools::attachment_run_python`, `dag_engine::infrastructure::nodes::llm_synthetic_tools::data_run_python`, `dag_engine::infrastructure::nodes::llm_synthetic_tools::mcp`, `dag_engine::infrastructure::nodes::llm_synthetic_tools::sql_bulk_tools`, `dag_engine::infrastructure::pool_registry`, `documents::application`, `documents::domain::ids`, `llm::application`, `llm::application::agent_service`, `llm::application::attachment_catalog`, `llm::domain`, `llm::domain::attachments`, `llm::domain::call_cancels`, `llm::domain::steering`, `llm::domain::tools`, `llm::infrastructure`, `llm::infrastructure::attachment_summary`, `llm::infrastructure::attachments`, `llm::infrastructure::files`, `llm::infrastructure::files::signed_url_downloader`, `llm::infrastructure::persistence`, `llm::infrastructure::persistence::in_memory_conversation_repository`, `skills::domain`, `skills::infrastructure`, `storage::domain`, `storage::infrastructure`
+- Depends on (36): `crdt_documents`, `dag_engine::application::ports`, `dag_engine::domain::lint`, `dag_engine::domain::node`, `dag_engine::domain::observer`, `dag_engine::domain::tool_configuration`, `dag_engine::infrastructure::dag_tool_executor`, `dag_engine::infrastructure::env_provenance`, `dag_engine::infrastructure::nodes::llm_synthetic_tools`, `dag_engine::infrastructure::nodes::llm_synthetic_tools::attachment_run_python`, `dag_engine::infrastructure::nodes::llm_synthetic_tools::data_run_python`, `dag_engine::infrastructure::nodes::llm_synthetic_tools::mcp`, `dag_engine::infrastructure::nodes::llm_synthetic_tools::sql_bulk_tools`, `dag_engine::infrastructure::pool_registry`, `dag_engine::infrastructure::registry`, `documents::application`, `documents::domain::ids`, `llm::application`, `llm::application::agent_service`, `llm::application::attachment_catalog`, `llm::domain`, `llm::domain::attachments`, `llm::domain::call_cancels`, `llm::domain::steering`, `llm::domain::tools`, `llm::infrastructure`, `llm::infrastructure::attachment_summary`, `llm::infrastructure::attachments`, `llm::infrastructure::files`, `llm::infrastructure::files::signed_url_downloader`, `llm::infrastructure::persistence`, `llm::infrastructure::persistence::in_memory_conversation_repository`, `skills::domain`, `skills::infrastructure`, `storage::domain`, `storage::infrastructure`
 
 #### `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/attachment_run_python.rs`
 - Module: `dag_engine::infrastructure::nodes::llm_synthetic_tools::attachment_run_python`
@@ -561,7 +561,7 @@
 #### `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/load_attachment_tool.rs`
 - Module: `dag_engine::infrastructure::nodes::llm_synthetic_tools::load_attachment_tool`
 - **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
-- Depends on (3): `llm::domain`, `llm::domain::attachments`, `llm::domain::tools`
+- Depends on (5): `llm::domain`, `llm::domain::attachments`, `llm::domain::tools`, `storage::domain`, `storage::infrastructure`
 
 #### `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/load_skill_tool.rs`
 - Module: `dag_engine::infrastructure::nodes::llm_synthetic_tools::load_skill_tool`
@@ -915,7 +915,7 @@
 
 #### `src/libs/colmena/src/dag_engine/infrastructure/registry.rs`
 - Module: `dag_engine::infrastructure::registry`
-- **Used by (3)**: `src/libs/colmena/src/dag_engine/engine.rs`, `src/libs/colmena/src/node_bindings/registry.rs`, `src/libs/colmena/src/python_bindings/mod.rs`
+- **Used by (4)**: `src/libs/colmena/src/dag_engine/engine.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm.rs`, `src/libs/colmena/src/node_bindings/registry.rs`, `src/libs/colmena/src/python_bindings/mod.rs`
 - Depends on (31): `dag_engine::application::ports`, `dag_engine::application::run_use_case`, `dag_engine::application::secure_value_service`, `dag_engine::domain::error`, `dag_engine::domain::events`, `dag_engine::domain::graph`, `dag_engine::domain::lint`, `dag_engine::domain::node`, `dag_engine::domain::observer`, `dag_engine::domain::secure_value_repository`, `dag_engine::domain::state`, `dag_engine::domain::tool_configuration`, `dag_engine::domain::toolkit_node`, `dag_engine::engine`, `dag_engine::infrastructure::dag_tool_executor`, `dag_engine::infrastructure::nodes`, `dag_engine::infrastructure::nodes::api_explorer`, `dag_engine::infrastructure::nodes::image_edit`, `dag_engine::infrastructure::nodes::image_generation`, `dag_engine::infrastructure::nodes::llm`, `dag_engine::infrastructure::nodes::llm_synthetic_tools`, `dag_engine::infrastructure::nodes::tavily_client`, `dag_engine::infrastructure::nodes::tts`, `dag_engine::infrastructure::pool_registry`, `dag_engine::infrastructure::sql_port_factory`, `llm::domain`, `llm::domain::tool_executor`, `llm::infrastructure`, `llm::infrastructure::files`, `storage::domain`, `storage::infrastructure`
 
 #### `src/libs/colmena/src/dag_engine/infrastructure/sql_ast.rs`
@@ -2009,7 +2009,7 @@
 
 #### `src/libs/colmena/src/storage/domain/mod.rs`
 - Module: `storage::domain`
-- **Used by (14)**: `src/libs/colmena/src/dag_engine/engine.rs`, `src/libs/colmena/src/dag_engine/infrastructure/dag_tool_executor.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/http.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/image_edit.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/image_generation.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/tts.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/util/session_attachment.rs`, `src/libs/colmena/src/dag_engine/infrastructure/registry.rs`, `src/libs/colmena/src/llm/domain/attachments/stream_resolver.rs`, `src/libs/colmena/src/llm/infrastructure/attachments/stream_resolver_impl.rs`, `src/libs/colmena/src/storage/infrastructure/http_callback_adapter.rs`, `src/libs/colmena/src/storage/infrastructure/local_cache_adapter.rs`, `src/libs/colmena/src/storage/infrastructure/local_http_adapter.rs`
+- **Used by (15)**: `src/libs/colmena/src/dag_engine/engine.rs`, `src/libs/colmena/src/dag_engine/infrastructure/dag_tool_executor.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/http.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/image_edit.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/image_generation.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/load_attachment_tool.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/tts.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/util/session_attachment.rs`, `src/libs/colmena/src/dag_engine/infrastructure/registry.rs`, `src/libs/colmena/src/llm/domain/attachments/stream_resolver.rs`, `src/libs/colmena/src/llm/infrastructure/attachments/stream_resolver_impl.rs`, `src/libs/colmena/src/storage/infrastructure/http_callback_adapter.rs`, `src/libs/colmena/src/storage/infrastructure/local_cache_adapter.rs`, `src/libs/colmena/src/storage/infrastructure/local_http_adapter.rs`
 - Depends on (0): — (no intra-crate imports)
 
 #### `src/libs/colmena/src/storage/domain/output_storage_repository.rs`
@@ -2039,7 +2039,7 @@
 
 #### `src/libs/colmena/src/storage/infrastructure/mod.rs`
 - Module: `storage::infrastructure`
-- **Used by (3)**: `src/libs/colmena/src/dag_engine/engine.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm.rs`, `src/libs/colmena/src/dag_engine/infrastructure/registry.rs`
+- **Used by (4)**: `src/libs/colmena/src/dag_engine/engine.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/load_attachment_tool.rs`, `src/libs/colmena/src/dag_engine/infrastructure/registry.rs`
 - Depends on (0): — (no intra-crate imports)
 
 #### `src/libs/colmena/src/storage/mod.rs`

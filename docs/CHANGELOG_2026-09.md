@@ -7221,3 +7221,19 @@ preludio es el de antes; con `LocalHttpStorageAdapter` suma la forma; el nodo `l
 Mutación roja: el preludio que enseña sin mirar la capacidad. E2E `attachment_url_taught_e2e.json` (con modelo): no
 corrido, sin clave del proveedor; linteado limpio. **ADP.** [Nota de migración](adp_migration/2026-09-28-attachment-url-placeholder.md).
 **Estado.** done.
+
+## 196. Tests del executor `subprocess`: el script falso ya no choca con `Text file busy`
+
+**Qué cambia.** Solo tests; el código de producción no se toca. El fixture `fake()` de
+`python_exec/subprocess.rs` escribía el script que hace de template con `std::fs::write` y lo ejecutaba enseguida.
+Si otro test forkeaba mientras ese descriptor de escritura seguía abierto, el hijo se quedaba con una copia hasta hacer
+su propio exec o salir (`O_CLOEXEC` solo lo cierra en el exec del hijo, y renombrar no sirve porque la copia apunta al
+mismo inode). Si el exec del script caía en esa ventana, Linux devolvía ETXTBSY. Así falló
+`a_template_that_exits_after_ready_is_replaced_at_once` en CI (run 36462679926, PR #441). Ahora un `/bin/sh` hijo
+escribe el script con su `printf` builtin (`write_executable`), así que el proceso de tests nunca tiene abierto para
+escritura un archivo que después ejecuta. El executor de producción ejecuta un binario que no escribe él mismo.
+**Tests.** Nuevo `a_written_script_runs_while_other_threads_fork`: 200 scripts escritos y ejecutados mientras 4 hilos
+forkean sin parar. Mutación roja: con `std::fs::write` falla 20 de 20 corridas con `Text file busy (os error 26)`; con
+el fix pasa 20 de 20. En Linux (Docker, `debian:bookworm`, root, 32 hilos de test) la suite `python_exec` pasa 100 de
+100 corridas. Aparte, un arnés que repite el patrón escribir→ejecutar contra 16 hilos que forkean dio 1605 ETXTBSY en
+15000 ejecuciones con `std::fs::write` y 0 con el `sh` hijo. **ADP.** No aplica (solo tests). **Estado.** done.
