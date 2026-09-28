@@ -7023,7 +7023,7 @@ el adapter, y el grafo E2E con el modo del router.
 **ADP.** Sin impacto: sin cambios de API pública, bindings ni SSE.
 **Estado.** done.
 
-## 183. Python: banco de equivalencia entre executors
+## 185. Python: banco de equivalencia entre executors
 
 **Qué cambia.** `tests/python_executor_golden.rs` corre 17 casos en proceso y en el executor que elige el entorno, y
 exige el mismo resultado (stdout incluido); cada caso fija además qué debe dar (un valor o un error de un tipo), así dos
