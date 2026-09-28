@@ -7001,7 +7001,7 @@ decimales cuesta más (del orden del doble en ese paso), sin otro cambio visible
 `protocol::tests::floats_keep_every_bit_across_the_wire` fallaba sin la feature y pasa con ella; la suite de lib en
 macOS pasa entera. **ADP.** El worker lee floats exactos al subir el pin. **Estado.** done.
 
-## 183. `http_request`: `"$attachment_url:<document_id>"` pone en un body JSON una URL que da el host (parte 2 de 2)
+## 184. `http_request`: `"$attachment_url:<document_id>"` pone en un body JSON una URL que da el host (parte 2 de 2)
 
 **Qué cambia.** En el body JSON de `http_request`, un string que es entero `"$attachment_url:<document_id>"` se reemplaza
 por una URL de lectura de ese documento de la sesión que emite el storage del host (`resolve_url`, 900 s), con las
