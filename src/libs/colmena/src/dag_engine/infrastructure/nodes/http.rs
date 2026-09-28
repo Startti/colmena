@@ -24,7 +24,9 @@
 
 use crate::dag_engine::domain::lint::{FieldSpec, NodeCatalogEntry};
 use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
-use crate::dag_engine::infrastructure::env_provenance::{escape_pointer_segment, EnvPolicy};
+use crate::dag_engine::infrastructure::env_provenance::{
+    escape_pointer_segment, is_authored_input, EnvPolicy,
+};
 use crate::dag_engine::infrastructure::nodes::util::session_attachment::read_session_attachment;
 use crate::llm::domain::{BoxedByteStream, LlmError};
 use crate::llm::infrastructure::files::signed_url_downloader::{
@@ -62,6 +64,9 @@ impl Default for HttpNode {
 }
 
 const ATTACHMENT_PLACEHOLDER_PREFIX: &str = "$attachment:";
+/// `"$attachment_url:<document_id>"`: a read URL the host's storage issues
+/// for that document of the session, in place of its bytes.
+const ATTACHMENT_URL_PLACEHOLDER_PREFIX: &str = "$attachment_url:";
 const URL_HTTP_PREFIX: &str = "http://";
 const URL_HTTPS_PREFIX: &str = "https://";
 
@@ -436,6 +441,133 @@ impl HttpNode {
         }
     }
 
+    /// Whether `v` holds a `"$attachment_url:<document_id>"` string anywhere.
+    fn has_attachment_url(v: &Value) -> bool {
+        match v {
+            Value::String(s) => s.starts_with(ATTACHMENT_URL_PLACEHOLDER_PREFIX),
+            Value::Object(m) => m.values().any(Self::has_attachment_url),
+            Value::Array(a) => a.iter().any(Self::has_attachment_url),
+            _ => false,
+        }
+    }
+
+    /// What the scrub replaces, longest first, each with the placeholder of
+    /// its URL in `issued`: the URL, and each of its query values that
+    /// decodes to 16 or more characters (a signature, a credential, an
+    /// expiry token), so a partial echo loses them too. Each in the forms an
+    /// echo writes: as is, percent-decoded, percent-encoded (strictly, or
+    /// keeping `/`), and each of those JSON-encoded inside a string (`\/`,
+    /// `\u0026` and the like) or in HTML (`&amp;`).
+    fn scrub_forms(issued: &[(String, String)]) -> Vec<(String, String)> {
+        let decode = |s: &str| urlencoding::decode(s).map_or(s.to_string(), |d| d.into_owned());
+        let encode = |s: &str| urlencoding::encode(s).into_owned();
+        // `\uXXXX` for each of `chars`, as some JSON encoders write them.
+        let unicode = |s: &str, chars: &str| {
+            let each = |s: String, c: char| s.replace(c, &format!("\\u{:04x}", c as u32));
+            chars.chars().fold(s.to_string(), each)
+        };
+        let mut forms: Vec<(String, String)> = Vec::new();
+        for (url, placeholder) in issued {
+            let query = url.split_once('?').map_or("", |(_, q)| q);
+            let query = query.split('#').next().unwrap_or_default();
+            let values = query.split('&').filter_map(|p| Some(p.split_once('=')?.1));
+            let long = values.filter(|v| decode(v).chars().count() >= 16);
+            for token in std::iter::once(url.as_str()).chain(long) {
+                let decoded = decode(token);
+                let (strict, strict_of_decoded) = (encode(token), encode(&decoded));
+                let percent = [
+                    strict.replace("%2F", "/"),
+                    strict_of_decoded.replace("%2F", "/"),
+                    strict,
+                    strict_of_decoded,
+                    decoded,
+                    token.to_string(),
+                ];
+                for p in percent {
+                    for s in [p.replace('/', "\\/"), p] {
+                        let html = s.replace('&', "&amp;");
+                        for form in [unicode(&s, "&<>"), unicode(&s, "&<>="), html, s] {
+                            if !form.is_empty() && forms.iter().all(|(f, _)| *f != form) {
+                                forms.push((form, placeholder.clone()));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        forms.sort_by_key(|(f, _)| std::cmp::Reverse(f.len()));
+        forms
+    }
+
+    /// `s` with every form of [`Self::scrub_forms`] replaced by its placeholder.
+    fn scrub_text(mut s: String, forms: &[(String, String)]) -> String {
+        for (form, placeholder) in forms {
+            if s.contains(form.as_str()) {
+                s = s.replace(form.as_str(), placeholder);
+            }
+        }
+        s
+    }
+
+    /// `v` with every string and object key scrubbed (see
+    /// [`Self::scrub_forms`]): an issued URL never leaves the node — tool
+    /// result, events, memory, the next node.
+    fn scrub_issued_urls(v: Value, forms: &[(String, String)]) -> Value {
+        match v {
+            _ if forms.is_empty() => v,
+            Value::String(s) => Value::String(Self::scrub_text(s, forms)),
+            Value::Array(a) => a
+                .into_iter()
+                .map(|v| Self::scrub_issued_urls(v, forms))
+                .collect(),
+            Value::Object(m) => Value::Object(
+                m.into_iter()
+                    .map(|(k, v)| {
+                        (
+                            Self::scrub_text(k, forms),
+                            Self::scrub_issued_urls(v, forms),
+                        )
+                    })
+                    .collect(),
+            ),
+            other => other,
+        }
+    }
+
+    /// An error once a URL was issued: its text, scrubbed like the output.
+    fn scrub_error(
+        e: Box<dyn StdError + Send + Sync>,
+        forms: &[(String, String)],
+    ) -> Box<dyn StdError + Send + Sync> {
+        if forms.is_empty() {
+            return e;
+        }
+        Self::scrub_text(e.to_string(), forms).into()
+    }
+
+    const URL_FORM_NEEDS_AUTHORED_ADDRESS: &'static str =
+        "http_request: \"$attachment_url:<document_id>\" is replaced only when the node's \
+         configuration fixes the request's address (base_url and endpoint, in config or as a \
+         tool's fixed values); here part of it comes from runtime data (a tool argument, an \
+         edge). Use \"$attachment:<document_id>\" to send the file's content instead";
+
+    /// Whether the request's address is the author's: `base_url` and
+    /// `endpoint` each come from `config` (absent from `inputs`) or are a
+    /// tool's `fixed` value left as written (`__colmena_authored_inputs`).
+    /// A value from runtime data — an edge, global state, a model's argument,
+    /// a `$DYNAMIC` part — is not; `allowed_hosts` does not change that.
+    fn address_is_authored(inputs: &NodeInputs) -> bool {
+        ["base_url", "endpoint"]
+            .into_iter()
+            .all(|k| !inputs.contains_key(k) || is_authored_input(inputs, k))
+    }
+
+    /// The URL form toward the author's address, while this build issues
+    /// no URL: refused, so it never goes out as text.
+    const URL_FORM_NOT_ISSUED_YET: &'static str =
+        "http_request: \"$attachment_url:<document_id>\" is not available in this build yet; \
+         use \"$attachment:<document_id>\" to send the file's content instead";
+
     fn resolve_env_vars(input: &str) -> Result<String, String> {
         let mut result = String::new();
         let mut last_end = 0;
@@ -693,10 +825,10 @@ impl HttpNode {
         }
     }
 
-    /// A client whose redirects never take the author's credentials to
-    /// another origin (with credentials on the request, only a same-origin
-    /// redirect is followed; a cross-origin one is returned as is), and that
-    /// dials only where `guard` allows, on every hop.
+    /// A client whose redirects never take the author's credentials, or an
+    /// attachment URL, to another origin (with `credentials`, only a
+    /// same-origin redirect is followed; a cross-origin one is returned as
+    /// is), and that dials only where `guard` allows, on every hop.
     fn client_for(
         credentials: bool,
         guard: Option<DialGuard>,
@@ -1326,10 +1458,24 @@ impl ExecutableNode for HttpNode {
         let allowed_hosts = Self::author_value(inputs, config, "allowed_hosts");
         let guard = self.destination_guard(&url, author_base_url.as_deref(), allowed_hosts)?;
 
+        let body_from_inputs = inputs.get("body");
+        let body_val = body_from_inputs.or_else(|| config.get("body"));
+        // A JSON body, `${VAR}` expanded: from `inputs`, only where trusted.
+        let json_body = body_val.filter(|b| !b.is_string()).map(|b| {
+            if body_from_inputs.is_some() {
+                Self::resolve_env_vars_in_value_gated(b, "/body", &policy)
+            } else {
+                Self::resolve_env_vars_in_value(b)
+            }
+        });
+        // One that asks for an attachment URL, like the author's credentials,
+        // follows no redirect to another origin.
+        let carries_url = json_body.as_ref().is_some_and(Self::has_attachment_url);
+
         // 3. Prepare Client and Request
         // Build client forcing HTTP/1.1 to avoid HTTP/2 issues with some APIs
         let client = Self::client_for(
-            credentials,
+            credentials || carries_url,
             guard.clone(),
             crate::shared::http_client::builder().http1_only(),
         )?;
@@ -1480,9 +1626,6 @@ impl ExecutableNode for HttpNode {
                 .await;
         }
 
-        let body_from_inputs = inputs.get("body");
-        let body_val = body_from_inputs.or_else(|| config.get("body"));
-
         if let Some(body) = body_val {
             if let Some(s) = body.as_str() {
                 let s_resolved = if body_from_inputs.is_some() {
@@ -1493,15 +1636,15 @@ impl ExecutableNode for HttpNode {
                 .map_err(Self::io_err)?;
                 // Never log body contents — may contain credentials or PII
                 request_builder = request_builder.body(s_resolved);
-            } else {
-                // Resolve ${ENV_VAR} in body object string values before sending.
-                // Gated per-leaf-pointer only when `body` came from `inputs`
-                // (model-reachable); a `config`-sourced body always expands.
-                let resolved_body = if body_from_inputs.is_some() {
-                    Self::resolve_env_vars_in_value_gated(body, "/body", &policy)
-                } else {
-                    Self::resolve_env_vars_in_value(body)
-                };
+            } else if let Some(resolved_body) = json_body {
+                // `$attachment_url:` only toward the author's address, checked
+                // before any attachment is read; this build issues no URL yet.
+                if carries_url && !Self::address_is_authored(inputs) {
+                    return Err(Self::URL_FORM_NEEDS_AUTHORED_ADDRESS.into());
+                }
+                if carries_url {
+                    return Err(Self::URL_FORM_NOT_ISSUED_YET.into());
+                }
                 // Then resolve any `$attachment:<id>` placeholders to data: URIs
                 // by reading bytes via OutputStorageRepository. This is what
                 // lets agents pass generated artifacts to external endpoints
@@ -1526,15 +1669,19 @@ impl ExecutableNode for HttpNode {
         // Note: Headers are not easily printable from request_builder, but we can print what we added
         // println!("DEBUG: Headers: {:?}", request_builder); // RequestBuilder doesn't implement Debug nicely for headers
 
+        // An issued attachment URL never leaves the node, in an error's text
+        // either (a redirect hop's URL, say). None is issued yet.
+        let forms = Self::scrub_forms(&[]);
         let response = if let Some(provider) = oauth_provider {
             crate::dag_engine::infrastructure::nodes::http_oauth::send_with_oauth_retry(
                 request_builder,
                 provider,
             )
-            .await?
+            .await
         } else {
-            request_builder.send().await.map_err(Self::send_error)?
-        };
+            request_builder.send().await.map_err(Self::send_error)
+        }
+        .map_err(|e| Self::scrub_error(e, &forms))?;
         let status = response.status().as_u16();
         println!("[HttpNode] ← {} ({})", status, full_url_str);
 
@@ -1550,11 +1697,9 @@ impl ExecutableNode for HttpNode {
             }
         };
 
-        // 8. Return Output
-        Ok(json!({
-            "status": status,
-            "body": response_body
-        }))
+        // 8. Return Output — an issued attachment URL never leaves the node.
+        let output = json!({ "status": status, "body": response_body });
+        Ok(Self::scrub_issued_urls(output, &forms))
     }
 
     /// Human-readable description of this node type, used in LLM tool definitions.
@@ -2074,6 +2219,146 @@ mod session_attachment_tests {
             .mount(&server)
             .await;
         assert_eq!(run_graph(Some("s1"), "doc-1", &server).await, None);
+    }
+}
+
+/// `"$attachment_url:<document_id>"` in a JSON body: the rules that hold
+/// before any URL is issued.
+#[cfg(test)]
+mod attachment_url_tests {
+    use super::*;
+    use crate::dag_engine::infrastructure::env_provenance::AUTHORED_INPUTS_KEY;
+    use crate::storage::domain::MockOutputStorageRepository;
+    use std::collections::HashMap;
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const PLACEHOLDER: &str = "$attachment_url:doc-1";
+    const SIG: &str = "3f9a1c07e5b24d8e9a6c1f0b7d3e5a2c4b6d8f0e1a3c5e7b9d1f3a5c7e9b1d3f";
+
+    /// A signed read URL's shape: an object path, a credential with `@` and
+    /// `/`, an expiry and a hex signature.
+    fn signed() -> String {
+        format!(
+            "https://storage.example.test/bucket/sessions/k1.png\
+             ?X-Goog-Algorithm=GOOG4-RSA-SHA256\
+             &X-Goog-Credential=svc%40proj.example.test%2F20260927%2Fauto%2Fstorage%2Fgoog4_request\
+             &X-Goog-Date=20260927T120000Z&X-Goog-Expires=900&X-Goog-SignedHeaders=host\
+             &alt=media&X-Goog-Signature={SIG}"
+        )
+    }
+
+    /// Python's `urllib.parse.quote(s, safe)`: `%XX` (uppercase) for every
+    /// byte but ASCII letters, digits, `-._~` and `safe`.
+    fn quote(s: &str, safe: &str) -> String {
+        let kept = |b: u8| b.is_ascii_alphanumeric() || b"-._~".contains(&b);
+        s.bytes()
+            .map(|b| match b {
+                b if kept(b) || safe.as_bytes().contains(&b) => (b as char).to_string(),
+                b => format!("%{b:02X}"),
+            })
+            .collect()
+    }
+
+    /// Each form an echo writes of an issued URL, or of its signature alone,
+    /// comes back as the placeholder: in a nested value, in an object key
+    /// and in an error's text. A short query value elsewhere is kept.
+    #[test]
+    fn every_form_an_echo_writes_is_scrubbed() {
+        let url = signed();
+        let forms = HttpNode::scrub_forms(&[(url.clone(), PLACEHOLDER.into())]);
+        let scrub = |s: &str| {
+            let v = json!({ "a": [{ "b": s }], s: 0 });
+            let e = HttpNode::scrub_error(s.into(), &forms).to_string();
+            (HttpNode::scrub_issued_urls(v, &forms), e)
+        };
+        let shown = format!("see {PLACEHOLDER}.");
+        for echo in [
+            url.clone(),
+            url.replace('/', "\\/"), // JSON text in a string, as PHP writes it
+            url.replace('&', "\\u0026"), // the same, as Go writes it
+            url.replace('&', "&amp;"), // HTML
+            quote(&url, "/"),        // percent-encoded, `/` kept
+            quote(&url, ""),         // percent-encoded strictly
+            SIG.to_string(),         // a partial echo: the signature only
+        ] {
+            let expected = json!({ "a": [{ "b": shown }], shown.as_str(): 0 });
+            assert_eq!(scrub(&format!("see {echo}.")), (expected, shown.clone()));
+        }
+        let kept = "cache: X-Goog-Expires=900&alt=media";
+        let expected = json!({ "a": [{ "b": kept }], kept: 0 });
+        assert_eq!(scrub(kept), (expected, kept.to_string()));
+    }
+
+    /// Each part of the address is the author's when absent from `inputs`
+    /// (it is in `config`) or listed as a tool's fixed value;
+    /// `allowed_hosts` changes nothing.
+    #[test]
+    fn the_address_is_the_authors_only_when_each_part_is() {
+        let (base, key) = ("https://api.example.test", AUTHORED_INPUTS_KEY);
+        let fixed = |listed: Value| json!({ "base_url": base, "endpoint": "/jobs", key: listed });
+        let listed_host = json!({ "base_url": base, "allowed_hosts": ["api.example.test"],
+            key: ["allowed_hosts"] });
+        for (inputs, authored) in [
+            (json!({}), true),
+            (json!({ "base_url": base }), false),
+            (json!({ "endpoint": "/jobs" }), false),
+            (fixed(json!(["base_url", "endpoint"])), true),
+            (fixed(json!(["base_url"])), false),
+            (listed_host, false),
+        ] {
+            let inputs: NodeInputs = serde_json::from_value(inputs).unwrap();
+            let got = HttpNode::address_is_authored(&inputs);
+            assert_eq!(got, authored, "{inputs:?}");
+        }
+    }
+
+    /// Only a whole string value is the form, at any depth: not part of a
+    /// longer string, nor an object key.
+    #[test]
+    fn only_a_whole_string_value_is_the_url_form() {
+        for (body, carries) in [
+            (json!({ "a": [[PLACEHOLDER]] }), true),
+            (json!([{ "img": { "src": PLACEHOLDER } }]), true),
+            (json!({ "note": format!("see {PLACEHOLDER}") }), false),
+            (json!({ PLACEHOLDER: "k" }), false),
+            (json!({ "file": "$attachment:doc-1" }), false),
+        ] {
+            assert_eq!(HttpNode::has_attachment_url(&body), carries, "{body}");
+        }
+    }
+
+    /// POSTs `body` (with `inputs`) to a server that must never be called;
+    /// storage has no expectations, so reading any attachment panics.
+    async fn refused(body: Value, mut inputs: NodeInputs, mut config: Value) -> String {
+        let server = MockServer::start().await;
+        let never = Mock::given(method("POST")).respond_with(ResponseTemplate::new(200));
+        never.expect(0).mount(&server).await;
+        config["base_url"] = json!(server.uri());
+        config["method"] = json!("POST");
+        inputs.insert("body".into(), body);
+        let node = HttpNode::new().with_storage(Arc::new(MockOutputStorageRepository::new()));
+        let out = node.execute(&inputs, &config, &mut json!({}), None).await;
+        out.unwrap_err().to_string()
+    }
+
+    /// Toward the author's address the form is refused, with a fixed text:
+    /// this build issues no URL yet. Nothing is sent.
+    #[tokio::test]
+    async fn the_url_form_is_refused_until_it_is_issued() {
+        let body = json!({ "image_url": PLACEHOLDER });
+        let err = refused(body, HashMap::new(), json!({ "endpoint": "/jobs" })).await;
+        assert!(err.contains("is not available in this build yet"), "{err}");
+    }
+
+    /// Toward a data address the address rule answers first, before any
+    /// `$attachment:` is read.
+    #[tokio::test]
+    async fn the_address_is_checked_before_any_attachment_is_read() {
+        let both = json!({ "file": "$attachment:k1", "image_url": PLACEHOLDER });
+        let data = HashMap::from([("endpoint".to_string(), json!("/jobs"))]);
+        let err = refused(both, data, json!({})).await;
+        assert!(err.contains("fixes the request's address"), "{err}");
     }
 }
 

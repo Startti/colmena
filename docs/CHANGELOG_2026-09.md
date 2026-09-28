@@ -6978,3 +6978,15 @@ arrancar; mientras no arranque, cada llamada falla con `PythonExecutorError`, nu
 compara byte a byte). `remote` sigue sin poder elegirse. Guía 53: sección para correr código que no escribiste.
 **Tests.** Contenedor root: suite de aislamiento y de subprocess; el grafo smoke con `subprocess` da la misma firma que
 en proceso; sin root el motor no arranca. **ADP.** Sin cambios (no usa la bandera). **Estado.** done.
+
+## 180. `http_request`: las guardas de `"$attachment_url:<document_id>"` (parte 1 de 2)
+
+**Qué cambia.** En el body JSON de `http_request`, un string que es entero `"$attachment_url:<document_id>"` pide la
+URL de lectura de un adjunto de la sesión. Esta parte trae las guardas, sin la sustitución: la forma solo va hacia
+una dirección (`base_url` + `endpoint`) que fijó el autor, y eso se revisa antes de leer cualquier `$attachment:` y
+antes de conectarse; un pedido que la lleva no sigue redirecciones; toda URL emitida (y sus valores largos de query)
+vuelve como el placeholder en la salida y en los textos de error, también en las formas que escribe un eco
+(JSON-encoded, HTML, percent-encoded). Hasta la parte 2 la forma se rechaza con un error claro y no se envía nada.
+**Tests.** Tabla de formas del eco (y un valor corto que se conserva), tabla de la dirección del autor, detección de la
+forma como string entero; con dirección del autor, rechazo sin pedido; con dirección de los datos, el error llega antes
+de leer adjuntos. **ADP.** Sin cambios. **Estado.** done.
