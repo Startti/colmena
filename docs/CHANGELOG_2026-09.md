@@ -7033,7 +7033,7 @@ de las cuatro tools tabulares quedan visibles para el test (`#[doc(hidden)] pub`
 arregló §181. **Tests.** Contenedor root: 17/17 con `subprocess` y `MODES=all`; con la configuración por defecto no hay
 nada que comparar; con un preludio roto el banco falla (antes pasaba). **ADP.** Sin cambios. **Estado.** done.
 
-## 186. CI: las suites de Python corren con el executor aislado (Linux)
+## 187. CI: las suites de Python corren con el executor aislado (Linux)
 
 **Qué cambia.** Job nuevo `python-executor` en `ci-develop.yml`: contenedor Debian bookworm con `CAP_SYS_ADMIN` (sin
 seccomp ni apparmor del runtime), pandas/numpy/scipy de Debian y un Postgres de servicio. Corre los tests unitarios del
