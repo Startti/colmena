@@ -6991,6 +6991,16 @@ vuelve como el placeholder en la salida y en los textos de error, también en la
 forma como string entero; con dirección del autor, rechazo sin pedido; con dirección de los datos, el error llega antes
 de leer adjuntos. **ADP.** Sin cambios. **Estado.** done.
 
+## 181. JSON: los números con decimales se leen exactos (`float_roundtrip`)
+
+**Qué cambia.** `serde_json` se compila con `float_roundtrip`: un número con decimales escrito como JSON se lee de vuelta
+bit a bit igual. Sin eso, a veces se leía corrido en la última cifra (1 ULP); se vio en un resultado de `describe()` que
+cruzaba el executor aislado de Python y volvía distinto que en proceso. El cambio alcanza a todo lo que lee JSON en un
+build que incluye el crate (la unificación de features de Cargo lo extiende a los bindings y al host); leer un número con
+decimales cuesta más (del orden del doble en ese paso), sin otro cambio visible. **Tests.**
+`protocol::tests::floats_keep_every_bit_across_the_wire` fallaba sin la feature y pasa con ella; la suite de lib en
+macOS pasa entera. **ADP.** El worker lee floats exactos al subir el pin. **Estado.** done.
+
 ## 183. `http_request`: `"$attachment_url:<document_id>"` pone en un body JSON una URL que da el host (parte 2 de 2)
 
 **Qué cambia.** En el body JSON de `http_request`, un string que es entero `"$attachment_url:<document_id>"` se reemplaza
