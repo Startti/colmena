@@ -58,7 +58,9 @@ fn global() -> &'static Result<Arc<Dispatcher>, ExecutorConfigError> {
 
 /// Build the process executor from the environment (idempotent). Hosts call it
 /// at startup so a bad configuration stops the process instead of failing
-/// every Python call later. Callers may call this more than once (a host may
+/// every Python call later. A `subprocess` template that cannot start (its
+/// self-test fails, say) does not stop startup: it is warmed in the background
+/// and every call fails with a `PythonExecutorError` until it starts. Callers may call this more than once (a host may
 /// call it from more than one place, e.g. `EngineConfig::from_env` and the
 /// `dag_engine` CLI); the one-time `info!` install event fires only
 /// for the first successful call of this function, never on a later one
@@ -151,10 +153,9 @@ impl Dispatcher {
                 // not wait for them.
                 if let Ok(handle) = tokio::runtime::Handle::try_current() {
                     let warm = exec.clone();
+                    // A failed start is logged where it happens.
                     handle.spawn(async move {
-                        if let Err(e) = warm.warm().await {
-                            tracing::warn!(target: T_PYTHON_EXEC, error = %e, "python template not ready");
-                        }
+                        let _ = warm.warm().await;
                     });
                 }
                 exec

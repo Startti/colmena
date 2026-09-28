@@ -63,7 +63,10 @@ pub struct SubprocessConfig {
     pub max_request_bytes: usize,
     pub max_response_bytes: usize,
     /// Literals a result may not contain, e.g. the prefix of a credential
-    /// type: a result with any of them does not leave the executor.
+    /// type: a result with any of them does not leave the executor. A second
+    /// layer: matched byte for byte against the encoded result, so an
+    /// encoded or transformed value does not match; the in-process executor
+    /// does not apply it.
     pub refuse_output: Vec<String>,
 }
 

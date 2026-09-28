@@ -319,7 +319,7 @@ impl ExecutableNode for PythonNode {
                 },
                 "sandbox_timeout_secs": {
                     "type": "number",
-                    "description": "Max execution seconds in 'restricted' mode. Default 10. Ignored when sandbox_mode is 'none'. With `COLMENA_PYTHON_EXECUTOR=subprocess` or `remote` the code runs in a separate process that is killed at the deadline; in-process, a loop holding the interpreter keeps its thread busy after the deadline."
+                    "description": "Max execution seconds in 'restricted' mode. Default 10. Ignored when sandbox_mode is 'none'. With `COLMENA_PYTHON_EXECUTOR=subprocess` the code runs in a separate process that is killed at the deadline; in-process, a loop holding the interpreter keeps its thread busy after the deadline."
                 }
             },
             "inputs": {

@@ -1457,7 +1457,7 @@
           "type": "number",
           "required": false,
           "default": 10,
-          "description": "Maximum execution time in seconds. Only applies when sandbox_mode is 'restricted'. If the script exceeds this limit, the node returns a SandboxTimeout error to the caller. With `COLMENA_PYTHON_EXECUTOR=subprocess` or `remote` the code runs in a separate process that is killed at the deadline; in-process, a loop holding the interpreter keeps its thread busy after the deadline. Minimum recommended value: 2; increase for scripts that process large datasets.",
+          "description": "Maximum execution time in seconds. Only applies when sandbox_mode is 'restricted'. If the script exceeds this limit, the node returns a SandboxTimeout error to the caller. With `COLMENA_PYTHON_EXECUTOR=subprocess` the code runs in a separate process that is killed at the deadline; in-process, a loop holding the interpreter keeps its thread busy after the deadline. Minimum recommended value: 2; increase for scripts that process large datasets.",
           "example": 10
         }
       },

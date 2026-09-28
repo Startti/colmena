@@ -96,10 +96,11 @@ async fn the_environment_holds_only_the_template_variables() {
     assert_eq!(env.unwrap(), expected);
 }
 
-/// `/tmp` is writable; directories any user may write to on the host, and
-/// those only root may write to, are not.
+/// Of these directories only `/tmp` takes a file: the ones any user may write
+/// to on the host are covered, and the system ones are not writable by the
+/// slot's user (the root filesystem itself is not remounted read-only).
 #[tokio::test]
-async fn only_tmp_is_writable() {
+async fn of_these_directories_only_tmp_takes_a_file() {
     let Some(ex) = executor() else { return };
     for d in ["/var/tmp", "/dev/shm"] {
         assert!(std::path::Path::new(d).is_dir(), "{d} exists here");
@@ -145,8 +146,10 @@ async fn tmp_is_private_to_each_call() {
 /// call.
 #[tokio::test]
 async fn memory_exhaustion_is_a_python_error_and_the_next_call_works() {
-    let Some(ex) = executor() else { return };
-    let e = run(&ex, "x = bytearray(64 * 1024**3)\noutput = 1", 20).await;
+    let Some(ex) = executor_with(|c| c.memory_mb = 256) else {
+        return;
+    };
+    let e = run(&ex, "x = bytearray(1024**3)\noutput = 1", 20).await;
     let e = e.unwrap_err();
     assert!(
         matches!(&e, PythonRunError::Python(m) if m.contains("MemoryError")),
