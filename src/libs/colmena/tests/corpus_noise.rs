@@ -178,10 +178,13 @@ fn measure() -> Measured {
 // (a whole-string "$attachment_url:<document_id>" in an http_request JSON body
 // becomes a URL the host issues, only toward the author's address). Lints
 // clean.
-// Bumped 340 -> 341: adds tests/graphs/security/attachment_url_ttl_e2e.json (the
+// Bumped 340 -> 341: adds tests/graphs/control_flow/router_decision_model.json (a
+// router in decision_model mode: TypeSafe Jev picks one of four branches, with
+// fallback_branch human_review). Lints clean.
+// Bumped 341 -> 342: adds tests/graphs/security/attachment_url_ttl_e2e.json (the
 // author's attachment_url_ttl_seconds: a valid TTL posts the link, an invalid one
 // fails before any request). Lints clean.
-const EXPECTED_FILES: usize = 341;
+const EXPECTED_FILES: usize = 342;
 const EXPECTED_ERRORS: usize = 0;
 const EXPECTED_WARNINGS: usize = 0;
 const EXPECTED_INFOS: usize = 0;

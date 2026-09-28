@@ -16,6 +16,7 @@ Dos nodos nuevos que cubren dos necesidades recurrentes:
 | "Tengo la salida en texto de un agente y necesito extraer `{intent, confidence}`." | `output_parser` |
 | "Decidir entre `sales_agent`, `support_agent`, `billing_agent` según el mensaje del usuario." | `router` (modo `llm_direct`) |
 | "El LLM debe extraer `intent` + `urgency`, y enrutar por regla `intent==sales AND urgency==high`." | `router` (modo `extract_and_route`) |
+| "Necesito un score de confianza real por rama, con un fallback obligatorio para el caso ambiguo o fuera del set." | `router` (modo `decision_model`) |
 | "Decidir por un valor que ya viene estructurado de un nodo upstream (sin LLM)." | `python_node` con `output = ...` (más simple) |
 | "Activar múltiples ramas en paralelo (no XOR)." | Edges independientes con `loop_status` o `python_node` — el router siempre dispara solo una rama. |
 
@@ -181,6 +182,48 @@ El LLM extrae un JSON contra `schema`; reglas declarativas sobre ese JSON eligen
 
 ---
 
+## `router` — modo C: `decision_model`
+
+Un modelo de decisión (TypeSafe Jev, `provider: "typesafe"`) elige una rama con una distribución de probabilidad completa y un score de confianza — no es un LLM de texto libre. El motor inyecta automáticamente una opción oculta `none_of_these` en cada llamada; ninguna rama declarada puede usar ese nombre.
+
+```json
+{
+  "type": "router",
+  "config": {
+    "mode": "decision_model",
+    "provider": "typesafe",
+    "api_key": "${TYPESAFE_API_KEY}",
+    "fallback_branch": "human_review",
+    "min_confidence": 0.7,
+    "branches": [
+      { "name": "refund",            "description": "Wants money back for a charge." },
+      { "name": "technical_support", "description": "Something in the product is broken." },
+      { "name": "sales",             "description": "Wants to buy or upgrade." },
+      { "name": "human_review",      "description": "Needs a person." }
+    ]
+  }
+}
+```
+
+**Campos propios de este modo:**
+
+- `api_key` — es explícito y obligatorio en TODOS los modos del router (no cambia acá), pero en `decision_model` no hay ningún default implícito: si el campo falta, o `${TYPESAFE_API_KEY}` no resuelve, o resuelve a un valor vacío, el nodo falla con un mensaje que nombra `TYPESAFE_API_KEY` explícitamente — cero requests HTTP salen.
+- `fallback_branch` (obligatorio solo en este modo, prohibido en los otros dos) — debe nombrar una rama declarada. Es adonde se enruta cuando el modelo elige `none_of_these`, o cuando su confianza queda por debajo de `min_confidence`.
+- `min_confidence` (opcional solo en este modo, prohibido en los otros dos) — rango `(0, 1]`, default `0.7`. El umbral es `>=`: justo en el borde, pasa.
+- `model` — pin por default a `jev-1.13.0` (ver `nodes/router/decision_model.rs::DEFAULT_MODEL`). Un upgrade silencioso correría el calibrado de `min_confidence`, así que el default queda fijo hasta que se elija cambiarlo a mano.
+
+**El gate** (`dag_engine::domain::router_rules::gate`, función pura):
+
+```
+elegido == "none_of_these"        → fallback_branch, reason "none_of_these"
+confidence < min_confidence       → fallback_branch, reason "low_confidence"
+confidence >= min_confidence      → el pick del modelo,  reason "confident"
+```
+
+**Un error del vendor NUNCA enruta a `fallback_branch`.** Auth, rate limit, 5xx o timeout hacen fallar el nodo — una caída del proveedor no puede disfrazarse de "baja confianza". Ver `docs/developer_guide/04_adding_providers.md` para el mapeo completo de errores del puerto `DecisionModelRepository`.
+
+---
+
 ## DSL `when` — referencia
 
 | Forma | Significado |
@@ -335,6 +378,20 @@ Además de los ports por rama, el router siempre emite `__decision`:
 
 Útil para logging, audit trails, o como input de un nodo `log` / `task_memory_writer`. En modo A, `extracted` es `null` (no hubo extracción). En errores de routing, el `extracted` JSON va dentro del mensaje de error (no en un `__decision` parcial).
 
+En modo `decision_model`, `__decision` lleva además `model_choice`, `confidence`, `min_confidence`, `probabilities` (mapa rama→probabilidad, incluye `none_of_these`) y `model`; `extracted` siempre es `null` y `reason` es uno de `confident` | `low_confidence` | `none_of_these`:
+
+Salida real (TypeSafe, `jev-1.13.0`) para "Me interesa el plan Pro, aunque no sé si funciona con mi
+integración que falla": el modelo duda entre dos ramas y el gate manda al fallback.
+
+```json
+{
+  "selected_branch": "human_review", "reason": "low_confidence", "extracted": null,
+  "model_choice": "sales", "confidence": 0.38, "min_confidence": 0.7,
+  "probabilities": { "sales": 0.51, "technical_support": 0.48, "none_of_these": 0.01, "refund": 0.0, "human_review": 0.0 },
+  "model": "jev-1.13.0"
+}
+```
+
 ---
 
 ## Errores comunes
@@ -346,12 +403,15 @@ Además de los ports por rama, el router siempre emite `__decision`:
 | `llm picked unknown branch 'X'` | Mode A: el LLM alucinó un nombre fuera del enum. | Revisá si las descripciones son ambiguas; bajá `temperature` (default ya es 0.1); considerá pasar a mode B con un enum explícito en el schema. |
 | `'when' references unknown field 'X'` | Mode B: typo en un `field` del DSL. | Corregí el typo. La validación corre al init, así que aparece antes de ejecutar. |
 | `RouterConfigError: schema invalid — field 'X' has invalid type 'Y'` | Tipo no soportado en el schema inline. | Tipos válidos: `string`, `number`, `integer`, `boolean`, `array`, `object`. |
+| `Router: decision_model mode requires 'fallback_branch'` | Modo `decision_model` sin `fallback_branch`. | Agregalo, nombrando una rama declarada. |
+| `... — decision_model mode requires TYPESAFE_API_KEY to be set` | `api_key` ausente, `${TYPESAFE_API_KEY}` sin resolver, o resuelto vacío. | Seteá la env var, o pasá un literal/secure-value explícito en `api_key`. Cero requests HTTP salen antes de este chequeo. |
+| `RouterConfigError: 'fallback_branch' is only allowed in decision_model mode` | `fallback_branch` (o `min_confidence`) en modo `llm_direct`/`extract_and_route`. | Sacalo — esos campos solo existen en `decision_model`. |
 
 ---
 
 ## Tests de integración
 
-Siete grafos en [`tests/graphs/control_flow/`](../../tests/graphs/control_flow/):
+Ocho grafos en [`tests/graphs/control_flow/`](../../tests/graphs/control_flow/):
 
 ```
 output_parser_basic.json           # llm_call → output_parser → log
@@ -361,9 +421,10 @@ router_extract_rules.json          # mode B con schema + when rules (incluye com
 router_mode_b_sentiment.json       # mode B routing por sentiment (positive/negative)
 router_with_subgraph.json          # rama con subgraph inline (LLM agent embebido)
 router_chained.json                # dos routers en cascada (intent → idioma)
+router_decision_model.json         # modo decision_model, 4 ramas + fallback human_review
 ```
 
-Todos requieren `GEMINI_API_KEY`. Corré uno con:
+Los siete primeros requieren `GEMINI_API_KEY`. Corré uno con:
 
 ```bash
 source .env
@@ -371,11 +432,15 @@ cargo run --bin dag_engine -- run tests/graphs/control_flow/router_llm_direct.js
   --agent-session-id router_demo --include-extra-info
 ```
 
+`router_decision_model.json` requiere `TYPESAFE_API_KEY`. Para ver el fallback, cambiá
+`trigger.test_payload.user_message` por un mensaje fuera de las ramas (ej. "¿Qué hora es en Tokio?").
+
 ---
 
 ## Internals — quick reference
 
-- **Archivos**: `nodes/output_parser.rs`, `nodes/router/{mod,config,when_dsl,llm_direct,extract_and_route,node}.rs`
+- **Archivos**: `nodes/output_parser.rs`, `nodes/router/{mod,config,when_dsl,llm_direct,extract_and_route,decision_model,node}.rs`, `dag_engine/domain/router_rules.rs` (regla `fallback_branch`/`min_confidence` + gate, ambos puros)
 - **Helpers compartidos**: `nodes/util/inline_schema.rs` (converter + validator), `nodes/util/extract_with_schema.rs` (LLM call + parse + validate)
 - **Reuso**: `information_extraction` también delega a `extract_with_schema` desde Task 3 — los tres nodos comparten el mismo motor de extracción.
+- **`decision_model`**: puerto `llm::domain::decision_model_repository::DecisionModelRepository`, adapter `TypesafeJevAdapter`, factory `llm::infrastructure::build_decision_model_repository`. `router_rules::decision_model_rejection` hoy solo lo llama el parser de runtime (`config.rs`); `Graph::validate` y el linter comparten la misma función en un cambio posterior.
 - **Wiring del executor**: el router comparte el mismo `Arc<OnceLock<SubGraphExecutorPort>>` que el `SubGraphNode`, así que el `set_subgraph_executor()` del engine los wirea a ambos con una sola llamada.

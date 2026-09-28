@@ -611,23 +611,23 @@
 
     "router": {
       "name": "Router",
-      "description": "Routes the input to one of N declared branches. Mode 'llm_direct': the LLM reads each branch's description and picks one by name. Mode 'extract_and_route': the LLM first extracts a JSON object against an inline schema, then declarative 'when' rules pick the branch in declaration order (first match wins). Each branch is a named output port; only the selected port emits a non-null payload, all others emit null. Each branch may optionally declare a 'subgraph' (child_graph_path, child_graph_inline or child_graph_ref — exactly one) that runs internally before emission. Fails fast (no default branch) when no rule matches or the LLM picks an unknown branch — error embeds the extracted JSON for diagnostics. Always emits an additional '__decision' output port with { selected_branch, reason?, extracted? } for logging.",
+      "description": "Routes the input to one of N declared branches. Mode 'llm_direct': the LLM reads each branch's description and picks one by name. Mode 'extract_and_route': the LLM first extracts a JSON object against an inline schema, then declarative 'when' rules pick the branch in declaration order (first match wins). Mode 'decision_model': a TypeSafe Jev decision call (provider 'typesafe') picks a branch, or the injected 'none_of_these' option, with a probability distribution and a confidence score; routes to the pick only when confidence >= 'min_confidence', otherwise (or on 'none_of_these') routes to the required 'fallback_branch'. A decision_model vendor error (auth, rate limit, server error, timeout) fails the node — never routed to 'fallback_branch'. Each branch is a named output port; only the selected port emits a non-null payload, all others emit null. Each branch may optionally declare a 'subgraph' (child_graph_path, child_graph_inline or child_graph_ref — exactly one) that runs internally before emission. Fails fast (no default branch) when no rule matches or the LLM picks an unknown branch — error embeds the extracted JSON for diagnostics. Always emits an additional '__decision' output port with { selected_branch, reason?, extracted? } for logging (decision_model additionally emits model_choice, confidence, min_confidence, probabilities, model).",
       "category": "control_flow",
       "config_fields": {
         "mode": {
           "type": "string",
           "required": true,
           "default": null,
-          "description": "Routing strategy. 'llm_direct' = LLM picks a branch by name from descriptions. 'extract_and_route' = LLM extracts JSON against 'schema', then 'when' rules per branch decide.",
-          "valid_values": ["llm_direct", "extract_and_route"],
+          "description": "Routing strategy. 'llm_direct' = LLM picks a branch by name from descriptions. 'extract_and_route' = LLM extracts JSON against 'schema', then 'when' rules per branch decide. 'decision_model' = a TypeSafe Jev decision call picks a branch with confidence gating — see 'fallback_branch' and 'min_confidence'.",
+          "valid_values": ["llm_direct", "extract_and_route", "decision_model"],
           "example": "extract_and_route"
         },
         "provider": {
           "type": "string",
           "required": true,
           "default": null,
-          "description": "LLM provider. See 'llm_shared_fields.provider'.",
-          "valid_values": ["openai", "google", "anthropic"],
+          "description": "LLM provider. See 'llm_shared_fields.provider'. 'typesafe' is required — and the only accepted value — when 'mode' is 'decision_model'.",
+          "valid_values": ["openai", "google", "anthropic", "typesafe"],
           "example": "google"
         },
         "api_key": {
@@ -685,6 +685,20 @@
             { "name": "sales",   "when": { "field": "intent", "equals": "sales" } },
             { "name": "support", "when": { "field": "intent", "in": ["support", "technical"] } }
           ]
+        },
+        "fallback_branch": {
+          "type": "string",
+          "required": "decision_model only",
+          "default": null,
+          "description": "Required in 'decision_model' mode; forbidden in the other modes. Must name a declared branch — validated at runtime today (Graph::validate and the linter hoist the same check load-time in a later change). Selected when the decision model picks the injected 'none_of_these' option, or when its confidence is below 'min_confidence'.",
+          "example": "human_review"
+        },
+        "min_confidence": {
+          "type": "number",
+          "required": "decision_model only",
+          "default": 0.7,
+          "description": "Only used in 'decision_model' mode; forbidden in the other modes. Must be in (0, 1]. The decision model's pick routes directly only when its confidence is >= this value; below it (or on 'none_of_these'), routing falls back to 'fallback_branch'.",
+          "example": 0.7
         }
       },
       "input_ports": {
@@ -700,7 +714,7 @@
         },
         "__decision": {
           "type": "object",
-          "description": "Always emitted on success: { selected_branch, reason?, extracted? }. Use for logging, audit trails, or as a debug output. On routing failure, the extracted JSON is embedded in the node error message (no partial __decision is emitted)."
+          "description": "Always emitted on success: { selected_branch, reason?, extracted? }. In 'decision_model' mode it additionally carries { model_choice, confidence, min_confidence, probabilities, model }; 'reason' is one of 'confident' | 'low_confidence' | 'none_of_these' and 'extracted' is always null. Use for logging, audit trails, or as a debug output. On routing failure, the extracted JSON is embedded in the node error message (no partial __decision is emitted)."
         }
       },
       "default_input": "input",
@@ -720,6 +734,13 @@
           "graph": {
             "router": { "type": "router", "config": { "mode": "extract_and_route", "provider": "google", "model": "gemini-2.5-flash", "api_key": "${GEMINI_API_KEY}", "schema": { "sentiment": { "type": "string", "required": true, "description": "positive | negative" } }, "branches": [ { "name": "thank",    "when": { "field": "sentiment", "equals": "positive" } }, { "name": "escalate", "when": { "field": "sentiment", "equals": "negative" } } ] } },
             "edges":  [ { "from": "trigger.feedback", "to": "router.input" }, { "from": "router.thank", "to": "log_thank" }, { "from": "router.escalate", "to": "log_escalate" } ]
+          }
+        },
+        {
+          "title": "Mode decision_model — TypeSafe Jev picks with confidence gating",
+          "graph": {
+            "router": { "type": "router", "config": { "mode": "decision_model", "provider": "typesafe", "api_key": "${TYPESAFE_API_KEY}", "fallback_branch": "human_review", "min_confidence": 0.7, "branches": [ { "name": "refund", "description": "Wants money back for a charge." }, { "name": "human_review", "description": "Needs a person." } ] } },
+            "edges":  [ { "from": "trigger.user_message", "to": "router.input" }, { "from": "router.refund", "to": "log_refund" }, { "from": "router.human_review", "to": "log_human_review" }, { "from": "router.__decision", "to": "audit" } ]
           }
         }
       ]

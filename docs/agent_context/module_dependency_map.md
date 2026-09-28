@@ -320,7 +320,7 @@
 
 #### `src/libs/colmena/src/dag_engine/domain/router_rules.rs`
 - Module: `dag_engine::domain::router_rules`
-- **Used by (1)**: `src/libs/colmena/src/dag_engine/infrastructure/nodes/router/decision_model.rs`
+- **Used by (2)**: `src/libs/colmena/src/dag_engine/infrastructure/nodes/router/config.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/router/decision_model.rs`
 - Depends on (0): — (no intra-crate imports)
 
 #### `src/libs/colmena/src/dag_engine/domain/secure_value_repository.rs`
@@ -701,7 +701,7 @@
 #### `src/libs/colmena/src/dag_engine/infrastructure/nodes/router/config.rs`
 - Module: `dag_engine::infrastructure::nodes::router::config`
 - **Used by (1)**: `src/libs/colmena/src/dag_engine/infrastructure/nodes/router/decision_model.rs`
-- Depends on (1): `dag_engine::domain::child_graph_source`
+- Depends on (2): `dag_engine::domain::child_graph_source`, `dag_engine::domain::router_rules`
 
 #### `src/libs/colmena/src/dag_engine/infrastructure/nodes/router/decision_model.rs`
 - Module: `dag_engine::infrastructure::nodes::router::decision_model`

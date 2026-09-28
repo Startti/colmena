@@ -7143,6 +7143,36 @@ grafo E2E.
 **ADP.** Sin impacto.
 **Estado.** done.
 
+## 192. Modo `decision_model` en el nodo `router` (Jev, 6/7)
+
+**Qué cambia.** El `router` gana un tercer modo, `mode: "decision_model"`, que usa `decide_branch` (§191)
+para elegir la rama con TypeSafe Jev. Acepta solo `provider: "typesafe"` y se resuelve antes del
+chequeo de proveedores de chat. `api_key` sigue obligatoria y explícita; si falta, no resuelve o queda
+vacía, el nodo falla sin ningún request y el mensaje nombra `TYPESAFE_API_KEY`. El parser de runtime
+aplica la regla de §190 (`fallback_branch` obligatorio y declarado, `none_of_these` reservado,
+`min_confidence` en `(0, 1]`, default `0.7`). Los otros dos modos no cambian. Catálogo
+(`docs/node_configurations.json`) y guía (`developer_guide/37_router_and_output_parser.md`, modo C)
+actualizados.
+
+**Tests.** `config.rs`: el modo exige `description` por rama y rechaza `when`, y los rechazos de la
+regla. `node.rs`: proveedor distinto de `typesafe`, `api_key` ausente o `${TYPESAFE_API_KEY}` sin
+resolver, y `fallback_branch` ausente. Paridad catálogo ↔ `config_schema()` en verde.
+
+**E2E.** [`tests/graphs/control_flow/router_decision_model.json`](../tests/graphs/control_flow/router_decision_model.json),
+contra el API real (SSE en `/tmp/colmena_e2e/router_decision_model_*.sse`), cambiando solo el mensaje:
+
+| Mensaje | Elección | Confianza | Rama | `reason` |
+|---|---|---|---|---|
+| "Me cobraron dos veces la suscripción de agosto…" | `refund` | 1.0 | `refund` | `confident` |
+| "¿Qué hora es en Tokio ahora mismo?" | `none_of_these` | 1.0 | `human_review` | `none_of_these` |
+| "Me interesa el plan Pro, aunque no sé si funciona con mi integración que falla" | `sales` (0.51 vs 0.48) | 0.38 | `human_review` | `low_confidence` |
+
+El `usage` de cada corrida llega al frame `finish` (por ejemplo 422 prompt / 57 completion) y solo el
+nodo de la rama elegida recibe el mensaje.
+
+**ADP.** Sin impacto: el modo es opt-in por grafo; sin cambios de API pública, bindings ni SSE.
+**Estado.** done. El rechazo al cargar el grafo (`Graph::validate` y linter) llega en el cambio siguiente.
+
 ## 193. `$attachment_url:`: solo en un body JSON, un `Host` de datos no la lleva, y el autor fija cuánto vive la URL
 
 **Qué cambia.** La regla de dirección de §184 cubre también un header `Host` de datos: mismo error, que ahora nombra
