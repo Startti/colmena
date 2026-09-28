@@ -3,6 +3,7 @@
 //! CPython's after-fork hooks run); the template itself never runs user code.
 
 use super::child::{self, JailSpec, EXIT_NOT_READY};
+use super::selftest;
 use pyo3::exceptions::PyImportError;
 use pyo3::prelude::*;
 use serde_json::{json, Value};
@@ -174,17 +175,31 @@ fn accept_with_timeout(l: &UnixListener, ms: i32) -> io::Result<Option<UnixStrea
     Ok(Some(s))
 }
 
-fn start(socket: &Path) -> Result<UnixListener, Value> {
+/// Proves the jail in a throwaway child before any call is accepted. Every
+/// layer that did not hold is logged, the last one as the returned event.
+fn prove_jail(jail: &JailSpec) -> Result<(), Value> {
+    let Err(checks) = selftest::run(jail) else {
+        return Ok(());
+    };
+    let event = |c: &selftest::LayerCheck| json!({"event": "self_test_failed", "layer": c.layer, "reason": c.reason, "errno": c.errno});
+    let mut failed: Vec<Value> = checks.iter().filter(|c| !c.ok).map(event).collect();
+    let last = failed.pop();
+    failed.into_iter().for_each(log);
+    Err(last.unwrap_or_else(|| json!({"event": "self_test_failed"})))
+}
+
+fn start(args: &ZygoteArgs) -> Result<UnixListener, Value> {
     die_with_parent()?;
     adopt_orphans()?;
     pyo3::Python::initialize();
     warm_imports()?;
     check_single_threaded()?;
-    bind_private(socket)
+    prove_jail(&args.jail)?;
+    bind_private(&args.socket)
 }
 
 pub fn run(args: ZygoteArgs) -> i32 {
-    let listener = match start(&args.socket) {
+    let listener = match start(&args) {
         Ok(l) => l,
         Err(event) => {
             log(event);

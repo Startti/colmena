@@ -10,6 +10,8 @@ pub mod inprocess;
 pub mod jail;
 pub mod protocol;
 #[cfg(target_os = "linux")]
+pub mod selftest;
+#[cfg(target_os = "linux")]
 pub mod subprocess;
 #[cfg(target_os = "linux")]
 pub mod zygote;

@@ -61,6 +61,7 @@ const EVENTS: &[&str] = &[
     "bind_failed",
     "socket_permissions_failed",
     "accept_failed",
+    "self_test_failed",
 ];
 const NUMBER_KEYS: &[&str] = &[
     "pid",
@@ -70,7 +71,7 @@ const NUMBER_KEYS: &[&str] = &[
     "errno",
     "threads",
 ];
-const NAME_KEYS: &[&str] = &["error_type", "module"];
+const NAME_KEYS: &[&str] = &["error_type", "module", "layer", "reason"];
 /// Host variables the template gets on top of `TEMPLATE_ENV`, so text
 /// encodings match the in-process interpreter. CPython takes only `LC_CTYPE`
 /// from the environment at startup, which `LC_ALL` overrides and `LANG` backs.
@@ -677,6 +678,8 @@ mod tests {
         let import =
             br#"{"event":"warm_imports_failed","error_type":"ImportError","module":"scipy.stats"}"#;
         assert!(template_event(import).is_some());
+        let layer = br#"{"event":"self_test_failed","layer":"network_dns","reason":"resolved","errno":null}"#;
+        assert!(template_event(layer).is_some());
         for line in [
             &b"Traceback (most recent call last):"[..],
             br#"{"event":"child_exit","pid":7,"note":"x"}"#,

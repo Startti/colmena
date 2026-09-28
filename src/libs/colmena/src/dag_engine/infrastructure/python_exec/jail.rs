@@ -43,8 +43,8 @@ pub const DEFAULT_HIDDEN: &[&str] = &[
     "/proc/timer_stats",
 ];
 const MIB: u64 = 1024 * 1024;
-const NOFILE: u64 = 256;
-const NPROC: u64 = 64;
+pub(crate) const NOFILE: u64 = 256;
+pub(crate) const NPROC: u64 = 64;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct JailSpec {
