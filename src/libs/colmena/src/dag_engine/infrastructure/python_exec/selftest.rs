@@ -240,10 +240,8 @@ fn covered(path: &Path) -> bool {
 
 /// Whether `p` sits under one of `covers` other than itself: a path there is
 /// hidden by that cover already, so the self-test does not check it on its
-/// own account. Pure and lexical (prefix comparison, no filesystem access),
-/// same as the exclusion it stands in for — see [`hidden_before`], which
-/// covers a hidden path first so a `..` component in a configured path can't
-/// walk it back out from under a cover it lexically sits inside of.
+/// own account. Lexical (a prefix test, no filesystem access), which is
+/// enough because a configured path cannot carry a `..` component.
 fn nested_under<'a>(p: &Path, mut covers: impl Iterator<Item = &'a Path>) -> bool {
     covers.any(|c| c != p && p.starts_with(c))
 }

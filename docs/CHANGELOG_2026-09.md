@@ -6903,3 +6903,12 @@ y se comprueban las interfaces de red, el presupuesto de memoria contra el tama�
 ningún montaje: 24 capas. Un reporte sin exactamente esas capas falla. Una ruta configurada que el uid del slot no
 alcanza falla como `unverified`. **Tests.** Contenedor root: 24/24; quitar cada capa la hace fallar en esa capa; una
 llamada no crea una cola en `/dev/mqueue`. **ADP.** Sin cambios. **Estado.** done.
+
+## 173. Python: las rutas tapadas rechazan `..` y el setup del self-test tiene sus propios códigos (Linux)
+
+**Qué cambia.** `…_HIDE_PATHS` y `--hide` rechazan una ruta con un componente `..` (el self-test salta las rutas
+anidadas bajo otra tapa con una comparación de prefijo). Si la plantilla no puede leer sus namespaces, su tabla de
+montajes o su tamaño, el self-test lo dice con `namespace_unreadable`, `mounts_unreadable` o `vm_size_unreadable`;
+`missing_layer` pasa a llamarse `incomplete_report`. **Tests.** Contenedor root: el test de `/dev/mqueue` comprueba antes
+que el directorio exista y acepte una entrada; la lectura de `/proc/net/dev`, la exclusión de rutas anidadas y el
+rechazo de `..` tienen tests unitarios que corren en CI. **ADP.** Sin cambios. **Estado.** done.

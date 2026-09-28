@@ -101,7 +101,7 @@ Its stderr is read as JSON events with known fields only; any other line is drop
 | `COLMENA_PYTHON_EXECUTOR_BIN` | `python_executor` |
 | `COLMENA_PYTHON_EXECUTOR_SLOTS` | CPU cores, at most 8 (1-64) |
 | `COLMENA_PYTHON_EXECUTOR_MEMORY_MB` | 2048 (256-65536) |
-| `COLMENA_PYTHON_EXECUTOR_HIDE_PATHS` | none (`:`-separated paths) |
+| `COLMENA_PYTHON_EXECUTOR_HIDE_PATHS` | none (`:`-separated absolute paths, no `..`) |
 | `COLMENA_PYTHON_EXECUTOR_MAX_REQUEST_MB`, `…_MAX_RESPONSE_MB` | 256 (1-4095) |
 
 Each call takes a slot, checks the request size first, forks a child through the template and reads one capped
@@ -139,7 +139,9 @@ template's pid hidden, masked entries covered), the covered paths (a directory i
 read-only `/dev/null` and cannot be opened), a private `/tmp`, no network (DNS, loopback, link-local and a public
 address unreachable; only `lo` and the kernel's per-namespace fallback tunnel devices listed) and, from the template
 once the probe is done, no mount added to its namespace. Each result is a JSON line `{layer, ok, reason, errno?}`
-with fixed reason codes; a report that does not carry exactly these layers fails. A configured path the slot uid
+with fixed reason codes. A report that does not carry exactly these layers fails as `incomplete_report`; a template
+that cannot read its own namespaces, mounts or size fails as `namespace_unreadable`, `mounts_unreadable` or
+`vm_size_unreadable`. A configured path the slot uid
 cannot reach (a file under a directory it cannot enter) fails as `unverified`: cover that directory instead. Any
 failure logs `self_test_failed` and the template exits 3; success is implied by `READY`.
 `python_executor self-test [--uid-base N] [--tmp-mb N] [--hide /abs]` runs the same checks (same values as the
