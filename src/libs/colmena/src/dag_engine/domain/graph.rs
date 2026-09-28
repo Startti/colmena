@@ -78,6 +78,10 @@ impl Graph {
     /// - A malformed `mcp` block, or one whose URL is not HTTPS.
     /// - Malformed `node_schema` on any tool in `tool_configurations`.
     /// - A `parallel` tool flag that is present but not a JSON boolean.
+    /// - A `router` node that breaks the `decision_model` rules in
+    ///   `router_rules::decision_model_rejection` (missing or undeclared
+    ///   `fallback_branch`, the reserved `none_of_these` name, `min_confidence`
+    ///   outside `(0, 1]`, or those fields in another mode).
     ///
     /// Keep this list complete. `dag_engine lint` mirrors these gates one by one so it
     /// can report them before a run, and it reads this comment to know what is left —
@@ -95,6 +99,21 @@ impl Graph {
                     node_id: node_id.clone(),
                     reason: "character '/' is reserved for subgraph path qualifiers",
                 });
+            }
+        }
+
+        // A router's decision_model rules, checked here so a bad graph fails
+        // before any upstream node runs and fires its side effects.
+        for (node_id, node) in &self.nodes {
+            if node.node_type != "router" {
+                continue;
+            }
+            if let Some(reason) =
+                crate::dag_engine::domain::router_rules::decision_model_rejection(&node.config)
+            {
+                return Err(DagError::NodeExecution(format!(
+                    "node '{node_id}': {reason}"
+                )));
             }
         }
 
@@ -497,6 +516,37 @@ mod tests {
     fn validate_accepts_absent_parallel() {
         let g = graph_with_tool(json!({ "node_type": "subgraph" }));
         assert!(g.validate().is_ok());
+    }
+
+    fn router_graph(config: Value) -> Graph {
+        serde_json::from_value(json!({
+            "nodes": { "route": { "type": "router", "config": config } },
+            "edges": []
+        }))
+        .unwrap()
+    }
+
+    /// A `decision_model` router without a valid `fallback_branch` must fail at
+    /// LOAD, before any upstream node runs and fires its side effects.
+    #[test]
+    fn validate_applies_the_router_decision_model_rules_at_load() {
+        let branches = json!([
+            { "name": "refund", "description": "wants money back" },
+            { "name": "human", "description": "needs a person" }
+        ]);
+        let bad = router_graph(json!({ "mode": "decision_model", "branches": branches }));
+        let err = bad.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("route") && err.contains("fallback_branch"),
+            "{err}"
+        );
+
+        let good = router_graph(json!({
+            "mode": "decision_model", "branches": branches, "fallback_branch": "human"
+        }));
+        assert!(good.validate().is_ok());
+        let other_mode = router_graph(json!({ "mode": "llm_direct", "branches": branches }));
+        assert!(other_mode.validate().is_ok());
     }
 }
 

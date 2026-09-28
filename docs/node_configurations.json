@@ -690,7 +690,7 @@
           "type": "string",
           "required": "decision_model only",
           "default": null,
-          "description": "Required in 'decision_model' mode; forbidden in the other modes. Must name a declared branch — validated at runtime today (Graph::validate and the linter hoist the same check load-time in a later change). Selected when the decision model picks the injected 'none_of_these' option, or when its confidence is below 'min_confidence'.",
+          "description": "Required in 'decision_model' mode; forbidden in the other modes. Must name a declared branch; checked when the graph loads (Graph::validate) and by dag_engine lint. Selected when the decision model picks the injected 'none_of_these' option, or when its confidence is below 'min_confidence'.",
           "example": "human_review"
         },
         "min_confidence": {
