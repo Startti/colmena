@@ -6959,3 +6959,12 @@ descifrados en el resultado que ve el LLM, igual que la ruta genérica.
 **Tests.** `data_run_python_resolves_secure_value_handles_in_its_args` (ignorado en CI porque necesita pandas): Python
 recibe el valor descifrado y el resultado lo muestra enmascarado. Sin el arreglo, Python veía `<sv_tok_1>`.
 **ADP.** Sin cambios de API. **Estado.** done.
+
+## 178. Adjuntos: el resolver de la sesión da la URL de lectura de un documento
+
+**Qué cambia.** `AttachmentStreamResolver::resolve_url(session, document_id, ttl_seconds)` busca el documento en el
+registro de la sesión (como `resolve`) y le pide al storage `read_url` con la `storage_key` de la fila y el TTL sin tope
+(el host lo recorta). Un id de otra sesión o una `storage_key` cruda dan `NotFound` sin preguntarle al storage; `Ok(None)`
+si el storage del host no da URLs (default del trait, así compila todo implementador anterior). Nadie lo llama todavía:
+lo usa `http_request` en la PR siguiente. **Tests.** La clave de la fila y el TTL llegan a `read_url` y se marca
+`last_used_at`; fuera de la sesión es `NotFound` y el storage no se llama. **ADP.** Sin cambios. **Estado.** done.
