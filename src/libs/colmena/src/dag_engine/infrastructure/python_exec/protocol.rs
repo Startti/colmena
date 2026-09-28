@@ -180,6 +180,39 @@ mod tests {
         assert_eq!(back(none).output, Some(Value::Null));
     }
 
+    /// A float reaches the other side with every bit, in both directions, as
+    /// it does in-process. `57.879184513951124` is one that a parser rounding
+    /// its last bit reads as `57.87918451395112`.
+    #[test]
+    fn floats_keep_every_bit_across_the_wire() {
+        let x = 57.879184513951124_f64;
+        let req = PythonRunRequest {
+            code: "c".into(),
+            mode: "none".into(),
+            timeout: None,
+            inputs: Map::from_iter([("x".to_string(), json!(x))]),
+        };
+        let bytes = serde_json::to_vec(&WireRequest::new(req, Duration::from_secs(1))).unwrap();
+        let sent = serde_json::from_slice::<WireRequest>(&bytes).unwrap();
+        assert_eq!(
+            sent.inputs["x"].as_f64().map(f64::to_bits),
+            Some(x.to_bits())
+        );
+        let r = WireResponse::from_helper(
+            Ok(PythonRunResult {
+                output: Some(json!([x])),
+                stdout: "".into(),
+            }),
+            1,
+        );
+        let back = serde_json::from_slice::<WireResponse>(&serde_json::to_vec(&r).unwrap())
+            .unwrap()
+            .into_result()
+            .unwrap();
+        let got = back.output.and_then(|v| v[0].as_f64());
+        assert_eq!(got.map(f64::to_bits), Some(x.to_bits()));
+    }
+
     #[test]
     fn python_errors_travel_verbatim_without_stdout() {
         let r = WireResponse::from_helper(
