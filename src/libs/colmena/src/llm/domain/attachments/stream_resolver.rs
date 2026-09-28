@@ -62,6 +62,24 @@ pub trait AttachmentStreamResolver: Send + Sync {
         agent_session_id: &str,
         document_id: &str,
     ) -> Result<StoredStream, AttachmentResolveError>;
+
+    /// A read URL for `document_id` of `agent_session_id`, valid for about
+    /// `ttl_seconds`: the same session lookup as [`Self::resolve`] (a raw
+    /// storage_key or another session's id is `NotFound`, and storage is
+    /// never asked), then `OutputStorageRepository::read_url` with the row's
+    /// `storage_key`. `Ok(None)`: the host's storage issues no read URLs.
+    ///
+    /// Default `Ok(None)`, so an implementer that predates it compiles and
+    /// behaves as a host without URLs.
+    async fn resolve_url(
+        &self,
+        agent_session_id: &str,
+        document_id: &str,
+        ttl_seconds: u64,
+    ) -> Result<Option<String>, AttachmentResolveError> {
+        let _ = (agent_session_id, document_id, ttl_seconds);
+        Ok(None)
+    }
 }
 
 #[cfg(test)]
