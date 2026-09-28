@@ -14,10 +14,6 @@ use std::io;
 const ARCH: TargetArch = TargetArch::x86_64;
 #[cfg(target_arch = "aarch64")]
 const ARCH: TargetArch = TargetArch::aarch64;
-#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-compile_error!(
-    "the syscall filter of the isolated Python executor supports x86_64 and aarch64 only"
-);
 
 const DENIED_COMMON: &[i64] = &[
     libc::SYS_socket,
