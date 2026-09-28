@@ -7173,7 +7173,7 @@ nodo de la rama elegida recibe el mensaje.
 **ADP.** Sin impacto: el modo es opt-in por grafo; sin cambios de API pública, bindings ni SSE.
 **Estado.** done. El rechazo al cargar el grafo (`Graph::validate` y linter) llega en el cambio siguiente.
 
-## 193. `$attachment_url:`: solo en un body JSON, un `Host` de datos no la lleva, y el autor fija cuánto vive la URL
+## 194. `$attachment_url:`: solo en un body JSON, un `Host` de datos no la lleva, y el autor fija cuánto vive la URL
 
 **Qué cambia.** La regla de dirección de §184 cubre también un header `Host` de datos: mismo error, que ahora nombra
 "base_url, endpoint and any Host header". La forma se acepta solo como valor entero de un string en un body **JSON**:
