@@ -7001,6 +7001,28 @@ decimales cuesta más (del orden del doble en ese paso), sin otro cambio visible
 `protocol::tests::floats_keep_every_bit_across_the_wire` fallaba sin la feature y pasa con ella; la suite de lib en
 macOS pasa entera. **ADP.** El worker lee floats exactos al subir el pin. **Estado.** done.
 
+## 182. Nuevo puerto `DecisionModelRepository` para modelos de decisión tipada (Jev, 1/7)
+
+**Qué cambia.** Se agrega un puerto de dominio para modelos que no generan texto y responden
+preguntas tipadas: `noul` (probabilidad de sí), `choice` (una opción de un conjunto cerrado, con
+probabilidades y confianza) y `score` (posición en una escala ordenada). Vive en `llm/domain`, junto a
+TTS, y no pasa por `LlmRepository`, que es de chat. Incluye los value objects
+(`llm/domain/decision_model.rs`), el trait y su error (`llm/domain/decision_model_repository.rs`,
+con mock de `mockall`). El dominio rechaza antes de cualquier llamada: `state` nulo, request sin
+preguntas, ids de pregunta repetidos, `choice` sin opciones o con claves repetidas, y `score` sin
+niveles. Es el primer paso para usar TypeSafe Jev en el nodo `router`: el adapter HTTP y el modo del router llegan
+en los cambios siguientes. Guía: `developer_guide/04_adding_providers.md` §5.
+
+**Tests.** `decision_model.rs`: tabla de requests válidos (state texto/objeto/arreglo, una sola opción,
+un solo nivel, preguntas mezcladas) y tabla de inválidos con su mensaje. `decision_model_repository.rs`:
+el mock devuelve la respuesta configurada y propaga el error del proveedor.
+
+**E2E.** No aplica todavía: ningún nodo usa el puerto. La evidencia contra el servicio real llega con
+el adapter, y el grafo E2E con el modo del router.
+
+**ADP.** Sin impacto: sin cambios de API pública, bindings ni SSE.
+**Estado.** done.
+
 ## 184. `http_request`: `"$attachment_url:<document_id>"` pone en un body JSON una URL que da el host (parte 2 de 2)
 
 **Qué cambia.** En el body JSON de `http_request`, un string que es entero `"$attachment_url:<document_id>"` se reemplaza
