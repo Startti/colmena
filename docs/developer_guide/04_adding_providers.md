@@ -83,6 +83,9 @@ No devuelvas errores genéricos de `reqwest`. Usa el helper `LlmError` para cate
 - `LlmError::parsing_error(e)`
 - `LlmError::request_failed(msg)` (para errores 4xx/5xx del API)
 
+Los envíos de `call` y `stream` pasan por `transient::send_with_transient_retry`
+(reenvío ante un estado transitorio; ver [18_troubleshooting.md](18_troubleshooting.md)).
+
 ### 3. Registrar en Factory
 
 ```rust

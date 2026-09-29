@@ -803,6 +803,39 @@ mod validate_graph_providers_tests {
         assert!(validate_graph_providers(&graph).await.is_ok());
     }
 
+    /// A provider that takes a minute to refuse the key: each check gives up
+    /// after `CREDENTIAL_CHECK_TIMEOUT`, which is no verdict on the key. The
+    /// clock is paused, so the time measured is the timers' own.
+    #[tokio::test(start_paused = true)]
+    async fn a_provider_slower_than_the_check_timeout_does_not_stop_the_run() {
+        use crate::llm::infrastructure::transient::CREDENTIAL_CHECK_TIMEOUT;
+        use crate::llm::infrastructure::{AnthropicAdapter, GeminiAdapter, OpenAiAdapter};
+        use wiremock::{matchers::method, Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        let slow_refusal = ResponseTemplate::new(401).set_delay(Duration::from_secs(60));
+        Mock::given(method("GET"))
+            .respond_with(slow_refusal)
+            .mount(&server)
+            .await;
+        let adapters: [Arc<dyn LlmRepository>; 3] = [
+            Arc::new(OpenAiAdapter::with_base_url(server.uri())),
+            Arc::new(AnthropicAdapter::with_base_url(server.uri())),
+            Arc::new(GeminiAdapter::with_base_url(server.uri())),
+        ];
+        for (i, adapter) in adapters.into_iter().enumerate() {
+            let _guard = OverrideGuard::install(adapter);
+            let graph = graph_with_llm_call(&format!("preflight-unit-test-slow-{i}"));
+            let started = tokio::time::Instant::now();
+            let result = validate_graph_providers(&graph).await;
+            assert!(result.is_ok(), "adapter {i}: {result:?}");
+            // Three checks of at most CREDENTIAL_CHECK_TIMEOUT each, plus backoff.
+            assert!(
+                started.elapsed() < CREDENTIAL_CHECK_TIMEOUT * 4,
+                "adapter {i}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn a_rejected_key_is_not_asked_again_and_stays_cached() {
         let _guard = OverrideGuard::install(scripted(&[Answer::Invalid]));

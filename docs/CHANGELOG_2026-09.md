@@ -7453,3 +7453,27 @@ regla: cachear lo transitorio, `NetworkError` como veredicto, un solo intento, n
 transitoria en cada adapter, sin el 429, sin el tope o el recorte del jitter, y la URL de vuelta en cada sitio.
 **ADP.** Subir el pin; ADP no hace `match` exhaustivo sobre `LlmError`.
 Nota: [2026-09-29-preflight-transient.md](adp_migration/2026-09-29-preflight-transient.md). **Estado.** done.
+
+## 207. LLM: una llamada al modelo se reenvía ante un estado transitorio, con backoff y jitter
+
+**Qué cambia.** `call` y `stream` de los adapters de OpenAI (chat completions y responses), Anthropic y Gemini mandaban
+el pedido una sola vez: un 503 o un 429 del proveedor fallaba el nodo. Ahora pasan por
+`llm::infrastructure::transient::send_with_transient_retry`, que lo reenvía hasta 2 veces más
+(`COLMENA_LLM_TRANSIENT_RETRIES`; 0 lo apaga, 5 como máximo) mientras la respuesta sea 408, 429, 500, 502, 503, 504 o
+529 (`is_transient_status`, de §206): espera lo que pida `Retry-After` (en segundos) si es de 20 s o menos, y si no un
+backoff exponencial con jitter completo (base 1 s, tope 8 s); con un `Retry-After` más largo devuelve la respuesta tal
+cual. Un error de transporte no se reenvía (el pedido pudo haber llegado y cobrarse), ni un cuerpo que no se puede
+copiar. La decisión lee solo el status y los headers, antes del cuerpo: un `stream` que ya empezó a emitir nunca se
+vuelve a pedir, y la última respuesta vuelve tal cual, así que el error no cambia de forma. Un `warn` en `colmena::llm`
+por reenvío. Además, cada intento de `validate_credentials` (pre-flight) espera 10 s como máximo
+(`CREDENTIAL_CHECK_TIMEOUT`): más lento es un error de red, sin veredicto, y pre-flight no pasa de unos 31 s por key.
+Guía: [18_troubleshooting.md](developer_guide/18_troubleshooting.md).
+**Tests.** `transient`: reenvía hasta agotar, devuelve la respuesta siguiente, no reenvía un 400, un error de transporte
+ni un cuerpo en stream, 0 lo apaga, `Retry-After` sobre el tope no se espera y dentro sí (medido), y la variable se lee
+acotada; los 8 envíos (un 503 y después la respuesta: 2 pedidos); un `stream` cortado después del primer texto no se
+reenvía; pre-flight con un proveedor que tarda un minuto en rechazar la key no corta la corrida y cada intento se corta
+a los 10 s (reloj pausado). **Mutación.** Una roja por regla (20), incluido volver cada envío al directo y multiplicar
+por 100 el timeout de cada validación. **E2E.** `dag_engine run` contra un proveedor local: 503 y después 200 (2
+pedidos, el nodo contesta), 503 siempre con la variable en 1 (2 pedidos, el error de siempre), 0 (1 pedido),
+`Retry-After: 30` (1 pedido) y `: 2` (esperado), y `/models` que tarda 15 s (3 intentos a los 10 s, la corrida sigue).
+**ADP.** Subir el pin; nada más. **Estado.** done.

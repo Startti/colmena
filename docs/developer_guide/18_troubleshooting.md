@@ -438,7 +438,18 @@ a preguntar por la key hasta tres veces, con backoff exponencial y jitter; si
 sigue sin respuesta, la corrida arranca igual (un `warn` de `colmena::preflight`)
 y el error llega del nodo, nunca como «rejected the API key». Nada queda en la
 caché de pre-flight hasta que haya un veredicto: una key válida, o un 401/403 u
-otro estado (un 4xx, o un 5xx como el 501).
+otro estado (un 4xx, o un 5xx como el 501). Cada pregunta espera 10 s como
+máximo (`CREDENTIAL_CHECK_TIMEOUT`); una respuesta más lenta cuenta como error de
+red, así que pre-flight no pasa de unos 31 s por key.
+
+Cada llamada al modelo (`call` y `stream`) se reenvía ante 408, 429, 500, 502,
+503, 504 o 529 hasta 2 veces más (`COLMENA_LLM_TRANSIENT_RETRIES`; 0 lo apaga, 5
+como máximo), esperando lo que pida `Retry-After` (en segundos) si es de 20 s o
+menos, o si no un backoff exponencial con jitter (base 1 s, tope 8 s); con un
+`Retry-After` más largo, la respuesta vuelve tal cual. Un `warn` de
+`colmena::llm` por reenvío. Un error de transporte no se reenvía (el pedido pudo
+haber llegado). La decisión lee solo el status y los headers, antes del cuerpo:
+un `stream` que ya empezó a emitir nunca se vuelve a pedir.
 
 ### Error: "Invalid API key"
 
