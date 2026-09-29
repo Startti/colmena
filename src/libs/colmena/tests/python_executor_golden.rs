@@ -266,10 +266,8 @@ async fn a_burst_of_calls_completes() {
     let calls = (0..12).map(|i| printer("restricted", &format!("burst-{i}")));
     let results = futures::future::join_all(calls.map(python_exec::run)).await;
     assert!(results.iter().all(Result::is_ok), "{results:?}");
-    eprintln!(
-        "burst: 12 calls at once completed ({} executor)",
-        cfg.kind.as_str()
-    );
+    let kind = cfg.kind.as_str();
+    eprintln!("burst: 12 calls at once completed ({kind} executor)");
 }
 
 const MARKERS: [&str; 2] = ["first-call", "second-call"];

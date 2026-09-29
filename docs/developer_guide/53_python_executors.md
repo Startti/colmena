@@ -193,8 +193,8 @@ arguments.
 
 For model-written code or anything else you did not write, use `COLMENA_PYTHON_EXECUTOR=subprocess` with
 `COLMENA_PYTHON_EXECUTOR_MODES=all`, on Linux, in a container where the host starts as root with `CAP_SYS_ADMIN`; run
-`python_executor self-test` there first; or `remote`, with `python_executor serve` in such a container. In process,
-`restricted` is an aid to authors, not an isolation boundary.
+`python_executor self-test` there first; or `COLMENA_PYTHON_EXECUTOR=remote`, also with `…_MODES=all`, against a
+`python_executor serve` in such a container. In process, `restricted` is an aid to authors, not an isolation boundary.
 
 ## Remote service (`python_executor serve`)
 
@@ -286,17 +286,18 @@ over `…_MAX_WIRE_MB`, and an answer over `…_MAX_RESPONSE_MB` fails. Bodies a
 end to end when inputs may exceed what an HTTP/1 front accepts, or set `COLMENA_PYTHON_EXECUTOR_MAX_WIRE_MB` so
 oversized calls fail clearly. Proxy variables and redirects are ignored, and the token file is read per call.
 
-A call ends within its timeout plus 30 s, credentials and retries included. Only a call that certainly did not run is
-sent again, with the same request id: after a connection error (a connect timeout too), once, 250 ms later; after 429
-or 503, when `Retry-After` says (at most 2 s), while time is left, so a burst beyond what `serve` takes in flight waits.
-502, 504, a lost or cut answer, late credentials or no time left is `PythonExecutorError: … unavailable (…)`, never an
-in-process run. 401/403 is `… rejected this caller's credentials`, 413 `Python execution error: the input exceeds what
-the isolated Python executor accepts`, another status `… answered HTTP <status>`. A retry logs `python remote call
-retried` with `request_id` and `reason` only. `warm` (what `wait_until_ready` awaits) waits up to 120 s, asking every
-second, for `GET <URL>/readyz` to answer 200 and then for an empty `POST <URL>/v1/run` with the credentials to answer
-400 (`serve` runs nothing without a body); 401 or 403 ends the wait at once, so a wrong token shows at startup. Its
-connections belong to the runtime that opened them: while one of several runtimes ends (parallel `#[tokio::test]`s),
-the others' calls can fail with `… unavailable (request failed)`, so run such tests on one thread.
+A call ends within its timeout plus 30 s, credentials and waits included, on a connection of its own (none is kept for
+reuse). Only a call that certainly did not run is sent again, with the same request id: after a connection error (a
+connect timeout too) or a 503 without `Retry-After` (not ready, no usable slot), once, 250 ms later; after 429, or 503
+with `Retry-After` (a full `serve`), when it says (at most 2 s), while the code would still get its whole timeout, so
+waits fit in the 30 s. 502, 504, a lost or cut answer, late credentials or a wait that no longer fits is
+`PythonExecutorError: … unavailable (…)`, never an in-process run or the code's timeout. 401/403 is `… rejected this
+caller's credentials`, 413 `Python execution error: the input exceeds what the isolated Python executor accepts`,
+another status `… answered HTTP <status>`. A call's first resend logs `python remote call retried` with `request_id` and
+`reason` only. `warm` (what `wait_until_ready` awaits) waits up to 120 s in all, asking every second, for `GET
+<URL>/readyz` to answer 200 and then for an empty `POST <URL>/v1/run` with the credentials to answer 400, taken as ready
+(`serve` runs nothing without a body), so a wire-version mismatch or a front that answers 400 before checking
+credentials passes it; 401, 403 or credentials it cannot obtain end the wait at once, so a wrong token shows at startup.
 
 ## Equivalence with the in-process executor
 
@@ -326,10 +327,10 @@ numpy and scipy from Debian): the executor's unit tests, both jail suites (the s
 `python_executor self-test`, the Python node and tool suites and the equivalence bench under `subprocess` with
 `COLMENA_PYTHON_EXECUTOR_MODES=all`, the bench again with the default modes, and the smoke graph under `subprocess`
 (four `python run` events with `outcome="ok"`); then, against a local `python_executor serve` (loopback, no token, 2
-slots), the same suites on one test thread, the bench (its burst of 12 calls exceeds the 4 in flight) and the smoke
-graph under `remote`. `tests/python_executor_remote.rs`, a jail suite, runs cases through `serve`'s router with a token
-and compares them with in process. Four `gsheets_run_python` tests are skipped there by name: with pandas installed
-they fail the same way under every executor, and no job runs their assertions today.
+slots), the same suites, the bench (its burst of 12 calls exceeds the 4 in flight) and the smoke graph under `remote`.
+`tests/python_executor_remote.rs`, a jail suite, runs cases through `serve`'s router with a token and compares them
+with in process. Four `gsheets_run_python` tests are skipped there by name: with pandas installed they fail the same
+way under every executor, and no job runs their assertions today.
 
 ## About `restricted`
 

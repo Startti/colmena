@@ -7416,19 +7416,18 @@ con 1714 es el bloque de fecha y hora inyectado). **ADP.** No aplica. **Estado.*
 ## 205. Python: el executor `remote` se puede elegir (`remote`, 3/3)
 
 **Qué cambia.** `COLMENA_PYTHON_EXECUTOR=remote` arma el `RemoteExecutor` (sin URL, el arranque corta) y nunca corre
-en proceso. Un plazo por llamada (timeout + 30 s) cubre credenciales, intentos y esperas: 429 y 503 esperan su
-`Retry-After` (hasta 2 s, con jitter) mientras quede plazo, así una ráfaga sobre el tope en vuelo de `serve` espera;
-un error de conexión se reintenta una vez; credenciales tardías dan `unavailable (credentials timed out)`, no un
-timeout del código. 413 da un texto válido para cualquier capa, un token con caracteres de control `… does not hold a
-valid token`, y un `Content-Length` sobre el tope se rechaza antes de leer. `wait_until_ready` espera `/readyz` y un
-`POST /v1/run` vacío con las credenciales (400, no corre nada): un token equivocado corta al arrancar. CI: paso
-«Equivalence — remote (local server)», `serve` con 2 slots y la ráfaga de 12 llamadas del banco dorado, en un hilo.
+en proceso. Un plazo por llamada (timeout + 30 s) cubre credenciales, intentos y esperas. Un error de conexión o un 503
+sin `Retry-After` se reintenta una vez; 429 y 503 con `Retry-After` se esperan (hasta 2 s, con jitter) solo mientras
+al código le quede su timeout entero: una ráfaga sobre el tope en vuelo de `serve` espera dentro de los 30 s o da
+`unavailable (HTTP 503)`, nunca un timeout del código; un `warn` por llamada. Sin pool: una conexión guardada moría con
+el runtime que la abrió (`colmena.run_dag` desde varios hilos). 413 da un texto válido para cualquier capa, un token
+con caracteres de control `… does not hold a valid token`, y un `Content-Length` sobre el tope se rechaza antes de
+leer. `wait_until_ready` espera, 120 s en total, `/readyz` y un `POST /v1/run` vacío con las credenciales (400, no
+corre nada): un token equivocado corta al arrancar. CI: paso «Equivalence — remote (local server)», `serve` con 2
+slots, la ráfaga de 12 llamadas del banco dorado y el smoke por `dag_engine run`.
 Guía: [53_python_executors.md](developer_guide/53_python_executors.md#the-remote-client).
-**Tests.** Trece unitarios de `remote`, con una mutación roja por regla nueva (plazo, credenciales, `Retry-After` y su
-tope, reintentos, request id, `warm`, 413, token, `Content-Length`) y el despachador. `--lib python_exec`: 105 en Linux
-con la jaula, 67 en macOS; clippy limpio en los dos. Jaula: siete casos iguales a en proceso; otro token, rechazado en
-`warm` y en la llamada. El paso de CI en el contenedor: ráfaga completa (con la política anterior, `HTTP 503`), 17
-casos dorados y el smoke; en paralelo, conexiones de un runtime ya cerrado daban `request failed`. E2E por `dag_engine
-run` contra `serve --token-file`: token bueno, cuatro `remote` ok con la firma de en proceso; otro token, rechazado en
-la llamada y en `wait_until_ready` a los 2 s; `serve` detenido, `unavailable (connection failed)`.
+**Tests.** Quince unitarios de `remote`, una mutación roja por regla nueva (plazo, esperas, 503 sin `Retry-After`, 429,
+dos runtimes, un `warn`, `warm` acotado, 413, token, `Content-Length`). `--lib python_exec`: 107 en Linux con la jaula,
+69 en macOS; clippy limpio. Jaula: siete casos iguales a en proceso; otro token, rechazado en `warm` y en la llamada.
+El paso de CI en el contenedor, con las suites en paralelo: 5 de 5 verdes (con pool, 3 de 5 rojas).
 **ADP.** Puede elegir `remote` apuntando a un `python_executor serve`; llega con el próximo tag. **Estado.** done.

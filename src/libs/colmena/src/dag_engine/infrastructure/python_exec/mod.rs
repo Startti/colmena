@@ -395,11 +395,8 @@ mod tests {
             });
             Dispatcher::build(&cfg.unwrap()).map(|d| d.isolated.kind())
         };
-        let err = build(None).expect_err("must refuse");
-        assert!(
-            err.0.contains("remote needs COLMENA_PYTHON_EXECUTOR_URL"),
-            "{err}"
-        );
+        let err = build(None).expect_err("must refuse").0;
+        assert!(err.ends_with("needs COLMENA_PYTHON_EXECUTOR_URL"), "{err}");
         assert_eq!(build(Some("http://127.0.0.1:9")), Ok(ExecutorKind::Remote));
     }
 

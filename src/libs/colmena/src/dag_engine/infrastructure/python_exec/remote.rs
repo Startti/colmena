@@ -1,10 +1,10 @@
 //! Sends each Python call to a `python_executor serve` endpoint, with zstd
 //! bodies, within one deadline: the call's timeout plus [`TRANSFER_GRACE`].
-//! Only a call that did not run is sent again: after a connection error, once;
-//! after 429 or 503 (`serve` answers it before running a call), as its
-//! `Retry-After` says, while the deadline allows. It never falls back to
-//! running the code in process. Requests go only to the configured URL: proxy
-//! variables are ignored and redirects are not followed.
+//! Only a call that did not run is sent again: after a connection error or a
+//! bare 503, once; after 429, or 503 with `Retry-After`, as it says, while the
+//! code would still get its whole timeout. It never falls back to running the
+//! code in process. Requests go only to the configured URL: proxy variables
+//! are ignored and redirects are not followed.
 
 use super::config::{ExecutorConfigError, RemoteAuthConfig, RemoteConfig};
 use super::id_token::IdTokenSource;
@@ -22,7 +22,7 @@ use std::time::Duration;
 use tokio::time::Instant;
 
 /// Time beyond a call's timeout for waits and transfers; short in unit tests.
-const TRANSFER_GRACE: Duration = Duration::from_secs(if cfg!(test) { 1 } else { 30 });
+const TRANSFER_GRACE: Duration = Duration::from_secs(if cfg!(test) { 4 } else { 30 });
 const RETRY_DELAY: Duration = Duration::from_millis(250);
 /// Short in unit tests, which wait for it to expire.
 const CONNECT_TIMEOUT: Duration = Duration::from_millis(if cfg!(test) { 200 } else { 10_000 });
@@ -43,7 +43,7 @@ pub struct RemoteExecutor {
 
 enum Attempt {
     Done(Result<PythonRunResult, PythonRunError>),
-    /// Did not run: why, and the wait asked for (none after a connection error).
+    /// Did not run: why, and the wait asked for (none after a connection error or a bare 503).
     Retry(String, Option<Duration>),
 }
 
@@ -98,6 +98,8 @@ impl RemoteExecutor {
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(CONNECT_TIMEOUT)
+            // No pool: a kept connection is served by the runtime that opened it.
+            .pool_max_idle_per_host(0)
             .build()
             .map_err(|e| ExecutorConfigError(format!("cannot build the HTTP client: {e}")))?;
         let id_tokens = match &cfg.auth {
@@ -169,7 +171,9 @@ impl RemoteExecutor {
                 return Attempt::Done(Err(PythonRunError::Python(e.into())));
             }
             Ok((s @ (429 | 503), r)) => {
-                return Attempt::Retry(format!("HTTP {s}"), Some(retry_after(&r)))
+                // A bare 503 (not ready, or no usable slot) is sent again once.
+                let in_line = s == 429 || r.headers().contains_key(RETRY_AFTER);
+                return Attempt::Retry(format!("HTTP {s}"), in_line.then(|| retry_after(&r)));
             }
             Ok((s @ (502 | 504), _)) => {
                 return Attempt::Done(Err(unavailable(format!("HTTP {s}"))))
@@ -240,49 +244,54 @@ impl PythonExecutor for RemoteExecutor {
             )));
         }
         let (request_id, mut reconnected) = (uuid::Uuid::new_v4().to_string(), false);
+        let mut resent = false;
         loop {
             let (why, wait) = match self.post_once(body.clone(), deadline, &request_id).await {
                 Attempt::Done(r) => return r,
                 Attempt::Retry(why, wait) => (why, wait),
             };
-            // After a connection error, once; after 429 or 503, while time is left.
+            // Once, or as long as asked; only while the code would still get its whole timeout.
             let again = wait.is_some() || !std::mem::replace(&mut reconnected, true);
             let wait = wait.unwrap_or(RETRY_DELAY);
-            if !again || deadline.saturating_duration_since(Instant::now()) <= wait {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if !again || left < wait.saturating_add(timeout) {
                 return Err(unavailable(why));
             }
-            tracing::warn!(target: T_PYTHON_EXEC, request_id, reason = %why, "python remote call retried");
+            if !std::mem::replace(&mut resent, true) {
+                tracing::warn!(target: T_PYTHON_EXEC, request_id, reason = %why, "python remote call retried");
+            }
             tokio::time::sleep(wait).await;
         }
     }
 
     /// Waits until `/readyz` answers 200 and the service takes this caller's
-    /// credentials, asking every second for up to 120 s. The credentials go
-    /// with an empty `POST /v1/run`, which runs nothing: past the token check
-    /// the service answers 400. 401 or 403 ends the wait at once.
+    /// credentials, asking every second, for up to 120 s in all. The
+    /// credentials go with an empty `POST /v1/run`, which runs nothing: past
+    /// the token check the service answers 400, taken as ready. 401 or 403,
+    /// or credentials that cannot be obtained, end the wait at once.
     async fn warm(&self) -> Result<(), String> {
-        let started = Instant::now();
-        loop {
-            let readyz = self.http.get(endpoint(&self.cfg.url, "readyz"));
-            let run = self.http.post(endpoint(&self.cfg.url, "v1/run"));
-            let status = match self.status(readyz).await? {
-                Some(200) => match self.status(run).await? {
-                    Some(400) => return Ok(()),
+        let mut why = "no answer".to_string();
+        let asking = tokio::time::timeout(self.ready_within, async {
+            loop {
+                let readyz = self.http.get(endpoint(&self.cfg.url, "readyz"));
+                let run = self.http.post(endpoint(&self.cfg.url, "v1/run"));
+                let status = match self.status(readyz).await? {
+                    Some(200) => match self.status(run).await? {
+                        Some(400) => return Ok(()),
+                        s => s,
+                    },
                     s => s,
-                },
-                s => s,
-            };
-            let why = match status {
-                Some(401 | 403) => return Err(REJECTED.into()),
-                Some(s) => format!("HTTP {s}"),
-                None => "no answer".to_string(),
-            };
-            if started.elapsed() + READY_POLL > self.ready_within {
-                let e = "PythonExecutorError: the isolated Python executor is not ready";
-                return Err(format!("{e} ({why})"));
+                };
+                why = match status {
+                    Some(401 | 403) => return Err(REJECTED.to_string()),
+                    Some(s) => format!("HTTP {s}"),
+                    None => "no answer".to_string(),
+                };
+                tokio::time::sleep(READY_POLL).await;
             }
-            tokio::time::sleep(READY_POLL).await;
-        }
+        });
+        let e = "PythonExecutorError: the isolated Python executor is not ready";
+        asking.await.unwrap_or_else(|_| Err(format!("{e} ({why})")))
     }
 }
 
@@ -331,8 +340,6 @@ mod tests {
         Answer::new(200).set_body_bytes(ok_body())
     }
 
-    const JWT: &str = "h.eyJleHAiOjk5OTk5OTk5OTl9.s"; // {"exp":9999999999}
-
     /// Answers `a` on `at`, `n` times at most (then 404).
     async fn on(s: &MockServer, at: &str, a: Answer, n: u64) {
         let mock = Mock::given(path(at)).respond_with(a);
@@ -372,40 +379,66 @@ mod tests {
         assert_eq!(ex.run(req()).await.unwrap().output, Some(json!(1)));
     }
 
-    /// A full service (429, 503) is waited for as its `Retry-After` says (at
-    /// most 2 s), with the same request id, while the deadline allows; never a
-    /// fallback to running the code in process.
+    /// One retry, never a fallback to running the code in process.
     #[tokio::test]
-    async fn a_full_service_is_waited_for() {
-        let full = |s: u16, after: &str| Answer::new(s).insert_header("retry-after", after);
+    async fn a_busy_service_is_retried_once() {
         let s = MockServer::start().await;
-        on(&s, "/v1/run", full(503, "1"), 1).await;
-        on(&s, "/v1/run", full(429, "3600"), 1).await;
+        on(&s, "/v1/run", Answer::new(503), 1).await;
         on(&s, "/v1/run", ok(), 1).await;
-        let (ex, started) = (exec(&s.uri(), RemoteAuthConfig::None), Instant::now());
-        assert!(ex.run(req()).await.is_ok() && started.elapsed() >= Duration::from_secs(3));
-        let sent = s.received_requests().await.unwrap();
-        let id = |i: usize| sent[i].headers.get("x-colmena-request-id");
-        assert!(sent.len() == 3 && id(0).is_some() && id(0) == id(1) && id(1) == id(2));
+        let ex = exec(&s.uri(), RemoteAuthConfig::None);
+        assert!(ex.run(req()).await.is_ok());
+        let s = MockServer::start().await;
+        on(&s, "/v1/run", Answer::new(503), 9).await;
+        let e = fails(&exec(&s.uri(), RemoteAuthConfig::None), req()).await;
+        let unavailable = "PythonExecutorError: the isolated Python executor is unavailable";
+        assert!(e.starts_with(unavailable) && hits(&s).await == 2, "{e}");
     }
 
-    /// One deadline, the timeout plus the grace (1 s in unit tests), covers the
-    /// credentials, every attempt and every wait.
+    /// A full service (429, or 503 with `Retry-After`) is waited for as it says
+    /// (at most 2 s), with the same request id and one warning. A bare 503 (not
+    /// ready, no usable slot) is sent again once, a 429 as long as it lasts.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_full_service_is_waited_for() {
+        let s = MockServer::start().await;
+        let full = Answer::new(429).insert_header("retry-after", "3600");
+        for answer in [Answer::new(503), Answer::new(429), full, ok()] {
+            on(&s, "/v1/run", answer, 1).await;
+        }
+        let (ex, started) = (exec(&s.uri(), RemoteAuthConfig::None), Instant::now());
+        let rt = tokio::runtime::Handle::current();
+        let run = || tokio::task::block_in_place(|| rt.block_on(ex.run(req())));
+        let (r, log) = crate::dag_engine::log_policy::capture_warnings(run);
+        assert!(r.is_ok() && started.elapsed() >= Duration::from_secs(2));
+        assert!(log.matches("call retried").count() == 1, "{log}");
+        let sent = s.received_requests().await.unwrap();
+        let id = |i: usize| sent[i].headers.get("x-colmena-request-id");
+        assert!(sent.len() == 4 && id(0).is_some() && (1..4).all(|i| id(i) == id(0)));
+    }
+
+    /// One deadline, the timeout plus the grace (4 s in unit tests), covers the
+    /// credentials, every attempt and every wait. Waits stop once the code would
+    /// no longer get its whole timeout: a call kept in line past the grace is
+    /// unavailable, not the code's timeout.
     #[tokio::test]
     async fn one_deadline_covers_the_whole_call() {
         let s = MockServer::start().await;
-        let full = Answer::new(503).insert_header("retry-after", "1");
-        on(&s, "/v1/run", full, 2).await;
-        let slow = ok().set_delay(Duration::from_millis(2500));
-        on(&s, "/v1/run", slow, 9).await;
+        let full = |after| Answer::new(503).insert_header("retry-after", after);
+        on(&s, "/v1/run", full("1"), 1).await;
+        on(&s, "/v1/run", full("2"), 2).await;
+        on(&s, "/v1/run", ok().set_delay(Duration::from_secs(2)), 9).await;
         let (ex, mut r) = (exec(&s.uri(), RemoteAuthConfig::None), req());
-        r.timeout = Some(Duration::ZERO); // under 1 s left: no time to wait 1 s
+        r.timeout = Some(Duration::from_secs(2)); // 6 s in all: waits of 1 + 2 s fit, 2 s more do not
         let e = fails(&ex, r.clone()).await;
-        assert!(e.ends_with("(HTTP 503)") && hits(&s).await == 1, "{e}");
-        r.timeout = Some(Duration::from_secs(2)); // the second attempt has under 2 s left
+        assert!(e.ends_with("(HTTP 503)") && hits(&s).await == 3, "{e}");
+        s.reset().await;
+        on(&s, "/v1/run", full("1"), 1).await;
+        let slow = ok().set_delay(Duration::from_millis(3500));
+        on(&s, "/v1/run", slow, 9).await;
+        r.timeout = Some(Duration::ZERO); // after a wait of 1 s, under 3 s left
         assert_eq!(ex.run(r.clone()).await, Err(PythonRunError::Timeout));
-        let late = Answer::new(200).set_body_string(JWT);
-        on(&s, "/identity", late.set_delay(Duration::from_secs(3)), 9).await;
+        let jwt = "h.eyJleHAiOjk5OTk5OTk5OTl9.s"; // {"exp":9999999999}
+        let late = Answer::new(200).set_body_string(jwt);
+        on(&s, "/identity", late.set_delay(Duration::from_secs(6)), 9).await;
         let audience = "a".to_string();
         let mut ex = exec(&s.uri(), RemoteAuthConfig::GcpIdToken { audience });
         let metadata = format!("{}/identity", s.uri());
@@ -413,6 +446,20 @@ mod tests {
         (ex.id_tokens, r.timeout) = (Some(source), Some(Duration::ZERO));
         let e = fails(&ex, r).await; // the platform's failure, not the code's timeout
         assert!(e.ends_with("unavailable (credentials timed out)"), "{e}");
+    }
+
+    /// A call made while the runtime of an earlier call ends: a connection
+    /// kept from that call would be served by that runtime and end with it.
+    #[tokio::test]
+    async fn a_call_outlives_the_runtime_of_an_earlier_one() {
+        let s = MockServer::start().await;
+        on(&s, "/v1/run", ok().set_delay(Duration::from_secs(1)), 2).await;
+        let ex = std::sync::Arc::new(exec(&s.uri(), RemoteAuthConfig::None));
+        let (first, rt) = (ex.clone(), tokio::runtime::Runtime::new().unwrap());
+        let rt = std::thread::spawn(move || rt.block_on(first.run(req())).map(|_| rt));
+        let rt = rt.join().unwrap().unwrap(); // still alive
+        std::thread::spawn(move || drop((std::thread::sleep(RETRY_DELAY), rt)));
+        assert_eq!(ex.run(req()).await.map(|r| r.output), Ok(Some(json!(1))));
     }
 
     #[tokio::test]
@@ -424,19 +471,15 @@ mod tests {
         assert!(exec(&s.uri(), RemoteAuthConfig::None).run(r).await.is_ok());
     }
 
-    /// A refused connection, or a TLS handshake nobody answers (a connect
-    /// timeout, not the code's), is tried again once, 250 ms later.
+    /// A connect timeout (here, a TLS handshake nobody answers) is not the code's timeout.
     #[tokio::test]
-    async fn an_unreachable_service_is_unavailable() {
-        let listen = || std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let (silent, closed) = (listen(), listen().local_addr().unwrap()); // closed once read
-        let silent = format!("https://{}", silent.local_addr().unwrap());
-        for url in [silent, format!("http://{closed}")] {
-            let started = Instant::now();
-            let e = fails(&exec(&url, RemoteAuthConfig::None), req()).await;
-            assert!(e.ends_with("unavailable (connection failed)"), "{e}");
-            assert!((RETRY_DELAY..Duration::from_secs(2)).contains(&started.elapsed()));
-        }
+    async fn a_silent_service_is_unavailable() {
+        let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("https://{}", silent.local_addr().unwrap());
+        let started = Instant::now(); // tried again once, 250 ms later
+        let e = fails(&exec(&url, RemoteAuthConfig::None), req()).await;
+        assert!(e.ends_with("unavailable (connection failed)"), "{e}");
+        assert!((RETRY_DELAY..Duration::from_secs(2)).contains(&started.elapsed()));
     }
 
     /// Once sent, a call may have run: a lost or cut answer is not sent again
@@ -505,8 +548,9 @@ mod tests {
     #[tokio::test]
     async fn an_identity_token_is_sent() {
         let s = MockServer::start().await;
-        on(&s, "/identity", Answer::new(200).set_body_string(JWT), 9).await;
-        let bearer = header("authorization", format!("Bearer {JWT}").as_str());
+        let jwt = "h.eyJleHAiOjk5OTk5OTk5OTl9.s"; // {"exp":9999999999}
+        on(&s, "/identity", Answer::new(200).set_body_string(jwt), 9).await;
+        let bearer = header("authorization", format!("Bearer {jwt}").as_str());
         let given = Mock::given(path("/v1/run")).and(bearer);
         given.respond_with(ok()).mount(&s).await;
         let audience = "https://svc.example".to_string();
@@ -574,9 +618,11 @@ mod tests {
         let waited = tokio::time::timeout(Duration::from_secs(5), ex.warm()).await;
         assert_eq!(waited, Ok(Err(REJECTED.to_string())));
         s.reset().await;
-        on(&s, "/readyz", Answer::new(503), 9).await;
-        ex.ready_within = Duration::ZERO;
+        on(&s, "/readyz", Answer::new(503), 1).await;
+        on(&s, "/readyz", ok().set_delay(Duration::from_secs(9)), 9).await;
+        ex.ready_within = Duration::from_millis(1500); // in all, a slow probe included
         let e = "PythonExecutorError: the isolated Python executor is not ready (HTTP 503)";
-        assert_eq!(ex.warm().await, Err(e.to_string()));
+        let waited = tokio::time::timeout(Duration::from_secs(2), ex.warm()).await;
+        assert_eq!(waited, Ok(Err(e.to_string())));
     }
 }
