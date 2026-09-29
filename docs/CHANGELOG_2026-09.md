@@ -7351,7 +7351,7 @@ binario que sale con 3 la espera devuelve `the Python template process could not
 `install_from_env` (o `EngineConfig::from_env`) y antes de abrir su puerto, y loguear el error si lo hay. Llega con el
 próximo tag. **Estado.** done.
 
-## 203. Python: configuración del executor `remote` y tokens de identidad (`remote`, 1/2)
+## 203. Python: configuración del executor `remote` y tokens de identidad (`remote`, 1/3)
 
 **Qué cambia.** Primera de dos partes del executor `remote`, el cliente de `python_executor serve`: su configuración y
 la fuente de tokens de identidad, todavía sin cliente. `ExecutorConfig` suma `remote: Option<RemoteConfig>`, que se lee
