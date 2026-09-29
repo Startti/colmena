@@ -15,9 +15,9 @@ use crate::llm::domain::ProviderKind;
 
 #[derive(Debug, Clone)]
 struct Entry {
-    /// `Ok(())` on a valid key, `Err(reason)` on a rejected one. Both
-    /// outcomes are cached under the same TTL (v1 — see module docs on the
-    /// deferred "shorter TTL for errors" follow-up).
+    /// Only verdicts reach the cache: `Ok(())` for a valid key, `Err(reason)`
+    /// for a rejected one, under the same TTL. A transient answer (the
+    /// provider could not answer) is never cached (`validate_graph_providers`).
     result: Result<(), String>,
     checked_at: Instant,
 }

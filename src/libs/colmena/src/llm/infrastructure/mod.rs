@@ -17,6 +17,7 @@ pub mod openai_tts_adapter;
 pub mod persistence;
 pub mod scripted_adapter;
 mod tool_args;
+pub mod transient;
 pub mod tts_provider_factory;
 pub mod typesafe_jev_adapter;
 

@@ -2,6 +2,7 @@ use crate::llm::domain::{
     FileSource, FunctionCall, LlmError, LlmRepository, LlmRequest, LlmResponse, LlmStream,
     LlmStreamChunk, LlmStreamPart, LlmUsage, MessageRole, ToolCall, ToolCallChunk,
 };
+use crate::llm::infrastructure::transient::is_transient_status;
 use async_trait::async_trait;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use futures::{Stream, StreamExt};
@@ -636,6 +637,8 @@ impl LlmRepository for AnthropicAdapter {
             Ok(())
         } else if status.as_u16() == 401 || status.as_u16() == 403 {
             Err(LlmError::InvalidApiKey)
+        } else if is_transient_status(status.as_u16()) {
+            Err(LlmError::provider_unavailable(status.as_u16()))
         } else {
             Err(LlmError::request_failed(format!(
                 "Anthropic credential validation failed with status {}",
@@ -931,6 +934,26 @@ mod tests {
         let adapter = AnthropicAdapter::with_base_url(server.uri());
         let result = adapter.validate_credentials("real-anthropic-key").await;
         assert!(result.is_ok(), "expected Ok, got {:?}", result);
+    }
+
+    #[tokio::test]
+    async fn validate_credentials_on_503_is_unavailable_not_invalid() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/models"))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&server)
+            .await;
+
+        let adapter = AnthropicAdapter::with_base_url(server.uri());
+        let err = adapter
+            .validate_credentials("any-anthropic-key")
+            .await
+            .unwrap_err();
+        assert_eq!(err, LlmError::provider_unavailable(503));
     }
 
     #[tokio::test]

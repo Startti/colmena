@@ -6,6 +6,12 @@ ve ADP antes y después, qué tiene que hacer ADP, y qué se rompe si no hace na
 
 Los cambios que quedan dentro del motor no llevan nota aquí.
 
+## 2026-09-29 — pre-flight: una respuesta transitoria no es una key rechazada
+
+| # | Nota | Acción de ADP | Qué se rompe si se ignora |
+|---|------|---------------|---------------------------|
+| 1 | [Pre-flight y las respuestas transitorias](2026-09-29-preflight-transient.md) | Subir el pin | Nada al compilar; un 503 pasajero de un proveedor sigue cortando las corridas con esa key durante el TTL de la caché |
+
 ## 2026-09-28 — un link corto al adjunto en `http_request`
 
 | # | Nota | Acción de ADP | Qué se rompe si se ignora |

@@ -12,6 +12,7 @@
 
 use std::collections::BTreeSet;
 use std::str::FromStr;
+use std::time::Duration;
 
 use serde_json::Value;
 
@@ -19,7 +20,8 @@ use crate::dag_engine::application::preflight_cache::shared_preflight_cache;
 use crate::dag_engine::domain::child_graph_source::{CHILD_GRAPH_REF, CHILD_GRAPH_SOURCE_KEYS};
 use crate::dag_engine::domain::error::DagError;
 use crate::dag_engine::domain::graph::Graph;
-use crate::llm::domain::ProviderKind;
+use crate::llm::domain::{LlmError, ProviderKind};
+use crate::llm::infrastructure::transient::backoff_with_jitter;
 use crate::llm::infrastructure::LlmProviderFactory;
 
 /// Node types that carry a top-level `provider` + `api_key` pair directly in
@@ -256,10 +258,59 @@ pub fn enumerate_requirements(graph: &Graph) -> Vec<ProviderKeyRequirement> {
     reqs
 }
 
+/// How many times pre-flight asks a provider about a key before it gives up
+/// on a verdict. Only a transient answer (see `LlmError::is_transient`) is
+/// asked again.
+const CHECK_ATTEMPTS: u32 = 3;
+const CHECK_BACKOFF_BASE: Duration = Duration::from_millis(300);
+const CHECK_BACKOFF_CAP: Duration = Duration::from_secs(2);
+
+/// What one key check found.
+#[derive(Debug, PartialEq)]
+enum KeyCheck {
+    Valid,
+    /// The provider refused the key: the run must not start.
+    Rejected(String),
+    /// The provider could not answer (a 408, 429, 500, 502, 503, 504 or 529, or
+    /// the network). This says nothing about the key: the run goes on, and the
+    /// node reports what the provider says when it calls it.
+    Inconclusive(String),
+}
+
+fn classify(result: Result<(), LlmError>) -> KeyCheck {
+    match result {
+        Ok(()) => KeyCheck::Valid,
+        Err(e) if e.is_transient() => KeyCheck::Inconclusive(e.to_string()),
+        Err(e) => KeyCheck::Rejected(e.to_string()),
+    }
+}
+
+/// Asks the provider about one key, and again (exponential backoff with full
+/// jitter) while the answer is transient, up to `CHECK_ATTEMPTS` times.
+async fn check_key(req: &ProviderKeyRequirement) -> KeyCheck {
+    let repo = LlmProviderFactory::create(req.provider.clone());
+    let mut attempt = 1;
+    loop {
+        let check = classify(repo.validate_credentials(&req.api_key).await);
+        if !matches!(check, KeyCheck::Inconclusive(_)) || attempt >= CHECK_ATTEMPTS {
+            return check;
+        }
+        tokio::time::sleep(backoff_with_jitter(
+            attempt,
+            CHECK_BACKOFF_BASE,
+            CHECK_BACKOFF_CAP,
+        ))
+        .await;
+        attempt += 1;
+    }
+}
+
 /// Validate the API keys of every statically-enumerable provider this graph
-/// will use. Blocking: aborts (returns `Err`) on the first invalid key found.
-/// Cached per `(provider, key)` with a TTL, so repeated entries into the same
-/// graph (fresh run, resume, subgraph re-entry) don't re-hit providers.
+/// will use. Blocking: aborts (returns `Err`) on the first key a provider
+/// rejects; a provider that cannot answer does not block (see `check_key`).
+/// Verdicts are cached per `(provider, key)` with a TTL, so repeated entries
+/// into the same graph (fresh run, resume, subgraph re-entry) don't re-hit
+/// providers.
 ///
 /// Disabled entirely via `COLMENA_PREFLIGHT_HEALTH=off` (safety valve).
 pub async fn validate_graph_providers(graph: &Graph) -> Result<(), DagError> {
@@ -281,15 +332,28 @@ pub async fn validate_graph_providers(graph: &Graph) -> Result<(), DagError> {
     for req in requirements {
         let outcome = match cache.get_fresh(&req.provider, &req.api_key) {
             Some(cached) => cached,
-            None => {
-                let repo = LlmProviderFactory::create(req.provider.clone());
-                let live = repo
-                    .validate_credentials(&req.api_key)
-                    .await
-                    .map_err(|e| e.to_string());
-                cache.put(&req.provider, &req.api_key, live.clone());
-                live
-            }
+            None => match check_key(&req).await {
+                KeyCheck::Valid => {
+                    cache.put(&req.provider, &req.api_key, Ok(()));
+                    Ok(())
+                }
+                KeyCheck::Rejected(reason) => {
+                    cache.put(&req.provider, &req.api_key, Err(reason.clone()));
+                    Err(reason)
+                }
+                // Neither cached nor blocking: a provider that cannot answer
+                // now may answer on the next run, and the node's own call
+                // reports what it says.
+                KeyCheck::Inconclusive(reason) => {
+                    tracing::warn!(
+                        target: "colmena::preflight",
+                        provider = %req.provider,
+                        reason = %reason,
+                        "pre-flight got no verdict on the API key; the run goes on"
+                    );
+                    Ok(())
+                }
+            },
         };
 
         if let Err(reason) = outcome {
@@ -628,7 +692,9 @@ mod enumerate_requirements_tests {
 #[cfg(test)]
 mod validate_graph_providers_tests {
     use super::*;
-    use crate::llm::domain::{LlmError, LlmRepository, LlmRequest, LlmResponse, LlmStream};
+    use crate::llm::domain::{
+        LlmError, LlmRepository, LlmRequest, LlmResponse, LlmStream, MockLlmRepository,
+    };
     use crate::llm::infrastructure::OverrideGuard;
     use async_trait::async_trait;
     use serde_json::json;
@@ -680,6 +746,69 @@ mod validate_graph_providers_tests {
             "edges": []
         });
         serde_json::from_value(json).unwrap()
+    }
+
+    #[derive(Clone, Copy)]
+    enum Answer {
+        Valid,
+        Invalid,
+        Unavailable(u16),
+    }
+
+    /// A provider asked exactly `answers.len()` times, answering in order
+    /// (mockall panics on an extra call and, when dropped, on a missing one).
+    fn scripted(answers: &[Answer]) -> Arc<MockLlmRepository> {
+        let mut mock = MockLlmRepository::new();
+        let mut seq = mockall::Sequence::new();
+        for answer in answers.iter().copied() {
+            mock.expect_validate_credentials()
+                .times(1)
+                .in_sequence(&mut seq)
+                .returning(move |_| match answer {
+                    Answer::Valid => Ok(()),
+                    Answer::Invalid => Err(LlmError::InvalidApiKey),
+                    Answer::Unavailable(status) => Err(LlmError::provider_unavailable(status)),
+                });
+        }
+        Arc::new(mock)
+    }
+
+    #[test]
+    fn classify_splits_verdicts_from_transient_answers() {
+        assert_eq!(classify(Ok(())), KeyCheck::Valid);
+        let rejected = |e| matches!(classify(Err(e)), KeyCheck::Rejected(_));
+        let inconclusive = |e| matches!(classify(Err(e)), KeyCheck::Inconclusive(_));
+        assert!(rejected(LlmError::InvalidApiKey));
+        assert!(rejected(LlmError::request_failed("status 400")));
+        assert!(inconclusive(LlmError::provider_unavailable(503)));
+        assert!(inconclusive(LlmError::network_error("reset")));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_transient_answer_is_asked_again_and_the_later_verdict_counts() {
+        for status in [503, 429] {
+            let _guard =
+                OverrideGuard::install(scripted(&[Answer::Unavailable(status), Answer::Valid]));
+            let graph = graph_with_llm_call(&format!("preflight-unit-test-{status}-then-valid"));
+            assert!(validate_graph_providers(&graph).await.is_ok());
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_provider_that_stays_unavailable_neither_blocks_the_run_nor_is_cached() {
+        // Three attempts per run; nothing cached, so the second run asks again.
+        let _guard = OverrideGuard::install(scripted(&[Answer::Unavailable(503); 6]));
+        let graph = graph_with_llm_call("preflight-unit-test-503-always");
+        assert!(validate_graph_providers(&graph).await.is_ok());
+        assert!(validate_graph_providers(&graph).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_rejected_key_is_not_asked_again_and_stays_cached() {
+        let _guard = OverrideGuard::install(scripted(&[Answer::Invalid]));
+        let graph = graph_with_llm_call("preflight-unit-test-invalid-once");
+        assert!(validate_graph_providers(&graph).await.is_err());
+        assert!(validate_graph_providers(&graph).await.is_err());
     }
 
     #[tokio::test]

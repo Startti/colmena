@@ -31,6 +31,12 @@ pub enum LlmError {
     #[error("Rate limit exceeded")]
     RateLimitExceeded,
 
+    /// The provider answered a status that says nothing about the request or
+    /// the key (408, 429, 500, 502, 503, 504 or 529): the same request may work
+    /// a moment later.
+    #[error("Provider temporarily unavailable (HTTP {status})")]
+    ProviderUnavailable { status: u16 },
+
     #[error("Invalid model: {model}")]
     InvalidModel { model: String },
 
@@ -134,6 +140,19 @@ impl LlmError {
         }
     }
 
+    pub fn provider_unavailable(status: u16) -> Self {
+        Self::ProviderUnavailable { status }
+    }
+
+    /// A failure that says nothing about the request or the key: the provider
+    /// could not answer now (a transient status or the network).
+    pub fn is_transient(&self) -> bool {
+        matches!(
+            self,
+            Self::ProviderUnavailable { .. } | Self::RateLimitExceeded | Self::NetworkError { .. }
+        )
+    }
+
     pub fn internal_error(message: impl Into<String>) -> Self {
         Self::InternalError {
             message: message.into(),
@@ -207,5 +226,27 @@ mod files_error_tests {
             provider_file_id: "file_abc".into(),
         };
         assert!(format!("{}", e).contains("file_abc"));
+    }
+}
+
+#[cfg(test)]
+mod transient_tests {
+    use super::*;
+
+    #[test]
+    fn transient_errors_say_nothing_about_the_key() {
+        assert!(LlmError::provider_unavailable(503).is_transient());
+        assert!(LlmError::RateLimitExceeded.is_transient());
+        assert!(LlmError::network_error("connection reset").is_transient());
+        assert!(!LlmError::InvalidApiKey.is_transient());
+        assert!(!LlmError::request_failed("status 400").is_transient());
+    }
+
+    #[test]
+    fn provider_unavailable_names_the_status() {
+        assert_eq!(
+            LlmError::provider_unavailable(503).to_string(),
+            "Provider temporarily unavailable (HTTP 503)"
+        );
     }
 }
