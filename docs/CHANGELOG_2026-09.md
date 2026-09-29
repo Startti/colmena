@@ -7283,7 +7283,7 @@ otra ruta que la del token lo pone rojo. Contenedor con la jaula: `--lib python_
 `serve_process` 1/1, subprocess 23/23; clippy limpio en Linux y macOS. El job del executor aislado de CI lo corre.
 **ADP.** Sin impacto: el motor todavía no llama a `serve`. **Estado.** done.
 
-## 199. Python: `python_executor serve` acepta bodies zstd y habla h2c (`serve`, 3/4)
+## 200. Python: `python_executor serve` acepta bodies zstd y habla h2c (`serve`, 3/4)
 
 **Qué cambia.** Un pedido con `Content-Encoding: zstd` se descomprime hasta el límite de pedido (pasado, 413; un body
 que no es un frame zstd, 400), y la respuesta va comprimida cuando el pedido manda `Accept-Encoding: zstd`; otra
