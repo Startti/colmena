@@ -370,7 +370,7 @@ impl SubprocessExecutor {
 
     /// [`Self::new`] without its checks, for the unit tests' stand-in
     /// templates, which run without root.
-    fn unchecked(
+    pub(super) fn unchecked(
         cfg: SubprocessConfig,
         max_timeout: Duration,
     ) -> Result<Self, ExecutorConfigError> {
@@ -397,6 +397,16 @@ impl SubprocessExecutor {
             spawner,
             stderr_dropped: Arc::default(),
         })
+    }
+
+    /// Whether a call can still get a slot: false once every slot is retired
+    /// (see [`Slot`]), when the process must be restarted.
+    pub fn has_usable_slot(&self) -> bool {
+        self.usable_slots.load(Ordering::Acquire) > 0
+    }
+
+    pub fn config(&self) -> &SubprocessConfig {
+        &self.cfg
     }
 
     /// Start the template now so the first call does not pay for the imports.
@@ -955,6 +965,7 @@ mod tests {
     #[tokio::test]
     async fn a_call_fails_at_once_when_no_slot_is_left() {
         let (_dir, ex) = fake("exit 1");
+        assert!(ex.has_usable_slot());
         let mut held = Vec::new();
         for _ in 0..ex.cfg.slots {
             let Ok(mut slot) = ex.take_slot().await else {
@@ -964,6 +975,7 @@ mod tests {
             held.push(slot);
         }
         drop(held);
+        assert!(!ex.has_usable_slot());
         let taken = tokio::time::timeout(Duration::from_secs(1), ex.take_slot()).await;
         let Ok(Err(RawFailure::Unavailable(m))) = taken else {
             panic!("the call did not fail at once")
