@@ -7402,6 +7402,17 @@ overflow, y un handshake sin respuesta da `unavailable`, no timeout. `--lib pyth
 66 en macOS; clippy limpio en los dos. E2E: con URL y `AUTH=none` el smoke sigue en proceso, misma firma.
 **ADP.** Sin impacto: `remote` todavía no se puede elegir. **Estado.** done.
 
+## 198. Docs: la medición de caché en Gemini compara el input total, no `promptTokens`
+
+**Qué cambia.** Solo docs. La guía 15 ("Dónde termina el resumen") y CHANGELOG_2026-08 §7 decían que el turno 1 de la
+medición en Gemini daba `promptTokens` idéntico (1714) en los dos arms. Era cierto con la contabilidad de entonces, pero
+desde CHANGELOG_2026-08 §8 (#188) Gemini descuenta de `promptTokens` lo que leyó de caché, así que hoy la frase se lee
+falsa: un arm que reusa el prefijo del otro reporta menos `promptTokens`. Ahora las dos dicen input total
+(`promptTokens` + `cacheReadTokens`), y la guía enlaza la semántica de `promptTokens` en la guía 14. **Verificación.**
+Se volvió a correr `prompt_cache_compaction_measure_gemini.json` sobre `develop`, dos sesiones nuevas seguidas: turno 1
+en frío `promptTokens` 1715 + `cacheReadTokens` 0; el siguiente 891 + 824. Mismo total (1715; el token de diferencia
+con 1714 es el bloque de fecha y hora inyectado). **ADP.** No aplica. **Estado.** done.
+
 ## 205. Python: el executor `remote` se puede elegir (`remote`, 3/3)
 
 **Qué cambia.** `COLMENA_PYTHON_EXECUTOR=remote` arma el `RemoteExecutor` (sin URL, el arranque corta) y nunca corre
