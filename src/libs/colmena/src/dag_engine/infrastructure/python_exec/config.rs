@@ -212,19 +212,25 @@ impl RemoteConfig {
         let Some(raw) = val(ENV_URL) else {
             return Ok(None);
         };
-        let url =
-            reqwest::Url::parse(&raw).map_err(|_| invalid(ENV_URL, &raw, "an absolute URL"))?;
+        // The value is never echoed: it may hold a secret, parsed or not.
+        let bad = |expected: &str| {
+            ExecutorConfigError(format!("{ENV_URL} is invalid; expected {expected}"))
+        };
+        let url = reqwest::Url::parse(&raw).map_err(|_| bad("an absolute URL"))?;
+        // Credentials go in `COLMENA_PYTHON_EXECUTOR_AUTH`, never in the URL.
+        let userinfo = !url.username().is_empty() || url.password().is_some();
+        if userinfo || url.query().is_some() || url.fragment().is_some() {
+            return Err(bad("no user, password, query or fragment"));
+        }
         // Loopback as `python_executor serve` reads it (127.0.0.0/8, ::1), or `localhost`.
-        let host = url.host_str().unwrap_or("");
-        let host = host.trim_start_matches('[').trim_end_matches(']');
-        let ip = host.parse::<std::net::IpAddr>();
-        let loopback = host == "localhost" || ip.is_ok_and(|ip| ip.is_loopback());
+        let loopback = match url.host() {
+            Some(url::Host::Domain(d)) => d == "localhost",
+            Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+            Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+            None => false,
+        };
         if url.scheme() != "https" && !(url.scheme() == "http" && loopback) {
-            return Err(invalid(
-                ENV_URL,
-                &raw,
-                "https (plain http only for loopback)",
-            ));
+            return Err(bad("https (plain http only for loopback)"));
         }
         let auth = match val(ENV_AUTH).as_deref() {
             Some("none") => RemoteAuthConfig::None,
@@ -433,16 +439,35 @@ mod tests {
     }
 
     #[test]
-    fn plain_http_is_only_for_loopback() {
-        let at = |url, auth| cfg(&[(ENV_EXECUTOR, "remote"), (ENV_URL, url), (ENV_AUTH, auth)]);
-        assert!(at("http://10.0.0.5:8080", "none").is_err());
-        assert!(at("http://127.0.0.1:8080", "none").is_ok());
-        assert!(at("http://[::1]:8080", "none").is_ok());
-        assert!(at("http://127.0.0.2:8080", "none").is_ok());
-        assert!(at("http://localhost:8080", "none").is_ok());
-        assert!(at("http://127.0.0.1:8080", "gcp_id_token").is_err());
-        assert!(at("ftp://x.example", "none").is_err());
-        assert!(at("not a url", "none").is_err());
+    fn plain_http_is_only_for_loopback_whatever_the_executor() {
+        for kind in ["remote", "inprocess", "subprocess"] {
+            let at = |url, auth| cfg(&[(ENV_EXECUTOR, kind), (ENV_URL, url), (ENV_AUTH, auth)]);
+            assert!(at("http://10.0.0.5:8080", "none").is_err());
+            assert!(at("http://127.0.0.1:8080", "none").is_ok());
+            assert!(at("http://[::1]:8080", "none").is_ok());
+            assert!(at("http://127.0.0.2:8080", "none").is_ok());
+            assert!(at("http://localhost:8080", "none").is_ok());
+            assert!(at("http://127.0.0.1:8080", "gcp_id_token").is_err());
+            assert!(at("ftp://x.example", "none").is_err());
+            assert!(at("not a url", "none").is_err());
+        }
+    }
+
+    #[test]
+    fn the_url_carries_no_credentials_and_is_never_echoed() {
+        for (url, why) in [
+            ("https://:hunter2@x.example/", "password"),
+            ("https://u@x.example/", "password"),
+            ("http://u:hunter2@10.0.0.5/", "password"),
+            ("https://x.example/?k=hunter2", "query"),
+            ("https://x.example/#hunter2", "fragment"),
+            ("http://10.0.0.5/hunter2", "https"),
+            ("hunter2 x.example", "absolute URL"),
+        ] {
+            let e = cfg(&[(ENV_URL, url), (ENV_AUTH, "none")]).unwrap_err().0;
+            assert!(e.starts_with(ENV_URL) && e.contains(why), "{e}");
+            assert!(!e.contains("hunter2") && !e.contains(".example"), "{e}");
+        }
     }
 
     #[test]
