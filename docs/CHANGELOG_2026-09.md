@@ -7282,3 +7282,22 @@ bajo la política de salida, y no lee el token por ninguna de las dos rutas mien
 otra ruta que la del token lo pone rojo. Contenedor con la jaula: `--lib python_exec` 74, aislamiento 7/7,
 `serve_process` 1/1, subprocess 23/23; clippy limpio en Linux y macOS. El job del executor aislado de CI lo corre.
 **ADP.** Sin impacto: el motor todavía no llama a `serve`. **Estado.** done.
+
+## 199. Python: `python_executor serve` acepta bodies zstd y habla h2c (`serve`, 3/4)
+
+**Qué cambia.** Un pedido con `Content-Encoding: zstd` se descomprime hasta el límite de pedido (pasado, 413; un body
+que no es un frame zstd, 400), y la respuesta va comprimida cuando el pedido manda `Accept-Encoding: zstd`; otra
+codificación que no sea `identity` es un 415. HTTP/2 sin TLS (h2c, prior knowledge) queda declarado de forma explícita,
+así una plataforma que reenvía HTTP/2 al contenedor llega al servidor. El log de cada llamada suma `wire_in_bytes`, el
+tamaño del body tal como llegó. Dependencias nuevas, solo en Linux: `zstd` 0.13 (0.13.3, compila la librería C con
+`cc`) y la feature `http2` de axum 0.7 (h2, hyper y hyper-util ya estaban en el lockfile). Guía:
+[53_python_executors.md](developer_guide/53_python_executors.md#remote-service-python_executor-serve).
+**Tests.** Unitario de `decode`: sin codificación o con `identity` el body pasa igual, zstd se descomprime y pasado el
+límite es 413. En el test del router: un zstd que se expande sobre el límite da 413, `gzip` 415, un body que no es zstd
+400, y una llamada zstd válida llega al executor. Rojo con `decode` de stub: ese test falla y el router da 400 en vez
+de 413. Test de la jaula (`tests/python_executor_serve.rs`): una llamada comprimida por HTTP/1.1 vuelve comprimida, y
+la misma por h2c responde por HTTP/2. Quitar la feature `http2` no lo pone rojo: otra dependencia ya activa HTTP/2 en
+hyper-util por unificación de features; la declaración deja escrito el requisito y sobrevive a un cambio de
+dependencias. Contenedor con la jaula: `--lib python_exec::server` 6, serve 1/1; clippy limpio en Linux y macOS. El
+job del executor aislado de CI suma el test. **ADP.** Sin impacto: el motor todavía no llama a `serve`.
+**Estado.** done.
