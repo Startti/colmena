@@ -7,11 +7,11 @@
 
 use colmena::dag_engine::infrastructure::python_exec::config::SubprocessConfig;
 use colmena::dag_engine::infrastructure::python_exec::protocol::WireResponse;
-use colmena::dag_engine::infrastructure::python_exec::server::{router, AppState};
+use colmena::dag_engine::infrastructure::python_exec::server::{readiness, router, AppState};
 use colmena::dag_engine::infrastructure::python_exec::subprocess::SubprocessExecutor;
 use reqwest::StatusCode;
 use serde_json::json;
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{path::PathBuf, sync::Arc, time::Duration, time::Instant};
 
 /// State for a router with a fresh executor, running as uids from `uid_base`.
 fn state(uid_base: u32, ready: bool) -> Option<AppState> {
@@ -85,4 +85,39 @@ async fn a_call_is_answered_compressed_and_over_h2c() {
     );
     let body: WireResponse = serde_json::from_slice(&resp.bytes().await.unwrap()).unwrap();
     assert_eq!(body.output, Some(json!(3)));
+}
+
+/// Ready only while no egress target accepts a connection: a server that
+/// starts ready turns unready once an open target is seen, and one that
+/// starts unready turns ready while its target is closed.
+#[tokio::test]
+async fn the_server_is_ready_only_while_the_egress_targets_are_closed() {
+    let open = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let closed = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let closed_addr = closed.local_addr().unwrap();
+    drop(closed);
+    for (uid_base, target, starts_ready, becomes) in [
+        (
+            30200,
+            open.local_addr().unwrap(),
+            true,
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+        (30300, closed_addr, false, StatusCode::OK),
+    ] {
+        let Some(st) = state(uid_base, starts_ready) else {
+            return;
+        };
+        let targets = vec![target.to_string()];
+        tokio::spawn(readiness(st.exec.clone(), targets, st.ready.clone()));
+        let readyz = format!("{}/readyz", listen(st).await);
+        let t0 = Instant::now();
+        while reqwest::get(&readyz).await.unwrap().status() != becomes {
+            assert!(
+                t0.elapsed() < Duration::from_secs(60),
+                "{target}: never {becomes}"
+            );
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    }
 }

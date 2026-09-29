@@ -7302,6 +7302,33 @@ dependencias. Contenedor con la jaula: `--lib python_exec::server` 6, serve 1/1;
 job del executor aislado de CI suma el test. **ADP.** Sin impacto: el motor todavía no llama a `serve`.
 **Estado.** done.
 
+## 202. Python: `python_executor serve` está listo solo con el egress cerrado y acota los pedidos en vuelo (`serve`, 4/4)
+
+**Qué cambia.** `--require-closed-egress host:port,...`: el servidor se reporta listo solo mientras cada destino está
+probado cerrado, es decir, resuelve y cada una de sus direcciones rechaza la conexión o la deja vencer (2 s). Un
+destino que no resuelve, que acepta o que falla de otra forma (sin ruta, por ejemplo) no prueba nada: se loguea por
+dirección y tipo de error, y el servidor no está listo. Un destino que no es `host:port` (IPv6 entre corchetes, puerto
+de 1 a 65535) corta `serve` al parsear las flags (sale con 2). Tope de pedidos en vuelo: el doble de los slots,
+contado antes de leer el body; uno más recibe 503 con `Retry-After: 1`. Las llamadas corren de a `slots` y otras
+tantas pueden subir y esperar, así ningún slot queda ocioso entre llamadas y los bodies en memoria quedan acotados.
+`/readyz` da 503 cuando no queda ningún slot usable (`/healthz` sigue en 200). `--allow-no-token`: la opción explícita
+para servir sin token en una dirección que no es loopback, con un warning al arrancar. El header
+`X-Colmena-Request-Id` se loguea como id de correlación, reducido a 64 caracteres de `[A-Za-z0-9._:-]`. Guía:
+[53_python_executors.md](developer_guide/53_python_executors.md#remote-service-python_executor-serve), también con
+destinos en IP donde el DNS está bloqueado y el reinicio que pide un token rotado por symlink.
+**Tests.** Unitarios: el parser de destinos (acepta IPv4, IPv6 entre corchetes y nombres; rechaza sin puerto, host
+vacío, puerto 0 o fuera de rango, IPv6 sin corchetes); `egress_closed` (un destino cerrado sí; uno abierto o uno que no
+resuelve, no); dos pedidos colgados llenan el tope de un slot, el tercero recibe 503 con `Retry-After: 1` y al
+soltarlos vuelve a admitir; el id de correlación filtrado; el token opcional con `--allow-no-token`. Test de la jaula:
+un servidor listo pasa a 503 al ver su destino abierto y uno no listo pasa a 200 con su destino cerrado. Test de
+proceso: un destino mal formado sale con 2. Rojo contra stubs: el parser, `egress_closed` (un destino sin resolver
+contaba como cerrado), el tope (400 en vez de 503) y el destino mal formado (el servidor seguía sirviendo a los 10 s).
+Mutación roja: sin el chequeo de egress, el test de la jaula nunca ve 503. Contenedor con la jaula: `--lib python_exec`
+79, también como uid 65534; aislamiento 7/7, serve 2/2, `serve_process` 2/2, subprocess 23/23; clippy limpio en Linux
+y macOS; `cargo fmt --check` limpio. E2E con curl contra el binario en el contenedor: el destino mal formado sale con
+2, y con `--allow-no-token` en `0.0.0.0` y un destino que no resuelve, `/readyz` da 503 y salen los dos warnings.
+**ADP.** Sin impacto: el motor todavía no llama a `serve`. **Estado.** done.
+
 ## 201. `wait_until_ready`: un host puede esperar al template de Python antes de atender pedidos
 
 **Qué cambia.** Nueva `colmena::dag_engine::infrastructure::python_exec::wait_until_ready()` (async,

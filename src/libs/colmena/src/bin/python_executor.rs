@@ -51,6 +51,13 @@ mod linux {
             /// required unless --listen is a loopback address.
             #[arg(long)]
             token_file: Option<PathBuf>,
+            /// Serve without --token-file on an address other than loopback.
+            #[arg(long)]
+            allow_no_token: bool,
+            /// `host:port` targets that must refuse a connection for the
+            /// server to report ready (comma-separated or repeated).
+            #[arg(long, value_delimiter = ',', value_parser = server::egress_target)]
+            require_closed_egress: Vec<String>,
         },
     }
 
@@ -106,7 +113,12 @@ mod linux {
                 }
                 code
             }
-            Cmd::Serve { listen, token_file } => {
+            Cmd::Serve {
+                listen,
+                token_file,
+                allow_no_token,
+                require_closed_egress,
+            } => {
                 let filter = tracing_subscriber::EnvFilter::try_from_default_env();
                 let log = tracing_subscriber::fmt().with_ansi(false);
                 let _ = log
@@ -124,6 +136,8 @@ mod linux {
                     subprocess: cfg.subprocess,
                     max_timeout: cfg.max_timeout,
                     token_file,
+                    allow_no_token,
+                    closed_egress: require_closed_egress,
                 })
             }
         }
