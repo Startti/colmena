@@ -542,7 +542,7 @@ mod tests {
         drop(listener);
         let open = open.local_addr().unwrap().to_string();
         assert!(egress_closed(&[]).await);
-        assert!(egress_closed(&[closed.clone()]).await);
+        assert!(egress_closed(std::slice::from_ref(&closed)).await);
         assert!(!egress_closed(&[closed.clone(), open]).await);
         // A target that does not resolve proves nothing.
         assert!(!egress_closed(&[closed, "unresolved.invalid:80".into()]).await);

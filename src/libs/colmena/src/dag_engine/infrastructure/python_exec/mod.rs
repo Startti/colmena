@@ -5,6 +5,7 @@
 pub mod child;
 pub mod config;
 pub mod frame;
+pub mod id_token;
 pub mod inprocess;
 #[cfg(target_os = "linux")]
 pub mod jail;
