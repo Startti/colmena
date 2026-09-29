@@ -154,7 +154,7 @@ jobs:
       # passes; the step fails if one does.
       - name: Isolation and subprocess suites
         run: |
-          cargo test --test python_executor_subprocess --test python_executor_isolation \
+          cargo test --test python_executor_subprocess --test python_executor_isolation --test python_executor_serve \
             --test python_executor_serve_process -- --nocapture 2>&1 | tee jail-suites.log
           if grep -F 'skipped: set COLMENA_PYEXEC_JAIL_TESTS' jail-suites.log; then exit 1; fi
 
