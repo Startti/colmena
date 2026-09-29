@@ -13,7 +13,7 @@ stay in the host process; Python only receives JSON inputs and returns JSON.
 |---|---|---|
 | `inprocess` (default) | inside the host process, embedded interpreter | available |
 | `subprocess` | a jailed child process per call, forked from a warm template (Linux; the host starts as root inside its container) | available |
-| `remote` | a [`python_executor serve`](#remote-service-python_executor-serve) endpoint | not yet: startup refuses it; its [settings](#remote-executor-settings) are read |
+| `remote` | a [`python_executor serve`](#remote-service-python_executor-serve) endpoint, through [the remote client](#the-remote-client) | available |
 
 Any other value is a configuration error: the host fails at startup (when it
 calls `install_from_env`, as `EngineConfig::from_env` does, and as the
@@ -52,7 +52,8 @@ took about 106 s on one instance and passed the 120 s start limit on another,
 whose Python calls failed until a later start; the same image with full CPU did
 the cold imports in 17.4 s. The wait joins the start under way (it never starts
 a second template beside it) and returns `Ok(())` once the template is ready,
-or the `PythonExecutorError: …` text of a failed start; `inprocess` returns
+or the `PythonExecutorError: …` text of a failed start; `remote` waits for the
+service ([The remote client](#the-remote-client)); `inprocess` returns
 `Ok(())` at once. A failed start does not stop the host: log it and serve;
 isolated calls fail until a later start succeeds. `EngineConfig::from_env` and
 the `dag_engine` CLI do not wait.
@@ -192,7 +193,8 @@ arguments.
 
 For model-written code or anything else you did not write, use `COLMENA_PYTHON_EXECUTOR=subprocess` with
 `COLMENA_PYTHON_EXECUTOR_MODES=all`, on Linux, in a container where the host starts as root with `CAP_SYS_ADMIN`; run
-`python_executor self-test` there first. In process, `restricted` is an aid to authors, not an isolation boundary.
+`python_executor self-test` there first; or `COLMENA_PYTHON_EXECUTOR=remote`, also with `…_MODES=all`, against a
+`python_executor serve` in such a container. In process, `restricted` is an aid to authors, not an isolation boundary.
 
 ## Remote service (`python_executor serve`)
 
@@ -252,8 +254,8 @@ event per call with `request_id`, `outcome`, `in_bytes`, `wire_in_bytes` (the bo
 
 ## Remote executor settings
 
-The `remote` executor, a client of `python_executor serve`, is not selectable yet: `COLMENA_PYTHON_EXECUTOR=remote`
-stops startup with `…=remote is not available in this build`. Its settings are read whenever
+`COLMENA_PYTHON_EXECUTOR=remote` needs `COLMENA_PYTHON_EXECUTOR_URL`: without it startup stops with
+`…=remote needs COLMENA_PYTHON_EXECUTOR_URL`. The settings are read whenever
 `COLMENA_PYTHON_EXECUTOR_URL` is set, whatever the executor, so an invalid one stops startup like any other variable,
 named in the error. The URL only ever comes from the process environment, never from graph data, and its error never
 echoes the value.
@@ -278,16 +280,24 @@ unreadable answer or one that is not a JWT with `exp`), never the answer itself.
 
 ### The remote client
 
-`python_exec::remote::RemoteExecutor` (not selectable yet) sends each call as `POST <URL>/v1/run`, keeping a path in
+`python_exec::remote::RemoteExecutor` sends each call as `POST <URL>/v1/run`, keeping a path in
 the URL, with an `X-Colmena-Request-Id` that the service logs. Nothing is sent over `…_MAX_REQUEST_MB` or, compressed,
 over `…_MAX_WIRE_MB`, and an answer over `…_MAX_RESPONSE_MB` fails. Bodies are zstd-compressed; serve behind HTTP/2
 end to end when inputs may exceed what an HTTP/1 front accepts, or set `COLMENA_PYTHON_EXECUTOR_MAX_WIRE_MB` so
 oversized calls fail clearly. Proxy variables and redirects are ignored, and the token file is read per call.
 
-Only a call that certainly did not run is retried, once, after 250 ms: a connection error (a connect timeout too), 429
-or 503. 502, 504, a lost or cut answer, or a second failure is `PythonExecutorError: … unavailable (…)`, never an
-in-process run. 401/403 is `… rejected this caller's credentials`, 413 the input-limit text, and another status
-`… answered HTTP <status>`. A retry logs `python remote call retried` with `request_id` and `reason` only.
+A call ends within its timeout plus 30 s, credentials and waits included, on a connection of its own (none is kept for
+reuse). Only a call that certainly did not run is sent again, with the same request id: after a connection error (a
+connect timeout too) or a 503 without `Retry-After` (not ready, no usable slot), once, 250 ms later; after 429, or 503
+with `Retry-After` (a full `serve`), when it says (at most 2 s), while the code would still get its whole timeout, so
+waits fit in the 30 s. 502, 504, a lost or cut answer, late credentials or a wait that no longer fits is
+`PythonExecutorError: … unavailable (…)`, never an in-process run or the code's timeout. 401/403 is `… rejected this
+caller's credentials`, 413 `Python execution error: the input exceeds what the isolated Python executor accepts`,
+another status `… answered HTTP <status>`. A call's first resend logs `python remote call retried` with `request_id` and
+`reason` only. `warm` (what `wait_until_ready` awaits) waits up to 120 s in all, asking every second, for `GET
+<URL>/readyz` to answer 200 and then for an empty `POST <URL>/v1/run` with the credentials to answer 400, taken as ready
+(`serve` runs nothing without a body), so a wire-version mismatch or a front that answers 400 before checking
+credentials passes it; 401, 403 or credentials it cannot obtain end the wait at once, so a wrong token shows at startup.
 
 ## Equivalence with the in-process executor
 
@@ -296,7 +306,8 @@ value that cannot become JSON, and the four tabular tools' wrappers over pandas)
 executor the environment selects, and requires the same result, stdout included. Each case also states what it must
 produce (a value, or an error of a given kind), so two identical failures do not count as a match. With the default
 `inprocess` there is nothing to compare and the test says so; run it with `COLMENA_PYTHON_EXECUTOR=subprocess`
-(`COLMENA_PYTHON_EXECUTOR_MODES=all` to route every case) in a root container with `CAP_SYS_ADMIN`.
+(`COLMENA_PYTHON_EXECUTOR_MODES=all` to route every case) in a root container with `CAP_SYS_ADMIN`, or with
+`remote` against a `python_executor serve` running in one.
 
 Concurrent calls: through `subprocess` each call has its own process, so each gets only its own stdout. In process,
 the executor swaps the interpreter's `sys.stdout` for each call, so two calls running at the same time can mix what
@@ -315,14 +326,17 @@ CI runs them in the `python-executor` job of `ci-develop.yml` (Debian bookworm c
 numpy and scipy from Debian): the executor's unit tests, both jail suites (the step fails on any skip line),
 `python_executor self-test`, the Python node and tool suites and the equivalence bench under `subprocess` with
 `COLMENA_PYTHON_EXECUTOR_MODES=all`, the bench again with the default modes, and the smoke graph under `subprocess`
-(four `python run` events with `outcome="ok"`). Four `gsheets_run_python` tests are skipped there by name: with pandas
-installed they fail the same way under every executor, and no job runs their assertions today.
+(four `python run` events with `outcome="ok"`); then, against a local `python_executor serve` (loopback, no token, 2
+slots), the same suites, the bench (its burst of 12 calls exceeds the 4 in flight) and the smoke graph under `remote`.
+`tests/python_executor_remote.rs`, a jail suite, runs cases through `serve`'s router with a token and compares them
+with in process. Four `gsheets_run_python` tests are skipped there by name: with pandas installed they fail the same
+way under every executor, and no job runs their assertions today.
 
 ## About `restricted`
 
 `restricted` validates imports and a few builtins before running. It helps
 authors stay within the supported module set; it is not an isolation boundary.
-Isolation comes from the `subprocess` executor (Linux).
+Isolation comes from the `subprocess` executor (Linux), in the host or behind `remote`.
 
 ## Observability
 

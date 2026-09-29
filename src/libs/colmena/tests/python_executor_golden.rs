@@ -257,6 +257,19 @@ async fn every_case_matches_the_in_process_result() {
     );
 }
 
+/// More calls at once than `serve` takes in flight (2 × slots) wait, not fail.
+#[tokio::test]
+async fn a_burst_of_calls_completes() {
+    let Some(cfg) = isolated_config().await else {
+        return;
+    };
+    let calls = (0..12).map(|i| printer("restricted", &format!("burst-{i}")));
+    let results = futures::future::join_all(calls.map(python_exec::run)).await;
+    assert!(results.iter().all(Result::is_ok), "{results:?}");
+    let kind = cfg.kind.as_str();
+    eprintln!("burst: 12 calls at once completed ({kind} executor)");
+}
+
 const MARKERS: [&str; 2] = ["first-call", "second-call"];
 
 /// Prints `marker` five times, 0.1 s apart, and returns when it started and

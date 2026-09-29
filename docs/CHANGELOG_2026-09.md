@@ -7412,3 +7412,22 @@ falsa: un arm que reusa el prefijo del otro reporta menos `promptTokens`. Ahora 
 Se volvió a correr `prompt_cache_compaction_measure_gemini.json` sobre `develop`, dos sesiones nuevas seguidas: turno 1
 en frío `promptTokens` 1715 + `cacheReadTokens` 0; el siguiente 891 + 824. Mismo total (1715; el token de diferencia
 con 1714 es el bloque de fecha y hora inyectado). **ADP.** No aplica. **Estado.** done.
+
+## 205. Python: el executor `remote` se puede elegir (`remote`, 3/3)
+
+**Qué cambia.** `COLMENA_PYTHON_EXECUTOR=remote` arma el `RemoteExecutor` (sin URL, el arranque corta) y nunca corre
+en proceso. Un plazo por llamada (timeout + 30 s) cubre credenciales, intentos y esperas. Un error de conexión o un 503
+sin `Retry-After` se reintenta una vez; 429 y 503 con `Retry-After` se esperan (hasta 2 s, con jitter) solo mientras
+al código le quede su timeout entero: una ráfaga sobre el tope en vuelo de `serve` espera dentro de los 30 s o da
+`unavailable (HTTP 503)`, nunca un timeout del código; un `warn` por llamada. Sin pool: una conexión guardada moría con
+el runtime que la abrió (`colmena.run_dag` desde varios hilos). 413 da un texto válido para cualquier capa, un token
+con caracteres de control `… does not hold a valid token`, y un `Content-Length` sobre el tope se rechaza antes de
+leer. `wait_until_ready` espera, 120 s en total, `/readyz` y un `POST /v1/run` vacío con las credenciales (400, no
+corre nada): un token equivocado corta al arrancar. CI: paso «Equivalence — remote (local server)», `serve` con 2
+slots, la ráfaga de 12 llamadas del banco dorado y el smoke por `dag_engine run`.
+Guía: [53_python_executors.md](developer_guide/53_python_executors.md#the-remote-client).
+**Tests.** Quince unitarios de `remote`, una mutación roja por regla nueva (plazo, esperas, 503 sin `Retry-After`, 429,
+dos runtimes, un `warn`, `warm` acotado, 413, token, `Content-Length`). `--lib python_exec`: 107 en Linux con la jaula,
+69 en macOS; clippy limpio. Jaula: siete casos iguales a en proceso; otro token, rechazado en `warm` y en la llamada.
+El paso de CI en el contenedor, con las suites en paralelo: 5 de 5 verdes (con pool, 3 de 5 rojas).
+**ADP.** Puede elegir `remote` apuntando a un `python_executor serve`; llega con el próximo tag. **Estado.** done.

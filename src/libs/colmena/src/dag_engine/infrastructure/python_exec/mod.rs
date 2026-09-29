@@ -97,7 +97,8 @@ pub fn install_from_env() -> Result<ExecutorKind, ExecutorConfigError> {
 /// one beside it), or starts the template when none is running, and returns
 /// that start's result: `Ok(())` once the template is ready, or the
 /// `PythonExecutorError: …` text of a failed start, at the latest after the
-/// start's 120 s limit. `inprocess` is ready at once; a misconfigured executor
+/// start's 120 s limit. `remote` waits up to 120 s for the service to be ready
+/// and take its credentials. `inprocess` is ready at once; a misconfigured executor
 /// returns the text [`run`] would. The error does not stop anything: the host
 /// logs it and serves, and isolated calls fail until a later start succeeds.
 /// Nothing changes for a host that does not call it.
@@ -196,10 +197,11 @@ impl Dispatcher {
                 )))
             }
             ExecutorKind::Remote => {
-                return Err(ExecutorConfigError(format!(
-                    "{}=remote is not available in this build",
-                    config::ENV_EXECUTOR
-                )))
+                let remote = cfg.remote.clone().ok_or_else(|| {
+                    let (kind, url) = (config::ENV_EXECUTOR, config::ENV_URL);
+                    ExecutorConfigError(format!("{kind}=remote needs {url}"))
+                })?;
+                Arc::new(remote::RemoteExecutor::new(remote, cfg.max_timeout)?)
             }
         };
         Ok(Self::new(cfg.modes, cfg.max_timeout, isolated, inprocess))
@@ -383,13 +385,19 @@ mod tests {
     }
 
     #[test]
-    fn remote_is_refused_until_it_exists() {
-        let cfg = config::ExecutorConfig::from_lookup(|k| {
-            (k == config::ENV_EXECUTOR).then(|| "remote".to_string())
-        })
-        .unwrap();
-        let err = Dispatcher::build(&cfg).err().expect("must refuse");
-        assert!(err.0.contains("remote is not available"), "{err}");
+    fn remote_is_built_with_a_url_only() {
+        let build = |url: Option<&str>| {
+            let cfg = config::ExecutorConfig::from_lookup(|k| match k {
+                config::ENV_EXECUTOR => Some("remote".to_string()),
+                config::ENV_URL => url.map(str::to_string),
+                config::ENV_AUTH => Some("none".to_string()),
+                _ => None,
+            });
+            Dispatcher::build(&cfg.unwrap()).map(|d| d.isolated.kind())
+        };
+        let err = build(None).expect_err("must refuse").0;
+        assert!(err.ends_with("needs COLMENA_PYTHON_EXECUTOR_URL"), "{err}");
+        assert_eq!(build(Some("http://127.0.0.1:9")), Ok(ExecutorKind::Remote));
     }
 
     /// `subprocess` is built on Linux by a process that runs as root, and
