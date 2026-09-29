@@ -178,15 +178,34 @@ root and `CAP_SYS_ADMIN`, as for `subprocess`). It serves:
   the same jail, under the same limits and output policy, as a call made by a host. A body over `…_MAX_REQUEST_MB` is
   a 413, a body that is not a wire request of this version a 400, and the deadline a request asks for is capped at
   `…_MAX_TIMEOUT_SECS`. While the template is not running a call is a 503; it never runs anywhere else.
-- `GET /healthz`: 200 while the process runs.
-- `GET /readyz`: 200 while the warm template runs, else 503; checked every minute, every 5 s while not ready.
+- `GET /healthz`: 200 while the process runs, even once no usable slot is left.
+- `GET /readyz`: 200 while the warm template runs and every `--require-closed-egress` target is proven closed
+  (checked every minute, every 5 s while not ready) and a slot is usable (checked on each request); else 503. Once
+  every slot is retired the process must be restarted, and only `/readyz` says so: act on readiness, not only on
+  liveness.
 
 The probes need no token. `--listen` defaults to `127.0.0.1:8080`. With `--token-file PATH`, every `POST /v1/run` must
 carry `Authorization: Bearer <token>`, the token being the file's content, trimmed: 32 or more visible ASCII bytes. It
 is checked before the body is read; a missing or wrong token is a 401 without a body. Without `--token-file` the server
-starts only on a loopback address. The token file joins the hidden paths by its canonical path (through any symlink),
-so the code a call runs cannot read it, and the startup self-test proves that path is covered. In a container:
+starts only on a loopback address, unless `--allow-no-token` is given (for a platform that authenticates callers
+itself); then startup logs the warning `python serve without a token on a non-loopback address`. The token file joins
+the hidden paths by its canonical path (through any symlink), so the code a call runs cannot read it, and the startup
+self-test proves that path is covered. The file is read once, at startup: a token rotated by swapping a symlink (as a
+mounted secret volume does) is only picked up after a restart. In a container:
 `python_executor serve --listen 0.0.0.0:8080 --token-file /secrets/token`.
+
+`--require-closed-egress host:port[,host:port…]` (the flag may repeat) makes readiness require that every target is
+proven closed: it resolves within 2 s and each of its addresses refuses the connection or lets it time out (2 s). Any
+other result proves nothing and keeps the server not ready: a target that does not resolve, that accepts, or that
+fails otherwise (no route, for example); a warning names the target and the error kind, if any. So a server on a
+network with no route at all never becomes ready, and where DNS is blocked a host name never resolves: use IP literals
+there, of hosts that would accept a connection if egress were open. A target that is not `host:port` (an IPv6 host in
+brackets, a port from 1 to 65535) stops `serve` at flag parsing.
+
+At most twice `…_SLOTS` requests are in flight, counted after the token and readiness checks and before the body is
+read; one more gets a 503 with `Retry-After: 1`. Calls run `…_SLOTS` at a time and the rest upload and wait, so no
+slot idles between calls and the bodies held in memory stay near `2 × slots × …_MAX_REQUEST_MB` (plus one decoded
+copy per zstd request).
 
 Bodies may be zstd-compressed: a request with `Content-Encoding: zstd` is decompressed up to `…_MAX_REQUEST_MB` (past
 it a 413; a body that is not a zstd frame, a 400), and any other encoding than `identity` is a 415. An answer is
@@ -198,11 +217,13 @@ The executor settings are the `COLMENA_PYTHON_EXECUTOR_*` variables a host reads
 defaults and ranges; there are no flags for them. Before it listens, the server runs the jail self-test in its own
 process. Exit codes: 0 after SIGTERM or Ctrl-C (a graceful stop); 1 when serving fails (the address cannot be bound,
 for example); 2 for a bad configuration (an invalid variable, named in the error; no token file on a non-loopback
-address; a token file that cannot be read or holds a short token); 3 when the self-test fails, each failed layer logged.
+address without `--allow-no-token`; a token file that cannot be read or holds a short token; a malformed egress
+target); 3 when the self-test fails, each failed layer logged.
 
 Logs (target `colmena::python_exec`, level from `RUST_LOG`, `info` by default) are fields only: one `python serve run`
-event per call with `outcome`, `in_bytes`, `wire_in_bytes` (the body as sent), `out_bytes` and `duration_ms`. They
-never carry code, inputs, outputs, stdout, tokens or headers.
+event per call with `request_id`, `outcome`, `in_bytes`, `wire_in_bytes` (the body as sent), `out_bytes` and
+`duration_ms`. `request_id` is the caller's `X-Colmena-Request-Id` header reduced to 64 characters of
+`[A-Za-z0-9._:-]` (`-` without one). They never carry code, inputs, outputs, stdout, tokens or other headers.
 
 ## Equivalence with the in-process executor
 
