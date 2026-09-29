@@ -3,9 +3,10 @@
 
 use std::time::Duration;
 
-/// 408, 429 and the 5xx that an overloaded provider or its gateway answers.
+/// 408, 429, 500, 502, 503, 504 and 529 (Anthropic's "overloaded"). Any other status,
+/// a 5xx included, is not transient.
 pub fn is_transient_status(status: u16) -> bool {
-    matches!(status, 408 | 429 | 500 | 502 | 503 | 504)
+    matches!(status, 408 | 429 | 500 | 502 | 503 | 504 | 529)
 }
 
 /// Exponential backoff with full jitter: a random wait in
@@ -33,7 +34,7 @@ mod tests {
 
     #[test]
     fn transient_statuses() {
-        for s in [408, 429, 500, 502, 503, 504] {
+        for s in [408, 429, 500, 502, 503, 504, 529] {
             assert!(is_transient_status(s), "{s}");
         }
         for s in [200, 400, 401, 403, 404, 422, 501] {

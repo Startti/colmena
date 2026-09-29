@@ -271,9 +271,9 @@ enum KeyCheck {
     Valid,
     /// The provider refused the key: the run must not start.
     Rejected(String),
-    /// The provider could not answer (a 408, 429 or 5xx, or the network). This
-    /// says nothing about the key: the run goes on, and the node reports what
-    /// the provider says when it calls it.
+    /// The provider could not answer (a 408, 429, 500, 502, 503, 504 or 529, or
+    /// the network). This says nothing about the key: the run goes on, and the
+    /// node reports what the provider says when it calls it.
     Inconclusive(String),
 }
 

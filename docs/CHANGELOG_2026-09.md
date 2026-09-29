@@ -7438,12 +7438,12 @@ El paso de CI en el contenedor, con las suites en paralelo: 5 de 5 verdes (con p
 rejected the API key» y lo guardaba en la caché de pre-flight (60 s por defecto): un 503 pasajero del endpoint de
 modelos cortaba cada corrida de ese proceso con esa key durante un minuto, y volver a llamar enseguida leía el mismo
 error de la caché. Ahora los adapters de OpenAI, Anthropic y Gemini devuelven `LlmError::ProviderUnavailable { status }`
-ante 408, 429 y 5xx (`llm::infrastructure::transient::is_transient_status`), y `LlmError::is_transient()` (esa
+ante 408, 429, 500, 502, 503, 504 y 529 (`llm::infrastructure::transient::is_transient_status`), y `LlmError::is_transient()` (esa
 variante, `RateLimitExceeded` y `NetworkError`) separa «no hubo respuesta» de «la key no sirve». Pre-flight vuelve a
 preguntar con backoff exponencial y jitter completo (3 intentos, base 300 ms, tope 2 s; el jitter sale de los bits
 aleatorios de un UUID v4, sin dependencia nueva); sin veredicto no guarda nada, deja un `warn` en `colmena::preflight`
-y la corrida sigue: el nodo informa lo que diga el proveedor. Un 401/403, o cualquier otro 4xx, sigue cortando la
-corrida y quedando en la caché. Los errores de red de Gemini con la key en el query (validación, TTS y subida a su
+y la corrida sigue: el nodo informa lo que diga el proveedor. Un 401/403, o cualquier otro estado (un 4xx, o un 5xx como el
+501), sigue cortando la corrida y quedando en la caché. Los errores de red de Gemini con la key en el query (validación, TTS y subida a su
 Files API, cuya URL de sesión puede repetirla) ya no citan la URL (`reqwest::Error::without_url`).
 Guía: [18_troubleshooting.md](developer_guide/18_troubleshooting.md).
 **Tests.** `transient` (estados, techo del backoff, jitter), `is_transient`, un 503 de validación por adapter, el error

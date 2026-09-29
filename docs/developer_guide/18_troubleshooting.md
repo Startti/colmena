@@ -433,11 +433,12 @@ cargo run --bin dag_engine -- run tests/graphs/agents/llm_call.json
 
 ### El proveedor contesta 503 o 429
 
-Pre-flight vuelve a preguntar por la key hasta tres veces, con backoff
-exponencial y jitter; si el proveedor sigue sin contestar, la corrida arranca
-igual (un `warn` de `colmena::preflight`) y el error llega del nodo, nunca como
-«rejected the API key». Nada queda en la caché de pre-flight hasta que haya un
-veredicto: una key válida, o un 401/403 u otro 4xx.
+Ante un 408, 429, 500, 502, 503, 504 o 529, o un error de red, pre-flight vuelve
+a preguntar por la key hasta tres veces, con backoff exponencial y jitter; si
+sigue sin respuesta, la corrida arranca igual (un `warn` de `colmena::preflight`)
+y el error llega del nodo, nunca como «rejected the API key». Nada queda en la
+caché de pre-flight hasta que haya un veredicto: una key válida, o un 401/403 u
+otro estado (un 4xx, o un 5xx como el 501).
 
 ### Error: "Invalid API key"
 

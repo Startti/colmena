@@ -32,7 +32,8 @@ pub enum LlmError {
     RateLimitExceeded,
 
     /// The provider answered a status that says nothing about the request or
-    /// the key (408, 429 or a 5xx): the same request may work a moment later.
+    /// the key (408, 429, 500, 502, 503, 504 or 529): the same request may work
+    /// a moment later.
     #[error("Provider temporarily unavailable (HTTP {status})")]
     ProviderUnavailable { status: u16 },
 
