@@ -43,7 +43,7 @@ of at boot, and the install event never fires.
 
 ## Wire protocol (isolated executors)
 
-Isolated executors (not available in this build yet) talk to the process that
+Isolated executors (`subprocess`, and `python_executor serve` in front of it) talk to the process that
 runs the code over a byte stream, one request and one response per call
 (`python_exec::protocol`, `python_exec::frame`):
 
