@@ -13,6 +13,7 @@ stay in the host process; Python only receives JSON inputs and returns JSON.
 |---|---|---|
 | `inprocess` (default) | inside the host process, embedded interpreter | available |
 | `subprocess` | a jailed child process per call, forked from a warm template (Linux; the host starts as root inside its container) | available |
+| `remote` | a [`python_executor serve`](#remote-service-python_executor-serve) endpoint | not yet: startup refuses it; its [settings](#remote-executor-settings) are read |
 
 Any other value is a configuration error: the host fails at startup (when it
 calls `install_from_env`, as `EngineConfig::from_env` does, and as the
@@ -248,6 +249,29 @@ Logs (target `colmena::python_exec`, level from `RUST_LOG`, `info` by default) a
 event per call with `request_id`, `outcome`, `in_bytes`, `wire_in_bytes` (the body as sent), `out_bytes` and
 `duration_ms`. `request_id` is the caller's `X-Colmena-Request-Id` header reduced to 64 characters of
 `[A-Za-z0-9._:-]` (`-` without one). They never carry code, inputs, outputs, stdout, tokens or other headers.
+
+## Remote executor settings
+
+The `remote` executor, a client of `python_executor serve`, is not selectable yet: `COLMENA_PYTHON_EXECUTOR=remote`
+stops startup with `…=remote is not available in this build`. Its settings are read whenever
+`COLMENA_PYTHON_EXECUTOR_URL` is set, whatever the executor, so an invalid one stops startup like any other variable,
+named in the error. The URL only ever comes from the process environment, never from graph data.
+
+| Variable | Values | Default |
+|---|---|---|
+| `COLMENA_PYTHON_EXECUTOR_URL` | the service's absolute URL: `https`, or `http` only for a loopback host (`127.0.0.0/8`, `::1`, `localhost`) | unset: no remote settings |
+| `COLMENA_PYTHON_EXECUTOR_AUTH` | required with a URL: `none`, `bearer_file` or `gcp_id_token` (`https` only) | — |
+| `COLMENA_PYTHON_EXECUTOR_TOKEN_FILE` | required with `bearer_file`: a file holding the same token as the service's `--token-file` | — |
+| `COLMENA_PYTHON_EXECUTOR_AUDIENCE` | with `gcp_id_token`, the audience the identity token is bound to | the URL's origin (`https://svc.example`, with its port if any) |
+| `COLMENA_PYTHON_EXECUTOR_MAX_WIRE_MB` | 1 to 4095: a cap on the compressed request body, for a transport in front of the service that limits request size (HTTP/1 fronts commonly cap at 32 MiB) | unset: no cap |
+
+The request and response limits are `…_MAX_REQUEST_MB` and `…_MAX_RESPONSE_MB`, as for `subprocess`. For
+`gcp_id_token`, `python_exec::id_token` asks the GCP metadata server of the host's own runtime identity for an
+identity token bound to the audience (`…/service-accounts/default/identity`, `format=standard`, 5 s timeout). The
+token is kept in memory only and fetched again once less than 5 minutes remain before its `exp` claim; concurrent
+callers wait for one fetch. The claim is read without checking the signature: the token is only forwarded, and the
+service checks it. The token is never logged, and the error of a failed fetch names what failed (no answer, the
+HTTP status, an unreadable answer or one that is not a JWT with `exp`), never the answer itself.
 
 ## Equivalence with the in-process executor
 

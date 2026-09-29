@@ -16,6 +16,11 @@ pub const ENV_HIDE_PATHS: &str = "COLMENA_PYTHON_EXECUTOR_HIDE_PATHS";
 pub const ENV_MAX_REQUEST_MB: &str = "COLMENA_PYTHON_EXECUTOR_MAX_REQUEST_MB";
 pub const ENV_MAX_RESPONSE_MB: &str = "COLMENA_PYTHON_EXECUTOR_MAX_RESPONSE_MB";
 pub const ENV_REFUSE_OUTPUT: &str = "COLMENA_PYTHON_EXECUTOR_REFUSE_OUTPUT";
+pub const ENV_URL: &str = "COLMENA_PYTHON_EXECUTOR_URL";
+pub const ENV_AUTH: &str = "COLMENA_PYTHON_EXECUTOR_AUTH";
+pub const ENV_TOKEN_FILE: &str = "COLMENA_PYTHON_EXECUTOR_TOKEN_FILE";
+pub const ENV_AUDIENCE: &str = "COLMENA_PYTHON_EXECUTOR_AUDIENCE";
+pub const ENV_MAX_WIRE_MB: &str = "COLMENA_PYTHON_EXECUTOR_MAX_WIRE_MB";
 const MIB: usize = 1024 * 1024;
 
 /// Which sandbox modes go to an isolated executor.
@@ -48,6 +53,34 @@ pub struct ExecutorConfig {
     /// Deadline for requests that carry none of their own.
     pub max_timeout: Duration,
     pub subprocess: SubprocessConfig,
+    /// Set when `COLMENA_PYTHON_EXECUTOR_URL` is.
+    pub remote: Option<RemoteConfig>,
+}
+
+/// How the remote executor authenticates each call.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RemoteAuthConfig {
+    None,
+    /// `Authorization: Bearer` with the file's content, trimmed.
+    BearerFile(PathBuf),
+    /// An identity token for `audience` from the GCP metadata server.
+    GcpIdToken {
+        audience: String,
+    },
+}
+
+/// Settings of the remote executor, a client of `python_executor serve`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RemoteConfig {
+    pub url: reqwest::Url,
+    pub auth: RemoteAuthConfig,
+    pub max_request_bytes: usize,
+    pub max_response_bytes: usize,
+    /// Cap on the compressed body; `None` is no cap. Set it when the
+    /// transport in front of the service limits request size (HTTP/1 fronts
+    /// commonly cap at 32 MiB), so an oversized call fails with a clear
+    /// message.
+    pub max_wire_bytes: Option<usize>,
 }
 
 /// Settings of the subprocess executor (Linux).
@@ -164,6 +197,73 @@ impl SubprocessConfig {
     }
 }
 
+impl RemoteConfig {
+    /// `None` when no URL is set. The URL only ever comes from the process
+    /// environment, never from graph data.
+    pub fn from_lookup(
+        get: &impl Fn(&str) -> Option<String>,
+        sub: &SubprocessConfig,
+    ) -> Result<Option<Self>, ExecutorConfigError> {
+        let val = |k: &str| {
+            get(k)
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+        };
+        let Some(raw) = val(ENV_URL) else {
+            return Ok(None);
+        };
+        let url =
+            reqwest::Url::parse(&raw).map_err(|_| invalid(ENV_URL, &raw, "an absolute URL"))?;
+        // Loopback as `python_executor serve` reads it (127.0.0.0/8, ::1), or `localhost`.
+        let host = url.host_str().unwrap_or("");
+        let host = host.trim_start_matches('[').trim_end_matches(']');
+        let ip = host.parse::<std::net::IpAddr>();
+        let loopback = host == "localhost" || ip.is_ok_and(|ip| ip.is_loopback());
+        if url.scheme() != "https" && !(url.scheme() == "http" && loopback) {
+            return Err(invalid(
+                ENV_URL,
+                &raw,
+                "https (plain http only for loopback)",
+            ));
+        }
+        let auth = match val(ENV_AUTH).as_deref() {
+            Some("none") => RemoteAuthConfig::None,
+            Some("bearer_file") => RemoteAuthConfig::BearerFile(
+                val(ENV_TOKEN_FILE).map(PathBuf::from).ok_or_else(|| {
+                    ExecutorConfigError(format!("{ENV_AUTH}=bearer_file needs {ENV_TOKEN_FILE}"))
+                })?,
+            ),
+            Some("gcp_id_token") if url.scheme() == "https" => RemoteAuthConfig::GcpIdToken {
+                audience: val(ENV_AUDIENCE).unwrap_or_else(|| url.origin().ascii_serialization()),
+            },
+            Some("gcp_id_token") => {
+                return Err(invalid(
+                    ENV_AUTH,
+                    "gcp_id_token",
+                    "an https URL for identity tokens",
+                ))
+            }
+            Some(v) => return Err(invalid(ENV_AUTH, v, "none, bearer_file or gcp_id_token")),
+            None => {
+                return Err(ExecutorConfigError(format!(
+                    "{ENV_AUTH} is required when {ENV_URL} is set"
+                )))
+            }
+        };
+        let max_wire_bytes = match val(ENV_MAX_WIRE_MB) {
+            None => None,
+            Some(_) => Some(parse_in(get, ENV_MAX_WIRE_MB, 0usize, 1, 4095)? * MIB),
+        };
+        Ok(Some(Self {
+            url,
+            auth,
+            max_request_bytes: sub.max_request_bytes,
+            max_response_bytes: sub.max_response_bytes,
+            max_wire_bytes,
+        }))
+    }
+}
+
 impl ExecutorConfig {
     pub fn from_env() -> Result<Self, ExecutorConfigError> {
         Self::from_lookup(|k| std::env::var(k).ok())
@@ -195,11 +295,13 @@ impl ExecutorConfig {
                 _ => return Err(invalid(ENV_MAX_TIMEOUT, &v, "a positive number of seconds")),
             },
         };
+        let subprocess = SubprocessConfig::from_lookup(&get)?;
         Ok(Self {
             kind,
             modes,
             max_timeout,
-            subprocess: SubprocessConfig::from_lookup(&get)?,
+            remote: RemoteConfig::from_lookup(&get, &subprocess)?,
+            subprocess,
         })
     }
 }
@@ -310,6 +412,71 @@ mod tests {
     fn modes_names_are_the_env_values() {
         assert_eq!(ModesPolicy::Restricted.as_str(), "restricted");
         assert_eq!(ModesPolicy::All.as_str(), "all");
+    }
+
+    #[test]
+    fn remote_requires_url_and_explicit_auth() {
+        let only_kind = cfg(&[(ENV_EXECUTOR, "remote")]);
+        assert!(only_kind.unwrap().remote.is_none()); // parsed; Dispatcher::build refuses it
+        let e = cfg(&[(ENV_EXECUTOR, "remote"), (ENV_URL, "https://x.example")]).unwrap_err();
+        assert!(e.0.contains(ENV_AUTH), "{e}");
+        let r = cfg(&[
+            (ENV_EXECUTOR, "remote"),
+            (ENV_URL, "https://x.example/"),
+            (ENV_AUTH, "gcp_id_token"),
+        ])
+        .unwrap()
+        .remote
+        .unwrap();
+        let audience = "https://x.example".to_string();
+        assert_eq!(r.auth, RemoteAuthConfig::GcpIdToken { audience });
+    }
+
+    #[test]
+    fn plain_http_is_only_for_loopback() {
+        let at = |url, auth| cfg(&[(ENV_EXECUTOR, "remote"), (ENV_URL, url), (ENV_AUTH, auth)]);
+        assert!(at("http://10.0.0.5:8080", "none").is_err());
+        assert!(at("http://127.0.0.1:8080", "none").is_ok());
+        assert!(at("http://[::1]:8080", "none").is_ok());
+        assert!(at("http://127.0.0.2:8080", "none").is_ok());
+        assert!(at("http://localhost:8080", "none").is_ok());
+        assert!(at("http://127.0.0.1:8080", "gcp_id_token").is_err());
+        assert!(at("ftp://x.example", "none").is_err());
+        assert!(at("not a url", "none").is_err());
+    }
+
+    #[test]
+    fn remote_auth_settings_and_wire_cap() {
+        let base = [
+            (ENV_EXECUTOR, "remote"),
+            (ENV_URL, "https://x.example:8443/"),
+        ];
+        let with = |extra: &[(&str, &str)]| cfg(&[&base[..], extra].concat());
+        let e = with(&[(ENV_AUTH, "bearer_file")]).unwrap_err();
+        assert!(e.0.contains(ENV_TOKEN_FILE), "{e}");
+        let r = with(&[(ENV_AUTH, "bearer_file"), (ENV_TOKEN_FILE, "/run/t")]);
+        let r = r.unwrap().remote.unwrap();
+        assert_eq!(
+            r.auth,
+            RemoteAuthConfig::BearerFile(PathBuf::from("/run/t"))
+        );
+        assert_eq!((r.max_request_bytes, r.max_wire_bytes), (256 * MIB, None));
+        let r = with(&[(ENV_AUTH, "gcp_id_token")]).unwrap().remote.unwrap();
+        let audience = "https://x.example:8443".to_string();
+        assert_eq!(r.auth, RemoteAuthConfig::GcpIdToken { audience });
+        let r = with(&[
+            (ENV_AUTH, "gcp_id_token"),
+            (ENV_AUDIENCE, "aud"),
+            (ENV_MAX_WIRE_MB, "31"),
+        ]);
+        let r = r.unwrap().remote.unwrap();
+        let audience = "aud".to_string();
+        assert_eq!(r.auth, RemoteAuthConfig::GcpIdToken { audience });
+        assert_eq!(r.max_wire_bytes, Some(31 * MIB));
+        let e = with(&[(ENV_AUTH, "none"), (ENV_MAX_WIRE_MB, "0")]).unwrap_err();
+        assert!(e.0.contains(ENV_MAX_WIRE_MB), "{e}");
+        let e = with(&[(ENV_AUTH, "basic")]).unwrap_err();
+        assert!(e.0.contains(ENV_AUTH), "{e}");
     }
 
     #[test]

@@ -7350,3 +7350,36 @@ binario que sale con 3 la espera devuelve `the Python template process could not
 **ADP.** El worker, con `COLMENA_PYTHON_EXECUTOR=subprocess`, debe esperar `wait_until_ready()` después de
 `install_from_env` (o `EngineConfig::from_env`) y antes de abrir su puerto, y loguear el error si lo hay. Llega con el
 próximo tag. **Estado.** done.
+
+## 203. Python: configuración del executor `remote` y tokens de identidad (`remote`, 1/2)
+
+**Qué cambia.** Primera de dos partes del executor `remote`, el cliente de `python_executor serve`: su configuración y
+la fuente de tokens de identidad, todavía sin cliente. `ExecutorConfig` suma `remote: Option<RemoteConfig>`, que se lee
+cuando está `COLMENA_PYTHON_EXECUTOR_URL`, sea cual sea el executor. La URL es absoluta, `https`, o `http` solo con un
+host loopback (`127.0.0.0/8`, `::1` o `localhost`); sale solo del entorno del proceso, nunca de datos del grafo.
+`COLMENA_PYTHON_EXECUTOR_AUTH` es obligatoria con una URL: `none`, `bearer_file` (pide
+`COLMENA_PYTHON_EXECUTOR_TOKEN_FILE`) o `gcp_id_token` (solo `https`; audiencia en `COLMENA_PYTHON_EXECUTOR_AUDIENCE`,
+por defecto el origen de la URL). `COLMENA_PYTHON_EXECUTOR_MAX_WIRE_MB` (1 a 4095) pone tope al body comprimido, para un
+frente que limita el tamaño de pedido; sin ella no hay tope. Los límites de pedido y respuesta son los de
+`subprocess`. Un valor inválido corta el arranque con la variable en el error, también con `inprocess`.
+`COLMENA_PYTHON_EXECUTOR=remote` sigue rechazado al arrancar. Nuevo `python_exec::id_token`: `IdTokenSource` pide al
+servidor de metadata de GCP un token de identidad para la audiencia (`format=standard`, 5 s), lo guarda solo en memoria
+y lo vuelve a pedir cuando le quedan menos de 5 minutos; las llamadas concurrentes esperan un solo pedido, y el token
+nunca se loguea. `jwt_expiry` lee `exp` sin chequear la firma: el token solo se reenvía. Sin dependencias nuevas
+(`wiremock` ya era dev-dependency). Guía:
+[53_python_executors.md](developer_guide/53_python_executors.md#remote-executor-settings).
+**Tests.** Config: sin URL no hay config remota (y `remote` sigue rechazado); con URL sin `AUTH`, error que la nombra;
+`http` pasa solo con loopback (`127.0.0.1`, `127.0.0.2`, `[::1]`, `localhost`) y nunca con `gcp_id_token`; la
+audiencia por defecto es el origen de la URL, con su puerto; `bearer_file` sin archivo, un `AUTH` desconocido y
+`MAX_WIRE_MB=0` son errores. `IdTokenSource` contra un servidor wiremock: un solo pedido (con `Metadata-Flavor`,
+`audience` y `format`) para dos llamadas; un token que vence en 60 s se vuelve a pedir; un 404 da un error con el
+status y sin el body. `jwt_expiry` lee `exp` y rechaza lo que no es JWT, un payload que no es base64url, un JSON sin
+`exp` y un `exp` fuera de rango. Rojos contra stubs (los 7 tests nuevos) y con mutaciones: `http` en cualquier host,
+`gcp_id_token` sobre `http`, el tope sin pasar a MiB, margen de refresco 0, sin caché y sin chequear el status ponen
+rojo cada uno su test. `--lib python_exec`: 89 en Linux con la jaula, 49 en macOS; clippy `-D warnings` limpio en
+Linux y macOS. E2E con el smoke por `dag_engine run` en el contenedor: sin variables, con `http://127.0.0.1:8080` +
+`none` y con `https` + `gcp_id_token` + `MAX_WIRE_MB=31`, los cuatro `python run` dan `outcome="ok"` en proceso y la
+misma firma; con `http://10.0.0.5:8080`, sin `AUTH`, con `gcp_id_token` sobre `http` y con `remote`, el arranque corta
+con la variable en el error.
+**ADP.** Sin impacto: nada usa la config remota todavía, y un host sin `COLMENA_PYTHON_EXECUTOR_URL` no cambia.
+**Estado.** done.
