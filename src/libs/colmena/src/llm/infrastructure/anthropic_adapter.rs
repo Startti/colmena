@@ -2,7 +2,9 @@ use crate::llm::domain::{
     FileSource, FunctionCall, LlmError, LlmRepository, LlmRequest, LlmResponse, LlmStream,
     LlmStreamChunk, LlmStreamPart, LlmUsage, MessageRole, ToolCall, ToolCallChunk,
 };
-use crate::llm::infrastructure::transient::is_transient_status;
+use crate::llm::infrastructure::transient::{
+    is_transient_status, send_with_transient_retry, RetryPolicy, CREDENTIAL_CHECK_TIMEOUT,
+};
 use async_trait::async_trait;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use futures::{Stream, StreamExt};
@@ -16,6 +18,8 @@ use std::task::{Context, Poll};
 pub struct AnthropicAdapter {
     client: Client,
     base_url: String,
+    /// Sends a model request again after a transient answer (`transient`).
+    retry: RetryPolicy,
 }
 
 impl Default for AnthropicAdapter {
@@ -29,6 +33,7 @@ impl AnthropicAdapter {
         Self {
             client: crate::shared::http_client::client(),
             base_url: "https://api.anthropic.com/v1".to_string(),
+            retry: RetryPolicy::from_env(),
         }
     }
 
@@ -36,6 +41,7 @@ impl AnthropicAdapter {
         Self {
             client: crate::shared::http_client::client(),
             base_url,
+            retry: RetryPolicy::from_env(),
         }
     }
 
@@ -307,17 +313,15 @@ impl LlmRepository for AnthropicAdapter {
     async fn call(&self, request: LlmRequest) -> Result<LlmResponse, LlmError> {
         let body = self.build_request_body(&request)?;
 
-        let response = self
+        let http_request = self
             .client
             .post(format!("{}/messages", self.base_url))
             .header("x-api-key", request.config().api_key())
             .header("Content-Type", "application/json")
             .header("anthropic-version", "2023-06-01")
             .header("anthropic-beta", "files-api-2025-04-14")
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| LlmError::network_error(e.to_string()))?;
+            .json(&body);
+        let response = send_with_transient_retry("anthropic", &self.retry, http_request).await?;
 
         if !response.status().is_success() {
             let error_text = response
@@ -388,17 +392,15 @@ impl LlmRepository for AnthropicAdapter {
     async fn stream(&self, request: LlmRequest) -> Result<LlmStream, LlmError> {
         let body = self.build_request_body(&request)?;
 
-        let response = self
+        let http_request = self
             .client
             .post(format!("{}/messages", self.base_url))
             .header("x-api-key", request.config().api_key())
             .header("Content-Type", "application/json")
             .header("anthropic-version", "2023-06-01")
             .header("anthropic-beta", "files-api-2025-04-14")
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| LlmError::network_error(e.to_string()))?;
+            .json(&body);
+        let response = send_with_transient_retry("anthropic", &self.retry, http_request).await?;
 
         if !response.status().is_success() {
             let error_text = response
@@ -628,6 +630,7 @@ impl LlmRepository for AnthropicAdapter {
             .get(format!("{}/models", self.base_url))
             .header("x-api-key", api_key)
             .header("anthropic-version", "2023-06-01")
+            .timeout(CREDENTIAL_CHECK_TIMEOUT)
             .send()
             .await
             .map_err(|e| LlmError::network_error(e.to_string()))?;
@@ -878,6 +881,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::llm::infrastructure::transient::stub_answering;
+    use wiremock::ResponseTemplate;
 
     #[test]
     fn new_uses_production_default() {
@@ -1380,5 +1385,42 @@ mod tests {
         assert_eq!(arr[0]["cache_control"]["type"], "ephemeral");
         assert!(arr[1].get("cache_control").is_none());
         assert!(arr[2].get("cache_control").is_none());
+    }
+
+    #[tokio::test]
+    async fn call_and_stream_send_the_request_again_after_a_503() {
+        for streaming in [false, true] {
+            let second = ResponseTemplate::new(400).set_body_string("second answer");
+            let server = stub_answering(ResponseTemplate::new(503), Some(second)).await;
+            let mut adapter = AnthropicAdapter::with_base_url(server.uri());
+            adapter.retry = RetryPolicy::immediate(2);
+            let request = anth_request_with_suffix("s", None);
+            let err = match streaming {
+                false => adapter.call(request).await.err(),
+                true => adapter.stream(request).await.err(),
+            };
+            assert!(format!("{err:?}").contains("second answer"), "{err:?}");
+            assert_eq!(server.received_requests().await.unwrap().len(), 2);
+        }
+    }
+
+    /// The decision to send again reads the status, before the body: a stream
+    /// whose output has started is never sent again, even if it ends early.
+    #[tokio::test]
+    async fn a_stream_is_not_sent_again_once_its_output_has_started() {
+        let delta = r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hel"}}"#;
+        let cut_short = ResponseTemplate::new(200)
+            .set_body_raw(format!("data: {delta}\n\n"), "text/event-stream");
+        let server = stub_answering(ResponseTemplate::new(503), Some(cut_short)).await;
+        let mut adapter = AnthropicAdapter::with_base_url(server.uri());
+        adapter.retry = RetryPolicy::immediate(2);
+        let stream = adapter
+            .stream(anth_request_with_suffix("s", None))
+            .await
+            .unwrap();
+        let chunks: Vec<_> = stream.collect().await;
+        let text: String = chunks.iter().flatten().map(|c| c.content()).collect();
+        assert_eq!(text, "Hel");
+        assert_eq!(server.received_requests().await.unwrap().len(), 2);
     }
 }

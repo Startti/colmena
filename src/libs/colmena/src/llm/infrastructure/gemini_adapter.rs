@@ -3,7 +3,9 @@ use crate::llm::domain::{
     LlmStreamChunk, LlmStreamPart, LlmUsage, MessageRole, ToolCall, ToolCallChunk,
 };
 use crate::llm::infrastructure::gemini_schema;
-use crate::llm::infrastructure::transient::is_transient_status;
+use crate::llm::infrastructure::transient::{
+    is_transient_status, send_with_transient_retry, RetryPolicy, CREDENTIAL_CHECK_TIMEOUT,
+};
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
 use reqwest::Client;
@@ -15,6 +17,8 @@ use std::task::{Context, Poll};
 pub struct GeminiAdapter {
     client: Client,
     base_url: String,
+    /// Sends a model request again after a transient answer (`transient`).
+    retry: RetryPolicy,
 }
 
 impl Default for GeminiAdapter {
@@ -28,6 +32,7 @@ impl GeminiAdapter {
         Self {
             client: crate::shared::http_client::client(),
             base_url: "https://generativelanguage.googleapis.com/v1beta".to_string(),
+            retry: RetryPolicy::from_env(),
         }
     }
 
@@ -35,6 +40,7 @@ impl GeminiAdapter {
         Self {
             client: crate::shared::http_client::client(),
             base_url,
+            retry: RetryPolicy::from_env(),
         }
     }
 
@@ -349,15 +355,13 @@ impl LlmRepository for GeminiAdapter {
             request.config().model()
         );
 
-        let response = self
+        let http_request = self
             .client
             .post(&url)
             .header("Content-Type", "application/json")
             .header("x-goog-api-key", request.config().api_key())
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| LlmError::network_error(e.to_string()))?;
+            .json(&body);
+        let response = send_with_transient_retry("gemini", &self.retry, http_request).await?;
 
         if !response.status().is_success() {
             let error_text = response
@@ -532,15 +536,13 @@ impl LlmRepository for GeminiAdapter {
             request.config().model()
         );
 
-        let response = self
+        let http_request = self
             .client
             .post(&url)
             .header("Content-Type", "application/json")
             .header("x-goog-api-key", request.config().api_key())
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| LlmError::network_error(e.to_string()))?;
+            .json(&body);
+        let response = send_with_transient_retry("gemini", &self.retry, http_request).await?;
 
         if !response.status().is_success() {
             let error_text = response
@@ -729,6 +731,7 @@ impl LlmRepository for GeminiAdapter {
             .client
             .get(format!("{}/models", self.base_url))
             .query(&[("key", api_key)])
+            .timeout(CREDENTIAL_CHECK_TIMEOUT)
             .send()
             .await
             // The key travels in the query string: an error that quotes the
@@ -1607,5 +1610,24 @@ mod tests {
             text.contains("## Conversation summary (older turns)"),
             "compaction summary survives"
         );
+    }
+
+    #[tokio::test]
+    async fn call_and_stream_send_the_request_again_after_a_503() {
+        use crate::llm::infrastructure::transient::stub_answering;
+        use wiremock::ResponseTemplate;
+        for streaming in [false, true] {
+            let second = ResponseTemplate::new(400).set_body_string("second answer");
+            let server = stub_answering(ResponseTemplate::new(503), Some(second)).await;
+            let mut adapter = GeminiAdapter::with_base_url(server.uri());
+            adapter.retry = RetryPolicy::immediate(2);
+            let request = gemini_req_with_suffix(None);
+            let err = match streaming {
+                false => adapter.call(request).await.err(),
+                true => adapter.stream(request).await.err(),
+            };
+            assert!(format!("{err:?}").contains("second answer"), "{err:?}");
+            assert_eq!(server.received_requests().await.unwrap().len(), 2);
+        }
     }
 }

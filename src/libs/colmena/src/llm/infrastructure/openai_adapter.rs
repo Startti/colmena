@@ -2,7 +2,9 @@ use crate::llm::domain::{
     FileSource, FunctionCall, LlmError, LlmRepository, LlmRequest, LlmResponse, LlmStream,
     LlmStreamChunk, LlmStreamPart, LlmUsage, MessageRole, ToolCall, ToolCallChunk,
 };
-use crate::llm::infrastructure::transient::is_transient_status;
+use crate::llm::infrastructure::transient::{
+    is_transient_status, send_with_transient_retry, RetryPolicy, CREDENTIAL_CHECK_TIMEOUT,
+};
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
 use reqwest::Client;
@@ -14,6 +16,8 @@ use std::task::{Context, Poll};
 pub struct OpenAiAdapter {
     client: Client,
     base_url: String,
+    /// Sends a model request again after a transient answer (`transient`).
+    retry: RetryPolicy,
 }
 
 impl Default for OpenAiAdapter {
@@ -27,6 +31,7 @@ impl OpenAiAdapter {
         Self {
             client: crate::shared::http_client::client(),
             base_url: "https://api.openai.com/v1".to_string(),
+            retry: RetryPolicy::from_env(),
         }
     }
 
@@ -34,6 +39,7 @@ impl OpenAiAdapter {
         Self {
             client: crate::shared::http_client::client(),
             base_url,
+            retry: RetryPolicy::from_env(),
         }
     }
 
@@ -276,7 +282,7 @@ impl OpenAiAdapter {
     async fn call_chat_completions(&self, request: LlmRequest) -> Result<LlmResponse, LlmError> {
         let body = self.build_request_body(&request)?;
 
-        let response = self
+        let http_request = self
             .client
             .post(format!("{}/chat/completions", self.base_url))
             .header(
@@ -284,10 +290,8 @@ impl OpenAiAdapter {
                 format!("Bearer {}", request.config().api_key()),
             )
             .header("Content-Type", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| LlmError::network_error(e.to_string()))?;
+            .json(&body);
+        let response = send_with_transient_retry("openai", &self.retry, http_request).await?;
 
         if !response.status().is_success() {
             let error_text = response
@@ -367,7 +371,7 @@ impl OpenAiAdapter {
     async fn stream_chat_completions(&self, request: LlmRequest) -> Result<LlmStream, LlmError> {
         let body = self.build_request_body(&request)?;
 
-        let response = self
+        let http_request = self
             .client
             .post(format!("{}/chat/completions", self.base_url))
             .header(
@@ -375,10 +379,8 @@ impl OpenAiAdapter {
                 format!("Bearer {}", request.config().api_key()),
             )
             .header("Content-Type", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| LlmError::network_error(e.to_string()))?;
+            .json(&body);
+        let response = send_with_transient_retry("openai", &self.retry, http_request).await?;
 
         if !response.status().is_success() {
             let error_text = response
@@ -544,6 +546,7 @@ impl LlmRepository for OpenAiAdapter {
             .client
             .get(format!("{}/models", self.base_url))
             .header("Authorization", format!("Bearer {}", api_key))
+            .timeout(CREDENTIAL_CHECK_TIMEOUT)
             .send()
             .await
             .map_err(|e| LlmError::network_error(e.to_string()))?;
@@ -1125,7 +1128,7 @@ impl OpenAiAdapter {
     async fn call_responses(&self, request: LlmRequest) -> Result<LlmResponse, LlmError> {
         let body = self.build_responses_request_body(&request)?;
 
-        let response = self
+        let http_request = self
             .client
             .post(format!("{}/responses", self.base_url))
             .header(
@@ -1133,10 +1136,8 @@ impl OpenAiAdapter {
                 format!("Bearer {}", request.config().api_key()),
             )
             .header("Content-Type", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| LlmError::network_error(e.to_string()))?;
+            .json(&body);
+        let response = send_with_transient_retry("openai", &self.retry, http_request).await?;
 
         if !response.status().is_success() {
             let error_text = response
@@ -1212,7 +1213,7 @@ impl OpenAiAdapter {
         let mut body = self.build_responses_request_body(&request)?;
         body["stream"] = json!(true);
 
-        let response = self
+        let http_request = self
             .client
             .post(format!("{}/responses", self.base_url))
             .header(
@@ -1220,10 +1221,8 @@ impl OpenAiAdapter {
                 format!("Bearer {}", request.config().api_key()),
             )
             .header("Content-Type", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| LlmError::network_error(e.to_string()))?;
+            .json(&body);
+        let response = send_with_transient_retry("openai", &self.retry, http_request).await?;
 
         if !response.status().is_success() {
             let error_text = response
@@ -2473,5 +2472,36 @@ mod tests {
         assert_eq!(calls[0].id, "call_abc", "call_id is the id echoed back");
         assert_eq!(calls[0].function.name, "recall_history");
         assert_eq!(calls[0].function.arguments, "{\"turn\":1}");
+    }
+
+    #[tokio::test]
+    async fn every_endpoint_sends_the_request_again_after_a_503() {
+        use crate::llm::domain::{LlmConfig, LlmMessage, LlmProvider, ProviderKind};
+        use crate::llm::infrastructure::transient::stub_answering;
+        use wiremock::ResponseTemplate;
+        for endpoint in 0..4 {
+            let second = ResponseTemplate::new(400).set_body_string("second answer");
+            let server = stub_answering(ResponseTemplate::new(503), Some(second)).await;
+            let mut adapter = OpenAiAdapter::with_base_url(server.uri());
+            adapter.retry = RetryPolicy::immediate(2);
+            let provider = LlmProvider::new(ProviderKind::OpenAi, "k".into(), None).unwrap();
+            let messages = vec![LlmMessage::user("hi".into()).unwrap()];
+            let request = LlmRequest::new(messages, LlmConfig::new(provider), false).unwrap();
+            let err = match endpoint {
+                0 => adapter.call_chat_completions(request).await.err(),
+                1 => adapter.stream_chat_completions(request).await.err(),
+                2 => adapter.call_responses(request).await.err(),
+                _ => adapter.stream_responses(request).await.err(),
+            };
+            assert!(
+                format!("{err:?}").contains("second answer"),
+                "{endpoint}: {err:?}"
+            );
+            assert_eq!(
+                server.received_requests().await.unwrap().len(),
+                2,
+                "{endpoint}"
+            );
+        }
     }
 }
