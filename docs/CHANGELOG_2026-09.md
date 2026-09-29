@@ -7237,3 +7237,24 @@ forkean sin parar. Mutación roja: con `std::fs::write` falla 20 de 20 corridas 
 el fix pasa 20 de 20. En Linux (Docker, `debian:bookworm`, root, 32 hilos de test) la suite `python_exec` pasa 100 de
 100 corridas. Aparte, un arnés que repite el patrón escribir→ejecutar contra 16 hilos que forkean dio 1605 ETXTBSY en
 15000 ejecuciones con `std::fs::write` y 0 con el `sh` hijo. **ADP.** No aplica (solo tests). **Estado.** done.
+
+## 197. Python: token bearer y chequeos de pedido para servir el executor por HTTP (`serve`, 1/4)
+
+**Qué cambia.** Primera de cuatro partes de `python_executor serve`, el frente HTTP del executor `subprocess`: las
+piezas contra las que el servidor chequea un pedido y su propio arranque, todavía sin servidor
+(`python_exec::server`). `token`: el token de un archivo, recortado y nunca vacío; sin archivo de token solo se puede
+servir en una dirección loopback. `executor_config`: la config del executor con el archivo del token tapado en la
+jaula por su ruta canónica (absoluta, sin `..`, a través de cualquier symlink), así el self-test de arranque prueba
+que el código que corre no puede leerlo; el token debe tener 32 o más caracteres ASCII visibles. `authorized`: el
+chequeo de `Authorization: Bearer`, que compara digests SHA-256 hasta el último byte, así el tiempo que tarda no dice
+nada del token ni de su largo. `deadline`: el plazo que pide un wire request, con tope en el máximo del executor; un
+body que no es un wire request de esta versión se rechaza. `SubprocessExecutor` suma `config()` y `has_usable_slot()`
+(falso cuando todos los slots quedaron retirados y hay que reiniciar el proceso). Las cuatro funciones son `pub` solo
+en esta parte, porque nada del crate las llama todavía; la parte 2 las vuelve privadas cuando el router las usa.
+**Tests.** Unitarios de cada pieza: solo el token exacto autoriza (sin `Bearer `, con `Basic`, prefijo o sufijo del
+token: no); token corto o con un carácter no ASCII rechazado, y el archivo tapado por su ruta canónica a través de un
+symlink; plazo con tope y otra versión rechazada (400); token obligatorio fuera de loopback, un archivo vacío o
+faltante rechazado. `a_call_fails_at_once_when_no_slot_is_left` afirma además `has_usable_slot()` antes y después de
+retirar los slots; con `has_usable_slot()` siempre verdadero, ese test falla. En Linux `--lib python_exec` pasa 73;
+clippy `-D warnings` limpio en Linux y macOS. **ADP.** Sin impacto: nada llama a estas piezas todavía.
+**Estado.** done.
