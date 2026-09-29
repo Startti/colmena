@@ -7302,7 +7302,7 @@ dependencias. Contenedor con la jaula: `--lib python_exec::server` 6, serve 1/1;
 job del executor aislado de CI suma el test. **ADP.** Sin impacto: el motor todavía no llama a `serve`.
 **Estado.** done.
 
-## 200. Python: `python_executor serve` está listo solo con el egress cerrado y acota los pedidos en vuelo (`serve`, 4/4)
+## 202. Python: `python_executor serve` está listo solo con el egress cerrado y acota los pedidos en vuelo (`serve`, 4/4)
 
 **Qué cambia.** `--require-closed-egress host:port,...`: el servidor se reporta listo solo mientras cada destino está
 probado cerrado, es decir, resuelve y cada una de sus direcciones rechaza la conexión o la deja vencer (2 s). Un
