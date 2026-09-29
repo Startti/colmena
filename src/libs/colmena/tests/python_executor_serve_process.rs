@@ -123,3 +123,28 @@ async fn a_served_call_needs_the_token_and_cannot_read_it() {
         json!("MARKER.x")
     );
 }
+
+/// An egress target that is not `host:port` stops `serve` before anything
+/// starts; it is not taken as a target that refuses connections.
+#[test]
+fn a_malformed_egress_target_is_refused_at_startup() {
+    let mut serve = Command::new(env!("CARGO_BIN_EXE_python_executor"));
+    serve.args([
+        "serve",
+        "--listen",
+        "127.0.0.1:0",
+        "--require-closed-egress",
+    ]);
+    let serve = serve
+        .arg("127.0.0.1:443,127.0.0.1")
+        .stderr(std::process::Stdio::piped());
+    let mut server = Server(serve.spawn().unwrap());
+    let t0 = Instant::now();
+    while server.0.try_wait().unwrap().is_none() && t0.elapsed() < Duration::from_secs(10) {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(server.0.try_wait().unwrap().and_then(|s| s.code()), Some(2));
+    let mut stderr = String::new();
+    std::io::Read::read_to_string(&mut server.0.stderr.take().unwrap(), &mut stderr).unwrap();
+    assert!(stderr.contains("'127.0.0.1'"), "{stderr}");
+}
