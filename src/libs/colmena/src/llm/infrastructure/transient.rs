@@ -93,15 +93,16 @@ fn retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
 /// jitter. The decision reads only the status and the headers, so the body of
 /// the answer that is returned has not been touched: a stream is never sent
 /// again once its output has started. A transport error is returned at once,
-/// because the request may have reached the provider; so is the first answer
-/// to a request whose body cannot be copied (a stream). The last answer is
-/// returned as it came, so the caller reads its status and body as before.
+/// because the request may have reached the provider, and without the URL in
+/// its text; so is the first answer to a request whose body cannot be copied
+/// (a stream). The last answer is returned as it came, so the caller reads its
+/// status and body as before.
 pub async fn send_with_transient_retry(
     provider: &'static str,
     policy: &RetryPolicy,
     request: reqwest::RequestBuilder,
 ) -> Result<reqwest::Response, LlmError> {
-    let network = |e: reqwest::Error| LlmError::network_error(e.to_string());
+    let network = |e: reqwest::Error| LlmError::network_error(e.without_url().to_string());
     let mut retried = 0u32;
     loop {
         let Some(attempt) = request.try_clone() else {
@@ -254,6 +255,25 @@ mod tests {
         assert!(started.elapsed() >= Duration::from_secs(1));
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn the_default_backoff_is_a_real_wait() {
+        let mut policy = RetryPolicy::from_env();
+        policy.retries = 1;
+        let s = Duration::from_secs;
+        let got = (policy.base, policy.cap, policy.max_retry_after);
+        assert_eq!(got, (s(1), s(8), s(20)));
+        let server =
+            stub_answering(ResponseTemplate::new(503), Some(ResponseTemplate::new(200))).await;
+        // No idle-pool timer: the paused clock would jump to it during the I/O.
+        let client = reqwest::Client::builder()
+            .pool_idle_timeout(None)
+            .build()
+            .unwrap();
+        let started = tokio::time::Instant::now();
+        let sent = send_with_transient_retry("test", &policy, client.post(server.uri())).await;
+        assert!(sent.is_ok() && started.elapsed() > Duration::ZERO);
+    }
+
     #[tokio::test]
     async fn a_body_that_cannot_be_copied_is_sent_once() {
         let server = stub_answering(ResponseTemplate::new(503), None).await;
@@ -271,7 +291,7 @@ mod tests {
     async fn a_transport_error_is_not_sent_again() {
         // Accepts each connection and closes it without an answer.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("http://{}", listener.local_addr().unwrap());
+        let url = format!("http://{}/v1?key=FAKE-KEY", listener.local_addr().unwrap());
         let accepted = tokio::spawn(async move {
             let mut count = 0;
             let quiet = Duration::from_millis(500);
@@ -283,10 +303,10 @@ mod tests {
         });
         let request = reqwest::Client::new().post(url);
         let result = send_with_transient_retry("test", &RetryPolicy::immediate(2), request).await;
-        assert!(
-            matches!(result, Err(LlmError::NetworkError { .. })),
-            "{result:?}"
-        );
+        let Err(LlmError::NetworkError { message }) = result else {
+            panic!("{result:?}");
+        };
+        assert!(!message.contains("FAKE-KEY") && !message.contains("127.0.0.1"));
         assert_eq!(accepted.await.unwrap(), 1);
     }
 
