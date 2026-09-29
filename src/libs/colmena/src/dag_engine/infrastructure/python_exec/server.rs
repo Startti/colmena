@@ -1,18 +1,69 @@
-//! Pieces of the HTTP front for the subprocess executor (`python_executor
-//! serve`): the bearer token and the file it is read from, which the jail
-//! hides, and the version and deadline of a request.
+//! HTTP front for the subprocess executor (`python_executor serve`). A request
+//! body is a wire request and a response body a wire response, as JSON. Every
+//! call goes through [`SubprocessExecutor::run_raw`], so the jail and the
+//! output policy apply as they do in a host. Logs carry fields only: never
+//! code, inputs, outputs, stdout, tokens or headers.
 
+use super::child::EXIT_NOT_READY;
 use super::config::SubprocessConfig;
-use super::protocol::WIRE_VERSION;
+use super::jail::JailSpec;
+use super::protocol::{
+    result_too_large_message, WireResponse, WireStatus, REFUSED_MESSAGE, WIRE_VERSION,
+};
+use super::selftest;
+use super::subprocess::{RawFailure, SubprocessExecutor};
+use crate::dag_engine::log_policy::T_PYTHON_EXEC;
+use axum::extract::{DefaultBodyLimit, Request, State};
 use axum::http::{header, HeaderMap, StatusCode};
+use axum::middleware::{from_fn_with_state, Next};
+use axum::response::{IntoResponse, Response};
+use axum::{body::Bytes, routing::get, routing::post, Router};
 use sha2::{Digest, Sha256};
 use std::net::SocketAddr;
-use std::path::Path;
-use std::time::Duration;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tokio::signal::unix::{signal, SignalKind};
+
+pub struct ServeArgs {
+    pub listen: SocketAddr,
+    pub subprocess: SubprocessConfig,
+    /// The longest deadline a request may ask for.
+    pub max_timeout: Duration,
+    /// Every request must carry `Authorization: Bearer <the file's content>`;
+    /// required unless `listen` is a loopback address.
+    pub token_file: Option<PathBuf>,
+}
+
+#[derive(Clone)]
+pub struct AppState {
+    pub exec: Arc<SubprocessExecutor>,
+    pub token: Option<Arc<String>>,
+    pub ready: Arc<AtomicBool>,
+    pub max_timeout: Duration,
+}
+
+pub fn router(state: AppState) -> Router {
+    let limit = state.exec.config().max_request_bytes;
+    let run = post(run_call).route_layer(from_fn_with_state(state.clone(), guard));
+    let readyz = |State(st): State<AppState>| async move {
+        match st.ready.load(SeqCst) {
+            true => StatusCode::OK,
+            false => StatusCode::SERVICE_UNAVAILABLE,
+        }
+    };
+    Router::new()
+        .route("/v1/run", run)
+        .route("/healthz", get(|| async { StatusCode::OK }))
+        .route("/readyz", get(readyz))
+        .layer(DefaultBodyLimit::max(limit))
+        .with_state(state)
+}
 
 /// Whether the request carries the token. Digests are compared to the last
 /// byte, so the time taken says nothing about the token, its length included.
-pub fn authorized(headers: &HeaderMap, token: Option<&str>) -> bool {
+fn authorized(headers: &HeaderMap, token: Option<&str>) -> bool {
     let Some(token) = token else { return true };
     let sent = headers
         .get(header::AUTHORIZATION)
@@ -24,6 +75,18 @@ pub fn authorized(headers: &HeaderMap, token: Option<&str>) -> bool {
     a.iter().zip(b.iter()).fold(0, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
+/// Refuses a request without the token (401) or while not ready (503),
+/// before its body is read.
+async fn guard(State(st): State<AppState>, req: Request, next: Next) -> Response {
+    if !authorized(req.headers(), st.token.as_deref().map(String::as_str)) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    match st.ready.load(SeqCst) {
+        true => next.run(req).await,
+        false => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    }
+}
+
 #[derive(serde::Deserialize)]
 struct Peek {
     v: u32,
@@ -32,15 +95,70 @@ struct Peek {
 
 /// The deadline the request asks for, capped at `max`; 400 unless the body is
 /// a wire request of this version.
-pub fn deadline(raw: &[u8], max: Duration) -> Result<Duration, StatusCode> {
+fn deadline(raw: &[u8], max: Duration) -> Result<Duration, StatusCode> {
     match serde_json::from_slice::<Peek>(raw) {
         Ok(p) if p.v == WIRE_VERSION => Ok(Duration::from_millis(p.timeout_ms).min(max)),
         _ => Err(StatusCode::BAD_REQUEST),
     }
 }
 
+/// A call's result as a wire response, or an HTTP error without a body; with
+/// its outcome for the log.
+fn answer(
+    result: Result<Vec<u8>, RawFailure>,
+    max_response: usize,
+) -> (StatusCode, Vec<u8>, &'static str) {
+    let wire = |status, message: Option<String>, outcome| {
+        let body = serde_json::to_vec(&WireResponse::status_only(status, message));
+        (StatusCode::OK, body.unwrap_or_default(), outcome)
+    };
+    let refused = || Some(REFUSED_MESSAGE.to_string());
+    match result {
+        Ok(body) => (StatusCode::OK, body, "completed"),
+        Err(RawFailure::Timeout) => wire(WireStatus::Timeout, None, "timeout"),
+        Err(RawFailure::Crashed) => wire(WireStatus::Crashed, None, "crashed"),
+        Err(RawFailure::ResponseTooLarge) => {
+            let message = Some(result_too_large_message(max_response));
+            wire(WireStatus::TooLarge, message, "result_too_large")
+        }
+        Err(RawFailure::Refused) => wire(WireStatus::PythonError, refused(), "output_refused"),
+        Err(RawFailure::RequestTooLarge) => {
+            (StatusCode::PAYLOAD_TOO_LARGE, vec![], "request_too_large")
+        }
+        Err(RawFailure::Unavailable(_)) => (StatusCode::SERVICE_UNAVAILABLE, vec![], "unavailable"),
+    }
+}
+
+async fn run_call(State(st): State<AppState>, raw: Bytes) -> Response {
+    let timeout = match deadline(&raw, st.max_timeout) {
+        Ok(timeout) => timeout,
+        Err(code) => return code.into_response(),
+    };
+    let (started, max_response) = (Instant::now(), st.exec.config().max_response_bytes);
+    let (code, out, outcome) = answer(st.exec.run_raw(timeout, &raw).await, max_response);
+    let (in_bytes, out_bytes) = (raw.len(), out.len());
+    let duration_ms = started.elapsed().as_millis() as u64;
+    tracing::info!(target: T_PYTHON_EXEC, outcome, in_bytes, out_bytes, duration_ms, "python serve run");
+    match out.is_empty() {
+        true => code.into_response(),
+        false => (code, [(header::CONTENT_TYPE, "application/json")], out).into_response(),
+    }
+}
+
+/// Keeps `ready` true only while the template runs; checked every minute,
+/// every 5 s while not ready.
+async fn readiness(exec: Arc<SubprocessExecutor>, ready: Arc<AtomicBool>) {
+    loop {
+        let ok = exec.warm().await.is_ok();
+        if ready.swap(ok, SeqCst) != ok {
+            tracing::info!(target: T_PYTHON_EXEC, ready = ok, "python serve readiness");
+        }
+        tokio::time::sleep(Duration::from_secs(if ok { 60 } else { 5 })).await;
+    }
+}
+
 /// The token of `--token-file`; without one, only loopback is served.
-pub fn token(file: Option<&Path>, listen: SocketAddr) -> Result<Option<String>, String> {
+fn token(file: Option<&Path>, listen: SocketAddr) -> Result<Option<String>, String> {
     let Some(file) = file else {
         return match listen.ip().is_loopback() {
             true => Ok(None),
@@ -64,7 +182,7 @@ const MIN_TOKEN_BYTES: usize = 32;
 /// the jail, by its canonical path (absolute, without `..`, through any
 /// symlink), so the code the server runs cannot read it and the self-test
 /// proves so. The token must be visible ASCII, [`MIN_TOKEN_BYTES`] or more.
-pub fn executor_config(
+fn executor_config(
     cfg: &SubprocessConfig,
     token: Option<&str>,
     file: Option<&Path>,
@@ -84,9 +202,66 @@ pub fn executor_config(
     Ok(cfg)
 }
 
+/// `python_executor serve`: checks the configuration, proves the jail once
+/// (each template start proves it again) and serves until SIGTERM or Ctrl-C.
+/// Exits 2 for a bad configuration, [`EXIT_NOT_READY`] when the jail does not
+/// hold, 1 when serving fails.
+pub fn run(args: ServeArgs) -> i32 {
+    let Err((code, reason)) = start(args) else {
+        return 0;
+    };
+    tracing::error!(target: T_PYTHON_EXEC, reason = %reason, "python serve stopped");
+    code
+}
+
+fn start(args: ServeArgs) -> Result<(), (i32, String)> {
+    let token = token(args.token_file.as_deref(), args.listen).map_err(|e| (2, e))?;
+    let cfg = &args.subprocess;
+    let file = args.token_file.as_deref();
+    let cfg = executor_config(cfg, token.as_deref(), file).map_err(|e| (2, e))?;
+    let spec = JailSpec {
+        uid_base: cfg.uid_base,
+        tmp_mb: cfg.tmp_mb,
+        hide_paths: cfg.hide_paths.clone(),
+    };
+    // First, while this is the only thread: the self-test forks.
+    if let Err(checks) = selftest::run(&spec) {
+        for c in checks.iter().filter(|c| !c.ok) {
+            tracing::error!(target: T_PYTHON_EXEC, layer = %c.layer, reason = %c.reason, errno = c.errno, "python jail self-test failed");
+        }
+        return Err((EXIT_NOT_READY, "the jail self-test failed".into()));
+    }
+    let exec = SubprocessExecutor::new(cfg.clone(), args.max_timeout).map_err(|e| (2, e.0))?;
+    let (exec, token) = (Arc::new(exec), token.map(Arc::new));
+    let (ready, max_timeout) = (Arc::default(), args.max_timeout);
+    let state = AppState {
+        exec,
+        token,
+        ready,
+        max_timeout,
+    };
+    let rt = tokio::runtime::Runtime::new().map_err(|e| (1, e.to_string()))?;
+    rt.block_on(serve(args.listen, state)).map_err(|e| (1, e))
+}
+
+async fn serve(listen: SocketAddr, state: AppState) -> Result<(), String> {
+    // SIGTERM is how a container platform stops the server.
+    let mut term = signal(SignalKind::terminate()).map_err(|e| e.to_string())?;
+    tokio::spawn(readiness(state.exec.clone(), state.ready.clone()));
+    let listener = tokio::net::TcpListener::bind(listen).await;
+    let listener = listener.map_err(|e| format!("cannot listen on {listen}: {e}"))?;
+    tracing::info!(target: T_PYTHON_EXEC, addr = %listen, "python serve listening");
+    let served = axum::serve(listener, router(state)).with_graceful_shutdown(async move {
+        tokio::select! { _ = term.recv() => {}, _ = tokio::signal::ctrl_c() => {} }
+    });
+    served.await.map_err(|e| e.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::Body;
+    use tower::ServiceExt;
 
     #[test]
     fn only_the_exact_bearer_token_is_authorized() {
@@ -116,6 +291,58 @@ mod tests {
         let short = &long[1..];
         assert!(executor_config(&cfg, Some(short), link.as_deref()).is_err());
         assert!(executor_config(&cfg, Some(&format!("{short}\u{e9}")), link.as_deref()).is_err());
+    }
+
+    /// A router whose template cannot start: nothing in it runs Python.
+    fn app(ready: bool, token: Option<&str>) -> Router {
+        let mut cfg = SubprocessConfig::from_lookup(&|_: &str| None::<String>).unwrap();
+        (cfg.bin, cfg.uid_base, cfg.max_request_bytes) = ("/nonexistent".into(), 40000, 1024);
+        let exec = Arc::new(SubprocessExecutor::unchecked(cfg, Duration::from_secs(5)).unwrap());
+        let (token, ready) = (token.map(|t| Arc::new(t.into())), Arc::new(ready.into()));
+        let max_timeout = Duration::from_secs(5);
+        router(AppState {
+            exec,
+            token,
+            ready,
+            max_timeout,
+        })
+    }
+
+    async fn status(app: Router, headers: &[(&str, &str)], body: String) -> StatusCode {
+        let mut req = axum::http::Request::post("/v1/run");
+        for (k, v) in headers {
+            req = req.header(*k, *v);
+        }
+        let req = req.body(Body::from(body)).unwrap();
+        app.oneshot(req).await.unwrap().status()
+    }
+
+    /// Each check before a call, in its order (the token before the body is
+    /// read); a call that passes them all fails as unavailable, since the
+    /// template cannot start, and runs nowhere else.
+    #[tokio::test]
+    async fn a_request_is_checked_before_any_call() {
+        use StatusCode as S;
+        let wire =
+            |v| format!(r#"{{"v":{v},"code":"","mode":"none","timeout_ms":1,"inputs":{{}}}}"#);
+        let (t, big) = (Some("s3cret"), || " ".repeat(1025));
+        let auth = &[("authorization", "Bearer s3cret")][..];
+        for (ready, token, headers, body, expected) in [
+            (true, t, &[][..], big(), S::UNAUTHORIZED),
+            (false, t, auth, wire(2), S::SERVICE_UNAVAILABLE),
+            (true, t, auth, big(), S::PAYLOAD_TOO_LARGE),
+            (true, t, auth, wire(2), S::BAD_REQUEST),
+            (true, None, &[][..], "{}".into(), S::BAD_REQUEST),
+            (true, None, &[][..], wire(1), S::SERVICE_UNAVAILABLE),
+        ] {
+            let got = status(app(ready, token), headers, body.clone()).await;
+            assert_eq!(got, expected, "{headers:?} {body:.20}");
+        }
+        let probe = |path| axum::http::Request::get(path).body(Body::empty()).unwrap();
+        let readyz = app(false, None).oneshot(probe("/readyz")).await.unwrap();
+        assert_eq!(readyz.status(), S::SERVICE_UNAVAILABLE);
+        let healthz = app(false, None).oneshot(probe("/healthz")).await.unwrap();
+        assert_eq!(healthz.status(), S::OK);
     }
 
     #[test]

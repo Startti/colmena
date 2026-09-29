@@ -4,7 +4,8 @@
 mod linux {
     use clap::{Parser, Subcommand};
     use colmena::dag_engine::infrastructure::python_exec::child::{JailSpec, EXIT_NOT_READY};
-    use colmena::dag_engine::infrastructure::python_exec::{selftest, zygote};
+    use colmena::dag_engine::infrastructure::python_exec::config::ExecutorConfig;
+    use colmena::dag_engine::infrastructure::python_exec::{selftest, server, zygote};
     use std::path::PathBuf;
 
     #[derive(Parser)]
@@ -39,6 +40,17 @@ mod linux {
             tmp_mb: u64,
             #[arg(long = "hide", value_parser = absolute)]
             hide: Vec<PathBuf>,
+        },
+        /// HTTP front for remote callers: `POST /v1/run`, `GET /healthz` and
+        /// `GET /readyz`. The executor takes the `COLMENA_PYTHON_EXECUTOR_*`
+        /// settings a host would.
+        Serve {
+            #[arg(long, default_value = "127.0.0.1:8080")]
+            listen: std::net::SocketAddr,
+            /// Every request must carry `Authorization: Bearer <file content>`;
+            /// required unless --listen is a loopback address.
+            #[arg(long)]
+            token_file: Option<PathBuf>,
         },
     }
 
@@ -93,6 +105,26 @@ mod linux {
                     println!("{}", serde_json::to_string(&check).unwrap_or_default());
                 }
                 code
+            }
+            Cmd::Serve { listen, token_file } => {
+                let filter = tracing_subscriber::EnvFilter::try_from_default_env();
+                let log = tracing_subscriber::fmt().with_ansi(false);
+                let _ = log
+                    .with_env_filter(filter.unwrap_or_else(|_| "info".into()))
+                    .try_init();
+                let cfg = match ExecutorConfig::from_env() {
+                    Ok(cfg) => cfg,
+                    Err(e) => {
+                        eprintln!("python_executor: {e}");
+                        return 2;
+                    }
+                };
+                server::run(server::ServeArgs {
+                    listen,
+                    subprocess: cfg.subprocess,
+                    max_timeout: cfg.max_timeout,
+                    token_file,
+                })
             }
         }
     }
