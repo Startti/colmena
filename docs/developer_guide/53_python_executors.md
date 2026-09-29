@@ -41,6 +41,29 @@ it anyway). A host that builds `EngineConfig` by hand (without going through
 `COLMENA_PYTHON_EXECUTOR` value surfaces only at the first Python call instead
 of at boot, and the install event never fires.
 
+A host that serves requests should then await
+`python_exec::wait_until_ready()` before it starts listening. With
+`subprocess`, `install_from_env` only begins the template's start (interpreter,
+module imports, self-test) in the background; without the wait it runs beside
+the first requests, and a platform that throttles CPU outside requests can make
+it several times slower. On a 2-vCPU service with CPU only during requests it
+took about 106 s on one instance and passed the 120 s start limit on another,
+whose Python calls failed until a later start; the same image with full CPU did
+the cold imports in 17.4 s. The wait joins the start under way (it never starts
+a second template beside it) and returns `Ok(())` once the template is ready,
+or the `PythonExecutorError: …` text of a failed start; `inprocess` returns
+`Ok(())` at once. A failed start does not stop the host: log it and serve;
+isolated calls fail until a later start succeeds. `EngineConfig::from_env` and
+the `dag_engine` CLI do not wait.
+
+```rust
+python_exec::install_from_env()?;
+if let Err(e) = python_exec::wait_until_ready().await {
+    tracing::warn!("python executor not ready: {e}");
+}
+// ...then bind the port.
+```
+
 ## Wire protocol (isolated executors)
 
 Isolated executors (`subprocess`, and `python_executor serve` in front of it) talk to the process that
@@ -110,7 +133,8 @@ Each call takes a slot, checks the request size first, forks a child through the
 response; a passed deadline kills the child (`Timeout`), and an abandoned call's child is killed and its slot freed
 once it is gone. The template gets only the host's `LANG`, `LC_ALL` and `LC_CTYPE` (same text encodings as in process),
 no `PYTHONPATH`/`PYTHONHOME`. The host must ignore `SIGPIPE`. `SubprocessExecutor::new` refuses to start unless the
-host runs as root (children switch to unprivileged users). The template is warmed in the background at startup; while it
+host runs as root (children switch to unprivileged users). The template is warmed in the background at startup (a host
+waits for it with `wait_until_ready`, see [Installing at startup](#installing-at-startup)); while it
 cannot start (its self-test fails, the binary is missing) every call fails with a `PythonExecutorError`, never by running
 the code in process. A result that contains any `…_REFUSE_OUTPUT` literal, byte for byte, does not leave: the call
 fails with `Python execution error: the result was refused by the executor's output policy`. That is a second layer,

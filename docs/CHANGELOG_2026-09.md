@@ -7328,3 +7328,25 @@ Mutación roja: sin el chequeo de egress, el test de la jaula nunca ve 503. Cont
 y macOS; `cargo fmt --check` limpio. E2E con curl contra el binario en el contenedor: el destino mal formado sale con
 2, y con `--allow-no-token` en `0.0.0.0` y un destino que no resuelve, `/readyz` da 503 y salen los dos warnings.
 **ADP.** Sin impacto: el motor todavía no llama a `serve`. **Estado.** done.
+
+## 201. `wait_until_ready`: un host puede esperar al template de Python antes de atender pedidos
+
+**Qué cambia.** Nueva `colmena::dag_engine::infrastructure::python_exec::wait_until_ready()` (async,
+`Result<(), String>`). Con `subprocess` espera el arranque del template que `install_from_env` deja en marcha en
+segundo plano (el lock del estado lo tiene ese arranque; nunca arranca un segundo template al lado) o lo arranca si no
+hay ninguno, y devuelve su resultado: `Ok(())` cuando el template está listo o el texto `PythonExecutorError: …` de un
+arranque fallido. Con `inprocess` devuelve `Ok(())` en el acto; con un executor mal configurado, el mismo texto que
+daría `run`. El error no frena el arranque: el host lo loguea y atiende. Por dentro, `PythonExecutor` suma un método
+`warm` con default `Ok(())`, que `SubprocessExecutor` implementa con su `warm`. Un host que no la llama no cambia.
+Motivo, medido en un servicio de 2 vCPU con CPU solo durante pedidos: el arranque del template tardó ~106 s en una
+instancia y pasó el límite de 120 s en otra (las llamadas a Python fallaron hasta otro arranque); la misma imagen con
+CPU completa hizo los imports en frío en 17,4 s. Guía 53, "Installing at startup".
+**Tests.** Con un template falso detrás de un `Dispatcher` y su arranque ya en curso: la espera vuelve recién después
+de `READY` (el falso duerme 1 s) y con un solo arranque; con uno que sale antes de `READY` devuelve el error del
+arranque, sin reintentar; con `inprocess` está lista en el primer poll. Mutación roja: la espera que devuelve `Ok(())`
+sin esperar hace fallar los dos tests del template. El golden (`python_executor_golden`) arma el executor como un host,
+`install_from_env` y después `wait_until_ready`: con el template real pasa en los dos modos de `subprocess`, y con un
+binario que sale con 3 la espera devuelve `the Python template process could not start`.
+**ADP.** El worker, con `COLMENA_PYTHON_EXECUTOR=subprocess`, debe esperar `wait_until_ready()` después de
+`install_from_env` (o `EngineConfig::from_env`) y antes de abrir su puerto, y loguear el error si lo hay. Llega con el
+próximo tag. **Estado.** done.

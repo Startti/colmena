@@ -62,6 +62,12 @@ impl ExecutorKind {
 pub trait PythonExecutor: Send + Sync {
     fn kind(&self) -> ExecutorKind;
     async fn run(&self, req: PythonRunRequest) -> Result<PythonRunResult, PythonRunError>;
+    /// Returns once the executor can take calls, or with why it cannot (a
+    /// `PythonExecutorError: …` text). One that keeps a process warm waits for
+    /// that process to start; the default has nothing to wait for.
+    async fn warm(&self) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 #[cfg(test)]

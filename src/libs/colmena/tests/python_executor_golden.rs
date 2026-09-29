@@ -24,12 +24,16 @@ use serde_json::{json, Map, Value};
 use std::time::Duration;
 
 /// The environment's executor configuration once it is installed as the
-/// process executor, or `None` when it is the in-process one.
-fn isolated_config() -> Option<ExecutorConfig> {
+/// process executor and ready, as a host does it, or `None` when it is the
+/// in-process one.
+async fn isolated_config() -> Option<ExecutorConfig> {
     pyo3::Python::initialize();
     let cfg = ExecutorConfig::from_env().expect("valid executor configuration");
     let kind = python_exec::install_from_env().expect("the configured executor builds");
     assert_eq!(kind, cfg.kind);
+    python_exec::wait_until_ready()
+        .await
+        .expect("the executor is ready");
     if kind == ExecutorKind::InProcess {
         eprintln!("skipped: COLMENA_PYTHON_EXECUTOR is inprocess; nothing to compare");
         return None;
@@ -227,7 +231,9 @@ fn normalize(r: Result<PythonRunResult, PythonRunError>) -> Value {
 
 #[tokio::test]
 async fn every_case_matches_the_in_process_result() {
-    let Some(cfg) = isolated_config() else { return };
+    let Some(cfg) = isolated_config().await else {
+        return;
+    };
     let (mut isolated, mut local) = (0, 0);
     for (name, expect, req) in cases() {
         let side = if routed(&cfg, &req.mode) {
@@ -305,7 +311,9 @@ fn stdout_problems(
 /// in-process is skipped (see the ignored in-process test below).
 #[tokio::test]
 async fn concurrent_calls_keep_their_own_stdout() {
-    let Some(cfg) = isolated_config() else { return };
+    let Some(cfg) = isolated_config().await else {
+        return;
+    };
     if cfg.subprocess.slots < 2 {
         eprintln!("skipped: COLMENA_PYTHON_EXECUTOR_SLOTS is below 2, so calls cannot overlap");
         return;
