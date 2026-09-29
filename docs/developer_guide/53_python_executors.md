@@ -279,23 +279,15 @@ unreadable answer or one that is not a JWT with `exp`), never the answer itself.
 ### The remote client
 
 `python_exec::remote::RemoteExecutor` (not selectable yet) sends each call as `POST <URL>/v1/run`, keeping a path in
-the URL with or without a trailing `/` (`https://h.example/py` → `https://h.example/py/v1/run`). The body is the wire
-request, zstd-compressed, sent with `Accept-Encoding: zstd` and an `X-Colmena-Request-Id` that the service logs.
-Nothing is sent for an input over `…_MAX_REQUEST_MB` (the `subprocess` text) or a compressed body over
-`…_MAX_WIRE_MB` (`Python execution error: the compressed input exceeds the Python executor transport limit of N MiB`).
-Bodies are zstd-compressed; serve behind HTTP/2 end to end when inputs may exceed what an HTTP/1 front accepts, or set
-`COLMENA_PYTHON_EXECUTOR_MAX_WIRE_MB` so oversized calls fail clearly. An answer over `…_MAX_RESPONSE_MB`, compressed
-or not, fails with the `subprocess` text.
+the URL, with an `X-Colmena-Request-Id` that the service logs. Nothing is sent over `…_MAX_REQUEST_MB` or, compressed,
+over `…_MAX_WIRE_MB`, and an answer over `…_MAX_RESPONSE_MB` fails. Bodies are zstd-compressed; serve behind HTTP/2
+end to end when inputs may exceed what an HTTP/1 front accepts, or set `COLMENA_PYTHON_EXECUTOR_MAX_WIRE_MB` so
+oversized calls fail clearly. Proxy variables and redirects are ignored, and the token file is read per call.
 
-A connection error, an interrupted answer, or HTTP 429, 502, 503 or 504 is retried once, 250 ms later, with the same
-request id: a call is a pure function, so a repeat has no side effects. A second failure is `PythonExecutorError: the
-isolated Python executor is unavailable (…)`, and the code never runs in process instead. 401 or 403 is
-`PythonExecutorError: the isolated Python executor rejected this caller's credentials`, 413 the input-limit text, any
-other status `PythonExecutorError: … answered HTTP <status>`. A call may take its deadline plus 30 s. The client
-connects only to the URL: proxy variables are ignored (for the metadata server too) and redirects are not followed.
-The token file is read on each call, so a rotated token is used without a restart; an unreadable or empty one fails
-the call. A retry logs the `warn` event `python remote call retried` with `request_id` and `reason` (`HTTP 503`,
-`connection failed`, …), never code, inputs, outputs or credentials.
+Only a call that certainly did not run is retried, once, after 250 ms: a connection error (a connect timeout too), 429
+or 503. 502, 504, a lost or cut answer, or a second failure is `PythonExecutorError: … unavailable (…)`, never an
+in-process run. 401/403 is `… rejected this caller's credentials`, 413 the input-limit text, and another status
+`… answered HTTP <status>`. A retry logs `python remote call retried` with `request_id` and `reason` only.
 
 ## Equivalence with the in-process executor
 

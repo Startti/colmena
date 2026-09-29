@@ -1,6 +1,6 @@
 //! Sends each Python call to a `python_executor serve` endpoint, with zstd
-//! bodies. One retry on connection errors and 429/502/503/504: a call is a
-//! pure function, so repeating it has no side effects. It never falls back to
+//! bodies. One retry, only when the call did not run: a connection error, 429,
+//! or 503 (`serve` answers it before running a call). It never falls back to
 //! running the code in process. Requests go only to the configured URL: proxy
 //! variables are ignored and redirects are not followed.
 
@@ -21,6 +21,8 @@ use std::time::Duration;
 /// Time allowed beyond a call's deadline for sending and receiving it.
 const TRANSFER_GRACE: Duration = Duration::from_secs(30);
 const RETRY_DELAY: Duration = Duration::from_millis(250);
+/// Short in unit tests, which wait for it to expire.
+const CONNECT_TIMEOUT: Duration = Duration::from_millis(if cfg!(test) { 200 } else { 10_000 });
 const REJECTED: &str =
     "PythonExecutorError: the isolated Python executor rejected this caller's credentials";
 const MALFORMED: &str = "PythonExecutorError: malformed response from the isolated Python executor";
@@ -39,6 +41,11 @@ enum Attempt {
 
 fn internal(m: impl Into<String>) -> PythonRunError {
     PythonRunError::Internal(m.into())
+}
+
+fn unavailable(why: impl std::fmt::Display) -> PythonRunError {
+    let m = format!("PythonExecutorError: the isolated Python executor is unavailable ({why})");
+    internal(m)
 }
 
 /// `path` under `base`, keeping the path of `base` whether or not it ends in `/`.
@@ -76,7 +83,7 @@ impl RemoteExecutor {
             .use_rustls_tls()
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
-            .connect_timeout(Duration::from_secs(10))
+            .connect_timeout(CONNECT_TIMEOUT)
             .build()
             .map_err(|e| ExecutorConfigError(format!("cannot build the HTTP client: {e}")))?;
         let id_tokens = match &cfg.auth {
@@ -120,7 +127,8 @@ impl RemoteExecutor {
             .header(CONTENT_ENCODING, "zstd")
             .header(ACCEPT_ENCODING, "zstd");
         let rb = rb.header("x-colmena-request-id", request_id);
-        let rb = match self.authorized(rb.timeout(timeout + TRANSFER_GRACE)).await {
+        let rb = rb.timeout(timeout.saturating_add(TRANSFER_GRACE));
+        let rb = match self.authorized(rb).await {
             Ok(rb) => rb,
             Err(e) => return Attempt::Done(Err(e)),
         };
@@ -131,15 +139,19 @@ impl RemoteExecutor {
             Ok((413, _)) => {
                 return Attempt::Done(Err(PythonRunError::Python(input_too_large_message(limit))))
             }
-            Ok((s @ (429 | 502 | 503 | 504), _)) => return Attempt::Retry(format!("HTTP {s}")),
+            Ok((s @ (429 | 503), _)) => return Attempt::Retry(format!("HTTP {s}")),
+            Ok((s @ (502 | 504), _)) => {
+                return Attempt::Done(Err(unavailable(format!("HTTP {s}"))))
+            }
             Ok((s, _)) => {
                 let e =
                     format!("PythonExecutorError: the isolated Python executor answered HTTP {s}");
                 return Attempt::Done(Err(internal(e)));
             }
-            Err(e) if e.is_timeout() => return Attempt::Done(Err(PythonRunError::Timeout)),
+            // Before `is_timeout`: a connect timeout is both, and the call did not run.
             Err(e) if e.is_connect() => return Attempt::Retry("connection failed".into()),
-            Err(_) => return Attempt::Retry("request failed".into()),
+            Err(e) if e.is_timeout() => return Attempt::Done(Err(PythonRunError::Timeout)),
+            Err(_) => return Attempt::Done(Err(unavailable("request failed"))),
         };
         let zstd_body = resp.headers().get(CONTENT_ENCODING).map(|v| v == "zstd");
         let mut body = Vec::new();
@@ -151,7 +163,7 @@ impl RemoteExecutor {
                 Ok(Some(c)) => body.extend_from_slice(&c),
                 Ok(None) => break,
                 Err(e) if e.is_timeout() => return Attempt::Done(Err(PythonRunError::Timeout)),
-                Err(_) => return Attempt::Retry("response interrupted".into()),
+                Err(_) => return Attempt::Done(Err(unavailable("response interrupted"))),
             }
         }
         let zstd_body = zstd_body.unwrap_or(false);
@@ -192,9 +204,7 @@ impl PythonExecutor for RemoteExecutor {
         tokio::time::sleep(RETRY_DELAY).await;
         match self.post_once(body, timeout, &request_id).await {
             Attempt::Done(r) => r,
-            Attempt::Retry(why) => Err(internal(format!(
-                "PythonExecutorError: the isolated Python executor is unavailable ({why})"
-            ))),
+            Attempt::Retry(why) => Err(unavailable(why)),
         }
     }
 }
@@ -246,11 +256,8 @@ mod tests {
 
     /// Answers `a` on `at`, `n` times at most (then 404).
     async fn on(s: &MockServer, at: &str, a: Answer, n: u64) {
-        Mock::given(path(at))
-            .respond_with(a)
-            .up_to_n_times(n)
-            .mount(s)
-            .await
+        let mock = Mock::given(path(at)).respond_with(a);
+        mock.up_to_n_times(n).mount(s).await
     }
 
     async fn hits(s: &MockServer) -> usize {
@@ -286,10 +293,8 @@ mod tests {
         let given = Mock::given(path("/py/v1/run")).and(header("content-encoding", "zstd"));
         let given = given.and(header("accept-encoding", "zstd"));
         let given = given.and(header_exists("x-colmena-request-id"));
-        given
-            .respond_with(answer.set_body_bytes(packed))
-            .mount(&s)
-            .await;
+        let given = given.respond_with(answer.set_body_bytes(packed));
+        given.mount(&s).await;
         let ex = exec(&format!("{}/py", s.uri()), RemoteAuthConfig::None);
         assert_eq!(ex.run(req()).await.unwrap().output, Some(json!(1)));
     }
@@ -300,15 +305,51 @@ mod tests {
         let s = MockServer::start().await;
         on(&s, "/v1/run", Answer::new(503), 1).await;
         on(&s, "/v1/run", ok(), 1).await;
-        assert!(exec(&s.uri(), RemoteAuthConfig::None)
-            .run(req())
-            .await
-            .is_ok());
+        let ex = exec(&s.uri(), RemoteAuthConfig::None);
+        assert!(ex.run(req()).await.is_ok());
         let s = MockServer::start().await;
         on(&s, "/v1/run", Answer::new(503), 9).await;
         let e = fails(&exec(&s.uri(), RemoteAuthConfig::None), req()).await;
         let unavailable = "PythonExecutorError: the isolated Python executor is unavailable";
         assert!(e.starts_with(unavailable) && hits(&s).await == 2, "{e}");
+    }
+
+    #[tokio::test]
+    async fn a_huge_timeout_does_not_overflow() {
+        let s = MockServer::start().await;
+        on(&s, "/v1/run", ok(), 9).await;
+        let mut r = req();
+        r.timeout = Some(Duration::MAX);
+        assert!(exec(&s.uri(), RemoteAuthConfig::None).run(r).await.is_ok());
+    }
+
+    /// A connect timeout (here, a TLS handshake nobody answers) is not the code's timeout.
+    #[tokio::test]
+    async fn a_silent_service_is_unavailable() {
+        let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("https://{}", silent.local_addr().unwrap());
+        let e = fails(&exec(&url, RemoteAuthConfig::None), req()).await;
+        assert!(e.ends_with("unavailable (connection failed)"), "{e}");
+    }
+
+    /// Once sent, a call may have run: a lost or cut answer is not sent again
+    /// (a retry would find the port closed and say `connection failed`).
+    #[tokio::test]
+    async fn a_lost_answer_is_not_retried() {
+        let cut = b"HTTP/1.1 200 OK\r\ncontent-length: 9\r\n\r\n{";
+        for (answer, why) in [(&b""[..], "request failed"), (cut, "response interrupted")] {
+            let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let url = format!("http://{}", port.local_addr().unwrap());
+            std::thread::spawn(move || {
+                let mut c = port.accept().unwrap().0;
+                let _ = c.read(&mut [0; 64]); // answer only once the request has started
+                let _ = std::io::Write::write_all(&mut c, answer);
+                let _ = c.shutdown(std::net::Shutdown::Write);
+                let _ = c.read_to_end(&mut vec![]);
+            });
+            let e = fails(&exec(&url, RemoteAuthConfig::None), req()).await;
+            assert!(e.ends_with(&format!("unavailable ({why})")), "{e}");
+        }
     }
 
     /// Each is sent once; a redirect is not followed.
@@ -320,15 +361,12 @@ mod tests {
             (413, "the input exceeds the Python executor limit of 1 MiB"),
             (500, "answered HTTP 500"),
             (307, "answered HTTP 307"),
+            (502, "unavailable (HTTP 502)"),
+            (504, "unavailable (HTTP 504)"),
         ] {
             let s = MockServer::start().await;
-            on(
-                &s,
-                "/v1/run",
-                Answer::new(status).insert_header("location", "/x"),
-                9,
-            )
-            .await;
+            let answer = Answer::new(status).insert_header("location", "/x");
+            on(&s, "/v1/run", answer, 9).await;
             on(&s, "/x", ok(), 9).await;
             let e = fails(&exec(&s.uri(), RemoteAuthConfig::None), req()).await;
             assert!(e.contains(text) && hits(&s).await == 1, "{status}: {e}");
@@ -356,11 +394,8 @@ mod tests {
         let jwt = "h.eyJleHAiOjk5OTk5OTk5OTl9.s"; // {"exp":9999999999}
         on(&s, "/identity", Answer::new(200).set_body_string(jwt), 9).await;
         let bearer = header("authorization", format!("Bearer {jwt}").as_str());
-        Mock::given(path("/v1/run"))
-            .and(bearer)
-            .respond_with(ok())
-            .mount(&s)
-            .await;
+        let given = Mock::given(path("/v1/run")).and(bearer);
+        given.respond_with(ok()).mount(&s).await;
         let audience = "https://svc.example".to_string();
         let mut ex = exec(&s.uri(), RemoteAuthConfig::GcpIdToken { audience });
         let metadata = format!("{}/identity", s.uri());
@@ -386,12 +421,10 @@ mod tests {
         // Random hex barely compresses: 4 MiB stays above the 1 MiB wire cap.
         let hex = |_| uuid::Uuid::new_v4().simple().to_string();
         let noisy = (0..(128 << 10)).map(hex).collect();
-        assert!(fails(&ex, with(noisy))
-            .await
-            .contains("transport limit of 1 MiB"));
-        assert!(fails(&ex, with("x".repeat(9 << 20)))
-            .await
-            .contains("input exceeds"));
+        let e = fails(&ex, with(noisy)).await;
+        assert!(e.contains("transport limit of 1 MiB"), "{e}");
+        let e = fails(&ex, with("x".repeat(9 << 20))).await;
+        assert!(e.contains("input exceeds"), "{e}");
         assert_eq!(hits(&s).await, 1);
     }
 
