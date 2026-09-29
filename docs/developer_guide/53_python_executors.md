@@ -276,6 +276,19 @@ again. The claim is read without checking the signature: the token is only forwa
 The token is never logged, and the error of a failed fetch names what failed (no answer, the HTTP status, an
 unreadable answer or one that is not a JWT with `exp`), never the answer itself.
 
+### The remote client
+
+`python_exec::remote::RemoteExecutor` (not selectable yet) sends each call as `POST <URL>/v1/run`, keeping a path in
+the URL, with an `X-Colmena-Request-Id` that the service logs. Nothing is sent over `…_MAX_REQUEST_MB` or, compressed,
+over `…_MAX_WIRE_MB`, and an answer over `…_MAX_RESPONSE_MB` fails. Bodies are zstd-compressed; serve behind HTTP/2
+end to end when inputs may exceed what an HTTP/1 front accepts, or set `COLMENA_PYTHON_EXECUTOR_MAX_WIRE_MB` so
+oversized calls fail clearly. Proxy variables and redirects are ignored, and the token file is read per call.
+
+Only a call that certainly did not run is retried, once, after 250 ms: a connection error (a connect timeout too), 429
+or 503. 502, 504, a lost or cut answer, or a second failure is `PythonExecutorError: … unavailable (…)`, never an
+in-process run. 401/403 is `… rejected this caller's credentials`, 413 the input-limit text, and another status
+`… answered HTTP <status>`. A retry logs `python remote call retried` with `request_id` and `reason` only.
+
 ## Equivalence with the in-process executor
 
 `tests/python_executor_golden.rs` runs 17 cases (plain scripts, `restricted` refusals, syntax and runtime errors, a

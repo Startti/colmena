@@ -7351,9 +7351,9 @@ binario que sale con 3 la espera devuelve `the Python template process could not
 `install_from_env` (o `EngineConfig::from_env`) y antes de abrir su puerto, y loguear el error si lo hay. Llega con el
 próximo tag. **Estado.** done.
 
-## 203. Python: configuración del executor `remote` y tokens de identidad (`remote`, 1/2)
+## 203. Python: configuración del executor `remote` y tokens de identidad (`remote`, 1/3)
 
-**Qué cambia.** Primera de dos partes del executor `remote`, el cliente de `python_executor serve`: su configuración y
+**Qué cambia.** Primera de tres partes del executor `remote`, el cliente de `python_executor serve`: su configuración y
 la fuente de tokens de identidad, todavía sin cliente. `ExecutorConfig` suma `remote: Option<RemoteConfig>`, que se lee
 cuando está `COLMENA_PYTHON_EXECUTOR_URL`, sea cual sea el executor. La URL es absoluta, `https`, o `http` solo con un
 host loopback (`127.0.0.0/8`, `::1` o `localhost`), sin usuario, contraseña, query ni fragmento; sale solo del entorno
@@ -7388,3 +7388,16 @@ limpio en Linux y macOS. E2E con el smoke por `dag_engine run` en el contenedor:
 con `remote`, el arranque corta con la variable en el error.
 **ADP.** Sin impacto: nada usa la config remota todavía, y un host sin `COLMENA_PYTHON_EXECUTOR_URL` no cambia.
 **Estado.** done.
+
+## 204. Python: el cliente del executor `remote`, todavía sin seleccionar (`remote`, 2/3)
+
+**Qué cambia.** Nuevo `python_exec::remote::RemoteExecutor`, el cliente de `python_executor serve`; `…=remote` sigue
+rechazado al arrancar. Cada llamada es un `POST <URL>/v1/run` en zstd, dentro de los topes de entrada, wire y
+respuesta. Se reintenta una vez solo lo que seguro no corrió (error de conexión, 429, 503); 502, 504 o una respuesta
+perdida dan `PythonExecutorError: … unavailable (…)`, nunca una corrida en proceso. Sin proxies ni redirects; `zstd`
+en todas las plataformas. Guía: [53_python_executors.md](developer_guide/53_python_executors.md#the-remote-client).
+**Tests.** Doce unitarios contra wiremock o un puerto local, con mutaciones rojas: path, zstd, reintento de 503, sin
+reintento en 401/403/413/500/307/502/504 ni en un envío o una respuesta perdidos, tokens, topes, un timeout enorme sin
+overflow, y un handshake sin respuesta da `unavailable`, no timeout. `--lib python_exec`: 104 en Linux con la jaula,
+66 en macOS; clippy limpio en los dos. E2E: con URL y `AUTH=none` el smoke sigue en proceso, misma firma.
+**ADP.** Sin impacto: `remote` todavía no se puede elegir. **Estado.** done.
