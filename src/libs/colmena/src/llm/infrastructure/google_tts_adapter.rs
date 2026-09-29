@@ -92,7 +92,8 @@ impl TtsRepository for GoogleTtsAdapter {
             .json(&body)
             .send()
             .await
-            .map_err(|e| TtsError::Transport(e.to_string()))?;
+            // The key travels in the query string: never quote the URL.
+            .map_err(|e| TtsError::Transport(e.without_url().to_string()))?;
 
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
@@ -103,7 +104,7 @@ impl TtsRepository for GoogleTtsAdapter {
         let payload: Value = resp
             .json()
             .await
-            .map_err(|e| TtsError::Transport(format!("invalid JSON: {e}")))?;
+            .map_err(|e| TtsError::Transport(format!("invalid JSON: {}", e.without_url())))?;
 
         let inline = payload
             .pointer("/candidates/0/content/parts/0/inlineData")
@@ -220,6 +221,16 @@ mod tests {
             speed: None,
             model: "gemini-2.5-flash-preview-tts".into(),
         }
+    }
+
+    #[tokio::test]
+    async fn network_error_does_not_carry_the_key() {
+        // Nothing listens on port 9 (discard): the connection is refused.
+        let adapter = GoogleTtsAdapter::new("secret-tts-key-123".into())
+            .with_base_url("http://127.0.0.1:9".into());
+        let err = adapter.synthesize(req("hola")).await.unwrap_err();
+        assert!(matches!(err, TtsError::Transport(_)), "got {err:?}");
+        assert!(!err.to_string().contains("secret-tts-key-123"), "got {err}");
     }
 
     #[tokio::test]

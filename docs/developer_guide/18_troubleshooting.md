@@ -389,16 +389,20 @@ maturin develop --release
 
 ### Error: "invalid peer certificate: UnknownIssuer" (proxy TLS local, p. ej. Proxon)
 
-**Síntomas:**
+**Síntomas:** en el log, un `warn` de `colmena::preflight` («pre-flight got no
+verdict on the API key; the run goes on», con `reason=Network error: … invalid
+peer certificate: UnknownIssuer`), y después el nodo falla al llamar al modelo:
+
 ```
-Pre-flight: provider openai rejected the API key: Network error:
-error sending request for url (https://api.openai.com/v1/models):
+Network error: error sending request for url (https://api.openai.com/v1/chat/completions):
 ... invalid peer certificate: UnknownIssuer
 ```
 
-Se disfraza de "API key rechazada", pero la key está bien: es un problema de
-**confianza TLS**. Pista clave: `curl https://api.openai.com/v1/models` funciona
-desde la misma máquina, pero el binario de Colmena no.
+Hasta la versión anterior salía como «Pre-flight: provider openai rejected the
+API key: Network error: …»: se disfrazaba de "API key rechazada", pero la key
+está bien: es un problema de **confianza TLS**. Pista clave: `curl
+https://api.openai.com/v1/models` funciona desde la misma máquina, pero el
+binario de Colmena no.
 
 **Causa.** Un proxy que **intercepta TLS** en tu red local (herramientas de
 seguridad/medición de consumo como *Proxon*, o un MITM corporativo) descifra el
@@ -426,6 +430,14 @@ cargo run --bin dag_engine -- run tests/graphs/agents/llm_call.json
 - Alternativa si preferís no tocar Colmena: **excluir** los dominios de los
   proveedores de la interceptación del proxy — pero eso puede anular su función si
   el proxy está justo para medir ese tráfico.
+
+### El proveedor contesta 503 o 429
+
+Pre-flight vuelve a preguntar por la key hasta tres veces, con backoff
+exponencial y jitter; si el proveedor sigue sin contestar, la corrida arranca
+igual (un `warn` de `colmena::preflight`) y el error llega del nodo, nunca como
+«rejected the API key». Nada queda en la caché de pre-flight hasta que haya un
+veredicto: una key válida, o un 401/403 u otro 4xx.
 
 ### Error: "Invalid API key"
 

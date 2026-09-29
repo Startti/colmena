@@ -84,7 +84,8 @@ impl GeminiFilesApiAdapter {
             .await
             .map_err(|e| LlmError::FileApiUploadFailed {
                 provider: "google".into(),
-                message: format!("session start failed: {}", e),
+                // The key travels in the query string: never quote the URL.
+                message: format!("session start failed: {}", e.without_url()),
             })?;
 
         if !resp.status().is_success() {
@@ -129,7 +130,8 @@ impl GeminiFilesApiAdapter {
             .await
             .map_err(|e| LlmError::FileApiUploadFailed {
                 provider: "google".into(),
-                message: format!("PUT chunk failed at offset {}: {}", offset, e),
+                // The session URL may repeat the key in its query string.
+                message: format!("PUT chunk failed at offset {}: {}", offset, e.without_url()),
             })?;
 
         if !resp.status().is_success() {
@@ -147,7 +149,7 @@ impl GeminiFilesApiAdapter {
                     .await
                     .map_err(|e| LlmError::FileApiUploadFailed {
                         provider: "google".into(),
-                        message: format!("invalid finalize JSON: {}", e),
+                        message: format!("invalid finalize JSON: {}", e.without_url()),
                     })?;
             Ok(Some(parsed))
         } else {
@@ -320,6 +322,31 @@ mod tests {
             Err(e) => e,
         };
         assert!(matches!(err, LlmError::FileApiUploadFailed { .. }));
+    }
+
+    #[tokio::test]
+    async fn network_errors_do_not_carry_the_key() {
+        let key = "secret-files-key-123";
+        // The session start (nothing listens on port 9), then a chunk sent to a
+        // session URL that repeats the key in its query string.
+        let server = MockServer::start().await;
+        let upload_url = format!("http://127.0.0.1:9/upload?key={key}&upload_id=u1");
+        Mock::given(method("POST"))
+            .and(path("/upload/v1beta/files"))
+            .respond_with(
+                ResponseTemplate::new(200).insert_header("X-Goog-Upload-URL", upload_url.as_str()),
+            )
+            .mount(&server)
+            .await;
+        for (base, step) in [
+            ("http://127.0.0.1:9".to_string(), "session start"),
+            (server.uri(), "PUT chunk"),
+        ] {
+            let adapter = GeminiFilesApiAdapter::with_base_url(key.into(), base);
+            let upload = adapter.upload_streaming(fake_stream(b"x"), "application/pdf", "x.pdf");
+            let msg = upload.await.expect_err("the upload must fail").to_string();
+            assert!(msg.contains(step) && !msg.contains(key), "got {msg}");
+        }
     }
 
     #[test]

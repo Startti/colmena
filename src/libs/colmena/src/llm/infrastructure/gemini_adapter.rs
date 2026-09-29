@@ -3,6 +3,7 @@ use crate::llm::domain::{
     LlmStreamChunk, LlmStreamPart, LlmUsage, MessageRole, ToolCall, ToolCallChunk,
 };
 use crate::llm::infrastructure::gemini_schema;
+use crate::llm::infrastructure::transient::is_transient_status;
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
 use reqwest::Client;
@@ -730,13 +731,17 @@ impl LlmRepository for GeminiAdapter {
             .query(&[("key", api_key)])
             .send()
             .await
-            .map_err(|e| LlmError::network_error(e.to_string()))?;
+            // The key travels in the query string: an error that quotes the
+            // URL would carry it into the run's error message.
+            .map_err(|e| LlmError::network_error(e.without_url().to_string()))?;
 
         let status = response.status();
         if status.is_success() {
             Ok(())
         } else if status.as_u16() == 401 || status.as_u16() == 403 {
             Err(LlmError::InvalidApiKey)
+        } else if is_transient_status(status.as_u16()) {
+            Err(LlmError::provider_unavailable(status.as_u16()))
         } else {
             Err(LlmError::request_failed(format!(
                 "Gemini credential validation failed with status {}",
@@ -1491,6 +1496,45 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, LlmError::InvalidApiKey), "got {:?}", err);
+    }
+
+    #[tokio::test]
+    async fn validate_credentials_on_503_is_unavailable_not_invalid() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/models"))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&server)
+            .await;
+
+        let adapter = GeminiAdapter::with_base_url(server.uri());
+        let err = adapter
+            .validate_credentials("any-gemini-key")
+            .await
+            .unwrap_err();
+        assert_eq!(err, LlmError::provider_unavailable(503));
+    }
+
+    #[tokio::test]
+    async fn validate_credentials_network_error_does_not_carry_the_key() {
+        // Nothing listens on port 9 (discard): the connection is refused.
+        let adapter = GeminiAdapter::with_base_url("http://127.0.0.1:9".to_string());
+        let err = adapter
+            .validate_credentials("secret-gemini-key-123")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, LlmError::NetworkError { .. }),
+            "got {:?}",
+            err
+        );
+        assert!(
+            !err.to_string().contains("secret-gemini-key-123"),
+            "got {err}"
+        );
     }
 
     // ── Cache-safe temporal suffix (2026-06-11) ──────────────────────────
