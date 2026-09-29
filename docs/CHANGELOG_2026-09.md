@@ -7259,7 +7259,7 @@ retirar los slots; con `has_usable_slot()` siempre verdadero, ese test falla. En
 clippy `-D warnings` limpio en Linux y macOS. **ADP.** Sin impacto: nada llama a estas piezas todavía.
 **Estado.** done.
 
-## 198. Python: `python_executor serve`, el frente HTTP del executor `subprocess` (`serve`, 2/4)
+## 199. Python: `python_executor serve`, el frente HTTP del executor `subprocess` (`serve`, 2/4)
 
 **Qué cambia.** `python_executor serve` contesta `POST /v1/run` con el wire protocol que ya habla el executor
 `subprocess`: el body es un wire request y la respuesta un wire response, en JSON. Cada llamada pasa por
