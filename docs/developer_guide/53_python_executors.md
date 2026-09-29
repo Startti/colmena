@@ -99,7 +99,7 @@ Its stderr is read as JSON events with known fields only; any other line is drop
 
 | Variable | Default |
 |---|---|
-| `COLMENA_PYTHON_EXECUTOR_BIN` | `python_executor` |
+| `COLMENA_PYTHON_EXECUTOR_BIN` | the `python_executor` file in the host executable's directory (not a `PATH` lookup) |
 | `COLMENA_PYTHON_EXECUTOR_SLOTS` | CPU cores, at most 8 (1-64) |
 | `COLMENA_PYTHON_EXECUTOR_MEMORY_MB` | 2048 (256-65536) |
 | `COLMENA_PYTHON_EXECUTOR_HIDE_PATHS` | none (`:`-separated absolute paths, no `..`) |
@@ -168,6 +168,36 @@ arguments.
 For model-written code or anything else you did not write, use `COLMENA_PYTHON_EXECUTOR=subprocess` with
 `COLMENA_PYTHON_EXECUTOR_MODES=all`, on Linux, in a container where the host starts as root with `CAP_SYS_ADMIN`; run
 `python_executor self-test` there first. In process, `restricted` is an aid to authors, not an isolation boundary.
+
+## Remote service (`python_executor serve`)
+
+`python_executor serve` puts the subprocess executor behind HTTP, for callers in another process or container (Linux;
+root and `CAP_SYS_ADMIN`, as for `subprocess`). It serves:
+
+- `POST /v1/run`: the body is a wire request as JSON, the answer a wire response. Each call takes a slot and runs in
+  the same jail, under the same limits and output policy, as a call made by a host. A body over `…_MAX_REQUEST_MB` is
+  a 413, a body that is not a wire request of this version a 400, and the deadline a request asks for is capped at
+  `…_MAX_TIMEOUT_SECS`. While the template is not running a call is a 503; it never runs anywhere else.
+- `GET /healthz`: 200 while the process runs.
+- `GET /readyz`: 200 while the warm template runs, else 503; checked every minute, every 5 s while not ready.
+
+The probes need no token. `--listen` defaults to `127.0.0.1:8080`. With `--token-file PATH`, every `POST /v1/run` must
+carry `Authorization: Bearer <token>`, the token being the file's content, trimmed: 32 or more visible ASCII bytes. It
+is checked before the body is read; a missing or wrong token is a 401 without a body. Without `--token-file` the server
+starts only on a loopback address. The token file joins the hidden paths by its canonical path (through any symlink),
+so the code a call runs cannot read it, and the startup self-test proves that path is covered. In a container:
+`python_executor serve --listen 0.0.0.0:8080 --token-file /secrets/token`.
+
+The executor settings are the `COLMENA_PYTHON_EXECUTOR_*` variables a host reads (`…_BIN`, `…_SLOTS`, `…_MEMORY_MB`,
+`…_HIDE_PATHS`, `…_MAX_REQUEST_MB`, `…_MAX_RESPONSE_MB`, `…_REFUSE_OUTPUT`, `…_MAX_TIMEOUT_SECS`), with the same
+defaults and ranges; there are no flags for them. Before it listens, the server runs the jail self-test in its own
+process. Exit codes: 0 after SIGTERM or Ctrl-C (a graceful stop); 1 when serving fails (the address cannot be bound,
+for example); 2 for a bad configuration (an invalid variable, named in the error; no token file on a non-loopback
+address; a token file that cannot be read or holds a short token); 3 when the self-test fails, each failed layer logged.
+
+Logs (target `colmena::python_exec`, level from `RUST_LOG`, `info` by default) are fields only: one `python serve run`
+event per call with `outcome`, `in_bytes`, `out_bytes` and `duration_ms`. They never carry code, inputs, outputs,
+stdout, tokens or headers.
 
 ## Equivalence with the in-process executor
 

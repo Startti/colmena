@@ -7258,3 +7258,27 @@ faltante rechazado. `a_call_fails_at_once_when_no_slot_is_left` afirma además `
 retirar los slots; con `has_usable_slot()` siempre verdadero, ese test falla. En Linux `--lib python_exec` pasa 73;
 clippy `-D warnings` limpio en Linux y macOS. **ADP.** Sin impacto: nada llama a estas piezas todavía.
 **Estado.** done.
+
+## 198. Python: `python_executor serve`, el frente HTTP del executor `subprocess` (`serve`, 2/4)
+
+**Qué cambia.** `python_executor serve` contesta `POST /v1/run` con el wire protocol que ya habla el executor
+`subprocess`: el body es un wire request y la respuesta un wire response, en JSON. Cada llamada pasa por
+`SubprocessExecutor::run_raw`, con la misma jaula, límites y política de salida que la llamada de un host. `/healthz`
+dice que el proceso vive y `/readyz` si la plantilla caliente corre. Con `--token-file`, cada pedido necesita
+`Authorization: Bearer <token>`, chequeado antes de leer el body (401 sin detalle); sin archivo de token solo escucha en
+loopback (`--listen`, `127.0.0.1:8080` por defecto). El archivo del token queda tapado en la jaula, y el self-test de
+la jaula corre en el proceso del servidor antes de escuchar (sale con 3 si una capa no se cumple); una plantilla que
+después no arranca hace de cada llamada un 503, nunca una llamada corrida en otro lado. Body sobre el límite: 413;
+otra versión: 400; el plazo pedido tiene tope en el máximo del executor. La config del executor sale de las variables
+`COLMENA_PYTHON_EXECUTOR_*` de un host. Logs solo con campos (resultado, tamaños, duración); SIGTERM lo para en orden.
+Guía: [53_python_executors.md](developer_guide/53_python_executors.md#remote-service-python_executor-serve), y el
+default de `COLMENA_PYTHON_EXECUTOR_BIN` corregido: el `python_executor` junto al ejecutable del host, no en `PATH`.
+**Tests.** Router contra un executor de reemplazo, sin root: sin token 401 antes de leer un body sobre el límite, 503
+sin estar listo, 413, 400 por otra versión o un body que no es wire request, 503 con la plantilla caída; `/readyz` 503
+y `/healthz` 200. Mutaciones rojas: sin el chequeo de listo en la capa de la ruta da 400 en vez de 503; con el token
+chequeado en el handler, después del body, 413 en vez de 401. Test de proceso con el binario real y el archivo del
+token fuera de `/tmp`, detrás de un symlink: la llamada necesita el token, corre con un uid no privilegiado y pandas,
+bajo la política de salida, y no lee el token por ninguna de las dos rutas mientras un archivo vecino sí se lee; tapar
+otra ruta que la del token lo pone rojo. Contenedor con la jaula: `--lib python_exec` 74, aislamiento 7/7,
+`serve_process` 1/1, subprocess 23/23; clippy limpio en Linux y macOS. El job del executor aislado de CI lo corre.
+**ADP.** Sin impacto: el motor todavía no llama a `serve`. **Estado.** done.
