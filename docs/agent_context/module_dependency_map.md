@@ -5,8 +5,8 @@
 
 **How to use (for the exploration/spec phase):** before opening files to assess a change, look up the target file below. **Used by** is its blast radius — the files that break if you change its public surface. **Depends on** is what it needs. Start by reading only those, not the whole repo.
 
-- Files indexed: **411**
-- Modules with at least one importer: **191**
+- Files indexed: **412**
+- Modules with at least one importer: **192**
 
 ## Blast-radius ranking (change these with the most care)
 
@@ -28,10 +28,10 @@
 | 14 | `llm::infrastructure` | `src/libs/colmena/src/llm/infrastructure/mod.rs` |
 | 13 | `dag_engine::application::ports` | `src/libs/colmena/src/dag_engine/application/ports.rs` |
 | 12 | `dag_engine::application::secure_value_service` | `src/libs/colmena/src/dag_engine/application/secure_value_service.rs` |
+| 11 | `dag_engine::domain::python_executor` | `src/libs/colmena/src/dag_engine/domain/python_executor.rs` |
 | 11 | `documents::domain::ports` | `src/libs/colmena/src/documents/domain/ports.rs` |
 | 11 | `text` | `src/libs/colmena/src/text/mod.rs` |
 | 10 | `dag_engine::domain::events` | `src/libs/colmena/src/dag_engine/domain/events.rs` |
-| 10 | `dag_engine::domain::python_executor` | `src/libs/colmena/src/dag_engine/domain/python_executor.rs` |
 | 10 | `dag_engine::infrastructure::pool_registry` | `src/libs/colmena/src/dag_engine/infrastructure/pool_registry/mod.rs` |
 | 10 | `documents::domain::artifact` | `src/libs/colmena/src/documents/domain/artifact.rs` |
 | 10 | `documents::domain::patch` | `src/libs/colmena/src/documents/domain/patch.rs` |
@@ -315,7 +315,7 @@
 
 #### `src/libs/colmena/src/dag_engine/domain/python_executor.rs`
 - Module: `dag_engine::domain::python_executor`
-- **Used by (10)**: `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/attachment_run_python.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/crdt_doc_run_python.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/data_run_python.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/gsheets_run_python.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/python_node.rs`, `src/libs/colmena/src/dag_engine/infrastructure/python_exec/config.rs`, `src/libs/colmena/src/dag_engine/infrastructure/python_exec/inprocess.rs`, `src/libs/colmena/src/dag_engine/infrastructure/python_exec/mod.rs`, `src/libs/colmena/src/dag_engine/infrastructure/python_exec/protocol.rs`, `src/libs/colmena/src/dag_engine/infrastructure/python_exec/subprocess.rs`
+- **Used by (11)**: `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/attachment_run_python.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/crdt_doc_run_python.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/data_run_python.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/gsheets_run_python.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/python_node.rs`, `src/libs/colmena/src/dag_engine/infrastructure/python_exec/config.rs`, `src/libs/colmena/src/dag_engine/infrastructure/python_exec/inprocess.rs`, `src/libs/colmena/src/dag_engine/infrastructure/python_exec/mod.rs`, `src/libs/colmena/src/dag_engine/infrastructure/python_exec/protocol.rs`, `src/libs/colmena/src/dag_engine/infrastructure/python_exec/remote.rs`, `src/libs/colmena/src/dag_engine/infrastructure/python_exec/subprocess.rs`
 - Depends on (0): — (no intra-crate imports)
 
 #### `src/libs/colmena/src/dag_engine/domain/router_rules.rs`
@@ -895,8 +895,13 @@
 
 #### `src/libs/colmena/src/dag_engine/infrastructure/python_exec/protocol.rs`
 - Module: `dag_engine::infrastructure::python_exec::protocol`
-- **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
+- **Used by (1)**: `src/libs/colmena/src/dag_engine/infrastructure/python_exec/remote.rs`
 - Depends on (1): `dag_engine::domain::python_executor`
+
+#### `src/libs/colmena/src/dag_engine/infrastructure/python_exec/remote.rs`
+- Module: `dag_engine::infrastructure::python_exec::remote`
+- **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
+- Depends on (3): `dag_engine::domain::python_executor`, `dag_engine::infrastructure::python_exec::protocol`, `dag_engine::log_policy`
 
 #### `src/libs/colmena/src/dag_engine/infrastructure/python_exec/seccomp.rs`
 - Module: `dag_engine::infrastructure::python_exec::seccomp`
@@ -960,7 +965,7 @@
 
 #### `src/libs/colmena/src/dag_engine/log_policy.rs`
 - Module: `dag_engine::log_policy`
-- **Used by (4)**: `src/libs/colmena/src/dag_engine/infrastructure/nodes/python_node.rs`, `src/libs/colmena/src/dag_engine/infrastructure/python_exec/mod.rs`, `src/libs/colmena/src/dag_engine/infrastructure/python_exec/server.rs`, `src/libs/colmena/src/dag_engine/infrastructure/python_exec/subprocess.rs`
+- **Used by (5)**: `src/libs/colmena/src/dag_engine/infrastructure/nodes/python_node.rs`, `src/libs/colmena/src/dag_engine/infrastructure/python_exec/mod.rs`, `src/libs/colmena/src/dag_engine/infrastructure/python_exec/remote.rs`, `src/libs/colmena/src/dag_engine/infrastructure/python_exec/server.rs`, `src/libs/colmena/src/dag_engine/infrastructure/python_exec/subprocess.rs`
 - Depends on (1): `dag_engine::engine`
 
 #### `src/libs/colmena/src/dag_engine/main.rs`

@@ -7388,3 +7388,30 @@ limpio en Linux y macOS. E2E con el smoke por `dag_engine run` en el contenedor:
 con `remote`, el arranque corta con la variable en el error.
 **ADP.** Sin impacto: nada usa la config remota todavía, y un host sin `COLMENA_PYTHON_EXECUTOR_URL` no cambia.
 **Estado.** done.
+
+## 204. Python: el cliente del executor `remote`, todavía sin seleccionar (`remote`, 2/3)
+
+**Qué cambia.** Nuevo `python_exec::remote::RemoteExecutor`, el cliente de `python_executor serve`;
+`COLMENA_PYTHON_EXECUTOR=remote` sigue rechazado al arrancar hasta la parte siguiente. Cada llamada va como
+`POST <URL>/v1/run`, conservando el path de la URL termine o no en `/`, con el wire request comprimido con zstd,
+`Accept-Encoding: zstd` y un `X-Colmena-Request-Id`. No sale nada con una entrada sobre `…_MAX_REQUEST_MB` ni con un
+body comprimido sobre `…_MAX_WIRE_MB`; una respuesta sobre `…_MAX_RESPONSE_MB`, comprimida o no, se corta al leerla.
+Un error de conexión, una respuesta interrumpida o un 429, 502, 503 o 504 se reintenta una vez a los 250 ms con el
+mismo id; el segundo fallo es `PythonExecutorError: … unavailable (…)` y el código nunca corre en proceso. 401 o 403
+dan credenciales rechazadas, 413 el texto del límite de entrada y otro status `answered HTTP <status>`. Conecta solo a
+la URL: ignora las variables de proxy (también para el servidor de metadata), no sigue redirects y rechaza una URL
+con usuario o contraseña. El archivo de token se lee en cada llamada. Un reintento loguea `python remote call retried`
+con `request_id` y `reason`. `zstd` pasa a ser dependencia en todas las plataformas. Guía:
+[53_python_executors.md](developer_guide/53_python_executors.md#the-remote-client).
+**Tests.** Nueve unitarios contra wiremock: el path de la URL se conserva con y sin `/` final; una URL con usuario se
+rechaza; el pedido sale con zstd, `Accept-Encoding` y el id, y se lee una respuesta zstd; un 503 se reintenta una vez
+y dos dan `unavailable` tras dos pedidos; 401, 403, 413, 500 y 307 dan su texto con un solo pedido, sin seguir el
+redirect; el archivo de token se lee en cada llamada y uno vacío corta antes de enviar; el token de identidad va en
+`Authorization`; no sale una entrada sobre el límite ni una comprimida sobre el tope de wire (una repetitiva de 4 MiB
+sí); una respuesta sobre el límite, plana o zstd, se rechaza. Mutaciones rojas, cada una en su test: el path por
+`join`, sin reintento, reintento de 401/403, seguir redirects, sin tope de wire, sin límite de entrada, sin tope de la
+respuesta descomprimida, token vacío enviado y URL con usuario aceptada. `--lib python_exec`: 98 en Linux con la
+jaula, 58 en macOS; clippy `-D warnings` limpio en Linux y macOS. E2E con el smoke por `dag_engine run` en el
+contenedor: con URL y `AUTH=none` los cuatro `python run` siguen en proceso con la misma firma (`sX/8gxym…130=`); con
+`remote`, el arranque sigue cortando con `…=remote is not available in this build`.
+**ADP.** Sin impacto: `remote` todavía no se puede elegir. **Estado.** done.

@@ -10,6 +10,7 @@ pub mod inprocess;
 #[cfg(target_os = "linux")]
 pub mod jail;
 pub mod protocol;
+pub mod remote;
 #[cfg(all(
     target_os = "linux",
     any(target_arch = "x86_64", target_arch = "aarch64")
