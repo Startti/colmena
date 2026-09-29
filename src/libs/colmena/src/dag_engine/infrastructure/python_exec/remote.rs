@@ -16,13 +16,16 @@ use bytes::Bytes;
 use reqwest::header::{ACCEPT_ENCODING, CONTENT_ENCODING, CONTENT_TYPE};
 use reqwest::{RequestBuilder, Url};
 use std::io::Read;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Time allowed beyond a call's deadline for sending and receiving it.
 const TRANSFER_GRACE: Duration = Duration::from_secs(30);
 const RETRY_DELAY: Duration = Duration::from_millis(250);
 /// Short in unit tests, which wait for it to expire.
 const CONNECT_TIMEOUT: Duration = Duration::from_millis(if cfg!(test) { 200 } else { 10_000 });
+/// How long [`PythonExecutor::warm`] waits for the service, and how often it asks.
+const READY_WITHIN: Duration = Duration::from_secs(120);
+const READY_POLL: Duration = Duration::from_secs(1);
 const REJECTED: &str =
     "PythonExecutorError: the isolated Python executor rejected this caller's credentials";
 const MALFORMED: &str = "PythonExecutorError: malformed response from the isolated Python executor";
@@ -30,6 +33,7 @@ const MALFORMED: &str = "PythonExecutorError: malformed response from the isolat
 pub struct RemoteExecutor {
     cfg: RemoteConfig,
     max_timeout: Duration,
+    ready_within: Duration,
     http: reqwest::Client,
     id_tokens: Option<IdTokenSource>,
 }
@@ -91,9 +95,11 @@ impl RemoteExecutor {
             _ => None,
         };
         let id_tokens = id_tokens.map(|a| IdTokenSource::new(a, http.clone()));
+        let ready_within = READY_WITHIN;
         Ok(Self {
             cfg,
             max_timeout,
+            ready_within,
             http,
             id_tokens,
         })
@@ -205,6 +211,27 @@ impl PythonExecutor for RemoteExecutor {
         match self.post_once(body, timeout, &request_id).await {
             Attempt::Done(r) => r,
             Attempt::Retry(why) => Err(unavailable(why)),
+        }
+    }
+
+    /// Waits until the service's `/readyz` answers 200, asking every second
+    /// for up to 120 s; rejected credentials end the wait at once.
+    async fn warm(&self) -> Result<(), String> {
+        let started = Instant::now();
+        loop {
+            let rb = self.http.get(endpoint(&self.cfg.url, "readyz"));
+            let rb = self.authorized(rb.timeout(Duration::from_secs(10))).await;
+            let why = match rb.map_err(|e| e.to_string())?.send().await {
+                Ok(r) if r.status() == 200 => return Ok(()),
+                Ok(r) if [401, 403].contains(&r.status().as_u16()) => return Err(REJECTED.into()),
+                Ok(r) => format!("HTTP {}", r.status().as_u16()),
+                Err(_) => "no answer".to_string(),
+            };
+            if started.elapsed() + READY_POLL > self.ready_within {
+                let e = "PythonExecutorError: the isolated Python executor is not ready";
+                return Err(format!("{e} ({why})"));
+            }
+            tokio::time::sleep(READY_POLL).await;
         }
     }
 }
@@ -442,5 +469,24 @@ mod tests {
             let e = fails(&exec(&s.uri(), RemoteAuthConfig::None), req()).await;
             assert!(e.contains("result exceeds"), "{e}");
         }
+    }
+
+    #[tokio::test]
+    async fn warm_waits_for_readyz() {
+        let s = MockServer::start().await;
+        on(&s, "/readyz", Answer::new(503), 1).await;
+        on(&s, "/readyz", Answer::new(200), 1).await;
+        let mut ex = exec(&s.uri(), RemoteAuthConfig::None);
+        assert_eq!((ex.warm().await, hits(&s).await), (Ok(()), 2));
+        s.reset().await;
+        on(&s, "/readyz", Answer::new(503), 9).await;
+        ex.ready_within = Duration::ZERO;
+        let e = "PythonExecutorError: the isolated Python executor is not ready (HTTP 503)";
+        assert_eq!(ex.warm().await, Err(e.to_string()));
+        s.reset().await;
+        on(&s, "/readyz", Answer::new(403), 9).await;
+        ex.ready_within = Duration::from_secs(60);
+        let waited = tokio::time::timeout(Duration::from_secs(5), ex.warm()).await;
+        assert_eq!(waited, Ok(Err(REJECTED.to_string())));
     }
 }
