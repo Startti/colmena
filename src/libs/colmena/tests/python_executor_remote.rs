@@ -18,11 +18,10 @@ const TOKEN: &str = "remote-test-token-0123456789abcdef";
 
 fn req(code: &str, mode: &str) -> PythonRunRequest {
     let inputs = serde_json::json!({ "x": 20 }).as_object().cloned().unwrap();
-    let (code, mode, timeout) = (code.into(), mode.into(), Some(Duration::from_secs(30)));
     PythonRunRequest {
-        code,
-        mode,
-        timeout,
+        code: code.into(),
+        mode: mode.into(),
+        timeout: Some(Duration::from_secs(30)),
         inputs,
     }
 }
@@ -38,13 +37,11 @@ async fn calls_through_the_server_match_the_in_process_results() {
     sub.bin = PathBuf::from(env!("CARGO_BIN_EXE_python_executor"));
     (sub.slots, sub.uid_base) = (2, 30400);
     let exec = Arc::new(SubprocessExecutor::new(sub.clone(), Duration::from_secs(60)).unwrap());
-    let (token, ready) = (Some(Arc::new(TOKEN.into())), Arc::new(true.into()));
-    let max_timeout = Duration::from_secs(60);
     let state = AppState {
         exec,
-        token,
-        ready,
-        max_timeout,
+        token: Some(Arc::new(TOKEN.into())),
+        ready: Arc::new(true.into()),
+        max_timeout: Duration::from_secs(60),
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}/", listener.local_addr().unwrap());
@@ -53,16 +50,12 @@ async fn calls_through_the_server_match_the_in_process_results() {
     let client = |token: &str| {
         let file = dir.path().join(token);
         std::fs::write(&file, token).unwrap();
-        let (url, auth) = (url.parse().unwrap(), RemoteAuthConfig::BearerFile(file));
-        let (max_request_bytes, max_response_bytes) =
-            (sub.max_request_bytes, sub.max_response_bytes);
-        let max_wire_bytes = Some(1 << 20);
         let cfg = RemoteConfig {
-            url,
-            auth,
-            max_request_bytes,
-            max_response_bytes,
-            max_wire_bytes,
+            url: url.parse().unwrap(),
+            auth: RemoteAuthConfig::BearerFile(file),
+            max_request_bytes: sub.max_request_bytes,
+            max_response_bytes: sub.max_response_bytes,
+            max_wire_bytes: Some(1 << 20),
         };
         RemoteExecutor::new(cfg, Duration::from_secs(60)).unwrap()
     };
@@ -82,10 +75,10 @@ async fn calls_through_the_server_match_the_in_process_results() {
         let expected = InProcessExecutor.run(req(code, mode)).await;
         assert_eq!(remote.run(req(code, mode)).await, expected, "{code}");
     }
+    // Another token is refused before anything runs, from `warm` on.
     let refused = client("a-token-this-server-does-not-accept");
+    let rejected = "rejected this caller's credentials";
+    assert!(refused.warm().await.is_err_and(|e| e.ends_with(rejected)));
     let e = refused.run(req("output = 1", "none")).await.unwrap_err();
-    assert!(
-        e.to_string().contains("rejected this caller's credentials"),
-        "{e}"
-    );
+    assert!(e.to_string().ends_with(rejected), "{e}");
 }

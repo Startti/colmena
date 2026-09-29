@@ -286,12 +286,17 @@ over `…_MAX_WIRE_MB`, and an answer over `…_MAX_RESPONSE_MB` fails. Bodies a
 end to end when inputs may exceed what an HTTP/1 front accepts, or set `COLMENA_PYTHON_EXECUTOR_MAX_WIRE_MB` so
 oversized calls fail clearly. Proxy variables and redirects are ignored, and the token file is read per call.
 
-Only a call that certainly did not run is retried, once, after 250 ms: a connection error (a connect timeout too), 429
-or 503. 502, 504, a lost or cut answer, or a second failure is `PythonExecutorError: … unavailable (…)`, never an
-in-process run. 401/403 is `… rejected this caller's credentials`, 413 the input-limit text, and another status
-`… answered HTTP <status>`. A retry logs `python remote call retried` with `request_id` and `reason` only. `warm` (what `wait_until_ready` awaits) asks
-`GET <URL>/readyz`, with the caller's credentials, every second until it answers 200, for up to 120 s; 401 or 403
-ends the wait at once.
+A call ends within its timeout plus 30 s, credentials and retries included. Only a call that certainly did not run is
+sent again, with the same request id: after a connection error (a connect timeout too), once, 250 ms later; after 429
+or 503, when `Retry-After` says (at most 2 s), while time is left, so a burst beyond what `serve` takes in flight waits.
+502, 504, a lost or cut answer, late credentials or no time left is `PythonExecutorError: … unavailable (…)`, never an
+in-process run. 401/403 is `… rejected this caller's credentials`, 413 `Python execution error: the input exceeds what
+the isolated Python executor accepts`, another status `… answered HTTP <status>`. A retry logs `python remote call
+retried` with `request_id` and `reason` only. `warm` (what `wait_until_ready` awaits) waits up to 120 s, asking every
+second, for `GET <URL>/readyz` to answer 200 and then for an empty `POST <URL>/v1/run` with the credentials to answer
+400 (`serve` runs nothing without a body); 401 or 403 ends the wait at once, so a wrong token shows at startup. Its
+connections belong to the runtime that opened them: while one of several runtimes ends (parallel `#[tokio::test]`s),
+the others' calls can fail with `… unavailable (request failed)`, so run such tests on one thread.
 
 ## Equivalence with the in-process executor
 
@@ -320,11 +325,11 @@ CI runs them in the `python-executor` job of `ci-develop.yml` (Debian bookworm c
 numpy and scipy from Debian): the executor's unit tests, both jail suites (the step fails on any skip line),
 `python_executor self-test`, the Python node and tool suites and the equivalence bench under `subprocess` with
 `COLMENA_PYTHON_EXECUTOR_MODES=all`, the bench again with the default modes, and the smoke graph under `subprocess`
-(four `python run` events with `outcome="ok"`); then, against a local `python_executor serve` (loopback, no token),
-the same suites, the bench and the smoke graph under `remote`. `tests/python_executor_remote.rs`, a jail suite, runs
-cases through `serve`'s router with a token and compares them with in process. Four `gsheets_run_python` tests are
-skipped there by name: with pandas installed they fail the same way under every executor, and no job runs their
-assertions today.
+(four `python run` events with `outcome="ok"`); then, against a local `python_executor serve` (loopback, no token, 2
+slots), the same suites on one test thread, the bench (its burst of 12 calls exceeds the 4 in flight) and the smoke
+graph under `remote`. `tests/python_executor_remote.rs`, a jail suite, runs cases through `serve`'s router with a token
+and compares them with in process. Four `gsheets_run_python` tests are skipped there by name: with pandas installed
+they fail the same way under every executor, and no job runs their assertions today.
 
 ## About `restricted`
 

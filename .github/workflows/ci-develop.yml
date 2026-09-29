@@ -167,7 +167,7 @@ jobs:
       # only error results carry); without pandas they return before their
       # assertions. No job runs those assertions today; they are skipped here.
       # The golden test prints its summary only after it compared every case;
-      # without it nothing was compared. It runs on one test thread so its two
+      # without it nothing was compared. It runs on one test thread so its
       # tests do not compete for the executor's slots.
       - name: Python suites under the subprocess executor, every mode
         env:
@@ -208,6 +208,9 @@ jobs:
 
       # The same suites, the golden bench and the smoke graph through the remote
       # executor, against a local `python_executor serve` (loopback, no token).
+      # With 2 slots it takes 4 calls in flight: the bench's burst of 12 waits.
+      # One test thread: the client's connections belong to the runtime that
+      # opened them, and each test drops its own.
       - name: Equivalence — remote (local server)
         env:
           DATABASE_URL: postgres://colmena:colmena@postgres:5432/colmena
@@ -215,15 +218,16 @@ jobs:
           RUST_LOG: colmena::python_exec=debug
           NO_COLOR: "1"
         run: |
-          COLMENA_PYTHON_EXECUTOR_SLOTS=4 target/debug/python_executor serve --listen 127.0.0.1:18080 &
+          COLMENA_PYTHON_EXECUTOR_SLOTS=2 target/debug/python_executor serve --listen 127.0.0.1:18080 &
           timeout 120 bash -c 'until curl -fsS http://127.0.0.1:18080/readyz; do sleep 2; done'
           export COLMENA_PYTHON_EXECUTOR=remote COLMENA_PYTHON_EXECUTOR_URL=http://127.0.0.1:18080 COLMENA_PYTHON_EXECUTOR_AUTH=none
           cargo test -p colmena_dag_engine --lib -- python_node data_run_python gsheets_run_python attachment_run_python crdt_doc_run_python \
             --skip dispatch_inline_data_binding_reaches_sandbox --skip dispatch_inline_2d_array_is_converted_to_records \
-            --skip multi_sheet_write_back_three_tabs --skip multi_sheet_collision_retries_with_suffix
-          cargo test --test crdt_run_python_sandbox_test --test crdt_doc_run_python_test --test crdt_doc_cross_sheet_e2e_test -- --include-ignored
+            --skip multi_sheet_write_back_three_tabs --skip multi_sheet_collision_retries_with_suffix --test-threads=1
+          cargo test --test crdt_run_python_sandbox_test --test crdt_doc_run_python_test --test crdt_doc_cross_sheet_e2e_test -- --include-ignored --test-threads=1
           cargo test --test python_executor_golden -- --nocapture --test-threads=1 2>&1 | tee golden-remote.log
           grep -F 'golden: 17 cases match' golden-remote.log
+          grep -F 'burst: 12 calls at once completed (remote executor)' golden-remote.log
           test "$(grep -c 'concurrent .*: each call kept its own stdout' golden-remote.log)" -eq 2
           export SECURE_VALUES_KEY="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
           cargo run --bin dag_engine -- run tests/graphs/basic/python_executor_smoke.json 2>&1 | tee smoke-remote.log

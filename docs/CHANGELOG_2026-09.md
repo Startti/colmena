@@ -7404,28 +7404,20 @@ overflow, y un handshake sin respuesta da `unavailable`, no timeout. `--lib pyth
 
 ## 205. Python: el executor `remote` se puede elegir (`remote`, 3/3)
 
-**Qué cambia.** `COLMENA_PYTHON_EXECUTOR=remote` arma el `RemoteExecutor` con los ajustes de
-`COLMENA_PYTHON_EXECUTOR_URL`; sin URL, el arranque corta con `…=remote needs COLMENA_PYTHON_EXECUTOR_URL`. Nunca
-vuelve a correr en proceso: con el servicio caído, cada llamada falla con `PythonExecutorError: … unavailable`.
-`wait_until_ready` con `remote` pregunta `GET <URL>/readyz` (con las credenciales del cliente) cada segundo hasta que
-da 200, hasta 120 s; 401 o 403 cortan la espera con el texto de credenciales rechazadas. CI: nuevo paso
-«Equivalence — remote (local server)» que levanta `python_executor serve` en loopback sin token y corre, con
-`remote` y `COLMENA_PYTHON_EXECUTOR_MODES=all`, las suites de Python, el banco dorado (17 casos y la concurrencia) y
-el smoke (cuatro `python run executor="remote"` con `outcome="ok"` y ninguno `inprocess`); el paso de la jaula suma
-`python_executor_remote`. Guía: [53_python_executors.md](developer_guide/53_python_executors.md#the-remote-client).
-**Tests.** Unitarios: `remote` se arma con URL y sin ella corta con el texto que la nombra; `warm` espera tras un 503
-hasta el 200, con el plazo vencido da `not ready (HTTP 503)` y un 403 corta en el acto. Mutaciones rojas: el
-despachador que arma `inprocess` para `remote`, `warm` sin reintentar y `warm` que sigue esperando ante un 403. Suite
-de la jaula `python_executor_remote` (router de `serve` con token y el template real): siete casos (`none` con
-entradas, sin `output`, `None` con stdout unicode, un import rechazado, una excepción, un error de sintaxis y un entero
-que no pasa a JSON) dan por `remote` lo mismo que en proceso, y otro token da credenciales rechazadas. `--lib
-python_exec`: 99 en Linux con la jaula, 59 en macOS; clippy `-D warnings` limpio en Linux y macOS. El paso nuevo de
-CI, corrido igual en el contenedor: suites de Python ok, `golden: 17 cases match; 17 ran through the remote executor`,
-la concurrencia en los dos modos y el smoke con cuatro `python run executor="remote"` ok. E2E con el smoke por
-`dag_engine run` contra `python_executor serve --token-file` en el contenedor: con el token, cuatro `python run
-executor="remote" … outcome="ok"`, la misma firma que en proceso (`sX/8gxym…130=`) y cuatro `python serve run` en el
-servidor; igual con `HTTP_PROXY` y `ALL_PROXY` a un puerto cerrado (sin `.no_proxy()` esa llamada falla); con otro
-token, el primer nodo falla con `rejected this caller's credentials`; sin URL, el arranque corta; con `serve` detenido,
-`python remote call retried … reason=connection failed` y el nodo falla con `unavailable (connection failed)`, sin
-ninguna línea `executor="inprocess"`.
+**Qué cambia.** `COLMENA_PYTHON_EXECUTOR=remote` arma el `RemoteExecutor` (sin URL, el arranque corta) y nunca corre
+en proceso. Un plazo por llamada (timeout + 30 s) cubre credenciales, intentos y esperas: 429 y 503 esperan su
+`Retry-After` (hasta 2 s, con jitter) mientras quede plazo, así una ráfaga sobre el tope en vuelo de `serve` espera;
+un error de conexión se reintenta una vez; credenciales tardías dan `unavailable (credentials timed out)`, no un
+timeout del código. 413 da un texto válido para cualquier capa, un token con caracteres de control `… does not hold a
+valid token`, y un `Content-Length` sobre el tope se rechaza antes de leer. `wait_until_ready` espera `/readyz` y un
+`POST /v1/run` vacío con las credenciales (400, no corre nada): un token equivocado corta al arrancar. CI: paso
+«Equivalence — remote (local server)», `serve` con 2 slots y la ráfaga de 12 llamadas del banco dorado, en un hilo.
+Guía: [53_python_executors.md](developer_guide/53_python_executors.md#the-remote-client).
+**Tests.** Trece unitarios de `remote`, con una mutación roja por regla nueva (plazo, credenciales, `Retry-After` y su
+tope, reintentos, request id, `warm`, 413, token, `Content-Length`) y el despachador. `--lib python_exec`: 105 en Linux
+con la jaula, 67 en macOS; clippy limpio en los dos. Jaula: siete casos iguales a en proceso; otro token, rechazado en
+`warm` y en la llamada. El paso de CI en el contenedor: ráfaga completa (con la política anterior, `HTTP 503`), 17
+casos dorados y el smoke; en paralelo, conexiones de un runtime ya cerrado daban `request failed`. E2E por `dag_engine
+run` contra `serve --token-file`: token bueno, cuatro `remote` ok con la firma de en proceso; otro token, rechazado en
+la llamada y en `wait_until_ready` a los 2 s; `serve` detenido, `unavailable (connection failed)`.
 **ADP.** Puede elegir `remote` apuntando a un `python_executor serve`; llega con el próximo tag. **Estado.** done.

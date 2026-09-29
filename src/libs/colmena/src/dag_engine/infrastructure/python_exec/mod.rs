@@ -97,8 +97,8 @@ pub fn install_from_env() -> Result<ExecutorKind, ExecutorConfigError> {
 /// one beside it), or starts the template when none is running, and returns
 /// that start's result: `Ok(())` once the template is ready, or the
 /// `PythonExecutorError: …` text of a failed start, at the latest after the
-/// start's 120 s limit. `remote` waits up to 120 s for `/readyz` to answer
-/// 200. `inprocess` is ready at once; a misconfigured executor
+/// start's 120 s limit. `remote` waits up to 120 s for the service to be ready
+/// and take its credentials. `inprocess` is ready at once; a misconfigured executor
 /// returns the text [`run`] would. The error does not stop anything: the host
 /// logs it and serves, and isolated calls fail until a later start succeeds.
 /// Nothing changes for a host that does not call it.
