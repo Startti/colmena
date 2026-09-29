@@ -1,5 +1,6 @@
 //! HTTP front for the subprocess executor (`python_executor serve`). A request
-//! body is a wire request and a response body a wire response, as JSON. Every
+//! body is a wire request and a response body a wire response, as JSON,
+//! optionally zstd-compressed (`Content-Encoding` / `Accept-Encoding`). Every
 //! call goes through [`SubprocessExecutor::run_raw`], so the jail and the
 //! output policy apply as they do in a host. Logs carry fields only: never
 //! code, inputs, outputs, stdout, tokens or headers.
@@ -19,6 +20,7 @@ use axum::middleware::{from_fn_with_state, Next};
 use axum::response::{IntoResponse, Response};
 use axum::{body::Bytes, routing::get, routing::post, Router};
 use sha2::{Digest, Sha256};
+use std::io::Read;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
@@ -129,7 +131,37 @@ fn answer(
     }
 }
 
-async fn run_call(State(st): State<AppState>, raw: Bytes) -> Response {
+/// The body with its `Content-Encoding` undone; 413 once it exceeds `max`.
+fn decode(encoding: Option<&str>, body: Bytes, max: usize) -> Result<Bytes, StatusCode> {
+    let raw = match encoding {
+        None | Some("identity") => body,
+        Some("zstd") => {
+            let unpack = zstd::stream::read::Decoder::new(&body[..]);
+            let mut out = Vec::new();
+            let read = unpack.and_then(|u| u.take(max as u64 + 1).read_to_end(&mut out));
+            read.map_err(|_| StatusCode::BAD_REQUEST)?;
+            out.into()
+        }
+        Some(_) => return Err(StatusCode::UNSUPPORTED_MEDIA_TYPE),
+    };
+    match raw.len() > max {
+        true => Err(StatusCode::PAYLOAD_TOO_LARGE),
+        false => Ok(raw),
+    }
+}
+
+async fn run_call(State(st): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
+    let text = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
+    let (wire_in_bytes, max) = (body.len(), st.exec.config().max_request_bytes);
+    let encoding = text("content-encoding").map(str::to_string);
+    let decoded = tokio::task::spawn_blocking(move || decode(encoding.as_deref(), body, max));
+    let raw = match decoded
+        .await
+        .unwrap_or(Err(StatusCode::INTERNAL_SERVER_ERROR))
+    {
+        Ok(raw) => raw,
+        Err(code) => return code.into_response(),
+    };
     let timeout = match deadline(&raw, st.max_timeout) {
         Ok(timeout) => timeout,
         Err(code) => return code.into_response(),
@@ -138,10 +170,17 @@ async fn run_call(State(st): State<AppState>, raw: Bytes) -> Response {
     let (code, out, outcome) = answer(st.exec.run_raw(timeout, &raw).await, max_response);
     let (in_bytes, out_bytes) = (raw.len(), out.len());
     let duration_ms = started.elapsed().as_millis() as u64;
-    tracing::info!(target: T_PYTHON_EXEC, outcome, in_bytes, out_bytes, duration_ms, "python serve run");
-    match out.is_empty() {
-        true => code.into_response(),
-        false => (code, [(header::CONTENT_TYPE, "application/json")], out).into_response(),
+    tracing::info!(target: T_PYTHON_EXEC, outcome, in_bytes, wire_in_bytes, out_bytes, duration_ms, "python serve run");
+    let json = (header::CONTENT_TYPE, "application/json");
+    let accept = text("accept-encoding").unwrap_or("");
+    if out.is_empty() || !accept.split(',').any(|e| e.trim().starts_with("zstd")) {
+        return (code, [json], out).into_response();
+    }
+    match tokio::task::spawn_blocking(move || zstd::bulk::compress(&out, 3)).await {
+        Ok(Ok(packed)) => {
+            (code, [json, (header::CONTENT_ENCODING, "zstd")], packed).into_response()
+        }
+        _ => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
 
@@ -308,7 +347,7 @@ mod tests {
         })
     }
 
-    async fn status(app: Router, headers: &[(&str, &str)], body: String) -> StatusCode {
+    async fn status(app: Router, headers: &[(&str, &str)], body: Vec<u8>) -> StatusCode {
         let mut req = axum::http::Request::post("/v1/run");
         for (k, v) in headers {
             req = req.header(*k, *v);
@@ -325,18 +364,28 @@ mod tests {
         use StatusCode as S;
         let wire =
             |v| format!(r#"{{"v":{v},"code":"","mode":"none","timeout_ms":1,"inputs":{{}}}}"#);
-        let (t, big) = (Some("s3cret"), || " ".repeat(1025));
-        let auth = &[("authorization", "Bearer s3cret")][..];
+        let (wire, big) = (|v| wire(v).into_bytes(), || vec![b' '; 1025]);
+        let zipped = |b: Vec<u8>| zstd::bulk::compress(&b, 3).unwrap();
+        let (t, auth) = (Some("s3cret"), &[("authorization", "Bearer s3cret")][..]);
+        let (gzip, zstd) = (
+            &[("content-encoding", "gzip")][..],
+            &[("content-encoding", "zstd")][..],
+        );
         for (ready, token, headers, body, expected) in [
             (true, t, &[][..], big(), S::UNAUTHORIZED),
             (false, t, auth, wire(2), S::SERVICE_UNAVAILABLE),
             (true, t, auth, big(), S::PAYLOAD_TOO_LARGE),
+            (true, None, zstd, zipped(big()), S::PAYLOAD_TOO_LARGE),
+            (true, None, gzip, wire(1), S::UNSUPPORTED_MEDIA_TYPE),
+            (true, None, zstd, b"not zstd".to_vec(), S::BAD_REQUEST),
             (true, t, auth, wire(2), S::BAD_REQUEST),
-            (true, None, &[][..], "{}".into(), S::BAD_REQUEST),
+            (true, None, &[][..], b"{}".to_vec(), S::BAD_REQUEST),
             (true, None, &[][..], wire(1), S::SERVICE_UNAVAILABLE),
+            (true, None, zstd, zipped(wire(1)), S::SERVICE_UNAVAILABLE),
         ] {
-            let got = status(app(ready, token), headers, body.clone()).await;
-            assert_eq!(got, expected, "{headers:?} {body:.20}");
+            let text = String::from_utf8_lossy(&body[..body.len().min(20)]).into_owned();
+            let got = status(app(ready, token), headers, body).await;
+            assert_eq!(got, expected, "{headers:?} {text:?}");
         }
         let probe = |path| axum::http::Request::get(path).body(Body::empty()).unwrap();
         let readyz = app(false, None).oneshot(probe("/readyz")).await.unwrap();
@@ -367,5 +416,21 @@ mod tests {
         std::fs::write(&file, " \n").unwrap();
         assert!(token(Some(&file), lo).is_err());
         assert!(token(Some(&dir.path().join("missing")), lo).is_err());
+    }
+
+    #[test]
+    fn a_body_is_decoded_up_to_the_limit() {
+        let (fits, max) = (Bytes::from(vec![b' '; 1024]), 1024);
+        let packed = Bytes::from(zstd::bulk::compress(&fits, 3).unwrap());
+        assert_eq!(decode(None, fits.clone(), max), Ok(fits.clone()));
+        assert_eq!(
+            decode(Some("identity"), fits.clone(), max),
+            Ok(fits.clone())
+        );
+        assert_eq!(decode(Some("zstd"), packed.clone(), max), Ok(fits));
+        assert_eq!(
+            decode(Some("zstd"), packed, max - 1),
+            Err(StatusCode::PAYLOAD_TOO_LARGE)
+        );
     }
 }

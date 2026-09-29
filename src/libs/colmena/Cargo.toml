@@ -181,6 +181,11 @@ pulldown-cmark = { version = "0.10", default-features = false }
 # Isolated Python executor: the syscall filter of each per-call child.
 seccompiler = "0.5"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# `python_executor serve`: HTTP/2 without TLS (h2c) and zstd-compressed bodies.
+axum = { version = "0.7", features = ["http2"] }
+zstd = "0.13"
+
 [features]
 default = []
 python = ["pyo3-async-runtimes"]

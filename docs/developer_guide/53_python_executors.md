@@ -188,6 +188,11 @@ starts only on a loopback address. The token file joins the hidden paths by its 
 so the code a call runs cannot read it, and the startup self-test proves that path is covered. In a container:
 `python_executor serve --listen 0.0.0.0:8080 --token-file /secrets/token`.
 
+Bodies may be zstd-compressed: a request with `Content-Encoding: zstd` is decompressed up to `…_MAX_REQUEST_MB` (past
+it a 413; a body that is not a zstd frame, a 400), and any other encoding than `identity` is a 415. An answer is
+compressed when the request's `Accept-Encoding` lists `zstd`. The server speaks HTTP/1.1 and HTTP/2 without TLS (h2c,
+prior knowledge), so a platform that forwards HTTP/2 to the container reaches it.
+
 The executor settings are the `COLMENA_PYTHON_EXECUTOR_*` variables a host reads (`…_BIN`, `…_SLOTS`, `…_MEMORY_MB`,
 `…_HIDE_PATHS`, `…_MAX_REQUEST_MB`, `…_MAX_RESPONSE_MB`, `…_REFUSE_OUTPUT`, `…_MAX_TIMEOUT_SECS`), with the same
 defaults and ranges; there are no flags for them. Before it listens, the server runs the jail self-test in its own
@@ -196,8 +201,8 @@ for example); 2 for a bad configuration (an invalid variable, named in the error
 address; a token file that cannot be read or holds a short token); 3 when the self-test fails, each failed layer logged.
 
 Logs (target `colmena::python_exec`, level from `RUST_LOG`, `info` by default) are fields only: one `python serve run`
-event per call with `outcome`, `in_bytes`, `out_bytes` and `duration_ms`. They never carry code, inputs, outputs,
-stdout, tokens or headers.
+event per call with `outcome`, `in_bytes`, `wire_in_bytes` (the body as sent), `out_bytes` and `duration_ms`. They
+never carry code, inputs, outputs, stdout, tokens or headers.
 
 ## Equivalence with the in-process executor
 
