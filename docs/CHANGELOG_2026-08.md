@@ -515,8 +515,10 @@ acertando aunque el resumen viajara pegado detrás.
 
 Evidencia de OpenAI: sonda directa a `chat/completions` con las dos formas del mensaje (`system`
 fusionado vs `system` separados), creciendo el resumen entre llamadas — `cached_tokens` idéntico en
-ambas. Evidencia de Gemini: 5 turnos por arm; el turno 1 (sin compactación todavía) da
-`promptTokens` **1714 exacto en los dos arms**, y la divergencia posterior es de ~5 tokens, que es
+ambas. Evidencia de Gemini: 5 turnos por arm; el turno 1 (sin compactación todavía) da un input
+total (`promptTokens` + `cacheReadTokens`) de **1714 exacto en los dos arms** — desde §8
+`promptTokens` ya no incluye lo leído de caché, así que se compara el total —, y la divergencia
+posterior es de ~5 tokens, que es
 el separador `---` que dejó de emitirse. Grafos:
 `tests/graphs/agents/prompt_cache_compaction_measure_{openai,gemini}.json`.
 
