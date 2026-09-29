@@ -403,7 +403,11 @@ sin perder nada (el original siempre vive en la DB).
 > En Gemini el `systemInstruction` sí cambia de texto — pasa de `estable\n\n---\n\nresumen` a
 > `estable\n\nresumen`, porque el adapter une los `system` con `\n\n` y el separador `---`
 > desaparece. Es una diferencia de ~5 tokens que no mueve el caching: el turno 1, todavía sin
-> compactar, da `promptTokens` idéntico (1714) en ambos arms.
+> compactar, recibe el mismo input total (1714 tokens, `promptTokens` + `cacheReadTokens`) en
+> ambos arms. Se compara el total y no `promptTokens` solo porque Gemini descuenta de
+> `promptTokens` lo que leyó de caché ([§14](14_llm_deep_dive.md#semántica-de-prompttokens-normalizada-sin-restas-del-consumidor)),
+> y un arm puede leer de caché el prefijo que dejó el otro: repetido el 2026-09-28, el turno 1
+> en frío dio 1715 + 0 y el siguiente 891 + 824 — el mismo total de 1715.
 >
 > **Varios `system` en un request son legales** y cada adapter los maneja así:
 >
