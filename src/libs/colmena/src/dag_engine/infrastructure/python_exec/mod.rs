@@ -62,9 +62,11 @@ fn global() -> &'static Result<Arc<Dispatcher>, ExecutorConfigError> {
 /// at startup so a bad configuration stops the process instead of failing
 /// every Python call later. A `subprocess` template that cannot start (its
 /// self-test fails, say) does not stop startup: it is warmed in the background
-/// and every call fails with a `PythonExecutorError` until it starts. Callers may call this more than once (a host may
-/// call it from more than one place, e.g. `EngineConfig::from_env` and the
-/// `dag_engine` CLI); the one-time `info!` install event fires only
+/// and every call fails with a `PythonExecutorError` until it starts (a host
+/// that should not serve before then awaits [`wait_until_ready`]). Callers
+/// may call this more than once (a host may call it from more than one place,
+/// e.g. `EngineConfig::from_env` and the `dag_engine` CLI); the one-time
+/// `info!` install event fires only
 /// for the first successful call of this function, never on a later one
 /// (the executor may already have been built by an earlier [`run`]).
 pub fn install_from_env() -> Result<ExecutorKind, ExecutorConfigError> {
@@ -84,6 +86,30 @@ pub fn install_from_env() -> Result<ExecutorKind, ExecutorConfigError> {
     }
 }
 
+/// Returns once the process executor can take calls, or with why it cannot.
+/// A host awaits it after [`install_from_env`] and before it starts serving,
+/// so that the `subprocess` template's startup (interpreter, module imports,
+/// self-test) runs while the host starts rather than beside its first
+/// requests. For `subprocess` it waits for the template start already under
+/// way (the one [`install_from_env`] begins in the background; never a second
+/// one beside it), or starts the template when none is running, and returns
+/// that start's result: `Ok(())` once the template is ready, or the
+/// `PythonExecutorError: …` text of a failed start, at the latest after the
+/// start's 120 s limit. `inprocess` is ready at once; a misconfigured executor
+/// returns the text [`run`] would. The error does not stop anything: the host
+/// logs it and serves, and isolated calls fail until a later start succeeds.
+/// Nothing changes for a host that does not call it.
+pub async fn wait_until_ready() -> Result<(), String> {
+    match global() {
+        Ok(d) => d.wait_until_ready().await,
+        Err(e) => Err(misconfigured(e)),
+    }
+}
+
+fn misconfigured(e: &ExecutorConfigError) -> String {
+    format!("PythonExecutorError: the Python executor is misconfigured: {e}")
+}
+
 /// Deadline applied to isolated requests that carry none of their own.
 pub fn max_timeout() -> Duration {
     match global() {
@@ -100,9 +126,7 @@ pub async fn run(req: PythonRunRequest) -> Result<PythonRunResult, PythonRunErro
     }
     match global() {
         Ok(d) => d.run(req).await,
-        Err(e) => Err(PythonRunError::Internal(format!(
-            "PythonExecutorError: the Python executor is misconfigured: {e}"
-        ))),
+        Err(e) => Err(PythonRunError::Internal(misconfigured(e))),
     }
 }
 
@@ -177,6 +201,11 @@ impl Dispatcher {
             }
         };
         Ok(Self::new(cfg.modes, cfg.max_timeout, isolated, inprocess))
+    }
+
+    /// See [`wait_until_ready`].
+    pub(crate) async fn wait_until_ready(&self) -> Result<(), String> {
+        self.isolated.warm().await
     }
 
     pub(crate) async fn run(
@@ -325,6 +354,20 @@ mod tests {
             local.seen.lock().unwrap().as_slice(),
             &[("none".to_string(), None)]
         );
+    }
+
+    /// `inprocess` has nothing to start: the wait is over on its first poll.
+    #[test]
+    fn an_in_process_executor_is_ready_at_once() {
+        use futures::FutureExt;
+        let local: Arc<dyn PythonExecutor> = Arc::new(inprocess::InProcessExecutor);
+        let d = Dispatcher::new(
+            ModesPolicy::All,
+            Duration::from_secs(99),
+            local.clone(),
+            local,
+        );
+        assert_eq!(d.wait_until_ready().now_or_never(), Some(Ok(())));
     }
 
     #[tokio::test]

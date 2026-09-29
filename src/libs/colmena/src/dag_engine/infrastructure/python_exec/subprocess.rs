@@ -587,6 +587,10 @@ impl PythonExecutor for SubprocessExecutor {
             Err(f) => Err(f.into_run_error(&self.cfg)),
         }
     }
+
+    async fn warm(&self) -> Result<(), String> {
+        SubprocessExecutor::warm(self).await
+    }
 }
 
 /// Blocking. Runs on the executor's own thread (see [`SubprocessExecutor::new`]).
@@ -717,6 +721,7 @@ fn template_event(line: &[u8]) -> Option<Map<String, Value>> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::{config::ModesPolicy, inprocess::InProcessExecutor, Dispatcher};
     use super::*;
 
     #[test]
@@ -1019,6 +1024,43 @@ mod tests {
         let e = RawFailure::Refused.into_run_error(&cfg);
         assert_eq!(e, PythonRunError::Python(REFUSED_MESSAGE.to_string()));
         assert!(REFUSED_MESSAGE.starts_with("Python execution error:"));
+    }
+
+    /// A dispatcher over `ex` whose template start is under way and holds the
+    /// state lock, as `Dispatcher::build` leaves it.
+    async fn starting(ex: SubprocessExecutor) -> Dispatcher {
+        let ex = Arc::new(ex);
+        let background = ex.clone();
+        tokio::spawn(async move { background.warm().await });
+        tokio::task::yield_now().await;
+        assert!(ex.state.try_lock().is_err(), "the start is not under way");
+        let local = Arc::new(InProcessExecutor);
+        Dispatcher::new(ModesPolicy::Restricted, Duration::from_secs(60), ex, local)
+    }
+
+    /// Waiting joins the start under way: it returns once the template has
+    /// printed READY, and starts no second template.
+    #[tokio::test]
+    async fn waiting_returns_once_the_template_is_ready() {
+        // `${0%/*}` is the directory of the script.
+        let (dir, ex) = fake("sleep 1\necho > \"${0%/*}/ready\"\necho READY\nexec sleep 30");
+        let d = starting(ex).await;
+        d.wait_until_ready().await.unwrap();
+        assert!(dir.path().join("ready").exists(), "returned before READY");
+        assert_eq!(starts(&dir), 1);
+    }
+
+    /// A start that fails is what the wait returns; it is not retried.
+    #[tokio::test]
+    async fn waiting_returns_the_error_of_a_failed_start() {
+        let (dir, ex) = fake("sleep 1\nexit 3");
+        let d = starting(ex).await;
+        let e = d.wait_until_ready().await.unwrap_err();
+        assert!(
+            e.starts_with("PythonExecutorError:") && e.contains("could not start"),
+            "{e}"
+        );
+        assert_eq!(starts(&dir), 1);
     }
 
     #[tokio::test]
