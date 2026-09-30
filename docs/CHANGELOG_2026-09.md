@@ -7498,3 +7498,36 @@ el límite y con caracteres de 2 bytes; `search` y `fetch` sobre un servidor que
 mayúsculas, el `starts_with('<')`, el bloqueo también en 401, sin corte, límite corrido, corte por bytes, la página
 dentro del texto, el status del bloqueo y el de la auth, y cada frase del mensaje. **ADP.** Subir el pin.
 **Estado.** done.
+
+## 209. `router` `decision_model`: se puede cobrar y lee el input como JSON (Jev)
+
+**Qué cambia.** Tres ajustes al modo `decision_model` del `router`:
+
+- **El `usage-summary` informa el modelo.** Si la config no escribe `model`, el nodo usa `jev-1.13.0`, y
+  ahora el `usage-summary` lo dice: antes llegaba `"model": null` y un host que cobra por modelo (ADP)
+  descartaba el nodo sin cobrarlo. La regla vive en `router_rules::default_usage_model` y la usan los dos
+  lugares que arman el resumen (nodos del grafo y nodos de un subgrafo).
+- **`provider` en cualquier combinación de mayúsculas.** `"TypeSafe"` y `"TYPESAFE"` valen como
+  `"typesafe"` (`router_rules::is_decision_model_provider`): ADP escribe el proveedor como lo tiene en su
+  catálogo de modelos, y antes una mayúscula hacía fallar el nodo.
+- **El input viaja como JSON.** Un objeto o un arreglo llega a Jev como `state` estructurado, con sus
+  campos; antes se convertía en texto. Un número o un booleano se manda como texto, porque Jev no los
+  acepta. Los otros modos no cambian.
+
+Guía: `37_router_and_output_parser.md` (modo C). Catálogo: la descripción de `provider`.
+
+**Tests.** `router_rules.rs`: tablas de `default_usage_model` (solo un `router` en `decision_model` tiene
+modelo por defecto) y de `is_decision_model_provider`. `decision_model.rs`: un objeto y un arreglo llegan
+como JSON; un texto, como texto; un número y un booleano, como texto.
+
+**E2E.** `tests/graphs/control_flow/router_decision_model.json` contra el API real, y una variante con
+`provider: "TypeSafe"`, sin `model` y un objeto `{cliente, plan, mensaje}` como input: las dos enrutan a
+`refund` con `reason: "confident"`, y el `usage-summary` del `router` trae `"model": "jev-1.13.0"` en las
+dos (antes, `null`). La variante JSON consumió 444 tokens de entrada contra 422 del texto, por los campos
+`cliente` y `plan`.
+
+**ADP.** El `usage-summary` ahora trae `model` para este nodo, lo que su billing necesita. Falta, del
+lado de ADP, la fila `typesafe` / `jev-1.13.0` en `AiModel` (ver
+`apps/service/ia/platform/docs/pricing/typesafe-jev.md` en el repo de ADP). Sin cambio de API pública.
+**Estado.** done.
+

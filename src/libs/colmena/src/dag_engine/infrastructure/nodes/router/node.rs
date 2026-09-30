@@ -116,7 +116,7 @@ impl ExecutableNode for RouterNode {
             Option<Value>,
             Option<Value>,
         ) = if is_decision_model {
-            if provider_str != "typesafe" {
+            if !crate::dag_engine::domain::router_rules::is_decision_model_provider(provider_str) {
                 return Err(format!(
                     "Router: decision_model mode requires provider 'typesafe', got '{}'",
                     provider_str
@@ -140,7 +140,7 @@ impl ExecutableNode for RouterNode {
                 model,
                 fallback_branch,
                 min_confidence,
-                user_text,
+                input_raw.clone(),
                 observer.clone(),
             )
             .await?;

@@ -17,6 +17,24 @@ use serde_json::Value;
 /// [`decision_model_rejection`]).
 pub const NONE_OF_THESE: &str = "none_of_these";
 
+/// Default model of the router's `decision_model` mode. Pinned rather than
+/// `jev-latest`: `min_confidence` is calibrated against one model, so a silent
+/// upgrade would move routing.
+pub const DEFAULT_DECISION_MODEL: &str = "jev-1.13.0";
+
+/// The model a node runs when its config names none, for the usage summary a
+/// host bills from. Only a `decision_model` router has one.
+pub fn default_usage_model(node_type: &str, config: &Value) -> Option<&'static str> {
+    let decision_model = config.get("mode").and_then(Value::as_str) == Some("decision_model");
+    (node_type == "router" && decision_model).then_some(DEFAULT_DECISION_MODEL)
+}
+
+/// Whether `provider` names the decision-model vendor, in any letter case: a
+/// host writes the provider the way its model catalog spells it.
+pub fn is_decision_model_provider(provider: &str) -> bool {
+    provider.eq_ignore_ascii_case("typesafe")
+}
+
 /// Checks the `decision_model`-specific router config rules against a raw
 /// node config. Returns `Some(message)` describing the first violation, or
 /// `None` when the config is fine. Never reads the network or the
@@ -261,6 +279,41 @@ mod tests {
         ];
         for (name, choice, confidence, min_confidence, expected) in cases {
             assert_eq!(gate(choice, confidence, min_confidence), expected, "{name}");
+        }
+    }
+
+    #[test]
+    fn only_a_decision_model_router_has_a_default_usage_model() {
+        let cases = [
+            (
+                "router",
+                serde_json::json!({ "mode": "decision_model" }),
+                Some(DEFAULT_DECISION_MODEL),
+            ),
+            ("router", serde_json::json!({ "mode": "llm_direct" }), None),
+            ("router", serde_json::json!({}), None),
+            (
+                "llm_call",
+                serde_json::json!({ "mode": "decision_model" }),
+                None,
+            ),
+        ];
+        for (node_type, config, expected) in cases {
+            assert_eq!(
+                default_usage_model(node_type, &config),
+                expected,
+                "{node_type} {config}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_decision_model_provider_matches_in_any_case() {
+        for p in ["typesafe", "TypeSafe", "TYPESAFE"] {
+            assert!(is_decision_model_provider(p), "{p}");
+        }
+        for p in ["openai", "type safe", "typesafe-ai", ""] {
+            assert!(!is_decision_model_provider(p), "{p}");
         }
     }
 }

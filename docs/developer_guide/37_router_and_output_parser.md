@@ -210,7 +210,10 @@ Un modelo de decisión (TypeSafe Jev, `provider: "typesafe"`) elige una rama con
 - `api_key` — es explícito y obligatorio en TODOS los modos del router (no cambia acá), pero en `decision_model` no hay ningún default implícito: si el campo falta, o `${TYPESAFE_API_KEY}` no resuelve, o resuelve a un valor vacío, el nodo falla con un mensaje que nombra `TYPESAFE_API_KEY` explícitamente — cero requests HTTP salen.
 - `fallback_branch` (obligatorio solo en este modo, prohibido en los otros dos) — debe nombrar una rama declarada. Es adonde se enruta cuando el modelo elige `none_of_these`, o cuando su confianza queda por debajo de `min_confidence`.
 - `min_confidence` (opcional solo en este modo, prohibido en los otros dos) — rango `(0, 1]`, default `0.7`. El umbral es `>=`: justo en el borde, pasa.
-- `model` — pin por default a `jev-1.13.0` (ver `nodes/router/decision_model.rs::DEFAULT_MODEL`). Un upgrade silencioso correría el calibrado de `min_confidence`, así que el default queda fijo hasta que se elija cambiarlo a mano.
+- `provider` — `"typesafe"`, en cualquier combinación de mayúsculas (`"TypeSafe"` también vale): un host como ADP lo escribe como lo tenga en su catálogo de modelos.
+- `model` — pin por default a `jev-1.13.0` (`router_rules::DEFAULT_DECISION_MODEL`). Un upgrade silencioso correría el calibrado de `min_confidence`, así que el default queda fijo hasta que se elija cambiarlo a mano. Aunque la config no lo escriba, el `usage-summary` del nodo informa `"model": "jev-1.13.0"`, que es lo que un host necesita para cobrarlo.
+
+**Qué recibe el modelo.** El `input` del nodo es el `state` de Jev. Un objeto o un arreglo JSON viaja **como JSON**, así el modelo puede leer sus campos (un ticket con `cliente`, `plan` y `mensaje` llega con esos nombres); un texto viaja como texto. Un número o un booleano solo se manda como texto, porque Jev no los acepta como `state`. Los otros dos modos siguen recibiendo el input como texto.
 
 **El gate** (`dag_engine::domain::router_rules::gate`, función pura):
 

@@ -626,7 +626,7 @@
           "type": "string",
           "required": true,
           "default": null,
-          "description": "LLM provider. See 'llm_shared_fields.provider'. 'typesafe' is required — and the only accepted value — when 'mode' is 'decision_model'.",
+          "description": "LLM provider. See 'llm_shared_fields.provider'. 'typesafe' (in any letter case) is required — and the only accepted value — when 'mode' is 'decision_model'.",
           "valid_values": ["openai", "google", "anthropic", "typesafe"],
           "example": "google"
         },
