@@ -641,7 +641,7 @@
           "type": "string",
           "required": false,
           "default": null,
-          "description": "Provider-specific model ID.",
+          "description": "Provider-specific model ID. In 'decision_model' mode it defaults to 'jev-1.13.0' (pinned, not 'jev-latest': 'min_confidence' is calibrated against one model), and the usage-summary row reports that effective model when this field is omitted.",
           "example": "gemini-2.5-flash"
         },
         "schema": {

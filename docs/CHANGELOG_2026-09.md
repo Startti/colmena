@@ -7531,3 +7531,17 @@ lado de ADP, la fila `typesafe` / `jev-1.13.0` en `AiModel` (ver
 `apps/service/ia/platform/docs/pricing/typesafe-jev.md` en el repo de ADP). Sin cambio de API pública.
 **Estado.** done.
 
+
+## 210. Docs: el modo `decision_model` del `router` en la referencia SSE, el catálogo y el plan de QA (Jev)
+
+**Qué cambia.** Solo documentación. Cierra los huecos que quedaron después de §209:
+
+- `docs/sse_events_reference.md` (`usage-summary.nodes`): la fila de un `router` en modo `decision_model`
+  sin `model` reporta `"model": "jev-1.13.0"` (antes `null`), y su `provider` llega como está escrito en la
+  config.
+- `docs/node_configurations.json`: el campo `model` del `router` dice que en `decision_model` el default es
+  `jev-1.13.0`, fijo, y que el `usage-summary` lo reporta.
+- `docs/qa/nodes/router.md`: casos 12 a 16 para el modo C (routing confiado, fallback, error del proveedor,
+  `provider` en cualquier caso con input JSON, config rechazada al cargar). También corrige el nombre de la
+  guía 37 en las fuentes.
+- `CLAUDE.md`: la entrada de Jev menciona lo que agregó §209.
