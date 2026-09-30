@@ -7477,3 +7477,24 @@ por 100 el timeout de cada validación. **E2E.** `dag_engine run` contra un prov
 pedidos, el nodo contesta), 503 siempre con la variable en 1 (2 pedidos, el error de siempre), 0 (1 pedido),
 `Retry-After: 30` (1 pedido) y `: 2` (esperado), y `/models` que tarda 15 s (3 intentos a los 10 s, la corrida sigue).
 **ADP.** Subir el pin; nada más. **Estado.** done.
+
+## 208. Tavily: un 403 con página de bloqueo no se lee como una key rechazada
+
+**Qué cambia.** `TavilyAdapter::map_error` devolvía todo 401 y 403 como `AdapterInit("Tavily auth failed (status N):
+<cuerpo>")`, con el cuerpo entero. Cuando el borde del proveedor rechaza la red de quien llama con una página HTML 403
+(un bloqueo que suele levantarse en unos minutos, ajeno a la key), el modelo informaba «auth failed». Ahora un 403 cuyo
+cuerpo es una página (empieza por `<` y trae `<html` o `<!doctype html`) o nombra nginx, sin distinguir mayúsculas,
+sale como `WebDomainError::Upstream { status: 403, .. }` con un texto fijo: el proveedor rechazó el pedido desde esta
+red con una página de bloqueo, no es un problema de la key, suele resolverse en unos minutos, reintentar más tarde. El
+texto no incluye la página. Es recuperable: `web__search` y `web__fetch` lo devuelven al modelo como `upstream_error`
+en vez de un error del nodo, y el use case no lo reintenta (solo reintenta 5xx y transporte). Un 401, y un 403 cuyo
+cuerpo no es una página (el JSON de la API), siguen siendo `AdapterInit`, pero el cuerpo se corta a 200 caracteres
+(`...` al cortar, por caracteres y no por bytes). Guía: [25_web_nodes.md](developer_guide/25_web_nodes.md).
+**Tests.** En `tavily_adapter`: la página de nginx, con marcador `<html`, con `<!doctype html`, en mayúsculas y con
+espacios, y el texto plano con `NGINX`; el texto no lleva nada de la página; un 403 JSON (también uno que contiene
+`<html` sin empezar por `<`), un 401 y un 401 con HTML siguen siendo `AdapterInit`; el corte a 200 caracteres, justo en
+el límite y con caracteres de 2 bytes; `search` y `fetch` sobre un servidor que contesta 403 con la página.
+**Mutación.** Una roja por regla (16): la guarda, cada marcador (`<html`, `<!doctype html`, nginx), el `trim`, las
+mayúsculas, el `starts_with('<')`, el bloqueo también en 401, sin corte, límite corrido, corte por bytes, la página
+dentro del texto, el status del bloqueo y el de la auth, y cada frase del mensaje. **ADP.** Subir el pin.
+**Estado.** done.
