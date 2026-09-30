@@ -772,7 +772,8 @@ impl DagRunUseCase {
 
                 // Record model/provider for usage summary
                 {
-                    let model = node_config.config.get("model").and_then(|v| v.as_str()).map(|s| s.to_string());
+                    let model = node_config.config.get("model").and_then(|v| v.as_str()).map(|s| s.to_string())
+                        .or_else(|| crate::dag_engine::domain::router_rules::default_usage_model(&node_config.node_type, &node_config.config).map(str::to_string));
                     let provider = node_config.config.get("provider").and_then(|v| v.as_str()).map(|s| s.to_string());
                     let provider_key_id = node_config.config.get("provider_key_id").and_then(|v| v.as_str()).map(|s| s.to_string());
                     node_meta.insert(node_id.clone(), NodeMeta { model, provider, node_type: node_config.node_type.clone(), provider_key_id });
@@ -1050,7 +1051,8 @@ impl DagRunUseCase {
                                                     match &child_event {
                                                         DagExecutionEvent::NodeStart { node_id: cid, node_type: ctype, inputs, config } => {
                                                             let model = inputs.get("model").or_else(|| config.get("model"))
-                                                                .and_then(|v| v.as_str()).map(|s| s.to_string());
+                                                                .and_then(|v| v.as_str()).map(|s| s.to_string())
+                                                                .or_else(|| crate::dag_engine::domain::router_rules::default_usage_model(ctype, config).map(str::to_string));
                                                             let provider = inputs.get("provider").or_else(|| config.get("provider"))
                                                                 .and_then(|v| v.as_str()).map(|s| s.to_string());
                                                             let provider_key_id = config.get("provider_key_id")

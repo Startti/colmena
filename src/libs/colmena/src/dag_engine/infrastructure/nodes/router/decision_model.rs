@@ -20,9 +20,8 @@ const NONE_CRITERIA: &str =
 
 const ROUTE_QUESTION_ID: &str = "route";
 
-/// Pinned default model (design decision #2 — a silent upgrade would shift
-/// `min_confidence` calibration).
-pub const DEFAULT_MODEL: &str = "jev-1.13.0";
+/// Default model; see [`crate::dag_engine::domain::router_rules::DEFAULT_DECISION_MODEL`].
+pub const DEFAULT_MODEL: &str = crate::dag_engine::domain::router_rules::DEFAULT_DECISION_MODEL;
 
 /// Default `min_confidence` when the config omits it.
 pub const DEFAULT_MIN_CONFIDENCE: f64 = 0.7;
@@ -43,7 +42,7 @@ pub async fn decide_branch(
     model: Option<String>,
     fallback_branch: &str,
     min_confidence: f64,
-    state: String,
+    state: Value,
     observer: Option<Arc<dyn ExecutionObserver>>,
 ) -> Result<(usize, Value), Box<dyn Error + Send + Sync>> {
     let mut options: Vec<ChoiceOption> = cfg
@@ -61,7 +60,13 @@ pub async fn decide_branch(
 
     let request = DecisionRequest {
         model: model.unwrap_or_else(|| DEFAULT_MODEL.to_string()),
-        state: Value::String(state),
+        // Structured input stays structured so the model can read its fields.
+        // A bare number or boolean is not a state the vendor accepts: send it
+        // as text.
+        state: match state {
+            Value::String(_) | Value::Object(_) | Value::Array(_) => state,
+            other => Value::String(other.to_string()),
+        },
         questions: vec![(
             ROUTE_QUESTION_ID.to_string(),
             Question {
@@ -213,7 +218,7 @@ mod tests {
             None,
             "human_review",
             0.7,
-            "me cobraron dos veces".to_string(),
+            json!("me cobraron dos veces"),
             Some(capturing.clone()),
         )
         .await
@@ -256,17 +261,10 @@ mod tests {
             mock.expect_decide()
                 .returning(move |_| Ok(choice_response(choice, confidence, None)));
 
-            let (idx, decision) = decide_branch(
-                &cfg(),
-                &mock,
-                None,
-                "human_review",
-                0.7,
-                "x".to_string(),
-                None,
-            )
-            .await
-            .unwrap_or_else(|e| panic!("{name}: {e}"));
+            let (idx, decision) =
+                decide_branch(&cfg(), &mock, None, "human_review", 0.7, json!("x"), None)
+                    .await
+                    .unwrap_or_else(|e| panic!("{name}: {e}"));
 
             assert_eq!(idx, 2, "{name}");
             assert_eq!(decision["selected_branch"], json!("human_review"), "{name}");
@@ -281,17 +279,9 @@ mod tests {
         mock.expect_decide()
             .returning(|_| Err(DecisionModelError::RateLimited));
 
-        let err = decide_branch(
-            &cfg(),
-            &mock,
-            None,
-            "human_review",
-            0.7,
-            "x".to_string(),
-            None,
-        )
-        .await
-        .unwrap_err();
+        let err = decide_branch(&cfg(), &mock, None, "human_review", 0.7, json!("x"), None)
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("rate limit"));
     }
 
@@ -305,17 +295,9 @@ mod tests {
             Ok(choice_response("refund", 0.9, None))
         });
 
-        decide_branch(
-            &cfg(),
-            &mock,
-            None,
-            "human_review",
-            0.7,
-            "x".to_string(),
-            None,
-        )
-        .await
-        .unwrap();
+        decide_branch(&cfg(), &mock, None, "human_review", 0.7, json!("x"), None)
+            .await
+            .unwrap();
 
         let req = captured.lock().unwrap().take().unwrap();
         assert_eq!(req.model, DEFAULT_MODEL);
@@ -329,5 +311,47 @@ mod tests {
         assert!(options
             .iter()
             .any(|o| o.key == NONE_OF_THESE && o.criteria.is_some()));
+    }
+
+    /// Structured input reaches the model as structured `state`, so it can read
+    /// named fields; a bare number or boolean, which the vendor rejects, is sent
+    /// as text.
+    #[tokio::test]
+    async fn the_input_reaches_the_model_as_json_and_scalars_as_text() {
+        let cases = [
+            (
+                json!({ "ticket": "cobro doble", "plan": "pro" }),
+                json!({ "ticket": "cobro doble", "plan": "pro" }),
+            ),
+            (
+                json!(["hola", "me cobraron dos veces"]),
+                json!(["hola", "me cobraron dos veces"]),
+            ),
+            (json!("texto"), json!("texto")),
+            (json!(42), json!("42")),
+            (json!(true), json!("true")),
+        ];
+        for (input, expected_state) in cases {
+            let captured: Arc<Mutex<Option<DecisionRequest>>> = Arc::new(Mutex::new(None));
+            let captured_clone = captured.clone();
+            let mut mock = MockDecisionModelRepository::new();
+            mock.expect_decide().returning(move |req| {
+                *captured_clone.lock().unwrap() = Some(req);
+                Ok(choice_response("refund", 0.9, None))
+            });
+            decide_branch(
+                &cfg(),
+                &mock,
+                None,
+                "human_review",
+                0.7,
+                input.clone(),
+                None,
+            )
+            .await
+            .unwrap();
+            let req = captured.lock().unwrap().take().unwrap();
+            assert_eq!(req.state, expected_state, "input {input}");
+        }
     }
 }
