@@ -6,7 +6,7 @@
 - `docs/node_configurations.json` (entrada `router`)
 - `docs/node_as_tools_reference.json` (entrada `router`)
 - `docs/agent_context/node_ports_reference.md` (sección router)
-- `docs/developer_guide/37_router.md`
+- `docs/developer_guide/37_router_and_output_parser.md`
 - `src/libs/colmena/text/prompts/routing_classifier_system.md`
 
 ---
@@ -647,3 +647,65 @@ cargo run --bin dag_engine -- run <padre.json> --agent-session-id qa_router_subg
 
 **Verificación:** Proceso falla antes de ejecutar el nodo.
 
+
+---
+
+## 4) Modo C (`decision_model`, TypeSafe Jev)
+
+Todos los casos parten del grafo `tests/graphs/control_flow/router_decision_model.json` (4 ramas,
+`fallback_branch: "human_review"`) y cambian solo lo que indica cada caso. Requieren
+`TYPESAFE_API_KEY` en el entorno, salvo el 16.
+
+### Caso 12: Routing confiado
+
+**Entrada:** el `test_payload` del grafo ("Me cobraron dos veces la suscripción…").
+
+**Resultado esperado:** rama `refund`.
+
+**Verificación:** `__decision.reason == "confident"`, `__decision.confidence >= __decision.min_confidence`
+(0.7 por default), `__decision.model == "jev-1.13.0"`, y `__decision.probabilities` incluye la clave
+`none_of_these`.
+
+### Caso 13: Fallback por `none_of_these` o por baja confianza
+
+**Entrada:** un mensaje que no encaja en ninguna rama (por ejemplo, "¿Qué hora es en Tokio?"); para
+forzar la baja confianza, subir `min_confidence` a `0.99`.
+
+**Resultado esperado:** rama `human_review`.
+
+**Verificación:** `__decision.reason` es `"none_of_these"` o `"low_confidence"`, y
+`__decision.model_choice` conserva lo que eligió el modelo.
+
+### Caso 14: Un error del proveedor falla el nodo
+
+**Entrada:** `api_key` inválida (por ejemplo, `"invalid"`).
+
+**Resultado esperado:** el nodo falla con `decision model authentication failed`. Un 503 o un timeout
+fallan igual (`decision model upstream error (status 503)`, `decision model request timed out`); no hay
+reintento.
+
+**Verificación:** ninguna rama se ejecuta, **tampoco** `human_review`: un error del proveedor nunca
+cae al fallback.
+
+### Caso 15: `provider` en cualquier caso e input JSON
+
+**Entrada:** `"provider": "TypeSafe"` y, como input, un objeto
+`{"cliente": "ACME", "plan": "pro", "mensaje": "Me cobraron dos veces"}`.
+
+**Resultado esperado:** rama `refund`.
+
+**Verificación:** el nodo corre (el provider se compara sin distinguir mayúsculas); en `usage-summary`
+la fila `router` trae `"model": "jev-1.13.0"` y más `prompt_tokens` que con el mismo mensaje como texto,
+porque el objeto llega a Jev como JSON con sus campos. Con `"provider": "openai"` el nodo falla con
+`decision_model mode requires provider 'typesafe'`.
+
+### Caso 16: Config rechazada al cargar
+
+**Entrada:** cada variante por separado: sin `fallback_branch`; `fallback_branch` que no nombra una
+rama; una rama llamada `none_of_these`; `min_confidence` fuera de (0, 1]; `fallback_branch` o
+`min_confidence` en modo `llm_direct`.
+
+**Resultado esperado:** `RouterConfigError` al cargar el grafo, antes de ejecutar nodos.
+
+**Verificación:** `dag_engine lint` reporta el mismo error (`INVALID_FIELD_VALUE`); ambos usan
+`router_rules::decision_model_rejection`.

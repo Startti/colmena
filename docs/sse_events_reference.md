@@ -451,6 +451,14 @@ El texto completo también queda disponible en `output.final_response` del `node
 > suyos. Hasta el 2026-08-23 llegaban en `null` para todo nodo anidado, lo que
 > permitía atribuir sus tokens pero no tarifarlos.
 
+> `model` es el que escribe la config del nodo. La excepción es un `router` en
+> modo `decision_model` sin `model`: corre el default `jev-1.13.0` y su fila lo
+> reporta así, en vez de `null` (antes del 2026-09-29 llegaba `null` y el
+> embebedor no podía tarifarlo). Esa fila trae `provider` tal como está escrito en
+> la config (`typesafe`, en cualquier combinación de mayúsculas), y
+> `completion_tokens` son tokens de salida que TypeSafe no cobra. Ver
+> [guía 37](developer_guide/37_router_and_output_parser.md), modo C.
+
 > `provider_key_id` es **opcional y aditivo**: solo aparece cuando el
 > `llm_call` de esa fila declaró `config.provider_key_id` (string opaco, no
 > secreto, que el embebedor escribe junto a `api_key` — ver
