@@ -16,9 +16,13 @@
 //!   | transport timeout  | `WebDomainError::Timeout`      |
 //!   | other transport    | `WebDomainError::Upstream`     |
 //!
-//! A 403 whose body is an HTML page (or names nginx) is the network being
-//! refused at the edge, not the key being rejected: it is reported as a
-//! recoverable `Upstream` error with a fixed message, without the page.
+//! A 403 whose body is an HTML page (or names nginx) is a block page from the
+//! provider's edge. It does not say why: the network the call comes from may be
+//! refused, or the provider may be blocking this key from that network (measured:
+//! a key blocked from Google Cloud IPs for 13+ hours while it answered 200 from
+//! elsewhere; replacing the key fixed it). It is reported as a recoverable
+//! `Upstream` error with a fixed message, without the page, that claims neither
+//! that the key is fine nor that waiting fixes it.
 
 use crate::web::domain::errors::WebDomainError;
 #[allow(unused_imports)]
@@ -37,14 +41,20 @@ const DEFAULT_BASE_URL: &str = "https://api.tavily.com";
 const MAX_ERROR_BODY_CHARS: usize = 200;
 
 /// What the model reads when the provider answers 403 with a block page. The
-/// page itself is never included: it is noise, and says nothing about the key.
-const BLOCK_PAGE_MESSAGE: &str = "The search provider refused this request from the current \
-    network with a block page (HTTP 403). This is not a problem with the API key. It usually \
-    clears within a few minutes; try again later.";
+/// page itself is never included: it is noise. The message names both possible
+/// causes and tells the model to stop: retrying in the same turn does not clear
+/// it, and an earlier wording ("not a problem with the API key", "clears within
+/// a few minutes") made agents tell the user to wait and answer from memory.
+const BLOCK_PAGE_MESSAGE: &str = "The search provider refused this search with a block page \
+    (HTTP 403); the cause may be the network the call comes from or the provider blocking this \
+    API key. Retrying in this turn will not fix it: tell the person web search is unavailable \
+    and do not answer as if you had searched.";
 
 /// True when a 403 body is an HTML page from the provider's edge (a block page)
-/// rather than an API answer: it starts with `<` and holds an `<html` or
-/// `<!doctype html` marker, or it names nginx.
+/// rather than an API answer. Such a page does not show the key is fine: the
+/// provider may serve it for a key it blocks from this network. The body is a
+/// page when it starts with `<` and holds an `<html` or `<!doctype html` marker,
+/// or when it names nginx.
 fn looks_like_block_page(body: &str) -> bool {
     let lower = body.trim().to_lowercase();
     (lower.starts_with('<') && (lower.contains("<html") || lower.contains("<!doctype html")))
@@ -374,9 +384,37 @@ mod tests {
         let (status, text) = upstream_text(e);
         assert_eq!(status, 403);
         assert!(text.contains("block page"), "{text}");
-        assert!(text.contains("not a problem with the API key"), "{text}");
-        assert!(text.contains("few minutes"), "{text}");
-        assert!(text.contains("try again later"), "{text}");
+        // Both causes are named: the network, and the provider blocking the key.
+        assert!(text.contains("network"), "{text}");
+        assert!(text.contains("blocking this API key"), "{text}");
+        // It tells the model to stop and say so, not to wait and retry.
+        assert!(text.contains("will not fix it"), "{text}");
+        assert!(text.contains("web search is unavailable"), "{text}");
+        assert!(
+            text.contains("do not answer as if you had searched"),
+            "{text}"
+        );
+        assert!(text.is_ascii(), "{text}");
+    }
+
+    /// Measured 2026-10-01: the block page lasted 13+ hours and was caused by
+    /// the key (blocked from Google Cloud IPs). The message must not clear the
+    /// key nor promise that waiting fixes it.
+    #[test]
+    fn map_error_403_block_page_text_neither_clears_the_key_nor_promises_a_wait() {
+        let (_, text) = upstream_text(TavilyAdapter::map_error(403, NGINX_BLOCK_PAGE.into()));
+        let lower = text.to_lowercase();
+        for claim in [
+            "not a problem with the api key",
+            "not the key",
+            "key is fine",
+            "key is valid",
+            "few minutes",
+            "clears within",
+            "try again later",
+        ] {
+            assert!(!lower.contains(claim), "{claim:?} in: {text}");
+        }
     }
 
     #[test]
@@ -664,7 +702,8 @@ mod tests {
         assert!(err.is_llm_recoverable());
         let (status, text) = upstream_text(err);
         assert_eq!(status, 403);
-        assert!(text.contains("not a problem with the API key"), "{text}");
+        assert!(text.contains("blocking this API key"), "{text}");
+        assert!(!text.contains("not a problem with the API key"), "{text}");
         assert!(!text.contains("nginx"), "{text}");
     }
 
