@@ -617,6 +617,25 @@ mod standalone_tests {
 mod tests {
     use super::*;
 
+    /// An upstream 403 (a block page) reaches the model as not retryable,
+    /// with the adapter's message verbatim.
+    #[test]
+    fn an_upstream_403_reaches_the_model_as_not_retryable() {
+        use crate::web::domain::errors::WebDomainError;
+        let v = format_llm_error(
+            WebDomainError::Upstream {
+                status: 403,
+                body: "block page text".into(),
+            },
+            &json!({}),
+        )
+        .unwrap();
+        assert_eq!(v["error"], "upstream_error");
+        assert_eq!(v["status"], 403);
+        assert_eq!(v["retryable"], false);
+        assert_eq!(v["message"], "block page text");
+    }
+
     #[test]
     fn catalog_has_search_and_fetch() {
         let node = TavilyClientNode::new();

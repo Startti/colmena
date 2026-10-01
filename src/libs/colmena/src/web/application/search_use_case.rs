@@ -679,6 +679,32 @@ mod tests {
         assert_eq!(*port.calls.lock().unwrap(), 1);
     }
 
+    /// A 403 block page from the provider does not clear by retrying in the
+    /// same turn (measured: 13+ hours), so it is tried once.
+    #[tokio::test]
+    async fn retry_does_not_retry_an_upstream_403() {
+        let port = Arc::new(FlakyPort::new(
+            10,
+            WebDomainError::Upstream {
+                status: 403,
+                body: "block page".into(),
+            },
+        ));
+        let cfg = SearchUseCaseConfig {
+            max_attempts: 5,
+            initial_backoff: Duration::from_millis(1),
+            enable_cache: false,
+            ..Default::default()
+        };
+        let uc = SearchUseCase::new(port.clone(), cfg);
+        let err = uc
+            .search("run-A", SearchRequest::new("q"))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, WebDomainError::Upstream { status: 403, .. }));
+        assert_eq!(*port.calls.lock().unwrap(), 1);
+    }
+
     #[tokio::test]
     async fn retry_does_not_retry_adapter_init() {
         let port = Arc::new(FlakyPort::new(

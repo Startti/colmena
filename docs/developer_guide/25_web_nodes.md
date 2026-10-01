@@ -127,7 +127,7 @@ Ver `tests/graphs/web/tavily_direct_search.json`. El output del nodo es el mismo
 | 429 Too Many Requests | `{ error: "rate_limit", ... }` | Sólo si `fail_on_limit=true` |
 | 5xx (tras reintentos) | `{ error: "upstream_error", status, ... }` | No |
 | Timeout | `{ error: "timeout", ms, ... }` | No |
-| 403 con página de bloqueo (HTML o `nginx`) | `{ error: "upstream_error", status: 403, message }`: la red fue rechazada, no la key; suele levantarse en unos minutos | No |
+| 403 con página de bloqueo (HTML o `nginx`) | `{ error: "upstream_error", status: 403, retryable: false, message }`: la causa puede ser la red de salida o que el proveedor bloquee esa key desde esa red (medido: 13+ h, se arregló cambiando la key); no se reintenta, y el mensaje le pide al modelo decir que la búsqueda no está disponible y no contestar como si hubiera buscado | No |
 | 401 / 403 con cuerpo de la API / llave vacía | — | Sí (`AdapterInit`, cuerpo cortado a 200 caracteres) |
 | Config inválida | — | Sí (`InvalidConfig`) |
 
