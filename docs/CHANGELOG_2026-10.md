@@ -100,7 +100,18 @@ cambia y ningún cliente usa la fuente nueva todavía. De la revisión de #463: 
 `HostRefreshTokenProvider` que pide un token al host una vez y reintenta. **Mutación.**
 `invalidate` sin efecto, sin el brazo de reconexión. **E2E.** No aplica. **ADP.** Ninguno. **Estado.** partial.
 
-## 6. `http_request`: `bearer_refresh` pide al host un token nuevo ante un 401 o cerca del vencimiento
+## 6. gsheets: cliente con la cuenta conectada (porte de `feat/google-workspace-auth`, parte 3)
+
+**Qué cambia.** `GoogleSheetsHttpClient::from_config_with_auth(cfg, Option<&GoogleWorkspaceAuth>)`: `None` =
+`from_config` de siempre; `Some` usa el provider compartido de esa identidad, no lee las env vars y deja
+`share_email` vacío. Su 403 es `SheetsError::ConnectedAccountPermissionDenied` → `permission_denied` sin
+`share_email`. Ningún dispatcher le pasa `auth` todavía. Guía: [39_gsheets.md](developer_guide/39_gsheets.md).
+**Commits portados.** Parte de `32a7d46c` y `d94d2d37` (`http_client.rs`, `errors.rs`, `error_to_json`).
+**Tests.** Credenciales del bloque sin env (con señuelos en env), `None` = camino env, el bearer sale del
+`token_url` del bloque, 403 de cuenta conectada vs. de plataforma, payload. **Mutación.** 403 sin mirar la cuenta.
+**E2E.** No aplica hasta el cableado de `llm_call`. **ADP.** Ninguno. **Estado.** partial.
+
+## 7. `http_request`: `bearer_refresh` pide al host un token nuevo ante un 401 o cerca del vencimiento
 
 **Qué cambia.** Clave hermana de `bearer_token`: `bearer_refresh: {handle, expires_at}`, en config o como entrada
 `fixed` de `node_schema` (la que escribe el modelo se ignora). Con `EngineConfig.host_token_port`, el nodo arma por
