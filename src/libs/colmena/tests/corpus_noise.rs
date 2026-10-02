@@ -187,7 +187,7 @@ fn measure() -> Measured {
 // Bumped 342 -> 343: adds tests/graphs/security/attachment_url_taught_e2e.json (a
 // model learns "$attachment_url:<document_id>" from the attachments prelude only
 // when the host's storage issues read URLs; needs a provider key). Lints clean.
-const EXPECTED_FILES: usize = 343;
+const EXPECTED_FILES: usize = 344;
 const EXPECTED_ERRORS: usize = 0;
 const EXPECTED_WARNINGS: usize = 0;
 const EXPECTED_INFOS: usize = 0;

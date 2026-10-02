@@ -38,7 +38,7 @@ use tokio::sync::Mutex;
 /// whether to reuse it. Any token with less than this remaining is
 /// treated as already-expired so an HTTP request in flight cannot race
 /// the actual expiry server-side.
-const EXPIRY_MARGIN_SECONDS: i64 = 60;
+pub(crate) const EXPIRY_MARGIN_SECONDS: i64 = 60;
 
 #[derive(Clone)]
 pub struct OAuthRefreshTokenProvider {
@@ -115,6 +115,10 @@ impl AuthTokenProvider for OAuthRefreshTokenProvider {
         let access = new_token.access_token.clone();
         *guard = Some(new_token);
         Ok(access)
+    }
+
+    async fn invalidate(&self) {
+        self.invalidate_cache().await;
     }
 }
 
@@ -310,6 +314,28 @@ mod tests {
         // original refresh_token, not the rotated one — we don't
         // mutate state outside the cache.
         assert_eq!(provider.creds.refresh_token.expose(), "RT");
+    }
+
+    /// `invalidate()` through the trait drops the cache: the next call refreshes.
+    #[tokio::test]
+    async fn trait_invalidate_drops_the_cache() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"{"access_token":"ya29.AGAIN","expires_in":3599,"token_type":"Bearer"}"#,
+            ))
+            .expect(2)
+            .mount(&server)
+            .await;
+
+        let provider: Arc<dyn AuthTokenProvider> =
+            Arc::new(OAuthRefreshTokenProvider::with_refresh_client(
+                creds(),
+                RefreshClient::for_tests(&server.uri()),
+            ));
+        provider.get_bearer_token().await.unwrap();
+        provider.invalidate().await;
+        provider.get_bearer_token().await.unwrap();
     }
 
     /// When the refresh fails non-transiently, the cache must be

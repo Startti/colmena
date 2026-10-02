@@ -1,5 +1,7 @@
 use crate::dag_engine::application::ports::NodeRegistryPort;
-use crate::dag_engine::application::ports::{ChildGraphResolverPort, SubGraphExecutorPort};
+use crate::dag_engine::application::ports::{
+    ChildGraphResolverPort, HostTokenPort, SubGraphExecutorPort,
+};
 use crate::dag_engine::application::secure_value_service::SecureValueService;
 use crate::dag_engine::domain::node::ExecutableNode;
 use crate::dag_engine::domain::toolkit_node::ToolkitNode;
@@ -20,6 +22,7 @@ pub struct HashMapNodeRegistry {
     toolkit_nodes: HashMap<String, Arc<dyn ToolkitNode>>,
     subgraph_node: Option<Arc<SubGraphNode>>,
     foreach_node: Option<Arc<crate::dag_engine::infrastructure::nodes::for_each::ForEachNode>>,
+    http_node: Arc<crate::dag_engine::infrastructure::nodes::http::HttpNode>,
 }
 
 use crate::llm::infrastructure::ConversationRepositoryFactory;
@@ -129,7 +132,11 @@ impl HashMapNodeRegistry {
             if let Some(reg) = attachment_registry.clone() {
                 http_node = http_node.with_attachment_registry(reg);
             }
-            nodes.insert("http_request".to_string(), Arc::new(http_node));
+            let http_node = Arc::new(http_node);
+            nodes.insert(
+                "http_request".to_string(),
+                http_node.clone() as Arc<dyn ExecutableNode>,
+            );
 
             // --- Registrar Nodos Socket.IO ---
             nodes.insert(
@@ -377,6 +384,7 @@ impl HashMapNodeRegistry {
                 toolkit_nodes,
                 subgraph_node: Some(sub_node),
                 foreach_node: Some(fe_node),
+                http_node,
             }
         })
     }
@@ -395,6 +403,12 @@ impl HashMapNodeRegistry {
         if let Some(sub) = &self.subgraph_node {
             let _ = sub.resolver.set(resolver);
         }
+    }
+
+    /// Injects the embedder's port for host-refreshed bearer tokens into the
+    /// `http_request` node (graph nodes and tool calls share that instance).
+    pub fn set_host_token_port(&self, port: Arc<dyn HostTokenPort>) {
+        let _ = self.http_node.host_token_port.set(port);
     }
 
     /// Injects the shared node registry handle into the `for_each` node so it
@@ -526,6 +540,23 @@ mod registry_tavily_tests {
         let sql_factory = Arc::new(SqlPortFactory::new(pool_registry));
         let task_memory: Arc<dyn DagTaskMemoryRepository> = Arc::new(StubTaskMemory);
         HashMapNodeRegistry::new(repo_factory, sql_factory, Some(task_memory))
+    }
+
+    /// The port reaches the one `http_request` node (graph nodes and tools).
+    #[test]
+    fn host_token_port_reaches_the_http_node() {
+        use crate::dag_engine::application::ports::{self as p, HostTokenError as E};
+        struct NoTokens;
+        #[async_trait]
+        impl p::HostTokenPort for NoTokens {
+            async fn fresh_token(&self, _: p::HostTokenRequest) -> Result<p::HostToken, E> {
+                Err(E::RateLimited)
+            }
+        }
+        let reg = build_registry();
+        assert!(reg.http_node.host_token_port().is_none());
+        reg.set_host_token_port(Arc::new(NoTokens));
+        assert!(reg.http_node.host_token_port().is_some());
     }
 
     #[test]

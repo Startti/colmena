@@ -4,7 +4,7 @@
 //! value repositories, the node registry, and the `DagRunUseCase`. Consumers
 //! (CLI, HTTP worker, `run_dag`/`serve_dag`) build one per process.
 
-use crate::dag_engine::application::ports::ChildGraphResolverPort;
+use crate::dag_engine::application::ports::{ChildGraphResolverPort, HostTokenPort};
 use crate::dag_engine::application::run_use_case::DagRunUseCase;
 use crate::dag_engine::application::secure_value_service::SecureValueService;
 use crate::dag_engine::domain::error::DagError;
@@ -67,6 +67,10 @@ pub struct EngineConfig {
     /// an `agent_id` still containing `${…}` (untemplated) fails earlier with
     /// `not_found`, resolver present or not.
     pub child_graph_resolver: Option<Arc<dyn ChildGraphResolverPort>>,
+    /// Gets fresh access tokens from the embedder for connections it seeded
+    /// with a token plus a refresh handle — the engine never sees the client
+    /// secret. `from_env` leaves it `None`: no host refresh.
+    pub host_token_port: Option<Arc<dyn HostTokenPort>>,
 }
 
 /// Parse a raw string value as a boolean, independent of any environment
@@ -250,6 +254,8 @@ impl EngineConfig {
             // Only an embedder can resolve a ref (e.g. the ADP worker); it sets
             // this after `from_env`.
             child_graph_resolver: None,
+            // Only an embedder can refresh a host token; it sets this too.
+            host_token_port: None,
         })
     }
 }
@@ -338,6 +344,9 @@ impl ColmenaEngine {
         node_registry.set_subgraph_executor(use_case.clone());
         if let Some(resolver) = config.child_graph_resolver.clone() {
             node_registry.set_child_graph_resolver(resolver);
+        }
+        if let Some(port) = config.host_token_port.clone() {
+            node_registry.set_host_token_port(port);
         }
         node_registry.set_foreach_registry(node_registry.clone());
 

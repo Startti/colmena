@@ -134,7 +134,7 @@ fn oauth_error_to_docs_error(err: crate::google_oauth::domain::OAuthError) -> Do
     use crate::google_oauth::domain::OAuthError as E;
     match err {
         E::RefreshTokenRevoked => DocsError::NotConfigured(format!("{err}")),
-        E::ClientCredsInvalid(_) => DocsError::NotConfigured(format!("{err}")),
+        E::ClientCredsInvalid(_) | E::HostRefused(_) => DocsError::NotConfigured(format!("{err}")),
         E::ConfigMissing(_) => DocsError::NotConfigured(format!("{err}")),
         E::Transient(msg) => DocsError::AuthFailed(msg),
     }

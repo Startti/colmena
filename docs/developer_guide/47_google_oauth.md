@@ -283,6 +283,17 @@ Tiempo total: ~10 min.
 - Si persiste, chequeá que el worker tenga egress habilitado a `oauth2.googleapis.com`.
 - Si es prolongado: incidente de Google (chequear https://www.google.com/appsstatus).
 
+## Token refrescado por el host (`HostTokenPort`)
+
+Para una conexión cuyo `client_secret` no llega al motor, el embebedor siembra la corrida con un access
+token, su vencimiento y un `handle` firmado. El motor pide el token nuevo al embebedor por
+`HostTokenPort` (`dag_engine/application/ports.rs`; `EngineConfig.host_token_port`, `None` en `from_env`,
+llega al `http_request` del registry). `HostRefreshTokenProvider` sirve el token sembrado mientras le
+queden más de 60 s; si no, o tras `invalidate()` (un 401, manda el sha256 del token rechazado), llama al
+puerto: un pedido para llamadas concurrentes, tope `HOST_TOKEN_TIMEOUT` (10 s). Un rechazo del host es
+`OAuthError::HostRefused` (solo su texto); lo demás, `Transient`. Lleva el `agent_session_id`: nunca
+cachearlo entre sesiones solo por `handle_fingerprint()`. `Debug` redactado.
+
 ## Monitoring
 
 Eventos estructurados que conviene alertear:

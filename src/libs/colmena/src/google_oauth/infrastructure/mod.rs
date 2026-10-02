@@ -3,11 +3,13 @@
 //! `domain::traits`.
 
 pub mod config;
+pub mod host_refresh_provider;
 pub mod provider_cache;
 pub mod refresh_client;
 pub mod token_provider;
 
 pub use config::OAuthCredentials;
+pub use host_refresh_provider::HostRefreshTokenProvider;
 pub use provider_cache::OAuthProviderCache;
 pub use refresh_client::{RefreshClient, RefreshResponse};
 pub use token_provider::OAuthRefreshTokenProvider;
