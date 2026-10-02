@@ -301,6 +301,21 @@ vía `COLMENA_GDOCS_SCOPES=<comma-sep>` (short names o full URLs).
 > downgrade a `drive.file` vía `COLMENA_GDOCS_SCOPES` si solo trabajan
 > con docs que ellos mismos crean.
 
+### Cuenta Google conectada (porte de `google_workspace_auth`, en curso)
+
+`TokenCache::from_shared_provider(Arc<dyn AuthTokenProvider>)` envuelve el provider de
+`GoogleWorkspaceAuth::provider()` ([47_google_oauth.md](47_google_oauth.md#credenciales-por-nodo-google_workspace_auth))
+o cualquier otro `AuthTokenProvider`, p. ej. el `HostRefreshTokenProvider` de #462. Si el refresh de esa
+cuenta es rechazado (`invalid_grant`), el error es `DocsError::GoogleAccountReconnectRequired` →
+`google_account_reconnect_required` ("Reconnect Google in ADP"), no el texto de `colmena_oauth_setup`.
+
+`GoogleDocsHttpClient::from_config_with_auth(cfg, auth)`: con `None` es exactamente `from_config` (env).
+Con `Some(&GoogleWorkspaceAuth)` actúa como esa cuenta, no lee las env vars y vacía `share_email` y
+`default_parent_folder` (la carpeta de la plataforma nunca se usa con la cuenta del usuario). Un 403 es
+`DocsError::ConnectedAccountPermissionDenied` → `permission_denied` sin `share_email`, el mismo payload que
+gsheets. Ningún dispatcher le pasa `auth` todavía: el cliente de `gdocs_tools` sigue siendo el singleton
+de proceso con la cuenta de plataforma.
+
 ### Parent folder requirement
 
 Drive requiere un folder explícito para `gdocs_create*`. Dos formas:

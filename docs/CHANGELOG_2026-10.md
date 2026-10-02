@@ -110,3 +110,17 @@ cambia y ningún cliente usa la fuente nueva todavía. De la revisión de #463: 
 **Tests.** Credenciales del bloque sin env (con señuelos en env), `None` = camino env, el bearer sale del
 `token_url` del bloque, 403 de cuenta conectada vs. de plataforma, payload. **Mutación.** 403 sin mirar la cuenta.
 **E2E.** No aplica hasta el cableado de `llm_call`. **ADP.** Ninguno. **Estado.** partial.
+
+## 8. gdocs: fuente de token y cliente con la cuenta conectada (porte de `feat/google-workspace-auth`, parte 4)
+
+**Qué cambia.** `TokenCache` de gdocs guarda `Arc<dyn AuthTokenProvider>` y suma `from_shared_provider`; su
+`invalidate()` es el del trait. `GoogleDocsHttpClient::from_config_with_auth(cfg, Option<&GoogleWorkspaceAuth>)`:
+`None` = `from_config` de siempre; `Some` usa el provider compartido de esa identidad, no lee las env vars y vacía
+`share_email` y la carpeta por defecto de la plataforma. Su 403 es `DocsError::ConnectedAccountPermissionDenied` y
+un `invalid_grant` es `DocsError::GoogleAccountReconnectRequired`, con los mismos payloads que gsheets. Ningún
+dispatcher le pasa `auth` todavía. Guía: [45_gdocs.md](developer_guide/45_gdocs.md).
+**Commits portados.** La parte gdocs de `32a7d46c`, `d94d2d37` y `58a69afe` (`auth.rs`, `errors.rs`,
+`http_client.rs`, `error_to_json`). **Tests.** Credenciales del bloque sin env (con señuelos en env), `None` = camino
+env, 403 de la cuenta conectada, la carpeta de la plataforma no se usa, reconexión vs. error del operador, payloads
+iguales a gsheets. **Mutación.** 403 sin mirar la cuenta; sin el brazo de reconexión; `share_email` sin vaciar.
+**E2E.** No aplica hasta el cableado de `llm_call`. **ADP.** Ninguno. **Estado.** partial.

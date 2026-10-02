@@ -225,7 +225,7 @@ fn permission_denied_payload(share_email: &str) -> serde_json::Value {
 /// connected Google account (per-node `google_workspace_auth`). There is no
 /// platform address to share with and nothing for the operator to do: the
 /// user opens the file with that account or shares it with that account.
-/// gdocs will share it so both subsystems emit the same payload.
+/// Shared with gdocs so both subsystems emit the same payload.
 pub(crate) fn connected_account_permission_denied_payload() -> serde_json::Value {
     serde_json::json!({
         "error": "permission_denied",
@@ -237,7 +237,7 @@ pub(crate) fn connected_account_permission_denied_payload() -> serde_json::Value
 }
 
 /// Tool result when the connected Google account's refresh was rejected
-/// (expired or revoked authorization). gdocs will share it.
+/// (expired or revoked authorization). Shared with gdocs.
 pub(crate) fn reconnect_google_payload() -> serde_json::Value {
     serde_json::json!({
         "error": "google_account_reconnect_required",

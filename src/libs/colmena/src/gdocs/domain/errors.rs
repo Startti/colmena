@@ -32,6 +32,21 @@ pub enum DocsError {
     #[error("permission_denied: share with {0}")]
     PermissionDenied(String),
 
+    /// 403 while acting as the user's connected Google account (per-node
+    /// `google_workspace_auth`): that account has no access to the file.
+    /// Carries the request context for diagnostics; there is no platform
+    /// address to share with.
+    #[error("permission_denied: the connected Google account has no access ({0})")]
+    ConnectedAccountPermissionDenied(String),
+
+    /// The connected Google account's refresh was rejected (`invalid_grant`):
+    /// its authorization expired or was revoked. The user reconnects Google.
+    #[error(
+        "google_account_reconnect_required: {}",
+        crate::gsheets::domain::errors::RECONNECT_GOOGLE_MESSAGE
+    )]
+    GoogleAccountReconnectRequired,
+
     /// `create_*` was called and no parent folder is configured
     /// (no env var, no per-call argument).
     #[error("no_parent_folder_configured")]
