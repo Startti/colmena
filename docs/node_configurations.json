@@ -1014,6 +1014,13 @@
             "refresh_token": { "type": "string", "required": true, "description": "Long-lived refresh token obtained once offline (e.g. OAuth Playground). Accepts ${ENV} or secure_values.", "example": "${GMAIL_REFRESH_TOKEN}" }
           }
         },
+        "bearer_refresh": {
+          "type": "object",
+          "required": false,
+          "default": null,
+          "description": "Host-refreshed bearer_token (CX7). '{handle, expires_at}' (unix seconds) the embedder wrote next to the author's bearer_token, in config or as a tool's fixed value (a model-written one is ignored). With a HostTokenPort in the EngineConfig the node asks the host for a fresh token near expiry and on a 401, then retries once; if the host gives none, the seeded token goes out and a 401 comes back as the response. Without a port it is ignored; with multipart bodies bearer_token stays static. Error with 'auth' or without bearer_token. The handle is sent only to the port, never in a header.",
+          "example": { "handle": "cth1.…", "expires_at": 1790000000 }
+        },
         "secure": {
           "type": "boolean",
           "required": false,
@@ -1100,7 +1107,7 @@
       "default_output": "body",
       "requires": [],
       "supports_env_vars": true,
-      "reserved_input_keys": ["base_url", "endpoint", "method", "headers", "body", "query_params", "query_parameters", "bearer_token", "authorization", "secure", "session_id", "attachment_url_ttl_seconds", "__colmena_session_id", "__node_id", "__colmena_resume_answer"]
+      "reserved_input_keys": ["base_url", "endpoint", "method", "headers", "body", "query_params", "query_parameters", "bearer_token", "bearer_refresh", "authorization", "secure", "session_id", "attachment_url_ttl_seconds", "__colmena_session_id", "__node_id", "__colmena_resume_answer"]
     },
 
     "secure_suspend": {

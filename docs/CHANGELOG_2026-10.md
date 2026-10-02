@@ -78,3 +78,20 @@ Guía: [47_google_oauth.md](developer_guide/47_google_oauth.md#token-refrescado-
 timeout, `ClientCredsInvalid`: cada una tumba un test. **E2E.** No aplica hasta `bearer_refresh`.
 **ADP.** Un literal `EngineConfig { … }` necesita `host_token_port: None`; el worker usa `from_env`. `corpus_noise`
 pasa a 344: #460 sumó un grafo sin subirlo y dejó `develop` en rojo. **Estado.** partial.
+
+## 4. `http_request`: `bearer_refresh` pide al host un token nuevo ante un 401 o cerca del vencimiento
+
+**Qué cambia.** Clave hermana de `bearer_token`: `bearer_refresh: {handle, expires_at}`, en config o como entrada
+`fixed` de `node_schema` (la que escribe el modelo se ignora). Con `EngineConfig.host_token_port`, el nodo arma por
+ejecución un `HostRefreshTokenProvider` con el `agent_session_id` de la corrida y manda por `send_with_oauth_retry`,
+que ahora toma `&dyn AuthTokenProvider` y llama `invalidate()`: ante un 401 pide un token y reintenta una vez; a
+menos de 60 s del vencimiento lo pide antes de mandar. Si el host no da token, sale el sembrado y el 401 vuelve como
+respuesta. Sin puerto se ignora; con multipart el `bearer_token` va estático; con `auth` o sin `bearer_token` es
+error (sin repetir valores). Guía: [25_web_nodes.md](developer_guide/25_web_nodes.md#token-refrescado-por-el-host-bearer_refresh).
+**Tests.** `http_oauth` (parser: ausente, bien formado, `fixed` vs del modelo, errores sin valores); `http.rs`
+`bearer_refresh_tests` con wiremock: grafo por `DagRunUseCase` (401 → 1 pedido al puerto con el sha256 del token
+sembrado y la sesión → 200), sin puerto, host que rechaza, vencimiento cercano, multipart, herramienta por
+`DagToolExecutor`. **Mutación.** Sin `invalidate`, reintento tras el sembrado, sin respaldo (primer pedido o
+reintento), `bearer_refresh` del modelo aceptado, sin sesión, handle vacío, multipart rechazado: cada una tumba un
+test. **E2E.** Solo el camino sin puerto (CLI); con puerto espera al worker de ADP. **ADP.** Emitir
+`bearer_refresh` solo con la compuerta abierta. **Estado.** partial.
