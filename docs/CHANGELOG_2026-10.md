@@ -142,7 +142,7 @@ env, 403 de la cuenta conectada, la carpeta de la plataforma no se usa, reconexi
 iguales a gsheets. **Mutación.** 403 sin mirar la cuenta; sin el brazo de reconexión; `share_email` sin vaciar.
 **E2E.** No aplica hasta el cableado de `llm_call`. **ADP.** Ninguno. **Estado.** partial.
 
-## 9. gdocs: carpeta de la cuenta conectada, 403 con el correo y reintento ante 401 (porte de `feat/google-workspace-auth`, parte 5)
+## 10. gdocs: carpeta de la cuenta conectada, 403 con el correo y reintento ante 401 (porte de `feat/google-workspace-auth`, parte 5)
 
 **Qué cambia.** Con la cuenta conectada, `create`, `create_from_markdown` y `create_from_docx` sin carpeta dejan el
 documento en la raíz de su Drive (antes `NoParentFolder`); con carpeta la respetan. El 403 de la cuenta de plataforma

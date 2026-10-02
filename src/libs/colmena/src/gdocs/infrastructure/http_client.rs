@@ -1834,6 +1834,7 @@ mod tests {
     const TOKEN_JSON: &str =
         r#"{"access_token":"ya29.connected-account","expires_in":3600,"token_type":"Bearer"}"#;
 
+    /// One refresh per test: the access token is minted once and cached.
     async fn mount_token_endpoint(server: &MockServer, refresh_token: &str) {
         use wiremock::matchers::body_string_contains;
         Mock::given(method("POST"))
@@ -1842,6 +1843,7 @@ mod tests {
                 "refresh_token={refresh_token}"
             )))
             .respond_with(ResponseTemplate::new(200).set_body_string(TOKEN_JSON))
+            .expect(1)
             .mount(server)
             .await;
     }
