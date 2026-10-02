@@ -311,9 +311,15 @@ cuenta es rechazado (`invalid_grant`), el error es `DocsError::GoogleAccountReco
 
 `GoogleDocsHttpClient::from_config_with_auth(cfg, auth)`: con `None` es exactamente `from_config` (env).
 Con `Some(&GoogleWorkspaceAuth)` actúa como esa cuenta, no lee las env vars y vacía `share_email` y
-`default_parent_folder` (la carpeta de la plataforma nunca se usa con la cuenta del usuario). Un 403 es
+`default_parent_folder` (la carpeta de la plataforma nunca se usa con la cuenta del usuario): `create*` sin
+carpeta explícita deja el documento en la raíz del Drive de esa cuenta, y con carpeta la respeta. Un 403 es
 `DocsError::ConnectedAccountPermissionDenied` → `permission_denied` sin `share_email`, el mismo payload que
-gsheets. Ningún dispatcher le pasa `auth` todavía: el cliente de `gdocs_tools` sigue siendo el singleton
+gsheets; el 403 de la cuenta de plataforma lleva su `share_email` (el contexto y el cuerpo de Google van al
+log en `debug`).
+
+**401.** Cualquier llamada que recibe un 401 invalida la fuente de token (`invalidate()` del trait) y
+reintenta una vez con un token nuevo; un segundo 401 es `AuthFailed`. Con `HostRefreshTokenProvider` eso
+es un único pedido al host con el SHA-256 del token rechazado. Ningún dispatcher le pasa `auth` todavía: el cliente de `gdocs_tools` sigue siendo el singleton
 de proceso con la cuenta de plataforma.
 
 ### Parent folder requirement
@@ -325,7 +331,8 @@ Drive requiere un folder explícito para `gdocs_create*`. Dos formas:
    que el dispatcher la inyecte cuando el LLM no la provee.
 
 Sin ninguna de las dos, el dispatcher devuelve `no_parent_folder_configured`
-antes de pegarle al API.
+antes de pegarle al API. Con la cuenta conectada (`from_config_with_auth`) no hay error: el documento
+queda en la raíz de su Drive.
 
 > **Sobre ownership de archivos creados:** ver §"Limitaciones en v1 §1"
 > más abajo — el SA sin Workspace no puede ownear archivos por
