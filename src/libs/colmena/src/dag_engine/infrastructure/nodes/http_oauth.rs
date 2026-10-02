@@ -4,11 +4,10 @@
 //! the LLM's `inputs`.
 
 use crate::dag_engine::domain::node::NodeInputs;
-use crate::google_oauth::domain::AuthTokenProvider;
-use crate::google_oauth::infrastructure::{parse_oauth_refresh_block, OAuthRefreshTokenProvider};
+use crate::google_oauth::domain::{AuthTokenProvider, OAuthError};
+use crate::google_oauth::infrastructure::parse_oauth_refresh_block;
 use serde_json::Value;
 use std::error::Error as StdError;
-use std::sync::Arc;
 
 /// Resolved OAuth2 refresh-token auth, all `${ENV}` still unexpanded
 /// (the caller resolves env vars before use).
@@ -79,16 +78,61 @@ pub fn parse_oauth_auth(
     }))
 }
 
+/// `bearer_refresh` (CX7): `{handle, expires_at}` lets the host mint a fresh
+/// access token for the author's `bearer_token` through `HostTokenPort`. Read
+/// from `config` or a tool's `fixed` value, never from what the model wrote.
+/// `Ok(None)` when absent. The errors never repeat a value.
+pub fn parse_bearer_refresh(
+    config: &Value,
+    inputs: &NodeInputs,
+) -> Result<Option<(String, i64)>, String> {
+    let authored = |k| super::http::HttpNode::author_value(inputs, config, k);
+    let Some(block) = authored("bearer_refresh") else {
+        return Ok(None);
+    };
+    if config.get("auth").is_some() {
+        return Err("bearer_refresh cannot be combined with auth".into());
+    }
+    if authored("bearer_token").is_none() {
+        return Err("bearer_refresh needs bearer_token".into());
+    }
+    let handle = block.get("handle").and_then(Value::as_str);
+    let handle = handle
+        .filter(|s| !s.trim().is_empty())
+        .ok_or("bearer_refresh.handle must be a non-empty string")?;
+    let expires_at = block.get("expires_at").and_then(Value::as_i64);
+    let expires_at = expires_at.ok_or("bearer_refresh.expires_at must be an integer")?;
+    Ok(Some((handle.to_string(), expires_at)))
+}
+
 /// Send `builder` (which must NOT already carry an Authorization header)
-/// with a fresh Bearer from `provider`. On HTTP 401, invalidate the cached
-/// token, mint a new one, and retry exactly once. 403/429/etc. pass through.
+/// with a Bearer from `provider`. On HTTP 401, invalidate the token, get a new
+/// one, and retry exactly once. 403/429/etc. pass through.
+///
+/// With `fallback` (the seed of a host-refreshed `bearer_token`), a provider
+/// that cannot give a token leaves the request as it would be without one: the
+/// seed goes out, and a 401 comes back as the response.
 pub async fn send_with_oauth_retry(
     builder: reqwest::RequestBuilder,
-    provider: Arc<OAuthRefreshTokenProvider>,
+    provider: &dyn AuthTokenProvider,
+    fallback: Option<&str>,
 ) -> Result<reqwest::Response, Box<dyn StdError + Send + Sync>> {
-    let token = provider.get_bearer_token().await.map_err(|e| {
-        Box::new(std::io::Error::other(format!("OAuth: {e}"))) as Box<dyn StdError + Send + Sync>
-    })?;
+    let oauth_err = |what: &str, e: OAuthError| -> Box<dyn StdError + Send + Sync> {
+        Box::new(std::io::Error::other(format!("{what}: {e}")))
+    };
+    // The host's texts carry neither the handle nor a token.
+    let fell_back = |e: &OAuthError| {
+        tracing::warn!(target: "colmena::http_request", error = %e,
+        "host token refresh failed; the request goes on as without bearer_refresh")
+    };
+    let (token, seeded) = match (provider.get_bearer_token().await, fallback) {
+        (Ok(t), _) => (t.0, false),
+        (Err(e), Some(seed)) => {
+            fell_back(&e);
+            (seed.to_string(), true)
+        }
+        (Err(e), None) => return Err(oauth_err("OAuth", e)),
+    };
 
     let first = builder
         .try_clone()
@@ -97,15 +141,19 @@ pub async fn send_with_oauth_retry(
                 "http_request: OAuth requires a cloneable request (no streaming body)",
             )) as Box<dyn StdError + Send + Sync>
         })?
-        .header("Authorization", format!("Bearer {}", token.as_str()));
+        .header("Authorization", format!("Bearer {token}"));
     let resp = first.send().await?;
 
-    if resp.status().as_u16() == 401 {
-        provider.invalidate_cache().await;
-        let token2 = provider.get_bearer_token().await.map_err(|e| {
-            Box::new(std::io::Error::other(format!("OAuth (retry): {e}")))
-                as Box<dyn StdError + Send + Sync>
-        })?;
+    if resp.status().as_u16() == 401 && !seeded {
+        provider.invalidate().await;
+        let token2 = match provider.get_bearer_token().await {
+            Ok(t) => t,
+            Err(e) if fallback.is_some() => {
+                fell_back(&e);
+                return Ok(resp);
+            }
+            Err(e) => return Err(oauth_err("OAuth (retry)", e)),
+        };
         let second = builder.header("Authorization", format!("Bearer {}", token2.as_str()));
         return Ok(second.send().await?);
     }
@@ -115,6 +163,7 @@ pub async fn send_with_oauth_retry(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dag_engine::infrastructure::env_provenance::AUTHORED_INPUTS_KEY;
     use serde_json::json;
 
     #[test]
@@ -196,6 +245,56 @@ mod tests {
         assert!(err.contains("oauth2_refresh_token"));
     }
 
+    fn refresh(c: Value, inputs: &NodeInputs) -> Result<Option<(String, i64)>, String> {
+        parse_bearer_refresh(&c, inputs)
+    }
+
+    #[test]
+    fn bearer_refresh_absent_is_none_and_well_formed_is_parsed() {
+        let none = Default::default();
+        assert_eq!(refresh(json!({ "bearer_token": "t" }), &none), Ok(None));
+        let c = json!({ "bearer_token": "t",
+            "bearer_refresh": { "handle": "cth1-cx7-h", "expires_at": 1790000000 } });
+        let want = Some(("cth1-cx7-h".to_string(), 1790000000));
+        assert_eq!(refresh(c, &none), Ok(want.clone()));
+        // A tool's `fixed` value counts; one the model wrote does not.
+        let block = json!({ "handle": "cth1-cx7-h", "expires_at": 1790000000 });
+        let mut inputs: NodeInputs = [
+            ("bearer_token".to_string(), json!("t")),
+            ("bearer_refresh".to_string(), block),
+        ]
+        .into();
+        assert_eq!(refresh(json!({}), &inputs), Ok(None));
+        let authored = json!(["bearer_token", "bearer_refresh"]);
+        inputs.insert(AUTHORED_INPUTS_KEY.into(), authored);
+        assert_eq!(refresh(json!({}), &inputs), Ok(want));
+    }
+
+    #[test]
+    fn bearer_refresh_errors_never_repeat_the_value() {
+        let none = Default::default();
+        let (h, int) = ("cth1-cx7-h", "must be an integer");
+        let bad = [
+            (
+                json!({ "handle": " ", "expires_at": 1 }),
+                "must be a non-empty",
+            ),
+            (json!({ "handle": h, "expires_at": "1" }), int),
+            (json!({ "handle": h }), int),
+        ];
+        for (block, want) in bad {
+            let c = json!({ "bearer_token": "tok-cx7-seed", "bearer_refresh": block });
+            let err = refresh(c, &none).expect_err("malformed");
+            assert!(err.contains(want) && !err.contains("-cx7-"), "{err}");
+        }
+        let block = json!({ "handle": "cth1-cx7-h", "expires_at": 1 });
+        let err = refresh(json!({ "bearer_refresh": block }), &none).expect_err("no token");
+        assert_eq!(err, "bearer_refresh needs bearer_token");
+        let c = json!({ "bearer_refresh": block, "auth": { "type": "oauth2_refresh_token" } });
+        let err = refresh(c, &none).expect_err("with auth");
+        assert_eq!(err, "bearer_refresh cannot be combined with auth");
+    }
+
     #[test]
     fn debug_redacts_secrets() {
         let spec = OAuthAuthSpec {
@@ -254,7 +353,9 @@ mod tests {
         let provider = cache.get_or_create(&token_srv.uri(), "cid", "csec", "rt");
         let client = reqwest::Client::builder().http1_only().build().unwrap();
         let builder = client.get(format!("{}/x", api.uri()));
-        let resp = send_with_oauth_retry(builder, provider).await.expect("ok");
+        let resp = send_with_oauth_retry(builder, provider.as_ref(), None)
+            .await
+            .expect("ok");
         assert_eq!(resp.status().as_u16(), 200);
     }
 }

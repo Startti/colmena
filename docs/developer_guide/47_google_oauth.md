@@ -292,7 +292,8 @@ llega al `http_request` del registry). `HostRefreshTokenProvider` sirve el token
 queden más de 60 s; si no, o tras `invalidate()` (un 401, manda el sha256 del token rechazado), llama al
 puerto: un pedido para llamadas concurrentes, tope `HOST_TOKEN_TIMEOUT` (10 s). Un rechazo del host es
 `OAuthError::HostRefused` (solo su texto); lo demás, `Transient`. Lleva el `agent_session_id`: nunca
-cachearlo entre sesiones solo por `handle_fingerprint()`. `Debug` redactado.
+cachearlo entre sesiones solo por `handle_fingerprint()`. `Debug` redactado. Lo usa `bearer_refresh` de
+`http_request` ([25_web_nodes.md](25_web_nodes.md#token-refrescado-por-el-host-bearer_refresh)).
 
 ## Credenciales por nodo (`google_workspace_auth`)
 
