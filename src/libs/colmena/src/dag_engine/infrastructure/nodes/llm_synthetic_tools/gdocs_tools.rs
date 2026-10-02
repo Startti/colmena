@@ -175,6 +175,16 @@ fn platform_parent_folder_env(auth: Option<&GoogleWorkspaceAuth>) -> Option<Stri
     }
 }
 
+/// Test-only: back the process-wide revision store with memory, so
+/// executor-level tests reach the Docs client of the edit tools without a
+/// database. No test relies on the missing-`DATABASE_URL` error.
+#[cfg(test)]
+pub(crate) fn use_in_memory_revisions_for_tests() {
+    let _ = REVS.set(Arc::new(
+        crate::gdocs::infrastructure::revision_store::InMemoryRevisionStore::new(),
+    ));
+}
+
 async fn shared_revs() -> Result<Arc<dyn RevisionStore>, serde_json::Value> {
     REVS.get_or_try_init(|| async {
         let url = std::env::var("DATABASE_URL").map_err(|_| {
