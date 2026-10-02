@@ -194,6 +194,7 @@ endpoint de token. **Mutación.** Sin barrido; barrer también los que están en
 `for_each` pasa `None` por ahora. Ningún `llm_call` llama a `with_google_workspace_auth` todavía: todo sigue
 con la cuenta de plataforma. Guía: [47_google_oauth.md](developer_guide/47_google_oauth.md).
 **Commits portados.** La parte gsheets de `db76489c` (`gsheets_tools.rs`, `gsheets_run_python.rs`,
-`data_run_python.rs`, el campo del executor). **Tests.** El dispatcher actúa con el bloque (señuelos en env)
+`data_run_python.rs`, el campo del executor). De la revisión de #470: el test de `${VAR}` limpia la env var
+aunque falle, y `provider_cache.rs` dice que con 1024+ providers en uso cada alta recorre el mapa. **Tests.** El dispatcher actúa con el bloque (señuelos en env)
 y sin él toma el camino env; el builder del executor. **Mutación.** `build_client` ignorando `auth`.
 **E2E.** No aplica hasta el cableado de `llm_call`. **ADP.** Ninguno. **Estado.** partial.

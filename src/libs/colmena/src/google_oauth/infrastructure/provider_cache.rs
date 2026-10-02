@@ -9,7 +9,9 @@
 //! costs a fresh token mint on its next use; it also stops keeping a refresh
 //! token of an identity no longer in use in memory. Providers still held by a
 //! client are never dropped, so the map may exceed the bound while that many
-//! identities are in flight at once.
+//! identities are in flight at once. While it stays at or above the bound,
+//! every insert sweeps the whole map (a linear pass under the lock); that is
+//! only reached with 1024+ distinct identities held at the same time.
 //!
 //! Injected into `HttpNode` at construction in `registry.rs`, same pattern
 //! as `with_storage`.
