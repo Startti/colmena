@@ -210,6 +210,10 @@ pub(crate) fn error_to_json(e: DocsError) -> serde_json::Value {
                 })
             }
         }
+        ConnectedAccountPermissionDenied(_) => {
+            super::gsheets_tools::connected_account_permission_denied_payload()
+        }
+        GoogleAccountReconnectRequired => super::gsheets_tools::reconnect_google_payload(),
         NoParentFolder => serde_json::json!({
             "error": "no_parent_folder_configured",
             "hint": "set COLMENA_GDOCS_DEFAULT_PARENT_FOLDER_ID or pass parent_folder_id"
@@ -2651,6 +2655,37 @@ mod tests {
             insert_image_source(&att),
             Ok(ImageSource::Attachment(_))
         ));
+    }
+
+    /// Mirror of the gsheets connected-account payload (same shape and wording).
+    #[test]
+    fn connected_account_permission_denied_names_the_connected_account() {
+        use crate::gdocs::domain::DocsError;
+        let v = error_to_json(DocsError::ConnectedAccountPermissionDenied(
+            "docs.get d1: forbidden".into(),
+        ));
+        assert_eq!(v["error"], "permission_denied");
+        assert!(v.get("share_email").is_none(), "{v}");
+        assert_eq!(
+            v,
+            crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::gsheets_tools::error_to_json(
+                crate::gsheets::domain::SheetsError::ConnectedAccountPermissionDenied
+            ),
+            "gsheets and gdocs must emit the same connected-account payload"
+        );
+    }
+
+    #[test]
+    fn reconnect_required_payload_matches_gsheets() {
+        use crate::gdocs::domain::DocsError;
+        let v = error_to_json(DocsError::GoogleAccountReconnectRequired);
+        assert_eq!(v["error"], "google_account_reconnect_required");
+        assert_eq!(
+            v,
+            crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::gsheets_tools::error_to_json(
+                crate::gsheets::domain::SheetsError::GoogleAccountReconnectRequired
+            )
+        );
     }
 
     #[test]

@@ -34,7 +34,7 @@ struct StaticCached {
 enum Inner {
     /// Production: forward every token decision to the shared OAuth
     /// provider. It owns its own cache + refresh loop.
-    OAuth(Arc<OAuthRefreshTokenProvider>),
+    OAuth(Arc<dyn AuthTokenProvider>),
 
     /// Tests: a pre-seeded bearer string. Invalidate is a no-op in
     /// this variant since wiremock tests never have a real refresh
@@ -54,6 +54,10 @@ enum Inner {
 #[derive(Clone)]
 pub struct TokenCache {
     inner: Inner,
+    /// True for the connected Google account (per-node
+    /// `google_workspace_auth`): a revoked refresh asks the user to reconnect
+    /// Google instead of pointing the operator at the platform setup.
+    connected_account: bool,
 }
 
 impl TokenCache {
@@ -61,6 +65,28 @@ impl TokenCache {
     pub fn from_oauth_credentials(creds: OAuthCredentials) -> Self {
         Self {
             inner: Inner::OAuth(Arc::new(OAuthRefreshTokenProvider::new(creds))),
+            connected_account: false,
+        }
+    }
+
+    /// Wrap a provider shared by identity (per-node
+    /// `google_workspace_auth`, see
+    /// `google_oauth::infrastructure::GoogleWorkspaceAuth::provider`).
+    /// Every client acting as the same Google account reuses one
+    /// access-token cache.
+    pub fn from_shared_provider(provider: Arc<dyn AuthTokenProvider>) -> Self {
+        Self {
+            inner: Inner::OAuth(provider),
+            connected_account: true,
+        }
+    }
+
+    /// Test-only: whether this cache wraps exactly `provider`.
+    #[cfg(test)]
+    pub(crate) fn shares_provider_for_tests(&self, provider: &Arc<dyn AuthTokenProvider>) -> bool {
+        match &self.inner {
+            Inner::OAuth(p) => Arc::ptr_eq(p, provider),
+            Inner::Static { .. } => false,
         }
     }
 
@@ -72,6 +98,7 @@ impl TokenCache {
             inner: Inner::Static {
                 cache: Arc::new(Mutex::new(None)),
             },
+            connected_account: false,
         }
     }
 
@@ -83,7 +110,7 @@ impl TokenCache {
                 .get_bearer_token()
                 .await
                 .map(|t| t.into_string())
-                .map_err(oauth_error_to_docs_error),
+                .map_err(|e| oauth_error_to_docs_error(e, self.connected_account)),
             #[cfg(test)]
             Inner::Static { cache } => {
                 let guard = cache.lock().await;
@@ -104,7 +131,7 @@ impl TokenCache {
     /// surviving across the 401-refresh boundary.
     pub async fn invalidate(&self) {
         match &self.inner {
-            Inner::OAuth(provider) => provider.invalidate_cache().await,
+            Inner::OAuth(provider) => provider.invalidate().await,
             #[cfg(test)]
             Inner::Static { .. } => {}
         }
@@ -130,9 +157,15 @@ impl TokenCache {
     }
 }
 
-fn oauth_error_to_docs_error(err: crate::google_oauth::domain::OAuthError) -> DocsError {
+/// A revoked refresh of the connected Google account is the user's to fix
+/// (reconnect), not the operator's.
+fn oauth_error_to_docs_error(
+    err: crate::google_oauth::domain::OAuthError,
+    connected_account: bool,
+) -> DocsError {
     use crate::google_oauth::domain::OAuthError as E;
     match err {
+        E::RefreshTokenRevoked if connected_account => DocsError::GoogleAccountReconnectRequired,
         E::RefreshTokenRevoked => DocsError::NotConfigured(format!("{err}")),
         E::ClientCredsInvalid(_) | E::HostRefused(_) => DocsError::NotConfigured(format!("{err}")),
         E::ConfigMissing(_) => DocsError::NotConfigured(format!("{err}")),
@@ -169,6 +202,66 @@ mod tests {
         let cache = TokenCache::for_tests_static();
         let err = cache.get().await.unwrap_err();
         assert!(matches!(err, DocsError::AuthFailed(_)));
+    }
+
+    #[test]
+    fn from_shared_provider_wraps_the_given_provider() {
+        use crate::google_oauth::infrastructure::OAuthProviderCache;
+        let cache = OAuthProviderCache::new();
+        let shared: Arc<dyn AuthTokenProvider> =
+            cache.get_or_create("https://t/token", "cid", "cs", "rt-1");
+        let c = TokenCache::from_shared_provider(shared.clone());
+        assert!(c.shares_provider_for_tests(&shared));
+        let other: Arc<dyn AuthTokenProvider> =
+            cache.get_or_create("https://t/token", "cid", "cs", "rt-2");
+        assert!(!c.shares_provider_for_tests(&other));
+    }
+
+    /// OAuth provider whose token endpoint (wiremock) rejects the refresh
+    /// with `invalid_grant`.
+    async fn revoked_provider() -> (wiremock::MockServer, Arc<OAuthRefreshTokenProvider>) {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(400).set_body_string(
+                r#"{"error":"invalid_grant","error_description":"Token has been expired or revoked."}"#,
+            ))
+            .mount(&server)
+            .await;
+        let provider = Arc::new(OAuthRefreshTokenProvider::with_endpoint(
+            OAuthCredentials::new("cid", "cs", "rt"),
+            &server.uri(),
+        ));
+        (server, provider)
+    }
+
+    #[tokio::test]
+    async fn revoked_refresh_with_connected_account_asks_to_reconnect() {
+        let (_server, provider) = revoked_provider().await;
+        let err = TokenCache::from_shared_provider(provider)
+            .get()
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, DocsError::GoogleAccountReconnectRequired),
+            "{err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn revoked_refresh_with_platform_credentials_keeps_the_operator_error() {
+        let (_server, provider) = revoked_provider().await;
+        let platform = TokenCache {
+            inner: Inner::OAuth(provider),
+            connected_account: false,
+        };
+        match platform.get().await.unwrap_err() {
+            DocsError::NotConfigured(msg) => {
+                assert!(msg.contains("colmena_oauth_setup"), "{msg}")
+            }
+            other => panic!("expected NotConfigured, got {other:?}"),
+        }
     }
 
     #[test]
