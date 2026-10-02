@@ -1089,6 +1089,64 @@ mod tests {
     use wiremock::matchers::{header, method, path_regex};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
+    /// A connected account whose token the host refreshes (#462): a 401 on the
+    /// seeded token asks the host once, naming the rejected token by its
+    /// SHA-256, and the call is retried with the fresh one.
+    #[tokio::test]
+    async fn host_refreshed_provider_retries_a_401_once_with_the_fresh_token() {
+        use crate::dag_engine::application::ports::{
+            HostToken, HostTokenError, HostTokenPort, HostTokenRequest,
+        };
+        use crate::google_oauth::infrastructure::HostRefreshTokenProvider;
+        use sha2::{Digest, Sha256};
+        use std::sync::Arc;
+        struct Port(std::sync::Mutex<Vec<HostTokenRequest>>);
+        #[async_trait::async_trait]
+        impl HostTokenPort for Port {
+            async fn fresh_token(&self, r: HostTokenRequest) -> Result<HostToken, HostTokenError> {
+                self.0.lock().unwrap().push(r);
+                let expires_at = chrono::Utc::now().timestamp() + 3600;
+                Ok(HostToken {
+                    access_token: "tok-cx7-fresh".into(),
+                    expires_at,
+                })
+            }
+        }
+        let meta = serde_json::json!({ "sheets": [{ "properties": {
+            "sheetId": 0, "title": "Sheet1", "index": 0,
+            "gridProperties": { "rowCount": 10, "columnCount": 3 }
+        } }] });
+        let (server, mut client) = setup_mock().await;
+        for (bearer, status) in [("tok-cx7-seed", 401), ("tok-cx7-fresh", 200)] {
+            Mock::given(method("GET"))
+                .and(path_regex(r"/abc$"))
+                .and(header("authorization", format!("Bearer {bearer}").as_str()))
+                .respond_with(ResponseTemplate::new(status).set_body_json(meta.clone()))
+                .expect(1)
+                .mount(&server)
+                .await;
+        }
+        let port = Arc::new(Port(Default::default()));
+        let expires_at = chrono::Utc::now().timestamp() + 3600;
+        let host = HostRefreshTokenProvider::new(
+            port.clone(),
+            "cth1-cx7-h".into(),
+            "tok-cx7-seed".into(),
+            expires_at,
+            Some("sess_1".into()),
+        );
+        client.token = TokenProvider::from_shared_provider(Arc::new(host));
+        let tabs = client.list_sheets(&SpreadsheetId("abc".into())).await;
+        assert_eq!(
+            tabs.expect("retried with the fresh token")[0].title,
+            "Sheet1"
+        );
+        let calls = port.0.lock().unwrap();
+        assert_eq!(calls.len(), 1, "one host refresh");
+        let stale = format!("{:x}", Sha256::digest(b"tok-cx7-seed"));
+        assert_eq!(calls[0].stale_token_sha256.as_deref(), Some(stale.as_str()));
+    }
+
     async fn setup_mock() -> (MockServer, GoogleSheetsHttpClient) {
         let server = MockServer::start().await;
         let client = GoogleSheetsHttpClient::for_tests(&server.uri(), &server.uri(), &server.uri());
