@@ -93,7 +93,8 @@ Guía: [47_google_oauth.md](developer_guide/47_google_oauth.md#credenciales-por-
 **Qué cambia.** `TokenProvider` de gsheets guarda `Arc<dyn AuthTokenProvider>` (antes el concreto) y suma
 `from_shared_provider`; un 401 llama `invalidate()` del trait. Un `invalid_grant` de la cuenta conectada da
 `SheetsError::GoogleAccountReconnectRequired` → `google_account_reconnect_required`. La cuenta de plataforma no
-cambia y ningún cliente usa la fuente nueva todavía. Guía: [39_gsheets.md](developer_guide/39_gsheets.md).
+cambia y ningún cliente usa la fuente nueva todavía. De la revisión de #463: una sola constante del endpoint de token
+(`DEFAULT_TOKEN_ENDPOINT`, sale `GOOGLE_TOKEN_ENDPOINT`). Guía: [39_gsheets.md](developer_guide/39_gsheets.md).
 **Commits portados.** Parte de `32a7d46c` y de `58a69afe` (`gsheets/infrastructure/auth.rs`, `errors.rs`,
 `error_to_json`). **Tests.** `gsheets::infrastructure::auth`, `gsheets_tools` (payload) y un 401 con
 `HostRefreshTokenProvider` que pide un token al host una vez y reintenta. **Mutación.**

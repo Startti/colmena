@@ -13,6 +13,6 @@ pub mod workspace_auth;
 pub use config::{parse_oauth_refresh_block, OAuthCredentials, OAuthRefreshBlock};
 pub use host_refresh_provider::HostRefreshTokenProvider;
 pub use provider_cache::OAuthProviderCache;
-pub use refresh_client::{RefreshClient, RefreshResponse};
+pub use refresh_client::{RefreshClient, RefreshResponse, DEFAULT_TOKEN_ENDPOINT};
 pub use token_provider::OAuthRefreshTokenProvider;
-pub use workspace_auth::{GoogleWorkspaceAuth, GOOGLE_TOKEN_ENDPOINT};
+pub use workspace_auth::GoogleWorkspaceAuth;

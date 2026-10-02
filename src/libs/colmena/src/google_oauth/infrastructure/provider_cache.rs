@@ -1,6 +1,7 @@
 //! Process-wide cache of `OAuthRefreshTokenProvider`s keyed by a hash of
 //! the credentials. Guarantees that all http_request nodes/tool-calls
-//! sharing one identity (same token_url + client_id + refresh_token) reuse
+//! sharing one identity (same token_url + client_id + client_secret +
+//! refresh_token) reuse
 //! a single provider — hence a single access-token cache and a single mint.
 //!
 //! Injected into `HttpNode` at construction in `registry.rs`, same pattern
