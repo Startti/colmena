@@ -7677,7 +7677,7 @@ mod google_workspace_auth_tests {
         }
     }
 
-    /// Executor with attachment plumbing wired, so the xlsx importer
+    /// Executor with attachment plumbing wired, so the xlsx/docx importers
     /// get past the attachment fetch and reach their Google client.
     fn executor(auth: Option<GoogleWorkspaceAuth>) -> DagToolExecutor {
         let mut storage = MockOutputStorageRepository::new();
@@ -7689,10 +7689,16 @@ mod google_workspace_auth_tests {
             })
         });
         DagToolExecutor::new(Arc::new(DummyRegistry), HashMap::new())
-            .with_attachments(vec![attachment(
-                "att-xlsx",
-                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )])
+            .with_attachments(vec![
+                attachment(
+                    "att-xlsx",
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                ),
+                attachment(
+                    "att-docx",
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                ),
+            ])
             .with_attachment_storage(Arc::new(storage))
             .with_google_workspace_auth(auth.map(Arc::new))
     }
@@ -7761,6 +7767,112 @@ mod google_workspace_auth_tests {
             (
                 "gsheets_run_python",
                 json!({"bindings": [{"var": "t", "data": [{"a": 1}]}], "code": "output = len(t)"}),
+            ),
+        ]
+    }
+
+    fn gdocs_cases() -> Vec<(&'static str, serde_json::Value)> {
+        use serde_json::json;
+        let d = "d1";
+        vec![
+            ("gdocs_create", json!({"title": "t"})),
+            (
+                "gdocs_create_from_markdown",
+                json!({"title": "t", "markdown": "# t"}),
+            ),
+            (
+                "gdocs_create_from_docx",
+                json!({"title": "t", "attachment_id": "att-docx"}),
+            ),
+            (
+                "gdocs_share",
+                json!({"doc_id": d, "email": "user@example.com", "role": "writer"}),
+            ),
+            ("gdocs_export", json!({"doc_id": d, "format": "pdf"})),
+            ("gdocs_list_tabs", json!({"doc_id": d})),
+            ("gdocs_list_documents", json!({})),
+            ("gdocs_list_permissions", json!({"doc_id": d})),
+            ("gdocs_unshare", json!({"doc_id": d, "permission_id": "p1"})),
+            ("gdocs_add_tab", json!({"doc_id": d, "title": "t"})),
+            ("gdocs_add_comment", json!({"doc_id": d, "content": "c"})),
+            ("gdocs_list_comments", json!({"doc_id": d})),
+            (
+                "gdocs_resolve_comment",
+                json!({"doc_id": d, "comment_id": "c1"}),
+            ),
+            ("gdocs_read_as_markdown", json!({"doc_id": d})),
+            ("gdocs_read_outline", json!({"doc_id": d})),
+            ("gdocs_list_named_ranges", json!({"doc_id": d})),
+            (
+                "gdocs_replace_text",
+                json!({"doc_id": d, "find": "a", "replace": "b"}),
+            ),
+            (
+                "gdocs_insert_after_text",
+                json!({"doc_id": d, "anchor": "a", "new_markdown": "b"}),
+            ),
+            (
+                "gdocs_insert_before_text",
+                json!({"doc_id": d, "anchor": "a", "new_markdown": "b"}),
+            ),
+            (
+                "gdocs_insert_between",
+                json!({"doc_id": d, "after_heading": "h", "new_markdown": "b"}),
+            ),
+            (
+                "gdocs_insert_image_after_text",
+                json!({"doc_id": d, "anchor": "a", "image_url": "https://example.com/i.png"}),
+            ),
+            ("gdocs_delete_text", json!({"doc_id": d, "find": "a"})),
+            (
+                "gdocs_replace_section",
+                json!({"doc_id": d, "heading": "h", "new_markdown": "b"}),
+            ),
+            (
+                "gdocs_append_markdown",
+                json!({"doc_id": d, "markdown": "b"}),
+            ),
+            (
+                "gdocs_apply_edits",
+                json!({"doc_id": d, "edits": [{"tool": "replace_text", "find": "a", "replace": "b"}]}),
+            ),
+            (
+                "gdocs_style_text",
+                json!({"doc_id": d, "find": "a", "style": {"bold": true}}),
+            ),
+            (
+                "gdocs_create_named_range",
+                json!({"doc_id": d, "name": "n", "scope": {"kind": "all"}}),
+            ),
+            (
+                "gdocs_replace_named_range",
+                json!({"doc_id": d, "name": "n", "new_text": "t"}),
+            ),
+            ("gdocs_acknowledge_human_changes", json!({"doc_id": d})),
+            ("gdocs_read_tables", json!({"doc_id": d})),
+            (
+                "gdocs_set_table_cell",
+                json!({"doc_id": d, "table_index": 0, "row": 0, "col": 0, "text": "t"}),
+            ),
+            (
+                "gdocs_insert_table_row",
+                json!({"doc_id": d, "table_index": 0, "at_row": 0}),
+            ),
+            (
+                "gdocs_delete_table_row",
+                json!({"doc_id": d, "table_index": 0, "row": 0}),
+            ),
+            (
+                "gdocs_insert_table_column",
+                json!({"doc_id": d, "table_index": 0, "at_col": 0}),
+            ),
+            (
+                "gdocs_delete_table_column",
+                json!({"doc_id": d, "table_index": 0, "col": 0}),
+            ),
+            (
+                "gdocs_format_table",
+                json!({"doc_id": d, "ops": [{"table_index": 0, "cell_range": {"row_start": 0, "row_end": 1, "col_start": 0, "col_end": 1}, "format": {}}]}),
             ),
         ]
     }
@@ -7895,6 +8007,64 @@ mod google_workspace_auth_tests {
             "every refresh must use the llm_call credentials"
         );
         assert!(!refreshes.is_empty());
+    }
+
+    #[test]
+    fn cases_cover_every_gdocs_tool() {
+        use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::build_all_gdocs_tools;
+        let mut expected: Vec<String> = build_all_gdocs_tools()
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+        let mut covered: Vec<String> = gdocs_cases()
+            .into_iter()
+            .map(|(n, _)| n.to_string())
+            .collect();
+        expected.sort();
+        covered.sort();
+        assert_eq!(covered, expected);
+    }
+
+    /// Every gdocs dispatch acts with the `llm_call` credentials: each one
+    /// reaches the block's token endpoint (which rejects the refresh, so no
+    /// Google API is called) and none falls back to env. Without the block,
+    /// no dispatch reaches that endpoint.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn every_gdocs_dispatch_uses_the_llm_call_credentials() {
+        for name in OAUTH_ENV {
+            std::env::remove_var(name);
+        }
+        crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::gdocs_tools::use_in_memory_revisions_for_tests();
+        let token_server = rejecting_token_endpoint().await;
+        let platform = executor(None);
+        for (tool, args) in gdocs_cases() {
+            run(&platform, tool, &args).await;
+        }
+        assert!(
+            token_server
+                .received_requests()
+                .await
+                .unwrap_or_default()
+                .is_empty(),
+            "the platform path must never reach the block's token endpoint"
+        );
+
+        let with_auth = executor(Some(auth_for(&token_server, "rt-gdocs-wiring")));
+        for (tool, args) in gdocs_cases() {
+            let before = token_server
+                .received_requests()
+                .await
+                .unwrap_or_default()
+                .len();
+            let out = run(&with_auth, tool, &args).await;
+            assert!(!out.contains(ENV_MARKER), "{tool}: fell back to env: {out}");
+            let after = token_server.received_requests().await.unwrap_or_default();
+            assert!(after.len() > before, "{tool}: never used the block: {out}");
+            assert!(after.iter().all(
+                |r| String::from_utf8_lossy(&r.body).contains("refresh_token=rt-gdocs-wiring")
+            ));
+        }
     }
 
     /// `data_run_python` degrades a failed Sheets client to "source

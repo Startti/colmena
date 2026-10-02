@@ -199,3 +199,11 @@ habría podido soltarlo nunca. Ningún `llm_call` pasa `auth` todavía. Guía: [
 **Tests.** Caché por identidad; cliente por llamada; carpeta de plataforma nunca con la cuenta conectada; tope de
 cachés. **Mutación.** La cuenta conectada usa el singleton; la caché ignora la identidad; carpeta de plataforma con
 la cuenta conectada; sin barrido. **E2E.** No aplica. **ADP.** Ninguno. **Estado.** partial.
+
+## 15. gdocs: tests de cableado de `google_workspace_auth` en el executor (porte de `feat/google-workspace-auth`, parte 10)
+
+**Qué cambia.** Solo tests (de `db76489c` y `9051dbf7`, parte gdocs): con el bloque en el executor, **cada** tool
+`gdocs_*` (la lista sale de `build_all_gdocs_tools`) llega al endpoint de token del bloque y ninguna cae a env; sin
+él, ninguna llega a ese endpoint. Un `RevisionStore` en memoria (solo en tests) deja que las tools de edición
+lleguen al cliente sin base de datos. **Mutación.** Una tool que pasa `None`. **E2E.** No aplica. **ADP.** Ninguno.
+**Estado.** partial.
