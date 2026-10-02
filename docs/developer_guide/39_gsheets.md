@@ -98,8 +98,14 @@ or any other `AuthTokenProvider`, e.g. #462's `HostRefreshTokenProvider`. A 401 
 `invalidate()`. When that account's refresh is revoked (`invalid_grant`) the error is
 `SheetsError::GoogleAccountReconnectRequired`, whose tool result is
 `google_account_reconnect_required` ("Reconnect Google in ADP"), not the operator's
-`colmena_oauth_setup` text. No client is built from it yet: the platform env account is still the only
-path.
+`colmena_oauth_setup` text.
+
+`GoogleSheetsHttpClient::from_config_with_auth(cfg, auth)`: `None` is exactly `from_config` (env
+credentials, `share_email` from config); `Some(&GoogleWorkspaceAuth)` acts as that account through its
+shared provider, never reads the env, and leaves `share_email` empty. A 403 is then
+`SheetsError::ConnectedAccountPermissionDenied`: `permission_denied` with no `share_email` and a hint to
+open or share the file with the connected account. No dispatcher passes `auth` yet (`llm_call` wiring
+is the next part of the port), so every tool still uses the platform account.
 
 ## Formulas — Google evaluates them
 
