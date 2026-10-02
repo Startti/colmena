@@ -1,8 +1,15 @@
 //! Process-wide cache of `OAuthRefreshTokenProvider`s keyed by a hash of
 //! the credentials. Guarantees that all http_request nodes/tool-calls
 //! sharing one identity (same token_url + client_id + client_secret +
-//! refresh_token) reuse
-//! a single provider — hence a single access-token cache and a single mint.
+//! refresh_token) reuse a single provider — hence a single access-token
+//! cache and a single mint.
+//!
+//! Bounded: at [`MAX_CACHED_PROVIDERS`] entries, an insert first drops every
+//! provider nobody else holds (only the cache's own `Arc`). Dropping one only
+//! costs a fresh token mint on its next use; it also stops keeping a refresh
+//! token of an identity no longer in use in memory. Providers still held by a
+//! client are never dropped, so the map may exceed the bound while that many
+//! identities are in flight at once.
 //!
 //! Injected into `HttpNode` at construction in `registry.rs`, same pattern
 //! as `with_storage`.
@@ -12,16 +19,46 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+/// Entries kept before an insert sweeps out the providers nobody holds.
+pub const MAX_CACHED_PROVIDERS: usize = 1024;
+
 /// Maps a credential fingerprint to a shared provider.
-#[derive(Default)]
 pub struct OAuthProviderCache {
     inner: Mutex<HashMap<String, Arc<OAuthRefreshTokenProvider>>>,
+    max_entries: usize,
+}
+
+impl Default for OAuthProviderCache {
+    fn default() -> Self {
+        Self::with_max_entries(MAX_CACHED_PROVIDERS)
+    }
 }
 
 impl OAuthProviderCache {
-    /// Create an empty cache.
+    /// Create an empty cache bounded by [`MAX_CACHED_PROVIDERS`].
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Create an empty cache with a custom bound (tests).
+    pub fn with_max_entries(max_entries: usize) -> Self {
+        Self {
+            inner: Mutex::new(HashMap::new()),
+            max_entries,
+        }
+    }
+
+    /// Number of cached providers.
+    pub fn len(&self) -> usize {
+        self.inner
+            .lock()
+            .expect("oauth provider cache mutex poisoned")
+            .len()
+    }
+
+    /// Whether the cache holds no provider.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 
     /// SHA-256 hex of the identity tuple. The refresh token is hashed, never
@@ -59,6 +96,9 @@ impl OAuthProviderCache {
         if let Some(p) = guard.get(&fp) {
             return p.clone();
         }
+        if guard.len() >= self.max_entries {
+            guard.retain(|_, p| Arc::strong_count(p) > 1);
+        }
         let creds = OAuthCredentials::new(client_id, client_secret, refresh_token);
         let provider = Arc::new(OAuthRefreshTokenProvider::with_endpoint(creds, token_url));
         guard.insert(fp, provider.clone());
@@ -86,6 +126,21 @@ mod tests {
         assert!(
             !Arc::ptr_eq(&a, &b),
             "different refresh tokens => different providers"
+        );
+    }
+
+    #[test]
+    fn at_the_bound_unheld_providers_are_dropped_and_held_ones_kept() {
+        let cache = OAuthProviderCache::with_max_entries(2);
+        let held = cache.get_or_create("https://t/token", "cid", "cs", "rt-held");
+        drop(cache.get_or_create("https://t/token", "cid", "cs", "rt-idle"));
+        assert_eq!(cache.len(), 2);
+        let _third = cache.get_or_create("https://t/token", "cid", "cs", "rt-third");
+        assert_eq!(cache.len(), 2, "the idle provider was swept");
+        let again = cache.get_or_create("https://t/token", "cid", "cs", "rt-held");
+        assert!(
+            Arc::ptr_eq(&held, &again),
+            "a held provider is never dropped"
         );
     }
 

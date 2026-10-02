@@ -303,8 +303,16 @@ Bloque `{type: "oauth2_refresh_token", client_id, client_secret, refresh_token, 
 plataforma, igual que hoy) y `Err` si es inválida (otro `type`, un campo faltante o en blanco):
 **nunca** cae a la cuenta de plataforma. Los errores nombran `google_workspace_auth`, nunca un valor.
 `provider()` da un `Arc<dyn AuthTokenProvider>` compartido por identidad (los cuatro campos) en un
-`OAuthProviderCache` propio del proceso, sin desalojo. `Debug` redacta los secretos. Todavía ningún
-nodo lee el bloque: lo conectan las PRs siguientes del porte de `feat/google-workspace-auth`.
+`OAuthProviderCache` propio del proceso. `Debug` redacta los secretos. Todavía ningún nodo lee el
+bloque: lo conectan las PRs siguientes del porte de `feat/google-workspace-auth`.
+
+- **Sin expansión de `${VAR}`.** Los valores se usan tal cual llegan: ADP manda las credenciales ya
+  resueltas de la conexión del usuario. Expandirlos dejaría que un grafo nombre una env var del motor
+  (por ejemplo `COLMENA_GOOGLE_OAUTH_REFRESH_TOKEN`) y actúe con la cuenta de la plataforma.
+- **Caché acotada.** `OAuthProviderCache` (el mismo tipo que usa `http_request`) guarda hasta
+  `MAX_CACHED_PROVIDERS` (1024). Al llegar al tope, un alta descarta los providers que nadie más tiene
+  (solo queda el `Arc` de la caché). Descartar uno solo cuesta un mint al volver a usarlo, y deja de
+  tener en memoria el refresh token de una identidad que ya no se usa. Uno en uso nunca se descarta.
 
 ## Monitoring
 
