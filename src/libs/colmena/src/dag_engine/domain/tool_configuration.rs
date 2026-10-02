@@ -408,6 +408,53 @@ pub struct McpServerSpec {
     pub timeout_seconds: u64,
     #[serde(default = "default_mcp_cache_ttl_seconds")]
     pub cache_ttl_seconds: u64,
+    /// The `header` carries a host-issued bearer token the embedder can renew
+    /// (CX7): with a `HostTokenPort`, a 401 renews it and retries once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_refresh: Option<McpAuthRefresh>,
+}
+
+/// `auth_refresh` of an MCP entry. `Debug` never prints the handle.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+pub struct McpAuthRefresh {
+    pub header: String,
+    pub scheme: String,
+    pub handle: String,
+    pub expires_at: i64,
+}
+
+impl std::fmt::Debug for McpAuthRefresh {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("McpAuthRefresh")
+            .field("header", &self.header)
+            .field("scheme", &self.scheme)
+            .field("handle", &"<redacted>")
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
+}
+
+/// Why an `auth_refresh` cannot be honoured, never quoting a value.
+fn auth_refresh_error(spec: &McpServerSpec) -> Option<&'static str> {
+    let a = spec.auth_refresh.as_ref()?;
+    let tchar = |c: char| c.is_ascii_alphanumeric() || "!#$%&'*+-.^_`|~".contains(c);
+    if a.header.is_empty() || !a.header.chars().all(tchar) {
+        return Some("'mcp.auth_refresh.header' is not a valid header name");
+    }
+    if !spec
+        .headers
+        .keys()
+        .any(|h| h.eq_ignore_ascii_case(&a.header))
+    {
+        return Some("'mcp.auth_refresh.header' must name a header present in 'mcp.headers'");
+    }
+    if a.scheme != "Bearer" {
+        return Some("'mcp.auth_refresh.scheme' must be \"Bearer\"");
+    }
+    a.handle
+        .trim()
+        .is_empty()
+        .then_some("'mcp.auth_refresh.handle' is empty")
 }
 
 fn default_mcp_timeout_seconds() -> u64 {
@@ -614,15 +661,19 @@ pub fn validate_mcp_config(node_type: &str, tool_cfg: &Value) -> Result<(), Stri
     // malformed". Failing closed here is the only place that distinction can
     // still be made.
     if let Some(block) = block {
-        if serde_json::from_value::<McpServerSpec>(block.clone()).is_err() {
+        let parsed = serde_json::from_value::<McpServerSpec>(block.clone());
+        if let Some(why) = parsed.as_ref().ok().and_then(auth_refresh_error) {
+            return Err(why.to_string());
+        }
+        if parsed.is_err() {
             // NOT serde's message: `headers` is where a bearer token lives, and
             // serde prints the offending string. Naming each key by shape says
             // which one is wrong without saying what it holds.
             return Err(format!(
                 "the 'mcp' block on this tool is malformed ({}). Valid fields are \
                  url, transport (streamable_http | sse), headers (string map), \
-                 tools (list of the server's tool names), timeout_seconds and \
-                 cache_ttl_seconds",
+                 tools (list of the server's tool names), timeout_seconds, \
+                 cache_ttl_seconds and auth_refresh",
                 describe_object_shapes(block)
             ));
         }
@@ -1179,6 +1230,31 @@ mod tests {
 
     fn mcp_cfg(node_type: &str, mcp: Value) -> Value {
         json!({ "name": "t", "node_type": node_type, "mcp": mcp })
+    }
+
+    /// `auth_refresh` names a header of `headers`, scheme `Bearer`, and its
+    /// errors never quote a value.
+    #[test]
+    fn auth_refresh_must_name_a_bearer_header_and_errors_quote_no_value() {
+        let block = |header: &str, scheme: &str| {
+            json!({ "url": "https://mcp.example.com/mcp",
+                "headers": { "Authorization": "Bearer tok-cx7-seed" },
+                "auth_refresh": { "header": header, "scheme": scheme,
+                    "handle": "cth1-cx7-h", "expires_at": 1 } })
+        };
+        let check = |h: &str, s: &str| validate_mcp_config("mcp", &mcp_cfg("mcp", block(h, s)));
+        assert_eq!(check("authorization", "Bearer"), Ok(()));
+        for (h, s) in [
+            ("X-Other", "Bearer"),
+            ("Authorization", "Token"),
+            ("Bad Name", "Bearer"),
+        ] {
+            let err = check(h, s).unwrap_err();
+            assert!(
+                err.contains("auth_refresh") && !err.contains("cx7"),
+                "{err}"
+            );
+        }
     }
 
     /// The defaults are a documented part of the config surface: an operator

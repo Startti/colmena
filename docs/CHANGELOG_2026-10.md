@@ -198,3 +198,27 @@ con la cuenta de plataforma. Guía: [47_google_oauth.md](developer_guide/47_goog
 aunque falle, y `provider_cache.rs` dice que con 1024+ providers en uso cada alta recorre el mapa. **Tests.** El dispatcher actúa con el bloque (señuelos en env)
 y sin él toma el camino env; el builder del executor. **Mutación.** `build_client` ignorando `auth`.
 **E2E.** No aplica hasta el cableado de `llm_call`. **ADP.** Ninguno. **Estado.** partial.
+
+## 14. MCP: entrada `auth_refresh` — el header bearer del host se renueva por el puerto (parte 2 de `auth_refresh`)
+
+**Qué cambia.** Una entrada `mcp` acepta `auth_refresh: {header, scheme: "Bearer", handle, expires_at}`. La carga
+exige que `header` sea un nombre válido presente en `headers` (sin importar mayúsculas), `scheme` `Bearer` y un
+`handle` no vacío; los errores no repiten valores y `Debug` tacha el handle. Con `EngineConfig.host_token_port`
+(que ahora también llega a `llm_call`), `bind_with` arma por ejecución un `HostRefreshTokenProvider` con el handle,
+el token sembrado (el header resuelto sin `Bearer `) y la sesión de `__colmena_agent_session_id`, y conecta con
+`connect_refreshing` (§9). La clave del pool usa la huella del handle y la sesión en vez del token: renovar no parte
+el pool y otra sesión no reusa el proveedor; las corridas sin sesión de agente comparten una conexión por handle
+(misma credencial). El valor del header debe empezar exactamente con `Bearer ` (sensible a mayúsculas); si no, error
+fijo. `auth_refresh` vale solo si el autor escribió `tool_configurations`
+(`mcp_specs_for`); sin puerto se ignora y todo queda como hoy. Referencia: `mcp.auth_refresh` en
+[node_as_tools_reference.json](node_as_tools_reference.json); evento `mcp.auth_refresh_failed` en
+[52_mcp_observability.md](developer_guide/52_mcp_observability.md).
+**Tests.** Validación (header ausente, scheme, nombre inválido; sin valores en el error); `bind` (mismo handle con
+otro token → misma clave; otro handle u otra sesión → otra; el proveedor pide al host con el handle y la sesión);
+`expose` (`auth_refresh` de inputs no del autor se descarta); `llm_call` con `tool_configurations` que llegan por
+inputs no del autor y un puerto instalado: el puerto nunca se llama (la copia del autor sí lo llama); `registry` (el puerto llega a `llm_call`).
+**Mutación.** Sesión fuera de la clave, clave por token, proveedor sin sesión, `auth_refresh` del modelo aceptado,
+header sin chequear, scheme sin chequear, puerto sin llegar a `llm_call`, `tools_authored` invertido o fijo en
+`true`: cada una tumba un test. **E2E.** Con
+puerto, espera al worker de ADP. **ADP.** Emitir `auth_refresh` en la entrada MCP solo con la compuerta abierta;
+cortar el tag A después de esta PR. **Estado.** partial.
