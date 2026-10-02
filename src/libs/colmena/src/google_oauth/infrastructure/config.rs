@@ -15,11 +15,24 @@ use crate::google_oauth::domain::{OAuthError, RefreshTokenSecret};
 /// passed into `RefreshClient::refresh` per call so the client is
 /// stateless and can be shared across many providers if needed in
 /// the future.
-#[derive(Debug, Clone)]
+///
+/// `Debug` is hand-written: `client_secret` and `refresh_token` are
+/// redacted so a stray `{:?}` can never leak them.
+#[derive(Clone)]
 pub struct OAuthCredentials {
     pub client_id: String,
     pub client_secret: String,
     pub refresh_token: RefreshTokenSecret,
+}
+
+impl std::fmt::Debug for OAuthCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OAuthCredentials")
+            .field("client_id", &self.client_id)
+            .field("client_secret", &"<redacted>")
+            .field("refresh_token", &"<redacted>")
+            .finish()
+    }
 }
 
 impl OAuthCredentials {
@@ -89,6 +102,96 @@ impl OAuthCredentials {
     }
 }
 
+/// Fields of an `oauth2_refresh_token` block (shared by `http_request.auth`
+/// and `llm_call.google_workspace_auth`). Debug redacts the secrets.
+#[derive(Clone, PartialEq, Eq)]
+pub struct OAuthRefreshBlock {
+    pub token_url: Option<String>,
+    pub client_id: String,
+    pub client_secret: String,
+    pub refresh_token: String,
+}
+
+impl std::fmt::Debug for OAuthRefreshBlock {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OAuthRefreshBlock")
+            .field("token_url", &self.token_url)
+            .field("client_id", &self.client_id)
+            .field("client_secret", &"<redacted>")
+            .field("refresh_token", &"<redacted>")
+            .finish()
+    }
+}
+
+/// Parse `{ type: "oauth2_refresh_token", token_url?, client_id,
+/// client_secret, refresh_token }`.
+///
+/// `require_token_url`: `http_request` requires it (any provider); Google
+/// Workspace defaults to Google's endpoint. Every missing field is listed in
+/// one error; an empty or whitespace-only string counts as missing. Values
+/// are returned raw (no `${ENV}` expansion, no trimming). Error messages name
+/// the block `auth` (the `http_request` key).
+pub fn parse_oauth_refresh_block(
+    block: &serde_json::Value,
+    require_token_url: bool,
+) -> Result<OAuthRefreshBlock, String> {
+    parse_oauth_refresh_block_named(block, require_token_url, "auth")
+}
+
+/// [`parse_oauth_refresh_block`] with the config key used in error messages
+/// (`auth` for `http_request`, `google_workspace_auth` for `llm_call`).
+pub(crate) fn parse_oauth_refresh_block_named(
+    block: &serde_json::Value,
+    require_token_url: bool,
+    key: &str,
+) -> Result<OAuthRefreshBlock, String> {
+    let ty = block.get("type").and_then(|v| v.as_str()).unwrap_or("");
+    if ty != "oauth2_refresh_token" {
+        return Err(format!(
+            "unsupported {key}.type '{ty}'; v1 supports only 'oauth2_refresh_token'"
+        ));
+    }
+
+    let get = |k: &str| {
+        block
+            .get(k)
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| s.to_string())
+    };
+    let token_url = get("token_url");
+    let client_id = get("client_id");
+    let client_secret = get("client_secret");
+    let refresh_token = get("refresh_token");
+
+    let mut missing = Vec::new();
+    if require_token_url && token_url.is_none() {
+        missing.push("token_url");
+    }
+    if client_id.is_none() {
+        missing.push("client_id");
+    }
+    if client_secret.is_none() {
+        missing.push("client_secret");
+    }
+    if refresh_token.is_none() {
+        missing.push("refresh_token");
+    }
+    if !missing.is_empty() {
+        return Err(format!(
+            "{key} block missing required fields: {}",
+            missing.join(", ")
+        ));
+    }
+
+    Ok(OAuthRefreshBlock {
+        token_url,
+        client_id: client_id.unwrap_or_default(),
+        client_secret: client_secret.unwrap_or_default(),
+        refresh_token: refresh_token.unwrap_or_default(),
+    })
+}
+
 /// Read an env var, returning `Some(trimmed)` when set AND non-empty
 /// after trim. Treats whitespace-only as missing (Cloud Run secret
 /// mounts that resolve to empty strings are a common misconfig).
@@ -110,6 +213,85 @@ mod tests {
 
     use super::*;
     use serial_test::serial;
+
+    #[test]
+    fn parse_oauth_refresh_block_reports_every_missing_field() {
+        let v = serde_json::json!({ "type": "oauth2_refresh_token" });
+        let err = parse_oauth_refresh_block(&v, true).unwrap_err();
+        assert!(
+            err.contains("token_url")
+                && err.contains("client_id")
+                && err.contains("client_secret")
+                && err.contains("refresh_token"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn parse_oauth_refresh_block_rejects_other_types() {
+        let v = serde_json::json!({ "type": "basic", "client_id": "a", "client_secret": "b", "refresh_token": "c" });
+        assert!(parse_oauth_refresh_block(&v, false)
+            .unwrap_err()
+            .contains("oauth2_refresh_token"));
+    }
+
+    #[test]
+    fn parse_oauth_refresh_block_token_url_optional_when_not_required() {
+        let v = serde_json::json!({ "type": "oauth2_refresh_token", "client_id": "cid", "client_secret": "CS-SECRET", "refresh_token": "RT-SECRET" });
+        let b = parse_oauth_refresh_block(&v, false).unwrap();
+        assert_eq!(b.token_url, None);
+        let dbg = format!("{b:?}");
+        assert!(
+            !dbg.contains("CS-SECRET") && !dbg.contains("RT-SECRET"),
+            "{dbg}"
+        );
+    }
+
+    #[test]
+    fn parse_oauth_refresh_block_treats_empty_or_blank_values_as_missing() {
+        let v = serde_json::json!({
+            "type": "oauth2_refresh_token",
+            "token_url": "",
+            "client_id": "   ",
+            "client_secret": "",
+            "refresh_token": "\t\n"
+        });
+        let err = parse_oauth_refresh_block(&v, true).unwrap_err();
+        assert!(
+            err.contains("token_url")
+                && err.contains("client_id")
+                && err.contains("client_secret")
+                && err.contains("refresh_token"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn parse_oauth_refresh_block_rejects_empty_refresh_token_only() {
+        let v = serde_json::json!({
+            "type": "oauth2_refresh_token",
+            "client_id": "cid",
+            "client_secret": "cs",
+            "refresh_token": ""
+        });
+        let err = parse_oauth_refresh_block(&v, false).unwrap_err();
+        assert!(
+            err.ends_with("missing required fields: refresh_token"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn oauth_credentials_debug_redacts_secrets() {
+        let creds = OAuthCredentials::new("cid-visible", "CS-SECRET", "RT-SECRET");
+        let dbg = format!("{creds:?}");
+        assert!(
+            !dbg.contains("CS-SECRET") && !dbg.contains("RT-SECRET"),
+            "{dbg}"
+        );
+        assert!(dbg.contains("cid-visible"), "{dbg}");
+        assert!(dbg.contains("<redacted>"), "{dbg}");
+    }
 
     #[test]
     fn new_builds_credentials_directly() {

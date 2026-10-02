@@ -294,6 +294,17 @@ puerto: un pedido para llamadas concurrentes, tope `HOST_TOKEN_TIMEOUT` (10 s). 
 `OAuthError::HostRefused` (solo su texto); lo demás, `Transient`. Lleva el `agent_session_id`: nunca
 cachearlo entre sesiones solo por `handle_fingerprint()`. `Debug` redactado.
 
+## Credenciales por nodo (`google_workspace_auth`)
+
+Bloque `{type: "oauth2_refresh_token", client_id, client_secret, refresh_token, token_url?}`, el de
+`auth` de `http_request` (mismo parser) con `token_url` opcional (`GOOGLE_TOKEN_ENDPOINT`).
+`GoogleWorkspaceAuth::from_node_config(config)` da `Ok(None)` si la clave falta (rige la cuenta de
+plataforma, igual que hoy) y `Err` si es inválida (otro `type`, un campo faltante o en blanco):
+**nunca** cae a la cuenta de plataforma. Los errores nombran `google_workspace_auth`, nunca un valor.
+`provider()` da un `Arc<dyn AuthTokenProvider>` compartido por identidad (los cuatro campos) en un
+`OAuthProviderCache` propio del proceso, sin desalojo. `Debug` redacta los secretos. Todavía ningún
+nodo lee el bloque: lo conectan las PRs siguientes del porte de `feat/google-workspace-auth`.
+
 ## Monitoring
 
 Eventos estructurados que conviene alertear:
