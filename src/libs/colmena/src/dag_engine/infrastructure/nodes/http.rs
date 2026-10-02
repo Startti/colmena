@@ -39,6 +39,7 @@
 //! The node's output and error texts show the placeholder wherever the
 //! response repeats that URL or its long query values.
 
+use crate::dag_engine::application::ports::HostTokenPort;
 use crate::dag_engine::domain::lint::{FieldSpec, NodeCatalogEntry};
 use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
 use crate::dag_engine::infrastructure::env_provenance::{
@@ -80,6 +81,9 @@ pub struct HttpNode {
     /// Registers a file response as a session attachment, so `load_attachment`
     /// and `$attachment:<document_id>` reach it and the host can show it.
     attachment_registry: Option<Arc<dyn crate::llm::domain::AttachmentRegistry>>,
+    /// The embedder's port for host-refreshed bearer tokens. Set once, after
+    /// construction, by `HashMapNodeRegistry::set_host_token_port`.
+    pub(crate) host_token_port: std::sync::OnceLock<Arc<dyn HostTokenPort>>,
 }
 
 impl Default for HttpNode {
@@ -333,7 +337,13 @@ impl HttpNode {
             oauth_cache: None,
             url_parts: SignedUrlDownloader::new(),
             attachment_registry: None,
+            host_token_port: std::sync::OnceLock::new(),
         }
+    }
+
+    /// The embedder's `HostTokenPort`, when it set one.
+    pub fn host_token_port(&self) -> Option<Arc<dyn HostTokenPort>> {
+        self.host_token_port.get().cloned()
     }
 
     /// Wire the session attachment registry: a file response is then

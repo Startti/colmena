@@ -24,4 +24,8 @@ pub trait AuthTokenProvider: Send + Sync {
     /// near expiry. Concurrent calls from multiple tasks must
     /// coalesce into a single refresh (no thundering herd).
     async fn get_bearer_token(&self) -> Result<AccessToken, OAuthError>;
+
+    /// The API rejected the last token (a 401): drop it so the next
+    /// `get_bearer_token` gets a new one. Default: nothing to drop.
+    async fn invalidate(&self) {}
 }

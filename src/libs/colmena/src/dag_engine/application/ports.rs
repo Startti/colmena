@@ -105,6 +105,71 @@ impl std::fmt::Debug for ResumeGraph {
     }
 }
 
+/// Gets a fresh access token from the host (the embedder) for a connection it
+/// handed to the run as a seed token plus an opaque, signed `handle`. Implemented
+/// by the embedder: the ADP worker asks ADP, which refreshes with a client secret
+/// the engine never sees. The engine knows no host URL. Neither the handle nor a
+/// token is ever logged or emitted.
+#[async_trait::async_trait]
+pub trait HostTokenPort: Send + Sync {
+    /// Returns a currently valid access token for `req.handle`, or why not.
+    async fn fresh_token(&self, req: HostTokenRequest) -> Result<HostToken, HostTokenError>;
+}
+
+/// What the engine sends the host. `Debug` is hand-written to redact `handle`.
+#[derive(Clone)]
+pub struct HostTokenRequest {
+    /// The opaque handle from the run's graph; a bearer credential.
+    pub handle: String,
+    /// The embedder's stable session, when the run has one.
+    pub agent_session_id: Option<String>,
+    /// SHA-256 (lowercase hex) of the token the API rejected with a 401, or
+    /// `None` when the token is only near expiry. Lets the host force a refresh
+    /// only when its stored token is the one that failed.
+    pub stale_token_sha256: Option<String>,
+}
+
+impl std::fmt::Debug for HostTokenRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HostTokenRequest")
+            .field("handle", &"<redacted>")
+            .field("agent_session_id", &self.agent_session_id)
+            .field("stale_token_sha256", &self.stale_token_sha256)
+            .finish()
+    }
+}
+
+/// A token from the host. `Debug` is hand-written to redact `access_token`.
+#[derive(Clone)]
+pub struct HostToken {
+    pub access_token: String,
+    /// Unix seconds.
+    pub expires_at: i64,
+}
+
+impl std::fmt::Debug for HostToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HostToken")
+            .field("access_token", &"<redacted>")
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
+}
+
+/// Why the host gave no token. The texts are the host's own fixed messages;
+/// they never carry the handle or a token.
+#[derive(Debug, Clone, PartialEq)]
+pub enum HostTokenError {
+    /// The host refused the handle (bad signature, expired, wrong session).
+    Unauthorized(String),
+    /// The connection's grant is gone: its owner has to reconnect it.
+    NeedsReconnect(String),
+    /// Too many refreshes for this handle; retry later.
+    RateLimited,
+    /// No port configured, the host failed or it timed out.
+    Unavailable(String),
+}
+
 /// Resolves a child graph named by reference (`child_graph_ref`). Implemented by
 /// the embedder: the ADP worker asks ADP for the agent's runnable graph. The
 /// resolved graph is never emitted, never returned to the model and never stored

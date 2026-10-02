@@ -283,6 +283,33 @@ Tiempo total: ~10 min.
 - Si persiste, chequeá que el worker tenga egress habilitado a `oauth2.googleapis.com`.
 - Si es prolongado: incidente de Google (chequear https://www.google.com/appsstatus).
 
+## Token refrescado por el host (`HostTokenPort`)
+
+Para una conexión OAuth cuyo `client_secret` no puede llegar al motor (un proveedor de
+plataforma del embebedor), el embebedor siembra la corrida con un access token, su
+vencimiento y un `handle` opaco y firmado. El motor pide un token nuevo **al embebedor**,
+nunca al proveedor: no conoce la URL del host.
+
+- **Puerto.** `HostTokenPort::fresh_token(HostTokenRequest) -> Result<HostToken, HostTokenError>`
+  en `dag_engine/application/ports.rs`. Se inyecta por `EngineConfig.host_token_port`
+  (como `child_graph_resolver`); `from_env` lo deja en `None`. `ColmenaEngine::new` lo pasa
+  al nodo `http_request` del registry, que sirve a los nodos del grafo y a las tool calls.
+  En ADP lo implementa el worker.
+- **Proveedor.** `HostRefreshTokenProvider` (`google_oauth/infrastructure/host_refresh_provider.rs`)
+  implementa `AuthTokenProvider`. Sirve el token sembrado mientras le queden más de
+  `EXPIRY_MARGIN_SECONDS` (60 s); si no, llama al puerto con `stale_token_sha256: None`.
+  `invalidate()` (tras un 401) marca el token como rechazado y el siguiente pedido manda el
+  sha256 hex de ese token, para que el host fuerce el refresco solo si el suyo es el que
+  falló. Un solo `tokio::Mutex`: llamadas concurrentes comparten un pedido.
+  `handle_fingerprint()` es el sha256 hex del handle, para identificar la conexión sin
+  exponerla.
+- **Errores.** `Unauthorized`/`NeedsReconnect` → `OAuthError::ClientCredsInvalid(<texto del host>)`;
+  `RateLimited`/`Unavailable` → `OAuthError::Transient`.
+- **Redacción.** `Debug` de `HostRefreshTokenProvider`, `HostTokenRequest` y `HostToken`
+  imprime `<redacted>` en el handle y el token; ningún log los nombra.
+- **`invalidate` en el trait.** `AuthTokenProvider::invalidate` tiene cuerpo vacío por
+  defecto; `OAuthRefreshTokenProvider` vacía su caché (como `invalidate_cache`).
+
 ## Monitoring
 
 Eventos estructurados que conviene alertear:
