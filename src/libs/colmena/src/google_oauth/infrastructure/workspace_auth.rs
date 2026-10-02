@@ -59,8 +59,14 @@ impl GoogleWorkspaceAuth {
         }))
     }
 
-    /// Shared provider for this identity (process-wide `OAuthProviderCache`),
-    /// behind the port so callers never depend on how the token is refreshed.
+    /// Shared provider for this identity (process-wide `OAuthProviderCache`,
+    /// bounded, see `provider_cache`), behind the port so callers never
+    /// depend on how the token is refreshed.
+    ///
+    /// Values are used literally: `${VAR}` is never expanded here. ADP sends
+    /// the resolved credentials of the user's connection; expanding them
+    /// would let a graph author name an engine env var (for instance the
+    /// platform's own `COLMENA_GOOGLE_OAUTH_REFRESH_TOKEN`) and act with it.
     pub fn provider(&self) -> Arc<dyn AuthTokenProvider> {
         PROVIDERS
             .get_or_init(OAuthProviderCache::new)
@@ -76,6 +82,43 @@ impl GoogleWorkspaceAuth {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `${VAR}` in a block is sent as written, never replaced by the engine's
+    /// env (the platform refresh token must stay out of reach of a graph).
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn env_placeholders_are_never_expanded() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"{"access_token":"tok-cx7-lit","expires_in":3600,"token_type":"Bearer"}"#,
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+        std::env::set_var("CX7_PLATFORM_RT", "tok-cx7-platform-secret");
+        let auth = GoogleWorkspaceAuth::from_node_config(&serde_json::json!({
+            "google_workspace_auth": {
+                "type": "oauth2_refresh_token",
+                "token_url": format!("{}/token", server.uri()),
+                "client_id": "cid",
+                "client_secret": "cs",
+                "refresh_token": "${CX7_PLATFORM_RT}",
+            }
+        }))
+        .unwrap()
+        .unwrap();
+        assert_eq!(auth.refresh_token, "${CX7_PLATFORM_RT}");
+        auth.provider().get_bearer_token().await.unwrap();
+        std::env::remove_var("CX7_PLATFORM_RT");
+        let body = String::from_utf8_lossy(&server.received_requests().await.unwrap()[0].body)
+            .into_owned();
+        assert!(!body.contains("tok-cx7-platform-secret"), "{body}");
+        assert!(body.contains("CX7_PLATFORM_RT"), "{body}");
+    }
 
     #[test]
     fn absent_block_is_none() {

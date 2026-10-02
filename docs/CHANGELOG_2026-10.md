@@ -172,3 +172,15 @@ respeta, plataforma sin carpeta → `NoParentFolder`, plataforma usa la suya; 40
 con `HostRefreshTokenProvider` (un pedido, sha correcto) y segundo 401 → `AuthFailed`. **Mutación.** Sin reintento,
 reintento sin `invalidate`, carpeta de plataforma con la cuenta conectada. **E2E.** No aplica hasta el cableado de
 `llm_call`. **ADP.** Ninguno. **Estado.** partial.
+
+## 11. Google OAuth: la caché de providers queda acotada y `google_workspace_auth` nunca expande `${VAR}`
+
+**Qué cambia.** De las revisiones del porte de `feat/google-workspace-auth`. `OAuthProviderCache` (la usan
+`http_request.auth` y `google_workspace_auth`) guarda hasta `MAX_CACHED_PROVIDERS` = 1024. Al llegar al tope, un
+alta descarta los providers que nadie más tiene; uno en uso nunca se descarta. Antes no desalojaba nunca.
+`GoogleWorkspaceAuth::provider()` documenta y prueba que usa los valores literales: un `${VAR}` no se reemplaza
+por la env del motor, así un grafo no puede actuar con la cuenta de plataforma.
+Guía: [47_google_oauth.md](developer_guide/47_google_oauth.md).
+**Tests.** Al tope se barren los que nadie tiene y se conserva el que está en uso; `${VAR}` llega literal al
+endpoint de token. **Mutación.** Sin barrido; barrer también los que están en uso. **E2E.** No aplica.
+**ADP.** Ninguno. **Estado.** done.
