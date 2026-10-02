@@ -304,7 +304,7 @@ plataforma, igual que hoy) y `Err` si es inválida (otro `type`, un campo faltan
 **nunca** cae a la cuenta de plataforma. Los errores nombran `google_workspace_auth`, nunca un valor.
 `provider()` da un `Arc<dyn AuthTokenProvider>` compartido por identidad (los cuatro campos) en un
 `OAuthProviderCache` propio del proceso. `Debug` redacta los secretos. Todavía ningún nodo lee el
-bloque: lo conectan las PRs siguientes del porte de `feat/google-workspace-auth`.
+bloque desde su config: lo conectan las PRs siguientes del porte de `feat/google-workspace-auth`.
 
 - **Sin expansión de `${VAR}`.** Los valores se usan tal cual llegan: ADP manda las credenciales ya
   resueltas de la conexión del usuario. Expandirlos dejaría que un grafo nombre una env var del motor
@@ -313,6 +313,12 @@ bloque: lo conectan las PRs siguientes del porte de `feat/google-workspace-auth`
   `MAX_CACHED_PROVIDERS` (1024). Al llegar al tope, un alta descarta los providers que nadie más tiene
   (solo queda el `Arc` de la caché). Descartar uno solo cuesta un mint al volver a usarlo, y deja de
   tener en memoria el refresh token de una identidad que ya no se usa. Uno en uso nunca se descarta.
+- **Solo del config del autor.** `DagToolExecutor::with_google_workspace_auth` recibe el bloque parseado
+  del `config` del nodo, nunca de los argumentos de una tool ni de los inputs.
+
+Las tools de gsheets (`gsheets_*`, `gsheets_run_python` y la fuente Sheets de `data_run_python`) ya
+arman su cliente por llamada con ese bloque (`build_client(auth)`). El `llm_call` todavía no se lo pasa
+al executor, así que siguen actuando como la cuenta de plataforma.
 
 ## Monitoring
 

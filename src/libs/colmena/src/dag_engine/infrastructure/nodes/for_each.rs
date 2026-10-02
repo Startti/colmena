@@ -131,7 +131,8 @@ async fn resolve_rows_async(config: &Value, inputs: &NodeInputs) -> Result<Vec<V
                 if let Some(r) = range {
                     args["range"] = json!(r);
                 }
-                let res = dispatch_gsheets_read(args).await;
+                // Platform account until for_each reads `google_workspace_auth`.
+                let res = dispatch_gsheets_read(args, None).await;
                 if res.get("ok").and_then(|v| v.as_bool()) != Some(true) {
                     return Err(format!("for_each items_from sheet failed: {res}"));
                 }
@@ -340,7 +341,7 @@ impl ExecutableNode for ForEachNode {
         let mut sink_ctx: Option<(String, String, String, Vec<String>)> = None;
         if let Some(sink) = &results_to {
             let create_res =
-                dispatch_gsheets_create_spreadsheet(json!({ "title": sink.title })).await;
+                dispatch_gsheets_create_spreadsheet(json!({ "title": sink.title }), None).await;
             if create_res.get("ok").and_then(|v| v.as_bool()) != Some(true) {
                 return Err(format!(
                     "for_each results_to: failed to create results spreadsheet: {create_res}"
@@ -367,12 +368,15 @@ impl ExecutableNode for ForEachNode {
                 .to_string();
 
             let (input_cols, header) = results_sheet_header(&rows);
-            let header_res = dispatch_gsheets_set_range(json!({
-                "spreadsheet_id": spreadsheet_id,
-                "sheet": sheet_name,
-                "start": "A1",
-                "values": [header],
-            }))
+            let header_res = dispatch_gsheets_set_range(
+                json!({
+                    "spreadsheet_id": spreadsheet_id,
+                    "sheet": sheet_name,
+                    "start": "A1",
+                    "values": [header],
+                }),
+                None,
+            )
             .await;
             if header_res.get("ok").and_then(|v| v.as_bool()) != Some(true) {
                 colmena_log!(
@@ -577,12 +581,15 @@ impl ExecutableNode for ForEachNode {
                         Err(e) => ("err", json!(e.clone())),
                     };
                     let row_values = results_sheet_row(index, &row, status, cell, input_cols);
-                    let write_res = dispatch_gsheets_set_range(json!({
-                        "spreadsheet_id": spreadsheet_id,
-                        "sheet": sheet_name,
-                        "start": format!("A{}", index + 2),
-                        "values": [row_values],
-                    }))
+                    let write_res = dispatch_gsheets_set_range(
+                        json!({
+                            "spreadsheet_id": spreadsheet_id,
+                            "sheet": sheet_name,
+                            "start": format!("A{}", index + 2),
+                            "values": [row_values],
+                        }),
+                        None,
+                    )
                     .await;
                     if write_res.get("ok").and_then(|v| v.as_bool()) != Some(true) {
                         colmena_log!(
@@ -669,12 +676,15 @@ impl ExecutableNode for ForEachNode {
                         results_sheet_row(r.index, &r.input, status, cell, input_cols)
                     })
                     .collect();
-                let write_res = dispatch_gsheets_set_range(json!({
-                    "spreadsheet_id": spreadsheet_id,
-                    "sheet": sheet_name,
-                    "start": "A2",
-                    "values": data_rows,
-                }))
+                let write_res = dispatch_gsheets_set_range(
+                    json!({
+                        "spreadsheet_id": spreadsheet_id,
+                        "sheet": sheet_name,
+                        "start": "A2",
+                        "values": data_rows,
+                    }),
+                    None,
+                )
                 .await;
                 if write_res.get("ok").and_then(|v| v.as_bool()) != Some(true) {
                     results_sheet_error = Some(format!("{write_res}"));
