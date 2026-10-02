@@ -4,7 +4,7 @@
 
 ## Symbols
 
-- `DEFAULT_TOKEN_ENDPOINT` (const, private) — Google OAuth 2.0 token endpoint URL; overridable in tests for wiremock
+- `DEFAULT_TOKEN_ENDPOINT` (const, pub, re-exported from `infrastructure`) — Google OAuth 2.0 token endpoint URL, also the default `token_url` of `google_workspace_auth`; overridable in tests for wiremock
 - `PRODUCTION_RETRY_DELAYS` (const, private) — Exponential backoff schedule: 1s then 2s delays before giving up
 - `RefreshResponse` (pub struct) — Successful token response with access_token, expires_in, and optional rotated_refresh_token
 - `RefreshClient` (pub struct) — Stateless HTTP client holding reqwest::Client, endpoint URL, and retry configuration
