@@ -127,3 +127,17 @@ sembrado y la sesión → 200), sin puerto, host que rechaza, vencimiento cercan
 reintento), `bearer_refresh` del modelo aceptado, sin sesión, handle vacío, multipart rechazado: cada una tumba un
 test. **E2E.** Solo el camino sin puerto (CLI); con puerto espera al worker de ADP. **ADP.** Emitir
 `bearer_refresh` solo con la compuerta abierta. **Estado.** partial.
+
+## 9. MCP: el cliente renueva un header bearer del host ante un 401 (parte 1 de `auth_refresh`)
+
+**Qué cambia.** `RmcpHttpClient::connect_refreshing` recibe un `HeaderRefresh` (`header`, `seed`, un
+`AuthTokenProvider`): conecta con `Bearer <token del proveedor>` (el sembrado si el host no da uno) y, ante un
+**401** de cualquier pedido (con o sin `WWW-Authenticate`), llama `invalidate()`, pide un token, reconecta y
+reintenta **una vez**. Un 401 se contesta antes de que el servidor corra la tool, por eso `tools/call` puede
+reintentarse solo en ese caso; un 500 sigue sin reintento. Llamadas concurrentes renuevan una sola vez. `Debug`
+y logs no muestran el token. Nadie lo llama todavía: la entrada `auth_refresh` y el cableado llegan en la parte 2.
+**Tests.** `rmcp_http_client` `auth_refresh` con un servidor MCP de prueba: 401 (las dos formas) → 1 pedido al
+puerto con el sha256 del sembrado, reconexión y 1 sola ejecución de la tool; 500 sin reintento ni pedido al
+puerto; sin renovación el 401 sube como hoy. **Mutación.** Sin cada forma de 401, sin `invalidate`, reintento
+ante cualquier error, sin reconexión: cada una tumba un test. **E2E.** No aplica hasta la parte 2. **ADP.**
+Ninguno. **Estado.** partial.
