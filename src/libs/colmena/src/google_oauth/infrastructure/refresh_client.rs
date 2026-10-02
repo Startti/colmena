@@ -11,9 +11,10 @@ use crate::google_oauth::infrastructure::config::OAuthCredentials;
 use serde::Deserialize;
 use std::time::Duration;
 
-/// The Google OAuth 2.0 token endpoint. Override in tests by passing
-/// `RefreshClient::with_endpoint(url)` so wiremock can intercept.
-const DEFAULT_TOKEN_ENDPOINT: &str = "https://oauth2.googleapis.com/token";
+/// The Google OAuth 2.0 token endpoint: the env provider's endpoint and the
+/// default `token_url` of a `google_workspace_auth` block. Override in tests by
+/// passing `RefreshClient::with_endpoint(url)` so wiremock can intercept.
+pub const DEFAULT_TOKEN_ENDPOINT: &str = "https://oauth2.googleapis.com/token";
 
 /// Backoff schedule (production). On the first transient failure we
 /// wait `delays[0]`; on the second we wait `delays[1]`; after that we

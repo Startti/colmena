@@ -88,7 +88,19 @@ Guía: [47_google_oauth.md](developer_guide/47_google_oauth.md#credenciales-por-
 **Commits portados.** `32a7d46c`, `438f0580`. **Tests.** `config`, `workspace_auth`, `http_oauth`.
 **Mutación.** Ver la PR. **E2E.** No aplica hasta que un nodo lo lea. **ADP.** Ninguno. **Estado.** partial.
 
-## 5. `http_request`: `bearer_refresh` pide al host un token nuevo ante un 401 o cerca del vencimiento
+## 5. gsheets: fuente de token de la cuenta conectada (porte de `feat/google-workspace-auth`, parte 2)
+
+**Qué cambia.** `TokenProvider` de gsheets guarda `Arc<dyn AuthTokenProvider>` (antes el concreto) y suma
+`from_shared_provider`; un 401 llama `invalidate()` del trait. Un `invalid_grant` de la cuenta conectada da
+`SheetsError::GoogleAccountReconnectRequired` → `google_account_reconnect_required`. La cuenta de plataforma no
+cambia y ningún cliente usa la fuente nueva todavía. De la revisión de #463: una sola constante del endpoint de token
+(`DEFAULT_TOKEN_ENDPOINT`, sale `GOOGLE_TOKEN_ENDPOINT`). Guía: [39_gsheets.md](developer_guide/39_gsheets.md).
+**Commits portados.** Parte de `32a7d46c` y de `58a69afe` (`gsheets/infrastructure/auth.rs`, `errors.rs`,
+`error_to_json`). **Tests.** `gsheets::infrastructure::auth`, `gsheets_tools` (payload) y un 401 con
+`HostRefreshTokenProvider` que pide un token al host una vez y reintenta. **Mutación.**
+`invalidate` sin efecto, sin el brazo de reconexión. **E2E.** No aplica. **ADP.** Ninguno. **Estado.** partial.
+
+## 6. `http_request`: `bearer_refresh` pide al host un token nuevo ante un 401 o cerca del vencimiento
 
 **Qué cambia.** Clave hermana de `bearer_token`: `bearer_refresh: {handle, expires_at}`, en config o como entrada
 `fixed` de `node_schema` (la que escribe el modelo se ignora). Con `EngineConfig.host_token_port`, el nodo arma por

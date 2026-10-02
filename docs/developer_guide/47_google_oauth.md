@@ -298,7 +298,7 @@ cachearlo entre sesiones solo por `handle_fingerprint()`. `Debug` redactado. Lo 
 ## Credenciales por nodo (`google_workspace_auth`)
 
 Bloque `{type: "oauth2_refresh_token", client_id, client_secret, refresh_token, token_url?}`, el de
-`auth` de `http_request` (mismo parser) con `token_url` opcional (`GOOGLE_TOKEN_ENDPOINT`).
+`auth` de `http_request` (mismo parser) con `token_url` opcional (`DEFAULT_TOKEN_ENDPOINT`).
 `GoogleWorkspaceAuth::from_node_config(config)` da `Ok(None)` si la clave falta (rige la cuenta de
 plataforma, igual que hoy) y `Err` si es inválida (otro `type`, un campo faltante o en blanco):
 **nunca** cae a la cuenta de plataforma. Los errores nombran `google_workspace_auth`, nunca un valor.

@@ -1,6 +1,11 @@
 //! Error type for the Google Sheets integration. Public so dispatchers
 //! can map to JSON tool results.
 
+/// User-facing text for [`SheetsError::GoogleAccountReconnectRequired`]
+/// (shared with the gdocs equivalent).
+pub const RECONNECT_GOOGLE_MESSAGE: &str = "The connected Google account's authorization expired \
+     or was revoked. Reconnect Google in ADP and run the agent again.";
+
 #[derive(Debug, thiserror::Error)]
 pub enum SheetsError {
     /// No credentials configured (no `GOOGLE_APPLICATION_CREDENTIALS`
@@ -32,6 +37,12 @@ pub enum SheetsError {
     /// <email>". Empty string if the SA email isn't available.
     #[error("permission_denied: {0}")]
     PermissionDenied(String),
+
+    /// The connected Google account's refresh was rejected (`invalid_grant`):
+    /// its authorization expired or was revoked. The user reconnects Google;
+    /// there is nothing for the operator to set up.
+    #[error("google_account_reconnect_required: {RECONNECT_GOOGLE_MESSAGE}")]
+    GoogleAccountReconnectRequired,
 
     /// 429 — rate limit hit. Retry after the given seconds.
     #[error("rate_limit: retry after {0}s")]

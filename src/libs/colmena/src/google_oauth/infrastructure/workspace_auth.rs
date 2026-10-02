@@ -10,13 +10,9 @@
 //! a provider.
 
 use super::config::parse_oauth_refresh_block_named;
-use super::OAuthProviderCache;
+use super::{OAuthProviderCache, DEFAULT_TOKEN_ENDPOINT};
 use crate::google_oauth::domain::AuthTokenProvider;
 use std::sync::{Arc, OnceLock};
-
-/// Google's OAuth 2.0 token endpoint — the default when the block omits
-/// `token_url`.
-pub const GOOGLE_TOKEN_ENDPOINT: &str = "https://oauth2.googleapis.com/token";
 
 /// Process-wide provider cache for Google Workspace identities.
 static PROVIDERS: OnceLock<OAuthProviderCache> = OnceLock::new();
@@ -45,7 +41,7 @@ impl GoogleWorkspaceAuth {
     /// Read `config.google_workspace_auth`.
     /// - `Ok(None)` when the key is absent (env credentials apply).
     /// - `Ok(Some(_))` when it is a valid `oauth2_refresh_token` block;
-    ///   `token_url` defaults to [`GOOGLE_TOKEN_ENDPOINT`].
+    ///   `token_url` defaults to [`DEFAULT_TOKEN_ENDPOINT`].
     /// - `Err(msg)` when present but invalid — never an env fallback.
     pub fn from_node_config(config: &serde_json::Value) -> Result<Option<Self>, String> {
         let Some(block) = config.get("google_workspace_auth") else {
@@ -56,7 +52,7 @@ impl GoogleWorkspaceAuth {
         Ok(Some(Self {
             token_url: b
                 .token_url
-                .unwrap_or_else(|| GOOGLE_TOKEN_ENDPOINT.to_string()),
+                .unwrap_or_else(|| DEFAULT_TOKEN_ENDPOINT.to_string()),
             client_id: b.client_id,
             client_secret: b.client_secret,
             refresh_token: b.refresh_token,
@@ -96,7 +92,7 @@ mod tests {
         let a = GoogleWorkspaceAuth::from_node_config(&cfg)
             .unwrap()
             .unwrap();
-        assert_eq!(a.token_url, GOOGLE_TOKEN_ENDPOINT);
+        assert_eq!(a.token_url, DEFAULT_TOKEN_ENDPOINT);
         let dbg = format!("{a:?}");
         assert!(
             !dbg.contains("CS-SECRET") && !dbg.contains("RT-SECRET"),
@@ -116,7 +112,7 @@ mod tests {
     #[test]
     fn same_identity_shares_one_provider_distinct_identities_do_not() {
         let base = GoogleWorkspaceAuth {
-            token_url: GOOGLE_TOKEN_ENDPOINT.into(),
+            token_url: DEFAULT_TOKEN_ENDPOINT.into(),
             client_id: "cid".into(),
             client_secret: "cs".into(),
             refresh_token: "rt-1".into(),

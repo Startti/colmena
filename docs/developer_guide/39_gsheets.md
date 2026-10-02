@@ -90,6 +90,17 @@ and the `colmena_oauth_setup` consent flow.
 Scopes: defaults to `spreadsheets` + `drive.file` (consented at setup time).
 Override via `COLMENA_GSHEETS_SCOPES=<comma-sep>` (short names or full URLs).
 
+### Connected-account token source (port of `google_workspace_auth`, in progress)
+
+`TokenProvider::from_shared_provider(Arc<dyn AuthTokenProvider>)` wraps the provider of
+`GoogleWorkspaceAuth::provider()` ([47_google_oauth.md](47_google_oauth.md#credenciales-por-nodo-google_workspace_auth))
+or any other `AuthTokenProvider`, e.g. #462's `HostRefreshTokenProvider`. A 401 calls the trait's
+`invalidate()`. When that account's refresh is revoked (`invalid_grant`) the error is
+`SheetsError::GoogleAccountReconnectRequired`, whose tool result is
+`google_account_reconnect_required` ("Reconnect Google in ADP"), not the operator's
+`colmena_oauth_setup` text. No client is built from it yet: the platform env account is still the only
+path.
+
 ## Formulas — Google evaluates them
 
 Unlike subsystem D (where colmena's `formula_engine` evaluates

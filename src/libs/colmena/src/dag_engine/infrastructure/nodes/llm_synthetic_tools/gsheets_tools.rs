@@ -165,6 +165,7 @@ pub struct FormatOp {
 pub(crate) fn error_to_json(e: SheetsError) -> serde_json::Value {
     match &e {
         SheetsError::PermissionDenied(share_email) => permission_denied_payload(share_email),
+        SheetsError::GoogleAccountReconnectRequired => reconnect_google_payload(),
         _ => {
             let (kind, message) = match &e {
                 SheetsError::NotConfigured(m) => ("gsheets_not_configured", m.clone()),
@@ -172,7 +173,9 @@ pub(crate) fn error_to_json(e: SheetsError) -> serde_json::Value {
                 SheetsError::SpreadsheetNotFound(s) => ("spreadsheet_not_found", s.clone()),
                 SheetsError::SheetNotFound(s) => ("sheet_not_found", s.clone()),
                 SheetsError::InvalidRange(m) => ("invalid_range", m.clone()),
-                SheetsError::PermissionDenied(_) => unreachable!("handled above"),
+                SheetsError::PermissionDenied(_) | SheetsError::GoogleAccountReconnectRequired => {
+                    unreachable!("handled above")
+                }
                 SheetsError::RateLimit(s) => ("rate_limit", format!("retry after {s}s")),
                 SheetsError::Http(m) => ("http_error", m.clone()),
                 SheetsError::Internal(m) => ("internal", m.clone()),
@@ -212,6 +215,15 @@ fn permission_denied_payload(share_email: &str) -> serde_json::Value {
              correo aparece listado con permiso de Editor.",
             share_email = share_email
         )
+    })
+}
+
+/// Tool result when the connected Google account's refresh was rejected
+/// (expired or revoked authorization). gdocs will share it.
+pub(crate) fn reconnect_google_payload() -> serde_json::Value {
+    serde_json::json!({
+        "error": "google_account_reconnect_required",
+        "message": crate::gsheets::domain::errors::RECONNECT_GOOGLE_MESSAGE,
     })
 }
 
@@ -1245,6 +1257,23 @@ mod tests {
             hint.contains("operador"),
             "degraded hint must point to the operator: {hint}"
         );
+    }
+
+    /// A revoked or expired refresh of the connected Google account tells the
+    /// user to reconnect Google, never to run the operator's setup.
+    #[test]
+    fn reconnect_required_payload_asks_to_reconnect_google() {
+        let v = error_to_json(SheetsError::GoogleAccountReconnectRequired);
+        assert_eq!(v["error"], "google_account_reconnect_required");
+        assert_eq!(
+            v["message"],
+            "The connected Google account's authorization expired or was revoked. \
+             Reconnect Google in ADP and run the agent again."
+        );
+        let text = v.to_string();
+        for banned in ["colmena_oauth_setup", "Secret Manager", "COLMENA_"] {
+            assert!(!text.contains(banned), "mentions `{banned}`: {text}");
+        }
     }
 
     /// A minimal `SheetsClient` that returns a fixed `values` JSON array from
