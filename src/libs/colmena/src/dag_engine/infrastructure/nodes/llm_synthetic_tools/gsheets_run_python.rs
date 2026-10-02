@@ -12,8 +12,7 @@
 //! See E-T14 in the implementation plan.
 
 use crate::gsheets::domain::{ReadOptions, ReadResponse, SheetsClient, SpreadsheetId};
-use crate::gsheets::infrastructure::config::GSheetsConfig;
-use crate::gsheets::infrastructure::http_client::{rectangle_to_records, GoogleSheetsHttpClient};
+use crate::gsheets::infrastructure::http_client::rectangle_to_records;
 use crate::llm::domain::tools::ToolDefinition;
 use crate::text;
 use futures::future::join_all;
@@ -198,13 +197,17 @@ pub fn tool_gsheets_run_python() -> ToolDefinition {
 
 // ── Dispatchers ──────────────────────────────────────────────────────
 
-/// Build a client from process env (`GOOGLE_APPLICATION_CREDENTIALS` /
-/// ADC) and dispatch. This is the production entry point used by the
-/// router in `dag_tool_executor`.
-pub async fn dispatch_gsheets_run_python(args: serde_json::Value) -> serde_json::Value {
-    let client = match GoogleSheetsHttpClient::from_config(&GSheetsConfig::from_env()) {
+/// Build a client — from the `llm_call`'s `google_workspace_auth` when
+/// present, else from the platform env credentials — and dispatch. This is
+/// the production entry point used by the router in `dag_tool_executor`.
+pub async fn dispatch_gsheets_run_python(
+    args: serde_json::Value,
+    auth: Option<&crate::google_oauth::infrastructure::GoogleWorkspaceAuth>,
+) -> serde_json::Value {
+    // Same builder as the other gsheets dispatchers.
+    let client = match super::gsheets_tools::build_client(auth) {
         Ok(c) => c,
-        Err(e) => return error_to_json(e),
+        Err(e) => return e,
     };
     dispatch_gsheets_run_python_with_client(Arc::new(client), args).await
 }
@@ -590,6 +593,7 @@ fn truncate_json(v: &serde_json::Value, cap: usize) -> (serde_json::Value, bool)
 mod tests {
     use super::super::sheet_writer::a1_addr;
     use super::*;
+    use crate::gsheets::infrastructure::http_client::GoogleSheetsHttpClient;
     use wiremock::matchers::{method, path_regex, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
