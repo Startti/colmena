@@ -21,6 +21,7 @@ use crate::gdocs::domain::{
 };
 use crate::gdocs::infrastructure::auth::TokenCache;
 use crate::gdocs::infrastructure::config::GDocsConfig;
+use crate::google_oauth::infrastructure::GoogleWorkspaceAuth;
 use async_trait::async_trait;
 use reqwest::{Client, Method, Response, StatusCode};
 use std::sync::Arc;
@@ -38,35 +39,111 @@ pub struct GoogleDocsHttpClient {
     cfg: GDocsConfig,
     http: Client,
     pub(crate) tokens: Arc<TokenCache>,
+    /// True when built from per-node `google_workspace_auth` (the user's
+    /// connected Google account): a 403 surfaces as
+    /// `DocsError::ConnectedAccountPermissionDenied`.
+    connected_account: bool,
     base_docs: String,
     base_drive: String,
     base_drive_upld: String,
 }
 
 impl GoogleDocsHttpClient {
-    /// Build a production client from operator config (env-derived).
-    ///
-    /// Reads OAuth credentials from env via
-    /// `OAuthCredentials::from_env`. Any missing variable surfaces as
-    /// `DocsError::NotConfigured` carrying the full list of missing
-    /// vars — so deploys see one clear error per boot rather than
-    /// playing whack-a-mole through them.
+    /// Build a production client from operator config (env-derived)
+    /// with the platform credentials from env. Equivalent to
+    /// [`Self::from_config_with_auth`] with `auth = None`.
     pub fn from_config(cfg: &GDocsConfig) -> Result<Self, DocsError> {
+        Self::from_config_with_auth(cfg, None)
+    }
+
+    /// Build a production client with optional per-node credentials.
+    ///
+    /// - `auth = None` → today's env path: OAuth credentials come from
+    ///   `OAuthCredentials::from_env`. Any missing variable surfaces as
+    ///   `DocsError::NotConfigured` carrying the full list of missing
+    ///   vars — so deploys see one clear error per boot rather than
+    ///   playing whack-a-mole through them.
+    /// - `auth = Some(_)` → config credentials (the connected Google
+    ///   account) through the provider shared by identity; env is not
+    ///   read. `share_email` becomes empty: there is no platform
+    ///   address to share files with. `default_parent_folder` becomes
+    ///   empty too: the platform folder belongs to the platform account,
+    ///   so `create*` without an explicit folder never writes there (for
+    ///   now it is `NoParentFolder`).
+    pub fn from_config_with_auth(
+        cfg: &GDocsConfig,
+        auth: Option<&GoogleWorkspaceAuth>,
+    ) -> Result<Self, DocsError> {
+        Self::build(
+            cfg,
+            auth,
+            PROD_BASE_DOCS.to_string(),
+            PROD_BASE_DRIVE.to_string(),
+            PROD_BASE_DRIVE_UPLD.to_string(),
+        )
+    }
+
+    /// Credential selection shared by production and the wiremock tests.
+    fn build(
+        cfg: &GDocsConfig,
+        auth: Option<&GoogleWorkspaceAuth>,
+        base_docs: String,
+        base_drive: String,
+        base_drive_upld: String,
+    ) -> Result<Self, DocsError> {
         let http = crate::shared::http_client::builder()
             .timeout(cfg.request_timeout)
             .build()
             .map_err(|e| DocsError::Http(e.to_string()))?;
-        let creds = crate::google_oauth::infrastructure::OAuthCredentials::from_env()
-            .map_err(|e| DocsError::NotConfigured(format!("{e}")))?;
-        let tokens = Arc::new(TokenCache::from_oauth_credentials(creds));
+        let (tokens, cfg) = match auth {
+            Some(auth) => (
+                TokenCache::from_shared_provider(auth.provider()),
+                GDocsConfig {
+                    share_email: String::new(),
+                    default_parent_folder: None,
+                    ..cfg.clone()
+                },
+            ),
+            None => {
+                let creds = crate::google_oauth::infrastructure::OAuthCredentials::from_env()
+                    .map_err(|e| DocsError::NotConfigured(format!("{e}")))?;
+                (TokenCache::from_oauth_credentials(creds), cfg.clone())
+            }
+        };
         Ok(Self {
-            cfg: cfg.clone(),
+            cfg,
             http,
-            tokens,
-            base_docs: PROD_BASE_DOCS.to_string(),
-            base_drive: PROD_BASE_DRIVE.to_string(),
-            base_drive_upld: PROD_BASE_DRIVE_UPLD.to_string(),
+            tokens: Arc::new(tokens),
+            connected_account: auth.is_some(),
+            base_docs,
+            base_drive,
+            base_drive_upld,
         })
+    }
+
+    /// Test-only: [`Self::from_config_with_auth`] with the Google API bases
+    /// pointing at wiremock.
+    #[cfg(test)]
+    pub(crate) fn with_base_urls_and_auth(
+        cfg: &GDocsConfig,
+        auth: Option<&GoogleWorkspaceAuth>,
+        base_docs: impl Into<String>,
+        base_drive: impl Into<String>,
+        base_drive_upld: impl Into<String>,
+    ) -> Result<Self, DocsError> {
+        Self::build(
+            cfg,
+            auth,
+            base_docs.into(),
+            base_drive.into(),
+            base_drive_upld.into(),
+        )
+    }
+
+    /// Test-only accessor for the configured share address.
+    #[cfg(test)]
+    pub(crate) fn share_email_for_tests(&self) -> &str {
+        &self.cfg.share_email
     }
 
     /// Construct a client whose endpoints point at user-supplied base
@@ -89,6 +166,7 @@ impl GoogleDocsHttpClient {
             cfg: cfg.clone(),
             http,
             tokens,
+            connected_account: false,
             base_docs: base_docs.into(),
             base_drive: base_drive.into(),
             base_drive_upld: base_drive_upld.into(),
@@ -135,6 +213,9 @@ impl GoogleDocsHttpClient {
         let body = r.text().await.unwrap_or_default();
         Err(match s {
             StatusCode::UNAUTHORIZED => DocsError::AuthFailed(format!("{ctx}: 401 {body}")),
+            StatusCode::FORBIDDEN if self.connected_account => {
+                DocsError::ConnectedAccountPermissionDenied(format!("{ctx}: {body}"))
+            }
             StatusCode::FORBIDDEN => DocsError::PermissionDenied(format!("{ctx}: {body}")),
             StatusCode::NOT_FOUND => DocsError::DocumentNotFound(ctx.into()),
             StatusCode::TOO_MANY_REQUESTS => DocsError::RateLimit(60),
@@ -1665,6 +1746,179 @@ mod tests {
             revision_cache_ttl: Duration::from_secs(5),
             share_email: String::new(),
         }
+    }
+
+    const OAUTH_ENV: [&str; 3] = [
+        "COLMENA_GOOGLE_OAUTH_CLIENT_ID",
+        "COLMENA_GOOGLE_OAUTH_CLIENT_SECRET",
+        "COLMENA_GOOGLE_OAUTH_REFRESH_TOKEN",
+    ];
+
+    /// Same env-isolation pattern as `google_oauth::infrastructure::config`
+    /// tests: `#[serial]` + clearing the platform credentials.
+    fn clear_oauth_env() {
+        for name in OAUTH_ENV {
+            std::env::remove_var(name);
+        }
+    }
+
+    /// Config with a non-empty share email, so asserting it is cleared
+    /// can't pass vacuously.
+    fn cfg_with_share_email() -> GDocsConfig {
+        GDocsConfig {
+            share_email: "agents@example.com".into(),
+            ..test_cfg()
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn from_config_with_auth_uses_config_credentials_without_env() {
+        use crate::google_oauth::infrastructure::{GoogleWorkspaceAuth, DEFAULT_TOKEN_ENDPOINT};
+        clear_oauth_env();
+        let auth = GoogleWorkspaceAuth {
+            token_url: DEFAULT_TOKEN_ENDPOINT.into(),
+            client_id: "cid".into(),
+            client_secret: "cs".into(),
+            refresh_token: "rt".into(),
+        };
+        let client =
+            GoogleDocsHttpClient::from_config_with_auth(&cfg_with_share_email(), Some(&auth))
+                .expect("builds from config credentials");
+        assert_eq!(client.share_email_for_tests(), "");
+        // The client must reuse the process-wide provider for this identity.
+        assert!(client.tokens.shares_provider_for_tests(&auth.provider()));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn from_config_with_auth_none_keeps_env_path() {
+        clear_oauth_env();
+        match GoogleDocsHttpClient::from_config_with_auth(&cfg_with_share_email(), None) {
+            Err(DocsError::NotConfigured(msg)) => {
+                assert!(msg.contains("COLMENA_GOOGLE_OAUTH_REFRESH_TOKEN"), "{msg}")
+            }
+            Err(other) => panic!("expected NotConfigured, got {other:?}"),
+            Ok(_) => panic!("without auth and without env the client must not build"),
+        }
+    }
+
+    const TOKEN_JSON: &str =
+        r#"{"access_token":"ya29.connected-account","expires_in":3600,"token_type":"Bearer"}"#;
+
+    async fn mount_token_endpoint(server: &MockServer, refresh_token: &str) {
+        use wiremock::matchers::body_string_contains;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .and(body_string_contains(format!(
+                "refresh_token={refresh_token}"
+            )))
+            .respond_with(ResponseTemplate::new(200).set_body_string(TOKEN_JSON))
+            .mount(server)
+            .await;
+    }
+
+    /// Client built through the production credential selection with config
+    /// credentials whose token endpoint is `token_server`, and Google API
+    /// bases pointing at `server`. The config carries a platform default
+    /// folder to prove it is not used for the connected account.
+    async fn connected_client(
+        server: &MockServer,
+        token_server: &MockServer,
+        refresh_token: &str,
+    ) -> GoogleDocsHttpClient {
+        use crate::google_oauth::infrastructure::GoogleWorkspaceAuth;
+        mount_token_endpoint(token_server, refresh_token).await;
+        let auth = GoogleWorkspaceAuth {
+            token_url: format!("{}/token", token_server.uri()),
+            client_id: "cid-connected".into(),
+            client_secret: "cs-connected".into(),
+            refresh_token: refresh_token.into(),
+        };
+        let cfg = GDocsConfig {
+            default_parent_folder: Some("platform-folder".into()),
+            ..cfg_with_share_email()
+        };
+        let base = server.uri();
+        GoogleDocsHttpClient::with_base_urls_and_auth(
+            &cfg,
+            Some(&auth),
+            format!("{}/docs", base),
+            format!("{}/drive", base),
+            format!("{}/upload", base),
+        )
+        .expect("builds from config credentials")
+    }
+
+    fn empty_doc_json(title: &str) -> serde_json::Value {
+        json!({ "title": title, "revisionId": "r1", "body": {"content": []}, "tabs": [] })
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn connected_account_sends_bearer_minted_from_config_credentials() {
+        use wiremock::matchers::header;
+        for name in OAUTH_ENV {
+            std::env::set_var(name, "ENV-DECOY");
+        }
+        let server = MockServer::start().await;
+        let token_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/docs/documents/d1"))
+            .and(header("authorization", "Bearer ya29.connected-account"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(empty_doc_json("T")))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = connected_client(&server, &token_server, "rt-docs-bearer").await;
+        let result = client.get(&DocumentId("d1".into())).await;
+        clear_oauth_env();
+
+        assert_eq!(result.expect("get with the connected account").title, "T");
+        let token_requests = token_server.received_requests().await.unwrap_or_default();
+        assert_eq!(token_requests.len(), 1);
+        for req in token_requests {
+            let body = String::from_utf8_lossy(&req.body);
+            assert!(
+                !body.contains("ENV-DECOY"),
+                "env credentials leaked: {body}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn connected_account_403_reports_the_connected_account() {
+        let server = MockServer::start().await;
+        let token_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/docs/documents/d1"))
+            .respond_with(ResponseTemplate::new(403).set_body_string("forbidden"))
+            .mount(&server)
+            .await;
+        let client = connected_client(&server, &token_server, "rt-docs-403").await;
+        let err = client.get(&DocumentId("d1".into())).await.unwrap_err();
+        assert!(
+            matches!(err, DocsError::ConnectedAccountPermissionDenied(_)),
+            "{err:?}"
+        );
+    }
+
+    /// The platform default folder is never used for the connected account.
+    #[tokio::test]
+    async fn connected_account_create_ignores_the_platform_folder() {
+        let server = MockServer::start().await;
+        let token_server = MockServer::start().await;
+        let client = connected_client(&server, &token_server, "rt-docs-no-folder").await;
+        let err = client
+            .create_from_markdown("Hello", "# Hello", None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, DocsError::NoParentFolder), "{err:?}");
+        assert!(server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .is_empty());
     }
 
     fn client_for(server: &MockServer) -> GoogleDocsHttpClient {
