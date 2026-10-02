@@ -179,3 +179,11 @@ con la cuenta de plataforma. Guía: [47_google_oauth.md](developer_guide/47_goog
 `data_run_python.rs`, el campo del executor). **Tests.** El dispatcher actúa con el bloque (señuelos en env)
 y sin él toma el camino env; el builder del executor. **Mutación.** `build_client` ignorando `auth`.
 **E2E.** No aplica hasta el cableado de `llm_call`. **ADP.** Ninguno. **Estado.** partial.
+
+## 13. gsheets: tests de cableado de `google_workspace_auth` en el executor (porte de `feat/google-workspace-auth`, parte 8)
+
+**Qué cambia.** Solo tests (de `db76489c` y `9051dbf7`, parte gsheets): con el bloque en el executor, **cada** tool
+`gsheets_*` (la lista sale del catálogo, así una tool nueva sin cablear rompe el test), `gsheets_run_python` tras
+una vista previa exitosa y la fuente Sheets de `data_run_python` actúan con esas credenciales; sin él, toman el
+camino env. **Mutación.** Una tool que pasa `None`; la corrida tras la vista previa sin `auth`; `data_run_python`
+sin `auth`. **E2E.** No aplica. **ADP.** Ninguno. **Estado.** partial.
