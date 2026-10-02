@@ -650,6 +650,28 @@ Si la API responde **401**, el nodo invalida el cache del token y **reintenta un
 vez** con un token fresco. **403 y 429 NO disparan retry** (no son problemas de
 token: scope, permiso o cuota) → se devuelven al LLM tal cual.
 
+### Token refrescado por el host (`bearer_refresh`)
+
+Clave hermana de `bearer_token` para un token que el embebedor sabe renovar (CX7). En config o como
+entrada `fixed` de `node_schema`; la que escribe el modelo se ignora:
+
+```json
+{ "bearer_token": "<access token>",
+  "bearer_refresh": { "handle": "cth1.…", "expires_at": 1790000000 } }
+```
+
+- Con `HostTokenPort` en el `EngineConfig`, el nodo arma por ejecución un `HostRefreshTokenProvider`
+  ([47_google_oauth.md](47_google_oauth.md#token-refrescado-por-el-host-hosttokenport)) con el
+  `agent_session_id` de la corrida. A menos de 60 s del vencimiento pide uno nuevo antes de mandar; ante
+  un **401** invalida, pide uno y **reintenta una vez**, como `auth`.
+- Si el host no da token, sigue como sin `bearer_refresh`: sale el token sembrado y el 401 vuelve como
+  respuesta. Sin puerto, `bearer_refresh` se ignora. Con multipart, el `bearer_token` va estático.
+- Exige un `bearer_token` del autor (string); con `auth` es error. El token sembrado es siempre el del
+  autor: un `bearer_token` en `inputs` que no puso el autor no lo reemplaza. Los errores no repiten el
+  handle ni el token, y el handle solo viaja al puerto, nunca en un header.
+- Un `Authorization` en `headers` junto con el bearer sale como **dos** headers `Authorization`, igual que
+  hoy en el camino estático: no los combines.
+
 ### Caché compartido por fingerprint (un token para N endpoints)
 
 El proveedor de tokens se cachea en el service container por

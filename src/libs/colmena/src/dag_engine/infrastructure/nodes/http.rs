@@ -48,6 +48,7 @@ use crate::dag_engine::infrastructure::env_provenance::{
 use crate::dag_engine::infrastructure::nodes::util::attachment_id::build_document_id;
 use crate::dag_engine::infrastructure::nodes::util::response_file;
 use crate::dag_engine::infrastructure::nodes::util::session_attachment::read_session_attachment;
+use crate::google_oauth::{domain::AuthTokenProvider, infrastructure::HostRefreshTokenProvider};
 use crate::llm::domain::attachments::{origin, AttachmentSource, UpsertAttachmentInput};
 use crate::llm::domain::ProviderKind;
 use crate::llm::domain::{BoxedByteStream, LlmError};
@@ -61,6 +62,9 @@ use serde_json::{json, Value};
 use std::error::Error as StdError;
 use std::str::FromStr;
 use std::sync::Arc;
+
+/// A request's token provider, plus the static token to send when it has none.
+type TokenSource = (Arc<dyn AuthTokenProvider>, Option<String>);
 
 /// Executes HTTP requests. Implements [`ExecutableNode`]. Stateless — all configuration
 /// comes from `inputs` (highest priority) and `config`.
@@ -267,7 +271,7 @@ fn filename_from_url_path(url: &Url) -> String {
 
 impl HttpNode {
     /// Keys this node consumes itself; they must never travel as query params.
-    const RESERVED_KEYS: [&'static str; 12] = [
+    const RESERVED_KEYS: [&'static str; 13] = [
         "base_url",
         "endpoint",
         "method",
@@ -276,6 +280,7 @@ impl HttpNode {
         "query_params",     // correct key used throughout the codebase
         "query_parameters", // kept for backward compat
         "bearer_token",
+        "bearer_refresh",
         "authorization",
         "secure", // internal Colmena flag — NEVER send to external APIs
         // The run's id: global state hands it to every node. An API that needs a
@@ -391,25 +396,39 @@ impl HttpNode {
         self
     }
 
-    /// Resolve the OAuth provider for this request, if an `auth` block is
-    /// configured. Returns Ok(None) when there is no `auth` block.
+    /// The token provider for this request: the `auth` block's, or a
+    /// `HostRefreshTokenProvider` for a `bearer_token` with `bearer_refresh`
+    /// when the embedder set a `HostTokenPort` (with the seed as fallback).
+    /// Built per execution: it carries the run's `agent_session_id`.
+    /// `Ok(None)` for neither; then `bearer_refresh` is ignored.
+    /// Error for a `bearer_refresh` whose author `bearer_token` is not a string.
+    const SEED_ERR: &str = "http_request: `bearer_refresh` needs a string author `bearer_token`";
+
     fn resolve_oauth_provider(
         &self,
         config: &Value,
         inputs: &NodeInputs,
-    ) -> Result<
-        Option<Arc<crate::google_oauth::infrastructure::OAuthRefreshTokenProvider>>,
-        Box<dyn StdError + Send + Sync>,
-    > {
-        let spec = match crate::dag_engine::infrastructure::nodes::http_oauth::parse_oauth_auth(
-            config, inputs,
-        )
-        .map_err(|e| {
-            Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
-                as Box<dyn StdError + Send + Sync>
-        })? {
+    ) -> Result<Option<TokenSource>, Box<dyn StdError + Send + Sync>> {
+        use crate::dag_engine::infrastructure::nodes::http_oauth as oauth;
+        let refresh = oauth::parse_bearer_refresh(config, inputs).map_err(Self::io_err)?;
+        let spec = match oauth::parse_oauth_auth(config, inputs).map_err(Self::io_err)? {
             Some(s) => s,
-            None => return Ok(None),
+            None => {
+                let (Some((handle, expires_at)), Some(port)) = (refresh, self.host_token_port())
+                else {
+                    return Ok(None);
+                };
+                // The seed is the author's token only: a `bearer_token` in
+                // non-author inputs must never reach the host as the stale one.
+                let seed = Self::author_value(inputs, config, "bearer_token")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| Self::io_err(Self::SEED_ERR.into()))?;
+                let seed = Self::resolve_env_vars(seed).map_err(Self::io_err)?;
+                let sid = Self::input_str(inputs, "__colmena_agent_session_id");
+                let provider =
+                    HostRefreshTokenProvider::new(port, handle, seed.clone(), expires_at, sid);
+                return Ok(Some((Arc::new(provider), Some(seed))));
+            }
         };
         let cache = self.oauth_cache.as_ref().ok_or_else(|| {
             Box::new(std::io::Error::other(
@@ -426,12 +445,8 @@ impl HttpNode {
         let client_id = resolve(&spec.client_id)?;
         let client_secret = resolve(&spec.client_secret)?;
         let refresh_token = resolve(&spec.refresh_token)?;
-        Ok(Some(cache.get_or_create(
-            &token_url,
-            &client_id,
-            &client_secret,
-            &refresh_token,
-        )))
+        let provider = cache.get_or_create(&token_url, &client_id, &client_secret, &refresh_token);
+        Ok(Some((provider, None)))
     }
 
     /// Recursively walks a JSON value, replacing every string of the form
@@ -1847,7 +1862,8 @@ impl ExecutableNode for HttpNode {
             // v1: native OAuth is wired only into the main send path below.
             // `execute_multipart` has its own send, so refuse rather than
             // silently dropping the `auth` block.
-            if oauth_provider.is_some() {
+            // A `bearer_refresh` here keeps its static `bearer_token`.
+            if config.get("auth").is_some() {
                 return Err(Box::new(std::io::Error::other(
                     "http_request: native OAuth (`auth`) is not supported with multipart bodies in v1",
                 )) as Box<dyn StdError + Send + Sync>);
@@ -1927,10 +1943,11 @@ impl ExecutableNode for HttpNode {
         // An issued attachment URL never leaves the node, in an error's text
         // either (a redirect hop's URL, say).
         let forms = Self::scrub_forms(&issued);
-        let response = if let Some(provider) = oauth_provider {
+        let response = if let Some((provider, fallback)) = oauth_provider {
             crate::dag_engine::infrastructure::nodes::http_oauth::send_with_oauth_retry(
                 request_builder,
-                provider,
+                provider.as_ref(),
+                fallback.as_deref(),
             )
             .await
         } else {
@@ -2030,6 +2047,7 @@ impl ExecutableNode for HttpNode {
                 .with_field("bearer_token", FieldSpec::of_type("string"))
                 .with_field("authorization", FieldSpec::of_type("string"))
                 .with_field("auth", FieldSpec::of_type("object"))
+                .with_field("bearer_refresh", FieldSpec::of_type("object"))
                 .with_field("secure", FieldSpec::of_type("boolean"))
                 .with_field("max_file_size_bytes", FieldSpec::of_type("integer"))
                 .with_field("max_parts", FieldSpec::of_type("integer"))
@@ -3712,6 +3730,223 @@ mod multipart_execute_tests {
             .await
             .expect("ok");
         assert_eq!(out["status"], 200);
+    }
+}
+
+/// CX7 `bearer_refresh`: on a 401 the node asks the host for a fresh token
+/// through `HostTokenPort` and retries once; without a port, today's 401.
+#[cfg(test)]
+mod bearer_refresh_tests {
+    use super::*;
+    use crate::dag_engine::application::ports as p;
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    use wiremock::{matchers::header, Mock, MockServer, ResponseTemplate};
+
+    /// Returns `tok-cx7-new`, or refuses; records every request.
+    struct FakePort(Mutex<Vec<p::HostTokenRequest>>, bool);
+    #[async_trait::async_trait]
+    impl HostTokenPort for FakePort {
+        async fn fresh_token(
+            &self,
+            req: p::HostTokenRequest,
+        ) -> Result<p::HostToken, p::HostTokenError> {
+            self.0.lock().unwrap().push(req);
+            let (access_token, expires_at) = ("tok-cx7-new".into(), later());
+            let t = self.1.then_some(p::HostToken {
+                access_token,
+                expires_at,
+            });
+            t.ok_or(p::HostTokenError::Unauthorized("refused".into()))
+        }
+    }
+
+    struct Reg(Arc<HttpNode>);
+    impl p::NodeRegistryPort for Reg {
+        fn get_node(&self, t: &str) -> Option<Arc<dyn ExecutableNode>> {
+            (t == "http_request").then(|| self.0.clone() as _)
+        }
+        fn get_all_nodes(&self) -> HashMap<String, Arc<dyn ExecutableNode>> {
+            HashMap::new()
+        }
+    }
+
+    /// 401 to the seed token, 200 to the host's fresh one.
+    async fn api() -> MockServer {
+        let s = MockServer::start().await;
+        for (tok, code) in [("tok-cx7-seed", 401), ("tok-cx7-new", 200)] {
+            Mock::given(header("Authorization", format!("Bearer {tok}").as_str()))
+                .respond_with(ResponseTemplate::new(code).set_body_json(json!({"code": code})))
+                .mount(&s)
+                .await;
+        }
+        s
+    }
+
+    fn node(ok: bool) -> (Arc<HttpNode>, Arc<FakePort>) {
+        let (node, port) = (HttpNode::new(), Arc::new(FakePort(Mutex::default(), ok)));
+        let _ = node.host_token_port.set(port.clone());
+        (Arc::new(node), port)
+    }
+
+    fn config(s: &MockServer, expires_at: i64) -> Value {
+        json!({ "base_url": s.uri(), "endpoint": "/x", "method": "GET",
+            "bearer_token": "tok-cx7-seed",
+            "bearer_refresh": { "handle": "cth1-cx7-h", "expires_at": expires_at } })
+    }
+
+    fn later() -> i64 {
+        chrono::Utc::now().timestamp() + 3600
+    }
+
+    async fn auths(s: &MockServer) -> Vec<String> {
+        let reqs = s.received_requests().await.unwrap();
+        let auth = |r: &wiremock::Request| r.headers["authorization"].to_str().unwrap().into();
+        reqs.iter().map(auth).collect()
+    }
+
+    async fn run(node: &HttpNode, config: &Value, inputs: &NodeInputs) -> Value {
+        let out = node.execute(inputs, config, &mut Value::Null, None).await;
+        out.expect("ok")
+    }
+
+    /// A graph run: 401, one call to the host with the rejected token's
+    /// sha256 and the run's session, then 200.
+    #[tokio::test]
+    async fn a_401_asks_the_host_once_and_retries_with_the_fresh_token() {
+        use crate::dag_engine::application::run_use_case::DagRunUseCase;
+        use futures::StreamExt;
+        use sha2::Digest;
+        let (s, (node, port)) = (api().await, node(true));
+        let get = json!({ "type": "http_request", "config": config(&s, later()) });
+        let graph = json!({ "nodes": { "get": get }, "edges": [] });
+        let uc = DagRunUseCase::new(Arc::new(Reg(node)), None);
+        let graph = serde_json::from_value(graph).unwrap();
+        let stream = uc.execute_stream(graph, None, None, false, None, Some("s1".into()), None);
+        tokio::pin!(stream);
+        let mut text = String::new();
+        while let Some(event) = stream.next().await {
+            text.push_str(&format!("{:?}", event.expect("no run error")));
+        }
+        assert_eq!(
+            auths(&s).await,
+            ["Bearer tok-cx7-seed", "Bearer tok-cx7-new"]
+        );
+        // The output (not the NodeStart echo of the config) carries no handle.
+        let output = text.split("NodeFinish").nth(1).expect("finished");
+        assert!(
+            output.contains("Number(200)") && !output.contains("cth1-cx7-"),
+            "{text}"
+        );
+        let calls = port.0.lock().unwrap();
+        let sha = format!("{:x}", sha2::Sha256::digest(b"tok-cx7-seed"));
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].stale_token_sha256, Some(sha));
+        assert_eq!(calls[0].handle, "cth1-cx7-h");
+        assert_eq!(calls[0].agent_session_id.as_deref(), Some("s1"));
+    }
+
+    /// Without a port `bearer_refresh` is ignored: the 401 comes back as today.
+    #[tokio::test]
+    async fn without_a_port_the_401_comes_back_as_today() {
+        let s = api().await;
+        let out = run(&HttpNode::new(), &config(&s, later()), &HashMap::new()).await;
+        assert_eq!(out["status"], 401);
+        assert_eq!(auths(&s).await, ["Bearer tok-cx7-seed"]);
+    }
+
+    /// A host that refuses leaves the request as it would be without one.
+    #[tokio::test]
+    async fn a_refusing_host_leaves_the_401_and_a_near_expiry_seed_goes_out() {
+        let (node, port) = node(false);
+        let out = run(&node, &config(&api().await, later()), &HashMap::new()).await;
+        assert_eq!(
+            (out["status"].as_u64(), port.0.lock().unwrap().len()),
+            (Some(401), 1)
+        );
+        // Near expiry: the host is asked first; refused, the seed still goes out.
+        let s = api().await;
+        let out = run(&node, &config(&s, 0), &HashMap::new()).await;
+        assert_eq!(
+            (out["status"].as_u64(), port.0.lock().unwrap().len()),
+            (Some(401), 2)
+        );
+        assert_eq!(auths(&s).await, ["Bearer tok-cx7-seed"]);
+    }
+
+    /// Near expiry with a working host: the first request already carries the
+    /// fresh token, and the host was told no token was rejected.
+    #[tokio::test]
+    async fn a_near_expiry_seed_is_replaced_before_the_first_request() {
+        let (s, (node, port)) = (api().await, node(true));
+        assert_eq!(
+            run(&node, &config(&s, 0), &HashMap::new()).await["status"],
+            200
+        );
+        assert_eq!(auths(&s).await, ["Bearer tok-cx7-new"]);
+        assert_eq!(port.0.lock().unwrap()[0].stale_token_sha256, None);
+    }
+
+    /// A `bearer_token` in non-author inputs is not the seed: the author's
+    /// token goes out first and its sha256 is the one the host receives.
+    #[tokio::test]
+    async fn a_non_author_bearer_token_is_not_the_seed() {
+        use sha2::Digest;
+        let (s, (node, port)) = (api().await, node(true));
+        let inputs = HashMap::from([("bearer_token".to_string(), json!("tok-model"))]);
+        let out = run(&node, &config(&s, later()), &inputs).await;
+        assert_eq!(out["status"], 200);
+        assert_eq!(
+            auths(&s).await,
+            ["Bearer tok-cx7-seed", "Bearer tok-cx7-new"]
+        );
+        let sha = format!("{:x}", sha2::Sha256::digest(b"tok-cx7-seed"));
+        assert_eq!(port.0.lock().unwrap()[0].stale_token_sha256, Some(sha));
+    }
+
+    /// A multipart body is not refused: it keeps its static `bearer_token`.
+    #[tokio::test]
+    async fn a_multipart_body_keeps_the_static_bearer() {
+        let (s, (node, _)) = (api().await, node(true));
+        let mut c = config(&s, later());
+        c["method"] = json!("POST");
+        c["headers"] = json!({ "Content-Type": "multipart/form-data" });
+        c["body"] = json!({ "note": "x" });
+        assert_eq!(run(&node, &c, &HashMap::new()).await["status"], 401);
+    }
+
+    /// As a tool: `bearer_token` and `bearer_refresh` are `fixed` entries of
+    /// `node_schema`. A `bearer_refresh` the model writes is never used.
+    #[tokio::test]
+    async fn a_tool_with_fixed_bearer_refresh_retries_and_a_model_one_is_ignored() {
+        use crate::dag_engine::infrastructure::dag_tool_executor::DagToolExecutor;
+        use crate::llm::domain::{FunctionCall, ToolCall, ToolExecutor};
+        let (s, (node, port)) = (api().await, node(true));
+        let block = json!({ "handle": "cth1-cx7-h", "expires_at": later() });
+        let schema = json!({ "base_url": { "fixed": s.uri() }, "endpoint": { "fixed": "/x" },
+            "bearer_token": { "type": "string", "fixed": "tok-cx7-seed" },
+            "bearer_refresh": { "type": "object", "fixed": block },
+            "q": { "type": "string", "description": "query" } });
+        let cfg = json!({ "node_type": "http_request", "node_schema": schema });
+        let configs = HashMap::from([("get".to_string(), serde_json::from_value(cfg).unwrap())]);
+        let exec = DagToolExecutor::new(Arc::new(Reg(node.clone())), configs);
+        let call = FunctionCall::new("get".into(), r#"{"q":"x"}"#.into());
+        let out = exec
+            .execute(&ToolCall::new("c1".into(), call))
+            .await
+            .unwrap();
+        assert!(out.output.contains("200"), "{}", out.output);
+        assert_eq!(
+            auths(&s).await,
+            ["Bearer tok-cx7-seed", "Bearer tok-cx7-new"]
+        );
+        assert_eq!(port.0.lock().unwrap().len(), 1);
+        // The model's own `bearer_refresh` (not a fixed value) is ignored.
+        let token = ("bearer_token".to_string(), json!("tok-cx7-seed"));
+        let model: NodeInputs = [token, ("bearer_refresh".to_string(), block)].into();
+        let cfg = json!({ "base_url": s.uri(), "endpoint": "/x" });
+        assert_eq!(run(&node, &cfg, &model).await["status"], 401);
+        assert_eq!(port.0.lock().unwrap().len(), 1);
     }
 }
 
