@@ -16,8 +16,12 @@
 //!   `oauth2.googleapis.com`, in-process token cache.
 //!
 //! Consumers in `gsheets::infrastructure::auth` and
-//! `gdocs::infrastructure::auth` hold an `Arc<dyn AuthTokenProvider>`
-//! and call `get_bearer_token()` per request. The provider handles
+//! `gdocs::infrastructure::auth` hold the concrete
+//! `Arc<OAuthRefreshTokenProvider>` built from the platform env
+//! credentials and call `get_bearer_token()` per request. A per-node
+//! `google_workspace_auth` block resolves through
+//! `infrastructure::GoogleWorkspaceAuth::provider`, an
+//! `Arc<dyn AuthTokenProvider>` shared by identity. The provider handles
 //! caching + refresh internally — callers never see the refresh
 //! protocol.
 //!

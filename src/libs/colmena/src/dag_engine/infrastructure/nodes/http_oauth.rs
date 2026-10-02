@@ -5,6 +5,7 @@
 
 use crate::dag_engine::domain::node::NodeInputs;
 use crate::google_oauth::domain::{AuthTokenProvider, OAuthError};
+use crate::google_oauth::infrastructure::parse_oauth_refresh_block;
 use serde_json::Value;
 use std::error::Error as StdError;
 
@@ -63,43 +64,17 @@ pub fn parse_oauth_auth(
             .to_string());
     }
 
-    let ty = auth.get("type").and_then(|v| v.as_str()).unwrap_or("");
-    if ty != "oauth2_refresh_token" {
-        return Err(format!(
-            "unsupported auth.type '{ty}'; v1 supports only 'oauth2_refresh_token'"
-        ));
-    }
-
-    let mut missing = Vec::new();
-    let get = |k: &str| auth.get(k).and_then(|v| v.as_str()).map(|s| s.to_string());
-    let token_url = get("token_url");
-    let client_id = get("client_id");
-    let client_secret = get("client_secret");
-    let refresh_token = get("refresh_token");
-    if token_url.is_none() {
-        missing.push("token_url");
-    }
-    if client_id.is_none() {
-        missing.push("client_id");
-    }
-    if client_secret.is_none() {
-        missing.push("client_secret");
-    }
-    if refresh_token.is_none() {
-        missing.push("refresh_token");
-    }
-    if !missing.is_empty() {
-        return Err(format!(
-            "auth block missing required fields: {}",
-            missing.join(", ")
-        ));
-    }
+    // Field extraction + validation is shared with
+    // `llm_call.google_workspace_auth` (same messages as before).
+    let block = parse_oauth_refresh_block(auth, true)?;
 
     Ok(Some(OAuthAuthSpec {
-        token_url: token_url.unwrap(),
-        client_id: client_id.unwrap(),
-        client_secret: client_secret.unwrap(),
-        refresh_token: refresh_token.unwrap(),
+        token_url: block
+            .token_url
+            .expect("token_url validated by parse_oauth_refresh_block(require_token_url = true)"),
+        client_id: block.client_id,
+        client_secret: block.client_secret,
+        refresh_token: block.refresh_token,
     }))
 }
 
@@ -223,6 +198,24 @@ mod tests {
                 && err.contains("client_id")
                 && err.contains("client_secret")
                 && err.contains("refresh_token")
+        );
+    }
+
+    #[test]
+    fn rejects_empty_refresh_token_with_http_request_wording() {
+        let c = json!({ "auth": { "type": "oauth2_refresh_token", "token_url": "https://t/token",
+            "client_id": "cid", "client_secret": "cs", "refresh_token": "" } });
+        let err = parse_oauth_auth(&c, &Default::default()).expect_err("empty refresh_token");
+        assert_eq!(err, "auth block missing required fields: refresh_token");
+    }
+
+    #[test]
+    fn unknown_type_keeps_http_request_wording() {
+        let c = json!({ "auth": { "type": "client_credentials" } });
+        let err = parse_oauth_auth(&c, &Default::default()).expect_err("unknown type v1");
+        assert!(
+            err.starts_with("unsupported auth.type 'client_credentials'"),
+            "{err}"
         );
     }
 

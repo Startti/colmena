@@ -79,7 +79,16 @@ timeout, `ClientCredsInvalid`: cada una tumba un test. **E2E.** No aplica hasta 
 **ADP.** Un literal `EngineConfig { … }` necesita `host_token_port: None`; el worker usa `from_env`. `corpus_noise`
 pasa a 344: #460 sumó un grafo sin subirlo y dejó `develop` en rojo. **Estado.** partial.
 
-## 4. `http_request`: `bearer_refresh` pide al host un token nuevo ante un 401 o cerca del vencimiento
+## 4. Google OAuth: bloque `google_workspace_auth` por nodo (porte de `feat/google-workspace-auth`, parte 1)
+
+**Qué cambia.** `GoogleWorkspaceAuth` (`from_node_config`, `provider()` → `Arc<dyn AuthTokenProvider>` por
+identidad) y el parser compartido con `http_request.auth`, donde un campo en blanco ahora cuenta como faltante.
+Ausente = cuenta de plataforma; inválido = error. `Debug` redactado. Ningún nodo lo lee todavía.
+Guía: [47_google_oauth.md](developer_guide/47_google_oauth.md#credenciales-por-nodo-google_workspace_auth).
+**Commits portados.** `32a7d46c`, `438f0580`. **Tests.** `config`, `workspace_auth`, `http_oauth`.
+**Mutación.** Ver la PR. **E2E.** No aplica hasta que un nodo lo lea. **ADP.** Ninguno. **Estado.** partial.
+
+## 5. `http_request`: `bearer_refresh` pide al host un token nuevo ante un 401 o cerca del vencimiento
 
 **Qué cambia.** Clave hermana de `bearer_token`: `bearer_refresh: {handle, expires_at}`, en config o como entrada
 `fixed` de `node_schema` (la que escribe el modelo se ignora). Con `EngineConfig.host_token_port`, el nodo arma por
