@@ -87,6 +87,9 @@ pub async fn bind_with(
                 .iter()
                 .find(|(n, _)| n.eq_ignore_ascii_case(&a.header))
                 .ok_or_else(bad)?;
+            // Case-sensitive on purpose: the header must start with exactly
+            // `Bearer ` (the scheme the embedder writes); anything else is the
+            // fixed error above, never a guess.
             let seed = value
                 .strip_prefix("Bearer ")
                 .filter(|t| !t.trim().is_empty());
@@ -119,7 +122,9 @@ pub async fn bind_with(
     //
     // A renewable header is keyed by its handle and session, not by the token
     // it carries now: a renewal must not split the pool, and another session
-    // must not reuse this one's provider.
+    // must not reuse this one's provider. Runs WITHOUT an agent session all
+    // key on the handle alone and share one pooled connection: same handle,
+    // same credential, so sharing is acceptable.
     let mut keyed = resolved_headers.clone();
     if let Some((name, _, provider)) = &refresh {
         let sid = agent_session_id.unwrap_or_default();

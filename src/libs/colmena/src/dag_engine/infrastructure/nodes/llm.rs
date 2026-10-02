@@ -7870,6 +7870,62 @@ mod steering_take_tests {
         }
     }
 
+    /// `auth_refresh` in a `tool_configurations` that arrived through inputs
+    /// the author did not write is dropped: the host port is never called. The
+    /// author's copy (config) does reach it (expired seed: asked at connect).
+    #[tokio::test]
+    async fn a_model_fed_auth_refresh_never_reaches_the_host_port() {
+        use crate::dag_engine::application::ports as p;
+        struct Port(std::sync::Mutex<usize>);
+        #[async_trait::async_trait]
+        impl p::HostTokenPort for Port {
+            async fn fresh_token(
+                &self,
+                _: p::HostTokenRequest,
+            ) -> Result<p::HostToken, p::HostTokenError> {
+                *self.0.lock().unwrap() += 1;
+                Err(p::HostTokenError::RateLimited)
+            }
+        }
+        let tc = json!({ "srv": { "node_type": "mcp", "mcp": {
+            "url": "https://127.0.0.1:9/mcp",
+            "headers": { "Authorization": "Bearer tok-cx7-seed" },
+            "auth_refresh": { "header": "Authorization", "scheme": "Bearer",
+                "handle": "cth1-cx7-h", "expires_at": 0 } } } });
+        let db = tempfile::NamedTempFile::new().unwrap();
+        let registry: Arc<dyn NodeRegistryPort> = Arc::new(OnlyPeek(Arc::default()));
+        let pools = Arc::new(PgPoolRegistry::new(PoolConfig::defaults()));
+        let repos = Arc::new(ConversationRepositoryFactory::new(pools));
+        let llm = LlmNode::new(repos, Arc::downgrade(&registry), None);
+        let port = Arc::new(Port(Default::default()));
+        let _ = llm.host_token_port.set(port.clone());
+        let mut asked = Vec::new();
+        for from_inputs in [true, false] {
+            let _guard = OverrideGuard::install(Arc::new(ScriptedAdapter::new(vec![
+                ScriptedResponse::Text("ok".into()),
+            ])));
+            let mut config = json!({
+                "provider": "mock", "model": "m", "api_key": "k", "stream": false, "prompt": "go",
+                "connection_url": format!("sqlite://{}", db.path().display()),
+            });
+            let mut inputs = HashMap::from([("__colmena_session_id".to_string(), json!("s1"))]);
+            match from_inputs {
+                true => inputs.insert("tool_configurations".into(), tc.clone()),
+                false => config
+                    .as_object_mut()
+                    .unwrap()
+                    .insert("tool_configurations".into(), tc.clone()),
+            };
+            let _ = llm.execute(&inputs, &config, &mut json!({}), None).await;
+            asked.push(std::mem::take(&mut *port.0.lock().unwrap()));
+        }
+        assert_eq!(asked[0], 0, "inputs-fed auth_refresh reached the host");
+        assert!(
+            asked[1] >= 1,
+            "the author's auth_refresh never reached the host"
+        );
+    }
+
     #[tokio::test]
     async fn a_resumed_call_finds_no_inbox_and_the_loop_gets_it() {
         let _guard = OverrideGuard::install(Arc::new(ScriptedAdapter::new(vec![
