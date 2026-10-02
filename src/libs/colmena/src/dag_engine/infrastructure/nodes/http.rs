@@ -401,11 +401,13 @@ impl HttpNode {
     /// when the embedder set a `HostTokenPort` (with the seed as fallback).
     /// Built per execution: it carries the run's `agent_session_id`.
     /// `Ok(None)` for neither; then `bearer_refresh` is ignored.
+    /// Error for a `bearer_refresh` whose author `bearer_token` is not a string.
+    const SEED_ERR: &str = "http_request: `bearer_refresh` needs a string author `bearer_token`";
+
     fn resolve_oauth_provider(
         &self,
         config: &Value,
         inputs: &NodeInputs,
-        policy: &EnvPolicy,
     ) -> Result<Option<TokenSource>, Box<dyn StdError + Send + Sync>> {
         use crate::dag_engine::infrastructure::nodes::http_oauth as oauth;
         let refresh = oauth::parse_bearer_refresh(config, inputs).map_err(Self::io_err)?;
@@ -416,10 +418,12 @@ impl HttpNode {
                 else {
                     return Ok(None);
                 };
-                let token = "bearer_token";
-                let seed =
-                    Self::resolve_priority_opt(inputs, config, token, "/bearer_token", policy);
-                let seed = seed.map_err(Self::io_err)?.unwrap_or_default();
+                // The seed is the author's token only: a `bearer_token` in
+                // non-author inputs must never reach the host as the stale one.
+                let seed = Self::author_value(inputs, config, "bearer_token")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| Self::io_err(Self::SEED_ERR.into()))?;
+                let seed = Self::resolve_env_vars(seed).map_err(Self::io_err)?;
                 let sid = Self::input_str(inputs, "__colmena_agent_session_id");
                 let provider =
                     HostRefreshTokenProvider::new(port, handle, seed.clone(), expires_at, sid);
@@ -1764,7 +1768,7 @@ impl ExecutableNode for HttpNode {
         // Parse the `auth` block (config-only) and mint a provider. Validation
         // includes mutual exclusion with bearer_token/authorization and the
         // base_url-from-inputs guard.
-        let oauth_provider = self.resolve_oauth_provider(config, inputs, &policy)?;
+        let oauth_provider = self.resolve_oauth_provider(config, inputs)?;
 
         // Handle specific auth inputs. Read from `inputs` first (priority), then
         // fall back to `config` so delivered graphs can fix the token in `config`.
@@ -3881,6 +3885,23 @@ mod bearer_refresh_tests {
         );
         assert_eq!(auths(&s).await, ["Bearer tok-cx7-new"]);
         assert_eq!(port.0.lock().unwrap()[0].stale_token_sha256, None);
+    }
+
+    /// A `bearer_token` in non-author inputs is not the seed: the author's
+    /// token goes out first and its sha256 is the one the host receives.
+    #[tokio::test]
+    async fn a_non_author_bearer_token_is_not_the_seed() {
+        use sha2::Digest;
+        let (s, (node, port)) = (api().await, node(true));
+        let inputs = HashMap::from([("bearer_token".to_string(), json!("tok-model"))]);
+        let out = run(&node, &config(&s, later()), &inputs).await;
+        assert_eq!(out["status"], 200);
+        assert_eq!(
+            auths(&s).await,
+            ["Bearer tok-cx7-seed", "Bearer tok-cx7-new"]
+        );
+        let sha = format!("{:x}", sha2::Sha256::digest(b"tok-cx7-seed"));
+        assert_eq!(port.0.lock().unwrap()[0].stale_token_sha256, Some(sha));
     }
 
     /// A multipart body is not refused: it keeps its static `bearer_token`.

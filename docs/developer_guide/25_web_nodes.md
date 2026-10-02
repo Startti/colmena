@@ -666,8 +666,11 @@ entrada `fixed` de `node_schema`; la que escribe el modelo se ignora:
   un **401** invalida, pide uno y **reintenta una vez**, como `auth`.
 - Si el host no da token, sigue como sin `bearer_refresh`: sale el token sembrado y el 401 vuelve como
   respuesta. Sin puerto, `bearer_refresh` se ignora. Con multipart, el `bearer_token` va estático.
-- Exige un `bearer_token` del autor; con `auth` es error. Los errores no repiten el handle ni el token,
-  y el handle solo viaja al puerto, nunca en un header.
+- Exige un `bearer_token` del autor (string); con `auth` es error. El token sembrado es siempre el del
+  autor: un `bearer_token` en `inputs` que no puso el autor no lo reemplaza. Los errores no repiten el
+  handle ni el token, y el handle solo viaja al puerto, nunca en un header.
+- Un `Authorization` en `headers` junto con el bearer sale como **dos** headers `Authorization`, igual que
+  hoy en el camino estático: no los combines.
 
 ### Caché compartido por fingerprint (un token para N endpoints)
 
