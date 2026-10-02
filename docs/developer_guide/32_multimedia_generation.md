@@ -338,6 +338,34 @@ de la sesión (ver "Resolución de `source_url`").
 
 **Sample graph**: `tests/graphs/media/tts_basic.json`.
 
+### `http_request` — una respuesta que es un archivo
+
+`http_request` no genera medios, pero cuando la API responde un **archivo**
+(un PDF, una imagen, audio, video, un Office) lo guarda como artifact igual que
+los nodos de arriba, en vez de devolver `body: null` y perder los bytes.
+
+- **Cuándo es un archivo:** primero mandan los bytes (`%PDF-`, PNG, JPEG, GIF,
+  WebP, WAV, MP3, OGG, MP4; un ZIP cede al `Content-Type` si este dice qué
+  Office es), después el `Content-Type`. Hay APIs que mandan una lista
+  (`application/json;charset=utf-8,application/pdf`): por eso un PDF con
+  `application/json` primero en la cabecera igual se reconoce. Texto, HTML y
+  cuerpos vacíos siguen siendo `body: null`; el JSON se sigue parseando como
+  antes.
+- **Output:** `{ "status": 200, "body": null, "files": [{ "document_id",
+  "mime_type", "filename", "size_bytes" }] }`. El `document_id` empieza con
+  `file_` y la fila del registro lleva `origin: generated_by:http_request`.
+  El nombre sale del `Content-Disposition` o del último tramo de la URL
+  (`/reservations/123/voucher` → `voucher.pdf`). La URL de lectura nunca va
+  en el output.
+- **Límites:** `max_file_size_bytes` (default 100 MiB) es también el tope de lo
+  que se guarda. Sin storage adapter, o por encima del tope, o si `store`
+  falla, el output queda `{ status, body: null }` como antes. El registro es
+  fail-soft, igual que en `image_generation`.
+- **Host:** ADP lee `files[]` de cualquier tool y lo muestra en el chat como
+  archivo descargable (y en `output.files` de `/v1/run`).
+
+**Sample graph**: `tests/graphs/external/http_file_response.json`.
+
 ## Artifacts unification — el agente como ciudadano de primera
 
 Los outputs generados se registran automáticamente en `AttachmentRegistry` con `provider: ProviderKind::Generated` (variant sintético, ver `src/libs/colmena/src/llm/domain/llm_provider.rs`). Esto desbloquea 3 capacidades:

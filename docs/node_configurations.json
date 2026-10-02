@@ -1025,7 +1025,7 @@
           "type": "integer",
           "required": false,
           "default": 104857600,
-          "description": "Hard cap per file part in multipart mode. Validated against Content-Length (URL parts) or size_bytes (attachment parts).",
+          "description": "Hard cap per file part in multipart mode. Validated against Content-Length (URL parts) or size_bytes (attachment parts). Also the largest file response the node keeps as an attachment (see output `files`).",
           "example": 52428800
         },
         "max_parts": {
@@ -1089,7 +1089,11 @@
         },
         "body": {
           "type": "any",
-          "description": "The HTTP response body, parsed as JSON if possible. If the response is not valid JSON, this is null. This is the default output port — downstream nodes connected without specifying a field get this value."
+          "description": "The HTTP response body, parsed as JSON if possible. If the response is not valid JSON, this is null — also when the response is a file (see `files`). This is the default output port — downstream nodes connected without specifying a field get this value."
+        },
+        "files": {
+          "type": "array",
+          "description": "Present only when the response is a file (PDF, image, audio, video, Office document — decided by the bytes, then by Content-Type) and the engine has a storage adapter: one entry `{ document_id, mime_type, filename, size_bytes }`. The bytes are stored as a session attachment registered under `document_id` (origin `generated_by:http_request`), so `load_attachment` and `$attachment:<document_id>` reach it and a host can show it. A file over `max_file_size_bytes`, or with no storage adapter, leaves only `body: null`."
         }
       },
       "default_input": null,
