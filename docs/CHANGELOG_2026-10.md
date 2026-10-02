@@ -187,3 +187,15 @@ y sin él toma el camino env; el builder del executor. **Mutación.** `build_cli
 una vista previa exitosa y la fuente Sheets de `data_run_python` actúan con esas credenciales; sin él, toman el
 camino env. **Mutación.** Una tool que pasa `None`; la corrida tras la vista previa sin `auth`; `data_run_python`
 sin `auth`. **E2E.** No aplica. **ADP.** Ninguno. **Estado.** partial.
+
+## 14. gdocs: cliente y caché de outline por identidad (porte de `feat/google-workspace-auth`, parte 9)
+
+**Qué cambia.** Los dispatchers de gdocs reciben `auth: Option<&GoogleWorkspaceAuth>` del executor. La cuenta de
+plataforma conserva su cliente y su `OutlineCache` de proceso; una cuenta conectada arma su cliente por llamada y
+usa su propia `OutlineCache` (mapa por huella, acotado a 256, barre las que nadie usa). Con la cuenta conectada,
+`gdocs_create*` no usa la carpeta de la plataforma. **Desvío deliberado de `db76489c`:** la rama guardaba un
+cliente por identidad sin desalojo; cada cliente retenía su provider y la caché acotada de providers (#470) no
+habría podido soltarlo nunca. Ningún `llm_call` pasa `auth` todavía. Guía: [45_gdocs.md](developer_guide/45_gdocs.md).
+**Tests.** Caché por identidad; cliente por llamada; carpeta de plataforma nunca con la cuenta conectada; tope de
+cachés. **Mutación.** La cuenta conectada usa el singleton; la caché ignora la identidad; carpeta de plataforma con
+la cuenta conectada; sin barrido. **E2E.** No aplica. **ADP.** Ninguno. **Estado.** partial.

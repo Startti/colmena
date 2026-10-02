@@ -1881,10 +1881,13 @@ impl DagToolExecutor {
                     .or(self.session_id.as_deref())
                     .unwrap_or("unknown");
 
+                let auth = self.google_workspace_auth();
                 let result = match name {
-                    n if n == GDOCS_CREATE_TOOL => dispatch_gdocs_create(args, session_id).await,
+                    n if n == GDOCS_CREATE_TOOL => {
+                        dispatch_gdocs_create(args, session_id, auth).await
+                    }
                     n if n == GDOCS_CREATE_FROM_MARKDOWN_TOOL => {
-                        dispatch_gdocs_create_from_markdown(args, session_id).await
+                        dispatch_gdocs_create_from_markdown(args, session_id, auth).await
                     }
                     n if n == GDOCS_CREATE_FROM_DOCX_TOOL => {
                         // Bundle 1 (G item 4, 2026-06-10): via_executor path
@@ -1893,7 +1896,9 @@ impl DagToolExecutor {
                         use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::gdocs_tools::dispatch_create_from_docx_via_executor;
                         dispatch_create_from_docx_via_executor(self, args, session_id).await
                     }
-                    n if n == GDOCS_SHARE_TOOL => dispatch_gdocs_share(args, session_id).await,
+                    n if n == GDOCS_SHARE_TOOL => {
+                        dispatch_gdocs_share(args, session_id, auth).await
+                    }
                     n if n == GDOCS_EXPORT_TOOL => {
                         // Bundle 1 (G item 5, 2026-06-10): wire export through
                         // the via_executor variant so the bytes get registered
@@ -1903,97 +1908,101 @@ impl DagToolExecutor {
                         dispatch_export_via_executor(self, args, session_id).await
                     }
                     n if n == GDOCS_LIST_TABS_TOOL => {
-                        dispatch_gdocs_list_tabs(args, session_id).await
+                        dispatch_gdocs_list_tabs(args, session_id, auth).await
                     }
                     n if n == GDOCS_LIST_DOCUMENTS_TOOL => {
                         // Bundle 2A (2026-06-11): Drive discovery for documents.
                         use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::dispatch_gdocs_list_documents;
-                        dispatch_gdocs_list_documents(args, session_id).await
+                        dispatch_gdocs_list_documents(args, session_id, auth).await
                     }
                     n if n == GDOCS_LIST_PERMISSIONS_TOOL => {
-                        dispatch_gdocs_list_permissions(args, session_id).await
+                        dispatch_gdocs_list_permissions(args, session_id, auth).await
                     }
-                    n if n == GDOCS_UNSHARE_TOOL => dispatch_gdocs_unshare(args, session_id).await,
+                    n if n == GDOCS_UNSHARE_TOOL => {
+                        dispatch_gdocs_unshare(args, session_id, auth).await
+                    }
                     n if n == GDOCS_ADD_COMMENT_TOOL => {
                         // Bundle 4A (2026-06-11): Drive Comments.
-                        dispatch_gdocs_add_comment(args, session_id).await
+                        dispatch_gdocs_add_comment(args, session_id, auth).await
                     }
                     n if n == GDOCS_LIST_COMMENTS_TOOL => {
-                        dispatch_gdocs_list_comments(args, session_id).await
+                        dispatch_gdocs_list_comments(args, session_id, auth).await
                     }
                     n if n == GDOCS_RESOLVE_COMMENT_TOOL => {
-                        dispatch_gdocs_resolve_comment(args, session_id).await
+                        dispatch_gdocs_resolve_comment(args, session_id, auth).await
                     }
-                    n if n == GDOCS_ADD_TAB_TOOL => dispatch_gdocs_add_tab(args, session_id).await,
+                    n if n == GDOCS_ADD_TAB_TOOL => {
+                        dispatch_gdocs_add_tab(args, session_id, auth).await
+                    }
                     n if n == GDOCS_READ_AS_MARKDOWN_TOOL => {
-                        dispatch_gdocs_read_as_markdown(args, session_id).await
+                        dispatch_gdocs_read_as_markdown(args, session_id, auth).await
                     }
                     n if n == GDOCS_READ_OUTLINE_TOOL => {
-                        dispatch_gdocs_read_outline(args, session_id).await
+                        dispatch_gdocs_read_outline(args, session_id, auth).await
                     }
                     n if n == GDOCS_LIST_NAMED_RANGES_TOOL => {
-                        dispatch_gdocs_list_named_ranges(args, session_id).await
+                        dispatch_gdocs_list_named_ranges(args, session_id, auth).await
                     }
                     n if n == GDOCS_REPLACE_TEXT_TOOL => {
-                        dispatch_gdocs_replace_text(args, session_id).await
+                        dispatch_gdocs_replace_text(args, session_id, auth).await
                     }
                     n if n == GDOCS_INSERT_AFTER_TEXT_TOOL => {
-                        dispatch_gdocs_insert_after_text(args, session_id).await
+                        dispatch_gdocs_insert_after_text(args, session_id, auth).await
                     }
                     n if n == GDOCS_INSERT_BEFORE_TEXT_TOOL => {
-                        dispatch_gdocs_insert_before_text(args, session_id).await
+                        dispatch_gdocs_insert_before_text(args, session_id, auth).await
                     }
                     n if n == GDOCS_INSERT_BETWEEN_TOOL => {
-                        dispatch_gdocs_insert_between(args, session_id).await
+                        dispatch_gdocs_insert_between(args, session_id, auth).await
                     }
                     n if n == GDOCS_INSERT_IMAGE_AFTER_TEXT_TOOL => {
                         dispatch_gdocs_insert_image_after_text(self, args, session_id).await
                     }
                     n if n == GDOCS_DELETE_TEXT_TOOL => {
-                        dispatch_gdocs_delete_text(args, session_id).await
+                        dispatch_gdocs_delete_text(args, session_id, auth).await
                     }
                     n if n == GDOCS_REPLACE_SECTION_TOOL => {
-                        dispatch_gdocs_replace_section(args, session_id).await
+                        dispatch_gdocs_replace_section(args, session_id, auth).await
                     }
                     n if n == GDOCS_APPEND_MARKDOWN_TOOL => {
-                        dispatch_gdocs_append_markdown(args, session_id).await
+                        dispatch_gdocs_append_markdown(args, session_id, auth).await
                     }
                     n if n == GDOCS_APPLY_EDITS_TOOL => {
-                        dispatch_gdocs_apply_edits(args, session_id).await
+                        dispatch_gdocs_apply_edits(args, session_id, auth).await
                     }
                     n if n == GDOCS_STYLE_TEXT_TOOL => {
-                        dispatch_gdocs_style_text(args, session_id).await
+                        dispatch_gdocs_style_text(args, session_id, auth).await
                     }
                     n if n == GDOCS_CREATE_NAMED_RANGE_TOOL => {
-                        dispatch_gdocs_create_named_range(args, session_id).await
+                        dispatch_gdocs_create_named_range(args, session_id, auth).await
                     }
                     n if n == GDOCS_REPLACE_NAMED_RANGE_TOOL => {
-                        dispatch_gdocs_replace_named_range(args, session_id).await
+                        dispatch_gdocs_replace_named_range(args, session_id, auth).await
                     }
                     n if n == GDOCS_ACKNOWLEDGE_HUMAN_CHANGES_TOOL => {
-                        dispatch_gdocs_acknowledge_human_changes(args, session_id).await
+                        dispatch_gdocs_acknowledge_human_changes(args, session_id, auth).await
                     }
                     // Subsystem G v1.1 (2026-06-21): surgical table edits.
                     n if n == GDOCS_READ_TABLES_TOOL => {
-                        dispatch_gdocs_read_tables(args, session_id).await
+                        dispatch_gdocs_read_tables(args, session_id, auth).await
                     }
                     n if n == GDOCS_SET_TABLE_CELL_TOOL => {
-                        dispatch_gdocs_set_table_cell(args, session_id).await
+                        dispatch_gdocs_set_table_cell(args, session_id, auth).await
                     }
                     n if n == GDOCS_FORMAT_TABLE_TOOL => {
-                        dispatch_gdocs_format_table(args, session_id).await
+                        dispatch_gdocs_format_table(args, session_id, auth).await
                     }
                     n if n == GDOCS_INSERT_TABLE_ROW_TOOL => {
-                        dispatch_gdocs_insert_table_row(args, session_id).await
+                        dispatch_gdocs_insert_table_row(args, session_id, auth).await
                     }
                     n if n == GDOCS_DELETE_TABLE_ROW_TOOL => {
-                        dispatch_gdocs_delete_table_row(args, session_id).await
+                        dispatch_gdocs_delete_table_row(args, session_id, auth).await
                     }
                     n if n == GDOCS_INSERT_TABLE_COLUMN_TOOL => {
-                        dispatch_gdocs_insert_table_column(args, session_id).await
+                        dispatch_gdocs_insert_table_column(args, session_id, auth).await
                     }
                     n if n == GDOCS_DELETE_TABLE_COLUMN_TOOL => {
-                        dispatch_gdocs_delete_table_column(args, session_id).await
+                        dispatch_gdocs_delete_table_column(args, session_id, auth).await
                     }
                     other => serde_json::json!({
                         "error": "unknown_gdocs_tool",
