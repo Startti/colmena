@@ -8,12 +8,15 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::dag_engine::application::ports::HostTokenPort;
 use crate::dag_engine::application::secure_value_service::{
     is_secure_value_placeholder, SecureValueService,
 };
 use crate::dag_engine::domain::tool_configuration::McpServerSpec;
 use crate::dag_engine::infrastructure::mcp_registry::{CredentialFingerprint, McpServerKey};
+use crate::google_oauth::infrastructure::HostRefreshTokenProvider;
 use crate::llm::domain::mcp::{McpClientPort, McpError, McpServerConfig};
+use crate::llm::infrastructure::mcp_client::rmcp_http_client::HeaderRefresh;
 use crate::llm::infrastructure::mcp_client::RmcpHttpClient;
 
 /// One configured server, with its credentials resolved.
@@ -26,6 +29,8 @@ pub struct McpBinding {
     pub key: McpServerKey,
     config: McpServerConfig,
     resolved_headers: BTreeMap<String, String>,
+    /// `auth_refresh` with a host port: (header name, seed token, provider).
+    refresh: Option<(String, String, Arc<HostRefreshTokenProvider>)>,
 }
 
 impl std::fmt::Debug for McpBinding {
@@ -50,8 +55,54 @@ pub async fn bind(
     session_id: &str,
     agent_session_id: Option<&str>,
 ) -> Result<McpBinding, McpError> {
+    bind_with(
+        alias,
+        spec,
+        secure_values,
+        session_id,
+        agent_session_id,
+        None,
+    )
+    .await
+}
+
+/// [`bind`] with the embedder's `HostTokenPort`: an `auth_refresh` header
+/// then renews through it. Without a port `auth_refresh` is ignored.
+pub async fn bind_with(
+    alias: &str,
+    spec: &McpServerSpec,
+    secure_values: Option<&SecureValueService>,
+    session_id: &str,
+    agent_session_id: Option<&str>,
+    port: Option<Arc<dyn HostTokenPort>>,
+) -> Result<McpBinding, McpError> {
     let resolved_headers =
         resolve_headers(alias, spec, secure_values, session_id, agent_session_id).await?;
+    let refresh = match (&spec.auth_refresh, port) {
+        (Some(a), Some(port)) => {
+            let bad = || McpError::InvalidConfig {
+                detail: format!("MCP server '{alias}' auth_refresh header is not a Bearer value"),
+            };
+            let (name, value) = resolved_headers
+                .iter()
+                .find(|(n, _)| n.eq_ignore_ascii_case(&a.header))
+                .ok_or_else(bad)?;
+            let seed = value
+                .strip_prefix("Bearer ")
+                .filter(|t| !t.trim().is_empty());
+            let seed = seed.ok_or_else(bad)?.trim().to_string();
+            let sid = agent_session_id.map(str::to_string);
+            let provider = HostRefreshTokenProvider::new(
+                port,
+                a.handle.clone(),
+                seed.clone(),
+                a.expires_at,
+                sid,
+            );
+            Some((name.clone(), seed, Arc::new(provider)))
+        }
+        _ => None,
+    };
 
     let config = McpServerConfig {
         url: spec.url.clone(),
@@ -65,13 +116,24 @@ pub async fn bind(
     // references would leave the identity unchanged across a rotation, and the
     // pool would go on handing back a connection built with the retired
     // secret. See `CredentialFingerprint`.
-    let key = McpServerKey::from_resolved(&config, &CredentialFingerprint::of(&resolved_headers));
+    //
+    // A renewable header is keyed by its handle and session, not by the token
+    // it carries now: a renewal must not split the pool, and another session
+    // must not reuse this one's provider.
+    let mut keyed = resolved_headers.clone();
+    if let Some((name, _, provider)) = &refresh {
+        let sid = agent_session_id.unwrap_or_default();
+        let id = format!("auth_refresh:{}:{sid}", provider.handle_fingerprint());
+        keyed.insert(name.clone(), id);
+    }
+    let key = McpServerKey::from_resolved(&config, &CredentialFingerprint::of(&keyed));
 
     Ok(McpBinding {
         alias: alias.to_string(),
         key,
         config,
         resolved_headers,
+        refresh,
     })
 }
 
@@ -171,8 +233,18 @@ impl McpBinding {
 
     /// Open a live connection using the resolved credentials.
     pub async fn connect(&self) -> Result<Arc<dyn McpClientPort>, McpError> {
-        let client =
-            RmcpHttpClient::connect(&self.alias, &self.config, &self.resolved_headers).await?;
+        let (alias, config, headers) = (&self.alias, &self.config, &self.resolved_headers);
+        let client = match &self.refresh {
+            Some((header, seed, provider)) => {
+                let auth = HeaderRefresh {
+                    header: header.clone(),
+                    seed: seed.clone(),
+                    provider: provider.clone(),
+                };
+                RmcpHttpClient::connect_refreshing(alias, config, headers, auth).await?
+            }
+            None => RmcpHttpClient::connect(alias, config, headers).await?,
+        };
         Ok(Arc::new(client))
     }
 }
@@ -433,5 +505,73 @@ mod tests {
 
         assert_eq!(b.config.timeout, Duration::from_secs(7), "timeout");
         assert_eq!(b.config.cache_ttl, Duration::from_secs(900), "cache_ttl");
+    }
+
+    /// An `auth_refresh` header is keyed by handle and session, not by the
+    /// token it carries: a renewal keeps the connection; another handle or
+    /// session gets its own.
+    #[tokio::test]
+    async fn auth_refresh_keys_by_handle_and_session_not_by_token() {
+        use crate::dag_engine::application::ports as p;
+        use crate::google_oauth::domain::AuthTokenProvider;
+        struct Port(std::sync::Mutex<Vec<p::HostTokenRequest>>);
+        #[async_trait]
+        impl p::HostTokenPort for Port {
+            async fn fresh_token(
+                &self,
+                req: p::HostTokenRequest,
+            ) -> Result<p::HostToken, p::HostTokenError> {
+                self.0.lock().unwrap().push(req);
+                Err(p::HostTokenError::RateLimited)
+            }
+        }
+        let port = Arc::new(Port(Default::default()));
+        let key = |token: &str, handle: &str, sid: &'static str| {
+            let s = spec(json!({ "Authorization": format!("Bearer {token}") }));
+            let mut s = s;
+            s.auth_refresh = serde_json::from_value(json!({ "header": "Authorization",
+                "scheme": "Bearer", "handle": handle, "expires_at": 1 }))
+            .unwrap();
+            let port: Arc<dyn p::HostTokenPort> = port.clone();
+            async move {
+                bind_with("srv", &s, None, "s1", Some(sid), Some(port))
+                    .await
+                    .unwrap()
+            }
+        };
+        // The provider asks the host with this run's session and the handle.
+        let b = key("tok-cx7-a", "cth1-cx7-h", "a1").await;
+        let _ = b.refresh.as_ref().unwrap().2.get_bearer_token().await;
+        let req = port.0.lock().unwrap().pop().expect("asked the host");
+        assert_eq!(
+            (req.handle.as_str(), req.agent_session_id.as_deref()),
+            ("cth1-cx7-h", Some("a1"))
+        );
+        let key = |t, h, s| {
+            let f = key(t, h, s);
+            async move { f.await.key }
+        };
+        let base = b.key;
+        assert_eq!(
+            base,
+            key("tok-cx7-b", "cth1-cx7-h", "a1").await,
+            "renewed token"
+        );
+        assert_ne!(
+            base,
+            key("tok-cx7-a", "cth1-cx7-k", "a1").await,
+            "other handle"
+        );
+        assert_ne!(
+            base,
+            key("tok-cx7-a", "cth1-cx7-h", "a2").await,
+            "other session"
+        );
+        // Without a port `auth_refresh` is ignored: keyed by the token, as today.
+        let s = spec(json!({ "Authorization": "Bearer tok-cx7-a" }));
+        assert_ne!(
+            base,
+            bind("srv", &s, None, "s1", Some("a1")).await.unwrap().key
+        );
     }
 }

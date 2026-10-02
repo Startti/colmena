@@ -23,6 +23,8 @@ pub struct HashMapNodeRegistry {
     subgraph_node: Option<Arc<SubGraphNode>>,
     foreach_node: Option<Arc<crate::dag_engine::infrastructure::nodes::for_each::ForEachNode>>,
     http_node: Arc<crate::dag_engine::infrastructure::nodes::http::HttpNode>,
+    /// `llm_call`'s slot for the host token port (MCP `auth_refresh`).
+    llm_host_token_port: Arc<std::sync::OnceLock<Arc<dyn HostTokenPort>>>,
 }
 
 use crate::llm::infrastructure::ConversationRepositoryFactory;
@@ -170,6 +172,7 @@ impl HashMapNodeRegistry {
             if let Some(st) = storage.clone() {
                 llm_node = llm_node.with_storage(st);
             }
+            let llm_host_token_port = llm_node.host_token_port.clone();
             nodes.insert("llm_call".to_string(), Arc::new(llm_node));
 
             // --- Registrar Nodos Python ---
@@ -385,6 +388,7 @@ impl HashMapNodeRegistry {
                 subgraph_node: Some(sub_node),
                 foreach_node: Some(fe_node),
                 http_node,
+                llm_host_token_port,
             }
         })
     }
@@ -406,8 +410,10 @@ impl HashMapNodeRegistry {
     }
 
     /// Injects the embedder's port for host-refreshed bearer tokens into the
-    /// `http_request` node (graph nodes and tool calls share that instance).
+    /// `http_request` node (graph nodes and tool calls share that instance)
+    /// and into `llm_call`, for MCP `auth_refresh`.
     pub fn set_host_token_port(&self, port: Arc<dyn HostTokenPort>) {
+        let _ = self.llm_host_token_port.set(port.clone());
         let _ = self.http_node.host_token_port.set(port);
     }
 
@@ -557,6 +563,10 @@ mod registry_tavily_tests {
         assert!(reg.http_node.host_token_port().is_none());
         reg.set_host_token_port(Arc::new(NoTokens));
         assert!(reg.http_node.host_token_port().is_some());
+        assert!(
+            reg.llm_host_token_port.get().is_some(),
+            "llm_call has it too"
+        );
     }
 
     #[test]

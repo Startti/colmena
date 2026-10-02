@@ -26,10 +26,13 @@ use crate::llm::domain::mcp::McpToolDescriptor;
 use crate::llm::domain::tools::ToolDefinition;
 
 use super::allowlist::{allowed_hosts_from_env, host_for_log, url_is_allowed};
-use super::bind::{bind, McpBinding};
+#[cfg(test)]
+use super::bind::bind;
+use super::bind::{bind_with, McpBinding};
 use super::expose::{
     allowed_catalog, drop_colliding, exposed_definitions, unpublished_listed_tools,
 };
+use crate::dag_engine::application::ports::HostTokenPort;
 
 /// Why a server dropped out of a turn. A stable label for the log, distinct
 /// from the human-facing note text (which is free-form and may change).
@@ -98,6 +101,19 @@ pub async fn wire(
     session_id: &str,
     agent_session_id: Option<&str>,
 ) -> McpWiring {
+    let ids = (session_id, agent_session_id);
+    wire_with(registry, specs, claimed, secure_values, ids, None).await
+}
+
+/// [`wire`] with the embedder's `HostTokenPort`, for `auth_refresh`.
+pub async fn wire_with(
+    registry: &McpConnectionRegistry,
+    specs: &BTreeMap<String, McpServerSpec>,
+    claimed: &mut HashSet<String>,
+    secure_values: Option<&SecureValueService>,
+    (session_id, agent_session_id): (&str, Option<&str>),
+    port: Option<Arc<dyn HostTokenPort>>,
+) -> McpWiring {
     // Reach every server CONCURRENTLY. Sequentially, N servers that are slow but
     // alive add up: each is bounded only by its own `timeout_seconds` (default
     // 30) and nothing bounds the sum, so five of them could add over two minutes
@@ -109,7 +125,7 @@ pub async fn wire(
     // from this vector — so nothing here needs to preserve it.
     let allowed_hosts = allowed_hosts_from_env();
 
-    let allowed_hosts = &allowed_hosts;
+    let (allowed_hosts, port) = (&allowed_hosts, &port);
     let fetched: Vec<Fetched> = join_all(specs.iter().map(|(alias, spec)| async move {
         let started = std::time::Instant::now();
 
@@ -129,7 +145,9 @@ pub async fn wire(
             );
         }
 
-        let binding = match bind(alias, spec, secure_values, session_id, agent_session_id).await {
+        let ids = (session_id, agent_session_id);
+        let binding = match bind_with(alias, spec, secure_values, ids.0, ids.1, port.clone()).await
+        {
             Ok(b) => b,
             // Includes the credential refusals: a reference that did not resolve
             // is a configuration fault, but it must not be fatal here either, or

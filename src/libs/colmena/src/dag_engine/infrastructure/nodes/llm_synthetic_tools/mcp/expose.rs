@@ -12,6 +12,23 @@ use crate::llm::domain::mcp::{
 use crate::llm::domain::text_bounds::head_truncate;
 use crate::llm::domain::tools::{ToolDefinition, ToolParameters};
 
+/// The `mcp` blocks of an `llm_call`'s `tool_configurations` (inputs, then
+/// config). `auth_refresh` sends a handle to the embedder, so it is kept only
+/// when the author wrote the block (`authored`); otherwise it is dropped.
+pub fn mcp_specs_for(
+    inputs: &crate::dag_engine::domain::node::NodeInputs,
+    config: &Value,
+    authored: bool,
+) -> BTreeMap<String, McpServerSpec> {
+    let raw = inputs.get("tool_configurations");
+    let raw = raw.or_else(|| config.get("tool_configurations"));
+    let mut specs = raw.map(collect_mcp_tool_configs).unwrap_or_default();
+    if !authored {
+        specs.values_mut().for_each(|s| s.auth_refresh = None);
+    }
+    specs
+}
+
 /// The `mcp` blocks declared in a raw `tool_configurations` object.
 ///
 /// Read from raw JSON rather than from `ToolConfiguration`, which carries no
@@ -400,6 +417,22 @@ pub fn drop_colliding(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// `auth_refresh` survives only in a block the author wrote.
+    #[test]
+    fn auth_refresh_is_kept_only_when_authored() {
+        let tc = json!({ "srv": { "node_type": "mcp", "mcp": {
+            "url": "https://mcp.example.com/mcp",
+            "headers": { "Authorization": "Bearer tok-cx7-seed" },
+            "auth_refresh": { "header": "Authorization", "scheme": "Bearer",
+                "handle": "cth1-cx7-h", "expires_at": 1 } } } });
+        let config = json!({ "tool_configurations": tc });
+        let inputs = std::collections::HashMap::from([("tool_configurations".into(), tc)]);
+        let none = std::collections::HashMap::new();
+        let refresh = |s: BTreeMap<String, McpServerSpec>| s["srv"].auth_refresh.is_some();
+        assert!(refresh(mcp_specs_for(&none, &config, true)));
+        assert!(!refresh(mcp_specs_for(&inputs, &config, false)));
+    }
 
     /// Catalogs probed from the live servers on 2026-09-01, committed so the
     /// shapes under test are the ones real servers actually send.

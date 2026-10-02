@@ -14,7 +14,7 @@ use std::error::Error;
 use std::sync::Arc;
 
 use crate::crdt_documents::{ArtifactId, CrdtDocumentsRuntime};
-use crate::dag_engine::application::ports::NodeRegistryPort;
+use crate::dag_engine::application::ports::{HostTokenPort, NodeRegistryPort};
 use crate::dag_engine::domain::lint::{FieldSpec, NodeCatalogEntry};
 use crate::dag_engine::infrastructure::dag_tool_executor::DagToolExecutor;
 use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::{
@@ -454,6 +454,9 @@ pub struct LlmNode {
     /// Optional runs' state rows — propagated to DagToolExecutor, which closes
     /// the child run of a question a parallel group does not keep.
     state_repository: Option<Arc<dyn crate::dag_engine::domain::state::DagStateRepository>>,
+    /// The embedder's port for MCP `auth_refresh` headers; set after
+    /// construction by `HashMapNodeRegistry::set_host_token_port`.
+    pub(crate) host_token_port: Arc<std::sync::OnceLock<Arc<dyn HostTokenPort>>>,
 }
 
 impl LlmNode {
@@ -508,6 +511,7 @@ impl LlmNode {
             secure_value_service: None,
             storage: None,
             state_repository: None,
+            host_token_port: Arc::default(),
         }
     }
 
@@ -2473,12 +2477,8 @@ impl ExecutableNode for LlmNode {
         // be built yet — wiring needs the names this executor already claims — so
         // it gets an empty slot now and is filled after tool assembly.
         let mcp_specs = {
-            use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::mcp::collect_mcp_tool_configs;
-            inputs
-                .get("tool_configurations")
-                .or_else(|| config.get("tool_configurations"))
-                .map(collect_mcp_tool_configs)
-                .unwrap_or_default()
+            use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::mcp::mcp_specs_for;
+            mcp_specs_for(inputs, config, tools_authored)
         };
         let mcp_slot = std::sync::Arc::new(std::sync::OnceLock::new());
 
@@ -3294,18 +3294,18 @@ impl ExecutableNode for LlmNode {
             None
         } else {
             use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::mcp::{
-                unavailable_notice, wire, McpDispatcher,
+                unavailable_notice, wire_with, McpDispatcher,
             };
             let pool = crate::dag_engine::infrastructure::mcp_registry::global_mcp_registry();
             let mut claimed: std::collections::HashSet<String> =
                 tools.iter().map(|t| t.name.clone()).collect();
-            let wiring = wire(
+            let wiring = wire_with(
                 pool,
                 &mcp_specs,
                 &mut claimed,
                 self.secure_value_service.as_deref(),
-                &session_id_str,
-                agent_session_id_str.as_deref(),
+                (&session_id_str, agent_session_id_str.as_deref()),
+                self.host_token_port.get().cloned(),
             )
             .await;
 
