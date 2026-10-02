@@ -53,10 +53,12 @@ fn short_uuid8() -> String {
     s[..8].to_string()
 }
 
-/// Map MIME type to a short extension. Covers both image and audio types
-/// used by Plan A's three producer nodes. Unknown mimes map to `"bin"`.
+/// Map MIME type to a short extension. Covers the image and audio types
+/// used by Plan A's three producer nodes, plus PDF (file responses of
+/// `http_request`). Unknown mimes map to `"bin"`.
 pub fn file_ext(mime: &str) -> &'static str {
     match mime {
+        "application/pdf" => "pdf",
         "image/png" => "png",
         "image/jpeg" => "jpg",
         "image/webp" => "webp",
@@ -193,10 +195,12 @@ mod tests {
     }
 
     #[test]
-    fn file_ext_handles_image_and_audio() {
+    fn file_ext_handles_image_audio_and_pdf() {
         assert_eq!(file_ext("image/png"), "png");
         assert_eq!(file_ext("audio/wav"), "wav");
         assert_eq!(file_ext("audio/L16"), "pcm");
-        assert_eq!(file_ext("application/pdf"), "bin");
+        // http_request keeps PDF responses: `voucher.pdf` → document_id stem `voucher`.
+        assert_eq!(file_ext("application/pdf"), "pdf");
+        assert_eq!(file_ext("application/x-unknown"), "bin");
     }
 }
