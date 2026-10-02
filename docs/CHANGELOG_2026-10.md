@@ -68,26 +68,13 @@ de cualquier tool en el chat como archivo descargable y en `output.files` de `/v
 
 ## 3. OAuth: puerto `HostTokenPort` y `HostRefreshTokenProvider` (token refrescado por el host)
 
-**Qué cambia.** El motor puede pedirle un access token nuevo al embebedor a mitad de una corrida, para una conexión
-cuyo `client_secret` nunca le llega (un proveedor de plataforma de ADP). Aditivo:
-- `AuthTokenProvider::invalidate()` con cuerpo vacío por defecto; `OAuthRefreshTokenProvider` vacía su caché.
-- `HostTokenPort` / `HostTokenRequest` / `HostToken` / `HostTokenError` en `dag_engine/application/ports.rs`, con
-  `Debug` redactado. `EngineConfig.host_token_port: Option<Arc<dyn HostTokenPort>>` (`None` en `from_env`);
-  `ColmenaEngine::new` lo pasa al `http_request` del registry (`HttpNode::host_token_port()`).
-- `HostRefreshTokenProvider`: sirve el token sembrado mientras le queden más de 60 s; si no, o tras `invalidate()`,
-  llama al puerto (con el sha256 del token rechazado en el segundo caso); un pedido para llamadas concurrentes;
-  `handle_fingerprint()` = sha256 hex del handle.
-
-Ningún nodo lo usa todavía: `bearer_refresh` (`http_request`) y `auth_refresh` (MCP) vienen en los cambios siguientes.
+**Qué cambia.** El motor puede pedirle al embebedor un access token nuevo a mitad de corrida, para una conexión cuyo
+`client_secret` nunca le llega. Aditivo: `AuthTokenProvider::invalidate()` (vacío por defecto;
+`OAuthRefreshTokenProvider` vacía su caché), el puerto en `ports.rs`, `EngineConfig.host_token_port` (llega al
+`http_request` del registry), `HostRefreshTokenProvider` y `OAuthError::HostRefused`. Ningún nodo lo usa todavía.
 Guía: [47_google_oauth.md](developer_guide/47_google_oauth.md#token-refrescado-por-el-host-hosttokenport).
-**Tests.** `host_refresh_provider` (token sembrado sin llamar al puerto; cerca del vencimiento llama sin hash y con el
-`agent_session_id`; con exactamente 60 s también refresca; `invalidate` manda el sha256 del token rechazado; tras el
-refresco el token nuevo queda en caché; dos llamadas concurrentes, un pedido; los errores del puerto no traen handle
-ni token; `RateLimited`/`Unavailable` son `Transient`; `Debug` redactado). `token_provider`: `invalidate()` por el
-trait vuelve a refrescar. `registry`: el puerto llega al nodo `http_request`.
-**Mutación.** `>` → `>=` en el margen, no limpiar el rechazo tras el refresco, no mandar el hash, y vaciar el
-`invalidate` de `OAuthRefreshTokenProvider`: cada una tumba un test.
-**E2E.** No aplica todavía: ningún grafo puede ejercer el puerto hasta que `http_request` acepte `bearer_refresh`.
-**ADP.** Rompe los literales de `EngineConfig { … }` (agregar `host_token_port: None`); el worker usa `from_env`, así
-que no cambia hasta implementar el puerto. De paso, `corpus_noise` pasa a 344 grafos: #460 sumó
-`tests/graphs/external/http_file_response.json` sin subirlo y dejó `develop` en rojo. **Estado.** partial.
+**Tests.** `host_refresh_provider`, `token_provider` (`invalidate`), `registry` (el puerto llega al nodo).
+**Mutación.** Margen `>=`, no limpiar el rechazo, sin hash, `invalidate` vacío, lock suelto antes del puerto, sin
+timeout, `ClientCredsInvalid`: cada una tumba un test. **E2E.** No aplica hasta `bearer_refresh`.
+**ADP.** Un literal `EngineConfig { … }` necesita `host_token_port: None`; el worker usa `from_env`. `corpus_noise`
+pasa a 344: #460 sumó un grafo sin subirlo y dejó `develop` en rojo. **Estado.** partial.

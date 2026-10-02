@@ -47,6 +47,12 @@ pub enum OAuthError {
          See docs/developer_guide/47_google_oauth.md."
     )]
     ConfigMissing(Vec<String>),
+
+    /// The host refused to refresh a host-seeded token (the handle was
+    /// refused or the connection must be reconnected). Displays the host's
+    /// own text only, as the model reads it.
+    #[error("{0}")]
+    HostRefused(String),
 }
 
 #[cfg(test)]

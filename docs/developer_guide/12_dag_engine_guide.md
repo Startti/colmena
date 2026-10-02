@@ -1307,8 +1307,6 @@ let engine = ColmenaEngine::new(config).await?;
 
 `ColmenaEngine::new` pin'ea el pool interno, corre las migraciones de state + secure_values sobre él, e inyecta el registry en todos los factories.
 
-Puertos que solo el embebedor llena después de `from_env` (quedan en `None`): `child_graph_resolver` ([19_nested_agents_and_subgraphs.md](19_nested_agents_and_subgraphs.md#grafo-por-referencia-child_graph_ref)) y `host_token_port` ([47_google_oauth.md](47_google_oauth.md#token-refrescado-por-el-host-hosttokenport)).
-
 ### Ejecución
 
 ```rust

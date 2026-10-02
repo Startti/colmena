@@ -162,7 +162,9 @@ fn token_error_to_sheets_error(err: crate::google_oauth::domain::OAuthError) -> 
     use crate::google_oauth::domain::OAuthError as E;
     match err {
         E::RefreshTokenRevoked => SheetsError::NotConfigured(format!("{err}")),
-        E::ClientCredsInvalid(_) => SheetsError::NotConfigured(format!("{err}")),
+        E::ClientCredsInvalid(_) | E::HostRefused(_) => {
+            SheetsError::NotConfigured(format!("{err}"))
+        }
         E::ConfigMissing(_) => SheetsError::NotConfigured(format!("{err}")),
         E::Transient(msg) => SheetsError::AuthFailed(msg),
     }

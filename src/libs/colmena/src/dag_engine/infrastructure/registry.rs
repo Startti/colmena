@@ -542,18 +542,15 @@ mod registry_tavily_tests {
         HashMapNodeRegistry::new(repo_factory, sql_factory, Some(task_memory))
     }
 
-    /// The embedder's `HostTokenPort` reaches the one `http_request` node the
-    /// registry serves (graph nodes and tool calls alike).
+    /// The port reaches the one `http_request` node (graph nodes and tools).
     #[test]
     fn host_token_port_reaches_the_http_node() {
-        use crate::dag_engine::application::ports::{
-            HostToken, HostTokenError, HostTokenPort, HostTokenRequest,
-        };
+        use crate::dag_engine::application::ports::{self as p, HostTokenError as E};
         struct NoTokens;
         #[async_trait]
-        impl HostTokenPort for NoTokens {
-            async fn fresh_token(&self, _: HostTokenRequest) -> Result<HostToken, HostTokenError> {
-                Err(HostTokenError::Unavailable("test".into()))
+        impl p::HostTokenPort for NoTokens {
+            async fn fresh_token(&self, _: p::HostTokenRequest) -> Result<p::HostToken, E> {
+                Err(E::RateLimited)
             }
         }
         let reg = build_registry();

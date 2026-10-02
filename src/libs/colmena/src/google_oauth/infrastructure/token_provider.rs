@@ -316,8 +316,7 @@ mod tests {
         assert_eq!(provider.creds.refresh_token.expose(), "RT");
     }
 
-    /// `invalidate()` through the trait drops the cached token like
-    /// `invalidate_cache()`: the next call refreshes again.
+    /// `invalidate()` through the trait drops the cache: the next call refreshes.
     #[tokio::test]
     async fn trait_invalidate_drops_the_cache() {
         let server = MockServer::start().await;

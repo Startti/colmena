@@ -105,11 +105,11 @@ impl std::fmt::Debug for ResumeGraph {
     }
 }
 
-/// Gets a fresh access token from the host (the embedder) for a connection it
-/// handed to the run as a seed token plus an opaque, signed `handle`. Implemented
-/// by the embedder: the ADP worker asks ADP, which refreshes with a client secret
-/// the engine never sees. The engine knows no host URL. Neither the handle nor a
-/// token is ever logged or emitted.
+/// Gets a fresh access token from the embedder (in ADP, the worker) for a
+/// connection it seeded with a token plus an opaque, signed `handle`; the engine
+/// never sees the client secret nor a host URL, and never logs handle or token.
+/// A provider on this port carries the run's `agent_session_id`: never cache one
+/// across sessions by the handle's fingerprint alone.
 #[async_trait::async_trait]
 pub trait HostTokenPort: Send + Sync {
     /// Returns a currently valid access token for `req.handle`, or why not.
@@ -123,19 +123,15 @@ pub struct HostTokenRequest {
     pub handle: String,
     /// The embedder's stable session, when the run has one.
     pub agent_session_id: Option<String>,
-    /// SHA-256 (lowercase hex) of the token the API rejected with a 401, or
-    /// `None` when the token is only near expiry. Lets the host force a refresh
-    /// only when its stored token is the one that failed.
+    /// SHA-256 hex of the token the API rejected (a 401); `None` when only near
+    /// expiry. The host forces a refresh only if its stored token is that one.
     pub stale_token_sha256: Option<String>,
 }
 
 impl std::fmt::Debug for HostTokenRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("HostTokenRequest")
-            .field("handle", &"<redacted>")
-            .field("agent_session_id", &self.agent_session_id)
-            .field("stale_token_sha256", &self.stale_token_sha256)
-            .finish()
+        let (sid, stale) = (&self.agent_session_id, &self.stale_token_sha256);
+        write!(f, "HostTokenRequest {{ handle: <redacted>, agent_session_id: {sid:?}, stale_token_sha256: {stale:?} }}")
     }
 }
 
@@ -149,10 +145,11 @@ pub struct HostToken {
 
 impl std::fmt::Debug for HostToken {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("HostToken")
-            .field("access_token", &"<redacted>")
-            .field("expires_at", &self.expires_at)
-            .finish()
+        let at = self.expires_at;
+        write!(
+            f,
+            "HostToken {{ access_token: <redacted>, expires_at: {at} }}"
+        )
     }
 }
 
