@@ -35,3 +35,33 @@ no dice que la key está bien ni promete que esperar lo arregla; `search` sobre 
 página ya no trae «not a problem with the API key». En `search_use_case`: un `Upstream` 403 se intenta una sola vez.
 En `tavily_client`: un `Upstream` 403 llega al modelo con `retryable: false` y el mensaje tal cual.
 **ADP.** Subir el pin; nada más. **Estado.** done.
+
+## 2. `http_request`: una respuesta que es un archivo queda como adjunto de la sesión
+
+**Qué cambia.** Antes, si la API respondía un archivo (un PDF, una imagen), `http_request` intentaba parsearlo como
+JSON, fallaba y devolvía `body: null`: los bytes se perdían y el agente no tenía cómo entregarlo. Caso real: un
+agente de reservas de hoteles no podía devolver el voucher (`GET /reservations/{id}/voucher` de Despegar responde un
+PDF). Ahora, cuando la respuesta es un archivo, el nodo lo guarda por el puerto de storage, lo registra en el registro
+de adjuntos de la sesión con un `document_id` `file_*` (origin `generated_by:http_request`, fail-soft como en
+`image_generation`) y devuelve:
+
+```json
+{ "status": 200, "body": null,
+  "files": [{ "document_id": "file_voucher_f49b0ccb", "mime_type": "application/pdf",
+              "filename": "voucher.pdf", "size_bytes": 37975 }] }
+```
+
+Qué es un archivo lo deciden primero los bytes (PDF, PNG, JPEG, GIF, WebP, WAV, MP3, OGG, MP4; un ZIP cede al
+`Content-Type` si dice qué Office es) y después el `Content-Type`: Despegar manda
+`application/json;charset=utf-8,application/pdf;charset=utf-8`, con JSON primero para un PDF. El JSON se sigue
+parseando en `body`; texto, HTML y cuerpos vacíos siguen siendo `body: null`; un archivo por encima de
+`max_file_size_bytes`, sin storage adapter o con `store` fallido también. `body` sigue en `null`, así que quien lee
+`body` no ve diferencia. Guía: [32_multimedia_generation.md](developer_guide/32_multimedia_generation.md); catálogo:
+puerto `files` en [node_configurations.json](node_configurations.json).
+**Tests.** `response_file` (la cabecera con JSON primero no gana sobre los bytes de un PDF; texto y HTML no son
+archivos; un ZIP cede al Office declarado; el nombre sale del `Content-Disposition` o de la URL y no lleva `/`);
+`file_response_tests` en `http.rs` (un PDF se guarda, se registra y sale en `files`; sin storage, `body: null`; por
+encima del tope `store` no se llama; HTML no es archivo y el JSON se sigue parseando). E2E con el motor real:
+`tests/graphs/external/http_file_response.json` y el voucher del sandbox de Despegar.
+**Commits.** #459 (clasificador), #460 (el nodo). **ADP.** Subir el pin. Startti/adp#1036 ya muestra el `files[]`
+de cualquier tool en el chat como archivo descargable y en `output.files` de `/v1/run`. **Estado.** done.
