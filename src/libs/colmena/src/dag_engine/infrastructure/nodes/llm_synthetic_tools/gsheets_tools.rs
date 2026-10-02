@@ -165,6 +165,9 @@ pub struct FormatOp {
 pub(crate) fn error_to_json(e: SheetsError) -> serde_json::Value {
     match &e {
         SheetsError::PermissionDenied(share_email) => permission_denied_payload(share_email),
+        SheetsError::ConnectedAccountPermissionDenied => {
+            connected_account_permission_denied_payload()
+        }
         SheetsError::GoogleAccountReconnectRequired => reconnect_google_payload(),
         _ => {
             let (kind, message) = match &e {
@@ -173,9 +176,9 @@ pub(crate) fn error_to_json(e: SheetsError) -> serde_json::Value {
                 SheetsError::SpreadsheetNotFound(s) => ("spreadsheet_not_found", s.clone()),
                 SheetsError::SheetNotFound(s) => ("sheet_not_found", s.clone()),
                 SheetsError::InvalidRange(m) => ("invalid_range", m.clone()),
-                SheetsError::PermissionDenied(_) | SheetsError::GoogleAccountReconnectRequired => {
-                    unreachable!("handled above")
-                }
+                SheetsError::PermissionDenied(_)
+                | SheetsError::ConnectedAccountPermissionDenied
+                | SheetsError::GoogleAccountReconnectRequired => unreachable!("handled above"),
                 SheetsError::RateLimit(s) => ("rate_limit", format!("retry after {s}s")),
                 SheetsError::Http(m) => ("http_error", m.clone()),
                 SheetsError::Internal(m) => ("internal", m.clone()),
@@ -215,6 +218,21 @@ fn permission_denied_payload(share_email: &str) -> serde_json::Value {
              correo aparece listado con permiso de Editor.",
             share_email = share_email
         )
+    })
+}
+
+/// `permission_denied` tool result when the client acts as the user's
+/// connected Google account (per-node `google_workspace_auth`). There is no
+/// platform address to share with and nothing for the operator to do: the
+/// user opens the file with that account or shares it with that account.
+/// gdocs will share it so both subsystems emit the same payload.
+pub(crate) fn connected_account_permission_denied_payload() -> serde_json::Value {
+    serde_json::json!({
+        "error": "permission_denied",
+        "hint": "Google returned 403: the connected Google account does not have access \
+                 to this file. Ask the user to open the file with that Google account, or \
+                 to share it with that account (as Editor if it has to be edited), and then \
+                 try again."
     })
 }
 
@@ -1257,6 +1275,21 @@ mod tests {
             hint.contains("operador"),
             "degraded hint must point to the operator: {hint}"
         );
+    }
+
+    /// 403 while acting as the user's connected Google account: the hint
+    /// names that account and never the platform share address or operator.
+    #[test]
+    fn connected_account_permission_denied_names_the_connected_account() {
+        let v = error_to_json(SheetsError::ConnectedAccountPermissionDenied);
+        assert_eq!(v["error"], "permission_denied");
+        assert!(v.get("share_email").is_none(), "{v}");
+        let hint = v["hint"].as_str().expect("hint must be a string");
+        assert!(hint.contains("connected Google account"), "{hint}");
+        assert!(hint.contains("open") && hint.contains("share"), "{hint}");
+        for banned in ["@", "operador", "operator", "agents@startti.co"] {
+            assert!(!hint.contains(banned), "hint mentions `{banned}`: {hint}");
+        }
     }
 
     /// A revoked or expired refresh of the connected Google account tells the

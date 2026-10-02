@@ -1,6 +1,7 @@
 //! REST adapter implementing [`SheetsClient`] against the Google Sheets
 //! API v4 + Drive API.
 
+use crate::google_oauth::infrastructure::GoogleWorkspaceAuth;
 use crate::gsheets::domain::{
     CellValue, ReadOptions, ReadResponse, SetRangeResponse, SheetId, SheetMeta, SheetsClient,
     SheetsError, SpreadsheetId, SpreadsheetMeta, ValueRenderOption,
@@ -30,36 +31,107 @@ pub struct GoogleSheetsHttpClient {
     /// which address to share the spreadsheet with. Empty string in
     /// degraded deployments where the var is not set.
     share_email: String,
+    /// True when built from per-node `google_workspace_auth` (the user's
+    /// connected Google account). A 403 then surfaces as
+    /// `SheetsError::ConnectedAccountPermissionDenied`.
+    connected_account: bool,
     sheets_base: String,
     drive_base: String,
     drive_upload_base: String,
 }
 
 impl GoogleSheetsHttpClient {
-    /// Construct from config — production path.
-    ///
-    /// Reads OAuth credentials from env (via
-    /// `OAuthCredentials::from_env`). Any missing variable surfaces as
-    /// `SheetsError::NotConfigured` with the full list of missing
-    /// vars in the message — so deploys see one clear error per boot
-    /// rather than playing whack-a-mole.
+    /// Construct from config — production path with the platform
+    /// credentials from env. Equivalent to
+    /// [`Self::from_config_with_auth`] with `auth = None`.
     pub fn from_config(cfg: &GSheetsConfig) -> Result<Self, SheetsError> {
+        Self::from_config_with_auth(cfg, None)
+    }
+
+    /// Construct from config with optional per-node credentials.
+    ///
+    /// - `auth = None` → today's env path: OAuth credentials come from
+    ///   `OAuthCredentials::from_env`. Any missing variable surfaces as
+    ///   `SheetsError::NotConfigured` with the full list of missing
+    ///   vars in the message — so deploys see one clear error per boot
+    ///   rather than playing whack-a-mole.
+    /// - `auth = Some(_)` → config credentials (the connected Google
+    ///   account) through the provider shared by identity; env is not
+    ///   read. `share_email` becomes empty: there is no platform
+    ///   address to share files with.
+    pub fn from_config_with_auth(
+        cfg: &GSheetsConfig,
+        auth: Option<&GoogleWorkspaceAuth>,
+    ) -> Result<Self, SheetsError> {
+        Self::build(cfg, auth, SHEETS_BASE, DRIVE_BASE, DRIVE_UPLOAD_BASE)
+    }
+
+    /// Credential selection shared by production and the wiremock tests.
+    fn build(
+        cfg: &GSheetsConfig,
+        auth: Option<&GoogleWorkspaceAuth>,
+        sheets_base: &str,
+        drive_base: &str,
+        drive_upload_base: &str,
+    ) -> Result<Self, SheetsError> {
         let http = crate::shared::http_client::builder()
             .timeout(cfg.request_timeout)
             .build()
             .map_err(|e| SheetsError::Internal(format!("reqwest builder: {e}")))?;
-        let creds = crate::google_oauth::infrastructure::OAuthCredentials::from_env()
-            .map_err(|e| SheetsError::NotConfigured(format!("{e}")))?;
+        let (token, share_email) = match auth {
+            Some(auth) => (
+                TokenProvider::from_shared_provider(auth.provider()),
+                String::new(),
+            ),
+            None => {
+                let creds = crate::google_oauth::infrastructure::OAuthCredentials::from_env()
+                    .map_err(|e| SheetsError::NotConfigured(format!("{e}")))?;
+                (
+                    TokenProvider::from_oauth_credentials(creds),
+                    cfg.share_email.clone(),
+                )
+            }
+        };
         Ok(Self {
             http,
-            token: TokenProvider::from_oauth_credentials(creds),
+            token,
             max_retries: cfg.max_retries,
             retry_base_delay: Duration::from_secs(1), // production: 1s/2s/4s
-            share_email: cfg.share_email.clone(),
-            sheets_base: SHEETS_BASE.to_string(),
-            drive_base: DRIVE_BASE.to_string(),
-            drive_upload_base: DRIVE_UPLOAD_BASE.to_string(),
+            share_email,
+            connected_account: auth.is_some(),
+            sheets_base: sheets_base.to_string(),
+            drive_base: drive_base.to_string(),
+            drive_upload_base: drive_upload_base.to_string(),
         })
+    }
+
+    /// Test-only: [`Self::from_config_with_auth`] with every Google API base
+    /// pointing at `base` (a wiremock server) and fast retries.
+    #[cfg(test)]
+    pub(crate) fn for_tests_with_auth(
+        cfg: &GSheetsConfig,
+        auth: Option<&GoogleWorkspaceAuth>,
+        base: &str,
+    ) -> Result<Self, SheetsError> {
+        let mut client = Self::build(cfg, auth, base, base, base)?;
+        client.retry_base_delay = Duration::from_millis(50);
+        Ok(client)
+    }
+
+    /// The 403 error for this client's credential source: the platform share
+    /// address, or the connected Google account.
+    fn permission_denied(&self) -> SheetsError {
+        if self.connected_account {
+            SheetsError::ConnectedAccountPermissionDenied
+        } else {
+            SheetsError::PermissionDenied(self.share_email.clone())
+        }
+    }
+
+    /// Test-only accessor for the address surfaced in `PermissionDenied`.
+    #[cfg(test)]
+    pub(crate) fn share_email_for_tests(&self) -> &str {
+        &self.share_email
     }
 
     /// Test-only constructor pointing at a wiremock server. `max_retries`
@@ -76,6 +148,7 @@ impl GoogleSheetsHttpClient {
             max_retries: 2,
             retry_base_delay: Duration::from_millis(50), // tests: 50ms/100ms/200ms
             share_email: String::new(),
+            connected_account: false,
             sheets_base: sheets_base.to_string(),
             drive_base: drive_base.to_string(),
             drive_upload_base: drive_upload_base.to_string(),
@@ -114,7 +187,7 @@ impl GoogleSheetsHttpClient {
                     continue;
                 }
                 StatusCode::FORBIDDEN => {
-                    return Err(SheetsError::PermissionDenied(self.share_email.clone()));
+                    return Err(self.permission_denied());
                 }
                 StatusCode::NOT_FOUND => {
                     return Err(SheetsError::SpreadsheetNotFound(url.to_string()));
@@ -166,7 +239,7 @@ impl GoogleSheetsHttpClient {
                     continue;
                 }
                 StatusCode::FORBIDDEN => {
-                    return Err(SheetsError::PermissionDenied(self.share_email.clone()));
+                    return Err(self.permission_denied());
                 }
                 StatusCode::NOT_FOUND => {
                     return Err(SheetsError::SpreadsheetNotFound(url.to_string()));
@@ -225,7 +298,7 @@ impl GoogleSheetsHttpClient {
                     continue;
                 }
                 StatusCode::FORBIDDEN => {
-                    return Err(SheetsError::PermissionDenied(self.share_email.clone()));
+                    return Err(self.permission_denied());
                 }
                 StatusCode::NOT_FOUND => {
                     return Err(SheetsError::SpreadsheetNotFound(url.to_string()));
@@ -512,9 +585,7 @@ impl SheetsClient for GoogleSheetsHttpClient {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
             return Err(match status {
-                StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
-                    SheetsError::PermissionDenied(self.share_email.clone())
-                }
+                StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => self.permission_denied(),
                 _ => SheetsError::Http(format!("upload {status}: {body}")),
             });
         }
@@ -551,7 +622,7 @@ impl SheetsClient for GoogleSheetsHttpClient {
             let body = resp.text().await.unwrap_or_default();
             return Err(match status {
                 StatusCode::NOT_FOUND => SheetsError::SpreadsheetNotFound(id.0.clone()),
-                StatusCode::FORBIDDEN => SheetsError::PermissionDenied(self.share_email.clone()),
+                StatusCode::FORBIDDEN => self.permission_denied(),
                 _ => SheetsError::Http(format!("export {status}: {body}")),
             });
         }
@@ -664,7 +735,7 @@ impl SheetsClient for GoogleSheetsHttpClient {
                     continue;
                 }
                 StatusCode::FORBIDDEN => {
-                    return Err(SheetsError::PermissionDenied(self.share_email.clone()));
+                    return Err(self.permission_denied());
                 }
                 StatusCode::NOT_FOUND => {
                     return Err(SheetsError::SpreadsheetNotFound(format!(
@@ -1089,6 +1160,182 @@ mod tests {
     use wiremock::matchers::{header, method, path_regex};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
+    const OAUTH_ENV: [&str; 3] = [
+        "COLMENA_GOOGLE_OAUTH_CLIENT_ID",
+        "COLMENA_GOOGLE_OAUTH_CLIENT_SECRET",
+        "COLMENA_GOOGLE_OAUTH_REFRESH_TOKEN",
+    ];
+
+    /// Same env-isolation pattern as `google_oauth::infrastructure::config`
+    /// tests: `#[serial]` + clearing the platform credentials.
+    fn clear_oauth_env() {
+        for name in OAUTH_ENV {
+            std::env::remove_var(name);
+        }
+    }
+
+    /// Config with a non-empty share email, so asserting it is cleared
+    /// can't pass vacuously on an env without `COLMENA_GOOGLE_SHARE_EMAIL`.
+    fn cfg_with_share_email() -> GSheetsConfig {
+        GSheetsConfig {
+            share_email: "agents@example.com".into(),
+            ..GSheetsConfig::from_env()
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn from_config_with_auth_uses_config_credentials_without_env() {
+        use crate::google_oauth::infrastructure::{GoogleWorkspaceAuth, DEFAULT_TOKEN_ENDPOINT};
+        clear_oauth_env();
+        let auth = GoogleWorkspaceAuth {
+            token_url: DEFAULT_TOKEN_ENDPOINT.into(),
+            client_id: "cid".into(),
+            client_secret: "cs".into(),
+            refresh_token: "rt".into(),
+        };
+        let client =
+            GoogleSheetsHttpClient::from_config_with_auth(&cfg_with_share_email(), Some(&auth))
+                .expect("builds from config credentials");
+        assert_eq!(client.share_email_for_tests(), "");
+        // The client must reuse the process-wide provider for this identity.
+        assert!(client.token.shares_provider_for_tests(&auth.provider()));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn from_config_with_auth_none_keeps_env_path() {
+        clear_oauth_env();
+        match GoogleSheetsHttpClient::from_config_with_auth(&cfg_with_share_email(), None) {
+            Err(SheetsError::NotConfigured(msg)) => {
+                assert!(msg.contains("COLMENA_GOOGLE_OAUTH_REFRESH_TOKEN"), "{msg}")
+            }
+            Err(other) => panic!("expected NotConfigured, got {other:?}"),
+            Ok(_) => panic!("without auth and without env the client must not build"),
+        }
+    }
+
+    const TOKEN_JSON: &str =
+        r#"{"access_token":"ya29.connected-account","expires_in":3600,"token_type":"Bearer"}"#;
+
+    /// Mount a token endpoint that only answers for the given refresh token.
+    async fn mount_token_endpoint(server: &MockServer, refresh_token: &str) {
+        use wiremock::matchers::{body_string_contains, path};
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .and(body_string_contains(format!(
+                "refresh_token={refresh_token}"
+            )))
+            .respond_with(ResponseTemplate::new(200).set_body_string(TOKEN_JSON))
+            .expect(1)
+            .mount(server)
+            .await;
+    }
+
+    fn connected_auth(token_server: &MockServer, refresh_token: &str) -> GoogleWorkspaceAuth {
+        GoogleWorkspaceAuth {
+            token_url: format!("{}/token", token_server.uri()),
+            client_id: "cid-connected".into(),
+            client_secret: "cs-connected".into(),
+            refresh_token: refresh_token.into(),
+        }
+    }
+
+    fn sheets_meta_json() -> serde_json::Value {
+        serde_json::json!({ "sheets": [{ "properties": {
+            "sheetId": 0, "title": "Sheet1", "index": 0,
+            "gridProperties": { "rowCount": 10, "columnCount": 3 }
+        } }] })
+    }
+
+    /// With config credentials the Sheets call carries the access token minted
+    /// by the block's token endpoint, and the platform env credentials are
+    /// never used (decoys are set and must not reach the token endpoint).
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn connected_account_sends_bearer_minted_from_config_credentials() {
+        for name in OAUTH_ENV {
+            std::env::set_var(name, "ENV-DECOY");
+        }
+        let token_server = MockServer::start().await;
+        mount_token_endpoint(&token_server, "rt-sheets-bearer").await;
+        let sheets = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"/abc$"))
+            .and(header("authorization", "Bearer ya29.connected-account"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(sheets_meta_json()))
+            .expect(1)
+            .mount(&sheets)
+            .await;
+
+        let auth = connected_auth(&token_server, "rt-sheets-bearer");
+        let client = GoogleSheetsHttpClient::for_tests_with_auth(
+            &cfg_with_share_email(),
+            Some(&auth),
+            &sheets.uri(),
+        )
+        .expect("builds from config credentials");
+        let result = client.list_sheets(&SpreadsheetId("abc".into())).await;
+        clear_oauth_env();
+
+        let tabs = result.expect("list_sheets with the connected account");
+        assert_eq!(tabs[0].title, "Sheet1");
+        for req in token_server.received_requests().await.unwrap_or_default() {
+            let body = String::from_utf8_lossy(&req.body);
+            assert!(
+                !body.contains("ENV-DECOY"),
+                "env credentials leaked: {body}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn connected_account_403_reports_the_connected_account() {
+        let token_server = MockServer::start().await;
+        mount_token_endpoint(&token_server, "rt-sheets-403").await;
+        let sheets = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"/abc$"))
+            .respond_with(ResponseTemplate::new(403))
+            .mount(&sheets)
+            .await;
+
+        let auth = connected_auth(&token_server, "rt-sheets-403");
+        let client = GoogleSheetsHttpClient::for_tests_with_auth(
+            &cfg_with_share_email(),
+            Some(&auth),
+            &sheets.uri(),
+        )
+        .unwrap();
+        let err = client
+            .list_sheets(&SpreadsheetId("abc".into()))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, SheetsError::ConnectedAccountPermissionDenied),
+            "{err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn platform_403_keeps_share_email_error() {
+        let (server, mut client) = setup_mock().await;
+        client.share_email = "agents@example.com".into();
+        Mock::given(method("GET"))
+            .and(path_regex(r"/abc$"))
+            .respond_with(ResponseTemplate::new(403))
+            .mount(&server)
+            .await;
+        let err = client
+            .list_sheets(&SpreadsheetId("abc".into()))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, SheetsError::PermissionDenied(email) if email == "agents@example.com"),
+            "{err:?}"
+        );
+    }
+
     /// A connected account whose token the host refreshes (#462): a 401 on the
     /// seeded token asks the host once, naming the rejected token by its
     /// SHA-256, and the call is retried with the fresh one.
@@ -1112,16 +1359,12 @@ mod tests {
                 })
             }
         }
-        let meta = serde_json::json!({ "sheets": [{ "properties": {
-            "sheetId": 0, "title": "Sheet1", "index": 0,
-            "gridProperties": { "rowCount": 10, "columnCount": 3 }
-        } }] });
         let (server, mut client) = setup_mock().await;
         for (bearer, status) in [("tok-cx7-seed", 401), ("tok-cx7-fresh", 200)] {
             Mock::given(method("GET"))
                 .and(path_regex(r"/abc$"))
                 .and(header("authorization", format!("Bearer {bearer}").as_str()))
-                .respond_with(ResponseTemplate::new(status).set_body_json(meta.clone()))
+                .respond_with(ResponseTemplate::new(status).set_body_json(sheets_meta_json()))
                 .expect(1)
                 .mount(&server)
                 .await;

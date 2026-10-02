@@ -38,6 +38,12 @@ pub enum SheetsError {
     #[error("permission_denied: {0}")]
     PermissionDenied(String),
 
+    /// 403 from Google while acting as the user's connected Google account
+    /// (per-node `google_workspace_auth`): that account has no access to the
+    /// file. There is no platform address to share with.
+    #[error("permission_denied: the connected Google account has no access to this file")]
+    ConnectedAccountPermissionDenied,
+
     /// The connected Google account's refresh was rejected (`invalid_grant`):
     /// its authorization expired or was revoked. The user reconnects Google;
     /// there is nothing for the operator to set up.
