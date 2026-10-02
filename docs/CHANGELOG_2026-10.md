@@ -155,3 +155,16 @@ puerto con el sha256 del sembrado, reconexión y 1 sola ejecución de la tool; 5
 puerto; sin renovación el 401 sube como hoy. **Mutación.** Sin cada forma de 401, sin `invalidate`, reintento
 ante cualquier error, sin reconexión: cada una tumba un test. **E2E.** No aplica hasta la parte 2. **ADP.**
 Ninguno. **Estado.** partial.
+
+## 10. gdocs: carpeta de la cuenta conectada, 403 con el correo y reintento ante 401 (porte de `feat/google-workspace-auth`, parte 5)
+
+**Qué cambia.** Con la cuenta conectada, `create`, `create_from_markdown` y `create_from_docx` sin carpeta dejan el
+documento en la raíz de su Drive (antes `NoParentFolder`); con carpeta la respetan. El 403 de la cuenta de plataforma
+lleva el `share_email` configurado en vez del contexto y el cuerpo de Google, que van al log. **Nuevo:** un 401
+invalida la fuente de token y reintenta una vez (la rama no lo hacía; gdocs devolvía `AuthFailed` de inmediato).
+Guía: [45_gdocs.md](developer_guide/45_gdocs.md). **Commits portados.** La parte gdocs de `d94d2d37` (carpeta),
+`1fa1047b` y `91b1b48d` (`http_client.rs`). **Tests.** Carpeta: sin carpeta → sin `parents`, con carpeta → la
+respeta, plataforma sin carpeta → `NoParentFolder`, plataforma usa la suya; 403 de plataforma con y sin correo; 401
+con `HostRefreshTokenProvider` (un pedido, sha correcto) y segundo 401 → `AuthFailed`. **Mutación.** Sin reintento,
+reintento sin `invalidate`, carpeta de plataforma con la cuenta conectada. **E2E.** No aplica hasta el cableado de
+`llm_call`. **ADP.** Ninguno. **Estado.** partial.

@@ -6,8 +6,9 @@
 //!   - `https://www.googleapis.com/upload/drive/v3/files`
 //!
 //! Retry policy: up to `max_retries` (default 3) retries with
-//! 1s/2s/4s backoff on 429 + 5xx. 401 surfaces immediately as
-//! `AuthFailed`. Other 4xx → typed `DocsError`.
+//! 1s/2s/4s backoff on 429 + 5xx. A 401 invalidates the token source and
+//! retries once; a second 401 surfaces as `AuthFailed`. Other 4xx → typed
+//! `DocsError`.
 //!
 //! THIS FILE IS BUILT INCREMENTALLY. Task 9 adds `get` + snapshot
 //! parsing; Tasks 10/11/12 fill in the rest of the trait via
@@ -41,7 +42,8 @@ pub struct GoogleDocsHttpClient {
     pub(crate) tokens: Arc<TokenCache>,
     /// True when built from per-node `google_workspace_auth` (the user's
     /// connected Google account): a 403 surfaces as
-    /// `DocsError::ConnectedAccountPermissionDenied`.
+    /// `DocsError::ConnectedAccountPermissionDenied`, and `create*` without a
+    /// folder leaves the document in the root of that account's Drive.
     connected_account: bool,
     base_docs: String,
     base_drive: String,
@@ -68,8 +70,8 @@ impl GoogleDocsHttpClient {
     ///   read. `share_email` becomes empty: there is no platform
     ///   address to share files with. `default_parent_folder` becomes
     ///   empty too: the platform folder belongs to the platform account,
-    ///   so `create*` without an explicit folder never writes there (for
-    ///   now it is `NoParentFolder`).
+    ///   so `create*` without an explicit folder stays in the root of the
+    ///   connected account's Drive.
     pub fn from_config_with_auth(
         cfg: &GDocsConfig,
         auth: Option<&GoogleWorkspaceAuth>,
@@ -140,6 +142,21 @@ impl GoogleDocsHttpClient {
         )
     }
 
+    /// Folder for a new document: the call argument, else the configured
+    /// default. Without either, the platform account errors
+    /// (`NoParentFolder`) while the connected account keeps the document in
+    /// the root of its own Drive (`Ok(None)`).
+    fn target_folder(&self, parent_folder: Option<&str>) -> Result<Option<String>, DocsError> {
+        match parent_folder
+            .map(String::from)
+            .or_else(|| self.cfg.default_parent_folder.clone())
+        {
+            Some(folder) => Ok(Some(folder)),
+            None if self.connected_account => Ok(None),
+            None => Err(DocsError::NoParentFolder),
+        }
+    }
+
     /// Test-only accessor for the configured share address.
     #[cfg(test)]
     pub(crate) fn share_email_for_tests(&self) -> &str {
@@ -177,13 +194,17 @@ impl GoogleDocsHttpClient {
         self.tokens.get().await
     }
 
-    /// Send with retry on 429/5xx. The `build_req` closure rebuilds the
-    /// request on each retry (so token refreshes apply).
+    /// Send with retry on 429/5xx, and once on a 401 after invalidating the
+    /// token source (the access token was revoked or expired early). The
+    /// `build_req` closure rebuilds the request on each retry (so token
+    /// refreshes apply). A second 401 is returned to `map_status`
+    /// (`AuthFailed`).
     async fn send_with_retry(
         &self,
         build_req: impl Fn(&Client, &str) -> reqwest::RequestBuilder,
     ) -> Result<Response, DocsError> {
         let mut attempt = 0u32;
+        let mut reauthorized = false;
         loop {
             let token = self.bearer().await?;
             let resp = build_req(&self.http, &token)
@@ -191,6 +212,11 @@ impl GoogleDocsHttpClient {
                 .await
                 .map_err(|e| DocsError::Http(e.to_string()))?;
             let status = resp.status();
+            if status == StatusCode::UNAUTHORIZED && !reauthorized {
+                reauthorized = true;
+                self.tokens.invalidate().await;
+                continue;
+            }
             if status.is_success() || !is_retryable(status) {
                 return Ok(resp);
             }
@@ -216,13 +242,34 @@ impl GoogleDocsHttpClient {
             StatusCode::FORBIDDEN if self.connected_account => {
                 DocsError::ConnectedAccountPermissionDenied(format!("{ctx}: {body}"))
             }
-            StatusCode::FORBIDDEN => DocsError::PermissionDenied(format!("{ctx}: {body}")),
+            // The platform variant carries the share email: the tool result
+            // tells the user which address to share the file with, not the
+            // request context or Google's response body. Log those here
+            // instead, so a real permission problem is still triageable
+            // server-side.
+            StatusCode::FORBIDDEN => {
+                tracing::debug!("gdocs: platform 403 {ctx}: {body}");
+                DocsError::PermissionDenied(self.cfg.share_email.clone())
+            }
             StatusCode::NOT_FOUND => DocsError::DocumentNotFound(ctx.into()),
             StatusCode::TOO_MANY_REQUESTS => DocsError::RateLimit(60),
             StatusCode::BAD_REQUEST if body.contains("requiredRevisionId") => DocsError::Conflict,
             _ => DocsError::Http(format!("{ctx}: {s} {body}")),
         })
     }
+}
+
+/// Drive metadata for a new native Google Doc. Without a folder, `parents`
+/// is omitted so Drive places the file in the account's root.
+fn new_document_metadata(title: &str, folder: Option<String>) -> serde_json::Value {
+    let mut metadata = serde_json::json!({
+        "name": title,
+        "mimeType": "application/vnd.google-apps.document",
+    });
+    if let Some(folder) = folder {
+        metadata["parents"] = serde_json::json!([folder]);
+    }
+    metadata
 }
 
 /// Bundle 4A: shape a `drive.comments.get`/list element into our domain
@@ -661,23 +708,22 @@ impl DocsClient for GoogleDocsHttpClient {
                 .to_string(),
         );
 
-        // Step 2: move to parent_folder (call arg overrides config).
-        let folder = parent_folder
-            .map(String::from)
-            .or_else(|| self.cfg.default_parent_folder.clone())
-            .ok_or(DocsError::NoParentFolder)?;
-        let url = format!(
-            "{}/files/{}?addParents={}&removeParents=root&fields=id,parents",
-            self.base_drive, doc_id.0, folder
-        );
-        let resp = self
-            .send_with_retry(|c, t| {
-                c.request(Method::PATCH, &url)
-                    .bearer_auth(t)
-                    .json(&serde_json::json!({}))
-            })
-            .await?;
-        self.map_status(resp, "files.update parent").await?;
+        // Step 2: move to parent_folder (call arg overrides config). No
+        // folder for the connected account → the document stays in its root.
+        if let Some(folder) = self.target_folder(parent_folder)? {
+            let url = format!(
+                "{}/files/{}?addParents={}&removeParents=root&fields=id,parents",
+                self.base_drive, doc_id.0, folder
+            );
+            let resp = self
+                .send_with_retry(|c, t| {
+                    c.request(Method::PATCH, &url)
+                        .bearer_auth(t)
+                        .json(&serde_json::json!({}))
+                })
+                .await?;
+            self.map_status(resp, "files.update parent").await?;
+        }
 
         // Step 3: fetch fresh snapshot for revision_id + url + tabs.
         let snap = self.get(&doc_id).await?;
@@ -697,16 +743,7 @@ impl DocsClient for GoogleDocsHttpClient {
         md: &str,
         parent_folder: Option<&'a str>,
     ) -> Result<CreateFromMarkdownResult, DocsError> {
-        let folder = parent_folder
-            .map(String::from)
-            .or_else(|| self.cfg.default_parent_folder.clone())
-            .ok_or(DocsError::NoParentFolder)?;
-
-        let metadata = serde_json::json!({
-            "name": title,
-            "mimeType": "application/vnd.google-apps.document",
-            "parents": [folder],
-        });
+        let metadata = new_document_metadata(title, self.target_folder(parent_folder)?);
         let boundary = "colmena_gdocs_boundary";
         let body = format!(
             "--{boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n{}\r\n\
@@ -770,16 +807,7 @@ impl DocsClient for GoogleDocsHttpClient {
         bytes: Vec<u8>,
         parent_folder: Option<&'a str>,
     ) -> Result<DocumentMeta, DocsError> {
-        let folder = parent_folder
-            .map(String::from)
-            .or_else(|| self.cfg.default_parent_folder.clone())
-            .ok_or(DocsError::NoParentFolder)?;
-
-        let metadata = serde_json::json!({
-            "name": title,
-            "mimeType": "application/vnd.google-apps.document",
-            "parents": [folder],
-        });
+        let metadata = new_document_metadata(title, self.target_folder(parent_folder)?);
         let boundary = "colmena_gdocs_boundary";
         let metadata_part = format!(
             "--{boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n{}\r\n",
@@ -1806,6 +1834,7 @@ mod tests {
     const TOKEN_JSON: &str =
         r#"{"access_token":"ya29.connected-account","expires_in":3600,"token_type":"Bearer"}"#;
 
+    /// One refresh per test: the access token is minted once and cached.
     async fn mount_token_endpoint(server: &MockServer, refresh_token: &str) {
         use wiremock::matchers::body_string_contains;
         Mock::given(method("POST"))
@@ -1814,6 +1843,7 @@ mod tests {
                 "refresh_token={refresh_token}"
             )))
             .respond_with(ResponseTemplate::new(200).set_body_string(TOKEN_JSON))
+            .expect(1)
             .mount(server)
             .await;
     }
@@ -1903,22 +1933,331 @@ mod tests {
         );
     }
 
-    /// The platform default folder is never used for the connected account.
+    /// The platform 403 carries the configured share email, which is what the
+    /// `permission_denied` hint tells the user to share with — never the
+    /// request context or Google's response body.
     #[tokio::test]
-    async fn connected_account_create_ignores_the_platform_folder() {
+    async fn platform_403_carries_the_share_email() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/docs/documents/d1"))
+            .respond_with(ResponseTemplate::new(403).set_body_string("forbidden-body"))
+            .mount(&server)
+            .await;
+        let base = server.uri();
+        let client = GoogleDocsHttpClient::with_base_urls(
+            &cfg_with_share_email(),
+            format!("{}/docs", base),
+            format!("{}/drive", base),
+            format!("{}/upload", base),
+        )
+        .unwrap();
+        client.tokens.set_token_for_test("fake".to_string()).await;
+        let err = client.get(&DocumentId("d1".into())).await.unwrap_err();
+        assert!(
+            matches!(&err, DocsError::PermissionDenied(email) if email == "agents@example.com"),
+            "{err:?}"
+        );
+        let hint = crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::gdocs_tools::error_to_json(err)["hint"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(hint.contains("`agents@example.com`"), "{hint}");
+        assert!(
+            !hint.contains("forbidden-body") && !hint.contains("docs.get"),
+            "{hint}"
+        );
+    }
+
+    /// Without a share email the platform 403 falls back to the degraded
+    /// payload (ask the operator), as the tool mapping expects.
+    #[tokio::test]
+    async fn platform_403_without_share_email_is_degraded() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/docs/documents/d1"))
+            .respond_with(ResponseTemplate::new(403).set_body_string("forbidden-body"))
+            .mount(&server)
+            .await;
+        let client = client_for(&server);
+        client.tokens.set_token_for_test("fake".to_string()).await;
+        let err = client.get(&DocumentId("d1".into())).await.unwrap_err();
+        assert!(
+            matches!(&err, DocsError::PermissionDenied(email) if email.is_empty()),
+            "{err:?}"
+        );
+    }
+
+    /// Mount the reads every `create*` performs after the document exists.
+    async fn mount_created_doc_reads(server: &MockServer) {
+        Mock::given(method("GET"))
+            .and(path("/docs/documents/new_doc"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(empty_doc_json("Hello")))
+            .mount(server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/drive/files/new_doc/export"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("# Hello"))
+            .mount(server)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn connected_account_create_without_folder_stays_in_the_user_root() {
         let server = MockServer::start().await;
         let token_server = MockServer::start().await;
-        let client = connected_client(&server, &token_server, "rt-docs-no-folder").await;
+        Mock::given(method("POST"))
+            .and(path("/docs/documents"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "documentId": "new_doc"
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("PATCH"))
+            .and(path("/drive/files/new_doc"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .expect(0)
+            .mount(&server)
+            .await;
+        mount_created_doc_reads(&server).await;
+
+        let client = connected_client(&server, &token_server, "rt-docs-create").await;
+        let meta = client
+            .create("Hello", None)
+            .await
+            .expect("no NoParentFolder with the connected account");
+        assert_eq!(meta.doc_id.0, "new_doc");
+    }
+
+    #[tokio::test]
+    async fn connected_account_create_respects_explicit_parent_folder() {
+        use wiremock::matchers::query_param;
+        let server = MockServer::start().await;
+        let token_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/docs/documents"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "documentId": "new_doc"
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("PATCH"))
+            .and(path("/drive/files/new_doc"))
+            .and(query_param("addParents", "user-folder"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        mount_created_doc_reads(&server).await;
+
+        let client = connected_client(&server, &token_server, "rt-docs-create-folder").await;
+        client
+            .create("Hello", Some("user-folder"))
+            .await
+            .expect("create into the explicit folder");
+    }
+
+    /// Body of the single multipart upload `server` received.
+    async fn uploaded_body(server: &MockServer) -> String {
+        let uploads: Vec<_> = server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|r| r.url.path() == "/upload/files")
+            .collect();
+        assert_eq!(uploads.len(), 1, "expected exactly one upload");
+        String::from_utf8_lossy(&uploads[0].body).into_owned()
+    }
+
+    async fn mount_upload(server: &MockServer) {
+        Mock::given(method("POST"))
+            .and(path("/upload/files"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "id": "new_doc" })))
+            .mount(server)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn connected_account_create_from_markdown_without_folder_omits_parents() {
+        let server = MockServer::start().await;
+        let token_server = MockServer::start().await;
+        mount_upload(&server).await;
+        mount_created_doc_reads(&server).await;
+        let client = connected_client(&server, &token_server, "rt-docs-md").await;
+        client
+            .create_from_markdown("Hello", "# Hello", None)
+            .await
+            .expect("no NoParentFolder with the connected account");
+        let body = uploaded_body(&server).await;
+        assert!(!body.contains("parents"), "{body}");
+        assert!(!body.contains("platform-folder"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn connected_account_create_from_markdown_respects_explicit_parent_folder() {
+        let server = MockServer::start().await;
+        let token_server = MockServer::start().await;
+        mount_upload(&server).await;
+        mount_created_doc_reads(&server).await;
+        let client = connected_client(&server, &token_server, "rt-docs-md-folder").await;
+        client
+            .create_from_markdown("Hello", "# Hello", Some("user-folder"))
+            .await
+            .unwrap();
+        let body = uploaded_body(&server).await;
+        assert!(body.contains(r#""parents":["user-folder"]"#), "{body}");
+    }
+
+    #[tokio::test]
+    async fn connected_account_create_from_docx_without_folder_omits_parents() {
+        let server = MockServer::start().await;
+        let token_server = MockServer::start().await;
+        mount_upload(&server).await;
+        mount_created_doc_reads(&server).await;
+        let client = connected_client(&server, &token_server, "rt-docs-docx").await;
+        client
+            .create_from_docx("Hello", b"PK-fake-docx".to_vec(), None)
+            .await
+            .expect("no NoParentFolder with the connected account");
+        let body = uploaded_body(&server).await;
+        assert!(!body.contains("parents"), "{body}");
+        assert!(!body.contains("platform-folder"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn connected_account_create_from_docx_respects_explicit_parent_folder() {
+        let server = MockServer::start().await;
+        let token_server = MockServer::start().await;
+        mount_upload(&server).await;
+        mount_created_doc_reads(&server).await;
+        let client = connected_client(&server, &token_server, "rt-docs-docx-folder").await;
+        client
+            .create_from_docx("Hello", b"PK-fake-docx".to_vec(), Some("user-folder"))
+            .await
+            .unwrap();
+        let body = uploaded_body(&server).await;
+        assert!(body.contains(r#""parents":["user-folder"]"#), "{body}");
+    }
+
+    #[tokio::test]
+    async fn platform_create_from_markdown_without_folder_errors() {
+        let server = MockServer::start().await;
+        let client = client_for(&server);
+        client.tokens.set_token_for_test("fake".to_string()).await;
         let err = client
             .create_from_markdown("Hello", "# Hello", None)
             .await
             .unwrap_err();
         assert!(matches!(err, DocsError::NoParentFolder), "{err:?}");
-        assert!(server
-            .received_requests()
+    }
+
+    #[tokio::test]
+    async fn platform_create_from_docx_without_folder_errors() {
+        let server = MockServer::start().await;
+        let client = client_for(&server);
+        client.tokens.set_token_for_test("fake".to_string()).await;
+        let err = client
+            .create_from_docx("Hello", b"PK".to_vec(), None)
             .await
-            .unwrap_or_default()
-            .is_empty());
+            .unwrap_err();
+        assert!(matches!(err, DocsError::NoParentFolder), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn platform_create_from_markdown_uses_configured_parent_folder() {
+        let server = MockServer::start().await;
+        mount_upload(&server).await;
+        mount_created_doc_reads(&server).await;
+        let cfg = GDocsConfig {
+            default_parent_folder: Some("platform-folder".into()),
+            ..test_cfg()
+        };
+        let base = server.uri();
+        let client = GoogleDocsHttpClient::with_base_urls(
+            &cfg,
+            format!("{}/docs", base),
+            format!("{}/drive", base),
+            format!("{}/upload", base),
+        )
+        .unwrap();
+        client.tokens.set_token_for_test("fake".to_string()).await;
+        client
+            .create_from_markdown("Hello", "# Hello", None)
+            .await
+            .unwrap();
+        let body = uploaded_body(&server).await;
+        assert!(body.contains(r#""parents":["platform-folder"]"#), "{body}");
+    }
+
+    /// A Docs 401 invalidates the token source and retries once with a fresh
+    /// token. Driven through #462's `HostRefreshTokenProvider`: the host is
+    /// asked exactly once, naming the rejected token by its SHA-256.
+    #[tokio::test]
+    async fn a_401_invalidates_and_retries_once_with_the_fresh_token() {
+        use crate::dag_engine::application::ports::{
+            HostToken, HostTokenError, HostTokenPort, HostTokenRequest,
+        };
+        use crate::gdocs::infrastructure::auth::TokenCache;
+        use crate::google_oauth::infrastructure::HostRefreshTokenProvider;
+        use sha2::{Digest, Sha256};
+        struct Port(std::sync::Mutex<Vec<HostTokenRequest>>);
+        #[async_trait::async_trait]
+        impl HostTokenPort for Port {
+            async fn fresh_token(&self, r: HostTokenRequest) -> Result<HostToken, HostTokenError> {
+                self.0.lock().unwrap().push(r);
+                let expires_at = chrono::Utc::now().timestamp() + 3600;
+                Ok(HostToken {
+                    access_token: "tok-cx7-fresh".into(),
+                    expires_at,
+                })
+            }
+        }
+        let server = MockServer::start().await;
+        for (bearer, status) in [("tok-cx7-seed", 401), ("tok-cx7-fresh", 200)] {
+            Mock::given(method("GET"))
+                .and(path("/docs/documents/d1"))
+                .and(wiremock::matchers::header(
+                    "authorization",
+                    format!("Bearer {bearer}").as_str(),
+                ))
+                .respond_with(ResponseTemplate::new(status).set_body_json(empty_doc_json("T")))
+                .expect(1)
+                .mount(&server)
+                .await;
+        }
+        let port = Arc::new(Port(Default::default()));
+        let host = HostRefreshTokenProvider::new(
+            port.clone(),
+            "cth1-cx7-h".into(),
+            "tok-cx7-seed".into(),
+            chrono::Utc::now().timestamp() + 3600,
+            Some("sess_1".into()),
+        );
+        let mut client = client_for(&server);
+        client.tokens = Arc::new(TokenCache::from_shared_provider(Arc::new(host)));
+        let doc = client.get(&DocumentId("d1".into())).await;
+        assert_eq!(doc.expect("retried with the fresh token").title, "T");
+        let calls = port.0.lock().unwrap();
+        assert_eq!(calls.len(), 1, "one host refresh");
+        let stale = format!("{:x}", Sha256::digest(b"tok-cx7-seed"));
+        assert_eq!(calls[0].stale_token_sha256.as_deref(), Some(stale.as_str()));
+    }
+
+    /// A second 401 after the refresh is not retried again: `AuthFailed`.
+    #[tokio::test]
+    async fn a_second_401_is_auth_failed_without_another_retry() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/docs/documents/d1"))
+            .respond_with(ResponseTemplate::new(401).set_body_string("nope"))
+            .expect(2)
+            .mount(&server)
+            .await;
+        let client = client_for(&server);
+        client.tokens.set_token_for_test("fake".to_string()).await;
+        let err = client.get(&DocumentId("d1".into())).await.unwrap_err();
+        assert!(matches!(err, DocsError::AuthFailed(_)), "{err:?}");
     }
 
     fn client_for(server: &MockServer) -> GoogleDocsHttpClient {
