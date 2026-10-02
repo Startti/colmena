@@ -14,7 +14,7 @@ use std::error::Error;
 use std::sync::Arc;
 
 use crate::crdt_documents::{ArtifactId, CrdtDocumentsRuntime};
-use crate::dag_engine::application::ports::NodeRegistryPort;
+use crate::dag_engine::application::ports::{HostTokenPort, NodeRegistryPort};
 use crate::dag_engine::domain::lint::{FieldSpec, NodeCatalogEntry};
 use crate::dag_engine::infrastructure::dag_tool_executor::DagToolExecutor;
 use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::{
@@ -454,6 +454,9 @@ pub struct LlmNode {
     /// Optional runs' state rows — propagated to DagToolExecutor, which closes
     /// the child run of a question a parallel group does not keep.
     state_repository: Option<Arc<dyn crate::dag_engine::domain::state::DagStateRepository>>,
+    /// The embedder's port for MCP `auth_refresh` headers; set after
+    /// construction by `HashMapNodeRegistry::set_host_token_port`.
+    pub(crate) host_token_port: Arc<std::sync::OnceLock<Arc<dyn HostTokenPort>>>,
 }
 
 impl LlmNode {
@@ -508,6 +511,7 @@ impl LlmNode {
             secure_value_service: None,
             storage: None,
             state_repository: None,
+            host_token_port: Arc::default(),
         }
     }
 
@@ -2473,12 +2477,8 @@ impl ExecutableNode for LlmNode {
         // be built yet — wiring needs the names this executor already claims — so
         // it gets an empty slot now and is filled after tool assembly.
         let mcp_specs = {
-            use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::mcp::collect_mcp_tool_configs;
-            inputs
-                .get("tool_configurations")
-                .or_else(|| config.get("tool_configurations"))
-                .map(collect_mcp_tool_configs)
-                .unwrap_or_default()
+            use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::mcp::mcp_specs_for;
+            mcp_specs_for(inputs, config, tools_authored)
         };
         let mcp_slot = std::sync::Arc::new(std::sync::OnceLock::new());
 
@@ -3294,18 +3294,18 @@ impl ExecutableNode for LlmNode {
             None
         } else {
             use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::mcp::{
-                unavailable_notice, wire, McpDispatcher,
+                unavailable_notice, wire_with, McpDispatcher,
             };
             let pool = crate::dag_engine::infrastructure::mcp_registry::global_mcp_registry();
             let mut claimed: std::collections::HashSet<String> =
                 tools.iter().map(|t| t.name.clone()).collect();
-            let wiring = wire(
+            let wiring = wire_with(
                 pool,
                 &mcp_specs,
                 &mut claimed,
                 self.secure_value_service.as_deref(),
-                &session_id_str,
-                agent_session_id_str.as_deref(),
+                (&session_id_str, agent_session_id_str.as_deref()),
+                self.host_token_port.get().cloned(),
             )
             .await;
 
@@ -7868,6 +7868,62 @@ mod steering_take_tests {
         fn get_all_nodes(&self) -> HashMap<String, Arc<dyn ExecutableNode>> {
             HashMap::new()
         }
+    }
+
+    /// `auth_refresh` in a `tool_configurations` that arrived through inputs
+    /// the author did not write is dropped: the host port is never called. The
+    /// author's copy (config) does reach it (expired seed: asked at connect).
+    #[tokio::test]
+    async fn a_model_fed_auth_refresh_never_reaches_the_host_port() {
+        use crate::dag_engine::application::ports as p;
+        struct Port(std::sync::Mutex<usize>);
+        #[async_trait::async_trait]
+        impl p::HostTokenPort for Port {
+            async fn fresh_token(
+                &self,
+                _: p::HostTokenRequest,
+            ) -> Result<p::HostToken, p::HostTokenError> {
+                *self.0.lock().unwrap() += 1;
+                Err(p::HostTokenError::RateLimited)
+            }
+        }
+        let tc = json!({ "srv": { "node_type": "mcp", "mcp": {
+            "url": "https://127.0.0.1:9/mcp",
+            "headers": { "Authorization": "Bearer tok-cx7-seed" },
+            "auth_refresh": { "header": "Authorization", "scheme": "Bearer",
+                "handle": "cth1-cx7-h", "expires_at": 0 } } } });
+        let db = tempfile::NamedTempFile::new().unwrap();
+        let registry: Arc<dyn NodeRegistryPort> = Arc::new(OnlyPeek(Arc::default()));
+        let pools = Arc::new(PgPoolRegistry::new(PoolConfig::defaults()));
+        let repos = Arc::new(ConversationRepositoryFactory::new(pools));
+        let llm = LlmNode::new(repos, Arc::downgrade(&registry), None);
+        let port = Arc::new(Port(Default::default()));
+        let _ = llm.host_token_port.set(port.clone());
+        let mut asked = Vec::new();
+        for from_inputs in [true, false] {
+            let _guard = OverrideGuard::install(Arc::new(ScriptedAdapter::new(vec![
+                ScriptedResponse::Text("ok".into()),
+            ])));
+            let mut config = json!({
+                "provider": "mock", "model": "m", "api_key": "k", "stream": false, "prompt": "go",
+                "connection_url": format!("sqlite://{}", db.path().display()),
+            });
+            let mut inputs = HashMap::from([("__colmena_session_id".to_string(), json!("s1"))]);
+            match from_inputs {
+                true => inputs.insert("tool_configurations".into(), tc.clone()),
+                false => config
+                    .as_object_mut()
+                    .unwrap()
+                    .insert("tool_configurations".into(), tc.clone()),
+            };
+            let _ = llm.execute(&inputs, &config, &mut json!({}), None).await;
+            asked.push(std::mem::take(&mut *port.0.lock().unwrap()));
+        }
+        assert_eq!(asked[0], 0, "inputs-fed auth_refresh reached the host");
+        assert!(
+            asked[1] >= 1,
+            "the author's auth_refresh never reached the host"
+        );
     }
 
     #[tokio::test]
