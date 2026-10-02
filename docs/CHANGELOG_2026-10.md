@@ -148,12 +148,16 @@ iguales a gsheets. **Mutación.** 403 sin mirar la cuenta; sin el brazo de recon
 `AuthTokenProvider`): conecta con `Bearer <token del proveedor>` (el sembrado si el host no da uno) y, ante un
 **401** de cualquier pedido (con o sin `WWW-Authenticate`), llama `invalidate()`, pide un token, reconecta y
 reintenta **una vez**. Un 401 se contesta antes de que el servidor corra la tool, por eso `tools/call` puede
-reintentarse solo en ese caso; un 500 sigue sin reintento. Llamadas concurrentes renuevan una sola vez. `Debug`
+reintentarse solo en ese caso; un 500 sigue sin reintento. Llamadas concurrentes renuevan una sola vez; el header
+renovado reemplaza cualquier otro con el mismo nombre sin importar mayúsculas, y un pedido ya en vuelo termina en la
+conexión vieja. Un 401 con cuerpo JSON-RPC y sin `WWW-Authenticate` rmcp lo devuelve como respuesta: no renueva. `Debug`
 y logs no muestran el token. Nadie lo llama todavía: la entrada `auth_refresh` y el cableado llegan en la parte 2.
 **Tests.** `rmcp_http_client` `auth_refresh` con un servidor MCP de prueba: 401 (las dos formas) → 1 pedido al
-puerto con el sha256 del sembrado, reconexión y 1 sola ejecución de la tool; 500 sin reintento ni pedido al
+puerto con el sha256 del sembrado, reconexión y 1 sola ejecución de la tool, con el header sembrado en minúsculas;
+dos 401 a la vez, una renovación; el host rechaza, el 401 queda y la tool no corre; 500 sin reintento ni pedido al
 puerto; sin renovación el 401 sube como hoy. **Mutación.** Sin cada forma de 401, sin `invalidate`, reintento
-ante cualquier error, sin reconexión: cada una tumba un test. **E2E.** No aplica hasta la parte 2. **ADP.**
+ante cualquier error, sin reconexión, reemplazo sensible a mayúsculas, sin generación, reintento tras el rechazo:
+cada una tumba un test. **E2E.** No aplica hasta la parte 2. **ADP.**
 Ninguno. **Estado.** partial.
 
 ## 10. gdocs: carpeta de la cuenta conectada, 403 con el correo y reintento ante 401 (porte de `feat/google-workspace-auth`, parte 5)

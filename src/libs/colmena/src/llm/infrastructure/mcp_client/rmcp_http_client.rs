@@ -192,8 +192,10 @@ fn mcp_http_client(guard: DialGuard) -> Result<rmcp_reqwest::Client, McpError> {
 pub struct RmcpHttpClient {
     server_label: String,
     timeout: Duration,
-    /// Replaced when an `auth_refresh` header is renewed after a 401.
-    running: tokio::sync::RwLock<RunningService<RoleClient, ClientInfo>>,
+    /// Replaced when an `auth_refresh` header is renewed after a 401. An `Arc`
+    /// so a request already sent on the old connection keeps it alive and
+    /// completes; only new requests use the replacement.
+    running: tokio::sync::RwLock<Arc<RunningService<RoleClient, ClientInfo>>>,
     refresh: Option<Refresh>,
 }
 
@@ -211,13 +213,15 @@ impl std::fmt::Debug for HeaderRefresh {
     }
 }
 
-/// What renewing needs: the headers WITHOUT the renewed one's current value.
+/// What renewing needs. `headers` holds every other header: none of its keys
+/// equals `auth.header` ignoring ASCII case (see [`with_bearer`]).
 struct Refresh {
     auth: HeaderRefresh,
     config: McpServerConfig,
     headers: BTreeMap<String, String>,
     block_private: bool,
-    /// Bumped per reconnect, so concurrent 401s renew once.
+    /// Bumped together with the swap, under the write lock, so concurrent
+    /// 401s on one connection renew once.
     generation: AtomicU64,
     lock: tokio::sync::Mutex<()>,
 }
@@ -228,8 +232,29 @@ impl std::fmt::Debug for Refresh {
     }
 }
 
+/// `headers` without any key equal to `name` ignoring ASCII case, then with
+/// `name: Bearer <token>`: one header, never a stale copy under other casing.
+fn with_bearer(
+    headers: &BTreeMap<String, String>,
+    name: &str,
+    token: &str,
+) -> BTreeMap<String, String> {
+    let mut out: BTreeMap<String, String> = headers
+        .iter()
+        .filter(|(k, _)| !k.eq_ignore_ascii_case(name))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    out.insert(name.to_string(), format!("Bearer {token}"));
+    out
+}
+
 /// Whether the server answered HTTP 401 (rmcp: `AuthRequired` with a
 /// `WWW-Authenticate`, else an `HTTP 401 …` unexpected response).
+///
+/// rmcp 3.1.4 turns a 401 whose body is a JSON-RPC error and that carries no
+/// `WWW-Authenticate` into an `Ok` JSON-RPC error reply, not a transport
+/// error: that case does not renew and comes back as today's error (fails
+/// safe: nothing is sent twice).
 fn is_unauthorized(err: &ServiceError) -> bool {
     let ServiceError::TransportSend(e) = err else {
         return false;
@@ -313,14 +338,15 @@ impl RmcpHttpClient {
                 auth.seed.clone()
             }
         };
-        let mut sent = headers.clone();
-        sent.insert(auth.header.clone(), format!("Bearer {token}"));
+        let sent = with_bearer(headers, &auth.header, &token);
         let guard = DialGuard::system(label, block_private);
         let mut client = Self::connect_transport(label, config, &sent, guard).await?;
+        let mut headers = sent;
+        headers.remove(&auth.header);
         client.refresh = Some(Refresh {
             auth,
             config: config.clone(),
-            headers: headers.clone(),
+            headers,
             block_private,
             generation: AtomicU64::new(0),
             lock: tokio::sync::Mutex::new(()),
@@ -348,13 +374,13 @@ impl RmcpHttpClient {
             Ok(t) => t,
             Err(e) => return fail(&format!("host gave no token after a 401: {e}")),
         };
-        let mut headers = r.headers.clone();
-        headers.insert(r.auth.header.clone(), format!("Bearer {}", token.as_str()));
+        let headers = with_bearer(&r.headers, &r.auth.header, token.as_str());
         let guard = DialGuard::system(&self.server_label, r.block_private);
         match Self::connect_transport(&self.server_label, &r.config, &headers, guard).await {
             Ok(fresh) => {
-                *self.running.write().await = fresh.running.into_inner();
+                let mut running = self.running.write().await;
                 r.generation.fetch_add(1, Ordering::SeqCst);
+                *running = fresh.running.into_inner();
                 true
             }
             Err(e) => fail(&format!("reconnect after a 401 failed: {e}")),
@@ -419,7 +445,7 @@ impl RmcpHttpClient {
         Ok(Self {
             server_label: server_label.to_string(),
             timeout: config.timeout,
-            running: tokio::sync::RwLock::new(running),
+            running: tokio::sync::RwLock::new(Arc::new(running)),
             refresh: None,
         })
     }
@@ -552,41 +578,43 @@ impl RmcpHttpClient {
     /// outer `tokio::time::timeout` plus an explicit notification, rather
     /// than the `PeerRequestOptions.timeout` field alone.
     async fn send_request(&self, request: ClientRequest) -> Result<ServerResult, McpError> {
-        let generation = self
-            .refresh
-            .as_ref()
-            .map_or(0, |r| r.generation.load(Ordering::SeqCst));
-        let result = match self.send_once(request.clone()).await? {
+        let (first, generation) = self.send_once(request.clone()).await?;
+        let result = match first {
             // `auth_refresh` only. A 401 is answered before the server runs
             // anything, so resending once with a renewed token can never run a
             // tool twice; `call_tool`'s no-retry rule is about everything else.
             Err(e) if is_unauthorized(&e) && self.renew(generation).await => {
-                self.send_once(request).await?
+                self.send_once(request).await?.0
             }
             other => other,
         };
         result.map_err(|e| self.service_error(e))
     }
 
-    /// One request. `Err` is the timeout; the inner result is rmcp's.
+    /// One request, and the generation of the connection it went on (read
+    /// with it under the lock). `Err` is the timeout; the inner result is
+    /// rmcp's.
     async fn send_once(
         &self,
         request: ClientRequest,
-    ) -> Result<Result<ServerResult, ServiceError>, McpError> {
-        let sent = self
-            .running
-            .read()
-            .await
+    ) -> Result<(Result<ServerResult, ServiceError>, u64), McpError> {
+        let (running, generation) = {
+            let guard = self.running.read().await;
+            let refresh = self.refresh.as_ref();
+            let generation = refresh.map_or(0, |r| r.generation.load(Ordering::SeqCst));
+            (guard.clone(), generation)
+        };
+        let sent = running
             .send_cancellable_request(request, PeerRequestOptions::no_options())
             .await;
         let handle = match sent {
             Ok(h) => h,
-            Err(e) => return Ok(Err(e)),
+            Err(e) => return Ok((Err(e), generation)),
         };
         let peer = handle.peer.clone();
         let request_id = handle.id.clone();
         match tokio::time::timeout(self.timeout, handle.await_response()).await {
-            Ok(inner) => Ok(inner),
+            Ok(inner) => Ok((inner, generation)),
             Err(_) => {
                 Self::spawn_cancel_notification(peer, request_id);
                 Err(self.timeout_error())
@@ -2037,7 +2065,8 @@ mod tests {
         use crate::google_oauth::infrastructure::HostRefreshTokenProvider;
         use std::sync::atomic::{AtomicUsize, Ordering};
 
-        struct Port(Mutex<Vec<p::HostTokenRequest>>);
+        /// Records every request; answers `tok-cx7-new`, or refuses when `.1`.
+        struct Port(Mutex<Vec<p::HostTokenRequest>>, bool);
         #[async_trait::async_trait]
         impl p::HostTokenPort for Port {
             async fn fresh_token(
@@ -2045,6 +2074,9 @@ mod tests {
                 req: p::HostTokenRequest,
             ) -> Result<p::HostToken, p::HostTokenError> {
                 self.0.lock().unwrap().push(req);
+                if self.1 {
+                    return Err(p::HostTokenError::NeedsReconnect("reconnect".into()));
+                }
                 let expires_at = chrono::Utc::now().timestamp() + 3600;
                 let access_token = "tok-cx7-new".into();
                 Ok(p::HostToken {
@@ -2058,8 +2090,9 @@ mod tests {
         struct Server(McpMock, u16, Arc<AtomicUsize>, bool);
         impl Respond for Server {
             fn respond(&self, request: &Request) -> ResponseTemplate {
-                let auth = request.headers.get("authorization");
-                let fresh = auth.is_some_and(|v| v.as_bytes() == b"Bearer tok-cx7-new");
+                // Fresh = exactly ONE Authorization, carrying the new token.
+                let auth: Vec<_> = request.headers.get_all("authorization").iter().collect();
+                let fresh = auth.len() == 1 && auth[0].as_bytes() == b"Bearer tok-cx7-new";
                 if String::from_utf8_lossy(&request.body).contains("\"tools/call\"") {
                     if !fresh {
                         let r = ResponseTemplate::new(self.1);
@@ -2084,12 +2117,18 @@ mod tests {
             (server, runs)
         }
 
+        /// Lowercase on purpose: `auth_refresh.header` is `Authorization`, and
+        /// the renewed value must replace it rather than travel beside it.
         fn seed() -> BTreeMap<String, String> {
-            BTreeMap::from([("Authorization".into(), "Bearer tok-cx7-seed".into())])
+            BTreeMap::from([("authorization".into(), "Bearer tok-cx7-seed".into())])
         }
 
         async fn refreshing(server: &MockServer) -> (RmcpHttpClient, Arc<Port>) {
-            let port = Arc::new(Port(Mutex::default()));
+            refreshing_with(server, false).await
+        }
+
+        async fn refreshing_with(server: &MockServer, refuse: bool) -> (RmcpHttpClient, Arc<Port>) {
+            let port = Arc::new(Port(Mutex::default(), refuse));
             let later = chrono::Utc::now().timestamp() + 3600;
             let (h, s) = ("cth1-cx7-h".to_string(), "tok-cx7-seed".to_string());
             let provider = HostRefreshTokenProvider::new(port.clone(), h, s.clone(), later, None);
@@ -2119,6 +2158,35 @@ mod tests {
                 assert_eq!(calls.len(), 1);
                 assert_eq!(calls[0].stale_token_sha256, Some(sha));
             }
+        }
+
+        /// Two calls that get a 401 at once renew once; both tools then run.
+        #[tokio::test]
+        async fn concurrent_401s_renew_once() {
+            let (server, runs) = setup(401, true).await;
+            let (client, port) = refreshing(&server).await;
+            let (a, b) = tokio::join!(
+                client.call_tool("t", json!({})),
+                client.call_tool("t", json!({}))
+            );
+            assert!(a.is_ok() && b.is_ok(), "{a:?} {b:?}");
+            assert_eq!(port.0.lock().unwrap().len(), 1, "one renewal");
+            assert_eq!(runs.load(Ordering::SeqCst), 2);
+        }
+
+        /// A host that refuses after a 401: the 401 stands, `tools/call` was
+        /// sent once and the tool never ran.
+        #[tokio::test]
+        async fn a_refusing_host_leaves_the_401() {
+            let (server, runs) = setup(401, true).await;
+            let (client, port) = refreshing_with(&server, true).await;
+            let err = client.call_tool("t", json!({})).await.unwrap_err();
+            assert!(matches!(err, McpError::Transport { .. }), "{err}");
+            assert_eq!(port.0.lock().unwrap().len(), 1);
+            let calls = server.received_requests().await.unwrap();
+            let call = |r: &Request| String::from_utf8_lossy(&r.body).contains("tools/call");
+            let sent = calls.iter().filter(|r| call(r)).count();
+            assert_eq!((sent, runs.load(Ordering::SeqCst)), (1, 0));
         }
 
         /// A 500 from `tools/call` is still never retried.
