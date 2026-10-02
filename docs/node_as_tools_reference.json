@@ -245,6 +245,11 @@
           "type": "integer",
           "required": false,
           "description": "How long this server's tools/list result stays reusable, in seconds. Default 300."
+        },
+        "auth_refresh": {
+          "type": "object",
+          "required": false,
+          "description": "{header, scheme, handle, expires_at}: the embedder (CX7) renews the bearer token of 'header' (must be in 'headers'; scheme 'Bearer'). With the engine's HostTokenPort, a 401 renews it and retries once (a tools/call too: the server refuses before running it); without a port it is ignored. Honoured only when the author wrote tool_configurations. Pooled by handle and agent session, not by token."
         }
       },
       "example": {

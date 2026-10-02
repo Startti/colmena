@@ -172,3 +172,23 @@ respeta, plataforma sin carpeta → `NoParentFolder`, plataforma usa la suya; 40
 con `HostRefreshTokenProvider` (un pedido, sha correcto) y segundo 401 → `AuthFailed`. **Mutación.** Sin reintento,
 reintento sin `invalidate`, carpeta de plataforma con la cuenta conectada. **E2E.** No aplica hasta el cableado de
 `llm_call`. **ADP.** Ninguno. **Estado.** partial.
+
+## 14. MCP: entrada `auth_refresh` — el header bearer del host se renueva por el puerto (parte 2 de `auth_refresh`)
+
+**Qué cambia.** Una entrada `mcp` acepta `auth_refresh: {header, scheme: "Bearer", handle, expires_at}`. La carga
+exige que `header` sea un nombre válido presente en `headers` (sin importar mayúsculas), `scheme` `Bearer` y un
+`handle` no vacío; los errores no repiten valores y `Debug` tacha el handle. Con `EngineConfig.host_token_port`
+(que ahora también llega a `llm_call`), `bind_with` arma por ejecución un `HostRefreshTokenProvider` con el handle,
+el token sembrado (el header resuelto sin `Bearer `) y la sesión de `__colmena_agent_session_id`, y conecta con
+`connect_refreshing` (§9). La clave del pool usa la huella del handle y la sesión en vez del token: renovar no parte
+el pool y otra sesión no reusa el proveedor. `auth_refresh` vale solo si el autor escribió `tool_configurations`
+(`mcp_specs_for`); sin puerto se ignora y todo queda como hoy. Referencia: `mcp.auth_refresh` en
+[node_as_tools_reference.json](node_as_tools_reference.json); evento `mcp.auth_refresh_failed` en
+[52_mcp_observability.md](developer_guide/52_mcp_observability.md).
+**Tests.** Validación (header ausente, scheme, nombre inválido; sin valores en el error); `bind` (mismo handle con
+otro token → misma clave; otro handle u otra sesión → otra; el proveedor pide al host con el handle y la sesión);
+`expose` (`auth_refresh` de inputs no del autor se descarta); `registry` (el puerto llega a `llm_call`).
+**Mutación.** Sesión fuera de la clave, clave por token, proveedor sin sesión, `auth_refresh` del modelo aceptado,
+header sin chequear, scheme sin chequear, puerto sin llegar a `llm_call`: cada una tumba un test. **E2E.** Con
+puerto, espera al worker de ADP. **ADP.** Emitir `auth_refresh` en la entrada MCP solo con la compuerta abierta;
+cortar el tag A después de esta PR. **Estado.** partial.
