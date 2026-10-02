@@ -1,0 +1,38 @@
+{
+  "comment": "http_request whose response is a file. pdf_call downloads a real PDF: the output must be body null plus files[0] = { document_id: file_dummy_*, mime_type: application/pdf, filename: dummy.pdf, size_bytes }. html_call is the control: an HTML page is not a file, so its output stays { status, body: null } with no files. Run with COLMENA_LOCAL=true so the engine has a storage adapter (see docs/developer_guide/32_multimedia_generation.md).",
+  "metadata": {
+    "category": "external",
+    "features": ["http_request", "file_response", "attachments"],
+    "requires_env": ["COLMENA_LOCAL"]
+  },
+  "nodes": {
+    "start": {
+      "type": "trigger_webhook",
+      "config": { "path": "/http-file", "method": "POST", "test_payload": {} }
+    },
+    "pdf_call": {
+      "type": "http_request",
+      "config": {
+        "base_url": "https://www.w3.org",
+        "endpoint": "/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf",
+        "method": "GET"
+      }
+    },
+    "html_call": {
+      "type": "http_request",
+      "config": {
+        "base_url": "https://example.com",
+        "endpoint": "/",
+        "method": "GET"
+      }
+    },
+    "log_pdf": { "type": "log" },
+    "log_html": { "type": "log" }
+  },
+  "edges": [
+    { "from": "start", "to": "pdf_call" },
+    { "from": "start", "to": "html_call" },
+    { "from": "pdf_call", "to": "log_pdf" },
+    { "from": "html_call", "to": "log_html" }
+  ]
+}

@@ -126,6 +126,9 @@ impl HashMapNodeRegistry {
             if let Some(resolver) = attachment_resolver.clone() {
                 http_node = http_node.with_attachment_resolver(resolver);
             }
+            if let Some(reg) = attachment_registry.clone() {
+                http_node = http_node.with_attachment_registry(reg);
+            }
             nodes.insert("http_request".to_string(), Arc::new(http_node));
 
             // --- Registrar Nodos Socket.IO ---

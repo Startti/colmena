@@ -6,7 +6,7 @@
 **How to use (for the exploration/spec phase):** before opening files to assess a change, look up the target file below. **Used by** is its blast radius — the files that break if you change its public surface. **Depends on** is what it needs. Start by reading only those, not the whole repo.
 
 - Files indexed: **414**
-- Modules with at least one importer: **193**
+- Modules with at least one importer: **194**
 
 ## Blast-radius ranking (change these with the most care)
 
@@ -441,7 +441,7 @@
 #### `src/libs/colmena/src/dag_engine/infrastructure/nodes/http.rs`
 - Module: `dag_engine::infrastructure::nodes::http`
 - **Used by (4)**: `src/libs/colmena/src/dag_engine/application/run_use_case.rs`, `src/libs/colmena/src/dag_engine/infrastructure/dag_tool_executor.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/for_each.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/socketio.rs`
-- Depends on (15): `dag_engine::application::ports`, `dag_engine::application::run_use_case`, `dag_engine::domain::lint`, `dag_engine::domain::node`, `dag_engine::infrastructure::env_provenance`, `dag_engine::infrastructure::nodes::trigger`, `dag_engine::infrastructure::nodes::util::session_attachment`, `google_oauth::infrastructure`, `llm::domain`, `llm::domain::attachments`, `llm::infrastructure::attachments`, `llm::infrastructure::files`, `llm::infrastructure::files::signed_url_downloader`, `llm::infrastructure::persistence`, `storage::domain`
+- Depends on (17): `dag_engine::application::ports`, `dag_engine::application::run_use_case`, `dag_engine::domain::lint`, `dag_engine::domain::node`, `dag_engine::infrastructure::env_provenance`, `dag_engine::infrastructure::nodes::trigger`, `dag_engine::infrastructure::nodes::util::attachment_id`, `dag_engine::infrastructure::nodes::util::response_file`, `dag_engine::infrastructure::nodes::util::session_attachment`, `google_oauth::infrastructure`, `llm::domain`, `llm::domain::attachments`, `llm::infrastructure::attachments`, `llm::infrastructure::files`, `llm::infrastructure::files::signed_url_downloader`, `llm::infrastructure::persistence`, `storage::domain`
 
 #### `src/libs/colmena/src/dag_engine/infrastructure/nodes/http_oauth.rs`
 - Module: `dag_engine::infrastructure::nodes::http_oauth`
@@ -785,7 +785,7 @@
 
 #### `src/libs/colmena/src/dag_engine/infrastructure/nodes/util/attachment_id.rs`
 - Module: `dag_engine::infrastructure::nodes::util::attachment_id`
-- **Used by (3)**: `src/libs/colmena/src/dag_engine/infrastructure/nodes/image_edit.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/image_generation.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/tts.rs`
+- **Used by (4)**: `src/libs/colmena/src/dag_engine/infrastructure/nodes/http.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/image_edit.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/image_generation.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/tts.rs`
 - Depends on (0): — (no intra-crate imports)
 
 #### `src/libs/colmena/src/dag_engine/infrastructure/nodes/util/extract_with_schema.rs`
@@ -805,7 +805,7 @@
 
 #### `src/libs/colmena/src/dag_engine/infrastructure/nodes/util/response_file.rs`
 - Module: `dag_engine::infrastructure::nodes::util::response_file`
-- **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
+- **Used by (1)**: `src/libs/colmena/src/dag_engine/infrastructure/nodes/http.rs`
 - Depends on (0): — (no intra-crate imports)
 
 #### `src/libs/colmena/src/dag_engine/infrastructure/nodes/util/session_attachment.rs`

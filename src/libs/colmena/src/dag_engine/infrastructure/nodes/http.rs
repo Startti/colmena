@@ -22,6 +22,13 @@
 //! `body` is parsed as JSON; if the response is not valid JSON, `body` is `null`.
 //! The default output port is `body`.
 //!
+//! When the response is a file (PDF, image, audio, video, Office document —
+//! decided by the bytes, then by `Content-Type`) and the node has a storage
+//! adapter, the bytes are stored as a session attachment and the output gains
+//! `"files": [{ "document_id", "mime_type", "filename", "size_bytes" }]`, with
+//! `body` still `null`. `max_file_size_bytes` caps the size kept; a larger
+//! file, or one with no storage adapter, leaves only `body: null`.
+//!
 //! ## Attachments
 //! In a JSON body, a whole string `"$attachment:<document_id>"` becomes a
 //! `data:` URI of that document of the session, and
@@ -37,12 +44,17 @@ use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
 use crate::dag_engine::infrastructure::env_provenance::{
     escape_pointer_segment, is_authored_input, EnvPolicy,
 };
+use crate::dag_engine::infrastructure::nodes::util::attachment_id::build_document_id;
+use crate::dag_engine::infrastructure::nodes::util::response_file;
 use crate::dag_engine::infrastructure::nodes::util::session_attachment::read_session_attachment;
+use crate::llm::domain::attachments::{origin, AttachmentSource, UpsertAttachmentInput};
+use crate::llm::domain::ProviderKind;
 use crate::llm::domain::{BoxedByteStream, LlmError};
 use crate::llm::infrastructure::files::signed_url_downloader::{
     is_dial_refused, DialGuard, DialRefused,
 };
 use crate::llm::infrastructure::files::SignedUrlDownloader;
+use crate::storage::domain::StoreRequest;
 use reqwest::{Method, Url};
 use serde_json::{json, Value};
 use std::error::Error as StdError;
@@ -65,6 +77,9 @@ pub struct HttpNode {
     /// Fetches multipart URL parts: public addresses only. Its address rule
     /// also bounds a destination that comes from data.
     url_parts: SignedUrlDownloader,
+    /// Registers a file response as a session attachment, so `load_attachment`
+    /// and `$attachment:<document_id>` reach it and the host can show it.
+    attachment_registry: Option<Arc<dyn crate::llm::domain::AttachmentRegistry>>,
 }
 
 impl Default for HttpNode {
@@ -317,7 +332,18 @@ impl HttpNode {
             attachment_resolver: None,
             oauth_cache: None,
             url_parts: SignedUrlDownloader::new(),
+            attachment_registry: None,
         }
+    }
+
+    /// Wire the session attachment registry: a file response is then
+    /// registered under its `document_id` (fail-soft, as the media nodes do).
+    pub fn with_attachment_registry(
+        mut self,
+        registry: Arc<dyn crate::llm::domain::AttachmentRegistry>,
+    ) -> Self {
+        self.attachment_registry = Some(registry);
+        self
     }
 
     #[cfg(test)]
@@ -718,6 +744,122 @@ impl HttpNode {
 
     /// Wraps a `resolve_env_vars`-family `String` error as the boxed error
     /// type `execute()` returns — a one-liner replacing a repeated 4-line closure.
+    fn output(status: u16, body: Value, file: Option<Value>) -> Value {
+        let mut out = json!({ "status": status, "body": body });
+        if let Some(file) = file {
+            out["files"] = json!([file]);
+        }
+        out
+    }
+
+    /// Reads the response: a JSON body as `body`, or a file stored as a
+    /// session attachment and described for the `files` output. Anything else
+    /// (text, HTML, empty, a failed read) is `body: null`, as before.
+    async fn read_response(
+        &self,
+        response: reqwest::Response,
+        url: &str,
+        inputs: &NodeInputs,
+        config: &Value,
+    ) -> (Value, Option<Value>) {
+        let header = |name: reqwest::header::HeaderName| {
+            response
+                .headers()
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string)
+        };
+        let content_type = header(reqwest::header::CONTENT_TYPE);
+        let disposition = header(reqwest::header::CONTENT_DISPOSITION);
+        let Ok(bytes) = response.bytes().await else {
+            return (Value::Null, None);
+        };
+        if let Ok(json) = serde_json::from_slice::<Value>(&bytes) {
+            return (json, None);
+        }
+        let Some(mime) = response_file::file_mime(content_type.as_deref(), &bytes) else {
+            println!("[HttpNode] Response body is not JSON or is empty");
+            return (Value::Null, None);
+        };
+        let max = Self::limit_u64(
+            config,
+            "max_file_size_bytes",
+            Self::DEFAULT_MAX_FILE_SIZE_BYTES,
+        );
+        let Some(storage) = self.storage.as_ref() else {
+            println!("[HttpNode] File response ({mime}) not kept: no storage adapter");
+            return (Value::Null, None);
+        };
+        if bytes.len() as u64 > max {
+            println!(
+                "[HttpNode] File response ({mime}, {} bytes) not kept: max_file_size_bytes is {max}",
+                bytes.len()
+            );
+            return (Value::Null, None);
+        }
+        let session_id = Self::input_str(inputs, "__colmena_session_id");
+        let agent_session_id = Self::input_str(inputs, "__colmena_agent_session_id");
+        let stored = match storage
+            .store(StoreRequest {
+                bytes: bytes.to_vec(),
+                mime_type: mime.clone(),
+                filename: response_file::filename(disposition.as_deref(), url, &mime),
+                session_id,
+                agent_session_id: agent_session_id.clone(),
+            })
+            .await
+        {
+            Ok(stored) => stored,
+            Err(e) => {
+                tracing::warn!(target: "colmena::http_request", error = %e,
+                    "file response not kept: storage failed");
+                return (Value::Null, None);
+            }
+        };
+        let document_id = build_document_id(
+            &stored.filename,
+            &stored.mime_type,
+            &stored.storage_key,
+            "file",
+        );
+        if let (Some(reg), Some(agent_sid)) = (self.attachment_registry.as_ref(), agent_session_id)
+        {
+            let upsert = UpsertAttachmentInput {
+                agent_session_id: agent_sid,
+                document_id: document_id.clone(),
+                provider: ProviderKind::Generated,
+                provider_file_id: stored.storage_key.clone(),
+                mime_type: stored.mime_type.clone(),
+                filename: stored.filename.clone(),
+                size_bytes: Some(stored.size_bytes),
+                label: None,
+                description: Some(format!(
+                    "File returned by an HTTP request: {}",
+                    stored.filename
+                )),
+                source: AttachmentSource::Path(stored.storage_key.clone()),
+                storage_key: Some(stored.storage_key.clone()),
+                origin: Some(origin::generated_by("http_request")),
+            };
+            if let Err(e) = reg.upsert(upsert).await {
+                tracing::warn!(target: "colmena::http_request", error = %e,
+                    document_id = %document_id,
+                    "file response not registered — load_attachment will not see it");
+            }
+        }
+        let file = json!({
+            "document_id": document_id,
+            "mime_type": stored.mime_type,
+            "filename": stored.filename,
+            "size_bytes": stored.size_bytes,
+        });
+        (Value::Null, Some(file))
+    }
+
+    fn input_str(inputs: &NodeInputs, key: &str) -> Option<String> {
+        inputs.get(key).and_then(|v| v.as_str()).map(String::from)
+    }
+
     fn io_err(e: String) -> Box<dyn StdError + Send + Sync> {
         Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
     }
@@ -1365,15 +1507,8 @@ impl HttpNode {
         let status = response.status().as_u16();
         println!("[HttpNode] ← {status} ({full_url})");
 
-        let response_body: Value = match response.json::<Value>().await {
-            Ok(json) => json,
-            Err(_) => Value::Null,
-        };
-
-        Ok(serde_json::json!({
-            "status": status,
-            "body": response_body
-        }))
+        let (response_body, file) = self.read_response(response, full_url, inputs, config).await;
+        Ok(Self::output(status, response_body, file))
     }
 
     async fn add_part_to_form(
@@ -1795,20 +1930,14 @@ impl ExecutableNode for HttpNode {
         let status = response.status().as_u16();
         println!("[HttpNode] ← {} ({})", status, full_url_str);
 
-        // Try to parse response as JSON, fallback to text/string
-        let response_body: Value = match response.json::<Value>().await {
-            Ok(json) => {
-                // Never log response body — it may contain tokens, keys, or PII
-                json
-            }
-            Err(_) => {
-                println!("[HttpNode] Response body is not JSON or is empty");
-                Value::Null
-            }
-        };
+        // JSON body, or a file kept as a session attachment (see module docs).
+        // Never log the response body — it may contain tokens, keys, or PII.
+        let (response_body, file) = self
+            .read_response(response, &full_url_str, inputs, config)
+            .await;
 
         // 8. Return Output — an issued attachment URL never leaves the node.
-        let output = json!({ "status": status, "body": response_body });
+        let output = Self::output(status, response_body, file);
         Ok(Self::scrub_issued_urls(output, &forms))
     }
 
@@ -1860,7 +1989,8 @@ impl ExecutableNode for HttpNode {
             },
             "outputs": {
                 "status": "integer",
-                "body": "any"
+                "body": "any",
+                "files": "array of { document_id, mime_type, filename, size_bytes } (only when the response is a file)"
             }
         })
     }
@@ -4128,5 +4258,146 @@ mod data_destination_tests {
         let open = HttpNode::new().with_url_parts(SignedUrlDownloader::allowing_private_hosts());
         let url = Url::parse("http://10.255.0.1").unwrap();
         assert!(open.destination_guard(&url, None, None).unwrap().is_none());
+    }
+}
+
+#[cfg(test)]
+mod file_response_tests {
+    use super::*;
+    use crate::llm::domain::AttachmentRegistry;
+    use crate::llm::infrastructure::persistence::SqliteAttachmentRegistry;
+    use crate::storage::domain::{MockOutputStorageRepository, StoredOutput};
+    use std::collections::HashMap;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const PDF: &[u8] = b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n1 0 obj\n";
+    /// The Content-Type the Despegar voucher endpoint really sends.
+    const JSON_FIRST: &str = "application/json;charset=utf-8,application/pdf;charset=utf-8";
+
+    async fn server_returning(body: &[u8], content_type: &str) -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/reservations/123/voucher"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(body.to_vec(), content_type))
+            .mount(&server)
+            .await;
+        server
+    }
+
+    fn config(server: &MockServer) -> Value {
+        json!({ "base_url": server.uri(), "endpoint": "/reservations/123/voucher", "method": "GET" })
+    }
+
+    fn session_inputs() -> NodeInputs {
+        HashMap::from([
+            ("__colmena_session_id".to_string(), json!("run_1")),
+            ("__colmena_agent_session_id".to_string(), json!("agent_1")),
+        ])
+    }
+
+    fn storing_storage() -> MockOutputStorageRepository {
+        let mut storage = MockOutputStorageRepository::new();
+        storage
+            .expect_store()
+            .times(1)
+            .withf(|req| {
+                req.bytes == PDF
+                    && req.agent_session_id.as_deref() == Some("agent_1")
+                    && req.session_id.as_deref() == Some("run_1")
+            })
+            .returning(|req| {
+                Ok(StoredOutput {
+                    storage_key: "chat-attachments/u/agent_1/generated/voucher.pdf".into(),
+                    read_url: "https://storage.example/signed".into(),
+                    mime_type: req.mime_type,
+                    filename: req.filename,
+                    size_bytes: req.bytes.len() as u64,
+                })
+            });
+        storage
+    }
+
+    #[tokio::test]
+    async fn pdf_response_is_stored_registered_and_listed_in_files() {
+        let server = server_returning(PDF, JSON_FIRST).await;
+        let registry: Arc<dyn AttachmentRegistry> = Arc::new(
+            SqliteAttachmentRegistry::new("sqlite::memory:")
+                .await
+                .unwrap(),
+        );
+        let node = HttpNode::new()
+            .with_storage(Arc::new(storing_storage()))
+            .with_attachment_registry(registry.clone());
+
+        let out = node
+            .execute(&session_inputs(), &config(&server), &mut json!({}), None)
+            .await
+            .unwrap();
+
+        assert_eq!(out["status"], 200);
+        assert_eq!(out["body"], Value::Null);
+        let file = &out["files"][0];
+        assert_eq!(file["mime_type"], "application/pdf");
+        assert_eq!(file["filename"], "voucher.pdf");
+        assert_eq!(file["size_bytes"], PDF.len());
+        let doc_id = file["document_id"].as_str().unwrap();
+        assert!(doc_id.starts_with("file_voucher_"), "got {doc_id}");
+        // The read URL never reaches the model.
+        assert!(!out.to_string().contains("storage.example"));
+
+        let row = registry
+            .lookup_by_document_id("agent_1", doc_id)
+            .await
+            .unwrap()
+            .expect("registered under its document_id");
+        assert_eq!(row.origin.as_deref(), Some("generated_by:http_request"));
+        assert_eq!(row.mime_type, "application/pdf");
+    }
+
+    #[tokio::test]
+    async fn without_storage_a_file_response_stays_body_null() {
+        let server = server_returning(PDF, "application/pdf").await;
+        let out = HttpNode::new()
+            .execute(&session_inputs(), &config(&server), &mut json!({}), None)
+            .await
+            .unwrap();
+        assert_eq!(out, json!({ "status": 200, "body": null }));
+    }
+
+    #[tokio::test]
+    async fn file_over_max_file_size_bytes_is_not_stored() {
+        let server = server_returning(PDF, "application/pdf").await;
+        let mut storage = MockOutputStorageRepository::new();
+        storage.expect_store().never();
+        let mut cfg = config(&server);
+        cfg["max_file_size_bytes"] = json!(4);
+        let out = HttpNode::new()
+            .with_storage(Arc::new(storage))
+            .execute(&session_inputs(), &cfg, &mut json!({}), None)
+            .await
+            .unwrap();
+        assert_eq!(out, json!({ "status": 200, "body": null }));
+    }
+
+    #[tokio::test]
+    async fn text_response_is_not_a_file_and_json_still_parses() {
+        let mut storage = MockOutputStorageRepository::new();
+        storage.expect_store().never();
+        let node = HttpNode::new().with_storage(Arc::new(storage));
+
+        let html = server_returning(b"<html>error</html>", "text/html").await;
+        let out = node
+            .execute(&session_inputs(), &config(&html), &mut json!({}), None)
+            .await
+            .unwrap();
+        assert_eq!(out, json!({ "status": 200, "body": null }));
+
+        let api = server_returning(br#"{"ok":true}"#, JSON_FIRST).await;
+        let out = node
+            .execute(&session_inputs(), &config(&api), &mut json!({}), None)
+            .await
+            .unwrap();
+        assert_eq!(out, json!({ "status": 200, "body": { "ok": true } }));
     }
 }
