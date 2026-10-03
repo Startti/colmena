@@ -29,6 +29,15 @@ impl ConversationRepositoryFactory {
         }
     }
 
+    /// The shared pool registry this factory draws Postgres pools from.
+    ///
+    /// Nodes that need their own Postgres-backed collaborators (attachment
+    /// registry, file cache) borrow it instead of building a registry per
+    /// execution, so pools stay cached per URL and honor `COLMENA_POOL_*`.
+    pub fn pool_registry(&self) -> Arc<PgPoolRegistry> {
+        self.registry.clone()
+    }
+
     pub async fn get_repository(
         &self,
         connection_url: &str,
@@ -94,5 +103,20 @@ impl ConversationRepositoryFactory {
 
         repos.insert(connection_url.to_string(), repo.clone());
         Ok(repo)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dag_engine::infrastructure::pool_registry::PoolConfig;
+
+    #[test]
+    fn pool_registry_returns_the_registry_the_factory_was_built_with() {
+        let shared = Arc::new(PgPoolRegistry::new(PoolConfig::defaults()));
+        let factory = ConversationRepositoryFactory::new(shared.clone());
+        assert!(Arc::ptr_eq(&shared, &factory.pool_registry()));
+        // Cloned factories (one per node) keep pointing at the same registry.
+        assert!(Arc::ptr_eq(&shared, &factory.clone().pool_registry()));
     }
 }
