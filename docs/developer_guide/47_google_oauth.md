@@ -319,9 +319,8 @@ plataforma, igual que hoy) y `Err` si es inválida (otro `type`, un campo faltan
 Las tools de gsheets (`gsheets_*`, `gsheets_run_python` y la fuente Sheets de `data_run_python`) y de
 gdocs arman su cliente por llamada con ese bloque (`build_client(auth)`). `llm_call` se lo pasa al
 executor (`with_google_workspace_auth`), así que actúan como la cuenta conectada del usuario; sin el
-bloque, como la cuenta de plataforma. El prelude de Google Workspace también depende de la fuente
-(`build_google_workspace_prelude_for`): con la cuenta conectada no pide compartir nada y, ante un
-`permission_denied`, pide abrir el archivo con esa cuenta; con la de plataforma el texto es el de siempre.
+bloque, como la de plataforma. Con la cuenta conectada el prelude (`build_google_workspace_prelude_for`)
+no pide compartir nada; con la de plataforma el texto es el de siempre.
 
 ## Monitoring
 
