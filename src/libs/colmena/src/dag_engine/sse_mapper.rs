@@ -4,6 +4,7 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::dag_engine::domain::events::{DagExecutionEvent, NodeEndError};
+use crate::dag_engine::frame_redaction::redact_secrets;
 
 /// Stateful mapper from `DagExecutionEvent` to the SSE Data Stream Protocol JSON parts.
 ///
@@ -234,8 +235,8 @@ impl SseMapper {
                     "type": "node-start",
                     "node_id": node_id,
                     "node_type": node_type,
-                    "config": config,
-                    "inputs": Self::clean_inputs(inputs)
+                    "config": redact_secrets(config),
+                    "inputs": redact_secrets(&Self::clean_inputs(inputs))
                 }))
             }
             DagExecutionEvent::NodeSkipped { node_id, reason } => Some(json!({
@@ -511,8 +512,8 @@ impl SseMapper {
                         "type": "subgraph-node-start",
                         "node_id": node_id,
                         "node_type": node_type,
-                        "config": config,
-                        "inputs": Self::clean_inputs(inputs)
+                        "config": redact_secrets(config),
+                        "inputs": redact_secrets(&Self::clean_inputs(inputs))
                     });
                     // A by-reference child's boundary carries the embedder's
                     // display name in `config.node_label` (`SubGraphNode`);
@@ -1182,6 +1183,47 @@ mod tests {
         assert_eq!(parts[0]["stage"], "running");
         assert_eq!(parts[0]["node_id"], "inner_node");
         assert_eq!(parts[0]["idleSecs"], 40);
+    }
+
+    // ── Credentials in a start frame's config and inputs ─────────────────────
+
+    /// A node-start (and its subgraph form) carries none of the secret values
+    /// of an http_request with a bearer, a header, a `bearer_refresh` and an MCP
+    /// `auth_refresh`; non-secret config stays.
+    #[test]
+    fn a_start_frame_carries_no_secret_values() {
+        let config = json!({
+            "node_label": "Get", "base_url": "https://api.example.com", "method": "GET",
+            "bearer_token": "tok-cx7-a",
+            "headers": { "authorization": "Bearer tok-cx7-b", "Accept": "json" },
+            "bearer_refresh": { "handle": "cth1-cx7-h", "expires_at": 1 },
+            "tool_configurations": { "srv": { "node_type": "mcp", "mcp": {
+                "url": "https://mcp.example.com/mcp",
+                "headers": { "Authorization": "Bearer tok-cx7-c" },
+                "auth_refresh": { "header": "Authorization", "scheme": "Bearer",
+                    "handle": "cth1-cx7-k", "expires_at": 1 } } } }
+        });
+        let start = DagExecutionEvent::NodeStart {
+            node_id: "get".into(),
+            node_type: "http_request".into(),
+            inputs: json!({ "bearer_token": "tok-cx7-d", "q": "x" }),
+            config,
+        };
+        let mut mapper = SseMapper::new();
+        let wrapped = wrap(start.clone(), 1, "root>get");
+        for frame in [mapper.map(&start), mapper.map(&wrapped)].concat() {
+            let text = frame.to_string();
+            assert!(
+                !text.contains("tok-cx7-") && !text.contains("cth1-cx7-"),
+                "{text}"
+            );
+            assert_eq!(frame["config"]["headers"]["Accept"], "json");
+            assert_eq!(frame["config"]["base_url"], "https://api.example.com");
+            assert_eq!(frame["config"]["node_label"], "Get");
+            assert_eq!(frame["inputs"]["q"], "x");
+            let mcp = &frame["config"]["tool_configurations"]["srv"]["mcp"];
+            assert_eq!(mcp["url"], "https://mcp.example.com/mcp");
+        }
     }
 
     // ── `node_label` on a by-reference child's boundary start ────────────────

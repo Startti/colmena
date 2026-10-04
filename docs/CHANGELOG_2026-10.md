@@ -240,3 +240,25 @@ cualquiera de los dos sitios no tumba un test unitario (necesita Postgres real; 
 **ADP.** Subir el pin. El pool compartido para `DATABASE_URL` toma su tamaño de `COLMENA_POOL_MAX_CONN_PER_URL`
 (default 2) y el worker corre 4 runs por instancia: fijarlo en el deploy del worker (Startti/adp#1057 lo pone en 8
 en develop, con tope de 5 instancias). **Estado.** done.
+
+## 16. SSE: `node-start` y `subgraph-node-start` ya no llevan credenciales en `config` ni en `inputs`
+
+**Qué cambia.** Esos frames repetían el `config` entero del nodo (y sus `inputs` limpios) y viajan al embebedor,
+que puede guardarlos horas en su store de eventos; el motor solo enmascaraba los secure values descifrados. Ahora
+`SseMapper` pasa los dos por `frame_redaction::redact_secrets`: a cualquier profundidad, el valor de una clave de
+`SECRET_KEYS` pasa a `"[redacted]"`, también dentro de `headers` y de un bloque entero. Las claves se comparan
+normalizadas (minúsculas, `-` como `_`: `X-Goog-Api-Key` = `x_goog_api_key`); la lista incluye `authorization`,
+`bearer_token`, `bearer_refresh`, `auth_refresh`, `auth`, `google_workspace_auth`, `api_key`, `x_api_key`,
+`x_goog_api_key`, `ocp_apim_subscription_key`, `private_token`, `x_auth_token`, `client_secret`, `refresh_token`,
+`access_token`, `session_token`, `secret_key`, `aws_secret_access_key`, `private_key`, `credentials`, `password`,
+`token`, `connection_url`, `cookie`, …. En una URL `http(s)://` se tacha solo el valor de un parámetro de query con
+un nombre de esa lista o de `SECRET_QUERY_PARAMS` (`key`, `sig`, `signature`, `x_amz_signature`, `code`, …), que
+solo vale en URLs: un campo de config llamado `key` queda. El resto
+(`node_label`, `provider`, `model`, urls, headers no secretos) queda igual. ADP ya borra `config` antes de mostrar
+nada: esto es endurecimiento en tránsito y en reposo.
+**Tests.** `frame_redaction` (anidado en objeto y en array, header en mayúsculas, header con guiones
+`X-Goog-Api-Key`, `?key=` y una firma `X-Amz-Signature` en una URL, un campo `key` que queda, lo no secreto intacto); `sse_mapper` (un `node-start` de `http_request` con `bearer_token`, `headers.authorization`,
+`bearer_refresh` y una entrada MCP con `auth_refresh`, y su forma `subgraph-node-start`, no llevan ningún valor
+secreto y conservan lo demás). **Mutación.** `config` sin tachar en cada frame, `inputs` sin tachar, comparación
+sensible a mayúsculas, guiones sin normalizar, sin recorrer arrays, query de URL intacta, `bearer_refresh` fuera
+de la lista: cada una tumba un test. **E2E.** No aplica. **ADP.** Ninguno. **Estado.** done.
