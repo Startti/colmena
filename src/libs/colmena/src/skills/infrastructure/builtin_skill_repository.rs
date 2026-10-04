@@ -522,4 +522,67 @@ mod tests {
                 .unwrap_or_else(|e| panic!("built-in skill '{n}' failed to load: {e:?}"));
         }
     }
+
+    /// Mirrors `text::mod::google_workspace_tool_texts_do_not_assume_the_platform_account`
+    /// for the skills whose worked examples talk about gsheets/gdocs, so a
+    /// `google_workspace_auth` connected account doesn't get told to "share"
+    /// anything or to ask an "agent account". Keep this list in sync with the
+    /// tool-text one; the "ask the operator" narrowing exists there because
+    /// `gsheets_run_python`'s description legitimately says "Operators can
+    /// opt back into..." for the sink collision policy — none of these
+    /// skills mention operators at all, so the same narrowed term is safe
+    /// here too.
+    #[tokio::test]
+    async fn google_workspace_skills_do_not_assume_the_platform_account() {
+        let skill_names = [
+            "gsheets-editing",
+            "gsheets-cross-sheet-analysis",
+            "gsheets-presentable-output",
+            "gsheets-table-exploration",
+            "gdocs-surgical-edits",
+        ];
+        let repo = BuiltinSkillRepository::new(
+            &skill_names
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+
+        let banned = [
+            "agents@startti.co",
+            "colmena_",
+            "agent account",
+            "oauth user",
+            "catalog prelude",
+            "prefer sharing",
+            "share an existing",
+            "ask the operator",
+            "service account",
+            "share email",
+        ];
+
+        for name in skill_names {
+            let skill = repo.load_skill(name).await.unwrap();
+            check_text_for_banned_terms(&format!("{name} (body)"), &skill.body, &banned);
+            for r in &skill.references {
+                let reference = repo.load_reference(name, &r.name).await.unwrap();
+                check_text_for_banned_terms(
+                    &format!("{name}/{}", r.name),
+                    &reference.body,
+                    &banned,
+                );
+            }
+        }
+    }
+
+    fn check_text_for_banned_terms(label: &str, text: &str, banned: &[&str]) {
+        let lower = text.to_lowercase();
+        for term in banned {
+            assert!(
+                !lower.contains(term),
+                "`{label}` mentions `{term}`, which assumes the platform account"
+            );
+        }
+    }
 }

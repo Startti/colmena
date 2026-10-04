@@ -335,3 +335,18 @@ y escribe sus hojas con la cuenta conectada. Ningún otro tipo de nodo lo recibe
 bloque); `only_for_each_receives_the_credentials_in_its_config` (un `http_request` y un `llm_call` hijo no lo
 reciben); `to_config_block` ida y vuelta. **Mutación.** Darle el bloque también a `llm_call` y no dárselo a
 `for_each` tumban un test cada una. **E2E.** No aplica. **ADP.** Ninguno. **Estado.** done.
+
+## 22. gsheets/gdocs: textos de tools y skills que no asumen la cuenta de plataforma (porte de `feat/google-workspace-auth`, B8c)
+
+**Qué cambia.** Los `summary`/`description` de `gsheets_*` y `gdocs_*` (`text/tools/*.yaml`) hablan de «the
+Google account these tools act as»: sin `agents@startti.co`, sin env vars del operador, sin «AGENT account» ni
+«prefer sharing». Lo que dependía de la cuenta pasa al prelude de plataforma (las dos variantes): qué ven las
+tools de descubrimiento, que un archivo creado no lo ve el usuario hasta compartirlo, y qué hacer con
+`no_parent_folder_configured`. La skill `gsheets-editing` (`create-and-populate.md`) remite a esas notas en vez
+de pedir que el usuario comparta. Guías: [47_google_oauth.md](developer_guide/47_google_oauth.md),
+[39_gsheets.md](developer_guide/39_gsheets.md). **Tests.** `google_workspace_tool_texts_do_not_assume_the_platform_account`
+(lista de términos prohibidos, incluidos «service account», «share email», «ask the operator»);
+`google_workspace_skills_do_not_assume_the_platform_account` (cinco skills de gsheets/gdocs);
+`platform_prelude_carries_the_account_guidance_moved_out_of_tool_descriptions`. **Mutación.** Volver a poner
+«prefer sharing» en un summary o en la skill tumba el test correspondiente. **E2E.** No aplica. **ADP.**
+Ninguno. **Estado.** done.

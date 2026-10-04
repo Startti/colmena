@@ -108,6 +108,49 @@ mod tests {
         );
     }
 
+    /// gsheets/gdocs tools act as the platform account OR the user's connected
+    /// Google account (`google_workspace_auth`). Their texts must hold for
+    /// both: anything that depends on the account lives in the Google
+    /// Workspace prelude, never in a tool description or summary.
+    #[test]
+    fn google_workspace_tool_texts_do_not_assume_the_platform_account() {
+        let names: Vec<&str> = all_tool_names()
+            .into_iter()
+            .filter(|n| n.starts_with("gsheets_") || n.starts_with("gdocs_"))
+            .collect();
+        assert!(
+            names.len() >= 45,
+            "expected every gsheets/gdocs tool: {names:?}"
+        );
+        for name in names {
+            for text in [tool_summary(name), tool_description(name)] {
+                let lower = text.to_lowercase();
+                for banned in [
+                    "agents@startti.co",
+                    "colmena_",
+                    "agent account",
+                    "oauth user",
+                    "catalog prelude",
+                    "prefer sharing",
+                    "share an existing",
+                    // Narrowed to "ask the operator" (not bare "operator"):
+                    // `gsheets_run_python`'s description legitimately says
+                    // "Operators can opt back into silent auto-suffix..." for
+                    // the sink collision policy, unrelated to whose Google
+                    // account the tools act as.
+                    "ask the operator",
+                    "service account",
+                    "share email",
+                ] {
+                    assert!(
+                        !lower.contains(banned),
+                        "`{name}` text mentions `{banned}`: {text}"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn duplicate_yaml_keys_would_panic_in_load() {
         // The duplicate-key panic is inside load() and can't be reached
