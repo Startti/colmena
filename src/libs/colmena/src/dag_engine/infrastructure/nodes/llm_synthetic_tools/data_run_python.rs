@@ -785,7 +785,10 @@ pub async fn dispatch_data_run_python_via_executor(
     let gsheets_client: Option<Arc<dyn SheetsClient>> = {
         use crate::gsheets::infrastructure::config::GSheetsConfig;
         use crate::gsheets::infrastructure::http_client::GoogleSheetsHttpClient;
-        match GoogleSheetsHttpClient::from_config(&GSheetsConfig::from_env()) {
+        match GoogleSheetsHttpClient::from_config_with_auth(
+            &GSheetsConfig::from_env(),
+            exec.google_workspace_auth(),
+        ) {
             Ok(c) => Some(Arc::new(c) as Arc<dyn SheetsClient>),
             Err(e) => {
                 // Degrade to "gsheets not available" (a graph may legitimately not

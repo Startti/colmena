@@ -171,6 +171,11 @@ pub struct DagToolExecutor {
     /// Current subgraph-tool nesting depth, threaded from the parent llm_call so
     /// tool-invoked subgraphs receive `depth` and can enforce the recursion limit.
     subgraph_depth: u64,
+    /// The `llm_call`'s `google_workspace_auth` (the user's connected Google
+    /// account), parsed from the node's author config only — never from tool
+    /// arguments or inputs. When `Some`, every gsheets / data_run_python
+    /// dispatch acts with it; `None` keeps the platform env credentials.
+    google_workspace_auth: Option<Arc<crate::google_oauth::infrastructure::GoogleWorkspaceAuth>>,
     /// The node id path of the `llm_call` whose tools this executor runs. A
     /// caller inside a tool-invoked child keeps its own thread of a tool with
     /// memory ([`memory_node_path`]). `None`: keyed as a root caller.
@@ -334,6 +339,7 @@ impl DagToolExecutor {
             max_tool_result_bytes: DEFAULT_MAX_TOOL_RESULT_STRING_BYTES,
             gsheets_seen_sheets: std::sync::Mutex::new(std::collections::HashSet::new()),
             subgraph_depth: 0,
+            google_workspace_auth: None,
             caller_node_path: None,
             state_repository: None,
         }
@@ -353,6 +359,24 @@ impl DagToolExecutor {
         self.authored_tool_configurations = Some(authored);
         self.fixed_values_authored = fixed_values_authored;
         self
+    }
+
+    /// Builder: Google Workspace credentials from the `llm_call`'s author
+    /// config (`google_workspace_auth`). `None` keeps the platform env
+    /// credentials.
+    pub fn with_google_workspace_auth(
+        mut self,
+        auth: Option<Arc<crate::google_oauth::infrastructure::GoogleWorkspaceAuth>>,
+    ) -> Self {
+        self.google_workspace_auth = auth;
+        self
+    }
+
+    /// Credentials the Google Workspace dispatchers act with (`None` = env).
+    pub(crate) fn google_workspace_auth(
+        &self,
+    ) -> Option<&crate::google_oauth::infrastructure::GoogleWorkspaceAuth> {
+        self.google_workspace_auth.as_deref()
     }
 
     /// Set the current subgraph nesting depth (0 at the top level).
@@ -424,7 +448,7 @@ impl DagToolExecutor {
             unseen_sheet_bindings(&args, &seen)
         };
         if unseen.is_empty() {
-            return dispatch_gsheets_run_python(args).await;
+            return dispatch_gsheets_run_python(args, self.google_workspace_auth()).await;
         }
 
         let mut inspected = serde_json::Map::new();
@@ -435,7 +459,7 @@ impl DagToolExecutor {
                 "range": b.range.clone().unwrap_or_else(|| "1:6".to_string()),
                 "format": "markdown",
             });
-            let read_res = dispatch_gsheets_read(read_args).await;
+            let read_res = dispatch_gsheets_read(read_args, self.google_workspace_auth()).await;
             // If the preview read itself errored (missing sheet / permission),
             // surface that — run_python would have failed too.
             if matches!(&read_res, serde_json::Value::Object(m) if m.contains_key("error")) {
@@ -467,7 +491,7 @@ impl DagToolExecutor {
         // empty and the write/compute never happens. If a column name was guessed
         // wrong, the execution error rides alongside the preview so the next call
         // can fix it (the sheet is now marked seen → it executes directly).
-        let exec = dispatch_gsheets_run_python(args).await;
+        let exec = dispatch_gsheets_run_python(args, self.google_workspace_auth()).await;
         let note = "First run on these sheet(s) this turn: their REAL columns + a \
                     row preview are in `inspected_sheets`. Your code WAS executed — \
                     see the result fields. If you used a column name not in the real \
@@ -1674,14 +1698,19 @@ impl DagToolExecutor {
                     })?
                 };
 
+                let auth = self.google_workspace_auth();
                 let result = match name {
                     n if n == GSHEETS_CREATE_SPREADSHEET_TOOL => {
-                        dispatch_gsheets_create_spreadsheet(args).await
+                        dispatch_gsheets_create_spreadsheet(args, auth).await
                     }
-                    n if n == GSHEETS_LIST_SHEETS_TOOL => dispatch_gsheets_list_sheets(args).await,
-                    n if n == GSHEETS_ADD_SHEET_TOOL => dispatch_gsheets_add_sheet(args).await,
+                    n if n == GSHEETS_LIST_SHEETS_TOOL => {
+                        dispatch_gsheets_list_sheets(args, auth).await
+                    }
+                    n if n == GSHEETS_ADD_SHEET_TOOL => {
+                        dispatch_gsheets_add_sheet(args, auth).await
+                    }
                     n if n == GSHEETS_DELETE_SHEET_TOOL => {
-                        dispatch_gsheets_delete_sheet(args).await
+                        dispatch_gsheets_delete_sheet(args, auth).await
                     }
                     n if n == GSHEETS_READ_TOOL => {
                         let ss = args
@@ -1689,7 +1718,7 @@ impl DagToolExecutor {
                             .and_then(|v| v.as_str())
                             .map(String::from);
                         let sheet = args.get("sheet").and_then(|v| v.as_str()).map(String::from);
-                        let r = dispatch_gsheets_read(args).await;
+                        let r = dispatch_gsheets_read(args, auth).await;
                         let is_err =
                             matches!(&r, serde_json::Value::Object(m) if m.contains_key("error"));
                         if !is_err {
@@ -1699,10 +1728,12 @@ impl DagToolExecutor {
                         }
                         r
                     }
-                    n if n == GSHEETS_SET_CELL_TOOL => dispatch_gsheets_set_cell(args).await,
-                    n if n == GSHEETS_SET_RANGE_TOOL => dispatch_gsheets_set_range(args).await,
+                    n if n == GSHEETS_SET_CELL_TOOL => dispatch_gsheets_set_cell(args, auth).await,
+                    n if n == GSHEETS_SET_RANGE_TOOL => {
+                        dispatch_gsheets_set_range(args, auth).await
+                    }
                     n if n == GSHEETS_FORMAT_RANGE_TOOL => {
-                        dispatch_gsheets_format_range(args).await
+                        dispatch_gsheets_format_range(args, auth).await
                     }
                     n if n == TOOL_GSHEETS_RUN_PYTHON => {
                         self.gsheets_run_python_guarded(args).await
@@ -1714,13 +1745,13 @@ impl DagToolExecutor {
                         dispatch_export_xlsx_via_executor(self, args).await
                     }
                     n if n == GSHEETS_LIST_SPREADSHEETS_TOOL => {
-                        dispatch_gsheets_list_spreadsheets(args).await
+                        dispatch_gsheets_list_spreadsheets(args, auth).await
                     }
-                    n if n == GSHEETS_SHARE_TOOL => dispatch_gsheets_share(args).await,
+                    n if n == GSHEETS_SHARE_TOOL => dispatch_gsheets_share(args, auth).await,
                     n if n == GSHEETS_LIST_PERMISSIONS_TOOL => {
-                        dispatch_gsheets_list_permissions(args).await
+                        dispatch_gsheets_list_permissions(args, auth).await
                     }
-                    n if n == GSHEETS_UNSHARE_TOOL => dispatch_gsheets_unshare(args).await,
+                    n if n == GSHEETS_UNSHARE_TOOL => dispatch_gsheets_unshare(args, auth).await,
                     other => serde_json::json!({
                         "error": "unknown_gsheets_tool",
                         "message": format!("router matched gsheets prefix but no dispatch arm for `{other}` — this is a bug in dag_tool_executor"),
@@ -7543,5 +7574,39 @@ mod author_owned_arg_tests {
         });
         let author_mode = run(opted_in, json!({ "code": code })).await;
         assert!(author_mode.success, "{}", author_mode.output);
+    }
+}
+
+#[cfg(test)]
+mod google_workspace_auth_builder_tests {
+    use super::*;
+    use crate::dag_engine::domain::node::ExecutableNode;
+    use crate::google_oauth::infrastructure::GoogleWorkspaceAuth;
+
+    struct DummyRegistry;
+    impl NodeRegistryPort for DummyRegistry {
+        fn get_node(&self, _: &str) -> Option<Arc<dyn ExecutableNode>> {
+            None
+        }
+        fn get_all_nodes(&self) -> HashMap<String, Arc<dyn ExecutableNode>> {
+            HashMap::new()
+        }
+    }
+
+    /// The executor exposes exactly the credentials it was built with.
+    #[test]
+    fn with_google_workspace_auth_sets_and_clears() {
+        let auth = GoogleWorkspaceAuth {
+            token_url: "https://t/token".into(),
+            client_id: "cid".into(),
+            client_secret: "cs".into(),
+            refresh_token: "rt".into(),
+        };
+        let exec = DagToolExecutor::new(Arc::new(DummyRegistry), HashMap::new());
+        assert!(exec.google_workspace_auth().is_none());
+        let exec = exec.with_google_workspace_auth(Some(Arc::new(auth.clone())));
+        assert_eq!(exec.google_workspace_auth(), Some(&auth));
+        let exec = exec.with_google_workspace_auth(None);
+        assert!(exec.google_workspace_auth().is_none());
     }
 }

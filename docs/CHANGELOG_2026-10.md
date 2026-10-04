@@ -185,6 +185,20 @@ Guía: [47_google_oauth.md](developer_guide/47_google_oauth.md).
 endpoint de token. **Mutación.** Sin barrido; barrer también los que están en uso. **E2E.** No aplica.
 **ADP.** Ninguno. **Estado.** done.
 
+## 12. gsheets: las tools sintéticas reciben `google_workspace_auth` (porte de `feat/google-workspace-auth`, parte 7)
+
+**Qué cambia.** Cada dispatcher de gsheets (`gsheets_*`, `gsheets_run_python`, la fuente Sheets de
+`data_run_python`) recibe `auth: Option<&GoogleWorkspaceAuth>` y arma su cliente por llamada con
+`build_client(auth)`, así una cuenta conectada nunca reusa un cliente de otra identidad ni de la plataforma.
+`DagToolExecutor` suma `with_google_workspace_auth` / `google_workspace_auth()` y lo pasa a cada dispatcher.
+`for_each` pasa `None` por ahora. Ningún `llm_call` llama a `with_google_workspace_auth` todavía: todo sigue
+con la cuenta de plataforma. Guía: [47_google_oauth.md](developer_guide/47_google_oauth.md).
+**Commits portados.** La parte gsheets de `db76489c` (`gsheets_tools.rs`, `gsheets_run_python.rs`,
+`data_run_python.rs`, el campo del executor). De la revisión de #470: el test de `${VAR}` limpia la env var
+aunque falle, y `provider_cache.rs` dice que con 1024+ providers en uso cada alta recorre el mapa. **Tests.** El dispatcher actúa con el bloque (señuelos en env)
+y sin él toma el camino env; el builder del executor. **Mutación.** `build_client` ignorando `auth`.
+**E2E.** No aplica hasta el cableado de `llm_call`. **ADP.** Ninguno. **Estado.** partial.
+
 ## 14. MCP: entrada `auth_refresh` — el header bearer del host se renueva por el puerto (parte 2 de `auth_refresh`)
 
 **Qué cambia.** Una entrada `mcp` acepta `auth_refresh: {header, scheme: "Bearer", handle, expires_at}`. La carga

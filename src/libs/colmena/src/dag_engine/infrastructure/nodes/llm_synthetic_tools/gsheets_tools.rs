@@ -11,13 +11,15 @@
 //! - gsheets_set_cell
 //! - gsheets_set_range
 //!
-//! Each dispatcher builds a `GoogleSheetsHttpClient` from env config and
+//! Each dispatcher builds a `GoogleSheetsHttpClient` — with the `llm_call`'s
+//! `google_workspace_auth` when present, else from env config — and
 //! delegates to the [`SheetsClient`] trait. Errors are mapped to JSON
 //! shapes the agent can pattern-match on.
 //!
 //! UX aliases (per D-T16 lessons): `address` ↔ `addr`, `start` ↔ `start_addr`,
 //! `values` ↔ `values_2d`, `name` ↔ `sheet`. Single-A1 ranges auto-expanded.
 
+use crate::google_oauth::infrastructure::GoogleWorkspaceAuth;
 use crate::gsheets::application::format::{a1_to_grid_range, build_format_requests};
 use crate::gsheets::domain::{
     CellValue, ReadOptions, SheetsClient, SheetsError, SpreadsheetId, ValueRenderOption,
@@ -245,8 +247,55 @@ pub(crate) fn reconnect_google_payload() -> serde_json::Value {
     })
 }
 
-fn build_client() -> Result<GoogleSheetsHttpClient, serde_json::Value> {
-    GoogleSheetsHttpClient::from_config(&GSheetsConfig::from_env()).map_err(error_to_json)
+/// Build a Sheets client for this call: the `llm_call`'s
+/// `google_workspace_auth` when present, the platform env credentials
+/// otherwise. Shared by the gsheets dispatchers and `gsheets_run_python`.
+/// One client per call: a connected account never reuses a client (or its
+/// token source) built for another identity or for the platform.
+pub(crate) fn build_client(
+    auth: Option<&GoogleWorkspaceAuth>,
+) -> Result<GoogleSheetsHttpClient, serde_json::Value> {
+    #[cfg(test)]
+    if let Some(base) = SHEETS_API_BASE_FOR_TESTS.with(|b| b.borrow().clone()) {
+        return GoogleSheetsHttpClient::for_tests_with_auth(
+            &GSheetsConfig::from_env(),
+            auth,
+            &base,
+        )
+        .map_err(error_to_json);
+    }
+    GoogleSheetsHttpClient::from_config_with_auth(&GSheetsConfig::from_env(), auth)
+        .map_err(error_to_json)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only: Google API base for clients built by [`build_client`] on
+    /// this thread (a wiremock server), so executor-level tests can drive a
+    /// dispatch past its first Sheets call. Credential selection is unchanged:
+    /// it still goes through the production `build`.
+    static SHEETS_API_BASE_FOR_TESTS: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Test-only guard returned by [`override_sheets_api_base_for_tests`]; clears
+/// the override on drop.
+#[cfg(test)]
+pub(crate) struct SheetsApiBaseOverride;
+
+#[cfg(test)]
+impl Drop for SheetsApiBaseOverride {
+    fn drop(&mut self) {
+        SHEETS_API_BASE_FOR_TESTS.with(|b| *b.borrow_mut() = None);
+    }
+}
+
+/// Test-only: point every client [`build_client`] builds on this thread at
+/// `base` until the returned guard drops.
+#[cfg(test)]
+pub(crate) fn override_sheets_api_base_for_tests(base: &str) -> SheetsApiBaseOverride {
+    SHEETS_API_BASE_FOR_TESTS.with(|b| *b.borrow_mut() = Some(base.to_string()));
+    SheetsApiBaseOverride
 }
 
 fn parse_value_render(s: Option<&str>) -> ValueRenderOption {
@@ -528,8 +577,11 @@ pub async fn dispatch_list_sheets_with_client(
     }
 }
 
-pub async fn dispatch_list_sheets(args: serde_json::Value) -> serde_json::Value {
-    let client = match build_client() {
+pub async fn dispatch_list_sheets(
+    args: serde_json::Value,
+    auth: Option<&GoogleWorkspaceAuth>,
+) -> serde_json::Value {
+    let client = match build_client(auth) {
         Ok(c) => c,
         Err(e) => return e,
     };
@@ -562,8 +614,11 @@ pub async fn dispatch_list_spreadsheets_with_client(
     }
 }
 
-pub async fn dispatch_list_spreadsheets(args: serde_json::Value) -> serde_json::Value {
-    let client = match build_client() {
+pub async fn dispatch_list_spreadsheets(
+    args: serde_json::Value,
+    auth: Option<&GoogleWorkspaceAuth>,
+) -> serde_json::Value {
+    let client = match build_client(auth) {
         Ok(c) => c,
         Err(e) => return e,
     };
@@ -601,8 +656,11 @@ pub async fn dispatch_share_with_client(
     }
 }
 
-pub async fn dispatch_share(args: serde_json::Value) -> serde_json::Value {
-    let client = match build_client() {
+pub async fn dispatch_share(
+    args: serde_json::Value,
+    auth: Option<&GoogleWorkspaceAuth>,
+) -> serde_json::Value {
+    let client = match build_client(auth) {
         Ok(c) => c,
         Err(e) => return e,
     };
@@ -630,8 +688,11 @@ pub async fn dispatch_list_permissions_with_client(
     }
 }
 
-pub async fn dispatch_list_permissions(args: serde_json::Value) -> serde_json::Value {
-    let client = match build_client() {
+pub async fn dispatch_list_permissions(
+    args: serde_json::Value,
+    auth: Option<&GoogleWorkspaceAuth>,
+) -> serde_json::Value {
+    let client = match build_client(auth) {
         Ok(c) => c,
         Err(e) => return e,
     };
@@ -656,8 +717,11 @@ pub async fn dispatch_unshare_with_client(
     }
 }
 
-pub async fn dispatch_unshare(args: serde_json::Value) -> serde_json::Value {
-    let client = match build_client() {
+pub async fn dispatch_unshare(
+    args: serde_json::Value,
+    auth: Option<&GoogleWorkspaceAuth>,
+) -> serde_json::Value {
+    let client = match build_client(auth) {
         Ok(c) => c,
         Err(e) => return e,
     };
@@ -690,8 +754,11 @@ pub async fn dispatch_create_spreadsheet_with_client(
     }
 }
 
-pub async fn dispatch_create_spreadsheet(args: serde_json::Value) -> serde_json::Value {
-    let client = match build_client() {
+pub async fn dispatch_create_spreadsheet(
+    args: serde_json::Value,
+    auth: Option<&GoogleWorkspaceAuth>,
+) -> serde_json::Value {
+    let client = match build_client(auth) {
         Ok(c) => c,
         Err(e) => return e,
     };
@@ -719,8 +786,11 @@ pub async fn dispatch_add_sheet_with_client(
     }
 }
 
-pub async fn dispatch_add_sheet(args: serde_json::Value) -> serde_json::Value {
-    let client = match build_client() {
+pub async fn dispatch_add_sheet(
+    args: serde_json::Value,
+    auth: Option<&GoogleWorkspaceAuth>,
+) -> serde_json::Value {
+    let client = match build_client(auth) {
         Ok(c) => c,
         Err(e) => return e,
     };
@@ -744,8 +814,11 @@ pub async fn dispatch_delete_sheet_with_client(
     }
 }
 
-pub async fn dispatch_delete_sheet(args: serde_json::Value) -> serde_json::Value {
-    let client = match build_client() {
+pub async fn dispatch_delete_sheet(
+    args: serde_json::Value,
+    auth: Option<&GoogleWorkspaceAuth>,
+) -> serde_json::Value {
+    let client = match build_client(auth) {
         Ok(c) => c,
         Err(e) => return e,
     };
@@ -836,8 +909,11 @@ pub async fn dispatch_read_with_client(
     }
 }
 
-pub async fn dispatch_read(args: serde_json::Value) -> serde_json::Value {
-    let client = match build_client() {
+pub async fn dispatch_read(
+    args: serde_json::Value,
+    auth: Option<&GoogleWorkspaceAuth>,
+) -> serde_json::Value {
+    let client = match build_client(auth) {
         Ok(c) => c,
         Err(e) => return e,
     };
@@ -866,8 +942,11 @@ pub async fn dispatch_set_cell_with_client(
     }
 }
 
-pub async fn dispatch_set_cell(args: serde_json::Value) -> serde_json::Value {
-    let client = match build_client() {
+pub async fn dispatch_set_cell(
+    args: serde_json::Value,
+    auth: Option<&GoogleWorkspaceAuth>,
+) -> serde_json::Value {
+    let client = match build_client(auth) {
         Ok(c) => c,
         Err(e) => return e,
     };
@@ -905,8 +984,11 @@ pub async fn dispatch_set_range_with_client(
     }
 }
 
-pub async fn dispatch_set_range(args: serde_json::Value) -> serde_json::Value {
-    let client = match build_client() {
+pub async fn dispatch_set_range(
+    args: serde_json::Value,
+    auth: Option<&GoogleWorkspaceAuth>,
+) -> serde_json::Value {
+    let client = match build_client(auth) {
         Ok(c) => c,
         Err(e) => return e,
     };
@@ -970,8 +1052,11 @@ pub async fn dispatch_format_range_with_client(
     }
 }
 
-pub async fn dispatch_format_range(args: serde_json::Value) -> serde_json::Value {
-    let client = match build_client() {
+pub async fn dispatch_format_range(
+    args: serde_json::Value,
+    auth: Option<&GoogleWorkspaceAuth>,
+) -> serde_json::Value {
+    let client = match build_client(auth) {
         Ok(c) => c,
         Err(e) => return e,
     };
@@ -1004,7 +1089,7 @@ pub async fn dispatch_create_from_xlsx_via_executor(
             });
         }
     };
-    let client = match build_client() {
+    let client = match build_client(executor.google_workspace_auth()) {
         Ok(c) => c,
         Err(e) => return e,
     };
@@ -1035,7 +1120,7 @@ pub async fn dispatch_export_xlsx_via_executor(
         Ok(a) => a,
         Err(e) => return serde_json::json!({"error": "invalid_args", "message": e.to_string()}),
     };
-    let client = match build_client() {
+    let client = match build_client(executor.google_workspace_auth()) {
         Ok(c) => c,
         Err(e) => return e,
     };
@@ -1313,6 +1398,68 @@ mod tests {
     /// `read_range` and errors on all other methods. Used by dispatch_read tests.
     struct ReadClient {
         values: serde_json::Value,
+    }
+
+    /// The production dispatcher acts with the `google_workspace_auth` it is
+    /// handed: its token comes from the block's `token_url` (env decoys are
+    /// never sent), and without a block it takes the env path.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn dispatcher_acts_with_the_auth_it_is_given_and_env_without_it() {
+        use wiremock::matchers::{body_string_contains, header, method, path, path_regex};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        const ENV: [&str; 3] = [
+            "COLMENA_GOOGLE_OAUTH_CLIENT_ID",
+            "COLMENA_GOOGLE_OAUTH_CLIENT_SECRET",
+            "COLMENA_GOOGLE_OAUTH_REFRESH_TOKEN",
+        ];
+        let token = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .and(body_string_contains("refresh_token=rt-cx7-dispatch"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"{"access_token":"tok-cx7-sheets","expires_in":3600,"token_type":"Bearer"}"#,
+            ))
+            .expect(1)
+            .mount(&token)
+            .await;
+        let sheets = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"/ss$"))
+            .and(header("authorization", "Bearer tok-cx7-sheets"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "sheets": [{ "properties": {
+                    "sheetId": 0, "title": "S", "index": 0,
+                    "gridProperties": { "rowCount": 1, "columnCount": 1 }
+                } }]
+            })))
+            .expect(1)
+            .mount(&sheets)
+            .await;
+        let _base = override_sheets_api_base_for_tests(&sheets.uri());
+        let auth = GoogleWorkspaceAuth {
+            token_url: format!("{}/token", token.uri()),
+            client_id: "cid".into(),
+            client_secret: "cs".into(),
+            refresh_token: "rt-cx7-dispatch".into(),
+        };
+        let args = serde_json::json!({ "spreadsheet_id": "ss" });
+
+        for name in ENV {
+            std::env::set_var(name, "ENV-DECOY");
+        }
+        let out = dispatch_list_sheets(args.clone(), Some(&auth)).await;
+        for name in ENV {
+            std::env::remove_var(name);
+        }
+        assert_eq!(out["ok"], true, "{out}");
+        let sent = token.received_requests().await.unwrap_or_default();
+        assert!(sent
+            .iter()
+            .all(|r| !String::from_utf8_lossy(&r.body).contains("ENV-DECOY")));
+
+        let out = dispatch_list_sheets(args, None).await;
+        assert!(out.to_string().contains("COLMENA_GOOGLE_OAUTH"), "{out}");
     }
 
     fn mock_client_returning(values: serde_json::Value) -> ReadClient {

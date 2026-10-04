@@ -99,7 +99,15 @@ mod tests {
             .expect(1)
             .mount(&server)
             .await;
+        /// Removes the env var even when an assertion below panics.
+        struct EnvGuard(&'static str);
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                std::env::remove_var(self.0);
+            }
+        }
         std::env::set_var("CX7_PLATFORM_RT", "tok-cx7-platform-secret");
+        let _env = EnvGuard("CX7_PLATFORM_RT");
         let auth = GoogleWorkspaceAuth::from_node_config(&serde_json::json!({
             "google_workspace_auth": {
                 "type": "oauth2_refresh_token",
@@ -113,7 +121,6 @@ mod tests {
         .unwrap();
         assert_eq!(auth.refresh_token, "${CX7_PLATFORM_RT}");
         auth.provider().get_bearer_token().await.unwrap();
-        std::env::remove_var("CX7_PLATFORM_RT");
         let body = String::from_utf8_lossy(&server.received_requests().await.unwrap()[0].body)
             .into_owned();
         assert!(!body.contains("tok-cx7-platform-secret"), "{body}");
