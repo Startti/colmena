@@ -66,6 +66,34 @@ fn a_real_field_is_not_reported() {
         report.diagnostics
     );
 }
+/// `google_workspace_auth` (per-node Google credentials) is a real field of
+/// `llm_call`: a graph that sets it must not be told the node never reads it.
+#[test]
+fn google_workspace_auth_is_a_known_field_of_llm_call() {
+    let report = lint(serde_json::json!({
+        "nodes": {
+            "chat": {
+                "type": "llm_call",
+                "config": {
+                    "provider": "openai",
+                    "api_key": "k",
+                    "google_workspace_auth": {
+                        "type": "oauth2_refresh_token",
+                        "client_id": "cid",
+                        "client_secret": "cs",
+                        "refresh_token": "rt"
+                    }
+                }
+            }
+        },
+        "edges": []
+    }));
+    assert!(
+        !codes(&report).contains(&"UNKNOWN_FIELD"),
+        "{:?}",
+        report.diagnostics
+    );
+}
 #[test]
 fn engine_injected_keys_are_not_treated_as_invented() {
     let report = lint(serde_json::json!({

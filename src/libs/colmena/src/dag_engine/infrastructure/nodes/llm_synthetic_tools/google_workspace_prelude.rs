@@ -200,7 +200,55 @@ pub fn build_google_workspace_prelude(sa_email: Option<&str>) -> String {
              Editor."
             .to_string(),
     };
-    format!("{base}\n\n{SHEET_WORKFLOW_PRELUDE}\n\n{TABLE_WORKFLOW_PRELUDE}")
+    with_workflow_blocks(&base)
+}
+
+/// Whose Google credentials the `gsheets_*` / `gdocs_*` tools act with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GoogleWorkspaceCredentialSource<'a> {
+    /// Platform env credentials (`COLMENA_GOOGLE_OAUTH_*`): users share
+    /// files with `share_email` (degraded text when unknown).
+    Platform { share_email: Option<&'a str> },
+    /// Per-node `llm_call.config.google_workspace_auth`: the user's connected
+    /// Google account. Nothing is shared with anyone.
+    UserConnection,
+}
+
+/// Access block for the connected-account prelude. Keeps the document-ID
+/// rule of the platform prelude, drops every sharing instruction: the tools
+/// act as the user's own account, so a missing access means the user opens
+/// the file with that account.
+const CONNECTED_ACCOUNT_ACCESS_PRELUDE: &str =
+    "## Google Workspace access (connected Google account)\n\
+     You have Google Docs and/or Sheets tools. They act as the user's connected Google \
+     account: you can work with the files that account can open, and the files you create \
+     are created in that account's Drive.\n\
+     To operate on a document you need its **document ID** (the user gives it, or extract it \
+     from the URL: `docs.google.com/document/d/<ID>/edit` or \
+     `docs.google.com/spreadsheets/d/<ID>/edit`). If the user already gave one in this or a \
+     previous turn, proceed directly and do not ask for it again; if not, ask for it and show \
+     where it is in the URL.\n\
+     If a tool fails with `permission_denied`, the connected Google account cannot open that \
+     file: tell the user to open it with that account (the tool result carries a `hint` to \
+     paraphrase), then try again.";
+
+/// Build the prelude for the given credential source. `Platform` is exactly
+/// [`build_google_workspace_prelude`]; `UserConnection` never asks the user
+/// to share anything and names the connected Google account instead.
+pub fn build_google_workspace_prelude_for(source: GoogleWorkspaceCredentialSource<'_>) -> String {
+    match source {
+        GoogleWorkspaceCredentialSource::Platform { share_email } => {
+            build_google_workspace_prelude(share_email)
+        }
+        GoogleWorkspaceCredentialSource::UserConnection => {
+            with_workflow_blocks(CONNECTED_ACCOUNT_ACCESS_PRELUDE)
+        }
+    }
+}
+
+/// Append the tool-workflow blocks shared by every prelude variant.
+fn with_workflow_blocks(access: &str) -> String {
+    format!("{access}\n\n{SHEET_WORKFLOW_PRELUDE}\n\n{TABLE_WORKFLOW_PRELUDE}")
 }
 
 /// True when the LLM's exposed-tools list contains any `gsheets_*` or
@@ -221,6 +269,44 @@ mod tests {
     use super::*;
     use serial_test::serial;
     use std::io::Write;
+
+    #[test]
+    fn user_connection_prelude_never_asks_to_share() {
+        let text =
+            build_google_workspace_prelude_for(GoogleWorkspaceCredentialSource::UserConnection);
+        let lower = text.to_lowercase();
+        // Neither the English nor the Spanish share instruction, nor any
+        // address or operator to ask for one.
+        for banned in [
+            "share",
+            "compart",
+            "@",
+            "operador",
+            "operator",
+            "service account",
+        ] {
+            assert!(!lower.contains(banned), "mentions `{banned}`: {text}");
+        }
+        assert!(text.contains("connected Google account"), "{text}");
+        // Missing access is solved by opening the file with that account.
+        assert!(lower.contains("open it with that account"), "{text}");
+        // Keeps the document-ID rule and the tool workflow blocks.
+        assert!(text.contains("docs.google.com/document/d/<ID>"), "{text}");
+        assert!(text.contains(SHEET_WORKFLOW_PRELUDE), "{text}");
+        assert!(text.contains(TABLE_WORKFLOW_PRELUDE), "{text}");
+    }
+
+    #[test]
+    fn platform_prelude_is_unchanged() {
+        for email in [Some("agents@startti.co"), None] {
+            let old = build_google_workspace_prelude(email);
+            let new =
+                build_google_workspace_prelude_for(GoogleWorkspaceCredentialSource::Platform {
+                    share_email: email,
+                });
+            assert_eq!(old, new);
+        }
+    }
 
     #[test]
     fn prelude_with_email_includes_address_and_share_instruction() {

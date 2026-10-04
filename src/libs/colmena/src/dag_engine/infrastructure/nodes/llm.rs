@@ -1495,6 +1495,15 @@ impl ExecutableNode for LlmNode {
             }
         };
 
+        // Per-node Google Workspace credentials (`config.google_workspace_auth`,
+        // the user's connected Google account). Read from `config` only —
+        // never from `inputs`. Present but invalid fails the node here, before
+        // any provider call: it must never fall back to the platform env
+        // credentials. The message names the block, never its values.
+        let google_workspace_auth =
+            crate::google_oauth::infrastructure::GoogleWorkspaceAuth::from_node_config(config)?
+                .map(Arc::new);
+
         // Verbose flag for debugging — prints prompt, system message, and raw response.
         let verbose = inputs
             .get("verbose")
@@ -2511,6 +2520,7 @@ impl ExecutableNode for LlmNode {
             // Thread the parent observer so tool-invoked subgraphs emit subgraph-* events.
             executor = executor.with_observer(_observer.clone());
             executor = executor.with_subgraph_depth(effective_subgraph_depth(inputs));
+            executor = executor.with_google_workspace_auth(google_workspace_auth.clone());
             if let Some(repo) = self.state_repository.clone() {
                 executor = executor.with_state_repository(repo);
             }
@@ -3427,18 +3437,30 @@ impl ExecutableNode for LlmNode {
             // Google Workspace prelude — auto-injected whenever any
             // gsheets_* or gdocs_* tool is exposed. Forces the agent to
             // (a) require an explicit doc ID before any tool call and
-            // (b) tell the user which SA email to share the doc with.
+            // (b) with the platform credentials, tell the user which email
+            // to share the doc with; with the user's connected Google
+            // account (`google_workspace_auth`) there is nothing to share.
             // Eliminates the "agent guesses ID and hits PermissionDenied"
             // first-turn round-trip. ~140 tokens with email; ~110 in the
             // degraded path. See google_workspace_prelude.rs for the
             // resolution chain (env var → JSON file → None).
             {
                 use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::{
-                    build_google_workspace_prelude, has_google_workspace_tools, resolve_share_email,
+                    build_google_workspace_prelude_for, has_google_workspace_tools,
+                    resolve_share_email, GoogleWorkspaceCredentialSource,
                 };
                 if has_google_workspace_tools(tools.iter().map(|t| t.name.as_str())) {
-                    let share_email = resolve_share_email();
-                    sections.push(build_google_workspace_prelude(share_email.as_deref()));
+                    let share_email;
+                    let source = match google_workspace_auth {
+                        Some(_) => GoogleWorkspaceCredentialSource::UserConnection,
+                        None => {
+                            share_email = resolve_share_email();
+                            GoogleWorkspaceCredentialSource::Platform {
+                                share_email: share_email.as_deref(),
+                            }
+                        }
+                    };
+                    sections.push(build_google_workspace_prelude_for(source));
                 }
             }
             if let Some(sys_msg) = system_message {
@@ -4172,7 +4194,8 @@ impl ExecutableNode for LlmNode {
                 .with_field("documents", FieldSpec::of_type("object"))
                 .with_field("skills_path", FieldSpec::of_type("string"))
                 .with_field("skills_paths", FieldSpec::of_type("array"))
-                .with_field("crdt_documents", FieldSpec::of_type("object")),
+                .with_field("crdt_documents", FieldSpec::of_type("object"))
+                .with_field("google_workspace_auth", FieldSpec::of_type("object")),
         )
     }
 }
@@ -7999,5 +8022,317 @@ mod steering_take_tests {
             })
             .collect();
         assert_eq!(read, ["m1"]);
+    }
+}
+
+#[cfg(test)]
+mod google_workspace_auth_node_tests {
+    //! `llm_call.config.google_workspace_auth`: present but invalid fails the
+    //! node before any LLM call (never an env fallback); valid credentials
+    //! reach the tool executor and pick the connected-account prelude; absent
+    //! keeps today's behavior. Read from `config` only, values used literally.
+    use super::*;
+    use crate::dag_engine::application::ports::NodeRegistryPort;
+    use crate::dag_engine::domain::node::ExecutableNode;
+    use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::{
+        build_google_workspace_prelude_for, GoogleWorkspaceCredentialSource,
+    };
+    use crate::dag_engine::infrastructure::pool_registry::{PgPoolRegistry, PoolConfig};
+    use crate::llm::domain::{LlmError, LlmRepository, LlmRequest, LlmResponse, LlmStream};
+    use crate::llm::infrastructure::{OverrideGuard, ScriptedAdapter, ScriptedResponse};
+    use std::sync::Mutex as StdMutex;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    struct DummyRegistry;
+    impl NodeRegistryPort for DummyRegistry {
+        fn get_node(&self, _: &str) -> Option<Arc<dyn ExecutableNode>> {
+            None
+        }
+        fn get_all_nodes(&self) -> HashMap<String, Arc<dyn ExecutableNode>> {
+            HashMap::new()
+        }
+    }
+
+    /// Scripted adapter that also records the system messages it receives.
+    struct RecordingAdapter {
+        inner: ScriptedAdapter,
+        systems: StdMutex<Vec<String>>,
+    }
+
+    impl RecordingAdapter {
+        fn new(script: Vec<ScriptedResponse>) -> Arc<Self> {
+            Arc::new(Self {
+                inner: ScriptedAdapter::new(script),
+                systems: StdMutex::new(Vec::new()),
+            })
+        }
+        fn record(&self, request: &LlmRequest) {
+            let mut systems = self.systems.lock().unwrap();
+            for m in request.messages() {
+                if matches!(m.role(), crate::llm::domain::MessageRole::System) {
+                    systems.push(m.content().to_string());
+                }
+            }
+        }
+        fn system_text(&self) -> String {
+            self.systems.lock().unwrap().join("\n")
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl LlmRepository for RecordingAdapter {
+        async fn call(&self, request: LlmRequest) -> Result<LlmResponse, LlmError> {
+            self.record(&request);
+            self.inner.call(request).await
+        }
+        async fn stream(&self, request: LlmRequest) -> Result<LlmStream, LlmError> {
+            self.record(&request);
+            self.inner.stream(request).await
+        }
+        async fn health_check(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
+        fn provider_name(&self) -> &'static str {
+            "recording"
+        }
+    }
+
+    async fn run_node(
+        inputs: HashMap<String, Value>,
+        config: Value,
+        adapter: Arc<RecordingAdapter>,
+    ) -> Result<Value, Box<dyn Error + Send + Sync>> {
+        let registry: Arc<dyn NodeRegistryPort> = Arc::new(DummyRegistry);
+        let factory = Arc::new(ConversationRepositoryFactory::new(Arc::new(
+            PgPoolRegistry::new(PoolConfig::defaults()),
+        )));
+        let node = LlmNode::new(factory, Arc::downgrade(&registry), None);
+        let _guard = OverrideGuard::install(adapter);
+        let mut state = Value::Null;
+        node.execute(&inputs, &config, &mut state, None).await
+    }
+
+    fn base_config() -> Value {
+        serde_json::json!({
+            "provider": "mock",
+            "api_key": "test-key",
+            "prompt": "hello",
+            "enabled_tools": ["gsheets_list_sheets"]
+        })
+    }
+
+    fn with_block(block: Value) -> Value {
+        let mut cfg = base_config();
+        cfg["google_workspace_auth"] = block;
+        cfg
+    }
+
+    /// One `gsheets_list_sheets` call, then a final answer.
+    fn tool_call_script() -> Vec<ScriptedResponse> {
+        vec![
+            ScriptedResponse::ToolCall {
+                id: "call-1".into(),
+                tool_name: "gsheets_list_sheets".into(),
+                arguments: serde_json::json!({"spreadsheet_id": "ss"}),
+            },
+            ScriptedResponse::Text("done".into()),
+        ]
+    }
+
+    /// Token endpoint that refuses every refresh, so a tool call that reaches
+    /// it is recorded and then fails without any Google API call.
+    async fn refusing_token_server() -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(400).set_body_string(
+                r#"{"error":"invalid_grant","error_description":"test endpoint"}"#,
+            ))
+            .mount(&server)
+            .await;
+        server
+    }
+
+    fn clear_platform_env() {
+        for name in ["CLIENT_ID", "CLIENT_SECRET", "REFRESH_TOKEN"] {
+            std::env::remove_var(format!("COLMENA_GOOGLE_OAUTH_{name}"));
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn invalid_google_workspace_auth_fails_before_calling_the_llm() {
+        let adapter = RecordingAdapter::new(vec![ScriptedResponse::Text("unused".into())]);
+        let cfg = with_block(serde_json::json!({
+            "type": "oauth2_refresh_token",
+            "client_id": "cid",
+            "client_secret": "CS-MUST-NOT-LEAK",
+            "refresh_token": ""
+        }));
+        let err = run_node(HashMap::new(), cfg, adapter.clone())
+            .await
+            .expect_err("invalid google_workspace_auth must fail the node")
+            .to_string();
+        assert!(err.contains("google_workspace_auth"), "{err}");
+        assert!(err.contains("refresh_token"), "{err}");
+        assert!(!err.contains("CS-MUST-NOT-LEAK"), "{err}");
+        assert_eq!(adapter.inner.remaining(), 1, "the LLM must not be called");
+    }
+
+    /// Absent → today's platform prelude; valid → the connected-account
+    /// prelude, which never names the platform share address.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn the_prelude_follows_the_credential_source() {
+        let block = serde_json::json!({ "type": "oauth2_refresh_token",
+            "client_id": "cid", "client_secret": "cs", "refresh_token": "rt-prelude" });
+        let platform = GoogleWorkspaceCredentialSource::Platform {
+            share_email: Some("agents@example.com"),
+        };
+        let user = GoogleWorkspaceCredentialSource::UserConnection;
+        for (cfg, source) in [(base_config(), platform), (with_block(block), user)] {
+            std::env::set_var("COLMENA_GOOGLE_SHARE_EMAIL", "agents@example.com");
+            let adapter = RecordingAdapter::new(vec![ScriptedResponse::Text("ok".into())]);
+            let result = run_node(HashMap::new(), cfg, adapter.clone()).await;
+            std::env::remove_var("COLMENA_GOOGLE_SHARE_EMAIL");
+            result.expect("the node runs");
+            let system = adapter.system_text();
+            assert!(
+                system.contains(&build_google_workspace_prelude_for(source)),
+                "{system}"
+            );
+            assert_eq!(system.contains("agents@example.com"), source == platform);
+        }
+    }
+
+    /// The node hands its credentials to the tool executor: a gsheets tool
+    /// call refreshes against the block's token endpoint, never env.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn tool_calls_use_the_node_credentials() {
+        clear_platform_env();
+        let token_server = refusing_token_server().await;
+
+        // Absent: the tool takes the env path and never reaches the endpoint.
+        run_node(
+            HashMap::new(),
+            base_config(),
+            RecordingAdapter::new(tool_call_script()),
+        )
+        .await
+        .expect("node without google_workspace_auth");
+        assert!(token_server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .is_empty());
+
+        let cfg = with_block(serde_json::json!({
+            "type": "oauth2_refresh_token",
+            "token_url": format!("{}/token", token_server.uri()),
+            "client_id": "cid",
+            "client_secret": "cs",
+            "refresh_token": "rt-node-wiring"
+        }));
+        run_node(
+            HashMap::new(),
+            cfg,
+            RecordingAdapter::new(tool_call_script()),
+        )
+        .await
+        .expect("node with google_workspace_auth");
+        let refreshes = token_server.received_requests().await.unwrap_or_default();
+        assert_eq!(refreshes.len(), 1);
+        assert!(
+            String::from_utf8_lossy(&refreshes[0].body).contains("refresh_token=rt-node-wiring")
+        );
+    }
+
+    /// The block is author config: the same key arriving through `inputs`
+    /// (an edge or an upstream output) is never used as credentials. The
+    /// tool keeps the platform identity and the platform prelude.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn a_block_arriving_through_inputs_is_not_used_as_credentials() {
+        clear_platform_env();
+        std::env::set_var("COLMENA_GOOGLE_SHARE_EMAIL", "agents@example.com");
+        let token_server = refusing_token_server().await;
+        let inputs = HashMap::from([(
+            "google_workspace_auth".to_string(),
+            serde_json::json!({
+                "type": "oauth2_refresh_token",
+                "token_url": format!("{}/token", token_server.uri()),
+                "client_id": "cid",
+                "client_secret": "cs",
+                "refresh_token": "rt-from-upstream"
+            }),
+        )]);
+        let adapter = RecordingAdapter::new(tool_call_script());
+        let result = run_node(inputs, base_config(), adapter.clone()).await;
+        std::env::remove_var("COLMENA_GOOGLE_SHARE_EMAIL");
+        result.expect("node runs with the platform identity");
+
+        assert_eq!(adapter.inner.remaining(), 0, "the tool call was dispatched");
+        let refreshes = token_server.received_requests().await.unwrap_or_default();
+        assert!(
+            refreshes.is_empty(),
+            "an inputs-fed block reached the token endpoint: {} request(s)",
+            refreshes.len()
+        );
+        let system = adapter.system_text();
+        assert!(
+            system.contains(&build_google_workspace_prelude_for(
+                GoogleWorkspaceCredentialSource::Platform {
+                    share_email: Some("agents@example.com")
+                }
+            )),
+            "{system}"
+        );
+    }
+
+    /// `${VAR}` inside the block is a literal value, never expanded from the
+    /// engine env: a graph author must not be able to name the platform's
+    /// own Google secret and act with it.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn env_placeholders_in_the_block_are_passed_literally() {
+        const VAR: &str = "COLMENA_GOOGLE_OAUTH_CLIENT_SECRET";
+        let previous = std::env::var(VAR).ok();
+        std::env::set_var(VAR, "PLATFORM-SECRET-MUST-NOT-BE-SENT");
+        let token_server = refusing_token_server().await;
+        let cfg = with_block(serde_json::json!({
+            "type": "oauth2_refresh_token",
+            "token_url": format!("{}/token", token_server.uri()),
+            "client_id": "cid",
+            "client_secret": format!("${{{VAR}}}"),
+            "refresh_token": "rt-literal-placeholder"
+        }));
+        let result = run_node(
+            HashMap::new(),
+            cfg,
+            RecordingAdapter::new(tool_call_script()),
+        )
+        .await;
+        match previous {
+            Some(v) => std::env::set_var(VAR, v),
+            None => std::env::remove_var(VAR),
+        }
+        result.expect("node with google_workspace_auth");
+
+        let refreshes = token_server.received_requests().await.unwrap_or_default();
+        assert_eq!(refreshes.len(), 1);
+        let form: HashMap<String, String> = url::form_urlencoded::parse(&refreshes[0].body)
+            .into_owned()
+            .collect();
+        assert_eq!(
+            form.get("client_secret").map(String::as_str),
+            Some("${COLMENA_GOOGLE_OAUTH_CLIENT_SECRET}"),
+            "{form:?}"
+        );
+        assert!(
+            !String::from_utf8_lossy(&refreshes[0].body).contains("PLATFORM-SECRET"),
+            "the env value was sent"
+        );
     }
 }

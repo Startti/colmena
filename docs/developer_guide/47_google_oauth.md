@@ -303,8 +303,8 @@ Bloque `{type: "oauth2_refresh_token", client_id, client_secret, refresh_token, 
 plataforma, igual que hoy) y `Err` si es inválida (otro `type`, un campo faltante o en blanco):
 **nunca** cae a la cuenta de plataforma. Los errores nombran `google_workspace_auth`, nunca un valor.
 `provider()` da un `Arc<dyn AuthTokenProvider>` compartido por identidad (los cuatro campos) en un
-`OAuthProviderCache` propio del proceso. `Debug` redacta los secretos. Todavía ningún nodo lee el
-bloque desde su config: lo conectan las PRs siguientes del porte de `feat/google-workspace-auth`.
+`OAuthProviderCache` propio del proceso. `Debug` redacta los secretos. `llm_call` lo lee de su
+`config` antes de llamar al proveedor: si es inválido, el nodo falla sin llamar al LLM.
 
 - **Sin expansión de `${VAR}`.** Los valores se usan tal cual llegan: ADP manda las credenciales ya
   resueltas de la conexión del usuario. Expandirlos dejaría que un grafo nombre una env var del motor
@@ -316,9 +316,11 @@ bloque desde su config: lo conectan las PRs siguientes del porte de `feat/google
 - **Solo del config del autor.** `DagToolExecutor::with_google_workspace_auth` recibe el bloque parseado
   del `config` del nodo, nunca de los argumentos de una tool ni de los inputs.
 
-Las tools de gsheets (`gsheets_*`, `gsheets_run_python` y la fuente Sheets de `data_run_python`) ya
-arman su cliente por llamada con ese bloque (`build_client(auth)`). El `llm_call` todavía no se lo pasa
-al executor, así que siguen actuando como la cuenta de plataforma.
+Las tools de gsheets (`gsheets_*`, `gsheets_run_python` y la fuente Sheets de `data_run_python`) y de
+gdocs arman su cliente por llamada con ese bloque (`build_client(auth)`). `llm_call` se lo pasa al
+executor (`with_google_workspace_auth`), así que actúan como la cuenta conectada del usuario; sin el
+bloque, como la de plataforma. Con la cuenta conectada el prelude (`build_google_workspace_prelude_for`)
+no pide compartir nada; con la de plataforma el texto es el de siempre.
 
 ## Monitoring
 

@@ -1830,6 +1830,12 @@
           "default": null,
           "description": "Several directories to scan for skills, same semantics as 'skills_path' but plural. Both are read and their results deduped by name (llm.rs:712-722)."
         },
+        "google_workspace_auth": {
+          "type": "object",
+          "required": false,
+          "default": null,
+          "description": "Optional per-node Google credentials (the user's connected Google account) for the gsheets_* and gdocs_* tools this node calls. Shape: { type: \"oauth2_refresh_token\", client_id, client_secret, refresh_token, token_url? } (token_url defaults to https://oauth2.googleapis.com/token). Read from config only, never from inputs; values are used literally (`${VAR}` is not expanded). Absent → the platform credentials (COLMENA_GOOGLE_OAUTH_*), as before. Present but invalid (wrong type, or a missing or blank field) → the node fails before calling the LLM, with an error that names the block and never its values; it never falls back to the platform account. With it, the Google Workspace prelude drops every instruction to share files. Carries secrets: inject it at run time, never persist it in a stored graph."
+        },
         "crdt_documents": {
           "type": "object",
           "required": false,
