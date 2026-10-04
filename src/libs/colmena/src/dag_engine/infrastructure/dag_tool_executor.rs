@@ -7617,7 +7617,7 @@ mod google_workspace_auth_builder_tests {
     /// The executor exposes exactly the credentials it was built with.
     #[test]
     fn with_google_workspace_auth_sets_and_clears() {
-        let auth = GoogleWorkspaceAuth {
+        let auth = GoogleWorkspaceAuth::RefreshToken {
             token_url: "https://t/token".into(),
             client_id: "cid".into(),
             client_secret: "cs".into(),
@@ -7902,7 +7902,7 @@ mod google_workspace_auth_tests {
     }
 
     fn auth_for(token_server: &MockServer, refresh_token: &str) -> GoogleWorkspaceAuth {
-        GoogleWorkspaceAuth {
+        GoogleWorkspaceAuth::RefreshToken {
             token_url: format!("{}/token", token_server.uri()),
             client_id: "cid-executor".into(),
             client_secret: "cs-executor".into(),
@@ -8229,7 +8229,7 @@ mod google_workspace_auth_tests {
     /// does not inherit the parent's block.
     #[tokio::test]
     async fn only_for_each_receives_the_credentials_in_its_config() {
-        let exec = for_each_executor(Some(GoogleWorkspaceAuth {
+        let exec = for_each_executor(Some(GoogleWorkspaceAuth::RefreshToken {
             token_url: "https://t/token".into(),
             client_id: "cid".into(),
             client_secret: "cs".into(),

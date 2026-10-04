@@ -1437,7 +1437,7 @@ mod tests {
             .mount(&sheets)
             .await;
         let _base = override_sheets_api_base_for_tests(&sheets.uri());
-        let auth = GoogleWorkspaceAuth {
+        let auth = GoogleWorkspaceAuth::RefreshToken {
             token_url: format!("{}/token", token.uri()),
             client_id: "cid".into(),
             client_secret: "cs".into(),
