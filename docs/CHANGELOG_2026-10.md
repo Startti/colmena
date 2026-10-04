@@ -324,3 +324,14 @@ bloque, el entorno; bloque inválido falla antes de tocar hojas; las tres operac
 las credenciales; el bloque llegado por `inputs` no se usa; el linter acepta el campo en `for_each`.
 **Mutación.** Leer el bloque también de `inputs` tumba un test; sacar el campo del catálogo tumba el del
 linter. **E2E.** No aplica. **ADP.** Ninguno todavía. **Estado.** done.
+
+## 21. `for_each` como tool actúa con el `google_workspace_auth` del `llm_call` (porte de `feat/google-workspace-auth`, B8b)
+
+**Qué cambia.** Cuando un `llm_call` con `google_workspace_auth` despacha `for_each` como tool, el executor le
+pone el bloque en su `config` (`GoogleWorkspaceAuth::to_config_block`, inverso de `from_node_config`), así lee
+y escribe sus hojas con la cuenta conectada. Ningún otro tipo de nodo lo recibe: un `llm_call` hijo sigue con
+`config` vacío y no hereda el bloque del padre. Guía: [47_google_oauth.md](developer_guide/47_google_oauth.md).
+**Tests.** `for_each_tool_uses_the_llm_call_credentials` (sin bloque, el entorno; con bloque, el refresh del
+bloque); `only_for_each_receives_the_credentials_in_its_config` (un `http_request` y un `llm_call` hijo no lo
+reciben); `to_config_block` ida y vuelta. **Mutación.** Darle el bloque también a `llm_call` y no dárselo a
+`for_each` tumban un test cada una. **E2E.** No aplica. **ADP.** Ninguno. **Estado.** done.

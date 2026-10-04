@@ -594,7 +594,7 @@
           "type": "object",
           "required": false,
           "default": null,
-          "description": "Optional Google credentials (the user's connected Google account) for `items_from: { source: \"sheet\" }` and `results_to: { sink: \"sheet\" }`. Same shape as llm_call.google_workspace_auth. Read from config only, never from inputs or rows. Absent → the platform credentials (COLMENA_GOOGLE_OAUTH_*), as before. Present but invalid → the node fails before reading or writing any sheet. The rows' target nodes do not receive it. Carries secrets: inject it at run time, never persist it in a stored graph."
+          "description": "Optional Google credentials (the user's connected Google account) for `items_from: { source: \"sheet\" }` and `results_to: { sink: \"sheet\" }`. Same shape as llm_call.google_workspace_auth. Read from config only, never from inputs or rows. Absent → the platform credentials (COLMENA_GOOGLE_OAUTH_*), as before. Present but invalid → the node fails before reading or writing any sheet. As an LLM tool, for_each uses the google_workspace_auth of the llm_call that dispatches it; the rows' target nodes do not receive it. Carries secrets: inject it at run time, never persist it in a stored graph."
         }
       },
       "input_ports": {

@@ -59,6 +59,20 @@ impl GoogleWorkspaceAuth {
         }))
     }
 
+    /// The `google_workspace_auth` config block for these credentials, the
+    /// inverse of [`Self::from_node_config`]. The tool executor uses it to hand
+    /// an `llm_call`'s credentials to a node it dispatches (`for_each`). Holds
+    /// the secrets in clear: never log or persist it.
+    pub fn to_config_block(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "oauth2_refresh_token",
+            "token_url": self.token_url,
+            "client_id": self.client_id,
+            "client_secret": self.client_secret,
+            "refresh_token": self.refresh_token,
+        })
+    }
+
     /// Shared provider for this identity (process-wide `OAuthProviderCache`,
     /// bounded, see `provider_cache`), behind the port so callers never
     /// depend on how the token is refreshed.
@@ -194,6 +208,21 @@ mod tests {
                 "a different identity must not share the provider: {v:?}"
             );
         }
+    }
+
+    #[test]
+    fn to_config_block_round_trips_through_from_node_config() {
+        let auth = GoogleWorkspaceAuth {
+            token_url: "https://t/token".into(),
+            client_id: "cid".into(),
+            client_secret: "cs".into(),
+            refresh_token: "rt".into(),
+        };
+        let config = serde_json::json!({ "google_workspace_auth": auth.to_config_block() });
+        assert_eq!(
+            GoogleWorkspaceAuth::from_node_config(&config).unwrap(),
+            Some(auth)
+        );
     }
 
     #[test]

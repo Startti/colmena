@@ -2397,11 +2397,6 @@ impl DagToolExecutor {
             inputs
         };
 
-        // fixed_config values are already merged into `inputs` by the logic above.
-        // Do NOT pass fixed_config as node config: HttpNode would double-process headers/body
-        // causing conflicts (e.g., duplicate Content-Type → Amadeus 400).
-        let node_exec_config = serde_json::json!({});
-
         // Read the secure flag directly from tool_cfg — no need to pass it via config.
         let is_secure = tool_cfg
             .and_then(|c| c.fixed_config.get("secure"))
@@ -2415,6 +2410,23 @@ impl DagToolExecutor {
         let dispatched_node_type = tool_cfg
             .map(|c| c.node_type.as_str())
             .unwrap_or(node_type.as_str());
+
+        // fixed_config values are already merged into `inputs` by the logic above.
+        // Do NOT pass fixed_config as node config: HttpNode would double-process headers/body
+        // causing conflicts (e.g., duplicate Content-Type → Amadeus 400).
+        //
+        // One engine-authored exception: `for_each` reads and writes Google
+        // Sheets itself (`items_from` / `results_to`), so it acts with this
+        // `llm_call`'s `google_workspace_auth`, handed over in its config (the
+        // same key it reads as a graph node). Config, not inputs: inputs carry
+        // model arguments and are echoed into events. No other node type gets
+        // it — a nested `llm_call` tool still uses only its own config.
+        let node_exec_config = match (dispatched_node_type, self.google_workspace_auth()) {
+            ("for_each", Some(auth)) => {
+                serde_json::json!({ "google_workspace_auth": auth.to_config_block() })
+            }
+            _ => serde_json::json!({}),
+        };
 
         // A node that runs its own inner execution — `llm_call` (an agent loop)
         // or `for_each` (one target run per row) — shares this agent's observer,
@@ -8102,5 +8114,133 @@ mod google_workspace_auth_tests {
         assert_eq!(refreshes.len(), 1, "{auth_out}");
         assert!(String::from_utf8_lossy(&refreshes[0].body)
             .contains("refresh_token=rt-data-run-python"));
+    }
+
+    /// Registry with the real `for_each` node plus a probe that reports
+    /// whether its config carried `google_workspace_auth`.
+    struct ForEachRegistry {
+        for_each: Arc<crate::dag_engine::infrastructure::nodes::for_each::ForEachNode>,
+    }
+    impl NodeRegistryPort for ForEachRegistry {
+        fn get_node(&self, node_type: &str) -> Option<Arc<dyn ExecutableNode>> {
+            match node_type {
+                "for_each" => Some(self.for_each.clone()),
+                "http_request" | "llm_call" => Some(Arc::new(ConfigProbe)),
+                _ => None,
+            }
+        }
+        fn get_all_nodes(&self) -> HashMap<String, Arc<dyn ExecutableNode>> {
+            HashMap::new()
+        }
+    }
+
+    struct ConfigProbe;
+    #[async_trait::async_trait]
+    impl ExecutableNode for ConfigProbe {
+        async fn execute(
+            &self,
+            _inputs: &crate::dag_engine::domain::node::NodeInputs,
+            config: &serde_json::Value,
+            _state: &mut serde_json::Value,
+            _observer: Option<Arc<dyn crate::dag_engine::domain::observer::ExecutionObserver>>,
+        ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
+            Ok(
+                serde_json::json!({ "config_has_google_workspace_auth": config.get("google_workspace_auth").is_some() }),
+            )
+        }
+        fn schema(&self) -> serde_json::Value {
+            serde_json::json!({ "type": "http_request" })
+        }
+    }
+
+    fn for_each_executor(auth: Option<GoogleWorkspaceAuth>) -> DagToolExecutor {
+        let for_each =
+            Arc::new(crate::dag_engine::infrastructure::nodes::for_each::ForEachNode::new());
+        let registry: Arc<dyn NodeRegistryPort> = Arc::new(ForEachRegistry {
+            for_each: for_each.clone(),
+        });
+        for_each.registry.set(registry.clone()).ok();
+        let mut configs = HashMap::new();
+        configs.insert(
+            "rows_from_sheet".to_string(),
+            serde_json::from_value::<ToolConfiguration>(serde_json::json!({
+                "name": "rows_from_sheet",
+                "node_type": "for_each",
+                "node_schema": {
+                    "items_from": { "type": "object", "required": true, "description": "source" },
+                    "target": { "type": "object", "required": true, "description": "target" }
+                }
+            }))
+            .unwrap(),
+        );
+        for (name, node_type) in [("probe", "http_request"), ("child_agent", "llm_call")] {
+            configs.insert(
+                name.to_string(),
+                serde_json::from_value::<ToolConfiguration>(serde_json::json!({
+                    "name": name, "node_type": node_type, "node_schema": {}
+                }))
+                .unwrap(),
+            );
+        }
+        DagToolExecutor::new(registry, configs).with_google_workspace_auth(auth.map(Arc::new))
+    }
+
+    /// `for_each` dispatched as a tool reads its sheet with the credentials of
+    /// the `llm_call` that dispatches it; without them it keeps the env path.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn for_each_tool_uses_the_llm_call_credentials() {
+        for name in OAUTH_ENV {
+            std::env::remove_var(name);
+        }
+        let args = serde_json::json!({
+            "items_from": { "source": "sheet", "ref": "ss|S" },
+            "target": { "node_type": "add", "node_schema": {} }
+        });
+        let token_server = rejecting_token_endpoint().await;
+
+        let platform_out = run(&for_each_executor(None), "rows_from_sheet", &args).await;
+        assert!(platform_out.contains(ENV_MARKER), "{platform_out}");
+        assert!(token_server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .is_empty());
+
+        let auth_out = run(
+            &for_each_executor(Some(auth_for(&token_server, "rt-for-each-tool"))),
+            "rows_from_sheet",
+            &args,
+        )
+        .await;
+        assert!(
+            !auth_out.contains(ENV_MARKER),
+            "fell back to env: {auth_out}"
+        );
+        let refreshes = token_server.received_requests().await.unwrap_or_default();
+        assert_eq!(refreshes.len(), 1, "{auth_out}");
+        assert!(
+            String::from_utf8_lossy(&refreshes[0].body).contains("refresh_token=rt-for-each-tool")
+        );
+    }
+
+    /// Only `for_each` gets the credentials in its config; any other tool node
+    /// keeps the empty config it always had — a child `llm_call` included: it
+    /// does not inherit the parent's block.
+    #[tokio::test]
+    async fn only_for_each_receives_the_credentials_in_its_config() {
+        let exec = for_each_executor(Some(GoogleWorkspaceAuth {
+            token_url: "https://t/token".into(),
+            client_id: "cid".into(),
+            client_secret: "cs".into(),
+            refresh_token: "rt".into(),
+        }));
+        for tool in ["probe", "child_agent"] {
+            let out = run(&exec, tool, &serde_json::json!({})).await;
+            assert!(
+                out.contains(r#""config_has_google_workspace_auth":false"#),
+                "{tool}: {out}"
+            );
+        }
     }
 }

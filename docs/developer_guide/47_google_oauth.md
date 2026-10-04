@@ -315,6 +315,12 @@ plataforma, igual que hoy) y `Err` si es inválida (otro `type`, un campo faltan
   tener en memoria el refresh token de una identidad que ya no se usa. Uno en uso nunca se descarta.
 - **Solo del config del autor.** `DagToolExecutor::with_google_workspace_auth` recibe el bloque parseado
   del `config` del nodo, nunca de los argumentos de una tool ni de los inputs.
+- **`for_each` como tool.** Es la única excepción: el executor le pone el bloque del `llm_call` en su
+  `config` (`to_config_block`), y así lee y escribe sus hojas con esa cuenta. Los targets de sus filas no
+  lo reciben.
+- **Un `llm_call` hijo no hereda.** Un `llm_call` despachado como tool recibe un `config` vacío y lee el
+  bloque solo de su `config`: sus tools de Google actúan con la cuenta de plataforma, nunca con el bloque
+  del padre.
 
 Las tools de gsheets (`gsheets_*`, `gsheets_run_python` y la fuente Sheets de `data_run_python`) y de
 gdocs arman su cliente por llamada con ese bloque (`build_client(auth)`). `llm_call` se lo pasa al

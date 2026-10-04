@@ -65,8 +65,9 @@ impl ForEachNode {
 
 /// Google Sheets access for `for_each`'s `items_from: sheet` source and
 /// `results_to: sheet` sink. Every call carries the same credentials: the
-/// node's `config.google_workspace_auth`. `None` = the platform env
-/// credentials, as before.
+/// node's `config.google_workspace_auth` (as a graph node, or placed there by
+/// the tool executor from the dispatching `llm_call`). `None` = the platform
+/// env credentials, as before.
 #[derive(Clone)]
 struct SheetsAccess {
     auth: Option<Arc<GoogleWorkspaceAuth>>,
@@ -1707,8 +1708,9 @@ mod http_target_env_tests {
 #[cfg(test)]
 mod google_workspace_auth_tests {
     //! `for_each` reads (`items_from: sheet`) and writes (`results_to: sheet`)
-    //! Google Sheets with `config.google_workspace_auth`. Absent → platform
-    //! env, as before.
+    //! Google Sheets with `config.google_workspace_auth`: its own config as a
+    //! graph node, or the dispatching `llm_call`'s credentials, which the tool
+    //! executor places in this node's config. Absent → platform env, as before.
     use super::*;
     use crate::google_oauth::infrastructure::GoogleWorkspaceAuth;
     use wiremock::matchers::{method, path};
