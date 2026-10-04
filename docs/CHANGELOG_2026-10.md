@@ -199,6 +199,14 @@ aunque falle, y `provider_cache.rs` dice que con 1024+ providers en uso cada alt
 y sin él toma el camino env; el builder del executor. **Mutación.** `build_client` ignorando `auth`.
 **E2E.** No aplica hasta el cableado de `llm_call`. **ADP.** Ninguno. **Estado.** partial.
 
+## 13. gsheets: tests de cableado de `google_workspace_auth` en el executor (porte de `feat/google-workspace-auth`, parte 8)
+
+**Qué cambia.** Solo tests (de `db76489c` y `9051dbf7`, parte gsheets): con el bloque en el executor, **cada** tool
+`gsheets_*` (la lista sale del catálogo, así una tool nueva sin cablear rompe el test), `gsheets_run_python` tras
+una vista previa exitosa y la fuente Sheets de `data_run_python` actúan con esas credenciales; sin él, toman el
+camino env. **Mutación.** Una tool que pasa `None`; la corrida tras la vista previa sin `auth`; `data_run_python`
+sin `auth`. **E2E.** No aplica. **ADP.** Ninguno. **Estado.** partial.
+
 ## 14. MCP: entrada `auth_refresh` — el header bearer del host se renueva por el puerto (parte 2 de `auth_refresh`)
 
 **Qué cambia.** Una entrada `mcp` acepta `auth_refresh: {header, scheme: "Bearer", handle, expires_at}`. La carga

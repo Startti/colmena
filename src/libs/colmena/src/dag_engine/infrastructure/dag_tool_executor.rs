@@ -7610,3 +7610,318 @@ mod google_workspace_auth_builder_tests {
         assert!(exec.google_workspace_auth().is_none());
     }
 }
+
+#[cfg(test)]
+mod google_workspace_auth_tests {
+    //! Per-`llm_call` Google Workspace credentials (`google_workspace_auth`)
+    //! must reach EVERY gsheets / data_run_python dispatch. A single
+    //! dispatch that ignores them silently acts as the platform account.
+    //!
+    //! Observation: with the platform env credentials cleared, the env path
+    //! fails with `NotConfigured` naming `COLMENA_GOOGLE_OAUTH_*`, while the
+    //! config path never reads env (its token endpoint is a wiremock that
+    //! rejects the refresh, so no Google API is ever reached).
+    use super::*;
+    use crate::dag_engine::domain::node::ExecutableNode;
+    use crate::google_oauth::infrastructure::GoogleWorkspaceAuth;
+    use crate::llm::domain::attachments::AttachmentSource;
+    use crate::llm::domain::tools::FunctionCall;
+    use crate::llm::domain::{ConversationAttachment, ProviderKind, ToolCall};
+    use crate::storage::domain::{MockOutputStorageRepository, StoredBytes};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const OAUTH_ENV: [&str; 3] = [
+        "COLMENA_GOOGLE_OAUTH_CLIENT_ID",
+        "COLMENA_GOOGLE_OAUTH_CLIENT_SECRET",
+        "COLMENA_GOOGLE_OAUTH_REFRESH_TOKEN",
+    ];
+    const ENV_MARKER: &str = "COLMENA_GOOGLE_OAUTH";
+
+    struct DummyRegistry;
+    impl NodeRegistryPort for DummyRegistry {
+        fn get_node(&self, _: &str) -> Option<Arc<dyn ExecutableNode>> {
+            None
+        }
+        fn get_all_nodes(&self) -> HashMap<String, Arc<dyn ExecutableNode>> {
+            HashMap::new()
+        }
+    }
+
+    fn attachment(doc_id: &str, mime: &str) -> ConversationAttachment {
+        ConversationAttachment {
+            agent_session_id: "agent_gw".to_string(),
+            document_id: doc_id.to_string(),
+            provider: ProviderKind::OpenAi,
+            provider_file_id: "pf".to_string(),
+            mime_type: mime.to_string(),
+            filename: format!("{doc_id}.bin"),
+            size_bytes: Some(4),
+            label: None,
+            description: None,
+            source: AttachmentSource::Inline,
+            registered_at: chrono::Utc::now(),
+            refreshed_at: chrono::Utc::now(),
+            storage_key: Some(format!("sk_{doc_id}")),
+            origin: None,
+            last_used_at: None,
+        }
+    }
+
+    /// Executor with attachment plumbing wired, so the xlsx importer
+    /// get past the attachment fetch and reach their Google client.
+    fn executor(auth: Option<GoogleWorkspaceAuth>) -> DagToolExecutor {
+        let mut storage = MockOutputStorageRepository::new();
+        storage.expect_read().returning(|_| {
+            Ok(StoredBytes {
+                bytes: b"PK\x03\x04".to_vec(),
+                mime_type: "application/octet-stream".to_string(),
+                filename: "file.bin".to_string(),
+            })
+        });
+        DagToolExecutor::new(Arc::new(DummyRegistry), HashMap::new())
+            .with_attachments(vec![attachment(
+                "att-xlsx",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )])
+            .with_attachment_storage(Arc::new(storage))
+            .with_google_workspace_auth(auth.map(Arc::new))
+    }
+
+    async fn run(exec: &DagToolExecutor, tool: &str, args: &serde_json::Value) -> String {
+        let call = ToolCall::new(
+            format!("call-{tool}"),
+            FunctionCall::new(tool.to_string(), args.to_string()),
+        );
+        exec.execute(&call)
+            .await
+            .unwrap_or_else(|e| panic!("{tool}: executor error {e:?}"))
+            .output
+    }
+
+    fn gsheets_cases() -> Vec<(&'static str, serde_json::Value)> {
+        use serde_json::json;
+        vec![
+            ("gsheets_create_spreadsheet", json!({"title": "t"})),
+            (
+                "gsheets_create_from_xlsx",
+                json!({"attachment_id": "att-xlsx", "title": "t"}),
+            ),
+            ("gsheets_export_xlsx", json!({"spreadsheet_id": "ss"})),
+            ("gsheets_list_spreadsheets", json!({})),
+            (
+                "gsheets_share",
+                json!({"spreadsheet_id": "ss", "email": "user@example.com", "role": "writer"}),
+            ),
+            ("gsheets_list_permissions", json!({"spreadsheet_id": "ss"})),
+            (
+                "gsheets_unshare",
+                json!({"spreadsheet_id": "ss", "permission_id": "p1"}),
+            ),
+            ("gsheets_list_sheets", json!({"spreadsheet_id": "ss"})),
+            (
+                "gsheets_add_sheet",
+                json!({"spreadsheet_id": "ss", "name": "n"}),
+            ),
+            (
+                "gsheets_delete_sheet",
+                json!({"spreadsheet_id": "ss", "sheet": "n"}),
+            ),
+            (
+                "gsheets_read",
+                json!({"spreadsheet_id": "ss", "sheet": "S"}),
+            ),
+            (
+                "gsheets_set_cell",
+                json!({"spreadsheet_id": "ss", "sheet": "S", "addr": "A1", "value": 1}),
+            ),
+            (
+                "gsheets_set_range",
+                json!({"spreadsheet_id": "ss", "sheet": "S", "start_addr": "A1", "values_2d": [[1]]}),
+            ),
+            (
+                "gsheets_format_range",
+                json!({"spreadsheet_id": "ss", "ops": [{"sheet": "S", "range": "A1", "format": {}}]}),
+            ),
+            // Sheet binding: the inspect guard reads a preview first.
+            (
+                "gsheets_run_python",
+                json!({"bindings": [{"var": "t", "spreadsheet_id": "ss", "sheet": "S"}], "code": "output = 1"}),
+            ),
+            // Inline-only binding: dispatched straight to gsheets_run_python.
+            (
+                "gsheets_run_python",
+                json!({"bindings": [{"var": "t", "data": [{"a": 1}]}], "code": "output = len(t)"}),
+            ),
+        ]
+    }
+
+    async fn rejecting_token_endpoint() -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(400).set_body_string(
+                r#"{"error":"invalid_grant","error_description":"test endpoint"}"#,
+            ))
+            .mount(&server)
+            .await;
+        server
+    }
+
+    fn auth_for(token_server: &MockServer, refresh_token: &str) -> GoogleWorkspaceAuth {
+        GoogleWorkspaceAuth {
+            token_url: format!("{}/token", token_server.uri()),
+            client_id: "cid-executor".into(),
+            client_secret: "cs-executor".into(),
+            refresh_token: refresh_token.into(),
+        }
+    }
+
+    #[test]
+    fn cases_cover_every_gsheets_tool() {
+        let mut expected: Vec<String> = crate::text::all_tool_names()
+            .into_iter()
+            .filter(|n| n.starts_with("gsheets_"))
+            .map(String::from)
+            .collect();
+        let mut covered: Vec<String> = gsheets_cases()
+            .into_iter()
+            .map(|(n, _)| n.to_string())
+            .collect();
+        expected.sort();
+        covered.sort();
+        covered.dedup();
+        assert_eq!(covered, expected);
+    }
+
+    /// The inspect guard's second `gsheets_run_python` dispatch — the one that
+    /// runs the code after a successful preview read — also acts with the
+    /// `llm_call` credentials. The Sheets API is a wiremock (test-only base
+    /// override) so the preview can succeed.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn gsheets_run_python_after_a_successful_preview_uses_the_llm_call_credentials() {
+        use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::gsheets_tools::override_sheets_api_base_for_tests;
+        use wiremock::matchers::{header, path_regex};
+        for name in OAUTH_ENV {
+            std::env::remove_var(name);
+        }
+        let token_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"{"access_token":"ya29.preview-run","expires_in":3600,"token_type":"Bearer"}"#,
+            ))
+            .mount(&token_server)
+            .await;
+        let sheets = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"/ss$"))
+            .and(header("authorization", "Bearer ya29.preview-run"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "sheets": [{
+                    "data": [{"startRow": 0, "startColumn": 0, "rowData": [
+                        {"values": [{"effectiveValue": {"stringValue": "name"}}]},
+                        {"values": [{"effectiveValue": {"stringValue": "apple"}}]}
+                    ]}],
+                    "merges": []
+                }]
+            })))
+            .mount(&sheets)
+            .await;
+        let _base = override_sheets_api_base_for_tests(&sheets.uri());
+
+        let exec = executor(Some(auth_for(&token_server, "rt-preview-run")));
+        let out = run(
+            &exec,
+            "gsheets_run_python",
+            &serde_json::json!({
+                "bindings": [{"var": "t", "spreadsheet_id": "ss", "sheet": "S"}],
+                "code": "output = len(t)"
+            }),
+        )
+        .await;
+
+        assert!(
+            out.contains("inspected_sheets"),
+            "the preview must succeed: {out}"
+        );
+        assert!(!out.contains(ENV_MARKER), "the run fell back to env: {out}");
+        let reads = sheets.received_requests().await.unwrap_or_default();
+        assert_eq!(
+            reads.len(),
+            2,
+            "preview read + the run's own binding read: {out}"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn every_gsheets_dispatch_uses_the_llm_call_credentials() {
+        for name in OAUTH_ENV {
+            std::env::remove_var(name);
+        }
+        let token_server = rejecting_token_endpoint().await;
+        let with_auth = executor(Some(auth_for(&token_server, "rt-executor-wiring")));
+        let platform = executor(None);
+
+        for (tool, args) in gsheets_cases() {
+            let env_out = run(&platform, tool, &args).await;
+            assert!(
+                env_out.contains(ENV_MARKER),
+                "{tool}: without google_workspace_auth the dispatch must take the env path: {env_out}"
+            );
+            let auth_out = run(&with_auth, tool, &args).await;
+            assert!(
+                !auth_out.contains(ENV_MARKER),
+                "{tool}: ignored google_workspace_auth and fell back to env: {auth_out}"
+            );
+        }
+        let refreshes = token_server.received_requests().await.unwrap_or_default();
+        assert!(
+            refreshes
+                .iter()
+                .all(|r| String::from_utf8_lossy(&r.body)
+                    .contains("refresh_token=rt-executor-wiring")),
+            "every refresh must use the llm_call credentials"
+        );
+        assert!(!refreshes.is_empty());
+    }
+
+    /// `data_run_python` degrades a failed Sheets client to "source
+    /// disabled" instead of surfacing the env error, so it is observed via
+    /// the token endpoint: only the configured credentials reach it.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn data_run_python_sheet_binding_uses_the_llm_call_credentials() {
+        for name in OAUTH_ENV {
+            std::env::remove_var(name);
+        }
+        let args = serde_json::json!({
+            "bindings": [{"var": "t", "spreadsheet_id": "ss", "sheet": "S"}],
+            "code": "output = len(t)"
+        });
+
+        let token_server = rejecting_token_endpoint().await;
+        let platform_out = run(&executor(None), "data_run_python", &args).await;
+        assert!(
+            token_server
+                .received_requests()
+                .await
+                .unwrap_or_default()
+                .is_empty(),
+            "platform path must not reach the config token endpoint: {platform_out}"
+        );
+
+        let auth_out = run(
+            &executor(Some(auth_for(&token_server, "rt-data-run-python"))),
+            "data_run_python",
+            &args,
+        )
+        .await;
+        let refreshes = token_server.received_requests().await.unwrap_or_default();
+        assert_eq!(refreshes.len(), 1, "{auth_out}");
+        assert!(String::from_utf8_lossy(&refreshes[0].body)
+            .contains("refresh_token=rt-data-run-python"));
+    }
+}
