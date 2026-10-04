@@ -1559,11 +1559,9 @@ impl ExecutableNode for LlmNode {
             if agent_session_id_str.is_some() {
                 match std::env::var("DATABASE_URL").ok() {
                     Some(url) => {
-                        use crate::dag_engine::infrastructure::pool_registry::{
-                            PgPoolRegistry, PoolConfig,
-                        };
-                        let registry =
-                            std::sync::Arc::new(PgPoolRegistry::new(PoolConfig::defaults()));
+                        // Reuse the engine's shared registry: one pool per URL,
+                        // not one per node execution.
+                        let registry = self.repository_factory.pool_registry();
                         let reg = PostgresAttachmentRegistry::new(registry, &url)
                             .await
                             .map_err(|e| format!("attachment registry init: {}", e))?;
@@ -1690,10 +1688,8 @@ impl ExecutableNode for LlmNode {
                     crate::colmena_log!(
                             "[file-resolve] DATABASE_URL set — building PostgresFileCache for provider_file_cache table"
                         );
-                    use crate::dag_engine::infrastructure::pool_registry::{
-                        PgPoolRegistry, PoolConfig,
-                    };
-                    let registry = Arc::new(PgPoolRegistry::new(PoolConfig::defaults()));
+                    // Shared engine registry, never a per-execution one.
+                    let registry = self.repository_factory.pool_registry();
                     // Run migrations to ensure provider_file_cache table exists.
                     let pool = registry
                         .get_or_create(url)

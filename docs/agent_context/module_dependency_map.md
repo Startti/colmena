@@ -5,8 +5,8 @@
 
 **How to use (for the exploration/spec phase):** before opening files to assess a change, look up the target file below. **Used by** is its blast radius — the files that break if you change its public surface. **Depends on** is what it needs. Start by reading only those, not the whole repo.
 
-- Files indexed: **414**
-- Modules with at least one importer: **194**
+- Files indexed: **416**
+- Modules with at least one importer: **197**
 
 ## Blast-radius ranking (change these with the most care)
 
@@ -20,16 +20,17 @@
 | 23 | `documents::domain` | `src/libs/colmena/src/documents/domain/mod.rs` |
 | 21 | `gdocs::domain` | `src/libs/colmena/src/gdocs/domain/mod.rs` |
 | 20 | `documents::domain::ids` | `src/libs/colmena/src/documents/domain/ids.rs` |
+| 19 | `dag_engine::application::ports` | `src/libs/colmena/src/dag_engine/application/ports.rs` |
 | 17 | `crdt_documents` | `src/libs/colmena/src/crdt_documents/mod.rs` |
 | 15 | `llm::domain::attachments` | `src/libs/colmena/src/llm/domain/attachments/mod.rs` |
 | 15 | `storage::domain` | `src/libs/colmena/src/storage/domain/mod.rs` |
 | 14 | `dag_engine::domain::error` | `src/libs/colmena/src/dag_engine/domain/error.rs` |
 | 14 | `dag_engine::domain::tool_configuration` | `src/libs/colmena/src/dag_engine/domain/tool_configuration.rs` |
 | 14 | `llm::infrastructure` | `src/libs/colmena/src/llm/infrastructure/mod.rs` |
-| 13 | `dag_engine::application::ports` | `src/libs/colmena/src/dag_engine/application/ports.rs` |
 | 12 | `dag_engine::application::secure_value_service` | `src/libs/colmena/src/dag_engine/application/secure_value_service.rs` |
 | 11 | `dag_engine::domain::python_executor` | `src/libs/colmena/src/dag_engine/domain/python_executor.rs` |
 | 11 | `documents::domain::ports` | `src/libs/colmena/src/documents/domain/ports.rs` |
+| 11 | `google_oauth::domain` | `src/libs/colmena/src/google_oauth/domain/mod.rs` |
 | 11 | `text` | `src/libs/colmena/src/text/mod.rs` |
 | 10 | `dag_engine::domain::events` | `src/libs/colmena/src/dag_engine/domain/events.rs` |
 | 10 | `dag_engine::infrastructure::pool_registry` | `src/libs/colmena/src/dag_engine/infrastructure/pool_registry/mod.rs` |
@@ -39,9 +40,8 @@
 | 9 | `crdt_documents::tool_executor` | `src/libs/colmena/src/crdt_documents/tool_executor.rs` |
 | 9 | `documents::domain::ir` | `src/libs/colmena/src/documents/domain/ir/mod.rs` |
 | 9 | `gdocs::application::co_edit_guard` | `src/libs/colmena/src/gdocs/application/co_edit_guard.rs` |
+| 9 | `google_oauth::infrastructure` | `src/libs/colmena/src/google_oauth/infrastructure/mod.rs` |
 | 9 | `llm::domain::mcp` | `src/libs/colmena/src/llm/domain/mcp.rs` |
-| 9 | `llm::infrastructure::persistence` | `src/libs/colmena/src/llm/infrastructure/persistence/mod.rs` |
-| 9 | `skills::domain` | `src/libs/colmena/src/skills/domain/mod.rs` |
 
 ## Per-file dependencies
 
@@ -215,7 +215,7 @@
 
 #### `src/libs/colmena/src/dag_engine/application/ports.rs`
 - Module: `dag_engine::application::ports`
-- **Used by (13)**: `src/libs/colmena/src/dag_engine/application/run_use_case.rs`, `src/libs/colmena/src/dag_engine/engine.rs`, `src/libs/colmena/src/dag_engine/infrastructure/dag_tool_executor.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/for_each.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/http.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/orchestrator.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/router/node.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/sql.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/subgraph.rs`, `src/libs/colmena/src/dag_engine/infrastructure/registry.rs`, `src/libs/colmena/src/node_bindings/registry.rs`, `src/libs/colmena/src/python_bindings/mod.rs`
+- **Used by (19)**: `src/libs/colmena/src/dag_engine/application/run_use_case.rs`, `src/libs/colmena/src/dag_engine/engine.rs`, `src/libs/colmena/src/dag_engine/infrastructure/dag_tool_executor.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/for_each.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/http.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/mcp/bind.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/mcp/wire.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/orchestrator.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/router/node.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/sql.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/subgraph.rs`, `src/libs/colmena/src/dag_engine/infrastructure/registry.rs`, `src/libs/colmena/src/gdocs/infrastructure/http_client.rs`, `src/libs/colmena/src/google_oauth/infrastructure/host_refresh_provider.rs`, `src/libs/colmena/src/gsheets/infrastructure/http_client.rs`, `src/libs/colmena/src/llm/infrastructure/mcp_client/rmcp_http_client.rs`, `src/libs/colmena/src/node_bindings/registry.rs`, `src/libs/colmena/src/python_bindings/mod.rs`
 - Depends on (2): `dag_engine::domain::error`, `dag_engine::domain::node`
 
 #### `src/libs/colmena/src/dag_engine/application/preflight.rs`
@@ -365,12 +365,12 @@
 
 #### `src/libs/colmena/src/dag_engine/infrastructure/dag_tool_executor.rs`
 - Module: `dag_engine::infrastructure::dag_tool_executor`
-- **Used by (5)**: `src/libs/colmena/src/dag_engine/infrastructure/node_schema_merge.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/for_each.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/sql.rs`, `src/libs/colmena/src/dag_engine/infrastructure/registry.rs`
+- **Used by (6)**: `src/libs/colmena/src/dag_engine/infrastructure/node_schema_merge.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/for_each.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/http.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/sql.rs`, `src/libs/colmena/src/dag_engine/infrastructure/registry.rs`
 - Depends on (31): `dag_engine::application::ports`, `dag_engine::application::secure_value_service`, `dag_engine::domain::error`, `dag_engine::domain::events`, `dag_engine::domain::node`, `dag_engine::domain::observer`, `dag_engine::domain::state`, `dag_engine::domain::tool_configuration`, `dag_engine::domain::toolkit_node`, `dag_engine::infrastructure::env_provenance`, `dag_engine::infrastructure::node_schema_merge`, `dag_engine::infrastructure::nodes::api_explorer`, `dag_engine::infrastructure::nodes::echo_toolkit`, `dag_engine::infrastructure::nodes::http`, `dag_engine::infrastructure::nodes::llm_synthetic_tools`, `dag_engine::infrastructure::nodes::llm_synthetic_tools::attachment_run_python`, `dag_engine::infrastructure::nodes::llm_synthetic_tools::data_run_python`, `dag_engine::infrastructure::nodes::llm_synthetic_tools::gdocs_tools`, `dag_engine::infrastructure::nodes::llm_synthetic_tools::gsheets_inspect_guard`, `dag_engine::infrastructure::nodes::llm_synthetic_tools::gsheets_tools`, `dag_engine::infrastructure::nodes::llm_synthetic_tools::mcp`, `dag_engine::infrastructure::nodes::llm_synthetic_tools::sql_bulk_tools`, `dag_engine::infrastructure::nodes::subgraph`, `llm::domain`, `llm::domain::attachments`, `llm::domain::attachments::attachment_registry`, `llm::domain::tools`, `llm::infrastructure::persistence`, `llm::infrastructure::persistence::in_memory_conversation_repository`, `skills::domain`, `storage::domain`
 
 #### `src/libs/colmena/src/dag_engine/infrastructure/env_provenance.rs`
 - Module: `dag_engine::infrastructure::env_provenance`
-- **Used by (7)**: `src/libs/colmena/src/dag_engine/infrastructure/dag_tool_executor.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/for_each.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/http.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/python_node.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/socketio.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/sql.rs`
+- **Used by (8)**: `src/libs/colmena/src/dag_engine/infrastructure/dag_tool_executor.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/for_each.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/http.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/http_oauth.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/python_node.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/socketio.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/sql.rs`
 - Depends on (1): `dag_engine::domain::node`
 
 #### `src/libs/colmena/src/dag_engine/infrastructure/mcp_registry/key.rs`
@@ -441,12 +441,12 @@
 #### `src/libs/colmena/src/dag_engine/infrastructure/nodes/http.rs`
 - Module: `dag_engine::infrastructure::nodes::http`
 - **Used by (4)**: `src/libs/colmena/src/dag_engine/application/run_use_case.rs`, `src/libs/colmena/src/dag_engine/infrastructure/dag_tool_executor.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/for_each.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/socketio.rs`
-- Depends on (17): `dag_engine::application::ports`, `dag_engine::application::run_use_case`, `dag_engine::domain::lint`, `dag_engine::domain::node`, `dag_engine::infrastructure::env_provenance`, `dag_engine::infrastructure::nodes::trigger`, `dag_engine::infrastructure::nodes::util::attachment_id`, `dag_engine::infrastructure::nodes::util::response_file`, `dag_engine::infrastructure::nodes::util::session_attachment`, `google_oauth::infrastructure`, `llm::domain`, `llm::domain::attachments`, `llm::infrastructure::attachments`, `llm::infrastructure::files`, `llm::infrastructure::files::signed_url_downloader`, `llm::infrastructure::persistence`, `storage::domain`
+- Depends on (20): `dag_engine::application::ports`, `dag_engine::application::run_use_case`, `dag_engine::domain::lint`, `dag_engine::domain::node`, `dag_engine::infrastructure::dag_tool_executor`, `dag_engine::infrastructure::env_provenance`, `dag_engine::infrastructure::nodes::http_oauth`, `dag_engine::infrastructure::nodes::trigger`, `dag_engine::infrastructure::nodes::util::attachment_id`, `dag_engine::infrastructure::nodes::util::response_file`, `dag_engine::infrastructure::nodes::util::session_attachment`, `google_oauth`, `google_oauth::infrastructure`, `llm::domain`, `llm::domain::attachments`, `llm::infrastructure::attachments`, `llm::infrastructure::files`, `llm::infrastructure::files::signed_url_downloader`, `llm::infrastructure::persistence`, `storage::domain`
 
 #### `src/libs/colmena/src/dag_engine/infrastructure/nodes/http_oauth.rs`
 - Module: `dag_engine::infrastructure::nodes::http_oauth`
-- **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
-- Depends on (3): `dag_engine::domain::node`, `google_oauth::domain`, `google_oauth::infrastructure`
+- **Used by (1)**: `src/libs/colmena/src/dag_engine/infrastructure/nodes/http.rs`
+- Depends on (4): `dag_engine::domain::node`, `dag_engine::infrastructure::env_provenance`, `google_oauth::domain`, `google_oauth::infrastructure`
 
 #### `src/libs/colmena/src/dag_engine/infrastructure/nodes/image_edit.rs`
 - Module: `dag_engine::infrastructure::nodes::image_edit`
@@ -581,7 +581,7 @@
 #### `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/mcp/bind.rs`
 - Module: `dag_engine::infrastructure::nodes::llm_synthetic_tools::mcp::bind`
 - **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
-- Depends on (7): `dag_engine::application::secure_value_service`, `dag_engine::domain::error`, `dag_engine::domain::secure_value_repository`, `dag_engine::domain::tool_configuration`, `dag_engine::infrastructure::mcp_registry`, `llm::domain::mcp`, `llm::infrastructure::mcp_client`
+- Depends on (11): `dag_engine::application::ports`, `dag_engine::application::secure_value_service`, `dag_engine::domain::error`, `dag_engine::domain::secure_value_repository`, `dag_engine::domain::tool_configuration`, `dag_engine::infrastructure::mcp_registry`, `google_oauth::domain`, `google_oauth::infrastructure`, `llm::domain::mcp`, `llm::infrastructure::mcp_client`, `llm::infrastructure::mcp_client::rmcp_http_client`
 
 #### `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/mcp/contain.rs`
 - Module: `dag_engine::infrastructure::nodes::llm_synthetic_tools::mcp::contain`
@@ -606,7 +606,7 @@
 #### `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/mcp/wire.rs`
 - Module: `dag_engine::infrastructure::nodes::llm_synthetic_tools::mcp::wire`
 - **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
-- Depends on (5): `dag_engine::application::secure_value_service`, `dag_engine::domain::tool_configuration`, `dag_engine::infrastructure::mcp_registry`, `llm::domain::mcp`, `llm::domain::tools`
+- Depends on (6): `dag_engine::application::ports`, `dag_engine::application::secure_value_service`, `dag_engine::domain::tool_configuration`, `dag_engine::infrastructure::mcp_registry`, `llm::domain::mcp`, `llm::domain::tools`
 
 #### `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/mod.rs`
 - Module: `dag_engine::infrastructure::nodes::llm_synthetic_tools`
@@ -1315,7 +1315,7 @@
 #### `src/libs/colmena/src/gdocs/infrastructure/http_client.rs`
 - Module: `gdocs::infrastructure::http_client`
 - **Used by (1)**: `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/gdocs_tools.rs`
-- Depends on (4): `gdocs::domain`, `gdocs::domain::types`, `gdocs::infrastructure::auth`, `gdocs::infrastructure::config`
+- Depends on (6): `dag_engine::application::ports`, `gdocs::domain`, `gdocs::domain::types`, `gdocs::infrastructure::auth`, `gdocs::infrastructure::config`, `google_oauth::infrastructure`
 
 #### `src/libs/colmena/src/gdocs/infrastructure/mod.rs`
 - Module: `gdocs::infrastructure`
@@ -1346,7 +1346,7 @@
 
 #### `src/libs/colmena/src/google_oauth/domain/mod.rs`
 - Module: `google_oauth::domain`
-- **Used by (7)**: `src/libs/colmena/src/dag_engine/infrastructure/nodes/http_oauth.rs`, `src/libs/colmena/src/gdocs/infrastructure/auth.rs`, `src/libs/colmena/src/google_oauth/domain/traits.rs`, `src/libs/colmena/src/google_oauth/infrastructure/config.rs`, `src/libs/colmena/src/google_oauth/infrastructure/refresh_client.rs`, `src/libs/colmena/src/google_oauth/infrastructure/token_provider.rs`, `src/libs/colmena/src/gsheets/infrastructure/auth.rs`
+- **Used by (11)**: `src/libs/colmena/src/dag_engine/infrastructure/nodes/http_oauth.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/mcp/bind.rs`, `src/libs/colmena/src/gdocs/infrastructure/auth.rs`, `src/libs/colmena/src/google_oauth/domain/traits.rs`, `src/libs/colmena/src/google_oauth/infrastructure/config.rs`, `src/libs/colmena/src/google_oauth/infrastructure/host_refresh_provider.rs`, `src/libs/colmena/src/google_oauth/infrastructure/refresh_client.rs`, `src/libs/colmena/src/google_oauth/infrastructure/token_provider.rs`, `src/libs/colmena/src/google_oauth/infrastructure/workspace_auth.rs`, `src/libs/colmena/src/gsheets/infrastructure/auth.rs`, `src/libs/colmena/src/llm/infrastructure/mcp_client/rmcp_http_client.rs`
 - Depends on (0): — (no intra-crate imports)
 
 #### `src/libs/colmena/src/google_oauth/domain/traits.rs`
@@ -1364,9 +1364,14 @@
 - **Used by (2)**: `src/libs/colmena/src/google_oauth/infrastructure/refresh_client.rs`, `src/libs/colmena/src/google_oauth/infrastructure/token_provider.rs`
 - Depends on (1): `google_oauth::domain`
 
+#### `src/libs/colmena/src/google_oauth/infrastructure/host_refresh_provider.rs`
+- Module: `google_oauth::infrastructure::host_refresh_provider`
+- **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
+- Depends on (2): `dag_engine::application::ports`, `google_oauth::domain`
+
 #### `src/libs/colmena/src/google_oauth/infrastructure/mod.rs`
 - Module: `google_oauth::infrastructure`
-- **Used by (5)**: `src/libs/colmena/src/dag_engine/infrastructure/nodes/http.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/http_oauth.rs`, `src/libs/colmena/src/gdocs/infrastructure/auth.rs`, `src/libs/colmena/src/google_oauth/infrastructure/provider_cache.rs`, `src/libs/colmena/src/gsheets/infrastructure/auth.rs`
+- **Used by (9)**: `src/libs/colmena/src/dag_engine/infrastructure/nodes/http.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/http_oauth.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/mcp/bind.rs`, `src/libs/colmena/src/gdocs/infrastructure/auth.rs`, `src/libs/colmena/src/gdocs/infrastructure/http_client.rs`, `src/libs/colmena/src/google_oauth/infrastructure/provider_cache.rs`, `src/libs/colmena/src/gsheets/infrastructure/auth.rs`, `src/libs/colmena/src/gsheets/infrastructure/http_client.rs`, `src/libs/colmena/src/llm/infrastructure/mcp_client/rmcp_http_client.rs`
 - Depends on (0): — (no intra-crate imports)
 
 #### `src/libs/colmena/src/google_oauth/infrastructure/provider_cache.rs`
@@ -1384,9 +1389,14 @@
 - **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
 - Depends on (3): `google_oauth::domain`, `google_oauth::infrastructure::config`, `google_oauth::infrastructure::refresh_client`
 
+#### `src/libs/colmena/src/google_oauth/infrastructure/workspace_auth.rs`
+- Module: `google_oauth::infrastructure::workspace_auth`
+- **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
+- Depends on (1): `google_oauth::domain`
+
 #### `src/libs/colmena/src/google_oauth/mod.rs`
 - Module: `google_oauth`
-- **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
+- **Used by (1)**: `src/libs/colmena/src/dag_engine/infrastructure/nodes/http.rs`
 - Depends on (0): — (no intra-crate imports)
 
 ### gsheets
@@ -1434,7 +1444,7 @@
 #### `src/libs/colmena/src/gsheets/infrastructure/http_client.rs`
 - Module: `gsheets::infrastructure::http_client`
 - **Used by (5)**: `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/data_run_python.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/gsheets_run_python.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/gsheets_tools.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/table_writer.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/tabular_bindings.rs`
-- Depends on (5): `gsheets::domain`, `gsheets::domain::types`, `gsheets::infrastructure::auth`, `gsheets::infrastructure::config`, `gsheets::infrastructure::merge_fill`
+- Depends on (7): `dag_engine::application::ports`, `google_oauth::infrastructure`, `gsheets::domain`, `gsheets::domain::types`, `gsheets::infrastructure::auth`, `gsheets::infrastructure::config`, `gsheets::infrastructure::merge_fill`
 
 #### `src/libs/colmena/src/gsheets/infrastructure/merge_fill.rs`
 - Module: `gsheets::infrastructure::merge_fill`
@@ -1792,8 +1802,8 @@
 
 #### `src/libs/colmena/src/llm/infrastructure/mcp_client/rmcp_http_client.rs`
 - Module: `llm::infrastructure::mcp_client::rmcp_http_client`
-- **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
-- Depends on (3): `dag_engine::infrastructure::nodes::llm_synthetic_tools::mcp::allowlist`, `llm::domain::mcp`, `llm::domain::text_bounds`
+- **Used by (1)**: `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/mcp/bind.rs`
+- Depends on (6): `dag_engine::application::ports`, `dag_engine::infrastructure::nodes::llm_synthetic_tools::mcp::allowlist`, `google_oauth::domain`, `google_oauth::infrastructure`, `llm::domain::mcp`, `llm::domain::text_bounds`
 
 #### `src/libs/colmena/src/llm/infrastructure/message_summarizer/llm_message_summarizer.rs`
 - Module: `llm::infrastructure::message_summarizer::llm_message_summarizer`

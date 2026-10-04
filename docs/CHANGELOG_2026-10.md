@@ -222,3 +222,21 @@ header sin chequear, scheme sin chequear, puerto sin llegar a `llm_call`, `tools
 `true`: cada una tumba un test. **E2E.** Con
 puerto, espera al worker de ADP. **ADP.** Emitir `auth_refresh` en la entrada MCP solo con la compuerta abierta;
 cortar el tag A después de esta PR. **Estado.** partial.
+
+## 15. `llm_call`: el registro de adjuntos y la caché de archivos usan el pool compartido del motor
+
+**Qué cambia.** Cada ejecución de `llm_call` con `__colmena_agent_session_id` y `DATABASE_URL` armaba un
+`PgPoolRegistry::new(PoolConfig::defaults())` propio para `PostgresAttachmentRegistry`, y otro para
+`PostgresFileCache` cuando el nodo trae archivos: un pool nuevo por ejecución, que además ignoraba `COLMENA_POOL_*`.
+Ahora los dos usan el registro compartido del motor (`ConversationRepositoryFactory::pool_registry()`, el mismo que
+el motor arma con `PoolConfig::from_env()`): un pool por URL normalizada, cacheado, que respeta `COLMENA_POOL_*`.
+Medido en ADP dev el 2026-10-02: el worker logueó `pool_created pinned=false` 53 veces en 20 minutos para la misma
+URL; con la base al tope de conexiones, las corridas caían con `attachment registry init: … pool timed out while
+waiting for an open connection`. Los mensajes de error no cambian; SQLite no se toca.
+**Tests.** `repository_factory`: la fábrica y sus clones devuelven el mismo registro (`Arc::ptr_eq`). Los 664 tests
+de `dag_engine::infrastructure::nodes::llm` pasan sin cambios. **Mutación.** Volver a `PgPoolRegistry::new` en
+cualquiera de los dos sitios no tumba un test unitario (necesita Postgres real; los tests de Postgres son
+`#[ignore]`). **E2E.** No aplica.
+**ADP.** Subir el pin. El pool compartido para `DATABASE_URL` toma su tamaño de `COLMENA_POOL_MAX_CONN_PER_URL`
+(default 2) y el worker corre 4 runs por instancia: fijarlo en el deploy del worker (Startti/adp#1057 lo pone en 8
+en develop, con tope de 5 instancias). **Estado.** done.
