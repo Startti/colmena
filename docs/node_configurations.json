@@ -583,12 +583,18 @@
           "type": "object",
           "required": false,
           "default": null,
-          "description": "Optional sink that writes the results table to a NEW Google Sheet (never mutates the input/source sheet). { sink: \"sheet\" (only supported value, any other errors), title?: string (default \"for_each results\"), mode?: \"final\" | \"incremental\" (default \"final\") }. `mode: \"final\"` writes all rows in one call at the end; `mode: \"incremental\"` writes each row at A{index+2} as soon as it finishes (concurrency-safe — distinct cell address per row) so the sheet fills in live. Any other `mode` value errors: \"for_each results_to: unknown mode '<x>' (expected 'final' or 'incremental')\". The created sheet's header is [index, <input columns, alphabetical>, status, result], where `result` is the compact JSON of the row's output (ok) or the error string (err). On success the node output gains `results_sheet: { spreadsheet_id, url }`. Sheet-creation failure fails the whole node; a per-row write failure in incremental mode logs a warning and continues; a final-mode write failure surfaces as `results_sheet_error` in the output instead of failing the node. Requires the same gsheets OAuth credentials as `items_from: { source: \"sheet\" }` (COLMENA_GOOGLE_OAUTH_*).",
+          "description": "Optional sink that writes the results table to a NEW Google Sheet (never mutates the input/source sheet). { sink: \"sheet\" (only supported value, any other errors), title?: string (default \"for_each results\"), mode?: \"final\" | \"incremental\" (default \"final\") }. `mode: \"final\"` writes all rows in one call at the end; `mode: \"incremental\"` writes each row at A{index+2} as soon as it finishes (concurrency-safe — distinct cell address per row) so the sheet fills in live. Any other `mode` value errors: \"for_each results_to: unknown mode '<x>' (expected 'final' or 'incremental')\". The created sheet's header is [index, <input columns, alphabetical>, status, result], where `result` is the compact JSON of the row's output (ok) or the error string (err). On success the node output gains `results_sheet: { spreadsheet_id, url }`. Sheet-creation failure fails the whole node; a per-row write failure in incremental mode logs a warning and continues; a final-mode write failure surfaces as `results_sheet_error` in the output instead of failing the node. Uses the same Google credentials as `items_from: { source: \"sheet\" }`: `google_workspace_auth` when present, else the platform COLMENA_GOOGLE_OAUTH_*.",
           "example": {
             "sink": "sheet",
             "title": "batch_results",
             "mode": "incremental"
           }
+        },
+        "google_workspace_auth": {
+          "type": "object",
+          "required": false,
+          "default": null,
+          "description": "Optional Google credentials (the user's connected Google account) for `items_from: { source: \"sheet\" }` and `results_to: { sink: \"sheet\" }`. Same shape as llm_call.google_workspace_auth. Read from config only, never from inputs or rows. Absent → the platform credentials (COLMENA_GOOGLE_OAUTH_*), as before. Present but invalid → the node fails before reading or writing any sheet. The rows' target nodes do not receive it. Carries secrets: inject it at run time, never persist it in a stored graph."
         }
       },
       "input_ports": {

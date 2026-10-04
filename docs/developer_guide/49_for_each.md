@@ -201,9 +201,10 @@ Errores:
 - Fallo de escritura **final** (modo `final`) → no aborta el nodo; el
   output incluye `results_sheet_error` con el detalle.
 
-Requiere las mismas credenciales OAuth de gsheets que `items_from: sheet`
-(`COLMENA_GOOGLE_OAUTH_*` en el entorno — ver
-[`docs/developer_guide/47_google_oauth.md`](47_google_oauth.md)).
+Usa las mismas credenciales que `items_from: sheet`: `config.google_workspace_auth` si está (la cuenta
+conectada del usuario; inválido → el nodo falla antes de leer o escribir), si no `COLMENA_GOOGLE_OAUTH_*`
+del entorno. Solo del `config`, nunca de `inputs` ni de las filas; los targets de las filas no lo reciben.
+Ver [`docs/developer_guide/47_google_oauth.md`](47_google_oauth.md).
 
 ### Ejemplo — leer de una hoja y escribir resultados en otra
 
