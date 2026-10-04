@@ -311,3 +311,16 @@ refresh, prelude de plataforma); `${COLMENA_GOOGLE_OAUTH_CLIENT_SECRET}` llega l
 puesta; el linter de grafos acepta el campo. **Mutación.** Leer el bloque también de `inputs` y expandir `${VAR}`
 tumban un test cada una; sacar el campo de `node_configurations.json` tumba el del linter. **E2E.** No aplica.
 **ADP.** Puede inyectar el bloque en el `config` del `llm_call` al correr. **Estado.** done.
+
+## 20. `for_each`: lee y escribe hojas con su `google_workspace_auth` (porte de `feat/google-workspace-auth`, B8a)
+
+**Qué cambia.** `for_each` lee `config.google_workspace_auth` (solo del `config`, nunca de `inputs` ni de las
+filas). Inválido → el nodo falla antes de leer o escribir una hoja, sin valores en el error. Toda llamada a
+Sheets (`items_from: sheet`, y en `results_to: sheet` la creación, el encabezado y las escrituras `incremental`
+y `final`) pasa por un `SheetsAccess` con esas credenciales; ausente → la cuenta de plataforma, como antes.
+Campo `google_workspace_auth` en el `config_schema` y en `node_configurations.json`. Guía:
+[49_for_each.md](developer_guide/49_for_each.md). **Tests.** Lectura y creación del sink con el bloque; sin
+bloque, el entorno; bloque inválido falla antes de tocar hojas; las tres operaciones de `SheetsAccess` llevan
+las credenciales; el bloque llegado por `inputs` no se usa; el linter acepta el campo en `for_each`.
+**Mutación.** Leer el bloque también de `inputs` tumba un test; sacar el campo del catálogo tumba el del
+linter. **E2E.** No aplica. **ADP.** Ninguno todavía. **Estado.** done.

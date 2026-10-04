@@ -16,8 +16,9 @@ use crate::dag_engine::infrastructure::node_schema_merge::{
     drop_unoffered_author_owned, merge_args_into_schema, offered_params,
 };
 use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::{
-    dispatch_gsheets_create_spreadsheet, dispatch_gsheets_set_range,
+    dispatch_gsheets_create_spreadsheet, dispatch_gsheets_read, dispatch_gsheets_set_range,
 };
+use crate::google_oauth::infrastructure::GoogleWorkspaceAuth;
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 use std::error::Error as StdError;
@@ -62,6 +63,33 @@ impl ForEachNode {
     }
 }
 
+/// Google Sheets access for `for_each`'s `items_from: sheet` source and
+/// `results_to: sheet` sink. Every call carries the same credentials: the
+/// node's `config.google_workspace_auth`. `None` = the platform env
+/// credentials, as before.
+#[derive(Clone)]
+struct SheetsAccess {
+    auth: Option<Arc<GoogleWorkspaceAuth>>,
+}
+
+impl SheetsAccess {
+    fn new(auth: Option<Arc<GoogleWorkspaceAuth>>) -> Self {
+        Self { auth }
+    }
+
+    async fn read(&self, args: Value) -> Value {
+        dispatch_gsheets_read(args, self.auth.as_deref()).await
+    }
+
+    async fn create_spreadsheet(&self, args: Value) -> Value {
+        dispatch_gsheets_create_spreadsheet(args, self.auth.as_deref()).await
+    }
+
+    async fn set_range(&self, args: Value) -> Value {
+        dispatch_gsheets_set_range(args, self.auth.as_deref()).await
+    }
+}
+
 /// Select a single column from each row, renaming it to `as_name` (or the
 /// column name itself if `as_name` is absent). With no `column`, rows pass
 /// through unchanged.
@@ -103,7 +131,11 @@ fn value_type_name(v: &Value) -> &'static str {
 
 /// Read the list of rows from config or inputs: `items` (inline array) →
 /// `items_from` (data-source handle) → default input edge.
-async fn resolve_rows_async(config: &Value, inputs: &NodeInputs) -> Result<Vec<Value>, String> {
+async fn resolve_rows_async(
+    config: &Value,
+    inputs: &NodeInputs,
+    sheets: &SheetsAccess,
+) -> Result<Vec<Value>, String> {
     if let Some(v) = cfg_or_input(config, inputs, "items") {
         return match v {
             Value::Array(arr) => Ok(arr.clone()),
@@ -120,7 +152,6 @@ async fn resolve_rows_async(config: &Value, inputs: &NodeInputs) -> Result<Vec<V
         let as_name = handle.get("as").and_then(|v| v.as_str());
         let rows = match source {
             "sheet" => {
-                use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::dispatch_gsheets_read;
                 let reference = handle.get("ref").and_then(|v| v.as_str()).unwrap_or("");
                 // `ref` = "<spreadsheet_id>|<sheet>|<range?>"
                 let mut parts = reference.split('|');
@@ -131,8 +162,7 @@ async fn resolve_rows_async(config: &Value, inputs: &NodeInputs) -> Result<Vec<V
                 if let Some(r) = range {
                     args["range"] = json!(r);
                 }
-                // Platform account until for_each reads `google_workspace_auth`.
-                let res = dispatch_gsheets_read(args, None).await;
+                let res = sheets.read(args).await;
                 if res.get("ok").and_then(|v| v.as_bool()) != Some(true) {
                     return Err(format!("for_each items_from sheet failed: {res}"));
                 }
@@ -282,6 +312,12 @@ impl ExecutableNode for ForEachNode {
         _state: &mut Value,
         observer: Option<Arc<dyn ExecutionObserver>>,
     ) -> Result<Value, Box<dyn StdError + Send + Sync>> {
+        // Google Sheets credentials for `items_from` / `results_to`. Read from
+        // `config` only (never from inputs or rows). Present but invalid fails
+        // here, before any sheet is read or written — never an env fallback.
+        let sheets =
+            SheetsAccess::new(GoogleWorkspaceAuth::from_node_config(config)?.map(Arc::new));
+
         let node_id = inputs
             .get("__node_id")
             .and_then(|v| v.as_str())
@@ -312,7 +348,7 @@ impl ExecutableNode for ForEachNode {
             .unwrap_or_else(|| json!({}));
 
         let policy = parse_policy(config, inputs);
-        let mut rows = resolve_rows_async(config, inputs)
+        let mut rows = resolve_rows_async(config, inputs, &sheets)
             .await
             .map_err(|e| -> Box<dyn StdError + Send + Sync> { e.into() })?;
         if rows.len() > policy.max_items {
@@ -340,8 +376,9 @@ impl ExecutableNode for ForEachNode {
         // per-row `incremental` write and the post-loop `final` write.
         let mut sink_ctx: Option<(String, String, String, Vec<String>)> = None;
         if let Some(sink) = &results_to {
-            let create_res =
-                dispatch_gsheets_create_spreadsheet(json!({ "title": sink.title }), None).await;
+            let create_res = sheets
+                .create_spreadsheet(json!({ "title": sink.title }))
+                .await;
             if create_res.get("ok").and_then(|v| v.as_bool()) != Some(true) {
                 return Err(format!(
                     "for_each results_to: failed to create results spreadsheet: {create_res}"
@@ -368,16 +405,14 @@ impl ExecutableNode for ForEachNode {
                 .to_string();
 
             let (input_cols, header) = results_sheet_header(&rows);
-            let header_res = dispatch_gsheets_set_range(
-                json!({
+            let header_res = sheets
+                .set_range(json!({
                     "spreadsheet_id": spreadsheet_id,
                     "sheet": sheet_name,
                     "start": "A1",
                     "values": [header],
-                }),
-                None,
-            )
-            .await;
+                }))
+                .await;
             if header_res.get("ok").and_then(|v| v.as_bool()) != Some(true) {
                 colmena_log!(
                     "⚠️ [for_each] results_to: failed to write header row: {}",
@@ -436,6 +471,7 @@ impl ExecutableNode for ForEachNode {
             let observer = observer.clone();
             let forwarded_context = forwarded_context.clone();
             let incremental_sink = incremental_sink.clone();
+            let sheets = sheets.clone();
             async move {
                 let dispatch_result: Result<Value, String> = async {
                     let mut row_map: HashMap<String, Value> = match &row {
@@ -581,16 +617,14 @@ impl ExecutableNode for ForEachNode {
                         Err(e) => ("err", json!(e.clone())),
                     };
                     let row_values = results_sheet_row(index, &row, status, cell, input_cols);
-                    let write_res = dispatch_gsheets_set_range(
-                        json!({
+                    let write_res = sheets
+                        .set_range(json!({
                             "spreadsheet_id": spreadsheet_id,
                             "sheet": sheet_name,
                             "start": format!("A{}", index + 2),
                             "values": [row_values],
-                        }),
-                        None,
-                    )
-                    .await;
+                        }))
+                        .await;
                     if write_res.get("ok").and_then(|v| v.as_bool()) != Some(true) {
                         colmena_log!(
                             "⚠️ [for_each] results_to incremental write failed for row {}: {}",
@@ -676,16 +710,14 @@ impl ExecutableNode for ForEachNode {
                         results_sheet_row(r.index, &r.input, status, cell, input_cols)
                     })
                     .collect();
-                let write_res = dispatch_gsheets_set_range(
-                    json!({
+                let write_res = sheets
+                    .set_range(json!({
                         "spreadsheet_id": spreadsheet_id,
                         "sheet": sheet_name,
                         "start": "A2",
                         "values": data_rows,
-                    }),
-                    None,
-                )
-                .await;
+                    }))
+                    .await;
                 if write_res.get("ok").and_then(|v| v.as_bool()) != Some(true) {
                     results_sheet_error = Some(format!("{write_res}"));
                 }
@@ -732,7 +764,8 @@ impl ExecutableNode for ForEachNode {
                 )
                 .with_field("concurrency", FieldSpec::of_type("integer"))
                 .with_field("max_items", FieldSpec::of_type("integer"))
-                .with_field("results_to", FieldSpec::of_type("object")),
+                .with_field("results_to", FieldSpec::of_type("object"))
+                .with_field("google_workspace_auth", FieldSpec::of_type("object")),
         )
     }
 
@@ -1668,5 +1701,237 @@ mod http_target_env_tests {
             got[0].headers.get("x-extra").is_none(),
             "an undeclared header arrived"
         );
+    }
+}
+
+#[cfg(test)]
+mod google_workspace_auth_tests {
+    //! `for_each` reads (`items_from: sheet`) and writes (`results_to: sheet`)
+    //! Google Sheets with `config.google_workspace_auth`. Absent → platform
+    //! env, as before.
+    use super::*;
+    use crate::google_oauth::infrastructure::GoogleWorkspaceAuth;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const OAUTH_ENV: [&str; 3] = [
+        "COLMENA_GOOGLE_OAUTH_CLIENT_ID",
+        "COLMENA_GOOGLE_OAUTH_CLIENT_SECRET",
+        "COLMENA_GOOGLE_OAUTH_REFRESH_TOKEN",
+    ];
+    const ENV_MARKER: &str = "COLMENA_GOOGLE_OAUTH";
+
+    fn clear_env() {
+        for name in OAUTH_ENV {
+            std::env::remove_var(name);
+        }
+    }
+
+    async fn rejecting_token_endpoint() -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(400).set_body_string(
+                r#"{"error":"invalid_grant","error_description":"test endpoint"}"#,
+            ))
+            .mount(&server)
+            .await;
+        server
+    }
+
+    fn auth_block(token_server: &MockServer, refresh_token: &str) -> Value {
+        json!({
+            "type": "oauth2_refresh_token",
+            "token_url": format!("{}/token", token_server.uri()),
+            "client_id": "cid-for-each",
+            "client_secret": "cs-for-each",
+            "refresh_token": refresh_token
+        })
+    }
+
+    async fn refresh_tokens_seen(server: &MockServer) -> Vec<String> {
+        server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .map(|r| String::from_utf8_lossy(&r.body).into_owned())
+            .collect()
+    }
+
+    fn node() -> ForEachNode {
+        struct NoTargets;
+        impl NodeRegistryPort for NoTargets {
+            fn get_node(&self, _: &str) -> Option<Arc<dyn ExecutableNode>> {
+                None
+            }
+            fn get_all_nodes(&self) -> HashMap<String, Arc<dyn ExecutableNode>> {
+                HashMap::new()
+            }
+        }
+        let node = ForEachNode::new();
+        node.registry
+            .set(Arc::new(NoTargets) as Arc<dyn NodeRegistryPort>)
+            .ok();
+        node
+    }
+
+    async fn run(config: Value) -> Result<Value, String> {
+        let mut state = json!({});
+        node()
+            .execute(&HashMap::new(), &config, &mut state, None)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    fn sheet_source_config() -> Value {
+        json!({
+            "target": { "node_type": "add", "node_schema": {} },
+            "items_from": { "source": "sheet", "ref": "ss|S" }
+        })
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn node_with_auth_reads_the_sheet_with_its_own_credentials() {
+        clear_env();
+        let token_server = rejecting_token_endpoint().await;
+        let mut config = sheet_source_config();
+        config["google_workspace_auth"] = auth_block(&token_server, "rt-for-each-read");
+
+        let err = run(config)
+            .await
+            .expect_err("the test token endpoint rejects");
+        assert!(err.contains("items_from sheet failed"), "{err}");
+        assert!(!err.contains(ENV_MARKER), "fell back to env: {err}");
+        let seen = refresh_tokens_seen(&token_server).await;
+        assert_eq!(seen.len(), 1);
+        assert!(seen[0].contains("refresh_token=rt-for-each-read"));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn node_without_auth_reads_the_sheet_with_the_platform_env() {
+        clear_env();
+        let err = run(sheet_source_config())
+            .await
+            .expect_err("no env credentials");
+        assert!(err.contains("items_from sheet failed"), "{err}");
+        assert!(err.contains(ENV_MARKER), "{err}");
+    }
+
+    /// The block is author config: the same key arriving through `inputs`
+    /// (an edge, or a model's tool arguments) is never used as credentials.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn a_block_arriving_through_inputs_is_not_used_as_credentials() {
+        clear_env();
+        let token_server = rejecting_token_endpoint().await;
+        let inputs = HashMap::from([(
+            "google_workspace_auth".to_string(),
+            auth_block(&token_server, "rt-for-each-inputs"),
+        )]);
+        let err = node()
+            .execute(&inputs, &sheet_source_config(), &mut json!({}), None)
+            .await
+            .expect_err("no env credentials")
+            .to_string();
+        assert!(
+            err.contains(ENV_MARKER),
+            "did not take the platform path: {err}"
+        );
+        assert!(refresh_tokens_seen(&token_server).await.is_empty());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn node_with_invalid_auth_fails_before_reading_or_writing() {
+        clear_env();
+        let mut config = sheet_source_config();
+        config["results_to"] = json!({ "sink": "sheet" });
+        config["google_workspace_auth"] = json!({
+            "type": "oauth2_refresh_token",
+            "client_id": "cid",
+            "client_secret": "CS-MUST-NOT-LEAK",
+            "refresh_token": ""
+        });
+        let err = run(config).await.expect_err("invalid block");
+        assert!(
+            err.starts_with("google_workspace_auth block missing required fields"),
+            "{err}"
+        );
+        assert!(!err.contains("CS-MUST-NOT-LEAK"), "{err}");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn node_with_auth_creates_the_results_sheet_with_its_own_credentials() {
+        clear_env();
+        let token_server = rejecting_token_endpoint().await;
+        let config = json!({
+            "target": { "node_type": "add", "node_schema": {} },
+            "items": [{ "a": 1 }],
+            "results_to": { "sink": "sheet" },
+            "google_workspace_auth": auth_block(&token_server, "rt-for-each-sink")
+        });
+        let err = run(config)
+            .await
+            .expect_err("the test token endpoint rejects");
+        assert!(
+            err.contains("failed to create results spreadsheet"),
+            "{err}"
+        );
+        assert!(!err.contains(ENV_MARKER), "fell back to env: {err}");
+        let seen = refresh_tokens_seen(&token_server).await;
+        assert_eq!(seen.len(), 1);
+        assert!(seen[0].contains("refresh_token=rt-for-each-sink"));
+    }
+
+    /// Every Sheets call `for_each` makes goes through `SheetsAccess`, so each
+    /// of its operations must carry the credentials it was built with.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn sheets_access_uses_its_credentials_for_every_operation() {
+        clear_env();
+        let token_server = rejecting_token_endpoint().await;
+        let block =
+            json!({ "google_workspace_auth": auth_block(&token_server, "rt-sheets-access") });
+        let connected = SheetsAccess::new(
+            GoogleWorkspaceAuth::from_node_config(&block)
+                .unwrap()
+                .map(Arc::new),
+        );
+        let platform = SheetsAccess::new(None);
+        let read_args = json!({ "spreadsheet_id": "ss", "sheet": "S" });
+        let create_args = json!({ "title": "t" });
+        let write_args =
+            json!({ "spreadsheet_id": "ss", "sheet": "S", "start": "A1", "values": [[1]] });
+
+        for (op, out) in [
+            ("read", connected.read(read_args.clone()).await),
+            (
+                "create_spreadsheet",
+                connected.create_spreadsheet(create_args.clone()).await,
+            ),
+            ("set_range", connected.set_range(write_args.clone()).await),
+        ] {
+            assert!(!out.to_string().contains(ENV_MARKER), "{op}: {out}");
+        }
+        let seen = refresh_tokens_seen(&token_server).await;
+        assert_eq!(seen.len(), 3, "one refresh per operation");
+        assert!(seen
+            .iter()
+            .all(|b| b.contains("refresh_token=rt-sheets-access")));
+
+        for (op, out) in [
+            ("read", platform.read(read_args).await),
+            (
+                "create_spreadsheet",
+                platform.create_spreadsheet(create_args).await,
+            ),
+            ("set_range", platform.set_range(write_args).await),
+        ] {
+            assert!(out.to_string().contains(ENV_MARKER), "{op}: {out}");
+        }
     }
 }
