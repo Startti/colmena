@@ -99,7 +99,9 @@ impl GoogleDocsHttpClient {
             .map_err(|e| DocsError::Http(e.to_string()))?;
         let (tokens, cfg) = match auth {
             Some(auth) => (
-                TokenCache::from_shared_provider(auth.provider()),
+                TokenCache::from_shared_provider(
+                    auth.provider().map_err(DocsError::NotConfigured)?,
+                ),
                 GDocsConfig {
                     share_email: String::new(),
                     default_parent_folder: None,
@@ -1804,7 +1806,7 @@ mod tests {
     fn from_config_with_auth_uses_config_credentials_without_env() {
         use crate::google_oauth::infrastructure::{GoogleWorkspaceAuth, DEFAULT_TOKEN_ENDPOINT};
         clear_oauth_env();
-        let auth = GoogleWorkspaceAuth {
+        let auth = GoogleWorkspaceAuth::RefreshToken {
             token_url: DEFAULT_TOKEN_ENDPOINT.into(),
             client_id: "cid".into(),
             client_secret: "cs".into(),
@@ -1815,7 +1817,9 @@ mod tests {
                 .expect("builds from config credentials");
         assert_eq!(client.share_email_for_tests(), "");
         // The client must reuse the process-wide provider for this identity.
-        assert!(client.tokens.shares_provider_for_tests(&auth.provider()));
+        assert!(client
+            .tokens
+            .shares_provider_for_tests(&auth.provider().unwrap()));
     }
 
     #[test]
@@ -1859,7 +1863,7 @@ mod tests {
     ) -> GoogleDocsHttpClient {
         use crate::google_oauth::infrastructure::GoogleWorkspaceAuth;
         mount_token_endpoint(token_server, refresh_token).await;
-        let auth = GoogleWorkspaceAuth {
+        let auth = GoogleWorkspaceAuth::RefreshToken {
             token_url: format!("{}/token", token_server.uri()),
             client_id: "cid-connected".into(),
             client_secret: "cs-connected".into(),

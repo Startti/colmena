@@ -350,3 +350,20 @@ de pedir que el usuario comparta. Guías: [47_google_oauth.md](developer_guide/4
 `platform_prelude_carries_the_account_guidance_moved_out_of_tool_descriptions`. **Mutación.** Volver a poner
 «prefer sharing» en un summary o en la skill tumba el test correspondiente. **E2E.** No aplica. **ADP.**
 Ninguno. **Estado.** done.
+
+## 23. Google OAuth: `google_workspace_auth` de tipo `host_refresh_bearer` (CX7, parte 1: el bloque y su provider)
+
+**Qué cambia.** `google_workspace_auth` acepta `{type: "host_refresh_bearer", access_token, expires_at, handle}`:
+ADP siembra un access token de la cuenta conectada (sin `client_secret` ni refresh token) y el motor lo renueva
+pidiéndolo al host por el `HostTokenPort` existente. `GoogleWorkspaceAuth` pasa a enum (`RefreshToken {…}` |
+`HostRefresh {…}`); el bloque mal formado lista todos los campos que faltan y un `type` desconocido nombra los
+dos tipos. `with_host_context(port, agent_session_id)` ata el contexto de la corrida; `provider()` devuelve
+`Result` y sin puerto falla con `this engine has no host token port` (las tools dan `*_not_configured`), nunca
+la cuenta de plataforma. `identity_key()` = `sha256(handle)` para `HostRefresh` (cachés de gdocs y
+`session_scope`). `to_config_block` reescribe las dos variantes. El `Debug` no muestra ni el token ni el
+handle. Todavía ningún nodo ata el contexto (parte 2): hoy el bloque da `*_not_configured`. Guía:
+[47_google_oauth.md](developer_guide/47_google_oauth.md). **Tests.** Parseo, `Debug` redactado e identidad por
+handle; campos faltantes listados; `type` desconocido; sin puerto → error; gsheets sin puerto con env de
+señuelo → `NotConfigured`; `to_config_block` ida y vuelta de las dos variantes. **Mutación.** Caer en la cuenta
+de plataforma sin puerto e imprimir el handle en el `Debug` tumban al menos un test cada una. **E2E.** No
+aplica. **ADP.** Ninguno todavía. **Estado.** partial (sigue la parte 2).

@@ -24,7 +24,7 @@ use crate::gdocs::infrastructure::config::GDocsConfig;
 use crate::gdocs::infrastructure::http_client::GoogleDocsHttpClient;
 use crate::gdocs::infrastructure::outline_cache::OutlineCache;
 use crate::gdocs::infrastructure::revision_store::{PostgresRevisionStore, RevisionStore};
-use crate::google_oauth::infrastructure::{GoogleWorkspaceAuth, OAuthProviderCache};
+use crate::google_oauth::infrastructure::GoogleWorkspaceAuth;
 use crate::llm::domain::tools::ToolDefinition;
 use crate::text;
 use schemars::JsonSchema;
@@ -142,12 +142,7 @@ async fn cache_for(auth: Option<&GoogleWorkspaceAuth>) -> Arc<OutlineCache> {
     let Some(auth) = auth else {
         return shared_cache().await;
     };
-    let key = OAuthProviderCache::fingerprint(
-        &auth.token_url,
-        &auth.client_id,
-        &auth.client_secret,
-        &auth.refresh_token,
-    );
+    let key = auth.identity_key();
     let mut caches = CONNECTED_CACHES
         .get_or_init(Default::default)
         .lock()
@@ -173,15 +168,7 @@ async fn cache_for(auth: Option<&GoogleWorkspaceAuth>) -> Arc<OutlineCache> {
 fn session_scope(session_id: &str, auth: Option<&GoogleWorkspaceAuth>) -> String {
     match auth {
         None => session_id.to_string(),
-        Some(a) => format!(
-            "{session_id}#gws:{}",
-            OAuthProviderCache::fingerprint(
-                &a.token_url,
-                &a.client_id,
-                &a.client_secret,
-                &a.refresh_token
-            )
-        ),
+        Some(a) => format!("{session_id}#gws:{}", a.identity_key()),
     }
 }
 
@@ -2777,7 +2764,7 @@ mod tests {
     }
 
     fn connected(refresh_token: &str) -> GoogleWorkspaceAuth {
-        GoogleWorkspaceAuth {
+        GoogleWorkspaceAuth::RefreshToken {
             token_url: "https://t/token".into(),
             client_id: "cid".into(),
             client_secret: "cs".into(),
