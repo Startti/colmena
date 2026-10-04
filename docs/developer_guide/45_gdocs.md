@@ -325,7 +325,9 @@ es un único pedido al host con el SHA-256 del token rechazado.
 proceso. Una cuenta conectada arma su cliente **por llamada** (el provider ya se comparte por identidad en la
 `OAuthProviderCache` acotada) y usa su propia `OutlineCache`, en un mapa por huella de identidad acotado a 256
 que descarta las que ninguna llamada está usando: un snapshot de una cuenta nunca se le sirve a otra. Con la
-cuenta conectada, `gdocs_create*` no usa `COLMENA_GDOCS_DEFAULT_PARENT_FOLDER_ID`. Cada dispatcher recibe
+cuenta conectada, `gdocs_create*` no usa `COLMENA_GDOCS_DEFAULT_PARENT_FOLDER_ID`. El estado del co-edit guard
+(`gdocs_session_state`) también va por identidad: la plataforma usa el `agent_session_id` y una cuenta
+conectada `<session>#gws:<huella>`, así una cuenta nunca compara contra el snapshot de otra. Cada dispatcher recibe
 `auth` del executor; el `llm_call` todavía no se lo pasa, así que todo sigue con la cuenta de plataforma.
 
 ### Parent folder requirement

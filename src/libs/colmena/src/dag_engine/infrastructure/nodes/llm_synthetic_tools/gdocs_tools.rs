@@ -165,6 +165,26 @@ async fn cache_for(auth: Option<&GoogleWorkspaceAuth>) -> Arc<OutlineCache> {
     cache
 }
 
+/// Key for the co-edit guard's per-session state (`gdocs_session_state`
+/// and the outline cache). The platform account keeps the agent session id
+/// as before; a connected account appends its provider fingerprint (a hash,
+/// never the secrets), so account B never diffs against a snapshot account A
+/// stored for the same document in the same session.
+fn session_scope(session_id: &str, auth: Option<&GoogleWorkspaceAuth>) -> String {
+    match auth {
+        None => session_id.to_string(),
+        Some(a) => format!(
+            "{session_id}#gws:{}",
+            OAuthProviderCache::fingerprint(
+                &a.token_url,
+                &a.client_id,
+                &a.client_secret,
+                &a.refresh_token
+            )
+        ),
+    }
+}
+
 /// Default folder for new documents: the platform folder from env, read per
 /// call as before. It belongs to the platform account, so a connected account
 /// never falls back to it (no folder → the root of its own Drive).
@@ -173,6 +193,16 @@ fn platform_parent_folder_env(auth: Option<&GoogleWorkspaceAuth>) -> Option<Stri
         Some(_) => None,
         None => std::env::var("COLMENA_GDOCS_DEFAULT_PARENT_FOLDER_ID").ok(),
     }
+}
+
+/// Test-only: back the process-wide revision store with memory, so
+/// executor-level tests reach the Docs client of the edit tools without a
+/// database. No test relies on the missing-`DATABASE_URL` error.
+#[cfg(test)]
+pub(crate) fn use_in_memory_revisions_for_tests() {
+    let _ = REVS.set(Arc::new(
+        crate::gdocs::infrastructure::revision_store::InMemoryRevisionStore::new(),
+    ));
 }
 
 async fn shared_revs() -> Result<Arc<dyn RevisionStore>, serde_json::Value> {
@@ -1572,6 +1602,10 @@ pub async fn dispatch_add_tab(
     session_id: &str,
     auth: Option<&GoogleWorkspaceAuth>,
 ) -> serde_json::Value {
+    // Revisions are per identity too: one account never diffs against a
+    // snapshot another account stored in the same session.
+    let scoped_session = session_scope(session_id, auth);
+    let session_id = scoped_session.as_str();
     let parsed: AddTabArgs = match serde_json::from_value(args) {
         Ok(a) => a,
         Err(e) => return invalid_args(e),
@@ -1732,6 +1766,10 @@ pub async fn dispatch_replace_text(
     session_id: &str,
     auth: Option<&GoogleWorkspaceAuth>,
 ) -> serde_json::Value {
+    // Revisions are per identity too: one account never diffs against a
+    // snapshot another account stored in the same session.
+    let scoped_session = session_scope(session_id, auth);
+    let session_id = scoped_session.as_str();
     let parsed: ReplaceTextArgs = match serde_json::from_value(args) {
         Ok(a) => a,
         Err(e) => return invalid_args(e),
@@ -1776,6 +1814,10 @@ pub async fn dispatch_insert_after_text(
     session_id: &str,
     auth: Option<&GoogleWorkspaceAuth>,
 ) -> serde_json::Value {
+    // Revisions are per identity too: one account never diffs against a
+    // snapshot another account stored in the same session.
+    let scoped_session = session_scope(session_id, auth);
+    let session_id = scoped_session.as_str();
     let parsed: InsertAfterTextArgs = match serde_json::from_value(args) {
         Ok(a) => a,
         Err(e) => return invalid_args(e),
@@ -1821,6 +1863,10 @@ pub async fn dispatch_insert_image_after_text_via_executor(
     args: serde_json::Value,
     session_id: &str,
 ) -> serde_json::Value {
+    // Revisions are per identity too: one account never diffs against a
+    // snapshot another account stored in the same session.
+    let scoped_session = session_scope(session_id, executor.google_workspace_auth());
+    let session_id = scoped_session.as_str();
     let parsed: InsertImageAfterTextArgs = match serde_json::from_value(args) {
         Ok(a) => a,
         Err(e) => return invalid_args(e),
@@ -1906,6 +1952,10 @@ pub async fn dispatch_insert_before_text(
     session_id: &str,
     auth: Option<&GoogleWorkspaceAuth>,
 ) -> serde_json::Value {
+    // Revisions are per identity too: one account never diffs against a
+    // snapshot another account stored in the same session.
+    let scoped_session = session_scope(session_id, auth);
+    let session_id = scoped_session.as_str();
     let parsed: InsertBeforeTextArgs = match serde_json::from_value(args) {
         Ok(a) => a,
         Err(e) => return invalid_args(e),
@@ -1944,6 +1994,10 @@ pub async fn dispatch_insert_between(
     session_id: &str,
     auth: Option<&GoogleWorkspaceAuth>,
 ) -> serde_json::Value {
+    // Revisions are per identity too: one account never diffs against a
+    // snapshot another account stored in the same session.
+    let scoped_session = session_scope(session_id, auth);
+    let session_id = scoped_session.as_str();
     let parsed: InsertBetweenArgs = match serde_json::from_value(args) {
         Ok(a) => a,
         Err(e) => return invalid_args(e),
@@ -1982,6 +2036,10 @@ pub async fn dispatch_delete_text(
     session_id: &str,
     auth: Option<&GoogleWorkspaceAuth>,
 ) -> serde_json::Value {
+    // Revisions are per identity too: one account never diffs against a
+    // snapshot another account stored in the same session.
+    let scoped_session = session_scope(session_id, auth);
+    let session_id = scoped_session.as_str();
     let parsed: DeleteTextArgs = match serde_json::from_value(args) {
         Ok(a) => a,
         Err(e) => return invalid_args(e),
@@ -2023,6 +2081,10 @@ pub async fn dispatch_replace_section(
     session_id: &str,
     auth: Option<&GoogleWorkspaceAuth>,
 ) -> serde_json::Value {
+    // Revisions are per identity too: one account never diffs against a
+    // snapshot another account stored in the same session.
+    let scoped_session = session_scope(session_id, auth);
+    let session_id = scoped_session.as_str();
     let parsed: ReplaceSectionArgs = match serde_json::from_value(args) {
         Ok(a) => a,
         Err(e) => return invalid_args(e),
@@ -2060,6 +2122,10 @@ pub async fn dispatch_append_markdown(
     session_id: &str,
     auth: Option<&GoogleWorkspaceAuth>,
 ) -> serde_json::Value {
+    // Revisions are per identity too: one account never diffs against a
+    // snapshot another account stored in the same session.
+    let scoped_session = session_scope(session_id, auth);
+    let session_id = scoped_session.as_str();
     let parsed: AppendMarkdownArgs = match serde_json::from_value(args) {
         Ok(a) => a,
         Err(e) => return invalid_args(e),
@@ -2097,6 +2163,10 @@ pub async fn dispatch_style_text(
     session_id: &str,
     auth: Option<&GoogleWorkspaceAuth>,
 ) -> serde_json::Value {
+    // Revisions are per identity too: one account never diffs against a
+    // snapshot another account stored in the same session.
+    let scoped_session = session_scope(session_id, auth);
+    let session_id = scoped_session.as_str();
     let parsed: StyleTextArgs = match serde_json::from_value(args) {
         Ok(a) => a,
         Err(e) => return invalid_args(e),
@@ -2140,6 +2210,10 @@ pub async fn dispatch_apply_edits(
     session_id: &str,
     auth: Option<&GoogleWorkspaceAuth>,
 ) -> serde_json::Value {
+    // Revisions are per identity too: one account never diffs against a
+    // snapshot another account stored in the same session.
+    let scoped_session = session_scope(session_id, auth);
+    let session_id = scoped_session.as_str();
     let parsed: ApplyEditsArgs = match serde_json::from_value(args) {
         Ok(a) => a,
         Err(e) => return invalid_args(e),
@@ -2231,6 +2305,10 @@ pub async fn dispatch_create_named_range(
     session_id: &str,
     auth: Option<&GoogleWorkspaceAuth>,
 ) -> serde_json::Value {
+    // Revisions are per identity too: one account never diffs against a
+    // snapshot another account stored in the same session.
+    let scoped_session = session_scope(session_id, auth);
+    let session_id = scoped_session.as_str();
     let parsed: CreateNamedRangeArgs = match serde_json::from_value(args) {
         Ok(a) => a,
         Err(e) => return invalid_args(e),
@@ -2280,6 +2358,10 @@ pub async fn dispatch_replace_named_range(
     session_id: &str,
     auth: Option<&GoogleWorkspaceAuth>,
 ) -> serde_json::Value {
+    // Revisions are per identity too: one account never diffs against a
+    // snapshot another account stored in the same session.
+    let scoped_session = session_scope(session_id, auth);
+    let session_id = scoped_session.as_str();
     let parsed: ReplaceNamedRangeArgs = match serde_json::from_value(args) {
         Ok(a) => a,
         Err(e) => return invalid_args(e),
@@ -2324,6 +2406,10 @@ pub async fn dispatch_acknowledge_human_changes(
     session_id: &str,
     auth: Option<&GoogleWorkspaceAuth>,
 ) -> serde_json::Value {
+    // Revisions are per identity too: one account never diffs against a
+    // snapshot another account stored in the same session.
+    let scoped_session = session_scope(session_id, auth);
+    let session_id = scoped_session.as_str();
     let parsed: AcknowledgeHumanChangesArgs = match serde_json::from_value(args) {
         Ok(a) => a,
         Err(e) => return invalid_args(e),
@@ -2374,6 +2460,10 @@ pub async fn dispatch_set_table_cell(
     session_id: &str,
     auth: Option<&GoogleWorkspaceAuth>,
 ) -> serde_json::Value {
+    // Revisions are per identity too: one account never diffs against a
+    // snapshot another account stored in the same session.
+    let scoped_session = session_scope(session_id, auth);
+    let session_id = scoped_session.as_str();
     let parsed: SetTableCellArgs = match serde_json::from_value(args) {
         Ok(a) => a,
         Err(e) => return invalid_args(e),
@@ -2416,6 +2506,10 @@ pub async fn dispatch_format_table(
     session_id: &str,
     auth: Option<&GoogleWorkspaceAuth>,
 ) -> serde_json::Value {
+    // Revisions are per identity too: one account never diffs against a
+    // snapshot another account stored in the same session.
+    let scoped_session = session_scope(session_id, auth);
+    let session_id = scoped_session.as_str();
     use crate::gdocs::application::table_format;
     let parsed: FormatTableArgs = match serde_json::from_value(args) {
         Ok(a) => a,
@@ -2456,6 +2550,10 @@ pub async fn dispatch_insert_table_row(
     session_id: &str,
     auth: Option<&GoogleWorkspaceAuth>,
 ) -> serde_json::Value {
+    // Revisions are per identity too: one account never diffs against a
+    // snapshot another account stored in the same session.
+    let scoped_session = session_scope(session_id, auth);
+    let session_id = scoped_session.as_str();
     let parsed: InsertTableRowArgs = match serde_json::from_value(args) {
         Ok(a) => a,
         Err(e) => return invalid_args(e),
@@ -2498,6 +2596,10 @@ pub async fn dispatch_delete_table_row(
     session_id: &str,
     auth: Option<&GoogleWorkspaceAuth>,
 ) -> serde_json::Value {
+    // Revisions are per identity too: one account never diffs against a
+    // snapshot another account stored in the same session.
+    let scoped_session = session_scope(session_id, auth);
+    let session_id = scoped_session.as_str();
     let parsed: DeleteTableRowArgs = match serde_json::from_value(args) {
         Ok(a) => a,
         Err(e) => return invalid_args(e),
@@ -2539,6 +2641,10 @@ pub async fn dispatch_insert_table_column(
     session_id: &str,
     auth: Option<&GoogleWorkspaceAuth>,
 ) -> serde_json::Value {
+    // Revisions are per identity too: one account never diffs against a
+    // snapshot another account stored in the same session.
+    let scoped_session = session_scope(session_id, auth);
+    let session_id = scoped_session.as_str();
     let parsed: InsertTableColumnArgs = match serde_json::from_value(args) {
         Ok(a) => a,
         Err(e) => return invalid_args(e),
@@ -2581,6 +2687,10 @@ pub async fn dispatch_delete_table_column(
     session_id: &str,
     auth: Option<&GoogleWorkspaceAuth>,
 ) -> serde_json::Value {
+    // Revisions are per identity too: one account never diffs against a
+    // snapshot another account stored in the same session.
+    let scoped_session = session_scope(session_id, auth);
+    let session_id = scoped_session.as_str();
     let parsed: DeleteTableColumnArgs = match serde_json::from_value(args) {
         Ok(a) => a,
         Err(e) => return invalid_args(e),
@@ -2712,6 +2822,23 @@ mod tests {
         let one = client_for(Some(&a)).await.expect("builds without env");
         let two = client_for(Some(&a)).await.expect("builds without env");
         assert!(!Arc::ptr_eq(&one, &two));
+    }
+
+    /// The co-edit state key is per identity: the platform keeps the plain
+    /// session id (existing rows stay valid), each connected account gets its
+    /// own key, and the key never carries a secret in clear.
+    #[test]
+    fn session_scope_separates_identities_without_secrets() {
+        let a = connected("tok-cx7-rt-a");
+        let b = connected("tok-cx7-rt-b");
+        assert_eq!(session_scope("s1", None), "s1");
+        let ka = session_scope("s1", Some(&a));
+        let kb = session_scope("s1", Some(&b));
+        assert!(ka.starts_with("s1#gws:"), "{ka}");
+        assert_ne!(ka, kb);
+        assert_eq!(ka, session_scope("s1", Some(&a)));
+        assert_ne!(ka, session_scope("s2", Some(&a)));
+        assert!(!ka.contains("tok-cx7-rt-a") && !ka.contains("cs"), "{ka}");
     }
 
     /// The platform default folder never applies to a connected account.

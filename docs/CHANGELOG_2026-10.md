@@ -282,3 +282,16 @@ habría podido soltarlo nunca. Ningún `llm_call` pasa `auth` todavía. Guía: [
 **Tests.** Caché por identidad; cliente por llamada; carpeta de plataforma nunca con la cuenta conectada; tope de
 cachés. **Mutación.** La cuenta conectada usa el singleton; la caché ignora la identidad; carpeta de plataforma con
 la cuenta conectada; sin barrido. **E2E.** No aplica. **ADP.** Ninguno. **Estado.** partial.
+
+## 18. gdocs: tests de cableado de `google_workspace_auth` en el executor y estado de co-edición por identidad (porte de `feat/google-workspace-auth`, parte 10)
+
+**Qué cambia.** Solo tests (de `db76489c` y `9051dbf7`, parte gdocs): con el bloque en el executor, **cada** tool
+`gdocs_*` (la lista sale de `build_all_gdocs_tools`) llega al endpoint de token del bloque y ninguna cae a env; sin
+él, ninguna llega a ese endpoint. Un `RevisionStore` en memoria (solo en tests) deja que las tools de edición
+lleguen al cliente sin base de datos. **Mutación.** Una tool que pasa `None`. **E2E.** No aplica. **ADP.** Ninguno.
+**Estado.** partial.
+**Además (revisión de #477).** El estado del co-edit guard (`gdocs_session_state` y la caché de outline) se guarda
+con una clave por identidad: la cuenta de plataforma conserva el `agent_session_id` de siempre (las filas
+existentes siguen valiendo) y una cuenta conectada usa `<session>#gws:<huella>`. Así la cuenta B nunca compara
+contra un snapshot que guardó la cuenta A en la misma sesión. Sin migración (`agent_session_id` es `TEXT`).
+**Test.** `session_scope_separates_identities_without_secrets`. **Mutación.** La clave ignora la identidad.
