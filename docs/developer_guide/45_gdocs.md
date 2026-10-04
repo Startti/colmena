@@ -319,8 +319,14 @@ log en `debug`).
 
 **401.** Cualquier llamada que recibe un 401 invalida la fuente de token (`invalidate()` del trait) y
 reintenta una vez con un token nuevo; un segundo 401 es `AuthFailed`. Con `HostRefreshTokenProvider` eso
-es un único pedido al host con el SHA-256 del token rechazado. Ningún dispatcher le pasa `auth` todavía: el cliente de `gdocs_tools` sigue siendo el singleton
-de proceso con la cuenta de plataforma.
+es un único pedido al host con el SHA-256 del token rechazado.
+
+**Por identidad en `gdocs_tools`.** La cuenta de plataforma conserva su cliente y su `OutlineCache` de
+proceso. Una cuenta conectada arma su cliente **por llamada** (el provider ya se comparte por identidad en la
+`OAuthProviderCache` acotada) y usa su propia `OutlineCache`, en un mapa por huella de identidad acotado a 256
+que descarta las que ninguna llamada está usando: un snapshot de una cuenta nunca se le sirve a otra. Con la
+cuenta conectada, `gdocs_create*` no usa `COLMENA_GDOCS_DEFAULT_PARENT_FOLDER_ID`. Cada dispatcher recibe
+`auth` del executor; el `llm_call` todavía no se lo pasa, así que todo sigue con la cuenta de plataforma.
 
 ### Parent folder requirement
 

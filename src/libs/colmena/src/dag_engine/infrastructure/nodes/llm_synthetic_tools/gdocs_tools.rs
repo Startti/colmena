@@ -1,8 +1,9 @@
 //! Google Docs synthetic LLM tools (Subsystem G). 22 tools mapping to
-//! content-addressed surgical edits. Each dispatcher builds a
-//! `GoogleDocsHttpClient` + `OutlineCache` + `PostgresRevisionStore`
-//! once per process (`OnceCell`), then routes to the matching
-//! application use case.
+//! content-addressed surgical edits. The platform account uses one
+//! `GoogleDocsHttpClient` + `OutlineCache` per process (`OnceCell`); a
+//! connected account (`google_workspace_auth`) gets a client per call and its
+//! own bounded outline cache. One `PostgresRevisionStore` per process. Each
+//! dispatcher then routes to the matching application use case.
 //!
 //! Layered like `gsheets_tools` for skill transfer:
 //! - Const tool names
@@ -23,11 +24,13 @@ use crate::gdocs::infrastructure::config::GDocsConfig;
 use crate::gdocs::infrastructure::http_client::GoogleDocsHttpClient;
 use crate::gdocs::infrastructure::outline_cache::OutlineCache;
 use crate::gdocs::infrastructure::revision_store::{PostgresRevisionStore, RevisionStore};
+use crate::google_oauth::infrastructure::{GoogleWorkspaceAuth, OAuthProviderCache};
 use crate::llm::domain::tools::ToolDefinition;
 use crate::text;
 use schemars::JsonSchema;
 use serde::Deserialize;
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
 use tokio::sync::OnceCell;
 
 // ── 22 tool name constants ────────────────────────────────────────────
@@ -102,6 +105,74 @@ async fn shared_cache() -> Arc<OutlineCache> {
         })
         .await
         .clone()
+}
+
+/// Outline caches of connected accounts, keyed by the provider fingerprint (a
+/// hash, never the secrets). Bounded like `OAuthProviderCache`: at
+/// [`MAX_CONNECTED_OUTLINE_CACHES`] an insert drops every cache no call is
+/// using, which only costs a fresh snapshot fetch.
+static CONNECTED_CACHES: OnceLock<Mutex<HashMap<String, Arc<OutlineCache>>>> = OnceLock::new();
+
+/// Connected-account outline caches kept before an insert sweeps idle ones.
+const MAX_CONNECTED_OUTLINE_CACHES: usize = 256;
+
+/// The Docs client for this call. The platform account keeps its process
+/// singleton. A connected account (`google_workspace_auth`) gets a client per
+/// call: its token provider is already shared by identity through the bounded
+/// `OAuthProviderCache`, and no client of one identity is ever reused by
+/// another one or by the platform. (The source branch kept a per-identity
+/// client map with no eviction; each client held its provider, so the bounded
+/// provider cache could never drop it.)
+async fn client_for(
+    auth: Option<&GoogleWorkspaceAuth>,
+) -> Result<Arc<GoogleDocsHttpClient>, serde_json::Value> {
+    match auth {
+        None => shared_client().await,
+        Some(auth) => {
+            GoogleDocsHttpClient::from_config_with_auth(&GDocsConfig::from_env(), Some(auth))
+                .map(Arc::new)
+                .map_err(error_to_json)
+        }
+    }
+}
+
+/// The outline cache for this identity: a snapshot fetched by one account is
+/// never served to another one.
+async fn cache_for(auth: Option<&GoogleWorkspaceAuth>) -> Arc<OutlineCache> {
+    let Some(auth) = auth else {
+        return shared_cache().await;
+    };
+    let key = OAuthProviderCache::fingerprint(
+        &auth.token_url,
+        &auth.client_id,
+        &auth.client_secret,
+        &auth.refresh_token,
+    );
+    let mut caches = CONNECTED_CACHES
+        .get_or_init(Default::default)
+        .lock()
+        .expect("gdocs outline cache map poisoned");
+    if let Some(cache) = caches.get(&key) {
+        return cache.clone();
+    }
+    if caches.len() >= MAX_CONNECTED_OUTLINE_CACHES {
+        caches.retain(|_, c| Arc::strong_count(c) > 1);
+    }
+    let cache = Arc::new(OutlineCache::new(
+        GDocsConfig::from_env().revision_cache_ttl,
+    ));
+    caches.insert(key, cache.clone());
+    cache
+}
+
+/// Default folder for new documents: the platform folder from env, read per
+/// call as before. It belongs to the platform account, so a connected account
+/// never falls back to it (no folder → the root of its own Drive).
+fn platform_parent_folder_env(auth: Option<&GoogleWorkspaceAuth>) -> Option<String> {
+    match auth {
+        Some(_) => None,
+        None => std::env::var("COLMENA_GDOCS_DEFAULT_PARENT_FOLDER_ID").ok(),
+    }
 }
 
 async fn shared_revs() -> Result<Arc<dyn RevisionStore>, serde_json::Value> {
@@ -1056,16 +1127,20 @@ fn edit_result_to_json(r: crate::gdocs::domain::EditResult) -> serde_json::Value
 
 // Lifecycle ────────────────────────────────────────────────────────────
 
-pub async fn dispatch_create(args: serde_json::Value, _session_id: &str) -> serde_json::Value {
+pub async fn dispatch_create(
+    args: serde_json::Value,
+    _session_id: &str,
+    auth: Option<&GoogleWorkspaceAuth>,
+) -> serde_json::Value {
     let parsed: CreateArgs = match serde_json::from_value(args) {
         Ok(a) => a,
         Err(e) => return invalid_args(e),
     };
-    let client = match shared_client().await {
+    let client = match client_for(auth).await {
         Ok(c) => c,
         Err(e) => return e,
     };
-    let parent_env = std::env::var("COLMENA_GDOCS_DEFAULT_PARENT_FOLDER_ID").ok();
+    let parent_env = platform_parent_folder_env(auth);
     let parent = parsed.parent_folder_id.as_deref().or(parent_env.as_deref());
     match client.create(&parsed.title, parent).await {
         Ok(m) => serde_json::json!({
@@ -1083,16 +1158,17 @@ pub async fn dispatch_create(args: serde_json::Value, _session_id: &str) -> serd
 pub async fn dispatch_create_from_markdown(
     args: serde_json::Value,
     _session_id: &str,
+    auth: Option<&GoogleWorkspaceAuth>,
 ) -> serde_json::Value {
     let parsed: CreateFromMarkdownArgs = match serde_json::from_value(args) {
         Ok(a) => a,
         Err(e) => return invalid_args(e),
     };
-    let client = match shared_client().await {
+    let client = match client_for(auth).await {
         Ok(c) => c,
         Err(e) => return e,
     };
-    let parent_env = std::env::var("COLMENA_GDOCS_DEFAULT_PARENT_FOLDER_ID").ok();
+    let parent_env = platform_parent_folder_env(auth);
     let parent = parsed.parent_folder_id.as_deref().or(parent_env.as_deref());
     match client
         .create_from_markdown(&parsed.title, &parsed.markdown, parent)
@@ -1155,7 +1231,7 @@ pub async fn dispatch_create_from_docx_via_executor(
             });
         }
     };
-    let client = match shared_client().await {
+    let client = match client_for(executor.google_workspace_auth()).await {
         Ok(c) => c,
         Err(e) => return e,
     };
@@ -1183,12 +1259,13 @@ pub async fn dispatch_create_from_docx_via_executor(
 pub async fn dispatch_list_permissions(
     args: serde_json::Value,
     _session_id: &str,
+    auth: Option<&GoogleWorkspaceAuth>,
 ) -> serde_json::Value {
     let parsed: ListPermissionsArgs = match serde_json::from_value(args) {
         Ok(a) => a,
         Err(e) => return invalid_args(e),
     };
-    let client = match shared_client().await {
+    let client = match client_for(auth).await {
         Ok(c) => c,
         Err(e) => return e,
     };
@@ -1202,12 +1279,16 @@ pub async fn dispatch_list_permissions(
 }
 
 /// Bundle 2B (2026-06-11) — revoke a permission from a doc.
-pub async fn dispatch_unshare(args: serde_json::Value, _session_id: &str) -> serde_json::Value {
+pub async fn dispatch_unshare(
+    args: serde_json::Value,
+    _session_id: &str,
+    auth: Option<&GoogleWorkspaceAuth>,
+) -> serde_json::Value {
     let parsed: UnshareArgs = match serde_json::from_value(args) {
         Ok(a) => a,
         Err(e) => return invalid_args(e),
     };
-    let client = match shared_client().await {
+    let client = match client_for(auth).await {
         Ok(c) => c,
         Err(e) => return e,
     };
@@ -1221,12 +1302,16 @@ pub async fn dispatch_unshare(args: serde_json::Value, _session_id: &str) -> ser
 }
 
 /// Bundle 4A (2026-06-11) — post a Drive comment on a doc.
-pub async fn dispatch_add_comment(args: serde_json::Value, _session_id: &str) -> serde_json::Value {
+pub async fn dispatch_add_comment(
+    args: serde_json::Value,
+    _session_id: &str,
+    auth: Option<&GoogleWorkspaceAuth>,
+) -> serde_json::Value {
     let parsed: AddCommentArgs = match serde_json::from_value(args) {
         Ok(a) => a,
         Err(e) => return invalid_args(e),
     };
-    let client = match shared_client().await {
+    let client = match client_for(auth).await {
         Ok(c) => c,
         Err(e) => return e,
     };
@@ -1250,12 +1335,13 @@ pub async fn dispatch_add_comment(args: serde_json::Value, _session_id: &str) ->
 pub async fn dispatch_list_comments(
     args: serde_json::Value,
     _session_id: &str,
+    auth: Option<&GoogleWorkspaceAuth>,
 ) -> serde_json::Value {
     let parsed: ListCommentsArgs = match serde_json::from_value(args) {
         Ok(a) => a,
         Err(e) => return invalid_args(e),
     };
-    let client = match shared_client().await {
+    let client = match client_for(auth).await {
         Ok(c) => c,
         Err(e) => return e,
     };
@@ -1282,12 +1368,13 @@ pub async fn dispatch_list_comments(
 pub async fn dispatch_resolve_comment(
     args: serde_json::Value,
     _session_id: &str,
+    auth: Option<&GoogleWorkspaceAuth>,
 ) -> serde_json::Value {
     let parsed: ResolveCommentArgs = match serde_json::from_value(args) {
         Ok(a) => a,
         Err(e) => return invalid_args(e),
     };
-    let client = match shared_client().await {
+    let client = match client_for(auth).await {
         Ok(c) => c,
         Err(e) => return e,
     };
@@ -1308,12 +1395,13 @@ pub async fn dispatch_resolve_comment(
 pub async fn dispatch_list_documents(
     args: serde_json::Value,
     _session_id: &str,
+    auth: Option<&GoogleWorkspaceAuth>,
 ) -> serde_json::Value {
     let parsed: ListDocumentsArgs = match serde_json::from_value(args) {
         Ok(a) => a,
         Err(e) => return invalid_args(e),
     };
-    let client = match shared_client().await {
+    let client = match client_for(auth).await {
         Ok(c) => c,
         Err(e) => return e,
     };
@@ -1334,7 +1422,11 @@ pub async fn dispatch_list_documents(
     }
 }
 
-pub async fn dispatch_share(args: serde_json::Value, _session_id: &str) -> serde_json::Value {
+pub async fn dispatch_share(
+    args: serde_json::Value,
+    _session_id: &str,
+    auth: Option<&GoogleWorkspaceAuth>,
+) -> serde_json::Value {
     let parsed: ShareArgs = match serde_json::from_value(args) {
         Ok(a) => a,
         Err(e) => return invalid_args(e),
@@ -1343,7 +1435,7 @@ pub async fn dispatch_share(args: serde_json::Value, _session_id: &str) -> serde
         Ok(r) => r,
         Err(j) => return j,
     };
-    let client = match shared_client().await {
+    let client = match client_for(auth).await {
         Ok(c) => c,
         Err(e) => return e,
     };
@@ -1360,7 +1452,11 @@ pub async fn dispatch_share(args: serde_json::Value, _session_id: &str) -> serde
 /// bytes as a new attachment. Kept for backwards compatibility with code
 /// that does its own bytes plumbing. The router now uses
 /// [`dispatch_export_via_executor`] instead.
-pub async fn dispatch_export(args: serde_json::Value, _session_id: &str) -> serde_json::Value {
+pub async fn dispatch_export(
+    args: serde_json::Value,
+    _session_id: &str,
+    auth: Option<&GoogleWorkspaceAuth>,
+) -> serde_json::Value {
     let parsed: ExportArgs = match serde_json::from_value(args) {
         Ok(a) => a,
         Err(e) => return invalid_args(e),
@@ -1369,7 +1465,7 @@ pub async fn dispatch_export(args: serde_json::Value, _session_id: &str) -> serd
         Ok(f) => f,
         Err(j) => return j,
     };
-    let client = match shared_client().await {
+    let client = match client_for(auth).await {
         Ok(c) => c,
         Err(e) => return e,
     };
@@ -1406,7 +1502,7 @@ pub async fn dispatch_export_via_executor(
         Ok(f) => f,
         Err(j) => return j,
     };
-    let client = match shared_client().await {
+    let client = match client_for(executor.google_workspace_auth()).await {
         Ok(c) => c,
         Err(e) => return e,
     };
@@ -1452,12 +1548,16 @@ pub async fn dispatch_export_via_executor(
 
 // Reads ────────────────────────────────────────────────────────────────
 
-pub async fn dispatch_list_tabs(args: serde_json::Value, _session_id: &str) -> serde_json::Value {
+pub async fn dispatch_list_tabs(
+    args: serde_json::Value,
+    _session_id: &str,
+    auth: Option<&GoogleWorkspaceAuth>,
+) -> serde_json::Value {
     let parsed: ListTabsArgs = match serde_json::from_value(args) {
         Ok(a) => a,
         Err(e) => return invalid_args(e),
     };
-    let client = match shared_client().await {
+    let client = match client_for(auth).await {
         Ok(c) => c,
         Err(e) => return e,
     };
@@ -1467,12 +1567,16 @@ pub async fn dispatch_list_tabs(args: serde_json::Value, _session_id: &str) -> s
     }
 }
 
-pub async fn dispatch_add_tab(args: serde_json::Value, session_id: &str) -> serde_json::Value {
+pub async fn dispatch_add_tab(
+    args: serde_json::Value,
+    session_id: &str,
+    auth: Option<&GoogleWorkspaceAuth>,
+) -> serde_json::Value {
     let parsed: AddTabArgs = match serde_json::from_value(args) {
         Ok(a) => a,
         Err(e) => return invalid_args(e),
     };
-    let client = match shared_client().await {
+    let client = match client_for(auth).await {
         Ok(c) => c,
         Err(e) => return e,
     };
@@ -1486,7 +1590,7 @@ pub async fn dispatch_add_tab(args: serde_json::Value, session_id: &str) -> serd
             // its insert_index against a stale snapshot that lacks
             // the new tab and the markdown would land in the wrong
             // tab (Google defaults to tab 1 when tabId is unknown).
-            let cache = shared_cache().await;
+            let cache = cache_for(auth).await;
             cache.invalidate(session_id, &doc_id);
 
             // Bundle 3 (G item 3, 2026-06-11): markdown seeding for new tabs.
@@ -1556,12 +1660,13 @@ pub async fn dispatch_add_tab(args: serde_json::Value, session_id: &str) -> serd
 pub async fn dispatch_read_as_markdown(
     args: serde_json::Value,
     _session_id: &str,
+    auth: Option<&GoogleWorkspaceAuth>,
 ) -> serde_json::Value {
     let parsed: ReadAsMarkdownArgs = match serde_json::from_value(args) {
         Ok(a) => a,
         Err(e) => return invalid_args(e),
     };
-    let client = match shared_client().await {
+    let client = match client_for(auth).await {
         Ok(c) => c,
         Err(e) => return e,
     };
@@ -1578,12 +1683,13 @@ pub async fn dispatch_read_as_markdown(
 pub async fn dispatch_read_outline(
     args: serde_json::Value,
     _session_id: &str,
+    auth: Option<&GoogleWorkspaceAuth>,
 ) -> serde_json::Value {
     let parsed: ReadOutlineArgs = match serde_json::from_value(args) {
         Ok(a) => a,
         Err(e) => return invalid_args(e),
     };
-    let client = match shared_client().await {
+    let client = match client_for(auth).await {
         Ok(c) => c,
         Err(e) => return e,
     };
@@ -1600,12 +1706,13 @@ pub async fn dispatch_read_outline(
 pub async fn dispatch_list_named_ranges(
     args: serde_json::Value,
     _session_id: &str,
+    auth: Option<&GoogleWorkspaceAuth>,
 ) -> serde_json::Value {
     let parsed: ListNamedRangesArgs = match serde_json::from_value(args) {
         Ok(a) => a,
         Err(e) => return invalid_args(e),
     };
-    let client = match shared_client().await {
+    let client = match client_for(auth).await {
         Ok(c) => c,
         Err(e) => return e,
     };
@@ -1620,16 +1727,20 @@ pub async fn dispatch_list_named_ranges(
 
 // Edits ────────────────────────────────────────────────────────────────
 
-pub async fn dispatch_replace_text(args: serde_json::Value, session_id: &str) -> serde_json::Value {
+pub async fn dispatch_replace_text(
+    args: serde_json::Value,
+    session_id: &str,
+    auth: Option<&GoogleWorkspaceAuth>,
+) -> serde_json::Value {
     let parsed: ReplaceTextArgs = match serde_json::from_value(args) {
         Ok(a) => a,
         Err(e) => return invalid_args(e),
     };
-    let client = match shared_client().await {
+    let client = match client_for(auth).await {
         Ok(c) => c,
         Err(e) => return e,
     };
-    let cache = shared_cache().await;
+    let cache = cache_for(auth).await;
     let revisions = match shared_revs().await {
         Ok(r) => r,
         Err(e) => return e,
@@ -1663,16 +1774,17 @@ pub async fn dispatch_replace_text(args: serde_json::Value, session_id: &str) ->
 pub async fn dispatch_insert_after_text(
     args: serde_json::Value,
     session_id: &str,
+    auth: Option<&GoogleWorkspaceAuth>,
 ) -> serde_json::Value {
     let parsed: InsertAfterTextArgs = match serde_json::from_value(args) {
         Ok(a) => a,
         Err(e) => return invalid_args(e),
     };
-    let client = match shared_client().await {
+    let client = match client_for(auth).await {
         Ok(c) => c,
         Err(e) => return e,
     };
-    let cache = shared_cache().await;
+    let cache = cache_for(auth).await;
     let revisions = match shared_revs().await {
         Ok(r) => r,
         Err(e) => return e,
@@ -1717,11 +1829,11 @@ pub async fn dispatch_insert_image_after_text_via_executor(
         Ok(s) => s,
         Err(e) => return serde_json::json!({"error": "invalid_args", "message": e}),
     };
-    let client = match shared_client().await {
+    let client = match client_for(executor.google_workspace_auth()).await {
         Ok(c) => c,
         Err(e) => return e,
     };
-    let cache = shared_cache().await;
+    let cache = cache_for(executor.google_workspace_auth()).await;
     let revisions = match shared_revs().await {
         Ok(r) => r,
         Err(e) => return e,
@@ -1792,16 +1904,17 @@ pub async fn dispatch_insert_image_after_text_via_executor(
 pub async fn dispatch_insert_before_text(
     args: serde_json::Value,
     session_id: &str,
+    auth: Option<&GoogleWorkspaceAuth>,
 ) -> serde_json::Value {
     let parsed: InsertBeforeTextArgs = match serde_json::from_value(args) {
         Ok(a) => a,
         Err(e) => return invalid_args(e),
     };
-    let client = match shared_client().await {
+    let client = match client_for(auth).await {
         Ok(c) => c,
         Err(e) => return e,
     };
-    let cache = shared_cache().await;
+    let cache = cache_for(auth).await;
     let revisions = match shared_revs().await {
         Ok(r) => r,
         Err(e) => return e,
@@ -1829,16 +1942,17 @@ pub async fn dispatch_insert_before_text(
 pub async fn dispatch_insert_between(
     args: serde_json::Value,
     session_id: &str,
+    auth: Option<&GoogleWorkspaceAuth>,
 ) -> serde_json::Value {
     let parsed: InsertBetweenArgs = match serde_json::from_value(args) {
         Ok(a) => a,
         Err(e) => return invalid_args(e),
     };
-    let client = match shared_client().await {
+    let client = match client_for(auth).await {
         Ok(c) => c,
         Err(e) => return e,
     };
-    let cache = shared_cache().await;
+    let cache = cache_for(auth).await;
     let revisions = match shared_revs().await {
         Ok(r) => r,
         Err(e) => return e,
@@ -1863,16 +1977,20 @@ pub async fn dispatch_insert_between(
     }
 }
 
-pub async fn dispatch_delete_text(args: serde_json::Value, session_id: &str) -> serde_json::Value {
+pub async fn dispatch_delete_text(
+    args: serde_json::Value,
+    session_id: &str,
+    auth: Option<&GoogleWorkspaceAuth>,
+) -> serde_json::Value {
     let parsed: DeleteTextArgs = match serde_json::from_value(args) {
         Ok(a) => a,
         Err(e) => return invalid_args(e),
     };
-    let client = match shared_client().await {
+    let client = match client_for(auth).await {
         Ok(c) => c,
         Err(e) => return e,
     };
-    let cache = shared_cache().await;
+    let cache = cache_for(auth).await;
     let revisions = match shared_revs().await {
         Ok(r) => r,
         Err(e) => return e,
@@ -1903,16 +2021,17 @@ pub async fn dispatch_delete_text(args: serde_json::Value, session_id: &str) -> 
 pub async fn dispatch_replace_section(
     args: serde_json::Value,
     session_id: &str,
+    auth: Option<&GoogleWorkspaceAuth>,
 ) -> serde_json::Value {
     let parsed: ReplaceSectionArgs = match serde_json::from_value(args) {
         Ok(a) => a,
         Err(e) => return invalid_args(e),
     };
-    let client = match shared_client().await {
+    let client = match client_for(auth).await {
         Ok(c) => c,
         Err(e) => return e,
     };
-    let cache = shared_cache().await;
+    let cache = cache_for(auth).await;
     let revisions = match shared_revs().await {
         Ok(r) => r,
         Err(e) => return e,
@@ -1939,16 +2058,17 @@ pub async fn dispatch_replace_section(
 pub async fn dispatch_append_markdown(
     args: serde_json::Value,
     session_id: &str,
+    auth: Option<&GoogleWorkspaceAuth>,
 ) -> serde_json::Value {
     let parsed: AppendMarkdownArgs = match serde_json::from_value(args) {
         Ok(a) => a,
         Err(e) => return invalid_args(e),
     };
-    let client = match shared_client().await {
+    let client = match client_for(auth).await {
         Ok(c) => c,
         Err(e) => return e,
     };
-    let cache = shared_cache().await;
+    let cache = cache_for(auth).await;
     let revisions = match shared_revs().await {
         Ok(r) => r,
         Err(e) => return e,
@@ -1972,16 +2092,20 @@ pub async fn dispatch_append_markdown(
     }
 }
 
-pub async fn dispatch_style_text(args: serde_json::Value, session_id: &str) -> serde_json::Value {
+pub async fn dispatch_style_text(
+    args: serde_json::Value,
+    session_id: &str,
+    auth: Option<&GoogleWorkspaceAuth>,
+) -> serde_json::Value {
     let parsed: StyleTextArgs = match serde_json::from_value(args) {
         Ok(a) => a,
         Err(e) => return invalid_args(e),
     };
-    let client = match shared_client().await {
+    let client = match client_for(auth).await {
         Ok(c) => c,
         Err(e) => return e,
     };
-    let cache = shared_cache().await;
+    let cache = cache_for(auth).await;
     let revisions = match shared_revs().await {
         Ok(r) => r,
         Err(e) => return e,
@@ -2011,7 +2135,11 @@ pub async fn dispatch_style_text(args: serde_json::Value, session_id: &str) -> s
     }
 }
 
-pub async fn dispatch_apply_edits(args: serde_json::Value, session_id: &str) -> serde_json::Value {
+pub async fn dispatch_apply_edits(
+    args: serde_json::Value,
+    session_id: &str,
+    auth: Option<&GoogleWorkspaceAuth>,
+) -> serde_json::Value {
     let parsed: ApplyEditsArgs = match serde_json::from_value(args) {
         Ok(a) => a,
         Err(e) => return invalid_args(e),
@@ -2074,11 +2202,11 @@ pub async fn dispatch_apply_edits(args: serde_json::Value, session_id: &str) -> 
             }
         }
     }
-    let client = match shared_client().await {
+    let client = match client_for(auth).await {
         Ok(c) => c,
         Err(e) => return e,
     };
-    let cache = shared_cache().await;
+    let cache = cache_for(auth).await;
     let revisions = match shared_revs().await {
         Ok(r) => r,
         Err(e) => return e,
@@ -2101,6 +2229,7 @@ pub async fn dispatch_apply_edits(args: serde_json::Value, session_id: &str) -> 
 pub async fn dispatch_create_named_range(
     args: serde_json::Value,
     session_id: &str,
+    auth: Option<&GoogleWorkspaceAuth>,
 ) -> serde_json::Value {
     let parsed: CreateNamedRangeArgs = match serde_json::from_value(args) {
         Ok(a) => a,
@@ -2110,11 +2239,11 @@ pub async fn dispatch_create_named_range(
         Ok(s) => s,
         Err(e) => return invalid_args(format!("scope: {e}")),
     };
-    let client = match shared_client().await {
+    let client = match client_for(auth).await {
         Ok(c) => c,
         Err(e) => return e,
     };
-    let cache = shared_cache().await;
+    let cache = cache_for(auth).await;
     let revisions = match shared_revs().await {
         Ok(r) => r,
         Err(e) => return e,
@@ -2149,16 +2278,17 @@ pub async fn dispatch_create_named_range(
 pub async fn dispatch_replace_named_range(
     args: serde_json::Value,
     session_id: &str,
+    auth: Option<&GoogleWorkspaceAuth>,
 ) -> serde_json::Value {
     let parsed: ReplaceNamedRangeArgs = match serde_json::from_value(args) {
         Ok(a) => a,
         Err(e) => return invalid_args(e),
     };
-    let client = match shared_client().await {
+    let client = match client_for(auth).await {
         Ok(c) => c,
         Err(e) => return e,
     };
-    let cache = shared_cache().await;
+    let cache = cache_for(auth).await;
     let revisions = match shared_revs().await {
         Ok(r) => r,
         Err(e) => return e,
@@ -2192,12 +2322,13 @@ pub async fn dispatch_replace_named_range(
 pub async fn dispatch_acknowledge_human_changes(
     args: serde_json::Value,
     session_id: &str,
+    auth: Option<&GoogleWorkspaceAuth>,
 ) -> serde_json::Value {
     let parsed: AcknowledgeHumanChangesArgs = match serde_json::from_value(args) {
         Ok(a) => a,
         Err(e) => return invalid_args(e),
     };
-    let client = match shared_client().await {
+    let client = match client_for(auth).await {
         Ok(c) => c,
         Err(e) => return e,
     };
@@ -2218,12 +2349,16 @@ pub async fn dispatch_acknowledge_human_changes(
 
 // Tables (Subsystem G v1.1, 2026-06-21) ─────────────────────────────────
 
-pub async fn dispatch_read_tables(args: serde_json::Value, _session_id: &str) -> serde_json::Value {
+pub async fn dispatch_read_tables(
+    args: serde_json::Value,
+    _session_id: &str,
+    auth: Option<&GoogleWorkspaceAuth>,
+) -> serde_json::Value {
     let parsed: ReadTablesArgs = match serde_json::from_value(args) {
         Ok(a) => a,
         Err(e) => return invalid_args(e),
     };
-    let client = match shared_client().await {
+    let client = match client_for(auth).await {
         Ok(c) => c,
         Err(e) => return e,
     };
@@ -2237,16 +2372,17 @@ pub async fn dispatch_read_tables(args: serde_json::Value, _session_id: &str) ->
 pub async fn dispatch_set_table_cell(
     args: serde_json::Value,
     session_id: &str,
+    auth: Option<&GoogleWorkspaceAuth>,
 ) -> serde_json::Value {
     let parsed: SetTableCellArgs = match serde_json::from_value(args) {
         Ok(a) => a,
         Err(e) => return invalid_args(e),
     };
-    let client = match shared_client().await {
+    let client = match client_for(auth).await {
         Ok(c) => c,
         Err(e) => return e,
     };
-    let cache = shared_cache().await;
+    let cache = cache_for(auth).await;
     let revisions = match shared_revs().await {
         Ok(r) => r,
         Err(e) => return e,
@@ -2275,17 +2411,21 @@ pub async fn dispatch_set_table_cell(
     }
 }
 
-pub async fn dispatch_format_table(args: serde_json::Value, session_id: &str) -> serde_json::Value {
+pub async fn dispatch_format_table(
+    args: serde_json::Value,
+    session_id: &str,
+    auth: Option<&GoogleWorkspaceAuth>,
+) -> serde_json::Value {
     use crate::gdocs::application::table_format;
     let parsed: FormatTableArgs = match serde_json::from_value(args) {
         Ok(a) => a,
         Err(e) => return invalid_args(e),
     };
-    let client = match shared_client().await {
+    let client = match client_for(auth).await {
         Ok(c) => c,
         Err(e) => return e,
     };
-    let cache = shared_cache().await;
+    let cache = cache_for(auth).await;
     let revisions = match shared_revs().await {
         Ok(r) => r,
         Err(e) => return e,
@@ -2314,16 +2454,17 @@ pub async fn dispatch_format_table(args: serde_json::Value, session_id: &str) ->
 pub async fn dispatch_insert_table_row(
     args: serde_json::Value,
     session_id: &str,
+    auth: Option<&GoogleWorkspaceAuth>,
 ) -> serde_json::Value {
     let parsed: InsertTableRowArgs = match serde_json::from_value(args) {
         Ok(a) => a,
         Err(e) => return invalid_args(e),
     };
-    let client = match shared_client().await {
+    let client = match client_for(auth).await {
         Ok(c) => c,
         Err(e) => return e,
     };
-    let cache = shared_cache().await;
+    let cache = cache_for(auth).await;
     let revisions = match shared_revs().await {
         Ok(r) => r,
         Err(e) => return e,
@@ -2355,16 +2496,17 @@ pub async fn dispatch_insert_table_row(
 pub async fn dispatch_delete_table_row(
     args: serde_json::Value,
     session_id: &str,
+    auth: Option<&GoogleWorkspaceAuth>,
 ) -> serde_json::Value {
     let parsed: DeleteTableRowArgs = match serde_json::from_value(args) {
         Ok(a) => a,
         Err(e) => return invalid_args(e),
     };
-    let client = match shared_client().await {
+    let client = match client_for(auth).await {
         Ok(c) => c,
         Err(e) => return e,
     };
-    let cache = shared_cache().await;
+    let cache = cache_for(auth).await;
     let revisions = match shared_revs().await {
         Ok(r) => r,
         Err(e) => return e,
@@ -2395,16 +2537,17 @@ pub async fn dispatch_delete_table_row(
 pub async fn dispatch_insert_table_column(
     args: serde_json::Value,
     session_id: &str,
+    auth: Option<&GoogleWorkspaceAuth>,
 ) -> serde_json::Value {
     let parsed: InsertTableColumnArgs = match serde_json::from_value(args) {
         Ok(a) => a,
         Err(e) => return invalid_args(e),
     };
-    let client = match shared_client().await {
+    let client = match client_for(auth).await {
         Ok(c) => c,
         Err(e) => return e,
     };
-    let cache = shared_cache().await;
+    let cache = cache_for(auth).await;
     let revisions = match shared_revs().await {
         Ok(r) => r,
         Err(e) => return e,
@@ -2436,16 +2579,17 @@ pub async fn dispatch_insert_table_column(
 pub async fn dispatch_delete_table_column(
     args: serde_json::Value,
     session_id: &str,
+    auth: Option<&GoogleWorkspaceAuth>,
 ) -> serde_json::Value {
     let parsed: DeleteTableColumnArgs = match serde_json::from_value(args) {
         Ok(a) => a,
         Err(e) => return invalid_args(e),
     };
-    let client = match shared_client().await {
+    let client = match client_for(auth).await {
         Ok(c) => c,
         Err(e) => return e,
     };
-    let cache = shared_cache().await;
+    let cache = cache_for(auth).await;
     let revisions = match shared_revs().await {
         Ok(r) => r,
         Err(e) => return e,
@@ -2520,6 +2664,66 @@ mod tests {
         // + 1 Subsystem G v1.1 (2026-06-22) table-cell formatting
         // (gdocs_format_table) = 36.
         assert_eq!(tools.len(), 36);
+    }
+
+    fn connected(refresh_token: &str) -> GoogleWorkspaceAuth {
+        GoogleWorkspaceAuth {
+            token_url: "https://t/token".into(),
+            client_id: "cid".into(),
+            client_secret: "cs".into(),
+            refresh_token: refresh_token.into(),
+        }
+    }
+
+    /// One outline cache per identity: the same account gets the same cache,
+    /// another account or the platform never does.
+    #[tokio::test]
+    async fn outline_cache_is_per_identity() {
+        let a = connected("rt-cx7-cache-a");
+        let first = cache_for(Some(&a)).await;
+        assert!(Arc::ptr_eq(&first, &cache_for(Some(&a)).await));
+        let other = cache_for(Some(&connected("rt-cx7-cache-b"))).await;
+        assert!(!Arc::ptr_eq(&first, &other));
+        assert!(!Arc::ptr_eq(&first, &cache_for(None).await));
+    }
+
+    /// At the bound an insert sweeps the caches no call is using; one in use
+    /// survives the sweep.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn connected_outline_caches_are_bounded() {
+        let held = cache_for(Some(&connected("rt-cx7-held"))).await;
+        for i in 0..MAX_CONNECTED_OUTLINE_CACHES {
+            cache_for(Some(&connected(&format!("rt-cx7-idle-{i}")))).await;
+        }
+        let len = CONNECTED_CACHES.get().unwrap().lock().unwrap().len();
+        assert!(len <= MAX_CONNECTED_OUTLINE_CACHES, "{len}");
+        assert!(Arc::ptr_eq(
+            &held,
+            &cache_for(Some(&connected("rt-cx7-held"))).await
+        ));
+    }
+
+    /// A connected account's client is built per call, never the platform
+    /// singleton nor a client shared with another call.
+    #[tokio::test]
+    async fn connected_account_client_is_built_per_call() {
+        let a = connected("rt-cx7-client");
+        let one = client_for(Some(&a)).await.expect("builds without env");
+        let two = client_for(Some(&a)).await.expect("builds without env");
+        assert!(!Arc::ptr_eq(&one, &two));
+    }
+
+    /// The platform default folder never applies to a connected account.
+    #[test]
+    #[serial_test::serial]
+    fn connected_account_never_uses_the_platform_folder() {
+        std::env::set_var("COLMENA_GDOCS_DEFAULT_PARENT_FOLDER_ID", "platform-folder");
+        let platform = platform_parent_folder_env(None);
+        let user = platform_parent_folder_env(Some(&connected("rt-cx7-folder")));
+        std::env::remove_var("COLMENA_GDOCS_DEFAULT_PARENT_FOLDER_ID");
+        assert_eq!(platform.as_deref(), Some("platform-folder"));
+        assert_eq!(user, None);
     }
 
     #[test]
