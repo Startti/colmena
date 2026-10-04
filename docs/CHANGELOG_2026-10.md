@@ -295,3 +295,19 @@ con una clave por identidad: la cuenta de plataforma conserva el `agent_session_
 existentes siguen valiendo) y una cuenta conectada usa `<session>#gws:<huella>`. Así la cuenta B nunca compara
 contra un snapshot que guardó la cuenta A en la misma sesión. Sin migración (`agent_session_id` es `TEXT`).
 **Test.** `session_scope_separates_identities_without_secrets`. **Mutación.** La clave ignora la identidad.
+
+## 19. `llm_call`: `google_workspace_auth` en el config — las tools de Google actúan como la cuenta conectada (porte de `feat/google-workspace-auth`, B7)
+
+**Qué cambia.** `llm_call` lee `config.google_workspace_auth` con `GoogleWorkspaceAuth::from_node_config`, solo
+del `config` (nunca de `inputs`) y antes de cualquier llamada al proveedor. Inválido → el nodo falla con un error
+que nombra el bloque, sin valores. Válido → `DagToolExecutor::with_google_workspace_auth`, y los `gsheets_*` /
+`gdocs_*` actúan con esa cuenta. Ausente → la cuenta de plataforma, como antes. Los valores van tal cual: un
+`${VAR}` no se expande. Prelude: `build_google_workspace_prelude_for(UserConnection | Platform)`; el de plataforma
+queda byte a byte igual y el de la cuenta conectada no pide compartir nada. Campo `google_workspace_auth` (object)
+en el `config_schema` y en `node_configurations.json`. Guía: [47_google_oauth.md](developer_guide/47_google_oauth.md).
+**Tests.** Bloque inválido falla sin llamar al LLM; ausente → prelude de plataforma; válido → prelude de la cuenta
+conectada; la tool refresca contra el `token_url` del bloque; el mismo bloque llegado por `inputs` no se usa (sin
+refresh, prelude de plataforma); `${COLMENA_GOOGLE_OAUTH_CLIENT_SECRET}` llega literal al endpoint con la env var
+puesta; el linter de grafos acepta el campo. **Mutación.** Leer el bloque también de `inputs` y expandir `${VAR}`
+tumban un test cada una; sacar el campo de `node_configurations.json` tumba el del linter. **E2E.** No aplica.
+**ADP.** Puede inyectar el bloque en el `config` del `llm_call` al correr. **Estado.** done.
