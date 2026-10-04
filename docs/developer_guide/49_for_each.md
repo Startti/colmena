@@ -204,6 +204,8 @@ Errores:
 Usa las mismas credenciales que `items_from: sheet`: `config.google_workspace_auth` si está (la cuenta
 conectada del usuario; inválido → el nodo falla antes de leer o escribir), si no `COLMENA_GOOGLE_OAUTH_*`
 del entorno. Solo del `config`, nunca de `inputs` ni de las filas; los targets de las filas no lo reciben.
+Un bloque `host_refresh_bearer` se renueva por el `HostTokenPort` del motor con el
+`__colmena_agent_session_id` de la corrida, como en `llm_call` (como nodo y como tool).
 Ver [`docs/developer_guide/47_google_oauth.md`](47_google_oauth.md).
 
 ### Ejemplo — leer de una hoja y escribir resultados en otra

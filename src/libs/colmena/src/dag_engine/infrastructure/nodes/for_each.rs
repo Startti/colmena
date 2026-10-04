@@ -6,7 +6,7 @@ use crate::colmena_log;
 use crate::dag_engine::application::list_tool_executor::{
     run_list, ExecPolicy, ItemStatus, OnError, DEFAULT_MAX_ITEMS,
 };
-use crate::dag_engine::application::ports::NodeRegistryPort;
+use crate::dag_engine::application::ports::{HostTokenPort, NodeRegistryPort};
 use crate::dag_engine::domain::lint::{FieldSpec, NodeCatalogEntry};
 use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
 use crate::dag_engine::domain::observer::{ChildScopeObserver, ExecutionObserver, NodeEvent};
@@ -47,6 +47,9 @@ const FORWARDED_CONTEXT_KEYS: [&str; 3] = [
 
 pub struct ForEachNode {
     pub registry: Arc<OnceLock<Arc<dyn NodeRegistryPort>>>,
+    /// The embedder's port for a `host_refresh_bearer` block. Set after
+    /// construction by `HashMapNodeRegistry::set_host_token_port`.
+    pub(crate) host_token_port: Arc<OnceLock<Arc<dyn HostTokenPort>>>,
 }
 
 impl Default for ForEachNode {
@@ -59,6 +62,7 @@ impl ForEachNode {
     pub fn new() -> Self {
         Self {
             registry: Arc::new(OnceLock::new()),
+            host_token_port: Arc::default(),
         }
     }
 }
@@ -316,8 +320,18 @@ impl ExecutableNode for ForEachNode {
         // Google Sheets credentials for `items_from` / `results_to`. Read from
         // `config` only (never from inputs or rows). Present but invalid fails
         // here, before any sheet is read or written — never an env fallback.
-        let sheets =
-            SheetsAccess::new(GoogleWorkspaceAuth::from_node_config(config)?.map(Arc::new));
+        // A `host_refresh_bearer` block renews through the engine's port, with
+        // the run's session (never a value from the block).
+        let sid = inputs
+            .get("__colmena_agent_session_id")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        let port = self.host_token_port.get().cloned();
+        let sheets = SheetsAccess::new(
+            GoogleWorkspaceAuth::from_node_config(config)?
+                .map(|auth| Arc::new(auth.with_host_context(port, sid))),
+        );
 
         let node_id = inputs
             .get("__node_id")
@@ -1934,6 +1948,128 @@ mod google_workspace_auth_tests {
             ("set_range", platform.set_range(write_args).await),
         ] {
             assert!(out.to_string().contains(ENV_MARKER), "{op}: {out}");
+        }
+    }
+
+    /// `for_each` with a `host_refresh_bearer` block — as a graph node, and as
+    /// a tool of an `llm_call` whose block the executor hands over — renews an
+    /// expired seed through the engine's port with the run's session, and
+    /// reads the sheet with the token the host returned.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn a_host_refresh_block_reads_the_sheet_with_the_host_token() {
+        use crate::dag_engine::application::ports as p;
+        use crate::dag_engine::domain::tool_configuration::ToolConfiguration;
+        use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::gsheets_tools::override_sheets_api_base_for_tests;
+        use crate::llm::domain::{FunctionCall, ToolCall, ToolExecutor};
+        use wiremock::matchers::{header, path_regex};
+        #[derive(Default)]
+        struct Port(std::sync::Mutex<Vec<(String, Option<String>)>>);
+        #[async_trait::async_trait]
+        impl p::HostTokenPort for Port {
+            async fn fresh_token(
+                &self,
+                req: p::HostTokenRequest,
+            ) -> Result<p::HostToken, p::HostTokenError> {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push((req.handle, req.agent_session_id));
+                let expires_at = chrono::Utc::now().timestamp() + 3600;
+                let access_token = "tok-cx7-fresh".into();
+                Ok(p::HostToken {
+                    access_token,
+                    expires_at,
+                })
+            }
+        }
+        struct Echo;
+        #[async_trait::async_trait]
+        impl ExecutableNode for Echo {
+            async fn execute(
+                &self,
+                inputs: &NodeInputs,
+                _: &Value,
+                _: &mut Value,
+                _: Option<Arc<dyn ExecutionObserver>>,
+            ) -> Result<Value, Box<dyn StdError + Send + Sync>> {
+                Ok(json!({ "echo": inputs.get("name") }))
+            }
+            fn schema(&self) -> Value {
+                json!({})
+            }
+        }
+        struct Targets(Arc<ForEachNode>);
+        impl NodeRegistryPort for Targets {
+            fn get_node(&self, t: &str) -> Option<Arc<dyn ExecutableNode>> {
+                match t {
+                    "for_each" => Some(self.0.clone()),
+                    "echo" => Some(Arc::new(Echo)),
+                    _ => None,
+                }
+            }
+            fn get_all_nodes(&self) -> HashMap<String, Arc<dyn ExecutableNode>> {
+                HashMap::new()
+            }
+        }
+        clear_env();
+        let sheets = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"/ss$"))
+            .and(header("authorization", "Bearer tok-cx7-fresh"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({ "sheets": [{
+                "data": [{ "startRow": 0, "startColumn": 0, "rowData": [
+                    { "values": [{ "effectiveValue": { "stringValue": "name" } }] },
+                    { "values": [{ "effectiveValue": { "stringValue": "apple" } }] } ] }],
+                "merges": [] }] })),
+            )
+            .mount(&sheets)
+            .await;
+        let _base = override_sheets_api_base_for_tests(&sheets.uri());
+        let block = json!({ "type": "host_refresh_bearer", "access_token": "tok-cx7-seed",
+            "expires_at": 0, "handle": "cth1-cx7-h" });
+        let args = json!({ "items_from": { "source": "sheet", "ref": "ss|S" },
+            "target": { "node_type": "echo", "node_schema": {} } });
+
+        for as_tool in [false, true] {
+            let node = Arc::new(ForEachNode::new());
+            let registry: Arc<dyn NodeRegistryPort> = Arc::new(Targets(node.clone()));
+            node.registry.set(registry.clone()).ok();
+            let port = Arc::new(Port::default());
+            let _ = node.host_token_port.set(port.clone());
+            let out = if as_tool {
+                let tool: ToolConfiguration = serde_json::from_value(json!({
+                    "name": "rows_from_sheet", "node_type": "for_each", "node_schema": {
+                        "items_from": { "type": "object", "required": true, "description": "s" },
+                        "target": { "type": "object", "required": true, "description": "t" } } }))
+                .unwrap();
+                let auth = GoogleWorkspaceAuth::from_node_config(
+                    &json!({ "google_workspace_auth": block.clone() }),
+                );
+                let exec = DagToolExecutor::new(
+                    registry,
+                    HashMap::from([("rows_from_sheet".to_string(), tool)]),
+                )
+                .with_google_workspace_auth(auth.unwrap().map(Arc::new))
+                .with_agent_session_id(Some("sess-cx7".into()));
+                let call = ToolCall::new(
+                    "c1".into(),
+                    FunctionCall::new("rows_from_sheet".into(), args.to_string()),
+                );
+                exec.execute(&call).await.expect("tool runs").output
+            } else {
+                let mut config = args.clone();
+                config["google_workspace_auth"] = block.clone();
+                let inputs =
+                    HashMap::from([("__colmena_agent_session_id".to_string(), json!("sess-cx7"))]);
+                let out = node.execute(&inputs, &config, &mut json!({}), None).await;
+                out.expect("node runs").to_string()
+            };
+            assert!(out.contains("apple"), "as_tool {as_tool}: {out}");
+            let asked = std::mem::take(&mut *port.0.lock().unwrap());
+            let want = ("cth1-cx7-h".to_string(), Some("sess-cx7".to_string()));
+            assert_eq!(asked, [want], "as_tool {as_tool}");
         }
     }
 }

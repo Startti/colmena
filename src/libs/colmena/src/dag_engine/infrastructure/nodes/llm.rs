@@ -1500,9 +1500,17 @@ impl ExecutableNode for LlmNode {
         // never from `inputs`. Present but invalid fails the node here, before
         // any provider call: it must never fall back to the platform env
         // credentials. The message names the block, never its values.
+        // A `host_refresh_bearer` block renews through the engine's port, with
+        // the run's session (never a value from the block).
         let google_workspace_auth =
             crate::google_oauth::infrastructure::GoogleWorkspaceAuth::from_node_config(config)?
-                .map(Arc::new);
+                .map(|auth| {
+                    let sid = inputs
+                        .get("__colmena_agent_session_id")
+                        .and_then(|v| v.as_str());
+                    let sid = sid.filter(|s| !s.is_empty()).map(str::to_string);
+                    Arc::new(auth.with_host_context(self.host_token_port.get().cloned(), sid))
+                });
 
         // Verbose flag for debugging — prints prompt, system message, and raw response.
         let verbose = inputs
@@ -8334,5 +8342,45 @@ mod google_workspace_auth_node_tests {
             !String::from_utf8_lossy(&refreshes[0].body).contains("PLATFORM-SECRET"),
             "the env value was sent"
         );
+    }
+
+    /// A `host_refresh_bearer` block is bound to the node's host port and the
+    /// run's `__colmena_agent_session_id`: an expired seed makes the gsheets
+    /// tool ask the host once, with that session.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn a_host_refresh_block_renews_through_the_node_port() {
+        use crate::dag_engine::application::ports as p;
+        #[derive(Default)]
+        struct Port(StdMutex<Vec<Option<String>>>);
+        #[async_trait::async_trait]
+        impl p::HostTokenPort for Port {
+            async fn fresh_token(
+                &self,
+                req: p::HostTokenRequest,
+            ) -> Result<p::HostToken, p::HostTokenError> {
+                self.0.lock().unwrap().push(req.agent_session_id);
+                Err(p::HostTokenError::NeedsReconnect("test".into()))
+            }
+        }
+        clear_platform_env();
+        let registry: Arc<dyn NodeRegistryPort> = Arc::new(DummyRegistry);
+        let factory = Arc::new(ConversationRepositoryFactory::new(Arc::new(
+            PgPoolRegistry::new(PoolConfig::defaults()),
+        )));
+        let node = LlmNode::new(factory, Arc::downgrade(&registry), None);
+        let port = Arc::new(Port::default());
+        let _ = node.host_token_port.set(port.clone());
+        let _guard = OverrideGuard::install(RecordingAdapter::new(tool_call_script()));
+        let cfg = with_block(serde_json::json!({ "type": "host_refresh_bearer",
+            "access_token": "tok-cx7-seed", "expires_at": 0, "handle": "cth1-cx7-h" }));
+        let inputs = HashMap::from([(
+            "__colmena_agent_session_id".to_string(),
+            serde_json::json!("sess-cx7"),
+        )]);
+        node.execute(&inputs, &cfg, &mut Value::Null, None)
+            .await
+            .expect("node with a host_refresh_bearer block");
+        assert_eq!(*port.0.lock().unwrap(), [Some("sess-cx7".to_string())]);
     }
 }

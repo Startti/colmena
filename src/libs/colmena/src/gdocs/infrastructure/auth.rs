@@ -165,7 +165,10 @@ fn oauth_error_to_docs_error(
 ) -> DocsError {
     use crate::google_oauth::domain::OAuthError as E;
     match err {
-        E::RefreshTokenRevoked if connected_account => DocsError::GoogleAccountReconnectRequired,
+        // A refused host refresh is the connected account's too (CX7).
+        E::RefreshTokenRevoked | E::HostRefused(_) if connected_account => {
+            DocsError::GoogleAccountReconnectRequired
+        }
         E::RefreshTokenRevoked => DocsError::NotConfigured(format!("{err}")),
         E::ClientCredsInvalid(_) | E::HostRefused(_) => DocsError::NotConfigured(format!("{err}")),
         E::ConfigMissing(_) => DocsError::NotConfigured(format!("{err}")),
@@ -176,6 +179,22 @@ fn oauth_error_to_docs_error(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A refused host refresh of the connected account asks the user to
+    /// reconnect; for the platform account it stays an operator error.
+    #[test]
+    fn a_refused_host_refresh_is_a_reconnect_for_the_connected_account() {
+        use crate::google_oauth::domain::OAuthError;
+        let refused = || OAuthError::HostRefused("needs reconnect".into());
+        assert!(matches!(
+            oauth_error_to_docs_error(refused(), true),
+            DocsError::GoogleAccountReconnectRequired
+        ));
+        assert!(matches!(
+            oauth_error_to_docs_error(refused(), false),
+            DocsError::NotConfigured(_)
+        ));
+    }
 
     #[tokio::test]
     async fn cache_returns_seeded_token_within_ttl() {

@@ -410,10 +410,14 @@ impl HashMapNodeRegistry {
     }
 
     /// Injects the embedder's port for host-refreshed bearer tokens into the
-    /// `http_request` node (graph nodes and tool calls share that instance)
-    /// and into `llm_call`, for MCP `auth_refresh`.
+    /// `http_request` node (graph nodes and tool calls share that instance),
+    /// into `llm_call`, for MCP `auth_refresh` and a `host_refresh_bearer`
+    /// `google_workspace_auth`, and into `for_each`, for the same block.
     pub fn set_host_token_port(&self, port: Arc<dyn HostTokenPort>) {
         let _ = self.llm_host_token_port.set(port.clone());
+        if let Some(for_each) = &self.foreach_node {
+            let _ = for_each.host_token_port.set(port.clone());
+        }
         let _ = self.http_node.host_token_port.set(port);
     }
 
@@ -567,6 +571,8 @@ mod registry_tavily_tests {
             reg.llm_host_token_port.get().is_some(),
             "llm_call has it too"
         );
+        let for_each = reg.foreach_node.as_ref().expect("for_each registered");
+        assert!(for_each.host_token_port.get().is_some(), "for_each too");
     }
 
     #[test]
