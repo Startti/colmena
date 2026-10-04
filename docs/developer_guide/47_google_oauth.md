@@ -325,8 +325,21 @@ plataforma, igual que hoy) y `Err` si es inválida (otro `type`, un campo faltan
 Las tools de gsheets (`gsheets_*`, `gsheets_run_python` y la fuente Sheets de `data_run_python`) y de
 gdocs arman su cliente por llamada con ese bloque (`build_client(auth)`). `llm_call` se lo pasa al
 executor (`with_google_workspace_auth`), así que actúan como la cuenta conectada del usuario; sin el
-bloque, como la de plataforma. Con la cuenta conectada el prelude (`build_google_workspace_prelude_for`)
-no pide compartir nada; con la de plataforma el texto es el de siempre.
+bloque, como la de plataforma. Qué cambia para el modelo y el usuario con la cuenta conectada:
+
+- **Prelude** (`build_google_workspace_prelude_for(UserConnection)`): no pide compartir nada; ante un
+  `permission_denied`, pide abrir el archivo con esa cuenta. El de plataforma lleva lo que depende de la
+  cuenta (qué ven las tools de descubrimiento, que un archivo creado no lo ve el usuario hasta compartirlo,
+  `no_parent_folder_configured` → pedir una carpeta y pasar `parent_folder_id`).
+- **Textos de las tools**: hablan de «the Google account these tools act as», sin email de plataforma,
+  env vars del operador ni «prefer sharing». Lo cuidan `google_workspace_tool_texts_do_not_assume_the_platform_account`
+  (`text/mod.rs`) y `google_workspace_skills_do_not_assume_the_platform_account` (skills).
+- **403**: `permission_denied` sin `share_email`, con un hint para abrir o compartir el archivo con la
+  cuenta conectada.
+- **Refresh revocado**: `google_account_reconnect_required` («Reconnect Google in ADP»), no el texto de
+  `colmena_oauth_setup`.
+- **`gdocs_create*` sin carpeta**: no usa la carpeta de la plataforma; el documento va a la raíz del Drive
+  de esa cuenta.
 
 ## Monitoring
 

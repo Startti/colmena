@@ -164,6 +164,13 @@ pub fn build_google_workspace_prelude(sa_email: Option<&str>) -> String {
              del usuario — reservá esa opción para cuando el usuario lo pida \
              explícitamente o no tenga nada que compartir, y avisale que el archivo \
              va a vivir en la cuenta del agente.\n\n\
+             ### Qué ve y dónde crea la cuenta del agente\n\
+             Las tools de descubrimiento (`gsheets_list_spreadsheets`, `gdocs_list_documents`) \
+             solo ven los archivos de la cuenta del agente o compartidos con `{email}`. Un \
+             archivo que creás queda en la cuenta del agente: el usuario no lo ve hasta que se \
+             lo compartas con `gsheets_share` / `gdocs_share`. Si `gdocs_create*` falla con \
+             `no_parent_folder_configured`, pedile al usuario el ID de una carpeta compartida \
+             con `{email}` y pasalo en `parent_folder_id`.\n\n\
              ### Si el usuario YA mandó un doc ID en este turno o en uno previo\n\
              Procedé directo a operar — confiá en que el ID que pasó es real y que \
              está compartido. NO le vuelvas a pedir el ID. Si la tool falla con \
@@ -192,6 +199,12 @@ pub fn build_google_workspace_prelude(sa_email: Option<&str>) -> String {
              en su Drive) antes que crear uno nuevo con `gsheets_create_spreadsheet` / \
              `gdocs_create*` (que lo dejaría en la cuenta del agente). Creá uno nuevo \
              solo si el usuario lo pide o no tiene nada que compartir.\n\n\
+             Las tools de descubrimiento (`gsheets_list_spreadsheets`, `gdocs_list_documents`) \
+             solo ven los archivos de la cuenta del agente o compartidos con ella. Un archivo que \
+             creás queda en la cuenta del agente: el usuario no lo ve hasta que se lo compartas \
+             con `gsheets_share` / `gdocs_share`. Si `gdocs_create*` falla con \
+             `no_parent_folder_configured`, pedile al usuario el ID de una carpeta compartida con \
+             la cuenta del agente y pasalo en `parent_folder_id`.\n\n\
              Si el usuario ya mandó un doc ID, procedé directo. Si la tool falla con \
              `permission_denied`, el tool result trae un `hint` accionable que debés \
              paraphrasear al usuario.\n\n\
@@ -296,8 +309,37 @@ mod tests {
         assert!(text.contains(TABLE_WORKFLOW_PRELUDE), "{text}");
     }
 
+    /// Account-dependent guidance that used to live in the gsheets/gdocs tool
+    /// descriptions now lives in the platform prelude (both variants).
     #[test]
-    fn platform_prelude_is_unchanged() {
+    fn platform_prelude_carries_the_account_guidance_moved_out_of_tool_descriptions() {
+        for out in [
+            build_google_workspace_prelude(Some("agents@startti.co")),
+            build_google_workspace_prelude(None),
+        ] {
+            // Discovery only sees the platform account's files.
+            assert!(
+                out.contains("gsheets_list_spreadsheets") && out.contains("gdocs_list_documents"),
+                "{out}"
+            );
+            // A created file is not visible to the user until shared back.
+            assert!(
+                out.contains("gsheets_share") && out.contains("gdocs_share"),
+                "{out}"
+            );
+            // gdocs_create* needs a folder for the platform account.
+            assert!(out.contains("no_parent_folder_configured"), "{out}");
+            assert!(out.contains("parent_folder_id"), "{out}");
+        }
+        let with_email = build_google_workspace_prelude(Some("agents@startti.co"));
+        assert!(
+            with_email.contains("solo ven los archivos de la cuenta del agente o compartidos con `agents@startti.co`"),
+            "{with_email}"
+        );
+    }
+
+    #[test]
+    fn platform_source_builds_the_platform_prelude() {
         for email in [Some("agents@startti.co"), None] {
             let old = build_google_workspace_prelude(email);
             let new =

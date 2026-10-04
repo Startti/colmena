@@ -1,9 +1,9 @@
 gsheets_create_spreadsheet:
-  summary: Create a new Google Sheets workbook (prefer asking the user to share an existing one instead)
+  summary: Create a new Google Sheets workbook in the Google account these tools act as
   description: |
-    Create a new empty Google Spreadsheet with the given title. Returns {spreadsheet_id, url} you can use in subsequent calls.
+    Create a new empty Google Spreadsheet with the given title in the Drive of the Google account these tools act as. Returns {spreadsheet_id, url} you can use in subsequent calls.
 
-    PREFER SHARING OVER CREATING: a spreadsheet you create here lives in the AGENT account, not the user's Drive — the user does not own it and may not even see it unless you share it back. Default to asking the user to share an EXISTING spreadsheet with the agent (as Editor) instead. Use this tool only when the user explicitly wants a brand-new sheet or has nothing to share, and tell them the file will live in the agent account.
+    Before creating a new spreadsheet, follow the Google Workspace access notes in your instructions: they say where new files live and whether to work on an existing spreadsheet instead.
 
 gsheets_create_from_xlsx:
   summary: Upload a local .xlsx attachment and convert it into a new Google Sheet
@@ -246,14 +246,14 @@ gsheets_run_python:
     gaps to fill yourself.
 
 gsheets_list_spreadsheets:
-  summary: Discover Google Spreadsheets visible to the OAuth user (agents@startti.co) — optionally filtered by name, folder, or modified-after date
+  summary: Discover Google Spreadsheets visible to the Google account these tools act as — optionally filtered by name, folder, or modified-after date
   description: |
-    Drive discovery for spreadsheets. Returns the spreadsheets the OAuth
-    user can see (own + shared), in `modifiedTime desc` order, with
-    pagination.
+    Drive discovery for spreadsheets. Returns the spreadsheets the Google
+    account these tools act as can see (own + shared), in `modifiedTime desc`
+    order, with pagination.
 
     All args are optional. An empty call returns the 20 most-recently-modified
-    spreadsheets visible to the agent account.
+    spreadsheets visible to that account.
 
     Args:
       - `query` (optional): substring filter against the spreadsheet name.
@@ -279,16 +279,13 @@ gsheets_list_spreadsheets:
          → recibe tabs available
       4. LLM continúa con set_range / batch_update_cells / etc.
 
-    The agent account only sees files that have been shared with it OR are
-    owned by it. To make a new spreadsheet visible to the agent, share it
-    with the share email shown in the agent's catalog prelude.
+    Only files that account owns or that were shared with it are visible.
 
 gsheets_share:
   summary: Grant a Google account access to a spreadsheet (reader / commenter / writer)
   description: |
     Drive `permissions.create` for a spreadsheet. Adds a single grant.
-    Drive emails the recipient unless your operator config disables
-    notifications.
+    Drive may notify the recipient by email.
 
     Args:
       - `spreadsheet_id` (req): the Drive id of the spreadsheet.
@@ -296,7 +293,7 @@ gsheets_share:
       - `role` (req): one of `"reader"`, `"commenter"`, `"writer"`.
 
     Returns `{ok: true}`. Errors:
-      - `permission_denied`: agent account is not the owner / lacks share rights.
+      - `permission_denied`: the Google account these tools act as is not the owner / lacks share rights.
       - `invalid_role`: role must be one of the three strings above.
 
     Typical workflow:

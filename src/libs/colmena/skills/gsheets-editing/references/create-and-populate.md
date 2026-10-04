@@ -40,7 +40,8 @@ later run_python):
 
 ## New SPREADSHEET FILE → `gsheets_create_spreadsheet`
 
-Only when there is no workbook yet (prefer asking the user to share an existing
-one). It returns the new `spreadsheet_id`; then populate it with run_python
-(`output_sheets`) or set_range. To import an existing `.xlsx`, use
+Only when there is no workbook yet — check your Google Workspace access notes
+first: they say whether to work on an existing spreadsheet instead of creating
+a new one. It returns the new `spreadsheet_id`; then populate it with
+run_python (`output_sheets`) or set_range. To import an existing `.xlsx`, use
 `gsheets_create_from_xlsx` instead (uploads the attachment as a new Sheet).
