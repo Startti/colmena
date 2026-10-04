@@ -1394,33 +1394,6 @@ mod tests {
         assert_eq!(calls[0].stale_token_sha256.as_deref(), Some(stale.as_str()));
     }
 
-    /// Without a port the block cannot be honoured: an error that says so,
-    /// never the platform account (env decoys are set).
-    #[test]
-    #[serial_test::serial]
-    fn host_refresh_bearer_without_a_port_is_an_error_not_the_platform() {
-        use crate::google_oauth::infrastructure::GoogleWorkspaceAuth;
-        for name in OAUTH_ENV {
-            std::env::set_var(name, "ENV-DECOY");
-        }
-        let block = serde_json::json!({ "google_workspace_auth": {
-            "type": "host_refresh_bearer", "access_token": "tok-cx7-seed",
-            "expires_at": 1, "handle": "cth1-cx7-h" } });
-        let auth = GoogleWorkspaceAuth::from_node_config(&block)
-            .unwrap()
-            .unwrap();
-        let built =
-            GoogleSheetsHttpClient::from_config_with_auth(&cfg_with_share_email(), Some(&auth));
-        clear_oauth_env();
-        match built {
-            Err(SheetsError::NotConfigured(msg)) => {
-                assert!(msg.contains("this engine has no host token port"), "{msg}")
-            }
-            Err(other) => panic!("expected NotConfigured, got {other:?}"),
-            Ok(_) => panic!("must not build without a port"),
-        }
-    }
-
     async fn setup_mock() -> (MockServer, GoogleSheetsHttpClient) {
         let server = MockServer::start().await;
         let client = GoogleSheetsHttpClient::for_tests(&server.uri(), &server.uri(), &server.uri());

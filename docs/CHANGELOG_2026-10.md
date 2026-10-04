@@ -353,17 +353,15 @@ Ninguno. **Estado.** done.
 
 ## 23. Google OAuth: `google_workspace_auth` de tipo `host_refresh_bearer` (CX7, parte 1: el bloque y su provider)
 
-**Qué cambia.** `google_workspace_auth` acepta `{type: "host_refresh_bearer", access_token, expires_at, handle}`:
-ADP siembra un access token de la cuenta conectada (sin `client_secret` ni refresh token) y el motor lo renueva
-pidiéndolo al host por el `HostTokenPort` existente. `GoogleWorkspaceAuth` pasa a enum (`RefreshToken {…}` |
-`HostRefresh {…}`); el bloque mal formado lista todos los campos que faltan y un `type` desconocido nombra los
-dos tipos. `with_host_context(port, agent_session_id)` ata el contexto de la corrida; `provider()` devuelve
-`Result` y sin puerto falla con `this engine has no host token port` (las tools dan `*_not_configured`), nunca
-la cuenta de plataforma. `identity_key()` = `sha256(handle)` para `HostRefresh` (cachés de gdocs y
-`session_scope`). `to_config_block` reescribe las dos variantes. El `Debug` no muestra ni el token ni el
-handle. Todavía ningún nodo ata el contexto (parte 2): hoy el bloque da `*_not_configured`. Guía:
-[47_google_oauth.md](developer_guide/47_google_oauth.md). **Tests.** Parseo, `Debug` redactado e identidad por
-handle; campos faltantes listados; `type` desconocido; sin puerto → error; gsheets sin puerto con env de
-señuelo → `NotConfigured`; `to_config_block` ida y vuelta de las dos variantes. **Mutación.** Caer en la cuenta
-de plataforma sin puerto e imprimir el handle en el `Debug` tumban al menos un test cada una. **E2E.** No
-aplica. **ADP.** Ninguno todavía. **Estado.** partial (sigue la parte 2).
+**Qué cambia.** `google_workspace_auth` acepta `{type: "host_refresh_bearer", access_token, expires_at, handle,
+account_key}`: ADP siembra un access token de la cuenta conectada y el motor lo renueva pidiéndolo al host por
+el `HostTokenPort`. `GoogleWorkspaceAuth` pasa a enum (`RefreshToken {…}` | `HostRefresh {…}`); el bloque mal
+formado lista los campos que faltan. `provider()` devuelve `Result` y sin puerto falla (`*_not_configured`),
+nunca la cuenta de plataforma. `identity_key()` = `sha256("host:" + account_key)` (cachés de gdocs y
+`session_scope`): `account_key` es obligatorio, 1 a 128 caracteres, no secreto y estable (el handle se re-emite
+en cada turno). `to_config_block` reescribe las dos variantes; el `Debug` oculta token y handle. Ningún nodo ata
+todavía el puerto (parte 2). Guía: [47_google_oauth.md](developer_guide/47_google_oauth.md). **Tests.** Parseo,
+`Debug`, campos faltantes, sin puerto → error; dos handles con el mismo `account_key` dan la misma identidad y
+el mismo `session_scope`, otra clave, otros; `to_config_block` ida y vuelta. **Mutación.** Caer en la cuenta de
+plataforma sin puerto e imprimir el handle en el `Debug` tumban un test cada una. **E2E.** No aplica. **ADP.**
+Ninguno todavía. **Estado.** partial (sigue la parte 2).

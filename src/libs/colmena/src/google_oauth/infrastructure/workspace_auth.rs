@@ -37,14 +37,16 @@ pub enum GoogleWorkspaceAuth {
         /// Unix seconds.
         expires_at: i64,
         handle: String,
+        /// Stable, non-secret account identity chosen by the embedder (the
+        /// handle is re-minted every turn). 1..=128 chars.
+        account_key: String,
         host: HostTokenContext,
     },
 }
 
 /// What a `HostRefresh` block needs from the run: the engine's port and the
-/// run's `agent_session_id`. Bound by the node that read the block
-/// ([`GoogleWorkspaceAuth::with_host_context`]); its provider is built once and
-/// shared by every clone, so all tool calls of that node see one renewal.
+/// run's `agent_session_id`, bound by the node that read the block. Its
+/// provider is built once and shared by every clone.
 #[derive(Clone, Default)]
 pub struct HostTokenContext {
     pub port: Option<Arc<dyn HostTokenPort>>,
@@ -74,11 +76,16 @@ impl std::fmt::Debug for GoogleWorkspaceAuth {
                 .field("client_secret", &"<redacted>")
                 .field("refresh_token", &"<redacted>")
                 .finish(),
-            Self::HostRefresh { expires_at, .. } => f
+            Self::HostRefresh {
+                expires_at,
+                account_key,
+                ..
+            } => f
                 .debug_struct("GoogleWorkspaceAuth::HostRefresh")
                 .field("access_token", &"<redacted>")
                 .field("expires_at", expires_at)
                 .field("handle", &"<redacted>")
+                .field("account_key", account_key)
                 .finish(),
         }
     }
@@ -141,17 +148,20 @@ impl GoogleWorkspaceAuth {
                 access_token,
                 expires_at,
                 handle,
+                account_key,
                 ..
             } => serde_json::json!({
                 "type": "host_refresh_bearer",
                 "access_token": access_token,
                 "expires_at": expires_at,
                 "handle": handle,
+                "account_key": account_key,
             }),
         }
     }
 
-    /// `{access_token, expires_at, handle}`; every missing field is listed.
+    /// `{access_token, expires_at, handle, account_key}`; every missing field
+    /// is listed.
     fn host_refresh(block: &serde_json::Value) -> Result<Self, String> {
         let text = |k: &str| {
             let v = block.get(k).and_then(|v| v.as_str());
@@ -159,19 +169,30 @@ impl GoogleWorkspaceAuth {
         };
         let (access_token, handle) = (text("access_token"), text("handle"));
         let expires_at = block.get("expires_at").and_then(|v| v.as_i64());
+        let account_key = text("account_key");
+        if account_key
+            .as_ref()
+            .is_some_and(|k| k.chars().count() > 128)
+        {
+            return Err("google_workspace_auth.account_key exceeds 128 characters".into());
+        }
         let fields = [
             ("access_token", access_token.is_none()),
             ("expires_at", expires_at.is_none()),
             ("handle", handle.is_none()),
+            ("account_key", account_key.is_none()),
         ];
         let missing: Vec<&str> = fields.iter().filter(|f| f.1).map(|f| f.0).collect();
-        match (access_token, expires_at, handle) {
-            (Some(access_token), Some(expires_at), Some(handle)) => Ok(Self::HostRefresh {
-                access_token,
-                expires_at,
-                handle,
-                host: HostTokenContext::default(),
-            }),
+        match (access_token, expires_at, handle, account_key) {
+            (Some(access_token), Some(expires_at), Some(handle), Some(account_key)) => {
+                Ok(Self::HostRefresh {
+                    access_token,
+                    expires_at,
+                    handle,
+                    account_key,
+                    host: HostTokenContext::default(),
+                })
+            }
             _ => Err(format!(
                 "google_workspace_auth block missing required fields: {}",
                 missing.join(", ")
@@ -179,24 +200,10 @@ impl GoogleWorkspaceAuth {
         }
     }
 
-    /// Bind the run's port and session to a `HostRefresh` block (no-op for a
-    /// `RefreshToken` one). The session must be the run's
-    /// `__colmena_agent_session_id`, never a value from the block.
-    pub fn with_host_context(
-        mut self,
-        port: Option<Arc<dyn HostTokenPort>>,
-        agent_session_id: Option<String>,
-    ) -> Self {
-        if let Self::HostRefresh { host, .. } = &mut self {
-            let provider = Arc::default();
-            (host.port, host.agent_session_id, host.provider) = (port, agent_session_id, provider);
-        }
-        self
-    }
-
     /// The identity a cache keyed by account may use: the provider fingerprint
-    /// for a refresh token, `sha256(handle)` for a host-refreshed bearer.
-    /// Never a secret in clear.
+    /// for a refresh token, `sha256("host:" + account_key)` for a host-refreshed
+    /// bearer (never the handle: the embedder re-mints it every turn). Never a
+    /// secret in clear.
     pub fn identity_key(&self) -> String {
         match self {
             Self::RefreshToken {
@@ -207,7 +214,9 @@ impl GoogleWorkspaceAuth {
             } => {
                 OAuthProviderCache::fingerprint(token_url, client_id, client_secret, refresh_token)
             }
-            Self::HostRefresh { handle, .. } => format!("{:x}", Sha256::digest(handle.as_bytes())),
+            Self::HostRefresh { account_key, .. } => {
+                format!("{:x}", Sha256::digest(format!("host:{account_key}")))
+            }
         }
     }
 
@@ -239,6 +248,7 @@ impl GoogleWorkspaceAuth {
                 expires_at,
                 handle,
                 host,
+                ..
             } => {
                 let port = host.port.clone().ok_or_else(|| NO_HOST_PORT.to_string())?;
                 let (seed, sid) = (access_token.clone(), host.agent_session_id.clone());
@@ -316,7 +326,7 @@ mod tests {
         let a = GoogleWorkspaceAuth::from_node_config(&cfg)
             .unwrap()
             .unwrap();
-        assert_eq!(token_url_of(&a), DEFAULT_TOKEN_ENDPOINT);
+        assert_eq!(a.to_config_block()["token_url"], DEFAULT_TOKEN_ENDPOINT);
         let dbg = format!("{a:?}");
         assert!(
             !dbg.contains("CS-SECRET") && !dbg.contains("RT-SECRET"),
@@ -330,14 +340,7 @@ mod tests {
         let a = GoogleWorkspaceAuth::from_node_config(&cfg)
             .unwrap()
             .unwrap();
-        assert_eq!(token_url_of(&a), "https://t/token");
-    }
-
-    fn token_url_of(a: &GoogleWorkspaceAuth) -> &str {
-        match a {
-            GoogleWorkspaceAuth::RefreshToken { token_url, .. } => token_url,
-            other => panic!("not a refresh-token block: {other:?}"),
-        }
+        assert_eq!(a.to_config_block()["token_url"], "https://t/token");
     }
 
     fn refresh(url: &str, id: &str, secret: &str, rt: &str) -> GoogleWorkspaceAuth {
@@ -382,6 +385,7 @@ mod tests {
             access_token: "tok-cx7-seed".into(),
             expires_at: 1790000000,
             handle: "cth1-cx7-h".into(),
+            account_key: "acct-cx7".into(),
             host: HostTokenContext::default(),
         };
         for auth in [auth, host] {
@@ -424,49 +428,51 @@ mod tests {
     }
 
     /// A well-formed `host_refresh_bearer` block parses; `Debug` shows neither
-    /// the token nor the handle; its identity is `sha256(handle)`, so a renewed
-    /// token keeps it.
+    /// the token nor the handle (the account key is not secret); its identity
+    /// is `sha256("host:" + account_key)`: a re-minted handle or a renewed
+    /// token keeps it, another account changes it.
     #[test]
-    fn host_refresh_bearer_parses_redacts_and_keys_by_handle() {
-        let parse = |token: &str, handle: &str| {
-            let cfg = host_block(serde_json::json!({
-                "access_token": token, "expires_at": 1790000000, "handle": handle }));
+    fn host_refresh_bearer_parses_redacts_and_keys_by_account() {
+        let parse = |token: &str, handle: &str, key: &str| {
+            let cfg = host_block(serde_json::json!({ "access_token": token,
+                "expires_at": 1790000000, "handle": handle, "account_key": key }));
             GoogleWorkspaceAuth::from_node_config(&cfg)
                 .unwrap()
                 .unwrap()
         };
-        let a = parse("tok-cx7-seed", "cth1-cx7-h");
-        assert!(matches!(
-            &a,
-            GoogleWorkspaceAuth::HostRefresh {
-                expires_at: 1790000000,
-                ..
-            }
-        ));
+        let a = parse("tok-cx7-seed", "cth1-cx7-h", "acct-cx7");
+        assert_eq!(a.to_config_block()["expires_at"], 1790000000);
         let dbg = format!("{a:?}");
         assert!(
             !dbg.contains("tok-cx7-") && !dbg.contains("cth1-cx7-"),
             "{dbg}"
         );
-        let sha = format!("{:x}", Sha256::digest(b"cth1-cx7-h"));
+        assert!(dbg.contains("acct-cx7"), "{dbg}");
+        let sha = format!("{:x}", Sha256::digest(b"host:acct-cx7"));
         assert_eq!(a.identity_key(), sha);
-        assert_eq!(
-            a.identity_key(),
-            parse("tok-cx7-new", "cth1-cx7-h").identity_key()
-        );
-        assert_ne!(
-            a.identity_key(),
-            parse("tok-cx7-seed", "cth1-cx7-k").identity_key()
-        );
+        let same = parse("tok-cx7-new", "cth1-cx7-k", "acct-cx7");
+        assert_eq!(a.identity_key(), same.identity_key());
+        let other = parse("tok-cx7-seed", "cth1-cx7-h", "acct-cx7-2");
+        assert_ne!(a.identity_key(), other.identity_key());
     }
 
     #[test]
     fn host_refresh_bearer_lists_every_missing_field() {
-        let cfg = host_block(serde_json::json!({ "access_token": "tok-cx7-seed", "handle": "" }));
+        let cfg = host_block(
+            serde_json::json!({ "access_token": "tok-cx7-seed", "handle": "",
+            "account_key": " " }),
+        );
         let err = GoogleWorkspaceAuth::from_node_config(&cfg).unwrap_err();
         assert_eq!(
             err,
-            "google_workspace_auth block missing required fields: expires_at, handle"
+            "google_workspace_auth block missing required fields: expires_at, handle, account_key"
+        );
+        let long = host_block(serde_json::json!({ "access_token": "t", "expires_at": 1,
+            "handle": "h", "account_key": "k".repeat(129) }));
+        let err = GoogleWorkspaceAuth::from_node_config(&long).unwrap_err();
+        assert_eq!(
+            err,
+            "google_workspace_auth.account_key exceeds 128 characters"
         );
     }
 
@@ -474,7 +480,8 @@ mod tests {
     #[test]
     fn host_refresh_bearer_without_a_port_is_an_error() {
         let cfg = host_block(serde_json::json!({
-            "access_token": "tok-cx7-seed", "expires_at": 1, "handle": "cth1-cx7-h" }));
+            "access_token": "tok-cx7-seed", "expires_at": 1, "handle": "cth1-cx7-h",
+            "account_key": "acct-cx7" }));
         let a = GoogleWorkspaceAuth::from_node_config(&cfg)
             .unwrap()
             .unwrap();
@@ -483,8 +490,6 @@ mod tests {
             err,
             "google_workspace_auth: this engine has no host token port"
         );
-        let unbound = a.with_host_context(None, Some("sess_1".into()));
-        assert!(unbound.provider().is_err());
     }
 
     #[test]

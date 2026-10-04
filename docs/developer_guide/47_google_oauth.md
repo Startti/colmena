@@ -324,16 +324,15 @@ plataforma, igual que hoy) y `Err` si es inválida (otro `type`, un campo faltan
 
 ### Token refrescado por el host (`host_refresh_bearer`)
 
-`{type: "host_refresh_bearer", access_token, expires_at, handle}`: ADP siembra un access token de la cuenta
-conectada (sin `client_secret`) y lo renueva por `HostTokenPort` (CX7). `GoogleWorkspaceAuth` es un enum
-(`RefreshToken {…}` | `HostRefresh {…}`); el bloque mal formado lista los campos que faltan y un `type`
-desconocido nombra los dos tipos. `with_host_context(port, agent_session_id)` ata el puerto del motor y la
-sesión de la corrida; `provider()` arma entonces un `HostRefreshTokenProvider` una vez por atadura, que
-comparten sus clones. Sin puerto, `provider()` falla con `this engine has no host token port` y las tools dan
-`gsheets_not_configured`/`gdocs_not_configured`, nunca la cuenta de plataforma. Las cachés por identidad usan
-`identity_key()`: la huella del provider para `RefreshToken`, `sha256(handle)` para `HostRefresh` (renovar el
-token no cambia la identidad). `to_config_block` reescribe las dos variantes, sin el contexto atado. El `Debug`
-no muestra ni el token ni el handle.
+`{type: "host_refresh_bearer", access_token, expires_at, handle, account_key}`: ADP siembra un access token
+de la cuenta conectada (sin `client_secret`) y lo renueva por `HostTokenPort` (CX7). `GoogleWorkspaceAuth` es
+un enum (`RefreshToken {…}` | `HostRefresh {…}`); el bloque mal formado lista los campos que faltan y un
+`type` desconocido nombra los dos tipos. `provider()` arma un `HostRefreshTokenProvider` sobre el puerto atado
+al bloque; sin puerto falla con `this engine has no host token port` (tools: `*_not_configured`), nunca la
+cuenta de plataforma. `identity_key()` (cachés de gdocs y `session_scope`) es la huella del provider para
+`RefreshToken` y `sha256("host:" + account_key)` para `HostRefresh`: `account_key` (obligatorio, 1 a 128
+caracteres, no secreto) es estable, el handle se re-emite en cada turno. `to_config_block` reescribe las dos
+variantes. El `Debug` no muestra ni el token ni el handle.
 
 Las tools de gsheets (`gsheets_*`, `gsheets_run_python` y la fuente Sheets de `data_run_python`) y de
 gdocs arman su cliente por llamada con ese bloque (`build_client(auth)`). `llm_call` se lo pasa al
