@@ -200,6 +200,21 @@ impl GoogleWorkspaceAuth {
         }
     }
 
+    /// Bind the run's port and session to a `HostRefresh` block (no-op for a
+    /// `RefreshToken` one). The session must be the run's
+    /// `__colmena_agent_session_id`, never a value from the block.
+    pub fn with_host_context(
+        mut self,
+        port: Option<Arc<dyn HostTokenPort>>,
+        agent_session_id: Option<String>,
+    ) -> Self {
+        if let Self::HostRefresh { host, .. } = &mut self {
+            let provider = Arc::default();
+            (host.port, host.agent_session_id, host.provider) = (port, agent_session_id, provider);
+        }
+        self
+    }
+
     /// The identity a cache keyed by account may use: the provider fingerprint
     /// for a refresh token, `sha256("host:" + account_key)` for a host-refreshed
     /// bearer (never the handle: the embedder re-mints it every turn). Never a
@@ -490,6 +505,8 @@ mod tests {
             err,
             "google_workspace_auth: this engine has no host token port"
         );
+        let unbound = a.with_host_context(None, Some("sess_1".into()));
+        assert!(unbound.provider().is_err());
     }
 
     #[test]

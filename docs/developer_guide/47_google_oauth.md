@@ -334,6 +334,13 @@ cuenta de plataforma. `identity_key()` (cachés de gdocs y `session_scope`) es l
 caracteres, no secreto) es estable, el handle se re-emite en cada turno. `to_config_block` reescribe las dos
 variantes. El `Debug` no muestra ni el token ni el handle.
 
+Atan el contexto (`with_host_context`) `llm_call` y `for_each` al leer el bloque: el `HostTokenPort` del motor
+(`set_host_token_port` llega a los dos) y el `__colmena_agent_session_id` de la corrida, nunca un valor del
+bloque. `for_each` como tool recibe el bloque reescrito por el executor y le ata su propio contexto. Las tools
+de un nodo comparten un provider: un 401 o una semilla vencida piden un token al host y se reintenta una vez.
+Si el host rechaza (`HostRefused`), la cuenta conectada da `google_account_reconnect_required` con
+`RECONNECT_GOOGLE_MESSAGE`.
+
 Las tools de gsheets (`gsheets_*`, `gsheets_run_python` y la fuente Sheets de `data_run_python`) y de
 gdocs arman su cliente por llamada con ese bloque (`build_client(auth)`). `llm_call` se lo pasa al
 executor (`with_google_workspace_auth`), así que actúan como la cuenta conectada del usuario; sin el

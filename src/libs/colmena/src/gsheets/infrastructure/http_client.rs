@@ -1394,6 +1394,100 @@ mod tests {
         assert_eq!(calls[0].stale_token_sha256.as_deref(), Some(stale.as_str()));
     }
 
+    /// A `host_refresh_bearer` block bound to the run's port: the seeded
+    /// token gets a 401, the host is asked once, the call succeeds with the
+    /// fresh token. When the host refuses, the connected account must be
+    /// reconnected (never "not configured", never the platform account).
+    #[tokio::test]
+    async fn host_refresh_bearer_block_renews_through_the_port() {
+        use crate::dag_engine::application::ports as p;
+        use crate::google_oauth::infrastructure::GoogleWorkspaceAuth;
+        use std::sync::Arc;
+        struct Port(std::sync::Mutex<usize>, bool);
+        #[async_trait::async_trait]
+        impl p::HostTokenPort for Port {
+            async fn fresh_token(
+                &self,
+                _: p::HostTokenRequest,
+            ) -> Result<p::HostToken, p::HostTokenError> {
+                *self.0.lock().unwrap() += 1;
+                let expires_at = chrono::Utc::now().timestamp() + 3600;
+                let access_token = "tok-cx7-fresh".into();
+                let ok = p::HostToken {
+                    access_token,
+                    expires_at,
+                };
+                (!self.1)
+                    .then_some(ok)
+                    .ok_or(p::HostTokenError::NeedsReconnect("x".into()))
+            }
+        }
+        let block = serde_json::json!({ "google_workspace_auth": {
+            "type": "host_refresh_bearer", "access_token": "tok-cx7-seed",
+            "expires_at": chrono::Utc::now().timestamp() + 3600, "handle": "cth1-cx7-h",
+            "account_key": "acct-cx7" } });
+        for refuse in [false, true] {
+            let server = MockServer::start().await;
+            for (bearer, status) in [("tok-cx7-seed", 401), ("tok-cx7-fresh", 200)] {
+                Mock::given(method("GET"))
+                    .and(path_regex(r"/abc$"))
+                    .and(header("authorization", format!("Bearer {bearer}").as_str()))
+                    .respond_with(ResponseTemplate::new(status).set_body_json(sheets_meta_json()))
+                    .mount(&server)
+                    .await;
+            }
+            let port = Arc::new(Port(Default::default(), refuse));
+            let auth = GoogleWorkspaceAuth::from_node_config(&block)
+                .unwrap()
+                .unwrap();
+            let auth = auth.with_host_context(Some(port.clone()), Some("sess_1".into()));
+            let cfg = cfg_with_share_email();
+            let client =
+                GoogleSheetsHttpClient::for_tests_with_auth(&cfg, Some(&auth), &server.uri())
+                    .expect("builds from the host block");
+            let tabs = client.list_sheets(&SpreadsheetId("abc".into())).await;
+            assert_eq!(
+                *port.0.lock().unwrap(),
+                1,
+                "one host refresh (refuse: {refuse})"
+            );
+            match refuse {
+                false => assert_eq!(tabs.expect("fresh token")[0].title, "Sheet1"),
+                true => assert!(
+                    matches!(tabs, Err(SheetsError::GoogleAccountReconnectRequired)),
+                    "{tabs:?}"
+                ),
+            }
+        }
+    }
+
+    /// Without a port the block cannot be honoured: an error that says so,
+    /// never the platform account (env decoys are set).
+    #[test]
+    #[serial_test::serial]
+    fn host_refresh_bearer_without_a_port_is_an_error_not_the_platform() {
+        use crate::google_oauth::infrastructure::GoogleWorkspaceAuth;
+        for name in OAUTH_ENV {
+            std::env::set_var(name, "ENV-DECOY");
+        }
+        let block = serde_json::json!({ "google_workspace_auth": {
+            "type": "host_refresh_bearer", "access_token": "tok-cx7-seed",
+            "expires_at": 1, "handle": "cth1-cx7-h", "account_key": "acct-cx7" } });
+        let auth = GoogleWorkspaceAuth::from_node_config(&block)
+            .unwrap()
+            .unwrap();
+        let built =
+            GoogleSheetsHttpClient::from_config_with_auth(&cfg_with_share_email(), Some(&auth));
+        clear_oauth_env();
+        match built {
+            Err(SheetsError::NotConfigured(msg)) => {
+                assert!(msg.contains("this engine has no host token port"), "{msg}")
+            }
+            Err(other) => panic!("expected NotConfigured, got {other:?}"),
+            Ok(_) => panic!("must not build without a port"),
+        }
+    }
+
     async fn setup_mock() -> (MockServer, GoogleSheetsHttpClient) {
         let server = MockServer::start().await;
         let client = GoogleSheetsHttpClient::for_tests(&server.uri(), &server.uri(), &server.uri());

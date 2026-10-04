@@ -193,7 +193,10 @@ fn token_error_to_sheets_error(
 ) -> SheetsError {
     use crate::google_oauth::domain::OAuthError as E;
     match err {
-        E::RefreshTokenRevoked if connected_account => SheetsError::GoogleAccountReconnectRequired,
+        // A refused host refresh is the connected account's too (CX7).
+        E::RefreshTokenRevoked | E::HostRefused(_) if connected_account => {
+            SheetsError::GoogleAccountReconnectRequired
+        }
         E::RefreshTokenRevoked => SheetsError::NotConfigured(format!("{err}")),
         E::ClientCredsInvalid(_) | E::HostRefused(_) => {
             SheetsError::NotConfigured(format!("{err}"))

@@ -364,4 +364,21 @@ todavía el puerto (parte 2). Guía: [47_google_oauth.md](developer_guide/47_goo
 `Debug`, campos faltantes, sin puerto → error; dos handles con el mismo `account_key` dan la misma identidad y
 el mismo `session_scope`, otra clave, otros; `to_config_block` ida y vuelta. **Mutación.** Caer en la cuenta de
 plataforma sin puerto e imprimir el handle en el `Debug` tumban un test cada una. **E2E.** No aplica. **ADP.**
-Ninguno todavía. **Estado.** partial (sigue la parte 2).
+Ninguno todavía. **Estado.** done (la parte 2 es §24).
+
+## 24. Google OAuth: `llm_call` y `for_each` renuevan `host_refresh_bearer` por el puerto del host (CX7, parte 2)
+
+**Qué cambia.** `llm_call` y `for_each` (como nodo y como tool) atan al bloque `host_refresh_bearer` de §23 el
+`HostTokenPort` del motor y el `__colmena_agent_session_id` de la corrida (`with_host_context`, nuevo aquí), nunca un
+valor del bloque. `for_each` como tool recibe el bloque que reescribe `to_config_block` y le ata su propio contexto;
+`set_host_token_port` llega también a `for_each`. Si el host rechaza la renovación (`HostRefused`), gsheets y
+gdocs dan `google_account_reconnect_required` con `RECONNECT_GOOGLE_MESSAGE` para la cuenta conectada (para la
+de plataforma sigue `*_not_configured`). Guías: [47_google_oauth.md](developer_guide/47_google_oauth.md),
+[49_for_each.md](developer_guide/49_for_each.md); `node_configurations.json` describe el tipo. **Tests.**
+gsheets sin puerto, con env de señuelo → `NotConfigured`; gsheets con wiremock: 401 con el token sembrado → un pedido al puerto → 200, y host que rechaza → reconnect;
+mapeo de `HostRefused` en gdocs; `llm_call` con semilla vencida pide al puerto una vez con su sesión; `for_each`
+como nodo y como tool lee la hoja con el token del host (handle y sesión); el registro le da el puerto a
+`for_each`. **Mutación.** No atar el contexto en `llm.rs` o en `for_each`, no pasar la sesión, mapear
+`HostRefused` a un error genérico (gsheets y gdocs), alterar el handle en `to_config_block` y no darle el puerto
+a `for_each` en el registro tumban al menos un test cada una. **E2E.** No aplica. **ADP.** Puede mandar el
+bloque `host_refresh_bearer` con el `HostTokenPort` conectado. **Estado.** done.
