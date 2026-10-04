@@ -322,6 +322,18 @@ plataforma, igual que hoy) y `Err` si es inválida (otro `type`, un campo faltan
   bloque solo de su `config`: sus tools de Google actúan con la cuenta de plataforma, nunca con el bloque
   del padre.
 
+### Token refrescado por el host (`host_refresh_bearer`)
+
+`{type: "host_refresh_bearer", access_token, expires_at, handle, account_key}`: ADP siembra un access token
+de la cuenta conectada (sin `client_secret`) y lo renueva por `HostTokenPort` (CX7). `GoogleWorkspaceAuth` es
+un enum (`RefreshToken {…}` | `HostRefresh {…}`); el bloque mal formado lista los campos que faltan y un
+`type` desconocido nombra los dos tipos. `provider()` arma un `HostRefreshTokenProvider` sobre el puerto atado
+al bloque; sin puerto falla con `this engine has no host token port` (tools: `*_not_configured`), nunca la
+cuenta de plataforma. `identity_key()` (cachés de gdocs y `session_scope`) es la huella del provider para
+`RefreshToken` y `sha256("host:" + account_key)` para `HostRefresh`: `account_key` (obligatorio, 1 a 128
+caracteres, no secreto) es estable, el handle se re-emite en cada turno. `to_config_block` reescribe las dos
+variantes. El `Debug` no muestra ni el token ni el handle.
+
 Las tools de gsheets (`gsheets_*`, `gsheets_run_python` y la fuente Sheets de `data_run_python`) y de
 gdocs arman su cliente por llamada con ese bloque (`build_client(auth)`). `llm_call` se lo pasa al
 executor (`with_google_workspace_auth`), así que actúan como la cuenta conectada del usuario; sin el

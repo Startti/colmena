@@ -24,7 +24,7 @@ use crate::gdocs::infrastructure::config::GDocsConfig;
 use crate::gdocs::infrastructure::http_client::GoogleDocsHttpClient;
 use crate::gdocs::infrastructure::outline_cache::OutlineCache;
 use crate::gdocs::infrastructure::revision_store::{PostgresRevisionStore, RevisionStore};
-use crate::google_oauth::infrastructure::{GoogleWorkspaceAuth, OAuthProviderCache};
+use crate::google_oauth::infrastructure::GoogleWorkspaceAuth;
 use crate::llm::domain::tools::ToolDefinition;
 use crate::text;
 use schemars::JsonSchema;
@@ -142,12 +142,7 @@ async fn cache_for(auth: Option<&GoogleWorkspaceAuth>) -> Arc<OutlineCache> {
     let Some(auth) = auth else {
         return shared_cache().await;
     };
-    let key = OAuthProviderCache::fingerprint(
-        &auth.token_url,
-        &auth.client_id,
-        &auth.client_secret,
-        &auth.refresh_token,
-    );
+    let key = auth.identity_key();
     let mut caches = CONNECTED_CACHES
         .get_or_init(Default::default)
         .lock()
@@ -173,15 +168,7 @@ async fn cache_for(auth: Option<&GoogleWorkspaceAuth>) -> Arc<OutlineCache> {
 fn session_scope(session_id: &str, auth: Option<&GoogleWorkspaceAuth>) -> String {
     match auth {
         None => session_id.to_string(),
-        Some(a) => format!(
-            "{session_id}#gws:{}",
-            OAuthProviderCache::fingerprint(
-                &a.token_url,
-                &a.client_id,
-                &a.client_secret,
-                &a.refresh_token
-            )
-        ),
+        Some(a) => format!("{session_id}#gws:{}", a.identity_key()),
     }
 }
 
@@ -2777,7 +2764,7 @@ mod tests {
     }
 
     fn connected(refresh_token: &str) -> GoogleWorkspaceAuth {
-        GoogleWorkspaceAuth {
+        GoogleWorkspaceAuth::RefreshToken {
             token_url: "https://t/token".into(),
             client_id: "cid".into(),
             client_secret: "cs".into(),
@@ -2839,6 +2826,29 @@ mod tests {
         assert_eq!(ka, session_scope("s1", Some(&a)));
         assert_ne!(ka, session_scope("s2", Some(&a)));
         assert!(!ka.contains("tok-cx7-rt-a") && !ka.contains("cs"), "{ka}");
+    }
+
+    /// A `host_refresh_bearer` block is scoped by its `account_key`: the handle
+    /// ADP re-mints every turn keeps the scope, another account changes it.
+    #[test]
+    fn host_block_session_scope_follows_the_account_key() {
+        let host = |handle: &str, key: &str| {
+            let cfg = serde_json::json!({ "google_workspace_auth": {
+                "type": "host_refresh_bearer", "access_token": "tok-cx7-seed",
+                "expires_at": 1, "handle": handle, "account_key": key } });
+            GoogleWorkspaceAuth::from_node_config(&cfg)
+                .unwrap()
+                .unwrap()
+        };
+        let a = host("cth1-cx7-turn1", "acct-cx7");
+        let a2 = host("cth1-cx7-turn2", "acct-cx7");
+        let b = host("cth1-cx7-turn1", "acct-cx7-2");
+        let scope = |x: &GoogleWorkspaceAuth| session_scope("s1", Some(x));
+        assert_eq!(a.identity_key(), a2.identity_key());
+        assert_eq!(scope(&a), scope(&a2));
+        assert_ne!(a.identity_key(), b.identity_key());
+        assert_ne!(scope(&a), scope(&b));
+        assert!(!scope(&a).contains("cth1-cx7"), "{}", scope(&a));
     }
 
     /// The platform default folder never applies to a connected account.
