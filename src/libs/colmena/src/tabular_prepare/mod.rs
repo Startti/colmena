@@ -24,6 +24,7 @@ use std::time::Duration;
 use thiserror::Error;
 use tokio::time::Instant;
 
+pub mod gc;
 pub mod ports;
 pub mod postgres_registry;
 pub mod registry;
