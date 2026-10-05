@@ -1,4 +1,4 @@
-use crate::dag_engine::domain::observer::NodeEvent;
+use crate::dag_engine::domain::observer::{NodeEvent, ToolProgressStage};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -173,6 +173,24 @@ pub enum DagExecutionEvent {
         tool_id: String,
         tool_name: String,
     },
+    /// A long tool step is still alive (`NodeEvent::ToolProgress`). It is
+    /// activity: it resets the idle watchdog and the heartbeat clock like any
+    /// other content event. It bounds nothing: the run loop has no total clock
+    /// per node, so whoever emits it for a long step owes that step its own
+    /// deadline (see `DagToolExecutor::with_progress_ticker`).
+    #[serde(rename = "tool_progress")]
+    ToolProgress {
+        node_id: String,
+        tool_id: String,
+        stage: ToolProgressStage,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        done: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        total: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        unit: Option<String>,
+        elapsed_ms: u64,
+    },
     /// Coarse batch progress emitted by `for_each` at start, per item, and end.
     #[serde(rename = "batch_progress")]
     BatchProgress {
@@ -331,6 +349,22 @@ impl DagExecutionEvent {
                 tool_id,
                 tool_name,
             },
+            NodeEvent::ToolProgress {
+                tool_id,
+                stage,
+                done,
+                total,
+                unit,
+                elapsed_ms,
+            } => Self::ToolProgress {
+                node_id: nid(),
+                tool_id,
+                stage,
+                done,
+                total,
+                unit,
+                elapsed_ms,
+            },
             // `for_each` stamps its own node_id on these two.
             NodeEvent::BatchProgress {
                 node_id,
@@ -441,6 +475,7 @@ impl DagExecutionEvent {
             | DagExecutionEvent::SubgraphNodeFinish { node_id, .. }
             | DagExecutionEvent::SkillLoaded { node_id, .. }
             | DagExecutionEvent::ToolDescribed { node_id, .. }
+            | DagExecutionEvent::ToolProgress { node_id, .. }
             | DagExecutionEvent::BatchProgress { node_id, .. }
             | DagExecutionEvent::BatchItemFinished { node_id, .. }
             | DagExecutionEvent::Progress { node_id, .. }
@@ -475,6 +510,7 @@ impl DagExecutionEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dag_engine::domain::observer::ToolProgressStage;
 
     #[test]
     fn tool_described_serializes_with_event_tag() {
@@ -486,6 +522,94 @@ mod tests {
         let json = serde_json::to_value(&ev).unwrap();
         assert_eq!(json["event"], "tool_described");
         assert_eq!(json["data"]["tool_name"], "search_orders");
+    }
+
+    fn tool_progress_node_event(total: Option<u64>) -> NodeEvent {
+        NodeEvent::ToolProgress {
+            tool_id: "call_1".into(),
+            stage: ToolProgressStage::Staging,
+            done: Some(3),
+            total,
+            unit: Some("parts".into()),
+            elapsed_ms: 12_500,
+        }
+    }
+
+    #[test]
+    fn tool_progress_node_event_maps_to_a_dag_event_stamped_with_the_node() {
+        let ev = DagExecutionEvent::from_node_event(tool_progress_node_event(Some(8)), "agent")
+            .expect("a tool progress event must reach the stream");
+        match ev {
+            DagExecutionEvent::ToolProgress {
+                node_id,
+                tool_id,
+                stage,
+                done,
+                total,
+                unit,
+                elapsed_ms,
+            } => {
+                assert_eq!(node_id, "agent");
+                assert_eq!(tool_id, "call_1");
+                assert_eq!(stage, ToolProgressStage::Staging);
+                assert_eq!((done, total), (Some(3), Some(8)));
+                assert_eq!(unit.as_deref(), Some("parts"));
+                assert_eq!(elapsed_ms, 12_500);
+            }
+            other => panic!("expected ToolProgress, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tool_progress_without_a_count_omits_done_and_roundtrips() {
+        let ev = DagExecutionEvent::ToolProgress {
+            node_id: "agent".into(),
+            tool_id: "call_1".into(),
+            stage: ToolProgressStage::Running,
+            done: None,
+            total: None,
+            unit: None,
+            elapsed_ms: 10_000,
+        };
+        let v = serde_json::to_value(&ev).unwrap();
+        assert!(
+            v["data"].get("done").is_none(),
+            "an unknown count is absent, not zero"
+        );
+        let back: DagExecutionEvent = serde_json::from_value(v).unwrap();
+        assert!(matches!(
+            back,
+            DagExecutionEvent::ToolProgress { done: None, .. }
+        ));
+    }
+
+    #[test]
+    fn tool_progress_serializes_with_event_tag_and_roundtrips() {
+        let ev =
+            DagExecutionEvent::from_node_event(tool_progress_node_event(None), "agent").unwrap();
+        let v = serde_json::to_value(&ev).unwrap();
+        assert_eq!(v["event"], "tool_progress");
+        assert_eq!(v["data"]["stage"], "staging");
+        assert!(
+            v["data"].get("total").is_none(),
+            "an unknown total is absent, not null"
+        );
+        let back: DagExecutionEvent = serde_json::from_value(v).unwrap();
+        assert!(matches!(
+            back,
+            DagExecutionEvent::ToolProgress { total: None, .. }
+        ));
+    }
+
+    #[test]
+    fn tool_progress_belongs_to_its_node_and_keeps_the_stream_alive() {
+        let ev =
+            DagExecutionEvent::from_node_event(tool_progress_node_event(None), "agent").unwrap();
+        assert_eq!(ev.node_id(), Some("agent"));
+        assert!(
+            ev.advances_heartbeat_clock(),
+            "progress is real activity: it must reset the heartbeat clock"
+        );
     }
 
     #[test]

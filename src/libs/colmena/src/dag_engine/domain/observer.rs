@@ -1,5 +1,35 @@
 use serde::{Deserialize, Serialize};
 
+/// Where a long tool step is, as the person sees it. The wire strings are
+/// part of the `tool-progress` SSE frame and are lower case.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ToolProgressStage {
+    /// Waiting for a slot or for the preparation job to start.
+    Queued,
+    /// Converting the source into the form the run reads.
+    Preparing,
+    /// Moving the prepared data next to the code.
+    Staging,
+    /// The code is executing.
+    Running,
+    /// Gathering what the run produced.
+    Collecting,
+}
+
+impl ToolProgressStage {
+    /// The string the stage has on the wire.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Preparing => "preparing",
+            Self::Staging => "staging",
+            Self::Running => "running",
+            Self::Collecting => "collecting",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum NodeEvent {
     LlmToken {
@@ -72,6 +102,25 @@ pub enum NodeEvent {
         index: usize,
         key: String,
         status: String, // "ok" | "err"
+    },
+    /// A long tool step is still alive: where it is, and how far along when
+    /// that is known. Additive: nothing emits it until a tool opts in, and a
+    /// client that does not know the frame ignores it.
+    ToolProgress {
+        tool_id: String,
+        stage: ToolProgressStage,
+        /// How much work is finished; absent when the step keeps no count (a
+        /// step that only knows how long it has run).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        done: Option<u64>,
+        /// Absent when the step cannot say how much work there is.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        total: Option<u64>,
+        /// What `done` and `total` count (`parts`, `bytes`); absent when the
+        /// stage alone is the message.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        unit: Option<String>,
+        elapsed_ms: u64,
     },
     LlmMessageStart,
     LlmMessageFinish(Option<crate::llm::domain::LlmUsage>),
@@ -218,6 +267,20 @@ mod tests {
         }
     }
 
+    #[test]
+    fn tool_progress_stages_serialise_to_their_wire_strings() {
+        for (stage, wire) in [
+            (ToolProgressStage::Queued, "queued"),
+            (ToolProgressStage::Preparing, "preparing"),
+            (ToolProgressStage::Staging, "staging"),
+            (ToolProgressStage::Running, "running"),
+            (ToolProgressStage::Collecting, "collecting"),
+        ] {
+            assert_eq!(serde_json::to_value(stage).unwrap(), wire);
+            assert_eq!(stage.as_str(), wire);
+        }
+    }
+
     // ── ChildScopeObserver ──────────────────────────────────────────────────
 
     use crate::dag_engine::domain::events::DagExecutionEvent;
@@ -316,6 +379,43 @@ mod tests {
                 );
             }
             other => panic!("expected the event to be wrapped, got {other:?}"),
+        }
+    }
+
+    /// A tool dispatched as a nested agent shares its caller's observer, so its
+    /// progress crosses this adapter. It must come out attributed to the nested
+    /// node with every field intact, and survive the JSON hop the adapter uses.
+    #[test]
+    fn tool_progress_crosses_the_child_scope_attributed_to_the_nested_node() {
+        let sink = Arc::new(Capturing::default());
+        let scoped = ChildScopeObserver::new(sink.clone(), "nested_agent");
+
+        scoped.on_event(NodeEvent::ToolProgress {
+            tool_id: "call_7".into(),
+            stage: ToolProgressStage::Preparing,
+            done: Some(1),
+            total: Some(4),
+            unit: Some("parts".into()),
+            elapsed_ms: 900,
+        });
+
+        match only_captured(&sink) {
+            DagExecutionEvent::ToolProgress {
+                node_id,
+                tool_id,
+                stage,
+                done,
+                total,
+                unit,
+                elapsed_ms,
+            } => {
+                assert_eq!(node_id, "nested_agent");
+                assert_eq!(tool_id, "call_7");
+                assert_eq!(stage, ToolProgressStage::Preparing);
+                assert_eq!((done, total, elapsed_ms), (Some(1), Some(4), 900));
+                assert_eq!(unit.as_deref(), Some("parts"));
+            }
+            other => panic!("expected ToolProgress, got {other:?}"),
         }
     }
 
