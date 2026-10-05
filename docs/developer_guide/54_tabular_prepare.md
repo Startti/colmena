@@ -42,13 +42,24 @@ RETURNING`), atomic on both dialects. It is won when:
 | `failed` with `attempts < 3` | yes, `attempts + 1` |
 | `failed` with `attempts = 3` | no, the failure is final |
 | `running` with a live lease (`lease_until >= now`) | no |
-| `running` with an expired lease (`lease_until < now`) | yes, `attempts + 1` |
+| `running` with an expired lease and `attempts < 3` | yes, `attempts + 1` |
+| `running` with an expired lease and `attempts = 3` | no: abandoned (see below) |
 | `ready` at the current `format_version` | no |
 | `deleting` | no |
 | any state except `deleting` with an older `format_version` | yes, `attempts` restarts at 1 |
 
+An expired-lease takeover counts as an attempt, so the 3-attempt bound holds
+for jobs that die without writing `failed`. A row `running` with an expired
+lease at 3 attempts is **abandoned**: the claim refuses it and no write is
+needed to reach that state (the reader reports it as a final failure; that
+comes with `ensure_prepared` in a later slice). The row stays until the TTL
+pass removes it.
+
 `now` is passed in by the caller, never read from the database clock, so both
-dialects compare against the same value and tests control time.
+dialects compare against the same value and tests control time. SQLite compares
+the RFC 3339 text of whole-second and fractional timestamps; tests cover the
+lease boundary at millisecond resolution. Two concurrent claims give exactly one
+winner.
 
 The lease is a single fixed value, `P_PREP_TIME + 60 s` (`lease_for`), with no
 renewal: the registry is written on state change, not for progress.
@@ -63,6 +74,8 @@ attachment_prepared -- --ignored`).
 
 `cargo test --lib tabular_prepare` runs the registry cases against a
 file-backed SQLite database: a claim creates a `running` row, a live lease is
-refused, and an expired one is taken over. The cases are written once as
+refused, an expired one is taken over, a dead job is retried only up to the
+attempt cap, the lease boundary holds at millisecond resolution, and eight
+concurrent claims have exactly one winner. The cases are written once as
 functions generic over the trait (`registry_contract.rs`) so the Postgres slice
 runs the same ones.
