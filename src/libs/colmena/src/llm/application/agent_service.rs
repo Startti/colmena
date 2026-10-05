@@ -1602,7 +1602,10 @@ impl AgentService {
                     Ok(chunk) => {
                         captured_req_id = chunk.request_id().clone();
                         captured_provider = chunk.provider().clone();
-                        (callback)(chunk.part().clone());
+                        // A call's `Usage` goes out once, after the stream (below).
+                        if !matches!(chunk.part(), LlmStreamPart::Usage(_)) {
+                            (callback)(chunk.part().clone());
+                        }
                         match chunk.part() {
                             LlmStreamPart::Content(c) => full_content.push_str(c),
                             LlmStreamPart::ThinkingContent(c) => full_thinking.push_str(c),
@@ -1662,6 +1665,9 @@ impl AgentService {
             }
             if let Some(usage) = &completion_usage {
                 final_response = final_response.with_usage(usage.clone());
+                // Only the last `Usage` part is the call's total: a provider may
+                // stream cumulative ones, and the observer sums what it gets.
+                (callback)(LlmStreamPart::Usage(usage.clone()));
             }
             final_response
         } else {

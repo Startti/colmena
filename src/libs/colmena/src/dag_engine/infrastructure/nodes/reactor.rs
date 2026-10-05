@@ -312,6 +312,9 @@ impl ExecutableNode for ReactorNode {
             None
         };
 
+        // Without a streaming callback no `Usage` part reaches the observer, so
+        // the call is reported once its response is back (below).
+        let reports_live = on_token.is_some();
         let params = crate::llm::application::AgentRunParams {
             session_id: &tid,
             prompt: None, // messages already pre-populated
@@ -329,6 +332,13 @@ impl ExecutableNode for ReactorNode {
         };
 
         let response = agent_service.run(params).await?;
+        if !reports_live {
+            if let (Some(obs), Some(usage)) = (&_observer, response.usage()) {
+                obs.on_event(crate::dag_engine::domain::observer::NodeEvent::llm_usage(
+                    usage,
+                ));
+            }
+        }
 
         let raw = response.content();
 
