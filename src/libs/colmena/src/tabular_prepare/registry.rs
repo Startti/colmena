@@ -195,6 +195,19 @@ pub trait PreparationRegistry: Send + Sync {
     async fn delete(&self, source_key: &str) -> Result<bool, RegistryError>;
 
     async fn get(&self, source_key: &str) -> Result<Option<PreparedRow>, RegistryError>;
+
+    /// Record that a ready table was handed out, so the TTL measures use and
+    /// not creation. This is a write on use, not a preparation write and not
+    /// progress; it is throttled: the row changes only when `last_used_at` is
+    /// NULL or older than `min_interval`, so a table in constant use costs
+    /// about one write per interval. `true` if the row changed; only `ready`
+    /// rows qualify.
+    async fn touch_last_used(
+        &self,
+        source_key: &str,
+        now: DateTime<Utc>,
+        min_interval: Duration,
+    ) -> Result<bool, RegistryError>;
 }
 
 // ---------------------------------------------------------------------------
@@ -272,6 +285,14 @@ DELETE FROM attachment_prepared WHERE source_storage_key = $1 AND lease_owner = 
 
 pub(crate) const DELETE_SQL: &str = "\
 DELETE FROM attachment_prepared WHERE source_storage_key = $1";
+
+/// `$1` key, `$2` now, `$3` now minus the minimum interval.
+pub(crate) const TOUCH_LAST_USED_SQL: &str = "\
+UPDATE attachment_prepared
+   SET last_used_at = $2
+ WHERE source_storage_key = $1 AND status = 'ready'
+   AND (last_used_at IS NULL OR last_used_at < $3)
+RETURNING source_storage_key";
 
 pub(crate) const GET_SQL: &str = "\
 SELECT source_storage_key, status, format_version, manifest_key, blob_keys,

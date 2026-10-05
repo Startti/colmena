@@ -472,6 +472,17 @@ impl<R: PreparationRegistry> PreparationRegistry for CountingRegistry<R> {
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.inner.get(k).await
     }
+    async fn touch_last_used(
+        &self,
+        k: &str,
+        n: DateTime<Utc>,
+        i: Duration,
+    ) -> Result<bool, RegistryError> {
+        self.counts
+            .other_writes
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.touch_last_used(k, n, i).await
+    }
 }
 
 pub(crate) async fn a_preparation_writes_only_on_claim_and_terminal<R: PreparationRegistry>(r: R) {
@@ -577,6 +588,113 @@ pub(crate) async fn a_duplicate_trigger_after_delete_leaves_no_row<R: Preparatio
     assert_eq!(get_row(r, &key).await.lease_owner.as_deref(), Some("B"));
     assert!(r.release(&key, "B").await.unwrap());
     assert_eq!(r.get(&key).await.unwrap(), None);
+}
+
+pub(crate) async fn touch_last_used_marks_use_at_most_once_per_interval<R: PreparationRegistry>(
+    r: &R,
+) {
+    let key = fresh_key();
+    let interval = Duration::hours(1);
+    r.claim(claim_req(&key, "A", t0())).await.unwrap().unwrap();
+    // A row that is not ready is never touched.
+    assert!(!r.touch_last_used(&key, t0(), interval).await.unwrap());
+    r.complete(&key, "A", ready_info(), t0()).await.unwrap();
+
+    assert!(r.touch_last_used(&key, t0(), interval).await.unwrap());
+    assert_eq!(get_row(r, &key).await.last_used_at, Some(t0()));
+    let soon = t0() + Duration::minutes(30);
+    assert!(
+        !r.touch_last_used(&key, soon, interval).await.unwrap(),
+        "throttled"
+    );
+    assert_eq!(get_row(r, &key).await.last_used_at, Some(t0()));
+    let later = t0() + Duration::minutes(61);
+    assert!(r.touch_last_used(&key, later, interval).await.unwrap());
+    assert_eq!(get_row(r, &key).await.last_used_at, Some(later));
+    assert!(
+        !r.touch_last_used(&fresh_key(), later, interval)
+            .await
+            .unwrap(),
+        "no row"
+    );
+}
+
+/// A job run for real through `ensure_prepared`: the registry sees one claim,
+/// one terminal write and, when the table is handed out, one throttled
+/// `last_used_at` touch; the cancellation checks between parts are reads.
+pub(crate) struct PartsJob<R> {
+    pub registry: Arc<CountingRegistry<R>>,
+    pub parts: usize,
+}
+
+#[async_trait::async_trait]
+impl<R: PreparationRegistry + 'static> crate::tabular_prepare::ports::PrepareRunner
+    for PartsJob<R>
+{
+    async fn run(&self, req: crate::tabular_prepare::ports::PrepareRequest) {
+        let claim = ClaimRequest {
+            source_key: req.source_key.clone(),
+            source_bytes: req.size_bytes as i64,
+            format_version: FORMAT_VERSION,
+            owner: "job".to_string(),
+            lease: lease(),
+            now: Utc::now(),
+        };
+        self.registry.claim(claim).await.unwrap().expect("claimed");
+        for _ in 0..self.parts {
+            assert!(self
+                .registry
+                .still_owned(&req.source_key, "job")
+                .await
+                .unwrap());
+        }
+        let out = self
+            .registry
+            .complete(&req.source_key, "job", ready_info(), Utc::now())
+            .await
+            .unwrap();
+        assert_eq!(out, TerminalOutcome::Written);
+    }
+}
+
+pub(crate) async fn a_preparation_through_ensure_prepared_writes_only_on_claim_and_terminal<
+    R: PreparationRegistry + 'static,
+>(
+    r: R,
+) {
+    use crate::tabular_prepare::ports::{InlineTrigger, PrepareConfig, PrepareRequest};
+    use crate::tabular_prepare::{EnsureOutcome, TabularPrepare};
+    let counting = Arc::new(CountingRegistry::new(r));
+    let config = PrepareConfig {
+        large_tabular: true,
+        trigger: Arc::new(InlineTrigger::new(Arc::new(PartsJob {
+            registry: counting.clone(),
+            parts: 5,
+        }))),
+        ..PrepareConfig::default()
+    };
+    let prepare = TabularPrepare::new(config, counting.clone())
+        .with_poll_interval(std::time::Duration::from_millis(20));
+    let key = fresh_key();
+    let req = PrepareRequest {
+        source_key: key.clone(),
+        mime_type: "text/csv".to_string(),
+        filename: "big.csv".to_string(),
+        size_bytes: 60_000_000,
+    };
+    let out = prepare
+        .ensure_prepared(&req, std::time::Duration::from_secs(20))
+        .await
+        .unwrap();
+    assert!(matches!(out, EnsureOutcome::Ready(_)), "got {out:?}");
+    let (claims, terminals, other_writes, reads) = counting.snapshot();
+    assert_eq!((claims, terminals), (1, 1), "claim and terminal only");
+    assert_eq!(other_writes, 1, "only the throttled last_used_at touch");
+    assert!(
+        reads >= 5 + 2,
+        "5 ownership checks and the polling reads, got {reads}"
+    );
+    assert!(get_row(&*counting, &key).await.last_used_at.is_some());
 }
 
 #[cfg(test)]
@@ -736,5 +854,19 @@ mod sqlite {
     async fn tabular_prepare_a_duplicate_trigger_after_delete_leaves_no_row() {
         let f = fixture().await;
         a_duplicate_trigger_after_delete_leaves_no_row(&*f.registry).await;
+    }
+
+    #[tokio::test]
+    async fn tabular_prepare_touch_last_used_marks_use_at_most_once_per_interval() {
+        let f = fixture().await;
+        touch_last_used_marks_use_at_most_once_per_interval(&*f.registry).await;
+    }
+
+    #[tokio::test]
+    async fn tabular_prepare_a_preparation_through_ensure_prepared_writes_only_on_claim_and_terminal(
+    ) {
+        let f = fixture().await;
+        let inner = SqlitePreparationRegistry::from_pool(f.registry.pool());
+        a_preparation_through_ensure_prepared_writes_only_on_claim_and_terminal(inner).await;
     }
 }

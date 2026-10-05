@@ -132,6 +132,22 @@ impl PreparationRegistry for SqlitePreparationRegistry {
         Ok(done.rows_affected() > 0)
     }
 
+    async fn touch_last_used(
+        &self,
+        source_key: &str,
+        now: DateTime<Utc>,
+        min_interval: chrono::Duration,
+    ) -> Result<bool, RegistryError> {
+        let row = sqlx::query_scalar::<_, String>(&for_sqlite(TOUCH_LAST_USED_SQL))
+            .bind(source_key)
+            .bind(now)
+            .bind(now - min_interval)
+            .fetch_optional(&*self.pool)
+            .await
+            .map_err(|e| backend_err("touch_last_used", e))?;
+        Ok(row.is_some())
+    }
+
     async fn get(&self, source_key: &str) -> Result<Option<PreparedRow>, RegistryError> {
         let row = sqlx::query(&for_sqlite(GET_SQL))
             .bind(source_key)
