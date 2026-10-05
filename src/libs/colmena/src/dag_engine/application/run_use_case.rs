@@ -4870,6 +4870,231 @@ mod tool_progress_tests {
         .unwrap()
     }
 
+    fn progress(done: u64) -> NodeEvent {
+        NodeEvent::ToolProgress {
+            tool_id: "call_1".into(),
+            stage: ToolProgressStage::Running,
+            done: Some(done),
+            total: None,
+            unit: None,
+            elapsed_ms: 0,
+        }
+    }
+
+    /// Emits `beats` progress events, one every `every`, then either returns
+    /// or (`then_hangs`) never returns. Time is paused in the tests, so the
+    /// schedule is exact.
+    struct Beats {
+        every: std::time::Duration,
+        beats: u64,
+        then_hangs: bool,
+    }
+
+    #[async_trait]
+    impl ExecutableNode for Beats {
+        async fn execute(
+            &self,
+            _i: &NodeInputs,
+            _c: &Value,
+            _s: &mut Value,
+            observer: Option<Arc<dyn ExecutionObserver>>,
+        ) -> Result<Value, Box<dyn StdError + Send + Sync>> {
+            for beat in 0..self.beats {
+                tokio::time::sleep(self.every).await;
+                if let Some(o) = &observer {
+                    o.on_event(progress(beat));
+                }
+            }
+            if self.then_hangs {
+                std::future::pending::<()>().await;
+            }
+            Ok(json!({}))
+        }
+        fn schema(&self) -> Value {
+            json!({})
+        }
+    }
+
+    /// What a run showed: tool progress frames, liveness heartbeats, whether
+    /// the node ended, and the stream error (the idle abort), if any.
+    #[derive(Default)]
+    struct Outcome {
+        progress: u64,
+        heartbeats: u64,
+        node_ended: bool,
+        error: Option<String>,
+    }
+
+    async fn run(node: Beats, liveness: LivenessSettings) -> Outcome {
+        let uc = DagRunUseCase::new(Arc::new(One(Arc::new(node))), None).with_liveness(liveness);
+        let stream = uc.execute_stream(graph(), None, None, false, None, None, None);
+        tokio::pin!(stream);
+        let mut out = Outcome::default();
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(DagExecutionEvent::ToolProgress { .. }) => out.progress += 1,
+                Ok(DagExecutionEvent::Progress { .. }) => out.heartbeats += 1,
+                Ok(DagExecutionEvent::NodeFinish { .. }) => out.node_ended = true,
+                Ok(_) => {}
+                Err(e) => {
+                    out.error = Some(e.to_string());
+                    break;
+                }
+            }
+        }
+        out
+    }
+
+    const SECS: fn(u64) -> std::time::Duration = std::time::Duration::from_secs;
+
+    /// TG-2, kept alive: the node runs 12 s with an idle limit of 5 s, and is
+    /// never silent for more than 3 s, so the watchdog must not fire.
+    #[tokio::test(start_paused = true)]
+    async fn tool_progress_resets_the_idle_watchdog() {
+        let out = run(
+            Beats {
+                every: SECS(3),
+                beats: 4,
+                then_hangs: false,
+            },
+            LivenessSettings {
+                heartbeat_interval: None,
+                idle_timeout: Some(SECS(5)),
+            },
+        )
+        .await;
+        assert_eq!(out.error, None, "progress is activity, not silence");
+        assert_eq!((out.progress, out.node_ended), (4, true));
+    }
+
+    /// TG-2, silent: progress buys exactly one idle window. The last event is
+    /// at 3 s, so the cut comes at 3 s + 5 s, not at 5 s and not never.
+    #[tokio::test(start_paused = true)]
+    async fn silence_after_tool_progress_is_still_cut_one_idle_window_later() {
+        let started = tokio::time::Instant::now();
+        let out = run(
+            Beats {
+                every: SECS(3),
+                beats: 1,
+                then_hangs: true,
+            },
+            LivenessSettings {
+                heartbeat_interval: None,
+                idle_timeout: Some(SECS(5)),
+            },
+        )
+        .await;
+        let error = out.error.expect("a silent node must still be cut");
+        assert!(error.contains("liveness watchdog"), "{error}");
+        assert_eq!(out.progress, 1);
+        assert_eq!(started.elapsed(), SECS(8));
+    }
+
+    /// The heartbeat clock: with progress every 3 s and a heartbeat after 5 s
+    /// of silence, no heartbeat is ever due. The control test below proves the
+    /// scenario can show one: the same 12 s of silence does.
+    #[tokio::test(start_paused = true)]
+    async fn tool_progress_resets_the_heartbeat_clock() {
+        let heartbeat = LivenessSettings {
+            heartbeat_interval: Some(SECS(5)),
+            idle_timeout: None,
+        };
+        let with_progress = run(
+            Beats {
+                every: SECS(3),
+                beats: 4,
+                then_hangs: false,
+            },
+            heartbeat,
+        )
+        .await;
+        assert_eq!(with_progress.heartbeats, 0, "progress is the signal");
+        assert_eq!(with_progress.progress, 4);
+    }
+
+    /// Control for the test above: a node that is silent for 12 s does get
+    /// heartbeats, so a zero there means the progress reset the clock.
+    #[tokio::test(start_paused = true)]
+    async fn the_same_silence_without_tool_progress_does_heartbeat() {
+        struct Silent;
+        #[async_trait]
+        impl ExecutableNode for Silent {
+            async fn execute(
+                &self,
+                _i: &NodeInputs,
+                _c: &Value,
+                _s: &mut Value,
+                _o: Option<Arc<dyn ExecutionObserver>>,
+            ) -> Result<Value, Box<dyn StdError + Send + Sync>> {
+                tokio::time::sleep(SECS(12)).await;
+                Ok(json!({}))
+            }
+            fn schema(&self) -> Value {
+                json!({})
+            }
+        }
+        struct Reg;
+        impl NodeRegistryPort for Reg {
+            fn get_node(&self, node_type: &str) -> Option<Arc<dyn ExecutableNode>> {
+                (node_type == "emits").then(|| Arc::new(Silent) as Arc<dyn ExecutableNode>)
+            }
+            fn get_all_nodes(&self) -> HashMap<String, Arc<dyn ExecutableNode>> {
+                HashMap::new()
+            }
+        }
+        let uc = DagRunUseCase::new(Arc::new(Reg), None).with_liveness(LivenessSettings {
+            heartbeat_interval: Some(SECS(5)),
+            idle_timeout: None,
+        });
+        let beats = uc
+            .execute_stream(graph(), None, None, false, None, None, None)
+            .filter(|e| {
+                let is_beat = matches!(e, Ok(DagExecutionEvent::Progress { .. }));
+                async move { is_beat }
+            })
+            .count()
+            .await;
+        assert_eq!(beats, 2, "heartbeats at 5 s and 10 s of silence");
+    }
+
+    /// This loop has no per-node total clock, so it cannot bound a node that
+    /// keeps reporting progress: that bound belongs to whoever runs the step
+    /// (the ticker's mandatory maximum). What the loop does guarantee is that
+    /// progress never makes a node unstoppable: a node that reports progress
+    /// forever still stops when the turn is stopped.
+    #[tokio::test(start_paused = true)]
+    async fn a_node_that_reports_progress_forever_still_stops_when_the_turn_does() {
+        let token = tokio_util::sync::CancellationToken::new();
+        let stopper = token.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(SECS(10)).await;
+            stopper.cancel();
+        });
+        let node = Beats {
+            every: SECS(1),
+            beats: u64::MAX,
+            then_hangs: false,
+        };
+        let uc = DagRunUseCase::new(Arc::new(One(Arc::new(node))), None)
+            .with_liveness(LivenessSettings::disabled());
+        let stream = uc.execute_stream(graph(), None, None, false, None, None, Some(token));
+        tokio::pin!(stream);
+        let mut progress = 0u64;
+        loop {
+            match stream
+                .next()
+                .await
+                .expect("the stream ended without Cancelled")
+            {
+                Ok(DagExecutionEvent::ToolProgress { .. }) => progress += 1,
+                Ok(DagExecutionEvent::Cancelled { .. }) => break,
+                Ok(_) => {}
+                Err(e) => panic!("unexpected error: {e}"),
+            }
+        }
+        assert!(progress >= 9, "progress flowed until the stop: {progress}");
+    }
+
     #[tokio::test]
     async fn tool_progress_reaches_the_stream_stamped_with_the_node_before_it_ends() {
         let uc = DagRunUseCase::new(Arc::new(One(Arc::new(EmitsProgress))), None);
