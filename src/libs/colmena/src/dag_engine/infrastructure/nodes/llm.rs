@@ -8385,3 +8385,6 @@ mod google_workspace_auth_node_tests {
         assert_eq!(*port.0.lock().unwrap(), [Some("sess-cx7".to_string())]);
     }
 }
+
+#[cfg(test)]
+mod characterisation;
