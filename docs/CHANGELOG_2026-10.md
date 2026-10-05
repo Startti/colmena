@@ -392,7 +392,7 @@ llamada y al final otro con `response.usage()`, que ya es el total acumulado del
 contra 8771 en un `llm_call` de una llamada). Los hosts facturan con `usage-summary`. Ahora el `llm_call` reporta
 cada parte `Usage` al llegar, haga stream o no (el SSE no muestra frame para ese evento; una llamada anterior a
 una cancelación o a un error se cuenta), y al final solo lo que el total tenga por encima de lo ya reportado
-(`LlmUsage::beyond`, normalmente nada). Además `critic`, `planner` y `reactor` sin `streaming` (el default, y como
+(`LlmUsage::beyond`, normalmente nada). `AgentService::invoke_llm` pasa al observer una sola parte `Usage` por llamada, la última (la que ya guardaba como total), al terminar el stream: un proveedor que mande usage acumulado por chunk no se cobra de más en ningún nodo. Además `critic`, `planner` y `reactor` sin `streaming` (el default, y como
 los corre un `orchestrator`) no reportaban su llamada: ahora la reportan al volver la respuesta, una vez. Guías:
 [17_technical_reference.md](developer_guide/17_technical_reference.md) §6,
 [sse_events_reference.md](sse_events_reference.md) (`usage-summary.nodes`).
@@ -400,7 +400,7 @@ los corre un `orchestrator`) no reportaban su llamada: ahora la reportan al volv
 y compara, por el `SseMapper`, `usage-summary`, `finish.usage` y `extra_info.usage` con la suma de lo reportado:
 `llm_call` con 3 turnos de tools y con 1 llamada, con y sin stream; el mismo agente dentro de un `subgraph`
 (`subgraph-usage-summary`, `usage-summary` del padre y `finish`); `critic`, `planner` y `reactor` con y sin
-`streaming`. Antes del arreglo, los tres casos con stream daban el doble y los tres nodos de revisión sin
+`streaming`. El modelo manda además un `Usage` acumulado intermedio por llamada (sin el arreglo de `invoke_llm`, `llm_call` y `critic` cobraban de más). Antes del arreglo, los tres casos con stream daban el doble y los tres nodos de revisión sin
 `streaming`, cero. Unitarios de `LlmUsage::add` y `beyond`.
 **E2E.** `dag_engine run` de un `llm_call` con `add` contra un servidor OpenAI falso local (adapter real, 3
 llamadas): `usage-summary`, `finish.usage` y `extra_info.usage` iguales a lo que reportó el servidor (3300/33 con `stream`, 4200/42 sin).

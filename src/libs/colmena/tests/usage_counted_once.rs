@@ -92,7 +92,9 @@ impl LlmRepository for UsageModel {
         Ok(response.with_usage(self.next_usage()))
     }
 
-    /// The answer, then one `Usage` part, as the providers stream it.
+    /// An interim cumulative `Usage` part (as a provider with continuous
+    /// usage stats streams), the answer, then the call's final `Usage`. Only
+    /// the final one is billed.
     async fn stream(&self, request: LlmRequest) -> Result<LlmStream, LlmError> {
         let first = match self.decide(&request) {
             Some((id, args_chunk)) => LlmStreamPart::ToolCallChunk(ToolCallChunk {
@@ -104,21 +106,14 @@ impl LlmRepository for UsageModel {
             }),
             None => LlmStreamPart::Content(self.answer.into()),
         };
+        let interim = LlmStreamPart::Usage(LlmUsage::new(1, 1));
+        let last = LlmStreamPart::Usage(self.next_usage());
         let (id, provider) = (request.id(), request.config().provider());
-        let chunks: Vec<Result<LlmStreamChunk, LlmError>> = vec![
-            Ok(LlmStreamChunk::new(
-                id.clone(),
-                first,
-                provider.clone(),
-                false,
-            )),
-            Ok(LlmStreamChunk::new(
-                id.clone(),
-                LlmStreamPart::Usage(self.next_usage()),
-                provider.clone(),
-                true,
-            )),
-        ];
+        let chunks: Vec<Result<LlmStreamChunk, LlmError>> = [interim, first, last]
+            .into_iter()
+            .enumerate()
+            .map(|(i, p)| Ok(LlmStreamChunk::new(id.clone(), p, provider.clone(), i == 2)))
+            .collect();
         Ok(Box::pin(futures::stream::iter(chunks)))
     }
 
