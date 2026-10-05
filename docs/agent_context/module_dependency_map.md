@@ -5,7 +5,7 @@
 
 **How to use (for the exploration/spec phase):** before opening files to assess a change, look up the target file below. **Used by** is its blast radius — the files that break if you change its public surface. **Depends on** is what it needs. Start by reading only those, not the whole repo.
 
-- Files indexed: **423**
+- Files indexed: **424**
 - Modules with at least one importer: **200**
 
 ## Blast-radius ranking (change these with the most care)
@@ -360,7 +360,7 @@
 
 #### `src/libs/colmena/src/dag_engine/engine.rs`
 - Module: `dag_engine::engine`
-- **Used by (2)**: `src/libs/colmena/src/dag_engine/infrastructure/registry.rs`, `src/libs/colmena/src/dag_engine/log_policy.rs`
+- **Used by (3)**: `src/libs/colmena/src/dag_engine/infrastructure/registry.rs`, `src/libs/colmena/src/dag_engine/log_policy.rs`, `src/libs/colmena/src/tabular_prepare/ports.rs`
 - Depends on (19): `dag_engine::application::ports`, `dag_engine::application::run_control`, `dag_engine::application::run_use_case`, `dag_engine::application::secure_value_service`, `dag_engine::domain::error`, `dag_engine::domain::events`, `dag_engine::domain::graph`, `dag_engine::domain::state`, `dag_engine::infrastructure::persistence`, `dag_engine::infrastructure::persistence::postgres_dag_state_repository`, `dag_engine::infrastructure::pool_registry`, `dag_engine::infrastructure::registry`, `dag_engine::infrastructure::sql_port_factory`, `dag_engine::sse_mapper`, `llm::domain`, `llm::infrastructure::persistence`, `llm::infrastructure::persistence::repository_factory`, `storage::domain`, `storage::infrastructure`
 
 #### `src/libs/colmena/src/dag_engine/frame_redaction.rs`
@@ -2098,6 +2098,11 @@
 - Module: `tabular_prepare`
 - **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
 - Depends on (0): — (no intra-crate imports)
+
+#### `src/libs/colmena/src/tabular_prepare/ports.rs`
+- Module: `tabular_prepare::ports`
+- **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
+- Depends on (1): `dag_engine::engine`
 
 #### `src/libs/colmena/src/tabular_prepare/postgres_registry.rs`
 - Module: `tabular_prepare::postgres_registry`
