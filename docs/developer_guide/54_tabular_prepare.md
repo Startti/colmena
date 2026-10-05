@@ -159,15 +159,23 @@ early.
 prepared is never loaded whole into the sandbox, and `EnsureOutcome::message()`
 words the state for the model. The call never writes the registry: claiming is
 the job's business. The attempt bound mirrors the registry's claim rule (3 attempts; an
-expired-lease takeover counts as one). The recording of use follows in a later
-slice of this chain.
-
+expired-lease takeover counts as one).
 **De-duplication.** Concurrent callers in one process share a request through a
 set whose guard is created when the key is inserted, so every exit, including a
 dropped future, removes it. It only saves duplicate triggers: callers in other
 processes, or a later call after a wait ended, may request again, which is safe
 because triggers are idempotent. A trigger error is returned as an error and is
 not remembered as "already requested".
+
+**Use is recorded.** When a ready table is handed out, `ensure_prepared` calls
+`touch_last_used`, a conditional update that writes `last_used_at` only when it
+is NULL or older than a day and only for a `ready` row. That is a write on use
+(about one per row per day), not a preparation write and not progress, so the
+"claim and terminal only" rule for the preparation itself still holds (a test
+runs a whole job through `ensure_prepared` and counts exactly one claim, one
+terminal write and one touch). It is what lets the TTL measure use instead of
+creation. The call is bounded by its own short deadline and a failure to record
+is logged and never fails or delays the answer.
 
 **Known limit.** With the switch on and a trigger that is wired but never starts
 a job, every call ends `StillPreparing`; the unwired default cannot reach this

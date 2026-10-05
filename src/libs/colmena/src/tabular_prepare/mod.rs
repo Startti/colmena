@@ -38,6 +38,9 @@ const POLL_INTERVAL: Duration = Duration::from_secs(1);
 /// Minimum time any single registry or port call is given, whatever the wait.
 const CALL_FLOOR: Duration = Duration::from_secs(2);
 
+/// A table handed out is recorded as used at most once per this interval (a day).
+const LAST_USED_INTERVAL: chrono::Duration = chrono::Duration::days(1);
+
 /// Upper bound for a caller's wait, so `Instant + wait` cannot overflow.
 const MAX_WAIT: Duration = Duration::from_secs(10 * 365 * 24 * 3600);
 
@@ -223,7 +226,10 @@ impl TabularPrepare {
             };
             let observed = self.observe(row?, baseline);
             match observed {
-                Observed::Ready(row) => return Ok(EnsureOutcome::Ready(Box::new(row))),
+                Observed::Ready(row) => {
+                    self.mark_used(&req.source_key).await;
+                    return Ok(EnsureOutcome::Ready(Box::new(row)));
+                }
                 Observed::FinalFailure(row) => return Ok(failed(&row, true)),
                 Observed::NewFailure(row) => return Ok(failed(&row, false)),
                 Observed::DeadJob(row) => return Ok(dead_job(&row)),
@@ -299,6 +305,36 @@ impl TabularPrepare {
             }
         }
         Some(guard)
+    }
+
+    /// A ready table is being handed out: note the use (throttled), so the
+    /// TTL pass measures use and not creation. Best-effort: a failure is
+    /// logged and never fails the caller.
+    async fn mark_used(&self, source_key: &str) {
+        let now = (self.clock)();
+        let bound = Instant::now();
+        let outcome = within(
+            bound,
+            self.registry
+                .touch_last_used(source_key, now, LAST_USED_INTERVAL),
+        )
+        .await;
+        let Some(outcome) = outcome else {
+            tracing::warn!(
+                target: "colmena::tabular_prepare",
+                source_key,
+                "recording the use of a prepared table timed out"
+            );
+            return;
+        };
+        if let Err(e) = outcome {
+            tracing::warn!(
+                target: "colmena::tabular_prepare",
+                source_key,
+                error = %e,
+                "could not record the use of a prepared table"
+            );
+        }
     }
 
     fn observe(&self, row: Option<PreparedRow>, baseline: Option<Option<i32>>) -> Observed {
@@ -419,6 +455,9 @@ mod ensure_tests {
     struct FakeRegistry {
         current: Mutex<Option<PreparedRow>>,
         gets: AtomicUsize,
+        touches: AtomicUsize,
+        fail_touch: Mutex<bool>,
+        hang_touch: Mutex<bool>,
     }
 
     impl FakeRegistry {
@@ -426,6 +465,9 @@ mod ensure_tests {
             Arc::new(Self {
                 current: Mutex::new(row),
                 gets: AtomicUsize::new(0),
+                touches: AtomicUsize::new(0),
+                fail_touch: Mutex::new(false),
+                hang_touch: Mutex::new(false),
             })
         }
         fn set(&self, row: Option<PreparedRow>) {
@@ -472,6 +514,21 @@ mod ensure_tests {
         }
         async fn delete(&self, _k: &str) -> Result<bool, RegistryError> {
             panic!("ensure_prepared must not write")
+        }
+        async fn touch_last_used(
+            &self,
+            _k: &str,
+            _n: DateTime<Utc>,
+            _i: ChronoDuration,
+        ) -> Result<bool, RegistryError> {
+            self.touches.fetch_add(1, Ordering::SeqCst);
+            if *self.hang_touch.lock().unwrap() {
+                std::future::pending::<()>().await;
+            }
+            if *self.fail_touch.lock().unwrap() {
+                return Err(RegistryError::Backend("touch refused".into()));
+            }
+            Ok(true)
         }
     }
 
@@ -992,5 +1049,49 @@ mod ensure_tests {
             "got {out:?}"
         );
         assert_eq!(requests(&h), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn tabular_prepare_ensure_notes_the_use_of_a_ready_table_only() {
+        let ready = harness(true, Some(row(PrepareStatus::Ready, 1, None)));
+        ready.prepare.ensure_prepared(&req(), WAIT).await.unwrap();
+        assert_eq!(ready.registry.touches.load(Ordering::SeqCst), 1);
+
+        for existing in [
+            Some(row(PrepareStatus::Running, 1, Some(300))),
+            Some(row(PrepareStatus::Failed, MAX_ATTEMPTS, None)),
+        ] {
+            let h = harness(true, existing);
+            h.prepare
+                .ensure_prepared(&req(), Duration::from_secs(2))
+                .await
+                .unwrap();
+            assert_eq!(h.registry.touches.load(Ordering::SeqCst), 0);
+        }
+        let off = harness(false, Some(row(PrepareStatus::Ready, 1, None)));
+        off.prepare.ensure_prepared(&req(), WAIT).await.unwrap();
+        assert_eq!(off.registry.touches.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn tabular_prepare_ensure_a_failed_use_note_never_fails_the_call() {
+        let h = harness(true, Some(row(PrepareStatus::Ready, 1, None)));
+        *h.registry.fail_touch.lock().unwrap() = true;
+        let out = h.prepare.ensure_prepared(&req(), WAIT).await.unwrap();
+        assert!(matches!(out, EnsureOutcome::Ready(_)), "got {out:?}");
+        assert_eq!(h.registry.touches.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn tabular_prepare_ensure_a_hung_use_note_does_not_hold_the_ready_answer() {
+        let h = harness(true, Some(row(PrepareStatus::Ready, 1, None)));
+        *h.registry.hang_touch.lock().unwrap() = true;
+        let r = req();
+        let call = h.prepare.ensure_prepared(&r, WAIT);
+        let out = tokio::time::timeout(Duration::from_secs(60), call)
+            .await
+            .expect("recording a use must not outlive its short bound")
+            .unwrap();
+        assert!(matches!(out, EnsureOutcome::Ready(_)), "got {out:?}");
     }
 }

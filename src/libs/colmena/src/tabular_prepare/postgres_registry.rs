@@ -126,6 +126,22 @@ impl PreparationRegistry for PostgresPreparationRegistry {
         Ok(done.rows_affected() > 0)
     }
 
+    async fn touch_last_used(
+        &self,
+        source_key: &str,
+        now: DateTime<Utc>,
+        min_interval: chrono::Duration,
+    ) -> Result<bool, RegistryError> {
+        let row = sqlx::query_scalar::<_, String>(TOUCH_LAST_USED_SQL)
+            .bind(source_key)
+            .bind(now)
+            .bind(now - min_interval)
+            .fetch_optional(&*self.pool)
+            .await
+            .map_err(|e| backend_err("touch_last_used", e))?;
+        Ok(row.is_some())
+    }
+
     async fn get(&self, source_key: &str) -> Result<Option<PreparedRow>, RegistryError> {
         let row = sqlx::query(GET_SQL)
             .bind(source_key)
@@ -167,6 +183,10 @@ mod tests {
         };
     }
 
+    pg_case!(
+        tabular_prepare_pg_touch_last_used_marks_use_at_most_once_per_interval,
+        touch_last_used_marks_use_at_most_once_per_interval
+    );
     pg_case!(
         tabular_prepare_pg_claim_creates_a_running_row_when_there_is_none,
         claim_creates_a_running_row_when_there_is_none
@@ -252,5 +272,15 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn tabular_prepare_pg_concurrent_claims_have_exactly_one_winner() {
         concurrent_claims_have_exactly_one_winner(Arc::new(make_registry().await)).await;
+    }
+
+    #[ignore = "requires DATABASE_URL — run with `cargo test -- --ignored`"]
+    #[tokio::test]
+    async fn tabular_prepare_pg_a_preparation_through_ensure_prepared_writes_only_on_claim_and_terminal(
+    ) {
+        a_preparation_through_ensure_prepared_writes_only_on_claim_and_terminal(
+            make_registry().await,
+        )
+        .await;
     }
 }
