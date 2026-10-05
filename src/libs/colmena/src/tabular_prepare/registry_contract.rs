@@ -73,7 +73,10 @@ pub(crate) async fn claim_takes_over_an_expired_lease<R: PreparationRegistry>(r:
     let row = get_row(r, &key).await;
     assert_eq!(row.lease_owner.as_deref(), Some("B"));
     assert_eq!(row.lease_until, Some(later + Duration::seconds(360)));
-    assert_eq!(row.created_at, t0(), "the original creation time is kept");
+    assert_eq!(
+        row.created_at, later,
+        "a new preparation starts the TTL clock again"
+    );
 }
 
 pub(crate) async fn concurrent_claims_have_exactly_one_winner<R: PreparationRegistry + 'static>(
@@ -329,8 +332,9 @@ pub(crate) async fn a_ready_row_is_claimable_only_by_a_newer_format<R: Preparati
     let row = get_row(r, &key).await;
     assert_eq!(row.status, PrepareStatus::Running);
     assert_eq!(
-        row.manifest_key, None,
-        "the old manifest is not carried over"
+        row.manifest_key.as_deref(),
+        Some(ready_info().manifest_key.as_str()),
+        "the old manifest stays until complete supersedes it, so cleanup can reach it"
     );
     assert_eq!(
         row.blob_keys,
@@ -1055,6 +1059,139 @@ pub(crate) async fn delete_if_unchanged_only_deletes_the_row_that_was_observed<
     assert_eq!(get_row(r, &key2).await.lease_owner.as_deref(), Some("B"));
 }
 
+pub(crate) async fn a_deleting_row_is_never_taken_by_an_older_format_claim<
+    R: PreparationRegistry,
+>(
+    r: &R,
+) {
+    let key = fresh_key();
+    r.claim(claim_req(&key, "A", t0())).await.unwrap().unwrap();
+    r.fail(&key, "A", "time", "x", t0()).await.unwrap();
+    let observed = get_row(r, &key).await;
+    assert!(r
+        .begin_delete(&observed, "gc", Duration::minutes(10), t0())
+        .await
+        .unwrap());
+    // A newer format must not take a row the cleanup pass holds with a live lease.
+    let mut req = claim_req(&key, "v2", t0() + Duration::minutes(1));
+    req.format_version = FORMAT_VERSION + 1;
+    assert_eq!(r.claim(req).await.unwrap(), None);
+    assert_eq!(get_row(r, &key).await.status, PrepareStatus::Deleting);
+}
+
+pub(crate) async fn an_expired_deleting_lease_can_be_claimed_with_a_fresh_start<
+    R: PreparationRegistry,
+>(
+    r: &R,
+) {
+    let key = fresh_key();
+    let old = t0() - Duration::days(10);
+    // A final-failed old row that the cleanup pass started deleting and never finished.
+    for attempt in 1..=MAX_ATTEMPTS {
+        r.claim(claim_req(&key, &format!("j{attempt}"), old))
+            .await
+            .unwrap()
+            .unwrap();
+        r.fail(&key, &format!("j{attempt}"), "time", "x", old)
+            .await
+            .unwrap();
+    }
+    let observed = get_row(r, &key).await;
+    assert!(r
+        .begin_delete(&observed, "gc-dead", Duration::minutes(10), t0())
+        .await
+        .unwrap());
+    // Live lease: refused. Expired lease: taken, as a new life of the row.
+    assert_eq!(
+        r.claim(claim_req(&key, "B", t0() + Duration::minutes(5)))
+            .await
+            .unwrap(),
+        None
+    );
+    let later = t0() + Duration::minutes(11);
+    assert_eq!(
+        r.claim(claim_req(&key, "B", later)).await.unwrap(),
+        Some(Claim { attempts: 1 }),
+        "attempts restart: the old life was being deleted"
+    );
+    let row = get_row(r, &key).await;
+    assert_eq!(row.status, PrepareStatus::Running);
+    assert_eq!(
+        row.created_at, later,
+        "no longer looks stale to the TTL pass"
+    );
+    assert_eq!(row.last_used_at, None);
+}
+
+pub(crate) async fn an_older_format_claim_keeps_the_old_manifest_tracked<R: PreparationRegistry>(
+    r: &R,
+) {
+    let key = fresh_key();
+    r.claim(claim_req(&key, "A", t0())).await.unwrap().unwrap();
+    let mut info = ready_info();
+    info.manifest_key = "old/manifest.json".to_string();
+    r.complete(&key, "A", info, t0()).await.unwrap();
+    let mut req = claim_req(&key, "B", t0());
+    req.format_version = FORMAT_VERSION + 1;
+    r.claim(req).await.unwrap().unwrap();
+    let mut next = ready_info();
+    next.manifest_key = "new/manifest.json".to_string();
+    next.blob_keys = vec!["new/part".to_string()];
+    r.complete(&key, "B", next, t0()).await.unwrap();
+    let row = get_row(r, &key).await;
+    assert_eq!(row.manifest_key.as_deref(), Some("new/manifest.json"));
+    assert!(
+        row.blob_keys.contains(&"old/manifest.json".to_string()),
+        "the superseded manifest stays tracked for cleanup: {:?}",
+        row.blob_keys
+    );
+}
+
+/// A table that is prepared again (after a failure, a format change or a lost
+/// manifest) starts its TTL clock at that preparation: it must not be seen as
+/// stale before its first use because the row was created long ago.
+pub(crate) async fn a_re_prepared_table_is_not_stale_before_its_first_use<
+    R: PreparationRegistry,
+>(
+    r: &R,
+) {
+    let old = t0() - Duration::days(10);
+    let cutoff = t0() - Duration::days(7);
+    let is_stale =
+        |rows: Vec<PreparedRow>, key: &str| rows.iter().any(|row| row.source_storage_key == key);
+
+    // 1. a failed retry that succeeds
+    let retry = fresh_key();
+    r.claim(claim_req(&retry, "A", old)).await.unwrap().unwrap();
+    r.fail(&retry, "A", "time", "x", old).await.unwrap();
+    r.claim(claim_req(&retry, "B", t0()))
+        .await
+        .unwrap()
+        .unwrap();
+    r.complete(&retry, "B", ready_info(), t0()).await.unwrap();
+
+    // 2. an older-format row prepared again
+    let reformat = fresh_key();
+    r.claim(claim_req(&reformat, "A", old))
+        .await
+        .unwrap()
+        .unwrap();
+    r.complete(&reformat, "A", ready_info(), old).await.unwrap();
+    let mut req = claim_req(&reformat, "B", t0());
+    req.format_version = FORMAT_VERSION + 1;
+    r.claim(req).await.unwrap().unwrap();
+    r.complete(&reformat, "B", ready_info(), t0())
+        .await
+        .unwrap();
+
+    let stale = r.find_stale(cutoff, t0(), None, 10_000).await.unwrap();
+    for key in [&retry, &reformat] {
+        assert!(
+            !is_stale(stale.clone(), key),
+            "{key} would be deleted before first use"
+        );
+    }
+}
 #[cfg(test)]
 mod sqlite {
     use super::*;
@@ -1286,5 +1423,29 @@ mod sqlite {
     async fn tabular_prepare_delete_if_unchanged_only_deletes_the_row_that_was_observed() {
         let f = fixture().await;
         delete_if_unchanged_only_deletes_the_row_that_was_observed(&*f.registry).await;
+    }
+
+    #[tokio::test]
+    async fn tabular_prepare_a_deleting_row_is_never_taken_by_an_older_format_claim() {
+        let f = fixture().await;
+        a_deleting_row_is_never_taken_by_an_older_format_claim(&*f.registry).await;
+    }
+
+    #[tokio::test]
+    async fn tabular_prepare_an_expired_deleting_lease_can_be_claimed_with_a_fresh_start() {
+        let f = fixture().await;
+        an_expired_deleting_lease_can_be_claimed_with_a_fresh_start(&*f.registry).await;
+    }
+
+    #[tokio::test]
+    async fn tabular_prepare_an_older_format_claim_keeps_the_old_manifest_tracked() {
+        let f = fixture().await;
+        an_older_format_claim_keeps_the_old_manifest_tracked(&*f.registry).await;
+    }
+
+    #[tokio::test]
+    async fn tabular_prepare_a_re_prepared_table_is_not_stale_before_its_first_use() {
+        let f = fixture().await;
+        a_re_prepared_table_is_not_stale_before_its_first_use(&*f.registry).await;
     }
 }

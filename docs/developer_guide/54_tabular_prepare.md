@@ -47,7 +47,8 @@ RETURNING`), atomic on both dialects. It is won when:
 | `running` with an expired lease and `attempts < 3` | yes, `attempts + 1` |
 | `running` with an expired lease and `attempts = 3` | no: abandoned (see below) |
 | `ready` at the current `format_version` | no |
-| `deleting` | no |
+| `deleting` with a live lease | no |
+| `deleting` with an expired lease | yes, a new life: `attempts = 1` |
 | any state except `deleting` with an older `format_version` | yes, `attempts` restarts at 1 |
 
 An expired-lease takeover counts as an attempt, so the 3-attempt bound holds
@@ -91,6 +92,28 @@ are in `PreparationRegistry` and run on SQLite and Postgres:
 - `list_ready_after(after, limit)`: `ready` rows in key order after a cursor, for
   the pass that checks whether a manifest still exists.
 
+### State machine
+
+| From | To | By |
+|------|----|----|
+| (none) | `running` | `claim` |
+| `failed` (attempts < 3), `running` with an expired lease (attempts < 3), any row of an older format except `deleting` | `running` | `claim` |
+| `running` | `ready` / `failed` | `complete` / `fail` by the lease owner |
+| `ready`, `failed`, `running` with an expired lease | `deleting` | cleanup `begin_delete`, under its own lease, only if the row is unchanged since it was read (status, `updated_at`, `last_used_at`) |
+| `deleting` | (row deleted) | cleanup `finish_delete`, after the derived blobs are gone |
+| `deleting` with an expired lease | `running` | `claim`: the source is not stuck behind a cleanup that never finishes |
+| `running` with a live lease | (row deleted) | the source file was deleted: the job's `still_owned` turns false and it stops |
+
+The claim never takes a `deleting` row because of its format: only an expired
+`deleting` lease makes it claimable.
+
+**TTL clock.** Every claim sets `created_at` to the claim time and clears
+`last_used_at`: a table prepared again (after a failed retry or a format change) starts its TTL clock at that preparation, so it cannot look
+stale before its first use because its row was created long ago.
+
+A claim over an older format keeps the old `manifest_key` in place; `complete`/`fail` add it to
+the tracked `blob_keys` so cleanup can still reach it.
+
 ### Cleanup claim
 
 A row is never deleted from under a live preparation. The cleanup pass first
@@ -110,9 +133,7 @@ stale snapshot; the caller re-reads and follows the normal path instead.
 
 `find_stale` also returns a `deleting` row whatever its age once its lease has
 expired (a pass died mid-delete), so the next run takes it over; a `deleting` row
-with a live lease is never returned. A `deleting` row is never claimed by a
-preparation in this slice; the claim amendment that lets an expired `deleting`
-lease be taken follows.
+with a live lease is never returned.
 
 ### Cancellation check
 

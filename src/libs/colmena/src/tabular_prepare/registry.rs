@@ -270,7 +270,10 @@ pub(crate) fn for_sqlite(sql: &str) -> String {
 /// `$3` source bytes, `$4` owner, `$5` lease end, `$6` now, `$7` max
 /// attempts (a takeover of an expired lease counts as an attempt, so a job that
 /// dies without writing `failed` is retried at most `$7` times). A claim over a row written by an older format restarts the
-/// attempt count; any other claim adds one. `RETURNING` yields a row only
+/// attempt count; any other claim adds one. Every claim starts the TTL clock
+/// again (`created_at` = now, `last_used_at` cleared): a table prepared again
+/// after a failure, a format change or a lost manifest must not look stale
+/// before its first use because the row is old. `RETURNING` yields a row only
 /// when the claim was won.
 pub(crate) const CLAIM_SQL: &str = "\
 INSERT INTO attachment_prepared
@@ -280,23 +283,27 @@ VALUES ($1, 'running', $2, '[]', $3, $4, $5, 1, $6, $6)
 ON CONFLICT (source_storage_key) DO UPDATE SET
     status = 'running',
     attempts = CASE
+        WHEN attachment_prepared.status = 'deleting' THEN 1
         WHEN attachment_prepared.format_version < excluded.format_version THEN 1
         ELSE attachment_prepared.attempts + 1
     END,
     format_version = excluded.format_version,
     source_bytes = excluded.source_bytes,
-    manifest_key = NULL,
     tables_json = NULL,
     prepared_bytes = NULL,
     error_code = NULL,
     error_detail = NULL,
     lease_owner = excluded.lease_owner,
     lease_until = excluded.lease_until,
+    created_at = excluded.created_at,
+    last_used_at = NULL,
     updated_at = excluded.updated_at
-WHERE attachment_prepared.format_version < excluded.format_version
+WHERE (attachment_prepared.status <> 'deleting'
+        AND attachment_prepared.format_version < excluded.format_version)
    OR (attachment_prepared.status = 'failed' AND attachment_prepared.attempts < $7)
    OR (attachment_prepared.status = 'running' AND attachment_prepared.attempts < $7
         AND attachment_prepared.lease_until < $6)
+   OR (attachment_prepared.status = 'deleting' AND attachment_prepared.lease_until < $6)
 RETURNING attempts";
 
 /// `$1` key, `$2` owner, `$3` error code, `$4` detail, `$5` blob keys (JSON,

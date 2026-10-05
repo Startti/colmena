@@ -30,7 +30,13 @@ impl SqlitePreparationRegistry {
         Ok(self
             .get(source_key)
             .await?
-            .map(|row| row.blob_keys)
+            .map(|row| {
+                // The manifest a claim over an older format left in place is
+                // superseded by `complete`; keep it tracked for cleanup.
+                let mut keys = row.blob_keys;
+                keys.extend(row.manifest_key);
+                keys
+            })
             .unwrap_or_default())
     }
 }
