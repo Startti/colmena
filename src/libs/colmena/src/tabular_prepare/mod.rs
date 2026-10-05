@@ -227,8 +227,45 @@ impl TabularPrepare {
             let observed = self.observe(row?, baseline);
             match observed {
                 Observed::Ready(row) => {
-                    self.mark_used(&req.source_key).await;
-                    return Ok(EnsureOutcome::Ready(Box::new(row)));
+                    // Decide from the row already read: the touch only changes
+                    // something when the use was last recorded longer ago than
+                    // the interval (or never). Otherwise it is the normal,
+                    // throttled case: hand the table out with no write attempt
+                    // and no extra registry read.
+                    let due = row
+                        .last_used_at
+                        .is_none_or(|at| at < (self.clock)() - LAST_USED_INTERVAL);
+                    if !due || self.mark_used(&req.source_key).await {
+                        return Ok(EnsureOutcome::Ready(Box::new(row)));
+                    }
+                    // The touch was expected to change the row and did not: it
+                    // is no longer `ready` (the cleanup pass took it since we
+                    // read it). Look again; only a row that is still ready is
+                    // handed out, anything else follows the normal path below.
+                    // A failed re-read is best-effort, exactly like a failed
+                    // touch: it is logged and the table we hold is handed out
+                    // (failing the call here would turn a bookkeeping hiccup
+                    // into a tool error); a re-read that outlives the wait
+                    // bound ends the call as still preparing.
+                    let Some(again) = within(deadline, self.registry.get(&req.source_key)).await
+                    else {
+                        return Ok(still_preparing(None));
+                    };
+                    match again {
+                        Ok(Some(still)) if still.status == PrepareStatus::Ready => {
+                            return Ok(EnsureOutcome::Ready(Box::new(still)));
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            tracing::warn!(
+                                target: "colmena::tabular_prepare",
+                                source_key = %req.source_key,
+                                error = %e,
+                                "could not re-read a prepared table after an unrecorded use; handing it out"
+                            );
+                            return Ok(EnsureOutcome::Ready(Box::new(row)));
+                        }
+                    }
                 }
                 Observed::FinalFailure(row) => return Ok(failed(&row, true)),
                 Observed::NewFailure(row) => return Ok(failed(&row, false)),
@@ -308,9 +345,14 @@ impl TabularPrepare {
     }
 
     /// A ready table is being handed out: note the use (throttled), so the
-    /// TTL pass measures use and not creation. Best-effort: a failure is
-    /// logged and never fails the caller.
-    async fn mark_used(&self, source_key: &str) {
+    /// TTL pass measures use and not creation. Best-effort: a failure or a
+    /// timeout is logged and counts as recorded (the caller is not failed or
+    /// delayed). Only called when the touch is due (the use was last recorded
+    /// longer ago than the interval, or never). Returns `false` only when the
+    /// registry answered that the row was not changed although it was due: the
+    /// row is no longer `ready` (the cleanup pass took it), and the caller must
+    /// look again before handing the table out.
+    async fn mark_used(&self, source_key: &str) -> bool {
         let now = (self.clock)();
         let bound = Instant::now();
         let outcome = within(
@@ -325,15 +367,19 @@ impl TabularPrepare {
                 source_key,
                 "recording the use of a prepared table timed out"
             );
-            return;
+            return true;
         };
-        if let Err(e) = outcome {
-            tracing::warn!(
-                target: "colmena::tabular_prepare",
-                source_key,
-                error = %e,
-                "could not record the use of a prepared table"
-            );
+        match outcome {
+            Ok(changed) => changed,
+            Err(e) => {
+                tracing::warn!(
+                    target: "colmena::tabular_prepare",
+                    source_key,
+                    error = %e,
+                    "could not record the use of a prepared table"
+                );
+                true
+            }
         }
     }
 
@@ -458,6 +504,12 @@ mod ensure_tests {
         touches: AtomicUsize,
         fail_touch: Mutex<bool>,
         hang_touch: Mutex<bool>,
+        /// What `touch_last_used` answers (default true) and the row it leaves
+        /// behind (cleanup taking the row between the read and the touch).
+        touch_answer: Mutex<Option<bool>>,
+        /// The nth `get` (1-based) fails.
+        fail_get_on: Mutex<Option<usize>>,
+        after_touch: Mutex<Option<Option<PreparedRow>>>,
     }
 
     impl FakeRegistry {
@@ -468,6 +520,9 @@ mod ensure_tests {
                 touches: AtomicUsize::new(0),
                 fail_touch: Mutex::new(false),
                 hang_touch: Mutex::new(false),
+                touch_answer: Mutex::new(None),
+                fail_get_on: Mutex::new(None),
+                after_touch: Mutex::new(None),
             })
         }
         fn set(&self, row: Option<PreparedRow>) {
@@ -480,7 +535,10 @@ mod ensure_tests {
         async fn get(&self, _k: &str) -> Result<Option<PreparedRow>, RegistryError> {
             // A real registry read is pending on its first poll.
             tokio::task::yield_now().await;
-            self.gets.fetch_add(1, Ordering::SeqCst);
+            let call = self.gets.fetch_add(1, Ordering::SeqCst) + 1;
+            if *self.fail_get_on.lock().unwrap() == Some(call) {
+                return Err(RegistryError::Backend("read refused".into()));
+            }
             Ok(self.current.lock().unwrap().clone())
         }
         async fn claim(&self, _r: ClaimRequest) -> Result<Option<Claim>, RegistryError> {
@@ -566,7 +624,10 @@ mod ensure_tests {
             if *self.fail_touch.lock().unwrap() {
                 return Err(RegistryError::Backend("touch refused".into()));
             }
-            Ok(true)
+            if let Some(next) = self.after_touch.lock().unwrap().take() {
+                *self.current.lock().unwrap() = next;
+            }
+            Ok(self.touch_answer.lock().unwrap().unwrap_or(true))
         }
     }
 
@@ -1130,6 +1191,95 @@ mod ensure_tests {
             .await
             .expect("recording a use must not outlive its short bound")
             .unwrap();
+        assert!(matches!(out, EnsureOutcome::Ready(_)), "got {out:?}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn tabular_prepare_ensure_a_row_taken_by_cleanup_between_read_and_touch_is_not_handed_out(
+    ) {
+        let h = harness(true, Some(row(PrepareStatus::Ready, 1, None)));
+        // The cleanup pass claims the row right after we read it: our touch
+        // changes nothing and the row is now `deleting` with a live lease.
+        *h.registry.touch_answer.lock().unwrap() = Some(false);
+        *h.registry.after_touch.lock().unwrap() =
+            Some(Some(row(PrepareStatus::Deleting, 1, Some(600))));
+        let out = h
+            .prepare
+            .ensure_prepared(&req(), Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert!(
+            matches!(out, EnsureOutcome::StillPreparing { .. }),
+            "a table being deleted must not be handed out, got {out:?}"
+        );
+        assert_eq!(requests(&h), 0, "a live cleanup lease is waited on");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn tabular_prepare_ensure_a_throttled_touch_still_hands_the_ready_table_out() {
+        // touch answers false because the use was already recorded today; the
+        // row is still ready, so it is handed out.
+        let h = harness(true, Some(row(PrepareStatus::Ready, 1, None)));
+        *h.registry.touch_answer.lock().unwrap() = Some(false);
+        let out = h.prepare.ensure_prepared(&req(), WAIT).await.unwrap();
+        assert!(matches!(out, EnsureOutcome::Ready(_)), "got {out:?}");
+        assert_eq!(h.registry.touches.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn tabular_prepare_ensure_a_row_deleted_between_read_and_touch_is_requested_again() {
+        let h = harness(true, Some(row(PrepareStatus::Ready, 1, None)));
+        *h.registry.touch_answer.lock().unwrap() = Some(false);
+        *h.registry.after_touch.lock().unwrap() = Some(None); // cleanup finished
+        let out = h
+            .prepare
+            .ensure_prepared(&req(), Duration::from_secs(3))
+            .await
+            .unwrap();
+        assert!(
+            matches!(out, EnsureOutcome::StillPreparing { .. }),
+            "got {out:?}"
+        );
+        assert_eq!(requests(&h), 1, "the normal path: no row means request");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn tabular_prepare_ensure_a_use_recorded_recently_costs_neither_a_touch_nor_a_second_read(
+    ) {
+        // The normal case: the use was already recorded today. Decided from the
+        // row already read: no write attempt and no extra registry read.
+        let mut recent = row(PrepareStatus::Ready, 1, None);
+        recent.last_used_at = Some(now() - ChronoDuration::hours(1));
+        let h = harness(true, Some(recent));
+        let out = h.prepare.ensure_prepared(&req(), WAIT).await.unwrap();
+        assert!(matches!(out, EnsureOutcome::Ready(_)), "got {out:?}");
+        assert_eq!(h.registry.touches.load(Ordering::SeqCst), 0);
+        assert_eq!(h.registry.gets.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn tabular_prepare_ensure_a_use_older_than_the_interval_is_recorded_again() {
+        let mut stale = row(PrepareStatus::Ready, 1, None);
+        stale.last_used_at = Some(now() - ChronoDuration::days(2));
+        let h = harness(true, Some(stale));
+        let out = h.prepare.ensure_prepared(&req(), WAIT).await.unwrap();
+        assert!(matches!(out, EnsureOutcome::Ready(_)), "got {out:?}");
+        assert_eq!(h.registry.touches.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            h.registry.gets.load(Ordering::SeqCst),
+            1,
+            "the touch worked: no re-read"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn tabular_prepare_ensure_a_failed_re_read_after_an_unexpected_touch_is_best_effort() {
+        // The touch was due and changed nothing, so the row is re-read; that
+        // read fails. Like a failed touch, it must not fail the call.
+        let h = harness(true, Some(row(PrepareStatus::Ready, 1, None)));
+        *h.registry.touch_answer.lock().unwrap() = Some(false);
+        *h.registry.fail_get_on.lock().unwrap() = Some(2);
+        let out = h.prepare.ensure_prepared(&req(), WAIT).await.unwrap();
         assert!(matches!(out, EnsureOutcome::Ready(_)), "got {out:?}");
     }
 }

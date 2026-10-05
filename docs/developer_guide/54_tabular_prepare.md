@@ -244,7 +244,7 @@ is NULL or older than a day and only for a `ready` row. That is a write on use
 runs a whole job through `ensure_prepared` and counts exactly one claim, one
 terminal write and one touch). It is what lets the TTL measure use instead of
 creation. The call is bounded by its own short deadline and a failure to record
-is logged and never fails or delays the answer.
+is logged and never fails or delays the answer. The decision is made from the row already read: when the use was recorded within the day (the normal case) the table is handed out with no write attempt and no extra read. Only when the touch was due and changed nothing (the cleanup pass took the row between our read and the touch) does `ensure_prepared` read the row again and hand the table out only if it is still `ready`; a row that is `deleting` is waited on and a missing row is requested, like any other source. A failed re-read is best-effort, like a failed touch: it is logged and the table already held is handed out (failing there would turn a bookkeeping hiccup into a tool error).
 
 **Known limit.** With the switch on and a trigger that is wired but never starts
 a job, every call ends `StillPreparing`; the unwired default cannot reach this
