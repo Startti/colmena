@@ -28,8 +28,10 @@ The table sits behind the `PreparationRegistry` trait (`registry.rs`) so the
 host can decide where rows live and who deletes one (open question O8: ADP
 directly or an internal Colmena endpoint). Both dialects run the same
 statements: written once with `$N` placeholders, rewritten to `?N` for SQLite.
-This chain has the SQLite implementation (`sqlite_registry.rs`) so far, with
-`claim`, `complete`, `fail`, the cancellation check and `get`; the Postgres implementation follows in its own slice.
+Two implementations exist: SQLite (`sqlite_registry.rs`) and Postgres
+(`postgres_registry.rs`), with `claim`, `complete`, `fail`, the cancellation
+check and `get`. The Postgres one is `from_pool(Arc<PgPool>)`; it runs the same
+SQL text, with `TIMESTAMPTZ` compared natively.
 
 ### Claim rule
 
@@ -116,5 +118,10 @@ attempt cap, the lease boundary holds at millisecond resolution, and eight
 concurrent claims have exactly one winner. Terminal writes, the blob union, the
 `Cancelled` cases and the cancellation check (including that checking ownership
 changes nothing, lease included) are covered the same way. The cases are written once as
-functions generic over the trait (`registry_contract.rs`) so the Postgres slice
+functions generic over the trait (`registry_contract.rs`) so the Postgres implementation
 runs the same ones.
+
+The same cases run against Postgres from `postgres_registry.rs` as
+`tabular_prepare_pg_*`. They are `#[ignore]`d like the other Postgres repository
+tests and need `DATABASE_URL`:
+`DATABASE_URL=postgres://... cargo test --lib tabular_prepare -- --ignored`.
