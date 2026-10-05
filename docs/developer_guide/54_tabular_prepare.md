@@ -139,15 +139,25 @@ prepared, waiting at most `wait` (polled every second):
 | `ready` | `Ready(row)` |
 | `running` with a live lease | attach and wait; never a second trigger |
 | No row | request once, unless the progress port says the host already queued or started it (then attach) |
-| Any other row (nobody holds it) | request once, then wait |
+| Retryable `failed` row, expired lease with attempts left, or older format | request once, then wait; the progress hint is NOT consulted (a stale one must not block the takeover) |
+| `deleting` with a live lease | attach and wait; never a second trigger (checked before the format) |
+| `deleting` with an expired lease | request once, then wait (the claim takes it) |
 | Wait ends first | `StillPreparing { progress }`, never an error |
+| `failed` after a request, attempts left | `Failed { final_failure: false }`: a later request tries again |
+| `failed` with 3 attempts | `Failed { final_failure: true }` with the reason; never requested again |
+| `running`, lease expired, 3 attempts | `Failed { final_failure: true }` with code `lease_expired` (abandoned); never requested |
+
+A `failed` row found before the request is not mistaken for a new failure: only a
+higher attempt count, or a failure when we started from no failure, ends the wait
+early.
 
 `EnsureOutcome` has no variant that offers the whole file: a file that is not
 prepared is never loaded whole into the sandbox, and `EnsureOutcome::message()`
 words the state for the model. The call never writes the registry: claiming is
-the job's business. This is the core of the lifecycle; the handling of failed
-rows and attempts, de-duplication of concurrent callers, the bound on every
-awaited call and the recording of use follow in later slices of this chain.
+the job's business. The attempt bound mirrors the registry's claim rule (3 attempts; an
+expired-lease takeover counts as one). De-duplication of concurrent callers, the
+bound on every awaited call and the recording of use follow in later slices of
+this chain.
 
 ## Tests
 
