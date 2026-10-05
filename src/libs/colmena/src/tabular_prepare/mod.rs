@@ -18,7 +18,8 @@ use crate::tabular_prepare::registry::{
     PreparationRegistry, PrepareStatus, PreparedRow, RegistryError, FORMAT_VERSION, MAX_ATTEMPTS,
 };
 use chrono::{DateTime, Utc};
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use thiserror::Error;
 use tokio::time::Instant;
@@ -33,6 +34,12 @@ mod registry_contract;
 
 /// How often a waiting caller re-reads the registry.
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Minimum time any single registry or port call is given, whatever the wait.
+const CALL_FLOOR: Duration = Duration::from_secs(2);
+
+/// Upper bound for a caller's wait, so `Instant + wait` cannot overflow.
+const MAX_WAIT: Duration = Duration::from_secs(10 * 365 * 24 * 3600);
 
 /// Result of [`TabularPrepare::ensure_prepared`]. There is deliberately no
 /// variant that offers the whole file: a file that is not prepared is never
@@ -110,7 +117,24 @@ pub struct TabularPrepare {
     config: PrepareConfig,
     registry: Arc<dyn PreparationRegistry>,
     clock: Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>,
+    /// Sources this process is currently requesting or waiting on, so that
+    /// concurrent callers share one trigger.
+    requested: Mutex<HashSet<String>>,
     poll_interval: Duration,
+}
+
+/// Removes a source from the in-flight set when it is dropped. It is created
+/// at the moment the key is inserted, so every exit path (an early return, an
+/// error, a future dropped while awaiting a port) removes the key.
+struct RequestedGuard<'a> {
+    owner: &'a TabularPrepare,
+    key: String,
+}
+
+impl Drop for RequestedGuard<'_> {
+    fn drop(&mut self) {
+        self.owner.requested.lock().unwrap().remove(&self.key);
+    }
 }
 
 /// What a registry row means to a caller that needs the tables.
@@ -134,12 +158,26 @@ enum Observed {
     NewFailure(PreparedRow),
 }
 
+/// A port call that must not outlive the caller's wait bound, but always gets
+/// [`CALL_FLOOR`] to answer: a real registry read is pending on its first
+/// poll, so a zero or very short wait must not report `StillPreparing` for a
+/// table that is already ready.
+async fn within<T>(deadline: Instant, fut: impl std::future::Future<Output = T>) -> Option<T> {
+    let floor = Instant::now() + CALL_FLOOR;
+    tokio::time::timeout_at(deadline.max(floor), fut).await.ok()
+}
+
+fn still_preparing(progress: Option<PrepareProgressInfo>) -> EnsureOutcome {
+    EnsureOutcome::StillPreparing { progress }
+}
+
 impl TabularPrepare {
     pub fn new(config: PrepareConfig, registry: Arc<dyn PreparationRegistry>) -> Self {
         Self {
             config,
             registry,
             clock: Arc::new(Utc::now),
+            requested: Mutex::new(HashSet::new()),
             poll_interval: POLL_INTERVAL,
         }
     }
@@ -157,13 +195,16 @@ impl TabularPrepare {
     /// Make sure `req.source_key` is prepared, waiting at most `wait`.
     ///
     /// - Switch off: `NotEnabled`, nothing is touched.
-    /// - `ready`: `Ready`.
-    /// - `failed` with attempts left, or an expired lease: request once, then wait.
-    /// - Attempts exhausted (three failures, or a job that died three times
-    ///   without reporting): `Failed` with `final_failure`, never requested.
     /// - A live job holds it: attach and wait, no second trigger.
     /// - Nobody holds it: request once, then wait.
-    /// - The wait ends first: `StillPreparing`, never an error.
+    /// - The wait ends first: `StillPreparing`, never an error. The bound
+    ///   covers the awaited registry and port calls too, not only the sleeps.
+    ///
+    /// Known limits: concurrent callers in this process share one request, but
+    /// callers in other processes (and a later call after a wait ended) may
+    /// request again, which is safe because triggers are idempotent. With the
+    /// switch on and no runner wired the request goes nowhere and every call
+    /// ends `StillPreparing`.
     pub async fn ensure_prepared(
         &self,
         req: &PrepareRequest,
@@ -172,12 +213,16 @@ impl TabularPrepare {
         if !self.config.large_tabular {
             return Ok(EnsureOutcome::NotEnabled);
         }
-        let deadline = Instant::now() + wait;
+        let deadline = Instant::now() + wait.min(MAX_WAIT);
+        let mut guard: Option<RequestedGuard> = None;
         let mut baseline: Option<Option<i32>> = None;
-        let mut requested = false;
+        let mut requested_by_us = false;
         loop {
-            let row = self.registry.get(&req.source_key).await?;
-            match self.observe(row, baseline) {
+            let Some(row) = within(deadline, self.registry.get(&req.source_key)).await else {
+                return Ok(still_preparing(None));
+            };
+            let observed = self.observe(row?, baseline);
+            match observed {
                 Observed::Ready(row) => return Ok(EnsureOutcome::Ready(Box::new(row))),
                 Observed::FinalFailure(row) => return Ok(failed(&row, true)),
                 Observed::NewFailure(row) => return Ok(failed(&row, false)),
@@ -188,35 +233,72 @@ impl TabularPrepare {
                     failed_attempts,
                 } => {
                     baseline.get_or_insert(failed_attempts);
-                    if !requested && self.should_request(req, has_row).await {
-                        self.config.trigger.request(req.clone()).await?;
-                        requested = true;
+                    if !requested_by_us {
+                        if let Some(owned) = self.claim_the_request(req, has_row, deadline).await {
+                            // Held across the request: a failure or a dropped
+                            // call is not remembered as "already requested".
+                            match within(deadline, self.config.trigger.request(req.clone())).await {
+                                Some(sent) => sent?,
+                                None => return Ok(still_preparing(None)),
+                            }
+                            guard = Some(owned);
+                            requested_by_us = true;
+                        }
                     }
                 }
             }
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
-                let progress = self.config.progress.read(&req.source_key).await;
-                return Ok(EnsureOutcome::StillPreparing { progress });
+                drop(guard);
+                let progress = within(deadline, self.config.progress.read(&req.source_key))
+                    .await
+                    .flatten();
+                return Ok(still_preparing(progress));
             }
             tokio::time::sleep(self.poll_interval.min(left)).await;
         }
     }
 
-    /// Whether to send the request: always when a row exists that nobody
-    /// holds; with no row, unless the host's progress port says the item is
-    /// already queued or started.
-    async fn should_request(&self, req: &PrepareRequest, has_row: bool) -> bool {
-        if has_row {
-            return true;
+    /// Decide whether this call must send the request, returning the guard
+    /// that keeps the source marked in flight. Concurrent callers in this
+    /// process share one; an item the host already queued (visible through the
+    /// progress port while there is no row yet) is not requested again. The
+    /// hint is ignored when a row exists: a stale one must not block the
+    /// takeover of a dead job.
+    async fn claim_the_request<'a>(
+        &'a self,
+        req: &PrepareRequest,
+        has_row: bool,
+        deadline: Instant,
+    ) -> Option<RequestedGuard<'a>> {
+        if !self
+            .requested
+            .lock()
+            .unwrap()
+            .insert(req.source_key.clone())
+        {
+            return None;
         }
-        !matches!(
-            self.config.progress.read(&req.source_key).await,
-            Some(PrepareProgressInfo {
-                state: ProgressState::Queued | ProgressState::Running,
-                ..
-            })
-        )
+        let guard = RequestedGuard {
+            owner: self,
+            key: req.source_key.clone(),
+        };
+        if !has_row {
+            let hint = within(deadline, self.config.progress.read(&req.source_key))
+                .await
+                .flatten();
+            let queued = matches!(
+                hint,
+                Some(PrepareProgressInfo {
+                    state: ProgressState::Queued | ProgressState::Running,
+                    ..
+                })
+            );
+            if queued {
+                return None;
+            }
+        }
+        Some(guard)
     }
 
     fn observe(&self, row: Option<PreparedRow>, baseline: Option<Option<i32>>) -> Observed {
@@ -396,11 +478,17 @@ mod ensure_tests {
     #[derive(Default)]
     struct FakeTrigger {
         requests: Mutex<Vec<PrepareRequest>>,
+        fail: bool,
     }
 
     #[async_trait]
     impl PrepareTrigger for FakeTrigger {
         async fn request(&self, req: PrepareRequest) -> Result<(), PrepareTriggerError> {
+            // Let a concurrent caller run while the request is in flight.
+            tokio::task::yield_now().await;
+            if self.fail {
+                return Err(PrepareTriggerError::Unavailable("queue down".into()));
+            }
             self.requests.lock().unwrap().push(req);
             Ok(())
         }
@@ -410,6 +498,8 @@ mod ensure_tests {
     struct FakeProgress {
         reads: AtomicUsize,
         value: Mutex<Option<PrepareProgressInfo>>,
+        /// While set, `read` never completes (a slow progress backend).
+        block: Mutex<bool>,
     }
 
     #[async_trait]
@@ -417,6 +507,9 @@ mod ensure_tests {
         async fn report(&self, _k: &str, _i: PrepareProgressInfo) {}
         async fn read(&self, _k: &str) -> Option<PrepareProgressInfo> {
             self.reads.fetch_add(1, Ordering::SeqCst);
+            if *self.block.lock().unwrap() {
+                std::future::pending::<()>().await;
+            }
             self.value.lock().unwrap().clone()
         }
     }
@@ -429,8 +522,12 @@ mod ensure_tests {
     }
 
     fn harness(enabled: bool, row: Option<PreparedRow>) -> Harness {
+        harness_with(enabled, row, FakeTrigger::default())
+    }
+
+    fn harness_with(enabled: bool, row: Option<PreparedRow>, trigger: FakeTrigger) -> Harness {
         let registry = FakeRegistry::new(row);
-        let trigger = Arc::new(FakeTrigger::default());
+        let trigger = Arc::new(trigger);
         let progress = Arc::new(FakeProgress::default());
         let config = PrepareConfig {
             large_tabular: enabled,
@@ -786,5 +883,114 @@ mod ensure_tests {
             0,
             "the format check must not outrank `deleting`"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn tabular_prepare_ensure_concurrent_callers_cause_one_trigger() {
+        let h = harness(true, None);
+        let registry = h.registry.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(6)).await;
+            registry.set(Some(row(PrepareStatus::Ready, 1, None)));
+        });
+        let r = req();
+        let (a, b, c) = tokio::join!(
+            h.prepare.ensure_prepared(&r, WAIT),
+            h.prepare.ensure_prepared(&r, WAIT),
+            h.prepare.ensure_prepared(&r, WAIT),
+        );
+        for out in [a, b, c] {
+            assert!(matches!(out.unwrap(), EnsureOutcome::Ready(_)));
+        }
+        assert_eq!(requests(&h), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn tabular_prepare_ensure_surfaces_a_trigger_failure_and_allows_a_retry() {
+        let h = harness_with(
+            true,
+            None,
+            FakeTrigger {
+                fail: true,
+                ..Default::default()
+            },
+        );
+        let err = h.prepare.ensure_prepared(&req(), WAIT).await.unwrap_err();
+        assert!(err.to_string().contains("queue down"), "{err}");
+        // The failed request is not remembered as "already requested".
+        let err_again = h.prepare.ensure_prepared(&req(), WAIT).await.unwrap_err();
+        assert!(err_again.to_string().contains("queue down"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn tabular_prepare_ensure_a_dropped_call_does_not_leak_the_in_flight_key() {
+        let h = harness(true, None);
+        *h.progress.block.lock().unwrap() = true;
+        let prepare = h.prepare.clone();
+        let task = tokio::spawn(async move { prepare.ensure_prepared(&req(), WAIT).await });
+        // Let it reach the blocked progress read, then drop it.
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        // The next call must still be able to send the request.
+        *h.progress.block.lock().unwrap() = false;
+        let registry = h.registry.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            registry.set(Some(row(PrepareStatus::Ready, 1, None)));
+        });
+        let out = h.prepare.ensure_prepared(&req(), WAIT).await.unwrap();
+        assert!(matches!(out, EnsureOutcome::Ready(_)), "got {out:?}");
+        assert_eq!(requests(&h), 1, "the aborted call left no stale key behind");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn tabular_prepare_ensure_the_wait_bound_covers_a_hung_progress_port() {
+        let h = harness(true, Some(row(PrepareStatus::Running, 1, Some(3600))));
+        *h.progress.block.lock().unwrap() = true;
+        let r = req();
+        let call = h.prepare.ensure_prepared(&r, Duration::from_secs(5));
+        let out = tokio::time::timeout(Duration::from_secs(60), call)
+            .await
+            .expect("ensure_prepared must return within its bound")
+            .unwrap();
+        assert_eq!(out, EnsureOutcome::StillPreparing { progress: None });
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn tabular_prepare_ensure_an_enormous_wait_does_not_overflow() {
+        let h = harness(true, Some(row(PrepareStatus::Ready, 1, None)));
+        let out = h
+            .prepare
+            .ensure_prepared(&req(), Duration::MAX)
+            .await
+            .unwrap();
+        assert!(matches!(out, EnsureOutcome::Ready(_)));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn tabular_prepare_ensure_a_ready_table_is_returned_even_with_a_zero_wait() {
+        let h = harness(true, Some(row(PrepareStatus::Ready, 1, None)));
+        let out = h
+            .prepare
+            .ensure_prepared(&req(), Duration::ZERO)
+            .await
+            .unwrap();
+        assert!(matches!(out, EnsureOutcome::Ready(_)), "got {out:?}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn tabular_prepare_ensure_a_zero_wait_still_sends_the_request_when_there_is_no_job() {
+        let h = harness(true, None);
+        let out = h
+            .prepare
+            .ensure_prepared(&req(), Duration::ZERO)
+            .await
+            .unwrap();
+        assert!(
+            matches!(out, EnsureOutcome::StillPreparing { .. }),
+            "got {out:?}"
+        );
+        assert_eq!(requests(&h), 1);
     }
 }

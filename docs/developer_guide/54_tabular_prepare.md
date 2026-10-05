@@ -131,7 +131,11 @@ engine. With the switch off nothing is checked and nothing changes.
 ## `ensure_prepared`
 
 `TabularPrepare::ensure_prepared(request, wait)` makes sure a source is
-prepared, waiting at most `wait` (polled every second):
+prepared, waiting at most `wait` (polled every second). The bound covers the
+registry, trigger and progress calls too, not only the sleeps; each call is
+always given a 2 s floor, so a zero or very short wait still reads the registry
+and still reports a table that is already ready. The wait itself is capped (ten
+years) so `Instant + wait` cannot overflow:
 
 | Situation | Behaviour |
 |-----------|-----------|
@@ -155,9 +159,19 @@ early.
 prepared is never loaded whole into the sandbox, and `EnsureOutcome::message()`
 words the state for the model. The call never writes the registry: claiming is
 the job's business. The attempt bound mirrors the registry's claim rule (3 attempts; an
-expired-lease takeover counts as one). De-duplication of concurrent callers, the
-bound on every awaited call and the recording of use follow in later slices of
-this chain.
+expired-lease takeover counts as one). The recording of use follows in a later
+slice of this chain.
+
+**De-duplication.** Concurrent callers in one process share a request through a
+set whose guard is created when the key is inserted, so every exit, including a
+dropped future, removes it. It only saves duplicate triggers: callers in other
+processes, or a later call after a wait ended, may request again, which is safe
+because triggers are idempotent. A trigger error is returned as an error and is
+not remembered as "already requested".
+
+**Known limit.** With the switch on and a trigger that is wired but never starts
+a job, every call ends `StillPreparing`; the unwired default cannot reach this
+state because the engine refuses to start (see Switch and ports).
 
 ## Tests
 
@@ -168,10 +182,11 @@ needs `DATABASE_URL` (`DATABASE_URL=postgres://... cargo test --lib
 attachment_prepared -- --ignored`).
 
 `cargo test --lib tabular_prepare_ensure` covers `ensure_prepared` with fake
-ports and a fake registry under paused time. `cargo test --test
-large_tabular_switch` runs in its own process: the switch is off by default, is
-read once, and the engine refuses to start with the switch on and an unwired
-trigger.
+ports and a fake registry under paused time, including a dropped future, a hung
+progress port and a zero wait. `cargo test --test large_tabular_switch` runs in
+its own process: the switch is off by default, a built config keeps its value
+when the environment changes (shown through the outcome a caller sees), and the
+engine refuses to start with the switch on and an unwired trigger.
 
 `cargo test --lib tabular_prepare` runs the registry cases against a
 file-backed SQLite database: a claim creates a `running` row, a live lease is
