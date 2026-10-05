@@ -531,6 +531,21 @@ mod ensure_tests {
         ) -> Result<Vec<PreparedRow>, RegistryError> {
             panic!("ensure_prepared must not run the cleanup pass")
         }
+        async fn begin_delete(
+            &self,
+            _r: &PreparedRow,
+            _o: &str,
+            _l: ChronoDuration,
+            _n: DateTime<Utc>,
+        ) -> Result<bool, RegistryError> {
+            panic!("ensure_prepared must not run the cleanup pass")
+        }
+        async fn finish_delete(&self, _k: &str, _o: &str) -> Result<bool, RegistryError> {
+            panic!("ensure_prepared must not run the cleanup pass")
+        }
+        async fn delete_if_unchanged(&self, _r: &PreparedRow) -> Result<bool, RegistryError> {
+            panic!("ensure_prepared must not run the cleanup pass")
+        }
         async fn touch_last_used(
             &self,
             _k: &str,
