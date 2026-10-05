@@ -1030,6 +1030,7 @@ impl DagRunUseCase {
                                             }
                                             NodeEvent::SkillLoaded { tool_id, skill_name, reference, source, size_bytes } => yield DagExecutionEvent::SkillLoaded { node_id: node_id.clone(), tool_id, skill_name, reference, source, size_bytes },
                                             NodeEvent::ToolDescribed { tool_id, tool_name } => yield DagExecutionEvent::ToolDescribed { node_id: node_id.clone(), tool_id, tool_name },
+                                            NodeEvent::ToolProgress { tool_id, stage, done, total, unit, elapsed_ms } => yield DagExecutionEvent::ToolProgress { node_id: node_id.clone(), tool_id, stage, done, total, unit, elapsed_ms },
                                             NodeEvent::BatchProgress { node_id, total, completed, ok, err, in_flight } => {
                                                 yield DagExecutionEvent::BatchProgress { node_id, total, completed, ok, err, in_flight }
                                             }
@@ -4808,5 +4809,98 @@ mod read_on_stop_tests {
             })
             .collect();
         assert_eq!(left, ["m1", "m2"]);
+    }
+}
+
+#[cfg(test)]
+mod tool_progress_tests {
+    //! `NodeEvent::ToolProgress` through the real run loop: the node emits it
+    //! on its observer, the loop stamps the node and yields it in order.
+    use super::*;
+    use crate::dag_engine::domain::events::DagExecutionEvent;
+    use crate::dag_engine::domain::node::ExecutableNode;
+    use crate::dag_engine::domain::observer::{ExecutionObserver, NodeEvent, ToolProgressStage};
+    use async_trait::async_trait;
+    use futures::StreamExt;
+    use std::error::Error as StdError;
+
+    /// Emits one progress event for tool call `call_1` and returns.
+    struct EmitsProgress;
+
+    #[async_trait]
+    impl ExecutableNode for EmitsProgress {
+        async fn execute(
+            &self,
+            _i: &NodeInputs,
+            _c: &Value,
+            _s: &mut Value,
+            observer: Option<Arc<dyn ExecutionObserver>>,
+        ) -> Result<Value, Box<dyn StdError + Send + Sync>> {
+            if let Some(o) = &observer {
+                o.on_event(NodeEvent::ToolProgress {
+                    tool_id: "call_1".into(),
+                    stage: ToolProgressStage::Running,
+                    done: Some(2),
+                    total: Some(5),
+                    unit: None,
+                    elapsed_ms: 4_000,
+                });
+            }
+            Ok(json!({}))
+        }
+        fn schema(&self) -> Value {
+            json!({})
+        }
+    }
+
+    struct One(Arc<dyn ExecutableNode>);
+    impl NodeRegistryPort for One {
+        fn get_node(&self, node_type: &str) -> Option<Arc<dyn ExecutableNode>> {
+            (node_type == "emits").then(|| self.0.clone())
+        }
+        fn get_all_nodes(&self) -> HashMap<String, Arc<dyn ExecutableNode>> {
+            HashMap::new()
+        }
+    }
+
+    fn graph() -> Graph {
+        serde_json::from_value(
+            json!({ "nodes": { "agent": { "type": "emits", "config": {} } }, "edges": [] }),
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn tool_progress_reaches_the_stream_stamped_with_the_node_before_it_ends() {
+        let uc = DagRunUseCase::new(Arc::new(One(Arc::new(EmitsProgress))), None);
+        let stream = uc.execute_stream(graph(), None, None, false, None, None, None);
+        let seen: Vec<String> = stream
+            .filter_map(|e| async move {
+                match e.unwrap() {
+                    DagExecutionEvent::ToolProgress {
+                        node_id,
+                        tool_id,
+                        stage,
+                        done,
+                        total,
+                        elapsed_ms,
+                        ..
+                    } => Some(format!(
+                        "progress {node_id} {tool_id} {} {done:?}/{total:?} {elapsed_ms}",
+                        stage.as_str()
+                    )),
+                    DagExecutionEvent::NodeFinish { node_id, .. } => Some(format!("end {node_id}")),
+                    _ => None,
+                }
+            })
+            .collect()
+            .await;
+        assert_eq!(
+            seen,
+            [
+                "progress agent call_1 running Some(2)/Some(5) 4000",
+                "end agent"
+            ]
+        );
     }
 }

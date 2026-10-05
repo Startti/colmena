@@ -33,6 +33,41 @@ pub struct SseMapper {
     total_cache_write_tokens: u64,
 }
 
+/// The `tool-progress` frame and its `subgraph-` twin share one shape. `done`,
+/// `total` and `unit` are left out when unknown so a client never reads a null
+/// (or a made-up zero) as a real value.
+#[allow(clippy::too_many_arguments)]
+fn tool_progress_frame(
+    kind: &str,
+    node_id: &str,
+    tool_id: &str,
+    stage: &str,
+    done: Option<u64>,
+    total: Option<u64>,
+    unit: Option<&str>,
+    elapsed_ms: u64,
+) -> Value {
+    let mut frame = json!({
+        "type": kind,
+        "nodeId": node_id,
+        "toolCallId": tool_id,
+        "stage": stage,
+        "elapsedMs": elapsed_ms,
+    });
+    if let Some(obj) = frame.as_object_mut() {
+        if let Some(done) = done {
+            obj.insert("done".into(), json!(done));
+        }
+        if let Some(total) = total {
+            obj.insert("total".into(), json!(total));
+        }
+        if let Some(unit) = unit {
+            obj.insert("unit".into(), json!(unit));
+        }
+    }
+    frame
+}
+
 impl Default for SseMapper {
     fn default() -> Self {
         Self::new()
@@ -458,6 +493,24 @@ impl SseMapper {
                 "toolCallId": tool_id,
                 "toolName": tool_name,
             })),
+            DagExecutionEvent::ToolProgress {
+                node_id,
+                tool_id,
+                stage,
+                done,
+                total,
+                unit,
+                elapsed_ms,
+            } => Some(tool_progress_frame(
+                "tool-progress",
+                node_id,
+                tool_id,
+                stage.as_str(),
+                *done,
+                *total,
+                unit.as_deref(),
+                *elapsed_ms,
+            )),
             DagExecutionEvent::Progress { node_id, idle_secs } => Some(json!({
                 "type": "status",
                 "stage": "running",
@@ -682,6 +735,24 @@ impl SseMapper {
                     "toolCallId": tool_id,
                     "toolName": tool_name,
                 })),
+                DagExecutionEvent::ToolProgress {
+                    node_id,
+                    tool_id,
+                    stage,
+                    done,
+                    total,
+                    unit,
+                    elapsed_ms,
+                } => Some(tool_progress_frame(
+                    "subgraph-tool-progress",
+                    node_id,
+                    tool_id,
+                    stage.as_str(),
+                    *done,
+                    *total,
+                    unit.as_deref(),
+                    *elapsed_ms,
+                )),
                 DagExecutionEvent::BatchProgress {
                     node_id,
                     total,
@@ -836,6 +907,84 @@ mod tests {
                 cancelled: false,
             },
         ]
+    }
+
+    fn tool_progress_event(total: Option<u64>) -> DagExecutionEvent {
+        DagExecutionEvent::ToolProgress {
+            node_id: "llm_1".into(),
+            tool_id: "call_abc".into(),
+            stage: crate::dag_engine::domain::observer::ToolProgressStage::Running,
+            done: Some(40),
+            total,
+            unit: None,
+            elapsed_ms: 20_000,
+        }
+    }
+
+    #[test]
+    fn tool_progress_frame_carries_the_agreed_fields() {
+        let mut mapper = SseMapper::new();
+        let parts = mapper.map(&tool_progress_event(Some(100)));
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0]["type"], "tool-progress");
+        assert_eq!(parts[0]["nodeId"], "llm_1");
+        assert_eq!(parts[0]["toolCallId"], "call_abc");
+        assert_eq!(parts[0]["stage"], "running");
+        assert_eq!(parts[0]["done"], 40);
+        assert_eq!(parts[0]["total"], 100);
+        assert_eq!(parts[0]["elapsedMs"], 20_000);
+        assert!(parts[0].get("unit").is_none(), "an absent unit is omitted");
+    }
+
+    #[test]
+    fn tool_progress_frame_omits_an_unknown_done() {
+        let mut mapper = SseMapper::new();
+        let mut ev = tool_progress_event(None);
+        if let DagExecutionEvent::ToolProgress { done, .. } = &mut ev {
+            *done = None;
+        }
+        let parts = mapper.map(&ev);
+        assert_eq!(parts[0]["type"], "tool-progress");
+        assert!(parts[0].get("done").is_none(), "no count is not a zero");
+        assert_eq!(parts[0]["elapsedMs"], 20_000);
+    }
+
+    #[test]
+    fn tool_progress_frame_omits_an_unknown_total() {
+        let mut mapper = SseMapper::new();
+        let parts = mapper.map(&tool_progress_event(None));
+        assert_eq!(parts[0]["type"], "tool-progress");
+        assert!(parts[0].get("total").is_none(), "total is optional");
+    }
+
+    #[test]
+    fn tool_progress_frame_names_its_unit_when_it_has_one() {
+        let mut mapper = SseMapper::new();
+        let mut ev = tool_progress_event(Some(8));
+        if let DagExecutionEvent::ToolProgress { unit, .. } = &mut ev {
+            *unit = Some("parts".into());
+        }
+        assert_eq!(mapper.map(&ev)[0]["unit"], "parts");
+    }
+
+    #[test]
+    fn subgraph_tool_progress_frame_carries_the_same_fields_plus_its_identity() {
+        let mut mapper = SseMapper::new();
+        let wrapped = DagExecutionEvent::SubgraphWrapped {
+            inner: Box::new(tool_progress_event(Some(100))),
+            depth: 1,
+            path: "top>llm_1".into(),
+        };
+        let parts = mapper.map(&wrapped);
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0]["type"], "subgraph-tool-progress");
+        assert_eq!(parts[0]["toolCallId"], "call_abc");
+        assert_eq!(parts[0]["stage"], "running");
+        assert_eq!(parts[0]["done"], 40);
+        assert_eq!(parts[0]["total"], 100);
+        assert_eq!(parts[0]["elapsedMs"], 20_000);
+        assert_eq!(parts[0]["level"], 1);
+        assert_eq!(parts[0]["path"], "top>llm_1");
     }
 
     #[test]

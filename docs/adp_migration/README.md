@@ -6,6 +6,12 @@ ve ADP antes y después, qué tiene que hacer ADP, y qué se rompe si no hace na
 
 Los cambios que quedan dentro del motor no llevan nota aquí.
 
+## 2026-10-05 — progreso de una herramienta larga
+
+| # | Nota | Acción de ADP | Qué se rompe si se ignora |
+|---|------|---------------|---------------------------|
+| 1 | [`tool-progress`](2026-10-05-tool-progress.md) | Ninguna al compilar; subir el pin cuando se quiera mostrar la fila | Nada: ningún tool emite el frame todavía y el reductor ya lo lee |
+
 ## 2026-09-29 — pre-flight: una respuesta transitoria no es una key rechazada
 
 | # | Nota | Acción de ADP | Qué se rompe si se ignora |

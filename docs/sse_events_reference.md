@@ -166,6 +166,7 @@ Emitido cuando el LLM llama a una herramienta.
 | `tool-input-available` | `toolCallId`, `toolName`, `input`; `childScope` si la tool es `parallel` | Argumentos completos y parseados |
 | `tool-output-available` | `toolCallId`, `output`; `childScope` si la tool es `parallel`; `status: "cancelled"` si la persona cortó esa llamada | Resultado de ejecutar la herramienta |
 | `tool-described` | `nodeId`, `toolCallId`, `toolName` | Emitido cuando una invocación de `describe_tool` resuelve y el motor revela el schema completo de una tool perezosa. Permite al frontend mostrar "Schema de `<toolName>` listo" sin esperar al `tool-output-available`. Detalles en [29_lazy_tool_loading.md](./developer_guide/29_lazy_tool_loading.md). |
+| `tool-progress` | `nodeId`, `toolCallId`, `stage`, `elapsedMs`; `done`, `total`, `unit` si se conocen | Una herramienta larga sigue viva. `stage` es `queued`, `preparing`, `staging`, `running` o `collecting`. Aditivo: ningún tool lo emite todavía, y un cliente que no lo conoce lo ignora. Reinicia el watchdog de inactividad y el latido. |
 
 Secuencia completa:
 
@@ -567,6 +568,7 @@ propia falla.
 | `subgraph-tool-input-available` | `toolCallId`, `toolName`, `input`; `childScope` si la tool es `parallel` | Args completos del tool |
 | `subgraph-tool-output-available` | `toolCallId`, `output`; `childScope` si la tool es `parallel`; `status: "cancelled"` si la persona cortó esa llamada | Resultado del tool |
 | `subgraph-tool-described` | `nodeId`, `toolCallId`, `toolName` | Contraparte de subgrafo de `tool-described` — emitido cuando `describe_tool` resuelve dentro de un `subgraph` o agente-tarea del orchestrator. |
+| `subgraph-tool-progress` | `nodeId`, `toolCallId`, `stage`, `elapsedMs`; `done`, `total`, `unit` si se conocen | Contraparte de subgrafo de `tool-progress`. |
 
 ### Skill
 
@@ -848,6 +850,7 @@ Para reanudar, el cliente envía las respuestas con el mismo `session_id`. El pl
 | `tool-output-available` | top | `toolCallId`, `output` | `childScope`, `status` |
 | `skill-loaded` | top | `nodeId`, `toolCallId`, `skillName`, `source`, `sizeBytes` | `reference` |
 | `tool-described` | top | `nodeId`, `toolCallId`, `toolName` | — |
+| `tool-progress` | top | `nodeId`, `toolCallId`, `stage`, `elapsedMs` | `done`, `total`, `unit` |
 | `user-message-consumed` | top | `id`, `node_id` | — |
 | `status` | top/sub | `stage`, `node_id`, `idleSecs` | — |
 | `agent-turn` | top/sub | `phase`, `node_id` | — |
@@ -869,6 +872,7 @@ Para reanudar, el cliente envía las respuestas con el mismo `session_id`. El pl
 | `subgraph-tool-input-available` | sub | `toolCallId`, `toolName`, `input` | `childScope` |
 | `subgraph-tool-output-available` | sub | `toolCallId`, `output` | `childScope`, `status` |
 | `subgraph-tool-described` | sub | `nodeId`, `toolCallId`, `toolName` | — |
+| `subgraph-tool-progress` | sub | `nodeId`, `toolCallId`, `stage`, `elapsedMs` | `done`, `total`, `unit` |
 | `subgraph-skill-loaded` | sub | `nodeId`, `toolCallId`, `skillName`, `source`, `sizeBytes` | `reference` |
 | `subgraph-usage-summary` | sub | `nodes` | — |
 | `subgraph-error` | sub | `errorText` | — |
