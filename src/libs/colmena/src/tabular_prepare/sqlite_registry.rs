@@ -17,6 +17,11 @@ impl SqlitePreparationRegistry {
     pub fn from_pool(pool: Arc<SqlitePool>) -> Self {
         Self { pool }
     }
+
+    #[cfg(test)]
+    pub(crate) fn pool(&self) -> Arc<SqlitePool> {
+        self.pool.clone()
+    }
 }
 
 impl SqlitePreparationRegistry {
@@ -96,6 +101,35 @@ impl PreparationRegistry for SqlitePreparationRegistry {
             Some(_) => TerminalOutcome::Written,
             None => TerminalOutcome::Cancelled,
         })
+    }
+
+    async fn still_owned(&self, source_key: &str, owner: &str) -> Result<bool, RegistryError> {
+        let row = sqlx::query_scalar::<_, i32>(&for_sqlite(STILL_OWNED_SQL))
+            .bind(source_key)
+            .bind(owner)
+            .fetch_optional(&*self.pool)
+            .await
+            .map_err(|e| backend_err("still_owned", e))?;
+        Ok(row.is_some())
+    }
+
+    async fn release(&self, source_key: &str, owner: &str) -> Result<bool, RegistryError> {
+        let done = sqlx::query(&for_sqlite(RELEASE_SQL))
+            .bind(source_key)
+            .bind(owner)
+            .execute(&*self.pool)
+            .await
+            .map_err(|e| backend_err("release", e))?;
+        Ok(done.rows_affected() > 0)
+    }
+
+    async fn delete(&self, source_key: &str) -> Result<bool, RegistryError> {
+        let done = sqlx::query(&for_sqlite(DELETE_SQL))
+            .bind(source_key)
+            .execute(&*self.pool)
+            .await
+            .map_err(|e| backend_err("delete", e))?;
+        Ok(done.rows_affected() > 0)
     }
 
     async fn get(&self, source_key: &str) -> Result<Option<PreparedRow>, RegistryError> {

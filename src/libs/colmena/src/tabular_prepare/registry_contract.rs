@@ -381,6 +381,204 @@ pub(crate) async fn a_non_owner_terminal_write_records_no_blobs<R: PreparationRe
     assert!(get_row(r, &key).await.blob_keys.is_empty());
 }
 
+/// Counts what a job does to the registry. Only `claim` and the terminal
+/// writes may happen during a preparation (TP-5).
+#[derive(Default)]
+pub(crate) struct Counts {
+    pub claims: std::sync::atomic::AtomicUsize,
+    pub terminals: std::sync::atomic::AtomicUsize,
+    pub other_writes: std::sync::atomic::AtomicUsize,
+    pub reads: std::sync::atomic::AtomicUsize,
+}
+
+pub(crate) struct CountingRegistry<R> {
+    pub inner: R,
+    pub counts: Counts,
+}
+
+impl<R> CountingRegistry<R> {
+    pub fn new(inner: R) -> Self {
+        Self {
+            inner,
+            counts: Counts::default(),
+        }
+    }
+    pub fn snapshot(&self) -> (usize, usize, usize, usize) {
+        use std::sync::atomic::Ordering::SeqCst;
+        (
+            self.counts.claims.load(SeqCst),
+            self.counts.terminals.load(SeqCst),
+            self.counts.other_writes.load(SeqCst),
+            self.counts.reads.load(SeqCst),
+        )
+    }
+}
+
+#[async_trait::async_trait]
+impl<R: PreparationRegistry> PreparationRegistry for CountingRegistry<R> {
+    async fn claim(&self, req: ClaimRequest) -> Result<Option<Claim>, RegistryError> {
+        self.counts
+            .claims
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.claim(req).await
+    }
+    async fn complete(
+        &self,
+        k: &str,
+        o: &str,
+        i: ReadyInfo,
+        n: DateTime<Utc>,
+    ) -> Result<TerminalOutcome, RegistryError> {
+        self.counts
+            .terminals
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.complete(k, o, i, n).await
+    }
+    async fn fail_with_blobs(
+        &self,
+        k: &str,
+        o: &str,
+        c: &str,
+        d: &str,
+        b: &[String],
+        n: DateTime<Utc>,
+    ) -> Result<TerminalOutcome, RegistryError> {
+        self.counts
+            .terminals
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.fail_with_blobs(k, o, c, d, b, n).await
+    }
+    async fn still_owned(&self, k: &str, o: &str) -> Result<bool, RegistryError> {
+        self.counts
+            .reads
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.still_owned(k, o).await
+    }
+    async fn release(&self, k: &str, o: &str) -> Result<bool, RegistryError> {
+        self.counts
+            .other_writes
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.release(k, o).await
+    }
+    async fn delete(&self, k: &str) -> Result<bool, RegistryError> {
+        self.counts
+            .other_writes
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.delete(k).await
+    }
+    async fn get(&self, k: &str) -> Result<Option<PreparedRow>, RegistryError> {
+        self.counts
+            .reads
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.get(k).await
+    }
+}
+
+pub(crate) async fn a_preparation_writes_only_on_claim_and_terminal<R: PreparationRegistry>(r: R) {
+    let counting = CountingRegistry::new(r);
+    // A successful job, then a failing one on another source.
+    let ok = fresh_key();
+    counting
+        .claim(claim_req(&ok, "A", t0()))
+        .await
+        .unwrap()
+        .unwrap();
+    counting
+        .complete(&ok, "A", ready_info(), t0())
+        .await
+        .unwrap();
+    assert_eq!(counting.snapshot(), (1, 1, 0, 0));
+    let bad = fresh_key();
+    counting
+        .claim(claim_req(&bad, "A", t0()))
+        .await
+        .unwrap()
+        .unwrap();
+    counting.fail(&bad, "A", "time", "x", t0()).await.unwrap();
+    assert_eq!(counting.snapshot(), (2, 2, 0, 0));
+}
+
+pub(crate) async fn complete_after_the_row_is_deleted_is_cancelled<R: PreparationRegistry>(r: &R) {
+    let key = fresh_key();
+    r.claim(claim_req(&key, "A", t0())).await.unwrap().unwrap();
+    // The source was deleted: the API removed the row (done here by SQL-free
+    // means is not possible, so the trait's `delete` stands in for it).
+    assert!(r.delete(&key).await.unwrap());
+    let out = r.complete(&key, "A", ready_info(), t0()).await.unwrap();
+    assert_eq!(out, TerminalOutcome::Cancelled);
+    assert_eq!(r.get(&key).await.unwrap(), None, "no row, never ready");
+}
+
+pub(crate) async fn still_owned_tells_the_owner_from_everyone_else<R: PreparationRegistry>(r: &R) {
+    let key = fresh_key();
+    assert!(!r.still_owned(&key, "A").await.unwrap(), "no row");
+    r.claim(claim_req(&key, "A", t0())).await.unwrap().unwrap();
+    assert!(r.still_owned(&key, "A").await.unwrap());
+    assert!(!r.still_owned(&key, "B").await.unwrap(), "another owner");
+    // Takeover after expiry moves ownership.
+    r.claim(claim_req(&key, "B", t0() + Duration::seconds(400)))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!r.still_owned(&key, "A").await.unwrap());
+    assert!(r.still_owned(&key, "B").await.unwrap());
+    // Deleting the row is the cancellation signal.
+    assert!(r.delete(&key).await.unwrap());
+    assert!(!r.still_owned(&key, "B").await.unwrap());
+    assert!(
+        !r.delete(&key).await.unwrap(),
+        "second delete finds nothing"
+    );
+}
+
+pub(crate) async fn the_cancellation_check_is_a_read_and_the_lease_is_not_renewed<
+    R: PreparationRegistry,
+>(
+    r: R,
+) {
+    let counting = CountingRegistry::new(r);
+    let key = fresh_key();
+    counting
+        .claim(claim_req(&key, "A", t0()))
+        .await
+        .unwrap()
+        .unwrap();
+    let before = get_row(&counting, &key).await;
+    for _ in 0..20 {
+        assert!(counting.still_owned(&key, "A").await.unwrap());
+    }
+    let after = get_row(&counting, &key).await;
+    assert_eq!(
+        after, before,
+        "checking ownership changes nothing, lease included"
+    );
+    assert_eq!(counting.snapshot(), (1, 0, 0, 22));
+}
+
+pub(crate) async fn a_duplicate_trigger_after_delete_leaves_no_row<R: PreparationRegistry>(r: &R) {
+    let key = fresh_key();
+    r.claim(claim_req(&key, "A", t0())).await.unwrap().unwrap();
+    // The source file is deleted while A runs: the row goes first.
+    assert!(r.delete(&key).await.unwrap());
+    assert!(
+        !r.still_owned(&key, "A").await.unwrap(),
+        "A sees it and stops"
+    );
+    // A duplicate trigger arrives afterwards and re-claims a fresh row ...
+    let later = t0() + Duration::seconds(30);
+    let claim = r.claim(claim_req(&key, "B", later)).await.unwrap();
+    assert_eq!(claim, Some(Claim { attempts: 1 }));
+    // ... finds the source missing and removes its own row: nothing is left,
+    // in particular no `failed` row.
+    assert!(
+        !r.release(&key, "A").await.unwrap(),
+        "a stale owner removes nothing"
+    );
+    assert_eq!(get_row(r, &key).await.lease_owner.as_deref(), Some("B"));
+    assert!(r.release(&key, "B").await.unwrap());
+    assert_eq!(r.get(&key).await.unwrap(), None);
+}
+
 #[cfg(test)]
 mod sqlite {
     use super::*;
@@ -506,5 +704,37 @@ mod sqlite {
     async fn tabular_prepare_a_non_owner_terminal_write_records_no_blobs() {
         let f = fixture().await;
         a_non_owner_terminal_write_records_no_blobs(&*f.registry).await;
+    }
+
+    #[tokio::test]
+    async fn tabular_prepare_a_preparation_writes_only_on_claim_and_terminal() {
+        let f = fixture().await;
+        let inner = SqlitePreparationRegistry::from_pool(f.registry.pool());
+        a_preparation_writes_only_on_claim_and_terminal(inner).await;
+    }
+
+    #[tokio::test]
+    async fn tabular_prepare_complete_after_the_row_is_deleted_is_cancelled() {
+        let f = fixture().await;
+        complete_after_the_row_is_deleted_is_cancelled(&*f.registry).await;
+    }
+
+    #[tokio::test]
+    async fn tabular_prepare_still_owned_tells_the_owner_from_everyone_else() {
+        let f = fixture().await;
+        still_owned_tells_the_owner_from_everyone_else(&*f.registry).await;
+    }
+
+    #[tokio::test]
+    async fn tabular_prepare_the_cancellation_check_is_a_read_and_the_lease_is_not_renewed() {
+        let f = fixture().await;
+        let inner = SqlitePreparationRegistry::from_pool(f.registry.pool());
+        the_cancellation_check_is_a_read_and_the_lease_is_not_renewed(inner).await;
+    }
+
+    #[tokio::test]
+    async fn tabular_prepare_a_duplicate_trigger_after_delete_leaves_no_row() {
+        let f = fixture().await;
+        a_duplicate_trigger_after_delete_leaves_no_row(&*f.registry).await;
     }
 }

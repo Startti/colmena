@@ -179,6 +179,21 @@ pub trait PreparationRegistry: Send + Sync {
         now: DateTime<Utc>,
     ) -> Result<TerminalOutcome, RegistryError>;
 
+    /// Cancellation check: reads the row by primary key. `false` for a missing
+    /// row or another owner. A read, never a write.
+    async fn still_owned(&self, source_key: &str, owner: &str) -> Result<bool, RegistryError>;
+
+    /// Delete the row only if `owner` still holds it (a job that finds its
+    /// source missing leaves no `failed` row behind). `true` if a row went.
+    async fn release(&self, source_key: &str, owner: &str) -> Result<bool, RegistryError>;
+
+    /// Delete the row unconditionally. Used only when the SOURCE file is
+    /// deleted: a running job observes the missing row through `still_owned`,
+    /// stops, and can never complete a table for it. The TTL cleanup must never
+    /// use it (it claims rows with `begin_delete`, which refuses a live lease).
+    /// `true` if a row went.
+    async fn delete(&self, source_key: &str) -> Result<bool, RegistryError>;
+
     async fn get(&self, source_key: &str) -> Result<Option<PreparedRow>, RegistryError>;
 }
 
@@ -246,6 +261,17 @@ UPDATE attachment_prepared
        lease_owner = NULL, lease_until = NULL, updated_at = $7
  WHERE source_storage_key = $1 AND lease_owner = $2 AND status = 'running'
 RETURNING source_storage_key";
+
+/// Cancellation check: `$1` key, `$2` owner. A read.
+pub(crate) const STILL_OWNED_SQL: &str = "\
+SELECT 1 FROM attachment_prepared WHERE source_storage_key = $1 AND lease_owner = $2";
+
+/// Delete only while `$2` still owns the row.
+pub(crate) const RELEASE_SQL: &str = "\
+DELETE FROM attachment_prepared WHERE source_storage_key = $1 AND lease_owner = $2";
+
+pub(crate) const DELETE_SQL: &str = "\
+DELETE FROM attachment_prepared WHERE source_storage_key = $1";
 
 pub(crate) const GET_SQL: &str = "\
 SELECT source_storage_key, status, format_version, manifest_key, blob_keys,

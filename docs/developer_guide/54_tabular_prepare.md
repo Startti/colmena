@@ -29,7 +29,7 @@ host can decide where rows live and who deletes one (open question O8: ADP
 directly or an internal Colmena endpoint). Both dialects run the same
 statements: written once with `$N` placeholders, rewritten to `?N` for SQLite.
 This chain has the SQLite implementation (`sqlite_registry.rs`) so far, with
-`claim`, `complete`, `fail` and `get`; the Postgres implementation follows in its own slice.
+`claim`, `complete`, `fail`, the cancellation check and `get`; the Postgres implementation follows in its own slice.
 
 ### Claim rule
 
@@ -74,6 +74,20 @@ must stop. A cancelled preparation never becomes `ready`, and a missing row
 never gains a `failed` row. On success the lease is cleared; `failed` keeps its
 attempt count and records the reason.
 
+### Cancellation check
+
+- `still_owned(source_key, owner)` is the cancellation check a job makes
+  between parts: a read by primary key, `false` for a missing row or another
+  owner. It never writes, and it does not renew the lease (the lease is fixed).
+- `delete(source_key)` removes the row unconditionally. It is used only when
+  the SOURCE file is deleted: a running job then sees the missing row through
+  `still_owned`, stops, and its `complete` returns `Cancelled`, so no table is
+  ever completed for a source that no longer exists.
+- `release(source_key, owner)` removes the row only if `owner` still holds it.
+  A duplicate trigger that arrives after a delete re-claims a fresh row, finds
+  the source missing and releases its own row, so no `failed` row is left
+  behind.
+
 ### Blob tracking
 
 `blob_keys` is every blob that may exist for the source. `complete` and
@@ -99,7 +113,8 @@ attachment_prepared -- --ignored`).
 file-backed SQLite database: a claim creates a `running` row, a live lease is
 refused, an expired one is taken over, a dead job is retried only up to the
 attempt cap, the lease boundary holds at millisecond resolution, and eight
-concurrent claims have exactly one winner. Terminal writes, the blob union and the
-`Cancelled` cases are covered the same way. The cases are written once as
+concurrent claims have exactly one winner. Terminal writes, the blob union, the
+`Cancelled` cases and the cancellation check (including that checking ownership
+changes nothing, lease included) are covered the same way. The cases are written once as
 functions generic over the trait (`registry_contract.rs`) so the Postgres slice
 runs the same ones.
