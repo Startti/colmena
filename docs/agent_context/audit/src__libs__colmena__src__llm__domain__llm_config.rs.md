@@ -14,6 +14,8 @@
 - `LlmUsage::with_thinking_tokens(self, tokens) -> Self` — Builder adding reasoning tokens and updating total
 - `LlmUsage::with_cache_read_tokens(self, tokens) -> Self` — Builder adding cache read token count
 - `LlmUsage::with_cache_write_tokens(self, tokens) -> Self` — Builder adding cache write token count
+- `LlmUsage::add(&mut self, other)` — Folds another usage in, field by field
+- `LlmUsage::beyond(&self, reported) -> Option<LlmUsage>` — What a total holds beyond what was already reported (floored at 0; `None` when nothing); keeps `llm_call` from billing a call twice
 
 ### LlmConfig impl (builders)
 - `LlmConfig::new(provider) -> Self` — Constructor with provider and all parameters defaulted to None

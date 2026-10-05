@@ -475,6 +475,13 @@ El texto completo también queda disponible en `output.final_response` del `node
 > `cache_read_tokens` y `cache_write_tokens` están **siempre presentes**, incluso
 > en `0`. `thinking_tokens` solo aparece si es > 0.
 >
+> Cada llamada al proveedor cuenta **una sola vez** en `usage-summary`,
+> `subgraph-usage-summary` y `finish.usage`, y la fila de un `llm_call` coincide
+> con el `extra_info.usage` de su `node-end`. Hasta el 2026-10-05 un `llm_call`
+> con `stream: true` aparecía al doble, y un `critic`/`planner`/`reactor` sin
+> `streaming` (como los internos de un `orchestrator`) en cero. Ver
+> [guía 17 §6](developer_guide/17_technical_reference.md).
+>
 > Ver [§14 — Provider prompt caching](developer_guide/14_llm_deep_dive.md) para
 > la fórmula de costo y la tabla de semántica por provider.
 

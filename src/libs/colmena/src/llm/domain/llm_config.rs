@@ -123,6 +123,43 @@ impl LlmUsage {
         self
     }
 
+    /// Fold `other` into `self`, field by field.
+    pub fn add(&mut self, other: &LlmUsage) {
+        fn sum(a: Option<u32>, b: Option<u32>) -> Option<u32> {
+            match (a, b) {
+                (None, None) => None,
+                (a, b) => Some(a.unwrap_or(0) + b.unwrap_or(0)),
+            }
+        }
+        self.prompt_tokens += other.prompt_tokens;
+        self.completion_tokens += other.completion_tokens;
+        self.thinking_tokens = sum(self.thinking_tokens, other.thinking_tokens);
+        self.cache_read_tokens = sum(self.cache_read_tokens, other.cache_read_tokens);
+        self.cache_write_tokens = sum(self.cache_write_tokens, other.cache_write_tokens);
+        self.recompute_total();
+    }
+
+    /// What `self` (a total) holds beyond `reported`, each field floored at 0;
+    /// `None` when nothing is left. A node that already reported part of its
+    /// total reports only this, so no provider call is billed twice.
+    pub fn beyond(&self, reported: &LlmUsage) -> Option<LlmUsage> {
+        fn left(a: Option<u32>, b: Option<u32>) -> Option<u32> {
+            Some(a?.saturating_sub(b.unwrap_or(0))).filter(|n| *n > 0)
+        }
+        let mut rest = LlmUsage {
+            prompt_tokens: self.prompt_tokens.saturating_sub(reported.prompt_tokens),
+            completion_tokens: self
+                .completion_tokens
+                .saturating_sub(reported.completion_tokens),
+            thinking_tokens: left(self.thinking_tokens, reported.thinking_tokens),
+            cache_read_tokens: left(self.cache_read_tokens, reported.cache_read_tokens),
+            cache_write_tokens: left(self.cache_write_tokens, reported.cache_write_tokens),
+            total_tokens: 0,
+        };
+        rest.recompute_total();
+        (rest.total_tokens > 0).then_some(rest)
+    }
+
     /// Recomputed from scratch on every mutation so builder call order cannot
     /// change the result.
     fn recompute_total(&mut self) {
@@ -407,5 +444,18 @@ mod tests {
         assert_eq!(config.top_p(), Some(0.9));
         assert_eq!(config.frequency_penalty(), Some(-1.0));
         assert_eq!(config.presence_penalty(), Some(1.0));
+    }
+
+    #[test]
+    fn add_sums_and_beyond_is_what_was_not_reported() {
+        let mut total = LlmUsage::new(100, 10).with_cache_read_tokens(5);
+        total.add(&LlmUsage::new(200, 20).with_thinking_tokens(7));
+        let want = LlmUsage::new(300, 30).with_thinking_tokens(7);
+        assert_eq!(total, want.clone().with_cache_read_tokens(5));
+        assert_eq!(total.beyond(&total), None, "all reported: nothing left");
+        let rest = total.beyond(&LlmUsage::new(0, 0).with_cache_read_tokens(5));
+        assert_eq!(rest, Some(want), "a field reported whole drops out");
+        // More reported than the total floors at nothing rather than wrapping.
+        assert_eq!(LlmUsage::new(1, 1).beyond(&LlmUsage::new(5, 5)), None);
     }
 }

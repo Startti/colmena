@@ -3544,11 +3544,16 @@ impl ExecutableNode for LlmNode {
         let current_reasoning_id: Arc<std::sync::Mutex<Option<String>>> =
             Arc::new(std::sync::Mutex::new(None));
 
+        // Usage already reported to the observer, one `Usage` part per provider
+        // call; the end of the node reports only what this misses (3.1).
+        let reported_usage: Arc<std::sync::Mutex<crate::llm::domain::LlmUsage>> = Arc::default();
+
         // Define on_token callback if streaming is enabled and observer is present
         let observer_for_stream = _observer.clone();
         let on_token: Option<Box<dyn Fn(LlmStreamPart) + Send + Sync>> =
             if let Some(obs) = observer_for_stream {
                 let reasoning_id = current_reasoning_id.clone();
+                let reported_usage = reported_usage.clone();
                 let scope_executor = tool_executor.clone();
                 let scopes = ToolCallScopes::default();
                 Some(Box::new(move |part: LlmStreamPart| {
@@ -3587,14 +3592,15 @@ impl ExecutableNode for LlmNode {
                                 args_chunk: chunk.args_chunk,
                             })
                         }
-                        LlmStreamPart::Usage(usage) if stream_enabled => {
-                            obs.on_event(NodeEvent::LlmUsage {
-                                prompt_tokens: usage.prompt_tokens,
-                                completion_tokens: usage.completion_tokens,
-                                thinking_tokens: usage.thinking_tokens,
-                                cache_read_tokens: usage.cache_read_tokens,
-                                cache_write_tokens: usage.cache_write_tokens,
-                            })
+                        // Billing, not display (the SSE shows no frame for it), so
+                        // reported whether or not the node streams: a call made
+                        // before a cancel or an error is still billed.
+                        LlmStreamPart::Usage(usage) => {
+                            reported_usage
+                                .lock()
+                                .unwrap_or_else(|p| p.into_inner())
+                                .add(&usage);
+                            obs.on_event(NodeEvent::llm_usage(&usage))
                         }
                         LlmStreamPart::LlmToolCallStart(tc) => {
                             let child_scope = scopes.open(scope_executor.as_ref(), &tc);
@@ -3911,17 +3917,16 @@ impl ExecutableNode for LlmNode {
             }));
         }
 
-        // 3.1 Notify observer of usage (even if not streaming)
-        if let Some(obs) = _observer.clone() {
-            if let Some(usage) = response.usage() {
+        // 3.1 `response.usage()` is the whole loop's total, and each call's part
+        // of it already went out as it arrived: report only what did not.
+        if let (Some(obs), Some(total)) = (_observer.clone(), response.usage()) {
+            let reported = reported_usage
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .clone();
+            if let Some(rest) = total.beyond(&reported) {
                 use crate::dag_engine::domain::observer::NodeEvent;
-                obs.on_event(NodeEvent::LlmUsage {
-                    prompt_tokens: usage.prompt_tokens,
-                    completion_tokens: usage.completion_tokens,
-                    thinking_tokens: usage.thinking_tokens,
-                    cache_read_tokens: usage.cache_read_tokens,
-                    cache_write_tokens: usage.cache_write_tokens,
-                });
+                obs.on_event(NodeEvent::llm_usage(&rest));
             }
         }
 
