@@ -1596,12 +1596,22 @@ impl AgentService {
             let mut captured_req_id = crate::llm::domain::LlmRequestId::new();
             let mut accumulated_tool_calls: std::collections::HashMap<usize, ToolCall> =
                 std::collections::HashMap::new();
+            // The provider's reasons, kept like `call` keeps them: without
+            // them an empty answer reaches the host with no why.
+            let mut finish_reason: Option<String> = None;
+            let mut block_reason: Option<String> = None;
 
             while let Some(chunk_result) = stream.next().await {
                 match chunk_result {
                     Ok(chunk) => {
                         captured_req_id = chunk.request_id().clone();
                         captured_provider = chunk.provider().clone();
+                        if let Some(reason) = chunk.finish_reason() {
+                            finish_reason = Some(reason.to_string());
+                        }
+                        if let Some(reason) = chunk.block_reason() {
+                            block_reason = Some(reason.to_string());
+                        }
                         // A call's `Usage` goes out once, after the stream (below).
                         if !matches!(chunk.part(), LlmStreamPart::Usage(_)) {
                             (callback)(chunk.part().clone());
@@ -1668,6 +1678,12 @@ impl AgentService {
                 // Only the last `Usage` part is the call's total: a provider may
                 // stream cumulative ones, and the observer sums what it gets.
                 (callback)(LlmStreamPart::Usage(usage.clone()));
+            }
+            if let Some(reason) = finish_reason {
+                final_response = final_response.with_finish_reason(reason);
+            }
+            if let Some(reason) = block_reason {
+                final_response = final_response.with_block_reason(reason);
             }
             final_response
         } else {
@@ -2420,6 +2436,39 @@ mod tests {
         assert_eq!(result.unwrap().content(), "Hi there!");
         // 1 user message + 1 assistant message persisted.
         assert_eq!(conv_state.lock().unwrap().len(), 2);
+    }
+
+    /// A streamed answer keeps the provider's finish and block reasons, as
+    /// `call` does: they reach the node's `extra_info`.
+    #[tokio::test]
+    async fn streamed_answer_keeps_finish_and_block_reason() {
+        let mut mock_llm = MockLlmRepo::new();
+        mock_llm.expect_stream().times(1).returning(|_req| {
+            let part = LlmStreamPart::Content("[Empty]".to_string());
+            let chunk = LlmStreamChunk::new(
+                LlmRequestId::new(),
+                part,
+                create_config().provider().clone(),
+                true,
+            )
+            .with_finish_reason("SAFETY".to_string())
+            .with_block_reason("SAFETY".to_string());
+            Ok(Box::pin(futures::stream::iter(vec![Ok(chunk)])) as LlmStream)
+        });
+        let (mock_conv, _) = stateful_conv_mock(vec![]);
+        let service = AgentService::new(Arc::new(mock_llm), Arc::new(mock_conv));
+        let messages = vec![LlmMessage::user("hi".into()).unwrap()];
+        let request = LlmRequest::new(messages, create_config(), true).unwrap();
+        let on_token: Option<Box<dyn Fn(LlmStreamPart) + Send + Sync>> = Some(Box::new(|_| {}));
+
+        let (response, _) = service
+            .invoke_llm(request, &on_token, &create_config())
+            .await
+            .unwrap();
+
+        assert_eq!(response.content(), "[Empty]");
+        assert_eq!(response.finish_reason(), Some("SAFETY"));
+        assert_eq!(response.block_reason(), Some("SAFETY"));
     }
 
     #[tokio::test]
