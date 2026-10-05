@@ -453,6 +453,15 @@ El nodo LLM siempre retorna un JSON con la siguiente estructura:
 - **Descripción:** Herramientas que el LLM decidió llamar
 - **Nota:** Solo presente si el LLM usó herramientas
 
+#### `extra_info.finish_reason` / `extra_info.block_reason`
+- **Tipo:** `string`, cada uno solo si el proveedor lo dio, con o sin streaming.
+- `finish_reason` — el del proveedor tal cual (Gemini `STOP`, `SAFETY`, `RECITATION`, `MAX_TOKENS`,
+  `MALFORMED_FUNCTION_CALL`, `OTHER`; OpenAI `stop`/`length`/…; Anthropic `end_turn`/`max_tokens`/…).
+- `block_reason` — Gemini `promptFeedback.blockReason`: el proveedor rechazó el prompt mismo.
+- **Respuesta vacía de Gemini.** Sin texto y sin llamadas a tools, `result` es
+  `[Empty response - finish_reason: <X>]` (o `[Empty response - block_reason: <X>]`; con `MAX_TOKENS`, el aviso de
+  subir `max_tokens`), igual en `call` y en `stream`.
+
 #### `extra_info.all_tasks`
 - **Tipo:** `array<object>`
 - **Descripción:** Todos los resultados de tareas si `write_to_memory: true`
