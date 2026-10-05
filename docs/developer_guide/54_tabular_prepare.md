@@ -103,6 +103,31 @@ A cancelled job deletes what it wrote. Blobs of an attempt that crashed before
 any terminal write are not tracked; removing them needs a host that can delete
 by prefix (a later slice adds that port) and is otherwise a known limit.
 
+## Switch and ports
+
+`COLMENA_LARGE_TABULAR=on` (also `true`, `1`, `yes`) is read once by
+`EngineConfig::from_env` into `EngineConfig.prepare.large_tabular`; unset, `off`
+or anything else means off, and a later change of the environment does not reach
+a config already built. `EngineConfig.prepare` also carries the two ports a host
+replaces:
+
+- `PrepareTrigger::request(PrepareRequest)` asks the host to start a
+  preparation. It is best-effort and idempotent: the job claims the registry
+  row, so a duplicate request yields one preparation. The default
+  `InlineTrigger` hands the request to a `PrepareRunner` in this process; with
+  no converter wired (nothing converts yet) it only logs.
+- `PrepareProgress::{report, read}` carries progress outside the registry
+  (the ADP adapter keeps it in Redis). The default `NoopProgress` remembers
+  nothing. Colmena itself has no Redis dependency.
+
+**Start-up validation.** Enabling `COLMENA_LARGE_TABULAR` with the default,
+unwired trigger is a configuration error: `ColmenaEngine::new` calls
+`PrepareConfig::validate` and returns `EngineError::Other` naming the variable,
+instead of letting every call wait and report "still preparing" forever. A host
+that turns the switch on must first set `EngineConfig.prepare.trigger` to a
+wired trigger (and `prepare.progress` if it wants progress) before building the
+engine. With the switch off nothing is checked and nothing changes.
+
 ## Tests
 
 `cargo test --lib attachment_prepared` applies the SQLite migration to an
@@ -110,6 +135,10 @@ in-memory database and checks the columns, the primary key and the defaults.
 The Postgres twin is `#[ignore]`d like the other Postgres repository tests and
 needs `DATABASE_URL` (`DATABASE_URL=postgres://... cargo test --lib
 attachment_prepared -- --ignored`).
+
+`cargo test --test large_tabular_switch` runs in its own process: the switch is
+off by default, is read once, and the engine refuses to start with the switch on
+and an unwired trigger.
 
 `cargo test --lib tabular_prepare` runs the registry cases against a
 file-backed SQLite database: a claim creates a `running` row, a live lease is

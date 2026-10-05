@@ -27,6 +27,7 @@ async fn engine_boots_with_pinned_pool_and_migrates() {
         liveness: Default::default(),
         child_graph_resolver: None,
         host_token_port: None,
+        prepare: Default::default(),
     })
     .await
     .expect("engine boots");
@@ -56,6 +57,7 @@ async fn shutdown_is_idempotent() {
         liveness: Default::default(),
         child_graph_resolver: None,
         host_token_port: None,
+        prepare: Default::default(),
     })
     .await
     .unwrap();

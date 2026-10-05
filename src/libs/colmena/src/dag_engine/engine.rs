@@ -71,6 +71,11 @@ pub struct EngineConfig {
     /// with a token plus a refresh handle — the engine never sees the client
     /// secret. `from_env` leaves it `None`: no host refresh.
     pub host_token_port: Option<Arc<dyn HostTokenPort>>,
+    /// Large tabular preparation (dark): the `COLMENA_LARGE_TABULAR` switch,
+    /// read once by `from_env`, plus the trigger and progress ports. Off by
+    /// default; `from_env` keeps the in-process trigger and no progress, an
+    /// embedder replaces them.
+    pub prepare: crate::tabular_prepare::ports::PrepareConfig,
 }
 
 /// Parse a raw string value as a boolean, independent of any environment
@@ -256,6 +261,7 @@ impl EngineConfig {
             child_graph_resolver: None,
             // Only an embedder can refresh a host token; it sets this too.
             host_token_port: None,
+            prepare: crate::tabular_prepare::ports::PrepareConfig::from_env(),
         })
     }
 }
@@ -270,6 +276,7 @@ impl ColmenaEngine {
     /// Build the engine: pin the internal pool, migrate state + secure-values
     /// schemas on it, build the node registry, and wire the `DagRunUseCase`.
     pub async fn new(config: EngineConfig) -> Result<Self, EngineError> {
+        config.prepare.validate().map_err(EngineError::Other)?;
         let liveness = config.liveness;
         let registry = Arc::new(PgPoolRegistry::new(config.pool_config));
 
