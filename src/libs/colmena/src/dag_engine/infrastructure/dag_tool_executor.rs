@@ -27,7 +27,9 @@ use crate::dag_engine::application::ports::NodeRegistryPort;
 use crate::dag_engine::application::secure_value_service::{MaskingObserver, SecureValueService};
 use crate::dag_engine::domain::events::{DagExecutionEvent, NodeEndError};
 use crate::dag_engine::domain::node::ExecutableNode;
-use crate::dag_engine::domain::observer::{ChildScopeObserver, ExecutionObserver, NodeEvent};
+use crate::dag_engine::domain::observer::{
+    ChildScopeObserver, ExecutionObserver, NodeEvent, ToolProgressStage,
+};
 use crate::dag_engine::domain::state::DagStateRepository;
 use crate::dag_engine::domain::tool_configuration::{
     memory_node_path, MemoryMode, MissingThreadId, ToolConfiguration, DYNAMIC_PLACEHOLDER,
@@ -567,6 +569,39 @@ impl DagToolExecutor {
     ) -> Self {
         self.observer = observer;
         self
+    }
+
+    /// Tell the stream that tool call `tool_id` is still alive. `tool_id` MUST be
+    /// the id of the tool call the person sees: the one the engine puts on
+    /// `tool-input-available` for that call, because the client finds the row to
+    /// update by it. (There is no caller yet, so no test can tie the two; the
+    /// first caller owns that check.) A no-op when the executor has no observer,
+    /// so a host that does not stream is never affected. The event carries no
+    /// node identity: the run loop stamps the node that owns the call.
+    ///
+    /// Every call counts as activity for the run loop's idle watchdog and nothing
+    /// here bounds how long a caller keeps calling. A caller that loops on this
+    /// method must carry its own deadline; `with_progress_ticker` is the bounded
+    /// way to report progress from a step.
+    pub fn emit_tool_progress(
+        &self,
+        tool_id: &str,
+        stage: ToolProgressStage,
+        done: Option<u64>,
+        total: Option<u64>,
+        unit: Option<&str>,
+        elapsed_ms: u64,
+    ) {
+        if let Some(observer) = &self.observer {
+            observer.on_event(NodeEvent::ToolProgress {
+                tool_id: tool_id.to_string(),
+                stage,
+                done,
+                total,
+                unit: unit.map(str::to_string),
+                elapsed_ms,
+            });
+        }
     }
 
     /// Attach the slot that will hold this turn's MCP dispatcher.
@@ -8242,5 +8277,135 @@ mod google_workspace_auth_tests {
                 "{tool}: {out}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tool_progress_emitter_tests {
+    //! The emitter and the ticker a long tool step uses to say it is alive.
+    //! Time is paused, so every schedule below is exact.
+    use super::*;
+    use crate::dag_engine::domain::observer::ToolProgressStage;
+
+    struct EmptyRegistry;
+    impl NodeRegistryPort for EmptyRegistry {
+        fn get_node(&self, _node_type: &str) -> Option<Arc<dyn ExecutableNode>> {
+            None
+        }
+        fn get_all_nodes(&self) -> HashMap<String, Arc<dyn ExecutableNode>> {
+            HashMap::new()
+        }
+    }
+
+    #[derive(Default)]
+    struct Recording(std::sync::Mutex<Vec<NodeEvent>>);
+    impl ExecutionObserver for Recording {
+        fn on_event(&self, event: NodeEvent) {
+            self.0.lock().unwrap().push(event);
+        }
+    }
+    impl Recording {
+        /// `(tool_id, stage, done, total, unit, elapsed_ms)` of every progress
+        /// event seen so far; anything else recorded fails the test.
+        #[allow(clippy::type_complexity)]
+        fn progress(
+            &self,
+        ) -> Vec<(
+            String,
+            ToolProgressStage,
+            Option<u64>,
+            Option<u64>,
+            Option<String>,
+            u64,
+        )> {
+            self.0
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|e| match e {
+                    NodeEvent::ToolProgress {
+                        tool_id,
+                        stage,
+                        done,
+                        total,
+                        unit,
+                        elapsed_ms,
+                    } => (
+                        tool_id.clone(),
+                        *stage,
+                        *done,
+                        *total,
+                        unit.clone(),
+                        *elapsed_ms,
+                    ),
+                    other => panic!("only progress was expected, got {other:?}"),
+                })
+                .collect()
+        }
+    }
+
+    fn executor(observer: Option<Arc<Recording>>) -> DagToolExecutor {
+        DagToolExecutor::new(Arc::new(EmptyRegistry), HashMap::new())
+            .with_observer(observer.map(|o| o as Arc<dyn ExecutionObserver>))
+    }
+
+    #[test]
+    fn emit_tool_progress_sends_the_event_with_the_calls_tool_id() {
+        let recording = Arc::new(Recording::default());
+        executor(Some(recording.clone())).emit_tool_progress(
+            "call_9",
+            ToolProgressStage::Staging,
+            Some(3),
+            Some(8),
+            Some("parts"),
+            1_500,
+        );
+        assert_eq!(
+            recording.progress(),
+            [(
+                "call_9".to_string(),
+                ToolProgressStage::Staging,
+                Some(3),
+                Some(8),
+                Some("parts".to_string()),
+                1_500
+            )]
+        );
+    }
+
+    #[test]
+    fn emit_tool_progress_without_an_observer_is_a_no_op() {
+        executor(None).emit_tool_progress(
+            "call_9",
+            ToolProgressStage::Running,
+            None,
+            None,
+            None,
+            0,
+        );
+    }
+
+    /// What reaches the client: the recorded event, stamped by the loop's own
+    /// mapping and rendered by the real SSE mapper.
+    #[test]
+    fn an_emitted_event_renders_as_the_agreed_sse_frame() {
+        let recording = Arc::new(Recording::default());
+        executor(Some(recording.clone())).emit_tool_progress(
+            "call_9",
+            ToolProgressStage::Collecting,
+            None,
+            None,
+            None,
+            2_000,
+        );
+        let event = recording.0.lock().unwrap().remove(0);
+        let dag = DagExecutionEvent::from_node_event(event, "agent").unwrap();
+        let frames = crate::dag_engine::sse_mapper::SseMapper::new().map(&dag);
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0]["type"], "tool-progress");
+        assert_eq!(frames[0]["toolCallId"], "call_9");
+        assert_eq!(frames[0]["stage"], "collecting");
+        assert_eq!(frames[0]["elapsedMs"], 2_000);
+        assert!(frames[0].get("done").is_none(), "no count, no done");
     }
 }
