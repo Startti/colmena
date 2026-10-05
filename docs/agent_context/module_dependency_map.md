@@ -5,8 +5,8 @@
 
 **How to use (for the exploration/spec phase):** before opening files to assess a change, look up the target file below. **Used by** is its blast radius — the files that break if you change its public surface. **Depends on** is what it needs. Start by reading only those, not the whole repo.
 
-- Files indexed: **422**
-- Modules with at least one importer: **199**
+- Files indexed: **423**
+- Modules with at least one importer: **200**
 
 ## Blast-radius ranking (change these with the most care)
 
@@ -29,8 +29,8 @@
 | 14 | `llm::infrastructure` | `src/libs/colmena/src/llm/infrastructure/mod.rs` |
 | 13 | `google_oauth::infrastructure` | `src/libs/colmena/src/google_oauth/infrastructure/mod.rs` |
 | 12 | `dag_engine::application::secure_value_service` | `src/libs/colmena/src/dag_engine/application/secure_value_service.rs` |
+| 12 | `dag_engine::infrastructure::pool_registry` | `src/libs/colmena/src/dag_engine/infrastructure/pool_registry/mod.rs` |
 | 11 | `dag_engine::domain::python_executor` | `src/libs/colmena/src/dag_engine/domain/python_executor.rs` |
-| 11 | `dag_engine::infrastructure::pool_registry` | `src/libs/colmena/src/dag_engine/infrastructure/pool_registry/mod.rs` |
 | 11 | `documents::domain::ports` | `src/libs/colmena/src/documents/domain/ports.rs` |
 | 11 | `google_oauth::domain` | `src/libs/colmena/src/google_oauth/domain/mod.rs` |
 | 11 | `text` | `src/libs/colmena/src/text/mod.rs` |
@@ -860,7 +860,7 @@
 
 #### `src/libs/colmena/src/dag_engine/infrastructure/pool_registry/mod.rs`
 - Module: `dag_engine::infrastructure::pool_registry`
-- **Used by (11)**: `src/libs/colmena/src/dag_engine/engine.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/sql.rs`, `src/libs/colmena/src/dag_engine/infrastructure/registry.rs`, `src/libs/colmena/src/dag_engine/infrastructure/sql_port_factory.rs`, `src/libs/colmena/src/llm/infrastructure/files/postgres_file_cache.rs`, `src/libs/colmena/src/llm/infrastructure/persistence/postgres_attachment_registry.rs`, `src/libs/colmena/src/llm/infrastructure/persistence/repository_factory.rs`, `src/libs/colmena/src/node_bindings/registry.rs`, `src/libs/colmena/src/python_bindings/mod.rs`, `src/libs/colmena/src/tabular_prepare/registry.rs`
+- **Used by (12)**: `src/libs/colmena/src/dag_engine/engine.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/sql.rs`, `src/libs/colmena/src/dag_engine/infrastructure/registry.rs`, `src/libs/colmena/src/dag_engine/infrastructure/sql_port_factory.rs`, `src/libs/colmena/src/llm/infrastructure/files/postgres_file_cache.rs`, `src/libs/colmena/src/llm/infrastructure/persistence/postgres_attachment_registry.rs`, `src/libs/colmena/src/llm/infrastructure/persistence/repository_factory.rs`, `src/libs/colmena/src/node_bindings/registry.rs`, `src/libs/colmena/src/python_bindings/mod.rs`, `src/libs/colmena/src/tabular_prepare/postgres_registry.rs`, `src/libs/colmena/src/tabular_prepare/registry.rs`
 - Depends on (0): — (no intra-crate imports)
 
 #### `src/libs/colmena/src/dag_engine/infrastructure/pool_registry/registry.rs`
@@ -2099,6 +2099,11 @@
 - **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
 - Depends on (0): — (no intra-crate imports)
 
+#### `src/libs/colmena/src/tabular_prepare/postgres_registry.rs`
+- Module: `tabular_prepare::postgres_registry`
+- **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
+- Depends on (2): `dag_engine::infrastructure::pool_registry`, `tabular_prepare::registry_contract`
+
 #### `src/libs/colmena/src/tabular_prepare/registry.rs`
 - Module: `tabular_prepare::registry`
 - **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
@@ -2106,7 +2111,7 @@
 
 #### `src/libs/colmena/src/tabular_prepare/registry_contract.rs`
 - Module: `tabular_prepare::registry_contract`
-- **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
+- **Used by (1)**: `src/libs/colmena/src/tabular_prepare/postgres_registry.rs`
 - Depends on (1): `tabular_prepare::sqlite_registry`
 
 #### `src/libs/colmena/src/tabular_prepare/sqlite_registry.rs`
