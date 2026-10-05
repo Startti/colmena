@@ -76,6 +76,21 @@ must stop. A cancelled preparation never becomes `ready`, and a missing row
 never gains a `failed` row. On success the lease is cleared; `failed` keeps its
 attempt count and records the reason.
 
+### Cleanup queries
+
+Two read queries serve the cleanup pass (which arrives in later slices); both
+are in `PreparationRegistry` and run on SQLite and Postgres:
+
+- `find_stale(cutoff, now, after, limit)`: rows whose
+  `COALESCE(last_used_at, created_at)` is before `cutoff`, in key order strictly
+  after the `after` cursor, `limit` at a time. A `running` row with a live lease
+  at `now` is never returned: an old row claimed again keeps its creation time
+  and its preparation must not be pulled from under it. The keyset cursor means
+  rows the pass cannot delete never hide the ones behind them. A table used
+  recently is not returned, because `touch_last_used` moves `last_used_at`.
+- `list_ready_after(after, limit)`: `ready` rows in key order after a cursor, for
+  the pass that checks whether a manifest still exists.
+
 ### Cancellation check
 
 - `still_owned(source_key, owner)` is the cancellation check a job makes

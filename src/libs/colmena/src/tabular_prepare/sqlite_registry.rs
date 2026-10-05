@@ -148,6 +148,38 @@ impl PreparationRegistry for SqlitePreparationRegistry {
         Ok(row.is_some())
     }
 
+    async fn find_stale(
+        &self,
+        cutoff: DateTime<Utc>,
+        now: DateTime<Utc>,
+        after: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<PreparedRow>, RegistryError> {
+        let rows = sqlx::query(&for_sqlite(FIND_STALE_SQL))
+            .bind(cutoff)
+            .bind(now)
+            .bind(after.unwrap_or(""))
+            .bind(i64::from(limit))
+            .fetch_all(&*self.pool)
+            .await
+            .map_err(|e| backend_err("find_stale", e))?;
+        rows.iter().map(|row| Ok(prepared_row_from!(row))).collect()
+    }
+
+    async fn list_ready_after(
+        &self,
+        after: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<PreparedRow>, RegistryError> {
+        let rows = sqlx::query(&for_sqlite(LIST_READY_AFTER_SQL))
+            .bind(after.unwrap_or(""))
+            .bind(i64::from(limit))
+            .fetch_all(&*self.pool)
+            .await
+            .map_err(|e| backend_err("list_ready_after", e))?;
+        rows.iter().map(|row| Ok(prepared_row_from!(row))).collect()
+    }
+
     async fn get(&self, source_key: &str) -> Result<Option<PreparedRow>, RegistryError> {
         let row = sqlx::query(&for_sqlite(GET_SQL))
             .bind(source_key)

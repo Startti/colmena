@@ -208,6 +208,28 @@ pub trait PreparationRegistry: Send + Sync {
         now: DateTime<Utc>,
         min_interval: Duration,
     ) -> Result<bool, RegistryError>;
+
+    /// Rows for the cleanup pass, in key order strictly after `after` (a
+    /// keyset cursor, so rows that could not be deleted never hide later
+    /// ones): `COALESCE(last_used_at, created_at) < cutoff`, except a row that
+    /// is `running` with a live lease at `now` (an old row claimed again keeps
+    /// its creation time, and its preparation must not be pulled from under
+    /// it).
+    async fn find_stale(
+        &self,
+        cutoff: DateTime<Utc>,
+        now: DateTime<Utc>,
+        after: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<PreparedRow>, RegistryError>;
+
+    /// `ready` rows in key order, strictly after `after`, for the pass that
+    /// looks for rows whose manifest is gone.
+    async fn list_ready_after(
+        &self,
+        after: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<PreparedRow>, RegistryError>;
 }
 
 // ---------------------------------------------------------------------------
@@ -293,6 +315,29 @@ UPDATE attachment_prepared
  WHERE source_storage_key = $1 AND status = 'ready'
    AND (last_used_at IS NULL OR last_used_at < $3)
 RETURNING source_storage_key";
+
+/// `$1` cutoff, `$2` now, `$3` after-key (empty string for the first page),
+/// `$4` limit.
+pub(crate) const FIND_STALE_SQL: &str = "\
+SELECT source_storage_key, status, format_version, manifest_key, blob_keys,
+       tables_json, source_bytes, prepared_bytes, error_code, error_detail,
+       lease_owner, lease_until, attempts, created_at, updated_at, last_used_at
+  FROM attachment_prepared
+ WHERE COALESCE(last_used_at, created_at) < $1
+   AND NOT (status = 'running' AND lease_until >= $2)
+   AND source_storage_key > $3
+ ORDER BY source_storage_key
+ LIMIT $4";
+
+/// `$1` after-key (empty string for the first page), `$2` limit.
+pub(crate) const LIST_READY_AFTER_SQL: &str = "\
+SELECT source_storage_key, status, format_version, manifest_key, blob_keys,
+       tables_json, source_bytes, prepared_bytes, error_code, error_detail,
+       lease_owner, lease_until, attempts, created_at, updated_at, last_used_at
+  FROM attachment_prepared
+ WHERE status = 'ready' AND source_storage_key > $1
+ ORDER BY source_storage_key
+ LIMIT $2";
 
 pub(crate) const GET_SQL: &str = "\
 SELECT source_storage_key, status, format_version, manifest_key, blob_keys,
