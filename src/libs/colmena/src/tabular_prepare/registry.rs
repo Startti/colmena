@@ -107,6 +107,24 @@ pub struct Claim {
     pub attempts: i32,
 }
 
+/// What a finished preparation records.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReadyInfo {
+    pub manifest_key: String,
+    pub blob_keys: Vec<String>,
+    pub tables_json: String,
+    pub prepared_bytes: i64,
+}
+
+/// Outcome of a terminal write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalOutcome {
+    Written,
+    /// The row is gone or no longer owned by the caller: the source was
+    /// removed (or the lease was taken over) and the caller must stop.
+    Cancelled,
+}
+
 #[derive(Debug, Error)]
 pub enum RegistryError {
     #[error("preparation registry backend error: {0}")]
@@ -121,6 +139,45 @@ pub trait PreparationRegistry: Send + Sync {
     /// lease, or its `format_version` is older. `None` means someone else
     /// holds it, it is final, or it is already ready at this version.
     async fn claim(&self, req: ClaimRequest) -> Result<Option<Claim>, RegistryError>;
+
+    /// Mark the preparation ready, only while `owner` still holds the lease.
+    /// `info.blob_keys` is added to the keys the row already tracks (union), so
+    /// blobs left by earlier attempts stay known. `Cancelled` leaves the row
+    /// untouched: it never becomes ready.
+    async fn complete(
+        &self,
+        source_key: &str,
+        owner: &str,
+        info: ReadyInfo,
+        now: DateTime<Utc>,
+    ) -> Result<TerminalOutcome, RegistryError>;
+
+    /// Record `failed(error_code)`, only while `owner` still holds the lease.
+    async fn fail(
+        &self,
+        source_key: &str,
+        owner: &str,
+        error_code: &str,
+        error_detail: &str,
+        now: DateTime<Utc>,
+    ) -> Result<TerminalOutcome, RegistryError> {
+        self.fail_with_blobs(source_key, owner, error_code, error_detail, &[], now)
+            .await
+    }
+
+    /// [`fail`](Self::fail) that also names the blobs this attempt left on
+    /// storage. `blob_keys` becomes the union of what the row already had and
+    /// these keys, so no blob of any attempt goes untracked (`complete` does
+    /// the same).
+    async fn fail_with_blobs(
+        &self,
+        source_key: &str,
+        owner: &str,
+        error_code: &str,
+        error_detail: &str,
+        blob_keys: &[String],
+        now: DateTime<Utc>,
+    ) -> Result<TerminalOutcome, RegistryError>;
 
     async fn get(&self, source_key: &str) -> Result<Option<PreparedRow>, RegistryError>;
 }
@@ -170,6 +227,26 @@ WHERE attachment_prepared.format_version < excluded.format_version
         AND attachment_prepared.lease_until < $6)
 RETURNING attempts";
 
+/// `$1` key, `$2` owner, `$3` error code, `$4` detail, `$5` blob keys (JSON,
+/// already merged), `$6` now.
+pub(crate) const FAIL_SQL: &str = "\
+UPDATE attachment_prepared
+   SET status = 'failed', error_code = $3, error_detail = $4, blob_keys = $5,
+       lease_owner = NULL, lease_until = NULL, updated_at = $6
+ WHERE source_storage_key = $1 AND lease_owner = $2 AND status = 'running'
+RETURNING source_storage_key";
+
+/// `$1` key, `$2` owner, `$3` manifest key, `$4` blob keys (JSON), `$5`
+/// tables (JSON), `$6` prepared bytes, `$7` now. Conditional on the lease
+/// owner: no row back means the preparation was cancelled.
+pub(crate) const COMPLETE_SQL: &str = "\
+UPDATE attachment_prepared
+   SET status = 'ready', manifest_key = $3, blob_keys = $4, tables_json = $5,
+       prepared_bytes = $6, error_code = NULL, error_detail = NULL,
+       lease_owner = NULL, lease_until = NULL, updated_at = $7
+ WHERE source_storage_key = $1 AND lease_owner = $2 AND status = 'running'
+RETURNING source_storage_key";
+
 pub(crate) const GET_SQL: &str = "\
 SELECT source_storage_key, status, format_version, manifest_key, blob_keys,
        tables_json, source_bytes, prepared_bytes, error_code, error_detail,
@@ -179,6 +256,22 @@ SELECT source_storage_key, status, format_version, manifest_key, blob_keys,
 
 pub(crate) fn backend_err(context: &str, e: impl std::fmt::Display) -> RegistryError {
     RegistryError::Backend(format!("{context}: {e}"))
+}
+
+pub(crate) fn blob_keys_to_json(keys: &[String]) -> Result<String, RegistryError> {
+    serde_json::to_string(keys).map_err(|e| backend_err("blob_keys", e))
+}
+
+/// Union of the keys a row already tracks and new ones: existing order first,
+/// no duplicates.
+pub(crate) fn merge_keys(existing: &[String], added: &[String]) -> Vec<String> {
+    let mut merged = existing.to_vec();
+    for key in added {
+        if !merged.contains(key) {
+            merged.push(key.clone());
+        }
+    }
+    merged
 }
 
 pub(crate) fn blob_keys_from_json(raw: &str) -> Result<Vec<String>, RegistryError> {
