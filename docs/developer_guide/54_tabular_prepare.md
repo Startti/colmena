@@ -181,6 +181,27 @@ is logged and never fails or delays the answer.
 a job, every call ends `StillPreparing`; the unwired default cannot reach this
 state because the engine refuses to start (see Switch and ports).
 
+## Streamed storage
+
+`OutputStorageRepository::store_stream(StoreStreamRequest)` persists a payload
+that arrives as a stream. `placement` is `Generated` (today's layout) or
+`DerivedFrom { source_storage_key, relative_path }` (a blob that lives and dies
+with a source file). The default implementation buffers the stream in memory
+and calls `store`, ignoring `placement`; it refuses with `InvalidInput("this
+host does not support streamed storage ...")` a stream whose `size_hint` or
+accumulated bytes exceed `DEFAULT_STREAM_BUFFER_MAX` (64 MiB, one prepared
+part). **A host that stores larger outputs must override it** to upload in
+chunks and honour `placement`. A stream error aborts before anything is
+stored. `store` is unchanged.
+
+Two more methods have safe defaults: `derived_root(source_key)` (the prefix
+under which a source's derived blobs live; default `None` = unknown) and
+`delete_derived(source_key, tracked_keys)` (default: delete each tracked key in
+order, stopping at the first failure; a host that can delete by prefix overrides
+it and thereby also removes blobs nobody tracked, such as those of an attempt
+that crashed before any terminal write). Nothing calls them yet: the cleanup
+pass that uses them follows in later slices.
+
 ## Tests
 
 `cargo test --lib attachment_prepared` applies the SQLite migration to an
@@ -189,6 +210,8 @@ The Postgres twin is `#[ignore]`d like the other Postgres repository tests and
 needs `DATABASE_URL` (`DATABASE_URL=postgres://... cargo test --lib
 attachment_prepared -- --ignored`).
 
+`cargo test --lib output_storage` covers the storage defaults (buffering, the
+size cap, a stream error storing nothing, derived-blob deletion).
 `cargo test --lib tabular_prepare_ensure` covers `ensure_prepared` with fake
 ports and a fake registry under paused time, including a dropped future, a hung
 progress port and a zero wait. `cargo test --test large_tabular_switch` runs in
