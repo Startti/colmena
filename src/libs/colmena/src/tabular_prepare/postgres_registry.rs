@@ -225,6 +225,25 @@ impl PreparationRegistry for PostgresPreparationRegistry {
         rows.iter().map(|row| Ok(prepared_row_from!(row))).collect()
     }
 
+    async fn mark_manifest_missing(
+        &self,
+        row: &PreparedRow,
+        now: DateTime<Utc>,
+    ) -> Result<bool, RegistryError> {
+        let Some(manifest) = row.manifest_key.as_deref() else {
+            return Ok(false);
+        };
+        let done = sqlx::query_scalar::<_, String>(MARK_MANIFEST_MISSING_SQL)
+            .bind(&row.source_storage_key)
+            .bind(now)
+            .bind(row.updated_at)
+            .bind(manifest)
+            .fetch_optional(&*self.pool)
+            .await
+            .map_err(|e| backend_err("mark_manifest_missing", e))?;
+        Ok(done.is_some())
+    }
+
     async fn get(&self, source_key: &str) -> Result<Option<PreparedRow>, RegistryError> {
         let row = sqlx::query(GET_SQL)
             .bind(source_key)
@@ -277,6 +296,22 @@ mod tests {
     pg_case!(
         tabular_prepare_pg_an_older_format_claim_keeps_the_old_manifest_tracked,
         an_older_format_claim_keeps_the_old_manifest_tracked
+    );
+    pg_case!(
+        tabular_prepare_pg_a_ready_row_with_a_missing_manifest_becomes_claimable,
+        a_ready_row_with_a_missing_manifest_becomes_claimable
+    );
+    pg_case!(
+        tabular_prepare_pg_mark_manifest_missing_only_touches_ready_rows,
+        mark_manifest_missing_only_touches_ready_rows
+    );
+    pg_case!(
+        tabular_prepare_pg_mark_manifest_missing_refuses_a_row_changed_since_the_check,
+        mark_manifest_missing_refuses_a_row_changed_since_the_check
+    );
+    pg_case!(
+        tabular_prepare_pg_a_completed_preparation_resets_the_attempts,
+        a_completed_preparation_resets_the_attempts
     );
     pg_case!(
         tabular_prepare_pg_a_re_prepared_table_is_not_stale_before_its_first_use,

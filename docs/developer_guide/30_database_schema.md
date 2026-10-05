@@ -405,7 +405,7 @@ documented in [54_tabular_prepare.md](./54_tabular_prepare.md) as the chain land
 | `prepared_bytes` | BIGINT | yes | Total size of the prepared blobs |
 | `error_code`, `error_detail` | TEXT | yes | Reason, set when `failed` |
 | `lease_owner`, `lease_until` | TEXT, timestamp | yes | Who holds the preparation (or, for `deleting`, the cleanup pass) and until when (one fixed value, never renewed) |
-| `attempts` | INTEGER | no | Attempts made under this `format_version` (default 0) |
+| `attempts` | INTEGER | no | Consecutive failed or abandoned attempts since the last completed preparation, under this `format_version` (cleared by `complete`; default 0) |
 | `created_at`, `updated_at` | timestamp | no | Written by the application |
 | `last_used_at` | timestamp | yes | Written when a ready table is handed out (at most once a day); the TTL pass of `attachment_gc` measures from it |
 
