@@ -99,6 +99,7 @@ are in `PreparationRegistry` and run on SQLite and Postgres:
 | (none) | `running` | `claim` |
 | `failed` (attempts < 3), `running` with an expired lease (attempts < 3), any row of an older format except `deleting` | `running` | `claim` |
 | `running` | `ready` / `failed` | `complete` / `fail` by the lease owner |
+| `ready` | `failed(manifest_missing)` (attempts already 0) | cleanup, when the manifest is gone (`mark_manifest_missing`) |
 | `ready`, `failed`, `running` with an expired lease | `deleting` | cleanup `begin_delete`, under its own lease, only if the row is unchanged since it was read (status, `updated_at`, `last_used_at`) |
 | `deleting` | (row deleted) | cleanup `finish_delete`, after the derived blobs are gone |
 | `deleting` with an expired lease | `running` | `claim`: the source is not stuck behind a cleanup that never finishes |
@@ -108,10 +109,19 @@ The claim never takes a `deleting` row because of its format: only an expired
 `deleting` lease makes it claimable.
 
 **TTL clock.** Every claim sets `created_at` to the claim time and clears
-`last_used_at`: a table prepared again (after a failed retry or a format change) starts its TTL clock at that preparation, so it cannot look
+`last_used_at`: a table prepared again (after a failed retry, a format change or
+a lost manifest) starts its TTL clock at that preparation, so it cannot look
 stale before its first use because its row was created long ago.
 
-A claim over an older format keeps the old `manifest_key` in place; `complete`/`fail` add it to
+`mark_manifest_missing(observed_row, now)` turns a `ready` row whose manifest no
+longer exists into `failed(manifest_missing)`, so the next claim prepares it
+again. It applies only if the row is still exactly what the caller observed (same
+`updated_at` and `manifest_key`): the check that found the manifest missing is a
+snapshot, and a table prepared again since is not demoted by it. `complete`
+clears `attempts`, so the cap bounds CONSECUTIVE failures: the demoted row starts
+from a clean count, and a table that needed retries (or that loses its manifest
+more than once) is not a permanent failure for that reason alone. A claim over an
+older format keeps the old `manifest_key` in place; `complete`/`fail` add it to
 the tracked `blob_keys` so cleanup can still reach it.
 
 ### Cleanup claim

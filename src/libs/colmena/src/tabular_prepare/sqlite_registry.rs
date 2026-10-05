@@ -231,6 +231,25 @@ impl PreparationRegistry for SqlitePreparationRegistry {
         rows.iter().map(|row| Ok(prepared_row_from!(row))).collect()
     }
 
+    async fn mark_manifest_missing(
+        &self,
+        row: &PreparedRow,
+        now: DateTime<Utc>,
+    ) -> Result<bool, RegistryError> {
+        let Some(manifest) = row.manifest_key.as_deref() else {
+            return Ok(false);
+        };
+        let done = sqlx::query_scalar::<_, String>(&for_sqlite(MARK_MANIFEST_MISSING_SQL))
+            .bind(&row.source_storage_key)
+            .bind(now)
+            .bind(row.updated_at)
+            .bind(manifest)
+            .fetch_optional(&*self.pool)
+            .await
+            .map_err(|e| backend_err("mark_manifest_missing", e))?;
+        Ok(done.is_some())
+    }
+
     async fn get(&self, source_key: &str) -> Result<Option<PreparedRow>, RegistryError> {
         let row = sqlx::query(&for_sqlite(GET_SQL))
             .bind(source_key)

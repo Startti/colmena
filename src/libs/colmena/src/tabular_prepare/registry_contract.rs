@@ -535,6 +535,16 @@ impl<R: PreparationRegistry> PreparationRegistry for CountingRegistry<R> {
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.inner.delete_if_unchanged(row).await
     }
+    async fn mark_manifest_missing(
+        &self,
+        row: &PreparedRow,
+        n: DateTime<Utc>,
+    ) -> Result<bool, RegistryError> {
+        self.counts
+            .other_writes
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.mark_manifest_missing(row, n).await
+    }
 }
 
 pub(crate) async fn a_preparation_writes_only_on_claim_and_terminal<R: PreparationRegistry>(r: R) {
@@ -1147,6 +1157,127 @@ pub(crate) async fn an_older_format_claim_keeps_the_old_manifest_tracked<R: Prep
     );
 }
 
+pub(crate) async fn a_ready_row_with_a_missing_manifest_becomes_claimable<
+    R: PreparationRegistry,
+>(
+    r: &R,
+) {
+    let key = fresh_key();
+    r.claim(claim_req(&key, "A", t0())).await.unwrap().unwrap();
+    r.complete(&key, "A", ready_info(), t0()).await.unwrap();
+    assert_eq!(r.claim(claim_req(&key, "B", t0())).await.unwrap(), None);
+
+    let at = t0() + Duration::hours(1);
+    let observed = get_row(r, &key).await;
+    assert!(r.mark_manifest_missing(&observed, at).await.unwrap());
+    let row = get_row(r, &key).await;
+    assert_eq!(row.status, PrepareStatus::Failed);
+    assert_eq!(row.error_code.as_deref(), Some("manifest_missing"));
+    assert_eq!(
+        row.attempts, 0,
+        "a completed preparation cleared the attempts"
+    );
+    assert_eq!(
+        row.blob_keys,
+        ready_info().blob_keys,
+        "leftover blobs stay listed"
+    );
+    assert_eq!(
+        r.claim(claim_req(&key, "B", at)).await.unwrap(),
+        Some(Claim { attempts: 1 })
+    );
+}
+
+pub(crate) async fn mark_manifest_missing_only_touches_ready_rows<R: PreparationRegistry>(r: &R) {
+    let missing = fresh_key();
+    let mut ghost = {
+        let k = fresh_key();
+        r.claim(claim_req(&k, "A", t0())).await.unwrap().unwrap();
+        r.complete(&k, "A", ready_info(), t0()).await.unwrap();
+        let row = get_row(r, &k).await;
+        r.delete(&k).await.unwrap();
+        row
+    };
+    ghost.source_storage_key = missing.clone();
+    assert!(!r.mark_manifest_missing(&ghost, t0()).await.unwrap());
+    assert_eq!(r.get(&missing).await.unwrap(), None);
+
+    let running = fresh_key();
+    r.claim(claim_req(&running, "A", t0()))
+        .await
+        .unwrap()
+        .unwrap();
+    let observed = get_row(r, &running).await;
+    assert!(!r.mark_manifest_missing(&observed, t0()).await.unwrap());
+    assert_eq!(get_row(r, &running).await.status, PrepareStatus::Running);
+}
+
+/// The check that found a manifest missing is a snapshot: a table that was
+/// prepared again since must not be demoted by it.
+pub(crate) async fn mark_manifest_missing_refuses_a_row_changed_since_the_check<
+    R: PreparationRegistry,
+>(
+    r: &R,
+) {
+    let key = fresh_key();
+    r.claim(claim_req(&key, "A", t0())).await.unwrap().unwrap();
+    r.complete(&key, "A", ready_info(), t0()).await.unwrap();
+    let observed = get_row(r, &key).await;
+    // Meanwhile the table is demoted and prepared again (a fresh manifest).
+    assert!(r.mark_manifest_missing(&observed, t0()).await.unwrap());
+    r.claim(claim_req(&key, "B", t0() + Duration::minutes(1)))
+        .await
+        .unwrap()
+        .unwrap();
+    r.complete(&key, "B", ready_info(), t0() + Duration::minutes(2))
+        .await
+        .unwrap();
+    // The stale check's late mark is refused and the fresh table stays ready.
+    assert!(!r
+        .mark_manifest_missing(&observed, t0() + Duration::minutes(3))
+        .await
+        .unwrap());
+    assert_eq!(get_row(r, &key).await.status, PrepareStatus::Ready);
+}
+
+/// The attempt cap bounds CONSECUTIVE failures: a preparation that completes
+/// clears the count, so a table that needed retries, or that lost its manifest
+/// more than once, is never a permanent failure for that reason alone.
+pub(crate) async fn a_completed_preparation_resets_the_attempts<R: PreparationRegistry>(r: &R) {
+    let key = fresh_key();
+    let mut now = t0();
+    // Two failures, then a success on the third attempt.
+    for attempt in 1..=MAX_ATTEMPTS - 1 {
+        let claim = r.claim(claim_req(&key, "job", now)).await.unwrap();
+        assert_eq!(claim, Some(Claim { attempts: attempt }));
+        r.fail(&key, "job", "time", "x", now).await.unwrap();
+    }
+    assert_eq!(
+        r.claim(claim_req(&key, "job", now)).await.unwrap(),
+        Some(Claim {
+            attempts: MAX_ATTEMPTS
+        })
+    );
+    r.complete(&key, "job", ready_info(), now).await.unwrap();
+    assert_eq!(
+        get_row(r, &key).await.attempts,
+        0,
+        "completed: count cleared"
+    );
+    // Its manifest is lost, again and again: each time it is claimable.
+    for _ in 0..MAX_ATTEMPTS + 2 {
+        let observed = get_row(r, &key).await;
+        assert!(r.mark_manifest_missing(&observed, now).await.unwrap());
+        now += Duration::minutes(1);
+        assert_eq!(
+            r.claim(claim_req(&key, "job", now)).await.unwrap(),
+            Some(Claim { attempts: 1 }),
+            "never a final failure for repeated manifest loss alone"
+        );
+        r.complete(&key, "job", ready_info(), now).await.unwrap();
+    }
+}
+
 /// A table that is prepared again (after a failure, a format change or a lost
 /// manifest) starts its TTL clock at that preparation: it must not be seen as
 /// stale before its first use because the row was created long ago.
@@ -1184,8 +1315,17 @@ pub(crate) async fn a_re_prepared_table_is_not_stale_before_its_first_use<
         .await
         .unwrap();
 
+    // 3. a lost manifest, prepared again
+    let lost = fresh_key();
+    r.claim(claim_req(&lost, "A", old)).await.unwrap().unwrap();
+    r.complete(&lost, "A", ready_info(), old).await.unwrap();
+    let observed = get_row(r, &lost).await;
+    r.mark_manifest_missing(&observed, t0()).await.unwrap();
+    r.claim(claim_req(&lost, "B", t0())).await.unwrap().unwrap();
+    r.complete(&lost, "B", ready_info(), t0()).await.unwrap();
+
     let stale = r.find_stale(cutoff, t0(), None, 10_000).await.unwrap();
-    for key in [&retry, &reformat] {
+    for key in [&retry, &reformat, &lost] {
         assert!(
             !is_stale(stale.clone(), key),
             "{key} would be deleted before first use"
@@ -1441,6 +1581,30 @@ mod sqlite {
     async fn tabular_prepare_an_older_format_claim_keeps_the_old_manifest_tracked() {
         let f = fixture().await;
         an_older_format_claim_keeps_the_old_manifest_tracked(&*f.registry).await;
+    }
+
+    #[tokio::test]
+    async fn tabular_prepare_a_ready_row_with_a_missing_manifest_becomes_claimable() {
+        let f = fixture().await;
+        a_ready_row_with_a_missing_manifest_becomes_claimable(&*f.registry).await;
+    }
+
+    #[tokio::test]
+    async fn tabular_prepare_mark_manifest_missing_only_touches_ready_rows() {
+        let f = fixture().await;
+        mark_manifest_missing_only_touches_ready_rows(&*f.registry).await;
+    }
+
+    #[tokio::test]
+    async fn tabular_prepare_mark_manifest_missing_refuses_a_row_changed_since_the_check() {
+        let f = fixture().await;
+        mark_manifest_missing_refuses_a_row_changed_since_the_check(&*f.registry).await;
+    }
+
+    #[tokio::test]
+    async fn tabular_prepare_a_completed_preparation_resets_the_attempts() {
+        let f = fixture().await;
+        a_completed_preparation_resets_the_attempts(&*f.registry).await;
     }
 
     #[tokio::test]

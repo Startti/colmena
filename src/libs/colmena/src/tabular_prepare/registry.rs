@@ -252,6 +252,20 @@ pub trait PreparationRegistry: Send + Sync {
     /// read changes the row, and the finished table must not be lost from a
     /// stale snapshot. `true` if the row went.
     async fn delete_if_unchanged(&self, row: &PreparedRow) -> Result<bool, RegistryError>;
+    /// A `ready` row whose manifest no longer exists becomes `failed` with
+    /// `manifest_missing`, so the next claim prepares it again. Only a `ready`
+    /// row that is still exactly what the caller observed qualifies (same
+    /// `updated_at` and `manifest_key`): the check that found the manifest
+    /// missing is a snapshot, and a table prepared again since must not be
+    /// demoted by it. A completed preparation clears the attempt count (the cap
+    /// bounds CONSECUTIVE failures), so the demoted row starts from a clean count
+    /// and a table that needed retries is not a permanent failure after its first
+    /// demotion. `true` if the row changed.
+    async fn mark_manifest_missing(
+        &self,
+        row: &PreparedRow,
+        now: DateTime<Utc>,
+    ) -> Result<bool, RegistryError>;
 }
 
 // ---------------------------------------------------------------------------
@@ -317,12 +331,13 @@ RETURNING source_storage_key";
 
 /// `$1` key, `$2` owner, `$3` manifest key, `$4` blob keys (JSON), `$5`
 /// tables (JSON), `$6` prepared bytes, `$7` now. Conditional on the lease
-/// owner: no row back means the preparation was cancelled.
+/// owner: no row back means the preparation was cancelled. A completed
+/// preparation clears `attempts`: the cap bounds consecutive failures.
 pub(crate) const COMPLETE_SQL: &str = "\
 UPDATE attachment_prepared
    SET status = 'ready', manifest_key = $3, blob_keys = $4, tables_json = $5,
        prepared_bytes = $6, error_code = NULL, error_detail = NULL,
-       lease_owner = NULL, lease_until = NULL, updated_at = $7
+       attempts = 0, lease_owner = NULL, lease_until = NULL, updated_at = $7
  WHERE source_storage_key = $1 AND lease_owner = $2 AND status = 'running'
 RETURNING source_storage_key";
 
@@ -390,6 +405,17 @@ SELECT source_storage_key, status, format_version, manifest_key, blob_keys,
  WHERE status = 'ready' AND source_storage_key > $1
  ORDER BY source_storage_key
  LIMIT $2";
+
+/// `$1` key, `$2` now, `$3` observed `updated_at`, `$4` observed manifest key.
+pub(crate) const MARK_MANIFEST_MISSING_SQL: &str = "\
+UPDATE attachment_prepared
+   SET status = 'failed', error_code = 'manifest_missing',
+       error_detail = 'the prepared manifest is missing from storage',
+       manifest_key = NULL, tables_json = NULL, prepared_bytes = NULL,
+       lease_owner = NULL, lease_until = NULL, updated_at = $2
+ WHERE source_storage_key = $1 AND status = 'ready'
+   AND updated_at = $3 AND manifest_key = $4
+RETURNING source_storage_key";
 
 pub(crate) const GET_SQL: &str = "\
 SELECT source_storage_key, status, format_version, manifest_key, blob_keys,

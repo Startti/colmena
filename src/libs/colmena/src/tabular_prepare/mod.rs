@@ -546,6 +546,13 @@ mod ensure_tests {
         async fn delete_if_unchanged(&self, _r: &PreparedRow) -> Result<bool, RegistryError> {
             panic!("ensure_prepared must not run the cleanup pass")
         }
+        async fn mark_manifest_missing(
+            &self,
+            _r: &PreparedRow,
+            _n: DateTime<Utc>,
+        ) -> Result<bool, RegistryError> {
+            panic!("ensure_prepared must not write")
+        }
         async fn touch_last_used(
             &self,
             _k: &str,
