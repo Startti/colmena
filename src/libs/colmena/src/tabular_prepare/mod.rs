@@ -15,7 +15,7 @@ use crate::tabular_prepare::ports::{
     PrepareConfig, PrepareProgressInfo, PrepareRequest, PrepareTriggerError, ProgressState,
 };
 use crate::tabular_prepare::registry::{
-    PreparationRegistry, PrepareStatus, PreparedRow, RegistryError,
+    PreparationRegistry, PrepareStatus, PreparedRow, RegistryError, FORMAT_VERSION, MAX_ATTEMPTS,
 };
 use chrono::{DateTime, Utc};
 use std::sync::Arc;
@@ -47,6 +47,13 @@ pub enum EnsureOutcome {
     StillPreparing {
         progress: Option<PrepareProgressInfo>,
     },
+    Failed {
+        error_code: String,
+        error_detail: String,
+        attempts: i32,
+        /// `true` once the attempts are exhausted: no further request helps.
+        final_failure: bool,
+    },
 }
 
 impl EnsureOutcome {
@@ -68,6 +75,24 @@ impl EnsureOutcome {
                 }
                 _ => "the file is still being prepared; retry shortly".to_string(),
             },
+            EnsureOutcome::Failed {
+                error_code,
+                error_detail,
+                attempts,
+                final_failure,
+            } => {
+                if *final_failure {
+                    format!(
+                        "preparing this file failed after {attempts} attempts ({error_code}): \
+                         {error_detail}. It will not be retried and the file cannot be analysed here"
+                    )
+                } else {
+                    format!(
+                        "preparing this file failed (attempt {attempts} of {MAX_ATTEMPTS}, \
+                         {error_code}): {error_detail}. A new request will try again"
+                    )
+                }
+            }
         }
     }
 }
@@ -86,6 +111,27 @@ pub struct TabularPrepare {
     registry: Arc<dyn PreparationRegistry>,
     clock: Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>,
     poll_interval: Duration,
+}
+
+/// What a registry row means to a caller that needs the tables.
+enum Observed {
+    Ready(PreparedRow),
+    FinalFailure(PreparedRow),
+    /// A job that died without writing `failed` on every allowed attempt: the
+    /// row is still `running` with an expired lease and the claim refuses it.
+    DeadJob(PreparedRow),
+    /// A live job holds it: attach, never trigger again.
+    Running,
+    /// Nobody holds it: no row, a retryable failure, an expired lease or an
+    /// older format. `failed_attempts` is set for a failed row; `has_row`
+    /// tells "no row at all" (where the host's progress hint may say it is
+    /// already queued) from a row that can be taken over.
+    Claimable {
+        has_row: bool,
+        failed_attempts: Option<i32>,
+    },
+    /// A failure after our own request.
+    NewFailure(PreparedRow),
 }
 
 impl TabularPrepare {
@@ -112,6 +158,9 @@ impl TabularPrepare {
     ///
     /// - Switch off: `NotEnabled`, nothing is touched.
     /// - `ready`: `Ready`.
+    /// - `failed` with attempts left, or an expired lease: request once, then wait.
+    /// - Attempts exhausted (three failures, or a job that died three times
+    ///   without reporting): `Failed` with `final_failure`, never requested.
     /// - A live job holds it: attach and wait, no second trigger.
     /// - Nobody holds it: request once, then wait.
     /// - The wait ends first: `StillPreparing`, never an error.
@@ -124,16 +173,22 @@ impl TabularPrepare {
             return Ok(EnsureOutcome::NotEnabled);
         }
         let deadline = Instant::now() + wait;
+        let mut baseline: Option<Option<i32>> = None;
         let mut requested = false;
         loop {
             let row = self.registry.get(&req.source_key).await?;
-            match row {
-                Some(row) if row.status == PrepareStatus::Ready => {
-                    return Ok(EnsureOutcome::Ready(Box::new(row)));
-                }
-                Some(row) if self.holds_a_live_lease(&row) => {}
-                other => {
-                    if !requested && self.should_request(req, other.is_some()).await {
+            match self.observe(row, baseline) {
+                Observed::Ready(row) => return Ok(EnsureOutcome::Ready(Box::new(row))),
+                Observed::FinalFailure(row) => return Ok(failed(&row, true)),
+                Observed::NewFailure(row) => return Ok(failed(&row, false)),
+                Observed::DeadJob(row) => return Ok(dead_job(&row)),
+                Observed::Running => {}
+                Observed::Claimable {
+                    has_row,
+                    failed_attempts,
+                } => {
+                    baseline.get_or_insert(failed_attempts);
+                    if !requested && self.should_request(req, has_row).await {
                         self.config.trigger.request(req.clone()).await?;
                         requested = true;
                     }
@@ -164,9 +219,81 @@ impl TabularPrepare {
         )
     }
 
-    fn holds_a_live_lease(&self, row: &PreparedRow) -> bool {
-        row.status == PrepareStatus::Running
-            && row.lease_until.is_some_and(|until| until >= (self.clock)())
+    fn observe(&self, row: Option<PreparedRow>, baseline: Option<Option<i32>>) -> Observed {
+        let Some(row) = row else {
+            return Observed::Claimable {
+                has_row: false,
+                failed_attempts: None,
+            };
+        };
+        // Being removed by the cleanup pass: a live lease means wait. An
+        // expired one means the pass died or keeps failing; the claim takes
+        // such a row, so the source is requested like any other and is never
+        // stuck behind a cleanup that is not coming back. Checked before the
+        // format: the format must not outrank `deleting`.
+        if row.status == PrepareStatus::Deleting {
+            return match row.lease_until {
+                Some(until) if until >= (self.clock)() => Observed::Running,
+                _ => Observed::Claimable {
+                    has_row: true,
+                    failed_attempts: None,
+                },
+            };
+        }
+        if row.format_version < FORMAT_VERSION {
+            return Observed::Claimable {
+                has_row: true,
+                failed_attempts: None,
+            };
+        }
+        match row.status {
+            PrepareStatus::Ready => Observed::Ready(row),
+            PrepareStatus::Failed if row.attempts >= MAX_ATTEMPTS => Observed::FinalFailure(row),
+            PrepareStatus::Failed => match baseline {
+                // The failure we found before requesting is not a new one;
+                // a higher attempt count, or any failure we did not start
+                // from, is.
+                Some(Some(seen)) if row.attempts <= seen => Observed::Claimable {
+                    has_row: true,
+                    failed_attempts: Some(seen),
+                },
+                Some(_) => Observed::NewFailure(row),
+                None => Observed::Claimable {
+                    has_row: true,
+                    failed_attempts: Some(row.attempts),
+                },
+            },
+            PrepareStatus::Deleting => unreachable!("handled above"),
+            PrepareStatus::Running => match row.lease_until {
+                Some(until) if until >= (self.clock)() => Observed::Running,
+                _ if row.attempts >= MAX_ATTEMPTS => Observed::DeadJob(row),
+                _ => Observed::Claimable {
+                    has_row: true,
+                    failed_attempts: None,
+                },
+            },
+        }
+    }
+}
+
+fn dead_job(row: &PreparedRow) -> EnsureOutcome {
+    EnsureOutcome::Failed {
+        error_code: "lease_expired".to_string(),
+        error_detail: "the preparation job stopped without reporting a result".to_string(),
+        attempts: row.attempts,
+        final_failure: true,
+    }
+}
+
+fn failed(row: &PreparedRow, final_failure: bool) -> EnsureOutcome {
+    EnsureOutcome::Failed {
+        error_code: row
+            .error_code
+            .clone()
+            .unwrap_or_else(|| "unknown".to_string()),
+        error_detail: row.error_detail.clone().unwrap_or_default(),
+        attempts: row.attempts,
+        final_failure,
     }
 }
 
@@ -184,7 +311,7 @@ mod ensure_tests {
         Utc.with_ymd_and_hms(2026, 10, 4, 12, 0, 0).unwrap()
     }
 
-    fn row(status: PrepareStatus, lease_secs: Option<i64>) -> PreparedRow {
+    fn row(status: PrepareStatus, attempts: i32, lease_secs: Option<i64>) -> PreparedRow {
         PreparedRow {
             source_storage_key: "k".to_string(),
             status,
@@ -194,11 +321,11 @@ mod ensure_tests {
             tables_json: None,
             source_bytes: 60_000_000,
             prepared_bytes: None,
-            error_code: None,
-            error_detail: None,
+            error_code: matches!(status, PrepareStatus::Failed).then(|| "time".to_string()),
+            error_detail: matches!(status, PrepareStatus::Failed).then(|| "too slow".to_string()),
             lease_owner: lease_secs.map(|_| "job".to_string()),
             lease_until: lease_secs.map(|s| now() + ChronoDuration::seconds(s)),
-            attempts: 1,
+            attempts,
             created_at: now(),
             updated_at: now(),
             last_used_at: None,
@@ -337,7 +464,7 @@ mod ensure_tests {
 
     #[tokio::test(start_paused = true)]
     async fn tabular_prepare_ensure_with_the_switch_off_touches_nothing() {
-        let h = harness(false, Some(row(PrepareStatus::Failed, None)));
+        let h = harness(false, Some(row(PrepareStatus::Failed, 1, None)));
         let out = h.prepare.ensure_prepared(&req(), WAIT).await.unwrap();
         assert_eq!(out, EnsureOutcome::NotEnabled);
         assert_eq!(h.registry.gets.load(Ordering::SeqCst), 0);
@@ -347,7 +474,7 @@ mod ensure_tests {
 
     #[tokio::test(start_paused = true)]
     async fn tabular_prepare_ensure_returns_a_ready_row_without_a_trigger() {
-        let ready = row(PrepareStatus::Ready, None);
+        let ready = row(PrepareStatus::Ready, 1, None);
         let h = harness(true, Some(ready.clone()));
         let out = h.prepare.ensure_prepared(&req(), WAIT).await.unwrap();
         assert_eq!(out, EnsureOutcome::Ready(Box::new(ready)));
@@ -356,11 +483,11 @@ mod ensure_tests {
 
     #[tokio::test(start_paused = true)]
     async fn tabular_prepare_ensure_attaches_to_a_running_job_without_a_second_trigger() {
-        let h = harness(true, Some(row(PrepareStatus::Running, Some(300))));
+        let h = harness(true, Some(row(PrepareStatus::Running, 1, Some(300))));
         let registry = h.registry.clone();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs(5)).await;
-            registry.set(Some(row(PrepareStatus::Ready, None)));
+            registry.set(Some(row(PrepareStatus::Ready, 1, None)));
         });
         let out = h.prepare.ensure_prepared(&req(), WAIT).await.unwrap();
         assert!(matches!(out, EnsureOutcome::Ready(_)), "got {out:?}");
@@ -373,9 +500,9 @@ mod ensure_tests {
         let registry = h.registry.clone();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs(4)).await;
-            registry.set(Some(row(PrepareStatus::Running, Some(300))));
+            registry.set(Some(row(PrepareStatus::Running, 1, Some(300))));
             tokio::time::sleep(Duration::from_secs(4)).await;
-            registry.set(Some(row(PrepareStatus::Ready, None)));
+            registry.set(Some(row(PrepareStatus::Ready, 1, None)));
         });
         let out = h.prepare.ensure_prepared(&req(), WAIT).await.unwrap();
         assert!(matches!(out, EnsureOutcome::Ready(_)), "got {out:?}");
@@ -394,7 +521,7 @@ mod ensure_tests {
         let registry = h.registry.clone();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs(3)).await;
-            registry.set(Some(row(PrepareStatus::Ready, None)));
+            registry.set(Some(row(PrepareStatus::Ready, 1, None)));
         });
         let out = h.prepare.ensure_prepared(&req(), WAIT).await.unwrap();
         assert!(matches!(out, EnsureOutcome::Ready(_)), "got {out:?}");
@@ -403,7 +530,7 @@ mod ensure_tests {
 
     #[tokio::test(start_paused = true)]
     async fn tabular_prepare_ensure_wait_expires_as_still_preparing_not_an_error() {
-        let h = harness(true, Some(row(PrepareStatus::Running, Some(3600))));
+        let h = harness(true, Some(row(PrepareStatus::Running, 1, Some(3600))));
         *h.progress.value.lock().unwrap() = Some(PrepareProgressInfo {
             state: ProgressState::Running,
             done: 40,
@@ -430,6 +557,234 @@ mod ensure_tests {
         assert!(
             waited >= Duration::from_secs(10) && waited <= Duration::from_secs(11),
             "waited {waited:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn tabular_prepare_ensure_a_failed_row_under_three_attempts_is_requested_again() {
+        let h = harness(true, Some(row(PrepareStatus::Failed, 1, None)));
+        let registry = h.registry.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            registry.set(Some(row(PrepareStatus::Running, 2, Some(300))));
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            registry.set(Some(row(PrepareStatus::Ready, 2, None)));
+        });
+        let out = h.prepare.ensure_prepared(&req(), WAIT).await.unwrap();
+        assert!(matches!(out, EnsureOutcome::Ready(_)), "got {out:?}");
+        assert_eq!(
+            requests(&h),
+            1,
+            "re-requested once, the stale failure is not mistaken for a new one"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn tabular_prepare_ensure_reports_a_new_failure_that_is_not_yet_final() {
+        let h = harness(true, Some(row(PrepareStatus::Failed, 1, None)));
+        let registry = h.registry.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            registry.set(Some(row(PrepareStatus::Failed, 2, None)));
+        });
+        let out = h.prepare.ensure_prepared(&req(), WAIT).await.unwrap();
+        match out {
+            EnsureOutcome::Failed {
+                attempts,
+                final_failure,
+                ..
+            } => {
+                assert_eq!(attempts, 2);
+                assert!(!final_failure, "a later request may try again");
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        assert_eq!(requests(&h), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn tabular_prepare_ensure_third_failure_is_final_with_a_clear_error() {
+        let h = harness(true, Some(row(PrepareStatus::Failed, MAX_ATTEMPTS, None)));
+        let out = h.prepare.ensure_prepared(&req(), WAIT).await.unwrap();
+        let message = out.message();
+        match &out {
+            EnsureOutcome::Failed {
+                error_code,
+                attempts,
+                final_failure,
+                ..
+            } => {
+                assert_eq!(error_code, "time");
+                assert_eq!(*attempts, MAX_ATTEMPTS);
+                assert!(*final_failure);
+            }
+            other => panic!("expected a final failure, got {other:?}"),
+        }
+        assert!(message.contains("3 attempts"), "{message}");
+        assert!(message.contains("time"), "{message}");
+        assert!(message.contains("too slow"), "{message}");
+        assert!(
+            !message.to_lowercase().contains("whole file"),
+            "a failure never offers a whole-file fallback: {message}"
+        );
+        assert_eq!(requests(&h), 0, "a final failure is not triggered again");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn tabular_prepare_ensure_takes_over_an_expired_running_lease_by_requesting() {
+        let h = harness(true, Some(row(PrepareStatus::Running, 1, Some(-5))));
+        let registry = h.registry.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            registry.set(Some(row(PrepareStatus::Ready, 2, None)));
+        });
+        let out = h.prepare.ensure_prepared(&req(), WAIT).await.unwrap();
+        assert!(matches!(out, EnsureOutcome::Ready(_)), "got {out:?}");
+        assert_eq!(requests(&h), 1, "the dead job is replaced");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn tabular_prepare_ensure_a_ready_row_of_an_older_format_is_prepared_again() {
+        let mut old = row(PrepareStatus::Ready, 1, None);
+        old.format_version = FORMAT_VERSION - 1;
+        let h = harness(true, Some(old));
+        let registry = h.registry.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            registry.set(Some(row(PrepareStatus::Ready, 1, None)));
+        });
+        let out = h.prepare.ensure_prepared(&req(), WAIT).await.unwrap();
+        assert!(matches!(out, EnsureOutcome::Ready(_)), "got {out:?}");
+        assert_eq!(requests(&h), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn tabular_prepare_ensure_a_dead_job_at_the_attempt_cap_is_a_final_failure() {
+        // The job died three times without writing `failed`: the row is still
+        // `running` with an expired lease and the claim refuses it.
+        let h = harness(
+            true,
+            Some(row(PrepareStatus::Running, MAX_ATTEMPTS, Some(-5))),
+        );
+        let out = h.prepare.ensure_prepared(&req(), WAIT).await.unwrap();
+        match &out {
+            EnsureOutcome::Failed {
+                error_code,
+                attempts,
+                final_failure,
+                ..
+            } => {
+                assert_eq!(error_code, "lease_expired");
+                assert_eq!(*attempts, MAX_ATTEMPTS);
+                assert!(*final_failure);
+            }
+            other => panic!("expected a final failure, got {other:?}"),
+        }
+        assert!(out.message().contains("3 attempts"), "{}", out.message());
+        assert_eq!(
+            requests(&h),
+            0,
+            "nothing can claim it, so nothing is requested"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn tabular_prepare_ensure_a_dead_job_under_the_cap_is_still_taken_over() {
+        let h = harness(
+            true,
+            Some(row(PrepareStatus::Running, MAX_ATTEMPTS - 1, Some(-5))),
+        );
+        let registry = h.registry.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            registry.set(Some(row(PrepareStatus::Ready, MAX_ATTEMPTS, None)));
+        });
+        let out = h.prepare.ensure_prepared(&req(), WAIT).await.unwrap();
+        assert!(matches!(out, EnsureOutcome::Ready(_)), "got {out:?}");
+        assert_eq!(requests(&h), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn tabular_prepare_ensure_a_stale_hint_does_not_block_a_takeover() {
+        let hint = || {
+            Some(PrepareProgressInfo {
+                state: ProgressState::Running,
+                done: 1,
+                total: Some(10),
+            })
+        };
+        // An expired lease and an older format both have a row: the hint
+        // (which may outlive a dead job) is not consulted.
+        let mut old_format = row(PrepareStatus::Ready, 1, None);
+        old_format.format_version = FORMAT_VERSION - 1;
+        for existing in [row(PrepareStatus::Running, 1, Some(-5)), old_format] {
+            let h = harness(true, Some(existing));
+            *h.progress.value.lock().unwrap() = hint();
+            let registry = h.registry.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_secs(3)).await;
+                registry.set(Some(row(PrepareStatus::Ready, 2, None)));
+            });
+            let out = h.prepare.ensure_prepared(&req(), WAIT).await.unwrap();
+            assert!(matches!(out, EnsureOutcome::Ready(_)), "got {out:?}");
+            assert_eq!(requests(&h), 1, "takeover requested despite the stale hint");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn tabular_prepare_ensure_waits_on_a_row_being_deleted_without_requesting() {
+        let mut deleting = row(PrepareStatus::Deleting, 1, Some(600));
+        deleting.lease_owner = Some("gc".to_string());
+        let h = harness(true, Some(deleting));
+        let registry = h.registry.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            registry.set(None); // the collector finished
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            registry.set(Some(row(PrepareStatus::Ready, 1, None)));
+        });
+        let out = h.prepare.ensure_prepared(&req(), WAIT).await.unwrap();
+        assert!(matches!(out, EnsureOutcome::Ready(_)), "got {out:?}");
+        assert_eq!(requests(&h), 1, "requested only after the row was gone");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn tabular_prepare_ensure_an_expired_deleting_lease_is_recovered_by_requesting() {
+        let mut deleting = row(PrepareStatus::Deleting, 1, Some(-5));
+        deleting.lease_owner = Some("gc-dead".to_string());
+        let h = harness(true, Some(deleting));
+        let registry = h.registry.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            registry.set(Some(row(PrepareStatus::Ready, 1, None)));
+        });
+        let out = h.prepare.ensure_prepared(&req(), WAIT).await.unwrap();
+        assert!(matches!(out, EnsureOutcome::Ready(_)), "got {out:?}");
+        assert_eq!(
+            requests(&h),
+            1,
+            "the source is not stuck behind a dead cleanup"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn tabular_prepare_ensure_a_live_deleting_lease_with_an_older_format_still_waits() {
+        let mut deleting = row(PrepareStatus::Deleting, 1, Some(600));
+        deleting.format_version = FORMAT_VERSION - 1;
+        let h = harness(true, Some(deleting));
+        let out = h
+            .prepare
+            .ensure_prepared(&req(), Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert!(
+            matches!(out, EnsureOutcome::StillPreparing { .. }),
+            "got {out:?}"
+        );
+        assert_eq!(
+            requests(&h),
+            0,
+            "the format check must not outrank `deleting`"
         );
     }
 }
