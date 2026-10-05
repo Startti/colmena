@@ -506,6 +506,31 @@ impl<R: PreparationRegistry> PreparationRegistry for CountingRegistry<R> {
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.inner.list_ready_after(after, limit).await
     }
+    async fn begin_delete(
+        &self,
+        row: &PreparedRow,
+        owner: &str,
+        lease: Duration,
+        now: DateTime<Utc>,
+    ) -> Result<bool, RegistryError> {
+        self.counts
+            .other_writes
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.begin_delete(row, owner, lease, now).await
+    }
+
+    async fn finish_delete(&self, k: &str, owner: &str) -> Result<bool, RegistryError> {
+        self.counts
+            .other_writes
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.finish_delete(k, owner).await
+    }
+    async fn delete_if_unchanged(&self, row: &PreparedRow) -> Result<bool, RegistryError> {
+        self.counts
+            .other_writes
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.delete_if_unchanged(row).await
+    }
 }
 
 pub(crate) async fn a_preparation_writes_only_on_claim_and_terminal<R: PreparationRegistry>(r: R) {
@@ -866,6 +891,170 @@ pub(crate) async fn find_stale_pages_with_a_keyset_cursor<R: PreparationRegistry
     assert_eq!(seen, keys, "every row once, in key order, none skipped");
 }
 
+pub(crate) async fn gc_claims_a_row_before_deleting_it<R: PreparationRegistry>(r: &R) {
+    let key = fresh_key();
+    let old = t0() - Duration::days(10);
+    r.claim(claim_req(&key, "A", old)).await.unwrap().unwrap();
+    r.fail(&key, "A", "time", "x", old).await.unwrap();
+    let observed = get_row(r, &key).await;
+
+    assert!(r
+        .begin_delete(&observed, "gc-1", Duration::minutes(10), t0())
+        .await
+        .unwrap());
+    let row = get_row(r, &key).await;
+    assert_eq!(row.status, PrepareStatus::Deleting);
+    assert_eq!(row.lease_owner.as_deref(), Some("gc-1"));
+    assert_eq!(row.lease_until, Some(t0() + Duration::minutes(10)));
+    // A preparation cannot claim a row that is being deleted, however old,
+    // and a second collector cannot take it while the lease is live.
+    assert_eq!(r.claim(claim_req(&key, "B", t0())).await.unwrap(), None);
+    assert!(!r
+        .begin_delete(&row, "gc-2", Duration::minutes(10), t0())
+        .await
+        .unwrap());
+    // Only the owner finishes it.
+    assert!(!r.finish_delete(&key, "gc-2").await.unwrap());
+    assert!(r.finish_delete(&key, "gc-1").await.unwrap());
+    assert_eq!(r.get(&key).await.unwrap(), None);
+}
+
+pub(crate) async fn gc_cannot_claim_a_row_that_changed_since_it_was_read<R: PreparationRegistry>(
+    r: &R,
+) {
+    let key = fresh_key();
+    let old = t0() - Duration::days(10);
+    r.claim(claim_req(&key, "A", old)).await.unwrap().unwrap();
+    r.fail(&key, "A", "time", "x", old).await.unwrap();
+    let observed = get_row(r, &key).await;
+    // A worker re-claims it between GC's read and GC's claim.
+    r.claim(claim_req(&key, "worker", t0()))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!r
+        .begin_delete(&observed, "gc", Duration::minutes(10), t0())
+        .await
+        .unwrap());
+    let row = get_row(r, &key).await;
+    assert_eq!(
+        row.status,
+        PrepareStatus::Running,
+        "the live preparation is untouched"
+    );
+    assert_eq!(row.lease_owner.as_deref(), Some("worker"));
+    // Even with the fresh observation, a live lease is never claimed.
+    assert!(!r
+        .begin_delete(&row, "gc", Duration::minutes(10), t0())
+        .await
+        .unwrap());
+}
+
+pub(crate) async fn gc_cannot_claim_a_row_that_was_used_since_it_was_read<
+    R: PreparationRegistry,
+>(
+    r: &R,
+) {
+    let key = fresh_key();
+    let old = t0() - Duration::days(10);
+    r.claim(claim_req(&key, "A", old)).await.unwrap().unwrap();
+    r.complete(&key, "A", ready_info(), old).await.unwrap();
+    let observed = get_row(r, &key).await;
+    assert_eq!(observed.last_used_at, None, "read as stale: never used");
+    // A table is handed out after GC read the row: only `last_used_at` moves.
+    assert!(r
+        .touch_last_used(&key, t0(), Duration::hours(1))
+        .await
+        .unwrap());
+    assert!(!r
+        .begin_delete(&observed, "gc", Duration::minutes(10), t0())
+        .await
+        .unwrap());
+    let row = get_row(r, &key).await;
+    assert_eq!(
+        row.status,
+        PrepareStatus::Ready,
+        "the used table is untouched"
+    );
+    // Read again (now with a last_used_at), the same row can be claimed when
+    // nobody touches it in between, whatever the observed value was.
+    assert!(r
+        .begin_delete(&row, "gc", Duration::minutes(10), t0())
+        .await
+        .unwrap());
+}
+
+pub(crate) async fn an_abandoned_deleting_row_is_found_and_taken_over<R: PreparationRegistry>(
+    r: &R,
+) {
+    let key = fresh_key();
+    // Fresh row (not past the TTL) whose collector died mid-delete.
+    r.claim(claim_req(&key, "A", t0())).await.unwrap().unwrap();
+    r.fail(&key, "A", "time", "x", t0()).await.unwrap();
+    let observed = get_row(r, &key).await;
+    assert!(r
+        .begin_delete(&observed, "gc-dead", Duration::minutes(10), t0())
+        .await
+        .unwrap());
+    let cutoff = t0() - Duration::days(7);
+    let live = t0() + Duration::minutes(5);
+    let ids = |rows: Vec<PreparedRow>| -> Vec<String> {
+        rows.into_iter().map(|row| row.source_storage_key).collect()
+    };
+    let while_live = ids(r.find_stale(cutoff, live, None, 10_000).await.unwrap());
+    assert!(!while_live.contains(&key), "lease still live");
+    let expired = t0() + Duration::minutes(11);
+    let found = r.find_stale(cutoff, expired, None, 10_000).await.unwrap();
+    let row = found
+        .into_iter()
+        .find(|row| row.source_storage_key == key)
+        .expect("an expired deleting row is picked up whatever its age");
+    assert!(r
+        .begin_delete(&row, "gc-2", Duration::minutes(10), expired)
+        .await
+        .unwrap());
+    assert!(r.finish_delete(&key, "gc-2").await.unwrap());
+}
+
+pub(crate) async fn delete_if_unchanged_only_deletes_the_row_that_was_observed<
+    R: PreparationRegistry,
+>(
+    r: &R,
+) {
+    let key = fresh_key();
+    r.claim(claim_req(&key, "job", t0()))
+        .await
+        .unwrap()
+        .unwrap();
+    let observed = get_row(r, &key).await;
+    // The job completes after the cleanup read the row: the row changed.
+    r.complete(&key, "job", ready_info(), t0() + Duration::seconds(5))
+        .await
+        .unwrap();
+    assert!(!r.delete_if_unchanged(&observed).await.unwrap());
+    assert_eq!(
+        get_row(r, &key).await.status,
+        PrepareStatus::Ready,
+        "the finished table is not lost"
+    );
+    // Observed again, it can be deleted; a second delete finds nothing.
+    let fresh = get_row(r, &key).await;
+    assert!(r.delete_if_unchanged(&fresh).await.unwrap());
+    assert_eq!(r.get(&key).await.unwrap(), None);
+    assert!(!r.delete_if_unchanged(&fresh).await.unwrap());
+
+    // A row owned by another job than the observed one is not deleted either.
+    let key2 = fresh_key();
+    r.claim(claim_req(&key2, "A", t0())).await.unwrap().unwrap();
+    let seen = get_row(r, &key2).await;
+    r.claim(claim_req(&key2, "B", t0() + Duration::seconds(400)))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!r.delete_if_unchanged(&seen).await.unwrap());
+    assert_eq!(get_row(r, &key2).await.lease_owner.as_deref(), Some("B"));
+}
+
 #[cfg(test)]
 mod sqlite {
     use super::*;
@@ -1067,5 +1256,35 @@ mod sqlite {
     async fn tabular_prepare_find_stale_pages_with_a_keyset_cursor() {
         let f = fixture().await;
         find_stale_pages_with_a_keyset_cursor(&*f.registry).await;
+    }
+
+    #[tokio::test]
+    async fn tabular_prepare_gc_claims_a_row_before_deleting_it() {
+        let f = fixture().await;
+        gc_claims_a_row_before_deleting_it(&*f.registry).await;
+    }
+
+    #[tokio::test]
+    async fn tabular_prepare_gc_cannot_claim_a_row_that_changed_since_it_was_read() {
+        let f = fixture().await;
+        gc_cannot_claim_a_row_that_changed_since_it_was_read(&*f.registry).await;
+    }
+
+    #[tokio::test]
+    async fn tabular_prepare_gc_cannot_claim_a_row_that_was_used_since_it_was_read() {
+        let f = fixture().await;
+        gc_cannot_claim_a_row_that_was_used_since_it_was_read(&*f.registry).await;
+    }
+
+    #[tokio::test]
+    async fn tabular_prepare_an_abandoned_deleting_row_is_found_and_taken_over() {
+        let f = fixture().await;
+        an_abandoned_deleting_row_is_found_and_taken_over(&*f.registry).await;
+    }
+
+    #[tokio::test]
+    async fn tabular_prepare_delete_if_unchanged_only_deletes_the_row_that_was_observed() {
+        let f = fixture().await;
+        delete_if_unchanged_only_deletes_the_row_that_was_observed(&*f.registry).await;
     }
 }

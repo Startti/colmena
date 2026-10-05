@@ -148,6 +148,51 @@ impl PreparationRegistry for SqlitePreparationRegistry {
         Ok(row.is_some())
     }
 
+    async fn begin_delete(
+        &self,
+        row: &PreparedRow,
+        owner: &str,
+        lease: chrono::Duration,
+        now: DateTime<Utc>,
+    ) -> Result<bool, RegistryError> {
+        let done = sqlx::query_scalar::<_, String>(&for_sqlite(BEGIN_DELETE_SQL))
+            .bind(&row.source_storage_key)
+            .bind(owner)
+            .bind(now + lease)
+            .bind(now)
+            .bind(row.status.as_str())
+            .bind(row.updated_at)
+            .bind(row.last_used_at)
+            .bind(row.last_used_at.is_none())
+            .fetch_optional(&*self.pool)
+            .await
+            .map_err(|e| backend_err("begin_delete", e))?;
+        Ok(done.is_some())
+    }
+
+    async fn finish_delete(&self, source_key: &str, owner: &str) -> Result<bool, RegistryError> {
+        let done = sqlx::query(&for_sqlite(FINISH_DELETE_SQL))
+            .bind(source_key)
+            .bind(owner)
+            .execute(&*self.pool)
+            .await
+            .map_err(|e| backend_err("finish_delete", e))?;
+        Ok(done.rows_affected() > 0)
+    }
+
+    async fn delete_if_unchanged(&self, row: &PreparedRow) -> Result<bool, RegistryError> {
+        let done = sqlx::query(&for_sqlite(DELETE_IF_UNCHANGED_SQL))
+            .bind(&row.source_storage_key)
+            .bind(row.status.as_str())
+            .bind(row.updated_at)
+            .bind(&row.lease_owner)
+            .bind(row.lease_owner.is_none())
+            .execute(&*self.pool)
+            .await
+            .map_err(|e| backend_err("delete_if_unchanged", e))?;
+        Ok(done.rows_affected() > 0)
+    }
+
     async fn find_stale(
         &self,
         cutoff: DateTime<Utc>,

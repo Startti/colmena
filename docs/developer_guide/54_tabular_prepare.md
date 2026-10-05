@@ -91,6 +91,29 @@ are in `PreparationRegistry` and run on SQLite and Postgres:
 - `list_ready_after(after, limit)`: `ready` rows in key order after a cursor, for
   the pass that checks whether a manifest still exists.
 
+### Cleanup claim
+
+A row is never deleted from under a live preparation. The cleanup pass first
+CLAIMS the row with `begin_delete(row, owner, lease, now)`, which moves it to
+`deleting` under the pass's own lease, only if the row is still exactly what the
+pass read (same `status`, `updated_at` and `last_used_at`; the last uses a
+portable null-safe equality) and holds no live lease. `false` means someone
+changed it meanwhile (a preparation claimed it, or a table was just handed out):
+leave it alone. After the derived blobs are gone, `finish_delete(key, owner)`
+deletes the row, only while that owner still holds the `deleting` lease.
+
+`delete_if_unchanged(row)` deletes a row only if it is still exactly what the
+caller observed (same `status`, `updated_at` and lease owner). The cancellation
+of a running preparation uses it (see Cleanup): a job that completed or was taken
+over after the read changes the row, so the finished table is never lost from a
+stale snapshot; the caller re-reads and follows the normal path instead.
+
+`find_stale` also returns a `deleting` row whatever its age once its lease has
+expired (a pass died mid-delete), so the next run takes it over; a `deleting` row
+with a live lease is never returned. A `deleting` row is never claimed by a
+preparation in this slice; the claim amendment that lets an expired `deleting`
+lease be taken follows.
+
 ### Cancellation check
 
 - `still_owned(source_key, owner)` is the cancellation check a job makes

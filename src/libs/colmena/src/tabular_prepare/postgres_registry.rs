@@ -142,6 +142,51 @@ impl PreparationRegistry for PostgresPreparationRegistry {
         Ok(row.is_some())
     }
 
+    async fn begin_delete(
+        &self,
+        row: &PreparedRow,
+        owner: &str,
+        lease: chrono::Duration,
+        now: DateTime<Utc>,
+    ) -> Result<bool, RegistryError> {
+        let done = sqlx::query_scalar::<_, String>(BEGIN_DELETE_SQL)
+            .bind(&row.source_storage_key)
+            .bind(owner)
+            .bind(now + lease)
+            .bind(now)
+            .bind(row.status.as_str())
+            .bind(row.updated_at)
+            .bind(row.last_used_at)
+            .bind(row.last_used_at.is_none())
+            .fetch_optional(&*self.pool)
+            .await
+            .map_err(|e| backend_err("begin_delete", e))?;
+        Ok(done.is_some())
+    }
+
+    async fn finish_delete(&self, source_key: &str, owner: &str) -> Result<bool, RegistryError> {
+        let done = sqlx::query(FINISH_DELETE_SQL)
+            .bind(source_key)
+            .bind(owner)
+            .execute(&*self.pool)
+            .await
+            .map_err(|e| backend_err("finish_delete", e))?;
+        Ok(done.rows_affected() > 0)
+    }
+
+    async fn delete_if_unchanged(&self, row: &PreparedRow) -> Result<bool, RegistryError> {
+        let done = sqlx::query(DELETE_IF_UNCHANGED_SQL)
+            .bind(&row.source_storage_key)
+            .bind(row.status.as_str())
+            .bind(row.updated_at)
+            .bind(&row.lease_owner)
+            .bind(row.lease_owner.is_none())
+            .execute(&*self.pool)
+            .await
+            .map_err(|e| backend_err("delete_if_unchanged", e))?;
+        Ok(done.rows_affected() > 0)
+    }
+
     async fn find_stale(
         &self,
         cutoff: DateTime<Utc>,
@@ -215,6 +260,26 @@ mod tests {
         };
     }
 
+    pg_case!(
+        tabular_prepare_pg_delete_if_unchanged_only_deletes_the_row_that_was_observed,
+        delete_if_unchanged_only_deletes_the_row_that_was_observed
+    );
+    pg_case!(
+        tabular_prepare_pg_gc_claims_a_row_before_deleting_it,
+        gc_claims_a_row_before_deleting_it
+    );
+    pg_case!(
+        tabular_prepare_pg_gc_cannot_claim_a_row_that_changed_since_it_was_read,
+        gc_cannot_claim_a_row_that_changed_since_it_was_read
+    );
+    pg_case!(
+        tabular_prepare_pg_gc_cannot_claim_a_row_that_was_used_since_it_was_read,
+        gc_cannot_claim_a_row_that_was_used_since_it_was_read
+    );
+    pg_case!(
+        tabular_prepare_pg_an_abandoned_deleting_row_is_found_and_taken_over,
+        an_abandoned_deleting_row_is_found_and_taken_over
+    );
     pg_case!(
         tabular_prepare_pg_find_stale_selects_old_rows_and_spares_a_live_preparation,
         find_stale_selects_old_rows_and_spares_a_live_preparation

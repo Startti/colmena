@@ -211,10 +211,10 @@ pub trait PreparationRegistry: Send + Sync {
 
     /// Rows for the cleanup pass, in key order strictly after `after` (a
     /// keyset cursor, so rows that could not be deleted never hide later
-    /// ones): `COALESCE(last_used_at, created_at) < cutoff`, except a row that
-    /// is `running` with a live lease at `now` (an old row claimed again keeps
-    /// its creation time, and its preparation must not be pulled from under
-    /// it).
+    /// ones): `COALESCE(last_used_at, created_at) < cutoff`, plus any
+    /// `deleting` row whatever its age (a collector died mid-delete). A row
+    /// that is `running` or `deleting` with a live lease at `now` is never
+    /// returned (an old row claimed again keeps its creation time).
     async fn find_stale(
         &self,
         cutoff: DateTime<Utc>,
@@ -230,6 +230,28 @@ pub trait PreparationRegistry: Send + Sync {
         after: Option<&str>,
         limit: u32,
     ) -> Result<Vec<PreparedRow>, RegistryError>;
+    /// The cleanup pass takes a row before deleting anything: move it to
+    /// `deleting` under `owner`'s lease, only if it is still in the status and
+    /// `updated_at` of `row` (what the pass observed) and holds no live lease.
+    /// `false` means someone changed it meanwhile (for example a preparation
+    /// claimed it): leave it alone.
+    async fn begin_delete(
+        &self,
+        row: &PreparedRow,
+        owner: &str,
+        lease: Duration,
+        now: DateTime<Utc>,
+    ) -> Result<bool, RegistryError>;
+
+    /// Delete a row the caller holds in `deleting`, after its blobs are gone.
+    async fn finish_delete(&self, source_key: &str, owner: &str) -> Result<bool, RegistryError>;
+
+    /// Delete a row only if it is still exactly what the caller observed
+    /// (same `status`, `updated_at` and lease owner). The cancellation path of
+    /// the cleanup uses it: a job that completed or was taken over after the
+    /// read changes the row, and the finished table must not be lost from a
+    /// stale snapshot. `true` if the row went.
+    async fn delete_if_unchanged(&self, row: &PreparedRow) -> Result<bool, RegistryError>;
 }
 
 // ---------------------------------------------------------------------------
@@ -323,11 +345,34 @@ SELECT source_storage_key, status, format_version, manifest_key, blob_keys,
        tables_json, source_bytes, prepared_bytes, error_code, error_detail,
        lease_owner, lease_until, attempts, created_at, updated_at, last_used_at
   FROM attachment_prepared
- WHERE COALESCE(last_used_at, created_at) < $1
-   AND NOT (status = 'running' AND lease_until >= $2)
+ WHERE (COALESCE(last_used_at, created_at) < $1 OR status = 'deleting')
+   AND NOT (status IN ('running', 'deleting') AND lease_until >= $2)
    AND source_storage_key > $3
  ORDER BY source_storage_key
  LIMIT $4";
+
+/// `$1` key, `$2` owner, `$3` lease end, `$4` now, `$5` observed status, `$6`
+/// observed `updated_at`, `$7` observed `last_used_at` and `$8` whether it was
+/// NULL (portable null-safe equality: a table used since the read is refused).
+pub(crate) const BEGIN_DELETE_SQL: &str = "\
+UPDATE attachment_prepared
+   SET status = 'deleting', lease_owner = $2, lease_until = $3, updated_at = $4
+ WHERE source_storage_key = $1 AND status = $5 AND updated_at = $6
+   AND (last_used_at = $7 OR ($8 AND last_used_at IS NULL))
+   AND NOT (status IN ('running', 'deleting') AND lease_until >= $4)
+RETURNING source_storage_key";
+
+/// `$1` key, `$2` observed status, `$3` observed `updated_at`, `$4` observed
+/// lease owner, `$5` whether it was NULL (portable null-safe equality).
+pub(crate) const DELETE_IF_UNCHANGED_SQL: &str = "\
+DELETE FROM attachment_prepared
+ WHERE source_storage_key = $1 AND status = $2 AND updated_at = $3
+   AND (lease_owner = $4 OR ($5 AND lease_owner IS NULL))";
+
+/// `$1` key, `$2` owner.
+pub(crate) const FINISH_DELETE_SQL: &str = "\
+DELETE FROM attachment_prepared
+ WHERE source_storage_key = $1 AND lease_owner = $2 AND status = 'deleting'";
 
 /// `$1` after-key (empty string for the first page), `$2` limit.
 pub(crate) const LIST_READY_AFTER_SQL: &str = "\
