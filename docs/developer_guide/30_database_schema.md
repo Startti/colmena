@@ -38,6 +38,7 @@ All files live under `src/libs/colmena/migrations/`.
 | `20260608000000_gdocs_session_state.sql` | Creates `gdocs_session_state` (last-known revision per `(agent_session_id, document_id)`) + `gdocs_session_state_last_edit_at_idx`. Backs the Google Docs co-edit guard that detects human edits between agent writes |
 | `20260609000000_gdocs_session_state_snapshot.sql` | Adds `last_snapshot_json` (JSONB) and `last_snapshot_size_bytes` (INTEGER) to `gdocs_session_state` so the co-edit guard can show paragraph-level diffs of human changes |
 | `20260618000000_llm_history_summary.sql` | Adds the `summary` TEXT column to `llm_node_history` (per-message semantic summary cache; NULL = not yet summarized or below the verbatim threshold) |
+| `20261004000001_attachment_prepared.sql` | Creates `attachment_prepared`, the preparation registry for large tabular attachments (dark behind `COLMENA_LARGE_TABULAR`; unused while the switch is off) |
 
 ### SQLite (`migrations/sqlite/`)
 
@@ -51,6 +52,7 @@ All files live under `src/libs/colmena/migrations/`.
 | `20260525000001_attachment_uniform_resolution.sql` | Mirrors the Postgres `storage_key`/`origin`/`last_used_at` extension on `conversation_attachments` |
 | `20260603000000_crdt_doc_changes.sql` | SQLite mirror of the CRDT change-log tables (TEXT/INTEGER-typed). Used when the CRDT runtime points at a SQLite backend in tests / local dev |
 | `20260618000000_llm_history_summary.sql` | SQLite mirror: adds the `summary` TEXT column to `llm_node_history`. SQLite does not support `ADD COLUMN IF NOT EXISTS`, so it runs exactly once |
+| `20261004000001_attachment_prepared.sql` | SQLite mirror of `attachment_prepared` (`TIMESTAMP` columns hold RFC 3339 text written by the application) |
 
 > **SQLite scope**: SQLite is supported for `llm_node_history`,
 > `dag_task_memory`, `conversation_attachments` and the CRDT change-log
@@ -382,6 +384,35 @@ There are no FK constraints between them — the link is by convention on
 
 ---
 
+### `attachment_prepared`
+
+Preparation registry for large tabular attachments: one row per source
+`storage_key`, tracking whether the source has been converted into prepared
+tables. Created and used only behind `COLMENA_LARGE_TABULAR`; with the switch
+off the table stays empty. Available on PostgreSQL (`TIMESTAMPTZ`) and SQLite
+(`TIMESTAMP` columns holding RFC 3339 text). The behaviour that uses it is
+documented in [54_tabular_prepare.md](./54_tabular_prepare.md) as the chain lands.
+
+| Column | Type | Nullable | Description |
+|--------|------|----------|-------------|
+| `source_storage_key` | TEXT | no (PK) | Storage key of the source file |
+| `status` | TEXT | no | `running`, `ready`, `failed` or `deleting` (plain TEXT, no CHECK) |
+| `format_version` | INTEGER | no | Layout version the row was written with; an older value makes the row claimable again |
+| `manifest_key` | TEXT | yes | Storage key of the manifest, set when `ready` |
+| `blob_keys` | TEXT | no | JSON array of every blob that may exist for this source (union over attempts), for cleanup (default `'[]'`) |
+| `tables_json` | TEXT | yes | Table names, row counts and column types, set when `ready` |
+| `source_bytes` | BIGINT | no | Size of the source |
+| `prepared_bytes` | BIGINT | yes | Total size of the prepared blobs |
+| `error_code`, `error_detail` | TEXT | yes | Reason, set when `failed` |
+| `lease_owner`, `lease_until` | TEXT, timestamp | yes | Who holds the preparation (or, for `deleting`, the cleanup pass) and until when (one fixed value, never renewed) |
+| `attempts` | INTEGER | no | Attempts made under this `format_version` (default 0) |
+| `created_at`, `updated_at` | timestamp | no | Written by the application |
+| `last_used_at` | timestamp | yes | Written when a ready table is handed out (at most once a day); the TTL pass of `attachment_gc` measures from it |
+
+There is no FK to `conversation_attachments`; the link is the storage key.
+
+---
+
 ### `crdt_doc_events`
 
 Per-artifact change log for the CRDT documents subsystem. Every mutation
@@ -619,6 +650,9 @@ conversation_attachments ── standalone, per agent_session_id
                             keyed by (agent_session_id, document_id, provider)
                             convention-linked to provider_file_cache by
                             (document_id, provider); no FK
+
+attachment_prepared ── standalone, keyed by source_storage_key
+                       convention-linked to conversation_attachments.storage_key; no FK
 
 crdt_doc_events            ── standalone, append-only per artifact_id
 crdt_doc_session_cursors   ──> crdt_doc_events  (cursors.last_event_id → events.id;
