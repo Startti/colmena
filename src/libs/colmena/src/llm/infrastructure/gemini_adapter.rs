@@ -386,6 +386,7 @@ impl LlmRepository for GeminiAdapter {
                     e, response_text
                 ))
             })?;
+        gemini_response.ensure_answer()?;
 
         // Extract function calls if present
         let tool_calls = gemini_response.candidates.first().and_then(|candidate| {
@@ -574,6 +575,7 @@ impl LlmRepository for GeminiAdapter {
                 let json_bytes = json_bytes_result?;
                 let chunk_response = serde_json::from_slice::<GeminiResponse>(&json_bytes)
                     .map_err(|e| LlmError::parsing_error(e.to_string()))?;
+                chunk_response.ensure_answer()?;
                 if let Some(reason) = chunk_response.block_reason() {
                     block_reason = Some(reason.to_string());
                 }
@@ -861,9 +863,31 @@ struct GeminiResponse {
     usage_metadata: Option<GeminiUsage>,
     #[serde(rename = "promptFeedback")]
     prompt_feedback: Option<GeminiPromptFeedback>,
+    /// An error element: Gemini can send one inside a 200 (mid-stream too).
+    error: Option<serde_json::Value>,
 }
 
 impl GeminiResponse {
+    /// `candidates` defaults to empty only so a blocked prompt parses: an
+    /// error element, or one with no answer at all, is still a failure and
+    /// never an empty answer that finishes `done`.
+    fn ensure_answer(&self) -> Result<(), LlmError> {
+        if let Some(error) = &self.error {
+            return Err(LlmError::request_failed(format!(
+                "Gemini API error: {error}"
+            )));
+        }
+        if self.candidates.is_empty()
+            && self.prompt_feedback.is_none()
+            && self.usage_metadata.is_none()
+        {
+            return Err(LlmError::parsing_error(
+                "Gemini answer has no candidates, promptFeedback or usageMetadata",
+            ));
+        }
+        Ok(())
+    }
+
     fn block_reason(&self) -> Option<&str> {
         self.prompt_feedback.as_ref()?.block_reason.as_deref()
     }
@@ -1705,32 +1729,52 @@ mod tests {
     // and no function call; the node finished `done` with `result: ""` and no
     // trace of why. `call` already turned that into `[Empty response - …]`.
 
-    async fn stub_gemini(body: serde_json::Value) -> wiremock::MockServer {
-        use wiremock::matchers::method;
-        use wiremock::{Mock, MockServer, ResponseTemplate};
+    async fn stub_gemini(body: serde_json::Value) -> GeminiAdapter {
+        use wiremock::{matchers::method, Mock, MockServer, ResponseTemplate};
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .respond_with(ResponseTemplate::new(200).set_body_json(body))
             .mount(&server)
             .await;
-        server
+        let adapter = GeminiAdapter::with_base_url(server.uri());
+        std::mem::forget(server); // keep it serving for the whole test
+        adapter
     }
 
-    /// Streams one Gemini answer (`chunks`, a JSON array) and returns the
-    /// joined content plus every chunk.
-    async fn stream_answer(chunks: serde_json::Value) -> (String, Vec<LlmStreamChunk>) {
-        let server = stub_gemini(chunks).await;
-        let adapter = GeminiAdapter::with_base_url(server.uri());
+    async fn stream_items(chunks: serde_json::Value) -> Vec<Result<LlmStreamChunk, LlmError>> {
+        let adapter = stub_gemini(chunks).await;
         let stream = adapter.stream(gemini_req_with_suffix(None)).await.unwrap();
-        let parts: Vec<LlmStreamChunk> = stream.map(|c| c.unwrap()).collect().await;
-        let content = parts.iter().map(|c| c.content()).collect::<String>();
-        (content, parts)
+        stream.collect().await
     }
 
-    async fn call_answer(body: serde_json::Value) -> LlmResponse {
-        let server = stub_gemini(body).await;
-        let adapter = GeminiAdapter::with_base_url(server.uri());
-        adapter.call(gemini_req_with_suffix(None)).await.unwrap()
+    /// Streams one Gemini answer (`chunks`, a JSON array): joined content and every chunk.
+    async fn stream_answer(chunks: serde_json::Value) -> (String, Vec<LlmStreamChunk>) {
+        let parts: Vec<_> = stream_items(chunks)
+            .await
+            .into_iter()
+            .map(|c| c.unwrap())
+            .collect();
+        (parts.iter().map(|c| c.content()).collect(), parts)
+    }
+
+    async fn call_answer(body: serde_json::Value) -> Result<LlmResponse, LlmError> {
+        stub_gemini(body)
+            .await
+            .call(gemini_req_with_suffix(None))
+            .await
+    }
+
+    /// One answer element whose candidate has `parts` and, if given, a finish reason.
+    fn element(parts: serde_json::Value, reason: Option<&str>) -> serde_json::Value {
+        let mut c = json!({ "content": { "role": "model", "parts": parts } });
+        if let Some(r) = reason {
+            c["finishReason"] = json!(r);
+        }
+        json!({ "candidates": [c] })
+    }
+
+    fn has(parts: &[LlmStreamChunk], f: impl Fn(&LlmStreamPart) -> bool) -> bool {
+        parts.iter().any(|c| f(c.part()))
     }
 
     const USAGE: &str = r#"{"promptTokenCount":8771,"candidatesTokenCount":0}"#;
@@ -1747,13 +1791,11 @@ mod tests {
             "OTHER",
         ] {
             // Both shapes Gemini sends: an empty text part, and no content.
-            for content in [json!({"role":"model","parts":[{"text":""}]}), json!(null)] {
-                let mut candidate = json!({ "finishReason": reason });
-                if !content.is_null() {
-                    candidate["content"] = content;
-                }
-                let answer = json!({ "candidates": [candidate], "usageMetadata": usage });
-                let called = call_answer(answer.clone()).await;
+            let empty_part = element(json!([{ "text": "" }]), Some(reason));
+            let no_content = json!({ "candidates": [{ "finishReason": reason }] });
+            for mut answer in [empty_part, no_content] {
+                answer["usageMetadata"] = usage.clone();
+                let called = call_answer(answer.clone()).await.unwrap();
                 let (streamed, parts) = stream_answer(json!([answer])).await;
 
                 assert_eq!(streamed, called.content(), "{reason}");
@@ -1771,11 +1813,9 @@ mod tests {
     #[tokio::test]
     async fn blocked_prompt_names_the_block_reason_in_both_paths() {
         let usage: serde_json::Value = serde_json::from_str(USAGE).unwrap();
-        let answer = json!({
-            "promptFeedback": { "blockReason": "SAFETY" },
-            "usageMetadata": usage,
-        });
-        let called = call_answer(answer.clone()).await;
+        let answer =
+            json!({ "promptFeedback": { "blockReason": "SAFETY" }, "usageMetadata": usage });
+        let called = call_answer(answer.clone()).await.unwrap();
         let (streamed, parts) = stream_answer(json!([answer])).await;
 
         assert_eq!(called.content(), "[Empty response - block_reason: SAFETY]");
@@ -1785,44 +1825,64 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn empty_text_with_a_function_call_streams_the_call_and_no_placeholder() {
-        let answer = json!({ "candidates": [{
-            "content": { "role": "model", "parts": [
-                { "text": "" },
-                { "functionCall": { "name": "gsheets_create", "args": { "title": "X" } } }
-            ]},
-            "finishReason": "STOP"
-        }]});
-        let (streamed, parts) = stream_answer(json!([answer])).await;
-
-        assert_eq!(streamed, "");
-        let calls: Vec<_> = parts
-            .iter()
-            .filter_map(|c| match c.part() {
-                LlmStreamPart::ToolCallChunk(tc) => Some(tc.name.clone()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(calls, vec!["gsheets_create".to_string()]);
+    async fn a_function_call_gets_no_placeholder_even_after_the_finish_chunk() {
+        let call = json!({ "functionCall": { "name": "gsheets_create", "args": {} } });
+        let same_chunk = json!([element(json!([{ "text": "" }, call]), Some("STOP"))]);
+        let later_chunk = json!([
+            element(json!([{ "text": "" }]), Some("STOP")),
+            element(json!([call]), None)
+        ]);
+        for chunks in [same_chunk, later_chunk] {
+            let (streamed, parts) = stream_answer(chunks).await;
+            assert_eq!(streamed, "");
+            assert!(has(
+                &parts,
+                |p| matches!(p, LlmStreamPart::ToolCallChunk(tc) if tc.name == "gsheets_create")
+            ));
+        }
     }
 
     #[tokio::test]
-    async fn streamed_text_is_unchanged() {
-        let answer = |text: &str, reason: Option<&str>| {
-            let mut c = json!({ "content": { "role": "model", "parts": [{ "text": text }] } });
-            if let Some(r) = reason {
-                c["finishReason"] = json!(r);
-            }
-            json!({ "candidates": [c] })
-        };
+    async fn thought_only_stream_gets_the_placeholder() {
+        let thought = json!([{ "text": "pienso…", "thought": true }]);
+        let (streamed, parts) = stream_answer(json!([element(thought, Some("STOP"))])).await;
+
+        assert_eq!(streamed, "[Empty response - finish_reason: STOP]");
+        assert!(has(&parts, |p| matches!(p, LlmStreamPart::ThinkingEnd)));
+    }
+
+    /// An error element inside a 200 fails the call — before or after text —
+    /// instead of reading as an empty (or cut-off) answer that finishes `done`.
+    #[tokio::test]
+    async fn an_error_element_in_a_200_is_an_error_not_an_empty_answer() {
+        let error = json!({ "error": { "code": 500, "message": "Internal error" } });
+        let text = element(json!([{ "text": "Hola" }]), None);
+        for chunks in [json!([error.clone()]), json!([text, error.clone()])] {
+            let items = stream_items(chunks).await;
+            let err = items.iter().find_map(|i| i.as_ref().err());
+            assert!(format!("{err:?}").contains("Internal error"), "{err:?}");
+        }
+        let err = call_answer(error).await.unwrap_err();
+        assert!(format!("{err:?}").contains("Internal error"), "{err:?}");
+
+        let items = stream_items(json!([{ "modelVersion": "x" }])).await;
+        assert!(items.iter().any(|i| i.is_err()), "no answer at all fails");
+    }
+
+    #[tokio::test]
+    async fn text_is_unchanged_and_a_usage_only_final_chunk_is_fine() {
+        let usage: serde_json::Value = serde_json::from_str(USAGE).unwrap();
         let (streamed, parts) = stream_answer(json!([
-            answer("Hola, ", None),
-            answer("listo.", Some("STOP"))
+            element(json!([{ "text": "Hola, " }]), None),
+            element(json!([{ "text": "listo." }]), Some("STOP")),
+            { "usageMetadata": usage }
         ]))
         .await;
 
         assert_eq!(streamed, "Hola, listo.");
-        assert_eq!(parts.last().unwrap().finish_reason(), Some("STOP"));
+        let last_text = parts.iter().rev().find(|c| !c.content().is_empty());
+        assert_eq!(last_text.unwrap().finish_reason(), Some("STOP"));
+        assert!(has(&parts, |p| matches!(p, LlmStreamPart::Usage(_))));
         assert!(parts.iter().all(|c| c.block_reason().is_none()));
     }
 }
