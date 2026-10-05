@@ -28,6 +28,11 @@ pub struct LlmResponse {
     timestamp: DateTime<Utc>,
     finish_reason: Option<String>,
 
+    /// Why the provider refused the prompt itself (Gemini
+    /// `promptFeedback.blockReason`). `None` when the prompt was accepted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    block_reason: Option<String>,
+
     /// Tool calls requested by the LLM
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_calls: Option<Vec<ToolCall>>,
@@ -57,6 +62,7 @@ impl LlmResponse {
             provider,
             timestamp: Utc::now(),
             finish_reason: None,
+            block_reason: None,
             tool_calls: None,
             thinking_content: None,
             suspend: None,
@@ -76,6 +82,7 @@ impl LlmResponse {
             provider,
             timestamp: Utc::now(),
             finish_reason: None,
+            block_reason: None,
             tool_calls: None,
             thinking_content: None,
             suspend: None,
@@ -89,6 +96,12 @@ impl LlmResponse {
 
     pub fn with_finish_reason(mut self, reason: String) -> Self {
         self.finish_reason = Some(reason);
+        self
+    }
+
+    /// Records that the provider blocked the prompt (see [`Self::block_reason`]).
+    pub fn with_block_reason(mut self, reason: String) -> Self {
+        self.block_reason = Some(reason);
         self
     }
 
@@ -153,6 +166,11 @@ impl LlmResponse {
         self.finish_reason.as_deref()
     }
 
+    /// The provider's reason for refusing the prompt, when it did.
+    pub fn block_reason(&self) -> Option<&str> {
+        self.block_reason.as_deref()
+    }
+
     // Utility methods
     pub fn is_complete(&self) -> bool {
         self.finish_reason.is_some()
@@ -209,6 +227,7 @@ impl LlmResponse {
             provider,
             timestamp: Utc::now(),
             finish_reason: None,
+            block_reason: None,
             tool_calls: None,
             thinking_content: None,
             suspend: Some(SuspendInfo {
@@ -272,6 +291,8 @@ pub struct LlmStreamChunk {
     timestamp: DateTime<Utc>,
     is_final: bool,
     finish_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    block_reason: Option<String>,
 }
 
 impl LlmStreamChunk {
@@ -289,11 +310,19 @@ impl LlmStreamChunk {
             timestamp: Utc::now(),
             is_final,
             finish_reason: None,
+            block_reason: None,
         }
     }
 
     pub fn with_finish_reason(mut self, reason: String) -> Self {
         self.finish_reason = Some(reason);
+        self
+    }
+
+    /// Records that the provider blocked the prompt (Gemini
+    /// `promptFeedback.blockReason`).
+    pub fn with_block_reason(mut self, reason: String) -> Self {
+        self.block_reason = Some(reason);
         self
     }
 
@@ -335,6 +364,10 @@ impl LlmStreamChunk {
 
     pub fn finish_reason(&self) -> Option<&str> {
         self.finish_reason.as_deref()
+    }
+
+    pub fn block_reason(&self) -> Option<&str> {
+        self.block_reason.as_deref()
     }
 }
 

@@ -406,3 +406,26 @@ y compara, por el `SseMapper`, `usage-summary`, `finish.usage` y `extra_info.usa
 llamadas): `usage-summary`, `finish.usage` y `extra_info.usage` iguales a lo que reportó el servidor (3300/33 con `stream`, 4200/42 sin).
 **ADP.** Subir el pin: lo facturado desde `usage-summary` baja a la mitad en los `llm_call` con stream y suma las
 llamadas internas de planner/critic/reactor de un orquestador. **Estado.** done.
+
+## 26. `llm_call`: una respuesta vacía de Gemini en streaming dice por qué
+
+**Qué cambia.** Medido el 2026-10-05 en ADP dev: `gemini-2.5-flash` con el toolkit de gsheets devolvió, en
+streaming, una respuesta sin texto y sin llamadas a tools; el nodo terminó `done` con `result: ""` y
+`completion_tokens: 0`, sin decir por qué. Sin streaming, el adaptador ya escribía
+`[Empty response - finish_reason: <X>]`; en streaming el contenido quedaba vacío y el agregador del loop
+(`AgentService::invoke_llm`) tiraba el `finish_reason` de los chunks, para cualquier proveedor. Ahora:
+- el stream de Gemini, si no trajo texto ni llamadas, emite al final el mismo texto que `call`;
+- un prompt bloqueado (`promptFeedback.blockReason`, sin `candidates`) ya no es un error de parseo en ninguno de los
+  dos caminos: el texto es `[Empty response - block_reason: <X>]`;
+- un `{"error": …}` dentro de un 200 (también a mitad del stream) es un error del nodo, no una respuesta vacía o
+  cortada que termina `done`; un elemento sin `candidates`, `promptFeedback` ni `usageMetadata` falla en `call` y el
+  stream lo salta;
+- el agregador guarda `finish_reason` y `block_reason` del stream, y `llm_call` los pone en `extra_info` cuando
+  existen (también sin streaming y para OpenAI y Anthropic, cuyos streams ya los traían).
+
+Con texto o con llamadas a tools nada cambia: ni el contenido ni el despacho; `extra_info` suma la clave.
+Guía: [14_llm_deep_dive.md](developer_guide/14_llm_deep_dive.md).
+**Tests.** `gemini_adapter`: cada `finishReason` vacío da el mismo texto en `stream` y `call`; prompt bloqueado;
+`functionCall` (también tras el chunk final) sin aviso; solo razonamiento con aviso; `error` falla; elemento solo de
+metadatos saltado; texto intacto. `agent_service` conserva las razones; `llm` las nombra solo si existen.
+**ADP.** Subir el pin; `extra_info.finish_reason` permite explicar una respuesta vacía. **Estado.** done.

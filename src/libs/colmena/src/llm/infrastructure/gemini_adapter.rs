@@ -386,6 +386,7 @@ impl LlmRepository for GeminiAdapter {
                     e, response_text
                 ))
             })?;
+        gemini_response.ensure_answer()?;
 
         // Extract function calls if present
         let tool_calls = gemini_response.candidates.first().and_then(|candidate| {
@@ -454,35 +455,32 @@ impl LlmRepository for GeminiAdapter {
                     }
                 } else {
                     // Fallback to parts — exclude thought parts
-                    content.parts
-                        .as_ref()
-                        .and_then(|parts| {
-                            let joined: String = parts
-                                .iter()
-                                .filter(|p| p.thought != Some(true))
-                                .filter_map(|p| p.text.as_deref().filter(|t| !t.is_empty()))
-                                .collect::<Vec<_>>()
-                                .join("");
-                            if joined.is_empty() { None } else { Some(joined) }
-                        })
+                    content.parts.as_ref().and_then(|parts| {
+                        let joined: String = parts
+                            .iter()
+                            .filter(|p| p.thought != Some(true))
+                            .filter_map(|p| p.text.as_deref().filter(|t| !t.is_empty()))
+                            .collect::<Vec<_>>()
+                            .join("");
+                        if joined.is_empty() {
+                            None
+                        } else {
+                            Some(joined)
+                        }
+                    })
                 }
             })
             .unwrap_or_else(|| {
-                // If no content is found, check finish reason
-                let finish_reason = gemini_response
-                    .candidates
-                    .first()
-                    .and_then(|candidate| candidate.finish_reason.as_ref())
-                    .map(|s| s.as_str())
-                    .unwrap_or("UNKNOWN");
-
-                if finish_reason == "MAX_TOKENS" {
-                    "[No content generated - Increase max_tokens as this Gemini model uses tokens for internal reasoning]".to_string()
-                } else {
-                    format!("[Empty response - finish_reason: {}]", finish_reason)
-                }
+                empty_response_text(
+                    gemini_response
+                        .candidates
+                        .first()
+                        .and_then(|candidate| candidate.finish_reason.as_deref()),
+                    gemini_response.block_reason(),
+                )
             });
 
+        let block_reason = gemini_response.block_reason().map(str::to_string);
         let usage = gemini_response.usage_metadata.map(|u| {
             let mut usage = LlmUsage::new(
                 u.prompt_token_count.unwrap_or(0),
@@ -517,6 +515,9 @@ impl LlmRepository for GeminiAdapter {
             .and_then(|candidate| candidate.finish_reason.as_ref())
         {
             response = response.with_finish_reason(finish_reason.clone());
+        }
+        if let Some(block_reason) = block_reason {
+            response = response.with_block_reason(block_reason);
         }
 
         // Add tool calls if present
@@ -566,14 +567,28 @@ impl LlmRepository for GeminiAdapter {
             let mut tool_call_index: usize = 0;
             // Track whether we are currently inside a thinking block across chunks.
             let mut in_thinking = false;
+            // What the answer carried, so an empty one is named like `call` does.
+            let mut answered = false;
+            let mut last_finish_reason: Option<String> = None;
+            let mut block_reason: Option<String> = None;
             while let Some(json_bytes_result) = json_parser.next().await {
                 let json_bytes = json_bytes_result?;
                 let chunk_response = serde_json::from_slice::<GeminiResponse>(&json_bytes)
                     .map_err(|e| LlmError::parsing_error(e.to_string()))?;
+                chunk_response.ensure_no_error()?;
+                if chunk_response.is_metadata_only() {
+                    continue;
+                }
+                if let Some(reason) = chunk_response.block_reason() {
+                    block_reason = Some(reason.to_string());
+                }
 
                 if let Some(candidate) = chunk_response.candidates.first() {
                     let is_final = candidate.finish_reason.is_some();
                     let finish_reason = candidate.finish_reason.clone();
+                    if finish_reason.is_some() {
+                        last_finish_reason = finish_reason.clone();
+                    }
 
                     let candidate_content = candidate.content.as_ref();
                     if let Some(parts) = candidate_content.and_then(|c| c.parts.as_ref()) {
@@ -608,6 +623,7 @@ impl LlmRepository for GeminiAdapter {
                                                 false,
                                             );
                                         }
+                                        answered = true;
                                         let mut chunk = LlmStreamChunk::new(
                                             request_id.clone(),
                                             LlmStreamPart::Content(text.clone()),
@@ -623,6 +639,7 @@ impl LlmRepository for GeminiAdapter {
                             }
 
                             if let Some(fc) = &part.function_call {
+                                answered = true;
                                 let call_id = format!("call_{}", uuid::Uuid::new_v4());
                                 let args_str =
                                     super::tool_args::serialize_tool_args(&fc.args, &fc.name);
@@ -647,6 +664,7 @@ impl LlmRepository for GeminiAdapter {
                             }
                         }
                     } else if let Some(text) = candidate_content.and_then(|c| c.text.as_ref()) {
+                        answered |= !text.is_empty();
                         let mut chunk = LlmStreamChunk::new(
                             request_id.clone(),
                             LlmStreamPart::Content(text.clone()),
@@ -694,6 +712,33 @@ impl LlmRepository for GeminiAdapter {
                     }
                     latest_usage = Some(usage);
                 }
+            }
+
+            // No text and no call: say why, with the same text as `call`, so
+            // the host does not get a silent empty answer.
+            if !answered {
+                if in_thinking {
+                    yield LlmStreamChunk::new(
+                        request_id.clone(),
+                        LlmStreamPart::ThinkingEnd,
+                        provider.clone(),
+                        false,
+                    );
+                }
+                let text = empty_response_text(last_finish_reason.as_deref(), block_reason.as_deref());
+                let mut chunk = LlmStreamChunk::new(
+                    request_id.clone(),
+                    LlmStreamPart::Content(text),
+                    provider.clone(),
+                    true,
+                );
+                if let Some(reason) = last_finish_reason {
+                    chunk = chunk.with_finish_reason(reason);
+                }
+                if let Some(reason) = block_reason {
+                    chunk = chunk.with_block_reason(reason);
+                }
+                yield chunk;
             }
 
             if let Some(usage) = latest_usage {
@@ -814,9 +859,65 @@ struct GeminiFunctionCall {
 
 #[derive(Debug, Deserialize)]
 struct GeminiResponse {
+    /// Absent when the prompt itself was blocked (see `prompt_feedback`).
+    #[serde(default)]
     candidates: Vec<GeminiCandidate>,
     #[serde(rename = "usageMetadata")]
     usage_metadata: Option<GeminiUsage>,
+    #[serde(rename = "promptFeedback")]
+    prompt_feedback: Option<GeminiPromptFeedback>,
+    /// An error element: Gemini can send one inside a 200 (mid-stream too).
+    error: Option<serde_json::Value>,
+}
+
+impl GeminiResponse {
+    /// `candidates` defaults to empty only so a blocked prompt parses: an
+    /// error element is still a failure, never an empty answer that finishes `done`.
+    fn ensure_no_error(&self) -> Result<(), LlmError> {
+        match &self.error {
+            Some(error) => Err(LlmError::request_failed(format!(
+                "Gemini API error: {error}"
+            ))),
+            None => Ok(()),
+        }
+    }
+
+    /// Only `modelVersion`/`responseId`, say: the stream skips it, `call` fails.
+    fn is_metadata_only(&self) -> bool {
+        self.candidates.is_empty()
+            && self.prompt_feedback.is_none()
+            && self.usage_metadata.is_none()
+    }
+
+    fn ensure_answer(&self) -> Result<(), LlmError> {
+        self.ensure_no_error()?;
+        match self.is_metadata_only() {
+            true => Err(LlmError::parsing_error("Gemini answer has no candidates")),
+            false => Ok(()),
+        }
+    }
+
+    fn block_reason(&self) -> Option<&str> {
+        self.prompt_feedback.as_ref()?.block_reason.as_deref()
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct GeminiPromptFeedback {
+    #[serde(rename = "blockReason")]
+    block_reason: Option<String>,
+}
+
+/// The content of an answer with no text and no function call, shared by
+/// `call` and `stream` so a host reads the same thing on both paths.
+fn empty_response_text(finish_reason: Option<&str>, block_reason: Option<&str>) -> String {
+    if let Some(block) = block_reason {
+        return format!("[Empty response - block_reason: {block}]");
+    }
+    match finish_reason.unwrap_or("UNKNOWN") {
+        "MAX_TOKENS" => "[No content generated - Increase max_tokens as this Gemini model uses tokens for internal reasoning]".to_string(),
+        reason => format!("[Empty response - finish_reason: {reason}]"),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -1629,5 +1730,181 @@ mod tests {
             assert!(format!("{err:?}").contains("second answer"), "{err:?}");
             assert_eq!(server.received_requests().await.unwrap().len(), 2);
         }
+    }
+
+    // ── Empty completion: streaming names the finish reason like `call` ──
+    //
+    // 2026-10-05, ADP dev: gemini-2.5-flash streamed a completion with no text
+    // and no function call; the node finished `done` with `result: ""` and no
+    // trace of why. `call` already turned that into `[Empty response - …]`.
+
+    async fn stub_gemini(body: serde_json::Value) -> GeminiAdapter {
+        use wiremock::{matchers::method, Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(&server)
+            .await;
+        let adapter = GeminiAdapter::with_base_url(server.uri());
+        std::mem::forget(server); // keep it serving for the whole test
+        adapter
+    }
+
+    async fn stream_items(chunks: serde_json::Value) -> Vec<Result<LlmStreamChunk, LlmError>> {
+        let adapter = stub_gemini(chunks).await;
+        let stream = adapter.stream(gemini_req_with_suffix(None)).await.unwrap();
+        stream.collect().await
+    }
+
+    /// Streams one Gemini answer (`chunks`, a JSON array): joined content and every chunk.
+    async fn stream_answer(chunks: serde_json::Value) -> (String, Vec<LlmStreamChunk>) {
+        let parts: Vec<_> = stream_items(chunks)
+            .await
+            .into_iter()
+            .map(|c| c.unwrap())
+            .collect();
+        (parts.iter().map(|c| c.content()).collect(), parts)
+    }
+
+    async fn call_answer(body: serde_json::Value) -> Result<LlmResponse, LlmError> {
+        stub_gemini(body)
+            .await
+            .call(gemini_req_with_suffix(None))
+            .await
+    }
+
+    /// One answer element whose candidate has `parts` and, if given, a finish reason.
+    fn element(parts: serde_json::Value, reason: Option<&str>) -> serde_json::Value {
+        let mut c = json!({ "content": { "role": "model", "parts": parts } });
+        if let Some(r) = reason {
+            c["finishReason"] = json!(r);
+        }
+        json!({ "candidates": [c] })
+    }
+
+    fn has(parts: &[LlmStreamChunk], f: impl Fn(&LlmStreamPart) -> bool) -> bool {
+        parts.iter().any(|c| f(c.part()))
+    }
+
+    const USAGE: &str = r#"{"promptTokenCount":8771,"candidatesTokenCount":0}"#;
+
+    #[tokio::test]
+    async fn stream_empty_completion_names_each_finish_reason_like_call() {
+        let usage: serde_json::Value = serde_json::from_str(USAGE).unwrap();
+        for reason in [
+            "STOP",
+            "SAFETY",
+            "RECITATION",
+            "MAX_TOKENS",
+            "MALFORMED_FUNCTION_CALL",
+            "OTHER",
+        ] {
+            // Both shapes Gemini sends: an empty text part, and no content.
+            let empty_part = element(json!([{ "text": "" }]), Some(reason));
+            let no_content = json!({ "candidates": [{ "finishReason": reason }] });
+            for mut answer in [empty_part, no_content] {
+                answer["usageMetadata"] = usage.clone();
+                let called = call_answer(answer.clone()).await.unwrap();
+                let (streamed, parts) = stream_answer(json!([answer])).await;
+
+                assert_eq!(streamed, called.content(), "{reason}");
+                assert!(streamed.starts_with('['), "{reason}: {streamed}");
+                if reason != "MAX_TOKENS" {
+                    assert!(streamed.contains(reason), "{reason}: {streamed}");
+                }
+                let last_text = parts.iter().rev().find(|c| !c.content().is_empty());
+                assert_eq!(last_text.unwrap().finish_reason(), Some(reason));
+                assert_eq!(called.finish_reason(), Some(reason));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn blocked_prompt_names_the_block_reason_in_both_paths() {
+        let usage: serde_json::Value = serde_json::from_str(USAGE).unwrap();
+        let answer =
+            json!({ "promptFeedback": { "blockReason": "SAFETY" }, "usageMetadata": usage });
+        let called = call_answer(answer.clone()).await.unwrap();
+        let (streamed, parts) = stream_answer(json!([answer])).await;
+
+        assert_eq!(called.content(), "[Empty response - block_reason: SAFETY]");
+        assert_eq!(called.block_reason(), Some("SAFETY"));
+        assert_eq!(streamed, called.content());
+        assert!(parts.iter().any(|c| c.block_reason() == Some("SAFETY")));
+    }
+
+    #[tokio::test]
+    async fn a_function_call_gets_no_placeholder_even_after_the_finish_chunk() {
+        let call = json!({ "functionCall": { "name": "gsheets_create", "args": {} } });
+        let same_chunk = json!([element(json!([{ "text": "" }, call]), Some("STOP"))]);
+        let later_chunk = json!([
+            element(json!([{ "text": "" }]), Some("STOP")),
+            element(json!([call]), None)
+        ]);
+        for chunks in [same_chunk, later_chunk] {
+            let (streamed, parts) = stream_answer(chunks).await;
+            assert_eq!(streamed, "");
+            assert!(has(
+                &parts,
+                |p| matches!(p, LlmStreamPart::ToolCallChunk(tc) if tc.name == "gsheets_create")
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn thought_only_stream_gets_the_placeholder() {
+        let thought = json!([{ "text": "pienso…", "thought": true }]);
+        let (streamed, parts) = stream_answer(json!([element(thought, Some("STOP"))])).await;
+
+        assert_eq!(streamed, "[Empty response - finish_reason: STOP]");
+        assert!(has(&parts, |p| matches!(p, LlmStreamPart::ThinkingEnd)));
+    }
+
+    /// An error element inside a 200 fails the call — before or after text —
+    /// instead of reading as an empty (or cut-off) answer that finishes `done`.
+    #[tokio::test]
+    async fn an_error_element_in_a_200_is_an_error_not_an_empty_answer() {
+        let error = json!({ "error": { "code": 500, "message": "Internal error" } });
+        let text = element(json!([{ "text": "Hola" }]), None);
+        for chunks in [json!([error.clone()]), json!([text, error.clone()])] {
+            let items = stream_items(chunks).await;
+            let err = items.iter().find_map(|i| i.as_ref().err());
+            assert!(format!("{err:?}").contains("Internal error"), "{err:?}");
+        }
+        let err = call_answer(error).await.unwrap_err();
+        assert!(format!("{err:?}").contains("Internal error"), "{err:?}");
+
+        let err = call_answer(json!({ "modelVersion": "x" }))
+            .await
+            .unwrap_err();
+        assert!(format!("{err:?}").contains("no candidates"), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn a_metadata_only_element_mid_stream_is_skipped() {
+        let meta = json!({ "modelVersion": "gemini-2.5-flash", "responseId": "r1" });
+        let text = element(json!([{ "text": "Hola" }]), Some("STOP"));
+        let (streamed, _) = stream_answer(json!([meta.clone(), text])).await;
+        assert_eq!(streamed, "Hola");
+        // Only metadata, no answer: the stream ends with the placeholder.
+        let (streamed, _) = stream_answer(json!([meta])).await;
+        assert_eq!(streamed, "[Empty response - finish_reason: UNKNOWN]");
+    }
+
+    #[tokio::test]
+    async fn text_is_unchanged_and_a_usage_only_final_chunk_is_fine() {
+        let usage: serde_json::Value = serde_json::from_str(USAGE).unwrap();
+        let (streamed, parts) = stream_answer(json!([
+            element(json!([{ "text": "Hola, " }]), None),
+            element(json!([{ "text": "listo." }]), Some("STOP")),
+            { "usageMetadata": usage }
+        ]))
+        .await;
+
+        assert_eq!(streamed, "Hola, listo.");
+        let last_text = parts.iter().rev().find(|c| !c.content().is_empty());
+        assert_eq!(last_text.unwrap().finish_reason(), Some("STOP"));
+        assert!(has(&parts, |p| matches!(p, LlmStreamPart::Usage(_))));
+        assert!(parts.iter().all(|c| c.block_reason().is_none()));
     }
 }

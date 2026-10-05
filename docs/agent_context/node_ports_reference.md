@@ -92,7 +92,7 @@ Versioned document artifacts (Excel/Word) with an optimistic-concurrency edit mo
 
 | Node Type | `default_input` | `default_output` | Notes |
 |---|---|---|---|
-| `llm_call` | `prompt` | `result` | LLM node — always maps to/from prompt/result |
+| `llm_call` | `prompt` | `result` | LLM node — always maps to/from prompt/result. Sibling `extra_info` = `{ usage, tool_calls }`, plus `finish_reason` / `block_reason` when the provider gave them (an empty Gemini answer reads `[Empty response - …]`; see [§14](../developer_guide/14_llm_deep_dive.md)). |
 | `output` | `input` | `result` | Output node — captures final result |
 | `log` | `input` | `output` | Debug logger — pass-through |
 | `input` | — | `output` | Static input — reads from config |

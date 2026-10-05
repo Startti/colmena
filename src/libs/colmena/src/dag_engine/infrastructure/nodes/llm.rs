@@ -3945,10 +3945,7 @@ impl ExecutableNode for LlmNode {
         }
 
         // Format result json in standardized structure
-        let mut extra_info = json!({
-            "usage": response.usage(),
-            "tool_calls": response.tool_calls()
-        });
+        let mut extra_info = response_extra_info(&response);
 
         let result_json = json!({
             "result": response.content(),
@@ -4792,6 +4789,53 @@ pub(crate) fn classify_resume(has_pending: bool, has_persistent_memory: bool) ->
         (true, _) => ResumeRouting::ReplayPending,
         (false, true) => ResumeRouting::DegradeToFreshRun,
         (false, false) => ResumeRouting::FailNoPersistence,
+    }
+}
+
+/// The node's `extra_info` for a model answer: usage and tool calls, plus the
+/// provider's `finish_reason` and `block_reason` when it gave them — what lets
+/// a host say why an answer came back empty.
+fn response_extra_info(response: &crate::llm::domain::LlmResponse) -> Value {
+    let mut extra_info = json!({
+        "usage": response.usage(),
+        "tool_calls": response.tool_calls()
+    });
+    if let Some(reason) = response.finish_reason() {
+        extra_info["finish_reason"] = json!(reason);
+    }
+    if let Some(reason) = response.block_reason() {
+        extra_info["block_reason"] = json!(reason);
+    }
+    extra_info
+}
+
+#[cfg(test)]
+mod response_extra_info_tests {
+    use super::*;
+    use crate::llm::domain::{LlmRequestId, LlmResponse};
+
+    fn answer() -> LlmResponse {
+        let provider = LlmProvider::new(ProviderKind::Google, "k".into(), None).unwrap();
+        LlmResponse::new(LlmRequestId::new(), "x".into(), provider).unwrap()
+    }
+
+    #[test]
+    fn names_finish_and_block_reason_when_the_provider_gave_them() {
+        let extra = response_extra_info(
+            &answer()
+                .with_finish_reason("SAFETY".into())
+                .with_block_reason("PROHIBITED_CONTENT".into()),
+        );
+        assert_eq!(extra["finish_reason"], "SAFETY");
+        assert_eq!(extra["block_reason"], "PROHIBITED_CONTENT");
+    }
+
+    #[test]
+    fn omits_them_when_absent() {
+        let extra = response_extra_info(&answer());
+        assert!(extra.get("finish_reason").is_none());
+        assert!(extra.get("block_reason").is_none());
+        assert!(extra.get("usage").is_some() && extra.get("tool_calls").is_some());
     }
 }
 
