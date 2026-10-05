@@ -139,7 +139,8 @@ pub(crate) fn for_sqlite(sql: &str) -> String {
 
 /// The claim rule as one atomic statement: `$1` key, `$2` format version,
 /// `$3` source bytes, `$4` owner, `$5` lease end, `$6` now, `$7` max
-/// attempts. A claim over a row written by an older format restarts the
+/// attempts (a takeover of an expired lease counts as an attempt, so a job that
+/// dies without writing `failed` is retried at most `$7` times). A claim over a row written by an older format restarts the
 /// attempt count; any other claim adds one. `RETURNING` yields a row only
 /// when the claim was won.
 pub(crate) const CLAIM_SQL: &str = "\
@@ -165,7 +166,8 @@ ON CONFLICT (source_storage_key) DO UPDATE SET
     updated_at = excluded.updated_at
 WHERE attachment_prepared.format_version < excluded.format_version
    OR (attachment_prepared.status = 'failed' AND attachment_prepared.attempts < $7)
-   OR (attachment_prepared.status = 'running' AND attachment_prepared.lease_until < $6)
+   OR (attachment_prepared.status = 'running' AND attachment_prepared.attempts < $7
+        AND attachment_prepared.lease_until < $6)
 RETURNING attempts";
 
 pub(crate) const GET_SQL: &str = "\
