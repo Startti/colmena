@@ -154,6 +154,20 @@ pub enum NodeEvent {
     SubgraphChildEvent(serde_json::Value),
 }
 
+impl NodeEvent {
+    /// The `LlmUsage` event of one usage report. Billing sums every such
+    /// event, so each provider call must reach it exactly once.
+    pub fn llm_usage(usage: &crate::llm::domain::LlmUsage) -> Self {
+        Self::LlmUsage {
+            prompt_tokens: usage.prompt_tokens,
+            completion_tokens: usage.completion_tokens,
+            thinking_tokens: usage.thinking_tokens,
+            cache_read_tokens: usage.cache_read_tokens,
+            cache_write_tokens: usage.cache_write_tokens,
+        }
+    }
+}
+
 pub trait ExecutionObserver: Send + Sync {
     fn on_event(&self, event: NodeEvent);
 }

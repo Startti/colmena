@@ -382,3 +382,27 @@ como nodo y como tool lee la hoja con el token del host (handle y sesión); el r
 `HostRefused` a un error genérico (gsheets y gdocs), alterar el handle en `to_config_block` y no darle el puerto
 a `for_each` en el registro tumban al menos un test cada una. **E2E.** No aplica. **ADP.** Puede mandar el
 bloque `host_refresh_bearer` con el `HostTokenPort` conectado. **Estado.** done.
+
+## 25. Facturación: cada llamada al proveedor se cuenta una sola vez
+
+**Qué cambia.** Un `llm_call` con `stream: true` (el default) contaba cada llamada al proveedor dos veces en
+`usage-summary`, `subgraph-usage-summary` y `finish.usage`: emitía un `LlmUsage` por la parte `Usage` de cada
+llamada y al final otro con `response.usage()`, que ya es el total acumulado del loop (desde 4400f201, 2026-03-11).
+`node-end` → `extra_info.usage` estaba bien, así que la fila de facturación era el doble del nodo (medido: 17542
+contra 8771 en un `llm_call` de una llamada). Los hosts facturan con `usage-summary`. Ahora el `llm_call` reporta
+cada parte `Usage` al llegar, haga stream o no (el SSE no muestra frame para ese evento; una llamada anterior a
+una cancelación o a un error se cuenta), y al final solo lo que el total tenga por encima de lo ya reportado
+(`LlmUsage::beyond`, normalmente nada). Además `critic`, `planner` y `reactor` sin `streaming` (el default, y como
+los corre un `orchestrator`) no reportaban su llamada: ahora la reportan al volver la respuesta, una vez. Guías:
+[17_technical_reference.md](developer_guide/17_technical_reference.md) §6,
+[sse_events_reference.md](sse_events_reference.md) (`usage-summary.nodes`).
+**Tests.** `tests/usage_counted_once.rs` corre el loop real con un modelo que reporta un uso distinto por llamada
+y compara, por el `SseMapper`, `usage-summary`, `finish.usage` y `extra_info.usage` con la suma de lo reportado:
+`llm_call` con 3 turnos de tools y con 1 llamada, con y sin stream; el mismo agente dentro de un `subgraph`
+(`subgraph-usage-summary`, `usage-summary` del padre y `finish`); `critic`, `planner` y `reactor` con y sin
+`streaming`. Antes del arreglo, los tres casos con stream daban el doble y los tres nodos de revisión sin
+`streaming`, cero. Unitarios de `LlmUsage::add` y `beyond`.
+**E2E.** `dag_engine run` de un `llm_call` con `add` contra un servidor OpenAI falso local (adapter real, 3
+llamadas): `usage-summary`, `finish.usage` y `extra_info.usage` iguales a lo que reportó el servidor (3300/33 con `stream`, 4200/42 sin).
+**ADP.** Subir el pin: lo facturado desde `usage-summary` baja a la mitad en los `llm_call` con stream y suma las
+llamadas internas de planner/critic/reactor de un orquestador. **Estado.** done.
