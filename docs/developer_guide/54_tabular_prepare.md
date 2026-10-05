@@ -21,14 +21,48 @@ never claimable by a preparation.
 
 The migrations exist for SQLite and Postgres
 (`migrations/{sqlite,postgres}/20261004000001_attachment_prepared.sql`).
-Nothing reads or writes the table yet; the repository that does arrives in the
-next slices of this chain.
+
+## Registry
+
+The table sits behind the `PreparationRegistry` trait (`registry.rs`) so the
+host can decide where rows live and who deletes one (open question O8: ADP
+directly or an internal Colmena endpoint). Both dialects run the same
+statements: written once with `$N` placeholders, rewritten to `?N` for SQLite.
+This slice has the SQLite implementation (`sqlite_registry.rs`) with `claim` and
+`get`; the Postgres implementation follows in its own slice.
+
+### Claim rule
+
+`claim` is one statement (`INSERT ... ON CONFLICT DO UPDATE ... WHERE ...
+RETURNING`), atomic on both dialects. It is won when:
+
+| Existing row | Claim |
+|--------------|-------|
+| none | yes, `attempts = 1` |
+| `failed` with `attempts < 3` | yes, `attempts + 1` |
+| `failed` with `attempts = 3` | no, the failure is final |
+| `running` with a live lease (`lease_until >= now`) | no |
+| `running` with an expired lease (`lease_until < now`) | yes, `attempts + 1` |
+| `ready` at the current `format_version` | no |
+| `deleting` | no |
+| any state except `deleting` with an older `format_version` | yes, `attempts` restarts at 1 |
+
+`now` is passed in by the caller, never read from the database clock, so both
+dialects compare against the same value and tests control time.
+
+The lease is a single fixed value, `P_PREP_TIME + 60 s` (`lease_for`), with no
+renewal: the registry is written on state change, not for progress.
 
 ## Tests
 
 `cargo test --lib attachment_prepared` applies the SQLite migration to an
 in-memory database and checks the columns, the primary key and the defaults.
 The Postgres twin is `#[ignore]`d like the other Postgres repository tests and
-needs `DATABASE_URL`: it applies every Postgres migration and reads the columns
-back from `information_schema`
-(`DATABASE_URL=postgres://... cargo test --lib attachment_prepared -- --ignored`).
+needs `DATABASE_URL` (`DATABASE_URL=postgres://... cargo test --lib
+attachment_prepared -- --ignored`).
+
+`cargo test --lib tabular_prepare` runs the registry cases against a
+file-backed SQLite database: a claim creates a `running` row, a live lease is
+refused, and an expired one is taken over. The cases are written once as
+functions generic over the trait (`registry_contract.rs`) so the Postgres slice
+runs the same ones.
