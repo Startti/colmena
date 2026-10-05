@@ -28,8 +28,8 @@ The table sits behind the `PreparationRegistry` trait (`registry.rs`) so the
 host can decide where rows live and who deletes one (open question O8: ADP
 directly or an internal Colmena endpoint). Both dialects run the same
 statements: written once with `$N` placeholders, rewritten to `?N` for SQLite.
-This slice has the SQLite implementation (`sqlite_registry.rs`) with `claim` and
-`get`; the Postgres implementation follows in its own slice.
+This chain has the SQLite implementation (`sqlite_registry.rs`) so far, with
+`claim`, `complete`, `fail` and `get`; the Postgres implementation follows in its own slice.
 
 ### Claim rule
 
@@ -64,6 +64,29 @@ winner.
 The lease is a single fixed value, `P_PREP_TIME + 60 s` (`lease_for`), with no
 renewal: the registry is written on state change, not for progress.
 
+### Terminal writes
+
+The registry is written on state change: one claim and one terminal write per
+attempt. `complete` and `fail`/`fail_with_blobs` are conditional on
+`lease_owner = me` (and `status = 'running'`). Zero rows updated returns
+`Cancelled`: the row was deleted or the lease was taken over, and the caller
+must stop. A cancelled preparation never becomes `ready`, and a missing row
+never gains a `failed` row. On success the lease is cleared; `failed` keeps its
+attempt count and records the reason.
+
+### Blob tracking
+
+`blob_keys` is every blob that may exist for the source. `complete` and
+`fail_with_blobs` both write it as the **union** of what the row already tracks
+and what the attempt reports (existing order first, no duplicates), so blobs of
+an earlier failed attempt stay known; relative paths are deterministic, so a
+later attempt overwrites instead of adding. The lease owner is the only writer,
+so reading the tracked keys and then updating is safe. A claim keeps
+`blob_keys` and clears the manifest, tables and error of the previous attempt.
+A cancelled job deletes what it wrote. Blobs of an attempt that crashed before
+any terminal write are not tracked; removing them needs a host that can delete
+by prefix (a later slice adds that port) and is otherwise a known limit.
+
 ## Tests
 
 `cargo test --lib attachment_prepared` applies the SQLite migration to an
@@ -76,6 +99,7 @@ attachment_prepared -- --ignored`).
 file-backed SQLite database: a claim creates a `running` row, a live lease is
 refused, an expired one is taken over, a dead job is retried only up to the
 attempt cap, the lease boundary holds at millisecond resolution, and eight
-concurrent claims have exactly one winner. The cases are written once as
+concurrent claims have exactly one winner. Terminal writes, the blob union and the
+`Cancelled` cases are covered the same way. The cases are written once as
 functions generic over the trait (`registry_contract.rs`) so the Postgres slice
 runs the same ones.
