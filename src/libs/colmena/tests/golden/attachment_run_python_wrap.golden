@@ -1,0 +1,32 @@
+
+import pandas as pd
+import numpy as np
+import scipy.stats as stats
+
+df = pd.DataFrame(_attachment_records)
+result = None
+
+print(df.shape)
+result = df.head(2)
+
+# === colmena auto-postlude ===
+def __col_serialise(v):
+    if v is None:
+        return None
+    if hasattr(v, 'to_dict') and callable(v.to_dict):
+        try:
+            return v.to_dict(orient='records')
+        except TypeError:
+            return v.to_dict()
+    if hasattr(v, 'to_list') and callable(v.to_list):
+        return v.to_list()
+    try:
+        # numpy scalar coercion — np.int64 / np.float64 / etc.
+        import numpy as _np
+        if isinstance(v, _np.generic):
+            return v.item()
+    except Exception:
+        pass
+    return v
+
+output = __col_serialise(result)
