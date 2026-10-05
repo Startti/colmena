@@ -6,7 +6,7 @@
 **How to use (for the exploration/spec phase):** before opening files to assess a change, look up the target file below. **Used by** is its blast radius — the files that break if you change its public surface. **Depends on** is what it needs. Start by reading only those, not the whole repo.
 
 - Files indexed: **424**
-- Modules with at least one importer: **200**
+- Modules with at least one importer: **202**
 
 ## Blast-radius ranking (change these with the most care)
 
@@ -2097,11 +2097,11 @@
 #### `src/libs/colmena/src/tabular_prepare/mod.rs`
 - Module: `tabular_prepare`
 - **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
-- Depends on (0): — (no intra-crate imports)
+- Depends on (2): `tabular_prepare::ports`, `tabular_prepare::registry`
 
 #### `src/libs/colmena/src/tabular_prepare/ports.rs`
 - Module: `tabular_prepare::ports`
-- **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
+- **Used by (1)**: `src/libs/colmena/src/tabular_prepare/mod.rs`
 - Depends on (1): `dag_engine::engine`
 
 #### `src/libs/colmena/src/tabular_prepare/postgres_registry.rs`
@@ -2111,7 +2111,7 @@
 
 #### `src/libs/colmena/src/tabular_prepare/registry.rs`
 - Module: `tabular_prepare::registry`
-- **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
+- **Used by (1)**: `src/libs/colmena/src/tabular_prepare/mod.rs`
 - Depends on (1): `dag_engine::infrastructure::pool_registry`
 
 #### `src/libs/colmena/src/tabular_prepare/registry_contract.rs`
