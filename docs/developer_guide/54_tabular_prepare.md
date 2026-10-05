@@ -128,6 +128,27 @@ that turns the switch on must first set `EngineConfig.prepare.trigger` to a
 wired trigger (and `prepare.progress` if it wants progress) before building the
 engine. With the switch off nothing is checked and nothing changes.
 
+## `ensure_prepared`
+
+`TabularPrepare::ensure_prepared(request, wait)` makes sure a source is
+prepared, waiting at most `wait` (polled every second):
+
+| Situation | Behaviour |
+|-----------|-----------|
+| Switch off | `NotEnabled`; the registry, the trigger and the progress port are not touched |
+| `ready` | `Ready(row)` |
+| `running` with a live lease | attach and wait; never a second trigger |
+| No row | request once, unless the progress port says the host already queued or started it (then attach) |
+| Any other row (nobody holds it) | request once, then wait |
+| Wait ends first | `StillPreparing { progress }`, never an error |
+
+`EnsureOutcome` has no variant that offers the whole file: a file that is not
+prepared is never loaded whole into the sandbox, and `EnsureOutcome::message()`
+words the state for the model. The call never writes the registry: claiming is
+the job's business. This is the core of the lifecycle; the handling of failed
+rows and attempts, de-duplication of concurrent callers, the bound on every
+awaited call and the recording of use follow in later slices of this chain.
+
 ## Tests
 
 `cargo test --lib attachment_prepared` applies the SQLite migration to an
@@ -136,9 +157,11 @@ The Postgres twin is `#[ignore]`d like the other Postgres repository tests and
 needs `DATABASE_URL` (`DATABASE_URL=postgres://... cargo test --lib
 attachment_prepared -- --ignored`).
 
-`cargo test --test large_tabular_switch` runs in its own process: the switch is
-off by default, is read once, and the engine refuses to start with the switch on
-and an unwired trigger.
+`cargo test --lib tabular_prepare_ensure` covers `ensure_prepared` with fake
+ports and a fake registry under paused time. `cargo test --test
+large_tabular_switch` runs in its own process: the switch is off by default, is
+read once, and the engine refuses to start with the switch on and an unwired
+trigger.
 
 `cargo test --lib tabular_prepare` runs the registry cases against a
 file-backed SQLite database: a claim creates a `running` row, a live lease is
