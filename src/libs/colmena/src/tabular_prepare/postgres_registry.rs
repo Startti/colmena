@@ -24,7 +24,13 @@ impl PostgresPreparationRegistry {
         Ok(self
             .get(source_key)
             .await?
-            .map(|row| row.blob_keys)
+            .map(|row| {
+                // The manifest a claim over an older format left in place is
+                // superseded by `complete`; keep it tracked for cleanup.
+                let mut keys = row.blob_keys;
+                keys.extend(row.manifest_key);
+                keys
+            })
             .unwrap_or_default())
     }
 }
@@ -260,6 +266,22 @@ mod tests {
         };
     }
 
+    pg_case!(
+        tabular_prepare_pg_a_deleting_row_is_never_taken_by_an_older_format_claim,
+        a_deleting_row_is_never_taken_by_an_older_format_claim
+    );
+    pg_case!(
+        tabular_prepare_pg_an_expired_deleting_lease_can_be_claimed_with_a_fresh_start,
+        an_expired_deleting_lease_can_be_claimed_with_a_fresh_start
+    );
+    pg_case!(
+        tabular_prepare_pg_an_older_format_claim_keeps_the_old_manifest_tracked,
+        an_older_format_claim_keeps_the_old_manifest_tracked
+    );
+    pg_case!(
+        tabular_prepare_pg_a_re_prepared_table_is_not_stale_before_its_first_use,
+        a_re_prepared_table_is_not_stale_before_its_first_use
+    );
     pg_case!(
         tabular_prepare_pg_delete_if_unchanged_only_deletes_the_row_that_was_observed,
         delete_if_unchanged_only_deletes_the_row_that_was_observed
