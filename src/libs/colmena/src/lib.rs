@@ -7,6 +7,7 @@ pub mod gsheets;
 pub mod llm;
 pub mod skills;
 pub mod storage;
+pub mod tabular_prepare;
 pub mod text;
 pub mod web;
 

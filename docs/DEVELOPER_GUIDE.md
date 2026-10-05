@@ -67,6 +67,7 @@ Las secciones están organizadas por **tema**, no por orden numérico. Los prefi
 - [**Librería de Documentos**](./developer_guide/27_documents_library.md) — `DocumentRuntime`, `document_*` nodos, IR JSON como source of truth.
 - [**Archivos grandes via Files API**](./developer_guide/28_large_files_api.md) — Streaming, cache `provider_file_cache`, estrategias por proveedor.
 - [**Attachment GC**](./developer_guide/36_attachment_gc.md) — Binario `attachment_gc` que limpia `conversation_attachments` y blobs TTL'd.
+- [**Tabular prepare**](./developer_guide/54_tabular_prepare.md) — Registry, claim rule and cancellation for preparing large CSV/Excel attachments (dark behind `COLMENA_LARGE_TABULAR`).
 
 ## 8. Nodos
 
