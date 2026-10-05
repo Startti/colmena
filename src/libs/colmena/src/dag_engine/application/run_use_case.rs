@@ -5095,6 +5095,128 @@ mod tool_progress_tests {
         assert!(progress >= 9, "progress flowed until the stop: {progress}");
     }
 
+    /// A node that does what a long tool step will: runs `work` (forever when
+    /// `None`) inside the real executor's ticker, on the observer the run loop
+    /// gave it, bounded at `max`. A bound hit is the node's error.
+    struct TicksWhileWorking {
+        work: Option<std::time::Duration>,
+        max: std::time::Duration,
+    }
+
+    struct NoNodes;
+    impl NodeRegistryPort for NoNodes {
+        fn get_node(&self, _node_type: &str) -> Option<Arc<dyn ExecutableNode>> {
+            None
+        }
+        fn get_all_nodes(&self) -> HashMap<String, Arc<dyn ExecutableNode>> {
+            HashMap::new()
+        }
+    }
+
+    #[async_trait]
+    impl ExecutableNode for TicksWhileWorking {
+        async fn execute(
+            &self,
+            _i: &NodeInputs,
+            _c: &Value,
+            _s: &mut Value,
+            observer: Option<Arc<dyn ExecutionObserver>>,
+        ) -> Result<Value, Box<dyn StdError + Send + Sync>> {
+            use crate::dag_engine::infrastructure::dag_tool_executor::{
+                DagToolExecutor, ProgressTick,
+            };
+            let executor =
+                DagToolExecutor::new(Arc::new(NoNodes), HashMap::new()).with_observer(observer);
+            let work = self.work;
+            executor
+                .with_progress_ticker(
+                    ProgressTick {
+                        tool_id: "call_1",
+                        stage: ToolProgressStage::Running,
+                        call_started: tokio::time::Instant::now(),
+                        interval: SECS(10),
+                        call_budget: self.max,
+                    },
+                    async move {
+                        match work {
+                            Some(w) => tokio::time::sleep(w).await,
+                            None => std::future::pending::<()>().await,
+                        }
+                    },
+                )
+                .await?;
+            Ok(json!({}))
+        }
+        fn schema(&self) -> Value {
+            json!({})
+        }
+    }
+
+    async fn run_ticking(node: TicksWhileWorking) -> (Vec<u64>, bool, Option<String>) {
+        let uc = DagRunUseCase::new(Arc::new(One(Arc::new(node))), None).with_liveness(
+            LivenessSettings {
+                heartbeat_interval: None,
+                idle_timeout: Some(SECS(15)),
+            },
+        );
+        let stream = uc.execute_stream(graph(), None, None, false, None, None, None);
+        tokio::pin!(stream);
+        let (mut elapsed, mut ended, mut error) = (Vec::new(), false, None);
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(DagExecutionEvent::ToolProgress {
+                    node_id,
+                    elapsed_ms,
+                    ..
+                }) => {
+                    assert_eq!(node_id, "agent");
+                    elapsed.push(elapsed_ms);
+                }
+                Ok(DagExecutionEvent::NodeFinish { .. }) => ended = true,
+                Ok(_) => {}
+                Err(e) => {
+                    error = Some(e.to_string());
+                    break;
+                }
+            }
+        }
+        (elapsed, ended, error)
+    }
+
+    /// The emitter, the loop and the watchdog together: 35 s of silent work
+    /// against a 15 s idle limit survives only because the ticker's events
+    /// (10, 20 and 30 s) reach the loop and reset the watchdog.
+    #[tokio::test(start_paused = true)]
+    async fn the_executors_ticker_keeps_a_long_step_alive_through_the_run_loop() {
+        let (elapsed, ended, error) = run_ticking(TicksWhileWorking {
+            work: Some(SECS(35)),
+            max: SECS(60),
+        })
+        .await;
+        assert_eq!(error, None, "the ticker must keep the idle watchdog at bay");
+        assert_eq!(elapsed, [10_000, 20_000, 30_000]);
+        assert!(ended);
+    }
+
+    /// The same events that save a slow step would keep a hung one alive
+    /// forever: every tick resets the idle watchdog. The bound is what ends it,
+    /// at 40 s, with the ticker's own error and not the watchdog's.
+    #[tokio::test(start_paused = true)]
+    async fn a_hung_step_under_the_ticker_is_ended_by_its_bound_not_the_watchdog() {
+        let started = tokio::time::Instant::now();
+        let (elapsed, ended, error) = run_ticking(TicksWhileWorking {
+            work: None,
+            max: SECS(40),
+        })
+        .await;
+        let error = error.expect("the bound must end the hung step");
+        assert!(error.contains("did not finish within 40s"), "{error}");
+        assert!(!error.contains("liveness watchdog"), "{error}");
+        assert_eq!(elapsed, [10_000, 20_000, 30_000]);
+        assert!(!ended);
+        assert_eq!(started.elapsed(), SECS(40));
+    }
+
     #[tokio::test]
     async fn tool_progress_reaches_the_stream_stamped_with_the_node_before_it_ends() {
         let uc = DagRunUseCase::new(Arc::new(One(Arc::new(EmitsProgress))), None);
