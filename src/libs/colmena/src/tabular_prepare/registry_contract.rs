@@ -483,6 +483,29 @@ impl<R: PreparationRegistry> PreparationRegistry for CountingRegistry<R> {
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.inner.touch_last_used(k, n, i).await
     }
+    async fn find_stale(
+        &self,
+        cutoff: DateTime<Utc>,
+        now: DateTime<Utc>,
+        after: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<PreparedRow>, RegistryError> {
+        self.counts
+            .reads
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.find_stale(cutoff, now, after, limit).await
+    }
+
+    async fn list_ready_after(
+        &self,
+        after: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<PreparedRow>, RegistryError> {
+        self.counts
+            .reads
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.list_ready_after(after, limit).await
+    }
 }
 
 pub(crate) async fn a_preparation_writes_only_on_claim_and_terminal<R: PreparationRegistry>(r: R) {
@@ -697,6 +720,152 @@ pub(crate) async fn a_preparation_through_ensure_prepared_writes_only_on_claim_a
     assert!(get_row(&*counting, &key).await.last_used_at.is_some());
 }
 
+pub(crate) async fn find_stale_selects_old_rows_and_spares_a_live_preparation<
+    R: PreparationRegistry,
+>(
+    r: &R,
+) {
+    let old = t0() - Duration::days(10);
+    let prefix = format!("stale-{}", Uuid::new_v4());
+    let key = |n: &str| format!("{prefix}/{n}");
+    // An old failed row and an old ready row are stale.
+    r.claim(claim_req(&key("failed"), "A", old))
+        .await
+        .unwrap()
+        .unwrap();
+    r.fail(&key("failed"), "A", "time", "x", old).await.unwrap();
+    r.claim(claim_req(&key("ready"), "A", old))
+        .await
+        .unwrap()
+        .unwrap();
+    r.complete(&key("ready"), "A", ready_info(), old)
+        .await
+        .unwrap();
+    // A fresh row is not.
+    r.claim(claim_req(&key("fresh"), "A", t0()))
+        .await
+        .unwrap()
+        .unwrap();
+    // An old row that was claimed again and holds a live lease is not: it is
+    // being prepared right now (the claim keeps the original creation time).
+    let mut live = claim_req(&key("live"), "A", old);
+    live.lease = Duration::days(11);
+    r.claim(live).await.unwrap().unwrap();
+
+    let cutoff = t0() - Duration::days(7);
+    let page = r.find_stale(cutoff, t0(), None, 1000).await.unwrap();
+    let mut found: Vec<String> = page
+        .into_iter()
+        .map(|row| row.source_storage_key)
+        .filter(|k| k.starts_with(&prefix))
+        .collect();
+    found.sort();
+    assert_eq!(found, vec![key("failed"), key("ready")]);
+}
+
+pub(crate) async fn find_stale_honours_the_limit<R: PreparationRegistry>(r: &R) {
+    let old = t0() - Duration::days(10);
+    for _ in 0..3 {
+        let k = fresh_key();
+        r.claim(claim_req(&k, "A", old)).await.unwrap().unwrap();
+        r.fail(&k, "A", "time", "x", old).await.unwrap();
+    }
+    let page = r
+        .find_stale(t0() - Duration::days(7), t0(), None, 2)
+        .await
+        .unwrap();
+    assert_eq!(page.len(), 2);
+}
+
+pub(crate) async fn list_ready_after_pages_through_ready_rows_only<R: PreparationRegistry>(r: &R) {
+    let prefix = format!("ready-{}", Uuid::new_v4());
+    let key = |n: &str| format!("{prefix}/{n}");
+    for n in ["c", "a", "b"] {
+        r.claim(claim_req(&key(n), "A", t0()))
+            .await
+            .unwrap()
+            .unwrap();
+        r.complete(&key(n), "A", ready_info(), t0()).await.unwrap();
+    }
+    r.claim(claim_req(&key("d-running"), "A", t0()))
+        .await
+        .unwrap()
+        .unwrap();
+    let mut seen = Vec::new();
+    let mut after: Option<String> = None;
+    loop {
+        let page = r.list_ready_after(after.as_deref(), 2).await.unwrap();
+        if page.is_empty() {
+            break;
+        }
+        assert!(page.iter().all(|row| row.status == PrepareStatus::Ready));
+        after = Some(page.last().unwrap().source_storage_key.clone());
+        seen.extend(
+            page.into_iter()
+                .map(|row| row.source_storage_key)
+                .filter(|k| k.starts_with(&prefix)),
+        );
+    }
+    assert_eq!(
+        seen,
+        vec![key("a"), key("b"), key("c")],
+        "sorted, each once"
+    );
+}
+
+pub(crate) async fn a_table_in_use_is_not_stale<R: PreparationRegistry>(r: &R) {
+    let old = t0() - Duration::days(10);
+    let (used, idle) = (fresh_key(), fresh_key());
+    for key in [&used, &idle] {
+        r.claim(claim_req(key, "A", old)).await.unwrap().unwrap();
+        r.complete(key, "A", ready_info(), old).await.unwrap();
+    }
+    r.touch_last_used(&used, t0() - Duration::days(1), Duration::hours(1))
+        .await
+        .unwrap();
+    let stale: Vec<String> = r
+        .find_stale(t0() - Duration::days(7), t0(), None, 10_000)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|row| row.source_storage_key)
+        .collect();
+    assert!(stale.contains(&idle), "created long ago and never used");
+    assert!(
+        !stale.contains(&used),
+        "created long ago but used yesterday"
+    );
+}
+
+pub(crate) async fn find_stale_pages_with_a_keyset_cursor<R: PreparationRegistry>(r: &R) {
+    let old = t0() - Duration::days(10);
+    let prefix = format!("page-{}", Uuid::new_v4());
+    let keys: Vec<String> = (0..5).map(|i| format!("{prefix}/{i}")).collect();
+    for k in &keys {
+        r.claim(claim_req(k, "A", old)).await.unwrap().unwrap();
+        r.fail(k, "A", "time", "x", old).await.unwrap();
+    }
+    let cutoff = t0() - Duration::days(7);
+    let mut seen = Vec::new();
+    let mut after: Option<String> = None;
+    loop {
+        let page = r
+            .find_stale(cutoff, t0(), after.as_deref(), 2)
+            .await
+            .unwrap();
+        if page.is_empty() {
+            break;
+        }
+        after = Some(page.last().unwrap().source_storage_key.clone());
+        seen.extend(
+            page.into_iter()
+                .map(|row| row.source_storage_key)
+                .filter(|k| k.starts_with(&prefix)),
+        );
+    }
+    assert_eq!(seen, keys, "every row once, in key order, none skipped");
+}
+
 #[cfg(test)]
 mod sqlite {
     use super::*;
@@ -868,5 +1037,35 @@ mod sqlite {
         let f = fixture().await;
         let inner = SqlitePreparationRegistry::from_pool(f.registry.pool());
         a_preparation_through_ensure_prepared_writes_only_on_claim_and_terminal(inner).await;
+    }
+
+    #[tokio::test]
+    async fn tabular_prepare_find_stale_selects_old_rows_and_spares_a_live_preparation() {
+        let f = fixture().await;
+        find_stale_selects_old_rows_and_spares_a_live_preparation(&*f.registry).await;
+    }
+
+    #[tokio::test]
+    async fn tabular_prepare_find_stale_honours_the_limit() {
+        let f = fixture().await;
+        find_stale_honours_the_limit(&*f.registry).await;
+    }
+
+    #[tokio::test]
+    async fn tabular_prepare_list_ready_after_pages_through_ready_rows_only() {
+        let f = fixture().await;
+        list_ready_after_pages_through_ready_rows_only(&*f.registry).await;
+    }
+
+    #[tokio::test]
+    async fn tabular_prepare_a_table_in_use_is_not_stale() {
+        let f = fixture().await;
+        a_table_in_use_is_not_stale(&*f.registry).await;
+    }
+
+    #[tokio::test]
+    async fn tabular_prepare_find_stale_pages_with_a_keyset_cursor() {
+        let f = fixture().await;
+        find_stale_pages_with_a_keyset_cursor(&*f.registry).await;
     }
 }

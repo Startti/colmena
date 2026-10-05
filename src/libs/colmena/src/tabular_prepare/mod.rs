@@ -515,6 +515,22 @@ mod ensure_tests {
         async fn delete(&self, _k: &str) -> Result<bool, RegistryError> {
             panic!("ensure_prepared must not write")
         }
+        async fn find_stale(
+            &self,
+            _c: DateTime<Utc>,
+            _n: DateTime<Utc>,
+            _a: Option<&str>,
+            _l: u32,
+        ) -> Result<Vec<PreparedRow>, RegistryError> {
+            panic!("ensure_prepared must not run the cleanup pass")
+        }
+        async fn list_ready_after(
+            &self,
+            _a: Option<&str>,
+            _l: u32,
+        ) -> Result<Vec<PreparedRow>, RegistryError> {
+            panic!("ensure_prepared must not run the cleanup pass")
+        }
         async fn touch_last_used(
             &self,
             _k: &str,

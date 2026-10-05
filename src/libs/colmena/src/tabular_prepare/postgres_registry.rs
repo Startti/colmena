@@ -142,6 +142,38 @@ impl PreparationRegistry for PostgresPreparationRegistry {
         Ok(row.is_some())
     }
 
+    async fn find_stale(
+        &self,
+        cutoff: DateTime<Utc>,
+        now: DateTime<Utc>,
+        after: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<PreparedRow>, RegistryError> {
+        let rows = sqlx::query(FIND_STALE_SQL)
+            .bind(cutoff)
+            .bind(now)
+            .bind(after.unwrap_or(""))
+            .bind(i64::from(limit))
+            .fetch_all(&*self.pool)
+            .await
+            .map_err(|e| backend_err("find_stale", e))?;
+        rows.iter().map(|row| Ok(prepared_row_from!(row))).collect()
+    }
+
+    async fn list_ready_after(
+        &self,
+        after: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<PreparedRow>, RegistryError> {
+        let rows = sqlx::query(LIST_READY_AFTER_SQL)
+            .bind(after.unwrap_or(""))
+            .bind(i64::from(limit))
+            .fetch_all(&*self.pool)
+            .await
+            .map_err(|e| backend_err("list_ready_after", e))?;
+        rows.iter().map(|row| Ok(prepared_row_from!(row))).collect()
+    }
+
     async fn get(&self, source_key: &str) -> Result<Option<PreparedRow>, RegistryError> {
         let row = sqlx::query(GET_SQL)
             .bind(source_key)
@@ -183,6 +215,26 @@ mod tests {
         };
     }
 
+    pg_case!(
+        tabular_prepare_pg_find_stale_selects_old_rows_and_spares_a_live_preparation,
+        find_stale_selects_old_rows_and_spares_a_live_preparation
+    );
+    pg_case!(
+        tabular_prepare_pg_find_stale_honours_the_limit,
+        find_stale_honours_the_limit
+    );
+    pg_case!(
+        tabular_prepare_pg_list_ready_after_pages_through_ready_rows_only,
+        list_ready_after_pages_through_ready_rows_only
+    );
+    pg_case!(
+        tabular_prepare_pg_a_table_in_use_is_not_stale,
+        a_table_in_use_is_not_stale
+    );
+    pg_case!(
+        tabular_prepare_pg_find_stale_pages_with_a_keyset_cursor,
+        find_stale_pages_with_a_keyset_cursor
+    );
     pg_case!(
         tabular_prepare_pg_touch_last_used_marks_use_at_most_once_per_interval,
         touch_last_used_marks_use_at_most_once_per_interval
