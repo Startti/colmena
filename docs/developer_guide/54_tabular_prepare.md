@@ -286,6 +286,15 @@ run only logs. With no row for the source the pass makes no storage call. The
 passes read a `Clock` once per row, never once per pass, so each row's cleanup
 lease (10 minutes) starts when the pass claims it.
 
+**Failures and leases.** If storage refuses, the row stays `deleting`: while the
+cleanup lease is live nothing else touches it, and once it expires the next run
+(or a preparation, through the claim) takes it over, so a persistent failure
+never leaves a source unpreparable; the failure is reported in the summary
+(`storage_errors`) and in an error log. If a lease nevertheless expires while the
+blobs are being deleted and a preparation claims the row, `finish_delete` returns
+false: the pass logs it, counts it in `leases_lost` and leaves the new owner's row
+alone.
+
 **Incomplete is visible.** `PreparedGcSummary::is_incomplete()` is true when a blob
 could not be deleted (`storage_errors`) or when the pass could not settle the source
 (`busy`): the row had changed or is leased by another pass or a preparation.
