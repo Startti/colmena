@@ -2444,31 +2444,21 @@ mod tests {
     async fn streamed_answer_keeps_finish_and_block_reason() {
         let mut mock_llm = MockLlmRepo::new();
         mock_llm.expect_stream().times(1).returning(|_req| {
-            let provider = create_config().provider().clone();
-            let chunk = |text: &str| {
-                LlmStreamChunk::new(
-                    LlmRequestId::new(),
-                    LlmStreamPart::Content(text.to_string()),
-                    provider.clone(),
-                    true,
-                )
-            };
-            let s = futures::stream::iter(vec![
-                Ok(chunk("")),
-                Ok(chunk("[Empty response - block_reason: SAFETY]")
-                    .with_finish_reason("SAFETY".to_string())
-                    .with_block_reason("SAFETY".to_string())),
-            ]);
-            Ok(Box::pin(s) as LlmStream)
+            let part = LlmStreamPart::Content("[Empty]".to_string());
+            let chunk = LlmStreamChunk::new(
+                LlmRequestId::new(),
+                part,
+                create_config().provider().clone(),
+                true,
+            )
+            .with_finish_reason("SAFETY".to_string())
+            .with_block_reason("SAFETY".to_string());
+            Ok(Box::pin(futures::stream::iter(vec![Ok(chunk)])) as LlmStream)
         });
         let (mock_conv, _) = stateful_conv_mock(vec![]);
         let service = AgentService::new(Arc::new(mock_llm), Arc::new(mock_conv));
-        let request = LlmRequest::new(
-            vec![LlmMessage::user("hi".into()).unwrap()],
-            create_config(),
-            true,
-        )
-        .unwrap();
+        let messages = vec![LlmMessage::user("hi".into()).unwrap()];
+        let request = LlmRequest::new(messages, create_config(), true).unwrap();
         let on_token: Option<Box<dyn Fn(LlmStreamPart) + Send + Sync>> = Some(Box::new(|_| {}));
 
         let (response, _) = service
@@ -2476,10 +2466,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(
-            response.content(),
-            "[Empty response - block_reason: SAFETY]"
-        );
+        assert_eq!(response.content(), "[Empty]");
         assert_eq!(response.finish_reason(), Some("SAFETY"));
         assert_eq!(response.block_reason(), Some("SAFETY"));
     }

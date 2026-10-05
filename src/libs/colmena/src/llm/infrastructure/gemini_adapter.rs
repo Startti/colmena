@@ -575,7 +575,10 @@ impl LlmRepository for GeminiAdapter {
                 let json_bytes = json_bytes_result?;
                 let chunk_response = serde_json::from_slice::<GeminiResponse>(&json_bytes)
                     .map_err(|e| LlmError::parsing_error(e.to_string()))?;
-                chunk_response.ensure_answer()?;
+                chunk_response.ensure_no_error()?;
+                if chunk_response.is_metadata_only() {
+                    continue;
+                }
                 if let Some(reason) = chunk_response.block_reason() {
                     block_reason = Some(reason.to_string());
                 }
@@ -869,23 +872,29 @@ struct GeminiResponse {
 
 impl GeminiResponse {
     /// `candidates` defaults to empty only so a blocked prompt parses: an
-    /// error element, or one with no answer at all, is still a failure and
-    /// never an empty answer that finishes `done`.
-    fn ensure_answer(&self) -> Result<(), LlmError> {
-        if let Some(error) = &self.error {
-            return Err(LlmError::request_failed(format!(
+    /// error element is still a failure, never an empty answer that finishes `done`.
+    fn ensure_no_error(&self) -> Result<(), LlmError> {
+        match &self.error {
+            Some(error) => Err(LlmError::request_failed(format!(
                 "Gemini API error: {error}"
-            )));
+            ))),
+            None => Ok(()),
         }
-        if self.candidates.is_empty()
+    }
+
+    /// Only `modelVersion`/`responseId`, say: the stream skips it, `call` fails.
+    fn is_metadata_only(&self) -> bool {
+        self.candidates.is_empty()
             && self.prompt_feedback.is_none()
             && self.usage_metadata.is_none()
-        {
-            return Err(LlmError::parsing_error(
-                "Gemini answer has no candidates, promptFeedback or usageMetadata",
-            ));
+    }
+
+    fn ensure_answer(&self) -> Result<(), LlmError> {
+        self.ensure_no_error()?;
+        match self.is_metadata_only() {
+            true => Err(LlmError::parsing_error("Gemini answer has no candidates")),
+            false => Ok(()),
         }
-        Ok(())
     }
 
     fn block_reason(&self) -> Option<&str> {
@@ -1865,8 +1874,21 @@ mod tests {
         let err = call_answer(error).await.unwrap_err();
         assert!(format!("{err:?}").contains("Internal error"), "{err:?}");
 
-        let items = stream_items(json!([{ "modelVersion": "x" }])).await;
-        assert!(items.iter().any(|i| i.is_err()), "no answer at all fails");
+        let err = call_answer(json!({ "modelVersion": "x" }))
+            .await
+            .unwrap_err();
+        assert!(format!("{err:?}").contains("no candidates"), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn a_metadata_only_element_mid_stream_is_skipped() {
+        let meta = json!({ "modelVersion": "gemini-2.5-flash", "responseId": "r1" });
+        let text = element(json!([{ "text": "Hola" }]), Some("STOP"));
+        let (streamed, _) = stream_answer(json!([meta.clone(), text])).await;
+        assert_eq!(streamed, "Hola");
+        // Only metadata, no answer: the stream ends with the placeholder.
+        let (streamed, _) = stream_answer(json!([meta])).await;
+        assert_eq!(streamed, "[Empty response - finish_reason: UNKNOWN]");
     }
 
     #[tokio::test]

@@ -417,18 +417,15 @@ streaming, una respuesta sin texto y sin llamadas a tools; el nodo terminó `don
 - el stream de Gemini, si no trajo texto ni llamadas, emite al final el mismo texto que `call`;
 - un prompt bloqueado (`promptFeedback.blockReason`, sin `candidates`) ya no es un error de parseo en ninguno de los
   dos caminos: el texto es `[Empty response - block_reason: <X>]`;
-- un elemento `{"error": …}` dentro de un 200 (también a mitad del stream, haya o no texto antes) es un error del
-  nodo, no una respuesta vacía ni una cortada que termina `done`; un elemento sin `candidates`, sin
-  `promptFeedback` y sin `usageMetadata` también falla;
+- un `{"error": …}` dentro de un 200 (también a mitad del stream) es un error del nodo, no una respuesta vacía o
+  cortada que termina `done`; un elemento sin `candidates`, `promptFeedback` ni `usageMetadata` falla en `call` y el
+  stream lo salta;
 - el agregador guarda `finish_reason` y `block_reason` del stream, y `llm_call` los pone en `extra_info` cuando
   existen (también sin streaming y para OpenAI y Anthropic, cuyos streams ya los traían).
 
 Con texto o con llamadas a tools nada cambia: ni el contenido ni el despacho; `extra_info` suma la clave.
 Guía: [14_llm_deep_dive.md](developer_guide/14_llm_deep_dive.md).
-**Tests.** En `gemini_adapter`: vacío con cada `finishReason` (con parte de texto vacía y sin `content`) da el mismo
-texto en `stream` y en `call`; prompt bloqueado en los dos caminos; texto vacío más `functionCall`, o la llamada en
-un chunk posterior al de `finishReason`, emite la llamada y ningún aviso; solo razonamiento da el aviso; un elemento
-`error` falla `stream` (con y sin texto antes) y `call`; un chunk final con solo `usageMetadata` sigue bien; texto
-normal intacto. En `agent_service`: el stream conserva las dos razones. En `llm`:
-`extra_info` las nombra solo si existen.
+**Tests.** `gemini_adapter`: cada `finishReason` vacío da el mismo texto en `stream` y `call`; prompt bloqueado;
+`functionCall` (también tras el chunk final) sin aviso; solo razonamiento con aviso; `error` falla; elemento solo de
+metadatos saltado; texto intacto. `agent_service` conserva las razones; `llm` las nombra solo si existen.
 **ADP.** Subir el pin; `extra_info.finish_reason` permite explicar una respuesta vacía. **Estado.** done.
