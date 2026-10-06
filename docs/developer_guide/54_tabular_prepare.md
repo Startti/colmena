@@ -466,3 +466,15 @@ six fraction digits and **no zone** (a cell with `Z` or an offset stays text
 instead of being shifted). Integers with floats mix into floats; every other mix
 is text. A test feeds the inferred schema to the Arrow CSV reader to prove it
 parses everything the inference accepts.
+
+### Record scanner (`scan.rs`)
+
+The record scanner sits between the decoded text and the CSV parser. It follows
+the parser's own quoting rules (a quote opens a quoted field only at the start of
+a field, `""` is a quote inside one, a quoted field may hold line breaks), so it
+knows where a record really ends. A record longer than 1 MiB (`MAX_RECORD_BYTES`,
+quotes and delimiters included) fails with `CsvError::RecordTooLong { record,
+limit }`, naming the record and never its content. This holds inside an
+unclosed quote (`"12 inch pipe` makes the rest of the file one quoted field
+although every physical line is short), in the header, in the sample and after
+it; a line-based limit did not, and a parser would have buffered the whole file.
