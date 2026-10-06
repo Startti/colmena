@@ -261,7 +261,9 @@ impl DagRunUseCase {
     ) -> impl futures::Stream<
         Item = Result<crate::dag_engine::domain::events::DagExecutionEvent, DagError>,
     > {
-        async_stream::try_stream! {
+        let ledger = Arc::new(std::sync::Mutex::new(UsageLedger::default()));
+        let summaries = ledger.clone();
+        let run = async_stream::try_stream! {
             use crate::dag_engine::domain::events::{DagExecutionEvent, NodeEndError};
             use crate::dag_engine::domain::observer::NodeEvent;
 
@@ -496,13 +498,7 @@ impl DagRunUseCase {
             // than draining it.
             let mut stopped_early = false;
 
-            // Usage tracking: accumulate token counts and model/provider per node_id.
-            // node_meta: node_id → NodeMeta (model, provider, node_type, provider_key_id)
-            // usage_accumulator: node_id → (prompt, completion, thinking, cache_read, cache_write)
-            let mut node_meta: HashMap<String, NodeMeta> = HashMap::new();
-            let mut usage_accumulator: HashMap<String, (u32, u32, u32, u32, u32)> = HashMap::new();
-            // Who a child event says bills an entry, until this run bills one.
-            let mut child_meta: HashMap<String, NodeMeta> = HashMap::new();
+            // Usage is billed on `ledger`, summarized by `with_usage_summaries`.
 
             // Start cyclic execution loop
             while let Some(node_id) = active_queue.pop_front() {
@@ -778,7 +774,7 @@ impl DagRunUseCase {
                         .or_else(|| crate::dag_engine::domain::router_rules::default_usage_model(&node_config.node_type, &node_config.config).map(str::to_string));
                     let provider = node_config.config.get("provider").and_then(|v| v.as_str()).map(|s| s.to_string());
                     let provider_key_id = node_config.config.get("provider_key_id").and_then(|v| v.as_str()).map(|s| s.to_string());
-                    node_meta.insert(node_id.clone(), NodeMeta { model, provider, node_type: node_config.node_type.clone(), provider_key_id });
+                    ledger.lock().unwrap().node_meta.insert(node_id.clone(), NodeMeta { model, provider, node_type: node_config.node_type.clone(), provider_key_id });
                 }
 
                 // Masked CLONES only — the node itself still executes below with
@@ -1015,13 +1011,15 @@ impl DagRunUseCase {
                                             NodeEvent::LlmToolCall { tool_id, tool_name, args_chunk } => yield DagExecutionEvent::LlmToolCall { node_id: node_id.clone(), tool_id, tool_name, args_chunk },
                                             NodeEvent::LlmUsage { prompt_tokens, completion_tokens, thinking_tokens, cache_read_tokens, cache_write_tokens, side_call } => {
                                                 let usage_id = side_call.as_ref().map_or_else(|| node_id.clone(), |s| s.node_id(&node_id));
-                                                record_side_call_meta(&mut node_meta, &usage_id, &node_id, side_call.as_ref());
-                                                let entry = usage_accumulator.entry(usage_id.clone()).or_insert((0, 0, 0, 0, 0));
+                                                { let mut bill = ledger.lock().unwrap();
+                                                record_side_call_meta(&mut bill.node_meta, &usage_id, &node_id, side_call.as_ref());
+                                                let entry = bill.usage_accumulator.entry(usage_id.clone()).or_insert((0, 0, 0, 0, 0));
                                                 entry.0 += prompt_tokens;
                                                 entry.1 += completion_tokens;
                                                 entry.2 += thinking_tokens.unwrap_or(0);
                                                 entry.3 += cache_read_tokens.unwrap_or(0);
                                                 entry.4 += cache_write_tokens.unwrap_or(0);
+                                                }
                                                 yield DagExecutionEvent::LlmUsage { node_id: usage_id, prompt_tokens, completion_tokens, thinking_tokens, cache_read_tokens, cache_write_tokens, side_call, nested: false };
                                             }
                                             NodeEvent::LlmToolCallStart { tool_id, tool_name, tool_args, child_scope } => {
@@ -1053,7 +1051,7 @@ impl DagRunUseCase {
                                                 // Also bill what they say (`track_child_usage`).
                                                 if let Ok(child_event) = serde_json::from_value::<DagExecutionEvent>(raw) {
                                                     // Bill it before moving child_event into yield.
-                                                    track_child_usage(&mut node_meta, &mut child_meta, &mut usage_accumulator, &child_event);
+                                                    track_child_usage(&mut ledger.lock().unwrap(), &child_event);
                                                     match child_event {
                                                         DagExecutionEvent::GraphFinish { .. } => {}
                                                         // Grandchild+ event that already crossed one subgraph
@@ -1391,22 +1389,16 @@ impl DagRunUseCase {
                 }
             }
 
-            // Emit per-node usage summary before finishing
-            if !usage_accumulator.is_empty() {
-                let entries: Vec<Value> = usage_accumulator
-                    .iter()
-                    .map(|(nid, counts)| usage_entry(nid, *counts, node_meta.get(nid)))
-                    .collect();
-                yield DagExecutionEvent::GraphUsageSummary { entries };
-            }
-
+            // The usage summary goes out right before `GraphFinish`
+            // (`with_usage_summaries`), as on every other exit.
             // See the SUSPENDED-path GraphFinish above: child runs stay unmasked.
             let mut masked_final_aggregated = final_aggregated_output.clone();
             if path_prefix.is_none() {
                 SecureValueService::mask_secrets(&mut masked_final_aggregated, &run_secrets);
             }
             yield DagExecutionEvent::GraphFinish { output: masked_final_aggregated };
-        }
+        };
+        with_usage_summaries(run, summaries)
     }
 
     /// Whether a run loaded by id picks up the queue, and the SUSPENDED
@@ -1746,12 +1738,15 @@ fn record_side_call_meta(
 /// wrapper's `path` so two scopes never share an entry; a `nested` usage is a
 /// child run's, billed in its `subgraph-usage-summary` (`finish.usage` has all).
 fn track_child_usage(
-    node_meta: &mut HashMap<String, NodeMeta>,
-    child_meta: &mut HashMap<String, NodeMeta>,
-    usage_accumulator: &mut HashMap<String, (u32, u32, u32, u32, u32)>,
+    ledger: &mut UsageLedger,
     event: &crate::dag_engine::domain::events::DagExecutionEvent,
 ) {
     use crate::dag_engine::domain::events::DagExecutionEvent;
+    let UsageLedger {
+        node_meta,
+        usage_accumulator,
+        child_meta,
+    } = ledger;
     let (key, base) = match event {
         DagExecutionEvent::SubgraphWrapped { inner, path, .. } => (path.as_str(), &**inner),
         base => (base.node_id().unwrap_or_default(), base),
@@ -1826,6 +1821,62 @@ fn track_child_usage(
             entry.4 += cache_write_tokens.unwrap_or(0);
         }
         _ => {}
+    }
+}
+
+/// What a run bills, shared by its loop and [`with_usage_summaries`].
+#[derive(Default)]
+pub(crate) struct UsageLedger {
+    /// Entry → who bills it (model, provider, node type, key).
+    node_meta: HashMap<String, NodeMeta>,
+    /// Entry → (prompt, completion, thinking, cache_read, cache_write).
+    usage_accumulator: HashMap<String, (u32, u32, u32, u32, u32)>,
+    /// Who a child event says bills an entry, until this run bills one.
+    child_meta: HashMap<String, NodeMeta>,
+}
+
+impl UsageLedger {
+    /// Its summary, emptying it (none if it billed nothing).
+    fn take_summaries(&mut self) -> Vec<crate::dag_engine::domain::events::DagExecutionEvent> {
+        let mut entries: Vec<Value> = self
+            .usage_accumulator
+            .drain()
+            .map(|(id, counts)| usage_entry(&id, counts, self.node_meta.get(&id)))
+            .collect();
+        entries.sort_by(|a, b| a["node_id"].as_str().cmp(&b["node_id"].as_str()));
+        if entries.is_empty() {
+            return Vec::new();
+        }
+        vec![crate::dag_engine::domain::events::DagExecutionEvent::GraphUsageSummary { entries }]
+    }
+}
+
+/// `stream`, with the summaries of `ledger` sent right before it ends, on
+/// every exit: before its `GraphFinish` (done or suspended), its `Cancelled`,
+/// or the error that fails it. A host stops reading at those.
+fn with_usage_summaries<S>(
+    stream: S,
+    ledger: Arc<std::sync::Mutex<UsageLedger>>,
+) -> impl futures::Stream<Item = Result<crate::dag_engine::domain::events::DagExecutionEvent, DagError>>
+where
+    S: futures::Stream<
+        Item = Result<crate::dag_engine::domain::events::DagExecutionEvent, DagError>,
+    >,
+{
+    use crate::dag_engine::domain::events::DagExecutionEvent;
+    use futures::StreamExt;
+    async_stream::stream! {
+        futures::pin_mut!(stream);
+        while let Some(item) = stream.next().await {
+            let ends = matches!(item, Err(_) | Ok(DagExecutionEvent::GraphFinish { .. } | DagExecutionEvent::Cancelled { .. }));
+            if ends {
+                let summaries = ledger.lock().unwrap().take_summaries();
+                for summary in summaries {
+                    yield Ok(summary);
+                }
+            }
+            yield item;
+        }
     }
 }
 

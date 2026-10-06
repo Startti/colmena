@@ -506,6 +506,14 @@ El texto completo también queda disponible en `output.final_response` del `node
 > target. Ninguna es un nodo del árbol. Hasta el 2026-10-05 esa fila salía sin
 > modelo y `usage-summary` sumaba los nodos de un `subgraph` hijo.
 >
+> El resumen sale en **toda salida** de la corrida, siempre **antes** del frame
+> que la termina: `usage-summary`, después `finish` (completa o suspendida),
+> `cancelled` o el `error`. Una corrida hija lo manda antes del error que la
+> hace fallar. Una corrida reanudada cobra solo lo que llama después de
+> reanudar: lo de antes salió en el resumen del turno que se suspendió. Hasta
+> el 2026-10-05 una corrida que fallaba, se cancelaba o se suspendía no
+> mandaba resumen.
+>
 > Ver [§14 — Provider prompt caching](developer_guide/14_llm_deep_dive.md) para
 > la fórmula de costo y la tabla de semántica por provider.
 
