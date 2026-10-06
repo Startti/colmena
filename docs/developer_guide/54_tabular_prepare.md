@@ -720,6 +720,16 @@ with all of them and they are deleted. The wait goes through `PrepareEnv::sleepe
 (`tokio::time::sleep` by default), which is what the tests replace: no test depends on
 how long anything takes.
 
+The budget covers the whole job up to the manifest: one deadline, taken once, bounds the
+conversion and the manifest put. What comes after it is bounded step by step: the claim,
+the terminal writes, the ownership reads, the deletes and the progress reports each get
+`TERMINAL_STEP` (10 s) and are given up on, never waited for forever (a registry step that
+does not answer is an error with a fixed text; a delete that does not is logged and left to
+the cleanup pass). The lease is `lease_for(budget)`: the budget plus the registry's 60 s
+grace, a test pins it, and a compile-time assertion keeps the longest run of such steps
+(`MAX_TERMINAL_STEPS` = 5, 50 s) shorter than the grace, so the job is over before its
+lease is.
+
 **Failure reasons.** A failure is recorded in the registry with a reason (`error_code`)
 and a fixed detail sentence (`error_detail`); neither carries a cell, a storage key or
 the adapter's text. The set is small and stable, lowercase snake_case, and the host

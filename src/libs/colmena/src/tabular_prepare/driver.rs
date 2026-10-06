@@ -35,7 +35,7 @@ use crate::tabular_prepare::ports::{
 use crate::tabular_prepare::prepare::{PrepareStartError, StorageCsvSource, StoragePartSink};
 use crate::tabular_prepare::registry::{
     lease_for, ClaimRequest, PreparationRegistry, ReadyInfo, RegistryError, TerminalOutcome,
-    FORMAT_VERSION,
+    FORMAT_VERSION, LEASE_GRACE,
 };
 use crate::tabular_prepare::writer::{WriterConfig, WriterError};
 use async_trait::async_trait;
@@ -49,6 +49,23 @@ use std::time::Duration;
 
 /// How often a running preparation reports its progress.
 pub const PROGRESS_INTERVAL: Duration = Duration::from_secs(2);
+
+/// The bound of one registry or storage step that comes after the budget (a
+/// terminal write, a delete, an ownership read) and of the claim. A step that
+/// does not answer in this time is given up on, never waited for forever.
+pub const TERMINAL_STEP: Duration = Duration::from_secs(10);
+
+/// The most such steps a job takes outside its budget: the first progress report
+/// before it starts, and after it ended a failure write, a delete, an ownership
+/// read, a second delete or the release.
+pub const MAX_TERMINAL_STEPS: u32 = 5;
+
+// The lease is the budget plus `LEASE_GRACE` (see `registry::lease_for`), and the
+// budget bounds everything up to the manifest, so the job outlasts its lease only
+// if the steps after the budget could together take the whole grace.
+const _: () = assert!(
+    (TERMINAL_STEP.as_secs() * MAX_TERMINAL_STEPS as u64) < LEASE_GRACE.num_seconds() as u64
+);
 
 /// Time a preparation may take before it stops itself.
 pub const PREP_TIMEOUT: Duration = Duration::from_secs(300);
@@ -391,6 +408,28 @@ impl PartSink for OwnedSink {
     }
 }
 
+/// Runs one step under [`TERMINAL_STEP`]; `None` when it did not answer in time.
+async fn bounded<T>(env: &PrepareEnv, step: impl Future<Output = T>) -> Option<T> {
+    tokio::select! {
+        out = step => Some(out),
+        () = (env.sleeper)(TERMINAL_STEP) => None,
+    }
+}
+
+/// What a registry step that did not answer in time reports. Fixed text: it
+/// carries no key and nothing from the backend.
+fn no_answer() -> RegistryError {
+    RegistryError::Backend("the registry did not answer in time".into())
+}
+
+/// A registry step under its bound.
+async fn within<T>(
+    env: &PrepareEnv,
+    step: impl Future<Output = Result<T, RegistryError>>,
+) -> Result<T, RegistryError> {
+    bounded(env, step).await.unwrap_or_else(|| Err(no_answer()))
+}
+
 /// Prepares `req.source_key` as table 0 of its source. Registry errors are
 /// returned as they are: if the registry cannot be written nothing can be
 /// recorded.
@@ -410,9 +449,12 @@ pub async fn prepare_csv(
         // Nothing was started, or the registry could not be written.
         _ => return outcome,
     };
-    env.progress
-        .report(&req.source_key, PrepareProgressInfo { state, done, total })
-        .await;
+    bounded(
+        env,
+        env.progress
+            .report(&req.source_key, PrepareProgressInfo { state, done, total }),
+    )
+    .await;
     outcome
 }
 
@@ -426,17 +468,18 @@ async fn run_prepare(
     };
     let owner = format!("prep-{}", uuid::Uuid::new_v4());
     let lease = chrono::Duration::from_std(env.budget).unwrap_or(chrono::Duration::days(1));
-    let claim = env
-        .registry
-        .claim(ClaimRequest {
+    let claim = within(
+        env,
+        env.registry.claim(ClaimRequest {
             source_key: req.source_key.clone(),
             source_bytes: i64::try_from(req.size_bytes).unwrap_or(i64::MAX),
             format_version: FORMAT_VERSION,
             owner: owner.clone(),
             lease: lease_for(lease),
             now: (env.clock)(),
-        })
-        .await?;
+        }),
+    )
+    .await?;
     if claim.is_none() {
         return Ok(PrepareOutcome::NotClaimed);
     }
@@ -458,7 +501,7 @@ async fn run_prepare(
         done: done.min(req.size_bytes),
         total: Some(req.size_bytes),
     };
-    env.progress.report(&req.source_key, running(0)).await;
+    bounded(env, env.progress.report(&req.source_key, running(0))).await;
     // Progress is reported every [`PROGRESS_INTERVAL`] while the run goes on, to
     // the host's progress port and never to the registry.
     let ticker = async {
@@ -471,8 +514,11 @@ async fn run_prepare(
     // Every key any run may have written, as full storage keys.
     let keys_of =
         |paths: Vec<String>| -> Vec<String> { paths.iter().map(|p| stored.key_of(p)).collect() };
-    // The run is dropped when the budget ends first: that cancels its reader,
-    // and the keys it recorded in `control` before each put are still there.
+    // One budget for everything up to the manifest: the conversion and the
+    // manifest put. When it ends first the run is dropped, which cancels its
+    // reader; the keys were listed in the row before each put.
+    let budget = (env.sleeper)(env.budget);
+    tokio::pin!(budget);
     let converted = tokio::select! {
         done = convert_csv_table_with(
             &source,
@@ -485,7 +531,7 @@ async fn run_prepare(
             let _: std::convert::Infallible = never;
             unreachable!("the progress ticker never ends")
         }
-        () = (env.sleeper)(env.budget) => {
+        () = &mut budget => {
             let detail = "the preparation did not finish within its time budget".to_string();
             return fail(env, req, &owner, reason::TIME, detail, keys_of(control.paths_of(0))).await;
         }
@@ -526,8 +572,14 @@ async fn run_prepare(
                         )
                     })?;
                 Ok::<_, (&'static str, String)>(tables_json)
-            }
-            .await;
+            };
+            let manifest_put = tokio::select! {
+                done = manifest_put => done,
+                () = &mut budget => Err((
+                    reason::TIME,
+                    "the preparation did not finish within its time budget".to_string(),
+                )),
+            };
             let tables_json = match manifest_put {
                 Ok(t) => t,
                 Err((code, detail)) => {
@@ -540,9 +592,9 @@ async fn run_prepare(
             let mut live: Vec<String> = table.live_paths(0);
             live.push(MANIFEST_PATH.to_string());
             let prepared_bytes = stored.bytes_of(live.iter());
-            let outcome = env
-                .registry
-                .complete(
+            let outcome = within(
+                env,
+                env.registry.complete(
                     &req.source_key,
                     &owner,
                     ReadyInfo {
@@ -552,8 +604,9 @@ async fn run_prepare(
                         prepared_bytes: i64::try_from(prepared_bytes).unwrap_or(i64::MAX),
                     },
                     (env.clock)(),
-                )
-                .await?;
+                ),
+            )
+            .await?;
             match outcome {
                 TerminalOutcome::Cancelled => settle_lost(env, req, &blob_keys).await,
                 TerminalOutcome::Written => {
@@ -595,7 +648,10 @@ async fn settle_lost(
     req: &PrepareRequest,
     keys: &[String],
 ) -> Result<PrepareOutcome, RegistryError> {
-    if env.registry.get(&req.source_key).await?.is_none() {
+    if within(env, env.registry.get(&req.source_key))
+        .await?
+        .is_none()
+    {
         delete_best_effort(env, req, keys).await;
     }
     Ok(PrepareOutcome::Cancelled)
@@ -612,35 +668,41 @@ async fn source_gone(
 ) -> Result<PrepareOutcome, RegistryError> {
     // Ownership first: after a lease takeover the deterministic keys are the new
     // owner's, and a job that is not the owner deletes and releases nothing.
-    if !env.registry.still_owned(&req.source_key, owner).await? {
+    if !within(env, env.registry.still_owned(&req.source_key, owner)).await? {
         return settle_lost(env, req, &keys).await;
     }
-    if env
-        .storage
-        .delete_derived(&req.source_key, &keys)
-        .await
-        .is_err()
-    {
+    if !matches!(
+        bounded(env, env.storage.delete_derived(&req.source_key, &keys)).await,
+        Some(Ok(()))
+    ) {
         let detail = "the objects of a deleted source could not be removed".to_string();
         return fail(env, req, owner, reason::STORAGE, detail, keys).await;
     }
-    Ok(if env.registry.release(&req.source_key, owner).await? {
-        PrepareOutcome::SourceGone
-    } else {
-        PrepareOutcome::Cancelled
-    })
+    Ok(
+        if within(env, env.registry.release(&req.source_key, owner)).await? {
+            PrepareOutcome::SourceGone
+        } else {
+            PrepareOutcome::Cancelled
+        },
+    )
 }
 
 /// Deletes what a preparation wrote. The keys are listed in the row, so what
 /// this cannot delete the cleanup pass will; the failure is logged as a fixed
 /// sentence and a kind, never with the adapter's text or a key.
 async fn delete_best_effort(env: &PrepareEnv, req: &PrepareRequest, keys: &[String]) {
-    if let Err(e) = env.storage.delete_derived(&req.source_key, keys).await {
-        tracing::warn!(
+    match bounded(env, env.storage.delete_derived(&req.source_key, keys)).await {
+        Some(Ok(())) => {}
+        Some(Err(e)) => tracing::warn!(
             target: "colmena::tabular_prepare",
             kind = storage_kind(&e),
             "could not delete prepared objects; the cleanup pass will"
-        );
+        ),
+        None => tracing::warn!(
+            target: "colmena::tabular_prepare",
+            kind = "no_answer",
+            "could not delete prepared objects; the cleanup pass will"
+        ),
     }
 }
 
@@ -662,10 +724,12 @@ async fn fail(
     detail: String,
     keys: Vec<String>,
 ) -> Result<PrepareOutcome, RegistryError> {
-    let outcome = match env
-        .registry
-        .fail_with_blobs(&req.source_key, owner, code, &detail, &keys, (env.clock)())
-        .await
+    let outcome = match within(
+        env,
+        env.registry
+            .fail_with_blobs(&req.source_key, owner, code, &detail, &keys, (env.clock)()),
+    )
+    .await
     {
         Ok(outcome) => outcome,
         Err(e) => {
@@ -1186,6 +1250,8 @@ pub(crate) mod cases {
         pub fire: tokio::sync::Notify,
         /// Ends one progress interval.
         pub tick: tokio::sync::Notify,
+        /// Ends the bound of one terminal step.
+        pub step: tokio::sync::Notify,
     }
 
     pub(crate) fn gated(env: PrepareEnv) -> (PrepareEnv, Arc<Gate>) {
@@ -1193,6 +1259,7 @@ pub(crate) mod cases {
             asked: std::sync::Mutex::new(Vec::new()),
             fire: tokio::sync::Notify::new(),
             tick: tokio::sync::Notify::new(),
+            step: tokio::sync::Notify::new(),
         });
         let g = gate.clone();
         let env = env.with_sleeper(Arc::new(move |d| {
@@ -1200,6 +1267,8 @@ pub(crate) mod cases {
             Box::pin(async move {
                 if d == PROGRESS_INTERVAL {
                     g.tick.notified().await;
+                } else if d == TERMINAL_STEP {
+                    g.step.notified().await;
                 } else {
                     g.asked.lock().unwrap().push(d);
                     g.fire.notified().await;
@@ -1777,6 +1846,152 @@ pub(crate) mod cases {
         assert_eq!(row.error_code, None);
     }
 
+    /// Waits for a preparation that must end by its own bounds; a bound that does
+    /// not hold fails the test instead of hanging it.
+    async fn joined(run: tokio::task::JoinHandle<PrepareOutcome>) -> PrepareOutcome {
+        tokio::time::timeout(Duration::from_secs(30), run)
+            .await
+            .expect("the job outlived its bound")
+            .unwrap()
+    }
+
+    pub(crate) async fn a_manifest_put_that_never_completes_is_ended_by_the_same_budget(
+        registry: Arc<dyn PreparationRegistry>,
+    ) {
+        let source = fresh_source();
+        let source = source.as_str();
+        let storage = PlacedStorage::with_source(source, five_rows());
+        // Three parts are stored; the manifest, the fourth put, never completes.
+        *storage.hang_stores_from.lock().unwrap() = Some(3);
+        let (env, gate) = gated(env(registry.clone(), storage.clone()));
+        let req = request(source, 40);
+        let run = tokio::spawn(async move { prepare_csv(&env, &req).await.unwrap() });
+        storage.hung.notified().await;
+        gate.fire.notify_one();
+        let out = joined(run).await;
+        let (f, row) = failed_row(&registry, source, out).await;
+        assert_eq!(f.code, reason::TIME);
+        // One budget for the whole job: it was asked for once.
+        assert_eq!(*gate.asked.lock().unwrap(), vec![PREP_TIMEOUT]);
+        assert_eq!(row.manifest_key, None);
+        assert_eq!(storage.keys(), vec![source.to_string()]);
+    }
+
+    pub(crate) async fn a_completion_that_never_returns_is_ended_by_its_own_bound_and_deletes_nothing(
+        registry: Arc<dyn PreparationRegistry>,
+    ) {
+        use crate::tabular_prepare::registry_faults::FaultyRegistry;
+        use std::sync::atomic::Ordering::SeqCst;
+        let source = fresh_source();
+        let source = source.as_str();
+        let storage = PlacedStorage::with_source(source, five_rows());
+        let faulty = FaultyRegistry::new(registry.clone());
+        faulty.faults.hang_complete.store(true, SeqCst);
+        let (env, gate) = gated(env(faulty.clone(), storage.clone()));
+        let req = request(source, 40);
+        let run = tokio::spawn(async move { prepare_csv(&env, &req).await });
+        faulty.faults.complete_reached.notified().await;
+        gate.step.notify_one();
+        let out = tokio::time::timeout(Duration::from_secs(30), run)
+            .await
+            .expect("the job outlived its bound")
+            .unwrap();
+        assert!(out.is_err(), "{out:?}");
+        // Whether it was applied is unknown: nothing deleted, everything listed.
+        assert!(storage.deleted.lock().unwrap().is_empty());
+        let row = registry.get(source).await.unwrap().unwrap();
+        for k in objects_but_source(&storage, source) {
+            assert!(row.blob_keys.contains(&k), "{k} not tracked");
+        }
+    }
+
+    pub(crate) async fn a_delete_that_never_returns_does_not_hold_the_failure_back(
+        registry: Arc<dyn PreparationRegistry>,
+    ) {
+        let source = fresh_source();
+        let source = source.as_str();
+        let storage = PlacedStorage::with_source(source, five_rows());
+        // The manifest cannot be stored, and the cleanup that follows never returns.
+        *storage.fail_stores_from.lock().unwrap() = Some(3);
+        *storage.hang_delete.lock().unwrap() = true;
+        let (env, gate) = gated(env(registry.clone(), storage.clone()));
+        let req = request(source, 40);
+        let run = tokio::spawn(async move { prepare_csv(&env, &req).await.unwrap() });
+        storage.delete_reached.notified().await;
+        gate.step.notify_one();
+        let out = joined(run).await;
+        let (f, _row) = failed_row(&registry, source, out).await;
+        assert_eq!(f.code, reason::STORAGE);
+    }
+
+    pub(crate) async fn the_lease_is_the_budget_plus_the_grace_and_outlasts_the_bounded_job(
+        registry: Arc<dyn PreparationRegistry>,
+    ) {
+        let source = fresh_source();
+        let source = source.as_str();
+        let storage = PlacedStorage::with_source(source, five_rows());
+        *storage.hang_stores_from.lock().unwrap() = Some(1);
+        let budget = Duration::from_secs(300);
+        let env = env(registry.clone(), storage.clone()).with_budget(budget);
+        let req = request(source, 40);
+        let run = tokio::spawn(async move { prepare_csv(&env, &req).await });
+        storage.hung.notified().await;
+        let row = registry.get(source).await.unwrap().unwrap();
+        run.abort();
+        let _ = run.await;
+        let claimed = Utc.with_ymd_and_hms(2026, 10, 6, 12, 0, 0).unwrap();
+        // Budget plus the registry's grace, not the budget alone.
+        assert_eq!(
+            row.lease_until,
+            Some(
+                claimed
+                    + chrono::Duration::seconds(300)
+                    + crate::tabular_prepare::registry::LEASE_GRACE
+            )
+        );
+        // The job after the budget is at most MAX_TERMINAL_STEPS bounded steps.
+        let after = TERMINAL_STEP * MAX_TERMINAL_STEPS;
+        assert!(
+            chrono::Duration::from_std(after).unwrap()
+                < crate::tabular_prepare::registry::LEASE_GRACE
+        );
+    }
+
+    pub(crate) async fn a_cleanup_of_a_deleted_source_that_does_not_answer_keeps_the_row_and_its_keys(
+        registry: Arc<dyn PreparationRegistry>,
+    ) {
+        let source = fresh_source();
+        let source = source.as_str();
+        let storage = PlacedStorage::with_source(source, late_word_file());
+        *storage.remove_source_on_second_open.lock().unwrap() = true;
+        *storage.hang_delete.lock().unwrap() = true;
+        let (env, gate) = gated(
+            env(registry.clone(), storage.clone()).with_writer(WriterConfig {
+                max_rows: 2000,
+                max_bytes: usize::MAX,
+            }),
+        );
+        let req = request(source, 60_000);
+        let run = tokio::spawn(async move { prepare_csv(&env, &req).await.unwrap() });
+        let steps = async {
+            // The delete of the deleted source's objects, then the one of the failure.
+            for _ in 0..2 {
+                storage.delete_reached.notified().await;
+                gate.step.notify_one();
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(30), steps)
+            .await
+            .expect("the job did not go on after the delete timed out");
+        let out = joined(run).await;
+        // The objects could not be removed, so the row stays, failed, listing them.
+        let (f, row) = failed_row(&registry, source, out).await;
+        assert_eq!(f.code, reason::STORAGE);
+        for k in part_keys(source, 4) {
+            assert!(row.blob_keys.contains(&k), "{k} not tracked");
+        }
+    }
+
     pub(crate) async fn a_registry_error_at_completion_leaves_the_stored_objects_tracked_and_not_deleted(
         registry: Arc<dyn PreparationRegistry>,
     ) {
@@ -2019,5 +2234,25 @@ mod registry_tests {
     sqlite_case!(
         tabular_prepare_a_row_taken_before_the_budget_ends_the_run_keeps_the_new_owners_objects,
         a_row_taken_before_the_budget_ends_the_run_keeps_the_new_owners_objects
+    );
+    sqlite_case!(
+        tabular_prepare_a_manifest_put_that_never_completes_is_ended_by_the_same_budget,
+        a_manifest_put_that_never_completes_is_ended_by_the_same_budget
+    );
+    sqlite_case!(
+        tabular_prepare_a_completion_that_never_returns_is_ended_by_its_own_bound_and_deletes_nothing,
+        a_completion_that_never_returns_is_ended_by_its_own_bound_and_deletes_nothing
+    );
+    sqlite_case!(
+        tabular_prepare_a_delete_that_never_returns_does_not_hold_the_failure_back,
+        a_delete_that_never_returns_does_not_hold_the_failure_back
+    );
+    sqlite_case!(
+        tabular_prepare_the_lease_is_the_budget_plus_the_grace_and_outlasts_the_bounded_job,
+        the_lease_is_the_budget_plus_the_grace_and_outlasts_the_bounded_job
+    );
+    sqlite_case!(
+        tabular_prepare_a_cleanup_of_a_deleted_source_that_does_not_answer_keeps_the_row_and_its_keys,
+        a_cleanup_of_a_deleted_source_that_does_not_answer_keeps_the_row_and_its_keys
     );
 }
