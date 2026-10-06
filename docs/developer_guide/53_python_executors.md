@@ -204,7 +204,15 @@ mounts, so a call without mounts cannot list it either. Nothing else of the stag
 (random ids, no content reachable). A call id the jail cannot trust (a bad charset, a link in the path, a `data` directory
 others can write in) ends the call before any code runs, with the crash text. Everything else the jail applies, the
 user, capabilities, limits, seccomp filter, environment and the empty network namespace, is the same with or without
-mounts (`tests/python_executor_mounts.rs` compares them from inside).
+mounts (`tests/python_executor_mounts.rs` compares them from inside), except the largest file a call may write: it is
+the larger of `…_TMP_MB`'s 64 MiB and the call's output size (`/tmp` itself stays a 64 MiB `tmpfs`).
+
+The call's `out` volume appears at `/out`, writable, `nosuid`, `nodev`, `noexec`, and cannot be remounted or unmounted
+from inside. Before binding it the jail checks that it is a volume of its own with a size, no bigger than the
+`out_mb` the header declares, and not the volume of the call directory (`check_out_volume`); otherwise the call ends
+before any code runs. Its size and inode count are what bound the output. What the program leaves there, links
+included, is never followed on the trusted side: the volume is unmounted before anything is removed. `/out` is created
+like `/data` when missing.
 
 ### Startup self-test (Linux)
 
