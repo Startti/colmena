@@ -1,3 +1,68 @@
+//! Converting a CSV into Parquet parts (dark behind `COLMENA_LARGE_TABULAR`):
+//! typing the batches, restarting when a column turns out to be text after
+//! all, and reading a storage stream as a blocking source.
+//!
+//! The reader hands over text. Each cell is checked against the type of its
+//! column by the same rules that chose the type ([`cell_fits`]), never by what
+//! a number parser would accept: a late `007` in an integer column must not
+//! quietly become `7`. A cell that does not fit is a [`TypeConflict`] naming
+//! its column and row; the conversion demotes that column to text and starts
+//! over ([`convert_csv_table`]).
+//!
+//! # Memory
+//!
+//! Every stage is bounded by constants, never by the file. Records the reader
+//! keeps are copied into buffers of their exact size: the parser grows its own
+//! buffer by doubling and `ByteRecord::clone` copies all of it, which kept up to
+//! twice the text (116 instead of 96 MiB at 700 columns, 54 instead of 39 at
+//! 16,384). Per kept record there are also about 100 bytes of structure.
+//!
+//! - **Reader and sample.** A record is at most `MAX_RECORD_BYTES` = 1 MiB (the
+//!   scanner fails at the limit, also inside an unclosed quote). The type sample
+//!   keeps at most `SAMPLE_MAX_BYTES` = 16 MiB of text (plus one record), and at
+//!   most `SAMPLE_MAX_CELLS` = 2,000,000 fields at 8 bytes of field ends each =
+//!   16 MiB, over at most `INFERENCE_ROWS` = 10,000 records (about 1 MiB of
+//!   structure), plus about 2 MiB of sniff and parser buffers: 35 MiB, drained
+//!   as the first batches are built. A very wide file (up to 16,384 columns)
+//!   adds header-sized structures (names, schema, the table-list check), about
+//!   8 MiB at most (6 measured): 43 MiB. Such a file never reaches a batch: the
+//!   table list (cap 64 KiB, about 900 columns) cannot fit the registry row,
+//!   and the run stops right after the sample (measured 32 MiB at 3,000
+//!   columns, 39 at 16,384).
+//! - **A batch.** At most `BATCH_ROWS` = 8,192 rows, `BATCH_CELLS` = 1,000,000
+//!   cells and `BATCH_BYTES` = 8 MiB of text, whatever the row size (a record
+//!   that would pass the budget starts the next batch). The reader first holds
+//!   the batch's records (text 8 MiB + the held one, up to 1 MiB + 8 bytes of
+//!   field ends per cell, 8 MiB + about 1 MiB of structure = 18 MiB), then
+//!   builds each column with the exact capacity it needs (text 8 MiB + 4 bytes
+//!   of offset per cell, 4 MiB + validity, 0.1 MiB = 12 MiB) and drops the
+//!   records: 31 MiB at the peak of building (18 + 12 + 1), 12 MiB after.
+//!   Typing adds at most 8 MiB of numbers (text columns are shared, not
+//!   copied): 21 MiB. Windows-1252 expansion cannot break it: the budget counts
+//!   decoded bytes.
+//! - **In flight.** The reader building one batch (31 MiB), the channel holding
+//!   `CHANNEL_BATCHES` = 2 and the writer holding one (21 MiB each): 94 MiB.
+//! - **The writer.** One part is built in memory: its encoded size is closed at
+//!   `PART_MAX_BYTES` = 64 MiB, overshooting by at most one slice (an oversized
+//!   batch is cut into slices first), and finishing it holds the encoded row
+//!   group and its output at once: 2 x (64 + 21) = 170 MiB.
+//!
+//! In all, as a ceiling that adds every worst case even though they do not
+//! coincide: 94 + 170 + 43 (the sample, drained early) + 2 = 309 MiB at the
+//! default settings, against the 4 GiB of the preparation job. With a part
+//! limit of 8 MiB (the `tabular_convert_memory` test) it is
+//! 94 + 2 x (8 + 21) + 43 + 2 = 197 MiB.
+//!
+//! The test measures the peak of live heap bytes with a counting allocator, in
+//! a debug build, and gives each scenario its own bound, the measured peak plus
+//! a stated margin, so that the slack that was removed would fail it: 55 MiB
+//! (bound 64) for a 270 MB file of 96 KiB rows, and for one four times smaller;
+//! 96 MiB (bound 106) for 700 columns; 32 and 39 MiB (bounds 38 and 46) for
+//! 3,000 and 16,384 columns refused after the sample. It fails at 864 MiB when
+//! the byte budget is removed. A margin of 10 MiB cannot see the 3.5 MiB that
+//! builders sized empty would keep at 700 columns: a unit test of the batch's
+//! own size covers that.
+
 use crate::storage::domain::StorageError;
 use crate::tabular_prepare::csv::{
     open_csv_with, CsvError, DecodeStats, Encoding, RawBatches, ReadLimits,
@@ -310,6 +375,12 @@ impl PartSink for TrackingSink {
         self.inner.put(path, data).await
     }
 }
+
+/// Type restarts allowed. The first ones demote the column that conflicted;
+/// the last one makes every column text, which cannot conflict. With one more
+/// run if the encoding turns out to be Windows-1252, a file costs at most
+/// `MAX_RESTARTS + 2` reads.
+pub const MAX_RESTARTS: usize = 3;
 
 /// Batches in flight between reading and writing. Together with the batch
 /// bounds of the reader this keeps memory fixed whatever the file.
@@ -630,8 +701,19 @@ async fn run(
         _ => outcome,
     }
 }
-/// Converts one CSV into the parts of table `table_idx`, in one read of the
-/// source. Memory is bounded by the reader's batch limits, a channel of
+
+/// Converts one CSV into the parts of table `table_idx`.
+///
+/// The types come from a sample, so a late cell can contradict them. When one
+/// does, that column becomes text and the file is read again from the start;
+/// after [`MAX_RESTARTS`] restarts every column is text. Parts are written
+/// under deterministic keys, so a restart overwrites what the run before wrote
+/// and the result lists each key once. Invalid UTF-8 is replaced and counted
+/// (`replacements`); a file whose whole content is not plausibly UTF-8 (more
+/// invalid sequences than valid multibyte ones) is read once more as
+/// Windows-1252.
+///
+/// Memory is bounded by the reader's batch limits, a channel of
 /// [`CHANNEL_BATCHES`] batches and one part in the writer.
 pub async fn convert_csv_table(
     source: &dyn CsvSource,
@@ -662,11 +744,9 @@ pub async fn convert_csv_table_with(
     )
     .await
 }
-/// Converts one CSV into the parts of table `table_idx`, in one read of the
-/// source (a late conflict or a wrong encoding guess is a failure here; the
-/// restarts are the next slice). Every part key is recorded in `control` before
-/// its put, and nothing is reported as written on a failure. Crate private:
-/// only tests move the boundaries, and the limits are validated.
+
+/// [`convert_csv_table_with`] with other reader limits (sample, batch). Crate
+/// private: only tests move the boundaries, and the limits are validated.
 ///
 /// ```compile_fail
 /// use colmena::tabular_prepare::convert::convert_csv_table_limits;
@@ -686,52 +766,72 @@ pub(crate) async fn convert_csv_table_limits(
         inner: sink,
         control: control.clone(),
     });
-    let plan = RunPlan {
+    let mut plan = RunPlan {
         force: None,
         text_columns: Vec::new(),
         all_strings: false,
         limits: *limits,
     };
-    let failed = |error: TableError| TableFailure {
+    let mut restarts = 0;
+    let mut failed = None;
+    for _ in 0..MAX_RESTARTS + 2 {
+        let result = run(source, &sink, &cancel, table_idx, cfg, &plan).await;
+        match result {
+            Ok(ok) => {
+                let blob_paths = control.paths_of(table_idx);
+                let live: BTreeSet<String> = (0..ok.written.parts as usize)
+                    .filter_map(|i| part_path(table_idx, i).ok())
+                    .collect();
+                let stale_paths = blob_paths
+                    .iter()
+                    .filter(|p| !live.contains(*p))
+                    .cloned()
+                    .collect();
+                return Ok(ConvertedTable {
+                    written: ok.written,
+                    restarts,
+                    demoted: ok.demoted,
+                    all_strings: plan.all_strings,
+                    encoding: ok.encoding,
+                    replacements: ok.replacements,
+                    utf8_valid_multibyte: ok.utf8_valid_multibyte,
+                    utf8_invalid: ok.utf8_invalid,
+                    blank_rows: ok.blank_rows,
+                    blank_dropped: ok.blank_dropped,
+                    padded_rows: ok.padded_rows,
+                    blob_paths,
+                    stale_paths,
+                });
+            }
+            Err(RunEnd::Conflict(c)) if !plan.all_strings => {
+                restarts += 1;
+                if restarts >= MAX_RESTARTS {
+                    plan.all_strings = true;
+                } else {
+                    plan.text_columns.push(c.column);
+                }
+            }
+            Err(RunEnd::Reencode(right)) if plan.force.is_none() => {
+                plan.force = Some(right);
+            }
+            Err(RunEnd::Conflict(_)) | Err(RunEnd::Reencode(_)) => {
+                let e = ConvertError::Cast("a run that cannot conflict did".into());
+                failed = Some(e.into());
+                break;
+            }
+            Err(RunEnd::Failed(e)) => {
+                failed = Some(e);
+                break;
+            }
+        }
+    }
+    let error = failed.unwrap_or_else(|| {
+        ConvertError::Cast("the conversion did not settle after its restarts".into()).into()
+    });
+    Err(TableFailure {
         error,
         blob_paths: control.paths_of(table_idx),
-    };
-    match run(source, &sink, &cancel, table_idx, cfg, &plan).await {
-        Ok(ok) => {
-            let blob_paths = control.paths_of(table_idx);
-            let live: BTreeSet<String> = (0..ok.written.parts as usize)
-                .filter_map(|i| part_path(table_idx, i).ok())
-                .collect();
-            let stale_paths = blob_paths
-                .iter()
-                .filter(|p| !live.contains(*p))
-                .cloned()
-                .collect();
-            Ok(ConvertedTable {
-                written: ok.written,
-                restarts: 0,
-                demoted: ok.demoted,
-                all_strings: false,
-                encoding: ok.encoding,
-                replacements: ok.replacements,
-                utf8_valid_multibyte: ok.utf8_valid_multibyte,
-                utf8_invalid: ok.utf8_invalid,
-                blank_rows: ok.blank_rows,
-                blank_dropped: ok.blank_dropped,
-                padded_rows: ok.padded_rows,
-                blob_paths,
-                stale_paths,
-            })
-        }
-        Err(RunEnd::Conflict(c)) => Err(failed(ConvertError::Conflict(c).into())),
-        Err(RunEnd::Reencode(right)) => Err(failed(
-            ConvertError::Cast(format!(
-                "the whole file says {right:?} was the right encoding"
-            ))
-            .into(),
-        )),
-        Err(RunEnd::Failed(e)) => Err(failed(e)),
-    }
+    })
 }
 
 #[cfg(test)]
@@ -962,11 +1062,12 @@ mod tests {
 
     // ---- the restart loop ----
 
-    use crate::tabular_prepare::csv::CsvError;
+    use crate::tabular_prepare::csv::{CsvError, Encoding};
     use crate::tabular_prepare::infer::INFERENCE_ROWS;
     use crate::tabular_prepare::manifest::ManifestError;
     use crate::tabular_prepare::part_sink::fake::MemorySink;
     use crate::tabular_prepare::writer::{WriterConfig, WriterError};
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
@@ -1011,6 +1112,28 @@ mod tests {
         t.written.columns.iter().map(|c| c.column_type).collect()
     }
 
+    /// Reads the column `col` of every part, as text.
+    fn read_column_text(sink: &MemorySink, parts: u32, col: usize) -> Vec<Option<String>> {
+        let mut out = Vec::new();
+        for p in 0..parts {
+            let bytes = sink.get(&format!("t0/part-{p:05}.parquet")).unwrap();
+            for b in ParquetRecordBatchReaderBuilder::try_new(bytes)
+                .unwrap()
+                .build()
+                .unwrap()
+            {
+                let b = b.unwrap();
+                let a = b
+                    .column(col)
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .unwrap();
+                out.extend((0..a.len()).map(|i| (!a.is_null(i)).then(|| a.value(i).to_string())));
+            }
+        }
+        out
+    }
+
     /// `n` rows of "id,v" where v is an integer, then the given late rows.
     fn int_csv(n: usize, late: &str) -> Vec<u8> {
         let mut csv = String::from("id,v\n");
@@ -1036,6 +1159,170 @@ mod tests {
         );
         assert!(t.demoted.is_empty() && !t.all_strings);
         assert_eq!(t.blob_paths, vec!["t0/part-00000.parquet".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn a_million_ints_and_one_late_na_become_a_text_column_with_every_value_verbatim() {
+        let src = MemSource::new(int_csv(1_000_000, "1000000,N/A\n"));
+        let sink = Arc::new(MemorySink::default());
+        let t = convert(&src, &sink, WriterConfig::default()).await.unwrap();
+        assert_eq!((t.restarts, src.opens()), (1, 2));
+        assert_eq!(t.written.rows, 1_000_001);
+        // The exposed schema shows the fallback type; the other column keeps its own.
+        assert_eq!(types(&t), vec![ColumnType::Int, ColumnType::String]);
+        assert_eq!(t.demoted, vec!["v".to_string()]);
+        let v = read_column_text(&sink, t.written.parts, 1);
+        assert_eq!(v.len(), 1_000_001);
+        assert_eq!(v[0].as_deref(), Some("0"));
+        assert_eq!(v[999_999].as_deref(), Some("999999"));
+        assert_eq!(v[1_000_000].as_deref(), Some("N/A"));
+    }
+
+    /// Five integer columns; column k goes wrong at its own late row.
+    fn five_columns(bad: &[(usize, usize)]) -> Vec<u8> {
+        let rows = INFERENCE_ROWS + 3000;
+        let mut csv = String::from("c0,c1,c2,c3,c4\n");
+        for r in 0..rows {
+            let cells: Vec<String> = (0..5)
+                .map(
+                    |c| match bad.iter().find(|(col, row)| *col == c && *row == r) {
+                        Some(_) => "N/A".to_string(),
+                        None => r.to_string(),
+                    },
+                )
+                .collect();
+            csv.push_str(&cells.join(","));
+            csv.push('\n');
+        }
+        csv.into_bytes()
+    }
+
+    #[tokio::test]
+    async fn after_three_restarts_every_column_is_text() {
+        let late = INFERENCE_ROWS + 100;
+        // Three columns fail one after another, at rows far enough apart to
+        // land in different batches, so each run finds one.
+        let src = MemSource::new(five_columns(&[
+            (0, late),
+            (1, late + 1000),
+            (2, late + 2000),
+        ]));
+        let sink = Arc::new(MemorySink::default());
+        let t = convert(&src, &sink, WriterConfig::default()).await.unwrap();
+        assert_eq!((t.restarts, src.opens()), (3, 4));
+        assert!(t.all_strings);
+        assert!(
+            types(&t).iter().all(|t| *t == ColumnType::String),
+            "{:?}",
+            types(&t)
+        );
+        let c3 = read_column_text(&sink, t.written.parts, 3);
+        assert_eq!(c3[late].as_deref(), Some(late.to_string().as_str()));
+    }
+
+    #[tokio::test]
+    async fn two_conflicting_columns_demote_only_those_two() {
+        let late = INFERENCE_ROWS + 100;
+        let src = MemSource::new(five_columns(&[(1, late), (3, late + 1000)]));
+        let sink = Arc::new(MemorySink::default());
+        let t = convert(&src, &sink, WriterConfig::default()).await.unwrap();
+        assert_eq!((t.restarts, src.opens()), (2, 3));
+        assert!(!t.all_strings);
+        let expect = [
+            ColumnType::Int,
+            ColumnType::String,
+            ColumnType::Int,
+            ColumnType::String,
+            ColumnType::Int,
+        ];
+        assert_eq!(types(&t), expect);
+        assert_eq!(t.demoted, vec!["c1".to_string(), "c3".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn restarts_overwrite_the_same_keys_and_the_tracked_paths_are_the_union() {
+        // Parts of 5,000 rows; the conflict is past the first part, so the
+        // first run leaves part 0 behind and the second one replaces it.
+        let cfg = WriterConfig {
+            max_rows: 5000,
+            max_bytes: usize::MAX,
+        };
+        let src = MemSource::new(int_csv(INFERENCE_ROWS + 3000, "1,N/A\n"));
+        let sink = Arc::new(MemorySink::default());
+        let t = convert(&src, &sink, cfg).await.unwrap();
+        assert_eq!(t.restarts, 1);
+        let puts = sink.paths();
+        let first = "t0/part-00000.parquet";
+        assert_eq!(puts.iter().filter(|p| *p == first).count(), 2, "{puts:?}");
+        // The tracked paths are each key once, and cover every put.
+        let mut unique = puts.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(t.blob_paths, unique);
+        // The surviving part 0 is the text version.
+        let bytes = sink.get(first).unwrap();
+        let schema = ParquetRecordBatchReaderBuilder::try_new(bytes)
+            .unwrap()
+            .schema()
+            .clone();
+        assert_eq!(schema.field(1).data_type(), &arrow_schema::DataType::Utf8);
+    }
+
+    #[tokio::test]
+    async fn a_sink_failure_reports_every_path_tried_across_the_restart() {
+        let cfg = WriterConfig {
+            max_rows: 5000,
+            max_bytes: usize::MAX,
+        };
+        let src = MemSource::new(int_csv(INFERENCE_ROWS + 3000, "1,N/A\n"));
+        // Run 1 puts part 0; run 2 puts part 0 again (put 2) and then fails on put 3.
+        let sink = Arc::new(MemorySink::failing_from(2));
+        let failure = convert(&src, &sink, cfg).await.unwrap_err();
+        assert!(
+            matches!(failure.error, TableError::Writer(WriterError::Sink(_))),
+            "{:?}",
+            failure.error
+        );
+        assert_eq!(
+            failure.blob_paths.first().map(String::as_str),
+            Some("t0/part-00000.parquet")
+        );
+        assert!(failure.blob_paths.len() >= 2, "{:?}", failure.blob_paths);
+    }
+
+    #[tokio::test]
+    async fn invalid_utf8_after_the_sample_restarts_once_as_windows_1252() {
+        let mut csv = b"a,b\n".to_vec();
+        for _ in 0..(crate::tabular_prepare::csv::SNIFF_BYTES / 4 + 100) {
+            csv.extend_from_slice(b"1,x\n");
+        }
+        csv.extend_from_slice(b"2,caf\xE9\n");
+        let src = MemSource::new(csv);
+        let sink = Arc::new(MemorySink::default());
+        let t = convert(&src, &sink, WriterConfig::default()).await.unwrap();
+        assert_eq!(
+            (t.encoding, src.opens(), t.restarts),
+            (Encoding::Windows1252, 2, 0)
+        );
+        let b = read_column_text(&sink, t.written.parts, 1);
+        assert_eq!(b.last().unwrap().as_deref(), Some("café"));
+    }
+
+    #[tokio::test]
+    async fn the_number_of_runs_is_bounded() {
+        // Three type restarts and one encoding restart is the most any file costs.
+        let late = INFERENCE_ROWS + 100;
+        let mut csv = five_columns(&[(0, late), (1, late + 1000), (2, late + 2000)]);
+        for _ in 0..(crate::tabular_prepare::csv::SNIFF_BYTES / 4) {
+            csv.extend_from_slice(b"1,2,3,4,5\n");
+        }
+        csv.extend_from_slice(b"1,2,3,4,caf\xE9\n");
+        let src = MemSource::new(csv);
+        let sink = Arc::new(MemorySink::default());
+        let t = convert(&src, &sink, WriterConfig::default()).await.unwrap();
+        assert_eq!(src.opens(), 5);
+        assert_eq!((t.restarts, t.encoding), (3, Encoding::Windows1252));
+        assert_eq!(src.opens(), MAX_RESTARTS + 2);
     }
 
     #[tokio::test]
@@ -1871,6 +2158,70 @@ mod tests {
             matches!(failure.error, TableError::Writer(WriterError::Sink(_))),
             "{:?}",
             failure.error
+        );
+    }
+
+    // ---- the encoding is decided from the whole file ----
+
+    /// Rows "1,<word>" repeated, `n` of them.
+    fn rows_of_word(word: impl AsRef<[u8]>, n: usize) -> Vec<u8> {
+        let mut row = b"1,".to_vec();
+        row.extend_from_slice(word.as_ref());
+        row.push(b'\n');
+        row.repeat(n)
+    }
+
+    #[tokio::test]
+    async fn the_utf8_evidence_is_reported_whatever_the_encoding_chosen() {
+        // UTF-8 with one stray byte: one valid sequence, one invalid, replaced.
+        let src = MemSource::new(b"a,b\n1,caf\xC3\xA9\n1,bad\xFFbyte\n".to_vec());
+        let sink = Arc::new(MemorySink::default());
+        let t = convert(&src, &sink, WriterConfig::default()).await.unwrap();
+        assert_eq!(
+            (
+                t.encoding,
+                t.replacements,
+                t.utf8_valid_multibyte,
+                t.utf8_invalid
+            ),
+            (Encoding::Utf8, 1, 1, 1)
+        );
+        // Windows-1252: nothing replaced, and the counts say what the bytes
+        // looked like as UTF-8 (three single accented bytes in each row).
+        let src = MemSource::new(rows_of_word(b"caf\xE9 \xF1and\xFA", 300));
+        let t = convert(&src, &sink, WriterConfig::default()).await.unwrap();
+        assert_eq!(
+            (
+                t.encoding,
+                t.replacements,
+                t.utf8_valid_multibyte,
+                t.utf8_invalid
+            ),
+            (Encoding::Windows1252, 0, 0, 900)
+        );
+    }
+
+    #[tokio::test]
+    async fn the_two_known_misreads_leave_their_evidence_in_the_result() {
+        let sink = Arc::new(MemorySink::default());
+        // A Windows-1252 file whose accents are an uppercase letter followed by
+        // a byte 0x80-0xBF ("Ã©" is the bytes C3 A9): valid UTF-8, read as UTF-8.
+        let src = MemSource::new(rows_of_word(b"Caf\xC3\xA9", 50));
+        let t = convert(&src, &sink, WriterConfig::default()).await.unwrap();
+        assert_eq!(
+            (t.encoding, t.utf8_valid_multibyte, t.utf8_invalid),
+            (Encoding::Utf8, 50, 0)
+        );
+        // A UTF-8 file with many sequences cut mid-character (each lost its
+        // last byte): more invalid than half the valid ones, read as 1252.
+        let mut csv = rows_of_word("caf\u{e9}", 10);
+        csv.splice(0..0, b"a,b\n".iter().copied());
+        csv.extend(rows_of_word(b"\xE2\x82 cut", 100));
+        let src = MemSource::new(csv);
+        let t = convert(&src, &sink, WriterConfig::default()).await.unwrap();
+        assert_eq!(
+            (t.encoding, t.utf8_valid_multibyte, t.utf8_invalid),
+            (Encoding::Windows1252, 10, 100)
         );
     }
 

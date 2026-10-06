@@ -510,7 +510,12 @@ sequence, or at least half as many valid multibyte sequences as invalid ones (ti
 and near-ties go to UTF-8: a counted replacement character is visible, mojibake is
 not). Real Windows-1252 text has almost no valid UTF-8 multibyte sequences (an
 accented letter is one byte), so its valid count is near zero against many invalid
-ones.
+ones. The rule is applied to the **whole file**, symmetrically: the 1 MiB sample
+makes only the first guess, both encodings count the bytes as UTF-8 while they are
+read, and at the end of a conversion run the whole-file counts decide; if the run
+used the other encoding the file is read again, forced, once. So ASCII plus one
+stray byte in the sample followed by UTF-8 accents is read as UTF-8 with one
+replacement, and a real Windows-1252 file stays Windows-1252.
 
 **Batches.** `open_csv` reads the header (row 1) and a sample to decide the types
 (`infer.rs`): the first 10,000 rows, or fewer if 16 MiB of text or 2,000,000
@@ -563,6 +568,35 @@ storage error becomes an `io::Error` carrying its text. A read waiting on a
 stalled stream is woken by the conversion's cancel token and fails with
 `CsvError::Cancelled`; what cannot be interrupted is a read stuck inside a
 stream's own non-async code (none of this module's readers).
+
+**The pipeline.** `convert_csv_table` runs the whole conversion of one CSV into
+the parts of a table, from a source that can be opened (`CsvSource`) to a
+`PartSink`. Reading, parsing and typing run on a blocking thread and the writer on
+the async side, joined by a channel of two batches, so memory is bounded by the
+reader's batch limits plus one part, however large the file (the arithmetic is in
+the `convert` module documentation: a ceiling of about 310 MiB at the default
+settings, against the 4 GiB of the job; wide tables and the sample included). An
+integration test measures the peak of live heap bytes with a counting allocator on
+a 270 MB file (55 MiB), on 700 columns (96 MiB), and on files of 3,000 and 16,384
+columns that stop after the sample (32 and 39 MiB); each scenario has its own
+bound, the measured peak plus a margin, so the slack that was removed would fail.
+Any failure (a cell that contradicts its type, a bad source, a sink error) returns
+the paths that may exist in the sink (`blob_paths`) and nothing is reported as
+written; a reader that dies midway is a failure, never a short table (a panic in
+it is `ConvertError::ReaderPanicked`), and on any failure the reader is cancelled
+and joined, so a failure is reported even when the reader is parked on a stalled
+stream.
+
+**Restarts.** The types come from a sample, so a late cell can contradict them:
+the column that conflicted becomes text and the file is read again from the start.
+At most **three** restarts: the first two demote the column that conflicted, the
+third makes every column text (which cannot conflict), so a file costs at most four
+reads for types, plus one more if the whole-file counts say the other encoding was
+right (five in the worst case, which a test pins). Parts are written under
+deterministic keys, so a restart overwrites what the run before wrote; `blob_paths`
+lists every part key any run handed to the sink, each once. The exposed schema
+shows the fallback type: `demoted` lists every column that was typed from the
+sample and ended as text (all of them when `all_strings` is set).
 
 **What the result reports**, so nothing changes silently: `encoding` and
 `replacements` (invalid UTF-8 sequences replaced; zero for Windows-1252),
