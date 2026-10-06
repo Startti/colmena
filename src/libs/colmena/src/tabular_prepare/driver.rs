@@ -31,6 +31,8 @@ use crate::tabular_prepare::registry::{
 use crate::tabular_prepare::writer::{WriterConfig, WriterError};
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -59,11 +61,16 @@ pub mod reason {
 /// Source of "now". Read once per registry write.
 pub type Clock = dyn Fn() -> DateTime<Utc> + Send + Sync;
 
+/// How the driver waits out a duration: `tokio::time::sleep` in production, a
+/// test's own trigger in tests, so no test depends on how long anything takes.
+pub type Sleeper = dyn Fn(Duration) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync;
+
 /// What the driver needs.
 pub struct PrepareEnv {
     pub registry: Arc<dyn PreparationRegistry>,
     pub storage: Arc<dyn OutputStorageRepository>,
     pub clock: Arc<Clock>,
+    pub sleeper: Arc<Sleeper>,
     pub budget: Duration,
     pub writer: WriterConfig,
 }
@@ -77,6 +84,7 @@ impl PrepareEnv {
             registry,
             storage,
             clock: Arc::new(Utc::now),
+            sleeper: Arc::new(|d| Box::pin(tokio::time::sleep(d))),
             budget: PREP_TIMEOUT,
             writer: WriterConfig::default(),
         }
@@ -84,6 +92,11 @@ impl PrepareEnv {
 
     pub fn with_clock(mut self, clock: Arc<Clock>) -> Self {
         self.clock = clock;
+        self
+    }
+
+    pub fn with_sleeper(mut self, sleeper: Arc<Sleeper>) -> Self {
+        self.sleeper = sleeper;
         self
     }
 
@@ -239,17 +252,24 @@ pub async fn prepare_csv(
     }
     let control = ConvertControl::new();
     let source = StorageCsvSource::new(env.storage.clone(), &req.source_key);
-    let converted = convert_csv_table_with(
-        &source,
-        sink.clone() as Arc<dyn PartSink>,
-        0,
-        env.writer,
-        &control,
-    )
-    .await;
     // Every key any run may have written, as full storage keys.
     let keys_of =
         |paths: Vec<String>| -> Vec<String> { paths.iter().map(|p| sink.key_of(p)).collect() };
+    // The run is dropped when the budget ends first: that cancels its reader,
+    // and the keys it recorded in `control` before each put are still there.
+    let converted = tokio::select! {
+        done = convert_csv_table_with(
+            &source,
+            sink.clone() as Arc<dyn PartSink>,
+            0,
+            env.writer,
+            &control,
+        ) => done,
+        () = (env.sleeper)(env.budget) => {
+            let detail = "the preparation did not finish within its time budget".to_string();
+            return fail(env, req, &owner, reason::TIME, detail, keys_of(control.paths_of(0))).await;
+        }
+    };
     match converted {
         Ok(table) => {
             let name = table_name(&req.filename);
@@ -850,6 +870,73 @@ pub(crate) mod cases {
         assert_eq!(storage.keys(), vec![source.to_string()]);
     }
 
+    /// A sleeper that records what it was asked for and fires when told.
+    pub(crate) struct Gate {
+        pub asked: std::sync::Mutex<Vec<Duration>>,
+        pub fire: tokio::sync::Notify,
+    }
+
+    pub(crate) fn gated(env: PrepareEnv) -> (PrepareEnv, Arc<Gate>) {
+        let gate = Arc::new(Gate {
+            asked: std::sync::Mutex::new(Vec::new()),
+            fire: tokio::sync::Notify::new(),
+        });
+        let g = gate.clone();
+        let env = env.with_sleeper(Arc::new(move |d| {
+            g.asked.lock().unwrap().push(d);
+            let g = g.clone();
+            Box::pin(async move { g.fire.notified().await })
+        }));
+        (env, gate)
+    }
+
+    pub(crate) async fn the_budget_ends_a_stuck_run_with_the_time_reason_and_removes_its_output(
+        registry: Arc<dyn PreparationRegistry>,
+    ) {
+        let source = fresh_source();
+        let source = source.as_str();
+        let storage = PlacedStorage::with_source(source, five_rows());
+        // The first part is stored; the second put never completes.
+        *storage.hang_stores_from.lock().unwrap() = Some(1);
+        let (env, gate) =
+            gated(env(registry.clone(), storage.clone()).with_budget(Duration::from_secs(300)));
+        let req = request(source, 40);
+        let run = tokio::spawn(async move { prepare_csv(&env, &req).await.unwrap() });
+        storage.hung.notified().await;
+        gate.fire.notify_one();
+        let out = run.await.unwrap();
+        let (f, row) = failed_row(&registry, source, out).await;
+        assert_eq!(f.code, reason::TIME);
+        // Asked for exactly the budget, once.
+        assert_eq!(*gate.asked.lock().unwrap(), vec![Duration::from_secs(300)]);
+        // The part that was stored and the one that hung are tracked, then removed.
+        for k in part_keys(source, 2) {
+            assert!(row.blob_keys.contains(&k), "{k} untracked");
+            assert!(storage.deleted.lock().unwrap().contains(&k));
+        }
+        assert_eq!(storage.keys(), vec![source.to_string()]);
+        assert_eq!(row.manifest_key, None);
+    }
+
+    pub(crate) async fn a_source_that_never_yields_ends_with_the_time_reason(
+        registry: Arc<dyn PreparationRegistry>,
+    ) {
+        let source = fresh_source();
+        let source = source.as_str();
+        let storage = PlacedStorage::with_source(source, five_rows());
+        *storage.stall_source.lock().unwrap() = true;
+        let (env, gate) = gated(env(registry.clone(), storage.clone()));
+        gate.fire.notify_one();
+        let out = prepare_csv(&env, &request(source, 40)).await.unwrap();
+        let (f, row) = failed_row(&registry, source, out).await;
+        assert_eq!(f.code, reason::TIME);
+        assert_eq!(
+            (f.detail.as_str(), row.blob_keys.len()),
+            ("the preparation did not finish within its time budget", 0)
+        );
+        assert_eq!(storage.keys(), vec![source.to_string()]);
+    }
+
     pub(crate) async fn a_restart_with_fewer_parts_leaves_stale_keys_the_manifest_never_names(
         registry: Arc<dyn PreparationRegistry>,
     ) {
@@ -958,5 +1045,13 @@ mod registry_tests {
     sqlite_case!(
         tabular_prepare_a_restart_with_fewer_parts_leaves_stale_keys_the_manifest_never_names,
         a_restart_with_fewer_parts_leaves_stale_keys_the_manifest_never_names
+    );
+    sqlite_case!(
+        tabular_prepare_the_budget_ends_a_stuck_run_with_the_time_reason_and_removes_its_output,
+        the_budget_ends_a_stuck_run_with_the_time_reason_and_removes_its_output
+    );
+    sqlite_case!(
+        tabular_prepare_a_source_that_never_yields_ends_with_the_time_reason,
+        a_source_that_never_yields_ends_with_the_time_reason
     );
 }

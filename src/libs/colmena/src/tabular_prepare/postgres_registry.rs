@@ -328,6 +328,14 @@ mod tests {
         tabular_prepare_pg_a_restart_with_fewer_parts_leaves_stale_keys_the_manifest_never_names,
         a_restart_with_fewer_parts_leaves_stale_keys_the_manifest_never_names
     );
+    pg_driver_case!(
+        tabular_prepare_pg_the_budget_ends_a_stuck_run_with_the_time_reason_and_removes_its_output,
+        the_budget_ends_a_stuck_run_with_the_time_reason_and_removes_its_output
+    );
+    pg_driver_case!(
+        tabular_prepare_pg_a_source_that_never_yields_ends_with_the_time_reason,
+        a_source_that_never_yields_ends_with_the_time_reason
+    );
     pg_case!(
         tabular_prepare_pg_a_deleting_row_is_never_taken_by_an_older_format_claim,
         a_deleting_row_is_never_taken_by_an_older_format_claim

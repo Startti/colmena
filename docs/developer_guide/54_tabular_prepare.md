@@ -713,6 +713,13 @@ failure is recorded with `fail_with_blobs` and the tracked objects are then dele
 (best effort: they are tracked, so the cleanup pass removes what this could not).
 A registry that cannot be written is returned as an error: nothing could be recorded.
 
+**Time budget.** The conversion runs against `PrepareEnv::budget` (`PREP_TIMEOUT`,
+300 s). When it ends first the run is dropped (which cancels its reader), the keys it
+recorded before each put are read from the control, the failure is recorded as `time`
+with all of them and they are deleted. The wait goes through `PrepareEnv::sleeper`
+(`tokio::time::sleep` by default), which is what the tests replace: no test depends on
+how long anything takes.
+
 **Failure reasons.** A failure is recorded in the registry with a reason (`error_code`)
 and a fixed detail sentence (`error_detail`); neither carries a cell, a storage key or
 the adapter's text. The set is small and stable, lowercase snake_case, and the host

@@ -199,6 +199,10 @@ pub(crate) mod fake {
         pub swap_on_second_open: Mutex<Option<Bytes>>,
         /// Opening works but the stream never yields.
         pub stall_source: Mutex<bool>,
+        /// The nth store (0-based) and every later one never completes; the
+        /// first of them signals `hung`.
+        pub hang_stores_from: Mutex<Option<usize>>,
+        pub hung: tokio::sync::Notify,
     }
 
     impl PlacedStorage {
@@ -284,6 +288,15 @@ pub(crate) mod fake {
                 *s += 1;
                 *s - 1
             };
+            if self
+                .hang_stores_from
+                .lock()
+                .unwrap()
+                .is_some_and(|f| n >= f)
+            {
+                self.hung.notify_one();
+                futures::future::pending::<()>().await;
+            }
             if self
                 .fail_stores_from
                 .lock()
