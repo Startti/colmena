@@ -1,8 +1,14 @@
 use crate::storage::domain::StorageError;
-use crate::tabular_prepare::csv::{CsvError, Encoding, RawBatches};
+use crate::tabular_prepare::csv::{
+    open_csv_with, CsvError, DecodeStats, Encoding, RawBatches, ReadLimits,
+};
 use crate::tabular_prepare::infer::{cell_fits, InferredSchema};
-use crate::tabular_prepare::manifest::{part_path, ColumnType, ManifestError};
-use crate::tabular_prepare::writer::{TableWritten, WriterError};
+use crate::tabular_prepare::manifest::{
+    min_tables_json_len, part_path, ColumnType, ManifestError, TABLES_JSON_MAX_BYTES,
+};
+use crate::tabular_prepare::part_sink::{PartSink, SinkError};
+use crate::tabular_prepare::scan::ScanStats;
+use crate::tabular_prepare::writer::{PartWriter, TableWritten, WriterConfig, WriterError};
 use arrow_array::{Array, ArrayRef, RecordBatch, StringArray};
 use arrow_cast::cast;
 use arrow_schema::{DataType, SchemaRef};
@@ -14,6 +20,7 @@ use std::io::{self, Read};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use thiserror::Error;
+use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 /// A cell that does not fit the type of its column. `row` counts data rows
@@ -218,6 +225,21 @@ impl Read for StreamBridge {
     }
 }
 
+/// Fails the next read once the token is cancelled.
+struct CancelReader<R> {
+    inner: R,
+    cancel: CancellationToken,
+}
+
+impl<R: Read> Read for CancelReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if self.cancel.is_cancelled() {
+            return Err(CsvError::Cancelled.into_io());
+        }
+        self.inner.read(buf)
+    }
+}
+
 /// What the caller keeps while a conversion runs: the part keys that may exist
 /// in the sink, and the means to stop it. The keys are written *before* each
 /// put, here and not in the conversion's own state, so they survive dropping
@@ -266,7 +288,32 @@ impl ConvertControl {
             .filter(|p| p.starts_with(&prefix))
             .collect()
     }
+
+    fn note(&self, path: &str) {
+        match self.paths.lock() {
+            Ok(mut p) => p.insert(path.to_string()),
+            Err(poisoned) => poisoned.into_inner().insert(path.to_string()),
+        };
+    }
 }
+
+/// Records each path before the put it is for.
+struct TrackingSink {
+    inner: Arc<dyn PartSink>,
+    control: Arc<ConvertControl>,
+}
+
+#[async_trait]
+impl PartSink for TrackingSink {
+    async fn put(&self, path: &str, data: Bytes) -> Result<(), SinkError> {
+        self.control.note(path);
+        self.inner.put(path, data).await
+    }
+}
+
+/// Batches in flight between reading and writing. Together with the batch
+/// bounds of the reader this keeps memory fixed whatever the file.
+const CHANNEL_BATCHES: usize = 2;
 
 /// A CSV that can be opened from the start, once per run.
 #[async_trait]
@@ -339,6 +386,352 @@ impl ConvertedTable {
 pub struct TableFailure {
     pub error: TableError,
     pub blob_paths: Vec<String>,
+}
+
+/// What a single run ended with, other than success.
+enum RunEnd {
+    Conflict(TypeConflict),
+    /// The whole file says the other encoding was the right one.
+    Reencode(Encoding),
+    Failed(TableError),
+}
+
+impl From<ConvertError> for RunEnd {
+    fn from(e: ConvertError) -> Self {
+        match e {
+            ConvertError::Conflict(c) => RunEnd::Conflict(c),
+            other => RunEnd::Failed(other.into()),
+        }
+    }
+}
+
+impl From<WriterError> for RunEnd {
+    fn from(e: WriterError) -> Self {
+        RunEnd::Failed(e.into())
+    }
+}
+
+type Item = Result<Option<RecordBatch>, ConvertError>;
+
+/// What the producer tells the writer before any batch.
+struct RunHeader {
+    /// The effective schema, with demoted columns as text.
+    schema: InferredSchema,
+    /// What the sample said, before any demotion.
+    inferred: Vec<ColumnType>,
+    encoding: Encoding,
+    decode: Arc<DecodeStats>,
+    scan: Arc<ScanStats>,
+}
+
+type Header = Result<RunHeader, ConvertError>;
+
+/// What one finished run reports.
+struct RunOk {
+    written: TableWritten,
+    encoding: Encoding,
+    replacements: u64,
+    utf8_valid_multibyte: u64,
+    utf8_invalid: u64,
+    blank_rows: u64,
+    blank_dropped: u64,
+    padded_rows: u64,
+    demoted: Vec<String>,
+}
+
+/// The blocking half of a run: parse, type and send batches (`None` marks a
+/// clean end). It stops as soon as the receiving side is gone.
+fn produce(
+    reader: Box<dyn Read + Send>,
+    force: Option<Encoding>,
+    text_columns: Vec<usize>,
+    all_strings: bool,
+    limits: ReadLimits,
+    schema_tx: oneshot::Sender<Header>,
+    tx: mpsc::Sender<Item>,
+) {
+    let opened = match open_csv_with(reader, force, &limits) {
+        Ok(o) => o,
+        Err(e) => {
+            let _ = schema_tx.send(Err(e.into()));
+            return;
+        }
+    };
+    // Fail now, not after the whole file, when even the smallest possible table
+    // list cannot fit the registry row.
+    let columns: Vec<(&str, ColumnType)> = opened
+        .schema
+        .columns
+        .iter()
+        .map(|c| (c.name.as_str(), c.column_type))
+        .collect();
+    let min = min_tables_json_len(&columns, opened.sample_rows as u64);
+    if min > TABLES_JSON_MAX_BYTES {
+        let _ = schema_tx.send(Err(ManifestError::ManifestTooLarge {
+            bytes: min,
+            cap: TABLES_JSON_MAX_BYTES,
+        }
+        .into()));
+        return;
+    }
+    let inferred: Vec<ColumnType> = opened
+        .schema
+        .columns
+        .iter()
+        .map(|c| c.column_type)
+        .collect();
+    let mut schema = opened.schema.clone();
+    for (i, c) in schema.columns.iter_mut().enumerate() {
+        if all_strings || text_columns.contains(&i) {
+            c.column_type = ColumnType::String;
+        }
+    }
+    if schema_tx
+        .send(Ok(RunHeader {
+            schema: schema.clone(),
+            inferred,
+            encoding: opened.encoding,
+            decode: opened.decode.clone(),
+            scan: opened.stats.clone(),
+        }))
+        .is_err()
+    {
+        return;
+    }
+    for item in TypedBatches::new(opened.batches, schema) {
+        if tx.blocking_send(item.map(Some)).is_err() {
+            return;
+        }
+    }
+    let _ = tx.blocking_send(Ok(None));
+}
+
+/// What one run is asked to do differently from the sample's first guess.
+struct RunPlan {
+    force: Option<Encoding>,
+    text_columns: Vec<usize>,
+    all_strings: bool,
+    limits: ReadLimits,
+}
+
+/// One read of the file, written out as parts through `sink` (which records
+/// every key before its put).
+async fn run(
+    source: &dyn CsvSource,
+    sink: &Arc<dyn PartSink>,
+    cancel: &CancellationToken,
+    table_idx: usize,
+    cfg: WriterConfig,
+    plan: &RunPlan,
+) -> Result<RunOk, RunEnd> {
+    let (force, all_strings, limits) = (plan.force, plan.all_strings, plan.limits);
+    // A token of this run alone: cancelling it to stop this run's reader must
+    // not stop the restarts that may follow.
+    let cancel = &cancel.child_token();
+    let reader = source.open(cancel).await.map_err(RunEnd::from)?;
+    let reader: Box<dyn Read + Send> = Box::new(CancelReader {
+        inner: reader,
+        cancel: cancel.clone(),
+    });
+    let (schema_tx, schema_rx) = oneshot::channel();
+    let (tx, mut rx) = mpsc::channel(CHANNEL_BATCHES);
+    let text_columns = plan.text_columns.clone();
+    let producer = tokio::task::spawn_blocking(move || {
+        produce(
+            reader,
+            force,
+            text_columns,
+            all_strings,
+            limits,
+            schema_tx,
+            tx,
+        )
+    });
+
+    let outcome = async {
+        let header = schema_rx
+            .await
+            .map_err(|_| ConvertError::Cast("the reader stopped before the header".into()))
+            .and_then(|r| r)
+            .map_err(RunEnd::from)?;
+        let (schema, encoding, decode) = (&header.schema, header.encoding, &header.decode);
+        let mut writer = PartWriter::new(sink.clone(), table_idx, schema.arrow_schema(), cfg)?;
+        let written = async {
+            loop {
+                match rx.recv().await {
+                    Some(Ok(Some(batch))) => writer.write(&batch).await?,
+                    Some(Ok(None)) => {
+                        // The file is read to its end: only now do the counts
+                        // say whether it was plausibly UTF-8.
+                        if force.is_none() {
+                            let right = if decode.plausibly_utf8() {
+                                Encoding::Utf8
+                            } else {
+                                Encoding::Windows1252
+                            };
+                            if right != encoding {
+                                return Err(RunEnd::Reencode(right));
+                            }
+                        }
+                        return Ok(writer.finish().await?);
+                    }
+                    Some(Err(e)) => return Err(RunEnd::from(e)),
+                    None => {
+                        let e = ConvertError::Cast("the reader stopped unexpectedly".into());
+                        return Err(RunEnd::from(e));
+                    }
+                }
+            }
+        }
+        .await;
+        written.map(|w| RunOk {
+            encoding,
+            // Only UTF-8 replaces; for Windows-1252 the counts are of the bytes
+            // as UTF-8, kept for the decision.
+            replacements: if encoding == Encoding::Utf8 {
+                decode.invalid()
+            } else {
+                0
+            },
+            // Final: the file is read to its end.
+            utf8_valid_multibyte: decode.valid_multibyte(),
+            utf8_invalid: decode.invalid(),
+            blank_rows: header.scan.blank_rows(),
+            blank_dropped: header.scan.blank_dropped(),
+            padded_rows: header.scan.padded_rows(),
+            demoted: header
+                .schema
+                .columns
+                .iter()
+                .zip(&header.inferred)
+                .filter(|(c, was)| {
+                    c.column_type == ColumnType::String && **was != ColumnType::String
+                })
+                .map(|(c, _)| c.name.clone())
+                .collect(),
+            written: w,
+        })
+    }
+    .await;
+    // On any outcome but success the reader may still be going, or parked on a
+    // stalled stream: cancel it, close the channel, and only then wait for it, so
+    // no blocking thread outlives the run and the failure is reported.
+    if outcome.is_err() {
+        cancel.cancel();
+    }
+    drop(rx);
+    let joined = producer.await;
+    match (&outcome, joined) {
+        (Err(RunEnd::Failed(TableError::Convert(ConvertError::Cast(_)))), Err(e))
+            if e.is_panic() =>
+        {
+            Err(RunEnd::Failed(ConvertError::ReaderPanicked.into()))
+        }
+        _ => outcome,
+    }
+}
+/// Converts one CSV into the parts of table `table_idx`, in one read of the
+/// source. Memory is bounded by the reader's batch limits, a channel of
+/// [`CHANNEL_BATCHES`] batches and one part in the writer.
+pub async fn convert_csv_table(
+    source: &dyn CsvSource,
+    sink: Arc<dyn PartSink>,
+    table_idx: usize,
+    cfg: WriterConfig,
+) -> Result<ConvertedTable, TableFailure> {
+    convert_csv_table_with(source, sink, table_idx, cfg, &ConvertControl::new()).await
+}
+
+/// [`convert_csv_table`] with a caller-owned [`ConvertControl`]: the keys put so
+/// far stay readable after the future is dropped, and `control.cancel()` stops
+/// the run. Dropping the future cancels the reader too.
+pub async fn convert_csv_table_with(
+    source: &dyn CsvSource,
+    sink: Arc<dyn PartSink>,
+    table_idx: usize,
+    cfg: WriterConfig,
+    control: &Arc<ConvertControl>,
+) -> Result<ConvertedTable, TableFailure> {
+    convert_csv_table_limits(
+        source,
+        sink,
+        table_idx,
+        cfg,
+        control,
+        &ReadLimits::default(),
+    )
+    .await
+}
+/// Converts one CSV into the parts of table `table_idx`, in one read of the
+/// source (a late conflict or a wrong encoding guess is a failure here; the
+/// restarts are the next slice). Every part key is recorded in `control` before
+/// its put, and nothing is reported as written on a failure. Crate private:
+/// only tests move the boundaries, and the limits are validated.
+///
+/// ```compile_fail
+/// use colmena::tabular_prepare::convert::convert_csv_table_limits;
+/// ```
+pub(crate) async fn convert_csv_table_limits(
+    source: &dyn CsvSource,
+    sink: Arc<dyn PartSink>,
+    table_idx: usize,
+    cfg: WriterConfig,
+    control: &Arc<ConvertControl>,
+    limits: &ReadLimits,
+) -> Result<ConvertedTable, TableFailure> {
+    // A child of the caller's token, cancelled when this future is dropped.
+    let cancel = control.cancel.child_token();
+    let _stop_on_drop = cancel.clone().drop_guard();
+    let sink: Arc<dyn PartSink> = Arc::new(TrackingSink {
+        inner: sink,
+        control: control.clone(),
+    });
+    let plan = RunPlan {
+        force: None,
+        text_columns: Vec::new(),
+        all_strings: false,
+        limits: *limits,
+    };
+    let failed = |error: TableError| TableFailure {
+        error,
+        blob_paths: control.paths_of(table_idx),
+    };
+    match run(source, &sink, &cancel, table_idx, cfg, &plan).await {
+        Ok(ok) => {
+            let blob_paths = control.paths_of(table_idx);
+            let live: BTreeSet<String> = (0..ok.written.parts as usize)
+                .filter_map(|i| part_path(table_idx, i).ok())
+                .collect();
+            let stale_paths = blob_paths
+                .iter()
+                .filter(|p| !live.contains(*p))
+                .cloned()
+                .collect();
+            Ok(ConvertedTable {
+                written: ok.written,
+                restarts: 0,
+                demoted: ok.demoted,
+                all_strings: false,
+                encoding: ok.encoding,
+                replacements: ok.replacements,
+                utf8_valid_multibyte: ok.utf8_valid_multibyte,
+                utf8_invalid: ok.utf8_invalid,
+                blank_rows: ok.blank_rows,
+                blank_dropped: ok.blank_dropped,
+                padded_rows: ok.padded_rows,
+                blob_paths,
+                stale_paths,
+            })
+        }
+        Err(RunEnd::Conflict(c)) => Err(failed(ConvertError::Conflict(c).into())),
+        Err(RunEnd::Reencode(right)) => Err(failed(
+            ConvertError::Cast(format!(
+                "the whole file says {right:?} was the right encoding"
+            ))
+            .into(),
+        )),
+        Err(RunEnd::Failed(e)) => Err(failed(e)),
+    }
 }
 
 #[cfg(test)]

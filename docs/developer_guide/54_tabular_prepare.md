@@ -3,7 +3,8 @@
 Module `tabular_prepare` will hold the pieces that prepare a large tabular
 attachment once, ahead of the questions asked about it. Everything in it is
 **dark**: it is used only when the engine switch `COLMENA_LARGE_TABULAR=on`,
-and nothing converts a file or calls into the module yet. With the switch off
+and nothing calls into the module yet (the CSV converter exists, see below,
+but no host wires it). With the switch off
 (the default) behaviour is unchanged and the registry table stays empty.
 
 "Large" means strictly greater than 50 MiB (52,428,800 bytes); exactly 50 MiB
@@ -184,7 +185,8 @@ replaces:
   preparation. It is best-effort and idempotent: the job claims the registry
   row, so a duplicate request yields one preparation. The default
   `InlineTrigger` hands the request to a `PrepareRunner` in this process; with
-  no converter wired (nothing converts yet) it only logs.
+  no converter wired (the CSV converter below is not wired to it yet) it only
+  logs.
 - `PrepareProgress::{report, read}` carries progress outside the registry
   (the ADP adapter keeps it in Redis). The default `NoopProgress` remembers
   nothing. Colmena itself has no Redis dependency.
@@ -345,6 +347,7 @@ The same cases run against Postgres from `postgres_registry.rs` as
 `tabular_prepare_pg_*`. They are `#[ignore]`d like the other Postgres repository
 tests and need `DATABASE_URL`:
 `DATABASE_URL=postgres://... cargo test --lib tabular_prepare -- --ignored`.
+
 ## Conversion (CSV to Parquet)
 
 A large CSV is converted into typed Parquet parts by a trusted job, never by
@@ -560,3 +563,46 @@ storage error becomes an `io::Error` carrying its text. A read waiting on a
 stalled stream is woken by the conversion's cancel token and fails with
 `CsvError::Cancelled`; what cannot be interrupted is a read stuck inside a
 stream's own non-async code (none of this module's readers).
+
+**What the result reports**, so nothing changes silently: `encoding` and
+`replacements` (invalid UTF-8 sequences replaced; zero for Windows-1252),
+`utf8_valid_multibyte` and `utf8_invalid` (the whole-file counts the encoding
+decision used, for both outcomes), `blank_rows` (blank lines kept as null rows,
+one-column files), `blank_dropped` (blank lines dropped) and `padded_rows` (short
+rows padded with nulls).
+
+**Using the encoding evidence.** The decision rule is not changed by the counts; a
+caller uses them to tell the user when to doubt it. Warn that text was altered when
+`replacements > 0` (UTF-8: that many characters became U+FFFD). Warn that a file
+that looks like UTF-8 was read as single bytes when `encoding` is Windows-1252 and
+`utf8_valid_multibyte > 0`: the accents may be mojibake. Warn that the choice was
+close when both counts are non-zero and neither is ten times the other. Two misreads
+are known, and both leave this evidence: a Windows-1252 file whose accents are an
+uppercase letter followed by a byte 0x80-0xBF (`Ã©` is the bytes C3 A9, valid UTF-8
+for `é`) is read as UTF-8 with `utf8_valid_multibyte > 0` and no invalid sequence,
+which is indistinguishable from real UTF-8 by the bytes alone; and a UTF-8 file with
+many sequences cut mid-character (more than twice as many cut ones as whole ones)
+is read as Windows-1252 with a large `utf8_invalid` next to a non-zero
+`utf8_valid_multibyte`.
+
+**Table list cap.** A table list that cannot fit the registry row (64 KiB) fails
+right after the header and sample, not after the whole file. The check uses the
+smallest table list the columns could have (the shorter of each column's two
+possible type names, the least decoded size the rows of the sample allow, zero
+stored bytes), a true lower bound, so a file that would fit is never refused. It is
+tight to within about 2% (a 200-column table: 14,937 bytes against 15,137
+written); what stays undetected until the end is a table list within that band of
+the cap (about 860 to 880 columns with short names), because the digits of the
+stored sizes are only known then. A table wider than about 900 columns therefore
+never reaches a batch.
+
+**Cancellation.** `convert_csv_table_with` takes a caller-owned `ConvertControl`:
+every part key is recorded in it *before* its put, so after the future is dropped
+(a timeout, a cancelled request) the caller still reads `control.paths()` and
+removes those keys from the sink; dropping the future or calling `control.cancel()`
+cancels the reader (it fails at its next read, or at once if waiting on a stalled
+stream) and the run ends with `Cancelled`. A `CsvSource::open` receives the token to
+hand to `stream_reader`. Wait for the conversion future to finish (or drop it)
+before deleting anything: a conversion still running can put a key you just
+deleted, and `cancel()` stops the reader but does not interrupt a put in flight (up
+to two batches already read can still be put after it).

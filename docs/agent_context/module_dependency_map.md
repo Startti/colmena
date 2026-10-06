@@ -2102,7 +2102,7 @@
 #### `src/libs/colmena/src/tabular_prepare/convert.rs`
 - Module: `tabular_prepare::convert`
 - **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
-- Depends on (5): `storage::domain`, `tabular_prepare::csv`, `tabular_prepare::infer`, `tabular_prepare::manifest`, `tabular_prepare::writer`
+- Depends on (7): `storage::domain`, `tabular_prepare::csv`, `tabular_prepare::infer`, `tabular_prepare::manifest`, `tabular_prepare::part_sink`, `tabular_prepare::scan`, `tabular_prepare::writer`
 
 #### `src/libs/colmena/src/tabular_prepare/csv.rs`
 - Module: `tabular_prepare::csv`
@@ -2131,7 +2131,7 @@
 
 #### `src/libs/colmena/src/tabular_prepare/part_sink.rs`
 - Module: `tabular_prepare::part_sink`
-- **Used by (1)**: `src/libs/colmena/src/tabular_prepare/writer.rs`
+- **Used by (2)**: `src/libs/colmena/src/tabular_prepare/convert.rs`, `src/libs/colmena/src/tabular_prepare/writer.rs`
 - Depends on (1): `tabular_prepare::manifest`
 
 #### `src/libs/colmena/src/tabular_prepare/ports.rs`
@@ -2156,7 +2156,7 @@
 
 #### `src/libs/colmena/src/tabular_prepare/scan.rs`
 - Module: `tabular_prepare::scan`
-- **Used by (1)**: `src/libs/colmena/src/tabular_prepare/csv.rs`
+- **Used by (2)**: `src/libs/colmena/src/tabular_prepare/convert.rs`, `src/libs/colmena/src/tabular_prepare/csv.rs`
 - Depends on (1): `tabular_prepare::csv`
 
 #### `src/libs/colmena/src/tabular_prepare/sqlite_registry.rs`
