@@ -26,6 +26,7 @@ use tokio::time::Instant;
 
 pub mod gc;
 pub mod manifest;
+pub mod part_sink;
 pub mod ports;
 pub mod postgres_registry;
 pub mod registry;

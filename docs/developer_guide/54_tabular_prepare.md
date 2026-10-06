@@ -367,8 +367,50 @@ Arrow buffers (values, string offsets, validity bits), summed over the parts.
 Arrow buffers, **not an upper bound of what pandas holds**. What to add per type
 (pandas 1.5 on numpy, per row):
 
+| type | Arrow (`in_memory_bytes`) | pandas / Python |
+|---|---|---|
+| `int` | 8 bytes | 8 bytes as `int64`; 8 as `float64` if it has nulls |
+| `float` | 8 bytes | 8 bytes |
+| `bool` | 1 bit | 1 byte (x8); an `object` column of Python bools with nulls is 8 more |
+| `date` | 4 bytes | 8 bytes as `datetime64[ns]` (x2) |
+| `timestamp` | 8 bytes | 8 bytes as `datetime64[ns]` |
+| `string` | 4 bytes of offset + the text | 8 bytes of pointer + about 49 bytes of header + the text per distinct Python `str`, so roughly 57 + the text (a dictionary read can share them) |
+
+The Python side's memory budget must apply these multipliers itself; the manifest
+does not.
+
+**Versions.** The manifest has `version` 2 (version 1 had no `in_memory_bytes`). A
+reader that sees any other version must refuse it, treat the source as not
+prepared and ask for a new preparation; it must not guess a layout. The registry's
+`FORMAT_VERSION` (`registry.rs`) is a separate number: a row written by an older
+value is claimable again, and a manifest that cannot be read is demoted through
+`mark_manifest_missing`. Whether the manifest version should also bump
+`FORMAT_VERSION` is left to the unit that wires the manifest to the registry.
+
+**Table list.** The same table list is what the registry row keeps as
+`tables_json`, capped at 64 KiB and **never truncated**: a source whose table
+list is larger fails (`ManifestTooLarge`) and no manifest is written. A manifest
+read back from storage is validated (size before parsing, version, at most 256
+tables and 16,384 columns per table, unique clean table names, unique non-empty
+column names without control characters and at most 128 characters, at least one
+part and no more parts than rows, `in_memory_bytes` at least the fixed width of
+the type times the rows, no unknown fields), and the same validation runs before
+a manifest is written, so anything that can be written can be read back (a
+property test with generated manifests).
+
 Parts live at `t<table>/part-NNNNN.parquet`, built by one function from numbers;
 `parse_part_path` accepts only that exact spelling, so a key from outside is
 never trusted as a part path. Excel sheet names that repeat (ignoring case) or
 are empty or too long become unique, deterministic names (`Sales`, `sales_2`;
 `sheet1` for an empty name).
+
+### Part sink (`part_sink.rs`)
+
+The `PartSink` trait takes one buffer with a known length per path (`put`), so
+the host decides the storage and the converter never streams an unknown length.
+Putting the same path again replaces it, which is what lets a restarted
+conversion overwrite its earlier parts. `DirSink` is the local adapter used by
+tests and the manual bench: it accepts only a canonical part path or
+`manifest.json` (anything else is refused before the filesystem is touched) and
+writes through a temporary file and a rename, so a failed write leaves no partial
+file under a final name.
