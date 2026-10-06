@@ -630,6 +630,15 @@ the cap (about 860 to 880 columns with short names), because the digits of the
 stored sizes are only known then. A table wider than about 900 columns therefore
 never reaches a batch.
 
+**Stale parts.** A restart that ends with fewer parts than the aborted run left
+behind (or a source that changed between reads) leaves keys that no manifest
+references. `ConvertedTable::live_paths` lists the parts of the finished table,
+`stale_paths` the rest of `blob_paths`, so a caller can delete them; each result
+lists only the keys under its own `t<idx>/`, so a control shared by several tables
+never reports one table's parts as another's; the manifest refers only to live
+parts, and **a reader must take parts from the manifest (`parts`), never by
+listing the prefix**.
+
 **Cancellation.** `convert_csv_table_with` takes a caller-owned `ConvertControl`:
 every part key is recorded in it *before* its put, so after the future is dropped
 (a timeout, a cancelled request) the caller still reads `control.paths()` and
@@ -640,3 +649,9 @@ hand to `stream_reader`. Wait for the conversion future to finish (or drop it)
 before deleting anything: a conversion still running can put a key you just
 deleted, and `cancel()` stops the reader but does not interrupt a put in flight (up
 to two batches already read can still be put after it).
+
+**Tests of the whole.** The same table with the input split at every byte offset of
+the pipeline's chunks (the tricky part is moved across the 16 KiB grid by a filler
+row), with random read sizes over a 1.5 MiB file, the fragment moved row by row
+across the sample, batch and part boundaries (`ReadLimits`) and compared with rows
+written by hand, and a value-by-value read-back of every type across four parts.

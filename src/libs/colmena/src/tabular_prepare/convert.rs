@@ -2147,6 +2147,329 @@ mod tests {
             .expect("the blocking reader is still stuck on the stalled stream");
     }
 
+    // ---- the whole pipeline against the source ----
+
+    #[derive(Debug, Clone, PartialEq)]
+    enum Cell {
+        Null,
+        Int(i64),
+        Float(u64),
+        Bool(bool),
+        Date(i32),
+        Ts(i64),
+        Str(String),
+    }
+
+    /// Every row of every live part, cell by cell, as stored.
+    fn read_back(sink: &MemorySink, parts: u32) -> Vec<Vec<Cell>> {
+        use arrow_array::{BooleanArray, Date32Array, TimestampMicrosecondArray};
+        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+        let mut rows = Vec::new();
+        for p in 0..parts {
+            let bytes = sink.get(&format!("t0/part-{p:05}.parquet")).unwrap();
+            for b in ParquetRecordBatchReaderBuilder::try_new(bytes)
+                .unwrap()
+                .build()
+                .unwrap()
+            {
+                let b = b.unwrap();
+                for r in 0..b.num_rows() {
+                    let row = (0..b.num_columns())
+                        .map(|c| {
+                            let col = b.column(c);
+                            if col.is_null(r) {
+                                return Cell::Null;
+                            }
+                            let any = col.as_any();
+                            match col.data_type() {
+                                DataType::Int64 => {
+                                    Cell::Int(any.downcast_ref::<Int64Array>().unwrap().value(r))
+                                }
+                                DataType::Float64 => Cell::Float(
+                                    any.downcast_ref::<Float64Array>()
+                                        .unwrap()
+                                        .value(r)
+                                        .to_bits(),
+                                ),
+                                DataType::Boolean => {
+                                    Cell::Bool(any.downcast_ref::<BooleanArray>().unwrap().value(r))
+                                }
+                                DataType::Date32 => {
+                                    Cell::Date(any.downcast_ref::<Date32Array>().unwrap().value(r))
+                                }
+                                DataType::Timestamp(..) => Cell::Ts(
+                                    any.downcast_ref::<TimestampMicrosecondArray>()
+                                        .unwrap()
+                                        .value(r),
+                                ),
+                                _ => Cell::Str(
+                                    any.downcast_ref::<StringArray>()
+                                        .unwrap()
+                                        .value(r)
+                                        .to_string(),
+                                ),
+                            }
+                        })
+                        .collect();
+                    rows.push(row);
+                }
+            }
+        }
+        rows
+    }
+
+    #[tokio::test]
+    async fn every_type_reads_back_value_by_value_across_several_parts() {
+        use chrono::{NaiveDate, NaiveDateTime};
+        let want_types = vec![
+            ColumnType::Int,
+            ColumnType::Float,
+            ColumnType::Bool,
+            ColumnType::String,
+            ColumnType::Date,
+            ColumnType::Timestamp,
+        ];
+        // 3,500 rows with empties and edge values in every column, in 4 parts.
+        let mut csv = String::from("i,f,b,s,d,t\n");
+        let mut expect: Vec<Vec<Cell>> = Vec::new();
+        for r in 0..3500usize {
+            let i = (r % 7 != 0).then(|| (r as i64 - 1700) * 1_000_003);
+            let f = (r % 11 != 0)
+                .then(|| ["0.1", "-0.25", "1e5", "3.0", "2.5e-100", "123456.789"][r % 6]);
+            let b = (r % 13 != 0).then(|| ["TRUE", "false", "True", "FALSE"][r % 4]);
+            let s = (r % 5 != 0).then(|| {
+                [
+                    "00123",
+                    "with,comma",
+                    "naïve\nnewline",
+                    "日本語",
+                    "\"quoted\"",
+                    " padded ",
+                ][r % 6]
+            });
+            let d = (r % 17 != 0).then(|| ["2020-02-29", "1999-12-31", "2024-07-01"][r % 3]);
+            let t = (r % 19 != 0).then(|| {
+                [
+                    "2020-01-05 10:20:30",
+                    "1999-12-31T23:59:59.999999",
+                    "2024-07-01 00:00:00.5",
+                ][r % 3]
+            });
+            let q = |v: &str| format!("\"{}\"", v.replace('"', "\"\""));
+            csv.push_str(&format!(
+                "{},{},{},{},{},{}\n",
+                i.map_or(String::new(), |v| v.to_string()),
+                f.unwrap_or(""),
+                b.unwrap_or(""),
+                s.map_or(String::new(), q),
+                d.unwrap_or(""),
+                t.unwrap_or(""),
+            ));
+            expect.push(vec![
+                i.map_or(Cell::Null, Cell::Int),
+                f.map_or(Cell::Null, |v| {
+                    Cell::Float(v.parse::<f64>().unwrap().to_bits())
+                }),
+                b.map_or(Cell::Null, |v| Cell::Bool(v.eq_ignore_ascii_case("true"))),
+                s.map_or(Cell::Null, |v| Cell::Str(v.to_string())),
+                d.map_or(Cell::Null, |v| {
+                    let day = NaiveDate::parse_from_str(v, "%Y-%m-%d").unwrap();
+                    Cell::Date(
+                        day.signed_duration_since(NaiveDate::from_ymd_opt(1970, 1, 1).unwrap())
+                            .num_days() as i32,
+                    )
+                }),
+                t.map_or(Cell::Null, |v| {
+                    let fmt = if v.as_bytes()[10] == b'T' {
+                        "%Y-%m-%dT%H:%M:%S%.f"
+                    } else {
+                        "%Y-%m-%d %H:%M:%S%.f"
+                    };
+                    Cell::Ts(
+                        NaiveDateTime::parse_from_str(v, fmt)
+                            .unwrap()
+                            .and_utc()
+                            .timestamp_micros(),
+                    )
+                }),
+            ]);
+        }
+        let src = MemSource::new(csv.into_bytes());
+        let sink = Arc::new(MemorySink::default());
+        let cfg = WriterConfig {
+            max_rows: 1000,
+            max_bytes: usize::MAX,
+        };
+        let t = convert(&src, &sink, cfg).await.unwrap();
+        assert_eq!((t.written.rows, t.written.parts, t.restarts), (3500, 4, 0));
+        assert_eq!(types(&t), want_types);
+        let got = read_back(&sink, t.written.parts);
+        assert_eq!(got.len(), expect.len());
+        for (n, (g, e)) in got.iter().zip(&expect).enumerate() {
+            assert_eq!(g, e, "row {n}");
+        }
+    }
+
+    /// Reads `bytes` in reads of the sizes `chunk(n)` gives, to move every
+    /// internal boundary of the pipeline across the content.
+    struct Chunked<F: FnMut() -> usize> {
+        bytes: Vec<u8>,
+        pos: usize,
+        chunk: F,
+    }
+
+    impl<F: FnMut() -> usize> Read for Chunked<F> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let n = (self.chunk)()
+                .min(buf.len())
+                .min(self.bytes.len() - self.pos);
+            buf[..n].copy_from_slice(&self.bytes[self.pos..self.pos + n]);
+            self.pos += n;
+            Ok(n)
+        }
+    }
+
+    struct ChunkedSource {
+        bytes: Vec<u8>,
+        seed: u64,
+        max: usize,
+    }
+
+    #[async_trait::async_trait]
+    impl CsvSource for ChunkedSource {
+        async fn open(
+            &self,
+            _cancel: &CancellationToken,
+        ) -> Result<Box<dyn Read + Send>, ConvertError> {
+            let (mut x, max) = (self.seed, self.max as u64);
+            Ok(Box::new(Chunked {
+                bytes: self.bytes.clone(),
+                pos: 0,
+                chunk: move || {
+                    x ^= x << 13;
+                    x ^= x >> 7;
+                    x ^= x << 17;
+                    1 + (x % max) as usize
+                },
+            }))
+        }
+    }
+
+    async fn rows_after(bytes: Vec<u8>, seed: u64, max: usize) -> Vec<Vec<Cell>> {
+        let src = ChunkedSource { bytes, seed, max };
+        let sink = Arc::new(MemorySink::default());
+        let t = convert_csv_table(&src, sink.clone(), 0, WriterConfig::default())
+            .await
+            .unwrap();
+        read_back(&sink, t.written.parts)
+    }
+
+    /// Quotes, doubled quotes, an embedded newline, CRLF, a lone CR, multibyte
+    /// characters, a blank line, and a blank line inside a quoted field.
+    const TRICKY: &str = "\"he said \"\"hi\"\"\",1\r\n\"multi\nline\",2\r\nplain,3\rlone cr,4\nhéllo wörld,5\n\n\"日本語\",6\n\"blank\n\ninside\",8\n,7\n";
+
+    #[tokio::test]
+    async fn the_result_does_not_depend_on_where_the_input_is_split() {
+        // After a BOM and the header, filler rows put the tricky part at every
+        // offset of the pipeline's 16 KiB chunks: each internal boundary falls
+        // on every byte of it. One filler row changes length to shift it.
+        let bom = [0xEF, 0xBB, 0xBF];
+        let header = "a,b\n";
+        let filler = "xx,0\n";
+        let build = |shift: usize| {
+            let mut b = bom.to_vec();
+            b.extend_from_slice(header.as_bytes());
+            b.extend_from_slice(filler.repeat(3000).as_bytes());
+            // A row whose width brings the tricky part to `shift` bytes before
+            // the next 16 KiB boundary.
+            let at = b.len() + 6;
+            let pad = (16 * 1024 + (16 * 1024 - shift) - at % (16 * 1024)) % (16 * 1024);
+            b.extend_from_slice(format!("{},0\n", "p".repeat(pad.max(1))).as_bytes());
+            b.extend_from_slice(TRICKY.as_bytes());
+            b
+        };
+        let baseline = rows_after(build(0), 1, usize::MAX / 2).await;
+        let tail = |rows: &[Vec<Cell>]| rows[rows.len() - 8..].to_vec();
+        assert_eq!(baseline.len(), 3000 + 1 + 8);
+        let expect_tail = tail(&baseline);
+        assert_eq!(
+            expect_tail[1],
+            vec![Cell::Str("multi\nline".into()), Cell::Int(2)]
+        );
+        for shift in 0..TRICKY.len() {
+            let got = rows_after(build(shift), 1, usize::MAX / 2).await;
+            assert_eq!(got.len(), baseline.len(), "shift {shift}");
+            assert_eq!(tail(&got), expect_tail, "shift {shift}");
+        }
+    }
+
+    #[tokio::test]
+    async fn random_read_sizes_give_the_same_table() {
+        let mut csv = vec![0xEF, 0xBB, 0xBF];
+        csv.extend_from_slice(b"a,b\n");
+        for k in 0..4000 {
+            csv.extend_from_slice(format!("\"r{k} \"\"q\"\"\nnl\",{k}\r\n").as_bytes());
+            csv.extend_from_slice(format!("é{k},{k}\n").as_bytes());
+        }
+        let baseline = rows_after(csv.clone(), 7, usize::MAX / 2).await;
+        assert_eq!(baseline.len(), 8000);
+        for seed in [11u64, 12, 13] {
+            for max in [1usize, 7, 4096, 70_000] {
+                assert_eq!(
+                    rows_after(csv.clone(), seed, max).await,
+                    baseline,
+                    "seed {seed} max {max}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_restart_that_ends_with_fewer_parts_reports_the_stale_keys_separately() {
+        /// Opens a long file with a late conflict the first time and a short
+        /// clean one the second: the second run ends with fewer parts than the
+        /// aborted first one left behind (as when the object is replaced, or a
+        /// text column packs into fewer parts than its integer form).
+        struct Changing(AtomicUsize);
+        #[async_trait::async_trait]
+        impl CsvSource for Changing {
+            async fn open(
+                &self,
+                _cancel: &CancellationToken,
+            ) -> Result<Box<dyn Read + Send>, ConvertError> {
+                let n = self.0.fetch_add(1, Ordering::SeqCst);
+                let bytes = if n == 0 {
+                    int_csv(INFERENCE_ROWS + 9000, "1,N/A\n")
+                } else {
+                    int_csv(4000, "")
+                };
+                Ok(Box::new(Cursor::new(bytes)))
+            }
+        }
+        let sink = Arc::new(MemorySink::default());
+        let cfg = WriterConfig {
+            max_rows: 5000,
+            max_bytes: usize::MAX,
+        };
+        let t = convert_csv_table(&Changing(AtomicUsize::new(0)), sink.clone(), 0, cfg)
+            .await
+            .unwrap();
+        assert_eq!((t.restarts, t.written.parts, t.written.rows), (1, 1, 4000));
+        // Run 1 wrote parts 0..3 before the conflict; only part 0 is live.
+        assert_eq!(t.live_paths(0), vec!["t0/part-00000.parquet"]);
+        assert_eq!(
+            t.stale_paths,
+            vec!["t0/part-00001.parquet", "t0/part-00002.parquet"]
+        );
+        // Together they are everything that may exist, nothing twice.
+        let mut all = t.live_paths(0);
+        all.extend(t.stale_paths.clone());
+        all.sort();
+        assert_eq!(all, t.blob_paths);
+        // The live part is the new one: 4,000 rows.
+        assert_eq!(read_back(&sink, t.written.parts).len(), 4000);
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn a_failing_put_is_reported_even_when_the_reader_is_stalled_on_storage() {
         use std::task::Poll;
@@ -2450,6 +2773,128 @@ mod tests {
             "{:?}",
             f.blob_paths
         );
+    }
+
+    // ---- boundaries of the sample, the batches and the parts ----
+
+    /// The rows of the tricky fragment as the source text means them, written
+    /// by hand and not derived from any code under test.
+    fn tricky_text_and_cells() -> (String, Vec<Vec<Cell>>) {
+        let text = "\"he said \"\"hi\"\"\",1\nA,0\n\"multi\nline\",2\nplain,3\r\nhéllo wörld,5\n\"日本語\",6\n\"blank\n\ninside\",8\n,7\n".to_string();
+        let s = |v: &str| Cell::Str(v.to_string());
+        let cells = vec![
+            vec![s("he said \"hi\""), Cell::Int(1)],
+            vec![s("A"), Cell::Int(0)],
+            vec![s("multi\nline"), Cell::Int(2)],
+            vec![s("plain"), Cell::Int(3)],
+            vec![s("héllo wörld"), Cell::Int(5)],
+            vec![s("日本語"), Cell::Int(6)],
+            vec![s("blank\n\ninside"), Cell::Int(8)],
+            vec![Cell::Null, Cell::Int(7)],
+        ];
+        (text, cells)
+    }
+
+    #[tokio::test]
+    async fn the_tricky_fragment_survives_every_position_across_the_sample_batch_and_part_boundaries(
+    ) {
+        use crate::tabular_prepare::csv::{open_csv_with, ReadLimits};
+        let (tricky, tricky_cells) = tricky_text_and_cells();
+        let t = tricky_cells.len();
+        let sets = [
+            // The sample ends at row 40, a batch holds 17 rows.
+            ReadLimits {
+                inference_rows: 40,
+                batch_rows: 17,
+                ..ReadLimits::default()
+            },
+            // The sample ends by bytes, a batch by bytes.
+            ReadLimits {
+                inference_rows: 1000,
+                sample_bytes: 150,
+                batch_bytes: 80,
+                ..ReadLimits::default()
+            },
+            // Batches of at most 30 cells (15 rows of two columns).
+            ReadLimits {
+                inference_rows: 33,
+                batch_cells: 30,
+                ..ReadLimits::default()
+            },
+        ];
+        // Parts of 25 rows.
+        let cfg = WriterConfig {
+            max_rows: 25,
+            max_bytes: usize::MAX,
+        };
+        for (n, limits) in sets.iter().enumerate() {
+            let (mut crossed_sample, mut crossed_batch, mut crossed_part) = (0, 0, 0);
+            for pad in 0..70usize {
+                let mut csv = vec![0xEF, 0xBB, 0xBF];
+                csv.extend_from_slice(b"a,b\n");
+                for i in 0..pad {
+                    csv.extend_from_slice(format!("f{i},{i}\n").as_bytes());
+                }
+                csv.extend_from_slice(tricky.as_bytes());
+                // Where the real boundaries fall for this file.
+                let o = open_csv_with(Cursor::new(csv.clone()), None, limits).unwrap();
+                let sample_rows = o.sample_rows;
+                let mut at = 0;
+                let mut batch_starts = Vec::new();
+                for b in o.batches {
+                    at += b.unwrap().num_rows();
+                    batch_starts.push(at);
+                }
+                assert_eq!(at, pad + t, "set {n}, pad {pad}: the reader lost rows");
+                // The fragment starts at row `pad`: a boundary inside it is a
+                // row index strictly between its first and its end.
+                let inside = |b: usize| b > pad && b < pad + t;
+                crossed_sample += usize::from(inside(sample_rows));
+                crossed_batch += usize::from(batch_starts.iter().any(|b| inside(*b)));
+                crossed_part += usize::from(
+                    (1..)
+                        .map(|k| k * 25)
+                        .take_while(|b| *b < pad + t)
+                        .any(inside),
+                );
+
+                let src = MemSource::new(csv);
+                let sink = Arc::new(MemorySink::default());
+                let r = convert_csv_table_limits(
+                    &src,
+                    sink.clone(),
+                    0,
+                    cfg,
+                    &ConvertControl::new(),
+                    limits,
+                )
+                .await
+                .unwrap_or_else(|f| panic!("set {n}, pad {pad}: {}", f.error));
+                let got = read_back(&sink, r.written.parts);
+                // Expected: the filler rows and the fragment, from the source text.
+                let mut want: Vec<Vec<Cell>> = (0..pad)
+                    .map(|i| vec![Cell::Str(format!("f{i}")), Cell::Int(i as i64)])
+                    .collect();
+                want.extend(tricky_cells.clone());
+                assert_eq!(got.len(), want.len(), "set {n}, pad {pad}");
+                // The pad puts the fragment where it was meant to be.
+                assert_eq!(got[pad], tricky_cells[0], "set {n}, pad {pad}");
+                assert_eq!(got, want, "set {n}, pad {pad}");
+            }
+            // Every kind of boundary was crossed by the fragment at several offsets.
+            assert!(
+                crossed_sample >= 3,
+                "set {n}: sample crossed {crossed_sample} times"
+            );
+            assert!(
+                crossed_batch >= 3,
+                "set {n}: batch crossed {crossed_batch} times"
+            );
+            assert!(
+                crossed_part >= 3,
+                "set {n}: part crossed {crossed_part} times"
+            );
+        }
     }
 
     // ---- the early check on the table list ----
