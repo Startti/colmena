@@ -24,6 +24,7 @@ use std::time::Duration;
 use thiserror::Error;
 use tokio::time::Instant;
 
+pub mod convert;
 pub mod csv;
 pub mod gc;
 pub mod infer;
