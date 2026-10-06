@@ -82,7 +82,7 @@ fn cstr(s: &[u8]) -> io::Result<CString> {
     CString::new(s).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))
 }
 
-fn mount(
+pub(crate) fn mount(
     src: Option<&str>,
     target: &Path,
     fstype: Option<&str>,

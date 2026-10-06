@@ -172,13 +172,17 @@ call's child through a pidfd (the pid when pidfds are unavailable).
 
 Dark behind `COLMENA_LARGE_TABULAR`: nothing below runs while the switch is off. A call that carries prepared data
 is given two directories under a staging root: `<root>/<call id>/data` (read-only for the call) and
-`<root>/<call id>/out` (a size-bound volume the call writes to).
+`<root>/<call id>/out` (a size-bound volume the call writes to). The trusted side makes and removes them with
+`staging::StagedCall`: `out` is a `tmpfs` of its own (`size=<out_mb>m`, `nr_inodes=1024`, `nosuid,nodev,noexec`) and
+`data` is left for the trusted side to fill. Dropping the `StagedCall` unmounts `out` first and only then removes the
+directories, so nothing the program wrote is ever walked on the trusted side.
 
 The jail never receives a path. It receives the call id, which must be 1-64 characters of `[A-Za-z0-9_-]` (so it
 cannot be `.`/`..` or hold a separator), and derives the directories itself: every component, the root's included, is
 opened with `O_NOFOLLOW` (`staging::open_call_dirs`), `call` and `data` must be owned by the executor and not writable
 by group or others, and the descriptors it ends up with are what gets bound, so swapping a path after the check
-changes nothing.
+changes nothing. `check_out_volume` refuses an `out` that is larger than the bound the header declares, has no size, or
+shares the volume of the call directory.
 
 ### Startup self-test (Linux)
 
@@ -327,7 +331,7 @@ they print; `concurrent_in_process_calls_keep_their_own_stdout` records that and
 
 ## Testing
 
-The jail suites (`tests/python_executor_subprocess.rs`, `tests/python_executor_isolation.rs`) and the equivalence bench
+The jail suites (`tests/python_executor_subprocess.rs`, `tests/python_executor_isolation.rs`, `tests/python_executor_mounts.rs`) and the equivalence bench
 need Linux, root and `CAP_SYS_ADMIN`; they run only with `COLMENA_PYEXEC_JAIL_TESTS=1` and otherwise print a skip line.
 Locally, run them in a container:
 `docker run --rm --cap-add SYS_ADMIN --security-opt seccomp=unconfined --security-opt apparmor=unconfined
