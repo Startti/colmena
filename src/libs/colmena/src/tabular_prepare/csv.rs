@@ -5,8 +5,13 @@
 //! memory and never reading the rest ahead of the consumer: the file can be
 //! far larger than memory.
 
-use crate::tabular_prepare::scan::{RecordScanner, ScanStats};
-use std::collections::HashMap;
+use crate::tabular_prepare::infer::{InferredSchema, SchemaInferer, INFERENCE_ROWS};
+use crate::tabular_prepare::manifest::{MAX_COLUMNS, MAX_COLUMN_NAME_CHARS};
+use crate::tabular_prepare::scan::{RecordScanner, ScanStats, MAX_RECORD_BYTES};
+use arrow_array::builder::StringBuilder;
+use arrow_array::{ArrayRef, RecordBatch};
+use arrow_schema::{DataType, Field, Schema, SchemaRef};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{self, Cursor, Read};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -14,6 +19,88 @@ use thiserror::Error;
 
 /// Bytes read up front to detect the encoding and the delimiter.
 pub const SNIFF_BYTES: usize = 1024 * 1024;
+
+/// Rows per batch handed on, for files of a few columns.
+pub const BATCH_ROWS: usize = 8192;
+
+/// Cells (rows times columns) per batch at most: a wide file gets shorter
+/// batches so a batch stays small whatever the shape.
+pub const BATCH_CELLS: usize = 1_000_000;
+
+/// Bytes of text per batch at most. A record is at most `MAX_RECORD_BYTES`, so
+/// one always fits; a batch ends before the record that would pass this.
+pub const BATCH_BYTES: usize = 8 * 1024 * 1024;
+
+const _: () = assert!(MAX_RECORD_BYTES <= BATCH_BYTES);
+
+/// Bytes of text kept to decide the types. The sample stops at this size even
+/// if it has fewer than [`INFERENCE_ROWS`] rows (very long rows).
+pub const SAMPLE_MAX_BYTES: usize = 16 * 1024 * 1024;
+
+/// Cells kept to decide the types: a wide file is sampled over fewer rows (a
+/// parsed record costs about eight bytes of bookkeeping per field).
+pub const SAMPLE_MAX_CELLS: usize = 2_000_000;
+
+/// The limits of the reader. The defaults are the constants above; a test can
+/// lower them to move the sample, batch and part boundaries within a small
+/// file. They are crate-private on purpose: no production caller can pass
+/// other limits, and [`ReadLimits::validate`] refuses a value that would make
+/// the reader read nothing or hold more than the constants allow.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ReadLimits {
+    /// Rows the types are decided from.
+    pub inference_rows: usize,
+    pub sample_bytes: usize,
+    pub sample_cells: usize,
+    pub batch_rows: usize,
+    pub batch_cells: usize,
+    pub batch_bytes: usize,
+}
+
+impl ReadLimits {
+    /// Every limit is at least one and at most its production constant, and a
+    /// batch holds at least one row of `columns` cells. A violation is a typed
+    /// error, so no limit can yield an empty table that looks successful.
+    pub(crate) fn validate(&self, columns: usize) -> Result<(), CsvError> {
+        let bad = |name: &str, v: usize, max: usize| {
+            Err(CsvError::InvalidLimits(format!(
+                "{name} is {v}, it must be between 1 and {max}"
+            )))
+        };
+        for (name, v, max) in [
+            ("inference_rows", self.inference_rows, INFERENCE_ROWS),
+            ("sample_bytes", self.sample_bytes, SAMPLE_MAX_BYTES),
+            ("sample_cells", self.sample_cells, SAMPLE_MAX_CELLS),
+            ("batch_rows", self.batch_rows, BATCH_ROWS),
+            ("batch_cells", self.batch_cells, BATCH_CELLS),
+            ("batch_bytes", self.batch_bytes, BATCH_BYTES),
+        ] {
+            if v == 0 || v > max {
+                return bad(name, v, max);
+            }
+        }
+        if self.batch_cells < columns {
+            return Err(CsvError::InvalidLimits(format!(
+                "batch_cells is {}, a row of this file has {columns} cells",
+                self.batch_cells
+            )));
+        }
+        Ok(())
+    }
+}
+
+impl Default for ReadLimits {
+    fn default() -> Self {
+        Self {
+            inference_rows: INFERENCE_ROWS,
+            sample_bytes: SAMPLE_MAX_BYTES,
+            sample_cells: SAMPLE_MAX_CELLS,
+            batch_rows: BATCH_ROWS,
+            batch_cells: BATCH_CELLS,
+            batch_bytes: BATCH_BYTES,
+        }
+    }
+}
 
 /// Records the delimiter vote looks at.
 const SNIFF_RECORDS: usize = 50;
@@ -51,6 +138,13 @@ impl CsvError {
         match e.get_ref().and_then(|i| i.downcast_ref::<CsvError>()) {
             Some(inner) => inner.clone(),
             None => CsvError::Io(e.to_string()),
+        }
+    }
+
+    fn from_csv(e: ::csv::Error) -> Self {
+        match e.kind() {
+            ::csv::ErrorKind::Io(io) => Self::typed(io),
+            _ => CsvError::Parse(e.to_string()),
         }
     }
 
@@ -454,6 +548,327 @@ impl<R: Read> Read for Transcoder<R> {
         self.pos += take;
         Ok(take)
     }
+}
+
+/// Unique, deterministic column names from the header cells. Control
+/// characters become `_`, a name is cut at [`MAX_COLUMN_NAME_CHARS`], an empty
+/// one becomes `column<N>` (1-based) and a repeat gets `_2`, `_3`, ... until it
+/// is free. Names are compared as written (Parquet columns are case-sensitive).
+pub fn column_names(raw: &[String]) -> Vec<String> {
+    column_names_counted(raw).0
+}
+
+/// [`column_names`] and the number of candidate names it tried. Each base name
+/// remembers the next suffix to try, so the work is linear in the number of
+/// columns even when all of them are the same (16,384 identical headers).
+fn column_names_counted(raw: &[String]) -> (Vec<String>, usize) {
+    let mut taken: HashSet<String> = HashSet::new();
+    let mut next_suffix: HashMap<String, usize> = HashMap::new();
+    let mut tried = 0;
+    let mut out = Vec::with_capacity(raw.len());
+    for (i, name) in raw.iter().enumerate() {
+        let cleaned: String = name
+            .chars()
+            .map(|c| if c.is_control() { '_' } else { c })
+            .take(MAX_COLUMN_NAME_CHARS)
+            .collect();
+        let base = if cleaned.trim().is_empty() {
+            format!("column{}", i + 1)
+        } else {
+            cleaned
+        };
+        tried += 1;
+        let mut candidate = base.clone();
+        if !taken.insert(candidate.clone()) {
+            let mut n = next_suffix.get(&base).copied().unwrap_or(2);
+            loop {
+                let suffix = format!("_{n}");
+                let keep = MAX_COLUMN_NAME_CHARS.saturating_sub(suffix.chars().count());
+                candidate = format!("{}{suffix}", base.chars().take(keep).collect::<String>());
+                tried += 1;
+                n += 1;
+                if taken.insert(candidate.clone()) {
+                    break;
+                }
+            }
+            next_suffix.insert(base, n);
+        }
+        out.push(candidate);
+    }
+    (out, tried)
+}
+
+/// A CSV ready to read: the types decided from the sample, and the rows as
+/// batches of text.
+pub struct OpenedCsv {
+    pub schema: InferredSchema,
+    pub delimiter: u8,
+    pub encoding: Encoding,
+    /// Rows the types were decided from (below [`INFERENCE_ROWS`] only when
+    /// [`SAMPLE_MAX_BYTES`] or [`SAMPLE_MAX_CELLS`] was reached first).
+    pub sample_rows: usize,
+    /// Bytes of text in the sample.
+    pub sample_bytes: usize,
+    /// Records, blank lines and padded rows seen so far; final once `batches`
+    /// is exhausted.
+    pub stats: Arc<ScanStats>,
+    /// What decoding found; final once `batches` is exhausted.
+    pub decode: Arc<DecodeStats>,
+    pub batches: RawBatches,
+}
+
+/// Rows as all-text Arrow batches, empty cells as null, every cell verbatim.
+/// A batch holds at most [`BATCH_ROWS`] rows, [`BATCH_CELLS`] cells and
+/// [`BATCH_BYTES`] bytes of text, whatever the shape of the file: that is what
+/// keeps its memory bounded. A short row is padded with nulls and counted in
+/// [`ScanStats::padded_rows`]; a row with more fields than the header is an
+/// error. A failure ends the iteration after the rows read before it.
+pub struct RawBatches {
+    reader: ::csv::Reader<Box<dyn Read + Send>>,
+    pending: VecDeque<::csv::ByteRecord>,
+    held: Option<::csv::ByteRecord>,
+    /// The record the parser reads into; what is kept is a copy of its exact size.
+    scratch: ::csv::ByteRecord,
+    schema: SchemaRef,
+    limits: ReadLimits,
+    stats: Arc<ScanStats>,
+    rows_read: u64,
+    failed: Option<CsvError>,
+    done: bool,
+}
+
+/// A copy of `record` that holds exactly its bytes. The parser grows its
+/// buffer by doubling and `ByteRecord::clone` copies the whole buffer, so a
+/// kept clone costs up to twice its text; the sample and the records of a batch
+/// are kept, so they are copied field by field into a buffer of the right size.
+fn exact(record: &::csv::ByteRecord) -> ::csv::ByteRecord {
+    let mut copy = ::csv::ByteRecord::with_capacity(record.as_slice().len(), record.len());
+    for field in record.iter() {
+        copy.push_field(field);
+    }
+    copy
+}
+
+fn utf8(field: &[u8]) -> Result<&str, CsvError> {
+    std::str::from_utf8(field).map_err(|_| CsvError::Parse("a field is not valid UTF-8".into()))
+}
+
+impl RawBatches {
+    fn next_record(&mut self) -> Result<Option<::csv::ByteRecord>, CsvError> {
+        if let Some(r) = self.held.take().or_else(|| self.pending.pop_front()) {
+            return Ok(Some(r));
+        }
+        match self.reader.read_byte_record(&mut self.scratch) {
+            Ok(true) => Ok(Some(exact(&self.scratch))),
+            Ok(false) => Ok(None),
+            Err(e) => Err(CsvError::from_csv(e)),
+        }
+    }
+
+    /// Reads the records of one batch (bounded by rows, cells and bytes), then
+    /// builds each column with the exact capacity its values need: a builder
+    /// started empty reserves a few KiB per column that it keeps, which is
+    /// nothing for a handful of columns and megabytes per batch for hundreds.
+    fn build(&mut self) -> Option<RecordBatch> {
+        let columns = self.schema.fields().len();
+        let mut records: Vec<::csv::ByteRecord> = Vec::new();
+        let mut bytes = 0usize;
+        let limits = self.limits;
+        while records.len() < limits.batch_rows
+            && (records.len() + 1) * columns.max(1) <= limits.batch_cells
+        {
+            let record = match self.next_record() {
+                Ok(Some(r)) => r,
+                Ok(None) => {
+                    self.done = true;
+                    break;
+                }
+                Err(e) => {
+                    self.failed = Some(e);
+                    break;
+                }
+            };
+            let len = record.as_slice().len();
+            if !records.is_empty() && bytes + len > limits.batch_bytes {
+                self.held = Some(record);
+                break;
+            }
+            self.rows_read += 1;
+            if record.len() > columns {
+                self.failed = Some(CsvError::Parse(format!(
+                    "row {} has more fields than the header",
+                    self.rows_read
+                )));
+                break;
+            }
+            if record.len() < columns {
+                self.stats.note_padded();
+            }
+            bytes += len;
+            records.push(record);
+        }
+        if records.is_empty() {
+            if !self.done && self.failed.is_none() {
+                // No record fits the limits: never the end of the data.
+                self.failed = Some(CsvError::InvalidLimits(format!(
+                    "no row of {columns} cells fits a batch of {} rows and {} cells",
+                    limits.batch_rows, limits.batch_cells
+                )));
+            }
+            return None;
+        }
+        let mut column_bytes = vec![0usize; columns];
+        for r in &records {
+            for (total, f) in column_bytes.iter_mut().zip(r.iter()) {
+                *total += f.len();
+            }
+        }
+        let mut builders: Vec<StringBuilder> = column_bytes
+            .iter()
+            .map(|b| StringBuilder::with_capacity(records.len(), *b))
+            .collect();
+        for r in &records {
+            for (i, b) in builders.iter_mut().enumerate() {
+                match r.get(i).map(utf8).transpose() {
+                    Ok(Some(f)) if !f.is_empty() => b.append_value(f),
+                    Ok(_) => b.append_null(),
+                    Err(e) => {
+                        self.failed = Some(e);
+                        return None;
+                    }
+                }
+            }
+        }
+        let arrays: Vec<ArrayRef> = builders
+            .iter_mut()
+            .map(|b| Arc::new(b.finish()) as ArrayRef)
+            .collect();
+        match RecordBatch::try_new(self.schema.clone(), arrays) {
+            Ok(batch) => Some(batch),
+            Err(e) => {
+                // Never end the table silently.
+                self.failed = Some(CsvError::Parse(format!("could not build a batch: {e}")));
+                None
+            }
+        }
+    }
+}
+
+impl Iterator for RawBatches {
+    type Item = Result<RecordBatch, CsvError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if !self.done && self.failed.is_none() {
+            if let Some(batch) = self.build() {
+                return Some(Ok(batch));
+            }
+        }
+        // Nothing more to build: the failure that stopped it, once, then the end.
+        self.done = true;
+        self.failed.take().map(Err)
+    }
+}
+
+/// Opens a CSV: prepares the input, reads the header and a bounded sample to
+/// decide the types, then returns the rows (the sample included) as batches
+/// bounded by rows, cells and bytes. The limits are the constants of this
+/// module; the public API takes no other (naming either of these outside the
+/// crate does not compile).
+///
+/// ```compile_fail
+/// use colmena::tabular_prepare::csv::ReadLimits;
+/// ```
+///
+/// ```compile_fail
+/// use colmena::tabular_prepare::csv::open_csv_with;
+/// ```
+pub fn open_csv<R: Read + Send + 'static>(
+    input: R,
+    force: Option<Encoding>,
+) -> Result<OpenedCsv, CsvError> {
+    open_csv_with(input, force, &ReadLimits::default())
+}
+
+/// [`open_csv`] with other limits: crate-private, for tests that move the
+/// boundaries. The limits are validated; see [`ReadLimits::validate`].
+pub(crate) fn open_csv_with<R: Read + Send + 'static>(
+    input: R,
+    force: Option<Encoding>,
+    limits: &ReadLimits,
+) -> Result<OpenedCsv, CsvError> {
+    limits.validate(1)?;
+    let prepared = prepare_input(input, force)?;
+    let mut reader = ::csv::ReaderBuilder::new()
+        .delimiter(prepared.delimiter)
+        .has_headers(false)
+        .flexible(true)
+        .from_reader(prepared.reader);
+    let mut record = ::csv::ByteRecord::new();
+    if !reader
+        .read_byte_record(&mut record)
+        .map_err(CsvError::from_csv)?
+    {
+        return Err(CsvError::Empty);
+    }
+    let columns = record.len();
+    if columns > MAX_COLUMNS {
+        return Err(CsvError::TooManyColumns { limit: MAX_COLUMNS });
+    }
+    limits.validate(columns)?;
+    let raw_names = record
+        .iter()
+        .map(|f| utf8(f).map(str::to_string))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut inferer = SchemaInferer::with_window(column_names(&raw_names), limits.inference_rows);
+    let mut pending = VecDeque::new();
+    let mut row = ::csv::ByteRecord::new();
+    let (mut sample_bytes, mut sample_cells) = (0usize, 0usize);
+    while inferer.rows_seen() < limits.inference_rows
+        && sample_bytes < limits.sample_bytes
+        && sample_cells < limits.sample_cells
+    {
+        if !reader
+            .read_byte_record(&mut row)
+            .map_err(CsvError::from_csv)?
+        {
+            break;
+        }
+        sample_bytes += row.as_slice().len();
+        sample_cells += row.len().max(columns);
+        let cells = row.iter().map(utf8).collect::<Result<Vec<_>, _>>()?;
+        inferer.observe(&cells);
+        pending.push_back(exact(&row));
+    }
+    let sample_rows = inferer.rows_seen();
+    let schema = inferer.finish();
+    let text_schema = Arc::new(Schema::new(
+        schema
+            .columns
+            .iter()
+            .map(|c| Field::new(&c.name, DataType::Utf8, true))
+            .collect::<Vec<_>>(),
+    ));
+    Ok(OpenedCsv {
+        schema,
+        delimiter: prepared.delimiter,
+        encoding: prepared.encoding,
+        sample_rows,
+        sample_bytes,
+        stats: prepared.stats.clone(),
+        decode: prepared.decode,
+        batches: RawBatches {
+            reader,
+            pending,
+            held: None,
+            scratch: ::csv::ByteRecord::new(),
+            schema: text_schema,
+            limits: *limits,
+            stats: prepared.stats,
+            rows_read: 0,
+            failed: None,
+            done: false,
+        },
+    })
 }
 
 #[cfg(test)]

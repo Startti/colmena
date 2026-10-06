@@ -6,7 +6,7 @@
 **How to use (for the exploration/spec phase):** before opening files to assess a change, look up the target file below. **Used by** is its blast radius — the files that break if you change its public surface. **Depends on** is what it needs. Start by reading only those, not the whole repo.
 
 - Files indexed: **432**
-- Modules with at least one importer: **208**
+- Modules with at least one importer: **209**
 
 ## Blast-radius ranking (change these with the most care)
 
@@ -2102,7 +2102,7 @@
 #### `src/libs/colmena/src/tabular_prepare/csv.rs`
 - Module: `tabular_prepare::csv`
 - **Used by (1)**: `src/libs/colmena/src/tabular_prepare/scan.rs`
-- Depends on (1): `tabular_prepare::scan`
+- Depends on (3): `tabular_prepare::infer`, `tabular_prepare::manifest`, `tabular_prepare::scan`
 
 #### `src/libs/colmena/src/tabular_prepare/gc.rs`
 - Module: `tabular_prepare::gc`
@@ -2111,12 +2111,12 @@
 
 #### `src/libs/colmena/src/tabular_prepare/infer.rs`
 - Module: `tabular_prepare::infer`
-- **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
+- **Used by (1)**: `src/libs/colmena/src/tabular_prepare/csv.rs`
 - Depends on (1): `tabular_prepare::manifest`
 
 #### `src/libs/colmena/src/tabular_prepare/manifest.rs`
 - Module: `tabular_prepare::manifest`
-- **Used by (3)**: `src/libs/colmena/src/tabular_prepare/infer.rs`, `src/libs/colmena/src/tabular_prepare/part_sink.rs`, `src/libs/colmena/src/tabular_prepare/writer.rs`
+- **Used by (4)**: `src/libs/colmena/src/tabular_prepare/csv.rs`, `src/libs/colmena/src/tabular_prepare/infer.rs`, `src/libs/colmena/src/tabular_prepare/part_sink.rs`, `src/libs/colmena/src/tabular_prepare/writer.rs`
 - Depends on (0): — (no intra-crate imports)
 
 #### `src/libs/colmena/src/tabular_prepare/mod.rs`

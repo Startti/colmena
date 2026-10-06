@@ -58,6 +58,9 @@ impl ScanStats {
     pub fn padded_rows(&self) -> u64 {
         self.padded_rows.load(Ordering::Relaxed)
     }
+    pub(crate) fn note_padded(&self) {
+        self.padded_rows.fetch_add(1, Ordering::Relaxed);
+    }
     /// Blank lines in a one-column file that became null rows.
     pub fn blank_rows(&self) -> u64 {
         self.blank_rows.load(Ordering::Relaxed)

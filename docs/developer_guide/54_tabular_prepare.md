@@ -508,3 +508,31 @@ and near-ties go to UTF-8: a counted replacement character is visible, mojibake 
 not). Real Windows-1252 text has almost no valid UTF-8 multibyte sequences (an
 accented letter is one byte), so its valid count is near zero against many invalid
 ones.
+
+**Batches.** `open_csv` reads the header (row 1) and a sample to decide the types
+(`infer.rs`): the first 10,000 rows, or fewer if 16 MiB of text or 2,000,000
+fields are reached first (very long or very wide rows), and hands the rows back,
+the sample included, as batches of text: empty cells are null, every other cell is
+verbatim (`00123` stays `00123`, quoted delimiters and line breaks are kept). A
+short row is padded with nulls and counted (`ScanStats::padded_rows`); a long row
+is a `Parse` error naming the row. A batch holds at most 8,192 rows, 1,000,000
+cells **and 8 MiB of text**, whatever the row size: a record that would pass the
+budget starts the next batch (a record is at most 1 MiB, so one always fits), so a
+file of 128 KiB rows gets batches of about 64 rows, not 8,192. Columns are built
+with the exact capacity their values need, and the records kept (the sample and
+the batch being built) are copied to buffers of their exact size, because the
+parser's own buffers grow by doubling and a plain clone would keep up to twice
+the text. The limits are the fields of `ReadLimits`, which only this crate can
+name (`open_csv_with` and `convert_csv_table_limits` are crate-private): tests
+move the sample and batch boundaries within a small file, and production code
+always reads with the constants. Every limit is checked on opening (at least one,
+at most its constant, and a batch holds a row of this file's columns); a bad one
+is `CsvError::InvalidLimits`, and a batch that fits no row is the same error,
+never the end of the data, so no limit can give an empty table that looks
+successful. A file of more than 16,384 columns is refused (`TooManyColumns`). Header
+names are cleaned by `column_names`: control characters become `_`, names are cut
+at 128 characters, an empty one becomes `column<N>` and repeats get `_2`, `_3`
+(compared as written), in work linear in the number of columns (each base name
+remembers its next suffix; 16,384 identical headers take 16,384 probes, not 134
+million). A failure of the source (a guard's typed error) comes out of the
+iterator as that typed error, and the iterator ends after it.
