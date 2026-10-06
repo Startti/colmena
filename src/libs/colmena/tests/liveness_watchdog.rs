@@ -104,6 +104,7 @@ impl ExecutableNode for BorderChatterNode {
                 cache_read_tokens: None,
                 cache_write_tokens: None,
                 side_call: None,
+                nested: false,
             },
             DagExecutionEvent::LlmMessageFinish {
                 node_id: "sub".to_string(),

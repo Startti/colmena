@@ -496,6 +496,15 @@ El texto completo también queda disponible en `output.final_response` del `node
 > (`side_call.node_key` del `llm_usage`). Bajo un tool o una fila de
 > `for_each`, `<nodo>` es su scope. No es un nodo del árbol de eventos.
 >
+> Cada resumen cobra **lo de su propio grafo** a cualquier profundidad (un tool,
+> el tool de un tool, las filas de un `for_each`), no lo de una corrida anidada
+> (`subgraph`, agente como tool), que cobra su `subgraph-usage-summary`;
+> `finish.usage` es el total. Lo despachado dentro de un scope va en la fila de
+> su `path` (`"Fan>for_each#0"`). La fila `N` de un `for_each` es
+> `"<for_each>#N"`, con `node_type`/`model`/`provider`/`provider_key_id` del
+> target. Ninguna es un nodo del árbol. Hasta el 2026-10-05 esa fila salía sin
+> modelo y `usage-summary` sumaba los nodos de un `subgraph` hijo.
+>
 > Ver [§14 — Provider prompt caching](developer_guide/14_llm_deep_dive.md) para
 > la fórmula de costo y la tabla de semántica por provider.
 
