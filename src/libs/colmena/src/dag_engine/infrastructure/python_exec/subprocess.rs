@@ -14,7 +14,7 @@ use super::protocol::{
     input_too_large_message, result_too_large_message, WireRequest, WireResponse, CRASHED_MESSAGE,
     MALFORMED_MESSAGE, REFUSED_MESSAGE,
 };
-use super::zygote::TEMPLATE_ENV;
+use super::zygote::{ARROW_ENV, TEMPLATE_ENV};
 use crate::dag_engine::domain::python_executor::{
     ExecutorKind, PythonExecutor, PythonRunError, PythonRunRequest, PythonRunResult,
 };
@@ -655,7 +655,9 @@ fn start_template(cfg: &SubprocessConfig, dropped: Arc<AtomicU64>) -> Result<Tem
     if let Some(root) = &cfg.staging_root {
         cmd.arg("--staging-root").arg(root);
     }
-    cmd.env_clear().envs(template_env(std::env::vars_os()));
+    let staged = cfg.staging_root.is_some();
+    cmd.env_clear()
+        .envs(template_env_with(std::env::vars_os(), staged));
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -697,10 +699,24 @@ fn start_template(cfg: &SubprocessConfig, dropped: Arc<AtomicU64>) -> Result<Tem
 }
 
 /// `TEMPLATE_ENV` plus the host's `LOCALE_VARS`; nothing else of `host`.
+#[cfg(test)]
 fn template_env(host: impl Iterator<Item = (OsString, OsString)>) -> Vec<(OsString, OsString)> {
+    template_env_with(host, false)
+}
+
+/// [`template_env`], plus [`ARROW_ENV`] after the fixed variables when the
+/// executor stages prepared data (a staging root is configured).
+fn template_env_with(
+    host: impl Iterator<Item = (OsString, OsString)>,
+    arrow: bool,
+) -> Vec<(OsString, OsString)> {
     let fixed = TEMPLATE_ENV.iter().map(|&(k, v)| (k.into(), v.into()));
+    let arrow = ARROW_ENV
+        .iter()
+        .filter(|_| arrow)
+        .map(|&(k, v)| (k.into(), v.into()));
     let locale = host.filter(|(k, _)| LOCALE_VARS.iter().any(|l| k.as_os_str() == *l));
-    fixed.chain(locale).collect()
+    fixed.chain(arrow).chain(locale).collect()
 }
 
 /// Logs each known template event from stderr. Any other line is only counted,
@@ -908,6 +924,28 @@ mod tests {
         let fixed = TEMPLATE_ENV.iter().map(|(k, v)| format!("{k}={v}"));
         let locale = ["LANG=C.UTF-8", "LC_ALL=C", "LC_CTYPE=C"].map(String::from);
         assert_eq!(env, fixed.chain(locale).collect::<Vec<_>>());
+    }
+
+    /// With a staging root the template gets the Arrow variables on top, after
+    /// the fixed ones; without one it gets exactly the environment above.
+    #[test]
+    fn the_arrow_variables_are_added_only_for_a_staged_executor() {
+        let host = || std::iter::empty::<(OsString, OsString)>();
+        assert_eq!(template_env_with(host(), false), template_env(host()));
+        let arrow: Vec<_> = template_env_with(host(), true)
+            .iter()
+            .map(|(k, v)| format!("{}={}", k.display(), v.display()))
+            .collect();
+        let fixed = TEMPLATE_ENV.iter().map(|(k, v)| format!("{k}={v}"));
+        let extra = ARROW_ENV.iter().map(|(k, v)| format!("{k}={v}"));
+        assert_eq!(arrow, fixed.chain(extra).collect::<Vec<_>>());
+        assert_eq!(
+            ARROW_ENV,
+            [
+                ("ARROW_DEFAULT_MEMORY_POOL", "system"),
+                ("ARROW_IO_THREADS", "1")
+            ]
+        );
     }
 
     /// Dropping a call's child kills it; the slot stays taken until the
