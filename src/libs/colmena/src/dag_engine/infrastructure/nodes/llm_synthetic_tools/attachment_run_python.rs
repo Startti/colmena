@@ -321,7 +321,10 @@ fn success_envelope(call_id: &str, resp: &AttachmentRunPythonResponse) -> ToolRe
 /// Wrap a structured error message into the tool error envelope the LLM
 /// expects. Same convention as `sql_bulk_tools::err_envelope`.
 fn err_envelope(call_id: &str, msg: String) -> ToolResult {
-    let v = serde_json::json!({ "error": msg, "source": "execution" });
+    let v = crate::llm::domain::large_tabular::tag_refusal(
+        serde_json::json!({ "error": msg, "source": "execution" }),
+        &msg,
+    );
     ToolResult::success(call_id.to_string(), v.to_string())
 }
 

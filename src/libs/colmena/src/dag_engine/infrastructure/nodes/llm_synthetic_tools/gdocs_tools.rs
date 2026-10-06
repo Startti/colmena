@@ -1241,11 +1241,14 @@ pub async fn dispatch_create_from_docx_via_executor(
     let stored = match executor.fetch_attachment_bytes(&parsed.attachment_id).await {
         Ok(b) => b,
         Err(e) => {
-            return serde_json::json!({
-                "error": "attachment_fetch_failed",
-                "message": e,
-                "attachment_id": parsed.attachment_id,
-            });
+            return crate::llm::domain::large_tabular::tag_refusal(
+                serde_json::json!({
+                    "error": "attachment_fetch_failed",
+                    "message": e,
+                    "attachment_id": parsed.attachment_id,
+                }),
+                &e,
+            );
         }
     };
     let client = match client_for(executor.google_workspace_auth()).await {
@@ -1898,11 +1901,14 @@ pub async fn dispatch_insert_image_after_text_via_executor(
             let stored = match executor.fetch_attachment_bytes(&att).await {
                 Ok(b) => b,
                 Err(e) => {
-                    return serde_json::json!({
-                        "error": "attachment_fetch_failed",
-                        "message": e,
-                        "attachment_id": att,
-                    });
+                    return crate::llm::domain::large_tabular::tag_refusal(
+                        serde_json::json!({
+                            "error": "attachment_fetch_failed",
+                            "message": e,
+                            "attachment_id": att,
+                        }),
+                        &e,
+                    );
                 }
             };
             let input = insert::InsertImageAfterTextInput {

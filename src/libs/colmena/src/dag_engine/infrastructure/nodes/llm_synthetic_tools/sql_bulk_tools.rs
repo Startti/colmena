@@ -1447,7 +1447,10 @@ fn extract_connection_config(
 /// successful-shape output, the LLM sees the error verbatim in the tool
 /// response and can apply recovery logic.
 fn err_envelope(call_id: &str, msg: String) -> ToolResult {
-    let v = serde_json::json!({ "error": msg, "source": "execution" });
+    let v = crate::llm::domain::large_tabular::tag_refusal(
+        serde_json::json!({ "error": msg, "source": "execution" }),
+        &msg,
+    );
     ToolResult::success(call_id.to_string(), v.to_string())
 }
 
