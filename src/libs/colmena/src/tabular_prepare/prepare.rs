@@ -191,6 +191,14 @@ pub(crate) mod fake {
         /// The nth store (0-based) and every later one fail.
         pub fail_stores_from: Mutex<Option<usize>>,
         pub stores: Mutex<usize>,
+        /// Keys in the order they were stored.
+        pub order: Mutex<Vec<String>>,
+        /// How many times a source was opened.
+        pub opens: Mutex<usize>,
+        /// The second open of a source reads this instead (the file changed).
+        pub swap_on_second_open: Mutex<Option<Bytes>>,
+        /// Opening works but the stream never yields.
+        pub stall_source: Mutex<bool>,
     }
 
     impl PlacedStorage {
@@ -233,12 +241,26 @@ pub(crate) mod fake {
             })
         }
         async fn read_stream(&self, key: &str) -> Result<StoredStream, StorageError> {
-            let bytes = self
-                .objects
-                .lock()
-                .unwrap()
-                .get(key)
-                .cloned()
+            let n = {
+                let mut o = self.opens.lock().unwrap();
+                *o += 1;
+                *o
+            };
+            if *self.stall_source.lock().unwrap() {
+                return Ok(StoredStream {
+                    stream: Box::pin(futures::stream::pending()),
+                    size_bytes: 1,
+                    mime_type: String::new(),
+                    filename: String::new(),
+                });
+            }
+            let swapped = if n == 2 {
+                self.swap_on_second_open.lock().unwrap().clone()
+            } else {
+                None
+            };
+            let bytes = swapped
+                .or_else(|| self.objects.lock().unwrap().get(key).cloned())
                 .ok_or_else(|| StorageError::InvalidInput("missing".into()))?;
             let size = bytes.len() as u64;
             // Chunks of 1 KiB, so a read crosses chunk boundaries.
@@ -292,6 +314,7 @@ pub(crate) mod fake {
                 .lock()
                 .unwrap()
                 .insert(key.clone(), Bytes::from(all));
+            self.order.lock().unwrap().push(key.clone());
             Ok(StoredOutput {
                 storage_key: key,
                 read_url: String::new(),

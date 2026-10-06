@@ -13,14 +13,20 @@
 //! user-visible, and it never carries a cell or a storage key.
 
 use crate::storage::domain::OutputStorageRepository;
-use crate::tabular_prepare::convert::ConvertedTable;
+use crate::tabular_prepare::convert::{convert_csv_table_with, ConvertControl, ConvertedTable};
 use crate::tabular_prepare::csv::Encoding;
 use crate::tabular_prepare::manifest::{
-    unique_table_names, ConversionReport, Manifest, MAX_REPORTED_DEMOTED,
+    unique_table_names, ConversionReport, Manifest, TableInfo, MANIFEST_PATH, MAX_REPORTED_DEMOTED,
 };
-use crate::tabular_prepare::prepare::PrepareStartError;
-use crate::tabular_prepare::registry::PreparationRegistry;
+use crate::tabular_prepare::part_sink::PartSink;
+use crate::tabular_prepare::ports::PrepareRequest;
+use crate::tabular_prepare::prepare::{PrepareStartError, StorageCsvSource, StoragePartSink};
+use crate::tabular_prepare::registry::{
+    lease_for, ClaimRequest, PreparationRegistry, ReadyInfo, RegistryError, TerminalOutcome,
+    FORMAT_VERSION,
+};
 use crate::tabular_prepare::writer::WriterConfig;
+use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use std::sync::Arc;
 use std::time::Duration;
@@ -165,6 +171,160 @@ pub fn report_of(table: &str, t: &ConvertedTable) -> ConversionReport {
     }
 }
 
+/// Prepares `req.source_key` as table 0 of its source. Registry errors are
+/// returned as they are: if the registry cannot be written nothing can be
+/// recorded.
+pub async fn prepare_csv(
+    env: &PrepareEnv,
+    req: &PrepareRequest,
+) -> Result<PrepareOutcome, RegistryError> {
+    let sink = match StoragePartSink::new(env.storage.clone(), &req.source_key) {
+        Ok(sink) => Arc::new(sink),
+        Err(e) => return Ok(PrepareOutcome::Refused(e)),
+    };
+    let owner = format!("prep-{}", uuid::Uuid::new_v4());
+    let lease = chrono::Duration::from_std(env.budget).unwrap_or(chrono::Duration::days(1));
+    let claim = env
+        .registry
+        .claim(ClaimRequest {
+            source_key: req.source_key.clone(),
+            source_bytes: i64::try_from(req.size_bytes).unwrap_or(i64::MAX),
+            format_version: FORMAT_VERSION,
+            owner: owner.clone(),
+            lease: lease_for(lease),
+            now: (env.clock)(),
+        })
+        .await?;
+    if claim.is_none() {
+        return Ok(PrepareOutcome::NotClaimed);
+    }
+    let control = ConvertControl::new();
+    let source = StorageCsvSource::new(env.storage.clone(), &req.source_key);
+    let converted = convert_csv_table_with(
+        &source,
+        sink.clone() as Arc<dyn PartSink>,
+        0,
+        env.writer,
+        &control,
+    )
+    .await;
+    // Every key any run may have written, as full storage keys.
+    let keys_of =
+        |paths: Vec<String>| -> Vec<String> { paths.iter().map(|p| sink.key_of(p)).collect() };
+    match converted {
+        Ok(table) => {
+            let name = table_name(&req.filename);
+            let manifest = Manifest::new(vec![TableInfo {
+                name: name.clone(),
+                rows: table.written.rows,
+                parts: table.written.parts,
+                columns: table.written.columns.clone(),
+            }])
+            .with_conversion(vec![report_of(&name, &table)]);
+            let mut blob_keys = keys_of(table.blob_paths.clone());
+            let manifest_key = sink.key_of(MANIFEST_PATH);
+            blob_keys.push(manifest_key.clone());
+            let stored = async {
+                let tables_json = manifest.tables_json().map_err(|_| {
+                    (
+                        reason::TABLE_TOO_LARGE,
+                        "the table list does not fit the registry row; export fewer columns"
+                            .to_string(),
+                    )
+                })?;
+                let json = manifest.to_json().map_err(|_| {
+                    (
+                        reason::INTERNAL,
+                        "the manifest could not be written".to_string(),
+                    )
+                })?;
+                sink.put(MANIFEST_PATH, Bytes::from(json))
+                    .await
+                    .map_err(|_| {
+                        (
+                            reason::STORAGE,
+                            "the manifest could not be stored".to_string(),
+                        )
+                    })?;
+                Ok::<_, (&'static str, String)>(tables_json)
+            }
+            .await;
+            let tables_json = match stored {
+                Ok(t) => t,
+                Err((code, detail)) => {
+                    return fail(env, req, &owner, code, detail, blob_keys).await;
+                }
+            };
+            let mut live: Vec<String> = table.live_paths(0);
+            live.push(MANIFEST_PATH.to_string());
+            let prepared_bytes = sink.bytes_of(live.iter());
+            let outcome = env
+                .registry
+                .complete(
+                    &req.source_key,
+                    &owner,
+                    ReadyInfo {
+                        manifest_key: manifest_key.clone(),
+                        blob_keys: blob_keys.clone(),
+                        tables_json,
+                        prepared_bytes: i64::try_from(prepared_bytes).unwrap_or(i64::MAX),
+                    },
+                    (env.clock)(),
+                )
+                .await?;
+            match outcome {
+                TerminalOutcome::Cancelled => Ok(PrepareOutcome::Cancelled),
+                TerminalOutcome::Written => {
+                    let stale_keys = keys_of(table.stale_paths.clone());
+                    Ok(PrepareOutcome::Ready(Box::new(PreparedTable {
+                        manifest,
+                        manifest_key,
+                        blob_keys,
+                        stale_keys,
+                        prepared_bytes,
+                        converted: table,
+                    })))
+                }
+            }
+        }
+        Err(failure) => {
+            // Every failure is recorded as internal here; the next slice tells
+            // the reasons apart.
+            let (code, detail) = (reason::INTERNAL, "the conversion failed".to_string());
+            let keys = keys_of(failure.blob_paths);
+            fail(env, req, &owner, code, detail, keys).await
+        }
+    }
+}
+
+/// Records the failure with every key that may exist, then deletes them.
+async fn fail(
+    env: &PrepareEnv,
+    req: &PrepareRequest,
+    owner: &str,
+    code: &'static str,
+    detail: String,
+    keys: Vec<String>,
+) -> Result<PrepareOutcome, RegistryError> {
+    let outcome = env
+        .registry
+        .fail_with_blobs(&req.source_key, owner, code, &detail, &keys, (env.clock)())
+        .await?;
+    if outcome == TerminalOutcome::Cancelled {
+        return Ok(PrepareOutcome::Cancelled);
+    }
+    // Best effort: the keys are tracked, so the cleanup pass removes what this
+    // could not.
+    if let Err(e) = env.storage.delete_derived(&req.source_key, &keys).await {
+        tracing::warn!(
+            target: "colmena::tabular_prepare",
+            error = %e,
+            "could not delete the objects of a failed preparation; the cleanup pass will"
+        );
+    }
+    Ok(PrepareOutcome::Failed(PrepareFailure { code, detail }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -282,4 +442,240 @@ mod tests {
         assert_eq!(sorted.len(), all.len());
         assert_eq!(reason::TIME, "time");
     }
+}
+
+/// The driver's cases, written once over any registry: SQLite here, Postgres in
+/// the ignored tests of `postgres_registry`.
+#[cfg(test)]
+pub(crate) mod cases {
+    use super::*;
+    use crate::tabular_prepare::prepare::fake::{root_of, PlacedStorage};
+    use crate::tabular_prepare::registry::PrepareStatus;
+    use chrono::TimeZone;
+
+    /// A key no other run of the same database has used.
+    pub(crate) fn fresh_source() -> String {
+        format!("chat-attachments/u/s/{}.csv", uuid::Uuid::new_v4())
+    }
+
+    pub(crate) fn request(source: &str, size: u64) -> PrepareRequest {
+        PrepareRequest {
+            source_key: source.to_string(),
+            mime_type: "text/csv".into(),
+            filename: "sales.csv".into(),
+            size_bytes: size,
+        }
+    }
+
+    pub(crate) fn env(
+        registry: Arc<dyn PreparationRegistry>,
+        storage: Arc<PlacedStorage>,
+    ) -> PrepareEnv {
+        let now = Utc.with_ymd_and_hms(2026, 10, 6, 12, 0, 0).unwrap();
+        PrepareEnv::new(registry, storage)
+            .with_clock(Arc::new(move || now))
+            .with_writer(WriterConfig {
+                max_rows: 2,
+                max_bytes: usize::MAX,
+            })
+    }
+
+    fn five_rows() -> Vec<u8> {
+        b"id,name\n1,ann\n2,bob\n3,cy\n4,di\n5,ed\n".to_vec()
+    }
+
+    fn part_keys(source: &str, n: usize) -> Vec<String> {
+        let root = root_of(source);
+        (0..n)
+            .map(|i| format!("{root}/t0/part-{i:05}.parquet"))
+            .collect()
+    }
+
+    fn objects_but_source(storage: &PlacedStorage, source: &str) -> Vec<String> {
+        storage.keys().into_iter().filter(|k| k != source).collect()
+    }
+
+    pub(crate) async fn a_prepared_table_is_ready_with_the_manifest_stored_last(
+        registry: Arc<dyn PreparationRegistry>,
+    ) {
+        let source = fresh_source();
+        let source = source.as_str();
+        let storage = PlacedStorage::with_source(source, five_rows());
+        let env = env(registry.clone(), storage.clone());
+        let PrepareOutcome::Ready(table) = prepare_csv(&env, &request(source, 40)).await.unwrap()
+        else {
+            panic!("expected a ready table");
+        };
+        let root = root_of(source);
+        let manifest_key = format!("{root}/manifest.json");
+        // Layout: exactly the manifest and three parts of two rows (the last of one).
+        let mut want = part_keys(source, 3);
+        want.push(manifest_key.clone());
+        let mut got = objects_but_source(&storage, source);
+        got.sort();
+        want.sort();
+        assert_eq!(got, want);
+        // The manifest is the last object stored.
+        assert_eq!(storage.order.lock().unwrap().last(), Some(&manifest_key));
+        // The row says what the storage holds.
+        let row = registry.get(source).await.unwrap().unwrap();
+        assert_eq!(row.status, PrepareStatus::Ready);
+        assert_eq!(row.format_version, FORMAT_VERSION);
+        assert_eq!(row.manifest_key.as_deref(), Some(manifest_key.as_str()));
+        let mut tracked = row.blob_keys.clone();
+        tracked.sort();
+        assert_eq!(tracked, want);
+        assert_eq!(table.manifest.tables[0].rows, 5);
+        assert_eq!(table.manifest.tables[0].parts, 3);
+        assert_eq!(
+            row.tables_json.as_deref(),
+            Some(table.manifest.tables_json().unwrap().as_str())
+        );
+        let stored_manifest = storage.objects.lock().unwrap()[&manifest_key].clone();
+        assert_eq!(
+            Manifest::from_json(&stored_manifest).unwrap(),
+            table.manifest
+        );
+        let held: usize = objects_but_source(&storage, source)
+            .iter()
+            .map(|k| storage.objects.lock().unwrap()[k].len())
+            .sum();
+        assert_eq!(row.prepared_bytes, Some(held as i64));
+        assert_eq!(table.prepared_bytes, held as u64);
+        assert!(table.stale_keys.is_empty());
+    }
+
+    pub(crate) async fn without_a_derived_root_nothing_is_written_not_even_a_row(
+        registry: Arc<dyn PreparationRegistry>,
+    ) {
+        let source = fresh_source();
+        let source = source.as_str();
+        let storage = PlacedStorage::with_source(source, five_rows());
+        *storage.no_root.lock().unwrap() = true;
+        let env = env(registry.clone(), storage.clone());
+        let out = prepare_csv(&env, &request(source, 40)).await.unwrap();
+        assert!(matches!(
+            out,
+            PrepareOutcome::Refused(PrepareStartError::NoDerivedRoot)
+        ));
+        assert!(registry.get(source).await.unwrap().is_none());
+        assert_eq!(*storage.stores.lock().unwrap(), 0);
+        assert_eq!(*storage.opens.lock().unwrap(), 0);
+    }
+
+    pub(crate) async fn the_result_carries_what_the_conversion_reports(
+        registry: Arc<dyn PreparationRegistry>,
+    ) {
+        let source = fresh_source();
+        let source = source.as_str();
+        // Windows-1252, a short row and a blank line.
+        let body = b"name,v\ncaf\xE9,1\nshort\n\nzo\xEB,2\n".to_vec();
+        let storage = PlacedStorage::with_source(source, body);
+        let env = env(registry, storage.clone());
+        let PrepareOutcome::Ready(table) = prepare_csv(&env, &request(source, 30)).await.unwrap()
+        else {
+            panic!("expected a ready table");
+        };
+        let c = &table.converted;
+        assert_eq!(c.encoding, Encoding::Windows1252);
+        assert_eq!((c.replacements, c.padded_rows, c.blank_dropped), (0, 1, 1));
+        assert!(c.utf8_invalid >= 2 && c.utf8_valid_multibyte == 0);
+        let r = &table.manifest.conversion[0];
+        assert_eq!(r.table, "sales");
+        assert_eq!(r.encoding, "windows-1252");
+        assert_eq!(
+            (
+                r.replacements,
+                r.padded_rows,
+                r.blank_dropped,
+                r.utf8_invalid
+            ),
+            (0, 1, 1, c.utf8_invalid)
+        );
+        // The stored manifest carries the same section.
+        let key = table.manifest_key.clone();
+        let json = storage.objects.lock().unwrap()[&key].clone();
+        assert_eq!(
+            Manifest::from_json(&json).unwrap().conversion,
+            table.manifest.conversion
+        );
+    }
+
+    pub(crate) async fn a_second_preparation_is_not_claimed_and_stores_nothing(
+        registry: Arc<dyn PreparationRegistry>,
+    ) {
+        let source = fresh_source();
+        let source = source.as_str();
+        let storage = PlacedStorage::with_source(source, five_rows());
+        let env = env(registry, storage.clone());
+        assert!(matches!(
+            prepare_csv(&env, &request(source, 40)).await.unwrap(),
+            PrepareOutcome::Ready(_)
+        ));
+        let stores = *storage.stores.lock().unwrap();
+        assert!(matches!(
+            prepare_csv(&env, &request(source, 40)).await.unwrap(),
+            PrepareOutcome::NotClaimed
+        ));
+        assert_eq!(*storage.stores.lock().unwrap(), stores);
+    }
+}
+
+#[cfg(test)]
+mod registry_tests {
+    use super::cases::*;
+    use crate::tabular_prepare::registry::PreparationRegistry;
+    use crate::tabular_prepare::sqlite_registry::SqlitePreparationRegistry;
+    use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    async fn sqlite() -> (Arc<dyn PreparationRegistry>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let options = SqliteConnectOptions::new()
+            .filename(dir.path().join("registry.db"))
+            .create_if_missing(true)
+            .journal_mode(SqliteJournalMode::Wal)
+            .busy_timeout(Duration::from_secs(10));
+        let pool = SqlitePoolOptions::new()
+            .max_connections(4)
+            .connect_with(options)
+            .await
+            .unwrap();
+        sqlx::migrate!("migrations/sqlite")
+            .run(&pool)
+            .await
+            .unwrap();
+        (
+            Arc::new(SqlitePreparationRegistry::from_pool(Arc::new(pool))),
+            dir,
+        )
+    }
+
+    macro_rules! sqlite_case {
+        ($name:ident, $case:ident) => {
+            #[tokio::test]
+            async fn $name() {
+                let (registry, _dir) = sqlite().await;
+                $case(registry).await;
+            }
+        };
+    }
+
+    sqlite_case!(
+        tabular_prepare_a_prepared_table_is_ready_with_the_manifest_stored_last,
+        a_prepared_table_is_ready_with_the_manifest_stored_last
+    );
+    sqlite_case!(
+        tabular_prepare_without_a_derived_root_nothing_is_written_not_even_a_row,
+        without_a_derived_root_nothing_is_written_not_even_a_row
+    );
+    sqlite_case!(
+        tabular_prepare_the_result_carries_what_the_conversion_reports,
+        the_result_carries_what_the_conversion_reports
+    );
+    sqlite_case!(
+        tabular_prepare_a_second_preparation_is_not_claimed_and_stores_nothing,
+        a_second_preparation_is_not_claimed_and_stores_nothing
+    );
 }
