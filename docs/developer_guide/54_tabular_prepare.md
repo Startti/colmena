@@ -536,3 +536,27 @@ at 128 characters, an empty one becomes `column<N>` and repeats get `_2`, `_3`
 remembers its next suffix; 16,384 identical headers take 16,384 probes, not 134
 million). A failure of the source (a guard's typed error) comes out of the
 iterator as that typed error, and the iterator ends after it.
+
+### Conversion (`convert.rs`)
+
+**Typing.** `TypedBatches` turns the text batches of `open_csv` into typed Arrow
+batches for a given schema (the inferred one, or one with columns the caller
+demoted to text). Each cell is checked by the same rules that chose the type
+(`infer::cell_fits`), not by what a number parser would accept: a late `007` in an
+integer column, `+5`, `1e3` or `yes` in a boolean column is a conflict, not a
+changed value. The first cell that does not fit ends the iteration with
+`ConvertError::Conflict { column, row }` (row counted from zero over data rows;
+with several in one batch, the earliest row), after the batches before it were
+delivered typed. After a column is cast, the stored values are verified against
+the cells: every non-empty cell must be a non-null value (Arrow's cast turns what
+it cannot parse into null) and a float must be exactly the value of its literal; a
+disagreement between the inference and the cast is a conflict, never a changed
+value. A test feeds 200,000 generated near-miss strings to every type and asserts
+each is either refused or stored as its own value.
+
+`stream_reader` reads a storage stream (`read_stream`) as a blocking source for
+`open_csv`: build it inside the runtime and read it on a blocking thread; a
+storage error becomes an `io::Error` carrying its text. A read waiting on a
+stalled stream is woken by the conversion's cancel token and fails with
+`CsvError::Cancelled`; what cannot be interrupted is a read stuck inside a
+stream's own non-async code (none of this module's readers).
