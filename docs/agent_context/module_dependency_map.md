@@ -5,8 +5,8 @@
 
 **How to use (for the exploration/spec phase):** before opening files to assess a change, look up the target file below. **Used by** is its blast radius — the files that break if you change its public surface. **Depends on** is what it needs. Start by reading only those, not the whole repo.
 
-- Files indexed: **430**
-- Modules with at least one importer: **206**
+- Files indexed: **432**
+- Modules with at least one importer: **207**
 
 ## Blast-radius ranking (change these with the most care)
 
@@ -2099,6 +2099,11 @@
 
 ### tabular_prepare
 
+#### `src/libs/colmena/src/tabular_prepare/csv.rs`
+- Module: `tabular_prepare::csv`
+- **Used by (1)**: `src/libs/colmena/src/tabular_prepare/scan.rs`
+- Depends on (0): — (no intra-crate imports)
+
 #### `src/libs/colmena/src/tabular_prepare/gc.rs`
 - Module: `tabular_prepare::gc`
 - **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
@@ -2143,6 +2148,11 @@
 - Module: `tabular_prepare::registry_contract`
 - **Used by (1)**: `src/libs/colmena/src/tabular_prepare/postgres_registry.rs`
 - Depends on (3): `tabular_prepare`, `tabular_prepare::ports`, `tabular_prepare::sqlite_registry`
+
+#### `src/libs/colmena/src/tabular_prepare/scan.rs`
+- Module: `tabular_prepare::scan`
+- **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
+- Depends on (1): `tabular_prepare::csv`
 
 #### `src/libs/colmena/src/tabular_prepare/sqlite_registry.rs`
 - Module: `tabular_prepare::sqlite_registry`

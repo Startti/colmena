@@ -24,6 +24,7 @@ use std::time::Duration;
 use thiserror::Error;
 use tokio::time::Instant;
 
+pub mod csv;
 pub mod gc;
 pub mod infer;
 pub mod manifest;
@@ -31,6 +32,7 @@ pub mod part_sink;
 pub mod ports;
 pub mod postgres_registry;
 pub mod registry;
+pub mod scan;
 pub mod sqlite_registry;
 pub mod writer;
 
