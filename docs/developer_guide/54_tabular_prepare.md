@@ -700,3 +700,15 @@ reported), `Refused` (no derived root: nothing written, not even a row),
 recorded) or `Failed` with a reason. The table is named after the file without its
 extension (cleaned by `unique_table_names`), and the manifest records the
 conversion report of the table.
+
+`prepare_csv` claims the registry row (with `FORMAT_VERSION`, a lease of the time
+budget plus 60 s), converts the source as table 0 with the part sink above, stores
+the manifest LAST and completes the row with the manifest key, the table list and
+the prepared bytes. The row's `blob_keys` are the union of every key any attempt may
+have written (the part keys are recorded before each put, the manifest's before its
+put), as full storage keys, so a failed put and a restart that wrote more parts than
+the final run are both tracked. The manifest names only the parts of the final run;
+the others come back as `stale_keys` for deletion and are never referenced. A
+failure is recorded with `fail_with_blobs` and the tracked objects are then deleted
+(best effort: they are tracked, so the cleanup pass removes what this could not).
+A registry that cannot be written is returned as an error: nothing could be recorded.

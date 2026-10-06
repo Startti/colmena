@@ -285,6 +285,33 @@ mod tests {
         };
     }
 
+    macro_rules! pg_driver_case {
+        ($name:ident, $case:ident) => {
+            #[ignore = "requires DATABASE_URL — run with `cargo test -- --ignored`"]
+            #[tokio::test]
+            async fn $name() {
+                crate::tabular_prepare::driver::cases::$case(Arc::new(make_registry().await)).await;
+            }
+        };
+    }
+
+    pg_driver_case!(
+        tabular_prepare_pg_a_prepared_table_is_ready_with_the_manifest_stored_last,
+        a_prepared_table_is_ready_with_the_manifest_stored_last
+    );
+    pg_driver_case!(
+        tabular_prepare_pg_without_a_derived_root_nothing_is_written_not_even_a_row,
+        without_a_derived_root_nothing_is_written_not_even_a_row
+    );
+
+    pg_driver_case!(
+        tabular_prepare_pg_the_result_carries_what_the_conversion_reports,
+        the_result_carries_what_the_conversion_reports
+    );
+    pg_driver_case!(
+        tabular_prepare_pg_a_second_preparation_is_not_claimed_and_stores_nothing,
+        a_second_preparation_is_not_claimed_and_stores_nothing
+    );
     pg_case!(
         tabular_prepare_pg_a_deleting_row_is_never_taken_by_an_older_format_claim,
         a_deleting_row_is_never_taken_by_an_older_format_claim

@@ -2112,7 +2112,7 @@
 #### `src/libs/colmena/src/tabular_prepare/driver.rs`
 - Module: `tabular_prepare::driver`
 - **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
-- Depends on (7): `storage::domain`, `tabular_prepare::convert`, `tabular_prepare::csv`, `tabular_prepare::manifest`, `tabular_prepare::prepare`, `tabular_prepare::registry`, `tabular_prepare::writer`
+- Depends on (10): `storage::domain`, `tabular_prepare::convert`, `tabular_prepare::csv`, `tabular_prepare::manifest`, `tabular_prepare::part_sink`, `tabular_prepare::ports`, `tabular_prepare::prepare`, `tabular_prepare::registry`, `tabular_prepare::sqlite_registry`, `tabular_prepare::writer`
 
 #### `src/libs/colmena/src/tabular_prepare/gc.rs`
 - Module: `tabular_prepare::gc`
@@ -2136,12 +2136,12 @@
 
 #### `src/libs/colmena/src/tabular_prepare/part_sink.rs`
 - Module: `tabular_prepare::part_sink`
-- **Used by (3)**: `src/libs/colmena/src/tabular_prepare/convert.rs`, `src/libs/colmena/src/tabular_prepare/prepare.rs`, `src/libs/colmena/src/tabular_prepare/writer.rs`
+- **Used by (4)**: `src/libs/colmena/src/tabular_prepare/convert.rs`, `src/libs/colmena/src/tabular_prepare/driver.rs`, `src/libs/colmena/src/tabular_prepare/prepare.rs`, `src/libs/colmena/src/tabular_prepare/writer.rs`
 - Depends on (1): `tabular_prepare::manifest`
 
 #### `src/libs/colmena/src/tabular_prepare/ports.rs`
 - Module: `tabular_prepare::ports`
-- **Used by (2)**: `src/libs/colmena/src/tabular_prepare/mod.rs`, `src/libs/colmena/src/tabular_prepare/registry_contract.rs`
+- **Used by (3)**: `src/libs/colmena/src/tabular_prepare/driver.rs`, `src/libs/colmena/src/tabular_prepare/mod.rs`, `src/libs/colmena/src/tabular_prepare/registry_contract.rs`
 - Depends on (1): `dag_engine::engine`
 
 #### `src/libs/colmena/src/tabular_prepare/postgres_registry.rs`
@@ -2171,7 +2171,7 @@
 
 #### `src/libs/colmena/src/tabular_prepare/sqlite_registry.rs`
 - Module: `tabular_prepare::sqlite_registry`
-- **Used by (2)**: `src/libs/colmena/src/tabular_prepare/gc.rs`, `src/libs/colmena/src/tabular_prepare/registry_contract.rs`
+- **Used by (3)**: `src/libs/colmena/src/tabular_prepare/driver.rs`, `src/libs/colmena/src/tabular_prepare/gc.rs`, `src/libs/colmena/src/tabular_prepare/registry_contract.rs`
 - Depends on (0): — (no intra-crate imports)
 
 #### `src/libs/colmena/src/tabular_prepare/writer.rs`
