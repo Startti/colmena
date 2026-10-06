@@ -23,7 +23,8 @@ use crate::tabular_prepare::manifest::{
 };
 use crate::tabular_prepare::part_sink::{PartSink, SinkError};
 use crate::tabular_prepare::ports::{
-    NoopProgress, PrepareProgress, PrepareProgressInfo, PrepareRequest, ProgressState,
+    NoopProgress, PrepareConfig, PrepareProgress, PrepareProgressInfo, PrepareRequest,
+    PrepareRunner, ProgressState,
 };
 use crate::tabular_prepare::prepare::{PrepareStartError, StorageCsvSource, StoragePartSink};
 use crate::tabular_prepare::registry::{
@@ -237,6 +238,68 @@ pub fn report_of(table: &str, t: &ConvertedTable) -> ConversionReport {
             .take(MAX_REPORTED_DEMOTED)
             .cloned()
             .collect(),
+    }
+}
+
+/// The in-process runner behind `InlineTrigger`: prepares the CSV a request names.
+/// With the engine switch off it runs nothing (no registry read, no storage
+/// call); a source that is not a CSV is left for the Excel unit and is logged.
+pub struct CsvPrepareRunner {
+    env: Arc<PrepareEnv>,
+    enabled: bool,
+}
+
+impl CsvPrepareRunner {
+    /// `config.large_tabular` is the engine switch, read once.
+    pub fn new(env: Arc<PrepareEnv>, config: &PrepareConfig) -> Self {
+        Self {
+            env,
+            enabled: config.large_tabular,
+        }
+    }
+}
+
+fn is_csv(mime: &str) -> bool {
+    mime.split(';')
+        .next()
+        .is_some_and(|m| m.trim().eq_ignore_ascii_case("text/csv"))
+}
+
+#[async_trait]
+impl PrepareRunner for CsvPrepareRunner {
+    async fn run(&self, req: PrepareRequest) {
+        if !self.enabled {
+            return;
+        }
+        if !is_csv(&req.mime_type) {
+            tracing::warn!(
+                target: "colmena::tabular_prepare",
+                source_key = %req.source_key,
+                "only CSV sources are prepared; the request was dropped"
+            );
+            return;
+        }
+        match prepare_csv(&self.env, &req).await {
+            Ok(PrepareOutcome::Failed(f)) => tracing::warn!(
+                target: "colmena::tabular_prepare",
+                source_key = %req.source_key,
+                reason = f.code,
+                "the preparation failed"
+            ),
+            Ok(PrepareOutcome::Refused(e)) => tracing::error!(
+                target: "colmena::tabular_prepare",
+                source_key = %req.source_key,
+                error = %e,
+                "the preparation was refused"
+            ),
+            Ok(_) => {}
+            Err(e) => tracing::error!(
+                target: "colmena::tabular_prepare",
+                source_key = %req.source_key,
+                error = %e,
+                "the preparation could not record its outcome"
+            ),
+        }
     }
 }
 
@@ -1361,6 +1424,69 @@ pub(crate) mod cases {
         assert_eq!(progress.seen.lock().unwrap().len(), reports);
     }
 
+    pub(crate) async fn the_inline_trigger_runs_a_csv_request_through_the_driver(
+        registry: Arc<dyn PreparationRegistry>,
+    ) {
+        use crate::tabular_prepare::ports::{InlineTrigger, PrepareTrigger};
+        let progress = Arc::new(Recording::default());
+        for mime in ["text/csv", "Text/CSV; charset=utf-8"] {
+            let source = fresh_source();
+            let storage = PlacedStorage::with_source(&source, five_rows());
+            let env = env(registry.clone(), storage).with_progress(progress.clone());
+            let config = PrepareConfig::from_switch(Some("on"));
+            let runner = Arc::new(CsvPrepareRunner::new(Arc::new(env), &config));
+            let trigger = InlineTrigger::new(runner);
+            let mut req = request(&source, 40);
+            req.mime_type = mime.to_string();
+            let before = progress.seen.lock().unwrap().len();
+            trigger.request(req).await.unwrap();
+            // The request runs detached: wait for its final report, with a bound.
+            let done = async {
+                loop {
+                    let seen = progress.seen.lock().unwrap().len();
+                    if seen > before
+                        && progress.read("").await.unwrap().state == ProgressState::Ready
+                    {
+                        break;
+                    }
+                    progress.arrived.notified().await;
+                }
+            };
+            tokio::time::timeout(Duration::from_secs(30), done)
+                .await
+                .expect("the request never finished");
+            let row = registry.get(&source).await.unwrap().unwrap();
+            assert_eq!(row.status, PrepareStatus::Ready, "{mime}");
+        }
+    }
+
+    pub(crate) async fn with_the_switch_off_or_another_mime_the_runner_touches_nothing(
+        registry: Arc<dyn PreparationRegistry>,
+    ) {
+        let xlsx = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+        for (switch, mime) in [
+            ("off", "text/csv"),
+            ("on", xlsx),
+            ("on", "text/csvx"),
+            ("on", ""),
+        ] {
+            let source = fresh_source();
+            let storage = PlacedStorage::with_source(&source, five_rows());
+            let env = env(registry.clone(), storage.clone());
+            let config = PrepareConfig::from_switch(Some(switch));
+            let runner = CsvPrepareRunner::new(Arc::new(env), &config);
+            let mut req = request(&source, 40);
+            req.mime_type = mime.to_string();
+            runner.run(req).await;
+            assert!(
+                registry.get(&source).await.unwrap().is_none(),
+                "{switch} {mime}"
+            );
+            assert_eq!(*storage.opens.lock().unwrap(), 0);
+            assert_eq!(*storage.stores.lock().unwrap(), 0);
+        }
+    }
+
     pub(crate) async fn a_restart_with_fewer_parts_leaves_stale_keys_the_manifest_never_names(
         registry: Arc<dyn PreparationRegistry>,
     ) {
@@ -1505,5 +1631,13 @@ mod registry_tests {
     sqlite_case!(
         tabular_prepare_a_finished_preparation_reports_its_final_state_to_the_port,
         a_finished_preparation_reports_its_final_state_to_the_port
+    );
+    sqlite_case!(
+        tabular_prepare_the_inline_trigger_runs_a_csv_request_through_the_driver,
+        the_inline_trigger_runs_a_csv_request_through_the_driver
+    );
+    sqlite_case!(
+        tabular_prepare_with_the_switch_off_or_another_mime_the_runner_touches_nothing,
+        with_the_switch_off_or_another_mime_the_runner_touches_nothing
     );
 }

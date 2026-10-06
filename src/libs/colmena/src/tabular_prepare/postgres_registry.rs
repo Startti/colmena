@@ -364,6 +364,14 @@ mod tests {
         tabular_prepare_pg_a_finished_preparation_reports_its_final_state_to_the_port,
         a_finished_preparation_reports_its_final_state_to_the_port
     );
+    pg_driver_case!(
+        tabular_prepare_pg_the_inline_trigger_runs_a_csv_request_through_the_driver,
+        the_inline_trigger_runs_a_csv_request_through_the_driver
+    );
+    pg_driver_case!(
+        tabular_prepare_pg_with_the_switch_off_or_another_mime_the_runner_touches_nothing,
+        with_the_switch_off_or_another_mime_the_runner_touches_nothing
+    );
     pg_case!(
         tabular_prepare_pg_a_deleting_row_is_never_taken_by_an_older_format_claim,
         a_deleting_row_is_never_taken_by_an_older_format_claim
