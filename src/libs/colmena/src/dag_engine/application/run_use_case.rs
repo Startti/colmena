@@ -1674,22 +1674,40 @@ struct ChannelObserver {
 impl crate::dag_engine::domain::observer::ExecutionObserver for ChannelObserver {
     fn on_event(&self, event: crate::dag_engine::domain::observer::NodeEvent) {
         use crate::dag_engine::domain::observer::NodeEvent;
-        if let Ok(mut ledger) = self.ledger.lock() {
-            match &event {
-                NodeEvent::SubgraphChildEvent(raw) => {
-                    if let Ok(child) = serde_json::from_value(raw.clone()) {
-                        ledger.track_child(&self.node_id, child);
-                    }
-                }
-                usage => {
-                    if let Some(usage) = own_usage_event(&self.node_id, usage.clone()) {
-                        ledger.bill_own(&self.node_id, &usage);
-                    }
-                }
+        let billed = match &event {
+            NodeEvent::SubgraphChildEvent(raw) => bills(raw)
+                .then(|| serde_json::from_value(raw.clone()).ok())
+                .flatten()
+                .map(Err),
+            usage @ NodeEvent::LlmUsage { .. } => {
+                own_usage_event(&self.node_id, usage.clone()).map(Ok)
+            }
+            _ => None,
+        };
+        if let Some(billed) = billed {
+            // A poisoned lock still bills (plain counts).
+            let mut ledger = self.ledger.lock().unwrap_or_else(|p| p.into_inner());
+            match billed {
+                Ok(usage) => ledger.bill_own(&self.node_id, &usage),
+                Err(child) => ledger.track_child(&self.node_id, child),
             }
         }
         let _ = self.tx.send(event);
     }
+}
+
+/// Whether serialized child event `raw` (wrapped or not) is one the ledger reads.
+fn bills(raw: &Value) -> bool {
+    const READ: [&str; 4] = [
+        "llm_usage",
+        "graph_usage_summary",
+        "usage_identity",
+        "node_start",
+    ];
+    let inner = &raw["data"]["inner"]["event"];
+    [&raw["event"], inner]
+        .iter()
+        .any(|t| READ.contains(&t.as_str().unwrap_or_default()))
 }
 
 /// Per-node metadata tracked for the usage summary: which model/provider ran
