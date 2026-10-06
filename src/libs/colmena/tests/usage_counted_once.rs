@@ -930,13 +930,36 @@ async fn a_cancelled_run_bills_its_calls() {
         DagExecutionEvent::SubgraphWrapped { inner, .. } => usage_event(inner),
         e => usage_event(e),
     };
-    for graph in [graph.clone(), in_subgraph(graph)] {
+    let done = chain(&[("agent", call("usage-model"))]);
+    let cases = [
+        (graph.clone(), done.clone()),
+        (in_subgraph(graph.clone()), in_subgraph(done.clone())),
+        (
+            in_subgraph(in_subgraph(graph)),
+            in_subgraph(in_subgraph(done)),
+        ),
+    ];
+    for (graph, done) in cases {
         let model = UsageModel::new(0, "done");
         let _guard = OverrideGuard::install(model.clone());
         let frames = turn(&graph, &Arc::default(), None, usage).await;
         assert_billed_once(&model, &frames, 1);
         assert_summaries_before(&frames, "cancelled");
+        // A cut child's summary lands where its own would have.
+        let completed = turn(&done, &Arc::default(), None, never).await;
+        assert_eq!(places(&frames), places(&completed), "{frames:#?}");
     }
+}
+
+/// `(type, level, path)` of every usage summary frame.
+fn places(frames: &[Value]) -> Vec<(Value, Value, Value)> {
+    let summary = |f: &&Value| {
+        f["type"]
+            .as_str()
+            .is_some_and(|t| t.ends_with("usage-summary"))
+    };
+    let place = |f: &Value| (f["type"].clone(), f["level"].clone(), f["path"].clone());
+    frames.iter().filter(summary).map(place).collect()
 }
 
 /// A run that suspends bills what it called before asking; the turn that

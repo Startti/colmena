@@ -148,6 +148,10 @@ pub enum DagExecutionEvent {
     /// Emitted at the beginning of each loop turn
     #[serde(rename = "turn_start")]
     TurnStart { turn: u32 },
+    /// A child run's first event: its session id, so its parent knows where
+    /// that run's usage summary lands. Bookkeeping only: no SSE frame.
+    #[serde(rename = "run_start")]
+    RunStart { run: String },
     /// Emitted when a subgraph node completes. Carries `node_type: "subgraph"` so the
     /// data-stream protocol can distinguish it from a regular NodeFinish.
     #[serde(rename = "subgraph_node_finish")]
@@ -550,6 +554,7 @@ impl DagExecutionEvent {
             | DagExecutionEvent::LlmMessageStart { .. }
             | DagExecutionEvent::LlmMessageFinish { .. }
             | DagExecutionEvent::TurnStart { .. }
+            | DagExecutionEvent::RunStart { .. }
             | DagExecutionEvent::Progress { .. }
             | DagExecutionEvent::GraphFinish { .. } => false,
             DagExecutionEvent::SubgraphWrapped { inner, .. } => inner.advances_heartbeat_clock(),

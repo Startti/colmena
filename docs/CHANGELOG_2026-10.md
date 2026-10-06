@@ -531,7 +531,8 @@ anidado (§30): lo que la hija ya había llamado quedaba sin cobrar. Ahora `nest
 `session_id` de la corrida hija que lo hizo (la más interna) y `GraphUsageSummary` lleva `run`, la corrida que
 cobra. El padre guarda lo de cada hija en `UsageLedger::unbilled` hasta ver su resumen, y al terminar (por
 cualquier salida, antes del frame terminal) manda por cada hija sin resumen un `subgraph-usage-summary` con sus
-filas: `… subgraph-usage-summary, cancelled, finish`. Una llamada en vuelo al cancelar no reporta uso y no se
+filas: `… subgraph-usage-summary, cancelled, finish`, con el mismo `level` y `path` que habría tenido el resumen
+de la hija (cada corrida hija emite primero un `RunStart { run }`, sin frame SSE, y el padre anota dónde cae). Una llamada en vuelo al cancelar no reporta uso y no se
 cobra en ningún lado (tampoco en `finish.usage`). **Compatibilidad.** El stream crudo (`engine.rs`) muestra
 `"nested": "<session_id>"` en un `LlmUsage` de una hija (antes `true`) y `"run"` en `graph_usage_summary`; los
 frames SSE no cambian. **Tests.** `a_cancelled_run_bills_its_calls` con la hija; mutaciones: sin el resumen por

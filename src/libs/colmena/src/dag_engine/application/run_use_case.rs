@@ -500,6 +500,9 @@ impl DagRunUseCase {
 
             // Usage is billed on `ledger`, summarized by `with_usage_summaries`.
             ledger.lock().unwrap().run = session_id.clone();
+            if self.nested_run {
+                yield DagExecutionEvent::RunStart { run: session_id.clone() };
+            }
 
             // Start cyclic execution loop
             while let Some(node_id) = active_queue.pop_front() {
@@ -1052,7 +1055,7 @@ impl DagRunUseCase {
                                                 // Also bill what they say (`track_child_usage`).
                                                 if let Ok(child_event) = serde_json::from_value::<DagExecutionEvent>(raw) {
                                                     // Bill it before moving child_event into yield.
-                                                    track_child_usage(&mut ledger.lock().unwrap(), &child_event);
+                                                    track_child_usage(&mut ledger.lock().unwrap(), &node_id, &child_event);
                                                     match child_event {
                                                         DagExecutionEvent::GraphFinish { .. } => {}
                                                         // Grandchild+ event that already crossed one subgraph
@@ -1740,6 +1743,7 @@ fn record_side_call_meta(
 /// child run's, billed in its `subgraph-usage-summary` (`finish.usage` has all).
 fn track_child_usage(
     ledger: &mut UsageLedger,
+    node: &str,
     event: &crate::dag_engine::domain::events::DagExecutionEvent,
 ) {
     use crate::dag_engine::domain::events::DagExecutionEvent;
@@ -1748,6 +1752,7 @@ fn track_child_usage(
         usage_accumulator,
         child_meta,
         unbilled,
+        boundary,
         ..
     } = ledger;
     let (key, base) = match event {
@@ -1844,6 +1849,7 @@ fn track_child_usage(
             let inner = Box::new(usage);
             track_child_usage(
                 bill,
+                node,
                 &DagExecutionEvent::SubgraphWrapped {
                     inner,
                     depth: 1,
@@ -1855,6 +1861,17 @@ fn track_child_usage(
             run: Some(child), ..
         } => {
             unbilled.remove(child);
+        }
+        // Where the child's summary would land, as this run yields it.
+        DagExecutionEvent::RunStart { run } => {
+            let place = match event {
+                DagExecutionEvent::SubgraphWrapped { path, depth, .. } if !path.is_empty() => {
+                    (format!("{node}>{path}"), depth + 1)
+                }
+                DagExecutionEvent::SubgraphWrapped { depth, .. } => (node.to_string(), depth + 1),
+                _ => (node.to_string(), 1),
+            };
+            boundary.insert(run.clone(), place);
         }
         _ => {}
     }
@@ -1871,6 +1888,8 @@ pub(crate) struct UsageLedger {
     run: String,
     /// Child run → what it called that no summary of its own billed yet.
     unbilled: HashMap<String, UsageLedger>,
+    /// Child run → the `path` and `depth` its own summary has in this run.
+    boundary: HashMap<String, (String, u32)>,
     /// Entry → who bills it (model, provider, node type, key).
     node_meta: HashMap<String, NodeMeta>,
     /// Entry → (prompt, completion, thinking, cache_read, cache_write).
@@ -1899,13 +1918,10 @@ impl UsageLedger {
         children.sort_by(|a, b| a.0.cmp(&b.0));
         for (child, mut bill) in children {
             bill.run = child.clone();
+            let (path, depth) = self.boundary.get(&child).cloned().unwrap_or((child, 1));
             for inner in bill.take_summaries() {
-                let (inner, path) = (Box::new(inner), child.clone());
-                out.push(DagExecutionEvent::SubgraphWrapped {
-                    inner,
-                    depth: 1,
-                    path,
-                });
+                let (inner, path) = (Box::new(inner), path.clone());
+                out.push(DagExecutionEvent::SubgraphWrapped { inner, depth, path });
             }
         }
         out

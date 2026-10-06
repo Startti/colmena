@@ -330,7 +330,9 @@ impl SseMapper {
                 "type": "reasoning-end",
                 "id": id
             })),
-            DagExecutionEvent::LlmUsage { .. } | DagExecutionEvent::UsageIdentity { .. } => None,
+            DagExecutionEvent::LlmUsage { .. }
+            | DagExecutionEvent::UsageIdentity { .. }
+            | DagExecutionEvent::RunStart { .. } => None,
             DagExecutionEvent::GraphUsageSummary { entries, .. } => Some(json!({
                 "type": "usage-summary",
                 "nodes": entries
