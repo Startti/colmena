@@ -345,6 +345,54 @@ mod tests {
         }
     }
 
+    /// A manifest whose table list is exactly `len` bytes: valid short columns
+    /// up to the length, one more with a name padded to land on it.
+    fn manifest_with_tables_json_len(len: usize) -> Manifest {
+        let mut m = Manifest::new(vec![TableInfo {
+            name: "t".into(),
+            rows: 1,
+            parts: 1,
+            columns: vec![col("c0", ColumnType::Int, 1)],
+        }]);
+        let mut i = 1;
+        while len - m.tables_json().unwrap().len() > 100 {
+            m.tables[0]
+                .columns
+                .push(col(&format!("c{i}"), ColumnType::Int, 1));
+            i += 1;
+        }
+        let base = {
+            m.tables[0].columns.push(col("p", ColumnType::Int, 1));
+            m.tables_json().unwrap().len()
+        };
+        let last = m.tables[0].columns.last_mut().unwrap();
+        last.name = "p".to_string() + &"x".repeat(len - base);
+        m
+    }
+
+    #[test]
+    fn tables_json_is_refused_one_byte_above_the_cap_and_never_truncated() {
+        let at_cap = manifest_with_tables_json_len(TABLES_JSON_MAX_BYTES);
+        assert_eq!(at_cap.tables_json().unwrap().len(), TABLES_JSON_MAX_BYTES);
+        assert!(at_cap.to_json().is_ok());
+
+        let over = manifest_with_tables_json_len(TABLES_JSON_MAX_BYTES + 1);
+        let err = over.tables_json().unwrap_err();
+        assert_eq!(
+            err,
+            ManifestError::ManifestTooLarge {
+                bytes: TABLES_JSON_MAX_BYTES + 1,
+                cap: TABLES_JSON_MAX_BYTES
+            }
+        );
+        // The manifest file obeys the same rule, so it is never written
+        // when the registry row could not hold its table list.
+        assert!(matches!(
+            over.to_json(),
+            Err(ManifestError::ManifestTooLarge { .. })
+        ));
+    }
+
     #[test]
     fn part_paths_are_deterministic_and_zero_padded() {
         assert_eq!(part_path(0, 0).unwrap(), "t0/part-00000.parquet");
@@ -417,5 +465,240 @@ mod tests {
         let big = vec![b' '; MANIFEST_MAX_BYTES + 1];
         let err = Manifest::from_json(&big).unwrap_err();
         assert!(err.to_string().contains("above the"), "{err}");
+    }
+
+    #[test]
+    fn from_json_refuses_bad_manifests() {
+        let mut wrong_version = sample();
+        wrong_version.version = MANIFEST_VERSION + 1;
+        let mut no_tables = sample();
+        no_tables.tables.clear();
+        let mut too_many = sample();
+        let t = too_many.tables[1].clone();
+        too_many.tables = (0..=MAX_TABLES)
+            .map(|i| TableInfo {
+                name: format!("t{i}"),
+                ..t.clone()
+            })
+            .collect();
+        let mut dup = sample();
+        dup.tables[1].name = "SALES".into();
+        let mut bad_name = sample();
+        bad_name.tables[0].name = "a\nb".into();
+        let mut no_cols = sample();
+        no_cols.tables[0].columns.clear();
+        let mut many_parts = sample();
+        many_parts.tables[0].parts = MAX_PARTS as u32 + 1;
+        for (label, m) in [
+            ("version", wrong_version),
+            ("no tables", no_tables),
+            ("too many tables", too_many),
+            ("duplicate", dup),
+            ("name", bad_name),
+            ("no columns", no_cols),
+            ("parts", many_parts),
+        ] {
+            let json = serde_json::to_vec(&m).unwrap();
+            assert!(Manifest::from_json(&json).is_err(), "{label} was accepted");
+        }
+        assert!(Manifest::from_json(b"{not json").is_err());
+        // A valid manifest with a field this reader does not know is refused.
+        let mut v: serde_json::Value = serde_json::to_value(sample()).unwrap();
+        v["extra"] = serde_json::json!(1);
+        assert!(Manifest::from_json(&serde_json::to_vec(&v).unwrap()).is_err());
+    }
+
+    fn invalid_manifests() -> Vec<(&'static str, Manifest)> {
+        let mut dup_col = sample();
+        dup_col.tables[0].columns[1].name = "id".into();
+        let mut empty_col = sample();
+        empty_col.tables[0].columns[0].name = String::new();
+        let mut ctrl_col = sample();
+        ctrl_col.tables[0].columns[0].name = "a\tb".into();
+        let mut long_col = sample();
+        long_col.tables[0].columns[0].name = "x".repeat(MAX_COLUMN_NAME_CHARS + 1);
+        let mut no_parts = sample();
+        no_parts.tables[0].parts = 0;
+        let mut too_many_parts = sample();
+        too_many_parts.tables[1].parts = 5; // 10 rows in 5 parts is fine
+        too_many_parts.tables[1].rows = 3; // 3 rows in 5 parts is not
+        let mut wrong_version = sample();
+        wrong_version.version = MANIFEST_VERSION + 1;
+        let mut no_tables = sample();
+        no_tables.tables.clear();
+        let mut dup_table = sample();
+        dup_table.tables[1].name = "SALES".into();
+        let mut bad_table_name = sample();
+        bad_table_name.tables[0].name = "a\nb".into();
+        let mut no_cols = sample();
+        no_cols.tables[0].columns.clear();
+        let mut many_parts = sample();
+        many_parts.tables[0].parts = MAX_PARTS as u32 + 1;
+        vec![
+            ("duplicate column", dup_col),
+            ("empty column name", empty_col),
+            ("control character in a column name", ctrl_col),
+            ("long column name", long_col),
+            ("no parts", no_parts),
+            ("more parts than rows", too_many_parts),
+            ("version", wrong_version),
+            ("no tables", no_tables),
+            ("duplicate table", dup_table),
+            ("table name", bad_table_name),
+            ("no columns", no_cols),
+            ("parts limit", many_parts),
+        ]
+    }
+
+    #[test]
+    fn to_json_refuses_everything_from_json_refuses() {
+        // A manifest that could be written and then not read back would fail
+        // the preparation late, at the first reader.
+        for (label, m) in invalid_manifests() {
+            assert!(m.to_json().is_err(), "{label} was written");
+            let json = serde_json::to_vec(&m).unwrap();
+            assert!(Manifest::from_json(&json).is_err(), "{label} was read");
+        }
+    }
+
+    #[test]
+    fn whatever_to_json_accepts_from_json_accepts_and_gives_back() {
+        let mut seed = 0x2545_F491_4F6C_DD1Du64;
+        let mut next = move |m: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % m
+        };
+        let names = ["a", "b", "id", "Id", "x y", "", "q\u{7}", "long", "é"];
+        let types = [
+            ColumnType::Int,
+            ColumnType::Float,
+            ColumnType::Bool,
+            ColumnType::String,
+            ColumnType::Date,
+            ColumnType::Timestamp,
+        ];
+        let mut written = 0;
+        for _ in 0..3000 {
+            let tables = (0..1 + next(3))
+                .map(|_| TableInfo {
+                    name: names[next(names.len() as u64) as usize].to_string(),
+                    rows: next(5),
+                    parts: next(4) as u32,
+                    columns: (0..next(4))
+                        .map(|_| {
+                            col(
+                                names[next(names.len() as u64) as usize],
+                                types[next(6) as usize],
+                                next(1000),
+                            )
+                        })
+                        .collect(),
+                })
+                .collect();
+            let m = Manifest::new(tables);
+            if let Ok(json) = m.to_json() {
+                written += 1;
+                assert_eq!(Manifest::from_json(json.as_bytes()).unwrap(), m);
+            }
+        }
+        assert!(
+            written > 20,
+            "the generator hardly produced valid manifests: {written}"
+        );
+    }
+
+    #[test]
+    fn a_column_has_both_the_stored_size_and_an_estimate_of_its_size_in_memory() {
+        let c = ColumnInfo {
+            name: "t".into(),
+            column_type: ColumnType::String,
+            uncompressed_bytes: 100,
+            in_memory_bytes: 9_000,
+        };
+        let json = serde_json::to_string(&c).unwrap();
+        assert!(json.contains("\"in_memory_bytes\":9000"), "{json}");
+        let back: ColumnInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, c);
+    }
+
+    #[test]
+    fn a_manifest_of_another_version_is_refused_as_such() {
+        // Version 1 had no in_memory_bytes; it must be refused by its version,
+        // not by a parse error about a missing field.
+        let v1 = r#"{"version":1,"tables":[{"name":"t","rows":1,"parts":1,"columns":[{"name":"a","type":"int","uncompressed_bytes":9}]}]}"#;
+        let err = Manifest::from_json(v1.as_bytes()).unwrap_err().to_string();
+        assert!(err.contains("unsupported manifest version 1"), "{err}");
+        let v3 = sample()
+            .to_json()
+            .unwrap()
+            .replace("\"version\":2", "\"version\":3");
+        assert!(Manifest::from_json(v3.as_bytes())
+            .unwrap_err()
+            .to_string()
+            .contains("version 3"));
+        assert_eq!(sample().version, MANIFEST_VERSION);
+    }
+
+    #[test]
+    fn the_minimum_size_saturates_for_an_untrusted_row_count() {
+        for t in [
+            ColumnType::Int,
+            ColumnType::Float,
+            ColumnType::Timestamp,
+            ColumnType::Date,
+            ColumnType::String,
+        ] {
+            assert_eq!(min_in_memory_bytes(t, u64::MAX), u64::MAX, "{t:?}");
+            assert_eq!(min_in_memory_bytes(t, u64::MAX / 2 + 1), u64::MAX, "{t:?}");
+        }
+        assert_eq!(min_in_memory_bytes(ColumnType::Bool, u64::MAX), 1 << 61);
+        // A manifest that claims that many rows is refused, not a panic.
+        let m = Manifest::new(vec![TableInfo {
+            name: "t".into(),
+            rows: u64::MAX,
+            parts: 1,
+            columns: vec![ColumnInfo {
+                name: "a".into(),
+                column_type: ColumnType::Int,
+                uncompressed_bytes: 1,
+                in_memory_bytes: 1,
+            }],
+        }]);
+        assert!(Manifest::from_json(&serde_json::to_vec(&m).unwrap()).is_err());
+    }
+
+    #[test]
+    fn a_column_cannot_be_smaller_in_memory_than_its_rows_allow() {
+        for (t, rows, floor) in [
+            (ColumnType::Int, 1000u64, 8000u64),
+            (ColumnType::Float, 1000, 8000),
+            (ColumnType::Timestamp, 1000, 8000),
+            (ColumnType::Date, 1000, 4000),
+            (ColumnType::String, 1000, 4000),
+            (ColumnType::Bool, 1000, 125),
+        ] {
+            let mk = |bytes| {
+                Manifest::new(vec![TableInfo {
+                    name: "t".into(),
+                    rows,
+                    parts: 1,
+                    columns: vec![ColumnInfo {
+                        name: "a".into(),
+                        column_type: t,
+                        uncompressed_bytes: 1,
+                        in_memory_bytes: bytes,
+                    }],
+                }])
+            };
+            assert!(mk(floor).to_json().is_ok(), "{t:?} at the floor");
+            assert!(mk(floor - 1).to_json().is_err(), "{t:?} under the floor");
+            let json = serde_json::to_vec(&mk(floor - 1)).unwrap();
+            assert!(
+                Manifest::from_json(&json).is_err(),
+                "{t:?} read under the floor"
+            );
+        }
     }
 }
