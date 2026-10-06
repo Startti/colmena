@@ -345,3 +345,30 @@ The same cases run against Postgres from `postgres_registry.rs` as
 `tabular_prepare_pg_*`. They are `#[ignore]`d like the other Postgres repository
 tests and need `DATABASE_URL`:
 `DATABASE_URL=postgres://... cargo test --lib tabular_prepare -- --ignored`.
+## Conversion (CSV to Parquet)
+
+A large CSV is converted into typed Parquet parts by a trusted job, never by
+code the model writes. The converter is built from small modules, each dark
+(nothing calls them while `COLMENA_LARGE_TABULAR` is off). The sections below
+follow the order the data takes: the manifest and the part sink and writer that
+produce the output, then reading and typing a CSV, then the conversion that ties
+them together.
+
+### Manifest (`manifest.rs`)
+
+`manifest.json` lists, per table, its name, row count, part count and, per
+column, the name, type (`int`, `float`, `bool`, `string`, `date`, `timestamp`)
+and two sizes: `uncompressed_bytes` is the Parquet size as encoded (a
+dictionary-encoded string column is far smaller than its values; for information
+and for sizing storage) and `in_memory_bytes` is the column's decoded size in
+Arrow buffers (values, string offsets, validity bits), summed over the parts.
+**A reader that budgets memory starts from `in_memory_bytes`**, never
+`uncompressed_bytes`, and then applies its own multipliers: it is the size of the
+Arrow buffers, **not an upper bound of what pandas holds**. What to add per type
+(pandas 1.5 on numpy, per row):
+
+Parts live at `t<table>/part-NNNNN.parquet`, built by one function from numbers;
+`parse_part_path` accepts only that exact spelling, so a key from outside is
+never trusted as a part path. Excel sheet names that repeat (ignoring case) or
+are empty or too long become unique, deterministic names (`Sales`, `sales_2`;
+`sheet1` for an empty name).
