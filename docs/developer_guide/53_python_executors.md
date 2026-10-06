@@ -196,9 +196,12 @@ A call that asks for mounts gets its prepared data at `/data`, bound from the di
 call's new mount namespace: a descriptor from before `unshare` is refused by the kernel) and mounted read-only,
 `nosuid`, `nodev` and `noexec` at the MOUNT, so a world-writable file in it still fails with `EROFS`; the flags are read
 back with `statvfs` and a mount that did not take them ends the call. `/data` is created when the root filesystem
-lacks it (a link or a file there is refused); pre-create it in the image if the root filesystem is read-only. Nothing
-else of the staging volume is visible: the call directory and every other call's files are not bound, and `..` of
-`/data` is the jail's root. A call id the jail cannot trust (a bad charset, a link in the path, a `data` directory
+lacks it (a link or a file there is refused; calls starting together may race to create it, which is fine) and then
+stays, empty and not writable by the program, for later calls; pre-create it in the image if the root filesystem is
+read-only. The staging root is covered (an empty read-only `tmpfs`) for EVERY call once it is configured, with or without
+mounts, so a call without mounts cannot list it either. Nothing else of the staging volume is visible: the call directory and every other call's files are not bound, and `..` of
+`/data` is the jail's root. A call can still read the mount table, which names the other calls' output volumes
+(random ids, no content reachable). A call id the jail cannot trust (a bad charset, a link in the path, a `data` directory
 others can write in) ends the call before any code runs, with the crash text. Everything else the jail applies, the
 user, capabilities, limits, seccomp filter, environment and the empty network namespace, is the same with or without
 mounts (`tests/python_executor_mounts.rs` compares them from inside).

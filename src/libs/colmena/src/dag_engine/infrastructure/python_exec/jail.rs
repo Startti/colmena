@@ -204,11 +204,21 @@ fn open_staged(spec: &JailSpec, hdr: &CallHeader) -> io::Result<Option<CallDirs>
 /// does not exist yet is created, which needs a root filesystem that takes it.
 fn ensure_mount_point(target: &Path) -> io::Result<()> {
     use std::os::unix::fs::DirBuilderExt;
+    let is_dir = |m: std::fs::Metadata| match m.file_type().is_dir() {
+        true => Ok(()),
+        false => Err(io::Error::from(io::ErrorKind::InvalidInput)),
+    };
     match std::fs::symlink_metadata(target) {
-        Ok(m) if m.file_type().is_dir() => Ok(()),
-        Ok(_) => Err(io::Error::from(io::ErrorKind::InvalidInput)),
+        Ok(m) => is_dir(m),
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            std::fs::DirBuilder::new().mode(0o555).create(target)
+            match std::fs::DirBuilder::new().mode(0o555).create(target) {
+                Ok(()) => Ok(()),
+                // Another call made it first: it must be what this one needs.
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                    std::fs::symlink_metadata(target).and_then(is_dir)
+                }
+                Err(e) => Err(e),
+            }
         }
         Err(e) => Err(e),
     }
@@ -331,7 +341,10 @@ pub fn enter(spec: &JailSpec, hdr: &CallHeader, conn: UnixStream) -> Result<Unix
     let hidden = DEFAULT_HIDDEN
         .iter()
         .map(PathBuf::from)
-        .chain(spec.hide_paths.iter().cloned());
+        .chain(spec.hide_paths.iter().cloned())
+        // Every call, with or without mounts, finds the staging volume covered.
+        // A bind made above survives it: it names the directory, not the path.
+        .chain(spec.staging_root.iter().cloned());
     for p in hidden.filter(|p| p != Path::new("/tmp")) {
         hide(&p).map_err(at("mounts"))?;
     }
@@ -412,6 +425,29 @@ mod tests {
         for bad in [link, file] {
             let e = ensure_mount_point(&bad).unwrap_err();
             assert_eq!(e.kind(), io::ErrorKind::InvalidInput, "{bad:?}");
+        }
+    }
+
+    /// Calls start at the same time: whoever loses the race to create a mount
+    /// point finds it made and carries on.
+    #[test]
+    fn concurrent_calls_may_all_create_the_same_mount_point() {
+        let tmp = tempfile::tempdir().unwrap();
+        for round in 0..200 {
+            let target = std::sync::Arc::new(tmp.path().join(format!("m{round}")));
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+            let handles: Vec<_> = (0..8)
+                .map(|_| {
+                    let (t, b) = (target.clone(), barrier.clone());
+                    std::thread::spawn(move || {
+                        b.wait();
+                        ensure_mount_point(&t)
+                    })
+                })
+                .collect();
+            for h in handles {
+                h.join().unwrap().unwrap();
+            }
         }
     }
 

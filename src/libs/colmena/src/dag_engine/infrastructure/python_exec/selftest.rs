@@ -252,7 +252,10 @@ fn nested_under<'a>(p: &Path, mut covers: impl Iterator<Item = &'a Path>) -> boo
 /// Every hidden path: the defaults, then the configured ones.
 fn all_hidden(spec: &JailSpec) -> impl Iterator<Item = PathBuf> + '_ {
     let defaults = DEFAULT_HIDDEN.iter().map(PathBuf::from);
-    defaults.chain(spec.hide_paths.iter().cloned())
+    let staging = spec.staging_root.iter().cloned();
+    defaults
+        .chain(spec.hide_paths.iter().cloned())
+        .chain(staging)
 }
 
 /// An entry of the fresh `/proc`, checked as `proc_entries`.
