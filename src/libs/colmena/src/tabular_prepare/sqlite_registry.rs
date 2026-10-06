@@ -109,6 +109,28 @@ impl PreparationRegistry for SqlitePreparationRegistry {
         })
     }
 
+    async fn track_blobs(
+        &self,
+        source_key: &str,
+        owner: &str,
+        keys: &[String],
+        now: DateTime<Utc>,
+    ) -> Result<TerminalOutcome, RegistryError> {
+        let tracked = self.tracked_keys(source_key).await?;
+        let row = sqlx::query_scalar::<_, String>(&for_sqlite(TRACK_BLOBS_SQL))
+            .bind(source_key)
+            .bind(owner)
+            .bind(blob_keys_to_json(&merge_keys(&tracked, keys))?)
+            .bind(now)
+            .fetch_optional(&*self.pool)
+            .await
+            .map_err(|e| backend_err("track_blobs", e))?;
+        Ok(match row {
+            Some(_) => TerminalOutcome::Written,
+            None => TerminalOutcome::Cancelled,
+        })
+    }
+
     async fn still_owned(&self, source_key: &str, owner: &str) -> Result<bool, RegistryError> {
         let row = sqlx::query_scalar::<_, i32>(&for_sqlite(STILL_OWNED_SQL))
             .bind(source_key)

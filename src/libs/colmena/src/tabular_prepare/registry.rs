@@ -185,6 +185,20 @@ pub trait PreparationRegistry: Send + Sync {
         now: DateTime<Utc>,
     ) -> Result<TerminalOutcome, RegistryError>;
 
+    /// Add `keys` to the blobs the row tracks (a union), only while `owner` holds
+    /// the lease of a `running` row. A preparation calls it BEFORE it writes the
+    /// objects the keys name, so every object it may have written is listed in the
+    /// row whatever happens to the process afterwards; keys of objects that never
+    /// get written are harmless (deleting is idempotent). `Cancelled` leaves the
+    /// row untouched and means the caller must not write.
+    async fn track_blobs(
+        &self,
+        source_key: &str,
+        owner: &str,
+        keys: &[String],
+        now: DateTime<Utc>,
+    ) -> Result<TerminalOutcome, RegistryError>;
+
     /// Cancellation check: reads the row by primary key. `false` for a missing
     /// row or another owner. A read, never a write.
     async fn still_owned(&self, source_key: &str, owner: &str) -> Result<bool, RegistryError>;
@@ -332,6 +346,14 @@ pub(crate) const FAIL_SQL: &str = "\
 UPDATE attachment_prepared
    SET status = 'failed', error_code = $3, error_detail = $4, blob_keys = $5,
        lease_owner = NULL, lease_until = NULL, updated_at = $6
+ WHERE source_storage_key = $1 AND lease_owner = $2 AND status = 'running'
+RETURNING source_storage_key";
+
+/// `$1` key, `$2` owner, `$3` blob keys (JSON, already merged), `$4` now. The
+/// lease is not renewed: this is a write on the way, not progress.
+pub(crate) const TRACK_BLOBS_SQL: &str = "\
+UPDATE attachment_prepared
+   SET blob_keys = $3, updated_at = $4
  WHERE source_storage_key = $1 AND lease_owner = $2 AND status = 'running'
 RETURNING source_storage_key";
 
