@@ -110,8 +110,13 @@ fn row_to_attachment(
             .try_get("filename")
             .map_err(|e| AttachmentError::RepositoryFailed(format!("filename: {}", e)))?,
         size_bytes,
-        label: row.try_get("label").ok(),
-        description: row.try_get("description").ok(),
+        // A NULL decodes as `""` when read as a plain `String` under SQLite,
+        // which reads as "already described" and never queues a summary.
+        label: row.try_get::<Option<String>, _>("label").ok().flatten(),
+        description: row
+            .try_get::<Option<String>, _>("description")
+            .ok()
+            .flatten(),
         source,
         registered_at: parse_ts(&registered_at_str)?,
         refreshed_at: parse_ts(&refreshed_at_str)?,
@@ -503,6 +508,14 @@ mod tests {
         })
         .await
         .unwrap();
+
+        let undescribed = reg.lookup("s1", "doc-1", ProviderKind::Mock).await;
+        let undescribed = undescribed.unwrap().unwrap();
+        assert_eq!(
+            undescribed.description, None,
+            "NULL reads as no description"
+        );
+        assert_eq!(undescribed.label, None, "NULL reads as no label");
 
         reg.update_description("s1", "doc-1", ProviderKind::Mock, "Q3 financials")
             .await
