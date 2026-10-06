@@ -266,10 +266,57 @@ impl EngineConfig {
     }
 }
 
+/// Builds the node registry and applies everything `EngineConfig` says about
+/// it: the embedder's ports and the large tabular switch (`prepare`). Separate
+/// from [`ColmenaEngine::new`] so a test can prove the wiring without a database.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn node_registry_from_config(
+    conversation_factory: Arc<ConversationRepositoryFactory>,
+    sql_port_factory: Arc<SqlPortFactory>,
+    state_repo: Arc<PostgresDagStateRepository>,
+    secure_value_service: Option<Arc<SecureValueService>>,
+    storage: Arc<dyn OutputStorageRepository>,
+    attachment_registry: Arc<dyn AttachmentRegistry>,
+    child_graph_resolver: Option<Arc<dyn ChildGraphResolverPort>>,
+    host_token_port: Option<Arc<dyn HostTokenPort>>,
+    prepare: &crate::tabular_prepare::ports::PrepareConfig,
+) -> Arc<HashMapNodeRegistry> {
+    let node_registry = HashMapNodeRegistry::new_with_secure_values(
+        conversation_factory,
+        sql_port_factory,
+        Some(state_repo.clone() as Arc<dyn DagTaskMemoryRepository>),
+        secure_value_service,
+        Some(storage),
+        Some(attachment_registry),
+        Some(state_repo as Arc<dyn DagStateRepository>),
+    );
+    if let Some(resolver) = child_graph_resolver {
+        node_registry.set_child_graph_resolver(resolver);
+    }
+    if let Some(port) = host_token_port {
+        node_registry.set_host_token_port(port);
+    }
+    node_registry.set_large_tabular(prepare.large_tabular);
+    node_registry
+}
+
 pub struct ColmenaEngine {
     registry: Arc<PgPoolRegistry>,
     use_case: Arc<DagRunUseCase>,
     closed: AtomicBool,
+    /// The node registry the engine runs with, kept for tests of the wiring.
+    #[cfg(test)]
+    node_registry: Arc<HashMapNodeRegistry>,
+}
+
+/// What `ColmenaEngine::new` has ready once its database work is done.
+pub(crate) struct EngineParts {
+    registry: Arc<PgPoolRegistry>,
+    conversation_factory: Arc<ConversationRepositoryFactory>,
+    sql_port_factory: Arc<SqlPortFactory>,
+    state_repo: Arc<PostgresDagStateRepository>,
+    secure_value_service: Arc<SecureValueService>,
+    attachment_registry: Arc<dyn AttachmentRegistry>,
 }
 
 impl ColmenaEngine {
@@ -277,8 +324,7 @@ impl ColmenaEngine {
     /// schemas on it, build the node registry, and wire the `DagRunUseCase`.
     pub async fn new(config: EngineConfig) -> Result<Self, EngineError> {
         config.prepare.validate().map_err(EngineError::Other)?;
-        let liveness = config.liveness;
-        let registry = Arc::new(PgPoolRegistry::new(config.pool_config));
+        let registry = Arc::new(PgPoolRegistry::new(config.pool_config.clone()));
 
         // Pin the internal DB. The returned Arc<PgPool> is the sole Postgres
         // connection pool used by state + secure-value repositories, and is
@@ -330,31 +376,54 @@ impl ColmenaEngine {
             Arc::new(reg)
         };
 
-        let node_registry = HashMapNodeRegistry::new_with_secure_values(
+        Ok(Self::assemble(
+            config,
+            EngineParts {
+                registry,
+                conversation_factory,
+                sql_port_factory,
+                state_repo,
+                secure_value_service,
+                attachment_registry,
+            },
+        ))
+    }
+
+    /// Wires the node registry and the run use case from the config and the ready
+    /// parts. Everything the config says about the nodes (the embedder's ports,
+    /// the large tabular switch in `prepare`) is applied here, so a test can prove
+    /// it without a database.
+    pub(crate) fn assemble(config: EngineConfig, parts: EngineParts) -> Self {
+        let EngineParts {
+            registry,
             conversation_factory,
             sql_port_factory,
-            Some(state_repo.clone() as Arc<dyn DagTaskMemoryRepository>),
+            state_repo,
+            secure_value_service,
+            attachment_registry,
+        } = parts;
+        let liveness = config.liveness;
+        let node_registry = node_registry_from_config(
+            conversation_factory,
+            sql_port_factory,
+            state_repo.clone(),
             Some(secure_value_service.clone()),
-            Some(config.storage.clone()),
-            Some(attachment_registry.clone()),
-            Some(state_repo.clone() as Arc<dyn DagStateRepository>),
+            config.storage.clone(),
+            attachment_registry,
+            config.child_graph_resolver.clone(),
+            config.host_token_port.clone(),
+            &config.prepare,
         );
 
         let use_case = Arc::new(
             DagRunUseCase::with_secure_values_and_service(
                 node_registry.clone(),
-                Some(state_repo.clone()),
+                Some(state_repo),
                 secure_value_service,
             )
             .with_liveness(liveness),
         );
         node_registry.set_subgraph_executor(use_case.clone());
-        if let Some(resolver) = config.child_graph_resolver.clone() {
-            node_registry.set_child_graph_resolver(resolver);
-        }
-        if let Some(port) = config.host_token_port.clone() {
-            node_registry.set_host_token_port(port);
-        }
         node_registry.set_foreach_registry(node_registry.clone());
 
         tracing::info!(
@@ -363,11 +432,13 @@ impl ColmenaEngine {
             "engine_started"
         );
 
-        Ok(Self {
+        Self {
             registry,
             use_case,
             closed: AtomicBool::new(false),
-        })
+            #[cfg(test)]
+            node_registry,
+        }
     }
 
     /// Runs a graph to completion and returns the single final output.
@@ -595,6 +666,103 @@ impl Drop for ColmenaEngine {
                 "engine_dropped_without_shutdown"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod node_registry_wiring_tests {
+    //! `ColmenaEngine::new` does its database work and then hands the config and
+    //! the ready parts to `ColmenaEngine::assemble`. These tests run `assemble`
+    //! with stub parts (a lazy Postgres pool that never connects, an in-memory
+    //! SQLite attachment registry), so CI proves, without a database, that what
+    //! `EngineConfig.prepare` says reaches the node registry the engine runs with.
+    use super::*;
+    use crate::llm::infrastructure::persistence::SqliteAttachmentRegistry;
+    use crate::tabular_prepare::ports::PrepareConfig;
+
+    /// A secure-value store that is never used: building the engine does not touch it.
+    struct NoSecureValues;
+
+    #[async_trait::async_trait]
+    impl crate::dag_engine::domain::secure_value_repository::SecureValueRepository for NoSecureValues {
+        async fn persist(
+            &self,
+            _: &str,
+            _: Option<&str>,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &str,
+        ) -> Result<(), DagError> {
+            Ok(())
+        }
+        async fn decrypt(
+            &self,
+            _: &str,
+            _: Option<&str>,
+            _: &str,
+        ) -> Result<Option<String>, DagError> {
+            Ok(None)
+        }
+        async fn cleanup(&self, _: &str) -> Result<(), DagError> {
+            Ok(())
+        }
+        async fn cleanup_expired(&self) -> Result<u64, DagError> {
+            Ok(0)
+        }
+        async fn cleanup_expired_for_run(&self, _: &str, _: Option<&str>) -> Result<u64, DagError> {
+            Ok(0)
+        }
+    }
+
+    async fn engine_with(prepare: PrepareConfig) -> ColmenaEngine {
+        // Built field by field, not from the environment: a test must not set
+        // process-wide variables other tests read.
+        let config = EngineConfig {
+            internal_database_url: "postgres://unused:unused@127.0.0.1:1/unused".to_string(),
+            pool_config: PoolConfig::defaults(),
+            storage: Arc::new(LocalCacheStorageAdapter::new()),
+            attachment_registry: None,
+            liveness: crate::dag_engine::application::liveness::LivenessSettings::from_env(),
+            child_graph_resolver: None,
+            host_token_port: None,
+            prepare,
+        };
+        let pools = Arc::new(PgPoolRegistry::new(config.pool_config.clone()));
+        // A lazy pool never connects: assembling does not touch it.
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
+            .unwrap();
+        let attachments: Arc<dyn AttachmentRegistry> = Arc::new(
+            SqliteAttachmentRegistry::new("sqlite::memory:")
+                .await
+                .unwrap(),
+        );
+        let parts = EngineParts {
+            conversation_factory: Arc::new(ConversationRepositoryFactory::new(pools.clone())),
+            sql_port_factory: Arc::new(SqlPortFactory::new(pools.clone())),
+            state_repo: Arc::new(PostgresDagStateRepository::new(pool)),
+            secure_value_service: Arc::new(SecureValueService::new(Arc::new(NoSecureValues))),
+            attachment_registry: attachments,
+            registry: pools,
+        };
+        ColmenaEngine::assemble(config, parts)
+    }
+
+    #[tokio::test]
+    async fn the_prepare_switch_reaches_the_engines_node_registry() {
+        let on = PrepareConfig {
+            large_tabular: true,
+            ..PrepareConfig::default()
+        };
+        assert!(engine_with(on).await.node_registry.large_tabular_enabled());
+        assert!(
+            !engine_with(PrepareConfig::default())
+                .await
+                .node_registry
+                .large_tabular_enabled(),
+            "off by default"
+        );
     }
 }
 
