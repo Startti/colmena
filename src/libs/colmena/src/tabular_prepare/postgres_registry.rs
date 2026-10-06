@@ -336,6 +336,26 @@ mod tests {
         tabular_prepare_pg_a_source_that_never_yields_ends_with_the_time_reason,
         a_source_that_never_yields_ends_with_the_time_reason
     );
+    pg_driver_case!(
+        tabular_prepare_pg_a_job_whose_row_was_deleted_stops_before_its_next_part_and_leaves_no_row,
+        a_job_whose_row_was_deleted_stops_before_its_next_part_and_leaves_no_row
+    );
+    pg_driver_case!(
+        tabular_prepare_pg_a_job_whose_lease_was_taken_stops_and_leaves_the_new_owners_row_and_objects,
+        a_job_whose_lease_was_taken_stops_and_leaves_the_new_owners_row_and_objects
+    );
+    pg_driver_case!(
+        tabular_prepare_pg_a_completion_that_finds_the_row_gone_is_cancelled_and_never_ready,
+        a_completion_that_finds_the_row_gone_is_cancelled_and_never_ready
+    );
+    pg_driver_case!(
+        tabular_prepare_pg_an_unopenable_source_releases_the_row_without_a_failure,
+        an_unopenable_source_releases_the_row_without_a_failure
+    );
+    pg_driver_case!(
+        tabular_prepare_pg_a_source_deleted_during_a_restart_removes_what_was_written_and_releases_the_row,
+        a_source_deleted_during_a_restart_removes_what_was_written_and_releases_the_row
+    );
     pg_case!(
         tabular_prepare_pg_a_deleting_row_is_never_taken_by_an_older_format_claim,
         a_deleting_row_is_never_taken_by_an_older_format_claim

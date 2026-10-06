@@ -735,3 +735,16 @@ maps it to what the user sees:
 
 Nothing is written for a cancellation (the source was deleted or another job owns the
 row). The Excel unit adds its own reasons when it exists.
+
+**Ownership.** Every object a preparation writes (each part, then the manifest) is
+preceded by a read of the registry (`still_owned`): a preparation whose row was deleted
+(the source was removed) or taken by another job stops before its next write and never
+completes. The objects have deterministic keys, so a job that lost its row must not
+write over those of whoever owns it now. What it does then depends on why: if the row is
+gone, what it wrote belongs to nobody and is deleted; if another job owns the row, the
+objects are left alone, and the registry is not written either way (`Cancelled`). A
+`complete` that finds the row gone or taken is the same case. A source that does not
+exist (on the first read, or on a restart after some parts were written) deletes what was
+written and releases the row, keeping no failure (`SourceGone`); if the objects cannot be
+deleted the row stays, failed with `storage` and the keys, so the cleanup pass can reach
+them. A storage that cannot be reached is not a missing source: it is a `storage` failure.

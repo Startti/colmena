@@ -203,6 +203,10 @@ pub(crate) mod fake {
         /// first of them signals `hung`.
         pub hang_stores_from: Mutex<Option<usize>>,
         pub hung: tokio::sync::Notify,
+        /// Lets the hung store go on (once; later stores are not hung).
+        pub release_hang: tokio::sync::Notify,
+        /// The second open of a source finds it deleted.
+        pub remove_source_on_second_open: Mutex<bool>,
     }
 
     impl PlacedStorage {
@@ -258,6 +262,9 @@ pub(crate) mod fake {
                     filename: String::new(),
                 });
             }
+            if n == 2 && *self.remove_source_on_second_open.lock().unwrap() {
+                self.objects.lock().unwrap().remove(key);
+            }
             let swapped = if n == 2 {
                 self.swap_on_second_open.lock().unwrap().clone()
             } else {
@@ -295,7 +302,8 @@ pub(crate) mod fake {
                 .is_some_and(|f| n >= f)
             {
                 self.hung.notify_one();
-                futures::future::pending::<()>().await;
+                self.release_hang.notified().await;
+                *self.hang_stores_from.lock().unwrap() = None;
             }
             if self
                 .fail_stores_from

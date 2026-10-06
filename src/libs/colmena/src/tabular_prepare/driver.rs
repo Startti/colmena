@@ -21,7 +21,7 @@ use crate::tabular_prepare::manifest::{
     unique_table_names, ConversionReport, Manifest, ManifestError, TableInfo, MANIFEST_PATH,
     MAX_REPORTED_DEMOTED,
 };
-use crate::tabular_prepare::part_sink::PartSink;
+use crate::tabular_prepare::part_sink::{PartSink, SinkError};
 use crate::tabular_prepare::ports::PrepareRequest;
 use crate::tabular_prepare::prepare::{PrepareStartError, StorageCsvSource, StoragePartSink};
 use crate::tabular_prepare::registry::{
@@ -29,10 +29,12 @@ use crate::tabular_prepare::registry::{
     FORMAT_VERSION,
 };
 use crate::tabular_prepare::writer::{WriterConfig, WriterError};
+use async_trait::async_trait;
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -147,6 +149,9 @@ pub enum PrepareOutcome {
     NotClaimed,
     /// The row is gone or another job owns it: nothing was recorded.
     Cancelled,
+    /// The source no longer exists: what was written is removed and the row
+    /// released, with no failure kept.
+    SourceGone,
     Failed(PrepareFailure),
 }
 
@@ -223,6 +228,38 @@ pub fn report_of(table: &str, t: &ConvertedTable) -> ConversionReport {
     }
 }
 
+/// The sink of a run: before every object it checks, with a read, that the
+/// preparation still owns its row, and refuses to write when it does not. The
+/// objects are written under deterministic keys, so a job that lost its row must
+/// not write over those of whoever owns it now.
+struct OwnedSink {
+    inner: Arc<StoragePartSink>,
+    registry: Arc<dyn PreparationRegistry>,
+    source_key: String,
+    owner: String,
+    lost: AtomicBool,
+}
+
+#[async_trait]
+impl PartSink for OwnedSink {
+    async fn put(&self, path: &str, data: Bytes) -> Result<(), SinkError> {
+        match self
+            .registry
+            .still_owned(&self.source_key, &self.owner)
+            .await
+        {
+            Ok(true) => self.inner.put(path, data).await,
+            Ok(false) => {
+                self.lost.store(true, Ordering::SeqCst);
+                Err(SinkError("the preparation no longer owns its row".into()))
+            }
+            Err(_) => Err(SinkError(
+                "the registry could not confirm the preparation's row".into(),
+            )),
+        }
+    }
+}
+
 /// Prepares `req.source_key` as table 0 of its source. Registry errors are
 /// returned as they are: if the registry cannot be written nothing can be
 /// recorded.
@@ -230,7 +267,7 @@ pub async fn prepare_csv(
     env: &PrepareEnv,
     req: &PrepareRequest,
 ) -> Result<PrepareOutcome, RegistryError> {
-    let sink = match StoragePartSink::new(env.storage.clone(), &req.source_key) {
+    let stored = match StoragePartSink::new(env.storage.clone(), &req.source_key) {
         Ok(sink) => Arc::new(sink),
         Err(e) => return Ok(PrepareOutcome::Refused(e)),
     };
@@ -250,11 +287,18 @@ pub async fn prepare_csv(
     if claim.is_none() {
         return Ok(PrepareOutcome::NotClaimed);
     }
+    let sink = Arc::new(OwnedSink {
+        inner: stored.clone(),
+        registry: env.registry.clone(),
+        source_key: req.source_key.clone(),
+        owner: owner.clone(),
+        lost: AtomicBool::new(false),
+    });
     let control = ConvertControl::new();
     let source = StorageCsvSource::new(env.storage.clone(), &req.source_key);
     // Every key any run may have written, as full storage keys.
     let keys_of =
-        |paths: Vec<String>| -> Vec<String> { paths.iter().map(|p| sink.key_of(p)).collect() };
+        |paths: Vec<String>| -> Vec<String> { paths.iter().map(|p| stored.key_of(p)).collect() };
     // The run is dropped when the budget ends first: that cancels its reader,
     // and the keys it recorded in `control` before each put are still there.
     let converted = tokio::select! {
@@ -281,9 +325,9 @@ pub async fn prepare_csv(
             }])
             .with_conversion(vec![report_of(&name, &table)]);
             let mut blob_keys = keys_of(table.blob_paths.clone());
-            let manifest_key = sink.key_of(MANIFEST_PATH);
+            let manifest_key = stored.key_of(MANIFEST_PATH);
             blob_keys.push(manifest_key.clone());
-            let stored = async {
+            let manifest_put = async {
                 let tables_json = manifest.tables_json().map_err(|_| {
                     (
                         reason::TABLE_TOO_LARGE,
@@ -308,15 +352,18 @@ pub async fn prepare_csv(
                 Ok::<_, (&'static str, String)>(tables_json)
             }
             .await;
-            let tables_json = match stored {
+            let tables_json = match manifest_put {
                 Ok(t) => t,
                 Err((code, detail)) => {
+                    if sink.lost.load(Ordering::SeqCst) {
+                        return settle_lost(env, req, &blob_keys).await;
+                    }
                     return fail(env, req, &owner, code, detail, blob_keys).await;
                 }
             };
             let mut live: Vec<String> = table.live_paths(0);
             live.push(MANIFEST_PATH.to_string());
-            let prepared_bytes = sink.bytes_of(live.iter());
+            let prepared_bytes = stored.bytes_of(live.iter());
             let outcome = env
                 .registry
                 .complete(
@@ -332,7 +379,7 @@ pub async fn prepare_csv(
                 )
                 .await?;
             match outcome {
-                TerminalOutcome::Cancelled => Ok(PrepareOutcome::Cancelled),
+                TerminalOutcome::Cancelled => settle_lost(env, req, &blob_keys).await,
                 TerminalOutcome::Written => {
                     let stale_keys = keys_of(table.stale_paths.clone());
                     Ok(PrepareOutcome::Ready(Box::new(PreparedTable {
@@ -347,11 +394,66 @@ pub async fn prepare_csv(
             }
         }
         Err(failure) => {
+            let keys = keys_of(failure.blob_paths.clone());
+            if sink.lost.load(Ordering::SeqCst) {
+                return settle_lost(env, req, &keys).await;
+            }
+            if matches!(
+                failure.error,
+                TableError::Convert(ConvertError::SourceMissing)
+            ) {
+                return source_gone(env, req, &owner, keys).await;
+            }
             let (code, detail) = classify(&failure.error);
-            let keys = keys_of(failure.blob_paths);
             fail(env, req, &owner, code, detail, keys).await
         }
     }
+}
+
+/// The preparation lost its row: it records nothing. If the row is gone (the
+/// source was deleted) what it wrote belongs to nobody and is removed; if
+/// another job owns the row, the keys are the same deterministic ones and belong
+/// to that job now, so they are left alone.
+async fn settle_lost(
+    env: &PrepareEnv,
+    req: &PrepareRequest,
+    keys: &[String],
+) -> Result<PrepareOutcome, RegistryError> {
+    if env.registry.get(&req.source_key).await?.is_none() {
+        if let Err(e) = env.storage.delete_derived(&req.source_key, keys).await {
+            tracing::warn!(
+                target: "colmena::tabular_prepare",
+                error = %e,
+                "could not delete the objects of a cancelled preparation"
+            );
+        }
+    }
+    Ok(PrepareOutcome::Cancelled)
+}
+
+/// The source does not exist (any more): nothing is worth keeping and no
+/// failure is recorded. The objects are deleted first; if that fails the row
+/// stays, failed, with the keys, so the cleanup pass can still reach them.
+async fn source_gone(
+    env: &PrepareEnv,
+    req: &PrepareRequest,
+    owner: &str,
+    keys: Vec<String>,
+) -> Result<PrepareOutcome, RegistryError> {
+    if env
+        .storage
+        .delete_derived(&req.source_key, &keys)
+        .await
+        .is_err()
+    {
+        let detail = "the objects of a deleted source could not be removed".to_string();
+        return fail(env, req, owner, reason::STORAGE, detail, keys).await;
+    }
+    Ok(if env.registry.release(&req.source_key, owner).await? {
+        PrepareOutcome::SourceGone
+    } else {
+        PrepareOutcome::Cancelled
+    })
 }
 
 /// Records the failure with every key that may exist, then deletes them.
@@ -937,6 +1039,143 @@ pub(crate) mod cases {
         assert_eq!(storage.keys(), vec![source.to_string()]);
     }
 
+    /// Another job takes the row of `source`.
+    async fn take_over(registry: &Arc<dyn PreparationRegistry>, source: &str) {
+        registry.delete(source).await.unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 10, 6, 12, 0, 0).unwrap();
+        let claim = ClaimRequest {
+            source_key: source.to_string(),
+            source_bytes: 1,
+            format_version: FORMAT_VERSION,
+            owner: "other".into(),
+            lease: lease_for(chrono::Duration::seconds(300)),
+            now,
+        };
+        assert!(registry.claim(claim).await.unwrap().is_some());
+    }
+
+    /// Runs a preparation whose second put hangs, lets `during` change the
+    /// registry while it hangs, then lets it go on.
+    async fn run_hung_at<F, Fut>(
+        registry: &Arc<dyn PreparationRegistry>,
+        storage: &Arc<PlacedStorage>,
+        source: &str,
+        hang_at: usize,
+        during: F,
+    ) -> PrepareOutcome
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = ()>,
+    {
+        *storage.hang_stores_from.lock().unwrap() = Some(hang_at);
+        let env = env(registry.clone(), storage.clone());
+        let req = request(source, 40);
+        let run = tokio::spawn(async move { prepare_csv(&env, &req).await.unwrap() });
+        storage.hung.notified().await;
+        during().await;
+        storage.release_hang.notify_one();
+        run.await.unwrap()
+    }
+
+    pub(crate) async fn a_job_whose_row_was_deleted_stops_before_its_next_part_and_leaves_no_row(
+        registry: Arc<dyn PreparationRegistry>,
+    ) {
+        let source = fresh_source();
+        let source = source.as_str();
+        let storage = PlacedStorage::with_source(source, five_rows());
+        let out = run_hung_at(&registry, &storage, source, 1, || async {
+            registry.delete(source).await.unwrap();
+        })
+        .await;
+        assert!(matches!(out, PrepareOutcome::Cancelled), "{out:?}");
+        // The second part went through (it was in flight), the third was never tried.
+        assert_eq!(*storage.stores.lock().unwrap(), 2);
+        // Nothing is recorded, and what it wrote belongs to nobody: removed.
+        assert!(registry.get(source).await.unwrap().is_none());
+        assert_eq!(storage.keys(), vec![source.to_string()]);
+        for k in part_keys(source, 2) {
+            assert!(storage.deleted.lock().unwrap().contains(&k));
+        }
+    }
+
+    pub(crate) async fn a_job_whose_lease_was_taken_stops_and_leaves_the_new_owners_row_and_objects(
+        registry: Arc<dyn PreparationRegistry>,
+    ) {
+        let source = fresh_source();
+        let source = source.as_str();
+        let storage = PlacedStorage::with_source(source, five_rows());
+        let out = run_hung_at(&registry, &storage, source, 1, || async {
+            take_over(&registry, source).await;
+        })
+        .await;
+        assert!(matches!(out, PrepareOutcome::Cancelled), "{out:?}");
+        assert_eq!(*storage.stores.lock().unwrap(), 2);
+        // The new owner's row is untouched: running, not failed, nothing deleted
+        // (the keys are the deterministic ones it writes now).
+        let row = registry.get(source).await.unwrap().unwrap();
+        assert_eq!(row.status, PrepareStatus::Running);
+        assert_eq!(row.lease_owner.as_deref(), Some("other"));
+        assert_eq!(row.error_code, None);
+        assert!(storage.deleted.lock().unwrap().is_empty());
+        assert_eq!(objects_but_source(&storage, source).len(), 2);
+    }
+
+    pub(crate) async fn a_completion_that_finds_the_row_gone_is_cancelled_and_never_ready(
+        registry: Arc<dyn PreparationRegistry>,
+    ) {
+        let source = fresh_source();
+        let source = source.as_str();
+        let storage = PlacedStorage::with_source(source, five_rows());
+        // Three parts, then the manifest is the fourth put: the row is deleted
+        // while it is being stored, after the ownership check before it passed.
+        let out = run_hung_at(&registry, &storage, source, 3, || async {
+            registry.delete(source).await.unwrap();
+        })
+        .await;
+        assert!(matches!(out, PrepareOutcome::Cancelled), "{out:?}");
+        assert!(registry.get(source).await.unwrap().is_none());
+        assert_eq!(storage.keys(), vec![source.to_string()]);
+    }
+
+    pub(crate) async fn an_unopenable_source_releases_the_row_without_a_failure(
+        registry: Arc<dyn PreparationRegistry>,
+    ) {
+        let source = fresh_source();
+        let source = source.as_str();
+        let storage = Arc::new(PlacedStorage::default());
+        let env = env(registry.clone(), storage.clone());
+        let out = prepare_csv(&env, &request(source, 40)).await.unwrap();
+        assert!(matches!(out, PrepareOutcome::SourceGone), "{out:?}");
+        assert!(registry.get(source).await.unwrap().is_none());
+        assert_eq!(*storage.stores.lock().unwrap(), 0);
+    }
+
+    pub(crate) async fn a_source_deleted_during_a_restart_removes_what_was_written_and_releases_the_row(
+        registry: Arc<dyn PreparationRegistry>,
+    ) {
+        let source = fresh_source();
+        let source = source.as_str();
+        let mut first = b"id\n".to_vec();
+        for i in 0..10_000 {
+            first.extend_from_slice(format!("{i}\n").as_bytes());
+        }
+        first.extend_from_slice(b"late\n");
+        let storage = PlacedStorage::with_source(source, first);
+        *storage.remove_source_on_second_open.lock().unwrap() = true;
+        let env = env(registry.clone(), storage.clone()).with_writer(WriterConfig {
+            max_rows: 2000,
+            max_bytes: usize::MAX,
+        });
+        let out = prepare_csv(&env, &request(source, 60_000)).await.unwrap();
+        assert!(matches!(out, PrepareOutcome::SourceGone), "{out:?}");
+        assert!(registry.get(source).await.unwrap().is_none());
+        // The four parts the first run wrote are gone, and so is the source.
+        assert!(storage.keys().is_empty());
+        for k in part_keys(source, 4) {
+            assert!(storage.deleted.lock().unwrap().contains(&k));
+        }
+    }
+
     pub(crate) async fn a_restart_with_fewer_parts_leaves_stale_keys_the_manifest_never_names(
         registry: Arc<dyn PreparationRegistry>,
     ) {
@@ -1053,5 +1292,25 @@ mod registry_tests {
     sqlite_case!(
         tabular_prepare_a_source_that_never_yields_ends_with_the_time_reason,
         a_source_that_never_yields_ends_with_the_time_reason
+    );
+    sqlite_case!(
+        tabular_prepare_a_job_whose_row_was_deleted_stops_before_its_next_part_and_leaves_no_row,
+        a_job_whose_row_was_deleted_stops_before_its_next_part_and_leaves_no_row
+    );
+    sqlite_case!(
+        tabular_prepare_a_job_whose_lease_was_taken_stops_and_leaves_the_new_owners_row_and_objects,
+        a_job_whose_lease_was_taken_stops_and_leaves_the_new_owners_row_and_objects
+    );
+    sqlite_case!(
+        tabular_prepare_a_completion_that_finds_the_row_gone_is_cancelled_and_never_ready,
+        a_completion_that_finds_the_row_gone_is_cancelled_and_never_ready
+    );
+    sqlite_case!(
+        tabular_prepare_an_unopenable_source_releases_the_row_without_a_failure,
+        an_unopenable_source_releases_the_row_without_a_failure
+    );
+    sqlite_case!(
+        tabular_prepare_a_source_deleted_during_a_restart_removes_what_was_written_and_releases_the_row,
+        a_source_deleted_during_a_restart_removes_what_was_written_and_releases_the_row
     );
 }
