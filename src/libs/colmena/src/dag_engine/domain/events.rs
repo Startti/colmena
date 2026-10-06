@@ -45,10 +45,10 @@ pub enum DagExecutionEvent {
         /// (`SideCall::node_id`), so a parent run bills it the same way.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         side_call: Option<SideCall>,
-        /// The child run (session id) it was made in, whose own summary bills
-        /// it: a parent's leaves it out. Set by [`Self::nested`].
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        nested: Option<String>,
+        /// Made in a child run (`subgraph`, agent as a tool), whose own summary
+        /// bills it: a parent's leaves it out. Set by [`Self::nested`].
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        nested: bool,
     },
     #[serde(rename = "llm_tool_call_start")]
     LlmToolCallStart {
@@ -148,10 +148,6 @@ pub enum DagExecutionEvent {
     /// Emitted at the beginning of each loop turn
     #[serde(rename = "turn_start")]
     TurnStart { turn: u32 },
-    /// A child run's first event: its session id, so its parent knows where
-    /// that run's usage summary lands. Bookkeeping only: no SSE frame.
-    #[serde(rename = "run_start")]
-    RunStart { run: String },
     /// Emitted when a subgraph node completes. Carries `node_type: "subgraph"` so the
     /// data-stream protocol can distinguish it from a regular NodeFinish.
     #[serde(rename = "subgraph_node_finish")]
@@ -167,7 +163,7 @@ pub enum DagExecutionEvent {
     #[serde(rename = "graph_usage_summary")]
     GraphUsageSummary {
         entries: Vec<Value>,
-        /// The run (session id) it bills, so a parent knows it was billed.
+        /// The run (session id) it bills, so its parent knows it was sent.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         run: Option<String>,
     },
@@ -290,18 +286,32 @@ pub struct NodeEndError {
 }
 
 impl DagExecutionEvent {
-    /// This event as it leaves child run `run` for its parent: a usage, wrapped
-    /// or not, is marked `nested` in the innermost run that made it, whose
-    /// summary bills it.
-    pub fn nested(mut self, run: &str) -> Self {
+    /// This event as it leaves a child run for its parent: a usage, wrapped or
+    /// not, is marked `nested`, so only the child's own summary bills it.
+    pub fn nested(mut self) -> Self {
         match &mut self {
-            Self::LlmUsage { nested, .. } => {
-                nested.get_or_insert_with(|| run.to_string());
-            }
-            Self::SubgraphWrapped { inner, .. } => **inner = inner.clone().nested(run),
+            Self::LlmUsage { nested, .. } => *nested = true,
+            Self::SubgraphWrapped { inner, .. } => **inner = inner.clone().nested(),
             _ => {}
         }
         self
+    }
+
+    /// Whether this is a usage event or a usage summary, wrapped or not.
+    pub fn is_usage(&self) -> bool {
+        match self {
+            Self::SubgraphWrapped { inner, .. } => inner.is_usage(),
+            e => matches!(e, Self::LlmUsage { .. } | Self::GraphUsageSummary { .. }),
+        }
+    }
+
+    /// The run a usage summary, wrapped or not, bills.
+    pub fn usage_summary_run(&self) -> Option<&str> {
+        match self {
+            Self::SubgraphWrapped { inner, .. } => inner.usage_summary_run(),
+            Self::GraphUsageSummary { run, .. } => run.as_deref(),
+            _ => None,
+        }
     }
 
     /// Whether this is the usage of a side call made by node `node_id`
@@ -355,7 +365,7 @@ impl DagExecutionEvent {
                 cache_read_tokens,
                 cache_write_tokens,
                 side_call,
-                nested: None,
+                nested: false,
             },
             NodeEvent::LlmToolCallStart {
                 tool_id,
@@ -554,7 +564,6 @@ impl DagExecutionEvent {
             | DagExecutionEvent::LlmMessageStart { .. }
             | DagExecutionEvent::LlmMessageFinish { .. }
             | DagExecutionEvent::TurnStart { .. }
-            | DagExecutionEvent::RunStart { .. }
             | DagExecutionEvent::Progress { .. }
             | DagExecutionEvent::GraphFinish { .. } => false,
             DagExecutionEvent::SubgraphWrapped { inner, .. } => inner.advances_heartbeat_clock(),
@@ -771,7 +780,7 @@ mod tests {
             cache_read_tokens: None,
             cache_write_tokens: None,
             side_call: None,
-            nested: None,
+            nested: false,
         }
         .advances_heartbeat_clock());
         assert!(!DagExecutionEvent::TurnStart { turn: 1 }.advances_heartbeat_clock());

@@ -523,18 +523,20 @@ cancelada con una llamada en vuelo; cada llamada en exactamente una fila y todo 
 Mutaciones: resumen después del terminal, o solo en `GraphFinish`: fallan. Una hija que su padre descarta al
 cancelar no manda resumen: lo cubre §32. **Estado.** done.
 
-## 32. Facturación: el padre cobra por la hija que descartó al cancelar
+## 32. Facturación: lo que se llamó antes de un stop se cobra, aunque la corrida no lo haya leído
 
-**Qué cambia.** Al parar el turno, el padre descarta la corrida hija en vuelo (un `subgraph`, un agente como
-tool) sin que esta llegue a su salida, así que no manda su `subgraph-usage-summary`, y el padre no cuenta lo
-anidado (§30): lo que la hija ya había llamado quedaba sin cobrar. Ahora `nested` de un `LlmUsage` es el
-`session_id` de la corrida hija que lo hizo (la más interna) y `GraphUsageSummary` lleva `run`, la corrida que
-cobra. El padre guarda lo de cada hija en `UsageLedger::unbilled` hasta ver su resumen, y al terminar (por
-cualquier salida, antes del frame terminal) manda por cada hija sin resumen un `subgraph-usage-summary` con sus
-filas: `… subgraph-usage-summary, cancelled, finish`, con el mismo `level` y `path` que habría tenido el resumen
-de la hija (cada corrida hija emite primero un `RunStart { run }`, sin frame SSE, y el padre anota dónde cae). Una llamada en vuelo al cancelar no reporta uso y no se
-cobra en ningún lado (tampoco en `finish.usage`). **Compatibilidad.** El stream crudo (`engine.rs`) muestra
-`"nested": "<session_id>"` en un `LlmUsage` de una hija (antes `true`) y `"run"` en `graph_usage_summary`; los
-frames SSE no cambian. **Tests.** `a_cancelled_run_bills_its_calls` con la hija; mutaciones: sin el resumen por
-la hija, o sin descontar la hija que mandó el suyo, fallan. **Estado.** done.
-
+**Qué cambia.** (1) Un nodo manda su uso por un canal que la corrida lee entre otras cosas; si el stop (o el
+watchdog de inactividad) ganaba la carrera, el uso de una llamada que ya había terminado quedaba en el canal y no
+se cobraba. Ahora el observer de cada nodo (`ChannelObserver`) lo cobra en el `UsageLedger` cuando se manda, y lo
+que queda en el canal se emite antes del frame terminal (`consumed_left_in`), también en una corrida hija
+cancelada por su llamada. (2) Al parar el turno, el padre descarta la corrida hija en vuelo (un `subgraph`, un
+agente como tool) antes de que llegue a su salida, y el padre no cuenta lo anidado (§30): lo que la hija había
+llamado quedaba sin cobrar. Ahora una corrida hija descartada manda su resumen al observer de su nodo padre
+(`SummaryOnDrop`, después de descartar sus propias hijas), y el padre lo emite antes de su frame terminal, con
+el mismo `level`/`path` que el resumen de una hija que termina: `… subgraph-usage-summary, cancelled, finish`.
+`GraphUsageSummary` lleva `run` (la corrida que cobra; no sale en el frame SSE) para que el padre no lo emita dos
+veces. Una llamada en vuelo al parar no reporta uso y no se cobra en ningún lado. `finish.usage` no incluye lo
+que una hija descartada no llegó a emitir. **Tests.** `a_cancelled_run_bills_its_calls` (raíz, hija, nieta; el
+resumen de la hija cortada en el mismo lugar que el de una que termina) y `a_usage_queued_when_the_turn_stops_is_billed`
+(raíz e hija, 20 veces cada una). Mutaciones: sin el resumen al descartar, resumen antes de descartar las hijas,
+cobro al leer en vez de al mandar, o sin descontar el resumen ya emitido: fallan. **Estado.** done.

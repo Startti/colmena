@@ -513,9 +513,10 @@ El texto completo también queda disponible en `output.final_response` del `node
 > reanudar: lo de antes salió en el resumen del turno que se suspendió. Hasta
 > el 2026-10-05 una corrida que fallaba, se cancelaba o se suspendía no
 > mandaba resumen.
-> Una hija que el padre descarta al cancelar no llega a mandarlo: el padre manda
-> su `subgraph-usage-summary` por ella, también antes de `cancelled`, con el
-> `level` y el `path` que habría tenido el de la hija.
+> Una hija que el padre descarta al cancelar manda su `subgraph-usage-summary`
+> al descartarse, y sale antes de `cancelled`, con el mismo `level` y `path`
+> que el de una hija que termina. Una llamada que terminó justo cuando se paró
+> el turno también se cobra.
 >
 > Ver [§14 — Provider prompt caching](developer_guide/14_llm_deep_dive.md) para
 > la fórmula de costo y la tabla de semántica por provider.

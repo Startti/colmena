@@ -54,6 +54,9 @@ pub struct DagRunUseCase {
     /// gets none, a nested run never has one (`as_nested_run` drops it), and
     /// its nodes hide the parent's.
     steering: Option<Arc<dyn SteeringInbox>>,
+    /// A child run's parent node observer: a child dropped before it ends
+    /// sends its usage summary there (`with_usage_summaries`).
+    usage_sink: Option<Arc<dyn crate::dag_engine::domain::observer::ExecutionObserver>>,
 }
 
 impl DagRunUseCase {
@@ -70,6 +73,7 @@ impl DagRunUseCase {
             nested_run: false,
             call_registry: None,
             steering: None,
+            usage_sink: None,
         }
     }
 
@@ -92,6 +96,7 @@ impl DagRunUseCase {
             nested_run: false,
             call_registry: None,
             steering: None,
+            usage_sink: None,
         }
     }
 
@@ -126,6 +131,15 @@ impl DagRunUseCase {
         self.nested_run = true;
         // A child never reads the person's messages: only the root's agent does.
         self.steering = None;
+        self
+    }
+
+    /// Where this child run sends its usage summary if dropped before it ends.
+    fn with_usage_sink(
+        mut self,
+        sink: Option<Arc<dyn crate::dag_engine::domain::observer::ExecutionObserver>>,
+    ) -> Self {
+        self.usage_sink = sink;
         self
     }
 
@@ -263,6 +277,7 @@ impl DagRunUseCase {
     > {
         let ledger = Arc::new(std::sync::Mutex::new(UsageLedger::default()));
         let summaries = ledger.clone();
+        let sink = self.usage_sink.clone();
         let run = async_stream::try_stream! {
             use crate::dag_engine::domain::events::{DagExecutionEvent, NodeEndError};
             use crate::dag_engine::domain::observer::NodeEvent;
@@ -500,9 +515,6 @@ impl DagRunUseCase {
 
             // Usage is billed on `ledger`, summarized by `with_usage_summaries`.
             ledger.lock().unwrap().run = session_id.clone();
-            if self.nested_run {
-                yield DagExecutionEvent::RunStart { run: session_id.clone() };
-            }
 
             // Start cyclic execution loop
             while let Some(node_id) = active_queue.pop_front() {
@@ -796,7 +808,7 @@ impl DagRunUseCase {
 
                 let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
                 let channel_observer: Arc<dyn crate::dag_engine::domain::observer::ExecutionObserver> =
-                    Arc::new(ChannelObserver { tx });
+                    Arc::new(ChannelObserver { tx, node_id: node_id.clone(), ledger: ledger.clone() });
                 let observer = MaskingObserver::wrap(Some(channel_observer), &run_secrets);
 
                 // Snapshot the shared state before the node mutably borrows it, so the
@@ -906,14 +918,16 @@ impl DagRunUseCase {
                                 }
                                 // Nested: close the node and raise after the
                                 // loop, like the idle abort below.
+                                // What the node sent before it was dropped (its
+                                // channel is all that is left): read messages
+                                // and usage, its dropped children's summaries too.
+                                let left = consumed_left_in(&mut rx, &node_id, &ledger);
+                                for event in left {
+                                    yield event;
+                                }
                                 if self.nested_run {
                                     nested_cancelled = true;
                                     break;
-                                }
-                                // A read message the node announced before it
-                                // was dropped (its channel is all that is left).
-                                for read in consumed_left_in(&mut rx, &node_id) {
-                                    yield read;
                                 }
                                 yield DagExecutionEvent::Cancelled {
                                     reason: None,
@@ -992,8 +1006,9 @@ impl DagRunUseCase {
                                 // out of the loop so it can be raised as a stream-level
                                 // `Err` there, matching every other abort path (hard-stop,
                                 // node error) that drain consumers already handle.
-                                for read in consumed_left_in(&mut rx, &node_id) {
-                                    yield read;
+                                let left = consumed_left_in(&mut rx, &node_id, &ledger);
+                                for event in left {
+                                    yield event;
                                 }
                                 idle_abort_msg = Some(msg);
                                 break;
@@ -1013,18 +1028,11 @@ impl DagRunUseCase {
                                             NodeEvent::LlmToken { token } => yield DagExecutionEvent::LlmToken { node_id: node_id.clone(), token },
                                             NodeEvent::ThinkingToken { node_id: thinking_node_id, node_type: thinking_node_type, token } => yield DagExecutionEvent::ThinkingToken { node_id: thinking_node_id, node_type: thinking_node_type, token },
                                             NodeEvent::LlmToolCall { tool_id, tool_name, args_chunk } => yield DagExecutionEvent::LlmToolCall { node_id: node_id.clone(), tool_id, tool_name, args_chunk },
-                                            NodeEvent::LlmUsage { prompt_tokens, completion_tokens, thinking_tokens, cache_read_tokens, cache_write_tokens, side_call } => {
-                                                let usage_id = side_call.as_ref().map_or_else(|| node_id.clone(), |s| s.node_id(&node_id));
-                                                { let mut bill = ledger.lock().unwrap();
-                                                record_side_call_meta(&mut bill.node_meta, &usage_id, &node_id, side_call.as_ref());
-                                                let entry = bill.usage_accumulator.entry(usage_id.clone()).or_insert((0, 0, 0, 0, 0));
-                                                entry.0 += prompt_tokens;
-                                                entry.1 += completion_tokens;
-                                                entry.2 += thinking_tokens.unwrap_or(0);
-                                                entry.3 += cache_read_tokens.unwrap_or(0);
-                                                entry.4 += cache_write_tokens.unwrap_or(0);
+                                            usage @ NodeEvent::LlmUsage { .. } => {
+                                                // Billed when sent (`ChannelObserver`).
+                                                if let Some(usage) = own_usage_event(&node_id, usage) {
+                                                    yield usage;
                                                 }
-                                                yield DagExecutionEvent::LlmUsage { node_id: usage_id, prompt_tokens, completion_tokens, thinking_tokens, cache_read_tokens, cache_write_tokens, side_call, nested: None };
                                             }
                                             NodeEvent::LlmToolCallStart { tool_id, tool_name, tool_args, child_scope } => {
                                                 last_tool = Some(tool_name.clone());
@@ -1050,44 +1058,14 @@ impl DagRunUseCase {
                                             NodeEvent::ReasoningEnd { id } => yield DagExecutionEvent::ReasoningEnd { node_id: node_id.clone(), id },
                                             NodeEvent::UserMessageConsumed { id } => yield DagExecutionEvent::UserMessageConsumed { node_id: node_id.clone(), id },
                                             NodeEvent::SubgraphChildEvent(raw) => {
-                                                // Re-yield child events preserving their original node IDs.
-                                                // GraphFinish is suppressed — SubgraphNodeFinish (below) serves that role.
-                                                // Also bill what they say (`track_child_usage`).
+                                                // Re-yield child events under this node (billed when
+                                                // sent, `ChannelObserver`); `GraphFinish` is dropped:
+                                                // `SubgraphNodeFinish` (below) serves that role.
                                                 if let Ok(child_event) = serde_json::from_value::<DagExecutionEvent>(raw) {
-                                                    // Bill it before moving child_event into yield.
-                                                    track_child_usage(&mut ledger.lock().unwrap(), &node_id, &child_event);
-                                                    match child_event {
-                                                        DagExecutionEvent::GraphFinish { .. } => {}
-                                                        // Grandchild+ event that already crossed one subgraph
-                                                        // boundary: FLATTEN instead of re-nesting. Bump `depth`
-                                                        // and prefix this node onto the lineage `path`. The old
-                                                        // code produced `SubgraphWrapped { SubgraphWrapped { .. } }`,
-                                                        // which the mapper could not unwrap (dropped as `_ => None`).
-                                                        DagExecutionEvent::SubgraphWrapped { inner, depth, path } => {
-                                                            let new_path = if path.is_empty() {
-                                                                node_id.clone()
-                                                            } else {
-                                                                format!("{}>{}", node_id, path)
-                                                            };
-                                                            yield DagExecutionEvent::SubgraphWrapped {
-                                                                inner,
-                                                                depth: depth + 1,
-                                                                path: new_path,
-                                                            };
-                                                        }
-                                                        // Base child event from a direct child subgraph: wrap at
-                                                        // depth 1 with path `<this node>>​<child node>`.
-                                                        other => {
-                                                            let new_path = match other.node_id() {
-                                                                Some(cid) => format!("{}>{}", node_id, cid),
-                                                                None => node_id.clone(),
-                                                            };
-                                                            yield DagExecutionEvent::SubgraphWrapped {
-                                                                inner: Box::new(other),
-                                                                depth: 1,
-                                                                path: new_path,
-                                                            };
-                                                        }
+                                                    let event = wrap_child_event(&node_id, child_event);
+                                                    let event = ledger.lock().unwrap().yielded(event);
+                                                    if let Some(event) = event {
+                                                        yield event;
                                                     }
                                                 }
                                             }
@@ -1402,7 +1380,7 @@ impl DagRunUseCase {
             }
             yield DagExecutionEvent::GraphFinish { output: masked_final_aggregated };
         };
-        with_usage_summaries(run, summaries)
+        with_usage_summaries(run, summaries, sink)
     }
 
     /// Whether a run loaded by id picks up the queue, and the SUSPENDED
@@ -1686,11 +1664,30 @@ fn log_author_set_key_kept(node_id: &str, key: &str, source: &str) {
     );
 }
 
+/// The observer of node `node_id`. It bills what the node sends on `ledger`
+/// as it is sent, so a call is billed even if the run stops before reading it.
 struct ChannelObserver {
     tx: tokio::sync::mpsc::UnboundedSender<crate::dag_engine::domain::observer::NodeEvent>,
+    node_id: String,
+    ledger: Arc<std::sync::Mutex<UsageLedger>>,
 }
 impl crate::dag_engine::domain::observer::ExecutionObserver for ChannelObserver {
     fn on_event(&self, event: crate::dag_engine::domain::observer::NodeEvent) {
+        use crate::dag_engine::domain::observer::NodeEvent;
+        if let Ok(mut ledger) = self.ledger.lock() {
+            match &event {
+                NodeEvent::SubgraphChildEvent(raw) => {
+                    if let Ok(child) = serde_json::from_value(raw.clone()) {
+                        ledger.track_child(&self.node_id, child);
+                    }
+                }
+                usage => {
+                    if let Some(usage) = own_usage_event(&self.node_id, usage.clone()) {
+                        ledger.bill_own(&self.node_id, &usage);
+                    }
+                }
+            }
+        }
         let _ = self.tx.send(event);
     }
 }
@@ -1743,7 +1740,6 @@ fn record_side_call_meta(
 /// child run's, billed in its `subgraph-usage-summary` (`finish.usage` has all).
 fn track_child_usage(
     ledger: &mut UsageLedger,
-    node: &str,
     event: &crate::dag_engine::domain::events::DagExecutionEvent,
 ) {
     use crate::dag_engine::domain::events::DagExecutionEvent;
@@ -1751,8 +1747,6 @@ fn track_child_usage(
         node_meta,
         usage_accumulator,
         child_meta,
-        unbilled,
-        boundary,
         ..
     } = ledger;
     let (key, base) = match event {
@@ -1805,7 +1799,7 @@ fn track_child_usage(
             cache_read_tokens,
             cache_write_tokens,
             side_call,
-            nested: None,
+            nested: false,
             ..
         } => {
             // The node that made the call: this run's meta for it wins.
@@ -1828,68 +1822,22 @@ fn track_child_usage(
             entry.3 += cache_read_tokens.unwrap_or(0);
             entry.4 += cache_write_tokens.unwrap_or(0);
         }
-        // A child run's: its own summary bills it; until then, `unbilled`.
-        DagExecutionEvent::LlmUsage {
-            side_call,
-            nested: Some(child),
-            ..
-        } => {
-            let owner = side_call.as_ref().map_or(key, |s| {
-                key.strip_suffix(&format!("::{}", s.purpose)).unwrap_or(key)
-            });
-            let bill = unbilled.entry(child.clone()).or_default();
-            if let Some(meta) = child_meta.get(owner) {
-                bill.child_meta.insert(owner.to_string(), meta.clone());
-            }
-            let mut usage = base.clone();
-            if let DagExecutionEvent::LlmUsage { nested, .. } = &mut usage {
-                *nested = None;
-            }
-            let path = key.to_string();
-            let inner = Box::new(usage);
-            track_child_usage(
-                bill,
-                node,
-                &DagExecutionEvent::SubgraphWrapped {
-                    inner,
-                    depth: 1,
-                    path,
-                },
-            );
-        }
-        DagExecutionEvent::GraphUsageSummary {
-            run: Some(child), ..
-        } => {
-            unbilled.remove(child);
-        }
-        // Where the child's summary would land, as this run yields it.
-        DagExecutionEvent::RunStart { run } => {
-            let place = match event {
-                DagExecutionEvent::SubgraphWrapped { path, depth, .. } if !path.is_empty() => {
-                    (format!("{node}>{path}"), depth + 1)
-                }
-                DagExecutionEvent::SubgraphWrapped { depth, .. } => (node.to_string(), depth + 1),
-                _ => (node.to_string(), 1),
-            };
-            boundary.insert(run.clone(), place);
-        }
         _ => {}
     }
 }
 
-/// What a run bills, shared by its loop and [`with_usage_summaries`].
+/// What a run bills, shared by its nodes' observers, its loop and
+/// [`with_usage_summaries`].
 ///
-/// A child run dropped by a stop never sends its summary: what it called is
-/// kept in `unbilled` until its summary comes, and summarized on its behalf
-/// when this run ends.
+/// A child's summary (wrapped as this run yields it) is kept in `forward`
+/// from when it arrives until this run yields it: a child dropped before this
+/// run read its summary still gets it sent when this run ends.
 #[derive(Default)]
 pub(crate) struct UsageLedger {
     /// This run's session id: the `run` of its summary.
     run: String,
-    /// Child run → what it called that no summary of its own billed yet.
-    unbilled: HashMap<String, UsageLedger>,
-    /// Child run → the `path` and `depth` its own summary has in this run.
-    boundary: HashMap<String, (String, u32)>,
+    /// Child run → its summary, until this run yields it.
+    forward: HashMap<String, crate::dag_engine::domain::events::DagExecutionEvent>,
     /// Entry → who bills it (model, provider, node type, key).
     node_meta: HashMap<String, NodeMeta>,
     /// Entry → (prompt, completion, thinking, cache_read, cache_write).
@@ -1899,8 +1847,63 @@ pub(crate) struct UsageLedger {
 }
 
 impl UsageLedger {
-    /// Its summary, emptying it (none if it billed nothing), then one wrapped
-    /// (`subgraph-usage-summary`) per child run in `unbilled`.
+    /// Bills `usage`, the usage event of node `node_id` itself.
+    fn bill_own(
+        &mut self,
+        node_id: &str,
+        usage: &crate::dag_engine::domain::events::DagExecutionEvent,
+    ) {
+        use crate::dag_engine::domain::events::DagExecutionEvent;
+        let DagExecutionEvent::LlmUsage {
+            node_id: usage_id,
+            prompt_tokens,
+            completion_tokens,
+            thinking_tokens,
+            cache_read_tokens,
+            cache_write_tokens,
+            side_call,
+            ..
+        } = usage
+        else {
+            return;
+        };
+        record_side_call_meta(&mut self.node_meta, usage_id, node_id, side_call.as_ref());
+        let entry = self.usage_accumulator.entry(usage_id.clone()).or_default();
+        entry.0 += prompt_tokens;
+        entry.1 += completion_tokens;
+        entry.2 += thinking_tokens.unwrap_or(0);
+        entry.3 += cache_read_tokens.unwrap_or(0);
+        entry.4 += cache_write_tokens.unwrap_or(0);
+    }
+
+    /// Bills child event `child` of node `node_id`; a child run's summary is
+    /// kept until this run yields it.
+    fn track_child(
+        &mut self,
+        node_id: &str,
+        child: crate::dag_engine::domain::events::DagExecutionEvent,
+    ) {
+        track_child_usage(self, &child);
+        if let Some(run) = child.usage_summary_run().map(str::to_string) {
+            if let Some(event) = wrap_child_event(node_id, child) {
+                self.forward.insert(run, event);
+            }
+        }
+    }
+
+    /// `event`, which this run yields: a child's summary is no longer pending.
+    fn yielded(
+        &mut self,
+        event: Option<crate::dag_engine::domain::events::DagExecutionEvent>,
+    ) -> Option<crate::dag_engine::domain::events::DagExecutionEvent> {
+        if let Some(run) = event.as_ref().and_then(|e| e.usage_summary_run()) {
+            self.forward.remove(run);
+        }
+        event
+    }
+
+    /// Its summary, emptying it (none if it billed nothing), then the
+    /// summaries of its children it has not yielded.
     fn take_summaries(&mut self) -> Vec<crate::dag_engine::domain::events::DagExecutionEvent> {
         let mut entries: Vec<Value> = self
             .usage_accumulator
@@ -1908,32 +1911,31 @@ impl UsageLedger {
             .map(|(id, counts)| usage_entry(&id, counts, self.node_meta.get(&id)))
             .collect();
         entries.sort_by(|a, b| a["node_id"].as_str().cmp(&b["node_id"].as_str()));
-        use crate::dag_engine::domain::events::DagExecutionEvent;
-        let run = Some(self.run.clone());
         let mut out = Vec::new();
         if !entries.is_empty() {
-            out.push(DagExecutionEvent::GraphUsageSummary { entries, run });
+            let run = Some(self.run.clone());
+            out.push(
+                crate::dag_engine::domain::events::DagExecutionEvent::GraphUsageSummary {
+                    entries,
+                    run,
+                },
+            );
         }
-        let mut children: Vec<_> = self.unbilled.drain().collect();
+        let mut children: Vec<_> = self.forward.drain().collect();
         children.sort_by(|a, b| a.0.cmp(&b.0));
-        for (child, mut bill) in children {
-            bill.run = child.clone();
-            let (path, depth) = self.boundary.get(&child).cloned().unwrap_or((child, 1));
-            for inner in bill.take_summaries() {
-                let (inner, path) = (Box::new(inner), path.clone());
-                out.push(DagExecutionEvent::SubgraphWrapped { inner, depth, path });
-            }
-        }
+        out.extend(children.into_iter().map(|(_, summary)| summary));
         out
     }
 }
 
 /// `stream`, with the summaries of `ledger` sent right before it ends, on
 /// every exit: before its `GraphFinish` (done or suspended), its `Cancelled`,
-/// or the error that fails it. A host stops reading at those.
+/// or the error that fails it. A host stops reading at those. A child run
+/// dropped before it ends sends them to `sink`, its parent node's observer.
 fn with_usage_summaries<S>(
     stream: S,
     ledger: Arc<std::sync::Mutex<UsageLedger>>,
+    sink: Option<Arc<dyn crate::dag_engine::domain::observer::ExecutionObserver>>,
 ) -> impl futures::Stream<Item = Result<crate::dag_engine::domain::events::DagExecutionEvent, DagError>>
 where
     S: futures::Stream<
@@ -1941,13 +1943,12 @@ where
     >,
 {
     use crate::dag_engine::domain::events::DagExecutionEvent;
-    use futures::StreamExt;
     async_stream::stream! {
-        futures::pin_mut!(stream);
-        while let Some(item) = stream.next().await {
+        let mut run = SummaryOnDrop { stream: Some(Box::pin(stream)), ledger, sink };
+        while let Some(item) = run.next().await {
             let ends = matches!(item, Err(_) | Ok(DagExecutionEvent::GraphFinish { .. } | DagExecutionEvent::Cancelled { .. }));
             if ends {
-                let summaries = ledger.lock().unwrap().take_summaries();
+                let summaries = run.ledger.lock().unwrap().take_summaries();
                 for summary in summaries {
                     yield Ok(summary);
                 }
@@ -1955,6 +1956,99 @@ where
             yield item;
         }
     }
+}
+
+/// A run's stream that, dropped before it ends, drops the run first (so its
+/// own dropped children send it theirs) and then sends its summaries to `sink`.
+struct SummaryOnDrop<S> {
+    stream: Option<std::pin::Pin<Box<S>>>,
+    ledger: Arc<std::sync::Mutex<UsageLedger>>,
+    sink: Option<Arc<dyn crate::dag_engine::domain::observer::ExecutionObserver>>,
+}
+
+impl<S: futures::Stream> SummaryOnDrop<S> {
+    async fn next(&mut self) -> Option<S::Item> {
+        use futures::StreamExt;
+        self.stream.as_mut()?.next().await
+    }
+}
+
+impl<S> Drop for SummaryOnDrop<S> {
+    fn drop(&mut self) {
+        drop(self.stream.take());
+        let Some(sink) = &self.sink else { return };
+        let summaries = match self.ledger.lock() {
+            Ok(mut ledger) => ledger.take_summaries(),
+            Err(_) => return,
+        };
+        for summary in summaries {
+            if let Ok(raw) = serde_json::to_value(&summary) {
+                sink.on_event(
+                    crate::dag_engine::domain::observer::NodeEvent::SubgraphChildEvent(raw),
+                );
+            }
+        }
+    }
+}
+
+/// The event node `node_id`'s own usage `event` is yielded as.
+fn own_usage_event(
+    node_id: &str,
+    event: crate::dag_engine::domain::observer::NodeEvent,
+) -> Option<crate::dag_engine::domain::events::DagExecutionEvent> {
+    let crate::dag_engine::domain::observer::NodeEvent::LlmUsage {
+        prompt_tokens,
+        completion_tokens,
+        thinking_tokens,
+        cache_read_tokens,
+        cache_write_tokens,
+        side_call,
+    } = event
+    else {
+        return None;
+    };
+    let node = node_id.to_string();
+    let usage_id = side_call.as_ref().map_or(node, |s| s.node_id(node_id));
+    Some(
+        crate::dag_engine::domain::events::DagExecutionEvent::LlmUsage {
+            node_id: usage_id,
+            prompt_tokens,
+            completion_tokens,
+            thinking_tokens,
+            cache_read_tokens,
+            cache_write_tokens,
+            side_call,
+            nested: false,
+        },
+    )
+}
+
+/// Child event `event` of node `node_id` as this run yields it, under the
+/// node's lineage `path` (`None` for the child's `GraphFinish`: the node's
+/// `SubgraphNodeFinish` stands for it). A grandchild+ event that already
+/// crossed a boundary is flattened, not re-nested: the mapper cannot unwrap a
+/// `SubgraphWrapped` inside another.
+fn wrap_child_event(
+    node_id: &str,
+    event: crate::dag_engine::domain::events::DagExecutionEvent,
+) -> Option<crate::dag_engine::domain::events::DagExecutionEvent> {
+    use crate::dag_engine::domain::events::DagExecutionEvent;
+    let (inner, depth, path) = match event {
+        DagExecutionEvent::GraphFinish { .. } => return None,
+        DagExecutionEvent::SubgraphWrapped { inner, depth, path } if path.is_empty() => {
+            (inner, depth + 1, node_id.to_string())
+        }
+        DagExecutionEvent::SubgraphWrapped { inner, depth, path } => {
+            (inner, depth + 1, format!("{node_id}>{path}"))
+        }
+        other => {
+            let path = other
+                .node_id()
+                .map_or_else(|| node_id.to_string(), |c| format!("{node_id}>{c}"));
+            (Box::new(other), 1, path)
+        }
+    };
+    Some(DagExecutionEvent::SubgraphWrapped { inner, depth, path })
 }
 
 /// Build one `usage-summary` entry for a node. Pure and independently
@@ -2016,26 +2110,31 @@ fn node_event_advances_heartbeat(event: &crate::dag_engine::domain::observer::No
     }
 }
 
-/// The `UserMessageConsumed` events still in a node's channel, in order.
-/// Called by an arm that stops the run right after it dropped the node
-/// (`execution_future.set(None)`), so the channel holds everything the node
-/// emitted: a message the loop already saved to its history must reach the
-/// client, which otherwise sends it again as the next turn. `try_recv` only:
-/// it never awaits.
+/// What node `node_id` sent before it was dropped, still in `rx` (already
+/// billed when sent): its read messages, and its usage and its children's to
+/// yield, a child's summary included (no longer pending on `ledger`).
 fn consumed_left_in(
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<crate::dag_engine::domain::observer::NodeEvent>,
     node_id: &str,
+    ledger: &std::sync::Mutex<UsageLedger>,
 ) -> Vec<crate::dag_engine::domain::events::DagExecutionEvent> {
     use crate::dag_engine::domain::events::DagExecutionEvent;
     use crate::dag_engine::domain::observer::NodeEvent;
     let mut out = Vec::new();
+    let mut ledger = ledger.lock().unwrap();
     while let Ok(event) = rx.try_recv() {
-        if let NodeEvent::UserMessageConsumed { id } = event {
-            out.push(DagExecutionEvent::UserMessageConsumed {
+        let event = match event {
+            NodeEvent::UserMessageConsumed { id } => Some(DagExecutionEvent::UserMessageConsumed {
                 node_id: node_id.to_string(),
                 id,
-            });
-        }
+            }),
+            NodeEvent::SubgraphChildEvent(raw) => serde_json::from_value(raw)
+                .ok()
+                .and_then(|child| wrap_child_event(node_id, child))
+                .filter(DagExecutionEvent::is_usage),
+            usage => own_usage_event(node_id, usage),
+        };
+        out.extend(ledger.yielded(event));
     }
     out
 }
@@ -2191,6 +2290,7 @@ impl SubGraphExecutorPort for DagRunUseCase {
             self.clone()
                 .with_seed_state(seed)
                 .as_nested_run()
+                .with_usage_sink(observer.clone())
                 .execute_stream(
                     graph,
                     Some(session_id.to_string()),
@@ -2217,7 +2317,7 @@ impl SubGraphExecutorPort for DagRunUseCase {
             {
                 final_out = output.clone();
             } else if let Some(obs) = &observer {
-                if let Ok(raw) = serde_json::to_value(event.nested(session_id)) {
+                if let Ok(raw) = serde_json::to_value(event.nested()) {
                     obs.on_event(
                         crate::dag_engine::domain::observer::NodeEvent::SubgraphChildEvent(raw),
                     );
@@ -2263,7 +2363,11 @@ impl SubGraphExecutorPort for DagRunUseCase {
             .map_err(|e| DagError::NodeExecution(format!("Invalid sub-graph: {}", e)))?;
 
         use futures::StreamExt;
-        let mut stream = Box::pin(self.clone().as_nested_run().execute_stream(
+        let child = self
+            .clone()
+            .as_nested_run()
+            .with_usage_sink(observer.clone());
+        let mut stream = Box::pin(child.execute_stream(
             graph,
             Some(session_id.to_string()),
             Some(answer),
@@ -2282,7 +2386,7 @@ impl SubGraphExecutorPort for DagRunUseCase {
             {
                 final_out = output.clone();
             } else if let Some(obs) = &observer {
-                if let Ok(raw) = serde_json::to_value(event.nested(session_id)) {
+                if let Ok(raw) = serde_json::to_value(event.nested()) {
                     obs.on_event(
                         crate::dag_engine::domain::observer::NodeEvent::SubgraphChildEvent(raw),
                     );
@@ -5021,7 +5125,8 @@ mod read_on_stop_tests {
         tx.send(NodeEvent::UserMessageConsumed { id: "m2".into() })
             .unwrap();
         drop(tx);
-        let left: Vec<String> = consumed_left_in(&mut rx, "agent")
+        let ledger = std::sync::Mutex::new(UsageLedger::default());
+        let left: Vec<String> = consumed_left_in(&mut rx, "agent", &ledger)
             .into_iter()
             .map(|e| match e {
                 DagExecutionEvent::UserMessageConsumed { node_id, id } => {

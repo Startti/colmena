@@ -163,12 +163,21 @@ impl LlmRepository for UsageModel {
 }
 
 /// A call to `slow-model` is still in flight when a test stops the run: it
-/// never reports.
+/// never reports. The first call to `stop-model` stops the turn (`STOP`) and
+/// reports; the next ones are in flight, like `slow-model`'s.
 async fn slow_down(request: &LlmRequest) {
-    if request.config().provider().model() == "slow-model" {
-        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+    let stop = STOP.lock().unwrap().take();
+    match request.config().provider().model() {
+        "stop-model" if stop.is_some() => stop.unwrap().cancel(),
+        "slow-model" | "stop-model" => {
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        }
+        _ => *STOP.lock().unwrap() = stop,
     }
 }
+
+/// The token of the turn a `stop-model` call stops.
+static STOP: Mutex<Option<tokio_util::sync::CancellationToken>> = Mutex::new(None);
 
 /// The registry wants a task memory (`reactor`); these graphs never touch it.
 struct NoTaskMemory;
@@ -831,6 +840,7 @@ async fn turn(
 ) -> Vec<Value> {
     let graph: Graph = serde_json::from_value(graph.clone()).unwrap();
     let token = tokio_util::sync::CancellationToken::new();
+    *STOP.lock().unwrap() = Some(token.clone());
     let run = use_case(Some(repo.clone())).execute_stream(
         graph,
         Some("run_1".into()),
@@ -960,6 +970,44 @@ fn places(frames: &[Value]) -> Vec<(Value, Value, Value)> {
     };
     let place = |f: &Value| (f["type"].clone(), f["level"].clone(), f["path"].clone());
     frames.iter().filter(summary).map(place).collect()
+}
+
+/// A call that finished as the turn stopped, its usage still queued when the
+/// stop wins the race, is billed once, before `cancelled`: at the root and in
+/// a child the stop drops. Repeated, since which wins is up to the scheduler.
+#[tokio::test]
+#[serial]
+async fn a_usage_queued_when_the_turn_stops_is_billed() {
+    let mut graph = agent(false);
+    graph["nodes"]["agent"]["config"]["model"] = json!("stop-model");
+    for graph in [graph.clone(), in_subgraph(graph)] {
+        for _ in 0..20 {
+            let model = UsageModel::new(1, "done");
+            let _guard = OverrideGuard::install(model.clone());
+            let frames = turn(&graph, &Arc::default(), None, never).await;
+            assert_eq!(model.billed().0, 1, "{frames:#?}");
+            assert_priced(&frames, "usage-summary", rows_sum(&frames, "usage-summary"));
+            let all = [
+                rows_sum(&frames, "usage-summary"),
+                rows_sum(&frames, "subgraph-usage-summary"),
+            ];
+            assert_eq!(
+                all.iter().fold(LlmUsage::default(), |mut a, u| {
+                    a.add(u);
+                    a
+                }),
+                model.billed().1,
+                "{frames:#?}"
+            );
+            assert_summaries_before(&frames, "cancelled");
+        }
+    }
+}
+
+fn rows_sum(frames: &[Value], kind: &str) -> LlmUsage {
+    let mut sum = LlmUsage::default();
+    rows(frames, kind).iter().for_each(|r| sum.add(&usage(r)));
+    sum
 }
 
 /// A run that suspends bills what it called before asking; the turn that
