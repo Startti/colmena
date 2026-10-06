@@ -10,6 +10,10 @@ use crate::llm::domain::{LlmError, LlmRepository, LlmRequest, LlmResponse, LlmSt
 use crate::llm::infrastructure::{
     ConversationRepositoryFactory, OverrideGuard, ScriptedAdapter, ScriptedResponse,
 };
+use crate::storage::domain::{
+    OutputStorageRepository, StorageError, StoreRequest, StoredBytes, StoredOutput, StoredStream,
+};
+use crate::storage::infrastructure::LocalCacheStorageAdapter;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -25,12 +29,17 @@ pub(super) struct RecordingModel {
 
 impl RecordingModel {
     pub(super) fn new(replies: usize) -> Arc<Self> {
+        Self::scripted(
+            (0..replies)
+                .map(|_| ScriptedResponse::Text("ok".into()))
+                .collect(),
+        )
+    }
+
+    /// A model that plays `script`, one reply per call.
+    pub(super) fn scripted(script: Vec<ScriptedResponse>) -> Arc<Self> {
         Arc::new(Self {
-            inner: ScriptedAdapter::new(
-                (0..replies)
-                    .map(|_| ScriptedResponse::Text("ok".into()))
-                    .collect(),
-            ),
+            inner: ScriptedAdapter::new(script),
             texts: Mutex::default(),
             files: AtomicUsize::new(0),
         })
@@ -79,6 +88,13 @@ impl LlmRepository for RecordingModel {
 
 /// The node registry an engine builds, with the switch off until set.
 pub(super) fn registry() -> Arc<HashMapNodeRegistry> {
+    registry_with_storage(None)
+}
+
+/// [`registry`] with the host's storage wired, as an engine does.
+pub(super) fn registry_with_storage(
+    storage: Option<Arc<dyn OutputStorageRepository>>,
+) -> Arc<HashMapNodeRegistry> {
     let pools = Arc::new(PgPoolRegistry::new(PoolConfig::defaults()));
     let repos = Arc::new(ConversationRepositoryFactory::new(pools.clone()));
     // The reactor node insists on a task-memory store. The real Postgres one on
@@ -88,10 +104,14 @@ pub(super) fn registry() -> Arc<HashMapNodeRegistry> {
         .expect("a lazy pool does not connect");
     let task_memory: Arc<dyn DagTaskMemoryRepository> =
         Arc::new(PostgresDagStateRepository::new(pool));
-    HashMapNodeRegistry::new(
+    HashMapNodeRegistry::new_with_secure_values(
         repos,
         Arc::new(SqlPortFactory::new(pools)),
         Some(task_memory),
+        None,
+        storage,
+        None,
+        None,
     )
 }
 
@@ -103,6 +123,17 @@ pub(super) async fn run_turn(
     files: Vec<Value>,
     model: &Arc<RecordingModel>,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    run_turn_with_tools(reg, db_url, files, Value::Null, model).await
+}
+
+/// [`run_turn`] with a `tool_configurations` block (`Null`: none).
+pub(super) async fn run_turn_with_tools(
+    reg: &Arc<HashMapNodeRegistry>,
+    db_url: &str,
+    files: Vec<Value>,
+    tool_configurations: Value,
+    model: &Arc<RecordingModel>,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     use crate::dag_engine::application::ports::NodeRegistryPort;
     let node = reg.get_node("llm_call").expect("llm_call is registered");
     let _guard = OverrideGuard::install(model.clone());
@@ -111,9 +142,44 @@ pub(super) async fn run_turn(
         ("__colmena_agent_session_id".to_string(), json!("agent_1")),
         ("files".to_string(), Value::Array(files)),
     ]);
-    let config = json!({
-        "provider": "mock", "model": "m", "api_key": "k", "stream": false,
+    let mut config = json!({
+        "provider": "openai", "model": "m", "api_key": "k", "stream": false,
         "prompt": "go", "connection_url": db_url,
     });
+    if !tool_configurations.is_null() {
+        config["tool_configurations"] = tool_configurations;
+    }
     node.execute(&inputs, &config, &mut Value::Null, None).await
+}
+
+/// A real in-memory storage adapter that counts what is done to it.
+#[derive(Default)]
+pub(super) struct CountingStorage {
+    inner: LocalCacheStorageAdapter,
+    reads: AtomicUsize,
+}
+
+impl CountingStorage {
+    /// Whole-object and streamed reads together.
+    pub(super) fn reads(&self) -> usize {
+        self.reads.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait::async_trait]
+impl OutputStorageRepository for CountingStorage {
+    async fn store(&self, req: StoreRequest) -> Result<StoredOutput, StorageError> {
+        self.inner.store(req).await
+    }
+    async fn read(&self, key: &str) -> Result<StoredBytes, StorageError> {
+        self.reads.fetch_add(1, Ordering::SeqCst);
+        self.inner.read(key).await
+    }
+    async fn read_stream(&self, key: &str) -> Result<StoredStream, StorageError> {
+        self.reads.fetch_add(1, Ordering::SeqCst);
+        self.inner.read_stream(key).await
+    }
+    async fn delete(&self, key: &str) -> Result<(), StorageError> {
+        self.inner.delete(key).await
+    }
 }

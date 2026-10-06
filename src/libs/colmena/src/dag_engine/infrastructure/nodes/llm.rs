@@ -1037,6 +1037,19 @@ struct AttachmentResolverImpl {
     storage: Option<std::sync::Arc<dyn crate::storage::domain::OutputStorageRepository>>,
 }
 
+/// `load_attachment` never reads, inlines or uploads an object the HOST owns. The
+/// check is on the row the resolver has ALREADY looked up and is about to use, so
+/// the row judged is the row read (no second lookup, no row of another provider),
+/// whatever the large tabular switch says now and whatever the row's size or mime
+/// say. Every other row, and every other error, is exactly what it always was.
+fn refuse_host_reference(row: &crate::llm::domain::ConversationAttachment) -> Result<(), String> {
+    if row.is_host_storage_ref() {
+        Err(crate::llm::domain::large_tabular::refusal_text().to_string())
+    } else {
+        Ok(())
+    }
+}
+
 #[async_trait::async_trait]
 impl crate::llm::application::LoadAttachmentResolver for AttachmentResolverImpl {
     async fn resolve(
@@ -1055,7 +1068,10 @@ impl crate::llm::application::LoadAttachmentResolver for AttachmentResolverImpl 
             .await
             .map_err(|e| e.to_string())?;
         let att = match row {
-            Some(a) => a,
+            Some(a) => {
+                refuse_host_reference(&a)?;
+                a
+            }
             None => {
                 // Fallback: maybe it's a Generated artifact that hasn't been
                 // uploaded to this provider yet. Lazy cross-provider upload.
@@ -1067,6 +1083,7 @@ impl crate::llm::application::LoadAttachmentResolver for AttachmentResolverImpl 
                 let Some(gen) = gen_row else {
                     return Ok(None);
                 };
+                refuse_host_reference(&gen)?;
                 let storage = self.storage.as_ref().ok_or_else(|| {
                     "load_attachment: generated artifact present but no OutputStorageRepository \
                      is wired — cannot resolve bytes for cross-provider upload"
@@ -8599,3 +8616,6 @@ mod node_harness;
 
 #[cfg(test)]
 mod attachment_notices;
+
+#[cfg(test)]
+mod load_attachment_redirect;

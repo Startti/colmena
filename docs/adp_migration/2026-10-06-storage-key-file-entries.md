@@ -78,3 +78,16 @@ el motor se comporta exactamente como antes, para cualquier tamaño.
   configuración, una variable «el GC nuevo ya está desplegado» que el motor exigiera
   antes de registrar referencias del host sería la opción (no incluida: decisión del
   dueño).
+- **`load_attachment` sobre uno de estos archivos.** El modelo recibe, como resultado
+  de herramienta, `{"error":"large_tabular_file","document_id":…,"reason":"this file
+  is too large to be read by this tool, and the large-file analysis tool is not
+  available yet, so it cannot be analysed in this turn"}` y no se lee el objeto. El
+  texto con la herramienta futura («use `attachment_run_python` with `tables`») queda
+  detrás de `LARGE_FILE_TOOL_AVAILABLE`. El rechazo depende de la fila, no del interruptor: tampoco se lee entero tras un
+  rollback. Para cualquier otra fila nada cambia (mismas consultas, errores y códigos).
+- **Confianza en la llave (requisito para ADP).** El motor toma `storage_key` tal
+  cual lo manda ADP y luego lo sirve (lecturas por flujo, URL de lectura). ADP
+  **debe** verificar, antes de enviar la entrada, que la llave pertenece a la sesión
+  y es un adjunto de chat. El motor solo hace comprobaciones baratas sin conocer el
+  esquema de ADP: no vacía, hasta 1024 caracteres, sin caracteres de control y sin
+  segmentos `..`; una entrada con una llave así se omite con un aviso.

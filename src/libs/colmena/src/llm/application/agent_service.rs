@@ -1152,11 +1152,7 @@ impl AgentService {
                                     None,
                                 ),
                                 Err(e) => (
-                                    format!(
-                                        "{{\"error\":\"attachment_expired_unrecoverable\",\"document_id\":\"{}\",\"reason\":\"{}\"}}",
-                                        document_id,
-                                        e.replace('"', "'")
-                                    ),
+                                    super::load_failure::load_failure_body(document_id, &e),
                                     None,
                                 ),
                             };
