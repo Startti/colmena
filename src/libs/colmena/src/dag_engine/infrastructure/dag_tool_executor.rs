@@ -197,6 +197,77 @@ pub const DEFAULT_MAX_TOOL_RESULT_STRING_BYTES: usize = 50 * 1024;
 /// LLM-visible name of the thread selector auto-exposed for `dynamic` memory_mode.
 const THREAD_ID_PARAM: &str = "thread_id";
 
+/// Seconds between the `tool-progress` events of a long tool step (TG-1). Well
+/// inside the 60 s a downstream no-event watchdog tolerates, and long enough
+/// that a three-minute run costs a handful of frames. A caller whose run loop
+/// has an idle limit shorter than this passes a shorter interval.
+pub const TOOL_PROGRESS_INTERVAL_SECS: u64 = 10;
+
+/// The longest total time a progress-reporting tool call may be given: 15
+/// minutes. The design (`sdd/large-file-python-analysis/design`, D7) states a
+/// 300 s heavy run limit and a 240 s preparation wait; neither has a constant
+/// in this tree yet, so this is three times the larger of them. Anything longer
+/// is a caller's mistake.
+pub const TOOL_PROGRESS_MAX_BOUND_SECS: u64 = 900;
+
+/// The shortest interval between events: one second. Below it the ticker would
+/// flood the stream, and zero is not a valid timer period.
+pub const TOOL_PROGRESS_MIN_INTERVAL_SECS: u64 = 1;
+
+/// What [`DagToolExecutor::with_progress_ticker`] needs to know about the step.
+#[derive(Debug, Clone, Copy)]
+pub struct ProgressTick<'a> {
+    /// The id of the tool call the person sees: the one the engine puts on
+    /// `tool-input-available` for that call (the client finds the row by it).
+    /// There is no caller yet, so no test can tie the two; the first caller
+    /// owns that check.
+    pub tool_id: &'a str,
+    pub stage: ToolProgressStage,
+    /// When the TOOL CALL started, not this stage. Two things count from it: the
+    /// elapsed time of every stage (so the row never shows time going backwards)
+    /// and the deadline `call_started + call_budget`.
+    pub call_started: tokio::time::Instant,
+    /// Time between events. Clamped to between
+    /// [`TOOL_PROGRESS_MIN_INTERVAL_SECS`] and `call_budget`.
+    pub interval: std::time::Duration,
+    /// The TOOL CALL's total time, not this stage's. Mandatory, above zero and
+    /// at most [`TOOL_PROGRESS_MAX_BOUND_SECS`]. Every stage of the call passes
+    /// the same `call_started` and `call_budget`, so wrapping more stages cannot
+    /// extend the deadline; a stage that begins at or past it never runs.
+    pub call_budget: std::time::Duration,
+}
+
+/// Why [`DagToolExecutor::with_progress_ticker`] did not return the step's value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProgressTickerError {
+    /// `call_budget` was zero or above [`TOOL_PROGRESS_MAX_BOUND_SECS`]; the step
+    /// never ran.
+    InvalidBound { bound: std::time::Duration },
+    /// The call's deadline (`call_started + after`) passed before the step
+    /// finished, or before it began. The step's future was DROPPED, which is not
+    /// cancellation: work it handed to `tokio::spawn` or `spawn_blocking` keeps
+    /// running and a registry lease it took stays held. The caller must stop that
+    /// work and release or reconcile the lease before it reports the tool error.
+    TimedOut { after: std::time::Duration },
+}
+
+impl std::fmt::Display for ProgressTickerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidBound { bound } => write!(
+                f,
+                "a progress-reporting step needs a time bound above zero and at most {TOOL_PROGRESS_MAX_BOUND_SECS}s, got {}ms",
+                bound.as_millis()
+            ),
+            Self::TimedOut { after } => {
+                write!(f, "the step did not finish within {}s", after.as_secs())
+            }
+        }
+    }
+}
+
+impl std::error::Error for ProgressTickerError {}
+
 impl DagToolExecutor {
     /// Normalize an LLM-supplied `thread_id` into a safe path/DB-key fragment:
     /// keep `[A-Za-z0-9._-]`, replace every other run with a single `-`, trim
@@ -601,6 +672,77 @@ impl DagToolExecutor {
                 unit: unit.map(str::to_string),
                 elapsed_ms,
             });
+        }
+    }
+
+    /// Run `step`, emitting a `tool-progress` event every `tick.interval` while
+    /// it is pending, and ending it at the TOOL CALL's deadline
+    /// (`tick.call_started + tick.call_budget`) whether or not it completes.
+    ///
+    /// The bound is part of the call because the events defeat the run loop's
+    /// idle watchdog (each one counts as activity) and the loop has no total
+    /// clock of its own: without a bound, a hung step under a ticker would run
+    /// forever. The deadline belongs to the call, not to this wrap, so a caller
+    /// that wraps each stage with the same `call_started` and `call_budget`
+    /// cannot extend it; a wrap that starts at or past the deadline returns
+    /// [`ProgressTickerError::TimedOut`] without running the step. At the
+    /// deadline the step is dropped, the events stop and the same error is
+    /// returned. A step that completes at the deadline's own instant wins; a
+    /// tick due at that instant is not sent.
+    ///
+    /// DROPPING THE STEP IS NOT CANCELLING IT. Work the step handed to
+    /// `tokio::spawn` or `spawn_blocking` keeps running, and a registry lease it
+    /// holds stays held. The step must therefore be cancellable (a cancellation
+    /// token or a drop guard), and after `TimedOut` the caller must stop that
+    /// work and release or reconcile the lease before reporting the tool error.
+    ///
+    /// The first event comes one interval in, so a step shorter than that, which
+    /// is every small-file run, says nothing. The events carry the stage and the
+    /// elapsed time since the call started; they claim no `done`, `total` or
+    /// `unit` because a ticker cannot know them.
+    ///
+    /// The TICKER itself spawns nothing: it is a `select!` inside this future, so
+    /// it ends with the step, at the deadline, and when this future is dropped (a
+    /// Stop, an idle abort). That says nothing about the step's own tasks.
+    pub async fn with_progress_ticker<F: std::future::Future>(
+        &self,
+        tick: ProgressTick<'_>,
+        step: F,
+    ) -> Result<F::Output, ProgressTickerError> {
+        use std::time::Duration;
+        let budget = tick.call_budget;
+        if budget.is_zero() || budget > Duration::from_secs(TOOL_PROGRESS_MAX_BOUND_SECS) {
+            return Err(ProgressTickerError::InvalidBound { bound: budget });
+        }
+        let now = tokio::time::Instant::now();
+        let deadline = tick.call_started + budget;
+        if now >= deadline {
+            return Err(ProgressTickerError::TimedOut { after: budget });
+        }
+        // Both ends matter: below the floor the stream floods, and an interval
+        // near `Duration::MAX` overflows `Instant + interval`. The floor is
+        // applied last so a budget under one second cannot invert the range.
+        let interval = tick
+            .interval
+            .min(budget)
+            .max(Duration::from_secs(TOOL_PROGRESS_MIN_INTERVAL_SECS));
+        let mut ticks = tokio::time::interval_at(now + interval, interval);
+        ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let bound = tokio::time::sleep_until(deadline);
+        tokio::pin!(step, bound);
+        loop {
+            // `biased`: the step, then the deadline, then the tick, so a tie goes
+            // to the step's value and then to the cut, never to a late event.
+            tokio::select! {
+                biased;
+                out = &mut step => return Ok(out),
+                _ = &mut bound => return Err(ProgressTickerError::TimedOut { after: budget }),
+                _ = ticks.tick() => {
+                    let elapsed_ms = u64::try_from(tick.call_started.elapsed().as_millis())
+                        .unwrap_or(u64::MAX);
+                    self.emit_tool_progress(tick.tool_id, tick.stage, None, None, None, elapsed_ms);
+                }
+            }
         }
     }
 
@@ -8286,6 +8428,7 @@ mod tool_progress_emitter_tests {
     //! Time is paused, so every schedule below is exact.
     use super::*;
     use crate::dag_engine::domain::observer::ToolProgressStage;
+    use std::time::Duration;
 
     struct EmptyRegistry;
     impl NodeRegistryPort for EmptyRegistry {
@@ -8407,5 +8550,312 @@ mod tool_progress_emitter_tests {
         assert_eq!(frames[0]["stage"], "collecting");
         assert_eq!(frames[0]["elapsedMs"], 2_000);
         assert!(frames[0].get("done").is_none(), "no count, no done");
+    }
+
+    // ── the ticker ──────────────────────────────────────────────────────
+
+    const SECS: fn(u64) -> Duration = Duration::from_secs;
+
+    /// A ticker for `call_1`, whose tool call started now, ticking every 10 s.
+    fn tick(call_budget: Duration) -> ProgressTick<'static> {
+        ProgressTick {
+            tool_id: "call_1",
+            stage: ToolProgressStage::Running,
+            call_started: tokio::time::Instant::now(),
+            interval: SECS(10),
+            call_budget,
+        }
+    }
+
+    fn elapsed(recording: &Recording) -> Vec<u64> {
+        recording.progress().iter().map(|p| p.5).collect()
+    }
+
+    #[test]
+    fn the_progress_interval_is_ten_seconds_and_the_ceiling_fifteen_minutes() {
+        assert_eq!(TOOL_PROGRESS_INTERVAL_SECS, 10);
+        assert_eq!(TOOL_PROGRESS_MAX_BOUND_SECS, 900);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_ticker_emits_once_per_interval_and_returns_the_result() {
+        let recording = Arc::new(Recording::default());
+        let out = executor(Some(recording.clone()))
+            .with_progress_ticker(tick(SECS(60)), async {
+                tokio::time::sleep(SECS(35)).await;
+                "done"
+            })
+            .await;
+        assert_eq!(out, Ok("done"));
+        assert_eq!(elapsed(&recording), [10_000, 20_000, 30_000]);
+        let seen = recording.progress();
+        assert!(seen.iter().all(|p| p.0 == "call_1"
+            && p.1 == ToolProgressStage::Running
+            && p.2.is_none()
+            && p.3.is_none()));
+    }
+
+    /// A step that finishes inside the first interval says nothing: this is the
+    /// small path, which never reports progress.
+    #[tokio::test(start_paused = true)]
+    async fn a_step_shorter_than_one_interval_emits_nothing() {
+        let recording = Arc::new(Recording::default());
+        let out = executor(Some(recording.clone()))
+            .with_progress_ticker(tick(SECS(60)), tokio::time::sleep(SECS(9)))
+            .await;
+        assert_eq!(out, Ok(()));
+        assert!(recording.progress().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_ticker_stops_when_the_step_completes() {
+        let recording = Arc::new(Recording::default());
+        let exec = executor(Some(recording.clone()));
+        exec.with_progress_ticker(tick(SECS(60)), tokio::time::sleep(SECS(15)))
+            .await
+            .unwrap();
+        assert_eq!(recording.progress().len(), 1);
+        tokio::time::sleep(SECS(120)).await;
+        assert_eq!(recording.progress().len(), 1, "nothing ticks after the end");
+    }
+
+    /// The turn can drop a tool call (Stop, an idle abort). The ticker lives
+    /// inside the call's own future, so nothing is left running behind it.
+    #[tokio::test(start_paused = true)]
+    async fn dropping_the_future_stops_the_ticker_cleanly() {
+        let recording = Arc::new(Recording::default());
+        let exec = executor(Some(recording.clone()));
+        let dropped = tokio::time::timeout(
+            SECS(25),
+            exec.with_progress_ticker(tick(SECS(600)), std::future::pending::<()>()),
+        )
+        .await;
+        assert!(dropped.is_err(), "the outer timeout drops the ticker");
+        assert_eq!(recording.progress().len(), 2);
+        tokio::time::sleep(SECS(120)).await;
+        assert_eq!(recording.progress().len(), 2, "no detached task survived");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_ticker_without_an_observer_just_runs_the_step() {
+        let out = executor(None)
+            .with_progress_ticker(tick(SECS(60)), async {
+                tokio::time::sleep(SECS(35)).await;
+                7
+            })
+            .await;
+        assert_eq!(out, Ok(7));
+    }
+
+    // ── the bound (L1) ──────────────────────────────────────────────────
+
+    /// Each tick resets the run loop's idle watchdog, so a hung step under a
+    /// ticker would never be cut by it. The bound is what ends the step: it is
+    /// cut exactly there, with a distinct error, and nothing ticks after.
+    #[tokio::test(start_paused = true)]
+    async fn a_step_that_never_completes_is_cut_exactly_at_the_bound() {
+        let recording = Arc::new(Recording::default());
+        let exec = executor(Some(recording.clone()));
+        let started = tokio::time::Instant::now();
+        let out = exec
+            .with_progress_ticker(tick(SECS(25)), std::future::pending::<()>())
+            .await;
+        assert_eq!(out, Err(ProgressTickerError::TimedOut { after: SECS(25) }));
+        assert_eq!(started.elapsed(), SECS(25));
+        assert_eq!(elapsed(&recording), [10_000, 20_000]);
+        tokio::time::sleep(SECS(300)).await;
+        assert_eq!(recording.progress().len(), 2, "no tick after the bound");
+    }
+
+    /// A tick due at the very instant of the bound belongs to the bound: the
+    /// step is cut and that tick is not sent.
+    #[tokio::test(start_paused = true)]
+    async fn a_tick_due_at_the_bound_is_not_sent() {
+        let recording = Arc::new(Recording::default());
+        let out = executor(Some(recording.clone()))
+            .with_progress_ticker(tick(SECS(20)), std::future::pending::<()>())
+            .await;
+        assert!(out.is_err());
+        assert_eq!(elapsed(&recording), [10_000]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_step_that_completes_just_before_the_bound_returns_its_value() {
+        let recording = Arc::new(Recording::default());
+        let out = executor(Some(recording.clone()))
+            .with_progress_ticker(tick(SECS(25)), async {
+                tokio::time::sleep(SECS(25) - Duration::from_millis(1)).await;
+                "made it"
+            })
+            .await;
+        assert_eq!(out, Ok("made it"));
+        assert_eq!(elapsed(&recording), [10_000, 20_000]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_zero_bound_is_refused_before_the_step_runs() {
+        let polled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = polled.clone();
+        let out = executor(None)
+            .with_progress_ticker(tick(Duration::ZERO), async move {
+                flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            })
+            .await;
+        assert_eq!(
+            out,
+            Err(ProgressTickerError::InvalidBound {
+                bound: Duration::ZERO
+            })
+        );
+        assert!(!polled.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_bound_above_the_ceiling_is_refused_and_the_ceiling_itself_is_allowed() {
+        let over = SECS(TOOL_PROGRESS_MAX_BOUND_SECS) + Duration::from_millis(1);
+        let refused = executor(None)
+            .with_progress_ticker(tick(over), async {})
+            .await;
+        assert_eq!(
+            refused,
+            Err(ProgressTickerError::InvalidBound { bound: over })
+        );
+        let allowed = executor(None)
+            .with_progress_ticker(tick(SECS(TOOL_PROGRESS_MAX_BOUND_SECS)), async { 1 })
+            .await;
+        assert_eq!(allowed, Ok(1));
+    }
+
+    /// `Instant + interval` panics when it overflows. The interval is clamped
+    /// to the bound, itself capped at the ceiling, so no input can reach it.
+    #[tokio::test(start_paused = true)]
+    async fn an_enormous_interval_cannot_overflow_the_timer() {
+        let recording = Arc::new(Recording::default());
+        let mut huge = tick(SECS(5));
+        huge.interval = Duration::MAX;
+        let out = executor(Some(recording.clone()))
+            .with_progress_ticker(huge, std::future::pending::<()>())
+            .await;
+        assert_eq!(out, Err(ProgressTickerError::TimedOut { after: SECS(5) }));
+        assert!(recording.progress().is_empty());
+    }
+
+    /// An interval below the one-second floor is raised to it: a ticker that
+    /// fires every millisecond would flood the stream. Zero is not a valid
+    /// timer period at all.
+    #[tokio::test(start_paused = true)]
+    async fn an_interval_below_the_floor_is_raised_to_one_second() {
+        let recording = Arc::new(Recording::default());
+        let mut zero = tick(SECS(60));
+        zero.interval = Duration::ZERO;
+        executor(Some(recording.clone()))
+            .with_progress_ticker(zero, tokio::time::sleep(Duration::from_millis(2_500)))
+            .await
+            .unwrap();
+        assert_eq!(elapsed(&recording), [1_000, 2_000]);
+    }
+
+    // ── the bound is the tool call's (W1) ───────────────────────────────
+
+    /// Two stages of one call share one deadline, `call_started + budget`. The
+    /// second is cut at 40 s into the call, 15 s after it began, not at 40 s
+    /// after its own start, so wrapping every stage cannot buy fresh budgets.
+    #[tokio::test(start_paused = true)]
+    async fn two_stages_share_one_deadline() {
+        let recording = Arc::new(Recording::default());
+        let exec = executor(Some(recording.clone()));
+        let call_started = tokio::time::Instant::now();
+        let mut first = tick(SECS(40));
+        first.call_started = call_started;
+        exec.with_progress_ticker(first, tokio::time::sleep(SECS(25)))
+            .await
+            .unwrap();
+        let mut second = tick(SECS(40));
+        second.call_started = call_started;
+        let out = exec
+            .with_progress_ticker(second, std::future::pending::<()>())
+            .await;
+        assert_eq!(out, Err(ProgressTickerError::TimedOut { after: SECS(40) }));
+        assert_eq!(call_started.elapsed(), SECS(40));
+        assert_eq!(elapsed(&recording), [10_000, 20_000, 35_000]);
+    }
+
+    /// A stage that begins at or after the call's deadline does not run at all.
+    #[tokio::test(start_paused = true)]
+    async fn a_wrap_started_at_or_after_the_deadline_never_runs_the_step() {
+        for late in [SECS(40), SECS(50)] {
+            let recording = Arc::new(Recording::default());
+            let polled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let flag = polled.clone();
+            let mut t = tick(SECS(40));
+            t.call_started = tokio::time::Instant::now();
+            tokio::time::sleep(late).await;
+            let out = executor(Some(recording.clone()))
+                .with_progress_ticker(t, async move {
+                    flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                })
+                .await;
+            assert_eq!(out, Err(ProgressTickerError::TimedOut { after: SECS(40) }));
+            assert!(
+                !polled.load(std::sync::atomic::Ordering::SeqCst),
+                "{late:?}"
+            );
+            assert!(recording.progress().is_empty());
+        }
+    }
+
+    /// Documented hazard: dropping the step at the bound cancels the step's own
+    /// future, not work it handed to `tokio::spawn`. That work outlives the
+    /// TimedOut, which is why the caller must stop it (and release any lease)
+    /// before reporting the tool error.
+    #[tokio::test(start_paused = true)]
+    async fn dropping_the_step_does_not_cancel_work_it_spawned() {
+        let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = finished.clone();
+        let out = executor(None)
+            .with_progress_ticker(tick(SECS(25)), async move {
+                tokio::spawn(async move {
+                    tokio::time::sleep(SECS(100)).await;
+                    flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                });
+                std::future::pending::<()>().await
+            })
+            .await;
+        assert!(out.is_err());
+        assert!(!finished.load(std::sync::atomic::Ordering::SeqCst));
+        tokio::time::sleep(SECS(200)).await;
+        assert!(
+            finished.load(std::sync::atomic::Ordering::SeqCst),
+            "the spawned work kept running after the step was dropped"
+        );
+    }
+
+    // ── elapsed is the tool call's (L2) ─────────────────────────────────
+
+    /// Two stages of one tool call, each with its own ticker. The elapsed time
+    /// counts from the call's start, so the UI row never goes backwards.
+    #[tokio::test(start_paused = true)]
+    async fn elapsed_runs_on_across_consecutive_stages_of_one_call() {
+        let recording = Arc::new(Recording::default());
+        let exec = executor(Some(recording.clone()));
+        let call_started = tokio::time::Instant::now();
+        for stage in [ToolProgressStage::Preparing, ToolProgressStage::Running] {
+            let mut t = tick(SECS(60));
+            t.call_started = call_started;
+            t.stage = stage;
+            exec.with_progress_ticker(t, tokio::time::sleep(SECS(25)))
+                .await
+                .unwrap();
+        }
+        let seen = recording.progress();
+        assert_eq!(
+            seen.iter().map(|p| (p.1, p.5)).collect::<Vec<_>>(),
+            [
+                (ToolProgressStage::Preparing, 10_000),
+                (ToolProgressStage::Preparing, 20_000),
+                (ToolProgressStage::Running, 35_000),
+                (ToolProgressStage::Running, 45_000),
+            ]
+        );
     }
 }
