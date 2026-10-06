@@ -461,8 +461,113 @@ impl StagedCall {
 #[cfg(target_os = "linux")]
 impl Drop for StagedCall {
     fn drop(&mut self) {
-        let _ = self.release();
+        if let Err(e) = self.release() {
+            // Not swallowed: what could not be unmounted or removed stays where
+            // it is (never deleted through a mount) until the startup sweep.
+            tracing::warn!(
+                target: crate::dag_engine::log_policy::T_PYTHON_EXEC,
+                call = %self.id,
+                error = %e,
+                "staged call cleanup failed; left for the startup sweep"
+            );
+        }
     }
+}
+
+/// Whether the `out` directory of a leftover call is still a mount: it is on
+/// another device than the call directory. An `out` that cannot be opened is
+/// not (nothing to unmount); a call directory whose device cannot be read is
+/// treated as still mounted, which leaves it alone.
+#[cfg(target_os = "linux")]
+fn out_is_still_mounted(out_dev: Option<u64>, call_dev: Option<u64>) -> bool {
+    match (out_dev, call_dev) {
+        (None, _) => false,
+        (Some(_), None) => true,
+        (Some(out), Some(call)) => out != call,
+    }
+}
+
+/// What a sweep of the staging root did.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct SweepReport {
+    /// Call directories unmounted and removed.
+    pub removed: usize,
+    /// Entries that are not call directories made by [`StagedCall::create`]: left alone.
+    pub skipped: usize,
+    /// Call directories that could not be reclaimed: logged, left in place.
+    pub failed: usize,
+}
+
+/// The ids [`StagedCall::create`] generates: 32 lowercase hexadecimal digits.
+#[cfg(target_os = "linux")]
+fn is_generated_id(name: &str) -> bool {
+    name.len() == 32
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// Reclaims what an executor that was killed left in its staging root: for each
+/// directory a call made (a real directory named like a generated id; a link, a
+/// file or anything else is skipped and never opened), detaches its output volume
+/// and, once it is no longer a mount, removes the directory (removal does not
+/// follow links). Never walks a volume that is still mounted. For the root of
+/// one executor only: it cannot tell a leftover from a call in flight.
+#[cfg(target_os = "linux")]
+pub fn sweep_staging_root(root: &Path) -> io::Result<SweepReport> {
+    let rootfd = open_root(root)?;
+    use crate::dag_engine::log_policy::T_PYTHON_EXEC;
+    let mut report = SweepReport::default();
+    for entry in std::fs::read_dir(root)? {
+        let name = match entry {
+            Ok(e) => e.file_name(),
+            Err(_) => {
+                report.failed += 1;
+                continue;
+            }
+        };
+        let Some(id) = name.to_str().filter(|n| is_generated_id(n)) else {
+            report.skipped += 1;
+            continue;
+        };
+        // A real directory only: a link by that name is not ours to follow.
+        let Ok(call) = open_dir_at(rootfd.as_raw_fd(), id) else {
+            tracing::warn!(target: T_PYTHON_EXEC, call = %id, "staging entry is not a directory; skipped");
+            report.skipped += 1;
+            continue;
+        };
+        let path = root.join(id);
+        let out = path.join(OUT_NAME);
+        if let Ok(c) = CString::new(out.as_os_str().as_encoded_bytes()) {
+            // Not mounted (EINVAL) or already gone (ENOENT) is fine.
+            unsafe { libc::umount2(c.as_ptr(), libc::MNT_DETACH) };
+        }
+        let dev = |fd: RawFd| {
+            let mut st: libc::stat = unsafe { std::mem::zeroed() };
+            (unsafe { libc::fstat(fd, &mut st) } == 0).then_some(st.st_dev as u64)
+        };
+        let out_dev = open_dir_at(call.as_raw_fd(), OUT_NAME)
+            .ok()
+            .and_then(|f| dev(f.as_raw_fd()));
+        let still_mounted = out_is_still_mounted(out_dev, dev(call.as_raw_fd()));
+        if still_mounted {
+            tracing::warn!(target: T_PYTHON_EXEC, call = %id, "staged volume could not be unmounted; left in place");
+            report.failed += 1;
+            continue;
+        }
+        match std::fs::remove_dir_all(&path) {
+            Ok(()) => report.removed += 1,
+            Err(e) => {
+                tracing::warn!(target: T_PYTHON_EXEC, call = %id, error = %e, "leftover staged call could not be removed");
+                report.failed += 1;
+            }
+        }
+    }
+    if report != SweepReport::default() {
+        tracing::info!(target: T_PYTHON_EXEC, removed = report.removed, skipped = report.skipped, failed = report.failed, "staging root swept");
+    }
+    Ok(report)
 }
 
 #[cfg(test)]
@@ -553,6 +658,18 @@ mod tests {
         );
         assert_eq!(got[2], want[2], "a parent comes after its children");
         assert_eq!(unescape_mount_point("/a\\040b\\134c"), "/a b\\c");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_leftover_out_is_mounted_when_it_is_on_another_device() {
+        assert!(out_is_still_mounted(Some(7), Some(3)));
+        assert!(!out_is_still_mounted(Some(3), Some(3)));
+        assert!(!out_is_still_mounted(None, Some(3)));
+        assert!(
+            out_is_still_mounted(Some(7), None),
+            "unknown: leave it alone"
+        );
     }
 
     #[test]

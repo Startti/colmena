@@ -981,7 +981,7 @@
 #### `src/libs/colmena/src/dag_engine/infrastructure/python_exec/staging.rs`
 - Module: `dag_engine::infrastructure::python_exec::staging`
 - **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
-- Depends on (0): — (no intra-crate imports)
+- Depends on (1): `dag_engine::log_policy`
 
 #### `src/libs/colmena/src/dag_engine/infrastructure/python_exec/subprocess.rs`
 - Module: `dag_engine::infrastructure::python_exec::subprocess`
@@ -1030,7 +1030,7 @@
 
 #### `src/libs/colmena/src/dag_engine/log_policy.rs`
 - Module: `dag_engine::log_policy`
-- **Used by (5)**: `src/libs/colmena/src/dag_engine/infrastructure/nodes/python_node.rs`, `src/libs/colmena/src/dag_engine/infrastructure/python_exec/mod.rs`, `src/libs/colmena/src/dag_engine/infrastructure/python_exec/remote.rs`, `src/libs/colmena/src/dag_engine/infrastructure/python_exec/server.rs`, `src/libs/colmena/src/dag_engine/infrastructure/python_exec/subprocess.rs`
+- **Used by (6)**: `src/libs/colmena/src/dag_engine/infrastructure/nodes/python_node.rs`, `src/libs/colmena/src/dag_engine/infrastructure/python_exec/mod.rs`, `src/libs/colmena/src/dag_engine/infrastructure/python_exec/remote.rs`, `src/libs/colmena/src/dag_engine/infrastructure/python_exec/server.rs`, `src/libs/colmena/src/dag_engine/infrastructure/python_exec/staging.rs`, `src/libs/colmena/src/dag_engine/infrastructure/python_exec/subprocess.rs`
 - Depends on (1): `dag_engine::engine`
 
 #### `src/libs/colmena/src/dag_engine/main.rs`

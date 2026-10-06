@@ -10,8 +10,8 @@ use colmena::dag_engine::infrastructure::python_exec::child::CallMounts;
 use colmena::dag_engine::infrastructure::python_exec::config::SubprocessConfig;
 use colmena::dag_engine::infrastructure::python_exec::protocol::CRASHED_MESSAGE;
 use colmena::dag_engine::infrastructure::python_exec::staging::{
-    check_out_volume, open_call_dirs, StageError, StagedCall, OUT_MAX_INODES, OUT_MB_MAX,
-    STAGED_VOLUMES_MAX,
+    check_out_volume, open_call_dirs, sweep_staging_root, StageError, StagedCall, OUT_MAX_INODES,
+    OUT_MB_MAX, STAGED_VOLUMES_MAX,
 };
 use colmena::dag_engine::infrastructure::python_exec::subprocess::SubprocessExecutor;
 use serde_json::{json, Value};
@@ -1252,4 +1252,151 @@ async fn a_broken_staging_root_disables_mounts_and_not_plain_calls() {
         "{err}"
     );
     assert_eq!(run_plain(&ex, "output = 3").await.unwrap(), json!(3));
+}
+
+// ---------------------------------------------------------------------------
+// Cleanup: failures are logged with the call id; leftovers are swept at start.
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Default)]
+struct Captured(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+impl std::io::Write for Captured {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Captured {
+    type Writer = Captured;
+    fn make_writer(&'a self) -> Captured {
+        self.clone()
+    }
+}
+
+/// A cleanup that fails (here: a mount left over `data`, which cannot be
+/// removed) is not swallowed: it is logged with the call id, and the directories
+/// stay for the sweep.
+#[test]
+fn a_failed_cleanup_is_logged_with_the_call_id() {
+    let Some(_alone) = Root::exclusive() else {
+        return;
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let log = Captured::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(log.clone())
+        .with_ansi(false)
+        .finish();
+    let id = tracing::subscriber::with_default(subscriber, || {
+        let staged = StagedCall::create(&root, 1).unwrap();
+        let data = staged.data_dir();
+        let c = std::ffi::CString::new(data.to_str().unwrap()).unwrap();
+        let rc = unsafe {
+            libc::mount(
+                c"tmpfs".as_ptr(),
+                c.as_ptr(),
+                c"tmpfs".as_ptr(),
+                0,
+                c"size=1m".as_ptr() as *const libc::c_void,
+            )
+        };
+        assert_eq!(rc, 0);
+        let id = staged.id().to_string();
+        drop(staged);
+        unsafe { libc::umount2(c.as_ptr(), libc::MNT_DETACH) };
+        id
+    });
+    let text = String::from_utf8(log.0.lock().unwrap().clone()).unwrap();
+    assert!(text.contains(&id) && text.contains("cleanup"), "{text}");
+    assert!(
+        root.join(&id).exists(),
+        "what could not be removed is left for the sweep"
+    );
+    let report = sweep_staging_root(&root).unwrap();
+    assert_eq!(report.removed, 1, "{report:?}");
+    assert!(!root.join(&id).exists());
+}
+
+/// After a crash nothing reclaims the call directories (prepared customer data)
+/// or the volumes: the sweep unmounts and removes them, never follows anything
+/// inside, and leaves what is not a call directory alone.
+#[test]
+fn the_sweep_reclaims_leftover_calls_and_follows_nothing() {
+    let Some(_alone) = Root::exclusive() else {
+        return;
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let canary_dir = root.join("canary-dir");
+    std::fs::create_dir(&canary_dir).unwrap();
+    std::fs::write(canary_dir.join("canary"), "keep").unwrap();
+    // A crashed executor: two calls left mounted and filled.
+    let mut left = Vec::new();
+    for _ in 0..2 {
+        let staged = StagedCall::create(&root, 1).unwrap();
+        std::fs::write(staged.data_dir().join("part.parquet"), "customer").unwrap();
+        std::fs::write(staged.out_dir().join("result.csv"), "result").unwrap();
+        // The program's link, and a link in what the trusted side staged.
+        std::os::unix::fs::symlink(&canary_dir, staged.out_dir().join("escape")).unwrap();
+        std::os::unix::fs::symlink(&canary_dir, staged.data_dir().join("escape")).unwrap();
+        left.push(staged.id().to_string());
+        std::mem::forget(staged);
+    }
+    // A call-id-shaped link to the canary, and things that are not calls at all
+    // (the canary's own directory is one: only generated ids are swept).
+    let linked = "a".repeat(32);
+    std::os::unix::fs::symlink(&canary_dir, root.join(&linked)).unwrap();
+    std::fs::write(root.join("notes.txt"), "mine").unwrap();
+    std::fs::create_dir(root.join("not-a-call id")).unwrap();
+    let report = sweep_staging_root(&root).unwrap();
+    assert_eq!(report.removed, 2, "{report:?}");
+    assert_eq!(report.skipped, 4, "{report:?}");
+    for id in &left {
+        assert!(!root.join(id).exists(), "{id} left behind");
+    }
+    assert_eq!(mounts_under(&root), 0);
+    assert_eq!(
+        std::fs::read_to_string(canary_dir.join("canary")).unwrap(),
+        "keep"
+    );
+    assert!(root
+        .join(&linked)
+        .symlink_metadata()
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    assert!(root.join("notes.txt").exists() && root.join("not-a-call id").exists());
+}
+
+/// The executor that is about to serve sweeps its staging root first (the host
+/// and `python_executor serve` both build it this way); a plain `new` does not,
+/// because a sweep cannot tell a leftover from a call in flight.
+#[test]
+fn an_executor_about_to_serve_sweeps_its_root() {
+    let Some(root) = Root::exclusive() else {
+        return;
+    };
+    let build = |serving: bool| {
+        let mut cfg = SubprocessConfig::from_lookup(&|_: &str| None::<String>).unwrap();
+        cfg.bin = PathBuf::from(env!("CARGO_BIN_EXE_python_executor"));
+        cfg.staging_root = Some(root.path.clone());
+        cfg.uid_base = 65000;
+        match serving {
+            true => SubprocessExecutor::new_for_serving(cfg, Duration::from_secs(60)),
+            false => SubprocessExecutor::new(cfg, Duration::from_secs(60)),
+        }
+        .unwrap()
+    };
+    let staged = StagedCall::create(&root.path, 1).unwrap();
+    let leftover = root.path.join(staged.id());
+    std::mem::forget(staged);
+    let _plain = build(false);
+    assert!(leftover.exists(), "a plain new must not sweep");
+    let _serving = build(true);
+    assert!(!leftover.exists(), "a leftover call survived the start");
+    assert_eq!(mounts_under(&root.path), 0);
 }

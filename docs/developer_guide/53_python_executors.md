@@ -240,6 +240,16 @@ filesystem is a tmpfs, it has a size no bigger than the declared `out_mb`, its i
 device) and it is not the volume of the call directory. The `mount_out_bounded` self-test layer also probes the inode
 limit (empty files stop with `ENOSPC` at or before 1,024).
 
+Cleanup failures are logged, never swallowed: a `StagedCall` whose unmount or removal fails logs a warning with the call
+id and leaves what it could not remove in place (it never deletes through a mount). Nothing else reclaims a killed
+executor's leftovers, so `SubprocessExecutor::new_for_serving` (what the host and `python_executor serve` build) sweeps
+the staging root before serving, `staging::sweep_staging_root`: for each entry that is a real directory named like a
+generated id (32 lowercase hex digits; a link, a file or any other name is skipped and never opened) it detaches the
+`out` volume and, once that is no longer a mount, removes the directory without following links; a volume that cannot be
+detached is left in place and logged. It cannot tell a leftover from a call in flight, so the staging root must belong
+to ONE executor. If the staging volume is persistent, the prepared data of a call that was killed stays on it until the
+next start of an executor with that root; a tmpfs staging volume vanishes with the instance.
+
 ### Startup self-test (Linux)
 
 Before it binds its socket, the template forks a throwaway child that enters the jail as slot 9999 (uid
