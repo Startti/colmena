@@ -5,7 +5,7 @@
 
 use super::child::CallHeader;
 use super::jail::{self, JailSpec, CHANNEL_FD, DEFAULT_HIDDEN, NOFILE, NPROC};
-use super::staging::{StagedCall, OUT_MAX_INODES};
+use super::staging::{unescape_mount_point, StagedCall, OUT_MAX_INODES};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::io::{self, Read, Write};
@@ -176,18 +176,6 @@ fn mounts_outside(table: &str, except: Option<&Path>) -> usize {
 /// A pure function of the table, so the rule is proven without any timing.
 fn mounts_unchanged(table: &str, except: Option<&Path>, before: usize) -> bool {
     mounts_outside(table, except) <= before
-}
-
-/// The octal escapes `mountinfo` uses for space, tab, newline and backslash.
-fn unescape_mount_point(field: &str) -> String {
-    [
-        ("\\040", " "),
-        ("\\011", "\t"),
-        ("\\012", "\n"),
-        ("\\134", "\\"),
-    ]
-    .iter()
-    .fold(field.to_string(), |acc, (from, to)| acc.replace(from, to))
 }
 
 /// Besides the channel only 0, 1 and 2 are open, and they are the null device.

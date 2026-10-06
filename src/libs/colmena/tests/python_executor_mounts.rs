@@ -1073,3 +1073,129 @@ fn real_volumes_that_miss_one_fact_are_refused() {
         unsafe { libc::umount2(c.as_ptr(), libc::MNT_DETACH) };
     }
 }
+
+// ---------------------------------------------------------------------------
+// Other calls' volumes are not in this call's namespace.
+// ---------------------------------------------------------------------------
+
+/// Every call starts with a copy of the whole mount table, other calls' output
+/// volumes included. The jail detaches them: from inside, no mount of another
+/// call (or of this call's own staging path) is listed, with or without mounts.
+#[tokio::test]
+async fn a_call_does_not_see_other_calls_mounts() {
+    let Some(root) = Root::new() else { return };
+    let ex = executor(Some(&root));
+    let (mine, other) = (
+        StagedCall::create(&root.path, 1).unwrap(),
+        StagedCall::create(&root.path, 1).unwrap(),
+    );
+    // The id of the call itself may appear: the bind of its own `/data` names
+    // the directory it came from. Another call's id may not, anywhere.
+    let others = format!(
+        "table = open('/proc/self/mountinfo').read().splitlines()\n\
+         output = [l for l in table if {:?} in l]",
+        other.id()
+    );
+    assert_eq!(
+        run_staged(&ex, mine.mounts(), &others).await.unwrap(),
+        json!([])
+    );
+    assert_eq!(run_plain(&ex, &others).await.unwrap(), json!([]));
+    let own_mounts_under_root = format!(
+        "table = open('/proc/self/mountinfo').read().splitlines()\n\
+         output = [l.split()[4] for l in table if l.split()[4].startswith({:?} + '/')]",
+        root.path.to_str().unwrap()
+    );
+    let under = run_staged(&ex, mine.mounts(), &own_mounts_under_root).await;
+    assert_eq!(
+        under.unwrap(),
+        json!([]),
+        "no mount is left under the staging root"
+    );
+    // The call's own /out is still there, and is not listed under the staging path.
+    let own = "output = [l.split()[4] for l in open('/proc/self/mountinfo').read().splitlines() if l.split()[4] in ('/data', '/out')]";
+    let mut got = run_staged(&ex, mine.mounts(), own).await.unwrap();
+    got.as_array_mut()
+        .unwrap()
+        .sort_by_key(|v| v.as_str().unwrap().to_string());
+    assert_eq!(got, json!(["/data", "/out"]));
+}
+
+fn shmem_kib() -> u64 {
+    let info = std::fs::read_to_string("/proc/meminfo").unwrap();
+    let line = info.lines().find(|l| l.starts_with("Shmem:")).unwrap();
+    line.split_whitespace().nth(1).unwrap().parse().unwrap()
+}
+
+/// The memory of a released output volume is freed while a call that started
+/// before the release is still running. In the Docker container this was
+/// written in the volume is freed even without the detach (the host's unmount
+/// propagates to the call's copy), so this guards the property; it is
+/// `a_call_does_not_see_other_calls_mounts` that fails without the detach.
+#[tokio::test]
+async fn a_released_volume_is_freed_while_an_overlapping_call_runs() {
+    let Some(root) = Root::exclusive() else {
+        return;
+    };
+    let ex = executor(Some(&root));
+    let released = StagedCall::create(&root.path, 128).unwrap();
+    std::fs::write(released.out_dir().join("fill"), vec![1u8; 96 << 20]).unwrap();
+    let running = StagedCall::create(&root.path, 4).unwrap();
+    let hold = r#"
+import os, time
+open('/out/ready', 'w').close()
+for _ in range(400):
+    if os.path.exists('/out/go'):
+        break
+    time.sleep(0.05)
+output = os.path.exists('/out/go')
+"#;
+    let call = run_staged(&ex, running.mounts(), hold);
+    let control = async {
+        let ready = running.out_dir().join("ready");
+        for _ in 0..400 {
+            if ready.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(ready.exists(), "the overlapping call never started");
+        let before = shmem_kib();
+        drop(released);
+        let after = shmem_kib();
+        std::fs::write(running.out_dir().join("go"), "").unwrap();
+        (before, after)
+    };
+    let (answer, (before, after)) = tokio::join!(call, control);
+    assert_eq!(answer.unwrap(), json!(true));
+    let freed_mib = before.saturating_sub(after) / 1024;
+    assert!(
+        freed_mib >= 64,
+        "only {freed_mib} MiB freed (before {before} KiB, after {after} KiB)"
+    );
+}
+
+/// Calls come and go while others start: a mount that vanishes between the jail
+/// reading the table and detaching it is not an error.
+#[tokio::test]
+async fn calls_start_correctly_while_other_calls_come_and_go() {
+    let Some(root) = Root::new() else { return };
+    let ex = executor(Some(&root));
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let churn = {
+        let (stop, path) = (stop.clone(), root.path.clone());
+        std::thread::spawn(move || {
+            while !stop.load(Ordering::Relaxed) {
+                drop(StagedCall::create(&path, 1).unwrap());
+            }
+        })
+    };
+    for _ in 0..25 {
+        let staged = StagedCall::create(&root.path, 1).unwrap();
+        let out = run_staged(&ex, staged.mounts(), "output = 1").await;
+        assert_eq!(out.unwrap(), json!(1));
+        assert_eq!(run_plain(&ex, "output = 2").await.unwrap(), json!(2));
+    }
+    stop.store(true, Ordering::Relaxed);
+    churn.join().unwrap();
+}

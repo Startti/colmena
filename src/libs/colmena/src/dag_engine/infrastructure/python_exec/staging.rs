@@ -236,6 +236,32 @@ pub fn open_call_dirs(root: &Path, id: &str) -> io::Result<CallDirs> {
 /// Most inodes the output volume of a call may hold: a program cannot fill the
 /// executor's memory with empty files.
 pub const OUT_MAX_INODES: u64 = 1024;
+/// The octal escapes `mountinfo` uses for space, tab, newline and backslash.
+pub fn unescape_mount_point(field: &str) -> String {
+    [
+        ("\\040", " "),
+        ("\\011", "\t"),
+        ("\\012", "\n"),
+        ("\\134", "\\"),
+    ]
+    .iter()
+    .fold(field.to_string(), |acc, (from, to)| acc.replace(from, to))
+}
+
+/// The mount points below `root` in a `mountinfo` table, never `root` itself,
+/// children before their parents (deepest first), so that detaching them in
+/// order never meets a busy parent.
+pub fn mount_points_under(table: &str, root: &Path) -> Vec<std::path::PathBuf> {
+    let mut points: Vec<std::path::PathBuf> = table
+        .lines()
+        .filter_map(|l| l.split(' ').nth(4))
+        .map(|f| std::path::PathBuf::from(unescape_mount_point(f)))
+        .filter(|p| p != root && p.starts_with(root))
+        .collect();
+    points.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
+    points
+}
+
 /// `f_type` of a tmpfs.
 pub const TMPFS_MAGIC: i64 = 0x0102_1994;
 
@@ -494,6 +520,39 @@ mod tests {
         refused_with(&|f| f.parent_dev = 7, "root of its mount");
         let e = judge_out_volume(&good_volume(), 0).unwrap_err();
         assert_eq!(e.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    /// The mount points below a root, deepest first, from a mount table: not the
+    /// root itself, not a sibling that merely shares its prefix, escapes decoded.
+    #[test]
+    fn the_mounts_under_a_root_come_deepest_first() {
+        let line = |point: &str| format!("36 1 0:30 / {point} rw,nosuid - tmpfs tmpfs rw\n");
+        let table: String = [
+            "/",
+            "/srv/st",
+            "/srv/st/a/out",
+            "/srv/st/b\\040c/out",
+            "/srv/stx/out",
+            "/srv/st/a",
+            "/srv",
+        ]
+        .iter()
+        .map(|p| line(p))
+        .collect();
+        let got = mount_points_under(&table, Path::new("/srv/st"));
+        let want: Vec<std::path::PathBuf> = ["/srv/st/b c/out", "/srv/st/a/out", "/srv/st/a"]
+            .map(Into::into)
+            .into();
+        assert_eq!(got.len(), 3, "{got:?}");
+        assert_eq!(
+            &got[..2]
+                .iter()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>(),
+            &want[..2].iter().cloned().collect()
+        );
+        assert_eq!(got[2], want[2], "a parent comes after its children");
+        assert_eq!(unescape_mount_point("/a\\040b\\134c"), "/a b\\c");
     }
 
     #[test]

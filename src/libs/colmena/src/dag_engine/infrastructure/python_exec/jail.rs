@@ -4,7 +4,9 @@
 //! before it make.
 
 use super::child::CallHeader;
-use super::staging::{check_out_volume, open_call_dirs, valid_out_mb, CallDirs};
+use super::staging::{
+    check_out_volume, mount_points_under, open_call_dirs, valid_out_mb, CallDirs,
+};
 use serde::{Deserialize, Serialize};
 use std::ffi::CString;
 use std::io;
@@ -218,6 +220,29 @@ fn open_staged(spec: &JailSpec, hdr: &CallHeader) -> io::Result<Option<Staged>> 
     }
 }
 
+/// Detaches, in this call's own mount namespace, every mount below the staging
+/// root: they are copies of the executor's, among them the output volumes of
+/// every other call in flight, which this call must neither see nor keep alive.
+/// Run after this call's own directories are bound (those binds stay) and
+/// before the root is covered. A mount that cannot be detached ends the call,
+/// unless it is already gone.
+fn detach_staging_mounts(root: &Path) -> io::Result<()> {
+    let table = std::fs::read_to_string("/proc/self/mountinfo")?;
+    for point in mount_points_under(&table, root) {
+        let c = cstr(point.as_os_str().as_bytes())?;
+        if unsafe { libc::umount2(c.as_ptr(), libc::MNT_DETACH) } != 0 {
+            // A call that finished since the table was read took its volume
+            // with it: the mount is gone (ENOENT, or EINVAL for a path that is
+            // no longer a mount point), which is what was wanted.
+            let e = io::Error::last_os_error();
+            if !matches!(e.raw_os_error(), Some(libc::ENOENT | libc::EINVAL)) {
+                return Err(e);
+            }
+        }
+    }
+    Ok(())
+}
+
 /// A mount point of the jail's own root: a directory, never a link. One that
 /// does not exist yet is created, which needs a root filesystem that takes it.
 fn ensure_mount_point(target: &Path) -> io::Result<()> {
@@ -358,6 +383,9 @@ pub fn enter(spec: &JailSpec, hdr: &CallHeader, conn: UnixStream) -> Result<Unix
         bind_dir(&staged.dirs.data, DATA_TARGET, true).map_err(at("mounts"))?;
         bind_dir(&staged.dirs.out, OUT_TARGET, false).map_err(at("mounts"))?;
         out_bytes = staged.out_bytes;
+    }
+    if let Some(root) = &spec.staging_root {
+        detach_staging_mounts(root).map_err(at("mounts"))?;
     }
     let hidden = DEFAULT_HIDDEN
         .iter()

@@ -200,8 +200,10 @@ lacks it (a link or a file there is refused; calls starting together may race to
 stays, empty and not writable by the program, for later calls; pre-create it in the image if the root filesystem is
 read-only. The staging root is covered (an empty read-only `tmpfs`) for EVERY call once it is configured, with or without
 mounts, so a call without mounts cannot list it either. Nothing else of the staging volume is visible: the call directory and every other call's files are not bound, and `..` of
-`/data` is the jail's root. A call can still read the mount table, which names the other calls' output volumes
-(random ids, no content reachable). A call id the jail cannot trust (a bad charset, a link in the path, a `data` directory
+`/data` is the jail's root. The jail detaches, in the call's own mount namespace, every mount below the staging root that is not this call's own
+(the copies of the other calls' output volumes the namespace starts with), deepest first, before it covers the root: from
+inside, `/proc/self/mountinfo` names no other call and lists nothing under the root. A mount that vanishes between the
+table being read and its detach is ignored; any other failure ends the call. A call id the jail cannot trust (a bad charset, a link in the path, a `data` directory
 others can write in) ends the call before any code runs, with the crash text. Everything else the jail applies, the
 user, capabilities, limits, seccomp filter, environment and the empty network namespace, is the same with or without
 mounts (`tests/python_executor_mounts.rs` compares them from inside), except the largest file a call may write: it is
