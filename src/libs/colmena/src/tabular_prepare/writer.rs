@@ -749,6 +749,71 @@ mod part_writer {
     }
 
     #[tokio::test]
+    async fn the_memory_estimate_counts_values_offsets_and_validity_not_the_parquet_size() {
+        // Strings that dictionary-encode to almost nothing still take memory.
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("s", DataType::Utf8, true),
+            Field::new("n", DataType::Int64, false),
+        ]));
+        let values: Vec<Option<String>> = (0..1000)
+            .map(|i| (i % 10 != 0).then(|| format!("a fairly long repeated value {}", i % 3)))
+            .collect();
+        let value_bytes: usize = values.iter().flatten().map(|v| v.len()).sum();
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(StringArray::from(values)),
+                Arc::new(Int64Array::from_iter_values(0..1000)),
+            ],
+        )
+        .unwrap();
+        let sink = Arc::new(MemorySink::default());
+        let mut w = PartWriter::new(sink, 0, schema, small(400)).unwrap();
+        w.write(&batch).await.unwrap();
+        let done = w.finish().await.unwrap();
+        let (s, n) = (&done.columns[0], &done.columns[1]);
+        // Values plus 4 bytes of offset per row, plus validity: more than the
+        // text alone, and not wildly more.
+        let floor = (value_bytes + 4 * 1000) as u64;
+        assert!(
+            s.in_memory_bytes >= floor && s.in_memory_bytes <= floor * 2,
+            "{}",
+            s.in_memory_bytes
+        );
+        // The Parquet size is the dictionary, far below what is in memory.
+        assert!(
+            s.uncompressed_bytes * 3 < s.in_memory_bytes,
+            "{} vs {}",
+            s.uncompressed_bytes,
+            s.in_memory_bytes
+        );
+        // Eight bytes per integer.
+        assert_eq!(n.in_memory_bytes, 8 * 1000);
+    }
+
+    #[test]
+    fn column_names_must_be_unique_non_empty_clean_and_short() {
+        let sink = Arc::new(MemorySink::default());
+        let mk = |names: &[&str]| {
+            Arc::new(Schema::new(
+                names
+                    .iter()
+                    .map(|n| Field::new(*n, DataType::Int64, true))
+                    .collect::<Vec<_>>(),
+            ))
+        };
+        for bad in [vec!["a", "a"], vec![""], vec!["a\u{7}"], vec!["a\nb"]] {
+            assert!(
+                PartWriter::new(sink.clone(), 0, mk(&bad), WriterConfig::default()).is_err(),
+                "{bad:?}"
+            );
+        }
+        let long = "x".repeat(MAX_COLUMN_NAME_CHARS + 1);
+        assert!(PartWriter::new(sink.clone(), 0, mk(&[&long]), WriterConfig::default()).is_err());
+        assert!(PartWriter::new(sink, 0, mk(&["a", "A", "é"]), WriterConfig::default()).is_ok());
+    }
+
+    #[tokio::test]
     async fn a_failing_final_put_keeps_its_path_and_no_table_is_reported() {
         // One part is written (put 0), then the last part's put fails.
         let sink = Arc::new(MemorySink::failing_from(1));
@@ -762,5 +827,77 @@ mod part_writer {
             ["t0/part-00000.parquet", "t0/part-00001.parquet"]
         );
         assert!(matches!(w.finish().await, Err(WriterError::Poisoned)));
+    }
+
+    #[tokio::test]
+    async fn encoding_does_not_block_the_async_worker() {
+        // A single-threaded runtime: a probe task yields in a loop while the
+        // writer encodes 8 MiB of text. If the encoder ran on the runtime
+        // thread, the write would finish in its first poll and the probe would
+        // never run; with the blocking pool the write is pending while the
+        // thread encodes, and the probe runs. Nothing depends on how long that
+        // takes.
+        let schema = Arc::new(Schema::new(vec![Field::new("s", DataType::Utf8, false)]));
+        let mut x = 0x2545_F491_4F6C_DD1Du64;
+        let values: Vec<String> = (0..8)
+            .map(|_| {
+                (0..1024 * 1024)
+                    .map(|_| {
+                        x ^= x << 13;
+                        x ^= x >> 7;
+                        x ^= x << 17;
+                        (b'a' + (x % 26) as u8) as char
+                    })
+                    .collect()
+            })
+            .collect();
+        let batch = RecordBatch::try_new(schema.clone(), vec![Arc::new(StringArray::from(values))])
+            .unwrap();
+        let sink = Arc::new(MemorySink::default());
+        let mut w = PartWriter::new(sink, 0, schema, WriterConfig::default()).unwrap();
+        let ticks = std::sync::atomic::AtomicUsize::new(0);
+        let done = std::sync::atomic::AtomicBool::new(false);
+        let probe = async {
+            while !done.load(std::sync::atomic::Ordering::SeqCst) {
+                ticks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                tokio::task::yield_now().await;
+            }
+        };
+        let mut during_write = 0;
+        let work = async {
+            w.write(&batch).await.unwrap();
+            during_write = ticks.load(std::sync::atomic::Ordering::SeqCst);
+            w.finish().await.unwrap();
+            done.store(true, std::sync::atomic::Ordering::SeqCst);
+        };
+        tokio::join!(work, probe);
+        // `join!` polls `work` first. Encoding 8 MiB takes milliseconds, so when
+        // it runs on the blocking pool the write is pending at that first poll
+        // and the probe runs before the write is polled again; when it runs
+        // inline the write finishes in its first poll and the probe has not run.
+        assert!(
+            during_write >= 1,
+            "another task ran {during_write} times while the slices were encoded"
+        );
+        // The flush of the part is not asserted this way: the pages were already
+        // compressed while the slices were written, so closing the part can end
+        // before the next poll and a tick count between the two would depend on
+        // the machine. `roll` hands the close to `spawn_blocking` the same way.
+    }
+
+    #[tokio::test]
+    async fn a_panic_or_cancel_of_the_encoder_task_is_a_typed_error() {
+        let panicked = tokio::task::spawn_blocking(|| panic!("encoder bug"))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(encoder_stopped(panicked), WriterError::Parquet(m) if m.contains("panicked"))
+        );
+        let handle = tokio::spawn(std::future::pending::<()>());
+        handle.abort();
+        let cancelled = handle.await.unwrap_err();
+        assert!(
+            matches!(encoder_stopped(cancelled), WriterError::Parquet(m) if m.contains("cancelled"))
+        );
     }
 }

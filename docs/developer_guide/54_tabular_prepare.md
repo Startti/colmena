@@ -449,3 +449,20 @@ Dependencies for the writer and the rest: `parquet` 58.3.0 (only the `arrow` and
 `arrow-schema`, `arrow-cast`, `arrow-csv` 58.3.0. Arrow 58.3.0 was already in the
 lock through another dependency, so the lock gains `parquet` and its few helpers
 only; `encoding_rs` is used to read Windows-1252.
+
+### Type inference (`infer.rs`)
+
+The type of a column is decided from its first 10,000 rows; later rows are never
+examined (a later cell that does not fit is handled by the conversion, which
+demotes the column to text and starts over). An empty cell is null and does not
+decide the type; a column with nothing to go on is text. Integers (`-?digits`)
+and floats (`1.5`, `1e5`) are recognised only in plain form, at most 15 digits
+(what a float holds exactly), and an integer with a leading zero (`00123`, a zip
+code or an id) stays text. A float whose literal would underflow to zero or to a
+subnormal (`1e-400`) is text. `-0` is an integer with the value 0. Booleans are
+`true`/`false` in any case; dates are `YYYY-MM-DD` and real calendar days;
+timestamps are `YYYY-MM-DD[T ]HH:MM:SS` with digits only in the clock and up to
+six fraction digits and **no zone** (a cell with `Z` or an offset stays text
+instead of being shifted). Integers with floats mix into floats; every other mix
+is text. A test feeds the inferred schema to the Arrow CSV reader to prove it
+parses everything the inference accepts.
