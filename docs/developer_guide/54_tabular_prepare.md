@@ -438,6 +438,12 @@ so a failed table is never reported as written. `attempted_paths` lists every pa
 handed to the sink, including one whose put failed (`finish` takes `&mut self`,
 so it is still readable when the last put fails), so the caller can remove them.
 
+Encoding and compressing run on the blocking pool (a slice is tens of
+milliseconds of CPU), never on the async worker: a test on a single-threaded
+runtime counts how often another task runs while 8 MiB are encoded and flushed
+(zero when either runs inline). A panic or cancel of that task is a typed
+`WriterError`.
+
 Dependencies for the writer and the rest: `parquet` 58.3.0 (only the `arrow` and
 `zstd` features, no snappy, brotli, lz4 or async readers) and `arrow-array`,
 `arrow-schema`, `arrow-cast`, `arrow-csv` 58.3.0. Arrow 58.3.0 was already in the

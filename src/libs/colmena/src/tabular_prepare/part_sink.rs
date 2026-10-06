@@ -63,6 +63,52 @@ impl PartSink for DirSink {
 }
 
 #[cfg(test)]
+pub(crate) mod fake {
+    use super::*;
+    use std::collections::BTreeMap;
+    use std::sync::Mutex;
+
+    /// In-memory sink that remembers every put, in order, and can be told to
+    /// fail from the Nth put on.
+    #[derive(Default)]
+    pub struct MemorySink {
+        pub parts: Mutex<BTreeMap<String, Bytes>>,
+        pub order: Mutex<Vec<String>>,
+        pub fail_from: Mutex<Option<usize>>,
+    }
+
+    impl MemorySink {
+        pub fn failing_from(n: usize) -> Self {
+            Self {
+                fail_from: Mutex::new(Some(n)),
+                ..Self::default()
+            }
+        }
+        pub fn get(&self, path: &str) -> Option<Bytes> {
+            self.parts.lock().unwrap().get(path).cloned()
+        }
+        pub fn paths(&self) -> Vec<String> {
+            self.order.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl PartSink for MemorySink {
+        async fn put(&self, path: &str, data: Bytes) -> Result<(), SinkError> {
+            let mut order = self.order.lock().unwrap();
+            if let Some(n) = *self.fail_from.lock().unwrap() {
+                if order.len() >= n {
+                    return Err(SinkError("injected failure".into()));
+                }
+            }
+            order.push(path.to_string());
+            self.parts.lock().unwrap().insert(path.to_string(), data);
+            Ok(())
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
