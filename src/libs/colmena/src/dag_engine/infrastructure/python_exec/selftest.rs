@@ -5,7 +5,7 @@
 
 use super::child::CallHeader;
 use super::jail::{self, JailSpec, CHANNEL_FD, DEFAULT_HIDDEN, NOFILE, NPROC};
-use super::staging::StagedCall;
+use super::staging::{StagedCall, OUT_MAX_INODES};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::io::{self, Read, Write};
@@ -511,6 +511,9 @@ fn out_mount(dir: &Path) -> LayerCheck {
     if !read || size != SELF_TEST_OUT_MB << 20 || !refused_as(past, libc::ENOSPC) {
         return outcome(layer, "unbounded", "bounded");
     }
+    if !inodes_bounded(dir) {
+        return outcome(layer, "unbounded", "bounded");
+    }
     let wanted = libc::ST_NOSUID | libc::ST_NODEV | libc::ST_NOEXEC;
     let flags = fs.f_flag;
     let held = flags & wanted == wanted && flags & libc::ST_RDONLY == 0;
@@ -519,6 +522,27 @@ fn out_mount(dir: &Path) -> LayerCheck {
         if held { "bounded" } else { "flags_missing" },
         "bounded",
     )
+}
+
+/// Empty files stop at the inode bound: creating more than [`OUT_MAX_INODES`]
+/// fails with `ENOSPC` no later than that, and what was made is removed.
+fn inodes_bounded(dir: &Path) -> bool {
+    let probe = dir.join("inodes");
+    if std::fs::create_dir(&probe).is_err() {
+        return false;
+    }
+    let mut made = 0u64;
+    let failure = loop {
+        match std::fs::File::create(probe.join(made.to_string())) {
+            Ok(_) => made += 1,
+            Err(e) => break Some(e),
+        }
+        if made > OUT_MAX_INODES + 8 {
+            break None;
+        }
+    };
+    let _ = std::fs::remove_dir_all(&probe);
+    failure.is_some_and(|e| e.raw_os_error() == Some(libc::ENOSPC)) && made <= OUT_MAX_INODES
 }
 
 /// The staging root shows nothing: absent, or an empty cover.
@@ -793,10 +817,17 @@ mod tests {
         let out = tmp.path().join("out");
         std::fs::create_dir(&out).unwrap();
         let safe = libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC;
-        let size = format!("size={SELF_TEST_OUT_MB}m,mode=1777");
+        let size = format!("size={SELF_TEST_OUT_MB}m,nr_inodes={OUT_MAX_INODES},mode=1777");
+        let no_inode_bound = format!("size={SELF_TEST_OUT_MB}m,mode=1777");
         let _u = Unmount(out.clone());
         // A directory on a big volume: writable and not bounded.
         assert_eq!(out_mount(&out).reason, "unbounded");
+        // Right size and flags, but the number of files is not bounded.
+        let unbounded = Some(no_inode_bound.as_str());
+        jail::mount(Some("tmpfs"), &out, Some("tmpfs"), safe, unbounded).unwrap();
+        assert_eq!(out_mount(&out).reason, "unbounded");
+        let c = std::ffi::CString::new(out.to_str().unwrap()).unwrap();
+        assert_eq!(unsafe { libc::umount2(c.as_ptr(), libc::MNT_DETACH) }, 0);
         jail::mount(Some("tmpfs"), &out, Some("tmpfs"), safe, Some(&size)).unwrap();
         let held = out_mount(&out);
         assert!(held.ok, "{held:?}");

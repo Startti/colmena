@@ -236,32 +236,80 @@ pub fn open_call_dirs(root: &Path, id: &str) -> io::Result<CallDirs> {
 /// Most inodes the output volume of a call may hold: a program cannot fill the
 /// executor's memory with empty files.
 pub const OUT_MAX_INODES: u64 = 1024;
-/// The output directory is a volume of its own with a size, no bigger than
-/// `out_mb` MiB and not the volume that holds the call directory. This is what
-/// bounds what a call can write: the jail refuses a call whose output is
-/// anything else. [`StagedCall`] makes it a tmpfs.
-#[cfg(target_os = "linux")]
-pub fn check_out_volume(dirs: &CallDirs, out_mb: u64) -> io::Result<u64> {
+/// `f_type` of a tmpfs.
+pub const TMPFS_MAGIC: i64 = 0x0102_1994;
+
+/// What the jail reads about a call's output directory before it binds it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OutFacts {
+    /// `f_type` of the filesystem.
+    pub f_type: i64,
+    /// Its size in bytes.
+    pub bytes: u128,
+    /// Its inode count (`f_files`).
+    pub files: u64,
+    /// Device of the output directory, of the call directory, and of the parent
+    /// of the output directory (what `..` of the mount root reaches).
+    pub dev: u64,
+    pub call_dev: u64,
+    pub parent_dev: u64,
+}
+
+/// The output directory must be a tmpfs of its own with a size no bigger than
+/// `out_mb` MiB and an inode bound of at most [`OUT_MAX_INODES`], the root of its
+/// mount (its parent is on another device) and not the volume of the call
+/// directory. This is what bounds what a call can write: the jail refuses a
+/// call whose output is anything else. Returns the verified size in bytes.
+pub fn judge_out_volume(f: &OutFacts, out_mb: u64) -> io::Result<u64> {
     let unbounded = |why| refused(io::ErrorKind::PermissionDenied, why);
     if !valid_out_mb(out_mb) {
         return Err(refused(io::ErrorKind::InvalidInput, "invalid output size"));
     }
+    if f.f_type != TMPFS_MAGIC {
+        return Err(unbounded("out is not a tmpfs"));
+    }
+    if f.bytes == 0 {
+        return Err(unbounded("out has no size"));
+    }
+    if f.bytes > u128::from(out_mb) << 20 {
+        return Err(unbounded("out is larger than the declared bound"));
+    }
+    if f.files == 0 || f.files > OUT_MAX_INODES {
+        return Err(unbounded("out has no inode bound within the limit"));
+    }
+    if f.dev == f.call_dev {
+        return Err(unbounded("out shares the volume of the call directory"));
+    }
+    if f.dev == f.parent_dev {
+        return Err(unbounded("out is not the root of its mount"));
+    }
+    Ok(f.bytes as u64)
+}
+
+/// Reads the facts of the call's output directory and judges them.
+#[cfg(target_os = "linux")]
+pub fn check_out_volume(dirs: &CallDirs, out_mb: u64) -> io::Result<u64> {
     let mut fs: libc::statfs = unsafe { std::mem::zeroed() };
     if unsafe { libc::fstatfs(dirs.out.as_raw_fd(), &mut fs) } != 0 {
         return Err(io::Error::last_os_error());
     }
-    let bytes = (fs.f_blocks as u128) * (fs.f_bsize as u128);
-    if bytes == 0 || bytes > u128::from(out_mb) << 20 {
-        return Err(unbounded("out is larger than the declared bound"));
-    }
-    let dev = |fd: &OwnedFd| {
+    let dev = |fd: RawFd| {
         let mut st: libc::stat = unsafe { std::mem::zeroed() };
-        (unsafe { libc::fstat(fd.as_raw_fd(), &mut st) } == 0).then_some(st.st_dev as u64)
+        match unsafe { libc::fstat(fd, &mut st) } {
+            0 => Ok(st.st_dev as u64),
+            _ => Err(io::Error::last_os_error()),
+        }
     };
-    match (dev(&dirs.out), dev(&dirs.call)) {
-        (Some(out), Some(call)) if out != call => Ok(bytes as u64),
-        _ => Err(unbounded("out shares the volume of the call directory")),
-    }
+    let parent = open_dir_at(dirs.out.as_raw_fd(), "..")?;
+    let facts = OutFacts {
+        f_type: fs.f_type as i64,
+        bytes: (fs.f_blocks as u128) * (fs.f_bsize as u128),
+        files: fs.f_files as u64,
+        dev: dev(dirs.out.as_raw_fd())?,
+        call_dev: dev(dirs.call.as_raw_fd())?,
+        parent_dev: dev(parent.as_raw_fd())?,
+    };
+    judge_out_volume(&facts, out_mb)
 }
 
 /// One call's staging directories, made and removed by the trusted side. The
@@ -411,6 +459,41 @@ mod tests {
             std::fs::DirBuilder::new().mode(0o755).create(p).unwrap();
         }
         Fixture { _tmp: tmp, root }
+    }
+
+    fn good_volume() -> OutFacts {
+        OutFacts {
+            f_type: TMPFS_MAGIC,
+            bytes: 2 << 20,
+            files: OUT_MAX_INODES,
+            dev: 7,
+            call_dev: 3,
+            parent_dev: 3,
+        }
+    }
+
+    /// Each fact the jail reads about the output volume is checked on its own:
+    /// every variation below breaks exactly one and is refused for that.
+    #[test]
+    fn the_output_volume_is_judged_fact_by_fact() {
+        assert_eq!(judge_out_volume(&good_volume(), 2).unwrap(), 2 << 20);
+        let refused_with = |edit: &dyn Fn(&mut OutFacts), why: &str| {
+            let mut f = good_volume();
+            edit(&mut f);
+            let e = judge_out_volume(&f, 2).unwrap_err();
+            assert!(e.to_string().contains(why), "{why}: {e}");
+        };
+        refused_with(&|f| f.f_type = 0x858458f6, "not a tmpfs"); // ramfs
+        refused_with(&|f| f.f_type = 0xEF53, "not a tmpfs"); // ext4
+        refused_with(&|f| f.bytes = 0, "no size");
+        refused_with(&|f| f.bytes = (2 << 20) + 1, "larger than");
+        refused_with(&|f| f.files = 0, "inode");
+        refused_with(&|f| f.files = OUT_MAX_INODES + 1, "inode");
+        refused_with(&|f| f.files = u64::MAX, "inode");
+        refused_with(&|f| f.dev = 3, "call directory");
+        refused_with(&|f| f.parent_dev = 7, "root of its mount");
+        let e = judge_out_volume(&good_volume(), 0).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::InvalidInput);
     }
 
     #[test]

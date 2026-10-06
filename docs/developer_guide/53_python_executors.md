@@ -231,6 +231,12 @@ and `STAGED_OUT_MIB_MAX` = 2,048 MiB in total (the design's slots and `V = D_max
 wait for the instance memory measurement, spike item 5); a request over either gets `StageError::OverBudget` (a
 `PythonExecutorError … retry later`) and mounts nothing.
 
+Before binding `/out` the jail reads the facts of the output directory and `judge_out_volume` requires each of them: the
+filesystem is a tmpfs, it has a size no bigger than the declared `out_mb`, its inode count is at most 1,024
+(`OUT_MAX_INODES`, so the number of files is bounded too), it is the root of its mount (its parent is on another
+device) and it is not the volume of the call directory. The `mount_out_bounded` self-test layer also probes the inode
+limit (empty files stop with `ENOSPC` at or before 1,024).
+
 ### Startup self-test (Linux)
 
 Before it binds its socket, the template forks a throwaway child that enters the jail as slot 9999 (uid
