@@ -536,3 +536,14 @@ cobra; `finish.usage` no incluye lo que una hija descartada no emitió. **Tests.
 (raíz, hija, nieta, mismo lugar que una hija que termina) y `a_usage_queued_when_the_turn_stops_is_billed`.
 Mutaciones: sin resumen al descartar, antes de descartar las hijas, cobro al leer, o sin descontar el ya emitido:
 fallan. **Estado.** done.
+
+## 33. Facturación: la fila de un tool va bajo el nodo que lo llama
+
+**Qué cambia.** Lo que corre dentro de un scope del grafo (un tool, el tool de un tool, las filas de un `for_each`
+como tool) se cobraba en la fila de su `path` sin el nodo que lo corre: dos agentes con un tool del mismo nombre
+compartían la fila `Sub`, con el modelo del primero, y un tool que se llamara como un nodo del grafo tomaba el
+modelo de ese nodo. Ahora la fila lleva adelante el nodo, como el `path` del frame: `agent>Sub`,
+`agent>Sub::<propósito>`, `agent>T>T2`, `agent>Fan>for_each#N`. No cambian `agent`, `agent::<propósito>`, la fila
+de un `for_each` del grafo (`fe#N`, `fe#N::<propósito>`) ni las filas de una corrida hija en su
+`subgraph-usage-summary` (relativas a la hija: `agent`, `agent>Sub`). **Tests.**
+`the_same_tool_name_under_two_agents_is_two_entries`; mutación: sin el nodo adelante, fallan 3. **Estado.** done.
