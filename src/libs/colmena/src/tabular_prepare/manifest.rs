@@ -92,11 +92,51 @@ pub struct TableInfo {
     pub columns: Vec<ColumnInfo>,
 }
 
+/// Most demoted column names a report lists (the count is always exact), so
+/// the report stays small however wide the table is.
+pub const MAX_REPORTED_DEMOTED: usize = 32;
+
+/// What converting one table did, so a reader or the tool can warn the user
+/// about what changed silently. It is not part of the table list the registry
+/// row keeps (`tables_json`): that stays within its cap however many columns a
+/// table has. Optional in the manifest: a manifest without it is valid.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConversionReport {
+    /// Name of the table in `tables` this describes.
+    pub table: String,
+    /// `utf-8` or `windows-1252`: how the file was decoded.
+    pub encoding: String,
+    /// Invalid UTF-8 sequences replaced by U+FFFD (zero for Windows-1252).
+    pub replacements: u64,
+    /// Non-ASCII UTF-8 characters and invalid UTF-8 sequences found in the whole
+    /// file, whichever encoding was chosen: the evidence of the choice.
+    pub utf8_valid_multibyte: u64,
+    pub utf8_invalid: u64,
+    /// Blank lines that became null rows (a one-column file).
+    pub blank_rows: u64,
+    /// Blank lines dropped.
+    pub blank_dropped: u64,
+    /// Rows shorter than the header, padded with nulls.
+    pub padded_rows: u64,
+    /// Type restarts the conversion needed.
+    pub restarts: u32,
+    /// Every column is text because the restarts ran out.
+    pub all_strings: bool,
+    /// Columns typed from the sample that ended as text: how many, and the first
+    /// [`MAX_REPORTED_DEMOTED`] names.
+    pub demoted_count: u32,
+    pub demoted: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
     pub version: u32,
     pub tables: Vec<TableInfo>,
+    /// What the conversion did, per table. Absent when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conversion: Vec<ConversionReport>,
 }
 
 impl Manifest {
@@ -104,7 +144,13 @@ impl Manifest {
         Self {
             version: MANIFEST_VERSION,
             tables,
+            conversion: Vec::new(),
         }
+    }
+
+    pub fn with_conversion(mut self, conversion: Vec<ConversionReport>) -> Self {
+        self.conversion = conversion;
+        self
     }
 
     /// The table list as the registry row stores it. Exactly the `tables`
@@ -129,7 +175,15 @@ impl Manifest {
         // manifest that was written can always be read.
         self.validate()?;
         self.tables_json()?;
-        serde_json::to_string(self).map_err(|e| ManifestError::Invalid(e.to_string()))
+        let json =
+            serde_json::to_string(self).map_err(|e| ManifestError::Invalid(e.to_string()))?;
+        if json.len() > MANIFEST_MAX_BYTES {
+            return Err(ManifestError::Invalid(format!(
+                "manifest is {} bytes, above the {MANIFEST_MAX_BYTES}-byte limit",
+                json.len()
+            )));
+        }
+        Ok(json)
     }
 
     /// Parses and validates a manifest read from storage. The size is checked
@@ -214,6 +268,34 @@ impl Manifest {
                         t.name
                     ));
                 }
+            }
+        }
+        let mut reported = HashSet::new();
+        for r in &self.conversion {
+            if !self.tables.iter().any(|t| t.name == r.table) || !reported.insert(&r.table) {
+                return bad(format!(
+                    "conversion report for unknown or repeated table {:?}",
+                    r.table
+                ));
+            }
+            if r.encoding != "utf-8" && r.encoding != "windows-1252" {
+                return bad(format!(
+                    "unknown encoding in the report of table {:?}",
+                    r.table
+                ));
+            }
+            if r.demoted.len() > MAX_REPORTED_DEMOTED
+                || (r.demoted.len() as u64) > u64::from(r.demoted_count)
+                || r.demoted.iter().any(|n| {
+                    n.is_empty()
+                        || n.chars().count() > MAX_COLUMN_NAME_CHARS
+                        || n.chars().any(char::is_control)
+                })
+            {
+                return bad(format!(
+                    "invalid demoted list in the report of table {:?}",
+                    r.table
+                ));
             }
         }
         Ok(())
@@ -770,6 +852,117 @@ mod tests {
             .to_string()
             .contains("version 3"));
         assert_eq!(sample().version, MANIFEST_VERSION);
+    }
+
+    fn report(table: &str) -> ConversionReport {
+        ConversionReport {
+            table: table.to_string(),
+            encoding: "windows-1252".into(),
+            replacements: 0,
+            utf8_valid_multibyte: 3,
+            utf8_invalid: 90,
+            blank_rows: 1,
+            blank_dropped: 2,
+            padded_rows: 4,
+            restarts: 2,
+            all_strings: false,
+            demoted_count: 2,
+            demoted: vec!["a".into(), "b".into()],
+        }
+    }
+
+    #[test]
+    fn a_conversion_report_round_trips_and_stays_out_of_the_table_list() {
+        let plain = sample();
+        let name = plain.tables[0].name.clone();
+        let with = plain.clone().with_conversion(vec![report(&name)]);
+        let back = Manifest::from_json(with.to_json().unwrap().as_bytes()).unwrap();
+        assert_eq!(back, with);
+        // The registry row keeps the same table list with or without it.
+        assert_eq!(with.tables_json().unwrap(), plain.tables_json().unwrap());
+        // Without a report the manifest has no such key (it is optional).
+        assert!(!plain.to_json().unwrap().contains("conversion"));
+        assert!(Manifest::from_json(plain.to_json().unwrap().as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn a_conversion_report_that_does_not_fit_its_tables_is_refused() {
+        let base = sample();
+        let name = base.tables[0].name.clone();
+        let bad = |r: ConversionReport| base.clone().with_conversion(vec![r]);
+        let mut unknown = report(&name);
+        unknown.table = "nope".into();
+        let mut encoding = report(&name);
+        encoding.encoding = "latin1".into();
+        let mut too_many = report(&name);
+        too_many.demoted = (0..=MAX_REPORTED_DEMOTED)
+            .map(|i| format!("c{i}"))
+            .collect();
+        too_many.demoted_count = 1000;
+        let mut over_count = report(&name);
+        over_count.demoted_count = 1;
+        let mut control = report(&name);
+        control.demoted = vec!["a\nb".into()];
+        for (why, m) in [
+            ("unknown table", bad(unknown)),
+            ("unknown encoding", bad(encoding)),
+            ("too many names", bad(too_many)),
+            ("more names than the count", bad(over_count)),
+            ("control character", bad(control)),
+        ] {
+            assert!(m.to_json().is_err(), "{why}");
+            let json = serde_json::to_vec(&m).unwrap();
+            assert!(Manifest::from_json(&json).is_err(), "{why} (read back)");
+        }
+        let twice = base
+            .clone()
+            .with_conversion(vec![report(&name), report(&name)]);
+        assert!(twice.to_json().is_err());
+    }
+
+    #[test]
+    fn a_manifest_over_the_file_limit_is_never_written() {
+        // A table list at its cap leaves less than the file limit for a report:
+        // names at their longest still fit, and a manifest that would not be
+        // readable back is refused when written.
+        let m = manifest_with_tables_json_len(TABLES_JSON_MAX_BYTES);
+        let name = m.tables[0].name.clone();
+        let mut r = report(&name);
+        r.demoted_count = MAX_REPORTED_DEMOTED as u32;
+        r.demoted = (0..MAX_REPORTED_DEMOTED)
+            .map(|i| format!("{i:0>128}"))
+            .collect();
+        let json = m.with_conversion(vec![r]).to_json().unwrap();
+        assert!(json.len() <= MANIFEST_MAX_BYTES, "{}", json.len());
+        assert!(Manifest::from_json(json.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn many_reports_cannot_push_the_manifest_past_what_a_reader_accepts() {
+        // Many tables each carrying a full report: the table list is within its
+        // cap, the file is not, and it is refused instead of written unreadable.
+        let base = sample();
+        let tables: Vec<TableInfo> = (0..100)
+            .map(|i| TableInfo {
+                name: format!("t{i}"),
+                ..base.tables[0].clone()
+            })
+            .collect();
+        let reports = tables
+            .iter()
+            .map(|t| {
+                let mut r = report(&t.name);
+                r.demoted_count = MAX_REPORTED_DEMOTED as u32;
+                r.demoted = (0..MAX_REPORTED_DEMOTED)
+                    .map(|i| format!("{i:0>128}"))
+                    .collect();
+                r
+            })
+            .collect();
+        let m = Manifest::new(tables).with_conversion(reports);
+        assert!(m.tables_json().is_ok());
+        let err = m.to_json().unwrap_err().to_string();
+        assert!(err.contains("above the"), "{err}");
     }
 
     #[test]

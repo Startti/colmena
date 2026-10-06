@@ -390,6 +390,19 @@ value is claimable again, and a manifest that cannot be read is demoted through
 `mark_manifest_missing`. Whether the manifest version should also bump
 `FORMAT_VERSION` is left to the unit that wires the manifest to the registry.
 
+**Conversion report.** The manifest may carry a `conversion` array, one entry per
+table, with what the conversion did and a reader or the tool should warn about:
+`encoding` (`utf-8` or `windows-1252`), `replacements`, `utf8_valid_multibyte` and
+`utf8_invalid` (the whole-file evidence of the encoding choice), `blank_rows`,
+`blank_dropped`, `padded_rows`, `restarts`, `all_strings`, and `demoted_count` with
+the first 32 `demoted` column names. It is optional (a manifest without it is
+valid and carries no `conversion` key) and it is not part of `tables_json`, which
+the registry row keeps and which stays within its 64 KiB cap however many columns
+a table has. A manifest that would be larger than the 128 KiB a reader accepts is
+refused when it is written, never written unreadable. A reader that does not know
+the key must ignore it only if it parses the manifest loosely: this crate's own
+parser refuses unknown keys, so a reader of another version needs a version bump.
+
 **Table list.** The same table list is what the registry row keeps as
 `tables_json`, capped at 64 KiB and **never truncated**: a source whose table
 list is larger fails (`ManifestTooLarge`) and no manifest is written. A manifest
