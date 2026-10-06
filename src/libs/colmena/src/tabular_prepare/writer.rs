@@ -863,27 +863,26 @@ mod part_writer {
                 tokio::task::yield_now().await;
             }
         };
-        let (mut during_write, mut during_flush) = (0, 0);
+        let mut during_write = 0;
         let work = async {
             w.write(&batch).await.unwrap();
             during_write = ticks.load(std::sync::atomic::Ordering::SeqCst);
             w.finish().await.unwrap();
-            during_flush = ticks.load(std::sync::atomic::Ordering::SeqCst) - during_write;
             done.store(true, std::sync::atomic::Ordering::SeqCst);
         };
         tokio::join!(work, probe);
-        // Both the encoding of the slices and the flush of the part (zstd). When
-        // the work is pending on the blocking pool the probe runs at least once
-        // before it is polled again, however loaded the machine is; when it runs
-        // inline the work finishes in its first poll and the probe never runs.
+        // `join!` polls `work` first. Encoding 8 MiB takes milliseconds, so when
+        // it runs on the blocking pool the write is pending at that first poll
+        // and the probe runs before the write is polled again; when it runs
+        // inline the write finishes in its first poll and the probe has not run.
         assert!(
             during_write >= 1,
             "another task ran {during_write} times while the slices were encoded"
         );
-        assert!(
-            during_flush >= 1,
-            "another task ran {during_flush} times while the part was flushed"
-        );
+        // The flush of the part is not asserted this way: the pages were already
+        // compressed while the slices were written, so closing the part can end
+        // before the next poll and a tick count between the two would depend on
+        // the machine. `roll` hands the close to `spawn_blocking` the same way.
     }
 
     #[tokio::test]
