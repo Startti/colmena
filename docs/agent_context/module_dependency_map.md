@@ -6,7 +6,7 @@
 **How to use (for the exploration/spec phase):** before opening files to assess a change, look up the target file below. **Used by** is its blast radius — the files that break if you change its public surface. **Depends on** is what it needs. Start by reading only those, not the whole repo.
 
 - Files indexed: **461**
-- Modules with at least one importer: **228**
+- Modules with at least one importer: **229**
 
 ## Blast-radius ranking (change these with the most care)
 
@@ -946,7 +946,7 @@
 #### `src/libs/colmena/src/dag_engine/infrastructure/python_exec/jail.rs`
 - Module: `dag_engine::infrastructure::python_exec::jail`
 - **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
-- Depends on (0): — (no intra-crate imports)
+- Depends on (1): `dag_engine::infrastructure::python_exec::staging`
 
 #### `src/libs/colmena/src/dag_engine/infrastructure/python_exec/mod.rs`
 - Module: `dag_engine::infrastructure::python_exec`
@@ -980,7 +980,7 @@
 
 #### `src/libs/colmena/src/dag_engine/infrastructure/python_exec/staging.rs`
 - Module: `dag_engine::infrastructure::python_exec::staging`
-- **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
+- **Used by (1)**: `src/libs/colmena/src/dag_engine/infrastructure/python_exec/jail.rs`
 - Depends on (1): `dag_engine::log_policy`
 
 #### `src/libs/colmena/src/dag_engine/infrastructure/python_exec/subprocess.rs`
