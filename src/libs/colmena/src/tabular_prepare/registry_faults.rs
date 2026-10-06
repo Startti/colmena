@@ -18,13 +18,20 @@ pub(crate) struct Faults {
     pub complete_reached: tokio::sync::Notify,
     /// `fail_with_blobs` answers a backend error.
     pub fail_fail: AtomicBool,
-    /// `fail_with_blobs` never returns.
+    /// `fail_with_blobs` never returns, after saying it was reached.
     pub hang_fail: AtomicBool,
+    pub fail_reached: tokio::sync::Notify,
+    /// Runs right after `fail_with_blobs` was applied (a retry gets in here).
+    pub after_fail: std::sync::Mutex<Option<AfterFail>>,
     /// The row is deleted just before the first tracking write.
     pub delete_before_track: AtomicBool,
-    /// `release` never returns.
+    /// `release` never returns, after saying it was reached.
     pub hang_release: AtomicBool,
+    pub release_reached: tokio::sync::Notify,
 }
+
+pub(crate) type AfterFail =
+    Arc<dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send + Sync>;
 
 pub(crate) struct FaultyRegistry {
     pub inner: Arc<dyn PreparationRegistry>,
@@ -73,12 +80,18 @@ impl PreparationRegistry for FaultyRegistry {
         n: DateTime<Utc>,
     ) -> Result<TerminalOutcome, RegistryError> {
         if self.faults.hang_fail.load(SeqCst) {
+            self.faults.fail_reached.notify_one();
             futures::future::pending::<()>().await;
         }
         if self.faults.fail_fail.load(SeqCst) {
             return Err(RegistryError::Backend(SECRET.into()));
         }
-        self.inner.fail_with_blobs(k, o, c, d, b, n).await
+        let out = self.inner.fail_with_blobs(k, o, c, d, b, n).await?;
+        let hook = self.faults.after_fail.lock().unwrap().clone();
+        if let Some(hook) = hook {
+            hook().await;
+        }
+        Ok(out)
     }
     async fn track_blobs(
         &self,
@@ -97,6 +110,7 @@ impl PreparationRegistry for FaultyRegistry {
     }
     async fn release(&self, k: &str, o: &str) -> Result<bool, RegistryError> {
         if self.faults.hang_release.load(SeqCst) {
+            self.faults.release_reached.notify_one();
             futures::future::pending::<()>().await;
         }
         self.inner.release(k, o).await

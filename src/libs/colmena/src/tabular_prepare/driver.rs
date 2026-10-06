@@ -727,7 +727,14 @@ fn storage_kind(e: &StorageError) -> &'static str {
     }
 }
 
-/// Records the failure with every key that may exist, then deletes them.
+/// Deletes the objects of a failed preparation and then records the failure.
+///
+/// The order is the point. Once the failure is recorded the row is `failed`, its
+/// lease cleared and the source claimable at once, and the objects have
+/// deterministic keys a retry writes to: a delete after that could remove a part
+/// the retry just wrote. So the delete comes first, while this job still holds the
+/// lease, and nothing is deleted after the write. Before deleting, ownership is
+/// read; a job that is not the owner deletes nothing unless the row is gone.
 async fn fail(
     env: &PrepareEnv,
     req: &PrepareRequest,
@@ -736,30 +743,23 @@ async fn fail(
     detail: String,
     keys: Vec<String>,
 ) -> Result<PrepareOutcome, RegistryError> {
-    let outcome = match within(
+    if !within(env, env.registry.still_owned(&req.source_key, owner)).await? {
+        return settle_lost(env, req, &keys).await;
+    }
+    // Best effort: the keys are listed in the row, so the cleanup pass removes
+    // what this could not.
+    delete_best_effort(env, req, &keys).await;
+    let outcome = within(
         env,
         env.registry
             .fail_with_blobs(&req.source_key, owner, code, &detail, &keys, (env.clock)()),
     )
-    .await
-    {
-        Ok(outcome) => outcome,
-        Err(e) => {
-            // Whether the failure was recorded is unknown, and deleting the objects
-            // of a failed preparation is right either way: they are listed in the
-            // row (they were tracked before they were written).
-            delete_best_effort(env, req, &keys).await;
-            return Err(e);
-        }
-    };
+    .await?;
     if outcome == TerminalOutcome::Cancelled {
-        // The row is not ours any more: the same decision as everywhere else, row
-        // gone (delete what this job wrote) or row taken (delete nothing).
-        return settle_lost(env, req, &keys).await;
+        // The row was lost while the objects were being deleted: they are the
+        // new owner's keys now or nobody's; deleting again would be a guess.
+        return settle_lost(env, req, &[]).await;
     }
-    // Best effort: the keys are tracked, so the cleanup pass removes what this
-    // could not.
-    delete_best_effort(env, req, &keys).await;
     Ok(PrepareOutcome::Failed(PrepareFailure { code, detail }))
 }
 
@@ -2112,6 +2112,114 @@ pub(crate) mod cases {
         assert_eq!(*storage.opens.lock().unwrap(), 0);
     }
 
+    pub(crate) async fn a_retry_that_claims_right_after_the_failure_write_keeps_its_part(
+        registry: Arc<dyn PreparationRegistry>,
+    ) {
+        use crate::tabular_prepare::registry_faults::FaultyRegistry;
+        let source = fresh_source();
+        let source = source.as_str();
+        let storage = PlacedStorage::with_source(source, five_rows());
+        // The manifest cannot be stored: the job fails after three parts.
+        *storage.fail_stores_from.lock().unwrap() = Some(3);
+        let faulty = FaultyRegistry::new(registry.clone());
+        // The moment the failure is recorded the row is claimable: a retry takes
+        // it and writes the first part, under the same deterministic key.
+        let (reg, st, src) = (registry.clone(), storage.clone(), source.to_string());
+        let hook: crate::tabular_prepare::registry_faults::AfterFail = Arc::new(move || {
+            let (reg, st, src) = (reg.clone(), st.clone(), src.clone());
+            Box::pin(async move {
+                let now = Utc.with_ymd_and_hms(2026, 10, 6, 12, 0, 1).unwrap();
+                let claim = ClaimRequest {
+                    source_key: src.clone(),
+                    source_bytes: 1,
+                    format_version: FORMAT_VERSION,
+                    owner: "retry".into(),
+                    lease: lease_for(chrono::Duration::seconds(300)),
+                    now,
+                };
+                assert!(reg.claim(claim).await.unwrap().is_some());
+                let key = format!("{}/t0/part-00000.parquet", root_of(&src));
+                st.objects
+                    .lock()
+                    .unwrap()
+                    .insert(key, Bytes::from_static(b"retry-part"));
+            })
+        });
+        *faulty.faults.after_fail.lock().unwrap() = Some(hook);
+        let env = env(faulty, storage.clone());
+        let out = prepare_csv(&env, &request(source, 40)).await.unwrap();
+        assert!(matches!(out, PrepareOutcome::Failed(_)), "{out:?}");
+        // What the retry wrote survives: the failed job deleted before it recorded
+        // the failure, and not after.
+        let key = format!("{}/t0/part-00000.parquet", root_of(source));
+        assert_eq!(
+            storage.objects.lock().unwrap().get(&key).cloned(),
+            Some(Bytes::from_static(b"retry-part"))
+        );
+        assert_eq!(
+            registry
+                .get(source)
+                .await
+                .unwrap()
+                .unwrap()
+                .lease_owner
+                .as_deref(),
+            Some("retry")
+        );
+    }
+
+    pub(crate) async fn a_failure_write_that_never_returns_is_given_up_on(
+        registry: Arc<dyn PreparationRegistry>,
+    ) {
+        use crate::tabular_prepare::registry_faults::FaultyRegistry;
+        use std::sync::atomic::Ordering::SeqCst;
+        let source = fresh_source();
+        let source = source.as_str();
+        let storage = PlacedStorage::with_source(source, five_rows());
+        *storage.fail_stores_from.lock().unwrap() = Some(3);
+        let faulty = FaultyRegistry::new(registry.clone());
+        faulty.faults.hang_fail.store(true, SeqCst);
+        let (env, gate) = gated(env(faulty.clone(), storage.clone()));
+        let req = request(source, 40);
+        let run = tokio::spawn(async move { prepare_csv(&env, &req).await });
+        faulty.faults.fail_reached.notified().await;
+        gate.step.notify_one();
+        let out = tokio::time::timeout(Duration::from_secs(30), run)
+            .await
+            .expect("the job outlived its bound")
+            .unwrap();
+        assert!(out.is_err(), "{out:?}");
+        // The objects were deleted before the failure write, and the row lists them.
+        assert_eq!(storage.keys(), vec![source.to_string()]);
+        assert_eq!(
+            registry.get(source).await.unwrap().unwrap().status,
+            PrepareStatus::Running
+        );
+    }
+
+    pub(crate) async fn a_release_that_never_returns_is_given_up_on(
+        registry: Arc<dyn PreparationRegistry>,
+    ) {
+        use crate::tabular_prepare::registry_faults::FaultyRegistry;
+        use std::sync::atomic::Ordering::SeqCst;
+        let source = fresh_source();
+        let source = source.as_str();
+        // The source does not exist: the row is to be released.
+        let storage = Arc::new(PlacedStorage::default());
+        let faulty = FaultyRegistry::new(registry.clone());
+        faulty.faults.hang_release.store(true, SeqCst);
+        let (env, gate) = gated(env(faulty.clone(), storage.clone()));
+        let req = request(source, 40);
+        let run = tokio::spawn(async move { prepare_csv(&env, &req).await });
+        faulty.faults.release_reached.notified().await;
+        gate.step.notify_one();
+        let out = tokio::time::timeout(Duration::from_secs(30), run)
+            .await
+            .expect("the job outlived its bound")
+            .unwrap();
+        assert!(out.is_err(), "{out:?}");
+    }
+
     pub(crate) async fn a_registry_error_at_completion_leaves_the_stored_objects_tracked_and_not_deleted(
         registry: Arc<dyn PreparationRegistry>,
     ) {
@@ -2382,5 +2490,17 @@ mod registry_tests {
     sqlite_case!(
         tabular_prepare_a_source_key_that_cannot_be_a_key_is_refused_without_a_row,
         a_source_key_that_cannot_be_a_key_is_refused_without_a_row
+    );
+    sqlite_case!(
+        tabular_prepare_a_retry_that_claims_right_after_the_failure_write_keeps_its_part,
+        a_retry_that_claims_right_after_the_failure_write_keeps_its_part
+    );
+    sqlite_case!(
+        tabular_prepare_a_failure_write_that_never_returns_is_given_up_on,
+        a_failure_write_that_never_returns_is_given_up_on
+    );
+    sqlite_case!(
+        tabular_prepare_a_release_that_never_returns_is_given_up_on,
+        a_release_that_never_returns_is_given_up_on
     );
 }

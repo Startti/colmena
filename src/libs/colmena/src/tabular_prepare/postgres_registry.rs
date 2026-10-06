@@ -462,6 +462,18 @@ mod tests {
         tabular_prepare_pg_a_source_key_that_cannot_be_a_key_is_refused_without_a_row,
         a_source_key_that_cannot_be_a_key_is_refused_without_a_row
     );
+    pg_driver_case!(
+        tabular_prepare_pg_a_retry_that_claims_right_after_the_failure_write_keeps_its_part,
+        a_retry_that_claims_right_after_the_failure_write_keeps_its_part
+    );
+    pg_driver_case!(
+        tabular_prepare_pg_a_failure_write_that_never_returns_is_given_up_on,
+        a_failure_write_that_never_returns_is_given_up_on
+    );
+    pg_driver_case!(
+        tabular_prepare_pg_a_release_that_never_returns_is_given_up_on,
+        a_release_that_never_returns_is_given_up_on
+    );
     pg_case!(
         tabular_prepare_pg_a_deleting_row_is_never_taken_by_an_older_format_claim,
         a_deleting_row_is_never_taken_by_an_older_format_claim
