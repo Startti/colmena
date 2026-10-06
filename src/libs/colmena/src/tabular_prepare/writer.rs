@@ -361,3 +361,406 @@ impl PartWriter {
 }
 
 const _: () = assert!(MAX_PARTS <= u32::MAX as usize);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tabular_prepare::part_sink::fake::MemorySink;
+    use arrow_array::{Int64Array, StringArray};
+    use arrow_schema::{Field, Schema};
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+
+    /// What the writer produces is a Parquet file any reader opens: the codec,
+    /// the schema and every row are in the bytes the sink received.
+    #[tokio::test]
+    async fn parquet_smoke() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("name", DataType::Utf8, true),
+        ]));
+        let ids = Int64Array::from_iter_values(0..10);
+        let names = StringArray::from_iter((0..10).map(|i| Some(format!("row-{i}"))));
+        let batch =
+            RecordBatch::try_new(schema.clone(), vec![Arc::new(ids), Arc::new(names)]).unwrap();
+        let sink = Arc::new(MemorySink::default());
+        let mut w =
+            PartWriter::new(sink.clone(), 0, schema.clone(), WriterConfig::default()).unwrap();
+        w.write(&batch).await.unwrap();
+        w.finish().await.unwrap();
+
+        let builder =
+            ParquetRecordBatchReaderBuilder::try_new(sink.get("t0/part-00000.parquet").unwrap())
+                .unwrap();
+        // The file records the codec but not the level (the part writer's
+        // properties pin the level).
+        assert!(matches!(
+            builder.metadata().row_group(0).column(0).compression(),
+            Compression::ZSTD(_)
+        ));
+        assert_eq!(builder.schema().as_ref(), schema.as_ref());
+        let back: Vec<RecordBatch> = builder.build().unwrap().map(|b| b.unwrap()).collect();
+        assert_eq!(back, vec![batch]);
+    }
+}
+
+#[cfg(test)]
+mod part_writer {
+    use super::*;
+    use crate::tabular_prepare::manifest::ColumnType;
+    use crate::tabular_prepare::part_sink::fake::MemorySink;
+    use arrow_array::{
+        BooleanArray, Date32Array, Float64Array, Int64Array, StringArray, TimestampMicrosecondArray,
+    };
+    use arrow_schema::{Field, Schema, TimeUnit};
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+    use parquet::file::metadata::ParquetMetaData;
+    use parquet::schema::types::ColumnPath;
+
+    fn small(max_rows: usize) -> WriterConfig {
+        WriterConfig {
+            max_rows,
+            max_bytes: usize::MAX,
+        }
+    }
+
+    fn int_schema() -> SchemaRef {
+        Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]))
+    }
+
+    fn int_batch(range: std::ops::Range<i64>) -> RecordBatch {
+        RecordBatch::try_new(
+            int_schema(),
+            vec![Arc::new(Int64Array::from_iter_values(range))],
+        )
+        .unwrap()
+    }
+
+    fn metadata_of(bytes: Bytes) -> ParquetMetaData {
+        ParquetRecordBatchReaderBuilder::try_new(bytes)
+            .unwrap()
+            .metadata()
+            .as_ref()
+            .clone()
+    }
+
+    fn read_all(bytes: Bytes) -> Vec<RecordBatch> {
+        ParquetRecordBatchReaderBuilder::try_new(bytes)
+            .unwrap()
+            .build()
+            .unwrap()
+            .map(|b| b.unwrap())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn every_supported_type_round_trips_with_nulls() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("i", DataType::Int64, true),
+            Field::new("f", DataType::Float64, true),
+            Field::new("b", DataType::Boolean, true),
+            Field::new("s", DataType::Utf8, true),
+            Field::new("d", DataType::Date32, true),
+            Field::new("t", DataType::Timestamp(TimeUnit::Microsecond, None), true),
+            Field::new("n", DataType::Utf8, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(Int64Array::from(vec![Some(1), None, Some(-3)])),
+                Arc::new(Float64Array::from(vec![Some(1.5), Some(f64::MAX), None])),
+                Arc::new(BooleanArray::from(vec![None, Some(true), Some(false)])),
+                Arc::new(StringArray::from(vec![Some("00123"), Some(""), None])),
+                Arc::new(Date32Array::from(vec![Some(0), None, Some(19_000)])),
+                Arc::new(TimestampMicrosecondArray::from(vec![
+                    None,
+                    Some(1_700_000_000_000_000),
+                    Some(-1),
+                ])),
+                Arc::new(StringArray::from(vec![None::<&str>, None, None])),
+            ],
+        )
+        .unwrap();
+        let sink = Arc::new(MemorySink::default());
+        let mut w = PartWriter::new(sink.clone(), 0, schema, WriterConfig::default()).unwrap();
+        w.write(&batch).await.unwrap();
+        let done = w.finish().await.unwrap();
+
+        assert_eq!((done.rows, done.parts), (3, 1));
+        let types: Vec<_> = done.columns.iter().map(|c| c.column_type).collect();
+        assert_eq!(
+            types,
+            vec![
+                ColumnType::Int,
+                ColumnType::Float,
+                ColumnType::Bool,
+                ColumnType::String,
+                ColumnType::Date,
+                ColumnType::Timestamp,
+                ColumnType::String
+            ]
+        );
+        let back = read_all(sink.get("t0/part-00000.parquet").unwrap());
+        assert_eq!(back, vec![batch]);
+    }
+
+    #[test]
+    fn part_properties_pin_zstd_3_dictionary_and_chunk_statistics() {
+        let props = part_properties(1000);
+        let col = ColumnPath::from("anything");
+        assert_eq!(
+            props.compression(&col),
+            Compression::ZSTD(ZstdLevel::try_new(3).unwrap())
+        );
+        assert!(props.dictionary_enabled(&col));
+        assert_eq!(props.statistics_enabled(&col), EnabledStatistics::Chunk);
+        assert_eq!(props.max_row_group_row_count(), Some(1000));
+    }
+
+    #[tokio::test]
+    async fn a_written_part_has_dictionary_statistics_and_one_row_group() {
+        let schema = Arc::new(Schema::new(vec![Field::new("c", DataType::Utf8, false)]));
+        let values: Vec<String> = (0..5000).map(|i| format!("v{}", i % 7)).collect();
+        let batch = RecordBatch::try_new(schema.clone(), vec![Arc::new(StringArray::from(values))])
+            .unwrap();
+        let sink = Arc::new(MemorySink::default());
+        let mut w = PartWriter::new(sink.clone(), 0, schema, WriterConfig::default()).unwrap();
+        w.write(&batch).await.unwrap();
+        w.finish().await.unwrap();
+        let md = metadata_of(sink.get("t0/part-00000.parquet").unwrap());
+        assert_eq!(md.num_row_groups(), 1);
+        let chunk = md.row_group(0).column(0);
+        assert!(
+            chunk.dictionary_page_offset().is_some(),
+            "no dictionary page"
+        );
+        assert!(chunk.statistics().is_some(), "no chunk statistics");
+    }
+
+    #[tokio::test]
+    async fn parts_roll_at_max_rows_with_one_row_group_each() {
+        let sink = Arc::new(MemorySink::default());
+        let mut w = PartWriter::new(sink.clone(), 3, int_schema(), small(100)).unwrap();
+        // One batch that crosses two boundaries, then one that tops up.
+        w.write(&int_batch(0..250)).await.unwrap();
+        w.write(&int_batch(250..260)).await.unwrap();
+        let done = w.finish().await.unwrap();
+
+        assert_eq!((done.rows, done.parts), (260, 3));
+        assert_eq!(
+            sink.paths(),
+            vec![
+                "t3/part-00000.parquet",
+                "t3/part-00001.parquet",
+                "t3/part-00002.parquet"
+            ]
+        );
+        let mut next = 0i64;
+        for (path, rows) in sink.paths().iter().zip([100usize, 100, 60]) {
+            let bytes = sink.get(path).unwrap();
+            let md = metadata_of(bytes.clone());
+            assert_eq!(md.num_row_groups(), 1, "{path}");
+            assert_eq!(md.file_metadata().num_rows() as usize, rows, "{path}");
+            for b in read_all(bytes) {
+                let ids = b.column(0).as_any().downcast_ref::<Int64Array>().unwrap();
+                for v in ids.iter() {
+                    assert_eq!(v, Some(next));
+                    next += 1;
+                }
+            }
+        }
+        assert_eq!(next, 260);
+    }
+
+    #[tokio::test]
+    async fn column_bytes_are_the_sum_over_parts() {
+        let sink = Arc::new(MemorySink::default());
+        let mut w = PartWriter::new(sink.clone(), 0, int_schema(), small(100)).unwrap();
+        w.write(&int_batch(0..300)).await.unwrap();
+        let done = w.finish().await.unwrap();
+        let expect: i64 = sink
+            .paths()
+            .iter()
+            .map(|p| {
+                metadata_of(sink.get(p).unwrap())
+                    .row_group(0)
+                    .column(0)
+                    .uncompressed_size()
+            })
+            .sum();
+        assert_eq!(done.parts, 3);
+        assert_eq!(done.columns[0].uncompressed_bytes as i64, expect);
+        assert!(expect > 0);
+    }
+
+    #[tokio::test]
+    async fn a_table_without_rows_still_writes_one_readable_part() {
+        let sink = Arc::new(MemorySink::default());
+        let mut w =
+            PartWriter::new(sink.clone(), 0, int_schema(), WriterConfig::default()).unwrap();
+        let done = w.finish().await.unwrap();
+        assert_eq!((done.rows, done.parts), (0, 1));
+        let md = metadata_of(sink.get("t0/part-00000.parquet").unwrap());
+        assert_eq!(md.file_metadata().num_rows(), 0);
+        assert_eq!(md.file_metadata().schema_descr().num_columns(), 1);
+    }
+
+    #[test]
+    fn construction_refuses_unsupported_types_and_zero_limits() {
+        let sink = Arc::new(MemorySink::default());
+        let bad_type = Arc::new(Schema::new(vec![Field::new("x", DataType::Int32, true)]));
+        assert!(matches!(
+            PartWriter::new(sink.clone(), 0, bad_type, WriterConfig::default()),
+            Err(WriterError::UnsupportedType(_))
+        ));
+        let empty = Arc::new(Schema::empty());
+        assert!(PartWriter::new(sink.clone(), 0, empty, WriterConfig::default()).is_err());
+        assert!(PartWriter::new(sink.clone(), 0, int_schema(), small(0)).is_err());
+        let no_bytes = WriterConfig {
+            max_rows: 10,
+            max_bytes: 0,
+        };
+        assert!(PartWriter::new(sink.clone(), 0, int_schema(), no_bytes).is_err());
+        assert!(PartWriter::new(sink, MAX_TABLES, int_schema(), WriterConfig::default()).is_err());
+    }
+
+    #[tokio::test]
+    async fn parts_roll_at_max_bytes_and_the_buffer_stays_bounded() {
+        let schema = Arc::new(Schema::new(vec![Field::new("s", DataType::Utf8, false)]));
+        let max_bytes = 100 * 1024;
+        let cfg = WriterConfig {
+            max_rows: usize::MAX / 2,
+            max_bytes,
+        };
+        let sink = Arc::new(MemorySink::default());
+        let mut w = PartWriter::new(sink.clone(), 0, schema.clone(), cfg).unwrap();
+        let mut batch_raw = 0usize;
+        for k in 0..400 {
+            let values: Vec<String> = (0..500)
+                .map(|i| format!("row-{k}-{i}-{}", i * 7919))
+                .collect();
+            batch_raw = values.iter().map(|v| v.len() + 4).sum();
+            let batch =
+                RecordBatch::try_new(schema.clone(), vec![Arc::new(StringArray::from(values))])
+                    .unwrap();
+            w.write(&batch).await.unwrap();
+            // After a write returns, the open part is below the limit: a part
+            // that reached it was rolled out.
+            assert!(w.buffered_bytes() < max_bytes, "buffer at batch {k}");
+        }
+        let done = w.finish().await.unwrap();
+        assert_eq!(done.rows, 400 * 500);
+        assert!(done.parts > 3, "only {} parts", done.parts);
+        // A part is the buffer at the moment it rolled: below the limit plus
+        // one batch, plus the footer.
+        let footer = 8 * 1024;
+        for path in sink.paths() {
+            let len = sink.get(&path).unwrap().len();
+            assert!(len <= max_bytes + batch_raw + footer, "{path}: {len} bytes");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_sink_failure_poisons_the_writer_and_reports_what_was_attempted() {
+        let sink = Arc::new(MemorySink::failing_from(1));
+        let mut w = PartWriter::new(sink.clone(), 0, int_schema(), small(10)).unwrap();
+        // Part 0 (10 rows) is put, part 1 is attempted and fails.
+        let err = w.write(&int_batch(0..25)).await.unwrap_err();
+        assert!(matches!(err, WriterError::Sink(_)), "{err:?}");
+        assert_eq!(
+            w.attempted_paths(),
+            ["t0/part-00000.parquet", "t0/part-00001.parquet"]
+        );
+        // Nothing more is accepted and nothing is reported as complete.
+        assert!(matches!(
+            w.write(&int_batch(0..1)).await,
+            Err(WriterError::Poisoned)
+        ));
+        assert!(matches!(w.finish().await, Err(WriterError::Poisoned)));
+        assert_eq!(sink.paths(), vec!["t0/part-00000.parquet"]);
+    }
+
+    #[tokio::test]
+    async fn a_batch_with_another_schema_is_refused() {
+        let sink = Arc::new(MemorySink::default());
+        let mut w = PartWriter::new(sink, 0, int_schema(), WriterConfig::default()).unwrap();
+        let other = Arc::new(Schema::new(vec![Field::new(
+            "other",
+            DataType::Int64,
+            false,
+        )]));
+        let batch = RecordBatch::try_new(other, vec![Arc::new(Int64Array::from_iter_values(0..3))])
+            .unwrap();
+        assert!(matches!(
+            w.write(&batch).await,
+            Err(WriterError::SchemaMismatch)
+        ));
+    }
+
+    #[tokio::test]
+    async fn the_part_index_is_bounded() {
+        // Rolling past MAX_PARTS parts would need a sixth digit in the name.
+        let sink = Arc::new(MemorySink::default());
+        let mut w = PartWriter::new(sink, 0, int_schema(), small(1)).unwrap();
+        w.parts_done = MAX_PARTS; // as if that many parts were already written
+        let err = w.write(&int_batch(0..1)).await.unwrap_err();
+        assert!(matches!(err, WriterError::Manifest(_)), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn an_oversized_batch_is_written_in_slices_and_rolls_inside_it() {
+        // One batch of 64 rows of 1 MiB (64 MiB), a part limit of 4 MiB: it must
+        // become many parts, none holding more rows than a slice plus the limit.
+        let schema = Arc::new(Schema::new(vec![Field::new("s", DataType::Utf8, false)]));
+        // Pseudo-random text, which does not compress away.
+        let mut x = 0x9E37_79B9_7F4A_7C15u64;
+        let values: Vec<String> = (0..64)
+            .map(|_| {
+                (0..1024 * 1024)
+                    .map(|_| {
+                        x ^= x << 13;
+                        x ^= x >> 7;
+                        x ^= x << 17;
+                        (b'a' + (x % 26) as u8) as char
+                    })
+                    .collect()
+            })
+            .collect();
+        let batch = RecordBatch::try_new(schema.clone(), vec![Arc::new(StringArray::from(values))])
+            .unwrap();
+        let cfg = WriterConfig {
+            max_rows: usize::MAX / 2,
+            max_bytes: 4 * 1024 * 1024,
+        };
+        let sink = Arc::new(MemorySink::default());
+        let mut w = PartWriter::new(sink.clone(), 0, schema, cfg).unwrap();
+        w.write(&batch).await.unwrap();
+        // Right after the write the open part is under the limit.
+        assert!(w.buffered_bytes() < cfg.max_bytes);
+        let done = w.finish().await.unwrap();
+        assert_eq!(done.rows, 64);
+        // Without slicing the whole batch would be one part.
+        assert!(done.parts >= 8, "{} parts", done.parts);
+        for path in sink.paths() {
+            let md = metadata_of(sink.get(&path).unwrap());
+            let rows = md.file_metadata().num_rows();
+            // The slice is 8 rows of 1 MiB, the limit 4 MiB: at most 12 rows.
+            assert!(rows <= 12, "{path} has {rows} rows");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failing_final_put_keeps_its_path_and_no_table_is_reported() {
+        // One part is written (put 0), then the last part's put fails.
+        let sink = Arc::new(MemorySink::failing_from(1));
+        let mut w = PartWriter::new(sink.clone(), 0, int_schema(), small(10)).unwrap();
+        w.write(&int_batch(0..15)).await.unwrap();
+        let err = w.finish().await.unwrap_err();
+        assert!(matches!(err, WriterError::Sink(_)), "{err:?}");
+        // The path of the put that failed is known, so the caller can remove it.
+        assert_eq!(
+            w.attempted_paths(),
+            ["t0/part-00000.parquet", "t0/part-00001.parquet"]
+        );
+        assert!(matches!(w.finish().await, Err(WriterError::Poisoned)));
+    }
+}
