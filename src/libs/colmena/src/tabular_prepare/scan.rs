@@ -369,4 +369,58 @@ mod tests {
         // Nothing past the limit plus a read buffer was let through.
         assert!(read <= MAX_RECORD_BYTES + 32 * 1024, "{read}");
     }
+
+    #[test]
+    fn blank_lines_are_dropped_and_counted_in_a_multi_column_file() {
+        let (out, stats) = scan(b"\n\na,b\n1,2\n\n3,4\r\n\r\n5,6\n\n\n", b',');
+        assert_eq!(out, b"a,b\n1,2\n3,4\r\n5,6\n");
+        assert_eq!(stats.blank_dropped(), 6);
+        assert_eq!(stats.blank_rows(), 0);
+    }
+
+    #[test]
+    fn a_blank_line_in_a_one_column_file_is_a_null_row_and_trailing_ones_are_not() {
+        let (out, stats) = scan_with(b"\nname\nann\n\nbob\n\n\ncy\n\n\n", b',', true);
+        // Three blank lines inside the data become explicit empty cells; the
+        // leading blank line and the trailing ones are dropped.
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "name\nann\n\"\"\nbob\n\"\"\n\"\"\ncy\n"
+        );
+        assert_eq!(stats.blank_rows(), 3);
+        assert_eq!(stats.blank_dropped(), 3);
+    }
+
+    #[test]
+    fn a_blank_line_inside_quotes_is_data_not_a_blank_line() {
+        let csv = "a\n\"x\n\ny\"\n\"q\"\"\n\nr\"\nb\n";
+        let (out, stats) = scan_with(csv.as_bytes(), b',', true);
+        assert_eq!(String::from_utf8(out).unwrap(), csv);
+        assert_eq!((stats.blank_rows(), stats.blank_dropped()), (0, 0));
+    }
+
+    #[test]
+    fn many_blank_lines_do_not_buffer() {
+        // Fifty thousand blank lines between two rows: the output is produced
+        // in small pieces while reading, never as one allocation.
+        let csv = format!("a\n1\n{}2\n", "\n".repeat(50_000));
+        let stats = Arc::new(ScanStats::default());
+        let mut s = RecordScanner::new(Cursor::new(csv.into_bytes()), b',', true, stats.clone());
+        let mut buf = [0u8; 4096];
+        let (mut total, mut biggest, mut held) = (0, 0, 0);
+        loop {
+            let n = s.read(&mut buf).unwrap();
+            if n == 0 {
+                break;
+            }
+            total += n;
+            biggest = biggest.max(n);
+            held = held.max(s.out.capacity());
+        }
+        // The internal buffer stays near one refill, not one per blank line.
+        assert!(held <= 64 * 1024, "held {held} bytes");
+        assert_eq!(total, "a\n1\n".len() + 50_000 * 3 + "2\n".len());
+        assert!(biggest <= 4096);
+        assert_eq!(stats.blank_rows(), 50_000);
+    }
 }

@@ -478,3 +478,22 @@ limit }`, naming the record and never its content. This holds inside an
 unclosed quote (`"12 inch pipe` makes the rest of the file one quoted field
 although every physical line is short), in the header, in the sample and after
 it; a line-based limit did not, and a parser would have buffered the whole file.
+
+Blank lines are never skipped silently: in a one-column file (no delimiter
+evidence in the sample) a blank line after the header is a null row (the empty
+line is the empty cell; trailing blank lines at the end of the file and blank
+lines before the header are dropped); in a file with several columns a blank line
+is dropped. Every blank line is counted in `ScanStats` (`blank_rows`,
+`blank_dropped`), and the output does not depend on how the input is chunked (a
+test splits it at every byte offset).
+
+### Reading a CSV (`csv.rs`)
+
+`prepare_input` turns a blocking byte source into clean UTF-8 text and finds the
+delimiter. It reads a 1 MiB sample, then: a UTF-8 byte order mark is removed;
+UTF-16 and binary input (a NUL byte) are refused with a typed error; the
+delimiter is the one of comma, semicolon, tab and pipe whose records (quote-aware,
+the first 50, without the one the sample cut) agree most on a field count above
+one, with a comma as the fallback. An empty file, or one with only whitespace, is
+`CsvError::Empty`. Nothing past the sample is read before the consumer asks, and a
+record is bounded by the record scanner, not by physical lines.
