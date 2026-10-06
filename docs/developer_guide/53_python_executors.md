@@ -168,6 +168,18 @@ A call cannot start a process. As a second line, before a slot is reused, everyt
 calls fail with `PythonExecutorError: no usable Python slot is left…` until the process restarts. The host signals a
 call's child through a pidfd (the pid when pidfds are unavailable).
 
+### Run staging directories (Linux, dark)
+
+Dark behind `COLMENA_LARGE_TABULAR`: nothing below runs while the switch is off. A call that carries prepared data
+is given two directories under a staging root: `<root>/<call id>/data` (read-only for the call) and
+`<root>/<call id>/out` (a size-bound volume the call writes to).
+
+The jail never receives a path. It receives the call id, which must be 1-64 characters of `[A-Za-z0-9_-]` (so it
+cannot be `.`/`..` or hold a separator), and derives the directories itself: every component, the root's included, is
+opened with `O_NOFOLLOW` (`staging::open_call_dirs`), `call` and `data` must be owned by the executor and not writable
+by group or others, and the descriptors it ends up with are what gets bound, so swapping a path after the check
+changes nothing.
+
 ### Startup self-test (Linux)
 
 Before it binds its socket, the template forks a throwaway child that enters the jail as slot 9999 (uid
