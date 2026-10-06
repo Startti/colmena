@@ -13,10 +13,13 @@
 //! user-visible, and it never carries a cell or a storage key.
 
 use crate::storage::domain::OutputStorageRepository;
-use crate::tabular_prepare::convert::{convert_csv_table_with, ConvertControl, ConvertedTable};
-use crate::tabular_prepare::csv::Encoding;
+use crate::tabular_prepare::convert::{
+    convert_csv_table_with, ConvertControl, ConvertError, ConvertedTable, TableError,
+};
+use crate::tabular_prepare::csv::{CsvError, Encoding};
 use crate::tabular_prepare::manifest::{
-    unique_table_names, ConversionReport, Manifest, TableInfo, MANIFEST_PATH, MAX_REPORTED_DEMOTED,
+    unique_table_names, ConversionReport, Manifest, ManifestError, TableInfo, MANIFEST_PATH,
+    MAX_REPORTED_DEMOTED,
 };
 use crate::tabular_prepare::part_sink::PartSink;
 use crate::tabular_prepare::ports::PrepareRequest;
@@ -25,7 +28,7 @@ use crate::tabular_prepare::registry::{
     lease_for, ClaimRequest, PreparationRegistry, ReadyInfo, RegistryError, TerminalOutcome,
     FORMAT_VERSION,
 };
-use crate::tabular_prepare::writer::WriterConfig;
+use crate::tabular_prepare::writer::{WriterConfig, WriterError};
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use std::sync::Arc;
@@ -132,6 +135,42 @@ pub enum PrepareOutcome {
     /// The row is gone or another job owns it: nothing was recorded.
     Cancelled,
     Failed(PrepareFailure),
+}
+
+fn detail_of_csv(e: &CsvError) -> String {
+    match e {
+        CsvError::Empty => "the file is empty".into(),
+        CsvError::UnsupportedEncoding(what) => format!("unsupported encoding: {what}"),
+        CsvError::RecordTooLong { limit, .. } => format!("a record is longer than {limit} bytes"),
+        CsvError::TooManyColumns { limit } => format!("the file has more than {limit} columns"),
+        _ => "the file is not valid CSV".into(),
+    }
+}
+
+/// The reason and the fixed detail of a failed conversion.
+fn classify(e: &TableError) -> (&'static str, String) {
+    use reason::*;
+    match e {
+        TableError::Convert(ConvertError::Csv(c)) => match c {
+            CsvError::Io(_) => (STORAGE, "the source could not be read from storage".into()),
+            CsvError::Cancelled | CsvError::InvalidLimits(_) => {
+                (INTERNAL, "the conversion stopped unexpectedly".into())
+            }
+            other => (UNREADABLE_FILE, detail_of_csv(other)),
+        },
+        TableError::Convert(ConvertError::SourceUnavailable) => {
+            (STORAGE, "the source could not be read from storage".into())
+        }
+        TableError::Convert(ConvertError::Manifest(ManifestError::ManifestTooLarge { .. }))
+        | TableError::Writer(WriterError::Manifest(ManifestError::ManifestTooLarge { .. })) => (
+            TABLE_TOO_LARGE,
+            "the table list does not fit the registry row; export fewer columns".into(),
+        ),
+        TableError::Writer(WriterError::Sink(_)) => {
+            (STORAGE, "a prepared object could not be stored".into())
+        }
+        _ => (INTERNAL, "the conversion failed".into()),
+    }
 }
 
 pub fn encoding_name(e: Encoding) -> &'static str {
@@ -288,9 +327,7 @@ pub async fn prepare_csv(
             }
         }
         Err(failure) => {
-            // Every failure is recorded as internal here; the next slice tells
-            // the reasons apart.
-            let (code, detail) = (reason::INTERNAL, "the conversion failed".to_string());
+            let (code, detail) = classify(&failure.error);
             let keys = keys_of(failure.blob_paths);
             fail(env, req, &owner, code, detail, keys).await
         }
@@ -421,6 +458,98 @@ mod tests {
     }
 
     #[test]
+    fn every_failure_has_a_reason_and_a_fixed_text_without_content() {
+        use crate::tabular_prepare::part_sink::SinkError;
+        let csv = |c: CsvError| TableError::Convert(ConvertError::Csv(c));
+        let cases: Vec<(TableError, &str, &str)> = vec![
+            (
+                csv(CsvError::Empty),
+                reason::UNREADABLE_FILE,
+                "the file is empty",
+            ),
+            (
+                csv(CsvError::UnsupportedEncoding("UTF-16".into())),
+                reason::UNREADABLE_FILE,
+                "unsupported encoding: UTF-16",
+            ),
+            (
+                csv(CsvError::RecordTooLong {
+                    record: 7,
+                    limit: 1048576,
+                }),
+                reason::UNREADABLE_FILE,
+                "a record is longer than 1048576 bytes",
+            ),
+            (
+                csv(CsvError::TooManyColumns { limit: 16384 }),
+                reason::UNREADABLE_FILE,
+                "the file has more than 16384 columns",
+            ),
+            (
+                csv(CsvError::Parse("row 3: secret cell".into())),
+                reason::UNREADABLE_FILE,
+                "the file is not valid CSV",
+            ),
+            (
+                csv(CsvError::Io("https://x/secret-key".into())),
+                reason::STORAGE,
+                "the source could not be read from storage",
+            ),
+            (
+                TableError::Convert(ConvertError::SourceUnavailable),
+                reason::STORAGE,
+                "the source could not be read from storage",
+            ),
+            (
+                TableError::Writer(WriterError::Sink(SinkError("secret-key".into()))),
+                reason::STORAGE,
+                "a prepared object could not be stored",
+            ),
+            (
+                TableError::Writer(WriterError::Manifest(ManifestError::ManifestTooLarge {
+                    bytes: 70_000,
+                    cap: 65_536,
+                })),
+                reason::TABLE_TOO_LARGE,
+                "the table list does not fit the registry row; export fewer columns",
+            ),
+            (
+                TableError::Convert(ConvertError::Manifest(ManifestError::ManifestTooLarge {
+                    bytes: 70_000,
+                    cap: 65_536,
+                })),
+                reason::TABLE_TOO_LARGE,
+                "the table list does not fit the registry row; export fewer columns",
+            ),
+            (
+                TableError::Convert(ConvertError::ReaderPanicked),
+                reason::INTERNAL,
+                "the conversion failed",
+            ),
+            (
+                TableError::Convert(ConvertError::Cast("secret".into())),
+                reason::INTERNAL,
+                "the conversion failed",
+            ),
+            (
+                csv(CsvError::Cancelled),
+                reason::INTERNAL,
+                "the conversion stopped unexpectedly",
+            ),
+            (
+                csv(CsvError::InvalidLimits("secret".into())),
+                reason::INTERNAL,
+                "the conversion stopped unexpectedly",
+            ),
+        ];
+        for (err, code, detail) in cases {
+            let (c, d) = classify(&err);
+            assert_eq!((c, d.as_str()), (code, detail), "{err:?}");
+            assert!(!d.contains("secret"), "{err:?}");
+        }
+    }
+
+    #[test]
     fn the_time_budget_is_the_design_value_and_the_reasons_are_stable_snake_case() {
         assert_eq!(PREP_TIMEOUT, Duration::from_secs(300));
         let all = [
@@ -493,6 +622,24 @@ pub(crate) mod cases {
 
     fn objects_but_source(storage: &PlacedStorage, source: &str) -> Vec<String> {
         storage.keys().into_iter().filter(|k| k != source).collect()
+    }
+
+    async fn failed_row(
+        registry: &Arc<dyn PreparationRegistry>,
+        source: &str,
+        outcome: PrepareOutcome,
+    ) -> (
+        PrepareFailure,
+        crate::tabular_prepare::registry::PreparedRow,
+    ) {
+        let PrepareOutcome::Failed(f) = outcome else {
+            panic!("expected a recorded failure, got {outcome:?}");
+        };
+        let row = registry.get(source).await.unwrap().unwrap();
+        assert_eq!(row.status, PrepareStatus::Failed);
+        assert_eq!(row.error_code.as_deref(), Some(f.code));
+        assert_eq!(row.error_detail.as_deref(), Some(f.detail.as_str()));
+        (f, row)
     }
 
     pub(crate) async fn a_prepared_table_is_ready_with_the_manifest_stored_last(
@@ -619,6 +766,124 @@ pub(crate) mod cases {
         ));
         assert_eq!(*storage.stores.lock().unwrap(), stores);
     }
+
+    pub(crate) async fn a_file_that_is_not_a_csv_fails_with_a_fixed_text_and_no_cell(
+        registry: Arc<dyn PreparationRegistry>,
+    ) {
+        for (body, detail) in [
+            (&b""[..], "the file is empty"),
+            (&b"\xFF\xFEa\0,\0b\0"[..], "unsupported encoding: UTF-16"),
+            (
+                &b"a,b\n1,a secret cell,3\n"[..],
+                "the file is not valid CSV",
+            ),
+        ] {
+            let storage = Arc::new(PlacedStorage::default());
+            let env = env(registry.clone(), storage.clone());
+            // A fresh key per case keeps the rows apart.
+            let source = format!("chat-attachments/u/s/{}.csv", uuid::Uuid::new_v4());
+            storage
+                .objects
+                .lock()
+                .unwrap()
+                .insert(source.clone(), Bytes::from(body.to_vec()));
+            let out = prepare_csv(&env, &request(&source, 10)).await.unwrap();
+            let PrepareOutcome::Failed(f) = out else {
+                panic!("expected a failure");
+            };
+            assert_eq!(
+                (f.code, f.detail.as_str()),
+                (reason::UNREADABLE_FILE, detail)
+            );
+            let row = registry.get(&source).await.unwrap().unwrap();
+            assert_eq!(row.error_code.as_deref(), Some("unreadable_file"));
+            assert!(!row.error_detail.unwrap().contains("secret"));
+            assert!(row.blob_keys.is_empty());
+        }
+    }
+
+    pub(crate) async fn a_storage_failure_midway_tracks_every_key_tried_and_deletes_them(
+        registry: Arc<dyn PreparationRegistry>,
+    ) {
+        let source = fresh_source();
+        let source = source.as_str();
+        let storage = PlacedStorage::with_source(source, five_rows());
+        // The first part is stored, the second put fails.
+        *storage.fail_stores_from.lock().unwrap() = Some(1);
+        let env = env(registry.clone(), storage.clone());
+        let out = prepare_csv(&env, &request(source, 40)).await.unwrap();
+        let (f, row) = failed_row(&registry, source, out).await;
+        assert_eq!(f.code, reason::STORAGE);
+        assert!(!f.detail.contains("secret") && !f.detail.contains("chat-attachments"));
+        // The key of the put that failed is tracked, with the one that worked.
+        for k in part_keys(source, 2) {
+            assert!(row.blob_keys.contains(&k), "{k} untracked");
+        }
+        // Everything tracked was deleted; the source is untouched.
+        assert_eq!(storage.keys(), vec![source.to_string()]);
+        for k in &row.blob_keys {
+            assert!(storage.deleted.lock().unwrap().contains(k));
+        }
+        assert!(!storage
+            .deleted
+            .lock()
+            .unwrap()
+            .contains(&source.to_string()));
+    }
+
+    pub(crate) async fn a_manifest_that_could_not_be_stored_never_makes_the_row_ready(
+        registry: Arc<dyn PreparationRegistry>,
+    ) {
+        let source = fresh_source();
+        let source = source.as_str();
+        let storage = PlacedStorage::with_source(source, five_rows());
+        // Three parts are stored; the manifest is the fourth put and fails.
+        *storage.fail_stores_from.lock().unwrap() = Some(3);
+        let env = env(registry.clone(), storage.clone());
+        let out = prepare_csv(&env, &request(source, 40)).await.unwrap();
+        let (f, row) = failed_row(&registry, source, out).await;
+        assert_eq!(f.code, reason::STORAGE);
+        assert_eq!(row.manifest_key, None);
+        let manifest_key = format!("{}/manifest.json", root_of(source));
+        assert!(row.blob_keys.contains(&manifest_key));
+        assert_eq!(row.blob_keys.len(), 4);
+        assert_eq!(storage.keys(), vec![source.to_string()]);
+    }
+
+    pub(crate) async fn a_restart_with_fewer_parts_leaves_stale_keys_the_manifest_never_names(
+        registry: Arc<dyn PreparationRegistry>,
+    ) {
+        let source = fresh_source();
+        let source = source.as_str();
+        // Ten thousand integers and a late word: the first run writes four
+        // parts (8,000 rows; the rest of its batch was never flushed), then the column becomes text and the file is read again; it
+        // changed in between, and the second run writes one part.
+        let mut first = b"id\n".to_vec();
+        for i in 0..10_000 {
+            first.extend_from_slice(format!("{i}\n").as_bytes());
+        }
+        first.extend_from_slice(b"late\n");
+        let storage = PlacedStorage::with_source(source, first);
+        *storage.swap_on_second_open.lock().unwrap() = Some(Bytes::from_static(b"id\nx\ny\n"));
+        let env = env(registry.clone(), storage.clone()).with_writer(WriterConfig {
+            max_rows: 2000,
+            max_bytes: usize::MAX,
+        });
+        let PrepareOutcome::Ready(table) =
+            prepare_csv(&env, &request(source, 60_000)).await.unwrap()
+        else {
+            panic!("expected a ready table");
+        };
+        assert_eq!(table.manifest.tables[0].parts, 1);
+        assert_eq!(table.stale_keys, part_keys(source, 4)[1..].to_vec());
+        let row = registry.get(source).await.unwrap().unwrap();
+        // Tracked for cleanup, still stored, and not referenced.
+        for k in &table.stale_keys {
+            assert!(row.blob_keys.contains(k));
+            assert!(storage.objects.lock().unwrap().contains_key(k));
+        }
+        assert_eq!(row.blob_keys.len(), 5);
+    }
 }
 
 #[cfg(test)]
@@ -677,5 +942,21 @@ mod registry_tests {
     sqlite_case!(
         tabular_prepare_a_second_preparation_is_not_claimed_and_stores_nothing,
         a_second_preparation_is_not_claimed_and_stores_nothing
+    );
+    sqlite_case!(
+        tabular_prepare_a_file_that_is_not_a_csv_fails_with_a_fixed_text_and_no_cell,
+        a_file_that_is_not_a_csv_fails_with_a_fixed_text_and_no_cell
+    );
+    sqlite_case!(
+        tabular_prepare_a_storage_failure_midway_tracks_every_key_tried_and_deletes_them,
+        a_storage_failure_midway_tracks_every_key_tried_and_deletes_them
+    );
+    sqlite_case!(
+        tabular_prepare_a_manifest_that_could_not_be_stored_never_makes_the_row_ready,
+        a_manifest_that_could_not_be_stored_never_makes_the_row_ready
+    );
+    sqlite_case!(
+        tabular_prepare_a_restart_with_fewer_parts_leaves_stale_keys_the_manifest_never_names,
+        a_restart_with_fewer_parts_leaves_stale_keys_the_manifest_never_names
     );
 }

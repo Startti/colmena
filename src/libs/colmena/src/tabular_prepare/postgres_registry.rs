@@ -312,6 +312,22 @@ mod tests {
         tabular_prepare_pg_a_second_preparation_is_not_claimed_and_stores_nothing,
         a_second_preparation_is_not_claimed_and_stores_nothing
     );
+    pg_driver_case!(
+        tabular_prepare_pg_a_file_that_is_not_a_csv_fails_with_a_fixed_text_and_no_cell,
+        a_file_that_is_not_a_csv_fails_with_a_fixed_text_and_no_cell
+    );
+    pg_driver_case!(
+        tabular_prepare_pg_a_storage_failure_midway_tracks_every_key_tried_and_deletes_them,
+        a_storage_failure_midway_tracks_every_key_tried_and_deletes_them
+    );
+    pg_driver_case!(
+        tabular_prepare_pg_a_manifest_that_could_not_be_stored_never_makes_the_row_ready,
+        a_manifest_that_could_not_be_stored_never_makes_the_row_ready
+    );
+    pg_driver_case!(
+        tabular_prepare_pg_a_restart_with_fewer_parts_leaves_stale_keys_the_manifest_never_names,
+        a_restart_with_fewer_parts_leaves_stale_keys_the_manifest_never_names
+    );
     pg_case!(
         tabular_prepare_pg_a_deleting_row_is_never_taken_by_an_older_format_claim,
         a_deleting_row_is_never_taken_by_an_older_format_claim
