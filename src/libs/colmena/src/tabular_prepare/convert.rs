@@ -1,14 +1,18 @@
 use crate::storage::domain::StorageError;
-use crate::tabular_prepare::csv::{CsvError, RawBatches};
+use crate::tabular_prepare::csv::{CsvError, Encoding, RawBatches};
 use crate::tabular_prepare::infer::{cell_fits, InferredSchema};
-use crate::tabular_prepare::manifest::{ColumnType, ManifestError};
+use crate::tabular_prepare::manifest::{part_path, ColumnType, ManifestError};
+use crate::tabular_prepare::writer::{TableWritten, WriterError};
 use arrow_array::{Array, ArrayRef, RecordBatch, StringArray};
 use arrow_cast::cast;
 use arrow_schema::{DataType, SchemaRef};
+use async_trait::async_trait;
 use bytes::Bytes;
 use futures::{Stream, StreamExt};
+use std::collections::BTreeSet;
 use std::io::{self, Read};
 use std::pin::Pin;
+use std::sync::{Arc, Mutex};
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
@@ -212,6 +216,129 @@ impl Read for StreamBridge {
         self.chunk = self.chunk.slice(n..);
         Ok(n)
     }
+}
+
+/// What the caller keeps while a conversion runs: the part keys that may exist
+/// in the sink, and the means to stop it. The keys are written *before* each
+/// put, here and not in the conversion's own state, so they survive dropping
+/// the conversion future (a timeout, a cancelled request): the caller removes
+/// them from the sink afterwards.
+///
+/// Rules for the caller. Wait for the conversion future to finish, or drop it,
+/// before deleting anything: a conversion still running can put a key you just
+/// deleted. `cancel()` stops the reader but does not interrupt a put in flight,
+/// and up to `CHANNEL_BATCHES` batches already read can still be put after it.
+/// One control may serve several tables (each result lists only the keys under
+/// its own `t<idx>/`), but a table index must not be used twice on one control.
+#[derive(Default)]
+pub struct ConvertControl {
+    paths: Mutex<BTreeSet<String>>,
+    cancel: CancellationToken,
+}
+
+impl ConvertControl {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    /// Every part key handed to the sink so far, sorted, each once.
+    pub fn paths(&self) -> Vec<String> {
+        self.paths.lock().map_or_else(
+            |poisoned| poisoned.into_inner().iter().cloned().collect(),
+            |p| p.iter().cloned().collect(),
+        )
+    }
+
+    /// Stops the conversion: its reader fails at its next read (or at once if it
+    /// is waiting on a stalled stream) and the run ends with
+    /// [`CsvError::Cancelled`].
+    pub fn cancel(&self) {
+        self.cancel.cancel();
+    }
+
+    /// The keys of table `table_idx` alone (those under `t<idx>/`): what that
+    /// table's result reports, so a control shared by several tables never
+    /// lists one table's parts as another's.
+    pub fn paths_of(&self, table_idx: usize) -> Vec<String> {
+        let prefix = format!("t{table_idx}/");
+        self.paths()
+            .into_iter()
+            .filter(|p| p.starts_with(&prefix))
+            .collect()
+    }
+}
+
+/// A CSV that can be opened from the start, once per run.
+#[async_trait]
+pub trait CsvSource: Send + Sync {
+    /// Opens the source. `cancel` is cancelled when the conversion is dropped or
+    /// cancelled; a source whose reads can stall waits on it (see
+    /// [`stream_reader`]).
+    async fn open(&self, cancel: &CancellationToken) -> Result<Box<dyn Read + Send>, ConvertError>;
+}
+
+#[derive(Debug, Error)]
+pub enum TableError {
+    #[error(transparent)]
+    Convert(#[from] ConvertError),
+    #[error(transparent)]
+    Writer(#[from] WriterError),
+}
+
+/// A finished table.
+#[derive(Debug)]
+pub struct ConvertedTable {
+    pub written: TableWritten,
+    /// Type restarts (the encoding retry is not counted).
+    pub restarts: usize,
+    /// Names of every column that was typed from the sample and ended as text
+    /// (all of them when `all_strings` is set), as the manifest shows them.
+    pub demoted: Vec<String>,
+    /// Every column is text because the restarts ran out.
+    pub all_strings: bool,
+    pub encoding: Encoding,
+    /// Invalid UTF-8 sequences replaced by U+FFFD (zero for Windows-1252). A
+    /// caller that cares about exact values reports a non-zero count.
+    pub replacements: u64,
+    /// Non-ASCII UTF-8 characters found in the whole file, whichever encoding
+    /// was chosen. With `utf8_invalid` this is the evidence of the choice: a
+    /// caller can warn when it was close, or when a file with UTF-8 sequences
+    /// was read as Windows-1252.
+    pub utf8_valid_multibyte: u64,
+    /// Invalid UTF-8 sequences found in the whole file, whichever encoding was
+    /// chosen (for Windows-1252 they are what the single bytes looked like).
+    pub utf8_invalid: u64,
+    /// Blank lines that became null rows (a one-column file).
+    pub blank_rows: u64,
+    /// Blank lines dropped (several columns, before the header, trailing).
+    pub blank_dropped: u64,
+    /// Rows with fewer fields than the header, padded with nulls.
+    pub padded_rows: u64,
+    /// Every part path any run handed to the sink, each once. Runs overwrite
+    /// the same keys, so this is the set of objects that may exist.
+    pub blob_paths: Vec<String>,
+    /// The part of `blob_paths` the manifest does not reference: left by an
+    /// aborted run that wrote more parts than the final one. Safe to delete,
+    /// and a reader must never list the prefix to find parts.
+    pub stale_paths: Vec<String>,
+}
+
+impl ConvertedTable {
+    /// The keys of the parts of the finished table, in order: the only ones a
+    /// manifest or a reader refers to.
+    pub fn live_paths(&self, table_idx: usize) -> Vec<String> {
+        (0..self.written.parts as usize)
+            .filter_map(|i| part_path(table_idx, i).ok())
+            .collect()
+    }
+}
+
+/// A conversion that did not finish. `blob_paths` is what may exist in the
+/// sink and has to be removed; nothing is reported as written.
+#[derive(Debug)]
+pub struct TableFailure {
+    pub error: TableError,
+    pub blob_paths: Vec<String>,
 }
 
 #[cfg(test)]
@@ -441,6 +568,216 @@ mod tests {
     }
 
     // ---- the restart loop ----
+
+    // ---- no value changes silently ----
+
+    fn column_of(late: &str, kind_rows: &[&str]) -> Result<RecordBatch, ConvertError> {
+        let mut csv = String::from("v\n");
+        for r in kind_rows {
+            csv.push_str(&format!("{r}\n"));
+        }
+        // Keep the type decided by the sample, then put the odd value far
+        // past it.
+        for _ in 0..crate::tabular_prepare::infer::INFERENCE_ROWS {
+            csv.push_str(&format!("{}\n", kind_rows[0]));
+        }
+        csv.push_str(&format!("{late}\n"));
+        let (_, it) = typed(&csv);
+        let mut last = None;
+        for b in it {
+            last = Some(b?);
+        }
+        Ok(last.unwrap())
+    }
+
+    #[test]
+    fn a_timestamp_the_inference_accepts_is_never_stored_as_null() {
+        // `u32::parse` accepts a plus sign, so "+9:00:00" looked like a clock.
+        for late in [
+            "2020-01-05 +9:00:00",
+            "2020-01-05 09:+0:00",
+            "2020-01-05T09:00:+1",
+        ] {
+            let r = column_of(late, &["2020-01-05 10:20:30"]);
+            assert!(
+                matches!(r, Err(ConvertError::Conflict(_))),
+                "{late} was not refused: {r:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_float_that_underflows_is_not_stored_as_zero() {
+        for late in ["1e-400", "4.9e-325", "-1e-999", "2e-310"] {
+            let r = column_of(late, &["1.5"]);
+            assert!(
+                matches!(r, Err(ConvertError::Conflict(_))),
+                "{late} was not refused: {r:?}"
+            );
+        }
+        // Zero written as zero is fine, so is a tiny normal number.
+        for ok in ["0.0", "0e0", "-0.0", "1e-300", "2.5e-100"] {
+            let b = column_of(ok, &["1.5"]).unwrap();
+            let v = b.column(0).as_any().downcast_ref::<Float64Array>().unwrap();
+            let got = v.value(v.len() - 1);
+            assert_eq!(got.to_bits(), ok.parse::<f64>().unwrap().to_bits(), "{ok}");
+        }
+    }
+
+    /// Strings that look like the type they are fed to, and mutations of them.
+    fn corpus(seed: u64, templates: &[&str], alphabet: &str, n: usize) -> Vec<String> {
+        let mut x = seed;
+        let mut next = move || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        let chars: Vec<char> = alphabet.chars().collect();
+        let mut out = Vec::new();
+        for _ in 0..n {
+            let t = templates[(next() % templates.len() as u64) as usize];
+            let s: String = t
+                .chars()
+                .map(|c| {
+                    if c == '#' {
+                        chars[(next() % chars.len() as u64) as usize]
+                    } else {
+                        c
+                    }
+                })
+                .collect();
+            out.push(s);
+        }
+        out
+    }
+
+    /// Either the type refuses the string, or the stored value is the value of
+    /// the literal: never null, never another number.
+    fn check(s: &str, t: ColumnType) {
+        use arrow_array::{BooleanArray, Date32Array, TimestampMicrosecondArray};
+        use chrono::{NaiveDate, NaiveDateTime};
+        let text = StringArray::from(vec![Some(s)]);
+        let dt = crate::tabular_prepare::infer::arrow_type_of(t);
+        let Ok(col) = type_column(&text, t, &dt) else {
+            return;
+        };
+        assert!(!col.is_null(0), "{s:?} stored as null in {t:?}");
+        let any = col.as_any();
+        match t {
+            ColumnType::Int => {
+                let v = any.downcast_ref::<Int64Array>().unwrap().value(0);
+                assert_eq!(v, s.parse::<i64>().unwrap(), "{s:?}");
+            }
+            ColumnType::Float => {
+                let v = any.downcast_ref::<Float64Array>().unwrap().value(0);
+                let want = s.parse::<f64>().unwrap();
+                assert!(
+                    v.is_finite() && (v != 0.0 || want == 0.0),
+                    "{s:?} became {v}"
+                );
+                assert_eq!(v.to_bits(), want.to_bits(), "{s:?}");
+            }
+            ColumnType::Bool => {
+                let v = any.downcast_ref::<BooleanArray>().unwrap().value(0);
+                assert_eq!(v, s.eq_ignore_ascii_case("true"), "{s:?}");
+            }
+            ColumnType::Date => {
+                let v = any.downcast_ref::<Date32Array>().unwrap().value(0);
+                let d = NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap();
+                assert_eq!(
+                    v,
+                    d.signed_duration_since(NaiveDate::from_ymd_opt(1970, 1, 1).unwrap())
+                        .num_days() as i32,
+                    "{s:?}"
+                );
+            }
+            ColumnType::Timestamp => {
+                let v = any
+                    .downcast_ref::<TimestampMicrosecondArray>()
+                    .unwrap()
+                    .value(0);
+                let fmt = if s.as_bytes()[10] == b'T' {
+                    "%Y-%m-%dT%H:%M:%S%.f"
+                } else {
+                    "%Y-%m-%d %H:%M:%S%.f"
+                };
+                let d = NaiveDateTime::parse_from_str(s, fmt).unwrap();
+                assert_eq!(v, d.and_utc().timestamp_micros(), "{s:?}");
+            }
+            ColumnType::String => {}
+        }
+    }
+
+    #[test]
+    fn near_miss_strings_are_either_refused_or_stored_as_their_own_value() {
+        let digits = "0123456789+-.eE: TtZ_x٣";
+        let sets: [(ColumnType, &[&str], &str); 5] = [
+            (
+                ColumnType::Int,
+                &["#", "##", "###", "-##", "#####", "0#", "-0", "#.#", "+#"],
+                digits,
+            ),
+            (
+                ColumnType::Float,
+                &[
+                    "#.#",
+                    "#.##",
+                    "-#.#e#",
+                    "#e-##",
+                    "##.#e##",
+                    "#e+#",
+                    "0.#",
+                    "-0.#",
+                    "#.#e-###",
+                    "##.##e-###",
+                ],
+                "0123456789-+eE.",
+            ),
+            (
+                ColumnType::Bool,
+                &["true", "TRUE", "tRuE", "false", "FALSE", "#rue", "fals#"],
+                "tfTF01e",
+            ),
+            (
+                ColumnType::Date,
+                &[
+                    "20##-##-##",
+                    "2020-0#-#1",
+                    "####-##-##",
+                    "2020-#-##",
+                    "2020-02-#9",
+                ],
+                "0123456789-+ ",
+            ),
+            (
+                ColumnType::Timestamp,
+                &[
+                    "2020-01-05 ##:##:##",
+                    "2020-01-05T##:##:##",
+                    "2020-01-05 ##:##:##.#",
+                    "2020-01-05 #:##:##",
+                    "2020-01-05 ##:#+:##",
+                    "2020-02-29 2#:5#:5#.######",
+                    "2020-01-05 ##:##:##Z",
+                ],
+                "0123456789+- :.TZ",
+            ),
+        ];
+        let mut accepted = 0;
+        for (t, templates, alphabet) in sets {
+            for s in corpus(0x9E37_79B9_7F4A_7C15, templates, alphabet, 40_000) {
+                if crate::tabular_prepare::infer::cell_fits(&s, t) {
+                    accepted += 1;
+                }
+                check(&s, t);
+            }
+        }
+        assert!(
+            accepted > 20_000,
+            "the corpus hardly exercised the types: {accepted}"
+        );
+    }
 
     // ---- cancellation ----
 }
