@@ -26,6 +26,7 @@ use tokio::time::Instant;
 
 pub mod convert;
 pub mod csv;
+pub mod driver;
 pub mod gc;
 pub mod infer;
 pub mod manifest;
