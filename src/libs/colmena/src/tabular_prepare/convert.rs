@@ -962,6 +962,282 @@ mod tests {
 
     // ---- the restart loop ----
 
+    use crate::tabular_prepare::csv::CsvError;
+    use crate::tabular_prepare::infer::INFERENCE_ROWS;
+    use crate::tabular_prepare::part_sink::fake::MemorySink;
+    use crate::tabular_prepare::writer::{WriterConfig, WriterError};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    /// A CSV in memory that counts how often it is opened.
+    struct MemSource {
+        bytes: Vec<u8>,
+        opens: AtomicUsize,
+    }
+
+    impl MemSource {
+        fn new(bytes: Vec<u8>) -> Self {
+            Self {
+                bytes,
+                opens: AtomicUsize::new(0),
+            }
+        }
+        fn opens(&self) -> usize {
+            self.opens.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl CsvSource for MemSource {
+        async fn open(
+            &self,
+            _cancel: &CancellationToken,
+        ) -> Result<Box<dyn Read + Send>, ConvertError> {
+            self.opens.fetch_add(1, Ordering::SeqCst);
+            Ok(Box::new(Cursor::new(self.bytes.clone())))
+        }
+    }
+
+    async fn convert(
+        src: &MemSource,
+        sink: &Arc<MemorySink>,
+        cfg: WriterConfig,
+    ) -> Result<ConvertedTable, TableFailure> {
+        convert_csv_table(src, sink.clone(), 0, cfg).await
+    }
+
+    fn types(t: &ConvertedTable) -> Vec<ColumnType> {
+        t.written.columns.iter().map(|c| c.column_type).collect()
+    }
+
+    /// `n` rows of "id,v" where v is an integer, then the given late rows.
+    fn int_csv(n: usize, late: &str) -> Vec<u8> {
+        let mut csv = String::from("id,v\n");
+        for i in 0..n {
+            csv.push_str(&format!("{i},{i}\n"));
+        }
+        csv.push_str(late);
+        csv.into_bytes()
+    }
+
+    #[tokio::test]
+    async fn a_clean_file_is_converted_in_one_pass() {
+        let src = MemSource::new(b"a,b,c\n1,x,2020-01-01\n2,y,2020-01-02\n".to_vec());
+        let sink = Arc::new(MemorySink::default());
+        let t = convert(&src, &sink, WriterConfig::default()).await.unwrap();
+        assert_eq!(
+            (t.written.rows, t.written.parts, t.restarts, src.opens()),
+            (2, 1, 0, 1)
+        );
+        assert_eq!(
+            types(&t),
+            vec![ColumnType::Int, ColumnType::String, ColumnType::Date]
+        );
+        assert!(t.demoted.is_empty() && !t.all_strings);
+        assert_eq!(t.blob_paths, vec!["t0/part-00000.parquet".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn a_source_error_that_no_restart_fixes_fails_at_once() {
+        let mut csv = b"a,b\n".to_vec();
+        for _ in 0..INFERENCE_ROWS + 100 {
+            csv.extend_from_slice(b"1,2\n");
+        }
+        csv.extend(std::iter::repeat_n(
+            b'x',
+            crate::tabular_prepare::scan::MAX_RECORD_BYTES + 10,
+        ));
+        let src = MemSource::new(csv);
+        let sink = Arc::new(MemorySink::default());
+        let failure = convert(&src, &sink, WriterConfig::default())
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            failure.error,
+            TableError::Convert(ConvertError::Csv(CsvError::RecordTooLong { .. }))
+        ));
+        assert_eq!(src.opens(), 1);
+    }
+
+    #[tokio::test]
+    async fn an_empty_file_and_an_unopenable_source_fail_without_paths() {
+        let sink = Arc::new(MemorySink::default());
+        let src = MemSource::new(Vec::new());
+        let failure = convert(&src, &sink, WriterConfig::default())
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            failure.error,
+            TableError::Convert(ConvertError::Csv(CsvError::Empty))
+        ));
+        assert!(failure.blob_paths.is_empty() && sink.paths().is_empty());
+
+        struct Broken;
+        #[async_trait::async_trait]
+        impl CsvSource for Broken {
+            async fn open(
+                &self,
+                _cancel: &CancellationToken,
+            ) -> Result<Box<dyn Read + Send>, ConvertError> {
+                Err(ConvertError::Csv(CsvError::Io("gone".into())))
+            }
+        }
+        let failure = convert_csv_table(&Broken, sink.clone(), 0, WriterConfig::default())
+            .await
+            .unwrap_err();
+        assert!(failure.blob_paths.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_reader_that_dies_midway_is_a_failure_never_a_short_table() {
+        /// Serves a header and rows, then panics well past the sample, as a bug
+        /// in a source would.
+        struct Dies {
+            data: Vec<u8>,
+            sent: usize,
+        }
+        impl Read for Dies {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                if self.sent >= 2_000_000 {
+                    panic!("source blew up");
+                }
+                let n = buf.len().min(self.data.len() - self.sent).min(16 * 1024);
+                buf[..n].copy_from_slice(&self.data[self.sent..self.sent + n]);
+                self.sent += n;
+                Ok(n)
+            }
+        }
+        struct DiesSource;
+        #[async_trait::async_trait]
+        impl CsvSource for DiesSource {
+            async fn open(
+                &self,
+                _cancel: &CancellationToken,
+            ) -> Result<Box<dyn Read + Send>, ConvertError> {
+                Ok(Box::new(Dies {
+                    data: int_csv(250_000, ""),
+                    sent: 0,
+                }))
+            }
+        }
+        let sink = Arc::new(MemorySink::default());
+        let failure = convert_csv_table(&DiesSource, sink.clone(), 0, WriterConfig::default())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                failure.error,
+                TableError::Convert(ConvertError::ReaderPanicked)
+            ),
+            "{}",
+            failure.error
+        );
+    }
+
+    #[tokio::test]
+    async fn a_sink_failure_reports_every_path_tried_and_no_table() {
+        let cfg = WriterConfig {
+            max_rows: 1000,
+            max_bytes: usize::MAX,
+        };
+        let src = MemSource::new(int_csv(3500, ""));
+        // Part 0 is put, part 1 is tried and fails.
+        let sink = Arc::new(MemorySink::failing_from(1));
+        let failure = convert(&src, &sink, cfg).await.unwrap_err();
+        assert!(
+            matches!(failure.error, TableError::Writer(WriterError::Sink(_))),
+            "{:?}",
+            failure.error
+        );
+        assert_eq!(
+            failure.blob_paths,
+            vec!["t0/part-00000.parquet", "t0/part-00001.parquet"]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failure_stops_the_reader_instead_of_letting_it_finish_the_file() {
+        /// Three million rows, generated as they are read, and a count of what was pulled.
+        struct Endless {
+            next: u64,
+            pending: Vec<u8>,
+            pulled: Arc<AtomicUsize>,
+        }
+        impl Read for Endless {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                while self.pending.len() < buf.len().min(32 * 1024) && self.next < 3_000_000 {
+                    self.pending
+                        .extend_from_slice(format!("{},x\n", self.next).as_bytes());
+                    self.next += 1;
+                }
+                let n = buf.len().min(self.pending.len());
+                buf[..n].copy_from_slice(&self.pending[..n]);
+                self.pending.drain(..n);
+                self.pulled.fetch_add(n, Ordering::SeqCst);
+                Ok(n)
+            }
+        }
+        struct EndlessSource(Arc<AtomicUsize>);
+        #[async_trait::async_trait]
+        impl CsvSource for EndlessSource {
+            async fn open(
+                &self,
+                _cancel: &CancellationToken,
+            ) -> Result<Box<dyn Read + Send>, ConvertError> {
+                Ok(Box::new(Endless {
+                    next: 0,
+                    pending: b"id,v\n".to_vec(),
+                    pulled: self.0.clone(),
+                }))
+            }
+        }
+        let pulled = Arc::new(AtomicUsize::new(0));
+        let cfg = WriterConfig {
+            max_rows: 1000,
+            max_bytes: usize::MAX,
+        };
+        // The first part put fails.
+        let sink = Arc::new(MemorySink::failing_from(0));
+        let failure = convert_csv_table(&EndlessSource(pulled.clone()), sink, 0, cfg)
+            .await
+            .unwrap_err();
+        assert!(matches!(failure.error, TableError::Writer(_)));
+        // About 40 MB were on offer; the reader stopped within a few batches.
+        assert!(
+            pulled.load(Ordering::SeqCst) < 8 * 1024 * 1024,
+            "{}",
+            pulled.load(Ordering::SeqCst)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_reader_that_panics_before_the_header_is_a_typed_error_too() {
+        struct Boom;
+        impl Read for Boom {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                panic!("source blew up at once");
+            }
+        }
+        struct BoomSource;
+        #[async_trait::async_trait]
+        impl CsvSource for BoomSource {
+            async fn open(
+                &self,
+                _cancel: &CancellationToken,
+            ) -> Result<Box<dyn Read + Send>, ConvertError> {
+                Ok(Box::new(Boom))
+            }
+        }
+        let sink = Arc::new(MemorySink::default());
+        let failure = convert_csv_table(&BoomSource, sink, 0, WriterConfig::default())
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            failure.error,
+            TableError::Convert(ConvertError::ReaderPanicked)
+        ));
+    }
+
     // ---- no value changes silently ----
 
     fn column_of(late: &str, kind_rows: &[&str]) -> Result<RecordBatch, ConvertError> {
@@ -1172,5 +1448,135 @@ mod tests {
         );
     }
 
+    // ---- what the result reports ----
+
+    #[tokio::test]
+    async fn the_result_reports_blank_lines_and_padded_rows() {
+        let sink = Arc::new(MemorySink::default());
+        // One column: blank lines inside are null rows, trailing ones dropped.
+        let src = MemSource::new(b"name\nann\n\nbob\n\n\ncy\n\n".to_vec());
+        let t = convert(&src, &sink, WriterConfig::default()).await.unwrap();
+        assert_eq!(
+            (t.written.rows, t.blank_rows, t.blank_dropped, t.padded_rows),
+            (6, 3, 1, 0)
+        );
+        // Several columns: blank lines dropped, short rows padded, both counted.
+        let src = MemSource::new(b"a,b,c\n1,2,3\n\n4,5\n6\n7,8,9\n\n".to_vec());
+        let sink = Arc::new(MemorySink::default());
+        let t = convert(&src, &sink, WriterConfig::default()).await.unwrap();
+        assert_eq!(
+            (t.written.rows, t.blank_rows, t.blank_dropped, t.padded_rows),
+            (4, 0, 2, 2)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_wide_table_that_fits_is_converted() {
+        let header = (0..700)
+            .map(|i| format!("c{i}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let row = vec!["1"; 700].join(",");
+        let src = MemSource::new(format!("{header}\n{row}\n{row}\n").into_bytes());
+        let sink = Arc::new(MemorySink::default());
+        let t = convert(&src, &sink, WriterConfig::default()).await.unwrap();
+        assert_eq!(t.written.columns.len(), 700);
+    }
+
     // ---- cancellation ----
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_failing_put_is_reported_even_when_the_reader_is_stalled_on_storage() {
+        use std::task::Poll;
+        /// Many rows, then a stream that never yields again.
+        struct ThenStalls(bool);
+        impl Stream for ThenStalls {
+            type Item = Result<bytes::Bytes, StorageError>;
+            fn poll_next(
+                mut self: Pin<&mut Self>,
+                _: &mut std::task::Context<'_>,
+            ) -> Poll<Option<Self::Item>> {
+                if !self.0 {
+                    self.0 = true;
+                    // More rows than the 1 MiB sniff, the sample and one batch hold, so a batch is written (and
+                    // its put fails) while the reader waits for more.
+                    let mut rows = String::from("id,v\n");
+                    for i in 0..11_000 {
+                        rows.push_str(&format!("{i},{}\n", "a".repeat(100)));
+                    }
+                    return Poll::Ready(Some(Ok(bytes::Bytes::from(rows))));
+                }
+                Poll::Pending
+            }
+        }
+        struct StallSource;
+        #[async_trait::async_trait]
+        impl CsvSource for StallSource {
+            async fn open(
+                &self,
+                cancel: &CancellationToken,
+            ) -> Result<Box<dyn Read + Send>, ConvertError> {
+                let stream: ByteStream = Box::pin(ThenStalls(false));
+                Ok(Box::new(stream_reader(stream, cancel.clone())))
+            }
+        }
+        // Parts of two rows, and the first put fails: the writer fails while
+        // the blocking reader is parked on the stream.
+        let cfg = WriterConfig {
+            max_rows: 2,
+            max_bytes: usize::MAX,
+        };
+        let sink = Arc::new(MemorySink::failing_from(0));
+        let run = convert_csv_table(&StallSource, sink, 0, cfg);
+        // The timeout is only a guard: the failure must come back by itself.
+        let failure = tokio::time::timeout(std::time::Duration::from_secs(20), run)
+            .await
+            .expect("the failure was never reported: the reader was not cancelled")
+            .unwrap_err();
+        assert!(
+            matches!(failure.error, TableError::Writer(WriterError::Sink(_))),
+            "{:?}",
+            failure.error
+        );
+    }
+
+    #[tokio::test]
+    async fn limits_that_would_read_nothing_fail_the_conversion_instead_of_succeeding_empty() {
+        use crate::tabular_prepare::csv::ReadLimits;
+        let d = ReadLimits::default();
+        for limits in [
+            ReadLimits { batch_rows: 0, ..d },
+            ReadLimits {
+                batch_cells: 1,
+                ..d
+            },
+            ReadLimits {
+                batch_bytes: crate::tabular_prepare::csv::BATCH_BYTES + 1,
+                ..d
+            },
+        ] {
+            let src = MemSource::new(b"a,b\n1,2\n3,4\n".to_vec());
+            let sink = Arc::new(MemorySink::default());
+            let r = convert_csv_table_limits(
+                &src,
+                sink,
+                0,
+                WriterConfig::default(),
+                &ConvertControl::new(),
+                &limits,
+            )
+            .await;
+            let Err(failure) = r else {
+                panic!("an invalid limit is never a success")
+            };
+            assert!(
+                matches!(
+                    failure.error,
+                    TableError::Convert(ConvertError::Csv(CsvError::InvalidLimits(_)))
+                ),
+                "{:?}",
+                failure.error
+            );
+        }
+    }
 }
