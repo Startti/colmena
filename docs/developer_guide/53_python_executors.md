@@ -220,9 +220,10 @@ With a staging root configured the template's fixed environment gains two variab
 and `ARROW_IO_THREADS=1`, and every call inherits them; without one the environment is exactly the four variables above.
 The system pool is required under the address-space limit: with pyarrow's default allocator, versions 21 and later
 reserve about 1 GiB of address space per process. pandas 1.5.3 imports pyarrow inside `import pandas` when it is
-installed, so a template of such an image loads it. After the warm imports a template with a staging root checks that
-a loaded pyarrow's default pool is the system one (`arrow_pool_not_system` otherwise, exit 3), then, as always, that it
-still has a single thread. An image without pyarrow starts as before. User code still cannot import pyarrow; pandas
+installed, so a template of such an image has it loaded. A template with a staging root checks, without importing
+anything, that a pyarrow that is ALREADY loaded uses the system pool; an image without pyarrow loaded is not checked. A
+wrong pool disables the mounts capability (see below); the thread-count check that follows is the one every template
+already had, and a pyarrow older than 18.1 (a second thread at import) fails it for every call, as it would today. User code still cannot import pyarrow; pandas
 reads Parquet for it (`pd.read_parquet(..., use_threads=False)`).
 
 The output size is validated twice, before any mount: `out_mb` must be 1 to `OUT_MB_MAX` (1,024 MiB, the design's output
@@ -255,14 +256,29 @@ mount and unmount their output volumes there while a template starts, and a temp
 with fixed reason codes. A report that does not carry exactly these layers fails as `incomplete_report`; a template
 that cannot read its own namespaces, mounts or size fails as `namespace_unreadable`, `mounts_unreadable` or
 `vm_size_unreadable`. A configured path the slot uid
-cannot reach (a file under a directory it cannot enter) fails as `unverified`: cover that directory instead. With a staging root configured (`--staging-root`, see [Run staging directories](#run-staging-directories-linux-dark))
-the probe is a call that asks for mounts and the report carries three more layers, 29 in all: `mount_data_readonly`
-(a world-writable file and directory under `/data` cannot be written, it reads back, and its flags are read-only,
-`nosuid`, `nodev`, `noexec`), `mount_out_bounded` (`/out` takes a file, is the size the trusted side gave it, refuses a
-write past it and is `nosuid`, `nodev`, `noexec`) and `staging_root_hidden`. The probe's staged call is removed before
-the host's mount table is checked (which, as above, does not count mounts under the staging root). Without a staging root the report is the 26 layers above.
-Any
-failure logs `self_test_failed` and the template exits 3; success is implied by `READY`.
+cannot reach (a file under a directory it cannot enter) fails as `unverified`: cover that directory instead. A failure of any of these 26 logs `self_test_failed` and the template exits 3;
+success is implied by `READY`.
+
+With a staging root (`--staging-root`, see
+[Run staging directories](#run-staging-directories-linux-dark)) a second probe, `selftest::run_mounts`, is a throwaway
+staged call that asks for mounts and checks three more layers, 29 in all in `python_executor self-test`:
+`mount_data_readonly` (a world-writable file and directory under `/data` cannot be written, it reads back, and its flags
+are read-only, `nosuid`, `nodev`, `noexec`), `mount_out_bounded` (`/out` takes a file, is the size the trusted side gave
+it, refuses a write past it, stops empty files at the inode bound and is `nosuid`, `nodev`, `noexec`) and
+`staging_root_hidden` (the root IS the empty read-only tmpfs cover, listed successfully and found empty; a path that
+cannot be listed fails the layer, because the probe runs as the slot user and the real directory is the executor's).
+The probe's staged call is removed before the host's mount table is checked (which, as above, does not count mounts
+under the staging root).
+
+A failure of that second probe does NOT stop the template: it disables the mounts capability. So does a loaded pyarrow
+whose pool is not the system one. The template logs the failing layers and a `mounts_disabled` event, prints
+`MOUNTS_DISABLED <reason>` before `READY`, and keeps serving plain calls. Reasons: `staging_unusable` (the probe's
+staged call could not be made: an unwritable or read-only staging root, a root filesystem that refuses `mkdir /data` or
+`/out`), `mount_layer_failed` (a mount layer did not hold), `arrow_pool_not_system`, `arrow_pool_unreadable`. A call that
+asks for mounts then gets `PythonExecutorError: run mounts are disabled on this executor (<reason>)` before any child
+starts; the pool setting is therefore enforced for every mounts call. The `python_executor self-test` exit code covers
+all 29.
+
 `python_executor self-test [--uid-base N] [--tmp-mb N] [--hide /abs] [--staging-root /abs]` runs the same checks (same values as the
 executor settings; root and `CAP_SYS_ADMIN` needed): exit 0 when every layer holds, 3 when one fails, 2 for bad
 arguments.

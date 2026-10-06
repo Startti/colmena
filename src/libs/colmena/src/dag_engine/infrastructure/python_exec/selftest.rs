@@ -99,15 +99,11 @@ pub struct LayerCheck {
     pub errno: Option<i32>,
 }
 
-/// The layers a complete report carries for this jail: the fixed ones, and the
-/// mount ones only when a staging root is configured.
-fn expected_layers(spec: &JailSpec) -> BTreeSet<&'static str> {
-    let mounts = spec.staging_root.is_some().then_some(MOUNT_LAYERS);
-    LAYERS
-        .iter()
-        .chain(mounts.into_iter().flatten())
-        .copied()
-        .collect()
+/// The layers a complete report carries: the fixed ones for the jail's own
+/// probe, the mount ones for the probe of a call that asks for mounts.
+fn expected_layers(_spec: &JailSpec, mounts: bool) -> BTreeSet<&'static str> {
+    let layers = if mounts { MOUNT_LAYERS } else { LAYERS };
+    layers.iter().copied().collect()
 }
 
 fn outcome(layer: &str, reason: &str, held: &str) -> LayerCheck {
@@ -533,9 +529,28 @@ fn inodes_bounded(dir: &Path) -> bool {
     failure.is_some_and(|e| e.raw_os_error() == Some(libc::ENOSPC)) && made <= OUT_MAX_INODES
 }
 
-/// The staging root shows nothing: absent, or an empty cover.
+/// The staging root IS the cover the jail puts over it: an empty read-only
+/// tmpfs, listed successfully and found empty. A path that cannot be listed (the
+/// probe runs as the slot's user, and the real directory is the executor's, mode
+/// 0700) proves nothing and fails the layer: a missing cover must not read as one.
 fn staging_hidden(root: &Path) -> LayerCheck {
-    check("staging_root_hidden", covered(root), "covered", "visible")
+    let layer = "staging_root_hidden";
+    let held = "covered";
+    let Ok(mut entries) = std::fs::read_dir(root) else {
+        return outcome(layer, "unreadable", held);
+    };
+    if entries.next().is_some() {
+        return outcome(layer, "not_covered", held);
+    }
+    let c = std::ffi::CString::new(root.as_os_str().as_encoded_bytes()).unwrap_or_default();
+    let mut fs: libc::statfs = unsafe { std::mem::zeroed() };
+    let mut vfs: libc::statvfs = unsafe { std::mem::zeroed() };
+    let read = unsafe { libc::statfs(c.as_ptr(), &mut fs) } == 0
+        && unsafe { libc::statvfs(c.as_ptr(), &mut vfs) } == 0;
+    let cover = read
+        && fs.f_type as i64 == super::staging::TMPFS_MAGIC
+        && vfs.f_flag & libc::ST_RDONLY != 0;
+    outcome(layer, if cover { held } else { "not_covered" }, held)
 }
 
 fn probe(spec: &JailSpec, before: &Before) -> Vec<LayerCheck> {
@@ -554,12 +569,20 @@ fn probe(spec: &JailSpec, before: &Before) -> Vec<LayerCheck> {
     out.extend(network(before.loopback_port));
     out.push(interfaces());
     out.extend(syscall_filter());
-    if let Some(root) = &spec.staging_root {
-        out.push(data_mount(Path::new("/data")));
-        out.push(out_mount(Path::new("/out")));
-        out.push(staging_hidden(root));
-    }
     out
+}
+
+/// What a call that asks for mounts finds: `/data`, `/out` and the covered root.
+fn probe_mounts(spec: &JailSpec) -> Vec<LayerCheck> {
+    let root = spec
+        .staging_root
+        .as_deref()
+        .unwrap_or(Path::new("/nonexistent"));
+    vec![
+        data_mount(Path::new("/data")),
+        out_mount(Path::new("/out")),
+        staging_hidden(root),
+    ]
 }
 
 /// The forked child: enters the jail, probes it and reports on fd 3. That
@@ -568,6 +591,7 @@ fn probe_in_child(
     spec: &JailSpec,
     before: &Before,
     header: &CallHeader,
+    mounts: bool,
     channel: UnixStream,
 ) -> bool {
     let fd = channel.into_raw_fd();
@@ -584,7 +608,11 @@ fn probe_in_child(
         // What it returns is fd 3, written through below.
         Ok(channel) => {
             let _ = channel.into_raw_fd();
-            probe(spec, before)
+            if mounts {
+                probe_mounts(spec)
+            } else {
+                probe(spec, before)
+            }
         }
         Err(e) => vec![failure(e.layer, "not_applied", e.source.raw_os_error())],
     };
@@ -663,12 +691,33 @@ fn stage_probe(root: &Path) -> io::Result<StagedCall> {
 /// layer; `Ok` only when every check held. Only for a single-threaded
 /// process: the child allocates after the fork.
 pub fn run(spec: &JailSpec) -> Result<Vec<LayerCheck>, Vec<LayerCheck>> {
+    run_probe(spec, false)
+}
+
+/// The same, for a call that asks for mounts: a throwaway staged call whose probe
+/// checks the three mount layers. Separate from [`run`] so that a staging setup
+/// that is broken (an unwritable root, a root filesystem that takes no `/data`)
+/// or a mount that does not hold disables the mounts capability alone, never the
+/// jail every call depends on.
+pub fn run_mounts(spec: &JailSpec) -> Result<Vec<LayerCheck>, Vec<LayerCheck>> {
+    run_probe(spec, true)
+}
+
+fn run_probe(spec: &JailSpec, mounts: bool) -> Result<Vec<LayerCheck>, Vec<LayerCheck>> {
     let (listener, before, mut ours, theirs) = setup(spec)?;
     // With a staging root the probe is a call that asks for mounts, staged like
     // any other and removed after the probe, before the host's mounts are read.
-    let staged = match &spec.staging_root {
-        Some(root) => Some(stage_probe(root).map_err(|e| setup_error("staging_failed", e))?),
-        None => None,
+    let staged = match (&spec.staging_root, mounts) {
+        (Some(root), true) => {
+            Some(stage_probe(root).map_err(|e| setup_error("staging_failed", e))?)
+        }
+        (None, true) => {
+            return Err(setup_error(
+                "staging_failed",
+                io::Error::other("no staging root"),
+            ))
+        }
+        _ => None,
     };
     let header = CallHeader {
         mounts: staged.as_ref().map(StagedCall::mounts),
@@ -682,7 +731,7 @@ pub fn run(spec: &JailSpec) -> Result<Vec<LayerCheck>, Vec<LayerCheck>> {
         0 => {
             drop(ours);
             let sent = catch_unwind(AssertUnwindSafe(|| {
-                probe_in_child(spec, &before, &header, theirs)
+                probe_in_child(spec, &before, &header, mounts, theirs)
             }));
             let code = i32::from(!matches!(sent, Ok(true)));
             // Dropping a panic's payload could panic again.
@@ -704,14 +753,27 @@ pub fn run(spec: &JailSpec) -> Result<Vec<LayerCheck>, Vec<LayerCheck>> {
     drop(staged);
     let mut checks: Vec<LayerCheck> = serde_json::from_slice(&report).unwrap_or_default();
     let reported = exited && !checks.is_empty();
+    if mounts {
+        return finish(checks, reported, true, spec);
+    }
     // The probe's mounts stayed where it made them: the template's /tmp and
     // mount table are as they were.
     let kept = std::fs::metadata("/tmp").is_ok_and(|m| m.dev() == before.tmp_dev)
         && std::fs::read_to_string("/proc/self/mountinfo")
             .is_ok_and(|t| mounts_unchanged(&t, spec.staging_root.as_deref(), before.mounts));
     checks.push(check("host_mounts", kept, "unchanged", "mounts_leaked"));
+    finish(checks, reported, false, spec)
+}
+
+/// Adds the report-level failures and decides.
+fn finish(
+    mut checks: Vec<LayerCheck>,
+    reported: bool,
+    mounts: bool,
+    spec: &JailSpec,
+) -> Result<Vec<LayerCheck>, Vec<LayerCheck>> {
     let layers: BTreeSet<&str> = checks.iter().map(|c| c.layer.as_str()).collect();
-    let complete = layers == expected_layers(spec);
+    let complete = layers == expected_layers(spec, mounts);
     if !reported {
         checks.push(failure("self_test", "no_report", None));
     } else if !complete {
@@ -835,28 +897,58 @@ mod tests {
     }
 
     #[test]
-    fn the_staging_probe_holds_only_on_a_covered_directory() {
+    fn the_staging_probe_proves_the_cover_and_does_not_read_a_failure_as_one() {
+        // An absent path or one that cannot be listed proves nothing.
         let tmp = tempfile::tempdir().unwrap();
-        assert!(staging_hidden(&tmp.path().join("absent")).ok);
-        assert!(staging_hidden(tmp.path()).ok);
+        assert_eq!(
+            staging_hidden(&tmp.path().join("absent")).reason,
+            "unreadable"
+        );
+        // A plain writable directory is not the cover, empty or not.
+        assert_eq!(staging_hidden(tmp.path()).reason, "not_covered");
         std::fs::write(tmp.path().join("visible"), "x").unwrap();
-        assert_eq!(staging_hidden(tmp.path()).reason, "visible");
+        assert_eq!(staging_hidden(tmp.path()).reason, "not_covered");
+        if !enabled() {
+            return;
+        }
+        // The real cover: an empty read-only tmpfs, as `hide` makes it.
+        let cover = tmp.path().join("cover");
+        std::fs::create_dir(&cover).unwrap();
+        let _u = Unmount(cover.clone());
+        let flags = libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC | libc::MS_RDONLY;
+        jail::mount(
+            Some("tmpfs"),
+            &cover,
+            Some("tmpfs"),
+            flags,
+            Some("size=16k,mode=0555"),
+        )
+        .unwrap();
+        let held = staging_hidden(&cover);
+        assert!(held.ok, "{held:?}");
+        // A tmpfs that is writable is not the cover.
+        let loose = tmp.path().join("loose");
+        std::fs::create_dir(&loose).unwrap();
+        let _v = Unmount(loose.clone());
+        jail::mount(Some("tmpfs"), &loose, Some("tmpfs"), 0, Some("size=16k")).unwrap();
+        assert_eq!(staging_hidden(&loose).reason, "not_covered");
     }
 
     /// The layers a staging root adds are fixed: three, and the 26 of before are unchanged.
     #[test]
-    fn the_expected_layers_grow_by_three_only_with_a_staging_root() {
+    fn the_plain_report_is_the_26_layers_and_the_mount_probe_adds_its_own_three() {
         let spec = |staging_root| JailSpec {
             uid_base: 1,
             tmp_mb: 1,
             hide_paths: vec![],
             staging_root,
         };
-        assert_eq!(expected_layers(&spec(None)).len(), 26);
-        let with = expected_layers(&spec(Some("/x".into())));
-        assert_eq!(with.len(), 29);
-        assert!(MOUNT_LAYERS.iter().all(|l| with.contains(l)));
-        assert!(LAYERS.iter().all(|l| with.contains(l)));
+        for root in [None, Some("/x".into())] {
+            assert_eq!(expected_layers(&spec(root), false).len(), 26);
+        }
+        let mounts = expected_layers(&spec(Some("/x".into())), true);
+        assert_eq!(mounts, MOUNT_LAYERS.iter().copied().collect());
+        assert!(LAYERS.iter().all(|l| !mounts.contains(l)));
     }
 
     // A real `/proc/net/dev`'s two header lines, then one `name: counters`

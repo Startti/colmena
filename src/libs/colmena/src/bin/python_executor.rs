@@ -112,10 +112,19 @@ mod linux {
                     hide_paths: hide,
                     staging_root,
                 };
-                let (code, checks) = match selftest::run(&spec) {
+                let (mut code, mut checks) = match selftest::run(&spec) {
                     Ok(checks) => (0, checks),
                     Err(checks) => (EXIT_NOT_READY, checks),
                 };
+                // With a staging root, the mount layers too.
+                if spec.staging_root.is_some() {
+                    let (more_code, more) = match selftest::run_mounts(&spec) {
+                        Ok(more) => (0, more),
+                        Err(more) => (EXIT_NOT_READY, more),
+                    };
+                    code = code.max(more_code);
+                    checks.extend(more);
+                }
                 for check in checks {
                     println!("{}", serde_json::to_string(&check).unwrap_or_default());
                 }

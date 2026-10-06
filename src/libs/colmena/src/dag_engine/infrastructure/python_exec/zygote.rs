@@ -112,11 +112,15 @@ fn adopt_orphans() -> Result<(), Value> {
     Ok(())
 }
 
-/// With pyarrow installed (pandas loads it in the warm imports), its default
-/// memory pool must be the system one: a template that would let calls reserve
-/// a gibibyte of address space each does not start. pyarrow absent is fine.
+/// With pyarrow LOADED (pandas loads it in the warm imports when it is
+/// installed), its default memory pool must be the system one: a template that
+/// would let calls reserve a gibibyte of address space each cannot offer mounts.
+/// pyarrow not loaded is fine. Never imports it.
 pub(crate) fn check_arrow(py: Python<'_>) -> Result<(), Value> {
-    let Ok(arrow) = py.import("pyarrow") else {
+    // Only a pyarrow that is already loaded (pandas imports it when it is
+    // installed): importing it here could start a thread or crash the template.
+    let loaded = py.import("sys").and_then(|sys| sys.getattr("modules"));
+    let Some(arrow) = loaded.ok().and_then(|m| m.get_item("pyarrow").ok()) else {
         return Ok(());
     };
     let backend = arrow
@@ -215,28 +219,64 @@ fn prove_jail(jail: &JailSpec) -> Result<(), Value> {
     Err(last.unwrap_or_else(|| json!({"event": "self_test_failed"})))
 }
 
-fn start(args: &ZygoteArgs) -> Result<UnixListener, Value> {
+fn start(args: &ZygoteArgs) -> Result<(UnixListener, Option<&'static str>), Value> {
     die_with_parent()?;
     adopt_orphans()?;
     pyo3::Python::initialize();
     warm_imports()?;
-    // Before the thread count: pyarrow's import may start a thread.
-    if args.jail.staging_root.is_some() {
-        Python::attach(check_arrow)?;
-    }
     check_single_threaded()?;
     prove_jail(&args.jail)?;
-    bind_private(&args.socket)
+    let mounts_off = prove_mounts(&args.jail);
+    let listener = bind_private(&args.socket)?;
+    Ok((listener, mounts_off))
+}
+
+/// Whether this template can offer run mounts, for a template with a staging
+/// root: `None` when it can, else a fixed reason code. A failure here disables
+/// that capability, loudly, and nothing else: the executor keeps serving plain
+/// calls. (A broken jail, by contrast, stops the template: see [`prove_jail`].)
+fn prove_mounts(jail: &JailSpec) -> Option<&'static str> {
+    jail.staging_root.as_ref()?;
+    if let Err(event) = Python::attach(check_arrow) {
+        let reason = match event["event"].as_str() {
+            Some("arrow_pool_unreadable") => "arrow_pool_unreadable",
+            _ => "arrow_pool_not_system",
+        };
+        log(event);
+        return Some(reason);
+    }
+    let Err(checks) = selftest::run_mounts(jail) else {
+        return None;
+    };
+    let failed: Vec<&selftest::LayerCheck> = checks.iter().filter(|c| !c.ok).collect();
+    for c in &failed {
+        log(
+            json!({"event": "self_test_failed", "layer": c.layer, "reason": c.reason, "errno": c.errno}),
+        );
+    }
+    let staging = failed
+        .iter()
+        .any(|c| c.layer == "self_test" && c.reason == "staging_failed");
+    Some(if staging {
+        "staging_unusable"
+    } else {
+        "mount_layer_failed"
+    })
 }
 
 pub fn run(args: ZygoteArgs) -> i32 {
-    let listener = match start(&args) {
-        Ok(l) => l,
+    let (listener, mounts_off) = match start(&args) {
+        Ok(started) => started,
         Err(event) => {
             log(event);
             return EXIT_NOT_READY;
         }
     };
+    if let Some(reason) = mounts_off {
+        log(json!({"event": "mounts_disabled", "reason": reason}));
+        // Read by the executor before READY; a fixed code, never free text.
+        println!("MOUNTS_DISABLED {reason}");
+    }
     println!("READY");
     let _ = io::stdout().flush();
     loop {
@@ -307,12 +347,29 @@ mod tests {
     }
 
     #[test]
-    fn without_pyarrow_there_is_nothing_to_check() {
-        with_fake_pyarrow(None, |py| {
-            let installed = py.import("pyarrow").is_ok();
-            if !installed {
-                assert!(check_arrow(py).is_ok());
+    fn pyarrow_is_never_imported_just_to_be_checked() {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            let sys = py.import("sys").unwrap();
+            let modules = sys.getattr("modules").unwrap();
+            let saved = modules.get_item("pyarrow").ok();
+            let _ = modules.del_item("pyarrow");
+            let ns = pyo3::types::PyDict::new(py);
+            let hook = c"class Hook:\n    asked = []\n    def find_spec(self, name, path=None, target=None):\n        if name == 'pyarrow':\n            Hook.asked.append(name)\n        return None\nhook = Hook()\nimport sys\nsys.meta_path.insert(0, hook)\n";
+            py.run(hook, Some(&ns), None).unwrap();
+            let result = check_arrow(py);
+            py.run(c"import sys\nsys.meta_path.remove(hook)\n", Some(&ns), None)
+                .unwrap();
+            let asked: usize = py
+                .eval(c"len(Hook.asked)", Some(&ns), None)
+                .unwrap()
+                .extract()
+                .unwrap();
+            if let Some(m) = saved {
+                modules.set_item("pyarrow", m).unwrap();
             }
+            assert!(result.is_ok());
+            assert_eq!(asked, 0, "pyarrow was imported to be checked");
         });
     }
 
