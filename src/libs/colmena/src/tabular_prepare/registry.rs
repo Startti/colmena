@@ -15,8 +15,14 @@ use chrono::{DateTime, Duration, Utc};
 use thiserror::Error;
 
 /// Version of the prepared layout. A row written with an older value is
-/// claimable again so the file is prepared in the new layout.
-pub const FORMAT_VERSION: i32 = 1;
+/// claimable again so the file is prepared in the new layout. It moves together
+/// with the manifest version: 1 was the layout whose manifests had no
+/// `in_memory_bytes`; 2 is the layout `prepare` writes (manifest version 2).
+pub const FORMAT_VERSION: i32 = 2;
+
+// A layout change is a manifest version change and the other way round: a row
+// whose manifest a reader cannot read must be claimable again.
+const _: () = assert!(FORMAT_VERSION as u32 == crate::tabular_prepare::manifest::MANIFEST_VERSION);
 
 /// A source that failed this many times is final: no further claim.
 pub const MAX_ATTEMPTS: i32 = 3;

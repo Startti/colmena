@@ -317,6 +317,37 @@ pub(crate) async fn claim_takes_a_row_written_by_an_older_format<R: PreparationR
     assert_eq!(row.error_code, None);
 }
 
+/// The first layout (format 1, manifests without `in_memory_bytes`) is gone:
+/// a table prepared under it is claimed again by the layout this code writes,
+/// and its old objects stay tracked so cleanup can still reach them.
+pub(crate) async fn a_ready_row_of_the_first_layout_is_claimable_by_the_current_one<
+    R: PreparationRegistry,
+>(
+    r: &R,
+) {
+    let key = fresh_key();
+    let mut first = claim_req(&key, "old", t0());
+    first.format_version = 1;
+    r.claim(first).await.unwrap().unwrap();
+    r.complete(&key, "old", ready_info(), t0()).await.unwrap();
+    assert_eq!(get_row(r, &key).await.format_version, 1);
+    let later = t0() + Duration::days(1);
+    let claim = r.claim(claim_req(&key, "new", later)).await.unwrap();
+    assert_eq!(claim, Some(Claim { attempts: 1 }));
+    let row = get_row(r, &key).await;
+    assert_eq!(row.status, PrepareStatus::Running);
+    assert_eq!(row.format_version, FORMAT_VERSION);
+    assert_eq!(row.blob_keys, ready_info().blob_keys);
+    // Once ready under the current layout it is not claimed again.
+    r.complete(&key, "new", ready_info(), later).await.unwrap();
+    assert_eq!(
+        r.claim(claim_req(&key, "third", later + Duration::days(30)))
+            .await
+            .unwrap(),
+        None
+    );
+}
+
 pub(crate) async fn a_ready_row_is_claimable_only_by_a_newer_format<R: PreparationRegistry>(r: &R) {
     let key = fresh_key();
     r.claim(claim_req(&key, "A", t0())).await.unwrap().unwrap();
@@ -1439,6 +1470,12 @@ mod sqlite {
     async fn tabular_prepare_claim_takes_a_row_written_by_an_older_format() {
         let f = fixture().await;
         claim_takes_a_row_written_by_an_older_format(&*f.registry).await;
+    }
+
+    #[tokio::test]
+    async fn tabular_prepare_a_ready_row_of_the_first_layout_is_claimable_by_the_current_one() {
+        let f = fixture().await;
+        a_ready_row_of_the_first_layout_is_claimable_by_the_current_one(&*f.registry).await;
     }
 
     #[tokio::test]
