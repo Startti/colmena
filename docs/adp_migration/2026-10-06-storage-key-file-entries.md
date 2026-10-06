@@ -29,8 +29,11 @@ el motor se comporta exactamente como antes, para cualquier tamaño.
   `storage_key` (sin `data`, `url` ni `path`), de tipo `text/csv` o xlsx y con
   `size_bytes` **estrictamente mayor** a 52 428 800 bytes (50 MiB) deja de omitirse:
   el motor lo reconoce como archivo grande (`FileSource::StorageRef`) sin descargar
-  el archivo ni subirlo al proveedor. Registrarlo como adjunto llega en un cambio
-  posterior de la misma cadena; hasta entonces el modelo todavía no lo ve. Los campos que lee el motor son `id`, `mime_type`,
+  el archivo ni subirlo al proveedor. Se registra como adjunto con esa llave
+  (`provider_file_id` vacío, sin copia ni resumen automático) y el modelo lo ve en el
+  catálogo de adjuntos. Si la llamada no puede registrarlo (sin sesión de agente, sin
+  registro de adjuntos o con `attachments_enabled: false`), o si ese `id` ya está
+  registrado en la otra clase, el motor lo dice al modelo en lugar de descartarlo. Los campos que lee el motor son `id`, `mime_type`,
   `filename`, `size_bytes` y `storage_key`.
 - **Qué debe enviar ADP, exactamente.** `mime_type` igual a `text/csv` o a
   `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet` (se ignoran
