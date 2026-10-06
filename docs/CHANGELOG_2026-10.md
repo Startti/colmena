@@ -506,3 +506,20 @@ fila con tokens tiene `model`/`provider` y cada resumen suma lo de su grafo. Uni
 Mutaciones: sin `nested`, fila por id en vez de `path`, modelo del hijo pisando al padre, sin `UsageIdentity` o sin
 su clave: falla su caso. **ADP.** `<for_each>#N` y `<scope>>…` no son nodos del árbol: para cobrarlas hay que
 estamparlas. **Estado.** done.
+
+## 31. Facturación: el resumen de uso sale en toda salida de la corrida
+
+**Qué cambia.** Una corrida mandaba `usage-summary`/`subgraph-usage-summary` solo al terminar bien: si fallaba
+(`error`), se cancelaba (`cancelled`) o se suspendía (`finish` suspendido), lo que ya había llamado al proveedor
+quedaba en `finish.usage` pero en ningún resumen, y el host (que cobra del resumen y deja de leer en el frame
+terminal) no lo cobraba. Desde §30 también le pasaba a una corrida hija que fallaba, porque el padre ya no cuenta
+lo anidado. Ahora el uso se lleva en un `UsageLedger` compartido y `with_usage_summaries` (`run_use_case.rs`) manda
+el resumen justo antes del evento que termina la corrida: `GraphFinish` (completa o suspendida), `Cancelled` o el
+`Err`. Secuencias: completa `… usage-summary, finish`; suspendida `… usage-summary, finish` y el turno que reanuda
+cobra solo lo de después; error `… usage-summary, error`; cancelada `… usage-summary, cancelled, finish`. Una hija
+que falla manda su `subgraph-usage-summary` antes del error. Sin resumen si la corrida no cobró nada.
+**Tests.** `tests/usage_counted_once.rs`: raíz e hija que fallan, raíz e hija suspendidas y reanudadas, raíz
+cancelada con una llamada en vuelo; cada llamada en exactamente una fila y todo resumen antes del frame terminal.
+Mutaciones: resumen después del terminal, o solo en `GraphFinish`: fallan. Una hija que su padre descarta al
+cancelar no manda resumen: lo cubre la PR siguiente. **Estado.** done.
+
