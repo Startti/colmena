@@ -747,6 +747,93 @@ mod openai_cache_usage_tests {
         );
         assert_eq!(u.prompt_tokens, 176);
     }
+
+    // OpenAI counts `reasoning_tokens` INSIDE `completion_tokens` /
+    // `output_tokens`. `LlmUsage` keeps the two disjoint (like the cache
+    // columns), so the reasoning comes out of the completion — otherwise the
+    // total and any `completion + thinking` bill count it twice.
+
+    fn reasoning_usage() -> serde_json::Value {
+        serde_json::json!({
+            "prompt_tokens": 100,
+            "completion_tokens": 300,
+            "total_tokens": 400,
+            "completion_tokens_details": { "reasoning_tokens": 250 }
+        })
+    }
+
+    #[test]
+    fn chat_reasoning_is_subtracted_out_of_the_completion() {
+        let u = openai_usage_to_llm_usage(serde_json::from_value(reasoning_usage()).unwrap());
+        assert_eq!(u.completion_tokens, 50, "visible output only");
+        assert_eq!(u.thinking_tokens, Some(250));
+        assert_eq!(u.total_tokens, 400, "matches OpenAI's own total_tokens");
+    }
+
+    #[test]
+    fn chat_reasoning_and_cache_partition_together() {
+        let mut raw = reasoning_usage();
+        raw["prompt_tokens_details"] = serde_json::json!({ "cached_tokens": 60 });
+        let u = openai_usage_to_llm_usage(serde_json::from_value(raw).unwrap());
+        assert_eq!((u.prompt_tokens, u.cache_read_tokens), (40, Some(60)));
+        assert_eq!((u.completion_tokens, u.thinking_tokens), (50, Some(250)));
+        assert_eq!(u.total_tokens, 400);
+    }
+
+    #[test]
+    fn chat_stream_final_chunk_splits_reasoning() {
+        let chunk: OpenAiStreamChunk = serde_json::from_value(serde_json::json!({
+            "choices": [],
+            "usage": reasoning_usage()
+        }))
+        .unwrap();
+        let u = openai_usage_to_llm_usage(chunk.usage.unwrap());
+        assert_eq!((u.completion_tokens, u.thinking_tokens), (50, Some(250)));
+        assert_eq!(u.total_tokens, 400);
+    }
+
+    fn responses_reasoning_usage() -> serde_json::Value {
+        serde_json::json!({
+            "input_tokens": 100,
+            "output_tokens": 300,
+            "total_tokens": 400,
+            "input_tokens_details": { "cached_tokens": 60 },
+            "output_tokens_details": { "reasoning_tokens": 250 }
+        })
+    }
+
+    #[test]
+    fn responses_reasoning_is_subtracted_out_of_the_output() {
+        let u = responses_usage_to_llm_usage(&responses_reasoning_usage()).unwrap();
+        assert_eq!((u.prompt_tokens, u.cache_read_tokens), (40, Some(60)));
+        assert_eq!(u.completion_tokens, 50, "visible output only");
+        assert_eq!(u.thinking_tokens, Some(250));
+        assert_eq!(u.total_tokens, 400);
+    }
+
+    #[test]
+    fn responses_stream_completed_event_splits_reasoning() {
+        let event = serde_json::json!({
+            "type": "response.completed",
+            "response": { "usage": responses_reasoning_usage() }
+        });
+        let usage = event.get("response").and_then(|r| r.get("usage")).unwrap();
+        let u = responses_usage_to_llm_usage(usage).unwrap();
+        assert_eq!((u.completion_tokens, u.thinking_tokens), (50, Some(250)));
+        assert_eq!(u.total_tokens, 400);
+    }
+
+    #[test]
+    fn no_reasoning_leaves_the_completion_whole() {
+        let u = responses_usage_to_llm_usage(&serde_json::json!({
+            "input_tokens": 10,
+            "output_tokens": 5,
+            "output_tokens_details": { "reasoning_tokens": 0 }
+        }))
+        .unwrap();
+        assert_eq!((u.completion_tokens, u.thinking_tokens), (5, None));
+        assert_eq!(u.total_tokens, 15);
+    }
 }
 
 /// Parse a non-streaming Responses API body into `(text, tool_calls)`.
@@ -819,7 +906,7 @@ fn openai_usage_to_llm_usage(u: OpenAiUsage) -> LlmUsage {
         .completion_tokens_details
         .filter(|d| d.reasoning_tokens > 0)
     {
-        usage = usage.with_thinking_tokens(r.reasoning_tokens);
+        usage = usage.with_thinking_tokens_included(r.reasoning_tokens);
     }
     if let Some(p) = u.prompt_tokens_details {
         if p.cached_tokens > 0 {
@@ -830,6 +917,37 @@ fn openai_usage_to_llm_usage(u: OpenAiUsage) -> LlmUsage {
         }
     }
     usage
+}
+
+/// Map a Responses API `usage` object (non-streaming body, or the
+/// `response.completed` event of a stream) to [`LlmUsage`].
+///
+/// Same normalization as [`openai_usage_to_llm_usage`] under the Responses
+/// field names: `input_tokens_details` holds the cache subsets and
+/// `output_tokens_details.reasoning_tokens` the reasoning subset of
+/// `output_tokens`. Returns `None` when either total is missing.
+fn responses_usage_to_llm_usage(usage: &serde_json::Value) -> Option<LlmUsage> {
+    let count = |section: &str, field: &str| {
+        usage
+            .get(section)
+            .and_then(|d| d.get(field))
+            .and_then(|v| v.as_u64())
+            .filter(|&n| n > 0)
+            .map(|n| n as u32)
+    };
+    let input = usage.get("input_tokens")?.as_u64()? as u32;
+    let output = usage.get("output_tokens")?.as_u64()? as u32;
+    let mut u = LlmUsage::new(input, output);
+    if let Some(c) = count("input_tokens_details", "cached_tokens") {
+        u = u.with_cached_input_tokens_included(c);
+    }
+    if let Some(w) = count("input_tokens_details", "cache_write_tokens") {
+        u = u.with_cache_write_tokens_included(w);
+    }
+    if let Some(r) = count("output_tokens_details", "reasoning_tokens") {
+        u = u.with_thinking_tokens_included(r);
+    }
+    Some(u)
 }
 
 enum SseEvent {
@@ -1159,36 +1277,7 @@ impl OpenAiAdapter {
 
         let (content, tool_calls) = parse_responses_output(&json_val);
 
-        let mut usage_obj = None;
-        if let Some(usage) = json_val.get("usage") {
-            if let (Some(input), Some(output)) = (
-                usage.get("input_tokens").and_then(|v| v.as_u64()),
-                usage.get("output_tokens").and_then(|v| v.as_u64()),
-            ) {
-                let mut u = LlmUsage::new(input as u32, output as u32);
-                // Responses API reports cache hits under `input_tokens_details`
-                // (the Chat Completions equivalent is `prompt_tokens_details`).
-                // Like Chat Completions, the cached count is a SUBSET of
-                // `input_tokens`, so normalize rather than add.
-                if let Some(c) = usage
-                    .get("input_tokens_details")
-                    .and_then(|d| d.get("cached_tokens"))
-                    .and_then(|v| v.as_u64())
-                    .filter(|&n| n > 0)
-                {
-                    u = u.with_cached_input_tokens_included(c as u32);
-                }
-                if let Some(w) = usage
-                    .get("input_tokens_details")
-                    .and_then(|d| d.get("cache_write_tokens"))
-                    .and_then(|v| v.as_u64())
-                    .filter(|&n| n > 0)
-                {
-                    u = u.with_cache_write_tokens_included(w as u32);
-                }
-                usage_obj = Some(u);
-            }
-        }
+        let usage_obj = json_val.get("usage").and_then(responses_usage_to_llm_usage);
 
         let mut llm_response = LlmResponse::new(
             request.id().clone(),
@@ -1331,38 +1420,17 @@ impl OpenAiAdapter {
                                 ));
                             }
                         } else if event_type == "response.completed" {
-                            if let Some(usage) = event_json.get("response").and_then(|r| r.get("usage")) {
-                                if let (Some(input_tokens), Some(output_tokens)) = (
-                                    usage.get("input_tokens").and_then(|v| v.as_u64()),
-                                    usage.get("output_tokens").and_then(|v| v.as_u64()),
-                                ) {
-                                    let mut u = LlmUsage::new(
-                                        input_tokens as u32,
-                                        output_tokens as u32,
-                                    );
-                                    if let Some(c) = usage
-                                        .get("input_tokens_details")
-                                        .and_then(|d| d.get("cached_tokens"))
-                                        .and_then(|v| v.as_u64())
-                                        .filter(|&n| n > 0)
-                                    {
-                                        u = u.with_cached_input_tokens_included(c as u32);
-                                    }
-                                    if let Some(w) = usage
-                                        .get("input_tokens_details")
-                                        .and_then(|d| d.get("cache_write_tokens"))
-                                        .and_then(|v| v.as_u64())
-                                        .filter(|&n| n > 0)
-                                    {
-                                        u = u.with_cache_write_tokens_included(w as u32);
-                                    }
-                                    yield Ok(LlmStreamChunk::new(
-                                        request_id.clone(),
-                                        LlmStreamPart::Usage(u),
-                                        provider.clone(),
-                                        false,
-                                    ));
-                                }
+                            if let Some(u) = event_json
+                                .get("response")
+                                .and_then(|r| r.get("usage"))
+                                .and_then(responses_usage_to_llm_usage)
+                            {
+                                yield Ok(LlmStreamChunk::new(
+                                    request_id.clone(),
+                                    LlmStreamPart::Usage(u),
+                                    provider.clone(),
+                                    false,
+                                ));
                             }
                             yield Ok(LlmStreamChunk::new(
                                 request_id.clone(),
