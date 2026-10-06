@@ -689,3 +689,14 @@ missing source is `ConvertError::SourceMissing`, anything else
 `SourceUnavailable`) and counts the bytes read, which is what progress reports.
 Errors never echo a storage key, a URL or a cell: the adapter's text is dropped and
 replaced by a fixed sentence.
+
+**The driver (`driver.rs`).** `PrepareEnv` holds what a preparation needs: the
+registry, the storage, a clock, the time budget (`PREP_TIMEOUT`, 300 s) and the
+writer settings. A preparation ends in a `PrepareOutcome`: `Ready` (a
+`PreparedTable` with the manifest, its key, every key any attempt may have
+written, the stale ones, the prepared bytes and everything the conversion
+reported), `Refused` (no derived root: nothing written, not even a row),
+`NotClaimed`, `Cancelled` (the row is gone or another job owns it: nothing
+recorded) or `Failed` with a reason. The table is named after the file without its
+extension (cleaned by `unique_table_names`), and the manifest records the
+conversion report of the table.
