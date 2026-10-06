@@ -163,6 +163,19 @@ pub(super) async fn run_turn_with_tools(
     tool_configurations: Value,
     model: &Arc<RecordingModel>,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    run_turn_with_config(reg, db_url, files, tool_configurations, json!({}), model).await
+}
+
+/// [`run_turn_with_tools`] with extra node `config` keys (for example
+/// `attachments_enabled`).
+pub(super) async fn run_turn_with_config(
+    reg: &Arc<HashMapNodeRegistry>,
+    db_url: &str,
+    files: Vec<Value>,
+    tool_configurations: Value,
+    extra_config: Value,
+    model: &Arc<RecordingModel>,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     use crate::dag_engine::application::ports::NodeRegistryPort;
     let node = reg.get_node("llm_call").expect("llm_call is registered");
     let _guard = OverrideGuard::install(model.clone());
@@ -177,6 +190,9 @@ pub(super) async fn run_turn_with_tools(
     });
     if !tool_configurations.is_null() {
         config["tool_configurations"] = tool_configurations;
+    }
+    for (key, value) in extra_config.as_object().into_iter().flatten() {
+        config[key] = value.clone();
     }
     node.execute(&inputs, &config, &mut Value::Null, None).await
 }

@@ -1975,6 +1975,13 @@ impl ExecutableNode for LlmNode {
                     .map(String::from)
             });
 
+        // ---- Attachments enabled flag -------------------------------------------------
+        let attachments_enabled: bool = inputs
+            .get("attachments_enabled")
+            .and_then(|v| v.as_bool())
+            .or_else(|| config.get("attachments_enabled").and_then(|v| v.as_bool()))
+            .unwrap_or(true);
+
         // ---- Step 3: Auto-register resolved uploads in AttachmentRegistry -----------
         let mut summary_targets: Vec<SummaryTarget> = Vec::new();
         if let (Some(reg), Some(sid)) =
@@ -2014,6 +2021,23 @@ impl ExecutableNode for LlmNode {
                     );
                     continue;
                 };
+
+                // An author who opted out of attachments gets no catalog, so a
+                // registered storage reference would be invisible to the model:
+                // it is not registered, and the model is told why. (Ordinary
+                // files keep registering as they always did.)
+                if storage_ref_key(file).is_some() && !attachments_enabled {
+                    note_skipped(
+                        &mut skipped_notices,
+                        format!(
+                            "[file: {}] was not delivered: attachments are disabled for this \
+                             node (attachments_enabled is false), so a storage reference \
+                             cannot be registered.",
+                            clipped(&file.filename)
+                        ),
+                    );
+                    continue;
+                }
 
                 // Plan A — Foundation: persist bytes uniformly to
                 // OutputStorageRepository so this attachment is reachable via
@@ -2076,7 +2100,8 @@ impl ExecutableNode for LlmNode {
                 // A storage reference points at an object the HOST owns: the
                 // marker keeps every deleter and every whole-object read away
                 // from it, whatever the switch says later.
-                let origin = if storage_ref_key(file).is_some() {
+                let is_storage_ref = storage_ref_key(file).is_some();
+                let origin = if is_storage_ref {
                     crate::llm::domain::attachments::origin::HOST_STORAGE_REF
                 } else {
                     crate::llm::domain::attachments::origin::USER_UPLOAD
@@ -2097,9 +2122,29 @@ impl ExecutableNode for LlmNode {
                     storage_key,
                     origin: Some(origin),
                 };
-                reg.upsert(input)
+                // The registry refuses, in the write itself, to change a row's
+                // ownership class (host reference <-> engine-stored file).
+                if reg
+                    .upsert_checked(input)
                     .await
-                    .map_err(|e| format!("attachment upsert: {}", e))?;
+                    .map_err(|e| format!("attachment upsert: {}", e))?
+                    == crate::llm::domain::attachments::UpsertOutcome::OwnershipConflict
+                {
+                    let existing = if is_storage_ref {
+                        "an engine-stored file"
+                    } else {
+                        "a host reference"
+                    };
+                    note_skipped(
+                        &mut skipped_notices,
+                        format!(
+                            "[file: {}] was not delivered: its id is already registered as \
+                             {existing}, and a file's class cannot change.",
+                            clipped(&file.filename)
+                        ),
+                    );
+                    continue;
+                }
                 tracing::info!(
                     target: "colmena::attachment",
                     event = "attachment.registered",
@@ -2137,16 +2182,15 @@ impl ExecutableNode for LlmNode {
                 .iter()
                 .filter(|f| storage_ref_key(f).is_some())
             {
-                let notice = format!(
-                    "[file: {}] was not delivered: this call has no attachment catalog (no agent \
-                     session or no attachment registry), so a storage reference cannot be \
-                     registered.",
-                    clipped(&file.filename)
+                note_skipped(
+                    &mut skipped_notices,
+                    format!(
+                        "[file: {}] was not delivered: this call has no attachment catalog (no \
+                         agent session or no attachment registry), so a storage reference \
+                         cannot be registered.",
+                        clipped(&file.filename)
+                    ),
                 );
-                crate::colmena_log!("WARN: storage reference not registered: {}", notice);
-                if skipped_notices.len() < MAX_SKIP_NOTICES {
-                    skipped_notices.push(notice);
-                }
             }
         }
 
@@ -2299,13 +2343,6 @@ impl ExecutableNode for LlmNode {
             .or_else(|| config.get("lazy_tool_loading"))
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
-
-        // ---- Attachments enabled flag -------------------------------------------------
-        let attachments_enabled: bool = inputs
-            .get("attachments_enabled")
-            .and_then(|v| v.as_bool())
-            .or_else(|| config.get("attachments_enabled").and_then(|v| v.as_bool()))
-            .unwrap_or(true);
 
         // Build the catalog (CatalogEntry list) and the lookup snapshot for
         // describe_tool. Both are populated only when lazy mode is on AND the
@@ -4499,6 +4536,20 @@ type ParsedEntries = (Vec<crate::llm::domain::FileData>, Vec<usize>, Vec<String>
 
 /// Longest filename or mime string a notice repeats.
 const MAX_NOTICE_FIELD: usize = 80;
+
+/// Records why a `files[]` entry was not delivered: an always-on operational log
+/// (the notice is already inert text) and, bounded, a notice for the model.
+fn note_skipped(notices: &mut Vec<String>, notice: String) {
+    tracing::warn!(
+        target: "colmena::attachment",
+        event = "attachment.entry_not_delivered",
+        notice = %notice,
+        "file entry not delivered"
+    );
+    if notices.len() < MAX_SKIP_NOTICES {
+        notices.push(notice);
+    }
+}
 
 /// A client-controlled string as inert data (see
 /// [`inert_text`](crate::llm::domain::large_tabular::inert_text)), clipped to
