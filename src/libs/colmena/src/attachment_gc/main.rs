@@ -43,8 +43,16 @@ struct Cli {
 
 #[derive(Debug, Default, Clone, Copy)]
 struct GcSummary {
+    /// Rows removed (a storage reference counts here too).
     total_deleted: u64,
     total_storage_errors: u64,
+    /// Of `total_deleted`, rows that pointed at an object the host owns: the
+    /// row went, the object was left alone.
+    total_host_references_released: u64,
+    /// Dry run only: rows that would be deleted with their blob.
+    would_delete: u64,
+    /// Dry run only: host references whose row would be dropped, object kept.
+    would_release_host_references: u64,
 }
 
 #[tokio::main]
@@ -174,23 +182,39 @@ async fn run_gc(
         );
 
         for row in stale {
+            let host_owned = row.is_host_storage_ref();
             if dry_run {
-                tracing::info!(
-                    target: "colmena::attachment_gc",
-                    event = "gc.dry_run.would_delete",
-                    document_id = %row.document_id,
-                    agent_session_id = %row.agent_session_id,
-                    storage_key = ?row.storage_key,
-                    last_used_at = ?row.last_used_at,
-                    registered_at = %row.registered_at,
-                    "[dry-run] would delete"
-                );
+                // Says what it WOULD do, and never prints a host object's key.
+                if host_owned {
+                    summary.would_release_host_references += 1;
+                    tracing::info!(
+                        target: "colmena::attachment_gc",
+                        event = "gc.dry_run.would_release",
+                        document_id = %row.document_id,
+                        agent_session_id = %row.agent_session_id,
+                        provider = %row.provider,
+                        "[dry-run] would release (drop the row, object kept)"
+                    );
+                } else {
+                    summary.would_delete += 1;
+                    tracing::info!(
+                        target: "colmena::attachment_gc",
+                        event = "gc.dry_run.would_delete",
+                        document_id = %row.document_id,
+                        agent_session_id = %row.agent_session_id,
+                        storage_key = ?row.storage_key,
+                        last_used_at = ?row.last_used_at,
+                        registered_at = %row.registered_at,
+                        "[dry-run] would delete"
+                    );
+                }
                 continue;
             }
 
-            // Step 1: delete the blob (best-effort).
-            // If it fails, skip deleting the registry row so the next run retries.
-            if let Some(storage_key) = row.storage_key.as_deref() {
+            // Step 1: delete the blob (best-effort), unless the object is the
+            // HOST's: a row that references one is only a row. If the blob delete
+            // fails, skip deleting the registry row so the next run retries.
+            if let Some(storage_key) = row.storage_key.as_deref().filter(|_| !host_owned) {
                 if let Err(e) = storage.delete(storage_key).await {
                     tracing::warn!(
                         target: "colmena::attachment_gc",
@@ -216,12 +240,23 @@ async fn run_gc(
                     document_id = %row.document_id,
                     agent_session_id = %row.agent_session_id,
                     error = %e,
-                    "registry.delete_attachment failed; storage blob already deleted"
+                    "registry delete failed; the blob (if any) is already gone"
                 );
                 continue;
             }
 
             summary.total_deleted += 1;
+            if host_owned {
+                // Counted only now that the row is really gone.
+                summary.total_host_references_released += 1;
+                tracing::info!(
+                    target: "colmena::attachment_gc",
+                    event = "gc.host_reference_object_kept",
+                    document_id = %row.document_id,
+                    agent_session_id = %row.agent_session_id,
+                    "storage reference: row dropped, the host's object was left alone"
+                );
+            }
         }
 
         tracing::info!(
@@ -230,6 +265,7 @@ async fn run_gc(
             batch_size = batch_len,
             total_deleted = summary.total_deleted,
             total_storage_errors = summary.total_storage_errors,
+            total_host_references_released = summary.total_host_references_released,
             "batch complete"
         );
 
@@ -427,5 +463,328 @@ mod tests {
 
         assert_eq!(summary.total_deleted, 0);
         assert_eq!(summary.total_storage_errors, 0);
+    }
+
+    /// A storage whose `delete` is recorded: the host's objects must never reach it.
+    struct DeleteRecorder {
+        inner: LocalCacheStorageAdapter,
+        deleted: std::sync::Mutex<Vec<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl OutputStorageRepository for DeleteRecorder {
+        async fn store(
+            &self,
+            req: StoreRequest,
+        ) -> Result<colmena::storage::domain::StoredOutput, colmena::storage::domain::StorageError>
+        {
+            self.inner.store(req).await
+        }
+        async fn read(
+            &self,
+            key: &str,
+        ) -> Result<colmena::storage::domain::StoredBytes, colmena::storage::domain::StorageError>
+        {
+            self.inner.read(key).await
+        }
+        async fn read_stream(
+            &self,
+            key: &str,
+        ) -> Result<colmena::storage::domain::StoredStream, colmena::storage::domain::StorageError>
+        {
+            self.inner.read_stream(key).await
+        }
+        async fn delete(&self, key: &str) -> Result<(), colmena::storage::domain::StorageError> {
+            self.deleted.lock().unwrap().push(key.to_string());
+            self.inner.delete(key).await
+        }
+    }
+
+    #[tokio::test]
+    async fn a_stale_storage_reference_row_is_dropped_but_the_hosts_object_is_never_deleted() {
+        let (registry, pool, _dir) = fresh_sqlite_registry().await;
+        let storage = Arc::new(DeleteRecorder {
+            inner: LocalCacheStorageAdapter::new(),
+            deleted: Default::default(),
+        });
+        let host_key = seed_row(
+            &registry,
+            &pool,
+            &storage,
+            "host-ref",
+            ProviderKind::OpenAi,
+            true,
+        )
+        .await;
+        let copy_key = seed_attachment(&registry, &storage.inner, "sess", "copy", b"mine").await;
+        backdate(&pool, "host-ref", 30).await;
+        backdate(&pool, "copy", 30).await;
+
+        let registry_arc: Arc<dyn AttachmentRegistry> = Arc::new(registry);
+        let storage_arc: Arc<dyn OutputStorageRepository> = storage.clone();
+        let cutoff = chrono::Utc::now() - chrono::Duration::days(7);
+        let summary = run_gc(registry_arc.clone(), storage_arc, cutoff, 10, false)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            *storage.deleted.lock().unwrap(),
+            std::slice::from_ref(&copy_key)
+        );
+        assert!(
+            storage.read(&host_key).await.is_ok(),
+            "the host's object stays"
+        );
+        assert!(
+            storage.read(&copy_key).await.is_err(),
+            "an engine copy is deleted as before"
+        );
+        for id in ["host-ref", "copy"] {
+            assert!(registry_arc
+                .lookup_by_document_id("sess", id)
+                .await
+                .unwrap()
+                .is_none());
+        }
+        assert_eq!(summary.total_deleted, 2);
+        assert_eq!(summary.total_host_references_released, 1);
+        assert_eq!(summary.total_storage_errors, 0);
+    }
+
+    #[tokio::test]
+    async fn a_dry_run_deletes_nothing_for_a_storage_reference_either() {
+        let (registry, pool, _dir) = fresh_sqlite_registry().await;
+        let storage = Arc::new(DeleteRecorder {
+            inner: LocalCacheStorageAdapter::new(),
+            deleted: Default::default(),
+        });
+        seed_row(
+            &registry,
+            &pool,
+            &storage,
+            "host-ref",
+            ProviderKind::OpenAi,
+            true,
+        )
+        .await;
+        backdate(&pool, "host-ref", 30).await;
+        let registry_arc: Arc<dyn AttachmentRegistry> = Arc::new(registry);
+        let storage_arc: Arc<dyn OutputStorageRepository> = storage.clone();
+        let cutoff = chrono::Utc::now() - chrono::Duration::days(7);
+        run_gc(registry_arc.clone(), storage_arc, cutoff, 10, true)
+            .await
+            .unwrap();
+        assert!(storage.deleted.lock().unwrap().is_empty());
+        assert!(registry_arc
+            .lookup_by_document_id("sess", "host-ref")
+            .await
+            .unwrap()
+            .is_some());
+    }
+
+    /// A row of `provider` for `document_id`: the host's (`host`) or the engine's.
+    async fn seed_row(
+        registry: &SqliteAttachmentRegistry,
+        pool: &SqlitePool,
+        storage: &DeleteRecorder,
+        document_id: &str,
+        provider: ProviderKind,
+        host: bool,
+    ) -> String {
+        let key = seed_attachment(registry, &storage.inner, "sess", document_id, b"x").await;
+        // `seed_attachment` registered it under OpenAi; rewrite it under `provider`.
+        sqlx::query("DELETE FROM conversation_attachments WHERE document_id = ?1")
+            .bind(document_id)
+            .execute(pool)
+            .await
+            .unwrap();
+        registry
+            .upsert(UpsertAttachmentInput {
+                agent_session_id: "sess".to_string(),
+                document_id: document_id.to_string(),
+                provider,
+                provider_file_id: if host {
+                    String::new()
+                } else {
+                    "pf".to_string()
+                },
+                mime_type: "text/csv".to_string(),
+                filename: "f.csv".to_string(),
+                size_bytes: Some(10),
+                label: None,
+                description: None,
+                source: AttachmentSource::Path(key.clone()),
+                storage_key: Some(key.clone()),
+                origin: Some(
+                    if host {
+                        origin::HOST_STORAGE_REF
+                    } else {
+                        origin::USER_UPLOAD
+                    }
+                    .to_string(),
+                ),
+            })
+            .await
+            .unwrap();
+        key
+    }
+
+    async fn backdate_row(pool: &SqlitePool, document_id: &str, provider: &str) {
+        let dt = chrono::Utc::now() - chrono::Duration::days(30);
+        sqlx::query(
+            "UPDATE conversation_attachments SET registered_at = ?1, last_used_at = NULL \
+             WHERE document_id = ?2 AND provider = ?3",
+        )
+        .bind(dt.format("%Y-%m-%d %H:%M:%S").to_string())
+        .bind(document_id)
+        .bind(provider)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    fn recorder() -> Arc<DeleteRecorder> {
+        Arc::new(DeleteRecorder {
+            inner: LocalCacheStorageAdapter::new(),
+            deleted: Default::default(),
+        })
+    }
+
+    /// A dry run says what it WOULD do and never prints a host key.
+    #[tokio::test]
+    async fn a_dry_run_counts_what_it_would_release_and_what_it_would_delete() {
+        let (registry, pool, _dir) = fresh_sqlite_registry().await;
+        let storage = recorder();
+        seed_row(&registry, &pool, &storage, "h", ProviderKind::OpenAi, true).await;
+        seed_row(&registry, &pool, &storage, "e", ProviderKind::OpenAi, false).await;
+        backdate_row(&pool, "h", "openai").await;
+        backdate_row(&pool, "e", "openai").await;
+        let registry_arc: Arc<dyn AttachmentRegistry> = Arc::new(registry);
+        let storage_arc: Arc<dyn OutputStorageRepository> = storage.clone();
+        let cutoff = chrono::Utc::now() - chrono::Duration::days(7);
+        let summary = run_gc(registry_arc.clone(), storage_arc, cutoff, 10, true)
+            .await
+            .unwrap();
+        assert_eq!(summary.would_release_host_references, 1);
+        assert_eq!(summary.would_delete, 1);
+        assert_eq!(summary.total_deleted, 0);
+        assert_eq!(summary.total_host_references_released, 0);
+        assert!(storage.deleted.lock().unwrap().is_empty());
+        for id in ["h", "e"] {
+            assert!(registry_arc
+                .lookup_by_document_id("sess", id)
+                .await
+                .unwrap()
+                .is_some());
+        }
+    }
+
+    /// The `released` counter moves only when the row is really gone.
+    #[tokio::test]
+    async fn a_release_is_counted_only_after_the_row_is_deleted() {
+        let (registry, pool, _dir) = fresh_sqlite_registry().await;
+        let storage = recorder();
+        seed_row(&registry, &pool, &storage, "h", ProviderKind::OpenAi, true).await;
+        backdate_row(&pool, "h", "openai").await;
+        let failing: Arc<dyn AttachmentRegistry> = Arc::new(FailingDelete(registry));
+        let storage_arc: Arc<dyn OutputStorageRepository> = storage.clone();
+        let cutoff = chrono::Utc::now() - chrono::Duration::days(7);
+        let summary = run_gc(failing.clone(), storage_arc, cutoff, 10, false)
+            .await
+            .unwrap();
+        assert_eq!(summary.total_host_references_released, 0);
+        assert_eq!(summary.total_deleted, 0);
+        assert!(failing
+            .lookup_by_document_id("sess", "h")
+            .await
+            .unwrap()
+            .is_some());
+        assert!(storage.deleted.lock().unwrap().is_empty());
+    }
+
+    /// A registry whose row deletes fail and whose reads delegate.
+    struct FailingDelete(SqliteAttachmentRegistry);
+
+    #[async_trait::async_trait]
+    impl AttachmentRegistry for FailingDelete {
+        async fn upsert(
+            &self,
+            i: UpsertAttachmentInput,
+        ) -> Result<(), colmena::llm::domain::AttachmentError> {
+            self.0.upsert(i).await
+        }
+        async fn lookup(
+            &self,
+            s: &str,
+            d: &str,
+            p: ProviderKind,
+        ) -> Result<
+            Option<colmena::llm::domain::ConversationAttachment>,
+            colmena::llm::domain::AttachmentError,
+        > {
+            self.0.lookup(s, d, p).await
+        }
+        async fn refresh_provider_file_id(
+            &self,
+            s: &str,
+            d: &str,
+            p: ProviderKind,
+            id: &str,
+        ) -> Result<(), colmena::llm::domain::AttachmentError> {
+            self.0.refresh_provider_file_id(s, d, p, id).await
+        }
+        async fn update_description(
+            &self,
+            s: &str,
+            d: &str,
+            p: ProviderKind,
+            t: &str,
+        ) -> Result<(), colmena::llm::domain::AttachmentError> {
+            self.0.update_description(s, d, p, t).await
+        }
+        async fn list_for_session(
+            &self,
+            s: &str,
+        ) -> Result<
+            Vec<colmena::llm::domain::ConversationAttachment>,
+            colmena::llm::domain::AttachmentError,
+        > {
+            self.0.list_for_session(s).await
+        }
+        async fn lookup_by_document_id(
+            &self,
+            s: &str,
+            d: &str,
+        ) -> Result<
+            Option<colmena::llm::domain::ConversationAttachment>,
+            colmena::llm::domain::AttachmentError,
+        > {
+            self.0.lookup_by_document_id(s, d).await
+        }
+        async fn touch_last_used(
+            &self,
+            s: &str,
+            d: &str,
+        ) -> Result<(), colmena::llm::domain::AttachmentError> {
+            self.0.touch_last_used(s, d).await
+        }
+        async fn find_stale_attachments(
+            &self,
+            q: colmena::llm::domain::StaleAttachmentQuery,
+        ) -> Result<
+            Vec<colmena::llm::domain::ConversationAttachment>,
+            colmena::llm::domain::AttachmentError,
+        > {
+            self.0.find_stale_attachments(q).await
+        }
+        async fn delete_attachment(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> Result<(), colmena::llm::domain::AttachmentError> {
+            Err(colmena::llm::domain::AttachmentError::RepositoryFailed(
+                "delete failed".into(),
+            ))
+        }
     }
 }
