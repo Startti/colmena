@@ -712,3 +712,19 @@ the others come back as `stale_keys` for deletion and are never referenced. A
 failure is recorded with `fail_with_blobs` and the tracked objects are then deleted
 (best effort: they are tracked, so the cleanup pass removes what this could not).
 A registry that cannot be written is returned as an error: nothing could be recorded.
+
+**Failure reasons.** A failure is recorded in the registry with a reason (`error_code`)
+and a fixed detail sentence (`error_detail`); neither carries a cell, a storage key or
+the adapter's text. The set is small and stable, lowercase snake_case, and the host
+maps it to what the user sees:
+
+| reason | written when |
+|---|---|
+| `time` | the time budget (300 s) ran out; the partial output is removed |
+| `storage` | the source could not be read from storage, or a part or the manifest could not be stored, or the adapter answered with a key outside the prepared layout |
+| `unreadable_file` | the file cannot be read as CSV: empty, UTF-16 or binary, a row longer than the header, a record over 1 MiB, more than 16,384 columns, or text that does not parse |
+| `table_too_large` | the table list does not fit the 64 KiB registry row (too many or too long column names) |
+| `internal` | anything else (a reader that panicked, a conversion that stopped unexpectedly): a defect, never the file's fault |
+
+Nothing is written for a cancellation (the source was deleted or another job owns the
+row). The Excel unit adds its own reasons when it exists.
