@@ -1123,6 +1123,7 @@ mod tests {
             thinking_tokens: None,
             cache_read_tokens: read,
             cache_write_tokens: write,
+            side_call: None,
         }
     }
 

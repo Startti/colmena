@@ -23,7 +23,7 @@ use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::{
     current_turn_slice, reconstruct_discovered_set, summary_for_catalog, CatalogEntry,
     CrdtDocsContext, DescribeToolDispatchResult, DocumentToolsContext, DOCUMENTS_SYSTEM_PRELUDE,
 };
-use crate::dag_engine::infrastructure::nodes::util::billed_llm::billed;
+use crate::dag_engine::infrastructure::nodes::util::billed_llm::{billed, SidePurpose};
 use crate::documents::application::DocumentRuntime;
 use crate::documents::domain::ids::SessionId as DocSessionId;
 use crate::llm::application::agent_service::{
@@ -2671,6 +2671,7 @@ impl ExecutableNode for LlmNode {
                     billed(
                         LlmProviderFactory::create(provider_kind.clone()),
                         _observer.clone(),
+                        SidePurpose::HistoryCompaction,
                     ),
                     provider_kind.clone(),
                     api_key.clone(),
@@ -3801,6 +3802,7 @@ impl ExecutableNode for LlmNode {
                 let repo = billed(
                     LlmProviderFactory::create(provider_kind.clone()),
                     _observer.clone(),
+                    SidePurpose::AttachmentSummary,
                 );
                 Some(std::sync::Arc::new(LlmAttachmentSummaryGenerator::new(
                     repo,

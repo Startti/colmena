@@ -49,6 +49,10 @@ pub enum NodeEvent {
         cache_read_tokens: Option<u32>,
         #[serde(skip_serializing_if = "Option::is_none")]
         cache_write_tokens: Option<u32>,
+        /// Set for a call the node makes outside its answer loop: it is billed
+        /// on an entry of its own, with its own model (see [`SideCall`]).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        side_call: Option<SideCall>,
     },
     LlmToolCallStart {
         tool_id: String,
@@ -158,13 +162,44 @@ impl NodeEvent {
     /// The `LlmUsage` event of one usage report. Billing sums every such
     /// event, so each provider call must reach it exactly once.
     pub fn llm_usage(usage: &crate::llm::domain::LlmUsage) -> Self {
+        Self::usage_of(usage, None)
+    }
+
+    /// The `LlmUsage` event of one call a node makes outside its answer loop.
+    pub fn side_llm_usage(usage: &crate::llm::domain::LlmUsage, side_call: SideCall) -> Self {
+        Self::usage_of(usage, Some(side_call))
+    }
+
+    fn usage_of(usage: &crate::llm::domain::LlmUsage, side_call: Option<SideCall>) -> Self {
         Self::LlmUsage {
             prompt_tokens: usage.prompt_tokens,
             completion_tokens: usage.completion_tokens,
             thinking_tokens: usage.thinking_tokens,
             cache_read_tokens: usage.cache_read_tokens,
             cache_write_tokens: usage.cache_write_tokens,
+            side_call,
         }
+    }
+}
+
+/// A provider call a node makes outside its answer loop, often with a cheaper
+/// model than the node's own (the summary of an old turn, of an attachment,
+/// the SQL guardrail critic). Hosts price each usage entry by its model, so
+/// its usage goes on an entry of its own, `<node_id>::<purpose>`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SideCall {
+    /// `history_compaction`, `attachment_summary` or `sql_guardrail`.
+    pub purpose: String,
+    pub model: String,
+    pub provider: String,
+    /// Whether the call is made with the node's own key (and so billed to it).
+    pub node_key: bool,
+}
+
+impl SideCall {
+    /// The id of the usage entry of this call, made by node `node_id`.
+    pub fn node_id(&self, node_id: &str) -> String {
+        format!("{node_id}::{}", self.purpose)
     }
 }
 
@@ -230,7 +265,11 @@ impl ExecutionObserver for ChildScopeObserver {
                 // — a `for_each` dispatched as a tool reported its batch progress
                 // outside the very tool node its rows were nested under. Wrap
                 // those explicitly so the hop survives as `parent>scope>ownId`.
-                if ev.node_id() == Some(self.node_id.as_str()) {
+                //
+                // A side call's usage is stamped `<scope>::<purpose>`: still this
+                // scope's own event, kept bare so the loop bills it.
+                if ev.node_id() == Some(self.node_id.as_str()) || ev.is_side_usage_of(&self.node_id)
+                {
                     ev
                 } else {
                     ev.wrap_as_child_of(&self.node_id)
