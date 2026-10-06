@@ -16,8 +16,12 @@
 use async_trait::async_trait;
 use colmena::dag_engine::application::run_use_case::DagRunUseCase;
 use colmena::dag_engine::domain::error::DagError;
+use colmena::dag_engine::domain::events::DagExecutionEvent;
 use colmena::dag_engine::domain::graph::Graph;
-use colmena::dag_engine::domain::state::{DagPhaseSummary, DagTask, DagTaskMemoryRepository};
+use colmena::dag_engine::domain::state::{
+    DagPhaseSummary, DagRunState, DagRunStatus, DagStateRepository, DagTask,
+    DagTaskMemoryRepository,
+};
 use colmena::dag_engine::infrastructure::pool_registry::{PgPoolRegistry, PoolConfig};
 use colmena::dag_engine::infrastructure::registry::HashMapNodeRegistry;
 use colmena::dag_engine::infrastructure::sql_port_factory::SqlPortFactory;
@@ -113,6 +117,7 @@ impl UsageModel {
 #[async_trait]
 impl LlmRepository for UsageModel {
     async fn call(&self, request: LlmRequest) -> Result<LlmResponse, LlmError> {
+        slow_down(&request).await;
         let (id, provider) = (request.id().clone(), request.config().provider().clone());
         let response = match self.decide(&request) {
             Some((call, tool, args)) => LlmResponse::new(id, String::new(), provider)?
@@ -126,6 +131,7 @@ impl LlmRepository for UsageModel {
     /// usage stats streams), the answer, then the call's final `Usage`. Only
     /// the final one is billed.
     async fn stream(&self, request: LlmRequest) -> Result<LlmStream, LlmError> {
+        slow_down(&request).await;
         let first = match self.decide(&request) {
             Some((id, name, args_chunk)) => LlmStreamPart::ToolCallChunk(ToolCallChunk {
                 index: 0,
@@ -153,6 +159,14 @@ impl LlmRepository for UsageModel {
 
     fn provider_name(&self) -> &'static str {
         "usage-model"
+    }
+}
+
+/// A call to `slow-model` is still in flight when a test stops the run: it
+/// never reports.
+async fn slow_down(request: &LlmRequest) {
+    if request.config().provider().model() == "slow-model" {
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
     }
 }
 
@@ -212,20 +226,7 @@ async fn run(graph: Value) -> Vec<Value> {
 /// `run`, as a turn of the conversation `agent_session_id` when given, with
 /// an in-process store for attachment bytes.
 async fn run_in(graph: Value, agent_session_id: Option<&str>) -> Vec<Value> {
-    let pools = Arc::new(PgPoolRegistry::new(PoolConfig::defaults()));
-    let registry = HashMapNodeRegistry::new_with_secure_values(
-        Arc::new(ConversationRepositoryFactory::new(pools.clone())),
-        Arc::new(SqlPortFactory::new(pools)),
-        Some(Arc::new(NoTaskMemory)),
-        None,
-        Some(Arc::new(LocalCacheStorageAdapter::new())),
-        None,
-        None,
-    );
-    let use_case = DagRunUseCase::new(registry.clone(), None);
-    registry.set_subgraph_executor(Arc::new(use_case.clone()));
-    registry.set_foreach_registry(registry.clone());
-
+    let use_case = use_case(None);
     let graph: Graph = serde_json::from_value(graph).unwrap();
     let mut mapper = SseMapper::new();
     let mut frames = Vec::new();
@@ -236,6 +237,24 @@ async fn run_in(graph: Value, agent_session_id: Option<&str>) -> Vec<Value> {
         frames.extend(mapper.map(&event.expect("the run must not fail")));
     }
     frames
+}
+
+/// The real run loop, storing its runs in `repo` when given.
+fn use_case(repo: Option<Arc<dyn DagStateRepository>>) -> DagRunUseCase {
+    let pools = Arc::new(PgPoolRegistry::new(PoolConfig::defaults()));
+    let registry = HashMapNodeRegistry::new_with_secure_values(
+        Arc::new(ConversationRepositoryFactory::new(pools.clone())),
+        Arc::new(SqlPortFactory::new(pools)),
+        Some(Arc::new(NoTaskMemory)),
+        None,
+        Some(Arc::new(LocalCacheStorageAdapter::new())),
+        None,
+        None,
+    );
+    let use_case = DagRunUseCase::new(registry.clone(), repo);
+    registry.set_subgraph_executor(Arc::new(use_case.clone()));
+    registry.set_foreach_registry(registry.clone());
+    use_case
 }
 
 fn one<'a>(frames: &'a [Value], kind: &str) -> &'a Value {
@@ -774,4 +793,184 @@ async fn a_child_reusing_an_id_keeps_the_parent_row() {
     );
     let child_row = entry(&frames, "subgraph-usage-summary", "agent");
     assert_eq!(child_row["model"], "child-model");
+}
+
+/// Runs in memory, for a turn that suspends and the one that resumes it.
+#[derive(Default)]
+struct MemRepo(Mutex<std::collections::HashMap<String, DagRunState>>);
+
+#[async_trait]
+impl DagStateRepository for MemRepo {
+    async fn get_by_id(&self, id: &str) -> Result<Option<DagRunState>, DagError> {
+        Ok(self.0.lock().unwrap().get(id).cloned())
+    }
+    async fn save(&self, state: &DagRunState) -> Result<(), DagError> {
+        let mut rows = self.0.lock().unwrap();
+        rows.insert(state.session_id.clone(), state.clone());
+        Ok(())
+    }
+    async fn find_resume_entry(&self, _: &str) -> Result<Option<String>, DagError> {
+        Ok(None)
+    }
+    async fn find_suspended_child(&self, parent: &str) -> Result<Option<String>, DagError> {
+        let rows = self.0.lock().unwrap();
+        let child = rows.values().find(|r| {
+            r.parent_session_id.as_deref() == Some(parent) && r.status == DagRunStatus::Suspended
+        });
+        Ok(child.map(|r| r.session_id.clone()))
+    }
+}
+
+/// One turn of run `run_1` (resuming it with `answer`), cancelled when an
+/// event matches `cancel_at`. Its frames, and an `error` frame if it failed.
+async fn turn(
+    graph: &Value,
+    repo: &Arc<MemRepo>,
+    answer: Option<&str>,
+    cancel_at: fn(&DagExecutionEvent) -> bool,
+) -> Vec<Value> {
+    let graph: Graph = serde_json::from_value(graph.clone()).unwrap();
+    let token = tokio_util::sync::CancellationToken::new();
+    let run = use_case(Some(repo.clone())).execute_stream(
+        graph,
+        Some("run_1".into()),
+        answer.map(str::to_string),
+        true,
+        None,
+        None,
+        Some(token.clone()),
+    );
+    let (mut mapper, mut frames) = (SseMapper::new(), Vec::new());
+    let mut run = Box::pin(run);
+    while let Some(event) = run.next().await {
+        match event {
+            Ok(event) => {
+                if cancel_at(&event) {
+                    token.cancel();
+                }
+                frames.extend(mapper.map(&event));
+            }
+            Err(e) => frames.push(json!({ "type": "error", "errorText": e.to_string() })),
+        }
+    }
+    frames
+}
+
+fn never(_: &DagExecutionEvent) -> bool {
+    false
+}
+
+/// A linear graph of `nodes`, in order.
+fn chain(nodes: &[(&str, Value)]) -> Value {
+    let edges: Vec<Value> = nodes
+        .windows(2)
+        .map(|w| json!({ "from": w[0].0, "to": w[1].0 }))
+        .collect();
+    let nodes: serde_json::Map<_, _> = nodes
+        .iter()
+        .map(|(id, n)| (id.to_string(), n.clone()))
+        .collect();
+    json!({ "nodes": nodes, "edges": edges })
+}
+
+/// An `llm_call` on `model`, with no tools.
+fn call(model: &str) -> Value {
+    json!({ "type": "llm_call", "config": { "provider": "mock", "api_key": "unused",
+        "model": model, "prompt": "go", "stream": false } })
+}
+
+/// A `suspend` asking `id`; with none it fails.
+fn ask(id: Option<&str>) -> Value {
+    json!({ "type": "suspend", "config": id.map_or(json!({}), |id| json!({ "id": id })) })
+}
+
+/// `graph` as the child of a `subgraph` node, the root's only node.
+fn in_subgraph(graph: Value) -> Value {
+    chain(&[(
+        "sub",
+        json!({ "type": "subgraph", "config": { "child_graph_inline": graph } }),
+    )])
+}
+
+/// Every call the provider billed is in exactly one summary row across the
+/// turn(s), with its model: no exit leaves a call out or bills it twice.
+fn assert_billed_once(model: &UsageModel, frames: &[Value], calls: usize) {
+    assert_eq!(model.billed().0, calls, "{frames:#?}");
+    let mut all = rows(frames, "usage-summary");
+    all.extend(rows(frames, "subgraph-usage-summary"));
+    let mut sum = LlmUsage::default();
+    all.iter().for_each(|r| sum.add(&usage(r)));
+    assert_eq!(sum, model.billed().1, "summaries: {all:#?}");
+    assert!(all.iter().all(|r| r["model"] == "usage-model"), "{all:#?}");
+}
+
+/// A run that fails, at the root or in its child, bills what it called
+/// before failing: its summary goes out before the error.
+#[tokio::test]
+#[serial]
+async fn a_failed_run_bills_its_calls() {
+    let graph = chain(&[("agent", call("usage-model")), ("bad", ask(None))]);
+    for graph in [graph.clone(), in_subgraph(graph)] {
+        let model = UsageModel::new(0, "done");
+        let _guard = OverrideGuard::install(model.clone());
+        let frames = turn(&graph, &Arc::default(), None, never).await;
+        assert_billed_once(&model, &frames, 1);
+        assert_summaries_before(&frames, "error");
+    }
+}
+
+/// A run cancelled after its first call, with its second in flight, bills
+/// the first before its `cancelled`.
+#[tokio::test]
+#[serial]
+async fn a_cancelled_run_bills_its_calls() {
+    let graph = chain(&[("agent", call("usage-model")), ("next", call("slow-model"))]);
+    let usage = |e: &DagExecutionEvent| matches!(e, DagExecutionEvent::LlmUsage { .. });
+    {
+        let model = UsageModel::new(0, "done");
+        let _guard = OverrideGuard::install(model.clone());
+        let frames = turn(&graph, &Arc::default(), None, usage).await;
+        assert_billed_once(&model, &frames, 1);
+        assert_summaries_before(&frames, "cancelled");
+    }
+}
+
+/// A run that suspends bills what it called before asking; the turn that
+/// resumes it bills only what it calls after: each call once across both.
+#[tokio::test]
+#[serial]
+async fn a_suspended_run_bills_each_call_once_across_its_turns() {
+    let ask_q = ask(Some("q"));
+    let graph = chain(&[
+        ("before", call("usage-model")),
+        ("q", ask_q),
+        ("after", call("usage-model")),
+    ]);
+    for graph in [graph.clone(), in_subgraph(graph)] {
+        let model = UsageModel::new(0, "done");
+        let _guard = OverrideGuard::install(model.clone());
+        let repo = Arc::default();
+        let mut frames = turn(&graph, &repo, None, never).await;
+        assert_billed_once(&model, &frames, 1);
+        assert_summaries_before(&frames, "finish");
+        let resumed = turn(&graph, &repo, Some("A[q]: yes"), never).await;
+        assert_summaries_before(&resumed, "finish");
+        frames.extend(resumed);
+        assert_billed_once(&model, &frames, 2);
+    }
+}
+
+/// The turn ends on its first `terminal` frame (a host stops reading there),
+/// and every summary of the turn comes before it.
+fn assert_summaries_before(frames: &[Value], terminal: &str) {
+    let end = frames.iter().position(|f| f["type"] == terminal);
+    let end = end.unwrap_or_else(|| panic!("no {terminal}: {frames:#?}"));
+    let summary = |f: &Value| {
+        f["type"]
+            .as_str()
+            .is_some_and(|t| t.ends_with("usage-summary"))
+    };
+    assert!(frames.iter().any(summary), "no summary: {frames:#?}");
+    let late = frames[end..].iter().any(summary);
+    assert!(!late, "a summary after {terminal}: {frames:#?}");
 }
