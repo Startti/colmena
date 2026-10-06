@@ -85,8 +85,10 @@ impl LlmRepository for BilledLlm {
         Ok(response)
     }
 
-    /// Reports the last `Usage` part when the stream ends: a provider may
-    /// stream cumulative ones, and only the last is the call's total.
+    /// Reports the last `Usage` part once: when the stream ends (a provider
+    /// may stream cumulative ones, and only the last is the call's total), or
+    /// when it is dropped before it ends (a cancel cuts the call; the provider
+    /// bills what it already sent).
     async fn stream(&self, request: LlmRequest) -> Result<LlmStream, LlmError> {
         let side_call = self.purpose.side_call(&request);
         let stream = self.inner.stream(request).await?;
@@ -99,15 +101,16 @@ impl LlmRepository for BilledLlm {
                 }
             }
         });
-        let observer = self.observer.clone();
-        let report = futures::stream::once(async move {
-            let usage = last.lock().unwrap_or_else(|p| p.into_inner()).take();
-            if let Some(usage) = usage {
-                observer.on_event(NodeEvent::side_llm_usage(&usage, side_call));
-            }
-        })
-        .filter_map(|()| async { None });
-        Ok(Box::pin(parts.chain(report)))
+        let report = ReportOnDrop {
+            last,
+            observer: self.observer.clone(),
+            side_call: Some(side_call),
+        };
+        // Reached at the end, or dropped unpolled with the stream: either way
+        // `report` drops, once.
+        let end =
+            futures::stream::once(async move { drop(report) }).filter_map(|()| async { None });
+        Ok(Box::pin(parts.chain(end)))
     }
 
     async fn health_check(&self) -> Result<(), LlmError> {
@@ -120,6 +123,23 @@ impl LlmRepository for BilledLlm {
 
     fn provider_name(&self) -> &'static str {
         self.inner.provider_name()
+    }
+}
+
+/// Reports a side call's last usage to `observer` when dropped.
+struct ReportOnDrop {
+    last: Arc<Mutex<Option<LlmUsage>>>,
+    observer: Arc<dyn ExecutionObserver>,
+    side_call: Option<SideCall>,
+}
+
+impl Drop for ReportOnDrop {
+    fn drop(&mut self) {
+        let usage = self.last.lock().unwrap_or_else(|p| p.into_inner()).take();
+        if let (Some(usage), Some(side_call)) = (usage, self.side_call.take()) {
+            let event = NodeEvent::side_llm_usage(&usage, side_call);
+            self.observer.on_event(event);
+        }
     }
 }
 
@@ -217,5 +237,35 @@ mod tests {
         assert_eq!(parts.len(), 3, "every part passes through");
         let expected = vec![(40, side("history_compaction", true))];
         assert_eq!(recorder.usages(), expected);
+    }
+
+    #[tokio::test]
+    async fn a_stream_dropped_mid_way_is_billed_once_with_its_last_usage() {
+        let mut inner = MockLlmRepository::new();
+        inner.expect_stream().times(1).returning(|_| {
+            let parts = [
+                LlmStreamPart::Usage(LlmUsage::new(40, 0)),
+                LlmStreamPart::Usage(LlmUsage::new(40, 9)),
+            ];
+            let chunks: Vec<_> = parts.into_iter().map(chunk).collect();
+            let hang = futures::stream::pending();
+            Ok(Box::pin(futures::stream::iter(chunks).chain(hang)) as LlmStream)
+        });
+        let recorder = Arc::new(Recorder::default());
+        let purpose = SidePurpose::AttachmentSummary;
+        let repo = billed(Arc::new(inner), Some(recorder.clone()), purpose);
+        let mut stream = repo.stream(request()).await.unwrap();
+        stream.next().await;
+        stream.next().await;
+        assert!(recorder.usages().is_empty(), "nothing before the cut");
+        drop(stream);
+        let events = recorder.0.lock().unwrap();
+        let completion = events.iter().filter_map(|e| match e {
+            NodeEvent::LlmUsage {
+                completion_tokens, ..
+            } => Some(*completion_tokens),
+            _ => None,
+        });
+        assert_eq!(completion.collect::<Vec<_>>(), vec![9]);
     }
 }

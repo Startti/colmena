@@ -554,23 +554,26 @@ impl LlmRepository for AnthropicAdapter {
                             }
                         }
                     }
-                    "message_start" => {
-                        if let Some(msg) = parsed.message {
-                            if let Some(u) = msg.usage {
-                                stream_input_tokens = u.input_tokens;
-                                stream_cache_read = u.cache_read_input_tokens;
-                                stream_cache_write = u.cache_creation_input_tokens;
-                            }
-                        }
-                    }
-                    "message_delta" => {
+                    // Usage goes out cumulative, as it arrives: `message_start`
+                    // already bills the input (and a first output count), each
+                    // `message_delta` the output so far. A call cut before its
+                    // `message_delta` still reports what the provider billed.
+                    "message_start" | "message_delta" => {
                         if let Some(delta) = parsed.delta {
                             if let Some(reason) = delta.stop_reason {
                                 stop_reason = Some(reason);
                             }
                         }
-                        // message_delta carries final output_tokens count
-                        if let Some(u) = parsed.usage {
+                        let usage = match parsed.message.and_then(|m| m.usage) {
+                            Some(u) => {
+                                stream_input_tokens = u.input_tokens;
+                                stream_cache_read = u.cache_read_input_tokens;
+                                stream_cache_write = u.cache_creation_input_tokens;
+                                Some(u)
+                            }
+                            None => parsed.usage,
+                        };
+                        if let Some(u) = usage {
                             let mut usage = LlmUsage::new(stream_input_tokens, u.output_tokens);
                             if stream_cache_read > 0 {
                                 usage = usage.with_cache_read_tokens(stream_cache_read);
@@ -1422,5 +1425,42 @@ mod tests {
         let text: String = chunks.iter().flatten().map(|c| c.content()).collect();
         assert_eq!(text, "Hel");
         assert_eq!(server.received_requests().await.unwrap().len(), 2);
+    }
+
+    /// `message_start` already bills the input: its usage goes out as it
+    /// arrives, then each cumulative `message_delta` one. A stream cut before
+    /// `message_delta` (thinking, say) still reports the input.
+    #[tokio::test]
+    async fn usage_goes_out_from_message_start_and_each_message_delta() {
+        let start = r#"{"type":"message_start","message":{"usage":{"input_tokens":120,"output_tokens":1,"cache_read_input_tokens":30}}}"#;
+        let think = r#"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"hm"}}"#;
+        let delta = r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":9}}"#;
+        for (events, outputs) in [
+            (vec![start, think], vec![1]),
+            (vec![start, think, delta], vec![1, 9]),
+        ] {
+            let body: String = events.iter().map(|e| format!("data: {e}\n\n")).collect();
+            let answer = ResponseTemplate::new(200).set_body_raw(body, "text/event-stream");
+            let server = stub_answering(answer, None).await;
+            let adapter = AnthropicAdapter::with_base_url(server.uri());
+            let stream = adapter
+                .stream(anth_request_with_suffix("s", None))
+                .await
+                .unwrap();
+            let chunks: Vec<_> = stream.collect().await;
+            let usages: Vec<_> = chunks
+                .iter()
+                .flatten()
+                .filter_map(|c| match c.part() {
+                    LlmStreamPart::Usage(u) => Some(u.clone()),
+                    _ => None,
+                })
+                .collect();
+            let expected: Vec<_> = outputs
+                .into_iter()
+                .map(|out| LlmUsage::new(120, out).with_cache_read_tokens(30))
+                .collect();
+            assert_eq!(usages, expected);
+        }
     }
 }

@@ -710,7 +710,17 @@ impl LlmRepository for GeminiAdapter {
                     if let Some(c) = u.cached_content_token_count.filter(|&n| n > 0) {
                         usage = usage.with_cached_input_tokens_included(c);
                     }
-                    latest_usage = Some(usage);
+                    // Cumulative: each one goes out as it changes, so a call
+                    // cut mid-stream still reports what the provider billed.
+                    if latest_usage.as_ref() != Some(&usage) {
+                        latest_usage = Some(usage.clone());
+                        yield LlmStreamChunk::new(
+                            request_id.clone(),
+                            LlmStreamPart::Usage(usage),
+                            provider.clone(),
+                            false,
+                        );
+                    }
                 }
             }
 
@@ -739,15 +749,6 @@ impl LlmRepository for GeminiAdapter {
                     chunk = chunk.with_block_reason(reason);
                 }
                 yield chunk;
-            }
-
-            if let Some(usage) = latest_usage {
-                yield LlmStreamChunk::new(
-                    request_id.clone(),
-                    LlmStreamPart::Usage(usage),
-                    provider.clone(),
-                    true,
-                );
             }
         };
 
@@ -1906,5 +1907,33 @@ mod tests {
         assert_eq!(last_text.unwrap().finish_reason(), Some("STOP"));
         assert!(has(&parts, |p| matches!(p, LlmStreamPart::Usage(_))));
         assert!(parts.iter().all(|c| c.block_reason().is_none()));
+    }
+
+    /// Each element's cumulative `usageMetadata` goes out as it arrives (once
+    /// per change), so a call cut mid-stream still reports what was billed.
+    #[tokio::test]
+    async fn cumulative_usage_goes_out_as_it_arrives() {
+        let with_usage = |text: &str, reason, candidates: u32| {
+            let mut e = element(json!([{ "text": text }]), reason);
+            e["usageMetadata"] =
+                json!({ "promptTokenCount": 80, "candidatesTokenCount": candidates });
+            e
+        };
+        let (_, parts) = stream_answer(json!([
+            with_usage("Hola", None, 1),
+            with_usage("", None, 1),
+            with_usage(", listo.", Some("STOP"), 4),
+        ]))
+        .await;
+        let seen: Vec<(u32, &str)> = parts
+            .iter()
+            .filter_map(|c| match c.part() {
+                LlmStreamPart::Usage(u) => Some((u.completion_tokens, "usage")),
+                LlmStreamPart::Content(t) if !t.is_empty() => Some((0, t.as_str())),
+                _ => None,
+            })
+            .collect();
+        let expected = [(0, "Hola"), (1, "usage"), (0, ", listo."), (4, "usage")];
+        assert_eq!(seen, expected);
     }
 }

@@ -547,3 +547,22 @@ modelo de ese nodo. Ahora la fila lleva adelante el nodo, como el `path` del fra
 de un `for_each` del grafo (`fe#N`, `fe#N::<propósito>`) ni las filas de una corrida hija en su
 `subgraph-usage-summary` (relativas a la hija: `agent`, `agent>Sub`). **Tests.**
 `the_same_tool_name_under_two_agents_is_two_entries`; mutación: sin el nodo adelante, fallan 3. **Estado.** done.
+
+## 34. Facturación: una llamada cortada a mitad del stream cobra lo que el proveedor ya reportó
+
+**Qué cambia.** Una llamada al proveedor todavía en vuelo cuando la corrida se cancela (stop, timeout del cliente,
+watchdog de inactividad, hija descartada por el padre) no reportaba uso: `AgentService::invoke_llm` pasa una sola
+parte `Usage` por llamada, al terminar el stream, y al descartarse el stream no pasaba nada (medido en dev: un turno
+de gemini-2.5-pro cortado a los 8 s, sin filas). Ahora `invoke_llm` guarda el último `Usage` acumulado que mandó el
+proveedor y, si la llamada termina antes que su stream (descartada o con un error a mitad), lo reporta al
+descartarse (`PendingUsage`), una vez: el nodo lo cobra al mandarlo y sale en el resumen antes de `cancelled` (§31,
+§32). Lo mismo las llamadas laterales (`billed_llm.rs`, `ReportOnDrop`). Para que haya algo que reportar, los
+adaptadores mandan el uso acumulado a medida que llega: **Gemini** cada `usageMetadata` que cambia (antes, uno solo
+al final); **Anthropic** el de `message_start` (input, cache y el primer conteo de salida) y después cada
+`message_delta` (antes, solo `message_delta`). **OpenAI** no cambia: chat manda el uso solo en el último chunk y
+Responses en `response.completed`, así que un corte antes no cobra nada; nunca se estima. Varias partes `Usage` en
+el stream crudo de un adaptador son acumuladas: la última es el total de la llamada. **Tests.**
+`a_call_cut_mid_stream_bills_what_its_provider_reported` (raíz, hija y nieta: una fila igual al último acumulado,
+antes de `cancelled`; sin uso reportado, sin resumen), `a_call_cut_mid_stream_reports_its_last_usage_once`,
+`a_stream_dropped_mid_way_is_billed_once_with_its_last_usage` y uno por adaptador. Mutaciones: sin reporte al
+descartar, o reportando también al terminar: fallan. **Estado.** done.
