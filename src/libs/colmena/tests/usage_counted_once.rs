@@ -698,7 +698,7 @@ async fn a_tool_inside_a_subgraph_is_billed_once() {
         "the child's, not the parent's"
     );
     assert_eq!(finish(&frames), model.billed().1, "finish.usage");
-    let tool = entry(&frames, "subgraph-usage-summary", "Sub");
+    let tool = entry(&frames, "subgraph-usage-summary", "agent>Sub");
     assert_eq!(
         (&tool["model"], &tool["provider"]),
         (&json!("usage-model"), &json!("openai"))
@@ -737,6 +737,31 @@ async fn an_agent_as_a_tool_is_billed_in_its_own_summary() {
     assert_eq!(finish(&frames), model.billed().1, "finish.usage");
 }
 
+/// Two agents with a tool of the same name, on different models: each
+/// agent's calls of it are an entry of their own, `<agent>>Sub`, priced with
+/// that agent's tool's model.
+#[tokio::test]
+#[serial]
+async fn the_same_tool_name_under_two_agents_is_two_entries() {
+    let with_tool = |model: &str| {
+        let mut schema = plain_schema();
+        schema["model"] = json!({ "fixed": model });
+        let tool = json!({ "name": "Sub", "description": "d", "node_type": "llm_call",
+            "node_schema": schema });
+        agent_with_tool("Sub", tool)["nodes"]["agent"].clone()
+    };
+    let graph = chain(&[("a1", with_tool("tool-1")), ("a2", with_tool("tool-2"))]);
+    let model = UsageModel::new(1, "done");
+    let _guard = OverrideGuard::install(model.clone());
+    let frames = run(graph).await;
+    assert_every_call_priced(&model, &frames, "usage-summary");
+    for (agent, tool) in [("a1", "tool-1"), ("a2", "tool-2")] {
+        let row = entry(&frames, "usage-summary", &format!("{agent}>Sub"));
+        let want = (model.billed_for(tool).1, json!(tool));
+        assert_eq!((usage(row), row["model"].clone()), want);
+    }
+}
+
 /// Two `for_each` tools: their rows, one level below the tool, are billed
 /// (they used to be left out), each keyed by its own scope's path so the two
 /// never share an entry, each with its own target's model and key.
@@ -767,7 +792,11 @@ async fn two_for_each_tools_keep_their_rows_apart() {
     for (tool, row_model) in [("Fan", "row-model-1"), ("Fan2", "row-model-2")] {
         let mut sum = LlmUsage::default();
         for n in 0..2 {
-            let r = entry(&frames, "usage-summary", &format!("{tool}>for_each#{n}"));
+            let r = entry(
+                &frames,
+                "usage-summary",
+                &format!("agent>{tool}>for_each#{n}"),
+            );
             assert_eq!(
                 (&r["model"], &r["provider_key_id"]),
                 (&json!(row_model), &json!("pk-row"))

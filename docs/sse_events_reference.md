@@ -500,7 +500,10 @@ El texto completo también queda disponible en `output.final_response` del `node
 > el tool de un tool, las filas de un `for_each`), no lo de una corrida anidada
 > (`subgraph`, agente como tool), que cobra su `subgraph-usage-summary`;
 > `finish.usage` es el total. Lo despachado dentro de un scope va en la fila de
-> su `path` (`"Fan>for_each#0"`). La fila `N` de un `for_each` es
+> su `path` bajo el nodo que lo corre: `"agent>Sub"` (el tool `Sub` del nodo
+> `agent`), `"agent>Sub::<propósito>"` (su llamada lateral), `"agent>T>T2"` (el
+> tool de un tool), `"agent>Fan>for_each#0"` (fila de un `for_each` como tool);
+> la fila de un `for_each` del grafo sigue siendo `"fe#0"`. La fila `N` de un `for_each` es
 > `"<for_each>#N"`, con `node_type`/`model`/`provider`/`provider_key_id` del
 > target. Ninguna es un nodo del árbol. Hasta el 2026-10-05 esa fila salía sin
 > modelo y `usage-summary` sumaba los nodos de un `subgraph` hijo.

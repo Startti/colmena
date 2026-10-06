@@ -1757,6 +1757,7 @@ fn record_side_call_meta(
 /// child run's, billed in its `subgraph-usage-summary` (`finish.usage` has all).
 fn track_child_usage(
     ledger: &mut UsageLedger,
+    node: &str,
     event: &crate::dag_engine::domain::events::DagExecutionEvent,
 ) {
     use crate::dag_engine::domain::events::DagExecutionEvent;
@@ -1766,10 +1767,19 @@ fn track_child_usage(
         child_meta,
         ..
     } = ledger;
-    let (key, base) = match event {
+    let (raw, base) = match event {
         DagExecutionEvent::SubgraphWrapped { inner, path, .. } => (path.as_str(), &**inner),
         base => (base.node_id().unwrap_or_default(), base),
     };
+    // Under node `node` that runs it, as the run's lineage `path`
+    // (`agent>Sub`): the same tool name under two nodes is two entries, and
+    // never a node's. A row of the node itself (`fe#0`) keeps its own id.
+    let key = if raw.starts_with(&format!("{node}#")) {
+        raw.to_string()
+    } else {
+        format!("{node}>{raw}")
+    };
+    let key = key.as_str();
     match base {
         DagExecutionEvent::NodeStart {
             node_type,
@@ -1900,7 +1910,7 @@ impl UsageLedger {
         node_id: &str,
         child: crate::dag_engine::domain::events::DagExecutionEvent,
     ) {
-        track_child_usage(self, &child);
+        track_child_usage(self, node_id, &child);
         if let Some(run) = child.usage_summary_run().map(str::to_string) {
             if let Some(event) = wrap_child_event(node_id, child) {
                 self.forward.insert(run, event);
