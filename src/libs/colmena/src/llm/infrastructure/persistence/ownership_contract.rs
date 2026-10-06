@@ -190,6 +190,37 @@ pub(crate) async fn rows_of_another_provider_are_independent(
     );
 }
 
+/// Deleting the row the cleanup judged removes that row only: the document's
+/// row under another provider (and its class) stays.
+pub(crate) async fn a_provider_scoped_delete_removes_one_row(
+    reg: &dyn AttachmentRegistry,
+    sid: &str,
+) {
+    reg.upsert(host(sid, "d", ProviderKind::OpenAi))
+        .await
+        .unwrap();
+    reg.upsert(ordinary(sid, "d", ProviderKind::Anthropic, Some(COPY_KEY)))
+        .await
+        .unwrap();
+    reg.delete_attachment_for_provider(sid, "d", ProviderKind::OpenAi)
+        .await
+        .unwrap();
+    assert!(reg
+        .lookup(sid, "d", ProviderKind::OpenAi)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(reg
+        .lookup(sid, "d", ProviderKind::Anthropic)
+        .await
+        .unwrap()
+        .is_some());
+    // Idempotent, like the document-wide delete.
+    reg.delete_attachment_for_provider(sid, "d", ProviderKind::OpenAi)
+        .await
+        .unwrap();
+}
+
 /// Both classes race for the same new id: exactly one wins, whole.
 pub(crate) async fn concurrent_registration_of_both_classes_never_mixes(
     reg: Arc<dyn AttachmentRegistry>,
@@ -259,6 +290,11 @@ mod sqlite {
         rows_of_another_provider_are_independent(&*reg, "s").await;
     }
     #[tokio::test]
+    async fn a_provider_scoped_delete_removes_one_row() {
+        let (reg, _d) = registry().await;
+        super::a_provider_scoped_delete_removes_one_row(&*reg, "s").await;
+    }
+    #[tokio::test]
     async fn the_race_never_mixes() {
         let (reg, _d) = registry().await;
         concurrent_registration_of_both_classes_never_mixes(reg, "s").await;
@@ -308,6 +344,12 @@ mod postgres {
     async fn other_provider_is_independent() {
         let (reg, sid) = registry().await;
         rows_of_another_provider_are_independent(&*reg, &sid).await;
+    }
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL"]
+    async fn a_provider_scoped_delete_removes_one_row() {
+        let (reg, sid) = registry().await;
+        super::a_provider_scoped_delete_removes_one_row(&*reg, &sid).await;
     }
     #[tokio::test]
     #[ignore = "requires DATABASE_URL"]

@@ -355,6 +355,27 @@ impl AttachmentRegistry for PostgresAttachmentRegistry {
         .map_err(|e| AttachmentError::RepositoryFailed(format!("delete_attachment: {}", e)))?;
         Ok(())
     }
+
+    async fn delete_attachment_for_provider(
+        &self,
+        agent_session_id: &str,
+        document_id: &str,
+        provider: ProviderKind,
+    ) -> Result<(), AttachmentError> {
+        sqlx::query(
+            "DELETE FROM conversation_attachments
+              WHERE agent_session_id = $1 AND document_id = $2 AND provider = $3",
+        )
+        .bind(agent_session_id)
+        .bind(document_id)
+        .bind(provider.to_string())
+        .execute(&*self.pool)
+        .await
+        .map_err(|e| {
+            AttachmentError::RepositoryFailed(format!("delete_attachment_for_provider: {}", e))
+        })?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
