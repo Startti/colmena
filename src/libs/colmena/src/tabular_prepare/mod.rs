@@ -563,6 +563,15 @@ mod ensure_tests {
         ) -> Result<TerminalOutcome, RegistryError> {
             panic!("ensure_prepared must not write")
         }
+        async fn track_blobs(
+            &self,
+            _k: &str,
+            _o: &str,
+            _b: &[String],
+            _n: DateTime<Utc>,
+        ) -> Result<TerminalOutcome, RegistryError> {
+            panic!("ensure_prepared must not write")
+        }
         async fn fail_with_blobs(
             &self,
             _k: &str,

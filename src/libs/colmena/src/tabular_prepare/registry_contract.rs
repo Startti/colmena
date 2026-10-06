@@ -416,6 +416,56 @@ pub(crate) async fn a_non_owner_terminal_write_records_no_blobs<R: PreparationRe
     assert!(get_row(r, &key).await.blob_keys.is_empty());
 }
 
+pub(crate) async fn tracked_blobs_are_a_union_written_only_by_the_lease_owner<
+    R: PreparationRegistry,
+>(
+    r: &R,
+) {
+    let key = fresh_key();
+    let k = |n: &str| format!("chat-attachments/u/s/prepared/{n}");
+    r.claim(claim_req(&key, "A", t0())).await.unwrap().unwrap();
+    let at = t0() + Duration::seconds(5);
+    // The keys are in the row, the row is still running and nothing else moved.
+    let out = r
+        .track_blobs(&key, "A", &[k("one"), k("two")], at)
+        .await
+        .unwrap();
+    assert_eq!(out, TerminalOutcome::Written);
+    let row = get_row(r, &key).await;
+    assert_eq!(row.blob_keys, vec![k("one"), k("two")]);
+    assert_eq!(row.status, PrepareStatus::Running);
+    assert_eq!(row.lease_owner.as_deref(), Some("A"));
+    assert_eq!(row.lease_until, Some(t0() + lease()));
+    assert_eq!(row.attempts, 1);
+    // A second batch is added, a repeated key is not.
+    r.track_blobs(&key, "A", &[k("two"), k("three")], at)
+        .await
+        .unwrap();
+    assert_eq!(
+        get_row(r, &key).await.blob_keys,
+        vec![k("one"), k("two"), k("three")]
+    );
+    // Someone else cannot add anything.
+    let out = r.track_blobs(&key, "B", &[k("evil")], at).await.unwrap();
+    assert_eq!(out, TerminalOutcome::Cancelled);
+    assert_eq!(get_row(r, &key).await.blob_keys.len(), 3);
+    // What was tracked survives the terminal write and is joined by its keys.
+    r.fail_with_blobs(&key, "A", "time", "x", &[k("four")], at)
+        .await
+        .unwrap();
+    assert_eq!(
+        get_row(r, &key).await.blob_keys,
+        vec![k("one"), k("two"), k("three"), k("four")]
+    );
+    // A row that is no longer running takes nothing, and neither does a missing one.
+    let out = r.track_blobs(&key, "A", &[k("late")], at).await.unwrap();
+    assert_eq!(out, TerminalOutcome::Cancelled);
+    r.delete(&key).await.unwrap();
+    let out = r.track_blobs(&key, "A", &[k("late")], at).await.unwrap();
+    assert_eq!(out, TerminalOutcome::Cancelled);
+    assert!(r.get(&key).await.unwrap().is_none());
+}
+
 /// Counts what a job does to the registry. Only `claim` and the terminal
 /// writes may happen during a preparation (TP-5).
 #[derive(Default)]
@@ -482,6 +532,18 @@ impl<R: PreparationRegistry> PreparationRegistry for CountingRegistry<R> {
             .terminals
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.inner.fail_with_blobs(k, o, c, d, b, n).await
+    }
+    async fn track_blobs(
+        &self,
+        k: &str,
+        o: &str,
+        b: &[String],
+        n: DateTime<Utc>,
+    ) -> Result<TerminalOutcome, RegistryError> {
+        self.counts
+            .other_writes
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.track_blobs(k, o, b, n).await
     }
     async fn still_owned(&self, k: &str, o: &str) -> Result<bool, RegistryError> {
         self.counts
@@ -1488,6 +1550,12 @@ mod sqlite {
     async fn tabular_prepare_complete_and_fail_keep_every_blob_ever_recorded() {
         let f = fixture().await;
         complete_and_fail_keep_every_blob_ever_recorded(&*f.registry).await;
+    }
+
+    #[tokio::test]
+    async fn tabular_prepare_tracked_blobs_are_a_union_written_only_by_the_lease_owner() {
+        let f = fixture().await;
+        tracked_blobs_are_a_union_written_only_by_the_lease_owner(&*f.registry).await;
     }
 
     #[tokio::test]

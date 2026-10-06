@@ -765,3 +765,9 @@ call). A request whose mime type is not `text/csv` (parameters such as a charset
 ignored, case too) is logged and dropped: the Excel unit adds its own source. The host
 that wires production storage and registry builds the same environment and its own
 trigger; nothing here constructs either.
+
+**Tracking before writing.** `PreparationRegistry::track_blobs(source, owner, keys, now)`
+adds keys to the row's `blob_keys` (a union), only while `owner` holds the lease of a
+`running` row; `Cancelled` means the caller must not write. It does not renew the lease and
+it is not progress: it is the write that makes it true that every object a preparation may
+have written is listed in the row, whatever happens to the process afterwards.
