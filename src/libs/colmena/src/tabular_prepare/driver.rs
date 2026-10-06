@@ -22,7 +22,9 @@ use crate::tabular_prepare::manifest::{
     MAX_REPORTED_DEMOTED,
 };
 use crate::tabular_prepare::part_sink::{PartSink, SinkError};
-use crate::tabular_prepare::ports::PrepareRequest;
+use crate::tabular_prepare::ports::{
+    NoopProgress, PrepareProgress, PrepareProgressInfo, PrepareRequest, ProgressState,
+};
 use crate::tabular_prepare::prepare::{PrepareStartError, StorageCsvSource, StoragePartSink};
 use crate::tabular_prepare::registry::{
     lease_for, ClaimRequest, PreparationRegistry, ReadyInfo, RegistryError, TerminalOutcome,
@@ -37,6 +39,9 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+
+/// How often a running preparation reports its progress.
+pub const PROGRESS_INTERVAL: Duration = Duration::from_secs(2);
 
 /// Time a preparation may take before it stops itself.
 pub const PREP_TIMEOUT: Duration = Duration::from_secs(300);
@@ -73,6 +78,7 @@ pub struct PrepareEnv {
     pub storage: Arc<dyn OutputStorageRepository>,
     pub clock: Arc<Clock>,
     pub sleeper: Arc<Sleeper>,
+    pub progress: Arc<dyn PrepareProgress>,
     pub budget: Duration,
     pub writer: WriterConfig,
 }
@@ -87,6 +93,7 @@ impl PrepareEnv {
             storage,
             clock: Arc::new(Utc::now),
             sleeper: Arc::new(|d| Box::pin(tokio::time::sleep(d))),
+            progress: Arc::new(NoopProgress),
             budget: PREP_TIMEOUT,
             writer: WriterConfig::default(),
         }
@@ -99,6 +106,11 @@ impl PrepareEnv {
 
     pub fn with_sleeper(mut self, sleeper: Arc<Sleeper>) -> Self {
         self.sleeper = sleeper;
+        self
+    }
+
+    pub fn with_progress(mut self, progress: Arc<dyn PrepareProgress>) -> Self {
+        self.progress = progress;
         self
     }
 
@@ -267,6 +279,28 @@ pub async fn prepare_csv(
     env: &PrepareEnv,
     req: &PrepareRequest,
 ) -> Result<PrepareOutcome, RegistryError> {
+    let outcome = run_prepare(env, req).await;
+    let (state, done, total) = match &outcome {
+        Ok(PrepareOutcome::Ready(_)) => {
+            (ProgressState::Ready, req.size_bytes, Some(req.size_bytes))
+        }
+        Ok(PrepareOutcome::Failed(_)) => (ProgressState::Failed, 0, None),
+        Ok(PrepareOutcome::Cancelled | PrepareOutcome::SourceGone) => {
+            (ProgressState::Cancelled, 0, None)
+        }
+        // Nothing was started, or the registry could not be written.
+        _ => return outcome,
+    };
+    env.progress
+        .report(&req.source_key, PrepareProgressInfo { state, done, total })
+        .await;
+    outcome
+}
+
+async fn run_prepare(
+    env: &PrepareEnv,
+    req: &PrepareRequest,
+) -> Result<PrepareOutcome, RegistryError> {
     let stored = match StoragePartSink::new(env.storage.clone(), &req.source_key) {
         Ok(sink) => Arc::new(sink),
         Err(e) => return Ok(PrepareOutcome::Refused(e)),
@@ -296,6 +330,22 @@ pub async fn prepare_csv(
     });
     let control = ConvertControl::new();
     let source = StorageCsvSource::new(env.storage.clone(), &req.source_key);
+    let read = source.bytes_read();
+    let running = |done: u64| PrepareProgressInfo {
+        state: ProgressState::Running,
+        done: done.min(req.size_bytes),
+        total: Some(req.size_bytes),
+    };
+    env.progress.report(&req.source_key, running(0)).await;
+    // Progress is reported every [`PROGRESS_INTERVAL`] while the run goes on, to
+    // the host's progress port and never to the registry.
+    let ticker = async {
+        loop {
+            (env.sleeper)(PROGRESS_INTERVAL).await;
+            let done = read.load(Ordering::Relaxed);
+            env.progress.report(&req.source_key, running(done)).await;
+        }
+    };
     // Every key any run may have written, as full storage keys.
     let keys_of =
         |paths: Vec<String>| -> Vec<String> { paths.iter().map(|p| stored.key_of(p)).collect() };
@@ -309,6 +359,10 @@ pub async fn prepare_csv(
             env.writer,
             &control,
         ) => done,
+        never = ticker => {
+            let _: std::convert::Infallible = never;
+            unreachable!("the progress ticker never ends")
+        }
         () = (env.sleeper)(env.budget) => {
             let detail = "the preparation did not finish within its time budget".to_string();
             return fail(env, req, &owner, reason::TIME, detail, keys_of(control.paths_of(0))).await;
@@ -974,20 +1028,31 @@ pub(crate) mod cases {
 
     /// A sleeper that records what it was asked for and fires when told.
     pub(crate) struct Gate {
+        /// Durations asked for, other than the progress interval.
         pub asked: std::sync::Mutex<Vec<Duration>>,
+        /// Ends the time budget.
         pub fire: tokio::sync::Notify,
+        /// Ends one progress interval.
+        pub tick: tokio::sync::Notify,
     }
 
     pub(crate) fn gated(env: PrepareEnv) -> (PrepareEnv, Arc<Gate>) {
         let gate = Arc::new(Gate {
             asked: std::sync::Mutex::new(Vec::new()),
             fire: tokio::sync::Notify::new(),
+            tick: tokio::sync::Notify::new(),
         });
         let g = gate.clone();
         let env = env.with_sleeper(Arc::new(move |d| {
-            g.asked.lock().unwrap().push(d);
             let g = g.clone();
-            Box::pin(async move { g.fire.notified().await })
+            Box::pin(async move {
+                if d == PROGRESS_INTERVAL {
+                    g.tick.notified().await;
+                } else {
+                    g.asked.lock().unwrap().push(d);
+                    g.fire.notified().await;
+                }
+            })
         }));
         (env, gate)
     }
@@ -1176,6 +1241,126 @@ pub(crate) mod cases {
         }
     }
 
+    /// Remembers every report and says when one arrives.
+    #[derive(Default)]
+    pub(crate) struct Recording {
+        pub seen: std::sync::Mutex<Vec<PrepareProgressInfo>>,
+        pub arrived: tokio::sync::Notify,
+    }
+
+    #[async_trait]
+    impl PrepareProgress for Recording {
+        async fn report(&self, _key: &str, info: PrepareProgressInfo) {
+            self.seen.lock().unwrap().push(info);
+            self.arrived.notify_one();
+        }
+        async fn read(&self, _key: &str) -> Option<PrepareProgressInfo> {
+            self.seen.lock().unwrap().last().cloned()
+        }
+    }
+
+    /// Runs a preparation held at its second put, ticks the progress interval once
+    /// and returns the report that tick produced, checking the registry was not
+    /// written for it. A report that never comes fails the test instead of hanging it.
+    async fn one_tick(
+        registry: &Arc<dyn PreparationRegistry>,
+        declared: u64,
+    ) -> PrepareProgressInfo {
+        let source = fresh_source();
+        let source = source.as_str();
+        let storage = PlacedStorage::with_source(source, five_rows());
+        let progress = Arc::new(Recording::default());
+        *storage.hang_stores_from.lock().unwrap() = Some(1);
+        let (env, gate) =
+            gated(env(registry.clone(), storage.clone()).with_progress(progress.clone()));
+        let req = request(source, declared);
+        let run = tokio::spawn(async move { prepare_csv(&env, &req).await.unwrap() });
+        storage.hung.notified().await;
+        let before = registry.get(source).await.unwrap().unwrap();
+        gate.tick.notify_one();
+        // The start report, then the tick's.
+        let arrived = async {
+            while progress.seen.lock().unwrap().len() < 2 {
+                progress.arrived.notified().await;
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(30), arrived)
+            .await
+            .expect("the tick produced no report");
+        let tick = progress.seen.lock().unwrap()[1].clone();
+        // The registry was not written for it.
+        assert_eq!(registry.get(source).await.unwrap().unwrap(), before);
+        storage.release_hang.notify_one();
+        assert!(matches!(run.await.unwrap(), PrepareOutcome::Ready(_)));
+        tick
+    }
+
+    pub(crate) async fn progress_is_reported_every_interval_to_the_port_and_never_written_to_the_registry(
+        registry: Arc<dyn PreparationRegistry>,
+    ) {
+        // The whole file was read (the sample reads it before any part).
+        let read = five_rows().len() as u64;
+        let tick = one_tick(&registry, 40).await;
+        assert_eq!(tick.state, ProgressState::Running);
+        assert_eq!((tick.done, tick.total), (read, Some(40)));
+        // A declared size smaller than what was read never makes done pass total.
+        let tick = one_tick(&registry, 20).await;
+        assert_eq!((tick.done, tick.total), (20, Some(20)));
+    }
+
+    pub(crate) async fn a_finished_preparation_reports_its_final_state_to_the_port(
+        registry: Arc<dyn PreparationRegistry>,
+    ) {
+        let progress = Arc::new(Recording::default());
+        // Ready.
+        let ready = fresh_source();
+        let storage = PlacedStorage::with_source(&ready, five_rows());
+        let env1 = env(registry.clone(), storage).with_progress(progress.clone());
+        assert!(matches!(
+            prepare_csv(&env1, &request(&ready, 40)).await.unwrap(),
+            PrepareOutcome::Ready(_)
+        ));
+        assert_eq!(
+            progress.read("").await,
+            Some(PrepareProgressInfo {
+                state: ProgressState::Ready,
+                done: 40,
+                total: Some(40)
+            })
+        );
+        // Failed.
+        let source = fresh_source();
+        let storage = PlacedStorage::with_source(&source, Vec::new());
+        let env2 = env(registry.clone(), storage).with_progress(progress.clone());
+        assert!(matches!(
+            prepare_csv(&env2, &request(&source, 0)).await.unwrap(),
+            PrepareOutcome::Failed(_)
+        ));
+        assert_eq!(
+            progress.read("").await.unwrap().state,
+            ProgressState::Failed
+        );
+        // Cancelled: the source does not exist.
+        let source = fresh_source();
+        let env3 = env(registry.clone(), Arc::new(PlacedStorage::default()))
+            .with_progress(progress.clone());
+        assert!(matches!(
+            prepare_csv(&env3, &request(&source, 40)).await.unwrap(),
+            PrepareOutcome::SourceGone
+        ));
+        assert_eq!(
+            progress.read("").await.unwrap().state,
+            ProgressState::Cancelled
+        );
+        // Not claimed: nothing is reported for it.
+        let reports = progress.seen.lock().unwrap().len();
+        assert!(matches!(
+            prepare_csv(&env1, &request(&ready, 40)).await.unwrap(),
+            PrepareOutcome::NotClaimed
+        ));
+        assert_eq!(progress.seen.lock().unwrap().len(), reports);
+    }
+
     pub(crate) async fn a_restart_with_fewer_parts_leaves_stale_keys_the_manifest_never_names(
         registry: Arc<dyn PreparationRegistry>,
     ) {
@@ -1312,5 +1497,13 @@ mod registry_tests {
     sqlite_case!(
         tabular_prepare_a_source_deleted_during_a_restart_removes_what_was_written_and_releases_the_row,
         a_source_deleted_during_a_restart_removes_what_was_written_and_releases_the_row
+    );
+    sqlite_case!(
+        tabular_prepare_progress_is_reported_every_interval_to_the_port_and_never_written_to_the_registry,
+        progress_is_reported_every_interval_to_the_port_and_never_written_to_the_registry
+    );
+    sqlite_case!(
+        tabular_prepare_a_finished_preparation_reports_its_final_state_to_the_port,
+        a_finished_preparation_reports_its_final_state_to_the_port
     );
 }

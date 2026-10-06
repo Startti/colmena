@@ -748,3 +748,12 @@ exist (on the first read, or on a restart after some parts were written) deletes
 written and releases the row, keeping no failure (`SourceGone`); if the objects cannot be
 deleted the row stays, failed with `storage` and the keys, so the cleanup pass can reach
 them. A storage that cannot be reached is not a missing source: it is a `storage` failure.
+
+**Progress.** While a preparation runs it reports `PrepareProgressInfo` to the host's
+progress port (`PrepareEnv::progress`, the `NoopProgress` by default; build the
+environment from `PrepareConfig::progress`): `Running` when it starts, then every 2 s
+(`PROGRESS_INTERVAL`) with the bytes of the source read so far over the declared size
+(never above it, whatever the restarts re-read), and a final `Ready`, `Failed` or
+`Cancelled` state. Progress never touches the registry: the row is written only on
+claim and on the terminal write. Nothing is reported for a source that was not claimed
+or refused.
