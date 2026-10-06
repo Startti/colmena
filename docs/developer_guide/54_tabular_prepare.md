@@ -799,3 +799,31 @@ budget that ran out, a storage or source failure, a manifest that could not be w
 completion and a source found missing all end in "row gone, delete what this job wrote" or
 "row taken, delete nothing and release nothing". A source found missing checks ownership
 before it deletes or releases.
+
+**Logs.** The driver and the runner log a fixed sentence, a `kind` or a `reason`, and an
+opaque `source` identifier (the first 12 hex digits of the SHA-256 of the source key: it
+follows one preparation through the logs and cannot be turned back into the key). They
+never write a storage key, a URL or the text of a registry or storage error; a test runs
+the failing paths with error texts that name a key and checks none of it appears.
+
+**Known limits, stated.**
+
+- *A source the adapter calls `InvalidInput`.* `StorageError::InvalidInput` from
+  `read_stream` is how the adapters say "no such object", so it releases the row (and resets
+  its attempts) like a deleted source. A key that can never be a key (empty, over 1 KiB, a
+  control character, a `..` segment) is refused before the storage is asked, and writes
+  nothing; an adapter that answers `InvalidInput` for some other reason would make a
+  re-triggered preparation start over each time, unbounded by the attempt cap. The trigger
+  is idempotent and a preparation costs one read of the file at most, so this is tolerated
+  rather than bounded.
+- *Check then write.* Ownership is read (or written, at a batch boundary) before an object
+  is put, and the put itself is not conditional: a lease taken between the check and the put
+  lets one object be written over the new owner's key. The lease is longer than the whole
+  bounded job, so a takeover can only follow a deleted row that someone claims again within
+  that put's duration; the new owner writes the same bytes of the same source under the same
+  key, and its own terminal write is conditional on its own lease. When a job finds the row
+  gone, the `get` that decides whether to delete is not atomic with the delete either, for
+  the same reason.
+- *Progress.* `done` is the bytes of the current read of the file and stays under the total
+  until the table is ready; after a restart (a column that turned out to be text) it starts
+  over.

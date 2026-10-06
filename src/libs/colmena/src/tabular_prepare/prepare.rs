@@ -31,11 +31,30 @@ use tokio_util::sync::CancellationToken;
 /// Why a preparation could not even start.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum PrepareStartError {
+    #[error("the source key cannot be a storage key")]
+    InvalidSourceKey,
     #[error(
         "the storage adapter reports no derived root for this source, so the prepared \
          objects could not be contained or cleaned up"
     )]
     NoDerivedRoot,
+}
+
+/// Longest source key accepted. Object stores cap keys near a kilobyte.
+const MAX_SOURCE_KEY_BYTES: usize = 1024;
+
+/// A key that can never be a storage key is refused before anything is asked of
+/// the storage: it would otherwise look like a source that does not exist.
+fn check_source_key(key: &str) -> Result<(), PrepareStartError> {
+    let bad = key.is_empty()
+        || key.len() > MAX_SOURCE_KEY_BYTES
+        || key.chars().any(char::is_control)
+        || key.split('/').any(|segment| segment == "..");
+    if bad {
+        Err(PrepareStartError::InvalidSourceKey)
+    } else {
+        Ok(())
+    }
 }
 
 /// Writes parts and the manifest of one source through
@@ -53,6 +72,7 @@ impl StoragePartSink {
         storage: Arc<dyn OutputStorageRepository>,
         source_key: &str,
     ) -> Result<Self, PrepareStartError> {
+        check_source_key(source_key)?;
         let root = storage
             .derived_root(source_key)
             .map(|r| r.trim_end_matches('/').to_string())
@@ -151,6 +171,9 @@ impl StorageCsvSource {
 #[async_trait]
 impl CsvSource for StorageCsvSource {
     async fn open(&self, cancel: &CancellationToken) -> Result<Box<dyn Read + Send>, ConvertError> {
+        // A new read of the file starts its count over: progress is the current
+        // read's, not the sum of every restart's.
+        self.read.store(0, Ordering::Relaxed);
         let stored = self
             .storage
             .read_stream(&self.source_key)
@@ -207,6 +230,8 @@ pub(crate) mod fake {
         pub release_hang: tokio::sync::Notify,
         /// The second open of a source finds it deleted.
         pub remove_source_on_second_open: Mutex<bool>,
+        /// `delete` fails with text that must never be logged.
+        pub fail_delete: Mutex<bool>,
         /// `delete` never returns; says so first.
         pub hang_delete: Mutex<bool>,
         pub delete_reached: tokio::sync::Notify,
@@ -373,6 +398,11 @@ pub(crate) mod fake {
             if *self.hang_delete.lock().unwrap() {
                 self.delete_reached.notify_one();
                 futures::future::pending::<()>().await;
+            }
+            if *self.fail_delete.lock().unwrap() {
+                return Err(StorageError::UploadFailed(
+                    "secret-delete-text chat-attachments/u/s/x.csv".into(),
+                ));
             }
             self.objects.lock().unwrap().remove(key);
             self.deleted.lock().unwrap().push(key.to_string());
@@ -552,6 +582,35 @@ mod tests {
             !text.contains("secret") && !text.contains("chat-attachments"),
             "{text}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_source_key_that_cannot_be_a_key_is_refused_before_anything_is_asked() {
+        let storage = PlacedStorage::with_source(SOURCE, b"a\n".to_vec());
+        let long = format!("chat-attachments/{}", "x".repeat(1100));
+        for bad in [
+            "",
+            "chat-attachments/../other/x.csv",
+            "chat-attachments/u/s/\u{0}x.csv",
+            "chat-attachments/u/s/a\nb.csv",
+            long.as_str(),
+        ] {
+            let err = StoragePartSink::new(storage.clone(), bad).err();
+            assert_eq!(err, Some(PrepareStartError::InvalidSourceKey), "{bad:?}");
+        }
+        assert!(StoragePartSink::new(storage, SOURCE).is_ok());
+    }
+
+    #[tokio::test]
+    async fn the_bytes_read_count_the_current_read_not_every_read_so_far() {
+        let body = b"a,b\n1,2\n".to_vec();
+        let storage = PlacedStorage::with_source(SOURCE, body.clone());
+        let source = StorageCsvSource::new(storage, SOURCE);
+        let counter = source.bytes_read();
+        read_all(&source).await.unwrap();
+        read_all(&source).await.unwrap();
+        // A restart re-reads the file: progress starts over instead of passing the size.
+        assert_eq!(counter.load(Ordering::Relaxed), body.len() as u64);
     }
 
     async fn read_all(source: &StorageCsvSource) -> Result<Vec<u8>, ConvertError> {
