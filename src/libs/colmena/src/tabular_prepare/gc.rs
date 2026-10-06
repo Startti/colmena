@@ -17,8 +17,10 @@
 //! preparation) takes the row over.
 //!
 //! Time is read from a clock once per row, never once per pass, so each row's
-//! lease starts when the pass claims it. With an empty table none of this makes
-//! a storage call.
+//! lease starts when the pass claims it. If a lease nevertheless expires while
+//! the blobs are being deleted and something claims the row, `finish_delete`
+//! returns false: the pass logs it and counts `leases_lost` and leaves the new
+//! owner's row alone. With an empty table none of this makes a storage call.
 
 use crate::storage::domain::OutputStorageRepository;
 use crate::tabular_prepare::registry::{PreparationRegistry, PreparedRow, RegistryError};
@@ -43,6 +45,9 @@ pub struct PreparedGcSummary {
     /// someone else (another pass, or a preparation). Nothing was wrongly
     /// deleted; the caller must retry on its next run.
     pub busy: u64,
+    /// Rows whose `deleting` lease expired and was taken by someone else
+    /// before the pass could finish them.
+    pub leases_lost: u64,
 }
 
 impl PreparedGcSummary {
@@ -65,6 +70,7 @@ impl PreparedGcSummary {
         self.rows_reset += other.rows_reset;
         self.storage_errors += other.storage_errors;
         self.busy += other.busy;
+        self.leases_lost += other.leases_lost;
     }
 }
 
@@ -131,6 +137,14 @@ async fn remove_prepared(
     summary.blobs_deleted += keys.len() as u64;
     if registry.finish_delete(source, &owner).await? {
         summary.rows_deleted += 1;
+    } else {
+        summary.leases_lost += 1;
+        tracing::warn!(
+            target: "colmena::attachment_gc",
+            event = "gc.prepared.lease_lost",
+            source_key = source,
+            "the cleanup lease expired and the row was taken over before it could be finished; leaving it"
+        );
     }
     Ok(true)
 }
@@ -173,6 +187,7 @@ mod tests {
     use chrono::TimeZone;
     use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
     use std::collections::HashSet;
+    use std::sync::atomic::{AtomicI64, Ordering};
     use std::sync::{Arc, Mutex};
 
     fn now() -> DateTime<Utc> {
@@ -188,7 +203,11 @@ mod tests {
         failing: Mutex<HashSet<String>>,
         unreachable: Mutex<bool>,
         reads: Mutex<usize>,
+        /// Runs before `delete_derived` deletes anything.
+        hook: Mutex<Option<Hook>>,
     }
+
+    type Hook = Box<dyn Fn() -> futures::future::BoxFuture<'static, ()> + Send + Sync>;
 
     impl FakeStorage {
         fn with(keys: &[String]) -> Arc<Self> {
@@ -198,6 +217,9 @@ mod tests {
         }
         fn calls(&self) -> usize {
             self.deleted.lock().unwrap().len() + *self.reads.lock().unwrap()
+        }
+        fn refuse(&self, key: &str) {
+            self.failing.lock().unwrap().insert(key.to_string());
         }
     }
 
@@ -230,6 +252,20 @@ mod tests {
             }
             self.blobs.lock().unwrap().remove(key);
             self.deleted.lock().unwrap().push(key.to_string());
+            Ok(())
+        }
+        async fn delete_derived(
+            &self,
+            _source: &str,
+            tracked_keys: &[String],
+        ) -> Result<(), StorageError> {
+            let hook = self.hook.lock().unwrap().take();
+            if let Some(hook) = hook {
+                hook().await;
+            }
+            for key in tracked_keys {
+                self.delete(key).await?;
+            }
             Ok(())
         }
     }
@@ -320,6 +356,11 @@ mod tests {
         f.registry.get(&source_of(name)).await.unwrap()
     }
 
+    /// A clock frozen at `now()` plus an offset.
+    fn at(offset: Duration) -> impl Fn() -> DateTime<Utc> + Send + Sync {
+        move || now() + offset
+    }
+
     async fn gc_source(
         f: &Fixture,
         storage: &FakeStorage,
@@ -399,5 +440,92 @@ mod tests {
         seed_ready(&f, "b", 0).await;
         let ok = gc_source(&f, &storage_with(&["b"]), "b", &now, false).await;
         assert!(!ok.is_incomplete());
+    }
+
+    #[tokio::test]
+    async fn attachment_gc_a_refused_delete_leaves_a_deleting_row_the_next_run_finishes() {
+        let f = fixture().await;
+        seed_ready(&f, "a", 0).await;
+        let storage = storage_with(&["a"]);
+        storage.refuse(&parts_of("a")[1]);
+        let first = gc_source(&f, &storage, "a", &now, false).await;
+        assert_eq!(first.storage_errors, 1);
+        assert_eq!(first.rows_deleted, 0);
+        assert_eq!(row(&f, "a").await.unwrap().status, PrepareStatus::Deleting);
+        // While the lease is live another run leaves it alone.
+        let busy = gc_source(&f, &storage, "a", &at(Duration::minutes(5)), false).await;
+        assert_eq!(
+            busy,
+            PreparedGcSummary {
+                busy: 1,
+                ..Default::default()
+            },
+            "another pass holds it: not settled, so the caller retries"
+        );
+
+        storage.failing.lock().unwrap().clear();
+        let second = gc_source(&f, &storage, "a", &at(Duration::minutes(11)), false).await;
+        assert_eq!(second.rows_deleted, 1);
+        assert!(storage.blobs.lock().unwrap().is_empty());
+        assert_eq!(row(&f, "a").await, None);
+    }
+
+    #[tokio::test]
+    async fn attachment_gc_a_persistent_delete_failure_leaves_a_row_a_preparation_can_take() {
+        let f = fixture().await;
+        seed_ready(&f, "a", 0).await;
+        let storage = storage_with(&["a"]);
+        storage.refuse(&parts_of("a")[0]);
+        let first = gc_source(&f, &storage, "a", &now, false).await;
+        assert_eq!(first.storage_errors, 1, "the failure is reported");
+        assert_eq!(row(&f, "a").await.unwrap().status, PrepareStatus::Deleting);
+        // The cleanup never comes back, but after its lease the source can be
+        // prepared again instead of waiting for it.
+        let later = now() + Duration::minutes(11);
+        assert_eq!(
+            f.registry.claim(claim_at("a", "job", later)).await.unwrap(),
+            Some(Claim { attempts: 1 })
+        );
+    }
+
+    #[tokio::test]
+    async fn attachment_gc_a_lease_that_expires_mid_delete_is_counted_and_the_new_owner_is_left_alone(
+    ) {
+        let f = fixture().await;
+        seed_ready(&f, "a", 0).await;
+        let storage = storage_with(&["a"]);
+        // While the blobs are being deleted the 10-minute lease runs out and a
+        // preparation claims the row.
+        let offset = Arc::new(AtomicI64::new(0));
+        {
+            let registry = f.registry.clone();
+            let offset = offset.clone();
+            *storage.hook.lock().unwrap() = Some(Box::new(move || {
+                let registry = registry.clone();
+                let offset = offset.clone();
+                Box::pin(async move {
+                    offset.store(11 * 60, Ordering::SeqCst);
+                    let later = now() + Duration::minutes(11);
+                    registry
+                        .claim(claim_at("a", "worker", later))
+                        .await
+                        .unwrap()
+                        .expect("the expired deleting lease is claimable");
+                })
+            }));
+        }
+        let clock = {
+            let offset = offset.clone();
+            move || now() + Duration::seconds(offset.load(Ordering::SeqCst))
+        };
+        let summary = gc_source(&f, &storage, "a", &clock, false).await;
+        assert_eq!(
+            summary.leases_lost, 1,
+            "finish_delete returning false is visible"
+        );
+        assert_eq!(summary.rows_deleted, 0);
+        let live = row(&f, "a").await.expect("the new owner's row survives");
+        assert_eq!(live.status, PrepareStatus::Running);
+        assert_eq!(live.lease_owner.as_deref(), Some("worker"));
     }
 }
