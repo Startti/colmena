@@ -5,8 +5,8 @@
 //! the registry ([`registry`], with SQLite and Postgres implementations), the
 //! ports the host replaces ([`ports`]) and the `ensure_prepared` entry a tool
 //! calls before it needs the tables ([`TabularPrepare::ensure_prepared`]); the
-//! cleanup pass `attachment_gc` runs will follow. Nothing here converts a file
-//! yet and nothing calls it.
+//! cleanup pass `attachment_gc` runs will follow. The CSV converter
+//! ([`convert::convert_csv_table`]) is here too; nothing calls it yet.
 //!
 //! With the engine switch off (the default) none of it runs.
 //! See `docs/developer_guide/54_tabular_prepare.md`.
