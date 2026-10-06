@@ -414,3 +414,32 @@ tests and the manual bench: it accepts only a canonical part path or
 `manifest.json` (anything else is refused before the filesystem is touched) and
 writes through a temporary file and a rename, so a failed write leaves no partial
 file under a final name.
+
+### Part writer (`writer.rs`)
+
+`PartWriter` writes the Arrow batches of one table through a `PartSink`: ZSTD
+level 3 (pinned on the writer properties, since a Parquet file records the codec
+but not the level), dictionary encoding on, chunk statistics and exactly one row
+group per part. A part closes at `PART_MAX_ROWS` (500,000) rows, or once its
+encoded size reaches `PART_MAX_BYTES` (64 MiB), checked after each slice of at
+most 8 MiB: an oversized batch is cut into slices, never encoded whole, so a part
+is below the limit plus one slice and the writer never holds more than one part.
+Only the column types the converter produces are accepted (`Int64`, `Float64`,
+`Boolean`, `Utf8`, `Date32`, microsecond timestamp without a zone) and column
+names must be unique, non-empty, clean and at most 128 characters; both are
+checked when the writer is built. Each part is built in memory and handed over as
+one buffer.
+
+`finish` returns the rows, the parts and, per column, the type, the Parquet size
+and the decoded size in memory (`in_memory_bytes`) summed over the parts; a table
+with no rows still writes one empty part. Any error (a sink failure, a batch with
+another schema) poisons the writer: it accepts nothing more and `finish` refuses,
+so a failed table is never reported as written. `attempted_paths` lists every part
+handed to the sink, including one whose put failed (`finish` takes `&mut self`,
+so it is still readable when the last put fails), so the caller can remove them.
+
+Dependencies for the writer and the rest: `parquet` 58.3.0 (only the `arrow` and
+`zstd` features, no snappy, brotli, lz4 or async readers) and `arrow-array`,
+`arrow-schema`, `arrow-cast`, `arrow-csv` 58.3.0. Arrow 58.3.0 was already in the
+lock through another dependency, so the lock gains `parquet` and its few helpers
+only; `encoding_rs` is used to read Windows-1252.
