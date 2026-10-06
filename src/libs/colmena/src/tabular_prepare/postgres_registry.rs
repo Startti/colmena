@@ -356,6 +356,14 @@ mod tests {
         tabular_prepare_pg_a_source_deleted_during_a_restart_removes_what_was_written_and_releases_the_row,
         a_source_deleted_during_a_restart_removes_what_was_written_and_releases_the_row
     );
+    pg_driver_case!(
+        tabular_prepare_pg_progress_is_reported_every_interval_to_the_port_and_never_written_to_the_registry,
+        progress_is_reported_every_interval_to_the_port_and_never_written_to_the_registry
+    );
+    pg_driver_case!(
+        tabular_prepare_pg_a_finished_preparation_reports_its_final_state_to_the_port,
+        a_finished_preparation_reports_its_final_state_to_the_port
+    );
     pg_case!(
         tabular_prepare_pg_a_deleting_row_is_never_taken_by_an_older_format_claim,
         a_deleting_row_is_never_taken_by_an_older_format_claim
