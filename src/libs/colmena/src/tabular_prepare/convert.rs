@@ -964,6 +964,7 @@ mod tests {
 
     use crate::tabular_prepare::csv::CsvError;
     use crate::tabular_prepare::infer::INFERENCE_ROWS;
+    use crate::tabular_prepare::manifest::ManifestError;
     use crate::tabular_prepare::part_sink::fake::MemorySink;
     use crate::tabular_prepare::writer::{WriterConfig, WriterError};
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1471,6 +1472,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_table_list_that_cannot_fit_the_registry_fails_before_the_conversion() {
+        // 3,000 columns of an endless file: even with the shortest type and
+        // zero bytes the table list is over 64 KiB, so nothing is converted.
+        struct Endless(Arc<AtomicUsize>, bool);
+        impl Read for Endless {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                let header = (0..3000)
+                    .map(|i| format!("c{i}"))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let row = vec!["1"; 3000].join(",");
+                let line = if self.1 {
+                    format!("{row}\n")
+                } else {
+                    self.1 = true;
+                    format!("{header}\n")
+                };
+                let n = line.len().min(buf.len());
+                buf[..n].copy_from_slice(&line.as_bytes()[..n]);
+                self.0.fetch_add(n, Ordering::SeqCst);
+                Ok(n)
+            }
+        }
+        struct EndlessSource(Arc<AtomicUsize>);
+        #[async_trait::async_trait]
+        impl CsvSource for EndlessSource {
+            async fn open(
+                &self,
+                _cancel: &CancellationToken,
+            ) -> Result<Box<dyn Read + Send>, ConvertError> {
+                Ok(Box::new(Endless(self.0.clone(), false)))
+            }
+        }
+        let pulled = Arc::new(AtomicUsize::new(0));
+        let sink = Arc::new(MemorySink::default());
+        let failure = convert_csv_table(
+            &EndlessSource(pulled.clone()),
+            sink.clone(),
+            0,
+            WriterConfig::default(),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            failure.error,
+            TableError::Convert(ConvertError::Manifest(
+                ManifestError::ManifestTooLarge { .. }
+            ))
+        ));
+        assert!(sink.paths().is_empty());
+        // Only the sample was read, not the (endless) file.
+        assert!(
+            pulled.load(Ordering::SeqCst) < 40 * 1024 * 1024,
+            "{}",
+            pulled.load(Ordering::SeqCst)
+        );
+    }
+
+    #[tokio::test]
     async fn a_wide_table_that_fits_is_converted() {
         let header = (0..700)
             .map(|i| format!("c{i}"))
@@ -1484,6 +1544,280 @@ mod tests {
     }
 
     // ---- cancellation ----
+
+    use tokio::sync::Notify;
+
+    /// How long a test waits for something that must happen by itself. Only a
+    /// guard so a regression fails instead of hanging; nothing is asserted
+    /// about timing.
+    const GUARD: std::time::Duration = std::time::Duration::from_secs(60);
+
+    /// A CSV of `rows` short rows. It counts what it was asked for, can cancel
+    /// a control once enough was pulled, and says when the reader is dropped
+    /// (the blocking thread letting go of it).
+    struct Counted {
+        rows: usize,
+        pulled: Arc<AtomicUsize>,
+        cancel_after: Option<(usize, Arc<ConvertControl>)>,
+        gone: Arc<Notify>,
+    }
+
+    impl Counted {
+        fn new(rows: usize) -> Self {
+            Self {
+                rows,
+                pulled: Arc::new(AtomicUsize::new(0)),
+                cancel_after: None,
+                gone: Arc::new(Notify::new()),
+            }
+        }
+    }
+
+    struct CountedReader {
+        next: usize,
+        rows: usize,
+        pending: Vec<u8>,
+        pulled: Arc<AtomicUsize>,
+        cancel_after: Option<(usize, Arc<ConvertControl>)>,
+        gone: Arc<Notify>,
+    }
+
+    impl Read for CountedReader {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            while self.pending.len() < buf.len().min(16 * 1024) && self.next < self.rows {
+                self.pending
+                    .extend_from_slice(format!("{},x\n", self.next).as_bytes());
+                self.next += 1;
+            }
+            let n = buf.len().min(self.pending.len());
+            buf[..n].copy_from_slice(&self.pending[..n]);
+            self.pending.drain(..n);
+            let total = self.pulled.fetch_add(n, Ordering::SeqCst) + n;
+            if let Some((limit, control)) = &self.cancel_after {
+                if total >= *limit {
+                    control.cancel();
+                }
+            }
+            Ok(n)
+        }
+    }
+
+    impl Drop for CountedReader {
+        fn drop(&mut self) {
+            self.gone.notify_one();
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl CsvSource for Counted {
+        async fn open(
+            &self,
+            _cancel: &CancellationToken,
+        ) -> Result<Box<dyn Read + Send>, ConvertError> {
+            Ok(Box::new(CountedReader {
+                next: 0,
+                rows: self.rows,
+                pending: b"id,v\n".to_vec(),
+                pulled: self.pulled.clone(),
+                cancel_after: self.cancel_after.clone(),
+                gone: self.gone.clone(),
+            }))
+        }
+    }
+
+    /// Stores into a memory sink and says once `after` puts have been made.
+    struct Signals {
+        inner: MemorySink,
+        after: usize,
+        seen: AtomicUsize,
+        reached: Arc<Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl PartSink for Signals {
+        async fn put(&self, path: &str, data: bytes::Bytes) -> Result<(), SinkError> {
+            self.inner.put(path, data).await?;
+            if self.seen.fetch_add(1, Ordering::SeqCst) + 1 == self.after {
+                self.reached.notify_one();
+            }
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn dropping_the_future_keeps_the_keys_already_put_and_stops_the_reader() {
+        let src = Counted::new(30_000_000);
+        let reached = Arc::new(Notify::new());
+        let sink = Arc::new(Signals {
+            inner: MemorySink::default(),
+            after: 3,
+            seen: AtomicUsize::new(0),
+            reached: reached.clone(),
+        });
+        let control = ConvertControl::new();
+        let cfg = WriterConfig {
+            max_rows: 2000,
+            max_bytes: usize::MAX,
+        };
+        let run = convert_csv_table_with(&src, sink.clone(), 0, cfg, &control);
+        // Dropped the moment the third part has been put: `select!` drops the
+        // conversion when the other branch is ready.
+        tokio::select! {
+            _ = run => panic!("30 million rows cannot be done yet"),
+            _ = reached.notified() => {}
+        }
+        let kept = control.paths();
+        assert!(kept.len() >= 3, "{kept:?}");
+        assert_eq!(kept[0], "t0/part-00000.parquet");
+        // Every key that reached the sink is in the set the caller still holds.
+        for p in sink.inner.paths() {
+            assert!(kept.contains(&p), "{p} lost");
+        }
+        // The blocking reader lets go: it is dropped, long before the end.
+        tokio::time::timeout(GUARD, src.gone.notified())
+            .await
+            .expect("the reader went on after the future was dropped");
+        assert!(src.pulled.load(Ordering::SeqCst) < 100 * 1024 * 1024);
+    }
+
+    #[tokio::test]
+    async fn a_key_is_recorded_before_its_put_so_a_put_that_never_returns_is_still_known() {
+        struct Hangs(Arc<Notify>);
+        #[async_trait::async_trait]
+        impl PartSink for Hangs {
+            async fn put(&self, _: &str, _: bytes::Bytes) -> Result<(), SinkError> {
+                self.0.notify_one();
+                std::future::pending().await
+            }
+        }
+        let src = MemSource::new(int_csv(3000, ""));
+        let control = ConvertControl::new();
+        let cfg = WriterConfig {
+            max_rows: 1000,
+            max_bytes: usize::MAX,
+        };
+        let started = Arc::new(Notify::new());
+        let run = convert_csv_table_with(&src, Arc::new(Hangs(started.clone())), 0, cfg, &control);
+        tokio::select! {
+            _ = run => panic!("a put that never returns cannot finish"),
+            _ = started.notified() => {}
+        }
+        assert_eq!(control.paths(), vec!["t0/part-00000.parquet"]);
+    }
+
+    #[tokio::test]
+    async fn cancelling_the_control_ends_the_run_with_a_typed_error() {
+        let control = ConvertControl::new();
+        let mut src = Counted::new(30_000_000);
+        // The reader cancels the control itself once it has served 1 MiB.
+        src.cancel_after = Some((1024 * 1024, control.clone()));
+        let sink = Arc::new(MemorySink::default());
+        let failure = convert_csv_table_with(&src, sink, 0, WriterConfig::default(), &control)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                failure.error,
+                TableError::Convert(ConvertError::Csv(CsvError::Cancelled))
+            ),
+            "{:?}",
+            failure.error
+        );
+        assert!(src.pulled.load(Ordering::SeqCst) < 200 * 1024 * 1024);
+    }
+
+    /// A stream that gives `first` and then never yields again. It says when it
+    /// is first left waiting, and when it is dropped.
+    struct Stalls {
+        first: Option<bytes::Bytes>,
+        waiting: Arc<Notify>,
+        dropped: Arc<Notify>,
+    }
+
+    impl Stalls {
+        fn new(first: &'static [u8]) -> Self {
+            Self {
+                first: Some(bytes::Bytes::from_static(first)),
+                waiting: Arc::new(Notify::new()),
+                dropped: Arc::new(Notify::new()),
+            }
+        }
+    }
+
+    impl Stream for Stalls {
+        type Item = Result<bytes::Bytes, StorageError>;
+        fn poll_next(
+            mut self: Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<Self::Item>> {
+            match self.first.take() {
+                Some(chunk) => std::task::Poll::Ready(Some(Ok(chunk))),
+                None => {
+                    self.waiting.notify_one();
+                    std::task::Poll::Pending
+                }
+            }
+        }
+    }
+
+    impl Drop for Stalls {
+        fn drop(&mut self) {
+            self.dropped.notify_one();
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_stalled_storage_read_is_interrupted_by_the_token() {
+        // A stream that never yields: a blocking read on it cannot return on
+        // its own.
+        let token = CancellationToken::new();
+        let stalls = Stalls::new(b"");
+        let waiting = stalls.waiting.clone();
+        let mut reader = stream_reader(Box::pin(stalls), token.clone());
+        let handle = tokio::task::spawn_blocking(move || reader.read(&mut [0u8; 16]));
+        // Cancel only once the read is parked on the stream.
+        tokio::time::timeout(GUARD, waiting.notified())
+            .await
+            .unwrap();
+        token.cancel();
+        let r = tokio::time::timeout(GUARD, handle)
+            .await
+            .expect("the blocked read was not interrupted")
+            .unwrap();
+        assert_eq!(CsvError::from_io(r.unwrap_err()), CsvError::Cancelled);
+    }
+
+    struct StallSource(Arc<Notify>, Arc<Notify>);
+
+    #[async_trait::async_trait]
+    impl CsvSource for StallSource {
+        async fn open(
+            &self,
+            cancel: &CancellationToken,
+        ) -> Result<Box<dyn Read + Send>, ConvertError> {
+            let mut stalls = Stalls::new(b"id,v\n1,a\n2,b\n");
+            stalls.waiting = self.0.clone();
+            stalls.dropped = self.1.clone();
+            Ok(Box::new(stream_reader(Box::pin(stalls), cancel.clone())))
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dropping_the_future_frees_a_reader_stalled_on_the_storage_stream() {
+        let (waiting, dropped) = (Arc::new(Notify::new()), Arc::new(Notify::new()));
+        let source = StallSource(waiting.clone(), dropped.clone());
+        let sink = Arc::new(MemorySink::default());
+        let run = convert_csv_table(&source, sink, 0, WriterConfig::default());
+        // Dropped once the reader is parked on the stalled stream.
+        tokio::select! {
+            _ = run => panic!("a stalled stream cannot finish"),
+            _ = waiting.notified() => {}
+        }
+        // The blocking thread was woken and ended; the stream is gone.
+        tokio::time::timeout(GUARD, dropped.notified())
+            .await
+            .expect("the blocking reader is still stuck on the stalled stream");
+    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn a_failing_put_is_reported_even_when_the_reader_is_stalled_on_storage() {
@@ -1578,5 +1912,132 @@ mod tests {
                 failure.error
             );
         }
+    }
+
+    // ---- the early check on the table list ----
+
+    fn grid(cols: usize, rows: usize) -> Vec<u8> {
+        let header = (0..cols)
+            .map(|i| format!("c{i}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let row = vec!["12345"; cols].join(",");
+        format!("{header}\n{}", format!("{row}\n").repeat(rows)).into_bytes()
+    }
+
+    #[tokio::test]
+    async fn the_early_minimum_never_exceeds_the_table_list_that_is_written() {
+        use crate::tabular_prepare::csv::open_csv;
+        use crate::tabular_prepare::manifest::Manifest;
+        for (cols, rows) in [(1usize, 5usize), (3, 40), (40, 2000), (200, 300)] {
+            let bytes = grid(cols, rows);
+            let o = open_csv(Cursor::new(bytes.clone()), None).unwrap();
+            let pairs: Vec<(&str, ColumnType)> = o
+                .schema
+                .columns
+                .iter()
+                .map(|c| (c.name.as_str(), c.column_type))
+                .collect();
+            let min = min_tables_json_len(&pairs, o.sample_rows as u64);
+            let sink = Arc::new(MemorySink::default());
+            let t = convert(&MemSource::new(bytes), &sink, WriterConfig::default())
+                .await
+                .unwrap();
+            let real = Manifest::new(vec![crate::tabular_prepare::manifest::TableInfo {
+                name: "t".into(),
+                rows: t.written.rows,
+                parts: t.written.parts,
+                columns: t.written.columns.clone(),
+            }])
+            .tables_json()
+            .unwrap()
+            .len();
+            assert!(min <= real, "{cols} columns: {min} > {real}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_table_the_looser_check_let_through_is_now_refused_after_the_sample() {
+        use crate::tabular_prepare::csv::SAMPLE_MAX_CELLS;
+        // Columns for which the minimum with zero rows fits the cap but the one
+        // with the rows of the sample does not.
+        let names = |n: usize| (0..n).map(|i| format!("c{i}")).collect::<Vec<_>>();
+        let min_for = |n: usize, rows: u64| {
+            let ns = names(n);
+            let pairs: Vec<(&str, ColumnType)> =
+                ns.iter().map(|s| (s.as_str(), ColumnType::Int)).collect();
+            min_tables_json_len(&pairs, rows)
+        };
+        let cols = (300..2000)
+            .find(|&n| {
+                let rows = (SAMPLE_MAX_CELLS / n).min(10_000) as u64;
+                min_for(n, 0) <= TABLES_JSON_MAX_BYTES && min_for(n, rows) > TABLES_JSON_MAX_BYTES
+            })
+            .expect("a width between the two bounds");
+        // An endless file of that width: the run must stop after the sample.
+        struct EndlessSource(usize, Arc<AtomicUsize>);
+        #[async_trait::async_trait]
+        impl CsvSource for EndlessSource {
+            async fn open(
+                &self,
+                _c: &CancellationToken,
+            ) -> Result<Box<dyn Read + Send>, ConvertError> {
+                // The header once, then the same row for ever.
+                let all = grid(self.0, 1);
+                let (header, row) = all.split_at(all.iter().position(|b| *b == b'\n').unwrap() + 1);
+                struct Loop {
+                    head: Vec<u8>,
+                    row: Vec<u8>,
+                    sent: usize,
+                    pulled: Arc<AtomicUsize>,
+                }
+                impl Read for Loop {
+                    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                        let total = self.head.len();
+                        let n = if self.sent < total {
+                            let n = buf.len().min(total - self.sent);
+                            buf[..n].copy_from_slice(&self.head[self.sent..self.sent + n]);
+                            n
+                        } else {
+                            let at = (self.sent - total) % self.row.len();
+                            let n = buf.len().min(self.row.len() - at);
+                            buf[..n].copy_from_slice(&self.row[at..at + n]);
+                            n
+                        };
+                        self.sent += n;
+                        self.pulled.fetch_add(n, Ordering::SeqCst);
+                        Ok(n)
+                    }
+                }
+                Ok(Box::new(Loop {
+                    head: header.to_vec(),
+                    row: row.to_vec(),
+                    sent: 0,
+                    pulled: self.1.clone(),
+                }))
+            }
+        }
+        let pulled = Arc::new(AtomicUsize::new(0));
+        let sink = Arc::new(MemorySink::default());
+        let failure = convert_csv_table(
+            &EndlessSource(cols, pulled.clone()),
+            sink.clone(),
+            0,
+            WriterConfig::default(),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(
+                failure.error,
+                TableError::Convert(ConvertError::Manifest(
+                    ManifestError::ManifestTooLarge { .. }
+                ))
+            ),
+            "{:?}",
+            failure.error
+        );
+        assert!(sink.paths().is_empty());
+        assert!(pulled.load(Ordering::SeqCst) < 40 * 1024 * 1024);
     }
 }
