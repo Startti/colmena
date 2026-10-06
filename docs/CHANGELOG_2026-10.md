@@ -521,5 +521,19 @@ que falla manda su `subgraph-usage-summary` antes del error. Sin resumen si la c
 **Tests.** `tests/usage_counted_once.rs`: raíz e hija que fallan, raíz e hija suspendidas y reanudadas, raíz
 cancelada con una llamada en vuelo; cada llamada en exactamente una fila y todo resumen antes del frame terminal.
 Mutaciones: resumen después del terminal, o solo en `GraphFinish`: fallan. Una hija que su padre descarta al
-cancelar no manda resumen: lo cubre la PR siguiente. **Estado.** done.
+cancelar no manda resumen: lo cubre §32. **Estado.** done.
+
+## 32. Facturación: el padre cobra por la hija que descartó al cancelar
+
+**Qué cambia.** Al parar el turno, el padre descarta la corrida hija en vuelo (un `subgraph`, un agente como
+tool) sin que esta llegue a su salida, así que no manda su `subgraph-usage-summary`, y el padre no cuenta lo
+anidado (§30): lo que la hija ya había llamado quedaba sin cobrar. Ahora `nested` de un `LlmUsage` es el
+`session_id` de la corrida hija que lo hizo (la más interna) y `GraphUsageSummary` lleva `run`, la corrida que
+cobra. El padre guarda lo de cada hija en `UsageLedger::unbilled` hasta ver su resumen, y al terminar (por
+cualquier salida, antes del frame terminal) manda por cada hija sin resumen un `subgraph-usage-summary` con sus
+filas: `… subgraph-usage-summary, cancelled, finish`. Una llamada en vuelo al cancelar no reporta uso y no se
+cobra en ningún lado (tampoco en `finish.usage`). **Compatibilidad.** El stream crudo (`engine.rs`) muestra
+`"nested": "<session_id>"` en un `LlmUsage` de una hija (antes `true`) y `"run"` en `graph_usage_summary`; los
+frames SSE no cambian. **Tests.** `a_cancelled_run_bills_its_calls` con la hija; mutaciones: sin el resumen por
+la hija, o sin descontar la hija que mandó el suyo, fallan. **Estado.** done.
 

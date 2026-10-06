@@ -920,13 +920,17 @@ async fn a_failed_run_bills_its_calls() {
 }
 
 /// A run cancelled after its first call, with its second in flight, bills
-/// the first before its `cancelled`.
+/// the first before its `cancelled`. A child dropped by its parent's stop
+/// sends no summary: the parent sends it on the child's behalf.
 #[tokio::test]
 #[serial]
 async fn a_cancelled_run_bills_its_calls() {
     let graph = chain(&[("agent", call("usage-model")), ("next", call("slow-model"))]);
-    let usage = |e: &DagExecutionEvent| matches!(e, DagExecutionEvent::LlmUsage { .. });
-    {
+    let usage = |e: &DagExecutionEvent| match e {
+        DagExecutionEvent::SubgraphWrapped { inner, .. } => usage_event(inner),
+        e => usage_event(e),
+    };
+    for graph in [graph.clone(), in_subgraph(graph)] {
         let model = UsageModel::new(0, "done");
         let _guard = OverrideGuard::install(model.clone());
         let frames = turn(&graph, &Arc::default(), None, usage).await;
@@ -973,4 +977,8 @@ fn assert_summaries_before(frames: &[Value], terminal: &str) {
     assert!(frames.iter().any(summary), "no summary: {frames:#?}");
     let late = frames[end..].iter().any(summary);
     assert!(!late, "a summary after {terminal}: {frames:#?}");
+}
+
+fn usage_event(event: &DagExecutionEvent) -> bool {
+    matches!(event, DagExecutionEvent::LlmUsage { .. })
 }

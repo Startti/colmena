@@ -499,6 +499,7 @@ impl DagRunUseCase {
             let mut stopped_early = false;
 
             // Usage is billed on `ledger`, summarized by `with_usage_summaries`.
+            ledger.lock().unwrap().run = session_id.clone();
 
             // Start cyclic execution loop
             while let Some(node_id) = active_queue.pop_front() {
@@ -1020,7 +1021,7 @@ impl DagRunUseCase {
                                                 entry.3 += cache_read_tokens.unwrap_or(0);
                                                 entry.4 += cache_write_tokens.unwrap_or(0);
                                                 }
-                                                yield DagExecutionEvent::LlmUsage { node_id: usage_id, prompt_tokens, completion_tokens, thinking_tokens, cache_read_tokens, cache_write_tokens, side_call, nested: false };
+                                                yield DagExecutionEvent::LlmUsage { node_id: usage_id, prompt_tokens, completion_tokens, thinking_tokens, cache_read_tokens, cache_write_tokens, side_call, nested: None };
                                             }
                                             NodeEvent::LlmToolCallStart { tool_id, tool_name, tool_args, child_scope } => {
                                                 last_tool = Some(tool_name.clone());
@@ -1746,6 +1747,8 @@ fn track_child_usage(
         node_meta,
         usage_accumulator,
         child_meta,
+        unbilled,
+        ..
     } = ledger;
     let (key, base) = match event {
         DagExecutionEvent::SubgraphWrapped { inner, path, .. } => (path.as_str(), &**inner),
@@ -1797,7 +1800,7 @@ fn track_child_usage(
             cache_read_tokens,
             cache_write_tokens,
             side_call,
-            nested: false,
+            nested: None,
             ..
         } => {
             // The node that made the call: this run's meta for it wins.
@@ -1820,13 +1823,54 @@ fn track_child_usage(
             entry.3 += cache_read_tokens.unwrap_or(0);
             entry.4 += cache_write_tokens.unwrap_or(0);
         }
+        // A child run's: its own summary bills it; until then, `unbilled`.
+        DagExecutionEvent::LlmUsage {
+            side_call,
+            nested: Some(child),
+            ..
+        } => {
+            let owner = side_call.as_ref().map_or(key, |s| {
+                key.strip_suffix(&format!("::{}", s.purpose)).unwrap_or(key)
+            });
+            let bill = unbilled.entry(child.clone()).or_default();
+            if let Some(meta) = child_meta.get(owner) {
+                bill.child_meta.insert(owner.to_string(), meta.clone());
+            }
+            let mut usage = base.clone();
+            if let DagExecutionEvent::LlmUsage { nested, .. } = &mut usage {
+                *nested = None;
+            }
+            let path = key.to_string();
+            let inner = Box::new(usage);
+            track_child_usage(
+                bill,
+                &DagExecutionEvent::SubgraphWrapped {
+                    inner,
+                    depth: 1,
+                    path,
+                },
+            );
+        }
+        DagExecutionEvent::GraphUsageSummary {
+            run: Some(child), ..
+        } => {
+            unbilled.remove(child);
+        }
         _ => {}
     }
 }
 
 /// What a run bills, shared by its loop and [`with_usage_summaries`].
+///
+/// A child run dropped by a stop never sends its summary: what it called is
+/// kept in `unbilled` until its summary comes, and summarized on its behalf
+/// when this run ends.
 #[derive(Default)]
 pub(crate) struct UsageLedger {
+    /// This run's session id: the `run` of its summary.
+    run: String,
+    /// Child run → what it called that no summary of its own billed yet.
+    unbilled: HashMap<String, UsageLedger>,
     /// Entry → who bills it (model, provider, node type, key).
     node_meta: HashMap<String, NodeMeta>,
     /// Entry → (prompt, completion, thinking, cache_read, cache_write).
@@ -1836,7 +1880,8 @@ pub(crate) struct UsageLedger {
 }
 
 impl UsageLedger {
-    /// Its summary, emptying it (none if it billed nothing).
+    /// Its summary, emptying it (none if it billed nothing), then one wrapped
+    /// (`subgraph-usage-summary`) per child run in `unbilled`.
     fn take_summaries(&mut self) -> Vec<crate::dag_engine::domain::events::DagExecutionEvent> {
         let mut entries: Vec<Value> = self
             .usage_accumulator
@@ -1844,10 +1889,26 @@ impl UsageLedger {
             .map(|(id, counts)| usage_entry(&id, counts, self.node_meta.get(&id)))
             .collect();
         entries.sort_by(|a, b| a["node_id"].as_str().cmp(&b["node_id"].as_str()));
-        if entries.is_empty() {
-            return Vec::new();
+        use crate::dag_engine::domain::events::DagExecutionEvent;
+        let run = Some(self.run.clone());
+        let mut out = Vec::new();
+        if !entries.is_empty() {
+            out.push(DagExecutionEvent::GraphUsageSummary { entries, run });
         }
-        vec![crate::dag_engine::domain::events::DagExecutionEvent::GraphUsageSummary { entries }]
+        let mut children: Vec<_> = self.unbilled.drain().collect();
+        children.sort_by(|a, b| a.0.cmp(&b.0));
+        for (child, mut bill) in children {
+            bill.run = child.clone();
+            for inner in bill.take_summaries() {
+                let (inner, path) = (Box::new(inner), child.clone());
+                out.push(DagExecutionEvent::SubgraphWrapped {
+                    inner,
+                    depth: 1,
+                    path,
+                });
+            }
+        }
+        out
     }
 }
 
@@ -2140,7 +2201,7 @@ impl SubGraphExecutorPort for DagRunUseCase {
             {
                 final_out = output.clone();
             } else if let Some(obs) = &observer {
-                if let Ok(raw) = serde_json::to_value(event.nested()) {
+                if let Ok(raw) = serde_json::to_value(event.nested(session_id)) {
                     obs.on_event(
                         crate::dag_engine::domain::observer::NodeEvent::SubgraphChildEvent(raw),
                     );
@@ -2205,7 +2266,7 @@ impl SubGraphExecutorPort for DagRunUseCase {
             {
                 final_out = output.clone();
             } else if let Some(obs) = &observer {
-                if let Ok(raw) = serde_json::to_value(event.nested()) {
+                if let Ok(raw) = serde_json::to_value(event.nested(session_id)) {
                     obs.on_event(
                         crate::dag_engine::domain::observer::NodeEvent::SubgraphChildEvent(raw),
                     );

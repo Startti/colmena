@@ -45,10 +45,10 @@ pub enum DagExecutionEvent {
         /// (`SideCall::node_id`), so a parent run bills it the same way.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         side_call: Option<SideCall>,
-        /// Made in a child run (`subgraph`, agent as a tool), whose own summary
-        /// bills it: a parent's leaves it out. Set by [`Self::nested`].
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        nested: bool,
+        /// The child run (session id) it was made in, whose own summary bills
+        /// it: a parent's leaves it out. Set by [`Self::nested`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        nested: Option<String>,
     },
     #[serde(rename = "llm_tool_call_start")]
     LlmToolCallStart {
@@ -161,7 +161,12 @@ pub enum DagExecutionEvent {
     /// Emitted just before GraphFinish. Summarises token usage per node with model and
     /// provider names for cost/audit visibility.
     #[serde(rename = "graph_usage_summary")]
-    GraphUsageSummary { entries: Vec<Value> },
+    GraphUsageSummary {
+        entries: Vec<Value>,
+        /// The run (session id) it bills, so a parent knows it was billed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        run: Option<String>,
+    },
     /// Emitted when the load_skill synthetic tool successfully loads a skill or reference.
     /// Fires alongside llm_tool_call_start/finish so frontends can render a skill-specific UI.
     #[serde(rename = "skill_loaded")]
@@ -281,12 +286,15 @@ pub struct NodeEndError {
 }
 
 impl DagExecutionEvent {
-    /// This event as it leaves a child run for its parent: a usage, wrapped or
-    /// not, is marked `nested`, so only the child's own summary bills it.
-    pub fn nested(mut self) -> Self {
+    /// This event as it leaves child run `run` for its parent: a usage, wrapped
+    /// or not, is marked `nested` in the innermost run that made it, whose
+    /// summary bills it.
+    pub fn nested(mut self, run: &str) -> Self {
         match &mut self {
-            Self::LlmUsage { nested, .. } => *nested = true,
-            Self::SubgraphWrapped { inner, .. } => **inner = inner.clone().nested(),
+            Self::LlmUsage { nested, .. } => {
+                nested.get_or_insert_with(|| run.to_string());
+            }
+            Self::SubgraphWrapped { inner, .. } => **inner = inner.clone().nested(run),
             _ => {}
         }
         self
@@ -343,7 +351,7 @@ impl DagExecutionEvent {
                 cache_read_tokens,
                 cache_write_tokens,
                 side_call,
-                nested: false,
+                nested: None,
             },
             NodeEvent::LlmToolCallStart {
                 tool_id,
@@ -758,7 +766,7 @@ mod tests {
             cache_read_tokens: None,
             cache_write_tokens: None,
             side_call: None,
-            nested: false,
+            nested: None,
         }
         .advances_heartbeat_clock());
         assert!(!DagExecutionEvent::TurnStart { turn: 1 }.advances_heartbeat_clock());
