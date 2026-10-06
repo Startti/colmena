@@ -519,7 +519,10 @@ El texto completo también queda disponible en `output.final_response` del `node
 > Una hija que el padre descarta al cancelar manda su `subgraph-usage-summary`
 > al descartarse, y sale antes de `cancelled`, con el mismo `level` y `path`
 > que el de una hija que termina. Una llamada que terminó justo cuando se paró
-> el turno también se cobra.
+> el turno también se cobra. Una llamada **en vuelo** al parar cobra el último
+> uso acumulado que el proveedor ya mandó (Gemini y Anthropic lo mandan mientras
+> responden; OpenAI solo al final, así que cortada antes no cobra nada): nunca se
+> estima. Hasta el 2026-10-06 una llamada en vuelo no se cobraba.
 >
 > Ver [§14 — Provider prompt caching](developer_guide/14_llm_deep_dive.md) para
 > la fórmula de costo y la tabla de semántica por provider.
