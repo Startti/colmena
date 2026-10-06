@@ -1584,7 +1584,7 @@ impl AgentService {
             (callback)(LlmStreamPart::LlmMessageStart);
         }
 
-        let mut completion_usage = None;
+        let completion_usage;
         let response = if let Some(callback) = on_token {
             let stream = self.llm_repository.stream(request).await?;
             use futures::StreamExt;
@@ -1600,6 +1600,12 @@ impl AgentService {
             // them an empty answer reaches the host with no why.
             let mut finish_reason: Option<String> = None;
             let mut block_reason: Option<String> = None;
+            // The provider's latest (cumulative) usage, reported once: below
+            // when the stream ends, or by the guard when the call ends first.
+            let mut pending = PendingUsage {
+                callback: callback.as_ref(),
+                latest: None,
+            };
 
             while let Some(chunk_result) = stream.next().await {
                 match chunk_result {
@@ -1644,7 +1650,7 @@ impl AgentService {
                                 }
                                 entry.function.arguments.push_str(&tc.args_chunk);
                             }
-                            LlmStreamPart::Usage(u) => completion_usage = Some(u.clone()),
+                            LlmStreamPart::Usage(u) => pending.latest = Some(u.clone()),
                             LlmStreamPart::ThinkingStart
                             | LlmStreamPart::ThinkingEnd
                             | LlmStreamPart::LlmToolCallStart(_)
@@ -1658,6 +1664,7 @@ impl AgentService {
                 }
             }
 
+            completion_usage = pending.latest.take();
             let mut final_response =
                 LlmResponse::new(captured_req_id, full_content, captured_provider)?;
             if !full_thinking.is_empty() {
@@ -1697,6 +1704,24 @@ impl AgentService {
         }
 
         Ok((response, completion_usage))
+    }
+}
+
+/// The latest usage a call's stream reported, until the call reports it. A
+/// call cut before its stream ends (dropped on a cancel, an idle abort or a
+/// parent's stop, or failed mid-stream) reports it on the drop: the provider
+/// bills what it already sent. Before the first `Usage` part there is nothing
+/// to report, and nothing is estimated.
+struct PendingUsage<'a> {
+    callback: &'a (dyn Fn(LlmStreamPart) + Send + Sync),
+    latest: Option<LlmUsage>,
+}
+
+impl Drop for PendingUsage<'_> {
+    fn drop(&mut self) {
+        if let Some(usage) = self.latest.take() {
+            (self.callback)(LlmStreamPart::Usage(usage));
+        }
     }
 }
 
@@ -2469,6 +2494,57 @@ mod tests {
         assert_eq!(response.content(), "[Empty]");
         assert_eq!(response.finish_reason(), Some("SAFETY"));
         assert_eq!(response.block_reason(), Some("SAFETY"));
+    }
+
+    /// A call that fails mid-stream reports the usage its provider already
+    /// sent, once (the provider bills it); one that ends reports its last.
+    #[tokio::test]
+    async fn a_call_cut_mid_stream_reports_its_last_usage_once() {
+        for fails in [true, false] {
+            let mut mock_llm = MockLlmRepo::new();
+            mock_llm.expect_stream().times(1).returning(move |_req| {
+                let chunk = |part| {
+                    let provider = create_config().provider().clone();
+                    Ok(LlmStreamChunk::new(
+                        LlmRequestId::new(),
+                        part,
+                        provider,
+                        false,
+                    ))
+                };
+                let mut chunks = vec![
+                    chunk(LlmStreamPart::Usage(LlmUsage::new(10, 0))),
+                    chunk(LlmStreamPart::Usage(LlmUsage::new(10, 3))),
+                ];
+                if fails {
+                    chunks.push(Err(LlmError::network_error("cut".to_string())));
+                }
+                Ok(Box::pin(futures::stream::iter(chunks)) as LlmStream)
+            });
+            let (mock_conv, _) = stateful_conv_mock(vec![]);
+            let service = AgentService::new(Arc::new(mock_llm), Arc::new(mock_conv));
+            let messages = vec![LlmMessage::user("hi".into()).unwrap()];
+            let request = LlmRequest::new(messages, create_config(), true).unwrap();
+            let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let sink = seen.clone();
+            let on_token: Option<Box<dyn Fn(LlmStreamPart) + Send + Sync>> =
+                Some(Box::new(move |part| {
+                    if let LlmStreamPart::Usage(u) = part {
+                        sink.lock().unwrap().push(u);
+                    }
+                }));
+
+            let result = service
+                .invoke_llm(request, &on_token, &create_config())
+                .await;
+
+            assert_eq!(result.is_err(), fails);
+            assert_eq!(
+                *seen.lock().unwrap(),
+                vec![LlmUsage::new(10, 3)],
+                "fails={fails}"
+            );
+        }
     }
 
     #[tokio::test]

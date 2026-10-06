@@ -1082,3 +1082,89 @@ fn assert_summaries_before(frames: &[Value], terminal: &str) {
 fn usage_event(event: &DagExecutionEvent) -> bool {
     matches!(event, DagExecutionEvent::LlmUsage { .. })
 }
+
+/// A model whose call streams `interim`, cumulative `Usage` parts (as Gemini
+/// and Anthropic do while they answer), stops the turn and then never ends:
+/// the call is in flight when the run drops it.
+struct CutModel {
+    interim: Vec<LlmUsage>,
+}
+
+#[async_trait]
+impl LlmRepository for CutModel {
+    async fn call(&self, _: LlmRequest) -> Result<LlmResponse, LlmError> {
+        unreachable!("llm_call streams")
+    }
+
+    async fn stream(&self, request: LlmRequest) -> Result<LlmStream, LlmError> {
+        let (id, provider) = (request.id().clone(), request.config().provider().clone());
+        let parts = self.interim.iter().cloned().map(LlmStreamPart::Usage);
+        let chunks: Vec<Result<LlmStreamChunk, LlmError>> = parts
+            .map(|p| Ok(LlmStreamChunk::new(id.clone(), p, provider.clone(), false)))
+            .collect();
+        let mut stop = STOP.lock().unwrap().take();
+        let hang = futures::stream::poll_fn(move |_| {
+            stop.take().inspect(|t| t.cancel());
+            std::task::Poll::Pending
+        });
+        Ok(Box::pin(futures::stream::iter(chunks).chain(hang)))
+    }
+
+    async fn health_check(&self) -> Result<(), LlmError> {
+        Ok(())
+    }
+
+    fn provider_name(&self) -> &'static str {
+        "cut-model"
+    }
+}
+
+/// A call cut mid-stream bills the last usage its provider reported, once,
+/// before `cancelled`: at the root and in a child the stop drops. A call cut
+/// before its provider reported any bills nothing (no estimate).
+#[tokio::test]
+#[serial]
+async fn a_call_cut_mid_stream_bills_what_its_provider_reported() {
+    let graph = chain(&[("agent", call("cut-model"))]);
+    let reported = LlmUsage::new(800, 40)
+        .with_thinking_tokens(25)
+        .with_cache_read_tokens(30)
+        .with_cache_write_tokens(5);
+    let interim = vec![
+        LlmUsage::new(800, 0),
+        LlmUsage::new(800, 12),
+        reported.clone(),
+    ];
+    let graphs = [
+        graph.clone(),
+        in_subgraph(graph.clone()),
+        in_subgraph(in_subgraph(graph)),
+    ];
+    for graph in graphs {
+        let frames = cut(&graph, interim.clone()).await;
+        assert_summaries_before(&frames, "cancelled");
+        let mut all = rows(&frames, "usage-summary");
+        all.extend(rows(&frames, "subgraph-usage-summary"));
+        assert_eq!(all.len(), 1, "billed once: {frames:#?}");
+        assert_eq!(usage(&all[0]), reported, "{frames:#?}");
+        assert_eq!(all[0]["model"], "cut-model", "{frames:#?}");
+
+        let frames = cut(&graph, vec![]).await;
+        assert!(
+            frames.iter().any(|f| f["type"] == "cancelled"),
+            "{frames:#?}"
+        );
+        let summary = |f: &&Value| {
+            f["type"]
+                .as_str()
+                .is_some_and(|t| t.ends_with("usage-summary"))
+        };
+        assert_eq!(frames.iter().filter(summary).count(), 0, "{frames:#?}");
+    }
+}
+
+/// One turn of `graph` against a `CutModel` streaming `interim`.
+async fn cut(graph: &Value, interim: Vec<LlmUsage>) -> Vec<Value> {
+    let _guard = OverrideGuard::install(Arc::new(CutModel { interim }));
+    turn(graph, &Arc::default(), None, never).await
+}
