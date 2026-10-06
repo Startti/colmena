@@ -472,6 +472,13 @@ El texto completo también queda disponible en `output.final_response` del `node
 > están adentro, en ningún provider (los adapters normalizan la discrepancia
 > entre las tres APIs). `total_tokens` suma las cinco columnas, cache incluido.
 >
+> `completion_tokens` y `thinking_tokens` también son **disjuntos**: el
+> razonamiento que OpenAI cuenta dentro de `completion_tokens`/`output_tokens`
+> sale de `completion_tokens` y va a `thinking_tokens` (Gemini ya lo reporta
+> aparte). Anthropic no da un conteo de thinking separado: su thinking queda en
+> `completion_tokens` y `thinking_tokens` no aparece. La salida total es
+> `completion_tokens + thinking_tokens`, contada una vez.
+>
 > `cache_read_tokens` y `cache_write_tokens` están **siempre presentes**, incluso
 > en `0`. `thinking_tokens` solo aparece si es > 0.
 >

@@ -429,3 +429,24 @@ Guía: [14_llm_deep_dive.md](developer_guide/14_llm_deep_dive.md).
 `functionCall` (también tras el chunk final) sin aviso; solo razonamiento con aviso; `error` falla; elemento solo de
 metadatos saltado; texto intacto. `agent_service` conserva las razones; `llm` las nombra solo si existen.
 **ADP.** Subir el pin; `extra_info.finish_reason` permite explicar una respuesta vacía. **Estado.** done.
+
+## 28. Facturación: el razonamiento de OpenAI se cuenta una sola vez
+
+**Qué cambia.** OpenAI cuenta `reasoning_tokens` *dentro* de `completion_tokens` (Chat Completions) y de
+`output_tokens` (Responses API). El adaptador de Chat Completions ponía `completion_tokens` entero **y**
+`thinking_tokens = reasoning_tokens`, así que `total_tokens` sumaba el razonamiento dos veces y un host que factura
+la salida como `completion + thinking` (ADP) lo cobraba dos veces. El de Responses no leía
+`output_tokens_details.reasoning_tokens`: no duplicaba, pero dejaba todo en `completion_tokens`. Ahora
+`completion_tokens` y `thinking_tokens` son disjuntos en todos los proveedores, como ya lo eran las columnas de cache:
+`LlmUsage::with_thinking_tokens_included` resta el razonamiento de la salida (saturando), y lo usan Chat Completions
+(con y sin stream) y Responses (con y sin stream, ahora por un solo `responses_usage_to_llm_usage`). Gemini ya era
+disjunto (`candidatesTokenCount` excluye los thoughts). Anthropic no reporta thinking aparte: queda dentro de
+`completion_tokens` y `thinking_tokens` es `None`. Ningún consumidor del motor cambia: `recompute_total`, el
+`SseMapper` y `usage_entry` ya sumaban las columnas como disjuntas. Guía:
+[sse_events_reference.md](sse_events_reference.md) (`usage-summary`).
+**Tests.** `openai_adapter`: `{prompt 100, completion 300, reasoning 250}` da completion 50, thinking 250, total 400
+en Chat Completions, su chunk final de stream y Responses (body y evento `response.completed`), también con cache;
+sin razonamiento la salida queda entera. `llm_config`: el helper resta y satura. Rojo antes del arreglo (5 de 10) y
+mutación (sin la resta: 7 fallan).
+**ADP.** Subir el pin: la salida de los modelos de razonamiento de OpenAI (gpt-5, o-series) baja a lo real; la
+fórmula `completion + thinking` no cambia. **Estado.** done.
