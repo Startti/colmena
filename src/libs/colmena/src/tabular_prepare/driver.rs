@@ -610,6 +610,11 @@ async fn source_gone(
     owner: &str,
     keys: Vec<String>,
 ) -> Result<PrepareOutcome, RegistryError> {
+    // Ownership first: after a lease takeover the deterministic keys are the new
+    // owner's, and a job that is not the owner deletes and releases nothing.
+    if !env.registry.still_owned(&req.source_key, owner).await? {
+        return settle_lost(env, req, &keys).await;
+    }
     if env
         .storage
         .delete_derived(&req.source_key, &keys)
@@ -672,7 +677,9 @@ async fn fail(
         }
     };
     if outcome == TerminalOutcome::Cancelled {
-        return Ok(PrepareOutcome::Cancelled);
+        // The row is not ours any more: the same decision as everywhere else, row
+        // gone (delete what this job wrote) or row taken (delete nothing).
+        return settle_lost(env, req, &keys).await;
     }
     // Best effort: the keys are tracked, so the cleanup pass removes what this
     // could not.
@@ -1641,6 +1648,135 @@ pub(crate) mod cases {
         assert!(registry.get(source).await.unwrap().is_none());
     }
 
+    pub(crate) async fn a_row_deleted_before_the_budget_ends_the_run_still_gets_its_objects_deleted(
+        registry: Arc<dyn PreparationRegistry>,
+    ) {
+        let source = fresh_source();
+        let source = source.as_str();
+        let storage = PlacedStorage::with_source(source, five_rows());
+        *storage.hang_stores_from.lock().unwrap() = Some(1);
+        let (env, gate) = gated(env(registry.clone(), storage.clone()));
+        let req = request(source, 40);
+        let run = tokio::spawn(async move { prepare_csv(&env, &req).await.unwrap() });
+        storage.hung.notified().await;
+        registry.delete(source).await.unwrap();
+        gate.fire.notify_one();
+        let out = run.await.unwrap();
+        assert!(matches!(out, PrepareOutcome::Cancelled), "{out:?}");
+        // The first part was stored; with no row it belongs to nobody.
+        assert_eq!(storage.keys(), vec![source.to_string()]);
+        assert!(registry.get(source).await.unwrap().is_none());
+    }
+
+    pub(crate) async fn a_row_deleted_before_a_storage_failure_still_gets_its_objects_deleted(
+        registry: Arc<dyn PreparationRegistry>,
+    ) {
+        let source = fresh_source();
+        let source = source.as_str();
+        let storage = PlacedStorage::with_source(source, five_rows());
+        // The second put is held; the row goes; the put then fails.
+        *storage.hang_stores_from.lock().unwrap() = Some(1);
+        *storage.fail_stores_from.lock().unwrap() = Some(1);
+        let out = run_hung_at(&registry, &storage, source, 1, || async {
+            registry.delete(source).await.unwrap();
+        })
+        .await;
+        assert!(matches!(out, PrepareOutcome::Cancelled), "{out:?}");
+        assert_eq!(storage.keys(), vec![source.to_string()]);
+        assert!(registry.get(source).await.unwrap().is_none());
+    }
+
+    /// A late word forces a second read of the file; `during` runs while that
+    /// second open is stopped.
+    async fn run_paused_at_the_second_open<F, Fut>(
+        registry: &Arc<dyn PreparationRegistry>,
+        storage: &Arc<PlacedStorage>,
+        source: &str,
+        during: F,
+    ) -> PrepareOutcome
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = ()>,
+    {
+        *storage.pause_second_open.lock().unwrap() = true;
+        let env = env(registry.clone(), storage.clone()).with_writer(WriterConfig {
+            max_rows: 2000,
+            max_bytes: usize::MAX,
+        });
+        let req = request(source, 60_000);
+        let run = tokio::spawn(async move { prepare_csv(&env, &req).await.unwrap() });
+        storage.second_open_reached.notified().await;
+        during().await;
+        storage.second_open_go.notify_one();
+        run.await.unwrap()
+    }
+
+    fn late_word_file() -> Vec<u8> {
+        let mut body = b"id\n".to_vec();
+        for i in 0..10_000 {
+            body.extend_from_slice(format!("{i}\n").as_bytes());
+        }
+        body.extend_from_slice(b"late\n");
+        body
+    }
+
+    pub(crate) async fn a_row_deleted_before_a_source_read_failure_still_gets_its_objects_deleted(
+        registry: Arc<dyn PreparationRegistry>,
+    ) {
+        let source = fresh_source();
+        let source = source.as_str();
+        let storage = PlacedStorage::with_source(source, late_word_file());
+        *storage.fail_second_open.lock().unwrap() = true;
+        let out = run_paused_at_the_second_open(&registry, &storage, source, || async {
+            registry.delete(source).await.unwrap();
+        })
+        .await;
+        assert!(matches!(out, PrepareOutcome::Cancelled), "{out:?}");
+        // The four parts the first run wrote are removed.
+        assert_eq!(storage.keys(), vec![source.to_string()]);
+        assert!(registry.get(source).await.unwrap().is_none());
+    }
+
+    pub(crate) async fn a_lease_taken_before_the_source_turns_out_missing_deletes_nothing_and_releases_nothing(
+        registry: Arc<dyn PreparationRegistry>,
+    ) {
+        let source = fresh_source();
+        let source = source.as_str();
+        let storage = PlacedStorage::with_source(source, late_word_file());
+        *storage.remove_source_on_second_open.lock().unwrap() = true;
+        let out = run_paused_at_the_second_open(&registry, &storage, source, || async {
+            take_over(&registry, source).await;
+        })
+        .await;
+        assert!(matches!(out, PrepareOutcome::Cancelled), "{out:?}");
+        // The new owner's row stays, and the keys it writes are not touched.
+        let row = registry.get(source).await.unwrap().unwrap();
+        assert_eq!(row.lease_owner.as_deref(), Some("other"));
+        assert!(storage.deleted.lock().unwrap().is_empty());
+        assert_eq!(objects_but_source(&storage, source).len(), 4);
+    }
+
+    pub(crate) async fn a_row_taken_before_the_budget_ends_the_run_keeps_the_new_owners_objects(
+        registry: Arc<dyn PreparationRegistry>,
+    ) {
+        let source = fresh_source();
+        let source = source.as_str();
+        let storage = PlacedStorage::with_source(source, five_rows());
+        *storage.hang_stores_from.lock().unwrap() = Some(1);
+        let (env, gate) = gated(env(registry.clone(), storage.clone()));
+        let req = request(source, 40);
+        let run = tokio::spawn(async move { prepare_csv(&env, &req).await.unwrap() });
+        storage.hung.notified().await;
+        take_over(&registry, source).await;
+        gate.fire.notify_one();
+        let out = run.await.unwrap();
+        assert!(matches!(out, PrepareOutcome::Cancelled), "{out:?}");
+        assert!(storage.deleted.lock().unwrap().is_empty());
+        let row = registry.get(source).await.unwrap().unwrap();
+        assert_eq!(row.lease_owner.as_deref(), Some("other"));
+        assert_eq!(row.error_code, None);
+    }
+
     pub(crate) async fn a_registry_error_at_completion_leaves_the_stored_objects_tracked_and_not_deleted(
         registry: Arc<dyn PreparationRegistry>,
     ) {
@@ -1863,5 +1999,25 @@ mod registry_tests {
     sqlite_case!(
         tabular_prepare_a_row_that_vanishes_before_the_first_tracking_write_stops_the_job_before_any_object,
         a_row_that_vanishes_before_the_first_tracking_write_stops_the_job_before_any_object
+    );
+    sqlite_case!(
+        tabular_prepare_a_row_deleted_before_the_budget_ends_the_run_still_gets_its_objects_deleted,
+        a_row_deleted_before_the_budget_ends_the_run_still_gets_its_objects_deleted
+    );
+    sqlite_case!(
+        tabular_prepare_a_row_deleted_before_a_storage_failure_still_gets_its_objects_deleted,
+        a_row_deleted_before_a_storage_failure_still_gets_its_objects_deleted
+    );
+    sqlite_case!(
+        tabular_prepare_a_row_deleted_before_a_source_read_failure_still_gets_its_objects_deleted,
+        a_row_deleted_before_a_source_read_failure_still_gets_its_objects_deleted
+    );
+    sqlite_case!(
+        tabular_prepare_a_lease_taken_before_the_source_turns_out_missing_deletes_nothing_and_releases_nothing,
+        a_lease_taken_before_the_source_turns_out_missing_deletes_nothing_and_releases_nothing
+    );
+    sqlite_case!(
+        tabular_prepare_a_row_taken_before_the_budget_ends_the_run_keeps_the_new_owners_objects,
+        a_row_taken_before_the_budget_ends_the_run_keeps_the_new_owners_objects
     );
 }

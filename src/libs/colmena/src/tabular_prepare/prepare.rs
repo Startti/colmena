@@ -207,6 +207,12 @@ pub(crate) mod fake {
         pub release_hang: tokio::sync::Notify,
         /// The second open of a source finds it deleted.
         pub remove_source_on_second_open: Mutex<bool>,
+        /// The second open stops until `second_open_go`, after saying so.
+        pub pause_second_open: Mutex<bool>,
+        pub second_open_reached: tokio::sync::Notify,
+        pub second_open_go: tokio::sync::Notify,
+        /// The second open answers an unreachable storage.
+        pub fail_second_open: Mutex<bool>,
     }
 
     impl PlacedStorage {
@@ -261,6 +267,13 @@ pub(crate) mod fake {
                     mime_type: String::new(),
                     filename: String::new(),
                 });
+            }
+            if n == 2 && *self.pause_second_open.lock().unwrap() {
+                self.second_open_reached.notify_one();
+                self.second_open_go.notified().await;
+            }
+            if n == 2 && *self.fail_second_open.lock().unwrap() {
+                return Err(StorageError::BackendUnavailable("secret-down".into()));
             }
             if n == 2 && *self.remove_source_on_second_open.lock().unwrap() {
                 self.objects.lock().unwrap().remove(key);

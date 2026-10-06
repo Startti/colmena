@@ -414,6 +414,26 @@ mod tests {
         tabular_prepare_pg_a_row_that_vanishes_before_the_first_tracking_write_stops_the_job_before_any_object,
         a_row_that_vanishes_before_the_first_tracking_write_stops_the_job_before_any_object
     );
+    pg_driver_case!(
+        tabular_prepare_pg_a_row_deleted_before_the_budget_ends_the_run_still_gets_its_objects_deleted,
+        a_row_deleted_before_the_budget_ends_the_run_still_gets_its_objects_deleted
+    );
+    pg_driver_case!(
+        tabular_prepare_pg_a_row_deleted_before_a_storage_failure_still_gets_its_objects_deleted,
+        a_row_deleted_before_a_storage_failure_still_gets_its_objects_deleted
+    );
+    pg_driver_case!(
+        tabular_prepare_pg_a_row_deleted_before_a_source_read_failure_still_gets_its_objects_deleted,
+        a_row_deleted_before_a_source_read_failure_still_gets_its_objects_deleted
+    );
+    pg_driver_case!(
+        tabular_prepare_pg_a_lease_taken_before_the_source_turns_out_missing_deletes_nothing_and_releases_nothing,
+        a_lease_taken_before_the_source_turns_out_missing_deletes_nothing_and_releases_nothing
+    );
+    pg_driver_case!(
+        tabular_prepare_pg_a_row_taken_before_the_budget_ends_the_run_keeps_the_new_owners_objects,
+        a_row_taken_before_the_budget_ends_the_run_keeps_the_new_owners_objects
+    );
     pg_case!(
         tabular_prepare_pg_a_deleting_row_is_never_taken_by_an_older_format_claim,
         a_deleting_row_is_never_taken_by_an_older_format_claim
