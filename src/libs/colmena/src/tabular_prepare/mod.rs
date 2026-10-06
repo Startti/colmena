@@ -25,6 +25,7 @@ use thiserror::Error;
 use tokio::time::Instant;
 
 pub mod gc;
+pub mod infer;
 pub mod manifest;
 pub mod part_sink;
 pub mod ports;

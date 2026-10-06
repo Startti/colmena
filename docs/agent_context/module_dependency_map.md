@@ -5,7 +5,7 @@
 
 **How to use (for the exploration/spec phase):** before opening files to assess a change, look up the target file below. **Used by** is its blast radius — the files that break if you change its public surface. **Depends on** is what it needs. Start by reading only those, not the whole repo.
 
-- Files indexed: **429**
+- Files indexed: **430**
 - Modules with at least one importer: **206**
 
 ## Blast-radius ranking (change these with the most care)
@@ -2104,9 +2104,14 @@
 - **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
 - Depends on (3): `storage::domain`, `tabular_prepare::registry`, `tabular_prepare::sqlite_registry`
 
+#### `src/libs/colmena/src/tabular_prepare/infer.rs`
+- Module: `tabular_prepare::infer`
+- **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
+- Depends on (1): `tabular_prepare::manifest`
+
 #### `src/libs/colmena/src/tabular_prepare/manifest.rs`
 - Module: `tabular_prepare::manifest`
-- **Used by (2)**: `src/libs/colmena/src/tabular_prepare/part_sink.rs`, `src/libs/colmena/src/tabular_prepare/writer.rs`
+- **Used by (3)**: `src/libs/colmena/src/tabular_prepare/infer.rs`, `src/libs/colmena/src/tabular_prepare/part_sink.rs`, `src/libs/colmena/src/tabular_prepare/writer.rs`
 - Depends on (0): — (no intra-crate imports)
 
 #### `src/libs/colmena/src/tabular_prepare/mod.rs`
