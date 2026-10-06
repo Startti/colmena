@@ -31,6 +31,7 @@ pub mod ports;
 pub mod postgres_registry;
 pub mod registry;
 pub mod sqlite_registry;
+pub mod writer;
 
 #[cfg(test)]
 mod registry_contract;
