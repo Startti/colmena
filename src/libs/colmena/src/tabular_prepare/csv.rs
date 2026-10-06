@@ -874,7 +874,9 @@ pub(crate) fn open_csv_with<R: Read + Send + 'static>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tabular_prepare::manifest::ColumnType;
     use crate::tabular_prepare::scan::MAX_RECORD_BYTES;
+    use arrow_array::{Array, StringArray};
     use std::io::{Cursor, Read};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
@@ -1117,6 +1119,30 @@ mod tests {
     }
 
     #[test]
+    fn column_names_are_cleaned_and_unique() {
+        let raw: Vec<String> = ["id", "", "id", " name ", "ID", "\u{0}x", "  "]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(
+            column_names(&raw),
+            vec!["id", "column2", "id_2", " name ", "ID", "_x", "column7"]
+        );
+        // Deterministic.
+        assert_eq!(column_names(&raw), column_names(&raw));
+        // A long name is cut, and a suffix still fits inside the limit.
+        let long = "é".repeat(MAX_COLUMN_NAME_CHARS + 20);
+        let cut = column_names(&[long.clone(), long]);
+        assert!(cut
+            .iter()
+            .all(|n| n.chars().count() <= MAX_COLUMN_NAME_CHARS));
+        assert_ne!(cut[0], cut[1]);
+        // A suffixed name never collides with a later real one.
+        let raw: Vec<String> = ["a", "a", "a_2"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(column_names(&raw), vec!["a", "a_2", "a_2_2"]);
+    }
+
+    #[test]
     fn a_finished_windows_1252_stream_keeps_answering_end_of_file() {
         // The decoder panics when used after its last call; a parser that
         // reads again after the end must get Ok(0), not a panic.
@@ -1127,6 +1153,286 @@ mod tests {
         for _ in 0..3 {
             assert_eq!(p.reader.read(&mut buf).unwrap(), 0);
         }
+    }
+
+    fn open(bytes: &[u8]) -> OpenedCsv {
+        open_csv(Cursor::new(bytes.to_vec()), None).unwrap()
+    }
+
+    fn rows_of(opened: OpenedCsv) -> Vec<Vec<Option<String>>> {
+        let mut out = Vec::new();
+        for batch in opened.batches {
+            let batch = batch.unwrap();
+            for r in 0..batch.num_rows() {
+                out.push(
+                    (0..batch.num_columns())
+                        .map(|c| {
+                            let col = batch
+                                .column(c)
+                                .as_any()
+                                .downcast_ref::<StringArray>()
+                                .unwrap();
+                            (!col.is_null(r)).then(|| col.value(r).to_string())
+                        })
+                        .collect(),
+                );
+            }
+        }
+        out
+    }
+
+    fn cell(s: &str) -> Option<String> {
+        Some(s.to_string())
+    }
+
+    #[test]
+    fn the_header_is_row_one_and_the_types_come_from_the_sample() {
+        let o = open(b"id,code,price\n1,00123,1.5\n2,01234,2.5\n");
+        let cols: Vec<_> = o
+            .schema
+            .columns
+            .iter()
+            .map(|c| (c.name.as_str(), c.column_type))
+            .collect();
+        assert_eq!(
+            cols,
+            vec![
+                ("id", ColumnType::Int),
+                ("code", ColumnType::String),
+                ("price", ColumnType::Float)
+            ]
+        );
+        assert_eq!(o.delimiter, b',');
+        assert_eq!(o.sample_rows, 2);
+        assert_eq!(rows_of(o).len(), 2);
+    }
+
+    #[test]
+    fn cells_come_out_verbatim_with_empty_as_null() {
+        let csv = "a;b;c\r\n\"x;y\";\"line1\nline2\";\"say \"\"hi\"\"\"\r\n007;;\r\n";
+        let rows = rows_of(open(csv.as_bytes()));
+        assert_eq!(
+            rows[0],
+            vec![cell("x;y"), cell("line1\nline2"), cell("say \"hi\"")]
+        );
+        assert_eq!(rows[1], vec![cell("007"), None, None]);
+    }
+
+    #[test]
+    fn a_bom_and_windows_1252_are_handled_end_to_end() {
+        let mut bytes = vec![0xEF, 0xBB, 0xBF];
+        bytes.extend_from_slice("name,city\nZoë,São Paulo\n".as_bytes());
+        assert_eq!(
+            rows_of(open(&bytes))[0],
+            vec![cell("Zoë"), cell("São Paulo")]
+        );
+        let o = open(b"name,note\ncaf\xE9,\x80\n");
+        assert_eq!(o.encoding, Encoding::Windows1252);
+        assert_eq!(rows_of(o)[0], vec![cell("café"), cell("€")]);
+    }
+
+    #[test]
+    fn a_header_only_file_has_a_schema_and_no_rows() {
+        let o = open(b"a,b,c\n");
+        assert_eq!(o.schema.columns.len(), 3);
+        assert!(o
+            .schema
+            .columns
+            .iter()
+            .all(|c| c.column_type == ColumnType::String));
+        assert_eq!(rows_of(o).len(), 0);
+    }
+
+    #[test]
+    fn a_short_row_is_null_padded_and_a_long_row_is_an_error() {
+        let rows = rows_of(open(b"a,b,c\n1,2,3\n4,5\n"));
+        assert_eq!(rows[1], vec![cell("4"), cell("5"), None]);
+        let o = open(b"a,b\n1,2\n3,4,5\n");
+        let err = o.batches.last().unwrap().unwrap_err();
+        assert!(matches!(err, CsvError::Parse(_)), "{err:?}");
+    }
+
+    #[test]
+    fn empty_input_and_too_many_columns_are_typed_errors() {
+        assert_eq!(
+            open_csv(Cursor::new(Vec::new()), None).err().unwrap(),
+            CsvError::Empty
+        );
+        let header = (0..=MAX_COLUMNS)
+            .map(|i| format!("c{i}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let err = open_csv(Cursor::new(format!("{header}\n1\n").into_bytes()), None)
+            .err()
+            .unwrap();
+        assert_eq!(err, CsvError::TooManyColumns { limit: MAX_COLUMNS });
+        let header = (0..MAX_COLUMNS)
+            .map(|i| format!("c{i}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        assert!(open_csv(Cursor::new(format!("{header}\n").into_bytes()), None).is_ok());
+    }
+
+    /// Generates `rows` rows of "i,x" lazily and counts what was pulled.
+    struct Rows {
+        next: u64,
+        rows: u64,
+        pending: Vec<u8>,
+        pulled: Arc<AtomicUsize>,
+    }
+
+    impl Rows {
+        fn new(rows: u64, pulled: Arc<AtomicUsize>) -> Self {
+            Self {
+                next: 0,
+                rows,
+                pending: b"id,v\n".to_vec(),
+                pulled,
+            }
+        }
+    }
+
+    impl Read for Rows {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            while self.pending.len() < buf.len().min(32 * 1024) && self.next < self.rows {
+                self.pending
+                    .extend_from_slice(format!("{},x\n", self.next).as_bytes());
+                self.next += 1;
+            }
+            let n = buf.len().min(self.pending.len());
+            buf[..n].copy_from_slice(&self.pending[..n]);
+            self.pending.drain(..n);
+            self.pulled.fetch_add(n, Ordering::SeqCst);
+            Ok(n)
+        }
+    }
+
+    #[test]
+    fn five_million_rows_stream_in_bounded_batches_without_reading_ahead() {
+        let pulled = Arc::new(AtomicUsize::new(0));
+        let o = open_csv(Rows::new(5_000_000, pulled.clone()), None).unwrap();
+        assert_eq!(o.sample_rows, INFERENCE_ROWS);
+        let (mut rows, mut largest, mut worst_ahead) = (0usize, 0usize, 0usize);
+        for batch in o.batches {
+            let batch = batch.unwrap();
+            largest = largest.max(batch.num_rows());
+            rows += batch.num_rows();
+            // A row is at most 12 bytes here. Whatever has been pulled is what
+            // was consumed plus the sample and a few batches, never the file.
+            let consumed = rows * 12;
+            worst_ahead = worst_ahead.max(pulled.load(Ordering::SeqCst).saturating_sub(consumed));
+        }
+        assert_eq!(rows, 5_000_000);
+        assert!(largest <= BATCH_ROWS, "a batch of {largest} rows");
+        assert!(
+            worst_ahead <= SNIFF_BYTES + 4 * BATCH_ROWS * 12,
+            "read {worst_ahead} bytes ahead"
+        );
+    }
+
+    #[test]
+    fn batches_shrink_for_wide_files() {
+        let cols = 2000;
+        let header = (0..cols)
+            .map(|i| format!("c{i}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let row = vec!["1"; cols].join(",");
+        let csv = format!("{header}\n{}", format!("{row}\n").repeat(1500));
+        let o = open(csv.as_bytes());
+        let mut total = 0;
+        for b in o.batches {
+            let b = b.unwrap();
+            assert!(
+                b.num_rows() * cols <= BATCH_CELLS,
+                "{} cells",
+                b.num_rows() * cols
+            );
+            total += b.num_rows();
+        }
+        assert_eq!(total, 1500);
+    }
+
+    #[test]
+    fn the_sample_stops_at_its_byte_cap_and_every_row_still_comes_out() {
+        // 5,000 rows of about 4 KiB: the sample (16 MiB) ends near row 4,000.
+        let big = "x".repeat(4000);
+        let csv = format!("a,b\n{}", format!("1,{big}\n").repeat(5000));
+        let o = open(csv.as_bytes());
+        assert!(
+            o.sample_rows < INFERENCE_ROWS && o.sample_rows > 3000,
+            "{}",
+            o.sample_rows
+        );
+        assert!(
+            o.sample_bytes < SAMPLE_MAX_BYTES + 64 * 1024,
+            "{}",
+            o.sample_bytes
+        );
+        let rows = rows_of(o);
+        assert_eq!(rows.len(), 5000);
+        assert!(rows
+            .iter()
+            .all(|r| r[0] == cell("1") && r[1].as_deref() == Some(big.as_str())));
+    }
+
+    #[test]
+    fn guard_errors_surface_typed_from_the_batches() {
+        // A line past the limit after the sample.
+        let mut csv = b"a,b\n".to_vec();
+        for _ in 0..INFERENCE_ROWS + 100 {
+            csv.extend_from_slice(b"1,2\n");
+        }
+        csv.extend(std::iter::repeat_n(b'x', MAX_RECORD_BYTES + 10));
+        let results: Vec<_> = open(&csv).batches.take(1000).collect();
+        // The rows before the long line arrive, then exactly one error ends it.
+        assert_eq!(results.iter().filter(|r| r.is_err()).count(), 1);
+        let err = results.last().unwrap().as_ref().unwrap_err();
+        assert!(matches!(
+            *err,
+            CsvError::RecordTooLong {
+                limit: MAX_RECORD_BYTES,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_line_guard_error_during_the_sample_is_typed_too() {
+        let mut csv = b"a,b\n".to_vec();
+        csv.extend(std::iter::repeat_n(b'x', MAX_RECORD_BYTES + 10));
+        let err = open_csv(Cursor::new(csv), None).err().unwrap();
+        assert!(matches!(
+            err,
+            CsvError::RecordTooLong {
+                limit: MAX_RECORD_BYTES,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_one_column_file_keeps_its_empty_cells_as_null_rows() {
+        let o = open(b"name\nann\n\nbob\n\n\ncy\n\n");
+        let stats = o.stats.clone();
+        let rows: Vec<_> = rows_of(o).into_iter().map(|r| r[0].clone()).collect();
+        assert_eq!(
+            rows,
+            vec![cell("ann"), None, cell("bob"), None, None, cell("cy")]
+        );
+        assert_eq!((stats.blank_rows(), stats.blank_dropped()), (3, 1));
+    }
+
+    #[test]
+    fn blank_lines_in_a_multi_column_file_are_dropped_and_reported() {
+        let o = open(b"a,b\n1,2\n\n3,4\n\n\n");
+        let stats = o.stats.clone();
+        let rows = rows_of(o);
+        assert_eq!(
+            rows,
+            vec![vec![cell("1"), cell("2")], vec![cell("3"), cell("4")]]
+        );
+        assert_eq!((stats.blank_rows(), stats.blank_dropped()), (0, 3));
     }
 
     /// Accented UTF-8 text with one stray byte in the middle.
@@ -1213,12 +1519,162 @@ mod tests {
     }
 
     #[test]
+    fn a_late_stray_byte_after_the_sample_is_replaced_and_reported_through_the_batches() {
+        let mut bytes = b"a,b\n".to_vec();
+        for _ in 0..SNIFF_BYTES / 8 {
+            bytes.extend_from_slice("é,ñ\n".as_bytes());
+        }
+        bytes.extend_from_slice(b"x\xFF,y\n");
+        let o = open(&bytes);
+        let (stats, enc) = (o.decode.clone(), o.encoding);
+        let rows = rows_of(o);
+        assert_eq!(enc, Encoding::Utf8);
+        assert_eq!(rows.last().unwrap()[0].as_deref(), Some("x\u{FFFD}"));
+        assert_eq!((stats.invalid(), stats.plausibly_utf8()), (1, true));
+    }
+
+    #[test]
+    fn an_ascii_sample_followed_by_late_accents_is_not_plausibly_utf8() {
+        let mut bytes = b"a,b\n".to_vec();
+        for _ in 0..SNIFF_BYTES / 4 + 100 {
+            bytes.extend_from_slice(b"1,x\n");
+        }
+        bytes.extend_from_slice(b"caf\xE9,2\nna\xEFve,3\n");
+        let o = open(&bytes);
+        assert_eq!(o.encoding, Encoding::Utf8);
+        let stats = o.decode.clone();
+        let _ = rows_of(o);
+        assert_eq!((stats.invalid(), stats.valid_multibyte()), (2, 0));
+        assert!(!stats.plausibly_utf8());
+    }
+
+    #[test]
     fn the_sample_count_counts_sequences_not_bytes_and_a_cut_end_only_when_it_is_the_end() {
         assert_eq!(count_utf8("é日".as_bytes(), true), (2, 0));
         assert_eq!(count_utf8(b"a\xFF\xC3\xA9", true), (1, 1));
         // A character cut by a sample limit is not invalid; at the real end it is.
         assert_eq!(count_utf8(b"ab\xE2\x82", false), (0, 0));
         assert_eq!(count_utf8(b"ab\xE2\x82", true), (0, 1));
+    }
+
+    /// The most memory one raw batch may hold: its text with the builder's
+    /// capacity doubling, plus offsets and validity for the cells.
+    fn raw_batch_bound() -> usize {
+        2 * BATCH_BYTES + 5 * 1024 * 1024
+    }
+
+    fn largest_batch(o: OpenedCsv) -> (usize, usize) {
+        let (mut rows, mut worst) = (0, 0);
+        for b in o.batches {
+            let b = b.unwrap();
+            rows += b.num_rows();
+            worst = worst.max(b.get_array_memory_size());
+        }
+        (rows, worst)
+    }
+
+    #[test]
+    fn rows_of_wide_text_are_batched_by_bytes_not_only_by_rows() {
+        // 400 rows of 100 KiB: 40 MB of text in few rows. Before the byte
+        // budget this was one batch of 52 MB (and 8,192 such rows, 1 GiB).
+        let cell = "x".repeat(100 * 1024);
+        let row = format!("{cell},1\n");
+        let csv = format!("t,n\n{}", row.repeat(400));
+        let (rows, worst) = largest_batch(open(csv.as_bytes()));
+        assert_eq!(rows, 400);
+        assert!(worst <= raw_batch_bound(), "a batch of {worst} bytes");
+    }
+
+    #[test]
+    fn rows_at_the_record_limit_fill_a_batch_with_a_few_rows_and_still_all_arrive() {
+        let cell = "y".repeat(MAX_RECORD_BYTES - 10);
+        let csv = format!("t,n\n{}", format!("{cell},1\n").repeat(40));
+        let (rows, worst) = largest_batch(open(csv.as_bytes()));
+        assert_eq!(rows, 40);
+        assert!(worst <= raw_batch_bound(), "a batch of {worst} bytes");
+    }
+
+    #[test]
+    fn transcoding_that_triples_the_size_cannot_overflow_a_batch() {
+        // 0x80 is the euro sign in Windows-1252: one byte in, three bytes out.
+        // 150 rows of 100 KiB is 15 MB in the file and 45 MB as text.
+        let mut csv = b"t,n\n".to_vec();
+        for _ in 0..150 {
+            csv.extend(std::iter::repeat_n(0x80u8, 100 * 1024));
+            csv.extend_from_slice(b",1\n");
+        }
+        let o = open(&csv);
+        assert_eq!(o.encoding, Encoding::Windows1252);
+        let (rows, worst) = largest_batch(o);
+        assert_eq!(rows, 150);
+        assert!(worst <= raw_batch_bound(), "a batch of {worst} bytes");
+    }
+
+    #[test]
+    fn a_wide_file_is_sampled_over_fewer_rows_and_still_arrives_whole() {
+        let cols = 4000;
+        let header = (0..cols)
+            .map(|i| format!("c{i}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let row = vec!["1"; cols].join(",");
+        let csv = format!("{header}\n{}", format!("{row}\n").repeat(1200));
+        let o = open(csv.as_bytes());
+        // 2,000,000 cells at 4,000 per row: 500 rows decide the types.
+        assert_eq!(o.sample_rows, SAMPLE_MAX_CELLS / cols);
+        assert_eq!(largest_batch(o).0, 1200);
+    }
+
+    #[test]
+    fn short_rows_are_padded_and_counted_and_long_rows_are_an_error_naming_the_row() {
+        let o = open(b"a,b,c\n1,2,3\n4,5\n6\n7,8,9\n");
+        let stats = o.stats.clone();
+        let rows = rows_of(o);
+        assert_eq!(rows.len(), 4);
+        assert_eq!(rows[1], vec![cell("4"), cell("5"), None]);
+        assert_eq!(stats.padded_rows(), 2);
+
+        let o = open(b"a,b\n1,2\n3,4,5\n");
+        let err = o.batches.last().unwrap().unwrap_err();
+        assert_eq!(
+            err,
+            CsvError::Parse("row 2 has more fields than the header".into())
+        );
+    }
+
+    #[test]
+    fn identical_header_names_are_resolved_in_linear_work() {
+        let raw = vec!["id".to_string(); MAX_COLUMNS];
+        let (names, tried) = column_names_counted(&raw);
+        assert_eq!(names.len(), MAX_COLUMNS);
+        // One probe for the first, one per repeat: not 134 million.
+        assert!(tried <= 2 * MAX_COLUMNS, "{tried} probes");
+        let unique: HashSet<_> = names.iter().collect();
+        assert_eq!(unique.len(), MAX_COLUMNS);
+        assert_eq!(names[1], "id_2");
+        assert_eq!(names[MAX_COLUMNS - 1], format!("id_{MAX_COLUMNS}"));
+        // A real header named like a generated one is still not lost.
+        let raw: Vec<String> = ["a", "a", "a_3", "a", "a"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(column_names(&raw), vec!["a", "a_2", "a_3", "a_4", "a_5"]);
+    }
+
+    #[test]
+    fn a_wide_batch_holds_what_its_cells_need_and_not_kilobytes_per_column() {
+        // 700 columns and 5 rows: 3,500 cells of 3 bytes. A builder started
+        // empty keeps about 5 KiB per column (3.5 MiB here).
+        let cols = 700;
+        let header = (0..cols)
+            .map(|i| format!("c{i}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let row = vec!["abc"; cols].join(",");
+        let csv = format!("{header}\n{}", format!("{row}\n").repeat(5));
+        let b = open(csv.as_bytes()).batches.next().unwrap().unwrap();
+        let held = b.get_array_memory_size();
+        assert!(held < 400 * 1024, "{held} bytes for 3,500 three-byte cells");
     }
 
     #[test]
