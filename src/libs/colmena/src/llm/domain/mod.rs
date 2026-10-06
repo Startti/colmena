@@ -28,7 +28,7 @@ pub mod value_objects;
 
 pub use attachments::{
     AttachmentError, AttachmentRegistry, AttachmentSource, ConversationAttachment,
-    StaleAttachmentQuery, UpsertAttachmentInput,
+    StaleAttachmentQuery, UpsertAttachmentInput, UpsertOutcome,
 };
 pub use decision_model::{
     Answer, ChoiceOption, DecisionRequest, DecisionResponse, DecisionUsage, NoulCriteria, Question,

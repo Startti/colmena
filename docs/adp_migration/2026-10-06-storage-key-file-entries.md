@@ -37,3 +37,10 @@ el motor se comporta exactamente como antes, para cualquier tamaño.
   `match` exhaustivo sobre ese tipo deja de compilar. Comprobado en el repo de ADP
   (no en este): `git grep FileSource -- apps` no devuelve ningún resultado, así que
   no hay `match` que actualizar.
+- **Filas de `conversation_attachments`.** El motor registra estos archivos con
+  `origin = 'host_storage_ref'` (valor nuevo; no hay columna ni migración) y
+  `storage_key` igual a la llave que mandó ADP. El objeto es de ADP, no del motor. Si
+  ADP lee esa tabla (lectura directa), debe tratar ese valor de `origin` como «objeto
+  ajeno al motor». La clase de una fila (referencia del host o copia del motor) no
+  cambia nunca: si el mismo `id` se vuelve a registrar en la otra clase para el mismo
+  proveedor, el registro conserva la fila tal cual y el motor lo avisa.

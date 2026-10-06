@@ -1,6 +1,6 @@
 use crate::llm::domain::{
     AttachmentError, AttachmentRegistry, AttachmentSource, ConversationAttachment, ProviderKind,
-    StaleAttachmentQuery, UpsertAttachmentInput,
+    StaleAttachmentQuery, UpsertAttachmentInput, UpsertOutcome,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, NaiveDateTime, Utc};
@@ -133,12 +133,19 @@ fn row_to_attachment(
 #[async_trait]
 impl AttachmentRegistry for SqliteAttachmentRegistry {
     async fn upsert(&self, input: UpsertAttachmentInput) -> Result<(), AttachmentError> {
+        self.upsert_checked(input).await.map(|_| ())
+    }
+
+    async fn upsert_checked(
+        &self,
+        input: UpsertAttachmentInput,
+    ) -> Result<UpsertOutcome, AttachmentError> {
         let provider_str = input.provider.to_string();
         let source_kind = input.source.kind_str().to_string();
         let source_value = input.source.value().map(|s| s.to_string());
         let size_db: Option<i64> = input.size_bytes.map(|n| n as i64);
 
-        sqlx::query(
+        let done = sqlx::query(
             "INSERT INTO conversation_attachments (
                 agent_session_id, document_id, provider, provider_file_id,
                 mime_type, filename, size_bytes, label, description,
@@ -156,7 +163,9 @@ impl AttachmentRegistry for SqliteAttachmentRegistry {
                 source_value     = excluded.source_value,
                 storage_key      = COALESCE(excluded.storage_key, conversation_attachments.storage_key),
                 origin           = COALESCE(excluded.origin, conversation_attachments.origin),
-                refreshed_at     = CURRENT_TIMESTAMP",
+                refreshed_at     = CURRENT_TIMESTAMP
+            WHERE (COALESCE(conversation_attachments.origin, '') = 'host_storage_ref')
+                = (COALESCE(excluded.origin, '') = 'host_storage_ref')",
         )
         .bind(&input.agent_session_id)
         .bind(&input.document_id)
@@ -174,7 +183,13 @@ impl AttachmentRegistry for SqliteAttachmentRegistry {
         .execute(&*self.pool)
         .await
         .map_err(|e| AttachmentError::RepositoryFailed(format!("upsert: {}", e)))?;
-        Ok(())
+        // 0 rows: the conflict branch's WHERE refused a write of the other
+        // ownership class and left the row exactly as it was.
+        Ok(if done.rows_affected() == 0 {
+            UpsertOutcome::OwnershipConflict
+        } else {
+            UpsertOutcome::Written
+        })
     }
 
     async fn lookup(

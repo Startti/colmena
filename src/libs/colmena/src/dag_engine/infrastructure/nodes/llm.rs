@@ -2455,8 +2455,9 @@ impl ExecutableNode for LlmNode {
                         // agent_session_id, not just same-provider turns.
                         a.provider == provider_kind
                             || a.provider == crate::llm::domain::ProviderKind::Generated
-                            || a.origin.as_deref()
-                                == Some(crate::llm::domain::attachments::origin::USER_UPLOAD)
+                            || crate::llm::domain::attachments::origin::is_user_supplied(
+                                a.origin.as_deref(),
+                            )
                     }) {
                         // Prefer provider-specific row over the synthetic
                         // Generated row when both exist (= cross-provider
