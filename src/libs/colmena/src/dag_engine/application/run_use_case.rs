@@ -1048,37 +1048,10 @@ impl DagRunUseCase {
                                             NodeEvent::SubgraphChildEvent(raw) => {
                                                 // Re-yield child events preserving their original node IDs.
                                                 // GraphFinish is suppressed — SubgraphNodeFinish (below) serves that role.
-                                                // Also intercept NodeStart and LlmUsage to populate tracking maps.
+                                                // Also bill what they say (`track_child_usage`).
                                                 if let Ok(child_event) = serde_json::from_value::<DagExecutionEvent>(raw) {
-                                                    // Extract tracking data before moving child_event into yield
-                                                    match &child_event {
-                                                        DagExecutionEvent::NodeStart { node_id: cid, node_type: ctype, inputs, config } => {
-                                                            let model = inputs.get("model").or_else(|| config.get("model"))
-                                                                .and_then(|v| v.as_str()).map(|s| s.to_string())
-                                                                .or_else(|| crate::dag_engine::domain::router_rules::default_usage_model(ctype, config).map(str::to_string));
-                                                            let provider = inputs.get("provider").or_else(|| config.get("provider"))
-                                                                .and_then(|v| v.as_str()).map(|s| s.to_string());
-                                                            let provider_key_id = config.get("provider_key_id")
-                                                                .and_then(|v| v.as_str()).map(|s| s.to_string());
-                                                            node_meta.insert(cid.clone(), NodeMeta { model, provider, node_type: ctype.clone(), provider_key_id });
-                                                        }
-                                                        DagExecutionEvent::LlmUsage { node_id: cid, prompt_tokens, completion_tokens, thinking_tokens, cache_read_tokens, cache_write_tokens, side_call } => {
-                                                            if let Some(s) = side_call {
-                                                                let owner = cid.strip_suffix(&format!("::{}", s.purpose)).unwrap_or(cid);
-                                                                record_side_call_meta(&mut node_meta, cid, owner, Some(s));
-                                                            }
-                                                            let entry = usage_accumulator.entry(cid.clone()).or_insert((0, 0, 0, 0, 0));
-                                                            entry.0 += prompt_tokens;
-                                                            entry.1 += completion_tokens;
-                                                            entry.2 += thinking_tokens.unwrap_or(0);
-                                                            entry.3 += cache_read_tokens.unwrap_or(0);
-                                                            entry.4 += cache_write_tokens.unwrap_or(0);
-                                                        }
-                                                        DagExecutionEvent::GraphFinish { .. } => {
-                                                            // suppressed
-                                                        }
-                                                        _ => {}
-                                                    }
+                                                    // Bill it before moving child_event into yield.
+                                                    track_child_usage(&mut node_meta, &mut usage_accumulator, &child_event);
                                                     match child_event {
                                                         DagExecutionEvent::GraphFinish { .. } => {}
                                                         // Grandchild+ event that already crossed one subgraph
@@ -1763,6 +1736,96 @@ fn record_side_call_meta(
             provider_key_id,
         },
     );
+}
+
+/// Bills child event `event` into this run's usage: a `NodeStart` or a
+/// `UsageIdentity` names the model of an entry, an `LlmUsage` adds to it.
+///
+/// A wrapped event bills like a base one. Each provider call reaches this
+/// run's stream exactly once, at whatever depth it was made (a tool inside a
+/// subgraph, a `for_each` row inside a tool, a grandchild graph), and
+/// `finish.usage` already counts every one of them, so `usage-summary` must
+/// too. Counting only base events left the deeper ones out of it.
+fn track_child_usage(
+    node_meta: &mut HashMap<String, NodeMeta>,
+    usage_accumulator: &mut HashMap<String, (u32, u32, u32, u32, u32)>,
+    event: &crate::dag_engine::domain::events::DagExecutionEvent,
+) {
+    use crate::dag_engine::domain::events::DagExecutionEvent;
+    match event {
+        DagExecutionEvent::SubgraphWrapped { inner, .. } => {
+            track_child_usage(node_meta, usage_accumulator, inner)
+        }
+        DagExecutionEvent::NodeStart {
+            node_id,
+            node_type,
+            inputs,
+            config,
+        } => {
+            let field = |key: &str| {
+                inputs
+                    .get(key)
+                    .or_else(|| config.get(key))
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+            };
+            let model = field("model").or_else(|| {
+                crate::dag_engine::domain::router_rules::default_usage_model(node_type, config)
+                    .map(str::to_string)
+            });
+            let provider_key_id = config
+                .get("provider_key_id")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            let meta = NodeMeta {
+                model,
+                provider: field("provider"),
+                node_type: node_type.clone(),
+                provider_key_id,
+            };
+            node_meta.insert(node_id.clone(), meta);
+        }
+        DagExecutionEvent::UsageIdentity {
+            node_id,
+            node_type,
+            model,
+            provider,
+            provider_key_id,
+        } => {
+            let meta = NodeMeta {
+                model: model.clone(),
+                provider: provider.clone(),
+                node_type: node_type.clone(),
+                provider_key_id: provider_key_id.clone(),
+            };
+            node_meta.insert(node_id.clone(), meta);
+        }
+        DagExecutionEvent::LlmUsage {
+            node_id,
+            prompt_tokens,
+            completion_tokens,
+            thinking_tokens,
+            cache_read_tokens,
+            cache_write_tokens,
+            side_call,
+        } => {
+            if let Some(s) = side_call {
+                let owner = node_id
+                    .strip_suffix(&format!("::{}", s.purpose))
+                    .unwrap_or(node_id);
+                record_side_call_meta(node_meta, node_id, owner, Some(s));
+            }
+            let entry = usage_accumulator
+                .entry(node_id.clone())
+                .or_insert((0, 0, 0, 0, 0));
+            entry.0 += prompt_tokens;
+            entry.1 += completion_tokens;
+            entry.2 += thinking_tokens.unwrap_or(0);
+            entry.3 += cache_read_tokens.unwrap_or(0);
+            entry.4 += cache_write_tokens.unwrap_or(0);
+        }
+        _ => {}
+    }
 }
 
 /// Build one `usage-summary` entry for a node. Pure and independently

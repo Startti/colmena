@@ -497,6 +497,18 @@ El texto completo también queda disponible en `output.final_response` del `node
 > (`side_call.node_key` del `llm_usage`). Bajo un tool o una fila de
 > `for_each`, `<nodo>` es su scope. No es un nodo del árbol de eventos.
 >
+> La fila `N` de un `for_each` con un target que llama al proveedor (un
+> `llm_call`, no un `subgraph`) se cobra en la fila `"<for_each>#N"`, con el
+> `node_type`, `model`, `provider` y `provider_key_id` del target en esa fila
+> (`"for_each#N"` si el `for_each` es un tool). Hasta el 2026-10-05 esa fila
+> salía con `model`/`provider` en `null`. Tampoco es un nodo del árbol.
+>
+> `usage-summary` cuenta lo que se llamó a **cualquier profundidad** de la
+> corrida (lo mismo que `finish.usage`): un `llm_call` como tool dentro de un
+> `subgraph`, las filas de un `for_each` como tool, un subgrafo nieto. Hasta el
+> 2026-10-05 solo contaba lo de un nivel abajo; `subgraph-usage-summary` (el de
+> la corrida hija) ya lo tenía.
+>
 > Ver [§14 — Provider prompt caching](developer_guide/14_llm_deep_dive.md) para
 > la fórmula de costo y la tabla de semántica por provider.
 

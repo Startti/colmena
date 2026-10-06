@@ -483,3 +483,27 @@ historia o el del adjunto, o con la lectura vieja de SQLite, falla su caso; envo
 hace fallar los casos de §25 (cobro doble).
 **ADP.** `EventTreeBuilder` no estampa las filas `<nodo>::<propósito>` (no son nodos del árbol): para cobrarlas hay
 que estamparlas, mapear su clave a la del dueño y leer `guardrail_llm.api_key` (hoy BYOK). **Estado.** done.
+
+## 30. Facturación: las filas de `for_each` y lo de dos niveles abajo llevan su modelo y se cuentan
+
+**Qué cambia.** Tres huecos de §29, que un host que descarta la fila sin `model`/`provider` no cobraba. (1) La fila
+`N` de un `for_each` con un target `llm_call` se cobra en `<for_each>#N`, pero la fila no tiene `NodeStart` y salía
+con `model: null, provider: null` y sin `provider_key_id`. Ahora el `for_each` emite, antes de cada fila y en su
+observer (un nivel arriba de la fila, como la frontera de un tool), un `DagExecutionEvent::UsageIdentity` con el
+`node_type`, `model`, `provider` y `provider_key_id` del target de la fila; el SSE no lo muestra. (2) Un `llm_call`
+como tool dentro de un `subgraph` y (3) las filas de un `for_each` como tool llegan a la corrida de afuera como un
+`SubgraphWrapped`, y la corrida solo contaba los eventos de un hijo sin envolver: quedaban fuera de `usage-summary`
+(no de `finish.usage`, que suma a cualquier profundidad). Ahora `track_child_usage` (`run_use_case.rs`) desenvuelve:
+`NodeStart`, `UsageIdentity` y `LlmUsage` se cuentan a cualquier profundidad, una vez cada uno. La fila
+`<for_each>#N` queda `{"node_id":"fe#0","node_type":"llm_call","model":"…","provider":"…","provider_key_id":"…",`
+`"prompt_tokens":…,"completion_tokens":…,"cache_read_tokens":…,"cache_write_tokens":…,"total_tokens":…}`
+(`provider_key_id` solo si el target lo tiene; `for_each#N` si el `for_each` es un tool). Ver
+[sse_events_reference.md](sse_events_reference.md) y [guía 17](developer_guide/17_technical_reference.md) §6.
+**Tests.** `tests/usage_counted_once.rs`: un `for_each` de dos filas `llm_call`, un `llm_call` como tool dentro de un
+`subgraph` (5 llamadas) y un `for_each` como tool (4 llamadas): la suma de las filas de `usage-summary` (y de
+`subgraph-usage-summary`) es lo que reportó el proveedor y `finish.usage`, y toda fila con tokens tiene `model` y
+`provider`; las filas de `for_each` llevan el modelo y la clave del target. Los casos de §29 bajo un tool y en una
+fila de `for_each` ahora también lo exigen. Antes del arreglo fallaban los tres. Mutaciones: sin el `UsageIdentity`,
+ignorándolo, sin su `provider_key_id` o sin desenvolver `SubgraphWrapped`, falla su caso.
+**ADP.** La fila `<for_each>#N` no es un nodo del árbol de eventos (como `<nodo>::<propósito>`): para cobrarla hay
+que estamparla. **Estado.** done.

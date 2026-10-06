@@ -33,7 +33,7 @@ use serde_json::{json, Value};
 use serial_test::serial;
 use std::sync::{Arc, Mutex};
 
-/// A model that calls `add` (or, offered no `add`, `Sub`) until the request
+/// A model that calls `add` (or, offered no `add`, `Sub`, then `Fan`) until the request
 /// carries `tool_turns` tool results, then answers `answer`; offered neither,
 /// it answers. Call `k` (from 0) reports a usage of its
 /// own, so a call counted twice, or not at all, changes every total.
@@ -100,6 +100,11 @@ impl UsageModel {
             ("add", r#"{"a":1,"b":2}"#.to_string())
         } else if offers("Sub") {
             ("Sub", format!(r#"{{"prompt":"task {done}"}}"#))
+        } else if offers("Fan") {
+            (
+                "Fan",
+                r#"{"items":[{"prompt":"a"},{"prompt":"b"}]}"#.to_string(),
+            )
         } else {
             return None;
         };
@@ -496,12 +501,11 @@ fn memory_db() -> (tempfile::TempDir, std::path::PathBuf) {
 }
 
 /// `finish.usage` and the sum of every `usage-summary` row both equal what
-/// the provider reported, and one row, `*::<purpose>`, is the cheap model's.
+/// the provider reported, every row is priced, and one row, `*::<purpose>`,
+/// is the cheap model's.
 fn assert_all_billed(model: &UsageModel, frames: &[Value], purpose: &str) {
+    assert_every_call_priced(model, frames, "usage-summary");
     let rows = one(frames, "usage-summary")["nodes"].as_array().unwrap();
-    let mut sum = LlmUsage::default();
-    rows.iter().for_each(|r| sum.add(&usage(r)));
-    assert_eq!(sum, model.billed().1, "usage-summary rows: {rows:#?}");
     assert_eq!(finish(frames), model.billed().1, "finish.usage");
     let suffix = format!("::{purpose}");
     let is_side = |r: &&Value| r["node_id"].as_str().unwrap().ends_with(&suffix);
@@ -561,4 +565,124 @@ async fn a_side_call_in_a_for_each_row_is_billed() {
     let frames = run_in(graph, Some("c")).await;
     assert_eq!(model.billed().0, 3, "two rows, one summary");
     assert_all_billed(&model, &frames, "history_compaction");
+}
+
+/// What every host bills from `usage-summary`: its rows add up to
+/// `finish.usage` and to what the provider reported, and every row with
+/// tokens names the model and provider that burned them (a row without them
+/// is dropped by the host, not billed).
+fn assert_every_call_priced(model: &UsageModel, frames: &[Value], kind: &str) {
+    let rows = one(frames, kind)["nodes"].as_array().unwrap();
+    let mut sum = LlmUsage::default();
+    rows.iter().for_each(|r| sum.add(&usage(r)));
+    assert_eq!(sum, model.billed().1, "{kind} rows: {rows:#?}");
+    for r in rows.iter().filter(|r| r["total_tokens"] != 0) {
+        assert!(r["model"].is_string(), "{kind}: a row without model: {r:#}");
+        assert!(
+            r["provider"].is_string(),
+            "{kind}: a row without provider: {r:#}"
+        );
+    }
+}
+
+/// The `node_schema` of a plain `llm_call` (as a tool or a `for_each`
+/// target) with a key of its own: only `prompt` is the caller's.
+fn plain_schema() -> Value {
+    json!({
+        "provider": { "fixed": "openai" }, "api_key": { "fixed": "unused" },
+        "model": { "fixed": "usage-model" }, "stream": { "fixed": false },
+        "provider_key_id": { "fixed": "pk-row" },
+        "prompt": { "type": "string", "required": true, "description": "p" }
+    })
+}
+
+/// Each `for_each` row runs its `llm_call` target with no `NodeStart` of its
+/// own: its row `fe#N` used to carry `model: null, provider: null`, and a
+/// host drops such a row instead of billing it.
+#[tokio::test]
+#[serial]
+async fn a_for_each_row_is_billed_with_its_model() {
+    let graph = json!({ "nodes": { "fe": { "type": "for_each", "config": {
+        "items": [{ "prompt": "a" }, { "prompt": "b" }], "concurrency": 1,
+        "target": { "node_type": "llm_call", "node_schema": plain_schema() }
+    } } }, "edges": [] });
+    let model = UsageModel::new(0, "done");
+    let _guard = OverrideGuard::install(model.clone());
+    let frames = run(graph).await;
+    assert_eq!(model.billed().0, 2, "one call per row");
+    assert_every_call_priced(&model, &frames, "usage-summary");
+    assert_eq!(finish(&frames), model.billed().1, "finish.usage");
+    for n in 0..2 {
+        let row = entry(&frames, "usage-summary", &format!("fe#{n}"));
+        assert_eq!(row["model"], "usage-model", "fe#{n}");
+        assert_eq!(row["provider"], "openai", "fe#{n}");
+        assert_eq!(row["node_type"], "llm_call", "fe#{n}");
+        assert_eq!(row["provider_key_id"], "pk-row", "fe#{n}");
+    }
+}
+
+/// An agent `agent` whose tool `name` is `tool`.
+fn agent_with_tool(name: &str, tool: Value) -> Value {
+    json!({ "nodes": { "agent": { "type": "llm_call", "config": {
+        "provider": "openai", "api_key": "unused", "model": "usage-model",
+        "prompt": "go", "stream": false, "enabled_tools": [name],
+        "tool_configurations": { name: tool }
+    } } }, "edges": [] })
+}
+
+/// An `llm_call` tool inside a `subgraph`: the child bills it on a row of its
+/// own, and the parent's `usage-summary` re-counts the child's events — the
+/// tool's among them, once. It used to leave the tool's usage out.
+#[tokio::test]
+#[serial]
+async fn a_tool_inside_a_subgraph_is_billed_once() {
+    let sub_tool = json!({ "name": "Sub", "description": "d", "node_type": "llm_call",
+        "node_schema": plain_schema() });
+    let child = agent_with_tool("Sub", sub_tool);
+    let sub = json!({ "type": "subgraph", "config": { "child_graph_inline": child } });
+    let model = UsageModel::new(2, "done");
+    let _guard = OverrideGuard::install(model.clone());
+    let frames = run(json!({ "nodes": { "sub": sub }, "edges": [] })).await;
+    assert_eq!(model.billed().0, 5, "agent x3, Sub x2");
+    assert_every_call_priced(&model, &frames, "subgraph-usage-summary");
+    assert_every_call_priced(&model, &frames, "usage-summary");
+    assert_eq!(finish(&frames), model.billed().1, "finish.usage");
+    let tool = entry(&frames, "usage-summary", "Sub");
+    let mut both = row(&frames, "usage-summary");
+    both.add(&usage(tool));
+    assert_eq!(
+        both,
+        model.billed().1,
+        "the agent's row and the tool's, once each"
+    );
+    assert_eq!(
+        (&tool["model"], &tool["provider"]),
+        (&json!("usage-model"), &json!("openai"))
+    );
+}
+
+/// A `for_each` dispatched as a tool: its rows come out one level below the
+/// tool, and the agent's `usage-summary` used to leave them out.
+#[tokio::test]
+#[serial]
+async fn a_for_each_tool_is_billed() {
+    let fan = json!({ "name": "Fan", "description": "d", "node_type": "for_each",
+        "node_schema": {
+            "target": { "fixed": { "node_type": "llm_call", "node_schema": plain_schema() } },
+            "concurrency": { "fixed": 1 },
+            "items": { "type": "array", "required": true, "description": "rows",
+                "items": { "type": "object" } }
+        } });
+    let model = UsageModel::new(1, "done");
+    let _guard = OverrideGuard::install(model.clone());
+    let frames = run(agent_with_tool("Fan", fan)).await;
+    assert_eq!(model.billed().0, 4, "agent x2, two rows");
+    assert_every_call_priced(&model, &frames, "usage-summary");
+    assert_eq!(finish(&frames), model.billed().1, "finish.usage");
+    // Dispatched as a tool, the fan-out has no node id of its own.
+    let row = entry(&frames, "usage-summary", "for_each#1");
+    assert_eq!(
+        (&row["model"], &row["provider_key_id"]),
+        (&json!("usage-model"), &json!("pk-row"))
+    );
 }

@@ -7,6 +7,7 @@ use crate::dag_engine::application::list_tool_executor::{
     run_list, ExecPolicy, ItemStatus, OnError, DEFAULT_MAX_ITEMS,
 };
 use crate::dag_engine::application::ports::{HostTokenPort, NodeRegistryPort};
+use crate::dag_engine::domain::events::DagExecutionEvent;
 use crate::dag_engine::domain::lint::{FieldSpec, NodeCatalogEntry};
 use crate::dag_engine::domain::node::{ExecutableNode, NodeInputs};
 use crate::dag_engine::domain::observer::{ChildScopeObserver, ExecutionObserver, NodeEvent};
@@ -601,9 +602,20 @@ impl ExecutableNode for ForEachNode {
                     // Scoping each row under its own identity gives it a distinct
                     // lineage. The suffix is the row index, which lines up with the
                     // `index` field of the `batch-item-finished` event for that row.
+                    let row_id = format!("{node_id}#{index}");
+                    // The row has no `NodeStart` of its own, yet its target's
+                    // usage is billed on an entry `<node_id>#<index>`: name its
+                    // model there, or a host gets a row it cannot price. On the
+                    // raw observer, one level above the row, like a tool's boundary.
+                    if let Some(obs) = &observer {
+                        let identity = row_usage_identity(&row_id, &target_type, &merged);
+                        if let Ok(raw) = serde_json::to_value(&identity) {
+                            obs.on_event(NodeEvent::SubgraphChildEvent(raw));
+                        }
+                    }
                     let row_observer = observer
                         .clone()
-                        .map(|obs| ChildScopeObserver::wrap(obs, format!("{node_id}#{index}")));
+                        .map(|obs| ChildScopeObserver::wrap(obs, row_id.clone()));
 
                     let result = node
                         .execute(&merged, &json!({}), &mut item_state, row_observer)
@@ -791,6 +803,28 @@ impl ExecutableNode for ForEachNode {
               ({ source: \"sheet\", ref: \"<spreadsheet_id>|<sheet>|<range?>\", column?, as? }) \
               to read rows from a Google Sheet without the model re-typing them.",
         )
+    }
+}
+
+/// Who bills row `row_id` of a fan-out: its target's type and the model,
+/// provider and key its merged inputs `merged` run with.
+fn row_usage_identity(
+    row_id: &str,
+    target_type: &str,
+    merged: &HashMap<String, Value>,
+) -> DagExecutionEvent {
+    let field = |key: &str| merged.get(key).and_then(Value::as_str).map(str::to_string);
+    let model = field("model").or_else(|| {
+        let config = Value::Object(merged.clone().into_iter().collect());
+        crate::dag_engine::domain::router_rules::default_usage_model(target_type, &config)
+            .map(str::to_string)
+    });
+    DagExecutionEvent::UsageIdentity {
+        node_id: row_id.to_string(),
+        node_type: target_type.to_string(),
+        model,
+        provider: field("provider"),
+        provider_key_id: field("provider_key_id"),
     }
 }
 

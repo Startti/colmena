@@ -225,6 +225,20 @@ pub enum DagExecutionEvent {
     /// A child run never reads, so it is never wrapped.
     #[serde(rename = "user_message_consumed")]
     UserMessageConsumed { node_id: String, id: String },
+    /// Who bills the usage of `node_id`: a usage entry with no `NodeStart` of
+    /// its own (a `for_each` row, `<node>#<index>`) names its model with this.
+    /// Bookkeeping only: the SSE mapper sends nothing for it.
+    #[serde(rename = "usage_identity")]
+    UsageIdentity {
+        node_id: String,
+        node_type: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_key_id: Option<String>,
+    },
     /// Wraps a DagExecutionEvent emitted from inside a subgraph execution.
     /// The frontend receives these with a "subgraph-" prefix on the event type.
     ///
@@ -492,6 +506,7 @@ impl DagExecutionEvent {
             | DagExecutionEvent::BatchItemFinished { node_id, .. }
             | DagExecutionEvent::Progress { node_id, .. }
             | DagExecutionEvent::UserMessageConsumed { node_id, .. }
+            | DagExecutionEvent::UsageIdentity { node_id, .. }
             | DagExecutionEvent::NodeSkipped { node_id, .. } => Some(node_id),
             _ => None,
         }
@@ -508,6 +523,7 @@ impl DagExecutionEvent {
     pub fn advances_heartbeat_clock(&self) -> bool {
         match self {
             DagExecutionEvent::LlmUsage { .. }
+            | DagExecutionEvent::UsageIdentity { .. }
             | DagExecutionEvent::LlmMessageStart { .. }
             | DagExecutionEvent::LlmMessageFinish { .. }
             | DagExecutionEvent::TurnStart { .. }
