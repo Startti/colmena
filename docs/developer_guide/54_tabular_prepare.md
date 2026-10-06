@@ -271,6 +271,26 @@ it and thereby also removes blobs nobody tracked, such as those of an attempt
 that crashed before any terminal write). Nothing calls them yet: the cleanup
 pass that uses them follows in later slices.
 
+## Cleanup
+
+`gc.rs` holds the passes `attachment_gc` will run (the binary is wired in a later
+slice). The first: when a source blob is deleted,
+`delete_prepared_for_source(registry, storage, source_key, clock, dry_run)` removes
+its prepared tables.
+
+The pass claims the row (`begin_delete`, see Cleanup claim), calls
+`OutputStorageRepository::delete_derived` with the tracked keys (manifest last)
+and, last, `finish_delete`. If a preparation claimed the row after the pass read
+it, `begin_delete` returns false and the row and its blobs are left alone. A dry
+run only logs. With no row for the source the pass makes no storage call. The
+passes read a `Clock` once per row, never once per pass, so each row's cleanup
+lease (10 minutes) starts when the pass claims it.
+
+**Incomplete is visible.** `PreparedGcSummary::is_incomplete()` is true when a blob
+could not be deleted (`storage_errors`) or when the pass could not settle the source
+(`busy`): the row had changed or is leased by another pass or a preparation.
+Nothing was wrongly deleted, and the caller must retry on its next run.
+
 ## Tests
 
 `cargo test --lib attachment_prepared` applies the SQLite migration to an
@@ -279,7 +299,8 @@ The Postgres twin is `#[ignore]`d like the other Postgres repository tests and
 needs `DATABASE_URL` (`DATABASE_URL=postgres://... cargo test --lib
 attachment_prepared -- --ignored`).
 
-`cargo test --lib output_storage` covers the storage defaults (buffering, the
+`cargo test --lib attachment_gc` covers the cleanup passes against a real SQLite
+registry and an in-memory fake storage. `cargo test --lib output_storage` covers the storage defaults (buffering, the
 size cap, a stream error storing nothing, derived-blob deletion).
 `cargo test --lib tabular_prepare_ensure` covers `ensure_prepared` with fake
 ports and a fake registry under paused time, including a dropped future, a hung

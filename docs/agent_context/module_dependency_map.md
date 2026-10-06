@@ -5,7 +5,7 @@
 
 **How to use (for the exploration/spec phase):** before opening files to assess a change, look up the target file below. **Used by** is its blast radius — the files that break if you change its public surface. **Depends on** is what it needs. Start by reading only those, not the whole repo.
 
-- Files indexed: **424**
+- Files indexed: **425**
 - Modules with at least one importer: **203**
 
 ## Blast-radius ranking (change these with the most care)
@@ -22,8 +22,8 @@
 | 20 | `dag_engine::application::ports` | `src/libs/colmena/src/dag_engine/application/ports.rs` |
 | 20 | `documents::domain::ids` | `src/libs/colmena/src/documents/domain/ids.rs` |
 | 17 | `crdt_documents` | `src/libs/colmena/src/crdt_documents/mod.rs` |
+| 17 | `storage::domain` | `src/libs/colmena/src/storage/domain/mod.rs` |
 | 16 | `llm::domain::attachments` | `src/libs/colmena/src/llm/domain/attachments/mod.rs` |
-| 16 | `storage::domain` | `src/libs/colmena/src/storage/domain/mod.rs` |
 | 14 | `dag_engine::domain::error` | `src/libs/colmena/src/dag_engine/domain/error.rs` |
 | 14 | `dag_engine::domain::tool_configuration` | `src/libs/colmena/src/dag_engine/domain/tool_configuration.rs` |
 | 14 | `llm::infrastructure` | `src/libs/colmena/src/llm/infrastructure/mod.rs` |
@@ -2054,7 +2054,7 @@
 
 #### `src/libs/colmena/src/storage/domain/mod.rs`
 - Module: `storage::domain`
-- **Used by (16)**: `src/libs/colmena/src/dag_engine/engine.rs`, `src/libs/colmena/src/dag_engine/infrastructure/dag_tool_executor.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/http.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/image_edit.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/image_generation.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm/characterisation.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/load_attachment_tool.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/tts.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/util/session_attachment.rs`, `src/libs/colmena/src/dag_engine/infrastructure/registry.rs`, `src/libs/colmena/src/llm/domain/attachments/stream_resolver.rs`, `src/libs/colmena/src/llm/infrastructure/attachments/stream_resolver_impl.rs`, `src/libs/colmena/src/storage/infrastructure/http_callback_adapter.rs`, `src/libs/colmena/src/storage/infrastructure/local_cache_adapter.rs`, `src/libs/colmena/src/storage/infrastructure/local_http_adapter.rs`
+- **Used by (17)**: `src/libs/colmena/src/dag_engine/engine.rs`, `src/libs/colmena/src/dag_engine/infrastructure/dag_tool_executor.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/http.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/image_edit.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/image_generation.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm/characterisation.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/llm_synthetic_tools/load_attachment_tool.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/tts.rs`, `src/libs/colmena/src/dag_engine/infrastructure/nodes/util/session_attachment.rs`, `src/libs/colmena/src/dag_engine/infrastructure/registry.rs`, `src/libs/colmena/src/llm/domain/attachments/stream_resolver.rs`, `src/libs/colmena/src/llm/infrastructure/attachments/stream_resolver_impl.rs`, `src/libs/colmena/src/storage/infrastructure/http_callback_adapter.rs`, `src/libs/colmena/src/storage/infrastructure/local_cache_adapter.rs`, `src/libs/colmena/src/storage/infrastructure/local_http_adapter.rs`, `src/libs/colmena/src/tabular_prepare/gc.rs`
 - Depends on (0): — (no intra-crate imports)
 
 #### `src/libs/colmena/src/storage/domain/output_storage_repository.rs`
@@ -2094,6 +2094,11 @@
 
 ### tabular_prepare
 
+#### `src/libs/colmena/src/tabular_prepare/gc.rs`
+- Module: `tabular_prepare::gc`
+- **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
+- Depends on (3): `storage::domain`, `tabular_prepare::registry`, `tabular_prepare::sqlite_registry`
+
 #### `src/libs/colmena/src/tabular_prepare/mod.rs`
 - Module: `tabular_prepare`
 - **Used by (1)**: `src/libs/colmena/src/tabular_prepare/registry_contract.rs`
@@ -2111,7 +2116,7 @@
 
 #### `src/libs/colmena/src/tabular_prepare/registry.rs`
 - Module: `tabular_prepare::registry`
-- **Used by (1)**: `src/libs/colmena/src/tabular_prepare/mod.rs`
+- **Used by (2)**: `src/libs/colmena/src/tabular_prepare/gc.rs`, `src/libs/colmena/src/tabular_prepare/mod.rs`
 - Depends on (1): `dag_engine::infrastructure::pool_registry`
 
 #### `src/libs/colmena/src/tabular_prepare/registry_contract.rs`
@@ -2121,7 +2126,7 @@
 
 #### `src/libs/colmena/src/tabular_prepare/sqlite_registry.rs`
 - Module: `tabular_prepare::sqlite_registry`
-- **Used by (1)**: `src/libs/colmena/src/tabular_prepare/registry_contract.rs`
+- **Used by (2)**: `src/libs/colmena/src/tabular_prepare/gc.rs`, `src/libs/colmena/src/tabular_prepare/registry_contract.rs`
 - Depends on (0): — (no intra-crate imports)
 
 ### text
