@@ -161,7 +161,12 @@ pub enum DagExecutionEvent {
     /// Emitted just before GraphFinish. Summarises token usage per node with model and
     /// provider names for cost/audit visibility.
     #[serde(rename = "graph_usage_summary")]
-    GraphUsageSummary { entries: Vec<Value> },
+    GraphUsageSummary {
+        entries: Vec<Value>,
+        /// The run (session id) it bills, so its parent knows it was sent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        run: Option<String>,
+    },
     /// Emitted when the load_skill synthetic tool successfully loads a skill or reference.
     /// Fires alongside llm_tool_call_start/finish so frontends can render a skill-specific UI.
     #[serde(rename = "skill_loaded")]
@@ -272,6 +277,23 @@ impl DagExecutionEvent {
             _ => {}
         }
         self
+    }
+
+    /// Whether this is a usage event or a usage summary, wrapped or not.
+    pub fn is_usage(&self) -> bool {
+        match self {
+            Self::SubgraphWrapped { inner, .. } => inner.is_usage(),
+            e => matches!(e, Self::LlmUsage { .. } | Self::GraphUsageSummary { .. }),
+        }
+    }
+
+    /// The run a usage summary, wrapped or not, bills.
+    pub fn usage_summary_run(&self) -> Option<&str> {
+        match self {
+            Self::SubgraphWrapped { inner, .. } => inner.usage_summary_run(),
+            Self::GraphUsageSummary { run, .. } => run.as_deref(),
+            _ => None,
+        }
     }
 
     /// Whether this is the usage of a side call made by node `node_id`

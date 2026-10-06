@@ -296,7 +296,7 @@ impl SseMapper {
                 "id": id
             })),
             DagExecutionEvent::LlmUsage { .. } | DagExecutionEvent::UsageIdentity { .. } => None,
-            DagExecutionEvent::GraphUsageSummary { entries } => Some(json!({
+            DagExecutionEvent::GraphUsageSummary { entries, .. } => Some(json!({
                 "type": "usage-summary",
                 "nodes": entries
             })),
@@ -658,7 +658,7 @@ impl SseMapper {
                     "source": source,
                     "sizeBytes": size_bytes,
                 })),
-                DagExecutionEvent::GraphUsageSummary { entries } => Some(json!({
+                DagExecutionEvent::GraphUsageSummary { entries, .. } => Some(json!({
                     "type": "subgraph-usage-summary",
                     "nodes": entries
                 })),

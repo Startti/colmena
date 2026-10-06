@@ -521,5 +521,18 @@ que falla manda su `subgraph-usage-summary` antes del error. Sin resumen si la c
 **Tests.** `tests/usage_counted_once.rs`: raíz e hija que fallan, raíz e hija suspendidas y reanudadas, raíz
 cancelada con una llamada en vuelo; cada llamada en exactamente una fila y todo resumen antes del frame terminal.
 Mutaciones: resumen después del terminal, o solo en `GraphFinish`: fallan. Una hija que su padre descarta al
-cancelar no manda resumen: lo cubre la PR siguiente. **Estado.** done.
+cancelar no manda resumen: lo cubre §32. **Estado.** done.
 
+## 32. Facturación: lo que se llamó antes de un stop se cobra, aunque la corrida no lo haya leído
+
+**Qué cambia.** (1) Si el stop o el watchdog de inactividad le ganaban a la lectura del canal de un nodo, el uso
+de una llamada ya terminada no se cobraba: ahora el observer del nodo (`ChannelObserver`) lo cobra al mandarlo, y lo
+que queda en el canal sale antes del frame terminal (`consumed_left_in`). (2) Una corrida hija que el padre
+descarta al parar el turno no llegaba a su salida y lo que había llamado quedaba sin cobrar: ahora manda su resumen
+al descartarse (`SummaryOnDrop`, después de descartar sus hijas) y el padre lo emite antes de su frame terminal,
+con el mismo `level`/`path` que el de una hija que termina: `… subgraph-usage-summary, cancelled, finish`.
+`GraphUsageSummary` lleva `run` (sin frame SSE) para no emitirlo dos veces. Una llamada en vuelo al parar no se
+cobra; `finish.usage` no incluye lo que una hija descartada no emitió. **Tests.** `a_cancelled_run_bills_its_calls`
+(raíz, hija, nieta, mismo lugar que una hija que termina) y `a_usage_queued_when_the_turn_stops_is_billed`.
+Mutaciones: sin resumen al descartar, antes de descartar las hijas, cobro al leer, o sin descontar el ya emitido:
+fallan. **Estado.** done.
