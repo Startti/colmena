@@ -4,9 +4,11 @@
 //! before it make.
 
 use super::child::CallHeader;
+use super::staging::{open_call_dirs, CallDirs};
 use serde::{Deserialize, Serialize};
 use std::ffi::CString;
 use std::io;
+use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::io::{FromRawFd, IntoRawFd, RawFd};
 use std::os::unix::net::UnixStream;
@@ -185,6 +187,59 @@ fn hide(path: &Path) -> io::Result<()> {
     )
 }
 
+/// Where a call's prepared data appears in the jail.
+const DATA_TARGET: &str = "/data";
+
+/// The staged directories a call asks for. `None` for a call without mounts, which then takes no
+/// step below that a call never had.
+fn open_staged(spec: &JailSpec, hdr: &CallHeader) -> io::Result<Option<CallDirs>> {
+    match (&hdr.mounts, &spec.staging_root) {
+        (None, _) => Ok(None),
+        (Some(_), None) => Err(io::Error::other("mounts asked for without a staging root")),
+        (Some(m), Some(root)) => open_call_dirs(root, &m.stage_id).map(Some),
+    }
+}
+
+/// A mount point of the jail's own root: a directory, never a link. One that
+/// does not exist yet is created, which needs a root filesystem that takes it.
+fn ensure_mount_point(target: &Path) -> io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    match std::fs::symlink_metadata(target) {
+        Ok(m) if m.file_type().is_dir() => Ok(()),
+        Ok(_) => Err(io::Error::from(io::ErrorKind::InvalidInput)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            std::fs::DirBuilder::new().mode(0o555).create(target)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Binds what `fd` names, not a path, onto `target`, then sets the flags of
+/// that mount (a bind takes them from a remount) and reads them back: a mount
+/// that did not take them is an error, not a weaker mount.
+fn bind_dir(fd: &std::os::fd::OwnedFd, target: &str, read_only: bool) -> io::Result<()> {
+    let target = Path::new(target);
+    ensure_mount_point(target)?;
+    let source = format!("/proc/self/fd/{}", fd.as_raw_fd());
+    mount(Some(&source), target, None, libc::MS_BIND, None)?;
+    let mut flags = libc::MS_REMOUNT | libc::MS_BIND | libc::MS_NOSUID | libc::MS_NODEV;
+    flags |= libc::MS_NOEXEC;
+    if read_only {
+        flags |= libc::MS_RDONLY;
+    }
+    mount(None, target, None, flags, None)?;
+    let c = cstr(target.as_os_str().as_bytes())?;
+    let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
+    check(unsafe { libc::statvfs(c.as_ptr(), &mut st) })?;
+    let want = libc::ST_NOSUID | libc::ST_NODEV | libc::ST_NOEXEC;
+    let held = (st.f_flag & want == want) && ((st.f_flag & libc::ST_RDONLY != 0) == read_only);
+    if held {
+        Ok(())
+    } else {
+        Err(io::Error::other("the mount did not take its flags"))
+    }
+}
+
 /// The uid and gid of `slot`: `u32::MAX`, which [`enter`] refuses, when the
 /// sum does not fit.
 pub fn uid_for(spec: &JailSpec, slot: u32) -> u32 {
@@ -244,11 +299,10 @@ pub fn enter(spec: &JailSpec, hdr: &CallHeader, conn: UnixStream) -> Result<Unix
         None,
     )
     .map_err(at("mounts"))?;
-    // Prepared data is not bound yet: a call that asks for it ends here, before
-    // any code runs, rather than running without it.
-    if hdr.mounts.is_some() {
-        return Err(at("mounts")(io::Error::from(io::ErrorKind::Unsupported)));
-    }
+    // Run mounts: opened here, in this mount namespace, because a bind needs a
+    // source that belongs to the namespace it is made in (a descriptor opened
+    // before `unshare` is refused with EINVAL), and before `/tmp` is replaced.
+    let staged = open_staged(spec, hdr).map_err(at("mounts"))?;
     mount(
         Some("tmpfs"),
         Path::new("/tmp"),
@@ -271,6 +325,9 @@ pub fn enter(spec: &JailSpec, hdr: &CallHeader, conn: UnixStream) -> Result<Unix
         Some("hidepid=invisible"),
     )
     .map_err(at("mounts"))?;
+    if let Some(dirs) = staged {
+        bind_dir(&dirs.data, DATA_TARGET, true).map_err(at("mounts"))?;
+    }
     let hidden = DEFAULT_HIDDEN
         .iter()
         .map(PathBuf::from)
@@ -337,6 +394,25 @@ mod tests {
         };
         assert_eq!(serde_json::to_string(&spec).unwrap(), today);
         assert_eq!(serde_json::from_str::<JailSpec>(today).unwrap(), spec);
+    }
+
+    /// A mount point is a directory of the jail's own root: made when missing,
+    /// never a link or a file standing in its place.
+    #[test]
+    fn a_mount_point_is_a_directory_never_a_link_or_a_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let made = tmp.path().join("made");
+        ensure_mount_point(&made).unwrap();
+        assert!(made.is_dir());
+        ensure_mount_point(&made).unwrap();
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(&made, &link).unwrap();
+        let file = tmp.path().join("file");
+        std::fs::write(&file, "x").unwrap();
+        for bad in [link, file] {
+            let e = ensure_mount_point(&bad).unwrap_err();
+            assert_eq!(e.kind(), io::ErrorKind::InvalidInput, "{bad:?}");
+        }
     }
 
     #[test]

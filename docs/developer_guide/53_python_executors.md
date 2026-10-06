@@ -190,7 +190,18 @@ with `COLMENA_PYTHON_EXECUTOR_STAGING_DIR` (an absolute, existing directory with
 startup) and read ONLY while `COLMENA_LARGE_TABULAR` is on; with the switch off the variable is not even looked at.
 The subprocess executor passes it to the template as `--staging-root`, as `python_executor self-test` and `zygote`
 accept it. `SubprocessExecutor::run_staged` is the call that sends `mounts`; without a staging root it starts no
-child. For now the jail refuses a call that asks for mounts (it ends before any code runs, with the crash text).
+child.
+
+A call that asks for mounts gets its prepared data at `/data`, bound from the directory the jail itself opened (in the
+call's new mount namespace: a descriptor from before `unshare` is refused by the kernel) and mounted read-only,
+`nosuid`, `nodev` and `noexec` at the MOUNT, so a world-writable file in it still fails with `EROFS`; the flags are read
+back with `statvfs` and a mount that did not take them ends the call. `/data` is created when the root filesystem
+lacks it (a link or a file there is refused); pre-create it in the image if the root filesystem is read-only. Nothing
+else of the staging volume is visible: the call directory and every other call's files are not bound, and `..` of
+`/data` is the jail's root. A call id the jail cannot trust (a bad charset, a link in the path, a `data` directory
+others can write in) ends the call before any code runs, with the crash text. Everything else the jail applies, the
+user, capabilities, limits, seccomp filter, environment and the empty network namespace, is the same with or without
+mounts (`tests/python_executor_mounts.rs` compares them from inside).
 
 ### Startup self-test (Linux)
 
