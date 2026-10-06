@@ -371,6 +371,71 @@ mod tests {
     }
 
     #[test]
+    fn a_record_of_exactly_the_limit_is_accepted() {
+        let mut csv = b"a\n\"".to_vec();
+        csv.extend(std::iter::repeat_n(b'x', MAX_RECORD_BYTES - 2));
+        csv.extend_from_slice(b"\"\nb\n");
+        assert_eq!(scan(&csv, b',').0, csv);
+        let mut over = b"a\n\"".to_vec();
+        over.extend(std::iter::repeat_n(b'x', MAX_RECORD_BYTES - 1));
+        over.extend_from_slice(b"\"\nb\n");
+        let mut s = RecordScanner::new(Cursor::new(over), b',', false, Arc::default());
+        assert!(s.read_to_end(&mut Vec::new()).is_err());
+    }
+
+    #[test]
+    fn the_output_does_not_depend_on_how_the_input_is_chunked() {
+        let csv = "\nh1,h2\r\n\"a\"\"b\",\"c\nd\"\r\n\r\n5\" x,é\rlone\n\n\"\"\n\n".as_bytes();
+        for blank_as_null in [false, true] {
+            let (whole, whole_stats) = scan_with(csv, b',', blank_as_null);
+            struct Dribble<'a>(&'a [u8], usize);
+            impl Read for Dribble<'_> {
+                fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                    let n = self.1.min(self.0.len()).min(buf.len());
+                    buf[..n].copy_from_slice(&self.0[..n]);
+                    self.0 = &self.0[n..];
+                    Ok(n)
+                }
+            }
+            for step in [1usize, 2, 3, 7] {
+                let mut s =
+                    RecordScanner::new(Dribble(csv, step), b',', blank_as_null, Arc::default());
+                let mut out = Vec::new();
+                s.read_to_end(&mut out).unwrap();
+                assert_eq!(out, whole, "step {step}, blank_as_null {blank_as_null}");
+            }
+            for cut in 0..csv.len() {
+                let (a, b) = csv.split_at(cut);
+                let stats = Arc::new(ScanStats::default());
+                let src = Cursor::new(a.to_vec()).chain(Cursor::new(b.to_vec()));
+                let mut s = RecordScanner::new(src, b',', blank_as_null, stats.clone());
+                let mut out = Vec::new();
+                s.read_to_end(&mut out).unwrap();
+                assert_eq!(out, whole, "cut {cut}, blank_as_null {blank_as_null}");
+                assert_eq!(
+                    (stats.records(), stats.blank_rows(), stats.blank_dropped()),
+                    (
+                        whole_stats.records(),
+                        whole_stats.blank_rows(),
+                        whole_stats.blank_dropped()
+                    ),
+                    "cut {cut}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_different_delimiter_changes_what_starts_a_quote() {
+        // With a semicolon separator a quote after a comma is mid-field.
+        let csv = "a;b\n1,\"x;2\ny;z\n";
+        assert_eq!(text(csv.as_bytes(), b';'), csv);
+        // With a comma separator the same quote opens a field that swallows lines.
+        let stats = scan(csv.as_bytes(), b',').1;
+        assert_eq!(stats.records(), 2);
+    }
+
+    #[test]
     fn blank_lines_are_dropped_and_counted_in_a_multi_column_file() {
         let (out, stats) = scan(b"\n\na,b\n1,2\n\n3,4\r\n\r\n5,6\n\n\n", b',');
         assert_eq!(out, b"a,b\n1,2\n3,4\r\n5,6\n");

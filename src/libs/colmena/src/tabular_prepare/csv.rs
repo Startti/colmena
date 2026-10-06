@@ -455,3 +455,365 @@ impl<R: Read> Read for Transcoder<R> {
         Ok(take)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tabular_prepare::scan::MAX_RECORD_BYTES;
+    use std::io::{Cursor, Read};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    fn prepared(bytes: &[u8]) -> Prepared {
+        prepare_input(Cursor::new(bytes.to_vec()), None).unwrap()
+    }
+
+    fn text_of(mut p: Prepared) -> String {
+        let mut out = String::new();
+        p.reader.read_to_string(&mut out).unwrap();
+        out
+    }
+
+    #[test]
+    fn the_delimiter_is_sniffed_among_comma_semicolon_tab_and_pipe() {
+        for (d, name) in [
+            (b',', "comma"),
+            (b';', "semicolon"),
+            (b'\t', "tab"),
+            (b'|', "pipe"),
+        ] {
+            let sep = (d as char).to_string();
+            let csv = format!("a{sep}b{sep}c\n1{sep}2{sep}3\n4{sep}5{sep}6\n");
+            assert_eq!(prepared(csv.as_bytes()).delimiter, d, "{name}");
+        }
+    }
+
+    #[test]
+    fn a_delimiter_inside_quotes_does_not_decide() {
+        // Commas everywhere inside quoted cells; the real separator is a semicolon.
+        let csv = "name;note\n\"a,b,c\";\"x,y,z\"\n\"d,e,f\";\"u,v,w\"\n";
+        assert_eq!(prepared(csv.as_bytes()).delimiter, b';');
+        // Decimal commas with a semicolon separator.
+        let csv = "id;price\n1;1,5\n2;2,5\n3;10,25\n";
+        assert_eq!(prepared(csv.as_bytes()).delimiter, b';');
+    }
+
+    #[test]
+    fn a_single_column_or_header_only_file_falls_back_to_comma() {
+        assert_eq!(prepared(b"name\nann\nbob\n").delimiter, b',');
+        assert_eq!(prepared(b"a;b;c\n").delimiter, b';');
+        assert_eq!(prepared(b"only_header_no_newline").delimiter, b',');
+    }
+
+    #[test]
+    fn the_sniff_ignores_the_row_cut_by_the_sample_limit() {
+        // Rows of 3 semicolon fields, long enough that the 1 MiB sample ends
+        // inside a row; the half row must not break the vote.
+        let row = format!(
+            "{};{};{}\n",
+            "x".repeat(1000),
+            "y".repeat(1000),
+            "z".repeat(1000)
+        );
+        let csv = format!("a;b;c\n{}", row.repeat(2000));
+        assert!(csv.len() > 2 * SNIFF_BYTES);
+        assert_eq!(prepared(csv.as_bytes()).delimiter, b';');
+    }
+
+    #[test]
+    fn a_utf8_bom_is_removed_and_the_text_is_kept() {
+        let mut bytes = vec![0xEF, 0xBB, 0xBF];
+        bytes.extend_from_slice("name,city\nZoë,São Paulo\n".as_bytes());
+        let p = prepared(&bytes);
+        assert_eq!(p.encoding, Encoding::Utf8);
+        assert_eq!(text_of(p), "name,city\nZoë,São Paulo\n");
+    }
+
+    #[test]
+    fn utf16_and_binary_input_are_refused_with_a_typed_error() {
+        let utf16le = [0xFF, 0xFE, b'a', 0, b',', 0, b'b', 0];
+        let utf16be = [0xFE, 0xFF, 0, b'a', 0, b',', 0, b'b'];
+        for bytes in [&utf16le[..], &utf16be[..], b"a,b\n1,\0\n2,3\n"] {
+            let err = prepare_input(Cursor::new(bytes.to_vec()), None)
+                .err()
+                .unwrap();
+            assert!(matches!(err, CsvError::UnsupportedEncoding(_)), "{err:?}");
+        }
+    }
+
+    #[test]
+    fn windows_1252_is_transcoded_to_utf8() {
+        // 0xE9 is "é" and 0x80 is the euro sign in Windows-1252.
+        let p = prepared(b"name,price\ncaf\xE9,\x805\n");
+        assert_eq!(p.encoding, Encoding::Windows1252);
+        assert_eq!(p.delimiter, b',');
+        assert_eq!(text_of(p), "name,price\ncafé,€5\n");
+    }
+
+    #[test]
+    fn transcoding_is_correct_across_internal_chunk_boundaries() {
+        let mut bytes = b"c\n".to_vec();
+        for _ in 0..50_000 {
+            bytes.extend_from_slice(b"caf\xE9\x80\n");
+        }
+        let text = text_of(prepared(&bytes));
+        assert_eq!(text, format!("c\n{}", "café€\n".repeat(50_000)));
+    }
+
+    #[test]
+    fn utf8_text_passes_through_byte_for_byte_even_across_the_sample_cut() {
+        // A multibyte character straddling the sample limit must not make the
+        // file look like Windows-1252.
+        let mut s = String::from("a,b\n");
+        while s.len() < SNIFF_BYTES - 1 {
+            s.push('x');
+        }
+        s.push_str("é,ñ\nsecond,row\n");
+        let p = prepared(s.as_bytes());
+        assert_eq!(p.encoding, Encoding::Utf8);
+        assert_eq!(text_of(p), s);
+    }
+
+    #[test]
+    fn empty_input_is_a_typed_error_and_header_only_is_not() {
+        for bytes in [&b""[..], &[0xEF, 0xBB, 0xBF][..], b"\n\r\n  \n"] {
+            let err = prepare_input(Cursor::new(bytes.to_vec()), None)
+                .err()
+                .unwrap();
+            assert_eq!(err, CsvError::Empty, "{bytes:?}");
+        }
+        assert_eq!(text_of(prepared(b"a,b,c")), "a,b,c");
+    }
+
+    #[test]
+    fn the_input_is_not_read_ahead_of_the_sample() {
+        struct Counting {
+            produced: Arc<AtomicUsize>,
+            row: Vec<u8>,
+            pos: usize,
+        }
+        impl Read for Counting {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                let n = buf.len().min(16 * 1024);
+                for b in &mut buf[..n] {
+                    *b = self.row[self.pos % self.row.len()];
+                    self.pos += 1;
+                }
+                self.produced.fetch_add(n, Ordering::SeqCst);
+                Ok(n)
+            }
+        }
+        let produced = Arc::new(AtomicUsize::new(0));
+        let src = Counting {
+            produced: produced.clone(),
+            row: b"1,2,3\n".to_vec(),
+            pos: 0,
+        };
+        let mut p = prepare_input(src, None).unwrap();
+        let mut first = [0u8; 100];
+        p.reader.read_exact(&mut first).unwrap();
+        // A 64 MiB file that is not touched beyond the sample and one chunk.
+        assert!(produced.load(Ordering::SeqCst) <= SNIFF_BYTES + 32 * 1024);
+    }
+
+    #[test]
+    fn a_tie_between_delimiters_goes_to_the_first_in_the_fixed_order() {
+        // Two fields with a comma and two with a semicolon on every row.
+        assert_eq!(prepared(b"a,b;c\nd,e;f\ng,h;i\n").delimiter, b',');
+    }
+
+    #[test]
+    fn a_record_cut_by_the_sample_limit_gets_no_vote() {
+        // The header says semicolon; the only other record is cut by the
+        // sample limit and, as far as it goes, looks like eleven columns of
+        // commas.
+        let csv = format!("a;b\n,,,,,,,,,,{}", "x".repeat(2 * SNIFF_BYTES));
+        assert_eq!(prepared(csv.as_bytes()).delimiter, b';');
+    }
+
+    #[test]
+    fn a_line_without_a_newline_is_cut_off_at_the_limit() {
+        struct Counting {
+            produced: Arc<AtomicUsize>,
+        }
+        impl Read for Counting {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                let n = buf.len().min(64 * 1024);
+                buf[..n].fill(b'x');
+                self.produced.fetch_add(n, Ordering::SeqCst);
+                Ok(n)
+            }
+        }
+        let produced = Arc::new(AtomicUsize::new(0));
+        // An endless line: never a newline, never an end.
+        let mut p = prepare_input(
+            Counting {
+                produced: produced.clone(),
+            },
+            None,
+        )
+        .unwrap();
+        let mut sink = vec![0u8; 8192];
+        let err = loop {
+            match p.reader.read(&mut sink) {
+                Ok(0) => panic!("the stream has no end"),
+                Ok(_) => {}
+                Err(e) => break e,
+            }
+        };
+        assert!(matches!(
+            CsvError::from_io(err),
+            CsvError::RecordTooLong {
+                limit: MAX_RECORD_BYTES,
+                ..
+            }
+        ));
+        // Nothing past the limit plus the sample and a chunk was pulled.
+        assert!(
+            produced.load(Ordering::SeqCst) <= SNIFF_BYTES + MAX_RECORD_BYTES + 128 * 1024,
+            "pulled {} bytes",
+            produced.load(Ordering::SeqCst)
+        );
+    }
+
+    #[test]
+    fn a_line_of_exactly_the_limit_is_accepted_and_one_byte_more_is_not() {
+        let line = |n: usize| format!("{}\nb\n", "x".repeat(n)).into_bytes();
+        let mut ok = prepare_input(Cursor::new(line(MAX_RECORD_BYTES)), None).unwrap();
+        assert!(ok.reader.read_to_end(&mut Vec::new()).is_ok());
+        let mut bad = prepare_input(Cursor::new(line(MAX_RECORD_BYTES + 1)), None).unwrap();
+        let err = bad.reader.read_to_end(&mut Vec::new()).unwrap_err();
+        assert!(matches!(
+            CsvError::from_io(err),
+            CsvError::RecordTooLong {
+                limit: MAX_RECORD_BYTES,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn carriage_return_line_endings_do_not_count_as_one_long_line() {
+        let row = format!("{},{}\r", "x".repeat(50), "y".repeat(50));
+        let csv = format!("a,b\r{}", row.repeat(100_000));
+        assert!(csv.len() > MAX_RECORD_BYTES);
+        let mut p = prepared(csv.as_bytes());
+        assert!(p.reader.read_to_end(&mut Vec::new()).is_ok());
+    }
+
+    #[test]
+    fn a_finished_windows_1252_stream_keeps_answering_end_of_file() {
+        // The decoder panics when used after its last call; a parser that
+        // reads again after the end must get Ok(0), not a panic.
+        let mut p = prepared(b"a,b\ncaf\xE9,1\n");
+        let mut sink = Vec::new();
+        p.reader.read_to_end(&mut sink).unwrap();
+        let mut buf = [0u8; 16];
+        for _ in 0..3 {
+            assert_eq!(p.reader.read(&mut buf).unwrap(), 0);
+        }
+    }
+
+    /// Accented UTF-8 text with one stray byte in the middle.
+    fn mostly_utf8_with_a_stray_byte() -> Vec<u8> {
+        let mut bytes = b"name,city\n".to_vec();
+        for _ in 0..200 {
+            bytes.extend_from_slice("José,São Paulo\n".as_bytes());
+        }
+        bytes.extend_from_slice(b"ab\xFFcd,x\n");
+        for _ in 0..200 {
+            bytes.extend_from_slice("Zoë,Köln\n".as_bytes());
+        }
+        bytes
+    }
+
+    #[test]
+    fn one_stray_byte_does_not_turn_a_utf8_file_into_mojibake() {
+        let bytes = mostly_utf8_with_a_stray_byte();
+        let p = prepared(&bytes);
+        assert_eq!(p.encoding, Encoding::Utf8);
+        let stats = p.decode.clone();
+        let out = text_of(p);
+        // Every accent survives; the stray byte became one replacement character.
+        assert!(out.contains("José,São Paulo\n") && out.contains("Zoë,Köln\n"));
+        assert!(!out.contains('Ã'), "mojibake in the output");
+        assert!(out.contains("ab\u{FFFD}cd,x\n"));
+        assert_eq!((stats.invalid(), stats.valid_multibyte() > 0), (1, true));
+    }
+
+    #[test]
+    fn a_real_windows_1252_file_is_not_mistaken_for_utf8() {
+        // Accents are single bytes that are not valid UTF-8 sequences.
+        let p = prepared(b"name,city\nJos\xE9,S\xE3o Paulo\nZo\xEB,K\xF6ln\n");
+        assert_eq!(p.encoding, Encoding::Windows1252);
+        assert_eq!(text_of(p), "name,city\nJosé,São Paulo\nZoë,Köln\n");
+    }
+
+    #[test]
+    fn the_plausibility_rule_prefers_utf8_for_ties_and_near_ties() {
+        let stats = |valid, invalid| {
+            let d = DecodeStats::default();
+            d.valid_multibyte.store(valid, Ordering::Relaxed);
+            d.invalid.store(invalid, Ordering::Relaxed);
+            d.plausibly_utf8()
+        };
+        // No invalid sequence; more valid than invalid; a tie; a near tie (half).
+        assert!(stats(0, 0) && stats(5, 0) && stats(2, 1) && stats(100, 99));
+        assert!(stats(1, 1) && stats(3, 5) && stats(3, 6));
+        // Mostly invalid: ASCII plus a stray byte, or real Windows-1252.
+        assert!(!stats(0, 1) && !stats(1, 3) && !stats(3, 7) && !stats(0, 400));
+    }
+
+    #[test]
+    fn counting_is_the_same_however_the_stream_is_split_and_a_cut_end_is_one_replacement() {
+        let mut bytes = "é,ñ,ü\n".as_bytes().to_vec();
+        bytes.extend_from_slice(b"a\xFFb\xC3\n");
+        bytes.extend_from_slice("日本\n".as_bytes());
+        bytes.push(0xE2); // a character cut by the end of the stream
+        let whole = prepared(&bytes);
+        let (valid, invalid) = (whole.decode.clone(), whole.decode.clone());
+        let expect = text_of(whole);
+        let mut p = prepared(&bytes);
+        let (mut out, mut one) = (Vec::new(), [0u8; 1]);
+        while p.reader.read(&mut one).unwrap() == 1 {
+            out.push(one[0]);
+        }
+        assert_eq!(String::from_utf8(out).unwrap(), expect);
+        // 0xFF, the lone 0xC3 and the cut 0xE2 are three invalid sequences;
+        // é ñ ü 日 本 are five valid multibyte ones.
+        assert_eq!((p.decode.invalid(), p.decode.valid_multibyte()), (3, 5));
+        assert_eq!((valid.invalid(), invalid.valid_multibyte()), (3, 5));
+    }
+
+    #[test]
+    fn replacement_characters_cannot_overflow_the_output() {
+        // Every byte invalid: three output bytes per input byte.
+        let mut bytes = b"a\n".to_vec();
+        bytes.extend(std::iter::repeat_n(0xFF, 100_000));
+        let p = prepare_input(Cursor::new(bytes), Some(Encoding::Utf8)).unwrap();
+        let stats = p.decode.clone();
+        let out = text_of(p);
+        assert_eq!(out.matches('\u{FFFD}').count(), 100_000);
+        assert_eq!(stats.invalid(), 100_000);
+    }
+
+    #[test]
+    fn the_sample_count_counts_sequences_not_bytes_and_a_cut_end_only_when_it_is_the_end() {
+        assert_eq!(count_utf8("é日".as_bytes(), true), (2, 0));
+        assert_eq!(count_utf8(b"a\xFF\xC3\xA9", true), (1, 1));
+        // A character cut by a sample limit is not invalid; at the real end it is.
+        assert_eq!(count_utf8(b"ab\xE2\x82", false), (0, 0));
+        assert_eq!(count_utf8(b"ab\xE2\x82", true), (0, 1));
+    }
+
+    #[test]
+    fn a_windows_1252_stream_is_also_counted_as_utf8_and_its_bytes_are_unchanged() {
+        let p = prepared(b"name,city\nJos\xE9,S\xE3o\nZo\xEB,K\xF6ln\n");
+        assert_eq!(p.encoding, Encoding::Windows1252);
+        let stats = p.decode.clone();
+        let _ = text_of(p);
+        // Four accented single bytes: four invalid sequences, no valid one.
+        assert_eq!((stats.invalid(), stats.valid_multibyte()), (4, 0));
+        assert!(!stats.plausibly_utf8());
+    }
+}

@@ -497,3 +497,14 @@ the first 50, without the one the sample cut) agree most on a field count above
 one, with a comma as the fallback. An empty file, or one with only whitespace, is
 `CsvError::Empty`. Nothing past the sample is read before the consumer asks, and a
 record is bounded by the record scanner, not by physical lines.
+
+**Encoding rule.** An invalid UTF-8 sequence is never an error and never decides
+the encoding by itself: it is replaced by U+FFFD and counted (`DecodeStats::invalid`,
+with `valid_multibyte` the count of valid non-ASCII characters), so one stray byte
+in a UTF-8 file costs one character and is reported instead of turning every
+accent into mojibake. The content is *plausibly UTF-8* when there is no invalid
+sequence, or at least half as many valid multibyte sequences as invalid ones (ties
+and near-ties go to UTF-8: a counted replacement character is visible, mojibake is
+not). Real Windows-1252 text has almost no valid UTF-8 multibyte sequences (an
+accented letter is one byte), so its valid count is near zero against many invalid
+ones.
