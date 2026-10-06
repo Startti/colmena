@@ -483,3 +483,26 @@ historia o el del adjunto, o con la lectura vieja de SQLite, falla su caso; envo
 hace fallar los casos de §25 (cobro doble).
 **ADP.** `EventTreeBuilder` no estampa las filas `<nodo>::<propósito>` (no son nodos del árbol): para cobrarlas hay
 que estamparlas, mapear su clave a la del dueño y leer `guardrail_llm.api_key` (hoy BYOK). **Estado.** done.
+
+## 30. Facturación: cada resumen cobra su propio grafo, y las filas de `for_each` llevan su modelo
+
+**Qué cambia.** Un host cobra cada fila de `usage-summary`/`subgraph-usage-summary` por su `model`/`provider` y
+descarta la que no los tiene. (1) La fila `N` de un `for_each` (`<for_each>#N`) no tiene `NodeStart` y salía con
+`model`/`provider` en `null` y sin `provider_key_id`: ahora el `for_each` emite antes de cada fila un
+`DagExecutionEvent::UsageIdentity` (sin frame SSE) con `node_type`, `model`, `provider` y `provider_key_id` del
+target, solo si el target llama al proveedor. (2) Un `llm_call` como tool dentro de un `subgraph` y (3) las filas de
+un `for_each` como tool llegaban envueltas (`SubgraphWrapped`) y no se contaban. Ahora **cada resumen cobra
+exactamente lo de su grafo**, a cualquier profundidad dentro de él: `track_child_usage` (`run_use_case.rs`) cuenta
+lo envuelto por un scope del mismo grafo en la fila de su `path` (`Fan>for_each#0`: dos scopes con el mismo id no
+comparten fila) y deja afuera lo de una corrida anidada (`subgraph`, agente como tool): `run_subgraph` marca
+`nested` cada `LlmUsage` que sale de una corrida hija, que lo cobra en su `subgraph-usage-summary`. **El
+`usage-summary` raíz ya no trae los nodos de un `subgraph` hijo** (los sumaba, y si el hijo repetía un id del padre
+mezclaba los tokens de los dos con un solo modelo); el modelo que dice un hijo no pisa el de una fila del padre.
+`finish.usage` sigue siendo el total. Fila: `{"node_id":"fe#0","node_type":"llm_call","model":"…","provider":"…",`
+`"provider_key_id":"…","prompt_tokens":…,…,"total_tokens":…}` (`provider_key_id` solo si el target lo tiene).
+**Tests.** `tests/usage_counted_once.rs`: filas de `for_each`, un tool dentro de un `subgraph`, un agente como tool
+cuyo nodo también es `agent` con otro modelo, dos `for_each` como tool y un hijo que repite el id del padre; toda
+fila con tokens tiene `model`/`provider` y cada resumen suma lo de su grafo. Unitario de `row_usage_identity`.
+Mutaciones: sin `nested`, fila por id en vez de `path`, modelo del hijo pisando al padre, sin `UsageIdentity` o sin
+su clave: falla su caso. **ADP.** `<for_each>#N` y `<scope>>…` no son nodos del árbol: para cobrarlas hay que
+estamparlas. **Estado.** done.
