@@ -71,6 +71,8 @@ pub(crate) struct Faults {
     pub fail_reached: tokio::sync::Notify,
     /// Runs right after `fail_with_blobs` was applied (a retry gets in here).
     pub after_fail: std::sync::Mutex<Option<AfterFail>>,
+    /// `track_blobs` answers a backend error whose text must never be shown.
+    pub fail_track: AtomicBool,
     /// The row is deleted just before the first tracking write.
     pub delete_before_track: AtomicBool,
     /// `release` never returns, after saying it was reached.
@@ -166,6 +168,9 @@ impl PreparationRegistry for FaultyRegistry {
     ) -> Result<TerminalOutcome, RegistryError> {
         if self.faults.delete_before_track.swap(false, SeqCst) {
             self.inner.delete(k).await?;
+        }
+        if self.faults.fail_track.load(SeqCst) {
+            return Err(RegistryError::Backend(SECRET.into()));
         }
         if let Some(s) = self.faults.slow.lock().unwrap().clone() {
             s.enter_budget();

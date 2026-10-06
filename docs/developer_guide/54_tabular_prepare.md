@@ -65,8 +65,9 @@ the RFC 3339 text of whole-second and fractional timestamps; tests cover the
 lease boundary at millisecond resolution. Two concurrent claims give exactly one
 winner.
 
-The lease is a single fixed value, `P_PREP_TIME + 60 s` (`lease_for`), with no
-renewal: the registry is written on state change, not for progress.
+The lease is a single fixed value, with no renewal: the registry is written on state
+change, not for progress. The registry's `lease_for` is `P_PREP_TIME + 60 s`; the CSV
+driver claims with the budget plus its own 90 s grace (see *Time budget* below).
 
 ### Terminal writes
 
@@ -169,9 +170,10 @@ an earlier failed attempt stay known; relative paths are deterministic, so a
 later attempt overwrites instead of adding. The lease owner is the only writer,
 so reading the tracked keys and then updating is safe. A claim keeps
 `blob_keys` and clears the manifest, tables and error of the previous attempt.
-A cancelled job deletes what it wrote. Blobs of an attempt that crashed before
-any terminal write are not tracked; removing them needs a host that can delete
-by prefix (a later slice adds that port) and is otherwise a known limit.
+A cancelled job deletes what it wrote. The CSV driver lists each key in the row
+before it writes the object (`track_blobs`), so the blobs of an attempt that
+crashed before any terminal write are tracked too; a host that can delete by
+prefix also covers a writer that did not list its keys.
 
 ## Switch and ports
 
@@ -269,8 +271,8 @@ Two more methods have safe defaults: `derived_root(source_key)` (the prefix
 under which a source's derived blobs live; default `None` = unknown) and
 `delete_derived(source_key, tracked_keys)` (default: delete each tracked key in
 order, stopping at the first failure; a host that can delete by prefix overrides
-it and thereby also removes blobs nobody tracked, such as those of an attempt
-that crashed before any terminal write). Nothing calls them yet: the cleanup
+it and thereby also removes blobs nobody tracked, such as those of a writer
+that did not list its keys). Nothing calls them yet: the cleanup
 pass that uses them follows in later slices.
 
 ## Cleanup
@@ -702,21 +704,24 @@ extension (cleaned by `unique_table_names`), and the manifest records the
 conversion report of the table.
 
 `prepare_csv` claims the registry row (with `FORMAT_VERSION`, a lease of the time
-budget plus 60 s), converts the source as table 0 with the part sink above, stores
+budget plus `JOB_GRACE`, 90 s), converts the source as table 0 with the part sink above, stores
 the manifest LAST and completes the row with the manifest key, the table list and
 the prepared bytes. The row's `blob_keys` are the union of every key any attempt may
-have written (the part keys are recorded before each put, the manifest's before its
-put), as full storage keys, so a failed put and a restart that wrote more parts than
+have written (listed in the row before each put, see *What holds about the objects*),
+as full storage keys, so a failed put and a restart that wrote more parts than
 the final run are both tracked. The manifest names only the parts of the final run;
 the others come back as `stale_keys` for deletion and are never referenced. A
-failure is recorded with `fail_with_blobs` and the tracked objects are then deleted
-(best effort: they are tracked, so the cleanup pass removes what this could not).
+failure is handled in this order: ownership is read, the objects are deleted (best effort:
+they are listed, so the cleanup pass removes what this could not), and only then is the
+failure recorded with `fail_with_blobs`. Nothing is deleted after the write: once the row
+is `failed` its lease is cleared and a retry may claim it at once and write the same
+deterministic keys.
 A registry that cannot be written is returned as an error: nothing could be recorded.
 
 **Time budget.** The conversion runs against `PrepareEnv::budget` (`PREP_TIMEOUT`,
 300 s). When it ends first the run is dropped (which cancels its reader), the keys it
-recorded before each put are read from the control, the failure is recorded as `time`
-with all of them and they are deleted. The wait goes through `PrepareEnv::sleeper`
+recorded before each put are read from the control, the objects are deleted and the
+failure is then recorded as `time` with all of them. The wait goes through `PrepareEnv::sleeper`
 (`tokio::time::sleep` by default), which is what the tests replace: no test depends on
 how long anything takes.
 
@@ -725,10 +730,15 @@ conversion and the manifest put. What comes after it is bounded step by step: th
 the terminal writes, the ownership reads, the deletes and the progress reports each get
 `TERMINAL_STEP` (10 s) and are given up on, never waited for forever (a registry step that
 does not answer is an error with a fixed text; a delete that does not is logged and left to
-the cleanup pass). The lease is `lease_for(budget)`: the budget plus the registry's 60 s
-grace, a test pins it, and a compile-time assertion keeps the longest run of such steps
-(`MAX_TERMINAL_STEPS` = 5, 50 s) shorter than the grace, so the job is over before its
-lease is.
+the cleanup pass). The lease is the budget plus `JOB_GRACE` (90 s), not the registry's 60 s
+grace: the longest path an owner can take outside the budget is seven bounded steps (the
+claim and the first progress report before it; after it, for a source found missing whose
+cleanup fails, an ownership read, a delete, an ownership read, a delete and the failure
+write), 70 s at 10 s each. A compile-time assertion keeps that shorter than the grace, and a
+test runs that path for real on a virtual clock, every step taking its whole bound and the
+conversion the whole budget: it checks the list of steps and that every delete and terminal
+write happens before `lease_until`, so adding a step to the path fails it. A job that no
+longer owns its row writes nothing that needs the lease, so its steps are not counted.
 
 **Failure reasons.** A failure is recorded in the registry with a reason (`error_code`)
 and a fixed detail sentence (`error_detail`); neither carries a cell, a storage key or
@@ -741,13 +751,14 @@ maps it to what the user sees:
 | `storage` | the source could not be read from storage, or a part or the manifest could not be stored, or the adapter answered with a key outside the prepared layout |
 | `unreadable_file` | the file cannot be read as CSV: empty, UTF-16 or binary, a row longer than the header, a record over 1 MiB, more than 16,384 columns, or text that does not parse |
 | `table_too_large` | the table list does not fit the 64 KiB registry row (too many or too long column names) |
-| `internal` | anything else (a reader that panicked, a conversion that stopped unexpectedly): a defect, never the file's fault |
+| `internal` | anything else (a reader that panicked, a conversion that stopped unexpectedly, the registry unable to list keys or confirm the row): a defect or an outage on our side, never the file's fault |
 
 Nothing is written for a cancellation (the source was deleted or another job owns the
 row). The Excel unit adds its own reasons when it exists.
 
 **Ownership.** Every object a preparation writes (each part, then the manifest) is
-preceded by a read of the registry (`still_owned`): a preparation whose row was deleted
+preceded by an ownership check, a `still_owned` read, or the owner-guarded tracking write
+at the start of each batch of sixteen parts and for the manifest: a preparation whose row was deleted
 (the source was removed) or taken by another job stops before its next write and never
 completes. The objects have deterministic keys, so a job that lost its row must not
 write over those of whoever owns it now. What it does then depends on why: if the row is
@@ -758,6 +769,8 @@ exist (on the first read, or on a restart after some parts were written) deletes
 written and releases the row, keeping no failure (`SourceGone`); if the objects cannot be
 deleted the row stays, failed with `storage` and the keys, so the cleanup pass can reach
 them. A storage that cannot be reached is not a missing source: it is a `storage` failure.
+The part bookkeeping is per table, so the first part of a second table is listed before
+it is put.
 
 **Progress.** While a preparation runs it reports `PrepareProgressInfo` to the host's
 progress port (`PrepareEnv::progress`, the `NoopProgress` by default; build the
@@ -789,7 +802,7 @@ write on top of the claim and the terminal write. So every object a preparation 
 written is in the row whatever happens next, a crash, a dropped future or a registry error
 at the terminal write; a key listed and never written is harmless (deleting is idempotent,
 and a ready row of three parts also lists the thirteen unused part keys, which cleanup
-deletes as no-ops). If the failure cannot be recorded the objects are deleted anyway; if
+deletes as no-ops). If the failure cannot be recorded the objects are already deleted (they are deleted first); if
 `complete` errors, whether it was applied is unknown, so nothing is deleted and the objects
 stay listed. If the row is gone and the registry errors when the job asks (`get`), what it
 wrote is left behind with no row to list it: the one case the row cannot cover.
@@ -818,12 +831,20 @@ the failing paths with error texts that name a key and checks none of it appears
   rather than bounded.
 - *Check then write.* Ownership is read (or written, at a batch boundary) before an object
   is put, and the put itself is not conditional: a lease taken between the check and the put
-  lets one object be written over the new owner's key. The lease is longer than the whole
-  bounded job, so a takeover can only follow a deleted row that someone claims again within
-  that put's duration; the new owner writes the same bytes of the same source under the same
-  key, and its own terminal write is conditional on its own lease. When a job finds the row
-  gone, the `get` that decides whether to delete is not atomic with the delete either, for
-  the same reason.
+  lets one object be written over the new owner's key. The lease outlasts the owner's whole
+  bounded job (see *Time budget*), so a takeover cannot follow an expiry; it can only follow
+  a deleted row that someone claims again within that put's duration. If that new claim is
+  for the same unchanged source the bytes written are the same; if the source key was
+  rewritten in between they are not, and the table could mix versions. The upload paths give
+  every file a fresh key, so a key is not reused after a deletion; this is tolerated, not
+  closed (it needs a conditional put the storage port does not have). The new owner's own
+  terminal write is conditional on its own lease. When a job finds the row gone, the `get`
+  that decides whether to delete is not atomic with the delete either, for the same reason.
+- *A delete with no row.* When the row is gone the objects the job wrote are listed nowhere.
+  A delete that fails or does not answer in its bound then leaves them (the default
+  `delete_derived` stops at the first error): the log says so ("no row lists them") and they
+  stay until a host that deletes by prefix, or someone, removes them. With a row (every other
+  path) the keys are listed and the cleanup pass removes them.
 - *Progress.* `done` is the bytes of the current read of the file and stays under the total
   until the table is ready; after a restart (a column that turned out to be text) it starts
   over.
