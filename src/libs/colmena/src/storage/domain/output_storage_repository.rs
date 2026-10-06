@@ -184,10 +184,12 @@ pub trait OutputStorageRepository: Send + Sync {
     }
 
     /// Prefix under which the blobs derived from `source_storage_key` (its
-    /// prepared tables) live, when the host's layout makes it knowable.
-    /// Default `None`: the layout is unknown, so callers cannot validate a
-    /// tracked key against a root. A host that returns a root lets cleanup
-    /// refuse any tracked key outside it.
+    /// prepared tables) live. A host that stores prepared tables MUST override
+    /// it: the cleanup pass (`attachment_gc`) deletes only tracked keys it can
+    /// contain, i.e. keys inside this root (compared on a path-segment
+    /// boundary) and never the source itself, so with the default `None` it
+    /// REFUSES to delete them (it leaves the row, logs and counts them) rather
+    /// than trust keys it cannot check.
     fn derived_root(&self, source_storage_key: &str) -> Option<String> {
         let _ = source_storage_key;
         None

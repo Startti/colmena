@@ -300,6 +300,19 @@ could not be deleted (`storage_errors`) or when the pass could not settle the so
 (`busy`): the row had changed or is leased by another pass or a preparation.
 Nothing was wrongly deleted, and the caller must retry on its next run.
 
+**Containment.** Every deletion path validates the tracked keys with one
+function before it deletes anything: never the source key itself, never a key with
+a `..` segment, and only keys inside the root the host's storage adapter reports
+with `derived_root`, compared on a path-segment boundary (`u/s/prepared-other/x`
+is not inside `u/s/prepared`). **A host whose adapter reports no root (the default)
+cannot have its keys contained, so the pass refuses to delete them**: the row is
+left untouched, an error is logged and `keys_rejected` is counted. A row that
+tracks no key has nothing to contain and is processed normally. A dry run
+validates first, so it never promises a deletion the real run would refuse. In the
+shipped binary no adapter overrides `derived_root` yet, so prepared tables are not
+deleted until the host's adapter does (nothing writes them until the preparation
+job exists); the counters show it.
+
 ## Tests
 
 `cargo test --lib attachment_prepared` applies the SQLite migration to an

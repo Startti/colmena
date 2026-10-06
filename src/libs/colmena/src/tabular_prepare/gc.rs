@@ -2,8 +2,7 @@
 //! own pass over `conversation_attachments`.
 //!
 //! Idempotent steps: delete the prepared tables of a source whose blob was
-//! just deleted (this slice); later slices add failure handling and lease
-//! accounting, the containment checks on tracked keys, the cancellation of a live
+//! just deleted (this slice); later slices add the cancellation of a live
 //! preparation, the TTL pass and the pass that makes a `ready` row whose
 //! manifest has disappeared claimable again.
 //!
@@ -16,11 +15,22 @@
 //! pass dies or storage refuses, the lease expires and the next run (or a
 //! preparation) takes the row over.
 //!
-//! Time is read from a clock once per row, never once per pass, so each row's
-//! lease starts when the pass claims it. If a lease nevertheless expires while
-//! the blobs are being deleted and something claims the row, `finish_delete`
-//! returns false: the pass logs it and counts `leases_lost` and leaves the new
-//! owner's row alone. With an empty table none of this makes a storage call.
+//! Time is read from a clock once per row, never once per pass: each row's
+//! lease starts when the pass claims it, so a long pass cannot leave a late
+//! row with a lease that is already half spent. If a lease nevertheless
+//! expires while the blobs are being deleted and something claims the row,
+//! `finish_delete` returns false: the pass logs it and counts `leases_lost`
+//! and leaves the new owner's row alone.
+//!
+//! Containment. Before it deletes anything the pass checks every tracked key
+//! (`contain_keys`): never the source key itself, never a key with a `..`
+//! segment, and only keys inside the root the host's storage adapter reports
+//! with `derived_root` (compared on a path-segment boundary, so
+//! `u/s/prepared-other/x` is not inside `u/s/prepared`). A host whose adapter
+//! reports no root cannot have its keys contained, so the pass REFUSES to
+//! delete them: it leaves the row, logs an error and counts `keys_rejected`.
+//! A row that tracks no key has nothing to contain and is processed normally.
+//! With an empty table none of this makes a storage call.
 
 use crate::storage::domain::OutputStorageRepository;
 use crate::tabular_prepare::registry::{PreparationRegistry, PreparedRow, RegistryError};
@@ -45,6 +55,10 @@ pub struct PreparedGcSummary {
     /// someone else (another pass, or a preparation). Nothing was wrongly
     /// deleted; the caller must retry on its next run.
     pub busy: u64,
+    /// Rows left alone because a tracked key could not be contained: it is
+    /// the source, has a `..` segment, lies outside the derived root, or the
+    /// host reports no derived root.
+    pub keys_rejected: u64,
     /// Rows whose `deleting` lease expired and was taken by someone else
     /// before the pass could finish them.
     pub leases_lost: u64,
@@ -70,6 +84,7 @@ impl PreparedGcSummary {
         self.rows_reset += other.rows_reset;
         self.storage_errors += other.storage_errors;
         self.busy += other.busy;
+        self.keys_rejected += other.keys_rejected;
         self.leases_lost += other.leases_lost;
     }
 }
@@ -87,6 +102,58 @@ fn tracked_keys(row: &PreparedRow) -> Vec<String> {
     keys
 }
 
+/// Why a tracked key cannot be deleted.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Refusal {
+    pub key: String,
+    pub reason: &'static str,
+}
+
+/// The one validation every deletion path shares (claim-and-delete and the
+/// cancellation of a live preparation). `Ok` when `keys` is empty or every key
+/// is contained.
+pub(crate) fn contain_keys(
+    storage: &dyn OutputStorageRepository,
+    source: &str,
+    keys: &[String],
+) -> Result<(), Refusal> {
+    if keys.is_empty() {
+        return Ok(());
+    }
+    let refuse = |key: &String, reason| Refusal {
+        key: key.clone(),
+        reason,
+    };
+    if let Some(k) = keys.iter().find(|k| *k == source) {
+        return Err(refuse(k, "the key is the source itself"));
+    }
+    if let Some(k) = keys.iter().find(|k| k.split('/').any(|seg| seg == "..")) {
+        return Err(refuse(k, "the key has a `..` segment"));
+    }
+    let Some(root) = storage.derived_root(source) else {
+        return Err(refuse(
+            &keys[0],
+            "the storage adapter reports no derived root, so the key cannot be contained",
+        ));
+    };
+    let prefix = format!("{}/", root.trim_end_matches('/'));
+    match keys.iter().find(|k| !k.starts_with(&prefix)) {
+        Some(k) => Err(refuse(k, "the key lies outside the derived root")),
+        None => Ok(()),
+    }
+}
+
+fn log_refusal(source: &str, refusal: &Refusal) {
+    tracing::error!(
+        target: "colmena::attachment_gc",
+        event = "gc.prepared.key_rejected",
+        source_key = source,
+        blob = refusal.key.as_str(),
+        reason = refusal.reason,
+        "tracked key refused; the row is left untouched"
+    );
+}
+
 /// Take a row, delete its derived blobs and then the row. A row that changed
 /// since it was read (a preparation claimed it) is left alone. Returns `false`
 /// only in that case, so a caller that re-reads can try again.
@@ -100,6 +167,13 @@ async fn remove_prepared(
 ) -> Result<bool, RegistryError> {
     let source = row.source_storage_key.as_str();
     let keys = tracked_keys(row);
+    // Validate first, dry run included: a dry run must not promise deletions
+    // the real run would refuse.
+    if let Err(refusal) = contain_keys(storage, source, &keys) {
+        summary.keys_rejected += 1;
+        log_refusal(source, &refusal);
+        return Ok(true);
+    }
     if dry_run {
         tracing::info!(
             target: "colmena::attachment_gc",
@@ -174,7 +248,6 @@ pub async fn delete_prepared_for_source(
 }
 
 #[cfg(test)]
-#[cfg(test)]
 mod tests {
     use super::*;
     use crate::storage::domain::{
@@ -195,7 +268,8 @@ mod tests {
     }
 
     /// In-memory storage that remembers what was deleted and in which order,
-    /// and can refuse to delete or to find chosen keys.
+    /// and can refuse to delete or to find chosen keys. Its layout puts a
+    /// source's blobs under `<parent>/prepared/`.
     #[derive(Default)]
     struct FakeStorage {
         blobs: Mutex<HashSet<String>>,
@@ -203,6 +277,9 @@ mod tests {
         failing: Mutex<HashSet<String>>,
         unreachable: Mutex<bool>,
         reads: Mutex<usize>,
+        no_root: Mutex<bool>,
+        /// Report the root without a trailing slash (a sibling-prefix trap).
+        bare_root: Mutex<bool>,
         /// Runs before `delete_derived` deletes anything.
         hook: Mutex<Option<Hook>>,
     }
@@ -253,6 +330,19 @@ mod tests {
             self.blobs.lock().unwrap().remove(key);
             self.deleted.lock().unwrap().push(key.to_string());
             Ok(())
+        }
+        fn derived_root(&self, source: &str) -> Option<String> {
+            if *self.no_root.lock().unwrap() {
+                return None;
+            }
+            let bare = *self.bare_root.lock().unwrap();
+            source.rsplit_once('/').map(|(parent, _)| {
+                if bare {
+                    format!("{parent}/prepared")
+                } else {
+                    format!("{parent}/prepared/")
+                }
+            })
         }
         async fn delete_derived(
             &self,
@@ -527,5 +617,138 @@ mod tests {
         let live = row(&f, "a").await.expect("the new owner's row survives");
         assert_eq!(live.status, PrepareStatus::Running);
         assert_eq!(live.lease_owner.as_deref(), Some("worker"));
+    }
+
+    /// Seed a ready row for `name` tracking exactly `keys` (plus the usual
+    /// manifest key unless it is empty).
+    async fn seed_tracking(f: &Fixture, name: &str, keys: Vec<String>, manifest: Option<String>) {
+        f.registry
+            .claim(claim_at(name, "job", now()))
+            .await
+            .unwrap()
+            .unwrap();
+        let info = ReadyInfo {
+            manifest_key: manifest.unwrap_or_default(),
+            blob_keys: keys,
+            tables_json: "[]".to_string(),
+            prepared_bytes: 1,
+        };
+        f.registry
+            .complete(&source_of(name), "job", info, now())
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn attachment_gc_refuses_a_tracked_key_outside_the_derived_root() {
+        let f = fixture().await;
+        seed_tracking(
+            &f,
+            "evil",
+            vec!["chat-attachments/other-user/secret.csv".to_string()],
+            Some(manifest_of("evil")),
+        )
+        .await;
+        let storage = FakeStorage::with(&["chat-attachments/other-user/secret.csv".to_string()]);
+        let summary = gc_source(&f, &storage, "evil", &now, false).await;
+        assert_eq!(summary.keys_rejected, 1);
+        assert_eq!(summary.rows_deleted, 0);
+        assert_eq!(storage.calls(), 0, "nothing was deleted");
+        assert_eq!(row(&f, "evil").await.unwrap().status, PrepareStatus::Ready);
+    }
+
+    #[tokio::test]
+    async fn attachment_gc_refuses_a_sibling_prefix_of_the_derived_root() {
+        // `prepared-other` starts with `prepared` but is not inside it.
+        for bare in [false, true] {
+            let f = fixture().await;
+            let sibling = "chat-attachments/u/s/prepared-other/x/part-00000.parquet".to_string();
+            seed_tracking(&f, "sib", vec![sibling.clone()], Some(manifest_of("sib"))).await;
+            let storage = FakeStorage::with(std::slice::from_ref(&sibling));
+            *storage.bare_root.lock().unwrap() = bare;
+            let summary = gc_source(&f, &storage, "sib", &now, false).await;
+            assert_eq!(summary.keys_rejected, 1, "bare_root={bare}");
+            assert_eq!(storage.calls(), 0);
+        }
+        // The same root with a key really inside it is accepted, bare or not.
+        for bare in [false, true] {
+            let f = fixture().await;
+            seed_ready(&f, "ok", 0).await;
+            let storage = storage_with(&["ok"]);
+            *storage.bare_root.lock().unwrap() = bare;
+            let summary = gc_source(&f, &storage, "ok", &now, false).await;
+            assert_eq!(summary.rows_deleted, 1, "bare_root={bare}");
+        }
+    }
+
+    #[tokio::test]
+    async fn attachment_gc_without_a_derived_root_refuses_the_keys_it_cannot_contain() {
+        let f = fixture().await;
+        seed_ready(&f, "a", 0).await;
+        let storage = storage_with(&["a"]);
+        *storage.no_root.lock().unwrap() = true;
+        let summary = gc_source(&f, &storage, "a", &now, false).await;
+        assert_eq!(summary.keys_rejected, 1);
+        assert_eq!(summary.blobs_deleted, 0);
+        assert_eq!(storage.calls(), 0, "no blob is deleted without containment");
+        assert_eq!(row(&f, "a").await.unwrap().status, PrepareStatus::Ready);
+    }
+
+    #[tokio::test]
+    async fn attachment_gc_a_row_that_tracks_no_key_needs_no_root() {
+        let f = fixture().await;
+        f.registry
+            .claim(claim_at("empty", "job", now()))
+            .await
+            .unwrap()
+            .unwrap();
+        f.registry
+            .fail(&source_of("empty"), "job", "time", "x", now())
+            .await
+            .unwrap();
+        let storage = FakeStorage::with(&[]);
+        *storage.no_root.lock().unwrap() = true;
+        let summary = gc_source(&f, &storage, "empty", &now, false).await;
+        assert_eq!(
+            summary.rows_deleted, 1,
+            "nothing to contain: the row just goes"
+        );
+        assert_eq!(summary.keys_rejected, 0);
+    }
+
+    #[tokio::test]
+    async fn attachment_gc_never_deletes_the_source_key_or_a_dot_dot_key_with_or_without_a_root() {
+        let sneaky = "chat-attachments/u/s/prepared/x/../../../other/secret.csv".to_string();
+        for no_root in [false, true] {
+            for (name, bad) in [("self", source_of("self")), ("dots", sneaky.clone())] {
+                let f = fixture().await;
+                seed_tracking(&f, name, vec![bad.clone()], Some(manifest_of(name))).await;
+                let storage = FakeStorage::with(std::slice::from_ref(&bad));
+                *storage.no_root.lock().unwrap() = no_root;
+                let summary = gc_source(&f, &storage, name, &now, false).await;
+                assert_eq!(summary.keys_rejected, 1, "{name} no_root={no_root}");
+                assert_eq!(storage.calls(), 0);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn attachment_gc_a_dry_run_refuses_what_the_real_run_refuses() {
+        let f = fixture().await;
+        seed_tracking(
+            &f,
+            "evil",
+            vec!["chat-attachments/other-user/secret.csv".to_string()],
+            Some(manifest_of("evil")),
+        )
+        .await;
+        let storage = FakeStorage::with(&[]);
+        let dry = gc_source(&f, &storage, "evil", &now, true).await;
+        let real = gc_source(&f, &storage, "evil", &now, false).await;
+        assert_eq!(
+            dry, real,
+            "the dry run must not promise what the real run refuses"
+        );
+        assert_eq!(dry.keys_rejected, 1);
     }
 }
