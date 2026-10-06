@@ -6,7 +6,7 @@
 //! long as the executor. Each call runs in a fresh child the template forks
 //! for it (see [`SubprocessExecutor::run_raw`]).
 
-use super::child::{CallHeader, EXIT_NOT_READY, MAX_HEADER_BYTES};
+use super::child::{CallHeader, CallMounts, EXIT_NOT_READY, MAX_HEADER_BYTES};
 use super::config::{ExecutorConfigError, SubprocessConfig};
 use super::frame;
 use super::jail::{self, JailSpec};
@@ -350,6 +350,36 @@ fn reap(mut conn: UnixStream, slot: Slot) {
 }
 
 impl SubprocessExecutor {
+    /// One call that carries prepared data (dark behind
+    /// `COLMENA_LARGE_TABULAR`): the same sandbox as [`PythonExecutor::run`],
+    /// plus the call's staged directories. The seam the protocol work builds on.
+    pub async fn run_staged(
+        &self,
+        req: PythonRunRequest,
+        mounts: CallMounts,
+    ) -> Result<PythonRunResult, PythonRunError> {
+        self.run_with(req, Some(mounts)).await
+    }
+
+    async fn run_with(
+        &self,
+        req: PythonRunRequest,
+        mounts: Option<CallMounts>,
+    ) -> Result<PythonRunResult, PythonRunError> {
+        let timeout = req.timeout.unwrap_or(self.max_timeout);
+        let bytes = serde_json::to_vec(&WireRequest::new(req, timeout)).map_err(|e| {
+            PythonRunError::Internal(format!(
+                "PythonExecutorError: cannot encode the request: {e}"
+            ))
+        })?;
+        match self.run_raw_with(timeout, &bytes, mounts).await {
+            Ok(resp) => serde_json::from_slice::<WireResponse>(&resp)
+                .map_err(|_| PythonRunError::Python(MALFORMED_MESSAGE.to_string()))?
+                .into_result(),
+            Err(f) => Err(f.into_run_error(&self.cfg)),
+        }
+    }
+
     /// Fails unless the binary exists and this process runs as root: each
     /// child switches to an unprivileged user of its own, which only root may
     /// do. The template starts on the first call, or on [`Self::warm`].
@@ -387,6 +417,7 @@ impl SubprocessExecutor {
                 uid_base: cfg.uid_base,
                 tmp_mb: cfg.tmp_mb,
                 hide_paths: cfg.hide_paths.clone(),
+                staging_root: cfg.staging_root.clone(),
             },
             permits: Arc::new(Semaphore::new(cfg.slots)),
             free_slots: Arc::new(Mutex::new((0..cfg.slots as u32).rev().collect())),
@@ -490,6 +521,23 @@ impl SubprocessExecutor {
     /// refused here: the child could only answer it to a host whose write of
     /// the whole request succeeded.
     pub async fn run_raw(&self, timeout: Duration, request: &[u8]) -> Result<Vec<u8>, RawFailure> {
+        self.run_raw_with(timeout, request, None).await
+    }
+
+    /// [`Self::run_raw`] for a call that carries prepared data: the header
+    /// asks the jail for the call's staged directories. Without a staging
+    /// root no child is started.
+    async fn run_raw_with(
+        &self,
+        timeout: Duration,
+        request: &[u8],
+        mounts: Option<CallMounts>,
+    ) -> Result<Vec<u8>, RawFailure> {
+        if mounts.is_some() && self.cfg.staging_root.is_none() {
+            return Err(RawFailure::Unavailable(
+                "PythonExecutorError: this executor has no staging directory configured".into(),
+            ));
+        }
         if request.len() > self.cfg.max_request_bytes {
             return Err(RawFailure::RequestTooLarge);
         }
@@ -516,6 +564,7 @@ impl SubprocessExecutor {
             memory_mb: self.cfg.memory_mb,
             cpu_secs: timeout.as_secs().saturating_add(1),
             max_request_bytes: self.cfg.max_request_bytes,
+            mounts,
         };
         let header = serde_json::to_vec(&header).expect("header serializes");
         debug_assert!(header.len() <= MAX_HEADER_BYTES);
@@ -574,18 +623,7 @@ impl PythonExecutor for SubprocessExecutor {
     }
 
     async fn run(&self, req: PythonRunRequest) -> Result<PythonRunResult, PythonRunError> {
-        let timeout = req.timeout.unwrap_or(self.max_timeout);
-        let bytes = serde_json::to_vec(&WireRequest::new(req, timeout)).map_err(|e| {
-            PythonRunError::Internal(format!(
-                "PythonExecutorError: cannot encode the request: {e}"
-            ))
-        })?;
-        match self.run_raw(timeout, &bytes).await {
-            Ok(resp) => serde_json::from_slice::<WireResponse>(&resp)
-                .map_err(|_| PythonRunError::Python(MALFORMED_MESSAGE.to_string()))?
-                .into_result(),
-            Err(f) => Err(f.into_run_error(&self.cfg)),
-        }
+        self.run_with(req, None).await
     }
 
     async fn warm(&self) -> Result<(), String> {
@@ -613,6 +651,9 @@ fn start_template(cfg: &SubprocessConfig, dropped: Arc<AtomicU64>) -> Result<Tem
     cmd.arg("--tmp-mb").arg(cfg.tmp_mb.to_string());
     for p in &cfg.hide_paths {
         cmd.arg("--hide").arg(p);
+    }
+    if let Some(root) = &cfg.staging_root {
+        cmd.arg("--staging-root").arg(root);
     }
     cmd.env_clear().envs(template_env(std::env::vars_os()));
     cmd.stdin(Stdio::null())

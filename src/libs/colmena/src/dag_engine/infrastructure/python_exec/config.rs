@@ -13,6 +13,9 @@ pub const ENV_BIN: &str = "COLMENA_PYTHON_EXECUTOR_BIN";
 pub const ENV_SLOTS: &str = "COLMENA_PYTHON_EXECUTOR_SLOTS";
 pub const ENV_MEMORY_MB: &str = "COLMENA_PYTHON_EXECUTOR_MEMORY_MB";
 pub const ENV_HIDE_PATHS: &str = "COLMENA_PYTHON_EXECUTOR_HIDE_PATHS";
+/// Dark switch of the large tabular feature; read here only to gate staging.
+pub const ENV_LARGE_TABULAR: &str = "COLMENA_LARGE_TABULAR";
+pub const ENV_STAGING_DIR: &str = "COLMENA_PYTHON_EXECUTOR_STAGING_DIR";
 pub const ENV_MAX_REQUEST_MB: &str = "COLMENA_PYTHON_EXECUTOR_MAX_REQUEST_MB";
 pub const ENV_MAX_RESPONSE_MB: &str = "COLMENA_PYTHON_EXECUTOR_MAX_RESPONSE_MB";
 pub const ENV_REFUSE_OUTPUT: &str = "COLMENA_PYTHON_EXECUTOR_REFUSE_OUTPUT";
@@ -93,6 +96,9 @@ pub struct SubprocessConfig {
     pub uid_base: u32,
     pub tmp_mb: u64,
     pub hide_paths: Vec<PathBuf>,
+    /// Where calls that carry prepared data are staged: `Some` only with
+    /// `COLMENA_LARGE_TABULAR` on and `COLMENA_PYTHON_EXECUTOR_STAGING_DIR` set.
+    pub staging_root: Option<PathBuf>,
     pub max_request_bytes: usize,
     pub max_response_bytes: usize,
     /// Literals a result may not contain, e.g. the prefix of a credential
@@ -160,6 +166,30 @@ fn hide_paths(get: &impl Fn(&str) -> Option<String>) -> Result<Vec<PathBuf>, Exe
     ))
 }
 
+/// The staging root, canonical, only while `COLMENA_LARGE_TABULAR` is on: with
+/// the switch off the directory is not even looked at, so today's executor
+/// starts exactly as before. The directory must exist, hold no `..` and be a
+/// real directory; it is resolved once here and walked without following links
+/// by the jail on every call.
+fn staging_root(
+    get: &impl Fn(&str) -> Option<String>,
+) -> Result<Option<PathBuf>, ExecutorConfigError> {
+    let on = get(ENV_LARGE_TABULAR).and_then(|v| crate::dag_engine::engine::parse_bool_str(&v));
+    let dir = get(ENV_STAGING_DIR).map(|v| v.trim().to_string());
+    let (Some(true), Some(dir)) = (on, dir.filter(|d| !d.is_empty())) else {
+        return Ok(None);
+    };
+    let path = PathBuf::from(&dir);
+    let expected = "an absolute path of an existing directory, without '..'";
+    if !path.is_absolute() || has_parent_dir_component(&path) {
+        return Err(invalid(ENV_STAGING_DIR, &dir, expected));
+    }
+    match std::fs::canonicalize(&path) {
+        Ok(p) if p.is_dir() => Ok(Some(p)),
+        _ => Err(invalid(ENV_STAGING_DIR, &dir, expected)),
+    }
+}
+
 impl SubprocessConfig {
     pub fn from_lookup(get: &impl Fn(&str) -> Option<String>) -> Result<Self, ExecutorConfigError> {
         let bin = match get(ENV_BIN)
@@ -182,6 +212,7 @@ impl SubprocessConfig {
             uid_base: 20000,
             tmp_mb: 64,
             hide_paths: hide_paths(get)?,
+            staging_root: staging_root(get)?,
             max_request_bytes: parse_in(get, ENV_MAX_REQUEST_MB, 256usize, 1, 4095)? * MIB,
             max_response_bytes: parse_in(get, ENV_MAX_RESPONSE_MB, 256usize, 1, 4095)? * MIB,
             refuse_output: get(ENV_REFUSE_OUTPUT)
@@ -309,6 +340,60 @@ impl ExecutorConfig {
             remote: RemoteConfig::from_lookup(&get, &subprocess)?,
             subprocess,
         })
+    }
+}
+
+#[cfg(test)]
+mod staging_tests {
+    use super::*;
+
+    fn staging_env<'a>(
+        switch: Option<&'a str>,
+        dir: Option<&'a str>,
+    ) -> impl Fn(&str) -> Option<String> + 'a {
+        move |k| match k {
+            ENV_LARGE_TABULAR => switch.map(String::from),
+            ENV_STAGING_DIR => dir.map(String::from),
+            _ => None,
+        }
+    }
+
+    /// With the switch off (or unset) the staging directory is not even looked
+    /// at: today's executor config, whatever the variable holds.
+    #[test]
+    fn staging_is_off_unless_the_switch_is_on_and_a_directory_is_set() {
+        let real = std::env::temp_dir();
+        let real = real.to_str().unwrap();
+        for switch in [None, Some("off"), Some("0"), Some("maybe"), Some("")] {
+            assert_eq!(staging_root(&staging_env(switch, Some(real))), Ok(None));
+            assert_eq!(
+                staging_root(&staging_env(switch, Some("../relative"))),
+                Ok(None)
+            );
+        }
+        assert_eq!(staging_root(&staging_env(Some("on"), None)), Ok(None));
+        assert_eq!(staging_root(&staging_env(Some("on"), Some("  "))), Ok(None));
+    }
+
+    #[test]
+    fn the_staging_directory_is_canonical_and_must_be_a_real_plain_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let canonical = tmp.path().canonicalize().unwrap();
+        let ok = staging_root(&staging_env(Some("on"), tmp.path().to_str()));
+        assert_eq!(ok, Ok(Some(canonical.clone())));
+        let file = canonical.join("f");
+        std::fs::write(&file, "x").unwrap();
+        std::fs::create_dir(canonical.join("sub")).unwrap();
+        let dotted = format!("{}/sub/..", canonical.display());
+        for bad in [
+            "relative/dir",
+            "/does/not/exist",
+            file.to_str().unwrap(),
+            &dotted,
+        ] {
+            let got = staging_root(&staging_env(Some("on"), Some(bad)));
+            assert!(got.is_err_and(|e| e.0.contains(ENV_STAGING_DIR)), "{bad}");
+        }
     }
 }
 

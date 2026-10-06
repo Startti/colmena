@@ -3,10 +3,19 @@
 //! gate as the other jail suites: root and CAP_SYS_ADMIN, enabled with
 //! `COLMENA_PYEXEC_JAIL_TESTS=1`.
 
+use colmena::dag_engine::domain::python_executor::{PythonRunError, PythonRunRequest};
+use colmena::dag_engine::infrastructure::python_exec::child::CallMounts;
+use colmena::dag_engine::infrastructure::python_exec::config::SubprocessConfig;
+use colmena::dag_engine::infrastructure::python_exec::protocol::CRASHED_MESSAGE;
 use colmena::dag_engine::infrastructure::python_exec::staging::{
     check_out_volume, open_call_dirs, StagedCall, OUT_MAX_INODES,
 };
+use colmena::dag_engine::infrastructure::python_exec::subprocess::SubprocessExecutor;
+use serde_json::Value;
+use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::Duration;
 
 fn enabled() -> bool {
     std::env::var("COLMENA_PYEXEC_JAIL_TESTS").as_deref() == Ok("1")
@@ -164,4 +173,94 @@ fn an_output_on_the_volume_of_the_call_directory_is_refused() {
     let dirs = open_call_dirs(&root, "c").unwrap();
     assert!(check_out_volume(&dirs, 1).is_err());
     assert!(check_out_volume(&dirs, 1024).is_err());
+}
+
+// ---------------------------------------------------------------------------
+// From inside the sandbox: a call that carries prepared data, run in `none`
+// mode (full Python) by the subprocess executor.
+// ---------------------------------------------------------------------------
+
+/// A staging root outside `/tmp` (the jail's own `/tmp` would hide it anyway)
+/// and outside the default hidden paths, so that hiding it is the jail's doing.
+struct Root {
+    path: PathBuf,
+}
+
+impl Root {
+    fn new() -> Option<Self> {
+        if !enabled() {
+            eprintln!("skipped: set COLMENA_PYEXEC_JAIL_TESTS=1 (Linux, root, CAP_SYS_ADMIN)");
+            return None;
+        }
+        let path = PathBuf::from(format!(
+            "/var/lib/colmena-mounts-test-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&path)
+            .unwrap();
+        Some(Root { path })
+    }
+}
+
+impl Drop for Root {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+fn executor(root: Option<&Root>) -> SubprocessExecutor {
+    pyo3::Python::initialize();
+    let mut cfg = SubprocessConfig::from_lookup(&|_: &str| None::<String>).unwrap();
+    cfg.bin = PathBuf::from(env!("CARGO_BIN_EXE_python_executor"));
+    cfg.slots = 1;
+    static NEXT: AtomicU32 = AtomicU32::new(0);
+    cfg.uid_base = 60000 + 100 * NEXT.fetch_add(1, Ordering::Relaxed);
+    cfg.max_response_bytes = 1 << 20;
+    cfg.staging_root = root.map(|r| r.path.clone());
+    SubprocessExecutor::new(cfg, Duration::from_secs(60)).unwrap()
+}
+
+fn req(code: &str) -> PythonRunRequest {
+    PythonRunRequest {
+        code: code.into(),
+        mode: "none".into(),
+        timeout: Some(Duration::from_secs(30)),
+        inputs: Default::default(),
+    }
+}
+
+async fn run_staged(
+    ex: &SubprocessExecutor,
+    mounts: CallMounts,
+    code: &str,
+) -> Result<Value, PythonRunError> {
+    let result = ex.run_staged(req(code), mounts).await;
+    result.map(|r| r.output.unwrap_or_default())
+}
+
+#[tokio::test]
+async fn mounts_without_a_staging_root_are_refused() {
+    let Some(_root) = Root::new() else { return };
+    let ex = executor(None);
+    let mounts = CallMounts {
+        stage_id: "a".repeat(32),
+        out_mb: 1,
+    };
+    let err = run_staged(&ex, mounts, "output = 1").await.unwrap_err();
+    assert!(err.to_string().contains("staging"), "{err}");
+}
+
+/// Until the jail binds the prepared data, a call that asks for it ends before
+/// any code runs: it never runs without what it asked for.
+#[tokio::test]
+async fn a_call_asking_for_mounts_ends_before_any_code_runs() {
+    let Some(root) = Root::new() else { return };
+    let ex = executor(Some(&root));
+    let staged = StagedCall::create(&root.path, 1).unwrap();
+    let err = run_staged(&ex, staged.mounts(), "output = 1")
+        .await
+        .unwrap_err();
+    assert_eq!(err.to_string(), CRASHED_MESSAGE);
 }

@@ -155,6 +155,7 @@ pub fn check_out_volume(dirs: &CallDirs, out_mb: u64) -> io::Result<()> {
 pub struct StagedCall {
     call: std::path::PathBuf,
     id: String,
+    out_mb: u64,
     mounted: bool,
     released: bool,
 }
@@ -176,6 +177,7 @@ impl StagedCall {
         let mut staged = StagedCall {
             call: call.clone(),
             id,
+            out_mb,
             mounted: false,
             released: false,
         };
@@ -197,6 +199,14 @@ impl StagedCall {
 
     pub fn id(&self) -> &str {
         &self.id
+    }
+
+    /// What the header of the call that uses this staging carries.
+    pub fn mounts(&self) -> super::child::CallMounts {
+        super::child::CallMounts {
+            stage_id: self.id.clone(),
+            out_mb: self.out_mb,
+        }
     }
 
     /// Where the trusted side puts what the call reads.

@@ -17,6 +17,17 @@ use std::time::Instant;
 /// `max_request_bytes`.
 pub const MAX_HEADER_BYTES: usize = 4096;
 
+/// What a call that carries prepared data asks of the jail (dark behind
+/// `COLMENA_LARGE_TABULAR`). No path is ever sent: the jail derives both
+/// directories from the id under its own staging root (see `staging`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CallMounts {
+    /// One path component, `[A-Za-z0-9_-]{1,64}`.
+    pub stage_id: String,
+    /// The size, in MiB, the call's output volume must not exceed.
+    pub out_mb: u64,
+}
+
 /// Per-call settings sent before the request.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CallHeader {
@@ -24,6 +35,9 @@ pub struct CallHeader {
     pub memory_mb: u64,
     pub cpu_secs: u64,
     pub max_request_bytes: usize,
+    /// Absent, and not even a key in the header, for every call without prepared data.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mounts: Option<CallMounts>,
 }
 
 #[cfg(target_os = "linux")]
@@ -248,6 +262,36 @@ mod tests {
         assert_eq!(r.status, WireStatus::Ok);
         assert_eq!(r.output, Some(serde_json::json!(3)));
         assert_eq!(r.stdout, "n\n");
+    }
+
+    /// Without mounts the header is the bytes it always was: no `mounts` key at
+    /// all. A header from before the field parses, and one with mounts carries them.
+    #[test]
+    fn a_header_without_mounts_is_byte_for_byte_what_it_was() {
+        let today = r#"{"slot":1,"memory_mb":2048,"cpu_secs":31,"max_request_bytes":1048576}"#;
+        let header = CallHeader {
+            slot: 1,
+            memory_mb: 2048,
+            cpu_secs: 31,
+            max_request_bytes: 1 << 20,
+            mounts: None,
+        };
+        assert_eq!(serde_json::to_string(&header).unwrap(), today);
+        assert_eq!(serde_json::from_str::<CallHeader>(today).unwrap(), header);
+        let with = CallHeader {
+            mounts: Some(CallMounts {
+                stage_id: "abc".into(),
+                out_mb: 8,
+            }),
+            ..header
+        };
+        let text = serde_json::to_string(&with).unwrap();
+        assert!(
+            text.ends_with(r#","mounts":{"stage_id":"abc","out_mb":8}}"#),
+            "{text}"
+        );
+        assert_eq!(serde_json::from_str::<CallHeader>(&text).unwrap(), with);
+        assert!(text.len() < MAX_HEADER_BYTES);
     }
 
     #[test]
