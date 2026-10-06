@@ -32,6 +32,7 @@ pub mod manifest;
 pub mod part_sink;
 pub mod ports;
 pub mod postgres_registry;
+pub mod prepare;
 pub mod registry;
 pub mod scan;
 pub mod sqlite_registry;
