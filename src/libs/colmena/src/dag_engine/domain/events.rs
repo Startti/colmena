@@ -264,6 +264,12 @@ pub struct NodeEndError {
 }
 
 impl DagExecutionEvent {
+    /// Whether this is the usage of a side call made by node `node_id`
+    /// (`SideCall::node_id`).
+    pub fn is_side_usage_of(&self, node_id: &str) -> bool {
+        matches!(self, Self::LlmUsage { node_id: id, side_call: Some(s), .. } if *id == s.node_id(node_id))
+    }
+
     /// Lift a node-emitted [`NodeEvent`] into the stream event it corresponds to,
     /// stamping it with `node_id`.
     ///

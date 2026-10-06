@@ -265,7 +265,11 @@ impl ExecutionObserver for ChildScopeObserver {
                 // — a `for_each` dispatched as a tool reported its batch progress
                 // outside the very tool node its rows were nested under. Wrap
                 // those explicitly so the hop survives as `parent>scope>ownId`.
-                if ev.node_id() == Some(self.node_id.as_str()) {
+                //
+                // A side call's usage is stamped `<scope>::<purpose>`: still this
+                // scope's own event, kept bare so the loop bills it.
+                if ev.node_id() == Some(self.node_id.as_str()) || ev.is_side_usage_of(&self.node_id)
+                {
                     ev
                 } else {
                     ev.wrap_as_child_of(&self.node_id)

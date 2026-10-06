@@ -33,8 +33,9 @@ use serde_json::{json, Value};
 use serial_test::serial;
 use std::sync::{Arc, Mutex};
 
-/// A model that calls `add` until the request carries `tool_turns` tool
-/// results, then answers `answer`. Call `k` (from 0) reports a usage of its
+/// A model that calls `add` (or, offered no `add`, `Sub`) until the request
+/// carries `tool_turns` tool results, then answers `answer`; offered neither,
+/// it answers. Call `k` (from 0) reports a usage of its
 /// own, so a call counted twice, or not at all, changes every total.
 struct UsageModel {
     tool_turns: usize,
@@ -84,11 +85,25 @@ impl UsageModel {
         (kept.len(), sum)
     }
 
-    /// `Some((id, args))` for a tool call, `None` for the answer.
-    fn decide(&self, request: &LlmRequest) -> Option<(String, String)> {
+    /// `Some((id, tool, args))` for a tool call, `None` for the answer.
+    fn decide(&self, request: &LlmRequest) -> Option<(String, String, String)> {
+        let offers = |name: &str| {
+            request
+                .tools()
+                .unwrap_or(&[])
+                .iter()
+                .any(|t| t.name == name)
+        };
         let messages = request.messages().iter();
         let done = messages.filter(|m| m.role() == &MessageRole::Tool).count();
-        (done < self.tool_turns).then(|| (format!("call_{done}"), r#"{"a":1,"b":2}"#.into()))
+        let (tool, args) = if offers("add") {
+            ("add", r#"{"a":1,"b":2}"#.to_string())
+        } else if offers("Sub") {
+            ("Sub", format!(r#"{{"prompt":"task {done}"}}"#))
+        } else {
+            return None;
+        };
+        (done < self.tool_turns).then(|| (format!("call_{done}"), tool.into(), args))
     }
 }
 
@@ -97,9 +112,8 @@ impl LlmRepository for UsageModel {
     async fn call(&self, request: LlmRequest) -> Result<LlmResponse, LlmError> {
         let (id, provider) = (request.id().clone(), request.config().provider().clone());
         let response = match self.decide(&request) {
-            Some((call, args)) => LlmResponse::new(id, String::new(), provider)?.with_tool_calls(
-                vec![ToolCall::new(call, FunctionCall::new("add".into(), args))],
-            ),
+            Some((call, tool, args)) => LlmResponse::new(id, String::new(), provider)?
+                .with_tool_calls(vec![ToolCall::new(call, FunctionCall::new(tool, args))]),
             None => LlmResponse::new(id, self.answer.into(), provider)?,
         };
         Ok(response.with_usage(self.next_usage(&request)))
@@ -110,10 +124,10 @@ impl LlmRepository for UsageModel {
     /// the final one is billed.
     async fn stream(&self, request: LlmRequest) -> Result<LlmStream, LlmError> {
         let first = match self.decide(&request) {
-            Some((id, args_chunk)) => LlmStreamPart::ToolCallChunk(ToolCallChunk {
+            Some((id, name, args_chunk)) => LlmStreamPart::ToolCallChunk(ToolCallChunk {
                 index: 0,
                 id,
-                name: "add".into(),
+                name,
                 args_chunk,
                 provider_signature: None,
             }),
@@ -207,6 +221,7 @@ async fn run_in(graph: Value, agent_session_id: Option<&str>) -> Vec<Value> {
     );
     let use_case = DagRunUseCase::new(registry.clone(), None);
     registry.set_subgraph_executor(Arc::new(use_case.clone()));
+    registry.set_foreach_registry(registry.clone());
 
     let graph: Graph = serde_json::from_value(graph).unwrap();
     let mut mapper = SseMapper::new();
@@ -443,27 +458,107 @@ async fn attachment_summary_is_billed() {
     assert_side_call_billed(&model, &frames, "attachment_summary");
 }
 
-/// The attachment's summary inside a `subgraph`: the child's summary and the
-/// parent's (which re-counts the child's events) both give it its own row,
-/// with its model.
+/// Two attachments summarized inside a `subgraph`: the child's summary and
+/// the parent's (which re-counts the child's events) give both calls one row
+/// of their own, with their model.
 #[tokio::test]
 #[serial]
 async fn child_side_call_keeps_its_model() {
-    use base64::{engine::general_purpose::STANDARD, Engine as _};
-    let dir = tempfile::tempdir().unwrap();
-    let db = dir.path().join("memory.db");
-    std::fs::File::create(&db).unwrap();
-    let files = json!({ "files": [{ "id": "doc-1", "mime_type": "text/plain",
-        "filename": "a.txt", "data": STANDARD.encode("Revenue grew 12%.") }] });
+    let (_dir, db) = memory_db();
+    let files = json!({ "files": [text_file("d1"), text_file("d2")] });
     let child = remembering_agent(&db, files);
     let sub = json!({ "type": "subgraph", "config": { "child_graph_inline": child } });
     let model = UsageModel::new(0, "three");
     let _guard = OverrideGuard::install(model.clone());
     let frames = run_in(json!({ "nodes": { "sub": sub }, "edges": [] }), Some("c")).await;
-    let (_, side_usage) = model.billed_for("gpt-4o-mini");
+    let (calls, side_usage) = model.billed_for("gpt-4o-mini");
+    assert_eq!(calls, 2, "two summaries");
     for kind in ["subgraph-usage-summary", "usage-summary"] {
         let side = entry(&frames, kind, "agent::attachment_summary");
         assert_eq!(usage(side), side_usage, "{kind}");
         assert_eq!(side["model"], "gpt-4o-mini", "{kind}");
     }
+}
+
+/// A text attachment `id` with no description.
+fn text_file(id: &str) -> Value {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    let data = STANDARD.encode("Revenue grew 12%.");
+    json!({ "id": id, "mime_type": "text/plain", "filename": "a.txt", "data": data })
+}
+
+/// A memory file for one test.
+fn memory_db() -> (tempfile::TempDir, std::path::PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("memory.db");
+    std::fs::File::create(&db).unwrap();
+    (dir, db)
+}
+
+/// `finish.usage` and the sum of every `usage-summary` row both equal what
+/// the provider reported, and one row, `*::<purpose>`, is the cheap model's.
+fn assert_all_billed(model: &UsageModel, frames: &[Value], purpose: &str) {
+    let rows = one(frames, "usage-summary")["nodes"].as_array().unwrap();
+    let mut sum = LlmUsage::default();
+    rows.iter().for_each(|r| sum.add(&usage(r)));
+    assert_eq!(sum, model.billed().1, "usage-summary rows: {rows:#?}");
+    assert_eq!(finish(frames), model.billed().1, "finish.usage");
+    let suffix = format!("::{purpose}");
+    let is_side = |r: &&Value| r["node_id"].as_str().unwrap().ends_with(&suffix);
+    let side: Vec<&Value> = rows.iter().filter(is_side).collect();
+    assert_eq!(side.len(), 1, "one {purpose} row: {rows:#?}");
+    let cheap = model.billed_for("gpt-4o-mini").1;
+    assert_eq!(
+        (usage(side[0]), &side[0]["model"]),
+        (cheap, &json!("gpt-4o-mini"))
+    );
+}
+
+/// The `node_schema` of an `llm_call` that remembers (`sqlite`), as a tool
+/// or a `for_each` target: only `prompt` is the caller's.
+fn remembering_schema(db: &std::path::Path) -> Value {
+    let url = format!("sqlite://{}", db.display());
+    json!({
+        "provider": { "fixed": "openai" }, "api_key": { "fixed": "unused" },
+        "model": { "fixed": "usage-model" }, "stream": { "fixed": false },
+        "connection_url": { "fixed": url },
+        "prompt": { "type": "string", "required": true, "description": "p" }
+    })
+}
+
+/// An `llm_call` dispatched as a tool, called twice: the second call compacts
+/// the first one's long answer. That side call is billed under the tool.
+#[tokio::test]
+#[serial]
+async fn a_side_call_inside_a_tool_is_billed() {
+    let (_dir, db) = memory_db();
+    let sub = json!({ "name": "Sub", "description": "d", "node_type": "llm_call",
+        "memory_mode": "persistent", "node_schema": remembering_schema(&db) });
+    let graph = json!({ "nodes": { "agent": { "type": "llm_call", "config": {
+        "provider": "openai", "api_key": "unused", "model": "usage-model",
+        "prompt": "go", "stream": false, "enabled_tools": ["Sub"],
+        "tool_configurations": { "Sub": sub }
+    } } }, "edges": [] });
+    let model = UsageModel::new(2, LONG_ANSWER);
+    let _guard = OverrideGuard::install(model.clone());
+    let frames = run_in(graph, Some("c")).await;
+    assert_eq!(model.billed().0, 6, "agent x3, Sub x2, one summary");
+    assert_all_billed(&model, &frames, "history_compaction");
+}
+
+/// Two `for_each` rows share a conversation: the second compacts the first's
+/// long answer. That side call is billed under its row.
+#[tokio::test]
+#[serial]
+async fn a_side_call_in_a_for_each_row_is_billed() {
+    let (_dir, db) = memory_db();
+    let graph = json!({ "nodes": { "fe": { "type": "for_each", "config": {
+        "items": [{ "prompt": "a" }, { "prompt": "b" }], "concurrency": 1,
+        "target": { "node_type": "llm_call", "node_schema": remembering_schema(&db) }
+    } } }, "edges": [] });
+    let model = UsageModel::new(0, LONG_ANSWER);
+    let _guard = OverrideGuard::install(model.clone());
+    let frames = run_in(graph, Some("c")).await;
+    assert_eq!(model.billed().0, 3, "two rows, one summary");
+    assert_all_billed(&model, &frames, "history_compaction");
 }
