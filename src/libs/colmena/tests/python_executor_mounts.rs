@@ -10,7 +10,8 @@ use colmena::dag_engine::infrastructure::python_exec::child::CallMounts;
 use colmena::dag_engine::infrastructure::python_exec::config::SubprocessConfig;
 use colmena::dag_engine::infrastructure::python_exec::protocol::CRASHED_MESSAGE;
 use colmena::dag_engine::infrastructure::python_exec::staging::{
-    check_out_volume, open_call_dirs, StagedCall, OUT_MAX_INODES,
+    check_out_volume, open_call_dirs, StageError, StagedCall, OUT_MAX_INODES, OUT_MB_MAX,
+    STAGED_VOLUMES_MAX,
 };
 use colmena::dag_engine::infrastructure::python_exec::subprocess::SubprocessExecutor;
 use serde_json::{json, Value};
@@ -929,4 +930,81 @@ async fn pandas_reads_a_parquet_part_through_data_when_pyarrow_is_installed() {
         output = df.groupby('k')['v'].sum().to_dict()";
     let out = run_staged(&ex, staged.mounts(), code).await.unwrap();
     assert_eq!(out, json!({"a": 4, "b": 2}));
+}
+
+// ---------------------------------------------------------------------------
+// The output size: validated, budgeted, and the file limit follows the volume.
+// ---------------------------------------------------------------------------
+
+/// A size of zero (an unlimited tmpfs) or over the ceiling is refused before any
+/// directory or mount exists.
+#[test]
+fn an_invalid_output_size_makes_nothing() {
+    let Some(_t) = Root::new() else { return };
+    // A root of its own, so that other tests' calls cannot be mistaken for leftovers.
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    for bad in [0, OUT_MB_MAX + 1, u64::MAX] {
+        let e = StagedCall::create(&root, bad).unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::InvalidInput, "{bad}");
+    }
+    assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
+    assert_eq!(mounts_under(&root), 0);
+}
+
+/// The executor stages calls under a budget of volumes and mebibytes in flight:
+/// over it, a typed error and nothing mounted; a released call frees its share.
+#[test]
+fn the_executor_refuses_staged_calls_over_its_budget() {
+    // Counts the mounts under the shared root, and has an executor without one:
+    // nothing else may mount meanwhile.
+    let Some(root) = Root::exclusive() else {
+        return;
+    };
+    let ex = executor(Some(&root));
+    // Small volumes, so that it is the COUNT that bites; the MiB total is
+    // covered by the budget's unit test.
+    let mut held = Vec::new();
+    for _ in 0..STAGED_VOLUMES_MAX {
+        held.push(ex.stage_call(10).unwrap());
+    }
+    let over = ex.stage_call(1).unwrap_err();
+    assert!(matches!(over, StageError::OverBudget { .. }), "{over:?}");
+    let before = mounts_under(&root.path);
+    assert!(ex.stage_call(1).is_err());
+    assert_eq!(mounts_under(&root.path), before, "a refusal mounts nothing");
+    drop(held.pop());
+    held.push(ex.stage_call(1).unwrap());
+    let none = executor_without_root(&root);
+    assert!(matches!(
+        none.stage_call(1).unwrap_err(),
+        StageError::NoStagingRoot
+    ));
+}
+
+/// The header can claim any size; what the call may write follows the volume the
+/// jail verified, not the claim.
+#[tokio::test]
+async fn the_file_limit_follows_the_verified_volume_not_the_header() {
+    let Some(root) = Root::new() else { return };
+    let ex = executor(Some(&root));
+    let staged = StagedCall::create(&root.path, 2).unwrap();
+    let mut claim = staged.mounts();
+    claim.out_mb = 100;
+    let limit = "import resource\noutput = resource.getrlimit(resource.RLIMIT_FSIZE)[1] >> 20";
+    assert_eq!(run_staged(&ex, claim, limit).await.unwrap(), json!(64));
+}
+
+/// An out size the jail will not accept ends the call before any mount or code.
+#[tokio::test]
+async fn a_header_with_an_invalid_output_size_ends_the_call() {
+    let Some(root) = Root::new() else { return };
+    let ex = executor(Some(&root));
+    let staged = StagedCall::create(&root.path, 2).unwrap();
+    for bad in [0, OUT_MB_MAX + 1, u64::MAX] {
+        let mut claim = staged.mounts();
+        claim.out_mb = bad;
+        let err = run_staged(&ex, claim, "output = 1").await.unwrap_err();
+        assert_eq!(err.to_string(), CRASHED_MESSAGE, "{bad}");
+    }
 }

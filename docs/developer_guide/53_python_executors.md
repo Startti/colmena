@@ -223,6 +223,14 @@ a loaded pyarrow's default pool is the system one (`arrow_pool_not_system` other
 still has a single thread. An image without pyarrow starts as before. User code still cannot import pyarrow; pandas
 reads Parquet for it (`pd.read_parquet(..., use_threads=False)`).
 
+The output size is validated twice, before any mount: `out_mb` must be 1 to `OUT_MB_MAX` (1,024 MiB, the design's output
+cap) both when the trusted side creates the volume (a size of 0 would mount a tmpfs with no limit) and when the jail
+reads the header. The call's largest file is taken from the size of the volume the jail verified, never from the header's
+claim. `SubprocessExecutor::stage_call` also keeps a budget of staged volumes in flight, `STAGED_VOLUMES_MAX` = 2 volumes
+and `STAGED_OUT_MIB_MAX` = 2,048 MiB in total (the design's slots and `V = D_max + OUT_MAX`; estimates, the final values
+wait for the instance memory measurement, spike item 5); a request over either gets `StageError::OverBudget` (a
+`PythonExecutorError … retry later`) and mounts nothing.
+
 ### Startup self-test (Linux)
 
 Before it binds its socket, the template forks a throwaway child that enters the jail as slot 9999 (uid

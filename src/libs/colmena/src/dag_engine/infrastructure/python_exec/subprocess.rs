@@ -14,6 +14,9 @@ use super::protocol::{
     input_too_large_message, result_too_large_message, WireRequest, WireResponse, CRASHED_MESSAGE,
     MALFORMED_MESSAGE, REFUSED_MESSAGE,
 };
+use super::staging::{
+    StageError, StagedCall, StagingBudget, STAGED_OUT_MIB_MAX, STAGED_VOLUMES_MAX,
+};
 use super::zygote::{ARROW_ENV, TEMPLATE_ENV};
 use crate::dag_engine::domain::python_executor::{
     ExecutorKind, PythonExecutor, PythonRunError, PythonRunRequest, PythonRunResult,
@@ -141,6 +144,8 @@ pub struct SubprocessExecutor {
     spawner: mpsc::Sender<Job>,
     /// Template stderr lines that were not a known event; never logged.
     stderr_dropped: Arc<AtomicU64>,
+    /// Staged volumes in flight (dark behind `COLMENA_LARGE_TABULAR`).
+    staging_budget: Arc<StagingBudget>,
 }
 
 /// Returns its index to the pool when dropped, once every process still
@@ -350,6 +355,19 @@ fn reap(mut conn: UnixStream, slot: Slot) {
 }
 
 impl SubprocessExecutor {
+    /// Stages one call (dark behind `COLMENA_LARGE_TABULAR`): takes a share of
+    /// the executor's budget of volumes in flight, then makes the directories
+    /// and the output volume. The share goes back when the call is dropped.
+    pub fn stage_call(&self, out_mb: u64) -> Result<StagedCall, StageError> {
+        let root = self
+            .cfg
+            .staging_root
+            .as_ref()
+            .ok_or(StageError::NoStagingRoot)?;
+        let share = StagingBudget::reserve(&self.staging_budget, out_mb)?;
+        Ok(StagedCall::create_with(root, out_mb, Some(share))?)
+    }
+
     /// One call that carries prepared data (dark behind
     /// `COLMENA_LARGE_TABULAR`): the same sandbox as [`PythonExecutor::run`],
     /// plus the call's staged directories. The seam the protocol work builds on.
@@ -427,6 +445,7 @@ impl SubprocessExecutor {
             state: tokio::sync::Mutex::new(State::NotStarted),
             spawner,
             stderr_dropped: Arc::default(),
+            staging_budget: Arc::new(StagingBudget::new(STAGED_VOLUMES_MAX, STAGED_OUT_MIB_MAX)),
         })
     }
 
