@@ -232,6 +232,57 @@ pub fn min_in_memory_bytes(t: ColumnType, rows: u64) -> u64 {
     }
 }
 
+/// The smallest the table list of a one-table source can be, given what is
+/// known before the conversion ends: the columns as the sample typed them and a
+/// lower bound of the rows (the rows of the sample). It is a true lower bound,
+/// so a source whose minimum is over [`TABLES_JSON_MAX_BYTES`] cannot be
+/// recorded however it converts, and a caller can refuse it before reading the
+/// rest of the file; one under the cap may still turn out too large.
+///
+/// Per column, whatever the type ends as (the sample's type, or text after a
+/// late conflict): the shorter of the two type names, the least decoded size
+/// either type allows for the rows ([`min_in_memory_bytes`]), zero stored
+/// bytes; one part, and a one-letter table name.
+pub fn min_tables_json_len(columns: &[(&str, ColumnType)], min_rows: u64) -> usize {
+    let infos = columns
+        .iter()
+        .map(|(name, inferred)| {
+            let shorter = [*inferred, ColumnType::String]
+                .into_iter()
+                .min_by_key(|t| type_name_len(*t))
+                .unwrap_or(ColumnType::String);
+            let in_memory = [*inferred, ColumnType::String]
+                .into_iter()
+                .map(|t| min_in_memory_bytes(t, min_rows))
+                .min()
+                .unwrap_or(0);
+            ColumnInfo {
+                name: name.to_string(),
+                column_type: shorter,
+                uncompressed_bytes: 0,
+                in_memory_bytes: in_memory,
+            }
+        })
+        .collect();
+    let table = TableInfo {
+        name: "t".into(),
+        rows: min_rows,
+        parts: 1,
+        columns: infos,
+    };
+    serde_json::to_string(&[table]).map_or(usize::MAX, |j| j.len())
+}
+
+fn type_name_len(t: ColumnType) -> usize {
+    match t {
+        ColumnType::Int => 3,
+        ColumnType::Bool | ColumnType::Date => 4,
+        ColumnType::Float => 5,
+        ColumnType::String => 6,
+        ColumnType::Timestamp => 9,
+    }
+}
+
 /// Storage path of one part, relative to the prepared root:
 /// `t<table>/part-NNNNN.parquet`. The only place such a path is built.
 pub fn part_path(table_idx: usize, part_idx: usize) -> Result<String, ManifestError> {
@@ -506,6 +557,86 @@ mod tests {
         let mut v: serde_json::Value = serde_json::to_value(sample()).unwrap();
         v["extra"] = serde_json::json!(1);
         assert!(Manifest::from_json(&serde_json::to_vec(&v).unwrap()).is_err());
+    }
+
+    #[test]
+    fn the_minimum_table_list_never_exceeds_the_real_one() {
+        let mut seed = 0x1234_5678_9ABC_DEF1u64;
+        let mut next = move |m: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % m
+        };
+        let types = [
+            ColumnType::Int,
+            ColumnType::Float,
+            ColumnType::Bool,
+            ColumnType::String,
+            ColumnType::Date,
+            ColumnType::Timestamp,
+        ];
+        for _ in 0..2000 {
+            let n = 1 + next(6) as usize;
+            let names: Vec<String> = (0..n).map(|i| format!("col{}_{}", i, next(1000))).collect();
+            let inferred: Vec<ColumnType> = (0..n).map(|_| types[next(6) as usize]).collect();
+            // Rows where eight bytes a row has more digits than four.
+            let sample_rows = [0u64, 7, 1250, 1999, 2500, 12_500, 20_000][next(7) as usize];
+            let rows = sample_rows + next(3);
+            // Whatever the conversion ends as: each column keeps its type or is
+            // text, with any sizes the validation allows.
+            let columns = (0..n)
+                .map(|i| {
+                    let t = if next(3) == 0 {
+                        ColumnType::String
+                    } else {
+                        inferred[i]
+                    };
+                    ColumnInfo {
+                        name: names[i].clone(),
+                        column_type: t,
+                        uncompressed_bytes: next(3),
+                        // As small as the validation allows, so the bound is tested close.
+                        in_memory_bytes: min_in_memory_bytes(t, rows) + next(3),
+                    }
+                })
+                .collect();
+            let table = TableInfo {
+                name: "t".into(),
+                rows,
+                parts: 1,
+                columns,
+            };
+            let real = serde_json::to_string(&[table]).unwrap().len();
+            let pairs: Vec<(&str, ColumnType)> =
+                names.iter().map(String::as_str).zip(inferred).collect();
+            let min = min_tables_json_len(&pairs, sample_rows);
+            assert!(min <= real, "{min} > {real}");
+        }
+    }
+
+    #[test]
+    fn the_minimum_is_exact_for_the_smallest_possible_table() {
+        let tiny = Manifest::new(vec![TableInfo {
+            name: "t".into(),
+            rows: 0,
+            parts: 1,
+            columns: vec![ColumnInfo {
+                name: "a".into(),
+                column_type: ColumnType::Int,
+                uncompressed_bytes: 0,
+                in_memory_bytes: 0,
+            }],
+        }]);
+        assert_eq!(
+            min_tables_json_len(&[("a", ColumnType::Int)], 0),
+            tiny.tables_json().unwrap().len()
+        );
+        // More rows in the sample make the digits of the sizes longer.
+        assert!(
+            min_tables_json_len(&[("a", ColumnType::Int)], 10_000)
+                > min_tables_json_len(&[("a", ColumnType::Int)], 0)
+        );
     }
 
     fn invalid_manifests() -> Vec<(&'static str, Manifest)> {
