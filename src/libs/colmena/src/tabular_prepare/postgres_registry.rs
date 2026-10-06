@@ -406,6 +406,10 @@ mod tests {
         claim_takes_a_row_written_by_an_older_format
     );
     pg_case!(
+        tabular_prepare_pg_a_ready_row_of_the_first_layout_is_claimable_by_the_current_one,
+        a_ready_row_of_the_first_layout_is_claimable_by_the_current_one
+    );
+    pg_case!(
         tabular_prepare_pg_a_ready_row_is_claimable_only_by_a_newer_format,
         a_ready_row_is_claimable_only_by_a_newer_format
     );

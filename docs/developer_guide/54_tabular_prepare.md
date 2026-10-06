@@ -387,8 +387,10 @@ reader that sees any other version must refuse it, treat the source as not
 prepared and ask for a new preparation; it must not guess a layout. The registry's
 `FORMAT_VERSION` (`registry.rs`) is a separate number: a row written by an older
 value is claimable again, and a manifest that cannot be read is demoted through
-`mark_manifest_missing`. Whether the manifest version should also bump
-`FORMAT_VERSION` is left to the unit that wires the manifest to the registry.
+`mark_manifest_missing`. The two move together: `FORMAT_VERSION` is 2, the
+manifest version, and a compile-time assertion keeps them equal, so a table
+prepared under the first layout (version 1) is claimed again by the current one
+(its old objects stay tracked for cleanup).
 
 **Conversion report.** The manifest may carry a `conversion` array, one entry per
 table, with what the conversion did and a reader or the tool should warn about:
