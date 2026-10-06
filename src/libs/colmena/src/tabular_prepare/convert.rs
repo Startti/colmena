@@ -1499,6 +1499,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_stray_byte_in_a_utf8_file_is_replaced_and_reported_not_reread_as_1252() {
+        let mut csv = b"a,b\n".to_vec();
+        for _ in 0..crate::tabular_prepare::csv::SNIFF_BYTES / 8 {
+            csv.extend_from_slice("é,ñ\n".as_bytes());
+        }
+        csv.extend_from_slice(b"x\xFF,y\n");
+        let src = MemSource::new(csv);
+        let sink = Arc::new(MemorySink::default());
+        let t = convert(&src, &sink, WriterConfig::default()).await.unwrap();
+        assert_eq!(
+            (t.encoding, t.replacements, src.opens()),
+            (Encoding::Utf8, 1, 1)
+        );
+        let a = read_column_text(&sink, t.written.parts, 0);
+        assert_eq!(a.first().unwrap().as_deref(), Some("é"));
+        assert_eq!(a.last().unwrap().as_deref(), Some("x\u{FFFD}"));
+    }
+
+    #[tokio::test]
     async fn a_reader_that_panics_before_the_header_is_a_typed_error_too() {
         struct Boom;
         impl Read for Boom {
@@ -1756,6 +1775,28 @@ mod tests {
             (t.written.rows, t.blank_rows, t.blank_dropped, t.padded_rows),
             (4, 0, 2, 2)
         );
+    }
+
+    #[tokio::test]
+    async fn demoted_lists_every_demoted_column_also_when_all_are_text() {
+        let late = INFERENCE_ROWS + 100;
+        let src = MemSource::new(five_columns(&[
+            (0, late),
+            (1, late + 1000),
+            (2, late + 2000),
+        ]));
+        let sink = Arc::new(MemorySink::default());
+        let t = convert(&src, &sink, WriterConfig::default()).await.unwrap();
+        assert!(t.all_strings);
+        assert_eq!(t.demoted, vec!["c0", "c1", "c2", "c3", "c4"]);
+        // A column that was text from the start is not "demoted".
+        let src = MemSource::new(b"a,b\nx,1\ny,2\n".to_vec());
+        let sink = Arc::new(MemorySink::default());
+        assert!(convert(&src, &sink, WriterConfig::default())
+            .await
+            .unwrap()
+            .demoted
+            .is_empty());
     }
 
     #[tokio::test]
@@ -2172,6 +2213,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ascii_and_one_stray_byte_in_the_sample_then_utf8_later_is_read_as_utf8() {
+        // The sample alone says "0 valid, 1 invalid": not plausibly UTF-8. The
+        // rest of the file is UTF-8 with accents.
+        let mut csv = b"a,b\n1,plain\n1,x\xFFy\n".to_vec();
+        csv.extend(rows_of_word(
+            "ascii",
+            crate::tabular_prepare::csv::SNIFF_BYTES / 8,
+        ));
+        csv.extend(rows_of_word("café ñandú", 2000));
+        let src = MemSource::new(csv);
+        let sink = Arc::new(MemorySink::default());
+        let t = convert(&src, &sink, WriterConfig::default()).await.unwrap();
+        assert_eq!(
+            (t.encoding, t.replacements, src.opens()),
+            (Encoding::Utf8, 1, 2)
+        );
+        let b = read_column_text(&sink, t.written.parts, 1);
+        assert_eq!(b[1].as_deref(), Some("x\u{FFFD}y"));
+        assert_eq!(b.last().unwrap().as_deref(), Some("café ñandú"));
+        assert!(b.iter().flatten().all(|v| !v.contains('Ã')), "mojibake");
+    }
+
+    #[tokio::test]
+    async fn one_valid_and_one_invalid_sequence_is_utf8_with_one_replacement() {
+        let src = MemSource::new(b"a,b\n1,caf\xC3\xA9\n1,bad\xFFbyte\n".to_vec());
+        let sink = Arc::new(MemorySink::default());
+        let t = convert(&src, &sink, WriterConfig::default()).await.unwrap();
+        assert_eq!((t.encoding, t.replacements), (Encoding::Utf8, 1));
+        let b = read_column_text(&sink, t.written.parts, 1);
+        assert_eq!(b[0].as_deref(), Some("café"));
+    }
+
+    #[tokio::test]
+    async fn a_real_windows_1252_file_stays_windows_1252_whether_accents_come_early_or_late() {
+        for late in [false, true] {
+            let mut csv = b"a,b\n".to_vec();
+            if late {
+                csv.extend(rows_of_word(
+                    "ascii",
+                    crate::tabular_prepare::csv::SNIFF_BYTES / 8,
+                ));
+            }
+            csv.extend(rows_of_word(b"caf\xE9 \xF1and\xFA", 300));
+            let src = MemSource::new(csv);
+            let sink = Arc::new(MemorySink::default());
+            let t = convert(&src, &sink, WriterConfig::default()).await.unwrap();
+            assert_eq!(
+                (t.encoding, t.replacements),
+                (Encoding::Windows1252, 0),
+                "late {late}"
+            );
+            let b = read_column_text(&sink, t.written.parts, 1);
+            assert_eq!(b.last().unwrap().as_deref(), Some("café ñandú"));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_utf8_file_with_one_binary_looking_cell_keeps_its_accents() {
+        let mut csv = b"a,b\n".to_vec();
+        csv.extend(rows_of_word("café ñandú", 500));
+        csv.extend_from_slice(b"1,\x01\x02\xFF\xFE\x80\n");
+        csv.extend(rows_of_word("naïve", 500));
+        let src = MemSource::new(csv);
+        let sink = Arc::new(MemorySink::default());
+        let t = convert(&src, &sink, WriterConfig::default()).await.unwrap();
+        assert_eq!((t.encoding, src.opens()), (Encoding::Utf8, 1));
+        assert_eq!(t.replacements, 3); // 0xFF, 0xFE, 0x80
+        let b = read_column_text(&sink, t.written.parts, 1);
+        assert_eq!(b[0].as_deref(), Some("café ñandú"));
+        assert_eq!(b.last().unwrap().as_deref(), Some("naïve"));
+    }
+
+    #[tokio::test]
     async fn the_utf8_evidence_is_reported_whatever_the_encoding_chosen() {
         // UTF-8 with one stray byte: one valid sequence, one invalid, replaced.
         let src = MemSource::new(b"a,b\n1,caf\xC3\xA9\n1,bad\xFFbyte\n".to_vec());
@@ -2263,6 +2377,79 @@ mod tests {
                 failure.error
             );
         }
+    }
+
+    #[tokio::test]
+    async fn a_control_shared_by_two_tables_never_lists_one_tables_parts_as_the_others() {
+        let sink = Arc::new(MemorySink::default());
+        let control = ConvertControl::new();
+        let cfg = WriterConfig {
+            max_rows: 1000,
+            max_bytes: usize::MAX,
+        };
+        let a = MemSource::new(int_csv(2500, ""));
+        let t0 = convert_csv_table_with(&a, sink.clone(), 0, cfg, &control)
+            .await
+            .unwrap();
+        // Table 1 restarts and ends with fewer parts, so it has stale keys of its own.
+        struct Changing(AtomicUsize);
+        #[async_trait::async_trait]
+        impl CsvSource for Changing {
+            async fn open(
+                &self,
+                _c: &CancellationToken,
+            ) -> Result<Box<dyn Read + Send>, ConvertError> {
+                let n = self.0.fetch_add(1, Ordering::SeqCst);
+                let bytes = if n == 0 {
+                    int_csv(INFERENCE_ROWS + 3000, "1,N/A\n")
+                } else {
+                    int_csv(1500, "")
+                };
+                Ok(Box::new(Cursor::new(bytes)))
+            }
+        }
+        let t1 = convert_csv_table_with(
+            &Changing(AtomicUsize::new(0)),
+            sink.clone(),
+            1,
+            cfg,
+            &control,
+        )
+        .await
+        .unwrap();
+        // Each result lists only its own table's keys, whatever else the control saw.
+        assert!(
+            t0.blob_paths.iter().all(|p| p.starts_with("t0/")),
+            "{:?}",
+            t0.blob_paths
+        );
+        assert!(
+            t1.blob_paths.iter().all(|p| p.starts_with("t1/")),
+            "{:?}",
+            t1.blob_paths
+        );
+        assert!(t1.stale_paths.iter().all(|p| p.starts_with("t1/")));
+        assert!(!t1.stale_paths.is_empty());
+        // Deleting what table 1 reports as stale cannot touch table 0's live parts.
+        for p in &t1.stale_paths {
+            assert!(!t0.live_paths(0).contains(p));
+        }
+        // The control still knows everything, for a caller that wants it.
+        assert_eq!(
+            control.paths().len(),
+            t0.blob_paths.len() + t1.blob_paths.len()
+        );
+        // A failed table reports its own keys too.
+        let bad = MemSource::new(int_csv(INFERENCE_ROWS + 3000, "1,N/A\n"));
+        let failing = Arc::new(MemorySink::failing_from(0));
+        let f = convert_csv_table_with(&bad, failing, 2, cfg, &control)
+            .await
+            .unwrap_err();
+        assert!(
+            f.blob_paths.iter().all(|p| p.starts_with("t2/")),
+            "{:?}",
+            f.blob_paths
+        );
     }
 
     // ---- the early check on the table list ----
