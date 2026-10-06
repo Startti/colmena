@@ -6,6 +6,12 @@ ve ADP antes y después, qué tiene que hacer ADP, y qué se rompe si no hace na
 
 Los cambios que quedan dentro del motor no llevan nota aquí.
 
+## 2026-10-06 — archivos tabulares grandes: entrada solo con `storage_key`
+
+| # | Nota | Acción de ADP | Qué se rompe si se ignora |
+|---|------|---------------|---------------------------|
+| 1 | [`storage_key` en `files[]`](2026-10-06-storage-key-file-entries.md) | Ninguna al compilar; emitir la entrada cuando se active la ruta de archivos grandes | Nada: con el interruptor apagado el motor omite estas entradas como siempre |
+
 ## 2026-10-05 — progreso de una herramienta larga
 
 | # | Nota | Acción de ADP | Qué se rompe si se ignora |

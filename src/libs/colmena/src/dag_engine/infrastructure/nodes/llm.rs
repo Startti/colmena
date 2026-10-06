@@ -458,6 +458,10 @@ pub struct LlmNode {
     /// The embedder's port for MCP `auth_refresh` headers; set after
     /// construction by `HashMapNodeRegistry::set_host_token_port`.
     pub(crate) host_token_port: Arc<std::sync::OnceLock<Arc<dyn HostTokenPort>>>,
+    /// The large tabular switch (`COLMENA_LARGE_TABULAR`), set once after
+    /// construction by `HashMapNodeRegistry::set_large_tabular` and read at the
+    /// start of each call. Off: every large-file branch below is skipped.
+    pub(crate) large_tabular: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl LlmNode {
@@ -513,7 +517,14 @@ impl LlmNode {
             storage: None,
             state_repository: None,
             host_token_port: Arc::default(),
+            large_tabular: Arc::default(),
         }
+    }
+
+    /// Whether the large tabular switch is on for this node.
+    pub(crate) fn large_tabular_enabled(&self) -> bool {
+        self.large_tabular
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Builder: attach the runs' state rows so DagToolExecutor can close the
@@ -1673,11 +1684,17 @@ impl ExecutableNode for LlmNode {
         // The `files[]` index of the entry each parsed file came from (Step 3).
         let mut parsed_entries = Vec::new();
 
+        // The switch is read once per call, so one turn never mixes both answers.
+        let large_tabular = self.large_tabular_enabled();
+
         // Check if there are any files passed in the node inputs
         if let Some(files_val) = inputs.get("files").or_else(|| config.get("files")) {
             if let Some(files_arr) = files_val.as_array() {
-                (resolved_files, parsed_entries) =
-                    parse_file_entries(files_arr, crate::dag_engine::engine::local_mode())?;
+                (resolved_files, parsed_entries) = parse_file_entries_with(
+                    files_arr,
+                    crate::dag_engine::engine::local_mode(),
+                    large_tabular,
+                )?;
             }
         }
 
@@ -4388,20 +4405,42 @@ const DEFAULT_FILENAME: &str = "upload.file";
 ///   "size_bytes": 123,                  // hint, not validated as ground truth
 ///   "data": "base64...",                // for files < 30 MB
 ///   "url": "https://...",               // for files >= 30 MB (signed URL)
-///   "path": "/local/path"               // legacy, < 30 MB, `local_mode` only
+///   "path": "/local/path",              // legacy, < 30 MB, `local_mode` only
+///   "storage_key": "chat-attachments/…" // only with the large tabular switch on
 /// }
 /// ```
 ///
-/// Priority when multiple sources are present: data > url > path. Outside
+/// Priority when multiple sources are present: data > url > path, and
+/// `storage_key` after all of them (see [`parse_file_entries_with`]). Outside
 /// `local_mode` an entry that names a `path` fails (`PathFieldNotAllowed`).
+/// The node calls [`parse_file_entries_with`]; this is its switch-off form,
+/// which the characterisation tests pin.
+///
 /// Returns the files and, for each, the index in `arr` of the entry it was
 /// parsed from. Per-file errors are logged and skipped; only the
 /// hard-limit errors (`DataFieldTooLarge`, `PathFieldTooLarge`,
 /// `UrlWithoutDocumentId`, `PathFieldNotAllowed`) propagate.
+#[cfg(test)]
 pub(crate) fn parse_file_entries(
     arr: &[serde_json::Value],
     local_mode: bool,
 ) -> Result<(Vec<crate::llm::domain::FileData>, Vec<usize>), crate::llm::domain::LlmError> {
+    parse_file_entries_with(arr, local_mode, false)
+}
+
+/// [`parse_file_entries`] with the large tabular switch (`large_tabular`).
+///
+/// With it on, an entry that carries only a `storage_key` and is a CSV/xlsx
+/// strictly above 50 MiB (`size_bytes`) becomes `FileSource::StorageRef`. It has
+/// the lowest priority: an entry that also has `data`, `url` or `path` parses as
+/// it does today. Any other entry with only a `storage_key` (switch off, another
+/// type, size missing or at most 50 MiB) is skipped silently, as today.
+pub(crate) fn parse_file_entries_with(
+    arr: &[serde_json::Value],
+    local_mode: bool,
+    large_tabular: bool,
+) -> Result<(Vec<crate::llm::domain::FileData>, Vec<usize>), crate::llm::domain::LlmError> {
+    use crate::llm::domain::large_tabular::is_large_tabular;
     use crate::llm::domain::{FileData, FileSource, LlmError};
     let mut out = Vec::with_capacity(arr.len());
     let mut kept = Vec::with_capacity(arr.len());
@@ -4437,6 +4476,10 @@ pub(crate) fn parse_file_entries(
             .filter(|s| !s.is_empty());
         let path_present = obj
             .get("path")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty());
+        let storage_key_present = obj
+            .get("storage_key")
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty());
         if path_present.is_some() && !local_mode {
@@ -4495,6 +4538,10 @@ pub(crate) fn parse_file_entries(
                 }
             };
             FileSource::InlineBytes { bytes }
+        } else if let Some(key) =
+            storage_key_present.filter(|_| is_large_tabular(&mime_type, size_hint, large_tabular))
+        {
+            FileSource::StorageRef(key.to_string())
         } else {
             crate::colmena_log!("WARN: file entry has no data/url/path; skipping");
             continue;
@@ -8454,3 +8501,6 @@ mod characterisation;
 
 #[cfg(test)]
 mod large_files;
+
+#[cfg(test)]
+mod storage_key_entries;
