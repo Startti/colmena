@@ -501,6 +501,8 @@ impl DagRunUseCase {
             // usage_accumulator: node_id → (prompt, completion, thinking, cache_read, cache_write)
             let mut node_meta: HashMap<String, NodeMeta> = HashMap::new();
             let mut usage_accumulator: HashMap<String, (u32, u32, u32, u32, u32)> = HashMap::new();
+            // Who a child event says bills an entry, until this run bills one.
+            let mut child_meta: HashMap<String, NodeMeta> = HashMap::new();
 
             // Start cyclic execution loop
             while let Some(node_id) = active_queue.pop_front() {
@@ -1020,7 +1022,7 @@ impl DagRunUseCase {
                                                 entry.2 += thinking_tokens.unwrap_or(0);
                                                 entry.3 += cache_read_tokens.unwrap_or(0);
                                                 entry.4 += cache_write_tokens.unwrap_or(0);
-                                                yield DagExecutionEvent::LlmUsage { node_id: usage_id, prompt_tokens, completion_tokens, thinking_tokens, cache_read_tokens, cache_write_tokens, side_call };
+                                                yield DagExecutionEvent::LlmUsage { node_id: usage_id, prompt_tokens, completion_tokens, thinking_tokens, cache_read_tokens, cache_write_tokens, side_call, nested: false };
                                             }
                                             NodeEvent::LlmToolCallStart { tool_id, tool_name, tool_args, child_scope } => {
                                                 last_tool = Some(tool_name.clone());
@@ -1051,7 +1053,7 @@ impl DagRunUseCase {
                                                 // Also bill what they say (`track_child_usage`).
                                                 if let Ok(child_event) = serde_json::from_value::<DagExecutionEvent>(raw) {
                                                     // Bill it before moving child_event into yield.
-                                                    track_child_usage(&mut node_meta, &mut usage_accumulator, &child_event);
+                                                    track_child_usage(&mut node_meta, &mut child_meta, &mut usage_accumulator, &child_event);
                                                     match child_event {
                                                         DagExecutionEvent::GraphFinish { .. } => {}
                                                         // Grandchild+ event that already crossed one subgraph
@@ -1738,59 +1740,52 @@ fn record_side_call_meta(
     );
 }
 
-/// Bills child event `event` into this run's usage: a `NodeStart` or a
-/// `UsageIdentity` names the model of an entry, an `LlmUsage` adds to it.
-///
-/// A wrapped event bills like a base one. Each provider call reaches this
-/// run's stream exactly once, at whatever depth it was made (a tool inside a
-/// subgraph, a `for_each` row inside a tool, a grandchild graph), and
-/// `finish.usage` already counts every one of them, so `usage-summary` must
-/// too. Counting only base events left the deeper ones out of it.
+/// Bills child event `event`: a `NodeStart`/`UsageIdentity` names an entry's
+/// model (`child_meta`), an `LlmUsage` adds to the entry. This run bills its own
+/// graph at any depth (a tool's tool, a `for_each` tool's rows), keyed by the
+/// wrapper's `path` so two scopes never share an entry; a `nested` usage is a
+/// child run's, billed in its `subgraph-usage-summary` (`finish.usage` has all).
 fn track_child_usage(
     node_meta: &mut HashMap<String, NodeMeta>,
+    child_meta: &mut HashMap<String, NodeMeta>,
     usage_accumulator: &mut HashMap<String, (u32, u32, u32, u32, u32)>,
     event: &crate::dag_engine::domain::events::DagExecutionEvent,
 ) {
     use crate::dag_engine::domain::events::DagExecutionEvent;
-    match event {
-        DagExecutionEvent::SubgraphWrapped { inner, .. } => {
-            track_child_usage(node_meta, usage_accumulator, inner)
-        }
+    let (key, base) = match event {
+        DagExecutionEvent::SubgraphWrapped { inner, path, .. } => (path.as_str(), &**inner),
+        base => (base.node_id().unwrap_or_default(), base),
+    };
+    match base {
         DagExecutionEvent::NodeStart {
-            node_id,
             node_type,
             inputs,
             config,
+            ..
         } => {
-            let field = |key: &str| {
+            let field = |k: &str| {
                 inputs
-                    .get(key)
-                    .or_else(|| config.get(key))
+                    .get(k)
+                    .or_else(|| config.get(k))
                     .and_then(|v| v.as_str())
-                    .map(str::to_string)
             };
             let model = field("model").or_else(|| {
                 crate::dag_engine::domain::router_rules::default_usage_model(node_type, config)
-                    .map(str::to_string)
             });
-            let provider_key_id = config
-                .get("provider_key_id")
-                .and_then(|v| v.as_str())
-                .map(str::to_string);
             let meta = NodeMeta {
-                model,
-                provider: field("provider"),
+                model: model.map(str::to_string),
+                provider: field("provider").map(str::to_string),
                 node_type: node_type.clone(),
-                provider_key_id,
+                provider_key_id: config["provider_key_id"].as_str().map(str::to_string),
             };
-            node_meta.insert(node_id.clone(), meta);
+            child_meta.insert(key.to_string(), meta);
         }
         DagExecutionEvent::UsageIdentity {
-            node_id,
             node_type,
             model,
             provider,
             provider_key_id,
+            ..
         } => {
             let meta = NodeMeta {
                 model: model.clone(),
@@ -1798,25 +1793,31 @@ fn track_child_usage(
                 node_type: node_type.clone(),
                 provider_key_id: provider_key_id.clone(),
             };
-            node_meta.insert(node_id.clone(), meta);
+            child_meta.insert(key.to_string(), meta);
         }
         DagExecutionEvent::LlmUsage {
-            node_id,
             prompt_tokens,
             completion_tokens,
             thinking_tokens,
             cache_read_tokens,
             cache_write_tokens,
             side_call,
+            nested: false,
+            ..
         } => {
-            if let Some(s) = side_call {
-                let owner = node_id
-                    .strip_suffix(&format!("::{}", s.purpose))
-                    .unwrap_or(node_id);
-                record_side_call_meta(node_meta, node_id, owner, Some(s));
+            // The node that made the call: this run's meta for it wins.
+            let owner = side_call.as_ref().map_or(key, |s| {
+                key.strip_suffix(&format!("::{}", s.purpose)).unwrap_or(key)
+            });
+            if let Some(meta) = child_meta
+                .get(owner)
+                .filter(|_| !node_meta.contains_key(owner))
+            {
+                node_meta.insert(owner.to_string(), meta.clone());
             }
+            record_side_call_meta(node_meta, key, owner, side_call.as_ref());
             let entry = usage_accumulator
-                .entry(node_id.clone())
+                .entry(key.to_string())
                 .or_insert((0, 0, 0, 0, 0));
             entry.0 += prompt_tokens;
             entry.1 += completion_tokens;
@@ -2088,7 +2089,7 @@ impl SubGraphExecutorPort for DagRunUseCase {
             {
                 final_out = output.clone();
             } else if let Some(obs) = &observer {
-                if let Ok(raw) = serde_json::to_value(&event) {
+                if let Ok(raw) = serde_json::to_value(event.nested()) {
                     obs.on_event(
                         crate::dag_engine::domain::observer::NodeEvent::SubgraphChildEvent(raw),
                     );
@@ -2153,7 +2154,7 @@ impl SubGraphExecutorPort for DagRunUseCase {
             {
                 final_out = output.clone();
             } else if let Some(obs) = &observer {
-                if let Ok(raw) = serde_json::to_value(&event) {
+                if let Ok(raw) = serde_json::to_value(event.nested()) {
                     obs.on_event(
                         crate::dag_engine::domain::observer::NodeEvent::SubgraphChildEvent(raw),
                     );

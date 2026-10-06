@@ -33,7 +33,7 @@ use serde_json::{json, Value};
 use serial_test::serial;
 use std::sync::{Arc, Mutex};
 
-/// A model that calls `add` (or, offered no `add`, `Sub`, then `Fan`) until the request
+/// A model that calls `add` (or else `Sub`, or else `Fan`/`Fan2`) until the request
 /// carries `tool_turns` tool results, then answers `answer`; offered neither,
 /// it answers. Call `k` (from 0) reports a usage of its
 /// own, so a call counted twice, or not at all, changes every total.
@@ -101,10 +101,8 @@ impl UsageModel {
         } else if offers("Sub") {
             ("Sub", format!(r#"{{"prompt":"task {done}"}}"#))
         } else if offers("Fan") {
-            (
-                "Fan",
-                r#"{"items":[{"prompt":"a"},{"prompt":"b"}]}"#.to_string(),
-            )
+            let fan = ["Fan", "Fan2"][usize::from(done % 2 == 1 && offers("Fan2"))];
+            (fan, r#"{"items":[{"prompt":"a"},{"prompt":"b"}]}"#.into())
         } else {
             return None;
         };
@@ -308,8 +306,8 @@ async fn llm_call_is_billed_once() {
     }
 }
 
-/// The same agent inside a `subgraph`: the child's summary, the parent's
-/// (which re-counts the child's `LlmUsage` events) and `finish` match.
+/// The same agent inside a `subgraph`: the child's summary and `finish`
+/// match; the parent's bills its own nodes only, and the child is not one.
 #[tokio::test]
 #[serial]
 async fn child_graph_is_billed_once() {
@@ -325,7 +323,7 @@ async fn child_graph_is_billed_once() {
             billed,
             "stream={stream}"
         );
-        assert_eq!(row(&frames, "usage-summary"), billed, "stream={stream}");
+        assert!(rows(&frames, "usage-summary").is_empty(), "stream={stream}");
         assert_eq!(finish(&frames), billed, "stream={stream}");
         assert_eq!(
             node_end(&frames, "subgraph-node-end"),
@@ -463,9 +461,8 @@ async fn attachment_summary_is_billed() {
     assert_side_call_billed(&model, &frames, "attachment_summary");
 }
 
-/// Two attachments summarized inside a `subgraph`: the child's summary and
-/// the parent's (which re-counts the child's events) give both calls one row
-/// of their own, with their model.
+/// Two attachments summarized inside a `subgraph`: the child's summary gives
+/// both calls one row of their own, with their model; the parent's has none.
 #[tokio::test]
 #[serial]
 async fn child_side_call_keeps_its_model() {
@@ -478,11 +475,25 @@ async fn child_side_call_keeps_its_model() {
     let frames = run_in(json!({ "nodes": { "sub": sub }, "edges": [] }), Some("c")).await;
     let (calls, side_usage) = model.billed_for("gpt-4o-mini");
     assert_eq!(calls, 2, "two summaries");
-    for kind in ["subgraph-usage-summary", "usage-summary"] {
-        let side = entry(&frames, kind, "agent::attachment_summary");
-        assert_eq!(usage(side), side_usage, "{kind}");
-        assert_eq!(side["model"], "gpt-4o-mini", "{kind}");
-    }
+    let side = entry(
+        &frames,
+        "subgraph-usage-summary",
+        "agent::attachment_summary",
+    );
+    assert_eq!(usage(side), side_usage);
+    assert_eq!(side["model"], "gpt-4o-mini");
+    assert!(
+        rows(&frames, "usage-summary").is_empty(),
+        "the child's, not the parent's"
+    );
+}
+
+/// Every row of every `kind` frame (none if the run billed nothing).
+fn rows(frames: &[Value], kind: &str) -> Vec<Value> {
+    let summaries = frames.iter().filter(|f| f["type"] == kind);
+    summaries
+        .flat_map(|f| f["nodes"].as_array().unwrap().clone())
+        .collect()
 }
 
 /// A text attachment `id` with no description.
@@ -567,15 +578,18 @@ async fn a_side_call_in_a_for_each_row_is_billed() {
     assert_all_billed(&model, &frames, "history_compaction");
 }
 
-/// What every host bills from `usage-summary`: its rows add up to
-/// `finish.usage` and to what the provider reported, and every row with
-/// tokens names the model and provider that burned them (a row without them
-/// is dropped by the host, not billed).
+/// `kind` rows add up to what the provider reported, and every row with tokens
+/// names its model and provider (a host drops a row without them).
 fn assert_every_call_priced(model: &UsageModel, frames: &[Value], kind: &str) {
-    let rows = one(frames, kind)["nodes"].as_array().unwrap();
+    assert_priced(frames, kind, model.billed().1);
+}
+
+/// `assert_every_call_priced`, for `kind` rows that bill `expected`.
+fn assert_priced(frames: &[Value], kind: &str, expected: LlmUsage) {
+    let rows = rows(frames, kind);
     let mut sum = LlmUsage::default();
     rows.iter().for_each(|r| sum.add(&usage(r)));
-    assert_eq!(sum, model.billed().1, "{kind} rows: {rows:#?}");
+    assert_eq!(sum, expected, "{kind} rows: {rows:#?}");
     for r in rows.iter().filter(|r| r["total_tokens"] != 0) {
         assert!(r["model"].is_string(), "{kind}: a row without model: {r:#}");
         assert!(
@@ -613,11 +627,18 @@ async fn a_for_each_row_is_billed_with_its_model() {
     assert_every_call_priced(&model, &frames, "usage-summary");
     assert_eq!(finish(&frames), model.billed().1, "finish.usage");
     for n in 0..2 {
-        let row = entry(&frames, "usage-summary", &format!("fe#{n}"));
-        assert_eq!(row["model"], "usage-model", "fe#{n}");
-        assert_eq!(row["provider"], "openai", "fe#{n}");
-        assert_eq!(row["node_type"], "llm_call", "fe#{n}");
-        assert_eq!(row["provider_key_id"], "pk-row", "fe#{n}");
+        let r = entry(&frames, "usage-summary", &format!("fe#{n}"));
+        let who = [
+            &r["node_type"],
+            &r["model"],
+            &r["provider"],
+            &r["provider_key_id"],
+        ];
+        assert_eq!(
+            who,
+            ["llm_call", "usage-model", "openai", "pk-row"],
+            "fe#{n}"
+        );
     }
 }
 
@@ -630,9 +651,8 @@ fn agent_with_tool(name: &str, tool: Value) -> Value {
     } } }, "edges": [] })
 }
 
-/// An `llm_call` tool inside a `subgraph`: the child bills it on a row of its
-/// own, and the parent's `usage-summary` re-counts the child's events — the
-/// tool's among them, once. It used to leave the tool's usage out.
+/// An `llm_call` tool inside a `subgraph` is billed once, in the child's
+/// summary, on a row of its own with its model; the parent's has none of it.
 #[tokio::test]
 #[serial]
 async fn a_tool_inside_a_subgraph_is_billed_once() {
@@ -645,44 +665,113 @@ async fn a_tool_inside_a_subgraph_is_billed_once() {
     let frames = run(json!({ "nodes": { "sub": sub }, "edges": [] })).await;
     assert_eq!(model.billed().0, 5, "agent x3, Sub x2");
     assert_every_call_priced(&model, &frames, "subgraph-usage-summary");
-    assert_every_call_priced(&model, &frames, "usage-summary");
-    assert_eq!(finish(&frames), model.billed().1, "finish.usage");
-    let tool = entry(&frames, "usage-summary", "Sub");
-    let mut both = row(&frames, "usage-summary");
-    both.add(&usage(tool));
-    assert_eq!(
-        both,
-        model.billed().1,
-        "the agent's row and the tool's, once each"
+    assert!(
+        rows(&frames, "usage-summary").is_empty(),
+        "the child's, not the parent's"
     );
+    assert_eq!(finish(&frames), model.billed().1, "finish.usage");
+    let tool = entry(&frames, "subgraph-usage-summary", "Sub");
     assert_eq!(
         (&tool["model"], &tool["provider"]),
         (&json!("usage-model"), &json!("openai"))
     );
 }
 
-/// A `for_each` dispatched as a tool: its rows come out one level below the
-/// tool, and the agent's `usage-summary` used to leave them out.
+/// The root agent and the agent it calls as a tool both name their node
+/// `agent`, on different models: each summary bills its own run's, with its
+/// own model, and the root's never takes the child's tokens.
 #[tokio::test]
 #[serial]
-async fn a_for_each_tool_is_billed() {
-    let fan = json!({ "name": "Fan", "description": "d", "node_type": "for_each",
+async fn an_agent_as_a_tool_is_billed_in_its_own_summary() {
+    let child = json!({ "nodes": { "agent": { "type": "llm_call", "config": {
+        "provider": "openai", "api_key": "unused", "model": "child-model",
+        "prompt": "help", "stream": false
+    } } }, "edges": [] });
+    let sub = json!({ "name": "Sub", "description": "d", "node_type": "subgraph",
         "node_schema": {
-            "target": { "fixed": { "node_type": "llm_call", "node_schema": plain_schema() } },
-            "concurrency": { "fixed": 1 },
-            "items": { "type": "array", "required": true, "description": "rows",
-                "items": { "type": "object" } }
+            "child_graph_inline": { "fixed": child },
+            "prompt": { "type": "string", "required": true, "description": "p" }
         } });
-    let model = UsageModel::new(1, "done");
+    let model = UsageModel::new(2, "done");
     let _guard = OverrideGuard::install(model.clone());
-    let frames = run(agent_with_tool("Fan", fan)).await;
-    assert_eq!(model.billed().0, 4, "agent x2, two rows");
+    let frames = run(agent_with_tool("Sub", sub)).await;
+    let (root_calls, root) = model.billed_for("usage-model");
+    let (child_calls, child) = model.billed_for("child-model");
+    assert_eq!((root_calls, child_calls), (3, 2));
+    assert_priced(&frames, "usage-summary", root);
+    assert_eq!(
+        entry(&frames, "usage-summary", "agent")["model"],
+        "usage-model"
+    );
+    assert_priced(&frames, "subgraph-usage-summary", child);
+    let children = rows(&frames, "subgraph-usage-summary");
+    assert!(children.iter().all(|r| r["model"] == "child-model"));
+    assert_eq!(finish(&frames), model.billed().1, "finish.usage");
+}
+
+/// Two `for_each` tools: their rows, one level below the tool, are billed
+/// (they used to be left out), each keyed by its own scope's path so the two
+/// never share an entry, each with its own target's model and key.
+#[tokio::test]
+#[serial]
+async fn two_for_each_tools_keep_their_rows_apart() {
+    let fan = |name: &str, row_model: &str| {
+        let mut schema = plain_schema();
+        schema["model"] = json!({ "fixed": row_model });
+        json!({ "name": name, "description": "d", "node_type": "for_each",
+            "node_schema": {
+                "target": { "fixed": { "node_type": "llm_call", "node_schema": schema } },
+                "concurrency": { "fixed": 1 },
+                "items": { "type": "array", "required": true, "description": "rows",
+                    "items": { "type": "object" } }
+            } })
+    };
+    let mut graph = agent_with_tool("Fan", fan("Fan", "row-model-1"));
+    let config = &mut graph["nodes"]["agent"]["config"];
+    config["enabled_tools"] = json!(["Fan", "Fan2"]);
+    config["tool_configurations"]["Fan2"] = fan("Fan2", "row-model-2");
+    let model = UsageModel::new(2, "done");
+    let _guard = OverrideGuard::install(model.clone());
+    let frames = run(graph).await;
+    assert_eq!(model.billed().0, 7, "agent x3, two rows per tool");
     assert_every_call_priced(&model, &frames, "usage-summary");
     assert_eq!(finish(&frames), model.billed().1, "finish.usage");
-    // Dispatched as a tool, the fan-out has no node id of its own.
-    let row = entry(&frames, "usage-summary", "for_each#1");
+    for (tool, row_model) in [("Fan", "row-model-1"), ("Fan2", "row-model-2")] {
+        let mut sum = LlmUsage::default();
+        for n in 0..2 {
+            let r = entry(&frames, "usage-summary", &format!("{tool}>for_each#{n}"));
+            assert_eq!(
+                (&r["model"], &r["provider_key_id"]),
+                (&json!(row_model), &json!("pk-row"))
+            );
+            sum.add(&usage(r));
+        }
+        assert_eq!(sum, model.billed_for(row_model).1, "{tool}: its two rows");
+    }
+}
+
+/// A `subgraph` node whose child names its node `agent`, like the parent's
+/// own `agent` that ran first: the parent's row keeps the parent's model.
+#[tokio::test]
+#[serial]
+async fn a_child_reusing_an_id_keeps_the_parent_row() {
+    let mut child = agent(false);
+    child["nodes"]["agent"]["config"]["model"] = json!("child-model");
+    child["nodes"]["agent"]["config"]["enabled_tools"] = json!([]);
+    let mut graph = agent(false);
+    graph["nodes"]["sub"] =
+        json!({ "type": "subgraph", "config": { "child_graph_inline": child } });
+    graph["edges"] = json!([{ "from": "agent", "to": "sub" }]);
+    let model = UsageModel::new(1, "done");
+    let _guard = OverrideGuard::install(model.clone());
+    let frames = run(graph).await;
+    let root = model.billed_for("usage-model").1;
+    assert_priced(&frames, "usage-summary", root.clone());
+    let parent = entry(&frames, "usage-summary", "agent");
     assert_eq!(
-        (&row["model"], &row["provider_key_id"]),
-        (&json!("usage-model"), &json!("pk-row"))
+        (usage(parent), &parent["model"]),
+        (root, &json!("usage-model"))
     );
+    let child_row = entry(&frames, "subgraph-usage-summary", "agent");
+    assert_eq!(child_row["model"], "child-model");
 }

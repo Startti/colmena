@@ -45,6 +45,10 @@ pub enum DagExecutionEvent {
         /// (`SideCall::node_id`), so a parent run bills it the same way.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         side_call: Option<SideCall>,
+        /// Made in a child run (`subgraph`, agent as a tool), whose own summary
+        /// bills it: a parent's leaves it out. Set by [`Self::nested`].
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        nested: bool,
     },
     #[serde(rename = "llm_tool_call_start")]
     LlmToolCallStart {
@@ -225,9 +229,8 @@ pub enum DagExecutionEvent {
     /// A child run never reads, so it is never wrapped.
     #[serde(rename = "user_message_consumed")]
     UserMessageConsumed { node_id: String, id: String },
-    /// Who bills the usage of `node_id`: a usage entry with no `NodeStart` of
-    /// its own (a `for_each` row, `<node>#<index>`) names its model with this.
-    /// Bookkeeping only: the SSE mapper sends nothing for it.
+    /// The model of usage entry `node_id`, which has no `NodeStart` (a
+    /// `for_each` row). Bookkeeping only: no SSE frame.
     #[serde(rename = "usage_identity")]
     UsageIdentity {
         node_id: String,
@@ -278,6 +281,17 @@ pub struct NodeEndError {
 }
 
 impl DagExecutionEvent {
+    /// This event as it leaves a child run for its parent: a usage, wrapped or
+    /// not, is marked `nested`, so only the child's own summary bills it.
+    pub fn nested(mut self) -> Self {
+        match &mut self {
+            Self::LlmUsage { nested, .. } => *nested = true,
+            Self::SubgraphWrapped { inner, .. } => **inner = inner.clone().nested(),
+            _ => {}
+        }
+        self
+    }
+
     /// Whether this is the usage of a side call made by node `node_id`
     /// (`SideCall::node_id`).
     pub fn is_side_usage_of(&self, node_id: &str) -> bool {
@@ -329,6 +343,7 @@ impl DagExecutionEvent {
                 cache_read_tokens,
                 cache_write_tokens,
                 side_call,
+                nested: false,
             },
             NodeEvent::LlmToolCallStart {
                 tool_id,
@@ -742,7 +757,8 @@ mod tests {
             thinking_tokens: None,
             cache_read_tokens: None,
             cache_write_tokens: None,
-            side_call: None
+            side_call: None,
+            nested: false,
         }
         .advances_heartbeat_clock());
         assert!(!DagExecutionEvent::TurnStart { turn: 1 }.advances_heartbeat_clock());

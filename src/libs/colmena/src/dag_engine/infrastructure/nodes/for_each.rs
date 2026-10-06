@@ -603,12 +603,10 @@ impl ExecutableNode for ForEachNode {
                     // lineage. The suffix is the row index, which lines up with the
                     // `index` field of the `batch-item-finished` event for that row.
                     let row_id = format!("{node_id}#{index}");
-                    // The row has no `NodeStart` of its own, yet its target's
-                    // usage is billed on an entry `<node_id>#<index>`: name its
-                    // model there, or a host gets a row it cannot price. On the
-                    // raw observer, one level above the row, like a tool's boundary.
-                    if let Some(obs) = &observer {
-                        let identity = row_usage_identity(&row_id, &target_type, &merged);
+                    // The row has no `NodeStart`, yet its usage is billed on entry
+                    // `<node_id>#<index>`: name its model, one level above the row.
+                    let identity = row_usage_identity(&row_id, &target_type, &merged);
+                    if let (Some(obs), Some(identity)) = (&observer, identity) {
                         if let Ok(raw) = serde_json::to_value(&identity) {
                             obs.on_event(NodeEvent::SubgraphChildEvent(raw));
                         }
@@ -807,25 +805,26 @@ impl ExecutableNode for ForEachNode {
 }
 
 /// Who bills row `row_id` of a fan-out: its target's type and the model,
-/// provider and key its merged inputs `merged` run with.
+/// provider and key its merged inputs `merged` run with. `None` for a target
+/// that calls no provider itself: a `subgraph` (its child run names its own
+/// nodes) or a node with neither a model nor a provider.
 fn row_usage_identity(
     row_id: &str,
     target_type: &str,
     merged: &HashMap<String, Value>,
-) -> DagExecutionEvent {
+) -> Option<DagExecutionEvent> {
     let field = |key: &str| merged.get(key).and_then(Value::as_str).map(str::to_string);
-    let model = field("model").or_else(|| {
-        let config = Value::Object(merged.clone().into_iter().collect());
-        crate::dag_engine::domain::router_rules::default_usage_model(target_type, &config)
-            .map(str::to_string)
-    });
-    DagExecutionEvent::UsageIdentity {
+    let (model, provider) = (field("model"), field("provider"));
+    if target_type == "subgraph" || (model.is_none() && provider.is_none()) {
+        return None;
+    }
+    Some(DagExecutionEvent::UsageIdentity {
         node_id: row_id.to_string(),
         node_type: target_type.to_string(),
         model,
-        provider: field("provider"),
+        provider,
         provider_key_id: field("provider_key_id"),
-    }
+    })
 }
 
 #[cfg(test)]
@@ -1352,6 +1351,22 @@ mod tests {
             vec!["fan#0".to_string(), "fan#1".to_string()],
             "each row must emit under its own `<node_id>#<index>` lineage"
         );
+    }
+
+    /// Only a row whose target calls the provider itself names who bills it.
+    #[test]
+    fn a_row_names_its_model_only_for_a_target_that_calls_a_provider() {
+        let row =
+            |pairs: Value| -> HashMap<String, Value> { serde_json::from_value(pairs).unwrap() };
+        let llm = row(json!({ "provider": "openai", "model": "m", "provider_key_id": "k" }));
+        assert!(matches!(
+            super::row_usage_identity("fe#0", "llm_call", &llm),
+            Some(DagExecutionEvent::UsageIdentity { node_id, model: Some(m), provider_key_id: Some(k), .. })
+                if node_id == "fe#0" && m == "m" && k == "k"
+        ));
+        assert!(super::row_usage_identity("fe#0", "subgraph", &llm).is_none());
+        let http = row(json!({ "url": "https://example.com" }));
+        assert!(super::row_usage_identity("fe#0", "http_request", &http).is_none());
     }
 
     #[test]
