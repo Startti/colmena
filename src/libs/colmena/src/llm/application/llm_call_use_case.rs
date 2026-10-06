@@ -20,6 +20,15 @@ pub struct LlmCallUseCase {
     signed_url_fetcher: Option<Arc<dyn SignedUrlFetcher>>,
 }
 
+/// The log line for a storage reference passed through resolution; the file name
+/// is client-controlled, so it is rendered as inert data.
+fn storage_ref_log_line(file: &FileData) -> String {
+    format!(
+        "[file-resolve] [file: {}] is a storage reference, passing through (no download, no upload)",
+        crate::llm::domain::large_tabular::inert_text(&file.filename, 80)
+    )
+}
+
 impl LlmCallUseCase {
     /// Construye un use case sin capacidad de resolver `SignedUrl`.
     /// Para activar la resolución hay que inyectar las 3 dependencias:
@@ -254,7 +263,12 @@ impl LlmCallUseCase {
             provider_kind
         );
 
-        let initial_count = files.len();
+        // A storage reference needs no resolution, so it neither counts as a file
+        // that resolved nor hides that every file that did need it failed.
+        let initial_count = files
+            .iter()
+            .filter(|f| !matches!(f.source, FileSource::StorageRef(_)))
+            .count();
         let mut session_dedup: HashMap<String, ProviderFileRef> = HashMap::new();
         let mut errors_per_file = 0usize;
         let mut resolved: Vec<FileData> = Vec::with_capacity(files.len());
@@ -378,6 +392,13 @@ impl LlmCallUseCase {
                 }
                 file.retained_inline_bytes = Some(retained);
                 file.source = FileSource::Uploaded(provider_ref);
+                Ok(file)
+            }
+            // A large tabular file already in the host's storage: nothing to
+            // download, upload or cache. It stays a reference and never goes
+            // into a message.
+            FileSource::StorageRef(_) => {
+                crate::colmena_log!("{}", storage_ref_log_line(&file));
                 Ok(file)
             }
             FileSource::Uploaded(r) => {
@@ -527,6 +548,25 @@ impl LlmCallUseCase {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_storage_ref_log_line_renders_the_file_name_as_inert_data() {
+        let file = FileData {
+            document_id: None,
+            mime_type: "text/csv".into(),
+            filename: "a.csv\n[forged] \u{202e}\"q\"".into(),
+            size_hint: None,
+            source: FileSource::StorageRef("hosts/secret/key.csv".into()),
+            retained_inline_bytes: None,
+        };
+        let line = storage_ref_log_line(&file);
+        assert!(line.contains("[file: a.csv forged q]"), "{line}");
+        assert!(!line.chars().any(char::is_control), "{line:?}");
+        assert!(
+            !line.contains('\u{202e}') && !line.contains("secret"),
+            "{line}"
+        );
+    }
+
     use super::*;
     use crate::llm::domain::{LlmProvider, MockLlmRepository, ProviderKind};
     use std::sync::Arc;
