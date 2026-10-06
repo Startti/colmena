@@ -50,6 +50,13 @@ pub enum AttachmentResolveError {
     /// etc.). Catalog state is unknown.
     #[error("registry error: {0}")]
     RegistryError(#[from] AttachmentError),
+
+    /// The row references an object the HOST owns and the caller would read it
+    /// whole into memory (see
+    /// [`resolve_for_buffering`](AttachmentStreamResolver::resolve_for_buffering)).
+    /// Displays the large-file refusal text.
+    #[error("{}", crate::llm::domain::large_tabular::refusal_text())]
+    HostObject,
 }
 
 #[async_trait]
@@ -62,6 +69,19 @@ pub trait AttachmentStreamResolver: Send + Sync {
         agent_session_id: &str,
         document_id: &str,
     ) -> Result<StoredStream, AttachmentResolveError>;
+
+    /// [`resolve`](Self::resolve) for a caller that will hold the WHOLE stream in
+    /// memory (the JSON body of `http_request`, `image_edit`). A row that
+    /// references an object the HOST owns is refused with
+    /// [`AttachmentResolveError::HostObject`]; streamed uses (`resolve`, a read
+    /// URL) stay allowed. The default is for resolvers that know no host rows.
+    async fn resolve_for_buffering(
+        &self,
+        agent_session_id: &str,
+        document_id: &str,
+    ) -> Result<StoredStream, AttachmentResolveError> {
+        self.resolve(agent_session_id, document_id).await
+    }
 
     /// A read URL for `document_id` of `agent_session_id`, valid for about
     /// `ttl_seconds`: the same session lookup as [`Self::resolve`] (a raw

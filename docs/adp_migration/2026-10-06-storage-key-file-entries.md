@@ -91,3 +91,9 @@ el motor se comporta exactamente como antes, para cualquier tamaño.
   y es un adjunto de chat. El motor solo hace comprobaciones baratas sin conocer el
   esquema de ADP: no vacía, hasta 1024 caracteres, sin caracteres de control y sin
   segmentos `..`; una entrada con una llave así se omite con un aviso.
+- **Qué sigue permitido sobre estos archivos y qué no.** Permitido (no cargan el
+  objeto entero): subirlo como multipart por flujo y pedir una URL de lectura firmada.
+  Rechazado con el mismo texto y código: incluirlo en el cuerpo JSON de `http_request`
+  (`$attachment:` → base64, hasta el tope de 100 MiB) o en `image_edit`. En los
+  errores de almacenamiento sobre estas filas el motor nunca incluye la llave ni una
+  ruta: solo el documento y el nombre del archivo.
