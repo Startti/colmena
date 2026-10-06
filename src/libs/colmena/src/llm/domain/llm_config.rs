@@ -25,9 +25,19 @@ pub struct LlmUsage {
     /// same thing everywhere and `prompt + cache_read + cache_write` is always
     /// the true input size. Verified live 2026-08-23 against all three APIs.
     pub prompt_tokens: u32,
-    /// Tokens in the text output (Gemini: text only; Anthropic/OpenAI: includes thinking).
+    /// Output tokens, **disjoint from [`Self::thinking_tokens`]**: when a
+    /// provider reports a separate reasoning count, it is not in here.
+    ///
+    /// Gemini's `candidatesTokenCount` already excludes thoughts. OpenAI counts
+    /// `reasoning_tokens` *inside* `completion_tokens` / `output_tokens`, so its
+    /// adapter subtracts them via [`LlmUsage::with_thinking_tokens_included`].
+    /// Anthropic reports no separate thinking count: its `output_tokens`
+    /// includes extended thinking, which therefore stays here and
+    /// `thinking_tokens` is `None`. Either way `completion + thinking` is the
+    /// whole output, counted once.
     pub completion_tokens: u32,
-    /// Thinking / reasoning tokens (Gemini `thoughtsTokenCount`, OpenAI `reasoning_tokens`).
+    /// Thinking / reasoning tokens (Gemini `thoughtsTokenCount`, OpenAI
+    /// `reasoning_tokens`), never also counted in [`Self::completion_tokens`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thinking_tokens: Option<u32>,
     /// Tokens read from the prompt cache (Anthropic `cache_read_input_tokens`,
@@ -55,7 +65,8 @@ pub struct LlmUsage {
     #[serde(serialize_with = "serialize_opt_u32_as_zero")]
     pub cache_write_tokens: Option<u32>,
     /// Every token the turn touched: prompt + completion + thinking +
-    /// cache_read + cache_write. Cache tokens are counted here because they are
+    /// cache_read + cache_write — five disjoint columns, each token in exactly
+    /// one. Cache tokens are counted here because they are
     /// real tokens the provider processed and billed; omitting them understated
     /// a cached Anthropic turn by ~80%.
     pub total_tokens: u32,
@@ -73,6 +84,22 @@ impl LlmUsage {
 
     pub fn with_thinking_tokens(mut self, tokens: u32) -> Self {
         self.thinking_tokens = Some(tokens);
+        self.recompute_total();
+        self
+    }
+
+    /// Record reasoning tokens that the provider counted *inside* its
+    /// completion total, subtracting them so [`Self::completion_tokens`] is
+    /// left holding only visible output.
+    ///
+    /// Use this for OpenAI (`completion_tokens_details.reasoning_tokens`,
+    /// `output_tokens_details.reasoning_tokens`). Gemini reports thoughts
+    /// disjointly and must use [`Self::with_thinking_tokens`] instead.
+    ///
+    /// Saturating, like [`Self::with_cached_input_tokens_included`].
+    pub fn with_thinking_tokens_included(mut self, reasoning: u32) -> Self {
+        self.completion_tokens = self.completion_tokens.saturating_sub(reasoning);
+        self.thinking_tokens = Some(reasoning);
         self.recompute_total();
         self
     }
@@ -457,5 +484,19 @@ mod tests {
         assert_eq!(rest, Some(want), "a field reported whole drops out");
         // More reported than the total floors at nothing rather than wrapping.
         assert_eq!(LlmUsage::new(1, 1).beyond(&LlmUsage::new(5, 5)), None);
+    }
+
+    #[test]
+    fn thinking_included_comes_out_of_the_completion() {
+        let u = LlmUsage::new(100, 300).with_thinking_tokens_included(250);
+        assert_eq!((u.completion_tokens, u.thinking_tokens), (50, Some(250)));
+        assert_eq!(u.total_tokens, 400, "reasoning counted once");
+    }
+
+    #[test]
+    fn thinking_included_saturates() {
+        let u = LlmUsage::new(0, 10).with_thinking_tokens_included(25);
+        assert_eq!(u.completion_tokens, 0);
+        assert_eq!(u.thinking_tokens, Some(25));
     }
 }
