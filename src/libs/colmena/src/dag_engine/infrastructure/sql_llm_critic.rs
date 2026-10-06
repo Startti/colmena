@@ -6,17 +6,22 @@
 //! Uses `LlmProviderFactory` to create a provider adapter and `LlmRepository::call()`
 //! to make a single non-streaming request. No conversation persistence needed.
 
+use crate::dag_engine::domain::observer::ExecutionObserver;
 use crate::dag_engine::domain::sql_errors::SqlNodeError;
 use crate::dag_engine::domain::sql_ports::{CriticResult, SqlCriticPort};
+use crate::dag_engine::infrastructure::nodes::util::billed_llm::billed;
 use crate::llm::domain::{LlmConfig, LlmMessage, LlmProvider, LlmRequest, ProviderKind};
 use crate::llm::infrastructure::LlmProviderFactory;
 use std::str::FromStr;
+use std::sync::Arc;
 
 /// Adapter that uses an LLM to analyze SQL queries for security and optimization.
 pub struct LlmCriticAdapter {
     provider: String,
     model: String,
     api_key: String,
+    /// The `sql` node's observer, billed for each critic call.
+    observer: Option<Arc<dyn ExecutionObserver>>,
 }
 
 impl LlmCriticAdapter {
@@ -25,7 +30,14 @@ impl LlmCriticAdapter {
             provider,
             model,
             api_key,
+            observer: None,
         }
+    }
+
+    /// Bills each critic call to `observer` (the node running the query).
+    pub fn with_observer(mut self, observer: Option<Arc<dyn ExecutionObserver>>) -> Self {
+        self.observer = observer;
+        self
     }
 }
 
@@ -78,7 +90,10 @@ impl SqlCriticPort for LlmCriticAdapter {
         })?;
 
         // Create provider adapter via factory and call
-        let llm_repo = LlmProviderFactory::create(provider_kind);
+        let llm_repo = billed(
+            LlmProviderFactory::create(provider_kind),
+            self.observer.clone(),
+        );
         let response = llm_repo
             .call(request)
             .await
@@ -120,5 +135,44 @@ impl SqlCriticPort for LlmCriticAdapter {
             security_reason,
             optimization_hints,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dag_engine::domain::observer::NodeEvent;
+    use crate::llm::domain::{LlmRequestId, LlmResponse, LlmUsage, MockLlmRepository};
+    use crate::llm::infrastructure::OverrideGuard;
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct Recorder(Mutex<Vec<u32>>);
+
+    impl ExecutionObserver for Recorder {
+        fn on_event(&self, event: NodeEvent) {
+            if let NodeEvent::LlmUsage { prompt_tokens, .. } = event {
+                self.0.lock().unwrap().push(prompt_tokens);
+            }
+        }
+    }
+
+    /// The critic's call is billed to the `sql` node, once.
+    #[tokio::test]
+    async fn the_critic_call_is_billed_to_the_node() {
+        let mut model = MockLlmRepository::new();
+        model.expect_call().times(1).returning(|request| {
+            let provider = request.config().provider().clone();
+            let id = LlmRequestId::from_string("r".into()).unwrap();
+            let response = LlmResponse::new(id, r#"{"security":"ok"}"#.into(), provider)?;
+            Ok(response.with_usage(LlmUsage::new(321, 4)))
+        });
+        let _guard = OverrideGuard::install(Arc::new(model));
+        let recorder = Arc::new(Recorder::default());
+        let critic = LlmCriticAdapter::new("openai".into(), "m".into(), "k".into())
+            .with_observer(Some(recorder.clone()));
+        let result = critic.analyze("SELECT 1", "").await.unwrap();
+        assert!(result.security_ok);
+        assert_eq!(*recorder.0.lock().unwrap(), vec![321]);
     }
 }

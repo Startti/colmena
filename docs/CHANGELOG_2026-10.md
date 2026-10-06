@@ -450,3 +450,32 @@ sin razonamiento la salida queda entera. `llm_config`: el helper resta y satura.
 mutación (sin la resta: 7 fallan).
 **ADP.** Subir el pin: la salida de los modelos de razonamiento de OpenAI (gpt-5, o-series) baja a lo real; la
 fórmula `completion + thinking` no cambia. **Estado.** done.
+
+## 29. Facturación: las llamadas laterales de un nodo también se cuentan
+
+**Qué cambia.** Después de §25, cada llamada del loop de respuesta se cuenta una vez, pero un nodo también llama
+al proveedor por fuera de ese loop, sin callback ni observer, y esas llamadas no llegaban a `usage-summary` ni a
+`finish.usage`: el resumen con modelo barato de un mensaje viejo al compactar la historia de un `llm_call`
+(`LlmMessageSummarizer`), el resumen de un adjunto sin descripción (`LlmAttachmentSummaryGenerator`) y el crítico
+`guardrail_llm` del nodo `sql` (`LlmCriticAdapter`). Ahora las tres pasan por `nodes/util/billed_llm.rs`, un
+`LlmRepository` que reporta el uso de cada llamada (`call`: el de la respuesta; `stream`: la última parte `Usage`,
+al terminar) como un `LlmUsage` del nodo que la hizo. El repositorio del loop de respuesta no se envuelve: ya se
+reporta y se cobraría dos veces. `extra_info.usage` sigue siendo el total del loop de respuesta.
+Revisadas y ya contadas una vez: `llm_call` (loop), `critic`/`planner`/`reactor`, el `final_reactor` del
+`orchestrator` (por su callback), `extract_with_schema` (`output_parser`, `extraction`, `router` en `llm_direct` y
+`extract_and_route`) y el `router` `decision_model`. Sin contexto de facturación: el preflight de claves
+(`validate_credentials`, sin tokens), el health check y `ServiceContainer` (`LlmCallUseCase`/`LlmStreamUseCase`
+fuera de un run: el host recibe el uso en la respuesta). `image_generation`, `image_edit` y `tts` no pasan por
+`LlmRepository` y no reportan tokens; quedan fuera.
+Además, `SqliteAttachmentRegistry` leía un `description` (y `label`) `NULL` como `""`: en modo SQLite un adjunto
+nunca se resumía, porque parecía ya descrito. Ahora es `None`, como en Postgres. Guía:
+[17_technical_reference.md](developer_guide/17_technical_reference.md) §6.
+**Tests.** `tests/usage_counted_once.rs`: un segundo turno de una conversación en SQLite compacta la respuesta
+larga del primero (2 llamadas: el resumen y la respuesta) y un `llm_call` con un adjunto de texto lo resume
+mientras responde (2 llamadas); `usage-summary` y `finish.usage` igualan la suma de lo que reportó el proveedor.
+Antes del arreglo los dos daban solo la respuesta. Unitarios de `billed_llm` (`call` y `stream`, con un `Usage`
+acumulado intermedio), del crítico SQL y de la lectura de `NULL` en SQLite. Mutaciones: sin envolver el resumen de
+historia o el del adjunto, o con la lectura vieja de SQLite, falla su caso; envolver también el loop de respuesta
+hace fallar los casos de §25 (cobro doble).
+**ADP.** Subir el pin: suma a lo facturado las compactaciones de historia, los resúmenes de adjuntos y el crítico
+SQL. **Estado.** done.

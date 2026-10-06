@@ -23,6 +23,7 @@ use crate::dag_engine::infrastructure::nodes::llm_synthetic_tools::{
     current_turn_slice, reconstruct_discovered_set, summary_for_catalog, CatalogEntry,
     CrdtDocsContext, DescribeToolDispatchResult, DocumentToolsContext, DOCUMENTS_SYSTEM_PRELUDE,
 };
+use crate::dag_engine::infrastructure::nodes::util::billed_llm::billed;
 use crate::documents::application::DocumentRuntime;
 use crate::documents::domain::ids::SessionId as DocSessionId;
 use crate::llm::application::agent_service::{
@@ -2665,7 +2666,12 @@ impl ExecutableNode for LlmNode {
         let message_summarizer: std::sync::Arc<dyn crate::llm::domain::MessageSummarizer> =
             std::sync::Arc::new(
                 crate::llm::infrastructure::message_summarizer::LlmMessageSummarizer::new(
-                    LlmProviderFactory::create(provider_kind.clone()),
+                    // Billed to this node: its calls happen outside the answer
+                    // loop, which reports only its own.
+                    billed(
+                        LlmProviderFactory::create(provider_kind.clone()),
+                        _observer.clone(),
+                    ),
                     provider_kind.clone(),
                     api_key.clone(),
                     summary_model,
@@ -3791,7 +3797,11 @@ impl ExecutableNode for LlmNode {
 
         let summary_generator: Option<std::sync::Arc<dyn AttachmentSummaryGenerator>> =
             if summary_enabled && !summary_targets.is_empty() && attachment_registry.is_some() {
-                let repo = LlmProviderFactory::create(provider_kind.clone());
+                // Billed to this node: the answer loop reports only its own calls.
+                let repo = billed(
+                    LlmProviderFactory::create(provider_kind.clone()),
+                    _observer.clone(),
+                );
                 Some(std::sync::Arc::new(LlmAttachmentSummaryGenerator::new(
                     repo,
                 )))

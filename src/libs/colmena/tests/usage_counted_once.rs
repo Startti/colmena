@@ -27,6 +27,7 @@ use colmena::llm::domain::{
     LlmStreamPart, LlmUsage, MessageRole, ToolCall, ToolCallChunk,
 };
 use colmena::llm::infrastructure::{ConversationRepositoryFactory, OverrideGuard};
+use colmena::storage::infrastructure::LocalCacheStorageAdapter;
 use futures::StreamExt;
 use serde_json::{json, Value};
 use serial_test::serial;
@@ -176,11 +177,21 @@ fn agent(stream: bool) -> Value {
 
 /// Runs `graph` through the real run loop and maps every event to SSE frames.
 async fn run(graph: Value) -> Vec<Value> {
+    run_in(graph, None).await
+}
+
+/// `run`, as a turn of the conversation `agent_session_id` when given, with
+/// an in-process store for attachment bytes.
+async fn run_in(graph: Value, agent_session_id: Option<&str>) -> Vec<Value> {
     let pools = Arc::new(PgPoolRegistry::new(PoolConfig::defaults()));
-    let registry = HashMapNodeRegistry::new(
+    let registry = HashMapNodeRegistry::new_with_secure_values(
         Arc::new(ConversationRepositoryFactory::new(pools.clone())),
         Arc::new(SqlPortFactory::new(pools)),
         Some(Arc::new(NoTaskMemory)),
+        None,
+        Some(Arc::new(LocalCacheStorageAdapter::new())),
+        None,
+        None,
     );
     let use_case = DagRunUseCase::new(registry.clone(), None);
     registry.set_subgraph_executor(Arc::new(use_case.clone()));
@@ -188,7 +199,9 @@ async fn run(graph: Value) -> Vec<Value> {
     let graph: Graph = serde_json::from_value(graph).unwrap();
     let mut mapper = SseMapper::new();
     let mut frames = Vec::new();
-    let mut stream = Box::pin(use_case.execute_stream(graph, None, None, true, None, None, None));
+    let session = agent_session_id.map(str::to_string);
+    let mut stream =
+        Box::pin(use_case.execute_stream(graph, None, None, true, None, session, None));
     while let Some(event) = stream.next().await {
         frames.extend(mapper.map(&event.expect("the run must not fail")));
     }
@@ -312,4 +325,80 @@ async fn review_nodes_are_billed_once() {
             assert_eq!(finish(&frames), billed, "{case}: finish.usage");
         }
     }
+}
+
+/// An answer long enough (over 250 characters) that a later turn compacts
+/// it with the cheap-model summarizer instead of quoting it.
+const LONG_ANSWER: &str = "The sum of one and two is three. Adding the two numbers \
+    together, one plus two, gives three, which is the result that was asked for. \
+    Nothing else was needed to answer: no tool, no lookup, no assumption. Three is \
+    the final answer, and it was checked twice before it was written down here.";
+
+/// An agent with a conversation that persists across runs (`sqlite`).
+fn remembering_agent(db: &std::path::Path, extra: Value) -> Value {
+    let mut config = json!({
+        "provider": "openai", "api_key": "unused", "model": "usage-model",
+        "prompt": "add 1 and 2", "stream": false,
+        "connection_url": format!("sqlite://{}", db.display()),
+    });
+    config
+        .as_object_mut()
+        .unwrap()
+        .extend(extra.as_object().unwrap().clone());
+    json!({ "nodes": { "agent": { "type": "llm_call", "config": config } }, "edges": [] })
+}
+
+/// The second turn of a conversation compacts the first turn's long answer
+/// with a call of its own to the provider: that call is billed too, in the
+/// node that made it. It used not to reach `usage-summary` at all.
+#[tokio::test]
+#[serial]
+async fn history_compaction_is_billed() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("memory.db");
+    std::fs::File::create(&db).unwrap();
+    let graph = remembering_agent(&db, json!({}));
+
+    let first = UsageModel::new(0, LONG_ANSWER);
+    {
+        let _guard = OverrideGuard::install(first.clone());
+        run_in(graph.clone(), Some("conversation")).await;
+    }
+    assert_eq!(first.billed().0, 1, "the first turn makes one call");
+
+    let model = UsageModel::new(0, "three");
+    let _guard = OverrideGuard::install(model.clone());
+    let frames = run_in(graph, Some("conversation")).await;
+    let (calls, billed) = model.billed();
+    assert_eq!(calls, 2, "the summary of the long answer, then the answer");
+    assert_eq!(row(&frames, "usage-summary"), billed, "usage-summary");
+    assert_eq!(finish(&frames), billed, "finish.usage");
+}
+
+/// A text attachment without a description is summarized by the provider
+/// while the node answers: that call is billed too, in the node that made it.
+/// It used not to reach `usage-summary` at all.
+#[tokio::test]
+#[serial]
+async fn attachment_summary_is_billed() {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("memory.db");
+    std::fs::File::create(&db).unwrap();
+    let text = "Quarterly report. Revenue grew 12% over the previous quarter.";
+    let graph = remembering_agent(
+        &db,
+        json!({ "files": [{
+            "id": "doc-1", "mime_type": "text/plain", "filename": "report.txt",
+            "data": STANDARD.encode(text)
+        }] }),
+    );
+
+    let model = UsageModel::new(0, "three");
+    let _guard = OverrideGuard::install(model.clone());
+    let frames = run_in(graph, Some("conversation")).await;
+    let (calls, billed) = model.billed();
+    assert_eq!(calls, 2, "the attachment's summary and the answer");
+    assert_eq!(row(&frames, "usage-summary"), billed, "usage-summary");
+    assert_eq!(finish(&frames), billed, "finish.usage");
 }

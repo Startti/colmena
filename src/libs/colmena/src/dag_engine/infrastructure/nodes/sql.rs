@@ -730,7 +730,9 @@ impl ExecutableNode for SqlNode {
                     .into());
                 }
 
-                Some(Arc::new(LlmCriticAdapter::new(provider, model, api_key))
+                Some(Arc::new(
+                    LlmCriticAdapter::new(provider, model, api_key).with_observer(observer.clone()),
+                )
                     as Arc<
                         dyn crate::dag_engine::domain::sql_ports::SqlCriticPort,
                     >)
