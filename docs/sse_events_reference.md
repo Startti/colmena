@@ -489,6 +489,13 @@ El texto completo también queda disponible en `output.final_response` del `node
 > `streaming` (como los internos de un `orchestrator`) en cero. Ver
 > [guía 17 §6](developer_guide/17_technical_reference.md).
 >
+> Una llamada de un nodo fuera de su loop de respuesta tiene **fila propia**,
+> `"<nodo>::<propósito>"` (`history_compaction`, `attachment_summary`,
+> `sql_guardrail`; las del mismo propósito suman), con su `model`/`provider`,
+> `node_type` = propósito y el `provider_key_id` del nodo si usa su clave
+> (`side_call.node_key` del `llm_usage`). Bajo un tool o una fila de
+> `for_each`, `<nodo>` es su scope. No es un nodo del árbol de eventos.
+>
 > Ver [§14 — Provider prompt caching](developer_guide/14_llm_deep_dive.md) para
 > la fórmula de costo y la tabla de semántica por provider.
 

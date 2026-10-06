@@ -718,6 +718,7 @@ impl OrchestratorNode {
                                 thinking_tokens: usage.thinking_tokens,
                                 cache_read_tokens: usage.cache_read_tokens,
                                 cache_write_tokens: usage.cache_write_tokens,
+                                side_call: None,
                             })
                         }
                         crate::llm::domain::LlmStreamPart::LlmMessageStart => {
@@ -2422,6 +2423,7 @@ mod direct_thinking_observer_tests {
             thinking_tokens: None,
             cache_read_tokens: None,
             cache_write_tokens: None,
+            side_call: None,
         });
         obs.on_event(NodeEvent::ReasoningStart { id: "r1".into() });
 

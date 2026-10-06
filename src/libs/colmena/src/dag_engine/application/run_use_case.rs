@@ -1011,14 +1011,16 @@ impl DagRunUseCase {
                                             NodeEvent::LlmToken { token } => yield DagExecutionEvent::LlmToken { node_id: node_id.clone(), token },
                                             NodeEvent::ThinkingToken { node_id: thinking_node_id, node_type: thinking_node_type, token } => yield DagExecutionEvent::ThinkingToken { node_id: thinking_node_id, node_type: thinking_node_type, token },
                                             NodeEvent::LlmToolCall { tool_id, tool_name, args_chunk } => yield DagExecutionEvent::LlmToolCall { node_id: node_id.clone(), tool_id, tool_name, args_chunk },
-                                            NodeEvent::LlmUsage { prompt_tokens, completion_tokens, thinking_tokens, cache_read_tokens, cache_write_tokens } => {
-                                                let entry = usage_accumulator.entry(node_id.clone()).or_insert((0, 0, 0, 0, 0));
+                                            NodeEvent::LlmUsage { prompt_tokens, completion_tokens, thinking_tokens, cache_read_tokens, cache_write_tokens, side_call } => {
+                                                let usage_id = side_call.as_ref().map_or_else(|| node_id.clone(), |s| s.node_id(&node_id));
+                                                record_side_call_meta(&mut node_meta, &usage_id, &node_id, side_call.as_ref());
+                                                let entry = usage_accumulator.entry(usage_id.clone()).or_insert((0, 0, 0, 0, 0));
                                                 entry.0 += prompt_tokens;
                                                 entry.1 += completion_tokens;
                                                 entry.2 += thinking_tokens.unwrap_or(0);
                                                 entry.3 += cache_read_tokens.unwrap_or(0);
                                                 entry.4 += cache_write_tokens.unwrap_or(0);
-                                                yield DagExecutionEvent::LlmUsage { node_id: node_id.clone(), prompt_tokens, completion_tokens, thinking_tokens, cache_read_tokens, cache_write_tokens };
+                                                yield DagExecutionEvent::LlmUsage { node_id: usage_id, prompt_tokens, completion_tokens, thinking_tokens, cache_read_tokens, cache_write_tokens, side_call };
                                             }
                                             NodeEvent::LlmToolCallStart { tool_id, tool_name, tool_args, child_scope } => {
                                                 last_tool = Some(tool_name.clone());
@@ -1059,7 +1061,11 @@ impl DagRunUseCase {
                                                                 .and_then(|v| v.as_str()).map(|s| s.to_string());
                                                             node_meta.insert(cid.clone(), NodeMeta { model, provider, node_type: ctype.clone(), provider_key_id });
                                                         }
-                                                        DagExecutionEvent::LlmUsage { node_id: cid, prompt_tokens, completion_tokens, thinking_tokens, cache_read_tokens, cache_write_tokens } => {
+                                                        DagExecutionEvent::LlmUsage { node_id: cid, prompt_tokens, completion_tokens, thinking_tokens, cache_read_tokens, cache_write_tokens, side_call } => {
+                                                            if let Some(s) = side_call {
+                                                                let owner = cid.strip_suffix(&format!("::{}", s.purpose)).unwrap_or(cid);
+                                                                record_side_call_meta(&mut node_meta, cid, owner, Some(s));
+                                                            }
                                                             let entry = usage_accumulator.entry(cid.clone()).or_insert((0, 0, 0, 0, 0));
                                                             entry.0 += prompt_tokens;
                                                             entry.1 += completion_tokens;
@@ -1731,6 +1737,31 @@ pub(crate) struct NodeMeta {
     /// consumption to the key that paid for it — never inferred or validated
     /// by the engine.
     pub provider_key_id: Option<String>,
+}
+
+/// Records the model of side call `side_call` (none: the node's own usage)
+/// for its usage entry `usage_id`, made by node `owner`. Its key is the
+/// owner's when the call is made with the owner's key.
+fn record_side_call_meta(
+    node_meta: &mut HashMap<String, NodeMeta>,
+    usage_id: &str,
+    owner: &str,
+    side_call: Option<&crate::dag_engine::domain::observer::SideCall>,
+) {
+    let Some(side) = side_call else { return };
+    let provider_key_id = node_meta
+        .get(owner)
+        .filter(|_| side.node_key)
+        .and_then(|m| m.provider_key_id.clone());
+    node_meta.insert(
+        usage_id.to_string(),
+        NodeMeta {
+            model: Some(side.model.clone()),
+            provider: Some(side.provider.clone()),
+            node_type: side.purpose.clone(),
+            provider_key_id,
+        },
+    );
 }
 
 /// Build one `usage-summary` entry for a node. Pure and independently

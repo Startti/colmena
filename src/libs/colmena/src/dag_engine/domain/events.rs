@@ -1,4 +1,4 @@
-use crate::dag_engine::domain::observer::NodeEvent;
+use crate::dag_engine::domain::observer::{NodeEvent, SideCall};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -41,6 +41,10 @@ pub enum DagExecutionEvent {
         cache_read_tokens: Option<u32>,
         #[serde(skip_serializing_if = "Option::is_none")]
         cache_write_tokens: Option<u32>,
+        /// A side call's model and purpose; `node_id` is then its own entry's
+        /// (`SideCall::node_id`), so a parent run bills it the same way.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        side_call: Option<SideCall>,
     },
     #[serde(rename = "llm_tool_call_start")]
     LlmToolCallStart {
@@ -242,6 +246,12 @@ pub struct NodeEndError {
 }
 
 impl DagExecutionEvent {
+    /// Whether this is the usage of a side call made by node `node_id`
+    /// (`SideCall::node_id`).
+    pub fn is_side_usage_of(&self, node_id: &str) -> bool {
+        matches!(self, Self::LlmUsage { node_id: id, side_call: Some(s), .. } if *id == s.node_id(node_id))
+    }
+
     /// Lift a node-emitted [`NodeEvent`] into the stream event it corresponds to,
     /// stamping it with `node_id`.
     ///
@@ -278,13 +288,15 @@ impl DagExecutionEvent {
                 thinking_tokens,
                 cache_read_tokens,
                 cache_write_tokens,
+                side_call,
             } => Self::LlmUsage {
-                node_id: nid(),
+                node_id: side_call.as_ref().map_or_else(nid, |s| s.node_id(node_id)),
                 prompt_tokens,
                 completion_tokens,
                 thinking_tokens,
                 cache_read_tokens,
                 cache_write_tokens,
+                side_call,
             },
             NodeEvent::LlmToolCallStart {
                 tool_id,
@@ -476,6 +488,28 @@ impl DagExecutionEvent {
 mod tests {
     use super::*;
 
+    /// A side call's usage, re-parented under a node, goes to its own entry.
+    #[test]
+    fn a_side_call_usage_keeps_its_own_entry() {
+        let side = SideCall {
+            purpose: "history_compaction".into(),
+            model: "gpt-4o-mini".into(),
+            provider: "openai".into(),
+            node_key: true,
+        };
+        let usage = crate::llm::domain::LlmUsage::new(5, 1);
+        let event = NodeEvent::side_llm_usage(&usage, side.clone());
+        match DagExecutionEvent::from_node_event(event, "agent") {
+            Some(DagExecutionEvent::LlmUsage {
+                node_id, side_call, ..
+            }) => assert_eq!(
+                (node_id.as_str(), side_call),
+                ("agent::history_compaction", Some(side))
+            ),
+            other => panic!("{other:?}"),
+        }
+    }
+
     #[test]
     fn tool_described_serializes_with_event_tag() {
         let ev = DagExecutionEvent::ToolDescribed {
@@ -567,7 +601,8 @@ mod tests {
             completion_tokens: 1,
             thinking_tokens: None,
             cache_read_tokens: None,
-            cache_write_tokens: None
+            cache_write_tokens: None,
+            side_call: None
         }
         .advances_heartbeat_clock());
         assert!(!DagExecutionEvent::TurnStart { turn: 1 }.advances_heartbeat_clock());

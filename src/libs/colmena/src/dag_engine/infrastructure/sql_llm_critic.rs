@@ -9,7 +9,7 @@
 use crate::dag_engine::domain::observer::ExecutionObserver;
 use crate::dag_engine::domain::sql_errors::SqlNodeError;
 use crate::dag_engine::domain::sql_ports::{CriticResult, SqlCriticPort};
-use crate::dag_engine::infrastructure::nodes::util::billed_llm::billed;
+use crate::dag_engine::infrastructure::nodes::util::billed_llm::{billed, SidePurpose};
 use crate::llm::domain::{LlmConfig, LlmMessage, LlmProvider, LlmRequest, ProviderKind};
 use crate::llm::infrastructure::LlmProviderFactory;
 use std::str::FromStr;
@@ -93,6 +93,7 @@ impl SqlCriticPort for LlmCriticAdapter {
         let llm_repo = billed(
             LlmProviderFactory::create(provider_kind),
             self.observer.clone(),
+            SidePurpose::SqlGuardrail,
         );
         let response = llm_repo
             .call(request)
@@ -141,23 +142,29 @@ impl SqlCriticPort for LlmCriticAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dag_engine::domain::observer::NodeEvent;
+    use crate::dag_engine::domain::observer::{NodeEvent, SideCall};
     use crate::llm::domain::{LlmRequestId, LlmResponse, LlmUsage, MockLlmRepository};
     use crate::llm::infrastructure::OverrideGuard;
     use std::sync::Mutex;
 
     #[derive(Default)]
-    struct Recorder(Mutex<Vec<u32>>);
+    struct Recorder(Mutex<Vec<(u32, Option<SideCall>)>>);
 
     impl ExecutionObserver for Recorder {
         fn on_event(&self, event: NodeEvent) {
-            if let NodeEvent::LlmUsage { prompt_tokens, .. } = event {
-                self.0.lock().unwrap().push(prompt_tokens);
+            if let NodeEvent::LlmUsage {
+                prompt_tokens,
+                side_call,
+                ..
+            } = event
+            {
+                self.0.lock().unwrap().push((prompt_tokens, side_call));
             }
         }
     }
 
-    /// The critic's call is billed to the `sql` node, once.
+    /// The critic's call is billed to the `sql` node, once, with the critic's
+    /// own model and provider (not the node's: it has none) and its own key.
     #[tokio::test]
     async fn the_critic_call_is_billed_to_the_node() {
         let mut model = MockLlmRepository::new();
@@ -169,10 +176,16 @@ mod tests {
         });
         let _guard = OverrideGuard::install(Arc::new(model));
         let recorder = Arc::new(Recorder::default());
-        let critic = LlmCriticAdapter::new("openai".into(), "m".into(), "k".into())
+        let critic = LlmCriticAdapter::new("openai".into(), "gpt-4o-mini".into(), "k".into())
             .with_observer(Some(recorder.clone()));
         let result = critic.analyze("SELECT 1", "").await.unwrap();
         assert!(result.security_ok);
-        assert_eq!(*recorder.0.lock().unwrap(), vec![321]);
+        let side = SideCall {
+            purpose: "sql_guardrail".into(),
+            model: "gpt-4o-mini".into(),
+            provider: "openai".into(),
+            node_key: false,
+        };
+        assert_eq!(*recorder.0.lock().unwrap(), vec![(321, Some(side))]);
     }
 }

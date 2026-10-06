@@ -88,6 +88,7 @@ pub async fn extract_with_schema<'a>(
                 thinking_tokens: usage.thinking_tokens,
                 cache_read_tokens: usage.cache_read_tokens,
                 cache_write_tokens: usage.cache_write_tokens,
+                side_call: None,
             });
         }
     }
