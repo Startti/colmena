@@ -230,6 +230,10 @@ pub(crate) mod fake {
         pub release_hang: tokio::sync::Notify,
         /// The second open of a source finds it deleted.
         pub remove_source_on_second_open: Mutex<bool>,
+        /// Every bounded step through the storage passes through this clock.
+        pub slow: Mutex<Option<Arc<crate::tabular_prepare::registry_faults::Slow>>>,
+        /// The second open of a source costs this much virtual time.
+        pub second_open_cost: Mutex<Option<std::time::Duration>>,
         /// `delete` fails with text that must never be logged.
         pub fail_delete: Mutex<bool>,
         /// `delete` never returns; says so first.
@@ -295,6 +299,13 @@ pub(crate) mod fake {
                     mime_type: String::new(),
                     filename: String::new(),
                 });
+            }
+            if let (2, Some(cost), Some(s)) = (
+                n,
+                *self.second_open_cost.lock().unwrap(),
+                self.slow.lock().unwrap().clone(),
+            ) {
+                s.leave_budget(cost);
             }
             if n == 2 && *self.pause_second_open.lock().unwrap() {
                 self.second_open_reached.notify_one();
@@ -395,6 +406,9 @@ pub(crate) mod fake {
             }
         }
         async fn delete(&self, key: &str) -> Result<(), StorageError> {
+            if let Some(s) = self.slow.lock().unwrap().clone() {
+                s.pass("delete");
+            }
             if *self.hang_delete.lock().unwrap() {
                 self.delete_reached.notify_one();
                 futures::future::pending::<()>().await;
