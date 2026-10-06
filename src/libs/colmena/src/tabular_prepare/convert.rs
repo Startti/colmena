@@ -106,6 +106,12 @@ pub enum ConvertError {
     Conflict(TypeConflict),
     #[error("could not convert a column: {0}")]
     Cast(String),
+    /// The source object does not exist (it was deleted).
+    #[error("the source file does not exist")]
+    SourceMissing,
+    /// The source could not be reached or read from storage.
+    #[error("the source file could not be read from storage")]
+    SourceUnavailable,
     /// The blocking half of the conversion panicked. Never silent and never a
     /// short table: the run fails with this.
     #[error("the file reader panicked")]

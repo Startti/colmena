@@ -1,5 +1,5 @@
-//! The storage side of preparing a CSV: where the converter's parts and
-//! manifest go, on the host's storage port.
+//! The storage side of preparing a CSV: where the converter reads the source
+//! from and where its parts and manifest go, on the host's storage port.
 //!
 //! Layout. Everything a source produces lives under the root the adapter
 //! reports with `derived_root` and nowhere else: `<root>/manifest.json` and
@@ -12,14 +12,21 @@
 //! Errors never echo a storage key, a URL or a cell: the text of a storage
 //! error is dropped and replaced by a fixed sentence.
 
-use crate::storage::domain::{OutputStorageRepository, StorePlacement, StoreStreamRequest};
+use crate::storage::domain::{
+    OutputStorageRepository, StorageError, StorePlacement, StoreStreamRequest,
+};
+use crate::tabular_prepare::convert::{stream_reader, ConvertError, CsvSource};
 use crate::tabular_prepare::manifest::{parse_part_path, MANIFEST_PATH};
 use crate::tabular_prepare::part_sink::{PartSink, SinkError};
 use async_trait::async_trait;
 use bytes::Bytes;
+use futures::StreamExt;
 use std::collections::BTreeMap;
+use std::io::Read;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use thiserror::Error;
+use tokio_util::sync::CancellationToken;
 
 /// Why a preparation could not even start.
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -115,6 +122,50 @@ impl PartSink for StoragePartSink {
             .unwrap_or_else(|p| p.into_inner())
             .insert(path.to_string(), len);
         Ok(())
+    }
+}
+
+/// The source CSV, read from storage as a blocking stream. The bytes read so
+/// far are counted for progress.
+pub struct StorageCsvSource {
+    storage: Arc<dyn OutputStorageRepository>,
+    source_key: String,
+    read: Arc<AtomicU64>,
+}
+
+impl StorageCsvSource {
+    pub fn new(storage: Arc<dyn OutputStorageRepository>, source_key: &str) -> Self {
+        Self {
+            storage,
+            source_key: source_key.to_string(),
+            read: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    /// Bytes of the source read so far, over every run of the conversion.
+    pub fn bytes_read(&self) -> Arc<AtomicU64> {
+        self.read.clone()
+    }
+}
+
+#[async_trait]
+impl CsvSource for StorageCsvSource {
+    async fn open(&self, cancel: &CancellationToken) -> Result<Box<dyn Read + Send>, ConvertError> {
+        let stored = self
+            .storage
+            .read_stream(&self.source_key)
+            .await
+            .map_err(|e| match e {
+                StorageError::InvalidInput(_) => ConvertError::SourceMissing,
+                _ => ConvertError::SourceUnavailable,
+            })?;
+        let read = self.read.clone();
+        let counted = stored.stream.inspect(move |chunk| {
+            if let Ok(bytes) = chunk {
+                read.fetch_add(bytes.len() as u64, Ordering::Relaxed);
+            }
+        });
+        Ok(Box::new(stream_reader(Box::pin(counted), cancel.clone())))
     }
 }
 
@@ -437,5 +488,70 @@ mod tests {
             !text.contains("secret") && !text.contains("chat-attachments"),
             "{text}"
         );
+    }
+
+    async fn read_all(source: &StorageCsvSource) -> Result<Vec<u8>, ConvertError> {
+        let cancel = CancellationToken::new();
+        let mut reader = source.open(&cancel).await?;
+        Ok(tokio::task::spawn_blocking(move || {
+            let mut out = Vec::new();
+            reader.read_to_end(&mut out).unwrap();
+            out
+        })
+        .await
+        .unwrap())
+    }
+
+    #[tokio::test]
+    async fn the_source_is_read_whole_across_chunks_and_counted() {
+        let body: Vec<u8> = (0..5000u32)
+            .flat_map(|i| format!("{i},x\n").into_bytes())
+            .collect();
+        let storage = PlacedStorage::with_source(SOURCE, body.clone());
+        let source = StorageCsvSource::new(storage, SOURCE);
+        let counter = source.bytes_read();
+        assert_eq!(read_all(&source).await.unwrap(), body);
+        assert_eq!(counter.load(Ordering::Relaxed), body.len() as u64);
+    }
+
+    #[tokio::test]
+    async fn a_missing_source_is_told_apart_from_an_unreachable_storage() {
+        let storage = PlacedStorage::with_source(SOURCE, b"a\n".to_vec());
+        let missing = StorageCsvSource::new(storage, "chat-attachments/u/s/gone.csv");
+        assert!(matches!(
+            read_all(&missing).await,
+            Err(ConvertError::SourceMissing)
+        ));
+        struct Down;
+        #[async_trait]
+        impl OutputStorageRepository for Down {
+            async fn store(
+                &self,
+                _: crate::storage::domain::StoreRequest,
+            ) -> Result<crate::storage::domain::StoredOutput, StorageError> {
+                unreachable!()
+            }
+            async fn read(
+                &self,
+                _: &str,
+            ) -> Result<crate::storage::domain::StoredBytes, StorageError> {
+                unreachable!()
+            }
+            async fn read_stream(
+                &self,
+                _: &str,
+            ) -> Result<crate::storage::domain::StoredStream, StorageError> {
+                Err(StorageError::BackendUnavailable(
+                    "down at https://x/secret".into(),
+                ))
+            }
+            async fn delete(&self, _: &str) -> Result<(), StorageError> {
+                Ok(())
+            }
+        }
+        let down = StorageCsvSource::new(Arc::new(Down), SOURCE);
+        let err = read_all(&down).await.err().unwrap();
+        assert!(matches!(err, ConvertError::SourceUnavailable));
+        assert!(!err.to_string().contains("secret"));
     }
 }

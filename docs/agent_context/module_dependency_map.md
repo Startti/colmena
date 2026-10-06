@@ -6,7 +6,7 @@
 **How to use (for the exploration/spec phase):** before opening files to assess a change, look up the target file below. **Used by** is its blast radius — the files that break if you change its public surface. **Depends on** is what it needs. Start by reading only those, not the whole repo.
 
 - Files indexed: **434**
-- Modules with at least one importer: **210**
+- Modules with at least one importer: **211**
 
 ## Blast-radius ranking (change these with the most care)
 
@@ -2101,7 +2101,7 @@
 
 #### `src/libs/colmena/src/tabular_prepare/convert.rs`
 - Module: `tabular_prepare::convert`
-- **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
+- **Used by (1)**: `src/libs/colmena/src/tabular_prepare/prepare.rs`
 - Depends on (7): `storage::domain`, `tabular_prepare::csv`, `tabular_prepare::infer`, `tabular_prepare::manifest`, `tabular_prepare::part_sink`, `tabular_prepare::scan`, `tabular_prepare::writer`
 
 #### `src/libs/colmena/src/tabular_prepare/csv.rs`
@@ -2147,7 +2147,7 @@
 #### `src/libs/colmena/src/tabular_prepare/prepare.rs`
 - Module: `tabular_prepare::prepare`
 - **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
-- Depends on (4): `storage::domain`, `storage::infrastructure`, `tabular_prepare::manifest`, `tabular_prepare::part_sink`
+- Depends on (5): `storage::domain`, `storage::infrastructure`, `tabular_prepare::convert`, `tabular_prepare::manifest`, `tabular_prepare::part_sink`
 
 #### `src/libs/colmena/src/tabular_prepare/registry.rs`
 - Module: `tabular_prepare::registry`

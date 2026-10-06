@@ -669,5 +669,8 @@ the root, so an object stored elsewhere could never be removed. An adapter that
 reports no root (or an empty one) cannot be used: preparing refuses to start and
 writes nothing. The default adapter of this crate ignores the placement, so it is
 refused too; the first adapter that honours it is the host's.
+`StorageCsvSource` reads the source with `read_stream` as a blocking stream (a
+missing source is `ConvertError::SourceMissing`, anything else
+`SourceUnavailable`) and counts the bytes read, which is what progress reports.
 Errors never echo a storage key, a URL or a cell: the adapter's text is dropped and
 replaced by a fixed sentence.
