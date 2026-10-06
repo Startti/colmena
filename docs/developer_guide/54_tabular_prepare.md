@@ -771,3 +771,15 @@ adds keys to the row's `blob_keys` (a union), only while `owner` holds the lease
 `running` row; `Cancelled` means the caller must not write. It does not renew the lease and
 it is not progress: it is the write that makes it true that every object a preparation may
 have written is listed in the row, whatever happens to the process afterwards.
+
+**What holds about the objects.** Before an object is put, its key is listed in the row
+with `track_blobs` (owner-guarded): the part keys are deterministic, so one write lists the
+next sixteen parts and the manifest, and a table of up to sixteen parts costs one tracking
+write on top of the claim and the terminal write. So every object a preparation may have
+written is in the row whatever happens next, a crash, a dropped future or a registry error
+at the terminal write; a key listed and never written is harmless (deleting is idempotent,
+and a ready row of three parts also lists the thirteen unused part keys, which cleanup
+deletes as no-ops). If the failure cannot be recorded the objects are deleted anyway; if
+`complete` errors, whether it was applied is unknown, so nothing is deleted and the objects
+stay listed. If the row is gone and the registry errors when the job asks (`get`), what it
+wrote is left behind with no row to list it: the one case the row cannot cover.

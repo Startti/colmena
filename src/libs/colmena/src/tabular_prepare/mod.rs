@@ -41,6 +41,8 @@ pub mod writer;
 
 #[cfg(test)]
 mod registry_contract;
+#[cfg(test)]
+mod registry_faults;
 
 /// How often a waiting caller re-reads the registry.
 const POLL_INTERVAL: Duration = Duration::from_secs(1);

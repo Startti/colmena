@@ -5,21 +5,27 @@
 //! Order matters. The manifest is the only thing that names the parts, so it is
 //! put after every part is stored and the row is completed only after the
 //! manifest is stored: a reader that finds a ready row finds every part it
-//! lists. The key of every object is recorded before its put (the keys of the
-//! parts by [`ConvertControl`], the manifest's here), so the registry always
-//! tracks the union of everything any attempt may have written, including what
-//! a failed put left. A failure is recorded with `fail_with_blobs` and the
-//! tracked objects are then deleted; nothing but the failure reason is
-//! user-visible, and it never carries a cell or a storage key.
+//! lists.
+//!
+//! What holds about the objects. Before an object is put, its key is listed in the
+//! registry row by an owner-guarded write (`track_blobs`): the part keys are
+//! deterministic, so one write lists the next sixteen parts and the manifest, not
+//! one write per part. So every object a preparation may have written is in the
+//! row whatever happens next (a crash, a dropped future, a registry error at the
+//! terminal write); a key listed and never written is harmless, deleting is
+//! idempotent. A failure is recorded with `fail_with_blobs` and the objects are
+//! then deleted. If the registry cannot say whether `complete` was applied nothing
+//! is deleted (the row may be ready), the objects stay listed. Nothing but the
+//! failure reason is user-visible, and it never carries a cell or a storage key.
 
-use crate::storage::domain::OutputStorageRepository;
+use crate::storage::domain::{OutputStorageRepository, StorageError};
 use crate::tabular_prepare::convert::{
     convert_csv_table_with, ConvertControl, ConvertError, ConvertedTable, TableError,
 };
 use crate::tabular_prepare::csv::{CsvError, Encoding};
 use crate::tabular_prepare::manifest::{
-    unique_table_names, ConversionReport, Manifest, ManifestError, TableInfo, MANIFEST_PATH,
-    MAX_REPORTED_DEMOTED,
+    parse_part_path, part_path, unique_table_names, ConversionReport, Manifest, ManifestError,
+    TableInfo, MANIFEST_PATH, MAX_PARTS, MAX_REPORTED_DEMOTED,
 };
 use crate::tabular_prepare::part_sink::{PartSink, SinkError};
 use crate::tabular_prepare::ports::{
@@ -37,7 +43,7 @@ use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -310,19 +316,69 @@ impl PrepareRunner for CsvPrepareRunner {
 struct OwnedSink {
     inner: Arc<StoragePartSink>,
     registry: Arc<dyn PreparationRegistry>,
+    clock: Arc<Clock>,
     source_key: String,
     owner: String,
     lost: AtomicBool,
+    /// Parts `0..tracked_parts` of each table are listed in the row already.
+    tracked_parts: AtomicUsize,
+    manifest_tracked: AtomicBool,
+}
+
+/// How many part keys are listed in the row ahead of the part being written. The
+/// part keys are deterministic, so they are known long before the parts exist: one
+/// registry write lists the next sixteen (up to a gigabyte of output) and the
+/// manifest, instead of one write per part. A key listed and never written is
+/// harmless, deleting is idempotent; an object written and never listed is what
+/// this prevents.
+const TRACK_AHEAD: usize = 16;
+
+impl OwnedSink {
+    /// Lists in the row, owner-guarded, the keys that writing `path` needs listed,
+    /// before it is written. `Ok(false)` means the row is no longer ours.
+    async fn track_for(&self, path: &str) -> Result<bool, RegistryError> {
+        let mut keys: Vec<String> = Vec::new();
+        let mut upto = None;
+        if let Some((table, part)) = parse_part_path(path) {
+            if part >= self.tracked_parts.load(Ordering::SeqCst) {
+                let end = (part + TRACK_AHEAD).min(MAX_PARTS);
+                keys.extend((part..end).filter_map(|p| part_path(table, p).ok()));
+                upto = Some(end);
+            }
+        }
+        let with_manifest = !self.manifest_tracked.load(Ordering::SeqCst);
+        if with_manifest {
+            keys.push(MANIFEST_PATH.to_string());
+        }
+        if keys.is_empty() {
+            return self.registry_owns().await;
+        }
+        let full: Vec<String> = keys.iter().map(|k| self.inner.key_of(k)).collect();
+        let outcome = self
+            .registry
+            .track_blobs(&self.source_key, &self.owner, &full, (self.clock)())
+            .await?;
+        if outcome == TerminalOutcome::Cancelled {
+            return Ok(false);
+        }
+        if let Some(end) = upto {
+            self.tracked_parts.store(end, Ordering::SeqCst);
+        }
+        self.manifest_tracked.store(true, Ordering::SeqCst);
+        Ok(true)
+    }
+
+    async fn registry_owns(&self) -> Result<bool, RegistryError> {
+        self.registry
+            .still_owned(&self.source_key, &self.owner)
+            .await
+    }
 }
 
 #[async_trait]
 impl PartSink for OwnedSink {
     async fn put(&self, path: &str, data: Bytes) -> Result<(), SinkError> {
-        match self
-            .registry
-            .still_owned(&self.source_key, &self.owner)
-            .await
-        {
+        match self.track_for(path).await {
             Ok(true) => self.inner.put(path, data).await,
             Ok(false) => {
                 self.lost.store(true, Ordering::SeqCst);
@@ -387,9 +443,12 @@ async fn run_prepare(
     let sink = Arc::new(OwnedSink {
         inner: stored.clone(),
         registry: env.registry.clone(),
+        clock: env.clock.clone(),
         source_key: req.source_key.clone(),
         owner: owner.clone(),
         lost: AtomicBool::new(false),
+        tracked_parts: AtomicUsize::new(0),
+        manifest_tracked: AtomicBool::new(false),
     });
     let control = ConvertControl::new();
     let source = StorageCsvSource::new(env.storage.clone(), &req.source_key);
@@ -537,13 +596,7 @@ async fn settle_lost(
     keys: &[String],
 ) -> Result<PrepareOutcome, RegistryError> {
     if env.registry.get(&req.source_key).await?.is_none() {
-        if let Err(e) = env.storage.delete_derived(&req.source_key, keys).await {
-            tracing::warn!(
-                target: "colmena::tabular_prepare",
-                error = %e,
-                "could not delete the objects of a cancelled preparation"
-            );
-        }
+        delete_best_effort(env, req, keys).await;
     }
     Ok(PrepareOutcome::Cancelled)
 }
@@ -573,6 +626,28 @@ async fn source_gone(
     })
 }
 
+/// Deletes what a preparation wrote. The keys are listed in the row, so what
+/// this cannot delete the cleanup pass will; the failure is logged as a fixed
+/// sentence and a kind, never with the adapter's text or a key.
+async fn delete_best_effort(env: &PrepareEnv, req: &PrepareRequest, keys: &[String]) {
+    if let Err(e) = env.storage.delete_derived(&req.source_key, keys).await {
+        tracing::warn!(
+            target: "colmena::tabular_prepare",
+            kind = storage_kind(&e),
+            "could not delete prepared objects; the cleanup pass will"
+        );
+    }
+}
+
+fn storage_kind(e: &StorageError) -> &'static str {
+    match e {
+        StorageError::BackendUnavailable(_) => "backend_unavailable",
+        StorageError::InvalidInput(_) => "invalid_input",
+        StorageError::UploadFailed(_) => "upload_failed",
+        StorageError::CallbackFailed { .. } => "callback_failed",
+    }
+}
+
 /// Records the failure with every key that may exist, then deletes them.
 async fn fail(
     env: &PrepareEnv,
@@ -582,22 +657,26 @@ async fn fail(
     detail: String,
     keys: Vec<String>,
 ) -> Result<PrepareOutcome, RegistryError> {
-    let outcome = env
+    let outcome = match env
         .registry
         .fail_with_blobs(&req.source_key, owner, code, &detail, &keys, (env.clock)())
-        .await?;
+        .await
+    {
+        Ok(outcome) => outcome,
+        Err(e) => {
+            // Whether the failure was recorded is unknown, and deleting the objects
+            // of a failed preparation is right either way: they are listed in the
+            // row (they were tracked before they were written).
+            delete_best_effort(env, req, &keys).await;
+            return Err(e);
+        }
+    };
     if outcome == TerminalOutcome::Cancelled {
         return Ok(PrepareOutcome::Cancelled);
     }
     // Best effort: the keys are tracked, so the cleanup pass removes what this
     // could not.
-    if let Err(e) = env.storage.delete_derived(&req.source_key, &keys).await {
-        tracing::warn!(
-            target: "colmena::tabular_prepare",
-            error = %e,
-            "could not delete the objects of a failed preparation; the cleanup pass will"
-        );
-    }
+    delete_best_effort(env, req, &keys).await;
     Ok(PrepareOutcome::Failed(PrepareFailure { code, detail }))
 }
 
@@ -908,9 +987,12 @@ pub(crate) mod cases {
         assert_eq!(row.status, PrepareStatus::Ready);
         assert_eq!(row.format_version, FORMAT_VERSION);
         assert_eq!(row.manifest_key.as_deref(), Some(manifest_key.as_str()));
-        let mut tracked = row.blob_keys.clone();
-        tracked.sort();
-        assert_eq!(tracked, want);
+        // Every object is listed; so are the part keys listed ahead of the parts
+        // (sixteen) that were never needed, which cleanup deletes as no-ops.
+        for k in &want {
+            assert!(row.blob_keys.contains(k), "{k} not tracked");
+        }
+        assert_eq!(row.blob_keys.len(), TRACK_AHEAD + 1);
         assert_eq!(table.manifest.tables[0].rows, 5);
         assert_eq!(table.manifest.tables[0].parts, 3);
         assert_eq!(
@@ -1060,8 +1142,8 @@ pub(crate) mod cases {
         }
         // Everything tracked was deleted; the source is untouched.
         assert_eq!(storage.keys(), vec![source.to_string()]);
-        for k in &row.blob_keys {
-            assert!(storage.deleted.lock().unwrap().contains(k));
+        for k in part_keys(source, 2) {
+            assert!(storage.deleted.lock().unwrap().contains(&k));
         }
         assert!(!storage
             .deleted
@@ -1085,7 +1167,7 @@ pub(crate) mod cases {
         assert_eq!(row.manifest_key, None);
         let manifest_key = format!("{}/manifest.json", root_of(source));
         assert!(row.blob_keys.contains(&manifest_key));
-        assert_eq!(row.blob_keys.len(), 4);
+        assert_eq!(row.blob_keys.len(), TRACK_AHEAD + 1);
         assert_eq!(storage.keys(), vec![source.to_string()]);
     }
 
@@ -1487,6 +1569,123 @@ pub(crate) mod cases {
         }
     }
 
+    pub(crate) async fn dropping_the_prepare_future_mid_run_leaves_every_stored_object_tracked_in_the_row(
+        registry: Arc<dyn PreparationRegistry>,
+    ) {
+        let source = fresh_source();
+        let source = source.as_str();
+        let storage = PlacedStorage::with_source(source, five_rows());
+        // The second put never completes; the whole preparation is then dropped.
+        *storage.hang_stores_from.lock().unwrap() = Some(1);
+        let env = env(registry.clone(), storage.clone());
+        let req = request(source, 40);
+        let run = tokio::spawn(async move { prepare_csv(&env, &req).await });
+        storage.hung.notified().await;
+        run.abort();
+        let _ = run.await;
+        let row = registry.get(source).await.unwrap().unwrap();
+        assert_eq!(row.status, PrepareStatus::Running);
+        // Every object in storage is listed, and so are the one in flight and
+        // the manifest that was never reached.
+        let manifest = format!("{}/manifest.json", root_of(source));
+        for k in objects_but_source(&storage, source) {
+            assert!(row.blob_keys.contains(&k), "{k} stored but not tracked");
+        }
+        for k in part_keys(source, 2).into_iter().chain([manifest]) {
+            assert!(row.blob_keys.contains(&k), "{k} not tracked ahead");
+        }
+    }
+
+    pub(crate) async fn a_part_beyond_the_first_batch_is_tracked_before_its_put_a_batch_ahead(
+        registry: Arc<dyn PreparationRegistry>,
+    ) {
+        let source = fresh_source();
+        let source = source.as_str();
+        // Forty-two rows of two per part: twenty-one parts.
+        let mut body = b"id\n".to_vec();
+        for i in 0..42 {
+            body.extend_from_slice(format!("{i}\n").as_bytes());
+        }
+        let storage = PlacedStorage::with_source(source, body);
+        // The seventeenth put (part 16) is the first one past the first batch.
+        *storage.hang_stores_from.lock().unwrap() = Some(TRACK_AHEAD);
+        let env = env(registry.clone(), storage.clone());
+        let req = request(source, 100);
+        let run = tokio::spawn(async move { prepare_csv(&env, &req).await });
+        storage.hung.notified().await;
+        run.abort();
+        let _ = run.await;
+        let row = registry.get(source).await.unwrap().unwrap();
+        // Part 16 is not stored yet, and it is listed with the whole second batch.
+        assert_eq!(objects_but_source(&storage, source).len(), TRACK_AHEAD);
+        for k in part_keys(source, 2 * TRACK_AHEAD) {
+            assert!(row.blob_keys.contains(&k), "{k} not tracked ahead");
+        }
+        assert_eq!(row.blob_keys.len(), 2 * TRACK_AHEAD + 1);
+    }
+
+    pub(crate) async fn a_row_that_vanishes_before_the_first_tracking_write_stops_the_job_before_any_object(
+        registry: Arc<dyn PreparationRegistry>,
+    ) {
+        use crate::tabular_prepare::registry_faults::FaultyRegistry;
+        use std::sync::atomic::Ordering::SeqCst;
+        let source = fresh_source();
+        let source = source.as_str();
+        let storage = PlacedStorage::with_source(source, five_rows());
+        let faulty = FaultyRegistry::new(registry.clone());
+        faulty.faults.delete_before_track.store(true, SeqCst);
+        let env = env(faulty, storage.clone());
+        let out = prepare_csv(&env, &request(source, 40)).await.unwrap();
+        assert!(matches!(out, PrepareOutcome::Cancelled), "{out:?}");
+        assert_eq!(*storage.stores.lock().unwrap(), 0);
+        assert!(registry.get(source).await.unwrap().is_none());
+    }
+
+    pub(crate) async fn a_registry_error_at_completion_leaves_the_stored_objects_tracked_and_not_deleted(
+        registry: Arc<dyn PreparationRegistry>,
+    ) {
+        use crate::tabular_prepare::registry_faults::FaultyRegistry;
+        use std::sync::atomic::Ordering::SeqCst;
+        let source = fresh_source();
+        let source = source.as_str();
+        let storage = PlacedStorage::with_source(source, five_rows());
+        let faulty = FaultyRegistry::new(registry.clone());
+        faulty.faults.fail_complete.store(true, SeqCst);
+        let env = env(faulty, storage.clone());
+        let err = prepare_csv(&env, &request(source, 40)).await.unwrap_err();
+        let _ = err;
+        // Whether `complete` applied is unknown, so nothing is deleted; every
+        // object is listed in the row instead.
+        let row = registry.get(source).await.unwrap().unwrap();
+        assert!(storage.deleted.lock().unwrap().is_empty());
+        let stored = objects_but_source(&storage, source);
+        assert_eq!(stored.len(), 4);
+        for k in stored {
+            assert!(row.blob_keys.contains(&k), "{k} stored but not tracked");
+        }
+    }
+
+    pub(crate) async fn a_registry_error_recording_a_failure_still_deletes_the_objects_that_are_tracked(
+        registry: Arc<dyn PreparationRegistry>,
+    ) {
+        use crate::tabular_prepare::registry_faults::FaultyRegistry;
+        use std::sync::atomic::Ordering::SeqCst;
+        let source = fresh_source();
+        let source = source.as_str();
+        let storage = PlacedStorage::with_source(source, five_rows());
+        // The manifest cannot be stored, and the failure cannot be recorded.
+        *storage.fail_stores_from.lock().unwrap() = Some(3);
+        let faulty = FaultyRegistry::new(registry.clone());
+        faulty.faults.fail_fail.store(true, SeqCst);
+        let env = env(faulty, storage.clone());
+        assert!(prepare_csv(&env, &request(source, 40)).await.is_err());
+        // The failure is safe to act on whether or not it was recorded.
+        assert_eq!(storage.keys(), vec![source.to_string()]);
+        let row = registry.get(source).await.unwrap().unwrap();
+        assert_eq!(row.status, PrepareStatus::Running);
+        assert_eq!(row.blob_keys.len(), TRACK_AHEAD + 1);
+    }
+
     pub(crate) async fn a_restart_with_fewer_parts_leaves_stale_keys_the_manifest_never_names(
         registry: Arc<dyn PreparationRegistry>,
     ) {
@@ -1519,7 +1718,12 @@ pub(crate) mod cases {
             assert!(row.blob_keys.contains(k));
             assert!(storage.objects.lock().unwrap().contains_key(k));
         }
-        assert_eq!(row.blob_keys.len(), 5);
+        for k in part_keys(source, 4) {
+            assert!(row.blob_keys.contains(&k));
+        }
+        assert!(row
+            .blob_keys
+            .contains(&format!("{}/manifest.json", root_of(source))));
     }
 }
 
@@ -1639,5 +1843,25 @@ mod registry_tests {
     sqlite_case!(
         tabular_prepare_with_the_switch_off_or_another_mime_the_runner_touches_nothing,
         with_the_switch_off_or_another_mime_the_runner_touches_nothing
+    );
+    sqlite_case!(
+        tabular_prepare_dropping_the_prepare_future_mid_run_leaves_every_stored_object_tracked_in_the_row,
+        dropping_the_prepare_future_mid_run_leaves_every_stored_object_tracked_in_the_row
+    );
+    sqlite_case!(
+        tabular_prepare_a_registry_error_at_completion_leaves_the_stored_objects_tracked_and_not_deleted,
+        a_registry_error_at_completion_leaves_the_stored_objects_tracked_and_not_deleted
+    );
+    sqlite_case!(
+        tabular_prepare_a_registry_error_recording_a_failure_still_deletes_the_objects_that_are_tracked,
+        a_registry_error_recording_a_failure_still_deletes_the_objects_that_are_tracked
+    );
+    sqlite_case!(
+        tabular_prepare_a_part_beyond_the_first_batch_is_tracked_before_its_put_a_batch_ahead,
+        a_part_beyond_the_first_batch_is_tracked_before_its_put_a_batch_ahead
+    );
+    sqlite_case!(
+        tabular_prepare_a_row_that_vanishes_before_the_first_tracking_write_stops_the_job_before_any_object,
+        a_row_that_vanishes_before_the_first_tracking_write_stops_the_job_before_any_object
     );
 }
