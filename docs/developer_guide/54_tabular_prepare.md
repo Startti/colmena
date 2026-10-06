@@ -655,3 +655,19 @@ the pipeline's chunks (the tricky part is moved across the 16 KiB grid by a fill
 row), with random read sizes over a 1.5 MiB file, the fragment moved row by row
 across the sample, batch and part boundaries (`ReadLimits`) and compared with rows
 written by hand, and a value-by-value read-back of every type across four parts.
+
+### Preparing a source (`prepare.rs`)
+
+**Layout.** Everything a source produces lives under the root its storage adapter
+reports with `derived_root`, and nowhere else: `<root>/manifest.json` and
+`<root>/t<n>/part-NNNNN.parquet` (the table index has at most four digits, the part
+number five; the ADP signing route accepts exactly this pattern). `StoragePartSink`
+builds each key as `<root>/<relative path>` before the put, hands the object to
+`store_stream` with `StorePlacement::DerivedFrom`, and refuses the answer when the
+adapter returns any other key: the cleanup pass deletes only keys it can contain in
+the root, so an object stored elsewhere could never be removed. An adapter that
+reports no root (or an empty one) cannot be used: preparing refuses to start and
+writes nothing. The default adapter of this crate ignores the placement, so it is
+refused too; the first adapter that honours it is the host's.
+Errors never echo a storage key, a URL or a cell: the adapter's text is dropped and
+replaced by a fixed sentence.
