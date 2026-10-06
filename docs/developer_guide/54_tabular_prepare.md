@@ -757,3 +757,11 @@ environment from `PrepareConfig::progress`): `Running` when it starts, then ever
 `Cancelled` state. Progress never touches the registry: the row is written only on
 claim and on the terminal write. Nothing is reported for a source that was not claimed
 or refused.
+
+**Inline runner.** `CsvPrepareRunner` is the `PrepareRunner` behind `InlineTrigger` for
+local runs and tests: built from a `PrepareEnv` and the `PrepareConfig` (it keeps the
+engine switch). With the switch off it runs nothing at all (no registry read, no storage
+call). A request whose mime type is not `text/csv` (parameters such as a charset are
+ignored, case too) is logged and dropped: the Excel unit adds its own source. The host
+that wires production storage and registry builds the same environment and its own
+trigger; nothing here constructs either.
