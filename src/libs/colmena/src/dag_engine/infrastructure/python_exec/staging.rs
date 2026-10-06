@@ -462,6 +462,11 @@ impl StagedCall {
 impl Drop for StagedCall {
     fn drop(&mut self) {
         if let Err(e) = self.release() {
+            // A volume that is still mounted still holds its memory: its share of
+            // the budget is NOT given back (the process keeps it until it ends).
+            if self.mounted {
+                std::mem::forget(self._share.take());
+            }
             // Not swallowed: what could not be unmounted or removed stays where
             // it is (never deleted through a mount) until the startup sweep.
             tracing::warn!(
@@ -474,16 +479,31 @@ impl Drop for StagedCall {
     }
 }
 
-/// Whether the `out` directory of a leftover call is still a mount: it is on
-/// another device than the call directory. An `out` that cannot be opened is
-/// not (nothing to unmount); a call directory whose device cannot be read is
-/// treated as still mounted, which leaves it alone.
+/// What the sweep knows about the `out` directory of a leftover call.
 #[cfg(target_os = "linux")]
-fn out_is_still_mounted(out_dev: Option<u64>, call_dev: Option<u64>) -> bool {
-    match (out_dev, call_dev) {
-        (None, _) => false,
-        (Some(_), None) => true,
-        (Some(out), Some(call)) => out != call,
+#[derive(Debug, PartialEq, Eq)]
+enum OutState {
+    /// There is no `out` (ENOENT, and only that): nothing to unmount.
+    Gone,
+    /// On the same device as the call directory: no longer a mount.
+    Unmounted,
+    /// On another device: still a mount, which is never walked.
+    Mounted,
+    /// Anything else (EMFILE, EACCES, EIO, a file where the directory should
+    /// be, a device that cannot be read): not known to be unmounted, so the
+    /// call directory is left alone.
+    Unknown,
+}
+
+/// Reads what opening `out` and reading the devices said. Only ENOENT may mean
+/// absent; every other failure, and an unreadable device, is `Unknown`.
+#[cfg(target_os = "linux")]
+fn out_state(opened: io::Result<Option<u64>>, call_dev: Option<u64>) -> OutState {
+    match (opened, call_dev) {
+        (Err(e), _) if e.kind() == io::ErrorKind::NotFound => OutState::Gone,
+        (Err(_), _) | (Ok(None), _) | (Ok(Some(_)), None) => OutState::Unknown,
+        (Ok(Some(out)), Some(call)) if out == call => OutState::Unmounted,
+        (Ok(Some(_)), Some(_)) => OutState::Mounted,
     }
 }
 
@@ -547,10 +567,11 @@ pub fn sweep_staging_root(root: &Path) -> io::Result<SweepReport> {
             let mut st: libc::stat = unsafe { std::mem::zeroed() };
             (unsafe { libc::fstat(fd, &mut st) } == 0).then_some(st.st_dev as u64)
         };
-        let out_dev = open_dir_at(call.as_raw_fd(), OUT_NAME)
-            .ok()
-            .and_then(|f| dev(f.as_raw_fd()));
-        let still_mounted = out_is_still_mounted(out_dev, dev(call.as_raw_fd()));
+        let opened = open_dir_at(call.as_raw_fd(), OUT_NAME).map(|f| dev(f.as_raw_fd()));
+        let still_mounted = match out_state(opened, dev(call.as_raw_fd())) {
+            OutState::Gone | OutState::Unmounted => false,
+            OutState::Mounted | OutState::Unknown => true,
+        };
         if still_mounted {
             tracing::warn!(target: T_PYTHON_EXEC, call = %id, "staged volume could not be unmounted; left in place");
             report.failed += 1;
@@ -660,16 +681,62 @@ mod tests {
         assert_eq!(unescape_mount_point("/a\\040b\\134c"), "/a b\\c");
     }
 
+    /// The size is refused before the root is even opened or anything is made.
     #[cfg(target_os = "linux")]
     #[test]
-    fn a_leftover_out_is_mounted_when_it_is_on_another_device() {
-        assert!(out_is_still_mounted(Some(7), Some(3)));
-        assert!(!out_is_still_mounted(Some(3), Some(3)));
-        assert!(!out_is_still_mounted(None, Some(3)));
-        assert!(
-            out_is_still_mounted(Some(7), None),
-            "unknown: leave it alone"
-        );
+    fn creation_refuses_an_invalid_size_before_touching_the_root() {
+        let missing = Path::new("/nonexistent-staging-root");
+        for bad in [0, OUT_MB_MAX + 1] {
+            let e = StagedCall::create(missing, bad).unwrap_err();
+            assert_eq!(e.kind(), io::ErrorKind::InvalidInput, "{bad}");
+        }
+        let e = StagedCall::create(missing, 1).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::NotFound);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn only_a_missing_out_means_nothing_to_unmount() {
+        let err = |code| Err(io::Error::from_raw_os_error(code));
+        assert_eq!(out_state(Ok(Some(3)), Some(3)), OutState::Unmounted);
+        assert_eq!(out_state(Ok(Some(7)), Some(3)), OutState::Mounted);
+        assert_eq!(out_state(err(libc::ENOENT), Some(3)), OutState::Gone);
+        for code in [
+            libc::EMFILE,
+            libc::EACCES,
+            libc::EIO,
+            libc::ENOTDIR,
+            libc::ELOOP,
+        ] {
+            assert_eq!(out_state(err(code), Some(3)), OutState::Unknown, "{code}");
+        }
+        assert_eq!(out_state(Ok(None), Some(3)), OutState::Unknown);
+        assert_eq!(out_state(Ok(Some(7)), None), OutState::Unknown);
+    }
+
+    /// A volume that failed to unmount keeps its share of the budget: it still
+    /// holds its memory. One that was unmounted gives it back.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_share_is_kept_only_while_the_volume_may_still_be_mounted() {
+        let budget = std::sync::Arc::new(StagingBudget::new(2, 100));
+        let call = |mounted: bool| StagedCall {
+            call: "/nonexistent-staging-call".into(),
+            id: "x".into(),
+            out_mb: 1,
+            mounted,
+            released: false,
+            _share: Some(StagingBudget::reserve(&budget, 1).unwrap()),
+        };
+        // Believed mounted, and the unmount fails (ENOENT, not EBUSY): kept.
+        drop(call(true));
+        assert_eq!(budget.in_flight(), (1, 1));
+        // Not mounted any more, only the removal fails: given back.
+        let before = budget.in_flight();
+        let unmounted = call(false);
+        assert_eq!(budget.in_flight(), (before.0 + 1, before.1 + 1));
+        drop(unmounted);
+        assert_eq!(budget.in_flight(), before);
     }
 
     #[test]

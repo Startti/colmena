@@ -200,10 +200,13 @@ lacks it (a link or a file there is refused; calls starting together may race to
 stays, empty and not writable by the program, for later calls; pre-create it in the image if the root filesystem is
 read-only. The staging root is covered (an empty read-only `tmpfs`) for EVERY call once it is configured, with or without
 mounts, so a call without mounts cannot list it either. Nothing else of the staging volume is visible: the call directory and every other call's files are not bound, and `..` of
-`/data` is the jail's root. The jail detaches, in the call's own mount namespace, every mount below the staging root that is not this call's own
-(the copies of the other calls' output volumes the namespace starts with), deepest first, before it covers the root: from
-inside, `/proc/self/mountinfo` names no other call and lists nothing under the root. A mount that vanishes between the
-table being read and its detach is ignored; any other failure ends the call. A call id the jail cannot trust (a bad charset, a link in the path, a `data` directory
+`/data` is the jail's root. The jail detaches, in the call's own mount namespace, EVERY mount below the staging root, this call's own volume at its
+staging path included (the copies of the executor's mounts the namespace starts with), deepest first, before it covers
+the root; only the `/data` and `/out` binds, made before and from descriptors, survive. From inside,
+`/proc/self/mountinfo` names no other call and lists nothing under the root. A mount whose path has vanished by the time
+it is detached (ENOENT, or EINVAL) is ignored, and any other failure ends the call: that branch is reached in practice
+(a full run of the suite hit ENOENT on stale copies of released volumes 56 times, counted once with a temporary probe),
+but no test asserts it on purpose. A call id the jail cannot trust (a bad charset, a link in the path, a `data` directory
 others can write in) ends the call before any code runs, with the crash text. Everything else the jail applies, the
 user, capabilities, limits, seccomp filter, environment and the empty network namespace, is the same with or without
 mounts (`tests/python_executor_mounts.rs` compares them from inside), except the largest file a call may write: it is
@@ -229,7 +232,9 @@ reads Parquet for it (`pd.read_parquet(..., use_threads=False)`).
 The output size is validated twice, before any mount: `out_mb` must be 1 to `OUT_MB_MAX` (1,024 MiB, the design's output
 cap) both when the trusted side creates the volume (a size of 0 would mount a tmpfs with no limit) and when the jail
 reads the header. The call's largest file is taken from the size of the volume the jail verified, never from the header's
-claim. `SubprocessExecutor::stage_call` also keeps a budget of staged volumes in flight, `STAGED_VOLUMES_MAX` = 2 volumes
+claim. `SubprocessExecutor::stage_call` also keeps a budget of staged volumes in flight (only there: `StagedCall::create` and
+`run_staged(CallMounts)` are public primitives without it, used by the tests; a host MUST obtain staged calls through
+`stage_call`, which visibility does not enforce), `STAGED_VOLUMES_MAX` = 2 volumes
 and `STAGED_OUT_MIB_MAX` = 2,048 MiB in total (the design's slots and `V = D_max + OUT_MAX`; estimates, the final values
 wait for the instance memory measurement, spike item 5); a request over either gets `StageError::OverBudget` (a
 `PythonExecutorError … retry later`) and mounts nothing.
@@ -245,8 +250,9 @@ id and leaves what it could not remove in place (it never deletes through a moun
 executor's leftovers, so `SubprocessExecutor::new_for_serving` (what the host and `python_executor serve` build) sweeps
 the staging root before serving, `staging::sweep_staging_root`: for each entry that is a real directory named like a
 generated id (32 lowercase hex digits; a link, a file or any other name is skipped and never opened) it detaches the
-`out` volume and, once that is no longer a mount, removes the directory without following links; a volume that cannot be
-detached is left in place and logged. It cannot tell a leftover from a call in flight, so the staging root must belong
+`out` volume and, once it is known not to be a mount, removes the directory without following links; a volume that cannot
+be detached, or an `out` that cannot be opened for any reason but ENOENT (EMFILE, EACCES, EIO, a file in its place), is left
+in place and logged. It cannot tell a leftover from a call in flight, so the staging root must belong
 to ONE executor. If the staging volume is persistent, the prepared data of a call that was killed stays on it until the
 next start of an executor with that root; a tmpfs staging volume vanishes with the instance.
 
@@ -276,7 +282,11 @@ staged call that asks for mounts and checks three more layers, 29 in all in `pyt
 are read-only, `nosuid`, `nodev`, `noexec`), `mount_out_bounded` (`/out` takes a file, is the size the trusted side gave
 it, refuses a write past it, stops empty files at the inode bound and is `nosuid`, `nodev`, `noexec`) and
 `staging_root_hidden` (the root IS the empty read-only tmpfs cover, listed successfully and found empty; a path that
-cannot be listed fails the layer, because the probe runs as the slot user and the real directory is the executor's).
+cannot be listed fails the layer, because the probe runs as the slot user and the real directory is the executor's). A root
+BELOW a path the jail covers (a volume mounted under `/mnt`, `/srv`, `/run`, `/home`, `/root`, `/var/tmp`, `/app`,
+`/dev/shm`, a configured hidden path, or the jail's own `/tmp`) does not exist inside the jail, and that is hidden: the
+layer passes only when it is absent AND the nearest covered ancestor is proven to be the cover (an empty read-only
+tmpfs, or the fresh tmpfs `/tmp`); an absent root with no such ancestor is `unreadable`.
 The probe's staged call is removed before the host's mount table is checked (which, as above, does not count mounts
 under the staging root).
 

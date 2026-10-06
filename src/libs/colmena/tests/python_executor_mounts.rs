@@ -833,11 +833,15 @@ fn self_test_without_root(alone: &Root) -> (bool, Vec<Value>) {
 }
 
 fn self_test(root: Option<&Root>) -> (bool, Vec<Value>) {
+    self_test_at(root.map(|r| r.path.as_path()))
+}
+
+fn self_test_at(root: Option<&Path>) -> (bool, Vec<Value>) {
     let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_python_executor"));
     cmd.arg("self-test").arg("--uid-base");
     cmd.arg(next_uid_base().to_string());
     if let Some(root) = root {
-        cmd.arg("--staging-root").arg(&root.path);
+        cmd.arg("--staging-root").arg(root);
     }
     let out = cmd.output().unwrap();
     let lines = String::from_utf8(out.stdout).unwrap();
@@ -1438,4 +1442,111 @@ fn an_executor_about_to_serve_sweeps_its_root() {
     let _serving = build(true);
     assert!(!leftover.exists(), "a leftover call survived the start");
     assert_eq!(mounts_under(&root.path), 0);
+}
+
+// ---------------------------------------------------------------------------
+// A staging root below a path the jail covers.
+// ---------------------------------------------------------------------------
+
+/// A Cloud Run volume normally mounts under `/mnt`, which the jail covers, and a
+/// test root under `/tmp` is below the jail's own fresh `/tmp`: inside the jail
+/// such a root does not exist, and that is hidden. Mounts must still work and the
+/// self-test must pass with all 29 layers, not report "unreadable".
+#[tokio::test]
+async fn a_staging_root_below_a_covered_path_enables_mounts() {
+    let Some(_alone) = Root::exclusive() else {
+        return;
+    };
+    let under_mnt = PathBuf::from(format!(
+        "/mnt/colmena-nested-{}",
+        uuid::Uuid::new_v4().simple()
+    ));
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&under_mnt)
+        .unwrap();
+    let _scrap = Scrap(under_mnt.clone());
+    let tmp = tempfile::tempdir().unwrap();
+    let under_tmp = tmp.path().canonicalize().unwrap();
+    for root in [&under_mnt, &under_tmp] {
+        let (ok, checks) = self_test_at(Some(root));
+        assert!(ok, "{root:?}: {checks:?}");
+        assert_eq!(checks.len(), 29, "{root:?}");
+        let hidden = checks
+            .iter()
+            .find(|c| c["layer"] == "staging_root_hidden")
+            .unwrap();
+        assert_eq!(hidden["ok"], true, "{root:?}: {hidden}");
+        // And a real call with mounts is served, not refused as disabled.
+        let mut cfg = SubprocessConfig::from_lookup(&|_: &str| None::<String>).unwrap();
+        cfg.bin = PathBuf::from(env!("CARGO_BIN_EXE_python_executor"));
+        cfg.slots = 1;
+        cfg.uid_base = 66000;
+        cfg.staging_root = Some(root.clone());
+        let ex = SubprocessExecutor::new(cfg, Duration::from_secs(60)).unwrap();
+        let staged = ex.stage_call(1).unwrap();
+        std::fs::write(staged.data_dir().join("a.txt"), "hi").unwrap();
+        let code = "import os\noutput = open('/data/a.txt').read()";
+        assert_eq!(
+            run_staged(&ex, staged.mounts(), code).await.unwrap(),
+            json!("hi"),
+            "{root:?}"
+        );
+    }
+}
+
+/// The budget share goes back when the volume was unmounted even though the rest
+/// of the cleanup failed (here: a mount left over `data`).
+#[test]
+fn a_share_goes_back_when_the_volume_was_unmounted() {
+    let Some(root) = Root::exclusive() else {
+        return;
+    };
+    let ex = executor(Some(&root));
+    let staged = ex.stage_call(1).unwrap();
+    assert_eq!(ex.staged_in_flight(), (1, 1));
+    let data = std::ffi::CString::new(staged.data_dir().to_str().unwrap()).unwrap();
+    let rc = unsafe {
+        libc::mount(
+            c"tmpfs".as_ptr(),
+            data.as_ptr(),
+            c"tmpfs".as_ptr(),
+            0,
+            c"size=1m".as_ptr() as *const libc::c_void,
+        )
+    };
+    assert_eq!(rc, 0);
+    let id = staged.id().to_string();
+    drop(staged);
+    unsafe { libc::umount2(data.as_ptr(), libc::MNT_DETACH) };
+    assert_eq!(ex.staged_in_flight(), (0, 0));
+    let _ = sweep_staging_root(&root.path);
+    assert!(!root.path.join(id).exists());
+}
+
+/// An `out` the sweep cannot open for a reason other than ENOENT (here a file
+/// where the directory should be: ENOTDIR) is not known to be unmounted: the call
+/// directory, and what is in it, stays.
+#[test]
+fn the_sweep_leaves_a_call_whose_out_it_cannot_open() {
+    let Some(_alone) = Root::exclusive() else {
+        return;
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let id = uuid::Uuid::new_v4().simple().to_string();
+    let call = root.join(&id);
+    std::fs::create_dir_all(call.join("data")).unwrap();
+    std::fs::write(call.join("data").join("part.parquet"), "customer").unwrap();
+    std::fs::write(call.join("out"), "not a directory").unwrap();
+    let report = sweep_staging_root(&root).unwrap();
+    assert_eq!((report.removed, report.failed), (0, 1), "{report:?}");
+    assert_eq!(
+        std::fs::read_to_string(call.join("data").join("part.parquet")).unwrap(),
+        "customer"
+    );
+    // A call with no `out` at all (ENOENT) is reclaimed.
+    std::fs::remove_file(call.join("out")).unwrap();
+    let report = sweep_staging_root(&root).unwrap();
+    assert_eq!(report.removed, 1, "{report:?}");
 }
