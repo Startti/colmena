@@ -230,9 +230,15 @@ mount and unmount their output volumes there while a template starts, and a temp
 with fixed reason codes. A report that does not carry exactly these layers fails as `incomplete_report`; a template
 that cannot read its own namespaces, mounts or size fails as `namespace_unreadable`, `mounts_unreadable` or
 `vm_size_unreadable`. A configured path the slot uid
-cannot reach (a file under a directory it cannot enter) fails as `unverified`: cover that directory instead. Any
+cannot reach (a file under a directory it cannot enter) fails as `unverified`: cover that directory instead. With a staging root configured (`--staging-root`, see [Run staging directories](#run-staging-directories-linux-dark))
+the probe is a call that asks for mounts and the report carries three more layers, 29 in all: `mount_data_readonly`
+(a world-writable file and directory under `/data` cannot be written, it reads back, and its flags are read-only,
+`nosuid`, `nodev`, `noexec`), `mount_out_bounded` (`/out` takes a file, is the size the trusted side gave it, refuses a
+write past it and is `nosuid`, `nodev`, `noexec`) and `staging_root_hidden`. The probe's staged call is removed before
+the host's mount table is checked (which, as above, does not count mounts under the staging root). Without a staging root the report is the 26 layers above.
+Any
 failure logs `self_test_failed` and the template exits 3; success is implied by `READY`.
-`python_executor self-test [--uid-base N] [--tmp-mb N] [--hide /abs]` runs the same checks (same values as the
+`python_executor self-test [--uid-base N] [--tmp-mb N] [--hide /abs] [--staging-root /abs]` runs the same checks (same values as the
 executor settings; root and `CAP_SYS_ADMIN` needed): exit 0 when every layer holds, 3 when one fails, 2 for bad
 arguments.
 
