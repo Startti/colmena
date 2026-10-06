@@ -1661,6 +1661,113 @@ mod tests {
         assert_eq!(column_names(&raw), vec!["a", "a_2", "a_3", "a_4", "a_5"]);
     }
 
+    /// `head`, then newline-terminated short lines until `total` bytes were
+    /// produced (so a missing guard ends in `Ok`, not in a hang), counting what
+    /// was pulled.
+    struct Dirty {
+        head: Vec<u8>,
+        sent: usize,
+        total: usize,
+        pulled: Arc<AtomicUsize>,
+    }
+
+    impl Read for Dirty {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let mut n = 0;
+            while self.sent < self.head.len() && n < buf.len() {
+                buf[n] = self.head[self.sent];
+                n += 1;
+                self.sent += 1;
+            }
+            while self.sent < self.total && n + 10 <= buf.len().min(16 * 1024) {
+                buf[n..n + 10].copy_from_slice(b"some text\n");
+                n += 10;
+                self.sent += 10;
+            }
+            self.pulled.fetch_add(n, Ordering::SeqCst);
+            Ok(n)
+        }
+    }
+
+    fn dirty(head: Vec<u8>) -> (Dirty, Arc<AtomicUsize>) {
+        let pulled = Arc::new(AtomicUsize::new(0));
+        let d = Dirty {
+            head,
+            sent: 0,
+            total: 64 * 1024 * 1024,
+            pulled: pulled.clone(),
+        };
+        (d, pulled)
+    }
+
+    /// What may be pulled before the record limit has to have fired.
+    fn pull_bound() -> usize {
+        SNIFF_BYTES + MAX_RECORD_BYTES + 64 * 1024
+    }
+
+    #[test]
+    fn an_unclosed_quote_in_the_header_fails_fast_with_the_record_number() {
+        let (src, pulled) = dirty(b"\"".to_vec());
+        let err = open_csv(src, None)
+            .err()
+            .expect("a 64 MiB header must be refused");
+        assert_eq!(
+            err,
+            CsvError::RecordTooLong {
+                record: 1,
+                limit: MAX_RECORD_BYTES
+            }
+        );
+        assert!(pulled.load(Ordering::SeqCst) <= pull_bound());
+    }
+
+    #[test]
+    fn an_unclosed_quote_inside_the_sample_fails_fast_with_the_record_number() {
+        let (src, pulled) = dirty(b"a,b\n1,2\n3,4\n5,\"".to_vec());
+        let err = open_csv(src, None)
+            .err()
+            .expect("a 64 MiB record must be refused");
+        assert_eq!(
+            err,
+            CsvError::RecordTooLong {
+                record: 4,
+                limit: MAX_RECORD_BYTES
+            }
+        );
+        assert!(pulled.load(Ordering::SeqCst) <= pull_bound());
+    }
+
+    #[test]
+    fn an_unclosed_quote_after_the_sample_fails_fast_from_the_batches() {
+        let mut head = b"a,b\n".to_vec();
+        for _ in 0..INFERENCE_ROWS + 5 {
+            head.extend_from_slice(b"1,2\n");
+        }
+        head.extend_from_slice(b"9,\"");
+        let (src, pulled) = dirty(head);
+        let results: Vec<_> = open_csv(src, None).unwrap().batches.take(1000).collect();
+        let err = results.last().unwrap().as_ref().unwrap_err();
+        assert!(matches!(
+            err,
+            CsvError::RecordTooLong {
+                limit: MAX_RECORD_BYTES,
+                ..
+            }
+        ));
+        assert_eq!(results.iter().filter(|r| r.is_err()).count(), 1);
+        assert!(pulled.load(Ordering::SeqCst) <= pull_bound() + 128 * 1024);
+    }
+
+    #[test]
+    fn a_quoted_field_with_many_line_breaks_below_the_limit_reads_back_exactly() {
+        let field: String = (0..9000).map(|i| format!("line {i}\n")).collect();
+        assert!(field.len() > 60_000 && field.len() < MAX_RECORD_BYTES);
+        let csv = format!("id,note\n1,\"{field}\"\n2,plain\n");
+        let rows = rows_of(open(csv.as_bytes()));
+        assert_eq!(rows[0], vec![cell("1"), Some(field)]);
+        assert_eq!(rows[1], vec![cell("2"), cell("plain")]);
+    }
+
     #[test]
     fn a_wide_batch_holds_what_its_cells_need_and_not_kilobytes_per_column() {
         // 700 columns and 5 rows: 3,500 cells of 3 bytes. A builder started
@@ -1686,5 +1793,110 @@ mod tests {
         // Four accented single bytes: four invalid sequences, no valid one.
         assert_eq!((stats.invalid(), stats.valid_multibyte()), (4, 0));
         assert!(!stats.plausibly_utf8());
+    }
+
+    // ---- the limits cannot be wrong ----
+
+    fn rows_csv() -> Cursor<Vec<u8>> {
+        Cursor::new(b"a,b,c\n1,2,3\n4,5,6\n".to_vec())
+    }
+
+    #[test]
+    fn limits_that_read_nothing_or_exceed_the_constants_are_typed_errors() {
+        let d = ReadLimits::default();
+        let bad = [
+            ReadLimits {
+                inference_rows: 0,
+                ..d
+            },
+            ReadLimits {
+                sample_bytes: 0,
+                ..d
+            },
+            ReadLimits {
+                sample_cells: 0,
+                ..d
+            },
+            ReadLimits { batch_rows: 0, ..d },
+            ReadLimits {
+                batch_cells: 0,
+                ..d
+            },
+            ReadLimits {
+                batch_bytes: 0,
+                ..d
+            },
+            // Fewer cells than a row of this file (three columns).
+            ReadLimits {
+                batch_cells: 2,
+                ..d
+            },
+            ReadLimits {
+                inference_rows: INFERENCE_ROWS + 1,
+                ..d
+            },
+            ReadLimits {
+                sample_bytes: SAMPLE_MAX_BYTES + 1,
+                ..d
+            },
+            ReadLimits {
+                sample_cells: SAMPLE_MAX_CELLS + 1,
+                ..d
+            },
+            ReadLimits {
+                batch_rows: BATCH_ROWS + 1,
+                ..d
+            },
+            ReadLimits {
+                batch_cells: BATCH_CELLS + 1,
+                ..d
+            },
+            ReadLimits {
+                batch_bytes: BATCH_BYTES + 1,
+                ..d
+            },
+            ReadLimits {
+                batch_bytes: usize::MAX,
+                ..d
+            },
+        ];
+        for (i, limits) in bad.iter().enumerate() {
+            let err = open_csv_with(rows_csv(), None, limits).err();
+            assert!(
+                matches!(err, Some(CsvError::InvalidLimits(_))),
+                "limits {i}: {err:?}"
+            );
+        }
+        // The edge: exactly the constants, and exactly one row of cells.
+        assert!(open_csv_with(rows_csv(), None, &d).is_ok());
+        let one_row = ReadLimits {
+            batch_cells: 3,
+            ..d
+        };
+        assert!(open_csv_with(rows_csv(), None, &one_row).is_ok());
+    }
+
+    #[test]
+    fn a_batch_that_fits_no_row_is_an_error_never_the_end_of_the_data() {
+        // The limits are validated on opening; if they were ever changed after
+        // that, no row fitting must fail, not read as an empty table.
+        for tweak in [0, 1] {
+            let mut o = open_csv_with(rows_csv(), None, &ReadLimits::default()).unwrap();
+            if tweak == 0 {
+                o.batches.limits.batch_rows = 0;
+            } else {
+                o.batches.limits.batch_cells = 2;
+            }
+            let first = o.batches.next();
+            assert!(
+                matches!(first, Some(Err(CsvError::InvalidLimits(_)))),
+                "{tweak}: {first:?}"
+            );
+            assert!(o.batches.next().is_none());
+        }
+        // The same file with sane limits has its two rows.
+        let o = open_csv_with(rows_csv(), None, &ReadLimits::default()).unwrap();
+        let rows: usize = o.batches.map(|b| b.unwrap().num_rows()).sum();
+        assert_eq!(rows, 2);
     }
 }
