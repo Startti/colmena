@@ -10,10 +10,15 @@
 //! - [`verify`]: is the prepared copy one the registry vouches for? Ownership,
 //!   readiness, layout and manifest are checked before anything is staged.
 //!
+//! - [`stage`]: stream the parts into the call's data directory, bounded in
+//!   memory and in bytes (Unix).
+//!
 //! See docs/developer_guide/53_python_executors.md and
 //! docs/developer_guide/54_tabular_prepare.md.
 
 pub mod refusal;
+#[cfg(unix)]
+pub mod stage;
 #[cfg(test)]
 pub(crate) mod testkit;
 pub mod verify;

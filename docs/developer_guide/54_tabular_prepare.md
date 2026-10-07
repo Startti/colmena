@@ -1485,3 +1485,23 @@ parse error is not shown. A verification opens only the manifest; no part is rea
 Two cross-checks tie the storage to the registry. The manifest's table list must equal the row's `tables_json` byte for
 byte (the row stores exactly `Manifest::tables_json`), else `Invalid(Manifest)`; and every part the manifest lists must be a
 blob the row tracks, else `Invalid(Parts)`. A manifest the storage holds but the registry did not record is not trusted.
+
+### Staging the parts (`stage.rs`)
+
+`stage_tables(storage, plan, tables, data_dir, limits)` copies the manifest and the parts of the chosen tables into a
+directory the trusted side owns (the call's `data` directory, which the jail binds read-only at `/data`; see
+[53_python_executors.md](./53_python_executors.md)). `data_dir` must exist and be empty.
+
+- *What is written.* `manifest.json` (the verified manifest serialised again: no byte of the stored file reaches the call
+  unparsed) and `t<n>/part-NNNNN.parquet` for each part of each chosen table, the table index being the manifest's.
+  Paths are built only from `manifest::part_path`. Directories are `0755` and files `0644` whatever the umask, so the slot
+  user that reads through the bind can read them.
+- *Streamed.* Each part is copied chunk by chunk to its file; the memory held is one chunk, whatever the part's size.
+- *Bounded.* A part may be at most `PART_FILE_MAX_BYTES` (128 MiB, twice the size the converter rolls at) and the call at
+  most `StageLimits::total_bytes` (`DATA_MAX_BYTES`, 1 GiB). Both are checked on the size the storage DECLARES, before the
+  part's file exists, and again on the bytes that actually arrive.
+- *Refusals.* Over a limit is `OverBudget(Part)` or `OverBudget(Data)`; bytes that differ from the declared size are
+  `Invalid(Parts)`; a storage failure is `Storage`; a failure of the directory itself (a name already taken, a link, a full
+  volume) is `Unavailable(Executor)`. No refusal carries an adapter's text or a path.
+- *Nothing outside, nothing left.* Every file is created new, so a name that already exists (a link included) is refused and
+  never followed. A refused or failed staging removes everything it wrote.
