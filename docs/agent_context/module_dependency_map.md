@@ -5,7 +5,7 @@
 
 **How to use (for the exploration/spec phase):** before opening files to assess a change, look up the target file below. **Used by** is its blast radius — the files that break if you change its public surface. **Depends on** is what it needs. Start by reading only those, not the whole repo.
 
-- Files indexed: **476**
+- Files indexed: **477**
 - Modules with at least one importer: **235**
 
 ## Blast-radius ranking (change these with the most care)
@@ -2385,6 +2385,11 @@
 - Module: `tabular_run::verify`
 - **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
 - Depends on (3): `storage::domain`, `tabular_prepare::manifest`, `tabular_prepare::registry`
+
+#### `src/libs/colmena/src/tabular_run/wire.rs`
+- Module: `tabular_run::wire`
+- **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
+- Depends on (0): — (no intra-crate imports)
 
 ### text
 
