@@ -1082,11 +1082,14 @@ pub async fn dispatch_create_from_xlsx_via_executor(
     let stored = match executor.fetch_attachment_bytes(&parsed.attachment_id).await {
         Ok(b) => b,
         Err(e) => {
-            return serde_json::json!({
-                "error": "attachment_fetch_failed",
-                "message": e,
-                "attachment_id": parsed.attachment_id,
-            });
+            return crate::llm::domain::large_tabular::tag_refusal(
+                serde_json::json!({
+                    "error": "attachment_fetch_failed",
+                    "message": e,
+                    "attachment_id": parsed.attachment_id,
+                }),
+                &e,
+            );
         }
     };
     let client = match build_client(executor.google_workspace_auth()) {

@@ -57,6 +57,13 @@ pub type ToolDescribeObserver = Arc<
         + Sync,
 >;
 
+/// Where an attachment's bytes are and whose they are.
+struct AttachmentLocation {
+    key: String,
+    /// The row references an object the HOST owns (`origin = host_storage_ref`).
+    host_owned: bool,
+}
+
 /// Executes DAG nodes on behalf of LLM tool calls.
 ///
 /// Constructed via [`DagToolExecutor::new`] and optionally configured with
@@ -865,9 +872,16 @@ impl DagToolExecutor {
              constructing the LLM node."
                 .to_string()
         })?;
-        let storage_key = self.lookup_storage_key(document_id).await?;
+        let location = self.locate_attachment(document_id).await?;
+        // An object the HOST owns is never read whole: the row that was just
+        // looked up says so (no extra query), whatever the large tabular switch
+        // says now and whatever the row's size or mime say. Every other row is
+        // read as it always was.
+        if location.host_owned {
+            return Err(crate::llm::domain::large_tabular::refusal_text().to_string());
+        }
         storage
-            .read(&storage_key)
+            .read(&location.key)
             .await
             .map_err(|e| format!("attachment_storage.read failed for '{document_id}': {e}"))
     }
@@ -964,7 +978,8 @@ impl DagToolExecutor {
         Some((entry.mime_type.clone(), entry.filename.clone()))
     }
 
-    /// Internal: resolve `document_id` → `storage_key`.
+    /// Internal: resolve `document_id` → its `storage_key` and whether the object
+    /// behind it is the HOST's (see [`AttachmentLocation`]).
     ///
     /// Resolution order:
     /// 1. Fast path: start-of-turn snapshot (no DB hit). On a catalog hit,
@@ -977,24 +992,31 @@ impl DagToolExecutor {
     /// Snapshot miss with no registry wired falls back to the catalog-size
     /// error (preserving the pre-live-fallback message for backward
     /// compatibility with existing callers that don't wire a registry).
-    async fn lookup_storage_key(&self, document_id: &str) -> Result<String, String> {
+    async fn locate_attachment(&self, document_id: &str) -> Result<AttachmentLocation, String> {
         // 1. Fast path: start-of-turn snapshot (no DB hit).
         if let Some(catalog) = self.attachment_catalog.as_ref() {
             if let Some(entry) = catalog.iter().find(|a| a.document_id == document_id) {
-                return entry.storage_key.clone().ok_or_else(|| {
-                    format!(
-                        "attachment '{document_id}' has no storage_key — it likely \
-                         originated from a pre-Plan-A path that did not persist bytes. \
-                         Tell the operator to re-upload."
-                    )
-                });
+                return entry
+                    .storage_key
+                    .clone()
+                    .map(|key| AttachmentLocation {
+                        key,
+                        host_owned: entry.is_host_storage_ref(),
+                    })
+                    .ok_or_else(|| {
+                        format!(
+                            "attachment '{document_id}' has no storage_key — it likely \
+                             originated from a pre-Plan-A path that did not persist bytes. \
+                             Tell the operator to re-upload."
+                        )
+                    });
             }
         }
         // 2. Live registry fallback — single source for both the snapshot-miss
         //    and no-snapshot cases. Catches mid-turn outputs (e.g. an image just
         //    produced by image_generation in the same tool loop).
-        if let Some(key) = self.lookup_storage_key_via_registry(document_id).await? {
-            return Ok(key);
+        if let Some(location) = self.lookup_storage_key_via_registry(document_id).await? {
+            return Ok(location);
         }
         // 3. Not found anywhere. Preserve the two distinct messages the callers'
         //    tests assert: "not found in catalog" when a snapshot existed,
@@ -1021,7 +1043,7 @@ impl DagToolExecutor {
     async fn lookup_storage_key_via_registry(
         &self,
         document_id: &str,
-    ) -> Result<Option<String>, String> {
+    ) -> Result<Option<AttachmentLocation>, String> {
         let (Some(reg), Some(sid)) = (
             self.attachment_registry.as_ref(),
             self.agent_session_id.as_ref(),
@@ -1034,11 +1056,20 @@ impl DagToolExecutor {
                     format!("attachment '{document_id}' found in registry but has no storage_key")
                 })?;
                 let _ = reg.touch_last_used(sid, document_id).await;
-                Ok(Some(key))
+                Ok(Some(AttachmentLocation {
+                    key,
+                    host_owned: row.is_host_storage_ref(),
+                }))
             }
             Ok(None) => Ok(None),
             Err(e) => Err(format!("attachment registry lookup failed: {e}")),
         }
+    }
+
+    /// The `storage_key` of an attachment (what every caller that only needs the
+    /// key uses; the same lookup as [`locate_attachment`](Self::locate_attachment)).
+    async fn lookup_storage_key(&self, document_id: &str) -> Result<String, String> {
+        self.locate_attachment(document_id).await.map(|l| l.key)
     }
 
     /// Recursively scan fixed_config for all "$DYNAMIC" placeholders.
@@ -8859,3 +8890,6 @@ mod tool_progress_emitter_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod large_object_guard;

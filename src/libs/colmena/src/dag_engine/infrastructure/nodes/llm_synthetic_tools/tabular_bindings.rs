@@ -408,7 +408,10 @@ async fn resolve_one(
                 binding_error(
                     "AttachmentFetchFailed",
                     &b.var,
-                    serde_json::json!({ "message": message }),
+                    crate::llm::domain::large_tabular::tag_refusal(
+                        serde_json::json!({ "message": message }),
+                        &message,
+                    ),
                 )
             })?;
             let (_columns, records) =

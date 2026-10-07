@@ -45,6 +45,15 @@ pub fn refusal_code_for(message: &str) -> Option<&'static str> {
         .then_some(LARGE_TABULAR_ERROR_CODE)
 }
 
+/// `value` (a tool's error object) with `"code": "large_tabular_file"` added when
+/// `message` is a refusal text, so every tool reports a refusal the same way.
+pub fn tag_refusal(mut value: serde_json::Value, message: &str) -> serde_json::Value {
+    if let (Some(code), Some(object)) = (refusal_code_for(message), value.as_object_mut()) {
+        object.insert("code".to_string(), serde_json::Value::from(code));
+    }
+    value
+}
+
 /// A tool refused to read a large tabular file whole (see [`refusal_text`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LargeTabularRefusal;
@@ -287,5 +296,16 @@ mod tests {
             "ünïcode ✓",
             "ordinary text is kept"
         );
+    }
+
+    #[test]
+    fn tagging_adds_the_code_only_to_a_refusal() {
+        let refused = tag_refusal(serde_json::json!({"error": "x"}), refusal_text());
+        assert_eq!(refused["code"], LARGE_TABULAR_ERROR_CODE);
+        assert_eq!(refused["error"], "x", "the rest is kept");
+        let other = tag_refusal(serde_json::json!({"error": "x"}), "attachment not found");
+        assert!(other.get("code").is_none());
+        let not_an_object = tag_refusal(serde_json::json!("x"), refusal_text());
+        assert_eq!(not_an_object, serde_json::json!("x"));
     }
 }
