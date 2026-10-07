@@ -1180,3 +1180,30 @@ the failure order (delete, then record) and the fixed failure sentences are one 
   single `converted`: a `Vec`, one per table, in manifest order.
 - The sizes the row keeps (`prepared_bytes`, `blob_keys`) are the sums over every table and
   the manifest. A source that disappears while it is spooled releases the row, like a CSV.
+
+### The memory test (`tests/xlsx_convert_memory.rs`)
+
+Own test binary with a counting global allocator, in the style of `tabular_convert_memory`: it
+measures the peak of live heap bytes while a generated workbook is converted, with the spool,
+the zip reader, the XML parser, the shared-strings table, the batches and the part writer all
+inside the measurement (the workbook file is written before it starts; the generator streams).
+Parts are limited to 8 MiB, as in the CSV test.
+
+| Workbook | Size | Peak |
+|---|---|---|
+| 100,000 rows of 8 short cells of every kind, 50,000 shared strings | 33 MiB | 23 MiB |
+| the same with 400,000 rows | 127 MiB | 25 MiB |
+| 300 rows of four 16 KiB text cells (a batch is held by its 8 MiB of text) | 18 MiB | 28 MiB |
+| the same with 1,200 rows | 75 MiB | 28 MiB |
+| 150,000 rows, deflated (the inflate path) | 9 MiB (about 50 MiB expanded) | 25 MiB |
+
+(debug build, macOS; the numbers are what was measured, not the bounds.) **The bounds are not
+tuned to those numbers**: a bound tuned to one machine's measurement already failed in CI once.
+The allocator counts requested bytes, not time, so a slower runner changes only the
+interleaving of the reading and writing halves, which can add at most the batches in flight
+(one being built, two in the channel, one being written). Each scenario's absolute bound is
+the worst case those add up to for its shape, with room above the measurement: 64 MiB for the
+short-row shape and 112 MiB for the wide-text shape. The assertion that proves the memory is
+bounded and not merely small is the other one in each scenario: the peak of a workbook four
+times larger must be within a quarter plus 8 MiB of the smaller one's, which a sheet or a
+shared-strings table held whole would fail by a wide margin.
