@@ -173,6 +173,7 @@ impl LargeTabularRuntime {
             tables: &chosen,
             limits: self.config.limits,
             out_mb: self.config.out_mb,
+            sink: None,
         };
         match self.executor.run_with_mounts(call, mounted).await {
             Ok(done) => Ok(LargeRunOutput {

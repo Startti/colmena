@@ -6,6 +6,7 @@
 //! the unbudgeted `StagedCall::create` and `run_staged` primitives are never
 //! used to take a call's volume.
 
+use super::collect::{collect_out, CollectLimits};
 use super::mounted::{MountedCall, MountedError, MountedExecutor, MountedResult};
 use super::refusal::{Budget, RunRefusal, Unavailable};
 use super::stage::stage_tables;
@@ -55,7 +56,28 @@ impl MountedExecutor for SubprocessExecutor {
                 .run_staged(req, staged_call.mounts())
                 .await
                 .map_err(MountedError::Run)?;
-            Ok(MountedResult { result, staged })
+            // The child is dead (SIGKILL to its uid before `run_staged` returns)
+            // and the volume is still mounted: read what it wrote, nothing else.
+            let mut done = MountedResult {
+                result,
+                staged,
+                emitted: vec![],
+                rejected: vec![],
+                too_many_entries: false,
+            };
+            if let Some(sink) = call.sink {
+                let found = collect_out(&staged_call.out_dir(), CollectLimits::default()).map_err(
+                    |_| MountedError::Refused(RunRefusal::Unavailable(Unavailable::Executor)),
+                )?;
+                done.rejected = found.rejected;
+                done.too_many_entries = found.too_many_entries;
+                for file in found.files {
+                    let name = file.name.clone();
+                    sink.accept(file).await.map_err(MountedError::Refused)?;
+                    done.emitted.push(name);
+                }
+            }
+            Ok(done)
         }
         .await;
         // The volume is unmounted and the directories removed off the async
