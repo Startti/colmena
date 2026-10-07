@@ -1,0 +1,1 @@
+{"tables":[{"sheet":"Mac","name":"Mac","columns":[{"name":"day","type":"timestamp"},{"name":"stamp","type":"timestamp"}],"rows":[["2021-01-01T00:00:00","2021-01-01T06:00:00"],["1999-12-31T00:00:00","2000-01-01T00:00:01"]]}],"skipped":[]}
