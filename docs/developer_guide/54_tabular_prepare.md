@@ -848,3 +848,30 @@ the failing paths with error texts that name a key and checks none of it appears
 - *Progress.* `done` is the bytes of the current read of the file and stays under the total
   until the table is ready; after a restart (a column that turned out to be text) it starts
   over.
+
+## Excel (xlsx) preparation
+
+An `.xlsx` above 50 MiB is prepared into the same layout as a CSV
+(`<derived_root>/manifest.json`, `<derived_root>/t<n>/part-NNNNN.parquet`, one table
+per sheet) by the same driver. The unit is built in slices and this section grows with
+each one. Everything is dark behind `COLMENA_LARGE_TABULAR`, like the CSV.
+
+### Archive pre-check (`precheck.rs`)
+
+An xlsx is a zip. Before any entry is opened, `check_archive` reads the
+end-of-central-directory record and the central directory and refuses the archive
+against limits. **Nothing is inflated**: the reads are the last 64 KiB of the file and
+a central directory of at most 8 MiB, so a bomb costs a few small reads whatever it
+would expand to.
+
+- Entries: at most 10,000. Central directory: at most 8 MiB. Both are estimates, not
+  prototyped; a central directory that is smaller than its entries need, or that does
+  not end where the end record says, is `InconsistentHeaders`.
+- Zip64, encryption, several disks and methods other than stored and deflate are
+  `Unsupported`. No workbook under the caps needs zip64, whose sizes start at 4 GiB.
+- A file that is not a zip at all (no end record, empty, truncated) is `NotAnArchive`,
+  told apart from one over a limit: the driver will record the first as
+  `unreadable_file` and the rest as `archive_limit`.
+
+Errors are a fixed enum (`ArchiveError`); its text carries no name, size or byte of the
+file. Later slices add the checks of names, sizes and local headers.

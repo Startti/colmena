@@ -33,6 +33,7 @@ pub mod manifest;
 pub mod part_sink;
 pub mod ports;
 pub mod postgres_registry;
+pub mod precheck;
 pub mod prepare;
 pub mod registry;
 pub mod scan;
@@ -43,6 +44,8 @@ pub mod writer;
 mod registry_contract;
 #[cfg(test)]
 mod registry_faults;
+#[cfg(test)]
+mod zipfix;
 
 /// How often a waiting caller re-reads the registry.
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
