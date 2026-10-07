@@ -1,5 +1,13 @@
 # Entradas de `files[]` con solo `storage_key` (archivos tabulares grandes)
 
+
+> **Orden de despliegue (obligatorio).** Despliega primero el `attachment_gc` nuevo y
+> solo después enciende `COLMENA_LARGE_TABULAR` en el motor. Un `attachment_gc`
+> **anterior** que corra contra filas escritas por un motor nuevo borraría el
+> objeto del usuario: borra `storage_key` de toda fila vencida y el adaptador de
+> callback reenvía ese borrado a ADP. Ninguna defensa del lado del motor sustituye
+> este orden (ver «Por qué no hay otra defensa» abajo).
+
 **Acción de ADP:** ninguna al compilar. Cuando ADP quiera usar la ruta de archivos
 grandes tendrá que emitir la entrada descrita abajo y activar el interruptor
 `COLMENA_LARGE_TABULAR` del motor; con el interruptor apagado (el valor por defecto)
@@ -44,3 +52,17 @@ el motor se comporta exactamente como antes, para cualquier tamaño.
   ajeno al motor». La clase de una fila (referencia del host o copia del motor) no
   cambia nunca: si el mismo `id` se vuelve a registrar en la otra clase para el mismo
   proveedor, el registro conserva la fila tal cual y el motor lo avisa.
+- **`attachment_gc`.** Para una fila `host_storage_ref` el GC borra solo la fila y
+  **nunca** llama al borrado de almacenamiento.
+  El contador `total_host_references_released` sube solo después de que la
+  fila se borró, aparece en `gc.batch.end`, y el modo `--dry-run` dice «would release
+  (drop the row, object kept)» sin imprimir la llave.
+- **Por qué no hay otra defensa.** Probé dos defensas sin cambio de esquema y las
+  descarté: (1) dejar `last_used_at` en el futuro para que un GC viejo no seleccione
+  la fila: cualquier lectura la actualiza a «ahora» y vuelve a ser vencida; (2)
+  guardar la llave con un prefijo (`host-ref:...`) para que un borrado viejo no
+  alcance el objeto real: cambia lo que ADP lee de `conversation_attachments`. Por eso
+  la garantía es el orden de despliegue de arriba. Si se quisiera forzarlo por
+  configuración, una variable «el GC nuevo ya está desplegado» que el motor exigiera
+  antes de registrar referencias del host sería la opción (no incluida: decisión del
+  dueño).
