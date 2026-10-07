@@ -39,6 +39,7 @@ pub mod registry;
 pub mod scan;
 pub mod sqlite_registry;
 pub mod writer;
+pub mod xlsx_package;
 pub mod xlsx_spool;
 
 #[cfg(test)]

@@ -907,3 +907,28 @@ as `xlsx_too_large`.
 `XlsxError` is the one error of the xlsx reader: the archive pre-check's errors, the caps,
 a part that is not valid, and the source and local failures above. Its text is fixed: no
 name, key, cell or library message is echoed.
+
+### Reading parts as streams (`xlsx_package.rs`)
+
+`Package::open` runs the pre-check and opens the archive; `Package::xml(name)` returns a
+part as an XML reader under **two guards**, because the pre-check only reads headers:
+
+- `Limited` ends a part at the size the archive declared for it. Deflate can produce more
+  than a header says (a consistent lie in both headers passes the pre-check), so a byte
+  past the declared size is `EntryTooLarge`. Together with the pre-check's caps this bounds
+  everything that is inflated: at most 2.5 GiB over a whole workbook, 2 GiB per part.
+- `Guarded` bounds what the XML parser buffers. The parser copies a text node or a tag
+  whole before it hands it over, so a single 1 GiB text node would be 1 GiB of memory. The
+  guard fails the read once more than 1 MiB (`MAX_TOKEN_BYTES`, the CSV record limit) was
+  consumed since the last event, whatever the structure (CDATA and comments too), and the
+  parse loop resets it after every event. A test shows the parser buffering less than the
+  limit plus one 16 KiB buffer of a 50 KiB node.
+
+Parts are looked up by the names the pre-check saw (unique, with no `..`), never by
+listing.
+
+**Dependencies.** `zip` 0.6 (stored and deflate only) and `quick-xml` 0.31 are now direct
+dependencies, at the versions calamine already pulls in, so `Cargo.lock` gains only the two
+edges and no package. Calamine itself is not used for large workbooks: it opens the
+archive itself (no inflate guard), loads the whole shared-strings table into memory and
+cannot be bounded from outside.
