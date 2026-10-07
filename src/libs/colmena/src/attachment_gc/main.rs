@@ -229,9 +229,14 @@ async fn run_gc(
                 }
             }
 
-            // Step 2: delete the registry row.
+            // Step 2: delete exactly the row that was judged (provider-scoped):
+            // the document's rows under other providers are judged on their own.
             if let Err(e) = registry
-                .delete_attachment(&row.agent_session_id, &row.document_id)
+                .delete_attachment_for_provider(
+                    &row.agent_session_id,
+                    &row.document_id,
+                    row.provider.clone(),
+                )
                 .await
             {
                 tracing::error!(
@@ -650,6 +655,94 @@ mod tests {
         })
     }
 
+    /// The GC deletes exactly the row it judged. A stale host row must not drag a
+    /// fresh engine row of another provider (and so leak its copy), and a stale
+    /// engine row must not drag a fresh host row (and its object's guard).
+    #[tokio::test]
+    async fn the_gc_deletes_exactly_the_row_it_judged_not_the_documents_other_rows() {
+        for host_is_stale in [true, false] {
+            let (registry, pool, _dir) = fresh_sqlite_registry().await;
+            let storage = recorder();
+            let host_key = seed_row(
+                &registry,
+                &pool,
+                &storage,
+                "same-doc-h",
+                ProviderKind::OpenAi,
+                true,
+            )
+            .await;
+            // Same document id, other provider, other class.
+            registry
+                .upsert(UpsertAttachmentInput {
+                    agent_session_id: "sess".to_string(),
+                    document_id: "same-doc-h".to_string(),
+                    provider: ProviderKind::Anthropic,
+                    provider_file_id: "pf".to_string(),
+                    mime_type: "text/csv".to_string(),
+                    filename: "e.csv".to_string(),
+                    size_bytes: Some(10),
+                    label: None,
+                    description: None,
+                    source: AttachmentSource::Inline,
+                    storage_key: Some("engine-copy".to_string()),
+                    origin: Some(origin::USER_UPLOAD.to_string()),
+                })
+                .await
+                .unwrap();
+            storage
+                .inner
+                .store(StoreRequest {
+                    bytes: b"copy".to_vec(),
+                    mime_type: "text/csv".into(),
+                    filename: "e.csv".into(),
+                    session_id: None,
+                    agent_session_id: Some("sess".into()),
+                })
+                .await
+                .unwrap();
+            let (stale, fresh) = if host_is_stale {
+                ("OpenAI", "Anthropic")
+            } else {
+                ("Anthropic", "OpenAI")
+            };
+            let _ = fresh;
+            backdate_row(&pool, "same-doc-h", &stale.to_lowercase()).await;
+
+            let registry_arc: Arc<dyn AttachmentRegistry> = Arc::new(registry);
+            let storage_arc: Arc<dyn OutputStorageRepository> = storage.clone();
+            let cutoff = chrono::Utc::now() - chrono::Duration::days(7);
+            run_gc(registry_arc.clone(), storage_arc, cutoff, 10, false)
+                .await
+                .unwrap();
+
+            let left_openai = registry_arc
+                .lookup("sess", "same-doc-h", ProviderKind::OpenAi)
+                .await
+                .unwrap();
+            let left_anthropic = registry_arc
+                .lookup("sess", "same-doc-h", ProviderKind::Anthropic)
+                .await
+                .unwrap();
+            if host_is_stale {
+                assert!(left_openai.is_none(), "the stale host row went");
+                assert!(left_anthropic.is_some(), "the fresh engine row stays");
+                assert!(
+                    storage.deleted.lock().unwrap().is_empty(),
+                    "no blob deleted"
+                );
+            } else {
+                assert!(left_openai.is_some(), "the fresh host row stays");
+                assert!(left_anthropic.is_none(), "the stale engine row went");
+                assert_eq!(*storage.deleted.lock().unwrap(), ["engine-copy"]);
+            }
+            assert!(
+                storage.read(&host_key).await.is_ok(),
+                "the host's object stays"
+            );
+        }
+    }
+
     /// A dry run says what it WOULD do and never prints a host key.
     #[tokio::test]
     async fn a_dry_run_counts_what_it_would_release_and_what_it_would_delete() {
@@ -785,6 +878,106 @@ mod tests {
             Err(colmena::llm::domain::AttachmentError::RepositoryFailed(
                 "delete failed".into(),
             ))
+        }
+        async fn delete_attachment_for_provider(
+            &self,
+            _: &str,
+            _: &str,
+            _: ProviderKind,
+        ) -> Result<(), colmena::llm::domain::AttachmentError> {
+            Err(colmena::llm::domain::AttachmentError::RepositoryFailed(
+                "delete failed".into(),
+            ))
+        }
+    }
+
+    /// The same host-object rule on Postgres, the production backend:
+    /// `DATABASE_URL=postgres://... cargo test --bin attachment_gc -- --ignored`.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL"]
+    async fn the_gc_leaves_a_host_object_alone_on_postgres() {
+        use colmena::dag_engine::infrastructure::pool_registry::PoolConfig;
+        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL not set");
+        let pools = Arc::new(PgPoolRegistry::new(PoolConfig::defaults()));
+        let pool = pools.get_or_create(&url).await.unwrap();
+        sqlx::migrate!("migrations/postgres")
+            .set_ignore_missing(true)
+            .run(&*pool)
+            .await
+            .unwrap();
+        let registry = PostgresAttachmentRegistry::new(pools, &url).await.unwrap();
+        let sid = format!("gc_pg_{}", uuid::Uuid::new_v4());
+        let storage = recorder();
+        let mut keys = Vec::new();
+        for (doc, host) in [("h", true), ("e", false)] {
+            let key = storage
+                .inner
+                .store(StoreRequest {
+                    bytes: b"x".to_vec(),
+                    mime_type: "text/csv".into(),
+                    filename: format!("{doc}.csv"),
+                    session_id: None,
+                    agent_session_id: Some(sid.clone()),
+                })
+                .await
+                .unwrap()
+                .storage_key;
+            registry
+                .upsert(UpsertAttachmentInput {
+                    agent_session_id: sid.clone(),
+                    document_id: doc.to_string(),
+                    provider: ProviderKind::OpenAi,
+                    provider_file_id: if host { String::new() } else { "pf".into() },
+                    mime_type: "text/csv".into(),
+                    filename: format!("{doc}.csv"),
+                    size_bytes: Some(1),
+                    label: None,
+                    description: None,
+                    source: AttachmentSource::Path(key.clone()),
+                    storage_key: Some(key.clone()),
+                    origin: Some(
+                        if host {
+                            origin::HOST_STORAGE_REF
+                        } else {
+                            origin::USER_UPLOAD
+                        }
+                        .into(),
+                    ),
+                })
+                .await
+                .unwrap();
+            keys.push(key);
+        }
+        sqlx::query(
+            "UPDATE conversation_attachments \
+             SET registered_at = NOW() - interval '30 days', last_used_at = NULL \
+             WHERE agent_session_id = $1",
+        )
+        .bind(&sid)
+        .execute(&*pool)
+        .await
+        .unwrap();
+
+        let registry_arc: Arc<dyn AttachmentRegistry> = Arc::new(registry);
+        let storage_arc: Arc<dyn OutputStorageRepository> = storage.clone();
+        let cutoff = chrono::Utc::now() - chrono::Duration::days(7);
+        run_gc(registry_arc.clone(), storage_arc, cutoff, 500, false)
+            .await
+            .unwrap();
+
+        let deleted = storage.deleted.lock().unwrap().clone();
+        assert!(
+            !deleted.contains(&keys[0]),
+            "the host's object is never deleted"
+        );
+        assert!(deleted.contains(&keys[1]), "the engine copy is");
+        assert!(storage.read(&keys[0]).await.is_ok());
+        for doc in ["h", "e"] {
+            assert!(registry_arc
+                .lookup_by_document_id(&sid, doc)
+                .await
+                .unwrap()
+                .is_none());
         }
     }
 }

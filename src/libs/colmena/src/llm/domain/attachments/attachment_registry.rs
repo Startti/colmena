@@ -161,4 +161,20 @@ pub trait AttachmentRegistry: Send + Sync {
         agent_session_id: &str,
         document_id: &str,
     ) -> Result<(), AttachmentError>;
+
+    /// Delete exactly one row, `(agent_session_id, document_id, provider)`. The
+    /// cleanup judges rows one by one (a host reference and an engine copy of the
+    /// same document id can coexist under different providers), so it must delete
+    /// the row it judged and not the document's other rows. The default falls back
+    /// to [`delete_attachment`](Self::delete_attachment) for registries that keep
+    /// one row per document.
+    async fn delete_attachment_for_provider(
+        &self,
+        agent_session_id: &str,
+        document_id: &str,
+        provider: ProviderKind,
+    ) -> Result<(), AttachmentError> {
+        let _ = provider;
+        self.delete_attachment(agent_session_id, document_id).await
+    }
 }

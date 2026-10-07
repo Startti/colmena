@@ -7,6 +7,16 @@
 > objeto del usuario: borra `storage_key` de toda fila vencida y el adaptador de
 > callback reenvía ese borrado a ADP. Ninguna defensa del lado del motor sustituye
 > este orden (ver «Por qué no hay otra defensa» abajo).
+>
+> **Una excepción a «con el interruptor apagado todo es como antes».** `attachment_gc`
+> ahora borra **fila por fila** (`sesión + documento + proveedor`) en vez de borrar
+> todas las filas de un documento cuando juzga una. Es un cambio deliberado que no
+> depende del interruptor y solo se nota en un documento con filas de varios
+> proveedores: la fila que no se juzgó ya no desaparece junto con la otra (antes
+> quedaba su copia huérfana). Con una sola fila por documento el resultado es el de
+> siempre. La regla de propiedad del registro (la clase de una fila no cambia)
+> no altera ninguna escritura mientras no existan filas `host_storage_ref`, y no hay
+> columnas nuevas: los contadores del GC son solo de log.
 
 **Acción de ADP:** ninguna al compilar. Cuando ADP quiera usar la ruta de archivos
 grandes tendrá que emitir la entrada descrita abajo y activar el interruptor
@@ -53,8 +63,10 @@ el motor se comporta exactamente como antes, para cualquier tamaño.
   cambia nunca: si el mismo `id` se vuelve a registrar en la otra clase para el mismo
   proveedor, el registro conserva la fila tal cual y el motor lo avisa.
 - **`attachment_gc`.** Para una fila `host_storage_ref` el GC borra solo la fila y
-  **nunca** llama al borrado de almacenamiento.
-  El contador `total_host_references_released` sube solo después de que la
+  **nunca** llama al borrado de almacenamiento. Juzga y borra fila por fila (clave
+  `sesión + documento + proveedor`): un documento con una fila del host bajo un
+  proveedor y una copia del motor bajo otro ya no pierde la otra fila ni deja huérfana
+  su copia. El contador `total_host_references_released` sube solo después de que la
   fila se borró, aparece en `gc.batch.end`, y el modo `--dry-run` dice «would release
   (drop the row, object kept)» sin imprimir la llave.
 - **Por qué no hay otra defensa.** Probé dos defensas sin cambio de esquema y las
