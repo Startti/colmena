@@ -2172,12 +2172,12 @@
 #### `src/libs/colmena/src/tabular_prepare/driver.rs`
 - Module: `tabular_prepare::driver`
 - **Used by (1)**: `src/libs/colmena/src/tabular_prepare/driver_xlsx_tests.rs`
-- Depends on (13): `storage::domain`, `tabular_prepare::convert`, `tabular_prepare::csv`, `tabular_prepare::manifest`, `tabular_prepare::part_sink`, `tabular_prepare::ports`, `tabular_prepare::prepare`, `tabular_prepare::registry`, `tabular_prepare::registry_faults`, `tabular_prepare::sqlite_registry`, `tabular_prepare::writer`, `tabular_prepare::xlsx_convert`, `tabular_prepare::xlsx_spool`
+- Depends on (15): `storage::domain`, `tabular_prepare::convert`, `tabular_prepare::csv`, `tabular_prepare::manifest`, `tabular_prepare::part_sink`, `tabular_prepare::ports`, `tabular_prepare::precheck`, `tabular_prepare::prepare`, `tabular_prepare::registry`, `tabular_prepare::registry_faults`, `tabular_prepare::sqlite_registry`, `tabular_prepare::writer`, `tabular_prepare::xlsx_convert`, `tabular_prepare::xlsx_sheet`, `tabular_prepare::xlsx_spool`
 
 #### `src/libs/colmena/src/tabular_prepare/driver_xlsx_tests.rs`
 - Module: `tabular_prepare::driver_xlsx_tests`
 - **Used by (0)**: — (leaf / entrypoint / not imported intra-crate)
-- Depends on (8): `tabular_prepare::driver`, `tabular_prepare::manifest`, `tabular_prepare::ports`, `tabular_prepare::prepare`, `tabular_prepare::registry`, `tabular_prepare::sqlite_registry`, `tabular_prepare::writer`, `tabular_prepare::xlsxfix`
+- Depends on (9): `tabular_prepare::driver`, `tabular_prepare::manifest`, `tabular_prepare::ports`, `tabular_prepare::prepare`, `tabular_prepare::registry`, `tabular_prepare::sqlite_registry`, `tabular_prepare::writer`, `tabular_prepare::xlsxfix`, `tabular_prepare::zipfix`
 
 #### `src/libs/colmena/src/tabular_prepare/gc.rs`
 - Module: `tabular_prepare::gc`
@@ -2216,7 +2216,7 @@
 
 #### `src/libs/colmena/src/tabular_prepare/precheck.rs`
 - Module: `tabular_prepare::precheck`
-- **Used by (2)**: `src/libs/colmena/src/tabular_prepare/xlsx_package.rs`, `src/libs/colmena/src/tabular_prepare/xlsx_spool.rs`
+- **Used by (3)**: `src/libs/colmena/src/tabular_prepare/driver.rs`, `src/libs/colmena/src/tabular_prepare/xlsx_package.rs`, `src/libs/colmena/src/tabular_prepare/xlsx_spool.rs`
 - Depends on (1): `tabular_prepare::zipfix`
 
 #### `src/libs/colmena/src/tabular_prepare/prepare.rs`
@@ -2276,7 +2276,7 @@
 
 #### `src/libs/colmena/src/tabular_prepare/xlsx_sheet.rs`
 - Module: `tabular_prepare::xlsx_sheet`
-- **Used by (3)**: `src/libs/colmena/src/tabular_prepare/xlsx_columns.rs`, `src/libs/colmena/src/tabular_prepare/xlsx_convert.rs`, `src/libs/colmena/src/tabular_prepare/xlsx_run.rs`
+- **Used by (4)**: `src/libs/colmena/src/tabular_prepare/driver.rs`, `src/libs/colmena/src/tabular_prepare/xlsx_columns.rs`, `src/libs/colmena/src/tabular_prepare/xlsx_convert.rs`, `src/libs/colmena/src/tabular_prepare/xlsx_run.rs`
 - Depends on (6): `tabular_prepare::xlsx_package`, `tabular_prepare::xlsx_spool`, `tabular_prepare::xlsx_strings`, `tabular_prepare::xlsx_styles`, `tabular_prepare::xlsx_workbook`, `tabular_prepare::xlsxfix`
 
 #### `src/libs/colmena/src/tabular_prepare/xlsx_spool.rs`
@@ -2306,7 +2306,7 @@
 
 #### `src/libs/colmena/src/tabular_prepare/zipfix.rs`
 - Module: `tabular_prepare::zipfix`
-- **Used by (6)**: `src/libs/colmena/src/tabular_prepare/precheck.rs`, `src/libs/colmena/src/tabular_prepare/xlsx_package.rs`, `src/libs/colmena/src/tabular_prepare/xlsx_strings.rs`, `src/libs/colmena/src/tabular_prepare/xlsx_styles.rs`, `src/libs/colmena/src/tabular_prepare/xlsx_workbook.rs`, `src/libs/colmena/src/tabular_prepare/xlsxfix.rs`
+- **Used by (7)**: `src/libs/colmena/src/tabular_prepare/driver_xlsx_tests.rs`, `src/libs/colmena/src/tabular_prepare/precheck.rs`, `src/libs/colmena/src/tabular_prepare/xlsx_package.rs`, `src/libs/colmena/src/tabular_prepare/xlsx_strings.rs`, `src/libs/colmena/src/tabular_prepare/xlsx_styles.rs`, `src/libs/colmena/src/tabular_prepare/xlsx_workbook.rs`, `src/libs/colmena/src/tabular_prepare/xlsxfix.rs`
 - Depends on (0): — (no intra-crate imports)
 
 ### text

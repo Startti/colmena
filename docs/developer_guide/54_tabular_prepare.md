@@ -749,12 +749,19 @@ maps it to what the user sees:
 |---|---|
 | `time` | the time budget (300 s) ran out; the partial output is removed |
 | `storage` | the source could not be read from storage, or a part or the manifest could not be stored, or the adapter answered with a key outside the prepared layout |
-| `unreadable_file` | the file cannot be read as CSV: empty, UTF-16 or binary, a row longer than the header, a record over 1 MiB, more than 16,384 columns, or text that does not parse |
+| `unreadable_file` | the file cannot be read as CSV: empty, UTF-16 or binary, a row longer than the header, a record over 1 MiB, more than 16,384 columns, or text that does not parse; or as xlsx: not a zip at all (also a truncated one), no workbook part, a bad relationship, XML that does not parse, a cell, row or XML element over its limit, a value past the last column of the header, or no sheet with data |
 | `table_too_large` | the table list does not fit the 64 KiB registry row (too many or too long column names) |
 | `internal` | anything else (a reader that panicked, a conversion that stopped unexpectedly, the registry unable to list keys or confirm the row): a defect or an outage on our side, never the file's fault |
+| `xlsx_too_large` | a workbook over a size limit: more bytes than `PrepareEnv::xlsx_max_bytes` (400 MiB; checked against the size the host declared **before a byte is read**, and again against the bytes as they arrive), more than 256 sheets, 1,048,576 rows or 16,384 columns in a sheet, 50,000,000 cells, or more shared-strings text than 128 MiB. The detail says to export as CSV |
+| `archive_limit` | a workbook whose zip archive is over a safety limit or inconsistent: a zip bomb (an entry or the whole over its expanded size, a compression ratio under 1 %, sizes deflate cannot produce), too many entries, an unacceptable or repeated entry name, zip64 or encryption, headers that disagree, or a part that inflates past the size its header declares |
 
-Nothing is written for a cancellation (the source was deleted or another job owns the
-row). The Excel unit adds its own reasons when it exists.
+**The two Excel reasons are spelled with an underscore** (`xlsx_too_large`, `archive_limit`).
+The ADP status endpoint currently accepts both `archive-limit` and `archive_limit`; it has to
+be reconciled with this spelling later. The detail sentences carry no sheet name, cell, key or
+library message: they are chosen by the kind of error alone (a test checks each one), so a
+sheet over a cap is named by the cap (`a sheet has more than 1048576 rows`), not by its name.
+
+Nothing is written for a cancellation (the source was deleted or another job owns the row).
 
 **Ownership.** Every object a preparation writes (each part, then the manifest) is
 preceded by an ownership check, a `still_owned` read, or the owner-guarded tracking write
