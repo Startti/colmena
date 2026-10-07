@@ -4,7 +4,8 @@
 //! a real SQLite attachment registry and a real in-memory storage that counts.
 
 use super::node_harness::{
-    registry_with_storage, run_turn, run_turn_with_tools, CountingStorage, RecordingModel,
+    registry_with_storage, run_turn, run_turn_with_config, run_turn_with_tools, CountingStorage,
+    RecordingModel,
 };
 use super::{summary_target, SummaryTarget};
 use crate::llm::domain::attachments::AttachmentSource;
@@ -270,4 +271,158 @@ async fn a_storage_ref_that_cannot_be_registered_is_reported() {
     assert!(seen.contains("no attachment catalog"), "the reason: {seen}");
     assert!(!seen.contains(KEY), "no key: {seen}");
     assert_eq!(storage.reads() + storage.stores(), 0);
+}
+
+/// M6: an author who opted out of attachments (`attachments_enabled: false`) gets
+/// no catalog, so a registered host reference would be invisible; it is not
+/// registered, and the model is told why.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_storage_ref_is_not_registered_when_attachments_are_disabled() {
+    let db = tempfile::NamedTempFile::new().unwrap();
+    let url = format!("sqlite://{}", db.path().display());
+    let storage = Arc::new(CountingStorage::default());
+    let reg = registry_with_storage(Some(storage.clone()));
+    reg.set_large_tabular(true);
+    let model = RecordingModel::new(2);
+    run_turn_with_config(
+        &reg,
+        &url,
+        vec![entry("doc-big", LIMIT + 1)],
+        Value::Null,
+        json!({"attachments_enabled": false}),
+        &model,
+    )
+    .await
+    .unwrap();
+    let seen = model.seen();
+    assert!(
+        seen.contains("[file: sales.csv]") && seen.contains("not delivered"),
+        "{seen}"
+    );
+    assert!(
+        seen.contains("attachments are disabled"),
+        "the reason: {seen}"
+    );
+    let attachments = crate::llm::infrastructure::persistence::SqliteAttachmentRegistry::new(&url)
+        .await
+        .unwrap();
+    use crate::llm::domain::AttachmentRegistry;
+    assert!(attachments
+        .lookup_by_document_id("agent_1", "doc-big")
+        .await
+        .unwrap()
+        .is_none());
+}
+
+/// M1 end to end: the class of a registered id never changes. A host reference
+/// re-sent as an ordinary file, and an engine file re-sent as a host reference, are
+/// refused and reported, and the existing row stays whole.
+#[tokio::test]
+#[serial_test::serial]
+async fn re_registering_an_id_in_the_other_class_is_refused_and_reported() {
+    use crate::llm::domain::AttachmentRegistry;
+    let db = tempfile::NamedTempFile::new().unwrap();
+    let url = format!("sqlite://{}", db.path().display());
+    let storage = Arc::new(CountingStorage::default());
+    let reg = registry_with_storage(Some(storage.clone()));
+    reg.set_large_tabular(true);
+    let attachments = crate::llm::infrastructure::persistence::SqliteAttachmentRegistry::new(&url)
+        .await
+        .unwrap();
+    let small = |id: &str| {
+        json!({"id": id, "mime_type": "text/csv", "filename": "s.csv",
+               "size_bytes": 8, "data": STANDARD.encode(b"a,b\n1,2\n")})
+    };
+
+    // host first, then the same id as an ordinary file
+    run_turn(
+        &reg,
+        &url,
+        vec![entry("doc-a", LIMIT + 1)],
+        &RecordingModel::new(2),
+    )
+    .await
+    .unwrap();
+    let model = RecordingModel::new(2);
+    run_turn(&reg, &url, vec![small("doc-a")], &model)
+        .await
+        .unwrap();
+    let row = attachments
+        .lookup_by_document_id("agent_1", "doc-a")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        row.storage_key.as_deref(),
+        Some(KEY),
+        "the host's key is still the key"
+    );
+    assert!(row.is_host_storage_ref());
+    assert!(
+        model
+            .seen()
+            .contains("already registered as a host reference"),
+        "{}",
+        model.seen()
+    );
+
+    // engine first, then the same id as a host reference
+    run_turn(&reg, &url, vec![small("doc-b")], &RecordingModel::new(2))
+        .await
+        .unwrap();
+    let copy = attachments
+        .lookup_by_document_id("agent_1", "doc-b")
+        .await
+        .unwrap()
+        .unwrap()
+        .storage_key;
+    let model = RecordingModel::new(2);
+    run_turn(&reg, &url, vec![entry("doc-b", LIMIT + 1)], &model)
+        .await
+        .unwrap();
+    let row = attachments
+        .lookup_by_document_id("agent_1", "doc-b")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.storage_key, copy, "the engine's copy stays reachable");
+    assert!(!row.is_host_storage_ref());
+    assert!(
+        model
+            .seen()
+            .contains("already registered as an engine-stored file"),
+        "{}",
+        model.seen()
+    );
+}
+
+/// Notices for the model are bounded, and each is an always-on WARN log line.
+#[tokio::test]
+#[serial_test::serial]
+async fn the_not_delivered_notices_are_bounded_and_logged_at_warn() {
+    let out = super::attachment_notices::captured();
+    let db = tempfile::NamedTempFile::new().unwrap();
+    let url = format!("sqlite://{}", db.path().display());
+    let reg = registry_with_storage(Some(Arc::new(CountingStorage::default())));
+    reg.set_large_tabular(true);
+    let model = RecordingModel::new(2);
+    let files: Vec<Value> = (0..14)
+        .map(|n| {
+            let mut e = entry(&format!("doc-{n}"), LIMIT + 1);
+            e["filename"] = json!(format!("nolog-marker-{n}.csv"));
+            e
+        })
+        .collect();
+    super::node_harness::run_turn_without_session(&reg, &url, files, &model)
+        .await
+        .unwrap();
+    let in_prompt = model.seen().matches("nolog-marker-").count();
+    assert_eq!(in_prompt, 10, "bounded for the model");
+    let logged = String::from_utf8(out.0.lock().unwrap().clone()).unwrap();
+    let lines = logged
+        .lines()
+        .filter(|l| l.contains("nolog-marker-") && l.contains("WARN"))
+        .count();
+    assert_eq!(lines, 14, "every entry is logged at WARN: {logged}");
 }

@@ -163,7 +163,7 @@ fn an_unacceptable_key_is_skipped_with_its_reason_and_never_echoed() {
 
 /// Writer that collects what a subscriber prints.
 #[derive(Clone, Default)]
-struct Captured(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+pub(super) struct Captured(pub(super) std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
 
 impl std::io::Write for Captured {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
@@ -187,7 +187,7 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Captured {
 /// interest, and another test hitting the callsite while nothing listened leaves it
 /// "never". Installing the global default rebuilds that cache, and every test then
 /// looks for its own unique marker in what was captured.
-fn captured() -> &'static Captured {
+pub(super) fn captured() -> &'static Captured {
     static CAPTURED: std::sync::OnceLock<Captured> = std::sync::OnceLock::new();
     CAPTURED.get_or_init(|| {
         let out = Captured::default();
