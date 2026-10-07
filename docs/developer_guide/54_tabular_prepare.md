@@ -888,3 +888,22 @@ Errors are a fixed enum (`ArchiveError`) whose text carries no name, size or byt
 the file. A file that is not a zip at all (`NotAnArchive`, also a truncated one) is told
 apart from one over a limit: the driver will record the first as `unreadable_file` and
 the rest as `archive_limit`.
+
+### Spooling the source (`xlsx_spool.rs`)
+
+**How it is read.** The storage port only streams a source from its start and a zip keeps
+its directory at the end, so the workbook is **spooled to a local temporary file** (at
+most 400 MiB, `MAX_XLSX_BYTES`; the storage's declared size is checked before a byte is
+read and the bytes are counted as they arrive, so a size that lies is caught) and read
+from there with random access. Memory is a chunk of the stream, never the file. On Unix
+the file is unlinked as soon as it is created (mode 0600), so it cannot outlive the
+process; elsewhere a guard removes it. **A temporary directory can be memory-backed (Cloud
+Run's is), in which case the 400 MiB count against the job's memory.** A source that does
+not exist, one that fails and a cancel are told apart (`SourceMissing`,
+`SourceUnavailable`, `Cancelled`); a local disk failure is `Local` (an internal failure,
+never the file's fault). Over the cap is `TooLarge(Bytes)`, which the driver will record
+as `xlsx_too_large`.
+
+`XlsxError` is the one error of the xlsx reader: the archive pre-check's errors, the caps,
+a part that is not valid, and the source and local failures above. Its text is fixed: no
+name, key, cell or library message is echoed.
