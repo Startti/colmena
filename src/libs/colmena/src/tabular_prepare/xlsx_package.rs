@@ -15,10 +15,14 @@ use crate::tabular_prepare::precheck::{
     check_archive_with, ArchiveError, ArchiveLimits, ArchiveSummary,
 };
 use crate::tabular_prepare::xlsx_spool::{Invalid, Spooled, XlsxError};
+use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
 use std::io::{self, BufRead, Read, Seek, SeekFrom};
 use thiserror::Error;
 use zip::ZipArchive;
+
+/// Sheets a workbook may have. It is the number of tables a manifest holds.
+pub const MAX_SHEETS: usize = crate::tabular_prepare::manifest::MAX_TABLES;
 
 /// Bytes the XML parser may buffer for one event (a tag or a text node).
 pub const MAX_TOKEN_BYTES: u64 = 1024 * 1024;
@@ -29,6 +33,7 @@ pub const MAX_TOKEN_BYTES: u64 = 1024 * 1024;
 pub(crate) struct XlsxLimits {
     pub archive: ArchiveLimits,
     pub max_token_bytes: u64,
+    pub max_sheets: usize,
 }
 
 impl Default for XlsxLimits {
@@ -36,6 +41,7 @@ impl Default for XlsxLimits {
         Self {
             archive: ArchiveLimits::default(),
             max_token_bytes: MAX_TOKEN_BYTES,
+            max_sheets: MAX_SHEETS,
         }
     }
 }
@@ -154,6 +160,7 @@ pub struct Package {
     archive: ZipArchive<Spooled>,
     summary: ArchiveSummary,
     max_token_bytes: u64,
+    max_sheets: usize,
 }
 
 impl Package {
@@ -175,7 +182,12 @@ impl Package {
             archive,
             summary,
             max_token_bytes: limits.max_token_bytes,
+            max_sheets: limits.max_sheets,
         })
+    }
+
+    pub fn max_sheets(&self) -> usize {
+        self.max_sheets
     }
 
     pub fn summary(&self) -> &ArchiveSummary {
@@ -207,6 +219,37 @@ impl Package {
             self.max_token_bytes,
         )))
     }
+}
+
+/// The next event of a part. The guard is reset once the event is read, so it
+/// bounds each event and not the part.
+pub fn next_event<'b, R: Read>(
+    reader: &mut Reader<Guarded<R>>,
+    buf: &'b mut Vec<u8>,
+) -> Result<Event<'b>, XlsxError> {
+    buf.clear();
+    let event = reader.read_event_into(buf).map_err(|e| xml_failure(&e))?;
+    reader.get_mut().reset();
+    Ok(event)
+}
+
+/// Raw XML bytes as text: UTF-8 (what the format requires) with the predefined
+/// and numeric entities resolved. `quick-xml`'s own helpers are not available
+/// here because another crate turns its `encoding` feature on.
+pub fn text_of(raw: &[u8]) -> Result<std::borrow::Cow<'_, str>, XlsxError> {
+    let text = std::str::from_utf8(raw).map_err(|_| XlsxError::Invalid(Invalid::Xml))?;
+    quick_xml::escape::unescape(text).map_err(|_| XlsxError::Invalid(Invalid::Xml))
+}
+
+/// The value of the attribute whose local name is `local` (`id` finds `r:id`).
+pub fn attribute(e: &BytesStart, local: &[u8]) -> Result<Option<String>, XlsxError> {
+    for attr in e.attributes() {
+        let attr = attr.map_err(|_| XlsxError::Invalid(Invalid::Xml))?;
+        if attr.key.local_name().as_ref() == local {
+            return text_of(&attr.value).map(|v| Some(v.into_owned()));
+        }
+    }
+    Ok(None)
 }
 
 /// A part of the workbook, parsed as XML.

@@ -27,6 +27,8 @@ pub const MAX_XLSX_BYTES: u64 = 400 * 1024 * 1024;
 pub enum Cap {
     #[error("the workbook is larger than the 400 MiB limit")]
     Bytes,
+    #[error("the workbook has more sheets than the limit")]
+    Sheets,
 }
 
 /// Why a part is not a workbook part, in fixed words.
@@ -36,6 +38,12 @@ pub enum Invalid {
     Xml,
     #[error("an XML element is longer than the limit")]
     TokenTooLong,
+    #[error("the file has no workbook part")]
+    NoWorkbook,
+    #[error("a relationship of the workbook is not valid")]
+    BadRelationship,
+    #[error("a part the workbook refers to is not in the file")]
+    MissingPart,
 }
 
 /// What can stop reading an xlsx. The text is fixed: no name, key, cell or
