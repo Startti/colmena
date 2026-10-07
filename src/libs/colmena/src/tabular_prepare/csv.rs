@@ -6,7 +6,7 @@
 //! far larger than memory.
 
 use crate::tabular_prepare::infer::{InferredSchema, SchemaInferer, INFERENCE_ROWS};
-use crate::tabular_prepare::manifest::{MAX_COLUMNS, MAX_COLUMN_NAME_CHARS};
+use crate::tabular_prepare::manifest::{is_clean_char, MAX_COLUMNS, MAX_COLUMN_NAME_CHARS};
 use crate::tabular_prepare::scan::{RecordScanner, ScanStats, MAX_RECORD_BYTES};
 use arrow_array::builder::StringBuilder;
 use arrow_array::{ArrayRef, RecordBatch};
@@ -569,7 +569,7 @@ fn column_names_counted(raw: &[String]) -> (Vec<String>, usize) {
     for (i, name) in raw.iter().enumerate() {
         let cleaned: String = name
             .chars()
-            .map(|c| if c.is_control() { '_' } else { c })
+            .map(|c| if is_clean_char(c) { c } else { '_' })
             .take(MAX_COLUMN_NAME_CHARS)
             .collect();
         let base = if cleaned.trim().is_empty() {
@@ -1898,5 +1898,15 @@ mod tests {
         let o = open_csv_with(rows_csv(), None, &ReadLimits::default()).unwrap();
         let rows: usize = o.batches.map(|b| b.unwrap().num_rows()).sum();
         assert_eq!(rows, 2);
+    }
+
+    #[test]
+    fn format_characters_in_a_header_become_underscores() {
+        let raw = vec![
+            "id\u{202E}".to_string(),
+            "\u{200B}".to_string(),
+            "ok".to_string(),
+        ];
+        assert_eq!(column_names(&raw), ["id_", "_", "ok"]);
     }
 }

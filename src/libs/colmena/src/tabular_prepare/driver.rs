@@ -27,7 +27,7 @@ use crate::tabular_prepare::convert::{
 use crate::tabular_prepare::csv::{CsvError, Encoding};
 use crate::tabular_prepare::manifest::{
     parse_part_path, part_path, unique_table_names, ConversionReport, Manifest, ManifestError,
-    TableInfo, MANIFEST_PATH, MAX_PARTS, MAX_REPORTED_DEMOTED,
+    SkippedSheet, TableInfo, MANIFEST_PATH, MAX_PARTS, MAX_REPORTED_DEMOTED,
 };
 use crate::tabular_prepare::part_sink::{PartSink, SinkError};
 use crate::tabular_prepare::ports::{
@@ -299,6 +299,12 @@ fn classify_xlsx(e: &XlsxError) -> (&'static str, String) {
             }
             .into(),
         ),
+        // Its own sentence: the cause is the number of sheets and columns together.
+        XlsxError::TooLarge(Cap::TableList) => (
+            TABLE_TOO_LARGE,
+            "the table lists of all the sheets do not fit the registry row; export fewer sheets or columns"
+                .into(),
+        ),
         XlsxError::TooLarge(cap) => (
             XLSX_TOO_LARGE,
             match cap {
@@ -314,6 +320,7 @@ fn classify_xlsx(e: &XlsxError) -> (&'static str, String) {
                 Cap::Cells => {
                     format!("the workbook has more than {MAX_CELLS} cells; export it as CSV")
                 }
+                Cap::TableList => unreachable!("classified above"),
                 Cap::SharedStrings => {
                     "the workbook's text is over the limit; export it as CSV".into()
                 }
@@ -590,6 +597,9 @@ async fn within<T>(
 /// What a workbook over the byte cap is told (the file is never read).
 const BYTES_DETAIL: &str = "the workbook is over the size limit; export it as CSV";
 
+/// The named tables a conversion made, and the sheets it skipped.
+type Named = (Vec<(String, ConvertedTable)>, Vec<SkippedSheet>);
+
 /// What a source is converted from; everything else about a preparation (claim,
 /// ownership, tracking, budget, terminal steps, failure sentences) is the same.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -722,20 +732,22 @@ async fn run_prepare(
     tokio::pin!(budget);
     let conversion = async {
         let sink = sink.clone() as Arc<dyn PartSink>;
-        let named: Result<Vec<(String, ConvertedTable)>, TableFailure> = match kind {
+        let named: Result<Named, TableFailure> = match kind {
             Kind::Csv => convert_csv_table_with(&csv_source, sink, 0, env.writer, &control)
                 .await
-                .map(|t| vec![(table_name(&req.filename), t)]),
+                .map(|t| (vec![(table_name(&req.filename), t)], Vec::new())),
             Kind::Xlsx => convert_xlsx(&xlsx_source, sink, env.writer, &control)
                 .await
-                .map(|sheets| {
-                    let raw: Vec<&str> = sheets.iter().map(|s| s.sheet.as_str()).collect();
+                .map(|converted| {
+                    let raw: Vec<&str> =
+                        converted.tables.iter().map(|s| s.sheet.as_str()).collect();
                     let names = unique_table_names(&raw);
-                    names
+                    let tables = names
                         .into_iter()
-                        .zip(sheets)
+                        .zip(converted.tables)
                         .map(|(name, sheet)| (name, sheet.table))
-                        .collect()
+                        .collect();
+                    (tables, converted.skipped)
                 }),
         };
         named
@@ -752,7 +764,7 @@ async fn run_prepare(
         }
     };
     match converted {
-        Ok(tables) => {
+        Ok((tables, skipped)) => {
             let manifest = Manifest::new(
                 tables
                     .iter()
@@ -764,7 +776,8 @@ async fn run_prepare(
                     })
                     .collect(),
             )
-            .with_conversion(tables.iter().map(|(name, t)| report_of(name, t)).collect());
+            .with_conversion(tables.iter().map(|(name, t)| report_of(name, t)).collect())
+            .with_skipped(skipped);
             let mut blob_keys = keys_of(
                 tables
                     .iter()
@@ -1281,6 +1294,11 @@ mod tests {
                 XlsxError::TooLarge(Cap::Cells),
                 reason::XLSX_TOO_LARGE,
                 "the workbook has more than 50000000 cells; export it as CSV".into(),
+            ),
+            (
+                XlsxError::TooLarge(Cap::TableList),
+                reason::TABLE_TOO_LARGE,
+                "the table lists of all the sheets do not fit the registry row; export fewer sheets or columns".into(),
             ),
             (
                 XlsxError::TooLarge(Cap::SharedStrings),

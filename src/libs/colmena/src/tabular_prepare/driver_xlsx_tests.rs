@@ -308,6 +308,51 @@ async fn a_source_that_never_answers_ends_with_the_time_reason_and_one_that_is_g
     assert!(registry.get(&gone).await.unwrap().is_none());
 }
 
+/// A sheet with a title above its table, and a plain one.
+fn titled_workbook() -> Vec<u8> {
+    let title = format!(
+        "<row r=\"1\">{}</row><row r=\"2\">{}{}</row>",
+        cell("A", 1, "Quarterly report"),
+        cell("A", 2, "id"),
+        cell("B", 2, "name")
+    );
+    let data = format!(
+        "<row r=\"1\">{}</row><row r=\"2\"><c r=\"A2\"><v>1</v></c></row>",
+        cell("A", 1, "id")
+    );
+    Wb::new()
+        .sheet("Title sheet", &title)
+        .sheet("Data", &data)
+        .build()
+}
+
+#[tokio::test]
+async fn a_sheet_without_a_header_is_recorded_in_the_manifest_and_the_workbook_is_ready() {
+    let (registry, _dir) = sqlite().await;
+    let source = source();
+    let bytes = titled_workbook();
+    let size = bytes.len() as u64;
+    let storage = PlacedStorage::with_source(&source, bytes);
+    let env = env(registry.clone(), storage.clone());
+    let PrepareOutcome::Ready(table) = prepare_xlsx(&env, &request(&source, size)).await.unwrap()
+    else {
+        panic!("expected a ready workbook");
+    };
+    let names: Vec<_> = table
+        .manifest
+        .tables
+        .iter()
+        .map(|t| t.name.as_str())
+        .collect();
+    assert_eq!(names, ["Data"]);
+    assert_eq!(table.manifest.skipped.len(), 1);
+    assert_eq!(table.manifest.skipped[0].sheet, "Title sheet");
+    assert_eq!(table.manifest.skipped[0].reason, "header_row");
+    let stored =
+        storage.objects.lock().unwrap()[&format!("{}/manifest.json", root_of(&source))].clone();
+    assert_eq!(Manifest::from_json(&stored).unwrap(), table.manifest);
+}
+
 #[tokio::test]
 async fn the_inline_runner_routes_the_xlsx_mime_and_nothing_else() {
     let (registry, _dir) = sqlite().await;

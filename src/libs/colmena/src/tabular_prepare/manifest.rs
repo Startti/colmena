@@ -137,6 +137,38 @@ pub struct Manifest {
     /// What the conversion did, per table. Absent when empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conversion: Vec<ConversionReport>,
+    /// Sheets of a workbook that were not turned into a table, and why. Absent when
+    /// empty (always, for a CSV).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped: Vec<SkippedSheet>,
+}
+
+/// The reason a sheet is skipped: its first row with a value is narrower than a row
+/// of its first 10,000 data rows (a title above the table, say), so it has no header
+/// to name its columns.
+pub const SKIPPED_HEADER_ROW: &str = "header_row";
+
+/// A sheet that is not a table.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SkippedSheet {
+    /// The sheet's name, cleaned like a table name.
+    pub sheet: String,
+    pub reason: String,
+}
+
+/// Whether a character may be part of a table or column name: not a control
+/// character and not a Unicode format character (category Cf: bidirectional
+/// overrides, zero-width characters, the byte order mark), which can make a name
+/// read as something else.
+pub fn is_clean_char(c: char) -> bool {
+    !c.is_control()
+        && !matches!(c,
+            '\u{AD}' | '\u{600}'..='\u{605}' | '\u{61C}' | '\u{6DD}' | '\u{70F}' | '\u{8E2}'
+            | '\u{180E}' | '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{206F}' | '\u{FEFF}'
+            | '\u{FFF9}'..='\u{FFFB}' | '\u{110BD}' | '\u{1D173}'..='\u{1D17A}'
+            | '\u{E0001}' | '\u{E0020}'..='\u{E007F}')
 }
 
 impl Manifest {
@@ -145,7 +177,13 @@ impl Manifest {
             version: MANIFEST_VERSION,
             tables,
             conversion: Vec::new(),
+            skipped: Vec::new(),
         }
+    }
+
+    pub fn with_skipped(mut self, skipped: Vec<SkippedSheet>) -> Self {
+        self.skipped = skipped;
+        self
     }
 
     pub fn with_conversion(mut self, conversion: Vec<ConversionReport>) -> Self {
@@ -227,7 +265,7 @@ impl Manifest {
         for t in &self.tables {
             if t.name.is_empty()
                 || t.name.chars().count() > MAX_NAME_CHARS
-                || t.name.chars().any(char::is_control)
+                || !t.name.chars().all(is_clean_char)
             {
                 return bad(format!("invalid table name {:?}", t.name));
             }
@@ -255,7 +293,7 @@ impl Manifest {
             for c in &t.columns {
                 if c.name.is_empty()
                     || c.name.chars().count() > MAX_COLUMN_NAME_CHARS
-                    || c.name.chars().any(char::is_control)
+                    || !c.name.chars().all(is_clean_char)
                 {
                     return bad(format!("invalid column name in table {:?}", t.name));
                 }
@@ -269,6 +307,16 @@ impl Manifest {
                     ));
                 }
             }
+        }
+        if self.skipped.len() > MAX_TABLES
+            || self.skipped.iter().any(|s| {
+                s.sheet.is_empty()
+                    || s.sheet.chars().count() > MAX_NAME_CHARS
+                    || !s.sheet.chars().all(is_clean_char)
+                    || s.reason != SKIPPED_HEADER_ROW
+            })
+        {
+            return bad("invalid list of skipped sheets".to_string());
         }
         let mut reported = HashSet::new();
         for r in &self.conversion {
@@ -289,7 +337,7 @@ impl Manifest {
                 || r.demoted.iter().any(|n| {
                     n.is_empty()
                         || n.chars().count() > MAX_COLUMN_NAME_CHARS
-                        || n.chars().any(char::is_control)
+                        || !n.chars().all(is_clean_char)
                 })
             {
                 return bad(format!(
@@ -403,7 +451,7 @@ pub fn unique_table_names(raw: &[&str]) -> Vec<String> {
         let cleaned: String = name
             .trim()
             .chars()
-            .map(|c| if c.is_control() { '_' } else { c })
+            .map(|c| if is_clean_char(c) { c } else { '_' })
             .take(MAX_NAME_CHARS)
             .collect();
         let base = if cleaned.trim().is_empty() {
@@ -1023,6 +1071,71 @@ mod tests {
                 Manifest::from_json(&json).is_err(),
                 "{t:?} read under the floor"
             );
+        }
+    }
+
+    #[test]
+    fn format_characters_are_stripped_from_names_and_refused_in_a_manifest() {
+        // A right-to-left override, a zero-width space and the byte order mark can
+        // make a name read as something else.
+        let raw = ["Report\u{202E}fdp.exe", "a\u{200B}b", "\u{FEFF}sales"];
+        let names = unique_table_names(&raw);
+        assert_eq!(names, ["Report_fdp.exe", "a_b", "_sales"]);
+        for c in ['\u{202E}', '\u{200B}', '\u{FEFF}', '\u{2066}', '\u{E0041}'] {
+            assert!(!is_clean_char(c), "{c:?}");
+        }
+        assert!(is_clean_char('é') && is_clean_char('日') && is_clean_char(' '));
+        let mut m = Manifest::new(vec![TableInfo {
+            name: "sales".into(),
+            rows: 1,
+            parts: 1,
+            columns: vec![ColumnInfo {
+                name: "a\u{202E}b".into(),
+                column_type: ColumnType::String,
+                uncompressed_bytes: 1,
+                in_memory_bytes: 40,
+            }],
+        }]);
+        assert!(m.to_json().is_err(), "a format character in a column name");
+        m.tables[0].columns[0].name = "ab".into();
+        m.tables[0].name = "\u{200B}x".into();
+        assert!(m.to_json().is_err(), "and in a table name");
+    }
+
+    #[test]
+    fn skipped_sheets_round_trip_and_nothing_else_is_accepted() {
+        let table = TableInfo {
+            name: "Data".into(),
+            rows: 1,
+            parts: 1,
+            columns: vec![ColumnInfo {
+                name: "a".into(),
+                column_type: ColumnType::String,
+                uncompressed_bytes: 1,
+                in_memory_bytes: 40,
+            }],
+        };
+        let skip = |sheet: &str, reason: &str| SkippedSheet {
+            sheet: sheet.into(),
+            reason: reason.into(),
+        };
+        let ok = Manifest::new(vec![table.clone()])
+            .with_skipped(vec![skip("Title", SKIPPED_HEADER_ROW)]);
+        let json = ok.to_json().unwrap();
+        assert!(json.contains("\"skipped\""));
+        assert_eq!(Manifest::from_json(json.as_bytes()).unwrap(), ok);
+        // Absent when empty: a CSV's manifest is what it was.
+        assert!(!Manifest::new(vec![table.clone()])
+            .to_json()
+            .unwrap()
+            .contains("skipped"));
+        for bad in [
+            skip("", SKIPPED_HEADER_ROW),
+            skip("a\u{0}b", SKIPPED_HEADER_ROW),
+            skip("Title", "because"),
+        ] {
+            let m = Manifest::new(vec![table.clone()]).with_skipped(vec![bad]);
+            assert!(m.to_json().is_err());
         }
     }
 }
