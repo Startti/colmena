@@ -62,6 +62,12 @@ pub struct ConversationAttachment {
 }
 
 impl ConversationAttachment {
+    /// Whether this row points at an object the HOST owns (see
+    /// [`origin::HOST_STORAGE_REF`](super::origin::HOST_STORAGE_REF)).
+    pub fn is_host_storage_ref(&self) -> bool {
+        self.origin.as_deref() == Some(super::origin::HOST_STORAGE_REF)
+    }
+
     /// Catalog rendering for the load_attachment tool description.
     /// Format: `"<doc_id>" — <label or filename> (<mime>, <size>)[. <description>]`
     pub fn catalog_line(&self) -> String {

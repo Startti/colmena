@@ -36,12 +36,39 @@ pub struct StaleAttachmentQuery {
     pub limit: u32,
 }
 
+/// What an [`AttachmentRegistry::upsert_checked`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpsertOutcome {
+    /// The row was inserted or updated.
+    Written,
+    /// The row exists in the OTHER ownership class (it references an object the
+    /// host owns, or one the engine stored) and was left untouched.
+    OwnershipConflict,
+}
+
 #[cfg_attr(test, mockall::automock)]
 #[async_trait]
 pub trait AttachmentRegistry: Send + Sync {
     /// Insert or update a registry entry. Idempotent on
-    /// `(agent_session_id, document_id, provider)`.
+    /// `(agent_session_id, document_id, provider)`. The ownership class of an
+    /// existing row never changes (see [`upsert_checked`](Self::upsert_checked));
+    /// a write of the other class is ignored.
     async fn upsert(&self, input: UpsertAttachmentInput) -> Result<(), AttachmentError>;
+
+    /// [`upsert`](Self::upsert) that says whether the write happened. The
+    /// ownership class of an existing `(agent_session_id, document_id, provider)`
+    /// row (host reference, `origin = host_storage_ref`, or engine-stored) is
+    /// immutable: a write of the other class changes nothing (`origin`,
+    /// `storage_key` and `provider_file_id` all stay) and returns
+    /// [`UpsertOutcome::OwnershipConflict`]. Implementations enforce this in the
+    /// write itself, atomically, so no caller can get it wrong. The default is for
+    /// registries that do not distinguish classes.
+    async fn upsert_checked(
+        &self,
+        input: UpsertAttachmentInput,
+    ) -> Result<UpsertOutcome, AttachmentError> {
+        self.upsert(input).await.map(|()| UpsertOutcome::Written)
+    }
 
     /// Fetch a single entry for the given session + document.
     /// Returns `Ok(None)` when nothing is registered.
