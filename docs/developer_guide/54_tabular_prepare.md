@@ -1111,3 +1111,17 @@ no rows for one with only a header. A value past the last column of the header i
 The limits structures (`XlsxLimits`, `SheetLimits`, `ArchiveLimits`) are public types whose
 fields are crate-private, so a host can only use the defaults and a test inside the crate can
 lower a limit to move a boundary.
+
+### Writing a sheet (`xlsx_run.rs`)
+
+`run_sheet` is the second read of a sheet: it streams every row, typed, into the part writer.
+Reading and typing run on a blocking thread and the writer on the async side, joined by a
+channel of two batches, as for a CSV. The blocking half stops at the next row when its token
+is cancelled or the receiving side is gone, and a run that fails cancels it and waits for it,
+so no thread outlives the run. A cell that contradicts its column's type comes back as
+`RunEnd::Conflict` (column, and data row from zero), which the caller turns into a restart.
+
+**Memory is bounded by constants, never by the sheet or the workbook** (which is on disk): a
+row (at most 1 MiB of text over 16,384 cells), a batch (8,192 rows, 1,000,000 cells or 8 MiB of
+text), two batches in the channel, one part in the writer (at most 64 MiB), the shared-strings
+table (at most 168 MiB) and the XML parser's buffer for one event (1 MiB).
