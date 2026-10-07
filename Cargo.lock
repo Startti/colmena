@@ -819,6 +819,7 @@ dependencies = [
  "pyo3",
  "pyo3-async-runtimes",
  "pythonize",
+ "quick-xml 0.31.0",
  "regex",
  "reqwest 0.11.27",
  "reqwest 0.13.4",
@@ -853,6 +854,7 @@ dependencies = [
  "y-sync",
  "yrs 0.26.0",
  "yup-oauth2",
+ "zip 0.6.6",
  "zstd",
 ]
 

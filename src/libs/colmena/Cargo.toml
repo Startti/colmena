@@ -157,6 +157,12 @@ arrow-cast = "58.3.0"
 arrow-csv = "58.3.0"
 # Windows-1252 CSV files are transcoded to UTF-8 (already in the lock).
 encoding_rs = "0.8"
+# Excel (`xlsx`) preparation reads the workbook archive itself, to bound what it
+# inflates: `zip` for the container (stored and deflate only, as calamine uses
+# it) and `quick-xml` for its parts. Both versions are already in the lock
+# through calamine, so the lock gains no package.
+zip = { version = "0.6", default-features = false, features = ["deflate"] }
+quick-xml = "0.31"
 
 # One-time OAuth consent CLI utility (`colmena_oauth_setup` binary). Tiny dep
 # (~30 KB), only pulled in for the binary target — the lib itself does not use it.
