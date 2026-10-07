@@ -25,6 +25,7 @@ Reglas:
   - `data`: base64 puro (sin prefijo `data:mime;base64,`). Solo válido si raw < 30 MB.
   - `url`: signed URL HTTPS a GCS. TTL típico 6h.
   - `path`: legacy local (solo dev/tests). Solo válido si archivo < 30 MB.
+- **`storage_key`** (solo con `COLMENA_LARGE_TABULAR` activo): una entrada que trae únicamente `storage_key` (sin `data`, `url` ni `path`), de tipo `text/csv` o xlsx y con `size_bytes` **estrictamente mayor** a 50 MiB, se convierte en `FileSource::StorageRef(key)`: no se descarga, no se sube al proveedor y no se resume. Cualquier otra entrada con solo `storage_key` se omite en silencio, como siempre. Ver «Archivos tabulares grandes» más abajo.
 - **Threshold del emisor**: el sistema upstream que genera el JSON decide a 30 MB. Colmena no decide threshold; confía en el emisor.
 - **`size_bytes`**: hint, no ground truth. Validar contra los bytes reales tras download/decode.
 
@@ -71,8 +72,10 @@ Un archivo así viaja como `FileSource::StorageRef(key)`: ya está en el almacen
 - **Resolución.** `LlmCallUseCase::resolve_files` deja intacto un `StorageRef`: sin descarga, sin subida al proveedor, sin consulta a la caché, y un turno cuyo único archivo es una referencia no termina en `AllFilesFailedToResolve`. Una referencia tampoco cuenta como archivo resuelto: si todos los archivos que sí necesitaban resolverse fallan, el turno sigue reportando `AllFilesFailedToResolve` aunque viajen referencias.
 - **Fuente de la fila.** `file_registrations` sabe qué fuente darle a la fila del catálogo de un `StorageRef`: la llave (`AttachmentSource::Path(key)`). Todavía nada registra un `StorageRef`.
 - **Adaptadores.** Ningún adaptador de proveedor acepta la variante. Los cuatro conversores (OpenAI chat y responses, Anthropic, Gemini) devuelven `InternalError` con el nombre del archivo, nunca su llave, en vez de enviarlo o descartarlo; el nodo nunca pone un archivo así en un mensaje.
+- **Lectura de `files[]`.** `parse_file_entries_with(entradas, local_mode, large_tabular)` convierte una entrada que trae solo `storage_key` y es grande en un `StorageRef` (id, mime, filename y tamaño se conservan; el id no es obligatorio). Tiene la prioridad más baja: una entrada que además trae `data`, `url` o `path` se lee como siempre. Cualquier otra entrada con solo `storage_key` (interruptor apagado, otro tipo, tamaño ausente o de 50 MiB o menos) se omite en silencio, y las demás conservan su índice. `parse_file_entries` es la llamada con el interruptor apagado.
+- **Interruptor.** `ColmenaEngine::new` entrega `EngineConfig.prepare.large_tabular` al registro de nodos (`set_large_tabular`), que lo comparte con `llm_call`; el nodo lo lee una vez por llamada. Un nodo construido fuera de un motor lo tiene apagado.
 
-Pruebas: `cargo test --lib large_tabular` cubre la definición en su frontera, `cargo test --lib large_files` el paso directo en la resolución y la fuente del registro, y `cargo test --lib refuses_a_storage_ref` los rechazos de los adaptadores.
+Pruebas: `cargo test --lib large_tabular` cubre la definición en su frontera, `cargo test --lib storage_key_entries` la lectura de `files[]`, `cargo test --lib large_files` el paso directo en la resolución y la fuente del registro, y `cargo test --lib refuses_a_storage_ref` los rechazos de los adaptadores.
 
 ## Estrategia por provider
 

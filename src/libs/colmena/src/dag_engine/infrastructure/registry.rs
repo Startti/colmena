@@ -25,6 +25,8 @@ pub struct HashMapNodeRegistry {
     http_node: Arc<crate::dag_engine::infrastructure::nodes::http::HttpNode>,
     /// `llm_call`'s slot for the host token port (MCP `auth_refresh`).
     llm_host_token_port: Arc<std::sync::OnceLock<Arc<dyn HostTokenPort>>>,
+    /// `llm_call`'s copy of the large tabular switch (shared with the node).
+    llm_large_tabular: Arc<std::sync::atomic::AtomicBool>,
 }
 
 use crate::llm::infrastructure::ConversationRepositoryFactory;
@@ -173,6 +175,7 @@ impl HashMapNodeRegistry {
                 llm_node = llm_node.with_storage(st);
             }
             let llm_host_token_port = llm_node.host_token_port.clone();
+            let llm_large_tabular = llm_node.large_tabular.clone();
             nodes.insert("llm_call".to_string(), Arc::new(llm_node));
 
             // --- Registrar Nodos Python ---
@@ -389,6 +392,7 @@ impl HashMapNodeRegistry {
                 foreach_node: Some(fe_node),
                 http_node,
                 llm_host_token_port,
+                llm_large_tabular,
             }
         })
     }
@@ -419,6 +423,14 @@ impl HashMapNodeRegistry {
             let _ = for_each.host_token_port.set(port.clone());
         }
         let _ = self.http_node.host_token_port.set(port);
+    }
+
+    /// Sets the large tabular switch (`COLMENA_LARGE_TABULAR`, read once into
+    /// `EngineConfig.prepare`) on the nodes that route large files. Off is the
+    /// default and leaves every node exactly as it is without the feature.
+    pub fn set_large_tabular(&self, enabled: bool) {
+        self.llm_large_tabular
+            .store(enabled, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Injects the shared node registry handle into the `for_each` node so it
@@ -573,6 +585,18 @@ mod registry_tavily_tests {
         );
         let for_each = reg.foreach_node.as_ref().expect("for_each registered");
         assert!(for_each.host_token_port.get().is_some(), "for_each too");
+    }
+
+    /// Off by default; the engine's switch reaches the slot `llm_call` reads.
+    #[test]
+    fn the_large_tabular_switch_is_off_until_the_engine_sets_it() {
+        use std::sync::atomic::Ordering::Relaxed;
+        let reg = build_registry();
+        assert!(!reg.llm_large_tabular.load(Relaxed), "off by default");
+        reg.set_large_tabular(true);
+        assert!(reg.llm_large_tabular.load(Relaxed));
+        reg.set_large_tabular(false);
+        assert!(!reg.llm_large_tabular.load(Relaxed));
     }
 
     #[test]
