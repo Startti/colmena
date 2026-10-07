@@ -50,6 +50,10 @@ pub enum Invalid {
     NoWorkbook,
     #[error("a relationship of the workbook is not valid")]
     BadRelationship,
+    #[error("an XML part is nested deeper than the limit")]
+    TooDeep,
+    #[error("an XML tag has more attributes than the limit")]
+    TooManyAttributes,
     #[error("a part the workbook refers to is not in the file")]
     MissingPart,
     #[error("the workbook has more cell styles than the limit")]

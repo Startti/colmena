@@ -14,7 +14,7 @@
 //! hidden worksheets are kept: the file is what the user uploaded, the manifest
 //! lists every table, and a hidden sheet is not a reason to drop data silently.
 
-use crate::tabular_prepare::xlsx_package::{attribute, next_event, Package};
+use crate::tabular_prepare::xlsx_package::{attribute, next_event, Package, MAX_SMALL_PART_BYTES};
 use crate::tabular_prepare::xlsx_spool::{Cap, Invalid, XlsxError};
 use quick_xml::events::Event;
 use std::collections::HashMap;
@@ -84,7 +84,7 @@ fn read_relationships(
 ) -> Result<Relationships, XlsxError> {
     let mut by_id = HashMap::new();
     let mut first_of_type: HashMap<String, String> = HashMap::new();
-    let mut reader = pkg.xml(part)?;
+    let mut reader = pkg.xml(part, MAX_SMALL_PART_BYTES)?;
     let mut buf = Vec::new();
     loop {
         match next_event(&mut reader, &mut buf)? {
@@ -132,7 +132,7 @@ pub fn read_workbook(pkg: &mut Package) -> Result<Workbook, XlsxError> {
     let mut date1904 = false;
     {
         let max = pkg.max_sheets();
-        let mut reader = pkg.xml(&workbook_part)?;
+        let mut reader = pkg.xml(&workbook_part, MAX_SMALL_PART_BYTES)?;
         let mut buf = Vec::new();
         loop {
             match next_event(&mut reader, &mut buf)? {

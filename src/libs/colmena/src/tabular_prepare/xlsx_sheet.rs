@@ -22,7 +22,9 @@
 //!   increase is a corrupt part.
 //! - Blank rows (no non-empty cell, or numbers skipped) are counted, not delivered.
 
-use crate::tabular_prepare::xlsx_package::{attribute, next_event, text_of, Package};
+use crate::tabular_prepare::xlsx_package::{
+    attribute, next_event, text_of, Package, MAX_SHEET_PART_BYTES,
+};
 use crate::tabular_prepare::xlsx_spool::{Cap, Invalid, XlsxError};
 use crate::tabular_prepare::xlsx_strings::{unescape_ooxml, SharedStrings};
 use crate::tabular_prepare::xlsx_styles::{temporal, Styles, Temporal};
@@ -289,7 +291,7 @@ pub(crate) fn read_sheet_with(
     let mut cells = RowCells::new();
     let mut pending: Option<Pending> = None;
     let (mut in_v, mut in_is, mut in_t, mut in_phonetic) = (false, false, false, false);
-    let mut reader = pkg.xml(part)?;
+    let mut reader = pkg.xml(part, MAX_SHEET_PART_BYTES)?;
     let mut buf = Vec::new();
     loop {
         match next_event(&mut reader, &mut buf)? {

@@ -18,7 +18,7 @@
 //! Bounded: at most [`MAX_XFS`] styles and as many custom formats are read; a
 //! part with more is refused, so the table is never larger than 64 KiB.
 
-use crate::tabular_prepare::xlsx_package::{attribute, next_event, Package};
+use crate::tabular_prepare::xlsx_package::{attribute, next_event, Package, MAX_SMALL_PART_BYTES};
 use crate::tabular_prepare::xlsx_spool::{Invalid, XlsxError};
 use chrono::{Datelike, NaiveDate, Timelike};
 use quick_xml::events::Event;
@@ -116,7 +116,7 @@ pub fn read_styles(pkg: &mut Package, part: &str) -> Result<Styles, XlsxError> {
     let mut custom: HashMap<u32, NumFmt> = HashMap::new();
     let mut xfs: Vec<NumFmt> = Vec::new();
     let mut in_cell_xfs = false;
-    let mut reader = pkg.xml(part)?;
+    let mut reader = pkg.xml(part, MAX_SMALL_PART_BYTES)?;
     let mut buf = Vec::new();
     loop {
         match next_event(&mut reader, &mut buf)? {
