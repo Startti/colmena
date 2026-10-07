@@ -41,11 +41,14 @@ pub mod sqlite_registry;
 pub mod writer;
 pub mod xlsx_package;
 pub mod xlsx_spool;
+pub mod xlsx_workbook;
 
 #[cfg(test)]
 mod registry_contract;
 #[cfg(test)]
 mod registry_faults;
+#[cfg(test)]
+mod xlsxfix;
 #[cfg(test)]
 mod zipfix;
 

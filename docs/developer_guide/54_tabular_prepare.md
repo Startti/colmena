@@ -932,3 +932,21 @@ dependencies, at the versions calamine already pulls in, so `Cargo.lock` gains o
 edges and no package. Calamine itself is not used for large workbooks: it opens the
 archive itself (no inflate guard), loads the whole shared-strings table into memory and
 cannot be bounded from outside.
+
+### The sheets of the workbook (`xlsx_workbook.rs`)
+
+`read_workbook` finds the workbook part through the package relationships (`_rels/.rels`,
+type `officeDocument`), never by a fixed name, then reads its `sheet` elements and the
+relationships they name. Every target is resolved against the directory of its part and
+must stay inside the package (a target that climbs out with `..` is `BadRelationship`) and
+name a part the archive has (`MissingPart`). Bounded by construction: at most 256 `sheet`
+elements are read (a 257th is `TooLarge(Sheets)` and the rest of the part is not read; 256
+is the number of tables a manifest can hold), a sheet name is cut at 255 characters, and a
+relationships part is scanned for the ids the workbook asked for, so what is kept is a
+handful of strings whatever its size.
+
+Decisions: a sheet whose relationship is not a worksheet (a chart sheet, a dialog sheet, a
+macro sheet) has no cells and is not a table. **Hidden and very hidden worksheets are
+kept**: the file is what the user uploaded, the manifest lists every table, and a hidden
+sheet is not a reason to drop data silently (the manifest has no visibility flag, so the
+model cannot tell it was hidden).
