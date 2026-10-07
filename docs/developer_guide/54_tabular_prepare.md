@@ -933,15 +933,16 @@ edges and no package. Calamine itself is not used for large workbooks: it opens 
 archive itself (no inflate guard), loads the whole shared-strings table into memory and
 cannot be bounded from outside.
 
-### The sheets of the workbook (`xlsx_workbook.rs`)
+### The structure of the workbook (`xlsx_workbook.rs`)
 
 `read_workbook` finds the workbook part through the package relationships (`_rels/.rels`,
-type `officeDocument`), never by a fixed name, then reads its `sheet` elements and the
-relationships they name. Every target is resolved against the directory of its part and
-must stay inside the package (a target that climbs out with `..` is `BadRelationship`) and
-name a part the archive has (`MissingPart`). Bounded by construction: at most 256 `sheet`
-elements are read (a 257th is `TooLarge(Sheets)` and the rest of the part is not read; 256
-is the number of tables a manifest can hold), a sheet name is cut at 255 characters, and a
+type `officeDocument`), never by a fixed name, then reads the `sheet` elements, the date
+system (`workbookPr date1904`) and the relationships the workbook names. Every target is
+resolved against the directory of its part and must stay inside the package (a target that
+climbs out with `..` is `BadRelationship`) and name a part the archive has (`MissingPart`);
+external relationships are ignored. Bounded by construction: at most 256 `sheet` elements
+are read (a 257th is `TooLarge(Sheets)` and the rest of the part is not read; 256 is the
+number of tables a manifest can hold), a sheet name is cut at 255 characters, and a
 relationships part is scanned for the ids the workbook asked for, so what is kept is a
 handful of strings whatever its size.
 

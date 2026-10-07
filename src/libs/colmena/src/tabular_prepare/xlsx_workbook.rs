@@ -1,4 +1,5 @@
-//! The structure of a workbook: which parts hold its sheets. Only the relationships the workbook names are
+//! The structure of a workbook: which parts hold its sheets, shared strings and
+//! styles, and the date system. Only the relationships the workbook names are
 //! followed, and every target must resolve to a part the archive has.
 //!
 //! The workbook part is found through the package relationships
@@ -34,6 +35,10 @@ pub struct SheetRef {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Workbook {
     pub sheets: Vec<SheetRef>,
+    /// The 1904 date system (`workbookPr date1904`).
+    pub date1904: bool,
+    pub shared_strings: Option<String>,
+    pub styles: Option<String>,
 }
 
 /// `target` as a part name, relative to `base_dir` (no trailing slash), or
@@ -124,6 +129,7 @@ pub fn read_workbook(pkg: &mut Package) -> Result<Workbook, XlsxError> {
 
     // The sheets and the date system, from the workbook part.
     let mut listed: Vec<(String, String, bool)> = Vec::new();
+    let mut date1904 = false;
     {
         let max = pkg.max_sheets();
         let mut reader = pkg.xml(&workbook_part)?;
@@ -131,19 +137,26 @@ pub fn read_workbook(pkg: &mut Package) -> Result<Workbook, XlsxError> {
         loop {
             match next_event(&mut reader, &mut buf)? {
                 Event::Eof => break,
-                Event::Start(e) | Event::Empty(e) if e.local_name().as_ref() == b"sheet" => {
-                    if listed.len() == max {
-                        return Err(XlsxError::TooLarge(Cap::Sheets));
+                Event::Start(e) | Event::Empty(e) => match e.local_name().as_ref() {
+                    b"workbookPr" => {
+                        date1904 =
+                            matches!(attribute(&e, b"date1904")?.as_deref(), Some("1" | "true"));
                     }
-                    let name = attribute(&e, b"name")?.unwrap_or_default();
-                    let rid = attribute(&e, b"id")?.ok_or(invalid(Invalid::BadRelationship))?;
-                    let hidden = matches!(
-                        attribute(&e, b"state")?.as_deref(),
-                        Some("hidden" | "veryHidden")
-                    );
-                    let name = name.chars().take(MAX_SHEET_NAME_CHARS).collect();
-                    listed.push((name, rid, hidden));
-                }
+                    b"sheet" => {
+                        if listed.len() == max {
+                            return Err(XlsxError::TooLarge(Cap::Sheets));
+                        }
+                        let name = attribute(&e, b"name")?.unwrap_or_default();
+                        let rid = attribute(&e, b"id")?.ok_or(invalid(Invalid::BadRelationship))?;
+                        let hidden = matches!(
+                            attribute(&e, b"state")?.as_deref(),
+                            Some("hidden" | "veryHidden")
+                        );
+                        let name = name.chars().take(MAX_SHEET_NAME_CHARS).collect();
+                        listed.push((name, rid, hidden));
+                    }
+                    _ => {}
+                },
                 _ => {}
             }
         }
@@ -155,7 +168,12 @@ pub fn read_workbook(pkg: &mut Package) -> Result<Workbook, XlsxError> {
     }
     let ids: std::collections::HashSet<&str> =
         listed.iter().map(|(_, id, _)| id.as_str()).collect();
-    let (by_id, _) = read_relationships(pkg, &rels_part, &|id| ids.contains(id), &[])?;
+    let (by_id, first) = read_relationships(
+        pkg,
+        &rels_part,
+        &|id| ids.contains(id),
+        &["sharedStrings", "styles"],
+    )?;
     let part_of = |target: &str| -> Result<String, XlsxError> {
         let part = resolve(&dir, target).ok_or(invalid(Invalid::BadRelationship))?;
         if pkg.has(&part) {
@@ -175,7 +193,13 @@ pub fn read_workbook(pkg: &mut Package) -> Result<Workbook, XlsxError> {
             });
         }
     }
-    Ok(Workbook { sheets })
+    let optional = |kind: &str| first.get(kind).map(|t| part_of(t)).transpose();
+    Ok(Workbook {
+        sheets,
+        date1904,
+        shared_strings: optional("sharedStrings")?,
+        styles: optional("styles")?,
+    })
 }
 
 #[cfg(test)]
@@ -211,6 +235,8 @@ mod tests {
             .sheet("Lookup", "")
             .sheet("Totals", "")
             .hidden(1)
+            .shared(&["a"])
+            .styles(&[0], &[])
             .build();
         let wb = read(bytes).await.unwrap();
         let sheets: Vec<_> = wb
@@ -226,6 +252,33 @@ mod tests {
                 ("Totals", "xl/worksheets/sheet3.xml", false),
             ]
         );
+        assert!(!wb.date1904);
+        assert_eq!(wb.shared_strings.as_deref(), Some("xl/sharedStrings.xml"));
+        assert_eq!(wb.styles.as_deref(), Some("xl/styles.xml"));
+    }
+
+    #[tokio::test]
+    async fn a_workbook_written_by_a_real_library_is_read() {
+        let mut book = rust_xlsxwriter::Workbook::new();
+        book.add_worksheet().set_name("First").unwrap();
+        let second = book.add_worksheet();
+        second.set_name("Second").unwrap();
+        second.write_string(0, 0, "x").unwrap();
+        let bytes = book.save_to_buffer().unwrap();
+        let wb = read(bytes).await.unwrap();
+        let names: Vec<_> = wb.sheets.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["First", "Second"]);
+        assert!(wb.shared_strings.is_some() && wb.styles.is_some());
+    }
+
+    #[tokio::test]
+    async fn the_1904_date_system_is_read_and_a_chart_sheet_is_not_a_table() {
+        let wb = read(Wb::new().sheet("A", "").chartsheet().date1904().build())
+            .await
+            .unwrap();
+        assert!(wb.date1904);
+        assert_eq!(wb.sheets.len(), 1);
+        assert_eq!(wb.shared_strings, None);
     }
 
     #[tokio::test]
@@ -326,5 +379,21 @@ mod tests {
         let no_office = "<Relationships><Relationship Id=\"r\" Type=\"http://x/thumbnail\" Target=\"t.png\"/></Relationships>";
         let r = read(package_with("worksheets/sheet1.xml", Some(no_office))).await;
         assert_eq!(r, Err(XlsxError::Invalid(Invalid::NoWorkbook)));
+    }
+
+    #[tokio::test]
+    async fn an_external_relationship_is_ignored_and_a_long_name_is_cut() {
+        let long = "n".repeat(300);
+        let wb = format!("<workbook xmlns:r=\"r\"><sheets><sheet name=\"{long}\" r:id=\"rId1\"/></sheets></workbook>");
+        let rels = "<Relationships><Relationship Id=\"rId1\" Type=\"http://x/worksheet\" Target=\"worksheets/sheet1.xml\"/><Relationship Id=\"rId2\" Type=\"http://x/styles\" Target=\"http://evil/styles.xml\" TargetMode=\"External\"/></Relationships>";
+        let bytes = build(&[
+            Entry::stored("_rels/.rels", ROOT.as_bytes()),
+            Entry::stored("xl/workbook.xml", wb.as_bytes()),
+            Entry::stored("xl/_rels/workbook.xml.rels", rels.as_bytes()),
+            Entry::stored("xl/worksheets/sheet1.xml", b"<worksheet/>"),
+        ]);
+        let wb = read(bytes).await.unwrap();
+        assert_eq!(wb.sheets[0].name.chars().count(), MAX_SHEET_NAME_CHARS);
+        assert_eq!(wb.styles, None);
     }
 }
