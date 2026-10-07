@@ -1693,3 +1693,15 @@ SAME gate as `/v1/run`: the bearer token compared by digest, readiness, and the 
 Logs carry the request id, the outcome, counts and durations: never code, inputs, outputs, paths or headers.
 The proofs are in `tests/tabular_run_remote.rs` (Linux, root, `COLMENA_PYEXEC_JAIL_TESTS=1`, one test at a time; the stall
 test takes the 30 s idle limit).
+
+### The client side (`remote_seam.rs`)
+
+The request body is produced while the parts are read from storage: one part at a time, one chunk in memory, through a channel
+of two chunks, so the HTTP client's backpressure holds the storage read; each file declares its size when it starts and the
+bytes counted from storage must equal it (a storage that sends more or fewer aborts the body with an error, so the server never
+takes a short file for the real one); a part or the call over its limit is refused before its bytes are read. Only canonical
+paths go out, never a storage key or URL. The response header is waited for as long as the code may run plus the idle limit,
+then each kept output is spooled to an anonymous private temporary file (bounded by the collector's caps) and handed to the
+sink; its name and size are checked again here. A server that sends more files or bytes than the collector would keep is not
+followed. Dropping the call drops the request, which makes the server release the volume. Nothing of the executor's or the
+server's text reaches the model.

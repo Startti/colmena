@@ -103,6 +103,22 @@ pub enum RejectReason {
     Unreadable,
 }
 
+impl RejectReason {
+    /// The reason a server named on the wire (its `Debug` spelling); an unknown
+    /// one reads as `Unreadable`.
+    pub fn from_wire(text: &str) -> Self {
+        match text {
+            "BadName" => Self::BadName,
+            "NotARegularFile" => Self::NotARegularFile,
+            "HardLinked" => Self::HardLinked,
+            "TooLarge" => Self::TooLarge,
+            "OverFileCount" => Self::OverFileCount,
+            "OverTotal" => Self::OverTotal,
+            _ => Self::Unreadable,
+        }
+    }
+}
+
 /// An entry that was not kept. `name` is set only when the name passed the
 /// charset check, so it is safe to show; a name that failed is never kept.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -124,6 +140,17 @@ pub struct OutFile {
 }
 
 impl OutFile {
+    /// An output the TRUSTED side wrote itself (spooled from a response) after
+    /// it checked the name and the size: a file at the start, `size` bytes long.
+    pub(crate) fn spooled(name: String, format: OutFormat, size: u64, file: File) -> Self {
+        Self {
+            name,
+            format,
+            size,
+            file,
+        }
+    }
+
     /// The descriptor, to read at most `size` bytes from.
     pub fn into_file(self) -> File {
         self.file
@@ -142,7 +169,7 @@ pub struct Collected {
 /// A name the model may choose: ASCII letters, digits, `.`, `_`, `-`, 1 to
 /// [`OUT_NAME_MAX`] bytes, not starting with `.` or `-`, ending in a known
 /// extension. Raw bytes in, so a name that is not UTF-8 is simply refused.
-fn checked_name(raw: &[u8]) -> Option<(String, OutFormat)> {
+pub(crate) fn checked_name(raw: &[u8]) -> Option<(String, OutFormat)> {
     if raw.is_empty() || raw.len() > OUT_NAME_MAX {
         return None;
     }
