@@ -8,6 +8,7 @@ pub mod llm;
 pub mod skills;
 pub mod storage;
 pub mod tabular_prepare;
+pub mod tabular_run;
 pub mod text;
 pub mod web;
 
