@@ -50,6 +50,8 @@ pub mod xlsx_styles;
 pub mod xlsx_workbook;
 
 #[cfg(test)]
+mod driver_xlsx_tests;
+#[cfg(test)]
 mod registry_contract;
 #[cfg(test)]
 mod registry_faults;

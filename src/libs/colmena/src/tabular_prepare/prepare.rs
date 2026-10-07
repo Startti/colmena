@@ -18,6 +18,8 @@ use crate::storage::domain::{
 use crate::tabular_prepare::convert::{stream_reader, ConvertError, CsvSource};
 use crate::tabular_prepare::manifest::{parse_part_path, MANIFEST_PATH};
 use crate::tabular_prepare::part_sink::{PartSink, SinkError};
+use crate::tabular_prepare::xlsx_convert::XlsxSource;
+use crate::tabular_prepare::xlsx_spool::{spool_stream, Spooled, XlsxError};
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::StreamExt;
@@ -189,6 +191,60 @@ impl CsvSource for StorageCsvSource {
             }
         });
         Ok(Box::new(stream_reader(Box::pin(counted), cancel.clone())))
+    }
+}
+
+/// The source workbook, read from storage and written to a local file (see
+/// `xlsx_spool`). The bytes written so far are counted for progress.
+pub struct StorageXlsxSource {
+    storage: Arc<dyn OutputStorageRepository>,
+    source_key: String,
+    max_bytes: u64,
+    read: Arc<AtomicU64>,
+}
+
+impl StorageXlsxSource {
+    /// `max_bytes` is the largest workbook accepted: the storage's own size is
+    /// checked against it before a byte is read, and the bytes as they arrive.
+    pub fn new(
+        storage: Arc<dyn OutputStorageRepository>,
+        source_key: &str,
+        max_bytes: u64,
+    ) -> Self {
+        Self {
+            storage,
+            source_key: source_key.to_string(),
+            max_bytes,
+            read: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    /// Bytes of the source written to the local file so far.
+    pub fn bytes_read(&self) -> Arc<AtomicU64> {
+        self.read.clone()
+    }
+}
+
+#[async_trait]
+impl XlsxSource for StorageXlsxSource {
+    async fn spool(&self, cancel: &CancellationToken) -> Result<Spooled, XlsxError> {
+        let stored = self
+            .storage
+            .read_stream(&self.source_key)
+            .await
+            .map_err(|e| match e {
+                StorageError::InvalidInput(_) => XlsxError::SourceMissing,
+                _ => XlsxError::SourceUnavailable,
+            })?;
+        spool_stream(
+            &std::env::temp_dir(),
+            stored.stream,
+            Some(stored.size_bytes),
+            self.max_bytes,
+            cancel,
+            &self.read,
+        )
+        .await
     }
 }
 

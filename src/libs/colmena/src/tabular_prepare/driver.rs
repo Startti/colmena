@@ -22,7 +22,7 @@
 
 use crate::storage::domain::{OutputStorageRepository, StorageError};
 use crate::tabular_prepare::convert::{
-    convert_csv_table_with, ConvertControl, ConvertError, ConvertedTable, TableError,
+    convert_csv_table_with, ConvertControl, ConvertError, ConvertedTable, TableError, TableFailure,
 };
 use crate::tabular_prepare::csv::{CsvError, Encoding};
 use crate::tabular_prepare::manifest::{
@@ -34,11 +34,15 @@ use crate::tabular_prepare::ports::{
     NoopProgress, PrepareConfig, PrepareProgress, PrepareProgressInfo, PrepareRequest,
     PrepareRunner, ProgressState,
 };
-use crate::tabular_prepare::prepare::{PrepareStartError, StorageCsvSource, StoragePartSink};
+use crate::tabular_prepare::prepare::{
+    PrepareStartError, StorageCsvSource, StoragePartSink, StorageXlsxSource,
+};
 use crate::tabular_prepare::registry::{
     ClaimRequest, PreparationRegistry, ReadyInfo, RegistryError, TerminalOutcome, FORMAT_VERSION,
 };
 use crate::tabular_prepare::writer::{WriterConfig, WriterError};
+use crate::tabular_prepare::xlsx_convert::convert_xlsx;
+use crate::tabular_prepare::xlsx_spool::{XlsxError, MAX_XLSX_BYTES};
 use async_trait::async_trait;
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
@@ -92,6 +96,14 @@ pub mod reason {
     pub const TABLE_TOO_LARGE: &str = "table_too_large";
     /// Anything else: a defect, never the file's fault.
     pub const INTERNAL: &str = "internal";
+    /// A workbook over a size limit (bytes, sheets, rows, columns, cells or shared
+    /// text): the user is told to export it as CSV.
+    pub const XLSX_TOO_LARGE: &str = "xlsx_too_large";
+    /// A workbook whose archive is over a safety limit or inconsistent (a zip bomb,
+    /// too many entries, headers that disagree). Written with an underscore: the
+    /// ADP status endpoint accepts both `archive-limit` and `archive_limit` and has
+    /// to be reconciled with this spelling.
+    pub const ARCHIVE_LIMIT: &str = "archive_limit";
 }
 
 /// Source of "now". Read once per registry write.
@@ -110,6 +122,10 @@ pub struct PrepareEnv {
     pub progress: Arc<dyn PrepareProgress>,
     pub budget: Duration,
     pub writer: WriterConfig,
+    /// The largest workbook prepared, checked against the size the storage reports
+    /// before a byte is read (a larger one fails with `xlsx_too_large`; 0 refuses
+    /// every workbook).
+    pub xlsx_max_bytes: u64,
 }
 
 impl PrepareEnv {
@@ -125,6 +141,7 @@ impl PrepareEnv {
             progress: Arc::new(NoopProgress),
             budget: PREP_TIMEOUT,
             writer: WriterConfig::default(),
+            xlsx_max_bytes: MAX_XLSX_BYTES,
         }
     }
 
@@ -152,6 +169,11 @@ impl PrepareEnv {
         self.writer = writer;
         self
     }
+
+    pub fn with_xlsx_max_bytes(mut self, max: u64) -> Self {
+        self.xlsx_max_bytes = max;
+        self
+    }
 }
 
 /// A table that is ready: what the registry row and the manifest record, and
@@ -168,9 +190,10 @@ pub struct PreparedTable {
     /// aborted run): safe to delete.
     pub stale_keys: Vec<String>,
     pub prepared_bytes: u64,
-    /// Everything the conversion reported (rows, parts, encoding, replacements,
-    /// the UTF-8 counts, blank and padded rows, demoted columns, restarts).
-    pub converted: ConvertedTable,
+    /// Everything the conversion reported for each table, in manifest order (rows,
+    /// parts, encoding, replacements, the UTF-8 counts, blank and padded rows,
+    /// demoted columns, restarts). A CSV has one; a workbook one per sheet.
+    pub tables: Vec<ConvertedTable>,
 }
 
 /// A failure that was recorded in the registry.
@@ -278,9 +301,9 @@ pub fn report_of(table: &str, t: &ConvertedTable) -> ConversionReport {
     }
 }
 
-/// The in-process runner behind `InlineTrigger`: prepares the CSV a request names.
-/// With the engine switch off it runs nothing (no registry read, no storage
-/// call); a source that is not a CSV is left for the Excel unit and is logged.
+/// The in-process runner behind `InlineTrigger`: prepares the CSV or the xlsx a
+/// request names, by its mime type. With the engine switch off it runs nothing (no
+/// registry read, no storage call); any other source is logged and dropped.
 pub struct CsvPrepareRunner {
     env: Arc<PrepareEnv>,
     enabled: bool,
@@ -305,10 +328,14 @@ pub(crate) fn opaque_id(source_key: &str) -> String {
     digest.iter().take(6).map(|b| format!("{b:02x}")).collect()
 }
 
-fn is_csv(mime: &str) -> bool {
+/// The mime type of an `.xlsx` workbook.
+pub const XLSX_MIME: &str = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+
+/// Whether `mime` (parameters such as a charset ignored, case too) is `expected`.
+fn is_mime(mime: &str, expected: &str) -> bool {
     mime.split(';')
         .next()
-        .is_some_and(|m| m.trim().eq_ignore_ascii_case("text/csv"))
+        .is_some_and(|m| m.trim().eq_ignore_ascii_case(expected))
 }
 
 #[async_trait]
@@ -318,15 +345,19 @@ impl PrepareRunner for CsvPrepareRunner {
             return;
         }
         let source = opaque_id(&req.source_key);
-        if !is_csv(&req.mime_type) {
+        let prepared = if is_mime(&req.mime_type, "text/csv") {
+            prepare_csv(&self.env, &req).await
+        } else if is_mime(&req.mime_type, XLSX_MIME) {
+            prepare_xlsx(&self.env, &req).await
+        } else {
             tracing::warn!(
                 target: "colmena::tabular_prepare",
                 source = %source,
-                "only CSV sources are prepared; the request was dropped"
+                "only CSV and xlsx sources are prepared; the request was dropped"
             );
             return;
-        }
-        match prepare_csv(&self.env, &req).await {
+        };
+        match prepared {
             Ok(PrepareOutcome::Failed(f)) => tracing::warn!(
                 target: "colmena::tabular_prepare",
                 source = %source,
@@ -375,6 +406,10 @@ struct OwnedSink {
 /// harmless, deleting is idempotent; an object written and never listed is what
 /// this prevents.
 const TRACK_AHEAD: usize = 16;
+
+/// [`TRACK_AHEAD`], for the tests of other modules.
+#[cfg(test)]
+pub(crate) const TRACK_AHEAD_FOR_TESTS: usize = TRACK_AHEAD;
 
 impl OwnedSink {
     /// Lists in the row, owner-guarded, the keys that writing `path` needs listed,
@@ -469,6 +504,17 @@ async fn within<T>(
     bounded(env, step).await.unwrap_or_else(|| Err(no_answer()))
 }
 
+/// What a workbook over the byte cap is told (the file is never read).
+const BYTES_DETAIL: &str = "the workbook is over the size limit; export it as CSV";
+
+/// What a source is converted from; everything else about a preparation (claim,
+/// ownership, tracking, budget, terminal steps, failure sentences) is the same.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Csv,
+    Xlsx,
+}
+
 /// Prepares `req.source_key` as table 0 of its source. Registry errors are
 /// returned as they are: if the registry cannot be written nothing can be
 /// recorded.
@@ -476,7 +522,25 @@ pub async fn prepare_csv(
     env: &PrepareEnv,
     req: &PrepareRequest,
 ) -> Result<PrepareOutcome, RegistryError> {
-    let outcome = run_prepare(env, req).await;
+    prepare(env, req, Kind::Csv).await
+}
+
+/// Prepares the workbook `req.source_key`: one table per sheet that holds a value.
+/// A workbook larger than `env.xlsx_max_bytes` fails with `xlsx_too_large` before
+/// a byte is read. Otherwise as [`prepare_csv`].
+pub async fn prepare_xlsx(
+    env: &PrepareEnv,
+    req: &PrepareRequest,
+) -> Result<PrepareOutcome, RegistryError> {
+    prepare(env, req, Kind::Xlsx).await
+}
+
+async fn prepare(
+    env: &PrepareEnv,
+    req: &PrepareRequest,
+    kind: Kind,
+) -> Result<PrepareOutcome, RegistryError> {
+    let outcome = run_prepare(env, req, kind).await;
     let (state, done, total) = match &outcome {
         Ok(PrepareOutcome::Ready(_)) => {
             (ProgressState::Ready, req.size_bytes, Some(req.size_bytes))
@@ -500,6 +564,7 @@ pub async fn prepare_csv(
 async fn run_prepare(
     env: &PrepareEnv,
     req: &PrepareRequest,
+    kind: Kind,
 ) -> Result<PrepareOutcome, RegistryError> {
     let stored = match StoragePartSink::new(env.storage.clone(), &req.source_key) {
         Ok(sink) => Arc::new(sink),
@@ -534,9 +599,19 @@ async fn run_prepare(
         tracked_parts: std::sync::Mutex::new(std::collections::HashMap::new()),
         manifest_tracked: AtomicBool::new(false),
     });
+    if kind == Kind::Xlsx && req.size_bytes > env.xlsx_max_bytes {
+        // Over the cap by the size the host declared: nothing is read.
+        let detail = BYTES_DETAIL.to_string();
+        return fail(env, req, &owner, reason::XLSX_TOO_LARGE, detail, Vec::new()).await;
+    }
     let control = ConvertControl::new();
-    let source = StorageCsvSource::new(env.storage.clone(), &req.source_key);
-    let read = source.bytes_read();
+    let csv_source = StorageCsvSource::new(env.storage.clone(), &req.source_key);
+    let xlsx_source =
+        StorageXlsxSource::new(env.storage.clone(), &req.source_key, env.xlsx_max_bytes);
+    let read = match kind {
+        Kind::Csv => csv_source.bytes_read(),
+        Kind::Xlsx => xlsx_source.bytes_read(),
+    };
     // Under the total until the table is ready: the file is read before its output
     // is written, and a bar must not show complete while that goes on.
     let running = |done: u64| PrepareProgressInfo {
@@ -562,34 +637,57 @@ async fn run_prepare(
     // reader; the keys were listed in the row before each put.
     let budget = (env.sleeper)(env.budget);
     tokio::pin!(budget);
+    let conversion = async {
+        let sink = sink.clone() as Arc<dyn PartSink>;
+        let named: Result<Vec<(String, ConvertedTable)>, TableFailure> = match kind {
+            Kind::Csv => convert_csv_table_with(&csv_source, sink, 0, env.writer, &control)
+                .await
+                .map(|t| vec![(table_name(&req.filename), t)]),
+            Kind::Xlsx => convert_xlsx(&xlsx_source, sink, env.writer, &control)
+                .await
+                .map(|sheets| {
+                    let raw: Vec<&str> = sheets.iter().map(|s| s.sheet.as_str()).collect();
+                    let names = unique_table_names(&raw);
+                    names
+                        .into_iter()
+                        .zip(sheets)
+                        .map(|(name, sheet)| (name, sheet.table))
+                        .collect()
+                }),
+        };
+        named
+    };
     let converted = tokio::select! {
-        done = convert_csv_table_with(
-            &source,
-            sink.clone() as Arc<dyn PartSink>,
-            0,
-            env.writer,
-            &control,
-        ) => done,
+        done = conversion => done,
         never = ticker => {
             let _: std::convert::Infallible = never;
             unreachable!("the progress ticker never ends")
         }
         () = &mut budget => {
             let detail = "the preparation did not finish within its time budget".to_string();
-            return fail(env, req, &owner, reason::TIME, detail, keys_of(control.paths_of(0))).await;
+            return fail(env, req, &owner, reason::TIME, detail, keys_of(control.paths())).await;
         }
     };
     match converted {
-        Ok(table) => {
-            let name = table_name(&req.filename);
-            let manifest = Manifest::new(vec![TableInfo {
-                name: name.clone(),
-                rows: table.written.rows,
-                parts: table.written.parts,
-                columns: table.written.columns.clone(),
-            }])
-            .with_conversion(vec![report_of(&name, &table)]);
-            let mut blob_keys = keys_of(table.blob_paths.clone());
+        Ok(tables) => {
+            let manifest = Manifest::new(
+                tables
+                    .iter()
+                    .map(|(name, t)| TableInfo {
+                        name: name.clone(),
+                        rows: t.written.rows,
+                        parts: t.written.parts,
+                        columns: t.written.columns.clone(),
+                    })
+                    .collect(),
+            )
+            .with_conversion(tables.iter().map(|(name, t)| report_of(name, t)).collect());
+            let mut blob_keys = keys_of(
+                tables
+                    .iter()
+                    .flat_map(|(_, t)| t.blob_paths.iter().cloned())
+                    .collect(),
+            );
             let manifest_key = stored.key_of(MANIFEST_PATH);
             blob_keys.push(manifest_key.clone());
             let manifest_put = async {
@@ -637,7 +735,11 @@ async fn run_prepare(
                     return fail(env, req, &owner, code, detail, blob_keys).await;
                 }
             };
-            let mut live: Vec<String> = table.live_paths(0);
+            let mut live: Vec<String> = tables
+                .iter()
+                .enumerate()
+                .flat_map(|(idx, (_, t))| t.live_paths(idx))
+                .collect();
             live.push(MANIFEST_PATH.to_string());
             let prepared_bytes = stored.bytes_of(live.iter());
             let outcome = within(
@@ -658,14 +760,19 @@ async fn run_prepare(
             match outcome {
                 TerminalOutcome::Cancelled => settle_lost(env, req, &blob_keys).await,
                 TerminalOutcome::Written => {
-                    let stale_keys = keys_of(table.stale_paths.clone());
+                    let stale_keys = keys_of(
+                        tables
+                            .iter()
+                            .flat_map(|(_, t)| t.stale_paths.iter().cloned())
+                            .collect(),
+                    );
                     Ok(PrepareOutcome::Ready(Box::new(PreparedTable {
                         manifest,
                         manifest_key,
                         blob_keys,
                         stale_keys,
                         prepared_bytes,
-                        converted: table,
+                        tables: tables.into_iter().map(|(_, t)| t).collect(),
                     })))
                 }
             }
@@ -678,6 +785,7 @@ async fn run_prepare(
             if matches!(
                 failure.error,
                 TableError::Convert(ConvertError::SourceMissing)
+                    | TableError::Xlsx(XlsxError::SourceMissing)
             ) {
                 return source_gone(env, req, &owner, keys).await;
             }
@@ -1176,7 +1284,7 @@ pub(crate) mod cases {
         else {
             panic!("expected a ready table");
         };
-        let c = &table.converted;
+        let c = &table.tables[0];
         assert_eq!(c.encoding, Encoding::Windows1252);
         assert_eq!((c.replacements, c.padded_rows, c.blank_dropped), (0, 1, 1));
         assert!(c.utf8_invalid >= 2 && c.utf8_valid_multibyte == 0);
@@ -1691,10 +1799,12 @@ pub(crate) mod cases {
     pub(crate) async fn with_the_switch_off_or_another_mime_the_runner_touches_nothing(
         registry: Arc<dyn PreparationRegistry>,
     ) {
-        let xlsx = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+        // The xlsx mime is routed to `prepare_xlsx` (see `driver_xlsx_tests`); the
+        // legacy `.xls` one is not an accepted type and is dropped like any other.
         for (switch, mime) in [
             ("off", "text/csv"),
-            ("on", xlsx),
+            ("off", XLSX_MIME),
+            ("on", "application/vnd.ms-excel"),
             ("on", "text/csvx"),
             ("on", ""),
         ] {
