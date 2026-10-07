@@ -951,3 +951,28 @@ macro sheet) has no cells and is not a table. **Hidden and very hidden worksheet
 kept**: the file is what the user uploaded, the manifest lists every table, and a hidden
 sheet is not a reason to drop data silently (the manifest has no visibility flag, so the
 model cannot tell it was hidden).
+
+### Dates (`xlsx_styles.rs`)
+
+A cell stores a number and its style says how to show it, so only the style tells a date
+from a quantity. `read_styles` reads the number format of every `cellXfs` style (the
+`cellStyleXfs` are not cell styles and are ignored); a style that does not exist is plain.
+At most 65,536 styles and as many custom formats are read (Excel's own limit is 64,000);
+a part with more is `TooManyStyles`.
+
+- **When a number is a date.** Only when its style's format is one: a built-in date or time
+  format (14 to 22, 27 to 36, 45 to 47, 50 to 58), or a custom code with a date or time
+  letter (`y d h s`, `m` as a month, or a minute beside an hour or second) in its first
+  section, outside quotes, brackets (a colour, a locale; `[h]` `[m]` `[s]` are elapsed time)
+  and after a backslash or underscore. `General`, `0.00`, `0.0%`, `0.00E+00`, `@` stay numbers.
+- **What a date serial becomes** (`temporal`): a date (`YYYY-MM-DD`; days since 1970), a
+  timestamp (`YYYY-MM-DD HH:MM:SS`, microseconds, **no zone**) when the serial has a time or
+  the format shows one (a date format over a serial with a time keeps the time, so a value
+  is never reduced to its day), or a time of day (`HH:MM:SS`) for a time-only format or a
+  fraction on day 0. Seconds are rounded; **a fraction of a second is not kept**.
+- **The 1900 system keeps Excel's quirk**: serial 60 is a 29 February 1900 that never
+  existed, so it stays a number, and serials 1 to 59 are shifted one day to keep the rest
+  right (44,197 is 2021-01-01; tested at 1, 59, 60, 61 and 9999-12-31). The 1904 system
+  (`workbookPr date1904`) is 1,462 days behind (42,735 is the same 2021-01-01).
+- **No date means a number**: negative, not finite, past 9999-12-31, day 0 without a time,
+  an elapsed time past one day (`[h]:mm` over 1.5), and any serial under a plain format.

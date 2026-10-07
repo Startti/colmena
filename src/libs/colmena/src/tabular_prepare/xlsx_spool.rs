@@ -44,6 +44,8 @@ pub enum Invalid {
     BadRelationship,
     #[error("a part the workbook refers to is not in the file")]
     MissingPart,
+    #[error("the workbook has more cell styles than the limit")]
+    TooManyStyles,
 }
 
 /// What can stop reading an xlsx. The text is fixed: no name, key, cell or
