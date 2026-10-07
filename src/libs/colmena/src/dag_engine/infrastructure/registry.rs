@@ -433,6 +433,13 @@ impl HashMapNodeRegistry {
             .store(enabled, std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// Whether the large tabular switch is on for the nodes of this registry.
+    #[cfg(test)]
+    pub(crate) fn large_tabular_enabled(&self) -> bool {
+        self.llm_large_tabular
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// Injects the shared node registry handle into the `for_each` node so it
     /// can dispatch to target nodes at execution time. Mirrors
     /// `set_subgraph_executor` above: creates an intentional self-referential
