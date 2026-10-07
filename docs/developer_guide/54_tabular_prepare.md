@@ -1015,3 +1015,25 @@ text; a boolean is a boolean; a number is a number (a stored value that is not a
 text); an error (`#DIV/0!`) is its **text**, so it is visible and turns a numeric column into
 text instead of vanishing; an empty string is empty, as in a CSV. Cells are counted as `c`
 elements, empty ones too, because they cost the parser the same.
+
+Two more decisions, each pinned by a test:
+
+- **Formulas are never evaluated.** A formula cell is read as the value Excel cached beside it
+  (`v`); one with no cached value is empty. The formula text (`f`) is skipped, never parsed.
+- **Merged cells are not expanded.** Excel keeps a merged range's value in its top-left cell
+  and leaves the others empty; that is what is read (`mergeCells` is ignored). Filling the
+  range would invent values.
+
+**Limits** (inclusive): 1,048,576 rows and 16,384 columns (Excel's own, and the CSV's column
+cap), 50,000,000 cells (`TooLarge(Cells)`), 131,072 bytes of text in a cell (Excel's 32,767
+characters at four bytes) and 1 MiB of text in a row (the CSV record limit): the last two are
+`CellTooLong` and `RowTooLong`, which the converter reports as an unreadable file, like a CSV
+record over its limit. A row number or a column that does not increase, or a shared-string
+index that does not exist, is a corrupt part (`BadCell`).
+- **Dates.** A number whose style's format is a date or time (see *Dates* above) is delivered
+  as a date, timestamp or time (`Cell::Temporal`); the same number under a plain style stays a
+  number, and so does one under a style that does not exist. An ISO 8601 cell (`t="d"`, a date
+  or a date and time without a zone) is a date or timestamp too; one that is not stays text.
+  The 1904 system moves every date. A test reads a workbook written by `rust_xlsxwriter`
+  (numbers, text with markup characters, a boolean, a date, a cached formula, a merged range)
+  through the whole stack.
