@@ -30,6 +30,9 @@ pub(crate) struct FakeStorage {
     pub reads: Mutex<Vec<String>>,
     /// Keys that fail to read.
     pub broken: Mutex<Vec<String>>,
+    /// Keys served by a generator instead of the bytes in `objects`.
+    #[allow(clippy::type_complexity)]
+    pub custom: Mutex<HashMap<String, Box<dyn Fn() -> StoredStream + Send + Sync>>>,
 }
 
 impl FakeStorage {
@@ -40,6 +43,7 @@ impl FakeStorage {
             chunk: 1024,
             reads: Mutex::new(vec![]),
             broken: Mutex::new(vec![]),
+            custom: Mutex::new(HashMap::new()),
         })
     }
 
@@ -48,6 +52,14 @@ impl FakeStorage {
             root: None,
             ..Arc::try_unwrap(Self::new()).ok().unwrap()
         })
+    }
+
+    /// Serve `key` from `make`, called at each read.
+    pub fn serve(&self, key: &str, make: impl Fn() -> StoredStream + Send + Sync + 'static) {
+        self.custom
+            .lock()
+            .unwrap()
+            .insert(key.to_string(), Box::new(make));
     }
 
     pub fn put(&self, key: &str, bytes: Vec<u8>) {
@@ -65,6 +77,9 @@ impl OutputStorageRepository for FakeStorage {
     }
     async fn read_stream(&self, key: &str) -> Result<StoredStream, StorageError> {
         self.reads.lock().unwrap().push(key.to_string());
+        if let Some(make) = self.custom.lock().unwrap().get(key) {
+            return Ok(make());
+        }
         if self.broken.lock().unwrap().iter().any(|k| k == key) {
             return Err(StorageError::BackendUnavailable(format!(
                 "secret detail about {key}"
@@ -209,5 +224,75 @@ pub(crate) async fn prepared_with(
         storage,
         manifest,
         _dir: dir,
+    }
+}
+
+/// How many bytes of generated chunks are alive at once.
+#[derive(Default)]
+pub(crate) struct Live {
+    pub now: std::sync::atomic::AtomicUsize,
+    pub peak: std::sync::atomic::AtomicUsize,
+    pub produced: std::sync::atomic::AtomicUsize,
+}
+
+struct Chunk {
+    data: Vec<u8>,
+    live: Arc<Live>,
+}
+
+impl AsRef<[u8]> for Chunk {
+    fn as_ref(&self) -> &[u8] {
+        &self.data
+    }
+}
+
+impl Drop for Chunk {
+    fn drop(&mut self) {
+        self.live
+            .now
+            .fetch_sub(self.data.len(), std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// A stream of `total` bytes in chunks of `chunk`, made one at a time as the
+/// consumer asks, that DECLARES `declared` bytes (a lie when it differs from
+/// `total`). `live` records the most chunk bytes alive at once. When `fail_at`
+/// is `Some(n)` the nth chunk is an error.
+pub(crate) fn generated(
+    total: u64,
+    chunk: usize,
+    declared: u64,
+    live: Arc<Live>,
+    fail_at: Option<usize>,
+) -> StoredStream {
+    use std::sync::atomic::Ordering::SeqCst;
+    let stream = futures::stream::unfold((0u64, 0usize), move |(sent, n)| {
+        let live = live.clone();
+        async move {
+            if sent >= total {
+                return None;
+            }
+            if fail_at == Some(n) {
+                return Some((
+                    Err(StorageError::BackendUnavailable(
+                        "secret detail from the adapter".into(),
+                    )),
+                    (total, n + 1),
+                ));
+            }
+            let len = (total - sent).min(chunk as u64) as usize;
+            let now = live.now.fetch_add(len, SeqCst) + len;
+            live.peak.fetch_max(now, SeqCst);
+            live.produced.fetch_add(len, SeqCst);
+            let data = vec![b'x'; len];
+            let bytes = Bytes::from_owner(Chunk { data, live });
+            Some((Ok(bytes), (sent + len as u64, n + 1)))
+        }
+    });
+    StoredStream {
+        stream: Box::pin(stream),
+        size_bytes: declared,
+        mime_type: "application/octet-stream".into(),
+        filename: "part".into(),
     }
 }

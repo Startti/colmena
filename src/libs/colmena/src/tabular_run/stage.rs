@@ -214,6 +214,10 @@ mod tests {
     use super::super::verify::verify_prepared;
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+    use std::sync::atomic::Ordering::SeqCst;
+    use std::sync::Arc;
+
+    const MIB: usize = 1024 * 1024;
 
     async fn plan_of(p: &Prepared) -> PreparedTables {
         verify_prepared(&*p.registry, &*p.storage, SOURCE)
@@ -344,6 +348,222 @@ mod tests {
         stage_tables(&*p.storage, &plan, &[0], dir.path(), at)
             .await
             .unwrap();
+    }
+
+    /// A part that declares more than the part limit is refused before its
+    /// file exists and before one byte of it is read.
+    #[tokio::test]
+    async fn a_part_declaring_over_the_part_limit_is_refused_unread() {
+        let p = prepared(&[("sales", 1)], 4).await;
+        let plan = plan_of(&p).await;
+        let live = Arc::new(Live::default());
+        let key = plan.part_key(0, 0).unwrap();
+        let l = live.clone();
+        p.storage.serve(&key, move || {
+            generated(10 * MIB as u64, MIB, 10 * MIB as u64, l.clone(), None)
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let limits = StageLimits {
+            total_bytes: 100 * MIB as u64,
+            part_bytes: 5 * MIB as u64,
+        };
+        let err = stage_tables(&*p.storage, &plan, &[0], dir.path(), limits)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err,
+            RunRefusal::OverBudget(Budget::Part {
+                limit_bytes: limits.part_bytes
+            })
+        );
+        assert_eq!(live.produced.load(SeqCst), 0, "no chunk was read");
+        assert!(entries(dir.path()).is_empty());
+    }
+
+    /// The declared size is not trusted: a stream that declares little and sends
+    /// without end is cut off at the limit, one chunk past it at most.
+    #[tokio::test]
+    async fn a_stream_that_outgrows_its_declared_size_is_cut_off_at_the_limit() {
+        let p = prepared(&[("sales", 1)], 4).await;
+        let plan = plan_of(&p).await;
+        let live = Arc::new(Live::default());
+        let key = plan.part_key(0, 0).unwrap();
+        let l = live.clone();
+        p.storage.serve(&key, move || {
+            generated(u64::MAX, MIB, 1024, l.clone(), None)
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let limits = StageLimits {
+            total_bytes: 100 * MIB as u64,
+            part_bytes: 4 * MIB as u64,
+        };
+        let err = stage_tables(&*p.storage, &plan, &[0], dir.path(), limits)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err,
+            RunRefusal::OverBudget(Budget::Part {
+                limit_bytes: limits.part_bytes
+            })
+        );
+        let produced = live.produced.load(SeqCst);
+        assert!(
+            produced <= 5 * MIB,
+            "read {produced} bytes past a 4 MiB limit"
+        );
+        assert!(entries(dir.path()).is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_total_is_enforced_on_arriving_bytes_too() {
+        let p = prepared(&[("sales", 1)], 4).await;
+        let plan = plan_of(&p).await;
+        let live = Arc::new(Live::default());
+        let key = plan.part_key(0, 0).unwrap();
+        let l = live.clone();
+        p.storage.serve(&key, move || {
+            generated(u64::MAX, MIB, 1024, l.clone(), None)
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let manifest_len = p.manifest.to_json().unwrap().len() as u64;
+        let limits = StageLimits {
+            total_bytes: manifest_len + 3 * MIB as u64,
+            part_bytes: 100 * MIB as u64,
+        };
+        let err = stage_tables(&*p.storage, &plan, &[0], dir.path(), limits)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, RunRefusal::OverBudget(Budget::Data { .. })),
+            "{err:?}"
+        );
+        assert!(live.produced.load(SeqCst) <= 4 * MIB);
+        assert!(entries(dir.path()).is_empty());
+    }
+
+    /// Bytes that differ from the declared size mean the part is not what the
+    /// storage said it was: refused, nothing kept.
+    #[tokio::test]
+    async fn bytes_that_differ_from_the_declared_size_are_refused() {
+        for (total, declared) in [(1000u64, 2000u64), (2000, 1000)] {
+            let p = prepared(&[("sales", 1)], 4).await;
+            let plan = plan_of(&p).await;
+            let live = Arc::new(Live::default());
+            let key = plan.part_key(0, 0).unwrap();
+            let l = live.clone();
+            p.storage.serve(&key, move || {
+                generated(total, 100, declared, l.clone(), None)
+            });
+            let dir = tempfile::tempdir().unwrap();
+            let err = stage_tables(&*p.storage, &plan, &[0], dir.path(), Default::default())
+                .await
+                .unwrap_err();
+            assert_eq!(
+                err,
+                RunRefusal::Invalid(Invalid::Parts),
+                "{total}/{declared}"
+            );
+            assert!(entries(dir.path()).is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_storage_failure_mid_part_hides_the_adapters_text_and_leaves_nothing() {
+        let p = prepared(&[("sales", 2)], 4).await;
+        let plan = plan_of(&p).await;
+        let live = Arc::new(Live::default());
+        let key = plan.part_key(0, 1).unwrap();
+        let l = live.clone();
+        p.storage
+            .serve(&key, move || generated(1000, 100, 1000, l.clone(), Some(3)));
+        let dir = tempfile::tempdir().unwrap();
+        let err = stage_tables(&*p.storage, &plan, &[0], dir.path(), Default::default())
+            .await
+            .unwrap_err();
+        assert_eq!(err, RunRefusal::Storage);
+        assert!(!err.message().contains("secret"));
+        assert!(entries(dir.path()).is_empty());
+    }
+
+    /// Memory held while staging is one chunk, however large the part: 64 MiB in
+    /// 1 MiB chunks never has more than two chunks alive.
+    #[tokio::test]
+    async fn memory_is_one_chunk_whatever_the_size_of_the_part() {
+        let p = prepared(&[("sales", 1)], 4).await;
+        let plan = plan_of(&p).await;
+        let live = Arc::new(Live::default());
+        let key = plan.part_key(0, 0).unwrap();
+        let l = live.clone();
+        let total = 64 * MIB as u64;
+        p.storage
+            .serve(&key, move || generated(total, MIB, total, l.clone(), None));
+        let dir = tempfile::tempdir().unwrap();
+        let limits = StageLimits {
+            total_bytes: 200 * MIB as u64,
+            part_bytes: 100 * MIB as u64,
+        };
+        stage_tables(&*p.storage, &plan, &[0], dir.path(), limits)
+            .await
+            .unwrap();
+        assert_eq!(live.produced.load(SeqCst) as u64, total);
+        let peak = live.peak.load(SeqCst);
+        assert!(
+            peak <= 2 * MIB,
+            "peak of {peak} bytes alive for 1 MiB chunks"
+        );
+        assert_eq!(
+            std::fs::metadata(dir.path().join("t0/part-00000.parquet"))
+                .unwrap()
+                .len(),
+            total
+        );
+        assert_eq!(live.now.load(SeqCst), 0, "every chunk was dropped");
+    }
+
+    /// A name already taken in the directory (a link the call could not have
+    /// planted, but a bug or a reused directory could) is refused, never followed.
+    #[tokio::test]
+    async fn an_existing_name_or_link_is_refused_and_never_followed() {
+        let p = prepared(&[("sales", 1)], 4).await;
+        let plan = plan_of(&p).await;
+        let dir = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(elsewhere.path(), dir.path().join("t0")).unwrap();
+        let err = stage_tables(&*p.storage, &plan, &[0], dir.path(), Default::default())
+            .await
+            .unwrap_err();
+        assert_eq!(err, RunRefusal::Unavailable(Unavailable::Executor));
+        assert!(
+            entries(elsewhere.path()).is_empty(),
+            "nothing went through the link"
+        );
+        // The same for a link in place of the manifest file.
+        let dir = tempfile::tempdir().unwrap();
+        let target = elsewhere.path().join("victim");
+        std::fs::write(&target, b"keep").unwrap();
+        std::os::unix::fs::symlink(&target, dir.path().join("manifest.json")).unwrap();
+        let err = stage_tables(&*p.storage, &plan, &[0], dir.path(), Default::default())
+            .await
+            .unwrap_err();
+        assert_eq!(err, RunRefusal::Unavailable(Unavailable::Executor));
+        assert_eq!(std::fs::read(&target).unwrap(), b"keep");
+    }
+
+    #[tokio::test]
+    async fn a_directory_that_cannot_be_written_is_the_executors_problem() {
+        let p = prepared(&[("sales", 1)], 4).await;
+        let plan = plan_of(&p).await;
+        let err = stage_tables(
+            &*p.storage,
+            &plan,
+            &[0],
+            Path::new("/nonexistent-colmena-stage-dir"),
+            Default::default(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err, RunRefusal::Unavailable(Unavailable::Executor));
+        assert!(!err.message().contains("nonexistent"));
     }
 
     #[test]
