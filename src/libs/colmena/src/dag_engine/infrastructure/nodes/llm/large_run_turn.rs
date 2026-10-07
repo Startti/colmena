@@ -137,3 +137,69 @@ async fn a_runtime_that_is_off_answers_with_the_typed_refusal() {
     assert!(seen.contains("large_tabular_disabled"), "{seen}");
     assert_eq!(exec.calls(), 0);
 }
+
+/// The files the code returns are attachments of the session afterwards: the
+/// answer names them with the engine's own id, and the registry holds an
+/// engine-owned row for each (never a host reference), so later tools can use them.
+#[tokio::test]
+#[serial_test::serial]
+async fn files_the_code_returns_become_engine_owned_attachments() {
+    use crate::llm::domain::AttachmentRegistry;
+    let db = tempfile::NamedTempFile::new().unwrap();
+    let url = format!("sqlite://{}", db.path().display());
+    let storage = Arc::new(CountingStorage::default());
+    let reg = registry_with_storage(Some(storage.clone()));
+    reg.set_large_tabular(true);
+    run_turn(&reg, &url, vec![entry()], &RecordingModel::new(2))
+        .await
+        .unwrap();
+    let p = prepared(&[("sales", 1)], 4).await;
+    let answer = json!({
+        "__colmena_emitted": [{"name": "out.csv", "rows": 2, "dtypes": {"a": "int64"}, "size": 6}],
+        "result": 7
+    });
+    let exec =
+        Recorder::ok_with_files(answer, &[("out.csv", b"a\n1\n2\n"), ("bad name.csv", b"x")]);
+    reg.set_large_tabular_runtime(Arc::new(runtime(&p, exec, true)));
+    let model = RecordingModel::scripted(tool_call());
+    run_turn_with_tools(&reg, &url, vec![], tools(), &model)
+        .await
+        .unwrap();
+    let seen = model.seen();
+    assert!(
+        seen.contains("\"document_id\":\"generated/out.csv\""),
+        "{seen}"
+    );
+    assert!(
+        seen.contains("\"rows\":2") && seen.contains("\"result\":7"),
+        "{seen}"
+    );
+    assert!(
+        seen.contains("not_kept") && !seen.contains("bad name"),
+        "{seen}"
+    );
+    assert!(!seen.contains(SOURCE), "{seen}");
+    assert_eq!(
+        *p.storage.stored.lock().unwrap(),
+        [("out.csv".to_string(), b"a\n1\n2\n".to_vec())]
+    );
+    let attachments = crate::llm::infrastructure::persistence::SqliteAttachmentRegistry::new(&url)
+        .await
+        .unwrap();
+    let row = attachments
+        .lookup_by_document_id("agent_1", "generated/out.csv")
+        .await
+        .unwrap()
+        .expect("registered");
+    assert!(!row.is_host_storage_ref());
+    assert_eq!(row.provider, crate::llm::domain::ProviderKind::Generated);
+    assert_eq!(
+        row.origin.as_deref(),
+        Some("generated_by:attachment_run_python")
+    );
+    assert_eq!(
+        (row.mime_type.as_str(), row.size_bytes),
+        ("text/csv", Some(6))
+    );
+    assert_eq!(storage.reads() + storage.stores(), 0);
+}

@@ -939,6 +939,46 @@ impl DagToolExecutor {
         Ok(stream)
     }
 
+    /// Registers an object the engine ALREADY stored (streamed, say) as a new
+    /// attachment of the session, the way [`register_attachment_bytes`] does for
+    /// bytes: provider `Generated`, the engine's own key as the id, origin
+    /// `generated_by:<tool_name>`. Fail-soft: a registry that refuses is logged
+    /// and the object stays where it is.
+    pub(crate) async fn register_stored_attachment(
+        &self,
+        storage_key: &str,
+        mime_type: &str,
+        filename: &str,
+        size_bytes: u64,
+        tool_name: &str,
+    ) {
+        // `storage_key` is the document_id surface for downstream tools, so it
+        // is registered in the session: `$attachment:<id>` and `fetch_attachment_*`
+        // only read ids the session registry knows. Fail-soft, like media nodes.
+        if let (Some(reg), Some(sid)) = (&self.attachment_registry, &self.agent_session_id) {
+            let key = storage_key.to_string();
+            let row = crate::llm::domain::attachments::UpsertAttachmentInput {
+                agent_session_id: sid.clone(),
+                document_id: key.clone(),
+                provider: crate::llm::domain::ProviderKind::Generated,
+                provider_file_id: key.clone(),
+                mime_type: mime_type.to_string(),
+                filename: filename.to_string(),
+                size_bytes: Some(size_bytes),
+                label: None,
+                description: None,
+                source: crate::llm::domain::attachments::AttachmentSource::Path(key.clone()),
+                storage_key: Some(key),
+                origin: Some(crate::llm::domain::attachments::origin::generated_by(
+                    tool_name,
+                )),
+            };
+            if let Err(e) = reg.upsert(row).await {
+                tracing::warn!(error = %e, "register_stored_attachment: registry upsert failed");
+            }
+        }
+    }
+
     /// Persist freshly produced bytes (e.g. a `gdocs_export` PDF, an
     /// `image_edit` output) as a new attachment and return the bytes' new
     /// `document_id`. The returned id can be embedded in the dispatcher's
@@ -973,31 +1013,14 @@ impl DagToolExecutor {
             .store(req)
             .await
             .map_err(|e| format!("attachment_storage.store failed: {e}"))?;
-        // `storage_key` is the document_id surface for downstream tools, so it
-        // is registered in the session: `$attachment:<id>` and `fetch_attachment_*`
-        // only read ids the session registry knows. Fail-soft, like media nodes.
-        if let (Some(reg), Some(sid)) = (&self.attachment_registry, &self.agent_session_id) {
-            let key = stored.storage_key.clone();
-            let row = crate::llm::domain::attachments::UpsertAttachmentInput {
-                agent_session_id: sid.clone(),
-                document_id: key.clone(),
-                provider: crate::llm::domain::ProviderKind::Generated,
-                provider_file_id: key.clone(),
-                mime_type: stored.mime_type.clone(),
-                filename: stored.filename.clone(),
-                size_bytes: Some(stored.size_bytes),
-                label: None,
-                description: None,
-                source: crate::llm::domain::attachments::AttachmentSource::Path(key.clone()),
-                storage_key: Some(key),
-                origin: Some(crate::llm::domain::attachments::origin::generated_by(
-                    tool_name,
-                )),
-            };
-            if let Err(e) = reg.upsert(row).await {
-                tracing::warn!(error = %e, "register_attachment_bytes: registry upsert failed");
-            }
-        }
+        self.register_stored_attachment(
+            &stored.storage_key,
+            &stored.mime_type,
+            &stored.filename,
+            stored.size_bytes,
+            tool_name,
+        )
+        .await;
         Ok(stored.storage_key)
     }
 
