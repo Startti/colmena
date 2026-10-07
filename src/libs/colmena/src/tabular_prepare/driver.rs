@@ -282,6 +282,15 @@ impl CsvPrepareRunner {
     }
 }
 
+/// A short, stable identifier of a source for logs, derived from its key with
+/// SHA-256: it lets one preparation be followed through the logs without the key
+/// (which names a user and a file) being written, and it cannot be turned back.
+pub(crate) fn opaque_id(source_key: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(source_key.as_bytes());
+    digest.iter().take(6).map(|b| format!("{b:02x}")).collect()
+}
+
 fn is_csv(mime: &str) -> bool {
     mime.split(';')
         .next()
@@ -294,10 +303,11 @@ impl PrepareRunner for CsvPrepareRunner {
         if !self.enabled {
             return;
         }
+        let source = opaque_id(&req.source_key);
         if !is_csv(&req.mime_type) {
             tracing::warn!(
                 target: "colmena::tabular_prepare",
-                source_key = %req.source_key,
+                source = %source,
                 "only CSV sources are prepared; the request was dropped"
             );
             return;
@@ -305,21 +315,21 @@ impl PrepareRunner for CsvPrepareRunner {
         match prepare_csv(&self.env, &req).await {
             Ok(PrepareOutcome::Failed(f)) => tracing::warn!(
                 target: "colmena::tabular_prepare",
-                source_key = %req.source_key,
+                source = %source,
                 reason = f.code,
                 "the preparation failed"
             ),
-            Ok(PrepareOutcome::Refused(e)) => tracing::error!(
+            Ok(PrepareOutcome::Refused(_)) => tracing::error!(
                 target: "colmena::tabular_prepare",
-                source_key = %req.source_key,
-                error = %e,
+                source = %source,
+                kind = "refused",
                 "the preparation was refused"
             ),
             Ok(_) => {}
-            Err(e) => tracing::error!(
+            Err(_) => tracing::error!(
                 target: "colmena::tabular_prepare",
-                source_key = %req.source_key,
-                error = %e,
+                source = %source,
+                kind = "registry",
                 "the preparation could not record its outcome"
             ),
         }
@@ -496,9 +506,11 @@ async fn run_prepare(
     let control = ConvertControl::new();
     let source = StorageCsvSource::new(env.storage.clone(), &req.source_key);
     let read = source.bytes_read();
+    // Under the total until the table is ready: the file is read before its output
+    // is written, and a bar must not show complete while that goes on.
     let running = |done: u64| PrepareProgressInfo {
         state: ProgressState::Running,
-        done: done.min(req.size_bytes),
+        done: done.min(req.size_bytes.saturating_sub(1)),
         total: Some(req.size_bytes),
     };
     bounded(env, env.progress.report(&req.source_key, running(0))).await;
@@ -1525,8 +1537,13 @@ pub(crate) mod cases {
         assert_eq!(tick.state, ProgressState::Running);
         assert_eq!((tick.done, tick.total), (read, Some(40)));
         // A declared size smaller than what was read never makes done pass total.
+        // Done stays under the total until the preparation is ready, so a bar
+        // never shows complete while the output is still being written.
+        let tick = one_tick(&registry, read).await;
+        assert_eq!((tick.done, tick.total), (read - 1, Some(read)));
+        // A declared size smaller than what was read is clamped the same way.
         let tick = one_tick(&registry, 20).await;
-        assert_eq!((tick.done, tick.total), (20, Some(20)));
+        assert_eq!((tick.done, tick.total), (19, Some(20)));
     }
 
     pub(crate) async fn a_finished_preparation_reports_its_final_state_to_the_port(
@@ -1992,6 +2009,109 @@ pub(crate) mod cases {
         }
     }
 
+    /// Collects what the tracing events of this thread write.
+    #[derive(Clone, Default)]
+    struct Captured(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Captured {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Captured {
+        type Writer = Captured;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    pub(crate) async fn logs_carry_a_fixed_sentence_a_kind_and_an_opaque_id_never_a_key_or_adapter_text(
+        registry: Arc<dyn PreparationRegistry>,
+    ) {
+        use crate::tabular_prepare::registry_faults::FaultyRegistry;
+        use std::sync::atomic::Ordering::SeqCst;
+        let captured = Captured::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(captured.clone())
+            .with_ansi(false)
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let config = PrepareConfig::from_switch(Some("on"));
+        let mut ids = Vec::new();
+        // 1. The registry cannot record the outcome (its text names a key).
+        let source = fresh_source();
+        let storage = PlacedStorage::with_source(&source, five_rows());
+        let faulty = FaultyRegistry::new(registry.clone());
+        faulty.faults.fail_complete.store(true, SeqCst);
+        let runner = CsvPrepareRunner::new(Arc::new(env(faulty, storage)), &config);
+        runner.run(request(&source, 40)).await;
+        ids.push(opaque_id(&source));
+        // 2. The failure is recorded and the cleanup that follows is refused with
+        // text that names a key.
+        let source = fresh_source();
+        let storage = PlacedStorage::with_source(&source, five_rows());
+        *storage.fail_stores_from.lock().unwrap() = Some(1);
+        *storage.fail_delete.lock().unwrap() = true;
+        let runner = CsvPrepareRunner::new(Arc::new(env(registry.clone(), storage)), &config);
+        runner.run(request(&source, 40)).await;
+        ids.push(opaque_id(&source));
+        // 3. A request that is not a CSV.
+        let source = fresh_source();
+        let storage = PlacedStorage::with_source(&source, five_rows());
+        let runner = CsvPrepareRunner::new(Arc::new(env(registry.clone(), storage)), &config);
+        let mut req = request(&source, 40);
+        req.mime_type = "application/pdf".into();
+        runner.run(req).await;
+        ids.push(opaque_id(&source));
+        // 4. No derived root.
+        let source = fresh_source();
+        let storage = PlacedStorage::with_source(&source, five_rows());
+        *storage.no_root.lock().unwrap() = true;
+        let runner = CsvPrepareRunner::new(Arc::new(env(registry.clone(), storage)), &config);
+        runner.run(request(&source, 40)).await;
+        ids.push(opaque_id(&source));
+
+        let text = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+        for forbidden in ["secret", "chat-attachments", ".csv", "prepared/"] {
+            assert!(
+                !text.contains(forbidden),
+                "{forbidden:?} in the log:\n{text}"
+            );
+        }
+        // The identifier is there, opaque and stable, and each line has a kind or a reason.
+        for id in &ids {
+            assert_eq!(id.len(), 12);
+            // Hexadecimal digits of a digest, not a piece of the key.
+            assert!(id.bytes().all(|b| b.is_ascii_hexdigit()), "{id}");
+            assert!(!"chat-attachments/u/s/".contains(id.as_str()));
+            assert!(text.contains(id.as_str()), "{id} missing:\n{text}");
+        }
+        assert!(
+            text.contains("kind=\"registry\"") && text.contains("kind=\"upload_failed\""),
+            "{text}"
+        );
+    }
+
+    pub(crate) async fn a_source_key_that_cannot_be_a_key_is_refused_without_a_row(
+        registry: Arc<dyn PreparationRegistry>,
+    ) {
+        let storage = Arc::new(PlacedStorage::default());
+        let env = env(registry, storage.clone());
+        let out = prepare_csv(&env, &request("chat-attachments/../x.csv", 40))
+            .await
+            .unwrap();
+        assert!(matches!(
+            out,
+            PrepareOutcome::Refused(PrepareStartError::InvalidSourceKey)
+        ));
+        assert_eq!(*storage.opens.lock().unwrap(), 0);
+    }
+
     pub(crate) async fn a_registry_error_at_completion_leaves_the_stored_objects_tracked_and_not_deleted(
         registry: Arc<dyn PreparationRegistry>,
     ) {
@@ -2254,5 +2374,13 @@ mod registry_tests {
     sqlite_case!(
         tabular_prepare_a_cleanup_of_a_deleted_source_that_does_not_answer_keeps_the_row_and_its_keys,
         a_cleanup_of_a_deleted_source_that_does_not_answer_keeps_the_row_and_its_keys
+    );
+    sqlite_case!(
+        tabular_prepare_logs_carry_a_fixed_sentence_a_kind_and_an_opaque_id_never_a_key_or_adapter_text,
+        logs_carry_a_fixed_sentence_a_kind_and_an_opaque_id_never_a_key_or_adapter_text
+    );
+    sqlite_case!(
+        tabular_prepare_a_source_key_that_cannot_be_a_key_is_refused_without_a_row,
+        a_source_key_that_cannot_be_a_key_is_refused_without_a_row
     );
 }

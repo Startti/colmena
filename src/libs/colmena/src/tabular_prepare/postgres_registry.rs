@@ -454,6 +454,14 @@ mod tests {
         tabular_prepare_pg_a_cleanup_of_a_deleted_source_that_does_not_answer_keeps_the_row_and_its_keys,
         a_cleanup_of_a_deleted_source_that_does_not_answer_keeps_the_row_and_its_keys
     );
+    pg_driver_case!(
+        tabular_prepare_pg_logs_carry_a_fixed_sentence_a_kind_and_an_opaque_id_never_a_key_or_adapter_text,
+        logs_carry_a_fixed_sentence_a_kind_and_an_opaque_id_never_a_key_or_adapter_text
+    );
+    pg_driver_case!(
+        tabular_prepare_pg_a_source_key_that_cannot_be_a_key_is_refused_without_a_row,
+        a_source_key_that_cannot_be_a_key_is_refused_without_a_row
+    );
     pg_case!(
         tabular_prepare_pg_a_deleting_row_is_never_taken_by_an_older_format_claim,
         a_deleting_row_is_never_taken_by_an_older_format_claim
