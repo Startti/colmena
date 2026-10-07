@@ -66,7 +66,13 @@ FileSource::SignedUrl (url) → resolve_files
 
 La ruta de archivos tabulares grandes (interruptor encendido) no lee el archivo entero en memoria; esta primera pieza solo fija cuál archivo cuenta como grande. «Grande» tiene una sola definición, `llm::domain::large_tabular::is_large_tabular(mime, tamaño, interruptor)`: el interruptor está encendido, el mime es `text/csv` o xlsx (sin distinguir mayúsculas ni parámetros; el `.xls` antiguo no se acepta) y `size_bytes` es conocido y **estrictamente mayor** a 52 428 800 (50 MiB). Exactamente 50 MiB es pequeño, un tamaño ausente es pequeño y, con el interruptor apagado, nada es grande a ningún tamaño. `refusal_text()` es el texto que una herramienta que no puede leer un archivo grande entero le da al modelo; hoy dice lo que es verdad («demasiado grande para esta herramienta, no se puede analizar en este turno») y el texto futuro («usa `attachment_run_python` con `tables`») queda detrás de `LARGE_FILE_TOOL_AVAILABLE`, que cambia a `true` la unidad que entregue esa herramienta. Todo rechazo lleva el código `large_tabular_file`. `validate_storage_key` es la validación barata de una llave del host (no vacía, hasta 1024 caracteres, sin caracteres de control ni segmentos `..`).
 
-Pruebas: `cargo test --lib large_tabular` cubre la definición en su frontera.
+Un archivo así viaja como `FileSource::StorageRef(key)`: ya está en el almacenamiento del host bajo `key` y nada necesita moverse.
+
+- **Resolución.** `LlmCallUseCase::resolve_files` deja intacto un `StorageRef`: sin descarga, sin subida al proveedor, sin consulta a la caché, y un turno cuyo único archivo es una referencia no termina en `AllFilesFailedToResolve`. Una referencia tampoco cuenta como archivo resuelto: si todos los archivos que sí necesitaban resolverse fallan, el turno sigue reportando `AllFilesFailedToResolve` aunque viajen referencias.
+- **Fuente de la fila.** `file_registrations` sabe qué fuente darle a la fila del catálogo de un `StorageRef`: la llave (`AttachmentSource::Path(key)`). Todavía nada registra un `StorageRef`.
+- **Adaptadores.** Ningún adaptador de proveedor acepta la variante. Los cuatro conversores (OpenAI chat y responses, Anthropic, Gemini) devuelven `InternalError` con el nombre del archivo, nunca su llave, en vez de enviarlo o descartarlo; el nodo nunca pone un archivo así en un mensaje.
+
+Pruebas: `cargo test --lib large_tabular` cubre la definición en su frontera, `cargo test --lib large_files` el paso directo en la resolución y la fuente del registro, y `cargo test --lib refuses_a_storage_ref` los rechazos de los adaptadores.
 
 ## Estrategia por provider
 

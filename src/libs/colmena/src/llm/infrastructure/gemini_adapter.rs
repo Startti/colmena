@@ -112,6 +112,9 @@ impl GeminiAdapter {
                                         ),
                                     });
                                 }
+                                FileSource::StorageRef(_) => {
+                                    return Err(file.storage_ref_refusal("Gemini adapter"));
+                                }
                             };
                             parts.push(part);
                         }
@@ -1935,5 +1938,39 @@ mod tests {
             .collect();
         let expected = [(0, "Hola"), (1, "usage"), (0, ", listo."), (4, "usage")];
         assert_eq!(seen, expected);
+    }
+
+    #[test]
+    fn build_request_body_refuses_a_storage_ref_file() {
+        use crate::llm::domain::{
+            FileData, FileSource, LlmConfig, LlmMessage, LlmProvider, LlmRequest, ProviderKind,
+        };
+        let file = FileData {
+            document_id: Some("doc-1".into()),
+            mime_type: "text/csv".into(),
+            filename: "big.csv".into(),
+            size_hint: Some(60 * 1024 * 1024),
+            source: FileSource::StorageRef("chat-attachments/u/s/doc-1".into()),
+            retained_inline_bytes: None,
+        };
+        let msg = LlmMessage::user_with_files("describe".into(), vec![file]).unwrap();
+        let provider = LlmProvider::new(
+            ProviderKind::Google,
+            "k".into(),
+            Some("gemini-2.5-pro".into()),
+        )
+        .unwrap();
+        let request = LlmRequest::new(vec![msg], LlmConfig::new(provider), false).unwrap();
+
+        let err = GeminiAdapter::new()
+            .build_request_body(&request)
+            .unwrap_err();
+        match err {
+            crate::llm::domain::LlmError::InternalError { message } => {
+                assert!(message.contains("big.csv"), "{message}");
+                assert!(!message.contains("chat-attachments"), "no key: {message}");
+            }
+            other => panic!("expected InternalError, got {other:?}"),
+        }
     }
 }

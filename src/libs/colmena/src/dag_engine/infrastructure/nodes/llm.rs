@@ -4634,6 +4634,8 @@ fn file_registrations(
                     .or_else(|| text("path").map(|p| AttachmentSource::Path(p.to_string())))
                     .unwrap_or(AttachmentSource::Inline),
                 FileSource::InlineBytes { .. } => AttachmentSource::Inline,
+                // The bytes stay where they are: the row's source is that key.
+                FileSource::StorageRef(key) => AttachmentSource::Path(key.clone()),
             };
             let document_id = file.document_id.clone().unwrap_or_else(|| {
                 generate_attachment_id(
@@ -8449,3 +8451,6 @@ mod google_workspace_auth_node_tests {
 
 #[cfg(test)]
 mod characterisation;
+
+#[cfg(test)]
+mod large_files;

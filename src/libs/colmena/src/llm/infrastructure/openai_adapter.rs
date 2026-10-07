@@ -98,6 +98,9 @@ impl OpenAiAdapter {
 
                 use base64::{engine::general_purpose::STANDARD, Engine as _};
                 for file in files {
+                    if matches!(file.source, FileSource::StorageRef(_)) {
+                        return Err(file.storage_ref_refusal("OpenAI chat completions adapter"));
+                    }
                     if file.mime_type.starts_with("image/") {
                         let image_url = match &file.source {
                             FileSource::InlineBytes { bytes } => {
@@ -123,6 +126,11 @@ impl OpenAiAdapter {
                                         file.filename, r.provider_file_id
                                     ),
                                 });
+                            }
+                            FileSource::StorageRef(_) => {
+                                return Err(
+                                    file.storage_ref_refusal("OpenAI chat completions adapter")
+                                );
                             }
                         };
                         content_arr.push(json!({
@@ -1143,6 +1151,11 @@ impl OpenAiAdapter {
                                             file.filename
                                         ),
                                     });
+                                }
+                                FileSource::StorageRef(_) => {
+                                    return Err(
+                                        file.storage_ref_refusal("OpenAI responses adapter")
+                                    );
                                 }
                             };
                             content_arr.push(file_part);
@@ -2570,6 +2583,43 @@ mod tests {
                 2,
                 "{endpoint}"
             );
+        }
+    }
+    /// A large tabular file is registered in the catalog, never put in a
+    /// message: an adapter that is handed one fails instead of dropping it.
+    #[test]
+    fn each_openai_endpoint_refuses_a_storage_ref_file() {
+        use crate::llm::domain::{
+            FileData, FileSource, LlmConfig, LlmError, LlmMessage, LlmProvider, LlmRequest,
+            ProviderKind,
+        };
+        let adapter = OpenAiAdapter::new();
+        for mime in ["text/csv", "image/png"] {
+            let file = FileData {
+                document_id: Some("doc-1".into()),
+                mime_type: mime.into(),
+                filename: "big.csv".into(),
+                size_hint: Some(60 * 1024 * 1024),
+                source: FileSource::StorageRef("chat-attachments/u/s/doc-1".into()),
+                retained_inline_bytes: None,
+            };
+            let msg = LlmMessage::user_with_files("describe".into(), vec![file]).unwrap();
+            let provider =
+                LlmProvider::new(ProviderKind::OpenAi, "k".into(), Some("gpt-5".into())).unwrap();
+            let request = LlmRequest::new(vec![msg], LlmConfig::new(provider), false).unwrap();
+
+            for err in [
+                adapter.build_request_body(&request).unwrap_err(),
+                adapter.build_responses_request_body(&request).unwrap_err(),
+            ] {
+                match err {
+                    LlmError::InternalError { message } => {
+                        assert!(message.contains("big.csv"), "{message}");
+                        assert!(!message.contains("chat-attachments"), "no key: {message}");
+                    }
+                    other => panic!("{mime}: expected InternalError, got {other:?}"),
+                }
+            }
         }
     }
 }

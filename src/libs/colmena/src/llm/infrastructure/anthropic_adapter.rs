@@ -113,6 +113,9 @@ impl AnthropicAdapter {
                                         ),
                                     });
                                 }
+                                FileSource::StorageRef(_) => {
+                                    return Err(file.storage_ref_refusal("Anthropic adapter"));
+                                }
                             };
                             if file.mime_type.starts_with("image/") {
                                 blocks.push(AnthropicContentBlock::Image { source });
@@ -1461,6 +1464,31 @@ mod tests {
                 .map(|out| LlmUsage::new(120, out).with_cache_read_tokens(30))
                 .collect();
             assert_eq!(usages, expected);
+        }
+    }
+
+    #[test]
+    fn convert_messages_refuses_a_storage_ref_file() {
+        use crate::llm::domain::{FileData, FileSource};
+        for mime in ["text/csv", "application/pdf"] {
+            let file = FileData {
+                document_id: Some("doc-1".into()),
+                mime_type: mime.into(),
+                filename: "big.csv".into(),
+                size_hint: Some(60 * 1024 * 1024),
+                source: FileSource::StorageRef("chat-attachments/u/s/doc-1".into()),
+                retained_inline_bytes: None,
+            };
+            let err = AnthropicAdapter::new()
+                .convert_messages(&build_request_with_file(file))
+                .unwrap_err();
+            match err {
+                LlmError::InternalError { message } => {
+                    assert!(message.contains("big.csv"), "{mime}: {message}");
+                    assert!(!message.contains("chat-attachments"), "no key: {message}");
+                }
+                other => panic!("{mime}: expected InternalError, got {other:?}"),
+            }
         }
     }
 }
