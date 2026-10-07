@@ -117,6 +117,139 @@ pub fn open_call_dirs(root: &Path, id: &str) -> io::Result<CallDirs> {
     Ok(CallDirs { call, data, out })
 }
 
+/// Most inodes the output volume of a call may hold: a program cannot fill the
+/// executor's memory with empty files.
+pub const OUT_MAX_INODES: u64 = 1024;
+/// The output directory is a volume of its own with a size, no bigger than
+/// `out_mb` MiB and not the volume that holds the call directory. This is what
+/// bounds what a call can write: the jail refuses a call whose output is
+/// anything else. [`StagedCall`] makes it a tmpfs.
+#[cfg(target_os = "linux")]
+pub fn check_out_volume(dirs: &CallDirs, out_mb: u64) -> io::Result<()> {
+    let unbounded = |why| refused(io::ErrorKind::PermissionDenied, why);
+    let mut fs: libc::statfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstatfs(dirs.out.as_raw_fd(), &mut fs) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let bytes = (fs.f_blocks as u128) * (fs.f_bsize as u128);
+    if bytes == 0 || bytes > u128::from(out_mb) << 20 {
+        return Err(unbounded("out is larger than the declared bound"));
+    }
+    let dev = |fd: &OwnedFd| {
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        (unsafe { libc::fstat(fd.as_raw_fd(), &mut st) } == 0).then_some(st.st_dev as u64)
+    };
+    match (dev(&dirs.out), dev(&dirs.call)) {
+        (Some(out), Some(call)) if out != call => Ok(()),
+        _ => Err(unbounded("out shares the volume of the call directory")),
+    }
+}
+
+/// One call's staging directories, made and removed by the trusted side. The
+/// output directory is mounted as a tmpfs of `out_mb` MiB; `data` is left for
+/// the trusted side to fill. Dropping it unmounts the output (its content goes
+/// with the mount, without anything inside being walked) and removes the
+/// directories.
+#[cfg(target_os = "linux")]
+#[derive(Debug)]
+pub struct StagedCall {
+    call: std::path::PathBuf,
+    id: String,
+    mounted: bool,
+    released: bool,
+}
+
+#[cfg(target_os = "linux")]
+impl StagedCall {
+    /// Creates `<root>/<fresh id>/{data,out}` under a root that is a plain
+    /// absolute path (no link anywhere in it) and mounts the output volume.
+    pub fn create(root: &Path, out_mb: u64) -> io::Result<Self> {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        drop(open_root(root)?);
+        let id = uuid::Uuid::new_v4().simple().to_string();
+        let call = root.join(&id);
+        let make = |p: &Path, mode: u32| -> io::Result<()> {
+            std::fs::DirBuilder::new().mode(mode).create(p)?;
+            // The umask must not decide who can read what the jail binds.
+            std::fs::set_permissions(p, std::fs::Permissions::from_mode(mode))
+        };
+        let mut staged = StagedCall {
+            call: call.clone(),
+            id,
+            mounted: false,
+            released: false,
+        };
+        make(&call, 0o700)?;
+        make(&call.join(DATA_NAME), 0o755)?;
+        make(&call.join(OUT_NAME), 0o755)?;
+        let options = format!("size={out_mb}m,nr_inodes={OUT_MAX_INODES},mode=1777");
+        let flags = libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC;
+        super::jail::mount(
+            Some("tmpfs"),
+            &call.join(OUT_NAME),
+            Some("tmpfs"),
+            flags,
+            Some(&options),
+        )?;
+        staged.mounted = true;
+        Ok(staged)
+    }
+
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// Where the trusted side puts what the call reads.
+    pub fn data_dir(&self) -> std::path::PathBuf {
+        self.call.join(DATA_NAME)
+    }
+
+    /// Where the call's output lives while the call runs and until release.
+    pub fn out_dir(&self) -> std::path::PathBuf {
+        self.call.join(OUT_NAME)
+    }
+
+    /// Unmounts the output volume and removes the directories. Nothing is
+    /// removed while the volume is still mounted: deleting through a mount
+    /// would walk what the program wrote. Safe to call again.
+    pub fn release(&mut self) -> io::Result<()> {
+        if self.released {
+            return Ok(());
+        }
+        if self.mounted {
+            let out = std::ffi::CString::new(self.out_dir().as_os_str().as_encoded_bytes())
+                .map_err(|_| refused(io::ErrorKind::InvalidInput, "nul"))?;
+            let busy = |rc: libc::c_int| {
+                rc != 0 && io::Error::last_os_error().raw_os_error() == Some(libc::EBUSY)
+            };
+            let mut rc = unsafe { libc::umount2(out.as_ptr(), 0) };
+            if busy(rc) {
+                rc = unsafe { libc::umount2(out.as_ptr(), libc::MNT_DETACH) };
+            }
+            if rc != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            self.mounted = false;
+        }
+        let gone = |r: io::Result<()>| match r {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        };
+        gone(std::fs::remove_dir(self.out_dir()))?;
+        gone(std::fs::remove_dir_all(self.data_dir()))?;
+        gone(std::fs::remove_dir(&self.call))?;
+        self.released = true;
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for StagedCall {
+    fn drop(&mut self) {
+        let _ = self.release();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
