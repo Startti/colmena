@@ -7,9 +7,15 @@
 //! that is too large for one call is refused from the row's recorded size,
 //! before any part is opened.
 
-use super::refusal::{FailureReason, Invalid, RunRefusal};
-use crate::tabular_prepare::manifest::{part_path, Manifest, TableInfo};
-use crate::tabular_prepare::registry::{PrepareStatus, PreparedRow, FORMAT_VERSION, MAX_ATTEMPTS};
+use super::refusal::{Budget, FailureReason, Invalid, RunRefusal, Unavailable};
+use crate::storage::domain::OutputStorageRepository;
+use crate::tabular_prepare::manifest::{
+    part_path, Manifest, TableInfo, MANIFEST_MAX_BYTES, MANIFEST_PATH,
+};
+use crate::tabular_prepare::registry::{
+    PreparationRegistry, PrepareStatus, PreparedRow, FORMAT_VERSION, MAX_ATTEMPTS,
+};
+use futures::StreamExt;
 use std::collections::HashSet;
 
 /// Most bytes of prepared parts one call may stage (`D_max`, 1 GiB). An estimate
@@ -103,13 +109,90 @@ pub fn judge_row(row: Option<PreparedRow>, source_key: &str) -> Result<PreparedR
     }
 }
 
+/// Reads one object that must fit in `cap` bytes, never holding more than the
+/// cap: the declared size is checked first, and the stream is cut off at the cap
+/// whatever it declared. `too_big` is the refusal for an object over the cap.
+async fn read_capped(
+    storage: &dyn OutputStorageRepository,
+    key: &str,
+    cap: usize,
+    too_big: RunRefusal,
+) -> Result<Vec<u8>, RunRefusal> {
+    let mut stream = storage
+        .read_stream(key)
+        .await
+        .map_err(|_| RunRefusal::Storage)?;
+    if stream.size_bytes > cap as u64 {
+        return Err(too_big);
+    }
+    let mut out = Vec::with_capacity((stream.size_bytes as usize).min(cap));
+    while let Some(chunk) = stream.stream.next().await {
+        let chunk = chunk.map_err(|_| RunRefusal::Storage)?;
+        if out.len() + chunk.len() > cap {
+            return Err(too_big);
+        }
+        out.extend_from_slice(&chunk);
+    }
+    Ok(out)
+}
+
+/// Verifies the prepared copy of `source_key` through the registry, then reads
+/// and checks its manifest. Returns the plan, or a refusal the model can read.
+///
+/// The key must come from the session's own catalog row, never from the model.
+pub async fn verify_prepared(
+    registry: &dyn PreparationRegistry,
+    storage: &dyn OutputStorageRepository,
+    source_key: &str,
+) -> Result<PreparedTables, RunRefusal> {
+    let row = registry
+        .get(source_key)
+        .await
+        .map_err(|_| RunRefusal::Unavailable(Unavailable::Registry))?;
+    let row = judge_row(row, source_key)?;
+
+    let root = storage
+        .derived_root(source_key)
+        .ok_or(RunRefusal::Invalid(Invalid::NoRoot))?;
+    let manifest_key = format!("{root}/{MANIFEST_PATH}");
+    if row.manifest_key.as_deref() != Some(manifest_key.as_str())
+        || !row.blob_keys.contains(&manifest_key)
+    {
+        return Err(RunRefusal::Invalid(Invalid::Record));
+    }
+    let prepared_bytes = u64::try_from(row.prepared_bytes.unwrap_or(-1))
+        .map_err(|_| RunRefusal::Invalid(Invalid::Record))?;
+    // Before a single object is opened: a copy too large for one call is
+    // refused on what the row says it holds.
+    if prepared_bytes > DATA_MAX_BYTES {
+        return Err(RunRefusal::OverBudget(Budget::Data {
+            limit_bytes: DATA_MAX_BYTES,
+        }));
+    }
+
+    let bytes = read_capped(
+        storage,
+        &manifest_key,
+        MANIFEST_MAX_BYTES,
+        RunRefusal::Invalid(Invalid::Manifest),
+    )
+    .await?;
+    let manifest =
+        Manifest::from_json(&bytes).map_err(|_| RunRefusal::Invalid(Invalid::Manifest))?;
+    let plan = PreparedTables {
+        root,
+        manifest_key,
+        manifest,
+        prepared_bytes,
+    };
+    Ok(plan)
+}
+
 #[cfg(test)]
 mod tests {
+    use super::super::testkit::*;
     use super::*;
     use chrono::Utc;
-
-    const SOURCE: &str = "chat-attachments/u1/s1/doc-1";
-    const ROOT: &str = "chat-attachments/u1/s1/prepared/doc-1";
 
     fn base_row(status: PrepareStatus) -> PreparedRow {
         let now = Utc::now();
@@ -184,6 +267,152 @@ mod tests {
                 RunRefusal::Invalid(Invalid::Record)
             );
         }
+    }
+
+    #[tokio::test]
+    async fn a_ready_copy_is_verified_and_lists_its_parts() {
+        let p = prepared(&[("sales", 2), ("Stores", 1)], 10).await;
+        let plan = verify_prepared(&*p.registry, &*p.storage, SOURCE)
+            .await
+            .unwrap();
+        assert_eq!(plan.tables().len(), 2);
+        assert_eq!(
+            plan.part_key(1, 0).unwrap(),
+            format!("{ROOT}/t1/part-00000.parquet")
+        );
+        assert_eq!(
+            plan.prepared_bytes(),
+            3 * 10 + p.manifest.to_json().unwrap().len() as u64
+        );
+        // Only the manifest was read: no part is opened by a verification.
+        assert_eq!(
+            p.storage.reads.lock().unwrap().as_slice(),
+            &[format!("{ROOT}/manifest.json")]
+        );
+    }
+
+    #[tokio::test]
+    async fn the_registry_is_asked_before_the_storage_is_touched() {
+        let (registry, _dir) = sqlite_registry().await;
+        let storage = FakeStorage::new();
+        // No row at all.
+        let err = verify_prepared(&*registry, &*storage, SOURCE)
+            .await
+            .unwrap_err();
+        assert_eq!(err, RunRefusal::NotPrepared);
+        assert!(storage.reads.lock().unwrap().is_empty());
+        // A row that is still running.
+        claim(&registry, FORMAT_VERSION).await;
+        let err = verify_prepared(&*registry, &*storage, SOURCE)
+            .await
+            .unwrap_err();
+        assert_eq!(err, RunRefusal::StillPreparing { percent: None });
+        assert!(storage.reads.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_copy_in_an_older_layout_is_invalid_not_staged() {
+        let p = prepared_with(&[("sales", 1)], 10, FORMAT_VERSION - 1, |_| {}).await;
+        let err = verify_prepared(&*p.registry, &*p.storage, SOURCE)
+            .await
+            .unwrap_err();
+        assert_eq!(err, RunRefusal::Invalid(Invalid::Record));
+        assert!(p.storage.reads.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_storage_that_cannot_say_where_the_copy_lives_is_refused() {
+        let p = prepared(&[("sales", 1)], 10).await;
+        let none = FakeStorage::without_root();
+        let err = verify_prepared(&*p.registry, &*none, SOURCE)
+            .await
+            .unwrap_err();
+        assert_eq!(err, RunRefusal::Invalid(Invalid::NoRoot));
+    }
+
+    /// A row whose manifest key is not at the derived root is not the copy this
+    /// source's storage placed there.
+    #[tokio::test]
+    async fn a_manifest_key_outside_the_derived_root_is_invalid() {
+        let p = prepared_with(&[("sales", 1)], 10, FORMAT_VERSION, |info| {
+            info.manifest_key = "chat-attachments/u9/s9/prepared/doc-9/manifest.json".into();
+            info.blob_keys.push(info.manifest_key.clone());
+        })
+        .await;
+        let err = verify_prepared(&*p.registry, &*p.storage, SOURCE)
+            .await
+            .unwrap_err();
+        assert_eq!(err, RunRefusal::Invalid(Invalid::Record));
+        assert!(p.storage.reads.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_copy_recorded_over_the_data_limit_is_refused_before_any_read() {
+        let p = prepared_with(&[("sales", 1)], 10, FORMAT_VERSION, |info| {
+            info.prepared_bytes = DATA_MAX_BYTES as i64 + 1;
+        })
+        .await;
+        let err = verify_prepared(&*p.registry, &*p.storage, SOURCE)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err,
+            RunRefusal::OverBudget(Budget::Data {
+                limit_bytes: DATA_MAX_BYTES
+            })
+        );
+        assert!(p.storage.reads.lock().unwrap().is_empty());
+        // Exactly at the limit is not over it.
+        let p = prepared_with(&[("sales", 1)], 10, FORMAT_VERSION, |info| {
+            info.prepared_bytes = DATA_MAX_BYTES as i64;
+        })
+        .await;
+        assert!(verify_prepared(&*p.registry, &*p.storage, SOURCE)
+            .await
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_manifest_that_is_not_json_is_invalid_and_its_text_is_not_echoed() {
+        let p = prepared(&[("sales", 1)], 10).await;
+        p.storage
+            .put(&format!("{ROOT}/manifest.json"), b"{secret cell}".to_vec());
+        let err = verify_prepared(&*p.registry, &*p.storage, SOURCE)
+            .await
+            .unwrap_err();
+        assert_eq!(err, RunRefusal::Invalid(Invalid::Manifest));
+        assert!(!err.message().contains("secret"));
+    }
+
+    /// The manifest is read under its cap whatever the storage declares: an
+    /// object that lies about its size is cut off, not buffered.
+    #[tokio::test]
+    async fn an_oversized_manifest_is_refused_at_the_cap() {
+        let p = prepared(&[("sales", 1)], 10).await;
+        p.storage.put(
+            &format!("{ROOT}/manifest.json"),
+            vec![b' '; MANIFEST_MAX_BYTES + 1],
+        );
+        let err = verify_prepared(&*p.registry, &*p.storage, SOURCE)
+            .await
+            .unwrap_err();
+        assert_eq!(err, RunRefusal::Invalid(Invalid::Manifest));
+    }
+
+    #[tokio::test]
+    async fn a_storage_failure_on_the_manifest_hides_the_adapters_text() {
+        let p = prepared(&[("sales", 1)], 10).await;
+        p.storage
+            .broken
+            .lock()
+            .unwrap()
+            .push(format!("{ROOT}/manifest.json"));
+        let err = verify_prepared(&*p.registry, &*p.storage, SOURCE)
+            .await
+            .unwrap_err();
+        assert_eq!(err, RunRefusal::Storage);
+        assert!(!err.message().contains("secret"));
+        assert!(!err.message().contains(ROOT));
     }
 
     fn plan(tables: &[(&str, u32)]) -> PreparedTables {

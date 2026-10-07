@@ -14,4 +14,6 @@
 //! docs/developer_guide/54_tabular_prepare.md.
 
 pub mod refusal;
+#[cfg(test)]
+pub(crate) mod testkit;
 pub mod verify;

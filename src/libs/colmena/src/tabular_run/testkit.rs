@@ -1,0 +1,213 @@
+//! Fixtures shared by the tests of this module: a storage that holds the
+//! prepared objects in memory, and a real SQLite registry holding a ready row.
+
+use crate::storage::domain::{
+    OutputStorageRepository, StorageError, StoreRequest, StoredBytes, StoredOutput, StoredStream,
+};
+use crate::tabular_prepare::manifest::{
+    part_path, ColumnInfo, ColumnType, Manifest, TableInfo, MANIFEST_PATH,
+};
+use crate::tabular_prepare::registry::{
+    ClaimRequest, PreparationRegistry, ReadyInfo, FORMAT_VERSION,
+};
+use crate::tabular_prepare::sqlite_registry::SqlitePreparationRegistry;
+use async_trait::async_trait;
+use bytes::Bytes;
+use chrono::{Duration, Utc};
+use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
+pub(crate) const SOURCE: &str = "chat-attachments/u1/s1/doc-1";
+pub(crate) const ROOT: &str = "chat-attachments/u1/s1/prepared/doc-1";
+
+/// Storage holding objects in memory. It answers `derived_root` as the host
+/// does, serves streams in chunks of `chunk` bytes, and records what was read.
+pub(crate) struct FakeStorage {
+    pub objects: Mutex<HashMap<String, Vec<u8>>>,
+    pub root: Option<String>,
+    pub chunk: usize,
+    pub reads: Mutex<Vec<String>>,
+    /// Keys that fail to read.
+    pub broken: Mutex<Vec<String>>,
+}
+
+impl FakeStorage {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            objects: Mutex::new(HashMap::new()),
+            root: Some(ROOT.to_string()),
+            chunk: 1024,
+            reads: Mutex::new(vec![]),
+            broken: Mutex::new(vec![]),
+        })
+    }
+
+    pub fn without_root() -> Arc<Self> {
+        Arc::new(Self {
+            root: None,
+            ..Arc::try_unwrap(Self::new()).ok().unwrap()
+        })
+    }
+
+    pub fn put(&self, key: &str, bytes: Vec<u8>) {
+        self.objects.lock().unwrap().insert(key.to_string(), bytes);
+    }
+}
+
+#[async_trait]
+impl OutputStorageRepository for FakeStorage {
+    async fn store(&self, _req: StoreRequest) -> Result<StoredOutput, StorageError> {
+        panic!("the run path never writes to storage")
+    }
+    async fn read(&self, _key: &str) -> Result<StoredBytes, StorageError> {
+        panic!("the run path never reads an object whole")
+    }
+    async fn read_stream(&self, key: &str) -> Result<StoredStream, StorageError> {
+        self.reads.lock().unwrap().push(key.to_string());
+        if self.broken.lock().unwrap().iter().any(|k| k == key) {
+            return Err(StorageError::BackendUnavailable(format!(
+                "secret detail about {key}"
+            )));
+        }
+        let bytes = self
+            .objects
+            .lock()
+            .unwrap()
+            .get(key)
+            .cloned()
+            .ok_or_else(|| StorageError::InvalidInput(format!("no such object {key}")))?;
+        let size = bytes.len() as u64;
+        let chunks: Vec<Result<Bytes, StorageError>> = bytes
+            .chunks(self.chunk.max(1))
+            .map(|c| Ok(Bytes::copy_from_slice(c)))
+            .collect();
+        Ok(StoredStream {
+            stream: Box::pin(futures::stream::iter(chunks)),
+            size_bytes: size,
+            mime_type: "application/octet-stream".into(),
+            filename: "object".into(),
+        })
+    }
+    async fn delete(&self, _key: &str) -> Result<(), StorageError> {
+        panic!("the run path never deletes from storage")
+    }
+    fn derived_root(&self, _source: &str) -> Option<String> {
+        self.root.clone()
+    }
+}
+
+pub(crate) fn manifest_with(tables: &[(&str, u32)]) -> Manifest {
+    Manifest::new(
+        tables
+            .iter()
+            .map(|(name, parts)| TableInfo {
+                name: (*name).to_string(),
+                rows: u64::from(*parts) * 10,
+                parts: *parts,
+                columns: vec![ColumnInfo {
+                    name: "a".into(),
+                    column_type: ColumnType::Int,
+                    uncompressed_bytes: 100,
+                    in_memory_bytes: 10_000,
+                }],
+            })
+            .collect(),
+    )
+}
+
+/// A prepared copy in `storage` and a ready row for it: the manifest, and a
+/// part per `parts` of `part_bytes` filler bytes (`b'a' + table index`).
+pub(crate) struct Prepared {
+    pub registry: Arc<SqlitePreparationRegistry>,
+    pub storage: Arc<FakeStorage>,
+    pub manifest: Manifest,
+    _dir: tempfile::TempDir,
+}
+
+pub(crate) async fn sqlite_registry() -> (Arc<SqlitePreparationRegistry>, tempfile::TempDir) {
+    let dir = tempfile::tempdir().unwrap();
+    let options = SqliteConnectOptions::new()
+        .filename(dir.path().join("registry.db"))
+        .create_if_missing(true)
+        .journal_mode(SqliteJournalMode::Wal)
+        .busy_timeout(std::time::Duration::from_secs(10));
+    let pool = SqlitePoolOptions::new()
+        .max_connections(4)
+        .connect_with(options)
+        .await
+        .unwrap();
+    sqlx::migrate!("migrations/sqlite")
+        .run(&pool)
+        .await
+        .unwrap();
+    (
+        Arc::new(SqlitePreparationRegistry::from_pool(Arc::new(pool))),
+        dir,
+    )
+}
+
+pub(crate) async fn claim(registry: &SqlitePreparationRegistry, format_version: i32) {
+    let now = Utc::now();
+    registry
+        .claim(ClaimRequest {
+            source_key: SOURCE.into(),
+            source_bytes: 60_000_000,
+            format_version,
+            owner: "job".into(),
+            lease: Duration::minutes(5),
+            now,
+        })
+        .await
+        .unwrap()
+        .expect("claim won");
+}
+
+pub(crate) async fn prepared(tables: &[(&str, u32)], part_bytes: usize) -> Prepared {
+    prepared_with(tables, part_bytes, FORMAT_VERSION, |_| {}).await
+}
+
+/// `tweak` may change the [`ReadyInfo`] before it is recorded.
+pub(crate) async fn prepared_with(
+    tables: &[(&str, u32)],
+    part_bytes: usize,
+    format_version: i32,
+    tweak: impl FnOnce(&mut ReadyInfo),
+) -> Prepared {
+    let (registry, dir) = sqlite_registry().await;
+    let storage = FakeStorage::new();
+    let manifest = manifest_with(tables);
+    let mut keys = vec![];
+    let mut total = 0usize;
+    for (t, (_, parts)) in tables.iter().enumerate() {
+        for p in 0..*parts as usize {
+            let key = format!("{ROOT}/{}", part_path(t, p).unwrap());
+            storage.put(&key, vec![b'a' + t as u8; part_bytes]);
+            total += part_bytes;
+            keys.push(key);
+        }
+    }
+    let manifest_json = manifest.to_json().unwrap();
+    let manifest_key = format!("{ROOT}/{MANIFEST_PATH}");
+    total += manifest_json.len();
+    storage.put(&manifest_key, manifest_json.into_bytes());
+    keys.push(manifest_key.clone());
+    claim(&registry, format_version).await;
+    let mut info = ReadyInfo {
+        manifest_key,
+        blob_keys: keys.clone(),
+        tables_json: manifest.tables_json().unwrap(),
+        prepared_bytes: total as i64,
+    };
+    tweak(&mut info);
+    registry
+        .complete(SOURCE, "job", info, Utc::now())
+        .await
+        .unwrap();
+    Prepared {
+        registry,
+        storage,
+        manifest,
+        _dir: dir,
+    }
+}
