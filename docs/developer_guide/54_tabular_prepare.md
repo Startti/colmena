@@ -3,8 +3,8 @@
 Module `tabular_prepare` will hold the pieces that prepare a large tabular
 attachment once, ahead of the questions asked about it. Everything in it is
 **dark**: it is used only when the engine switch `COLMENA_LARGE_TABULAR=on`,
-and nothing calls into the module yet (the CSV converter exists, see below,
-but no host wires it). With the switch off
+and nothing calls into the module yet (the CSV and xlsx converters exist, see
+below, but no host wires them). With the switch off
 (the default) behaviour is unchanged and the registry table stays empty.
 
 "Large" means strictly greater than 50 MiB (52,428,800 bytes); exactly 50 MiB
@@ -784,10 +784,12 @@ or refused.
 **Inline runner.** `CsvPrepareRunner` is the `PrepareRunner` behind `InlineTrigger` for
 local runs and tests: built from a `PrepareEnv` and the `PrepareConfig` (it keeps the
 engine switch). With the switch off it runs nothing at all (no registry read, no storage
-call). A request whose mime type is not `text/csv` (parameters such as a charset are
-ignored, case too) is logged and dropped: the Excel unit adds its own source. The host
-that wires production storage and registry builds the same environment and its own
-trigger; nothing here constructs either.
+call). A request whose mime type is `text/csv` is prepared by `prepare_csv` and one whose
+mime type is the xlsx one (`application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`,
+`XLSX_MIME`) by `prepare_xlsx` (parameters such as a charset are ignored, case too); any other
+mime type, legacy `.xls` included, is logged and dropped. The host that wires production
+storage and registry builds the same environment and its own trigger; nothing here constructs
+either.
 
 **Tracking before writing.** `PreparationRegistry::track_blobs(source, owner, keys, now)`
 adds keys to the row's `blob_keys` (a union), only while `owner` holds the lease of a
@@ -1148,3 +1150,26 @@ sampled and written (see above).
   its first read, as for a CSV.
 - Cancelling the control, or dropping the future, stops the read at its next row; the keys put
   so far are in `ConvertControl::paths()` for the caller to remove.
+
+### Preparing a workbook (`driver.rs`)
+
+`prepare_xlsx` is `prepare_csv` over a workbook: **the same driver, not a copy**. One private
+`prepare` serves both, and only the conversion step differs (`convert_csv_table_with` for a
+CSV, `convert_xlsx` for a workbook), so the claim, the lease (budget plus `JOB_GRACE`), the
+tracking before every put (`track_blobs`, per table: the first part of a second sheet is
+listed before it is put), the ownership checks, the 300 s budget, the bounded terminal steps,
+the failure order (delete, then record) and the fixed failure sentences are one code path.
+
+- A workbook larger than `PrepareEnv::xlsx_max_bytes` (default 400 MiB; 0 refuses every
+  workbook) fails with `xlsx_too_large` **before a byte is read**, by the size the host
+  declared in the request; the storage's own size and the bytes as they arrive are checked
+  again while the workbook is spooled.
+- The workbook is spooled to a local temporary file (see *Spooling the source*): progress
+  reports the bytes spooled over the declared size, and the time budget covers the spool, the
+  checks and the conversion together.
+- The manifest holds one table per sheet that has a value, named by `unique_table_names` (clean,
+  at most 64 characters, unique ignoring case: `Q3 Sales` and `q3 sales` become `Q3 Sales` and
+  `q3 sales_2`) and one `conversion` entry per table. `PreparedTable::tables` replaces the
+  single `converted`: a `Vec`, one per table, in manifest order.
+- The sizes the row keeps (`prepared_bytes`, `blob_keys`) are the sums over every table and
+  the manifest. A source that disappears while it is spooled releases the row, like a CSV.
