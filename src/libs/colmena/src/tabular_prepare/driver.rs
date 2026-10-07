@@ -13,9 +13,11 @@
 //! one write per part. So every object a preparation may have written is in the
 //! row whatever happens next (a crash, a dropped future, a registry error at the
 //! terminal write); a key listed and never written is harmless, deleting is
-//! idempotent. A failure is recorded with `fail_with_blobs` and the objects are
-//! then deleted. If the registry cannot say whether `complete` was applied nothing
-//! is deleted (the row may be ready), the objects stay listed. Nothing but the
+//! idempotent. A failure reads ownership, deletes the objects while the job still
+//! holds the lease and only then records the failure (never a delete after it: the
+//! row is claimable at once and a retry writes the same keys). If the registry cannot
+//! say whether `complete` was applied nothing is deleted (the row may be ready), the
+//! objects stay listed. Nothing but the
 //! failure reason is user-visible, and it never carries a cell or a storage key.
 
 use crate::storage::domain::{OutputStorageRepository, StorageError};
@@ -42,7 +44,7 @@ use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -230,6 +232,15 @@ fn classify(e: &TableError) -> (&'static str, String) {
     }
 }
 
+/// The reason when the registry, not the storage, failed while the job listed keys
+/// or confirmed its row: a defect or an outage on our side, never the file's.
+fn registry_failure() -> (&'static str, String) {
+    (
+        reason::INTERNAL,
+        "the registry could not confirm the preparation's row".to_string(),
+    )
+}
+
 pub fn encoding_name(e: Encoding) -> &'static str {
     match e {
         Encoding::Utf8 => "utf-8",
@@ -350,8 +361,10 @@ struct OwnedSink {
     source_key: String,
     owner: String,
     lost: AtomicBool,
-    /// Parts `0..tracked_parts` of each table are listed in the row already.
-    tracked_parts: AtomicUsize,
+    /// The registry itself failed (not storage) when listing keys or reading the row.
+    registry_failed: AtomicBool,
+    /// Per table, parts `0..n` are listed in the row already.
+    tracked_parts: std::sync::Mutex<std::collections::HashMap<usize, usize>>,
     manifest_tracked: AtomicBool,
 }
 
@@ -370,10 +383,17 @@ impl OwnedSink {
         let mut keys: Vec<String> = Vec::new();
         let mut upto = None;
         if let Some((table, part)) = parse_part_path(path) {
-            if part >= self.tracked_parts.load(Ordering::SeqCst) {
+            let done = self
+                .tracked_parts
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .get(&table)
+                .copied()
+                .unwrap_or(0);
+            if part >= done {
                 let end = (part + TRACK_AHEAD).min(MAX_PARTS);
                 keys.extend((part..end).filter_map(|p| part_path(table, p).ok()));
-                upto = Some(end);
+                upto = Some((table, end));
             }
         }
         let with_manifest = !self.manifest_tracked.load(Ordering::SeqCst);
@@ -391,8 +411,11 @@ impl OwnedSink {
         if outcome == TerminalOutcome::Cancelled {
             return Ok(false);
         }
-        if let Some(end) = upto {
-            self.tracked_parts.store(end, Ordering::SeqCst);
+        if let Some((table, end)) = upto {
+            self.tracked_parts
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .insert(table, end);
         }
         self.manifest_tracked.store(true, Ordering::SeqCst);
         Ok(true)
@@ -414,9 +437,12 @@ impl PartSink for OwnedSink {
                 self.lost.store(true, Ordering::SeqCst);
                 Err(SinkError("the preparation no longer owns its row".into()))
             }
-            Err(_) => Err(SinkError(
-                "the registry could not confirm the preparation's row".into(),
-            )),
+            Err(_) => {
+                self.registry_failed.store(true, Ordering::SeqCst);
+                Err(SinkError(
+                    "the registry could not confirm the preparation's row".into(),
+                ))
+            }
         }
     }
 }
@@ -504,7 +530,8 @@ async fn run_prepare(
         source_key: req.source_key.clone(),
         owner: owner.clone(),
         lost: AtomicBool::new(false),
-        tracked_parts: AtomicUsize::new(0),
+        registry_failed: AtomicBool::new(false),
+        tracked_parts: std::sync::Mutex::new(std::collections::HashMap::new()),
         manifest_tracked: AtomicBool::new(false),
     });
     let control = ConvertControl::new();
@@ -602,6 +629,11 @@ async fn run_prepare(
                     if sink.lost.load(Ordering::SeqCst) {
                         return settle_lost(env, req, &blob_keys).await;
                     }
+                    let (code, detail) = if sink.registry_failed.load(Ordering::SeqCst) {
+                        registry_failure()
+                    } else {
+                        (code, detail)
+                    };
                     return fail(env, req, &owner, code, detail, blob_keys).await;
                 }
             };
@@ -649,7 +681,11 @@ async fn run_prepare(
             ) {
                 return source_gone(env, req, &owner, keys).await;
             }
-            let (code, detail) = classify(&failure.error);
+            let (code, detail) = if sink.registry_failed.load(Ordering::SeqCst) {
+                registry_failure()
+            } else {
+                classify(&failure.error)
+            };
             fail(env, req, &owner, code, detail, keys).await
         }
     }
@@ -668,7 +704,7 @@ async fn settle_lost(
         .await?
         .is_none()
     {
-        delete_best_effort(env, req, keys).await;
+        delete_best_effort(env, req, keys, false).await;
     }
     Ok(PrepareOutcome::Cancelled)
 }
@@ -706,19 +742,27 @@ async fn source_gone(
 /// Deletes what a preparation wrote. The keys are listed in the row, so what
 /// this cannot delete the cleanup pass will; the failure is logged as a fixed
 /// sentence and a kind, never with the adapter's text or a key.
-async fn delete_best_effort(env: &PrepareEnv, req: &PrepareRequest, keys: &[String]) {
-    match bounded(env, env.storage.delete_derived(&req.source_key, keys)).await {
-        Some(Ok(())) => {}
-        Some(Err(e)) => tracing::warn!(
+async fn delete_best_effort(env: &PrepareEnv, req: &PrepareRequest, keys: &[String], listed: bool) {
+    let kind = match bounded(env, env.storage.delete_derived(&req.source_key, keys)).await {
+        Some(Ok(())) => return,
+        Some(Err(e)) => storage_kind(&e),
+        None => "no_answer",
+    };
+    // `listed`: the keys are in the row, so the cleanup pass will remove what this
+    // could not. When the row is gone nothing lists them: the default delete stops at
+    // the first error, so what is left stays until someone deletes by prefix.
+    if listed {
+        tracing::warn!(
             target: "colmena::tabular_prepare",
-            kind = storage_kind(&e),
+            kind,
             "could not delete prepared objects; the cleanup pass will"
-        ),
-        None => tracing::warn!(
+        );
+    } else {
+        tracing::warn!(
             target: "colmena::tabular_prepare",
-            kind = "no_answer",
-            "could not delete prepared objects; the cleanup pass will"
-        ),
+            kind,
+            "could not delete prepared objects; no row lists them"
+        );
     }
 }
 
@@ -752,7 +796,7 @@ async fn fail(
     }
     // Best effort: the keys are listed in the row, so the cleanup pass removes
     // what this could not.
-    delete_best_effort(env, req, &keys).await;
+    delete_best_effort(env, req, &keys, true).await;
     let outcome = within(
         env,
         env.registry
@@ -2294,6 +2338,95 @@ pub(crate) mod cases {
         assert!(out.is_err(), "{out:?}");
     }
 
+    pub(crate) async fn tracking_is_kept_per_table_so_a_second_tables_first_part_is_listed_before_it_is_put(
+        registry: Arc<dyn PreparationRegistry>,
+    ) {
+        let source = fresh_source();
+        let source = source.as_str();
+        let storage = PlacedStorage::with_source(source, five_rows());
+        let now = Utc.with_ymd_and_hms(2026, 10, 6, 12, 0, 0).unwrap();
+        let claim = ClaimRequest {
+            source_key: source.to_string(),
+            source_bytes: 1,
+            format_version: FORMAT_VERSION,
+            owner: "me".into(),
+            lease: lease_for(chrono::Duration::seconds(300)),
+            now,
+        };
+        assert!(registry.claim(claim).await.unwrap().is_some());
+        let sink = OwnedSink {
+            inner: Arc::new(StoragePartSink::new(storage.clone(), source).unwrap()),
+            registry: registry.clone(),
+            clock: Arc::new(move || now),
+            source_key: source.to_string(),
+            owner: "me".into(),
+            lost: AtomicBool::new(false),
+            registry_failed: AtomicBool::new(false),
+            tracked_parts: std::sync::Mutex::new(std::collections::HashMap::new()),
+            manifest_tracked: AtomicBool::new(false),
+        };
+        let data = Bytes::from_static(b"x");
+        sink.put("t0/part-00000.parquet", data.clone())
+            .await
+            .unwrap();
+        sink.put("t1/part-00000.parquet", data).await.unwrap();
+        let row = registry.get(source).await.unwrap().unwrap();
+        let root = root_of(source);
+        for table in 0..2 {
+            for part in 0..TRACK_AHEAD {
+                let key = format!("{root}/t{table}/part-{part:05}.parquet");
+                assert!(row.blob_keys.contains(&key), "{key} not tracked");
+            }
+        }
+    }
+
+    pub(crate) async fn a_registry_error_while_tracking_is_an_internal_failure_not_a_storage_one(
+        registry: Arc<dyn PreparationRegistry>,
+    ) {
+        use crate::tabular_prepare::registry_faults::FaultyRegistry;
+        use std::sync::atomic::Ordering::SeqCst;
+        let source = fresh_source();
+        let source = source.as_str();
+        let storage = PlacedStorage::with_source(source, five_rows());
+        let faulty = FaultyRegistry::new(registry.clone());
+        faulty.faults.fail_track.store(true, SeqCst);
+        let env = env(faulty, storage.clone());
+        let out = prepare_csv(&env, &request(source, 40)).await.unwrap();
+        let (f, _row) = failed_row(&registry, source, out).await;
+        assert_eq!(f.code, reason::INTERNAL);
+        assert!(!f.detail.contains("secret"), "{}", f.detail);
+        assert_eq!(*storage.stores.lock().unwrap(), 0);
+    }
+
+    pub(crate) async fn a_failed_delete_with_no_row_does_not_promise_a_cleanup(
+        registry: Arc<dyn PreparationRegistry>,
+    ) {
+        for attempt in 0..10 {
+            let source = fresh_source();
+            let storage = PlacedStorage::with_source(&source, five_rows());
+            *storage.fail_delete.lock().unwrap() = true;
+            let captured = Captured::default();
+            let subscriber = tracing_subscriber::fmt()
+                .with_writer(captured.clone())
+                .with_ansi(false)
+                .finish();
+            let _guard = tracing::subscriber::set_default(subscriber);
+            tracing::callsite::rebuild_interest_cache();
+            let env = env(registry.clone(), storage);
+            // No row exists for this source: the job lost it and deletes what it wrote.
+            let keys = vec![format!("{}/t0/part-00000.parquet", root_of(&source))];
+            let req = request(&source, 40);
+            let out = settle_lost(&env, &req, &keys).await.unwrap();
+            assert!(matches!(out, PrepareOutcome::Cancelled));
+            let text = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+            assert!(!text.contains("cleanup pass will"), "{text}");
+            if text.contains("no row lists them") {
+                return;
+            }
+            assert!(attempt < 9, "event missing after ten runs:\n{text}");
+        }
+    }
+
     pub(crate) async fn a_registry_error_at_completion_leaves_the_stored_objects_tracked_and_not_deleted(
         registry: Arc<dyn PreparationRegistry>,
     ) {
@@ -2580,5 +2713,17 @@ mod registry_tests {
     sqlite_case!(
         tabular_prepare_the_longest_owner_path_ends_before_the_lease_does,
         the_longest_owner_path_ends_before_the_lease_does
+    );
+    sqlite_case!(
+        tabular_prepare_tracking_is_kept_per_table_so_a_second_tables_first_part_is_listed_before_it_is_put,
+        tracking_is_kept_per_table_so_a_second_tables_first_part_is_listed_before_it_is_put
+    );
+    sqlite_case!(
+        tabular_prepare_a_registry_error_while_tracking_is_an_internal_failure_not_a_storage_one,
+        a_registry_error_while_tracking_is_an_internal_failure_not_a_storage_one
+    );
+    sqlite_case!(
+        tabular_prepare_a_failed_delete_with_no_row_does_not_promise_a_cleanup,
+        a_failed_delete_with_no_row_does_not_promise_a_cleanup
     );
 }

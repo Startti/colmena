@@ -478,6 +478,18 @@ mod tests {
         tabular_prepare_pg_the_longest_owner_path_ends_before_the_lease_does,
         the_longest_owner_path_ends_before_the_lease_does
     );
+    pg_driver_case!(
+        tabular_prepare_pg_tracking_is_kept_per_table_so_a_second_tables_first_part_is_listed_before_it_is_put,
+        tracking_is_kept_per_table_so_a_second_tables_first_part_is_listed_before_it_is_put
+    );
+    pg_driver_case!(
+        tabular_prepare_pg_a_registry_error_while_tracking_is_an_internal_failure_not_a_storage_one,
+        a_registry_error_while_tracking_is_an_internal_failure_not_a_storage_one
+    );
+    pg_driver_case!(
+        tabular_prepare_pg_a_failed_delete_with_no_row_does_not_promise_a_cleanup,
+        a_failed_delete_with_no_row_does_not_promise_a_cleanup
+    );
     pg_case!(
         tabular_prepare_pg_a_deleting_row_is_never_taken_by_an_older_format_claim,
         a_deleting_row_is_never_taken_by_an_older_format_claim
