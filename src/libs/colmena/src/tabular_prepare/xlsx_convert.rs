@@ -397,4 +397,202 @@ mod tests {
         assert_eq!(got[10_004], ["N/A"]);
         assert_eq!(got[10_009], ["10010"]);
     }
+
+    #[tokio::test]
+    async fn a_workbook_from_a_real_library_is_typed_by_the_kind_of_each_cell() {
+        use rust_xlsxwriter::{ExcelDateTime, Format, Workbook};
+        let mut book = Workbook::new();
+        let sheet = book.add_worksheet();
+        sheet.set_name("Data").unwrap();
+        for (c, name) in ["n", "f", "b", "d", "zip", "mixed"].iter().enumerate() {
+            sheet.write_string(0, c as u16, *name).unwrap();
+        }
+        let date = Format::new().set_num_format("yyyy-mm-dd");
+        for i in 0..3u32 {
+            let r = i + 1;
+            sheet.write_number(r, 0, f64::from(i) + 1.0).unwrap();
+            sheet.write_number(r, 1, 0.1 + f64::from(i)).unwrap();
+            sheet.write_boolean(r, 2, i % 2 == 0).unwrap();
+            let when = ExcelDateTime::from_ymd(2021, 1, (i + 1) as u8).unwrap();
+            sheet
+                .write_datetime_with_format(r, 3, &when, &date)
+                .unwrap();
+            sheet.write_string(r, 4, format!("0{}501", i)).unwrap();
+            if i == 1 {
+                sheet.write_string(r, 5, "N/A").unwrap();
+            } else {
+                sheet.write_number(r, 5, 42.0).unwrap();
+            }
+        }
+        let (result, sink) = convert(book.save_to_buffer().unwrap()).await;
+        let tables = result.unwrap();
+        use ColumnType::*;
+        assert_eq!(types(&tables[0]), [Int, Float, Bool, Date, String, String]);
+        let got = rows_of(&sink, 0, 1);
+        assert_eq!(got[0], ["1", "0.1", "true", "2021-01-01", "00501", "42"]);
+        assert_eq!(got[1], ["2", "1.1", "false", "2021-01-02", "01501", "N/A"]);
+        assert_eq!(
+            got[2][4], "02501",
+            "text that looks like a number keeps its zeros"
+        );
+        assert_eq!(tables[0].table.restarts, 0);
+    }
+
+    #[tokio::test]
+    async fn three_conflicts_make_every_column_text_and_keep_every_value() {
+        // Three numeric columns that each get a text cell after the 10,000 rows the
+        // types come from, one after another: three restarts, the last all text.
+        let mut rows = vec![row(
+            1,
+            &[text("A", 1, "a"), text("B", 1, "b"), text("C", 1, "c")],
+        )];
+        for r in 2..=10_010 {
+            let cell = |col: &str, at: usize, t: &str| {
+                if r == at {
+                    text(col, r, t)
+                } else {
+                    num(col, r, r)
+                }
+            };
+            rows.push(row(
+                r,
+                &[
+                    cell("A", 10_003, "x"),
+                    cell("B", 10_004, "y"),
+                    cell("C", 10_005, "z"),
+                ],
+            ));
+        }
+        let (result, sink) = convert(Wb::new().sheet("Data", &rows.concat()).build()).await;
+        let tables = result.unwrap();
+        let t = &tables[0].table;
+        assert_eq!((t.restarts, t.all_strings), (3, true));
+        assert_eq!(t.demoted, ["a", "b", "c"]);
+        assert_eq!(types(&tables[0]), [ColumnType::String; 3]);
+        let got = rows_of(&sink, 0, t.written.parts);
+        assert_eq!(got.len(), 10_009);
+        assert_eq!(got[10_001], ["x", "10003", "10003"]);
+        assert_eq!(got[10_002], ["10004", "y", "10004"]);
+        assert_eq!(got[10_003], ["10005", "10005", "z"]);
+        assert_eq!(got[0], ["2", "2", "2"]);
+    }
+
+    #[tokio::test]
+    async fn a_workbook_with_no_value_is_refused_and_a_header_only_sheet_is_a_table() {
+        let (result, sink) = convert(Wb::new().sheet("A", "").sheet("B", "").build()).await;
+        let failure = result.err().unwrap();
+        assert!(matches!(
+            failure.error,
+            TableError::Xlsx(XlsxError::Invalid(Invalid::NoData))
+        ));
+        assert!(sink.paths().is_empty());
+        let header = row(1, &[text("A", 1, "only"), text("B", 1, "header")]);
+        let (result, sink) = convert(Wb::new().sheet("H", &header).build()).await;
+        let tables = result.unwrap();
+        assert_eq!(
+            (tables[0].table.written.rows, tables[0].table.written.parts),
+            (0, 1)
+        );
+        assert_eq!(rows_of(&sink, 0, 1), Vec::<Vec<String>>::new());
+        assert_eq!(types(&tables[0]), [ColumnType::String; 2]);
+    }
+
+    #[tokio::test]
+    async fn the_cell_cap_counts_the_whole_workbook_not_each_sheet() {
+        let sheet = [
+            row(1, &[text("A", 1, "n")]),
+            row(2, &[num("A", 2, 1)]),
+            row(3, &[num("A", 3, 2)]),
+        ]
+        .concat();
+        let book = || Wb::new().sheet("One", &sheet).sheet("Two", &sheet).build();
+        let mut limits = Limits::default();
+        limits.sheet.max_cells = 6;
+        let (result, _) = convert_with(book(), WriterConfig::default(), &limits).await;
+        assert_eq!(result.unwrap().len(), 2, "six cells fit exactly");
+        limits.sheet.max_cells = 5;
+        let (result, _) = convert_with(book(), WriterConfig::default(), &limits).await;
+        let failure = result.err().unwrap();
+        assert!(matches!(
+            failure.error,
+            TableError::Xlsx(XlsxError::TooLarge(
+                crate::tabular_prepare::xlsx_spool::Cap::Cells
+            ))
+        ));
+    }
+
+    /// A sink that cancels the conversion at its first put.
+    struct CancelOnPut {
+        inner: MemorySink,
+        control: Arc<ConvertControl>,
+    }
+
+    #[async_trait]
+    impl PartSink for CancelOnPut {
+        async fn put(
+            &self,
+            path: &str,
+            data: Bytes,
+        ) -> Result<(), crate::tabular_prepare::part_sink::SinkError> {
+            self.inner.put(path, data).await?;
+            self.control.cancel();
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelling_stops_the_read_and_reports_what_may_exist() {
+        let mut rows = vec![row(1, &[text("A", 1, "n")])];
+        rows.extend((2..=60_000).map(|r| row(r, &[num("A", r, r)])));
+        let control = ConvertControl::new();
+        let sink = Arc::new(CancelOnPut {
+            inner: MemorySink::default(),
+            control: control.clone(),
+        });
+        let cfg = WriterConfig {
+            max_rows: 100,
+            ..WriterConfig::default()
+        };
+        let source = BytesSource(Wb::new().sheet("Data", &rows.concat()).build());
+        let limits = Limits::default();
+        let done = convert_xlsx_limits(&source, sink.clone(), cfg, &control, &limits);
+        let result = tokio::time::timeout(std::time::Duration::from_secs(60), done)
+            .await
+            .expect("a cancelled conversion ends");
+        let failure = result.err().unwrap();
+        assert!(matches!(
+            failure.error,
+            TableError::Xlsx(XlsxError::Cancelled)
+        ));
+        assert!(failure
+            .blob_paths
+            .contains(&"t0/part-00000.parquet".to_string()));
+        // It stopped before writing all 600 parts.
+        assert!(
+            sink.inner.paths().len() < 600,
+            "{} parts",
+            sink.inner.paths().len()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refused_workbook_says_nothing_about_its_cells_or_sheets() {
+        let rows = [
+            row(1, &[text("A", 1, "a")]),
+            row(2, &[num("A", 2, 1), text("B", 2, "secret cell text")]),
+        ]
+        .concat();
+        let (result, sink) = convert(Wb::new().sheet("Secret sheet", &rows).build()).await;
+        let failure = result.err().unwrap();
+        let said = failure.error.to_string();
+        assert!(
+            !said.contains("secret") && !said.contains("Secret"),
+            "{said}"
+        );
+        assert!(matches!(
+            failure.error,
+            TableError::Xlsx(XlsxError::Invalid(Invalid::BeyondHeader))
+        ));
+        assert!(failure.blob_paths.is_empty() && sink.paths().is_empty());
+    }
 }
