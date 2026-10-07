@@ -35,6 +35,8 @@ pub(crate) struct FakeStorage {
     pub root: Option<String>,
     pub chunk: usize,
     pub reads: Mutex<Vec<String>>,
+    /// What `store_stream` was given: file name and bytes.
+    pub stored: Mutex<Vec<(String, Vec<u8>)>>,
     /// Keys that fail to read.
     pub broken: Mutex<Vec<String>>,
     /// Keys served by a generator instead of the bytes in `objects`.
@@ -49,6 +51,7 @@ impl FakeStorage {
             root: Some(ROOT.to_string()),
             chunk: 1024,
             reads: Mutex::new(vec![]),
+            stored: Mutex::new(vec![]),
             broken: Mutex::new(vec![]),
             custom: Mutex::new(HashMap::new()),
         })
@@ -113,6 +116,28 @@ impl OutputStorageRepository for FakeStorage {
     }
     async fn delete(&self, _key: &str) -> Result<(), StorageError> {
         panic!("the run path never deletes from storage")
+    }
+    async fn store_stream(
+        &self,
+        mut req: crate::storage::domain::StoreStreamRequest,
+    ) -> Result<StoredOutput, StorageError> {
+        use futures::StreamExt;
+        let mut all = vec![];
+        while let Some(chunk) = req.stream.next().await {
+            all.extend_from_slice(&chunk?);
+        }
+        let size_bytes = all.len() as u64;
+        self.stored
+            .lock()
+            .unwrap()
+            .push((req.filename.clone(), all));
+        Ok(StoredOutput {
+            storage_key: format!("generated/{}", req.filename),
+            read_url: String::new(),
+            mime_type: req.mime_type,
+            filename: req.filename,
+            size_bytes,
+        })
     }
     fn derived_root(&self, _source: &str) -> Option<String> {
         self.root.clone()
@@ -308,6 +333,8 @@ pub(crate) fn generated(
 pub(crate) struct Recorder {
     pub seen: Mutex<Vec<(PythonRunRequest, Vec<usize>, u64)>>,
     pub answer: Mutex<Option<Result<MountedResult, MountedError>>>,
+    /// Files the fake "code" leaves in the output volume, fed to the sink.
+    pub outputs: Mutex<Vec<(String, Vec<u8>)>>,
 }
 
 impl Recorder {
@@ -315,6 +342,7 @@ impl Recorder {
         Arc::new(Self {
             seen: Mutex::new(vec![]),
             answer: Mutex::new(Some(answer)),
+            outputs: Mutex::new(vec![]),
         })
     }
     pub fn ok(output: Value) -> Arc<Self> {
@@ -333,6 +361,15 @@ impl Recorder {
             too_many_entries: false,
         }))
     }
+    /// Like [`Self::ok`], and the code leaves these files in `/out`.
+    pub fn ok_with_files(output: Value, files: &[(&str, &[u8])]) -> Arc<Self> {
+        let r = Self::ok(output);
+        *r.outputs.lock().unwrap() = files
+            .iter()
+            .map(|(n, b)| (n.to_string(), b.to_vec()))
+            .collect();
+        r
+    }
     pub fn calls(&self) -> usize {
         self.seen.lock().unwrap().len()
     }
@@ -349,7 +386,21 @@ impl MountedExecutor for Recorder {
             .lock()
             .unwrap()
             .push((req, call.tables.to_vec(), call.out_mb));
-        self.answer.lock().unwrap().take().expect("answered once")
+        let mut answer = self.answer.lock().unwrap().take().expect("answered once");
+        let files = self.outputs.lock().unwrap().clone();
+        if let (Some(sink), Ok(done), false) = (call.sink, answer.as_mut(), files.is_empty()) {
+            let dir = tempfile::tempdir().unwrap();
+            for (name, bytes) in &files {
+                std::fs::write(dir.path().join(name), bytes).unwrap();
+            }
+            let found = super::collect::collect_out(dir.path(), Default::default()).unwrap();
+            done.rejected = found.rejected;
+            for file in found.files {
+                done.emitted.push(file.name.clone());
+                sink.accept(file).await.map_err(MountedError::Refused)?;
+            }
+        }
+        answer
     }
 }
 

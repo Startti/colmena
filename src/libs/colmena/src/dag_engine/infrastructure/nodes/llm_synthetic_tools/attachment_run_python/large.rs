@@ -81,6 +81,8 @@ pub(super) async fn dispatch(
             size_bytes: target.size_bytes,
             code: args.code.clone(),
             tables: args.tables.clone(),
+            session_id: target.session_id,
+            agent_session_id: target.agent_session_id,
         })
         .await;
     let duration_ms = started.elapsed().as_millis() as u64;

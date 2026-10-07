@@ -6,8 +6,10 @@
 //! way the call cannot run is a typed [`RunRefusal`], and the original file is
 //! never read.
 
+use super::collect::RejectReason;
 use super::mounted::{MountedCall, MountedError, MountedExecutor, OUT_MIB};
-use super::prelude::{prelude_inputs, tables_summary, wrap_large_code};
+use super::outputs::StoreSink;
+use super::prelude::{prelude_inputs, tables_summary, unwrap_emitted, wrap_large_code};
 use super::refusal::{FailureReason, RunRefusal, Unavailable};
 use super::stage::StageLimits;
 use super::verify::verify_prepared;
@@ -54,6 +56,22 @@ pub struct LargeRunRequest {
     pub code: String,
     /// Tables to make readable; empty is all of them.
     pub tables: Vec<String>,
+    /// Where generated files belong, as for any attachment the engine stores.
+    pub session_id: Option<String>,
+    pub agent_session_id: Option<String>,
+}
+
+/// A file the code returned, stored and described.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EmittedOutput {
+    pub name: String,
+    pub mime_type: String,
+    pub size_bytes: u64,
+    /// The engine's own storage handle, as for every generated attachment.
+    pub storage_key: String,
+    /// What the code said about it, when it matches a kept file (untrusted, cleaned).
+    pub rows: Option<u64>,
+    pub dtypes: Vec<(String, String)>,
 }
 
 /// A call whose code ran to the end.
@@ -63,6 +81,11 @@ pub struct LargeRunOutput {
     pub result: Value,
     /// Names, rows and column types of the tables the code could read.
     pub tables: Value,
+    /// The files the code returned, already in storage.
+    pub emitted: Vec<EmittedOutput>,
+    /// What was written to the output volume and not kept, and why, as text
+    /// for the model (a name only when it passed the charset).
+    pub not_kept: Vec<String>,
 }
 
 /// Why a call produced no output.
@@ -83,6 +106,19 @@ pub enum LargeRunError {
 const MEMORY_TEXT: &str = "the run ended without returning a result; it probably ran out of \
     memory. Select fewer columns with `read(columns=[...])`, or loop \
     `for part in tables[name].parts(columns=[...])` and combine per-part results";
+
+/// Why an output was not kept, in words for the model.
+fn reason_text(reason: RejectReason) -> &'static str {
+    match reason {
+        RejectReason::BadName => "the name is not allowed (letters, digits, '.', '_' and '-', ending in .csv or .parquet)",
+        RejectReason::NotARegularFile => "not a regular file",
+        RejectReason::HardLinked => "more than one name for the file",
+        RejectReason::TooLarge => "over the size limit for one file",
+        RejectReason::OverFileCount => "over the number of files allowed",
+        RejectReason::OverTotal => "over the size limit for all files together",
+        RejectReason::Unreadable => "could not be read",
+    }
+}
 
 pub struct LargeTabularRuntime {
     prepare: TabularPrepare,
@@ -161,6 +197,11 @@ impl LargeTabularRuntime {
             .map_err(refused)?;
         let chosen = plan.select(&req.tables).map_err(refused)?;
         let timeout = self.config.heavy_timeout;
+        let sink = StoreSink::new(
+            self.storage.clone(),
+            req.session_id.clone(),
+            req.agent_session_id.clone(),
+        );
         let call = PythonRunRequest {
             code: wrap_large_code(&req.code),
             mode: "restricted".to_string(),
@@ -173,14 +214,47 @@ impl LargeTabularRuntime {
             tables: &chosen,
             limits: self.config.limits,
             out_mb: self.config.out_mb,
-            sink: None,
+            sink: Some(&sink),
         };
         match self.executor.run_with_mounts(call, mounted).await {
-            Ok(done) => Ok(LargeRunOutput {
-                stdout: done.result.stdout,
-                result: done.result.output.unwrap_or(Value::Null),
-                tables: tables_summary(plan.manifest(), &chosen),
-            }),
+            Ok(done) => {
+                let (result, reports) = unwrap_emitted(done.result.output.unwrap_or(Value::Null));
+                let emitted = sink
+                    .take()
+                    .into_iter()
+                    .map(|stored| {
+                        let report = reports.iter().find(|r| r.name == stored.name);
+                        EmittedOutput {
+                            rows: report.and_then(|r| r.rows),
+                            dtypes: report.map(|r| r.dtypes.clone()).unwrap_or_default(),
+                            name: stored.name,
+                            mime_type: stored.mime_type,
+                            size_bytes: stored.size_bytes,
+                            storage_key: stored.storage_key,
+                        }
+                    })
+                    .collect();
+                let mut not_kept: Vec<String> = done
+                    .rejected
+                    .iter()
+                    .map(|r| match &r.name {
+                        Some(n) => format!("{n}: {}", reason_text(r.reason)),
+                        None => format!("a file with an invalid name: {}", reason_text(r.reason)),
+                    })
+                    .collect();
+                if done.too_many_entries {
+                    not_kept.push(
+                        "the output folder held too many entries, so nothing was kept".into(),
+                    );
+                }
+                Ok(LargeRunOutput {
+                    stdout: done.result.stdout,
+                    result,
+                    tables: tables_summary(plan.manifest(), &chosen),
+                    emitted,
+                    not_kept,
+                })
+            }
             Err(MountedError::Refused(r)) => Err(refused(r)),
             Err(MountedError::Run(PythonRunError::Python(text))) => {
                 if text == CRASHED_MESSAGE || text.contains("MemoryError") {
@@ -215,6 +289,8 @@ mod tests {
             size_bytes: 60_000_000,
             code: code.into(),
             tables: tables.iter().map(|s| s.to_string()).collect(),
+            session_id: Some("s1".into()),
+            agent_session_id: Some("a1".into()),
         }
     }
 
@@ -448,6 +524,64 @@ mod tests {
         assert!(r.message().contains("will not be retried"));
         assert!(!r.message().contains("secret"));
         assert_eq!(exec.calls(), 0);
+    }
+
+    /// The files the code returned are in storage, described with what the code
+    /// said about them (matched by name, cleaned); what was not kept is told in
+    /// words, and the result is the code's alone.
+    #[tokio::test]
+    async fn the_files_the_code_returned_are_stored_and_described() {
+        let p = prepared(&[("sales", 1)], 4).await;
+        let answer = json!({
+            "__colmena_emitted": [
+                {"name": "out.csv", "rows": 2, "dtypes": {"a": "int64"}, "size": 8},
+                {"name": "ghost.csv", "rows": 99}
+            ],
+            "result": {"total": 3}
+        });
+        let exec = Recorder::ok_with_files(
+            answer,
+            &[
+                ("out.csv", b"a\n1\n2\n"),
+                ("bad name.csv", b"x"),
+                ("note.txt", b"x"),
+            ],
+        );
+        let out = runtime(&p, exec, true)
+            .run(request("pass", &[]))
+            .await
+            .unwrap();
+        assert_eq!(out.result, json!({"total": 3}));
+        assert_eq!(out.emitted.len(), 1);
+        let e = &out.emitted[0];
+        assert_eq!(
+            (e.name.as_str(), e.rows, e.size_bytes),
+            ("out.csv", Some(2), 6)
+        );
+        assert_eq!(e.dtypes, [("a".to_string(), "int64".to_string())]);
+        assert_eq!(e.mime_type, "text/csv");
+        assert_eq!(e.storage_key, "generated/out.csv");
+        assert_eq!(
+            *p.storage.stored.lock().unwrap(),
+            [("out.csv".to_string(), b"a\n1\n2\n".to_vec())]
+        );
+        assert_eq!(out.not_kept.len(), 2, "{:?}", out.not_kept);
+        assert!(out
+            .not_kept
+            .iter()
+            .all(|t| t.starts_with("a file with an invalid name")));
+        assert!(!out.not_kept.join("|").contains("bad name"));
+    }
+
+    #[tokio::test]
+    async fn a_call_that_returns_no_files_has_none_stored() {
+        let p = prepared(&[("sales", 1)], 4).await;
+        let out = runtime(&p, Recorder::ok(json!(1)), true)
+            .run(request("pass", &[]))
+            .await
+            .unwrap();
+        assert!(out.emitted.is_empty() && out.not_kept.is_empty());
+        assert!(p.storage.stored.lock().unwrap().is_empty());
     }
 
     #[test]
