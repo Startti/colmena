@@ -76,10 +76,13 @@ pub struct Sample {
 
 /// The header of a sheet as text, by column.
 fn header_of(row: &[(usize, crate::tabular_prepare::xlsx_sheet::Cell)]) -> Vec<String> {
-    let width = row.last().map_or(0, |(c, _)| c + 1);
+    // Never indexes past what it allocated, whatever order the cells come in.
+    let width = row.iter().map(|(c, _)| c + 1).max().unwrap_or(0);
     let mut raw = vec![String::new(); width];
     for (column, cell) in row {
-        raw[*column] = cell_text(cell).into_owned();
+        if let Some(slot) = raw.get_mut(*column) {
+            *slot = cell_text(cell).into_owned();
+        }
     }
     raw
 }
@@ -597,5 +600,19 @@ mod tests {
             result,
             Err(RunEnd::Failed(TableError::Xlsx(XlsxError::Cancelled)))
         ));
+    }
+
+    #[tokio::test]
+    async fn a_row_opened_inside_a_row_is_refused_by_the_sample_without_a_panic() {
+        // Cells in column F, then (inside the same row) a row with a cell in column A:
+        // the header used to be built by indexing with the first of those columns.
+        let rows = "<row r=\"1\"><c r=\"F1\"><v>1</v></c><row r=\"2\"><c r=\"A2\"><v>1</v></c></row></row>";
+        let book = book_of(Wb::new().sheet("A", rows).build()).await;
+        let err = sample(&book, 0).err().unwrap();
+        assert_eq!(err, XlsxError::Invalid(Invalid::BadCell));
+        // And the header builder itself never indexes past its width.
+        use crate::tabular_prepare::xlsx_sheet::Cell;
+        let out_of_order = vec![(5, Cell::Number(1.0)), (0, Cell::Number(2.0))];
+        assert_eq!(header_of(&out_of_order).len(), 6);
     }
 }

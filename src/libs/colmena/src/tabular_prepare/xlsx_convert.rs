@@ -112,11 +112,12 @@ pub(crate) async fn convert_xlsx_limits(
     let panicked = |_| fail(ConvertError::ReaderPanicked.into());
     let spooled = source.spool(&cancel).await.map_err(|e| fail(e.into()))?;
     let xlsx = limits.xlsx;
-    let book = tokio::task::spawn_blocking(move || open_book(spooled, &xlsx))
+    let mut book = tokio::task::spawn_blocking(move || open_book(spooled, &xlsx))
         .await
         .map_err(panicked)?
         .map_err(|e| fail(e.into()))?;
     let sheets = book.sheets.clone();
+    book.pkg.set_cancel(cancel.clone());
     let book = Arc::new(Mutex::new(book));
 
     let mut tables: Vec<SheetTable> = Vec::new();

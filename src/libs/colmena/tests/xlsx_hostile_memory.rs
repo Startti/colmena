@@ -139,11 +139,19 @@ fn parts() -> Vec<(&'static str, Vec<u8>)> {
 
 /// The valid workbook with `part` replaced by `body`, as an archive.
 fn book_with(part: &str, body: Vec<u8>) -> Vec<u8> {
+    book_with_all(&[(part, body)])
+}
+
+/// The valid workbook with several parts replaced.
+fn book_with_all(replacements: &[(&str, Vec<u8>)]) -> Vec<u8> {
     let mut zip = ZipWriter::new(Cursor::new(Vec::new()));
     for (name, bytes) in parts() {
         zip.start_file(name, stored()).unwrap();
-        zip.write_all(if name == part { &body } else { &bytes })
-            .unwrap();
+        let body = replacements
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map_or(&bytes, |(_, b)| b);
+        zip.write_all(body).unwrap();
     }
     zip.finish().unwrap().into_inner()
 }
@@ -285,4 +293,86 @@ async fn one_cell_made_of_millions_of_tiny_tokens_is_cut_at_the_cell_cap() {
     ));
     // The cell cap is 128 KiB; the rest is the reader's own buffers.
     assert!(peak < MIB, "peak {peak} bytes");
+}
+
+/// Reads the sheet of a package with its own shared strings.
+fn read_with_strings(pkg: &mut Package) -> Result<(), XlsxError> {
+    let strings = read_shared_strings(pkg, "xl/sharedStrings.xml")?;
+    let styles = Styles::none();
+    let (cells, cancel) = (AtomicU64::new(0), CancellationToken::new());
+    let ctx = SheetContext {
+        strings: &strings,
+        styles: &styles,
+        date1904: false,
+        cells: &cells,
+        cancel: &cancel,
+    };
+    read_sheet(pkg, "xl/worksheets/sheet1.xml", &ctx, |_, _| Ok(true)).map(|_| ())
+}
+
+#[tokio::test]
+async fn rows_opened_inside_an_open_row_are_refused_not_accumulated() {
+    let _one_at_a_time = SERIAL.lock().await;
+    use colmena::tabular_prepare::xlsx_spool::Invalid;
+    // A shared string of exactly 128 KiB, the cell cap; eight cells of it fill the row
+    // cap (1 MiB). Then, without ever closing the outer row, an empty `row` element and
+    // eight more such cells, again and again: each empty row used to reset the row's
+    // counters while its cells stayed held, so memory grew by a megabyte per 250 bytes.
+    let sst = format!("<sst><si><t>{}</t></si></sst>", "x".repeat(131_072));
+    let group: String = (1..=8)
+        .map(|c| {
+            format!(
+                "<c r=\"{}1\" t=\"s\"><v>0</v></c>",
+                (b'A' + c as u8 - 1) as char
+            )
+        })
+        .collect();
+    let mut rows = String::from("<row r=\"1\">");
+    for n in 2..2000 {
+        rows.push_str(&group);
+        rows.push_str(&format!("<row r=\"{n}\"/>"));
+    }
+    let sheet = format!("<worksheet><sheetData>{rows}</sheetData></worksheet>");
+    let bytes = book_with_all(&[
+        ("xl/sharedStrings.xml", sst.into_bytes()),
+        ("xl/worksheets/sheet1.xml", sheet.into_bytes()),
+    ]);
+    let (pkg, _) = open(bytes).await;
+    let mut pkg = pkg.unwrap();
+    let base = LIVE.load(Ordering::SeqCst);
+    PEAK.store(base, Ordering::SeqCst);
+    let result = read_with_strings(&mut pkg);
+    let peak = PEAK.load(Ordering::SeqCst) - base;
+    assert!(
+        matches!(result, Err(XlsxError::Invalid(Invalid::BadCell))),
+        "{result:?}"
+    );
+    // The table (128 KiB twice) and at most one row of eight cells (1 MiB), not 2,000 rows.
+    assert!(peak < 4 * MIB, "peak {peak} bytes");
+}
+
+#[tokio::test]
+async fn a_nested_row_start_and_the_header_that_used_to_index_past_its_width_are_refused() {
+    let _one_at_a_time = SERIAL.lock().await;
+    use colmena::tabular_prepare::xlsx_spool::Invalid;
+    for rows in [
+        "<row r=\"1\"><c r=\"A1\"><v>1</v></c><row r=\"2\"><c r=\"A2\"><v>1</v></c></row></row>",
+        // The reviewer's: a cell in column F, then a row whose cell is in column A.
+        "<row r=\"1\"><c r=\"F1\"><v>1</v></c><row r=\"2\"><c r=\"A2\"><v>1</v></c></row></row>",
+        "<row r=\"1\"><c r=\"A1\"><c r=\"B1\"><v>1</v></c></c></row>",
+        "<row r=\"1\"/><sheetData/>",
+        "<row r=\"1\"><c r=\"A1\"><v>1</v></c>",
+    ] {
+        let sheet = format!("<worksheet><sheetData>{rows}</sheetData></worksheet>");
+        let (pkg, _) = open(book_with("xl/worksheets/sheet1.xml", sheet.into_bytes())).await;
+        let mut pkg = pkg.unwrap();
+        let result = read_part(&mut pkg, "xl/worksheets/sheet1.xml");
+        assert!(
+            matches!(
+                result,
+                Err(XlsxError::Invalid(Invalid::BadCell | Invalid::Xml))
+            ),
+            "{rows}: {result:?}"
+        );
+    }
 }

@@ -24,7 +24,7 @@
 //! part of the value.
 
 use crate::tabular_prepare::xlsx_package::{next_event, text_of, Package};
-use crate::tabular_prepare::xlsx_spool::{Cap, XlsxError};
+use crate::tabular_prepare::xlsx_spool::{Cap, Invalid, XlsxError};
 use quick_xml::events::Event;
 use std::borrow::Cow;
 
@@ -135,6 +135,8 @@ pub(crate) fn read_shared_strings_with(
         match next_event(&mut reader, &mut buf)? {
             Event::Eof => break,
             Event::Start(e) => match e.local_name().as_ref() {
+                // A `si` inside a `si` would add strings the table never counted.
+                b"si" if in_si => return Err(XlsxError::Invalid(Invalid::Xml)),
                 b"si" => in_si = true,
                 b"t" if in_si => in_t = true,
                 b"rPh" => in_phonetic = true,
