@@ -349,6 +349,84 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_file_that_is_still_preparing_is_refused_and_nothing_is_read() {
+        let (registry, _dir) = sqlite_registry().await;
+        claim(&registry, crate::tabular_prepare::registry::FORMAT_VERSION).await;
+        let storage = FakeStorage::new();
+        let exec = Recorder::ok(Value::Null);
+        let config = PrepareConfig {
+            large_tabular: true,
+            ..PrepareConfig::default()
+        };
+        let rt = LargeTabularRuntime::new(
+            TabularPrepare::new(config, registry.clone()),
+            registry,
+            storage.clone(),
+            exec.clone(),
+        )
+        .with_config(RuntimeConfig {
+            prepare_wait: Duration::from_millis(50),
+            ..RuntimeConfig::default()
+        });
+        let err = rt.run(request("pass", &[])).await.unwrap_err();
+        assert_eq!(
+            err,
+            LargeRunError::Refused(RunRefusal::StillPreparing { percent: None })
+        );
+        assert_eq!(exec.calls(), 0);
+        assert!(storage.reads.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_final_preparation_failure_is_refused_with_its_reason() {
+        let (registry, _dir) = sqlite_registry().await;
+        let now = chrono::Utc::now();
+        for attempt in 0..crate::tabular_prepare::registry::MAX_ATTEMPTS {
+            let owner = format!("job-{attempt}");
+            registry
+                .claim(crate::tabular_prepare::registry::ClaimRequest {
+                    source_key: SOURCE.into(),
+                    source_bytes: 1,
+                    format_version: crate::tabular_prepare::registry::FORMAT_VERSION,
+                    owner: owner.clone(),
+                    lease: chrono::Duration::minutes(5),
+                    now,
+                })
+                .await
+                .unwrap()
+                .expect("claim won");
+            registry
+                .fail(SOURCE, &owner, "time", "gs://secret/key", now)
+                .await
+                .unwrap();
+        }
+        let exec = Recorder::ok(Value::Null);
+        let config = PrepareConfig {
+            large_tabular: true,
+            ..PrepareConfig::default()
+        };
+        let rt = LargeTabularRuntime::new(
+            TabularPrepare::new(config, registry.clone()),
+            registry,
+            FakeStorage::new(),
+            exec.clone(),
+        );
+        let err = rt.run(request("pass", &[])).await.unwrap_err();
+        let LargeRunError::Refused(refusal) = &err else {
+            panic!("{err:?}")
+        };
+        assert_eq!(
+            refusal,
+            &RunRefusal::PreparationFailed {
+                reason: FailureReason::Time,
+                final_failure: true
+            }
+        );
+        assert!(!refusal.message().contains("secret"));
+        assert_eq!(exec.calls(), 0);
+    }
+
+    #[tokio::test]
     async fn the_executors_refusal_passes_through_typed() {
         let p = prepared(&[("sales", 1)], 4).await;
         let exec = Recorder::answering(Err(MountedError::Refused(RunRefusal::OverBudget(
@@ -362,6 +440,41 @@ mod tests {
             err,
             LargeRunError::Refused(RunRefusal::OverBudget(Budget::Volumes))
         );
+    }
+
+    #[tokio::test]
+    async fn the_codes_failures_are_reported_as_the_code_s_and_memory_is_named() {
+        let cases = [
+            (
+                PythonRunError::Python("NameError: name 'x' is not defined".into()),
+                LargeRunError::Python("NameError: name 'x' is not defined".into()),
+            ),
+            (
+                PythonRunError::Python(CRASHED_MESSAGE.into()),
+                LargeRunError::Python(MEMORY_TEXT.into()),
+            ),
+            (
+                PythonRunError::Python("Traceback ...\nMemoryError".into()),
+                LargeRunError::Python(MEMORY_TEXT.into()),
+            ),
+            (
+                PythonRunError::Timeout,
+                LargeRunError::Timeout { secs: 300 },
+            ),
+            (
+                PythonRunError::Internal("PythonExecutorError: boom".into()),
+                LargeRunError::Internal("PythonExecutorError: boom".into()),
+            ),
+        ];
+        for (run_error, expected) in cases {
+            let p = prepared(&[("sales", 1)], 4).await;
+            let exec = Recorder::answering(Err(MountedError::Run(run_error)));
+            let err = runtime(&p, exec, true)
+                .run(request("pass", &[]))
+                .await
+                .unwrap_err();
+            assert_eq!(err, expected);
+        }
     }
 
     #[test]
